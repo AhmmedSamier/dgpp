@@ -1,11 +1,14 @@
 // micro_gemm_peak: cuBLASLt FP8(E4M3)/BF16 GEMM throughput over GLM-5.3-Flash
 // representative shapes. Output lines are machine-parseable:
-//   RES dtype m n k us tflops weight_GBps
+//   RES tag dtype m n k us tflops weight_GBps heuristic valid/returned
 #include <cublasLt.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
+#include <array>
 #include <cfloat>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +26,33 @@ struct Case {
   const char* tag;
   Shape s;
 };
+
+void check_cuda(cudaError_t err, const char* what);
+
+__global__ void clock_warmup_kernel(uint32_t* sink, uint64_t cycles) {
+  const uint64_t start = clock64();
+  uint32_t value = static_cast<uint32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+  while (clock64() - start < cycles)
+    value = value * 1664525u + 1013904223u;
+  if (threadIdx.x == 0) atomicAdd(sink, value);
+}
+
+void warm_device(void* workspace, cudaStream_t stream) {
+  int clock_khz = 0;
+  int multiprocessors = 0;
+  check_cuda(cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, 0),
+             "query clock rate");
+  check_cuda(cudaDeviceGetAttribute(&multiprocessors,
+                                    cudaDevAttrMultiProcessorCount, 0),
+             "query multiprocessor count");
+  check_cuda(cudaMemsetAsync(workspace, 0, sizeof(uint32_t), stream),
+             "warmup sink clear");
+  const uint64_t cycles = static_cast<uint64_t>(clock_khz) * 1000ull;
+  clock_warmup_kernel<<<multiprocessors, 256, 0, stream>>>(
+      static_cast<uint32_t*>(workspace), cycles);
+  check_cuda(cudaGetLastError(), "clock warmup launch");
+  check_cuda(cudaStreamSynchronize(stream), "clock warmup sync");
+}
 
 // Representative GLM-5.3-Flash projection group-gemm inner kernels.
 const std::vector<Case>& cases() {
@@ -54,7 +84,7 @@ void check_cuda(cudaError_t err, const char* what) {
 }
 
 struct Buffer {
-  void *a{}, *b{}, *d{}, *bias{};
+  void *a{}, *b{}, *d{};
   size_t a_bytes{}, b_bytes{}, d_bytes{};
 };
 
@@ -70,7 +100,6 @@ Buffer alloc_case(const Case& c, bool fp8) {
       cudaMemset(buf.a, 0x3C, buf.a_bytes),  // ~0.01 fp8 / benign bf16 bits
       "memset a");
   check_cuda(cudaMemset(buf.b, 0x3C, buf.b_bytes), "memset b");
-  check_cuda(cudaMalloc(&buf.bias, size_t(c.s.n) * 2), "malloc bias");
   return buf;
 }
 
@@ -84,7 +113,7 @@ double bench(bool fp8, const Case& c, cublasLtHandle_t lt, void* ws,
   cublasOperation_t ta = CUBLAS_OP_T;  // weights: cm view (k,n) -> (n,k)
   cublasOperation_t tb = CUBLAS_OP_N;  // activations: cm view (k,m)
 
-  cublasComputeType_t comp = fp8 ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F;
+  cublasComputeType_t comp = CUBLAS_COMPUTE_32F;
   cudaDataType_t ab_type = fp8 ? CUDA_R_8F_E4M3 : CUDA_R_16BF;
 
   cublasLtMatmulDesc_t desc{};
@@ -108,8 +137,6 @@ double bench(bool fp8, const Case& c, cublasLtHandle_t lt, void* ws,
   float alpha = 1.f, beta = 0.f;
   // FP8 requires alpha/beta scaling pointers in host memory (bf16 scale ptrs
   // supported for tensor-wise scaling; plain fp32 scalars OK).
-  cublasLtEpilogue_t epi = CUBLASLT_EPILOGUE_DEFAULT;
-
   cublasLtMatmulPreference_t pref{};
   check_cublas(cublasLtMatmulPreferenceCreate(&pref), "pref create");
   check_cublas(
@@ -118,62 +145,108 @@ double bench(bool fp8, const Case& c, cublasLtHandle_t lt, void* ws,
                                            &ws_bytes, sizeof(ws_bytes)),
       "pref ws");
 
-  cublasLtMatmulHeuristicResult_t heur[4]{};
+  constexpr int kMaxHeuristics = 16;
+  cublasLtMatmulHeuristicResult_t heur[kMaxHeuristics]{};
   int nres = 0;
   check_cublas(
-      cublasLtMatmulAlgoGetHeuristic(lt, desc, la, lb, ld, ld, pref, 4, heur,
-                                     &nres),
+      cublasLtMatmulAlgoGetHeuristic(lt, desc, la, lb, ld, ld, pref,
+                                     kMaxHeuristics, heur, &nres),
       "heuristic");
   if (nres == 0) {
     DGPP_LOG_WARN("no heuristic for {} fp8={} skipping", c.tag, int(fp8));
-    return -1;
+    cublasLtMatrixLayoutDestroy(la);
+    cublasLtMatrixLayoutDestroy(lb);
+    cublasLtMatrixLayoutDestroy(ld);
+    cublasLtMatmulPreferenceDestroy(pref);
+    cublasLtMatmulDescDestroy(desc);
+    cudaFree(buf.a);
+    cudaFree(buf.b);
+    cudaFree(buf.d);
+    return -1.0;
   }
 
-  constexpr int kIters = 60;
+  const int iters = c.s.m <= 8 ? 30 : 5;
   cudaEvent_t beg{}, end{};
-  cudaEventCreate(&beg);
-  cudaEventCreate(&end);
+  check_cuda(cudaEventCreate(&beg), "event create begin");
+  check_cuda(cudaEventCreate(&end), "event create end");
+  double best_ms = DBL_MAX;
+  int best_heuristic = -1;
+  int valid_heuristics = 0;
+  for (int candidate = 0; candidate < nres; ++candidate) {
+    bool valid = true;
+    for (int warmup = 0; warmup < 2; ++warmup) {
+      const cublasStatus_t status = cublasLtMatmul(
+          lt, desc, &alpha, buf.b, la, buf.a, lb, &beta, buf.d, ld, buf.d, ld,
+          &heur[candidate].algo, ws, ws_bytes, stream);
+      if (status != CUBLAS_STATUS_SUCCESS) {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid || cudaStreamSynchronize(stream) != cudaSuccess) {
+      cudaGetLastError();
+      continue;
+    }
 
-  for (int w = 0; w < 5; ++w) {
-    check_cublas(cublasLtMatmul(lt, desc, &alpha, buf.b, la, buf.a, lb, &beta,
-                                buf.d, ld, buf.d, ld, &heur[0].algo, ws,
-                                ws_bytes, stream),
-                 "matmul warm");
+    constexpr int kSamples = 3;
+    std::array<double, kSamples> samples{};
+    for (int sample = 0; sample < kSamples && valid; ++sample) {
+      check_cuda(cudaEventRecord(beg, stream), "event record begin");
+      for (int iteration = 0; iteration < iters; ++iteration) {
+        const cublasStatus_t status = cublasLtMatmul(
+            lt, desc, &alpha, buf.b, la, buf.a, lb, &beta, buf.d, ld, buf.d,
+            ld, &heur[candidate].algo, ws, ws_bytes, stream);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+          valid = false;
+          break;
+        }
+      }
+      check_cuda(cudaEventRecord(end, stream), "event record end");
+      if (!valid || cudaEventSynchronize(end) != cudaSuccess) {
+        cudaGetLastError();
+        valid = false;
+        break;
+      }
+      float total_ms = 0.0f;
+      check_cuda(cudaEventElapsedTime(&total_ms, beg, end), "event elapsed");
+      samples[sample] = static_cast<double>(total_ms) / iters;
+    }
+    if (!valid) continue;
+    std::sort(samples.begin(), samples.end());
+    const double candidate_ms = samples[kSamples / 2];
+    ++valid_heuristics;
+    if (candidate_ms < best_ms) {
+      best_ms = candidate_ms;
+      best_heuristic = candidate;
+    }
   }
-  cudaStreamSynchronize(stream);
-  cudaEventRecord(beg, stream);
-  for (int i = 0; i < kIters; ++i) {
-    check_cublas(cublasLtMatmul(lt, desc, &alpha, buf.b, la, buf.a, lb, &beta,
-                                buf.d, ld, buf.d, ld, &heur[0].algo, ws,
-                                ws_bytes, stream),
-                 "matmul");
+  if (best_heuristic < 0) {
+    DGPP_LOG_WARN("all heuristics failed for {} fp8={}", c.tag, int(fp8));
+    best_ms = -1.0;
   }
-  cudaEventRecord(end, stream);
-  cudaEventSynchronize(end);
-  float ms = 0.f;
-  cudaEventElapsedTime(&ms, beg, end);
-  ms /= kIters;
 
-  (void)epi;
-  double us = double(ms) * 1000.0;
+  double us = best_ms > 0.0 ? best_ms * 1000.0 : 0.0;
   double flops = 2.0 * c.s.m * c.s.n * c.s.k;
-  double tflops = flops / (us * 1e-6) / 1e12;
+  double tflops = us > 0.0 ? flops / (us * 1e-6) / 1e12 : 0.0;
   double w_gb = double(c.s.k) * c.s.n * (fp8 ? 1 : 2) / 1e9;
-  double eff_bw = w_gb / (us * 1e-6);
-  std::printf("RES %s %s m=%d n=%d k=%d %.1f us %.1f TFLOPS %.0f GB/s\n",
-              c.tag, fp8 ? "fp8" : "bf16", c.s.m, c.s.n, c.s.k, us, tflops,
-              c.s.m <= 8 ? eff_bw : 0.0);
+  double eff_bw = us > 0.0 ? w_gb / (us * 1e-6) : 0.0;
+  std::printf(
+      "RES %s %s m=%d n=%d k=%d %.1f us %.1f TFLOPS %.0f GB/s "
+      "heuristic=%d valid=%d/%d\n",
+      c.tag, fp8 ? "fp8" : "bf16", c.s.m, c.s.n, c.s.k, us, tflops,
+      c.s.m <= 8 ? eff_bw : 0.0, best_heuristic, valid_heuristics, nres);
 
   cublasLtMatrixLayoutDestroy(la);
   cublasLtMatrixLayoutDestroy(lb);
   cublasLtMatrixLayoutDestroy(ld);
   cublasLtMatmulPreferenceDestroy(pref);
   cublasLtMatmulDescDestroy(desc);
+  check_cuda(cudaEventDestroy(beg), "event destroy begin");
+  check_cuda(cudaEventDestroy(end), "event destroy end");
   cudaFree(buf.a);
   cudaFree(buf.b);
   cudaFree(buf.d);
-  cudaFree(buf.bias);
-  return tflops;
+  return best_heuristic >= 0 ? tflops : -1.0;
 }
 
 }  // namespace
@@ -187,19 +260,19 @@ int main() {
   void* ws = nullptr;
   check_cuda(cudaMalloc(&ws, ws_bytes), "ws malloc");
   cudaStream_t stream{};
-  cudaStreamCreate(&stream);
+  check_cuda(cudaStreamCreate(&stream), "stream create");
+  warm_device(ws, stream);
 
+  int failed_cases = 0;
   for (bool fp8 : {true, false}) {
-    if (!fp8) {
-      // sm_121 supports bf16 natively everywhere; skip TF32 fast paths.
-    }
     for (const auto& c : cases()) {
-      bench(fp8, c, lt, ws, ws_bytes, stream);
+      if (bench(fp8, c, lt, ws, ws_bytes, stream) < 0.0) ++failed_cases;
     }
   }
 
-  cudaFree(ws);
-  cublasLtDestroy(lt);
+  check_cuda(cudaStreamDestroy(stream), "stream destroy");
+  check_cuda(cudaFree(ws), "workspace free");
+  check_cublas(cublasLtDestroy(lt), "lt destroy");
   DGPP_LOG_INFO("done");
-  return 0;
+  return failed_cases == 0 ? 0 : 1;
 }

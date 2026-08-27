@@ -4,8 +4,7 @@
 // "host pinned" buffers live in the same physical memory the GPU streams.
 // This bench answers the CollectiveBus receive-path design questions:
 //   1. GPU streaming-read bandwidth of pinned memory vs cudaMalloc memory.
-//   2. Degradation when a CPU writer floods the same pool (simulating NIC
-//      arrival traffic / cache-line interference).
+//   2. Degradation when CPU writers flood other buffers in the same pool.
 //   3. Staging-copy alternative cost (pinned <-> device copies) for compare.
 //   4. CPU<->GPU flag visibility latency with correct fence discipline —
 //      the round trip a completion notification actually pays.
@@ -82,13 +81,13 @@ __global__ void write_u4_kernel(uint4* __restrict__ dst, size_t n4, u32 val) {
 struct WriterArgs {
   uint4* buf;
   size_t n4;
-  const volatile bool* stop;
+  const std::atomic<bool>* stop;
 };
 
 void writer_thread(WriterArgs a) {
   u32 seed = 0x9E3779B9u;
   size_t i = 0;
-  while (!*a.stop) {
+  while (!a.stop->load(std::memory_order_relaxed)) {
     seed = seed * 1664525u + 1013904223u;
     a.buf[i] = make_uint4(seed, seed ^ 1u, seed ^ 2u, seed ^ 3u);
     if (++i == a.n4) i = 0;
@@ -142,7 +141,7 @@ double best_read_gb_s(const uint4* src, size_t n4, uint4* sink,
 // ack. Wall-clock round trip = what a completion notification costs.
 // ---------------------------------------------------------------------------
 
-void run_flag_roundtrip(dgpp::StartSlot* start, dgpp::FlagAck* ack) {
+bool run_flag_roundtrip(dgpp::StartSlot* start, dgpp::FlagAck* ack) {
   constexpr int kMsgs = 512;
   std::vector<double> us;
   us.reserve(kMsgs);
@@ -158,7 +157,7 @@ void run_flag_roundtrip(dgpp::StartSlot* start, dgpp::FlagAck* ack) {
       if (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
               .count() > kMsgTimeoutSec) {
         printf("FLAG roundtrip TIMEOUT at seq=%d (kernel lost?)\n", i);
-        return;
+        return false;
       }
     }
     const auto t1 = std::chrono::steady_clock::now();
@@ -167,6 +166,7 @@ void run_flag_roundtrip(dgpp::StartSlot* start, dgpp::FlagAck* ack) {
   std::sort(us.begin(), us.end());
   printf("FLAG roundtrip min %.2f us | p50 %.2f us | p99 %.2f us | max %.2f us\n",
          us.front(), us[us.size() / 2], us[us.size() * 99 / 100], us.back());
+  return true;
 }
 
 }  // namespace
@@ -204,49 +204,27 @@ int main(int argc, char** argv) {
   gb = best_read_gb_s(pin_buf, n4, sink, stream);
   printf("PATTERN gpu_read_pin BEST %.1f GB/s\n", gb);
 
-  {  // contended: CPU writer floods the SAME buffer the GPU streams
-    volatile bool stop = false;
-    std::thread w(writer_thread, WriterArgs{pin_buf, n4, &stop});
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    gb = best_read_gb_s(pin_buf, n4, sink, stream);
-    stop = true;
-    w.join();
-    printf("PATTERN gpu_read_pin_contended_same BEST %.1f GB/s\n", gb);
-  }
-  {  // contended: writer hits a DIFFERENT pinned buffer (pool-level only)
-    volatile bool stop = false;
+  {  // contended: writer hits a different pinned buffer (pool-level only)
+    std::atomic<bool> stop{false};
     std::thread w(writer_thread, WriterArgs{pin_alt, n4, &stop});
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     gb = best_read_gb_s(pin_buf, n4, sink, stream);
-    stop = true;
+    stop.store(true, std::memory_order_relaxed);
     w.join();
     printf("PATTERN gpu_read_pin_contended_other BEST %.1f GB/s\n", gb);
   }
   {  // two writers on distinct other buffers: multi-flow pool pressure
-    volatile bool stop1 = false, stop2 = false;
+    std::atomic<bool> stop1{false}, stop2{false};
     std::thread w1(writer_thread, WriterArgs{pin_alt, n4, &stop1});
     std::thread w2(writer_thread, WriterArgs{pin_alt2, n4, &stop2});
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     gb = best_read_gb_s(pin_buf, n4, sink, stream);
-    stop1 = true;
-    stop2 = true;
+    stop1.store(true, std::memory_order_relaxed);
+    stop2.store(true, std::memory_order_relaxed);
     w1.join();
     w2.join();
     printf("PATTERN gpu_read_pin_contended_2other BEST %.1f GB/s\n", gb);
   }
-  {  // one same-buffer writer + one other-buffer writer: mixed flow
-    volatile bool stop1 = false, stop2 = false;
-    std::thread w1(writer_thread, WriterArgs{pin_buf, n4, &stop1});
-    std::thread w2(writer_thread, WriterArgs{pin_alt, n4, &stop2});
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    gb = best_read_gb_s(pin_buf, n4, sink, stream);
-    stop1 = true;
-    stop2 = true;
-    w1.join();
-    w2.join();
-    printf("PATTERN gpu_read_pin_contended_1same_1other BEST %.1f GB/s\n", gb);
-  }
-
   gb = best_ms(
       [&](cudaStream_t s) { write_u4_kernel<<<192, 256, 0, s>>>(pin_buf, n4, 7u); },
       stream, kIters, 3);
@@ -290,10 +268,15 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("flag slot alloc failed");
     return 1;
   }
+  *start = {};
+  *ack = {};
   dgpp::flag_heartbeat_kernel<<<1, 1, 0, stream>>>(&start->seq, ack,
                                                    kFlagDeadlineCycles);
-  run_flag_roundtrip(start, ack);
-  cudaDeviceSynchronize();
+  const bool flag_ok = run_flag_roundtrip(start, ack);
+  __atomic_store_n(&start->seq, dgpp::kFlagStopSequence, __ATOMIC_RELEASE);
+  const cudaError_t flag_sync = cudaStreamSynchronize(stream);
+  if (flag_sync != cudaSuccess)
+    DGPP_LOG_ERROR("flag stream sync failed: {}", cudaGetErrorString(flag_sync));
   if (cudaError_t err = cudaGetLastError(); err != cudaSuccess)
     DGPP_LOG_ERROR("flag phase error: {}", cudaGetErrorString(err));
 
@@ -305,5 +288,5 @@ int main(int argc, char** argv) {
   cudaFreeHost(start);
   cudaFreeHost(ack);
   cudaStreamDestroy(stream);
-  return 0;
+  return flag_ok && flag_sync == cudaSuccess ? 0 : 1;
 }

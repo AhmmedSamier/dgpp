@@ -1,8 +1,9 @@
 // micro_gdr_probe: determine GPU Direct RDMA viability on this GB10 system.
-// 1) reports peermem module presence,
+// 1) reports whether peermem modules are currently loaded,
 // 2) attempts ibverbs registration of cudaMalloc'd device memory,
-// 3) benchmarks cudaMemcpyAsync staging latency (pinned vs pageable) so the
-//    cost of the no-GDR fallback path is quantified.
+// 3) profiles CUDA copies for diagnostic comparison. A failed direct-device
+//    registration is an expected platform result on GB10 and is not itself a
+//    benchmark failure; registered host memory remains GPU-readable on UMA.
 #include <infiniband/verbs.h>
 
 #include <cuda_runtime.h>
@@ -10,6 +11,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -17,6 +19,13 @@
 #include "common/log.hpp"
 
 namespace {
+
+void check_cuda(cudaError_t status, const char* operation) {
+  if (status != cudaSuccess) {
+    DGPP_LOG_ERROR("{} failed: {}", operation, cudaGetErrorString(status));
+    std::exit(1);
+  }
+}
 
 bool module_loaded(const char* needle) {
   FILE* f = fopen("/proc/modules", "r");
@@ -35,23 +44,38 @@ bool module_loaded(const char* needle) {
 
 double bench_memcpy(size_t bytes, bool pinned, bool d2h, int iters) {
   void *host{}, *dev{};
-  if (pinned) cudaHostAlloc(&host, bytes, cudaHostAllocDefault);
-  else host = malloc(bytes);
-  cudaMalloc(&dev, bytes);
+  if (pinned)
+    check_cuda(cudaHostAlloc(&host, bytes, cudaHostAllocDefault),
+               "cudaHostAlloc");
+  else
+    host = malloc(bytes);
+  if (!host) {
+    DGPP_LOG_ERROR("host allocation failed bytes={}", bytes);
+    std::exit(1);
+  }
+  check_cuda(cudaMalloc(&dev, bytes), "cudaMalloc copy buffer");
   cudaStream_t s{};
-  cudaStreamCreate(&s);
+  check_cuda(cudaStreamCreate(&s), "cudaStreamCreate");
   // warmup
   for (int i = 0; i < 20; ++i) {
-    if (d2h) cudaMemcpyAsync(host, dev, bytes, cudaMemcpyDeviceToHost, s);
-    else cudaMemcpyAsync(dev, host, bytes, cudaMemcpyHostToDevice, s);
+    if (d2h)
+      check_cuda(cudaMemcpyAsync(host, dev, bytes, cudaMemcpyDeviceToHost, s),
+                 "warmup D2H");
+    else
+      check_cuda(cudaMemcpyAsync(dev, host, bytes, cudaMemcpyHostToDevice, s),
+                 "warmup H2D");
   }
-  cudaStreamSynchronize(s);
+  check_cuda(cudaStreamSynchronize(s), "warmup sync");
   auto t0 = std::chrono::steady_clock::now();
   for (int i = 0; i < iters; ++i) {
-    if (d2h) cudaMemcpyAsync(host, dev, bytes, cudaMemcpyDeviceToHost, s);
-    else cudaMemcpyAsync(dev, host, bytes, cudaMemcpyHostToDevice, s);
+    if (d2h)
+      check_cuda(cudaMemcpyAsync(host, dev, bytes, cudaMemcpyDeviceToHost, s),
+                 "timed D2H");
+    else
+      check_cuda(cudaMemcpyAsync(dev, host, bytes, cudaMemcpyHostToDevice, s),
+                 "timed H2D");
   }
-  cudaStreamSynchronize(s);
+  check_cuda(cudaStreamSynchronize(s), "timed copy sync");
   auto t1 = std::chrono::steady_clock::now();
   double us =
       std::chrono::duration<double, std::micro>(t1 - t0).count() / iters;
@@ -67,36 +91,49 @@ int try_gdr_registration() {
   ibv_device** list = ibv_get_device_list(&num);
   if (!list || num == 0) {
     DGPP_LOG_ERROR("no verbs devices for GDR probe");
-    return 1;
+    if (list) ibv_free_device_list(list);
+    return -1;
   }
   ibv_context* ctx = ibv_open_device(list[0]);
+  ibv_free_device_list(list);
+  if (!ctx) {
+    DGPP_LOG_ERROR("could not open verbs device errno={}", errno);
+    return -1;
+  }
   ibv_pd* pd = ibv_alloc_pd(ctx);
+  if (!pd) {
+    DGPP_LOG_ERROR("could not allocate protection domain errno={}", errno);
+    ibv_close_device(ctx);
+    return -1;
+  }
 
   void* devbuf = nullptr;
   size_t bytes = 4 << 20;
   cudaError_t ce = cudaMalloc(&devbuf, bytes);
   if (ce != cudaSuccess) {
     DGPP_LOG_ERROR("cudaMalloc failed: {}", cudaGetErrorString(ce));
-    return 1;
+    ibv_dealloc_pd(pd);
+    ibv_close_device(ctx);
+    return -1;
   }
   ibv_mr* mr = ibv_reg_mr(pd, devbuf, bytes,
                           IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
                               IBV_ACCESS_REMOTE_READ);
+  const bool supported = mr != nullptr;
   if (mr) {
-    DGPP_LOG_INFO(
-        "GDR-RESULT SUCCESS device memory registered with ibverbs (true "
-        "GPUDirect likely usable)");
+    DGPP_LOG_INFO("GDR-RESULT SUPPORTED cudaMalloc memory registered by ibverbs");
     ibv_dereg_mr(mr);
   } else {
     DGPP_LOG_WARN(
-        "GDR-RESULT FAILED ibverbs could not register device memory "
-        "(errno={}); falling back to pinned-bounce design",
+        "GDR-RESULT UNSUPPORTED cudaMalloc memory registration failed "
+        "(errno={}); use registered host memory for direct GPU consumption "
+        "on GB10 UMA (this does not imply a staging copy)",
         errno);
   }
   cudaFree(devbuf);
   ibv_dealloc_pd(pd);
   ibv_close_device(ctx);
-  return mr ? 0 : 1;
+  return supported ? 1 : 0;
 }
 
 }  // namespace
@@ -106,7 +143,7 @@ int main() {
 
   bool peermem_nvidia = module_loaded("nvidia_peermem");
   bool peermem_legacy = module_loaded("nv_peer_mem");
-  DGPP_LOG_INFO("peermem modules: nvidia_peermem={} nv_peer_mem={}",
+  DGPP_LOG_INFO("loaded peermem modules: nvidia_peermem={} nv_peer_mem={}",
                 peermem_nvidia, peermem_legacy);
 
   int rc = try_gdr_registration();
@@ -121,5 +158,5 @@ int main() {
         "d2h_pinned={:.2f}us",
         sz, h2d_p, h2d_n, d2h_p);
   }
-  return rc;
+  return rc < 0 ? 1 : 0;
 }

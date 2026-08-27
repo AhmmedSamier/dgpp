@@ -196,8 +196,9 @@ void DollModel::init_weights() {
                          static_cast<uint64_t>(cfg_.vocab) * hid, seed ^ 0x7EA5,
                          0.05f, s);
 
-  f32_lm_head_ok_ = gemm_.ensure_plan(1, cfg_.vocab, cfg_.hidden,
-                                      DType::F8_E4M3, GemmOut::F32);
+  f32_lm_head_ok_ =
+      gemm_.ensure_plan(1, cfg_.vocab, cfg_.hidden, DType::F8_E4M3,
+                        GemmOut::F32, static_cast<size_t>(cfg_.hidden));
   lm_head_out_ = f32_lm_head_ok_ ? GemmOut::F32 : GemmOut::BF16;
   DGPP_LOG_INFO("doll weights seeded; lm_head out={} (fp32 plan exists: {})",
                 f32_lm_head_ok_ ? "f32" : "bf16+cast", f32_lm_head_ok_);
@@ -240,7 +241,8 @@ void DollModel::record_body(cudaStream_t s, const BodyCtx& b) {
     rmsnorm_bf16(x_, ln1_[l], normed_, rows, hid, cfg_.eps, s);
     if (kStopStage == 2) return;
     gemm_.matmul(normed_, w_qkv_[l], qkv_buf_, rows, qkv_dim, hid,
-                 DType::BF16, GemmOut::BF16, gemm_ws_, kWsBytes, s);
+                 DType::BF16, GemmOut::BF16, static_cast<size_t>(hid),
+                 gemm_ws_, kWsBytes, s);
     if (kStopStage == 3) return;
     kv_append_from_pairs(qkv_buf_ + hq_dh, qkv_dim, kc_[l], vc_[l],
                          abs_first_dev_, rows, kv_dim, s);
@@ -250,11 +252,13 @@ void DollModel::record_body(cudaStream_t s, const BodyCtx& b) {
     add_inplace_bf16(x_, attn_out_, static_cast<int64_t>(rows) * hid, s);
     rmsnorm_bf16(x_, ln2_[l], normed2_, rows, hid, cfg_.eps, s);
     gemm_.matmul(normed2_, w13_[l], gateup_, rows, 2 * cfg_.inter, hid,
-                 DType::BF16, GemmOut::BF16, gemm_ws_, kWsBytes, s);
+                 DType::BF16, GemmOut::BF16, static_cast<size_t>(hid),
+                 gemm_ws_, kWsBytes, s);
     swiglu_gateup_pairs_bf16(gateup_, act_, rows, cfg_.inter,
                              cfg_.swiglu_limit, s);
     gemm_.matmul(act_, w2_[l], ffn_out_, rows, hid, cfg_.inter, DType::BF16,
-                 GemmOut::BF16, gemm_ws_, kWsBytes, s);
+                 GemmOut::BF16, static_cast<size_t>(cfg_.inter), gemm_ws_,
+                 kWsBytes, s);
     add_inplace_bf16(x_, ffn_out_, static_cast<int64_t>(rows) * hid, s);
   }
   rmsnorm_bf16(x_ + static_cast<int64_t>(b.logit_row_idx) * hid, final_ln_,
@@ -263,10 +267,12 @@ void DollModel::record_body(cudaStream_t s, const BodyCtx& b) {
   if (kStopStage == 4) return;
   if (lm_head_out_ == GemmOut::F32) {
     gemm_.matmul(act8_, lm_head_fp8_, logits32_, 1, cfg_.vocab, hid,
-                 DType::F8_E4M3, GemmOut::F32, gemm_ws_, kWsBytes, s);
+                 DType::F8_E4M3, GemmOut::F32, static_cast<size_t>(hid),
+                 gemm_ws_, kWsBytes, s);
   } else {
     gemm_.matmul(act8_, lm_head_fp8_, bf16_logits_, 1, cfg_.vocab, hid,
-                 DType::F8_E4M3, GemmOut::BF16, gemm_ws_, kWsBytes, s);
+                 DType::F8_E4M3, GemmOut::BF16, static_cast<size_t>(hid),
+                 gemm_ws_, kWsBytes, s);
     cast_bf16_to_f32_rows(bf16_logits_, logits32_, 1, cfg_.vocab, s);
   }
   argmax_rows_f32(logits32_, b.ids_out, nullptr, 1, cfg_.vocab, s);

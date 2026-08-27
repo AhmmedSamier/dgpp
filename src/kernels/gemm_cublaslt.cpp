@@ -5,9 +5,10 @@
 
 #include <cstdint>
 #include <format>
+#include <map>
 #include <mutex>
 #include <stdexcept>
-#include <unordered_map>
+#include <tuple>
 
 #include "common/cuda_check.hpp"
 
@@ -16,14 +17,20 @@ namespace dgpp {
 namespace {
 constexpr size_t kRecommendedWorkspace = 64ull << 20;
 
-uint64_t plan_key(int m, int n, int k, DType io, GemmOut od) {
-  uint64_t d = io == DType::F8_E4M3 ? 1ull : 0ull;
-  uint64_t o = od == GemmOut::F32 ? 1ull : 0ull;
-  return (d << 62) | (o << 61) |
-         (static_cast<uint64_t>(static_cast<int>(io)) << 56) |
-         (static_cast<uint64_t>(m) << 40) |
-         (static_cast<uint64_t>(n) << 20) | static_cast<uint64_t>(k);
-}
+// Full plan identity: shapes, dtypes, and activation leading dimension. The
+// old packed uint64 key had no room for the row stride, and a hash-fold risks
+// silently aliasing two plans — determinism beats cleverness here.
+struct PlanKey {
+  int m, n, k;
+  DType io;
+  GemmOut od;
+  size_t act_row_stride;
+
+  bool operator<(const PlanKey& o) const {
+    return std::tie(m, n, k, io, od, act_row_stride) <
+           std::tie(o.m, o.n, o.k, o.io, o.od, o.act_row_stride);
+  }
+};
 }  // namespace
 
 struct CublasLtGemm::Impl {
@@ -36,7 +43,7 @@ struct CublasLtGemm::Impl {
     cublasLtMatmulAlgo_t algo{};
     size_t ws_bytes = 0;
   };
-  std::unordered_map<uint64_t, Plan> plans;
+  std::map<PlanKey, Plan> plans;
 
   Impl() {
     DGPP_CUBLAS_OK(cublasLtCreate(&lt), "create");
@@ -57,9 +64,9 @@ struct CublasLtGemm::Impl {
     if (lt) cublasLtDestroy(lt);
   }
 
-  Plan& get_plan(int m, int n, int k, DType io, GemmOut od, void* /*ws*/,
-                 size_t ws_bytes) {
-    uint64_t key = plan_key(m, n, k, io, od);
+  Plan& get_plan(int m, int n, int k, DType io, GemmOut od,
+                 size_t act_row_stride, void* /*ws*/, size_t ws_bytes) {
+    PlanKey key{m, n, k, io, od, act_row_stride};
     auto it = plans.find(key);
     if (it != plans.end()) return it->second;
 
@@ -70,7 +77,8 @@ struct CublasLtGemm::Impl {
 
     // Convention (see benchmarks/micro/gemm_peak.cu): out row-major [M,N] is
     // issued as column-major D(N,M) = op_T(W cm(K,N)) x Act cm(K,M). Weight
-    // arrives row-major [N,K] == col-major (K,N) ld=K.
+    // arrives row-major [N,K] == col-major (K,N) ld=K. Activation rows of
+    // stride S == col-major (K,M) ld=S; S==K reads a contiguous [M,K] tensor.
     Plan p{};
     DGPP_CUBLAS_OK(
         cublasLtMatmulDescCreate(&p.desc, comp, CUDA_R_32F), "desc create");
@@ -97,8 +105,9 @@ struct CublasLtGemm::Impl {
 
     DGPP_CUBLAS_OK(
         cublasLtMatrixLayoutCreate(&p.la, ab_type, k, n, k), "layout a");
-    DGPP_CUBLAS_OK(
-        cublasLtMatrixLayoutCreate(&p.lb, ab_type, k, m, k), "layout b");
+    DGPP_CUBLAS_OK(cublasLtMatrixLayoutCreate(&p.lb, ab_type, k, m,
+                                              act_row_stride),
+                   "layout b");
     DGPP_CUBLAS_OK(cublasLtMatrixLayoutCreate(&p.ld, out_f32 ? CUDA_R_32F
                                                              : CUDA_R_16BF,
                                               n, m, n),
@@ -135,18 +144,19 @@ CublasLtGemm::~CublasLtGemm() { delete impl_; }
 
 void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                           int m, int n, int k, DType io_dtype, GemmOut out_dtype,
-                          void* workspace, size_t ws_bytes,
-                          cudaStream_t stream) {
-  Impl::Plan& p =
-      impl_->get_plan(m, n, k, io_dtype, out_dtype, workspace, ws_bytes);
+                          size_t act_row_stride, void* workspace,
+                          size_t ws_bytes, cudaStream_t stream) {
+  Impl::Plan& p = impl_->get_plan(m, n, k, io_dtype, out_dtype,
+                                  act_row_stride, workspace, ws_bytes);
   float alpha = 1.f, beta = 0.f;
   // Heuristic-selected algo + fixed layouts keep replays bitwise-stable in
-  // process (graph-capture determinism requirement, DESIGN §10).
+  // process (graph-capture determinism requirement, DESIGN §11).
   DGPP_CUBLAS_OK(
       cublasLtMatmul(impl_->lt, p.desc, &alpha, weight, p.la, act, p.lb, &beta,
                      out, p.ld, out, p.ld, &p.algo, workspace, ws_bytes,
                      stream),
-      "matmul");
+      std::format("matmul m={} n={} k={} lda={} dtype={}", m, n, k,
+                  act_row_stride, dtype_name(io_dtype)));
 }
 
 size_t CublasLtGemm::query_workspace_bytes(int, int, int, DType) {
@@ -154,12 +164,12 @@ size_t CublasLtGemm::query_workspace_bytes(int, int, int, DType) {
 }
 
 bool CublasLtGemm::ensure_plan(int m, int n, int k, DType io_dtype,
-                               GemmOut out_dtype) {
+                               GemmOut out_dtype, size_t act_row_stride) {
   // Callers must hand a workspace sized by query_workspace_bytes(); pass our
   // recommended cap via a scratchless probe — heuristic query alone does not
   // touch the workspace pointer.
   try {
-    impl_->get_plan(m, n, k, io_dtype, out_dtype, nullptr,
+    impl_->get_plan(m, n, k, io_dtype, out_dtype, act_row_stride, nullptr,
                     kRecommendedWorkspace);
     return true;
   } catch (const std::exception&) {

@@ -13,7 +13,7 @@ void rmsnorm_bf16(const void* x, const void* weight, void* y, int rows,
 
 // gate[m,i]: silu(clamp(g, -lim, lim)) * clamp(u, -lim, lim) -> bf16.
 // Reference-matching clamp semantics live here so parity work (M4) patches
-// exactly one site (DESIGN §10 numeric matrix).
+// exactly one site (DESIGN §12 numerical gates).
 void swiglu_limit_bf16(const void* gate, const void* up, void* out,
                        int64_t n_elems, float limit, cudaStream_t stream);
 

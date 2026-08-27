@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 
 #include <cstring>
+#include <limits>
 
 #include "common/cuda_check.hpp"
 #include "common/test.hpp"
@@ -92,4 +93,49 @@ DGPP_TEST(arena_alignment_guarantees) {
   if (!is_aligned(q, 256)) throw std::runtime_error("pinned alignment lost");
   void* d = a.alloc_scratch(dgpp::MemClass::DeviceHot, 33);
   if (!is_aligned(d, 256)) throw std::runtime_error("device alignment lost");
+  (void)a.alloc_scratch(dgpp::MemClass::DeviceHot, 137, 256);
+  void* page_aligned =
+      a.alloc_scratch(dgpp::MemClass::DeviceHot, 8, 4096);
+  if (!is_aligned(page_aligned, 4096))
+    throw std::runtime_error("alignment ignored slab base address");
+}
+
+DGPP_TEST(arena_rejects_invalid_geometry_and_double_init) {
+  if (!cuda_available()) {
+    std::printf("[SKIP] no CUDA device\n");
+    return;
+  }
+  dgpp::Arena a;
+  a.init({.scratch_hot = 1 << 20});
+
+  for (size_t alignment : {size_t{0}, size_t{3}}) {
+    bool rejected = false;
+    try {
+      (void)a.alloc_scratch(dgpp::MemClass::DeviceHot, 8, alignment);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    if (!rejected) throw std::runtime_error("invalid alignment was accepted");
+  }
+
+  bool overflow_rejected = false;
+  try {
+    (void)a.alloc_array_scratch<uint64_t>(
+        dgpp::MemClass::DeviceHot, std::numeric_limits<size_t>::max());
+  } catch (const std::overflow_error&) {
+    overflow_rejected = true;
+  }
+  if (!overflow_rejected) throw std::runtime_error("array overflow was accepted");
+
+  bool reinit_rejected = false;
+  try {
+    a.init({.scratch_hot = 1 << 20});
+  } catch (const std::logic_error&) {
+    reinit_rejected = true;
+  }
+  if (!reinit_rejected) throw std::runtime_error("double init was accepted");
+
+  a.release_all();
+  a.init({.scratch_hot = 4096});
+  (void)a.alloc_scratch(dgpp::MemClass::DeviceHot, 16);
 }

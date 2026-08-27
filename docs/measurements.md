@@ -1,244 +1,267 @@
-# DGPP — M0 Measurement Results
+# Validated platform measurements
 
-Platform fact (authoritative): DGX Spark GB10 = **unified memory**; no
-discrete GPU VRAM, no separate system RAM. One LPDDR5x pool shared by CPU
-cores and GPU over NVLink-C2C. Consequences: `cudaHostAlloc` and
-`cudaMalloc` reservations draw from the same physical memory; the
-device/host distinction is about mapping and access pattern, not location;
-NIC traffic destined for GPU consumption never needs a cross-media copy.
+Last updated: 2026-08-27. This document is curated; it is not auto-generated.
+Raw commands and the audit-remediation run record are in
+`benchmarks/results/2026-08-27-dgx-spark.md`; the M2 KDA correctness and
+state-traffic record is `benchmarks/results/2026-08-27-kda-m2.md`. The
+generated checkpoint report is `docs/checkpoint_budget.md`.
 
-Node A = this machine (`192.0.2.11`). Peer B = `192.0.2.12` (node-b).
-All RDMA numbers: RoCEv2, RC, MTU 4096 (jumbo IP frames), one active CX-7
-per node (`rocep1s0f0`; second CX-7 present but not wired/usable — NVIDIA
-DGX Spark platform design).
+## Scope and environment
 
-## Network (authoritative, via `perftest` 24.01)
+- source base: `a02ea4b` plus the audit-remediation working tree;
+- two DGX Spark GB10 nodes, AArch64 Linux `6.17.0-1026-nvidia`;
+- CUDA 13.0 compiler, SM 12.1, 48 SMs, 24 MiB L2;
+- ConnectX-7 firmware `28.45.4028`, RoCEv2, GID index 3;
+- perftest tool version 6.20;
+- model server not resident during the 2026-08-27 remediation measurements.
 
-| metric | value | notes |
-|---|---|---|
-| Cross-node RC RTT (2B send) | **2.7 µs typical** / 2.64 min / 2.94 p99 | `ib_send_lat -d rocep1s0f0` |
-| Unidirectional RC BW | **105.4 Gb/s avg** (13.2 GB/s) | `ib_write_bw`, sizes 256 KB / 1 MB / 8 MB all plateau ≈105.2–105.4 |
-| MTU path validation | jumbo OK (`ping -M do -s 8972`) | fabric 88 |
-| ICMP RTT peers .12/.13/.14 | ~0.4–0.6 ms software-stack baseline | informational only |
-| mgmt LAN (203.0.113.x) | ICMP blocked (firewall) | API traffic may still work over it |
+DGX Spark has one coherent 128 GB LPDDR5x pool, not discrete GPU VRAM plus
+host RAM. `cudaMalloc` and `cudaHostAlloc` draw from that pool. The words
+“device” and “host-pinned” below identify mappings/access paths.
 
-Implication for decode-step collectives (TP=4): payload ≤32 KB ⇒ tree
-allreduce ≈ 2–3 hops × 2.7 µs + copy ⇒ **~10 µs/classic allreduce**, two sync
-points per layer → ≤4% of the ~26 ms decode floor. Prefill RS/AG streams are
-bandwidth-bound at ~13.2 GB/s ⇒ overlapped chunked-pipeline design required
-(DESIGN §5.2). NOMINAL-vs-MEASURED gap (200 vs 105 Gb/s) is a hard planning
-number now baked into §6.
+## Network topology — closed
 
-## ibverbs micro-tool status
+One ConnectX-7 NIC connects to the SoC through two independent PCIe Gen5 x4
+links. The one cabled physical QSFP port exposes two active RoCE lanes:
 
-- QP lifecycle verified end-to-end cross-node in our `micro_ibv_smoke`
-  (handshake/RTR/RTS/data both directions).
-- Known issue (parked): initiator-side SEND completions missing when using
-  `IBV_SEND_INLINE` or stack-resident SGE VAs paired with MR lkeys; plain
-  signaled sends with MR-resident buffers proved correct during variant
-  testing but tool rewrite deferred (CollectiveBus will adopt those rules).
-- Root/sudo unavailable on nodes: PFC/ECN inspection pending infra support.
+| lane | RoCE device | PCIe function | state | reported line speed |
+|---|---|---|---|---:|
+| 0 | `rocep1s0f0` | `0000:01:00.0` | active | 200 Gb/s |
+| 1 | `roceP2p1s0f0` | `0002:01:00.0` | active | 200 Gb/s |
 
-## Checkpoint audit
+The `f1` functions map to the uncabled second QSFP port and are down. The two
+active lanes share one physical 200 Gb/s port and are not independent failure
+domains. This mapping agrees with the [NVIDIA ConnectX-7 networking guide](https://docs.nvidia.com/dgx/dgx-spark/spark-clustering.html).
 
-See `docs/checkpoint_budget.md`. Headlines:
-- 328.3 GB total; 76,108 tensors; FP8 experts 92.7% of bytes.
-- Linear-attention path kept BF16 by unsloth export (~10 GB/token headroom if requantized later).
-- Active-bytes/token ≈ **23.5 GB** cluster-wide ⇒ TP=4 share ≈5.9 GB/node ⇒
-  decode floor ≈26 ms @230 GB/s effective.
+### Authoritative perftest results
 
-## Device microbenches (GPU window granted; vLLM paused)
+`ib_write_bw`: 8 MiB messages, four QPs, depth 128, duration mode, relaxed
+ordering on, RC/RoCEv2/MTU 4096.
 
-`micro_mem_bw -s 4096` (4 GiB working set):
+| run | lane 0 | lane 1 | aggregate |
+|---|---:|---:|---:|
+| isolated | 107.64 Gb/s | 107.64 Gb/s | — |
+| concurrent | 97.98 Gb/s | 98.05 Gb/s | **196.03 Gb/s (24.50 GB/s)** |
 
-| pattern | GB/s | % of 273 nominal |
-|---|---|---|
-| read (weight-stream proxy) | **231.8** | 85% |
-| write | 195.2 | 71% |
-| copy (R+W aggregate) | 214.6 | — |
+The old 105 Gb/s number was a valid one-lane result but not a node ceiling.
+Bulk collectives must stripe both lanes.
 
-Device facts (`dgppctl info`): GB10 cc=12.1, **48 SMs**, **L2=24 MiB**, SM clock 2.42 GHz peak,
-unified addressing + HMM page-table access ON.
+`ib_send_lat`: 2-byte messages, 10,000 iterations.
 
-`micro_gemm_peak` (cuBLASLt heuristics; L2-note: shapes ≤24 MiB weights loop
-cache-resident, inflating apparent GB/s):
+| lane | min | typical | average | p99 | p99.9 |
+|---|---:|---:|---:|---:|---:|
+| 0 | 2.66 µs | 2.72 µs | 2.72 µs | 2.80 µs | 2.98 µs |
+| 1 | 2.40 µs | 2.46 µs | 2.57 µs | 2.97 µs | 3.04 µs |
 
-| shape (m,n,k) | dtype | us | TFLOPS | eff-BW |
-|---|---|---:|---:|---:|
-| attn_o_proj 1×4096×16384 | fp8 | 260 | 0.5 | 258 GB/s* |
-| qkv/qb 1×16384×1536 | fp8 | 44 | 1.2 | (L2) |
-| moe_w13 1×4096×4096 | fp8 | 18.5 | 1.8 | (L2) |
-| dense_gateup 1×24576×4096 | fp8 | 563 | 0.4 | 179 GB/s |
-| lm_head 1×154880×4096 | fp8/bf16 | 2824 / 7266 | — | DRAM-bound |
-| attn_o_proj 1×… ×16384 | bf16 | 587 | 0.2 | 228 GB/s |
-| prefill attn_o_proj 2048×… | fp8 / bf16 | 1378 / 2878 | **199.6** / 95.5 | — |
-| prefill dense_gateup 2048×… | fp8 / bf16 | 2059 / 4197 | **200.3** / 98.2 | — |
+Both lanes passed `ping -M do -s 8972`, validating 9000-byte IP frames.
+All three other cluster nodes answered on both fabric subnets during the
+reachability matrix.
 
-(* L2-warm artifact vs ceiling cross-check.)
+### Flow-control state
 
-Takeaways:
-1. Decode GEMV-class kernels are DRAM-bound at ≈230 GB/s → floor numbers stand.
-2. cuBLASLt fp8 prefill rates (~200 TFLOPS/board) ⇒ cluster prefill compute
-   ceiling ≈800 TFLOPS ⇒ TTFT for 32K-token prompt of order ~1–3 s ex-cache —
-   far better than the conservative §1 estimate; comm overlap still required.
-3. lm_head must be vocab-sharded AND considered for FP8 (bf16 costs 7.3 ms/stream single-node).
+Node-visible state on both active interfaces:
 
-`micro_gdr_probe`: **GPUDirect RDMA NOT available** (peermem absent;
-ibv_reg_mr on device memory fails errno=14). Copy-engine bounce profile:
-h2d_pinned 1.57–2.32 µs, d2h 1.61 µs (≤64 KB) ⇒ small-message collectives pay
-~+3–4 µs/hop in bounce mode. Decode-lane tree allreduce revised ≈12–18 µs
-including bounce — still ≤5% of step time. [Superseded by the unified-memory
-re-reading + micro_zerocopy below: bounce is unnecessary for GPU consumption;
-see §Zero-copy receive.]
+- Ethernet pause RX/TX enabled;
+- DCB priority PFC disabled for priorities 0–7;
+- `rx_out_of_buffer=0` at inspection;
+- cumulative priority-0 discards are nonzero.
 
-Event record/sync pair ≈ 5.3 µs/iter (host overhead reference).
+The switch PFC/ECN/global-pause policy is not available through node sudo.
+The paired tests reached the physical-link ceiling without a congestion
+symptom, so switch access is not a sign-off requirement. If a future four-node
+run shows drops, retries, unstable throughput, or latency spikes, collect
+before/after pause, discard, retry, and out-of-buffer counters and inspect the
+switch configuration. No switch policy is inferred here.
 
-## Zero-copy receive (micro_zerocopy, 2026-08-27)
+## Project RC protocol tool — repaired and validated
 
-Two full runs; both shown / averaged where stable. GB10 unified pool,
-256 MiB buffers (≫24 MiB L2), uint4 (128-bit) access, grid search 48–384
-blocks.
+The audit found unsignaled sends mislabeled as signaled and CQ polls writing
+multiple completions into one `ibv_wc`. `micro_ibv_smoke` now:
 
-| pattern | GB/s | notes |
-|---|---|---|
-| gpu_read_dev (cudaMalloc ref) | 238.7 / 240.8 / 238.3 | M0 baseline confirmed |
-| gpu_read_pin (zero-copy) | **254.7 / 254.8 / 252.6** | **~+6% faster than device buffer** |
-| …CPU writer on SAME buffer | 254.6 / 251.9 / 250.8 | −1.1% |
-| …writer on OTHER pinned buf | 236.2 / 235.0 / 233.8 | −7.8% |
-| …2 writers, 2 other buffers | **214.8 / 211.3** | −15.7% |
-| …1 same + 1 other | 230.6 / 230.7 | −9.5% ≈ additive |
-| gpu_write_pin | 217.1 / 210.6 | full-rate in-place payload build |
-| copy_pin2dev (staging copy) | 59.7 / 59.6 | staging would cost ~4× the data |
-| copy_dev2pin | 59.6 / 59.6 | symmetric |
-| cpu_memcpy_pin (1 thread) | 24.4 / 27.3 | CPU producer ceiling; NIC DMAs bypass CPU |
-| FLAG roundtrip (fenced) | p50 1.12–1.17, min 0.99–1.07, p99 ~1.4 µs | 512/512 seq-verified, 3 runs |
+- marks the required SENDs `IBV_SEND_SIGNALED`;
+- supplies completion arrays matching every poll count;
+- propagates link-thread, timeout, and sink failures;
+- validates request sizes and socket failures;
+- frees QP, CQ, MR, PD, context, and buffer resources after a connection;
+- maps repeated peer/device arguments by position for two-lane tests;
+- offers `--once` for bounded automation.
 
-Readings:
+Cross-node results:
 
-1. **Zero-copy receive is the fastest path, not a compromise.** Pinned-buffer
-   reads beat cudaMalloc reads by ~6% and need no copy. Staging copies
-   (59.6 GB/s) would multiply network payload traffic — strictly dominated.
-2. **Writer interference is approximately additive per active writer
-   region**, and same-buffer placement hurts least (−1% vs −8% per flow):
-   uncontended 254.8 → same −4 → other −21 → same+other −24 GB/s
-   (sum matches). Worst-case busy-bus extrapolation (all flows writing
-   elsewhere) budgets ~15–20% margin on receive bandwidth; decode-time
-   small-message traffic sits far below where this matters.
-3. **Completion signaling is cheap and provably ordered:** fenced flag
-   round trip p50 ≈ 1.1 µs with zero sequence failures across runs —
-   better than the 3–4 µs/hop bounce figure from M0, as predicted once
-   bounce staging left the picture.
-4. Design consequence: CollectiveBus receives go **directly into pinned
-   slabs consumed zero-copy by kernels; no staging copies; completion via
-   pinned flag words with release/acquire + `__threadfence_system`
-   discipline (pattern proven by the flag test).**
+| test | result |
+|---|---:|
+| 1,000-iteration lane-0 SEND echo | 3.25 µs minimum, 4.17 µs mean one-way |
+| 1 MiB signaled SEND, window 64 | 95.6 Gb/s |
+| same SEND test on both lanes | **184.0 Gb/s aggregate** |
 
-Protocol hardened since first measurement: the flag kernel now lives in
-`src/kernels/flag_protocol.cuh` (single implementation shared by bench and
-`tests/cuda/flag_protocol_test` — in-order ack delivery, payload-visibility-
-at-ack checksum invariant, and watchdog-on-dead-wakeup with device-recovery
-assertions; runs in ctest as `flag_protocol_test`).
+The SEND tool intentionally exercises receive WQEs/CQEs and signals every
+message, so perftest RDMA write—not this result—is the link ceiling.
+An earlier run before the final error-path hardening measured 3.29/3.47 µs
+minimum/mean and 185.0 Gb/s dual-lane; both runs are retained in the dated
+record rather than selecting only the faster result.
 
-M7 open items (real-NIC validation):
-- NIC DMA payload → GPU read ordering/visibility with doorbell scheme (the
-  flag test proves CPU-side visibility; mlx5 DMA coherence is the remaining
-  question, expected fine on this fabric but must be measured with
-  ibv_post_send + GPU read + integrity check).
-- Multi-writer / multi-flow scaling (does a second concurrently-written
-  region push the other-buffer −7.5% down further?).
-- Whether GPU kernels can poll remote-peer completion flags across the RoCE
-  path (they cannot read NIC registers; flags must be DMA'd by NIC into
-  pinned slab — that's the plan).
+## NIC DMA → GPU payload visibility — closed for this stack
 
-## GPUDirect-RDMA / peermem investigation — RESOLVED (2026-08-27)
+The new `micro_ibv_smoke verify` mode registers a `cudaHostAlloc` receive slab
+with ibverbs and launches a GPU consumer. For each iteration, the peer sends a
+changing 64-byte payload followed by a 64-byte sequence doorbell as ordered RC
+SENDs. The GPU observes the NIC-written doorbell with a system-scope acquire,
+hashes the payload, and publishes a system-scope release acknowledgement.
 
-With narrow sudoers grant (`modprobe`, `dmesg`, `lspci`, `ibstat`):
+| lane | iterations | mismatches | timeouts |
+|---|---:|---:|---:|
+| 0 | 10,000 | 0 | 0 |
+| 1 | 10,000 | 0 | 0 |
 
-1. `nvidia-peermem.ko` **IS shipped** here (v580.173.02, NVIDIA-open tree,
-   Canonical-signed). Earlier find-miss remains unexplained noise; modprobe
-   resolves it fine.
-2. Insertion refused with EINVAL, silently (no dmesg entry), even with
-   ib_core preloaded. `strings` on the module shows only
-   `nv_mem_client_init/cleanup` hooks: it exports GPU memory by registering
-   with the NVIDIA client registry for **PCIe BAR-backed** GPUs. On GB10
-   there is no discrete GPU / no BAR aperture to export ⇒ early bailout
-   before any printk. Verdict: **present-but-inapplicable**, not
-   misconfigured.
-3. Validates the revised model: with CPU+GPU sharing one LPDDR5x pool over
-   NVLink-C2C, NIC-side DMAs land in memory the GPU reads zero-copy anyway.
-   CollectiveBus commitment: pinned-buffer receive, direct GPU consumption,
-   correct fencing. The 3–4 µs/hop M0 bounce cost already reflects
-   same-pool staging, so headroom vs classic GDR nodes is smaller than once
-   assumed. Remaining engineering unknowns for the receive path:
-   coherency/cache-line behavior under mixed CPU×GPU×NIC access and
-   achievable zero-copy read bandwidth — unprivileged microbench planned.
+The final hardened binary then passed another 1,000/1,000 payloads on each
+lane. The larger runs validate the visibility contract; the bounded reruns
+validate that later argument, CQ-error, timeout, and cleanup changes did not
+regress it.
 
-NIC topology (lspci): two MT2910 ConnectX-7 (segments 0000 & 0002), each
-dual-port (`rocep1s0f0/f1`, `roceP2p1s0f0/f1`), all links **Gen5 x4 @32GT/s**
-— healthy. An earlier suspicious 2.5GT/s reading was my own tooling error:
-probing `000f:01:00.0` from dmesg's NVRM line hit the GPU's internal bridge,
-not a NIC. M7 gets four roce devices to allocate across; whether both CX-7s
-are actually cabled is switch-side verification (see PFC/ECN item above).
+This is empirical validation of the exact kernel, driver, and firmware stack;
+NIC DMA is outside the C++ abstract-machine synchronization model. The test is
+a deployment regression after CUDA, kernel, mlx5, firmware, or topology
+changes. CPU CQ polling remains in the production design for errors and slot
+credits even though the GPU consumes the payload directly.
 
-## Real-checkpoint loader smoke (2026-08-27)
+## Unified-memory and zero-copy results
 
-Production cold path (`ShardedCheckpoint`, eager_bind) over unsloth snapshot:
-12.5 MB shardspec + 62 shard mmaps parse/bind in **0.17 s, RSS 188 MiB**;
-all 76,108 tensors pass nbytes==numel*elemsize geometry check; spot-bind of 6
-roles incl. F8/BF16/F32 decode paths OK.
+Final `micro_zerocopy` regression run, 256 MiB buffers and best of its grid
+sweep:
 
-Facts that adjust M2 assumptions (and our earlier guesses):
-- `lm_head.weight` is **BF16** [154880,4096] (not FP8): per-token lm_head read
-  is ~1.27 GiB/stream — dominates small-seq decode traffic; keep vocab-proj
-  optimizations (chunked argmax w/o logits materialization) high priority.
-- Dense attention layers are MLA-shaped low-rank: `q_a_proj` F8_E4M3
-  [1536,4096]; layer naming uses `model.language_model.layers.*` with
-  `hc_*` hyper-connection wrappers (`hc_attn_{base,fn,scale}`, `hc_ffn_*`).
-- Linear-attention layers carry F32 `dt_bias` [8192] (KDA state parameters);
-  attention layer count appears smaller than MLP layer count (attn_qkv 24,
-  la_dtba 34 → hybrid layout ratio confirmed from tensor census).
-- Experts store raw-magnitude E4M3 (mean|v|~61) with separate
-  `weight_scale_inv` block-scale tensors ⇒ dequant-on-load must apply scale
-  blocks; raw fp8 bytes are NOT unit-range.
+| pattern | GB/s |
+|---|---:|
+| GPU read, `cudaMalloc` | 240.8 |
+| GPU read, `cudaHostAlloc` | **252.5** |
+| GPU write, pinned | 210.8 |
+| pinned → device copy | 59.6 |
+| device → pinned copy | 59.6 |
+| one-thread CPU memcpy → pinned | 27.4 |
+| flag round trip | 1.02 µs min, 1.12 µs p50, 1.41 µs p99 |
 
-## M1 results (core runtime & weight pipeline)
+The previous `volatile bool` CPU-thread stop flag was a data race; it is now a
+`std::atomic<bool>`. Doorbell slots are explicitly initialized, and the CUDA
+protocol uses system-scope atomics.
 
-All numbers single GB10 node, vLLM co-resident on the box (0.85 util);
-doll defaults: hidden 4096, 8 layers, GQA 32q/8kv × 128, inter 12288,
-vocab 154880, ~5.0 GiB weights (bf16 + fp8 lm_head), FP32 logits path.
+CPU-writer proxy cases touch separate buffers; the old same-buffer CPU/GPU
+race was removed. It was not used for the production margin.
 
-| check | result |
-|---|---|
-| gpt-doll greedy transcript vs eager | **bitwise-identical, 48 steps** |
-| graph replay repeatability (same inputs) | **bitwise-identical** |
-| rollout mega-graph replay (N=48) | **bitwise-identical across replays** |
-| decode throughput (sync API, avg seq ~232) | **60.1 tok/s**, step 16.6 ms |
-| effective streaming BW @ bs=1 | **225 GB/s** |
-| naive-roofline ratio (sync path) | **97.0%** (criterion ≥90%) |
-| rollout 1200 steps self-fed graph | 55.5 tok/s, 90.4% roofline |
-| rollout 4000 steps (long-context attn) | 43.0 tok/s, 72.2% — O(T) kernel latency-bound; expected, motivates M3 MLA kernels |
-| soak 10 min / 37k steps | **alloc growth = 0, slabs stable** |
+### Real incoming-RDMA contention
 
-Shardspec generation (`tools/make_shardspec.py`) over unsloth FP8 snapshot:
-76,108 tensors / 62 shards / 305.8 GiB; role split: experts_w13 193.5,
-experts_w2 96.8, other 7.0, attn_o 2.9, mlp_w13 1.5, lm_head+embed 2.4 GiB…
-(`artifacts/shardspec.json`, 12.5 MB — C++ cold-path parse verified.)
+In a paired earlier run with a 251.5 GB/s idle pinned baseline, two remote
+`ib_write_bw` streams each sustained 98.04 Gb/s into this node:
 
-Platform lessons encoded as permanent behavior:
-- `cudaFuncSetAttribute(MaxDynamicSharedMemorySize)` beyond driver cap FAILS
-  but leaves lastError set → the *next* launch misattributes "invalid
-  argument". Launchers now clamp to `MaxSharedMemoryPerBlockOptin` and clear
-  the error slate before every launch.
-- Events recorded inside a stream capture are absorbed into the graph and
-  cannot be host-synchronized afterwards reliably ⇒ all result copies +
-  completion fences live outside captured regions (`finish_step_outputs`).
-- Inside `namespace dgpp`, unqualified C-math names resolve to engine
-  templates (dgpp::logf shadowed ::logf in fill kernels). All internal math
-  now uses fully-qualified ::logf/exp2f etc.
-- e4m3 encoder property tests (full-table roundtrip, no-NaN invariant,
-  saturation semantics ≥448) pin the requant helper used everywhere.
+| pattern | GB/s | change from idle |
+|---|---:|---:|
+| GPU read, pinned | **218.4** | −13.2% |
+| GPU read, device mapping | 208.6 | −13.1% |
+| flag p50 / p99 | 1.12 / 1.42 µs | effectively stable |
 
-## Pending items
+Thus registered pinned receive slabs remain faster than a staging copy, but
+dual-lane saturation consumes measurable shared-memory bandwidth. Models that
+assume sustained dual-lane ingress provisionally derate simultaneous GPU
+memory bandwidth by 15%. This is a stress-case planning value, not a fixed
+inference penalty or an upper bound for other traffic patterns; M5 replaces it
+with measurements of the real collective schedule. CPU-writer patterns remain
+useful stress proxies but are no longer the evidence for NIC contention.
 
-- PFC/ECN switch inspection needs mgmt-plane credentials (switch CLI), NOT
-  node sudo — separate request.
+## Flag protocol regression
+
+`src/kernels/flag_protocol.cuh` now provides:
+
+- system-scope acquire/release operations for sequence words;
+- payload/stamp writes ordered before acknowledgement publication;
+- an inactivity deadline reset after every observed message;
+- a reserved orderly-stop sequence.
+
+CTest covers sequential acknowledgements, payload hashes, traffic continuing
+for longer than the watchdog budget, quiet-time expiry, and subsequent device
+use. The corrected flag-protocol test passes on GB10 in about 1.3 seconds.
+
+## Checkpoint and traffic audit
+
+The current generated report validates:
+
+- 328.33 GB / 305.78 GiB, 62 shards, 76,108 tensors;
+- 1.127 GB of vision tensors excluded from text decode;
+- zero unmatched tensor names;
+- 37,338/37,338 FP8 matrices paired with F32 inverse scales of exact
+  128×128-block geometry;
+- 22.415 GB/token of unique active base-text weights and 23.420 GB/token of
+  aggregate physical traffic after replicated-module reads;
+- TP=4 expected synchronized critical-path traffic 7.457 GB/token and a 32.42 ms
+  weight-bandwidth floor at 230 GB/s.
+
+The mean-rank value is 5.855 GB/token, but it is not used as a synchronized
+decode prediction. Representative real router traces are an M4 exit gate.
+
+## KDA operator state traffic (M2)
+
+`kda_bench` (idle node, 50 timed iterations after 5 warmups; full record in
+`benchmarks/results/2026-08-27-kda-m2.md`):
+
+| case | mean | state bytes/step | effective |
+|---|---:|---:|---:|
+| recurrent kernel, decode, TP=1 (64 heads, 34 layers) | 3.301 ms | 272.0 MiB | 86.4 GB/s |
+| recurrent kernel, decode, TP=4 rank (16 heads) | 1.123 ms | 68.0 MiB | 63.5 GB/s |
+| full KDA layer, decode (T=1), TP=1 | 1.324 ms | — | — |
+| full KDA layer, prefill chunk (T=2048), TP=1 | 23.787 ms | — | — |
+
+The decode recurrence is latency-bound at these sizes (256/64 blocks on 48
+SMs, 34 sequential per-layer launches), so the 230 GB/s planning floor does
+not bind it; batching layers into single launches is the identified
+optimization for M9. The full-layer decode step is weight-bandwidth
+dominated (~0.9 ms of 1.32 ms streams the 204 MB fused projection), which
+is the intended decode-traffic shape. These are correctness-first M2
+numbers, not performance claims.
+
+## cuBLASLt best-of-heuristics results
+
+`micro_gemm_peak` now warms all SMs before measurement, times every valid
+heuristic returned by cuBLASLt (up to 16 requested), and selects the fastest
+candidate by the median of three timed batches rather than timing the first
+heuristic only. Two final process runs produced these ranges:
+
+| model shape | FP8 | BF16 |
+|---|---:|---:|
+| attention output decode `1×4096×16384` | 231.8–238.3 µs | 578.3–581.4 µs |
+| dense gate/up decode `1×24576×4096` | 406.9–419.2 µs | 832.4–835.7 µs |
+| lm head `1×154880×4096` | 2,798.0–2,844.3 µs | 5,364.7–5,528.2 µs |
+| attention output prefill, m=2048 | 195.7–200.9 TFLOP/s | 93.4–94.9 TFLOP/s |
+| dense gate/up prefill, m=2048 | 220.8–220.9 TFLOP/s | 95.6–95.8 TFLOP/s |
+
+Decode shapes whose weight set fits L2 can report implausible effective DRAM
+bandwidth; those values are cache-warm diagnostics. This benchmark is a
+cuBLASLt heuristic baseline, not a hardware peak claim.
+
+## Direct-device MR probe
+
+`micro_gdr_probe` reports direct `cudaMalloc` registration as unsupported on
+this platform, consistent with NVIDIA's [DGX Spark CUDA porting guide](https://docs.nvidia.com/dgx/dgx-spark-porting-guide/porting/cuda.html).
+The binary now treats the expected unsupported result as a completed probe and
+states the correct fallback: registered host memory consumed directly by the
+GPU, not a pinned bounce copy.
+
+## Build and test validation
+
+The warning-as-error CI build consumes `DGPP_WERROR=ON`; the earlier unused
+cache variable is fixed. CTest contains host, CUDA, synthetic-model, and Python
+checkpoint-audit tests. ASan and UBSan are independent cache-variable presets.
+The final validation results are listed in the dated run record.
+
+## Historical M1 observations
+
+The base commit recorded synthetic `gpt_doll` graph/eager parity, stable graph
+replay, and a ten-minute allocation-stability soak. Those observations apply
+to the synthetic model only. They are not evidence for full GLM correctness or
+performance and are not carried into a model throughput target.
+
+## Future measurement scope
+
+The measurements in this report close the questions covered by the completed
+M0/M1 exit criteria. Later milestones still require their specified
+workload-specific correctness, stability, and performance measurements,
+including four-node CollectiveBus and full-model validation. Within those
+runs, switch policy and counter deltas are diagnostics if congestion symptoms
+appear. Comparisons with other inference engines are optional and are not an
+implementation or performance gate.

@@ -6,6 +6,7 @@
 // here before it fails in production.
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
@@ -25,9 +26,6 @@ constexpr int kMsgs = 256;  // fast enough for CI, long enough to be meaningful
 constexpr uint64_t kDeadlineCycles = 800'000'000ull;
 // Host-side per-message bound; must comfortably exceed the kernel deadline.
 constexpr double kHostTimeoutSec = 6.0;
-// Quiet-period length when testing the watchdog: must exceed the deadline
-// at any plausible GB10 clock (800M cycles @ 267 MHz would be 3 s).
-constexpr auto kQuietPeriod = std::chrono::milliseconds{3000};
 
 #if defined(__aarch64__)
 inline void cpu_pause() { asm volatile("yield" ::: "memory"); }
@@ -42,11 +40,30 @@ struct Fixture {
   cudaStream_t stream = nullptr;
 
   Fixture() {
-    cudaHostAlloc(&start, sizeof(dgpp::StartSlot), cudaHostAllocDefault);
-    cudaHostAlloc(&ack, sizeof(FlagAck), cudaHostAllocDefault);
-    cudaHostAlloc(&payload, 16 * sizeof(uint32_t), cudaHostAllocDefault);
-    if (!start || !ack || !payload) throw std::runtime_error("pinned alloc");
-    cudaStreamCreate(&stream);
+    if (cudaHostAlloc(&start, sizeof(dgpp::StartSlot), cudaHostAllocDefault) !=
+            cudaSuccess ||
+        cudaHostAlloc(&ack, sizeof(FlagAck), cudaHostAllocDefault) !=
+            cudaSuccess ||
+        cudaHostAlloc(&payload, 16 * sizeof(uint32_t), cudaHostAllocDefault) !=
+            cudaSuccess ||
+        !start || !ack || !payload) {
+      if (payload) cudaFreeHost(payload);
+      if (ack) cudaFreeHost(ack);
+      if (start) cudaFreeHost(start);
+      throw std::runtime_error("pinned alloc");
+    }
+    *start = {};
+    *ack = {};
+    std::fill_n(payload, 16, 0u);
+    if (cudaStreamCreate(&stream) != cudaSuccess) {
+      cudaFreeHost(payload);
+      cudaFreeHost(ack);
+      cudaFreeHost(start);
+      payload = nullptr;
+      ack = nullptr;
+      start = nullptr;
+      throw std::runtime_error("stream create");
+    }
   }
   ~Fixture() {
     cudaStreamDestroy(stream);
@@ -80,6 +97,27 @@ bool wait_ack(const FlagAck& ack, uint32_t want) {
   return true;
 }
 
+void stop_and_sync(Fixture& fixture) {
+  __atomic_store_n(&fixture.start->seq, dgpp::kFlagStopSequence,
+                   __ATOMIC_RELEASE);
+  if (cudaStreamSynchronize(fixture.stream) != cudaSuccess)
+    throw std::runtime_error("orderly flag-kernel stop failed");
+}
+
+bool wait_stream_complete(cudaStream_t stream, double timeout_seconds) {
+  const auto start = std::chrono::steady_clock::now();
+  for (;;) {
+    const cudaError_t status = cudaStreamQuery(stream);
+    if (status == cudaSuccess) return true;
+    if (status != cudaErrorNotReady)
+      throw std::runtime_error("stream query failed while waiting for watchdog");
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count() > timeout_seconds)
+      return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
 }  // namespace
 
 DGPP_TEST(flag_protocol_with_sequential_writes_delivers_every_ack_in_order) {
@@ -101,6 +139,7 @@ DGPP_TEST(flag_protocol_with_sequential_writes_delivers_every_ack_in_order) {
     if (c < last_cycles) throw std::runtime_error("device stamps regressed");
     last_cycles = c;
   }
+  stop_and_sync(f);
 }
 
 DGPP_TEST(flag_protocol_with_payload_released_before_flag_shows_payload_at_ack) {
@@ -122,6 +161,51 @@ DGPP_TEST(flag_protocol_with_payload_released_before_flag_shows_payload_at_ack) 
     if (f.ack->hash != host_fold(f.payload))
       throw std::runtime_error("payload not fully visible when ack observed");
   }
+  stop_and_sync(f);
+}
+
+DGPP_TEST(flag_protocol_with_continuous_traffic_resets_inactivity_watchdog) {
+  // GIVEN a watchdog shorter than this test's total runtime but longer than
+  // the interval between messages:
+  Fixture f;
+  int clock_khz = 0;
+  if (cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, 0) !=
+          cudaSuccess ||
+      clock_khz <= 0)
+    throw std::runtime_error("device clock unavailable");
+  constexpr uint64_t kIdleBudgetMs = 250;
+  const uint64_t deadline =
+      static_cast<uint64_t>(clock_khz) * kIdleBudgetMs;
+  flag_heartbeat_kernel<<<1, 1, 0, f.stream>>>(&f.start->seq, f.ack, deadline);
+
+  // WHEN messages remain active for more than one full watchdog budget as
+  // measured by the GPU's own clock64 domain:
+  uint64_t first_cycles = 0;
+  uint64_t last_cycles = 0;
+  uint32_t last_seq = 0;
+  for (uint32_t seq = 1; seq <= 100; ++seq) {
+    __atomic_store_n(&f.start->seq, seq, __ATOMIC_RELEASE);
+    if (!wait_ack(*f.ack, seq))
+      throw std::runtime_error("active watchdog expired from kernel age");
+    if (first_cycles == 0) first_cycles = f.ack->cycles;
+    last_cycles = f.ack->cycles;
+    last_seq = seq;
+    if (last_cycles - first_cycles > deadline) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(75));
+  }
+  if (last_cycles - first_cycles <= deadline)
+    throw std::runtime_error("traffic did not span the device watchdog budget");
+
+  // THEN all messages are acknowledged. A final quiet period still causes
+  // the intended clean watchdog exit.
+  if (!wait_stream_complete(f.stream, kHostTimeoutSec)) {
+    stop_and_sync(f);
+    throw std::runtime_error("inactivity watchdog did not expire in time");
+  }
+  if (cudaStreamSynchronize(f.stream) != cudaSuccess)
+    throw std::runtime_error("inactivity watchdog failed to drain stream");
+  if (__atomic_load_n(&f.ack->seq, __ATOMIC_ACQUIRE) != last_seq)
+    throw std::runtime_error("last active sequence was not acknowledged");
 }
 
 DGPP_TEST(flag_protocol_with_dead_wakeup_times_out_and_device_remains_usable) {
@@ -132,9 +216,12 @@ DGPP_TEST(flag_protocol_with_dead_wakeup_times_out_and_device_remains_usable) {
   __atomic_store_n(&f.start->seq, 1, __ATOMIC_RELEASE);
   if (!wait_ack(*f.ack, 1)) throw std::runtime_error("healthy ack missing");
 
-  // WHEN traffic stops well beyond the watchdog budget and a new sequence
-  // is sent to the (now dead) kernel:
-  std::this_thread::sleep_for(kQuietPeriod);
+  // WHEN traffic stops until the stream proves that the watchdog exited, and
+  // a new sequence is then sent to the dead kernel:
+  if (!wait_stream_complete(f.stream, kHostTimeoutSec)) {
+    stop_and_sync(f);
+    throw std::runtime_error("watchdog did not exit within host bound");
+  }
   __atomic_store_n(&f.start->seq, 2, __ATOMIC_RELEASE);
 
   // THEN the stream drains (kernel exited) and seq 2 is never acked —

@@ -1,49 +1,33 @@
 // Pinned-memory flag protocol: the completion-notification contract for
 // CollectiveBus on GB10's unified-memory fabric.
 //
-// Contract (validated by tests/cuda/flag_protocol_test.cpp):
-//   * Host writes payload first, then bumps `start->seq` with a RELEASE
-//     store. Device observes the new seq, consumes payload, stamps cycles
-//     and payload hash, and only after __threadfence_system() publishes
-//     `ack->seq`. Host observes acks with ACQUIRE loads.
+// Contract (validated by tests/cuda/flag_protocol_test.cu):
+//   * A producer writes payload first, then bumps `start->seq`. Host producers
+//     use a release store; the device observes with a system-scope acquire,
+//     consumes payload, stamps cycles/hash, and publishes `ack->seq` with a
+//     system-scope release. The host observes acks with acquire loads.
 //   * Consequence: if a host thread sees ack.seq == S, then the payload for
 //     S was fully visible to the device when it ran — the ordering invariant
 //     the bus receive path relies on.
-//   * The persistent kernels are watchdog-bounded: a lost wakeup exits the
-//     kernel instead of wedging the device. Callers detect this as "ack
-//     never arrives" + subsequent stream sync completing.
+//   * NIC doorbells are a hardware-coherency contract rather than a C++
+//     release operation; benchmarks/micro `verify` validates ordered RC DMA
+//     payload + doorbell visibility on the deployed driver/firmware stack.
+//   * The persistent kernels are inactivity-watchdog bounded. The deadline
+//     resets after traffic, and a reserved sequence shuts them down cleanly.
 //
 // Header-only by design: included from exactly one TU each (bench, test,
 // later the bus itself). Keep the kernels single-thread/single-block —
 // the protocol must stay minimal; bulk data movement is the caller's job.
 #pragma once
 
+#include <cuda/atomic>
 #include <cuda_runtime.h>
 
 #include <cstdint>
 
+#include "kernels/flag_protocol_types.hpp"
+
 namespace dgpp {
-
-// Start slot: the host->device doorbell. Own cache line so unrelated host
-// writes cannot false-share it. Sequences start at 1; 0 means "idle".
-struct alignas(64) StartSlot {
-  volatile uint32_t seq = 0;
-  uint32_t pad[15];
-};
-
-static_assert(sizeof(StartSlot) == 64, "StartSlot must occupy one cache line");
-
-// Ack slot: seq (protocol), cycles (device timestamp at observation), hash
-// (payload integrity for the payload variant). Padded to a full cache line
-// so unrelated pinned data sharing the line cannot false-share the seq.
-struct alignas(64) FlagAck {
-  volatile uint32_t seq = 0;
-  volatile uint64_t cycles = 0;
-  volatile uint64_t hash = 0;
-  uint32_t pad[10];
-};
-
-static_assert(sizeof(FlagAck) == 64, "FlagAck must occupy one cache line");
 
 __device__ inline void flag_poll_pause() {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
@@ -51,45 +35,57 @@ __device__ inline void flag_poll_pause() {
 #endif
 }
 
+__device__ inline uint32_t flag_load_acquire(uint32_t* seq) {
+  cuda::atomic_ref<uint32_t, cuda::thread_scope_system> ref(*seq);
+  return ref.load(cuda::memory_order_acquire);
+}
+
+__device__ inline void flag_store_release(uint32_t* seq, uint32_t value) {
+  cuda::atomic_ref<uint32_t, cuda::thread_scope_system> ref(*seq);
+  ref.store(value, cuda::memory_order_release);
+}
+
 // Persistent heartbeat: for every new start seq S, acks with S and a device
-// cycle stamp. Exits silently once `deadline_cycles` elapse without traffic
-// (watchdog against lost wakeups). Sequences start at 1; 0 means "idle".
-__global__ inline void flag_heartbeat_kernel(volatile uint32_t* start,
+// cycle stamp. Exits silently once `deadline_cycles` elapse without traffic.
+// Sequences start at 1; 0 means "idle".
+__global__ inline void flag_heartbeat_kernel(uint32_t* start,
                                              FlagAck* ack,
                                              uint64_t deadline_cycles) {
-  const uint64_t t0 = clock64();
+  uint64_t idle_since = clock64();
   uint32_t last_seen = 0;
   for (;;) {
-    uint32_t s = *start;
+    uint32_t s = flag_load_acquire(start);
     while (s == last_seen) {
-      if (clock64() - t0 > deadline_cycles) return;
+      if (clock64() - idle_since > deadline_cycles) return;
       flag_poll_pause();
-      s = *start;
+      s = flag_load_acquire(start);
     }
+    if (s == kFlagStopSequence) return;
     last_seen = s;
     ack->cycles = clock64();
     ack->hash = 0;
-    __threadfence_system();  // ack must never be observable before stamp
-    ack->seq = s;
+    flag_store_release(&ack->seq, s);
+    idle_since = clock64();
   }
 }
 
 // Persistent payload variant: on new seq, folds 16 u32 words (64 B, one
 // cache line) into a checksum before acking — the receive-path shape where
 // payload visibility must be proven before completion is signalled.
-__global__ inline void flag_payload_kernel(volatile uint32_t* start,
+__global__ inline void flag_payload_kernel(uint32_t* start,
                                            const uint32_t* payload,
                                            FlagAck* ack,
                                            uint64_t deadline_cycles) {
-  const uint64_t t0 = clock64();
+  uint64_t idle_since = clock64();
   uint32_t last_seen = 0;
   for (;;) {
-    uint32_t s = *start;
+    uint32_t s = flag_load_acquire(start);
     while (s == last_seen) {
-      if (clock64() - t0 > deadline_cycles) return;
+      if (clock64() - idle_since > deadline_cycles) return;
       flag_poll_pause();
-      s = *start;
+      s = flag_load_acquire(start);
     }
+    if (s == kFlagStopSequence) return;
     last_seen = s;
     uint64_t h = 0;
     // Checksum: xor of (hi<<32 | lo) per u32 pair, mixed with the golden
@@ -102,8 +98,8 @@ __global__ inline void flag_payload_kernel(volatile uint32_t* start,
     }
     ack->cycles = clock64();
     ack->hash = h;
-    __threadfence_system();  // payload-derived state precedes ack, always
-    ack->seq = s;
+    flag_store_release(&ack->seq, s);
+    idle_since = clock64();
   }
 }
 

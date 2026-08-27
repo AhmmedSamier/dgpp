@@ -21,8 +21,19 @@
     },
     {
       "name": "asan",
-      "inherits": "release",
-      "cacheVariables": {"DGPP_SANITIZE": "address"}
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "DGPP_SANITIZE": "address"
+      }
+    },
+    {
+      "name": "ubsan",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "DGPP_SANITIZE": "undefined"
+      }
     },
     {
       "name": "ci",
@@ -34,9 +45,12 @@
     {"name": "release", "configurePreset": "release"},
     {"name": "debug", "configurePreset": "debug"},
     {"name": "asan", "configurePreset": "asan"},
+    {"name": "ubsan", "configurePreset": "ubsan"},
     {"name": "ci", "configurePreset": "ci"}
   ],
   "testPresets": [
-    {"name": "ci", "configurePreset": "ci", "output": {"outputOnFailure": true}}
+    {"name": "ci", "configurePreset": "ci", "output": {"outputOnFailure": true}},
+    {"name": "asan", "configurePreset": "asan", "output": {"outputOnFailure": true}},
+    {"name": "ubsan", "configurePreset": "ubsan", "output": {"outputOnFailure": true}}
   ]
 }

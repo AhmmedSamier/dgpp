@@ -11,7 +11,7 @@ namespace dgpp {
 //   O: [nq, Hq*Dh] contiguous bf16.
 // Query i sits at absolute position (abs_first + i) and attends keys
 // [0 .. abs_first+i]. Counts arrive via DEVICE MEMORY so captured graphs
-// replay at any sequence state (DESIGN §5.1).
+// replay at any sequence state (DESIGN §11).
 void gqa_causal_attention(const void* q, int64_t q_stride_elems,
                           const void* k_cache, const void* v_cache, void* out,
                           const int* dev_query_count,
