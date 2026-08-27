@@ -1,0 +1,38 @@
+# --- Build artifacts (CMake + CUDA) ------------------------------------------
+# Out-of-source builds are the norm (build-ci/, build-release/, ...); the
+# trailing entries catch accidental in-source configuration.
+build*/
+cmake-build-*/
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+install/
+*.o
+*.a
+*.so
+
+# --- Generated runtime outputs -------------------------------------------------
+# shardspec.json / checkpoint_inventory.json are derived from the local HF
+# cache; regenerate with tools/make_shardspec.py or tools/checkpoint_audit.py.
+artifacts/
+
+# --- Python tooling -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- Editor / IDE / OS detritus -------------------------------------------------
+.vscode/
+.idea/
+.clangd/
+.cache/
+*.swp
+*~
+.DS_Store
+
+# --- Debug residue ---------------------------------------------------------------
+core
+core.*

@@ -1,0 +1,42 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "base",
+      "binaryDir": "${sourceDir}/build-${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "DGPP_WERROR": "OFF"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"}
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}
+    },
+    {
+      "name": "asan",
+      "inherits": "release",
+      "cacheVariables": {"DGPP_SANITIZE": "address"}
+    },
+    {
+      "name": "ci",
+      "inherits": "base",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "RelWithDebInfo", "DGPP_WERROR": "ON"}
+    }
+  ],
+  "buildPresets": [
+    {"name": "release", "configurePreset": "release"},
+    {"name": "debug", "configurePreset": "debug"},
+    {"name": "asan", "configurePreset": "asan"},
+    {"name": "ci", "configurePreset": "ci"}
+  ],
+  "testPresets": [
+    {"name": "ci", "configurePreset": "ci", "output": {"outputOnFailure": true}}
+  ]
+}
