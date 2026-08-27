@@ -3,13 +3,16 @@
 DGPP is an early-stage C++/CUDA inference-engine project for serving the text
 path of `unsloth/GLM-5.3-Flash-FP8` across four NVIDIA DGX Spark systems.
 
-Current status: M0/M1/M2 prototype. The repository implements platform and RoCE
-validation tools, checkpoint/shard inspection, core CUDA runtime utilities, a
-synthetic transformer testbed, and the KDA linear-attention operators with
-their per-request state manager and reference-dump harness. It does **not** yet
-implement the full GLM model, multi-node inference runtime, prefix cache, MTP
-generation loop, or OpenAI-compatible server. See `PLAN.md` for milestone
-status.
+Current status: M0/M1/M2 prototype with M3 in progress. The repository
+implements platform and RoCE validation tools, checkpoint/shard inspection,
+core CUDA runtime utilities, a synthetic transformer testbed, the KDA
+linear-attention operators with their per-request state manager and
+reference-dump harness, and the DSA/MLA sparse-attention kernels (indexer
+compression, deterministic pooled top-k, split-KV absorbed attention) with a
+dual-precision host oracle. It does **not** yet implement the full GLM model,
+the DSA layer orchestration and state pool, multi-node inference runtime,
+prefix cache, MTP generation loop, or OpenAI-compatible server. See `PLAN.md`
+for milestone status.
 
 ## Documentation
 
@@ -81,16 +84,31 @@ GPU.
 
 CTest currently runs:
 
-- 20 host unit cases covering logging/tracing, JSON, arenas, safetensors, FP8,
-  shard plans, KDA geometry/snapshot-header contracts;
+- 24 host unit cases covering logging/tracing, JSON, arenas, safetensors, FP8,
+  shard plans, KDA geometry/snapshot-header contracts, and the DSA geometry
+  contract against DESIGN §7.2's transcribed literals;
 - synthetic CUDA graph/eager parity;
 - the KDA operator suite: conv/recurrent kernel parity against host
   fp32/fp64 references, chunked-vs-unchunked bitwise equivalence, decode
   graph replay, snapshot round-trip, head-slice TP readiness, and
   reference-dump parity against the pure-python oracle;
+- the DSA kernel suite (M3, in progress): pool compression and tail-ring
+  continuation verified bitwise via hard-max gates (including multi-token
+  decode == single-token), a 1,100-case bitwise pooled top-k fuzz around
+  pool boundaries plus exact-tie and 512th-boundary constructions, the fused
+  decode select (MTP multi-row, grid-size invariance, 100k-pool long-context
+  stripes, graph capture/replay with changed position), split-KV absorbed
+  attention against the host oracle at TP1/TP4 with empty-row and
+  head-group coverage, latent/gather block-table round trip, multi-request
+  decode with padding rows, and kpool=2 generality;
 - CUDA system-scope flag ordering, payload visibility, inactivity watchdog,
   and post-watchdog recovery;
 - Python checkpoint classification and exact expert-occupancy tests.
+
+All CUDA suites are also verified clean under `compute-sanitizer` memcheck,
+racecheck, and initcheck; the sanitizer findings that motivated this (speculated
+loads past short-circuit guards, shared-memory reuse races that pass by
+scheduling luck) are pinned in `DESIGN.md` §12.
 
 Cross-node RoCE and NIC→GPU checks are intentionally manual/deployment tests;
 they require a peer and are documented under `benchmarks/README.md`.

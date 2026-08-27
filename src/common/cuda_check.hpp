@@ -22,9 +22,13 @@ inline std::runtime_error cuda_error(std::string_view what, cudaError_t err,
 #define DGPP_CUDA_OK(expr)                                                    \
   do {                                                                        \
     cudaError_t dgpp_err_ = (expr);                                           \
-    if (dgpp_err_ != cudaSuccess)                                             \
+    if (dgpp_err_ != cudaSuccess) {                                           \
+      /* Drain the sticky per-thread error so a failure here cannot */       \
+      /* surface later as a stale cudaGetLastError in unrelated code. */     \
+      cudaGetLastError();                                                     \
       throw ::dgpp::cuda_error(#expr, dgpp_err_,                              \
                                std::source_location::current());              \
+    }                                                                         \
   } while (0)
 
 #define DGPP_CUBLAS_OK(expr, ctx)                                            \

@@ -2,10 +2,12 @@
 
 Status: architecture contract for the staged implementation described in
 `PLAN.md`. The repository currently contains the M0/M1 platform probes, core
-runtime, checkpoint loader, synthetic transformer, and the M2 KDA operators
-(state pool, recurrence kernels, snapshot format, reference-dump harness); it
-does **not** yet contain a complete GLM runtime, distributed serving daemon,
-or HTTP server.
+runtime, checkpoint loader, synthetic transformer, the M2 KDA operators
+(state pool, recurrence kernels, snapshot format, reference-dump harness),
+and the M3 DSA/MLA kernels in progress (indexer compression, deterministic
+pooled top-k, split-KV absorbed attention, host oracle — layer orchestration
+pending); it does **not** yet contain a complete GLM runtime, distributed
+serving daemon, or HTTP server.
 
 Target: text serving for `unsloth/GLM-5.3-Flash-FP8` on four NVIDIA DGX Spark
 systems. Vision execution is post-v1.
@@ -294,6 +296,59 @@ At 300,000 cached tokens, the replicated per-rank DSA budget is approximately:
 The base cache total is therefore about 3.49 GB/rank plus block tables,
 allocator metadata, and alignment—not 4.2 GB cluster-wide.
 
+The M3 implementation pins the concrete layouts and the selection spec
+(tested in `tests/unit/dsa_geometry_test.cpp` and the CUDA suite):
+
+- the index K cache is **planar** — FP8-E4M3 rows `[slots, 128]` plus FP32
+  scales `[slots]`, one slot per pool. The reference's packed 132-byte pages
+  exist for a DeepGEMM `block_kv` constraint this engine does not inherit,
+  and packed rows would misalign every other 128-byte streaming read;
+- the latent cache is BF16 `[token_slots, 512]` rows; one shared block table
+  per request serves both caches (block = 128 tokens = 32 pools, so token
+  block *b* and pool block *b* are the same entry — prefix attachment shares
+  both by reference, §8);
+- the tail is a per-request ring `[2, kpool, 128]` BF16 — raw K at half 0,
+  gate at half 1, ring slot `pos % kpool`. Completion reads the ring with the
+  current token overriding its own slot (which still holds one stale pool's
+  stash — the reference's `is_current` rule); the stash happens *after* the
+  completion read;
+- visible pools for a query at position *p* are `floor((p+1)/kpool)`; the
+  incomplete tail is never scored, only appended. Sequences with
+  `visible <= select_k` degenerate to dense causal selection through the same
+  code path;
+- selection is pinned as: the `select_k = topk/kpool` pools with the highest
+  fp32 logits, exact ties to the **lower pool index**, output ascending in
+  pool index. The composite sort key `(~sortable_fp32 << 21) | pool_idx` is a
+  total order, which makes the selection deterministic on any correct
+  implementation. The reference's radix path is `atomicAdd`-ordered at exact
+  ties; this pin matches its deterministic path. Finite logits are assumed —
+  real quantized cache rows are always finite (the saturating encoder never
+  mints NaN);
+- the **decode select is fused**: one kernel streams the blocked index cache,
+  computes pool logits inline (warp per pool, lane per head, contraction-proof
+  `__fmul_rn`/`__fadd_rn` arithmetic so the host oracle's logit parity — and
+  therefore position parity — is bitwise), keeps a running top-`select_k` in
+  shared memory, and merges block partials with a last-block reduction whose
+  counter self-resets. Fixed grid, grid-striped over device-visible counts,
+  zero logits materialized: the whole decode path is CUDA-graph capturable.
+  Prefill instead materializes per-(row, head) fp8 dots through the IGemm
+  seam (FP8×FP8→F32, unit scales, K-cache reads amortized across query
+  tiles) and runs the same streaming selection over the dot buffer;
+- MLA runs absorbed: `q̃ = W_uk^T q` (bf16 GEMM rounding), scores
+  `q̃ · latent` in fp32 with split-KV online softmax — the running max lives
+  in per-lane registers fed by butterfly group reductions (no shared running
+  state to order), probs round to bf16 for the `c` accumulation while the
+  denominator stays unrounded, and the output is v-absorbed
+  (`out_h = W_uv_h · c_h`). `kv_b` is consumed in the checkpoint's
+  interleaved per-head layout;
+- the power-of-two fp8 scale is computed by exact bit manipulation (smallest
+  `2^n >= absmax/448`, exact powers mapping to themselves) rather than
+  `exp2f(ceilf(log2f(v)))`: the fp32 libm form can round across a
+  power-of-two boundary on near-tie inputs and clamp the row, and glibc and
+  libdevice also disagree by ulps there. The exact form matches the reference
+  except on pathological near-power-of-two magnitudes, where the reference
+  clamps and this engine does not.
+
 ## 8. Prefix cache
 
 V1 uses exact state snapshots only. The previous unproven 24 KB/token
@@ -392,6 +447,26 @@ Every model milestone has three tiers:
 3. performance tests: kernel time, effective bytes/s, collective time, and
    critical-rank routing measured separately.
 
+Numerical tests must include at least one **hand-computed expectation** for
+every spec-critical output. Differential (implementation-vs-implementation)
+tests verify consistency, not direction: an inverted selection ordering
+passed every bitwise parity test in both directions because the host oracle
+and the kernels were wrong together, and only a test with hand-computed
+expected logits exposed it.
+
+`compute-sanitizer` (memcheck, racecheck, initcheck) is part of the gate, not
+an optional extra — two classes of defect pass functional tests and only
+surface under it:
+
+- nvcc **speculates loads past short-circuit guards**: `i < n && a[i]`
+  reads `a[i]` regardless of `i < n` once the branch is predicated, and even
+  a ternary index gets both arms loaded. Per-token arrays in test drivers
+  must be sized to the token count, and bounds-dependent loads must clamp
+  their indices arithmetically;
+- shared-memory buffers reused across reduction phases (all threads read the
+  mean, lane-0s overwrite with the variance) race without a barrier between
+  the read and the reuse — scheduling luck passes functional tests.
+
 Measured numbers include the exact command, binary revision, driver, firmware,
 clock/power context, run count, and variability. `micro_gemm_peak` is a
 cuBLASLt heuristic sweep, not a proof of hardware peak. Network claims use
@@ -409,9 +484,9 @@ benchmarks/micro/     platform and transport probes (incl. kda_bench)
 docs/                 generated checkpoint budget and validated measurements
 src/common/           logging, dtypes, tests
 src/core/             arena, graph, streams, trace
-src/kernels/          synthetic kernels, GEMM wrapper, flag protocol, KDA ops
+src/kernels/          synthetic kernels, GEMM wrapper, flag protocol, KDA and DSA ops
 src/loaders/          JSON, safetensors, shardspec
-src/models/           synthetic GPT doll; KDA layer, state pool, reference, dump reader
+src/models/           synthetic GPT doll; KDA layer/state/reference/dump; DSA reference
 tests/                host, CUDA, and Python tests
 tools/                checkpoint audit, shard-plan and KDA reference-dump generators
 ```

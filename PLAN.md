@@ -23,7 +23,10 @@ retries, unstable throughput, or latency spikes. M1 is the synthetic/runtime
 milestone; completion does not imply that a GLM model or server exists. M2 is
 the KDA operator/state milestone: the recurrence, conv, projections, state
 arena, and snapshot format pass their parity suites, but no full GLM layer
-stack, scheduler, or server exists yet.
+stack, scheduler, or server exists yet. M3 is in progress: the indexer/MLA
+kernels, selection machinery, and host oracle are implemented and
+sanitizer-clean, but the layer orchestration, state pool, dump harness, and
+benchmarks are not yet written.
 
 ## Audit remediation completed on 2026-08-27
 
@@ -129,7 +132,7 @@ as a contiguous prefix (the head-slice test enforces this); and cuBLASLt
 returns garbage rather than an error for misaligned strided activation
 pointers, which the fused layout prevents by construction.
 
-## M3 — DSA/MLA sparse attention
+## M3 — DSA/MLA sparse attention (in progress)
 
 Deliverables:
 
@@ -140,6 +143,42 @@ Deliverables:
 3. Persistent raw-K/gate incomplete-tail cache across chunks and decode.
 4. Block size/chunk alignment checks and cache byte accounting.
 5. Fuzz cases at every sequence length around a four-token pool boundary.
+
+Delivered so far (kernel phase — all verified, sanitizer-clean):
+
+- `DsaConfig`/`DsaGeometry` with exact DESIGN §7.2 byte formulas
+  (`tests/unit/dsa_geometry_test.cpp` against transcribed literals);
+- the host fp32/fp64 oracle (`src/models/dsa_reference.cpp`) pinning the
+  full numeric contract: per-dimension gated pool softmax, Hadamard-128 with
+  the reference's bf16 boundary rounds, power-of-two fp8 scales via exact
+  bit manipulation, absorbed-MLA attention with bf16 prob rounding;
+- all M3 kernels (`src/kernels/dsa.cu`): fwht+quant, k_layernorm, fused
+  q/kv rmsnorm, pool compress-write, tail seed, decode ring update with
+  completion, latent append, pool gather, the fused decode select (streams
+  the planar index cache once, composite-key top-512 in shared memory,
+  last-block merge, counter self-reset — graph-capturable, no logits
+  materialized), the prefill select over IGemm fp8 dots, and the split-KV
+  absorbed attention with per-lane-register online-softmax state;
+- 18 CUDA tests: bitwise select fuzz over 1,100 cases around pool
+  boundaries; MTP-shaped multi-row decode; grid-size invariance; 100k-pool
+  long-context decode; multi-row prefill; exact ties including the 512th
+  boundary; ring continuation across a partial pool with multi-token ==
+  single-token bitwise; multi-request decode with padding rows; TP1
+  attention head-groups; empty-row zero output; graph capture/replay with
+  changed position; kpool=2 smoke. Release/ASan/UBSan suites green;
+  compute-sanitizer memcheck, racecheck, and initcheck clean on both CUDA
+  suites.
+
+The verification round also fixed a spec inversion the parity tests could
+not see (selection ordered by ascending instead of descending logits — both
+implementations were wrong together; caught by a hand-computed-expectation
+ties test), three shared-memory races, and a speculated out-of-bounds load
+(see DESIGN §12 for the pinned lessons).
+
+Remaining: `DsaStatePool` + `DsaLayer` orchestration, layer-level tests
+(chunked-vs-unchunked across a partial pool, decode graph replay, byte
+accounting within 2%, TP head-slice), the reference-dump harness, `dsa_bench`,
+and docs.
 
 Exit criteria:
 

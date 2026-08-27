@@ -249,6 +249,15 @@ cache variable is fixed. CTest contains host, CUDA, synthetic-model, and Python
 checkpoint-audit tests. ASan and UBSan are independent cache-variable presets.
 The final validation results are listed in the dated run record.
 
+The M3 kernel phase additionally holds both CUDA test suites (KDA and DSA)
+clean under `compute-sanitizer` memcheck, racecheck, and initcheck — not just
+functionally green. This is a standing gate for new kernels, not a one-off:
+the DSA round surfaced a speculated out-of-bounds load (short-circuit guards
+do not protect loads once nvcc predicates the branch) and two shared-memory
+reuse races that functional tests passed by scheduling luck. Details are
+pinned in `DESIGN.md` §12; no new timing measurements exist yet for the DSA
+path (`dsa_bench` arrives with the layer orchestration phase).
+
 ## Historical M1 observations
 
 The base commit recorded synthetic `gpt_doll` graph/eager parity, stable graph

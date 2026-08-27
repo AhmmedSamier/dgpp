@@ -50,8 +50,8 @@ endif()
 function(dgpp_set_common t)
   target_link_libraries(${t} PRIVATE dgpp_common)
   target_compile_options(${t} PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>
-    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda;--expt-relaxed-constexpr>)
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-ffp-contract=off>
+    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda;--expt-relaxed-constexpr;-Xcompiler=-ffp-contract=off>)
   if(DGPP_WERROR)
     target_compile_options(${t} PRIVATE
       $<$<COMPILE_LANGUAGE:CXX>:-Werror>
@@ -100,7 +100,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/gemm_cublaslt.cpp
   src/kernels/kernels.cu
   src/kernels/doll_attention.cu
-  src/kernels/kda.cu)
+  src/kernels/kda.cu
+  src/kernels/dsa.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
 
@@ -117,6 +118,11 @@ add_library(dgpp_models_kda STATIC
 target_link_libraries(dgpp_models_kda PUBLIC dgpp_kernels dgpp_loaders CUDA::cudart)
 dgpp_set_common(dgpp_models_kda)
 
+add_library(dgpp_models_dsa STATIC
+  src/models/dsa_reference.cpp)
+target_link_libraries(dgpp_models_dsa PUBLIC dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_dsa)
+
 add_executable(dgppctl apps/dgppctl.cpp src/common/log.cpp)
 target_link_libraries(dgppctl PRIVATE CUDA::cudart)
 dgpp_set_common(dgppctl)
@@ -130,6 +136,7 @@ add_executable(unit_tests
   tests/unit/fp8_test.cpp
   tests/unit/shardspec_test.cpp
   tests/unit/kda_geometry_test.cpp
+  tests/unit/dsa_geometry_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders Threads::Threads)
@@ -153,6 +160,13 @@ target_link_libraries(kda_test PRIVATE dgpp_models_kda CUDA::cudart Threads::Thr
 dgpp_set_common(kda_test)
 add_test(NAME kda_test COMMAND kda_test)
 set_tests_properties(kda_test PROPERTIES SKIP_RETURN_CODE 2)
+
+add_executable(dsa_test tests/cuda/dsa_test.cu)
+target_include_directories(dsa_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(dsa_test PRIVATE dgpp_models_dsa dgpp_models_kda CUDA::cudart Threads::Threads)
+dgpp_set_common(dsa_test)
+add_test(NAME dsa_test COMMAND dsa_test)
+set_tests_properties(dsa_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # Reference-dump parity: generate a pure-python oracle dump, then run the
 # layer against it. The torch backend (real checkpoint slices) is a manual
