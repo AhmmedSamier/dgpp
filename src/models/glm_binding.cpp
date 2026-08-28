@@ -177,49 +177,61 @@ void expect_moe(TensorList& out, const std::string& p,
 
 }  // namespace
 
+std::vector<GlmExpectedTensor> glm_expected_layer_tensors(
+    const GlmTextConfig& cfg, int layer) {
+  const bool is_mtp = layer == cfg.mtp_layer();
+  const int max_layer = cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
+  if (layer < 0 || layer >= max_layer)
+    throw std::invalid_argument(
+        "glm_expected_layer_tensors: layer index out of range");
+
+  TensorList out;
+  const std::string p =
+      "model.language_model.layers." + std::to_string(layer) + ".";
+  if (is_mtp) {
+    // Draft layer: DSA + MoE layout without mHC, plus the draft head.
+    add(out, p + "enorm.weight", DType::BF16, {cfg.hidden_size},
+        GlmWeightClass::Mtp, layer);
+    add(out, p + "hnorm.weight", DType::BF16, {cfg.hidden_size},
+        GlmWeightClass::Mtp, layer);
+    add(out, p + "eh_proj.weight", DType::BF16,
+        rows_cols(cfg.hidden_size, 2 * cfg.hidden_size), GlmWeightClass::Mtp,
+        layer);
+    add(out, p + "shared_head.norm.weight", DType::BF16, {cfg.hidden_size},
+        GlmWeightClass::Mtp, layer);
+    add(out, p + "input_layernorm.weight", DType::BF16, {cfg.hidden_size},
+        GlmWeightClass::LayerNorm, layer);
+    expect_dsa(out, p + "self_attn.", cfg, layer);
+    add(out, p + "post_attention_layernorm.weight", DType::BF16,
+        {cfg.hidden_size}, GlmWeightClass::LayerNorm, layer);
+    expect_moe(out, p, cfg, layer);
+    return out;
+  }
+  expect_mhc(out, p, cfg, layer);
+  add(out, p + "input_layernorm.weight", DType::BF16, {cfg.hidden_size},
+      GlmWeightClass::LayerNorm, layer);
+  if (cfg.layers[layer] == GlmLayerKind::Kda)
+    expect_kda(out, p + "self_attn.", cfg, layer);
+  else
+    expect_dsa(out, p + "self_attn.", cfg, layer);
+  add(out, p + "post_attention_layernorm.weight", DType::BF16,
+      {cfg.hidden_size}, GlmWeightClass::LayerNorm, layer);
+  if (cfg.mlps[layer] == GlmMlpKind::Dense)
+    expect_dense_mlp(out, p, cfg, layer);
+  else
+    expect_moe(out, p, cfg, layer);
+  return out;
+}
+
 std::vector<GlmExpectedTensor> glm_expected_text_tensors(
     const GlmTextConfig& cfg) {
   TensorList out;
   out.reserve(8192);  // real model: ~76k entries; reserve the arena, not hope
 
-  for (int i = 0; i < cfg.num_hidden_layers; ++i) {
-    const std::string p =
-        std::format("model.language_model.layers.{}.", i);
-    expect_mhc(out, p, cfg, i);
-    add(out, p + "input_layernorm.weight", DType::BF16, {cfg.hidden_size},
-        GlmWeightClass::LayerNorm, i);
-    if (cfg.layers[i] == GlmLayerKind::Kda)
-      expect_kda(out, p + "self_attn.", cfg, i);
-    else
-      expect_dsa(out, p + "self_attn.", cfg, i);
-    add(out, p + "post_attention_layernorm.weight", DType::BF16,
-        {cfg.hidden_size}, GlmWeightClass::LayerNorm, i);
-    if (cfg.mlps[i] == GlmMlpKind::Dense)
-      expect_dense_mlp(out, p, cfg, i);
-    else
-      expect_moe(out, p, cfg, i);
-  }
-
-  if (cfg.mtp_layer() >= 0) {
-    const int m = cfg.mtp_layer();
-    const std::string p = std::format("model.language_model.layers.{}.", m);
-    // Draft-layer head: enorm/hnorm/eh_proj + shared_head norm; the layer
-    // itself repeats the DSA + MoE layout, without hyper-connections.
-    add(out, p + "enorm.weight", DType::BF16, {cfg.hidden_size},
-        GlmWeightClass::Mtp, m);
-    add(out, p + "hnorm.weight", DType::BF16, {cfg.hidden_size},
-        GlmWeightClass::Mtp, m);
-    add(out, p + "eh_proj.weight", DType::BF16,
-        rows_cols(cfg.hidden_size, 2 * cfg.hidden_size), GlmWeightClass::Mtp,
-        m);
-    add(out, p + "shared_head.norm.weight", DType::BF16, {cfg.hidden_size},
-        GlmWeightClass::Mtp, m);
-    add(out, p + "input_layernorm.weight", DType::BF16, {cfg.hidden_size},
-        GlmWeightClass::LayerNorm, m);
-    expect_dsa(out, p + "self_attn.", cfg, m);
-    add(out, p + "post_attention_layernorm.weight", DType::BF16,
-        {cfg.hidden_size}, GlmWeightClass::LayerNorm, m);
-    expect_moe(out, p, cfg, m);
+  const int max_layer = cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
+  for (int i = 0; i < max_layer; ++i) {
+    TensorList layer_entries = glm_expected_layer_tensors(cfg, i);
+    out.insert(out.end(), layer_entries.begin(), layer_entries.end());
   }
 
   add(out, "model.language_model.embed_tokens.weight", DType::BF16,

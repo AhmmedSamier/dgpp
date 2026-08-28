@@ -558,8 +558,9 @@ src/core/             arena, graph, streams, trace
 src/kernels/          synthetic kernels, GEMM wrapper, flag protocol, KDA and DSA ops
 src/loaders/          JSON, safetensors, shardspec
 src/models/           synthetic GPT doll; KDA layer/state/reference/dump; DSA
-                      reference/geometry/state/layer/dump; GLM text config and
-                      expected-tensor binding (M4)
+                      reference/geometry/state/layer/dump; GLM text config,
+                      expected-tensor binding, and streaming resident loader
+                      (M4)
 tests/                host, CUDA, and Python tests
 tools/                checkpoint audit, shard-plan, KDA/DSA reference-dump generators
 ```

@@ -54,6 +54,13 @@ struct GlmExpectedTensor {
   int expert = -1;  // routed-expert id within the layer; -1 otherwise
 
   bool quantized() const { return dtype == DType::F8_E4M3; }
+
+  size_t numel() const {
+    size_t n = 1;
+    for (auto d : shape) n *= static_cast<size_t>(d);
+    return n;
+  }
+  size_t nbytes() const { return numel() * dtype_size(dtype); }
 };
 
 // Scale-grid shape for a quantized payload of the given [N, K] shape:
@@ -65,6 +72,12 @@ std::vector<int64_t> glm_scale_shape(const std::vector<int64_t>& payload);
 // layer then class; expert tensors are grouped per layer.
 std::vector<GlmExpectedTensor> glm_expected_text_tensors(
     const GlmTextConfig& cfg);
+
+// Entries for one layer only: `layer` in [0, num_hidden_layers) or
+// mtp_layer(). The resident loader sizes itself per layer from this
+// (cheap) instead of materializing the 75k-entry full table per call.
+std::vector<GlmExpectedTensor> glm_expected_layer_tensors(
+    const GlmTextConfig& cfg, int layer);
 
 // A tensor as observed in a checkpoint header (the app maps SafetensorsFile
 // entries to this; tests synthesize them directly).

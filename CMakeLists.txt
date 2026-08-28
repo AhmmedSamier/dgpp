@@ -101,7 +101,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/kernels.cu
   src/kernels/doll_attention.cu
   src/kernels/kda.cu
-  src/kernels/dsa.cu)
+  src/kernels/dsa.cu
+  src/kernels/fp8_dequant.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
 
@@ -134,9 +135,21 @@ add_library(dgpp_models_glm STATIC
 target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders)
 dgpp_set_common(dgpp_models_glm)
 
+# Streaming resident loader (M4): managed-memory layer residency over the
+# binding table, with the block-scale dequant bridge for the M3 seams.
+add_library(dgpp_models_glm_loader STATIC
+  src/models/glm_loader.cpp)
+target_link_libraries(dgpp_models_glm_loader PUBLIC dgpp_models_glm dgpp_kernels)
+dgpp_set_common(dgpp_models_glm_loader)
+
 add_executable(glm_bind_check apps/glm_bind_check.cpp)
 target_link_libraries(glm_bind_check PRIVATE dgpp_models_glm dgpp_loaders)
 dgpp_set_common(glm_bind_check)
+
+# Deployment evidence: stream real layers, reconcile bytes vs formula.
+add_executable(glm_stream_check apps/glm_stream_check.cpp)
+target_link_libraries(glm_stream_check PRIVATE dgpp_models_glm_loader)
+dgpp_set_common(glm_stream_check)
 
 add_executable(dgppctl apps/dgppctl.cpp src/common/log.cpp)
 target_link_libraries(dgppctl PRIVATE CUDA::cudart)
@@ -187,6 +200,15 @@ target_link_libraries(dsa_test PRIVATE dgpp_models_dsa dgpp_models_kda CUDA::cud
 dgpp_set_common(dsa_test)
 add_test(NAME dsa_test COMMAND dsa_test)
 set_tests_properties(dsa_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# M4 streaming loader tests (CUDA): synthetic mini-checkpoint on disk,
+# byte-exact layout merges, dequant bridge vs host oracle, formula parity.
+add_executable(glm_loader_test tests/cuda/glm_loader_test.cpp)
+target_include_directories(glm_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(glm_loader_test PRIVATE dgpp_models_glm_loader CUDA::cudart)
+dgpp_set_common(glm_loader_test)
+add_test(NAME glm_loader_test COMMAND glm_loader_test)
+set_tests_properties(glm_loader_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # DSA reference-dump parity: generate a pure-python oracle dump, then run
 # the layer against it (gen-torch is the manual deployment test).

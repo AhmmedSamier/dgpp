@@ -1,0 +1,23 @@
+#pragma once
+// Block-scaled E4M3 -> BF16 dequantization (DESIGN §4 contract):
+//   out[n, k] = decode_e4m3(payload[n, k]) * scales[n / 128][k / 128]
+// This is the transient bridge for seams that still consume BF16 (the M3
+// DSA layer weights); native block-scaled GEMM consumption is the M4
+// scale-aware GEMM's job. Kept as a standalone kernel because parity tests
+// and the loader both need the exact same rounding (decode-multiply, then a
+// single round-to-nearest-even BF16 conversion).
+#include <cstdint>
+
+#include <cuda_runtime.h>
+
+namespace dgpp {
+
+// Enqueues the dequant for a [rows, cols] E4M3 payload with an F32
+// [ceil(rows/128), ceil(cols/128)] row-major scale grid. Ragged tail blocks
+// (rows or cols not a multiple of 128) are handled; out-of-block elements
+// never read their scale. Async on `stream`.
+void launch_fp8_dequant_blocks(const uint8_t* payload, const float* scales,
+                               uint16_t* out_bf16, int64_t rows, int64_t cols,
+                               cudaStream_t stream);
+
+}  // namespace dgpp

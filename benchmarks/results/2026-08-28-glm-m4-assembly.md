@@ -73,3 +73,61 @@ no persistent BF16 expansion (DESIGN §4).
 - `unit` target: 34 tests, 0 failed (5 new config, 6 new binding).
 - `ci-local.sh`: 10/10 (CUDA suites unaffected; the new library is
   host-only and links into `unit_tests` and `glm_bind_check`).
+
+## Streaming resident loader (deliverable 2, later same day)
+
+`src/models/glm_loader.{hpp,cpp}` + `src/kernels/fp8_dequant.{hpp,cu}`:
+`GlmLayerStream` opens the checkpoint (mmap, header-indexed, full binding
+validated at construction), then loads one layer at a time into managed
+device memory in the exact layouts the M2/M3 kernels consume:
+
+- KDA: merged in_proj rows [f_a|g_a|q|k|v|b] and merged conv channels
+  (byte-exact concatenations of the six separate checkpoint tensors);
+- DSA: fused qkv_a, plus q_b/o_proj dequantized through the block-scale
+  kernel (decode × scale_inv, one BF16 round — bitwise vs host oracle,
+  including a direct [1000,1000] ragged-tail test); the APE arrives as F32
+  (converted from checkpoint BF16);
+- MLP/MoE matrices stay COMPRESSED (E4M3 payload + F32 block scales,
+  byte-identical); the four DSA attention matrices' BF16 form is a
+  documented transient per-layer bridge for the M3 IGemm seam until the
+  scale-aware GEMM (next chunk) consumes blocks natively.
+
+Two structural guarantees, both tested:
+
+1. **Formula = allocator.** `layer_bytes()` is a counting-mode run of the
+   SAME build code (256-aligned bump grants); `load_layer` throws unless
+   actual usage equals the formula. Every load of every layer reconciles.
+2. **Two-phase loads.** All CPU→managed copies happen first, then all
+   dequant kernels launch, then one sync — no host writes to managed
+   memory concurrent with kernels (the gray zone this avoids is documented
+   in the source).
+
+CI coverage: `glm_loader_test` builds a synthetic mini-checkpoint ON DISK
+from the expected table itself (config.json + safetensors), so fixture and
+table can never disagree, and verifies all of the above byte-exactly for
+every layer kind (KDA+dense, DSA+MoE, KDA+MoE, MTP) plus globals. The
+`minijson`-in-nvcc incompatibility (known from the dump-parity runners) is
+avoided by keeping the loader host-only — the only device code is the
+dequant kernel, reachable through a plain launcher.
+
+### Real-checkpoint stream run (deployment evidence)
+
+```
+$ glm_stream_check --config <snapshot>/config.json --checkpoint-dir <snapshot>
+binding validated; layer bump capacity 7.17 GiB
+globals: 2.363 GiB (embed+lm_head+final norm)
+layer  0..2  [KDA/dense]: 408.3 MiB each
+layer  3,7,11,...,43 [DSA/moe]: 7275.7 MiB each
+layer  4,5,6,...,44 [KDA/moe]: 7204.2 MiB each
+layer 45 [DSA/moe/mtp]: 7338.3 MiB
+peak layer 7694726912 B; streaming total 316.36 s; formula reconciled on every load
+```
+
+All 46 layers streamed; per-layer wall time ~7 s for MoE layers (7.2–7.3
+GiB read from cold disk, ~1 GB/s — loader overhead is not the bottleneck;
+second-pass timings drop once the page cache holds the shards). Peak
+device memory = largest layer + globals ≈ 9.6 GiB, confirming full-model
+correctness work fits a single 128 GB node without the TP placement.
+
+Verification: ci-local 11/11 (new glm_loader_test entry), ASan/UBSan clean
+(unit 34/34, loader 5/5), compute-sanitizer memcheck 0 errors.
