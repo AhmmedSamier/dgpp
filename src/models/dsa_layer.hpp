@@ -98,6 +98,11 @@ class DsaLayer {
   // query mid-chunk.
   bool prepare_prefill(int tile_rows, int64_t visible_pools);
 
+  // Streaming-weight seam (M4 diagnostic forward): swap the device weight
+  // view this layer enqueues against (shared scratch is unaffected — the
+  // scratch is shape-keyed, not weight-keyed).
+  void rebind(const DsaLayerWeights& w) { w_ = w; }
+
   // Prefills one pool-aligned chunk [token_start, token_start+tokens) of
   // request `req` (a single request per call: the prefill gather/select
   // path is per-request; the engine loops requests). token_start must be a

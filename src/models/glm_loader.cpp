@@ -433,6 +433,15 @@ size_t GlmLayerStream::layer_capacity() const {
 const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
   if (resident_.layer == layer) return resident_;
 
+  // Phase one below writes weight bytes into the bump from the CPU — the
+  // SAME managed region the previously loaded layer's kernels may still be
+  // reading (this loader was first exercised mid-forward by the M4
+  // diagnostic model; before that, callers always loaded with the device
+  // idle). Sync the whole device at entry: we cannot know which stream
+  // holds outstanding readers, and a layer-load boundary is already a
+  // full-sync point in every caller.
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+
   layer_bump_->reset();
   resident_ = GlmLayerResident{};
 
@@ -467,6 +476,8 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
 
 const GlmGlobalsResident& GlmLayerStream::load_globals() {
   if (globals_.embed) return globals_;
+  // Same entry-sync discipline as load_layer (phase-one CPU writes).
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
   globals_bump_->reset();
   globals_ = GlmGlobalsResident{};
 

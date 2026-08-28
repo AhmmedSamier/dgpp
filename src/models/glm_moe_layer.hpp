@@ -41,6 +41,11 @@ class GlmMoeLayer {
   const GlmMoeConfig& config() const { return cfg_; }
   int max_tokens() const { return max_tokens_; }
 
+  // Streaming-weight seam (M4 diagnostic forward): swap the device weight
+  // views (router gate/bias, expert and shared matrices). Device scratch
+  // and segmentation buffers are shape-keyed and unaffected.
+  void rebind(const GlmMoeWeights& w) { w_ = w; }
+
  private:
   void run_expert_segment(const uint16_t* x, const int32_t* rows_dev,
                           const float* row_w_dev, uint16_t* acc, int n_rows,

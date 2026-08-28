@@ -53,6 +53,12 @@ class KdaLayer {
   // capture; returns false when a heuristic is unavailable.
   bool prepare(int tokens);
 
+  // Streaming-weight seam (M4 diagnostic forward): swap the device weight
+  // view this layer enqueues against. Scratch and GEMM plans are
+  // shape-keyed, so a same-geometry rebind costs a struct copy. The new
+  // view must outlive the next enqueue.
+  void rebind(const KdaLayerWeights& w) { w_ = w; }
+
   // Enqueues the full layer for `tokens` rows on `stream`.
   //   hidden_in:       bf16 [tokens, hidden]
   //   recurrent_state: fp32 [local_heads, head_dim, head_dim], updated in place

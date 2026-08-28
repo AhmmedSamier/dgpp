@@ -105,7 +105,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/fp8_dequant.cu
   src/kernels/scale_gemm.cu
   src/kernels/glm_mhc.cu
-  src/kernels/glm_moe.cu)
+  src/kernels/glm_moe.cu
+  src/kernels/glm_norm.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
 
@@ -143,10 +144,16 @@ dgpp_set_common(dgpp_models_glm)
 
 # Streaming resident loader (M4): managed-memory layer residency over the
 # binding table, with the block-scale dequant bridge for the M3 seams.
+# Chunk 6 adds the full diagnostic forward (glm_forward) and the reference
+# dump reader (glm_dump) on top; they drive the parity-tested M2/M3 layer
+# modules, hence the kda/dsa library links.
 add_library(dgpp_models_glm_loader STATIC
   src/models/glm_loader.cpp
-  src/models/glm_moe_layer.cpp)
-target_link_libraries(dgpp_models_glm_loader PUBLIC dgpp_models_glm dgpp_kernels)
+  src/models/glm_moe_layer.cpp
+  src/models/glm_dump.cpp
+  src/models/glm_forward.cpp)
+target_link_libraries(dgpp_models_glm_loader
+  PUBLIC dgpp_models_glm dgpp_kernels dgpp_models_kda dgpp_models_dsa)
 dgpp_set_common(dgpp_models_glm_loader)
 
 add_executable(glm_bind_check apps/glm_bind_check.cpp)
@@ -250,6 +257,32 @@ target_link_libraries(glm_moe_test PRIVATE dgpp_models_glm_loader dgpp_models_gl
 dgpp_set_common(glm_moe_test)
 add_test(NAME glm_moe_test COMMAND glm_moe_test)
 set_tests_properties(glm_moe_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# Full-model forward parity (M4 chunk 6): this test writes a synthetic
+# mini-checkpoint, python computes the full-stack pure reference from the
+# SAME checkpoint (one tensor-table source: the C++ binding), and the test
+# runs the diagnostic forward against the dump. The torch backend on the
+# real checkpoint is the manual deployment run (glm_forward_check).
+add_executable(glm_forward_test tests/cuda/glm_forward_test.cpp)
+target_link_libraries(glm_forward_test
+  PRIVATE dgpp_models_glm_loader CUDA::cudart)
+dgpp_set_common(glm_forward_test)
+set(GLM_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/glm_forward_fixture)
+add_test(NAME glm_forward_fixture
+  COMMAND glm_forward_test --write-fixture ${GLM_FORWARD_FIXTURE})
+set_tests_properties(glm_forward_fixture PROPERTIES SKIP_RETURN_CODE 2)
+add_test(NAME glm_forward_generate
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm_reference_dump.py
+          gen-pure --checkpoint-dir ${GLM_FORWARD_FIXTURE}
+          --out ${CMAKE_CURRENT_BINARY_DIR}/glm_pure_ref.glmdump)
+set_tests_properties(glm_forward_generate PROPERTIES
+  DEPENDS glm_forward_fixture)
+add_test(NAME glm_forward_test
+  COMMAND glm_forward_test --checkpoint-dir ${GLM_FORWARD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/glm_pure_ref.glmdump)
+set_tests_properties(glm_forward_test PROPERTIES
+  DEPENDS glm_forward_generate SKIP_RETURN_CODE 2)
 
 # DSA reference-dump parity: generate a pure-python oracle dump, then run
 # the layer against it (gen-torch is the manual deployment test).

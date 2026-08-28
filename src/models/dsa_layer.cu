@@ -41,6 +41,26 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
   if (cfg.index_n_heads != 32)
     throw std::invalid_argument(
         "dsa layer: the selection kernels pin index_n_heads to 32");
+  // The bitonic select/expand networks are power-of-two sized: a
+  // non-power-of-two select_k (index_topk/kpool) indexes past the smem
+  // windows and silently drops every selected pool. The real checkpoint's
+  // 2048/4 = 512 satisfies this; fail loudly rather than mis-select.
+  {
+    const int select_k = cfg.index_topk / cfg.index_kpool;
+    if (select_k <= 0 || (select_k & (select_k - 1)) != 0)
+      throw std::invalid_argument(
+          "dsa layer: select_k (= index_topk / index_kpool) must be a "
+          "power of two (bitonic select networks)");
+  }
+  // The attention kernel's head-group tiling (hpb = min(heads, 16) heads
+  // per block, 128/hpb dim groups) is exercised for 4/8/64 heads; 1-2
+  // heads route to a 64-group partition that mis-computes (found by the
+  // M4 forward fixture — heads=2 produced 1e33-scale garbage with
+  // selections matching). Reject rather than silently corrupt.
+  if (cfg.num_heads < 4 || (cfg.num_heads & (cfg.num_heads - 1)) != 0)
+    throw std::invalid_argument(
+        "dsa layer: num_heads must be a power of two >= 4 (attention "
+        "head-group tiling)");
   if (max_tokens <= 0 || max_cache_tokens <= 0)
     throw std::invalid_argument(
         "dsa layer: max_tokens and max_cache_tokens must be positive");
