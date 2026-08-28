@@ -133,6 +133,15 @@ void dsa_gather_index_pools(const int32_t* block_table, int pools_per_block,
 // real quantized cache rows are always finite (the saturating fp8 encoder
 // never mints NaN), and NaN logits would sort as if near +infinity.
 
+// Opts the select-decode and attention kernels into large dynamic shared
+// memory (idempotent, cheap after the first call). Call it once per process
+// before CUDA graph capture of the decode path — cudaFuncSetAttribute is a
+// context mutation, not a stream operation, and must not happen inside
+// capture. DsaLayer::prepare()/enqueue*() call this automatically; a bare
+// kernel consumer that captures graphs should call it explicitly.
+void dsa_prepare_kernel_smem();
+
+
 // Fused decode select: streams pools [0, visible(pos[r])) per row straight
 // from the blocked index cache, computes pool logits inline (warp per pool,
 // lane per head), and keeps a running top-select_k composite-key selection.

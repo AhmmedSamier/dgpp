@@ -328,6 +328,48 @@ void layernorm_bf16(const uint16_t* x, const uint16_t* w, const uint16_t* b,
 }  // namespace
 
 template <typename Acc>
+void indexer_query_inputs(const HostWeights& w, const DsaConfig& cfg,
+                          const uint16_t* hidden_in, int tokens,
+                          uint8_t* q_fp8, float* w_folded) {
+  const int hidden = cfg.hidden;
+  const int heads = cfg.index_n_heads;
+  const int idx_dim = cfg.index_head_dim;
+  const int qkv_cols = cfg.q_lora_rank + cfg.kv_lora_rank;
+  const float logit_scale =
+      static_cast<float>(std::pow(double(idx_dim), -0.5) *
+                         std::pow(double(heads), -0.5));
+
+  std::vector<uint16_t> qkv_a(size_t(tokens) * qkv_cols);
+  gemm_bf16<Acc>(hidden_in, hidden, w.qkv_a, qkv_a.data(), tokens, qkv_cols,
+                 hidden);
+  std::vector<uint16_t> q_c(size_t(tokens) * cfg.q_lora_rank);
+  for (int t = 0; t < tokens; ++t)
+    rmsnorm_bf16<Acc>(&qkv_a[size_t(t) * qkv_cols], w.q_aln,
+                      &q_c[size_t(t) * cfg.q_lora_rank], cfg.q_lora_rank,
+                      cfg.rms_norm_eps);
+  std::vector<uint16_t> q_idx(size_t(tokens) * heads * idx_dim);
+  gemm_bf16<Acc>(q_c.data(), cfg.q_lora_rank, w.wq_b, q_idx.data(), tokens,
+                 heads * idx_dim, cfg.q_lora_rank);
+  std::vector<float> q_scale(size_t(tokens) * heads);
+  fwht128_quant_fp8<Acc>(q_idx.data(), tokens * heads, idx_dim, q_fp8,
+                         q_scale.data());
+  // Weights: fp32 dot with hidden, NO bf16 rounding (the reference pins
+  // this), then fold the q scale and the combined logit scale in.
+  for (int t = 0; t < tokens; ++t)
+    for (int h = 0; h < heads; ++h) {
+      Acc acc = 0;
+      for (int i = 0; i < hidden; ++i)
+        acc += static_cast<Acc>(bf16_bits_to_float(
+                   hidden_in[size_t(t) * hidden + i])) *
+               static_cast<Acc>(
+                   bf16_bits_to_float(w.wp[int64_t(h) * hidden + i]));
+      const float base =
+          static_cast<float>(acc) * q_scale[size_t(t) * heads + h];
+      w_folded[size_t(t) * heads + h] = base * logit_scale;
+    }
+}
+
+template <typename Acc>
 void layer_forward(const HostWeights& w, const DsaConfig& cfg,
                    const uint16_t* hidden_in, HostState& state,
                    int64_t token_start, int tokens, uint16_t* layer_out,
@@ -339,12 +381,6 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
   const int max_selected = g.max_selected;
   const int heads = cfg.index_n_heads;
   const int idx_dim = cfg.index_head_dim;
-  // Combined indexer logit scale: 128^-0.5 * 32^-0.5, exact 1/64 for this
-  // checkpoint (power-of-two head counts keep it exact in fp32).
-  const float logit_scale =
-      static_cast<float>(std::pow(double(idx_dim), -0.5) *
-                         std::pow(double(heads), -0.5));
-
   // ---- projections ----
   // Fused [q_a | kv_a]: [tokens, 1536+512].
   const int qkv_cols = cfg.q_lora_rank + cfg.kv_lora_rank;
@@ -369,16 +405,12 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
               latent_rows.data(), size_t(tokens) * cfg.kv_lora_rank * 2);
   state.num_tokens = std::max(state.num_tokens, token_start + tokens);
 
-  // q (MLA) and indexer q, both from the normed q-lora.
+  // q (MLA) from the normed q-lora.
   std::vector<uint16_t> q(size_t(tokens) * g.local_q_rows);
   gemm_bf16<Acc>(q_c.data(), cfg.q_lora_rank, w.q_b, q.data(), tokens,
                  g.local_q_rows, cfg.q_lora_rank);
-  std::vector<uint16_t> q_idx(size_t(tokens) * heads * idx_dim);
-  gemm_bf16<Acc>(q_c.data(), cfg.q_lora_rank, w.wq_b, q_idx.data(), tokens,
-                 heads * idx_dim, cfg.q_lora_rank);
 
-  // Indexer k (LayerNorm) and gate from hidden; weights in fp32 (no bf16
-  // rounding — the reference recomputes this projection in fp32).
+  // Indexer k (LayerNorm) and gate from hidden.
   std::vector<uint16_t> k_rows(size_t(tokens) * idx_dim);
   {
     std::vector<uint16_t> k_raw(size_t(tokens) * idx_dim);
@@ -391,47 +423,57 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
   std::vector<uint16_t> gate_rows(size_t(tokens) * idx_dim);
   gemm_bf16<Acc>(hidden_in, hidden, w.gate, gate_rows.data(), tokens, idx_dim,
                  hidden);
-  std::vector<float> weights(size_t(tokens) * heads);
-  for (int t = 0; t < tokens; ++t)
-    for (int h = 0; h < heads; ++h) {
-      Acc acc = 0;
-      for (int i = 0; i < hidden; ++i)
-        acc += static_cast<Acc>(bf16_bits_to_float(
-                   hidden_in[size_t(t) * hidden + i])) *
-               static_cast<Acc>(
-                   bf16_bits_to_float(w.wp[int64_t(h) * hidden + i]));
-      weights[size_t(t) * heads + h] = static_cast<float>(acc);
-    }
 
-  // Indexer q path: Hadamard-128 + fp8 quant, then fold scales into weights.
+  // Selection-side indexer inputs (q_fp8 + folded weights): shared with the
+  // exported audit helper, so parity tests audit divergences against the
+  // reference's OWN quantized rows (m-independent host GEMMs).
   std::vector<uint8_t> q_fp8(size_t(tokens) * heads * idx_dim);
-  std::vector<float> q_scale(size_t(tokens) * heads);
-  fwht128_quant_fp8<Acc>(q_idx.data(), tokens * heads, idx_dim,
-                         q_fp8.data(), q_scale.data());
   std::vector<float> w_folded(size_t(tokens) * heads);
-  for (int t = 0; t < tokens; ++t)
-    for (int h = 0; h < heads; ++h) {
-      float base = weights[size_t(t) * heads + h] *
-                   q_scale[size_t(t) * heads + h];
-      w_folded[size_t(t) * heads + h] = base * logit_scale;
-    }
+  indexer_query_inputs<Acc>(w, cfg, hidden_in, tokens, q_fp8.data(),
+                            w_folded.data());
 
-  // ---- pool writes: complete pools fully inside this chunk ----
-  // Chunk starts are pool-aligned; the final chunk may end mid-pool.
+  // ---- pool writes: complete pools covered by this batch's end ----
+  // A pool's kpool members may span prior batches (decode continuation):
+  // members outside this batch read from the tail ring, the current batch's
+  // last member reads from k_rows directly (the is_current rule) — exactly
+  // the device decode_update kernel's semantics. For pool-aligned prefill
+  // chunks every member is in-batch and this reduces to the plain in-chunk
+  // read.
   const int64_t pool_lo = token_start / kpool;
   const int64_t pool_hi = (token_start + tokens) / kpool;
+  std::vector<uint16_t> pool_k(size_t(kpool) * idx_dim);
+  std::vector<uint16_t> pool_g(size_t(kpool) * idx_dim);
   for (int64_t j = pool_lo; j < pool_hi; ++j) {
-    compress_pool<Acc>(&k_rows[size_t(j * kpool - token_start) * idx_dim],
-                       &gate_rows[size_t(j * kpool - token_start) * idx_dim],
-                       w.ape, kpool, idx_dim,
+    for (int s = 0; s < kpool; ++s) {
+      const int64_t t = j * kpool + s;
+      const uint16_t* ksrc;
+      const uint16_t* gsrc;
+      if (t >= token_start) {
+        ksrc = &k_rows[size_t(t - token_start) * idx_dim];
+        gsrc = &gate_rows[size_t(t - token_start) * idx_dim];
+      } else {
+        const size_t slot = size_t(t % kpool);
+        ksrc = &state.tail[slot * idx_dim];
+        gsrc = &state.tail[(size_t(kpool) + slot) * idx_dim];
+      }
+      std::memcpy(&pool_k[size_t(s) * idx_dim], ksrc, idx_dim * 2);
+      std::memcpy(&pool_g[size_t(s) * idx_dim], gsrc, idx_dim * 2);
+    }
+    compress_pool<Acc>(pool_k.data(), pool_g.data(), w.ape, kpool, idx_dim,
                        &state.index_k[size_t(j) * idx_dim],
                        &state.index_scale[j]);
   }
   state.num_pools = std::max(state.num_pools, pool_hi);
 
-  // ---- tail seed: the request's last kpool tokens so far ----
+  // ---- tail seed: this batch's last kpool tokens ----
+  // Seed only tokens IN this batch (clamp at token_start): earlier tokens'
+  // ring slots already hold their values from prior batches — exactly the
+  // device ring's stash semantics. Without the clamp, a continuation batch
+  // shorter than kpool reads k_rows at negative indices (out of bounds —
+  // the decode-path landmine the layer API rejects for prefill).
   const int64_t end = token_start + tokens;
-  for (int64_t pos = std::max<int64_t>(0, end - kpool); pos < end; ++pos) {
+  const int64_t seed_lo = std::max<int64_t>(token_start, end - kpool);
+  for (int64_t pos = seed_lo; pos < end; ++pos) {
     const int slot = int(pos % kpool);
     std::memcpy(&state.tail[size_t(slot) * idx_dim],
                 &k_rows[size_t(pos - token_start) * idx_dim], idx_dim * 2);
@@ -488,6 +530,12 @@ template void fwht128_quant_fp8<float>(const uint16_t*, int, int, uint8_t*,
                                        float*);
 template void fwht128_quant_fp8<double>(const uint16_t*, int, int, uint8_t*,
                                         float*);
+template void indexer_query_inputs<float>(const HostWeights&, const DsaConfig&,
+                                          const uint16_t*, int, uint8_t*,
+                                          float*);
+template void indexer_query_inputs<double>(const HostWeights&, const DsaConfig&,
+                                           const uint16_t*, int, uint8_t*,
+                                           float*);
 template void compress_pool<float>(const uint16_t*, const uint16_t*,
                                    const float*, int, int, uint8_t*, float*);
 template void compress_pool<double>(const uint16_t*, const uint16_t*,

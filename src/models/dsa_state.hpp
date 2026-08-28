@@ -1,0 +1,127 @@
+#pragma once
+// Per-rank blocked DSA cache pool (M3 layer phase, DESIGN §7.2/§8).
+//
+// Layout (all device memory, one allocation per region):
+//   latent      [num_dsa_layers][max_token_slots][kv_lora_rank]     BF16
+//   index_k     [num_dsa_layers][max_pool_slots][index_head_dim]    FP8
+//   index_scale [num_dsa_layers][max_pool_slots]                    FP32
+//   tail        [num_dsa_layers][max_requests][2][kpool][dim]       BF16
+//   block table [max_requests][total_blocks]                        INT32
+//
+// The block table is the co-location pin (DESIGN §7.2): block b of request r
+// holds the request's tokens [b*block_tokens, (b+1)*block_tokens) in every
+// layer's latent cache AND pools [b*pools_per_block, ...) in every layer's
+// index cache, through one physical block id. Prefix attachment (§8) shares
+// blocks by reference; M3 only provides the allocator.
+//
+// Block management is host-side (a LIFO free list + mirrored table); table
+// updates are small stream-ordered uploads. Acquired blocks are NOT scrubbed
+// on release: a new owner fully rewrites the rows it will read (prefill
+// writes latent rows and pool rows before any select or attention touches
+// them), so release never lands on the memory hot path.
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include <cuda_runtime.h>
+
+#include "core/arena.hpp"
+#include "models/dsa_geometry.hpp"
+
+namespace dgpp {
+
+class DsaStatePool {
+ public:
+  DsaStatePool() = default;
+  DsaStatePool(const DsaStatePool&) = delete;
+  DsaStatePool& operator=(const DsaStatePool&) = delete;
+
+  // Allocates the caches for cfg.num_dsa_layers layers, tail rings for
+  // max_requests request slots, and the shared block table sized by
+  // max_token_slots (which must be a multiple of block_tokens — the pool
+  // capacity in tokens is shared by all requests).
+  void init(Arena& arena, const DsaConfig& cfg, int max_requests,
+            int64_t max_token_slots);
+
+  int max_requests() const { return max_requests_; }
+  int64_t max_token_slots() const { return max_token_slots_; }
+  int64_t total_blocks() const { return total_blocks_; }
+  int64_t blocks_in_use() const;
+  const DsaConfig& config() const { return cfg_; }
+  const DsaGeometry& geometry() const { return geo_; }
+
+  // Per-layer cache views (device pointers; kernels index them physically).
+  //   latent(layer):      BF16 [max_token_slots, kv_lora_rank]
+  //   index_k(layer):     FP8  [max_pool_slots, index_head_dim]
+  //   index_scale(layer): FP32 [max_pool_slots]
+  //   tail(layer):        BF16 [max_requests, 2, kpool, index_head_dim]
+  void* latent(int layer);
+  void* index_k(int layer);
+  float* index_scale(int layer);
+  void* tail(int layer);
+  const void* latent(int layer) const;
+  const void* index_k(int layer) const;
+  const float* index_scale(int layer) const;
+  const void* tail(int layer) const;
+
+  // Device block table, int32 [max_requests, total_blocks]. This pointer is
+  // the row-strided 2-D table kernels receive (blocks_per_request ==
+  // total_blocks); row `req` is the request's logical->physical mapping.
+  const int32_t* block_tables() const { return block_tables_; }
+
+  // ---- block management (host side) ------------------------------------
+  // Transactionally grows req's table to cover `tokens` tokens, acquiring
+  // physical blocks and uploading the new table slice on `stream` (the
+  // caller's step kernels are enqueued on the same stream afterwards).
+  // Returns false without side effects when the pool cannot satisfy the
+  // request — the engine's admission controller (DESIGN §9) must guarantee
+  // capacity before this point.
+  bool ensure_request_blocks(int req, int64_t tokens, cudaStream_t stream);
+
+  // Releases all of req's blocks to the free list and zeroes its table row
+  // (the zeroed slice is uploaded on `stream`). Cache contents are not
+  // scrubbed — see the file header.
+  void release_request_blocks(int req, cudaStream_t stream);
+
+  // Blocks req currently holds (covers request_blocks()*block_tokens tokens).
+  int64_t request_blocks(int req) const;
+
+  // Cold start: zero every cache, tail ring, and table row, and return all
+  // blocks to the free list. One call at init or between test cases.
+  void reset_all(cudaStream_t stream);
+
+  // ---- accounting (the M3 exit criterion) -------------------------------
+  // Bytes this pool allocates (each region 256-byte aligned). The static
+  // form sizes a hypothetical pool without allocating — use it to check the
+  // ±2% criterion at deployment scale.
+  static size_t cache_bytes(const DsaConfig& cfg, int max_requests,
+                            int64_t max_token_slots);
+  size_t cache_bytes() const {
+    return cache_bytes(cfg_, max_requests_, max_token_slots_);
+  }
+
+ private:
+  int64_t block_count_for_tokens(int64_t tokens) const;
+
+  DsaConfig cfg_{};
+  DsaGeometry geo_{};
+  int max_requests_ = 0;
+  int64_t max_token_slots_ = 0;
+  int64_t max_pool_slots_ = 0;
+  int64_t total_blocks_ = 0;
+  bool initialized_ = false;
+
+  uint8_t* latent_base_ = nullptr;
+  uint8_t* index_k_base_ = nullptr;
+  float* index_scale_base_ = nullptr;
+  uint8_t* tail_base_ = nullptr;
+  int32_t* block_tables_ = nullptr;
+
+  // Host-side allocator state (the only mutable host state; the caches
+  // themselves are only touched by kernels on device).
+  std::vector<int32_t> tables_host_;  // mirror of block_tables_
+  std::vector<int32_t> held_;         // blocks per request
+  std::vector<int32_t> free_;         // LIFO free list
+};
+
+}  // namespace dgpp

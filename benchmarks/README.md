@@ -81,6 +81,23 @@ sequential launches) — see `benchmarks/results/2026-08-27-kda-m2.md` for
 the numbers and the documented optimization path. This is profiling
 evidence for the M2 exit criterion, not a production throughput claim.
 
+## DSA operator benchmark
+
+```bash
+"$BUILD/dsa_bench" [--iters N] [--warmup N] [--ctx N] [--decode-only]
+```
+
+Measures the M3 DSA layer at real geometry on an idle node: the full decode
+step (eager and CUDA-graph replay) at `--ctx` context length, and prefill
+chunks of 2,048/8,192 tokens. Reports effective bytes/s (weights + streamed
+index cache + gathered latents) against the 230 GB/s planning floor. The
+decode projection GEMMs stream 238 MiB of weights at the memory floor; the
+remaining custom-kernel time and the profiled optimization log (native
+hardware fp8/bf16 conversions, split-KV widening, bank-conflict-padded smem
+strides, split-32 bitonic keys) are recorded in
+`benchmarks/results/2026-08-28-dsa-m3-layer.md`. Profiling evidence, not a
+production throughput claim.
+
 ## KDA reference dumps (correctness, not bandwidth)
 
 `tools/kda_reference_dump.py` generates parity inputs for the C++ layer:
@@ -103,6 +120,31 @@ python3 tools/kda_reference_dump.py gen-torch --model-dir MODEL_DIR \
 `gen-torch` reads safetensors shards with the stdlib (no safetensors
 dependency) and runs the reference layer equations in torch; record its
 invocation and the parity result when run against the pinned revision.
+
+## DSA reference dumps (correctness, not bandwidth)
+
+`tools/dsa_reference_dump.py` generates parity inputs for the C++ layer
+(same `DGPP*AD` container, `DGPPDSAD` magic; the python fp8 codec is
+cross-checked bit-exact against the C++ encoder):
+
+```bash
+# stdlib-only synthetic oracle (wired into CTest):
+python3 tools/dsa_reference_dump.py gen-pure --out FILE
+"$BUILD/dsa_test" --dump-file FILE
+
+# self-contained format/determinism/codec check:
+python3 tools/dsa_reference_dump.py selftest
+
+# real checkpoint slices (requires torch; run where the checkpoint lives):
+python3 tools/dsa_reference_dump.py gen-torch --model-dir MODEL_DIR \
+    --layer 3 --out FILE --tokens 32
+"$BUILD/dsa_test" --dump-file FILE
+```
+
+`gen-torch` dequantizes FP8 block-scaled core weights to BF16 (M3 consumes
+BF16; FP8-native GEMMs are M4 scope) and runs the pinned reference layer
+equations in torch; record its invocation and the parity result when run
+against the pinned revision.
 
 ## Direct-device registration probe
 

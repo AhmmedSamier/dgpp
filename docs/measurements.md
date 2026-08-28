@@ -249,14 +249,25 @@ cache variable is fixed. CTest contains host, CUDA, synthetic-model, and Python
 checkpoint-audit tests. ASan and UBSan are independent cache-variable presets.
 The final validation results are listed in the dated run record.
 
-The M3 kernel phase additionally holds both CUDA test suites (KDA and DSA)
-clean under `compute-sanitizer` memcheck, racecheck, and initcheck — not just
-functionally green. This is a standing gate for new kernels, not a one-off:
-the DSA round surfaced a speculated out-of-bounds load (short-circuit guards
-do not protect loads once nvcc predicates the branch) and two shared-memory
-reuse races that functional tests passed by scheduling luck. Details are
-pinned in `DESIGN.md` §12; no new timing measurements exist yet for the DSA
-path (`dsa_bench` arrives with the layer orchestration phase).
+Both CUDA milestones additionally hold their suites clean under
+`compute-sanitizer`: the kernel phases ran full memcheck, racecheck, and
+initcheck; the DSA layer phase runs full-suite memcheck (it caught two
+undersized test buffers that made a graph test pass vacuously) plus targeted
+racecheck/initcheck on the tests exercising new kernel shapes — the
+real-geometry racecheck pass is deliberately skipped because its runtime is
+dominated by vendor cutlass GEMM kernels covered by the kernel-phase tests
+(reasoning recorded with the results). This is a standing gate for new
+kernels, not a one-off: sanitizer rounds have surfaced a speculated
+out-of-bounds load (short-circuit guards do not protect loads once nvcc
+predicates the branch), shared-memory reuse races that functional tests
+passed by scheduling luck, and the vacuous-test buffers above. Details are
+pinned in `DESIGN.md` §12.
+
+DSA layer timing lives in
+`benchmarks/results/2026-08-28-dsa-m3-layer.md`: decode 2.24 ms/layer at
+65k context (114 GB/s effective; the projection GEMMs alone are ~1.0 ms,
+i.e. at the 230 GB/s floor), prefill 6,443 tok/s at T=2048, and the full
+profiled optimization log from the 13.26 ms starting point.
 
 ## Historical M1 observations
 

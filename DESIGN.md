@@ -4,10 +4,10 @@ Status: architecture contract for the staged implementation described in
 `PLAN.md`. The repository currently contains the M0/M1 platform probes, core
 runtime, checkpoint loader, synthetic transformer, the M2 KDA operators
 (state pool, recurrence kernels, snapshot format, reference-dump harness),
-and the M3 DSA/MLA kernels in progress (indexer compression, deterministic
-pooled top-k, split-KV absorbed attention, host oracle — layer orchestration
-pending); it does **not** yet contain a complete GLM runtime, distributed
-serving daemon, or HTTP server.
+and the complete M3 DSA/MLA path (indexer compression, deterministic pooled
+top-k, split-KV absorbed attention, blocked state pool, layer orchestration,
+dump harness, benchmarks); it does **not** yet contain a complete GLM
+runtime, distributed serving daemon, or HTTP server.
 
 Target: text serving for `unsloth/GLM-5.3-Flash-FP8` on four NVIDIA DGX Spark
 systems. Vision execution is post-v1.
@@ -349,6 +349,47 @@ The M3 implementation pins the concrete layouts and the selection spec
   except on pathological near-power-of-two magnitudes, where the reference
   clamps and this engine does not.
 
+Layer-phase pins (the orchestration above those kernels):
+
+- `DsaStatePool` owns all 11 layers' caches as five arenas — latent
+  `[layers][token_slots][kv_lora]` BF16, planar index K `[layers][pool_slots]
+  [128]` FP8, index scales `[layers][pool_slots]` F32, tails
+  `[layers][requests][2,kpool,128]` BF16, and one shared block table
+  `[requests][blocks]` INT32 — every region 256-byte aligned. Block
+  management is host-side (LIFO free list; growth uploads only the new table
+  slice on the caller's stream; growth is transactional — admission control
+  per DESIGN §9 must guarantee capacity before the decode hot path, which
+  cannot check device-side positions). Released blocks are not scrubbed: a
+  new owner rewrites every row it reads before any consumer touches it;
+- `DsaLayer` shares one scratch buffer across all DSA layers (they run
+  sequentially on one stream; per-layer scratch would multiply the footprint
+  by 11 for zero benefit), sized by `scratch_bytes()` with a dot budget that
+  bounds prefill's materialized fp8 dots — query tiles shrink to fit,
+  trading K-cache re-reads for a bounded footprint. Prefill grows block
+  tables itself and throws on pool exhaustion (a control-path operation);
+  decode requires the tables to already cover every position a captured
+  batch will write. The decode path is CUDA-graph capturable end to end;
+- the near-tie contract for cross-implementation selection comparison:
+  logits from tensor-core GEMMs differ from any sequential oracle by ulps
+  that can flip the rank-select_k cut when two pools sit within that noise.
+  Divergences are certified, not tolerated: the audit re-derives the spec
+  selection from the device's own inputs (bitwise, including the actual
+  dot buffer) and requires the swapped pools to straddle the boundary
+  within the measured per-row noise. Device-vs-device comparisons (same
+  GEMM outputs) remain bitwise — that is the reproducibility contract
+  serving relies on;
+- decode performance pins (GB10, 48 SMs): native hardware e4m3→f16 and
+  bf16→f32 conversions (both exact — bit-identical to the software codecs,
+  proven by the bitwise select fuzz), split-KV attention at
+  rows×32×head-groups blocks with an empty-split early exit, padded smem
+  strides in the attention kernel (the natural [head][512]/[group][64]
+  layout bank-conflicts 32 ways on every access), and 32-bit split key
+  arrays in the bitonic networks (a u64 key spans two banks and XOR
+  indexing conflicts ~16 ways). Decode at 65k context: 2.24 ms/layer, 114
+  GB/s effective; the projection GEMMs alone are ~1.0 ms — 238 MiB of
+  weights at the memory floor (see
+  benchmarks/results/2026-08-28-dsa-m3-layer.md).
+
 ## 8. Prefix cache
 
 V1 uses exact state snapshots only. The previous unproven 24 KB/token
@@ -454,6 +495,18 @@ passed every bitwise parity test in both directions because the host oracle
 and the kernels were wrong together, and only a test with hand-computed
 expected logits exposed it.
 
+Device-vs-oracle divergences at selection boundaries are **certified, not
+tolerated**: the audit re-derives the spec selection from the device's own
+inputs (bitwise, tensor-core dots included) and measures the boundary gap
+against the row's actual cross-implementation noise. This discipline caught
+two reference bugs that plain tolerance would have absorbed into "FP noise"
+— an out-of-bounds tail-seed read for decode batches shorter than kpool and
+a gate-indexing typo — while the device path was correct both times.
+Instrumentation (in-kernel clock64 phase timers, removed after use) is the
+fastest path to a *mechanism* for a slow kernel; profile first, then fix the
+measured bottleneck (the attention kernel's 85% bank-conflict share was
+invisible from wall time alone).
+
 `compute-sanitizer` (memcheck, racecheck, initcheck) is part of the gate, not
 an optional extra — two classes of defect pass functional tests and only
 surface under it:
@@ -466,6 +519,14 @@ surface under it:
 - shared-memory buffers reused across reduction phases (all threads read the
   mean, lane-0s overwrite with the variance) race without a barrier between
   the read and the reuse — scheduling luck passes functional tests.
+
+Sanitizer scope is chosen per phase, deliberately: full-suite memcheck for
+orchestration code (pointer/size bugs — it caught two undersized test
+buffers that made a graph test pass vacuously), targeted racecheck/initcheck
+for new kernel shapes. Instrumenting vendor kernels (cuBLASLt's cutlass
+implementations dominate long benchmarks) buys no coverage of our code and
+costs orders of magnitude in wall time; the decision and reasoning are
+recorded with the results.
 
 Measured numbers include the exact command, binary revision, driver, firmware,
 clock/power context, run count, and variability. `micro_gemm_peak` is a
@@ -480,15 +541,16 @@ must be added to the next commit):
 
 ```text
 apps/                 dgppctl and synthetic gpt_doll driver
-benchmarks/micro/     platform and transport probes (incl. kda_bench)
+benchmarks/micro/     platform and transport probes (incl. kda_bench, dsa_bench)
 docs/                 generated checkpoint budget and validated measurements
 src/common/           logging, dtypes, tests
 src/core/             arena, graph, streams, trace
 src/kernels/          synthetic kernels, GEMM wrapper, flag protocol, KDA and DSA ops
 src/loaders/          JSON, safetensors, shardspec
-src/models/           synthetic GPT doll; KDA layer/state/reference/dump; DSA reference
+src/models/           synthetic GPT doll; KDA layer/state/reference/dump; DSA
+                      reference/geometry/state/layer/dump
 tests/                host, CUDA, and Python tests
-tools/                checkpoint audit, shard-plan and KDA reference-dump generators
+tools/                checkpoint audit, shard-plan, KDA/DSA reference-dump generators
 ```
 
 Planned directories such as `models/glm53`, `net`, `server`, `cache`, and

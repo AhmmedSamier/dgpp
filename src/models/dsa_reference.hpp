@@ -109,6 +109,17 @@ template <typename Acc>
 void fwht128_quant_fp8(const uint16_t* q, int rows, int dim, uint8_t* q_fp8,
                        float* q_scale);
 
+// The selection-side indexer inputs for `tokens` hidden rows (the exact
+// steps of layer_forward up to and including the weight fold):
+// q_fp8 [tokens, heads, dim] fp8 bits and w_folded [tokens, heads] fp32.
+// Exported so parity tests can audit divergences with the reference's OWN
+// quantized rows (host GEMMs are m-independent, so a row's values do not
+// depend on the chunk it was computed in).
+template <typename Acc>
+void indexer_query_inputs(const HostWeights& w, const DsaConfig& cfg,
+                          const uint16_t* hidden_in, int tokens,
+                          uint8_t* q_fp8, float* w_folded);
+
 // Compress one pool of kpool tokens into the index cache.
 // k/gate: [kpool, dim] bf16 bits; ape: [kpool, dim] fp32;
 // writes k_out [dim] fp8 bits + scale_out (single value).

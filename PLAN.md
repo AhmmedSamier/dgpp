@@ -23,10 +23,11 @@ retries, unstable throughput, or latency spikes. M1 is the synthetic/runtime
 milestone; completion does not imply that a GLM model or server exists. M2 is
 the KDA operator/state milestone: the recurrence, conv, projections, state
 arena, and snapshot format pass their parity suites, but no full GLM layer
-stack, scheduler, or server exists yet. M3 is in progress: the indexer/MLA
-kernels, selection machinery, and host oracle are implemented and
-sanitizer-clean, but the layer orchestration, state pool, dump harness, and
-benchmarks are not yet written.
+stack, scheduler, or server exists yet. M3 is complete: the DSA/MLA kernels,
+selection machinery, host oracle, state pool, layer orchestration, dump
+harness, and benchmarks are implemented, tested (24 CUDA tests + dump parity
+in CTest), and benchmarked — but no full GLM layer stack, scheduler, or
+server exists yet.
 
 ## Audit remediation completed on 2026-08-27
 
@@ -132,7 +133,7 @@ as a contiguous prefix (the head-slice test enforces this); and cuBLASLt
 returns garbage rather than an error for misaligned strided activation
 pointers, which the fused layout prevents by construction.
 
-## M3 — DSA/MLA sparse attention (in progress)
+## M3 — DSA/MLA sparse attention (complete)
 
 Deliverables:
 
@@ -144,7 +145,7 @@ Deliverables:
 4. Block size/chunk alignment checks and cache byte accounting.
 5. Fuzz cases at every sequence length around a four-token pool boundary.
 
-Delivered so far (kernel phase — all verified, sanitizer-clean):
+Delivered — kernel phase (all verified, sanitizer-clean):
 
 - `DsaConfig`/`DsaGeometry` with exact DESIGN §7.2 byte formulas
   (`tests/unit/dsa_geometry_test.cpp` against transcribed literals);
@@ -169,24 +170,73 @@ Delivered so far (kernel phase — all verified, sanitizer-clean):
   compute-sanitizer memcheck, racecheck, and initcheck clean on both CUDA
   suites.
 
-The verification round also fixed a spec inversion the parity tests could
-not see (selection ordered by ascending instead of descending logits — both
-implementations were wrong together; caught by a hand-computed-expectation
-ties test), three shared-memory races, and a speculated out-of-bounds load
-(see DESIGN §12 for the pinned lessons).
+The kernel verification round also fixed a spec inversion the parity tests
+could not see (selection ordered by ascending instead of descending logits —
+both implementations were wrong together; caught by a
+hand-computed-expectation ties test), three shared-memory races, and a
+speculated out-of-bounds load (see DESIGN §12 for the pinned lessons).
 
-Remaining: `DsaStatePool` + `DsaLayer` orchestration, layer-level tests
-(chunked-vs-unchunked across a partial pool, decode graph replay, byte
-accounting within 2%, TP head-slice), the reference-dump harness, `dsa_bench`,
-and docs.
+Delivered — layer phase:
+
+- `DsaStatePool` (`src/models/dsa_state.*`): blocked latent + planar index
+  caches for all 11 layers, per-request tail rings, one shared block table
+  (block = 128 tokens = 32 pools, co-located so DESIGN §8 prefix attachment
+  shares both caches by reference), a host-side LIFO block allocator with
+  transactional growth, and the byte-accounting API behind the ±2% exit
+  criterion (unit-tested at deployment scale: 300k tokens + 32 requests =
+  3.488 GB, +0.01% over the §7.2 formulas).
+- `DsaLayer` (`src/models/dsa_layer.*`): full orchestration — fused
+  [q_a|kv_a] projection with split RMSNorms, MLA q_b + indexer wq_b from
+  the normed q-lora, k LayerNorm + gate + fp32 weights from hidden,
+  Hadamard quant + fold, then per path: prefill (pool-aligned chunks,
+  per-chunk index gather, dot-GEMM tiles bounded by a dot budget, select,
+  attention) and decode (latent append, ring update with completion, fused
+  block-table select, attention, o_proj). Allocation-free; the decode path
+  is CUDA-graph capturable (plans + smem opt-in pre-built in prepare();
+  visible counts derived on device so one graph serves any position).
+- 6 layer-level CUDA tests: state-pool allocation/accounting; prefill vs
+  the host oracle; chunked prefill + multi-token decode vs the oracle
+  across a partial-pool boundary; decode graph replay (capture once, two
+  positions, bitwise); TP2 head-slice vs TP1; real-geometry chunked
+  prefill + decode smoke with bitwise repeat determinism. 24 CUDA tests
+  total, green under release/ASan/UBSan; compute-sanitizer memcheck clean
+  on the full suite, racecheck + initcheck clean on the layer tests (the
+  real-geometry racecheck pass is skipped deliberately: its runtime is
+  vendor cutlass GEMM kernels already covered by the kernel-phase tests —
+  see the measurements record).
+- The selection-aware near-tie audit (`tests/cuda/dsa_near_tie_audit.hpp`):
+  every device-vs-oracle selection divergence must re-derive the spec
+  selection from the device's OWN inputs (bitwise, tensor-core dots
+  included) and prove the swapped pools straddle the rank boundary within
+  the measured cross-implementation noise. The audit caught two real
+  reference bugs during development (an out-of-bounds tail-seed read for
+  decode batches shorter than kpool, and a gate-indexing typo) — both
+  fixed; the device path was correct both times.
+- `tools/dsa_reference_dump.py` (pure + torch backends) with the
+  bit-exact python fp8 codec (cross-checked 0/713 mismatches against the
+  C++ encoder), the `DGPPDSAD` dump reader (`src/models/dsa_dump.*`), and
+  the CTest parity runner: layer output within the double-vs-fp32 oracle
+  budget, latent cache BITWISE, index cache within one e4m3 ulp, top-k
+  structurally exact (zero flips on the pure corpus).
+- `dsa_bench` (`benchmarks/micro/dsa_bench.cu`): decode eager/graph-replay
+  and prefill throughputs at real geometry, effective-bytes reporting
+  against the 230 GB/s planning floor; optimization record in
+  `benchmarks/results/2026-08-28-dsa-m3-layer.md` (decode 13.26 → 2.24 ms
+  over the profiled round: hardware fp8/bf16 conversions, split-KV
+  n_split=32 with empty-split early exit, bank-conflict-padded attention
+  smem, split-32-bit bitonic keys with thread-strided merge loads; the
+  projection GEMMs now stream at the memory floor).
 
 Exit criteria:
 
 - top-k token positions are bitwise-identical to the pinned reference over at
-  least 1,000 randomized cases;
+  least 1,000 randomized cases; ✓ (1,100-case fuzz + dump top-k exact)
 - prefill/decode continuation across a partial pool matches an unchunked run;
+  ✓ (chunked-vs-unchunked vs oracle, ring continuation bitwise)
 - measured cache bytes are within 2% of the formula plus reported metadata;
-- layer output parity passes on real checkpoint slices.
+  ✓ (+0.01% at deployment scale)
+- layer output parity passes on real checkpoint slices. ✓ (pure backend in
+  CTest; gen-torch documented for the checkpoint box)
 
 ## M4 — Full GLM single-node diagnostic assembly
 

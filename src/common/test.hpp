@@ -2,6 +2,8 @@
 #pragma once
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -22,9 +24,19 @@ struct Registrar {
   Registrar(const char* name, void (*fn)()) { registry().push_back({name, fn}); }
 };
 
+// Runs every test whose name contains DGPP_TEST_FILTER (unset/empty = all).
+// Sanitizer passes target the smem-heavy groups (e.g. DGPP_TEST_FILTER=select
+// for racecheck on the bitonic kernels) so the gate stays rigorous without
+// paying full-suite instrumentation time on every tool.
 inline int run_all() {
+  const char* filter = std::getenv("DGPP_TEST_FILTER");
   int failed = 0;
+  size_t ran = 0;
   for (auto& tc : registry()) {
+    if (filter && filter[0] != '\0' &&
+        !std::strstr(tc.name, filter))
+      continue;
+    ++ran;
     try {
       tc.fn();
       std::printf("[ OK ] %s\n", tc.name);
@@ -33,7 +45,11 @@ inline int run_all() {
       std::printf("[FAIL] %s: %s\n", tc.name, e.what());
     }
   }
-  std::printf("%zu tests, %d failed\n", registry().size(), failed);
+  if (ran == 0) {
+    std::printf("no tests match filter \"%s\"\n", filter ? filter : "");
+    return 1;
+  }
+  std::printf("%zu tests, %d failed\n", ran, failed);
   return failed == 0 ? 0 : 1;
 }
 

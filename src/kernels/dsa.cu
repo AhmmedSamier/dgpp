@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
@@ -26,7 +28,42 @@ using dgpp::float_to_bf16_bits;
 using dgpp::float_to_fp8_e4m3_bits;
 using dgpp::fp8_e4m3_bits_to_float;
 
-constexpr uint64_t kKeyMax = ~0ull;
+// ---- native conversion helpers ----------------------------------------
+// The GB10 has hardware e4m3->f16 and bf16->f32 conversions; the software
+// decoders in dtypes.hpp are branchy (NaN/denormal special cases) and were
+// ~90% of the select kernel's cycles. Both paths are EXACT — e4m3 fits
+// entirely inside f16, bf16 inside f32 — so these are bit-identical
+// replacements, verified by the bitwise select fuzz.
+
+__device__ inline float2 fp8x2_to_float2(uint16_t v) {
+  const __half2_raw h = __nv_cvt_fp8x2_to_halfraw2(v, __NV_E4M3);
+  return __half22float2(__half2(h));
+}
+
+__device__ inline float2 bf16x2_to_float2(uint32_t v) {
+  __nv_bfloat16_raw lo, hi;
+  lo.x = static_cast<unsigned short>(v & 0xFFFFu);
+  hi.x = static_cast<unsigned short>(v >> 16);
+  return __bfloat1622float2(
+      __nv_bfloat162(__nv_bfloat16(lo), __nv_bfloat16(hi)));
+}
+
+// acc += sum(element-wise products of 8 bf16 pairs), accumulated in element
+// order (same sequence as the scalar loop it replaces — FFMA-friendly; the
+// attention path is tolerance-pinned, not bitwise).
+__device__ inline float dot8_bf16(uint4 a, uint4 b, float acc) {
+  const uint32_t* a32 = reinterpret_cast<const uint32_t*>(&a);
+  const uint32_t* b32 = reinterpret_cast<const uint32_t*>(&b);
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const float2 x = bf16x2_to_float2(a32[j]);
+    const float2 y = bf16x2_to_float2(b32[j]);
+    acc += x.x * y.x;
+    acc += x.y * y.y;
+  }
+  return acc;
+}
+
 constexpr int kIdxBits = 21;  // pool ids < 2^21 (validated at launch)
 constexpr uint64_t kIdxMask = (1ull << kIdxBits) - 1;
 constexpr int kSelectTile = 2048;  // pools per selection tile (>= 2*select_k)
@@ -91,76 +128,114 @@ __device__ inline void fwht128_smem(float* x) {
   __syncthreads();
 }
 
-// Bitonic sort (ascending) of n keys in smem; n a power of two.
-template <typename T>
-__device__ inline void bitonic_sort_asc(T* a, int n) {
+// Bitonic networks over 64-bit composite keys stored as SPLIT 32-bit arrays
+// (hi/lo). A u64 key spans two 4-byte banks, so a u64 array with XOR indexing
+// bank-conflicts ~16 ways in the sort stages (measured: the merge phase was
+// 97% of the select kernel). Split arrays give every thread its own bank for
+// every stride: stride >= 32 leaves i%32 untouched; smaller strides XOR-
+// permute the banks. Same keys, same comparisons, identical selection.
+__device__ inline bool key_less(uint32_t a_hi, uint32_t a_lo, uint32_t b_hi,
+                                uint32_t b_lo) {
+  return (a_hi < b_hi) || (a_hi == b_hi && a_lo < b_lo);
+}
+
+__device__ inline void cx_split(uint32_t* hi, uint32_t* lo, int i, int j,
+                                bool asc) {
+  const uint32_t a_hi = hi[i], a_lo = lo[i];
+  const uint32_t b_hi = hi[j], b_lo = lo[j];
+  const bool swap = asc ? key_less(b_hi, b_lo, a_hi, a_lo)
+                        : key_less(a_hi, a_lo, b_hi, b_lo);
+  if (swap) {
+    hi[i] = b_hi; lo[i] = b_lo;
+    hi[j] = a_hi; lo[j] = a_lo;
+  }
+}
+
+// Ascending bitonic sort of n keys (power of two).
+__device__ inline void bitonic_sort_asc(uint32_t* hi, uint32_t* lo, int n) {
   for (int size = 2; size <= n; size <<= 1) {
     for (int stride = size >> 1; stride > 0; stride >>= 1) {
       for (int i = threadIdx.x; i < n; i += blockDim.x) {
         const int j = i ^ stride;
-        if (j > i) {
-          const bool asc = (i & size) == 0;
-          if (asc ? a[i] > a[j] : a[i] < a[j]) {
-            const T t = a[i];
-            a[i] = a[j];
-            a[j] = t;
-          }
-        }
+        if (j > i) cx_split(hi, lo, i, j, (i & size) == 0);
       }
       __syncthreads();
     }
   }
 }
 
-// Bitonic merge of a bitonic sequence to ascending; n a power of two.
-template <typename T>
-__device__ inline void bitonic_merge_asc(T* a, int n) {
+// Ascending bitonic merge of a bitonic sequence of n (power of two).
+__device__ inline void bitonic_merge_asc(uint32_t* hi, uint32_t* lo, int n) {
   for (int stride = n >> 1; stride > 0; stride >>= 1) {
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
       const int j = i ^ stride;
-      if (j > i && a[i] > a[j]) {
-        const T t = a[i];
-        a[i] = a[j];
-        a[j] = t;
-      }
+      if (j > i) cx_split(hi, lo, i, j, true);
     }
     __syncthreads();
   }
 }
 
 // Streaming top-select_k over key_fn(pool) -> composite key, restricted to
-// pools [lo, hi). best[select_k] (smem) must be pre-initialized to kKeyMax;
-// on return it holds the smallest select_k keys seen, sorted ascending.
-// tile (smem) needs kSelectTile entries; kSelectTile >= 2*select_k required.
+// pools [lo, hi). best_hi/best_lo (smem, [select_k]) must be pre-initialized
+// to kKeyMax; on return they hold the smallest select_k keys seen, sorted
+// ascending. tile arrays (smem) need kSelectTile entries each;
+// kSelectTile >= 2*select_k required.
 template <typename KeyFn>
 __device__ inline void select_topk_stream(KeyFn key_fn, int64_t lo, int64_t hi,
-                                          uint64_t* best, uint64_t* tile,
+                                          uint32_t* best_hi, uint32_t* best_lo,
+                                          uint32_t* tile_hi, uint32_t* tile_lo,
                                           int select_k) {
   const int nthreads = blockDim.x;
   const int warp = threadIdx.x >> 5;
   const int nwarp = nthreads >> 5;
   for (int64_t base = lo; base < hi; base += kSelectTile) {
     const int n = int(min((int64_t)kSelectTile, hi - base));
-    for (int p = threadIdx.x; p < kSelectTile; p += nthreads)
-      tile[p] = kKeyMax;  // pads; [0, n) is overwritten by the warps below
-    __syncthreads();
-    for (int p = warp; p < n; p += nwarp) {
-      const uint64_t key = key_fn(base + p);
-      if ((threadIdx.x & 31) == 0) tile[p] = key;
+    for (int p = threadIdx.x; p < kSelectTile; p += nthreads) {
+      tile_hi[p] = 0xFFFFFFFFu;  // kKeyMax padding; [0, n) overwritten below
+      tile_lo[p] = 0xFFFFFFFFu;
     }
     __syncthreads();
-    bitonic_sort_asc(tile, kSelectTile);
+    if constexpr (KeyFn::kWarpCooperative) {
+      // Warp-cooperative keys (pool logits): one warp evaluates one pool;
+      // lane 0 publishes. All lanes load the same cache row — broadcast.
+      for (int p = warp; p < n; p += nwarp) {
+        const uint64_t key = key_fn(base + p);
+        if ((threadIdx.x & 31) == 0) {
+          tile_hi[p] = uint32_t(key >> 32);
+          tile_lo[p] = uint32_t(key);
+        }
+      }
+    } else {
+      // Per-thread keys (merge partials): thread-strided with unrolled
+      // independent loads — the warp-strided form serialized 512 dependent
+      // global loads per warp and was 57% of the select kernel.
+      for (int p = threadIdx.x; p < n; p += nthreads) {
+        const uint64_t key = key_fn(base + p);
+        tile_hi[p] = uint32_t(key >> 32);
+        tile_lo[p] = uint32_t(key);
+      }
+    }
+    __syncthreads();
+    bitonic_sort_asc(tile_hi, tile_lo, kSelectTile);
     // Merge best (asc) with the tile's smallest select_k reversed (desc):
     // [asc][desc] is bitonic, so a 2*select_k bitonic merge yields the new
     // best. Elements beyond the tile's first select_k are dominated by
     // select_k better tile keys and can never enter the global top-k.
-    for (int i = threadIdx.x; i < select_k; i += nthreads)
-      tile[select_k + i] = tile[select_k - 1 - i];
+    for (int i = threadIdx.x; i < select_k; i += nthreads) {
+      tile_hi[select_k + i] = tile_hi[select_k - 1 - i];
+      tile_lo[select_k + i] = tile_lo[select_k - 1 - i];
+    }
     __syncthreads();
-    for (int i = threadIdx.x; i < select_k; i += nthreads) tile[i] = best[i];
+    for (int i = threadIdx.x; i < select_k; i += nthreads) {
+      tile_hi[i] = best_hi[i];
+      tile_lo[i] = best_lo[i];
+    }
     __syncthreads();
-    bitonic_merge_asc(tile, 2 * select_k);
-    for (int i = threadIdx.x; i < select_k; i += nthreads) best[i] = tile[i];
+    bitonic_merge_asc(tile_hi, tile_lo, 2 * select_k);
+    for (int i = threadIdx.x; i < select_k; i += nthreads) {
+      best_hi[i] = tile_hi[i];
+      best_lo[i] = tile_lo[i];
+    }
     __syncthreads();
   }
 }
@@ -169,7 +244,8 @@ __device__ inline void select_topk_stream(KeyFn key_fn, int64_t lo, int64_t hi,
 // positions, append the query's incomplete tail. Writes out_row[0,
 // max_selected) (-1 padded); returns the token count. scratch: smem int32
 // [select_k]; smem_count: smem int32 [1].
-__device__ inline int expand_from_best(const uint64_t* best, int select_k,
+__device__ inline int expand_from_best(const uint32_t* best_hi,
+                                       const uint32_t* best_lo, int select_k,
                                        int64_t pos, int kpool,
                                        int max_selected, int32_t* out_row,
                                        int32_t* scratch, int* smem_count) {
@@ -177,9 +253,11 @@ __device__ inline int expand_from_best(const uint64_t* best, int select_k,
   if (threadIdx.x == 0) *smem_count = 0;
   __syncthreads();
   for (int i = threadIdx.x; i < select_k; i += nthreads) {
-    if (best[i] != kKeyMax) {
+    const bool real = best_hi[i] != 0xFFFFFFFFu || best_lo[i] != 0xFFFFFFFFu;
+    if (real) {
       const int slot = atomicAdd(smem_count, 1);
-      scratch[slot] = int32_t(best[i] & kIdxMask);
+      scratch[slot] = int32_t(
+          (uint64_t(best_hi[i]) << 32 | best_lo[i]) & kIdxMask);
     }
   }
   __syncthreads();
@@ -187,8 +265,24 @@ __device__ inline int expand_from_best(const uint64_t* best, int select_k,
   for (int i = n_sel + threadIdx.x; i < select_k; i += nthreads)
     scratch[i] = INT32_MAX;
   __syncthreads();
-  bitonic_sort_asc(scratch, select_k);
-
+  // Sort the selected pool ids ascending (single 32-bit array; positive
+  // ids, so int32 ordering == u32 ordering).
+  for (int size = 2; size <= select_k; size <<= 1) {
+    for (int stride = size >> 1; stride > 0; stride >>= 1) {
+      for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+        const int j = i ^ stride;
+        if (j > i) {
+          const bool asc = (i & size) == 0;
+          if (asc ? scratch[i] > scratch[j] : scratch[i] < scratch[j]) {
+            const int32_t t = scratch[i];
+            scratch[i] = scratch[j];
+            scratch[j] = t;
+          }
+        }
+      }
+      __syncthreads();
+    }
+  }
   const int64_t seq_len = pos + 1;
   const int64_t tail_start = (seq_len / kpool) * kpool;
   const int tail_cnt = int(seq_len - tail_start);
@@ -539,6 +633,7 @@ __global__ void gather_index_pools_kernel(const int32_t* block_table,
 // dot loop converts on access and is memory-bound regardless; the saving
 // is what lets an 8-row MTP decode batch fit the 99 KB GB10 smem optin.
 struct DecodeKeyFn {
+  static constexpr bool kWarpCooperative = true;  // warp computes one pool
   const uint8_t* q8;   // smem [heads * 128] fp8 bits (this row)
   const float* w;      // smem [heads] (this row)
   const uint8_t* index_k;
@@ -557,13 +652,26 @@ struct DecodeKeyFn {
     // Contraction-proof arithmetic (__fmul_rn/__fadd_rn, no FMA fusion):
     // the host oracle mirrors this exact sequence so pool-logit parity —
     // and therefore top-k position parity — is bitwise, not statistical.
+    // The element order matches the scalar form exactly (d = 0..127); only
+    // the fp8 decode is vectorized (native hardware, bit-exact — see the
+    // conversion helpers above).
     float partial = 0.0f;
-#pragma unroll 4
-    for (int d = 0; d < 128; ++d)
-      partial = __fadd_rn(
-          partial,
-          __fmul_rn(fp8_e4m3_bits_to_float(q8[lane * 128 + d]),
-                    fp8_e4m3_bits_to_float(krow[d])));
+    const uint2* q2 = reinterpret_cast<const uint2*>(q8 + lane * 128);
+    const uint2* k2 = reinterpret_cast<const uint2*>(krow);
+#pragma unroll 8
+    for (int p = 0; p < 16; ++p) {
+      const uint2 qv = q2[p];  // 8 fp8 values of this lane's head
+      const uint2 kv = k2[p];  // 8 fp8 values of the pool row
+      const uint16_t* qq = reinterpret_cast<const uint16_t*>(&qv);
+      const uint16_t* kk = reinterpret_cast<const uint16_t*>(&kv);
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        const float2 a = fp8x2_to_float2(qq[j]);
+        const float2 b = fp8x2_to_float2(kk[j]);
+        partial = __fadd_rn(partial, __fmul_rn(a.x, b.x));
+        partial = __fadd_rn(partial, __fmul_rn(a.y, b.y));
+      }
+    }
     const float contrib = __fmul_rn(__fmul_rn(w[lane], ks), partial);
     const float total = warp_sum(contrib);
     // ~sortable reverses the ascending float order: the smallest composite
@@ -574,6 +682,7 @@ struct DecodeKeyFn {
 };
 
 struct PrefillKeyFn {
+  static constexpr bool kWarpCooperative = true;  // warp computes one pool
   const float* dot;       // [rows * heads, dot_stride]
   const float* w_folded;  // [rows, heads]
   const float* k_scale;   // [n_pools]
@@ -593,6 +702,7 @@ struct PrefillKeyFn {
 };
 
 struct MergeKeyFn {
+  static constexpr bool kWarpCooperative = false;  // one load per key
   const uint64_t* partials;  // [grid_blocks, rows, select_k]
   int rows;
   int select_k;
@@ -615,11 +725,14 @@ __global__ void select_decode_kernel(
     int32_t* topk_out, int32_t* out_counts, uint64_t* partial_ws,
     int32_t* counter_ws) {
   extern __shared__ uint64_t smem_u64[];
-  // Layout: [best: rows*select_k][tile: kSelectTile][q8: rows*heads*128
-  // bytes][w: rows*heads][scratch: select_k + 1 (i32)].
-  uint64_t* best = smem_u64;
-  uint64_t* tile = best + int64_t(rows) * select_k;
-  uint8_t* q8 = reinterpret_cast<uint8_t*>(tile + kSelectTile);
+  // Layout (split 32-bit key arrays; see the bitonic networks above):
+  // [best_hi/best_lo: rows*select_k each][tile_hi/tile_lo: kSelectTile each]
+  // [q8: rows*heads*128 bytes][w: rows*heads][scratch: select_k + 1 (i32)].
+  uint32_t* best_hi = reinterpret_cast<uint32_t*>(smem_u64);
+  uint32_t* best_lo = best_hi + int64_t(rows) * select_k;
+  uint32_t* tile_hi = best_lo + int64_t(rows) * select_k;
+  uint32_t* tile_lo = tile_hi + kSelectTile;
+  uint8_t* q8 = reinterpret_cast<uint8_t*>(tile_lo + kSelectTile);
   float* w = reinterpret_cast<float*>(q8 + int64_t(rows) * heads * 128);
   int32_t* scratch = reinterpret_cast<int32_t*>(w + int64_t(rows) * heads);
 
@@ -636,21 +749,25 @@ __global__ void select_decode_kernel(
         (visible + gridDim.x - 1) / gridDim.x;  // >= 0; 0 when visible == 0
     const int64_t lo = min(visible, int64_t(blockIdx.x) * stripe);
     const int64_t hi = min(visible, lo + stripe);
-    for (int i = threadIdx.x; i < select_k; i += blockDim.x)
-      best[int64_t(r) * select_k + i] = kKeyMax;
+    for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+      best_hi[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+      best_lo[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+    }
     __syncthreads();
     DecodeKeyFn fn{q8 + int64_t(r) * heads * 128, w + int64_t(r) * heads,
                    index_k, index_scale,
                    block_tables + int64_t(req_ids[r]) * blocks_per_request,
                    pools_per_block, 128};
-    select_topk_stream(fn, lo, hi, best + int64_t(r) * select_k, tile,
+    select_topk_stream(fn, lo, hi, best_hi + int64_t(r) * select_k,
+                       best_lo + int64_t(r) * select_k, tile_hi, tile_lo,
                        select_k);
   }
   __syncthreads();
 
   // Publish this block's partials, then the last block merges.
   for (int64_t i = threadIdx.x; i < int64_t(rows) * select_k; i += blockDim.x)
-    partial_ws[int64_t(blockIdx.x) * rows * select_k + i] = best[i];
+    partial_ws[int64_t(blockIdx.x) * rows * select_k + i] =
+        uint64_t(best_hi[i]) << 32 | best_lo[i];
   __threadfence();
   __shared__ bool is_last;
   if (threadIdx.x == 0) {
@@ -661,16 +778,21 @@ __global__ void select_decode_kernel(
   if (!is_last) return;
 
   for (int r = 0; r < rows; ++r) {
-    for (int i = threadIdx.x; i < select_k; i += blockDim.x)
-      best[int64_t(r) * select_k + i] = kKeyMax;
+    for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+      best_hi[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+      best_lo[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+    }
     __syncthreads();
     MergeKeyFn fn{partial_ws, rows, select_k, r};
     select_topk_stream(fn, 0, int64_t(gridDim.x) * select_k,
-                       best + int64_t(r) * select_k, tile, select_k);
+                       best_hi + int64_t(r) * select_k,
+                       best_lo + int64_t(r) * select_k, tile_hi, tile_lo,
+                       select_k);
     __syncthreads();
     int* smem_count = reinterpret_cast<int*>(scratch + select_k);
     const int cnt = expand_from_best(
-        best + int64_t(r) * select_k, select_k, pos[r], kpool, max_selected,
+        best_hi + int64_t(r) * select_k, best_lo + int64_t(r) * select_k,
+        select_k, pos[r], kpool, max_selected,
         topk_out + int64_t(r) * max_selected, scratch, smem_count);
     if (threadIdx.x == 0) out_counts[r] = cnt;
     __syncthreads();
@@ -686,19 +808,26 @@ __global__ void select_prefill_kernel(const float* dot, int64_t dot_stride,
                                       int max_selected, int32_t* topk_out,
                                       int32_t* out_counts) {
   extern __shared__ uint64_t smem_u64[];
-  uint64_t* best = smem_u64;                // [select_k]
-  uint64_t* tile = best + select_k;         // [kSelectTile]
-  int32_t* scratch = reinterpret_cast<int32_t*>(tile + kSelectTile);
+  uint32_t* best_hi = reinterpret_cast<uint32_t*>(smem_u64);  // [select_k]
+  uint32_t* best_lo = best_hi + select_k;                     // [select_k]
+  uint32_t* tile_hi = best_lo + select_k;                     // [kSelectTile]
+  uint32_t* tile_lo = tile_hi + kSelectTile;                  // [kSelectTile]
+  int32_t* scratch = reinterpret_cast<int32_t*>(tile_lo + kSelectTile);
   int* smem_count = reinterpret_cast<int*>(scratch + select_k);
 
   const int r = blockIdx.x;
   const int64_t visible = (pos[r] + 1) / kpool;
-  for (int i = threadIdx.x; i < select_k; i += blockDim.x) best[i] = kKeyMax;
+  for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+    best_hi[i] = 0xFFFFFFFFu;
+    best_lo[i] = 0xFFFFFFFFu;
+  }
   __syncthreads();
   PrefillKeyFn fn{dot, w_folded, k_scale, dot_stride, heads, r};
-  select_topk_stream(fn, 0, min(visible, n_pools), best, tile, select_k);
+  select_topk_stream(fn, 0, min(visible, n_pools), best_hi, best_lo, tile_hi,
+                     tile_lo, select_k);
   __syncthreads();
-  const int cnt = expand_from_best(best, select_k, pos[r], kpool, max_selected,
+  const int cnt = expand_from_best(best_hi, best_lo, select_k, pos[r], kpool,
+                                   max_selected,
                                    topk_out + int64_t(r) * max_selected,
                                    scratch, smem_count);
   if (threadIdx.x == 0) out_counts[r] = cnt;
@@ -724,20 +853,46 @@ __global__ void absorb_q_kernel(const uint16_t* q, const uint16_t* kv_b,
   __shared__ uint16_t qs[256];
   for (int d = threadIdx.x; d < nope; d += blockDim.x) qs[d] = qh[d];
   __syncthreads();
-  const int col = threadIdx.x * 4;
-  float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  for (int d = 0; d < nope; ++d) {
-    const float qv = bf16_bits_to_float(qs[d]);
+  // Each thread owns 8 output columns (kv_lora % 8 == 0 validated at
+  // launch): one uint4 of W per row, native bf16x2->float2 conversion.
+  // 128 threads x 8 covers kv_lora == 512 (this checkpoint); smaller ranks
+  // idle their excess threads (an unguarded write would land in the next
+  // head's row — silent corruption, not an error).
+  const int col = threadIdx.x * 8;
+  if (col < kv_lora) {
+    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+#pragma unroll 4
+    for (int d = 0; d < nope; ++d) {
+      const float qv = bf16_bits_to_float(qs[d]);
+      const uint4 wv =
+          *reinterpret_cast<const uint4*>(wuk + int64_t(d) * kv_lora + col);
+      const uint32_t* w32 = reinterpret_cast<const uint32_t*>(&wv);
 #pragma unroll
-    for (int j = 0; j < 4; ++j)
-      acc[j] += qv * bf16_bits_to_float(wuk[int64_t(d) * kv_lora + col + j]);
+      for (int j = 0; j < 4; ++j) {
+        const float2 wf = bf16x2_to_float2(w32[j]);
+        acc[2 * j] += qv * wf.x;
+        acc[2 * j + 1] += qv * wf.y;
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+      out[col + j] = float_to_bf16_bits(acc[j]);
   }
-#pragma unroll
-  for (int j = 0; j < 4; ++j) out[col + j] = float_to_bf16_bits(acc[j]);
 }
 
 // One block per (row, split, head-group). Thread (h, g) within the block:
 // head h, dim group g (contiguous lanes, so the group reduce is shuffles).
+//
+// smem strides are PADDED to break bank conflicts: with the natural strides
+// (row 512 floats, group 64) every thread's address is congruent mod 32
+// banks — a 32-way conflict on every access (measured: 85% of this kernel's
+// cycles). Padding (16B-aligned for uint4/float4 vector access):
+//   gstride    = dslice + 8            (group windows in a padded row)
+//   row_stride = groups*gstride - 8 + 16
+//   scores_stride = kAttnTile + 1
+// A group's logical dims [g*dslice, g*dslice+dslice) live at padded offset
+// [g*gstride, g*gstride+dslice); the pad words between groups are never
+// read as data. All loads/stores/publish use this one mapping.
 __global__ void attn_partial_kernel(
     const uint16_t* q_tilde, const uint16_t* latent_cache,
     const int32_t* req_ids, const int32_t* topk, int topk_stride,
@@ -751,33 +906,74 @@ __global__ void attn_partial_kernel(
   const int groups = blockDim.x / hpb;
   const int h = h0 + threadIdx.x / groups;
   const int g = threadIdx.x % groups;
-  const int d0 = g * (kv_lora / groups);
   const int dslice = kv_lora / groups;
+  const int gstride = dslice + 8;
+  const int row_stride = groups * gstride + 8;
+  const int hl = h - h0;              // head local to this block
+  const int d0 = g * gstride;         // group window start (padded row)
 
   const int cnt = counts[r];
   const int chunk = (cnt + n_split - 1) / n_split;
   const int t_begin = s * chunk;
   const int t_end = min(cnt, t_begin + chunk);
 
+  // Empty split (padding rows, short contexts, counts far below the split
+  // granularity): publish zeroed partials and exit before any smem traffic
+  // — combine requires initialized values for every (row, split, head).
+  if (t_begin >= t_end) {
+    const int64_t base = (r * n_split + s) * local_heads;
+    for (int dd = threadIdx.x; dd < hpb * kv_lora; dd += blockDim.x) {
+      const int hh = dd / kv_lora;
+      const int cc = dd % kv_lora;
+      c_ws[(base + h0 + hh) * kv_lora + cc] = 0.0f;
+    }
+    if (threadIdx.x < hpb) {
+      m_ws[base + h0 + threadIdx.x] = -INFINITY;
+      l_ws[base + h0 + threadIdx.x] = 0.0f;
+    }
+    return;
+  }
+
   extern __shared__ uint16_t sm16[];
-  uint16_t* qt = sm16;  // [hpb * kv_lora] absorbed queries (head-local rows)
-  uint16_t* lat = qt + hpb * kv_lora;  // [kAttnTile * kv_lora] latent tile
-  float* c =
-      reinterpret_cast<float*>(lat + kAttnTile * kv_lora);  // [hpb * kv_lora]
-  float* scores = c + hpb * kv_lora;  // [hpb * kAttnTile]
-  float* l = scores + hpb * kAttnTile;  // [hpb], single-writer (g == 0)
+  uint16_t* qt = sm16;  // [hpb * row_stride] padded
+  uint16_t* lat = qt + hpb * row_stride;  // [kAttnTile * row_stride] padded
+  float* c = reinterpret_cast<float*>(lat + kAttnTile * row_stride);
+  float* scores = c + hpb * row_stride;  // [hpb * (kAttnTile + 1)]
+  float* l = scores + hpb * (kAttnTile + 1);  // [hpb], single writer
+  const int scores_stride = kAttnTile + 1;
+  const bool vec = (dslice % 8) == 0;  // vector paths need 8-wide groups
 
   // The running softmax max is per-lane register state: the group's
   // butterfly reduction leaves identical values in every lane, so no
-  // shared m exists to order (this replaces a smem m/m_new pair whose
-  // update needed a barrier between the readers and the writer).
+  // shared m exists to order.
   float m_reg = -INFINITY;
 
-  const int hl = h - h0;  // head index local to this block
-  for (int64_t i = threadIdx.x; i < int64_t(hpb) * kv_lora; i += blockDim.x)
-    qt[i] = q_tilde[(r * local_heads + h0) * kv_lora + i];
+  // Load q_tilde: logical dim gg*dslice+cc -> padded gg*gstride+cc.
+  if (vec) {
+    const int ds8 = dslice / 8;
+    for (int idx = threadIdx.x; idx < hpb * groups * ds8; idx += blockDim.x) {
+      const int hh = idx / (groups * ds8);
+      const int gidx = (idx / ds8) % groups;
+      const int c8 = idx % ds8;
+      *reinterpret_cast<uint4*>(qt + hh * row_stride + gidx * gstride +
+                                c8 * 8) =
+          *reinterpret_cast<const uint4*>(
+              &q_tilde[(r * local_heads + h0 + hh) * kv_lora +
+                       gidx * dslice + c8 * 8]);
+    }
+  } else {
+    for (int idx = threadIdx.x; idx < hpb * groups * dslice;
+         idx += blockDim.x) {
+      const int hh = idx / (groups * dslice);
+      const int gidx = (idx / dslice) % groups;
+      const int cc = idx % dslice;
+      qt[hh * row_stride + gidx * gstride + cc] =
+          q_tilde[(r * local_heads + h0 + hh) * kv_lora + gidx * dslice + cc];
+    }
+  }
   for (int i = threadIdx.x; i < hpb; i += blockDim.x) l[i] = 0.0f;
-  for (int64_t i = threadIdx.x; i < int64_t(hpb) * kv_lora; i += blockDim.x)
+  for (int64_t i = threadIdx.x; i < int64_t(hpb) * row_stride;
+       i += blockDim.x)
     c[i] = 0.0f;
   __syncthreads();
 
@@ -787,73 +983,131 @@ __global__ void attn_partial_kernel(
 
   for (int t0 = t_begin; t0 < t_end; t0 += kAttnTile) {
     const int n = min(kAttnTile, t_end - t0);
-    // Load the latent tile (bf16 rows gathered through the block table).
-    for (int i = threadIdx.x; i < n * kv_lora; i += blockDim.x) {
-      const int tt = i / kv_lora;
-      const int cc = i % kv_lora;
-      const int64_t tok = toks[t0 + tt];
-      const int32_t blk = bt[tok / block_tokens];
-      const int64_t phys =
-          int64_t(blk) * block_tokens + (tok % block_tokens);
-      lat[tt * kv_lora + cc] = latent_cache[phys * kv_lora + cc];
+    // Latent tile gather with the same padded mapping.
+    if (vec) {
+      const int ds8 = dslice / 8;
+      for (int idx = threadIdx.x; idx < n * groups * ds8; idx += blockDim.x) {
+        const int tt = idx / (groups * ds8);
+        const int gidx = (idx / ds8) % groups;
+        const int c8 = idx % ds8;
+        const int64_t tok = toks[t0 + tt];
+        const int32_t blk = bt[tok / block_tokens];
+        const int64_t phys =
+            int64_t(blk) * block_tokens + (tok % block_tokens);
+        *reinterpret_cast<uint4*>(&lat[int64_t(tt) * row_stride +
+                                       gidx * gstride + c8 * 8]) =
+            *reinterpret_cast<const uint4*>(
+                latent_cache + phys * kv_lora + gidx * dslice + c8 * 8);
+      }
+    } else {
+      for (int i = threadIdx.x; i < n * groups * dslice; i += blockDim.x) {
+        const int tt = i / (groups * dslice);
+        const int gidx = (i / dslice) % groups;
+        const int cc = i % dslice;
+        const int64_t tok = toks[t0 + tt];
+        const int32_t blk = bt[tok / block_tokens];
+        const int64_t phys =
+            int64_t(blk) * block_tokens + (tok % block_tokens);
+        lat[tt * row_stride + gidx * gstride + cc] =
+            latent_cache[phys * kv_lora + gidx * dslice + cc];
+      }
     }
     __syncthreads();
 
-    // Scores for this thread's head over the tile: every dim group computes
-    // its partial dot, then a butterfly group reduce — unlike a down-reduce,
-    // the butterfly leaves the identical sum in EVERY lane of the group, so
-    // the running max below is consistent per-lane with no shared state.
+    // Scores: each group lane dots its window, then a butterfly leaves the
+    // full sum in every lane (keeps the running max per-lane consistent).
     float tile_max = -INFINITY;
     for (int tt = 0; tt < n; ++tt) {
       float partial = 0.0f;
-      for (int dd = 0; dd < dslice; ++dd)
-        partial += bf16_bits_to_float(qt[hl * kv_lora + d0 + dd]) *
-                   bf16_bits_to_float(lat[tt * kv_lora + d0 + dd]);
+      if (vec) {
+        const uint4* q4 =
+            reinterpret_cast<const uint4*>(qt + hl * row_stride + d0);
+        const uint4* l4 =
+            reinterpret_cast<const uint4*>(lat + tt * row_stride + d0);
+#pragma unroll 2
+        for (int u = 0; u < dslice / 8; ++u)
+          partial = dot8_bf16(q4[u], l4[u], partial);
+      } else {
+        for (int dd = 0; dd < dslice; ++dd)
+          partial += bf16_bits_to_float(qt[hl * row_stride + d0 + dd]) *
+                     bf16_bits_to_float(lat[tt * row_stride + d0 + dd]);
+      }
 #pragma unroll
       for (int off = groups / 2; off > 0; off >>= 1)
         partial += __shfl_xor_sync(~0u, partial, off);
       const float score = partial * scale;
-      if (g == 0) scores[hl * kAttnTile + tt] = score;
+      if (g == 0) scores[hl * scores_stride + tt] = score;
       tile_max = fmaxf(tile_max, score);
     }
     __syncthreads();
 
-    // Online softmax update; m lives in registers, l in smem under its
-    // single writer — no barrier needed between reading the old max and
-    // committing the new one.
+    // Online softmax update; m in registers, l under its single writer.
     const float m_new = fmaxf(m_reg, tile_max);
     const float rescale = expf(m_reg - m_new);
     for (int dd = 0; dd < dslice; ++dd)
-      c[hl * kv_lora + d0 + dd] *= rescale;
+      c[hl * row_stride + d0 + dd] *= rescale;
     if (g == 0) {
       float ladd = 0.0f;
       for (int tt = 0; tt < n; ++tt)
-        ladd += expf(scores[hl * kAttnTile + tt] - m_new);
+        ladd += expf(scores[hl * scores_stride + tt] - m_new);
       l[hl] = l[hl] * rescale + ladd;
     }
     // c accumulation: probs round to bf16 (pinned; l stays unrounded).
+    // float4 RMW over the group window; element order preserved.
     for (int tt = 0; tt < n; ++tt) {
       const float p = bf16_bits_to_float(float_to_bf16_bits(
-          expf(scores[hl * kAttnTile + tt] - m_new)));
-      for (int dd = 0; dd < dslice; ++dd)
-        c[hl * kv_lora + d0 + dd] +=
-            p * bf16_bits_to_float(lat[tt * kv_lora + d0 + dd]);
+          expf(scores[hl * scores_stride + tt] - m_new)));
+      if (vec) {
+        const uint4* l4 =
+            reinterpret_cast<const uint4*>(lat + tt * row_stride + d0);
+        float* crow = c + hl * row_stride + d0;
+#pragma unroll 2
+        for (int u = 0; u < dslice / 8; ++u) {
+          const uint4 lv = l4[u];
+          const uint32_t* l32 = reinterpret_cast<const uint32_t*>(&lv);
+          const float2 w0 = bf16x2_to_float2(l32[0]);  // elems 8u+0,1
+          const float2 w1 = bf16x2_to_float2(l32[1]);  // 8u+2,3
+          const float2 w2 = bf16x2_to_float2(l32[2]);  // 8u+4,5
+          const float2 w3 = bf16x2_to_float2(l32[3]);  // 8u+6,7
+          float4 c4 = *reinterpret_cast<const float4*>(crow + u * 8);
+          c4.x += p * w0.x;
+          c4.y += p * w0.y;
+          c4.z += p * w1.x;
+          c4.w += p * w1.y;
+          float4 c4b = *reinterpret_cast<const float4*>(crow + u * 8 + 4);
+          c4b.x += p * w2.x;
+          c4b.y += p * w2.y;
+          c4b.z += p * w3.x;
+          c4b.w += p * w3.y;
+          *reinterpret_cast<float4*>(crow + u * 8) = c4;
+          *reinterpret_cast<float4*>(crow + u * 8 + 4) = c4b;
+        }
+      } else {
+        for (int dd = 0; dd < dslice; ++dd)
+          c[hl * row_stride + d0 + dd] +=
+              p * bf16_bits_to_float(lat[tt * row_stride + d0 + dd]);
+      }
     }
     m_reg = m_new;
     __syncthreads();
   }
 
-  // Publish partials.
+  // Publish partials: m/l by the group-0 lane, c gathered window by window
+  // back to logical column order.
   const int64_t base_m = (r * n_split + s) * local_heads + h;
   if (g == 0) {
     m_ws[base_m] = m_reg;
     l_ws[base_m] = l[hl];
   }
-  for (int dd = threadIdx.x; dd < hpb * kv_lora; dd += blockDim.x) {
-    const int hh = dd / kv_lora;
-    const int cc = dd % kv_lora;
-    c_ws[((r * n_split + s) * local_heads + h0 + hh) * kv_lora + cc] =
-        c[dd];
+  // Each head's row is published by its OWN `groups` lanes (strided by
+  // groups — the head has only `groups` threads, so a blockDim.x stride
+  // would copy 8x4=32 of the row's 512 columns and leave the rest stale).
+  float* crow_ws =
+      c_ws + (r * n_split + s) * local_heads * kv_lora + int64_t(h) * kv_lora;
+  for (int idx = g; idx < groups * dslice; idx += groups) {
+    const int gg = idx / dslice;
+    const int cc = idx % dslice;
+    crow_ws[gg * dslice + cc] = c[hl * row_stride + gg * gstride + cc];
   }
 }
 
@@ -861,14 +1115,17 @@ __global__ void attn_combine_kernel(const float* m_ws, const float* l_ws,
                                     const float* c_ws, int n_split,
                                     int local_heads, int kv_lora,
                                     float* c_out) {
+  // One block per (row, head): the old (row)-block form launched ONE block
+  // for single-row decode — a single SM merging 64 heads x 512 dims.
   const int64_t r = blockIdx.x;
+  const int h = blockIdx.y;
+  const int64_t base_m = (r * n_split) * local_heads + h;
+  float mhat = -INFINITY;
+  for (int s = 0; s < n_split; ++s)
+    mhat = fmaxf(mhat, m_ws[base_m + int64_t(s) * local_heads]);
   const int64_t total = int64_t(local_heads) * kv_lora;
-  for (int64_t i = int64_t(threadIdx.x); i < total; i += blockDim.x) {
-    const int h = int(i / kv_lora);
-    const int cc = int(i % kv_lora);
-    float mhat = -INFINITY;
-    for (int s = 0; s < n_split; ++s)
-      mhat = fmaxf(mhat, m_ws[(r * n_split + s) * local_heads + h]);
+  for (int64_t i = int64_t(h) * kv_lora + threadIdx.x;
+       i < int64_t(h + 1) * kv_lora; i += blockDim.x) {
     if (mhat == -INFINITY) {
       c_out[r * total + i] = 0.0f;  // empty row (padding)
       continue;
@@ -876,9 +1133,10 @@ __global__ void attn_combine_kernel(const float* m_ws, const float* l_ws,
     float num = 0.0f;
     float den = 0.0f;
     for (int s = 0; s < n_split; ++s) {
-      const float p = expf(m_ws[(r * n_split + s) * local_heads + h] - mhat);
-      num += p * c_ws[((r * n_split + s) * local_heads + h) * kv_lora + cc];
-      den += p * l_ws[(r * n_split + s) * local_heads + h];
+      const float p =
+          expf(m_ws[base_m + int64_t(s) * local_heads] - mhat);
+      num += p * c_ws[(r * n_split + s) * total + i];
+      den += p * l_ws[base_m + int64_t(s) * local_heads];
     }
     c_out[r * total + i] = (den > 0.0f) ? num / den : 0.0f;
   }
@@ -888,12 +1146,13 @@ __global__ void vout_gemm_kernel(const float* c, const uint16_t* kv_b,
                                  uint16_t* out, int local_heads, int nope,
                                  int v, int kv_lora) {
   // One block per (row, head); thread owns output rows, streaming W rows
-  // through L1. kv_b interleaved: head h's W_uv rows are
-  // [h*(nope+v)+nope, (h+1)*(nope+v)).
+  // through L1 in uint4 chunks (8 bf16 per load, native conversion — the
+  // scalar form was the bottleneck of the whole vout path). kv_b
+  // interleaved: head h's W_uv rows are [h*(nope+v)+nope, (h+1)*(nope+v)).
   const int64_t r = blockIdx.x;
   const int h = blockIdx.y;
   const int head_rows = nope + v;
-  __shared__ float cs[512];
+  __shared__ __align__(16) float cs[512];
   for (int cc = threadIdx.x; cc < kv_lora; cc += blockDim.x)
     cs[cc] = c[(r * local_heads + h) * kv_lora + cc];
   __syncthreads();
@@ -902,13 +1161,67 @@ __global__ void vout_gemm_kernel(const float* c, const uint16_t* kv_b,
   uint16_t* orow = out + (r * local_heads + h) * v;
   for (int d = threadIdx.x; d < v; d += blockDim.x) {
     float acc = 0.0f;
-    for (int cc = 0; cc < kv_lora; ++cc)
-      acc += bf16_bits_to_float(wuv[int64_t(d) * kv_lora + cc]) * cs[cc];
+    const uint4* w4 =
+        reinterpret_cast<const uint4*>(wuv + int64_t(d) * kv_lora);
+#pragma unroll 4
+    for (int u = 0; u < kv_lora / 8; ++u) {
+      const uint4 wv = w4[u];
+      const uint32_t* w32 = reinterpret_cast<const uint32_t*>(&wv);
+      const float4 cs4 = *reinterpret_cast<const float4*>(cs + u * 8);
+      const float4 cs4b = *reinterpret_cast<const float4*>(cs + u * 8 + 4);
+      const float2 w0 = bf16x2_to_float2(w32[0]);
+      const float2 w1 = bf16x2_to_float2(w32[1]);
+      const float2 w2 = bf16x2_to_float2(w32[2]);
+      const float2 w3 = bf16x2_to_float2(w32[3]);
+      // Element order cc = 8u..8u+7 preserved (same sequence as the scalar
+      // loop — accumulation order is part of the numeric contract).
+      acc += w0.x * cs4.x;
+      acc += w0.y * cs4.y;
+      acc += w1.x * cs4.z;
+      acc += w1.y * cs4.w;
+      acc += w2.x * cs4b.x;
+      acc += w2.y * cs4b.y;
+      acc += w3.x * cs4b.z;
+      acc += w3.y * cs4b.w;
+    }
     orow[d] = float_to_bf16_bits(acc);
   }
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------
+// Shared-memory opt-in
+// ---------------------------------------------------------------------
+
+namespace {
+
+// Populated by dsa_prepare_kernel_smem(); the launchers only read them.
+int g_select_smem_cap = -1;
+int g_attn_smem_cap = -1;
+
+}  // namespace
+
+void dsa_prepare_kernel_smem() {
+  if (g_select_smem_cap < 0) {
+    int cap = 0;
+    DGPP_CUDA_OK(cudaDeviceGetAttribute(
+        &cap, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0));
+    g_select_smem_cap = cap - 1024;  // leave room for static smem + alignment
+    DGPP_CUDA_OK(cudaFuncSetAttribute(
+        select_decode_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        g_select_smem_cap));
+  }
+  if (g_attn_smem_cap < 0) {
+    int cap = 0;
+    DGPP_CUDA_OK(cudaDeviceGetAttribute(
+        &cap, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0));
+    g_attn_smem_cap = cap - 1024;
+    DGPP_CUDA_OK(cudaFuncSetAttribute(
+        attn_partial_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        g_attn_smem_cap));
+  }
+}
 
 // ---------------------------------------------------------------------
 // Launchers
@@ -1039,19 +1352,11 @@ void dsa_select_decode(const void* q_fp8, const float* w_folded,
   const size_t smem = size_t(rows) * select_k * 8 + kSelectTile * 8 +
                       size_t(rows) * heads * 128 +
                       size_t(rows) * heads * 4 + (select_k + 1) * 4;
-  static int smem_cap = -1;
-  if (smem_cap < 0) {
-    cudaDeviceGetAttribute(&smem_cap, cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                           0);
-    smem_cap -= 1024;  // leave room for static smem + alignment
-    DGPP_CUDA_OK(cudaFuncSetAttribute(
-        select_decode_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        smem_cap));
-  }
-  if (smem > size_t(smem_cap)) DGPP_CUDA_OK(cudaErrorInvalidValue);
+  dsa_prepare_kernel_smem();
+  if (smem > size_t(g_select_smem_cap)) DGPP_CUDA_OK(cudaErrorInvalidValue);
   const int blocks = grid_blocks > 0 ? grid_blocks : 48;
   DGPP_CUDA_OK(cudaMemsetAsync(counter_ws, 0, sizeof(int32_t), stream));
-  select_decode_kernel<<<blocks, 128, smem, stream>>>(
+  select_decode_kernel<<<blocks, 256, smem, stream>>>(
       static_cast<const uint8_t*>(q_fp8), w_folded, req_ids, pos, rows,
       block_tables, blocks_per_request,
       static_cast<const uint8_t*>(index_k), index_scale, pools_per_block,
@@ -1071,7 +1376,7 @@ void dsa_select_prefill(const float* dot, int64_t dot_stride,
   if (select_k > kSelectTile / 2) DGPP_CUDA_OK(cudaErrorInvalidValue);
   const size_t smem =
       size_t(select_k) * 8 + kSelectTile * 8 + (select_k + 1) * 4;
-  select_prefill_kernel<<<unsigned(rows), 128, smem, stream>>>(
+  select_prefill_kernel<<<unsigned(rows), 256, smem, stream>>>(
       dot, dot_stride, w_folded, k_scale, pos, rows, n_pools, heads, select_k,
       kpool, max_selected, topk_out, out_counts);
   DGPP_CUDA_OK(cudaGetLastError());
@@ -1081,8 +1386,10 @@ void dsa_absorb_q(const void* q, const void* kv_b, void* q_tilde,
                   int64_t rows, int local_heads, int nope, int v, int kv_lora,
                   cudaStream_t stream) {
   if (rows <= 0) return;
-  if (nope > 256 || kv_lora % 4 != 0 || 512 % kv_lora != 0)
-    DGPP_CUDA_OK(cudaErrorInvalidValue);  // static q smem + column mapping
+  // kv_lora % 8: uint4 weight streaming (8 bf16 per load); 512 % kv_lora:
+  // static q smem + column mapping.
+  if (nope > 256 || kv_lora % 8 != 0 || 512 % kv_lora != 0)
+    DGPP_CUDA_OK(cudaErrorInvalidValue);
   dim3 grid{unsigned(rows), unsigned(local_heads)};
   absorb_q_kernel<<<grid, 128, 0, stream>>>(
       static_cast<const uint16_t*>(q), static_cast<const uint16_t*>(kv_b),
@@ -1098,24 +1405,28 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
                       int blocks_per_request, float scale, float* m_ws,
                       float* l_ws, float* c_ws, cudaStream_t stream) {
   if (rows <= 0) return;
-  const int hpb = local_heads < 16 ? local_heads : 16;  // smem bound
-  if (local_heads % hpb != 0 || 128 % hpb != 0 || 128 / hpb > 32)
+  // hpb in {1,2,4,8,16}: local_heads must divide across head-group blocks,
+  // and blockDim(128)/hpb gives the per-head dim groups (the butterfly
+  // reduce handles any power-of-two group count up to blockDim). kv_lora
+  // must give every group a nonempty 8-multiple slice: kv_lora >= groups
+  // and kv_lora % groups must keep the vec path's 8-wide windows aligned.
+  const int hpb = local_heads < 16 ? local_heads : 16;
+  if (local_heads % hpb != 0 || 128 % hpb != 0)
     DGPP_CUDA_OK(cudaErrorInvalidValue);
   if (kv_lora % 8 != 0) DGPP_CUDA_OK(cudaErrorInvalidValue);
-  const size_t smem = (size_t(hpb) * kv_lora * 2 +
-                       kAttnTile * kv_lora * 2 + hpb * kv_lora * 4 +
-                       hpb * kAttnTile * 4 + hpb * 4 + 15) &
+  if (kv_lora < 128 / hpb) DGPP_CUDA_OK(cudaErrorInvalidValue);
+  // Padded strides (see the kernel's bank-conflict note): must mirror the
+  // kernel's gstride/row_stride arithmetic exactly.
+  const int groups = 128 / hpb;
+  const int dslice = kv_lora / groups;
+  const int gstride = dslice + 8;
+  const int row_stride = groups * gstride + 8;
+  const size_t smem = (size_t(hpb) * row_stride * 2 +
+                        kAttnTile * row_stride * 2 + hpb * row_stride * 4 +
+                        hpb * (kAttnTile + 1) * 4 + hpb * 4 + 15) &
                       ~size_t(15);
-  static int smem_cap = -1;
-  if (smem_cap < 0) {
-    cudaDeviceGetAttribute(&smem_cap, cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                           0);
-    smem_cap -= 1024;  // static smem + alignment margin
-    DGPP_CUDA_OK(cudaFuncSetAttribute(
-        attn_partial_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        smem_cap));
-  }
-  if (smem > size_t(smem_cap)) DGPP_CUDA_OK(cudaErrorInvalidValue);
+  dsa_prepare_kernel_smem();
+  if (smem > size_t(g_attn_smem_cap)) DGPP_CUDA_OK(cudaErrorInvalidValue);
   dim3 grid{unsigned(rows), unsigned(n_split),
             unsigned(local_heads / hpb)};
   attn_partial_kernel<<<grid, 128, smem, stream>>>(
@@ -1130,7 +1441,9 @@ void dsa_attn_combine(const float* m_ws, const float* l_ws, const float* c_ws,
                       int rows, int n_split, int local_heads, int kv_lora,
                       float* c_out, cudaStream_t stream) {
   if (rows <= 0) return;
-  attn_combine_kernel<<<unsigned(rows), 128, 0, stream>>>(
+  // One block per (row, head): 64+ blocks instead of `rows`.
+  dim3 grid{unsigned(rows), unsigned(local_heads)};
+  attn_combine_kernel<<<grid, 128, 0, stream>>>(
       m_ws, l_ws, c_ws, n_split, local_heads, kv_lora, c_out);
   DGPP_CUDA_OK(cudaGetLastError());
 }
@@ -1139,7 +1452,9 @@ void dsa_vout_gemm(const void* c, const void* kv_b, void* out,
                    int64_t rows, int local_heads, int nope, int v,
                    int kv_lora, cudaStream_t stream) {
   if (rows <= 0) return;
-  if (kv_lora > 512) DGPP_CUDA_OK(cudaErrorInvalidValue);  // static c smem
+  // kv_lora % 8: uint4 weight streaming; <= 512: static c smem.
+  if (kv_lora > 512 || kv_lora % 8 != 0)
+    DGPP_CUDA_OK(cudaErrorInvalidValue);
   dim3 grid{unsigned(rows), unsigned(local_heads)};
   vout_gemm_kernel<<<grid, 128, 0, stream>>>(
       static_cast<const float*>(c), static_cast<const uint16_t*>(kv_b),

@@ -119,7 +119,10 @@ target_link_libraries(dgpp_models_kda PUBLIC dgpp_kernels dgpp_loaders CUDA::cud
 dgpp_set_common(dgpp_models_kda)
 
 add_library(dgpp_models_dsa STATIC
-  src/models/dsa_reference.cpp)
+  src/models/dsa_reference.cpp
+  src/models/dsa_dump.cpp
+  src/models/dsa_state.cpp
+  src/models/dsa_layer.cu)
 target_link_libraries(dgpp_models_dsa PUBLIC dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_dsa)
 
@@ -161,12 +164,25 @@ dgpp_set_common(kda_test)
 add_test(NAME kda_test COMMAND kda_test)
 set_tests_properties(kda_test PROPERTIES SKIP_RETURN_CODE 2)
 
-add_executable(dsa_test tests/cuda/dsa_test.cu)
+add_executable(dsa_test
+  tests/cuda/dsa_test.cu
+  tests/cuda/dsa_dump_parity.cpp)
 target_include_directories(dsa_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(dsa_test PRIVATE dgpp_models_dsa dgpp_models_kda CUDA::cudart Threads::Threads)
 dgpp_set_common(dsa_test)
 add_test(NAME dsa_test COMMAND dsa_test)
 set_tests_properties(dsa_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# DSA reference-dump parity: generate a pure-python oracle dump, then run
+# the layer against it (gen-torch is the manual deployment test).
+add_test(NAME dsa_dump_generate
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsa_reference_dump.py
+          gen-pure --out ${CMAKE_CURRENT_BINARY_DIR}/dsa_pure_ref.dsadump)
+add_test(NAME dsa_dump_test
+  COMMAND dsa_test --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsa_pure_ref.dsadump)
+set_tests_properties(dsa_dump_test PROPERTIES
+  DEPENDS dsa_dump_generate SKIP_RETURN_CODE 2)
 
 # Reference-dump parity: generate a pure-python oracle dump, then run the
 # layer against it. The torch backend (real checkpoint slices) is a manual
@@ -208,6 +224,10 @@ dgpp_set_common(micro_gemm_peak)
 add_executable(kda_bench benchmarks/micro/kda_bench.cu src/common/log.cpp)
 target_link_libraries(kda_bench PRIVATE dgpp_models_kda CUDA::cudart CUDA::cublasLt)
 dgpp_set_common(kda_bench)
+
+add_executable(dsa_bench benchmarks/micro/dsa_bench.cu src/common/log.cpp)
+target_link_libraries(dsa_bench PRIVATE dgpp_models_dsa CUDA::cudart CUDA::cublasLt)
+dgpp_set_common(dsa_bench)
 
 if(DGPP_ENABLE_IBV)
   add_executable(micro_gdr_probe benchmarks/micro/gdr_probe.cpp src/common/log.cpp)
