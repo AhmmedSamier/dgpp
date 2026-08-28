@@ -110,8 +110,10 @@ Delivered:
    field is validated before any payload byte lands.
 5. Reference-dump harness (`tools/kda_reference_dump.py`): a stdlib-only
    pure-python oracle wired into CTest, and a torch backend that reads real
-   checkpoint slices from safetensors (manual deployment test where the
-   checkpoint lives).
+   checkpoint slices from safetensors (executed 2026-08-28 on this box
+   against revision a160e2291674d9e3e92e98fd82faa2544a2867a3, layer 0 —
+   parity clean; the runner applies backend-aware budgets since the torch
+   oracle is fp32, not double. Record in the results file).
 
 Exit evidence (recorded in `benchmarks/results/2026-08-27-kda-m2.md`):
 
@@ -236,7 +238,15 @@ Exit criteria:
 - measured cache bytes are within 2% of the formula plus reported metadata;
   ✓ (+0.01% at deployment scale)
 - layer output parity passes on real checkpoint slices. ✓ (pure backend in
-  CTest; gen-torch documented for the checkpoint box)
+  CTest; torch backend executed on this box against revision
+  a160e2291674d9e3e92e98fd82faa2544a2867a3, layer 3: latent cache within a
+  bf16 ulp, index cache within one e4m3 ulp, layer output within the fp32
+  oracle budget, top-k exact at 32 and 2,052 tokens — the latter crossing
+  the top-k horizon with 0 flips. First execution surfaced four
+  never-executed-path bugs in the tool, most instructively a raw-byte
+  index_k dot that tolerance absorbed as a single boundary swap; the dump
+  runner now certifies flips with the near-tie audit instead of tolerating
+  them. Record in benchmarks/results/2026-08-28-dsa-m3-layer.md)
 
 ## M4 — Full GLM single-node diagnostic assembly
 

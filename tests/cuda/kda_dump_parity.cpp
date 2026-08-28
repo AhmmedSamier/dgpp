@@ -102,10 +102,17 @@ int run_kda_dump_parity(const std::string& path) {
     dconv.download(got_conv.data(), dconv.bytes);
 
     const std::string tag = " [" + dump.backend() + "]";
-    check_tensor("dump layer_out" + tag, got_out, dump.tensor("layer_out"), 2,
-                 2e-2, 0.02);
-    check_tensor("dump core_out" + tag, got_core, dump.tensor("core_out"), 2,
-                 2e-2, 0.02);
+    // The pure backend is a double-precision oracle; the torch backend
+    // runs the same pinned equations in fp32 with bf16 boundaries — the
+    // same cross-implementation drift class the DSA dump runner budgets
+    // for (8 ulps / 5% mismatch). Pure keeps its tighter budget.
+    const bool torch_backend = dump.backend() == "torch";
+    const int out_ulps = torch_backend ? 8 : 2;
+    const double out_mismatch = torch_backend ? 0.05 : 0.02;
+    check_tensor("dump layer_out" + tag, got_out, dump.tensor("layer_out"),
+                 out_ulps, 2e-2, out_mismatch);
+    check_tensor("dump core_out" + tag, got_core, dump.tensor("core_out"),
+                 out_ulps, 2e-2, out_mismatch);
     {
       const auto& tv = dump.tensor("recurrent_state_out");
       std::vector<float> want(tv.numel());

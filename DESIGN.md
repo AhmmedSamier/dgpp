@@ -501,7 +501,17 @@ inputs (bitwise, tensor-core dots included) and measures the boundary gap
 against the row's actual cross-implementation noise. This discipline caught
 two reference bugs that plain tolerance would have absorbed into "FP noise"
 — an out-of-bounds tail-seed read for decode batches shorter than kpool and
-a gate-indexing typo — while the device path was correct both times.
+a gate-indexing typo — while the device path was correct both times. The
+reference-dump parity runner carries the same audit for its corpora: a
+flipped row is certified from the device's probes AND the dump's own
+recorded tensors before it can pass. That guard earned its keep on the
+first real-checkpoint run: the dump tool's torch backend paired decoded
+q_fp8 with raw uint8 index_k bytes, and because e4m3 is monotone in the raw
+byte within each sign class, the corrupted logits preserved near-correct
+rankings — the failure was a single boundary swap that the structural
+budget happily absorbed while the engine was right and the reference was
+wrong. A near-miss bug that survives a tolerance is still a bug; only a
+certification path can reject it.
 Instrumentation (in-kernel clock64 phase timers, removed after use) is the
 fastest path to a *mechanism* for a slow kernel; profile first, then fix the
 measured bottleneck (the attention kernel's 85% bank-conflict share was

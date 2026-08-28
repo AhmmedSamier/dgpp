@@ -108,7 +108,11 @@ CTest currently runs:
   head-slice vs TP1, and a real-geometry chunked prefill + decode smoke;
 - DSA reference-dump parity: a pure-python oracle dump (bit-exact fp8 codec
   cross-checked against the C++ encoder) exercised through the full layer —
-  latent cache bitwise, index cache within one e4m3 ulp, top-k exact;
+  latent cache bitwise, index cache within one e4m3 ulp, top-k exact — plus
+  the torch backend against real checkpoint slices (executed on this box at
+  32 and 2,052 tokens, the latter crossing the top-k horizon with zero
+  flips); any flipped row is certified as a measured boundary near tie by
+  the audit, never absorbed by tolerance;
 - CUDA system-scope flag ordering, payload visibility, inactivity watchdog,
   and post-watchdog recovery;
 - Python checkpoint classification and exact expert-occupancy tests.

@@ -679,63 +679,54 @@ def gen_torch(args):
     def w(name):
         return load_tensor(entries, "%s.%s" % (prefix, name), torch)
 
-    # Checkpoint names -> engine layout. Indexer weights are BF16 (possibly
-    # replicated); core q_a/kv_a/q_b/kv_b/o_proj may be FP8 with block
-    # scales — dequantize to BF16 for the reference (M3 consumes BF16).
-    qkv_a_w = w("q_a_proj.weight")
-    kv_a_w = w("kv_a_proj_with_mqa.weight")
-    q_b_w = w("q_b_proj.weight")
-    kv_b_w = w("kv_b_proj.weight")
-    o_proj_w = w("o_proj.weight")
-    wq_b = w("indexer.wq_b")
-    wk = w("indexer.wk")
-    wp = w("indexer.weights_proj")
-    gate = w("indexer.gate")
-    k_norm = w("indexer.k_norm")
-    ape = w("indexer.ape")
-
-    def dequant(t):
-        """FP8 block-dequant to bf16 (128x128 blocks, weight_scale_inv)."""
-        if t.dtype == torch.bfloat16:
-            return t
-        name_scale = None  # caller supplies scale tensor separately
-        raise ValueError("dequant requires the block scale; use dequant_with")
+    # Checkpoint names -> engine layout. Indexer weights are BF16; core
+    # q_a/kv_a/q_b/o_proj are FP8 with 128x128 block scales — dequantize
+    # to BF16 for the reference (M3 consumes BF16). Checkpoint names:
+    # indexer projections are `.<name>.weight`, but the gate/ape/k_norm
+    # parameter tensors have no `.weight` suffix (they are plain tensors,
+    # not nn.Linear modules).
+    wq_b = w("indexer.wq_b.weight")
+    wk = w("indexer.wk.weight")
+    wp = w("indexer.weights_proj.weight")
+    gate = w("indexer.index_kpool_compress_gate")
+    k_norm_w = w("indexer.k_norm.weight")
+    k_norm_b = w("indexer.k_norm.bias")
+    ape = w("indexer.index_kpool_compress_ape")
 
     def dequant_with(t, scale_inv):
-        """E4M3 [N,K] + F32 scale_inv [N/128, K/128] -> bf16 [N,K]."""
+        """E4M3 [N,K] * F32 scale_inv [ceil(N/128), ceil(K/128)] -> bf16.
+
+        `weight_scale_inv` is the inverse of the quantization scale, so
+        dequantization MULTIPLIES (verified against the checkpoint: mul
+        gives std 0.015, div gives 5.6e5 on q_a_proj).
+        """
         if t.dtype == torch.bfloat16:
             return t
         n, k = t.shape
+        if tuple(scale_inv.shape) != (-(-n // 128), -(-k // 128)):
+            raise ValueError(
+                "scale_inv shape %s does not tile %s in 128x128 blocks"
+                % (tuple(scale_inv.shape), (n, k)))
         t = t.float()
         out = torch.empty(n, k, dtype=torch.bfloat16)
         for r in range(0, n, 128):
             for c in range(0, k, 128):
-                rb, cb = r // 128, c // 128
-                blk = t[r:r + 128, c:c + 128] / scale_inv[rb, cb].float()
+                blk = t[r:r + 128, c:c + 128] * scale_inv[r // 128, c // 128].float()
                 out[r:r + 128, c:c + 128] = blk.bfloat16()
         return out
 
-    def scale_for(t):
-        n, k = t.shape
-        name = "%s.weight_scale_inv" % None
-        return name
-
-    # Block scales live next to the weights.
+    # Block scales live next to the weights as `<name>_scale_inv`.
     def dq(name):
         t = w(name)
         if t.dtype == torch.bfloat16:
             return t
-        s = w("%s_scale_inv" % name) if ("%s_scale_inv" % name) in entries \
-            else w("%s.weight_scale_inv" % name)
-        return dequant_with(t, s)
+        return dequant_with(t, w("%s_scale_inv" % name))
 
     qkv_a = torch.cat([dq("q_a_proj.weight"), dq("kv_a_proj_with_mqa.weight")],
                       dim=0).contiguous()
     q_b = dq("q_b_proj.weight")
     kv_b = dq("kv_b_proj.weight")
     o_proj = dq("o_proj.weight")
-    k_norm_w = k_norm[0].contiguous() if k_norm.dim() == 2 else k_norm.contiguous()
-    k_norm_b = k_norm[1].contiguous() if k_norm.dim() == 2 else torch.zeros_like(k_norm_w)
 
     tokens = args.tokens
     torch.manual_seed(args.seed)
@@ -794,12 +785,16 @@ def gen_torch(args):
         h = h * (1.0 / math.sqrt(128.0))
         h = h.bfloat16().float()  # bf16 round after rotation
         absmax = h.abs().amax(dim=1, keepdim=True).clamp_min(1e-4)
-        # power-of-two scale by bit manipulation
-        e = torch.floor(torch.log2(absmax / 448.0))
-        exact = (absmax / 448.0) == torch.pow(2.0, torch.floor(torch.log2(absmax / 448.0)))
-        scale = torch.pow(2.0, torch.where(exact, e, e + 1))
+        # Power-of-two scale via the shared exact-bit helper: torch.log2
+        # rounds across power-of-two boundaries (the DESIGN 7.2 hazard), so
+        # scales are computed per row on python floats, exactly.
+        scales = [next_pow2_at_or_above(a.item() * (1.0 / 448.0))
+                  for a in absmax.flatten()]
+        scale = torch.tensor(scales, dtype=torch.float32).unsqueeze(1)
         q = (h / scale)
-        # saturating e4m3 encode via torch's cast
+        # Saturating e4m3 encode via torch's cast — cross-checked bit-exact
+        # against the hand codec (fp8_bits) over a 1.1M-value sweep
+        # including subnormals and the +-448 boundary.
         q = q.clamp(-448, 448).to(torch.float8_e4m3fn)
         return q, scale.squeeze(1).float()
 
@@ -840,9 +835,7 @@ def gen_torch(args):
         h = h * (1.0 / math.sqrt(128.0))
         h = h.bfloat16().float()
         absmax = h.abs().max().clamp_min(1e-4)
-        e = math.floor(math.log2(absmax.item() / 448.0))
-        v = absmax.item() / 448.0
-        sc = math.ldexp(1.0, e if v == math.ldexp(1.0, e) else e + 1)
+        sc = next_pow2_at_or_above(absmax.item() * (1.0 / 448.0))
         codes = [int(c) for c in
                  torch.clamp(h / sc, -448, 448).to(torch.float8_e4m3fn
                                                    ).view(torch.uint8).tolist()]
@@ -865,7 +858,12 @@ def gen_torch(args):
             for i in range(pos + 1):
                 row[i] = i
         else:
-            ik_f = index_k_t[:visible].float()
+            # Decode the fp8 codes before the dot: `.float()` on the raw
+            # uint8 tensor would pair decoded q with raw byte values —
+            # rankings stay nearly correct (e4m3 is monotone in the byte
+            # within each sign class) and the error only surfaces as
+            # single boundary swaps, which tolerance absorbs silently.
+            ik_f = index_k_t[:visible].view(torch.float8_e4m3fn).float()
             is_f = index_scale_t[:visible]
             dots = torch.einsum("hd,pd->hp", q_fp8_f[t], ik_f)
             logits = (w_folded[t].unsqueeze(1) * is_f.unsqueeze(0) *
@@ -886,7 +884,7 @@ def gen_torch(args):
         lat = latent[toks].float()
         for h in range(heads):
             w_uk = kv_b[h * head_rows:h * head_rows + nope].float()
-            q_tilde = (q_mla[t, h * nope:(h + 1) * nope].float() @ w_uk.T
+            q_tilde = (q_mla[t, h * nope:(h + 1) * nope].float() @ w_uk
                        ).bfloat16().float()
             scores = (lat @ q_tilde) * attn_scale
             mx = scores.max()
