@@ -69,8 +69,15 @@ DGPP_HD inline float bf16_bits_to_float(uint16_t b) {
 }
 
 DGPP_HD inline uint16_t float_to_bf16_bits(float f) {
-  // Round-to-nearest-even.
+  // Round-to-nearest-even. NaN needs an explicit path: the integer rounding
+  // below assumes a finite exponent, but hardware NaN payloads (e.g. the
+  // all-ones NaN that FMUL produces on some paths) carry far enough that
+  // u += 0x7fff overflows into the sign bit, silently converting NaN to
+  // -0.0. Canonical quiet NaN with the sign preserved — the same policy
+  // the fp8 encoder documents.
   uint32_t u = std::bit_cast<uint32_t>(f);
+  if ((u & 0x7FFFFFFFu) > 0x7F800000u)
+    return static_cast<uint16_t>(((u >> 16) & 0x8000u) | 0x7FC0u);
   uint32_t lsb = (u >> 16) & 1;
   u += 0x7fffu + lsb;
   return static_cast<uint16_t>(u >> 16);

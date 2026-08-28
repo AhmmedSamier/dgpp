@@ -88,3 +88,44 @@ DGPP_TEST(fp8_e4m3_boundary_semantics) {
   if (dec(0x01) <= 0.f || dec(0x01) >= 0.0025f)
     throw std::runtime_error("min denormal");
 }
+
+DGPP_TEST(bf16_round_preserves_nan_across_hardware_payloads) {
+  // The integer RNE trick (u += 0x7fff + lsb) assumes a finite exponent.
+  // Hardware-produced NaNs — e.g. the all-ones payload FMUL emits — carry
+  // far enough that the add overflows into the sign bit, which once
+  // silently converted NaN to -0.0. Every NaN payload must map to the
+  // canonical quiet NaN with sign preserved (found via the M4 scale-gemm
+  // NaN-policy parity case; the raw mma propagates NaN, so the bug lived
+  // entirely in this conversion).
+  using dgpp::float_to_bf16_bits;
+  const float nan_cases[] = {
+      std::nanf(""),                       // canonical 0x7FC00000
+      dgpp::bf16_bits_to_float(0x7FC0),    // bf16 NaN widened
+      std::bit_cast<float>(0x7FFFFFFFu),   // all-ones payload (FMUL output)
+      std::bit_cast<float>(0xFFC00001u),   // negative, odd payload
+      std::bit_cast<float>(0x7F800001u),   // signaling NaN, tiny payload
+      std::bit_cast<float>(0xFF800001u),   // negative signaling NaN
+  };
+  for (float v : nan_cases) {
+    if (!std::isnan(v)) throw std::runtime_error("fixture bug: non-NaN case");
+    const uint16_t bits = float_to_bf16_bits(v);
+    const uint16_t want =
+        (std::bit_cast<uint32_t>(v) >> 31) ? 0xFFC0 : 0x7FC0;
+    if (bits != want) {
+      std::printf("NaN 0x%08x -> 0x%04x (want 0x%04x)\n",
+                  std::bit_cast<uint32_t>(v), bits, want);
+      throw std::runtime_error("bf16 NaN not canonicalized");
+    }
+  }
+  // Finite boundary behavior is unchanged: FLT_MAX rounds to bf16 inf,
+  // and inf stays inf.
+  const uint16_t flt_max =
+      float_to_bf16_bits(std::bit_cast<float>(0x7F7FFFFFu));
+  if (flt_max != 0x7F80) throw std::runtime_error("FLT_MAX must round to inf");
+  const uint16_t inf_bits =
+      float_to_bf16_bits(std::bit_cast<float>(0x7F800000u));
+  if (inf_bits != 0x7F80) throw std::runtime_error("inf must stay inf");
+  const uint16_t ninf_bits =
+      float_to_bf16_bits(std::bit_cast<float>(0xFF800000u));
+  if (ninf_bits != 0xFF80) throw std::runtime_error("-inf must stay -inf");
+}

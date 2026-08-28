@@ -102,7 +102,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/doll_attention.cu
   src/kernels/kda.cu
   src/kernels/dsa.cu
-  src/kernels/fp8_dequant.cu)
+  src/kernels/fp8_dequant.cu
+  src/kernels/scale_gemm.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
 
@@ -209,6 +210,18 @@ target_link_libraries(glm_loader_test PRIVATE dgpp_models_glm_loader CUDA::cudar
 dgpp_set_common(glm_loader_test)
 add_test(NAME glm_loader_test COMMAND glm_loader_test)
 set_tests_properties(glm_loader_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# Scale-aware GEMM parity (M4): block edges, saturation, NaN policy;
+# --checkpoint-dir adds real-checkpoint slices (manual deployment test —
+# the checkpoint-runner TU is host-only, minijson does not mix with nvcc).
+add_executable(scale_gemm_test
+  tests/cuda/scale_gemm_test.cu
+  tests/cuda/scale_gemm_checkpoint.cpp)
+target_include_directories(scale_gemm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(scale_gemm_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cudart)
+dgpp_set_common(scale_gemm_test)
+add_test(NAME scale_gemm_test COMMAND scale_gemm_test)
+set_tests_properties(scale_gemm_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # DSA reference-dump parity: generate a pure-python oracle dump, then run
 # the layer against it (gen-torch is the manual deployment test).

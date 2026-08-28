@@ -131,3 +131,71 @@ correctness work fits a single 128 GB node without the TP placement.
 
 Verification: ci-local 11/11 (new glm_loader_test entry), ASan/UBSan clean
 (unit 34/34, loader 5/5), compute-sanitizer memcheck 0 errors.
+
+## Scale-aware GEMM (deliverable 3)
+
+`src/kernels/scale_gemm.{hpp,cu}`: `launch_scale_gemm_bf16` computes
+D = Act(bf16) x W^T with W consumed NATIVELY as E4M3 payload + F32 128x128
+block scales — no BF16 weight materialization, no persistent scratch. The
+numerics follow the pinned reference semantics (dequantized weights, bf16
+math), deliberately NOT DeepSeek-style dynamic activation quantization:
+quantizing activations would change the semantics every M2/M3 reference
+pinned.
+
+Design: BM=16/BN=64/BK=32 tiles, 8 warps (one m16n8k16 group each), manual
+PTX fragment packing from padded smem, bf16 mma with fp32 accumulation,
+fixed k-order (deterministic, graph-capturable). The tile geometry divides
+the 128-wide scale block exactly, so every stage applies ONE scalar scale
+(decode x scale, one bf16 round — bit-identical to the dequant bridge's
+weight tiles); ragged N/K tails read the true last scale row/col with
+masked loads. OOB tiles zero-fill; k=0 zeroes the output.
+
+### Parity results (dual oracle, both required)
+
+- **strict** (weights bf16-rounded exactly as the kernel rounds them,
+  result bf16-rounded, fp64 accumulation): isolates the kernel —
+  l2_rel 3.4e-5..2.9e-4, ZERO elementwise mismatches on every case
+  (2-ulp/1e-3-floor budget, l2 1e-3).
+- **semantic** (true dequant in fp64): pins the DESIGN §4 contract —
+  l2_rel 1.7e-3..2.6e-3 across every case, i.e. exactly the bf16
+  weight-rounding RMS (2^-8/sqrt(3) ~ 2.25e-3); zero mismatches.
+
+Cases: full blocks straddling scale boundaries (M29xN384xK256), ragged
+everything (M17xN1000xK1000), decode shape at real q_a geometry (M=1,
+N=1536, K=4096), all-448 payloads x 1e30 scales (products ~1e35),
+subnormal-minimum payloads x 2^-20 scales, bitwise determinism across
+runs, and NaN policy: e4m3fn 0x7F decodes to NaN, propagates through the
+fp32 accumulator to exactly the poisoned columns (mma propagates NaN —
+verified with a raw asm probe), all other outputs finite.
+
+### Real-checkpoint slices (manual deployment run)
+
+```
+$ scale_gemm_test --checkpoint-dir <snapshot>
+[ OK ] q_b_proj.weight   strict    l2_rel=9.6e-05 mismatches=0/786432
+[ OK ] q_b_proj.weight   semantic  l2_rel=0.00232 mismatches=0/786432
+[ OK ] o_proj.weight     strict    l2_rel=2.9e-04 mismatches=0/196608
+[ OK ] o_proj.weight     semantic  l2_rel=0.00232 mismatches=0/196608
+[ OK ] down_proj.weight  strict    l2_rel=1.0e-04 mismatches=0/196608
+[ OK ] down_proj.weight  semantic  l2_rel=0.00243 mismatches=0/196608
+```
+
+q_b [16384,1536] (12 scale columns), o_proj [4096,16384] (128 scale rows),
+expert down_proj [4096,2048] (the shape 42 layers x 288 experts repeat),
+M=48, ~6 s total including host oracles.
+
+### The NaN-policy case caught a real latent bug
+
+`float_to_bf16_bits` converted NaN to **-0.0**: the integer RNE trick
+(`u += 0x7fff + lsb`) assumes a finite exponent, and hardware FMUL on this
+platform returns an all-ones-payload NaN (0x7FFFFFFF), whose rounding
+carry overflows into the sign bit. Every oracle and kernel in the repo
+shared that converter; nothing had ever fed it a NaN, so M2/M3 never
+caught it. Fixed with an explicit NaN branch (canonical quiet NaN, sign
+preserved — the same policy the fp8 encoder documents) plus a unit test
+pinning six NaN payloads and the finite boundaries (FLT_MAX -> inf
+unchanged). Found by the deliverable's own "NaN/Inf policy" case, which is
+the point of having one.
+
+Verification: ci-local 12/12 (new scale_gemm_test entry), unit 35/35,
+ASan/UBSan clean, compute-sanitizer memcheck 0 errors.
