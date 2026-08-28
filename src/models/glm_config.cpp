@@ -250,6 +250,7 @@ GlmTextConfig GlmTextConfig::parse(const minijson::Value& tc) {
   (void)c.kda_config();
   (void)c.dsa_config();
   (void)c.mhc_config();
+  (void)c.moe_config();
   return c;
 }
 
@@ -338,6 +339,20 @@ GlmMhcConfig GlmTextConfig::mhc_config() const {
   m.hc_eps = hc_eps;
   m.norm_eps = rms_norm_eps;
   GlmMhcConfig::validate_config(m);
+  return m;
+}
+
+GlmMoeConfig GlmTextConfig::moe_config() const {
+  GlmMoeConfig m;
+  m.hidden = hidden_size;
+  m.inter = moe_intermediate_size;
+  m.n_experts = n_routed_experts;
+  m.top_k = num_experts_per_tok;
+  m.n_shared_experts = n_shared_experts;
+  m.routed_scaling_factor = routed_scaling_factor;
+  m.norm_topk_prob = norm_topk_prob;
+  m.swiglu_limit = swiglu_limit;
+  GlmMoeConfig::validate_config(m);
   return m;
 }
 

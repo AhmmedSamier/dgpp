@@ -36,8 +36,13 @@ struct Rng {
     return s;
   }
   double unit() {  // [-1, 1)
-    return static_cast<double>(static_cast<int64_t>(next() >> 11)) /
-           static_cast<double>(1ull << 52);
+    // next()>>11 is a 53-bit unsigned value in [0, 2^53); map to [-1, 1).
+    // (An earlier version divided by 2^52 without the shift of the range,
+    // silently producing [0, 1) — all-positive test data. The router
+    // parity's suspicious "max rel err 0" exposed it: sigmoid-saturated
+    // scores made every weight exactly 2.5/top_k.)
+    return static_cast<double>(next() >> 11) /
+               static_cast<double>(1ull << 52) - 1.0;
   }
 };
 

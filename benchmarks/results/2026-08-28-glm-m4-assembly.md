@@ -248,3 +248,80 @@ relative, so flips cluster at bf16 rounding boundaries only.
 
 Verification: ci-local 13/13, unit 36/36, ASan/UBSan clean, memcheck 0
 errors.
+
+## MoE router, expert execution, and route traces (deliverables 1+5)
+
+Semantics pinned to the transformers Glm5NextTextTopkRouter/Experts/MLP
+references and recorded as DESIGN §7.4. The subtle parts: selection ranks
+BIASED scores (sigmoid + e_score_correction_bias) but routes UNCORRECTED
+weights; normalization divides per element (not reciprocal-multiply) before
+×2.5; the swiglu clamps are asymmetric (gate max-only, up both sides);
+per-token accumulation runs in ASCENDING expert id (the reference's
+index_add visit order — order changes bits, so it is semantics); the shared
+expert (weight 1) is the final single bf16 add. The engine's tie rule
+(equal biased scores → lower expert id) is pinned where torch CUDA topk is
+unspecified.
+
+Implementation:
+- `src/kernels/glm_moe.{cu,glm_moe_launch.hpp}`: router (one thread per
+  expert dot, fixed sequential reduction; thread-0 top-k with the pinned
+  tie rule; ascending insertion sort; per-element fp32 normalize), swiglu
+  clamp, row gather, and the bf16-choreographed accumulation kernel. All
+  deterministic, graph-capturable, no scratch.
+- `src/models/glm_moe_layer.{hpp,cpp}`: host-orchestrated forward
+  (router → host segmentation → per-expert gather + scale-GEMMs + swiglu +
+  accumulate, ascending; shared last). One sync per enqueue — the
+  diagnostic mode's documented cost; device-side grouping is M5+.
+- `src/models/glm_moe_reference.{hpp,cpp}`: double oracle reproducing
+  every bf16 rounding point of the engine chain (strict GEMMs with
+  bf16-rounded dequant weights).
+- `src/models/glm_trace.{hpp,cpp}` + `tools/route_trace_traffic.py`: the
+  DGPPTC1 trace format (golden-byte-pinned on BOTH the C++ and python
+  sides) and the corrected per-rank traffic model.
+- `GlmQuantMatrix` moved to `src/models/quant_matrix.hpp` (CUDA-free) so
+  the host-only model library and kernels share the type.
+
+### Parity results (honest data — see the RNG fix below)
+
+- Router at REAL geometry (E=288, H=4096, K=8; tokens 1/3/17/257):
+  weights within 5.3e-7 relative of the double oracle (fp32-vs-double
+  sigmoid/normalize), ZERO id mismatches, zero near-tie certifications
+  needed. Tie test (all scores equal) selects experts 0..7 with uniform
+  weights 2.5/8.
+- Expert path (E=8/16, K=2/4, tokens 1/17/5) vs the strict oracle: max
+  0-1 bf16 ulps, l2 ≤ 4e-5, zero soft violations, bitwise-deterministic
+  reruns. Accumulation-order test: biased scores force selection order
+  {7,6,5}, output matches the ascending-order oracle exactly.
+- swiglu edges: gate-above-limit, gate-below (no clamp!), up ±, exact
+  boundary values at 10.
+
+### A test-infrastructure bug the router's "0 rel err" exposed
+
+The shared test RNG (`scale_gemm_test_helpers.hpp`) documented `[-1, 1)`
+but returned `[0, 2)` — the int64 cast of a 53-bit value is never
+negative. Every affected suite had been running on ALL-POSITIVE data: the
+router test's dots were ~+200, sigmoid saturated to exactly 1.0 for every
+expert, all weights were exactly 2.5/8, and the router weight comparison
+was VACUOUS (0.3125 vs 0.3125). Same class of skew in the mhc and loader
+fixture fills. Fixed in all three; the honest reruns above are the real
+results. The mhc comparator also gained the cancellation floor it never
+needed with one-signed data (a 4-stream sum canceling from ~0.25-magnitude
+terms to ~1e-8 turns ~8e-9 of fp32 noise into "36 ulps"), and the update
+chain gained a 1e-6-rate hard budget for chained-rounding boundary flips
+(1 intermediate-ulp flip per 33.6M elements, statistically expected).
+scale_gemm re-verified on symmetric data including the real-checkpoint
+slices: strict l2 7.4e-5..2.9e-4, semantic ~2.3e-3, zero mismatches.
+
+### Traffic-model tool validated against §3's own anchors
+
+`route_trace_test` (new ctest entry): a uniformly random trace (42 layers
+× 512 tokens × top-8) reproduces busiest-rank 3.515 ± 0.06 and the 7.457
+GB / 32.42 ms critical path; a single-rank trace reproduces §3's 12.198 GB
+worst-placement row; expert byte sizes reconcile with the checkpoint
+budget (304.4-304.6 GB routed share). Real traces from representative
+prompts land with the assembled model (next chunk) — a uniform trace is
+the null model, not evidence.
+
+Verification: ci-local 15/15 (glm_moe_test + route_trace_test new), unit
+39/39, ASan/UBSan clean on all touched suites, memcheck 0 errors on the
+moe and mhc tests.

@@ -29,6 +29,7 @@
 #include <cuda_runtime.h>
 
 #include "common/dtypes.hpp"
+#include "models/quant_matrix.hpp"
 #include "loaders/safetensors.hpp"
 #include "models/dsa_layer.hpp"
 #include "models/glm_binding.hpp"
@@ -41,15 +42,6 @@ namespace dgpp {
 // layer; counting mode walks the same grant sequence without allocating,
 // which is how the byte formula and the allocator share one code path.
 struct GlmLayerBump;
-
-// Compressed resident view of one E4M3 matrix: payload + block scales,
-// nothing else (DESIGN §4). Pointers are device-visible (managed) memory.
-struct GlmQuantMatrix {
-  const uint8_t* payload = nullptr;  // E4M3 [rows, cols]
-  const float* scales = nullptr;     // F32 [ceil(rows/128), ceil(cols/128)]
-  int64_t rows = 0;
-  int64_t cols = 0;
-};
 
 // One layer's routed-expert neighborhood in compressed form.
 struct GlmMoeResident {

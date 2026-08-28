@@ -74,6 +74,7 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `gpt_doll --selftest` | synthetic eager/graph parity testbed |
 | `glm_bind_check --config CONFIG --checkpoint-dir DIR` | validate a real GLM-5.3 checkpoint against the expected-tensor table (config parse, names, dtypes, shapes, FP8 scale pairing; headers only) |
 | `glm_stream_check --config CONFIG --checkpoint-dir DIR` | stream real layers through the resident loader; bytes vs formula reconciled per layer |
+| `tools/route_trace_traffic.py TRACE` | route-trace traffic model: measured busiest-rank occupancy and corrected critical path (replaces the uniform-expert assumption) |
 | `tools/checkpoint_audit.py [MODEL_DIR]` | regenerate inventory and checkpoint budget |
 | `tools/make_shardspec.py MODEL_DIR` | generate the loader shard plan |
 | `tools/kda_reference_dump.py` | KDA parity dumps: `selftest`, `gen-pure` (CI oracle), `gen-torch` (real checkpoint slices; needs torch) |

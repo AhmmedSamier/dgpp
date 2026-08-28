@@ -43,8 +43,8 @@ struct Rng {
     return s;
   }
   double unit() {  // [-1, 1)
-    return static_cast<double>(static_cast<int64_t>(next() >> 11)) /
-           static_cast<double>(1ull << 52);
+    return static_cast<double>(next() >> 11) /
+               static_cast<double>(1ull << 52) - 1.0;
   }
 };
 
@@ -128,15 +128,6 @@ Case make_case(const GlmMhcConfig& cfg, int tokens, uint64_t seed,
   return c;
 }
 
-// bf16 ulp distance via biased sign-magnitude key.
-int bf16_ulps(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) -> int32_t {
-    return (v & 0x8000u) ? -static_cast<int32_t>(v & 0x7FFFu)
-                         : static_cast<int32_t>(v & 0x7FFFu);
-  };
-  return std::abs(static_cast<int>(key(a) - key(b)));
-}
-
 struct UlpReport {
   long over = 0;       // beyond soft budget
   long hard = 0;       // beyond hard budget
@@ -144,21 +135,47 @@ struct UlpReport {
   double max_ulps = 0;
 };
 
+// Ulp comparison with a cancellation floor: streams mix positive and
+// negative values, so a sum of ~0.25-magnitude terms can cancel to ~1e-8,
+// where the bf16 ulp (~4e-11) turns absolutely-tiny fp32-vs-double noise
+// (bounded by the fp32 epsilon of the LARGE terms) into dozens of "ulps".
+// Elements below floor_frac * max|want| are measured at the floor's
+// magnitude instead (the same discipline as scale_gemm's comparator).
 UlpReport compare(const std::vector<uint16_t>& got,
-                  const std::vector<uint16_t>& want, int soft, int hard) {
+                  const std::vector<uint16_t>& want, int soft, int hard,
+                  double floor_frac = 1e-3) {
   UlpReport r;
   r.total = want.size();
+  double max_abs = 0;
+  for (uint16_t v : want)
+    max_abs = std::max(max_abs,
+                       std::abs(static_cast<double>(bf16_bits_to_float(v))));
+  const double floor_abs = floor_frac * max_abs;
   for (size_t i = 0; i < want.size(); ++i) {
-    const int u = bf16_ulps(got[i], want[i]);
-    r.max_ulps = std::max(r.max_ulps, static_cast<double>(u));
+    const double w = bf16_bits_to_float(want[i]);
+    const double g = bf16_bits_to_float(got[i]);
+    // bf16-ulp distance measured at the larger of |want| and the floor.
+    const double scale = std::max(std::abs(w), floor_abs);
+    const double ulp = scale > 0 ? scale * (1.0 / 256.0) : (1.0 / 256.0);
+    const double dist = std::abs(g - w) / ulp;
+    const int u = static_cast<int>(dist);
+    r.max_ulps = std::max(r.max_ulps, dist);
     if (u > soft) ++r.over;
     if (u > hard) ++r.hard;
   }
   return r;
 }
 
-void require_ulp(const UlpReport& r, double over_frac, const std::string& what) {
-  if (r.hard != 0 ||
+// hard_budget_count: chained-rounding boundary flips. When an intermediate
+// (e.g. post*h at magnitude ~1) rounds differently by one bf16 ulp between
+// the fp32 kernel and the double oracle — a 1-fp32-ulp product difference
+// straddling a rounding boundary, expected at ~1e-7 per element — the
+// output inherits that flip as ~1 ulp of the INTERMEDIATE's magnitude,
+// which the output-ulp metric over-reports when the output is smaller.
+// Budget: soft ulps at over_frac, hard outliers at a small absolute count.
+void require_ulp(const UlpReport& r, double over_frac, long hard_budget_count,
+                 const std::string& what) {
+  if (r.hard > hard_budget_count ||
       static_cast<double>(r.over) / static_cast<double>(r.total) > over_frac)
     throw std::runtime_error(what + ": over=" +
                              std::to_string(r.over) + "/" +
@@ -191,12 +208,12 @@ void run_case(const Case& c, const char* label) {
   for (size_t i = 0; i < comb_ref.size(); ++i)
     comb_ref[i] = float_to_bf16_bits(static_cast<float>(ref.comb[i]));
   require_ulp(compare(read_back(c.d_post, post_ref.size()), post_ref, 2, 4),
-              0.005, std::string(label) + " post");
+              0.005, 0, std::string(label) + " post");
   require_ulp(compare(read_back(c.d_comb, comb_ref.size()), comb_ref, 2, 4),
-              0.005, std::string(label) + " comb");
+              0.005, 0, std::string(label) + " comb");
   require_ulp(compare(read_back(c.d_collapsed, ref.collapsed.size()),
                       ref.collapsed, 2, 4),
-              0.005, std::string(label) + " collapsed");
+              0.005, 0, std::string(label) + " collapsed");
 
   // Isolated update: both sides consume the SAME (oracle) bf16 post/comb.
   std::vector<uint16_t> streams_ref(c.streams.size());
@@ -208,9 +225,13 @@ void run_case(const Case& c, const char* label) {
   dgpp::launch_mhc_stream_update(c.d_post, c.d_comb, c.d_sub, c.d_streams,
                                  c.d_streams_out, c.cfg, c.tokens, nullptr);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
+  // Update chain: allow ~1e-6 rate of chained-rounding boundary flips
+  // (post*h and the 4-term mix each round to bf16 before the final add).
+  const long flip_budget =
+      static_cast<long>(streams_ref.size()) / 1000000 + 1;
   require_ulp(compare(read_back(c.d_streams_out, streams_ref.size()),
                       streams_ref, 4, 8),
-              0.01, std::string(label) + " stream update");
+              0.01, flip_budget, std::string(label) + " stream update");
 
   // Final mean.
   std::vector<uint16_t> mean_ref(c.tokens * c.cfg.hidden);
@@ -220,7 +241,7 @@ void run_case(const Case& c, const char* label) {
                               nullptr);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
   require_ulp(compare(read_back(c.d_mean, mean_ref.size()), mean_ref, 2, 4),
-              0.005, std::string(label) + " final mean");
+              0.005, 0, std::string(label) + " final mean");
 
   std::printf("[ OK ] %s: post/comb/collapsed/update/mean within budgets\n",
               label);
@@ -301,7 +322,10 @@ DGPP_TEST(mhc_end_to_end_pipeline_is_deterministic) {
   dgpp::glm_mhc_ref_stream_update(post_ref.data(), comb_ref.data(),
                                   c.sublayer_out.data(), c.streams.data(),
                                   c.cfg, c.tokens, streams_ref.data());
-  require_ulp(compare(a, streams_ref, 4, 8), 0.01, "end-to-end streams");
+  const long flip_budget =
+      static_cast<long>(streams_ref.size()) / 1000000 + 1;
+  require_ulp(compare(a, streams_ref, 4, 8), 0.01, flip_budget,
+              "end-to-end streams");
   std::printf("[ OK ] end-to-end pipeline deterministic + within budgets\n");
 }
 

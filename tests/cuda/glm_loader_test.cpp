@@ -102,8 +102,8 @@ struct Rng {
     return s;
   }
   float unit() {  // [-1, 1)
-    return static_cast<float>(static_cast<int64_t>(next() >> 11)) /
-           static_cast<float>(1ull << 52);
+    return static_cast<float>(next() >> 11) / static_cast<float>(1ull << 52) -
+           1.0f;
   }
 };
 

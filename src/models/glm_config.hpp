@@ -18,6 +18,7 @@
 #include "loaders/minijson.hpp"
 #include "models/dsa_geometry.hpp"
 #include "models/glm_mhc.hpp"
+#include "models/glm_moe.hpp"
 #include "models/kda_geometry.hpp"
 
 namespace dgpp {
@@ -98,6 +99,7 @@ struct GlmTextConfig {
   KdaConfig kda_config() const;
   DsaConfig dsa_config() const;
   GlmMhcConfig mhc_config() const;
+  GlmMoeConfig moe_config() const;
 
   int num_kda_layers() const;
   int num_dsa_layers() const;

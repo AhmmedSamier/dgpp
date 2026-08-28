@@ -21,6 +21,8 @@
 
 #include <cuda_runtime.h>
 
+#include "models/quant_matrix.hpp"
+
 namespace dgpp {
 
 // act: bf16 row-major [M, act_row_stride_elems] (K-column slices allowed,

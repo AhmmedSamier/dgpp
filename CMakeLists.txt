@@ -104,7 +104,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/dsa.cu
   src/kernels/fp8_dequant.cu
   src/kernels/scale_gemm.cu
-  src/kernels/glm_mhc.cu)
+  src/kernels/glm_mhc.cu
+  src/kernels/glm_moe.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
 
@@ -134,14 +135,17 @@ dgpp_set_common(dgpp_models_dsa)
 add_library(dgpp_models_glm STATIC
   src/models/glm_config.cpp
   src/models/glm_binding.cpp
-  src/models/glm_mhc_reference.cpp)
+  src/models/glm_mhc_reference.cpp
+  src/models/glm_moe_reference.cpp
+  src/models/glm_trace.cpp)
 target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders)
 dgpp_set_common(dgpp_models_glm)
 
 # Streaming resident loader (M4): managed-memory layer residency over the
 # binding table, with the block-scale dequant bridge for the M3 seams.
 add_library(dgpp_models_glm_loader STATIC
-  src/models/glm_loader.cpp)
+  src/models/glm_loader.cpp
+  src/models/glm_moe_layer.cpp)
 target_link_libraries(dgpp_models_glm_loader PUBLIC dgpp_models_glm dgpp_kernels)
 dgpp_set_common(dgpp_models_glm_loader)
 
@@ -170,6 +174,7 @@ add_executable(unit_tests
   tests/unit/dsa_geometry_test.cpp
   tests/unit/glm_config_test.cpp
   tests/unit/glm_binding_test.cpp
+  tests/unit/glm_trace_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
@@ -183,6 +188,9 @@ add_test(NAME unit COMMAND unit_tests)
 add_test(NAME checkpoint_audit_test
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/checkpoint_audit_test.py)
+add_test(NAME route_trace_test
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/route_trace_test.py)
 
 # KDA operator tests (CUDA); skip without a device as above. The dump-parity
 # runner is a host-only TU (minijson + nvcc don't mix).
@@ -233,6 +241,15 @@ target_link_libraries(glm_mhc_test PRIVATE dgpp_kernels dgpp_models_glm CUDA::cu
 dgpp_set_common(glm_mhc_test)
 add_test(NAME glm_mhc_test COMMAND glm_mhc_test)
 set_tests_properties(glm_mhc_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# MoE module parity (M4): router vs oracle at real geometry, expert path on
+# small geometry, swiglu clamps, accumulation order, determinism.
+add_executable(glm_moe_test tests/cuda/glm_moe_test.cu)
+target_include_directories(glm_moe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(glm_moe_test PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart)
+dgpp_set_common(glm_moe_test)
+add_test(NAME glm_moe_test COMMAND glm_moe_test)
+set_tests_properties(glm_moe_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # DSA reference-dump parity: generate a pure-python oracle dump, then run
 # the layer against it (gen-torch is the manual deployment test).

@@ -431,6 +431,42 @@ it. Parity: `glm_mhc_test` vs the double oracle
 saturated logits, zero streams (norm-of-zero), and bitwise-deterministic
 end-to-end replay.
 
+### 7.4 MoE routing (noaux_tc) and expert execution
+
+Pinned to the transformers `Glm5NextTextTopkRouter` / `Glm5NextTextExperts`
+reference. Router math is fp32 end to end (the config's `moe_router_dtype`
+contract): logits = fp32 GEMM of the post-LN hidden (bf16 values) against
+the bf16 gate rows; `scores = sigmoid(logits)`; selection ranks
+`scores + e_score_correction_bias` (bias-corrected) but the ROUTED WEIGHTS
+are the UNCORRECTED scores gathered at the selected ids; `norm_topk_prob`
+divides by (Σ + 1e-20) per element, then multiplies by
+`routed_scaling_factor` (2.5). The engine's tie rule — equal biased scores
+select the LOWER expert id — is pinned where torch's CUDA topk leaves ties
+unspecified. The kernel emits ids in ascending expert order, which is also
+the accumulation order: the reference's `index_add` loop visits experts
+ascending, so per token `out = 0; for e ascending: out = bf16(out +
+bf16(w_e·y_e))`, and the shared expert (weight 1) is added last as a single
+bf16 add. Deviating from that order changes bits, not just tolerances.
+
+Experts are swiglu MLPs with ASYMMETRIC clamps: the gate clamps only its
+maximum (no lower bound), `up` clamps both sides at `swiglu_limit` (10);
+`act = bf16(bf16(silu(g)) · up)` — two rounding points, matching torch's
+opmath. The engine executes experts through the scale-aware GEMM on the
+compressed E4M3+scale weights (§4): gather per-expert token segments,
+gate/up GEMMs, swiglu, down GEMM, accumulate. The M4 diagnostic path
+segments on the host after one router round-trip (correctness first); the
+device-side grouped execution without host segmentation is M5+ work.
+
+Route traces (deliverable 5): the router records per-layer ids/weights in
+the `DGPPTC1` format, and `tools/route_trace_traffic.py` replaces §3's
+uniform-expert assumption with measured occupancy — per-token busiest-rank
+experts/layer (uniform expectation 3.515), per-layer batch critical rank
+for correlated routes, and the corrected critical path in GB/token. The
+tool's anchors are §3's own numbers: a uniform-random trace must reproduce
+3.515 experts and 7.457 GB/32.42 ms; an all-one-rank trace must reproduce
+12.198 GB. A uniform trace is the null model, not evidence — real traces
+come from representative prompts through the assembled model.
+
 ## 8. Prefix cache
 
 V1 uses exact state snapshots only. The previous unproven 24 KB/token
