@@ -126,6 +126,18 @@ add_library(dgpp_models_dsa STATIC
 target_link_libraries(dgpp_models_dsa PUBLIC dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_dsa)
 
+# Host-only GLM model assembly (config parsing, expected-tensor binding); no
+# CUDA dependency so the loader/binding layer builds and tests anywhere.
+add_library(dgpp_models_glm STATIC
+  src/models/glm_config.cpp
+  src/models/glm_binding.cpp)
+target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders)
+dgpp_set_common(dgpp_models_glm)
+
+add_executable(glm_bind_check apps/glm_bind_check.cpp)
+target_link_libraries(glm_bind_check PRIVATE dgpp_models_glm dgpp_loaders)
+dgpp_set_common(glm_bind_check)
+
 add_executable(dgppctl apps/dgppctl.cpp src/common/log.cpp)
 target_link_libraries(dgppctl PRIVATE CUDA::cudart)
 dgpp_set_common(dgppctl)
@@ -140,9 +152,12 @@ add_executable(unit_tests
   tests/unit/shardspec_test.cpp
   tests/unit/kda_geometry_test.cpp
   tests/unit/dsa_geometry_test.cpp
+  tests/unit/glm_config_test.cpp
+  tests/unit/glm_binding_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders Threads::Threads)
+target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
+                                        dgpp_models_glm Threads::Threads)
 dgpp_set_common(unit_tests)
 add_executable(flag_protocol_test tests/cuda/flag_protocol_test.cu)
 target_link_libraries(flag_protocol_test PRIVATE CUDA::cudart)

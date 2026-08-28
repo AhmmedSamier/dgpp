@@ -550,7 +550,7 @@ Current source-tree implementation (including the audit-remediation files that
 must be added to the next commit):
 
 ```text
-apps/                 dgppctl and synthetic gpt_doll driver
+apps/                 dgppctl, glm_bind_check, and synthetic gpt_doll driver
 benchmarks/micro/     platform and transport probes (incl. kda_bench, dsa_bench)
 docs/                 generated checkpoint budget and validated measurements
 src/common/           logging, dtypes, tests
@@ -558,7 +558,8 @@ src/core/             arena, graph, streams, trace
 src/kernels/          synthetic kernels, GEMM wrapper, flag protocol, KDA and DSA ops
 src/loaders/          JSON, safetensors, shardspec
 src/models/           synthetic GPT doll; KDA layer/state/reference/dump; DSA
-                      reference/geometry/state/layer/dump
+                      reference/geometry/state/layer/dump; GLM text config and
+                      expected-tensor binding (M4)
 tests/                host, CUDA, and Python tests
 tools/                checkpoint audit, shard-plan, KDA/DSA reference-dump generators
 ```

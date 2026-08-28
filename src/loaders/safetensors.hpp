@@ -94,6 +94,13 @@ class SafetensorsFile {
   const std::string& path() const { return path_; }
   const minijson::Value& header_meta() const { return meta_; }
 
+  // Header-truth iteration (bind-check tooling): visits every tensor of this
+  // shard. Fn takes const TensorInfo&.
+  template <typename Fn>
+  void for_each(Fn&& fn) const {
+    for (const auto& kv : tensors_) fn(*kv.second);
+  }
+
  private:
   SafetensorsFile() = default;
 
