@@ -103,7 +103,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/kda.cu
   src/kernels/dsa.cu
   src/kernels/fp8_dequant.cu
-  src/kernels/scale_gemm.cu)
+  src/kernels/scale_gemm.cu
+  src/kernels/glm_mhc.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
 
@@ -132,7 +133,8 @@ dgpp_set_common(dgpp_models_dsa)
 # CUDA dependency so the loader/binding layer builds and tests anywhere.
 add_library(dgpp_models_glm STATIC
   src/models/glm_config.cpp
-  src/models/glm_binding.cpp)
+  src/models/glm_binding.cpp
+  src/models/glm_mhc_reference.cpp)
 target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders)
 dgpp_set_common(dgpp_models_glm)
 
@@ -222,6 +224,15 @@ target_link_libraries(scale_gemm_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cu
 dgpp_set_common(scale_gemm_test)
 add_test(NAME scale_gemm_test COMMAND scale_gemm_test)
 set_tests_properties(scale_gemm_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# mHC module parity (M4): compute/update/final-mean kernels vs the double
+# oracle; real geometry, edge cases, determinism.
+add_executable(glm_mhc_test tests/cuda/glm_mhc_test.cu)
+target_include_directories(glm_mhc_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(glm_mhc_test PRIVATE dgpp_kernels dgpp_models_glm CUDA::cudart)
+dgpp_set_common(glm_mhc_test)
+add_test(NAME glm_mhc_test COMMAND glm_mhc_test)
+set_tests_properties(glm_mhc_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # DSA reference-dump parity: generate a pure-python oracle dump, then run
 # the layer against it (gen-torch is the manual deployment test).

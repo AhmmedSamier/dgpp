@@ -390,6 +390,47 @@ Layer-phase pins (the orchestration above those kernels):
   weights at the memory floor (see
   benchmarks/results/2026-08-28-dsa-m3-layer.md).
 
+### 7.3 mHC residual streams
+
+Pinned to the transformers `Glm5NextTextHyperConnection` reference (the
+semantics every prior section treats as ground truth). The residual stream
+is `hc_mult = 4` parallel bf16 streams of `hidden` each; all four start as
+the embedding row, and the model output is the unweighted mean over
+streams followed by the final RMSNorm. "mHC" names the manifold-constrained
+mixing — `scale` has 3 entries because there are three outputs, not three
+heads.
+
+Per sublayer site (attention and FFN each own one), with `n = hc_mult`:
+
+1. **Mapping.** Unweighted RMSNorm over the *flattened* `[n·hidden]` vector
+   (fp32, eps = rms_norm_eps); an fp32 projection by `fn [(2+n)·n, n·hidden]`
+   plus `base [(2+n)·n]`, split `pre[n] | post[n] | comb[n·n]`, each scaled
+   by its own `scale` entry:
+   `pre = σ(·) + hc_eps` (stream-collapse weights), `post = 2σ(·)`
+   (block-output placement, range [0,2]), `comb = softmax(·, rows) + hc_eps`
+   then Sinkhorn–Knopp toward doubly stochastic — one column pass, then
+   `sinkhorn_iters − 1` row+column passes, every denominator adding
+   `hc_eps`.
+2. **Collapse.** The sublayer input is `Σⱼ pre[j]·streams[j]` (fp32
+   accumulate, one bf16 round).
+3. **Update.** After the sublayer produces `h`: `streams'[i] =
+   bf16(bf16(post[i]·h) + bf16(Σⱼ comb[j,i]·streams[j]))` — post and comb
+   are rounded to bf16 *before* the products, with intermediate roundings
+   exactly as shown. The engine reproduces this choreography bitwise
+   (kernel and oracle share it); deviation from it is a semantics bug, not
+   a tolerance question.
+
+The whole mHC pipeline is replicated on every rank (§5.1's "norm + mHC"
+row): sublayer outputs are all-reduced first, so the stream state never
+leaves the replicated region. The engine kernel computes the norm and the
+24-logit projection in fp32 (fixed reduction order), applies
+sigmoid/softmax/Sinkhorn in registers, and pins `hc_mult = 4` the way the
+DSA kernels pin Hadamard-128 — widen only when a real checkpoint demands
+it. Parity: `glm_mhc_test` vs the double oracle
+(`glm_mhc_reference`), ulp-budgeted at the bf16 rounding points, including
+saturated logits, zero streams (norm-of-zero), and bitwise-deterministic
+end-to-end replay.
+
 ## 8. Prefix cache
 
 V1 uses exact state snapshots only. The previous unproven 24 KB/token

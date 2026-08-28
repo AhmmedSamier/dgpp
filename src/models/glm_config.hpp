@@ -17,6 +17,7 @@
 
 #include "loaders/minijson.hpp"
 #include "models/dsa_geometry.hpp"
+#include "models/glm_mhc.hpp"
 #include "models/kda_geometry.hpp"
 
 namespace dgpp {
@@ -80,6 +81,8 @@ struct GlmTextConfig {
   // --- mHC (multi-head hyper-connections) ----------------------------------
   bool mhc = true;
   int hc_mult = 4;
+  int hc_sinkhorn_iters = 20;
+  float hc_eps = 1e-6f;
 
   // --- MTP -----------------------------------------------------------------
   int num_nextn_predict_layers = 1;
@@ -94,6 +97,7 @@ struct GlmTextConfig {
   // Filled geometry configs for the layer modules (validated on fill).
   KdaConfig kda_config() const;
   DsaConfig dsa_config() const;
+  GlmMhcConfig mhc_config() const;
 
   int num_kda_layers() const;
   int num_dsa_layers() const;

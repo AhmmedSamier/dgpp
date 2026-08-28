@@ -230,10 +230,14 @@ GlmTextConfig GlmTextConfig::parse(const minijson::Value& tc) {
   // --- mHC -------------------------------------------------------------------
   c.mhc = require_bool(tc, "mhc");
   c.hc_mult = require_int(tc, "hc_mult");
+  c.hc_sinkhorn_iters = require_int(tc, "hc_sinkhorn_iters");
+  c.hc_eps = require_float(tc, "hc_eps");
   if (!c.mhc)
     reject("mhc", "the residual path is hyper-connection-shaped; a non-mHC "
                   "checkpoint is a different model");
   if (c.hc_mult <= 0) reject("hc_mult", "must be positive");
+  if (c.hc_sinkhorn_iters < 1)
+    reject("hc_sinkhorn_iters", "must be at least 1");
 
   // --- MTP --------------------------------------------------------------------
   c.num_nextn_predict_layers = require_int(tc, "num_nextn_predict_layers");
@@ -245,6 +249,7 @@ GlmTextConfig GlmTextConfig::parse(const minijson::Value& tc) {
   // invariants M2/M3 pinned) before handing anything to a loader.
   (void)c.kda_config();
   (void)c.dsa_config();
+  (void)c.mhc_config();
   return c;
 }
 
@@ -323,6 +328,17 @@ DsaConfig GlmTextConfig::dsa_config() const {
   d.rms_norm_eps = rms_norm_eps;
   DsaConfig::validate_config(d);
   return d;
+}
+
+GlmMhcConfig GlmTextConfig::mhc_config() const {
+  GlmMhcConfig m;
+  m.hc_mult = hc_mult;
+  m.hidden = hidden_size;
+  m.sinkhorn_iters = hc_sinkhorn_iters;
+  m.hc_eps = hc_eps;
+  m.norm_eps = rms_norm_eps;
+  GlmMhcConfig::validate_config(m);
+  return m;
 }
 
 }  // namespace dgpp

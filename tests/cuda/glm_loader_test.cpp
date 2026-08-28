@@ -71,7 +71,7 @@ const char* kTinyJson = R"json({
   "scoring_func": "sigmoid", "topk_method": "noaux_tc",
   "norm_topk_prob": true, "routed_scaling_factor": 1.5,
   "n_group": 1, "topk_group": 1, "moe_router_dtype": "float32",
-  "mhc": true, "hc_mult": 4,
+  "mhc": true, "hc_mult": 4, "hc_sinkhorn_iters": 20, "hc_eps": 1e-06,
   "num_nextn_predict_layers": 1
 })json";
 

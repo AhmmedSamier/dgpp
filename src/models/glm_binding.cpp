@@ -7,14 +7,14 @@ namespace dgpp {
 
 namespace {
 
-// mHC coefficient geometry, observed on the only mHC checkpoint (hc_mult=4):
-// base [24], fn [24, hc_mult*hidden], scale [3]. The 24 rows plausibly
-// factor as hc_mult*(hc_mult+2) (hyper-connections' n*(n+2) coefficient
-// block) and 3 as the multi-head count, but that derivation is pinned when
-// the mHC reference semantics are implemented — the binding table states
-// observed shapes, not semantics.
+// mHC coefficient geometry, from the transformers Glm5NextTextHyperConnection
+// reference: fn is [(2+n)*n, n*hidden] — rows split [pre n | post n | comb
+// n*n]; base is [(2+n)*n] with the same split; scale is [3], one per OUTPUT
+// (pre, post, comb) — not per head (mHC's "multi-head" names the
+// manifold-constrained mixing, and this checkpoint trains n = hc_mult = 4
+// streams). Semantics: DESIGN §7.3.
 constexpr int64_t kHcCoeffRows = 24;
-constexpr int64_t kHcScaleHeads = 3;
+constexpr int64_t kHcScaleOutputs = 3;
 
 using TensorList = std::vector<GlmExpectedTensor>;
 
@@ -47,7 +47,7 @@ void expect_mhc(TensorList& out, const std::string& p,
     add(out, p + "hc_" + std::string(side) + "_fn", DType::BF16,
         {kHcCoeffRows, fn_cols}, GlmWeightClass::Mhc, layer);
     add(out, p + "hc_" + std::string(side) + "_scale", DType::F32,
-        {kHcScaleHeads}, GlmWeightClass::Mhc, layer);
+        {kHcScaleOutputs}, GlmWeightClass::Mhc, layer);
   }
 }
 

@@ -199,3 +199,52 @@ the point of having one.
 
 Verification: ci-local 12/12 (new scale_gemm_test entry), unit 35/35,
 ASan/UBSan clean, compute-sanitizer memcheck 0 errors.
+
+## mHC residual-stream module (deliverable 1, mHC part)
+
+Semantics pinned from the transformers `Glm5NextTextHyperConnection`
+reference (fetched from huggingface/transformers main, matching the
+checkpoint's transformers_version 5.16.0) and recorded as DESIGN §7.3.
+The shape mystery resolved cleanly: `fn [24, 16384]` = `(2+n)·n` coefficient
+rows over the flattened 4 streams, split `pre[4] | post[4] | comb[16]`;
+`base [24]` the same split; `scale [3]` one per OUTPUT (pre/post/comb) —
+not per head. Two details that would have been guessed wrong:
+
+- the mHC input norm is an UNWEIGHTED RMSNorm over the whole flattened
+  `[n·hidden]` vector (not per-stream, not weighted);
+- `post`/`comb` are rounded to bf16 BEFORE the stream-update products, with
+  bf16 roundings between the multiply, the 4-term mix, and the final add —
+  the choreography is part of the semantics (kernel and oracle both
+  reproduce it bitwise).
+
+Also corrected: the chunk-1 binding-table comment on `scale` (guessed
+"multi-head count" — actually per-output scales).
+
+Implementation:
+
+- `src/models/glm_mhc.hpp` — config (hc_mult/hidden/sinkhorn_iters/hc_eps/
+  norm_eps; hc_mult pinned to 4 like the DSA kernels pin Hadamard-128) and
+  the device weight view; CUDA-free so config, oracle, and kernels share it
+  (kda_geometry pattern).
+- `src/kernels/glm_mhc.{cu,glm_mhc_launch.hpp}` — three deterministic,
+  graph-capturable kernels: compute (two-pass: fp32 sumsq → per-element
+  normalized 24-logit projection matching the reference's rounding order →
+  sequential 256-thread block reduction → sigmoid/softmax/Sinkhorn in
+  registers → fp32 collapse), stream update (per-element bf16 choreography
+  with the two intermediate roundings), final mean. No scratch, static smem
+  (25.6 KB/block, full occupancy at 8 blocks/SM).
+- `src/models/glm_mhc_reference.{hpp,cpp}` — double-precision oracle with
+  the same rounding points (kda_reference pattern).
+- Config parser now requires `hc_eps`/`hc_sinkhorn_iters` and exposes
+  `mhc_config()`; hc_mult≠4 rejected at parse (kernel geometry pin).
+
+Parity (`glm_mhc_test`, new CI entry): real geometry (n=4, D=4096) at
+tokens 1/3/17/257/2052, hidden=512, saturated logits (|base|=40 → σ→{0,1},
+softmax peaked), all-zero streams (norm-of-zero), end-to-end pipeline
+bitwise deterministic and within budgets. Elementwise bf16-ulp budgets:
+post/comb/collapsed/mean ≤ 2 ulps (0.5% soft, 4 hard), stream update ≤ 4
+ulps (1% soft, 8 hard) — the fp32-vs-double sigmoid gap sits at ~1e-6
+relative, so flips cluster at bf16 rounding boundaries only.
+
+Verification: ci-local 13/13, unit 36/36, ASan/UBSan clean, memcheck 0
+errors.

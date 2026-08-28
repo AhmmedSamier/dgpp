@@ -46,7 +46,7 @@ const char* kTinyConfig = R"json({
   "scoring_func": "sigmoid", "topk_method": "noaux_tc",
   "norm_topk_prob": true, "routed_scaling_factor": 1.5,
   "n_group": 1, "topk_group": 1, "moe_router_dtype": "float32",
-  "mhc": true, "hc_mult": 4,
+  "mhc": true, "hc_mult": 4, "hc_sinkhorn_iters": 20, "hc_eps": 1e-06,
   "num_nextn_predict_layers": 1
 })json";
 
@@ -195,4 +195,24 @@ DGPP_TEST(glm_config_num_nextn_zero_disables_mtp_layer) {
   const GlmTextConfig c =
       parse_replacing("\"num_nextn_predict_layers\": 1", "\"num_nextn_predict_layers\": 0");
   require(c.mtp_layer() == -1, "assertion: c.mtp_layer() == -1");
+}
+
+DGPP_TEST(glm_config_mhc_fields_parse_and_propagate) {
+  const GlmTextConfig c =
+      parse_replacing("\"hc_sinkhorn_iters\": 20, \"hc_eps\": 1e-06",
+                      "\"hc_sinkhorn_iters\": 7, \"hc_eps\": 5e-07");
+  require(c.hc_sinkhorn_iters == 7, "assertion: hc_sinkhorn_iters == 7");
+  require(c.hc_eps == 5e-7f, "assertion: hc_eps == 5e-7f");
+  const dgpp::GlmMhcConfig m = c.mhc_config();
+  require(m.hc_mult == 4 && m.hidden == 512, "assertion: mhc geometry");
+  require(m.sinkhorn_iters == 7 && m.hc_eps == 5e-7f,
+          "assertion: mhc trained values");
+  require(m.norm_eps == 1e-6f, "assertion: mhc norm eps");
+  // hc_mult != 4 is rejected by the kernel geometry pin (like index_kpool).
+  expect_throw(
+      [&] { parse_replacing("\"mhc\": true, \"hc_mult\": 4", "\"mhc\": true, \"hc_mult\": 8"); },
+      "hc_mult 8");
+  expect_throw(
+      [&] { parse_replacing("\"hc_sinkhorn_iters\": 20", "\"hc_sinkhorn_iters\": 0"); },
+      "sinkhorn iters 0");
 }
