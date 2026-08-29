@@ -500,10 +500,21 @@ around the measured facts, not around an aspiration of bit-parity:
   layer's floor. Kept rows (tokens whose routing did not flip) must sit
   under 2e-2; a route flip legitimately moves that token's row O(1)
   (the reference's noaux bias exists to tie scores at the selection
-  boundary, so cross-implementation noise flips them at a sub-1% rate);
-  flips are counted and bounded, not certified individually — the router
-  itself is pinned to 5.3e-7 against the double oracle. The head runs on
-  the isolated final streams: top-1 must agree on every token.
+  boundary, so cross-implementation noise flips them). Since the M4
+  close-out, every flip is CERTIFIED, not counted: the router kernel
+  exports its full biased-score row, the reference dump carries its own,
+  and `models/glm_route_audit.hpp` requires (a) the engine's selection to
+  be the spec top-k of the engine's OWN biased scores and (b) every
+  swapped expert pair to straddle the boundary within 32x the token's
+  MEASURED cross-implementation noise — the noise yardstick taken over
+  the experts NOT involved in the swap, so corruption concentrated on the
+  swapped experts cannot hide inside its own inflation (the router
+  itself is separately pinned to 5.3e-7 against the double oracle). The
+  head runs on the isolated final streams: top-1 must agree on every
+  token, and a disagreement must likewise certify as a boundary near tie
+  (reference top-2 logit margin within 32x the measured logit noise) —
+  a reduced layer budget crowds the head's boundaries, and the
+  truncated-stack suite exercises exactly that.
 * Free-run outputs are still REPORTED (drift curve, route agreement
   rates, top-8 margins) — they are the honest description of what
   cross-implementation bf16 inference at 45 layers looks like — but no

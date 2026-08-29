@@ -295,6 +295,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
       route.ids = moe_->last_ids();
       route.weights = moe_->last_weights();
       out.routes.push_back(std::move(route));
+      out.route_biased.push_back(moe_->last_biased());
     }
     launch_mhc_stream_update(post_, comb_, sub_out_, cur, nxt, mhc_cfg_, T,
                              stream_);

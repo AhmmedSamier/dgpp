@@ -24,6 +24,8 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
   const size_t I = static_cast<size_t>(cfg_.inter);
   DGPP_CUDA_OK(cudaMallocManaged(&d_ids_, static_cast<size_t>(M) * cfg_.top_k * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_weights_, static_cast<size_t>(M) * cfg_.top_k * 4));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_biased_,
+                                 static_cast<size_t>(M) * cfg_.n_experts * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_rows_, static_cast<size_t>(M) * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_row_w_, static_cast<size_t>(M) * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_gather_, M * H * 2));
@@ -37,6 +39,7 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
 GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_ids_);
   cudaFree(d_weights_);
+  cudaFree(d_biased_);
   cudaFree(d_rows_);
   cudaFree(d_row_w_);
   cudaFree(d_gather_);
@@ -79,14 +82,18 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
   // 1. Router + one sync: the ids/weights round-trip is the diagnostic
   //    mode's cost; the production path keeps segmentation device-side.
   launch_moe_router(hidden, w_.router_gate, w_.router_bias, d_ids_,
-                    d_weights_, cfg_, tokens, stream);
+                    d_weights_, cfg_, tokens, stream, d_biased_);
   h_ids_.resize(static_cast<size_t>(tokens) * K);
   h_weights_.resize(static_cast<size_t>(tokens) * K);
+  h_biased_.resize(static_cast<size_t>(tokens) * E);
   DGPP_CUDA_OK(cudaMemcpyAsync(h_ids_.data(), d_ids_,
                                static_cast<size_t>(tokens) * K * 4,
                                cudaMemcpyDeviceToHost, stream));
   DGPP_CUDA_OK(cudaMemcpyAsync(h_weights_.data(), d_weights_,
                                static_cast<size_t>(tokens) * K * 4,
+                               cudaMemcpyDeviceToHost, stream));
+  DGPP_CUDA_OK(cudaMemcpyAsync(h_biased_.data(), d_biased_,
+                               static_cast<size_t>(tokens) * E * 4,
                                cudaMemcpyDeviceToHost, stream));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream));
 

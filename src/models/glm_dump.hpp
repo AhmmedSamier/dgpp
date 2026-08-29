@@ -47,6 +47,7 @@ class GlmDumpFile {
   int vocab() const { return vocab_; }
   int num_layers() const { return num_layers_; }
   int top_k() const { return top_k_; }
+  int n_experts() const { return n_experts_; }
   int64_t token_count() const { return token_count_; }
   const std::vector<RouteLayer>& route_layers() const { return route_layers_; }
 
@@ -64,6 +65,11 @@ class GlmDumpFile {
   const int32_t* route_ids() const;
   const float* route_weights() const;
 
+  // router_biased: F32 flat over route_layers(), each layer's slice
+  // row-major [tokens, n_experts] — the near-tie certification inputs.
+  // Requires the dump's config to carry n_experts (regenerate older dumps).
+  const float* router_biased() const;
+
   // Per-layer residual streams (torch backend): [num_layers+1, token_count,
   // 4, hidden] — index 0 is the embedding broadcast, index L+1 the output of
   // layer L. Absent in pure dumps (the CI suite compares free-run at 6
@@ -74,6 +80,7 @@ class GlmDumpFile {
   std::vector<uint8_t> bytes_;
   std::string model_, revision_, backend_;
   int hidden_ = 0, vocab_ = 0, num_layers_ = 0, top_k_ = 0;
+  int n_experts_ = 0;  // 0: dump predates router_biased certification
   int64_t token_count_ = 0;
   std::vector<RouteLayer> route_layers_;
   std::map<std::string, TensorView> tensors_;

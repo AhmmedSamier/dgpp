@@ -281,9 +281,10 @@ def moe_reference(x_rows, moe, hidden, inter, top_k, n_experts, limit,
                   norm_topk, scaling):
     """Mirror of glm_moe_ref_router + glm_moe_ref_forward: biased selection,
     uncorrected weights, per-element normalization, ascending-id
-    accumulation, shared expert last."""
+    accumulation, shared expert last. Also returns every token's full
+    biased-score row (the near-tie certification inputs)."""
     gate, bias, experts, shared = moe
-    out_rows, ids_all, weights_all = [], [], []
+    out_rows, ids_all, weights_all, biased_all = [], [], [], []
     for x in x_rows:
         scores = [sigmoid(sum(x[k] * gate[e * hidden + k]
                               for k in range(hidden)))
@@ -324,7 +325,8 @@ def moe_reference(x_rows, moe, hidden, inter, top_k, n_experts, limit,
         out_rows.append(out)
         ids_all.extend(ids)
         weights_all.extend(float(w) for w in weights)
-    return out_rows, ids_all, weights_all
+        biased_all.extend(float(b) for b in biased)
+    return out_rows, ids_all, weights_all, biased_all
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +498,7 @@ def reference_forward(cfg, entries, tokens, progress=False):
                         cfg["intermediate_size"], limit)
                     out = [v for row in rows for v in row]
                 else:
-                    rows, ids, weights = moe_reference(
+                    rows, ids, weights, biased_rows = moe_reference(
                         x_rows, lw["moe"], hidden,
                         cfg["moe_intermediate_size"],
                         cfg["num_experts_per_tok"], cfg["n_routed_experts"],
@@ -504,7 +506,7 @@ def reference_forward(cfg, entries, tokens, progress=False):
                         cfg["routed_scaling_factor"])
                     out = [v for row in rows for v in row]
                     if site == "ffn":
-                        routes.append((layer, ids, weights))
+                        routes.append((layer, ids, weights, biased_rows))
 
             streams = mhc_update(post, comb, out, streams, T, n, hidden)
         if progress:
@@ -597,11 +599,12 @@ def gen_pure(args):
         top_vals.extend(vals)
 
     route_layers = [{"layer_idx": layer, "top_k": cfg["num_experts_per_tok"],
-                     "tokens": args.tokens} for layer, _, _ in routes]
-    flat_ids, flat_w = [], []
-    for _, ids, weights in routes:
+                     "tokens": args.tokens} for layer, _, _, _ in routes]
+    flat_ids, flat_w, flat_b = [], [], []
+    for _, ids, weights, biased in routes:
         flat_ids.extend(ids)
         flat_w.extend(weights)
+        flat_b.extend(biased)
 
     tensors = {
         "tokens": ("I64", [args.tokens],
@@ -617,6 +620,11 @@ def gen_pure(args):
                       struct.pack("<%di" % len(flat_ids), *flat_ids)),
         "route_weights": ("F32", [len(flat_w)],
                           struct.pack("<%df" % len(flat_w), *flat_w)),
+        # Full biased router scores per token per routed layer (flat over
+        # route_layers, row-major [tokens, n_experts]): the near-tie
+        # certification inputs for flipped rows.
+        "router_biased": ("F32", [len(flat_b)],
+                          struct.pack("<%df" % len(flat_b), *flat_b)),
     }
     meta = {
         "model": os.path.basename(os.path.normpath(args.checkpoint_dir)),
@@ -626,7 +634,7 @@ def gen_pure(args):
     cfg_summary = {
         "hidden": cfg["hidden_size"], "vocab": cfg["vocab_size"],
         "num_layers": cfg["num_hidden_layers"], "tokens": args.tokens,
-        "top_k": topk,
+        "top_k": topk, "n_experts": cfg["n_routed_experts"],
     }
     write_dump(args.out, meta, cfg_summary, tensors, route_layers)
     print("wrote %s (%d tokens, %d layers, %d routed layers)" %
@@ -652,6 +660,10 @@ def gen_torch(args):
     hc_eps, iters = cfg["hc_eps"], cfg["hc_sinkhorn_iters"]
     eps, limit = cfg["rms_norm_eps"], cfg["swiglu_limit"]
     n_layers = cfg["num_hidden_layers"]
+    if getattr(args, "layers", 0):
+        if args.layers < 1 or args.layers > n_layers:
+            raise SystemExit("--layers must be in [1, %d]" % n_layers)
+        n_layers = args.layers
 
     # ---- tokens ------------------------------------------------------
     if args.prompt:
@@ -1005,7 +1017,7 @@ def gen_torch(args):
                         dq(sp_ + "up_proj.weight"),
                         dq(sp_ + "down_proj.weight"))
         out = (out.float() + y.float()).bfloat16()
-        return out, ids, wsort
+        return out, ids, wsort, biased
 
     def dense_layer_t(p, x):
         m = p + "mlp."
@@ -1040,10 +1052,12 @@ def gen_torch(args):
                 if cfg["mlp_layer_types"][layer] == "dense":
                     out = dense_layer_t(p, x)
                 else:
-                    out, ids, ws = moe_layer_t(p, x)
+                    out, ids, ws, b_rows = moe_layer_t(p, x)
                     routes.append((layer, ids.flatten().tolist(),
                                    [float(v) for v in
-                                    ws.flatten().tolist()]))
+                                    ws.flatten().tolist()],
+                                   [float(v) for v in
+                                    b_rows.flatten().tolist()]))
             streams = mhc_update_t(post, comb, out, streams)
         layer_streams.append(streams.clone())
         print("  layer %d/%d done" % (layer + 1, n_layers))
@@ -1057,11 +1071,12 @@ def gen_torch(args):
     top_vals = [[float(v) for v in row] for row in tv.tolist()]
 
     route_layers = [{"layer_idx": layer, "top_k": cfg["num_experts_per_tok"],
-                     "tokens": T} for layer, _, _ in routes]
-    flat_ids, flat_w = [], []
-    for _, ids_, ws_ in routes:
+                     "tokens": T} for layer, _, _, _ in routes]
+    flat_ids, flat_w, flat_b = [], [], []
+    for _, ids_, ws_, b_ in routes:
         flat_ids.extend(ids_)
         flat_w.extend(ws_)
+        flat_b.extend(b_)
 
     tensors = {
         "tokens": ("I64", [T], struct.pack("<%dq" % T, *tokens)),
@@ -1077,6 +1092,11 @@ def gen_torch(args):
                       struct.pack("<%di" % len(flat_ids), *flat_ids)),
         "route_weights": ("F32", [len(flat_w)],
                           struct.pack("<%df" % len(flat_w), *flat_w)),
+        # Full biased router scores per token per routed layer (flat over
+        # route_layers, row-major [tokens, n_experts]): the near-tie
+        # certification inputs for flipped rows.
+        "router_biased": ("F32", [len(flat_b)],
+                          struct.pack("<%df" % len(flat_b), *flat_b)),
         # Per-layer residual streams (input to layer 0 = embedding broadcast;
         # output of layer L at index L+1) for the ISOLATED per-layer parity
         # runner: free-run end-to-end comparison is chaos-limited (module
@@ -1092,7 +1112,8 @@ def gen_torch(args):
         "backend": "torch",
     }
     cfg_summary = {"hidden": hidden, "vocab": cfg["vocab_size"],
-                   "num_layers": n_layers, "tokens": T, "top_k": topk}
+                   "num_layers": n_layers, "tokens": T, "top_k": topk,
+                   "n_experts": cfg["n_routed_experts"]}
     write_dump(args.out, meta, cfg_summary, tensors, route_layers)
     print("wrote %s (%d tokens, %d layers, %d routed layers)" %
           (args.out, T, n_layers, len(routes)))
@@ -1136,9 +1157,11 @@ def cmd_selftest(args):
     gate = [0.0] * (4 * 2)  # all-zero gate rows: scores all 0.5
     bias = [0.0, 0.0, 0.0, 0.0]
     experts = [[0.01] * (2 * 2)] * 12
-    out_rows, ids, weights = moe_reference(
+    out_rows, ids, weights, biased_rows = moe_reference(
         x_rows, (gate, bias, experts, experts), 2, 2, 2, 4, 10.0, True, 1.0)
     assert ids[:2] == [0, 1] and ids[2:4] == [0, 1], "tie rule"
+    # all-zero gate + zero bias: every biased score is exactly 0.5
+    assert biased_rows == [0.5] * 8, "biased export"
 
     # Dump round-trip.
     with tempfile.TemporaryDirectory() as td:
@@ -1182,7 +1205,10 @@ def main(argv=None):
     gt.add_argument("--prompt", default=None,
                     help="tokenize this prompt (requires `tokenizers`)")
     gt.add_argument("--token-ids", default=None,
-                    help="comma-separated token ids (no tokenizer)")
+                   help="comma-separated token ids (no tokenizer)")
+    gt.add_argument("--layers", type=int, default=0,
+                   help="truncate the stack to N layers (must match the "
+                        "suite run's --layers budget)")
     gt.set_defaults(fn=gen_torch)
 
     args = p.parse_args(argv)

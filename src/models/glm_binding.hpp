@@ -94,6 +94,9 @@ struct GlmBindReport {
   size_t shape_mismatch = 0;
   size_t unexpected = 0;        // present, not in table, not vision
   size_t vision = 0;            // present under model.visual.* (not validated)
+  size_t out_of_scope = 0;      // layers beyond the config's budget (a
+                                // truncated diagnostic stack does not
+                                // validate, let alone load, those layers)
   size_t quantized_matrices = 0;  // matched F8 payloads
   size_t scales_bound = 0;        // ... whose scale partner validated
   size_t scales_bad = 0;          // missing/mistyped/misshapen scales

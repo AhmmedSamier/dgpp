@@ -189,6 +189,7 @@ add_executable(unit_tests
   tests/unit/glm_config_test.cpp
   tests/unit/glm_binding_test.cpp
   tests/unit/glm_trace_test.cpp
+  tests/unit/glm_route_audit_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders

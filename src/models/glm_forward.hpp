@@ -41,6 +41,10 @@ class GlmDiagnosticModel {
     std::vector<uint16_t> logits_bits;        // bf16 [tokens, vocab]
     // One entry per MoE layer, in layer order (ids ascending per token).
     std::vector<GlmRouteTraceLayer> routes;
+    // Aligned with routes (same order): each MoE layer's full biased router
+    // score row [tokens, n_experts] fp32 — the near-tie certification
+    // inputs (both sides' selections come from these scores).
+    std::vector<std::vector<float>> route_biased;
   };
 
   // `max_tokens` bounds a forward's token count; `max_cache_tokens` bounds

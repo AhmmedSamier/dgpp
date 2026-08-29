@@ -419,3 +419,78 @@ is future work; the tool consumes their traces unchanged.
 Verification: ci-local 18/18, ASan/UBSan clean, memcheck 0 errors on the
 forward test; the curated suite and trace run recorded above are
 deployment runs on the checkpoint box.
+
+## Close-out (2026-08-29): per-flip route certification
+
+The one doctrine gap in the M4 evidence — route flips bounded
+statistically, not certified individually — is closed, with the DSA
+near-tie audit's shape adapted to fp32 router scores:
+
+- **Engine**: `moe_router_kernel` exports its full biased-score row
+  ([tokens, n_experts] fp32, written before the selection loop scribbles
+  -INFINITY into the smem copy); `GlmMoeLayer` stages it beside ids/
+  weights; `GlmDiagnosticModel::Outputs` carries it per routed layer.
+- **Reference**: both dump backends write a `router_biased` tensor
+  (flat over route_layers) plus `n_experts` in the header config.
+- **Certifier** (`src/models/glm_route_audit.hpp`, host-only): (a) the
+  engine's selection must be the spec top-k of the ENGINE'S OWN biased
+  scores; (b) every swapped expert pair must straddle the boundary within
+  32x the token's measured cross-implementation noise — the yardstick
+  taken over the experts NOT involved in the swap, so corruption
+  concentrated on the swapped experts cannot inflate its own cover (a
+  first design that averaged over all experts was rejected for exactly
+  this: a doctored far-rank displacement drove its own noise up and the
+  multiple down to 2.7x). Five host unit cases pin the certifier's
+  rejection paths: near-tie certifies, far-rank displacement rejected,
+  zero-noise swap rejected (engine right, reference doctored), selection
+  inconsistent with own scores rejected (router bug), duplicate id
+  rejected (top-k bug).
+
+### Close-out run: reduced budget (12 layers, 9 routed)
+
+Full-depth regeneration is ~4-10 min/case; the close-out re-validation ran
+at a measured smaller interval (~3.3 s/layer; 60-120 s/case generation,
+3-7 s/case suite run). The 45-layer numbers above stand as the
+exit-criterion evidence; the full-depth re-run with certification is
+pending future batch time.
+
+```
+$ glm_forward_check ... --suite suite.txt --layers 12
+smoke    21 tok  kept l2 max 0.0048  head l2 0.0032  top1=0  top8miss=8
+  routes: flips=7/1512 certified=2 (11.6x noise max)  OK
+factual  23 tok  kept l2 max 0.0051  head l2 0.0023  top1=0  top8miss=2
+  routes: flips=17/1656 certified=6 (8.5x noise max)  OK
+code     65 tok  kept l2 max 0.0035  head l2 0.0041  top1=2 (cert 2)
+  top8miss=10  routes: flips=64/4680 certified=16 (7.2x noise max)  OK
+3 cases, 0 failures
+```
+
+Every route flip certified (7-12x noise multiples, far under the 32x
+bound); zero rejections. The truncated stack crowds the head's boundaries
+too: `code` flips top-1 on 2 tokens whose reference top-2 logit margins
+sit within the measured logit noise — certified the same way (the
+full-45-layer stack had top1=0 on every case). The flip-rate bound is now
+a 10% wholesale-breakage net only — the certification is the primary
+criterion, and at 12 layers the old 1% statistical bound rejected
+legitimate certified flips (1.37% rate; the same doctrine inversion the
+M3 close-out fixed in the DSA chunked test).
+
+Trace path re-validated at the same budget: 272 tokens x 12 layers in
+8.8 s, deterministic re-run, traffic model consumes it unchanged —
+busiest-rank corrected critical path 7.482 GB/token (+0.3% vs uniform;
+45-layer record: 7.484, +0.4% — the router input distribution is stable
+across depths).
+
+Two latent app bugs found and fixed on the way (both in
+`glm_forward_check --layers`, a path that was dormant in M4 because the
+dump tool had no layer budget): the truncated config RELOCATED the MTP
+binding to `layers.<budget>.*` (mtp_layer() = num_hidden_layers when the
+predictor is enabled), and the loader's two-way binding gate rejected
+every layer beyond the budget as "unexpected" (a truncated diagnostic
+stack now classifies layers >= its budget as out-of-scope, counted
+separately — the full-config bind check is unchanged and still
+75,761/75,761 with 37,338/37,338 scales bound, zero unmatched).
+
+Verification: ci-local 18/18; unit 44/44 (was 39; +5 certifier cases);
+ASan/UBSan clean and memcheck 0 errors on glm_moe_test + glm_forward_test
++ unit_tests; tool selftest OK (both backends write router_biased).

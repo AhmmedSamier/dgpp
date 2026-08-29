@@ -317,10 +317,39 @@ GlmBindReport glm_validate_text_binding(
     ++rep.scales_bound;
   }
 
+  // Layers beyond the config's budget (a truncated diagnostic stack) are
+  // out of scope: present in the checkpoint, but neither validated nor
+  // loaded by this run. The covered range is exactly what the expected
+  // table enumerates: [0, num_hidden_layers) plus the MTP layer when
+  // enabled. Anything else unexpected remains an error.
+  const int64_t covered_layers =
+      cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
+  const std::string layer_prefix = "model.language_model.layers.";
+  const auto layer_index_of = [&](const std::string& name,
+                                   int64_t* idx) -> bool {
+    if (name.rfind(layer_prefix, 0) != 0) return false;
+    const size_t digits = name.find('.', layer_prefix.size());
+    if (digits == std::string::npos ||
+        digits == layer_prefix.size())
+      return false;
+    try {
+      *idx = std::stoll(name.substr(layer_prefix.size(),
+                                    digits - layer_prefix.size()));
+    } catch (const std::exception&) {
+      return false;
+    }
+    return true;
+  };
+
   for (const auto& [name, desc] : present) {
     if (consumed.count(name)) continue;
     if (name.rfind("model.visual.", 0) == 0) {
       ++rep.vision;
+      continue;
+    }
+    int64_t layer_idx = -1;
+    if (layer_index_of(name, &layer_idx) && layer_idx >= covered_layers) {
+      ++rep.out_of_scope;
       continue;
     }
     ++rep.unexpected;

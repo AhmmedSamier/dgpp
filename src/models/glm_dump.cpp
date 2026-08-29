@@ -61,6 +61,11 @@ GlmDumpFile GlmDumpFile::load(const std::string& path) {
   if (d.hidden_ <= 0 || d.vocab_ <= 0 || d.num_layers_ < 0 || d.top_k_ <= 0 ||
       d.token_count_ <= 0)
     throw std::runtime_error("glm dump: bad config block");
+  if (cfg.find("n_experts")) {
+    d.n_experts_ = static_cast<int>(cfg.at("n_experts").as_int());
+    if (d.n_experts_ <= 0)
+      throw std::runtime_error("glm dump: bad n_experts");
+  }
 
   if (root.find("route_layers")) {
     for (const auto& rl : root.at("route_layers").items()) {
@@ -175,6 +180,19 @@ const float* GlmDumpFile::route_weights() const {
   for (const auto& r : route_layers_) total += r.tokens * r.top_k;
   if (tv->shape.size() != 1 || tv->shape[0] != total)
     throw std::runtime_error("glm dump: route_weights shape mismatch");
+  return static_cast<const float*>(tv->data);
+}
+
+const float* GlmDumpFile::router_biased() const {
+  if (n_experts_ <= 0)
+    throw std::runtime_error(
+        "glm dump: router_biased needs an n_experts>=1 dump — regenerate "
+        "the dump with a current tools/glm_reference_dump.py");
+  const auto* tv = require_tensor(*this, "router_biased", DType::F32);
+  int64_t total = 0;
+  for (const auto& r : route_layers_) total += r.tokens * n_experts_;
+  if (tv->shape.size() != 1 || tv->shape[0] != total)
+    throw std::runtime_error("glm dump: router_biased shape mismatch");
   return static_cast<const float*>(tv->data);
 }
 

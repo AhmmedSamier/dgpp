@@ -10,11 +10,13 @@ namespace dgpp {
 
 // Router: hidden bf16 [tokens, hidden] -> ids int32 [tokens, top_k] in
 // ASCENDING expert order (the accumulation order the reference's index_add
-// produces), weights f32 [tokens, top_k] normalized and scaled.
+// produces), weights f32 [tokens, top_k] normalized and scaled. When
+// biased_out is non-null it receives the full biased score row
+// f32 [tokens, n_experts] (selection inputs; near-tie certification).
 void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
                        const float* bias, int32_t* ids, float* weights,
                        const GlmMoeConfig& cfg, int tokens,
-                       cudaStream_t stream);
+                       cudaStream_t stream, float* biased_out = nullptr);
 
 // swiglu with asymmetric clamps: gate clamp_max only, up clamp both; two
 // bf16 rounding points (silu result, then the product). n = rows*inter.

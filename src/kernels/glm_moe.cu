@@ -25,7 +25,8 @@ __global__ void moe_router_kernel(const uint16_t* __restrict__ hidden,
                                   const uint16_t* __restrict__ gate,
                                   const float* __restrict__ bias,
                                   int32_t* __restrict__ ids,
-                                  float* __restrict__ weights, int tokens,
+                                  float* __restrict__ weights,
+                                  float* __restrict__ biased_out, int tokens,
                                   int hidden_dim, int n_experts, int top_k,
                                   float routed_scaling_factor,
                                   int norm_topk) {
@@ -46,6 +47,11 @@ __global__ void moe_router_kernel(const uint16_t* __restrict__ hidden,
     const float s = 1.0f / (1.0f + expf(-dot));
     scores[e] = s;
     biased[e] = s + bias[e];
+    // Export BEFORE the selection loop scribbles -INFINITY into the smem
+    // copy: near-tie certification needs every expert's true biased score,
+    // not just the selected ones'.
+    if (biased_out)
+      biased_out[static_cast<size_t>(token) * n_experts + e] = biased[e];
   }
   __syncthreads();
 
@@ -151,14 +157,15 @@ void check_router_args(const uint16_t* hidden, const uint16_t* gate,
 void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
                        const float* bias, int32_t* ids, float* weights,
                        const GlmMoeConfig& cfg, int tokens,
-                       cudaStream_t stream) {
+                       cudaStream_t stream, float* biased_out) {
   GlmMoeConfig::validate_config(cfg);
   if (tokens <= 0) return;
   check_router_args(hidden, gate, bias, ids, weights);
   const size_t smem = 2 * static_cast<size_t>(cfg.n_experts) * sizeof(float);
   moe_router_kernel<<<tokens, kRouterThreads, smem, stream>>>(
-      hidden, gate, bias, ids, weights, tokens, cfg.hidden, cfg.n_experts,
-      cfg.top_k, cfg.routed_scaling_factor, cfg.norm_topk_prob ? 1 : 0);
+      hidden, gate, bias, ids, weights, biased_out, tokens, cfg.hidden,
+      cfg.n_experts, cfg.top_k, cfg.routed_scaling_factor,
+      cfg.norm_topk_prob ? 1 : 0);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

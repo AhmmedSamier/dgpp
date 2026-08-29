@@ -35,9 +35,12 @@ class GlmMoeLayer {
   void enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
                cudaStream_t stream);
 
-  // Host copies of the most recent enqueue's routing decision.
+  // Host copies of the most recent enqueue's routing decision. last_biased()
+  // holds every expert's biased score for the same enqueue
+  // ([tokens, n_experts], fp32) — the near-tie certification inputs.
   const std::vector<int32_t>& last_ids() const { return h_ids_; }
   const std::vector<float>& last_weights() const { return h_weights_; }
+  const std::vector<float>& last_biased() const { return h_biased_; }
   const GlmMoeConfig& config() const { return cfg_; }
   int max_tokens() const { return max_tokens_; }
 
@@ -60,6 +63,7 @@ class GlmMoeLayer {
   // device scratch (managed; sized to max_tokens)
   int32_t* d_ids_ = nullptr;
   float* d_weights_ = nullptr;
+  float* d_biased_ = nullptr;  // [max_tokens, n_experts] router scores
   int32_t* d_rows_ = nullptr;
   float* d_row_w_ = nullptr;
   uint16_t* d_gather_ = nullptr;
@@ -71,6 +75,7 @@ class GlmMoeLayer {
   // host staging
   std::vector<int32_t> h_ids_;
   std::vector<float> h_weights_;
+  std::vector<float> h_biased_;  // [tokens, n_experts] (certification)
   std::vector<int32_t> h_rows_;
   std::vector<float> h_row_w_;
   std::vector<int> h_counts_;

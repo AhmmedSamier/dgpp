@@ -1,0 +1,201 @@
+#pragma once
+// Route-divergence audit for the GLM curated parity suite (DESIGN 12).
+//
+// The MoE router's noaux_tc selection biases scores so experts cluster at
+// the selection boundary, and the suite's ISOLATED mode recomputes each
+// side's mHC+ln2 chain from the same injected streams — so each side's
+// router input carries its own ~1e-3 fp noise and near-boundary experts
+// legitimately flip. "Near tie" must be a MEASURED claim, never a budget
+// (the dsa_near_tie_audit discipline, adapted to fp32 router scores):
+//
+//   1. The engine's selection must be the spec top-k of the ENGINE'S OWN
+//      biased scores (biased descending, ties to the lower id) — this
+//      certifies the router kernel's selection for the inputs it actually
+//      consumed. A mis-sorted or dropped id fails here, loudly.
+//   2. Each swapped expert pair must straddle the selection boundary
+//      within a small multiple of the token's MEASURED cross-implementation
+//      noise — where noise is the mean |engine - reference| biased
+//      difference over the experts NOT involved in the swap. A legitimate
+//      input perturbation moves every expert's score by the same scale, so
+//      the uninvolved majority pins the true noise; corruption concentrated
+//      on the swapped experts cannot hide inside its own inflation. An
+//      expert ranked far below the boundary is not a near tie no matter
+//      what the noise says; a zero-noise row with a swap is a hard spec
+//      bug, not noise.
+//
+// Both sides' full biased-score rows are required inputs, so the noise
+// yardstick is measured per token, never assumed or tuned. Host-only.
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <numeric>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace dgpp::glm_route {
+
+struct RouteFlipAudit {
+  int64_t tokens_flipped = 0;
+  int64_t swaps_certified = 0;
+  double max_boundary_gap = 0;    // ref-side |b(in) - b(out)| of a swap
+  double max_noise_multiple = 0;  // worst gap / measured noise (both sides)
+};
+
+// Complete audit of one routed layer's engine-vs-reference ids. Throws
+// with a precise diagnosis when a divergence is NOT a certified near tie.
+//
+//   eng_ids/ref_ids: [tokens, top_k], ascending per token (both sides'
+//                    contract with the kernel / the torch reference).
+//   eng_biased/ref_biased: [tokens, n_experts] fp32 biased scores
+//                    (engine: the router's own export; reference: the
+//                    dump's router_biased tensor).
+inline void audit_route_flips(const int32_t* eng_ids,
+                              const int32_t* ref_ids, const float* eng_biased,
+                              const float* ref_biased, int64_t tokens,
+                              int top_k, int n_experts, RouteFlipAudit& out,
+                              int64_t layer_idx = -1) {
+  const std::string where = layer_idx >= 0
+                                ? "route audit (layer " +
+                                      std::to_string(layer_idx) + ")"
+                                : "route audit";
+  const size_t E = static_cast<size_t>(n_experts);
+  const size_t K = static_cast<size_t>(top_k);
+
+  // Ranking of experts by one side's biased scores: descending, ties to the
+  // lower id (the pinned spec order both the kernel and the reference use).
+  const auto rank_by = [&](const float* biased,
+                           std::vector<int32_t>* order_out) {
+    std::vector<int32_t>& order = *order_out;
+    order.resize(E);
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](int32_t a, int32_t b) {
+      const float ba = biased[a], bb = biased[b];
+      if (ba != bb) return ba > bb;
+      return a < b;
+    });
+  };
+
+  for (int64_t t = 0; t < tokens; ++t) {
+    const int32_t* ei = eng_ids + t * top_k;
+    const int32_t* ri = ref_ids + t * top_k;
+    std::vector<int32_t> eng(ei, ei + top_k), ref(ri, ri + top_k);
+    std::sort(eng.begin(), eng.end());
+    std::sort(ref.begin(), ref.end());
+    if (eng == ref) continue;  // kept token: nothing to prove
+
+    // Duplicated ids are a top-k bug, not a flip.
+    if (std::adjacent_find(eng.begin(), eng.end()) != eng.end() ||
+        std::adjacent_find(ref.begin(), ref.end()) != ref.end())
+      throw std::runtime_error(
+          where + ": token " + std::to_string(t) +
+          " has a duplicate expert id (top-k bug, not a near tie)");
+
+    const float* eb = eng_biased + t * E;
+    const float* rb = ref_biased + t * E;
+
+    // Part 1: the engine's ids must be the spec top-k of the engine's own
+    // biased scores. Certifies the selection for the inputs it consumed.
+    {
+      std::vector<int32_t> order;
+      rank_by(eb, &order);
+      std::vector<int32_t> spec(order.begin(), order.begin() + K);
+      std::sort(spec.begin(), spec.end());
+      if (spec != eng) {
+        std::string ss, es;
+        for (int32_t e : eng) es += " " + std::to_string(e);
+        for (int32_t e : spec) ss += " " + std::to_string(e);
+        throw std::runtime_error(
+            where + ": token " + std::to_string(t) +
+            " engine selection is NOT the spec top-k of the engine's own "
+            "biased scores (router bug, not a near tie); got:" + es +
+            " spec:" + ss);
+      }
+    }
+
+    std::vector<int32_t> only_eng, only_ref;
+    std::set_difference(eng.begin(), eng.end(), ref.begin(), ref.end(),
+                        std::back_inserter(only_eng));
+    std::set_difference(ref.begin(), ref.end(), eng.begin(), eng.end(),
+                        std::back_inserter(only_ref));
+    if (only_eng.size() != only_ref.size())
+      throw std::runtime_error(
+          where + ": token " + std::to_string(t) + " selection differs by " +
+          std::to_string(only_eng.size()) + " in / " +
+          std::to_string(only_ref.size()) +
+          " out (segmentation bug, not a near tie)");
+
+    // Measured noise for THIS token: mean |engine - reference| biased
+    // difference over the experts NOT involved in the swap (a legitimate
+    // input perturbation is uniform across experts; the uninvolved
+    // majority pins its scale, and corruption concentrated on the swapped
+    // experts cannot inflate its own yardstick). A zero-noise row with a
+    // swap is a hard spec bug.
+    std::vector<char> involved(E, 0);
+    for (int32_t e : only_eng) involved[size_t(e)] = 1;
+    for (int32_t e : only_ref) involved[size_t(e)] = 1;
+    double noise_sum = 0;
+    int64_t noise_count = 0;
+    for (size_t e = 0; e < E; ++e)
+      if (!involved[e]) {
+        noise_sum += std::abs(double(eb[e]) - double(rb[e]));
+        ++noise_count;
+      }
+    if (noise_count == 0) {  // degenerate: everyone involved — use everyone
+      noise_count = static_cast<int64_t>(E);
+      for (size_t e = 0; e < E; ++e)
+        noise_sum += std::abs(double(eb[e]) - double(rb[e]));
+    }
+    const double noise = noise_sum / static_cast<double>(noise_count);
+
+    // Reference ranking: ranks the swapped experts straddle the boundary.
+    std::vector<int32_t> order;
+    rank_by(rb, &order);
+    std::vector<int64_t> rank_of(E, -1);
+    for (size_t i = 0; i < E; ++i) rank_of[size_t(order[i])] = int64_t(i);
+
+    for (size_t i = 0; i < only_eng.size(); ++i) {
+      const int32_t expert_in = only_eng[i];    // engine selected, ref didn't
+      const int32_t expert_out = only_ref[i];  // reference selected, didn't
+      const double gap_ref =
+          std::abs(double(rb[expert_in]) - double(rb[expert_out]));
+      const double gap_eng =
+          std::abs(double(eb[expert_in]) - double(eb[expert_out]));
+      // The swapped experts' own cross-side disagreement: a legitimate
+      // perturbation moves them by the same scale as everyone else, so a
+      // large per-expert diff is concentrated corruption, not noise.
+      const double drift_in =
+          std::abs(double(eb[expert_in]) - double(rb[expert_in]));
+      const double drift_out =
+          std::abs(double(eb[expert_out]) - double(rb[expert_out]));
+      const int64_t rank_in = rank_of[size_t(expert_in)];
+      const int64_t rank_out = rank_of[size_t(expert_out)];
+      // A near tie requires: out at the boundary (it was selected, so its
+      // ref rank is < top_k) and in adjacent to it, plus the swap's every
+      // scale — both sides' boundary gaps and the swapped experts' own
+      // drifts — within the measured noise multiple.
+      const bool ranks_adjacent = rank_out < top_k &&
+                                  rank_in < top_k + 8;
+      const double worst =
+          std::max(std::max(gap_ref, gap_eng), std::max(drift_in, drift_out));
+      const double gap_multiple =
+          noise > 0 ? worst / noise : (worst > 0 ? 1e30 : 0);
+      if (!ranks_adjacent || gap_multiple > 32.0)
+        throw std::runtime_error(
+            where + ": expert " + std::to_string(expert_in) + " (ref rank " +
+            std::to_string(rank_in) + ", gaps " + std::to_string(gap_ref) +
+            " ref / " + std::to_string(gap_eng) + " eng, drifts " +
+            std::to_string(drift_in) + " / " + std::to_string(drift_out) +
+            " = " + std::to_string(gap_multiple) +
+            "x noise) displaced expert " + std::to_string(expert_out) +
+            " (ref rank " + std::to_string(rank_out) +
+            ") — NOT a boundary near tie");
+      out.swaps_certified += 1;
+      out.max_boundary_gap = std::max(out.max_boundary_gap, gap_ref);
+      out.max_noise_multiple = std::max(out.max_noise_multiple, gap_multiple);
+    }
+    out.tokens_flipped += 1;
+  }
+}
+
+}  // namespace dgpp::glm_route
