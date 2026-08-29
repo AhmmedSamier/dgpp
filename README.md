@@ -15,8 +15,13 @@ full single-node GLM diagnostic forward: config adapter and binding
 validation, mHC residual streams, the streaming resident loader (one layer
 resident at a time), block-scale-aware GEMMs, MoE routing with route-trace
 capture, and a curated real-checkpoint parity suite where every selection
-flip — router or head — is certified as a measured near tie. It does
-**not** yet implement multi-node inference runtime, the TP placement,
+flip — router or head — is certified as a measured near tie. M5 (four-rank
+tensor parallelism) has begun: the TCP control plane — epoch-based
+roster/startup, rank health, eviction on death or heartbeat deadline — is
+implemented, unit- and sanitizer-tested, and validated on all four nodes,
+including an injected rank death. It does
+**not** yet implement the CollectiveBus data plane (RC/RoCE collectives),
+the TP placement,
 prefix cache, MTP generation loop, or OpenAI-compatible server. See
 `PLAN.md` for milestone status.
 
@@ -87,6 +92,7 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `tools/kda_reference_dump.py` | KDA parity dumps: `selftest`, `gen-pure` (CI oracle), `gen-torch` (real checkpoint slices; needs torch) |
 | `tools/dsa_reference_dump.py` | DSA parity dumps: `selftest`, `gen-pure` (CI oracle), `gen-torch` (real checkpoint slices; needs torch) |
 | `tools/glm_reference_dump.py` | full-model parity dumps: `selftest`, `gen-pure` (CI oracle, mini checkpoint), `gen-torch` (real checkpoint, per-layer streams + router scores; `--layers N` for reduced budgets) |
+| `roster_check coordinator/rank/selftest` | M5 control plane on real nodes: epoch-based roster startup, rank health, eviction on death/deadline; `selftest` is the loopback in-process smoke |
 
 The GDR probe exits successfully when the probe itself completes, including
 the expected “unsupported” result on GB10. It does not prescribe a bounce
@@ -97,12 +103,14 @@ GPU.
 
 CTest currently runs:
 
-- 44 host unit cases covering logging/tracing, JSON, arenas, safetensors,
+- 54 host unit cases covering logging/tracing, JSON, arenas, safetensors,
   FP8, shard plans, KDA/DSA geometry contracts (against DESIGN §7.2's
   transcribed literals), route-trace golden bytes shared with the python
-  reader, and the MoE route-flip certifier's rejection paths (near-tie
+  reader, the MoE route-flip certifier's rejection paths (near-tie
   accepted; far-rank, zero-noise, own-scores-inconsistent, and duplicate-id
-  divergences rejected);
+  divergences rejected), and the TCP/roster control plane (seal, epoch
+  bumps, eviction by death and by deadline, rejection reasons, coordinator
+  loss);
 - synthetic CUDA graph/eager parity;
 - the KDA operator suite: conv/recurrent kernel parity against host
   fp32/fp64 references, chunked-vs-unchunked bitwise equivalence, decode

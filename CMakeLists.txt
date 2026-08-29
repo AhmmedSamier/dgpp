@@ -90,6 +90,13 @@ add_library(dgpp_core STATIC
   src/core/trace.cpp)
 dgpp_set_common(dgpp_core)
 
+# M5 control plane: TCP roster/startup/health (host-only; no CUDA).
+add_library(dgpp_net STATIC
+  src/net/tcp.cpp
+  src/net/roster.cpp)
+target_link_libraries(dgpp_net PUBLIC dgpp_core Threads::Threads)
+dgpp_set_common(dgpp_net)
+
 add_library(dgpp_loaders STATIC
   src/loaders/minijson.cpp
   src/loaders/shardspec.cpp)
@@ -176,6 +183,11 @@ add_executable(dgppctl apps/dgppctl.cpp src/common/log.cpp)
 target_link_libraries(dgppctl PRIVATE CUDA::cudart)
 dgpp_set_common(dgppctl)
 
+# M5 deliverable 1 deployment driver: roster/startup/health over TCP.
+add_executable(roster_check apps/roster_check.cpp)
+target_link_libraries(roster_check PRIVATE dgpp_net)
+dgpp_set_common(roster_check)
+
 enable_testing()
 add_executable(unit_tests
   tests/unit/log_test.cpp
@@ -190,10 +202,11 @@ add_executable(unit_tests
   tests/unit/glm_binding_test.cpp
   tests/unit/glm_trace_test.cpp
   tests/unit/glm_route_audit_test.cpp
+  tests/unit/net_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
-                                        dgpp_models_glm Threads::Threads)
+                                        dgpp_models_glm dgpp_net Threads::Threads)
 dgpp_set_common(unit_tests)
 add_executable(flag_protocol_test tests/cuda/flag_protocol_test.cu)
 target_link_libraries(flag_protocol_test PRIVATE CUDA::cudart)
@@ -326,6 +339,9 @@ set_tests_properties(doll_selftest PROPERTIES SKIP_RETURN_CODE 2)
 
 # Flag-protocol regression test (CUDA); skip without a device as above.
 add_test(NAME flag_protocol_test COMMAND flag_protocol_test)
+
+# M5 control-plane app smoke (loopback, in-process).
+add_test(NAME roster_selftest COMMAND roster_check selftest)
 set_tests_properties(flag_protocol_test PROPERTIES SKIP_RETURN_CODE 2)
 
 add_executable(micro_mem_bw benchmarks/micro/mem_bw.cu src/common/log.cpp)

@@ -181,6 +181,33 @@ KDA heads and recurrent state are head-sharded. DSA MLA latent and indexer
 caches are replicated because every rank begins with the same hidden state and
 must make the same sparse-token selection; there is no global score gather.
 
+### 5.3 Control plane: roster, epochs, health (M5)
+
+Membership and coordination run over TCP — never on the CUDA critical path.
+The wire protocol and its validated semantics live in `src/net/roster.hpp`
+and the M5 results file; the contract in brief:
+
+- The coordinator (rank 0) seals the roster at epoch 1 once every
+  configured rank has announced, or fails startup with exact progress.
+  Its own rank is an implicit member (it needs no loopback connection to
+  itself). Late joins and rejoins are refused in v1: a replacement member
+  would need a state-consistency story that does not exist yet.
+- Epochs are owned by the coordinator and carried by every roster frame;
+  they advance on membership change (eviction). A rank that observes a
+  non-monotonic epoch treats the batch as fatal — the same rule as the
+  coordinator epoch mismatch above.
+- A rank is evicted on process death (connection EOF) or on a heartbeat
+  deadline that applies **only after the roster is sealed** — before the
+  seal there is no batch to protect and slow announces are normal. The
+  evicted rank receives its final roster so it can tell eviction from
+  coordinator loss.
+- Rejections carry a reason string, not a bare close: cluster-start config
+  errors must be legible in the rank's log. `join()` returns the first
+  sealed roster frozen at receipt — a later eviction racing the caller's
+  wakeup must not rewrite what the rank was sealed with.
+- Coordinator loss (ack deadline) is fatal for the batch; there is no
+  coordinator failover in v1.
+
 ### 5.2 Weight placement
 
 - routed experts: 72 whole experts per rank initially;
@@ -722,6 +749,8 @@ src/models/           synthetic GPT doll; KDA layer/state/reference/dump; DSA
                       reference/geometry/state/layer/dump; GLM text config,
                       expected-tensor binding, and streaming resident loader
                       (M4)
+src/net/              M5 control plane: TCP primitives and the epoch-based
+                      roster (startup, health, eviction)
 tests/                host, CUDA, and Python tests
 tools/                checkpoint audit, shard-plan, KDA/DSA reference-dump generators
 ```

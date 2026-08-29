@@ -1,0 +1,78 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+namespace dgpp::net {
+
+// Deadline-correct POSIX TCP primitives for the M5 control plane.
+//
+// Policy: connect failures throw std::runtime_error (startup is exceptional
+// and the caller wants the reason); read/write return false on timeout or
+// peer close because the roster event loop treats those as protocol events,
+// not errors. send() always uses MSG_NOSIGNAL so a dead peer can never raise
+// SIGPIPE and kill the process.
+class TcpConn {
+ public:
+  TcpConn() = default;
+  TcpConn(TcpConn&& other) noexcept;
+  TcpConn& operator=(TcpConn&& other) noexcept;
+  TcpConn(const TcpConn&) = delete;
+  TcpConn& operator=(const TcpConn&) = delete;
+  ~TcpConn();
+
+  // Connect with a hard timeout; throws on DNS/refused/timeout failure.
+  // TCP_NODELAY is set: control-plane frames are small and latency-oriented.
+  static TcpConn connect(const std::string& host, uint16_t port,
+                         int timeout_ms);
+
+  // SO_RCVTIMEO/SO_SNDTIMEO: read/write return false once exceeded.
+  void set_io_deadline_ms(int ms);
+
+  // Exact-length helpers; false on timeout, peer close, or error.
+  bool write_all(const void* data, size_t len);
+  bool read_exact(void* dst, size_t len);
+
+  // poll(POLLIN) with deadline; true also when the peer closed (a subsequent
+  // read_exact then returns false), so callers never block past the deadline.
+  bool wait_readable(int timeout_ms);
+
+  void close();
+  bool valid() const { return fd_ >= 0; }
+
+ private:
+  explicit TcpConn(int fd);
+
+  int fd_ = -1;
+  friend class TcpListener;
+};
+
+// Bind-and-listen helper. port 0 picks an ephemeral port (call port()).
+class TcpListener {
+ public:
+  TcpListener() = default;
+  TcpListener(TcpListener&& other) noexcept;
+  TcpListener& operator=(TcpListener&& other) noexcept;
+  TcpListener(const TcpListener&) = delete;
+  TcpListener& operator=(const TcpListener&) = delete;
+  ~TcpListener();
+
+  static TcpListener bind(uint16_t port);
+
+  uint16_t port() const { return port_; }
+
+  // Blocks up to timeout_ms; nullopt on timeout. Accepted connections get
+  // TCP_NODELAY but no I/O deadline — the caller sets one.
+  // Returns an invalid conn only on unrecoverable accept errors (rare).
+  TcpConn accept(int timeout_ms) const;
+
+  void close();
+  bool valid() const { return fd_ >= 0; }
+
+ private:
+  int fd_ = -1;
+  uint16_t port_ = 0;
+};
+
+}  // namespace dgpp::net
