@@ -215,6 +215,31 @@ dominated (~0.9 ms of 1.32 ms streams the 204 MB fused projection), which
 is the intended decode-traffic shape. These are correctness-first M2
 numbers, not performance claims.
 
+## Layer streaming and real route traffic (M4)
+
+`glm_stream_check` over the full real checkpoint (full record in
+`benchmarks/results/2026-08-28-glm-m4-assembly.md`; idle node, cold page
+cache):
+
+- all 46 layers streamed one at a time through the resident loader:
+  KDA/dense 408.3 MiB, DSA/MoE 7,275.7 MiB, KDA/MoE 7,204.2 MiB,
+  MTP 7,338.3 MiB per layer; peak layer 7.17 GiB, globals 2.363 GiB
+  (embed + lm head + final norm) — peak device footprint ≈ 9.6 GiB,
+  so single-node correctness work fits without the TP placement;
+- streaming total 316.4 s (per MoE layer ~7 s reading 7.2–7.3 GiB —
+  ~1 GB/s from cold disk; loader overhead is not the bottleneck, and
+  second passes drop once the page cache holds the shards). The loader's
+  byte formula reconciles with the allocator on every load.
+
+The first real route trace (272-token technical-prose prompt, deterministic
+across re-runs) replaces the uniform-expert null model in the §3 traffic
+numbers: busiest-rank experts/layer 3.541 (uniform 3.515), corrected
+critical path 7.484 GB/token = 32.54 ms at the 230 GB/s planning floor
+(uniform 7.457 GB/token, +0.4%). A 12-layer close-out re-run reproduces
+the occupancy (+0.3%): the router input distribution is stable across
+depths. Sampling other prompt classes is future work; the traffic tool
+consumes their traces unchanged.
+
 ## cuBLASLt best-of-heuristics results
 
 `micro_gemm_peak` now warms all SMs before measurement, times every valid

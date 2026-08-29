@@ -278,6 +278,14 @@ Requirements:
 
 - cache block sizes and internal chunk starts are multiples of four; a final
   chunk may end with one to three tokens in the persistent incomplete tail;
+- `select_k = index_topk / index_kpool` must be a **power of two** — the
+  bitonic select/expand networks have no fallback shape (a select_k=6
+  experiment silently dropped every selected pool; rejected at layer
+  construction since);
+- `num_heads` must be a **power of two ≥ 4** — the absorbed-attention
+  kernel's head-group tiling partitions 64 lanes; heads=2 produced
+  1e33-scale output garbage with *correct selections* (bisected through
+  the CI machinery; 4/8/64 heads pass). Rejected at construction since;
 - the in-progress tail persists across prefill chunks, decode steps, MTP
   verification, prefix attachment, and cache transfer;
 - causal masking and deterministic tie-breaking operate on original token
@@ -674,6 +682,14 @@ surface under it:
 - shared-memory buffers reused across reduction phases (all threads read the
   mean, lane-0s overwrite with the variance) race without a barrier between
   the read and the reuse — scheduling luck passes functional tests.
+
+A third class, found by the M4 close-out's full-suite memcheck sweep: a CUDA
+API call whose failure the code deliberately swallows and clears (the M1
+rmsnorm's dynamic-smem opt-in probing the device cap, rejected on GB10 for
+that kernel's footprint) is still a sanitizer finding — the tool reports the
+error return regardless of the application's handling. Never make a call
+that can fail: query the driver-computed per-kernel ceiling
+(`cudaFuncAttributes::maxDynamicSharedSizeBytes`) and request within it.
 
 Sanitizer scope is chosen per phase, deliberately: full-suite memcheck for
 orchestration code (pointer/size bugs — it caught two undersized test

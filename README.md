@@ -3,17 +3,22 @@
 DGPP is an early-stage C++/CUDA inference-engine project for serving the text
 path of `unsloth/GLM-5.3-Flash-FP8` across four NVIDIA DGX Spark systems.
 
-Current status: M0–M3 prototype. The repository implements platform and RoCE
+Current status: M0–M4 prototype. The repository implements platform and RoCE
 validation tools, checkpoint/shard inspection, core CUDA runtime utilities, a
 synthetic transformer testbed, the KDA linear-attention operators with their
-per-request state manager and reference-dump harness, and the complete
+per-request state manager and reference-dump harness, the complete
 DSA/MLA sparse-attention path: indexer compression, deterministic pooled
 top-k, split-KV absorbed attention, a dual-precision host oracle, the blocked
 state pool with shared block tables, layer orchestration (graph-capturable
-decode, pool-tiled prefill), and the reference-dump parity harness. It does
-**not** yet implement the full GLM model, multi-node inference runtime,
-prefix cache, MTP generation loop, or OpenAI-compatible server. See `PLAN.md`
-for milestone status.
+decode, pool-tiled prefill), and the reference-dump parity harness; and the
+full single-node GLM diagnostic forward: config adapter and binding
+validation, mHC residual streams, the streaming resident loader (one layer
+resident at a time), block-scale-aware GEMMs, MoE routing with route-trace
+capture, and a curated real-checkpoint parity suite where every selection
+flip — router or head — is certified as a measured near tie. It does
+**not** yet implement multi-node inference runtime, the TP placement,
+prefix cache, MTP generation loop, or OpenAI-compatible server. See
+`PLAN.md` for milestone status.
 
 ## Documentation
 
@@ -80,6 +85,8 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `tools/checkpoint_audit.py [MODEL_DIR]` | regenerate inventory and checkpoint budget |
 | `tools/make_shardspec.py MODEL_DIR` | generate the loader shard plan |
 | `tools/kda_reference_dump.py` | KDA parity dumps: `selftest`, `gen-pure` (CI oracle), `gen-torch` (real checkpoint slices; needs torch) |
+| `tools/dsa_reference_dump.py` | DSA parity dumps: `selftest`, `gen-pure` (CI oracle), `gen-torch` (real checkpoint slices; needs torch) |
+| `tools/glm_reference_dump.py` | full-model parity dumps: `selftest`, `gen-pure` (CI oracle, mini checkpoint), `gen-torch` (real checkpoint, per-layer streams + router scores; `--layers N` for reduced budgets) |
 
 The GDR probe exits successfully when the probe itself completes, including
 the expected “unsupported” result on GB10. It does not prescribe a bounce
@@ -90,9 +97,12 @@ GPU.
 
 CTest currently runs:
 
-- 24 host unit cases covering logging/tracing, JSON, arenas, safetensors, FP8,
-  shard plans, KDA geometry/snapshot-header contracts, and the DSA geometry
-  contract against DESIGN §7.2's transcribed literals;
+- 44 host unit cases covering logging/tracing, JSON, arenas, safetensors,
+  FP8, shard plans, KDA/DSA geometry contracts (against DESIGN §7.2's
+  transcribed literals), route-trace golden bytes shared with the python
+  reader, and the MoE route-flip certifier's rejection paths (near-tie
+  accepted; far-rank, zero-noise, own-scores-inconsistent, and duplicate-id
+  divergences rejected);
 - synthetic CUDA graph/eager parity;
 - the KDA operator suite: conv/recurrent kernel parity against host
   fp32/fp64 references, chunked-vs-unchunked bitwise equivalence, decode
@@ -109,8 +119,9 @@ CTest currently runs:
   rows, kpool=2 generality, and the layer tests: state-pool block
   allocation and byte accounting at deployment scale, prefill/chunked-
   prefill/decode parity against the oracle with selection-aware near-tie
-  certification, decode graph replay bitwise across positions, TP2
-  head-slice vs TP1, and a real-geometry chunked prefill + decode smoke;
+  certification (at select_k=16 and select_k=8), decode graph replay
+  bitwise across positions, TP2 head-slice vs TP1, and a real-geometry
+  chunked prefill + decode smoke;
 - DSA reference-dump parity: a pure-python oracle dump (bit-exact fp8 codec
   cross-checked against the C++ encoder) exercised through the full layer —
   latent cache bitwise, index cache within one e4m3 ulp, top-k exact — plus
@@ -118,14 +129,24 @@ CTest currently runs:
   32 and 2,052 tokens, the latter crossing the top-k horizon with zero
   flips); any flipped row is certified as a measured boundary near tie by
   the audit, never absorbed by tolerance;
+- the M4 assembly suites: the mHC stream module (Sinkhorn mixing, stream
+  update, final mean vs the double oracle), the MoE router/expert/shared
+  path (sigmoid router with the noaux tie rule, swiglu asymmetries, bf16
+  accumulation order, near-tie certification on synthetic corpora), the
+  scale-aware GEMM against cuBLASLt BF16 references and real-checkpoint
+  block edges, and the assembled-forward chain: a synthetic mini-checkpoint
+  written on disk, a full-stack pure-python reference over the same
+  weights, then the engine compared (hidden ulp budgets, top-k exact, route
+  ids/weights, determinism);
 - CUDA system-scope flag ordering, payload visibility, inactivity watchdog,
   and post-watchdog recovery;
-- Python checkpoint classification and exact expert-occupancy tests.
+- Python checkpoint classification, exact expert-occupancy tests, and the
+  route-trace traffic-model contract.
 
 All CUDA suites are verified clean under `compute-sanitizer` memcheck (full
-suite, both milestones) with racecheck and initcheck run per-phase on the
-tests exercising new kernel shapes; the sanitizer findings that motivated
-this (speculated loads past short-circuit guards, shared-memory reuse races
+suite every milestone; racecheck and initcheck per-phase on the tests
+exercising new kernel shapes); the sanitizer findings that motivated this
+(speculated loads past short-circuit guards, shared-memory reuse races
 that pass by scheduling luck, undersized test buffers that made a graph test
 pass vacuously) are pinned in `DESIGN.md` §12.
 

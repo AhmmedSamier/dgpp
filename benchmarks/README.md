@@ -146,6 +146,39 @@ BF16; FP8-native GEMMs are M4 scope) and runs the pinned reference layer
 equations in torch; record its invocation and the parity result when run
 against the pinned revision.
 
+## GLM reference dumps and the curated suite (correctness, not bandwidth)
+
+`tools/glm_reference_dump.py` generates full-model parity inputs for the
+assembled forward (`DGPPGLMD` container), and `glm_forward_check` consumes
+them (DESIGN §7.5):
+
+```bash
+# stdlib-only full-stack oracle over a synthetic mini-checkpoint
+# (wired into CTest: fixture -> generate -> test):
+python3 tools/glm_reference_dump.py gen-pure --out FILE --tokens 16
+"$BUILD/glm_forward_test" --dump-file FILE
+
+python3 tools/glm_reference_dump.py selftest
+
+# real checkpoint (requires torch; ~3.3 s/layer measured — 4-10 min/case
+# at 45 layers, ~60-120 s/case at --layers 12):
+python3 tools/glm_reference_dump.py gen-torch --model-dir MODEL_DIR \
+    --out FILE --token-ids "$(cat ids)" --tokens 512 [--layers N]
+
+"$BUILD/glm_forward_check" --config MODEL_DIR/config.json \
+    --checkpoint-dir MODEL_DIR --suite FILE [--layers N]
+```
+
+The curated suite (`benchmarks/glm-suite/`: three real-prompt cases + one
+engine-only trace case) compares ISOLATED per layer — every layer starts
+from the reference trajectory — with kept-row l2 floors, per-flip route
+certification (engine vs reference biased router scores, noise measured
+per token over the unswapped experts), and near-tie-certified top-1
+agreement; see the suite README for the discipline and the reduced-budget
+workflow. Engine-only route traces (`--trace-ids-file`) feed
+`tools/route_trace_traffic.py`. Run these on the box that holds the
+checkpoint; dumps are tens of MB and are not stored in the repo.
+
 ## Direct-device registration probe
 
 ```bash

@@ -494,3 +494,25 @@ separately — the full-config bind check is unchanged and still
 Verification: ci-local 18/18; unit 44/44 (was 39; +5 certifier cases);
 ASan/UBSan clean and memcheck 0 errors on glm_moe_test + glm_forward_test
 + unit_tests; tool selftest OK (both backends write router_biased).
+
+## Close-out verification sweep (2026-08-29, final state)
+
+- ci-local (WERROR, clean configure/build) 18/18; full ctest under ASan
+  18/18 and under UBSan 18/18 (the UBSan-on-final-state gap from the M4
+  audit closed).
+- Full-suite compute-sanitizer memcheck over every CUDA test binary: 0
+  errors everywhere. One pre-existing finding fixed en route: the M1
+  synthetic testbed (gpt_doll) reported 2 "errors" that were the rmsnorm
+  launcher's swallowed dynamic-smem opt-in probe (a deliberate
+  clamp-and-clear from the initial commit, functionally benign — GB10
+  rejects the 96 KB request for that kernel's footprint). The launcher now
+  queries the per-kernel ceiling (`cudaFuncAttributes::
+  maxDynamicSharedSizeBytes`) and requests within it, so the call cannot
+  fail; behavior is unchanged (all gpt_doll stages pass bitwise).
+- Python tool selftests: kda/dsa/glm reference-dump selftest OK.
+- Docs brought current for M4: README status/tools/tests (44 unit cases,
+  the six M4 suites, per-flip certification), benchmarks/README GLM
+  suite section, docs/measurements.md M4 section (loader streaming
+  ~1 GB/s cold-disk, 7.2-7.3 GiB/MoE layer, peak footprint ~9.6 GiB;
+  real-trace traffic +0.4% vs uniform), DESIGN §7.2 kernel-constraint
+  pins (select_k pow2, heads pow2 >= 4), PLAN.md M4 marked complete.

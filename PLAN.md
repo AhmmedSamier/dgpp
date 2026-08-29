@@ -248,7 +248,7 @@ Exit criteria:
   runner now certifies flips with the near-tie audit instead of tolerating
   them. Record in benchmarks/results/2026-08-28-dsa-m3-layer.md)
 
-## M4 — Full GLM single-node diagnostic assembly
+## M4 — Full GLM single-node diagnostic assembly (complete)
 
 Deliverables:
 

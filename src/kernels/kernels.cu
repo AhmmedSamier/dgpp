@@ -271,17 +271,23 @@ void rmsnorm_bf16(const void* x, const void* weight, void* y, int rows,
                   int dim, float eps, cudaStream_t stream) {
   constexpr int kBlock = 512;
   size_t shmem = sizeof(float) * dim;
-  // One-time opt-in for >48 KB dynamic smem. GB10 rejects oversized requests;
-  // clamp to the device-reported cap and clear any stale error code so it is
-  // not misattributed to the next launch's cudaGetLastError().
+  // One-time opt-in for >48 KB dynamic smem. Request within the
+  // driver-computed PER-KERNEL ceiling (the device-wide opt-in cap minus
+  // this kernel's own footprint) so cudaFuncSetAttribute cannot fail: a
+  // blind request at the device cap is rejected on GB10 for this kernel's
+  // footprint, and even a swallowed-and-cleared probe reports under
+  // compute-sanitizer.
   static const bool attr_ok = [] {
-    int maxoptin = 49152;
-    cudaDeviceGetAttribute(&maxoptin,
-                           cudaDevAttrMaxSharedMemoryPerBlockOptin, 0);
+    cudaFuncAttributes fa;
+    if (cudaFuncGetAttributes(&fa, rmsnorm_kernel) != cudaSuccess) {
+      cudaGetLastError();
+      return false;
+    }
+    const size_t ceiling =
+        static_cast<size_t>(fa.maxDynamicSharedSizeBytes);
     const size_t want =
-        sizeof(float) * 24576 < static_cast<size_t>(maxoptin)
-            ? sizeof(float) * 24576
-            : static_cast<size_t>(maxoptin);
+        std::min(sizeof(float) * 24576, ceiling);
+    if (want <= 49152) return false;  // nothing to opt in for
     cudaError_t e = cudaFuncSetAttribute(
         rmsnorm_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
         static_cast<int>(want));
