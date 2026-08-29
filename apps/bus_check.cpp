@@ -118,6 +118,7 @@ struct CommonArgs {
   uint16_t port = 29600;
   std::vector<std::string> devs;
   int world = 2;
+  int rank = 1;  // connector rank for ping; serve is always rank 0
   int lat_slots = 32;
   size_t lat_bytes = 8192;
   int bulk_slots = 16;
@@ -284,8 +285,8 @@ PingStats bulk_flood(CollectiveBus& bus, int peer, int iters, size_t bytes,
 
 int run_ping(CommonArgs c, std::string peer_host, int iters, size_t bytes,
              const std::string& cls_text, bool contend, int lat_iters,
-             long window) {
-  CollectiveBus bus(options_for(c, 1, peer_host));
+             long window, long hold_ms) {
+  CollectiveBus bus(options_for(c, c.rank, peer_host));
   std::string error;
   if (!bus.start(&error)) {
     DGPP_LOG_ERROR("ping: {}", error);
@@ -293,6 +294,37 @@ int run_ping(CommonArgs c, std::string peer_host, int iters, size_t bytes,
   }
 
   int failures = 0;
+
+  // Mesh smoke (world > 2): every rank exchanges with every peer, small
+  // latency class plus one bulk message per pair — validates all pair
+  // QPs, the endpoint-table distribution, and per-peer doorbell counts.
+  // Ranks run at different speeds, so hold the bus up for slower peers:
+  // a rank that tears down early makes its in-flight partners' last pair
+  // watchdog against a dead peer (by design, but noise for a smoke).
+  if (c.world > 2) {
+    for (int peer = 0; peer < c.world; ++peer) {
+      if (peer == c.rank) continue;
+      const PingStats lat =
+          ping_class(bus, peer, BusMessageClass::kLatency, iters,
+                     c.lat_bytes, c.timeout_ms + 2000);
+      const PingStats bulk =
+          ping_class(bus, peer, BusMessageClass::kBulk, 2, 4u << 20,
+                     c.timeout_ms + 2000);
+      DGPP_LOG_INFO(
+          "MESH rank {} -> rank {}: lat ok={}/{} p50_us={:.1f} | bulk ok={}/{}",
+          c.rank, peer, lat.ok, iters,
+          percentile(lat.latency_us, 0.5), bulk.ok, 2);
+      failures += lat.fail + bulk.fail;
+    }
+    print_bus_stats(bus.stats());
+    DGPP_LOG_INFO("MESH rank {} holding {} ms for slower peers", c.rank,
+                  hold_ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+    bus.stop();
+    DGPP_LOG_INFO("mesh smoke: stopped cleanly (failures={})", failures);
+    return failures == 0 ? 0 : 1;
+  }
+
   if (contend) {
     // Bulk flood on one thread, latency probes on another: the §6.1
     // concurrency contract — latency must hold budget under bulk load.
@@ -495,6 +527,7 @@ int main(int argc, char** argv) {
   long duration_ms = 30000;
   long lat_iters = 1000;
   long window = 1;
+  long hold_ms = 20000;
   size_t bytes = 8192;
   std::string cls_text = "latency";
   bool contend = false;
@@ -553,6 +586,12 @@ int main(int argc, char** argv) {
     } else if (a == "--window") {
       if (!parse_long(val(), 1, 256, &n)) args_ok = false;
       else window = n;
+    } else if (a == "--hold-ms") {
+      if (!parse_long(val(), 0, 3600000, &n)) args_ok = false;
+      else hold_ms = n;
+    } else if (a == "--rank") {
+      if (!parse_long(val(), 1, 3, &n)) args_ok = false;
+      else c.rank = static_cast<int>(n);
     } else if (a == "--timeout-ms") {
       if (!parse_long(val(), 100, 600000, &n)) args_ok = false;
       else c.timeout_ms = static_cast<int>(n);
@@ -570,7 +609,7 @@ int main(int argc, char** argv) {
   if (mode == "ping") {
     if (peer.empty()) return 2;
     return run_ping(c, peer, static_cast<int>(iters), bytes, cls_text,
-                    contend, static_cast<int>(lat_iters), window);
+                    contend, static_cast<int>(lat_iters), window, hold_ms);
   }
   DGPP_LOG_ERROR("unknown mode {}", mode);
   return 2;

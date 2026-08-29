@@ -25,24 +25,36 @@ constexpr int kRnrRetry = 7;
 constexpr int kMinRnrTimer = 12;
 constexpr int kMaxRdAtomic = 1;
 
-// First RoCEv2 GID index on the port, via sysfs — the same discovery the
-// M0 tools used, so lane/GID selection cannot drift between probe and bus.
+// First routable RoCEv2 GID index on the port, via sysfs. The v2 table
+// entry sorts link-local (fe80::) first; switches forward link-local
+// traffic unpredictably per port pair — the four-node mesh found directed
+// pairs where fe80 GIDs were silently dropped (everything into one node
+// died while its own outbound worked). The IPv4-mapped v2 GIDs (one per
+// fabric subnet) route like normal unicast, so those are the ones to use.
 int pick_rocev2_gid(ibv_context* ctx, int port) {
   std::string base = "/sys/class/infiniband/";
   base += ctx->device->name;
   base += "/ports/" + std::to_string(port) + "/gid_attrs/types/";
+  int first_v2 = -1;
   for (int i = 0; i < 64; ++i) {
     FILE* f = std::fopen((base + std::to_string(i)).c_str(), "r");
     if (!f) continue;
-    char buf[32] = {};
-    const size_t r = std::fread(buf, 1, sizeof(buf) - 1, f);
+    char type_buf[32] = {};
+    const size_t r = std::fread(type_buf, 1, sizeof(type_buf) - 1, f);
     std::fclose(f);
     if (r == 0) continue;
-    for (char* c = buf; *c; ++c)
+    for (char* c = type_buf; *c; ++c)
       *c = static_cast<char>(std::tolower(static_cast<unsigned char>(*c)));
-    if (std::strstr(buf, "v2")) return i;
+    if (std::strstr(type_buf, "v2") == nullptr) continue;
+    if (first_v2 < 0) first_v2 = i;
+    ibv_gid gid{};
+    if (ibv_query_gid(ctx, port, i, &gid) != 0) continue;
+    if (gid.raw[0] == 0xfe && gid.raw[1] == 0x80) continue;  // link-local
+    return i;
   }
-  return 0;
+  // No routable v2 GID: fall back to the first v2 entry (matches the M0
+  // tools' behavior, which measured link-local on these fabrics).
+  return first_v2 < 0 ? 0 : first_v2;
 }
 
 }  // namespace

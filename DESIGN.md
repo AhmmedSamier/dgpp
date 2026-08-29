@@ -78,6 +78,15 @@ without a congestion symptom. Switch inspection and counter deltas are
 diagnostics if a future four-node run shows drops, retries, throughput collapse,
 or latency spikes; they are not a correctness or deployment prerequisite.
 
+RoCEv2 GID selection: each port's GID table sorts a link-local `fe80::` v2
+entry ahead of the routable IPv4-mapped one, and switch forwarding of
+link-local is pair-dependent — the M5 four-node mesh measured one-way
+silent drops on specific directed pairs while the same QP pair ran cleanly
+in reverse. The bus therefore prefers the first non-link-local v2 GID
+(lane 0 → `c0a8:58xx`, lane 1 → `c0a8:59xx`), and the M0 tools' numbers
+were taken on link-local GIDs — valid for those pairs, but the routable
+GIDs are the deployment selection.
+
 ### 2.3 Direct NIC-to-GPU consumption
 
 Conventional GPUDirect RDMA registration of `cudaMalloc` memory is unsupported

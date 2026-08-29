@@ -843,6 +843,10 @@ struct CollectiveBus::Impl {
       const size_t my_slot = bus_peer_index(opt.my_rank, peer_rank);
       for (size_t l = 0; l < peers[p].size(); ++l) {
         peers[p][l].peer_endpoint = peer_frame.peers[my_slot][l];
+        DGPP_LOG_DEBUG(
+            "bus: rank {} lane {} <- peer {} table qpns lat={} bulk={}",
+            opt.my_rank, l, peer_rank, peer_frame.peers[my_slot][l].qpn_lat,
+            peer_frame.peers[my_slot][l].qpn_bulk);
         for (int pool_i = 0; pool_i < 2; ++pool_i) {
           const BusPool pool =
               pool_i == 0 ? BusPool::kLatency : BusPool::kBulk;
@@ -949,6 +953,9 @@ bool CollectiveBus::start(std::string* error) {
         return false;
       }
       state.endpoint = state.lane->endpoint();
+      DGPP_LOG_DEBUG("bus: rank {} peer {} lane {} my qpns lat={} bulk={}",
+                     opt.my_rank, impl.peer_ranks[p], l,
+                     state.endpoint.qpn_lat, state.endpoint.qpn_bulk);
       state.stats.peer_rank = impl.peer_ranks[p];
       state.stats.lane = static_cast<int>(l);
       state.send[0].assign(static_cast<size_t>(opt.lat_slots), Impl::SendSlot{});

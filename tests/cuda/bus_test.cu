@@ -328,6 +328,81 @@ void scenario_consumer_inactivity_exit() {
   b->stop();
 }
 
+void scenario_mesh_three_way() {
+  // World=3 loopback mesh: rank 0 listens, ranks 1 and 2 connect, and every
+  // rank exchanges with every peer. Exercises the full endpoint-table
+  // distribution (the multi-peer path the two-rank scenarios never touch)
+  // on one node, one log.
+  const uint16_t port = 29890;
+  BusOptions o0 = base_options(0, port);
+  BusOptions o1 = base_options(1, port);
+  BusOptions o2 = base_options(2, port);
+  o0.world_size = 3;
+  o1.world_size = 3;
+  o2.world_size = 3;
+  auto a = std::make_unique<CollectiveBus>(o0);  // rank 0, listener
+  auto b = std::make_unique<CollectiveBus>(o1);
+  auto c = std::make_unique<CollectiveBus>(o2);
+
+  std::string a_error;
+  std::thread a_thread([&] {
+    if (!a->start(&a_error)) DGPP_LOG_ERROR("mesh A: {}", a_error);
+  });
+  auto start_rank = [](CollectiveBus* bus, std::string* error) {
+    if (!bus->start(error)) DGPP_LOG_ERROR("mesh: {}", *error);
+  };
+  std::string b_error, c_error;
+  std::thread b_thread(start_rank, b.get(), &b_error);
+  std::thread c_thread(start_rank, c.get(), &c_error);
+  a_thread.join();
+  b_thread.join();
+  c_thread.join();
+  const bool started =
+      a_error.empty() && b_error.empty() && c_error.empty();
+  CHECK(started, "mesh startup failed: A=" + a_error + " B=" + b_error +
+                     " C=" + c_error);
+  if (!started) {
+    // Error path must quiesce all consumers before any teardown frees
+    // (cudaFreeHost synchronizes the device implicitly).
+    a->quiesce();
+    b->quiesce();
+    c->quiesce();
+    a->stop();
+    b->stop();
+    c->stop();
+    return;
+  }
+
+  // Every rank sends to every peer; verify each.
+  struct Lane { int from; int to; };
+  const Lane lanes[] = {{1, 0}, {2, 0}, {0, 1}, {2, 1}, {0, 2}, {1, 2}};
+  int failures = 0;
+  for (const Lane& l : lanes) {
+    CollectiveBus* from = l.from == 0 ? a.get() : (l.from == 1 ? b.get() : c.get());
+    std::vector<uint64_t> payload(8192 / 8);
+    fill_payload(payload.data(), payload.size(),
+                 static_cast<uint32_t>(l.from * 10 + l.to));
+    for (int i = 0; i < 4; ++i) {
+      BusSendResult r;
+      if (!send_and_verify(*from, l.to, BusMessageClass::kLatency,
+                           payload.data(), 8192, 15000, &r)) {
+        DGPP_LOG_ERROR("mesh {}->{} iter {} failed", l.from, l.to, i);
+        ++failures;
+      }
+    }
+  }
+  CHECK(failures == 0,
+        "three-way mesh had " + std::to_string(failures) + " failures");
+  DGPP_LOG_INFO("scenario mesh_three_way: {} failures over 6 directed pairs",
+                failures);
+  a->quiesce();
+  b->quiesce();
+  c->quiesce();
+  a->stop();
+  b->stop();
+  c->stop();
+}
+
 void scenario_geometry_mismatch() {
   // Config errors must be legible over the rendezvous (roster precedent),
   // never a bare close or a hang.
@@ -401,6 +476,7 @@ int main() {
   scenario_latency_under_bulk();
   scenario_completion_timeout();
   scenario_consumer_inactivity_exit();
+  scenario_mesh_three_way();
   scenario_geometry_mismatch();
   scenario_stop_releases_waiters();
 
