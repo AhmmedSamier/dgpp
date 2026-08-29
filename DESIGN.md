@@ -396,6 +396,86 @@ synchronizes the device implicitly, so loopback pairs must stop all
 persistent consumers before either side frees (two-phase stop: `quiesce()`
 then `stop()`; one bus per process never notices).
 
+### 6.3 The collective: one-shot all-to-all all-reduce
+
+The M5 deliverable-3 primitive is a one-shot all-to-all all-reduce over the
+latency pool: every rank sends its full hidden vector to every peer
+simultaneously — all stripes are postable the moment the collective is
+issued, the W−1 wire transfers run in parallel — and one per-collective
+kernel folds the W vectors locally (bf16 loads, fp32 accumulation in
+canonical global-rank order: rank 0's vector first, always, so every
+rank computes the identical chain and all destinations agree bitwise —
+per-rank orderings could differ in the last ulp and diverge replicated
+state; the host oracle mirrors the same chain and verifies exactly).
+
+The recorded alternative, recursive doubling, was rejected for this class:
+its round-j payload is round-(j−1)'s *reduced output*, a data dependency no
+side can pre-post — every round would pay the full
+GPU-fold → host-flag → post → wire → doorbell chain serially, exactly the
+host round trip the per-collective design removes. At TP=4 one-shot sends
+3×8 KiB where doubling would send 2×8 KiB; against a 196 Gb/s fabric that
+"redundancy" is noise, and it buys a single dependency-free posting wave.
+Recursive doubling (more precisely reduce-scatter + allgather) remains the
+choice for large buffers where link bandwidth binds — the prefill striped
+bulk class, where the term sizes are MiB, not KiB.
+
+The three seams, in launch order:
+
+- **Staging (GPU → engine).** The per-collective kernel is also the stager:
+  it writes the device source vector into each peer's claimed send slot
+  (pinned LPDDR, zero-copy), `__threadfence_system`, then publishes a
+  per-peer ready bit in a pinned control cell (system-scope release). The
+  engine's collective pass acquire-loads the bits and posts payload+doorbell
+  SENDs — the same handoff the forward integration will use when the
+  producing GEMM writes slots directly. The wire protocol is unchanged:
+  an all-reduce stripe is an ordinary latency-class message.
+- **Inbound (NIC → GPU).** The kernel scans each peer's latency doorbell
+  cells across all lanes; `doorbell.seq != ack.seq` marks an unconsumed
+  message (the ring/credit discipline guarantees at most one per peer per
+  outstanding collective). It claims by publishing the standard ack —
+  hash = fold of the received payload, publish-last seq release — so the
+  engine's recycle and credit passes run byte-identical to harness
+  traffic. The engine's doorbell-CQE `expect_seq` validation catches any
+  contract violation loudly.
+- **Completion (GPU → engine → waiter).** The kernel publishes
+  `{ctl_seq, status}` into the control cell (release) after the reduce;
+  the engine's pass sees it, completes the request (the single completion
+  authority, same cv semantics as `send()`), and the waiter runs one
+  `cudaStreamSynchronize` after waking so cross-stream consumers of the
+  destination are ordered. Credits still flow receiver → sender for slot
+  recycling, but they are off the collective's critical path entirely —
+  completion no longer waits for the credit round trip (the ~17 µs
+  harness p50's second half).
+
+v1 restrictions, all deliberate: at most one outstanding collective per
+bus (decode is dependency-serialized layer to layer); `launch_consumers=
+false` (persistent harness consumers would race the per-collective kernel
+for doorbell claims); no other latency traffic while a collective is in
+flight — enforced: once a bus enters collective mode, `send()` is closed
+(a harness message would be claimed and folded into a peer's reduce: the
+silent-corruption class, rejected loudly instead). Failure paths: the
+kernel carries its own cycle deadline and exits through one common
+post-scan barrier (the persistent-kernel deadlock lesson), the engine
+watchdog fails the request and poisons the control cell so the kernel
+exits promptly, and a lane failure completes the request with the legible
+lane error. The slot that a failed request staged is freed by the normal
+credit/owning-reference machinery — a late credit after the waiter reaped
+never corrupts ring state.
+
+Measured (fabric, bitwise-verified against the canonical-chain oracle):
+TP=2 p50 37.6 µs, TP=4 (full mesh) p50 ~44 µs, submit→wait, credits off
+the critical path. Kernel-internal spans are ~6 µs staging, ~6 µs doorbell
+claim, ~10 µs fold+reduce; the kernel launch (~10-30 µs) is the fixed
+cost that graph capture (§6.2) amortizes in the decode path. Two
+scheduling lessons from the bring-up, both now engine policy: the idle
+branch's `sched_yield` was a hot-path syscall that cost ~2.2 ms of poll
+latency per idle stretch (fixed: a genuine hot spin whose 50 µs sleep
+tail is a power courtesy, never a latency mechanism), and bare
+condition-variable waits pay a CFS-timeslice wake against the hot
+engine (fixed: spin-then-futex on a release-published done flag — spun
+before the mutex, since spinning under it deadlocks the completer). The
+same fixes took the harness send path from 16.5 to 12.1 µs p50.
+
 ## 7. Attention and state semantics
 
 ### 7.1 KDA

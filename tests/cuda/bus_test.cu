@@ -403,6 +403,229 @@ void scenario_mesh_three_way() {
   c->stop();
 }
 
+// ---- bf16 helpers: shared in bus_kernel.hpp (match RNE exactly) -----------
+
+// Deterministic per-rank bf16 pattern with arbitrary mantissas (the
+// rounding path is exercised; the oracle chain matters).
+void fill_rank_bf16(std::vector<uint16_t>* out, size_t elems, int rank) {
+  out->assign(elems, 0);
+  uint64_t x = 0x9E3779B97F4A7C15ULL ^ (0x100000001B3ULL * (rank + 1));
+  for (size_t i = 0; i < elems; ++i) {
+    x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+    const float v =
+        static_cast<float>(static_cast<int32_t>(x >> 40)) * (1.0f / 8388608.0f) - 1.0f;
+    (*out)[i] = dgpp::net::bf16_from_f32_rne(v);
+  }
+}
+
+// Starts a loopback world: rank 0 listens, ranks 1..N-1 connect.
+// Collective mode: no persistent consumers (they would race the
+// per-collective kernel — and their 300s deadlines would turn any
+// implicit-sync call in the workers into a hang).
+std::vector<std::unique_ptr<CollectiveBus>> start_world(int world,
+                                                        uint16_t port) {
+  std::vector<std::unique_ptr<CollectiveBus>> out;
+  for (int r = 0; r < world; ++r) {
+    BusOptions o = base_options(r, port);
+    o.world_size = world;
+    o.launch_consumers = false;
+    out.push_back(std::make_unique<CollectiveBus>(o));
+  }
+  std::vector<std::string> errors(world);
+  std::thread listener([&] {
+    if (!out[0]->start(&errors[0])) DGPP_LOG_ERROR("world rank 0: {}", errors[0]);
+  });
+  std::vector<std::thread> connectors;
+  for (int r = 1; r < world; ++r)
+    connectors.emplace_back([&, r] {
+      if (!out[static_cast<size_t>(r)]->start(&errors[static_cast<size_t>(r)]))
+        DGPP_LOG_ERROR("world rank {}: {}", r, errors[static_cast<size_t>(r)]);
+    });
+  listener.join();
+  for (auto& t : connectors) t.join();
+  for (int r = 0; r < world; ++r)
+    if (!errors[static_cast<size_t>(r)].empty()) return {};
+  return out;
+}
+
+// One rank's share of a collective run: `iters` collectives over the same
+// buffers (slot generations advance, recycling is exercised), each result
+// checked bitwise against the canonical-chain oracle. Returns the number
+// of local failures (CHECK is main-thread-only; workers report home).
+int allreduce_rank_work(CollectiveBus& bus, int world, int my_rank,
+                        size_t elems, int iters) {
+  std::vector<uint16_t> host_src, host_dst(elems, 0);
+  fill_rank_bf16(&host_src, elems, my_rank);
+  // Any rank can regenerate any rank's pattern — the oracle needs them all.
+  std::vector<std::vector<uint16_t>> all_src(world);
+  for (int r = 0; r < world; ++r) fill_rank_bf16(&all_src[static_cast<size_t>(r)], elems, r);
+
+  uint16_t* dev_src = nullptr;
+  uint16_t* dev_dst = nullptr;
+  if (cudaMalloc(&dev_src, elems * 2) != cudaSuccess ||
+      cudaMalloc(&dev_dst, elems * 2) != cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: device alloc failed", my_rank);
+    return 1;
+  }
+  if (cudaMemcpy(dev_src, host_src.data(), elems * 2, cudaMemcpyHostToDevice) !=
+      cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: H2D failed", my_rank);
+    cudaFree(dev_src);
+    cudaFree(dev_dst);
+    return 1;
+  }
+
+  int failures = 0;
+  std::vector<uint16_t> got(elems, 0);
+  for (int iter = 0; iter < iters; ++iter) {
+    std::string error;
+    const uint64_t id = bus.allreduce(dev_src, dev_dst, elems, &error);
+    if (id == 0) {
+      DGPP_LOG_ERROR("rank {}: allreduce rejected: {}", my_rank, error);
+      ++failures;
+      break;
+    }
+    const dgpp::net::BusAllReduceResult r = bus.wait_allreduce(id, 15000);
+    if (!r.ok) {
+      DGPP_LOG_ERROR("rank {}: collective failed: {}", my_rank, r.error);
+      ++failures;
+      break;
+    }
+    if (cudaMemcpy(got.data(), dev_dst, elems * 2, cudaMemcpyDeviceToHost) !=
+        cudaSuccess) {
+      DGPP_LOG_ERROR("rank {}: D2H failed", my_rank);
+      ++failures;
+      break;
+    }
+    // Canonical chain: acc = 0; for r in 0..world-1: acc += f32(src_r[i]).
+    size_t mismatches = 0;
+    for (size_t i = 0; i < elems; ++i) {
+      float acc = 0.0f;
+      for (int r = 0; r < world; ++r)
+        acc += dgpp::net::bf16_to_f32(all_src[static_cast<size_t>(r)][i]);
+      const uint16_t want = dgpp::net::bf16_from_f32_rne(acc);
+      if (got[i] != want) {
+        if (mismatches < 3)
+          DGPP_LOG_ERROR("rank {} iter {} elem {}: got {:04x} want {:04x}",
+                         my_rank, iter, i, got[i], want);
+        ++mismatches;
+      }
+    }
+    if (mismatches != 0) {
+      DGPP_LOG_ERROR("rank {} iter {}: {} mismatches", my_rank, iter,
+                     mismatches);
+      ++failures;
+    }
+  }
+
+  cudaFree(dev_src);
+  cudaFree(dev_dst);
+  return failures;
+}
+
+void scenario_allreduce() {
+  // One-shot all-to-all all-reduce over loopback worlds: bitwise-identical
+  // results on every rank, across generations (slot recycling), plus the
+  // v1 contract pins (consumers-running rejection, mode-closed sends).
+  const size_t elems = 4096;  // 8 KiB, the decode unit
+  int failures = 0;
+
+  for (const int world : {2, 4}) {
+    const uint16_t port = world == 2 ? 29895 : 29896;
+    std::vector<std::unique_ptr<CollectiveBus>> world_buses =
+        start_world(world, port);
+    if (world_buses.empty()) {
+      DGPP_LOG_ERROR("world {} failed to start", world);
+      ++failures;
+      continue;
+    }
+    std::vector<std::thread> workers;
+    std::vector<int> rank_failures(static_cast<size_t>(world), 0);
+    for (int r = 0; r < world; ++r)
+      workers.emplace_back([&, r] {
+        rank_failures[static_cast<size_t>(r)] = allreduce_rank_work(
+            *world_buses[static_cast<size_t>(r)], world, r, elems, 8);
+      });
+    for (auto& t : workers) t.join();
+    int world_failures = 0;
+    for (int r = 0; r < world; ++r) {
+      if (rank_failures[static_cast<size_t>(r)] != 0)
+        DGPP_LOG_ERROR("world {} rank {} reported failures", world, r);
+      world_failures += rank_failures[static_cast<size_t>(r)];
+    }
+    CHECK(world_failures == 0,
+          "world " + std::to_string(world) + " had " +
+              std::to_string(world_failures) + " collective failures");
+    for (auto& bus : world_buses) bus->quiesce();
+    for (auto& bus : world_buses) bus->stop();
+    DGPP_LOG_INFO("scenario allreduce: world {} clean", world);
+  }
+
+  // Contract pins on a dedicated pair: allreduce is rejected while harness
+  // consumers run, and send() is closed once the bus is in collective mode.
+  {
+    auto [a, b] = start_pair(base_options(0, 29897), base_options(1, 29897));
+    if (!a || !b) {
+      ++failures;
+    } else {
+      std::string error;
+      CHECK(a->allreduce(nullptr, nullptr, elems, &error) == 0 &&
+                error.find("launch_consumers") != std::string::npos,
+            "allreduce must be rejected while consumers run: " + error);
+      CHECK(b->allreduce(nullptr, nullptr, elems, &error) == 0 &&
+                error.find("launch_consumers") != std::string::npos,
+            "peer allreduce must be rejected while consumers run: " + error);
+      a->quiesce();
+      b->quiesce();
+      a->stop();
+      b->stop();
+    }
+  }
+
+  {
+    // Mode pin: once a collective has been picked up, harness sends fail
+    // legibly (their messages would be folded into a peer's reduce). Both
+    // ranks participate; rank 0 probes send() mid-flight, after giving the
+    // engine a moment to enter collective mode.
+    std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(2, 29898);
+    if (buses.empty()) {
+      ++failures;
+    } else {
+      uint16_t* dev = nullptr;
+      CHECK(cudaMalloc(&dev, elems * 2) == cudaSuccess, "device alloc failed");
+      std::thread peer_worker([&, elems] {
+        uint16_t* peer_dev = nullptr;
+        cudaMalloc(&peer_dev, elems * 2);
+        std::string peer_error;
+        const uint64_t peer_id =
+            buses[1]->allreduce(peer_dev, peer_dev, elems, &peer_error);
+        if (peer_id != 0)
+          buses[1]->wait_allreduce(peer_id, 15000);
+        cudaFree(peer_dev);
+      });
+      std::string error;
+      const uint64_t id = buses[0]->allreduce(dev, dev, elems, &error);
+      CHECK(id != 0, "allreduce rejected: " + error);
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      std::vector<uint64_t> payload(8192 / 8);
+      const uint64_t send_id = buses[0]->send(
+          1, payload.data(), 8192, BusMessageClass::kLatency, &error);
+      CHECK(send_id == 0 && error.find("collective mode") != std::string::npos,
+            "send() must be closed in collective mode: " + error);
+      const dgpp::net::BusAllReduceResult r =
+          buses[0]->wait_allreduce(id, 15000);
+      CHECK(r.ok, "collective failed: " + r.error);
+      peer_worker.join();
+      cudaFree(dev);
+      for (auto& bus : buses) bus->quiesce();
+      for (auto& bus : buses) bus->stop();
+    }
+  }
+
+  g_failures += failures;
+  DGPP_LOG_INFO("scenario allreduce: {} total failures", g_failures);
+}
+
 void scenario_geometry_mismatch() {
   // Config errors must be legible over the rendezvous (roster precedent),
   // never a bare close or a hang.
@@ -477,6 +700,7 @@ int main() {
   scenario_completion_timeout();
   scenario_consumer_inactivity_exit();
   scenario_mesh_three_way();
+  scenario_allreduce();
   scenario_geometry_mismatch();
   scenario_stop_releases_waiters();
 

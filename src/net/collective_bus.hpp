@@ -90,6 +90,12 @@ struct BusSendResult {
   double elapsed_us = 0.0;
 };
 
+struct BusAllReduceResult {
+  bool ok = false;
+  std::string error;
+  double elapsed_us = 0.0;
+};
+
 class CollectiveBus {
  public:
   explicit CollectiveBus(BusOptions options);
@@ -113,6 +119,26 @@ class CollectiveBus {
   // Blocks for the request's completion. The engine enforces the watchdog;
   // timeout_ms is a generous backstop. Removes the request record.
   BusSendResult wait(uint64_t send_id, int timeout_ms);
+
+  // One-shot all-to-all all-reduce over the whole world (DESIGN §6.3),
+  // latency pool. `device_src`/`device_dst` are device pointers to
+  // `bf16_elems` bf16 elements (multiple of 2, at most lat_slot_bytes/2);
+  // they may alias. bf16 loads, fp32 accumulation in rank order —
+  // deterministic, so a host oracle of the same chain matches bitwise.
+  //
+  // Contract (v1): launch_consumers=false (the per-collective kernel owns
+  // doorbell claims), at most one outstanding collective (decode is
+  // dependency-serialized), and no other latency traffic in flight. After
+  // any collective failure the bus rejects further collectives — inbound
+  // generations can no longer be trusted to line up.
+  uint64_t allreduce(const void* device_src, void* device_dst,
+                     size_t bf16_elems, std::string* error);
+
+  // Blocks for the collective; on success the destination is stream-ordered
+  // for the caller (one cudaStreamSynchronize after the engine's
+  // completion). timeout_ms is a backstop; the engine watchdog owns the
+  // lifecycle. Removes the request record.
+  BusAllReduceResult wait_allreduce(uint64_t id, int timeout_ms);
 
   // Phase 1 of an orderly stop: rejects new submissions, joins the engine
   // (draining outstanding requests), stops the receive consumers via the

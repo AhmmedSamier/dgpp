@@ -30,9 +30,16 @@ using Clock = std::chrono::steady_clock;
 constexpr int kMaxIntakeLatency = 64;    // latency requests per iteration
 constexpr int kMaxIntakeBulkPosts = 16;  // bulk stripes per iteration
 constexpr int kMaxPollPerCq = 32;        // CQEs drained per CQ per iteration
-constexpr int kEngineSpinIterations = 200;
+// Hot-spin iterations before the 50us-sleep phase. Large on purpose: the
+// engine is a dedicated poller (§6.1), and a round trip (send: ~25us of
+// credit latency; collective: the kernel launch tail) must land inside
+// the hot phase or the sleep cadence (~50-110us) shows up in every
+// measurement. The sleep phase is a power courtesy for genuine idles —
+// never a latency mechanism.
+constexpr int kEngineSpinIterations = 2000;
 constexpr int kEngineIdleSleepUs = 50;
 constexpr size_t kMaxLatencySamples = 100000;
+constexpr int kWaitSpinUs = 500;  // spin before entering the scheduler
 constexpr int kConnectRetryMs = 500;
 constexpr size_t kMaxErrorText = 4096;
 
@@ -67,6 +74,15 @@ struct BusRequest {
   size_t len = 0;
   size_t offset = 0;  // bytes submitted as stripes so far
 
+  // Collective (§6.3): device buffers, element count, control-cell stamp.
+  // peer_rank stays -1 (the whole world); stripes are per-peer, and
+  // owner_stripe indexes stripe_hashes by peer, not by stripe.
+  bool is_collective = false;
+  const void* dev_src = nullptr;
+  void* dev_dst = nullptr;
+  size_t elems = 0;
+  uint32_t ctl_seq = 0;
+
   int outstanding = 0;  // stripes credited back so far are subtracted
   std::vector<BusStripe> stripes;
   std::vector<uint64_t> stripe_hashes;  // aligned with stripes, filled on credit
@@ -75,9 +91,22 @@ struct BusRequest {
   std::mutex mu;
   std::condition_variable cv;
   bool done = false;
+  // Set (release) after the mutex-guarded fields: a spinning waiter may
+  // read the results through an acquire on this flag without the mutex.
+  std::atomic<bool> done_flag{false};
   bool ok = false;
   std::string error;
 };
+
+// Cheap spin hint (NOT the sched_yield syscall — that surrenders the
+// timeslice; the engine measured 2.2ms poll latency doing it).
+inline void cpu_relax() {
+#if defined(__aarch64__)
+  asm volatile("yield" ::: "memory");
+#elif defined(__x86_64__)
+  asm volatile("pause" ::: "memory");
+#endif
+}
 
 struct CollectiveBus::Impl {
   struct SendSlot {
@@ -143,6 +172,29 @@ struct CollectiveBus::Impl {
   std::mutex stats_mu;
   BusStats stats_store;
 
+  // ---- collective state (§6.3) --------------------------------------------
+  // The ctl cell is one pinned cache line the kernel and the engine share;
+  // the stream serializes per-collective kernels. coll_q/coll_active make
+  // single-outstanding airtight across the submit/engine seam; coll_mode
+  // rejects harness sends once the bus is in collective mode (their
+  // messages would be claimed — and folded — by a peer's collective
+  // kernel: a silent-corruption class we refuse to ship).
+  std::mutex coll_mu;
+  std::deque<std::shared_ptr<BusRequest>> coll_q;
+  std::atomic<bool> coll_active{false};
+  bool coll_mode = false;      // engine-written; send() and intake() gate
+  bool coll_poisoned = false;  // any collective failure poisons the mode
+  cudaStream_t collective_stream = nullptr;
+  BusAllReduceCtl* ar_ctl = nullptr;
+  uint32_t ctl_seq_counter = 0;  // engine thread only
+  uint64_t ar_deadline_cycles = 0;  // cached device-clock rate conversion
+  struct CollectiveFlight {
+    std::shared_ptr<BusRequest> req;
+    std::vector<BusStripe> claims;  // per peer: claimed lane/slot
+    uint64_t posted_bits = 0;       // bit p once peer p's stripe is posted
+    Clock::time_point launched_at{};
+  } coll;                            // engine thread only
+
   BusRankExchange ex_{};  // our frame, built once during start()
 
   // ---- helpers -----------------------------------------------------------
@@ -164,6 +216,37 @@ struct CollectiveBus::Impl {
 
   size_t lane_count() const { return opt.lane_devices.size(); }
 
+  // Engine-side view builder (the public recv_view() delegates here).
+  BusRecvView recv_view_of(const LaneState& state) const {
+    BusRecvView view;
+    if (!state.lane) return view;
+    RcLane& rc = *state.lane;
+    const BusSlabLayout& layout = rc.layout();
+    uint8_t* slab = rc.slab();
+    view.doorbell_lat = layout.recv_doorbell(slab, BusPool::kLatency, 0);
+    view.doorbell_bulk = layout.recv_doorbell(slab, BusPool::kBulk, 0);
+    view.payload_lat = reinterpret_cast<const uint64_t*>(
+        layout.recv_payload(slab, BusPool::kLatency, 0));
+    view.payload_bulk = reinterpret_cast<const uint64_t*>(
+        layout.recv_payload(slab, BusPool::kBulk, 0));
+    view.ack_lat = layout.ack_cell(slab, BusPool::kLatency, 0);
+    view.ack_bulk = layout.ack_cell(slab, BusPool::kBulk, 0);
+    view.control = layout.control_cell(slab);
+    view.lat_slots = static_cast<int>(opt.lat_slots);
+    view.bulk_slots = static_cast<int>(opt.bulk_slots);
+    view.lat_slot_bytes = static_cast<uint32_t>(opt.lat_slot_bytes);
+    view.bulk_slot_bytes = static_cast<uint32_t>(opt.bulk_slot_bytes);
+    return view;
+  }
+
+  // Makes a (possibly still running) collective kernel exit promptly: the
+  // engine stamps the control cell, and the kernel's round check treats any
+  // done_seq match as an exit. Idempotent per request.
+  void poison_collective(const BusRequest& req) {
+    if (req.ctl_seq == 0) return;  // never picked up; no kernel to stop
+    __atomic_store_n(&ar_ctl->done_seq, req.ctl_seq, __ATOMIC_RELEASE);
+  }
+
   void record_latency(BusMessageClass cls, double us) {
     std::lock_guard<std::mutex> lock(stats_mu);
     BusClassStats& s = cls == BusMessageClass::kLatency ? stats_store.latency
@@ -179,8 +262,28 @@ struct CollectiveBus::Impl {
       req->error = error;
       req->done = true;
     }
+    req->done_flag.store(true, std::memory_order_release);
     record_latency(req->cls, elapsed_us(req->submitted));
     req->cv.notify_all();
+  }
+
+  // Spin on the done flag BEFORE taking the mutex (spinning under the
+  // lock deadlocks the completer out of the request), then fall to the
+  // futex. The flag is published release after the mutex-guarded fields,
+  // so a waiter that observes it can read the results lock-free. A futex
+  // wake measured ~60-100us against a hot engine; the common case lands
+  // inside the spin window.
+  bool spin_then_wait(BusRequest* req, int timeout_ms) {
+    const auto deadline =
+        Clock::now() + std::chrono::microseconds(kWaitSpinUs);
+    while (!req->done_flag.load(std::memory_order_acquire)) {
+      if (Clock::now() > deadline) break;
+      cpu_relax();
+    }
+    if (req->done_flag.load(std::memory_order_acquire)) return true;
+    std::unique_lock<std::mutex> lock(req->mu);
+    return req->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                            [req] { return req->done; });
   }
 
   void fail_lane(LaneState& lane, const std::string& reason) {
@@ -242,6 +345,24 @@ struct CollectiveBus::Impl {
   // deterministic lane order so verification can recompute the chunking.
   bool intake() {
     bool worked = false;
+
+    if (coll_mode) {
+      std::unique_lock<std::mutex> lock(lat_q_mu);
+      while (!lat_q.empty()) {
+        complete_request(lat_q.front().get(), false,
+                         "bus is in collective mode; send() is closed");
+        lat_q.pop_front();
+        worked = true;
+      }
+      std::unique_lock<std::mutex> bulk_lock(bulk_q_mu);
+      while (!bulk_q.empty()) {
+        complete_request(bulk_q.front().get(), false,
+                         "bus is in collective mode; send() is closed");
+        bulk_q.pop_front();
+        worked = true;
+      }
+      return worked;
+    }
 
     {
       std::unique_lock<std::mutex> lock(lat_q_mu);
@@ -339,6 +460,182 @@ struct CollectiveBus::Impl {
           // else: partially submitted; stays at the front.
         }
       }
+    }
+    return worked;
+  }
+
+  // ---- collective pass (§6.3) ----------------------------------------------
+  // Runs before intake (latency priority). Pickup: claim one latency slot
+  // per peer, reset the control cell, launch the per-collective kernel.
+  // Posting: peers whose staging bits landed get their payload+doorbell
+  // SENDs (the kernel staged the bytes; no host memcpy). Completion: the
+  // kernel's ctl stamp completes the request; credits still flow for slot
+  // recycling but are off the critical path.
+  bool collective_pass() {
+    bool worked = false;
+
+    if (!coll.req) {
+      std::lock_guard<std::mutex> lock(coll_mu);
+      if (!coll_q.empty()) {
+        coll.req = coll_q.front();
+        coll_q.pop_front();
+        coll_active.store(true, std::memory_order_relaxed);
+        coll_mode = true;  // engine-owned; send()/intake() gate on it
+      }
+    }
+    if (!coll.req) return worked;
+    BusRequest& req = *coll.req;
+
+    if (coll.claims.empty()) {
+      std::vector<BusStripe> claims;
+      for (size_t p = 0; p < peer_ranks.size(); ++p) {
+        bool have = false;
+        for (size_t l = 0; l < peers[p].size(); ++l) {
+          LaneState& lane = peers[p][l];
+          if (lane.failed) continue;
+          const uint32_t slot = lane.cursor[0];
+          if (lane.send[0][slot].in_flight) continue;  // ring position busy
+          claims.push_back(
+              BusStripe{static_cast<int>(l), BusPool::kLatency, slot, 0});
+          have = true;
+          break;
+        }
+        if (!have) return worked;  // a ring is exhausted; retry next iteration
+      }
+
+      if (ar_deadline_cycles == 0) {
+        ar_deadline_cycles = bus_consumer_deadline_cycles(opt.consumer_deadline_s);
+        int clock_khz = 0;
+        cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, 0);
+        DGPP_LOG_INFO("allreduce: device clock rate {} kHz (stamps conversion)",
+                      clock_khz);
+      }
+      if (ar_deadline_cycles == 0) {
+        complete_request(&req, false,
+                         "could not read device clock rate for the "
+                         "collective deadline");
+        coll_poisoned = true;
+        coll = {};
+        coll_active.store(false, std::memory_order_relaxed);
+        return true;
+      }
+
+      req.ctl_seq = ++ctl_seq_counter;
+      if (req.ctl_seq == 0) req.ctl_seq = ++ctl_seq_counter;  // skip idle 0
+      req.stripe_hashes.assign(peer_ranks.size(), 0);
+      // Reset before launch: the previous kernel's stamps are stale, and
+      // the launch (this thread) is ordered after the reset by program
+      // order.
+      __atomic_store_n(&ar_ctl->ready_bits, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ar_ctl->done_seq, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ar_ctl->status, 0, __ATOMIC_RELAXED);
+      ar_ctl->stamp_stage = 0;
+      ar_ctl->stamp_first_claim = 0;
+      ar_ctl->stamp_reduce_done = 0;
+
+      BusAllReduceView view{};
+      int vi = 0;
+      for (size_t p = 0; p < peer_ranks.size(); ++p)
+        for (const LaneState& lane : peers[p]) view.recv[vi++] = recv_view_of(lane);
+      view.recv_views = vi;
+      view.lanes_per_peer = static_cast<int>(lane_count());
+      for (size_t p = 0; p < peer_ranks.size(); ++p) {
+        const LaneState& lane = peers[p][static_cast<size_t>(claims[p].lane)];
+        view.send_payload[p] = reinterpret_cast<const uint16_t*>(
+            lane.lane->layout().send_payload(lane.lane->slab(),
+                                             BusPool::kLatency,
+                                             claims[p].slot));
+      }
+      view.send_peers = static_cast<int>(peer_ranks.size());
+
+      const auto t_launch0 = Clock::now();
+      const cudaError_t launch = launch_bus_allreduce(
+          view, opt.my_rank, static_cast<const __nv_bfloat16*>(req.dev_src),
+          static_cast<__nv_bfloat16*>(req.dev_dst),
+          static_cast<uint32_t>(req.elems), req.ctl_seq, ar_ctl,
+          ar_deadline_cycles, collective_stream);
+      DGPP_LOG_DEBUG("allreduce: rank {} seq {} launch_call={:.1f}us",
+                     opt.my_rank, req.ctl_seq, elapsed_us(t_launch0));
+      if (launch != cudaSuccess) {
+        complete_request(&req, false,
+                         std::string("allreduce kernel launch failed: ") +
+                             cudaGetErrorString(launch));
+        coll_poisoned = true;
+        coll = {};
+        coll_active.store(false, std::memory_order_relaxed);
+        return true;
+      }
+      coll.claims = std::move(claims);
+      coll.launched_at = Clock::now();
+      DGPP_LOG_DEBUG("allreduce: rank {} seq {} launched, {} peers",
+                     opt.my_rank, req.ctl_seq, view.send_peers);
+      worked = true;
+    }
+
+    // Posting pass: one stripe per staged peer.
+    const uint64_t ready = acquire_u64(&ar_ctl->ready_bits);
+    static uint64_t last_launch_seq = 0;
+    if (ready && req.ctl_seq != last_launch_seq) {
+      last_launch_seq = req.ctl_seq;
+      DGPP_LOG_DEBUG("allreduce: rank {} seq {} ready_seen={:.1f}us",
+                     opt.my_rank, req.ctl_seq, elapsed_us(coll.launched_at));
+    }
+    for (size_t p = 0; p < coll.claims.size(); ++p) {
+      if (coll.posted_bits & (1ULL << p)) continue;
+      if (!((ready >> p) & 1)) continue;
+      LaneState& lane = peers[p][static_cast<size_t>(coll.claims[p].lane)];
+      RcLane& rc = *lane.lane;
+      const uint32_t slot = coll.claims[p].slot;
+      SendSlot& ss = lane.send[0][slot];
+      const uint32_t seq = ss.gen + 1;
+      std::string error;
+      if (!rc.post_send_pair(BusPool::kLatency, slot, seq,
+                              static_cast<uint32_t>(req.elems * 2), &error)) {
+        fail_lane(lane, error);
+        poison_collective(req);
+        coll_poisoned = true;
+        complete_request(&req, false, "allreduce post failed: " + error);
+        coll = {};
+        coll_active.store(false, std::memory_order_relaxed);
+        return true;
+      }
+      ss.gen = seq;
+      ss.in_flight = true;
+      ss.owner = coll.req;
+      ss.owner_stripe = p;  // peer index: stripe_hashes is peers-sized
+      ++lane.in_flight_count;
+      lane.cursor[0] = (slot + 1) % static_cast<uint32_t>(opt.lat_slots);
+      ++lane.stats.posts;
+      lane.stats.bytes_sent += req.elems * 2;
+      ++req.outstanding;
+      coll.posted_bits |= 1ULL << p;
+      worked = true;
+      DGPP_LOG_DEBUG("allreduce stripe: peer={} lane={} slot={} seq={}",
+                     peer_ranks[p], lane.stats.lane, slot, seq);
+    }
+
+    // Completion: the kernel's stamp (or a poison) ends the flight.
+    const uint64_t done = acquire_u64(&ar_ctl->done_seq);
+    if (done == req.ctl_seq) {
+      DGPP_LOG_DEBUG(
+          "allreduce: rank {} seq {} stamped status={} notice={:.1f}us "
+          "spans_cycles stage->claim={} claim->reduce={}",
+          opt.my_rank, req.ctl_seq, acquire_u32(&ar_ctl->status),
+          elapsed_us(coll.launched_at),
+          ar_ctl->stamp_first_claim > ar_ctl->stamp_stage
+              ? ar_ctl->stamp_first_claim - ar_ctl->stamp_stage
+              : 0,
+          ar_ctl->stamp_reduce_done > ar_ctl->stamp_first_claim
+              ? ar_ctl->stamp_reduce_done - ar_ctl->stamp_first_claim
+              : 0);
+      const bool reduced = acquire_u32(&ar_ctl->status) == 0;
+      complete_request(&req, reduced,
+                       reduced ? "" : "collective consumer exited on deadline "
+                                      "or poison");
+      if (!reduced) coll_poisoned = true;
+      coll = {};
+      coll_active.store(false, std::memory_order_relaxed);
+      worked = true;
     }
     return worked;
   }
@@ -499,7 +796,10 @@ struct CollectiveBus::Impl {
               ss.owner = nullptr;
               ss.in_flight = false;
               if (lane.in_flight_count > 0) --lane.in_flight_count;
-              if (--req->outstanding == 0)
+              --req->outstanding;
+              // A collective completes on the kernel's ctl stamp; its
+              // credits only recycle slots (off the critical path).
+              if (!req->is_collective && req->outstanding == 0)
                 complete_request(req.get(), true, {});
             }
             // seq < ss.gen: stale credit for a request already failed by
@@ -543,6 +843,10 @@ struct CollectiveBus::Impl {
       complete_request(req, false,
                        "completion timeout (" +
                            std::to_string(opt.completion_timeout_ms) + " ms)");
+      if (req->is_collective) {
+        poison_collective(*req);
+        coll_poisoned = true;
+      }
       worked = true;
     }
     return worked;
@@ -572,19 +876,24 @@ struct CollectiveBus::Impl {
     int idle = 0;
     for (;;) {
       if (stopping.load(std::memory_order_relaxed) && drained()) break;
+      const bool coll_worked = collective_pass();
       const bool worked = intake();
       const bool polled = poll_cqs();
       const bool recycled = recycle_pass();
       const bool credited = credits_pass();
       const bool watched = watchdog_pass();
-      if (worked || polled || recycled || credited || watched) {
+      if (coll_worked || worked || polled || recycled || credited || watched) {
         idle = 0;
       } else if (++idle > kEngineSpinIterations) {
         std::this_thread::sleep_for(
             std::chrono::microseconds(kEngineIdleSleepUs));
-      } else {
-        std::this_thread::yield();
       }
+      // else: hot spin — the loop body is the poll. sched_yield here was
+      // measured at ~2.2 ms of poll latency per idle stretch (the collective
+      // path idles between engine events while kernels wait on doorbells,
+      // and every yield surrendered the timeslice); the sleep phase polls
+      // strictly faster than the "spin" phase did. No syscalls on the hot
+      // path — including this one.
     }
   }
 
@@ -983,6 +1292,30 @@ bool CollectiveBus::start(std::string* error) {
         return false;
       }
 
+  // Collective-mode plumbing (§6.3): the shared control cell and the
+  // stream that serializes per-collective kernels. Allocated regardless of
+  // use — two pointers and one cache line, and teardown stays symmetric.
+  {
+    const cudaError_t ctl_err =
+        cudaMallocHost(reinterpret_cast<void**>(&impl.ar_ctl),
+                       sizeof(BusAllReduceCtl));
+    if (ctl_err != cudaSuccess || impl.ar_ctl == nullptr) {
+      *error = std::string("collective control cell alloc failed: ") +
+               cudaGetErrorString(ctl_err);
+      return false;
+    }
+    *impl.ar_ctl = BusAllReduceCtl{};
+    const cudaError_t stream_err = cudaStreamCreateWithFlags(
+        &impl.collective_stream, cudaStreamNonBlocking);
+    if (stream_err != cudaSuccess) {
+      cudaFreeHost(impl.ar_ctl);
+      impl.ar_ctl = nullptr;
+      *error = std::string("collective stream create failed: ") +
+               cudaGetErrorString(stream_err);
+      return false;
+    }
+  }
+
   // Receive consumers: the Phase 2 harness folds payloads and acks. The
   // engine's real per-collective consumers (deliverable 3) replace these
   // by launching with launch_consumers=false. Each consumer gets its own
@@ -1030,10 +1363,15 @@ bool CollectiveBus::start(std::string* error) {
 }
 
 uint64_t CollectiveBus::send(int peer_rank, const void* data, size_t bytes,
-                             BusMessageClass cls, std::string* error) {
+                              BusMessageClass cls, std::string* error) {
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
+    return 0;
+  }
+  if (impl.coll_mode) {
+    *error = "bus is in collective mode; send() is closed (a peer's "
+             "collective kernel would fold harness traffic into a reduce)";
     return 0;
   }
   if (bytes == 0 || bytes % 8 != 0) {
@@ -1087,10 +1425,7 @@ BusSendResult CollectiveBus::wait(uint64_t send_id, int timeout_ms) {
     }
     req = it->second;
   }
-  std::unique_lock<std::mutex> lock(req->mu);
-  const bool done =
-      req->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                       [&req] { return req->done; });
+  const bool done = impl.spin_then_wait(req.get(), timeout_ms);
   if (!done) {
     // Backstop only. The request is NOT removed: it may still be in flight
     // (SendSlot::owner points at it) and the engine watchdog owns its
@@ -1103,11 +1438,105 @@ BusSendResult CollectiveBus::wait(uint64_t send_id, int timeout_ms) {
   result.error = req->error;
   result.stripe_hashes = std::move(req->stripe_hashes);
   result.elapsed_us = elapsed_us(req->submitted);
-  lock.unlock();
   {
     std::lock_guard<std::mutex> rlock(impl.registry_mu);
     // Only erase if still this request (stop() reaps by completing).
     auto it = impl.registry.find(send_id);
+    if (it != impl.registry.end() && it->second.get() == req.get())
+      impl.registry.erase(it);
+  }
+  return result;
+}
+
+uint64_t CollectiveBus::allreduce(const void* device_src, void* device_dst,
+                                 size_t bf16_elems, std::string* error) {
+  Impl& impl = *impl_;
+  if (impl.stopping.load(std::memory_order_relaxed)) {
+    *error = "bus is stopped";
+    return 0;
+  }
+  if (impl.consumers_launched) {
+    *error = "allreduce requires launch_consumers=false (persistent harness "
+             "consumers would race the per-collective kernel for claims)";
+    return 0;
+  }
+  if (bf16_elems == 0 || bf16_elems % 2 != 0 ||
+      bf16_elems * 2 > options_.lat_slot_bytes) {
+    *error = "allreduce element count must be a positive multiple of 2 and "
+             "fit a latency slot (at most " +
+             std::to_string(options_.lat_slot_bytes / 2) + " bf16)";
+    return 0;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    if (impl.coll_poisoned) {
+      *error = "an earlier collective failed; this bus must be restarted";
+      return 0;
+    }
+    if (impl.coll_active.load(std::memory_order_relaxed) ||
+        !impl.coll_q.empty()) {
+      *error = "one outstanding collective at a time (v1)";
+      return 0;
+    }
+  }
+
+  auto req = std::make_shared<BusRequest>();
+  req->cls = BusMessageClass::kLatency;  // latency-class stats/records
+  req->peer_rank = -1;
+  req->is_collective = true;
+  req->dev_src = device_src;
+  req->dev_dst = device_dst;
+  req->elems = bf16_elems;
+  req->submitted = Clock::now();
+  {
+    std::lock_guard<std::mutex> lock(impl.registry_mu);
+    req->id = impl.next_id++;
+    impl.registry[req->id] = req;
+  }
+  const uint64_t id = req->id;
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    impl.coll_q.push_back(std::move(req));
+  }
+  return id;
+}
+
+BusAllReduceResult CollectiveBus::wait_allreduce(uint64_t id,
+                                                  int timeout_ms) {
+  BusAllReduceResult result;
+  Impl& impl = *impl_;
+  std::shared_ptr<BusRequest> req;
+  {
+    std::lock_guard<std::mutex> lock(impl.registry_mu);
+    auto it = impl.registry.find(id);
+    if (it == impl.registry.end()) {
+      result.error = "unknown or already-waited collective id";
+      return result;
+    }
+    req = it->second;
+  }
+  const bool done = impl.spin_then_wait(req.get(), timeout_ms);
+  if (!done) {
+    result.error = "wait backstop timeout (engine watchdog should have "
+                   "failed the request first)";
+    return result;
+  }
+  result.ok = req->ok;
+  result.error = req->error;
+  result.elapsed_us = elapsed_us(req->submitted);
+  DGPP_LOG_DEBUG("allreduce wait: submit->wake={:.1f}us", elapsed_us(req->submitted));
+  if (result.ok && impl.collective_stream != nullptr) {
+    const cudaError_t sync = cudaStreamSynchronize(impl.collective_stream);
+    if (sync != cudaSuccess) {
+      result.ok = false;
+      result.error = std::string("collective stream sync failed: ") +
+                     cudaGetErrorString(sync);
+    }
+  }
+  {
+    std::lock_guard<std::mutex> rlock(impl.registry_mu);
+    auto it = impl.registry.find(id);
     if (it != impl.registry.end() && it->second.get() == req.get())
       impl.registry.erase(it);
   }
@@ -1122,6 +1551,17 @@ void CollectiveBus::quiesce() {
 
   impl.stopping.store(true, std::memory_order_relaxed);
   if (impl.engine.joinable()) impl.engine.join();
+
+  // A still-running collective kernel must exit before the stream sync:
+  // the engine already failed its request (watchdog or lane failure) and
+  // poisoned the cell, or it completed normally — either way this stamp
+  // is idempotent and merely hastens the exit.
+  if (impl.coll.req) impl.poison_collective(*impl.coll.req);
+  if (impl.collective_stream) {
+    cudaStreamSynchronize(impl.collective_stream);
+    cudaStreamDestroy(impl.collective_stream);
+    impl.collective_stream = nullptr;
+  }
 
   // Orderly consumer stop: reserved sequence in every control cell.
   for (auto& peer_lanes : impl.peers) {
@@ -1152,6 +1592,13 @@ void CollectiveBus::stop() {
     impl.stopping.store(true, std::memory_order_relaxed);
     if (impl.engine.joinable()) impl.engine.join();
 
+    if (impl.coll.req) impl.poison_collective(*impl.coll.req);
+    if (impl.collective_stream) {
+      cudaStreamSynchronize(impl.collective_stream);
+      cudaStreamDestroy(impl.collective_stream);
+      impl.collective_stream = nullptr;
+    }
+
     for (auto& peer_lanes : impl.peers) {
       for (auto& lane : peer_lanes) {
         if (!lane.lane) continue;
@@ -1181,6 +1628,10 @@ void CollectiveBus::stop() {
   // Lane teardown (QP -> CQ -> MR -> slab) and device close. All consumer
   // kernels must be dead by here: cudaFreeHost synchronizes the device
   // implicitly and would otherwise wait out a live peer's consumers.
+  if (impl.ar_ctl) {
+    cudaFreeHost(impl.ar_ctl);
+    impl.ar_ctl = nullptr;
+  }
   impl.peers.clear();
   impl.devices.clear();
 }
@@ -1196,33 +1647,14 @@ BusStats CollectiveBus::stats() const {
 
 BusRecvView CollectiveBus::recv_view(int peer_rank, int lane) const {
   Impl& impl = *impl_;
-  BusRecvView view;
   const auto it =
       std::find(impl.peer_ranks.begin(), impl.peer_ranks.end(), peer_rank);
   if (it == impl.peer_ranks.end() ||
       lane < 0 || lane >= static_cast<int>(impl.lane_count()))
-    return view;
-  const Impl::LaneState& state =
+    return {};
+  return impl.recv_view_of(
       impl.peers[static_cast<size_t>(it - impl.peer_ranks.begin())]
-                [static_cast<size_t>(lane)];
-  if (!state.lane) return view;
-  RcLane& rc = *state.lane;
-  const BusSlabLayout& layout = rc.layout();
-  uint8_t* slab = rc.slab();
-  view.doorbell_lat = layout.recv_doorbell(slab, BusPool::kLatency, 0);
-  view.doorbell_bulk = layout.recv_doorbell(slab, BusPool::kBulk, 0);
-  view.payload_lat = reinterpret_cast<const uint64_t*>(
-      layout.recv_payload(slab, BusPool::kLatency, 0));
-  view.payload_bulk = reinterpret_cast<const uint64_t*>(
-      layout.recv_payload(slab, BusPool::kBulk, 0));
-  view.ack_lat = layout.ack_cell(slab, BusPool::kLatency, 0);
-  view.ack_bulk = layout.ack_cell(slab, BusPool::kBulk, 0);
-  view.control = layout.control_cell(slab);
-  view.lat_slots = static_cast<int>(options_.lat_slots);
-  view.bulk_slots = static_cast<int>(options_.bulk_slots);
-  view.lat_slot_bytes = static_cast<uint32_t>(options_.lat_slot_bytes);
-  view.bulk_slot_bytes = static_cast<uint32_t>(options_.bulk_slot_bytes);
-  return view;
+                [static_cast<size_t>(lane)]);
 }
 
 }  // namespace dgpp::net

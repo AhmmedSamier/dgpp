@@ -378,6 +378,199 @@ int run_ping(CommonArgs c, std::string peer_host, int iters, size_t bytes,
   return failures == 0 ? 0 : 1;
 }
 
+// ---- allreduce --------------------------------------------------------------
+
+// Deterministic per-rank bf16 pattern (the same LCG shape as the loopback
+// test; every rank can regenerate every rank's vector, so each node
+// verifies its own destination bitwise against the canonical chain).
+void fill_rank_bf16(std::vector<uint16_t>* out, size_t elems, int rank) {
+  out->assign(elems, 0);
+  uint64_t x = 0x9E3779B97F4A7C15ULL ^ (0x100000001B3ULL * (rank + 1));
+  for (size_t i = 0; i < elems; ++i) {
+    x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+    const float v =
+        static_cast<float>(static_cast<int32_t>(x >> 40)) * (1.0f / 8388608.0f) - 1.0f;
+    (*out)[i] = dgpp::net::bf16_from_f32_rne(v);
+  }
+}
+
+int run_allreduce(CommonArgs c, const std::string& peer, int iters,
+                  long hold_ms) {
+  const int my_rank = c.rank;
+  if (my_rank != 0 && peer.empty()) {
+    DGPP_LOG_ERROR("allreduce: --peer is required for ranks 1..N-1");
+    return 2;
+  }
+  if (my_rank >= c.world) {
+    DGPP_LOG_ERROR("allreduce: --rank must be below --world");
+    return 2;
+  }
+  BusOptions o = options_for(c, my_rank, my_rank == 0 ? "" : peer);
+  o.launch_consumers = false;  // the per-collective kernel owns the claims
+
+  CollectiveBus bus(o);
+  std::string error;
+  if (!bus.start(&error)) {
+    DGPP_LOG_ERROR("allreduce: {}", error);
+    return 1;
+  }
+  DGPP_LOG_INFO("ALLREDUCE-READY rank={} world={}", my_rank, c.world);
+
+  const size_t elems = o.lat_slot_bytes / 2;
+  std::vector<uint16_t> host_src, host_dst(elems, 0), got(elems, 0);
+  fill_rank_bf16(&host_src, elems, my_rank);
+  std::vector<std::vector<uint16_t>> all_src(static_cast<size_t>(c.world));
+  for (int r = 0; r < c.world; ++r)
+    fill_rank_bf16(&all_src[static_cast<size_t>(r)], elems, r);
+
+  uint16_t* dev_src = nullptr;
+  uint16_t* dev_dst = nullptr;
+  float* warm_buf = nullptr;
+  cudaStream_t warm_stream = nullptr;
+  if (cudaMalloc(&dev_src, elems * 2) != cudaSuccess ||
+      cudaMalloc(&dev_dst, elems * 2) != cudaSuccess ||
+      cudaMalloc(&warm_buf, 256 * 4) != cudaSuccess ||
+      cudaStreamCreateWithFlags(&warm_stream, cudaStreamNonBlocking) !=
+          cudaSuccess) {
+    DGPP_LOG_ERROR("allreduce: device alloc failed");
+    bus.stop();
+    return 1;
+  }
+  cudaMemcpy(dev_src, host_src.data(), elems * 2, cudaMemcpyHostToDevice);
+  cudaMemset(warm_buf, 0, 256 * 4);
+
+  // Isolation probe: same-thread back-to-back kernel launches, timed.
+  for (int i = 0; i < 12; ++i) {
+    const auto w0 = std::chrono::steady_clock::now();
+    dgpp::net::launch_bus_warm_work(warm_stream, warm_buf, 2000);
+    cudaStreamSynchronize(warm_stream);
+    DGPP_LOG_INFO("probe: app-thread launch+sync #{} = {:.1f}us", i,
+                  std::chrono::duration<double, std::micro>(
+                      std::chrono::steady_clock::now() - w0)
+                      .count());
+  }
+  // Graph probe (the §6.2 decode answer): capture one launch, replay it.
+  // If replay is uniform and cheap, per-collective kernels inside graphs
+  // dodge the isolated-launch tail entirely.
+  {
+    cudaStreamBeginCapture(warm_stream, cudaStreamCaptureModeThreadLocal);
+    dgpp::net::launch_bus_warm_work(warm_stream, warm_buf, 2000);
+    cudaGraph_t graph;
+    cudaStreamEndCapture(warm_stream, &graph);
+    cudaGraphExec_t exec;
+    cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+    for (int i = 0; i < 3; ++i) {  // warm
+      cudaGraphLaunch(exec, warm_stream);
+      cudaStreamSynchronize(warm_stream);
+    }
+    for (int i = 0; i < 12; ++i) {
+      const auto g0 = std::chrono::steady_clock::now();
+      cudaGraphLaunch(exec, warm_stream);
+      cudaStreamSynchronize(warm_stream);
+      DGPP_LOG_INFO("probe: graph replay+sync #{} = {:.1f}us", i,
+                    std::chrono::duration<double, std::micro>(
+                        std::chrono::steady_clock::now() - g0)
+                        .count());
+    }
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+  }
+
+  // One collective is a full round trip; verification needs a D2H copy, so
+  // each iteration is: submit, wait, verify. Warmup absorbs the first-
+  // launch costs (module load, doorbell paths) like the mesh smoke does.
+  const int warmup = 4;
+  int verified = 0;
+  int failed = 0;
+  std::vector<double> latency_us;
+  const char* spins_env = std::getenv("DGPP_WARM_SPINS");
+  const int warm_spins = spins_env ? std::atoi(spins_env) : 200000;
+  auto prev_end = std::chrono::steady_clock::now();
+  for (int iter = 0; iter < warmup + iters; ++iter) {
+    // Spins >= 1,000,000: one long keep-alive at iter 0 (device never
+    // sleeps for the whole run — isolates GPU wake latency).
+    if (warm_spins >= 1000000) {
+      if (iter == 0)
+        dgpp::net::launch_bus_warm_work(warm_stream, warm_buf, warm_spins);
+    } else if (warm_spins > 0) {
+      dgpp::net::launch_bus_warm_work(warm_stream, warm_buf, warm_spins);
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint64_t id = bus.allreduce(dev_src, dev_dst, elems, &error);
+    if (id == 0) {
+      DGPP_LOG_ERROR("allreduce rejected: {}", error);
+      ++failed;
+      break;
+    }
+    const dgpp::net::BusAllReduceResult r = bus.wait_allreduce(id, 30000);
+    const double us = std::chrono::duration<double, std::micro>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    prev_end = std::chrono::steady_clock::now();
+    if (iter >= warmup && iter < warmup + 6)
+      DGPP_LOG_INFO("iter {}: submit->wait={:.1f}us", iter, us);
+    if (!r.ok) {
+      DGPP_LOG_ERROR("allreduce iter {} failed: {}", iter, r.error);
+      ++failed;
+      break;
+    }
+    if (iter < warmup) continue;
+    latency_us.push_back(us);
+    const bool do_verify = iter == warmup + iters - 1;
+    if (!do_verify) continue;
+    if (cudaMemcpy(got.data(), dev_dst, elems * 2, cudaMemcpyDeviceToHost) !=
+        cudaSuccess) {
+      DGPP_LOG_ERROR("allreduce iter {}: D2H failed", iter);
+      ++failed;
+      break;
+    }
+    size_t mismatches = 0;
+    for (size_t i = 0; i < elems; ++i) {
+      float acc = 0.0f;
+      for (int rr = 0; rr < c.world; ++rr)
+        acc += dgpp::net::bf16_to_f32(all_src[static_cast<size_t>(rr)][i]);
+      if (got[i] != dgpp::net::bf16_from_f32_rne(acc)) {
+        if (mismatches < 3)
+          DGPP_LOG_ERROR("iter {} elem {}: got {:04x} want {:04x}", iter, i,
+                         got[i], dgpp::net::bf16_from_f32_rne(acc));
+        ++mismatches;
+      }
+    }
+    if (mismatches != 0) {
+      DGPP_LOG_ERROR("allreduce iter {}: {} mismatches", iter, mismatches);
+      ++failed;
+    } else {
+      ++verified;
+    }
+  }
+
+  cudaFree(dev_src);
+  cudaFree(dev_dst);
+  cudaFree(warm_buf);
+  cudaStreamDestroy(warm_stream);
+
+  std::sort(latency_us.begin(), latency_us.end());
+  const auto pick = [&](double frac) {
+    return latency_us.empty()
+               ? 0.0
+               : latency_us[std::min(latency_us.size() - 1,
+                                     static_cast<size_t>(
+                                         frac * latency_us.size()))];
+  };
+  DGPP_LOG_INFO(
+      "ALLREDUCE rank={} world={} verified={}/{} min={:.1f}us p50={:.1f}us "
+      "p99={:.1f}us",
+      my_rank, c.world, verified, iters, pick(0.0), pick(0.5), pick(0.99));
+
+  print_bus_stats(bus.stats());
+  if (hold_ms > 0)
+    DGPP_LOG_INFO("allreduce: rank {} holding {} ms for slower peers",
+                  my_rank, hold_ms);
+  std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+  bus.stop();
+  DGPP_LOG_INFO("allreduce: stopped cleanly (failures={})", failed);
+  return failed == 0 && verified == iters ? 0 : 1;
+}
 
 // ---- selftest ----------------------------------------------------------------
 
@@ -515,6 +708,10 @@ int main(int argc, char** argv) {
                  "[--window N] [--lat-iters N] [--timeout-ms N]\n"
                  "                 (--window > 1 with --class bulk: pipelined "
                  "flood, verification deferred)\n"
+                 "  bus_check allreduce --peer HOST [--rank R] [--world N] "
+                 "[--iters N] [--hold-ms N]\n"
+                 "                        (rank 0 listens; every rank "
+                 "reduces and verifies bitwise)\n"
                  "  bus_check selftest\n");
     return 2;
   }
@@ -590,7 +787,7 @@ int main(int argc, char** argv) {
       if (!parse_long(val(), 0, 3600000, &n)) args_ok = false;
       else hold_ms = n;
     } else if (a == "--rank") {
-      if (!parse_long(val(), 1, 3, &n)) args_ok = false;
+      if (!parse_long(val(), 0, 3, &n)) args_ok = false;
       else c.rank = static_cast<int>(n);
     } else if (a == "--timeout-ms") {
       if (!parse_long(val(), 100, 600000, &n)) args_ok = false;
@@ -606,8 +803,15 @@ int main(int argc, char** argv) {
   if (!args_ok) return 2;
 
   if (mode == "serve") return run_serve(c, duration_ms);
+  if (mode == "allreduce") {
+    if (c.world < 2 || c.rank >= c.world) {
+      DGPP_LOG_ERROR("allreduce: need --world >= 2 and --rank < world");
+      return 2;
+    }
+    return run_allreduce(c, peer, static_cast<int>(iters), hold_ms);
+  }
   if (mode == "ping") {
-    if (peer.empty()) return 2;
+    if (peer.empty() || c.rank == 0) return 2;
     return run_ping(c, peer, static_cast<int>(iters), bytes, cls_text,
                     contend, static_cast<int>(lat_iters), window, hold_ms);
   }

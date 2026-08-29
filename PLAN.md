@@ -276,8 +276,14 @@ Deliverables:
    slabs, class-partitioned credits (latency headroom reserved against
    bulk), CQs, system-scope doorbells, inactivity watchdogs, and concurrent
    latency-under-bulk traffic as a tested mode.
-3. Replicated block boundaries with one attention and one FFN all-reduce per
-   layer; striped bulk prefill collectives.
+ 3. Replicated block boundaries with one attention and one FFN all-reduce per
+    layer; striped bulk prefill collectives. The all-reduce primitive itself
+    is built and validated (DESIGN §6.3, one-shot all-to-all over the
+    latency pool, canonical rank-order fp32 fold, bitwise-verified on the
+    full mesh at TP=2 37.6 µs / TP=4 ~44 µs p50); what remains is the
+    forward integration: block-boundary wiring, the producing GEMMs
+    writing send slots directly, and CUDA-graph capture of the decode
+    launch sequence (§6.2) to amortize per-collective kernel launches.
 4. Sharded load for TP=2 and TP=4, plus hashes for replicated weights.
 5. Transport regression command that reruns NIC→GPU visibility on every node
    pair after driver/firmware changes.
