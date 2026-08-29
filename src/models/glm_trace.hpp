@@ -27,6 +27,12 @@ struct GlmRouteTraceLayer {
   uint64_t tokens = 0;
   std::vector<int32_t> ids;
   std::vector<float> weights;
+
+  friend bool operator==(const GlmRouteTraceLayer& a,
+                         const GlmRouteTraceLayer& b) {
+    return a.layer_idx == b.layer_idx && a.top_k == b.top_k &&
+           a.tokens == b.tokens && a.ids == b.ids && a.weights == b.weights;
+  }
 };
 
 void glm_trace_write(const std::string& path,

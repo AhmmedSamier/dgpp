@@ -22,8 +22,12 @@ Backends:
          consumes the synthetic mini-checkpoint written by
          glm_forward_test --write-fixture.
 
-  torch  (requires torch; run where the real checkpoint lives) is chunk 6b:
-         the same wiring over real weights, streaming one layer at a time.
+  torch  (requires torch; run where the real checkpoint lives) the same
+         wiring over real weights, streaming one layer at a time; the KDA
+         and DSA layer math mirrors the M2/M3 gen-torch references and the
+         mHC/MoE/norm/head modules mirror the pure backend's pinned
+         semantics. Prompts come from the checkpoint tokenizer
+         (`tokenizers` package) or explicit --token-ids.
 
 File format ("DGPPGLMD"): 8-byte magic, u32 version=1, u32 header length,
 JSON header, payload — same container as the KDA/DSA dumps. Read by
@@ -630,6 +634,470 @@ def gen_pure(args):
     return 0
 
 
+
+# ---------------------------------------------------------------------------
+# Torch backend (real checkpoint): same wiring, torch tensors, one layer
+# resident at a time. The KDA/DSA layer math mirrors the M2/M3 gen-torch
+# references; mHC/MoE/norms/head mirror the pure backend's pinned semantics
+# with torch float64 interiors at the same rounding boundaries.
+# ---------------------------------------------------------------------------
+
+def gen_torch(args):
+    import torch  # noqa: delayed import: backend requires torch
+
+    cfg = text_config(args.checkpoint_dir)
+    entries = read_safetensors_index(args.checkpoint_dir)
+    hidden = cfg["hidden_size"]
+    n = cfg["hc_mult"]
+    hc_eps, iters = cfg["hc_eps"], cfg["hc_sinkhorn_iters"]
+    eps, limit = cfg["rms_norm_eps"], cfg["swiglu_limit"]
+    n_layers = cfg["num_hidden_layers"]
+
+    # ---- tokens ------------------------------------------------------
+    if args.prompt:
+        from tokenizers import Tokenizer  # noqa: delayed import
+        tok = Tokenizer.from_file(
+            os.path.join(args.checkpoint_dir, "tokenizer.json"))
+        tokens = tok.encode(args.prompt).ids
+    elif args.token_ids:
+        tokens = [int(v) for v in args.token_ids.split(",")]
+    else:
+        rng = make_rng(args.seed)
+        tokens = [int(rng() * cfg["vocab_size"]) % cfg["vocab_size"]
+                  for _ in range(args.tokens)]
+    tokens = tokens[:args.tokens]
+    T = len(tokens)
+    if T == 0:
+        raise SystemExit("empty prompt")
+
+    # ---- torch helpers -------------------------------------------------
+    dtype_map = {"BF16": torch.bfloat16, "F32": torch.float32,
+                 "F8_E4M3": torch.float8_e4m3fn}
+
+    def load_t(name):
+        path, offset, nbytes, dtype_str, shape = entries[name]
+        with open(path, "rb") as f:
+            f.seek(offset)
+            buf = bytearray(f.read(nbytes))
+        return torch.frombuffer(buf, dtype=dtype_map[dtype_str]).reshape(
+            shape).clone()
+
+    def dq(name):
+        """E4M3 payload x block scales -> bf16 (the engine's weight policy:
+        decode, multiply, ONE bf16 round)."""
+        t = load_t(name)
+        if t.dtype == torch.bfloat16:
+            return t
+        s = load_t(name + "_scale_inv").float()
+        rows, cols = t.shape
+        out = torch.empty(rows, cols, dtype=torch.bfloat16)
+        for r in range(0, rows, 128):
+            for c in range(0, cols, 128):
+                blk = t[r:r + 128, c:c + 128].float() *                     s[r // 128, c // 128]
+                out[r:r + 128, c:c + 128] = blk.bfloat16()
+        return out
+
+    def gemm_bf(x, w):
+        return (x.float() @ w.float().T).bfloat16()
+
+    def rmsnorm2_t(x, w):
+        xf = x.float()
+        var = (xf * xf).mean(-1, keepdim=True)
+        u = (xf * torch.rsqrt(var + eps)).bfloat16()
+        return (u.float() * w.float()).bfloat16()
+
+    def swiglu_t(g, u):
+        g = g.float().clamp(max=limit)
+        u = u.float().clamp(-limit, limit)
+        t = (g * torch.sigmoid(g)).bfloat16()
+        return (t.float() * u).bfloat16()
+
+    def mhc_t(streams, fn, base, scale):
+        """[T, n, H] bf16 -> (post [T,n] bf16, comb [T,n,n] bf16,
+        collapsed [T,H] bf16). Double interior, the pinned boundaries."""
+        T_ = streams.shape[0]
+        flat = streams.reshape(T_, n * hidden).double()
+        ms = (flat * flat).mean(-1, keepdim=True)
+        flat = flat * torch.rsqrt(ms + eps)
+        logits = flat @ fn.double().T                     # [T, 24]
+        pre = torch.sigmoid(logits[:, :n] * scale[0] + base[:n]) + hc_eps
+        post = 2.0 * torch.sigmoid(logits[:, n:2 * n] * scale[1] +
+                                   base[n:2 * n])
+        cl = logits[:, 2 * n:].reshape(T_, n, n) * scale[2] + \
+            base[2 * n:].reshape(n, n)
+        comb = torch.softmax(cl, dim=-1) + hc_eps
+        comb = comb / (comb.sum(dim=1, keepdim=True) + hc_eps)  # col pass
+        for _ in range(iters - 1):
+            comb = comb / (comb.sum(dim=-1, keepdim=True) + hc_eps)
+            comb = comb / (comb.sum(dim=1, keepdim=True) + hc_eps)
+        collapsed = (pre.unsqueeze(-1) * streams.double()).sum(1).bfloat16()
+        return post.bfloat16(), comb.bfloat16(), collapsed
+
+    def mhc_update_t(post, comb, h, streams):
+        # streams' [t,i,d] = bf16(bf16(post[t,i] * h[t,d])
+        #                         + bf16(sum_j comb[t,j,i] * streams[t,j,d]))
+        t1 = (post.double().unsqueeze(-1) * h.double().unsqueeze(1)
+              ).bfloat16()
+        # comb is [T, j, i]; einsum over j gives [T, i, d].
+        mix = torch.einsum("tji,tjd->tid", comb.double(),
+                           streams.double()).bfloat16()
+        return (t1.double() + mix.double()).bfloat16()
+
+    # ---- KDA sublayer (mirrors kda_reference_dump gen-torch) -----------
+    def kda_layer_t(p, x):
+        lin = cfg["linear_attn_config"]
+        heads, head_dim = lin["num_heads"], lin["head_dim"]
+        conv_w = lin["short_conv_kernel_size"]
+        lb = lin["gate_lower_bound"]
+        lp = heads * head_dim
+
+        def w_(name):
+            t = load_t(p + name)
+            return t
+
+        in_proj = torch.cat(
+            [w_("f_a_proj.weight"), w_("g_a_proj.weight"),
+             w_("q_proj.weight"), w_("k_proj.weight"),
+             w_("v_proj.weight"), w_("b_proj.weight")],
+            dim=0).contiguous()
+        conv = torch.cat(
+            [w_("q_conv1d.weight").reshape(lp, conv_w),
+             w_("k_conv1d.weight").reshape(lp, conv_w),
+             w_("v_conv1d.weight").reshape(lp, conv_w)],
+            dim=0).contiguous()
+        a_log = w_("A_log").float()
+        dt_bias = w_("dt_bias").float()
+
+        proj = gemm_bf(x, in_proj)
+        f_a = proj[:, :head_dim]
+        g_a = proj[:, head_dim:2 * head_dim]
+        qkv = proj[:, 2 * head_dim:2 * head_dim + 3 * lp]
+        beta_raw = proj[:, 2 * head_dim + 3 * lp:]
+        g1 = gemm_bf(f_a, w_("f_b_proj.weight"))
+        g2 = gemm_bf(g_a, w_("g_b_proj.weight"))
+
+        conv_in = qkv.float()
+        w_conv = conv.float()
+        y = torch.zeros(T, 3 * lp)
+        for t in range(T):
+            acc = w_conv[:, conv_w - 1] * conv_in[t]
+            for j in range(conv_w - 1):
+                src_t = t - (conv_w - 1) + j
+                xj = conv_in[src_t] if src_t >= 0 else torch.zeros(3 * lp)
+                acc = acc + w_conv[:, j] * xj
+            y[t] = acc * torch.sigmoid(acc)
+        qkv_conv = y.bfloat16()
+
+        state = torch.zeros(heads, head_dim, head_dim)
+        core = torch.zeros(T, heads, head_dim)
+        scale = head_dim ** -0.5
+        qkv_f = qkv_conv.float()
+        for t in range(T):
+            q = qkv_f[t, 0 * lp:1 * lp].view(heads, head_dim)
+            k = qkv_f[t, 1 * lp:2 * lp].view(heads, head_dim)
+            v = qkv_f[t, 2 * lp:3 * lp].view(heads, head_dim)
+            q = q / torch.sqrt((q * q).sum(-1, keepdim=True) + 1e-6)
+            k = k / torch.sqrt((k * k).sum(-1, keepdim=True) + 1e-6)
+            q = q * scale
+            g = g1[t].float().view(heads, head_dim) + \
+                dt_bias.view(heads, head_dim)
+            gate = lb / (1.0 + torch.exp(-(torch.exp(a_log).view(heads, 1)
+                                           * g)))
+            state = state * torch.exp(gate).unsqueeze(1)
+            beta = torch.sigmoid(beta_raw[t].float())
+            sk = torch.bmm(state, k.unsqueeze(2)).squeeze(2)
+            u = (v - sk) * beta.unsqueeze(1)
+            state = state + u.unsqueeze(2) * k.unsqueeze(1)
+            core[t] = torch.bmm(state, q.unsqueeze(2)).squeeze(2)
+        core = core.bfloat16()
+
+        core3 = core.view(T * heads, head_dim).float()
+        var = (core3 * core3).mean(-1, keepdim=True)
+        normed = core3 * torch.rsqrt(var + eps) * \
+            w_("o_norm.weight").float() * torch.sigmoid(
+                g2.view(T * heads, head_dim).float())
+        normed = normed.bfloat16().view(T, lp)
+        return gemm_bf(normed, w_("o_proj.weight"))
+
+    # ---- DSA sublayer (mirrors dsa_reference_dump gen-torch) -----------
+    def dsa_layer_t(p, x):
+        sa = cfg
+        heads = sa["num_attention_heads"]
+        q_lora, kv_lora = sa["q_lora_rank"], sa["kv_lora_rank"]
+        nope, v_dim = sa["qk_nope_head_dim"], sa["v_head_dim"]
+        idx_heads, idx_dim = sa["index_n_heads"], 128
+        topk, kpool = sa["index_topk"], sa["index_kpool"]
+        select_k = topk // kpool
+
+        sp = p + "self_attn."
+        ip = sp + "indexer."
+        wq_b = load_t(ip + "wq_b.weight")
+        wk = load_t(ip + "wk.weight")
+        wp = load_t(ip + "weights_proj.weight")
+        gate_w = load_t(ip + "index_kpool_compress_gate")
+        k_norm_w = load_t(ip + "k_norm.weight")
+        k_norm_b = load_t(ip + "k_norm.bias")
+        ape = load_t(ip + "index_kpool_compress_ape").float()
+        qkv_a = torch.cat([dq(sp + "q_a_proj.weight"),
+                           dq(sp + "kv_a_proj_with_mqa.weight")],
+                          dim=0).contiguous()
+        q_aln = load_t(sp + "q_a_layernorm.weight")
+        kv_aln = load_t(sp + "kv_a_layernorm.weight")
+        q_b = dq(sp + "q_b_proj.weight")
+        kv_b = load_t(sp + "kv_b_proj.weight")
+        o_proj = dq(sp + "o_proj.weight")
+
+        proj = gemm_bf(x, qkv_a)
+        q_c = proj[:, :q_lora]
+        kv_c = proj[:, q_lora:]
+
+        def rmsnorm_t(x_, wgt):
+            xf = x_.float()
+            var = (xf * xf).mean(-1, keepdim=True)
+            return (xf * torch.rsqrt(var + eps) * wgt.float()).bfloat16()
+
+        q_c = rmsnorm_t(q_c, q_aln)
+        latent = rmsnorm_t(kv_c, kv_aln)
+
+        q_mla = gemm_bf(q_c, q_b)
+        q_idx = gemm_bf(q_c, wq_b)
+        k_raw = gemm_bf(x, wk)
+        gate_rows = gemm_bf(x, gate_w)
+        weights_f = x.float() @ wp.float().T
+
+        def layernorm_t(x_, wgt, bias):
+            xf = x_.float()
+            mean = xf.mean(-1, keepdim=True)
+            var = ((xf - mean) ** 2).mean(-1, keepdim=True)
+            return ((xf - mean) * torch.rsqrt(var + 1e-6) * wgt.float() +
+                    bias.float()).bfloat16()
+
+        k_rows = layernorm_t(k_raw, k_norm_w, k_norm_b)
+
+        def fwht(x_):
+            h = x_.float().clone()
+            stride = 1
+            d = h.shape[-1]
+            while stride < d:
+                h = h.view(*h.shape[:-1], -1, 2 * stride)
+                a = h[..., :stride].clone()
+                b = h[..., stride:].clone()
+                h = torch.cat([a + b, a - b], dim=-1).reshape(
+                    *x_.shape)
+                stride <<= 1
+            return h * (1.0 / math.sqrt(float(d)))
+
+        hq = fwht(q_idx.view(T * idx_heads, idx_dim)).bfloat16().float()
+        absmax = hq.abs().amax(dim=1, keepdim=True).clamp_min(1e-4)
+        scales = [drd.next_pow2_at_or_above(a.item() * (1.0 / 448.0))
+                  for a in absmax.flatten()]
+        q_scale = torch.tensor(scales, dtype=torch.float32).unsqueeze(1)
+        q_fp8 = (hq / q_scale).clamp(-448, 448).to(
+            torch.float8_e4m3fn).view(T, idx_heads, idx_dim)
+        q_scale = q_scale.squeeze(1).view(T, idx_heads)
+
+        logit_scale = float(idx_dim) ** -0.5 * float(idx_heads) ** -0.5
+        w_folded = (weights_f * q_scale) * logit_scale
+
+        # Pool compression.
+        n_pools = T // kpool
+        index_k = torch.zeros(n_pools, idx_dim, dtype=torch.uint8)
+        index_scale = torch.zeros(n_pools)
+        ape_f = ape.float()
+        for j in range(n_pools):
+            k_blk = k_rows[j * kpool:(j + 1) * kpool].float()
+            g_blk = gate_rows[j * kpool:(j + 1) * kpool].float()
+            sc = g_blk + ape_f
+            mx = sc.max(dim=0, keepdim=True).values
+            prob = torch.exp(sc - mx)
+            x_ = (k_blk * prob).sum(dim=0) / prob.sum(dim=0, keepdim=True)
+            h_ = fwht(x_.view(1, idx_dim)).bfloat16().float().view(-1)
+            abs_ = h_.abs().max().clamp_min(1e-4)
+            sc_ = drd.next_pow2_at_or_above(abs_.item() * (1.0 / 448.0))
+            index_k[j] = (h_ / sc_).clamp(-448, 448).to(
+                torch.float8_e4m3fn).view(torch.uint8)
+            index_scale[j] = sc_
+
+        attn_scale = float(nope) ** -0.5
+        head_rows = nope + v_dim
+        attn_out = torch.zeros(T, heads * v_dim)
+        q_fp8_f = q_fp8.float()
+        for t in range(T):
+            visible = (t + 1) // kpool
+            if visible <= select_k:
+                toks = list(range(t + 1))
+            else:
+                ik_f = index_k[:visible].view(torch.float8_e4m3fn).float()
+                is_f = index_scale[:visible]
+                dots = torch.einsum("hd,pd->hp", q_fp8_f[t], ik_f)
+                logits_ = (w_folded[t].unsqueeze(1) * is_f.unsqueeze(0) *
+                           dots).sum(dim=0)
+                order = torch.argsort(logits_, descending=True, stable=True)
+                pools = sorted(order[:select_k].tolist())
+                toks = []
+                for pl in pools:
+                    toks.extend(range(pl * kpool, (pl + 1) * kpool))
+                tail_start = ((t + 1) // kpool) * kpool
+                toks.extend(range(tail_start, t + 1))
+            lat = latent[toks].float()
+            qh = q_mla[t].float().view(heads, nope)
+            for h in range(heads):
+                w_uk = kv_b[h * head_rows:h * head_rows + nope].float()
+                q_tilde = (qh[h] @ w_uk).bfloat16().float()
+                scores = (lat @ q_tilde) * attn_scale
+                mx = scores.max()
+                p_ = torch.exp(scores - mx)
+                p_ = (p_ / p_.sum()).bfloat16().float()
+                c_vec = p_ @ lat
+                w_uv = kv_b[h * head_rows + nope:
+                            (h + 1) * head_rows].float()
+                attn_out[t, h * v_dim:(h + 1) * v_dim] = \
+                    (w_uv @ c_vec).bfloat16().float()
+        return gemm_bf(attn_out.bfloat16(), o_proj)
+
+    # ---- MLP sublayers --------------------------------------------------
+    def expert_rows(x_rows, gate_w, up_w, down_w):
+        g = gemm_bf(x_rows, gate_w)
+        u = gemm_bf(x_rows, up_w)
+        act = swiglu_t(g, u)
+        return gemm_bf(act, down_w)
+
+    def moe_layer_t(p, x):
+        m = p + "mlp."
+        gate_w = load_t(m + "gate.weight")
+        bias = load_t(m + "gate.e_score_correction_bias").float()
+        E = cfg["n_routed_experts"]
+        K = cfg["num_experts_per_tok"]
+        logits = x.float() @ gate_w.float().T
+        scores = torch.sigmoid(logits)
+        biased = scores + bias
+        top = torch.topk(biased, K, dim=-1).indices      # [T, K]
+        wsel = scores.gather(1, top)
+        denom = wsel.sum(-1, keepdim=True) + 1e-20
+        weights = (wsel / denom) * cfg["routed_scaling_factor"]
+
+        ids = top.sort(dim=-1).values                    # ascending per tok
+        wsort = torch.zeros_like(weights)
+        for t in range(T):
+            order = torch.argsort(top[t])
+            wsort[t] = weights[t][order]
+
+        out = torch.zeros(T, hidden, dtype=torch.bfloat16)
+        flat_ids = ids.flatten()
+        for e in range(E):
+            rows = (flat_ids == e).nonzero().flatten() // K
+            if rows.numel() == 0:
+                continue
+            rows = torch.unique(rows)
+            ep = m + "experts.%d." % e
+            y = expert_rows(x[rows], dq(ep + "gate_proj.weight"),
+                            dq(ep + "up_proj.weight"),
+                            dq(ep + "down_proj.weight"))
+            we = torch.zeros(rows.numel())
+            for ri, r in enumerate(rows.tolist()):
+                sel = (ids[r] == e).nonzero().flatten()
+                we[ri] = wsort[r][sel[0]] if sel.numel() else 0.0
+            contrib = (we.unsqueeze(1) * y.float()).bfloat16()
+            out[rows] = (out[rows].float() +
+                         contrib.float()).bfloat16()
+        sp_ = m + "shared_experts."
+        y = expert_rows(x, dq(sp_ + "gate_proj.weight"),
+                        dq(sp_ + "up_proj.weight"),
+                        dq(sp_ + "down_proj.weight"))
+        out = (out.float() + y.float()).bfloat16()
+        return out, ids, wsort
+
+    def dense_layer_t(p, x):
+        m = p + "mlp."
+        return expert_rows(x, dq(m + "gate_proj.weight"),
+                           dq(m + "up_proj.weight"),
+                           dq(m + "down_proj.weight"))
+
+    # ---- the forward ----------------------------------------------------
+    embed = load_t("model.language_model.embed_tokens.weight")
+    lm_head = load_t("lm_head.weight")
+    final_norm = load_t("model.language_model.norm.weight")
+
+    streams = embed[tokens].unsqueeze(1).expand(T, n, hidden).contiguous()
+    routes = []
+    layer_streams = [streams.clone()]
+    for layer in range(n_layers):
+        p = "model.language_model.layers.%d." % layer
+        for site in ("attn", "ffn"):
+            fn = load_t(p + "hc_%s_fn" % site)
+            base = load_t(p + "hc_%s_base" % site).float()
+            scale = load_t(p + "hc_%s_scale" % site).float()
+            post, comb, collapsed = mhc_t(streams, fn, base, scale)
+            ln = load_t(p + ("input_layernorm.weight" if site == "attn"
+                             else "post_attention_layernorm.weight"))
+            x = rmsnorm2_t(collapsed, ln)
+            if site == "attn":
+                if cfg["layer_types"][layer] == "linear_attention":
+                    out = kda_layer_t(p + "self_attn.", x)
+                else:
+                    out = dsa_layer_t(p, x)
+            else:
+                if cfg["mlp_layer_types"][layer] == "dense":
+                    out = dense_layer_t(p, x)
+                else:
+                    out, ids, ws = moe_layer_t(p, x)
+                    routes.append((layer, ids.flatten().tolist(),
+                                   [float(v) for v in
+                                    ws.flatten().tolist()]))
+            streams = mhc_update_t(post, comb, out, streams)
+        layer_streams.append(streams.clone())
+        print("  layer %d/%d done" % (layer + 1, n_layers))
+
+    mean = (streams.double().mean(dim=1)).bfloat16()
+    hidden_rows = rmsnorm2_t(mean, final_norm)
+    logits = gemm_bf(hidden_rows, lm_head)
+    topk = 8
+    tv, ti = torch.topk(logits.float(), topk, dim=-1)
+    top_ids = ti.tolist()
+    top_vals = [[float(v) for v in row] for row in tv.tolist()]
+
+    route_layers = [{"layer_idx": layer, "top_k": cfg["num_experts_per_tok"],
+                     "tokens": T} for layer, _, _ in routes]
+    flat_ids, flat_w = [], []
+    for _, ids_, ws_ in routes:
+        flat_ids.extend(ids_)
+        flat_w.extend(ws_)
+
+    tensors = {
+        "tokens": ("I64", [T], struct.pack("<%dq" % T, *tokens)),
+        "final_hidden": ("BF16", [T, hidden],
+                         hidden_rows.view(torch.uint16).numpy().tobytes()),
+        "topk_ids": ("I32", [T, topk],
+                     struct.pack("<%di" % (T * topk),
+                                 *[i for row in top_ids for i in row])),
+        "topk_logits": ("F32", [T, topk],
+                        struct.pack("<%df" % (T * topk),
+                                    *[v for row in top_vals for v in row])),
+        "route_ids": ("I32", [len(flat_ids)],
+                      struct.pack("<%di" % len(flat_ids), *flat_ids)),
+        "route_weights": ("F32", [len(flat_w)],
+                          struct.pack("<%df" % len(flat_w), *flat_w)),
+        # Per-layer residual streams (input to layer 0 = embedding broadcast;
+        # output of layer L at index L+1) for the ISOLATED per-layer parity
+        # runner: free-run end-to-end comparison is chaos-limited (module
+        # noise floors compound through 45 amplifying layers), so the
+        # suite's correctness evidence is layer-isolated.
+        "streams_all": ("BF16", [n_layers + 1, T, n, hidden],
+                        torch.stack(layer_streams).view(
+                            torch.uint16).numpy().tobytes()),
+    }
+    meta = {
+        "model": os.path.basename(os.path.normpath(args.checkpoint_dir)),
+        "revision": "torch-%d" % args.seed,
+        "backend": "torch",
+    }
+    cfg_summary = {"hidden": hidden, "vocab": cfg["vocab_size"],
+                   "num_layers": n_layers, "tokens": T, "top_k": topk}
+    write_dump(args.out, meta, cfg_summary, tensors, route_layers)
+    print("wrote %s (%d tokens, %d layers, %d routed layers)" %
+          (args.out, T, n_layers, len(routes)))
+    return 0
+
 # ---------------------------------------------------------------------------
 # Selftest (no torch, no checkpoint)
 # ---------------------------------------------------------------------------
@@ -703,6 +1171,19 @@ def main(argv=None):
     gp.add_argument("--tokens", type=int, default=24)
     gp.add_argument("--seed", type=int, default=1234)
     gp.set_defaults(fn=gen_pure)
+
+    gt = sub.add_parser("gen-torch",
+                        help="full-stack torch reference dump (real "
+                             "checkpoint)")
+    gt.add_argument("--checkpoint-dir", required=True)
+    gt.add_argument("--out", required=True)
+    gt.add_argument("--tokens", type=int, default=32)
+    gt.add_argument("--seed", type=int, default=1234)
+    gt.add_argument("--prompt", default=None,
+                    help="tokenize this prompt (requires `tokenizers`)")
+    gt.add_argument("--token-ids", default=None,
+                    help="comma-separated token ids (no tokenizer)")
+    gt.set_defaults(fn=gen_torch)
 
     args = p.parse_args(argv)
     return args.fn(args)

@@ -467,6 +467,55 @@ tool's anchors are §3's own numbers: a uniform-random trace must reproduce
 12.198 GB. A uniform trace is the null model, not evidence — real traces
 come from representative prompts through the assembled model.
 
+### 7.5 The assembled forward and the parity discipline at depth
+
+`GlmDiagnosticModel` (M4 deliverable 1) runs the full text stack over the
+streaming resident loader: embedding -> 4-stream mHC init -> per layer
+[attn_hc -> ln1 -> KDA or DSA -> stream update] and [ffn_hc -> ln2 ->
+dense MLP or MoE -> update] -> unweighted stream mean -> final norm ->
+bf16 lm head. One layer is resident at a time; the KDA/DSA/MoE layer
+objects are constructed once (shape-keyed scratch and GEMM plans) and
+REBOUND to each layer's resident views. The two layer norms and the
+final norm are the Glm5NextTextRMSNorm TWO-rounding choreography
+(u = bf16(x*rsqrt); y = bf16(w*u)) — a dedicated kernel, because the
+generic single-round rmsnorm drifts the GLM path systematically.
+The MTP draft layer (index 45) is bound and loadable but outside the
+forward, matching the reference model class, which ignores it; its
+transaction model is §9 (M5+).
+
+Parity at real depth is chaos-limited, and the curated suite is designed
+around the measured facts, not around an aspiration of bit-parity:
+
+* Module noise floors (measured, M2/M3/M4): KDA engine-vs-torch
+  3.6e-3 l2, DSA ~3e-3 kept-row (fp8-indexer near-tie flips are inside
+  its design), MoE expert path 0-1 bf16 ulps vs the double oracle.
+* Those floors COMPOUND: a free-run 45-layer forward diverges from the
+  torch reference at ~1.18x per layer and decorrelates by layer ~30
+  (measured; the mHC residual stream is mildly amplifying — post in
+  [0,2], Sinkhorn-normalized comb columns). No bug is involved: every
+  layer's ISOLATED drift sits flat at the floor (<= 7e-3 at layer 44 as
+  at layer 0).
+* Therefore the real-checkpoint suite compares per-layer ISOLATED: every
+  layer starts from the reference trajectory, so drift is bounded by one
+  layer's floor. Kept rows (tokens whose routing did not flip) must sit
+  under 2e-2; a route flip legitimately moves that token's row O(1)
+  (the reference's noaux bias exists to tie scores at the selection
+  boundary, so cross-implementation noise flips them at a sub-1% rate);
+  flips are counted and bounded, not certified individually — the router
+  itself is pinned to 5.3e-7 against the double oracle. The head runs on
+  the isolated final streams: top-1 must agree on every token.
+* Free-run outputs are still REPORTED (drift curve, route agreement
+  rates, top-8 margins) — they are the honest description of what
+  cross-implementation bf16 inference at 45 layers looks like — but no
+  free-run parity is asserted.
+
+The first real trace (technical prose, 272 tokens) lands on the uniform
+null within measurement noise: busiest-rank 3.541 experts/token (uniform
+3.515), corrected critical path 7.484 GB/token vs 7.457 (+0.4%). The
+§3 traffic model's uniform assumption is validated for this prompt class;
+sampling other prompt classes (code, multilingual) is future work and the
+tool accepts their traces unchanged.
+
 ## 8. Prefix cache
 
 V1 uses exact state snapshots only. The previous unproven 24 KB/token

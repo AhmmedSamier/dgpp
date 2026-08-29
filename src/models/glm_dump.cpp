@@ -178,4 +178,14 @@ const float* GlmDumpFile::route_weights() const {
   return static_cast<const float*>(tv->data);
 }
 
+const uint16_t* GlmDumpFile::streams_all() const {
+  const auto* tv = require_tensor(*this, "streams_all", DType::BF16);
+  if (tv->shape.size() != 4 ||
+      tv->shape[0] != num_layers_ + 1 ||
+      tv->shape[1] != token_count_ || tv->shape[2] != 4 ||
+      tv->shape[3] != hidden_)
+    throw std::runtime_error("glm dump: streams_all shape mismatch");
+  return static_cast<const uint16_t*>(tv->data);
+}
+
 }  // namespace dgpp

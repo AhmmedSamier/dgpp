@@ -325,3 +325,92 @@ the null model, not evidence.
 Verification: ci-local 15/15 (glm_moe_test + route_trace_test new), unit
 39/39, ASan/UBSan clean on all touched suites, memcheck 0 errors on the
 moe and mhc tests.
+
+## Chunk 6: the assembled forward, curated suite, real traces (deliverables 1+5)
+
+`GlmDiagnosticModel` (src/models/glm_forward): the full text forward over
+the streaming loader — mHC wiring per DESIGN §7.5, KDA/DSA/MoE layers
+REBOUND to each resident layer (constructed once, shape-keyed scratch),
+the two-rounding Glm5NextTextRMSNorm kernel (the generic rmsnorm rounds
+once and drifts this path systematically), bf16 lm head. CI parity chain:
+glm_forward_test writes a synthetic mini-checkpoint (hidden 128, 6 layers
+4 KDA + 2 DSA, 2 dense + 4 MoE, MTP set present), the new
+tools/glm_reference_dump.py computes the FULL-STACK reference in pure
+python doubles from the SAME checkpoint, and the engine is compared:
+hidden max 75 ulps (19/3072 over soft, l2=0.0034), top-1 exact, top-8
+sets exact, route ids exact, route weights <= 4.3e-4 relative,
+deterministic reruns. ctest: fixture -> generate -> test (18/18 CI).
+
+Chunk 6a found and fixed three latent engine bugs before any of this
+passed, each caught by the honest-data discipline:
+
+1. Loader race: load_layer's phase-one CPU writes into the bump raced
+   previously-loaded layers' in-flight kernels (the loader had never been
+   called mid-forward). Symptom: flaky NaN streams -> router scores NaN
+   -> expert id -1 (NaN never wins comparisons) -> h_counts_[-1] host
+   heap corruption. Fix: entry cudaDeviceSynchronize in load_layer.
+2. DSA select_k must be a power of two (bitonic select/expand networks):
+   the real 2048/4=512 and every prior test's 16 satisfied it by luck;
+   select_k=6 silently dropped every selected pool. Now rejected at
+   construction.
+3. DSA num_heads=2 routes the attention kernel's head-group tiling to a
+   broken 64-group partition (selections match, outputs drift 1e33 —
+   bisected through the CI test machinery; 4/8/64 heads pass). Now
+   rejected (power of two >= 4). Also recorded: select_k=8 chunked
+   prefill has unaudited near-tie continuation flips (M3 test-coverage
+   gap, not a forward-path blocker).
+
+### The chaos finding and the suite design it forced
+
+Free-run end-to-end parity at REAL depth is chaos-limited: the measured
+cross-implementation floors (KDA 3.6e-3, DSA ~3e-3, MoE ~2.3e-3 vs their
+own oracles) compound at ~1.18x per layer through the mHC stream (post
+in [0,2] amplifies) and decorrelate the stacks by layer ~30 — measured
+engine-vs-torch, layer by layer, with layer 0 (an isolated measurement)
+sitting exactly at the module floors. Not a wiring bug: the mini fixture
+(same wiring code, 6 layers) holds l2=0.0034 free-run.
+
+The curated suite therefore compares per-layer ISOLATED (every layer
+starts from the reference trajectory; the dumps carry per-layer streams):
+kept-row l2 budgets < 0.02; route near-tie flips (the noaux bias ties
+scores at the selection boundary, so ~1e-3 router-input noise flips them)
+are counted, bounded < 1%, and excluded from the l2 — the M3 kept-row /
+flipped-row discipline; the head runs on the isolated final streams.
+
+### Real-checkpoint curated suite (exit criterion 1)
+
+```
+$ glm_forward_check --config <ckpt>/config.json --checkpoint-dir <ckpt> --suite suite.txt
+smoke    21 tok  kept l2 max 0.0068 (all-rows max 0.0330, 18 flip layers) head l2 0.0053 top1=0 top8miss=2 routes: flips=61/7056  kept-rel 0.0093  OK
+factual  23 tok  kept l2 max 0.0051 (all-rows max 0.0144,  8 flip layers) head l2 0.0046 top1=0 top8miss=2 routes: flips=30/7728  kept-rel 0.0063  OK
+code     65 tok  kept l2 max 0.0045 (all-rows max 0.0118, 26 flip layers) head l2 0.0047 top1=0 top8miss=3 routes: flips=171/21840 kept-rel 0.0047  OK
+```
+
+- Kept-row l2 is FLAT across depth: max 0.0068 at layer 44 as at layer 0
+  — the module floor, un-amplified, on all 45 layers of every case.
+- Every above-floor all-rows outlier coincides with a route flip on that
+  layer (L19: kept 0.0050 while the flipped row drives all-rows to 0.033).
+- Top-1 agrees on EVERY token of every case; top-8 set misses 2-3 of
+  8x65; kept route weights within 0.93% relative.
+- Free-run numbers are reported but not asserted (DESIGN §7.5).
+- Suite definition + token ids: benchmarks/glm-suite/ (dumps regenerate
+  from the tool; ~4-10 min/case on CPU).
+
+### Real route trace (exit criterion 4)
+
+```
+$ glm_forward_check ... --trace-ids-file ids/trace.ids --trace-out real.trace
+trace run: 272 tokens over 45 layers (317 s, deterministic re-run)
+$ tools/route_trace_traffic.py real.trace
+per-token busiest-rank experts/layer: 3.541  (uniform model: 3.515)
+corrected critical path: 7.484 GB/token = 32.54 ms @ 230 GB/s  (uniform: 7.457, +0.4%)
+```
+
+The first real trace (technical prose) validates the uniform null model
+to +0.4% — the §3 traffic numbers stand for this prompt class, now with
+measured evidence instead of an assumption. Sampling other prompt classes
+is future work; the tool consumes their traces unchanged.
+
+Verification: ci-local 18/18, ASan/UBSan clean, memcheck 0 errors on the
+forward test; the curated suite and trace run recorded above are
+deployment runs on the checkpoint box.

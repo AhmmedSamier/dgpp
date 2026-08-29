@@ -165,6 +165,13 @@ add_executable(glm_stream_check apps/glm_stream_check.cpp)
 target_link_libraries(glm_stream_check PRIVATE dgpp_models_glm_loader)
 dgpp_set_common(glm_stream_check)
 
+# M4 deliverables 1+5 deployment run: the curated reference suite over the
+# real checkpoint (dumps from tools/glm_reference_dump.py gen-torch) and
+# DGPPTC1 route-trace capture for the traffic model.
+add_executable(glm_forward_check apps/glm_forward_check.cpp)
+target_link_libraries(glm_forward_check PRIVATE dgpp_models_glm_loader CUDA::cudart)
+dgpp_set_common(glm_forward_check)
+
 add_executable(dgppctl apps/dgppctl.cpp src/common/log.cpp)
 target_link_libraries(dgppctl PRIVATE CUDA::cudart)
 dgpp_set_common(dgppctl)

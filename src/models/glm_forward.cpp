@@ -153,8 +153,13 @@ void GlmDiagnosticModel::enqueue_dense_mlp(
                          out, tokens, H, I, stream);
 }
 
-GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward(
-    const std::vector<int64_t>& token_ids) {
+// Shared stack runner. `layer_inputs` (isolated mode) overrides the stream
+// state entering EVERY layer (index L feeds layer L); `capture` (isolated
+// mode) receives each layer's output streams plus the initial state at
+// index 0. Free-run forward passes null for both.
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
+    const std::vector<int64_t>& token_ids, const uint16_t* const* layer_inputs,
+    std::vector<std::vector<uint16_t>>* capture) {
   const int T = static_cast<int>(token_ids.size());
   if (T <= 0) throw std::invalid_argument("forward: empty token batch");
   if (T > max_tokens_)
@@ -193,6 +198,14 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward(
                                cudaMemcpyHostToDevice, stream_));
   glm_embed_bcast_streams(globals_.embed, d_tokens_, streams_[0], T, H,
                           stream_);
+  if (layer_inputs) {
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+    std::memcpy(streams_[0], layer_inputs[0],
+                static_cast<size_t>(T) * 4 * H * 2);
+    if (capture)
+      capture->push_back(std::vector<uint16_t>(
+          streams_[0], streams_[0] + static_cast<size_t>(T) * 4 * H));
+  }
 
   Outputs out;
   out.routes.reserve(static_cast<size_t>(cfg_.num_hidden_layers));
@@ -202,6 +215,12 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward(
   int kda_ordinal = 0;
 
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+    if (layer_inputs && layer > 0) {
+      // Isolated mode: every layer starts from the reference trajectory.
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      std::memcpy(cur, layer_inputs[layer],
+                  static_cast<size_t>(T) * 4 * H * 2);
+    }
     const GlmLayerResident& r = loader_.load_layer(layer);
 
     // ---- attention site --------------------------------------------
@@ -279,7 +298,13 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward(
     }
     launch_mhc_stream_update(post_, comb_, sub_out_, cur, nxt, mhc_cfg_, T,
                              stream_);
-    std::swap(cur, nxt);  }
+    std::swap(cur, nxt);
+    if (capture) {
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      capture->push_back(std::vector<uint16_t>(
+          cur, cur + static_cast<size_t>(T) * 4 * H));
+    }
+  }
 
   // ---- head: mean over streams, final norm, lm head -----------------
   launch_mhc_final_mean(cur, collapsed_, mhc_cfg_, T, stream_);
@@ -290,11 +315,26 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward(
                stream_);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 
-  const size_t TH = static_cast<size_t>(T) * H;
+    const size_t TH = static_cast<size_t>(T) * H;
   const size_t TV = static_cast<size_t>(T) * cfg_.vocab_size;
   out.final_hidden_bits.assign(normed_, normed_ + TH);
   out.logits_bits.assign(logits_, logits_ + TV);
   return out;
+}
+
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward(
+    const std::vector<int64_t>& token_ids) {
+  return run_stack(token_ids, nullptr, nullptr);
+}
+
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward_isolated(
+    const std::vector<int64_t>& token_ids,
+    const std::vector<const uint16_t*>& layer_inputs,
+    std::vector<std::vector<uint16_t>>& capture) {
+  if (layer_inputs.size() != static_cast<size_t>(cfg_.num_hidden_layers) + 1)
+    throw std::invalid_argument(
+        "forward_isolated: needs num_layers+1 input snapshots");
+  return run_stack(token_ids, layer_inputs.data(), &capture);
 }
 
 std::vector<std::vector<std::pair<int32_t, float>>> GlmDiagnosticModel::topk(

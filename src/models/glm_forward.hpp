@@ -57,6 +57,18 @@ class GlmDiagnosticModel {
   // host copies of the final hidden state, logits, and routing decisions.
   Outputs forward(const std::vector<int64_t>& token_ids);
 
+  // Isolated parity runner (the curated suite's real-checkpoint mode):
+  // every layer starts from the REFERENCE trajectory — layer_inputs[L]
+  // replaces the stream state entering layer L (index 0 replaces the
+  // embedding broadcast) — so module noise never compounds across layers.
+  // capture receives num_layers+1 stream snapshots (initial + per-layer
+  // outputs) as host copies. The head runs on the isolated final streams.
+  // Routed-layer decisions are likewise isolated (comparable per layer).
+  Outputs forward_isolated(
+      const std::vector<int64_t>& token_ids,
+      const std::vector<const uint16_t*>& layer_inputs,
+      std::vector<std::vector<uint16_t>>& capture);
+
   const GlmTextConfig& config() const { return cfg_; }
   int max_tokens() const { return max_tokens_; }
 
@@ -71,6 +83,9 @@ class GlmDiagnosticModel {
                          const GlmQuantMatrix (&dense)[3], int tokens,
                          cudaStream_t stream);
   static GlmMoeWeights moe_weights(const GlmMoeResident& r);
+  Outputs run_stack(const std::vector<int64_t>& token_ids,
+                    const uint16_t* const* layer_inputs,
+                    std::vector<std::vector<uint16_t>>* capture);
 
   GlmTextConfig cfg_;
   KdaConfig kda_cfg_;

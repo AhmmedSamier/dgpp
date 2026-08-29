@@ -64,6 +64,12 @@ class GlmDumpFile {
   const int32_t* route_ids() const;
   const float* route_weights() const;
 
+  // Per-layer residual streams (torch backend): [num_layers+1, token_count,
+  // 4, hidden] — index 0 is the embedding broadcast, index L+1 the output of
+  // layer L. Absent in pure dumps (the CI suite compares free-run at 6
+  // layers where module noise does not compound).
+  const uint16_t* streams_all() const;
+
  private:
   std::vector<uint8_t> bytes_;
   std::string model_, revision_, backend_;
