@@ -328,12 +328,19 @@ bool RcLane::post_credit_write(BusPool pool, uint32_t slot, uint32_t seq,
   sge.lkey = mr_->lkey;
   sge.length = sizeof(BusCredit);
 
+  // The verbs contract retires an unsignaled WR's send-queue entry only at
+  // the next signaled completion on the QP — a QP that posts only unsignaled
+  // credit writes would fill its SQ monotonically and die at qp_depth (found
+  // by the window-32 flood at exactly 1024 posts). Signal every kCreditSignal
+  // -th generation: bounded SQ occupancy plus real error visibility for the
+  // credit path, at a small fraction of the CQ load.
+  constexpr uint32_t kCreditSignalEvery = 16;
   ibv_send_wr wr{};
   wr.wr_id = bus_wr_id(pool, BusWr::kCredit, slot);
   wr.sg_list = &sge;
   wr.num_sge = 1;
   wr.opcode = IBV_WR_RDMA_WRITE;
-  wr.send_flags = 0;  // unsignaled: the sender polls the cell as a flag
+  wr.send_flags = (seq % kCreditSignalEvery == 0) ? IBV_SEND_SIGNALED : 0;
   wr.wr.rdma.remote_addr =
       layout_.completion_remote_addr(peer.slab_base, pool, slot);
   wr.wr.rdma.rkey = peer.rkey;

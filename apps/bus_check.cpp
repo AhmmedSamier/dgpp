@@ -205,8 +205,86 @@ PingStats ping_class(CollectiveBus& bus, int peer, BusMessageClass cls,
   return st;
 }
 
+// Windowed bulk flood: keeps `window` requests in flight and defers hash
+// verification out of the timed section. This measures the transport's
+// steady state — engine pipelining, ring recycling, consumer rate — without
+// the per-message host costs (payload fill, fold verification) that the
+// sequential ping path pays inside its clock.
+PingStats bulk_flood(CollectiveBus& bus, int peer, int iters, size_t bytes,
+                     int window, int wait_ms) {
+  PingStats st;
+  std::vector<std::vector<uint64_t>> payloads(
+      static_cast<size_t>(window));
+  for (int i = 0; i < window; ++i) {
+    payloads[static_cast<size_t>(i)].resize(bytes / 8);
+    fill_payload(payloads[static_cast<size_t>(i)].data(), bytes / 8,
+                 static_cast<uint32_t>(i));
+  }
+  std::vector<dgpp::net::BusSendResult> results;
+  results.reserve(static_cast<size_t>(iters));
+  std::vector<uint64_t> ids;
+  ids.reserve(static_cast<size_t>(iters));
+
+  int submitted = 0;
+  int reaped = 0;
+  const auto t0 = std::chrono::steady_clock::now();
+  while (reaped < iters) {
+    while (submitted < iters && submitted - reaped < window) {
+      std::string error;
+      const uint64_t id =
+          bus.send(peer, payloads[static_cast<size_t>(submitted % window)]
+                       .data(),
+                   bytes, BusMessageClass::kBulk, &error);
+      if (id == 0) {
+        DGPP_LOG_ERROR("flood send rejected: {}", error);
+        ++st.fail;
+        results.push_back(dgpp::net::BusSendResult{});
+        ids.push_back(0);
+      } else {
+        ids.push_back(id);
+      }
+      ++submitted;
+    }
+    if (ids[static_cast<size_t>(reaped)] == 0) {
+      ++reaped;
+      continue;
+    }
+    dgpp::net::BusSendResult r =
+        bus.wait(ids[static_cast<size_t>(reaped)], wait_ms);
+    if (r.ok) {
+      ++st.ok;
+      st.latency_us.push_back(r.elapsed_us);
+      st.bytes += static_cast<double>(bytes);
+    } else {
+      DGPP_LOG_ERROR("flood request {} failed: {}", reaped, r.error);
+      ++st.fail;
+    }
+    results.push_back(std::move(r));
+    ++reaped;
+  }
+  st.elapsed_s =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+          .count();
+
+  // Verification runs after the clock: every message is still hash-checked,
+  // but the host cost no longer pollutes the throughput measurement.
+  const size_t stripe_bytes = bus.slot_bytes(BusMessageClass::kBulk);
+  for (size_t i = 0; i < results.size(); ++i) {
+    if (!results[i].ok) continue;
+    std::string why;
+    if (!verify_result(results[i], payloads[i % payloads.size()].data(),
+                       bytes, stripe_bytes, &why)) {
+      DGPP_LOG_ERROR("flood verification failed at request {}: {}", i, why);
+      --st.ok;
+      ++st.fail;
+    }
+  }
+  return st;
+}
+
 int run_ping(CommonArgs c, std::string peer_host, int iters, size_t bytes,
-             const std::string& cls_text, bool contend, int lat_iters) {
+             const std::string& cls_text, bool contend, int lat_iters,
+             long window) {
   CollectiveBus bus(options_for(c, 1, peer_host));
   std::string error;
   if (!bus.start(&error)) {
@@ -242,7 +320,9 @@ int run_ping(CommonArgs c, std::string peer_host, int iters, size_t bytes,
     const BusMessageClass cls =
         cls_text == "bulk" ? BusMessageClass::kBulk : BusMessageClass::kLatency;
     const PingStats st =
-        ping_class(bus, 0, cls, iters, bytes, c.timeout_ms + 2000);
+        (cls == BusMessageClass::kBulk && window > 1)
+            ? bulk_flood(bus, 0, iters, bytes, window, c.timeout_ms + 5000)
+            : ping_class(bus, 0, cls, iters, bytes, c.timeout_ms + 2000);
     if (st.fail != 0) failures += st.fail;
     const double gbps =
         st.elapsed_s > 0 ? st.bytes * 8.0 / st.elapsed_s / 1e9 : 0.0;
@@ -400,7 +480,9 @@ int main(int argc, char** argv) {
                  "  bus_check ping --peer HOST [--port N] [--dev D]... "
                  "[--iters N] [--bytes B]\n"
                  "                 [--class latency|bulk] [--contend] "
-                 "[--lat-iters N] [--timeout-ms N]\n"
+                 "[--window N] [--lat-iters N] [--timeout-ms N]\n"
+                 "                 (--window > 1 with --class bulk: pipelined "
+                 "flood, verification deferred)\n"
                  "  bus_check selftest\n");
     return 2;
   }
@@ -412,6 +494,7 @@ int main(int argc, char** argv) {
   long iters = 64;
   long duration_ms = 30000;
   long lat_iters = 1000;
+  long window = 1;
   size_t bytes = 8192;
   std::string cls_text = "latency";
   bool contend = false;
@@ -467,6 +550,9 @@ int main(int argc, char** argv) {
     } else if (a == "--lat-iters") {
       if (!parse_long(val(), 1, 1000000, &n)) args_ok = false;
       else lat_iters = n;
+    } else if (a == "--window") {
+      if (!parse_long(val(), 1, 256, &n)) args_ok = false;
+      else window = n;
     } else if (a == "--timeout-ms") {
       if (!parse_long(val(), 100, 600000, &n)) args_ok = false;
       else c.timeout_ms = static_cast<int>(n);
@@ -483,8 +569,8 @@ int main(int argc, char** argv) {
   if (mode == "serve") return run_serve(c, duration_ms);
   if (mode == "ping") {
     if (peer.empty()) return 2;
-    return run_ping(c, peer, static_cast<int>(iters), bytes, cls_text, contend,
-                    static_cast<int>(lat_iters));
+    return run_ping(c, peer, static_cast<int>(iters), bytes, cls_text,
+                    contend, static_cast<int>(lat_iters), window);
   }
   DGPP_LOG_ERROR("unknown mode {}", mode);
   return 2;
