@@ -1,0 +1,398 @@
+// RC-QP primitives for the CollectiveBus (see verbs.hpp).
+
+#include "net/verbs.hpp"
+
+#include <atomic>
+#include <cerrno>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+
+#include <cuda_runtime.h>
+
+#include "common/log.hpp"
+
+namespace dgpp::net {
+
+namespace {
+
+// The M0 working set, kept verbatim: these transition parameters measured
+// 107 Gb/s single-lane and 196 Gb/s concurrent on this fabric.
+constexpr int kPsn = 0x1234;
+constexpr int kQpTimeout = 14;
+constexpr int kRetryCount = 7;
+constexpr int kRnrRetry = 7;
+constexpr int kMinRnrTimer = 12;
+constexpr int kMaxRdAtomic = 1;
+
+// First RoCEv2 GID index on the port, via sysfs — the same discovery the
+// M0 tools used, so lane/GID selection cannot drift between probe and bus.
+int pick_rocev2_gid(ibv_context* ctx, int port) {
+  std::string base = "/sys/class/infiniband/";
+  base += ctx->device->name;
+  base += "/ports/" + std::to_string(port) + "/gid_attrs/types/";
+  for (int i = 0; i < 64; ++i) {
+    FILE* f = std::fopen((base + std::to_string(i)).c_str(), "r");
+    if (!f) continue;
+    char buf[32] = {};
+    const size_t r = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    if (r == 0) continue;
+    for (char* c = buf; *c; ++c)
+      *c = static_cast<char>(std::tolower(static_cast<unsigned char>(*c)));
+    if (std::strstr(buf, "v2")) return i;
+  }
+  return 0;
+}
+
+}  // namespace
+
+VerbsDevice::VerbsDevice(const std::string& name_hint, std::string* error) {
+  int count = 0;
+  ibv_device** list = ibv_get_device_list(&count);
+  if (!list || count == 0) {
+    if (list) ibv_free_device_list(list);
+    *error = "no verbs devices present";
+    return;
+  }
+
+  for (int i = 0; i < count && !ctx_; ++i) {
+    const std::string candidate = list[i]->name;
+    if (!name_hint.empty() && candidate != name_hint &&
+        candidate.find(name_hint) == std::string::npos)
+      continue;
+    ibv_context* ctx = ibv_open_device(list[i]);
+    if (!ctx) continue;
+
+    ibv_device_attr attr{};
+    if (ibv_query_device(ctx, &attr) != 0) {
+      ibv_close_device(ctx);
+      continue;
+    }
+    bool port_ok = false;
+    for (int p = 1; p <= attr.phys_port_cnt; ++p) {
+      ibv_port_attr pa{};
+      if (ibv_query_port(ctx, p, &pa) == 0 && pa.state == IBV_PORT_ACTIVE &&
+          pa.link_layer != IBV_LINK_LAYER_INFINIBAND) {
+        port_ = p;
+        port_ok = true;
+        break;
+      }
+    }
+    if (!port_ok) {
+      ibv_close_device(ctx);
+      continue;
+    }
+    ctx_ = ctx;
+    name_ = candidate;
+  }
+  ibv_free_device_list(list);
+
+  if (!ctx_) {
+    *error = "no ACTIVE RoCE device matching \"" + name_hint + "\"";
+    return;
+  }
+
+  gid_idx_ = pick_rocev2_gid(ctx_, port_);
+  if (ibv_query_gid(ctx_, port_, gid_idx_, &gid_) != 0) {
+    *error = "query_gid failed on " + name_ + " idx=" + std::to_string(gid_idx_);
+    ibv_close_device(ctx_);
+    ctx_ = nullptr;
+    return;
+  }
+
+  pd_ = ibv_alloc_pd(ctx_);
+  if (!pd_) {
+    *error = "alloc_pd failed errno=" + std::to_string(errno) + " on " + name_;
+    ibv_close_device(ctx_);
+    ctx_ = nullptr;
+    return;
+  }
+
+  DGPP_LOG_INFO("verbs: device {} port {} gid_index {}", name_, port_, gid_idx_);
+}
+
+VerbsDevice::~VerbsDevice() {
+  if (pd_) ibv_dealloc_pd(pd_);
+  if (ctx_) ibv_close_device(ctx_);
+}
+
+RcLane::RcLane(VerbsDevice& device, const BusSlabLayout& layout, int qp_depth,
+               std::string* error)
+    : device_(&device), layout_(layout) {
+  const cudaError_t alloc = cudaHostAlloc(reinterpret_cast<void**>(&slab_),
+                                          layout.total_bytes,
+                                          cudaHostAllocDefault);
+  if (alloc != cudaSuccess || !slab_) {
+    *error = "bus slab cudaHostAlloc failed (" +
+             std::string(cudaGetErrorString(alloc)) +
+             ") bytes=" + std::to_string(layout.total_bytes);
+    slab_ = nullptr;
+    return;
+  }
+  std::memset(slab_, 0, layout.total_bytes);
+
+  // Remote write lets the peer's credit WRITEs land in the completion cells;
+  // that is the only remote access the bus grants (no READ, no atomic).
+  mr_ = ibv_reg_mr(device.pd(), slab_, layout.total_bytes,
+                   IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+  if (!mr_) {
+    *error = "bus slab reg_mr failed errno=" + std::to_string(errno);
+    return;
+  }
+
+  // One CQ pair per pool's QP. Only doorbell SENDs are signaled and credit
+  // WRITEs never are, so send-CQ load stays near one entry per message.
+  for (int pool = 0; pool < 2; ++pool) {
+    tx_cq_[pool] = ibv_create_cq(device.ctx(), qp_depth, nullptr, nullptr, 0);
+    rx_cq_[pool] = ibv_create_cq(device.ctx(), qp_depth, nullptr, nullptr, 0);
+    if (!tx_cq_[pool] || !rx_cq_[pool]) {
+      *error = "create_cq failed errno=" + std::to_string(errno);
+      return;
+    }
+
+    ibv_qp_init_attr init{};
+    init.send_cq = tx_cq_[pool];
+    init.recv_cq = rx_cq_[pool];
+    init.qp_type = IBV_QPT_RC;
+    init.cap.max_send_wr = qp_depth;
+    init.cap.max_recv_wr = qp_depth;
+    init.cap.max_send_sge = 1;
+    init.cap.max_recv_sge = 1;
+    init.cap.max_inline_data = 0;
+    qp_[pool] = ibv_create_qp(device.pd(), &init);
+    if (!qp_[pool]) {
+      *error = "create_qp failed errno=" + std::to_string(errno);
+      return;
+    }
+
+    ibv_qp_attr attr{};
+    attr.qp_state = IBV_QPS_INIT;
+    attr.port_num = static_cast<uint8_t>(device.port());
+    attr.qp_access_flags =
+        IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE;
+    if (ibv_modify_qp(qp_[pool], &attr,
+                      IBV_QP_STATE | IBV_QP_PORT | IBV_QP_PKEY_INDEX |
+                          IBV_QP_ACCESS_FLAGS) != 0) {
+      *error = "qp->INIT failed errno=" + std::to_string(errno);
+      return;
+    }
+  }
+}
+
+RcLane::~RcLane() {
+  for (int pool = 0; pool < 2; ++pool) {
+    if (qp_[pool]) {
+      DGPP_LOG_DEBUG("lane dtor: destroying qp pool={} qpn={}", pool,
+                     qp_[pool]->qp_num);
+      ibv_destroy_qp(qp_[pool]);
+    }
+    if (tx_cq_[pool]) {
+      DGPP_LOG_DEBUG("lane dtor: destroying tx_cq pool={}", pool);
+      ibv_destroy_cq(tx_cq_[pool]);
+    }
+    if (rx_cq_[pool]) {
+      DGPP_LOG_DEBUG("lane dtor: destroying rx_cq pool={}", pool);
+      ibv_destroy_cq(rx_cq_[pool]);
+    }
+  }
+  if (mr_) {
+    DGPP_LOG_DEBUG("lane dtor: dereg mr");
+    ibv_dereg_mr(mr_);
+  }
+  if (slab_) {
+    DGPP_LOG_DEBUG("lane dtor: freeing slab");
+    cudaFreeHost(slab_);
+    DGPP_LOG_DEBUG("lane dtor: slab freed");
+  }
+}
+
+bool RcLane::connect(BusPool pool, const BusLaneEndpoint& peer,
+                     std::string* error) {
+  ibv_qp* qp = qp_[pool == BusPool::kLatency ? 0 : 1];
+  const uint32_t peer_qpn =
+      pool == BusPool::kLatency ? peer.qpn_lat : peer.qpn_bulk;
+  const uint32_t peer_psn =
+      pool == BusPool::kLatency ? peer.psn_lat : peer.psn_bulk;
+  ibv_port_attr pa{};
+  if (ibv_query_port(device_->ctx(), device_->port(), &pa) != 0) {
+    *error = "query_port failed errno=" + std::to_string(errno);
+    return false;
+  }
+
+  ibv_qp_attr attr{};
+  attr.qp_state = IBV_QPS_RTR;
+  attr.path_mtu = pa.active_mtu < IBV_MTU_4096 ? pa.active_mtu : IBV_MTU_4096;
+  attr.dest_qp_num = peer_qpn;
+  attr.rq_psn = peer_psn;
+  attr.max_dest_rd_atomic = kMaxRdAtomic;
+  attr.min_rnr_timer = kMinRnrTimer;
+  attr.ah_attr.is_global = 1;
+  std::memcpy(attr.ah_attr.grh.dgid.raw, peer.gid, 16);
+  attr.ah_attr.grh.sgid_index = static_cast<uint8_t>(device_->gid_index());
+  attr.ah_attr.grh.hop_limit = 255;
+  attr.ah_attr.sl = 0;
+  attr.ah_attr.port_num = static_cast<uint8_t>(device_->port());
+  if (ibv_modify_qp(qp, &attr,
+                    IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
+                        IBV_QP_RQ_PSN | IBV_QP_AV | IBV_QP_MAX_DEST_RD_ATOMIC |
+                        IBV_QP_MIN_RNR_TIMER) != 0) {
+    *error = "qp->RTR failed errno=" + std::to_string(errno);
+    return false;
+  }
+
+  std::memset(&attr, 0, sizeof(attr));
+  attr.qp_state = IBV_QPS_RTS;
+  attr.timeout = kQpTimeout;
+  attr.retry_cnt = kRetryCount;
+  attr.rnr_retry = kRnrRetry;
+  attr.sq_psn = kPsn;
+  attr.max_rd_atomic = kMaxRdAtomic;
+  if (ibv_modify_qp(qp, &attr,
+                    IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
+                        IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
+                        IBV_QP_MAX_QP_RD_ATOMIC) != 0) {
+    *error = "qp->RTS failed errno=" + std::to_string(errno);
+    return false;
+  }
+  return true;
+}
+
+BusLaneEndpoint RcLane::endpoint() const {
+  BusLaneEndpoint e{};
+  e.qpn_lat = qp_[0]->qp_num;
+  e.psn_lat = kPsn;
+  e.qpn_bulk = qp_[1]->qp_num;
+  e.psn_bulk = kPsn;
+  std::memcpy(e.gid, device_->gid().raw, 16);
+  e.rkey = mr_->rkey;
+  e.slab_base = reinterpret_cast<uint64_t>(slab_);
+  return e;
+}
+
+bool RcLane::post_send_pair(BusPool pool, uint32_t slot, uint32_t seq,
+                            uint32_t len, std::string* error) {
+  ibv_qp* qp = qp_[pool == BusPool::kLatency ? 0 : 1];
+  uint8_t* payload = layout_.send_payload(slab_, pool, slot);
+  StartSlot* doorbell = layout_.send_doorbell(slab_, pool, slot);
+  // Publish order: len first, seq last (readers acquire on seq and then
+  // read len — the same discipline as FlagAck), payload bytes precede both.
+  doorbell->len = len;
+  std::atomic_thread_fence(std::memory_order_release);
+  doorbell->seq = seq;
+  std::atomic_thread_fence(std::memory_order_release);
+
+  ibv_sge sge[2]{};
+  sge[0].addr = reinterpret_cast<uint64_t>(payload);
+  sge[0].lkey = mr_->lkey;
+  sge[0].length = len;
+  sge[1].addr = reinterpret_cast<uint64_t>(doorbell);
+  sge[1].lkey = mr_->lkey;
+  sge[1].length = sizeof(StartSlot);
+
+  ibv_send_wr wr[2]{};
+  wr[0].wr_id = bus_wr_id(pool, BusWr::kPayload, slot);
+  wr[0].sg_list = &sge[0];
+  wr[0].num_sge = 1;
+  wr[0].opcode = IBV_WR_SEND;
+  wr[0].next = &wr[1];
+  wr[1].wr_id = bus_wr_id(pool, BusWr::kDoorbell, slot);
+  wr[1].sg_list = &sge[1];
+  wr[1].num_sge = 1;
+  wr[1].opcode = IBV_WR_SEND;
+  wr[1].send_flags = IBV_SEND_SIGNALED;
+
+  ibv_send_wr* bad = nullptr;
+  if (ibv_post_send(qp, &wr[0], &bad) != 0) {
+    *error = "post_send pair failed errno=" + std::to_string(errno);
+    return false;
+  }
+  return true;
+}
+
+bool RcLane::post_credit_write(BusPool pool, uint32_t slot, uint32_t seq,
+                               const BusLaneEndpoint& peer, uint64_t hash,
+                               std::string* error) {
+  ibv_qp* qp = qp_[pool == BusPool::kLatency ? 0 : 1];
+  BusCredit* staging = reinterpret_cast<BusCredit*>(
+      layout_.credit_staging(slab_, pool, slot));
+  // Publish order: hash and slot first, seq last (readers acquire on seq).
+  staging->hash = hash;
+  staging->slot = slot;
+  std::atomic_thread_fence(std::memory_order_release);
+  staging->seq = seq;
+  std::atomic_thread_fence(std::memory_order_release);
+
+  ibv_sge sge{};
+  sge.addr = reinterpret_cast<uint64_t>(staging);
+  sge.lkey = mr_->lkey;
+  sge.length = sizeof(BusCredit);
+
+  ibv_send_wr wr{};
+  wr.wr_id = bus_wr_id(pool, BusWr::kCredit, slot);
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
+  wr.opcode = IBV_WR_RDMA_WRITE;
+  wr.send_flags = 0;  // unsignaled: the sender polls the cell as a flag
+  wr.wr.rdma.remote_addr =
+      layout_.completion_remote_addr(peer.slab_base, pool, slot);
+  wr.wr.rdma.rkey = peer.rkey;
+
+  ibv_send_wr* bad = nullptr;
+  if (ibv_post_send(qp, &wr, &bad) != 0) {
+    *error = "credit WRITE post failed errno=" + std::to_string(errno);
+    return false;
+  }
+  return true;
+}
+
+bool RcLane::post_recv_pair(BusPool pool, uint32_t slot, std::string* error) {
+  ibv_qp* qp = qp_[pool == BusPool::kLatency ? 0 : 1];
+  ibv_sge payload_sge{};
+  payload_sge.addr =
+      reinterpret_cast<uint64_t>(layout_.recv_payload(slab_, pool, slot));
+  payload_sge.lkey = mr_->lkey;
+  payload_sge.length = static_cast<uint32_t>(layout_.pool_slot_bytes(pool));
+  ibv_recv_wr payload_wr{};
+  payload_wr.wr_id = bus_wr_id(pool, BusWr::kPayload, slot);
+  payload_wr.sg_list = &payload_sge;
+  payload_wr.num_sge = 1;
+  ibv_recv_wr* bad = nullptr;
+  if (ibv_post_recv(qp, &payload_wr, &bad) != 0) {
+    *error = "post_recv payload failed errno=" + std::to_string(errno);
+    return false;
+  }
+
+  ibv_sge doorbell_sge{};
+  doorbell_sge.addr = reinterpret_cast<uint64_t>(
+      layout_.recv_doorbell(slab_, pool, slot));
+  doorbell_sge.lkey = mr_->lkey;
+  doorbell_sge.length = sizeof(StartSlot);
+  ibv_recv_wr doorbell_wr{};
+  doorbell_wr.wr_id = bus_wr_id(pool, BusWr::kDoorbell, slot);
+  doorbell_wr.sg_list = &doorbell_sge;
+  doorbell_wr.num_sge = 1;
+  bad = nullptr;
+  if (ibv_post_recv(qp, &doorbell_wr, &bad) != 0) {
+    *error = "post_recv doorbell failed errno=" + std::to_string(errno);
+    return false;
+  }
+  return true;
+}
+
+int RcLane::poll_tx(BusPool pool, ibv_wc* out, int max) {
+  return ibv_poll_cq(tx_cq_[pool == BusPool::kLatency ? 0 : 1], max, out);
+}
+
+int RcLane::poll_rx(BusPool pool, ibv_wc* out, int max) {
+  return ibv_poll_cq(rx_cq_[pool == BusPool::kLatency ? 0 : 1], max, out);
+}
+
+std::string bus_wc_error(const ibv_wc& wc) {
+  return "wc status=" + std::to_string(static_cast<int>(wc.status)) + " (" +
+         ibv_wc_status_str(wc.status) + ") opcode=" +
+         std::to_string(static_cast<int>(wc.opcode)) +
+         " vendor_err=" + std::to_string(wc.vendor_err);
+}
+
+}  // namespace dgpp::net

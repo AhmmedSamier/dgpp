@@ -1,0 +1,8 @@
+# ThreadSanitizer suppressions for one-off runs (not a house gate).
+# The CUDA driver serializes its own internal state with locks TSan cannot
+# model; concurrent kernel launches from different threads surface as
+# memintrinsics races inside libcuda. The runtime API is thread-safe by
+# contract — these are instrumentation blind spots, not product races.
+race:libcuda.so
+race:libcudart.so
+race:libnvidia-ml.so

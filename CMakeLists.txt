@@ -188,6 +188,24 @@ add_executable(roster_check apps/roster_check.cpp)
 target_link_libraries(roster_check PRIVATE dgpp_net)
 dgpp_set_common(roster_check)
 
+# M5 deliverable 2: the CollectiveBus data plane (verbs + CUDA). Gated on
+# ibverbs availability; the control plane (dgpp_net) never requires it.
+if(DGPP_ENABLE_IBV)
+  add_library(dgpp_bus STATIC
+    src/net/bus_types.cpp
+    src/net/verbs.cpp
+    src/net/collective_bus.cpp
+    src/net/bus_kernel.cu)
+  target_link_libraries(dgpp_bus
+    PUBLIC dgpp_net CUDA::cudart ${IBVERBS_LIBRARY})
+  target_include_directories(dgpp_bus PUBLIC ${IBVERBS_INCLUDE_DIR})
+  dgpp_set_common(dgpp_bus)
+
+  add_executable(bus_check apps/bus_check.cpp)
+  target_link_libraries(bus_check PRIVATE dgpp_bus)
+  dgpp_set_common(bus_check)
+endif()
+
 enable_testing()
 add_executable(unit_tests
   tests/unit/log_test.cpp
@@ -343,6 +361,18 @@ add_test(NAME flag_protocol_test COMMAND flag_protocol_test)
 # M5 control-plane app smoke (loopback, in-process).
 add_test(NAME roster_selftest COMMAND roster_check selftest)
 set_tests_properties(flag_protocol_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# M5 data plane: deep loopback scenarios (verbs + consumers + contention)
+# and the app-level smoke. Both skip without a visible device.
+if(DGPP_ENABLE_IBV)
+  add_executable(bus_test tests/cuda/bus_test.cu)
+  target_link_libraries(bus_test PRIVATE dgpp_bus)
+  dgpp_set_common(bus_test)
+  add_test(NAME bus_test COMMAND bus_test)
+  set_tests_properties(bus_test PROPERTIES SKIP_RETURN_CODE 2)
+  add_test(NAME bus_selftest COMMAND bus_check selftest)
+  set_tests_properties(bus_selftest PROPERTIES SKIP_RETURN_CODE 2)
+endif()
 
 add_executable(micro_mem_bw benchmarks/micro/mem_bw.cu src/common/log.cpp)
 target_link_libraries(micro_mem_bw PRIVATE CUDA::cudart Threads::Threads)

@@ -66,8 +66,10 @@ Measured node-to-node RC results on 2026-08-27:
 - 9000-byte IP frames pass on both lanes.
 
 CollectiveBus therefore stripes bulk traffic across both `f0` lanes and uses
-approximately 24.5 GB/s as the measured aggregate planning ceiling. A
-single-lane fallback remains supported.
+approximately 24.5 GB/s as the measured aggregate planning ceiling. The bus
+defines no per-lane failover (§6.1): the lanes share one physical port, so a
+single-lane configuration is a deployment choice at about half bandwidth, not
+a recovery mechanism.
 
 Host DCB inspection shows priority-flow-control disabled on all priorities and
 global Ethernet pause enabled in both directions. Switch PFC/ECN policy is not
@@ -222,23 +224,37 @@ capture.
 
 ## 6. CollectiveBus protocol
 
-Each peer pair owns RC QPs on both active lanes, registered send/receive slabs,
-credit state, CQs, and a nonblocking CUDA stream. Bulk chunks are split across
-the lanes; small messages may use the lower-latency lane while retaining the
-other as failover.
+Each peer pair owns RC QPs on both active lanes — one QP per slot pool per
+(peer, lane), so every receive queue is type-predictable: latency (8 KiB) and
+bulk (256 KiB) traffic can never consume each other's differently-sized
+receive buffers. Each (peer, lane) has one pinned, remotely-writable slab
+registered as a single MR, holding send slots, completion cells, receive
+slots, doorbell and ack cells, credit staging, and a control cell. Bulk
+chunks are striped round-robin across the lanes; small messages use the
+lower-latency lane.
 
 Receive protocol for slot `S`:
 
-1. the receiver posts payload and doorbell receive buffers and grants a credit;
-2. the sender posts the payload SEND followed by the doorbell SEND on the same
-   RC QP; only the doorbell needs a send completion;
+1. the receiver posts payload and doorbell receive buffers and grants a
+   credit. The credit grant is an unsignaled 64-byte RDMA WRITE of
+   `{hash, slot, seq}` into the sender's registered completion cells — no
+   CQE, no consumed receive WR; the sender polls the cell as a pinned flag,
+   the same visibility contract as the GPU ack. The record carries the
+   consumer's result, so the credit doubles as the message's completion
+   notification;
+2. the sender posts the payload SEND followed by the doorbell SEND on the
+   pool's RC QP; only the doorbell needs a send completion;
 3. the GPU observes the doorbell with a system-scope acquire, consumes the
    payload, and publishes its acknowledgement with a system-scope release;
 4. the CPU polls the CQ for transport errors and recycles the slot only after
    both the GPU acknowledgement and receive completions are known.
 
 Slots are 64-byte aligned, initialized before kernel launch, and never reused
-without a new credit. Persistent kernels use an **inactivity** watchdog whose
+without a new credit. **Ring discipline**: plain SENDs are consumed FIFO by
+the peer's receive ring, so a slot is a ring position, not a free buffer —
+the sender assigns slots round-robin per (lane, pool) and may not skip a
+busy position; the receiver recycles in ring order; credits therefore
+return in ring order. Persistent kernels use an **inactivity** watchdog whose
 deadline resets after every message; a reserved stop sequence provides orderly
 shutdown. The cross-node hash test and CUDA regression test pin this behavior.
 
@@ -248,6 +264,128 @@ three-destination “tree.” Algorithm selection is size-based:
 - small replicated hidden vectors: latency-oriented recursive doubling/tree;
 - large prefill chunks: striped reduce-scatter + all-gather or ring all-reduce;
 - control messages: TCP, never on the CUDA critical path.
+
+### 6.1 Threading and concurrency model
+
+The data plane is a single-threaded polling engine. One dedicated thread owns
+every data-plane QP, CQ, credit counter, and slot on the node. The runtime
+has exactly three thread roles:
+
+| role | owns | blocks on |
+|---|---|---|
+| forward/engine | CUDA stream(s), graph launches | stream/graph sync |
+| bus poller | all RC QPs/CQs, slots, credits, watchdogs | nothing (bounded poll) |
+| control plane | roster TCP (§5.3) | socket deadlines |
+
+The seams are the already-pinned ones: GPU↔bus through pinned-memory flag
+sequences (the flag protocol; payload-then-doorbell ordering), bus↔control
+through roster snapshots. Nothing else crosses threads, so the slot and
+credit lifecycles carry no locks.
+
+Why this shape, from measurements rather than taste:
+
+- A dedicated bus thread is *mandatory* under graph capture: the forward
+  thread is inside `cudaGraphLaunch` while inbound traffic still needs
+  receive-WR recycling and the graph's own send payloads need a reactive
+  CPU posting SENDs. The only question is the thread count.
+- Bus CPU work is proportional to message count, not bytes — the NIC DMAs
+  from registered slabs, so the CPU only posts WRs and polls CQs (~1 µs per
+  message, size-independent). A decode step is ~90 collectives; full-rate
+  prefill striping at the measured 24.5 GB/s aggregate is on the order of
+  10⁵ posts/s. One core stays under half busy at the ceiling, on a
+  20-core GB10.
+- Logical operations span QPs: an all-reduce step touches a different peer
+  each hop, a striped chunk touches both lanes. Splitting threads across
+  peers or lanes forces cross-thread joins on slot/credit state — the
+  failure mode is silent corruption, not a wrong roster.
+- The loop never syscalls on the hot path (`ibv_post_send`/`ibv_poll_cq`
+  are user-space MMIO). Completion-channel fds would cost an interrupt plus
+  a syscall per event against a measured 2.4–2.7 µs one-way budget, and
+  epoll-style demux exists for fd counts this system does not have (12 QPs
+  at TP=4: 3 peers × 2 lanes × 2 pools). GPU-ready flags are memory, not
+  fds, and cannot be epoll'd anyway.
+
+Loop discipline (the anti-jitter contract, since one thread serves latency
+and bulk traffic): each iteration is bounded — at most N posts and M
+completion drains, in priority order (GPU-ready latency flags first, bulk
+stripes after); per-QP watchdog timestamps are checked once per iteration;
+the thread spins through a fixed grace period when idle before sleeping, so
+back-to-back decode steps never reach the sleep path.
+
+Escape hatch, deliberately not built: if the soak shows TX backpressure or
+credit starvation concentrated on one lane, bulk striping moves to one
+thread per lane — the size-based split above already defines that seam —
+while latency traffic stays on the engine thread. NCCL-style per-channel
+threading is justified at channel counts an order of magnitude above six
+QPs.
+
+Traffic classes are concurrent from day one — mixed decode/prefill batching
+(M6) must not force a transport refactor. Concretely: submission has separate
+latency and bulk queues drained in priority order each iteration, with a
+bounded number of bulk posts per iteration so a full-speed stripe cannot
+starve a decode collective; the per-class slot pools make the credit floors
+structural — bulk traffic physically cannot occupy a latency slot, so posted
+receive buffers always exist for latency-class arrivals. The contention case
+— decode-class collectives meeting their latency budget while bulk stripes
+are in flight — is a tested Phase 2 behavior (two-node: 400/400 latency
+messages at p50 18.6 µs while 64 MiB striped both lanes), not a soak-time
+hope. What remains M6 is admission and scheduling of mixed steps at the
+engine level; the transport never assumes serialized steps.
+
+Per-lane failover is deliberately not designed: the two lanes share one
+physical port, so its failure takes both, and remapping traffic between them
+buys nothing. A lane loss is a transport failure surfaced by the watchdogs.
+Configuring the bus with a single lane is a deployment choice at about half
+bandwidth, not a recovery mechanism.
+
+### 6.2 GPU-side consumption: per-collective stream kernels
+
+The consumer of received payloads is a short-lived CUDA kernel per collective
+step, launched on the engine's stream: it polls the doorbells of the slots
+that step depends on (system-scope acquire, bounded by a cycle deadline),
+performs the reduction into local memory, writes the result, and publishes
+the per-slot acknowledgements (system-scope release) before exiting.
+
+Rejected alternatives, for the record:
+
+- **CPU-mediated completion** (NIC → pinned slab → cudaMemcpy → reduce →
+  copy back): two full-data copies per message and the CPU on the critical
+  path of every collective. On GB10's unified pool the copies are pure waste
+  — the zerocopy bench has the GPU streaming the NIC's landing zone
+  directly. It remains the documented emergency fallback if a driver or
+  firmware upgrade ever breaks unified visibility, which is exactly why the
+  NIC→GPU visibility probe reruns per deployment (M5 deliverable 5).
+- **One persistent dispatcher kernel per QP** (six for TP=4): multi-peer
+  steps would need inter-kernel coordination that CUDA does not offer
+  cheaply — a hand-built scheduler of atomics, the silent-corruption bug
+  class; each kernel holds an SM indefinitely; and, decisively, a
+  never-terminating kernel does not compose with CUDA graph capture, which
+  the decode path requires (goal 2). Making a replayed graph safely wait on
+  a persistent kernel requires a graph-side node polling memory that kernel
+  writes — at which point the per-collective kernel already exists, plus a
+  permanent kernel on top.
+
+What the chosen shape buys: stream order is the dependency scheduler (no
+hand-written sync between all-reduce steps and the GEMMs that consume them);
+the per-kernel cycle deadline is the §6 inactivity watchdog, one per
+collective; the decode step is a fixed launch sequence, hence
+graph-recordable; and the doorbell/ack sequence is the one flag protocol
+already pinned by `flag_protocol_test` and validated end-to-end by the
+NIC→GPU visibility probe.
+
+Cost: one kernel launch per collective step — a few µs uncaptured, under 1%
+of the ~32 ms decode-step floor at ~90 collectives, and amortized inside a
+replayed graph. A persistent doorbell-watcher hybrid remains a measured
+optimization option for a future launch-bound path, not a starting bet.
+
+One measured lesson from the Phase 2 harness (which *does* use persistent
+consumers): a persistent kernel starves every launch queued behind it on
+the same stream, so the harness runs one stream per consumer. The
+per-collective shape is immune to this class entirely — another reason it
+is the recorded choice. Teardown ordering matters too: `cudaFreeHost`
+synchronizes the device implicitly, so loopback pairs must stop all
+persistent consumers before either side frees (two-phase stop: `quiesce()`
+then `stop()`; one bus per process never notices).
 
 ## 7. Attention and state semantics
 
@@ -749,8 +887,12 @@ src/models/           synthetic GPT doll; KDA layer/state/reference/dump; DSA
                       reference/geometry/state/layer/dump; GLM text config,
                       expected-tensor binding, and streaming resident loader
                       (M4)
-src/net/              M5 control plane: TCP primitives and the epoch-based
-                      roster (startup, health, eviction)
+src/net/              M5 control + data planes: TCP primitives, the
+                      epoch-based roster (startup, health, eviction), and
+                      the CollectiveBus — verbs RC QPs, per-class slot
+                      pools with ring discipline, credit-grant RDMA writes,
+                      the single-threaded engine loop, and the
+                      watchdog-bounded receive consumers
 tests/                host, CUDA, and Python tests
 tools/                checkpoint audit, shard-plan, KDA/DSA reference-dump generators
 ```

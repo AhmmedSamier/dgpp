@@ -272,9 +272,10 @@ Exit criteria:
 Deliverables:
 
 1. Epoch-based roster/startup and rank health over TCP.
-2. `CollectiveBus` on both active `f0` lanes with single-lane failover,
-   registered pinned receive slabs, credits, CQs, system-scope doorbells, and
-   inactivity watchdogs.
+2. `CollectiveBus` on both active `f0` lanes: registered pinned receive
+   slabs, class-partitioned credits (latency headroom reserved against
+   bulk), CQs, system-scope doorbells, inactivity watchdogs, and concurrent
+   latency-under-bulk traffic as a tested mode.
 3. Replicated block boundaries with one attention and one FFN all-reduce per
    layer; striped bulk prefill collectives.
 4. Sharded load for TP=2 and TP=4, plus hashes for replicated weights.
@@ -284,7 +285,9 @@ Deliverables:
 Exit criteria:
 
 - TP=2/4 outputs match M4 within the same tolerance tier;
-- no CQ, credit, or watchdog failure during a one-hour mixed-size soak;
+- no CQ, credit, or watchdog failure during a one-hour mixed-size soak with
+  decode-class and bulk traffic concurrent (latency collectives hold budget
+  under bulk load);
 - both lanes contribute under concurrent bulk traffic;
 - throughput and latency remain stable for the defined workload; counter
   diagnostics are captured only if this criterion fails.

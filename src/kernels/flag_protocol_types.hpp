@@ -10,10 +10,14 @@ namespace dgpp {
 constexpr uint32_t kFlagStopSequence = std::numeric_limits<uint32_t>::max();
 
 // Start slot: the producer-to-device doorbell. Own a cache line so unrelated
-// writes cannot false-share it. Sequences start at 1; 0 means idle.
+// writes cannot false-share it. Sequences start at 1; 0 means idle. `len` is
+// the payload length in bytes when the bus uses the slot as a receive
+// doorbell (0 for pure-flag uses); the flag kernels deliberately ignore it,
+// so their pinned contract is unchanged.
 struct alignas(64) StartSlot {
   uint32_t seq = 0;
-  uint32_t pad[15];
+  uint32_t len = 0;
+  uint32_t pad[14];
 };
 
 static_assert(sizeof(StartSlot) == 64, "StartSlot must occupy one cache line");

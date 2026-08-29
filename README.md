@@ -16,11 +16,15 @@ validation, mHC residual streams, the streaming resident loader (one layer
 resident at a time), block-scale-aware GEMMs, MoE routing with route-trace
 capture, and a curated real-checkpoint parity suite where every selection
 flip — router or head — is certified as a measured near tie. M5 (four-rank
-tensor parallelism) has begun: the TCP control plane — epoch-based
+tensor parallelism) is in flight: the TCP control plane — epoch-based
 roster/startup, rank health, eviction on death or heartbeat deadline — is
-implemented, unit- and sanitizer-tested, and validated on all four nodes,
-including an injected rank death. It does
-**not** yet implement the CollectiveBus data plane (RC/RoCE collectives),
+validated on all four nodes, and the CollectiveBus data plane (RC QPs per
+pool per peer-lane on both f0 lanes, per-class slot pools, credit-grant RDMA
+writes, watchdog-bounded GPU consumers) is unit- and sanitizer-tested and
+validated two-node: verified payload integrity, dual-lane striping, and
+latency-under-bulk contention on the fabric. It does
+**not** yet implement replicated-boundary collectives (the attention/FFN
+all-reduces of deliverable 3),
 the TP placement,
 prefix cache, MTP generation loop, or OpenAI-compatible server. See
 `PLAN.md` for milestone status.
@@ -93,6 +97,7 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `tools/dsa_reference_dump.py` | DSA parity dumps: `selftest`, `gen-pure` (CI oracle), `gen-torch` (real checkpoint slices; needs torch) |
 | `tools/glm_reference_dump.py` | full-model parity dumps: `selftest`, `gen-pure` (CI oracle, mini checkpoint), `gen-torch` (real checkpoint, per-layer streams + router scores; `--layers N` for reduced budgets) |
 | `roster_check coordinator/rank/selftest` | M5 control plane on real nodes: epoch-based roster startup, rank health, eviction on death/deadline; `selftest` is the loopback in-process smoke |
+| `bus_check serve/ping/selftest` | M5 data plane on real nodes: RC/RoCE CollectiveBus — per-class slot pools, credit-grant RDMA writes, dual-lane striping, latency-under-bulk contention; `selftest` is the loopback in-process smoke |
 
 The GDR probe exits successfully when the probe itself completes, including
 the expected “unsupported” result on GB10. It does not prescribe a bounce
@@ -148,6 +153,11 @@ CTest currently runs:
   ids/weights, determinism);
 - CUDA system-scope flag ordering, payload visibility, inactivity watchdog,
   and post-watchdog recovery;
+- the M5 CollectiveBus data plane (needs the fabric + ibverbs): loopback
+  scenarios with real RC QPs — payload integrity via fold-hash, credit
+  recycling, dual-lane striping asserted on both sides, latency under bulk
+  contention, watchdog failures, config-mismatch rejection, and orderly
+  stop — plus the app-level smoke;
 - Python checkpoint classification, exact expert-occupancy tests, and the
   route-trace traffic-model contract.
 
