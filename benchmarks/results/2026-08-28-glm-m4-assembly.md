@@ -353,12 +353,17 @@ passed, each caught by the honest-data discipline:
    the real 2048/4=512 and every prior test's 16 satisfied it by luck;
    select_k=6 silently dropped every selected pool. Now rejected at
    construction.
-3. DSA num_heads=2 routes the attention kernel's head-group tiling to a
-   broken 64-group partition (selections match, outputs drift 1e33 —
-   bisected through the CI test machinery; 4/8/64 heads pass). Now
-   rejected (power of two >= 4). Also recorded: select_k=8 chunked
-   prefill has unaudited near-tie continuation flips (M3 test-coverage
-   gap, not a forward-path blocker).
+ 3. DSA num_heads=2 routes the attention kernel's head-group tiling to a
+    broken 64-group partition (selections match, outputs drift 1e33 —
+    bisected through the CI test machinery; 4/8/64 heads pass). Now
+    rejected (power of two >= 4). Also recorded: select_k=8 chunked
+    prefill has unaudited near-tie continuation flips (M3 test-coverage
+    gap, not a forward-path blocker). [Closed at the M4 close-out: the
+    re-measured failure was a test-logic inversion — the flipped-row
+    drift fallback budget was vetoing CERTIFIED near ties (accumulator
+    ran before the audit gate), and the select_k=8 flip was certified at
+    3.1x noise. Fixed + a permanent select_k=8 chunked variant; see the
+    close-out addendum in 2026-08-28-dsa-m3-layer.md.]
 
 ### The chaos finding and the suite design it forced
 

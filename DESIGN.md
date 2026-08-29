@@ -637,7 +637,15 @@ byte within each sign class, the corrupted logits preserved near-correct
 rankings — the failure was a single boundary swap that the structural
 budget happily absorbed while the engine was right and the reference was
 wrong. A near-miss bug that survives a tolerance is still a bug; only a
-certification path can reject it.
+certification path can reject it. Layered the other way: a tolerance kept
+as a fallback for rows the audit lacks inputs for must never veto a
+certification — a certified near tie moves the row output O(1) by design
+(near-tie scores mean the boundary is tied, not that the content is
+similar), and the M4 close-out fixed exactly this inversion in the
+chunked-prefill test, where a drift budget silently overroved the audit
+(one certified 3.1x-noise near-tie at select_k=8 was rejected as
+"flipped-row drift 1.0066" while the CI config sat one seed away from the
+same failure at 0.6798).
 Instrumentation (in-kernel clock64 phase timers, removed after use) is the
 fastest path to a *mechanism* for a slow kernel; profile first, then fix the
 measured bottleneck (the attention kernel's 85% bank-conflict share was

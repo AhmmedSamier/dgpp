@@ -1999,11 +1999,13 @@ void capture_phase_inputs(DsaLayer& layer, const HostWeights& host_w,
 // Builds the near-tie auditor for a single-request layer test. The device
 // cache is gathered in LOGICAL pool order through the block table (its
 // state at audit time — valid because the compared phases are the last ones
-// to write it); per-row q/w come from the phase captures.
+// to write it); per-row q/w come from the phase captures. `acc` collects the
+// audit's own evidence (swap counts, boundary gaps, noise multiples) so the
+// caller can print the certification numbers, not just "it passed".
 RowAuditor make_near_tie_auditor(
     const DsaConfig& cfg, const DsaGeometry& g, DsaStatePool& pool, int req,
     cudaStream_t s, const std::vector<PhaseInputs>& phases,
-    const dsa_ref::HostState& ref) {
+    const dsa_ref::HostState& ref, dsa_test::NearTieAudit* acc) {
   const int heads = cfg.index_n_heads;
   const int dim = cfg.index_head_dim;
   const std::vector<int32_t> bt = fetch_block_row(pool, req, s);
@@ -2027,7 +2029,7 @@ RowAuditor make_near_tie_auditor(
                                  cudaMemcpyDeviceToHost, s));
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
-  return [cfg, g, heads, dim, phases, dev_k_log, dev_ks_log, &ref](
+  return [cfg, g, heads, dim, phases, dev_k_log, dev_ks_log, &ref, acc](
              int64_t row, const int32_t* dev_toks,
              const int32_t* ref_toks) -> bool {
     const PhaseInputs* ph = nullptr;
@@ -2049,6 +2051,12 @@ RowAuditor make_near_tie_auditor(
         ref.index_scale.data(), visible, heads, dim, cfg.index_kpool, stats,
         ph->dots.empty() ? nullptr : ph->dots.data(), ph->dot_stride,
         phase_row, g.max_selected);
+    acc->rows_flipped += stats.rows_flipped;
+    acc->swaps_certified += stats.swaps_certified;
+    acc->max_boundary_gap =
+        std::max(acc->max_boundary_gap, stats.max_boundary_gap);
+    acc->max_noise_multiple =
+        std::max(acc->max_noise_multiple, stats.max_noise_multiple);
     return true;
   };
 }
@@ -2063,7 +2071,7 @@ void require_output_matches(const DsaConfig& cfg, const DsaGeometry& g,
   const int64_t rows = int64_t(got.size()) / cfg.hidden;
   const int ms = g.max_selected;
   int64_t flipped = 0, sparse = 0, certified = 0;
-  double worst_kept = 0, worst_flipped = 0;
+  double worst_kept = 0, worst_flipped = 0, worst_certified = 0;
   for (int64_t r = 0; r < rows; ++r) {
     const int32_t* gt = got_topk.data() + r * ms;
     const int32_t* wt = want_topk.data() + r * ms;
@@ -2089,7 +2097,6 @@ void require_output_matches(const DsaConfig& cfg, const DsaGeometry& g,
       continue;
     }
     ++flipped;
-    worst_flipped = std::max(worst_flipped, row_l2);
     // A flip must be a single boundary swap: |dev-only| == |ref-only| == 1
     // pool's worth of tokens.
     std::vector<int32_t> only_g, only_w;
@@ -2097,14 +2104,19 @@ void require_output_matches(const DsaConfig& cfg, const DsaGeometry& g,
                         std::back_inserter(only_g));
     std::set_difference(wp.begin(), wp.end(), gp.begin(), gp.end(),
                         std::back_inserter(only_w));
-    // The audit is the primary criterion: it re-derives the spec selection
+    // The audit is the PRIMARY criterion: it re-derives the spec selection
     // from the device's own inputs (bitwise) and measures the boundary gap
-    // against the row's actual cross-implementation noise. Only when the
-    // auditor lacks inputs do we fall back to the structural swap shape.
+    // against the row's actual cross-implementation noise. A certified
+    // near tie may legitimately move the row O(1) — near-tie indexer scores
+    // mean the pools are scored equally, not that their content is similar
+    // — so the row-output drift budget below is the FALLBACK for rows the
+    // auditor lacks inputs for; it must never veto a certification.
     if (audit && audit(r, gt, wt)) {
       ++certified;
+      worst_certified = std::max(worst_certified, row_l2);
       continue;
     }
+    worst_flipped = std::max(worst_flipped, row_l2);
     const bool one_swap = only_g.size() == size_t(cfg.index_kpool) &&
                           only_w.size() == size_t(cfg.index_kpool) &&
                           only_g[0] / cfg.index_kpool !=
@@ -2129,9 +2141,24 @@ void require_output_matches(const DsaConfig& cfg, const DsaGeometry& g,
     throw std::runtime_error(what + ": flipped-row drift " +
                              std::to_string(worst_flipped));
   std::printf("[INFO] %s: %lld/%lld sparse rows flipped (%lld audited as "
-              "near ties; kept-row max l2 %.2e)\n",
+              "near ties, max certified row l2 %.4f; kept-row max l2 "
+              "%.2e; unaudited max l2 %.4f)\n",
               what.c_str(), (long long)flipped, (long long)sparse,
-              (long long)certified, worst_kept);
+              (long long)certified, worst_certified, worst_kept,
+              worst_flipped);
+}
+
+// The certification's own evidence: what the audit measured, not just that
+// it did not throw. Boundary gaps are the ref-side logit distance between
+// a swapped pool pair; the noise multiple is that gap over the row's
+// measured cross-implementation logit disagreement.
+void print_near_tie_audit(const std::string& what,
+                          const dsa_test::NearTieAudit& a) {
+  std::printf("[INFO] %s near-tie audit: %lld rows / %lld swaps certified, "
+              "max boundary gap %.3e (%.1fx noise)\n",
+              what.c_str(), (long long)a.rows_flipped,
+              (long long)a.swaps_certified, a.max_boundary_gap,
+              a.max_noise_multiple);
 }
 
 DGPP_TEST(dsa_state_pool_block_allocation_and_accounting) {
@@ -2250,16 +2277,25 @@ DGPP_TEST(dsa_layer_prefill_matches_reference) {
                                got_topk.size() * 4, cudaMemcpyDeviceToHost, s));
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
   const std::vector<PhaseInputs> phases{std::move(phase)};
+  dsa_test::NearTieAudit audit_stats{};
   const RowAuditor audit = make_near_tie_auditor(cfg, g, pool, 0, s, phases,
-                                                 ref);
+                                                 ref, &audit_stats);
   require_output_matches(cfg, g, got_out, ref_out, got_topk, ref_topk,
                          "layer prefill", audit);
+  print_near_tie_audit("layer prefill", audit_stats);
   require_cache_matches(pool, 0, 0, ref, s);
 }
 
-DGPP_TEST(dsa_layer_chunked_prefill_and_decode_match_reference) {
+// Chunked prefill (the final chunk ends mid-pool, so the tail ring carries a
+// partial pool across the prefill->decode boundary) + one multi-token decode
+// batch, selection-aware against the oracle with the near-tie audit. Shared
+// body: the CI config (index_topk=64, select_k=16) and the select_k=8
+// variant below (the real checkpoint's 2048/4=512 dwarfs both, but 8 is the
+// smallest select_k the bitonic networks support and the boundary flips are
+// densest there — exactly where the audit must prove itself).
+static void chunked_prefill_decode_case(const DsaConfig& cfg,
+                                        const char* what) {
   cudaStream_t s = dgpp::kda_test::test_stream();
-  const DsaConfig cfg = small_cfg();
   const DsaGeometry g = DsaGeometry::from_config(cfg);
   const int chunk = 96;
   const int tail_chunk = 66;  // ends 2 tokens into pool 40 (mid-pool)
@@ -2382,11 +2418,23 @@ DGPP_TEST(dsa_layer_chunked_prefill_and_decode_match_reference) {
                          decode_tokens, p, s);
     phases.push_back(std::move(p));
   }
+  dsa_test::NearTieAudit audit_stats{};
   const RowAuditor audit = make_near_tie_auditor(cfg, g, pool, 0, s, phases,
-                                                 ref);
-  require_output_matches(cfg, g, got_out, want_all, got_topk, ref_topk,
-                         "layer chunked+decode", audit);
+                                                 ref, &audit_stats);
+  require_output_matches(cfg, g, got_out, want_all, got_topk, ref_topk, what,
+                         audit);
+  print_near_tie_audit(what, audit_stats);
   require_cache_matches(pool, 0, 0, ref, s);
+}
+
+DGPP_TEST(dsa_layer_chunked_prefill_and_decode_match_reference) {
+  chunked_prefill_decode_case(small_cfg(), "layer chunked+decode");
+}
+
+DGPP_TEST(dsa_layer_chunked_prefill_and_decode_select8) {
+  DsaConfig cfg = small_cfg();
+  cfg.index_topk = 32;  // select_k = 8 (power of two: bitonic networks)
+  chunked_prefill_decode_case(cfg, "layer chunked+decode select8");
 }
 
 DGPP_TEST(dsa_layer_decode_graph_replay_matches_eager) {
