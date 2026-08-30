@@ -277,13 +277,18 @@ Deliverables:
    bulk), CQs, system-scope doorbells, inactivity watchdogs, and concurrent
    latency-under-bulk traffic as a tested mode.
  3. Replicated block boundaries with one attention and one FFN all-reduce per
-    layer; striped bulk prefill collectives. The all-reduce primitive itself
-    is built and validated (DESIGN §6.3, one-shot all-to-all over the
-    latency pool, canonical rank-order fp32 fold, bitwise-verified on the
-    full mesh at TP=2 37.6 µs / TP=4 ~44 µs p50); what remains is the
-    forward integration: block-boundary wiring, the producing GEMMs
-    writing send slots directly, and CUDA-graph capture of the decode
-    launch sequence (§6.2) to amortize per-collective kernel launches.
+    layer; striped bulk prefill collectives. The all-reduce primitive is
+    built and validated (DESIGN §6.3, one-shot all-to-all, canonical
+    rank-order fp32 fold, bitwise on the full mesh at TP=2 37.6 µs /
+    TP=4 ~44 µs p50), and the FORWARD INTEGRATION is wired and validated
+    in CI over loopback buses (glm_tp_test): GlmTpViews slicing per
+    DESIGN §5.2, the two block-boundary folds, MoE whole-expert
+    partitions, per-layer isolated parity vs the world=1 oracle with
+    route-flip/head near-tie certification, and cross-rank BITWISE
+    hidden/logits/captures/routes at world 2 and 4. Remaining: the
+    fabric runner (glm_tp_check) and real-mesh parity, the producing
+    GEMMs writing send slots directly, bulk prefill collectives, and
+    CUDA-graph capture of the decode launch sequence (§6.2).
 4. Sharded load for TP=2 and TP=4, plus hashes for replicated weights.
 5. Transport regression command that reruns NIC→GPU visibility on every node
    pair after driver/firmware changes.

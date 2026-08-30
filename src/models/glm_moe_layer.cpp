@@ -54,19 +54,24 @@ void GlmMoeLayer::run_expert_segment(
     uint16_t* acc, int n_rows, const GlmQuantMatrix& gate,
     const GlmQuantMatrix& up, const GlmQuantMatrix& down,
     cudaStream_t stream) {
-  const int H = cfg_.hidden, I = cfg_.inter;
+  // The inter dim comes from the matrix views, not the config: routed
+  // experts are whole (I = cfg.inter) but the SHARED expert is TP-sharded
+  // (I = cfg.inter / tp_size) — both flow through this one path.
+  const int H = cfg_.hidden, I = static_cast<int>(gate.rows);
+  if (gate.rows != up.rows || down.cols != gate.rows)
+    throw std::runtime_error("GlmMoeLayer: inconsistent expert matrices");
   // Gather this segment's rows; the shared expert passes rows = identity
   // with x itself, but the gather is cheap and uniform — one code path.
   launch_moe_gather_rows(x, rows_dev, d_gather_, n_rows, H, stream);
   launch_scale_gemm_bf16(d_gather_, H, gate.payload, gate.scales, d_gate_,
-                         n_rows, I, H, stream);
+                          n_rows, I, H, stream);
   launch_scale_gemm_bf16(d_gather_, H, up.payload, up.scales, d_up_, n_rows,
-                         I, H, stream);
+                          I, H, stream);
   launch_moe_swiglu_clamp(d_gate_, d_up_, d_act_,
                           static_cast<int64_t>(n_rows) * I,
                           cfg_.swiglu_limit, stream);
   launch_scale_gemm_bf16(d_act_, I, down.payload, down.scales, d_down_,
-                         n_rows, H, I, stream);
+                          n_rows, H, I, stream);
   launch_moe_accum(acc, d_down_, rows_dev, row_w_dev, n_rows, H, stream);
 }
 
@@ -78,6 +83,13 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
   if (!hidden || !out)
     throw std::invalid_argument("GlmMoeLayer: null pointer");
   const int H = cfg_.hidden, E = cfg_.n_experts, K = cfg_.top_k;
+  // TP partition: execution covers [begin, begin+count); the router still
+  // scores all E experts (the selection is rank-identical by the
+  // block-boundary invariant). count < 0 = the full M4 range.
+  const int begin = w_.expert_begin;
+  const int count = w_.expert_count < 0 ? E : w_.expert_count;
+  if (begin < 0 || begin + count > E)
+    throw std::runtime_error("GlmMoeLayer: expert partition out of range");
 
   // 1. Router + one sync: the ids/weights round-trip is the diagnostic
   //    mode's cost; the production path keeps segmentation device-side.
@@ -105,9 +117,9 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
   h_row_w_.assign(static_cast<size_t>(tokens) * K, 0.f);
   // First pass: counts per expert; second pass: stable row placement.
   for (size_t i = 0; i < h_ids_.size(); ++i) ++h_counts_[h_ids_[i]];
-  std::vector<int> begin(E, 0);
-  for (int e = 1; e < E; ++e) begin[e] = begin[e - 1] + h_counts_[e - 1];
-  std::vector<int> fill(begin.begin(), begin.end());
+  std::vector<int> seg_begin(E, 0);
+  for (int e = 1; e < E; ++e) seg_begin[e] = seg_begin[e - 1] + h_counts_[e - 1];
+  std::vector<int> fill(seg_begin.begin(), seg_begin.end());
   for (int t = 0; t < tokens; ++t)
     for (int i = 0; i < K; ++i) {
       const int e = h_ids_[static_cast<size_t>(t) * K + i];
@@ -116,20 +128,24 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
       ++fill[e];
     }
 
-  // 3. Per-expert segments in ascending order (skipping empty ones).
+  // 3. Per-expert segments in ascending order (skipping empty ones and
+  //    other ranks' experts — a skipped local expert contributes nothing
+  //    to this rank's partial; the FFN all-reduce folds the partials).
   for (int e = 0; e < E; ++e) {
+    if (e < begin || e >= begin + count) continue;
     const int n = h_counts_[e];
     if (n == 0) continue;
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_rows_, h_rows_.data() + begin[e],
-                                 static_cast<size_t>(n) * 4,
-                                 cudaMemcpyHostToDevice, stream));
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_row_w_, h_row_w_.data() + begin[e],
-                                 static_cast<size_t>(n) * 4,
-                                 cudaMemcpyHostToDevice, stream));
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_rows_, h_rows_.data() + seg_begin[e],
+                                  static_cast<size_t>(n) * 4,
+                                  cudaMemcpyHostToDevice, stream));
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_row_w_, h_row_w_.data() + seg_begin[e],
+                                  static_cast<size_t>(n) * 4,
+                                  cudaMemcpyHostToDevice, stream));
     run_expert_segment(hidden, d_rows_, d_row_w_, out, n,
-                       w_.experts[static_cast<size_t>(e) * 3 + 0],
-                       w_.experts[static_cast<size_t>(e) * 3 + 1],
-                       w_.experts[static_cast<size_t>(e) * 3 + 2], stream);
+                        w_.experts[static_cast<size_t>(e - begin) * 3 + 0],
+                        w_.experts[static_cast<size_t>(e - begin) * 3 + 1],
+                        w_.experts[static_cast<size_t>(e - begin) * 3 + 2],
+                        stream);
   }
 
   // 4. Shared expert: all tokens, weight 1, added last (the reference's

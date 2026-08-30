@@ -188,11 +188,13 @@ struct CollectiveBus::Impl {
   BusAllReduceCtl* ar_ctl = nullptr;
   uint32_t ctl_seq_counter = 0;  // engine thread only
   uint64_t ar_deadline_cycles = 0;  // cached device-clock rate conversion
+  uint64_t ar_last_ready_seq = 0;   // one-shot ready-log gating (per bus)
   struct CollectiveFlight {
     std::shared_ptr<BusRequest> req;
     std::vector<BusStripe> claims;  // per peer: claimed lane/slot
     uint64_t posted_bits = 0;       // bit p once peer p's stripe is posted
     Clock::time_point launched_at{};
+    int stall_dumps = 0;            // bring-up microscope rate control
   } coll;                            // engine thread only
 
   BusRankExchange ex_{};  // our frame, built once during start()
@@ -484,10 +486,56 @@ struct CollectiveBus::Impl {
       }
     }
     if (!coll.req) return worked;
+    // TEMP bring-up microscope: an active flight that has not completed in
+    // 500ms dumps its state once per 500ms — the rare lane-watchdog stall
+    // in the TP loopback runs otherwise dies with no observables.
+    if (coll.req && coll.claims.size() > 0 &&
+        Clock::now() - coll.launched_at >
+            std::chrono::milliseconds(500 + 500 * coll.stall_dumps)) {
+      ++coll.stall_dumps;
+      std::string lanes;
+      for (size_t p = 0; p < peer_ranks.size(); ++p)
+        for (size_t l = 0; l < peers[p].size(); ++l) {
+          const LaneState& lane = peers[p][l];
+          lanes += " p" + std::to_string(peer_ranks[p]) + "l" +
+                   std::to_string(l) + ":[";
+          for (int s = 0; s < opt.lat_slots; ++s) {
+            const StartSlot* door =
+                recv_view_of(lane).doorbell_lat;  // per-lane view
+            lanes += std::to_string(door[s].seq) + "/" +
+                     std::to_string(recv_view_of(lane).ack_lat[s].seq) +
+                     (lane.send[0][s].in_flight ? "!" : ".");
+          }
+          lanes += "]";
+        }
+      DGPP_LOG_INFO(
+          "allreduce: rank {} seq {} STALLED {:.0f}ms posted={:#x} "
+          "ctl(ready={:#x} done={} status={}) {}",
+          opt.my_rank, coll.req->ctl_seq,
+          std::chrono::duration<double, std::milli>(Clock::now() -
+                                                     coll.launched_at)
+              .count(),
+          coll.posted_bits, acquire_u64(&ar_ctl->ready_bits),
+          acquire_u64(&ar_ctl->done_seq), acquire_u32(&ar_ctl->status),
+          lanes);
+    }
+    // A held flight whose request is already done was reaped out from
+    // under us (fail_lane completing the stripe owner, or the watchdog
+    // expiry below) — the flight must not survive the request: clear and
+    // poison, or every later collective is rejected "one outstanding"
+    // forever (the engine is single-threaded; no race with ourselves).
+    if (coll.req->done_flag.load(std::memory_order_acquire)) {
+      poison_collective(*coll.req);
+      coll_poisoned = true;
+      coll = {};
+      coll_active.store(false, std::memory_order_relaxed);
+      return true;
+    }
     BusRequest& req = *coll.req;
 
     if (coll.claims.empty()) {
       std::vector<BusStripe> claims;
+      bool starved_log_shown = false;  // TEMP bring-up: claim-wait tracing
       for (size_t p = 0; p < peer_ranks.size(); ++p) {
         bool have = false;
         for (size_t l = 0; l < peers[p].size(); ++l) {
@@ -500,7 +548,16 @@ struct CollectiveBus::Impl {
           have = true;
           break;
         }
-        if (!have) return worked;  // a ring is exhausted; retry next iteration
+        if (!have) {
+          if (!starved_log_shown) {
+            DGPP_LOG_INFO(
+                "allreduce: rank {} claim waiting — no free latency slot for "
+                "peer {} (credits outstanding)",
+                opt.my_rank, peer_ranks[p]);
+            starved_log_shown = true;
+          }
+          return worked;  // a ring is exhausted; retry next iteration
+        }
       }
 
       if (ar_deadline_cycles == 0) {
@@ -511,12 +568,12 @@ struct CollectiveBus::Impl {
                       clock_khz);
       }
       if (ar_deadline_cycles == 0) {
-        complete_request(&req, false,
-                         "could not read device clock rate for the "
-                         "collective deadline");
         coll_poisoned = true;
         coll = {};
         coll_active.store(false, std::memory_order_relaxed);
+        complete_request(&req, false,
+                         "could not read device clock rate for the "
+                         "collective deadline");
         return true;
       }
 
@@ -557,16 +614,22 @@ struct CollectiveBus::Impl {
       DGPP_LOG_DEBUG("allreduce: rank {} seq {} launch_call={:.1f}us",
                      opt.my_rank, req.ctl_seq, elapsed_us(t_launch0));
       if (launch != cudaSuccess) {
-        complete_request(&req, false,
-                         std::string("allreduce kernel launch failed: ") +
-                             cudaGetErrorString(launch));
         coll_poisoned = true;
         coll = {};
         coll_active.store(false, std::memory_order_relaxed);
+        complete_request(&req, false,
+                         std::string("allreduce kernel launch failed: ") +
+                             cudaGetErrorString(launch));
         return true;
       }
       coll.claims = std::move(claims);
       coll.launched_at = Clock::now();
+      // First-flight diagnostics at INFO (not DEBUG): the loopback TP
+      // bring-up had a stall whose DEBUG logging changed the timing, so
+      // the lifecycle must be observable in the failing configuration.
+      if (req.ctl_seq <= 16)
+        DGPP_LOG_INFO("allreduce: rank {} seq {} launched ({} peers)",
+                      opt.my_rank, req.ctl_seq, view.send_peers);
       DGPP_LOG_DEBUG("allreduce: rank {} seq {} launched, {} peers",
                      opt.my_rank, req.ctl_seq, view.send_peers);
       worked = true;
@@ -574,9 +637,11 @@ struct CollectiveBus::Impl {
 
     // Posting pass: one stripe per staged peer.
     const uint64_t ready = acquire_u64(&ar_ctl->ready_bits);
-    static uint64_t last_launch_seq = 0;
-    if (ready && req.ctl_seq != last_launch_seq) {
-      last_launch_seq = req.ctl_seq;
+    if (ready && req.ctl_seq != ar_last_ready_seq) {
+      ar_last_ready_seq = req.ctl_seq;
+      if (req.ctl_seq <= 16)
+        DGPP_LOG_INFO("allreduce: rank {} seq {} ready after {:.1f}us",
+                      opt.my_rank, req.ctl_seq, elapsed_us(coll.launched_at));
       DGPP_LOG_DEBUG("allreduce: rank {} seq {} ready_seen={:.1f}us",
                      opt.my_rank, req.ctl_seq, elapsed_us(coll.launched_at));
     }
@@ -594,9 +659,9 @@ struct CollectiveBus::Impl {
         fail_lane(lane, error);
         poison_collective(req);
         coll_poisoned = true;
-        complete_request(&req, false, "allreduce post failed: " + error);
         coll = {};
         coll_active.store(false, std::memory_order_relaxed);
+        complete_request(&req, false, "allreduce post failed: " + error);
         return true;
       }
       ss.gen = seq;
@@ -617,6 +682,11 @@ struct CollectiveBus::Impl {
     // Completion: the kernel's stamp (or a poison) ends the flight.
     const uint64_t done = acquire_u64(&ar_ctl->done_seq);
     if (done == req.ctl_seq) {
+      if (req.ctl_seq <= 16)
+        DGPP_LOG_INFO(
+            "allreduce: rank {} seq {} done status={} after {:.1f}us",
+            opt.my_rank, req.ctl_seq, acquire_u32(&ar_ctl->status),
+            elapsed_us(coll.launched_at));
       DGPP_LOG_DEBUG(
           "allreduce: rank {} seq {} stamped status={} notice={:.1f}us "
           "spans_cycles stage->claim={} claim->reduce={}",
@@ -629,12 +699,18 @@ struct CollectiveBus::Impl {
               ? ar_ctl->stamp_reduce_done - ar_ctl->stamp_first_claim
               : 0);
       const bool reduced = acquire_u32(&ar_ctl->status) == 0;
-      complete_request(&req, reduced,
-                       reduced ? "" : "collective consumer exited on deadline "
-                                      "or poison");
+      // Clear the flight BEFORE completing: complete_request wakes the
+      // waiter, and the woken thread's next submission races this cleanup
+      // against the single-outstanding check (measured as a spurious
+      // "one outstanding" rejection in the TP loopback bring-up). The bus
+      // must be ready for the next generation before the waiter can
+      // observe the result.
       if (!reduced) coll_poisoned = true;
       coll = {};
       coll_active.store(false, std::memory_order_relaxed);
+      complete_request(&req, reduced,
+                       reduced ? "" : "collective consumer exited on deadline "
+                                      "or poison");
       worked = true;
     }
     return worked;
@@ -840,13 +916,20 @@ struct CollectiveBus::Impl {
       }
     }
     for (BusRequest* req : expired) {
-      complete_request(req, false,
-                       "completion timeout (" +
-                           std::to_string(opt.completion_timeout_ms) + " ms)");
       if (req->is_collective) {
         poison_collective(*req);
         coll_poisoned = true;
+        // The flight must not outlive the request (same reasoning as the
+        // done-but-held check in collective_pass; the engine thread runs
+        // both passes, so the clear is race-free).
+        if (coll.req && coll.req.get() == req) {
+          coll = {};
+          coll_active.store(false, std::memory_order_relaxed);
+        }
       }
+      complete_request(req, false,
+                       "completion timeout (" +
+                           std::to_string(opt.completion_timeout_ms) + " ms)");
       worked = true;
     }
     return worked;

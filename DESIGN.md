@@ -462,6 +462,28 @@ lane error. The slot that a failed request staged is freed by the normal
 credit/owning-reference machinery — a late credit after the waiter reaped
 never corrupts ring state.
 
+Two ordering rules the TP forward integration taught (both were bugs):
+
+- **Completion clears before it wakes.** The flight state (claims,
+  posted stripes, the single-outstanding gate) must be fully reset
+  BEFORE the request is completed — completing wakes the waiter, and a
+  waiter that submits its next generation before the engine's cleanup
+  races the single-outstanding check. Symmetrically, any path that
+  reaps a collective out from under the engine (watchdog expiry, lane
+  failure) must clear the held flight, or the bus rejects every later
+  collective forever.
+- **Allocation-phase device syncs never overlap a spinning collective.**
+  `cudaMallocManaged`/`cudaFree` and device-wide syncs are whole-device
+  barriers; a rank still constructing its model while a peer's first
+  collective kernel spins on doorbells deadlocks the process (the
+  kernel waits for the constructing rank's post; the constructing
+  rank's allocation waits for the spinning kernel). The model
+  preconstructs every layer object at construction (no allocation inside
+  the forward), and TP runners barrier cluster-wide after construction
+  before any forward begins. Post-startup the shape is safe — engines
+  post from free threads, so staggered per-layer loads and in-flight
+  collectives coexist by construction.
+
 Measured (fabric, bitwise-verified against the canonical-chain oracle):
 TP=2 p50 37.6 µs, TP=4 (full mesh) p50 ~44 µs, submit→wait, credits off
 the critical path. Kernel-internal spans are ~6 µs staging, ~6 µs doorbell

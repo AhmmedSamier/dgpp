@@ -30,9 +30,21 @@
 #include "models/glm_loader.hpp"
 #include "models/glm_moe_layer.hpp"
 #include "models/glm_trace.hpp"
+#include "models/glm_tp.hpp"
 #include "models/kda_layer.hpp"
 
 namespace dgpp {
+
+// M5 tensor-parallel block-boundary seam (DESIGN §5.1): folds a partial
+// hidden activation [rows, hidden] bf16 into its replicated value, in
+// place. Called after the attention output projection and after the
+// FFN/MoE — the two row-parallel sites whose local sums are partial —
+// always with the producing kernels already quiesced on the model stream.
+// world=1 constructs the model without a reducer and the seam is skipped.
+struct GlmBoundaryReducer {
+  virtual ~GlmBoundaryReducer() = default;
+  virtual void reduce(uint16_t* partial, int rows, int hidden) = 0;
+};
 
 class GlmDiagnosticModel {
  public:
@@ -49,9 +61,17 @@ class GlmDiagnosticModel {
 
   // `max_tokens` bounds a forward's token count; `max_cache_tokens` bounds
   // the DSA cache (rounded up to a block). Both also size scratch.
+  //
+  // TP (M5): `tp_world` > 1 slices every layer's head/expert/inter shards
+  // to this rank (`tp_rank`), runs the forward on the local geometry, and
+  // folds the two block-boundary partials through `boundary` (required —
+  // a TP model without a reducer would silently return partial sums).
+  // The world=1 path (null reducer) is byte-identical to M4.
   GlmDiagnosticModel(const GlmTextConfig& cfg,
                      const std::string& checkpoint_dir, int max_tokens,
-                     int64_t max_cache_tokens);
+                     int64_t max_cache_tokens,
+                     GlmBoundaryReducer* boundary = nullptr, int tp_rank = 0,
+                     int tp_world = 1);
   ~GlmDiagnosticModel();
   GlmDiagnosticModel(const GlmDiagnosticModel&) = delete;
   GlmDiagnosticModel& operator=(const GlmDiagnosticModel&) = delete;
@@ -83,9 +103,20 @@ class GlmDiagnosticModel {
       int k);
 
  private:
+  // Produces the layer's weight views — full (world=1, byte-identical to
+  // the M4 path) or this rank's slice (GlmTpViews). `dense_mlp` mirrors
+  // cfg_.mlps[layer]; exactly one attention and one MLP view is set.
+  GlmLayerBound bind_layer(const GlmLayerResident& r, bool dense_mlp);
+
+  // Constructs every layer object with throwaway layer loads so run_stack
+  // never allocates (allocations are implicit device syncs; a lazily
+  // constructing rank deadlocks against a peer's spinning first
+  // collective kernel — see the M5 loopback bring-up notes).
+  void preconstruct_layers();
+
   void enqueue_dense_mlp(const uint16_t* x, uint16_t* out,
-                         const GlmQuantMatrix (&dense)[3], int tokens,
-                         cudaStream_t stream);
+                          const GlmQuantMatrix* dense, int tokens,
+                          cudaStream_t stream);
   static GlmMoeWeights moe_weights(const GlmMoeResident& r);
   Outputs run_stack(const std::vector<int64_t>& token_ids,
                     const uint16_t* const* layer_inputs,
@@ -108,6 +139,14 @@ class GlmDiagnosticModel {
   std::unique_ptr<DsaLayer> dsa_;
   std::unique_ptr<GlmMoeLayer> moe_;
   cudaStream_t stream_ = nullptr;
+
+  // TP state: null at world=1 (the M4 path).
+  GlmBoundaryReducer* boundary_ = nullptr;
+  std::unique_ptr<GlmTpViews> tp_;
+
+  // World=1 bind scratch (owned so the returned views outlive the call).
+  GlmLayerBound full_{};
+  GlmMoeWeights moe_full_{};
 
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;

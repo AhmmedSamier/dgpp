@@ -158,7 +158,8 @@ add_library(dgpp_models_glm_loader STATIC
   src/models/glm_loader.cpp
   src/models/glm_moe_layer.cpp
   src/models/glm_dump.cpp
-  src/models/glm_forward.cpp)
+  src/models/glm_forward.cpp
+  src/models/glm_tp.cpp)
 target_link_libraries(dgpp_models_glm_loader
   PUBLIC dgpp_models_glm dgpp_kernels dgpp_models_kda dgpp_models_dsa)
 dgpp_set_common(dgpp_models_glm_loader)
@@ -204,6 +205,18 @@ if(DGPP_ENABLE_IBV)
   add_executable(bus_check apps/bus_check.cpp)
   target_link_libraries(bus_check PRIVATE dgpp_bus)
   dgpp_set_common(bus_check)
+
+  # M5 deliverable 3: TP block-boundary parity over loopback buses
+  # (real verbs QPs, one process). Needs the model stack AND the bus.
+  # The fixture side is g++-only (nvcc cannot compile minijson).
+  add_executable(glm_tp_test tests/cuda/glm_tp_test.cpp
+                        tests/cuda/glm_tp_fixture.cpp)
+  target_include_directories(glm_tp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(glm_tp_test PRIVATE dgpp_models_glm_loader dgpp_bus
+                                         CUDA::cudart Threads::Threads)
+  dgpp_set_common(glm_tp_test)
+  add_test(NAME glm_tp_test COMMAND glm_tp_test)
+  set_tests_properties(glm_tp_test PROPERTIES SKIP_RETURN_CODE 2)
 endif()
 
 enable_testing()

@@ -73,7 +73,15 @@ struct GlmMoeWeights {
   const uint16_t* router_gate = nullptr;  // bf16 [n_experts, hidden]
   const float* router_bias = nullptr;     // f32 [n_experts]
   GlmQuantMatrix shared[3];               // gate, up, down (compressed)
-  const GlmQuantMatrix* experts = nullptr;  // [n_experts * 3] gate,up,down
+  const GlmQuantMatrix* experts = nullptr;  // [expert_count * 3] gate,up,down
+  // TP partition (M5): the router is REPLICATED and scores all
+  // cfg.n_experts on every rank (selection must be rank-identical); this
+  // rank executes only the contiguous id range
+  // [expert_begin, expert_begin + expert_count) of the whole-expert
+  // partition, producing a partial hidden sum for the FFN all-reduce.
+  // expert_count < 0 means "every expert" — the M4 single-rank default.
+  int expert_begin = 0;
+  int expert_count = -1;
 };
 
 }  // namespace dgpp

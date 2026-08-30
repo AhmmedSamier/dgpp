@@ -6,6 +6,7 @@
 
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
+#include "common/log.hpp"
 #include "kernels/glm_mhc_launch.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/glm_norm.hpp"
@@ -23,15 +24,25 @@ void* alloc_managed(size_t bytes) {
   return p;
 }
 
+// TP configs: the geometry validators run inside from_config, so the
+// head-divisibility rejection happens at construction, before any load.
+template <typename Cfg>
+Cfg with_tp(Cfg c, int world) {
+  c.tp_size = world;
+  return c;
+}
+
 }  // namespace
 
 GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
-                                       const std::string& checkpoint_dir,
-                                       int max_tokens,
-                                       int64_t max_cache_tokens)
+                                        const std::string& checkpoint_dir,
+                                        int max_tokens,
+                                        int64_t max_cache_tokens,
+                                        GlmBoundaryReducer* boundary,
+                                        int tp_rank, int tp_world)
     : cfg_(cfg),
-      kda_cfg_(cfg.kda_config()),
-      dsa_cfg_(cfg.dsa_config()),
+      kda_cfg_(with_tp(cfg.kda_config(), tp_world)),
+      dsa_cfg_(with_tp(cfg.dsa_config(), tp_world)),
       mhc_cfg_(cfg.mhc_config()),
       moe_cfg_(cfg.moe_config()),
       kda_geo_(KdaGeometry::from_config(kda_cfg_)),
@@ -41,10 +52,19 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     throw std::invalid_argument("GlmDiagnosticModel: max_tokens must be positive");
   if (max_cache_tokens < max_tokens_)
     max_cache_tokens = max_tokens_;
+  if ((tp_world > 1) != (boundary != nullptr))
+    throw std::invalid_argument(
+        "GlmDiagnosticModel: a boundary reducer is required exactly when "
+        "tp_world > 1 — without one the block-boundary partials would be "
+        "returned silently as results");
+  boundary_ = boundary;
 
   globals_ = loader_.load_globals();
 
   DGPP_CUDA_OK(cudaStreamCreate(&stream_));
+
+  if (tp_world > 1)
+    tp_ = std::make_unique<GlmTpViews>(cfg, tp_rank, tp_world, stream_);
 
   // GEMM workspace: 64 MB covers every M2/M3 shape; the lm head's N
   // (vocab) is the only dimension larger than anything tested there.
@@ -104,6 +124,11 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   }
   logits_ =
       static_cast<uint16_t*>(alloc_managed(T * cfg_.vocab_size * 2));
+
+  // Every device allocation happens above (see preconstruct_layers): the
+  // TP runners barrier after construction so no rank's first collective
+  // can spin while a peer is still inside allocation-phase device syncs.
+  preconstruct_layers();
 }
 
 GlmDiagnosticModel::~GlmDiagnosticModel() {
@@ -135,22 +160,90 @@ GlmMoeWeights GlmDiagnosticModel::moe_weights(const GlmMoeResident& r) {
   return w;
 }
 
+GlmLayerBound GlmDiagnosticModel::bind_layer(const GlmLayerResident& r,
+                                             bool dense_mlp) {
+  if (tp_) return tp_->bind(r, dense_mlp);
+  // World=1: direct resident views, byte-identical to the M4 path.
+  full_ = GlmLayerBound{};
+  full_.mhc = &r.mhc;
+  full_.ln1 = r.ln1;
+  full_.ln2 = r.ln2;
+  if (r.kind == GlmLayerKind::Kda) full_.kda = &r.kda;
+  else full_.dsa = &r.dsa;
+  if (dense_mlp) {
+    full_.dense = r.dense;
+  } else {
+    moe_full_ = moe_weights(r.moe);  // partition defaults: every expert
+    full_.moe = &moe_full_;
+  }
+  return full_;
+}
+
+// Constructs every layer object (KDA/DSA/MoE) with throwaway layer-0..k
+// loads so NO allocation ever happens inside run_stack. Allocations are
+// implicit device syncs, and a rank constructing lazily while a peer's
+// first collective kernel spins on doorbells is the process-wide
+// deadlock the M5 loopback bring-up measured: the lagging rank's
+// cudaMallocManaged waits for the spinning kernel, which waits for the
+// lagging rank's post, which requires the lagging rank to finish
+// constructing. Post-startup (all objects resident, engines posting from
+// free threads) the shape is safe — staggered per-layer loads and
+// collectives coexist by construction.
+void GlmDiagnosticModel::preconstruct_layers() {
+  bool need_kda = kda_cfg_.num_kda_layers > 0;
+  bool need_dsa = dsa_cfg_.num_dsa_layers > 0;
+  bool need_moe =
+      std::any_of(cfg_.mlps.begin(), cfg_.mlps.end(),
+                  [](GlmMlpKind k) { return k == GlmMlpKind::Moe; });
+  for (int layer = 0; layer < cfg_.num_hidden_layers &&
+                       (need_kda || need_dsa || need_moe);
+       ++layer) {
+    const GlmLayerResident& r = loader_.load_layer(layer);
+    const GlmLayerBound b =
+        bind_layer(r, cfg_.mlps[layer] == GlmMlpKind::Dense);
+    if (r.kind == GlmLayerKind::Kda && need_kda && !kda_) {
+      kda_ = std::make_unique<KdaLayer>(arena_, gemm_, *b.kda, kda_cfg_,
+                                        max_tokens_, gemm_ws_,
+                                        gemm_ws_bytes_, cfg_.rms_norm_eps);
+      need_kda = false;
+    }
+    if (r.kind == GlmLayerKind::Dsa && need_dsa && !dsa_) {
+      dsa_ = std::make_unique<DsaLayer>(
+          gemm_, *b.dsa, dsa_cfg_, max_tokens_, pool_.max_token_slots(),
+          dsa_scratch_,
+          DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
+                                  pool_.max_token_slots()),
+          gemm_ws_, gemm_ws_bytes_);
+      need_dsa = false;
+    }
+    if (need_moe && !moe_ && cfg_.mlps[layer] == GlmMlpKind::Moe) {
+      moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_);
+      need_moe = false;
+    }
+  }
+  loader_.release_layer();
+}
+
 void GlmDiagnosticModel::enqueue_dense_mlp(
-    const uint16_t* x, uint16_t* out, const GlmQuantMatrix (&dense)[3],
+    const uint16_t* x, uint16_t* out, const GlmQuantMatrix* dense,
     int tokens, cudaStream_t stream) {
+  // The inter dim comes from the views: the full matrix at world=1, this
+  // rank's column/row shard under TP (scratch is sized for the full I).
   const int H = cfg_.hidden_size;
-  const int I = cfg_.intermediate_size;
+  const int I = static_cast<int>(dense[0].rows);
+  if (dense[1].rows != dense[0].rows || dense[2].cols != dense[0].rows)
+    throw std::runtime_error("forward: inconsistent dense matrices");
   launch_scale_gemm_bf16(x, H, dense[0].payload, dense[0].scales, dense_g_,
-                         tokens, I, H, stream);
+                          tokens, I, H, stream);
   launch_scale_gemm_bf16(x, H, dense[1].payload, dense[1].scales, dense_u_,
-                         tokens, I, H, stream);
+                          tokens, I, H, stream);
   // Same asymmetric swiglu clamps as the experts (the reference MLP and
   // experts share the clamp choreography; DESIGN §7.4).
   launch_moe_swiglu_clamp(dense_g_, dense_u_, dense_act_,
                           static_cast<int64_t>(tokens) * I,
                           cfg_.swiglu_limit, stream);
   launch_scale_gemm_bf16(dense_act_, I, dense[2].payload, dense[2].scales,
-                         out, tokens, H, I, stream);
+                          out, tokens, H, I, stream);
 }
 
 // Shared stack runner. `layer_inputs` (isolated mode) overrides the stream
@@ -222,20 +315,21 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
                   static_cast<size_t>(T) * 4 * H * 2);
     }
     const GlmLayerResident& r = loader_.load_layer(layer);
+    const GlmLayerBound b = bind_layer(r, cfg_.mlps[layer] == GlmMlpKind::Dense);
 
     // ---- attention site --------------------------------------------
     GlmMhcWeights hw;
-    hw.fn = r.mhc.attn_fn;
-    hw.base = r.mhc.attn_base;
-    hw.scale = r.mhc.attn_scale;
+    hw.fn = b.mhc->attn_fn;
+    hw.base = b.mhc->attn_base;
+    hw.scale = b.mhc->attn_scale;
     launch_mhc_compute(cur, hw, mhc_cfg_, collapsed_, post_, comb_, T,
-                       stream_);    glm_rmsnorm_bf16(collapsed_, r.ln1, normed_, T, H, eps, stream_);    if (r.kind == GlmLayerKind::Kda) {
+                        stream_);    glm_rmsnorm_bf16(collapsed_, b.ln1, normed_, T, H, eps, stream_);    if (r.kind == GlmLayerKind::Kda) {
       if (!kda_) {
-        kda_ = std::make_unique<KdaLayer>(arena_, gemm_, r.kda, kda_cfg_,
+        kda_ = std::make_unique<KdaLayer>(arena_, gemm_, *b.kda, kda_cfg_,
                                           max_tokens_, gemm_ws_,
                                           gemm_ws_bytes_, eps);
       } else {
-        kda_->rebind(r.kda);
+        kda_->rebind(*b.kda);
       }
       if (!kda_->prepare(T))
         throw std::runtime_error("forward: KDA GEMM plans unavailable");
@@ -253,19 +347,31 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
     } else {
       if (!dsa_) {
         dsa_ = std::make_unique<DsaLayer>(
-            gemm_, r.dsa, dsa_cfg_, max_tokens_,
+            gemm_, *b.dsa, dsa_cfg_, max_tokens_,
             pool_.max_token_slots(), dsa_scratch_,
             DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
                                     pool_.max_token_slots()),
             gemm_ws_, gemm_ws_bytes_);
       } else {
-        dsa_->rebind(r.dsa);
+        dsa_->rebind(*b.dsa);
       }
       if (!dsa_->prepare(T))
         throw std::runtime_error("forward: DSA GEMM plans unavailable");
       dsa_->enqueue_prefill(normed_, pool_, dsa_ordinal, 0, 0, T, sub_out_,
-                            stream_);
+                             stream_);
       ++dsa_ordinal;
+    }
+    // Block boundary 1 (DESIGN §5.1): the attention output projection is
+    // row-parallel over this rank's heads, so sub_out_ is a partial sum
+    // until folded. The collective kernel runs on the bus's stream, so
+    // the producer quiesces first (stream order cannot cover a
+    // cross-stream consumer; the graph-mode decode path restores this as
+    // a stream-ordered node).
+    if (boundary_) {
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      DGPP_LOG_DEBUG("TP boundary (attn) layer={} rows={} — reducing", layer,
+                    T);
+      boundary_->reduce(sub_out_, T, H);
     }
     launch_mhc_stream_update(post_, comb_, sub_out_, cur, nxt, mhc_cfg_, T,
                              stream_);
@@ -273,19 +379,19 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
 
     // ---- feed-forward site -----------------------------------------
     GlmMhcWeights fw;
-    fw.fn = r.mhc.ffn_fn;
-    fw.base = r.mhc.ffn_base;
-    fw.scale = r.mhc.ffn_scale;
+    fw.fn = b.mhc->ffn_fn;
+    fw.base = b.mhc->ffn_base;
+    fw.scale = b.mhc->ffn_scale;
     launch_mhc_compute(cur, fw, mhc_cfg_, collapsed_, post_, comb_, T,
-                       stream_);
-    glm_rmsnorm_bf16(collapsed_, r.ln2, normed_, T, H, eps, stream_);
+                        stream_);
+    glm_rmsnorm_bf16(collapsed_, b.ln2, normed_, T, H, eps, stream_);
     if (cfg_.mlps[layer] == GlmMlpKind::Dense) {
-      enqueue_dense_mlp(normed_, sub_out_, r.dense, T, stream_);    } else {
+      enqueue_dense_mlp(normed_, sub_out_, b.dense, T, stream_);    } else {
       if (!moe_) {
-        moe_ = std::make_unique<GlmMoeLayer>(moe_weights(r.moe), moe_cfg_,
+        moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_,
                                              max_tokens_);
       } else {
-        moe_->rebind(moe_weights(r.moe));
+        moe_->rebind(*b.moe);
       }
       moe_->enqueue(normed_, sub_out_, T, stream_);
       GlmRouteTraceLayer route;
@@ -296,6 +402,14 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
       route.weights = moe_->last_weights();
       out.routes.push_back(std::move(route));
       out.route_biased.push_back(moe_->last_biased());
+    }
+    // Block boundary 2: same fold after the FFN/MoE (dense down-proj,
+    // shared expert, and this rank's routed experts are all partial).
+    if (boundary_) {
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      DGPP_LOG_DEBUG("TP boundary (ffn)  layer={} rows={} — reducing", layer,
+                    T);
+      boundary_->reduce(sub_out_, T, H);
     }
     launch_mhc_stream_update(post_, comb_, sub_out_, cur, nxt, mhc_cfg_, T,
                              stream_);
