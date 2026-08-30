@@ -4,8 +4,8 @@
 // header; no payload bytes are touched. Exit 0 only when the binding is
 // exact.
 //
-//   glm_bind_check --config <dir>/config.json --checkpoint-dir <dir>
-//       [--max-errors N]
+//   glm_bind_check --model ORG/NAME | (--config <dir>/config.json
+//                                    --checkpoint-dir <dir>) [--max-errors N]
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "loaders/hf_cache.hpp"
 #include "loaders/safetensors.hpp"
 #include "models/glm_binding.hpp"
 #include "models/glm_config.hpp"
@@ -24,7 +25,7 @@
 namespace {
 
 int run(int argc, char** argv) {
-  std::string config_path, checkpoint_dir;
+  std::string config_path, checkpoint_dir, model_id;
   size_t max_errors = 32;
   for (int i = 1; i < argc; ++i) {
     std::string_view a = argv[i];
@@ -35,13 +36,29 @@ int run(int argc, char** argv) {
     };
     if (a == "--config") config_path = next();
     else if (a == "--checkpoint-dir") checkpoint_dir = next();
+    else if (a == "--model") model_id = next();
     else if (a == "--max-errors") max_errors = std::stoul(std::string(next()));
     else throw std::runtime_error(std::format("unknown argument {}", a));
   }
+  // --model resolves the canonical HF hub cache in $HOME (the deployment
+  // location); --checkpoint-dir stays for fixtures and staged dirs.
+  if (!model_id.empty()) {
+    if (!checkpoint_dir.empty())
+      throw std::runtime_error("--model and --checkpoint-dir are mutually "
+                               "exclusive");
+    std::string err;
+    const std::string snapshot = dgpp::hf::model_dir(model_id, &err);
+    if (snapshot.empty())
+      throw std::runtime_error(std::format("--model {}: {}", model_id, err));
+    checkpoint_dir = snapshot;
+    if (config_path.empty())
+      config_path = snapshot + "/config.json";
+    std::printf("model: %s -> %s\n", model_id.c_str(), snapshot.c_str());
+  }
   if (config_path.empty() || checkpoint_dir.empty())
     throw std::runtime_error(
-        "usage: glm_bind_check --config <config.json> --checkpoint-dir <dir> "
-        "[--max-errors N]");
+        "usage: glm_bind_check --model ORG/NAME | (--config <config.json> "
+        "--checkpoint-dir <dir>) [--max-errors N]");
 
   // 1. Config: parse and cross-validate before trusting any tensor name.
   dgpp::GlmTextConfig cfg = dgpp::GlmTextConfig::from_json_file(config_path);

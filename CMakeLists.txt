@@ -99,7 +99,8 @@ dgpp_set_common(dgpp_net)
 
 add_library(dgpp_loaders STATIC
   src/loaders/minijson.cpp
-  src/loaders/shardspec.cpp)
+  src/loaders/shardspec.cpp
+  src/loaders/hf_cache.cpp)
 target_link_libraries(dgpp_loaders PUBLIC dgpp_core)
 dgpp_set_common(dgpp_loaders)
 
@@ -242,6 +243,7 @@ add_executable(unit_tests
   tests/unit/safetensors_test.cpp
   tests/unit/fp8_test.cpp
   tests/unit/shardspec_test.cpp
+  tests/unit/hf_cache_test.cpp
   tests/unit/kda_geometry_test.cpp
   tests/unit/dsa_geometry_test.cpp
   tests/unit/glm_config_test.cpp

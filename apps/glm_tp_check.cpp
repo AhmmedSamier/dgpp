@@ -37,6 +37,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
+#include "loaders/hf_cache.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "net/collective_bus.hpp"
@@ -217,6 +218,7 @@ int main(int argc, char** argv) {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
 
   std::string config_path, ckpt, peer, out_prefix = "glm_tp_rank";
+  std::string model_id;
   int world = 2, rank = 0, tokens = 21, rendezvous_timeout_ms = 120000;
   uint16_t port = 29960;
   for (int i = 1; i < argc; ++i) {
@@ -227,6 +229,7 @@ int main(int argc, char** argv) {
     };
     if (a == "--config") config_path = next();
     else if (a == "--checkpoint-dir") ckpt = next();
+    else if (a == "--model") model_id = next();
     else if (a == "--world") world = std::stoi(next());
     else if (a == "--rank") rank = std::stoi(next());
     else if (a == "--peer") peer = next();
@@ -237,15 +240,33 @@ int main(int argc, char** argv) {
     else if (a == "--out") out_prefix = next();
     else {
       std::fprintf(stderr,
-                   "usage: glm_tp_check --config CONFIG --checkpoint-dir "
-                   "DIR [--world N --rank R --peer HOST --port N] "
-                   "[--tokens N] [--out PREFIX]\n");
+                    "usage: glm_tp_check --model ORG/NAME | --checkpoint-dir "
+                    "DIR [--world N --rank R --peer HOST --port N] "
+                    "[--tokens N] [--out PREFIX]\n");
       return rank == 0 && a == "--help" ? 0 : 1;
     }
   }
+  // --model resolves the canonical HF hub cache in $HOME — the deployment
+  // location every node carries; --checkpoint-dir stays for fixtures and
+  // staged dirs.
+  if (!model_id.empty()) {
+    if (!ckpt.empty()) {
+      DGPP_LOG_ERROR("--model and --checkpoint-dir are mutually exclusive");
+      return 1;
+    }
+    std::string err;
+    const std::string snapshot = dgpp::hf::model_dir(model_id, &err);
+    if (snapshot.empty()) {
+      DGPP_LOG_ERROR("--model {}: {}", model_id, err);
+      return 1;
+    }
+    ckpt = snapshot;
+    if (config_path.empty()) config_path = snapshot + "/config.json";
+    DGPP_LOG_INFO("model {} -> {}", model_id, snapshot);
+  }
   if (config_path.empty() || ckpt.empty()) {
     std::fprintf(stderr,
-                 "usage: glm_tp_check --config CONFIG --checkpoint-dir DIR "
+                 "usage: glm_tp_check --model ORG/NAME | --checkpoint-dir DIR "
                  "[--world N --rank R --peer HOST --port N] [--tokens N] "
                  "[--out PREFIX]\n");
     return 1;

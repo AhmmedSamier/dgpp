@@ -33,6 +33,8 @@
 #include <string>
 #include <vector>
 
+#include "common/log.hpp"
+#include "loaders/hf_cache.hpp"
 #include "models/glm_dump.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_route_audit.hpp"
@@ -339,7 +341,7 @@ CaseReport run_case(dgpp::GlmDiagnosticModel& model,
 
 int run(int argc, char** argv) {
   std::string config_path, checkpoint_dir, suite_path, trace_dir;
-  std::string trace_ids_file, trace_out;
+  std::string trace_ids_file, trace_out, model_id;
   int max_layers = -1, max_tokens = -1;
   for (int i = 1; i < argc; ++i) {
     const std::string_view a = argv[i];
@@ -350,6 +352,7 @@ int run(int argc, char** argv) {
     };
     if (a == "--config") config_path = next();
     else if (a == "--checkpoint-dir") checkpoint_dir = next();
+    else if (a == "--model") model_id = next();
     else if (a == "--suite") suite_path = next();
     else if (a == "--trace-dir") trace_dir = next();
     else if (a == "--trace-ids-file") trace_ids_file = next();
@@ -358,11 +361,25 @@ int run(int argc, char** argv) {
     else if (a == "--tokens") max_tokens = std::stoi(std::string(next()));
     else throw std::runtime_error("unknown argument");
   }
+  // --model resolves the canonical HF hub cache in $HOME (the deployment
+  // location); --checkpoint-dir stays for fixtures and staged dirs.
+  if (!model_id.empty()) {
+    if (!checkpoint_dir.empty())
+      throw std::runtime_error("--model and --checkpoint-dir are mutually "
+                               "exclusive");
+    std::string err;
+    const std::string snapshot = dgpp::hf::model_dir(model_id, &err);
+    if (snapshot.empty())
+      throw std::runtime_error("--model " + model_id + ": " + err);
+    checkpoint_dir = snapshot;
+    if (config_path.empty()) config_path = snapshot + "/config.json";
+    DGPP_LOG_INFO("model {} -> {}", model_id, snapshot);
+  }
   if (config_path.empty() || checkpoint_dir.empty())
     throw std::runtime_error(
-        "usage: glm_forward_check --config CONFIG --checkpoint-dir DIR "
-        "(--suite FILE [--trace-dir DIR] | --trace-ids-file FILE "
-        "--trace-out PATH) [--layers N] [--tokens N]");
+        "usage: glm_forward_check --model ORG/NAME | (--config CONFIG "
+        "--checkpoint-dir DIR) (--suite FILE [--trace-dir DIR] | "
+        "--trace-ids-file FILE --trace-out PATH) [--layers N] [--tokens N]");
 
   // Engine-only trace capture: free-run forward over a long prompt (no
   // reference dump — the torch reference is the slow path; trace occupancy

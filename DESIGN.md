@@ -128,6 +128,21 @@ The checked revision contains 62 safetensors shards, 76,108 tensors, and
 checkpoint configuration and headers and emits the authoritative breakdown in
 `docs/checkpoint_budget.md`.
 
+Checkpoint location (deployment decision, M5 exit gates): every node carries
+the full weights in the canonical HuggingFace hub cache inside the user's
+home directory. The application resolves models from there by id —
+`--model unsloth/GLM-5.3-Flash-FP8` on any app — via `loaders/hf_cache`:
+the cache root follows huggingface_hub's own precedence (`$HF_HUB_CACHE`,
+then `$HF_HOME/hub`, then `~/.cache/huggingface/hub`), `refs/main` pins the
+snapshot, and resolution refuses ambiguities (multiple snapshots with no
+ref, a ref whose snapshot is missing) rather than guessing. Snapshots are
+symlink farms into `blobs/`, which mmap and fopen follow transparently —
+the loaders need no cache awareness of their own. `--checkpoint-dir`
+remains for fixtures and staged directories. This retired the
+per-rank-extraction question for the fabric: every rank reads its shard
+directly from its node's cache (the d4 sharded loader touches only its
+own bytes), so no staging copy exists at all.
+
 Main text configuration:
 
 - 45 layers: 34 KDA linear-attention and 11 DSA/MLA layers;

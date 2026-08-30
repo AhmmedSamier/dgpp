@@ -6,7 +6,8 @@
 // themselves is covered by glm_loader_test on a synthetic checkpoint; this
 // run proves the real thing fits the same contract.
 //
-//   glm_stream_check --config <dir>/config.json --checkpoint-dir <dir>
+//   glm_stream_check --model ORG/NAME | (--config <dir>/config.json
+//                                       --checkpoint-dir <dir>)
 //       [--layer N]  (default: every layer + globals)
 #include <algorithm>
 #include <chrono>
@@ -19,13 +20,14 @@
 #include <string_view>
 #include <vector>
 
+#include "loaders/hf_cache.hpp"
 #include "models/glm_config.hpp"
 #include "models/glm_loader.hpp"
 
 namespace {
 
 int run(int argc, char** argv) {
-  std::string config_path, checkpoint_dir;
+  std::string config_path, checkpoint_dir, model_id;
   std::vector<int> only_layers;
   for (int i = 1; i < argc; ++i) {
     std::string_view a = argv[i];
@@ -36,13 +38,28 @@ int run(int argc, char** argv) {
     };
     if (a == "--config") config_path = next();
     else if (a == "--checkpoint-dir") checkpoint_dir = next();
+    else if (a == "--model") model_id = next();
     else if (a == "--layer") only_layers.push_back(std::stoi(std::string(next())));
     else throw std::runtime_error("unknown argument");
   }
+  // --model resolves the canonical HF hub cache in $HOME (the deployment
+  // location); --checkpoint-dir stays for fixtures and staged dirs.
+  if (!model_id.empty()) {
+    if (!checkpoint_dir.empty())
+      throw std::runtime_error("--model and --checkpoint-dir are mutually "
+                               "exclusive");
+    std::string err;
+    const std::string snapshot = dgpp::hf::model_dir(model_id, &err);
+    if (snapshot.empty())
+      throw std::runtime_error("--model " + model_id + ": " + err);
+    checkpoint_dir = snapshot;
+    if (config_path.empty()) config_path = snapshot + "/config.json";
+    std::printf("model: %s -> %s\n", model_id.c_str(), snapshot.c_str());
+  }
   if (config_path.empty() || checkpoint_dir.empty())
     throw std::runtime_error(
-        "usage: glm_stream_check --config CONFIG --checkpoint-dir DIR "
-        "[--layer N ...]");
+        "usage: glm_stream_check --model ORG/NAME | (--config CONFIG "
+        "--checkpoint-dir DIR) [--layer N ...]");
 
   dgpp::GlmTextConfig cfg = dgpp::GlmTextConfig::from_json_file(config_path);
   std::printf("config: %d layers (%d KDA + %d DSA), vocab %d, mtp %s\n",
