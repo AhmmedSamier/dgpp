@@ -301,6 +301,172 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
   }
 }
 
+// The graph twin of the kernel above (§6.2, the decode step's replayed
+// launch sequence). The protocol is identical — snapshot, claim/fold/ack,
+// exit stamp — with three deltas a shared-body refactor forced and the
+// refactor MISCOMPILED (the fold read doorbell cells as payloads at -O3
+// while the mechanical diff was pure renames; the eager kernel is kept
+// verbatim — a validated machine is not a refactoring test bed):
+//   * the generation is READ from the cell (u64 acquire against the arm
+//     step's u64 release — width-matched), never baked: the recorded
+//     launch parameters stay replay-stable while every replay advances
+//     the generation (monotonic, so the previous replay's stale done_seq
+//     can never match this execution);
+//   * the staging rows derive from the generation — row
+//     (gen-1)%stage_ring of each peer's ring — instead of the engine's
+//     precomputed pointers;
+//   * the cell is this node's per-generation cell (the eager kernel's
+//     single ar_ctl is the one-flight case of the same layout).
+__global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
+    BusAllReduceGraphView v, int my_rank, const __nv_bfloat16* src,
+    __nv_bfloat16* dst, uint32_t elems, BusAllReduceCtl* ctl,
+    uint64_t deadline_cycles) {
+  using BlockRef = cuda::atomic_ref<int, cuda::thread_scope_block>;
+  using SysRef = cuda::atomic_ref<uint64_t, cuda::thread_scope_system>;
+
+  cuda::atomic_ref<uint64_t, cuda::thread_scope_system> gen_ref(ctl->gen_seq);
+  const uint32_t gen =
+      static_cast<uint32_t>(gen_ref.load(cuda::memory_order_acquire));
+  const uint32_t row_off =
+      (gen - 1) % v.stage_ring * (v.stage_row_bytes / 2);
+
+  __shared__ int s_got[kBusMaxPeers];  // 0 waiting, 1 claimed+acked
+  __shared__ uint32_t s_seq[kBusMaxPeers];
+  __shared__ size_t s_words[kBusMaxPeers];
+  __shared__ const uint16_t* s_payload[kBusMaxPeers];
+  __shared__ uint64_t s_hash[kConsumerThreads];
+  __shared__ int s_go;    // 0 none, >0 = flat cell index + 1
+  __shared__ int s_stop;  // any exit condition
+  __shared__ int s_failed;
+
+  BlockRef go_ref(s_go);
+  BlockRef stop_ref(s_stop);
+
+  for (int p = 0; p < kBusMaxPeers; ++p) s_got[p] = 0;
+  if (threadIdx.x == 0) {
+    s_stop = 0;
+    s_failed = 0;
+  }
+  __syncthreads();
+
+  // Phase 1 — snapshot the source vector into every peer's staging row
+  // (the generation's row of the peer's ring). Same contract as the eager
+  // kernel's phase 1: the fold overwrites src in place, so each row holds
+  // a copy taken BEFORE the fold — the engine's post reads these.
+  const uint32_t words = elems / 2;
+  for (int p = 0; p < v.send_peers; ++p) {
+    const uint32_t* s = reinterpret_cast<const uint32_t*>(src);
+    uint32_t* d = reinterpret_cast<uint32_t*>(
+        const_cast<uint16_t*>(v.stage_row_base[p] + row_off));
+    for (uint32_t w = threadIdx.x; w < words; w += kConsumerThreads) d[w] = s[w];
+  }
+  __threadfence_system();
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    ctl->stamp_stage = clock64();
+    SysRef ready(ctl->ready_bits);
+    uint64_t bits = 0;
+    for (int p = 0; p < v.send_peers; ++p) bits |= 1ULL << p;
+    ready.store(bits, cuda::memory_order_release);
+  }
+
+  // Phase 2 — wait for every peer's doorbell (identical to eager).
+  const int lat_slots_per_view = v.recv_views > 0 ? v.recv[0].lat_slots : 0;
+  const int total_cells = v.recv_views * lat_slots_per_view;
+  const uint64_t start = clock64();
+  SysRef done_ref(ctl->done_seq);
+  for (;;) {
+    if (threadIdx.x == 0) {
+      go_ref.store(0, cuda::memory_order_relaxed);
+      if (done_ref.load(cuda::memory_order_acquire) == gen ||
+          clock64() - start > deadline_cycles) {
+        stop_ref.store(1, cuda::memory_order_relaxed);
+        s_failed = 1;
+      }
+    }
+    __syncthreads();
+
+    int missing = 0;
+    for (int p = 0; p < v.send_peers; ++p) missing += (s_got[p] == 0);
+    if (missing == 0 || stop_ref.load(cuda::memory_order_relaxed)) break;
+
+    for (int cell = threadIdx.x;
+         cell < total_cells && go_ref.load(cuda::memory_order_relaxed) == 0 &&
+         stop_ref.load(cuda::memory_order_relaxed) == 0;
+         cell += blockDim.x) {
+      const int view_idx = cell / lat_slots_per_view;
+      const int slot = cell % lat_slots_per_view;
+      const int peer = view_idx / v.lanes_per_peer;
+      if (s_got[peer] != 0) continue;
+      const StartSlot* door = &v.recv[view_idx].doorbell_lat[slot];
+      const uint32_t seq =
+          flag_load_acquire(const_cast<uint32_t*>(&door->seq));
+      if (seq == 0) continue;
+      const FlagAck* ack = &v.recv[view_idx].ack_lat[slot];
+      if (seq == ack->seq) continue;  // already consumed
+      int expected = 0;
+      if (go_ref.compare_exchange_strong(expected, cell + 1,
+                                         cuda::memory_order_relaxed,
+                                         cuda::memory_order_relaxed)) {
+        s_seq[peer] = seq;
+        s_words[peer] = door->len / 8;
+      }
+    }
+    __syncthreads();
+
+    const int go = go_ref.load(cuda::memory_order_relaxed);
+    if (go == 0) {
+      flag_poll_pause();
+      continue;
+    }
+
+    const int cell = go - 1;
+    const int view_idx = cell / lat_slots_per_view;
+    const int slot = cell % lat_slots_per_view;
+    const int peer = view_idx / v.lanes_per_peer;
+    const BusRecvView& rv = v.recv[view_idx];
+    const uint64_t* base = rv.payload_lat +
+                           static_cast<size_t>(slot) * (rv.lat_slot_bytes / 8);
+    uint64_t h = 0;
+    for (size_t i = threadIdx.x; i < s_words[peer]; i += kConsumerThreads)
+      h ^= base[i] * kFoldMultiplier;
+    s_hash[threadIdx.x] = h;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      uint64_t total_hash = 0;
+      for (int t = 0; t < kConsumerThreads; ++t) total_hash ^= s_hash[t];
+      FlagAck* ack = &rv.ack_lat[slot];
+      ack->cycles = clock64();
+      ack->hash = total_hash;
+      flag_store_release(&ack->seq, s_seq[peer]);
+      s_payload[peer] = reinterpret_cast<const uint16_t*>(base);
+      s_got[peer] = 1;
+      if (ctl->stamp_first_claim == 0) ctl->stamp_first_claim = clock64();
+    }
+    __syncthreads();
+  }
+
+  // Common exit + fold (identical to eager; the canonical chain).
+  if (s_failed == 0) {
+    const uint16_t* local = reinterpret_cast<const uint16_t*>(src);
+    for (uint32_t i = threadIdx.x; i < elems; i += kConsumerThreads) {
+      float acc = 0.0f;
+      for (int r = 0; r < v.send_peers + 1; ++r) {
+        const uint16_t* vec =
+            r == my_rank ? local : s_payload[r < my_rank ? r : r - 1];
+        acc += bf16_to_f32(vec[i]);
+      }
+      dst[i] = __float2bfloat16(acc);
+    }
+    if (threadIdx.x == 0) ctl->stamp_reduce_done = clock64();
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    ctl->status = s_failed == 0 ? 0 : 1;
+    done_ref.store(gen, cuda::memory_order_release);
+  }
+}
+
 }  // namespace
 
 cudaError_t launch_bus_consumer(const BusRecvView& view,
@@ -311,13 +477,24 @@ cudaError_t launch_bus_consumer(const BusRecvView& view,
 }
 
 cudaError_t launch_bus_allreduce(const BusAllReduceView& v, int my_rank,
-                                  const __nv_bfloat16* src, __nv_bfloat16* dst,
-                                  uint32_t elems, uint32_t ctl_seq,
-                                  BusAllReduceCtl* ctl,
-                                  uint64_t deadline_cycles,
-                                  cudaStream_t stream) {
+                                   const __nv_bfloat16* src, __nv_bfloat16* dst,
+                                   uint32_t elems, uint32_t ctl_seq,
+                                   BusAllReduceCtl* ctl,
+                                   uint64_t deadline_cycles,
+                                   cudaStream_t stream) {
   bus_allreduce_kernel<<<1, kConsumerThreads, 0, stream>>>(
       v, my_rank, src, dst, elems, ctl_seq, ctl, deadline_cycles);
+  return cudaGetLastError();
+}
+
+cudaError_t launch_bus_allreduce_graph(const BusAllReduceGraphView& v,
+                                       int my_rank, const __nv_bfloat16* src,
+                                       __nv_bfloat16* dst, uint32_t elems,
+                                       BusAllReduceCtl* cell,
+                                       uint64_t deadline_cycles,
+                                       cudaStream_t stream) {
+  bus_allreduce_graph_kernel<<<1, kConsumerThreads, 0, stream>>>(
+      v, my_rank, src, dst, elems, cell, deadline_cycles);
   return cudaGetLastError();
 }
 

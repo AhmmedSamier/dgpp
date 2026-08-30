@@ -1003,6 +1003,289 @@ void scenario_allreduce_bulk() {
   DGPP_LOG_INFO("scenario allreduce_bulk: {} total failures", g_failures);
 }
 
+// One rank's share of a graph-era run (§6.2): the decode step's fixed
+// launch sequence — collectives with GEMM-stand-in compute between them —
+// recorded once, replayed per step. Every replay's result must be bitwise
+// the canonical-chain oracle AND the eager machine's bytes (the recorded
+// fold is the same chain; the doorbell/claim machinery is what differs).
+// Returns failures home (CHECK is main-thread-only).
+int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
+                              size_t elems, int gens_per_step, int replays,
+                              const std::vector<uint16_t>* want) {
+  // Loopback discipline: every device op on a private stream; the capture
+  // is ThreadLocal (other rank workers capture concurrently).
+  cudaStream_t stream = nullptr;
+  if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) !=
+      cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: graph stream create failed", my_rank);
+    return 1;
+  }
+  std::vector<uint16_t> host_src;
+  fill_rank_bf16(&host_src, elems, my_rank);
+  uint16_t* dev_src = nullptr;
+  uint16_t* dev_dst = nullptr;
+  float* warm_buf = nullptr;
+  if (cudaMalloc(&dev_src, elems * 2) != cudaSuccess ||
+      cudaMalloc(&dev_dst, elems * 2) != cudaSuccess ||
+      cudaMalloc(&warm_buf, 256 * 4) != cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: graph device alloc failed", my_rank);
+    cudaFree(dev_src);
+    cudaFree(dev_dst);
+    cudaStreamDestroy(stream);
+    return 1;
+  }
+  if (cudaMemcpyAsync(dev_src, host_src.data(), elems * 2,
+                      cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+      cudaMemsetAsync(warm_buf, 0, 256 * 4, stream) != cudaSuccess ||
+      cudaStreamSynchronize(stream) != cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: graph H2D failed", my_rank);
+    cudaFree(dev_src);
+    cudaFree(dev_dst);
+    cudaFree(warm_buf);
+    cudaStreamDestroy(stream);
+    return 1;
+  }
+
+  int failures = 0;
+  auto fail = [&](const std::string& why) {
+    DGPP_LOG_ERROR("rank {}: {}", my_rank, why);
+    ++failures;
+  };
+
+  // ---- eager baseline: the same fold before the era opens ----------------
+  std::vector<uint16_t> eager_bytes(elems, 0);
+  {
+    std::string error;
+    const uint64_t id = bus.allreduce(dev_src, dev_dst, elems, &error);
+    if (id == 0) {
+      fail("eager baseline rejected: " + error);
+    } else {
+      const dgpp::net::BusAllReduceResult r = bus.wait_allreduce(id, 30000);
+      if (!r.ok) {
+        fail("eager baseline failed: " + r.error);
+      } else if (cudaMemcpyAsync(eager_bytes.data(), dev_dst, elems * 2,
+                                 cudaMemcpyDeviceToHost, stream) !=
+                     cudaSuccess ||
+                 cudaStreamSynchronize(stream) != cudaSuccess) {
+        fail("eager baseline D2H failed");
+      }
+    }
+  }
+  if (failures != 0) {
+    cudaFree(dev_src);
+    cudaFree(dev_dst);
+    cudaFree(warm_buf);
+    cudaStreamDestroy(stream);
+    return failures;
+  }
+
+  // ---- contract pins (rank 0, pre-era) -------------------------------------
+  if (my_rank == 0) {
+    std::string error;
+    if (bus.allreduce_record(stream, dev_src, dev_dst, elems, &error) ||
+        error.find("no open graph session") == std::string::npos) {
+      fail("record without an open session not rejected: " + error);
+    }
+    if (bus.graph_replay_arm(&error) ||
+        error.find("no recorded graph") == std::string::npos) {
+      fail("arm without a recorded graph not rejected: " + error);
+    }
+  }
+
+  // ---- capture the step ----------------------------------------------------
+  // G collectives with dependent compute between them (the GEMM stand-in
+  // keeps the clocks honest and forces the stream-order serialization the
+  // walk's one-gen-at-a-time assumption is built on), plus trailing
+  // compute — the decode step's shape.
+  std::string error;
+  if (!bus.graph_record_begin(&error)) {
+    fail("graph_record_begin rejected: " + error);
+  } else {
+    if (my_rank == 0) {
+      std::string pin_error;
+      if (bus.graph_replay_arm(&pin_error) ||
+          pin_error.find("no recorded graph") == std::string::npos)
+        fail("arm during an open session not rejected: " + pin_error);
+    }    cudaGraph_t graph = nullptr;
+    const cudaError_t cap =
+        cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+    if (cap != cudaSuccess) {
+      fail("stream capture begin failed");
+    } else {
+      for (int g = 0; g < gens_per_step; ++g) {
+        dgpp::net::launch_bus_warm_work(stream, warm_buf, 20000);
+        if (!bus.allreduce_record(stream, dev_src, dev_dst, elems, &error)) {
+          fail("allreduce_record rejected: " + error);
+          break;
+        }
+      }
+      dgpp::net::launch_bus_warm_work(stream, warm_buf, 20000);
+    }
+    if (cap == cudaSuccess) {
+      if (cudaStreamEndCapture(stream, &graph) != cudaSuccess || !graph) {
+        fail("stream capture end failed");
+      }
+    }
+    if (failures == 0) {
+      if (!bus.graph_record_end(&error)) {
+        fail("graph_record_end rejected: " + error);
+      }
+    } else {
+      // Close the half-open session so the bus state stays defined; the
+      // run reports the failures above.
+      std::string close_error;
+      bus.graph_record_end(&close_error);
+    }
+
+    // ---- era pins ----------------------------------------------------------
+    if (my_rank == 0 && failures == 0) {
+      std::string pin_error;
+      if (bus.allreduce(dev_src, dev_dst, elems, &pin_error) != 0 ||
+          pin_error.find("graph mode") == std::string::npos)
+        fail("eager allreduce during the graph era not rejected: " +
+             pin_error);
+      if (bus.stage_next(&pin_error) != nullptr ||
+          pin_error.find("graph mode") == std::string::npos)
+        fail("stage_next during the graph era not rejected: " + pin_error);
+      std::vector<uint64_t> payload(8);
+      if (bus.send(world == 2 ? 1 - my_rank : 1, payload.data(), 64,
+                   BusMessageClass::kLatency, &pin_error) != 0 ||
+          pin_error.find("collective mode") == std::string::npos)
+        fail("send during the graph era not rejected: " + pin_error);
+    }
+
+    // ---- replays: warm 2, then measured ------------------------------------
+    cudaGraphExec_t exec = nullptr;
+    if (failures == 0) {
+      if (cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0) !=
+          cudaSuccess) {
+        fail("graph instantiate failed");
+      }
+    }
+    if (exec != nullptr) {
+      std::vector<double> step_us;
+      std::vector<uint16_t> got(elems, 0);
+      for (int replay = 0; replay < 2 + replays && failures == 0; ++replay) {
+        if (!bus.graph_replay_arm(&error)) {
+          fail("arm rejected: " + error);
+          break;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        if (cudaGraphLaunch(exec, stream) != cudaSuccess) {
+          fail("graph launch failed");
+          break;
+        }
+        if (cudaStreamSynchronize(stream) != cudaSuccess) {
+          fail("replay stream sync failed");
+          break;
+        }
+        if (!bus.graph_replay_finish(30000, &error)) {
+          fail("finish rejected: " + error);
+          // TEMP bring-up: the per-gen cells as this rank's engine last
+          // saw them — gen/ready/done/status localize a dead kernel vs a
+          // blind engine instantly.
+          bus.dump_graph_cells("finish");
+          break;
+        }
+        const double us =
+            std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        if (replay >= 2) step_us.push_back(us);
+        // Bitwise: every replay against the oracle AND the eager bytes.
+        if (cudaMemcpyAsync(got.data(), dev_dst, elems * 2,
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+            cudaStreamSynchronize(stream) != cudaSuccess) {
+          fail("replay D2H failed");
+          break;
+        }
+        if (std::memcmp(got.data(), eager_bytes.data(), elems * 2) != 0) {
+          fail("replay " + std::to_string(replay) +
+               " diverged from the eager machine bitwise");
+          break;
+        }
+        if (std::memcmp(got.data(), want->data(), elems * 2) != 0) {
+          fail("replay " + std::to_string(replay) +
+               " diverged from the canonical-chain oracle");
+          break;
+        }
+      }
+      if (failures == 0) {
+        DGPP_LOG_INFO(
+            "rank {}: {} replays x {} gens clean; step p50={:.1f}us "
+            "({:.1f}us per collective)",
+            my_rank, replays, gens_per_step, percentile(step_us, 0.5),
+            percentile(step_us, 0.5) / gens_per_step);
+      }
+      cudaGraphExecDestroy(exec);
+    }
+    if (graph) cudaGraphDestroy(graph);
+  }
+
+  cudaFree(dev_src);
+  cudaFree(dev_dst);
+  cudaFree(warm_buf);
+  cudaStreamDestroy(stream);
+  return failures;
+}
+
+void scenario_allreduce_graph() {
+  // The decode step (§6.2): capture the fixed launch sequence once,
+  // replay it per step. Pins: bitwise vs the oracle and the eager
+  // machine across replays and ring generations, the contract pins
+  // (record/arm/eager/send rejections), and the walk's determinism
+  // across worlds.
+  const size_t elems = 4096;  // 8 KiB, the decode unit
+  int failures = 0;
+  const int gens_per_step = 3;
+  const int replays = 8;
+
+  for (const int world : {2, 4}) {
+    const uint16_t port = world == 2 ? 29906 : 29907;
+    std::vector<std::unique_ptr<CollectiveBus>> world_buses =
+        start_world(world, port);
+    if (world_buses.empty()) {
+      DGPP_LOG_ERROR("graph world {} failed to start", world);
+      ++failures;
+      continue;
+    }
+    std::vector<std::vector<uint16_t>> all_src(static_cast<size_t>(world));
+    for (int r = 0; r < world; ++r)
+      fill_rank_bf16(&all_src[static_cast<size_t>(r)], elems, r);
+    std::vector<uint16_t> want(elems, 0);
+    for (size_t i = 0; i < elems; ++i) {
+      float acc = 0.0f;
+      for (int r = 0; r < world; ++r)
+        acc += dgpp::net::bf16_to_f32(all_src[static_cast<size_t>(r)][i]);
+      want[i] = dgpp::net::bf16_from_f32_rne(acc);
+    }
+    std::vector<std::thread> workers;
+    std::vector<int> rank_failures(static_cast<size_t>(world), 0);
+    for (int r = 0; r < world; ++r)
+      workers.emplace_back([&, r] {
+        rank_failures[static_cast<size_t>(r)] = allreduce_graph_rank_work(
+            *world_buses[static_cast<size_t>(r)], world, r, elems,
+            gens_per_step, replays, &want);
+      });
+    for (auto& t : workers) t.join();
+    int world_failures = 0;
+    for (int r = 0; r < world; ++r) {
+      if (rank_failures[static_cast<size_t>(r)] != 0)
+        DGPP_LOG_ERROR("graph world {} rank {} reported failures", world, r);
+      world_failures += rank_failures[static_cast<size_t>(r)];
+    }
+    CHECK(world_failures == 0,
+          "graph world " + std::to_string(world) + " had " +
+              std::to_string(world_failures) + " failures");
+    for (auto& bus : world_buses) bus->quiesce();
+    for (auto& bus : world_buses) bus->stop();
+    DGPP_LOG_INFO("scenario allreduce_graph: world {} clean", world);
+  }
+
+  g_failures += failures;
+  DGPP_LOG_INFO("scenario allreduce_graph: {} total failures", g_failures);
+}
+
 void scenario_geometry_mismatch() {
   // Config errors must be legible over the rendezvous (roster precedent),
   // never a bare close or a hang.
@@ -1080,6 +1363,7 @@ int main() {
   scenario_allreduce();
   scenario_allreduce_staged();
   scenario_allreduce_bulk();
+  scenario_allreduce_graph();
   scenario_geometry_mismatch();
   scenario_stop_releases_waiters();
 

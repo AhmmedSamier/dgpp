@@ -62,21 +62,31 @@ uint64_t bus_fold(const void* data, size_t bytes);
 // passes treat these messages exactly like harness traffic; the wire
 // protocol is unchanged.
 
-// Pinned 64B handoff cell, one per bus. Published fields, in order:
+// Pinned 64B handoff cell, one per in-flight eager collective (the bus's
+// single ar_ctl) and one per recorded graph generation (the per-gen cell
+// array, §6.2 graph mode). Published fields, in order:
 //   ready_bits — bit p set (release) once peer p's send slot is staged;
 //   done_seq   — the collective's ctl_seq (release) once the kernel is
 //                finished (status 0) or gave up (status 1). The engine
 //                may also write it as a poison to hasten a failed
 //                kernel's exit; the kernel treats any match as an exit.
+//   gen_seq    — graph mode only: this execution's generation, written
+//                (release) by the arm step AFTER the cell is reset. The
+//                replayed kernel acquires it at start and derives its
+//                staging row and its exit match from it — the recorded
+//                launch parameters stay replay-stable while the
+//                generation advances with every replay. Monotonic, so a
+//                stale done_seq from the previous replay never matches.
 struct alignas(64) BusAllReduceCtl {
   uint64_t ready_bits = 0;
   uint64_t done_seq = 0;
+  uint64_t gen_seq = 0;
   // TEMP instrumentation: kernel phase stamps (clock64), cycles 0 if unset
   uint64_t stamp_stage = 0;
   uint64_t stamp_first_claim = 0;
   uint64_t stamp_reduce_done = 0;
   uint32_t status = 0;  // 0 = reduced, 1 = deadline/poison exit
-  uint32_t pad2[5];  // 40 + 4 + 20 = 64
+  uint32_t pad2[3];  // 48 + 4 + 12 = 64
 };
 static_assert(sizeof(BusAllReduceCtl) == 64,
               "BusAllReduceCtl must occupy one cache line");
@@ -101,11 +111,65 @@ struct BusAllReduceView {
 // src aliases dst, the fold runs in place per element (one thread per
 // element, read before write) after snapshotting every peer's send copy.
 cudaError_t launch_bus_allreduce(const BusAllReduceView& v, int my_rank,
-                                  const __nv_bfloat16* src, __nv_bfloat16* dst,
-                                  uint32_t elems, uint32_t ctl_seq,
-                                  BusAllReduceCtl* ctl,
-                                  uint64_t deadline_cycles,
-                                  cudaStream_t stream);
+                                   const __nv_bfloat16* src, __nv_bfloat16* dst,
+                                   uint32_t elems, uint32_t ctl_seq,
+                                   BusAllReduceCtl* ctl,
+                                   uint64_t deadline_cycles,
+                                   cudaStream_t stream);
+
+// ---- graph-captured all-reduce (§6.2 decode path) ----------------------------
+//
+// The decode step is a fixed launch sequence, so the whole step — GEMMs and
+// collectives — records once into a CUDA graph and replays per token. The
+// collective kernel is a graph node like any other; the engine no longer
+// launches it and instead REACTS: per-generation cells (one per recorded
+// collective) carry the kernel->engine handoff, and the engine walks
+// generations the replay produces (§6.3 graph mode).
+//
+// What may be baked at record time and what may not:
+//   stable — the recv views, the staging ROW BASES (the block is pinned
+//            for the bus's lifetime), src/dst device buffers, elems, the
+//            cell pointer, the deadline;
+//   per-execution — the generation. The kernel reads cell->gen_seq at
+//            start (the arm step wrote it, release) and derives its
+//            staging row (gen-1)%kBusMaxGraphStageRing and its exit
+//            match from it. Monotonic generations make replays of the
+//            same node distinct.
+//
+// The engine's posting side (walk): the kernel stages peer rows and
+// releases ready_bits; the engine posts each peer's pair from the row the
+// generation selects, at the lane-0 cursor ring position (the position is
+// deterministic because the graph era is exclusive — harness sends are
+// closed and eager collectives rejected — so every latency post in the
+// era is a graph generation in order). done_seq == gen ends the
+// generation; window completion gates the next arm.
+constexpr int kBusMaxGraphGens = 64;        // recorded nodes per graph
+constexpr int kBusMaxGraphStageRing = 8;    // staging rows (kStageRing)
+
+// The graph twin of BusAllReduceView: staging rows are bases, not
+// precomputed rows — the kernel picks the row at runtime from its
+// generation. `stage_row_base[p]` is peer p's row 0; rows are
+// stage_row_bytes apart, stage_ring deep.
+struct BusAllReduceGraphView {
+  BusRecvView recv[kBusMaxPeers * kBusMaxLanes] = {};  // peer-major
+  int recv_views = 0;
+  int lanes_per_peer = 0;
+  uint16_t* stage_row_base[kBusMaxPeers] = {};
+  int send_peers = 0;
+  uint32_t stage_ring = 0;      // rows per peer (kBusMaxGraphStageRing)
+  uint32_t stage_row_bytes = 0; // == lat_slot_bytes
+};
+
+// Records one collective node onto `stream` (the caller's capturing
+// stream). The same fold as the eager one-shot (canonical rank order),
+// so a graph replay is bitwise the eager result. `cell` is this node's
+// per-generation cell; it must stay allocated for the bus's lifetime.
+cudaError_t launch_bus_allreduce_graph(const BusAllReduceGraphView& v,
+                                       int my_rank, const __nv_bfloat16* src,
+                                       __nv_bfloat16* dst, uint32_t elems,
+                                       BusAllReduceCtl* cell,
+                                       uint64_t deadline_cycles,
+                                       cudaStream_t stream);
 
 // ---- segment-quantized reduce-scatter/allgather (the prefill class) ------
 //

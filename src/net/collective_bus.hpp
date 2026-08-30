@@ -164,13 +164,68 @@ class CollectiveBus {
   // 2(W-1)/W of the buffer (one-shot pays W-1; RS+AG halves it at W=4).
   // Same v1 single-outstanding contract; wait via wait_allreduce().
   uint64_t allreduce_bulk(const void* device_src, void* device_dst,
-                         size_t bf16_elems, std::string* error);
+                          size_t bf16_elems, std::string* error);
 
   // Blocks for the collective; on success the destination is stream-ordered
   // for the caller (one cudaStreamSynchronize after the engine's
   // completion). timeout_ms is a backstop; the engine watchdog owns the
   // lifecycle. Removes the request record.
   BusAllReduceResult wait_allreduce(uint64_t id, int timeout_ms);
+
+  // ---- graph capture (DESIGN §6.2, the decode step) ------------------------
+  //
+  // The decode step is a fixed launch sequence, so it records once into a
+  // CUDA graph and replays per token. The collective kernels become graph
+  // nodes; the engine stops launching them and instead walks the
+  // generations each replay produces (per-gen cells carry the handoff).
+  //
+  // Session (once per bus, v1):
+  //   graph_record_begin()    — open. Requires a quiet bus: no held
+  //                              staging handout, no eager collective in
+  //                              flight or queued, consumers not running.
+  //                              Harness send() closes from here (the
+  //                              graph kernels claim doorbells exactly
+  //                              like eager collectives) and stays closed
+  //                              for the bus's lifetime — one graph era.
+  //   allreduce_record()      — per collective node, between the caller's
+  //                              cudaStreamBeginCapture/EndCapture on the
+  //                              SAME stream. src/dst are device pointers
+  //                              that must stay valid for the bus's
+  //                              lifetime (baked into the graph). Same
+  //                              element contract as allreduce(); results
+  //                              are bitwise the eager machine's.
+  //   graph_record_end()      — close and publish to the engine. At least
+  //                              one node required; at most
+  //                              kBusMaxGraphGens nodes.
+  //
+  // Replay (per step):
+  //   graph_replay_arm()      — reset the per-gen cells, assign the
+  //                              window's monotonic generations (the
+  //                              kernels read them at start), publish the
+  //                              window. Waits (bounded) for the engine to
+  //                              have walked any previous window. Call
+  //                              BEFORE cudaGraphLaunch.
+  //   graph_replay_finish()   — after the replay's work completed (the
+  //                              caller's stream sync is not enough: the
+  //                              engine must observe every generation's
+  //                              done). Waits (bounded) for the walk,
+  //                              verifies statuses, returns the verdict.
+  //
+  // Eager collectives and stage_next() are rejected for the bus's
+  // lifetime once a session opens — the graph era is exclusive (v1).
+  // Any graph failure (a generation exits on deadline/poison, a lane
+  // fails, a post fails) poisons the era: further arm/finish report it.
+  bool graph_record_begin(std::string* error);
+  bool allreduce_record(cudaStream_t capture_stream, const void* device_src,
+                        void* device_dst, size_t bf16_elems,
+                        std::string* error);
+  bool graph_record_end(std::string* error);
+  bool graph_replay_arm(std::string* error);
+  bool graph_replay_finish(int timeout_ms, std::string* error);
+
+  // TEMP bring-up microscope: the per-gen cells' gen/ready/done/status,
+  // failure-only observability for the graph walk.
+  void dump_graph_cells(const char* why);
 
   // Phase 1 of an orderly stop: rejects new submissions, joins the engine
   // (draining outstanding requests), stops the receive consumers via the

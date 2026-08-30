@@ -195,11 +195,13 @@ struct CollectiveBus::Impl {
   // single-outstanding airtight across the submit/engine seam; coll_mode
   // rejects harness sends once the bus is in collective mode (their
   // messages would be claimed — and folded — by a peer's collective
-  // kernel: a silent-corruption class we refuse to ship).
+  // kernel: a silent-corruption class we refuse to ship). Atomic: the
+  // engine writes it at eager pickup, the graph session writes it at
+  // record_begin (a second, non-engine writer — TSan's contract).
   std::mutex coll_mu;
   std::deque<std::shared_ptr<BusRequest>> coll_q;
   std::atomic<bool> coll_active{false};
-  bool coll_mode = false;      // engine-written; send() and intake() gate
+  std::atomic<bool> coll_mode{false};  // send() and intake() gate on it
   bool coll_poisoned = false;  // any collective failure poisons the mode
   cudaStream_t collective_stream = nullptr;
   BusAllReduceCtl* ar_ctl = nullptr;
@@ -236,6 +238,11 @@ struct CollectiveBus::Impl {
   // precede it — the RC per-QP ordering is the reuse fence.
   // Single-outstanding makes it airtight for the eager path.
   static constexpr int kStageRing = 8;
+  // The graph kernel derives its staging row from the generation with this
+  // rotation — the protocol bound is shared through the header so the
+  // recorded launch and the engine's posting agree forever.
+  static_assert(kStageRing == kBusMaxGraphStageRing,
+                "the engine's staging ring must match the graph protocol's");
   uint8_t* stage_block = nullptr;  // [peers + 1][kStageRing][lat_slot_bytes]
   std::vector<ibv_mr*> stage_mrs;  // one per distinct device (lkey source)
   uint8_t* stage_buf(size_t peer, int gen) const {
@@ -287,6 +294,64 @@ struct CollectiveBus::Impl {
   } bulk;
   uint64_t bulk_pairs_posted = 0;     // every bulk post_pair (harness too)
   uint64_t bulk_doorbell_ce_seen = 0;  // retired doorbell WRs (monotonic)
+
+  // ---- graph era (§6.2: the decode step's launch sequence, replayed) ------
+  // One recorded graph per bus (v1): the decode step shape is fixed, and a
+  // second capture would need a second cell set. The era opens at
+  // record_begin and never closes — eager collectives, handouts, and
+  // harness sends are rejected from there on. Thread ownership:
+  //   forward thread — the session fields (coll_mu), arm, finish, poison
+  //                    of the remaining window on stop;
+  //   engine thread  — the walk (graph_pass) and its flight/carrier;
+  //   both           — the window atomics (release publish, acquire adopt)
+  //                    and the failure flag (first-writer-wins).
+  struct GraphState {
+    // Session (forward thread, coll_mu-guarded).
+    bool recording = false;
+    // The engine reads this in fail_lane (a lane failure poisons the
+    // era) with no other synchronization — atomic, relaxed.
+    std::atomic<bool> recorded{false};  // the graph exists: graph era
+    int gens = 0;           // recorded collective nodes (G)
+    struct GenMeta {        // per node; write-once before the era publishes
+      uint32_t elems;       // the post length (bytes = elems*2)
+    };
+    std::vector<GenMeta> meta;
+    // The kernel deadline baked into every recorded launch (computed at
+    // record_begin, outside capture; the cycle-deadline conversion is
+    // per-device and stable).
+    uint64_t deadline_cycles = 0;
+    // Window publication. One counter: window c covers generations
+    // [(c-1)*G+1, c*G] — first/last derive arithmetically, so there is no
+    // pair of loads that could tear. 0 = nothing armed (pre-first-arm).
+    std::atomic<uint64_t> window_count{0};
+    // Engine: the next un-walked generation (monotonic). Arm c+1 waits
+    // for this to reach c*G+1; finish c waits for c*G.
+    std::atomic<uint64_t> walk_pub{0};
+    std::atomic<bool> failed{false};
+    // The era's failure reason (coll_mu-guarded; first failure wins).
+    std::string error;
+    // Engine walk (engine thread only).
+    uint64_t adopted_count = 0;  // window the walk state belongs to
+    uint64_t walk_seq = 0;        // next generation to complete
+    struct Flight {               // at most one generation is un-done at a
+      uint64_t gen = 0;          // time: the graph serializes the kernels
+      uint64_t posted_bits = 0;   // bit p once peer p's pair is posted
+      Clock::time_point progressed_at{};
+      Clock::time_point started_at{};
+      bool active = false;
+    } flight;
+    int stall_dumps = 0;  // TEMP bring-up: rate control for the walk dump
+    // The window's slot-credit carrier: graph posts have no request of
+    // their own, but SendSlot ownership (fail_lane completion, credit
+    // harvest, the in_flight gate) is request-shaped. A per-window
+    // carrier gives the machinery something to hold: unregistered (the
+    // watchdog never times it out), is_collective (credits recycle slots
+    // but never complete it — completion is the walk's business).
+    std::shared_ptr<BusRequest> carrier;
+  } graph;
+  // Per-generation cells, one per recorded node, pinned for the bus's
+  // lifetime (baked into the recorded kernel launches).
+  BusAllReduceCtl* graph_cells = nullptr;
 
   BusRankExchange ex_{};  // our frame, built once during start()
 
@@ -417,6 +482,12 @@ struct CollectiveBus::Impl {
       }
     }
     lane.in_flight_count = 0;
+    // A lane failure in the graph era strands every generation that would
+    // have posted through it (and the peer's kernels waiting on this
+    // side's arrivals). The era is over; the walk's drain-fail path
+    // poisons the window's remaining kernels.
+    if (graph.recorded.load(std::memory_order_relaxed))
+      graph_fail("lane failed: " + reason);
   }
 
   // ---- engine passes ------------------------------------------------------
@@ -464,7 +535,7 @@ struct CollectiveBus::Impl {
   bool intake() {
     bool worked = false;
 
-    if (coll_mode) {
+    if (coll_mode.load(std::memory_order_relaxed)) {
       std::unique_lock<std::mutex> lock(lat_q_mu);
       while (!lat_q.empty()) {
         complete_request(lat_q.front(), false,
@@ -799,6 +870,284 @@ struct CollectiveBus::Impl {
     return worked;
   }
 
+  // ---- graph walk (§6.2, engine thread) ----------------------------------
+  // Reacts to the generations a replayed graph produces. Stream order
+  // serializes the recorded kernels, so at most one generation is un-done
+  // at a time: a single-flight state machine — post each peer's pair when
+  // the kernel's staging lands, advance the walk on its done stamp. The
+  // window atomics are the only cross-thread state (arm publishes,
+  // release; the walk adopts, acquire — the per-gen cells and the node
+  // metadata become visible through that chain).
+
+  // First-writer-wins era failure. The error string rides under coll_mu
+  // (the engine already takes it at collective pickup; failure paths are
+  // rare, never hot).
+  void graph_fail(const std::string& why) {
+    bool expected = false;
+    if (graph.failed.compare_exchange_strong(expected, true)) {
+      {
+        std::lock_guard<std::mutex> lock(coll_mu);
+        graph.error = why;
+      }
+      DGPP_LOG_ERROR("bus graph era failed: {}", why);
+    }
+  }
+
+  // Stop-path drain of a live window: the engine is joined (its walk
+  // state is safe to read), so stamp every un-walked generation's done
+  // cell — the replayed kernels exit promptly when the caller syncs its
+  // stream (they run there, not on the collective stream) and stamp
+  // their own failure statuses. A completed window poisons nothing.
+  void poison_live_graph_window() {
+    if (!graph.recorded.load(std::memory_order_relaxed)) return;
+    const uint64_t count =
+        graph.window_count.load(std::memory_order_relaxed);
+    if (count == 0) return;
+    const uint64_t gens = static_cast<uint64_t>(graph.gens);
+    if (graph.walk_seq > count * gens) return;  // window already walked
+    const uint64_t first = (count - 1) * gens + 1;
+    for (uint64_t s = std::max(graph.walk_seq, first); s <= count * gens;
+         ++s) {
+      BusAllReduceCtl* cell = &graph_cells[(s - 1) % gens];
+      __atomic_store_n(&cell->done_seq, s, __ATOMIC_RELEASE);
+    }
+    graph_fail("bus stopped with a graph window in flight");
+  }
+
+  bool graph_pass() {
+    const uint64_t count = graph.window_count.load(std::memory_order_acquire);
+    if (count == 0) return false;  // recorded but never armed
+    bool worked = false;
+    const uint64_t gens = static_cast<uint64_t>(graph.gens);
+
+    if (count != graph.adopted_count) {
+      // A fresh window. Arm waited for the previous walk, so the walk
+      // sequence continues without gaps; a mismatch is a protocol break.
+      if (graph.failed.load(std::memory_order_relaxed)) return false;
+      const uint64_t first = (count - 1) * gens + 1;
+      const bool first_ever = graph.walk_seq == 0;
+      if (first_ever ? first != 1 : graph.walk_seq != first) {
+        graph_fail("graph window armed out of walk order (protocol)");
+        return true;
+      }
+      graph.adopted_count = count;
+      graph.walk_seq = first;
+      graph.flight = {};
+      graph.stall_dumps = 0;  // microscope rate control, per window
+      // Quiescence snapshot (the RNR-freeze tripwire, observability form):
+      // at adopt every kernel of the previous window exited (walk complete
+      // implies every claim acked), so every latency door cell should read
+      // consumed (door.seq == ack.seq). An unconsumed doorbell here is the
+      // precursor of the ring-recycle freeze — the receive queue drains
+      // over the next wrap and the wrap's last sender RNR-retries forever
+      // (a once-in-~30k-gen stall, unreproduced but not forgiven). NOT an
+      // era failure: the peer's engine may already be posting this window
+      // (its adopt precedes its posts too, but its doorbell can land
+      // between this pass's door and ack reads — door=ack+1 mid-flight is
+      // a legal observation); the snapshot goes to the log, and the stall
+      // microscope plus the lane watchdog own the verdict if the real
+      // freeze follows.
+      for (size_t p = 0; p < peer_ranks.size(); ++p) {
+        const BusRecvView view = recv_view_of(peers[p][0]);
+        for (int s = 0; s < opt.lat_slots; ++s) {
+          const uint32_t door =
+              acquire_u32(&view.doorbell_lat[s].seq);
+          const uint32_t ack = acquire_u32(&view.ack_lat[s].seq);
+          if (door != ack) {
+            std::string lanes;
+            for (int s2 = 0; s2 < opt.lat_slots; ++s2)
+              lanes += std::to_string(
+                           acquire_u32(&view.doorbell_lat[s2].seq)) +
+                       "/" +
+                       std::to_string(acquire_u32(&view.ack_lat[s2].seq)) +
+                       ",";
+            DGPP_LOG_INFO(
+                "graph adopt quiescence note: peer {} lane 0 slot {} "
+                "door={} ack={} (mid-flight ok; freeze precursor if it "
+                "persists) cells {}",
+                peer_ranks[p], s, door, ack, lanes);
+            break;  // one note per peer is enough state
+          }
+        }
+      }
+      // The window's slot-credit carrier (see GraphState): gives the
+      // posts request-shaped ownership without a registry entry.
+      auto carrier = std::make_shared<BusRequest>();
+      carrier->cls = BusMessageClass::kLatency;
+      carrier->peer_rank = -1;
+      carrier->is_collective = true;
+      carrier->stripe_hashes.assign(peer_ranks.size(), 0);
+      graph.carrier = std::move(carrier);
+      worked = true;
+    } else if (graph.walk_seq > count * gens) {
+      return false;  // window walked; awaiting the next arm
+    }
+
+    if (graph.failed.load(std::memory_order_relaxed)) {
+      // Drain-fail: poison every un-walked generation so the replay's
+      // remaining kernels exit promptly (each treats the done stamp as
+      // an exit and stamps its own failure status). finish reports.
+      const uint64_t last = count * gens;
+      for (uint64_t s = graph.walk_seq; s <= last; ++s) {
+        BusAllReduceCtl* cell =
+            &graph_cells[(s - 1) % gens];
+        __atomic_store_n(&cell->done_seq, s, __ATOMIC_RELEASE);
+      }
+      graph.walk_seq = last + 1;
+      graph.walk_pub.store(graph.walk_seq, std::memory_order_release);
+      graph.flight = {};
+      return true;
+    }
+
+    // The current generation: cell (gen-1)%gens. At most one kernel is
+    // un-done at a time (the graph serializes them), so the walk's view
+    // of the cell is exclusive.
+    const uint64_t gen = graph.walk_seq;
+    BusAllReduceCtl* const cell = &graph_cells[(gen - 1) % gens];
+    const uint32_t seq = static_cast<uint32_t>(gen);
+    const uint64_t ready = acquire_u64(&cell->ready_bits);
+    const uint64_t done = acquire_u64(&cell->done_seq);
+
+    // The flight activates BEFORE the done check: a fast peer can stamp
+    // this kernel's done within one engine pass of its ready (the fold
+    // waits on the PEER's doorbell, not this side's own post — done does
+    // NOT imply posted), and the advance below requires the posting mask
+    // complete. A generation whose pair is still ring-deferred parks
+    // here until the drain; advancing first would strand the peer's
+    // kernel on a doorbell that never comes (measured: posts 131/132
+    // with the peer's last generation spinning 5s on the missing one).
+    if (!graph.flight.active) {
+      graph.flight.gen = gen;
+      graph.flight.posted_bits = 0;
+      graph.flight.started_at = Clock::now();
+      graph.flight.progressed_at = Clock::now();
+      graph.flight.active = true;
+      worked = true;
+    }
+
+    if (done == seq) {
+      // The kernel stamped (or a poison matched). A nonzero status is an
+      // era failure regardless of posting; the drain-fail branch poisons
+      // the window's remainder on the next iteration.
+      if (acquire_u32(&cell->status) != 0) {
+        graph_fail("graph generation " + std::to_string(seq) +
+                   " exited on deadline or poison");
+        return true;
+      }
+      if (graph.flight.posted_bits == all_peers_mask()) {
+        ++graph.walk_seq;
+        graph.walk_pub.store(graph.walk_seq, std::memory_order_release);
+        record_latency(BusMessageClass::kLatency,
+                       elapsed_us(graph.flight.started_at));
+        graph.flight = {};
+        return true;
+      }
+      // else: posting not drained — fall through, post, advance next pass.
+    }
+
+    // TEMP bring-up microscope: a flight that has not progressed in 500ms
+    // dumps the walk state once per 500ms — what THIS thread's acquire
+    // loads return, versus the test thread's post-mortem dump. Lane 0 is
+    // the graph posting lane; its door/ack/in-flight cells adjudicate a
+    // lost doorbell (RNR retry shows as seq stuck ahead of ack).
+    if (Clock::now() - graph.flight.progressed_at >
+        std::chrono::milliseconds(500 + 500 * graph.stall_dumps)) {
+      ++graph.stall_dumps;
+      std::string cells;
+      for (int g = 0; g < graph.gens; ++g) {
+        const BusAllReduceCtl& c = graph_cells[g];
+        cells += " [" + std::to_string(g) + "]g=" +
+                 std::to_string(acquire_u64(&c.gen_seq)) + ",r=" +
+                 std::to_string(acquire_u64(&c.ready_bits)) + ",d=" +
+                 std::to_string(acquire_u64(&c.done_seq)) + ",s=" +
+                 std::to_string(acquire_u32(&c.status));
+      }
+      std::string lanes;
+      for (size_t p = 0; p < peer_ranks.size(); ++p) {
+        const BusRecvView view = recv_view_of(peers[p][0]);
+        lanes += " p" + std::to_string(peer_ranks[p]) + "l0:d/a/s!";
+        for (int s = 0; s < opt.lat_slots; ++s)
+          lanes += std::to_string(acquire_u32(
+                       &view.doorbell_lat[s].seq)) +
+                   "/" + std::to_string(acquire_u32(&view.ack_lat[s].seq)) +
+                   (peers[p][0].send[0][s].in_flight ? "!" : ".") + ",";
+      }
+      DGPP_LOG_INFO(
+          "graph walk STALLED gen={} posted={:#x} cell[{}]@{} window={} "
+          "adopted={} walk={}{}{}",
+          gen, graph.flight.posted_bits, (gen - 1) % gens,
+          static_cast<const void*>(&graph_cells[(gen - 1) % gens]),
+          count, graph.adopted_count, graph.walk_seq, cells, lanes);
+    }
+
+    // Posting: the kernel staged its peer rows (ready bits landed); post
+    // each peer's payload+doorbell pair from the generation's staging
+    // row. Deterministic positions — lane 0, the cursor's ring position
+    // (the (ctl_seq-1)%lat_slots claim; the cursor IS that ordinal under
+    // the era's exclusivity: every latency post in the era is a graph
+    // generation, in order, so the cursor and the claim never diverge
+    // and a later eager era — if ever opened — stays ring-aligned).
+    if (graph.flight.posted_bits != all_peers_mask() && ready != 0) {
+      const uint32_t elems =
+          graph.meta[(gen - 1) % gens].elems;
+      for (size_t p = 0; p < peer_ranks.size(); ++p) {
+        if ((graph.flight.posted_bits >> p) & 1) continue;
+        if (!((ready >> p) & 1)) continue;  // row not staged (belt+braces)
+        LaneState& lane = peers[p][0];  // deterministic lane 0
+        const uint32_t slot = lane.cursor[0];
+        SendSlot& ss = lane.send[0][slot];
+        if (ss.in_flight) break;  // ring position busy; retry next pass
+        const uint32_t pair_seq = ss.gen + 1;
+        // The row the kernel wrote: generation g stages ring slot
+        // (g-1)%kStageRing — the eager machine's rotation.
+        const uint8_t* row =
+            stage_buf(p, static_cast<int>((gen - 1) % Impl::kStageRing));
+        std::string error;
+        if (!lane.lane->post_send_pair(
+                BusPool::kLatency, slot, pair_seq,
+                static_cast<uint32_t>(elems) * 2, &error, row,
+                lane.stage_lkey)) {
+          fail_lane(lane, error);
+          graph_fail("graph post failed: " + error);
+          return true;
+        }
+        ss.gen = pair_seq;
+        ss.in_flight = true;
+        ss.owner = graph.carrier;
+        ss.owner_stripe = p;
+        ++lane.in_flight_count;
+        lane.cursor[0] = (slot + 1) % static_cast<uint32_t>(opt.lat_slots);
+        ++lane.stats.posts;
+        lane.stats.bytes_sent += elems * 2;
+        ++graph.carrier->outstanding;
+        graph.flight.posted_bits |= 1ULL << p;
+        graph.flight.progressed_at = Clock::now();
+        worked = true;
+        DGPP_LOG_DEBUG("graph stripe: gen={} peer={} lane=0 slot={} seq={}",
+                       seq, peer_ranks[p], slot, pair_seq);
+      }
+    }
+
+    // The flight watchdog: graph generations carry no registry entry, so
+    // the request watchdog cannot see them — the flight keeps its own
+    // budget (the same completion timeout; long intra-graph compute is a
+    // caller configuration concern). The lane watchdog covers a dead
+    // peer's unreturned credits independently.
+    if (Clock::now() - graph.flight.progressed_at >
+        std::chrono::milliseconds(opt.completion_timeout_ms)) {
+      graph_fail("graph generation " + std::to_string(seq) +
+                 " stalled (no engine progress for " +
+                 std::to_string(opt.completion_timeout_ms) + " ms)");
+      return true;
+    }
+    return worked;
+  }
+
+  uint64_t all_peers_mask() const {
+    const size_t peers = peer_ranks.size();
+    return peers >= 64 ? ~0ULL : ((1ULL << peers) - 1);
+  }
+
   bool collective_pass() {
     bool worked = false;
 
@@ -808,7 +1157,7 @@ struct CollectiveBus::Impl {
         coll.req = coll_q.front();
         coll_q.pop_front();
         coll_active.store(true, std::memory_order_relaxed);
-        coll_mode = true;  // engine-owned; send()/intake() gate on it
+        coll_mode.store(true, std::memory_order_relaxed);  // engine-owned
         coll.launched_at = Clock::now();  // flight clock starts at pickup
       }
     }
@@ -1321,20 +1670,31 @@ struct CollectiveBus::Impl {
     if (!lat_q.empty()) return false;
     std::lock_guard<std::mutex> bq(bulk_q_mu);
     if (!bulk_q.empty()) return false;
-    return total_outstanding() == 0;
+    if (total_outstanding() != 0) return false;
+    // A live graph window keeps the engine alive: the walk must drain
+    // (quiesce's poison path handles the deliberate-stop case). The
+    // acquire pairs with arm's window publish, so the gens read is
+    // ordered behind the session that set it.
+    const uint64_t count = graph.window_count.load(std::memory_order_acquire);
+    if (count > 0 &&
+        graph.walk_seq <= count * static_cast<uint64_t>(graph.gens))
+      return false;
+    return true;
   }
 
   void engine_loop() {
     int idle = 0;
     for (;;) {
       if (stopping.load(std::memory_order_relaxed) && drained()) break;
+      const bool graph_worked = graph_pass();
       const bool coll_worked = collective_pass();
       const bool worked = intake();
       const bool polled = poll_cqs();
       const bool recycled = recycle_pass();
       const bool credited = credits_pass();
       const bool watched = watchdog_pass();
-      if (coll_worked || worked || polled || recycled || credited || watched) {
+      if (graph_worked || coll_worked || worked || polled || recycled ||
+          credited || watched) {
         idle = 0;
       } else if (++idle > kEngineSpinIterations) {
         std::this_thread::sleep_for(
@@ -1809,6 +2169,9 @@ bool CollectiveBus::start(std::string* error) {
   // Collective-mode plumbing (§6.3): the shared control cell and the
   // stream that serializes per-collective kernels. Allocated regardless of
   // use — two pointers and one cache line, and teardown stays symmetric.
+  // The graph era's per-generation cells ride along: kBusMaxGraphGens
+  // cache lines, pinned for the bus's lifetime (baked into recorded
+  // kernel launches).
   {
     const cudaError_t ctl_err =
         cudaMallocHost(reinterpret_cast<void**>(&impl.ar_ctl),
@@ -1819,13 +2182,27 @@ bool CollectiveBus::start(std::string* error) {
       return false;
     }
     *impl.ar_ctl = BusAllReduceCtl{};
+    const cudaError_t cells_err = cudaMallocHost(
+        reinterpret_cast<void**>(&impl.graph_cells),
+        kBusMaxGraphGens * sizeof(BusAllReduceCtl));
+    if (cells_err != cudaSuccess || impl.graph_cells == nullptr) {
+      cudaFreeHost(impl.ar_ctl);
+      impl.ar_ctl = nullptr;
+      *error = std::string("graph generation cells alloc failed: ") +
+               cudaGetErrorString(cells_err);
+      return false;
+    }
+    for (int i = 0; i < kBusMaxGraphGens; ++i)
+      impl.graph_cells[i] = BusAllReduceCtl{};
     const cudaError_t stream_err = cudaStreamCreateWithFlags(
         &impl.collective_stream, cudaStreamNonBlocking);
     if (stream_err != cudaSuccess) {
+      cudaFreeHost(impl.graph_cells);
+      impl.graph_cells = nullptr;
       cudaFreeHost(impl.ar_ctl);
       impl.ar_ctl = nullptr;
       *error = std::string("collective stream create failed: ") +
-               cudaGetErrorString(stream_err);
+                cudaGetErrorString(stream_err);
       return false;
     }
   }
@@ -1883,7 +2260,7 @@ uint64_t CollectiveBus::send(int peer_rank, const void* data, size_t bytes,
     *error = "bus is stopped";
     return 0;
   }
-  if (impl.coll_mode) {
+  if (impl.coll_mode.load(std::memory_order_relaxed)) {
     *error = "bus is in collective mode; send() is closed (a peer's "
              "collective kernel would fold harness traffic into a reduce)";
     return 0;
@@ -1974,6 +2351,11 @@ void* CollectiveBus::stage_next(std::string* error) {
       *error = "an earlier collective failed; this bus must be restarted";
       return nullptr;
     }
+    if (impl.graph.recorded.load(std::memory_order_relaxed) ||
+        impl.graph.recording) {
+      *error = "bus is in graph mode; stage_next() is closed (v1)";
+      return nullptr;
+    }
     if (impl.stage_held_ptr != nullptr) {
       *error = "one pre-stage handout at a time (consume it with "
                "allreduce_staged())";
@@ -2025,6 +2407,11 @@ uint64_t CollectiveBus::allreduce_staged(size_t bf16_elems,
     std::lock_guard<std::mutex> lock(impl.coll_mu);
     if (impl.coll_poisoned) {
       *error = "an earlier collective failed; this bus must be restarted";
+      return 0;
+    }
+    if (impl.graph.recorded.load(std::memory_order_relaxed) ||
+        impl.graph.recording) {
+      *error = "bus is in graph mode; eager collectives are closed (v1)";
       return 0;
     }
     if (impl.stage_held_ptr == nullptr) {
@@ -2091,6 +2478,11 @@ uint64_t CollectiveBus::allreduce(const void* device_src, void* device_dst,
       *error = "an earlier collective failed; this bus must be restarted";
       return 0;
     }
+    if (impl.graph.recorded.load(std::memory_order_relaxed) ||
+        impl.graph.recording) {
+      *error = "bus is in graph mode; eager collectives are closed (v1)";
+      return 0;
+    }
     if (impl.stage_held_ptr != nullptr) {
       // A device-source collective would stage over the held handout's
       // buffer (the GEMM already wrote it) — the held handout owns its
@@ -2152,6 +2544,11 @@ uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
     std::lock_guard<std::mutex> lock(impl.coll_mu);
     if (impl.coll_poisoned) {
       *error = "an earlier collective failed; this bus must be restarted";
+      return 0;
+    }
+    if (impl.graph.recorded.load(std::memory_order_relaxed) ||
+        impl.graph.recording) {
+      *error = "bus is in graph mode; eager collectives are closed (v1)";
       return 0;
     }
     if (impl.stage_held_ptr != nullptr) {
@@ -2259,6 +2656,281 @@ BusAllReduceResult CollectiveBus::wait_allreduce(uint64_t id,
   return result;
 }
 
+// ---- graph capture (DESIGN §6.2, the decode step) ---------------------------
+
+// Bounded spin-then-sleep join on a graph walk predicate: the walk trails
+// the kernels by one engine poll cadence (microseconds when healthy), so
+// the spin phase is the whole story; the sleep phase and the backstop are
+// for a wedged engine — and to fail legibly instead of hanging forever.
+bool CollectiveBus::graph_replay_arm(std::string* error) {
+  Impl& impl = *impl_;
+  if (impl.stopping.load(std::memory_order_relaxed)) {
+    *error = "bus is stopped";
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    if (impl.graph.failed.load(std::memory_order_relaxed)) {
+      *error = "graph era failed: " + impl.graph.error;
+      return false;
+    }
+    if (!impl.graph.recorded.load(std::memory_order_relaxed) ||
+        impl.graph.recording) {
+      *error = "no recorded graph (open and close a session first)";
+      return false;
+    }
+    const int gens = impl.graph.gens;
+
+    // Wait for the engine to walk any previous window. Arm c+1 is gated
+    // on walk_pub reaching c*G+1 — the previous window's last generation
+    // plus one. First arm (no window) skips the wait.
+    const uint64_t prev =
+        impl.graph.window_count.load(std::memory_order_relaxed);
+    const uint64_t need = prev == 0 ? 0 : prev * gens + 1;
+    const auto deadline =
+        Clock::now() + std::chrono::milliseconds(std::max(
+                           options_.completion_timeout_ms + 5000, 30000));
+    while (impl.graph.walk_pub.load(std::memory_order_acquire) < need) {
+      if (impl.graph.failed.load(std::memory_order_relaxed)) {
+        *error = "graph era failed while arming: " + impl.graph.error;
+        return false;
+      }
+      if (impl.stopping.load(std::memory_order_relaxed)) {
+        *error = "bus stopped while arming";
+        return false;
+      }
+      if (Clock::now() > deadline) {
+        *error = "arm backstop: engine did not walk the previous window";
+        return false;
+      }
+      cpu_relax();
+    }
+
+    // Reset the cells and assign the window's generations. The gen_seq
+    // store is RELEASE and last per cell: the kernel's acquire read of it
+    // orders the resets ahead of its execution (monotonicity also means
+    // a previous replay's stale done stamp can never match this one).
+    const uint64_t first = prev * gens + 1;
+    for (int g = 0; g < gens; ++g) {
+      BusAllReduceCtl* cell = &impl.graph_cells[g];
+      __atomic_store_n(&cell->ready_bits, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&cell->done_seq, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&cell->status, 0, __ATOMIC_RELAXED);
+      cell->stamp_stage = 0;
+      cell->stamp_first_claim = 0;
+      cell->stamp_reduce_done = 0;
+      __atomic_store_n(&cell->gen_seq, first + g, __ATOMIC_RELEASE);
+    }
+    // Publish the window LAST: window_count's release makes every cell
+    // write and the node metadata visible to the engine's acquire.
+    impl.graph.window_count.fetch_add(1, std::memory_order_release);
+  }
+  return true;
+}
+
+bool CollectiveBus::graph_replay_finish(int timeout_ms, std::string* error) {
+  Impl& impl = *impl_;
+  if (impl.stopping.load(std::memory_order_relaxed)) {
+    *error = "bus is stopped";
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    if (!impl.graph.recorded.load(std::memory_order_relaxed)) {
+      *error = "no recorded graph";
+      return false;
+    }
+    if (impl.graph.failed.load(std::memory_order_relaxed)) {
+      *error = "graph era failed: " + impl.graph.error;
+      return false;
+    }
+  }
+  const uint64_t count = impl.graph.window_count.load(std::memory_order_acquire);
+  if (count == 0) {
+    *error = "no armed window (arm before finish)";
+    return false;
+  }
+  const int gens = impl.graph.gens;
+  const uint64_t need = count * gens;
+  const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (impl.graph.walk_pub.load(std::memory_order_acquire) < need) {
+    if (impl.graph.failed.load(std::memory_order_relaxed)) {
+      std::lock_guard<std::mutex> lock(impl.coll_mu);
+      *error = "graph era failed: " + impl.graph.error;
+      return false;
+    }
+    if (impl.stopping.load(std::memory_order_relaxed)) {
+      *error = "bus stopped mid-walk";
+      return false;
+    }
+    if (Clock::now() > deadline) {
+      *error = "finish backstop: engine did not walk the window (the "
+               "watchdog should have failed the era first)";
+      return false;
+    }
+    cpu_relax();
+  }
+  return true;
+}
+
+bool CollectiveBus::graph_record_begin(std::string* error) {
+  Impl& impl = *impl_;
+  if (impl.stopping.load(std::memory_order_relaxed)) {
+    *error = "bus is stopped";
+    return false;
+  }
+  if (impl.consumers_launched) {
+    *error = "graph mode requires launch_consumers=false (persistent "
+             "harness consumers would race the collective kernels)";
+    return false;
+  }
+  if (impl.coll_poisoned || impl.graph.failed.load(std::memory_order_relaxed)) {
+    *error = "an earlier collective failed; this bus must be restarted";
+    return false;
+  }
+  // The kernel deadline, computed before anything records (every launch
+  // bakes it) and outside any capture — attribute queries during capture
+  // are best avoided.
+  if (impl.graph.deadline_cycles == 0) {
+    int clock_khz = 0;
+    if (cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, 0) !=
+            cudaSuccess ||
+        clock_khz <= 0) {
+      *error = "could not read device clock rate for the graph deadline";
+      return false;
+    }
+    impl.graph.deadline_cycles = static_cast<uint64_t>(
+        static_cast<double>(clock_khz) * 1000.0 *
+        options_.consumer_deadline_s);
+  }
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    if (impl.graph.recording || impl.graph.recorded.load(std::memory_order_relaxed)) {
+      *error = "one graph session per bus (v1)";
+      return false;
+    }
+    if (impl.stage_held_ptr != nullptr) {
+      *error = "a pre-stage handout is held; consume it before opening a "
+               "graph session";
+      return false;
+    }
+    if (impl.coll_active.load(std::memory_order_relaxed) ||
+        !impl.coll_q.empty()) {
+      *error = "no graph session while an eager collective is in flight (v1)";
+      return false;
+    }
+    impl.graph.recording = true;
+    impl.graph.gens = 0;
+    impl.graph.meta.clear();
+    // Close the harness send path for the era: the recorded kernels claim
+    // doorbells exactly like eager collectives, and a harness message
+    // would be folded into a reduce — the silent-corruption class.
+    impl.coll_mode.store(true, std::memory_order_relaxed);
+  }
+  return true;
+}
+
+bool CollectiveBus::allreduce_record(cudaStream_t capture_stream,
+                                     const void* device_src, void* device_dst,
+                                     size_t bf16_elems, std::string* error) {
+  Impl& impl = *impl_;
+  if (bf16_elems == 0 || bf16_elems % 2 != 0 ||
+      bf16_elems * 2 > options_.lat_slot_bytes) {
+    *error = "graph collective element count must be a positive multiple of 2 "
+             "and fit a latency slot (at most " +
+             std::to_string(options_.lat_slot_bytes / 2) + " bf16)";
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(impl.coll_mu);
+  if (!impl.graph.recording) {
+    *error = "no open graph session (call graph_record_begin first)";
+    return false;
+  }
+  if (impl.graph.gens >= kBusMaxGraphGens) {
+    *error = "graph generation budget exceeded (" +
+             std::to_string(kBusMaxGraphGens) + " collective nodes)";
+    return false;
+  }
+
+  // The replay-stable view: everything baked here must outlive the graph.
+  // The recv slabs and the staging block are pinned for the bus's
+  // lifetime; src/dst are the caller's contract (documented).
+  BusAllReduceGraphView v{};
+  int vi = 0;
+  for (size_t p = 0; p < impl.peer_ranks.size(); ++p)
+    for (const Impl::LaneState& lane : impl.peers[p])
+      v.recv[vi++] = impl.recv_view_of(lane);
+  v.recv_views = vi;
+  v.lanes_per_peer = static_cast<int>(impl.lane_count());
+  for (size_t p = 0; p < impl.peer_ranks.size(); ++p)
+    v.stage_row_base[p] =
+        reinterpret_cast<uint16_t*>(impl.stage_buf(p, 0));
+  v.send_peers = static_cast<int>(impl.peer_ranks.size());
+  v.stage_ring = Impl::kStageRing;
+  v.stage_row_bytes = static_cast<uint32_t>(options_.lat_slot_bytes);
+
+  const cudaError_t launch = launch_bus_allreduce_graph(
+      v, options_.my_rank,
+      static_cast<const __nv_bfloat16*>(device_src),
+      static_cast<__nv_bfloat16*>(device_dst),
+      static_cast<uint32_t>(bf16_elems),
+      &impl.graph_cells[impl.graph.gens], impl.graph.deadline_cycles,
+      capture_stream);
+  if (launch != cudaSuccess) {
+    *error = std::string("graph collective kernel launch failed: ") +
+             cudaGetErrorString(launch);
+    return false;
+  }
+  impl.graph.meta.push_back(
+      Impl::GraphState::GenMeta{static_cast<uint32_t>(bf16_elems)});
+  ++impl.graph.gens;
+  return true;
+}
+
+bool CollectiveBus::graph_record_end(std::string* error) {
+  Impl& impl = *impl_;
+  std::lock_guard<std::mutex> lock(impl.coll_mu);
+  if (!impl.graph.recording) {
+    *error = "no open graph session";
+    return false;
+  }
+  if (impl.graph.gens == 0) {
+    impl.graph.recording = false;
+    impl.coll_mode.store(false, std::memory_order_relaxed);
+    *error = "no collectives recorded (call allreduce_record at least once)";
+    return false;
+  }
+  impl.graph.recording = false;
+  // Publish the era: the engine reads gens/meta only after an arm, which
+  // is happens-after this store through the same thread's window_count
+  // release. A failed end (empty session) reopens the bus above.
+  impl.graph.recorded.store(true, std::memory_order_relaxed);
+  DGPP_LOG_INFO("bus graph era: {} collective node(s) recorded",
+                impl.graph.gens);
+  return true;
+}
+
+void CollectiveBus::dump_graph_cells(const char* why) {
+  Impl& impl = *impl_;
+  const int gens = impl.graph.gens;
+  if (gens == 0 || impl.graph_cells == nullptr) return;
+  std::string cells;
+  for (int g = 0; g < gens; ++g) {
+    const BusAllReduceCtl& c = impl.graph_cells[g];
+    cells += " [" + std::to_string(g) + "]g=" +
+             std::to_string(acquire_u64(&c.gen_seq)) + ",r=" +
+             std::to_string(acquire_u64(&c.ready_bits)) + ",d=" +
+             std::to_string(acquire_u64(&c.done_seq)) + ",s=" +
+             std::to_string(acquire_u32(&c.status));
+  }
+  DGPP_LOG_INFO("graph cells ({}): walk={} window={} adopted={}{}", why,
+                impl.graph.walk_pub.load(std::memory_order_relaxed),
+                impl.graph.window_count.load(std::memory_order_relaxed),
+                impl.graph.adopted_count, cells);
+}
+
 void CollectiveBus::quiesce() {
   Impl& impl = *impl_;
   std::lock_guard<std::mutex> lock(impl.stop_mu);
@@ -2273,6 +2945,7 @@ void CollectiveBus::quiesce() {
   // poisoned the cell, or it completed normally — either way this stamp
   // is idempotent and merely hastens the exit.
   if (impl.coll.req) impl.poison_collective(*impl.coll.req);
+  impl.poison_live_graph_window();
   if (impl.collective_stream) {
     cudaStreamSynchronize(impl.collective_stream);
     cudaStreamDestroy(impl.collective_stream);
@@ -2309,6 +2982,7 @@ void CollectiveBus::stop() {
     if (impl.engine.joinable()) impl.engine.join();
 
     if (impl.coll.req) impl.poison_collective(*impl.coll.req);
+    impl.poison_live_graph_window();
     if (impl.collective_stream) {
       cudaStreamSynchronize(impl.collective_stream);
       cudaStreamDestroy(impl.collective_stream);
@@ -2343,10 +3017,17 @@ void CollectiveBus::stop() {
 
   // Lane teardown (QP -> CQ -> MR -> slab) and device close. All consumer
   // kernels must be dead by here: cudaFreeHost synchronizes the device
-  // implicitly and would otherwise wait out a live peer's consumers.
+  // implicitly and would otherwise wait out a live peer's consumers. The
+  // graph-era contract adds the caller's own stream: the caller must have
+  // drained its replay stream before stop() — the per-gen cells are baked
+  // into its recorded kernels.
   if (impl.ar_ctl) {
     cudaFreeHost(impl.ar_ctl);
     impl.ar_ctl = nullptr;
+  }
+  if (impl.graph_cells) {
+    cudaFreeHost(impl.graph_cells);
+    impl.graph_cells = nullptr;
   }
   // Staging block: deregister before the lanes/devices go away (the MRs
   // hang off the device PDs), then free the pinned block.

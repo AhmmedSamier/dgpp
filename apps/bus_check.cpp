@@ -395,7 +395,7 @@ void fill_rank_bf16(std::vector<uint16_t>* out, size_t elems, int rank) {
 }
 
 int run_allreduce(CommonArgs c, const std::string& peer, int iters,
-                  long hold_ms) {
+                  long hold_ms, int graph_gens) {
   const int my_rank = c.rank;
   if (my_rank != 0 && peer.empty()) {
     DGPP_LOG_ERROR("allreduce: --peer is required for ranks 1..N-1");
@@ -544,11 +544,6 @@ int run_allreduce(CommonArgs c, const std::string& peer, int iters,
     }
   }
 
-  cudaFree(dev_src);
-  cudaFree(dev_dst);
-  cudaFree(warm_buf);
-  cudaStreamDestroy(warm_stream);
-
   std::sort(latency_us.begin(), latency_us.end());
   const auto pick = [&](double frac) {
     return latency_us.empty()
@@ -562,6 +557,146 @@ int run_allreduce(CommonArgs c, const std::string& peer, int iters,
       "p99={:.1f}us",
       my_rank, c.world, verified, iters, pick(0.0), pick(0.5), pick(0.99));
 
+  // ---- graph amortization probe (§6.2) -----------------------------------
+  // The same collective, recorded into a decode-shaped step (GEMM
+  // stand-ins between the nodes, the same warm-spin cadence the eager
+  // loop pays per collective — the A/B is per-collective amortized) and
+  // replayed. The eager p50 above is the baseline; the numbers here are
+  // the amortization verdict the fabric measurement exists for.
+  if (graph_gens > 0 && failed == 0) {
+    if (!bus.graph_record_begin(&error)) {
+      DGPP_LOG_ERROR("graph record begin rejected: {}", error);
+      ++failed;
+    } else {
+      cudaGraph_t graph = nullptr;
+      cudaGraphExec_t exec = nullptr;
+      // Keep-alive spin (>= 1M means the eager loop used one long spin
+      // for the whole run; the probe wants the per-collective cadence).
+      const int spins_per_node = warm_spins >= 1000000 ? 200000 : warm_spins;
+      if (cudaStreamBeginCapture(warm_stream,
+                                 cudaStreamCaptureModeThreadLocal) !=
+          cudaSuccess) {
+        DGPP_LOG_ERROR("graph probe: capture begin failed");
+        ++failed;
+      } else {
+        for (int g = 0; g < graph_gens; ++g) {
+          dgpp::net::launch_bus_warm_work(warm_stream, warm_buf,
+                                          spins_per_node);
+          if (!bus.allreduce_record(warm_stream, dev_src, dev_dst, elems,
+                                    &error)) {
+            DGPP_LOG_ERROR("allreduce_record rejected: {}", error);
+            ++failed;
+            break;
+          }
+        }
+        dgpp::net::launch_bus_warm_work(warm_stream, warm_buf,
+                                        spins_per_node);
+        if (cudaStreamEndCapture(warm_stream, &graph) != cudaSuccess ||
+            !graph ||
+            cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0) !=
+                cudaSuccess) {
+          DGPP_LOG_ERROR("graph probe: capture/instantiate failed");
+          ++failed;
+        }
+      }
+      if (failed == 0) {
+        if (!bus.graph_record_end(&error)) {
+          DGPP_LOG_ERROR("graph record end rejected: {}", error);
+          ++failed;
+        }
+      } else {
+        std::string close_error;
+        bus.graph_record_end(&close_error);
+      }
+      if (exec != nullptr) {
+        // Warm replays absorb the instantiation/module costs, then the
+        // measured ones: arm -> launch -> sync -> finish is the step the
+        // decode path pays per token.
+        for (int warm = 0; warm < 2 && failed == 0; ++warm) {
+          if (!bus.graph_replay_arm(&error)) {
+            DGPP_LOG_ERROR("graph arm rejected: {}", error);
+            ++failed;
+            break;
+          }
+          cudaGraphLaunch(exec, warm_stream);
+          cudaStreamSynchronize(warm_stream);
+          if (!bus.graph_replay_finish(30000, &error)) {
+            DGPP_LOG_ERROR("graph finish rejected: {}", error);
+            ++failed;
+          }
+        }
+        std::vector<double> step_us;
+        int replay_fail = 0;
+        for (int replay = 0; replay < iters && failed == 0; ++replay) {
+          const auto t0 = std::chrono::steady_clock::now();
+          if (!bus.graph_replay_arm(&error)) {
+            DGPP_LOG_ERROR("graph arm rejected: {}", error);
+            replay_fail = 1;
+            break;
+          }
+          if (cudaGraphLaunch(exec, warm_stream) != cudaSuccess ||
+              cudaStreamSynchronize(warm_stream) != cudaSuccess) {
+            DGPP_LOG_ERROR("graph replay {} failed to run", replay);
+            replay_fail = 1;
+            break;
+          }
+          if (!bus.graph_replay_finish(30000, &error)) {
+            DGPP_LOG_ERROR("graph finish rejected: {}", error);
+            replay_fail = 1;
+            break;
+          }
+          step_us.push_back(std::chrono::duration<double, std::micro>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count());
+        }
+        failed += replay_fail;
+        if (!step_us.empty()) {
+          std::sort(step_us.begin(), step_us.end());
+          const double step_p50 =
+              step_us[std::min(step_us.size() - 1, step_us.size() / 2)];
+          const double step_min = step_us.front();
+          DGPP_LOG_INFO(
+              "GRAPH-PROBE rank={} gens={} replays={} step min={:.1f}us "
+              "p50={:.1f}us | per-collective min={:.1f}us p50={:.1f}us "
+              "(eager p50={:.1f}us)",
+              my_rank, graph_gens, step_us.size(), step_min, step_p50,
+              step_min / graph_gens, step_p50 / graph_gens, pick(0.5));
+        }
+        // Bitwise: the last replay must equal the canonical chain.
+        if (cudaMemcpy(got.data(), dev_dst, elems * 2,
+                       cudaMemcpyDeviceToHost) != cudaSuccess) {
+          DGPP_LOG_ERROR("graph probe: D2H failed");
+          ++failed;
+        } else {
+          size_t mismatches = 0;
+          for (size_t i = 0; i < elems; ++i) {
+            float acc = 0.0f;
+            for (int rr = 0; rr < c.world; ++rr)
+              acc += dgpp::net::bf16_to_f32(
+                  all_src[static_cast<size_t>(rr)][i]);
+            if (got[i] != dgpp::net::bf16_from_f32_rne(acc)) {
+              if (mismatches < 3)
+                DGPP_LOG_ERROR("graph probe elem {}: got {:04x} want {:04x}",
+                               i, got[i], dgpp::net::bf16_from_f32_rne(acc));
+              ++mismatches;
+            }
+          }
+          if (mismatches != 0) {
+            DGPP_LOG_ERROR("graph probe: {} mismatches", mismatches);
+            ++failed;
+          }
+        }
+        cudaGraphExecDestroy(exec);
+      }
+      if (graph) cudaGraphDestroy(graph);
+    }
+  }
+
+  cudaFree(dev_src);
+  cudaFree(dev_dst);
+  cudaFree(warm_buf);
+  cudaStreamDestroy(warm_stream);
+
   print_bus_stats(bus.stats());
   if (hold_ms > 0)
     DGPP_LOG_INFO("allreduce: rank {} holding {} ms for slower peers",
@@ -569,7 +704,9 @@ int run_allreduce(CommonArgs c, const std::string& peer, int iters,
   std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
   bus.stop();
   DGPP_LOG_INFO("allreduce: stopped cleanly (failures={})", failed);
-  return failed == 0 && verified == iters ? 0 : 1;
+  // `verified` counts the last-iteration check (the loop verifies once, by
+  // design — the eager p50 would otherwise pay a D2H per collective).
+  return failed == 0 && verified == 1 ? 0 : 1;
 }
 
 // ---- selftest ----------------------------------------------------------------
@@ -709,7 +846,7 @@ int main(int argc, char** argv) {
                  "                 (--window > 1 with --class bulk: pipelined "
                  "flood, verification deferred)\n"
                  "  bus_check allreduce --peer HOST [--rank R] [--world N] "
-                 "[--iters N] [--hold-ms N]\n"
+                 "[--iters N] [--hold-ms N] [--graph-gens N]\n"
                  "                        (rank 0 listens; every rank "
                  "reduces and verifies bitwise)\n"
                  "  bus_check selftest\n");
@@ -725,6 +862,7 @@ int main(int argc, char** argv) {
   long lat_iters = 1000;
   long window = 1;
   long hold_ms = 20000;
+  long graph_gens = 0;
   size_t bytes = 8192;
   std::string cls_text = "latency";
   bool contend = false;
@@ -786,6 +924,9 @@ int main(int argc, char** argv) {
     } else if (a == "--hold-ms") {
       if (!parse_long(val(), 0, 3600000, &n)) args_ok = false;
       else hold_ms = n;
+    } else if (a == "--graph-gens") {
+      if (!parse_long(val(), 0, 64, &n)) args_ok = false;
+      else graph_gens = n;
     } else if (a == "--rank") {
       if (!parse_long(val(), 0, 3, &n)) args_ok = false;
       else c.rank = static_cast<int>(n);
@@ -808,7 +949,8 @@ int main(int argc, char** argv) {
       DGPP_LOG_ERROR("allreduce: need --world >= 2 and --rank < world");
       return 2;
     }
-    return run_allreduce(c, peer, static_cast<int>(iters), hold_ms);
+    return run_allreduce(c, peer, static_cast<int>(iters), hold_ms,
+                          static_cast<int>(graph_gens));
   }
   if (mode == "ping") {
     if (peer.empty() || c.rank == 0) return 2;

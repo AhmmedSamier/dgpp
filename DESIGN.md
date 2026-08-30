@@ -387,6 +387,71 @@ of the ~32 ms decode-step floor at ~90 collectives, and amortized inside a
 replayed graph. A persistent doorbell-watcher hybrid remains a measured
 optimization option for a future launch-bound path, not a starting bet.
 
+**Graph capture (d3): the decode step's fixed launch sequence records once
+and replays per token.** The collective kernel becomes a graph node like
+any other — the engine no longer launches it and instead *reacts*. The
+seams that make replay-stable what capture bakes:
+
+- *Per-generation cells.* One pinned 64B ctl per recorded collective node
+  (vs. the eager machine's single one-flight cell). The arm step — before
+  each replay — resets them and assigns the window's monotonic
+  generations, `gen_seq` published release-last; the replayed kernel
+  acquires it at start and derives its staging row `(g−1)%ring` and its
+  exit match from it. Monotonicity means a previous replay's stale
+  `done_seq` can never match, so replays of one node are distinct without
+  re-recording.
+- *The engine generation walk.* `window_count` (one atomic; first/last
+  derive arithmetically) publishes the window; the engine adopts, posts
+  each generation's peer pairs when the kernel's `ready_bits` land (lane 0,
+  the cursor ring position — deterministic under the era's exclusivity:
+  every latency post in the era is a graph generation, in order), and
+  advances on `done_seq == gen`. Stream order serializes the recorded
+  kernels, so at most one generation is un-done at a time — a single-flight
+  state machine, not a queue. Arm waits for the previous window's walk
+  (bounded); finish joins the walk and returns the verdict.
+- *The era.* One graph per bus (the decode step shape is fixed); harness
+  sends close and eager collectives reject from `record_begin` — the
+  recorded kernels claim doorbells exactly like eager collectives, and the
+  ring positions must stay generation-ordered.
+- *Slot ownership without requests.* Graph posts carry no `BusRequest`,
+  but the SendSlot/credit machinery is request-shaped — a per-window
+  carrier request (unregistered, `is_collective`) gives the posts owners so
+  credits recycle slots exactly like eager flights; completion is the
+  walk's business, not the carrier's.
+
+Two ordering rules the bring-up measured into existence:
+
+- **Done does not imply posted** (the graph form of the bulk lesson): the
+  kernel's fold waits on the *peer's* doorbell, not this side's own post,
+  so a fast peer can stamp `done` while this engine's pair is still
+  ring-deferred. The walk requires the posting mask complete before it
+  advances — advancing first strands the peer's kernel on a doorbell that
+  never comes (measured: 131/132 posts with the peer's last generation
+  spinning 5 s on the missing one).
+- **Quiescence at adopt**: every kernel of the previous window exited
+  (walk complete implies every claim acked), so every latency door cell
+  reads consumed. An unconsumed doorbell there freezes the ring-ordered
+  recycle; the receive queue then drains over the next wrap and the
+  wrap's last sender RNR-retries forever — a once-in-~30k-generation
+  stall observed once, unreproduced in ~40k generations since, and
+  watched by a standing adopt-time quiescence note plus the per-flight
+  stall microscope (failure-only, in-tree).
+
+Measured over two fabric nodes (TP=2, 12-collective steps, decode-scale
+GEMM stand-ins between the nodes): eager p50 33.6 µs per collective
+(submit→wait); replayed step p50 357 µs = **29.8 µs per collective
+including the inter-node compute stand-in** — the per-collective host
+submit/launch cost amortizes to near-zero, and the step pays one arm +
+one finish for all twelve collectives. The wire floor (measured 2.4–2.7
+µs one-way) is what remains.
+
+One compiler lesson for the record: the shared eager/graph kernel body
+refactor (a mechanical template extraction, pure renames, reference-based
+row policies) *miscompiled* at -O3 — the fold read doorbell cells as
+payloads — while the verbatim eager kernel plus a duplicated graph twin
+was green on every gate. The eager kernel is kept verbatim; a validated
+machine is not a refactoring test bed.
+
 One measured lesson from the Phase 2 harness (which *does* use persistent
 consumers): a persistent kernel starves every launch queued behind it on
 the same stream, so the harness runs one stream per consumer. The
