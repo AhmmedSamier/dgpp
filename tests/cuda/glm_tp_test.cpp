@@ -35,6 +35,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -48,10 +49,12 @@
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "common/test.hpp"
+#include "models/dsa_geometry.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_route_audit.hpp"
 #include "models/glm_tp.hpp"
 #include "models/glm_tp_bus.hpp"
+#include "models/kda_geometry.hpp"
 #include "net/collective_bus.hpp"
 
 #include "glm_rng.hpp"
@@ -62,7 +65,13 @@ void glm_tp_write_fixture(const std::string& dir);
 
 using dgpp::GlmBusBoundaryReducer;
 using dgpp::GlmDiagnosticModel;
+using dgpp::GlmLayerBound;
+using dgpp::GlmLayerResident;
+using dgpp::GlmLayerStream;
+using dgpp::GlmMlpKind;
+using dgpp::GlmReplicatedDigest;
 using dgpp::GlmTextConfig;
+using dgpp::GlmTpViews;
 using dgpp::glm_route::RouteFlipAudit;
 using dgpp::glm_route::audit_route_flips;
 using dgpp::net::BusOptions;
@@ -87,10 +96,16 @@ BusOptions loop_options(int rank, int world, uint16_t port) {
   o.bulk_slots = 8;
   o.bulk_slot_bytes = 262144;
   o.qp_depth = 1024;
-  o.completion_timeout_ms = 5000;
   // Kernel deadline: a wedged peer must fail the collective in seconds,
   // not wedge the whole process for minutes (the 600s consumer default
-  // is for long forwards under a healthy fabric).
+  // is for long forwards under a healthy fabric). Overridable because
+  // sanitizer builds slow the CPU submission paths 10-50x — a release-
+  // tuned 5s no-progress budget flakes at world=4 under UBSan (measured:
+  // 1 fail in 3 runs, a rank falling behind, not a bus defect).
+  o.completion_timeout_ms = [] {
+    const char* ms = std::getenv("DGPP_TEST_BUS_TIMEOUT_MS");
+    return ms ? std::atoi(ms) : 5000;
+  }();
   o.consumer_deadline_s = 20.0;
   o.launch_consumers = false;     // per-collective kernels own doorbells
   return o;
@@ -556,7 +571,9 @@ DGPP_TEST(glm_tp_forward_parity_loopback) {
 // counterexample — it must be REJECTED loudly, never silently mis-scaled
 // (the hunt: rank 1's dense slice started mid-block, read the wrong
 // scale rows for 72 of its 100 inter dims, and the fold carried ~0.30
-// l2 error past a 0.02-budget assertion).
+// l2 error past a 0.02-budget assertion). Both consumers must reject it:
+// GlmTpViews AND the sharded GlmLayerStream (before a single shard is
+// opened — a bad config fails in milliseconds, not after 328 GB of mmap).
 DGPP_TEST(glm_tp_slice_alignment_contract) {
   const GlmTextConfig base = glm_tp_test_config();
   cudaStream_t st;
@@ -573,6 +590,18 @@ DGPP_TEST(glm_tp_slice_alignment_contract) {
     require(threw && msg.find(needle) != std::string::npos,
             std::string("misaligned inter slice must throw with '") +
                 needle + "' (got: " + msg + ")");
+    threw = false;
+    msg.clear();
+    try {
+      dgpp::GlmLayerStream shard(cfg, "glm_tp_fixture", 1, 2);
+    } catch (const std::exception& e) {
+      threw = true;
+      msg = e.what();
+    }
+    require(threw && msg.find(needle) != std::string::npos,
+            std::string("sharded loader must reject misaligned geometry "
+                        "with '") +
+                needle + "' (got: " + msg + ")");
   };
   {
     GlmTextConfig bad = base;
@@ -583,6 +612,256 @@ DGPP_TEST(glm_tp_slice_alignment_contract) {
     GlmTextConfig bad = base;
     bad.moe_intermediate_size = 64;  // quotient 32 % 128 != 0
     expect_throw(bad, "128");
+  }
+  DGPP_CUDA_OK(cudaStreamDestroy(st));
+}
+
+// ---------------------------------------------------------------------------
+// M5 d4: sharded load vs full-load+views, pinned BITWISE. The sharded
+// GlmLayerStream builds each resident layer directly at the rank's local
+// geometry (only rank-local checkpoint bytes ever read); GlmTpViews::bind
+// on a FULL resident is the independent reference implementation of the
+// same slicing spec. This test is what keeps the two from drifting: every
+// bound surface of every layer (all 6 fixture layers + the MTP draft
+// layer, KDA and DSA, dense and MoE) must match byte-for-byte at worlds 2
+// and 4.
+//
+// Plus the §5.2 boot checks, as arithmetic:
+//   * the replicated digest is rank-invariant (and equals the world=1
+//     pass — same files, same replicated set);
+//   * byte reconcile: sum_r(source bytes read) == world1 total +
+//     (world-1) * verbatim, with verbatim (the replicated + DSA-bridge
+//     re-read set) identical across ranks. Sharded bytes partition
+//     across ranks exactly once — a double-owned or missing row breaks
+//     the identity.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Compares the two bind paths' outputs for one layer. Sizes come from the
+// config at the TEST's local geometry — the slicing spec, spelled out.
+struct BoundCmp {
+  const GlmTextConfig& cfg;
+  int world;
+  int checked = 0;
+
+  void bytes(const std::string& what, const void* a, const void* b, size_t n) {
+    if (std::memcmp(a, b, n) != 0)
+      throw std::runtime_error(what + " differs bitwise (full+bind vs "
+                                   "sharded)");
+    ++checked;
+  }
+  void ints(const std::string& what, int64_t a, int64_t b) {
+    if (a != b)
+      throw std::runtime_error(what + " differs (" + std::to_string(a) +
+                               " vs " + std::to_string(b) + ")");
+    ++checked;
+  }
+  void quant(const std::string& what, const dgpp::GlmQuantMatrix& a,
+              const dgpp::GlmQuantMatrix& b) {
+    ints(what + ".rows", a.rows, b.rows);
+    ints(what + ".cols", a.cols, b.cols);
+    bytes(what, a.payload, b.payload,
+          static_cast<size_t>(a.rows) * static_cast<size_t>(a.cols));
+    bytes(what + ".scales", a.scales, b.scales,
+          static_cast<size_t>((a.rows + 127) / 128) *
+              static_cast<size_t>((a.cols + 127) / 128) * 4);
+  }
+
+  void run(int layer, bool dense_mlp, const dgpp::GlmLayerBound& a,
+           const dgpp::GlmLayerBound& b) {
+    const int64_t H = cfg.hidden_size;
+    // Layer-tagged surface names: a bitwise mismatch names the layer and
+    // the surface, not just "differs somewhere".
+    const auto tag = [layer](const char* what) {
+      return "shard parity (layer " + std::to_string(layer) + "): " + what;
+    };
+    bytes(tag("ln1"), a.ln1, b.ln1, H * 2);
+    bytes(tag("ln2"), a.ln2, b.ln2, H * 2);
+    // mHC (empty on the MTP layer — both sides null).
+    const bool has_mhc = a.mhc && a.mhc->attn_base;
+    if (has_mhc != (b.mhc && b.mhc->attn_base))
+      throw std::runtime_error(tag("mhc presence differs"));
+    if (has_mhc) {
+      // kHcCoeffRows (24) / kHcScaleOutputs (3) — glm_binding's pinned
+      // mHC coefficient row counts.
+      const size_t base_b = 24 * 4;
+      const size_t fn_b = static_cast<size_t>(cfg.hc_mult) * H * 24 * 2;
+      const size_t scale_b = 3 * 4;
+      bytes(tag("mhc.attn_base"), a.mhc->attn_base, b.mhc->attn_base, base_b);
+      bytes(tag("mhc.attn_fn"), a.mhc->attn_fn, b.mhc->attn_fn, fn_b);
+      bytes(tag("mhc.attn_scale"), a.mhc->attn_scale, b.mhc->attn_scale,
+           scale_b);
+      bytes(tag("mhc.ffn_base"), a.mhc->ffn_base, b.mhc->ffn_base, base_b);
+      bytes(tag("mhc.ffn_fn"), a.mhc->ffn_fn, b.mhc->ffn_fn, fn_b);
+      bytes(tag("mhc.ffn_scale"), a.mhc->ffn_scale, b.mhc->ffn_scale,
+           scale_b);
+    }
+    if (a.kda) {
+      dgpp::KdaConfig kc = cfg.kda_config();
+      kc.tp_size = world;
+      const dgpp::KdaGeometry kg = dgpp::KdaGeometry::from_config(kc);
+      const int64_t hd = cfg.kda_head_dim;
+      const int64_t lp_s = kg.local_proj;
+      const int64_t h_s = kg.local_heads;
+      bytes(tag("kda.in_proj"), a.kda->in_proj, b.kda->in_proj,
+            static_cast<size_t>(kg.in_proj_cols) * H * 2);
+      bytes(tag("kda.conv"), a.kda->conv, b.kda->conv,
+            static_cast<size_t>(kg.conv_channels) * cfg.kda_conv_width * 2);
+      bytes(tag("kda.f_b"), a.kda->f_b, b.kda->f_b, lp_s * hd * 2);
+      bytes(tag("kda.g_b"), a.kda->g_b, b.kda->g_b, lp_s * hd * 2);
+      bytes(tag("kda.a_log"), a.kda->a_log, b.kda->a_log, h_s * 4);
+      bytes(tag("kda.dt_bias"), a.kda->dt_bias, b.kda->dt_bias, lp_s * 4);
+      bytes(tag("kda.o_norm"), a.kda->o_norm, b.kda->o_norm, hd * 2);
+      bytes(tag("kda.o_proj"), a.kda->o_proj, b.kda->o_proj, H * lp_s * 2);
+    }
+    if (a.dsa) {
+      dgpp::DsaConfig dc = cfg.dsa_config();
+      dc.tp_size = world;
+      const dgpp::DsaGeometry dgeo = dgpp::DsaGeometry::from_config(dc);
+      const int64_t ql = cfg.q_lora_rank;
+      const int64_t kvl = cfg.kv_lora_rank;
+      const int64_t lh = dgeo.local_heads;
+      const int64_t kv_rows = lh * (cfg.qk_nope_head_dim + cfg.v_head_dim);
+      const int64_t idx_proj = cfg.index_n_heads * cfg.index_head_dim;
+      bytes(tag("dsa.qkv_a"), a.dsa->qkv_a, b.dsa->qkv_a, (ql + kvl) * H * 2);
+      bytes(tag("dsa.q_aln"), a.dsa->q_aln, b.dsa->q_aln, ql * 2);
+      bytes(tag("dsa.kv_aln"), a.dsa->kv_aln, b.dsa->kv_aln, kvl * 2);
+      bytes(tag("dsa.q_b"), a.dsa->q_b, b.dsa->q_b,
+            static_cast<size_t>(dgeo.local_q_rows) * ql * 2);
+      bytes(tag("dsa.kv_b"), a.dsa->kv_b, b.dsa->kv_b, kv_rows * kvl * 2);
+      bytes(tag("dsa.o_proj"), a.dsa->o_proj, b.dsa->o_proj,
+            H * static_cast<size_t>(dgeo.local_v_rows) * 2);
+      bytes(tag("dsa.wq_b"), a.dsa->wq_b, b.dsa->wq_b, idx_proj * ql * 2);
+      bytes(tag("dsa.wk"), a.dsa->wk, b.dsa->wk,
+            static_cast<size_t>(cfg.index_head_dim) * H * 2);
+      bytes(tag("dsa.wp"), a.dsa->wp, b.dsa->wp,
+            static_cast<size_t>(cfg.index_n_heads) * H * 2);
+      bytes(tag("dsa.k_norm_w"), a.dsa->k_norm_w, b.dsa->k_norm_w,
+            cfg.index_head_dim * 2);
+      bytes(tag("dsa.k_norm_b"), a.dsa->k_norm_b, b.dsa->k_norm_b,
+            cfg.index_head_dim * 2);
+      if (a.dsa->gate) {
+        bytes(tag("dsa.gate"), a.dsa->gate, b.dsa->gate,
+              static_cast<size_t>(cfg.index_head_dim) * H * 2);
+        bytes(tag("dsa.ape"), a.dsa->ape, b.dsa->ape,
+              static_cast<size_t>(cfg.index_kpool) * cfg.index_head_dim * 4);
+      }
+    }
+    if (dense_mlp) {
+      for (int i = 0; i < 3; ++i)
+        quant(tag("dense"), a.dense[i], b.dense[i]);
+    } else {
+      const int64_t E = cfg.moe_config().n_experts;
+      const int64_t local_e = cfg.moe_config().n_experts / world;
+      bytes(tag("moe.router_gate"), a.moe->router_gate, b.moe->router_gate,
+            E * H * 2);
+      bytes(tag("moe.router_bias"), a.moe->router_bias, b.moe->router_bias,
+            E * 4);
+      for (int i = 0; i < 3; ++i)
+        quant(tag("moe.shared"), a.moe->shared[i], b.moe->shared[i]);
+      // The full+bind path points at the rank's range inside the full
+      // expert array; the sharded path OWNS exactly those experts.
+      ints(tag("moe.expert_begin"), a.moe->expert_begin, b.moe->expert_begin);
+      ints(tag("moe.expert_count"), a.moe->expert_count, b.moe->expert_count);
+      require(a.moe->expert_count == local_e,
+              tag("expert partition is not the whole-expert range"));
+      for (int64_t e = 0; e < local_e; ++e)
+        for (int i = 0; i < 3; ++i)
+          quant(tag("moe.expert"),
+                a.moe->experts[static_cast<size_t>(e) * 3 + i],
+                b.moe->experts[static_cast<size_t>(e) * 3 + i]);
+    }
+  }
+};
+
+}  // namespace
+
+DGPP_TEST(glm_tp_shard_parity) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+
+  cudaStream_t st;
+  DGPP_CUDA_OK(cudaStreamCreate(&st));
+
+  for (int world : {2, 4}) {
+    // Fresh full (world=1) stream per iteration: its byte counters
+    // accumulate across loads, so reusing one across worlds would
+    // double-count (the parity loop reloads every layer per world).
+    GlmLayerStream full(cfg, dir);
+    const GlmReplicatedDigest ref_digest = full.hash_replicated();
+
+    std::vector<std::unique_ptr<GlmLayerStream>> shards(
+        static_cast<size_t>(world));
+    std::vector<std::unique_ptr<GlmTpViews>> views(
+        static_cast<size_t>(world));
+    for (int r = 0; r < world; ++r) {
+      shards[static_cast<size_t>(r)] =
+          std::make_unique<GlmLayerStream>(cfg, dir, r, world);
+      views[static_cast<size_t>(r)] =
+          std::make_unique<GlmTpViews>(cfg, r, world, st);
+      // The boot digest must be rank-invariant AND identical to the
+      // world=1 pass — same files, same replicated set, order-independent
+      // fold. A mismatch here is the silent-corruption class: some rank
+      // would compute different routers/latent projections.
+      const GlmReplicatedDigest d =
+          shards[static_cast<size_t>(r)]->hash_replicated();
+      require(d.layer == ref_digest.layer && d.globals == ref_digest.globals &&
+                  d.bytes == ref_digest.bytes && d.tensors == ref_digest.tensors,
+              "shard parity: replicated digest differs (rank " +
+                  std::to_string(r) + ")");
+    }
+
+    const int max_layer =
+        cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
+    int surfaces = 0;
+    for (int l = 0; l < max_layer; ++l) {
+      const bool dense_mlp = l < cfg.num_hidden_layers &&
+                             cfg.mlps[l] == GlmMlpKind::Dense;
+      const GlmLayerResident& fr = full.load_layer(l);
+      for (int r = 0; r < world; ++r) {
+        const GlmLayerResident& lr = shards[static_cast<size_t>(r)]->load_layer(l);
+        const GlmLayerBound a = views[static_cast<size_t>(r)]->bind(fr, dense_mlp);
+        const GlmLayerBound b =
+            views[static_cast<size_t>(r)]->bind_sharded(lr, dense_mlp);
+        // bind()'s slab packs are async on the stream; both sides must be
+        // landed before the memcmps.
+        DGPP_CUDA_OK(cudaStreamSynchronize(st));
+        BoundCmp cmp{cfg, world};
+        cmp.run(l, dense_mlp, a, b);
+        surfaces += cmp.checked;
+      }
+    }
+
+    // ---- byte reconcile (the arithmetic pin) --------------------------
+    full.load_globals();
+    uint64_t sum = 0;
+    for (int r = 0; r < world; ++r) {
+      shards[static_cast<size_t>(r)]->load_globals();
+      sum += shards[static_cast<size_t>(r)]->source_bytes_read();
+      require(shards[static_cast<size_t>(r)]->verbatim_source_bytes() ==
+                  shards[0]->verbatim_source_bytes(),
+              "shard parity: verbatim re-read set differs across ranks");
+      require(shards[static_cast<size_t>(r)]->source_bytes_read() <
+                  full.source_bytes_read(),
+              "shard parity: sharded rank reads as much as the full load");
+    }
+    const uint64_t expect = full.source_bytes_read() +
+                            static_cast<uint64_t>(world - 1) *
+                                shards[0]->verbatim_source_bytes();
+    require(sum == expect,
+            "shard parity: byte reconcile failed — sum " +
+                std::to_string(sum) + " != total + (world-1)*verbatim " +
+                std::to_string(expect));
+
+    DGPP_LOG_INFO(
+        "shard parity world={}: {} layers x {} ranks, {} bound surfaces "
+        "bitwise-equal; byte reconcile exact — rank reads {}/{} source "
+        "bytes ({:.0f}%)",
+        world, max_layer, world, surfaces,
+        shards[0]->source_bytes_read(), full.source_bytes_read(),
+        100.0 * static_cast<double>(shards[0]->source_bytes_read()) /
+            static_cast<double>(full.source_bytes_read()));
   }
   DGPP_CUDA_OK(cudaStreamDestroy(st));
 }

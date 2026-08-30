@@ -47,7 +47,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
       moe_cfg_(cfg.moe_config()),
       kda_geo_(KdaGeometry::from_config(kda_cfg_)),
       max_tokens_(max_tokens),
-      loader_(cfg, checkpoint_dir) {
+      loader_(cfg, checkpoint_dir, tp_rank, tp_world) {
   if (max_tokens_ <= 0)
     throw std::invalid_argument("GlmDiagnosticModel: max_tokens must be positive");
   if (max_cache_tokens < max_tokens_)
@@ -59,9 +59,20 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
         "returned silently as results");
   boundary_ = boundary;
 
+  // Boot check (§5.2): hash every replicated tensor BEFORE anything else
+  // runs — runners exchange this across ranks at startup, and a mismatch
+  // pinpoints the diverging layer. Pure mmap reads; no residency needed.
+  if (tp_world > 1) boot_digest_ = loader_.hash_replicated();
+
   globals_ = loader_.load_globals();
 
   DGPP_CUDA_OK(cudaStreamCreate(&stream_));
+  // The model's kernels are the resident layers' readers: load boundaries
+  // synchronize exactly this stream (+ the loader's dequant stream), not
+  // the whole device — a device-wide wait in a one-process multi-rank
+  // world deadlocks against a peer's spinning collective kernel (the
+  // loopback first-collective stall; see set_reader_stream).
+  loader_.set_reader_stream(stream_);
 
   if (tp_world > 1)
     tp_ = std::make_unique<GlmTpViews>(cfg, tp_rank, tp_world, stream_);
@@ -161,8 +172,11 @@ GlmMoeWeights GlmDiagnosticModel::moe_weights(const GlmMoeResident& r) {
 }
 
 GlmLayerBound GlmDiagnosticModel::bind_layer(const GlmLayerResident& r,
-                                             bool dense_mlp) {
-  if (tp_) return tp_->bind(r, dense_mlp);
+                                              bool dense_mlp) {
+  // The sharded path (d4): the resident layer is already this rank's
+  // geometry, so binding is identity wiring. The views' full-load bind()
+  // remains the parity reference the shard test pins bitwise.
+  if (tp_) return tp_->bind_sharded(r, dense_mlp);
   // World=1: direct resident views, byte-identical to the M4 path.
   full_ = GlmLayerBound{};
   full_.mhc = &r.mhc;

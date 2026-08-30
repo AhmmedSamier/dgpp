@@ -117,6 +117,16 @@ class GlmDiagnosticModel {
   const GlmTextConfig& config() const { return cfg_; }
   int max_tokens() const { return max_tokens_; }
 
+  // Boot digest over the replicated weights (d4, §5.2 "boot checks hash
+  // all replicated tensors"): computed at construction when tp_world > 1,
+  // BEFORE the first forward — runners exchange it across ranks and a
+  // mismatch pinpoints the layer. Empty at world=1 (no peers to convince).
+  const GlmReplicatedDigest& boot_digest() const { return boot_digest_; }
+
+  // Checkpoint source bytes this rank's loads have touched (the
+  // per-rank byte-total reconcile input; see GlmLayerStream).
+  uint64_t source_bytes_read() const { return loader_.source_bytes_read(); }
+
   // Host-side top-k over bf16 logits: value-descending, lowest-id
   // tie-break. k <= 64. One entry per row.
   static std::vector<std::vector<std::pair<int32_t, float>>> topk(
@@ -151,7 +161,12 @@ class GlmDiagnosticModel {
   GlmMoeConfig moe_cfg_;
   KdaGeometry kda_geo_;
   int max_tokens_ = 0;
+  GlmReplicatedDigest boot_digest_{};
 
+  // Sharded at world>1 (M5 d4): the loader builds each resident layer
+  // directly at this rank's geometry, and bind_layer is the identity
+  // wiring (GlmTpViews::bind_sharded) — pinned bitwise against
+  // full-load+bind by glm_tp_test's shard-parity test.
   GlmLayerStream loader_;
   GlmGlobalsResident globals_;
   CublasLtGemm gemm_;

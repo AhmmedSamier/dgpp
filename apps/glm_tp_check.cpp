@@ -77,6 +77,16 @@ void write_out(const std::string& path, const void* data, size_t bytes) {
   std::fclose(f);
 }
 
+std::string to_hex(uint64_t v) {
+  static const char* kDigits = "0123456789abcdef";
+  std::string s(16, '0');
+  for (int i = 15; i >= 0; --i) {
+    s[static_cast<size_t>(i)] = kDigits[v & 0xf];
+    v >>= 4;
+  }
+  return s;
+}
+
 BusOptions bus_options(int rank, int world, uint16_t port,
                        const std::string& peer, int rendezvous_timeout_ms) {
   BusOptions o;
@@ -127,6 +137,24 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 
   dgpp::GlmBusBoundaryReducer reducer(bus);
   GlmDiagnosticModel model(cfg, ckpt, tokens, cache, &reducer, rank, world);
+
+  // Boot digest (M5 d4): every rank folds its replicated weights at
+  // construction; this file is the run record's evidence. The offline
+  // comparison asserts equality across ranks — a mismatch pinpoints the
+  // diverging layer by index (the loopback test asserts the same thing
+  // in CI).
+  {
+    const dgpp::GlmReplicatedDigest& d = model.boot_digest();
+    std::string txt =
+        "replicated tensors " + std::to_string(d.tensors) + " bytes " +
+        std::to_string(d.bytes) + " globals 0x" +
+        to_hex(d.globals) + "\n";
+    for (size_t l = 0; l < d.layer.size(); ++l)
+      txt += "layer " + std::to_string(l) + " 0x" +
+             to_hex(d.layer[l]) + "\n";
+    write_out(out_prefix + ".digest.txt", txt.data(), txt.size());
+  }
+
   const auto t0 = std::chrono::steady_clock::now();
   const auto out = model.forward(ids);
   const double ms = std::chrono::duration<double, std::milli>(
@@ -175,9 +203,10 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
   const auto [bulk_n, bulk_tails] = summarize(stats.bulk.latency_us);
   DGPP_LOG_INFO(
       "TP rank {} world {}: forward {:.1f}ms, lat {} (p50={:.1f}us "
-      "p99={:.1f}us), bulk {} (p50={:.1f}us p99={:.1f}us)",
+      "p99={:.1f}us), bulk {} (p50={:.1f}us p99={:.1f}us), source {} MB",
       rank, world, ms, lat_n, lat_tails.first, lat_tails.second, bulk_n,
-      bulk_tails.first, bulk_tails.second);
+      bulk_tails.first, bulk_tails.second,
+      model.source_bytes_read() >> 20);
   bus.stop();
   return 0;
 }

@@ -99,6 +99,15 @@ class GlmTpViews {
   // layer populates one MLP view). Views stay valid until the next bind.
   GlmLayerBound bind(const GlmLayerResident& r, bool dense_mlp);
 
+  // Binds a SHARDED resident layer (M5 d4): a GlmLayerStream constructed
+  // with the SAME rank/world already built the local geometry and did the
+  // packs at load time, so this is wholesale pointer wiring plus the
+  // expert-partition stamps the loader recorded. No slab copies. The
+  // shard-parity test pins this path BITWISE against bind() of a full
+  // resident — the two are alternative implementations of one slicing
+  // spec (§5.2), and the test is what keeps them from drifting.
+  GlmLayerBound bind_sharded(const GlmLayerResident& r, bool dense_mlp);
+
   // Exact device bytes of the slice slab (same layout bind carves).
   static size_t slice_bytes(const GlmTextConfig& cfg, int world);
 

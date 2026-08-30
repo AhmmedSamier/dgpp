@@ -369,4 +369,41 @@ std::vector<int64_t> glm_scale_shape(const std::vector<int64_t>& payload) {
   return {(payload[0] + 127) / 128, (payload[1] + 127) / 128};
 }
 
+void glm_tp_validate_geometry(const GlmTextConfig& cfg, int rank, int world) {
+  if (world <= 1)
+    throw std::invalid_argument("TP geometry: world must be > 1");
+  if (rank < 0 || rank >= world)
+    throw std::invalid_argument("TP geometry: rank out of range");
+  const auto fail = [](const std::string& what) {
+    throw std::invalid_argument("TP geometry: " + what);
+  };
+  // Head divisibility (and every other KDA/DSA constraint) is enforced by
+  // the geometry validators themselves; the inter/expert splits are ours.
+  KdaConfig kc = cfg.kda_config();
+  kc.tp_size = world;
+  KdaGeometry::from_config(kc);
+  DsaConfig dc = cfg.dsa_config();
+  dc.tp_size = world;
+  DsaGeometry::from_config(dc);
+  const GlmMoeConfig mc = cfg.moe_config();
+  // The inter quotients carry the quantized scale-grid slice contract:
+  // every rank's slice start (rank * inter/world) must be 128-aligned,
+  // which the quotient being a 128-multiple guarantees for all ranks at
+  // once. Misaligned quotients would silently mis-scale at the fold —
+  // they fail here, loudly, before any load.
+  if (mc.n_experts % world != 0)
+    fail("n_routed_experts must divide by world (whole-expert shards)");
+  if (cfg.intermediate_size % world != 0)
+    fail("intermediate_size must divide by world (dense MLP TP)");
+  if (mc.inter % world != 0)
+    fail("moe_intermediate_size must divide by world (shared expert TP)");
+  if (cfg.intermediate_size / world % 128 != 0)
+    fail("intermediate_size/world must be a multiple of 128 (quantized "
+         "scale-grid slice alignment — misaligned slices throw at the view "
+         "seam instead of corrupting the fold)");
+  if (mc.inter / world % 128 != 0)
+    fail("moe_intermediate_size/world must be a multiple of 128 (quantized "
+         "scale-grid slice alignment)");
+}
+
 }  // namespace dgpp

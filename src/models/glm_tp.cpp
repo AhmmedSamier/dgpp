@@ -29,36 +29,16 @@ GlmTpViews::GlmTpViews(const GlmTextConfig& cfg, int rank, int world,
       rank_(rank),
       world_(world),
       stream_(stream) {
-  if (world <= 1)
-    throw std::invalid_argument("GlmTpViews: world must be > 1");
-  if (rank < 0 || rank >= world)
-    throw std::invalid_argument("GlmTpViews: rank out of range");
   if (!stream)
     throw std::invalid_argument("GlmTpViews: null stream");
-  const auto fail = [](const char* what) {
-    throw std::invalid_argument(std::string("GlmTpViews: ") + what);
-  };
-
-  // Head divisibility is enforced by the geometry validators (they throw
-  // with the exact dim); the inter/expert splits are ours to check. The
-  // inter quotients carry the quantized scale-grid slice contract: every
-  // rank's slice start (rank * inter/world) must be 128-aligned, which the
-  // quotient being a 128-multiple guarantees for all ranks at once.
+  // Full TP geometry acceptance (shared with the sharded loader — the
+  // two consumers must reject the same configs before any bytes move):
+  // world/rank range, head divisibility, expert and inter divisibility,
+  // and the 128-alignment of the inter quotients (the scale-grid slice
+  // contract).
+  glm_tp_validate_geometry(cfg, rank, world);
   kda_cfg_.tp_size = world;
   dsa_cfg_.tp_size = world;
-  if (moe_cfg_.n_experts % world != 0)
-    fail("n_routed_experts must divide by world (whole-expert shards)");
-  if (cfg.intermediate_size % world != 0)
-    fail("intermediate_size must divide by world (dense MLP TP)");
-  if (moe_cfg_.inter % world != 0)
-    fail("moe_intermediate_size must divide by world (shared expert TP)");
-  if (cfg.intermediate_size / world % 128 != 0)
-    fail("intermediate_size/world must be a multiple of 128 (quantized "
-         "scale-grid slice alignment — misaligned slices throw at the view "
-         "seam instead of corrupting the fold)");
-  if (moe_cfg_.inter / world % 128 != 0)
-    fail("moe_intermediate_size/world must be a multiple of 128 (quantized "
-         "scale-grid slice alignment)");
   kda_geo_ = KdaGeometry::from_config(kda_cfg_);
   dsa_geo_ = DsaGeometry::from_config(dsa_cfg_);
   local_experts_ = moe_cfg_.n_experts / world;
@@ -253,6 +233,44 @@ GlmLayerBound GlmTpViews::bind(const GlmLayerResident& r, bool dense_mlp) {
     moe_.experts = m.experts.data() + size_t(rank_) * local_experts_ * 3;
     moe_.expert_begin = rank_ * static_cast<int>(local_experts_);
     moe_.expert_count = static_cast<int>(local_experts_);
+    bound_.moe = &moe_;
+  }
+  return bound_;
+}
+
+GlmLayerBound GlmTpViews::bind_sharded(const GlmLayerResident& r,
+                                       bool dense_mlp) {
+  // The resident IS this rank's geometry (the sharded loader's contract,
+  // M5 d4): wire the pointers wholesale and stamp the expert partition
+  // the loader recorded. No slab, no copies — the loader did the merges
+  // and packs at load time, on the CPU, straight from the mmaps.
+  bound_ = GlmLayerBound{};
+  bound_.mhc = &r.mhc;
+  bound_.ln1 = r.ln1;
+  bound_.ln2 = r.ln2;
+  if (r.kind == GlmLayerKind::Kda) {
+    kda_ = r.kda;
+    bound_.kda = &kda_;
+  } else {
+    dsa_ = r.dsa;
+    bound_.dsa = &dsa_;
+  }
+  if (dense_mlp) {
+    for (int i = 0; i < 3; ++i) dense_[i] = r.dense[i];
+    bound_.dense = dense_;
+  } else {
+    // A full-resident layer here would silently execute every expert as
+    // this rank's "partition" — the one footgun worth a guard at the seam.
+    if (r.moe.expert_count <= 0)
+      throw std::invalid_argument(
+          "GlmTpViews::bind_sharded: resident MoE layer carries no TP "
+          "partition — was it loaded by a world=1 stream?");
+    moe_.router_gate = r.moe.router_gate;
+    moe_.router_bias = r.moe.router_bias;
+    for (int i = 0; i < 3; ++i) moe_.shared[i] = r.moe.shared[i];
+    moe_.experts = r.moe.experts.data();
+    moe_.expert_begin = r.moe.expert_begin;
+    moe_.expert_count = r.moe.expert_count;
     bound_.moe = &moe_;
   }
   return bound_;

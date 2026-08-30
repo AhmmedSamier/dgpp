@@ -245,6 +245,35 @@ The real checkpoint's inter dims (12288 dense / 2048 shared) are
 128-multiples at every TP world; non-multiple tails at world=1 remain the
 kernel's masked-tile case, which is correct and separately covered.
 
+**Sharded load (the loader IS the slicer):** at TP>1 the resident loader
+builds each layer DIRECTLY at this rank's local geometry — head row
+ranges, contiguous whole-expert ranges, 128-aligned quantized row/column
+slices — so only rank-local checkpoint bytes are ever read (measured on
+the fixture: 57% per rank at world=2, 36% at world=4; the re-read
+residue is the replicated set plus the DSA dequant-bridge tensors). The
+full-load+`GlmTpViews::bind` path remains as the independent reference
+implementation, and the shard-parity test pins the two BITWISE on every
+bound surface of every layer — the pair cannot drift. world=1 is the
+degenerate rank 0 of the same build (identical grant sequence, identical
+bytes — the M4 path by construction). The two DSA bridge tensors
+(`q_b_proj`, `o_proj`) are the documented exception: their quantized
+slices would start mid-block at some worlds, so every rank reads them in
+full and slices the dequantized bf16 — exactly what the views do to the
+same buffers — until the scale-aware GEMM seam replaces the bridge.
+
+**Boot checks:** the loader folds every replicated tensor's raw source
+bytes into a per-layer digest (order-independent, so load order cannot
+change it) plus the globals; ranks exchange at startup and a mismatch
+pinpoints the layer. Per-rank byte totals reconcile arithmetically: the
+sharded-class bytes partition across ranks exactly once and the
+replicated+bridge bytes re-read per rank, so
+`sum_ranks(source_bytes) == world1_total + (world−1)·verbatim` — a
+double-owned or missing row breaks the identity. Load boundaries
+synchronize exactly the bump's reader streams (the model's stream plus
+the loader's dequant stream), never the whole device: a device-wide wait
+in a one-process multi-rank world blocks on peers' spinning collective
+kernels — the first-collective stall measured under ~15 ms of thread skew.
+
 ## 6. CollectiveBus protocol
 
 Each peer pair owns RC QPs on both active lanes — one QP per slot pool per

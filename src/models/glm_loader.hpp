@@ -16,6 +16,11 @@
 // memory is therefore largest-layer + globals, which is what makes
 // full-model correctness testable on a single node without the TP placement.
 //
+// Sharded build (M5 d4): world>1 produces the resident layer directly at
+// this rank's TP geometry — the same layouts GlmTpViews::bind would carve
+// from a full layer, pinned bitwise by glm_tp_test's shard-parity test.
+// world=1 stays the degenerate rank 0 (the M4 build, byte-for-byte).
+//
 // Synchronization contract: load_layer/load_globals cudaDeviceSynchronize
 // before returning, so callers may read the managed buffers from the CPU
 // and must not touch them while later GPU work runs.
@@ -43,12 +48,18 @@ namespace dgpp {
 // which is how the byte formula and the allocator share one code path.
 struct GlmLayerBump;
 
-// One layer's routed-expert neighborhood in compressed form.
+// One layer's routed-expert neighborhood in compressed form. At world>1
+// (M5 d4) `experts` holds ONLY this rank's contiguous whole-expert range,
+// [expert_begin, expert_begin + expert_count); world=1 keeps the M4
+// "every expert" sentinel (count -1) so the single-rank forward is
+// byte-identical.
 struct GlmMoeResident {
   const uint16_t* router_gate = nullptr;  // BF16 [n_routed_experts, hidden]
   const float* router_bias = nullptr;     // F32 [n_routed_experts]
   GlmQuantMatrix shared[3];               // gate, up, down
-  std::vector<GlmQuantMatrix> experts;    // gate, up, down per expert
+  std::vector<GlmQuantMatrix> experts;    // gate, up, down per LOCAL expert
+  int expert_begin = 0;    // first global expert id resident here
+  int expert_count = -1;   // -1 = every expert (the M4 single-rank default)
   const GlmQuantMatrix& expert(int e, int i) const {
     return experts[static_cast<size_t>(e) * 3 + i];
   }
@@ -91,12 +102,45 @@ struct GlmGlobalsResident {
   size_t bytes = 0;
 };
 
+// Boot-time digest over REPLICATED weight source bytes (DESIGN §5.2: "boot
+// checks hash all replicated tensors"). One order-independent sum-hash per
+// layer (MTP last) plus the globals: ranks compare element-wise, so a
+// mismatch pinpoints the layer. Each tensor folds as FNV-1a over its name
+// then its raw checkpoint bytes, summed per layer — commutative, so load
+// order cannot change the value. Not adversarial: this is a
+// checksum-class agreement check between ranks loading the same files,
+// not a content-authentication hash.
+//
+// Replicated in v1: mHC, both layer norms, routers, the DSA indexer and
+// APE, the DSA latents (q_a/kv_a/their norms), KDA f_a/g_a/o_norm, the
+// MTP draft head, and the globals (embed/lm_head/final_norm load full on
+// every rank until the M6 vocabulary-sharded lm-head seam). The DSA q_b/
+// o_proj dequant bridges are NOT here — they are read in full by every
+// rank (the bf16 seam), but their resident outputs are sharded; they
+// count as full-read in the byte reconcile instead.
+struct GlmReplicatedDigest {
+  std::vector<uint64_t> layer;  // per layer 0..max_layer-1
+  uint64_t globals = 0;
+  uint64_t bytes = 0;    // total folded source bytes
+  uint64_t tensors = 0;  // total folded tensors
+};
+
 class GlmLayerStream {
  public:
   // Opens every safetensors shard in `checkpoint_dir` (sorted by name) and
   // validates the full text binding (glm_validate_text_binding); throws on
   // any mismatch. Allocates the layer bump at the max layer size.
-  GlmLayerStream(const GlmTextConfig& cfg, const std::string& checkpoint_dir);
+  //
+  // Sharded load (M5 d4): `world` > 1 builds each resident layer DIRECTLY
+  // at this rank's local geometry — head row ranges, contiguous
+  // whole-expert ranges, and 128-aligned quantized row/column slices (the
+  // §5.2 scale-grid contract) — so only rank-local checkpoint bytes are
+  // ever read. world=1 is the degenerate rank 0: the M4 full-geometry
+  // build, byte-for-byte (same grant sequence, same bytes — the layer
+  // formula cannot drift). TP geometry is validated BEFORE any shard is
+  // opened; misaligned inter quotients fail there, loudly.
+  GlmLayerStream(const GlmTextConfig& cfg, const std::string& checkpoint_dir,
+                 int rank = 0, int world = 1);
   ~GlmLayerStream();
   GlmLayerStream(const GlmLayerStream&) = delete;
   GlmLayerStream& operator=(const GlmLayerStream&) = delete;
@@ -114,16 +158,55 @@ class GlmLayerStream {
 
   // Exact device bytes load_layer will use for a layer — the same formula
   // that sizes the bump; load_layer throws if actual usage ever differs,
-  // so the formula and the allocator cannot silently drift apart.
-  static size_t layer_bytes(const GlmTextConfig& cfg, int layer);
+  // so the formula and the allocator cannot silently drift apart. At
+  // world>1 this is the LOCAL geometry's formula (the sharded bump).
+  static size_t layer_bytes(const GlmTextConfig& cfg, int layer,
+                            int rank = 0, int world = 1);
   static size_t globals_bytes(const GlmTextConfig& cfg);
 
+  // Registers the stream whose kernels READ resident layers (the model's
+  // compute stream). When set, load boundaries synchronize ONLY that
+  // stream plus the loader's own dequant stream — the complete set of
+  // bump readers — instead of the whole device. The device-wide wait is
+  // correct for standalone callers (conservative default), but in a
+  // ONE-PROCESS multi-rank world it deadlocks by construction: rank A's
+  // spinning collective kernel never completes, so rank B's
+  // cudaDeviceSynchronize inside a layer load never returns, so B never
+  // posts the doorbell A spins on (measured: first-collective stall, CI
+  // under post-build load — ~15ms of thread skew is enough). Peers'
+  // kernels never touch this rank's bump; the precise sync is strictly
+  // safer than the device-wide one everywhere, including the fabric.
+  void set_reader_stream(cudaStream_t reader) { reader_ = reader; }
+
   const GlmTextConfig& config() const { return cfg_; }
-  // Capacity of the per-layer bump (the largest layer's exact size).
+  // Capacity of the per-layer bump (the largest layer's exact size at
+  // this rank's geometry).
   size_t layer_capacity() const;
+
+  int rank() const { return rank_; }
+  int world() const { return world_; }
+
+  // Folds every replicated tensor's raw source bytes (all layers + the
+  // globals) straight from the mmaps — no layer residency required, which
+  // is what makes it a BOOT check. Rank-invariant by construction.
+  GlmReplicatedDigest hash_replicated() const;
+
+  // Checkpoint source bytes this rank has TOUCHED across all loads — the
+  // "reconcile per-rank byte totals" input (§5.2): the sharded-class bytes
+  // partition across ranks exactly once, the replicated+bridge bytes are
+  // re-read by every rank. verbatim_source_bytes() is that rank-invariant
+  // re-read subset, so sum_r(source) == world1_total + (world-1) *
+  // verbatim reconciles the shard coverage arithmetically.
+  uint64_t source_bytes_read() const { return source_bytes_; }
+  uint64_t verbatim_source_bytes() const { return verbatim_bytes_; }
 
  private:
   GlmTextConfig cfg_;
+  int rank_ = 0;
+  int world_ = 1;
+  cudaStream_t reader_ = nullptr;  // bump readers' stream (see above)
+  uint64_t source_bytes_ = 0;
+  uint64_t verbatim_bytes_ = 0;
   std::vector<std::unique_ptr<SafetensorsFile>> shards_;
   std::unordered_map<std::string, const TensorInfo*> tensors_;
   std::unique_ptr<GlmLayerBump> layer_bump_;
