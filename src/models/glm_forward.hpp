@@ -98,10 +98,21 @@ class GlmDiagnosticModel {
   // capture receives num_layers+1 stream snapshots (initial + per-layer
   // outputs) as host copies. The head runs on the isolated final streams.
   // Routed-layer decisions are likewise isolated (comparable per layer).
+  //
+  // boundary_capture (optional) receives the two BLOCK-BOUNDARY FOLDS per
+  // layer — the post-reduce attention output and FFN output, [tokens,
+  // hidden] each, 2*num_layers vectors in layer order. At world=1 these
+  // are the same buffers unfolded (the direct comparison targets). The
+  // stream snapshots above pass through the mHC stream update, whose
+  // mixing coefficients ATTENUATE boundary errors ~300x on the fixture —
+  // the raw folds are where slicing bugs actually surface (the dense
+  // scale-grid slice bug hid exactly there, 0.30 l2-wrong under a 0.001
+  // stream-state reading).
   Outputs forward_isolated(
       const std::vector<int64_t>& token_ids,
       const std::vector<const uint16_t*>& layer_inputs,
-      std::vector<std::vector<uint16_t>>& capture);
+      std::vector<std::vector<uint16_t>>& capture,
+      std::vector<std::vector<uint16_t>>* boundary_capture = nullptr);
 
   const GlmTextConfig& config() const { return cfg_; }
   int max_tokens() const { return max_tokens_; }
@@ -130,7 +141,8 @@ class GlmDiagnosticModel {
   static GlmMoeWeights moe_weights(const GlmMoeResident& r);
   Outputs run_stack(const std::vector<int64_t>& token_ids,
                     const uint16_t* const* layer_inputs,
-                    std::vector<std::vector<uint16_t>>* capture);
+                    std::vector<std::vector<uint16_t>>* capture,
+                    std::vector<std::vector<uint16_t>>* boundary_capture);
 
   GlmTextConfig cfg_;
   KdaConfig kda_cfg_;

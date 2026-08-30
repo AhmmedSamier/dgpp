@@ -16,10 +16,12 @@
 //     contiguous expert id range and GlmMoeLayer executes only that
 //     partition (the router still scores all experts on every rank).
 //
-// Quantized (E4M3 + 128x128 block scale) views offset the scale grid by
-// floor(start/128), not start/128: a rank boundary inside a scale block
-// shares that block's scale VALUE on both ranks — partial blocks are the
-// fixture's deliberate worst case (intermediate_size 200).
+// Quantized (E4M3 + 128x128 block scale) row/column slices must start
+// 128-ALIGNED in the sliced dimension: the local-frame consumer re-anchors
+// the scale grid at the slice origin, which is exact only for aligned
+// starts. Misaligned starts throw (quant_rows_view here; the column packs
+// in bind check the same contract). Non-multiple TAILS at world=1 remain
+// the kernel's own masked-tile case — correct and separately covered.
 //
 // The slice scratch is one slab of FIXED region slots reused per layer
 // (exactly one layer is resident at a time — the loader's contract), so
@@ -52,13 +54,25 @@ struct GlmLayerBound {
 };
 
 // Quant-matrix row-range view: payload rows are contiguous, so this is a
-// pure pointer view — no copy. `row_start` may land inside a 128-row
-// scale block; the scale row offset is floor(start/128) and the shared
-// block value is correct on both ranks that straddle it.
+// pure pointer view — no copy. A 128-ALIGNED row_start re-anchors the scale
+// grid exactly (local row r's true block is row_start/128 + r/128, which is
+// what the local-frame consumer computes); a MISALIGNED start that crosses
+// a block boundary would need two different scale values inside one local
+// block — unrepresentable — and is rejected here, loudly. The real
+// checkpoint's inter dims (12288 dense / 2048 shared) are 128-multiples at
+// every TP world; the loader-era fixture's 200 was this contract's
+// counterexample and produced silently wrong scales (measured: layer folds
+// 0.30 l2-wrong, invisible to the stream-state metric that attenuated it
+// 300x — see the M5 record).
 inline GlmQuantMatrix quant_rows_view(const GlmQuantMatrix& m,
-                                      int64_t row_start, int64_t rows) {
+                                       int64_t row_start, int64_t rows) {
   if (row_start < 0 || rows < 0 || rows > m.rows || row_start > m.rows - rows)
     throw std::invalid_argument("quant_rows_view: range out of bounds");
+  if (row_start % 128 != 0)
+    throw std::invalid_argument(
+        "quant_rows_view: row_start must be 128-aligned (quantized "
+        "scale-grid slice contract; misaligned slices cannot re-anchor "
+        "the block scales)");
   const int64_t sb = (m.cols + 127) / 128;  // scale blocks per scale row
   GlmQuantMatrix v;
   v.payload = m.payload + row_start * m.cols;

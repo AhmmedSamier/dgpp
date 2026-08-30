@@ -40,7 +40,10 @@ GlmTpViews::GlmTpViews(const GlmTextConfig& cfg, int rank, int world,
   };
 
   // Head divisibility is enforced by the geometry validators (they throw
-  // with the exact dim); the inter/expert splits are ours to check.
+  // with the exact dim); the inter/expert splits are ours to check. The
+  // inter quotients carry the quantized scale-grid slice contract: every
+  // rank's slice start (rank * inter/world) must be 128-aligned, which the
+  // quotient being a 128-multiple guarantees for all ranks at once.
   kda_cfg_.tp_size = world;
   dsa_cfg_.tp_size = world;
   if (moe_cfg_.n_experts % world != 0)
@@ -49,6 +52,13 @@ GlmTpViews::GlmTpViews(const GlmTextConfig& cfg, int rank, int world,
     fail("intermediate_size must divide by world (dense MLP TP)");
   if (moe_cfg_.inter % world != 0)
     fail("moe_intermediate_size must divide by world (shared expert TP)");
+  if (cfg.intermediate_size / world % 128 != 0)
+    fail("intermediate_size/world must be a multiple of 128 (quantized "
+         "scale-grid slice alignment — misaligned slices throw at the view "
+         "seam instead of corrupting the fold)");
+  if (moe_cfg_.inter / world % 128 != 0)
+    fail("moe_intermediate_size/world must be a multiple of 128 (quantized "
+         "scale-grid slice alignment)");
   kda_geo_ = KdaGeometry::from_config(kda_cfg_);
   dsa_geo_ = DsaGeometry::from_config(dsa_cfg_);
   local_experts_ = moe_cfg_.n_experts / world;
@@ -193,7 +203,12 @@ GlmLayerBound GlmTpViews::bind(const GlmLayerResident& r, bool dense_mlp) {
     dense_[1] = quant_rows_view(r.dense[1], rank_ * I, I);
     // down [H, I_full]: column slice -> packed payload + scale columns.
     // The slab carve is non-const for the copies; the views store const.
+    // Column starts carry the same 128-alignment contract as row slices
+    // (the local scale grid re-anchors at the pack origin).
     const GlmQuantMatrix& dn = r.dense[2];
+    if (rank_ * I % 128 != 0)
+      throw std::invalid_argument(
+          "GlmTpViews: dense down column slice must start 128-aligned");
     const int64_t sb_full = (dn.cols + 127) / 128;
     const int64_t sb_s = (I + 127) / 128;
     uint8_t* down_payload = slab + lay.off_dense_down;
@@ -217,6 +232,9 @@ GlmLayerBound GlmTpViews::bind(const GlmLayerResident& r, bool dense_mlp) {
     shared_[0] = quant_rows_view(m.shared[0], rank_ * M, M);
     shared_[1] = quant_rows_view(m.shared[1], rank_ * M, M);
     const GlmQuantMatrix& dn = m.shared[2];
+    if (rank_ * M % 128 != 0)
+      throw std::invalid_argument(
+          "GlmTpViews: shared down column slice must start 128-aligned");
     const int64_t sb_full = (dn.cols + 127) / 128;
     const int64_t sb_s = (M + 127) / 128;
     uint8_t* down_payload = slab + lay.off_shared_down;

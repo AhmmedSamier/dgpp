@@ -7,9 +7,17 @@
 
 namespace {
 
-// TP-divisible geometry; awkward inter dims kept deliberately (the scale
-// grid slicing must handle partial 128 blocks). Values are identical to
-// the M4 chain's fixture writer — same tensor names, same RNG.
+// TP-divisible geometry; awkward head/vocab dims kept deliberately. The
+// inter dims are 128-multiples at every tested world (512: 256 at world 2,
+// 128 at world 4) — the quantized scale-grid slice CONTRACT: a rank's
+// slice of a block-scaled matrix must start 128-aligned in the sliced
+// dimension, and misaligned starts throw at the view seam. The previous
+// fixture (dense inter 200) exercised a geometry the local-frame scale
+// consumer cannot represent — rank 1's slice started mid-block and read
+// the wrong scale rows (the M5 record has the hunt); non-multiple tails
+// remain covered where they are legal: world=1 full matrices
+// (glm_forward_test, scale GEMM tail tests). Values are identical to the
+// M4 chain's fixture writer — same tensor names, same RNG.
 const char* kTpJson = R"json({
   "hidden_size": 256, "vocab_size": 96, "num_hidden_layers": 6,
   "rms_norm_eps": 1e-5, "tie_word_embeddings": false,
@@ -31,7 +39,7 @@ const char* kTpJson = R"json({
   "index_n_heads": 32, "index_head_dim": 128, "index_kpool": 4,
   "index_topk": 32, "index_kpool_compress": true,
   "index_kpool_always_select_tail": true, "indexer_rope_interleave": true,
-  "intermediate_size": 200, "moe_intermediate_size": 64,
+  "intermediate_size": 512, "moe_intermediate_size": 512,
   "n_routed_experts": 8, "n_shared_experts": 1, "num_experts_per_tok": 2,
   "scoring_func": "sigmoid", "topk_method": "noaux_tc",
   "norm_topk_prob": true, "routed_scaling_factor": 1.5,

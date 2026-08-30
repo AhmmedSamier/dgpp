@@ -255,16 +255,22 @@ struct BuildCtx {
     out.dsa.k_norm_w = load_bf16(ip + "k_norm.weight");
     out.dsa.k_norm_b = load_bf16(ip + "k_norm.bias");
     // APE: checkpoint BF16 [kpool, index_head_dim]; the M3 kernel wants F32.
+    // Read via memcpy: safetensors does not align individual tensors in
+    // the file, so a typed uint16_t load from the mmap can be unaligned
+    // (the fixture's byte layout lands one at an odd offset).
     {
       const std::string name = ip + "index_kpool_compress_ape";
       const GlmExpectedTensor& e = expected(name);
       const size_t n = e.numel();
       float* ape = static_cast<float*>(bump.alloc(n * 4));
       if (copy) {
-        const uint16_t* src =
-            static_cast<const uint16_t*>(source(name).data);
-        for (size_t i = 0; i < n; ++i)
-          ape[i] = bf16_bits_to_float(src[i]);
+        const uint8_t* src =
+            static_cast<const uint8_t*>(source(name).data);
+        for (size_t i = 0; i < n; ++i) {
+          uint16_t bits;
+          std::memcpy(&bits, src + i * 2, 2);
+          ape[i] = bf16_bits_to_float(bits);
+        }
       }
       out.dsa.ape = ape;
     }

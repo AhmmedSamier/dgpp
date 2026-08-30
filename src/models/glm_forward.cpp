@@ -249,10 +249,16 @@ void GlmDiagnosticModel::enqueue_dense_mlp(
 // Shared stack runner. `layer_inputs` (isolated mode) overrides the stream
 // state entering EVERY layer (index L feeds layer L); `capture` (isolated
 // mode) receives each layer's output streams plus the initial state at
-// index 0. Free-run forward passes null for both.
+// index 0; `boundary_capture` (isolated mode) additionally receives the two
+// post-fold block-boundary outputs per layer (attn, FFN) — the raw surface
+// where slicing errors surface unattenuated (the mHC stream update in
+// `capture`'s snapshots compresses boundary errors below assertion budgets;
+// the dense scale-grid slice bug hid exactly there). Free-run forward
+// passes null for all three.
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
     const std::vector<int64_t>& token_ids, const uint16_t* const* layer_inputs,
-    std::vector<std::vector<uint16_t>>* capture) {
+    std::vector<std::vector<uint16_t>>* capture,
+    std::vector<std::vector<uint16_t>>* boundary_capture) {
   const int T = static_cast<int>(token_ids.size());
   if (T <= 0) throw std::invalid_argument("forward: empty token batch");
   if (T > max_tokens_)
@@ -383,6 +389,14 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
                      T);
       boundary_->reduce(attn_out, T, H);
     }
+    if (boundary_capture) {
+      // Post-fold attention boundary (world=1: the unfolded full output —
+      // the comparison target). Captured before the FFN site reuses the
+      // device buffer.
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      boundary_capture->push_back(std::vector<uint16_t>(
+          attn_out, attn_out + static_cast<size_t>(T) * H));
+    }
     launch_mhc_stream_update(post_, comb_, attn_out, cur, nxt, mhc_cfg_, T,
                              stream_);
     std::swap(cur, nxt);
@@ -426,6 +440,14 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
                      T);
       boundary_->reduce(ffn_out, T, H);
     }
+    if (boundary_capture) {
+      // Post-fold FFN boundary (world=1: the unfolded full output). The
+      // raw fold surface — dense/shared-expert slicing errors appear here
+      // at full magnitude.
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      boundary_capture->push_back(std::vector<uint16_t>(
+          ffn_out, ffn_out + static_cast<size_t>(T) * H));
+    }
     launch_mhc_stream_update(post_, comb_, ffn_out, cur, nxt, mhc_cfg_, T,
                              stream_);
     std::swap(cur, nxt);
@@ -454,17 +476,19 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
 
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward(
     const std::vector<int64_t>& token_ids) {
-  return run_stack(token_ids, nullptr, nullptr);
+  return run_stack(token_ids, nullptr, nullptr, nullptr);
 }
 
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward_isolated(
     const std::vector<int64_t>& token_ids,
     const std::vector<const uint16_t*>& layer_inputs,
-    std::vector<std::vector<uint16_t>>& capture) {
+    std::vector<std::vector<uint16_t>>& capture,
+    std::vector<std::vector<uint16_t>>* boundary_capture) {
   if (layer_inputs.size() != static_cast<size_t>(cfg_.num_hidden_layers) + 1)
     throw std::invalid_argument(
         "forward_isolated: needs num_layers+1 input snapshots");
-  return run_stack(token_ids, layer_inputs.data(), &capture);
+  return run_stack(token_ids, layer_inputs.data(), &capture,
+                   boundary_capture);
 }
 
 std::vector<std::vector<std::pair<int32_t, float>>> GlmDiagnosticModel::topk(

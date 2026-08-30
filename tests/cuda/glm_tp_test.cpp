@@ -1,11 +1,12 @@
 // M5 deliverable 3, forward integration: tensor-parallel block-boundary
 // parity, loopback (one process, real verbs QPs over 127.0.0.1 — the same
 // transport the bus scenarios use). The TP fixture is geometry the TP=4
-// world can shard: 4 KDA heads, 8 DSA heads, 8 routed experts, dense
-// intermediate 200 (a partial 128-block on every scale grid — the slicing
-// offset math's worst case), MoE intermediate 64. Values come from the
-// shared fixture writer (glm_fixture.hpp, via glm_tp_fixture.cpp — g++,
-// because nvcc cannot compile minijson's vector-of-incomplete Member).
+// world can shard: 4 KDA heads, 8 DSA heads, 8 routed experts, inter dims
+// 512 (128-multiple quotients at worlds 2 and 4 — the quantized
+// scale-grid slice contract; misaligned starts throw, and the negative
+// test below pins that). Values come from the shared fixture writer
+// (glm_fixture.hpp, via glm_tp_fixture.cpp — g++, because nvcc cannot
+// compile minijson's vector-of-incomplete Member).
 //
 // Oracles and assertions:
 //   * world=1 engine forward (the M4 path, byte-identical code) is the
@@ -15,6 +16,13 @@
 //     compute each layer from the SAME entering state, so drift is
 //     bounded by one layer's floor), and router flips certified as
 //     measured near ties (glm_route_audit).
+//   * ISOLATED parity asserts BOTH surfaces per layer: the mHC stream
+//     snapshots AND the raw block-boundary folds (attn + FFN). The
+//     stream snapshots pass through the mHC stream update, whose mixing
+//     coefficients attenuate boundary errors ~300x — the dense
+//     scale-grid slice bug measured 0.30 l2-wrong at the fold while the
+//     stream-state reading stayed at 0.001, silently under the 0.02
+//     budget. The folds are the unattenuated surface; both are asserted.
 //   * Cross-rank: final hidden, per-layer captures, route ids/weights,
 //     and logits are BITWISE identical on every rank — the canonical
 //     rank-order fold's guarantee (a violation means a rank's replicated
@@ -36,11 +44,13 @@
 
 #include <cuda_runtime.h>
 
+#include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "common/test.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_route_audit.hpp"
+#include "models/glm_tp.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "net/collective_bus.hpp"
 
@@ -124,6 +134,9 @@ struct RankOutcome {
   GlmDiagnosticModel::Outputs free_out;
   GlmDiagnosticModel::Outputs iso_out;
   std::vector<std::vector<uint16_t>> captures;
+  // 2*num_layers post-fold boundary outputs (attn, FFN per layer) from the
+  // isolated forward — the unattenuated assertion surface.
+  std::vector<std::vector<uint16_t>> boundary;
 };
 
 struct ConstructBarrier {
@@ -169,7 +182,8 @@ void rank_work(int rank, int world, const std::string& dir,
             .count());
     arrive_once();
     out->free_out = model.forward(tokens);
-    out->iso_out = model.forward_isolated(tokens, inputs, out->captures);
+    out->iso_out =
+        model.forward_isolated(tokens, inputs, out->captures, &out->boundary);
   } catch (const std::exception& e) {
     // Loud: a swallowed rank error presents as an unexplained hang (the
     // peers block on a collective that will never be submitted).
@@ -222,12 +236,13 @@ bool bits_equal(const std::vector<uint16_t>& a,
 // every observable, free-run l2 + top-1 near-tie certification, per-layer
 // isolated kept-row l2, and route-flip certification.
 void check_world(int world, uint16_t port, const std::string& dir,
-                 const GlmTextConfig& cfg,
-                 const std::vector<int64_t>& tokens,
-                 const std::vector<const uint16_t*>& state_ptrs,
-                 int64_t cache, const GlmDiagnosticModel::Outputs& ref_free,
-                 const std::vector<std::vector<uint16_t>>& ref_captures,
-                 const char* what) {
+                  const GlmTextConfig& cfg,
+                  const std::vector<int64_t>& tokens,
+                  const std::vector<const uint16_t*>& state_ptrs,
+                  int64_t cache, const GlmDiagnosticModel::Outputs& ref_free,
+                  const std::vector<std::vector<uint16_t>>& ref_captures,
+                  const std::vector<std::vector<uint16_t>>& ref_boundary,
+                  const char* what) {
   DGPP_LOG_INFO("TP loopback [{}] world={} tokens={}", what, world,
                 tokens.size());
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(world, port);
@@ -379,6 +394,63 @@ void check_world(int world, uint16_t port, const std::string& dir,
     }
   }
 
+  // ---- vs oracle: the raw boundary folds (the unattenuated surface) --
+  // The stream snapshots above pass through the mHC stream update, whose
+  // mixing coefficients compress boundary errors below the budget (the
+  // dense scale-grid slice bug measured 0.30 at the fold, 0.001 in the
+  // stream state). The folds themselves carry no such attenuation: the
+  // attention fold compares all rows (routing-independent), the FFN fold
+  // keeps the kept-row discipline (a flipped route legitimately moves the
+  // FFN output O(1) for that token).
+  double worst_fold_l2 = 0;
+  {
+    const size_t T = tokens.size();
+    const size_t row_elems = static_cast<size_t>(cfg.hidden_size);
+    require(ranks[0].boundary.size() ==
+                    2 * static_cast<size_t>(cfg.num_hidden_layers) &&
+                ref_boundary.size() ==
+                    2 * static_cast<size_t>(cfg.num_hidden_layers),
+            "boundary fold capture count mismatch");
+    for (int l = 0; l < cfg.num_hidden_layers; ++l) {
+      const dgpp::GlmRouteTraceLayer* eng_route = nullptr;
+      const dgpp::GlmRouteTraceLayer* ref_route = nullptr;
+      for (size_t ri = 0; ri < ranks[0].free_out.routes.size(); ++ri)
+        if (ranks[0].free_out.routes[ri].layer_idx ==
+            static_cast<uint32_t>(l)) {
+          eng_route = &ranks[0].free_out.routes[ri];
+          ref_route = &ref_free.routes[ri];
+          break;
+        }
+      for (int site = 0; site < 2; ++site) {
+        const bool is_ffn = site == 1;
+        const uint16_t* a = ranks[0].boundary[2 * l + site].data();
+        const uint16_t* b = ref_boundary[2 * l + site].data();
+        int kept = 0;
+        double acc = 0;
+        for (size_t t = 0; t < T; ++t) {
+          const bool flipped =
+              is_ffn && eng_route &&
+              !std::equal(eng_route->ids.begin() + t * eng_route->top_k,
+                          eng_route->ids.begin() + (t + 1) * eng_route->top_k,
+                          ref_route->ids.begin() + t * ref_route->top_k);
+          if (flipped) continue;
+          ++kept;
+          for (size_t i = 0; i < row_elems; ++i) {
+            const double d = dgpp::bf16_bits_to_float(a[t * row_elems + i]) -
+                              dgpp::bf16_bits_to_float(b[t * row_elems + i]);
+            acc += d * d;
+          }
+        }
+        const double l2 =
+            kept ? std::sqrt(acc / (double(kept) * row_elems)) : 0.0;
+        worst_fold_l2 = std::max(worst_fold_l2, l2);
+        require(l2 < 0.02,
+                std::string("boundary fold l2 vs oracle (layer ") +
+                    std::to_string(l) + (is_ffn ? ", ffn" : ", attn") + ")");
+      }
+    }
+  }
+
   // ---- vs oracle: routing (flips must be certified near ties) ------
   int64_t flips = 0, swaps = 0;
   double worst_noise_mult = 0;
@@ -404,20 +476,22 @@ void check_world(int world, uint16_t port, const std::string& dir,
   }
 
   DGPP_LOG_INFO(
-      "TP [{}] world={} free l2={:.4f} worst layer l2={:.4f} top1 misses={} "
-      "(uncertified {}, worst margin {:.1f}x noise) route flips={} "
-      "(certified swaps {}, worst {:.1f}x noise)",
-      what, world, free_l2, worst_layer_l2, top1_mismatch, top1_uncertified,
-      worst_margin_ratio, flips, swaps, worst_noise_mult);
+      "TP [{}] world={} free l2={:.4f} worst layer l2={:.4f} worst fold "
+      "l2={:.4f} top1 misses={} (uncertified {}, worst margin {:.1f}x noise) "
+      "route flips={} (certified swaps {}, worst {:.1f}x noise)",
+      what, world, free_l2, worst_layer_l2, worst_fold_l2, top1_mismatch,
+      top1_uncertified, worst_margin_ratio, flips, swaps, worst_noise_mult);
 
   for (auto& b : buses) b->stop();
 }
 
 // Oracle references for one token shape: the world=1 model's free-run and
-// isolated outputs (with per-layer captures), determinism double-checked.
+// isolated outputs (with per-layer captures and boundary folds),
+// determinism double-checked.
 struct OracleRef {
   GlmDiagnosticModel::Outputs free_out;
   std::vector<std::vector<uint16_t>> captures;
+  std::vector<std::vector<uint16_t>> boundary;
 };
 
 OracleRef run_oracle(const GlmTextConfig& cfg, const std::string& dir,
@@ -431,7 +505,7 @@ OracleRef run_oracle(const GlmTextConfig& cfg, const std::string& dir,
   require(ref.free_out.final_hidden_bits == again.final_hidden_bits &&
               ref.free_out.logits_bits == again.logits_bits,
           "oracle forward is not deterministic across calls");
-  oracle.forward_isolated(tokens, state_ptrs, ref.captures);
+  oracle.forward_isolated(tokens, state_ptrs, ref.captures, &ref.boundary);
   return ref;
 }
 
@@ -454,7 +528,7 @@ DGPP_TEST(glm_tp_forward_parity_loopback) {
     const OracleRef ref =
         run_oracle(cfg, dir, tokens, state_ptrs, 128);
     check_world(2, 29903, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
-                ref.captures, "staged");
+                ref.captures, ref.boundary, "staged");
   }
 
   // ---- the 21-token case: 5376 elems per boundary — above one latency
@@ -470,10 +544,47 @@ DGPP_TEST(glm_tp_forward_parity_loopback) {
     const OracleRef ref =
         run_oracle(cfg, dir, tokens, state_ptrs, 128);
     check_world(2, 29899, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
-                ref.captures, "chunked");
+                ref.captures, ref.boundary, "chunked");
     check_world(4, 29900, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
-                ref.captures, "chunked");
+                ref.captures, ref.boundary, "chunked");
   }
+}
+
+// The quantized scale-grid slice contract, pinned: a rank's slice of a
+// block-scaled matrix must start 128-aligned in the sliced dimension.
+// The pre-fix fixture geometry (dense inter 200 / MoE inter 64) is the
+// counterexample — it must be REJECTED loudly, never silently mis-scaled
+// (the hunt: rank 1's dense slice started mid-block, read the wrong
+// scale rows for 72 of its 100 inter dims, and the fold carried ~0.30
+// l2 error past a 0.02-budget assertion).
+DGPP_TEST(glm_tp_slice_alignment_contract) {
+  const GlmTextConfig base = glm_tp_test_config();
+  cudaStream_t st;
+  DGPP_CUDA_OK(cudaStreamCreate(&st));
+  const auto expect_throw = [&](GlmTextConfig cfg, const char* needle) {
+    bool threw = false;
+    std::string msg;
+    try {
+      dgpp::GlmTpViews tp(cfg, 1, 2, st);
+    } catch (const std::exception& e) {
+      threw = true;
+      msg = e.what();
+    }
+    require(threw && msg.find(needle) != std::string::npos,
+            std::string("misaligned inter slice must throw with '") +
+                needle + "' (got: " + msg + ")");
+  };
+  {
+    GlmTextConfig bad = base;
+    bad.intermediate_size = 200;  // divides by 2; quotient 100 % 128 != 0
+    expect_throw(bad, "128");
+  }
+  {
+    GlmTextConfig bad = base;
+    bad.moe_intermediate_size = 64;  // quotient 32 % 128 != 0
+    expect_throw(bad, "128");
+  }
+  DGPP_CUDA_OK(cudaStreamDestroy(st));
 }
 
 }  // namespace

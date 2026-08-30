@@ -231,6 +231,20 @@ The shard generator records the owning ranks and scale geometry. Boot checks
 hash all replicated tensors and reconcile per-rank byte totals before graph
 capture.
 
+**Quantized slice alignment (measured into the contract):** a rank's slice
+of an E4M3 block-scaled matrix must start **128-aligned** in the sliced
+dimension (gate/up row slices, down column packs). The local-frame scale
+consumer re-anchors the 128×128 grid at the slice origin — exact for
+aligned starts, unrepresentable for a slice that starts mid-block and
+crosses a boundary (the following block's rows would read the straddling
+block's scales; measured as a 0.30-l2-wrong boundary fold that the mHC
+stream-state metric attenuated 300× — the fixture's dense inter 200 was
+exactly this and passed its 0.02 budget at 0.001 for three milestones).
+Misaligned quotients fail at the validators and at the view seam, loudly.
+The real checkpoint's inter dims (12288 dense / 2048 shared) are
+128-multiples at every TP world; non-multiple tails at world=1 remain the
+kernel's masked-tile case, which is correct and separately covered.
+
 ## 6. CollectiveBus protocol
 
 Each peer pair owns RC QPs on both active lanes — one QP per slot pool per
