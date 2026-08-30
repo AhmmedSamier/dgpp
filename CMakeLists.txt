@@ -217,6 +217,12 @@ if(DGPP_ENABLE_IBV)
   dgpp_set_common(glm_tp_test)
   add_test(NAME glm_tp_test COMMAND glm_tp_test)
   set_tests_properties(glm_tp_test PROPERTIES SKIP_RETURN_CODE 2)
+
+  # M5 deliverable 3 fabric runner: TP forward on real nodes.
+  add_executable(glm_tp_check apps/glm_tp_check.cpp)
+  target_link_libraries(glm_tp_check PRIVATE dgpp_models_glm_loader dgpp_bus
+                                          CUDA::cudart Threads::Threads)
+  dgpp_set_common(glm_tp_check)
 endif()
 
 enable_testing()
