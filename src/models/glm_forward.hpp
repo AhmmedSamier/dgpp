@@ -43,6 +43,16 @@ namespace dgpp {
 // world=1 constructs the model without a reducer and the seam is skipped.
 struct GlmBoundaryReducer {
   virtual ~GlmBoundaryReducer() = default;
+
+  // Optional staging seam (the §6.3 evolution): hands the producing GEMM
+  // a pinned, device-writable destination for the boundary partial so the
+  // collective sends it straight from there (no device→slot staging copy).
+  // Returns nullptr when the shape does not fit (rows*hidden above the
+  // latency slot — prefill-sized boundaries stay on the device path) or
+  // when the transport has no pre-stage support. The returned pointer is
+  // consumed by the following reduce() call.
+  virtual uint16_t* stage(int /*rows*/, int /*hidden*/) { return nullptr; }
+
   virtual void reduce(uint16_t* partial, int rows, int hidden) = 0;
 };
 

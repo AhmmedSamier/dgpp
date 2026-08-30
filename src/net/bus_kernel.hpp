@@ -96,13 +96,16 @@ struct BusAllReduceView {
 // `elems` is the bf16 element count (multiple of 2). The kernel folds all
 // W vectors into dst with fp32 accumulation in canonical global-rank
 // order, so every rank's destination is bitwise identical and a host
-// oracle of the same chain matches exactly.
+// oracle of the same chain matches exactly. src may be device memory or a
+// pinned pre-stage buffer the producing GEMM wrote (the §6.3 seam); when
+// src aliases dst, the fold runs in place per element (one thread per
+// element, read before write) after snapshotting every peer's send copy.
 cudaError_t launch_bus_allreduce(const BusAllReduceView& v, int my_rank,
-                                 const __nv_bfloat16* src, __nv_bfloat16* dst,
-                                 uint32_t elems, uint32_t ctl_seq,
-                                 BusAllReduceCtl* ctl,
-                                 uint64_t deadline_cycles,
-                                 cudaStream_t stream);
+                                  const __nv_bfloat16* src, __nv_bfloat16* dst,
+                                  uint32_t elems, uint32_t ctl_seq,
+                                  BusAllReduceCtl* ctl,
+                                  uint64_t deadline_cycles,
+                                  cudaStream_t stream);
 
 // Host-side bf16 helpers matching the device intrinsics' round-to-nearest-
 // even. Consumers of the bus (tests, checks, the forward oracle) verify

@@ -160,8 +160,14 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
   }
   __syncthreads();
 
-  // Phase 1 — stage the source vector into every peer's claimed send slot.
+  // Phase 1 — snapshot the source vector into every peer's staging slot.
   // One u32 per thread iteration; 4096 bf16 = 2048 words over 256 threads.
+  // The snapshot is load-bearing for the pre-staged seam (src == dst == a
+  // staging buffer the producing GEMM wrote): the fold below overwrites
+  // src in place, so each peer's send buffer must hold a copy taken BEFORE
+  // the fold — the engine's post reads these, never the folding src.
+  // Pre-staged sources are pinned (the GEMM wrote them directly), so this
+  // pass is a pinned fan-out; the device→slot copy is what disappears.
   const uint32_t words = elems / 2;
   for (int p = 0; p < v.send_peers; ++p) {
     const uint32_t* s = reinterpret_cast<const uint32_t*>(src);
@@ -305,11 +311,11 @@ cudaError_t launch_bus_consumer(const BusRecvView& view,
 }
 
 cudaError_t launch_bus_allreduce(const BusAllReduceView& v, int my_rank,
-                                 const __nv_bfloat16* src, __nv_bfloat16* dst,
-                                 uint32_t elems, uint32_t ctl_seq,
-                                 BusAllReduceCtl* ctl,
-                                 uint64_t deadline_cycles,
-                                 cudaStream_t stream) {
+                                  const __nv_bfloat16* src, __nv_bfloat16* dst,
+                                  uint32_t elems, uint32_t ctl_seq,
+                                  BusAllReduceCtl* ctl,
+                                  uint64_t deadline_cycles,
+                                  cudaStream_t stream) {
   bus_allreduce_kernel<<<1, kConsumerThreads, 0, stream>>>(
       v, my_rank, src, dst, elems, ctl_seq, ctl, deadline_cycles);
   return cudaGetLastError();

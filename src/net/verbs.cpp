@@ -283,7 +283,8 @@ BusLaneEndpoint RcLane::endpoint() const {
 }
 
 bool RcLane::post_send_pair(BusPool pool, uint32_t slot, uint32_t seq,
-                            uint32_t len, std::string* error) {
+                            uint32_t len, std::string* error,
+                            const void* payload_local, uint32_t payload_lkey) {
   ibv_qp* qp = qp_[pool == BusPool::kLatency ? 0 : 1];
   uint8_t* payload = layout_.send_payload(slab_, pool, slot);
   StartSlot* doorbell = layout_.send_doorbell(slab_, pool, slot);
@@ -295,8 +296,9 @@ bool RcLane::post_send_pair(BusPool pool, uint32_t slot, uint32_t seq,
   std::atomic_thread_fence(std::memory_order_release);
 
   ibv_sge sge[2]{};
-  sge[0].addr = reinterpret_cast<uint64_t>(payload);
-  sge[0].lkey = mr_->lkey;
+  sge[0].addr = reinterpret_cast<uint64_t>(
+      payload_local != nullptr ? payload_local : payload);
+  sge[0].lkey = payload_local != nullptr ? payload_lkey : mr_->lkey;
   sge[0].length = len;
   sge[1].addr = reinterpret_cast<uint64_t>(doorbell);
   sge[1].lkey = mr_->lkey;

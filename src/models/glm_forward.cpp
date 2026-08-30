@@ -323,7 +323,19 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
     hw.base = b.mhc->attn_base;
     hw.scale = b.mhc->attn_scale;
     launch_mhc_compute(cur, hw, mhc_cfg_, collapsed_, post_, comb_, T,
-                        stream_);    glm_rmsnorm_bf16(collapsed_, b.ln1, normed_, T, H, eps, stream_);    if (r.kind == GlmLayerKind::Kda) {
+                        stream_);    glm_rmsnorm_bf16(collapsed_, b.ln1, normed_, T, H, eps, stream_);
+    // Block boundary 1 (DESIGN §5.1): the attention output projection is
+    // row-parallel over this rank's heads, so the block output is a partial
+    // sum until folded. With pre-stage support the attention writes the
+    // pinned staging buffer directly (the §6.3 seam — no staging copy;
+    // decode T qualifies, prefill-sized T falls back to the device
+    // buffer). The decision precedes the enqueue so the GEMM's destination
+    // is the transport's send source.
+    uint16_t* attn_out = sub_out_;
+    if (boundary_) {
+      if (uint16_t* staged = boundary_->stage(T, H)) attn_out = staged;
+    }
+    if (r.kind == GlmLayerKind::Kda) {
       if (!kda_) {
         kda_ = std::make_unique<KdaLayer>(arena_, gemm_, *b.kda, kda_cfg_,
                                           max_tokens_, gemm_ws_,
@@ -342,8 +354,9 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
       uint16_t* conv =
           kda_conv_ + static_cast<size_t>(kda_ordinal) *
                           (kda_geo_.conv_committed_bytes / 2);
-      kda_->enqueue(normed_, rec, conv, kda_geo_.conv_hist, sub_out_, T,
-                    stream_);      ++kda_ordinal;
+      kda_->enqueue(normed_, rec, conv, kda_geo_.conv_hist, attn_out, T,
+                    stream_);
+      ++kda_ordinal;
     } else {
       if (!dsa_) {
         dsa_ = std::make_unique<DsaLayer>(
@@ -357,23 +370,20 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
       }
       if (!dsa_->prepare(T))
         throw std::runtime_error("forward: DSA GEMM plans unavailable");
-      dsa_->enqueue_prefill(normed_, pool_, dsa_ordinal, 0, 0, T, sub_out_,
+      dsa_->enqueue_prefill(normed_, pool_, dsa_ordinal, 0, 0, T, attn_out,
                              stream_);
       ++dsa_ordinal;
     }
-    // Block boundary 1 (DESIGN §5.1): the attention output projection is
-    // row-parallel over this rank's heads, so sub_out_ is a partial sum
-    // until folded. The collective kernel runs on the bus's stream, so
-    // the producer quiesces first (stream order cannot cover a
-    // cross-stream consumer; the graph-mode decode path restores this as
-    // a stream-ordered node).
+    // The collective kernel runs on the bus's stream, so the producer
+    // quiesces first (stream order cannot cover a cross-stream consumer;
+    // the graph-mode decode path restores this as a stream-ordered node).
     if (boundary_) {
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
       DGPP_LOG_DEBUG("TP boundary (attn) layer={} rows={} — reducing", layer,
-                    T);
-      boundary_->reduce(sub_out_, T, H);
+                     T);
+      boundary_->reduce(attn_out, T, H);
     }
-    launch_mhc_stream_update(post_, comb_, sub_out_, cur, nxt, mhc_cfg_, T,
+    launch_mhc_stream_update(post_, comb_, attn_out, cur, nxt, mhc_cfg_, T,
                              stream_);
     std::swap(cur, nxt);
 
@@ -385,15 +395,22 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
     launch_mhc_compute(cur, fw, mhc_cfg_, collapsed_, post_, comb_, T,
                         stream_);
     glm_rmsnorm_bf16(collapsed_, b.ln2, normed_, T, H, eps, stream_);
+    // Block boundary 2 destination: same staging-seam decision before the
+    // FFN enqueue (dense down-proj, shared expert, and this rank's routed
+    // experts are all partial until the fold).
+    uint16_t* ffn_out = sub_out_;
+    if (boundary_) {
+      if (uint16_t* staged = boundary_->stage(T, H)) ffn_out = staged;
+    }
     if (cfg_.mlps[layer] == GlmMlpKind::Dense) {
-      enqueue_dense_mlp(normed_, sub_out_, b.dense, T, stream_);    } else {
+      enqueue_dense_mlp(normed_, ffn_out, b.dense, T, stream_);    } else {
       if (!moe_) {
         moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_,
                                              max_tokens_);
       } else {
         moe_->rebind(*b.moe);
       }
-      moe_->enqueue(normed_, sub_out_, T, stream_);
+      moe_->enqueue(normed_, ffn_out, T, stream_);
       GlmRouteTraceLayer route;
       route.layer_idx = static_cast<uint32_t>(layer);
       route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
@@ -403,15 +420,13 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
       out.routes.push_back(std::move(route));
       out.route_biased.push_back(moe_->last_biased());
     }
-    // Block boundary 2: same fold after the FFN/MoE (dense down-proj,
-    // shared expert, and this rank's routed experts are all partial).
     if (boundary_) {
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
       DGPP_LOG_DEBUG("TP boundary (ffn)  layer={} rows={} — reducing", layer,
-                    T);
-      boundary_->reduce(sub_out_, T, H);
+                     T);
+      boundary_->reduce(ffn_out, T, H);
     }
-    launch_mhc_stream_update(post_, comb_, sub_out_, cur, nxt, mhc_cfg_, T,
+    launch_mhc_stream_update(post_, comb_, ffn_out, cur, nxt, mhc_cfg_, T,
                              stream_);
     std::swap(cur, nxt);
     if (capture) {

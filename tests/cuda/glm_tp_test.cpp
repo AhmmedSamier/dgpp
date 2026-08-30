@@ -146,6 +146,16 @@ void rank_work(int rank, int world, const std::string& dir,
                const std::vector<const uint16_t*>& inputs,
                int64_t cache_tokens, CollectiveBus* bus,
                ConstructBarrier* barrier, RankOutcome* out) {
+  // Arrive at the construction barrier exactly once, from whatever path
+  // exits the construction phase — a second arrive_and_wait() (the naive
+  // catch) decrements `left` below zero and strands every rank at the
+  // barrier forever, swallowing the error with it.
+  bool arrived = false;
+  auto arrive_once = [&] {
+    if (arrived) return;
+    arrived = true;
+    barrier->arrive_and_wait();
+  };
   try {
     const auto t0 = std::chrono::steady_clock::now();
     DGPP_LOG_INFO("rank {}: model ctor begin", rank);
@@ -157,12 +167,15 @@ void rank_work(int rank, int world, const std::string& dir,
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - t0)
             .count());
-    barrier->arrive_and_wait();
+    arrive_once();
     out->free_out = model.forward(tokens);
     out->iso_out = model.forward_isolated(tokens, inputs, out->captures);
   } catch (const std::exception& e) {
+    // Loud: a swallowed rank error presents as an unexplained hang (the
+    // peers block on a collective that will never be submitted).
+    DGPP_LOG_ERROR("rank {} failed: {}", rank, e.what());
     out->error = std::string("rank ") + std::to_string(rank) + ": " + e.what();
-    barrier->arrive_and_wait();  // never strand peers at the barrier
+    arrive_once();  // never strand peers at the barrier
   }
 }
 
@@ -204,217 +217,262 @@ bool bits_equal(const std::vector<uint16_t>& a,
          std::memcmp(a.data(), b.data(), a.size() * 2) == 0;
 }
 
+// Runs one loopback TP world end to end and asserts the full parity
+// surface against the supplied oracle references: cross-rank bitwise at
+// every observable, free-run l2 + top-1 near-tie certification, per-layer
+// isolated kept-row l2, and route-flip certification.
+void check_world(int world, uint16_t port, const std::string& dir,
+                 const GlmTextConfig& cfg,
+                 const std::vector<int64_t>& tokens,
+                 const std::vector<const uint16_t*>& state_ptrs,
+                 int64_t cache, const GlmDiagnosticModel::Outputs& ref_free,
+                 const std::vector<std::vector<uint16_t>>& ref_captures,
+                 const char* what) {
+  DGPP_LOG_INFO("TP loopback [{}] world={} tokens={}", what, world,
+                tokens.size());
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(world, port);
+  require(!buses.empty(), "tp bus world failed to start");
+
+  std::vector<RankOutcome> ranks(static_cast<size_t>(world));
+  ConstructBarrier barrier(world);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < world; ++r)
+    workers.emplace_back(rank_work, r, world, dir, std::cref(cfg),
+                         std::cref(tokens), std::cref(state_ptrs), cache,
+                         buses[static_cast<size_t>(r)].get(), &barrier,
+                         &ranks[static_cast<size_t>(r)]);
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < world; ++r)
+    require(ranks[static_cast<size_t>(r)].error.empty(),
+            ranks[static_cast<size_t>(r)].error);
+
+  // ---- cross-rank: bitwise at every observable -------------------
+  for (int r = 1; r < world; ++r) {
+    const RankOutcome& a = ranks[0];
+    const RankOutcome& b = ranks[static_cast<size_t>(r)];
+    require(bits_equal(a.free_out.final_hidden_bits,
+                       b.free_out.final_hidden_bits),
+            "free-run final hidden differs bitwise across ranks");
+    require(bits_equal(a.free_out.logits_bits, b.free_out.logits_bits),
+            "logits differ bitwise across ranks");
+    require(a.captures.size() == b.captures.size() &&
+                a.captures.size() == ref_captures.size(),
+            "capture count mismatch");
+    for (size_t l = 0; l < a.captures.size(); ++l)
+      require(bits_equal(a.captures[l], b.captures[l]),
+              "per-layer stream state differs bitwise across ranks");
+    require(a.free_out.routes.size() == b.free_out.routes.size(),
+            "route layer count mismatch");
+    for (size_t l = 0; l < a.free_out.routes.size(); ++l) {
+      require(a.free_out.routes[l].ids == b.free_out.routes[l].ids &&
+                  a.free_out.routes[l].weights ==
+                      b.free_out.routes[l].weights,
+              "routing decisions differ across ranks");
+    }
+  }
+
+  // ---- vs oracle: free-run end-to-end -----------------------------
+  // Free-run divergence is REPORTED, not asserted (the M4 discipline:
+  // cross-implementation bf16 at depth compounds legitimately — the
+  // per-layer ISOLATED bound below is the assertion surface). The head
+  // keeps a hard gate: every top-1 disagreement must certify as a
+  // boundary near tie (oracle top-2 margin within 32x the measured
+  // TP-vs-oracle logit noise).
+  const double free_l2 = l2_bf16(ranks[0].free_out.final_hidden_bits,
+                                 ref_free.final_hidden_bits);
+  int top1_mismatch = 0, top1_uncertified = 0;
+  double worst_margin_ratio = 0;
+  {
+    const int V = cfg.vocab_size;
+    const size_t T = tokens.size();
+    const uint16_t* tp = ranks[0].free_out.logits_bits.data();
+    const uint16_t* rf = ref_free.logits_bits.data();
+    for (size_t t = 0; t < T; ++t) {
+      const uint16_t* tr = tp + t * V;
+      const uint16_t* rr = rf + t * V;
+      int tp_top = 0, rf_top = 0, rf_second = -1;
+      double noise = 0;
+      for (int c = 0; c < V; ++c) {
+        const double d = std::abs(dgpp::bf16_bits_to_float(tr[c]) -
+                                  dgpp::bf16_bits_to_float(rr[c]));
+        noise = std::max(noise, d);
+        if (dgpp::bf16_bits_to_float(tr[c]) >
+            dgpp::bf16_bits_to_float(tr[tp_top]))
+          tp_top = c;
+        if (dgpp::bf16_bits_to_float(rr[c]) >
+            dgpp::bf16_bits_to_float(rr[rf_top])) {
+          rf_second = rf_top;
+          rf_top = c;
+        } else if (rf_second < 0 ||
+                   dgpp::bf16_bits_to_float(rr[c]) >
+                       dgpp::bf16_bits_to_float(rr[rf_second])) {
+          if (c != rf_top) rf_second = c;
+        }
+      }
+      if (tp_top == rf_top) continue;
+      ++top1_mismatch;
+      const double margin = std::abs(
+          dgpp::bf16_bits_to_float(rr[rf_top]) -
+          dgpp::bf16_bits_to_float(rr[rf_second]));
+      worst_margin_ratio = std::max(worst_margin_ratio, margin / noise);
+      if (noise <= 0 || margin > 32.0 * noise) ++top1_uncertified;
+    }
+  }
+  require(top1_uncertified == 0,
+          "free-run top-1 disagreement is not a certified near tie "
+          "(oracle top-2 margin > 32x TP-vs-oracle logit noise)");
+
+  // ---- vs oracle: per-layer isolated parity (the assertion surface) --
+  // Kept-row discipline: a token whose routing flipped vs the oracle
+  // legitimately moves O(1) (the noaux bias ties scores at the selection
+  // boundary); its rows are excluded from the l2 and the flips are
+  // certified separately below. Kept rows must sit under 2e-2 — the
+  // M4 curated-suite tier — and measured an order lower.
+  double worst_layer_l2 = 0;
+  {
+    const size_t T = tokens.size();
+    const size_t row_elems =
+        static_cast<size_t>(cfg.hidden_size) * 4;  // [4, hidden] per token
+    for (size_t l = 0; l < ranks[0].captures.size(); ++l) {
+      // Which route belongs to this layer (MoE layers only)?
+      const dgpp::GlmRouteTraceLayer* eng_route = nullptr;
+      const dgpp::GlmRouteTraceLayer* ref_route = nullptr;
+      for (size_t ri = 0; ri < ranks[0].free_out.routes.size(); ++ri)
+        if (ranks[0].free_out.routes[ri].layer_idx == l) {
+          eng_route = &ranks[0].free_out.routes[ri];
+          ref_route = &ref_free.routes[ri];
+          break;
+        }
+      int kept_rows = 0, flipped_rows = 0;
+      double acc = 0;
+      for (size_t t = 0; t < T; ++t) {
+        const bool flipped =
+            eng_route &&
+            !std::equal(eng_route->ids.begin() + t * eng_route->top_k,
+                        eng_route->ids.begin() + (t + 1) * eng_route->top_k,
+                        ref_route->ids.begin() + t * ref_route->top_k);
+        if (flipped) {
+          ++flipped_rows;
+          continue;
+        }
+        ++kept_rows;
+        const uint16_t* a =
+            ranks[0].captures[l].data() + t * row_elems;
+        const uint16_t* b = ref_captures[l].data() + t * row_elems;
+        for (size_t i = 0; i < row_elems; ++i) {
+          const double d = dgpp::bf16_bits_to_float(a[i]) -
+                            dgpp::bf16_bits_to_float(b[i]);
+          acc += d * d;
+        }
+      }
+      const double l2 = kept_rows
+                            ? std::sqrt(acc / (double(kept_rows) * row_elems))
+                            : 0.0;
+      worst_layer_l2 = std::max(worst_layer_l2, l2);
+      require(l2 < 0.02,
+              "isolated kept-row l2 vs oracle (layer " + std::to_string(l) +
+                  ")");
+      if (flipped_rows)
+        DGPP_LOG_INFO("TP [{}] world={} layer {} isolated: {} flipped rows "
+                      "excluded (certified below)",
+                      what, world, l, flipped_rows);
+    }
+  }
+
+  // ---- vs oracle: routing (flips must be certified near ties) ------
+  int64_t flips = 0, swaps = 0;
+  double worst_noise_mult = 0;
+  size_t oi = 0;  // oracle route index (MoE layers only, ascending)
+  for (size_t l = 0; l < ranks[0].free_out.routes.size(); ++l) {
+    const auto& eng = ranks[0].free_out.routes[l];
+    const auto& ref_route = ref_free.routes[oi];
+    require(ref_route.layer_idx == eng.layer_idx,
+            "route layer alignment vs oracle");
+    const std::vector<float>& eng_biased =
+        ranks[0].free_out.route_biased[l];
+    const std::vector<float>& ref_biased = ref_free.route_biased[oi];
+    RouteFlipAudit audit;
+    audit_route_flips(eng.ids.data(), ref_route.ids.data(),
+                      eng_biased.data(), ref_biased.data(),
+                      static_cast<int64_t>(eng.tokens),
+                      cfg.moe_config().top_k, cfg.moe_config().n_experts,
+                      audit, eng.layer_idx);
+    flips += audit.tokens_flipped;
+    swaps += audit.swaps_certified;
+    worst_noise_mult = std::max(worst_noise_mult, audit.max_noise_multiple);
+    ++oi;
+  }
+
+  DGPP_LOG_INFO(
+      "TP [{}] world={} free l2={:.4f} worst layer l2={:.4f} top1 misses={} "
+      "(uncertified {}, worst margin {:.1f}x noise) route flips={} "
+      "(certified swaps {}, worst {:.1f}x noise)",
+      what, world, free_l2, worst_layer_l2, top1_mismatch, top1_uncertified,
+      worst_margin_ratio, flips, swaps, worst_noise_mult);
+
+  for (auto& b : buses) b->stop();
+}
+
+// Oracle references for one token shape: the world=1 model's free-run and
+// isolated outputs (with per-layer captures), determinism double-checked.
+struct OracleRef {
+  GlmDiagnosticModel::Outputs free_out;
+  std::vector<std::vector<uint16_t>> captures;
+};
+
+OracleRef run_oracle(const GlmTextConfig& cfg, const std::string& dir,
+                     const std::vector<int64_t>& tokens,
+                     const std::vector<const uint16_t*>& state_ptrs,
+                     int64_t cache) {
+  OracleRef ref;
+  GlmDiagnosticModel oracle(cfg, dir, static_cast<int>(tokens.size()), cache);
+  ref.free_out = oracle.forward(tokens);
+  const GlmDiagnosticModel::Outputs again = oracle.forward(tokens);
+  require(ref.free_out.final_hidden_bits == again.final_hidden_bits &&
+              ref.free_out.logits_bits == again.logits_bits,
+          "oracle forward is not deterministic across calls");
+  oracle.forward_isolated(tokens, state_ptrs, ref.captures);
+  return ref;
+}
+
 DGPP_TEST(glm_tp_forward_parity_loopback) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";
   glm_tp_write_fixture(dir);
 
-  const std::vector<int64_t> tokens = make_tokens(21, cfg.vocab_size);
-  const std::vector<std::vector<uint16_t>> states = make_layer_states(
-      cfg.num_hidden_layers, static_cast<int>(tokens.size()),
-      cfg.hidden_size);
-  std::vector<const uint16_t*> state_ptrs;
-  for (const auto& s : states) state_ptrs.push_back(s.data());
-  const int64_t cache = 128;  // one DSA block covers the 21 tokens
-
-  // ---- world=1 oracle (the M4 path) ----------------------------------
-  GlmDiagnosticModel::Outputs ref_free, ref_iso;
-  std::vector<std::vector<uint16_t>> ref_captures;
+  // ---- decode-shaped case (T=8): every boundary takes the pre-staged
+  // seam — stage() hands the pinned send source to the producing GEMM
+  // (8 x 256 = 2048 elems, one latency slot), world 2 exercises the
+  // zero-copy path and the GEMM-writes-pinned contract.
   {
-    GlmDiagnosticModel oracle(cfg, dir, static_cast<int>(tokens.size()),
-                              cache);
-    ref_free = oracle.forward(tokens);
-    const GlmDiagnosticModel::Outputs again = oracle.forward(tokens);
-    require(ref_free.final_hidden_bits == again.final_hidden_bits &&
-                ref_free.logits_bits == again.logits_bits,
-            "oracle forward is not deterministic across calls");
-    ref_iso = oracle.forward_isolated(tokens, state_ptrs, ref_captures);
+    const std::vector<int64_t> tokens = make_tokens(8, cfg.vocab_size);
+    const std::vector<std::vector<uint16_t>> states = make_layer_states(
+        cfg.num_hidden_layers, static_cast<int>(tokens.size()),
+        cfg.hidden_size);
+    std::vector<const uint16_t*> state_ptrs;
+    for (const auto& s : states) state_ptrs.push_back(s.data());
+    const OracleRef ref =
+        run_oracle(cfg, dir, tokens, state_ptrs, 128);
+    check_world(2, 29903, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
+                ref.captures, "staged");
   }
 
-  for (const int world : {2, 4}) {
-    DGPP_LOG_INFO("TP loopback world={} tokens={}", world, tokens.size());
-    std::vector<std::unique_ptr<CollectiveBus>> buses =
-        start_world(world, world == 2 ? 29899 : 29900);
-    require(!buses.empty(), "tp bus world failed to start");
-
-    std::vector<RankOutcome> ranks(static_cast<size_t>(world));
-    ConstructBarrier barrier(world);
-    std::vector<std::thread> workers;
-    for (int r = 0; r < world; ++r)
-      workers.emplace_back(rank_work, r, world, dir, std::cref(cfg),
-                           std::cref(tokens), std::cref(state_ptrs), cache,
-                           buses[static_cast<size_t>(r)].get(), &barrier,
-                           &ranks[static_cast<size_t>(r)]);
-    for (auto& t : workers) t.join();
-    for (int r = 0; r < world; ++r)
-      require(ranks[static_cast<size_t>(r)].error.empty(),
-              ranks[static_cast<size_t>(r)].error);
-
-    // ---- cross-rank: bitwise at every observable -------------------
-    for (int r = 1; r < world; ++r) {
-      const RankOutcome& a = ranks[0];
-      const RankOutcome& b = ranks[static_cast<size_t>(r)];
-      require(bits_equal(a.free_out.final_hidden_bits,
-                         b.free_out.final_hidden_bits),
-              "free-run final hidden differs bitwise across ranks");
-      require(bits_equal(a.free_out.logits_bits, b.free_out.logits_bits),
-              "logits differ bitwise across ranks");
-      require(a.captures.size() == b.captures.size() &&
-                  a.captures.size() == ref_captures.size(),
-              "capture count mismatch");
-      for (size_t l = 0; l < a.captures.size(); ++l)
-        require(bits_equal(a.captures[l], b.captures[l]),
-                "per-layer stream state differs bitwise across ranks");
-      require(a.free_out.routes.size() == b.free_out.routes.size(),
-              "route layer count mismatch");
-      for (size_t l = 0; l < a.free_out.routes.size(); ++l) {
-        require(a.free_out.routes[l].ids == b.free_out.routes[l].ids &&
-                    a.free_out.routes[l].weights ==
-                        b.free_out.routes[l].weights,
-                "routing decisions differ across ranks");
-      }
-    }
-
-    // ---- vs oracle: free-run end-to-end -----------------------------
-    // Free-run divergence is REPORTED, not asserted (the M4 discipline:
-    // cross-implementation bf16 at depth compounds legitimately — the
-    // per-layer ISOLATED bound below is the assertion surface). The head
-    // keeps a hard gate: every top-1 disagreement must certify as a
-    // boundary near tie (oracle top-2 margin within 32x the measured
-    // TP-vs-oracle logit noise).
-    const double free_l2 = l2_bf16(ranks[0].free_out.final_hidden_bits,
-                                   ref_free.final_hidden_bits);
-    int top1_mismatch = 0, top1_uncertified = 0;
-    double worst_margin_ratio = 0;
-    {
-      const int V = cfg.vocab_size;
-      const size_t T = tokens.size();
-      const uint16_t* tp = ranks[0].free_out.logits_bits.data();
-      const uint16_t* rf = ref_free.logits_bits.data();
-      for (size_t t = 0; t < T; ++t) {
-        const uint16_t* tr = tp + t * V;
-        const uint16_t* rr = rf + t * V;
-        int tp_top = 0, rf_top = 0, rf_second = -1;
-        double noise = 0;
-        for (int c = 0; c < V; ++c) {
-          const double d = std::abs(dgpp::bf16_bits_to_float(tr[c]) -
-                                    dgpp::bf16_bits_to_float(rr[c]));
-          noise = std::max(noise, d);
-          if (dgpp::bf16_bits_to_float(tr[c]) >
-              dgpp::bf16_bits_to_float(tr[tp_top]))
-            tp_top = c;
-          if (dgpp::bf16_bits_to_float(rr[c]) >
-              dgpp::bf16_bits_to_float(rr[rf_top])) {
-            rf_second = rf_top;
-            rf_top = c;
-          } else if (rf_second < 0 ||
-                     dgpp::bf16_bits_to_float(rr[c]) >
-                         dgpp::bf16_bits_to_float(rr[rf_second])) {
-            if (c != rf_top) rf_second = c;
-          }
-        }
-        if (tp_top == rf_top) continue;
-        ++top1_mismatch;
-        const double margin = std::abs(
-            dgpp::bf16_bits_to_float(rr[rf_top]) -
-            dgpp::bf16_bits_to_float(rr[rf_second]));
-        worst_margin_ratio = std::max(worst_margin_ratio, margin / noise);
-        if (noise <= 0 || margin > 32.0 * noise) ++top1_uncertified;
-      }
-    }
-    require(top1_uncertified == 0,
-            "free-run top-1 disagreement is not a certified near tie "
-            "(oracle top-2 margin > 32x TP-vs-oracle logit noise)");
-
-    // ---- vs oracle: per-layer isolated parity (the assertion surface) --
-    // Kept-row discipline: a token whose routing flipped vs the oracle
-    // legitimately moves O(1) (the noaux bias ties scores at the selection
-    // boundary); its rows are excluded from the l2 and the flips are
-    // certified separately below. Kept rows must sit under 2e-2 — the
-    // M4 curated-suite tier — and measured an order lower.
-    double worst_layer_l2 = 0;
-    {
-      const size_t T = tokens.size();
-      const size_t row_elems =
-          static_cast<size_t>(cfg.hidden_size) * 4;  // [4, hidden] per token
-      for (size_t l = 0; l < ranks[0].captures.size(); ++l) {
-        // Which route belongs to this layer (MoE layers only)?
-        const dgpp::GlmRouteTraceLayer* eng_route = nullptr;
-        const dgpp::GlmRouteTraceLayer* ref_route = nullptr;
-        for (size_t ri = 0; ri < ranks[0].free_out.routes.size(); ++ri)
-          if (ranks[0].free_out.routes[ri].layer_idx == l) {
-            eng_route = &ranks[0].free_out.routes[ri];
-            ref_route = &ref_free.routes[ri];
-            break;
-          }
-        int kept_rows = 0, flipped_rows = 0;
-        double acc = 0;
-        for (size_t t = 0; t < T; ++t) {
-          const bool flipped =
-              eng_route &&
-              !std::equal(eng_route->ids.begin() + t * eng_route->top_k,
-                          eng_route->ids.begin() + (t + 1) * eng_route->top_k,
-                          ref_route->ids.begin() + t * ref_route->top_k);
-          if (flipped) {
-            ++flipped_rows;
-            continue;
-          }
-          ++kept_rows;
-          const uint16_t* a =
-              ranks[0].captures[l].data() + t * row_elems;
-          const uint16_t* b = ref_captures[l].data() + t * row_elems;
-          for (size_t i = 0; i < row_elems; ++i) {
-            const double d = dgpp::bf16_bits_to_float(a[i]) -
-                              dgpp::bf16_bits_to_float(b[i]);
-            acc += d * d;
-          }
-        }
-        const double l2 = kept_rows
-                              ? std::sqrt(acc / (double(kept_rows) * row_elems))
-                              : 0.0;
-        worst_layer_l2 = std::max(worst_layer_l2, l2);
-        require(l2 < 0.02,
-                "isolated kept-row l2 vs oracle (layer " + std::to_string(l) +
-                    ")");
-        if (flipped_rows)
-          DGPP_LOG_INFO("TP world={} layer {} isolated: {} flipped rows "
-                        "excluded (certified below)",
-                        world, l, flipped_rows);
-      }
-    }
-
-    // ---- vs oracle: routing (flips must be certified near ties) ------
-    int64_t flips = 0, swaps = 0;
-    double worst_noise_mult = 0;
-    size_t oi = 0;  // oracle route index (MoE layers only, ascending)
-    for (size_t l = 0; l < ranks[0].free_out.routes.size(); ++l) {
-      const auto& eng = ranks[0].free_out.routes[l];
-      const auto& ref_route = ref_free.routes[oi];
-      require(ref_route.layer_idx == eng.layer_idx,
-              "route layer alignment vs oracle");
-      const std::vector<float>& eng_biased =
-          ranks[0].free_out.route_biased[l];
-      const std::vector<float>& ref_biased = ref_free.route_biased[oi];
-      RouteFlipAudit audit;
-      audit_route_flips(eng.ids.data(), ref_route.ids.data(),
-                        eng_biased.data(), ref_biased.data(),
-                        static_cast<int64_t>(eng.tokens),
-                        cfg.moe_config().top_k, cfg.moe_config().n_experts,
-                        audit, eng.layer_idx);
-      flips += audit.tokens_flipped;
-      swaps += audit.swaps_certified;
-      worst_noise_mult = std::max(worst_noise_mult, audit.max_noise_multiple);
-      ++oi;
-    }
-
-    DGPP_LOG_INFO(
-        "TP world={} free l2={:.4f} worst layer l2={:.4f} top1 misses={} "
-        "(uncertified {}, worst margin {:.1f}x noise) route flips={} "
-        "(certified swaps {}, worst {:.1f}x noise)",
-        world, free_l2, worst_layer_l2, top1_mismatch, top1_uncertified,
-        worst_margin_ratio, flips, swaps, worst_noise_mult);
-
-    for (auto& b : buses) b->stop();
+  // ---- the 21-token case: 5376 elems per boundary — above one latency
+  // slot, so boundaries stay on the chunked device path at worlds 2 and 4
+  // (the committed baseline).
+  {
+    const std::vector<int64_t> tokens = make_tokens(21, cfg.vocab_size);
+    const std::vector<std::vector<uint16_t>> states = make_layer_states(
+        cfg.num_hidden_layers, static_cast<int>(tokens.size()),
+        cfg.hidden_size);
+    std::vector<const uint16_t*> state_ptrs;
+    for (const auto& s : states) state_ptrs.push_back(s.data());
+    const OracleRef ref =
+        run_oracle(cfg, dir, tokens, state_ptrs, 128);
+    check_world(2, 29899, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
+                ref.captures, "chunked");
+    check_world(4, 29900, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
+                ref.captures, "chunked");
   }
 }
 

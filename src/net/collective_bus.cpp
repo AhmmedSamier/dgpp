@@ -82,6 +82,11 @@ struct BusRequest {
   void* dev_dst = nullptr;
   size_t elems = 0;
   uint32_t ctl_seq = 0;
+  // Staging-ring generation (the §6.3 staging seam): >= 0 marks a
+  // pre-staged collective (the producing GEMM wrote the peer-0 buffer
+  // through stage_next()); the engine uses this exact generation for every
+  // peer. -1 = device-source mode; the engine picks a generation.
+  int stage_gen = -1;
 
   int outstanding = 0;  // stripes credited back so far are subtracted
   std::vector<BusStripe> stripes;
@@ -128,6 +133,7 @@ struct CollectiveBus::Impl {
     std::unique_ptr<RcLane> lane;
     BusLaneEndpoint endpoint;      // ours, for the exchange table
     BusLaneEndpoint peer_endpoint;  // the peer's, learned from the table
+    uint32_t stage_lkey = 0;       // staging-block MR lkey on this lane's device
     std::vector<SendSlot> send[2];  // [latency, bulk]
     std::vector<RecvSlot> recv[2];
     // Ring cursor per pool: plain SENDs are consumed FIFO by the peer's
@@ -186,7 +192,10 @@ struct CollectiveBus::Impl {
   bool coll_poisoned = false;  // any collective failure poisons the mode
   cudaStream_t collective_stream = nullptr;
   BusAllReduceCtl* ar_ctl = nullptr;
-  uint32_t ctl_seq_counter = 0;  // engine thread only
+  // Collective sequence number: the engine thread is the only writer; the
+  // submitter reads it (relaxed) for staging-handout rotation. Atomic so
+  // that read is race-free by the letter, not just by the protocol.
+  std::atomic<uint32_t> ctl_seq_counter{0};
   uint64_t ar_deadline_cycles = 0;  // cached device-clock rate conversion
   uint64_t ar_last_ready_seq = 0;   // one-shot ready-log gating (per bus)
   struct CollectiveFlight {
@@ -195,7 +204,42 @@ struct CollectiveBus::Impl {
     uint64_t posted_bits = 0;       // bit p once peer p's stripe is posted
     Clock::time_point launched_at{};
     int stall_dumps = 0;            // bring-up microscope rate control
+    int stage_gen = -1;              // staging ring generation in flight
   } coll;                            // engine thread only
+
+  // ---- collective staging block (§6.3 seam, M5 d3) -----------------------
+  // Fixed pinned buffers, kStageRing-deep per peer PLUS one dedicated
+  // "self" row: collective payloads are sent from the peer rows (a SEND's
+  // local address is any MR-registered memory; only the doorbell's remote
+  // ring position must track the receiver's ring — the unchanged cursor
+  // discipline). The self row is the pre-stage handout: the producing
+  // GEMM writes it, and the collective kernel snapshots it into every
+  // peer row BEFORE folding in place — the peer rows are the send
+  // sources, so the engine's posts can never race the in-place fold (the
+  // first cut aliased the handout with peer 0's row and the posts read
+  // folded bytes; the rows must be disjoint, by construction).
+  // Reuse safety: generation g's peer row is rewritten at g+kStageRing,
+  // and the engine's post for g is in-order behind g-1's on the same QP
+  // while the rewrite (a later kernel, stream-ordered after the
+  // g+kStageRing-1 exit which required arrival of g+kStageRing-1) cannot
+  // precede it — the RC per-QP ordering is the reuse fence.
+  // Single-outstanding makes it airtight for the eager path.
+  static constexpr int kStageRing = 8;
+  uint8_t* stage_block = nullptr;  // [peers + 1][kStageRing][lat_slot_bytes]
+  std::vector<ibv_mr*> stage_mrs;  // one per distinct device (lkey source)
+  uint8_t* stage_buf(size_t peer, int gen) const {
+    return stage_block +
+           ((peer * static_cast<size_t>(kStageRing) +
+             static_cast<size_t>(((gen % kStageRing) + kStageRing) % kStageRing)) *
+            static_cast<size_t>(opt.lat_slot_bytes));
+  }
+  // The pre-stage handout row (index `peers`, after every peer row).
+  uint8_t* self_buf(size_t peer_count, int gen) const {
+    return stage_buf(peer_count, gen);
+  }
+  // Submit-thread handout state (guarded by coll_mu with the queue).
+  void* stage_held_ptr = nullptr;
+  int stage_held_gen = -1;
 
   BusRankExchange ex_{};  // our frame, built once during start()
 
@@ -577,8 +621,9 @@ struct CollectiveBus::Impl {
         return true;
       }
 
-      req.ctl_seq = ++ctl_seq_counter;
-      if (req.ctl_seq == 0) req.ctl_seq = ++ctl_seq_counter;  // skip idle 0
+      req.ctl_seq = ctl_seq_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (req.ctl_seq == 0)  // skip idle 0 (wrap)
+        req.ctl_seq = ctl_seq_counter.fetch_add(1, std::memory_order_relaxed) + 1;
       req.stripe_hashes.assign(peer_ranks.size(), 0);
       // Reset before launch: the previous kernel's stamps are stale, and
       // the launch (this thread) is ordered after the reset by program
@@ -596,13 +641,30 @@ struct CollectiveBus::Impl {
         for (const LaneState& lane : peers[p]) view.recv[vi++] = recv_view_of(lane);
       view.recv_views = vi;
       view.lanes_per_peer = static_cast<int>(lane_count());
-      for (size_t p = 0; p < peer_ranks.size(); ++p) {
-        const LaneState& lane = peers[p][static_cast<size_t>(claims[p].lane)];
-        view.send_payload[p] = reinterpret_cast<const uint16_t*>(
-            lane.lane->layout().send_payload(lane.lane->slab(),
-                                             BusPool::kLatency,
-                                             claims[p].slot));
+
+      // Staging generation: the request's (a pre-staged GEMM handout) or
+      // the engine's pick. Single-outstanding means any generation whose
+      // previous user completed is safe — and completion implies the peer
+      // folded the posted bytes, so the NIC read finished.
+      int stage_gen = req.stage_gen;
+      if (stage_gen < 0) {
+        stage_gen = static_cast<int>(
+            (req.ctl_seq - 1) % static_cast<uint32_t>(Impl::kStageRing));
+      } else if (req.dev_src !=
+                 self_buf(peer_ranks.size(), stage_gen)) {
+        // Defense in depth: a pre-staged submit must source the exact
+        // handout buffer. Anything else is a caller protocol break.
+        coll_poisoned = true;
+        coll = {};
+        coll_active.store(false, std::memory_order_relaxed);
+        complete_request(
+            &req, false,
+            "pre-staged collective source is not the held staging buffer");
+        return true;
       }
+      for (size_t p = 0; p < peer_ranks.size(); ++p)
+        view.send_payload[p] = reinterpret_cast<const uint16_t*>(
+            stage_buf(p, stage_gen));
       view.send_peers = static_cast<int>(peer_ranks.size());
 
       const auto t_launch0 = Clock::now();
@@ -624,6 +686,7 @@ struct CollectiveBus::Impl {
       }
       coll.claims = std::move(claims);
       coll.launched_at = Clock::now();
+      coll.stage_gen = stage_gen;
       // First-flight diagnostics at INFO (not DEBUG): the loopback TP
       // bring-up had a stall whose DEBUG logging changed the timing, so
       // the lifecycle must be observable in the failing configuration.
@@ -654,8 +717,12 @@ struct CollectiveBus::Impl {
       SendSlot& ss = lane.send[0][slot];
       const uint32_t seq = ss.gen + 1;
       std::string error;
+      // Payload from the staging generation (the slot argument remains the
+      // doorbell's remote ring position — the unchanged cursor discipline).
       if (!rc.post_send_pair(BusPool::kLatency, slot, seq,
-                              static_cast<uint32_t>(req.elems * 2), &error)) {
+                              static_cast<uint32_t>(req.elems * 2), &error,
+                              stage_buf(p, coll.stage_gen),
+                              lane.stage_lkey)) {
         fail_lane(lane, error);
         poison_collective(req);
         coll_poisoned = true;
@@ -1326,6 +1393,35 @@ bool CollectiveBus::start(std::string* error) {
   for (int r = 0; r < opt.world_size; ++r)
     if (r != opt.my_rank) impl.peer_ranks.push_back(r);
 
+  // Collective staging block: (peers + 1) rows x kStageRing x one latency
+  // slot — the peer rows are collective send sources; the extra row is the
+  // pre-stage handout. Pinned and registered on every distinct device's
+  // PD so any lane can post a payload SEND sourced from it.
+  {
+    const size_t block_bytes =
+        (impl.peer_ranks.size() + 1) *
+        static_cast<size_t>(Impl::kStageRing) * opt.lat_slot_bytes;
+    const cudaError_t alloc = cudaHostAlloc(
+        reinterpret_cast<void**>(&impl.stage_block), block_bytes,
+        cudaHostAllocDefault);
+    if (alloc != cudaSuccess || impl.stage_block == nullptr) {
+      *error = std::string("collective staging block alloc failed: ") +
+               cudaGetErrorString(alloc);
+      return false;
+    }
+    for (auto& device : impl.devices) {
+      ibv_mr* mr = ibv_reg_mr(device->pd(), impl.stage_block, block_bytes, 0);
+      if (mr == nullptr) {
+        *error = "collective staging block registration failed on " +
+                 device->name() + " errno=" + std::to_string(errno);
+        return false;
+      }
+      impl.stage_mrs.push_back(mr);
+    }
+    DGPP_LOG_DEBUG("bus: staging block {}B x {} MR(s)", block_bytes,
+                   impl.stage_mrs.size());
+  }
+
   impl.peers.resize(impl.peer_ranks.size());
   for (auto& peer_lanes : impl.peers)
     peer_lanes.resize(opt.lane_devices.size());
@@ -1344,6 +1440,11 @@ bool CollectiveBus::start(std::string* error) {
                  std::to_string(l) + "): " + lane_error;
         return false;
       }
+      // The staging MR registered on this lane's device (devices are
+      // deduped by name; stage_mrs follows the same order).
+      for (size_t di = 0; di < impl.devices.size(); ++di)
+        if (impl.devices[di].get() == dev)
+          state.stage_lkey = impl.stage_mrs[di]->lkey;
       state.endpoint = state.lane->endpoint();
       DGPP_LOG_DEBUG("bus: rank {} peer {} lane {} my qpns lat={} bulk={}",
                      opt.my_rank, impl.peer_ranks[p], l,
@@ -1531,8 +1632,111 @@ BusSendResult CollectiveBus::wait(uint64_t send_id, int timeout_ms) {
   return result;
 }
 
+void* CollectiveBus::stage_next(std::string* error) {
+  Impl& impl = *impl_;
+  if (impl.stopping.load(std::memory_order_relaxed)) {
+    *error = "bus is stopped";
+    return nullptr;
+  }
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    if (impl.coll_poisoned) {
+      *error = "an earlier collective failed; this bus must be restarted";
+      return nullptr;
+    }
+    if (impl.stage_held_ptr != nullptr) {
+      *error = "one pre-stage handout at a time (consume it with "
+               "allreduce_staged())";
+      return nullptr;
+    }
+    if (impl.coll_active.load(std::memory_order_relaxed) ||
+        !impl.coll_q.empty()) {
+      *error = "no pre-stage handout while a collective is in flight (v1)";
+      return nullptr;
+    }
+    // Rotate with the collective sequence: consecutive handouts get fresh
+    // buffers, and single-outstanding means every prior user of a
+    // generation completed (done implies the peer folded the posted bytes,
+    // so the NIC read finished — the reuse fence).
+    impl.stage_held_gen =
+        static_cast<int>(impl.ctl_seq_counter.load(std::memory_order_relaxed) %
+                         Impl::kStageRing);
+    // The handout lives in the dedicated self row — disjoint from every
+    // peer send row, so the kernel's in-place fold can never race a post.
+    impl.stage_held_ptr =
+        impl.self_buf(impl.peer_ranks.size(), impl.stage_held_gen);
+  }
+  return impl.stage_held_ptr;
+}
+
+uint64_t CollectiveBus::allreduce_staged(size_t bf16_elems,
+                                          std::string* error) {
+  Impl& impl = *impl_;
+  if (impl.stopping.load(std::memory_order_relaxed)) {
+    *error = "bus is stopped";
+    return 0;
+  }
+  if (impl.consumers_launched) {
+    *error = "allreduce requires launch_consumers=false (persistent harness "
+             "consumers would race the per-collective kernel for claims)";
+    return 0;
+  }
+  if (bf16_elems == 0 || bf16_elems % 2 != 0 ||
+      bf16_elems * 2 > options_.lat_slot_bytes) {
+    *error = "allreduce element count must be a positive multiple of 2 and "
+             "fit a latency slot (at most " +
+             std::to_string(options_.lat_slot_bytes / 2) + " bf16)";
+    return 0;
+  }
+
+  void* staged = nullptr;
+  int staged_gen = -1;
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    if (impl.coll_poisoned) {
+      *error = "an earlier collective failed; this bus must be restarted";
+      return 0;
+    }
+    if (impl.stage_held_ptr == nullptr) {
+      *error = "no held pre-stage handout (call stage_next() first)";
+      return 0;
+    }
+    if (impl.coll_active.load(std::memory_order_relaxed) ||
+        !impl.coll_q.empty()) {
+      *error = "one outstanding collective at a time (v1)";
+      return 0;
+    }
+    staged = impl.stage_held_ptr;
+    staged_gen = impl.stage_held_gen;
+    impl.stage_held_ptr = nullptr;  // consumed
+  }
+  DGPP_LOG_DEBUG("allreduce_staged: handout consumed (gen {})", staged_gen);
+
+  auto req = std::make_shared<BusRequest>();
+  req->cls = BusMessageClass::kLatency;
+  req->peer_rank = -1;
+  req->is_collective = true;
+  req->dev_src = staged;
+  req->dev_dst = staged;  // in-place fold; the model reads the result here
+  req->elems = bf16_elems;
+  req->stage_gen = staged_gen;
+  req->submitted = Clock::now();
+  {
+    std::lock_guard<std::mutex> lock(impl.registry_mu);
+    req->id = impl.next_id++;
+    impl.registry[req->id] = req;
+  }
+  const uint64_t id = req->id;
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    impl.coll_q.push_back(std::move(req));
+  }
+  DGPP_LOG_DEBUG("allreduce_staged: queued id={} gen={}", id, staged_gen);
+  return id;
+}
+
 uint64_t CollectiveBus::allreduce(const void* device_src, void* device_dst,
-                                 size_t bf16_elems, std::string* error) {
+                                  size_t bf16_elems, std::string* error) {
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
@@ -1555,6 +1759,14 @@ uint64_t CollectiveBus::allreduce(const void* device_src, void* device_dst,
     std::lock_guard<std::mutex> lock(impl.coll_mu);
     if (impl.coll_poisoned) {
       *error = "an earlier collective failed; this bus must be restarted";
+      return 0;
+    }
+    if (impl.stage_held_ptr != nullptr) {
+      // A device-source collective would stage over the held handout's
+      // buffer (the GEMM already wrote it) — the held handout owns its
+      // generation until consumed.
+      *error = "a pre-stage handout is held; consume it with "
+               "allreduce_staged() first";
       return 0;
     }
     if (impl.coll_active.load(std::memory_order_relaxed) ||
@@ -1715,6 +1927,16 @@ void CollectiveBus::stop() {
     cudaFreeHost(impl.ar_ctl);
     impl.ar_ctl = nullptr;
   }
+  // Staging block: deregister before the lanes/devices go away (the MRs
+  // hang off the device PDs), then free the pinned block.
+  for (ibv_mr* mr : impl.stage_mrs)
+    if (mr != nullptr) ibv_dereg_mr(mr);
+  impl.stage_mrs.clear();
+  if (impl.stage_block != nullptr) {
+    cudaFreeHost(impl.stage_block);
+    impl.stage_block = nullptr;
+  }
+  impl.stage_held_ptr = nullptr;
   impl.peers.clear();
   impl.devices.clear();
 }

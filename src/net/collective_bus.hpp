@@ -134,6 +134,22 @@ class CollectiveBus {
   uint64_t allreduce(const void* device_src, void* device_dst,
                      size_t bf16_elems, std::string* error);
 
+  // The staging seam (§6.3 evolution, M5 d3): hands out the pinned,
+  // device-writable buffer the next latency collective will fold from, so
+  // the producing GEMM writes the boundary partial directly into it —
+  // the kernel's device→slot staging pass becomes a pinned fan-out (the
+  // device round trip disappears), and the fold runs in place. One
+  // handout at a time, none while a collective is in flight; the buffer
+  // holds lat_slot_bytes/2 bf16. The handout must be consumed by
+  // allreduce_staged() before any other collective.
+  void* stage_next(std::string* error);
+
+  // Submits the pre-staged one-shot: the held handout is the source and
+  // the destination (the fold runs in place; the model's next kernels read
+  // the result from the same pinned buffer). Same v1 contract as
+  // allreduce(); wait via wait_allreduce().
+  uint64_t allreduce_staged(size_t bf16_elems, std::string* error);
+
   // Blocks for the collective; on success the destination is stream-ordered
   // for the caller (one cudaStreamSynchronize after the engine's
   // completion). timeout_ms is a backstop; the engine watchdog owns the

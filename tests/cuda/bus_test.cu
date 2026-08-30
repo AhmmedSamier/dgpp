@@ -418,6 +418,22 @@ void fill_rank_bf16(std::vector<uint16_t>* out, size_t elems, int rank) {
   }
 }
 
+// Device twin of fill_rank_bf16 — the producing-kernel half of the
+// pre-stage seam: a GPU kernel writing the NIC-registered pinned buffer
+// directly (what the boundary GEMM does in the model seam). Single thread
+// so the sequential LCG chain matches the host pattern element-for-element.
+__global__ void staged_fill_kernel(uint16_t* dst, size_t elems, int rank) {
+  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  uint64_t x = 0x9E3779B97F4A7C15ULL ^ (0x100000001B3ULL * (rank + 1));
+  for (size_t i = 0; i < elems; ++i) {
+    x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+    const float v =
+        static_cast<float>(static_cast<int32_t>(x >> 40)) * (1.0f / 8388608.0f) - 1.0f;
+    const uint32_t bits = __float_as_uint(v);
+    dst[i] = static_cast<uint16_t>((bits + 0x7FFFu + ((bits >> 16) & 1)) >> 16);
+  }
+}
+
 // Starts a loopback world: rank 0 listens, ranks 1..N-1 connect.
 // Collective mode: no persistent consumers (they would race the
 // per-collective kernel — and their 300s deadlines would turn any
@@ -626,6 +642,148 @@ void scenario_allreduce() {
   DGPP_LOG_INFO("scenario allreduce: {} total failures", g_failures);
 }
 
+// One rank's share of a pre-staged run: stage_next(), a GPU kernel writes
+// the pinned buffer (the seam's producing half), allreduce_staged(), wait,
+// and an in-place bitwise check against the canonical-chain oracle. The
+// result never leaves the pinned buffer — exactly the model's shape.
+int allreduce_staged_rank_work(CollectiveBus& bus, int world, int my_rank,
+                               size_t elems, int iters,
+                               std::vector<uint16_t>* want) {
+  // The producing kernel runs on a private stream and the worker
+  // STREAM-syncs before submit — never cudaDeviceSynchronize, which is a
+  // whole-device barrier and deadlocks against peer collective kernels
+  // spinning on this device in the loopback process (DESIGN §6.3's
+  // allocation-phase ordering rule, same class).
+  cudaStream_t fill_stream = nullptr;
+  if (cudaStreamCreateWithFlags(&fill_stream, cudaStreamNonBlocking) !=
+      cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: fill stream create failed", my_rank);
+    return 1;
+  }
+  int failures = 0;
+  for (int iter = 0; iter < iters; ++iter) {
+    std::string error;
+    uint16_t* staged = static_cast<uint16_t*>(bus.stage_next(&error));
+    if (staged == nullptr) {
+      DGPP_LOG_ERROR("rank {}: stage_next rejected: {}", my_rank, error);
+      ++failures;
+      break;
+    }
+    // Contract pins (rank 0, first iteration, before consuming): one
+    // handout at a time, and a device-source collective must not stomp
+    // it. Counted, not CHECKed — workers report home (g_failures is
+    // main-thread state).
+    if (my_rank == 0 && iter == 0) {
+      std::string pin_error;
+      if (bus.stage_next(&pin_error) != nullptr ||
+          pin_error.find("one pre-stage handout") == std::string::npos) {
+        DGPP_LOG_ERROR("rank 0: double stage_next not rejected: {}", pin_error);
+        ++failures;
+      }
+      if (bus.allreduce(nullptr, nullptr, elems, &pin_error) != 0 ||
+          pin_error.find("pre-stage handout is held") == std::string::npos) {
+        DGPP_LOG_ERROR("rank 0: allreduce under a held handout not rejected: {}",
+                       pin_error);
+        ++failures;
+      }
+    }
+    // The producing kernel writes the send source directly; a stream sync
+    // (not a device sync — see the loopback note above) orders it before
+    // the submit, which is the seam's contract.
+    staged_fill_kernel<<<1, 1, 0, fill_stream>>>(staged, elems, my_rank);
+    if (cudaStreamSynchronize(fill_stream) != cudaSuccess) {
+      DGPP_LOG_ERROR("rank {}: staged fill kernel failed", my_rank);
+      ++failures;
+      break;
+    }
+    const uint64_t id = bus.allreduce_staged(elems, &error);
+    if (id == 0) {
+      DGPP_LOG_ERROR("rank {}: allreduce_staged rejected: {}", my_rank, error);
+      ++failures;
+      break;
+    }
+    const dgpp::net::BusAllReduceResult r = bus.wait_allreduce(id, 15000);
+    if (!r.ok) {
+      DGPP_LOG_ERROR("rank {}: staged collective failed: {}", my_rank,
+                     r.error);
+      ++failures;
+      break;
+    }
+    size_t mismatches = 0;
+    for (size_t i = 0; i < elems; ++i)
+      if (staged[i] != (*want)[i]) ++mismatches;
+    if (mismatches != 0) {
+      DGPP_LOG_ERROR("rank {} iter {}: {} staged mismatches", my_rank, iter,
+                     mismatches);
+      ++failures;
+      break;
+    }
+    if (my_rank == 0 && iter == 0) {
+      // The handout was consumed; a staged submit without one must fail.
+      std::string pin_error;
+      if (bus.allreduce_staged(elems, &pin_error) != 0 ||
+          pin_error.find("no held pre-stage handout") == std::string::npos) {
+        DGPP_LOG_ERROR("rank 0: staged submit without handout not rejected: {}",
+                       pin_error);
+        ++failures;
+      }
+    }
+  }
+  cudaStreamDestroy(fill_stream);
+  return failures;
+}
+
+void scenario_allreduce_staged() {
+  // Pre-stage seam (§6.3 evolution): the producing kernel writes the
+  // transport's pinned send source directly and the collective runs with
+  // zero staging copies (world 2) or only the pinned fan-out (world 4).
+  // Bitwise against the canonical-chain oracle, across ring generations.
+  const size_t elems = 4096;
+  int failures = 0;
+
+  for (const int world : {2, 4}) {
+    const uint16_t port = world == 2 ? 29901 : 29902;
+    std::vector<std::unique_ptr<CollectiveBus>> world_buses =
+        start_world(world, port);
+    if (world_buses.empty()) {
+      DGPP_LOG_ERROR("staged world {} failed to start", world);
+      ++failures;
+      continue;
+    }
+    // The oracle chain over every rank's pattern.
+    std::vector<std::vector<uint16_t>> all_src(static_cast<size_t>(world));
+    for (int r = 0; r < world; ++r)
+      fill_rank_bf16(&all_src[static_cast<size_t>(r)], elems, r);
+    std::vector<uint16_t> want(elems, 0);
+    for (size_t i = 0; i < elems; ++i) {
+      float acc = 0.0f;
+      for (int r = 0; r < world; ++r)
+        acc += dgpp::net::bf16_to_f32(all_src[static_cast<size_t>(r)][i]);
+      want[i] = dgpp::net::bf16_from_f32_rne(acc);
+    }
+    std::vector<std::thread> workers;
+    std::vector<int> rank_failures(static_cast<size_t>(world), 0);
+    for (int r = 0; r < world; ++r)
+      workers.emplace_back([&, r] {
+        rank_failures[static_cast<size_t>(r)] = allreduce_staged_rank_work(
+            *world_buses[static_cast<size_t>(r)], world, r, elems, 6, &want);
+      });
+    for (auto& t : workers) t.join();
+    int world_failures = 0;
+    for (int r = 0; r < world; ++r)
+      world_failures += rank_failures[static_cast<size_t>(r)];
+    CHECK(world_failures == 0,
+          "staged world " + std::to_string(world) + " had " +
+              std::to_string(world_failures) + " failures");
+    for (auto& bus : world_buses) bus->quiesce();
+    for (auto& bus : world_buses) bus->stop();
+    DGPP_LOG_INFO("scenario allreduce_staged: world {} clean", world);
+  }
+
+  g_failures += failures;
+  DGPP_LOG_INFO("scenario allreduce_staged: {} total failures", g_failures);
+}
+
 void scenario_geometry_mismatch() {
   // Config errors must be legible over the rendezvous (roster precedent),
   // never a bare close or a hang.
@@ -701,6 +859,7 @@ int main() {
   scenario_consumer_inactivity_exit();
   scenario_mesh_three_way();
   scenario_allreduce();
+  scenario_allreduce_staged();
   scenario_geometry_mismatch();
   scenario_stop_releases_waiters();
 
