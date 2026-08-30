@@ -78,14 +78,14 @@ void write_out(const std::string& path, const void* data, size_t bytes) {
 }
 
 BusOptions bus_options(int rank, int world, uint16_t port,
-                       const std::string& peer) {
+                       const std::string& peer, int rendezvous_timeout_ms) {
   BusOptions o;
   o.world_size = world;
   o.my_rank = rank;
   o.lane_devices = {"rocep1s0f0", "roceP2p1s0f0"};
   o.rendezvous_port = port;
   o.rendezvous_host = rank == 0 ? "" : peer;
-  o.rendezvous_timeout_ms = 20000;
+  o.rendezvous_timeout_ms = rendezvous_timeout_ms;
   o.lat_slots = 8;
   o.lat_slot_bytes = 8192;
   o.bulk_slots = 8;
@@ -99,7 +99,7 @@ BusOptions bus_options(int rank, int world, uint16_t port,
 
 int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         int rank, uint16_t port, const std::string& peer, int tokens,
-        const std::string& out_prefix) {
+        const std::string& out_prefix, int rendezvous_timeout_ms) {
   const std::vector<int64_t> ids = make_tokens(tokens, cfg.vocab_size,
                                                20260829);
   const int64_t cache = 128;
@@ -117,7 +117,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     DGPP_LOG_INFO("oracle forward written ({} tokens)", tokens);
   }
 
-  CollectiveBus bus(bus_options(rank, world, port, peer));
+  CollectiveBus bus(
+      bus_options(rank, world, port, peer, rendezvous_timeout_ms));
   std::string err;
   if (!bus.start(&err)) {
     DGPP_LOG_ERROR("rank {}: bus start failed: {}", rank, err);
@@ -155,16 +156,28 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
   }
 
   const auto stats = bus.stats();
-  std::vector<double> lat = stats.latency.latency_us;
-  std::sort(lat.begin(), lat.end());
-  const auto pick = [&](double f) {
-    return lat.empty() ? 0.0 : lat[std::min(lat.size() - 1,
-                                            static_cast<size_t>(f * lat.size()))];
+  // Both classes: latency one-shots and bulk flights record into separate
+  // buckets (bulk p50/p99 is the deferred-ack flow-control bubble made
+  // visible) — printing only the latency bucket reported "0 collectives"
+  // on bulk-routed forwards.
+  const auto summarize = [](const std::vector<double>& us) {
+    std::vector<double> sorted = us;
+    std::sort(sorted.begin(), sorted.end());
+    const auto pct = [&](double f) {
+      return sorted.empty()
+                 ? 0.0
+                 : sorted[std::min(sorted.size() - 1,
+                                   static_cast<size_t>(f * sorted.size()))];
+    };
+    return std::make_pair(sorted.size(), std::make_pair(pct(0.5), pct(0.99)));
   };
+  const auto [lat_n, lat_tails] = summarize(stats.latency.latency_us);
+  const auto [bulk_n, bulk_tails] = summarize(stats.bulk.latency_us);
   DGPP_LOG_INFO(
-      "TP rank {} world {}: forward {:.1f}ms, {} collectives, "
-      "p50={:.1f}us p99={:.1f}us",
-      rank, world, ms, lat.size(), pick(0.5), pick(0.99));
+      "TP rank {} world {}: forward {:.1f}ms, lat {} (p50={:.1f}us "
+      "p99={:.1f}us), bulk {} (p50={:.1f}us p99={:.1f}us)",
+      rank, world, ms, lat_n, lat_tails.first, lat_tails.second, bulk_n,
+      bulk_tails.first, bulk_tails.second);
   bus.stop();
   return 0;
 }
@@ -175,7 +188,7 @@ int main(int argc, char** argv) {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
 
   std::string config_path, ckpt, peer, out_prefix = "glm_tp_rank";
-  int world = 2, rank = 0, tokens = 21;
+  int world = 2, rank = 0, tokens = 21, rendezvous_timeout_ms = 120000;
   uint16_t port = 29960;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -190,6 +203,8 @@ int main(int argc, char** argv) {
     else if (a == "--peer") peer = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--tokens") tokens = std::stoi(next());
+    else if (a == "--rendezvous-timeout-ms")
+      rendezvous_timeout_ms = std::stoi(next());
     else if (a == "--out") out_prefix = next();
     else {
       std::fprintf(stderr,
@@ -215,7 +230,8 @@ int main(int argc, char** argv) {
   const GlmTextConfig cfg =
       GlmTextConfig::from_json_file((fs::path(ckpt) / "config.json").string());
   try {
-    return run(cfg, ckpt, world, rank, port, peer, tokens, out_prefix);
+    return run(cfg, ckpt, world, rank, port, peer, tokens, out_prefix,
+               rendezvous_timeout_ms);
   } catch (const std::exception& e) {
     DGPP_LOG_ERROR("rank {}: {}", rank, e.what());
     return 1;

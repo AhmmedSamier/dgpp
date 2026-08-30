@@ -150,6 +150,22 @@ class CollectiveBus {
   // allreduce(); wait via wait_allreduce().
   uint64_t allreduce_staged(size_t bf16_elems, std::string* error);
 
+  // Segment-quantized reduce-scatter + allgather over the bulk pool
+  // (DESIGN §6.3, the prefill class): for boundaries well above one
+  // latency slot. The buffer stripes on the bulk-slot grid; shards are
+  // contiguous stripe ranges per rank; the bus drives segments of at
+  // most bulk_slots x lanes stripes internally (one kernel launch and one
+  // posting wave per segment, within every pool depth). The RS fold is
+  // the canonical ascending-rank chain per element — bitwise identical
+  // to the latency one-shot, so both paths against one oracle agree
+  // exactly. src/dst are device pointers and may alias (staging reads
+  // non-owned shards, the fold writes the owned one, AG reads it back —
+  // disjoint phases within a launch and across the machine). Wire cost
+  // 2(W-1)/W of the buffer (one-shot pays W-1; RS+AG halves it at W=4).
+  // Same v1 single-outstanding contract; wait via wait_allreduce().
+  uint64_t allreduce_bulk(const void* device_src, void* device_dst,
+                         size_t bf16_elems, std::string* error);
+
   // Blocks for the collective; on success the destination is stream-ordered
   // for the caller (one cudaStreamSynchronize after the engine's
   // completion). timeout_ms is a backstop; the engine watchdog owns the

@@ -439,12 +439,14 @@ __global__ void staged_fill_kernel(uint16_t* dst, size_t elems, int rank) {
 // per-collective kernel — and their 300s deadlines would turn any
 // implicit-sync call in the workers into a hang).
 std::vector<std::unique_ptr<CollectiveBus>> start_world(int world,
-                                                        uint16_t port) {
+                                                        uint16_t port,
+                                                        bool one_lane = false) {
   std::vector<std::unique_ptr<CollectiveBus>> out;
   for (int r = 0; r < world; ++r) {
     BusOptions o = base_options(r, port);
     o.world_size = world;
     o.launch_consumers = false;
+    if (one_lane) o.lane_devices = {o.lane_devices.front()};
     out.push_back(std::make_unique<CollectiveBus>(o));
   }
   std::vector<std::string> errors(world);
@@ -784,6 +786,223 @@ void scenario_allreduce_staged() {
   DGPP_LOG_INFO("scenario allreduce_staged: {} total failures", g_failures);
 }
 
+// One rank's share of a bulk-collective run: the machine over N iterations
+// of one size — (1) allreduce_bulk verified bitwise against the canonical
+// chain, (2) the latency-chunked path over the same buffer, verified
+// bitwise against BOTH the oracle and the bulk run's bytes (the two paths
+// compute the identical per-element chain; any divergence is a protocol
+// bug, not noise). Returns failures home.
+int allreduce_bulk_rank_work(CollectiveBus& bus, int world, int my_rank,
+                             size_t elems, int iters,
+                             std::vector<uint16_t>* want) {
+  // Loopback writer's discipline: EVERY device op in a rank worker runs on
+  // a private stream. Synchronous cudaMemcpy/cudaMemset are device-wide
+  // barriers (legacy default stream) and deadlock against a peer rank's
+  // spinning collective kernel — the §6.3 rule, which has now bitten this
+  // harness three separate ways (cudaDeviceSynchronize, sync H2D, memset).
+  cudaStream_t stream = nullptr;
+  if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) !=
+      cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: bulk stream create failed", my_rank);
+    return 1;
+  }
+  std::vector<uint16_t> host_src;
+  fill_rank_bf16(&host_src, elems, my_rank);
+  uint16_t* dev_src = nullptr;
+  uint16_t* dev_dst = nullptr;
+  if (cudaMalloc(&dev_src, elems * 2) != cudaSuccess ||
+      cudaMalloc(&dev_dst, elems * 2) != cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: bulk device alloc failed", my_rank);
+    return 1;
+  }
+  if (cudaMemcpyAsync(dev_src, host_src.data(), elems * 2,
+                      cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+      cudaStreamSynchronize(stream) != cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: bulk H2D failed", my_rank);
+    cudaFree(dev_src);
+    cudaFree(dev_dst);
+    return 1;
+  }
+
+  int failures = 0;
+  std::vector<uint16_t> got(elems, 0), bulk_run(elems, 0);
+  for (int iter = 0; iter < iters; ++iter) {
+    // ---- the bulk machine (RS + AG, segments internal) -----------------
+    cudaMemsetAsync(dev_dst, 0, elems * 2, stream);
+    cudaStreamSynchronize(stream);
+    {
+      std::string error;
+      const uint64_t id = bus.allreduce_bulk(dev_src, dev_dst, elems, &error);
+      if (id == 0) {
+        DGPP_LOG_ERROR("rank {}: allreduce_bulk rejected: {}", my_rank,
+                       error);
+        ++failures;
+        break;
+      }
+      const dgpp::net::BusAllReduceResult r = bus.wait_allreduce(id, 60000);
+      if (!r.ok) {
+        DGPP_LOG_ERROR("rank {}: bulk collective failed: {}", my_rank,
+                       r.error);
+        ++failures;
+        break;
+      }
+    }
+    if (cudaMemcpyAsync(got.data(), dev_dst, elems * 2,
+                        cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+        cudaStreamSynchronize(stream) != cudaSuccess) {
+      DGPP_LOG_ERROR("rank {}: bulk D2H failed", my_rank);
+      ++failures;
+      break;
+    }
+    size_t mismatches = 0;
+    // Bring-up fingerprint: which stripes mismatch (0=clean 1=partial
+    // 2=fully wrong) plus the first/last mismatching element — the
+    // distribution localizes a mapping bug faster than a count alone.
+    size_t first_bad = elems, last_bad = 0;
+    for (size_t i = 0; i < elems; ++i) {
+      if (got[i] == (*want)[i]) continue;
+      ++mismatches;
+      first_bad = std::min(first_bad, i);
+      last_bad = i;
+    }
+    if (mismatches != 0) {
+      const size_t stripe = 131072;  // loopback bulk_slot_bytes / 2
+      std::string map;
+      for (size_t s = 0; s * stripe < elems; ++s) {
+        const size_t b = s * stripe;
+        const size_t e = std::min(elems, b + stripe);
+        size_t bad = 0;
+        for (size_t i = b; i < e; ++i)
+          if (got[i] != (*want)[i]) ++bad;
+        map += bad == 0 ? "0" : (bad == e - b ? "2" : "1");
+      }
+      DGPP_LOG_ERROR("rank {} bulk iter {}: {} oracle mismatches "
+                     "[{},{}] stripes {}",
+                     my_rank, iter, mismatches, first_bad, last_bad, map);
+      for (size_t i = first_bad; i < first_bad + 4 && i < elems; ++i)
+        DGPP_LOG_ERROR("rank {} elem {}: got {:04x} want {:04x} (src {:04x})",
+                       my_rank, i, got[i], (*want)[i], host_src[i]);
+      ++failures;
+      break;
+    }
+    if (iter == 0) bulk_run = got;
+
+    // ---- the latency-chunked path over the same buffer ------------------
+    // Same chain per element, chunked into latency slots; the result must
+    // be BITWISE identical to the bulk machine's.
+    cudaMemsetAsync(dev_dst, 0, elems * 2, stream);
+    cudaStreamSynchronize(stream);
+    bool chunk_failed = false;
+    for (size_t base = 0; base < elems; base += 4096) {
+      const size_t n = std::min<size_t>(4096, elems - base);
+      std::string error;
+      const uint64_t id =
+          bus.allreduce(dev_src + base, dev_dst + base, n, &error);
+      if (id == 0) {
+        DGPP_LOG_ERROR("rank {}: chunked allreduce rejected: {}", my_rank,
+                       error);
+        ++failures;
+        chunk_failed = true;
+        break;
+      }
+      const dgpp::net::BusAllReduceResult r = bus.wait_allreduce(id, 30000);
+      if (!r.ok) {
+        DGPP_LOG_ERROR("rank {}: chunked collective failed: {}", my_rank,
+                       r.error);
+        ++failures;
+        chunk_failed = true;
+        break;
+      }
+    }
+    if (chunk_failed) break;
+    if (cudaMemcpyAsync(got.data(), dev_dst, elems * 2,
+                        cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+        cudaStreamSynchronize(stream) != cudaSuccess) {
+      DGPP_LOG_ERROR("rank {}: chunked D2H failed", my_rank);
+      ++failures;
+      break;
+    }
+    if (std::memcmp(got.data(), bulk_run.data(), elems * 2) != 0) {
+      DGPP_LOG_ERROR("rank {} iter {}: bulk and chunked paths diverged "
+                     "bitwise",
+                     my_rank, iter);
+      ++failures;
+      break;
+    }
+  }
+
+  cudaFree(dev_src);
+  cudaFree(dev_dst);
+  cudaStreamDestroy(stream);
+  return failures;
+}
+
+void scenario_allreduce_bulk() {
+  // The prefill class (§6.3): segment-quantized reduce-scatter + allgather
+  // over the bulk pool. Sizes chosen to exercise the degenerate geometry:
+  // below one stripe (empty shards at W=4), two stripes (more empty
+  // shards), and a multi-segment buffer with a partial tail stripe and
+  // shard/segment straddling — every result bitwise against the canonical
+  // chain and against the latency-chunked path (identical chains).
+  // DGPP_BULK_ONE_LANE=1 bisects lane-dependent failures (bring-up).
+  int failures = 0;
+  const size_t stripe = 262144 / 2;  // loopback option bulk_slot_bytes/2
+  const bool one_lane = std::getenv("DGPP_BULK_ONE_LANE") != nullptr;
+
+  for (const int world : {2, 4}) {
+    const uint16_t port = world == 2 ? 29904 : 29905;
+    for (const size_t elems : {static_cast<size_t>(2048), 2 * stripe + 100,
+                               41 * stripe - 32}) {
+      std::vector<std::unique_ptr<CollectiveBus>> world_buses =
+          start_world(world, port, one_lane);
+      if (world_buses.empty()) {
+        DGPP_LOG_ERROR("bulk world {} failed to start", world);
+        ++failures;
+        break;
+      }
+      // Oracle chain over every rank's pattern.
+      std::vector<std::vector<uint16_t>> all_src(static_cast<size_t>(world));
+      for (int r = 0; r < world; ++r)
+        fill_rank_bf16(&all_src[static_cast<size_t>(r)], elems, r);
+      std::vector<uint16_t> want(elems, 0);
+      for (size_t i = 0; i < elems; ++i) {
+        float acc = 0.0f;
+        for (int r = 0; r < world; ++r)
+          acc += dgpp::net::bf16_to_f32(all_src[static_cast<size_t>(r)][i]);
+        want[i] = dgpp::net::bf16_from_f32_rne(acc);
+      }
+      std::vector<std::thread> workers;
+      std::vector<int> rank_failures(static_cast<size_t>(world), 0);
+      const auto t0 = std::chrono::steady_clock::now();
+      for (int r = 0; r < world; ++r)
+        workers.emplace_back([&, r] {
+          rank_failures[static_cast<size_t>(r)] = allreduce_bulk_rank_work(
+              *world_buses[static_cast<size_t>(r)], world, r, elems, 2,
+              &want);
+        });
+      for (auto& t : workers) t.join();
+      int world_failures = 0;
+      for (int r = 0; r < world; ++r)
+        world_failures += rank_failures[static_cast<size_t>(r)];
+      const double ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+      CHECK(world_failures == 0,
+            "bulk world " + std::to_string(world) + " elems " +
+                std::to_string(elems) + " had " +
+                std::to_string(world_failures) + " failures");
+      DGPP_LOG_INFO("bulk case world={} elems={}: clean ({:.0f}ms for 2 "
+                    "iterations of both paths)",
+                    world, elems, ms);
+      for (auto& bus : world_buses) bus->quiesce();
+      for (auto& bus : world_buses) bus->stop();
+    }
+  }
+
+  g_failures += failures;
+  DGPP_LOG_INFO("scenario allreduce_bulk: {} total failures", g_failures);
+}
+
 void scenario_geometry_mismatch() {
   // Config errors must be legible over the rendezvous (roster precedent),
   // never a bare close or a hang.
@@ -860,6 +1079,7 @@ int main() {
   scenario_mesh_three_way();
   scenario_allreduce();
   scenario_allreduce_staged();
+  scenario_allreduce_bulk();
   scenario_geometry_mismatch();
   scenario_stop_releases_waiters();
 

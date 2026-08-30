@@ -88,6 +88,17 @@ struct BusRequest {
   // peer. -1 = device-source mode; the engine picks a generation.
   int stage_gen = -1;
 
+  // Bulk (prefill-class) collective: geometry precomputed at submit.
+  // Stripes are bulk-slot units of the whole buffer; shards are
+  // contiguous stripe ranges per global rank (ceil split); the engine
+  // walks segments of at most bulk_seg_stripes stripes.
+  bool is_bulk = false;
+  uint32_t bulk_stripes = 0;       // C = ceil(elems / stripe_elems)
+  uint32_t bulk_seg_stripes = 0;    // bulk_slots * lanes (pool-bounded)
+  uint32_t bulk_seg_count = 0;     // ceil(C / bulk_seg_stripes)
+  uint32_t shard_base[5] = {};     // per global rank (world <= 4 + guard)
+  uint32_t shard_count[5] = {};
+
   int outstanding = 0;  // stripes credited back so far are subtracted
   std::vector<BusStripe> stripes;
   std::vector<uint64_t> stripe_hashes;  // aligned with stripes, filled on credit
@@ -237,9 +248,45 @@ struct CollectiveBus::Impl {
   uint8_t* self_buf(size_t peer_count, int gen) const {
     return stage_buf(peer_count, gen);
   }
+  // Bulk arena: one row per peer after the staging rows; each row holds
+  // one segment's outbound stripes (stripe k at row + k*bulk_slot_bytes).
+  // Registered with the same per-device MRs (one superblock, one lkey).
+  uint8_t* bulk_arena_row(size_t peer) const {
+    return stage_block +
+           ((peer_ranks.size() + 1) * static_cast<size_t>(kStageRing) *
+                static_cast<size_t>(opt.lat_slot_bytes)) +
+           peer * static_cast<size_t>(bulk_seg_bytes());
+  }
+  uint64_t* bulk_staged_counters() const {
+    return reinterpret_cast<uint64_t*>(
+        bulk_arena_row(peer_ranks.size()));
+  }
+  size_t bulk_seg_bytes() const {
+    return static_cast<size_t>(opt.bulk_slots) * lane_count() *
+           static_cast<size_t>(opt.bulk_slot_bytes);
+  }
+  uint32_t bulk_seg_stripes() const {
+    return static_cast<uint32_t>(bulk_seg_bytes() / opt.bulk_slot_bytes);
+  }
   // Submit-thread handout state (guarded by coll_mu with the queue).
   void* stage_held_ptr = nullptr;
   int stage_held_gen = -1;
+
+  // Bulk segment machine, engine thread only. The arena-reuse fence is
+  // the pair of monotonic counters below: a segment's staging may only
+  // overwrite an arena row after every posted payload WR has its doorbell
+  // CQE reaped (bulk_pool SENDs are closed under coll_mode, so all bulk
+  // doorbell CEs in the air belong to this machine — the global equality
+  // is exact).
+  struct BulkFlight {
+    int phase = -1;  // -1 idle, 0 = reduce-scatter, 1 = allgather
+    uint32_t segment = 0;
+    bool launched = false;
+    std::vector<uint32_t> posted;  // per peer, this segment's stripes
+    BusBulkSegPlan plan{};          // the launched segment's plan
+  } bulk;
+  uint64_t bulk_pairs_posted = 0;     // every bulk post_pair (harness too)
+  uint64_t bulk_doorbell_ce_seen = 0;  // retired doorbell WRs (monotonic)
 
   BusRankExchange ex_{};  // our frame, built once during start()
 
@@ -285,6 +332,19 @@ struct CollectiveBus::Impl {
     return view;
   }
 
+  // Terminal path for a collective flight: the flight state resets
+  // BEFORE the wake (the single-outstanding gate must see a clean bus
+  // before the waiter can submit its next collective), while `finished`
+  // keeps the request alive through the completion's trailing notify.
+  void finish_flight(std::shared_ptr<BusRequest> finished, bool ok,
+                     const std::string& error) {
+    if (!ok) coll_poisoned = true;
+    coll = {};
+    bulk = {};
+    coll_active.store(false, std::memory_order_relaxed);
+    complete_request(std::move(finished), ok, error);
+  }
+
   // Makes a (possibly still running) collective kernel exit promptly: the
   // engine stamps the control cell, and the kernel's round check treats any
   // done_seq match as an exit. Idempotent per request.
@@ -300,17 +360,24 @@ struct CollectiveBus::Impl {
     if (s.latency_us.size() < kMaxLatencySamples) s.latency_us.push_back(us);
   }
 
-  void complete_request(BusRequest* req, bool ok, const std::string& error) {
+  // Takes the shared_ptr BY VALUE deliberately: the completion's tail
+  // (record + notify) must not outlive the request. The waiter can be the
+  // last other holder and drops out the moment done_flag publishes —
+  // TSan measured the trailing cv notify racing the waiter-side destructor
+  // when callers cleared their flight references before calling.
+  void complete_request(std::shared_ptr<BusRequest> req, bool ok,
+                        const std::string& error) {
+    BusRequest* const r = req.get();
     {
-      std::lock_guard<std::mutex> lock(req->mu);
-      if (req->done) return;
-      req->ok = ok;
-      req->error = error;
-      req->done = true;
+      std::lock_guard<std::mutex> lock(r->mu);
+      if (r->done) return;
+      r->ok = ok;
+      r->error = error;
+      r->done = true;
     }
-    req->done_flag.store(true, std::memory_order_release);
-    record_latency(req->cls, elapsed_us(req->submitted));
-    req->cv.notify_all();
+    r->done_flag.store(true, std::memory_order_release);
+    record_latency(r->cls, elapsed_us(r->submitted));
+    r->cv.notify_all();
   }
 
   // Spin on the done flag BEFORE taking the mutex (spinning under the
@@ -343,9 +410,9 @@ struct CollectiveBus::Impl {
     for (int pool = 0; pool < 2; ++pool) {
       for (SendSlot& s : lane.send[pool]) {
         if (s.in_flight && s.owner) {
-          complete_request(s.owner.get(), false, text);
-          s.owner = nullptr;
+          std::shared_ptr<BusRequest> owner = std::move(s.owner);
           s.in_flight = false;
+          complete_request(std::move(owner), false, text);
         }
       }
     }
@@ -369,6 +436,11 @@ struct CollectiveBus::Impl {
     if (!rc.post_send_pair(pool, slot, seq, static_cast<uint32_t>(chunk),
                            error))
       return false;
+    // TX retirement accounting (the bulk arena-reuse fence): every bulk
+    // post_pair — harness traffic included — must balance the doorbell CEs
+    // counted in poll_cqs, or a later collective's arena gate wedges on
+    // the mismatch.
+    if (pool == BusPool::kBulk) ++bulk_pairs_posted;
     ss.gen = seq;
     ss.in_flight = true;
     ss.owner = req;
@@ -395,14 +467,14 @@ struct CollectiveBus::Impl {
     if (coll_mode) {
       std::unique_lock<std::mutex> lock(lat_q_mu);
       while (!lat_q.empty()) {
-        complete_request(lat_q.front().get(), false,
+        complete_request(lat_q.front(), false,
                          "bus is in collective mode; send() is closed");
         lat_q.pop_front();
         worked = true;
       }
       std::unique_lock<std::mutex> bulk_lock(bulk_q_mu);
       while (!bulk_q.empty()) {
-        complete_request(bulk_q.front().get(), false,
+        complete_request(bulk_q.front(), false,
                          "bus is in collective mode; send() is closed");
         bulk_q.pop_front();
         worked = true;
@@ -445,7 +517,7 @@ struct CollectiveBus::Impl {
           ++taken;
         } else if (!hard_error.empty()) {
           complete_request(
-              req.get(), false,
+              req, false,
               "no alive lane to rank " + std::to_string(req->peer_rank));
           lat_q.pop_front();
           ++taken;
@@ -473,7 +545,7 @@ struct CollectiveBus::Impl {
             LaneState& lane = peers[p][stripe_idx % lanes];
             if (lane.failed) {
               complete_request(
-                  req.get(), false,
+                  req, false,
                   "bulk stripe lane " +
                       std::to_string(stripe_idx % lanes) + " to rank " +
                       std::to_string(req->peer_rank) +
@@ -492,7 +564,7 @@ struct CollectiveBus::Impl {
             if (!submit_stripe(req, lane, BusPool::kBulk, slot, chunk,
                                &error)) {
               fail_lane(lane, error);
-              complete_request(req.get(), false, error);
+              complete_request(req, false, error);
               request_done = true;
               break;
             }
@@ -517,6 +589,216 @@ struct CollectiveBus::Impl {
   // SENDs (the kernel staged the bytes; no host memcpy). Completion: the
   // kernel's ctl stamp completes the request; credits still flow for slot
   // recycling but are off the critical path.
+  // The prefill-class machine (§6.3): reduce-scatter over every segment,
+  // then allgather. One kernel launch and one posting wave per (phase,
+  // segment), everything bounded by the pool depths; the arena-reuse fence
+  // is the global TX retirement (bulk_pairs_posted == seen). Engine
+  // thread only, sibling of the latency flight path.
+  bool bulk_collective_pass(BusRequest& req) {
+    bool worked = false;
+
+    if (bulk.phase < 0) {
+      // Arena safety: the previous flight's payload WRs must be retired
+      // before this flight's first staging overwrites arena rows. All
+      // bulk SENDs in the air belong to this machine (harness bulk sends
+      // are closed under coll_mode), so the global equality is exact.
+      if (bulk_doorbell_ce_seen != bulk_pairs_posted) return worked;
+      req.ctl_seq =
+          ctl_seq_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (req.ctl_seq == 0)  // skip idle 0 (wrap)
+        req.ctl_seq =
+            ctl_seq_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+      req.stripe_hashes.assign(peer_ranks.size(), 0);
+      bulk.phase = 0;
+      bulk.segment = 0;
+      bulk.launched = false;
+      worked = true;
+    }
+
+    if (!bulk.launched) {
+      if (ar_deadline_cycles == 0) {
+        ar_deadline_cycles =
+            bus_consumer_deadline_cycles(opt.consumer_deadline_s);
+        int clock_khz = 0;
+        cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, 0);
+        DGPP_LOG_INFO("allreduce: device clock rate {} kHz (stamps conversion)",
+                      clock_khz);
+      }
+      if (ar_deadline_cycles == 0) {
+        finish_flight(coll.req, false,
+                      "could not read device clock rate for the "
+                      "collective deadline");
+        return true;
+      }
+
+      // Reset the control cell and the staged counters before launch
+      // (program order on this thread covers the kernel's start).
+      __atomic_store_n(&ar_ctl->ready_bits, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ar_ctl->done_seq, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ar_ctl->status, 0, __ATOMIC_RELAXED);
+      ar_ctl->stamp_stage = 0;
+      ar_ctl->stamp_first_claim = 0;
+      ar_ctl->stamp_reduce_done = 0;
+      for (size_t p = 0; p < peer_ranks.size(); ++p)
+        __atomic_store_n(&bulk_staged_counters()[p], 0, __ATOMIC_RELAXED);
+
+      // The segment plan: sub-range table = each rank's owned stripes of
+      // this segment (RS stages peers' ranges out; AG broadcasts mine;
+      // RS folds mine; AG lands peers').
+      BusBulkSegPlan plan{};
+      plan.total_elems = static_cast<uint32_t>(req.elems);
+      plan.stripe_elems = static_cast<uint32_t>(opt.bulk_slot_bytes / 2);
+      plan.seg_first = bulk.segment * req.bulk_seg_stripes;
+      plan.seg_stripe_count =
+          std::min(req.bulk_seg_stripes, req.bulk_stripes - plan.seg_first);
+      for (int r = 0; r < opt.world_size; ++r) {
+        const uint32_t b = std::max(req.shard_base[r], plan.seg_first);
+        const uint32_t e = std::min(req.shard_base[r] + req.shard_count[r],
+                                    plan.seg_first + plan.seg_stripe_count);
+        const uint32_t count = e > b ? e - b : 0;
+        const uint32_t base = count ? b - plan.seg_first : 0;
+        if (r == opt.my_rank) {
+          plan.my_base = base;
+          plan.my_count = count;
+        } else {
+          const size_t p = peer_index(r);
+          plan.out_base[p] = base;
+          plan.out_count[p] = count;
+        }
+      }
+
+      BusAllReduceView view{};
+      int vi = 0;
+      for (size_t p = 0; p < peer_ranks.size(); ++p)
+        for (const LaneState& lane : peers[p])
+          view.recv[vi++] = recv_view_of(lane);
+      view.recv_views = vi;
+      view.lanes_per_peer = static_cast<int>(lane_count());
+      for (size_t p = 0; p < peer_ranks.size(); ++p)
+        view.send_payload[p] = reinterpret_cast<const uint16_t*>(
+            bulk_arena_row(p));
+      view.send_peers = static_cast<int>(peer_ranks.size());
+
+      const cudaError_t launch = launch_bus_bulk_collective(
+          view, opt.my_rank, bulk.phase,
+          static_cast<const __nv_bfloat16*>(req.dev_src),
+          static_cast<__nv_bfloat16*>(req.dev_dst), plan,
+          bulk_staged_counters(), req.ctl_seq, ar_ctl, ar_deadline_cycles,
+          collective_stream);
+      if (launch != cudaSuccess) {
+        finish_flight(coll.req, false,
+                      std::string("bulk collective kernel launch failed: ") +
+                          cudaGetErrorString(launch));
+        return true;
+      }
+      bulk.plan = plan;
+      bulk.launched = true;
+      bulk.posted.assign(peer_ranks.size(), 0);
+      coll.launched_at = Clock::now();
+      if (req.ctl_seq <= 4)
+        DGPP_LOG_INFO(
+            "allreduce: rank {} seq {} bulk {} seg {}/{} launched",
+            opt.my_rank, req.ctl_seq, bulk.phase == 0 ? "RS" : "AG",
+            bulk.segment + 1, req.bulk_seg_count);
+      worked = true;
+    }
+
+    // Posting pass: stripes as the kernel's staged counters release them,
+    // ring-gated per (peer, lane). The sender's striping is round-robin
+    // (stripe k on lane k%lanes) — the receiver's arrival mapping derives
+    // from exactly this.
+    uint64_t* const staged = bulk_staged_counters();
+    for (size_t p = 0; p < peer_ranks.size(); ++p) {
+      const uint32_t n_out =
+          bulk.phase == 0 ? bulk.plan.out_count[p] : bulk.plan.my_count;
+      while (bulk.posted[p] < n_out &&
+             acquire_u64(&staged[p]) > bulk.posted[p]) {
+        const uint32_t k = bulk.posted[p];
+        LaneState& lane = peers[p][k % peers[p].size()];
+        const uint32_t slot = lane.cursor[1];
+        if (lane.send[1][slot].in_flight) break;  // ring full; retry
+        const uint32_t sub_base =
+            bulk.phase == 0 ? bulk.plan.out_base[p] : bulk.plan.my_base;
+        const uint32_t gs = bulk.plan.seg_first + sub_base + k;
+        const uint64_t left =
+            req.elems * 2 - static_cast<uint64_t>(gs) * opt.bulk_slot_bytes;
+        const uint32_t len = static_cast<uint32_t>(
+            left < opt.bulk_slot_bytes ? left : opt.bulk_slot_bytes);
+        RcLane& rc = *lane.lane;
+        SendSlot& ss = lane.send[1][slot];
+        const uint32_t seq = ss.gen + 1;
+        std::string error;
+        DGPP_LOG_DEBUG("bulk stripe: peer={} stripe={} len={}", peer_ranks[p],
+                       k, len);
+        if (!rc.post_send_pair(BusPool::kBulk, slot, seq, len, &error,
+                               bulk_arena_row(p) +
+                                   static_cast<size_t>(k) *
+                                       opt.bulk_slot_bytes,
+                               lane.stage_lkey)) {
+          fail_lane(lane, error);
+          poison_collective(req);
+          finish_flight(coll.req, false, "bulk post failed: " + error);
+          return true;
+        }
+        ss.gen = seq;
+        ss.in_flight = true;
+        ss.owner = coll.req;
+        ss.owner_stripe = static_cast<size_t>(p);
+        ++lane.in_flight_count;
+        lane.cursor[1] = (slot + 1) % static_cast<uint32_t>(opt.bulk_slots);
+        ++lane.stats.posts;
+        lane.stats.bytes_sent += len;
+        ++req.outstanding;
+        ++bulk_pairs_posted;
+        ++bulk.posted[p];
+        worked = true;
+      }
+    }
+
+    // Completion: the kernel's stamp ends this segment; advance the
+    // machine. Clear-before-complete on every terminal path. Two drains
+    // gate the advance, both because DONE DOES NOT IMPLY POSTED:
+    //   * this segment's posting must be fully out — a zero-arrival
+    //     kernel (empty receive window) stamps done instantly while its
+    //     own stripes are still being posted, and the next launch RESETS
+    //     staged_counters; advancing first would strand the unposted
+    //     stripes with staged < posted forever (measured: tx 31/31 with
+    //     5 of 16 AG stripes never posted — the receiver waits for
+    //     doorbells that no longer exist);
+    //   * every posted stripe's doorbell CQE (the arena-reuse fence) —
+    //     the next segment's kernel stages into the same rows, and the
+    //     kernel must not overwrite bytes the NIC has not read yet.
+    const uint64_t done = acquire_u64(&ar_ctl->done_seq);
+    if (done == req.ctl_seq) {
+      for (size_t p = 0; p < peer_ranks.size(); ++p) {
+        const uint32_t n_out = bulk.phase == 0 ? bulk.plan.out_count[p]
+                                               : bulk.plan.my_count;
+        if (bulk.posted[p] < n_out) return worked;  // posting not drained
+      }
+      if (bulk_doorbell_ce_seen != bulk_pairs_posted) return worked;
+      const bool ok = acquire_u32(&ar_ctl->status) == 0;
+      if (!ok) {
+        finish_flight(coll.req, false,
+                      "bulk collective consumer exited on deadline or "
+                      "poison");
+        return true;
+      }
+      ++bulk.segment;
+      if (bulk.segment >= req.bulk_seg_count) {
+        if (bulk.phase == 0) {
+          bulk.phase = 1;
+          bulk.segment = 0;
+        } else {
+          finish_flight(coll.req, true, {});
+          return true;
+        }
+      }
+      bulk.launched = false;
+      worked = true;
+    }
+    return worked;
+  }
+
   bool collective_pass() {
     bool worked = false;
 
@@ -527,13 +809,15 @@ struct CollectiveBus::Impl {
         coll_q.pop_front();
         coll_active.store(true, std::memory_order_relaxed);
         coll_mode = true;  // engine-owned; send()/intake() gate on it
+        coll.launched_at = Clock::now();  // flight clock starts at pickup
       }
     }
     if (!coll.req) return worked;
     // TEMP bring-up microscope: an active flight that has not completed in
     // 500ms dumps its state once per 500ms — the rare lane-watchdog stall
     // in the TP loopback runs otherwise dies with no observables.
-    if (coll.req && coll.claims.size() > 0 &&
+    if (coll.req &&
+        (coll.claims.size() > 0 || coll.req->is_bulk) &&
         Clock::now() - coll.launched_at >
             std::chrono::milliseconds(500 + 500 * coll.stall_dumps)) {
       ++coll.stall_dumps;
@@ -550,6 +834,13 @@ struct CollectiveBus::Impl {
                      std::to_string(recv_view_of(lane).ack_lat[s].seq) +
                      (lane.send[0][s].in_flight ? "!" : ".");
           }
+          lanes += " B[";
+          for (int s = 0; s < opt.bulk_slots; ++s) {
+            const BusRecvView view = recv_view_of(lane);
+            lanes += std::to_string(view.doorbell_bulk[s].seq) + "/" +
+                     std::to_string(view.ack_bulk[s].seq) +
+                     (lane.send[1][s].in_flight ? "!" : ".");
+          }
           lanes += "]";
         }
       DGPP_LOG_INFO(
@@ -562,6 +853,19 @@ struct CollectiveBus::Impl {
           coll.posted_bits, acquire_u64(&ar_ctl->ready_bits),
           acquire_u64(&ar_ctl->done_seq), acquire_u32(&ar_ctl->status),
           lanes);
+      if (coll.req->is_bulk) {
+        std::string posted_counts;
+        for (size_t p = 0; p < peer_ranks.size(); ++p)
+          posted_counts += " p" + std::to_string(peer_ranks[p]) + ":" +
+                           std::to_string(bulk.posted[p]) + "/" +
+                           std::to_string(acquire_u64(
+                               &bulk_staged_counters()[p]));
+        DGPP_LOG_INFO(
+            "allreduce: rank {} seq {} bulk {} seg {}/{} tx {}/{} STALLED {}",
+            opt.my_rank, coll.req->ctl_seq, bulk.phase == 0 ? "RS" : "AG",
+            bulk.segment + 1, coll.req->bulk_seg_count, bulk_doorbell_ce_seen,
+            bulk_pairs_posted, posted_counts);
+      }
     }
     // A held flight whose request is already done was reaped out from
     // under us (fail_lane completing the stripe owner, or the watchdog
@@ -572,10 +876,15 @@ struct CollectiveBus::Impl {
       poison_collective(*coll.req);
       coll_poisoned = true;
       coll = {};
+      bulk = {};
       coll_active.store(false, std::memory_order_relaxed);
       return true;
     }
     BusRequest& req = *coll.req;
+
+    // The prefill-class machine is self-contained (its own claims,
+    // posting, and completion); the latency one-shot continues below.
+    if (req.is_bulk) return bulk_collective_pass(req);
 
     if (coll.claims.empty()) {
       std::vector<BusStripe> claims;
@@ -612,12 +921,9 @@ struct CollectiveBus::Impl {
                       clock_khz);
       }
       if (ar_deadline_cycles == 0) {
-        coll_poisoned = true;
-        coll = {};
-        coll_active.store(false, std::memory_order_relaxed);
-        complete_request(&req, false,
-                         "could not read device clock rate for the "
-                         "collective deadline");
+        finish_flight(coll.req, false,
+                      "could not read device clock rate for the "
+                      "collective deadline");
         return true;
       }
 
@@ -654,12 +960,9 @@ struct CollectiveBus::Impl {
                  self_buf(peer_ranks.size(), stage_gen)) {
         // Defense in depth: a pre-staged submit must source the exact
         // handout buffer. Anything else is a caller protocol break.
-        coll_poisoned = true;
-        coll = {};
-        coll_active.store(false, std::memory_order_relaxed);
-        complete_request(
-            &req, false,
-            "pre-staged collective source is not the held staging buffer");
+        finish_flight(coll.req, false,
+                      "pre-staged collective source is not the held staging "
+                      "buffer");
         return true;
       }
       for (size_t p = 0; p < peer_ranks.size(); ++p)
@@ -676,12 +979,9 @@ struct CollectiveBus::Impl {
       DGPP_LOG_DEBUG("allreduce: rank {} seq {} launch_call={:.1f}us",
                      opt.my_rank, req.ctl_seq, elapsed_us(t_launch0));
       if (launch != cudaSuccess) {
-        coll_poisoned = true;
-        coll = {};
-        coll_active.store(false, std::memory_order_relaxed);
-        complete_request(&req, false,
-                         std::string("allreduce kernel launch failed: ") +
-                             cudaGetErrorString(launch));
+        finish_flight(coll.req, false,
+                      std::string("allreduce kernel launch failed: ") +
+                          cudaGetErrorString(launch));
         return true;
       }
       coll.claims = std::move(claims);
@@ -726,9 +1026,7 @@ struct CollectiveBus::Impl {
         fail_lane(lane, error);
         poison_collective(req);
         coll_poisoned = true;
-        coll = {};
-        coll_active.store(false, std::memory_order_relaxed);
-        complete_request(&req, false, "allreduce post failed: " + error);
+        finish_flight(coll.req, false, "allreduce post failed: " + error);
         return true;
       }
       ss.gen = seq;
@@ -766,18 +1064,16 @@ struct CollectiveBus::Impl {
               ? ar_ctl->stamp_reduce_done - ar_ctl->stamp_first_claim
               : 0);
       const bool reduced = acquire_u32(&ar_ctl->status) == 0;
-      // Clear the flight BEFORE completing: complete_request wakes the
-      // waiter, and the woken thread's next submission races this cleanup
-      // against the single-outstanding check (measured as a spurious
-      // "one outstanding" rejection in the TP loopback bring-up). The bus
+      // Clear the flight BEFORE completing (finish_flight): the woken
+      // waiter's next submission races the cleanup against the
+      // single-outstanding check (measured as a spurious "one
+      // outstanding" rejection in the TP loopback bring-up) — the bus
       // must be ready for the next generation before the waiter can
-      // observe the result.
-      if (!reduced) coll_poisoned = true;
-      coll = {};
-      coll_active.store(false, std::memory_order_relaxed);
-      complete_request(&req, reduced,
-                       reduced ? "" : "collective consumer exited on deadline "
-                                      "or poison");
+      // observe the result. The helper's keep-alive reference outlives
+      // the completion's trailing notify.
+      finish_flight(coll.req, reduced,
+                   reduced ? "" : "collective consumer exited on deadline "
+                                  "or poison");
       worked = true;
     }
     return worked;
@@ -802,6 +1098,12 @@ struct CollectiveBus::Impl {
               fail_lane(lane, bus_wc_error(wcs[i]));
               break;
             }
+            // TX retirement accounting (the bulk arena-reuse fence):
+            // each post_pair's doorbell WR is the signaled half, so its
+            // CQE retires exactly one message.
+            if (bus_wr_kind(wcs[i].wr_id) == BusWr::kDoorbell &&
+                pool == BusPool::kBulk)
+              ++bulk_doorbell_ce_seen;
           }
           if (n > 0) {
             lane.last_progress = Clock::now();
@@ -830,10 +1132,10 @@ struct CollectiveBus::Impl {
             const uint32_t seq = acquire_u32(&cell->seq);
             const uint32_t len = acquire_u32(&cell->len);
             DGPP_LOG_DEBUG(
-                "doorbell CE: peer={} lane={} pool={} slot={} cell_seq={} "
-                "expect={} len={}",
-                lane.stats.peer_rank, lane.stats.lane, pool_i, slot, seq,
-                rs.expect_seq, len);
+                "doorbell CE: myrank={} peer={} lane={} pool={} slot={} "
+                "cell_seq={} expect={} len={} cell={}",
+                opt.my_rank, lane.stats.peer_rank, lane.stats.lane, pool_i,
+                slot, seq, rs.expect_seq, len, (const void*)cell);
             if (rs.arrived) {
               fail_lane(lane, "duplicate doorbell arrival (protocol)");
               break;
@@ -943,7 +1245,7 @@ struct CollectiveBus::Impl {
               // A collective completes on the kernel's ctl stamp; its
               // credits only recycle slots (off the critical path).
               if (!req->is_collective && req->outstanding == 0)
-                complete_request(req.get(), true, {});
+                complete_request(req, true, {});
             }
             // seq < ss.gen: stale credit for a request already failed by
             // the watchdog and freed — nothing to do, the cell is current.
@@ -971,7 +1273,7 @@ struct CollectiveBus::Impl {
         }
       }
     }
-    std::vector<BusRequest*> expired;
+    std::vector<std::shared_ptr<BusRequest>> expired;
     {
       std::lock_guard<std::mutex> lock(registry_mu);
       for (auto& entry : registry) {
@@ -979,17 +1281,17 @@ struct CollectiveBus::Impl {
         if (!req->done &&
             now - req->submitted >
                 std::chrono::milliseconds(opt.completion_timeout_ms))
-          expired.push_back(req);
+          expired.push_back(entry.second);
       }
     }
-    for (BusRequest* req : expired) {
+    for (const std::shared_ptr<BusRequest>& req : expired) {
       if (req->is_collective) {
         poison_collective(*req);
         coll_poisoned = true;
         // The flight must not outlive the request (same reasoning as the
         // done-but-held check in collective_pass; the engine thread runs
         // both passes, so the clear is race-free).
-        if (coll.req && coll.req.get() == req) {
+        if (coll.req && coll.req.get() == req.get()) {
           coll = {};
           coll_active.store(false, std::memory_order_relaxed);
         }
@@ -1372,6 +1674,27 @@ bool CollectiveBus::start(std::string* error) {
              "combined slots must fit the consumer)";
     return false;
   }
+  // The bulk collective kernel's fixed plan/claim arrays bound the
+  // geometry: segments (bulk_slots x lanes stripes) must fit the plan
+  // tables, and every bulk receive cell (peers x lanes x bulk_slots)
+  // must fit the claim bitmap — beyond it, claimed cells stop acking
+  // (credits never return) and the flight hangs. Config errors must be
+  // legible, never a silent overflow.
+  if (static_cast<int>(opt.bulk_slots) * static_cast<int>(opt.lane_devices.size()) >
+      kBusMaxBulkSegStripes) {
+    *error = "bulk geometry: bulk_slots x lanes exceeds the segment plan (" +
+             std::to_string(kBusMaxBulkSegStripes) + " stripes)";
+    return false;
+  }
+  if (static_cast<int>(opt.world_size - 1) *
+          static_cast<int>(opt.lane_devices.size()) *
+          static_cast<int>(opt.bulk_slots) >
+      kBusMaxBulkCells) {
+    *error = "bulk geometry: peers x lanes x bulk_slots exceeds the kernel's "
+             "claim cells (" +
+             std::to_string(kBusMaxBulkCells) + ")";
+    return false;
+  }
 
   // One device per distinct lane name so both lanes of a pair share nothing
   // they don't have to (the two active f0s are distinct PCI functions).
@@ -1393,14 +1716,21 @@ bool CollectiveBus::start(std::string* error) {
   for (int r = 0; r < opt.world_size; ++r)
     if (r != opt.my_rank) impl.peer_ranks.push_back(r);
 
-  // Collective staging block: (peers + 1) rows x kStageRing x one latency
-  // slot — the peer rows are collective send sources; the extra row is the
-  // pre-stage handout. Pinned and registered on every distinct device's
-  // PD so any lane can post a payload SEND sourced from it.
+  // Collective staging superblock: (peers + 1) staging rows x kStageRing
+  // x one latency slot (the peer rows are collective send sources; the
+  // extra row is the pre-stage handout), then the bulk arena (one
+  // segment's stripes per peer), then the per-peer bulk staged counters.
+  // One pinned allocation, one MR per distinct device's PD — any lane can
+  // post a SEND sourced from any row.
   {
-    const size_t block_bytes =
+    const size_t stage_bytes =
         (impl.peer_ranks.size() + 1) *
         static_cast<size_t>(Impl::kStageRing) * opt.lat_slot_bytes;
+    const size_t arena_bytes =
+        impl.peer_ranks.size() * impl.bulk_seg_bytes();
+    const size_t counters_bytes =
+        impl.peer_ranks.size() * sizeof(uint64_t);  // 64B-aligned rows
+    const size_t block_bytes = stage_bytes + arena_bytes + counters_bytes;
     const cudaError_t alloc = cudaHostAlloc(
         reinterpret_cast<void**>(&impl.stage_block), block_bytes,
         cudaHostAllocDefault);
@@ -1797,6 +2127,97 @@ uint64_t CollectiveBus::allreduce(const void* device_src, void* device_dst,
   return id;
 }
 
+uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
+                                      size_t bf16_elems, std::string* error) {
+  Impl& impl = *impl_;
+  if (impl.stopping.load(std::memory_order_relaxed)) {
+    *error = "bus is stopped";
+    return 0;
+  }
+  if (impl.consumers_launched) {
+    *error = "allreduce requires launch_consumers=false (persistent harness "
+             "consumers would race the per-collective kernel for claims)";
+    return 0;
+  }
+  if (bf16_elems == 0 || bf16_elems % 2 != 0) {
+    *error = "allreduce element count must be a positive multiple of 2";
+    return 0;
+  }
+  if (bf16_elems > 0xFFFFFFFFull) {
+    *error = "bulk collective element count exceeds the u32 plan";
+    return 0;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    if (impl.coll_poisoned) {
+      *error = "an earlier collective failed; this bus must be restarted";
+      return 0;
+    }
+    if (impl.stage_held_ptr != nullptr) {
+      *error = "a pre-stage handout is held; consume it with "
+               "allreduce_staged() first";
+      return 0;
+    }
+    if (impl.coll_active.load(std::memory_order_relaxed) ||
+        !impl.coll_q.empty()) {
+      *error = "one outstanding collective at a time (v1)";
+      return 0;
+    }
+  }
+
+  // Geometry: the bulk-slot grid, ceil-split shards per rank, segments of
+  // at most bulk_slots x lanes stripes (every posting wave then fits the
+  // pool depths by construction).
+  const size_t stripe_elems = options_.lat_slot_bytes == 0
+                                  ? 0
+                                  : options_.bulk_slot_bytes / 2;
+  const uint32_t C = static_cast<uint32_t>(
+      (bf16_elems + stripe_elems - 1) / stripe_elems);
+  const uint32_t seg_stripes = impl.bulk_seg_stripes();
+  const uint32_t seg_count = (C + seg_stripes - 1) / seg_stripes;
+  uint32_t shard_base[5] = {}, shard_count[5] = {};
+  for (int r = 0; r < options_.world_size; ++r) {
+    // Contiguous ceil split: earlier ranks carry the remainder.
+    const uint32_t per = C / static_cast<uint32_t>(options_.world_size);
+    const uint32_t rem =
+        C % static_cast<uint32_t>(options_.world_size);
+    shard_count[r] = per + (static_cast<uint32_t>(r) < rem ? 1 : 0);
+  }
+  for (int r = 1; r < options_.world_size; ++r)
+    shard_base[r] = shard_base[r - 1] + shard_count[r - 1];
+
+  auto req = std::make_shared<BusRequest>();
+  req->cls = BusMessageClass::kBulk;  // stats/records bucket
+  req->peer_rank = -1;
+  req->is_collective = true;
+  req->is_bulk = true;
+  req->dev_src = device_src;
+  req->dev_dst = device_dst;
+  req->elems = bf16_elems;
+  req->bulk_stripes = C;
+  req->bulk_seg_stripes = seg_stripes;
+  req->bulk_seg_count = seg_count;
+  for (int r = 0; r < options_.world_size; ++r) {
+    req->shard_base[r] = shard_base[r];
+    req->shard_count[r] = shard_count[r];
+  }
+  req->submitted = Clock::now();
+  {
+    std::lock_guard<std::mutex> lock(impl.registry_mu);
+    req->id = impl.next_id++;
+    impl.registry[req->id] = req;
+  }
+  const uint64_t id = req->id;
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    impl.coll_q.push_back(std::move(req));
+  }
+  DGPP_LOG_DEBUG("allreduce_bulk: queued id={} elems={} stripes={} segs={}",
+                 id, bf16_elems, C, seg_count);
+  return id;
+}
+
 BusAllReduceResult CollectiveBus::wait_allreduce(uint64_t id,
                                                   int timeout_ms) {
   BusAllReduceResult result;
@@ -1918,7 +2339,7 @@ void CollectiveBus::stop() {
     impl.registry.clear();
   }
   for (auto& req : remaining)
-    impl.complete_request(req.get(), false, "bus stopped");
+    impl.complete_request(req, false, "bus stopped");
 
   // Lane teardown (QP -> CQ -> MR -> slab) and device close. All consumer
   // kernels must be dead by here: cudaFreeHost synchronizes the device

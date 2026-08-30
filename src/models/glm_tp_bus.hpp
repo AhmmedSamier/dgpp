@@ -70,6 +70,20 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
       return;
     }
     static thread_local int chunk_no = 0;
+    const size_t total =
+        static_cast<size_t>(rows) * static_cast<size_t>(hidden);
+    // Prefill-class boundaries (well above a couple of latency chunks)
+    // take the bulk machine: segment-quantized reduce-scatter + allgather,
+    // the same canonical per-element chain (bitwise-equal to chunking —
+    // the bus_test cross-path gate pins exactly that).
+    if (total > 2 * kMaxCollectiveElems) {
+      std::string err;
+      const uint64_t id = bus_.allreduce_bulk(partial, partial, total, &err);
+      if (id == 0)
+        throw std::runtime_error("boundary reduce: bulk rejected: " + err);
+      wait_collective(id, "boundary bulk");
+      return;
+    }
     // Floor: rows folded per collective (hidden itself when hidden fills
     // the slot — the decode shape, one collective per boundary).
     const int rows_per = static_cast<int>(kMaxCollectiveElems / hidden);

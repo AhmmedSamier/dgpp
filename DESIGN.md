@@ -484,6 +484,33 @@ Two ordering rules the TP forward integration taught (both were bugs):
   post from free threads, so staggered per-layer loads and in-flight
   collectives coexist by construction.
 
+Three more ordering rules, all measured into existence by the bulk
+machine's bring-up (§6.3's striped reduce-scatter + allgather):
+
+- **Claim only your segment's ring window.** The bulk doorbell rings are
+  flight- and phase-agnostic FIFOs and the shard geometry guarantees
+  ranks do NOT progress in lockstep — a rank whose shard ends in segment
+  0 enters allgather while its peer still folds reduce-scatter. The
+  receiver's kernel derives each arrival's ring-lifetime index j from
+  the doorbell itself and claims exactly [base, base + this lane's
+  stripe share); everything else stays unconsumed for the kernel whose
+  window contains it. Eager claiming acks a future segment's doorbell
+  away from its owner and both phases deadlock on the loss.
+- **Done does not imply posted — and neither does TX retirement.** A
+  zero-arrival segment kernel (empty receive window) stamps done while
+  its own outbound stripes are still being posted; the advance gate
+  requires the posting drained AND the doorbell CEs retired before the
+  next segment launches, or the launch's staged-counter reset strands
+  unposted stripes with the release condition inverted forever.
+- **The ack certifies consumption, not arrival.** The RS fold reads
+  payload slots at kernel exit; acking at claim time returns the
+  sender's credit early, and a sender a segment ahead wraps the
+  8-deep ring inside one claim-to-exit gap, DMAing new stripes over a
+  fold input. Acking after the fold makes the credit gate close the
+  race by construction — and the scan must skip the kernel's own claims
+  meanwhile, or a re-presented claim steals the shared CAS slot from a
+  fresh doorbell in the same warp, forever.
+
 Measured (fabric, bitwise-verified against the canonical-chain oracle):
 TP=2 p50 37.6 µs, TP=4 (full mesh) p50 ~44 µs, submit→wait, credits off
 the critical path. Kernel-internal spans are ~6 µs staging, ~6 µs doorbell
