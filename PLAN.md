@@ -291,7 +291,15 @@ Deliverables:
     CUDA-graph capture of the decode launch sequence (§6.2).
 4. Sharded load for TP=2 and TP=4, plus hashes for replicated weights.
 5. Transport regression command that reruns NIC→GPU visibility on every node
-   pair after driver/firmware changes.
+   pair after driver/firmware changes. Built (`nic_regress`): one mesh-mode
+   command drives the M0 project test (payload + doorbell ordered RC SENDs,
+   GPU system-scope poll, hash-then-ack) over every directed pair × both
+   lanes with the deployment GID selection, identity-checked hellos, held
+   early connections, both-endpoint view aggregation at nodes[0], and one
+   broadcast exit code; `pair`/`serve` for single-pair debugging and a
+   CI selftest (full mesh machinery, two-thread world on one device —
+   pre-thread construction, stream-scoped syncs) round it out. Fabric mesh
+   validation runs with the exit-gate fabric pass.
 
 Exit criteria:
 

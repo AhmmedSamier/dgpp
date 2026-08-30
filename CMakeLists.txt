@@ -196,7 +196,8 @@ if(DGPP_ENABLE_IBV)
     src/net/bus_types.cpp
     src/net/verbs.cpp
     src/net/collective_bus.cpp
-    src/net/bus_kernel.cu)
+    src/net/bus_kernel.cu
+    src/net/nic_visibility.cu)
   target_link_libraries(dgpp_bus
     PUBLIC dgpp_net CUDA::cudart ${IBVERBS_LIBRARY})
   target_include_directories(dgpp_bus PUBLIC ${IBVERBS_INCLUDE_DIR})
@@ -205,6 +206,14 @@ if(DGPP_ENABLE_IBV)
   add_executable(bus_check apps/bus_check.cpp)
   target_link_libraries(bus_check PRIVATE dgpp_bus)
   dgpp_set_common(bus_check)
+
+  # M5 deliverable 5: the transport regression command (NIC→GPU visibility
+  # on every node pair after driver/firmware changes).
+  add_executable(nic_regress apps/nic_regress.cpp)
+  target_link_libraries(nic_regress PRIVATE dgpp_bus CUDA::cudart Threads::Threads)
+  dgpp_set_common(nic_regress)
+  add_test(NAME nic_regress_selftest COMMAND nic_regress selftest)
+  set_tests_properties(nic_regress_selftest PROPERTIES SKIP_RETURN_CODE 2)
 
   # M5 deliverable 3: TP block-boundary parity over loopback buses
   # (real verbs QPs, one process). Needs the model stack AND the bus.
@@ -422,7 +431,7 @@ if(DGPP_ENABLE_IBV)
 
   add_executable(micro_ibv_smoke
     benchmarks/micro/ibv_smoke.cpp
-    benchmarks/micro/nic_gpu_visibility.cu
+    src/net/nic_visibility.cu
     src/common/log.cpp)
   target_link_libraries(micro_ibv_smoke PRIVATE ${IBVERBS_LIBRARY} CUDA::cudart)
   target_include_directories(micro_ibv_smoke PRIVATE ${IBVERBS_INCLUDE_DIR})

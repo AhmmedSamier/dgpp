@@ -1,8 +1,8 @@
-#include "nic_gpu_visibility.hpp"
+#include "net/nic_visibility.hpp"
 
 #include "kernels/flag_protocol.cuh"
 
-namespace dgpp::bench {
+namespace dgpp::net {
 
 cudaError_t launch_nic_visibility_kernel(uint32_t* start,
                                          const uint32_t* payload,
@@ -14,4 +14,4 @@ cudaError_t launch_nic_visibility_kernel(uint32_t* start,
   return cudaGetLastError();
 }
 
-}  // namespace dgpp::bench
+}  // namespace dgpp::net

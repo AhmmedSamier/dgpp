@@ -36,7 +36,7 @@
 #include <vector>
 
 #include "common/log.hpp"
-#include "nic_gpu_visibility.hpp"
+#include "net/nic_visibility.hpp"
 
 namespace {
 
@@ -696,7 +696,7 @@ int run_visibility_responder(int fd, const RoleHeader& hdr,
     return 1;
   const uint64_t deadline_cycles =
       static_cast<uint64_t>(clock_khz) * 5000ull;
-  const cudaError_t launch = dgpp::bench::launch_nic_visibility_kernel(
+  const cudaError_t launch = dgpp::net::launch_nic_visibility_kernel(
       &start->seq, payload, ack, deadline_cycles, stream);
   if (launch != cudaSuccess) {
     DGPP_LOG_ERROR("verify kernel launch failed: {}",

@@ -14,6 +14,17 @@
 
 namespace dgpp::net {
 
+// The RC transition working set, measured on this fabric (M0: 107 Gb/s per
+// lane, 196 Gb/s concurrent) and shared by every QP the project creates —
+// the bus's lanes and the transport regression probe alike, so a retune
+// cannot drift between the deployment and the tool that validates it.
+inline constexpr int kQpPsn = 0x1234;
+inline constexpr int kQpTimeout = 14;
+inline constexpr int kQpRetryCount = 7;
+inline constexpr int kQpRnrRetry = 7;
+inline constexpr int kQpMinRnrTimer = 12;
+inline constexpr int kQpMaxRdAtomic = 1;
+
 // One opened RoCE device: ACTIVE non-IB port, RoCEv2 GID, protection domain.
 // Shared by every lane on the same physical function; the destructor closes
 // when the last reference is dropped (the bus owns one per device name).

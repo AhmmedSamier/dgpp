@@ -13,17 +13,11 @@
 #include "common/log.hpp"
 
 namespace dgpp::net {
-
 namespace {
 
 // The M0 working set, kept verbatim: these transition parameters measured
-// 107 Gb/s single-lane and 196 Gb/s concurrent on this fabric.
-constexpr int kPsn = 0x1234;
-constexpr int kQpTimeout = 14;
-constexpr int kRetryCount = 7;
-constexpr int kRnrRetry = 7;
-constexpr int kMinRnrTimer = 12;
-constexpr int kMaxRdAtomic = 1;
+// 107 Gb/s single-lane and 196 Gb/s concurrent on this fabric. The values
+// live in verbs.hpp (kQp*) so the transport regression probe shares them.
 
 // First routable RoCEv2 GID index on the port, via sysfs. The v2 table
 // entry sorts link-local (fe80::) first; switches forward link-local
@@ -237,8 +231,8 @@ bool RcLane::connect(BusPool pool, const BusLaneEndpoint& peer,
   attr.path_mtu = pa.active_mtu < IBV_MTU_4096 ? pa.active_mtu : IBV_MTU_4096;
   attr.dest_qp_num = peer_qpn;
   attr.rq_psn = peer_psn;
-  attr.max_dest_rd_atomic = kMaxRdAtomic;
-  attr.min_rnr_timer = kMinRnrTimer;
+  attr.max_dest_rd_atomic = kQpMaxRdAtomic;
+  attr.min_rnr_timer = kQpMinRnrTimer;
   attr.ah_attr.is_global = 1;
   std::memcpy(attr.ah_attr.grh.dgid.raw, peer.gid, 16);
   attr.ah_attr.grh.sgid_index = static_cast<uint8_t>(device_->gid_index());
@@ -256,10 +250,10 @@ bool RcLane::connect(BusPool pool, const BusLaneEndpoint& peer,
   std::memset(&attr, 0, sizeof(attr));
   attr.qp_state = IBV_QPS_RTS;
   attr.timeout = kQpTimeout;
-  attr.retry_cnt = kRetryCount;
-  attr.rnr_retry = kRnrRetry;
-  attr.sq_psn = kPsn;
-  attr.max_rd_atomic = kMaxRdAtomic;
+  attr.retry_cnt = kQpRetryCount;
+  attr.rnr_retry = kQpRnrRetry;
+  attr.sq_psn = kQpPsn;
+  attr.max_rd_atomic = kQpMaxRdAtomic;
   if (ibv_modify_qp(qp, &attr,
                     IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
                         IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
@@ -273,9 +267,9 @@ bool RcLane::connect(BusPool pool, const BusLaneEndpoint& peer,
 BusLaneEndpoint RcLane::endpoint() const {
   BusLaneEndpoint e{};
   e.qpn_lat = qp_[0]->qp_num;
-  e.psn_lat = kPsn;
+  e.psn_lat = kQpPsn;
   e.qpn_bulk = qp_[1]->qp_num;
-  e.psn_bulk = kPsn;
+  e.psn_bulk = kQpPsn;
   std::memcpy(e.gid, device_->gid().raw, 16);
   e.rkey = mr_->rkey;
   e.slab_base = reinterpret_cast<uint64_t>(slab_);

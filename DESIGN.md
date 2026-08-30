@@ -101,6 +101,20 @@ publishing a system-scope release acknowledgement. Both active lanes passed
 10,000/10,000 changing payloads. This driver/firmware-specific hardware
 contract is rerun during deployment and after upgrades.
 
+The rerun is `nic_regress` (M5): one command drives the project test over
+every directed node pair on both lanes — the mesh mode derives a
+deterministic schedule from `--nodes`, every node processes its obligations
+in order (senders connect with bounded retries, receivers hold
+identity-checked connections that arrive early), and nodes[0] merges both
+endpoints' views into one matrix and one exit code broadcast to all ranks.
+Probes use the deployment GID selection (the first routable RoCEv2 GID, as
+`VerbsDevice` picks) — not the M0 bench default, which measured the
+link-local fe80:: GIDs whose directed-pair drops motivated the routable
+selection in the first place. The regression must exercise the path the bus
+uses. `nic_regress pair`/`serve` probe a single directed pair (targeted
+debugging); `nic_regress selftest` runs the full mesh machinery as a
+two-thread world on one device in CI.
+
 Two concurrent 98.04 Gb/s incoming RDMA streams reduced an unrelated pinned
 GPU read from 251.5 to 218.4 GB/s (13.2%). Capacity estimates that assume
 sustained dual-lane ingress provisionally derate simultaneous GPU memory

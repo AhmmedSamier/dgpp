@@ -10,8 +10,10 @@
 //     S was fully visible to the device when it ran — the ordering invariant
 //     the bus receive path relies on.
 //   * NIC doorbells are a hardware-coherency contract rather than a C++
-//     release operation; benchmarks/micro `verify` validates ordered RC DMA
-//     payload + doorbell visibility on the deployed driver/firmware stack.
+//     release operation; the M0 bench (micro_ibv_smoke verify) and the
+//     transport regression command (nic_regress, via src/net/nic_visibility)
+//     validate ordered RC DMA payload + doorbell visibility on the deployed
+//     driver/firmware stack.
 //   * The persistent kernels are inactivity-watchdog bounded. The deadline
 //     resets after traffic, and a reserved sequence shuts them down cleanly.
 //

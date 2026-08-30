@@ -258,6 +258,22 @@ consumer. The initiator sends a changing 64-byte payload followed by a
 64-byte sequence doorbell as two ordered RC SENDs. The GPU polls the doorbell
 with a system-scope acquire, hashes the payload, and publishes an acknowledgement.
 
+The regression command is `nic_regress` (M5): it runs this exact protocol over
+every directed node pair on both lanes from one command, uses the deployment
+GID selection (first routable RoCEv2 GID), and aggregates both endpoints'
+views into one matrix and exit code. On every node:
+
+```bash
+"$BUILD/nic_regress" mesh --nodes "$NODE0,$NODE1,$NODE2,$NODE3" --port 29961
+```
+
+Single-pair debugging (`serve` on the receiver, `pair` on the sender) and the
+CI selftest (`nic_regress selftest`, the full mesh machinery on one device)
+round out the modes.
+
+The underlying single-pair recipe, kept as the M0 measurement tool (note it
+defaults to the link-local GID unless `--gid-index` selects the routable one):
+
 Peer:
 
 ```bash
@@ -272,10 +288,10 @@ Initiator:
   --dev "$DEV_F0" --gid-index "$GID_INDEX"
 ```
 
-Run it independently on every lane and node pair after any CUDA, kernel,
-mlx5, NIC firmware, or topology change. A pass is empirical validation for
-that exact stack; a NIC is not a C++ atomic participant, so this hardware test
-cannot be replaced by the host-only CUDA test.
+Run the regression after any CUDA, kernel, mlx5, NIC firmware, or topology
+change. A pass is empirical validation for that exact stack; a NIC is not a
+C++ atomic participant, so this hardware test cannot be replaced by the
+host-only CUDA test.
 
 ## Authoritative perftest commands
 
