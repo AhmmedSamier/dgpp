@@ -143,6 +143,19 @@ per-rank-extraction question for the fabric: every rank reads its shard
 directly from its node's cache (the d4 sharded loader touches only its
 own bytes), so no staging copy exists at all.
 
+Production residency contract (deployment decision, M5 exit gates): in
+production, serving loads the rank's weights ONCE at startup and keeps
+them fully resident for the process's lifetime — storage is never
+touched during inference. Only TP=4 can honor this contract on a 128 GB
+GB10: ~79 GiB of weights per rank leaves ~49 GB of headroom; TP=2
+(~155 GiB/rank) and TP=1 (~306 GiB) cannot fit, which is the memory
+rationale for the four-rank deployment target. The current forward is
+the DIAGNOSTIC streaming instrument (§7.5: one layer resident at a time,
+~98 GB reclaimable page-cache pass-through per pass) and its ~1 GB/s
+read pace is a software artifact of 4 KB mmap faults across 62 shards,
+not a bus limit — the resident serving mode is the M6 loader
+deliverable that makes the contract explicit.
+
 Main text configuration:
 
 - 45 layers: 34 KDA linear-attention and 11 DSA/MLA layers;

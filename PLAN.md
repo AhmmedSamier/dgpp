@@ -321,6 +321,11 @@ Deliverables:
 3. Greedy and finite-top-k distributed fast paths plus full-logit gather for
    exact unrestricted top-p/min-p/logprobs behavior.
 4. HTTP/SSE endpoints for chat, completions, models, health, and metrics.
+5. Resident serving mode (the production residency contract, DESIGN §3):
+   the rank's weights load once at startup and stay resident — storage is
+   never touched during inference. TP=4 is the only world that fits 128 GB
+   (~79 GiB weights/rank, ~49 GB headroom); the M4/M5 streaming loader
+   remains the diagnostic instrument.
 
 Exit criteria:
 
