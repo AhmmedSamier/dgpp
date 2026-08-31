@@ -108,6 +108,34 @@ class GlmDiagnosticModel {
   // host copies of the final hidden state, logits, and routing decisions.
   Outputs forward(const std::vector<int64_t>& token_ids);
 
+  // ---- stateful decode session (M6 Stage 2, DESIGN §7/§9) --------------
+  // One request's incremental decode. session_prefill OPENS a fresh
+  // request (zeroed KDA recurrent/conv state, cold DSA caches — the same
+  // starting state run_stack builds) and processes the prompt in
+  // pool-aligned chunks (2048), keeping state across chunks.
+  // session_step then processes exactly ONE token at the next position,
+  // updating the persistent state in place, and returns that token's
+  // outputs. No cross-token scratch is re-derived: the layer pipeline is
+  // elementwise in time (all temporal recurrence lives in the KDA/DSA
+  // state), so a step equals the corresponding row of a full re-forward
+  // up to (a) GEMM-batch ulps across different M, and (b) the
+  // prefill-vs-decode kernel paths — the decode-session parity gate
+  // CERTIFIES near ties, never assumes them away. A single-chunk prefill
+  // (prompt <= 2048) runs the exact run_stack op sequence and must match
+  // the re-forward bitwise — the gate pins that tier too.
+  //
+  // Single request (id 0) in v1: the DSA pool is sized for one request and
+  // sessions are strictly prefill-then-steps. The scheduler (Stage 2b)
+  // generalizes to concurrent requests over the same machinery.
+  //
+  // HAZARD: forward()/forward_isolated() and the session share the
+  // KDA/DSA state pools. A plain forward on the SAME model instance mid-
+  // session throws (it would clobber the session's state) — a parity
+  // harness runs engine and reference on SEPARATE instances.
+  Outputs session_prefill(const std::vector<int64_t>& prompt_ids);
+  Outputs session_step(int64_t token_id);  // one token, state updated
+  int64_t session_position() const { return session_pos_; }
+
   // Isolated parity runner (the curated suite's real-checkpoint mode):
   // every layer starts from the REFERENCE trajectory — layer_inputs[L]
   // replaces the stream state entering layer L (index 0 replaces the
@@ -168,6 +196,20 @@ class GlmDiagnosticModel {
                           const GlmQuantMatrix* dense, int tokens,
                           cudaStream_t stream);
   static GlmMoeWeights moe_weights(const GlmMoeResident& r);
+  // The session's row runner: processes `tokens` contiguous rows of the
+  // OPEN request starting at absolute position `token_start`, updating
+  // the persistent KDA/DSA state in place (NO reset — prefill resets once
+  // at open). `decode_row` selects the DSA path: false = enqueue_prefill
+  // (pool-aligned chunks, tables grown internally), true = enqueue_decode
+  // (arbitrary positions via the caller-grown table + device metadata).
+  // Returns the LAST row's logits/final_hidden; routes/route_biased cover
+  // every processed row (audit inputs are per-token).
+  Outputs session_run_rows(const std::vector<int64_t>& ids,
+                           int64_t token_start, bool decode_row);
+  // Extends the route/route_biased outputs with one runner pass's entries,
+  // merging same-layer chunks along the token axis (prefill chunks emit
+  // per-chunk entries; the reference emits one per layer).
+  void session_merge_routes(Outputs* out, Outputs&& chunk) const;
   Outputs run_stack(const std::vector<int64_t>& token_ids,
                     const uint16_t* const* layer_inputs,
                     std::vector<std::vector<uint16_t>>* capture,
@@ -217,6 +259,19 @@ class GlmDiagnosticModel {
 
   // Per-forward activations (managed; sized to max_tokens).
   int64_t* d_tokens_ = nullptr;
+  // Decode-session state: the request's position (tokens processed) and
+  // the DSA decode-path metadata (enqueue_decode's caller-owned device
+  // buffers — allocation happens at construction, never mid-session; the
+  // synchronizing-call discipline applies between collectives). Sized
+  // for the v1 single-request batch; the scheduler generalizes.
+  int64_t session_pos_ = 0;      // 0 = no open session
+  int32_t* d_req_ids_ = nullptr;      // device [kDecodeRows]
+  int64_t* d_step_pos_ = nullptr;     // device [kDecodeRows]
+  int32_t* d_req_spans_ = nullptr;    // device [kDecodeRows, 2]
+  int32_t h_req_ids_[8] = {0};
+  int64_t h_step_pos_[8] = {0};
+  int32_t h_req_spans_[16] = {0};
+  static constexpr int kDecodeRows = 8;  // DsaLayer's select-kernel bound
   uint16_t* streams_[2] = {nullptr, nullptr};  // [T, 4, hidden]
   uint16_t* post_ = nullptr;                   // [T, 4]
   uint16_t* comb_ = nullptr;                   // [T, 4, 4]

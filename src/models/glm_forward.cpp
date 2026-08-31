@@ -108,6 +108,15 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     dsa_scratch_ = static_cast<uint8_t*>(
         alloc_managed(DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
                                               dsa_slots)));
+    // Decode-session metadata (enqueue_decode's caller-owned device
+    // buffers): allocated HERE, at construction — never mid-session (the
+    // synchronizing-call discipline applies between collectives).
+    d_req_ids_ = static_cast<int32_t*>(alloc_managed(sizeof(int32_t) *
+                                                     kDecodeRows));
+    d_step_pos_ = static_cast<int64_t*>(alloc_managed(sizeof(int64_t) *
+                                                      kDecodeRows));
+    d_req_spans_ = static_cast<int32_t*>(alloc_managed(sizeof(int32_t) * 2 *
+                                                       kDecodeRows));
   } else {
     arena_.init(ac);
   }
@@ -151,6 +160,9 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
 GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(gemm_ws_);
   cudaFree(dsa_scratch_);
+  cudaFree(d_req_ids_);
+  cudaFree(d_step_pos_);
+  cudaFree(d_req_spans_);
   cudaFree(kda_rec_);
   cudaFree(kda_conv_);
   cudaFree(d_tokens_);
@@ -279,6 +291,16 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
     const std::vector<int64_t>& token_ids, const uint16_t* const* layer_inputs,
     std::vector<std::vector<uint16_t>>* capture,
     std::vector<std::vector<uint16_t>>* boundary_capture) {
+  // The re-forward and an open decode session SHARE the KDA/DSA state
+  // pools — running one mid-session silently clobbers the other's state.
+  // That failure mode is exactly the kind a gate would absorb as noise;
+  // it throws loudly instead (a parity harness uses separate model
+  // instances for engine and reference).
+  if (session_pos_ > 0)
+    throw std::runtime_error(
+        "forward: a decode session is open on this model instance — a "
+        "re-forward would clobber its state (use a second model for the "
+        "reference)");
   const int T = static_cast<int>(token_ids.size());
   if (T <= 0) throw std::invalid_argument("forward: empty token batch");
   if (T > max_tokens_)

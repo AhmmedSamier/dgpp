@@ -159,6 +159,26 @@ GlmTextConfig GlmTextConfig::parse(const minijson::Value& tc) {
   c.first_k_dense_replace = require_int(tc, "first_k_dense_replace");
   if (c.first_k_dense_replace < 0 || c.first_k_dense_replace > c.num_hidden_layers)
     reject("first_k_dense_replace", "out of range");
+
+  // eos_token_id: OPTIONAL (the fixture carries none; HF emits int or
+  // array). Ids outside [0, vocab_size) would crash the embed lookup, so
+  // they are rejected here, at parse time.
+  if (const minijson::Value* eos = tc.find("eos_token_id")) {
+    if (eos->is_array()) {
+      for (const auto& item : eos->items()) {
+        if (!item.is_number()) reject("eos_token_id", "non-numeric element");
+        c.eos_token_ids.push_back(item.as_int());
+      }
+    } else if (eos->is_number()) {
+      c.eos_token_ids.push_back(eos->as_int());
+    } else {
+      reject("eos_token_id", "not a number or array");
+    }
+    for (int64_t id : c.eos_token_ids)
+      if (id < 0 || id >= c.vocab_size)
+        reject("eos_token_id",
+               "id outside [0, vocab_size) — the embed lookup cannot serve it");
+  }
   for (int i = 0; i < c.num_hidden_layers; ++i) {
     GlmMlpKind want = i < c.first_k_dense_replace ? GlmMlpKind::Dense
                                                   : GlmMlpKind::Moe;

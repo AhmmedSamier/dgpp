@@ -949,6 +949,268 @@ DGPP_TEST(glm_tp_greedy_gen_loopback) {
   DGPP_LOG_INFO("greedy w4 dist      : {}", w4_txt);
 }
 
+// M6 Stage 2: the stateful decode session vs the stateless re-forward.
+// Tiers (the parity discipline — CERTIFY near ties, never assume them):
+//   * single-chunk prefill (prompt <= 2048): BITWISE on the last row — the
+//     session runs run_stack's exact op sequence on fresh state;
+//   * steps and multi-chunk prefill: free-run l2 REPORTED, top-1
+//     divergence CERTIFIED (the re-forward's batched GEMMs vs the step's
+//     M=1 / the chunk's M=2048 ulps; the recurrence itself is exact —
+//     DESIGN §7.1's one-shared-recurrence claim is what keeps the noise
+//     at ulps instead of compounding drift);
+//   * world 4: the same tiering through the bus (the step's T=1 staged
+//     folds), plus rank-consistent transcripts (the fold's bitwise
+//     guarantee — every rank's full-head row must be identical).
+// Route flips per step are REPORTED only: the router's input row is the
+// certified logits surface; routing certification is the re-forward
+// gates' tier (glm_route_audit's cascade over full forwards).
+DGPP_TEST(glm_tp_decode_session_parity) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kSteps = 6;
+  const int max_tokens =
+      static_cast<int>(prompt.size()) + kSteps + 1;
+  const size_t V = static_cast<size_t>(cfg.vocab_size);
+  const size_t H = static_cast<size_t>(cfg.hidden_size);
+
+  // The engine transcript drives BOTH sides (identical tokens in), so the
+  // reference rows and the session rows are comparable position by
+  // position. Engine and reference are SEPARATE model instances: a plain
+  // forward mid-session would clobber the session's state pools (and now
+  // throws — the hazard is pinned in the negative test below).
+  const auto bits_argmax = [&](const std::vector<uint16_t>& bits,
+                               int count, int begin) {
+    std::vector<float> f(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i)
+      f[static_cast<size_t>(i)] = bf16_bits_to_float(bits[static_cast<size_t>(i)]);
+    return local_max(f.data(), count, begin);
+  };
+  const auto engine_transcript = [&](GlmDiagnosticModel& eng,
+                                     std::vector<int64_t>* gen_out,
+                                     std::vector<std::vector<uint16_t>>* rows) {
+    const GlmDiagnosticModel::Outputs pre = eng.session_prefill(prompt);
+    std::vector<int64_t> gen;
+    int32_t token = bits_argmax(pre.logits_bits, pre.lm_vocab_count,
+                                pre.lm_vocab_begin).id;
+    for (int s = 0; s < kSteps; ++s) {
+      const auto t0 = std::chrono::steady_clock::now();
+      const GlmDiagnosticModel::Outputs out = eng.session_step(token);
+      const double ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+      gen.push_back(token);
+      if (rows) rows->push_back(out.logits_bits);
+      DGPP_LOG_DEBUG("session step {} ({}ms): token {}", s, ms, token);
+      token = bits_argmax(out.logits_bits, out.lm_vocab_count,
+                        out.lm_vocab_begin)
+                  .id;
+    }
+    *gen_out = gen;
+  };
+
+  // ---- phase A: world 1 ------------------------------------------------
+  std::vector<int64_t> w1_gen;
+  std::vector<std::vector<uint16_t>> w1_rows;
+  {
+    GlmDiagnosticModel eng(cfg, dir, max_tokens, 128);
+    GlmDiagnosticModel ref(cfg, dir, max_tokens, 128);
+
+    // BITWISE tier: single-chunk prefill == the re-forward's last row.
+    const GlmDiagnosticModel::Outputs pre = eng.session_prefill(prompt);
+    const GlmDiagnosticModel::Outputs ref_pre = ref.forward(prompt);
+    const size_t rowV = (prompt.size() - 1) * V;
+    const size_t rowH = (prompt.size() - 1) * H;
+    require(pre.logits_bits.size() == V, "prefill row shape");
+    require(pre.final_hidden_bits.size() == H, "prefill hidden shape");
+    require(std::equal(pre.logits_bits.begin(), pre.logits_bits.end(),
+                       ref_pre.logits_bits.begin() + rowV),
+            "single-chunk prefill logits must be BITWISE the re-forward's "
+            "last row (same op sequence on fresh state)");
+    require(std::equal(pre.final_hidden_bits.begin(),
+                       pre.final_hidden_bits.end(),
+                       ref_pre.final_hidden_bits.begin() + rowH),
+            "single-chunk prefill final_hidden must be BITWISE the "
+            "re-forward's last row");
+
+    // The engine transcript, then the reference over the SAME tokens.
+    engine_transcript(eng, &w1_gen, &w1_rows);
+    std::vector<int64_t> seq = prompt;
+    seq.insert(seq.end(), w1_gen.begin(), w1_gen.end());
+    const GlmDiagnosticModel::Outputs ref_all = ref.forward(seq);
+    require(ref_all.logits_bits.size() == seq.size() * V,
+            "reference forward row count");
+
+    // Steps: row s is position P+s (the step consumed gen[s] there).
+    for (int s = 0; s < kSteps; ++s) {
+      const size_t pos = prompt.size() + static_cast<size_t>(s);
+      std::vector<uint16_t> rr(ref_all.logits_bits.begin() + pos * V,
+                               ref_all.logits_bits.begin() + (pos + 1) * V);
+      const double rel = dgpp::glm_route::l2_rel(w1_rows[s], rr);
+      const Top1AuditSummary t1 =
+          audit_top1_near_ties(w1_rows[s].data(), rr.data(), cfg.vocab_size, 1);
+      certify_top1_near_ties(t1, 1, "decode step (w1)");
+      DGPP_LOG_INFO("step {} vs re-forward: rel_l2 {:.6f}, top1 misses {}",
+                    s, rel, t1.misses);
+    }
+
+    // ---- multi-chunk prefill: 2050 = 2048 + 2 (a mid-pool chunk end), --
+    // then steps at pool-interior positions (the tail path).
+    const std::vector<int64_t> big = make_tokens(2050, cfg.vocab_size);
+    constexpr int kBigSteps = 3;
+    const int big_max = 2050 + kBigSteps + 1;
+    GlmDiagnosticModel eng2(cfg, dir, big_max, big_max);
+    GlmDiagnosticModel ref2(cfg, dir, big_max, big_max);
+    const GlmDiagnosticModel::Outputs pre2 = eng2.session_prefill(big);
+    std::vector<int64_t> gen2;
+    int32_t token2 =
+        bits_argmax(pre2.logits_bits, pre2.lm_vocab_count,
+                  pre2.lm_vocab_begin)
+            .id;
+    std::vector<std::vector<uint16_t>> rows2;
+    for (int s = 0; s < kBigSteps; ++s) {
+      const GlmDiagnosticModel::Outputs out = eng2.session_step(token2);
+      rows2.push_back(out.logits_bits);
+      gen2.push_back(token2);
+      token2 = bits_argmax(out.logits_bits, out.lm_vocab_count,
+                         out.lm_vocab_begin)
+                   .id;
+    }
+    std::vector<int64_t> seq2 = big;
+    seq2.insert(seq2.end(), gen2.begin(), gen2.end());
+    const GlmDiagnosticModel::Outputs ref2_all = ref2.forward(seq2);
+
+    // Prefill chunking tier: last row, chunked (2048+2) vs single-shot.
+    {
+      const size_t pos = 2049;
+      std::vector<uint16_t> rr(ref2_all.logits_bits.begin() + pos * V,
+                               ref2_all.logits_bits.begin() + (pos + 1) * V);
+      const double rel = dgpp::glm_route::l2_rel(pre2.logits_bits, rr);
+      const Top1AuditSummary t1 = audit_top1_near_ties(
+          pre2.logits_bits.data(), rr.data(), cfg.vocab_size, 1);
+      certify_top1_near_ties(t1, 1, "multi-chunk prefill (w1)");
+      DGPP_LOG_INFO("multi-chunk prefill (2048+2) vs re-forward: rel_l2 "
+                    "{:.6f}, top1 misses {} — the KDA recurrence crossed "
+                    "the chunk boundary; noise must be GEMM-batch ulps, "
+                    "not state drift",
+                    rel, t1.misses);
+    }
+    for (int s = 0; s < kBigSteps; ++s) {
+      const size_t pos = 2050 + static_cast<size_t>(s);
+      std::vector<uint16_t> rr(ref2_all.logits_bits.begin() + pos * V,
+                               ref2_all.logits_bits.begin() + (pos + 1) * V);
+      const double rel = dgpp::glm_route::l2_rel(rows2[s], rr);
+      const Top1AuditSummary t1 =
+          audit_top1_near_ties(rows2[s].data(), rr.data(), cfg.vocab_size, 1);
+      certify_top1_near_ties(t1, 1, "decode step after chunk boundary (w1)");
+      DGPP_LOG_INFO("post-chunk step {} vs re-forward: rel_l2 {:.6f}, "
+                    "top1 misses {}",
+                    s, rel, t1.misses);
+    }
+  }
+
+  // ---- phase B: world 4 through the bus --------------------------------
+  const int kWorld = 4;
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29918);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> rank_seqs(
+      kWorld, std::vector<int64_t>(kSteps, -1));
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      try {
+        GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)]);
+        GlmDiagnosticModel eng(cfg, dir, max_tokens, 128, &reducer, r, kWorld);
+        GlmDiagnosticModel ref(cfg, dir, max_tokens, 128, &reducer, r, kWorld);
+
+        // BITWISE prefill tier through the bus (identical collective
+        // sequences on both sides).
+        const GlmDiagnosticModel::Outputs pre = eng.session_prefill(prompt);
+        const GlmDiagnosticModel::Outputs ref_pre = ref.forward(prompt);
+        const size_t rowV = (prompt.size() - 1) * V;
+        require(std::equal(pre.logits_bits.begin(), pre.logits_bits.end(),
+                           ref_pre.logits_bits.begin() + rowV),
+                "w4 single-chunk prefill must be BITWISE the re-forward's "
+                "last row");
+
+        std::vector<int64_t> gen;
+        std::vector<std::vector<uint16_t>> rows;
+        engine_transcript(eng, &gen, &rows);
+        for (int s = 0; s < kSteps; ++s)
+          rank_seqs[static_cast<size_t>(r)][static_cast<size_t>(s)] =
+              gen[static_cast<size_t>(s)];
+
+        std::vector<int64_t> seq = prompt;
+        seq.insert(seq.end(), gen.begin(), gen.end());
+        const GlmDiagnosticModel::Outputs ref_all = ref.forward(seq);
+        for (int s = 0; s < kSteps; ++s) {
+          const size_t pos = prompt.size() + static_cast<size_t>(s);
+          std::vector<uint16_t> rr(ref_all.logits_bits.begin() + pos * V,
+                                   ref_all.logits_bits.begin() + (pos + 1) * V);
+          const double rel = dgpp::glm_route::l2_rel(rows[s], rr);
+          const Top1AuditSummary t1 = audit_top1_near_ties(
+              rows[s].data(), rr.data(), cfg.vocab_size, 1);
+          certify_top1_near_ties(t1, 1, "decode step (w4)");
+          DGPP_LOG_INFO("w4 step {} vs re-forward: rel_l2 {:.6f}, top1 "
+                        "misses {}",
+                        s, rel, t1.misses);
+        }
+        arrive_once();
+      } catch (const std::exception& e) {
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r)
+    require(rank_seqs[static_cast<size_t>(r)] == rank_seqs[0],
+            "w4 session transcript differs across ranks at rank " +
+                std::to_string(r));
+
+  std::string w1_txt, w4_txt;
+  for (int64_t t : w1_gen) w1_txt += std::to_string(t) + " ";
+  for (int64_t t : rank_seqs[0]) w4_txt += std::to_string(t) + " ";
+  DGPP_LOG_INFO("session w1 transcript: {}", w1_txt);
+  DGPP_LOG_INFO("session w4 transcript: {}", w4_txt);
+}
+
+// The session/forward state-sharing hazard, pinned: forward() on a model
+// instance with an open decode session must THROW (it would silently
+// clobber the session's KDA/DSA state pools — the exact corruption this
+// gate's phase-A design would otherwise have absorbed as noise).
+DGPP_TEST(glm_tp_decode_session_hazard) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(8, cfg.vocab_size);
+  GlmDiagnosticModel model(cfg, dir, 16, 16);
+  model.session_prefill(prompt);
+  bool threw = false;
+  std::string msg;
+  try {
+    (void)model.forward(prompt);
+  } catch (const std::exception& e) {
+    threw = true;
+    msg = e.what();
+  }
+  require(threw && msg.find("decode session is open") != std::string::npos,
+          "forward mid-session must throw the session-open guard (got: " +
+              msg + ")");
+}
+
 // The quantized scale-grid slice contract, pinned: a rank's slice of a
 // block-scaled matrix must start 128-aligned in the sliced dimension.
 // The pre-fix fixture geometry (dense inter 200 / MoE inter 64) is the

@@ -138,6 +138,7 @@ std::string ids_line(const std::vector<int64_t>& ids) {
 int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         int rank, uint16_t port, const std::string& peer,
         const std::vector<int64_t>& prompt, int steps, bool resident,
+        bool incremental, bool no_eos,
         const std::string& out_prefix, int rendezvous_timeout_ms) {
   const int max_tokens = static_cast<int>(prompt.size()) + steps + 1;
   const int64_t cache = std::max<int64_t>(128, max_tokens);
@@ -151,28 +152,71 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                    t_construct)
                                    .count();
     DGPP_LOG_INFO("w1 model constructed in {:.1f}s (streaming)", construct_s);
-    std::vector<int64_t> toks = prompt;
     std::vector<int64_t> generated;
+    const auto is_eos = [&](int64_t id) {
+      return !no_eos && std::find(cfg.eos_token_ids.begin(),
+                                 cfg.eos_token_ids.end(), id) !=
+                           cfg.eos_token_ids.end();
+    };
     std::vector<float> frow(static_cast<size_t>(cfg.vocab_size));
-    for (int s = 0; s < steps; ++s) {
+    if (incremental) {
+      // The serving path (Stage 2): prefill once, then one stateful
+      // step per token — constant work per step, no T^2 re-forward.
       const auto t0 = std::chrono::steady_clock::now();
-      const GlmDiagnosticModel::Outputs out = model.forward(toks);
-      const int T = static_cast<int>(toks.size());
-      require(out.lm_vocab_count == cfg.vocab_size,
-              "w1 head must be full-vocab");
-      const uint16_t* row = out.logits_bits.data() +
-                            static_cast<size_t>(T - 1) * cfg.vocab_size;
-      for (int i = 0; i < cfg.vocab_size; ++i)
-        frow[static_cast<size_t>(i)] = dgpp::bf16_bits_to_float(row[i]);
-      const dgpp::glm_sample::Candidate best =
+      const GlmDiagnosticModel::Outputs out = model.session_prefill(prompt);
+      const double prefill_ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - t0)
+                                    .count();
+      for (int i = 0; i < out.lm_vocab_count; ++i)
+        frow[static_cast<size_t>(i)] =
+            dgpp::bf16_bits_to_float(out.logits_bits[static_cast<size_t>(i)]);
+      dgpp::glm_sample::Candidate best =
           dgpp::glm_sample::local_max(frow.data(), cfg.vocab_size, 0);
-      toks.push_back(best.id);
-      generated.push_back(best.id);
-      const double ms = std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count();
-      DGPP_LOG_INFO("[gen] step {}: token {} (logit {:.4f}) [{:.0f}ms]",
-                    s, best.id, best.logit, ms);
+      DGPP_LOG_INFO("[gen] prefill: {} tokens in {:.0f}ms", prompt.size(),
+                    prefill_ms);
+      for (int s = 0; s < steps; ++s) {
+        generated.push_back(best.id);
+        if (is_eos(best.id)) {
+          DGPP_LOG_INFO("[gen] eos stop at step {} (token {})", s, best.id);
+          break;
+        }
+        if (s + 1 == steps) break;
+        const auto t0s = std::chrono::steady_clock::now();
+        const GlmDiagnosticModel::Outputs step =
+            model.session_step(generated.back());
+        const double ms = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - t0s)
+                             .count();
+        for (int i = 0; i < step.lm_vocab_count; ++i)
+          frow[static_cast<size_t>(i)] =
+              dgpp::bf16_bits_to_float(step.logits_bits[static_cast<size_t>(i)]);
+        best = dgpp::glm_sample::local_max(frow.data(), cfg.vocab_size, 0);
+        DGPP_LOG_INFO("[gen] step {}: token {} (logit {:.4f}) [{:.0f}ms]",
+                      s + 1, best.id, best.logit, ms);
+      }
+    } else {
+      // The re-forward reference (the T^2 diagnostic loop).
+      std::vector<int64_t> toks = prompt;
+      for (int s = 0; s < steps; ++s) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const GlmDiagnosticModel::Outputs out = model.forward(toks);
+        const int T = static_cast<int>(toks.size());
+        require(out.lm_vocab_count == cfg.vocab_size,
+                "w1 head must be full-vocab");
+        const uint16_t* row = out.logits_bits.data() +
+                              static_cast<size_t>(T - 1) * cfg.vocab_size;
+        for (int i = 0; i < cfg.vocab_size; ++i)
+          frow[static_cast<size_t>(i)] = dgpp::bf16_bits_to_float(row[i]);
+        const dgpp::glm_sample::Candidate best =
+            dgpp::glm_sample::local_max(frow.data(), cfg.vocab_size, 0);
+        toks.push_back(best.id);
+        generated.push_back(best.id);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        DGPP_LOG_INFO("[gen] step {}: token {} (logit {:.4f}) [{:.0f}ms]",
+                      s, best.id, best.logit, ms);
+      }
     }
     write_tokens_file(out_prefix + ".tokens.txt", rank, world, prompt,
                       generated);
@@ -217,33 +261,82 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     std::vector<int64_t> generated;
     std::vector<float> fslice;  // hoisted: no per-step device-adjacent work
     double forward_ms_total = 0.0;
-    for (int s = 0; s < steps; ++s) {
-      const auto t0 = std::chrono::steady_clock::now();
-      const GlmDiagnosticModel::Outputs out = model.forward(toks);
-      const int T = static_cast<int>(toks.size());
-      const uint16_t* row =
-          out.logits_bits.data() +
-          static_cast<size_t>(T - 1) * out.lm_vocab_count;
+    const auto is_eos = [&](int64_t id) {
+      return !no_eos && std::find(cfg.eos_token_ids.begin(),
+                                  cfg.eos_token_ids.end(), id) !=
+                            cfg.eos_token_ids.end();
+    };
+    // The step body: run one row (forward or stateful step), pick the
+    // winner through the bus, record it. Returns the picked token.
+    const auto run_step = [&](const GlmDiagnosticModel::Outputs& out,
+                              const char* what, int s) -> int32_t {
+      const uint16_t* row = out.logits_bits.data();
       fslice.resize(static_cast<size_t>(out.lm_vocab_count));
       for (int i = 0; i < out.lm_vocab_count; ++i)
-        fslice[static_cast<size_t>(i)] = dgpp::bf16_bits_to_float(row[i]);
+        fslice[static_cast<size_t>(i)] =
+            dgpp::bf16_bits_to_float(row[static_cast<size_t>(i)]);
       const dgpp::glm_sample::Candidate local = dgpp::glm_sample::local_max(
           fslice.data(), out.lm_vocab_count, out.lm_vocab_begin);
       const int32_t token =
           dgpp::bus_greedy_pick(*bus, rank, world, local, pick_scratch, 60000);
-      const double ms = std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count();
-      forward_ms_total += ms;
       require(token >= 0 && token < cfg.vocab_size,
               "generated id out of range: " + std::to_string(token));
-      toks.push_back(token);
-      generated.push_back(token);
       DGPP_LOG_INFO(
-          "[gen] rank {} step {}: token {} (local slice [{},{}) best "
-          "{} logit {:.4f}) [{:.0f}ms]",
-          rank, s, token, out.lm_vocab_begin,
-          out.lm_vocab_begin + out.lm_vocab_count, local.id, local.logit, ms);
+          "[gen] rank {} {} {}: token {} (local slice [{},{}) best "
+          "{} logit {:.4f})",
+          rank, what, s, token, out.lm_vocab_begin,
+          out.lm_vocab_begin + out.lm_vocab_count, local.id, local.logit);
+      return token;
+    };
+    if (incremental) {
+      // The serving path (Stage 2): prefill once, one stateful step per
+      // token, distributed pick over the sharded head's slices.
+      const auto t0 = std::chrono::steady_clock::now();
+      const GlmDiagnosticModel::Outputs pre = model.session_prefill(prompt);
+      const double prefill_ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - t0)
+                                    .count();
+      DGPP_LOG_INFO("rank {} prefill: {} tokens in {:.0f}ms", rank,
+                    prompt.size(), prefill_ms);
+      const auto tp0 = std::chrono::steady_clock::now();
+      int32_t token = run_step(pre, "prefill+pick", 0);
+      forward_ms_total =
+          prefill_ms + std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - tp0)
+                           .count();
+      for (int s = 0; s < steps; ++s) {
+        generated.push_back(token);
+        toks.push_back(token);
+        if (is_eos(token)) {
+          DGPP_LOG_INFO("rank {} eos stop at step {} (token {})", rank, s,
+                        token);
+          break;
+        }
+        if (s + 1 == steps) break;
+        const auto t0s = std::chrono::steady_clock::now();
+        const GlmDiagnosticModel::Outputs step =
+            model.session_step(generated.back());
+        token = run_step(step, "step", s + 1);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0s)
+                              .count();
+        forward_ms_total += ms;
+        DGPP_LOG_INFO("rank {} step {:.0f}ms (stateful step + pick)", rank,
+                      ms);
+      }
+    } else {
+      // The re-forward reference (the T^2 loop).
+      for (int s = 0; s < steps; ++s) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const GlmDiagnosticModel::Outputs out = model.forward(toks);
+        const int32_t token = run_step(out, "step", s);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        forward_ms_total += ms;
+        toks.push_back(token);
+        generated.push_back(token);
+      }
     }
 
     write_tokens_file(out_prefix + ".tokens.txt", rank, world, prompt,
@@ -266,11 +359,14 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     const auto [lat_n, lat_tails] = summarize(stats.latency.latency_us);
     const auto [bulk_n, bulk_tails] = summarize(stats.bulk.latency_us);
     DGPP_LOG_INFO(
-        "rank {}: {} steps in {:.1f}ms total ({:.0f}ms/step, T^2 diagnostic "
-        "— Stage 2's incremental engine is the serving path), lat {} "
+        "rank {}: {} steps in {:.1f}ms total ({:.0f}ms/step avg incl. "
+        "prefill; {}), lat {} "
         "(p50={:.1f}us p99={:.1f}us), bulk {} (p50={:.1f}us p99={:.1f}us)",
-        rank, steps, forward_ms_total, forward_ms_total / steps, lat_n,
-        lat_tails.first, lat_tails.second, bulk_n, bulk_tails.first,
+        rank, steps, forward_ms_total, forward_ms_total / steps,
+        incremental ? "incremental engine — constant per-step, the serving "
+                      "path (steady-state from the per-step logs)"
+                    : "re-forward T^2 diagnostic",
+        lat_n, lat_tails.first, lat_tails.second, bulk_n, bulk_tails.first,
         bulk_tails.second);
     bus->stop();
   } catch (...) {
@@ -290,7 +386,7 @@ int main(int argc, char** argv) {
               model_id;
   int world = 1, rank = 0, steps = 8, rendezvous_timeout_ms = 120000;
   uint16_t port = 29970;
-  bool resident = true;
+  bool resident = true, incremental = true, no_eos = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -306,13 +402,24 @@ int main(int argc, char** argv) {
     else if (a == "--prompt") prompt_text = next();
     else if (a == "--steps") steps = std::stoi(next());
     else if (a == "--streaming") resident = false;
+    else if (a == "--engine") {
+      const std::string v = next();
+      if (v == "incremental") incremental = true;
+      else if (v == "reforward") incremental = false;
+      else {
+        DGPP_LOG_ERROR("--engine must be incremental|reforward");
+        return 1;
+      }
+    }
+    else if (a == "--no-eos") no_eos = true;
     else if (a == "--rendezvous-timeout-ms") rendezvous_timeout_ms = std::stoi(next());
     else if (a == "--out") out_prefix = next();
     else {
       std::fprintf(stderr,
                    "usage: glm_gen_check --model ORG/NAME | --checkpoint-dir "
                    "DIR --prompt ID,ID,... [--steps N] [--world N --rank R "
-                   "--peer HOST --port N] [--streaming] [--out PREFIX]\n");
+                   "--peer HOST --port N] [--streaming] [--engine "
+                   "incremental|reforward] [--no-eos] [--out PREFIX]\n");
       return a == "--help" ? 0 : 1;
     }
   }
@@ -364,7 +471,7 @@ int main(int argc, char** argv) {
     }
     const std::vector<int64_t> prompt =
         parse_prompt_ids(prompt_text, cfg.vocab_size);
-    return run(cfg, ckpt, world, rank, port, peer, prompt, steps, resident,
+    return run(cfg, ckpt, world, rank, port, peer, prompt, steps, resident, incremental, no_eos,
                out_prefix, rendezvous_timeout_ms);
   } catch (const std::exception& e) {
     DGPP_LOG_ERROR("rank {}: {}", rank, e.what());

@@ -41,6 +41,11 @@ struct GlmTextConfig {
   std::vector<GlmMlpKind> mlps;
   int first_k_dense_replace = 3;
 
+  // Generation terminators (config's eos_token_id — HF writes either a
+  // bare int or an array; absent means the checkpoint names none and the
+  // decode loop runs to its step budget).
+  std::vector<int64_t> eos_token_ids;
+
   // --- KDA (linear_attn_config) -------------------------------------------
   int kda_num_heads = 64;
   int kda_head_dim = 128;
