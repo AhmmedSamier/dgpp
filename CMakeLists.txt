@@ -259,12 +259,14 @@ add_executable(unit_tests
   tests/unit/glm_binding_test.cpp
   tests/unit/glm_trace_test.cpp
   tests/unit/glm_route_audit_test.cpp
+  tests/unit/glm_sampler_test.cpp
   tests/unit/net_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm dgpp_net Threads::Threads)
 dgpp_set_common(unit_tests)
+add_test(NAME unit_tests COMMAND unit_tests)
 add_executable(flag_protocol_test tests/cuda/flag_protocol_test.cu)
 target_link_libraries(flag_protocol_test PRIVATE CUDA::cudart)
 dgpp_set_common(flag_protocol_test)
