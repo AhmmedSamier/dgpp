@@ -70,6 +70,8 @@ void glm_tp_write_fixture(const std::string& dir);
 
 using dgpp::GlmBusBoundaryReducer;
 using dgpp::GlmDiagnosticModel;
+using dgpp::GlmHeadSharding;
+using dgpp::GlmResidency;
 using dgpp::GlmLayerBound;
 using dgpp::GlmLayerResident;
 using dgpp::GlmLayerStream;
@@ -662,6 +664,107 @@ DGPP_TEST(glm_tp_forward_parity_loopback) {
     check_world(4, 29900, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
                 ref.iso_out, ref.captures, ref.boundary, "chunked");
   }
+}
+
+// ---- M6 d3: the vocabulary-sharded lm head ---------------------------------
+// The serving seam: a VocabSharded model computes ONLY its slice of the
+// logits, and that slice must equal the replicated head's columns
+// BITWISE — same weight rows enter the same K-reduction, so the
+// sampling merge inherits exactness instead of inheriting drift. Pinned
+// at world 1 (the degenerate slice = the full vocab) and at world 4 over
+// the loopback bus (the deployment geometry, where the slice is 1/4 of
+// the vocab and its bounds are rank-dependent).
+DGPP_TEST(glm_tp_head_shard_parity) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> tokens = make_tokens(8, cfg.vocab_size);
+
+  // ---- world 1: sharded degenerates to the full vocab, bitwise.
+  {
+    const GlmDiagnosticModel::Outputs full =
+        GlmDiagnosticModel(cfg, dir, 8, 128).forward(tokens);
+    const GlmDiagnosticModel::Outputs shard =
+        GlmDiagnosticModel(cfg, dir, 8, 128, nullptr, 0, 1,
+                           GlmResidency::Streaming,
+                           GlmHeadSharding::VocabSharded)
+            .forward(tokens);
+    require(full.lm_vocab_begin == 0 &&
+                full.lm_vocab_count == cfg.vocab_size,
+            "full head must report [0, vocab)");
+    require(shard.lm_vocab_begin == 0 &&
+                shard.lm_vocab_count == cfg.vocab_size,
+            "world-1 sharded slice must be the full vocab");
+    require(bits_equal(full.logits_bits, shard.logits_bits),
+            "world-1 sharded head drifted from the full head");
+  }
+
+  // ---- world 4: each rank's slice == the full-head model's columns.
+  constexpr int kWorld = 4;
+  constexpr uint16_t kPort = 29914;
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, kPort);
+  require(!buses.empty(), "tp bus world failed to start");
+
+  std::vector<std::string> errors(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  workers.reserve(kWorld);
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      try {
+        GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)]);
+        // Two models per rank, constructed back to back so the barrier
+        // still guards every allocation phase; forwards run after (the
+        // same order on every rank, so collectives stay aligned).
+        GlmDiagnosticModel full(cfg, dir, 8, 128, &reducer, r, kWorld);
+        GlmDiagnosticModel shard(cfg, dir, 8, 128, &reducer, r, kWorld,
+                                 GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded);
+        arrive_once();
+        const GlmDiagnosticModel::Outputs a = full.forward(tokens);
+        const GlmDiagnosticModel::Outputs b = shard.forward(tokens);
+        // Head placement cannot touch the pre-head computation.
+        require(bits_equal(a.final_hidden_bits, b.final_hidden_bits),
+                "final hidden differs between head modes");
+        const int begin =
+            static_cast<int>(static_cast<int64_t>(cfg.vocab_size) * r /
+                             kWorld);
+        const int count = static_cast<int>(
+            static_cast<int64_t>(cfg.vocab_size) * (r + 1) / kWorld - begin);
+        require(b.lm_vocab_begin == begin && b.lm_vocab_count == count,
+                "sharded slice bounds wrong at rank " + std::to_string(r));
+        // The bitwise claim, row by row: b's row must equal a's row
+        // restricted to columns [begin, begin+count).
+        for (int t = 0; t < static_cast<int>(tokens.size()); ++t) {
+          const uint16_t* full_row = a.logits_bits.data() +
+              static_cast<size_t>(t) * cfg.vocab_size + begin;
+          const uint16_t* shard_row =
+              b.logits_bits.data() +
+              static_cast<size_t>(t) * b.lm_vocab_count;
+          if (std::memcmp(full_row, shard_row,
+                          static_cast<size_t>(count) * 2) != 0)
+            throw std::runtime_error(
+                "head shard logits row " + std::to_string(t) +
+                " differs from the replicated head's columns (rank " +
+                std::to_string(r) + ")");
+        }
+        arrive_once();  // release peers even on success paths
+      } catch (const std::exception& e) {
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
 }
 
 // The quantized scale-grid slice contract, pinned: a rank's slice of a

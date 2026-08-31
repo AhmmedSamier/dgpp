@@ -40,7 +40,8 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
                                         int64_t max_cache_tokens,
                                         GlmBoundaryReducer* boundary,
                                         int tp_rank, int tp_world,
-                                        GlmResidency residency)
+                                        GlmResidency residency,
+                                        GlmHeadSharding head)
     : cfg_(cfg),
       kda_cfg_(with_tp(cfg.kda_config(), tp_world)),
       dsa_cfg_(with_tp(cfg.dsa_config(), tp_world)),
@@ -48,7 +49,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
       moe_cfg_(cfg.moe_config()),
       kda_geo_(KdaGeometry::from_config(kda_cfg_)),
       max_tokens_(max_tokens),
-      loader_(cfg, checkpoint_dir, tp_rank, tp_world, residency) {
+      loader_(cfg, checkpoint_dir, tp_rank, tp_world, residency, head) {
   if (max_tokens_ <= 0)
     throw std::invalid_argument("GlmDiagnosticModel: max_tokens must be positive");
   if (max_cache_tokens < max_tokens_)
@@ -66,6 +67,9 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   if (tp_world > 1) boot_digest_ = loader_.hash_replicated();
 
   globals_ = loader_.load_globals();
+  lm_vocab_begin_ = globals_.lm_vocab_begin;
+  lm_vocab_count_ =
+      globals_.lm_vocab_count > 0 ? globals_.lm_vocab_count : cfg_.vocab_size;
 
   DGPP_CUDA_OK(cudaStreamCreate(&stream_));
   // The model's kernels are the resident layers' readers: load boundaries
@@ -79,11 +83,12 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     tp_ = std::make_unique<GlmTpViews>(cfg, tp_rank, tp_world, stream_);
 
   // GEMM workspace: 64 MB covers every M2/M3 shape; the lm head's N
-  // (vocab) is the only dimension larger than anything tested there.
+  // (this rank's vocab slice in sharded mode) is the only dimension
+  // larger than anything tested there.
   gemm_ws_bytes_ = kGemmWsBase;
   {
     const size_t head_ws = gemm_.query_workspace_bytes(
-        max_tokens_, cfg_.vocab_size, cfg_.hidden_size, DType::BF16);
+        max_tokens_, lm_vocab_count_, cfg_.hidden_size, DType::BF16);
     if (head_ws > gemm_ws_bytes_) gemm_ws_bytes_ = head_ws;
   }
   DGPP_CUDA_OK(cudaMalloc(&gemm_ws_, gemm_ws_bytes_));
@@ -135,7 +140,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     dense_act_ = static_cast<uint16_t*>(alloc_managed(T * I * 2));
   }
   logits_ =
-      static_cast<uint16_t*>(alloc_managed(T * cfg_.vocab_size * 2));
+      static_cast<uint16_t*>(alloc_managed(T * lm_vocab_count_ * 2));
 
   // Every device allocation happens above (see preconstruct_layers): the
   // TP runners barrier after construction so no rank's first collective
@@ -285,7 +290,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
   const float eps = cfg_.rms_norm_eps;
 
   // Shape-keyed plans (cache hits after the first forward of this size).
-  if (!gemm_.ensure_plan(T, cfg_.vocab_size, H, DType::BF16, GemmOut::BF16,
+  if (!gemm_.ensure_plan(T, lm_vocab_count_, H, DType::BF16, GemmOut::BF16,
                          H))
     throw std::runtime_error("forward: lm head GEMM plan unavailable");
 
@@ -477,15 +482,17 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
   launch_mhc_final_mean(cur, collapsed_, mhc_cfg_, T, stream_);
   glm_rmsnorm_bf16(collapsed_, globals_.final_norm, normed_, T, H, eps,
                    stream_);
-  gemm_.matmul(normed_, globals_.lm_head, logits_, T, cfg_.vocab_size, H,
+  gemm_.matmul(normed_, globals_.lm_head, logits_, T, lm_vocab_count_, H,
                DType::BF16, GemmOut::BF16, H, gemm_ws_, gemm_ws_bytes_,
                stream_);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 
     const size_t TH = static_cast<size_t>(T) * H;
-  const size_t TV = static_cast<size_t>(T) * cfg_.vocab_size;
+  const size_t TV = static_cast<size_t>(T) * lm_vocab_count_;
   out.final_hidden_bits.assign(normed_, normed_ + TH);
   out.logits_bits.assign(logits_, logits_ + TV);
+  out.lm_vocab_begin = lm_vocab_begin_;
+  out.lm_vocab_count = lm_vocab_count_;
   return out;
 }
 

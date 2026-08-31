@@ -60,7 +60,11 @@ class GlmDiagnosticModel {
  public:
   struct Outputs {
     std::vector<uint16_t> final_hidden_bits;  // bf16 [tokens, hidden]
-    std::vector<uint16_t> logits_bits;        // bf16 [tokens, vocab]
+    // bf16 [tokens, lm_vocab_count] — the rank's logits COLUMNS of the
+    // full [tokens, vocab] matrix (Full head: the whole thing).
+    std::vector<uint16_t> logits_bits;
+    int lm_vocab_begin = 0;  // first vocab column of logits_bits
+    int lm_vocab_count = 0;
     // One entry per MoE layer, in layer order (ids ascending per token).
     std::vector<GlmRouteTraceLayer> routes;
     // Aligned with routes (same order): each MoE layer's full biased router
@@ -82,12 +86,19 @@ class GlmDiagnosticModel {
   // (the production residency contract — storage is never touched during
   // inference after the first forward). Only worlds whose
   // GlmLayerStream::resident_bytes() fits can use it (real dims: world 4).
+  //
+  // HEAD (M6 d3): `GlmHeadSharding::VocabSharded` loads only this rank's
+  // lm-head rows; Outputs.logits_bits is then the rank's [tokens,
+  // lm_vocab_count] slice (lm_vocab_begin/count report the bounds — the
+  // sampling merge consumes exactly those). Default Full: byte-stable
+  // with every M4/M5 parity gate.
   GlmDiagnosticModel(const GlmTextConfig& cfg,
                      const std::string& checkpoint_dir, int max_tokens,
                      int64_t max_cache_tokens,
                      GlmBoundaryReducer* boundary = nullptr, int tp_rank = 0,
                      int tp_world = 1,
-                     GlmResidency residency = GlmResidency::Streaming);
+                     GlmResidency residency = GlmResidency::Streaming,
+                     GlmHeadSharding head = GlmHeadSharding::Full);
   ~GlmDiagnosticModel();
   GlmDiagnosticModel(const GlmDiagnosticModel&) = delete;
   GlmDiagnosticModel& operator=(const GlmDiagnosticModel&) = delete;
@@ -134,7 +145,9 @@ class GlmDiagnosticModel {
   uint64_t source_bytes_read() const { return loader_.source_bytes_read(); }
 
   // Host-side top-k over bf16 logits: value-descending, lowest-id
-  // tie-break. k <= 64. One entry per row.
+  // tie-break. k <= 64. One entry per row. FULL-vocab logits only — a
+  // sharded-head consumer must merge its slice with glm_sample's
+  // helpers instead (this helper cannot see the other ranks' slices).
   static std::vector<std::vector<std::pair<int32_t, float>>> topk(
       const std::vector<uint16_t>& logits_bits, int64_t rows, int vocab,
       int k);
@@ -168,6 +181,9 @@ class GlmDiagnosticModel {
   KdaGeometry kda_geo_;
   int max_tokens_ = 0;
   GlmReplicatedDigest boot_digest_{};
+  // The logits slice this model computes (Full: [0, vocab)).
+  int lm_vocab_begin_ = 0;
+  int lm_vocab_count_ = 0;
 
   // Sharded at world>1 (M5 d4): the loader builds each resident layer
   // directly at this rank's geometry, and bind_layer is the identity

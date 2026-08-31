@@ -64,6 +64,23 @@ enum class GlmResidency {
   Resident,   // every layer materialized once, kept for the lifetime
 };
 
+// Which globals contract a stream serves for the lm head (M6 d3, the
+// "vocabulary-sharded lm-head seam"): Full keeps the M4/M5 diagnostic
+// default — every rank holds every vocab row, logits are the full
+// [T, vocab], and every pinned parity gate stays byte-stable.
+// VocabSharded gives rank r the contiguous row slice [V*r/W, V*(r+1)/W)
+// (integer bounds: contiguous, gap-free, any V), so a rank computes only
+// its logits slice [T, count] — the head GEMM's N. Sampling merges the
+// slices per DESIGN §10 (glm_sampler); the per-column K-reduction is
+// unchanged, and the head-shard parity gate pins slice == slice-of-full
+// bitwise. embed/final_norm stay replicated in v1 (a row gather and a
+// [hidden] vector: sharding buys nothing, and the embed lookup contract
+// keeps the token broadcast trivial).
+enum class GlmHeadSharding {
+  Full,
+  VocabSharded,
+};
+
 // Managed-memory bump (defined in glm_loader.cu): aligned grants, reset per
 // layer; counting mode walks the same grant sequence without allocating,
 // which is how the byte formula and the allocator share one code path.
@@ -118,8 +135,12 @@ struct GlmLayerResident {
 
 struct GlmGlobalsResident {
   const uint16_t* embed = nullptr;      // BF16 [vocab, hidden]
-  const uint16_t* lm_head = nullptr;    // BF16 [vocab, hidden]
+  const uint16_t* lm_head = nullptr;    // BF16 [lm_vocab_count, hidden]
   const uint16_t* final_norm = nullptr;  // BF16 [hidden]
+  // The lm_head's vocab slice (Full: [0, vocab) — count 0 reads as full
+  // for pre-M6 call sites; VocabSharded: this rank's contiguous slice).
+  int lm_vocab_begin = 0;
+  int lm_vocab_count = 0;
   size_t bytes = 0;
 };
 
@@ -162,7 +183,8 @@ class GlmLayerStream {
   // opened; misaligned inter quotients fail there, loudly.
   GlmLayerStream(const GlmTextConfig& cfg, const std::string& checkpoint_dir,
                  int rank = 0, int world = 1,
-                 GlmResidency residency = GlmResidency::Streaming);
+                 GlmResidency residency = GlmResidency::Streaming,
+                 GlmHeadSharding head = GlmHeadSharding::Full);
   ~GlmLayerStream();
   GlmLayerStream(const GlmLayerStream&) = delete;
   GlmLayerStream& operator=(const GlmLayerStream&) = delete;
@@ -187,7 +209,10 @@ class GlmLayerStream {
   // world>1 this is the LOCAL geometry's formula (the sharded bump).
   static size_t layer_bytes(const GlmTextConfig& cfg, int layer,
                             int rank = 0, int world = 1);
-  static size_t globals_bytes(const GlmTextConfig& cfg);
+  // `head` shrinks the lm-head share of the formula to the rank's slice.
+  static size_t globals_bytes(const GlmTextConfig& cfg, int rank = 0,
+                              int world = 1,
+                              GlmHeadSharding head = GlmHeadSharding::Full);
 
   // Exact device bytes a RESIDENT stream at this rank's geometry holds
   // once every layer + the globals are materialized: the sum of every
@@ -196,7 +221,8 @@ class GlmLayerStream {
   // dims: world 1 ~306 GiB, world 2 ~155 GiB per rank, world 4 ~79 GiB —
   // only world 4 fits a 128 GB GB10).
   static size_t resident_bytes(const GlmTextConfig& cfg, int rank = 0,
-                               int world = 1);
+                                int world = 1,
+                                GlmHeadSharding head = GlmHeadSharding::Full);
 
   // Registers the stream whose kernels READ resident layers (the model's
   // compute stream). When set, load boundaries synchronize ONLY that
@@ -242,6 +268,7 @@ class GlmLayerStream {
   int rank_ = 0;
   int world_ = 1;
   GlmResidency residency_ = GlmResidency::Streaming;
+  GlmHeadSharding head_ = GlmHeadSharding::Full;
   cudaStream_t reader_ = nullptr;  // bump readers' stream (see above)
   uint64_t source_bytes_ = 0;
   uint64_t verbatim_bytes_ = 0;

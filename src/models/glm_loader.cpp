@@ -760,18 +760,36 @@ size_t GlmLayerStream::layer_bytes(const GlmTextConfig& cfg, int layer,
   return count_layer_bytes(cfg, layer, rank, world);
 }
 
-size_t GlmLayerStream::globals_bytes(const GlmTextConfig& cfg) {
-  const size_t vocab_bytes = align_up_256(static_cast<size_t>(cfg.vocab_size) *
+namespace {
+// The contiguous vocab-slice bounds for a rank's sharded lm head
+// (integer split: gap-free and overlap-free at any vocab/world).
+std::pair<int, int> lm_head_slice(const GlmTextConfig& cfg, int rank,
+                                  int world) {
+  const int64_t V = cfg.vocab_size;
+  const int begin = static_cast<int>(V * rank / world);
+  const int end = static_cast<int>(V * (rank + 1) / world);
+  return {begin, end - begin};
+}
+}  // namespace
+
+size_t GlmLayerStream::globals_bytes(const GlmTextConfig& cfg, int rank,
+                                       int world, GlmHeadSharding head) {
+  const int head_vocab = head == GlmHeadSharding::VocabSharded
+                             ? lm_head_slice(cfg, rank, world).second
+                             : cfg.vocab_size;
+  const size_t embed_bytes = align_up_256(static_cast<size_t>(cfg.vocab_size) *
                                           cfg.hidden_size * 2);
+  const size_t head_bytes = align_up_256(static_cast<size_t>(head_vocab) *
+                                         cfg.hidden_size * 2);
   const size_t norm_bytes = align_up_256(static_cast<size_t>(cfg.hidden_size) * 2);
-  return 2 * vocab_bytes + norm_bytes;
+  return embed_bytes + head_bytes + norm_bytes;
 }
 
 size_t GlmLayerStream::resident_bytes(const GlmTextConfig& cfg, int rank,
-                                      int world) {
+                                      int world, GlmHeadSharding head) {
   const int max_layer =
       cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
-  size_t total = globals_bytes(cfg);
+  size_t total = globals_bytes(cfg, rank, world, head);
   for (int l = 0; l < max_layer; ++l)
     total += layer_bytes(cfg, l, rank, world);
   return total;
@@ -779,11 +797,13 @@ size_t GlmLayerStream::resident_bytes(const GlmTextConfig& cfg, int rank,
 
 GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
                                const std::string& checkpoint_dir, int rank,
-                               int world, GlmResidency residency)
+                               int world, GlmResidency residency,
+                               GlmHeadSharding head)
     : cfg_(cfg),
       rank_(rank),
       world_(world),
       residency_(residency),
+      head_(head),
       layer_bump_(std::make_unique<GlmLayerBump>()),
       globals_bump_(std::make_unique<GlmLayerBump>()) {
   if (world < 1 || rank < 0 || rank >= world)
@@ -849,7 +869,7 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
   } else {
     layer_bump_->init(capacity);
   }
-  globals_bump_->init(globals_bytes(cfg_));
+  globals_bump_->init(globals_bytes(cfg_, rank_, world_, head_));
   DGPP_CUDA_OK(cudaStreamCreate(&stream_));
 }
 
@@ -1009,15 +1029,38 @@ const GlmGlobalsResident& GlmLayerStream::load_globals() {
     uint16_t* dst = static_cast<uint16_t*>(globals_bump_->alloc(t.nbytes()));
     std::memcpy(dst, t.data, t.nbytes());
     source_bytes_ += t.nbytes();
-    verbatim_bytes_ += t.nbytes();  // globals are replicated in v1
+    verbatim_bytes_ += t.nbytes();
     return dst;
   };
   globals_.embed = copy_global("model.language_model.embed_tokens.weight");
-  globals_.lm_head = copy_global("lm_head.weight");
+  if (head_ == GlmHeadSharding::VocabSharded) {
+    // This rank's contiguous vocab slice only — the slice bytes are NOT
+    // verbatim: with a sharded head the lm_head partition across ranks
+    // (the §5.2 byte reconcile treats them like the sharded classes).
+    auto it = tensors_.find("lm_head.weight");
+    if (it == tensors_.end() || !it->second)
+      throw std::runtime_error("glm loader: global tensor missing: lm_head.weight");
+    const TensorInfo& t = *it->second;
+    const auto [begin, count] = lm_head_slice(cfg_, rank_, world_);
+    const size_t row_bytes = static_cast<size_t>(cfg_.hidden_size) * 2;
+    uint16_t* dst = static_cast<uint16_t*>(
+        globals_bump_->alloc(static_cast<size_t>(count) * row_bytes));
+    std::memcpy(dst, static_cast<const uint8_t*>(t.data) +
+                          static_cast<size_t>(begin) * row_bytes,
+                static_cast<size_t>(count) * row_bytes);
+    source_bytes_ += static_cast<size_t>(count) * row_bytes;
+    globals_.lm_head = dst;
+    globals_.lm_vocab_begin = begin;
+    globals_.lm_vocab_count = count;
+  } else {
+    globals_.lm_head = copy_global("lm_head.weight");
+    globals_.lm_vocab_begin = 0;
+    globals_.lm_vocab_count = cfg_.vocab_size;
+  }
   globals_.final_norm = copy_global("model.language_model.norm.weight");
   globals_.bytes = globals_bump_->cursor;
 
-  const size_t expected_bytes = globals_bytes(cfg_);
+  const size_t expected_bytes = globals_bytes(cfg_, rank_, world_, head_);
   if (globals_.bytes != expected_bytes)
     throw std::runtime_error(
         "glm loader: globals byte-formula drift: used " +
