@@ -28,10 +28,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "common/dtypes.hpp"
+#include "common/log.hpp"
+#include "models/glm_trace.hpp"
 
 namespace dgpp::glm_route {
 
@@ -237,6 +242,180 @@ inline void audit_route_flips(const int32_t* eng_ids,
     }
     out.tokens_flipped += 1;
   }
+}
+
+// ---- the shared parity-tier discipline (the loopback test AND the fabric
+// runner consume the same code — extracted from the CI test so a fabric
+// gate failure is self-diagnosing on the night it happens, not an offline
+// forensics project; the 0.57 hunt's lesson) ------------------------------
+
+// RMS over the bf16 element-wise delta — the test tables' "l2". Unnormalized
+// on purpose: it reads as "typical element error" against outputs whose
+// magnitude is known (final hidden ~1.3). l2_rel is the normalized variant
+// the gate's end-to-end tier used (||d||/||ref||).
+inline double l2_bf16(const std::vector<uint16_t>& a,
+                      const std::vector<uint16_t>& b) {
+  if (a.size() != b.size() || a.empty())
+    throw std::runtime_error("l2_bf16: shape mismatch");
+  double acc = 0;
+  for (size_t i = 0; i < a.size(); ++i) {
+    const double d = bf16_bits_to_float(a[i]) - bf16_bits_to_float(b[i]);
+    acc += d * d;
+  }
+  return std::sqrt(acc / static_cast<double>(a.size()));
+}
+
+inline double l2_rel(const std::vector<uint16_t>& got,
+                     const std::vector<uint16_t>& ref) {
+  double d2 = 0, r2 = 0;
+  for (size_t i = 0; i < got.size(); ++i) {
+    const double d = bf16_bits_to_float(got[i]) - bf16_bits_to_float(ref[i]);
+    d2 += d * d;
+    r2 += bf16_bits_to_float(ref[i]) * bf16_bits_to_float(ref[i]);
+  }
+  return r2 > 0 ? std::sqrt(d2) / std::sqrt(r2) : 0.0;
+}
+
+// Cascade-aware route-audit discipline, shared by the free-run and
+// isolated comparisons: every token's FIRST route divergence vs its
+// reference must certify (audit_route_flips on that token alone — near-tie
+// or attributable-to-structured-noise; a refusal is a real divergence
+// with no compounding to blame and THROWS). After a token's first
+// certified divergence its trajectory is legitimately different, so its
+// later route differences are consequences — counted and reported, never
+// certified and never failed. This keeps the audit's corruption-detection
+// strength exactly where it is sound (the first divergence of every
+// token, where the entering states were still comparable) and stops
+// misreading legitimate compounding as corruption (the 0.57 hunt: the
+// free-run audit refused a layer-40 flip whose score drift was 0.44 —
+// the consequence of certified flips tens of layers earlier, on a stream
+// state that had every right to differ).
+struct CascadeAuditSummary {
+  int64_t first_flips = 0;        // audited first divergences (certified)
+  int64_t cascaded_tokens = 0;    // tokens whose first flip happened
+  int64_t consequence_rows = 0;   // (layer, token) differences after the first
+  double worst_mean_mult = 0;     // worst certified swap / mean noise
+  double worst_struct_mult = 0;   // worst certified swap / max uninvolved drift
+};
+
+inline CascadeAuditSummary audit_routes_cascade(
+    const std::vector<GlmRouteTraceLayer>& eng_routes,
+    const std::vector<std::vector<float>>& eng_biased,
+    const std::vector<GlmRouteTraceLayer>& ref_routes,
+    const std::vector<std::vector<float>>& ref_biased, int top_k,
+    int n_experts, const char* what) {
+  CascadeAuditSummary sum;
+  std::vector<char> cascaded(
+      eng_routes.empty() ? size_t(0)
+                         : static_cast<size_t>(eng_routes.front().tokens),
+      0);
+  for (size_t ri = 0; ri < eng_routes.size(); ++ri) {
+    const auto& eng = eng_routes[ri];
+    const GlmRouteTraceLayer* ref = nullptr;
+    for (const auto& r : ref_routes)
+      if (r.layer_idx == eng.layer_idx) {
+        ref = &r;
+        break;
+      }
+    if (ref == nullptr)
+      throw std::runtime_error(std::string(what) +
+                               ": route layer alignment vs oracle");
+    const size_t ref_ri = static_cast<size_t>(ref - ref_routes.data());
+    for (uint64_t t = 0; t < eng.tokens; ++t) {
+      const size_t tk = static_cast<size_t>(t);
+      const bool differs =
+          !std::equal(eng.ids.begin() + tk * eng.top_k,
+                      eng.ids.begin() + (tk + 1) * eng.top_k,
+                      ref->ids.begin() + tk * ref->top_k);
+      if (!differs) continue;
+      if (cascaded[tk]) {
+        ++sum.consequence_rows;
+        continue;
+      }
+      // This token's first divergence: audited on its own row — must
+      // certify, or the comparison is a real divergence.
+      RouteFlipAudit audit;
+      audit_route_flips(eng.ids.data() + tk * eng.top_k,
+                        ref->ids.data() + tk * ref->top_k,
+                        eng_biased[ri].data() + tk * n_experts,
+                        ref_biased[ref_ri].data() + tk * n_experts,
+                        /*tokens=*/1, top_k, n_experts, audit, eng.layer_idx);
+      ++sum.first_flips;
+      cascaded[tk] = 1;
+      ++sum.cascaded_tokens;
+      sum.worst_mean_mult =
+          std::max(sum.worst_mean_mult, audit.max_noise_multiple);
+      sum.worst_struct_mult =
+          std::max(sum.worst_struct_mult, audit.max_structure_multiple);
+    }
+  }
+  DGPP_LOG_INFO(
+      "route audit (cascade) [{}]: {} first flips certified (worst "
+      "{:.1f}x mean noise, {:.1f}x max drift), {} cascaded tokens, {} "
+      "consequence route differences",
+      what, sum.first_flips, sum.worst_mean_mult, sum.worst_struct_mult,
+      sum.cascaded_tokens, sum.consequence_rows);
+  return sum;
+}
+
+// Top-1 near-tie certification over the logits: every top-1 disagreement
+// between engine and reference must be a boundary near tie (oracle top-2
+// margin within 32x the measured engine-vs-reference logit noise). The
+// free-run surface is reported, not asserted — this head is the hard
+// gate that stays.
+struct Top1AuditSummary {
+  int64_t misses = 0;             // tokens whose top-1 differs
+  int64_t uncertified = 0;        // misses whose margin exceeds 32x noise
+  double worst_margin_ratio = 0;   // worst miss: oracle top-2 margin / noise
+};
+
+inline Top1AuditSummary audit_top1_near_ties(const uint16_t* tp_logits,
+                                             const uint16_t* ref_logits,
+                                             int vocab, size_t tokens) {
+  Top1AuditSummary sum;
+  for (size_t t = 0; t < tokens; ++t) {
+    const uint16_t* tr = tp_logits + t * vocab;
+    const uint16_t* rr = ref_logits + t * vocab;
+    int tp_top = 0, rf_top = 0, rf_second = -1;
+    double noise = 0;
+    for (int c = 0; c < vocab; ++c) {
+      const double d =
+          std::abs(bf16_bits_to_float(tr[c]) - bf16_bits_to_float(rr[c]));
+      noise = std::max(noise, d);
+      if (bf16_bits_to_float(tr[c]) > bf16_bits_to_float(tr[tp_top]))
+        tp_top = c;
+      if (bf16_bits_to_float(rr[c]) > bf16_bits_to_float(rr[rf_top])) {
+        rf_second = rf_top;
+        rf_top = c;
+      } else if (rf_second < 0 || bf16_bits_to_float(rr[c]) >
+                                     bf16_bits_to_float(rr[rf_second])) {
+        if (c != rf_top) rf_second = c;
+      }
+    }
+    if (tp_top == rf_top) continue;
+    ++sum.misses;
+    const double margin = std::abs(
+        bf16_bits_to_float(rr[rf_top]) - bf16_bits_to_float(rr[rf_second]));
+    sum.worst_margin_ratio = std::max(sum.worst_margin_ratio, margin / noise);
+    if (noise <= 0 || margin > 32.0 * noise) ++sum.uncertified;
+  }
+  return sum;
+}
+
+inline void certify_top1_near_ties(const Top1AuditSummary& s, size_t tokens,
+                                  const char* what) {
+  if (s.uncertified != 0)
+    throw std::runtime_error(
+        std::string(what) +
+        ": free-run top-1 disagreement is not a certified near tie "
+        "(oracle top-2 margin > 32x engine-vs-oracle logit noise; " +
+        std::to_string(s.uncertified) + "/" + std::to_string(s.misses) +
+        " uncertified, worst margin " +
+        std::to_string(s.worst_margin_ratio) + "x noise)");
+  DGPP_LOG_INFO(
+      "top-1 near-tie certification [{}]: {}/{} misses, all certified "
+      "(worst margin {:.1f}x noise)",
+      what, s.misses, tokens, s.worst_margin_ratio);
 }
 
 }  // namespace dgpp::glm_route

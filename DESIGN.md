@@ -153,8 +153,15 @@ rationale for the four-rank deployment target. The current forward is
 the DIAGNOSTIC streaming instrument (§7.5: one layer resident at a time,
 ~98 GB reclaimable page-cache pass-through per pass) and its ~1 GB/s
 read pace is a software artifact of 4 KB mmap faults across 62 shards,
-not a bus limit — the resident serving mode is the M6 loader
-deliverable that makes the contract explicit.
+not a bus limit. The resident serving mode IS implemented (M5,
+2026-08-31, ahead of the M6 serving integration): resident mode is
+the streaming build path with each layer's bump adopted into a
+per-layer exact-formula allocation — resident bytes are streaming
+bytes by construction, pinned bitwise at every world; a materialized
+layer re-serves from cache with no storage reads and no sync, and the
+zero-reread contract is proven on all four ranks at real dims (81.77
+GiB materialized in ~120 s warm; re-pass 0.10-0.14 ms, 0 bytes read).
+M6 integrates it into the serving path.
 
 Main text configuration:
 

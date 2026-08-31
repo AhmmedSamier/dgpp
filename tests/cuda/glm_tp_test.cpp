@@ -77,7 +77,12 @@ using dgpp::GlmMlpKind;
 using dgpp::GlmShardParityReport;
 using dgpp::GlmTextConfig;
 using dgpp::glm_route::RouteFlipAudit;
+using dgpp::glm_route::Top1AuditSummary;
 using dgpp::glm_route::audit_route_flips;
+using dgpp::glm_route::audit_routes_cascade;
+using dgpp::glm_route::audit_top1_near_ties;
+using dgpp::glm_route::certify_top1_near_ties;
+using dgpp::glm_route::l2_bf16;
 using dgpp::net::BusOptions;
 using dgpp::net::CollectiveBus;
 
@@ -234,100 +239,10 @@ std::vector<std::vector<uint16_t>> make_layer_states(int layers, int tokens,
   return v;
 }
 
-double l2_bf16(const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
-  double acc = 0;
-  for (size_t i = 0; i < a.size(); ++i) {
-    const double d = dgpp::bf16_bits_to_float(a[i]) -
-                     dgpp::bf16_bits_to_float(b[i]);
-    acc += d * d;
-  }
-  return std::sqrt(acc / static_cast<double>(a.size()));
-}
-
 bool bits_equal(const std::vector<uint16_t>& a,
                 const std::vector<uint16_t>& b) {
   return a.size() == b.size() &&
          std::memcmp(a.data(), b.data(), a.size() * 2) == 0;
-}
-
-// Cascade-aware route-audit discipline, shared by the free-run and
-// isolated comparisons: every token's FIRST route divergence vs its
-// reference must certify (audit_route_flips on that token alone —
-// near-tie or attributable-to-structured-noise; a refusal is a real
-// divergence with no compounding to blame and THROWS). After a token's
-// first certified divergence its trajectory is legitimately different,
-// so its later route differences are consequences — counted and
-// reported, never certified and never failed. This keeps the audit's
-// corruption-detection strength exactly where it is sound (the first
-// divergence of every token, where the entering states were still
-// comparable) and stops misreading legitimate compounding as corruption
-// (the 0.57 hunt: the free-run audit refused a layer-40 flip whose
-// score drift was 0.44 — the consequence of certified flips tens of
-// layers earlier, on a stream state that had every right to differ).
-struct CascadeAuditSummary {
-  int64_t first_flips = 0;        // audited first divergences (certified)
-  int64_t cascaded_tokens = 0;    // tokens whose first flip happened
-  int64_t consequence_rows = 0;   // (layer, token) differences after the first
-  double worst_mean_mult = 0;     // worst certified swap / mean noise
-  double worst_struct_mult = 0;   // worst certified swap / max uninvolved drift
-};
-
-void audit_routes_cascade(
-    const std::vector<dgpp::GlmRouteTraceLayer>& eng_routes,
-    const std::vector<std::vector<float>>& eng_biased,
-    const std::vector<dgpp::GlmRouteTraceLayer>& ref_routes,
-    const std::vector<std::vector<float>>& ref_biased, int top_k,
-    int n_experts, const char* what) {
-  CascadeAuditSummary sum;
-  std::vector<char> cascaded(
-      eng_routes.empty() ? size_t(0)
-                         : static_cast<size_t>(eng_routes.front().tokens),
-      0);
-  for (size_t ri = 0; ri < eng_routes.size(); ++ri) {
-    const auto& eng = eng_routes[ri];
-    const dgpp::GlmRouteTraceLayer* ref = nullptr;
-    for (const auto& r : ref_routes)
-      if (r.layer_idx == eng.layer_idx) {
-        ref = &r;
-        break;
-      }
-    require(ref != nullptr,
-            std::string(what) + ": route layer alignment vs oracle");
-    const size_t ref_ri = static_cast<size_t>(ref - ref_routes.data());
-    for (uint64_t t = 0; t < eng.tokens; ++t) {
-      const size_t tk = static_cast<size_t>(t);
-      const bool differs =
-          !std::equal(eng.ids.begin() + tk * eng.top_k,
-                      eng.ids.begin() + (tk + 1) * eng.top_k,
-                      ref->ids.begin() + tk * ref->top_k);
-      if (!differs) continue;
-      if (cascaded[tk]) {
-        ++sum.consequence_rows;
-        continue;
-      }
-      // This token's first divergence: audited on its own row — must
-      // certify, or the comparison is a real divergence.
-      RouteFlipAudit audit;
-      audit_route_flips(eng.ids.data() + tk * eng.top_k,
-                        ref->ids.data() + tk * ref->top_k,
-                        eng_biased[ri].data() + tk * n_experts,
-                        ref_biased[ref_ri].data() + tk * n_experts,
-                        /*tokens=*/1, top_k, n_experts, audit, eng.layer_idx);
-      ++sum.first_flips;
-      cascaded[tk] = 1;
-      ++sum.cascaded_tokens;
-      sum.worst_mean_mult =
-          std::max(sum.worst_mean_mult, audit.max_noise_multiple);
-      sum.worst_struct_mult =
-          std::max(sum.worst_struct_mult, audit.max_structure_multiple);
-    }
-  }
-  DGPP_LOG_INFO(
-      "TP [{}] route audit (cascade): {} first flips certified (worst "
-      "{:.1f}x mean noise, {:.1f}x max drift), {} cascaded tokens, {} "
-      "consequence route differences",
-      what, sum.first_flips, sum.worst_mean_mult, sum.worst_struct_mult,
-      sum.cascaded_tokens, sum.consequence_rows);
 }
 
 // Runs one loopback TP world end to end and asserts the full parity
@@ -430,47 +345,10 @@ void check_world(int world, uint16_t port, const std::string& dir,
   // TP-vs-oracle logit noise).
   const double free_l2 = l2_bf16(ranks[0].free_out.final_hidden_bits,
                                  ref_free.final_hidden_bits);
-  int top1_mismatch = 0, top1_uncertified = 0;
-  double worst_margin_ratio = 0;
-  {
-    const int V = cfg.vocab_size;
-    const size_t T = tokens.size();
-    const uint16_t* tp = ranks[0].free_out.logits_bits.data();
-    const uint16_t* rf = ref_free.logits_bits.data();
-    for (size_t t = 0; t < T; ++t) {
-      const uint16_t* tr = tp + t * V;
-      const uint16_t* rr = rf + t * V;
-      int tp_top = 0, rf_top = 0, rf_second = -1;
-      double noise = 0;
-      for (int c = 0; c < V; ++c) {
-        const double d = std::abs(dgpp::bf16_bits_to_float(tr[c]) -
-                                  dgpp::bf16_bits_to_float(rr[c]));
-        noise = std::max(noise, d);
-        if (dgpp::bf16_bits_to_float(tr[c]) >
-            dgpp::bf16_bits_to_float(tr[tp_top]))
-          tp_top = c;
-        if (dgpp::bf16_bits_to_float(rr[c]) >
-            dgpp::bf16_bits_to_float(rr[rf_top])) {
-          rf_second = rf_top;
-          rf_top = c;
-        } else if (rf_second < 0 ||
-                   dgpp::bf16_bits_to_float(rr[c]) >
-                       dgpp::bf16_bits_to_float(rr[rf_second])) {
-          if (c != rf_top) rf_second = c;
-        }
-      }
-      if (tp_top == rf_top) continue;
-      ++top1_mismatch;
-      const double margin = std::abs(
-          dgpp::bf16_bits_to_float(rr[rf_top]) -
-          dgpp::bf16_bits_to_float(rr[rf_second]));
-      worst_margin_ratio = std::max(worst_margin_ratio, margin / noise);
-      if (noise <= 0 || margin > 32.0 * noise) ++top1_uncertified;
-    }
-  }
-  require(top1_uncertified == 0,
-          "free-run top-1 disagreement is not a certified near tie "
-          "(oracle top-2 margin > 32x TP-vs-oracle logit noise)");
+  const Top1AuditSummary top1 = audit_top1_near_ties(
+      ranks[0].free_out.logits_bits.data(), ref_free.logits_bits.data(),
+      cfg.vocab_size, tokens.size());
+  certify_top1_near_ties(top1, tokens.size(), what);
   // Reported IMMEDIATELY (the parity sections below can throw before the
   // end-of-run summary, and the free-run numbers are the hunt's context:
   // flip compounding is the designated non-assertion surface, so its size
@@ -478,7 +356,8 @@ void check_world(int world, uint16_t port, const std::string& dir,
   DGPP_LOG_INFO(
       "TP [{}] world={} FREE-RUN: final_hidden l2={:.6f}, top-1 misses={}/{} "
       "(all certified, worst margin {:.1f}x noise)",
-      what, world, free_l2, top1_mismatch, tokens.size(), worst_margin_ratio);
+      what, world, free_l2, top1.misses, tokens.size(),
+      top1.worst_margin_ratio);
 
   // ---- vs oracle: per-layer isolated parity (the assertion surface) --
   // Kept-row discipline: a token whose routing flipped vs the oracle
@@ -700,8 +579,8 @@ void check_world(int world, uint16_t port, const std::string& dir,
       "TP [{}] world={} free l2={:.4f} worst layer l2={:.4f} worst fold "
       "l2={:.4f} top1 misses={} (uncertified {}, worst margin {:.1f}x "
       "noise) — route audits above (cascade discipline)",
-      what, world, free_l2, worst_layer_l2, worst_fold_l2, top1_mismatch,
-      top1_uncertified, worst_margin_ratio);
+      what, world, free_l2, worst_layer_l2, worst_fold_l2, top1.misses,
+      top1.uncertified, top1.worst_margin_ratio);
 
   for (auto& b : buses) b->stop();
 }

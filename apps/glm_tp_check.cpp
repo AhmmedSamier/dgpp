@@ -38,7 +38,9 @@
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "loaders/hf_cache.hpp"
+#include "models/glm_config.hpp"
 #include "models/glm_forward.hpp"
+#include "models/glm_route_audit.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "net/collective_bus.hpp"
 
@@ -124,13 +126,17 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
   // Rank 0 runs the world=1 oracle FIRST (separate model, no bus): its
   // files are the comparison targets, and the forward never shares the
   // device with an in-flight collective.
+  GlmDiagnosticModel::Outputs oracle_out;  // rank 0: the inline verdict's
+                                           // reference (kept in memory)
   if (rank == 0) {
     GlmDiagnosticModel oracle(cfg, ckpt, tokens, cache);
-    const auto out = oracle.forward(ids);
+    oracle_out = oracle.forward(ids);
     write_out(out_prefix + ".oracle.final_hidden.bf16",
-              out.final_hidden_bits.data(), out.final_hidden_bits.size() * 2);
-    write_out(out_prefix + ".oracle.logits.bf16", out.logits_bits.data(),
-              out.logits_bits.size() * 2);
+              oracle_out.final_hidden_bits.data(),
+              oracle_out.final_hidden_bits.size() * 2);
+    write_out(out_prefix + ".oracle.logits.bf16",
+              oracle_out.logits_bits.data(),
+              oracle_out.logits_bits.size() * 2);
     DGPP_LOG_INFO("oracle forward written ({} tokens)", tokens);
   }
 
@@ -214,6 +220,41 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       rank, world, ms, lat_n, lat_tails.first, lat_tails.second, bulk_n,
       bulk_tails.first, bulk_tails.second,
       model.source_bytes_read() >> 20);
+
+  // THE INLINE VERDICT (rank 0): the parity tier's audit discipline —
+  // the same code the loopback test asserts — run against the in-memory
+  // oracle ON THE FABRIC. The 0.57 hunt's lesson: a gate failure must
+  // self-diagnose on the night it happens, not become an offline
+  // forensics project. Free-run l2 is REPORTED (the designated
+  // compounding surface); top-1 near ties and every token's FIRST route
+  // divergence are CERTIFIED — an uncertified divergence fails the run
+  // with its diagnosis in this log.
+  if (rank == 0) {
+    try {
+      const double rel = dgpp::glm_route::l2_rel(
+          out.final_hidden_bits, oracle_out.final_hidden_bits);
+      const double rms = dgpp::glm_route::l2_bf16(
+          out.final_hidden_bits, oracle_out.final_hidden_bits);
+      const dgpp::glm_route::Top1AuditSummary top1 =
+          dgpp::glm_route::audit_top1_near_ties(
+              out.logits_bits.data(), oracle_out.logits_bits.data(),
+              cfg.vocab_size, ids.size());
+      dgpp::glm_route::certify_top1_near_ties(top1, ids.size(), "fabric");
+      DGPP_LOG_INFO(
+          "fabric verdict: free-run final_hidden rel_l2={:.4f} "
+          "(rms {:.4f}) — the reported compounding surface",
+          rel, rms);
+      dgpp::glm_route::audit_routes_cascade(
+          out.routes, out.route_biased, oracle_out.routes,
+          oracle_out.route_biased, cfg.moe_config().top_k,
+          cfg.moe_config().n_experts, "fabric free-run");
+      DGPP_LOG_INFO("fabric verdict: rank-0 inline verdict PASS");
+    } catch (const std::exception& e) {
+      DGPP_LOG_ERROR("fabric verdict FAILED: {}", e.what());
+      bus.stop();
+      return 1;
+    }
+  }
   bus.stop();
   return 0;
 }
