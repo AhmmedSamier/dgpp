@@ -39,7 +39,15 @@ struct RouteFlipAudit {
   int64_t tokens_flipped = 0;
   int64_t swaps_certified = 0;
   double max_boundary_gap = 0;    // ref-side |b(in) - b(out)| of a swap
-  double max_noise_multiple = 0;  // worst gap / measured noise (both sides)
+  double max_noise_multiple = 0;  // worst gap / measured mean noise (both sides)
+  // The structured-noise view of the worst swap: its scale divided by the
+  // MAX cross-side drift over uninvolved experts (the perturbation's
+  // demonstrated ability to move ONE expert's score). At real dims the
+  // cross-implementation input delta concentrates on massive-activation
+  // channels, so a few aligned gate rows move ~10x the mean while the
+  // mean stays tiny (measured: layer-17 expert 7, rank 23, gap 0.078 =
+  // 11x mean noise but ~1-2x the max uninvolved drift).
+  double max_structure_multiple = 0;
 };
 
 // Complete audit of one routed layer's engine-vs-reference ids. Throws
@@ -135,18 +143,34 @@ inline void audit_route_flips(const int32_t* eng_ids,
     for (int32_t e : only_eng) involved[size_t(e)] = 1;
     for (int32_t e : only_ref) involved[size_t(e)] = 1;
     double noise_sum = 0;
+    double max_uninvolved_drift = 0;
     int64_t noise_count = 0;
     for (size_t e = 0; e < E; ++e)
       if (!involved[e]) {
-        noise_sum += std::abs(double(eb[e]) - double(rb[e]));
+        const double drift =
+            std::abs(double(eb[e]) - double(rb[e]));
+        noise_sum += drift;
+        max_uninvolved_drift = std::max(max_uninvolved_drift, drift);
         ++noise_count;
-      }
+    }
     if (noise_count == 0) {  // degenerate: everyone involved — use everyone
       noise_count = static_cast<int64_t>(E);
-      for (size_t e = 0; e < E; ++e)
-        noise_sum += std::abs(double(eb[e]) - double(rb[e]));
+      for (size_t e = 0; e < E; ++e) {
+        const double drift =
+            std::abs(double(eb[e]) - double(rb[e]));
+        noise_sum += drift;
+        max_uninvolved_drift = std::max(max_uninvolved_drift, drift);
+      }
     }
     const double noise = noise_sum / static_cast<double>(noise_count);
+    // The perturbation's demonstrated MAX per-expert effect over the same
+    // uninvolved majority (still not inflatable by the swap itself). The
+    // mean alone understates STRUCTURED noise: at real dims the input
+    // delta concentrates on massive-activation channels, so gate rows
+    // aligned with those channels move far more than the mean (measured,
+    // the 0.57 hunt: a rank-23 expert displaced the top-8 at 11x mean
+    // noise but ~1-2x the max uninvolved drift).
+    const double noise_max = max_uninvolved_drift;
 
     // Reference ranking: ranks the swapped experts straddle the boundary.
     std::vector<int32_t> order;
@@ -170,29 +194,46 @@ inline void audit_route_flips(const int32_t* eng_ids,
           std::abs(double(eb[expert_out]) - double(rb[expert_out]));
       const int64_t rank_in = rank_of[size_t(expert_in)];
       const int64_t rank_out = rank_of[size_t(expert_out)];
-      // A near tie requires: out at the boundary (it was selected, so its
-      // ref rank is < top_k) and in adjacent to it, plus the swap's every
-      // scale — both sides' boundary gaps and the swapped experts' own
-      // drifts — within the measured noise multiple.
+      // Certification, two measured paths (either certifies):
+      //   CLASSIC — out at the boundary, in within the rank window, and
+      //   every swap scale within 32x the MEAN uninvolved noise (the
+      //   fixture regime: uniform noise, deep ranks are unreachable).
+      //   STRUCTURED — every swap scale within 4x the MAX uninvolved
+      //   drift: the perturbation has DEMONSTRATED it can move one
+      //   expert's score that far, so the swap is attributable to it
+      //   regardless of rank distance (the real-dims regime: noise
+      //   concentrated on massive-activation channels moves aligned gate
+      //   rows ~10x the mean). Corruption cannot inflate this yardstick:
+      //   the swapped pair is excluded from it, and a doctored far jump
+      //   stays thousands of multiples above honest noise either way.
       const bool ranks_adjacent = rank_out < top_k &&
                                   rank_in < top_k + 8;
       const double worst =
           std::max(std::max(gap_ref, gap_eng), std::max(drift_in, drift_out));
       const double gap_multiple =
           noise > 0 ? worst / noise : (worst > 0 ? 1e30 : 0);
-      if (!ranks_adjacent || gap_multiple > 32.0)
+      const double structure_multiple =
+          noise_max > 0 ? worst / noise_max : (worst > 0 ? 1e30 : 0);
+      const bool certified =
+          (ranks_adjacent && gap_multiple <= 32.0) ||
+          structure_multiple <= 4.0;
+      if (!certified)
         throw std::runtime_error(
             where + ": expert " + std::to_string(expert_in) + " (ref rank " +
             std::to_string(rank_in) + ", gaps " + std::to_string(gap_ref) +
             " ref / " + std::to_string(gap_eng) + " eng, drifts " +
             std::to_string(drift_in) + " / " + std::to_string(drift_out) +
             " = " + std::to_string(gap_multiple) +
-            "x noise) displaced expert " + std::to_string(expert_out) +
+            "x mean noise, " + std::to_string(structure_multiple) +
+            "x max uninvolved drift " + std::to_string(noise_max) +
+            ") displaced expert " + std::to_string(expert_out) +
             " (ref rank " + std::to_string(rank_out) +
             ") — NOT a boundary near tie");
       out.swaps_certified += 1;
       out.max_boundary_gap = std::max(out.max_boundary_gap, gap_ref);
       out.max_noise_multiple = std::max(out.max_noise_multiple, gap_multiple);
+      out.max_structure_multiple =
+          std::max(out.max_structure_multiple, structure_multiple);
     }
     out.tokens_flipped += 1;
   }

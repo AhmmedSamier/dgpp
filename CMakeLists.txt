@@ -160,7 +160,8 @@ add_library(dgpp_models_glm_loader STATIC
   src/models/glm_moe_layer.cpp
   src/models/glm_dump.cpp
   src/models/glm_forward.cpp
-  src/models/glm_tp.cpp)
+  src/models/glm_tp.cpp
+  src/models/glm_tp_parity.cpp)
 target_link_libraries(dgpp_models_glm_loader
   PUBLIC dgpp_models_glm dgpp_kernels dgpp_models_kda dgpp_models_dsa)
 dgpp_set_common(dgpp_models_glm_loader)
@@ -168,6 +169,14 @@ dgpp_set_common(dgpp_models_glm_loader)
 add_executable(glm_bind_check apps/glm_bind_check.cpp)
 target_link_libraries(glm_bind_check PRIVATE dgpp_models_glm dgpp_loaders)
 dgpp_set_common(glm_bind_check)
+
+# M5 d4 at real scale: the shard-parity gate (loader-vs-bind bitwise +
+# replicated digest + byte reconcile) as a deployment command — the same
+# driver the CI glm_tp_test pins at the fixture, against the real
+# checkpoint via --model (HF hub cache). No bus dependency.
+add_executable(glm_shard_parity apps/glm_shard_parity.cpp)
+target_link_libraries(glm_shard_parity PRIVATE dgpp_models_glm_loader)
+dgpp_set_common(glm_shard_parity)
 
 # Deployment evidence: stream real layers, reconcile bytes vs formula.
 add_executable(glm_stream_check apps/glm_stream_check.cpp)

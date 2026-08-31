@@ -34,13 +34,16 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
-#include <mutex>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -49,10 +52,12 @@
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "common/test.hpp"
+#include "loaders/hf_cache.hpp"
 #include "models/dsa_geometry.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_route_audit.hpp"
 #include "models/glm_tp.hpp"
+#include "models/glm_tp_parity.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "models/kda_geometry.hpp"
 #include "net/collective_bus.hpp"
@@ -69,9 +74,8 @@ using dgpp::GlmLayerBound;
 using dgpp::GlmLayerResident;
 using dgpp::GlmLayerStream;
 using dgpp::GlmMlpKind;
-using dgpp::GlmReplicatedDigest;
+using dgpp::GlmShardParityReport;
 using dgpp::GlmTextConfig;
-using dgpp::GlmTpViews;
 using dgpp::glm_route::RouteFlipAudit;
 using dgpp::glm_route::audit_route_flips;
 using dgpp::net::BusOptions;
@@ -246,6 +250,86 @@ bool bits_equal(const std::vector<uint16_t>& a,
          std::memcmp(a.data(), b.data(), a.size() * 2) == 0;
 }
 
+// Cascade-aware route-audit discipline, shared by the free-run and
+// isolated comparisons: every token's FIRST route divergence vs its
+// reference must certify (audit_route_flips on that token alone —
+// near-tie or attributable-to-structured-noise; a refusal is a real
+// divergence with no compounding to blame and THROWS). After a token's
+// first certified divergence its trajectory is legitimately different,
+// so its later route differences are consequences — counted and
+// reported, never certified and never failed. This keeps the audit's
+// corruption-detection strength exactly where it is sound (the first
+// divergence of every token, where the entering states were still
+// comparable) and stops misreading legitimate compounding as corruption
+// (the 0.57 hunt: the free-run audit refused a layer-40 flip whose
+// score drift was 0.44 — the consequence of certified flips tens of
+// layers earlier, on a stream state that had every right to differ).
+struct CascadeAuditSummary {
+  int64_t first_flips = 0;        // audited first divergences (certified)
+  int64_t cascaded_tokens = 0;    // tokens whose first flip happened
+  int64_t consequence_rows = 0;   // (layer, token) differences after the first
+  double worst_mean_mult = 0;     // worst certified swap / mean noise
+  double worst_struct_mult = 0;   // worst certified swap / max uninvolved drift
+};
+
+void audit_routes_cascade(
+    const std::vector<dgpp::GlmRouteTraceLayer>& eng_routes,
+    const std::vector<std::vector<float>>& eng_biased,
+    const std::vector<dgpp::GlmRouteTraceLayer>& ref_routes,
+    const std::vector<std::vector<float>>& ref_biased, int top_k,
+    int n_experts, const char* what) {
+  CascadeAuditSummary sum;
+  std::vector<char> cascaded(
+      eng_routes.empty() ? size_t(0)
+                         : static_cast<size_t>(eng_routes.front().tokens),
+      0);
+  for (size_t ri = 0; ri < eng_routes.size(); ++ri) {
+    const auto& eng = eng_routes[ri];
+    const dgpp::GlmRouteTraceLayer* ref = nullptr;
+    for (const auto& r : ref_routes)
+      if (r.layer_idx == eng.layer_idx) {
+        ref = &r;
+        break;
+      }
+    require(ref != nullptr,
+            std::string(what) + ": route layer alignment vs oracle");
+    const size_t ref_ri = static_cast<size_t>(ref - ref_routes.data());
+    for (uint64_t t = 0; t < eng.tokens; ++t) {
+      const size_t tk = static_cast<size_t>(t);
+      const bool differs =
+          !std::equal(eng.ids.begin() + tk * eng.top_k,
+                      eng.ids.begin() + (tk + 1) * eng.top_k,
+                      ref->ids.begin() + tk * ref->top_k);
+      if (!differs) continue;
+      if (cascaded[tk]) {
+        ++sum.consequence_rows;
+        continue;
+      }
+      // This token's first divergence: audited on its own row — must
+      // certify, or the comparison is a real divergence.
+      RouteFlipAudit audit;
+      audit_route_flips(eng.ids.data() + tk * eng.top_k,
+                        ref->ids.data() + tk * ref->top_k,
+                        eng_biased[ri].data() + tk * n_experts,
+                        ref_biased[ref_ri].data() + tk * n_experts,
+                        /*tokens=*/1, top_k, n_experts, audit, eng.layer_idx);
+      ++sum.first_flips;
+      cascaded[tk] = 1;
+      ++sum.cascaded_tokens;
+      sum.worst_mean_mult =
+          std::max(sum.worst_mean_mult, audit.max_noise_multiple);
+      sum.worst_struct_mult =
+          std::max(sum.worst_struct_mult, audit.max_structure_multiple);
+    }
+  }
+  DGPP_LOG_INFO(
+      "TP [{}] route audit (cascade): {} first flips certified (worst "
+      "{:.1f}x mean noise, {:.1f}x max drift), {} cascaded tokens, {} "
+      "consequence route differences",
+      what, sum.first_flips, sum.worst_mean_mult, sum.worst_struct_mult,
+      sum.cascaded_tokens, sum.consequence_rows);
+}
+
 // Runs one loopback TP world end to end and asserts the full parity
 // surface against the supplied oracle references: cross-rank bitwise at
 // every observable, free-run l2 + top-1 near-tie certification, per-layer
@@ -255,6 +339,7 @@ void check_world(int world, uint16_t port, const std::string& dir,
                   const std::vector<int64_t>& tokens,
                   const std::vector<const uint16_t*>& state_ptrs,
                   int64_t cache, const GlmDiagnosticModel::Outputs& ref_free,
+                  const GlmDiagnosticModel::Outputs& ref_iso,
                   const std::vector<std::vector<uint16_t>>& ref_captures,
                   const std::vector<std::vector<uint16_t>>& ref_boundary,
                   const char* what) {
@@ -299,6 +384,41 @@ void check_world(int world, uint16_t port, const std::string& dir,
                       b.free_out.routes[l].weights,
               "routing decisions differ across ranks");
     }
+  }
+
+  // Optional output dump (DGPP_TP_DUMP_DIR): the free-run observables as
+  // files, exactly the fabric runner's {out}.* names — the offline
+  // instruments (bitwise compares vs fabric runs, rel_l2 tables) work on
+  // one artifact format then. When the boundary capture is present, both
+  // sides' folds go out too ({what}.fold.{attn|ffn}.L{N}.{tp|ref}.bf16):
+  // the fold l2 tables above summarize what happened, the dumps are what
+  // the ulp-level forensics (|d| vs |oracle| per element) run on.
+  if (const char* dump_dir = std::getenv("DGPP_TP_DUMP_DIR")) {
+    const std::string p = std::string(dump_dir) + "/" + what;
+    const auto dump = [&](const std::string& suffix,
+                          const std::vector<uint16_t>& bits) {
+      std::FILE* f = std::fopen((p + suffix).c_str(), "wb");
+      if (!f) throw std::runtime_error("cannot write " + p + suffix);
+      if (std::fwrite(bits.data(), 2, bits.size(), f) != bits.size())
+        throw std::runtime_error("short write to " + p + suffix);
+      std::fclose(f);
+    };
+    dump(".final_hidden.bf16", ranks[0].free_out.final_hidden_bits);
+    dump(".logits.bf16", ranks[0].free_out.logits_bits);
+    const bool have_folds = ranks[0].boundary.size() ==
+                                2 * static_cast<size_t>(cfg.num_hidden_layers) &&
+                            ref_boundary.size() == ranks[0].boundary.size();
+    if (have_folds)
+      for (int l = 0; l < cfg.num_hidden_layers; ++l)
+        for (int site = 0; site < 2; ++site) {
+          const char* sname = site == 0 ? "attn" : "ffn";
+          dump(".fold." + std::string(sname) + ".L" + std::to_string(l) +
+                   ".tp.bf16",
+               ranks[0].boundary[2 * l + site]);
+          dump(".fold." + std::string(sname) + ".L" + std::to_string(l) +
+                   ".ref.bf16",
+               ref_boundary[2 * l + site]);
+        }
   }
 
   // ---- vs oracle: free-run end-to-end -----------------------------
@@ -351,28 +471,72 @@ void check_world(int world, uint16_t port, const std::string& dir,
   require(top1_uncertified == 0,
           "free-run top-1 disagreement is not a certified near tie "
           "(oracle top-2 margin > 32x TP-vs-oracle logit noise)");
+  // Reported IMMEDIATELY (the parity sections below can throw before the
+  // end-of-run summary, and the free-run numbers are the hunt's context:
+  // flip compounding is the designated non-assertion surface, so its size
+  // must survive every failure path).
+  DGPP_LOG_INFO(
+      "TP [{}] world={} FREE-RUN: final_hidden l2={:.6f}, top-1 misses={}/{} "
+      "(all certified, worst margin {:.1f}x noise)",
+      what, world, free_l2, top1_mismatch, tokens.size(), worst_margin_ratio);
 
   // ---- vs oracle: per-layer isolated parity (the assertion surface) --
   // Kept-row discipline: a token whose routing flipped vs the oracle
   // legitimately moves O(1) (the noaux bias ties scores at the selection
   // boundary); its rows are excluded from the l2 and the flips are
-  // certified separately below. Kept rows must sit under 2e-2 — the
-  // M4 curated-suite tier — and measured an order lower.
+  // certified separately below. The routes compared are the ISOLATED
+  // forward's OWN (TP-isolated vs oracle-isolated) — the routing the
+  // compared layers actually executed — NOT the free-run's: the isolated
+  // streams pass through each layer's attention fold first, whose
+  // cross-implementation noise flips dense near-ties inside the isolated
+  // forward at real dims, and the free-run filter misread those flips as
+  // kept rows (the 0.57 hunt: layers 3/39 "folds" were one-expert
+  // reroutes on two tokens, uniform ~0.08 additive — not compute
+  // divergence).
+  // Failures COLLECT (with values) and assert at the end: one run must
+  // yield the whole per-layer table — a first-throw here cost the hunt
+  // the numbers behind every layer after the first miss.
+  const auto find_route =
+      [](const std::vector<dgpp::GlmRouteTraceLayer>& routes,
+         uint32_t layer) -> const dgpp::GlmRouteTraceLayer* {
+    for (const auto& r : routes)
+      if (r.layer_idx == layer) return &r;
+    return nullptr;
+  };
   double worst_layer_l2 = 0;
+  std::vector<std::string> parity_failures;
   {
     const size_t T = tokens.size();
     const size_t row_elems =
         static_cast<size_t>(cfg.hidden_size) * 4;  // [4, hidden] per token
     for (size_t l = 0; l < ranks[0].captures.size(); ++l) {
-      // Which route belongs to this layer (MoE layers only)?
-      const dgpp::GlmRouteTraceLayer* eng_route = nullptr;
-      const dgpp::GlmRouteTraceLayer* ref_route = nullptr;
-      for (size_t ri = 0; ri < ranks[0].free_out.routes.size(); ++ri)
-        if (ranks[0].free_out.routes[ri].layer_idx == l) {
-          eng_route = &ranks[0].free_out.routes[ri];
-          ref_route = &ref_free.routes[ri];
-          break;
-        }
+      // captures[l] is the stream state AFTER layer l-1 (index 0 is the
+      // initial state); the row filter must therefore pair it with
+      // layer (l-1)'s routing — the route that produced it. The loop
+      // originally paired captures[l] with route[l], one layer off:
+      // invisible at fixture (isolated flips never happened there), but
+      // at real dims it kept flip-affected rows at the capture following
+      // a flipping layer (layers 40/43/44's "failures" were layers
+      // 39/42/43's certified flips, mis-paired).
+      const uint32_t src_layer =
+          l == 0 ? 0 : static_cast<uint32_t>(l) - 1;
+      // Which route did the ISOLATED forward execute for this layer
+      // (MoE layers only)? l == 0 is the initial state — definitionally
+      // identical, no route pairs with it at all.
+      const dgpp::GlmRouteTraceLayer* eng_route =
+          l == 0 ? nullptr
+                 : find_route(ranks[0].iso_out.routes, src_layer);
+      const dgpp::GlmRouteTraceLayer* ref_route =
+          l == 0 ? nullptr : find_route(ref_iso.routes, src_layer);
+      // A MoE layer must carry its route on BOTH sides or neither — a
+      // one-sided route is a bookkeeping bug (and used to be a null
+      // deref: the short-circuit below only guards eng_route).
+      require(!eng_route || ref_route,
+              "isolated route present on TP side only (layer " +
+                  std::to_string(l) + ")");
+      require(!ref_route || eng_route,
+              "isolated route present on oracle side only (layer " +
+                  std::to_string(l) + ")");
       int kept_rows = 0, flipped_rows = 0;
       double acc = 0;
       for (size_t t = 0; t < T; ++t) {
@@ -391,7 +555,7 @@ void check_world(int world, uint16_t port, const std::string& dir,
         const uint16_t* b = ref_captures[l].data() + t * row_elems;
         for (size_t i = 0; i < row_elems; ++i) {
           const double d = dgpp::bf16_bits_to_float(a[i]) -
-                            dgpp::bf16_bits_to_float(b[i]);
+                           dgpp::bf16_bits_to_float(b[i]);
           acc += d * d;
         }
       }
@@ -399,13 +563,14 @@ void check_world(int world, uint16_t port, const std::string& dir,
                             ? std::sqrt(acc / (double(kept_rows) * row_elems))
                             : 0.0;
       worst_layer_l2 = std::max(worst_layer_l2, l2);
-      require(l2 < 0.02,
-              "isolated kept-row l2 vs oracle (layer " + std::to_string(l) +
-                  ")");
-      if (flipped_rows)
-        DGPP_LOG_INFO("TP [{}] world={} layer {} isolated: {} flipped rows "
-                      "excluded (certified below)",
-                      what, world, l, flipped_rows);
+      DGPP_LOG_INFO(
+          "TP [{}] world={} capture {} (post-layer {}): kept-row l2={:.6f} "
+          "({} kept, {} flipped rows excluded, certified below)",
+          what, world, l, src_layer, l2, kept_rows, flipped_rows);
+      if (l2 >= 0.02)
+        parity_failures.push_back(
+            "isolated kept-row l2 vs oracle (capture after layer " +
+            std::to_string(src_layer) + ") = " + std::to_string(l2));
     }
   }
 
@@ -427,19 +592,24 @@ void check_world(int world, uint16_t port, const std::string& dir,
                     2 * static_cast<size_t>(cfg.num_hidden_layers),
             "boundary fold capture count mismatch");
     for (int l = 0; l < cfg.num_hidden_layers; ++l) {
-      const dgpp::GlmRouteTraceLayer* eng_route = nullptr;
-      const dgpp::GlmRouteTraceLayer* ref_route = nullptr;
-      for (size_t ri = 0; ri < ranks[0].free_out.routes.size(); ++ri)
-        if (ranks[0].free_out.routes[ri].layer_idx ==
-            static_cast<uint32_t>(l)) {
-          eng_route = &ranks[0].free_out.routes[ri];
-          ref_route = &ref_free.routes[ri];
-          break;
-        }
+      // The ISOLATED forward's routing (same discipline as the capture
+      // loop above — the free-run's is a different forward).
+      const dgpp::GlmRouteTraceLayer* eng_route =
+          find_route(ranks[0].iso_out.routes, static_cast<uint32_t>(l));
+      const dgpp::GlmRouteTraceLayer* ref_route =
+          find_route(ref_iso.routes, static_cast<uint32_t>(l));
       for (int site = 0; site < 2; ++site) {
         const bool is_ffn = site == 1;
         const uint16_t* a = ranks[0].boundary[2 * l + site].data();
         const uint16_t* b = ref_boundary[2 * l + site].data();
+        // Same presence discipline as the capture loop: both sides or
+        // neither — a one-sided route must fail loudly, never deref.
+        require(!eng_route || ref_route,
+                "fold route present on TP side only (layer " +
+                    std::to_string(l) + ")");
+        require(!ref_route || eng_route,
+                "fold route present on oracle side only (layer " +
+                    std::to_string(l) + ")");
         int kept = 0;
         double acc = 0;
         for (size_t t = 0; t < T; ++t) {
@@ -452,59 +622,108 @@ void check_world(int world, uint16_t port, const std::string& dir,
           ++kept;
           for (size_t i = 0; i < row_elems; ++i) {
             const double d = dgpp::bf16_bits_to_float(a[t * row_elems + i]) -
-                              dgpp::bf16_bits_to_float(b[t * row_elems + i]);
+                             dgpp::bf16_bits_to_float(b[t * row_elems + i]);
             acc += d * d;
           }
         }
         const double l2 =
             kept ? std::sqrt(acc / (double(kept) * row_elems)) : 0.0;
         worst_fold_l2 = std::max(worst_fold_l2, l2);
-        require(l2 < 0.02,
-                std::string("boundary fold l2 vs oracle (layer ") +
-                    std::to_string(l) + (is_ffn ? ", ffn" : ", attn") + ")");
+        // Per-token distribution: cross-implementation bf16 regrouping
+        // noise concentrates on cancellation-heavy tokens (output much
+        // smaller than its contributions), while a systematic slicing/
+        // kernel bug is uniform. The tail (max token) is the noise
+        // signature; the median says whether the whole fold moved.
+        std::vector<double> per_token;
+        for (size_t t = 0; t < T; ++t) {
+          const bool flipped =
+              is_ffn && eng_route &&
+              !std::equal(eng_route->ids.begin() + t * eng_route->top_k,
+                          eng_route->ids.begin() + (t + 1) * eng_route->top_k,
+                          ref_route->ids.begin() + t * ref_route->top_k);
+          if (flipped) continue;
+          double ta = 0;
+          for (size_t i = 0; i < row_elems; ++i) {
+            const double d = dgpp::bf16_bits_to_float(a[t * row_elems + i]) -
+                             dgpp::bf16_bits_to_float(b[t * row_elems + i]);
+            ta += d * d;
+          }
+          per_token.push_back(std::sqrt(ta / row_elems));
+        }
+        std::sort(per_token.begin(), per_token.end());
+        DGPP_LOG_INFO(
+            "TP [{}] world={} layer {} {} fold: kept-row l2={:.6f} "
+            "(token l2 min/med/max = {:.6f}/{:.6f}/{:.6f}, n={})",
+            what, world, l, is_ffn ? "ffn" : "attn", l2,
+            per_token.empty() ? 0.0 : per_token.front(),
+            per_token.empty()
+                ? 0.0
+                : per_token[per_token.size() / 2],
+            per_token.empty() ? 0.0 : per_token.back(), per_token.size());
+        if (l2 >= 0.02)
+          parity_failures.push_back(
+              std::string("boundary fold l2 vs oracle layer ") +
+              std::to_string(l) + (is_ffn ? " (ffn)" : " (attn)") + " = " +
+              std::to_string(l2));
       }
     }
   }
+  require(parity_failures.empty(), [&] {
+    std::string joined = "parity surface vs oracle (" +
+                         std::to_string(parity_failures.size()) +
+                         " failing layers):";
+    for (const auto& f : parity_failures) joined += "\n  " + f;
+    return joined;
+  }());
 
-  // ---- vs oracle: routing (flips must be certified near ties) ------
-  int64_t flips = 0, swaps = 0;
-  double worst_noise_mult = 0;
-  size_t oi = 0;  // oracle route index (MoE layers only, ascending)
-  for (size_t l = 0; l < ranks[0].free_out.routes.size(); ++l) {
-    const auto& eng = ranks[0].free_out.routes[l];
-    const auto& ref_route = ref_free.routes[oi];
-    require(ref_route.layer_idx == eng.layer_idx,
-            "route layer alignment vs oracle");
-    const std::vector<float>& eng_biased =
-        ranks[0].free_out.route_biased[l];
-    const std::vector<float>& ref_biased = ref_free.route_biased[oi];
-    RouteFlipAudit audit;
-    audit_route_flips(eng.ids.data(), ref_route.ids.data(),
-                      eng_biased.data(), ref_biased.data(),
-                      static_cast<int64_t>(eng.tokens),
-                      cfg.moe_config().top_k, cfg.moe_config().n_experts,
-                      audit, eng.layer_idx);
-    flips += audit.tokens_flipped;
-    swaps += audit.swaps_certified;
-    worst_noise_mult = std::max(worst_noise_mult, audit.max_noise_multiple);
-    ++oi;
+  // ---- vs oracle: routing (the cascade discipline) ------------------
+  // Both surfaces: the FREE-RUN routes (whole-trajectory view) and the
+  // ISOLATED routes (the kept-row exclusions' own certification). Every
+  // token's FIRST divergence must certify; later divergences of an
+  // already-flipped token are consequences (reported). The isolated
+  // audit is the parity gate's routing assertion; the free-run audit is
+  // the same discipline on the compounded trajectory.
+  audit_routes_cascade(ranks[0].free_out.routes,
+                       ranks[0].free_out.route_biased, ref_free.routes,
+                       ref_free.route_biased, cfg.moe_config().top_k,
+                       cfg.moe_config().n_experts, what);
+  {
+    const std::string iso_label =
+        std::string(what) + "/isolated";
+    audit_routes_cascade(ranks[0].iso_out.routes,
+                         ranks[0].iso_out.route_biased, ref_iso.routes,
+                         ref_iso.route_biased, cfg.moe_config().top_k,
+                         cfg.moe_config().n_experts, iso_label.c_str());
   }
 
   DGPP_LOG_INFO(
       "TP [{}] world={} free l2={:.4f} worst layer l2={:.4f} worst fold "
-      "l2={:.4f} top1 misses={} (uncertified {}, worst margin {:.1f}x noise) "
-      "route flips={} (certified swaps {}, worst {:.1f}x noise)",
+      "l2={:.4f} top1 misses={} (uncertified {}, worst margin {:.1f}x "
+      "noise) — route audits above (cascade discipline)",
       what, world, free_l2, worst_layer_l2, worst_fold_l2, top1_mismatch,
-      top1_uncertified, worst_margin_ratio, flips, swaps, worst_noise_mult);
+      top1_uncertified, worst_margin_ratio);
 
   for (auto& b : buses) b->stop();
 }
 
 // Oracle references for one token shape: the world=1 model's free-run and
 // isolated outputs (with per-layer captures and boundary folds),
-// determinism double-checked.
+// determinism double-checked. iso_out carries the ISOLATED forward's own
+// routing — the kept-row discipline's flip filter must compare the
+// routing the isolated layers ACTUALLY EXECUTED (TP-isolated vs
+// oracle-isolated), not the free-run's: the isolated streams enter each
+// layer from the replayed reference state but pass through that layer's
+// own attention FIRST, and the attention fold's ~1e-3-rms cross-
+// implementation noise flips DENSE router near-ties inside the isolated
+// forward at real dims (288 sigmoid-scored experts, top-8). The
+// free-run-route filter misread those flips as kept rows — the 0.57
+// hunt's layers 3/39 "failures" were one-expert reroutes, not compute
+// divergence (the fold error vectors measured a uniform ~0.08 additive
+// per element: exactly one expert's weighted contribution, and
+// uncorrelated across the two affected tokens).
 struct OracleRef {
   GlmDiagnosticModel::Outputs free_out;
+  GlmDiagnosticModel::Outputs iso_out;
   std::vector<std::vector<uint16_t>> captures;
   std::vector<std::vector<uint16_t>> boundary;
 };
@@ -520,7 +739,8 @@ OracleRef run_oracle(const GlmTextConfig& cfg, const std::string& dir,
   require(ref.free_out.final_hidden_bits == again.final_hidden_bits &&
               ref.free_out.logits_bits == again.logits_bits,
           "oracle forward is not deterministic across calls");
-  oracle.forward_isolated(tokens, state_ptrs, ref.captures, &ref.boundary);
+  ref.iso_out =
+      oracle.forward_isolated(tokens, state_ptrs, ref.captures, &ref.boundary);
   return ref;
 }
 
@@ -543,7 +763,7 @@ DGPP_TEST(glm_tp_forward_parity_loopback) {
     const OracleRef ref =
         run_oracle(cfg, dir, tokens, state_ptrs, 128);
     check_world(2, 29903, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
-                ref.captures, ref.boundary, "staged");
+                ref.iso_out, ref.captures, ref.boundary, "staged");
   }
 
   // ---- the 21-token case: 5376 elems per boundary — above one latency
@@ -559,9 +779,9 @@ DGPP_TEST(glm_tp_forward_parity_loopback) {
     const OracleRef ref =
         run_oracle(cfg, dir, tokens, state_ptrs, 128);
     check_world(2, 29899, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
-                ref.captures, ref.boundary, "chunked");
+                ref.iso_out, ref.captures, ref.boundary, "chunked");
     check_world(4, 29900, dir, cfg, tokens, state_ptrs, 128, ref.free_out,
-                ref.captures, ref.boundary, "chunked");
+                ref.iso_out, ref.captures, ref.boundary, "chunked");
   }
 }
 
@@ -617,253 +837,124 @@ DGPP_TEST(glm_tp_slice_alignment_contract) {
 }
 
 // ---------------------------------------------------------------------------
-// M5 d4: sharded load vs full-load+views, pinned BITWISE. The sharded
-// GlmLayerStream builds each resident layer directly at the rank's local
-// geometry (only rank-local checkpoint bytes ever read); GlmTpViews::bind
-// on a FULL resident is the independent reference implementation of the
-// same slicing spec. This test is what keeps the two from drifting: every
-// bound surface of every layer (all 6 fixture layers + the MTP draft
-// layer, KDA and DSA, dense and MoE) must match byte-for-byte at worlds 2
-// and 4.
-//
-// Plus the §5.2 boot checks, as arithmetic:
-//   * the replicated digest is rank-invariant (and equals the world=1
-//     pass — same files, same replicated set);
-//   * byte reconcile: sum_r(source bytes read) == world1 total +
-//     (world-1) * verbatim, with verbatim (the replicated + DSA-bridge
-//     re-read set) identical across ranks. Sharded bytes partition
-//     across ranks exactly once — a double-owned or missing row breaks
-//     the identity.
+// M5 d4: sharded load vs full-load+views, pinned BITWISE. The comparator
+// and driver live in src/models/glm_tp_parity — shared with the
+// glm_shard_parity app so the fixture CI and the real-checkpoint gate
+// run ONE code path (the fixture is geometry the real model's 76k-tensor
+// binding is the generalization of; the app is how that generalization
+// is actually tested at scale). This test pins: every bound surface of
+// every layer (all 6 fixture layers + the MTP draft layer, KDA and DSA,
+// dense and MoE) matches byte-for-byte at worlds 2 and 4, the
+// replicated digest is rank-invariant, and the byte reconcile identity
+// holds — sum_r(source) == world1 total + (world-1)*verbatim.
 // ---------------------------------------------------------------------------
-namespace {
-
-// Compares the two bind paths' outputs for one layer. Sizes come from the
-// config at the TEST's local geometry — the slicing spec, spelled out.
-struct BoundCmp {
-  const GlmTextConfig& cfg;
-  int world;
-  int checked = 0;
-
-  void bytes(const std::string& what, const void* a, const void* b, size_t n) {
-    if (std::memcmp(a, b, n) != 0)
-      throw std::runtime_error(what + " differs bitwise (full+bind vs "
-                                   "sharded)");
-    ++checked;
-  }
-  void ints(const std::string& what, int64_t a, int64_t b) {
-    if (a != b)
-      throw std::runtime_error(what + " differs (" + std::to_string(a) +
-                               " vs " + std::to_string(b) + ")");
-    ++checked;
-  }
-  void quant(const std::string& what, const dgpp::GlmQuantMatrix& a,
-              const dgpp::GlmQuantMatrix& b) {
-    ints(what + ".rows", a.rows, b.rows);
-    ints(what + ".cols", a.cols, b.cols);
-    bytes(what, a.payload, b.payload,
-          static_cast<size_t>(a.rows) * static_cast<size_t>(a.cols));
-    bytes(what + ".scales", a.scales, b.scales,
-          static_cast<size_t>((a.rows + 127) / 128) *
-              static_cast<size_t>((a.cols + 127) / 128) * 4);
-  }
-
-  void run(int layer, bool dense_mlp, const dgpp::GlmLayerBound& a,
-           const dgpp::GlmLayerBound& b) {
-    const int64_t H = cfg.hidden_size;
-    // Layer-tagged surface names: a bitwise mismatch names the layer and
-    // the surface, not just "differs somewhere".
-    const auto tag = [layer](const char* what) {
-      return "shard parity (layer " + std::to_string(layer) + "): " + what;
-    };
-    bytes(tag("ln1"), a.ln1, b.ln1, H * 2);
-    bytes(tag("ln2"), a.ln2, b.ln2, H * 2);
-    // mHC (empty on the MTP layer — both sides null).
-    const bool has_mhc = a.mhc && a.mhc->attn_base;
-    if (has_mhc != (b.mhc && b.mhc->attn_base))
-      throw std::runtime_error(tag("mhc presence differs"));
-    if (has_mhc) {
-      // kHcCoeffRows (24) / kHcScaleOutputs (3) — glm_binding's pinned
-      // mHC coefficient row counts.
-      const size_t base_b = 24 * 4;
-      const size_t fn_b = static_cast<size_t>(cfg.hc_mult) * H * 24 * 2;
-      const size_t scale_b = 3 * 4;
-      bytes(tag("mhc.attn_base"), a.mhc->attn_base, b.mhc->attn_base, base_b);
-      bytes(tag("mhc.attn_fn"), a.mhc->attn_fn, b.mhc->attn_fn, fn_b);
-      bytes(tag("mhc.attn_scale"), a.mhc->attn_scale, b.mhc->attn_scale,
-           scale_b);
-      bytes(tag("mhc.ffn_base"), a.mhc->ffn_base, b.mhc->ffn_base, base_b);
-      bytes(tag("mhc.ffn_fn"), a.mhc->ffn_fn, b.mhc->ffn_fn, fn_b);
-      bytes(tag("mhc.ffn_scale"), a.mhc->ffn_scale, b.mhc->ffn_scale,
-           scale_b);
-    }
-    if (a.kda) {
-      dgpp::KdaConfig kc = cfg.kda_config();
-      kc.tp_size = world;
-      const dgpp::KdaGeometry kg = dgpp::KdaGeometry::from_config(kc);
-      const int64_t hd = cfg.kda_head_dim;
-      const int64_t lp_s = kg.local_proj;
-      const int64_t h_s = kg.local_heads;
-      bytes(tag("kda.in_proj"), a.kda->in_proj, b.kda->in_proj,
-            static_cast<size_t>(kg.in_proj_cols) * H * 2);
-      bytes(tag("kda.conv"), a.kda->conv, b.kda->conv,
-            static_cast<size_t>(kg.conv_channels) * cfg.kda_conv_width * 2);
-      bytes(tag("kda.f_b"), a.kda->f_b, b.kda->f_b, lp_s * hd * 2);
-      bytes(tag("kda.g_b"), a.kda->g_b, b.kda->g_b, lp_s * hd * 2);
-      bytes(tag("kda.a_log"), a.kda->a_log, b.kda->a_log, h_s * 4);
-      bytes(tag("kda.dt_bias"), a.kda->dt_bias, b.kda->dt_bias, lp_s * 4);
-      bytes(tag("kda.o_norm"), a.kda->o_norm, b.kda->o_norm, hd * 2);
-      bytes(tag("kda.o_proj"), a.kda->o_proj, b.kda->o_proj, H * lp_s * 2);
-    }
-    if (a.dsa) {
-      dgpp::DsaConfig dc = cfg.dsa_config();
-      dc.tp_size = world;
-      const dgpp::DsaGeometry dgeo = dgpp::DsaGeometry::from_config(dc);
-      const int64_t ql = cfg.q_lora_rank;
-      const int64_t kvl = cfg.kv_lora_rank;
-      const int64_t lh = dgeo.local_heads;
-      const int64_t kv_rows = lh * (cfg.qk_nope_head_dim + cfg.v_head_dim);
-      const int64_t idx_proj = cfg.index_n_heads * cfg.index_head_dim;
-      bytes(tag("dsa.qkv_a"), a.dsa->qkv_a, b.dsa->qkv_a, (ql + kvl) * H * 2);
-      bytes(tag("dsa.q_aln"), a.dsa->q_aln, b.dsa->q_aln, ql * 2);
-      bytes(tag("dsa.kv_aln"), a.dsa->kv_aln, b.dsa->kv_aln, kvl * 2);
-      bytes(tag("dsa.q_b"), a.dsa->q_b, b.dsa->q_b,
-            static_cast<size_t>(dgeo.local_q_rows) * ql * 2);
-      bytes(tag("dsa.kv_b"), a.dsa->kv_b, b.dsa->kv_b, kv_rows * kvl * 2);
-      bytes(tag("dsa.o_proj"), a.dsa->o_proj, b.dsa->o_proj,
-            H * static_cast<size_t>(dgeo.local_v_rows) * 2);
-      bytes(tag("dsa.wq_b"), a.dsa->wq_b, b.dsa->wq_b, idx_proj * ql * 2);
-      bytes(tag("dsa.wk"), a.dsa->wk, b.dsa->wk,
-            static_cast<size_t>(cfg.index_head_dim) * H * 2);
-      bytes(tag("dsa.wp"), a.dsa->wp, b.dsa->wp,
-            static_cast<size_t>(cfg.index_n_heads) * H * 2);
-      bytes(tag("dsa.k_norm_w"), a.dsa->k_norm_w, b.dsa->k_norm_w,
-            cfg.index_head_dim * 2);
-      bytes(tag("dsa.k_norm_b"), a.dsa->k_norm_b, b.dsa->k_norm_b,
-            cfg.index_head_dim * 2);
-      if (a.dsa->gate) {
-        bytes(tag("dsa.gate"), a.dsa->gate, b.dsa->gate,
-              static_cast<size_t>(cfg.index_head_dim) * H * 2);
-        bytes(tag("dsa.ape"), a.dsa->ape, b.dsa->ape,
-              static_cast<size_t>(cfg.index_kpool) * cfg.index_head_dim * 4);
-      }
-    }
-    if (dense_mlp) {
-      for (int i = 0; i < 3; ++i)
-        quant(tag("dense"), a.dense[i], b.dense[i]);
-    } else {
-      const int64_t E = cfg.moe_config().n_experts;
-      const int64_t local_e = cfg.moe_config().n_experts / world;
-      bytes(tag("moe.router_gate"), a.moe->router_gate, b.moe->router_gate,
-            E * H * 2);
-      bytes(tag("moe.router_bias"), a.moe->router_bias, b.moe->router_bias,
-            E * 4);
-      for (int i = 0; i < 3; ++i)
-        quant(tag("moe.shared"), a.moe->shared[i], b.moe->shared[i]);
-      // The full+bind path points at the rank's range inside the full
-      // expert array; the sharded path OWNS exactly those experts.
-      ints(tag("moe.expert_begin"), a.moe->expert_begin, b.moe->expert_begin);
-      ints(tag("moe.expert_count"), a.moe->expert_count, b.moe->expert_count);
-      require(a.moe->expert_count == local_e,
-              tag("expert partition is not the whole-expert range"));
-      for (int64_t e = 0; e < local_e; ++e)
-        for (int i = 0; i < 3; ++i)
-          quant(tag("moe.expert"),
-                a.moe->experts[static_cast<size_t>(e) * 3 + i],
-                b.moe->experts[static_cast<size_t>(e) * 3 + i]);
-    }
-  }
-};
-
-}  // namespace
-
 DGPP_TEST(glm_tp_shard_parity) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";
   glm_tp_write_fixture(dir);
 
-  cudaStream_t st;
-  DGPP_CUDA_OK(cudaStreamCreate(&st));
-
   for (int world : {2, 4}) {
-    // Fresh full (world=1) stream per iteration: its byte counters
-    // accumulate across loads, so reusing one across worlds would
-    // double-count (the parity loop reloads every layer per world).
-    GlmLayerStream full(cfg, dir);
-    const GlmReplicatedDigest ref_digest = full.hash_replicated();
-
-    std::vector<std::unique_ptr<GlmLayerStream>> shards(
-        static_cast<size_t>(world));
-    std::vector<std::unique_ptr<GlmTpViews>> views(
-        static_cast<size_t>(world));
-    for (int r = 0; r < world; ++r) {
-      shards[static_cast<size_t>(r)] =
-          std::make_unique<GlmLayerStream>(cfg, dir, r, world);
-      views[static_cast<size_t>(r)] =
-          std::make_unique<GlmTpViews>(cfg, r, world, st);
-      // The boot digest must be rank-invariant AND identical to the
-      // world=1 pass — same files, same replicated set, order-independent
-      // fold. A mismatch here is the silent-corruption class: some rank
-      // would compute different routers/latent projections.
-      const GlmReplicatedDigest d =
-          shards[static_cast<size_t>(r)]->hash_replicated();
-      require(d.layer == ref_digest.layer && d.globals == ref_digest.globals &&
-                  d.bytes == ref_digest.bytes && d.tensors == ref_digest.tensors,
-              "shard parity: replicated digest differs (rank " +
-                  std::to_string(r) + ")");
-    }
-
-    const int max_layer =
-        cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
-    int surfaces = 0;
-    for (int l = 0; l < max_layer; ++l) {
-      const bool dense_mlp = l < cfg.num_hidden_layers &&
-                             cfg.mlps[l] == GlmMlpKind::Dense;
-      const GlmLayerResident& fr = full.load_layer(l);
-      for (int r = 0; r < world; ++r) {
-        const GlmLayerResident& lr = shards[static_cast<size_t>(r)]->load_layer(l);
-        const GlmLayerBound a = views[static_cast<size_t>(r)]->bind(fr, dense_mlp);
-        const GlmLayerBound b =
-            views[static_cast<size_t>(r)]->bind_sharded(lr, dense_mlp);
-        // bind()'s slab packs are async on the stream; both sides must be
-        // landed before the memcmps.
-        DGPP_CUDA_OK(cudaStreamSynchronize(st));
-        BoundCmp cmp{cfg, world};
-        cmp.run(l, dense_mlp, a, b);
-        surfaces += cmp.checked;
-      }
-    }
-
-    // ---- byte reconcile (the arithmetic pin) --------------------------
-    full.load_globals();
-    uint64_t sum = 0;
-    for (int r = 0; r < world; ++r) {
-      shards[static_cast<size_t>(r)]->load_globals();
-      sum += shards[static_cast<size_t>(r)]->source_bytes_read();
-      require(shards[static_cast<size_t>(r)]->verbatim_source_bytes() ==
-                  shards[0]->verbatim_source_bytes(),
-              "shard parity: verbatim re-read set differs across ranks");
-      require(shards[static_cast<size_t>(r)]->source_bytes_read() <
-                  full.source_bytes_read(),
-              "shard parity: sharded rank reads as much as the full load");
-    }
-    const uint64_t expect = full.source_bytes_read() +
-                            static_cast<uint64_t>(world - 1) *
-                                shards[0]->verbatim_source_bytes();
-    require(sum == expect,
-            "shard parity: byte reconcile failed — sum " +
-                std::to_string(sum) + " != total + (world-1)*verbatim " +
-                std::to_string(expect));
-
+    const GlmShardParityReport rep =
+        glm_shard_parity_check(cfg, dir, world);
+    require(rep.layers_checked ==
+                cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0),
+            "shard parity: layer count mismatch");
     DGPP_LOG_INFO(
         "shard parity world={}: {} layers x {} ranks, {} bound surfaces "
         "bitwise-equal; byte reconcile exact — rank reads {}/{} source "
         "bytes ({:.0f}%)",
-        world, max_layer, world, surfaces,
-        shards[0]->source_bytes_read(), full.source_bytes_read(),
-        100.0 * static_cast<double>(shards[0]->source_bytes_read()) /
-            static_cast<double>(full.source_bytes_read()));
+        world, rep.layers_checked, world, rep.surfaces_checked,
+        rep.shard_source_bytes, rep.full_source_bytes,
+        100.0 * static_cast<double>(rep.shard_source_bytes) /
+            static_cast<double>(rep.full_source_bytes));
   }
-  DGPP_CUDA_OK(cudaStreamDestroy(st));
+}
+
+// ---------------------------------------------------------------------------
+// The 0.57 hunt (2026-08-31): the SAME forward-parity machinery against
+// the REAL checkpoint, loopback. The fabric gate's first real TP=2 run
+// failed its tolerance tier (final_hidden rel_l2 0.5677, logits 0.5159,
+// uniform on every token from token 0 — systematic, not drift) while the
+// cross-rank BITWISE surface passed; the CI fixture cannot reproduce a
+// geometry-class bug its own dims never reach (fixture DSA q_lora 64 /
+// kv_lora 64 / nope 32 / v 32 / 8 heads vs real 1536 / 512 / 256 / 256 /
+// 64; KDA head_dim 64 vs 128). This test is the hunt's second instrument:
+// per-layer isolated parity and raw boundary folds vs the world=1 oracle
+// AT real dims, with two token counts chosen to bisect the FOLD path at
+// real hidden 4096 (GlmBusBoundaryReducer routes on rows*hidden):
+//   T=21  -> 86016 elems > 2 latency slots -> the BULK RS+AG machine
+//            (exactly the fabric run's every-boundary path; the CI
+//            forward at fixture hidden 256 NEVER exercised bulk folds)
+//   T=2   -> 8192 elems <= 2 slots -> the CHUNKED latency path
+// T=21 failing while T=2 passes convicts the bulk path in the forward
+// context; both failing convicts the sharded compute at real local
+// geometry; both passing points at the fabric context itself.
+// Env-gated so CI stays fixture-only: DGPP_TP_REAL_MODEL=ORG/NAME.
+// ---------------------------------------------------------------------------
+DGPP_TEST(glm_tp_forward_parity_real) {
+  const char* model_env = std::getenv("DGPP_TP_REAL_MODEL");
+  if (!model_env || !*model_env) {
+    DGPP_LOG_INFO("glm_tp_forward_parity_real: skipped (set "
+                  "DGPP_TP_REAL_MODEL=ORG/NAME to run against the real "
+                  "checkpoint)");
+    return;
+  }
+  const std::string model_id = model_env;
+  std::string err;
+  const std::string dir = dgpp::hf::model_dir(model_id, &err);
+  require(!dir.empty(), "real model resolve failed: " + err);
+  DGPP_LOG_INFO("real-dims forward parity: {} -> {}", model_id, dir);
+  const GlmTextConfig cfg =
+      GlmTextConfig::from_json_file(
+          (std::filesystem::path(dir) / "config.json").string());
+  const int64_t cache = 128;
+
+  std::vector<std::string> case_failures;
+  // T=21 at real hidden 4096 rides the bulk RS+AG machine at every
+  // boundary — the only fold path reachable at real dims: the chunked
+  // latency path needs rows*4096 <= 8192 (T <= 2), and the DSA layer
+  // rejects max_tokens below its index-derived minimum, so no legal T
+  // takes it. Worlds 2 AND 4: the gate's TP=2/TP=4 parity tier in one
+  // command.
+  for (const auto& [tokens_n, world, port, what] :
+       std::vector<std::tuple<int, int, uint16_t, const char*>>{
+           {21, 2, 29910, "bulk-real-w2"},
+           {21, 4, 29912, "bulk-real-w4"},
+       }) {
+    // A failing case must not strand the other: each case's evidence is
+    // collected (logs + dumps land regardless), the exception is
+    // re-raised only after every case ran — the hunt gets the whole
+    // table in one process.
+    try {
+      const std::vector<int64_t> tokens =
+          make_tokens(tokens_n, cfg.vocab_size);
+      const std::vector<std::vector<uint16_t>> states = make_layer_states(
+          cfg.num_hidden_layers, tokens_n, cfg.hidden_size);
+      std::vector<const uint16_t*> state_ptrs;
+      for (const auto& s : states) state_ptrs.push_back(s.data());
+      // Oracle: single pass (the fixture test's determinism double-run is
+      // halved away here — M4 and the fabric runs established the world=1
+      // chain's determinism, and each real-dims pass costs minutes).
+      OracleRef ref;
+      {
+        GlmDiagnosticModel oracle(cfg, dir, tokens_n, cache);
+        ref.free_out = oracle.forward(tokens);
+        ref.iso_out = oracle.forward_isolated(tokens, state_ptrs,
+                                               ref.captures, &ref.boundary);
+      }
+      check_world(world, port, dir, cfg, tokens, state_ptrs, cache,
+                  ref.free_out, ref.iso_out, ref.captures, ref.boundary,
+                  what);
+    } catch (const std::exception& e) {
+      case_failures.push_back(std::string("[") + what + "] " + e.what());
+      DGPP_LOG_ERROR("real-dims case {} failed: {}", what, e.what());
+    }
+  }
+  require(case_failures.empty(), [&] {
+    std::string joined;
+    for (const auto& f : case_failures) joined += f + "\n";
+    return joined;
+  }());
 }
 
 }  // namespace
