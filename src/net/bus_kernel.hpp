@@ -86,7 +86,13 @@ struct alignas(64) BusAllReduceCtl {
   uint64_t stamp_first_claim = 0;
   uint64_t stamp_reduce_done = 0;
   uint32_t status = 0;  // 0 = reduced, 1 = deadline/poison exit
-  uint32_t pad2[3];  // 48 + 4 + 12 = 64
+  // TEMP hunt instrumentation (small-collective corruption): the FIRST
+  // doorbell this kernel claimed — flat cell index, the doorbell's len
+  // field, and its seq — to discriminate a stale-len read from a
+  // receive-slot misalignment. 0/0/0 = no claim yet.
+  uint32_t dbg_first_cell = 0;
+  uint32_t dbg_first_len = 0;
+  uint32_t dbg_first_seq = 0;
 };
 static_assert(sizeof(BusAllReduceCtl) == 64,
               "BusAllReduceCtl must occupy one cache line");
