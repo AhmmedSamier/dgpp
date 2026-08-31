@@ -46,6 +46,14 @@ PEER=$1
 PHASE_MIN=${2:-15}
 BIN_DIR=${3:-build-ci}
 
+PEER_HOST=${PEER##*@}
+# Rank 0's advertized address = the SOURCE address of the route to the
+# peer (NOT `hostname -I`, whose first entry may be a different fabric
+# interface — the smoke run caught exactly that).
+RANK0_IP=$(ip route get "$PEER_HOST" 2>/dev/null |
+    awk '{for (i = 1; i < NF; ++i) if ($i == "src") {print $(i + 1); exit}}')
+[ -n "$RANK0_IP" ] || { echo "soak: no route to $PEER_HOST" >&2; exit 2; }
+
 BIN="$BIN_DIR/bus_check"
 LOG=/tmp/opencode/soak
 PORT_BASE=29980
@@ -89,7 +97,7 @@ for bytes in "${PHASES[@]}"; do
   fi
 
   ssh -o BatchMode=yes "$PEER" "cd /tmp/bus4 && ./bus_check ping \
-      --peer $(hostname -I | awk '{print $1}') --port $port --contend \
+      --peer $RANK0_IP --port $port --contend \
       --soak-ms $SOAK_MS --bytes $bytes > ping_p$phase.log 2>&1; \
       echo exit=\$? >> ping_p$phase.log"
   rc=$?
