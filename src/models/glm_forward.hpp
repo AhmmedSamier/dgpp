@@ -77,11 +77,17 @@ class GlmDiagnosticModel {
   // folds the two block-boundary partials through `boundary` (required —
   // a TP model without a reducer would silently return partial sums).
   // The world=1 path (null reducer) is byte-identical to M4.
+  //
+  // RESIDENCY: `GlmResidency::Resident` materializes every layer once
+  // (the production residency contract — storage is never touched during
+  // inference after the first forward). Only worlds whose
+  // GlmLayerStream::resident_bytes() fits can use it (real dims: world 4).
   GlmDiagnosticModel(const GlmTextConfig& cfg,
                      const std::string& checkpoint_dir, int max_tokens,
                      int64_t max_cache_tokens,
                      GlmBoundaryReducer* boundary = nullptr, int tp_rank = 0,
-                     int tp_world = 1);
+                     int tp_world = 1,
+                     GlmResidency residency = GlmResidency::Streaming);
   ~GlmDiagnosticModel();
   GlmDiagnosticModel(const GlmDiagnosticModel&) = delete;
   GlmDiagnosticModel& operator=(const GlmDiagnosticModel&) = delete;

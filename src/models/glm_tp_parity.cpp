@@ -164,10 +164,37 @@ struct BoundCmp {
 
 }  // namespace
 
-GlmShardParityReport glm_shard_parity_check(const GlmTextConfig& cfg,
-                                           const std::string& checkpoint_dir,
-                                           int world,
-                                           const std::vector<int>* layers) {
+// Address fingerprint of one resident view — the representative pointer
+// of every site (norms, mHC, one attention matrix per kind, the MLP
+// payload/scale pair, the router and the first expert). A cache hit must
+// return the SAME addresses for every one of these; a rebuild or a bump
+// move changes them.
+std::vector<const void*> view_fingerprint(const GlmLayerResident& r) {
+  std::vector<const void*> f;
+  f.push_back(r.ln1);
+  f.push_back(r.ln2);
+  f.push_back(r.mhc.attn_fn);
+  if (r.kind == GlmLayerKind::Kda) {
+    f.push_back(r.kda.in_proj);
+    f.push_back(r.kda.o_proj);
+  } else {
+    f.push_back(r.dsa.wq_b);
+    f.push_back(r.dsa.qkv_a);
+  }
+  f.push_back(r.dense[0].payload);
+  f.push_back(r.dense[0].scales);
+  f.push_back(r.moe.router_gate);
+  if (!r.moe.experts.empty()) {
+    f.push_back(r.moe.experts[0].payload);
+    f.push_back(r.moe.experts[0].scales);
+  }
+  f.push_back(reinterpret_cast<const void*>(r.bytes));
+  return f;
+}
+
+GlmShardParityReport glm_shard_parity_check(
+    const GlmTextConfig& cfg, const std::string& checkpoint_dir, int world,
+    const std::vector<int>* layers, bool resident) {
   cudaStream_t st;
   DGPP_CUDA_OK(cudaStreamCreate(&st));
   GlmShardParityReport report;
@@ -186,8 +213,9 @@ GlmShardParityReport glm_shard_parity_check(const GlmTextConfig& cfg,
         static_cast<size_t>(world));
     std::vector<std::unique_ptr<GlmTpViews>> views(static_cast<size_t>(world));
     for (int r = 0; r < world; ++r) {
-      shards[static_cast<size_t>(r)] =
-          std::make_unique<GlmLayerStream>(cfg, checkpoint_dir, r, world);
+      shards[static_cast<size_t>(r)] = std::make_unique<GlmLayerStream>(
+          cfg, checkpoint_dir, r, world,
+          resident ? GlmResidency::Resident : GlmResidency::Streaming);
       views[static_cast<size_t>(r)] =
           std::make_unique<GlmTpViews>(cfg, r, world, st);
       // The boot digest must be rank-invariant AND identical to the
@@ -220,6 +248,10 @@ GlmShardParityReport glm_shard_parity_check(const GlmTextConfig& cfg,
     }
 
     int surfaces = 0;
+    // Resident mode: fingerprints of each rank's first-pass views, so the
+    // post-loop proof pass can demand the SAME addresses back from cache.
+    std::vector<std::vector<std::vector<const void*>>> fingerprints(
+        static_cast<size_t>(world));
     for (int l : *layers) {
       const bool dense_mlp = l < cfg.num_hidden_layers &&
                              cfg.mlps[static_cast<size_t>(l)] ==
@@ -227,6 +259,8 @@ GlmShardParityReport glm_shard_parity_check(const GlmTextConfig& cfg,
       const GlmLayerResident& fr = full.load_layer(l);
       for (int r = 0; r < world; ++r) {
         const GlmLayerResident& lr = shards[static_cast<size_t>(r)]->load_layer(l);
+        if (resident)
+          fingerprints[static_cast<size_t>(r)].push_back(view_fingerprint(lr));
         const GlmLayerBound a = views[static_cast<size_t>(r)]->bind(fr, dense_mlp);
         const GlmLayerBound b =
             views[static_cast<size_t>(r)]->bind_sharded(lr, dense_mlp);
@@ -264,6 +298,35 @@ GlmShardParityReport glm_shard_parity_check(const GlmTextConfig& cfg,
             "shard parity: byte reconcile failed — sum " +
                 std::to_string(sum) + " != total + (world-1)*verbatim " +
                 std::to_string(expect));
+
+    // ---- resident cache-hit proof (the residency contract) -----------
+    // Every requested layer re-served from cache: SAME addresses, ZERO
+    // storage reads. A rebuild, a bump move, or a stray re-read fails
+    // here — this is the "storage is never touched again" clause, as an
+    // assertion instead of a promise.
+    if (resident) {
+      int hits = 0;
+      for (int r = 0; r < world; ++r) {
+        const uint64_t before = shards[static_cast<size_t>(r)]->source_bytes_read();
+        for (size_t i = 0; i < fingerprints[static_cast<size_t>(r)].size();
+             ++i) {
+          const int l = (*layers)[i];
+          const GlmLayerResident& again =
+              shards[static_cast<size_t>(r)]->load_layer(l);
+          const std::vector<const void*> got = view_fingerprint(again);
+          require(got == fingerprints[static_cast<size_t>(r)][i],
+                  "shard parity: resident cache hit changed the view "
+                  "(layer " +
+                      std::to_string(l) + ", rank " + std::to_string(r) +
+                      ") — the layer was rebuilt, not served");
+          ++hits;
+        }
+        require(shards[static_cast<size_t>(r)]->source_bytes_read() == before,
+                "shard parity: resident cache pass re-read storage (rank " +
+                    std::to_string(r) + ")");
+      }
+      report.cache_hits = hits;
+    }
 
     report.surfaces_checked = surfaces;
     report.full_source_bytes = full.source_bytes_read();

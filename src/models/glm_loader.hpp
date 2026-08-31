@@ -16,6 +16,21 @@
 // memory is therefore largest-layer + globals, which is what makes
 // full-model correctness testable on a single node without the TP placement.
 //
+// RESIDENT model (the production residency contract, DESIGN §3, M6 d5 —
+// implemented M5 ahead of the serving integration): GlmResidency::Resident
+// materializes each layer ONCE into its own exact-formula bump and keeps
+// it for the stream's lifetime — storage is never touched again after a
+// layer's first load. load_layer on a materialized layer returns the
+// cached view with NO sync (the loader wrote nothing; the streaming
+// contract's sync exists to cover loader WRITES) and NO storage reads
+// (source_bytes_read stops growing — glm_stream_check's second pass is
+// the contract's proof). release_layer is a no-op so existing call sites
+// (the model's preconstruct pass) stay correct unchanged. resident_bytes()
+// is the exact formula total, so callers can refuse a world that cannot
+// fit BEFORE the first allocation: only TP=4 fits 128 GB at real dims
+// (~79 GiB weights/rank, ~49 GB headroom; TP=2 and TP=1 cannot — the
+// memory rationale for the four-rank deployment target).
+//
 // Sharded build (M5 d4): world>1 produces the resident layer directly at
 // this rank's TP geometry — the same layouts GlmTpViews::bind would carve
 // from a full layer, pinned bitwise by glm_tp_test's shard-parity test.
@@ -42,6 +57,12 @@
 #include "models/kda_layer.hpp"
 
 namespace dgpp {
+
+// Which residency contract a stream serves (see the file comment).
+enum class GlmResidency {
+  Streaming,  // one layer resident at a time (the M4 diagnostic instrument)
+  Resident,   // every layer materialized once, kept for the lifetime
+};
 
 // Managed-memory bump (defined in glm_loader.cu): aligned grants, reset per
 // layer; counting mode walks the same grant sequence without allocating,
@@ -140,14 +161,18 @@ class GlmLayerStream {
   // formula cannot drift). TP geometry is validated BEFORE any shard is
   // opened; misaligned inter quotients fail there, loudly.
   GlmLayerStream(const GlmTextConfig& cfg, const std::string& checkpoint_dir,
-                 int rank = 0, int world = 1);
+                 int rank = 0, int world = 1,
+                 GlmResidency residency = GlmResidency::Streaming);
   ~GlmLayerStream();
   GlmLayerStream(const GlmLayerStream&) = delete;
   GlmLayerStream& operator=(const GlmLayerStream&) = delete;
 
   // Loads layer `layer` (0..num_hidden_layers-1, or mtp_layer() when the
-  // draft layer is present). Frees the previously resident layer first.
-  // The returned view stays valid until the next load_layer/release_layer.
+  // draft layer is present). STREAMING: frees the previously resident layer
+  // first; the returned view stays valid until the next
+  // load_layer/release_layer. RESIDENT: materializes into the layer's own
+  // bump on first call and serves the cached view forever after — no
+  // storage reads, no sync on cache hits, release_layer is a no-op.
   const GlmLayerResident& load_layer(int layer);
 
   // Loads embed/lm_head/final norm once; persists across load_layer calls.
@@ -164,6 +189,15 @@ class GlmLayerStream {
                             int rank = 0, int world = 1);
   static size_t globals_bytes(const GlmTextConfig& cfg);
 
+  // Exact device bytes a RESIDENT stream at this rank's geometry holds
+  // once every layer + the globals are materialized: the sum of every
+  // layer's formula plus the globals formula. Callers use it to refuse a
+  // world that cannot fit BEFORE the first allocation (at the real GLM
+  // dims: world 1 ~306 GiB, world 2 ~155 GiB per rank, world 4 ~79 GiB —
+  // only world 4 fits a 128 GB GB10).
+  static size_t resident_bytes(const GlmTextConfig& cfg, int rank = 0,
+                               int world = 1);
+
   // Registers the stream whose kernels READ resident layers (the model's
   // compute stream). When set, load boundaries synchronize ONLY that
   // stream plus the loader's own dequant stream — the complete set of
@@ -179,8 +213,11 @@ class GlmLayerStream {
   void set_reader_stream(cudaStream_t reader) { reader_ = reader; }
 
   const GlmTextConfig& config() const { return cfg_; }
+  GlmResidency residency() const { return residency_; }
   // Capacity of the per-layer bump (the largest layer's exact size at
-  // this rank's geometry).
+  // this rank's geometry). In resident mode the shared bump is never
+  // allocated (each layer owns its exact-size bump instead) — this stays
+  // the largest layer's formula, the number callers report.
   size_t layer_capacity() const;
 
   int rank() const { return rank_; }
@@ -204,16 +241,30 @@ class GlmLayerStream {
   GlmTextConfig cfg_;
   int rank_ = 0;
   int world_ = 1;
+  GlmResidency residency_ = GlmResidency::Streaming;
   cudaStream_t reader_ = nullptr;  // bump readers' stream (see above)
   uint64_t source_bytes_ = 0;
   uint64_t verbatim_bytes_ = 0;
   std::vector<std::unique_ptr<SafetensorsFile>> shards_;
   std::unordered_map<std::string, const TensorInfo*> tensors_;
-  std::unique_ptr<GlmLayerBump> layer_bump_;
+  std::unique_ptr<GlmLayerBump> layer_bump_;  // streaming only
   std::unique_ptr<GlmLayerBump> globals_bump_;
-  GlmLayerResident resident_;
+  // Resident mode: one exact-size bump + one view per layer, alive for
+  // the stream's lifetime. Index l serves load_layer(l) directly (the MTP
+  // draft layer's index is mtp_layer(), inside the same range).
+  std::vector<std::unique_ptr<GlmLayerBump>> resident_bumps_;
+  std::vector<GlmLayerResident> resident_layers_;
+  size_t capacity_ = 0;  // largest layer's formula (layer_capacity)
+  GlmLayerResident resident_;  // streaming only (the active layer)
   GlmGlobalsResident globals_;
   cudaStream_t stream_ = nullptr;  // dedicated; synced before returning
+
+  // The one layer build both residency modes share — grant sequence,
+  // byte accounting, formula check and sync are identical, so resident
+  // bytes are streaming bytes by construction (the parity driver pins
+  // this bitwise at every world).
+  void build_layer_into(int layer, GlmLayerBump& bump,
+                        GlmLayerResident& out);
 };
 
 }  // namespace dgpp

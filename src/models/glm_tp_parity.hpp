@@ -38,14 +38,24 @@ struct GlmShardParityReport {
   uint64_t verbatim_bytes = 0;       // the rank-invariant re-read set
   uint64_t digest_bytes = 0;         // replicated bytes folded into digests
   uint64_t digest_tensors = 0;
+  // Resident mode only: cache-hit re-loads served after the parity loop
+  // (layers x ranks), each proven pointer-identical with ZERO storage
+  // reads — the residency contract's proof, folded into the parity run.
+  int cache_hits = 0;
 };
 
 // Runs the parity surface at `world` over `layers` (layer indices in
 // 0..num_hidden_layers-1 plus mtp_layer() when present; null = all
 // layers, MTP last). One cudaStream is created internally for the
 // views' slab packs. Throws on any mismatch or reconcile failure.
+//
+// `resident` materializes the SHARDED streams' layers once each and
+// serves the parity loop's loads from the resident cache after the
+// first pass — pinning resident-vs-streaming bitwise (the full side
+// stays streaming; resident bytes are streaming bytes by construction)
+// AND proving the residency contract (cache hits re-read nothing).
 GlmShardParityReport glm_shard_parity_check(
     const GlmTextConfig& cfg, const std::string& checkpoint_dir, int world,
-    const std::vector<int>* layers = nullptr);
+    const std::vector<int>* layers = nullptr, bool resident = false);
 
 }  // namespace dgpp

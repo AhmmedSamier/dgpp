@@ -483,6 +483,76 @@ DGPP_TEST(glm_loader_streaming_replaces_layers_and_counts_every_kind) {
   require(threw, "layer out of range rejected");
 }
 
+DGPP_TEST(glm_loader_resident_mode_serves_cache_hits_without_storage_reads) {
+  const Fixture fx = write_fixture();
+  const int max_layer =
+      fx.cfg.num_hidden_layers + (fx.cfg.mtp_layer() >= 0 ? 1 : 0);
+
+  // GIVEN a resident stream alongside a streaming one (same checkpoint):
+  // layer 0 is KDA/dense, layer 2 is DSA/sparse — both kinds covered.
+  dgpp::GlmLayerStream streaming(fx.cfg, fx.dir.string());
+  dgpp::GlmLayerStream resident(fx.cfg, fx.dir.string(), 0, 1,
+                                dgpp::GlmResidency::Resident);
+
+  // WHEN layer 0 materializes on both streams, THEN the bytes are
+  // bitwise-identical (the same build code; the parity driver pins the
+  // full surface set, this pins the two builds meet byte-for-byte here).
+  const dgpp::GlmLayerResident& r0 = resident.load_layer(0);
+  const dgpp::GlmLayerResident& s0 = streaming.load_layer(0);
+  require(r0.bytes == s0.bytes, "resident layer 0 formula differs");
+  require(r0.bytes == dgpp::GlmLayerStream::layer_bytes(fx.cfg, 0),
+          "resident layer 0 bytes match formula");
+  require(std::memcmp(r0.ln1, s0.ln1, static_cast<size_t>(fx.cfg.hidden_size) *
+                                          2) == 0,
+          "resident ln1 differs from streaming");
+  {
+    // Merged in_proj rows [f_a | g_a | q | k | v | b] — same sizes the
+    // byte-exact test below derives from this fixture's config.
+    const int64_t head_dim = fx.cfg.kda_head_dim;  // 64
+    const int64_t proj = 8 * head_dim;             // 512
+    const int64_t heads = 8;
+    const size_t in_proj_bytes =
+        static_cast<size_t>(2 * head_dim + 3 * proj + heads) *
+        static_cast<size_t>(fx.cfg.hidden_size) * 2;
+    require(std::memcmp(r0.kda.in_proj, s0.kda.in_proj, in_proj_bytes) == 0,
+            "resident in_proj differs from streaming");
+  }
+
+  // WHEN a different layer loads (which EVICTS layer 0 in streaming
+  // mode), THEN layer 0's resident view stays at the same addresses —
+  // the production residency contract's shape.
+  const dgpp::GlmLayerResident& r2 = resident.load_layer(2);
+  require(r2.layer == 2, "resident layer 2 id");
+  const dgpp::GlmLayerResident& r0_again = resident.load_layer(0);
+  require(r0_again.ln1 == r0.ln1 && r0_again.kda.in_proj == r0.kda.in_proj,
+          "resident re-load moved the view (rebuild, not cache)");
+
+  // WHEN release_layer() is called, THEN it is a no-op: the model's
+  // preconstruct pass calls it unconditionally, and a streaming-style
+  // release would make every resident view a dangling pointer.
+  resident.release_layer();
+  require(resident.load_layer(0).ln1 == r0.ln1,
+          "resident release_layer freed a view");
+
+  // THEN the storage counters freeze — but only once every layer is
+  // materialized (the re-pass below also serves first loads for layers
+  // this test never touched, which are LEGITIMATE storage reads). Pass 1:
+  // materialize everything; pass 2: re-serve everything in mixed order.
+  for (int l = 0; l < max_layer; ++l) (void)resident.load_layer(l);
+  const uint64_t before = resident.source_bytes_read();
+  for (int layer : {5, 1, 4, 0, 6, 2, 3, 0}) (void)resident.load_layer(layer);
+  require(resident.source_bytes_read() == before,
+          "resident re-pass re-read storage — contract broken");
+
+  // AND the formula total is exactly layers + globals — the number a
+  // deployment refuses a world on BEFORE the first allocation.
+  size_t formula = dgpp::GlmLayerStream::globals_bytes(fx.cfg);
+  for (int l = 0; l < max_layer; ++l)
+    formula += dgpp::GlmLayerStream::layer_bytes(fx.cfg, l);
+  require(dgpp::GlmLayerStream::resident_bytes(fx.cfg) == formula,
+          "resident_bytes formula differs from the per-layer sum");
+}
+
 DGPP_TEST(fp8_dequant_blocks_handles_ragged_tails_bitwise) {
   // [1000, 1000]: 7 full row/col blocks + 104-wide ragged tails on both
   // axes — the geometry the real checkpoint never produces but the kernel

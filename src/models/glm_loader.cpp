@@ -767,12 +767,23 @@ size_t GlmLayerStream::globals_bytes(const GlmTextConfig& cfg) {
   return 2 * vocab_bytes + norm_bytes;
 }
 
+size_t GlmLayerStream::resident_bytes(const GlmTextConfig& cfg, int rank,
+                                      int world) {
+  const int max_layer =
+      cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
+  size_t total = globals_bytes(cfg);
+  for (int l = 0; l < max_layer; ++l)
+    total += layer_bytes(cfg, l, rank, world);
+  return total;
+}
+
 GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
                                const std::string& checkpoint_dir, int rank,
-                               int world)
+                               int world, GlmResidency residency)
     : cfg_(cfg),
       rank_(rank),
       world_(world),
+      residency_(residency),
       layer_bump_(std::make_unique<GlmLayerBump>()),
       globals_bump_(std::make_unique<GlmLayerBump>()) {
   if (world < 1 || rank < 0 || rank >= world)
@@ -821,13 +832,23 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
 
   // Size the bump at the largest layer AT THIS RANK'S GEOMETRY (headers
   // say which; the shared build code says how much) and take a dedicated
-  // stream for the dequant launches.
+  // stream for the dequant launches. RESIDENT mode never allocates the
+  // shared bump — each layer materializes into its own exact-formula bump
+  // on first load — so the stream opens without a single layer allocation
+  // and the per-layer stores are sized instead.
   size_t capacity = 0;
   const int max_layer =
       cfg_.num_hidden_layers + (cfg_.mtp_layer() >= 0 ? 1 : 0);
   for (int i = 0; i < max_layer; ++i)
     capacity = std::max(capacity, count_layer_bytes(cfg_, i, rank_, world_));
-  layer_bump_->init(capacity);
+  capacity_ = capacity;
+  if (residency_ == GlmResidency::Resident) {
+    resident_bumps_.resize(static_cast<size_t>(max_layer));  // null bumps
+    resident_layers_.assign(static_cast<size_t>(max_layer),
+                            GlmLayerResident{});
+  } else {
+    layer_bump_->init(capacity);
+  }
   globals_bump_->init(globals_bytes(cfg_));
   DGPP_CUDA_OK(cudaStreamCreate(&stream_));
 }
@@ -837,24 +858,15 @@ GlmLayerStream::~GlmLayerStream() {
 }
 
 size_t GlmLayerStream::layer_capacity() const {
-  return layer_bump_->capacity;
+  return capacity_;
 }
 
-const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
-  if (resident_.layer == layer) return resident_;
-
-  // Phase one below writes weight bytes into the bump from the CPU — the
-  // SAME managed region the previously loaded layer's kernels may still be
-  // reading (this loader was first exercised mid-forward by the M4
-  // diagnostic model; before that, callers always loaded with the device
-  // idle). The boundary sync waits for exactly those readers — see
-  // sync_load_boundary for why it must NOT be device-wide in a
-  // one-process multi-rank world.
-  sync_load_boundary(reader_, stream_);
-
-  layer_bump_->reset();
-  resident_ = GlmLayerResident{};
-
+// The one layer build both residency modes share: the grant sequence,
+// the byte accounting, the formula check, and the dequant/pack phases.
+// Resident bytes are streaming bytes by construction — the parity
+// driver pins this bitwise at every world.
+void GlmLayerStream::build_layer_into(int layer, GlmLayerBump& bump,
+                                      GlmLayerResident& out) {
   std::vector<GlmExpectedTensor> table =
       glm_expected_layer_tensors(cfg_, layer);
   std::unordered_map<std::string, const GlmExpectedTensor*> by_name;
@@ -862,7 +874,7 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
 
   std::vector<DequantJob> jobs;
   std::vector<PackJob> packs;
-  BuildCtx ctx{cfg_,    table, by_name, *layer_bump_, resident_,
+  BuildCtx ctx{cfg_,    table, by_name, bump,          out,
                tensors_, jobs,  packs,   true,         rank_,   world_};
   ctx.build_layer(layer);
 
@@ -879,17 +891,57 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
   for (const PackJob& j : packs) run_pack(j);
 
   // The formula and the allocator share the build code; anything but
-  // equality is a bug that must never pass silently.
-  const size_t used = layer_bump_->cursor;
+  // equality is a bug that must never pass silently. In resident mode the
+  // bump was sized BY this formula, so allocation itself is a second,
+  // independent enforcement of the same equality.
+  const size_t used = bump.cursor;
   const size_t expected_bytes = layer_bytes(cfg_, layer, rank_, world_);
   if (used != expected_bytes)
     throw std::runtime_error(
         "glm loader: byte-formula drift on layer " + std::to_string(layer) +
         ": used " + std::to_string(used) + " != formula " +
         std::to_string(expected_bytes));
-  resident_.bytes = used;
+  out.bytes = used;
   source_bytes_ += ctx.source_bytes;
   verbatim_bytes_ += ctx.verbatim_bytes;
+}
+
+const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
+  // RESIDENT mode: a materialized layer is a pure cache hit — the stored
+  // view, no storage reads (source_bytes_read cannot grow), and no sync
+  // (the streaming contract's sync covers loader WRITES; a cache hit
+  // writes nothing). First load materializes into the layer's own
+  // exact-formula bump, which stays alive for the stream's lifetime.
+  if (residency_ == GlmResidency::Resident) {
+    if (layer < 0 || layer >= static_cast<int>(resident_layers_.size()))
+      throw std::out_of_range(
+          "glm loader: layer index out of range: " + std::to_string(layer));
+    GlmLayerResident& slot =
+        resident_layers_[static_cast<size_t>(layer)];
+    if (slot.layer == layer) return slot;
+
+    auto bump = std::make_unique<GlmLayerBump>();
+    bump->init(layer_bytes(cfg_, layer, rank_, world_));
+    sync_load_boundary(reader_, stream_);
+    build_layer_into(layer, *bump, slot);
+    resident_bumps_[static_cast<size_t>(layer)] = std::move(bump);
+    return slot;
+  }
+
+  if (resident_.layer == layer) return resident_;
+
+  // Phase one below writes weight bytes into the bump from the CPU — the
+  // SAME managed region the previously loaded layer's kernels may still be
+  // reading (this loader was first exercised mid-forward by the M4
+  // diagnostic model; before that, callers always loaded with the device
+  // idle). The boundary sync waits for exactly those readers — see
+  // sync_load_boundary for why it must NOT be device-wide in a
+  // one-process multi-rank world.
+  sync_load_boundary(reader_, stream_);
+
+  layer_bump_->reset();
+  resident_ = GlmLayerResident{};
+  build_layer_into(layer, *layer_bump_, resident_);
   return resident_;
 }
 
@@ -976,6 +1028,12 @@ const GlmGlobalsResident& GlmLayerStream::load_globals() {
 }
 
 void GlmLayerStream::release_layer() {
+  // RESIDENT mode: the contract is that materialized layers stay resident
+  // for the stream's lifetime — a no-op, so existing call sites (the
+  // model's preconstruct pass) stay correct unchanged. The views remain
+  // valid; a streaming release after resident loads would be a silent
+  // use-after-free factory, which is exactly what this refuses to be.
+  if (residency_ == GlmResidency::Resident) return;
   resident_ = GlmLayerResident{};
   layer_bump_->reset();
 }

@@ -9,9 +9,18 @@
 // is the instrument that answers "is the loader the slicer, at the real
 // 76k-tensor geometry, not just the 463-tensor fixture?"
 //
+// --resident materializes the sharded streams' layers once each (the
+// production residency contract, DESIGN §3) and proves it in the same
+// run: bitwise resident-vs-streaming parity PLUS a cache-hit pass that
+// must re-serve every layer from the SAME addresses with ZERO storage
+// reads. At real dims keep a --layers subset here: every rank's resident
+// set lives in ONE process (world x subset bytes), which only the
+// subset knob keeps inside 128 GB at world 4.
+//
 // No bus, no fabric: one node, models library only.
 //
 //   glm_shard_parity --model ORG/NAME [--worlds 2,4] [--layers 0,3,45]
+//                   [--resident]
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -50,6 +59,7 @@ int main(int argc, char** argv) {
   std::string model_id, ckpt;
   std::vector<int> worlds{2};
   std::unique_ptr<std::vector<int>> layers;  // null = all
+  bool resident = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -64,10 +74,12 @@ int main(int argc, char** argv) {
     else if (a == "--worlds") worlds = parse_ints(next());
     else if (a == "--layers")
       layers = std::make_unique<std::vector<int>>(parse_ints(next()));
+    else if (a == "--resident") resident = true;
     else {
       std::fprintf(stderr,
                     "usage: glm_shard_parity --model ORG/NAME | "
-                    "--checkpoint-dir DIR [--worlds 2,4] [--layers 0,3,45]\n");
+                    "--checkpoint-dir DIR [--worlds 2,4] [--layers 0,3,45] "
+                    "[--resident]\n");
       return a == "--help" ? 0 : 1;
     }
   }
@@ -78,7 +90,8 @@ int main(int argc, char** argv) {
   if (model_id.empty() && ckpt.empty()) {
     std::fprintf(stderr,
                   "usage: glm_shard_parity --model ORG/NAME | "
-                  "--checkpoint-dir DIR [--worlds 2,4] [--layers 0,3,45]\n");
+                  "--checkpoint-dir DIR [--worlds 2,4] [--layers 0,3,45] "
+                  "[--resident]\n");
     return 1;
   }
   if (model_id.empty()) {
@@ -106,21 +119,27 @@ int main(int argc, char** argv) {
     for (int world : worlds) {
       const auto t0 = std::chrono::steady_clock::now();
       const dgpp::GlmShardParityReport rep =
-          dgpp::glm_shard_parity_check(cfg, ckpt, world, layers.get());
+          dgpp::glm_shard_parity_check(cfg, ckpt, world, layers.get(),
+                                       resident);
       const double s =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
               .count();
       DGPP_LOG_INFO(
-          "shard parity world={} PASSED: {} layers x {} ranks, {} bound "
+          "shard parity world={} PASSED{}: {} layers x {} ranks, {} bound "
           "surfaces bitwise-equal; byte reconcile exact — rank reads "
           "{}/{} source bytes ({:.1f}%, verbatim {} MB); digest {} tensors "
-          "/ {} MB; {:.0f}s",
-          rep.world, rep.layers_checked, world, rep.surfaces_checked,
-          rep.shard_source_bytes >> 20, rep.full_source_bytes >> 20,
+          "/ {} MB{}; {:.0f}s",
+          rep.world, resident ? " [RESIDENT]" : "", rep.layers_checked, world,
+          rep.surfaces_checked, rep.shard_source_bytes >> 20,
+          rep.full_source_bytes >> 20,
           100.0 * static_cast<double>(rep.shard_source_bytes) /
               static_cast<double>(rep.full_source_bytes),
           rep.verbatim_bytes >> 20, rep.digest_tensors,
-          rep.digest_bytes >> 20, s);
+          rep.digest_bytes >> 20,
+          resident ? " ; " + std::to_string(rep.cache_hits) +
+                          " cache hits, 0 storage reads"
+                    : "",
+          s);
     }
   } catch (const std::exception& e) {
     DGPP_LOG_ERROR("shard parity FAILED: {}", e.what());

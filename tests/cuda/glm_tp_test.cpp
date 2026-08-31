@@ -867,6 +867,26 @@ DGPP_TEST(glm_tp_shard_parity) {
         rep.shard_source_bytes, rep.full_source_bytes,
         100.0 * static_cast<double>(rep.shard_source_bytes) /
             static_cast<double>(rep.full_source_bytes));
+
+    // RESIDENT mode: the sharded streams materialize every layer once
+    // and the same parity must hold bitwise (resident bytes are
+    // streaming bytes by construction — this is what keeps the two
+    // build paths from ever drifting), plus the residency contract's
+    // proof: every layer re-served from cache, same addresses, zero
+    // storage reads.
+    const GlmShardParityReport rrep =
+        glm_shard_parity_check(cfg, dir, world, nullptr, /*resident=*/true);
+    require(rrep.surfaces_checked == rep.surfaces_checked,
+            "shard parity: resident mode checked a different surface set");
+    require(rrep.cache_hits == rep.layers_checked * world,
+            "shard parity: resident cache-hit count mismatch");
+    require(rrep.shard_source_bytes == rep.shard_source_bytes,
+            "shard parity: resident mode read a different byte set");
+    DGPP_LOG_INFO(
+        "shard parity world={} [RESIDENT]: {} surfaces bitwise-equal; "
+        "{} cache hits across {} ranks with 0 storage reads — residency "
+        "contract holds",
+        world, rrep.surfaces_checked, rrep.cache_hits, world);
   }
 }
 

@@ -39,7 +39,8 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
                                         int max_tokens,
                                         int64_t max_cache_tokens,
                                         GlmBoundaryReducer* boundary,
-                                        int tp_rank, int tp_world)
+                                        int tp_rank, int tp_world,
+                                        GlmResidency residency)
     : cfg_(cfg),
       kda_cfg_(with_tp(cfg.kda_config(), tp_world)),
       dsa_cfg_(with_tp(cfg.dsa_config(), tp_world)),
@@ -47,7 +48,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
       moe_cfg_(cfg.moe_config()),
       kda_geo_(KdaGeometry::from_config(kda_cfg_)),
       max_tokens_(max_tokens),
-      loader_(cfg, checkpoint_dir, tp_rank, tp_world) {
+      loader_(cfg, checkpoint_dir, tp_rank, tp_world, residency) {
   if (max_tokens_ <= 0)
     throw std::invalid_argument("GlmDiagnosticModel: max_tokens must be positive");
   if (max_cache_tokens < max_tokens_)
