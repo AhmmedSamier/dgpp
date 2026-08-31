@@ -183,6 +183,13 @@ add_executable(glm_stream_check apps/glm_stream_check.cpp)
 target_link_libraries(glm_stream_check PRIVATE dgpp_models_glm_loader)
 dgpp_set_common(glm_stream_check)
 
+  # The small-collective stall repro (engine hunt instrument, not a CI gate
+  # until the fix lands — see the file comment).
+  add_executable(bus_small_repro apps/bus_small_repro.cu)
+  target_link_libraries(bus_small_repro PRIVATE dgpp_bus CUDA::cudart
+                                                Threads::Threads)
+  dgpp_set_common(bus_small_repro)
+
 # M4 deliverables 1+5 deployment run: the curated reference suite over the
 # real checkpoint (dumps from tools/glm_reference_dump.py gen-torch) and
 # DGPPTC1 route-trace capture for the traffic model.

@@ -86,6 +86,10 @@ class RcLane {
   // -- send side ---------------------------------------------------------
   // Posts the payload SEND (unsignaled) followed by the doorbell SEND
   // (signaled) from the slot's send buffers. `seq` is the slot generation.
+  // `ctl` is the COLLECTIVE sequence the doorbell belongs to (0 for
+  // harness/flag traffic) — the per-collective kernels' claim gate
+  // (see StartSlot::ctl; a blind claim eats a racing neighbor collective's
+  // early doorbell — found by the M6 greedy-loop corruption hunt).
   // `payload_local` overrides the payload's local address: any address in
   // `payload_mr` (e.g. a collective staging buffer) — only the doorbell's
   // remote ring position (the `slot` argument) participates in ring
@@ -93,7 +97,7 @@ class RcLane {
   bool post_send_pair(BusPool pool, uint32_t slot, uint32_t seq,
                       uint32_t len, std::string* error,
                       const void* payload_local = nullptr,
-                      uint32_t payload_lkey = 0);
+                      uint32_t payload_lkey = 0, uint32_t ctl = 0);
 
   // Unsignaled 64-byte RDMA WRITE of the staging cell into the peer's
   // completion cell for the same pool/slot. No CQE at either side — the

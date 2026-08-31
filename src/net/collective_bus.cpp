@@ -810,7 +810,7 @@ struct CollectiveBus::Impl {
                                bulk_arena_row(p) +
                                    static_cast<size_t>(k) *
                                        opt.bulk_slot_bytes,
-                               lane.stage_lkey)) {
+                               lane.stage_lkey, req.ctl_seq)) {
           fail_lane(lane, error);
           poison_collective(req);
           finish_flight(coll.req, false, "bulk post failed: " + error);
@@ -1112,7 +1112,7 @@ struct CollectiveBus::Impl {
         if (!lane.lane->post_send_pair(
                 BusPool::kLatency, slot, pair_seq,
                 static_cast<uint32_t>(elems) * 2, &error, row,
-                lane.stage_lkey)) {
+                lane.stage_lkey, gen)) {
           fail_lane(lane, error);
           graph_fail("graph post failed: " + error);
           return true;
@@ -1296,6 +1296,10 @@ struct CollectiveBus::Impl {
       ar_ctl->stamp_stage = 0;
       ar_ctl->stamp_first_claim = 0;
       ar_ctl->stamp_reduce_done = 0;
+      // TEMP hunt stamp reset (small-collective corruption).
+      __atomic_store_n(&ar_ctl->dbg_first_cell, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ar_ctl->dbg_first_len, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ar_ctl->dbg_first_seq, 0, __ATOMIC_RELAXED);
 
       BusAllReduceView view{};
       int vi = 0;
@@ -1378,7 +1382,7 @@ struct CollectiveBus::Impl {
       if (!rc.post_send_pair(BusPool::kLatency, slot, seq,
                               static_cast<uint32_t>(req.elems * 2), &error,
                               stage_buf(p, coll.stage_gen),
-                              lane.stage_lkey)) {
+                              lane.stage_lkey, req.ctl_seq)) {
         fail_lane(lane, error);
         poison_collective(req);
         coll_poisoned = true;
@@ -1409,9 +1413,31 @@ struct CollectiveBus::Impl {
             "allreduce: rank {} seq {} done status={} after {:.1f}us",
             opt.my_rank, req.ctl_seq, acquire_u32(&ar_ctl->status),
             elapsed_us(coll.launched_at));
+      // TEMP hunt dump (small-collective corruption hunt; DEBUG-only):
+      // the payload region's first words at each claimed slot plus the
+      // doorbell cell — if a doorbell WR ever landed in a payload buffer
+      // (half-pair RQ shift), w0/w1 here read as the StartSlot template
+      // {seq, len} instead of folded bf16 payload.
+      for (size_t p = 0; p < coll.claims.size(); ++p) {
+        const uint32_t s = coll.claims[p].slot;
+        const BusRecvView view =
+            recv_view_of(peers[p][static_cast<size_t>(coll.claims[p].lane)]);
+        const uint32_t* pay = reinterpret_cast<const uint32_t*>(
+            reinterpret_cast<const uint8_t*>(view.payload_lat) +
+            static_cast<size_t>(s) * view.lat_slot_bytes);
+        const uint32_t* door = reinterpret_cast<const uint32_t*>(
+            reinterpret_cast<const uint8_t*>(view.doorbell_lat) +
+            static_cast<size_t>(s) * sizeof(StartSlot));
+        DGPP_LOG_DEBUG(
+            "hunt: rank {} seq {} peer {} slot {} door(seq={},len={}) "
+            "pay(w0={:#x},w1={:#x},w2={:#x},w3={:#x})",
+            opt.my_rank, req.ctl_seq, peer_ranks[p], s, door[0], door[1],
+            pay[0], pay[1], pay[2], pay[3]);
+      }
       DGPP_LOG_DEBUG(
           "allreduce: rank {} seq {} stamped status={} notice={:.1f}us "
-          "spans_cycles stage->claim={} claim->reduce={}",
+          "spans_cycles stage->claim={} claim->reduce={} "
+          "first_claim cell={} len={} seq={}",
           opt.my_rank, req.ctl_seq, acquire_u32(&ar_ctl->status),
           elapsed_us(coll.launched_at),
           ar_ctl->stamp_first_claim > ar_ctl->stamp_stage
@@ -1419,7 +1445,16 @@ struct CollectiveBus::Impl {
               : 0,
           ar_ctl->stamp_reduce_done > ar_ctl->stamp_first_claim
               ? ar_ctl->stamp_reduce_done - ar_ctl->stamp_first_claim
-              : 0);
+              : 0,
+          ar_ctl->dbg_first_cell == 0
+              ? -1
+              : static_cast<int>(ar_ctl->dbg_first_cell) - 1,
+          ar_ctl->dbg_first_len == 0xFFFFFFFFu
+              ? -1
+              : static_cast<int>(ar_ctl->dbg_first_len),
+          ar_ctl->dbg_first_seq == 0xFFFFFFFFu
+              ? -1
+              : static_cast<int>(ar_ctl->dbg_first_seq));
       const bool reduced = acquire_u32(&ar_ctl->status) == 0;
       // Clear the flight BEFORE completing (finish_flight): the woken
       // waiter's next submission races the cleanup against the

@@ -278,13 +278,16 @@ BusLaneEndpoint RcLane::endpoint() const {
 
 bool RcLane::post_send_pair(BusPool pool, uint32_t slot, uint32_t seq,
                             uint32_t len, std::string* error,
-                            const void* payload_local, uint32_t payload_lkey) {
+                            const void* payload_local, uint32_t payload_lkey,
+                            uint32_t ctl) {
   ibv_qp* qp = qp_[pool == BusPool::kLatency ? 0 : 1];
   uint8_t* payload = layout_.send_payload(slab_, pool, slot);
   StartSlot* doorbell = layout_.send_doorbell(slab_, pool, slot);
-  // Publish order: len first, seq last (readers acquire on seq and then
-  // read len — the same discipline as FlagAck), payload bytes precede both.
+  // Publish order: len and ctl first, seq last (readers acquire on seq and
+  // then read them — the same discipline as FlagAck), payload bytes
+  // precede all three.
   doorbell->len = len;
+  doorbell->ctl = ctl;
   std::atomic_thread_fence(std::memory_order_release);
   doorbell->seq = seq;
   std::atomic_thread_fence(std::memory_order_release);

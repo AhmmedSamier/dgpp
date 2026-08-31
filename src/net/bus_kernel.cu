@@ -225,12 +225,28 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
       const uint32_t seq =
           flag_load_acquire(const_cast<uint32_t*>(&door->seq));
       if (seq == 0) continue;
+      // Generation gate: claim ONLY this collective's doorbells. Ranks
+      // run unbarriered between collectives, so a neighbor's NEXT
+      // collective can land its pair here while this kernel scans — a
+      // blind claim would fold the wrong collective's payload into ours
+      // and starve its own kernel (the M6 greedy-loop corruption; at
+      // fabric skew, the gen-1825 wedge).
+      if (door->ctl != ctl_seq) continue;
       const FlagAck* ack = &v.recv[view_idx].ack_lat[slot];
       if (seq == ack->seq) continue;  // already consumed
+      // TEMP hunt stamp: the go-ref CAS winner records the FIRST claim's
+      // (cell, len, seq) — one winner per round, so the triple is never
+      // mixed across cells; atomicCAS's return gates first-only.
       int expected = 0;
       if (go_ref.compare_exchange_strong(expected, cell + 1,
                                          cuda::memory_order_relaxed,
                                          cuda::memory_order_relaxed)) {
+        if (atomicCAS(reinterpret_cast<unsigned*>(&ctl->dbg_first_cell), 0,
+                      static_cast<unsigned>(cell + 1)) == 0) {
+          atomicExch(reinterpret_cast<unsigned*>(&ctl->dbg_first_len),
+                      door->len);
+          atomicExch(reinterpret_cast<unsigned*>(&ctl->dbg_first_seq), seq);
+        }
         s_seq[peer] = seq;
         s_words[peer] = door->len / 8;
       }
@@ -402,6 +418,9 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
       const uint32_t seq =
           flag_load_acquire(const_cast<uint32_t*>(&door->seq));
       if (seq == 0) continue;
+      // Generation gate (see bus_allreduce_kernel's claim — the graph
+      // kernel must not eat a neighbor replay's early doorbell either).
+      if (door->ctl != gen) continue;
       const FlagAck* ack = &v.recv[view_idx].ack_lat[slot];
       if (seq == ack->seq) continue;  // already consumed
       int expected = 0;
@@ -684,6 +703,11 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
       const uint32_t seq =
           flag_load_acquire(const_cast<uint32_t*>(&door->seq));
       if (seq == 0) continue;
+      // Cross-collective generation gate (the segment window below only
+      // separates THIS collective's phases; a NEXT collective's early
+      // bulk pair would be claimed and acked away from its own kernel
+      // just as eagerly — see the one-shot kernel's gate).
+      if (door->ctl != ctl_seq) continue;
       const uint32_t ack_seq = flag_load_acquire(
           const_cast<uint32_t*>(&v.recv[view_idx].ack_bulk[slot].seq));
       // Bring-up scan record (see BKFIN): what THIS kernel's acquire

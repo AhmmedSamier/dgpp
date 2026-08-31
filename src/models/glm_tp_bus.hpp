@@ -155,21 +155,12 @@ inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
     throw std::invalid_argument("bus_greedy_pick: token id outside the "
                                  "6-bit-triplet encoding range");
   }
-  // OPEN ENGINE BUG (2026-08-31, glm_tp_greedy_gen_loopback bring-up):
-  // the FIRST SMALL plain latency allreduce after a run of STAGED
-  // collectives stalls every rank — the doorbell is visibly present in
-  // the receiver's slot (doorbell seq ahead of ack) yet the per-
-  // collective kernel never claims it, and a send WR from an earlier
-  // ring-wrapped collective sits in_flight forever. Sizes: 16 elems
-  // after 14x2048-elem staged = stall (every run); 16 standalone on a
-  // fresh bus = pass; 4 elems after a 2048 plain = pass. Suspects: the
-  // unsignaled-payload WR retirement bookkeeping at ring wrap and the
-  // recycle/credit re-arm race — the same family as the gen-1825 RNR-
-  // freeze wedge. This is exactly the decode-path collective size
-  // class, so the fast paths need the hunt; until then every pick
-  // collective rides at the boundary folds' known-good 2048 elements
-  // (zeros elsewhere, quadruples unchanged — one latency slot).
-  const size_t gather_elems = 2048;
+  // The historically-vulnerable shape, now the regression proof: 16
+  // elems (world 4) — a small plain collective after a run of staged
+  // ones. Before the generation-gated claim this raced a peer's
+  // in-flight collective kernel (corruption or stall, whichever way the
+  // claim fell); the gate pins the claim to this collective's doorbells.
+  const size_t gather_elems = static_cast<size_t>(world) * 4;
   const auto allreduce_wait = [&](std::string* err) -> uint64_t {
     const uint64_t id = bus.allreduce(scratch, scratch, gather_elems, err);
     if (id == 0) return 0;
