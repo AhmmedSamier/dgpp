@@ -1199,6 +1199,19 @@ struct CollectiveBus::Impl {
           }
           lanes += "]";
         }
+      // TEMP hunt (burst wedge): live QP state per latency lane — a wedged
+      // SQ freezes sq_psn below the posted generations while rq_psn keeps
+      // counting arrivals; an ERR QP is a flushed one.
+      std::string qps;
+      for (size_t p = 0; p < peer_ranks.size(); ++p)
+        for (size_t l = 0; l < peers[p].size(); ++l) {
+          if (peers[p][l].failed) continue;
+          qps += " p" + std::to_string(peer_ranks[p]) + "l" +
+                 std::to_string(l) + "[" +
+                 peers[p][l].lane->qp_state_dump(BusPool::kLatency) + "]";
+        }
+      DGPP_LOG_INFO(
+          "hunt qp: rank {} seq {} {}", opt.my_rank, coll.req->ctl_seq, qps);
       DGPP_LOG_INFO(
           "allreduce: rank {} seq {} STALLED {:.0f}ms posted={:#x} "
           "ctl(ready={:#x} done={} status={}) {}",
@@ -1344,6 +1357,27 @@ struct CollectiveBus::Impl {
                           cudaGetErrorString(launch));
         return true;
       }
+      // TEMP hunt (burst wedge): the claim record — which slots this
+      // rank's engine grabbed for this collective, and the busy slots it
+      // skipped (the in_flight/credit chain is the wedge's suspect).
+      {
+        std::string c;
+        for (size_t ci = 0; ci < claims.size(); ++ci)
+          c += " p" + std::to_string(peer_ranks[ci]) + "l" +
+               std::to_string(claims[ci].lane) + "s" +
+               std::to_string(claims[ci].slot);
+        for (size_t p = 0; p < peer_ranks.size(); ++p)
+          for (size_t l = 0; l < peers[p].size(); ++l) {
+            const LaneState& lane = peers[p][l];
+            const uint32_t s = lane.cursor[0];
+            if (lane.send[0][s].in_flight)
+              c += " BUSY(p" + std::to_string(peer_ranks[p]) + "l" +
+                   std::to_string(l) + "s" + std::to_string(s) +
+                   " gen=" + std::to_string(lane.send[0][s].gen) + ")";
+          }
+        DGPP_LOG_DEBUG("hunt claim: rank {} seq {} slots:{}",
+                       opt.my_rank, req.ctl_seq, c);
+      }
       coll.claims = std::move(claims);
       coll.launched_at = Clock::now();
       coll.stage_gen = stage_gen;
@@ -1401,7 +1435,8 @@ struct CollectiveBus::Impl {
       ++req.outstanding;
       coll.posted_bits |= 1ULL << p;
       worked = true;
-      DGPP_LOG_DEBUG("allreduce stripe: peer={} lane={} slot={} seq={}",
+      DGPP_LOG_DEBUG("hunt post: rank {} seq {} peer={} lane={} slot={} pairseq={}",
+                     opt.my_rank, req.ctl_seq,
                      peer_ranks[p], lane.stats.lane, slot, seq);
     }
 

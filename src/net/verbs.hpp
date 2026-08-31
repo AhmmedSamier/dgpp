@@ -116,6 +116,12 @@ class RcLane {
   int poll_tx(BusPool pool, ibv_wc* out, int max);
   int poll_rx(BusPool pool, ibv_wc* out, int max);
 
+  // TEMP hunt instrument (the burst-wedge hunt): one-line live QP state —
+  // cur state, the last sent/received PSNs, and the RNR retry budget. A
+  // wedged SQ shows up as sq_psn frozen below the posted count (an RNR
+  // retry loop or an errored QP) while rq_psn keeps the arrivals' count.
+  std::string qp_state_dump(BusPool pool) const;
+
  private:
   VerbsDevice* device_ = nullptr;
   ibv_qp* qp_[2] = {nullptr, nullptr};     // [latency, bulk]

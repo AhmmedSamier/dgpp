@@ -398,6 +398,34 @@ bool RcLane::post_recv_pair(BusPool pool, uint32_t slot, std::string* error) {
   return true;
 }
 
+std::string RcLane::qp_state_dump(BusPool pool) const {
+  ibv_qp_attr attr{};
+  ibv_qp* q = qp_[pool == BusPool::kLatency ? 0 : 1];
+  if (!q) return "qp=null";
+  ibv_qp_init_attr ia{};
+  int mask = IBV_QP_STATE | IBV_QP_SQ_PSN | IBV_QP_RQ_PSN;
+  if (ibv_query_qp(q, &attr, mask, &ia) != 0)
+    return "query failed errno=" + std::to_string(errno);
+  const char* state = "?";
+  switch (attr.qp_state) {
+    case IBV_QPS_RESET: state = "RESET"; break;
+    case IBV_QPS_INIT: state = "INIT"; break;
+    case IBV_QPS_RTR: state = "RTR"; break;
+    case IBV_QPS_RTS: state = "RTS"; break;
+    case IBV_QPS_SQD: state = "SQD"; break;
+    case IBV_QPS_SQE: state = "SQE"; break;
+    case IBV_QPS_ERR: state = "ERR"; break;
+    default: break;
+  }
+  return std::string(state) + " sq_psn=" + std::to_string(attr.sq_psn) +
+         " rq_psn=" + std::to_string(attr.rq_psn) +
+         " ack_timeout=" + std::to_string(attr.timeout) +
+         " retry_cnt=" + std::to_string(attr.retry_cnt) +
+         " rnr_retry=" + std::to_string(attr.rnr_retry) +
+         " min_rnr=" + std::to_string(attr.min_rnr_timer) +
+         " sq_draining=" + std::to_string(attr.sq_draining);
+}
+
 int RcLane::poll_tx(BusPool pool, ibv_wc* out, int max) {
   return ibv_poll_cq(tx_cq_[pool == BusPool::kLatency ? 0 : 1], max, out);
 }

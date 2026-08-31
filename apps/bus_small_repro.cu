@@ -1,21 +1,34 @@
-// The small-collective stall repro (M6 d3 bring-up, 2026-08-31) — the hunt's
-// instrument, deliberately OUTSIDE the CI gate until the fix lands (a
-// committed red test buys nothing; a runnable repro command buys the hunt).
+// The burst-wedge repro (M6 d3 bring-up hunt, 2026-08-31) — VERDICT: the
+// engine was innocent; the wedge was THIS HARNESS's cudaMallocManaged
+// between collectives, and the class is now a documented discipline.
 //
-// BUG: the first SMALL plain latency allreduce after a run of STAGED
-// collectives stalls every rank — the receiver's doorbell cell is visibly
-// ahead of its ack (the engine's STALLED dump shows door/ack divergence)
-// yet the per-collective kernel never claims it. Sizes measured:
-//   16 elems after 14x2048 staged  = stall, every run (the greedy loop)
-//   16 elems standalone, fresh bus = pass
-//   4 elems after a 2048 plain     = pass
-// Family: the gen-1825 RNR-freeze wedge (unreproduced, fabric). Suspects:
-// unsignaled-payload WR retirement at ring wrap, credit/RQ re-arm lag.
+// WHAT THIS APP REPRODUCED: 28 staged 2048-elem collectives + rapid small
+// plains stalled "every run" with an 8-second march of releases — an
+// apparent transport wedge (sent-but-never-received pairs, frozen PSN
+// gaps, no RNR, no errors). The hunt's instruments (per-kernel first-
+// claim stamps, per-claim payload/doorbell dumps, live QP state via
+// --qp_state_dump, claim/post/recycle CE trails) exonerated the engine
+// at every level: claims exact, posts real, arrivals landing, recycles
+// complete, RQs armed.
 //
-// This reproduces the model's exact collective sequence without the model:
-// K staged boundaries (stage_next -> host write [the GEMM's stand-in] ->
-// allreduce_staged -> wait), then N plain small collectives. Variants via
-// flags bisect the trigger (staged count, sizes, interleavings).
+// THE ACTUAL MECHANISM: cudaMallocManaged between collectives is a
+// DEVICE-SYNCHRONIZING call. With peers' per-collective kernels spinning
+// on the shared GPU — waiting for doorbells that need THIS thread's next
+// submission — the alloc deadlocks host against device; each rank's
+// lane watchdog (completion_timeout_ms) then poisons one spinning
+// kernel per period, which is EXACTLY the observed 8-second march of
+// "releases" (the march rescaled when --timeout-ms changed — the timer
+// was ours, not the transport's). Pre-allocating the scratch before the
+// world forms makes every previously-stalling shape pass.
+//
+// THE DISCIPLINE (the loopback bring-up's first-collective lesson, now
+// generalized): NO synchronizing CUDA calls on the decode path —
+// allocations and device-wide syncs happen before the world forms (or
+// in idle windows), never between collectives. The same class as the
+// set_reader_stream fix (a loader sync vs spinning collective kernels).
+//
+// Kept as the regression instrument: the staged-then-plain sequence at
+// hostile sizes/counts, with zero host-side allocations in the loop.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -98,9 +111,17 @@ std::string rank_run(const Config& c, int rank, CollectiveBus* bus) {
   }
   DGPP_LOG_INFO("rank {}: {} staged collectives done", rank, c.staged_iters);
 
+  // THE WEDGE WAS THE HARNESS: cudaMallocManaged between collectives is a
+  // DEVICE-SYNCHRONIZING call — with this rank's peers' collective kernels
+  // spinning on the shared GPU (waiting for doorbells that need THIS
+  // thread's next submission), the alloc deadlocks host vs device — the
+  // loopback bring-up's documented class ("a lazily constructing rank
+  // deadlocks against a peer's spinning collective kernel"). Pre-allocate
+  // once, before the world forms: no synchronizing calls on the decode
+  // path. The staged loop's fill kernel + sync is BEFORE the world too.
+  uint16_t* scratch = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&scratch, c.plain_elems * 2));
   for (int i = 0; i < c.plain_iters; ++i) {
-    uint16_t* scratch = nullptr;
-    DGPP_CUDA_OK(cudaMallocManaged(&scratch, c.plain_elems * 2));
     std::memset(scratch, 0, c.plain_elems * 2);
     scratch[0] = static_cast<uint16_t>(rank);
     std::string err;
@@ -110,9 +131,12 @@ std::string rank_run(const Config& c, int rank, CollectiveBus* bus) {
       return "plain submit rejected: " + err;
     }
     const auto res = bus->wait_allreduce(id, c.timeout_ms);
-    cudaFree(scratch);
-    if (!res.ok) return "plain small wait failed: " + res.error;
+    if (!res.ok) {
+      cudaFree(scratch);
+      return "plain small wait failed: " + res.error;
+    }
   }
+  cudaFree(scratch);
   DGPP_LOG_INFO("rank {}: {} plain small collectives done", rank,
                c.plain_iters);
   return "";
@@ -163,7 +187,7 @@ int run(const Config& c) {
     }
   }
   if (rc == 0) DGPP_LOG_INFO("REPRO: PASS (sequence completed)");
-  else DGPP_LOG_INFO("REPRO: STALL (bug reproduced)");
+  else DGPP_LOG_INFO("REPRO: FAIL (sequence did not complete)");
   return rc;
 }
 
