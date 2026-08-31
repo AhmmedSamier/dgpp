@@ -102,8 +102,14 @@ BusOptions bus_options(int rank, int world, uint16_t port,
   o.bulk_slots = 8;
   o.bulk_slot_bytes = 262144;
   o.qp_depth = 1024;
-  o.completion_timeout_ms = 5000;
-  o.consumer_deadline_s = 20.0;
+  // Real-mesh budgets, not loopback budgets: a cold peer's first boundary
+  // waits behind seconds of cold NVMe weight streaming (the CI's 5 s was
+  // calibrated for the in-process fixture world and fires on healthy
+  // slow peers — found by the first fabric gate run, 2026-08-30). The lane
+  // watchdog arms from each POST now, so these bounds measure genuine
+  // in-flight stalls only.
+  o.completion_timeout_ms = 120000;
+  o.consumer_deadline_s = 60.0;
   o.launch_consumers = false;
   return o;
 }

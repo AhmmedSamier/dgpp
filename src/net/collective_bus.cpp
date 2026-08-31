@@ -517,6 +517,11 @@ struct CollectiveBus::Impl {
     ss.owner = req;
     ss.owner_stripe = req->stripes.size();
     ++lane.in_flight_count;
+    // A post is progress: arm the lane watchdog from THIS moment, not from
+    // whenever traffic last flowed. Otherwise a fresh post after an idle
+    // gap (a peer still cold-loading weights on the real mesh) inherits
+    // the idle period as if it were a stall and the lane dies on arrival.
+    lane.last_progress = Clock::now();
     DGPP_LOG_DEBUG("stripe: peer={} lane={} pool={} slot={} seq={} chunk={}",
                    req->peer_rank, lane.stats.lane, pool_index(pool), slot, seq,
                    chunk);
@@ -816,6 +821,7 @@ struct CollectiveBus::Impl {
         ss.owner = coll.req;
         ss.owner_stripe = static_cast<size_t>(p);
         ++lane.in_flight_count;
+        lane.last_progress = Clock::now();  // a post is progress (idle-gap arming)
         lane.cursor[1] = (slot + 1) % static_cast<uint32_t>(opt.bulk_slots);
         ++lane.stats.posts;
         lane.stats.bytes_sent += len;
@@ -1116,6 +1122,7 @@ struct CollectiveBus::Impl {
         ss.owner = graph.carrier;
         ss.owner_stripe = p;
         ++lane.in_flight_count;
+        lane.last_progress = Clock::now();  // a post is progress (idle-gap arming)
         lane.cursor[0] = (slot + 1) % static_cast<uint32_t>(opt.lat_slots);
         ++lane.stats.posts;
         lane.stats.bytes_sent += elems * 2;
@@ -1383,6 +1390,7 @@ struct CollectiveBus::Impl {
       ss.owner = coll.req;
       ss.owner_stripe = p;  // peer index: stripe_hashes is peers-sized
       ++lane.in_flight_count;
+      lane.last_progress = Clock::now();  // a post is progress (idle-gap arming)
       lane.cursor[0] = (slot + 1) % static_cast<uint32_t>(opt.lat_slots);
       ++lane.stats.posts;
       lane.stats.bytes_sent += req.elems * 2;

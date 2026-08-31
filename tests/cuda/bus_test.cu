@@ -1286,6 +1286,53 @@ void scenario_allreduce_graph() {
   DGPP_LOG_INFO("scenario allreduce_graph: {} total failures", g_failures);
 }
 
+void scenario_idle_gap_collective() {
+  // The real-mesh shape, found by the M5 exit-gate fabric run (2026-08-30):
+  // buses sit IDLE for seconds while a host loads weights (a cold peer's
+  // first inter-collective gap — cold NVMe reads of replicated globals
+  // before its first boundary), then the first collective posts against a
+  // lane whose last traffic flowed before the gap. The lane watchdog must
+  // arm from the POST, not inherit the idle period as a stall — otherwise
+  // every cold-start fabric forward dies on its first collective.
+  // Tight budget on purpose: the gaps below exceed it by a wide margin, so
+  // stale arming cannot pass by accident.
+  BusOptions a_opt = base_options(0, 29903);
+  BusOptions b_opt = base_options(1, 29903);
+  // Collective mode (the per-collective kernel owns claims) — and with it
+  // no persistent consumer kernels spinning on the device, which would
+  // wedge a worker's cudaMalloc mid-scenario (the bring-up hazard class).
+  a_opt.launch_consumers = false;
+  b_opt.launch_consumers = false;
+  a_opt.completion_timeout_ms = 800;
+  b_opt.completion_timeout_ms = 800;
+  auto [a, b] = start_pair(a_opt, b_opt);
+  if (!a || !b) return;
+
+  const size_t elems = 4096;
+  std::vector<int> failures(2, 0);
+  for (int round = 0; round < 3; ++round) {
+    // The idle gap — longer than the watchdog budget, before the first
+    // collective AND between rounds.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    std::vector<std::thread> workers;
+    workers.emplace_back(
+        [&] { failures[0] += allreduce_rank_work(*a, 2, 0, elems, 1); });
+    workers.emplace_back(
+        [&] { failures[1] += allreduce_rank_work(*b, 2, 1, elems, 1); });
+    for (auto& t : workers) t.join();
+  }
+  const int total = failures[0] + failures[1];
+  CHECK(total == 0, "idle-gap collectives: " + std::to_string(total) +
+                        " failures across 3 rounds (lane watchdog fired on "
+                        "an idle gap?)");
+  a->quiesce();
+  b->quiesce();
+  a->stop();
+  b->stop();
+  DGPP_LOG_INFO("scenario idle_gap_collective: 3 collectives across 2s "
+                "idle gaps, clean");
+}
+
 void scenario_geometry_mismatch() {
   // Config errors must be legible over the rendezvous (roster precedent),
   // never a bare close or a hang.
@@ -1364,6 +1411,7 @@ int main() {
   scenario_allreduce_staged();
   scenario_allreduce_bulk();
   scenario_allreduce_graph();
+  scenario_idle_gap_collective();
   scenario_geometry_mismatch();
   scenario_stop_releases_waiters();
 
