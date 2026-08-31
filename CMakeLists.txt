@@ -249,6 +249,13 @@ if(DGPP_ENABLE_IBV)
   target_link_libraries(glm_tp_check PRIVATE dgpp_models_glm_loader dgpp_bus
                                           CUDA::cudart Threads::Threads)
   dgpp_set_common(glm_tp_check)
+
+  # M6 Stage 1d: greedy generation end-to-end at real dims (w1 local
+  # reference + fabric TP with the distributed pick).
+  add_executable(glm_gen_check apps/glm_gen_check.cpp)
+  target_link_libraries(glm_gen_check PRIVATE dgpp_models_glm_loader dgpp_bus
+                                            CUDA::cudart Threads::Threads)
+  dgpp_set_common(glm_gen_check)
 endif()
 
 enable_testing()
