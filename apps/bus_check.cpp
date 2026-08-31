@@ -126,6 +126,7 @@ struct CommonArgs {
   int timeout_ms = 5000;
 };
 
+
 BusOptions options_for(const CommonArgs& c, int my_rank,
                        const std::string& host) {
   BusOptions o;
@@ -281,6 +282,112 @@ PingStats bulk_flood(CollectiveBus& bus, int peer, int iters, size_t bytes,
     }
   }
   return st;
+}
+
+// Mixed-class soak: bulk flood and latency probes run CONCURRENTLY until
+// the deadline (`ping --contend --soak-ms N`). The fixed --iters/--lat-iters
+// caps size smoke runs — a one-hour exit-gate soak needs a duration-bounded
+// workload driver instead. Latency samples are stored every
+// kSoakSampleStride-th probe (uniform subsample: percentiles stay
+// representative; counts and running max are exact).
+struct SoakStats {
+  std::atomic<uint64_t> ok{0};
+  std::atomic<uint64_t> fail{0};
+  std::atomic<uint64_t> bytes{0};
+  double max_us = 0.0;              // guarded by samples_mu
+  std::vector<double> samples;      // every kSoakSampleStride-th latency
+  std::mutex samples_mu;
+};
+
+constexpr size_t kSoakSampleStride = 16;
+
+// One worker thread's loop: batches of ping_class until stop. Batch sizes
+// bound stop latency (~1 s) while amortizing per-batch setup.
+void soak_thread(CollectiveBus& bus, BusMessageClass cls, size_t bytes,
+                 long batch, int wait_ms, std::atomic<bool>& stop,
+                 SoakStats& st) {
+  while (!stop.load()) {
+    const PingStats s =
+        ping_class(bus, 0, cls, static_cast<int>(batch), bytes, wait_ms);
+    st.ok.fetch_add(static_cast<uint64_t>(s.ok));
+    st.fail.fetch_add(static_cast<uint64_t>(s.fail));
+    st.bytes.fetch_add(static_cast<uint64_t>(s.bytes));
+    std::lock_guard<std::mutex> lock(st.samples_mu);
+    if (!s.latency_us.empty())
+      st.max_us = std::max(st.max_us, *std::max_element(
+                                          s.latency_us.begin(),
+                                          s.latency_us.end()));
+    for (size_t i = 0; i < s.latency_us.size(); i += kSoakSampleStride)
+      st.samples.push_back(s.latency_us[i]);
+  }
+}
+
+void soak_report(const char* what, SoakStats& st, double elapsed_s) {
+  std::vector<double> sorted;
+  double max_us;
+  {
+    std::lock_guard<std::mutex> lock(st.samples_mu);
+    sorted = st.samples;
+    max_us = st.max_us;
+  }
+  const double gbps =
+      elapsed_s > 0 ? static_cast<double>(st.bytes.load()) * 8.0 /
+                         elapsed_s / 1e9
+                   : 0.0;
+  DGPP_LOG_INFO(
+      "SOAK {}: ok={} fail={} max_us={:.1f} p50_us={:.1f} p99_us={:.1f} "
+      "samples={} gbps={:.2f}",
+      what, st.ok.load(), st.fail.load(), max_us,
+      percentile(sorted, 0.5), percentile(sorted, 0.99), sorted.size(),
+      gbps);
+}
+
+int run_soak(CommonArgs c, const std::string& peer_host, size_t bulk_bytes,
+             long soak_ms) {
+  CollectiveBus bus(options_for(c, c.rank, peer_host));
+  std::string error;
+  if (!bus.start(&error)) {
+    DGPP_LOG_ERROR("soak: {}", error);
+    return 1;
+  }
+  std::atomic<bool> stop{false};
+  SoakStats bulk, lat;
+  // Batches sized for ~1 s stop latency at the measured fabric rates
+  // (bulk ~50-400 us/iter by size, lat ~15 us/probe).
+  const long bulk_batch = 2000, lat_batch = 20000;
+  const int wait_ms = c.timeout_ms + 2000;
+  std::thread bulk_thread(soak_thread, std::ref(bus),
+                          BusMessageClass::kBulk, bulk_bytes, bulk_batch,
+                          wait_ms, std::ref(stop), std::ref(bulk));
+  std::thread lat_thread(soak_thread, std::ref(bus),
+                         BusMessageClass::kLatency, c.lat_bytes, lat_batch,
+                         wait_ms, std::ref(stop), std::ref(lat));
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto deadline = t0 + std::chrono::milliseconds(soak_ms);
+  uint64_t next_report_s = 60;
+  while (std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    const double elapsed_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count();
+    if (elapsed_s >= static_cast<double>(next_report_s)) {
+      DGPP_LOG_INFO("SOAK progress: {:.0f}s elapsed", elapsed_s);
+      next_report_s += 60;
+    }
+  }
+  stop.store(true);
+  bulk_thread.join();
+  lat_thread.join();
+  const double elapsed_s =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+          .count();
+  soak_report("bulk", bulk, elapsed_s);
+  soak_report("lat", lat, elapsed_s);
+  print_bus_stats(bus.stats());
+  bus.stop();
+  const uint64_t fails = bulk.fail.load() + lat.fail.load();
+  DGPP_LOG_INFO("soak: stopped cleanly (failures={})", fails);
+  return fails == 0 ? 0 : 1;
 }
 
 int run_ping(CommonArgs c, std::string peer_host, int iters, size_t bytes,
@@ -843,6 +950,8 @@ int main(int argc, char** argv) {
                  "[--iters N] [--bytes B]\n"
                  "                 [--class latency|bulk] [--contend] "
                  "[--window N] [--lat-iters N] [--timeout-ms N]\n"
+                 "                 [--soak-ms N] (with --contend: bulk flood "
+                 "+ latency probes until the deadline)\n"
                  "                 (--window > 1 with --class bulk: pipelined "
                  "flood, verification deferred)\n"
                  "  bus_check allreduce --peer HOST [--rank R] [--world N] "
@@ -859,6 +968,7 @@ int main(int argc, char** argv) {
   std::string peer;
   long iters = 64;
   long duration_ms = 30000;
+  long soak_ms = 0;
   long lat_iters = 1000;
   long window = 1;
   long hold_ms = 20000;
@@ -892,6 +1002,11 @@ int main(int argc, char** argv) {
     } else if (a == "--duration-ms") {
       if (!parse_long(val(), 100, 3600000, &n)) args_ok = false;
       else duration_ms = n;
+    } else if (a == "--soak-ms") {
+      // ping --contend --soak-ms N: duration-bounded mixed-class soak
+      // (bulk flood + latency probes concurrent until the deadline).
+      if (!parse_long(val(), 1000, 3600000, &n)) args_ok = false;
+      else soak_ms = n;
     } else if (a == "--lat-slots") {
       if (!parse_long(val(), 1, 240, &n)) args_ok = false;
       else c.lat_slots = static_cast<int>(n);
@@ -954,6 +1069,13 @@ int main(int argc, char** argv) {
   }
   if (mode == "ping") {
     if (peer.empty() || c.rank == 0) return 2;
+    if (soak_ms > 0) {
+      if (!contend) {
+        DGPP_LOG_ERROR("--soak-ms requires --contend (mixed-class soak)");
+        return 2;
+      }
+      return run_soak(c, peer, bytes, soak_ms);
+    }
     return run_ping(c, peer, static_cast<int>(iters), bytes, cls_text,
                     contend, static_cast<int>(lat_iters), window, hold_ms);
   }

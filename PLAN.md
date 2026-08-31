@@ -267,7 +267,7 @@ Exit criteria:
 - actual per-rank bytes reconcile with the shard plan;
 - route traces replace the uniform expert assumption in the performance model.
 
-## M5 — Four-rank tensor parallelism
+## M5 — Four-rank tensor parallelism (complete)
 
 Deliverables:
 
@@ -285,9 +285,13 @@ Deliverables:
     DESIGN §5.2, the two block-boundary folds, MoE whole-expert
     partitions, per-layer isolated parity vs the world=1 oracle with
     route-flip/head near-tie certification, and cross-rank BITWISE
-    hidden/logits/captures/routes at world 2 and 4. Remaining: the
-    fabric runner (glm_tp_check) and real-mesh parity, the producing
-    GEMMs writing send slots directly, bulk prefill collectives, and
+    hidden/logits/captures/routes at world 2 and 4. The fabric runner
+    (glm_tp_check) and real-mesh parity are DONE (2026-08-31: the fabric
+    TP=4 run's final_hidden/logits/routes/digests are bitwise-identical
+    across all four ranks AND to the loopback world-4 verdict dumps —
+    md5 f2674050…/f5a9bf85…, the full parity-tier verdict transfers to
+    the fabric by bitwise identity). Remaining: the producing GEMMs
+    writing send slots directly, bulk prefill collectives, and
     CUDA-graph capture of the decode launch sequence (§6.2).
 4. Sharded load for TP=2 and TP=4, plus hashes for replicated weights.
 5. Transport regression command that reruns NIC→GPU visibility on every node
@@ -301,15 +305,27 @@ Deliverables:
    pre-thread construction, stream-scoped syncs) round it out. Fabric mesh
    validation runs with the exit-gate fabric pass.
 
-Exit criteria:
+Exit criteria (ALL MET 2026-08-31; the full evidence trail is in
+benchmarks/results/2026-08-29-bus-m5.md):
 
-- TP=2/4 outputs match M4 within the same tolerance tier;
-- no CQ, credit, or watchdog failure during a one-hour mixed-size soak with
-  decode-class and bulk traffic concurrent (latency collectives hold budget
-  under bulk load);
-- both lanes contribute under concurrent bulk traffic;
-- throughput and latency remain stable for the defined workload; counter
-  diagnostics are captured only if this criterion fails.
+- TP=2/4 outputs match M4 within the same tolerance tier — the parity
+  tier PASSES at real dims, loopback worlds 2 and 4 (worst isolated
+  capture l2 0.0058/0.0066, worst fold 0.0041/0.0049, all first-flip
+  route certifications and top-1 near ties certified), and the fabric
+  TP=4 run is bitwise-identical to the loopback world-4 verdict
+  (final_hidden f2674050…, logits f5a9bf85…, identical across all
+  four ranks, routes and boot digests included);
+- no CQ, credit, or watchdog failure during a one-hour mixed-size soak
+  with decode-class and bulk traffic concurrent — four 15-minute
+  phases (1 MiB/256 KB/4 MiB/1 MiB), ~18.4 TB bulk + 184M decode-class
+  probes, ZERO failures, lat p50 17.9-19.4 µs and p99 50-187 µs under
+  22-42 Gbps concurrent floods (bus_check gained `--contend --soak-ms`,
+  the duration-bounded soak driver);
+- both lanes contribute under concurrent bulk traffic — every
+  multi-stripe phase split bulk stripes across both lanes (2.0-2.4 TB
+  on lane 1 per phase);
+- throughput and latency remain stable — phase 0 vs phase 3 (same
+  workload, one hour apart) within a few percent, no trend.
 
 ## M6 — Generation, tokenizer, and service
 
@@ -324,8 +340,12 @@ Deliverables:
 5. Resident serving mode (the production residency contract, DESIGN §3):
    the rank's weights load once at startup and stay resident — storage is
    never touched during inference. TP=4 is the only world that fits 128 GB
-   (~79 GiB weights/rank, ~49 GB headroom); the M4/M5 streaming loader
-   remains the diagnostic instrument.
+   (81.77 GiB/rank with the replicated globals, ~46 GB headroom); the
+   M4/M5 streaming loader remains the diagnostic instrument.
+   IMPLEMENTED in M5 (2026-08-31, ahead of the serving integration):
+   bitwise resident-vs-streaming parity pinned at every world, the
+   zero-reread contract proven on all four ranks at real dims; M6
+   integrates it into the serving path.
 
 Exit criteria:
 
