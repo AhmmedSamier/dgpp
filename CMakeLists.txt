@@ -146,7 +146,8 @@ add_library(dgpp_models_glm STATIC
   src/models/glm_binding.cpp
   src/models/glm_mhc_reference.cpp
   src/models/glm_moe_reference.cpp
-  src/models/glm_trace.cpp)
+  src/models/glm_trace.cpp
+  src/models/glm_tokenizer.cpp)
 target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders)
 dgpp_set_common(dgpp_models_glm)
 
@@ -282,6 +283,16 @@ target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm dgpp_net Threads::Threads)
 dgpp_set_common(unit_tests)
 add_test(NAME unit_tests COMMAND unit_tests)
+
+# M6 Stage 3: the tokenizer differential gate (host). Skips with rc 2 when
+# the model cache is absent (same discipline as the real-checkpoint gates).
+add_executable(glm_tokenizer_test tests/host/glm_tokenizer_test.cpp)
+target_include_directories(glm_tokenizer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(glm_tokenizer_test PRIVATE dgpp_models_glm Threads::Threads)
+dgpp_set_common(glm_tokenizer_test)
+add_test(NAME glm_tokenizer_test
+  COMMAND glm_tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_tokenizer_goldens.jsonl)
+set_tests_properties(glm_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 add_executable(flag_protocol_test tests/cuda/flag_protocol_test.cu)
 target_link_libraries(flag_protocol_test PRIVATE CUDA::cudart)
 dgpp_set_common(flag_protocol_test)

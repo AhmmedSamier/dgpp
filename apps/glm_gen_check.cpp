@@ -16,9 +16,11 @@
 //     consistency is by construction (canonical order + broadcast),
 //     the files are the audit trail.
 //
-// PROMPT: comma-separated token ids (--prompt "1,2,3"). The exact
-// tokenizer is Stage 3; the smoke record encodes its prompt with the
-// golden HF tokenizer offline and decodes the output the same way.
+// PROMPT: either raw text (--text "...", tokenized by the Stage 3 exact
+// tokenizer, whose ids match HF tokenizers 0.23.1 byte-for-byte) or
+// comma-separated token ids (--prompt "1,2,3"). Generated tokens decode
+// through the same tokenizer; EOS stops the loop (config's eos_token_ids,
+// --no-eos disables).
 //
 // T² IS DIAGNOSTIC HERE: every step re-forwards the whole sequence
 // (fresh KDA/DSA state per call — GlmDiagnosticModel's contract). The
@@ -48,6 +50,7 @@
 #include "loaders/hf_cache.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_sampler.hpp"
+#include "models/glm_tokenizer.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "net/collective_bus.hpp"
 
@@ -138,7 +141,7 @@ std::string ids_line(const std::vector<int64_t>& ids) {
 int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         int rank, uint16_t port, const std::string& peer,
         const std::vector<int64_t>& prompt, int steps, bool resident,
-        bool incremental, bool no_eos,
+        bool incremental, bool no_eos, const dgpp::GlmTokenizer& tok,
         const std::string& out_prefix, int rendezvous_timeout_ms) {
   const int max_tokens = static_cast<int>(prompt.size()) + steps + 1;
   const int64_t cache = std::max<int64_t>(128, max_tokens);
@@ -153,6 +156,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                    .count();
     DGPP_LOG_INFO("w1 model constructed in {:.1f}s (streaming)", construct_s);
     std::vector<int64_t> generated;
+    std::string generated_text;  // decoded via the exact tokenizer
     const auto is_eos = [&](int64_t id) {
       return !no_eos && std::find(cfg.eos_token_ids.begin(),
                                  cfg.eos_token_ids.end(), id) !=
@@ -176,6 +180,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                     prefill_ms);
       for (int s = 0; s < steps; ++s) {
         generated.push_back(best.id);
+        generated_text += tok.decode(best.id, /*skip_special_tokens=*/false);
         if (is_eos(best.id)) {
           DGPP_LOG_INFO("[gen] eos stop at step {} (token {})", s, best.id);
           break;
@@ -185,8 +190,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         const GlmDiagnosticModel::Outputs step =
             model.session_step(generated.back());
         const double ms = std::chrono::duration<double, std::milli>(
-                             std::chrono::steady_clock::now() - t0s)
-                             .count();
+                              std::chrono::steady_clock::now() - t0s)
+                              .count();
         for (int i = 0; i < step.lm_vocab_count; ++i)
           frow[static_cast<size_t>(i)] =
               dgpp::bf16_bits_to_float(step.logits_bits[static_cast<size_t>(i)]);
@@ -211,6 +216,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
             dgpp::glm_sample::local_max(frow.data(), cfg.vocab_size, 0);
         toks.push_back(best.id);
         generated.push_back(best.id);
+        generated_text += tok.decode(best.id, /*skip_special_tokens=*/false);
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0)
                               .count();
@@ -221,6 +227,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     write_tokens_file(out_prefix + ".tokens.txt", rank, world, prompt,
                       generated);
     DGPP_LOG_INFO("w1 generated ids: {}", ids_line(generated));
+    DGPP_LOG_INFO("w1 generated text: {}", generated_text);
     return 0;
   }
 
@@ -288,6 +295,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
           out.lm_vocab_begin + out.lm_vocab_count, local.id, local.logit);
       return token;
     };
+    std::string generated_text;
     if (incremental) {
       // The serving path (Stage 2): prefill once, one stateful step per
       // token, distributed pick over the sharded head's slices.
@@ -307,6 +315,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       for (int s = 0; s < steps; ++s) {
         generated.push_back(token);
         toks.push_back(token);
+        generated_text += tok.decode(token, /*skip_special_tokens=*/false);
         if (is_eos(token)) {
           DGPP_LOG_INFO("rank {} eos stop at step {} (token {})", rank, s,
                         token);
@@ -330,6 +339,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         const auto t0 = std::chrono::steady_clock::now();
         const GlmDiagnosticModel::Outputs out = model.forward(toks);
         const int32_t token = run_step(out, "step", s);
+        generated_text += tok.decode(token, /*skip_special_tokens=*/false);
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0)
                               .count();
@@ -342,6 +352,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     write_tokens_file(out_prefix + ".tokens.txt", rank, world, prompt,
                       generated);
     DGPP_LOG_INFO("rank {} generated ids: {}", rank, ids_line(generated));
+    DGPP_LOG_INFO("rank {} generated text: {}", rank, generated_text);
 
     const auto stats = bus->stats();
     const auto summarize = [](const std::vector<double>& us) {
@@ -382,7 +393,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 int main(int argc, char** argv) {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
 
-  std::string config_path, ckpt, peer, prompt_text, out_prefix = "glm_gen",
+  std::string config_path, ckpt, peer, prompt_text, text_prompt, out_prefix =
+                                                   "glm_gen",
               model_id;
   int world = 1, rank = 0, steps = 8, rendezvous_timeout_ms = 120000;
   uint16_t port = 29970;
@@ -400,6 +412,7 @@ int main(int argc, char** argv) {
     else if (a == "--peer") peer = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--prompt") prompt_text = next();
+    else if (a == "--text") text_prompt = next();
     else if (a == "--steps") steps = std::stoi(next());
     else if (a == "--streaming") resident = false;
     else if (a == "--engine") {
@@ -469,9 +482,25 @@ int main(int argc, char** argv) {
           cfg.vocab_size);
       return 1;
     }
-    const std::vector<int64_t> prompt =
-        parse_prompt_ids(prompt_text, cfg.vocab_size);
-    return run(cfg, ckpt, world, rank, port, peer, prompt, steps, resident, incremental, no_eos,
+    // --text goes through the exact tokenizer (Stage 3): the ids match
+    // HF tokenizers 0.23.1 byte-for-byte (glm_tokenizer_test pins it).
+    // --prompt stays for raw ids (parity with the earlier records).
+    if (!text_prompt.empty() && !prompt_text.empty()) {
+      DGPP_LOG_ERROR("--text and --prompt are mutually exclusive");
+      return 1;
+    }
+    std::vector<int64_t> prompt;
+    const dgpp::GlmTokenizer tok = dgpp::GlmTokenizer::load(
+        (fs::path(ckpt) / "tokenizer.json").string());
+    if (!text_prompt.empty()) {
+      prompt = tok.encode(text_prompt);
+      DGPP_LOG_INFO("prompt encoded to {} ids by the exact tokenizer",
+                    prompt.size());
+      require(!prompt.empty(), "--text produced no tokens");
+    } else {
+      prompt = parse_prompt_ids(prompt_text, cfg.vocab_size);
+    }
+    return run(cfg, ckpt, world, rank, port, peer, prompt, steps, resident, incremental, no_eos, tok,
                out_prefix, rendezvous_timeout_ms);
   } catch (const std::exception& e) {
     DGPP_LOG_ERROR("rank {}: {}", rank, e.what());
