@@ -56,6 +56,7 @@
 #include "models/dsa_geometry.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_route_audit.hpp"
+#include "models/glm_sampler.hpp"
 #include "models/glm_tp.hpp"
 #include "models/glm_tp_parity.hpp"
 #include "models/glm_tp_bus.hpp"
@@ -73,6 +74,10 @@ using dgpp::GlmDiagnosticModel;
 using dgpp::GlmHeadSharding;
 using dgpp::GlmResidency;
 using dgpp::GlmLayerBound;
+using dgpp::bf16_bits_to_float;
+using dgpp::bus_greedy_pick;
+using dgpp::glm_sample::Candidate;
+using dgpp::glm_sample::local_max;
 using dgpp::GlmLayerResident;
 using dgpp::GlmLayerStream;
 using dgpp::GlmMlpKind;
@@ -765,6 +770,183 @@ DGPP_TEST(glm_tp_head_shard_parity) {
   for (auto& t : workers) t.join();
   for (int r = 0; r < kWorld; ++r)
     require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+}
+
+// ---- M6 d3: end-to-end greedy generation ----------------------------------
+// The d3 criterion on the fixture, stated as the invariant that actually
+// holds: the DISTRIBUTED pick (per-rank slice argmax + the bus
+// gather/broadcast) must equal the CENTRALIZED argmax over the SAME
+// geometry's full logits, token for token, step after step — plus
+// rank-consistency of the whole loop. The world-1 single-rank loop is
+// run only as a LOGGED reference: its sequence may legitimately differ
+// from the world-4 one (the boundary folds' ulp-class noise flips
+// near-tie argmaxes — the same regime the route-audit discipline
+// certifies; asserting cross-geometry token equality would be asserting
+// the noise away). (T^2 re-forward per step — the incremental decode
+// engine with persistent state is M6 stage 2; this pins the SEMANTICS
+// the stateful engine must then preserve.)
+DGPP_TEST(glm_tp_greedy_gen_loopback) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(8, cfg.vocab_size);
+  constexpr int kSteps = 6;
+  constexpr int kWorld = 4;
+  const int max_tokens = static_cast<int>(prompt.size()) + kSteps + 1;
+
+  // ---- reference: the centralized world-1 greedy loop (logged) ---------
+  std::vector<int64_t> w1_seq;
+  {
+    GlmDiagnosticModel model(cfg, dir, max_tokens, 128);
+    std::vector<int64_t> toks = prompt;
+    for (int s = 0; s < kSteps; ++s) {
+      const GlmDiagnosticModel::Outputs out = model.forward(toks);
+      const int T = static_cast<int>(toks.size());
+      const uint16_t* row =
+          out.logits_bits.data() +
+          static_cast<size_t>(T - 1) * cfg.vocab_size;
+      std::vector<float> frow(cfg.vocab_size);
+      for (int i = 0; i < cfg.vocab_size; ++i)
+        frow[static_cast<size_t>(i)] = bf16_bits_to_float(row[i]);
+      const Candidate c =
+          local_max(frow.data(), cfg.vocab_size, 0);
+      toks.push_back(c.id);
+      w1_seq.push_back(c.id);
+    }
+  }
+  require(w1_seq.size() == kSteps, "w1 reference produced wrong length");
+
+  // ---- the distributed loop: world 4, BOTH heads, bus pick ----------
+  // Full-head model = the centralized pick's source (its logits are the
+  // bitwise union of the shards — pinned by glm_tp_head_shard_parity);
+  // sharded model = the serving path. Every rank forwards BOTH each
+  // step (same order on every rank, collectives stay aligned).
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29916);
+  require(!buses.empty(), "tp bus world failed to start");
+  // Small-collective canary: 16 elems as the FIRST collective on a fresh
+  // bus must pass (pinned standalone). The OPEN ENGINE BUG is the
+  // staged->small-plain TRANSITION (see bus_greedy_pick's note): 16 elems
+  // after a run of 2048-elem staged collectives stalls. This canary guards
+  // the passing path while that hunt stays open.
+  {
+    std::vector<std::string> probe(kWorld);
+    ConstructBarrier probe_barrier(kWorld);
+    std::vector<std::thread> probe_workers;
+    for (int r = 0; r < kWorld; ++r)
+      probe_workers.emplace_back([&, r] {
+        try {
+          uint16_t* s = nullptr;
+          DGPP_CUDA_OK(cudaMallocManaged(&s, 32));
+          std::memset(s, 0, 32);
+          s[0] = static_cast<uint16_t>(r);
+          probe_barrier.arrive_and_wait();
+          std::string err;
+          const uint64_t id =
+              buses[static_cast<size_t>(r)]->allreduce(s, s, 16, &err);
+          if (id == 0) throw std::runtime_error("probe submit: " + err);
+          const auto res = buses[static_cast<size_t>(r)]->wait_allreduce(
+              id, 60000);
+          if (!res.ok) throw std::runtime_error("probe wait: " + res.error);
+          cudaFree(s);
+        } catch (const std::exception& e) {
+          probe[static_cast<size_t>(r)] = e.what();
+          probe_barrier.arrive_and_wait();
+        }
+      });
+    for (auto& t : probe_workers) t.join();
+    for (int r = 0; r < kWorld; ++r)
+      require(probe[static_cast<size_t>(r)].empty(),
+              "probe rank " + std::to_string(r) + ": " +
+                  probe[static_cast<size_t>(r)]);
+    DGPP_LOG_INFO("small-collective probe: 16 elems standalone PASSED");
+  }
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> rank_seqs(
+      kWorld, std::vector<int64_t>(kSteps, -1));
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  workers.reserve(kWorld);
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;  // gather-scratch (2048 bf16)
+      try {
+        GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)]);
+        GlmDiagnosticModel full(cfg, dir, max_tokens, 128, &reducer, r,
+                               kWorld);
+        GlmDiagnosticModel shard(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded);
+        DGPP_CUDA_OK(cudaMallocManaged(&scratch, sizeof(uint16_t) * 2048));
+        arrive_once();
+        std::vector<int64_t> toks = prompt;
+        for (int s = 0; s < kSteps; ++s) {
+          const GlmDiagnosticModel::Outputs full_out = full.forward(toks);
+          const GlmDiagnosticModel::Outputs shard_out = shard.forward(toks);
+          const int T = static_cast<int>(toks.size());
+          // centralized pick: the full head's last row, whole vocab
+          const uint16_t* full_row =
+              full_out.logits_bits.data() +
+              static_cast<size_t>(T - 1) * cfg.vocab_size;
+          std::vector<float> ffull(cfg.vocab_size);
+          for (int i = 0; i < cfg.vocab_size; ++i)
+            ffull[static_cast<size_t>(i)] = bf16_bits_to_float(full_row[i]);
+          const Candidate central =
+              local_max(ffull.data(), cfg.vocab_size, 0);
+          // distributed pick: this rank's slice through the bus
+          const uint16_t* slice_row =
+              shard_out.logits_bits.data() +
+              static_cast<size_t>(T - 1) * shard_out.lm_vocab_count;
+          std::vector<float> fslice(shard_out.lm_vocab_count);
+          for (int i = 0; i < shard_out.lm_vocab_count; ++i)
+            fslice[static_cast<size_t>(i)] =
+                bf16_bits_to_float(slice_row[i]);
+          const Candidate local =
+              local_max(fslice.data(), shard_out.lm_vocab_count,
+                        shard_out.lm_vocab_begin);
+          const int32_t token = bus_greedy_pick(
+              *buses[static_cast<size_t>(r)], r, kWorld, local, scratch,
+              60000);
+          if (token < 0 || token >= cfg.vocab_size)
+            throw std::runtime_error("generated id out of range");
+          if (token != central.id)
+            throw std::runtime_error(
+                "distributed pick != centralized pick at step " +
+                std::to_string(s) + ": " + std::to_string(token) +
+                " vs " + std::to_string(central.id));
+          toks.push_back(token);
+          rank_seqs[static_cast<size_t>(r)][static_cast<size_t>(s)] = token;
+        }
+        cudaFree(scratch);
+      } catch (const std::exception& e) {
+        if (scratch) cudaFree(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+
+  // ---- rank consistency: identical sequences everywhere -------------
+  for (int r = 1; r < kWorld; ++r) {
+    require(rank_seqs[static_cast<size_t>(r)] == rank_seqs[0],
+            "greedy sequence differs across ranks — rank-consistency "
+            "broken at rank " +
+                std::to_string(r));
+  }
+  std::string w1_txt, w4_txt;
+  for (int64_t t : w1_seq) w1_txt += std::to_string(t) + " ";
+  for (int64_t t : rank_seqs[0]) w4_txt += std::to_string(t) + " ";
+  DGPP_LOG_INFO("greedy w1 reference: {}", w1_txt);
+  DGPP_LOG_INFO("greedy w4 dist      : {}", w4_txt);
 }
 
 // The quantized scale-grid slice contract, pinned: a rank's slice of a

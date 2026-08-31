@@ -18,12 +18,15 @@
 // slot stay on the device path (chunked, or the bulk collective class).
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <vector>
 
 #include "common/log.hpp"
 #include <stdexcept>
 #include <string>
 
 #include "models/glm_forward.hpp"
+#include "models/glm_sampler.hpp"
 #include "net/collective_bus.hpp"
 
 namespace dgpp {
@@ -118,5 +121,104 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
   int timeout_ms_ = 60000;
   uint16_t* staged_ = nullptr;  // held pre-stage handout, if any
 };
+
+// ---------------------------------------------------------------------------
+// M6 d3: the distributed greedy pick over the existing all-reduce.
+// ---------------------------------------------------------------------------
+
+// Exact greedy argmax across ranks with NO new transport surface. The
+// bus all-reduce is an elementwise SUM in canonical rank order — and a
+// sum over disjoint per-rank slots IS a gather: each rank's quadruple
+// rides its own slots, the fold accumulates zeros elsewhere (bitwise-
+// stable; bf16 values and small digits pass through exactly), and every
+// rank then decodes an IDENTICAL candidate table. The pick is
+// glm_sample's canonical (value desc, id asc) — rank-consistent by
+// construction, the same discipline the unit tests pin.
+//
+// Encoding: ids travel as three 6-bit digits (bf16 holds integers only
+// 0..256 exactly; vocab ids run past 150k); values travel as their own
+// bf16 (they were bf16 logits to begin with). Wire shape: one latency
+// collective for the candidate gather, one for the winner broadcast —
+// both padded to the boundary folds' 2048 elements (see the OPEN ENGINE
+// BUG note inside). A proper (value, id) arg-max all-reduce is the M9
+// optimization; this is exact and rides the proven collective contract
+// (single outstanding, no other latency traffic in flight — the pick is
+// serialized behind the forward's collectives in every consumer of it).
+//
+// `scratch` is a device (managed) buffer of >= 4*world bf16 elements,
+// host-writable — caller-owned so this helper allocates nothing inside
+// the decode loop.
+inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
+                              glm_sample::Candidate local, uint16_t* scratch,
+                              int timeout_ms) {
+  if (local.id < 0 || local.id >= (1 << 18)) {
+    throw std::invalid_argument("bus_greedy_pick: token id outside the "
+                                 "6-bit-triplet encoding range");
+  }
+  // OPEN ENGINE BUG (2026-08-31, glm_tp_greedy_gen_loopback bring-up):
+  // the FIRST SMALL plain latency allreduce after a run of STAGED
+  // collectives stalls every rank — the doorbell is visibly present in
+  // the receiver's slot (doorbell seq ahead of ack) yet the per-
+  // collective kernel never claims it, and a send WR from an earlier
+  // ring-wrapped collective sits in_flight forever. Sizes: 16 elems
+  // after 14x2048-elem staged = stall (every run); 16 standalone on a
+  // fresh bus = pass; 4 elems after a 2048 plain = pass. Suspects: the
+  // unsignaled-payload WR retirement bookkeeping at ring wrap and the
+  // recycle/credit re-arm race — the same family as the gen-1825 RNR-
+  // freeze wedge. This is exactly the decode-path collective size
+  // class, so the fast paths need the hunt; until then every pick
+  // collective rides at the boundary folds' known-good 2048 elements
+  // (zeros elsewhere, quadruples unchanged — one latency slot).
+  const size_t gather_elems = 2048;
+  const auto allreduce_wait = [&](std::string* err) -> uint64_t {
+    const uint64_t id = bus.allreduce(scratch, scratch, gather_elems, err);
+    if (id == 0) return 0;
+    const net::BusAllReduceResult r = bus.wait_allreduce(id, timeout_ms);
+    if (!r.ok) {
+      *err = r.error;
+      return 0;
+    }
+    return id;
+  };
+
+  // ---- gather: every rank's (value, id) in its own slots -------------
+  std::memset(scratch, 0, gather_elems * 2);
+  scratch[static_cast<size_t>(rank) * 4 + 0] =
+      float_to_bf16_bits(local.logit);
+  scratch[static_cast<size_t>(rank) * 4 + 1] =
+      static_cast<uint16_t>(local.id & 63);
+  scratch[static_cast<size_t>(rank) * 4 + 2] =
+      static_cast<uint16_t>((local.id >> 6) & 63);
+  scratch[static_cast<size_t>(rank) * 4 + 3] =
+      static_cast<uint16_t>((local.id >> 12) & 63);
+  std::string err;
+  if (allreduce_wait(&err) == 0)
+    throw std::runtime_error("bus_greedy_pick gather: " + err);
+  std::vector<glm_sample::Candidate> cands;
+  cands.reserve(static_cast<size_t>(world));
+  for (int r = 0; r < world; ++r) {
+    const uint16_t* q = scratch + static_cast<size_t>(r) * 4;
+    glm_sample::Candidate c;
+    c.logit = bf16_bits_to_float(q[0]);
+    c.id = static_cast<int32_t>(q[1]) | (static_cast<int32_t>(q[2]) << 6) |
+           (static_cast<int32_t>(q[3]) << 12);
+    cands.push_back(c);
+  }
+  const int32_t winner = glm_sample::merge_greedy(cands);
+
+  // ---- broadcast: rank 0's winner digits reach every rank -----------
+  std::memset(scratch, 0, gather_elems * 2);
+  if (rank == 0) {
+    scratch[0] = static_cast<uint16_t>(winner & 63);
+    scratch[1] = static_cast<uint16_t>((winner >> 6) & 63);
+    scratch[2] = static_cast<uint16_t>((winner >> 12) & 63);
+    scratch[3] = 0;
+  }
+  if (allreduce_wait(&err) == 0)
+    throw std::runtime_error("bus_greedy_pick broadcast: " + err);
+  return static_cast<int32_t>(scratch[0]) |
+         (static_cast<int32_t>(scratch[1]) << 6) |
+         (static_cast<int32_t>(scratch[2]) << 12);
+}
 
 }  // namespace dgpp
