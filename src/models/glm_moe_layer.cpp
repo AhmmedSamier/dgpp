@@ -6,15 +6,19 @@
 #include "common/cuda_check.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/scale_gemm.hpp"
+#include "models/glm_step_timing.hpp"
 
 namespace dgpp {
 
 GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
-                         int max_tokens)
-    : w_(weights), cfg_(cfg), max_tokens_(max_tokens) {
+                          int max_tokens, int decode_slots)
+    : w_(weights), cfg_(cfg), max_tokens_(max_tokens),
+      decode_slots_(decode_slots) {
   GlmMoeConfig::validate_config(cfg_);
   if (max_tokens_ <= 0)
     throw std::invalid_argument("GlmMoeLayer: max_tokens must be positive");
+  if (decode_slots_ < 0)
+    throw std::invalid_argument("GlmMoeLayer: decode_slots must be >= 0");
   if (!w_.router_gate || !w_.router_bias || !w_.experts ||
       !w_.shared[0].payload)
     throw std::invalid_argument("GlmMoeLayer: null weight pointer");
@@ -25,7 +29,7 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
   DGPP_CUDA_OK(cudaMallocManaged(&d_ids_, static_cast<size_t>(M) * cfg_.top_k * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_weights_, static_cast<size_t>(M) * cfg_.top_k * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_biased_,
-                                 static_cast<size_t>(M) * cfg_.n_experts * 4));
+                                  static_cast<size_t>(M) * cfg_.n_experts * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_rows_, static_cast<size_t>(M) * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_row_w_, static_cast<size_t>(M) * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_gather_, M * H * 2));
@@ -34,6 +38,30 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
   DGPP_CUDA_OK(cudaMallocManaged(&d_act_, M * I * 2));
   DGPP_CUDA_OK(cudaMallocManaged(&d_down_, M * H * 2));
   h_counts_.assign(cfg_.n_experts, 0);
+
+  // Decode-slot scratch: tokens*(top_k+1) rows — routed slots plus the
+  // shared expert's, per token. Sized by the decode-row bound, not
+  // max_tokens: a short-prompt model still decodes full slots.
+  if (decode_slots_ > 0) {
+    const size_t rows =
+        static_cast<size_t>(decode_slots_) * (cfg_.top_k + 1);
+    DGPP_CUDA_OK(cudaMallocManaged(&d_slot_gate_, rows * I * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_slot_up_, rows * I * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_slot_act_, rows * I * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_slot_down_, rows * H * 2));
+    // Max-sized for any partition (w1 holds every expert; a TP rank a
+    // slice) — one table, re-uploaded per enqueue_decode. The source is
+    // PINNED (see the member's comment): pageable async H2D syncs the
+    // stream before initiating, which would drain the pipeline once per
+    // MoE layer per step.
+    DGPP_CUDA_OK(cudaMallocManaged(
+        &d_expert_views_,
+        sizeof(MoeExpertView) * static_cast<size_t>(cfg_.n_experts) * 3));
+    DGPP_CUDA_OK(cudaHostAlloc(
+        reinterpret_cast<void**>(&h_expert_views_pinned_),
+        sizeof(MoeExpertView) * static_cast<size_t>(cfg_.n_experts) * 3,
+        cudaHostAllocDefault));
+  }
 }
 
 GlmMoeLayer::~GlmMoeLayer() {
@@ -47,6 +75,12 @@ GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_up_);
   cudaFree(d_act_);
   cudaFree(d_down_);
+  cudaFree(d_slot_gate_);
+  cudaFree(d_slot_up_);
+  cudaFree(d_slot_act_);
+  cudaFree(d_slot_down_);
+  cudaFree(d_expert_views_);
+  cudaFreeHost(h_expert_views_pinned_);
 }
 
 void GlmMoeLayer::run_expert_segment(
@@ -77,6 +111,7 @@ void GlmMoeLayer::run_expert_segment(
 
 void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
                           cudaStream_t stream) {
+  step_timing::Scope tick(step_timing::kMoe);
   if (tokens <= 0) return;
   if (tokens > max_tokens_)
     throw std::invalid_argument("GlmMoeLayer: tokens exceed max_tokens");
@@ -107,7 +142,10 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
   DGPP_CUDA_OK(cudaMemcpyAsync(h_biased_.data(), d_biased_,
                                static_cast<size_t>(tokens) * E * 4,
                                cudaMemcpyDeviceToHost, stream));
-  DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+  {
+    step_timing::Scope sync_tick(step_timing::kMoeSync);
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+  }
 
   // 2. Segment by expert (ascending expert id — the accumulation order).
   DGPP_CUDA_OK(cudaMemsetAsync(out, 0, static_cast<size_t>(tokens) * H * 2,
@@ -142,10 +180,10 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
                                   static_cast<size_t>(n) * 4,
                                   cudaMemcpyHostToDevice, stream));
     run_expert_segment(hidden, d_rows_, d_row_w_, out, n,
-                        w_.experts[static_cast<size_t>(e - begin) * 3 + 0],
-                        w_.experts[static_cast<size_t>(e - begin) * 3 + 1],
-                        w_.experts[static_cast<size_t>(e - begin) * 3 + 2],
-                        stream);
+                       w_.experts[static_cast<size_t>(e - begin) * 3 + 0],
+                       w_.experts[static_cast<size_t>(e - begin) * 3 + 1],
+                       w_.experts[static_cast<size_t>(e - begin) * 3 + 2],
+                       stream);
   }
 
   // 4. Shared expert: all tokens, weight 1, added last (the reference's
@@ -154,13 +192,113 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
   for (int t = 0; t < tokens; ++t) h_rows_[t] = t;
   h_row_w_.assign(tokens, 1.0f);
   DGPP_CUDA_OK(cudaMemcpyAsync(d_rows_, h_rows_.data(),
-                               static_cast<size_t>(tokens) * 4,
-                               cudaMemcpyHostToDevice, stream));
+                                static_cast<size_t>(tokens) * 4,
+                                cudaMemcpyHostToDevice, stream));
   DGPP_CUDA_OK(cudaMemcpyAsync(d_row_w_, h_row_w_.data(),
-                               static_cast<size_t>(tokens) * 4,
-                               cudaMemcpyHostToDevice, stream));
+                                static_cast<size_t>(tokens) * 4,
+                                cudaMemcpyHostToDevice, stream));
   run_expert_segment(hidden, d_rows_, d_row_w_, out, tokens, w_.shared[0],
-                     w_.shared[1], w_.shared[2], stream);
+                    w_.shared[1], w_.shared[2], stream);
+}
+
+void GlmMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out,
+                                 int tokens, MoeTraceStaging* trace,
+                                 cudaStream_t stream) {
+  step_timing::Scope tick(step_timing::kMoe);
+  if (tokens <= 0) return;
+  if (decode_slots_ <= 0)
+    throw std::runtime_error(
+        "GlmMoeLayer: decode path not provisioned (construct with "
+        "decode_slots > 0)");
+  if (tokens > decode_slots_)
+    throw std::invalid_argument(
+        "GlmMoeLayer: decode rows exceed decode_slots");
+  if (!hidden || !out)
+    throw std::invalid_argument("GlmMoeLayer: null pointer");
+  const int H = cfg_.hidden, E = cfg_.n_experts, K = cfg_.top_k;
+  const int begin = w_.expert_begin;
+  const int count = w_.expert_count < 0 ? E : w_.expert_count;
+  if (begin < 0 || begin + count > E)
+    throw std::runtime_error("GlmMoeLayer: expert partition out of range");
+  if (count > 0) {
+    // Routed dims come from the views (the same trust run_expert_segment
+    // gives them); all local experts share them — the loader's contract.
+    const GlmQuantMatrix& g0 = w_.experts[0];
+    const GlmQuantMatrix& d0 = w_.experts[2];
+    if (g0.cols != H || w_.experts[1].cols != H ||
+        w_.experts[1].rows != g0.rows || d0.rows != H || d0.cols != g0.rows)
+      throw std::runtime_error(
+          "GlmMoeLayer: inconsistent routed expert matrices");
+  }
+  if (w_.shared[0].rows != w_.shared[1].rows ||
+      w_.shared[2].cols != w_.shared[0].rows || w_.shared[2].rows != H ||
+      w_.shared[0].cols != H)
+    throw std::runtime_error("GlmMoeLayer: inconsistent shared matrices");
+
+  // 1. Router: unchanged kernel — ids ASCENDING per row, on device.
+  launch_moe_router(hidden, w_.router_gate, w_.router_bias, d_ids_,
+                    d_weights_, cfg_, tokens, stream, d_biased_);
+  // 2. Route traces ride ASYNC copies into the caller's pinned staging;
+  //    the caller materializes them after its next stream sync (the
+  //    decode step's final sync). No round-trip on the hot path.
+  if (trace) {
+    if (!trace->ids || !trace->weights || !trace->biased)
+      throw std::invalid_argument("GlmMoeLayer: incomplete trace staging");
+    DGPP_CUDA_OK(cudaMemcpyAsync(trace->ids, d_ids_,
+                                  static_cast<size_t>(tokens) * K * 4,
+                                  cudaMemcpyDeviceToHost, stream));
+    DGPP_CUDA_OK(cudaMemcpyAsync(trace->weights, d_weights_,
+                                  static_cast<size_t>(tokens) * K * 4,
+                                  cudaMemcpyDeviceToHost, stream));
+    DGPP_CUDA_OK(cudaMemcpyAsync(trace->biased, d_biased_,
+                                  static_cast<size_t>(tokens) * E * 4,
+                                  cudaMemcpyDeviceToHost, stream));
+  }
+
+  // 3. The slot chain. Slot layout: tokens*(K+1); slot t*(K+1)+j is row
+  //    t's routed expert j (ascending id — the router's contract) and
+  //    slot ..+K is the shared expert. Foreign experts early-exit in the
+  //    kernels; their contributions arrive via the FFN all-reduce.
+  //    The expert-view table is RE-UPLOADED EVERY CALL (see the member's
+  //    comment: the streaming loader makes binding-keyed caching a
+  //    wrong-weights factory; one small async upload per layer per step
+  //    is the honest price).
+  MoeExpertView* views = d_expert_views_;
+  if (count > 0) {
+    for (int e = 0; e < count; ++e)
+      for (int m = 0; m < 3; ++m) {
+        const GlmQuantMatrix& q = w_.experts[static_cast<size_t>(e) * 3 + m];
+        h_expert_views_pinned_[static_cast<size_t>(e) * 3 + m] =
+            MoeExpertView{q.payload, q.scales};
+      }
+    DGPP_CUDA_OK(cudaMemcpyAsync(
+        d_expert_views_, h_expert_views_pinned_,
+        sizeof(MoeExpertView) * static_cast<size_t>(count) * 3,
+        cudaMemcpyHostToDevice, stream));
+  } else {
+    views = nullptr;  // no local experts: the shared expert rides alone
+  }
+  const int slots = tokens * (K + 1);
+  const int I_r = count > 0 ? static_cast<int>(w_.experts[0].rows)
+                            : cfg_.inter;  // routed inter (whole experts)
+  const int I_s = static_cast<int>(w_.shared[0].rows);  // shared inter
+  launch_moe_slot_gemv(hidden, H, d_ids_, views, /*which=*/0, I_r, H, I_s,
+                       H, w_.shared[0].payload, w_.shared[0].scales,
+                       d_slot_gate_, I_r, slots, K, begin, count, stream);
+  launch_moe_slot_gemv(hidden, H, d_ids_, views, /*which=*/1, I_r, H, I_s,
+                       H, w_.shared[1].payload, w_.shared[1].scales,
+                       d_slot_up_, I_r, slots, K, begin, count, stream);
+  // The same elementwise swiglu the host path runs per segment; per-slot
+  // bounds are consumed downstream (the down GEMV reads only k=I_s of
+  // the shared slot; foreign slots are never read at all).
+  launch_moe_swiglu_clamp(d_slot_gate_, d_slot_up_, d_slot_act_,
+                          static_cast<int64_t>(slots) * I_r,
+                          cfg_.swiglu_limit, stream);
+  launch_moe_slot_gemv(d_slot_act_, I_r, d_ids_, views, /*which=*/2, H, I_r,
+                       H, I_s, w_.shared[2].payload, w_.shared[2].scales,
+                       d_slot_down_, H, slots, K, begin, count, stream);
+  launch_moe_slot_accum(out, d_slot_down_, d_ids_, d_weights_, tokens, H, K,
+                        begin, count, stream);
 }
 
 }  // namespace dgpp

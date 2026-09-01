@@ -46,6 +46,9 @@ stage() {
 boot_head() {
   echo "=== rank 0 (HTTP :$HTTP_PORT, fabric :$FABRIC_PORT, journal :$JOURNAL_PORT)"
   cd "$ROOT" || exit 1
+  # Rank 0 writes its op stream to its CWD at shutdown — sweep any stale
+  # file so the §11 ritual can never hash a previous run's evidence.
+  rm -f "$ROOT/serve_rank0.ops"
   DGPP_LOG_LEVEL=info setsid nohup "$BIN" --model "$MODEL" $KNOBS \
     --world "$WORLD" --rank 0 --port "$HTTP_PORT" \
     --fabric-port "$FABRIC_PORT" --journal-port "$JOURNAL_PORT" \
@@ -93,6 +96,7 @@ cmd_up() {
   # Peers IN PARALLEL (the soak's sequential-spawn lesson), each spawn
   # timeout-wrapped, observed by pgrep — never by ssh's exit code.
   echo "=== peers ${PEERS[*]}"
+  local spawn_pids=()
   for i in 1 2 3; do
     h=${PEERS[$((i - 1))]}
     ( timeout 25 ssh "${SSH_OPTS[@]}" "user@$h" \
@@ -100,8 +104,15 @@ cmd_up() {
          --world $WORLD --rank $i --peer $RANK0 --fabric-port $FABRIC_PORT \
          --journal-port $JOURNAL_PORT > serve_r$i.log 2>&1 &" \
         >/dev/null 2>&1 ) &
+    spawn_pids+=($!)
   done
-  wait
+  # Wait ONLY for the spawn subshells: a bare `wait` would also collect
+  # rank 0's setsid child (without job control setsid does not fork, so
+  # glm_serve stays a direct child) and block until the whole SERVE
+  # exits — the 2026-09-01 boot appeared to hang on exactly this.
+  for p in "${spawn_pids[@]}"; do
+    wait "$p" 2>/dev/null || true
+  done
   for i in 1 2 3; do
     h=${PEERS[$((i - 1))]}
     peer_ssh "$h" "pgrep -x glm_serve" >/dev/null 2>&1 \
@@ -122,7 +133,14 @@ cmd_down() {
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     echo "=== SIGINT rank 0 ($pid) — the stop record releases the peers"
     kill -INT "$pid"
-    for _ in $(seq 1 60); do
+    # 240s, not 60: a SIGINT that lands mid-PREFILL (a cold first-touch
+    # pass runs 2s/fold x ~90 folds) is honored only at the pass
+    # boundary — the 2026-09-01 catch killed rank 0 at 60s mid-collective,
+    # the peers ate transport-retry-exceeded, and the sweep had to shoot
+    # them (the drain-on-stop debt, one entry in the record). Give the
+    # engine time to reach a tick boundary; the SIGKILL remains for the
+    # genuinely wedged.
+    for _ in $(seq 1 240); do
       kill -0 "$pid" 2>/dev/null || break
       sleep 1
     done
@@ -142,7 +160,15 @@ cmd_down() {
       "$LOG/serve_rank$i.ops" 2>/dev/null \
       || echo "WARN: no serve_rank$i.ops on $h"
   done
-  [ -f "$LOG/serve_rank0.ops" ] || cp "$ROOT/serve_rank0.ops" "$LOG/" 2>/dev/null
+  # Rank 0's op stream lands in its CWD (the repo root) at shutdown —
+  # ALWAYS refresh the log-dir copy before hashing: a stale copy from a
+  # previous run is exactly the false "identical" the ritual exists to
+  # prevent (the 2026-09-01 catch: `down` hashed Stage 4b's file).
+  if [ -f "$ROOT/serve_rank0.ops" ]; then
+    cp "$ROOT/serve_rank0.ops" "$LOG/"
+  else
+    echo "WARN: no fresh serve_rank0.ops in $ROOT (rank 0 never wrote one?)"
+  fi
   md5sum "$LOG"/serve_rank*.ops 2>/dev/null || echo "(no op streams)"
   echo "=== logs in $LOG"
 }

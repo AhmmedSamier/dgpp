@@ -77,6 +77,7 @@
 #include "models/glm_gen_engine.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_scheduler.hpp"
+#include "models/glm_step_timing.hpp"
 #include "models/glm_tokenizer.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "net/collective_bus.hpp"
@@ -521,7 +522,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
                                                    pick_scratch, vocab));
     dgpp::glm::Scheduler sched(&engine, eos);
     // Submit COPIES (the manifest entries stay intact for the audit
-    // trail below — log_results reads them after the run).
+    // trail below — log_results reads spec.id/spec.prompt after the run).
     for (const auto& r : requests) {
       dgpp::glm::SchedulerRequest copy = r;
       sched.submit(std::move(copy));
@@ -535,6 +536,9 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
                           std::chrono::steady_clock::now() - t0)
                       .count());
     log_results(sched);
+    dgpp::step_timing::report(("rank " + std::to_string(rank) +
+                               " scheduler mode (prefill+decode mixed)")
+                                  .c_str());
     const auto stats = bus->stats();
     DGPP_LOG_INFO("rank {}: lat {} bulk {} collectives served",
                   rank, stats.latency.latency_us.size(),
@@ -733,6 +737,9 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
           prefill_ms + std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - tp0)
                            .count();
+      // The budget below is decode-steps only: prefill's folds and
+      // host-path MoE syncs are a different (amortized) story.
+      dgpp::step_timing::reset();
       for (int s = 0; s < steps; ++s) {
         generated.push_back(token);
         toks.push_back(token);
@@ -774,6 +781,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                       generated);
     DGPP_LOG_INFO("rank {} generated ids: {}", rank, ids_line(generated));
     DGPP_LOG_INFO("rank {} generated text: {}", rank, generated_text);
+    dgpp::step_timing::report(
+        ("rank " + std::to_string(rank) + " gen_check").c_str());
 
     const auto stats = bus->stats();
     const auto summarize = [](const std::vector<double>& us) {
@@ -814,14 +823,13 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 
 int main(int argc, char** argv) {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
-
   static constexpr const char* kUsage =
       "usage: glm_gen_check --model ORG/NAME | --checkpoint-dir DIR\n"
       "  (--prompt ID,ID,... | --text TEXT | --chat TEXT [--system TEXT]\n"
       "   | --requests FILE)\n"
       "  [--steps N] [--world N --rank R --peer HOST --port N]\n"
       "  [--streaming] [--engine incremental|reforward] [--no-eos]\n"
-      "  [--rendezvous-timeout-ms N] [--out PREFIX]\n"
+      "  [--step-timing] [--rendezvous-timeout-ms N] [--out PREFIX]\n"
       "scheduler mode (--requests): [--max-concurrency N] [--kv-capacity N]\n"
       "  [--sched-plan]\n";
 
@@ -830,7 +838,7 @@ int main(int argc, char** argv) {
               model_id, requests_path;
   int world = 1, rank = 0, steps = 8, rendezvous_timeout_ms = 120000;
   int max_concurrency = 0, kv_capacity = 0;
-  bool sched_plan = false;
+  bool sched_plan = false, step_timing = false;
   uint16_t port = 29970;
   bool resident = true, incremental = true, no_eos = false;
   std::string system_prompt, chat_text;
@@ -852,6 +860,7 @@ int main(int argc, char** argv) {
     else if (a == "--system") system_prompt = next();
     else if (a == "--steps") steps = std::stoi(next());
     else if (a == "--streaming") resident = false;
+    else if (a == "--step-timing") step_timing = true;
     else if (a == "--engine") {
       const std::string v = next();
       if (v == "incremental") incremental = true;
@@ -873,6 +882,7 @@ int main(int argc, char** argv) {
       return a == "--help" ? 0 : 1;
     }
   }
+  if (step_timing) dgpp::step_timing::set_enabled(true);
   if (world > 1) {
     require(rank >= 0 && rank < world, "--rank outside --world");
     require(!peer.empty() || rank == 0,

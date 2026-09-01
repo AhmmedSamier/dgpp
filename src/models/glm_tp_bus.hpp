@@ -28,6 +28,7 @@
 
 #include "models/glm_forward.hpp"
 #include "models/glm_sampler.hpp"
+#include "models/glm_step_timing.hpp"
 #include "net/collective_bus.hpp"
 
 namespace dgpp {
@@ -52,6 +53,7 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
   }
 
   void reduce(uint16_t* partial, int rows, int hidden) override {
+    step_timing::Scope tick(step_timing::kFold);
     if (hidden <= 0 || hidden > static_cast<int>(kMaxCollectiveElems) ||
         hidden % 2 != 0)
       throw std::invalid_argument(
@@ -150,8 +152,9 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
 // host-writable — caller-owned so this helper allocates nothing inside
 // the decode loop.
 inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
-                              glm_sample::Candidate local, uint16_t* scratch,
-                              int timeout_ms) {
+                               glm_sample::Candidate local, uint16_t* scratch,
+                               int timeout_ms) {
+  step_timing::Scope tick(step_timing::kPick);
   if (local.id < 0 || local.id >= (1 << 18)) {
     throw std::invalid_argument("bus_greedy_pick: token id outside the "
                                  "6-bit-triplet encoding range");

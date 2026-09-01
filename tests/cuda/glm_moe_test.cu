@@ -413,6 +413,93 @@ DGPP_TEST(moe_accumulation_order_is_ascending_expert) {
   c.free_all();
 }
 
+// The decode fast path's pin (2026-09-01): the slot kernels must
+// reproduce the host-orchestrated path's EXACT bits at the same
+// routing — same tile arithmetic (slot GEMV vs scale_gemm at m=1), same
+// swiglu, same ascending accumulation, same shared-last add. Also pins
+// the deferred traces (pinned staging vs the host path's
+// last_ids/last_weights/last_biased) and the TP partition's
+// foreign-expert skip, and exercises both the prefill-warmed and the
+// cold (lazy table upload) entry into enqueue_decode.
+DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path) {
+  struct Case {
+    int E, H, I, K, M, begin, count;
+  };
+  const Case cases[] = {
+      {8, 512, 256, 2, 1, 0, -1},   // world-1 shape, one decode row
+      {8, 512, 256, 2, 3, 0, -1},   // multi-row steps
+      {16, 1024, 512, 4, 2, 3, 5},  // TP partition: experts [3,8) local
+  };
+  for (const Case& cs : cases) {
+    SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M,
+                                  0xFACADE + cs.E + cs.M);
+    c.dev_w.expert_begin = cs.begin;
+    c.dev_w.expert_count = cs.count;
+    c.alloc();
+
+    // GIVEN the host-orchestrated run (which also warms the decode
+    // path's device expert tables):
+    GlmMoeLayer layer(c.dev_w, c.cfg, std::max(cs.M, 1),
+                      /*decode_slots=*/cs.M);
+    std::vector<uint16_t> host(static_cast<size_t>(cs.M) * c.cfg.hidden);
+    layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::memcpy(host.data(), c.d_out, host.size() * 2);
+    const std::vector<int32_t> want_ids = layer.last_ids();
+    const std::vector<float> want_w = layer.last_weights();
+    const std::vector<float> want_biased = layer.last_biased();
+
+    // WHEN the decode-slot path runs the same rows (poisoned output,
+    // pinned trace staging), THEN the output must be bitwise-identical
+    // and the staged traces must equal the host path's decision.
+    int32_t* pin_ids = nullptr;
+    float* pin_w = nullptr;
+    float* pin_b = nullptr;
+    DGPP_CUDA_OK(cudaHostAlloc(&pin_ids, want_ids.size() * 4,
+                               cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(&pin_w, want_w.size() * 4,
+                               cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(&pin_b, want_biased.size() * 4,
+                               cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+    dgpp::MoeTraceStaging trace{pin_ids, pin_w, pin_b};
+    layer.enqueue_decode(c.d_hidden, c.d_out, cs.M, &trace, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> fused(host.size(), 0x7F7F);
+    std::memcpy(fused.data(), c.d_out, fused.size() * 2);
+    require(std::memcmp(host.data(), fused.data(), host.size() * 2) == 0,
+            "decode slot path must be bitwise-identical to enqueue");
+    require(std::memcmp(pin_ids, want_ids.data(), want_ids.size() * 4) == 0,
+            "staged ids must equal the host path's router decision");
+    require(std::memcmp(pin_w, want_w.data(), want_w.size() * 4) == 0,
+            "staged weights must equal the host path's");
+    require(std::memcmp(pin_b, want_biased.data(), want_biased.size() * 4) == 0,
+            "staged biased scores must equal the host path's");
+
+    // GIVEN a COLD instance (no prefill warm — the lazy table upload),
+    // WHEN the decode path runs, THEN still bitwise.
+    GlmMoeLayer cold(c.dev_w, c.cfg, std::max(cs.M, 1),
+                     /*decode_slots=*/cs.M);
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+    cold.enqueue_decode(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> fused2(host.size(), 0x7F7F);
+    std::memcpy(fused2.data(), c.d_out, fused2.size() * 2);
+    require(std::memcmp(host.data(), fused2.data(), host.size() * 2) == 0,
+            "cold decode slot path must be bitwise-identical too");
+
+    cudaFreeHost(pin_ids);
+    cudaFreeHost(pin_w);
+    cudaFreeHost(pin_b);
+    c.free_all();
+    std::printf(
+        "[ OK ] decode slot path E=%d H=%d I=%d K=%d M=%d partition "
+        "[%d, %d): bitwise\n",
+        cs.E, cs.H, cs.I, cs.K, cs.M, cs.begin,
+        cs.count < 0 ? cs.E : cs.begin + cs.count);
+  }
+}
+
 int main() {
   int devices = 0;
   const cudaError_t err = cudaGetDeviceCount(&devices);

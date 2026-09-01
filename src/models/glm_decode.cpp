@@ -10,6 +10,7 @@
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/glm_norm.hpp"
 #include "kernels/scale_gemm.hpp"
+#include "models/glm_step_timing.hpp"
 
 namespace dgpp {
 namespace {
@@ -102,6 +103,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
 // ---------------------------------------------------------------------------
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_step(int req,
                                                              int64_t token_id) {
+  step_timing::Scope tick(step_timing::kStep);
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_step: request slot " + std::to_string(req));
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
@@ -191,6 +193,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   uint16_t* nxt = streams_[1];
   int dsa_ordinal = 0;
   int kda_ordinal = 0;
+  // Decode-path route-trace bookkeeping: enqueue_decode defers its
+  // traces (async pinned copies — no round-trip); the entries pushed
+  // during the loop are materialized from staging after the final sync.
+  int moe_decode_calls = 0;
 
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const GlmLayerResident& r = loader_.load_layer(layer);
@@ -261,7 +267,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       ++dsa_ordinal;
     }
     if (boundary_) {
-      DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      {
+        step_timing::Scope drain(step_timing::kFoldDrain);
+        DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      }
       boundary_->reduce(attn_out, T, H);
     }
     launch_mhc_stream_update(post_, comb_, attn_out, cur, nxt, mhc_cfg_, T,
@@ -284,22 +293,52 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       enqueue_dense_mlp(normed_, ffn_out, b.dense, T, stream_);
     } else {
       if (!moe_) {
-        moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_);
+        moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
+                                             kDecodeRows);
       } else {
         moe_->rebind(*b.moe);
       }
-      moe_->enqueue(normed_, ffn_out, T, stream_);
-      GlmRouteTraceLayer route;
-      route.layer_idx = static_cast<uint32_t>(layer);
-      route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
-      route.tokens = static_cast<uint64_t>(T);
-      route.ids = moe_->last_ids();
-      route.weights = moe_->last_weights();
-      out.routes.push_back(std::move(route));
-      out.route_biased.push_back(moe_->last_biased());
+      if (decode_row) {
+        // The decode fast path (2026-09-01): the MoE runs from the
+        // DEVICE-side route — no router round-trip, no host
+        // segmentation, no per-segment H2D. Traces ride async copies
+        // into this layer's pinned staging slot; the placeholder route
+        // entry is filled after the final sync below.
+        MoeTraceStaging trace;
+        const size_t lay = static_cast<size_t>(moe_decode_calls);
+        trace.ids = moe_trace_ids_ + lay * kDecodeRows * moe_cfg_.top_k;
+        trace.weights =
+            moe_trace_weights_ + lay * kDecodeRows * moe_cfg_.top_k;
+        trace.biased =
+            moe_trace_biased_ + lay * kDecodeRows * moe_cfg_.n_experts;
+        moe_->enqueue_decode(normed_, ffn_out, T, &trace, stream_);
+        GlmRouteTraceLayer route;
+        route.layer_idx = static_cast<uint32_t>(layer);
+        route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
+        route.tokens = static_cast<uint64_t>(T);
+        out.routes.push_back(std::move(route));  // ids/weights: post-sync
+        out.route_biased.emplace_back();
+        ++moe_decode_calls;
+      } else {
+        // Prefill keeps the host-orchestrated path (the sync amortizes
+        // over pool-aligned chunks) — and warms the decode path's
+        // device expert tables on the way through.
+        moe_->enqueue(normed_, ffn_out, T, stream_);
+        GlmRouteTraceLayer route;
+        route.layer_idx = static_cast<uint32_t>(layer);
+        route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
+        route.tokens = static_cast<uint64_t>(T);
+        route.ids = moe_->last_ids();
+        route.weights = moe_->last_weights();
+        out.routes.push_back(std::move(route));
+        out.route_biased.push_back(moe_->last_biased());
+      }
     }
     if (boundary_) {
-      DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      {
+        step_timing::Scope drain(step_timing::kFoldDrain);
+        DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+      }
       boundary_->reduce(ffn_out, T, H);
     }
     launch_mhc_stream_update(post_, comb_, ffn_out, cur, nxt, mhc_cfg_, T,
@@ -312,9 +351,38 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   glm_rmsnorm_bf16(collapsed_, globals_.final_norm, normed_, T, H, eps,
                    stream_);
   gemm_.matmul(normed_, globals_.lm_head, logits_, T, lm_vocab_count_, H,
-               DType::BF16, GemmOut::BF16, H, gemm_ws_, gemm_ws_bytes_,
-               stream_);
-  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+                DType::BF16, GemmOut::BF16, H, gemm_ws_, gemm_ws_bytes_,
+                stream_);
+  {
+    step_timing::Scope sync_tick(step_timing::kFinalSync);
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  }
+
+  // The decode path's deferred route traces: the pinned staging copies
+  // were issued per layer mid-loop and the sync above joins them —
+  // materialize the placeholders now (shape-identical to what the
+  // host-orchestrated path returns: ids/weights [tokens, K], biased
+  // [tokens, E], one entry per MoE layer in layer order).
+  if (decode_row && moe_decode_calls > 0) {
+    const size_t K = static_cast<size_t>(moe_cfg_.top_k);
+    const size_t E = static_cast<size_t>(moe_cfg_.n_experts);
+    const size_t rows = static_cast<size_t>(T);
+    const size_t base =
+        out.routes.size() - static_cast<size_t>(moe_decode_calls);
+    for (int i = 0; i < moe_decode_calls; ++i) {
+      const size_t lay = static_cast<size_t>(i);
+      GlmRouteTraceLayer& route = out.routes[base + lay];
+      const int32_t* ids =
+          moe_trace_ids_ + lay * kDecodeRows * moe_cfg_.top_k;
+      const float* ws =
+          moe_trace_weights_ + lay * kDecodeRows * moe_cfg_.top_k;
+      const float* bs =
+          moe_trace_biased_ + lay * kDecodeRows * moe_cfg_.n_experts;
+      route.ids.assign(ids, ids + rows * K);
+      route.weights.assign(ws, ws + rows * K);
+      out.route_biased[base + lay].assign(bs, bs + rows * E);
+    }
+  }
 
   // Last row only (see the runner's header note).
   const uint16_t* last_hidden =

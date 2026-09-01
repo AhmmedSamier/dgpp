@@ -84,4 +84,15 @@ struct GlmMoeWeights {
   int expert_count = -1;
 };
 
+// The decode path's device-side expert table entry (2026-09-01): the
+// slot kernels read the ROUTE from device memory, so the weight views
+// they indirect through must live there too. Dims stay kernel args (all
+// routed experts share them; only the shared expert's inter differs).
+// Layout-compatible with nothing — one type, one producer (the layer's
+// per-binding upload), one consumer (launch_moe_slot_gemv).
+struct MoeExpertView {
+  const uint8_t* payload = nullptr;  // E4M3 fp8 payload (GlmQuantMatrix)
+  const float* scales = nullptr;     // F32 block scales
+};
+
 }  // namespace dgpp

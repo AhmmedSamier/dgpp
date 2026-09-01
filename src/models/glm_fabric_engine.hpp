@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "models/glm_gen_engine.hpp"
+#include "models/glm_step_timing.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "net/collective_bus.hpp"
 

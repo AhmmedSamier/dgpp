@@ -36,4 +36,39 @@ void launch_moe_accum(uint16_t* acc, const uint16_t* y, const int32_t* rows,
                       const float* row_weights, int n_rows, int hidden,
                       cudaStream_t stream);
 
+// ---- decode-slot path (the sync-free MoE, 2026-09-01) --------------------
+//
+// The decode step's MoE without host round-trips: the router leaves
+// ids/weights on the device (ids ASCENDING per row — the router kernel's
+// contract), the slot kernels read the route from device memory and
+// early-exit foreign experts, and the accumulation reproduces the host
+// path's exact op order. Slot layout: tokens*(top_k+1) slots, slot
+// s = t*(K+1)+j; j<K is row t's routed expert j (ascending expert id),
+// j==K is the shared expert (all rows, weight 1, accumulated last).
+//
+// slot_gemv: one m=1 scale-GEMV per (slot, n-tile). `views` is the
+// device expert table [count, 3] (gate,up,down); `which` selects the
+// matrix. Routed dims (n_routed, k_routed) vs the shared expert's
+// (n_shared, k_shared — the TP-sliced inter differs); shared matrices
+// arrive as args (they are host-known constants, not table entries).
+// The tile arithmetic is scale_gemm.cu's verbatim (BM/BN/BK/mma, same
+// dequant rounding) — glm_moe_test's bitwise gate pins the equivalence.
+void launch_moe_slot_gemv(
+    const uint16_t* x, size_t x_stride, const int32_t* ids,
+    const MoeExpertView* views, int which, int n_routed, int k_routed,
+    int n_shared, int k_shared, const uint8_t* sh_payload,
+    const float* sh_scales, uint16_t* out, int out_stride, int slots,
+    int top_k, int begin, int count, cudaStream_t stream);
+
+// slot_accum: per (token, element), the ordered chain
+//   out = bf16( ... bf16(bf16(0) + bf16(w_j * y_j)) ... ) + shared last
+// — exactly the host path's ascending-expert accumulation with the same
+// per-add rounding; foreign experts contribute nothing on this rank
+// (their partials arrive via the FFN all-reduce, which folds in rank
+// order after).
+void launch_moe_slot_accum(uint16_t* acc, const uint16_t* contrib,
+                           const int32_t* ids, const float* weights,
+                           int tokens, int hidden, int top_k, int begin,
+                           int count, cudaStream_t stream);
+
 }  // namespace dgpp

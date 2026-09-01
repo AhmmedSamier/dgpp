@@ -139,6 +139,26 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   }
   session_pos_.assign(static_cast<size_t>(max_requests_), 0);
 
+  // Decode-path route traces: pinned staging the decode MoE's async
+  // copies land in (see glm_moe_layer.hpp's MoeTraceStaging). Pinned —
+  // the copies are issued mid-step with no sync, and pinned destinations
+  // keep them true async D2H.
+  n_moe_layers_ = static_cast<int>(std::count_if(
+      cfg_.mlps.begin(), cfg_.mlps.end(),
+      [](GlmMlpKind k) { return k == GlmMlpKind::Moe; }));
+  if (n_moe_layers_ > 0) {
+    const size_t rows = static_cast<size_t>(n_moe_layers_) * kDecodeRows;
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&moe_trace_ids_),
+                               rows * moe_cfg_.top_k * sizeof(int32_t),
+                               cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&moe_trace_weights_),
+                               rows * moe_cfg_.top_k * sizeof(float),
+                               cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&moe_trace_biased_),
+                               rows * moe_cfg_.n_experts * sizeof(float),
+                               cudaHostAllocDefault));
+  }
+
   // Activations.
   const size_t T = static_cast<size_t>(max_tokens_);
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
@@ -185,6 +205,9 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(dense_u_);
   cudaFree(dense_act_);
   cudaFree(logits_);
+  cudaFreeHost(moe_trace_ids_);
+  cudaFreeHost(moe_trace_weights_);
+  cudaFreeHost(moe_trace_biased_);
   if (stream_) cudaStreamDestroy(stream_);
 }
 
@@ -272,7 +295,10 @@ void GlmDiagnosticModel::preconstruct_layers() {
       need_dsa = false;
     }
     if (need_moe && !moe_ && cfg_.mlps[layer] == GlmMlpKind::Moe) {
-      moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_);
+      // kDecodeRows: the decode fast path's slot bound (session_step's
+      // time-multiplexed rows; the batched-decode ceiling).
+      moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
+                                           kDecodeRows);
       need_moe = false;
     }
   }

@@ -322,6 +322,14 @@ class GlmDiagnosticModel {
   int64_t h_step_pos_[8] = {0};
   int32_t h_req_spans_[16] = {0};
   static constexpr int kDecodeRows = 8;  // DsaLayer's select-kernel bound
+  // Decode-path route traces (2026-09-01): per-MoE-layer pinned staging
+  // filled by enqueue_decode's async D2H copies, materialized into
+  // Outputs.routes after the step's final sync (the copies are
+  // stream-ordered; the sync joins them). Allocated at construction.
+  int n_moe_layers_ = 0;
+  int32_t* moe_trace_ids_ = nullptr;    // [n_moe_layers_ * kDecodeRows * K]
+  float* moe_trace_weights_ = nullptr;  // same shape
+  float* moe_trace_biased_ = nullptr;   // [n_moe_layers_ * kDecodeRows * E]
   uint16_t* streams_[2] = {nullptr, nullptr};  // [T, 4, hidden]
   uint16_t* post_ = nullptr;                   // [T, 4]
   uint16_t* comb_ = nullptr;                   // [T, 4, 4]
