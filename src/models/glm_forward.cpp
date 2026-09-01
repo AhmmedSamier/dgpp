@@ -127,6 +127,24 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     arena_.init(ac);
   }
 
+  // The decode path's H2D upload sources, PINNED at construction
+  // (pageable async copies stream-sync before initiating — a per-step
+  // pipeline drain the decode path refuses; and the graph era's memcpy
+  // nodes require page-locked sources). Addresses are stable for the
+  // model's lifetime — the graph bakes them.
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_req_ids_),
+                             sizeof(int32_t) * kDecodeRows,
+                             cudaHostAllocDefault));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_step_pos_),
+                             sizeof(int64_t) * kDecodeRows,
+                             cudaHostAllocDefault));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_req_spans_),
+                             sizeof(int32_t) * 2 * kDecodeRows,
+                             cudaHostAllocDefault));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_token_),
+                             sizeof(int64_t) * kDecodeRows,
+                             cudaHostAllocDefault));
+
   // Per-request, per-layer KDA state (slot-major: one memset pair per
   // request open — see the header's layout note).
   if (kda_cfg_.num_kda_layers > 0) {
@@ -191,6 +209,10 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(d_req_ids_);
   cudaFree(d_step_pos_);
   cudaFree(d_req_spans_);
+  cudaFreeHost(h_req_ids_);
+  cudaFreeHost(h_step_pos_);
+  cudaFreeHost(h_req_spans_);
+  cudaFreeHost(h_token_);
   cudaFree(kda_rec_);
   cudaFree(kda_conv_);
   cudaFree(d_tokens_);
@@ -296,9 +318,12 @@ void GlmDiagnosticModel::preconstruct_layers() {
     }
     if (need_moe && !moe_ && cfg_.mlps[layer] == GlmMlpKind::Moe) {
       // kDecodeRows: the decode fast path's slot bound (session_step's
-      // time-multiplexed rows; the batched-decode ceiling).
+      // time-multiplexed rows; the batched-decode ceiling). The graph
+      // table slots (one per MoE layer) provision the capture path's
+      // per-layer pinned expert-table sources unconditionally — a few
+      // hundred KB of pinned memory; the eager path never touches them.
       moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
-                                           kDecodeRows);
+                                           kDecodeRows, n_moe_layers_);
       need_moe = false;
     }
   }

@@ -1377,7 +1377,10 @@ void scenario_allreduce_graph() {
   // across worlds.
   const size_t elems = 4096;  // 8 KiB, the decode unit
   int failures = 0;
-  const int gens_per_step = 3;
+  // Above the staging-ring depth (8) on purpose: intra-window row reuse
+  // is the walk's serialized-reuse discipline, and the decode graph is
+  // 90 nodes deep in it.
+  const int gens_per_step = 12;
   const int replays = 8;
 
   for (const int world : {2, 4}) {

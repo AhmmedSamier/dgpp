@@ -11,14 +11,18 @@
 namespace dgpp {
 
 GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
-                          int max_tokens, int decode_slots)
+                          int max_tokens, int decode_slots,
+                          int graph_table_slots)
     : w_(weights), cfg_(cfg), max_tokens_(max_tokens),
-      decode_slots_(decode_slots) {
+      decode_slots_(decode_slots), graph_table_slots_(graph_table_slots) {
   GlmMoeConfig::validate_config(cfg_);
   if (max_tokens_ <= 0)
     throw std::invalid_argument("GlmMoeLayer: max_tokens must be positive");
   if (decode_slots_ < 0)
     throw std::invalid_argument("GlmMoeLayer: decode_slots must be >= 0");
+  if (graph_table_slots_ < 0)
+    throw std::invalid_argument(
+        "GlmMoeLayer: graph_table_slots must be >= 0");
   if (!w_.router_gate || !w_.router_bias || !w_.experts ||
       !w_.shared[0].payload)
     throw std::invalid_argument("GlmMoeLayer: null weight pointer");
@@ -61,6 +65,16 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
         reinterpret_cast<void**>(&h_expert_views_pinned_),
         sizeof(MoeExpertView) * static_cast<size_t>(cfg_.n_experts) * 3,
         cudaHostAllocDefault));
+    // Per-slot capture sources: each recorded upload node bakes its
+    // slot's address, whose contents freeze at capture time (resident
+    // bindings). The eager path never touches these.
+    if (graph_table_slots_ > 0) {
+      DGPP_CUDA_OK(cudaHostAlloc(
+          reinterpret_cast<void**>(&h_expert_views_graph_),
+          sizeof(MoeExpertView) * static_cast<size_t>(cfg_.n_experts) * 3 *
+              static_cast<size_t>(graph_table_slots_),
+          cudaHostAllocDefault));
+    }
   }
 }
 
@@ -81,6 +95,7 @@ GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_slot_down_);
   cudaFree(d_expert_views_);
   cudaFreeHost(h_expert_views_pinned_);
+  cudaFreeHost(h_expert_views_graph_);
 }
 
 void GlmMoeLayer::run_expert_segment(
@@ -203,7 +218,7 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
 
 void GlmMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out,
                                  int tokens, MoeTraceStaging* trace,
-                                 cudaStream_t stream) {
+                                 cudaStream_t stream, int table_slot) {
   step_timing::Scope tick(step_timing::kMoe);
   if (tokens <= 0) return;
   if (decode_slots_ <= 0)
@@ -265,14 +280,30 @@ void GlmMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out,
   //    is the honest price).
   MoeExpertView* views = d_expert_views_;
   if (count > 0) {
+    // Capture mode (table_slot >= 0): fill the slot's OWN pinned source
+    // so the recorded upload node replays THIS layer's table — one
+    // shared buffer would replay the last capture-time refill for
+    // every layer (the wrong-weights class the 4c cache bug taught).
+    // Eager keeps the shared buffer. The device destination is shared
+    // in both modes: the stream serializes each call's upload node
+    // before its kernels.
+    MoeExpertView* src = h_expert_views_pinned_;
+    if (table_slot >= 0) {
+      if (table_slot >= graph_table_slots_ || h_expert_views_graph_ == nullptr)
+        throw std::invalid_argument(
+            "GlmMoeLayer: graph table slot out of range (construct with "
+            "graph_table_slots)");
+      src = h_expert_views_graph_ +
+            static_cast<size_t>(table_slot) * static_cast<size_t>(E) * 3;
+    }
     for (int e = 0; e < count; ++e)
       for (int m = 0; m < 3; ++m) {
         const GlmQuantMatrix& q = w_.experts[static_cast<size_t>(e) * 3 + m];
-        h_expert_views_pinned_[static_cast<size_t>(e) * 3 + m] =
+        src[static_cast<size_t>(e) * 3 + m] =
             MoeExpertView{q.payload, q.scales};
       }
     DGPP_CUDA_OK(cudaMemcpyAsync(
-        d_expert_views_, h_expert_views_pinned_,
+        d_expert_views_, src,
         sizeof(MoeExpertView) * static_cast<size_t>(count) * 3,
         cudaMemcpyHostToDevice, stream));
   } else {

@@ -161,6 +161,66 @@ class GlmDiagnosticModel {
   void session_close(int req);
   int64_t session_position(int req) const;
 
+  // ---- the graph era (DESIGN §6.2, the decode step) --------------------
+  // The decode step is a fixed launch sequence, so it records ONCE into
+  // a CUDA graph and replays per token. The bus-side collective nodes
+  // are recorded through a graph-recorder boundary reducer the CALLER
+  // installs for the capture (see glm_tp_bus.hpp) — the model only needs
+  // to know that a capture walk may not sync and must source its
+  // per-token inputs from stable pinned members.
+  //
+  //   stream()                    — the walk's stream (the capture and
+  //                                 replay stream; kernels, memcpy nodes,
+  //                                 and launches all target it).
+  //   set_boundary(b)              — swaps the boundary reducer; returns
+  //                                 the previous one (the capture dance:
+  //                                 install the recorder, capture,
+  //                                 restore).
+  //   session_graph_capture_step() — ONE decode step enqueued in
+  //                                 CAPTURE MODE between the caller's
+  //                                 cudaStreamBeginCapture/EndCapture on
+  //                                 stream(): every launch records, the
+  //                                 per-token H2D uploads (metadata,
+  //                                 token id) record as memcpy nodes
+  //                                 off stable pinned members, and the
+  //                                 eager path's synchronizations (the
+  //                                 two fold drains and the final sync)
+  //                                 are SKIPPED — a captured sync is an
+  //                                 error. NOTHING EXECUTES: state,
+  //                                 positions, and pinned staging are
+  //                                 untouched; the first replay performs
+  //                                 this step for real. The boundary
+  //                                 reducer must be a recorder or the
+  //                                 capture folds eagerly (and fails).
+  //   session_graph_stage()       — the REPLAY path's host half: DSA
+  //                                 admission plus the stable pinned
+  //                                 member writes (request id, position,
+  //                                 spans, token id). NO uploads — the
+  //                                 graph's memcpy nodes re-read the
+  //                                 pinned members at launch.
+  //   session_graph_collect()     — the REPLAY path's result half, after
+  //                                 the caller's launch + stream sync +
+  //                                 graph_replay_finish: materializes the
+  //                                 Outputs EXACTLY as the eager decode
+  //                                 tail does (logits/final_hidden from
+  //                                 the stable device buffers, route
+  //                                 traces from the pinned staging the
+  //                                 graph's D2H nodes filled) and
+  //                                 advances the slot's position.
+  //
+  // The replay outputs are bitwise the eager session_step's (the
+  // recorded kernels ARE the eager kernels; the bus gate pins its
+  // eager-vs-graph fold equality).
+  cudaStream_t stream() const { return stream_; }
+  GlmBoundaryReducer* set_boundary(GlmBoundaryReducer* boundary) {
+    GlmBoundaryReducer* prev = boundary_;
+    boundary_ = boundary;
+    return prev;
+  }
+  void session_graph_capture_step(int req, int64_t token_id);
+  void session_graph_stage(int req, int64_t token_id);
+  Outputs session_graph_collect(int req);
+
   // v1 single-request shims (slot 0) — the Stage 2 parity gates' shape.
   Outputs session_prefill(const std::vector<int64_t>& prompt_ids) {
     return session_prefill(0, prompt_ids);
@@ -247,8 +307,32 @@ class GlmDiagnosticModel {
   // caller-grown table + device metadata). Returns the LAST row's
   // logits/final_hidden; routes/route_biased cover every processed row
   // (audit inputs are per-token).
+  //
+  // capture_mode (the graph era): the launches record into the caller's
+  // CUDA-graph capture; the fold drains, final sync, and output
+  // materialization are skipped (a captured sync is an error) and the
+  // token-id upload reads the stable pinned member instead of the
+  // caller's vector (a memcpy node bakes its source address). NOTHING
+  // executes — state and positions are untouched. The caller wraps the
+  // call in BeginCapture/EndCapture and installs a recorder reducer.
   Outputs session_run_rows(int req, const std::vector<int64_t>& ids,
-                           int64_t token_start, bool decode_row);
+                           int64_t token_start, bool decode_row,
+                           bool capture_mode = false);
+  // The decode step's host-side half, shared by the eager step, the
+  // capture step, and the replay stage: validation, DSA admission, the
+  // pinned member writes (request id, position, spans, token id), and
+  // (when `upload`) the metadata H2Ds — eager issues them, capture
+  // records them as memcpy nodes, the replay stage skips them (its
+  // graph re-uploads at launch).
+  void session_decode_host_prep(int req, int64_t token_id, bool upload);
+  // The decode tail shared by the eager step and the graph-era collect:
+  // materializes the route traces from the pinned per-MoE-layer staging
+  // (the D2H copies must have joined — the eager final sync or the
+  // replay's stream sync) and assigns the LAST row's logits/final_hidden
+  // from the stable device buffers. The route shape (one entry per MoE
+  // layer, actual layer indices, [tokens, K]/[tokens, E] values) is the
+  // eager path's exactly.
+  Outputs session_decode_tail(int T);
   // Extends the route/route_biased outputs with one runner pass's entries,
   // merging same-layer chunks along the token axis (prefill chunks emit
   // per-chunk entries; the reference emits one per layer).
@@ -318,9 +402,18 @@ class GlmDiagnosticModel {
   int32_t* d_req_ids_ = nullptr;      // device [kDecodeRows]
   int64_t* d_step_pos_ = nullptr;     // device [kDecodeRows]
   int32_t* d_req_spans_ = nullptr;    // device [kDecodeRows, 2]
-  int32_t h_req_ids_[8] = {0};
-  int64_t h_step_pos_[8] = {0};
-  int32_t h_req_spans_[16] = {0};
+  // The H2D upload sources, PINNED (pageable async copies stream-sync
+  // before initiating — a per-step pipeline drain; and CUDA-graph
+  // memcpy nodes REQUIRE page-locked host sources). Stable addresses
+  // for the graph's lifetime: the replay's memcpy nodes re-read these
+  // after session_graph_stage refreshes their contents.
+  int32_t* h_req_ids_ = nullptr;      // pinned [kDecodeRows]
+  int64_t* h_step_pos_ = nullptr;     // pinned [kDecodeRows]
+  int32_t* h_req_spans_ = nullptr;    // pinned [kDecodeRows, 2]
+  int64_t* h_token_ = nullptr;       // pinned [kDecodeRows] — the step's
+                                     // token id (the decode walk's H2D
+                                     // source; a memcpy node's baked
+                                     // address)
   static constexpr int kDecodeRows = 8;  // DsaLayer's select-kernel bound
   // Decode-path route traces (2026-09-01): per-MoE-layer pinned staging
   // filled by enqueue_decode's async D2H copies, materialized into

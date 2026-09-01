@@ -555,7 +555,8 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
 int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         int rank, uint16_t port, const std::string& peer,
         const std::vector<int64_t>& prompt, int steps, bool resident,
-        bool incremental, bool no_eos, const dgpp::GlmTokenizer& tok,
+        bool incremental, bool no_eos, bool decode_graph,
+        const dgpp::GlmTokenizer& tok,
         const std::string& out_prefix, int rendezvous_timeout_ms,
         int64_t kv_capacity) {
   const int max_tokens = static_cast<int>(prompt.size()) + steps + 1;
@@ -740,6 +741,45 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       // The budget below is decode-steps only: prefill's folds and
       // host-path MoE syncs are a different (amortized) story.
       dgpp::step_timing::reset();
+
+      // ---- the graph era (--decode-graph, DESIGN §6.2) ---------------
+      // Record the decode step ONCE — the whole launch sequence
+      // including the bus's collective nodes — then replay per token:
+      // stage -> arm -> launch -> sync -> finish -> collect, with the
+      // EAGER pick riding BETWEEN windows (the mixed era). The capture
+      // executes NOTHING: state, positions, and staging are untouched,
+      // so the first replay performs step 1 exactly as the eager path
+      // would.
+      cudaGraphExec_t graph_exec = nullptr;
+      if (decode_graph) {
+        const auto t_capture = std::chrono::steady_clock::now();
+        dgpp::GlmGraphRecordReducer recorder(*bus, model.stream());
+        dgpp::GlmBoundaryReducer* eager_reducer =
+            model.set_boundary(&recorder);
+        std::string gerr;
+        require(bus->graph_record_begin(&gerr),
+                "graph_record_begin: " + gerr);
+        cudaGraph_t graph = nullptr;
+        DGPP_CUDA_OK(cudaStreamBeginCapture(
+            model.stream(), cudaStreamCaptureModeThreadLocal));
+        model.session_graph_capture_step(0, token);
+        DGPP_CUDA_OK(cudaStreamEndCapture(model.stream(), &graph));
+        require(graph != nullptr, "decode-graph capture produced no graph");
+        require(bus->graph_record_end(&gerr),
+                "graph_record_end: " + gerr);
+        model.set_boundary(eager_reducer);
+        DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr,
+                                          nullptr, 0));
+        cudaGraphDestroy(graph);
+        DGPP_LOG_INFO(
+            "rank {} decode graph recorded+instantiated in {:.0f}ms "
+            "(the bus logged the collective node count)",
+            rank,
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_capture)
+                .count());
+      }
+
       for (int s = 0; s < steps; ++s) {
         generated.push_back(token);
         toks.push_back(token);
@@ -751,16 +791,31 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         }
         if (s + 1 == steps) break;
         const auto t0s = std::chrono::steady_clock::now();
-        const GlmDiagnosticModel::Outputs step =
-            model.session_step(generated.back());
+        const GlmDiagnosticModel::Outputs step = [&] {
+          if (graph_exec == nullptr)
+            return model.session_step(generated.back());
+          // The replay path: the graph re-uploads the staged pinned
+          // members, runs every recorded node, and re-folds through
+          // the bus's window; the pick stays EAGER between windows.
+          std::string gerr;
+          model.session_graph_stage(0, generated.back());
+          require(bus->graph_replay_arm(&gerr),
+                  "graph_replay_arm: " + gerr);
+          DGPP_CUDA_OK(cudaGraphLaunch(graph_exec, model.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
+          require(bus->graph_replay_finish(60000, &gerr),
+                  "graph_replay_finish: " + gerr);
+          return model.session_graph_collect(0);
+        }();
         token = run_step(step, "step", s + 1);
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0s)
                               .count();
         forward_ms_total += ms;
-        DGPP_LOG_INFO("rank {} step {:.0f}ms (stateful step + pick)", rank,
-                      ms);
+        DGPP_LOG_INFO("rank {} step {:.0f}ms ({} + pick)", rank, ms,
+                      graph_exec ? "graph replay" : "stateful step");
       }
+      if (graph_exec != nullptr) cudaGraphExecDestroy(graph_exec);
     } else {
       // The re-forward reference (the T^2 loop).
       for (int s = 0; s < steps; ++s) {
@@ -829,6 +884,8 @@ int main(int argc, char** argv) {
       "   | --requests FILE)\n"
       "  [--steps N] [--world N --rank R --peer HOST --port N]\n"
       "  [--streaming] [--engine incremental|reforward] [--no-eos]\n"
+      "  [--decode-graph] (fabric decode step as a CUDA graph: record once,\n"
+      "   replay per token, eager pick between windows; resident only)\n"
       "  [--step-timing] [--rendezvous-timeout-ms N] [--out PREFIX]\n"
       "scheduler mode (--requests): [--max-concurrency N] [--kv-capacity N]\n"
       "  [--sched-plan]\n";
@@ -841,6 +898,7 @@ int main(int argc, char** argv) {
   bool sched_plan = false, step_timing = false;
   uint16_t port = 29970;
   bool resident = true, incremental = true, no_eos = false;
+  bool decode_graph = false;
   std::string system_prompt, chat_text;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -861,6 +919,7 @@ int main(int argc, char** argv) {
     else if (a == "--steps") steps = std::stoi(next());
     else if (a == "--streaming") resident = false;
     else if (a == "--step-timing") step_timing = true;
+    else if (a == "--decode-graph") decode_graph = true;
     else if (a == "--engine") {
       const std::string v = next();
       if (v == "incremental") incremental = true;
@@ -891,6 +950,17 @@ int main(int argc, char** argv) {
   if (steps < 1) {
     DGPP_LOG_ERROR("--steps must be >= 1");
     return 1;
+  }
+  if (decode_graph) {
+    require(world > 1 && incremental && resident,
+            "--decode-graph is the fabric decode step's graph era: it "
+            "needs --world > 1, --engine incremental, and RESIDENT "
+            "weights (the streaming loader refills one resident per "
+            "layer — a recorded graph would bake whichever layer was "
+            "last resident; resident bindings are lifetime-stable)");
+    require(requests_path.empty(),
+             "--decode-graph is the single-session decode gate (no "
+             "--requests scheduler mode)");
   }
   if (sched_plan && requests_path.empty()) {
     DGPP_LOG_ERROR("--sched-plan requires --requests");
@@ -1030,7 +1100,7 @@ int main(int argc, char** argv) {
     } else {
       prompt = parse_prompt_ids(prompt_text, cfg.vocab_size);
     }
-    return run(cfg, ckpt, world, rank, port, peer, prompt, steps, resident, incremental, no_eos, tok,
+    return run(cfg, ckpt, world, rank, port, peer, prompt, steps, resident, incremental, no_eos, decode_graph, tok,
                out_prefix, rendezvous_timeout_ms, kv_capacity);
   } catch (const std::exception& e) {
     DGPP_LOG_ERROR("rank {}: {}", rank, e.what());

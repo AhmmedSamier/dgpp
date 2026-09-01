@@ -53,8 +53,20 @@ class GlmMoeLayer {
   // session engine's kDecodeRows). 0 disables the decode path (its
   // scratch is not allocated) — the M4 forward-only callers and the
   // pre-prefill unit tests use that shape.
+  //
+  // graph_table_slots: per-call STABLE pinned expert-table sources for
+  // CUDA-graph capture (the session passes its MoE-layer ordinal as
+  // table_slot). A captured graph replays the table upload NODE with
+  // the source address baked — one shared pinned buffer would replay
+  // the LAST capture-time refill for every layer (the wrong-weights
+  // class). Per-slot buffers freeze each layer's table at capture time
+  // (resident bindings are lifetime-stable, so the bytes never go
+  // stale); the shared DEVICE destination stays safe because the
+  // replay's memcpy nodes and kernels serialize on the stream. 0 keeps
+  // the single shared pinned buffer (the eager path).
   GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
-              int max_tokens, int decode_slots = 0);
+              int max_tokens, int decode_slots = 0,
+              int graph_table_slots = 0);
   ~GlmMoeLayer();
   GlmMoeLayer(const GlmMoeLayer&) = delete;
   GlmMoeLayer& operator=(const GlmMoeLayer&) = delete;
@@ -67,8 +79,11 @@ class GlmMoeLayer {
   // The decode fast path: same contract, no host round-trip. tokens
   // must fit decode_slots. Bitwise-equal to enqueue() at the same
   // routing (the unit gate's pin); traces land async in `trace`.
+  // table_slot >= 0 uploads the expert views from graph slot's pinned
+  // buffer (capture mode; see the ctor) instead of the shared one.
   void enqueue_decode(const uint16_t* hidden, uint16_t* out, int tokens,
-                      MoeTraceStaging* trace, cudaStream_t stream);
+                      MoeTraceStaging* trace, cudaStream_t stream,
+                      int table_slot = -1);
 
   // Host copies of the most recent enqueue's routing decision. last_biased()
   // holds every expert's biased score for the same enqueue
@@ -139,6 +154,12 @@ class GlmMoeLayer {
   // path paid 49ms/token for exactly that. Pinned sources are true
   // async DMA.
   MoeExpertView* h_expert_views_pinned_ = nullptr;  // [n_experts * 3]
+  // Per-graph-slot table sources (capture mode): [graph_table_slots_]
+  // rows of [n_experts * 3] each, frozen at capture time. One shared
+  // device table is safe because the replay serializes each call's
+  // upload node before its kernels on the stream.
+  MoeExpertView* h_expert_views_graph_ = nullptr;
+  int graph_table_slots_ = 0;
 };
 
 }  // namespace dgpp

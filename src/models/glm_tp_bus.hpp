@@ -126,6 +126,74 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
 };
 
 // ---------------------------------------------------------------------------
+// DESIGN §6.2: the boundary reducer's RECORD half — the decode walk's
+// capture mode folds through the bus's graph session instead of the
+// eager machine. Install it with model.set_boundary() for the capture
+// only (between cudaStreamBeginCapture/EndCapture on the model's
+// stream), then restore the eager reducer; the replay path never calls
+// a reducer (the graph's collective nodes do the folds).
+//
+// stage() hands out ONE stable pinned buffer — the decode shape is
+// strictly one-boundary-at-a-time, and within a recorded graph the
+// producing kernel of boundary N+1 is stream-ordered behind boundary
+// N's fold, so a single buffer is the whole lifetime contract. The
+// buffer is pinned: the producing GEMMs write it over the fabric, the
+// recorded collective kernels read AND fold it in place (the eager
+// staged machine's discipline), and the baked src/dst addresses must
+// outlive the graph.
+// ---------------------------------------------------------------------------
+struct GlmGraphRecordReducer final : GlmBoundaryReducer {
+  static constexpr size_t kMaxCollectiveElems = 4096;  // one latency slot
+
+  GlmGraphRecordReducer(net::CollectiveBus& bus, cudaStream_t capture_stream)
+      : bus_(bus), stream_(capture_stream) {
+    const cudaError_t alloc = cudaMallocHost(
+        reinterpret_cast<void**>(&stable_), kMaxCollectiveElems * 2);
+    if (alloc != cudaSuccess)
+      throw std::runtime_error("graph record reducer: pinned stable "
+                               "buffer alloc failed");
+  }
+  ~GlmGraphRecordReducer() override {
+    if (stable_) cudaFreeHost(stable_);
+  }
+  GlmGraphRecordReducer(const GlmGraphRecordReducer&) = delete;
+  GlmGraphRecordReducer& operator=(const GlmGraphRecordReducer&) = delete;
+
+  uint16_t* stage(int rows, int hidden) override {
+    // Decode-shaped only: the capture walk is one row at hidden 4096.
+    // Anything else is the prefill shape, which never reaches this
+    // reducer (the app captures after prefill, restore-before-prefill).
+    if (hidden <= 0 || rows <= 0 || hidden % 2 != 0 ||
+        static_cast<size_t>(rows) * static_cast<size_t>(hidden) >
+            kMaxCollectiveElems)
+      return nullptr;
+    return stable_;
+  }
+
+  void reduce(uint16_t* partial, int rows, int hidden) override {
+    if (partial != stable_)
+      throw std::runtime_error(
+          "graph record reducer: the capture walk must fold the staged "
+          "buffer (the prefill-shaped device path cannot record)");
+    if (hidden <= 0 || rows <= 0 || hidden % 2 != 0 ||
+        static_cast<size_t>(rows) * static_cast<size_t>(hidden) >
+            kMaxCollectiveElems)
+      throw std::invalid_argument(
+          "graph record reducer: boundary must be decode-shaped");
+    std::string err;
+    const size_t elems = static_cast<size_t>(rows) * static_cast<size_t>(hidden);
+    if (!bus_.allreduce_record(stream_, partial, partial, elems, &err))
+      throw std::runtime_error("graph record reducer: allreduce_record "
+                               "rejected: " + err);
+  }
+
+ private:
+  net::CollectiveBus& bus_;
+  cudaStream_t stream_ = nullptr;
+  uint16_t* stable_ = nullptr;  // pinned; baked into every recorded node
+};
+
+// ---------------------------------------------------------------------------
 // M6 d3: the distributed greedy pick over the existing all-reduce.
 // ---------------------------------------------------------------------------
 

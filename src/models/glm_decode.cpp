@@ -97,47 +97,93 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
   session_pos_[static_cast<size_t>(req)] = P;
   return out;
 }
-
 // ---------------------------------------------------------------------------
 // session_step: one token at slot `req`'s next position.
 // ---------------------------------------------------------------------------
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_step(int req,
                                                              int64_t token_id) {
   step_timing::Scope tick(step_timing::kStep);
+  session_decode_host_prep(req, token_id, /*upload=*/true);
+  const int64_t pos = session_pos_[static_cast<size_t>(req)];
+  Outputs out = session_run_rows(req, std::vector<int64_t>{token_id}, pos,
+                                 /*decode_row=*/true);
+  session_pos_[static_cast<size_t>(req)] = pos + 1;
+  return out;
+}
+
+// The decode step's host-side half (see the header): one implementation
+// so the eager, capture, and replay paths validate and stage IDENTICALLY.
+void GlmDiagnosticModel::session_decode_host_prep(int req, int64_t token_id,
+                                                  bool upload) {
   if (req < 0 || req >= max_requests_)
-    throw std::out_of_range("session_step: request slot " + std::to_string(req));
+    throw std::out_of_range("session_decode: request slot " +
+                            std::to_string(req));
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   if (pos <= 0)
-    throw std::invalid_argument("session_step: no open session on slot " +
+    throw std::invalid_argument("session_decode: no open session on slot " +
                                 std::to_string(req));
   if (token_id < 0 || token_id >= cfg_.vocab_size)
-    throw std::invalid_argument("session_step: token id out of range");
+    throw std::invalid_argument("session_decode: token id out of range");
   if (pos + 1 > max_tokens_)
-    throw std::invalid_argument("session_step: position exceeds max_tokens");
+    throw std::invalid_argument("session_decode: position exceeds max_tokens");
 
   // DSA admission: the block table must cover this position BEFORE
   // enqueue_decode (its pos is device state; growth is host control).
   if (dsa_cfg_.num_dsa_layers > 0 &&
       !pool_.ensure_request_blocks(req, pos + 1, stream_))
-    throw std::runtime_error("session_step: DSA pool exhausted (admission "
-                             "budget) — grow the pool or shed requests");
+    throw std::runtime_error("session_decode: DSA pool exhausted (admission "
+                            "budget) — grow the pool or shed requests");
 
-  // Decode-batch metadata (device; re-uploaded per step — mid-session
-  // uploads are async, never device syncs, per the decode-path discipline).
-  // One row per call (time-multiplexed requests): row 0 serves `req`.
+  // Decode-batch metadata: one row per call (time-multiplexed requests),
+  // row 0 serves `req`. The PINNED members are the upload sources —
+  // eager issues the H2Ds, capture records them as memcpy nodes, the
+  // replay stage only writes the members (its graph re-uploads).
   h_req_ids_[0] = req;
   h_step_pos_[0] = pos;
   h_req_spans_[0] = 0;
   h_req_spans_[1] = 1;
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_req_ids_, h_req_ids_, sizeof(int32_t),
-                               cudaMemcpyHostToDevice, stream_));
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_step_pos_, h_step_pos_, sizeof(int64_t),
-                               cudaMemcpyHostToDevice, stream_));
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_req_spans_, h_req_spans_, 2 * sizeof(int32_t),
-                               cudaMemcpyHostToDevice, stream_));
+  h_token_[0] = token_id;
+  if (upload) {
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_req_ids_, h_req_ids_, sizeof(int32_t),
+                                 cudaMemcpyHostToDevice, stream_));
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_step_pos_, h_step_pos_, sizeof(int64_t),
+                                 cudaMemcpyHostToDevice, stream_));
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_req_spans_, h_req_spans_, 2 * sizeof(int32_t),
+                                 cudaMemcpyHostToDevice, stream_));
+  }
+}
 
+// ---------------------------------------------------------------------------
+// The graph era (DESIGN §6.2). The three replay-side halves the caller
+// sequences around ITS bus arm/launch/finish dance — see the header.
+// ---------------------------------------------------------------------------
+void GlmDiagnosticModel::session_graph_capture_step(int req,
+                                                    int64_t token_id) {
+  session_decode_host_prep(req, token_id, /*upload=*/true);
+  const int64_t pos = session_pos_[static_cast<size_t>(req)];
+  // The uploads and every launch record; the walk's syncs are skipped
+  // inside (capture_mode). NOTHING EXECUTES — no state, no position.
   Outputs out = session_run_rows(req, std::vector<int64_t>{token_id}, pos,
-                                 /*decode_row=*/true);
+                                 /*decode_row=*/true, /*capture_mode=*/true);
+  (void)out;  // empty by contract; the caller instantiates the graph
+}
+
+void GlmDiagnosticModel::session_graph_stage(int req, int64_t token_id) {
+  session_decode_host_prep(req, token_id, /*upload=*/false);
+}
+
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_graph_collect(
+    int req) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_graph_collect: request slot " +
+                           std::to_string(req));
+  const int64_t pos = session_pos_[static_cast<size_t>(req)];
+  if (pos <= 0)
+    throw std::invalid_argument("session_graph_collect: no open session");
+  // The caller synced the stream and finished the bus window: the
+  // graph's D2H nodes joined, the state advanced in place, the logits
+  // are stable. Materialize exactly as the eager tail does.
+  Outputs out = session_decode_tail(1);
   session_pos_[static_cast<size_t>(req)] = pos + 1;
   return out;
 }
@@ -173,7 +219,7 @@ int64_t GlmDiagnosticModel::session_position(int req) const {
 // ---------------------------------------------------------------------------
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     int req, const std::vector<int64_t>& ids, int64_t token_start,
-    bool decode_row) {
+    bool decode_row, bool capture_mode) {
   const int T = static_cast<int>(ids.size());
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
@@ -181,7 +227,11 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   if (!gemm_.ensure_plan(T, lm_vocab_count_, H, DType::BF16, GemmOut::BF16, H))
     throw std::runtime_error("session: lm head GEMM plan unavailable");
 
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, ids.data(),
+  // The decode rows' token id rides the PINNED member (a memcpy node's
+  // baked source; a pageable async copy would stream-sync anyway).
+  // Prefill keeps the caller's vector (its syncs amortize over chunks).
+  const int64_t* ids_src = decode_row ? h_token_ : ids.data();
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, ids_src,
                                static_cast<size_t>(T) * 8,
                                cudaMemcpyHostToDevice, stream_));
   glm_embed_bcast_streams(globals_.embed, d_tokens_, streams_[0], T, H,
@@ -267,7 +317,9 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       ++dsa_ordinal;
     }
     if (boundary_) {
-      {
+      // A captured sync is an error — under capture the fold is a
+      // recorded node and the stream order IS the drain.
+      if (!capture_mode) {
         step_timing::Scope drain(step_timing::kFoldDrain);
         DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
       }
@@ -311,7 +363,11 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
             moe_trace_weights_ + lay * kDecodeRows * moe_cfg_.top_k;
         trace.biased =
             moe_trace_biased_ + lay * kDecodeRows * moe_cfg_.n_experts;
-        moe_->enqueue_decode(normed_, ffn_out, T, &trace, stream_);
+        // Capture passes the layer's OWN graph table slot so the
+        // recorded upload node replays THIS layer's expert views; the
+        // eager path's shared pinned buffer serves both callers.
+        moe_->enqueue_decode(normed_, ffn_out, T, &trace, stream_,
+                             capture_mode ? moe_decode_calls : -1);
         GlmRouteTraceLayer route;
         route.layer_idx = static_cast<uint32_t>(layer);
         route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
@@ -335,7 +391,9 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       }
     }
     if (boundary_) {
-      {
+      // A captured sync is an error — under capture the fold is a
+      // recorded node and the stream order IS the drain.
+      if (!capture_mode) {
         step_timing::Scope drain(step_timing::kFoldDrain);
         DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
       }
@@ -353,38 +411,67 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   gemm_.matmul(normed_, globals_.lm_head, logits_, T, lm_vocab_count_, H,
                 DType::BF16, GemmOut::BF16, H, gemm_ws_, gemm_ws_bytes_,
                 stream_);
+
+  // Capture ends HERE: nothing executed, so there is nothing to sync
+  // or materialize — the caller ends the capture, instantiates, and the
+  // first replay performs this step for real.
+  if (capture_mode) return Outputs{};
+
   {
     step_timing::Scope sync_tick(step_timing::kFinalSync);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   }
 
-  // The decode path's deferred route traces: the pinned staging copies
-  // were issued per layer mid-loop and the sync above joins them —
-  // materialize the placeholders now (shape-identical to what the
-  // host-orchestrated path returns: ids/weights [tokens, K], biased
-  // [tokens, E], one entry per MoE layer in layer order).
-  if (decode_row && moe_decode_calls > 0) {
-    const size_t K = static_cast<size_t>(moe_cfg_.top_k);
-    const size_t E = static_cast<size_t>(moe_cfg_.n_experts);
-    const size_t rows = static_cast<size_t>(T);
-    const size_t base =
-        out.routes.size() - static_cast<size_t>(moe_decode_calls);
-    for (int i = 0; i < moe_decode_calls; ++i) {
-      const size_t lay = static_cast<size_t>(i);
-      GlmRouteTraceLayer& route = out.routes[base + lay];
-      const int32_t* ids =
-          moe_trace_ids_ + lay * kDecodeRows * moe_cfg_.top_k;
-      const float* ws =
-          moe_trace_weights_ + lay * kDecodeRows * moe_cfg_.top_k;
-      const float* bs =
-          moe_trace_biased_ + lay * kDecodeRows * moe_cfg_.n_experts;
-      route.ids.assign(ids, ids + rows * K);
-      route.weights.assign(ws, ws + rows * K);
-      out.route_biased[base + lay].assign(bs, bs + rows * E);
-    }
-  }
+  // The decode tail (route traces from the pinned staging the loop's
+  // async copies just joined, last-row logits/hidden) is one shared
+  // materializer — the eager step and the graph-era collect produce
+  // byte-identical Outputs through it.
+  if (decode_row) return session_decode_tail(T);
 
   // Last row only (see the runner's header note).
+  const uint16_t* last_hidden =
+      normed_ + static_cast<size_t>(T - 1) * H;
+  const uint16_t* last_logits =
+      logits_ + static_cast<size_t>(T - 1) * lm_vocab_count_;
+  out.final_hidden_bits.assign(last_hidden, last_hidden + H);
+  out.logits_bits.assign(last_logits, last_logits + lm_vocab_count_);
+  out.lm_vocab_begin = lm_vocab_begin_;
+  out.lm_vocab_count = lm_vocab_count_;
+  return out;
+}
+
+// The decode tail shared by the eager step and the graph-era collect
+// (see the header): routes materialized from the per-MoE-layer pinned
+// staging — the walk (eager) or the replay's D2H nodes (graph) filled
+// them — plus the last row's logits/final_hidden off the stable device
+// buffers. The route shape (one entry per MoE layer, actual layer
+// indices) is exactly the eager path's.
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_decode_tail(int T) {
+  const int H = cfg_.hidden_size;
+  const size_t K = static_cast<size_t>(moe_cfg_.top_k);
+  const size_t E = static_cast<size_t>(moe_cfg_.n_experts);
+  const size_t rows = static_cast<size_t>(T);
+  Outputs out;
+  int moe_ordinal = 0;
+  for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+    if (cfg_.mlps[layer] != GlmMlpKind::Moe) continue;
+    const size_t lay = static_cast<size_t>(moe_ordinal);
+    const int32_t* ids =
+        moe_trace_ids_ + lay * kDecodeRows * moe_cfg_.top_k;
+    const float* ws =
+        moe_trace_weights_ + lay * kDecodeRows * moe_cfg_.top_k;
+    const float* bs =
+        moe_trace_biased_ + lay * kDecodeRows * moe_cfg_.n_experts;
+    GlmRouteTraceLayer route;
+    route.layer_idx = static_cast<uint32_t>(layer);
+    route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
+    route.tokens = static_cast<uint64_t>(T);
+    route.ids.assign(ids, ids + rows * K);
+    route.weights.assign(ws, ws + rows * K);
+    out.routes.push_back(std::move(route));
+    out.route_biased.emplace_back(bs, bs + rows * E);
+    ++moe_ordinal;
+  }
   const uint16_t* last_hidden =
       normed_ + static_cast<size_t>(T - 1) * H;
   const uint16_t* last_logits =
