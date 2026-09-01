@@ -1008,6 +1008,10 @@ void scenario_allreduce_bulk() {
 // recorded once, replayed per step. Every replay's result must be bitwise
 // the canonical-chain oracle AND the eager machine's bytes (the recorded
 // fold is the same chain; the doorbell/claim machinery is what differs).
+// The replay loop is also the MIXED-ERA gate: eager collectives (the pick
+// class, the staged seam, the prefill bulk class) run BETWEEN windows —
+// consuming generations from the shared counter — and every later window
+// must adopt around them and stay bitwise.
 // Returns failures home (CHECK is main-thread-only).
 int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
                               size_t elems, int gens_per_step, int replays,
@@ -1025,14 +1029,53 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
   uint16_t* dev_src = nullptr;
   uint16_t* dev_dst = nullptr;
   float* warm_buf = nullptr;
+  // The prefill-class interlude buffer: the bulk machine shards on the
+  // bulk-slot grid, so it needs at least one stripe per rank (world x
+  // stripe elems; 4 x 131072 = 1 MiB at the default geometry).
+  const size_t bulk_elems =
+      static_cast<size_t>(world) * (262144 / 2) * 4;
+  uint16_t* dev_bsrc = nullptr;
+  uint16_t* dev_bdst = nullptr;
   if (cudaMalloc(&dev_src, elems * 2) != cudaSuccess ||
       cudaMalloc(&dev_dst, elems * 2) != cudaSuccess ||
-      cudaMalloc(&warm_buf, 256 * 4) != cudaSuccess) {
+      cudaMalloc(&warm_buf, 256 * 4) != cudaSuccess ||
+      cudaMalloc(&dev_bsrc, bulk_elems * 2) != cudaSuccess ||
+      cudaMalloc(&dev_bdst, bulk_elems * 2) != cudaSuccess) {
     DGPP_LOG_ERROR("rank {}: graph device alloc failed", my_rank);
     cudaFree(dev_src);
     cudaFree(dev_dst);
+    cudaFree(warm_buf);
+    cudaFree(dev_bsrc);
+    cudaFree(dev_bdst);
     cudaStreamDestroy(stream);
     return 1;
+  }
+  // Bulk oracle: the canonical chain over every rank's fill, computed
+  // locally (each rank knows every rank's deterministic input).
+  std::vector<uint16_t> bulk_want(bulk_elems, 0);
+  {
+    std::vector<std::vector<uint16_t>> all_src(static_cast<size_t>(world));
+    for (int r = 0; r < world; ++r)
+      fill_rank_bf16(&all_src[static_cast<size_t>(r)], bulk_elems, r);
+    for (size_t i = 0; i < bulk_elems; ++i) {
+      float acc = 0.0f;
+      for (int r = 0; r < world; ++r)
+        acc += dgpp::net::bf16_to_f32(all_src[static_cast<size_t>(r)][i]);
+      bulk_want[i] = dgpp::net::bf16_from_f32_rne(acc);
+    }
+    // My own slice up to the device source.
+    if (cudaMemcpyAsync(dev_bsrc, all_src[static_cast<size_t>(my_rank)].data(),
+                        bulk_elems * 2, cudaMemcpyHostToDevice, stream) !=
+        cudaSuccess) {
+      DGPP_LOG_ERROR("rank {}: bulk H2D failed", my_rank);
+      cudaFree(dev_src);
+      cudaFree(dev_dst);
+      cudaFree(warm_buf);
+      cudaFree(dev_bsrc);
+      cudaFree(dev_bdst);
+      cudaStreamDestroy(stream);
+      return 1;
+    }
   }
   if (cudaMemcpyAsync(dev_src, host_src.data(), elems * 2,
                       cudaMemcpyHostToDevice, stream) != cudaSuccess ||
@@ -1042,6 +1085,8 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
     cudaFree(dev_src);
     cudaFree(dev_dst);
     cudaFree(warm_buf);
+    cudaFree(dev_bsrc);
+    cudaFree(dev_bdst);
     cudaStreamDestroy(stream);
     return 1;
   }
@@ -1075,6 +1120,8 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
     cudaFree(dev_src);
     cudaFree(dev_dst);
     cudaFree(warm_buf);
+    cudaFree(dev_bsrc);
+    cudaFree(dev_bdst);
     cudaStreamDestroy(stream);
     return failures;
   }
@@ -1106,7 +1153,16 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
       if (bus.graph_replay_arm(&pin_error) ||
           pin_error.find("no recorded graph") == std::string::npos)
         fail("arm during an open session not rejected: " + pin_error);
-    }    cudaGraph_t graph = nullptr;
+      // The eager gate while RECORDING: rejections are host-side (no CUDA
+      // call, no registry entry), so they are capture-safe.
+      if (bus.allreduce(dev_src, dev_dst, elems, &pin_error) != 0 ||
+          pin_error.find("recording") == std::string::npos)
+        fail("eager allreduce during recording not rejected: " + pin_error);
+      if (bus.stage_next(&pin_error) != nullptr ||
+          pin_error.find("recording") == std::string::npos)
+        fail("stage_next during recording not rejected: " + pin_error);
+    }
+    cudaGraph_t graph = nullptr;
     const cudaError_t cap =
         cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
     if (cap != cudaSuccess) {
@@ -1139,14 +1195,9 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
 
     // ---- era pins ----------------------------------------------------------
     if (my_rank == 0 && failures == 0) {
+      // Harness sends stay closed for the era's lifetime (coll_mode);
+      // eager collectives are the ones that reopen between windows.
       std::string pin_error;
-      if (bus.allreduce(dev_src, dev_dst, elems, &pin_error) != 0 ||
-          pin_error.find("graph mode") == std::string::npos)
-        fail("eager allreduce during the graph era not rejected: " +
-             pin_error);
-      if (bus.stage_next(&pin_error) != nullptr ||
-          pin_error.find("graph mode") == std::string::npos)
-        fail("stage_next during the graph era not rejected: " + pin_error);
       std::vector<uint64_t> payload(8);
       if (bus.send(world == 2 ? 1 - my_rank : 1, payload.data(), 64,
                    BusMessageClass::kLatency, &pin_error) != 0 ||
@@ -1165,10 +1216,30 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
     if (exec != nullptr) {
       std::vector<double> step_us;
       std::vector<uint16_t> got(elems, 0);
+      std::vector<uint16_t> bulk_got(bulk_elems, 0);
       for (int replay = 0; replay < 2 + replays && failures == 0; ++replay) {
         if (!bus.graph_replay_arm(&error)) {
           fail("arm rejected: " + error);
           break;
+        }
+        // The eager gate while a window is ARMED (arm .. finish): rank 0
+        // must be rejected loudly, mid-flight — the gate is host-side
+        // and coll_mu-serialized, so pinning here is race-free.
+        if (replay == 3 && my_rank == 0) {
+          std::string pin_error;
+          if (bus.allreduce(dev_src, dev_dst, elems, &pin_error) != 0 ||
+              pin_error.find("armed") == std::string::npos)
+            fail("eager allreduce during an armed window not rejected: " +
+                 pin_error);
+          if (bus.stage_next(&pin_error) != nullptr ||
+              pin_error.find("armed") == std::string::npos)
+            fail("stage_next during an armed window not rejected: " +
+                 pin_error);
+          if (bus.allreduce_bulk(dev_bsrc, dev_bdst, bulk_elems,
+                                 &pin_error) != 0 ||
+              pin_error.find("armed") == std::string::npos)
+            fail("allreduce_bulk during an armed window not rejected: " +
+                 pin_error);
         }
         const auto t0 = std::chrono::steady_clock::now();
         if (cudaGraphLaunch(exec, stream) != cudaSuccess) {
@@ -1209,11 +1280,78 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
                " diverged from the canonical-chain oracle");
           break;
         }
+        // ---- the mixed-era interlude (eager between windows) ------------
+        // After the warmups: eager collectives run between replay windows,
+        // consuming generations from the shared counter exactly as the
+        // serving process interleaves prefill folds and the pick between
+        // decode steps. Every LATER window is the proof — it must adopt
+        // around the consumed numbers and stay bitwise.
+        if (replay == 2) {
+          std::string eager_error;
+          // (a) the pick's class: a latency one-shot.
+          {
+            const uint64_t id =
+                bus.allreduce(dev_src, dev_dst, elems, &eager_error);
+            if (id == 0) {
+              fail("mixed-era eager allreduce rejected: " + eager_error);
+            } else {
+              const dgpp::net::BusAllReduceResult r =
+                  bus.wait_allreduce(id, 30000);
+              if (!r.ok)
+                fail("mixed-era eager allreduce failed: " + r.error);
+            }
+          }
+          // (b) the prefill seam: a staged handout, folded in place.
+          {
+            void* handout = bus.stage_next(&eager_error);
+            if (handout == nullptr) {
+              fail("mixed-era stage_next rejected: " + eager_error);
+            } else {
+              std::memcpy(handout, host_src.data(), elems * 2);
+              const uint64_t id = bus.allreduce_staged(elems, &eager_error);
+              if (id == 0) {
+                fail("mixed-era allreduce_staged rejected: " + eager_error);
+              } else {
+                const dgpp::net::BusAllReduceResult r =
+                    bus.wait_allreduce(id, 30000);
+                if (!r.ok) {
+                  fail("mixed-era allreduce_staged failed: " + r.error);
+                } else if (std::memcmp(handout, eager_bytes.data(),
+                                       elems * 2) != 0) {
+                  fail("mixed-era staged fold diverged bitwise");
+                }
+              }
+            }
+          }
+          // (c) the prefill folds' class: a bulk machine run.
+          {
+            const uint64_t id = bus.allreduce_bulk(dev_bsrc, dev_bdst,
+                                                   bulk_elems, &eager_error);
+            if (id == 0) {
+              fail("mixed-era allreduce_bulk rejected: " + eager_error);
+            } else {
+              const dgpp::net::BusAllReduceResult r =
+                  bus.wait_allreduce(id, 30000);
+              if (!r.ok) {
+                fail("mixed-era allreduce_bulk failed: " + r.error);
+              } else if (
+                  cudaMemcpyAsync(bulk_got.data(), dev_bdst, bulk_elems * 2,
+                                  cudaMemcpyDeviceToHost, stream) !=
+                      cudaSuccess ||
+                  cudaStreamSynchronize(stream) != cudaSuccess) {
+                fail("mixed-era bulk D2H failed");
+              } else if (std::memcmp(bulk_got.data(), bulk_want.data(),
+                                     bulk_elems * 2) != 0) {
+                fail("mixed-era bulk fold diverged bitwise");
+              }
+            }
+          }
+        }
       }
       if (failures == 0) {
         DGPP_LOG_INFO(
-            "rank {}: {} replays x {} gens clean; step p50={:.1f}us "
-            "({:.1f}us per collective)",
+            "rank {}: {} replays x {} gens clean (eager interlude after "
+            "warmup); step p50={:.1f}us ({:.1f}us per collective)",
             my_rank, replays, gens_per_step, percentile(step_us, 0.5),
             percentile(step_us, 0.5) / gens_per_step);
       }
@@ -1225,6 +1363,8 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
   cudaFree(dev_src);
   cudaFree(dev_dst);
   cudaFree(warm_buf);
+  cudaFree(dev_bsrc);
+  cudaFree(dev_bdst);
   cudaStreamDestroy(stream);
   return failures;
 }

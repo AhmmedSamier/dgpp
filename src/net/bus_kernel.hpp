@@ -163,11 +163,14 @@ cudaError_t launch_bus_allreduce(const BusAllReduceView& v, int my_rank,
 // The engine's posting side (walk): the kernel stages peer rows and
 // releases ready_bits; the engine posts each peer's pair from the row the
 // generation selects, at the lane-0 cursor ring position (the position is
-// deterministic because the graph era is exclusive — harness sends are
-// closed and eager collectives rejected — so every latency post in the
-// era is a graph generation in order). done_seq == gen ends the
+// deterministic because every latency post — graph generation or eager
+// collective — goes through the same cursor in generation order; harness
+// sends alone are closed for the era). done_seq == gen ends the
 // generation; window completion gates the next arm.
-constexpr int kBusMaxGraphGens = 64;        // recorded nodes per graph
+// 128 covers the decode step with headroom: 45 layers x 2 boundary folds
+// = 90 collective nodes, plus margin for nodes a future era might record
+// beside them.
+constexpr int kBusMaxGraphGens = 128;       // recorded nodes per graph
 constexpr int kBusMaxGraphStageRing = 8;    // staging rows (kStageRing)
 
 // The graph twin of BusAllReduceView: staging rows are bases, not

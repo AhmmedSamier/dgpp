@@ -320,18 +320,36 @@ struct CollectiveBus::Impl {
     // record_begin, outside capture; the cycle-deadline conversion is
     // per-device and stable).
     uint64_t deadline_cycles = 0;
-    // Window publication. One counter: window c covers generations
-    // [(c-1)*G+1, c*G] — first/last derive arithmetically, so there is no
-    // pair of loads that could tear. 0 = nothing armed (pre-first-arm).
+    // Window publication. Two values: window_count signals "a new window
+    // exists" (the engine adopts on change), and window_first is the
+    // armed window's first generation. Arm reserves the window's G
+    // generations from the SHARED collective counter — eager pickups
+    // between windows take theirs from the same one — so firsts no
+    // longer derive from window_count (the v1 arithmetic assumed the
+    // era owned the numbering from gen 1; prefill before the first arm
+    // already breaks that). Publication order: window_first (relaxed),
+    // then window_count (release) — the engine's window_count acquire
+    // makes the window_first store visible. window_count 0 = nothing
+    // armed (pre-first-arm).
     std::atomic<uint64_t> window_count{0};
-    // Engine: the next un-walked generation (monotonic). Arm c+1 waits
-    // for this to reach c*G+1; finish c waits for c*G.
+    std::atomic<uint64_t> window_first{0};
+    // coll_mu-guarded (arm/finish and every eager gate run under it):
+    // true from a successful arm to the successful finish of that
+    // window — the era's eager gate. A plain bool: no writer can race
+    // the lock.
+    bool window_live = false;
+    // Engine: the next un-walked generation (monotonic, graph gens only
+    // — eager gens between windows are the eager machine's business).
+    // Arm c+1 waits for this to pass the armed window's last
+    // generation; finish waits for the same bound.
     std::atomic<uint64_t> walk_pub{0};
     std::atomic<bool> failed{false};
     // The era's failure reason (coll_mu-guarded; first failure wins).
     std::string error;
     // Engine walk (engine thread only).
     uint64_t adopted_count = 0;  // window the walk state belongs to
+    uint64_t adopted_first = 0;  // the adopted window's first generation
+    uint64_t adopted_last = 0;   // first + gens - 1 (inclusive)
     uint64_t walk_seq = 0;        // next generation to complete
     struct Flight {               // at most one generation is un-done at a
       uint64_t gen = 0;          // time: the graph serializes the kernels
@@ -897,6 +915,23 @@ struct CollectiveBus::Impl {
   // release; the walk adopts, acquire — the per-gen cells and the node
   // metadata become visible through that chain).
 
+  // The mixed-era eager gate (every caller holds coll_mu): a recording
+  // session closes it for the capture's duration, an armed window until
+  // its finish, a failed era for good. Returns the rejection text or
+  // nullptr when eager collectives are open. The v1 rejection on
+  // graph.recorded is gone on purpose: between windows the eager machine
+  // runs again (prefill folds, the pick) — the unified generation
+  // counter is what makes that safe.
+  const char* eager_gate_closed() const {
+    if (graph.recording)
+      return "a graph session is recording (graph_record_end reopens)";
+    if (graph.failed.load(std::memory_order_relaxed))
+      return "the graph era failed (this bus must be restarted)";
+    if (graph.window_live)
+      return "a graph replay window is armed (graph_replay_finish reopens)";
+    return nullptr;
+  }
+
   // First-writer-wins era failure. The error string rides under coll_mu
   // (the engine already takes it at collective pickup; failure paths are
   // rare, never hot).
@@ -922,11 +957,17 @@ struct CollectiveBus::Impl {
         graph.window_count.load(std::memory_order_relaxed);
     if (count == 0) return;
     const uint64_t gens = static_cast<uint64_t>(graph.gens);
-    if (graph.walk_seq > count * gens) return;  // window already walked
-    const uint64_t first = (count - 1) * gens + 1;
-    for (uint64_t s = std::max(graph.walk_seq, first); s <= count * gens;
-         ++s) {
-      BusAllReduceCtl* cell = &graph_cells[(s - 1) % gens];
+    // The armed window's reserved range. Forward thread, engine joined —
+    // the load is race-free by protocol (and window_first is ours).
+    const uint64_t first =
+        graph.window_first.load(std::memory_order_relaxed);
+    const uint64_t last = first + gens - 1;
+    if (graph.walk_seq > last) return;  // window already walked
+    for (uint64_t s = std::max(graph.walk_seq, first); s <= last; ++s) {
+      // Window-relative node index: gen s is node (s - first) — the
+      // v1 (gen-1)%gens arithmetic held only when every window started
+      // at gen 1, which prefill-before-era collectives broke.
+      BusAllReduceCtl* cell = &graph_cells[(s - first) % gens];
       __atomic_store_n(&cell->done_seq, s, __ATOMIC_RELEASE);
     }
     graph_fail("bus stopped with a graph window in flight");
@@ -939,16 +980,39 @@ struct CollectiveBus::Impl {
     const uint64_t gens = static_cast<uint64_t>(graph.gens);
 
     if (count != graph.adopted_count) {
-      // A fresh window. Arm waited for the previous walk, so the walk
-      // sequence continues without gaps; a mismatch is a protocol break.
-      if (graph.failed.load(std::memory_order_relaxed)) return false;
-      const uint64_t first = (count - 1) * gens + 1;
-      const bool first_ever = graph.walk_seq == 0;
-      if (first_ever ? first != 1 : graph.walk_seq != first) {
+      // A fresh window. Its first generation was reserved from the shared
+      // collective counter at arm (visible through the window_count
+      // acquire above). Nothing will walk it if the era already failed —
+      // and drained() keeps the engine alive for un-adopted windows, so
+      // publish the walk past it instead of wedging the stop path (a
+      // failure landing between arm and adoption would otherwise hang
+      // quiesce's join forever: the cells were never consumed; poison
+      // handles any launched kernels).
+      if (graph.failed.load(std::memory_order_relaxed)) {
+        const uint64_t first =
+            graph.window_first.load(std::memory_order_relaxed);
+        graph.adopted_count = count;
+        graph.adopted_first = first;
+        graph.adopted_last = first + gens - 1;
+        graph.walk_seq = first + gens;
+        graph.walk_pub.store(graph.walk_seq, std::memory_order_release);
+        return true;
+      }
+      const uint64_t first =
+          graph.window_first.load(std::memory_order_relaxed);
+      // Continuity: the walk state points at the next generation to
+      // walk, and the unified counter is monotonic with execution, so a
+      // window's first can only be AT or BEYOND it (eager collectives
+      // between windows consume numbers — the first window starts
+      // wherever prefill left the counter). Behind it is a protocol
+      // break; the gap ahead is the eager machine's completed business.
+      if (first < graph.walk_seq) {
         graph_fail("graph window armed out of walk order (protocol)");
         return true;
       }
       graph.adopted_count = count;
+      graph.adopted_first = first;
+      graph.adopted_last = first + gens - 1;
       graph.walk_seq = first;
       graph.flight = {};
       graph.stall_dumps = 0;  // microscope rate control, per window
@@ -997,7 +1061,7 @@ struct CollectiveBus::Impl {
       carrier->stripe_hashes.assign(peer_ranks.size(), 0);
       graph.carrier = std::move(carrier);
       worked = true;
-    } else if (graph.walk_seq > count * gens) {
+    } else if (graph.walk_seq > graph.adopted_last) {
       return false;  // window walked; awaiting the next arm
     }
 
@@ -1005,10 +1069,10 @@ struct CollectiveBus::Impl {
       // Drain-fail: poison every un-walked generation so the replay's
       // remaining kernels exit promptly (each treats the done stamp as
       // an exit and stamps its own failure status). finish reports.
-      const uint64_t last = count * gens;
+      const uint64_t last = graph.adopted_last;
       for (uint64_t s = graph.walk_seq; s <= last; ++s) {
         BusAllReduceCtl* cell =
-            &graph_cells[(s - 1) % gens];
+            &graph_cells[(s - graph.adopted_first) % gens];
         __atomic_store_n(&cell->done_seq, s, __ATOMIC_RELEASE);
       }
       graph.walk_seq = last + 1;
@@ -1017,11 +1081,14 @@ struct CollectiveBus::Impl {
       return true;
     }
 
-    // The current generation: cell (gen-1)%gens. At most one kernel is
+    // The current generation: node (gen - adopted_first) — window-
+    // relative, NOT (gen-1)%gens (that held only for first==1 windows;
+    // prefill before the era moves first). At most one kernel is
     // un-done at a time (the graph serializes them), so the walk's view
     // of the cell is exclusive.
     const uint64_t gen = graph.walk_seq;
-    BusAllReduceCtl* const cell = &graph_cells[(gen - 1) % gens];
+    BusAllReduceCtl* const cell =
+        &graph_cells[(gen - graph.adopted_first) % gens];
     const uint32_t seq = static_cast<uint32_t>(gen);
     const uint64_t ready = acquire_u64(&cell->ready_bits);
     const uint64_t done = acquire_u64(&cell->done_seq);
@@ -1093,8 +1160,10 @@ struct CollectiveBus::Impl {
       DGPP_LOG_INFO(
           "graph walk STALLED gen={} posted={:#x} cell[{}]@{} window={} "
           "adopted={} walk={}{}{}",
-          gen, graph.flight.posted_bits, (gen - 1) % gens,
-          static_cast<const void*>(&graph_cells[(gen - 1) % gens]),
+          gen, graph.flight.posted_bits,
+          (gen - graph.adopted_first) % gens,
+          static_cast<const void*>(
+              &graph_cells[(gen - graph.adopted_first) % gens]),
           count, graph.adopted_count, graph.walk_seq, cells, lanes);
     }
 
@@ -1107,7 +1176,7 @@ struct CollectiveBus::Impl {
     // and a later eager era — if ever opened — stays ring-aligned).
     if (graph.flight.posted_bits != all_peers_mask() && ready != 0) {
       const uint32_t elems =
-          graph.meta[(gen - 1) % gens].elems;
+          graph.meta[(gen - graph.adopted_first) % gens].elems;
       for (size_t p = 0; p < peer_ranks.size(); ++p) {
         if ((graph.flight.posted_bits >> p) & 1) continue;
         if (!((ready >> p) & 1)) continue;  // row not staged (belt+braces)
@@ -1885,11 +1954,14 @@ struct CollectiveBus::Impl {
     if (total_outstanding() != 0) return false;
     // A live graph window keeps the engine alive: the walk must drain
     // (quiesce's poison path handles the deliberate-stop case). The
-    // acquire pairs with arm's window publish, so the gens read is
-    // ordered behind the session that set it.
+    // acquire pairs with arm's window publish, so the adopted window
+    // state it orders against is the session's. An un-adopted armed
+    // window also keeps the engine alive (the walk must at least reach
+    // it — the failed-adopt drain above resolves the dead-era case).
     const uint64_t count = graph.window_count.load(std::memory_order_acquire);
     if (count > 0 &&
-        graph.walk_seq <= count * static_cast<uint64_t>(graph.gens))
+        (count != graph.adopted_count ||
+         graph.walk_seq <= graph.adopted_last))
       return false;
     return true;
   }
@@ -2563,9 +2635,8 @@ void* CollectiveBus::stage_next(std::string* error) {
       *error = "an earlier collective failed; this bus must be restarted";
       return nullptr;
     }
-    if (impl.graph.recorded.load(std::memory_order_relaxed) ||
-        impl.graph.recording) {
-      *error = "bus is in graph mode; stage_next() is closed (v1)";
+    if (const char* gate = impl.eager_gate_closed()) {
+      *error = std::string(gate) + "; stage_next() is closed with it";
       return nullptr;
     }
     if (impl.stage_held_ptr != nullptr) {
@@ -2621,9 +2692,8 @@ uint64_t CollectiveBus::allreduce_staged(size_t bf16_elems,
       *error = "an earlier collective failed; this bus must be restarted";
       return 0;
     }
-    if (impl.graph.recorded.load(std::memory_order_relaxed) ||
-        impl.graph.recording) {
-      *error = "bus is in graph mode; eager collectives are closed (v1)";
+    if (const char* gate = impl.eager_gate_closed()) {
+      *error = std::string(gate) + "; eager collectives are closed with it";
       return 0;
     }
     if (impl.stage_held_ptr == nullptr) {
@@ -2690,9 +2760,8 @@ uint64_t CollectiveBus::allreduce(const void* device_src, void* device_dst,
       *error = "an earlier collective failed; this bus must be restarted";
       return 0;
     }
-    if (impl.graph.recorded.load(std::memory_order_relaxed) ||
-        impl.graph.recording) {
-      *error = "bus is in graph mode; eager collectives are closed (v1)";
+    if (const char* gate = impl.eager_gate_closed()) {
+      *error = std::string(gate) + "; eager collectives are closed with it";
       return 0;
     }
     if (impl.stage_held_ptr != nullptr) {
@@ -2758,9 +2827,8 @@ uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
       *error = "an earlier collective failed; this bus must be restarted";
       return 0;
     }
-    if (impl.graph.recorded.load(std::memory_order_relaxed) ||
-        impl.graph.recording) {
-      *error = "bus is in graph mode; eager collectives are closed (v1)";
+    if (const char* gate = impl.eager_gate_closed()) {
+      *error = std::string(gate) + "; eager collectives are closed with it";
       return 0;
     }
     if (impl.stage_held_ptr != nullptr) {
@@ -2893,13 +2961,25 @@ bool CollectiveBus::graph_replay_arm(std::string* error) {
       return false;
     }
     const int gens = impl.graph.gens;
+    if (impl.stage_held_ptr != nullptr) {
+      // The handout's row was picked for "the next collective" — a window
+      // would claim that number range and rewrite the row out from
+      // under it (record_begin rejects the same class of collision).
+      *error = "a pre-stage handout is held; consume it before arming a "
+               "replay window";
+      return false;
+    }
 
-    // Wait for the engine to walk any previous window. Arm c+1 is gated
-    // on walk_pub reaching c*G+1 — the previous window's last generation
-    // plus one. First arm (no window) skips the wait.
+    // Wait for the engine to walk any previous window: its reserved last
+    // generation plus one (window_first still names the previous window
+    // until the reservation below overwrites it). First arm skips.
     const uint64_t prev =
         impl.graph.window_count.load(std::memory_order_relaxed);
-    const uint64_t need = prev == 0 ? 0 : prev * gens + 1;
+    const uint64_t need =
+        prev == 0
+            ? 0
+            : impl.graph.window_first.load(std::memory_order_relaxed) +
+                  static_cast<uint64_t>(gens);
     const auto deadline =
         Clock::now() + std::chrono::milliseconds(std::max(
                            options_.completion_timeout_ms + 5000, 30000));
@@ -2919,11 +2999,35 @@ bool CollectiveBus::graph_replay_arm(std::string* error) {
       cpu_relax();
     }
 
+    // Reserve the window's generations from the SHARED collective
+    // counter — eager pickups between windows take theirs from the same
+    // one, so execution order equals generation order across eras and
+    // the staging-ring reuse fences hold verbatim. A reservation that
+    // would cross the 32-bit top fails the era loudly: the counter space
+    // is ~4.3e9 collectives (~48M decode tokens at 90 gens); the remedy
+    // is a process restart. (Inline failure: graph_fail would take
+    // coll_mu, which this arm already holds.)
+    if (impl.ctl_seq_counter.load(std::memory_order_relaxed) >
+        0xFFFFFFFFu - static_cast<uint32_t>(gens)) {
+      bool expected = false;
+      if (impl.graph.failed.compare_exchange_strong(expected, true)) {
+        impl.graph.error =
+            "collective generation space exhausted (restart the process)";
+        DGPP_LOG_ERROR("bus graph era failed: {}", impl.graph.error);
+      }
+      *error = impl.graph.error;
+      return false;
+    }
+    const uint64_t first =
+        static_cast<uint64_t>(
+            impl.ctl_seq_counter.fetch_add(static_cast<uint32_t>(gens),
+                                            std::memory_order_relaxed)) +
+        1;
+
     // Reset the cells and assign the window's generations. The gen_seq
     // store is RELEASE and last per cell: the kernel's acquire read of it
     // orders the resets ahead of its execution (monotonicity also means
     // a previous replay's stale done stamp can never match this one).
-    const uint64_t first = prev * gens + 1;
     for (int g = 0; g < gens; ++g) {
       BusAllReduceCtl* cell = &impl.graph_cells[g];
       __atomic_store_n(&cell->ready_bits, 0, __ATOMIC_RELAXED);
@@ -2934,8 +3038,11 @@ bool CollectiveBus::graph_replay_arm(std::string* error) {
       cell->stamp_reduce_done = 0;
       __atomic_store_n(&cell->gen_seq, first + g, __ATOMIC_RELEASE);
     }
-    // Publish the window LAST: window_count's release makes every cell
-    // write and the node metadata visible to the engine's acquire.
+    // Close the era's eager gate (arm .. finish), then publish. window_first
+    // first (relaxed — the window_count release below makes it visible to
+    // the engine's acquire), window_count LAST.
+    impl.graph.window_live = true;
+    impl.graph.window_first.store(first, std::memory_order_relaxed);
     impl.graph.window_count.fetch_add(1, std::memory_order_release);
   }
   return true;
@@ -2964,7 +3071,11 @@ bool CollectiveBus::graph_replay_finish(int timeout_ms, std::string* error) {
     return false;
   }
   const int gens = impl.graph.gens;
-  const uint64_t need = count * gens;
+  // The armed window's reserved bound: first + gens. The window_count
+  // acquire above orders the window_first load (arm published it first).
+  const uint64_t need =
+      impl.graph.window_first.load(std::memory_order_relaxed) +
+      static_cast<uint64_t>(gens);
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   while (impl.graph.walk_pub.load(std::memory_order_acquire) < need) {
     if (impl.graph.failed.load(std::memory_order_relaxed)) {
@@ -2982,6 +3093,12 @@ bool CollectiveBus::graph_replay_finish(int timeout_ms, std::string* error) {
       return false;
     }
     cpu_relax();
+  }
+  // The window is walked: reopen the era's eager gate (coll_mu-serialized
+  // with the eager submissions that check it).
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    impl.graph.window_live = false;
   }
   return true;
 }

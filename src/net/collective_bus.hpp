@@ -199,22 +199,38 @@ class CollectiveBus {
   //                              kBusMaxGraphGens nodes.
   //
   // Replay (per step):
-  //   graph_replay_arm()      — reset the per-gen cells, assign the
-  //                              window's monotonic generations (the
-  //                              kernels read them at start), publish the
-  //                              window. Waits (bounded) for the engine to
-  //                              have walked any previous window. Call
-  //                              BEFORE cudaGraphLaunch.
+  //   graph_replay_arm()      — reset the per-gen cells, reserve the
+  //                              window's generations from the shared
+  //                              collective counter (the kernels read
+  //                              them at start), publish the window.
+  //                              Waits (bounded) for the engine to have
+  //                              walked any previous window. Call BEFORE
+  //                              cudaGraphLaunch. Rejects a held staging
+  //                              handout (its row would be rewritten by
+  //                              the window's kernels).
   //   graph_replay_finish()   — after the replay's work completed (the
   //                              caller's stream sync is not enough: the
   //                              engine must observe every generation's
   //                              done). Waits (bounded) for the walk,
   //                              verifies statuses, returns the verdict.
   //
-  // Eager collectives and stage_next() are rejected for the bus's
-  // lifetime once a session opens — the graph era is exclusive (v1).
+  // Mixed era: eager collectives (allreduce/allreduce_staged/allreduce_bulk)
+  // and stage_next() are rejected only while a session RECORDS or while a
+  // replay window is ARMED (arm .. finish); between windows they run as
+  // before — prefill's bulk folds and the pick's latency collectives ride
+  // the same engine. The seam is the generation counter: arm reserves the
+  // window's G generations from it, eager pickups take one each, so
+  // execution order equals generation order and the staging-ring reuse
+  // fences hold across eras verbatim. Session discipline: one forward
+  // thread for arm/finish/eager submissions (the gates are coll_mu-
+  // serialized, but the numbering contract is single-threaded by design).
+  // The counter is 32-bit; an arm whose reservation would cross its top
+  // fails the era loudly (~4.3e9 collectives ≈ 48M decode tokens — the
+  // remedy is a process restart).
+  //
   // Any graph failure (a generation exits on deadline/poison, a lane
-  // fails, a post fails) poisons the era: further arm/finish report it.
+  // fails, a post fails) poisons the era: further arm/finish report it,
+  // and the eager gate stays closed (the bus must be restarted).
   bool graph_record_begin(std::string* error);
   bool allreduce_record(cudaStream_t capture_stream, const void* device_src,
                         void* device_dst, size_t bf16_elems,
