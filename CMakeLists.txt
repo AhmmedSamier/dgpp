@@ -112,6 +112,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/dsa.cu
   src/kernels/fp8_dequant.cu
   src/kernels/scale_gemm.cu
+  src/kernels/bf16_gemv.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
   src/kernels/glm_norm.cu)
@@ -401,6 +402,13 @@ set_tests_properties(glm_loader_test PROPERTIES SKIP_RETURN_CODE 2)
 # Scale-aware GEMM parity (M4): block edges, saturation, NaN policy;
 # --checkpoint-dir adds real-checkpoint slices (manual deployment test —
 # the checkpoint-runner TU is host-only, minijson does not mix with nvcc).
+add_executable(bf16_gemv_test tests/cuda/bf16_gemv_test.cu)
+target_include_directories(bf16_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(bf16_gemv_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(bf16_gemv_test)
+add_test(NAME bf16_gemv_test COMMAND bf16_gemv_test)
+set_tests_properties(bf16_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
+
 add_executable(scale_gemm_test
   tests/cuda/scale_gemm_test.cu
   tests/cuda/scale_gemm_checkpoint.cpp)
@@ -512,6 +520,11 @@ dgpp_set_common(micro_mem_bw)
 add_executable(micro_zerocopy benchmarks/micro/zerocopy.cu src/common/log.cpp)
 target_link_libraries(micro_zerocopy PRIVATE CUDA::cudart Threads::Threads)
 dgpp_set_common(micro_zerocopy)
+
+add_executable(micro_gemv_bw benchmarks/micro/gemv_bw.cu)
+target_include_directories(micro_gemv_bw PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(micro_gemv_bw PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(micro_gemv_bw)
 
 add_executable(micro_gemm_peak benchmarks/micro/gemm_peak.cu src/common/log.cpp)
 target_link_libraries(micro_gemm_peak PRIVATE CUDA::cudart CUDA::cublasLt)

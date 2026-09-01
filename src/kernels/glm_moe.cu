@@ -386,7 +386,8 @@ void launch_moe_slot_gemv(
   // checked here; the routed payloads live in the device table and ride
   // the loader's 256-byte alignment contract.
   if (k_routed % fp8_gemv::kChunkBytes != 0 ||
-      !fp8_gemv::shape_ok(sh_payload, k_shared))
+      !gemv::smem_fits(1, k_routed) ||
+      !fp8_gemv::shape_ok(sh_payload, 1, k_shared))
     throw std::invalid_argument(
         "moe_slot_gemv: k must be a multiple of 16 with 16B-aligned payloads");
   const int max_n = n_routed > n_shared ? n_routed : n_shared;

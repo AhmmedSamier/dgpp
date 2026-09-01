@@ -11,6 +11,7 @@
 #include <tuple>
 
 #include "common/cuda_check.hpp"
+#include "kernels/bf16_gemv.hpp"
 
 namespace dgpp {
 
@@ -146,6 +147,16 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                           int m, int n, int k, DType io_dtype, GemmOut out_dtype,
                           size_t act_row_stride, void* workspace,
                           size_t ws_bytes, cudaStream_t stream) {
+  // Decode-shaped bf16 calls take the bandwidth GEMV (bf16_gemv.hpp):
+  // cuBLASLt's m=1 kernel sits at ~128 GB/s on this part. Same
+  // determinism contract (fixed order, no heuristic), different bits than
+  // the Lt path — the layer oracles gate it.
+  if (io_dtype == DType::BF16 && bf16_gemv_accepts(weight, m, k)) {
+    launch_bf16_gemv(static_cast<const uint16_t*>(act), act_row_stride,
+                     static_cast<const uint16_t*>(weight), out,
+                     out_dtype == GemmOut::F32, m, n, k, stream);
+    return;
+  }
   Impl::Plan& p = impl_->get_plan(m, n, k, io_dtype, out_dtype,
                                   act_row_stride, workspace, ws_bytes);
   float alpha = 1.f, beta = 0.f;

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <functional>
 #include <string>
@@ -69,13 +70,23 @@ int main(int argc, char** argv) {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   int mib = kDefaultMiB;
   int iters = 20;
+  // -m: cudaMallocManaged buffers, first-touched by the HOST (the resident
+  // loader's pattern: memcpy from the shards, then GPU reads) — measures
+  // the placement/translation path the model's weights actually take.
+  // -a: managed with cudaMemAdvise preferred-location GPU + accessed-by,
+  // then a device-side first touch. -p: cudaMallocHost (pinned).
+  int mode = 0;
   int opt{};
-  while ((opt = getopt(argc, argv, "s:i:h")) != -1) {
+  while ((opt = getopt(argc, argv, "s:i:mapf")) != -1) {
     switch (opt) {
       case 's': mib = atoi(optarg); break;
       case 'i': iters = atoi(optarg); break;
+      case 'm': mode = 1; break;
+      case 'a': mode = 2; break;
+      case 'p': mode = 3; break;
+      case 'f': mode = 4; break;
       default:
-        std::printf("usage: micro_mem_bw [-s size_MiB=%d] [-i iters=%d]\n",
+        std::printf("usage: micro_mem_bw [-s size_MiB=%d] [-i iters=%d] [-m|-a|-p]\n",
                     kDefaultMiB, iters);
         return 2;
     }
@@ -94,11 +105,37 @@ int main(int argc, char** argv) {
   const size_t bytes = static_cast<size_t>(mib) << 20;
   const size_t n4 = bytes / sizeof(float4);
   float *a = nullptr, *b = nullptr;
-  if (cudaMalloc(&a, bytes) != cudaSuccess ||
-      cudaMalloc(&b, bytes) != cudaSuccess) {
-    DGPP_LOG_ERROR("cudaMalloc {} MiB failed", mib);
+  const auto alloc = [&](float** p) -> bool {
+    if (mode == 0) return cudaMalloc(p, bytes) == cudaSuccess;
+    if (mode == 3) return cudaMallocHost(p, bytes) == cudaSuccess;
+    if (cudaMallocManaged(p, bytes) != cudaSuccess) return false;
+    if (mode == 1) {
+      std::memset(*p, 0x3C, bytes);  // host first touch
+    } else if (mode == 4) {
+      std::memset(*p, 0x3C, bytes);  // host first touch, then an explicit
+      cudaMemLocation gpu0{};        // prefetch (migration) to the GPU
+      gpu0.type = cudaMemLocationTypeDevice;
+      gpu0.id = 0;
+      if (cudaMemPrefetchAsync(*p, bytes, gpu0, 0, nullptr) != cudaSuccess)
+        DGPP_LOG_ERROR("prefetch failed: {}", cudaGetErrorString(cudaGetLastError()));
+      cudaDeviceSynchronize();
+    } else {
+      cudaMemLocation gpu0{};
+      gpu0.type = cudaMemLocationTypeDevice;
+      gpu0.id = 0;
+      cudaMemAdvise(*p, bytes, cudaMemAdviseSetPreferredLocation, gpu0);
+      cudaMemAdvise(*p, bytes, cudaMemAdviseSetAccessedBy, gpu0);
+    }
+    return true;
+  };
+  if (!alloc(&a) || !alloc(&b)) {
+    DGPP_LOG_ERROR("alloc {} MiB failed (mode {})", mib, mode);
     return 1;
   }
+  DGPP_LOG_INFO("allocation mode {} ({})", mode,
+                mode == 0 ? "cudaMalloc" : mode == 1 ? "managed, host first touch"
+                : mode == 2 ? "managed, advised GPU"
+                : mode == 4 ? "managed, host touch + prefetch to GPU" : "cudaMallocHost");
   cudaStream_t s{};
   cudaStreamCreate(&s);
 

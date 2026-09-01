@@ -1,7 +1,8 @@
 #pragma once
 // Resident weight loader for the GLM text model (M4 deliverable 2,
 // DESIGN §4). Loads one layer at a time from the mapped checkpoint into
-// managed device memory, transformed into the exact layouts the M2/M3 layer
+// DEVICE memory through a pinned staging mirror (see GlmLayerBump for why
+// not managed), transformed into the exact layouts the M2/M3 layer
 // kernels consume: merged KDA in_proj ([f_a|g_a|q|k|v|b] rows) and conv
 // (q|k|v channels), fused DSA qkv_a, F32 indexer APE. The E4M3+scale pairs
 // of the MLP/MoE matrices stay resident in compressed form — "load" never
@@ -37,8 +38,9 @@
 // world=1 stays the degenerate rank 0 (the M4 build, byte-for-byte).
 //
 // Synchronization contract: load_layer/load_globals cudaDeviceSynchronize
-// before returning, so callers may read the managed buffers from the CPU
-// and must not touch them while later GPU work runs.
+// before returning, so the weights are readable by device work issued
+// afterwards; the resident pointers are DEVICE addresses (cudaMemcpy them
+// to inspect from the host) and must not be overwritten while GPU work runs.
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -285,6 +287,8 @@ class GlmLayerStream {
   GlmLayerResident resident_;  // streaming only (the active layer)
   GlmGlobalsResident globals_;
   cudaStream_t stream_ = nullptr;  // dedicated; synced before returning
+  void* staging_ = nullptr;        // pinned host mirror the builds write
+  size_t staging_bytes_ = 0;
 
   // The one layer build both residency modes share — grant sequence,
   // byte accounting, formula check and sync are identical, so resident

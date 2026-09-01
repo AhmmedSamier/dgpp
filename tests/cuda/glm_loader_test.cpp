@@ -221,15 +221,28 @@ void require(bool cond, const char* what) {
   if (!cond) throw std::runtime_error(what);
 }
 
+// The resident pointers are DEVICE addresses (the bump is cudaMalloc'd —
+// see GlmLayerBump): fetch before comparing.
+std::vector<uint8_t> fetch(const void* dev, size_t bytes) {
+  std::vector<uint8_t> h(bytes);
+  if (bytes)
+    DGPP_CUDA_OK(cudaMemcpy(h.data(), dev, bytes, cudaMemcpyDeviceToHost));
+  return h;
+}
+
+bool device_bytes_equal(const void* a, const void* b, size_t bytes) {
+  return fetch(a, bytes) == fetch(b, bytes);
+}
+
 template <typename T>
-void require_bytes_eq(const T* got, const std::vector<uint8_t>& want,
+void require_bytes_eq(const T* got_dev, const std::vector<uint8_t>& want,
                       size_t count, const char* what) {
-  if (std::memcmp(got, want.data(), count * sizeof(T)) != 0) {
+  const std::vector<uint8_t> got = fetch(got_dev, count * sizeof(T));
+  if (std::memcmp(got.data(), want.data(), count * sizeof(T)) != 0) {
     std::printf("mismatch at %s: first differing offset %zu\n", what,
                 [&] {
                   for (size_t i = 0; i < count; ++i)
-                    if (std::memcmp(reinterpret_cast<const uint8_t*>(got) +
-                                        i * sizeof(T),
+                    if (std::memcmp(got.data() + i * sizeof(T),
                                     want.data() + i * sizeof(T), sizeof(T)))
                       return i;
                   return count;
@@ -382,7 +395,8 @@ DGPP_TEST(glm_loader_streams_dsa_moe_layer_with_dequant_bridge) {
     const auto& src = fx.at(p + "indexer.index_kpool_compress_ape");
     const uint16_t* s16 =
         reinterpret_cast<const uint16_t*>(src.data());
-    const float* ape = r.dsa.ape;
+    const std::vector<uint8_t> ape_bytes = fetch(r.dsa.ape, 4 * 128 * 4);
+    const float* ape = reinterpret_cast<const float*>(ape_bytes.data());
     for (size_t i = 0; i < 4 * 128; ++i)
       if (ape[i] != dgpp::bf16_bits_to_float(s16[i]))
         throw std::runtime_error("ape f32 conversion");
@@ -502,8 +516,8 @@ DGPP_TEST(glm_loader_resident_mode_serves_cache_hits_without_storage_reads) {
   require(r0.bytes == s0.bytes, "resident layer 0 formula differs");
   require(r0.bytes == dgpp::GlmLayerStream::layer_bytes(fx.cfg, 0),
           "resident layer 0 bytes match formula");
-  require(std::memcmp(r0.ln1, s0.ln1, static_cast<size_t>(fx.cfg.hidden_size) *
-                                          2) == 0,
+  require(device_bytes_equal(r0.ln1, s0.ln1,
+                             static_cast<size_t>(fx.cfg.hidden_size) * 2),
           "resident ln1 differs from streaming");
   {
     // Merged in_proj rows [f_a | g_a | q | k | v | b] — same sizes the
@@ -514,7 +528,7 @@ DGPP_TEST(glm_loader_resident_mode_serves_cache_hits_without_storage_reads) {
     const size_t in_proj_bytes =
         static_cast<size_t>(2 * head_dim + 3 * proj + heads) *
         static_cast<size_t>(fx.cfg.hidden_size) * 2;
-    require(std::memcmp(r0.kda.in_proj, s0.kda.in_proj, in_proj_bytes) == 0,
+    require(device_bytes_equal(r0.kda.in_proj, s0.kda.in_proj, in_proj_bytes),
             "resident in_proj differs from streaming");
   }
 

@@ -30,25 +30,25 @@
 #include <cstdint>
 
 #include "common/dtypes.hpp"
+#include "kernels/gemv_common.cuh"
 
 namespace dgpp {
 namespace fp8_gemv {
 
-constexpr int kWarps = 8;                 // rows per block
-constexpr int kThreads = kWarps * 32;
-constexpr int kChunkBytes = 16;           // one uint4 of fp8 per lane per step
-constexpr int kWarpSpan = 32 * kChunkBytes;  // 512 weight bytes per warp step
-constexpr int kBatch = 8;                 // chunks in flight per lane (k=4096 in one batch)
-constexpr int kMaxRows = 4;               // activation rows per pass (smem: rows * k * 2B)
+using gemv::kBatch;
+using gemv::kChunkBytes;
+using gemv::kMaxRows;
+using gemv::kThreads;
+using gemv::kWarps;
+using gemv::kWarpSpan;
+using gemv::smem_bytes;
+using gemv::stage_activations;
 
-// Shared-memory bytes the caller must provide for `rows` activation rows.
-__host__ __device__ constexpr size_t smem_bytes(int rows, int k) {
-  return static_cast<size_t>(rows) * static_cast<size_t>(k) * 2;
-}
-
-__host__ inline bool shape_ok(const void* payload, int k) {
-  return k > 0 && (k % kChunkBytes) == 0 &&
-         (reinterpret_cast<uintptr_t>(payload) & 15u) == 0;
+// k a multiple of 16 (a chunk sits inside one 128-wide scale block) and a
+// 16-byte-aligned payload.
+__host__ inline bool shape_ok(const void* payload, int rows, int k) {
+  return k > 0 && (k % kChunkBytes) == 0 && gemv::aligned16(payload) &&
+         gemv::smem_fits(rows, k);
 }
 
 // e4m3 -> f32, exact (every finite e4m3 value is an fp16 value; the two
@@ -63,30 +63,6 @@ __device__ __forceinline__ float2 e4m3x2_to_float2(uint16_t packed) {
 // The dequant bridge's rounding: bf16(w * s), back to f32 for the FMA.
 __device__ __forceinline__ float dequant(float w, float s) {
   return bf16_bits_to_float(float_to_bf16_bits(w * s));
-}
-
-// Stage `rows` bf16 activation rows (row stride x_stride elements) into
-// shared memory as [rows][k]; the whole block participates, the caller
-// syncs. 16-byte vectors when the source allows, scalar otherwise.
-template <int kRows>
-__device__ __forceinline__ void stage_activations(const uint16_t* __restrict__ x,
-                                                  size_t x_stride, int k,
-                                                  uint16_t* __restrict__ sx) {
-  const bool vec = ((reinterpret_cast<uintptr_t>(x) & 15u) == 0) &&
-                   ((x_stride * 2) % 16 == 0) && (k % 8 == 0);
-  if (vec) {
-    const int vecs_per_row = k / 8;
-    for (int i = threadIdx.x; i < kRows * vecs_per_row; i += blockDim.x) {
-      const int r = i / vecs_per_row, c = i - r * vecs_per_row;
-      reinterpret_cast<uint4*>(sx + static_cast<size_t>(r) * k)[c] =
-          reinterpret_cast<const uint4*>(x + static_cast<size_t>(r) * x_stride)[c];
-    }
-  } else {
-    for (int i = threadIdx.x; i < kRows * k; i += blockDim.x) {
-      const int r = i / k, c = i - r * k;
-      sx[static_cast<size_t>(r) * k + c] = x[static_cast<size_t>(r) * x_stride + c];
-    }
-  }
 }
 
 // One warp, one weight row, kRows activation rows: acc[r] = dot(w_row, sx[r]).
@@ -157,13 +133,7 @@ __device__ __forceinline__ void row_dots(const uint8_t* __restrict__ w_row,
       }
     }
   }
-  // Fixed xor-shuffle tree: deterministic, launch-shape independent.
-#pragma unroll
-  for (int r = 0; r < kRows; ++r) {
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-      acc[r] += __shfl_xor_sync(0xFFFFFFFFu, acc[r], off);
-  }
+  gemv::warp_reduce<kRows>(acc);
 }
 
 // The block body shared by the dense and slot launchers: this block's kWarps

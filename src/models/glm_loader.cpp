@@ -31,28 +31,20 @@ struct DequantJob {
   int64_t cols;
 };
 
-// One strided pack copy, executed AFTER the dequant jobs land (the DSA
-// o_proj pack's source is a bridge buffer the kernel writes; the KDA
-// o_proj pack's source is host mmap, but one phase for all packs keeps
-// "packs happen after dequants" a single rule).
+// One strided pack copy. Two classes now that the bump is device memory:
+// a HOST-source pack (the KDA o_proj column slice out of the mmap) runs in
+// phase one as a host memcpy into the staging mirror; a DEVICE-source pack
+// (the DSA o_proj slice out of a bridge buffer the dequant kernels write)
+// runs after the dequants as a strided device copy on the loader's stream.
 struct PackJob {
   const uint16_t* src;
-  uint16_t* dst;
-  size_t src_pitch;  // bytes
+  uint16_t* dst;      // DEVICE address (the grant)
+  size_t src_pitch;   // bytes
   size_t dst_pitch;
-  size_t width;      // <= both pitches
+  size_t width;       // <= both pitches
   size_t rows;
+  bool src_on_device;
 };
-
-void run_pack(const PackJob& j) {
-  if (j.width == j.dst_pitch && j.width == j.src_pitch) {
-    std::memcpy(j.dst, j.src, j.width * j.rows);  // degenerate: contiguous
-    return;
-  }
-  for (size_t r = 0; r < j.rows; ++r)
-    std::memcpy(j.dst + r * (j.dst_pitch / 2),
-                j.src + r * (j.src_pitch / 2), j.width);
-}
 
 // FNV-1a (the replicated digest's per-tensor hash; checksum class, not
 // adversarial — see GlmReplicatedDigest).
@@ -136,12 +128,25 @@ bool is_dsa_bridge(const GlmExpectedTensor& e) {
 
 }  // namespace
 
-// Managed-memory bump for streamed layer weights (defined here, pimpl'd in
+// Weight bump for streamed/resident layer weights (defined here, pimpl'd in
 // the header). Counting mode walks the same grant sequence without touching
 // memory — layer_bytes() and load_layer() run the SAME build code, so the
 // sizing formula cannot drift.
+//
+// PLACEMENT (2026-09-01, M6 Stage 2 round 3): DEVICE memory (cudaMalloc),
+// built through a pinned HOST staging mirror of the same layout. On the
+// GB10 the GPU streams cudaMallocManaged memory at ~160 GB/s whatever the
+// advice/prefetch, pinned host memory at ~228 falling to ~180 once tens of
+// GB are pinned (4 KB translations), and cudaMalloc at ~248 cold across 70
+// GiB (micro_mem_bw -m/-a/-f/-p, micro_gemv_bw -c) — the weights are the
+// decode step's bytes, and every weight-streaming kernel in the profile sat
+// at the managed plateau. The build code keeps writing with host memcpys;
+// it addresses the mirror through host(), and one H2D copy per layer lands
+// the bytes. The pointers handed out (alloc) are the DEVICE addresses the
+// kernels consume; nothing on the host may dereference them.
 struct GlmLayerBump {
-  void* base = nullptr;
+  void* base = nullptr;   // device memory: the addresses alloc() hands out
+  void* stage = nullptr;  // pinned host mirror for the build (same offsets)
   size_t capacity = 0;
   size_t cursor = 0;
   bool counting = false;
@@ -154,9 +159,18 @@ struct GlmLayerBump {
   GlmLayerBump& operator=(const GlmLayerBump&) = delete;
 
   void init(size_t cap) {
-    DGPP_CUDA_OK(cudaMallocManaged(&base, cap));
+    DGPP_CUDA_OK(cudaMalloc(&base, cap));
     capacity = cap;
     cursor = 0;
+  }
+
+  // The host-side address of a device grant: where the build writes.
+  template <typename T>
+  T* host(T* dev) const {
+    if (!stage) throw std::logic_error("glm loader: bump has no staging");
+    return reinterpret_cast<T*>(static_cast<char*>(stage) +
+                                (reinterpret_cast<const char*>(dev) -
+                                 static_cast<const char*>(base)));
   }
 
   // Every grant is 256-aligned, so a layer's total is exactly the sum of
@@ -172,6 +186,24 @@ struct GlmLayerBump {
 
   void reset() { cursor = 0; }
 };
+
+void run_host_pack(const PackJob& j, const GlmLayerBump& bump) {
+  uint16_t* dst = bump.host(j.dst);
+  if (j.width == j.dst_pitch && j.width == j.src_pitch) {
+    std::memcpy(dst, j.src, j.width * j.rows);  // degenerate: contiguous
+    return;
+  }
+  for (size_t r = 0; r < j.rows; ++r)
+    std::memcpy(dst + r * (j.dst_pitch / 2), j.src + r * (j.src_pitch / 2),
+                j.width);
+}
+
+void run_device_pack(const PackJob& j, cudaStream_t stream) {
+  DGPP_CUDA_OK(cudaMemcpy2DAsync(j.dst, j.dst_pitch, j.src, j.src_pitch,
+                                 j.width, j.rows, cudaMemcpyDeviceToDevice,
+                                 stream));
+}
+
 
 namespace {
 
@@ -264,7 +296,7 @@ struct BuildCtx {
           "the replicated classifier disagree; fix one of them)");
     void* dst = bump.alloc(e.nbytes());
     if (copy) {
-      std::memcpy(dst, source(name).data, e.nbytes());
+      std::memcpy(bump.host(dst), source(name).data, e.nbytes());
       note_read(e, e.nbytes());
     }
     return dst;
@@ -287,7 +319,7 @@ struct BuildCtx {
                    2));
     if (copy) {
       const uint8_t* src = static_cast<const uint8_t*>(source(name).data);
-      std::memcpy(dst, src + static_cast<size_t>(row_start) * width * 2,
+      std::memcpy(bump.host(dst), src + static_cast<size_t>(row_start) * width * 2,
                   static_cast<size_t>(rows) * width * 2);
       note_read(e, static_cast<size_t>(rows) * width * 2);
     }
@@ -300,7 +332,7 @@ struct BuildCtx {
     float* dst = static_cast<float*>(bump.alloc(static_cast<size_t>(count) * 4));
     if (copy) {
       const uint8_t* src = static_cast<const uint8_t*>(source(name).data);
-      std::memcpy(dst, src + static_cast<size_t>(start) * 4,
+      std::memcpy(bump.host(dst), src + static_cast<size_t>(start) * 4,
                   static_cast<size_t>(count) * 4);
       note_read(e, static_cast<size_t>(count) * 4);
     }
@@ -331,11 +363,11 @@ struct BuildCtx {
     q.scales = static_cast<const float*>(
         bump.alloc(static_cast<size_t>(scale_rows) * sb * 4));
     if (copy) {
-      std::memcpy(const_cast<uint8_t*>(q.payload),
+      std::memcpy(bump.host(const_cast<uint8_t*>(q.payload)),
                   static_cast<const uint8_t*>(source(name).data) +
                       static_cast<size_t>(row_start) * cols,
                   static_cast<size_t>(rows) * cols);
-      std::memcpy(const_cast<float*>(q.scales),
+      std::memcpy(bump.host(const_cast<float*>(q.scales)),
                   static_cast<const float*>(source(es.name).data) +
                       (row_start / 128) * sb,
                   static_cast<size_t>(scale_rows) * sb * 4);
@@ -374,18 +406,17 @@ struct BuildCtx {
     if (copy) {
       const uint8_t* sp = static_cast<const uint8_t*>(source(name).data);
       const float* ss = static_cast<const float*>(source(es.name).data);
+      uint8_t* hp = bump.host(const_cast<uint8_t*>(q.payload));
+      float* hs = bump.host(const_cast<float*>(q.scales));
       if (cols == full_cols && col_start == 0) {
-        std::memcpy(const_cast<uint8_t*>(q.payload), sp,
-                    static_cast<size_t>(rows) * cols);
-        std::memcpy(const_cast<float*>(q.scales), ss,
-                    static_cast<size_t>(scale_rows) * sb_s * 4);
+        std::memcpy(hp, sp, static_cast<size_t>(rows) * cols);
+        std::memcpy(hs, ss, static_cast<size_t>(scale_rows) * sb_s * 4);
       } else {
         for (int64_t r = 0; r < rows; ++r)
-          std::memcpy(const_cast<uint8_t*>(q.payload) + r * cols,
-                      sp + r * full_cols + col_start, cols);
+          std::memcpy(hp + r * cols, sp + r * full_cols + col_start, cols);
         for (int64_t r = 0; r < scale_rows; ++r)
-          std::memcpy(const_cast<float*>(q.scales) + r * sb_s,
-                      ss + r * sb_full + col_start / 128, sb_s * 4);
+          std::memcpy(hs + r * sb_s, ss + r * sb_full + col_start / 128,
+                      sb_s * 4);
       }
       note_read(e,
                static_cast<size_t>(rows) * cols +
@@ -486,7 +517,7 @@ struct BuildCtx {
         throw std::runtime_error("glm loader: TP read-class drift on '" +
                                  p + piece.name + "'");
       if (copy) {
-        std::memcpy(in_proj + static_cast<size_t>(dst_row) * hidden,
+        std::memcpy(bump.host(in_proj) + static_cast<size_t>(dst_row) * hidden,
                     static_cast<const uint8_t*>(source(p + piece.name).data) +
                         static_cast<size_t>(piece.src_off) * hidden * 2,
                     static_cast<size_t>(piece.rows) * hidden * 2);
@@ -510,7 +541,7 @@ struct BuildCtx {
       if (e.shape[0] != lp_f || e.shape[2] != conv_w)
         throw std::runtime_error("glm loader: conv piece geometry mismatch");
       if (copy) {
-        std::memcpy(conv + static_cast<size_t>(i) * lp_s * conv_w,
+        std::memcpy(bump.host(conv) + static_cast<size_t>(i) * lp_s * conv_w,
                     static_cast<const uint8_t*>(source(p + convs[i]).data) +
                         static_cast<size_t>(rank) * lp_s * conv_w * 2,
                     static_cast<size_t>(lp_s) * conv_w * 2);
@@ -528,7 +559,7 @@ struct BuildCtx {
 
     // o_proj [hidden, lp_f] bf16: column slice -> packed [hidden, lp_s].
     // BF16 carries no scale grid, so any column start is representable;
-    // the pack runs in the post-dequant phase for uniformity.
+    // the source is host mmap, so the pack runs in phase one (staging).
     {
       const std::string name = p + "o_proj.weight";
       const GlmExpectedTensor& e = expected(name);
@@ -541,7 +572,7 @@ struct BuildCtx {
             static_cast<const uint16_t*>(source(name).data) + rank * lp_s,
             packed, static_cast<size_t>(lp_f) * 2,
             static_cast<size_t>(lp_s) * 2, static_cast<size_t>(lp_s) * 2,
-            static_cast<size_t>(hidden)});
+            static_cast<size_t>(hidden), /*src_on_device=*/false});
         note_read(e, static_cast<size_t>(hidden) * lp_s * 2);
       }
       out.kda.o_proj = packed;
@@ -605,7 +636,8 @@ struct BuildCtx {
                                 static_cast<size_t>(local_v_rows) * world * 2,
                                 static_cast<size_t>(local_v_rows) * 2,
                                 static_cast<size_t>(local_v_rows) * 2,
-                                static_cast<size_t>(hidden)});
+                                static_cast<size_t>(hidden),
+                                /*src_on_device=*/true});
       out.dsa.o_proj = packed;
     } else {
       out.dsa.o_proj = o_bridge;
@@ -629,10 +661,11 @@ struct BuildCtx {
       if (copy) {
         const uint8_t* src =
             static_cast<const uint8_t*>(source(name).data);
+        float* h_ape = bump.host(ape);
         for (size_t i = 0; i < n; ++i) {
           uint16_t bits;
           std::memcpy(&bits, src + i * 2, 2);
-          ape[i] = bf16_bits_to_float(bits);
+          h_ape[i] = bf16_bits_to_float(bits);
         }
         note_read(e, n * 2);
       }
@@ -869,12 +902,18 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
   } else {
     layer_bump_->init(capacity);
   }
-  globals_bump_->init(globals_bytes(cfg_, rank_, world_, head_));
+  const size_t globals_cap = globals_bytes(cfg_, rank_, world_, head_);
+  globals_bump_->init(globals_cap);
+  // ONE pinned staging mirror serves every bump (layers and globals build
+  // one at a time and exit synced): sized for the largest of them.
+  staging_bytes_ = std::max(capacity, globals_cap);
+  DGPP_CUDA_OK(cudaHostAlloc(&staging_, staging_bytes_, cudaHostAllocDefault));
   DGPP_CUDA_OK(cudaStreamCreate(&stream_));
 }
 
 GlmLayerStream::~GlmLayerStream() {
   if (stream_) cudaStreamDestroy(stream_);
+  if (staging_) cudaFreeHost(staging_);
 }
 
 size_t GlmLayerStream::layer_capacity() const {
@@ -887,6 +926,7 @@ size_t GlmLayerStream::layer_capacity() const {
 // driver pins this bitwise at every world.
 void GlmLayerStream::build_layer_into(int layer, GlmLayerBump& bump,
                                       GlmLayerResident& out) {
+  bump.stage = staging_;  // the build writes here; the H2D below lands it
   std::vector<GlmExpectedTensor> table =
       glm_expected_layer_tensors(cfg_, layer);
   std::unordered_map<std::string, const GlmExpectedTensor*> by_name;
@@ -898,17 +938,24 @@ void GlmLayerStream::build_layer_into(int layer, GlmLayerBump& bump,
                tensors_, jobs,  packs,   true,         rank_,   world_};
   ctx.build_layer(layer);
 
-  // Phase two: all CPU writes are done, launch the dequants and wait.
+  // Phase one, continued: host-source packs land in the staging mirror
+  // alongside the builder's memcpys; then ONE H2D copy of the whole layer.
+  for (const PackJob& j : packs)
+    if (!j.src_on_device) run_host_pack(j, bump);
+  DGPP_CUDA_OK(cudaMemcpyAsync(bump.base, bump.stage, bump.cursor,
+                               cudaMemcpyHostToDevice, stream_));
+
+  // Phase two: the dequants (device -> device inside the bump).
   for (const DequantJob& j : jobs)
     launch_fp8_dequant_blocks(j.payload, j.scales, j.out, j.rows, j.cols,
                               stream_);
-  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 
-  // Phase three: the packs — strided copies whose sources include bridge
-  // buffers the dequants just wrote (the DSA o_proj pack; the KDA o_proj
-  // pack's source is host mmap, but one phase for all packs keeps the
-  // rule single).
-  for (const PackJob& j : packs) run_pack(j);
+  // Phase three: device-source packs — strided copies out of bridge
+  // buffers the dequants just wrote (the DSA o_proj slice). Then the exit
+  // sync: the staging mirror is reusable and the layer is readable.
+  for (const PackJob& j : packs)
+    if (j.src_on_device) run_device_pack(j, stream_);
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 
   // The formula and the allocator share the build code; anything but
   // equality is a bug that must never pass silently. In resident mode the
@@ -951,7 +998,7 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
   if (resident_.layer == layer) return resident_;
 
   // Phase one below writes weight bytes into the bump from the CPU — the
-  // SAME managed region the previously loaded layer's kernels may still be
+  // SAME region the previously loaded layer's kernels may still be
   // reading (this loader was first exercised mid-forward by the M4
   // diagnostic model; before that, callers always loaded with the device
   // idle). The boundary sync waits for exactly those readers — see
@@ -1019,6 +1066,7 @@ const GlmGlobalsResident& GlmLayerStream::load_globals() {
   // boundary sync covers exactly the globals bump's readers).
   sync_load_boundary(reader_, stream_);
   globals_bump_->reset();
+  globals_bump_->stage = staging_;
   globals_ = GlmGlobalsResident{};
 
   auto copy_global = [&](const std::string& name) -> uint16_t* {
@@ -1027,7 +1075,7 @@ const GlmGlobalsResident& GlmLayerStream::load_globals() {
       throw std::runtime_error("glm loader: global tensor missing: " + name);
     const TensorInfo& t = *it->second;
     uint16_t* dst = static_cast<uint16_t*>(globals_bump_->alloc(t.nbytes()));
-    std::memcpy(dst, t.data, t.nbytes());
+    std::memcpy(globals_bump_->host(dst), t.data, t.nbytes());
     source_bytes_ += t.nbytes();
     verbatim_bytes_ += t.nbytes();
     return dst;
@@ -1045,8 +1093,9 @@ const GlmGlobalsResident& GlmLayerStream::load_globals() {
     const size_t row_bytes = static_cast<size_t>(cfg_.hidden_size) * 2;
     uint16_t* dst = static_cast<uint16_t*>(
         globals_bump_->alloc(static_cast<size_t>(count) * row_bytes));
-    std::memcpy(dst, static_cast<const uint8_t*>(t.data) +
-                          static_cast<size_t>(begin) * row_bytes,
+    std::memcpy(globals_bump_->host(dst),
+                static_cast<const uint8_t*>(t.data) +
+                    static_cast<size_t>(begin) * row_bytes,
                 static_cast<size_t>(count) * row_bytes);
     source_bytes_ += static_cast<size_t>(count) * row_bytes;
     globals_.lm_head = dst;
@@ -1066,7 +1115,10 @@ const GlmGlobalsResident& GlmLayerStream::load_globals() {
         "glm loader: globals byte-formula drift: used " +
         std::to_string(globals_.bytes) + " != formula " +
         std::to_string(expected_bytes));
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  DGPP_CUDA_OK(cudaMemcpyAsync(globals_bump_->base, globals_bump_->stage,
+                               globals_.bytes, cudaMemcpyHostToDevice,
+                               stream_));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   return globals_;
 }
 

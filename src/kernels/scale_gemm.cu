@@ -157,7 +157,7 @@ void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
   // Decode-shaped calls take the bandwidth GEMV (the tile below is
   // latency-bound at m=1 — see fp8_gemv.cuh); ragged k or an unaligned
   // payload keeps the general tile.
-  if (m <= fp8_gemv::kMaxRows && fp8_gemv::shape_ok(w_payload, k)) {
+  if (m <= fp8_gemv::kMaxRows && fp8_gemv::shape_ok(w_payload, m, k)) {
     switch (m) {
       case 1:
         launch_scale_gemv<1>(act, act_row_stride_elems, w_payload, w_scales,

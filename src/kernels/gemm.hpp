@@ -38,7 +38,10 @@ class IGemm {
                            GemmOut out_dtype, size_t act_row_stride) = 0;
 };
 
-// cuBLASLt-backed implementation with per-shape heuristic caching.
+// cuBLASLt-backed implementation with per-shape heuristic caching. Decode-
+// shaped bf16 calls (m <= 4, k % 8 == 0, 16B-aligned weight) bypass Lt for
+// the in-house bandwidth GEMV (bf16_gemv.hpp) — Lt's m=1 kernel runs at
+// ~55% of the part's bandwidth.
 class CublasLtGemm : public IGemm {
  public:
   CublasLtGemm();   // creates handle, unit-scale device constants

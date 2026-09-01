@@ -32,8 +32,15 @@ struct BoundCmp {
   int world;
   int checked = 0;
 
+  // Both sides are DEVICE addresses (the loader's bumps and the views'
+  // slabs are cudaMalloc'd): fetch, then compare.
   void bytes(const std::string& what, const void* a, const void* b, size_t n) {
-    if (std::memcmp(a, b, n) != 0)
+    std::vector<uint8_t> ha(n), hb(n);
+    if (n) {
+      DGPP_CUDA_OK(cudaMemcpy(ha.data(), a, n, cudaMemcpyDeviceToHost));
+      DGPP_CUDA_OK(cudaMemcpy(hb.data(), b, n, cudaMemcpyDeviceToHost));
+    }
+    if (ha != hb)
       throw std::runtime_error(what + " differs bitwise (full+bind vs "
                                    "sharded)");
     ++checked;
