@@ -36,3 +36,6 @@ venv/
 # --- Debug residue ---------------------------------------------------------------
 /core
 core.*
+
+# Fabric-run artifacts (rank 0 writes its token transcript to its CWD)
+glm_gen.tokens.txt
