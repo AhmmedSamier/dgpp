@@ -148,7 +148,8 @@ add_library(dgpp_models_glm STATIC
   src/models/glm_moe_reference.cpp
   src/models/glm_trace.cpp
   src/models/glm_tokenizer.cpp
-  src/models/glm_chat_template.cpp)
+  src/models/glm_chat_template.cpp
+  src/models/glm_scheduler.cpp)
 target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders)
 dgpp_set_common(dgpp_models_glm)
 
@@ -304,6 +305,16 @@ dgpp_set_common(glm_chat_template_test)
 add_test(NAME glm_chat_template_test
   COMMAND glm_chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_chat_template_goldens.jsonl)
 set_tests_properties(glm_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# M6 Stage 2b: the scheduler policy gate (host, no model, no skip path —
+# the FakeEngine replaces the engine, so the policy is pinned everywhere
+# CI runs).
+add_executable(glm_scheduler_test tests/host/glm_scheduler_test.cpp)
+target_include_directories(glm_scheduler_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(glm_scheduler_test PRIVATE dgpp_models_glm Threads::Threads)
+dgpp_set_common(glm_scheduler_test)
+add_test(NAME glm_scheduler_test COMMAND glm_scheduler_test)
+
 add_executable(flag_protocol_test tests/cuda/flag_protocol_test.cu)
 target_link_libraries(flag_protocol_test PRIVATE CUDA::cudart)
 dgpp_set_common(flag_protocol_test)

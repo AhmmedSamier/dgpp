@@ -208,6 +208,25 @@ void DsaStatePool::reset_all(cudaStream_t stream) {
       stream));
 }
 
+void DsaStatePool::reset_request(int req, cudaStream_t stream) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("dsa state pool: request " + std::to_string(req));
+  // The tail region is layer-major with max_requests slots per layer, so a
+  // request's rings are strided across layers — one small stream-ordered
+  // memset per layer, once per request open. The ring is the ONLY cache a
+  // fresh request can read before writing (the tail-seed read), so it is
+  // the only one reset_request must zero.
+  for (int layer = 0; layer < cfg_.num_dsa_layers; ++layer) {
+    uint8_t* slot =
+        tail_base_ +
+        size_t(layer) * size_t(max_requests_) * geo_.tail_bytes_per_request +
+        size_t(req) * geo_.tail_bytes_per_request;
+    DGPP_CUDA_OK(
+        cudaMemsetAsync(slot, 0, geo_.tail_bytes_per_request, stream));
+  }
+  release_request_blocks(req, stream);
+}
+
 size_t DsaStatePool::cache_bytes(const DsaConfig& cfg, int max_requests,
                                  int64_t max_token_slots) {
   if (max_requests <= 0 || max_token_slots <= 0 ||

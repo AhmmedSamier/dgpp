@@ -86,9 +86,22 @@ class DsaStatePool {
   // Blocks req currently holds (covers request_blocks()*block_tokens tokens).
   int64_t request_blocks(int req) const;
 
+  // Blocks covering `tokens` tokens (rounds up). Public because it is the
+  // admission-budget arithmetic: the scheduler reserves
+  // block_count_for_tokens(prompt + max_steps) per request (M6 Stage 2b).
+  int64_t block_count_for_tokens(int64_t tokens) const;
+
   // Cold start: zero every cache, tail ring, and table row, and return all
   // blocks to the free list. One call at init or between test cases.
   void reset_all(cudaStream_t stream);
+
+  // Per-request open (M6 Stage 2b): zero req's tail rings and return any
+  // blocks it still holds to the free list. The latent/index caches are
+  // deliberately NOT scrubbed — a new owner rewrites every row it reads
+  // before any kernel reads it (the release contract in the file header),
+  // so opening a request never lands on the memory hot path. Pairs with
+  // the engine's per-request KDA state zeroing at session_prefill(req, ..).
+  void reset_request(int req, cudaStream_t stream);
 
   // ---- accounting (the M3 exit criterion) -------------------------------
   // Bytes this pool allocates (each region 256-byte aligned). The static
@@ -101,8 +114,6 @@ class DsaStatePool {
   }
 
  private:
-  int64_t block_count_for_tokens(int64_t tokens) const;
-
   DsaConfig cfg_{};
   DsaGeometry geo_{};
   int max_requests_ = 0;

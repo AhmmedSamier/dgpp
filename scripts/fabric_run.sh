@@ -38,6 +38,12 @@
 #   --port N        rendezvous port (default: first free of 29970..29989)
 #   --timeout SECS  head watchdog; 0 disables (default 1800)
 #   --no-stage      skip the peer scp (peers already carry this binary)
+#   --stage-file F  ALSO scp F to the peers and rewrite the peers'
+#                  --requests argument to the staged copy (rank 0 keeps
+#                  the local path — the app's manifest-hash log line is
+#                  the cross-rank identity check). Stages even under
+#                  --no-stage: the manifest changes more often than the
+#                  binary and costs nothing to ship.
 #   --force         pkill -x glm_gen_check on all ranks before starting
 #   --log-dir DIR   logs land here (default $BUILD/fabric-runs/<UTC ts>)
 #
@@ -47,6 +53,9 @@
 #       --system "You are a concise assistant." --steps 64
 #   scripts/fabric_run.sh --no-stage -- \
 #       --model unsloth/GLM-5.3-Flash-FP8 --text "Hello" --steps 2
+#   scripts/fabric_run.sh --stage-file build-ci/sched_smoke.jsonl -- \
+#       --model unsloth/GLM-5.3-Flash-FP8 --requests build-ci/sched_smoke.jsonl \
+#       --max-concurrency 2 --kv-capacity 256
 #
 # Fabric layout via env (defaults are the lab fabric):
 #   DGPP_FABRIC_HEAD   head's fabric IP as peers --peer it (192.0.2.11)
@@ -65,6 +74,7 @@ PEER_DIR="${DGPP_PEER_DIR:-/tmp/bus4}"
 SSH_OPTS=(-n -o BatchMode=yes -o ConnectTimeout=8)
 MONITOR_TIMEOUT=1800
 STAGE=1
+STAGE_FILE=""
 FORCE=0
 LOG_DIR=""
 
@@ -78,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --timeout) MONITOR_TIMEOUT="$2"; shift 2 ;;
     --no-stage) STAGE=0; shift ;;
+    --stage-file) STAGE_FILE="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --log-dir) LOG_DIR="$2"; shift 2 ;;
     --) shift; break ;;
@@ -122,6 +133,15 @@ if [[ $STAGE -eq 1 ]]; then
       "$FABRIC_USER@$ip:$PEER_DIR/" >/dev/null || die "staging to $ip failed"
   done
 fi
+if [[ -n "$STAGE_FILE" ]]; then
+  [[ -f "$STAGE_FILE" ]] || die "--stage-file not found: $STAGE_FILE"
+  for ip in "${FABRIC_PEERS[@]}"; do
+    scp -o BatchMode=yes -o ConnectTimeout=8 "$STAGE_FILE" \
+      "$FABRIC_USER@$ip:$PEER_DIR/" >/dev/null \
+      || die "staging $STAGE_FILE to $ip failed"
+  done
+  echo "fabric_run: staged $STAGE_FILE (peers read it as $PEER_DIR/$(basename "$STAGE_FILE"))"
+fi
 
 # ------------------------------------------------------------ the port
 if [[ -z "${PORT:-}" ]]; then
@@ -153,7 +173,19 @@ grep -q "rendezvous listening" "$LOG_DIR/r0.log" \
 echo "fabric_run: rank 0 listening on :$PORT"
 
 # ------------------------------------------------------- peers 1..N-1
-REMOTE_ARGS="$(printf '%q ' "${APP_ARGS[@]}")"
+# The peers' args: verbatim, except a staged --requests path points at
+# the peer's copy (rank 0 reads the local file — identical bytes, and
+# the app logs the manifest hash on every rank as the identity check).
+REMOTE_ARGS=""
+prev=""
+for a in "${APP_ARGS[@]}"; do
+  if [[ -n "$STAGE_FILE" && "$prev" == "--requests" ]]; then
+    REMOTE_ARGS+="$(printf '%q ' "$PEER_DIR/$(basename "$STAGE_FILE")")"
+  else
+    REMOTE_ARGS+="$(printf '%q ' "$a")"
+  fi
+  prev="$a"
+done
 for i in "${!FABRIC_PEERS[@]}"; do
   rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
   # Fire-and-forget on purpose (see header): the remote side is fully
@@ -192,18 +224,22 @@ HEAD_RC=0; wait "$HEAD_PID" || HEAD_RC=$?
 
 # ------------------------------------------------------------ collect
 echo "fabric_run: rank 0 exited rc=$HEAD_RC — collecting verdicts"
-md5_of_generated() { grep -m1 "generated ids" "$1" | sed 's/^.*generated ids: //' | md5sum | awk '{print $1}'; }
+# md5 over EVERY "generated ids" line (scheduler mode logs one per
+# request, in deterministic order) — the payload after the colon, so the
+# embedded rank prefix cannot differ. Missing lines mean failure.
+md5_of_generated() { grep "generated ids" "$1" | sed 's/^.*generated ids: //' | md5sum | awk '{print $1}'; }
 head_md5="$(md5_of_generated "$LOG_DIR/r0.log" || true)"
 echo "  head : ${head_md5:-<no generated line>}"
 for i in "${!FABRIC_PEERS[@]}"; do
   rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
   peer_md5="$(peer_ssh "$ip" \
-    "grep -m1 'generated ids' $PEER_DIR/fabric_r$rank.log | sed 's/^.*generated ids: //' | md5sum | awk '{print \$1}'" 2>/dev/null || true)"
+    "grep 'generated ids' $PEER_DIR/fabric_r$rank.log | sed 's/^.*generated ids: //' | md5sum | awk '{print \$1}'" 2>/dev/null || true)"
   echo "  rank $rank: ${peer_md5:-<no generated line>}"
   [[ -n "$peer_md5" && "$peer_md5" == "$head_md5" ]] || HEAD_RC=1
 done
 echo "fabric_run: rank consistency $([[ -n "$head_md5" ]] && echo "$head_md5" || echo 'n/a') — $([[ $HEAD_RC -eq 0 ]] && echo 'ALL RANKS IDENTICAL' || echo 'MISMATCH or missing')"
 grep -m1 "eos stop" "$LOG_DIR/r0.log" || true
-grep -m1 -E "steps in" "$LOG_DIR/r0.log" || true
+grep "retired (" "$LOG_DIR/r0.log" || true
+grep -m1 -E "steps in|step cap in" "$LOG_DIR/r0.log" || true
 echo "fabric_run: full logs in $LOG_DIR (r0.log local, fabric_rN.log on peers)"
 exit "$HEAD_RC"

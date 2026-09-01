@@ -41,7 +41,8 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
                                         GlmBoundaryReducer* boundary,
                                         int tp_rank, int tp_world,
                                         GlmResidency residency,
-                                        GlmHeadSharding head)
+                                        GlmHeadSharding head,
+                                        int max_requests)
     : cfg_(cfg),
       kda_cfg_(with_tp(cfg.kda_config(), tp_world)),
       dsa_cfg_(with_tp(cfg.dsa_config(), tp_world)),
@@ -54,6 +55,10 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     throw std::invalid_argument("GlmDiagnosticModel: max_tokens must be positive");
   if (max_cache_tokens < max_tokens_)
     max_cache_tokens = max_tokens_;
+  if (max_requests <= 0)
+    throw std::invalid_argument(
+        "GlmDiagnosticModel: max_requests must be positive");
+  max_requests_ = max_requests;
   if ((tp_world > 1) != (boundary != nullptr))
     throw std::invalid_argument(
         "GlmDiagnosticModel: a boundary reducer is required exactly when "
@@ -102,9 +107,10 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   Arena::Config ac;
   ac.persistent_hot = KdaLayer::persistent_hot_bytes(kda_cfg_, max_tokens_);
   if (dsa_cfg_.num_dsa_layers > 0) {
-    ac.persistent_hot += DsaStatePool::cache_bytes(dsa_cfg_, 1, dsa_slots);
+    ac.persistent_hot += DsaStatePool::cache_bytes(dsa_cfg_, max_requests_,
+                                                   dsa_slots);
     arena_.init(ac);
-    pool_.init(arena_, dsa_cfg_, 1, dsa_slots);
+    pool_.init(arena_, dsa_cfg_, max_requests_, dsa_slots);
     dsa_scratch_ = static_cast<uint8_t*>(
         alloc_managed(DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
                                               dsa_slots)));
@@ -121,15 +127,17 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     arena_.init(ac);
   }
 
-  // Per-layer KDA state, contiguous so one forward zeros it all.
+  // Per-request, per-layer KDA state (slot-major: one memset pair per
+  // request open — see the header's layout note).
   if (kda_cfg_.num_kda_layers > 0) {
     kda_rec_ = static_cast<float*>(alloc_managed(
-        static_cast<size_t>(kda_cfg_.num_kda_layers) *
+        static_cast<size_t>(kda_cfg_.num_kda_layers) * max_requests_ *
         kda_geo_.recurrent_bytes));
     kda_conv_ = static_cast<uint16_t*>(alloc_managed(
-        static_cast<size_t>(kda_cfg_.num_kda_layers) *
+        static_cast<size_t>(kda_cfg_.num_kda_layers) * max_requests_ *
         kda_geo_.conv_committed_bytes));
   }
+  session_pos_.assign(static_cast<size_t>(max_requests_), 0);
 
   // Activations.
   const size_t T = static_cast<size_t>(max_tokens_);
@@ -178,6 +186,21 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(dense_act_);
   cudaFree(logits_);
   if (stream_) cudaStreamDestroy(stream_);
+}
+
+// ---- DSA admission meters (the scheduler's budget seam, Stage 2b) ------
+// A no-DSA model reports an unbounded pool: admission then keys on the
+// engine slot count alone. INT64_MAX (not "huge") so the scheduler's
+// subtraction arithmetic cannot overflow a real capacity.
+int64_t GlmDiagnosticModel::dsa_blocks_total() const {
+  return dsa_cfg_.num_dsa_layers > 0 ? pool_.total_blocks() : INT64_MAX;
+}
+int64_t GlmDiagnosticModel::dsa_blocks_in_use() const {
+  return dsa_cfg_.num_dsa_layers > 0 ? pool_.blocks_in_use() : int64_t(0);
+}
+int64_t GlmDiagnosticModel::dsa_blocks_for_tokens(int64_t tokens) const {
+  return dsa_cfg_.num_dsa_layers > 0 ? pool_.block_count_for_tokens(tokens)
+                                    : int64_t(0);
 }
 
 GlmMoeWeights GlmDiagnosticModel::moe_weights(const GlmMoeResident& r) {
@@ -296,11 +319,13 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
   // That failure mode is exactly the kind a gate would absorb as noise;
   // it throws loudly instead (a parity harness uses separate model
   // instances for engine and reference).
-  if (session_pos_ > 0)
-    throw std::runtime_error(
-        "forward: a decode session is open on this model instance — a "
-        "re-forward would clobber its state (use a second model for the "
-        "reference)");
+  for (int64_t pos : session_pos_) {
+    if (pos > 0)
+      throw std::runtime_error(
+          "forward: a decode session is open on this model instance — a "
+          "re-forward would clobber its state (use a second model for the "
+          "reference)");
+  }
   const int T = static_cast<int>(token_ids.size());
   if (T <= 0) throw std::invalid_argument("forward: empty token batch");
   if (T > max_tokens_)

@@ -22,10 +22,13 @@ constexpr int kPrefillChunkTokens = 2048;
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// session_prefill: opens a fresh request and processes the prompt.
+// session_prefill: opens request slot `req` and processes the prompt.
 // ---------------------------------------------------------------------------
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
-    const std::vector<int64_t>& prompt_ids) {
+    int req, const std::vector<int64_t>& prompt_ids) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_prefill: request slot " +
+                           std::to_string(req));
   const int64_t P = static_cast<int64_t>(prompt_ids.size());
   if (P <= 0) throw std::invalid_argument("session_prefill: empty prompt");
   if (P > max_tokens_)
@@ -38,22 +41,29 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
     throw std::runtime_error(
         "session_prefill: the chunk size broke the kpool-alignment contract");
 
-  // Fresh request state — the SAME starting state run_stack builds, so a
-  // single-chunk prefill runs the exact reference op sequence (the
-  // bitwise tier of the parity gate).
+  // Open THIS slot only — other slots' sessions are untouched (the Stage
+  // 2b concurrency contract). Slot 0's zeroed state is the SAME starting
+  // state run_stack builds, so a single-chunk prefill there still runs
+  // the exact reference op sequence (the bitwise tier of the parity gate).
   if (kda_rec_) {
+    float* slot_rec =
+        kda_rec_ + static_cast<size_t>(req) * kda_cfg_.num_kda_layers *
+                       kda_geo_.recurrent_elems;
+    uint16_t* slot_conv =
+        kda_conv_ + static_cast<size_t>(req) * kda_cfg_.num_kda_layers *
+                        (kda_geo_.conv_committed_bytes / 2);
     DGPP_CUDA_OK(cudaMemsetAsync(
-        kda_rec_, 0,
+        slot_rec, 0,
         static_cast<size_t>(kda_cfg_.num_kda_layers) * kda_geo_.recurrent_bytes,
         stream_));
     DGPP_CUDA_OK(cudaMemsetAsync(
-        kda_conv_, 0,
+        slot_conv, 0,
         static_cast<size_t>(kda_cfg_.num_kda_layers) *
             kda_geo_.conv_committed_bytes,
         stream_));
   }
-  if (dsa_cfg_.num_dsa_layers > 0) pool_.reset_all(stream_);
-  session_pos_ = 0;
+  if (dsa_cfg_.num_dsa_layers > 0) pool_.reset_request(req, stream_);
+  session_pos_[static_cast<size_t>(req)] = 0;
 
   Outputs out;  // last row's logits/final_hidden; routes cover ALL rows
   // Chunking: boundaries stay pool-aligned (starts ≡ 0 mod kpool) and a
@@ -72,6 +82,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
       n += kpool;
     }
     Outputs chunk = session_run_rows(
+        req,
         std::vector<int64_t>(prompt_ids.begin() + c0,
                              prompt_ids.begin() + c0 + n),
         c0, /*decode_row=*/false);
@@ -82,32 +93,38 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
     session_merge_routes(&out, std::move(chunk));
     c0 += n;
   }
-  session_pos_ = P;
+  session_pos_[static_cast<size_t>(req)] = P;
   return out;
 }
 
 // ---------------------------------------------------------------------------
-// session_step: one token at the next position.
+// session_step: one token at slot `req`'s next position.
 // ---------------------------------------------------------------------------
-GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_step(int64_t token_id) {
-  if (session_pos_ <= 0)
-    throw std::invalid_argument("session_step: no open session");
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_step(int req,
+                                                             int64_t token_id) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_step: request slot " + std::to_string(req));
+  const int64_t pos = session_pos_[static_cast<size_t>(req)];
+  if (pos <= 0)
+    throw std::invalid_argument("session_step: no open session on slot " +
+                                std::to_string(req));
   if (token_id < 0 || token_id >= cfg_.vocab_size)
     throw std::invalid_argument("session_step: token id out of range");
-  if (session_pos_ + 1 > max_tokens_)
+  if (pos + 1 > max_tokens_)
     throw std::invalid_argument("session_step: position exceeds max_tokens");
 
   // DSA admission: the block table must cover this position BEFORE
   // enqueue_decode (its pos is device state; growth is host control).
   if (dsa_cfg_.num_dsa_layers > 0 &&
-      !pool_.ensure_request_blocks(0, session_pos_ + 1, stream_))
+      !pool_.ensure_request_blocks(req, pos + 1, stream_))
     throw std::runtime_error("session_step: DSA pool exhausted (admission "
                              "budget) — grow the pool or shed requests");
 
   // Decode-batch metadata (device; re-uploaded per step — mid-session
   // uploads are async, never device syncs, per the decode-path discipline).
-  h_req_ids_[0] = 0;
-  h_step_pos_[0] = session_pos_;
+  // One row per call (time-multiplexed requests): row 0 serves `req`.
+  h_req_ids_[0] = req;
+  h_step_pos_[0] = pos;
   h_req_spans_[0] = 0;
   h_req_spans_[1] = 1;
   DGPP_CUDA_OK(cudaMemcpyAsync(d_req_ids_, h_req_ids_, sizeof(int32_t),
@@ -117,11 +134,31 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_step(int64_t token_id) {
   DGPP_CUDA_OK(cudaMemcpyAsync(d_req_spans_, h_req_spans_, 2 * sizeof(int32_t),
                                cudaMemcpyHostToDevice, stream_));
 
-  Outputs out =
-      session_run_rows(std::vector<int64_t>{token_id}, session_pos_,
-                       /*decode_row=*/true);
-  session_pos_ += 1;
+  Outputs out = session_run_rows(req, std::vector<int64_t>{token_id}, pos,
+                                 /*decode_row=*/true);
+  session_pos_[static_cast<size_t>(req)] = pos + 1;
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// session_close: retires the slot — blocks return to the free pool (the
+// scheduler's admission meters see the capacity again) and the slot may be
+// reopened by a later prefill. No collective; safe between any two ops.
+// ---------------------------------------------------------------------------
+void GlmDiagnosticModel::session_close(int req) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_close: request slot " +
+                            std::to_string(req));
+  if (dsa_cfg_.num_dsa_layers > 0)
+    pool_.release_request_blocks(req, stream_);
+  session_pos_[static_cast<size_t>(req)] = 0;
+}
+
+int64_t GlmDiagnosticModel::session_position(int req) const {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_position: request slot " +
+                            std::to_string(req));
+  return session_pos_[static_cast<size_t>(req)];
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +170,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_step(int64_t token_id) {
 // consumes, and the parity gate compares rows, not matrices).
 // ---------------------------------------------------------------------------
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
-    const std::vector<int64_t>& ids, int64_t token_start, bool decode_row) {
+    int req, const std::vector<int64_t>& ids, int64_t token_start,
+    bool decode_row) {
   const int T = static_cast<int>(ids.size());
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
@@ -180,11 +218,16 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       }
       if (!kda_->prepare(T))
         throw std::runtime_error("session: KDA GEMM plans unavailable");
-      float* rec = kda_rec_ +
-                   static_cast<size_t>(kda_ordinal) * kda_geo_.recurrent_elems;
+      // Slot-major state: request `req`'s layer-`kda_ordinal` slice.
+      float* rec =
+          kda_rec_ +
+          (static_cast<size_t>(req) * kda_cfg_.num_kda_layers +
+           static_cast<size_t>(kda_ordinal)) *
+              kda_geo_.recurrent_elems;
       uint16_t* conv =
           kda_conv_ +
-          static_cast<size_t>(kda_ordinal) *
+          (static_cast<size_t>(req) * kda_cfg_.num_kda_layers +
+           static_cast<size_t>(kda_ordinal)) *
               (kda_geo_.conv_committed_bytes / 2);
       // In-place state update: prefill chunks and steps share ONE
       // recurrence implementation, so the state this enqueue leaves is
@@ -206,11 +249,13 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       if (!dsa_->prepare(T))
         throw std::runtime_error("session: DSA GEMM plans unavailable");
       if (decode_row) {
+        // Row 0 of the decode table serves `req` (uploaded in
+        // session_step); num_requests=1 — time-multiplexed steps.
         dsa_->enqueue_decode(normed_, pool_, dsa_ordinal, d_req_ids_,
                              d_step_pos_, d_req_spans_, /*num_requests=*/1, T,
                              attn_out, stream_);
       } else {
-        dsa_->enqueue_prefill(normed_, pool_, dsa_ordinal, /*req=*/0,
+        dsa_->enqueue_prefill(normed_, pool_, dsa_ordinal, /*req=*/req,
                               token_start, T, attn_out, stream_);
       }
       ++dsa_ordinal;

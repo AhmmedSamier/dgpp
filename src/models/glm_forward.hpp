@@ -92,13 +92,22 @@ class GlmDiagnosticModel {
   // lm_vocab_count] slice (lm_vocab_begin/count report the bounds — the
   // sampling merge consumes exactly those). Default Full: byte-stable
   // with every M4/M5 parity gate.
+  //
+  // SESSIONS (M6 Stage 2b): `max_requests` sizes the concurrent-session
+  // machinery — the DSA pool's per-request block tables/tail rings and the
+  // per-request KDA state slots. Default 1 is byte-stable with every
+  // Stage 2 parity gate. The shared DSA cache capacity (`max_cache_tokens`)
+  // is the ADMISSION BUDGET across all concurrent requests, not a
+  // per-request bound: the scheduler admits a request only when its full
+  // reservation (prompt + max_steps, block-rounded) fits the free pool.
   GlmDiagnosticModel(const GlmTextConfig& cfg,
                      const std::string& checkpoint_dir, int max_tokens,
                      int64_t max_cache_tokens,
                      GlmBoundaryReducer* boundary = nullptr, int tp_rank = 0,
                      int tp_world = 1,
                      GlmResidency residency = GlmResidency::Streaming,
-                     GlmHeadSharding head = GlmHeadSharding::Full);
+                     GlmHeadSharding head = GlmHeadSharding::Full,
+                     int max_requests = 1);
   ~GlmDiagnosticModel();
   GlmDiagnosticModel(const GlmDiagnosticModel&) = delete;
   GlmDiagnosticModel& operator=(const GlmDiagnosticModel&) = delete;
@@ -108,33 +117,66 @@ class GlmDiagnosticModel {
   // host copies of the final hidden state, logits, and routing decisions.
   Outputs forward(const std::vector<int64_t>& token_ids);
 
-  // ---- stateful decode session (M6 Stage 2, DESIGN §7/§9) --------------
-  // One request's incremental decode. session_prefill OPENS a fresh
-  // request (zeroed KDA recurrent/conv state, cold DSA caches — the same
-  // starting state run_stack builds) and processes the prompt in
-  // pool-aligned chunks (2048), keeping state across chunks.
-  // session_step then processes exactly ONE token at the next position,
-  // updating the persistent state in place, and returns that token's
-  // outputs. No cross-token scratch is re-derived: the layer pipeline is
-  // elementwise in time (all temporal recurrence lives in the KDA/DSA
-  // state), so a step equals the corresponding row of a full re-forward
-  // up to (a) GEMM-batch ulps across different M, and (b) the
-  // prefill-vs-decode kernel paths — the decode-session parity gate
-  // CERTIFIES near ties, never assumes them away. A single-chunk prefill
-  // (prompt <= 2048) runs the exact run_stack op sequence and must match
-  // the re-forward bitwise — the gate pins that tier too.
+  // ---- stateful decode sessions (M6 Stage 2/2b, DESIGN §7/§9) ----------
+  // One request's incremental decode. session_prefill OPENS request slot
+  // `req` (zeroed KDA recurrent/conv state for that slot, released DSA
+  // blocks, cold tail rings — the same starting state run_stack builds)
+  // and processes the prompt in pool-aligned chunks (2048), keeping state
+  // across chunks. session_step then processes exactly ONE token at the
+  // slot's next position, updating the persistent state in place, and
+  // returns that token's outputs. No cross-token scratch is re-derived:
+  // the layer pipeline is elementwise in time (all temporal recurrence
+  // lives in the KDA/DSA state), so a step equals the corresponding row
+  // of a full re-forward up to (a) GEMM-batch ulps across different M,
+  // and (b) the prefill-vs-decode kernel paths — the decode-session
+  // parity gate CERTIFIES near ties, never assumes them away. A
+  // single-chunk prefill (prompt <= 2048) runs the exact run_stack op
+  // sequence and must match the re-forward bitwise — the gate pins that
+  // tier too.
   //
-  // Single request (id 0) in v1: the DSA pool is sized for one request and
-  // sessions are strictly prefill-then-steps. The scheduler (Stage 2b)
-  // generalizes to concurrent requests over the same machinery.
+  // CONCURRENT REQUESTS (Stage 2b): slots are independent — prefilling or
+  // stepping one never touches another's state, so a request's transcript
+  // is invariant to whatever else the scheduler interleaves (the property
+  // the 2b gates pin and the fabric smoke proves). Steps are
+  // TIME-MULTIPLEXED (one request per call): batching multiple requests'
+  // rows into one step needs per-row state indexing in the KDA recurrence
+  // (the DESIGN §9 MTP state-index surgery) and stays a later
+  // optimization — the scheduler's policy is unchanged by it.
   //
-  // HAZARD: forward()/forward_isolated() and the session share the
-  // KDA/DSA state pools. A plain forward on the SAME model instance mid-
-  // session throws (it would clobber the session's state) — a parity
-  // harness runs engine and reference on SEPARATE instances.
-  Outputs session_prefill(const std::vector<int64_t>& prompt_ids);
-  Outputs session_step(int64_t token_id);  // one token, state updated
-  int64_t session_position() const { return session_pos_; }
+  // Slot assignment and op ORDER are the caller's contract (the
+  // scheduler): every rank must issue the same ops on the same slots in
+  // the same order — session ops embed boundary folds and the consumer
+  // picks over the sharded head, so identical rank order (DESIGN §11) is
+  // what keeps the collectives aligned.
+  //
+  // HAZARD: forward()/forward_isolated() and the sessions share the
+  // KDA/DSA state pools. A plain forward on the SAME model instance while
+  // any session is open throws (it would clobber session state) — a
+  // parity harness runs engine and reference on SEPARATE instances.
+  Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids);
+  Outputs session_step(int req, int64_t token_id);
+  // Retires slot `req`: its DSA blocks return to the free pool (admission
+  // meters see the capacity again) and the slot may be reopened by a
+  // later prefill. No collective — safe between any two session ops.
+  void session_close(int req);
+  int64_t session_position(int req) const;
+
+  // v1 single-request shims (slot 0) — the Stage 2 parity gates' shape.
+  Outputs session_prefill(const std::vector<int64_t>& prompt_ids) {
+    return session_prefill(0, prompt_ids);
+  }
+  Outputs session_step(int64_t token_id) { return session_step(0, token_id); }
+  int64_t session_position() const { return session_position(0); }
+
+  // ---- DSA admission meters (the scheduler's budget seam, Stage 2b) ----
+  // A model with no DSA layers has no pool; its meters report an
+  // unbounded budget so admission keys on the slot count alone.
+  int max_session_requests() const { return max_requests_; }
+  int64_t dsa_blocks_total() const;
+  int64_t dsa_blocks_in_use() const;
+  // Block count covering `tokens` tokens — the reserve arithmetic for
+  // prompt + max_steps admissions.
+  int64_t dsa_blocks_for_tokens(int64_t tokens) const;
 
   // Isolated parity runner (the curated suite's real-checkpoint mode):
   // every layer starts from the REFERENCE trajectory — layer_inputs[L]
@@ -196,15 +238,16 @@ class GlmDiagnosticModel {
                           const GlmQuantMatrix* dense, int tokens,
                           cudaStream_t stream);
   static GlmMoeWeights moe_weights(const GlmMoeResident& r);
-  // The session's row runner: processes `tokens` contiguous rows of the
-  // OPEN request starting at absolute position `token_start`, updating
-  // the persistent KDA/DSA state in place (NO reset — prefill resets once
-  // at open). `decode_row` selects the DSA path: false = enqueue_prefill
-  // (pool-aligned chunks, tables grown internally), true = enqueue_decode
-  // (arbitrary positions via the caller-grown table + device metadata).
-  // Returns the LAST row's logits/final_hidden; routes/route_biased cover
-  // every processed row (audit inputs are per-token).
-  Outputs session_run_rows(const std::vector<int64_t>& ids,
+  // The session's row runner: processes `tokens` contiguous rows of OPEN
+  // request slot `req` starting at absolute position `token_start`,
+  // updating that slot's persistent KDA/DSA state in place (NO reset —
+  // prefill resets once at open). `decode_row` selects the DSA path:
+  // false = enqueue_prefill (pool-aligned chunks, tables grown
+  // internally), true = enqueue_decode (arbitrary positions via the
+  // caller-grown table + device metadata). Returns the LAST row's
+  // logits/final_hidden; routes/route_biased cover every processed row
+  // (audit inputs are per-token).
+  Outputs session_run_rows(int req, const std::vector<int64_t>& ids,
                            int64_t token_start, bool decode_row);
   // Extends the route/route_biased outputs with one runner pass's entries,
   // merging same-layer chunks along the token axis (prefill chunks emit
@@ -253,18 +296,25 @@ class GlmDiagnosticModel {
   size_t gemm_ws_bytes_ = 0;
   uint8_t* dsa_scratch_ = nullptr;
 
-  // Per-layer KDA state (contiguous across layers, zeroed per forward).
-  float* kda_rec_ = nullptr;      // [num_kda_layers, local_heads, V, K]
-  uint16_t* kda_conv_ = nullptr;  // [num_kda_layers, conv_channels, conv_hist]
+  // Per-request, per-layer KDA state, slot-major:
+  //   kda_rec_  [max_requests, num_kda_layers, local_heads, V, K]  fp32
+  //   kda_conv_ [max_requests, num_kda_layers, conv_channels, conv_hist] bf16
+  // Slot-major so opening a request is ONE memset pair (all its layers
+  // contiguous); forward() (the fresh-state re-forward) uses slot 0.
+  float* kda_rec_ = nullptr;
+  uint16_t* kda_conv_ = nullptr;
 
   // Per-forward activations (managed; sized to max_tokens).
   int64_t* d_tokens_ = nullptr;
-  // Decode-session state: the request's position (tokens processed) and
-  // the DSA decode-path metadata (enqueue_decode's caller-owned device
-  // buffers — allocation happens at construction, never mid-session; the
-  // synchronizing-call discipline applies between collectives). Sized
-  // for the v1 single-request batch; the scheduler generalizes.
-  int64_t session_pos_ = 0;      // 0 = no open session
+  // Decode-session state: per-slot positions (tokens processed; 0 = slot
+  // closed) and the DSA decode-path metadata (enqueue_decode's
+  // caller-owned device buffers — allocation happens at construction,
+  // never mid-session; the synchronizing-call discipline applies between
+  // collectives). One ROW per step call (time-multiplexed requests);
+  // kDecodeRows=8 is DsaLayer's select-kernel bound and the batched-decode
+  // ceiling the Stage 2b scheduler inherits.
+  int max_requests_ = 1;
+  std::vector<int64_t> session_pos_;  // [max_requests]; 0 = closed slot
   int32_t* d_req_ids_ = nullptr;      // device [kDecodeRows]
   int64_t* d_step_pos_ = nullptr;     // device [kDecodeRows]
   int32_t* d_req_spans_ = nullptr;    // device [kDecodeRows, 2]
