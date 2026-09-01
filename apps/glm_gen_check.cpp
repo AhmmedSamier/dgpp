@@ -48,6 +48,7 @@
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "loaders/hf_cache.hpp"
+#include "models/glm_chat_template.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_tokenizer.hpp"
@@ -399,6 +400,8 @@ int main(int argc, char** argv) {
   int world = 1, rank = 0, steps = 8, rendezvous_timeout_ms = 120000;
   uint16_t port = 29970;
   bool resident = true, incremental = true, no_eos = false;
+  bool chat = false;
+  std::string system_prompt;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -413,6 +416,8 @@ int main(int argc, char** argv) {
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--prompt") prompt_text = next();
     else if (a == "--text") text_prompt = next();
+    else if (a == "--chat") chat = true;
+    else if (a == "--system") system_prompt = next();
     else if (a == "--steps") steps = std::stoi(next());
     else if (a == "--streaming") resident = false;
     else if (a == "--engine") {
@@ -482,17 +487,44 @@ int main(int argc, char** argv) {
           cfg.vocab_size);
       return 1;
     }
-    // --text goes through the exact tokenizer (Stage 3): the ids match
-    // HF tokenizers 0.23.1 byte-for-byte (glm_tokenizer_test pins it).
-    // --prompt stays for raw ids (parity with the earlier records).
-    if (!text_prompt.empty() && !prompt_text.empty()) {
-      DGPP_LOG_ERROR("--text and --prompt are mutually exclusive");
+    // --text goes through the exact tokenizer (Stage 3); --prompt stays for
+    // raw ids; --chat renders the chat template (Stage 3b) with the user
+    // text as the message body. They are mutually exclusive.
+    const int prompt_kinds = static_cast<int>(!text_prompt.empty()) +
+                            static_cast<int>(!prompt_text.empty()) +
+                            static_cast<int>(chat);
+    if (prompt_kinds > 1) {
+      DGPP_LOG_ERROR("--text, --prompt and --chat are mutually exclusive");
       return 1;
     }
     std::vector<int64_t> prompt;
     const dgpp::GlmTokenizer tok = dgpp::GlmTokenizer::load(
         (fs::path(ckpt) / "tokenizer.json").string());
-    if (!text_prompt.empty()) {
+    if (chat) {
+      const dgpp::glm::ChatTemplate chat_tpl = dgpp::glm::ChatTemplate::load(
+          (fs::path(ckpt) / "chat_template.jinja").string());
+      std::vector<dgpp::glm::Value> messages;
+      if (!system_prompt.empty()) {
+        dgpp::glm::Value::Members sys_msg;
+        sys_msg.emplace_back("role", dgpp::glm::Value::string_value("system"));
+        sys_msg.emplace_back("content", dgpp::glm::Value::string_value(system_prompt));
+        messages.push_back(dgpp::glm::Value::map_value(std::move(sys_msg)));
+      }
+      dgpp::glm::Value::Members user_msg;
+      user_msg.emplace_back("role", dgpp::glm::Value::string_value("user"));
+      user_msg.emplace_back("content", dgpp::glm::Value::string_value(text_prompt));
+      messages.push_back(dgpp::glm::Value::map_value(std::move(user_msg)));
+      dgpp::glm::Value::Members globals;
+      globals.emplace_back("messages",
+                           dgpp::glm::Value::list_value(std::move(messages)));
+      globals.emplace_back("add_generation_prompt", dgpp::glm::Value::boolean(true));
+      const std::string rendered = chat_tpl.render(
+          dgpp::glm::Value::map_value(std::move(globals)));
+      prompt = tok.encode(rendered);
+      DGPP_LOG_INFO("chat template {} rendered to {} bytes, {} ids",
+                    chat_tpl.source_hash(), rendered.size(), prompt.size());
+      require(!prompt.empty(), "--chat produced no tokens");
+    } else if (!text_prompt.empty()) {
       prompt = tok.encode(text_prompt);
       DGPP_LOG_INFO("prompt encoded to {} ids by the exact tokenizer",
                     prompt.size());
