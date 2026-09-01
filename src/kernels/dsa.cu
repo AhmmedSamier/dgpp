@@ -745,6 +745,21 @@ __global__ void select_decode_kernel(
 
   for (int r = 0; r < rows; ++r) {
     const int64_t visible = (pos[r] + 1) / kpool;
+    // Short contexts (visible <= select_k pools) select EVERY pool: the
+    // top-k of at most k candidates is all of them, and the expansion
+    // sorts ids ascending anyway — the streaming selection and the merge
+    // are no-ops here, and at 2K-token contexts they were the whole 263us
+    // of this kernel (the T=1 profile). The merge below rebuilds the same
+    // best[] directly; the result is the general path's, bit for bit.
+    // (Sentinels keep the published partials initialized — initcheck
+    // discipline; the merge never reads them for these rows.)
+    if (visible <= select_k) {
+      for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+        best_hi[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+        best_lo[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+      }
+      continue;
+    }
     const int64_t stripe =
         (visible + gridDim.x - 1) / gridDim.x;  // >= 0; 0 when visible == 0
     const int64_t lo = min(visible, int64_t(blockIdx.x) * stripe);
@@ -778,17 +793,36 @@ __global__ void select_decode_kernel(
   if (!is_last) return;
 
   for (int r = 0; r < rows; ++r) {
-    for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
-      best_hi[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
-      best_lo[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+    const int64_t visible = (pos[r] + 1) / kpool;
+    if (visible <= select_k) {
+      // Every visible pool is selected (see above): keys carry only the
+      // pool id in their low kIdxBits — the expansion reads nothing else.
+      for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+        const bool real = i < visible;
+        best_hi[int64_t(r) * select_k + i] = real ? 0u : 0xFFFFFFFFu;
+        best_lo[int64_t(r) * select_k + i] =
+            real ? uint32_t(i) : 0xFFFFFFFFu;
+      }
+      __syncthreads();
+    } else {
+      for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+        best_hi[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+        best_lo[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+      }
+      __syncthreads();
+      // Only blocks whose stripe was non-empty published real keys; the
+      // rest hold sentinels the merge can skip (block b's stripe starts at
+      // b*stripe, so the non-empty ones are the first ceil(visible/stripe)).
+      const int64_t stripe = (visible + gridDim.x - 1) / gridDim.x;
+      const int64_t live_blocks =
+          min(int64_t(gridDim.x), (visible + stripe - 1) / stripe);
+      MergeKeyFn fn{partial_ws, rows, select_k, r};
+      select_topk_stream(fn, 0, live_blocks * select_k,
+                         best_hi + int64_t(r) * select_k,
+                         best_lo + int64_t(r) * select_k, tile_hi, tile_lo,
+                         select_k);
+      __syncthreads();
     }
-    __syncthreads();
-    MergeKeyFn fn{partial_ws, rows, select_k, r};
-    select_topk_stream(fn, 0, int64_t(gridDim.x) * select_k,
-                       best_hi + int64_t(r) * select_k,
-                       best_lo + int64_t(r) * select_k, tile_hi, tile_lo,
-                       select_k);
-    __syncthreads();
     int* smem_count = reinterpret_cast<int*>(scratch + select_k);
     const int cnt = expand_from_best(
         best_hi + int64_t(r) * select_k, best_lo + int64_t(r) * select_k,
