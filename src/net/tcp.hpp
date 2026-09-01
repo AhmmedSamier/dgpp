@@ -34,6 +34,13 @@ class TcpConn {
   bool write_all(const void* data, size_t len);
   bool read_exact(void* dst, size_t len);
 
+  // One recv, no fill: n>0 bytes read, 0 = orderly peer close, -1 =
+  // error or SO_RCVTIMEO expiry. Callers that wait_readable() first see
+  // -1 only on genuine errors. The journal's line reader uses this so
+  // a record costs one syscall, not one per byte; read_exact stays the
+  // default for framed protocols.
+  int read_some(void* dst, size_t cap);
+
   // poll(POLLIN) with deadline; true also when the peer closed (a subsequent
   // read_exact then returns false), so callers never block past the deadline.
   bool wait_readable(int timeout_ms);

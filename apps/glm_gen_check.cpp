@@ -72,6 +72,7 @@
 #include "loaders/hf_cache.hpp"
 #include "loaders/minijson.hpp"
 #include "models/glm_chat_template.hpp"
+#include "models/glm_fabric_engine.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_gen_engine.hpp"
 #include "models/glm_sampler.hpp"
@@ -98,29 +99,10 @@ void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
 }
 
-// Real-mesh budgets, not loopback budgets (found by the first fabric gate
-// run, 2026-08-30: a cold peer's first boundary waits behind seconds of
-// cold NVMe weight streaming). The lane watchdog arms from each POST,
-// so these bounds measure genuine in-flight stalls only.
-BusOptions bus_options(int rank, int world, uint16_t port,
-                       const std::string& peer, int rendezvous_timeout_ms) {
-  BusOptions o;
-  o.world_size = world;
-  o.my_rank = rank;
-  o.lane_devices = {"rocep1s0f0", "roceP2p1s0f0"};
-  o.rendezvous_port = port;
-  o.rendezvous_host = rank == 0 ? "" : peer;
-  o.rendezvous_timeout_ms = rendezvous_timeout_ms;
-  o.lat_slots = 8;
-  o.lat_slot_bytes = 8192;
-  o.bulk_slots = 8;
-  o.bulk_slot_bytes = 262144;
-  o.qp_depth = 1024;
-  o.completion_timeout_ms = 120000;
-  o.consumer_deadline_s = 60.0;
-  o.launch_consumers = false;
-  return o;
-}
+// Real-mesh bus budgets + the fabric pick now live in the shared seam
+// (models/glm_fabric_engine.hpp) — glm_serve and this app ride the
+// same closure, so the pick path cannot drift between the smoke
+// instrument and the serving deployment.
 
 std::vector<int64_t> parse_prompt_ids(const std::string& text,
                                       int64_t vocab_size) {
@@ -512,8 +494,8 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
                               cudaHostAllocDefault));
   std::unique_ptr<CollectiveBus> bus;
   try {
-    bus = std::make_unique<CollectiveBus>(
-        bus_options(rank, world, port, peer, rendezvous_timeout_ms));
+    bus = std::make_unique<CollectiveBus>(dgpp::fabric_bus_options(
+        rank, world, port, peer, rendezvous_timeout_ms));
     std::string err;
     if (!bus->start(&err))
       throw std::runtime_error("rank " + std::to_string(rank) +
@@ -527,26 +509,16 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
     DGPP_LOG_INFO(
         "rank {} model constructed in {:.1f}s ({}, {} request slots)", rank,
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      t_construct)
+                                       t_construct)
                 .count(),
         resident ? "resident" : "streaming", max_requests);
 
-    std::vector<float> fslice;  // hoisted: no per-pick allocation
-    const auto pick = [&](const GlmDiagnosticModel::Outputs& out) -> int32_t {
-      const uint16_t* row = out.logits_bits.data();
-      fslice.resize(static_cast<size_t>(out.lm_vocab_count));
-      for (int i = 0; i < out.lm_vocab_count; ++i)
-        fslice[static_cast<size_t>(i)] =
-            dgpp::bf16_bits_to_float(row[static_cast<size_t>(i)]);
-      const dgpp::glm_sample::Candidate local = dgpp::glm_sample::local_max(
-          fslice.data(), out.lm_vocab_count, out.lm_vocab_begin);
-      const int32_t t = dgpp::bus_greedy_pick(*bus, rank, world, local,
-                                              pick_scratch, 60000);
-      require(t >= 0 && t < vocab, "picked id out of range: " +
-                                       std::to_string(t));
-      return t;
-    };
-    GenEngineAdapter engine(&model, max_requests, pick);
+    // The shared fabric pick (glm_fabric_engine.hpp) — the same
+    // closure glm_serve runs in production; this app's runs are its
+    // regression gate.
+    GenEngineAdapter engine(&model, max_requests,
+                            dgpp::make_fabric_pick(bus.get(), rank, world,
+                                                   pick_scratch, vocab));
     dgpp::glm::Scheduler sched(&engine, eos);
     // Submit COPIES (the manifest entries stay intact for the audit
     // trail below — log_results reads them after the run).
@@ -691,8 +663,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                              cudaHostAllocDefault));
   std::unique_ptr<CollectiveBus> bus;
   try {
-    bus = std::make_unique<CollectiveBus>(
-        bus_options(rank, world, port, peer, rendezvous_timeout_ms));
+    bus = std::make_unique<CollectiveBus>(dgpp::fabric_bus_options(
+        rank, world, port, peer, rendezvous_timeout_ms));
     std::string err;
     if (!bus->start(&err))
       throw std::runtime_error("rank " + std::to_string(rank) +

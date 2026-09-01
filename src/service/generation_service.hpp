@@ -35,6 +35,7 @@
 //     sockets are only ever written by the HTTP thread (idle()).
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -85,11 +86,36 @@ class GenerationService : public HttpHandler,
   void on_disconnect(uint64_t tag) override;
 
   // ---- engine-loop side (the app's engine thread) ---------------------
+  // One engine pass's scheduler-state changes — exactly what the fabric
+  // journal broadcasts (service/fabric_serve.hpp). submits are the
+  // requests try_submit ACCEPTED; cancels are the ids whose cancel()
+  // hit. Sheds (503 at the door or at admission) die on rank 0 and
+  // never ride the journal — peers only ever see state changes their
+  // identical queues will replay.
+  struct PassEvents {
+    std::vector<dgpp::glm::SchedulerRequest> submits;
+    std::vector<std::string> cancels;
+  };
+  // Invoked (engine thread) with the pass's events AFTER the drain and
+  // immediately BEFORE the tick — the one fixed position where the
+  // fabric broadcasts the record. The tick and its record are atomic:
+  // rank 0 never ticks without broadcasting, a peer never ticks
+  // without a record, so tick counts are identical by construction.
+  using PreTickHook = std::function<void(const PassEvents&)>;
+
   // Applies every queued admission/cancel, then runs ONE scheduler
   // quantum. Returns whether work remains pending (the app may idle-
   // sleep when false; the pending-admission queue is drained first, so
   // arrivals always make the next pass productive).
-  bool engine_pass();
+  bool engine_pass(const PreTickHook& pre_tick = nullptr);
+
+  // Optional audit tap on the engine event stream (tokens + retires,
+  // engine thread). The fabric verification hashes the per-rank streams
+  // against each other — the smoke's md5 ritual, serving edition. w1
+  // leaves it unset.
+  void set_audit_observer(dgpp::glm::SchedulerObserver* audit) {
+    audit_ = audit;
+  }
 
   // Stops accepting: every pending record is answered 503 and the
   // queues drained. Called by the app on shutdown (before stopping the
@@ -162,7 +188,10 @@ class GenerationService : public HttpHandler,
   dgpp::glm::SchedulerEngine* engine_;
   const ModelFrontend* frontend_;
   dgpp::glm::Scheduler sched_;  // engine thread only (except try_submit
-                                // under the lock via engine_pass)
+                                 // under the lock via engine_pass)
+  // Engine-thread-only (set once before the loop, read in the observer
+  // callbacks, which the scheduler invokes on the engine thread).
+  dgpp::glm::SchedulerObserver* audit_ = nullptr;
 
   // Everything below lives under mutex_ (the one lock, held briefly).
   struct PendingAdmission {

@@ -166,6 +166,15 @@ bool TcpConn::read_exact(void* dst, size_t len) {
   return true;
 }
 
+int TcpConn::read_some(void* dst, size_t cap) {
+  for (;;) {
+    ssize_t n = ::recv(fd_, dst, cap, 0);
+    if (n >= 0) return static_cast<int>(n);
+    if (errno == EINTR) continue;
+    return -1;  // SO_RCVTIMEO expiry or error
+  }
+}
+
 bool TcpConn::wait_readable(int timeout_ms) {
   struct pollfd p{};
   p.fd = fd_;

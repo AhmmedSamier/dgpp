@@ -737,33 +737,42 @@ void GenerationService::on_disconnect(uint64_t tag) {
 void GenerationService::on_token(const std::string& id, int64_t token,
                                  int steps_done) {
   (void)steps_done;
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& r : records_) {
-    if (r->id != id || r->done) continue;
-    r->ids.push_back(token);
-    // Exact incremental text: the suffix diff of successive full
-    // decodes — UTF-8 splits and special tokens come out right by
-    // construction (the tokenizer's own decode gates, pinned by its
-    // differential goldens).
-    const std::string full = frontend_->decode_ids(r->ids);
-    if (full.size() > r->text.size())
-      r->delta.append(full, r->text.size(), std::string::npos);
-    r->text = full;
-    stats_.tokens_out++;
-    return;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& r : records_) {
+      if (r->id != id || r->done) continue;
+      r->ids.push_back(token);
+      // Exact incremental text: the suffix diff of successive full
+      // decodes — UTF-8 splits and special tokens come out right by
+      // construction (the tokenizer's own decode gates, pinned by its
+      // differential goldens).
+      const std::string full = frontend_->decode_ids(r->ids);
+      if (full.size() > r->text.size())
+        r->delta.append(full, r->text.size(), std::string::npos);
+      r->text = full;
+      stats_.tokens_out++;
+      break;
+    }
   }
+  // The audit tap sees every engine event, even ones this record list
+  // no longer knows (post-shutdown ticks) — cross-rank comparability
+  // is the tap's entire job.
+  if (audit_) audit_->on_token(id, token, steps_done);
 }
 
 void GenerationService::on_retire(const std::string& id,
                                  const Scheduler::Result& result) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& r : records_) {
-    if (r->id != id) continue;
-    r->done = true;
-    r->reason = result.reason;
-    r->completion_tokens = result.steps_done;
-    return;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& r : records_) {
+      if (r->id != id) continue;
+      r->done = true;
+      r->reason = result.reason;
+      r->completion_tokens = result.steps_done;
+      break;
+    }
   }
+  if (audit_) audit_->on_retire(id, result);
 }
 
 // ---------------------------------------------------------------------------
@@ -896,7 +905,7 @@ void GenerationService::pump_records() {
 // engine_pass() — the app's engine loop body
 // ---------------------------------------------------------------------------
 
-bool GenerationService::engine_pass() {
+bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
   std::vector<PendingAdmission> admissions;
   std::vector<PendingCancel> cancels;
   {
@@ -904,10 +913,20 @@ bool GenerationService::engine_pass() {
     admissions.swap(pending_admissions_);
     cancels.swap(pending_cancels_);
   }
+  PassEvents events;
   for (auto& a : admissions) {
     bool admitted = false;
+    bool journaled = false;
     try {
-      admitted = sched_.try_submit(std::move(a.request));
+      if (pre_tick) {
+        // The journal serializes the EXACT request the scheduler takes
+        // (a copy — std::move would leave a husk for the record pump).
+        events.submits.push_back(a.request);
+        journaled = true;
+        admitted = sched_.try_submit(events.submits.back());
+      } else {
+        admitted = sched_.try_submit(std::move(a.request));
+      }
     } catch (const std::exception& e) {
       // Unreachable by construction (the route validated everything
       // the scheduler re-checks) — but a bug here must not wedge the
@@ -915,12 +934,28 @@ bool GenerationService::engine_pass() {
       DGPP_LOG_ERROR("serve: admission rejected: {}", e.what());
     }
     if (!admitted) {
+      // A shed (queue full) or a rejected request died HERE, on rank
+      // 0 — peers must never learn it existed, or their identical
+      // queues would diverge from rank 0's.
+      if (journaled) events.submits.pop_back();
       std::lock_guard<std::mutex> lock(mutex_);
       a.record->reject_overloaded = true;
       stats_.requests_shed++;
     }
   }
-  for (const auto& c : cancels) sched_.cancel(c.scheduler_id);
+  for (const auto& c : cancels) {
+    // Only cancels that HIT ride the journal (rank 0's scheduler state
+    // changed). A late cancel is a no-op everywhere — peers' state is
+    // identical, so replaying it would no-op there too; silence is
+    // cheaper than noise.
+    if (sched_.cancel(c.scheduler_id) && pre_tick)
+      events.cancels.push_back(c.scheduler_id);
+  }
+
+  // The fixed journal position: this record and the tick below are one
+  // atomic unit — rank 0 never ticks without broadcasting, a peer
+  // never ticks without a record (see fabric_serve.hpp).
+  if (pre_tick) pre_tick(events);
 
   const bool more = sched_.tick();  // may throw on scheduler contract
                                        // violations — the app treats

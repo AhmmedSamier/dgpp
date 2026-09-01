@@ -1,0 +1,164 @@
+#!/bin/bash
+# M6 Stage 4b: the fabric serving launcher — rank 0 (HTTP ingress +
+# the admission journal + resident TP model) + world-1 peers, with the
+# fabric_run.sh discipline: head first, the 120s rendezvous window,
+# timeout-wrapped ssh, observe by pgrep (never ssh's exit code), and
+# peers swept on head death. The 2026-09-01 soak lessons are baked in:
+# spawn peers IN PARALLEL (sequential ssh fumbling burned rendezvous
+# windows), never trust a bare `ssh 'nohup ... &'` (session hangs
+# don't honor ConnectTimeout).
+#
+# Usage:
+#   serve_run.sh up     — stage + boot the world; waits for readiness
+#   serve_run.sh down   — SIGINT rank 0 (stop record releases peers),
+#                        sweeps strays, fetches + md5s the per-rank
+#                        op streams (the §11 evidence)
+#   serve_run.sh status — liveness snapshot of every rank
+set -u
+ROOT=/home/user/workspace/dgpp
+BIN=$ROOT/build-ci/glm_serve
+PEER_DIR=/tmp/bus4
+PEERS=(192.0.2.12 192.0.2.13 192.0.2.14)
+RANK0=192.0.2.11
+WORLD=4
+HTTP_PORT=18080
+FABRIC_PORT=29970
+JOURNAL_PORT=29971
+MODEL=unsloth/GLM-5.3-Flash-FP8
+KNOBS="--max-concurrency 2 --kv-capacity 4096 --default-max-tokens 32 --queue-limit 8"
+LOG=/tmp/opencode/serve_fabric
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5)
+
+mkdir -p "$LOG"
+
+peer_ssh() {  # timeout-wrapped: a hung session must not stall the launch
+  timeout 20 ssh "${SSH_OPTS[@]}" "user@$1" "${2:-true}"
+}
+
+stage() {
+  echo "=== staging glm_serve to peers"
+  for h in "${PEERS[@]}"; do
+    timeout 30 scp -q "${SSH_OPTS[@]}" "$BIN" "user@$h:$PEER_DIR/glm_serve" \
+      || { echo "STAGE FAILED to $h"; return 1; }
+  done
+}
+
+boot_head() {
+  echo "=== rank 0 (HTTP :$HTTP_PORT, fabric :$FABRIC_PORT, journal :$JOURNAL_PORT)"
+  cd "$ROOT" || exit 1
+  DGPP_LOG_LEVEL=info setsid nohup "$BIN" --model "$MODEL" $KNOBS \
+    --world "$WORLD" --rank 0 --port "$HTTP_PORT" \
+    --fabric-port "$FABRIC_PORT" --journal-port "$JOURNAL_PORT" \
+    > "$LOG/serve_r0.log" 2>&1 < /dev/null &
+  echo $! > "$LOG/r0.pid"
+  echo "head pid $(cat "$LOG/r0.pid")"
+}
+
+wait_log() {  # wait_log FILE NEEDLE TIMEOUT_S LABEL
+  local file=$1 needle=$2 timeout_s=$3 label=$4 waited=0
+  while ! grep -q "$needle" "$file" 2>/dev/null; do
+    sleep 2; waited=$((waited + 2))
+    if [ "$waited" -ge "$timeout_s" ]; then
+      echo "TIMEOUT waiting for $label (${timeout_s}s)"; return 1
+    fi
+  done
+  echo "$label: ok (${waited}s)"
+}
+
+head_alive() { kill -0 "$(cat "$LOG/r0.pid" 2>/dev/null)" 2>/dev/null; }
+
+sweep_peers() {  # best-effort: any glm_serve left on a peer dies now
+  for h in "${PEERS[@]}"; do
+    peer_ssh "$h" "pkill -x glm_serve" >/dev/null 2>&1 || true
+  done
+}
+
+peers_gone() {
+  for h in "${PEERS[@]}"; do
+    if peer_ssh "$h" "pgrep -x glm_serve" >/dev/null 2>&1; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+cmd_up() {
+  stage || { sweep_peers; exit 1; }
+  boot_head
+  # Head first: the bus rendezvous listener appears after ~20s of CUDA
+  # context init; peers connect against it.
+  if ! wait_log "$LOG/serve_r0.log" "rendezvous listening" 90 "bus rendezvous"; then
+    tail -5 "$LOG/serve_r0.log"; sweep_peers; exit 1
+  fi
+  # Peers IN PARALLEL (the soak's sequential-spawn lesson), each spawn
+  # timeout-wrapped, observed by pgrep — never by ssh's exit code.
+  echo "=== peers ${PEERS[*]}"
+  for i in 1 2 3; do
+    h=${PEERS[$((i - 1))]}
+    ( timeout 25 ssh "${SSH_OPTS[@]}" "user@$h" \
+        "cd $PEER_DIR && DGPP_LOG_LEVEL=info nohup ./glm_serve --model $MODEL $KNOBS \
+         --world $WORLD --rank $i --peer $RANK0 --fabric-port $FABRIC_PORT \
+         --journal-port $JOURNAL_PORT > serve_r$i.log 2>&1 &" \
+        >/dev/null 2>&1 ) &
+  done
+  wait
+  for i in 1 2 3; do
+    h=${PEERS[$((i - 1))]}
+    peer_ssh "$h" "pgrep -x glm_serve" >/dev/null 2>&1 \
+      || echo "WARN: peer $i (rank $i) not observed on $h"
+  done
+  # Readiness = rank 0's HTTP line: journal world complete + resident
+  # materialization (~2-3 min warm) + tokenizer + listen.
+  if ! wait_log "$LOG/serve_r0.log" "listening on :$HTTP_PORT" 600 "rank 0 serving"; then
+    tail -10 "$LOG/serve_r0.log"; sweep_peers; kill -9 "$(cat "$LOG/r0.pid")" 2>/dev/null
+    exit 1
+  fi
+  echo "READY — curl http://$RANK0:$HTTP_PORT/v1/models  (stop: $0 down)"
+}
+
+cmd_down() {
+  local pid
+  pid=$(cat "$LOG/r0.pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "=== SIGINT rank 0 ($pid) — the stop record releases the peers"
+    kill -INT "$pid"
+    for _ in $(seq 1 60); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -0 "$pid" 2>/dev/null && { echo "rank 0 wedged; SIGKILL"; kill -9 "$pid"; }
+  fi
+  echo "=== waiting for peers to drain"
+  for _ in $(seq 1 30); do
+    peers_gone && break
+    sleep 2
+  done
+  peers_gone || { echo "sweeping wedged peers"; sweep_peers; }
+  # The §11 evidence: every rank's engine event stream, md5-compared.
+  echo "=== op-stream identity (rank 0 + peers)"
+  for i in 1 2 3; do
+    h=${PEERS[$((i - 1))]}
+    timeout 20 scp -q "${SSH_OPTS[@]}" "user@$h:$PEER_DIR/serve_rank$i.ops" \
+      "$LOG/serve_rank$i.ops" 2>/dev/null \
+      || echo "WARN: no serve_rank$i.ops on $h"
+  done
+  [ -f "$LOG/serve_rank0.ops" ] || cp "$ROOT/serve_rank0.ops" "$LOG/" 2>/dev/null
+  md5sum "$LOG"/serve_rank*.ops 2>/dev/null || echo "(no op streams)"
+  echo "=== logs in $LOG"
+}
+
+cmd_status() {
+  head_alive && echo "rank 0: alive ($(cat "$LOG/r0.pid"))" || echo "rank 0: DOWN"
+  tail -2 "$LOG/serve_r0.log" 2>/dev/null
+  for h in "${PEERS[@]}"; do
+    echo -n "$h: "
+    peer_ssh "$h" "pgrep -x glm_serve | wc -l" 2>/dev/null || echo "?"
+  done
+}
+
+case "${1:-}" in
+  up) cmd_up ;;
+  down) cmd_down ;;
+  status) cmd_status ;;
+  *) echo "usage: $0 up|down|status"; exit 2 ;;
+esac
