@@ -4,6 +4,7 @@
 
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
+#include "kernels/fp8_gemv.cuh"
 
 namespace dgpp {
 namespace {
@@ -109,6 +110,35 @@ __global__ void scale_gemm_bf16_kernel(const uint16_t* __restrict__ act,
   store(r + 8, 1, c3);
 }
 
+// The small-m path (m <= fp8_gemv::kMaxRows): the bandwidth GEMV core, one
+// warp per weight row, activations staged in dynamic smem. Same dequant
+// values as the tile kernel above, a different (deterministic) fp32
+// accumulation order — see fp8_gemv.cuh.
+template <int kRows>
+__global__ void scale_gemv_bf16_kernel(const uint16_t* __restrict__ act,
+                                       size_t act_stride,
+                                       const uint8_t* __restrict__ w,
+                                       const float* __restrict__ scales,
+                                       uint16_t* __restrict__ out, int n,
+                                       int k) {
+  extern __shared__ __align__(16) uint16_t sx[];
+  fp8_gemv::stage_activations<kRows>(act, act_stride, k, sx);
+  __syncthreads();
+  fp8_gemv::block_rows<kRows>(w, scales, sx, blockIdx.x * fp8_gemv::kWarps, n,
+                              k, out, static_cast<size_t>(n));
+}
+
+template <int kRows>
+void launch_scale_gemv(const uint16_t* act, size_t act_stride,
+                       const uint8_t* w, const float* scales, uint16_t* out,
+                       int n, int k, cudaStream_t stream) {
+  const dim3 grid((n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps);
+  scale_gemv_bf16_kernel<kRows>
+      <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(kRows, k), stream>>>(
+          act, act_stride, w, scales, out, n, k);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 }  // namespace
 
 void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
@@ -123,6 +153,31 @@ void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
     DGPP_CUDA_OK(cudaMemsetAsync(out, 0, static_cast<size_t>(m) * n * 2,
                                  stream));
     return;
+  }
+  // Decode-shaped calls take the bandwidth GEMV (the tile below is
+  // latency-bound at m=1 — see fp8_gemv.cuh); ragged k or an unaligned
+  // payload keeps the general tile.
+  if (m <= fp8_gemv::kMaxRows && fp8_gemv::shape_ok(w_payload, k)) {
+    switch (m) {
+      case 1:
+        launch_scale_gemv<1>(act, act_row_stride_elems, w_payload, w_scales,
+                             out, n, k, stream);
+        return;
+      case 2:
+        launch_scale_gemv<2>(act, act_row_stride_elems, w_payload, w_scales,
+                             out, n, k, stream);
+        return;
+      case 3:
+        launch_scale_gemv<3>(act, act_row_stride_elems, w_payload, w_scales,
+                             out, n, k, stream);
+        return;
+      case 4:
+        launch_scale_gemv<4>(act, act_row_stride_elems, w_payload, w_scales,
+                             out, n, k, stream);
+        return;
+      default:
+        break;
+    }
   }
   const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
   scale_gemm_bf16_kernel<<<grid, kBlockThreads, 0, stream>>>(

@@ -4,6 +4,7 @@
 
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
+#include "kernels/fp8_gemv.cuh"
 
 namespace dgpp {
 namespace {
@@ -193,18 +194,13 @@ __global__ void moe_accum_kernel(uint16_t* __restrict__ acc,
 
 // ---- decode-slot path (the sync-free MoE, 2026-09-01) --------------------
 //
-// Tile geometry: IDENTICAL to scale_gemm.cu's (BM/BN/BK, the pad, the
-// thread mapping). The host-orchestrated path computes each expert's
-// contribution through launch_scale_gemm_bf16 at m=1 for decode rows —
-// this kernel must produce the same bits, so any change to either side's
-// tile arithmetic breaks glm_moe_test's bitwise gate. That gate is the
-// twin-keeping mechanism; do not "simplify" one side without the other.
-constexpr int kGemvBM = 16;
-constexpr int kGemvBN = 64;
-constexpr int kGemvBK = 32;
-constexpr int kGemvBKPad = kGemvBK + 8;
-constexpr int kGemvBlockThreads = (kGemvBN / 8) * 32;
-
+// One block per (8-row group, slot); the block resolves its slot's expert
+// from the DEVICE route, stages the slot's activation row in smem, and each
+// warp runs the fp8_gemv core on one weight row. The host-orchestrated path
+// computes each expert's contribution through launch_scale_gemm_bf16, which
+// dispatches m<=4 to the SAME core — glm_moe_test's bitwise gate pins the
+// two (any change to one side's arithmetic breaks it; that gate is the
+// twin-keeping mechanism).
 __global__ void moe_slot_gemv_kernel(
     const uint16_t* __restrict__ x, size_t x_stride,
     const int32_t* __restrict__ ids, const MoeExpertView* __restrict__ views,
@@ -212,7 +208,8 @@ __global__ void moe_slot_gemv_kernel(
     const uint8_t* __restrict__ sh_payload, const float* __restrict__ sh_scales,
     uint16_t* __restrict__ out, int out_stride, int slots, int top_k,
     int begin, int count) {
-  const int n0 = blockIdx.x * kGemvBN;
+  extern __shared__ __align__(16) uint16_t sx[];
+  const int n0 = blockIdx.x * fp8_gemv::kWarps;
   const int slot = blockIdx.y;
   if (slot >= slots) return;
   const int K = top_k;
@@ -245,81 +242,11 @@ __global__ void moe_slot_gemv_kernel(
   // THIS SLOT's activation (each slot's act row is its own).
   const size_t act_row =
       (which == 2) ? static_cast<size_t>(slot) : static_cast<size_t>(t);
-  const uint16_t* act = x + act_row * x_stride;
-
-  __shared__ uint16_t sA[kGemvBM][kGemvBKPad];
-  __shared__ uint16_t sB[kGemvBN][kGemvBKPad];
-
-  const int warp = threadIdx.x / 32;
-  const int lane = threadIdx.x % 32;
-  // m16n8k16 fragment coordinates — see scale_gemm.cu.
-  const int r = lane / 4;
-  const int cc = (lane % 4) * 2;
-  const int bnr = warp * 8 + r;
-  const int scale_cols = (k + 127) / 128;
-  const int scale_row = n0 / 128;
-
-  float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
-  for (int k0 = 0; k0 < k; k0 += kGemvBK) {
-    const float s = scales[(size_t)scale_row * scale_cols + (k0 / 128)];
-    // Weight tile: decode + scale + one BF16 round — the dequant bridge.
-    for (int idx = threadIdx.x; idx < kGemvBN * kGemvBK;
-         idx += kGemvBlockThreads) {
-      const int nn = idx / kGemvBK, kk = idx % kGemvBK;
-      const int gn = n0 + nn, gk = k0 + kk;
-      sB[nn][kk] =
-          (gn < n && gk < k)
-              ? float_to_bf16_bits(
-                    fp8_e4m3_bits_to_float(w_payload[(size_t)gn * k + gk]) * s)
-              : 0;
-    }
-    // Activation tile: m=1 — row 0 real, rows 1..15 zero (the host
-    // path's m=1 GEMV zero-fills the same padding).
-    for (int idx = threadIdx.x; idx < kGemvBM * kGemvBK;
-         idx += kGemvBlockThreads) {
-      const int mm = idx / kGemvBK, kk = idx % kGemvBK;
-      const int gk = k0 + kk;
-      sA[mm][kk] = (mm == 0 && gk < k) ? act[gk] : 0;
-    }
-    __syncthreads();
-
-#pragma unroll
-    for (int kk = 0; kk < kGemvBK; kk += 16) {
-      const uint32_t a0 = static_cast<uint32_t>(sA[r][kk + cc]) |
-                          (static_cast<uint32_t>(sA[r][kk + cc + 1]) << 16);
-      const uint32_t a1 =
-          static_cast<uint32_t>(sA[r + 8][kk + cc]) |
-          (static_cast<uint32_t>(sA[r + 8][kk + cc + 1]) << 16);
-      const uint32_t a2 =
-          static_cast<uint32_t>(sA[r][kk + cc + 8]) |
-          (static_cast<uint32_t>(sA[r][kk + cc + 9]) << 16);
-      const uint32_t a3 =
-          static_cast<uint32_t>(sA[r + 8][kk + cc + 8]) |
-          (static_cast<uint32_t>(sA[r + 8][kk + cc + 9]) << 16);
-      const uint32_t b0 =
-          static_cast<uint32_t>(sB[bnr][kk + cc]) |
-          (static_cast<uint32_t>(sB[bnr][kk + cc + 1]) << 16);
-      const uint32_t b1 =
-          static_cast<uint32_t>(sB[bnr][kk + cc + 8]) |
-          (static_cast<uint32_t>(sB[bnr][kk + cc + 9]) << 16);
-      asm volatile(
-          "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-          : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
-          : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
-    }
-    __syncthreads();  // tile reads done before the next stage overwrites
-  }
-
-  // Epilogue at m=1: only row 0 is real — lanes 0..3 (r == 0) hold its
-  // two outputs; the host path's m=1 epilogue stores exactly these and
-  // suppresses the rest on the same gm < m bound.
-  const int out_col = n0 + warp * 8 + cc;
-  uint16_t* dst = out + static_cast<size_t>(slot) * out_stride;
-  if (r == 0) {
-    if (out_col < n) dst[out_col] = float_to_bf16_bits(c0);
-    if (out_col + 1 < n) dst[out_col + 1] = float_to_bf16_bits(c1);
-  }
+  fp8_gemv::stage_activations<1>(x + act_row * x_stride, x_stride, k, sx);
+  __syncthreads();
+  fp8_gemv::block_rows<1>(w_payload, scales, sx, n0, n, k,
+                          out + static_cast<size_t>(slot) * out_stride,
+                          static_cast<size_t>(out_stride));
 }
 
 // The ordered decode accumulation — the host path's chain, op for op:
@@ -454,9 +381,20 @@ void launch_moe_slot_gemv(
     throw std::invalid_argument("moe_slot_gemv: which must be 0..2");
   if (n_routed <= 0 || k_routed <= 0 || n_shared <= 0 || k_shared <= 0)
     throw std::invalid_argument("moe_slot_gemv: degenerate dims");
+  // The GEMV core's contract (fp8_gemv.cuh): k a multiple of 16 so every
+  // 16-byte chunk lies inside one scale block. The shared payload is
+  // checked here; the routed payloads live in the device table and ride
+  // the loader's 256-byte alignment contract.
+  if (k_routed % fp8_gemv::kChunkBytes != 0 ||
+      !fp8_gemv::shape_ok(sh_payload, k_shared))
+    throw std::invalid_argument(
+        "moe_slot_gemv: k must be a multiple of 16 with 16B-aligned payloads");
   const int max_n = n_routed > n_shared ? n_routed : n_shared;
-  const dim3 grid((max_n + kGemvBN - 1) / kGemvBN, static_cast<unsigned>(slots));
-  moe_slot_gemv_kernel<<<grid, kGemvBlockThreads, 0, stream>>>(
+  const int max_k = k_routed > k_shared ? k_routed : k_shared;
+  const dim3 grid((max_n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps,
+                  static_cast<unsigned>(slots));
+  moe_slot_gemv_kernel<<<grid, fp8_gemv::kThreads,
+                         fp8_gemv::smem_bytes(1, max_k), stream>>>(
       x, x_stride, ids, views, which, n_routed, k_routed, n_shared, k_shared,
       sh_payload, sh_scales, out, out_stride, slots, top_k, begin, count);
   DGPP_CUDA_OK(cudaGetLastError());

@@ -4,6 +4,7 @@
 // pattern). Every synthetic case is checked against BOTH oracles: strict
 // (bf16-rounded weights, fp64 accumulation — isolates the kernel) and
 // semantic (true dequant — pins the DESIGN §4 scale contract).
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 
@@ -11,6 +12,7 @@
 
 #include "common/cuda_check.hpp"
 #include "common/test.hpp"
+#include "kernels/fp8_gemv.cuh"
 #include "kernels/scale_gemm.hpp"
 #include "scale_gemm_test_helpers.hpp"
 
@@ -199,6 +201,104 @@ DGPP_TEST(scale_gemm_degenerate_k_zeroes_output) {
     if (out[i] != 0) throw std::runtime_error("k=0 must zero outputs");
   DGPP_CUDA_OK(cudaFree(act));
   DGPP_CUDA_OK(cudaFree(out));
+}
+
+// ---- the m<=4 GEMV path (fp8_gemv.cuh) ------------------------------------
+
+__global__ void e4m3_convert_all_codes_kernel(float* hw, float* ref) {
+  // GIVEN every byte code, converted by the GEMV's hardware path and by the
+  // dequant bridge's reference function.
+  const int v = threadIdx.x;
+  const float2 pair = dgpp::fp8_gemv::e4m3x2_to_float2(
+      static_cast<uint16_t>(v | (v << 8)));
+  hw[v] = pair.x;
+  hw[256 + v] = pair.y;  // the high byte lands in .y
+  ref[v] = dgpp::fp8_e4m3_bits_to_float(static_cast<uint8_t>(v));
+}
+
+DGPP_TEST(fp8_gemv_hardware_conversion_matches_bridge_on_every_code) {
+  float* hw = nullptr;
+  float* ref = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&hw, 512 * 4));
+  DGPP_CUDA_OK(cudaMallocManaged(&ref, 256 * 4));
+  e4m3_convert_all_codes_kernel<<<1, 256>>>(hw, ref);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  // THEN both halves agree with the bridge bitwise on every finite code and
+  // are NaN exactly where the bridge is (0x7F / 0xFF).
+  for (int v = 0; v < 256; ++v) {
+    for (int half = 0; half < 2; ++half) {
+      const float got = hw[half * 256 + v];
+      if (std::isnan(ref[v])) {
+        require(std::isnan(got), "NaN codes convert to NaN");
+      } else {
+        require(std::memcmp(&got, &ref[v], 4) == 0,
+                "finite e4m3 codes convert bit-exactly");
+      }
+    }
+  }
+  DGPP_CUDA_OK(cudaFree(hw));
+  DGPP_CUDA_OK(cudaFree(ref));
+  std::printf("[ OK ] e4m3 hardware conversion == bridge on all 256 codes\n");
+}
+
+DGPP_TEST(scale_gemm_gemv_path_ragged_n_and_k_match_both_oracles) {
+  // GIVEN m=1 with k a multiple of 16 but NOT of 128 (the last chunk sits
+  // in a partial scale block) and n not a multiple of the 8-row block:
+  const Problem p = make_problem(1, 1003, 1008, 0xE1);
+  const std::vector<uint16_t> got = run_kernel(p);
+  check_both_oracles(p, got, "gemv M1xN1003xK1008");
+  // AND a k shorter than one warp span (512 bytes): every lane but the
+  // first few has no chunk at all.
+  const Problem q = make_problem(1, 200, 48, 0xE2);
+  check_both_oracles(q, run_kernel(q), "gemv M1xN200xK48");
+  // Determinism.
+  const std::vector<uint16_t> again = run_kernel(p);
+  require(std::memcmp(got.data(), again.data(), got.size() * 2) == 0,
+          "gemv second run bitwise identical");
+}
+
+DGPP_TEST(scale_gemm_gemv_rows_are_independent_of_row_count) {
+  // GIVEN the same activation rows run at m=1 each and at m=3 together,
+  // THEN every row's bits agree: each row's chain is the same sequence of
+  // FMAs whatever the row count (the property glm_moe_test's slot-vs-host
+  // bitwise pin relies on).
+  const Problem p3 = make_problem(3, 520, 4096, 0xE3);
+  const std::vector<uint16_t> got3 = run_kernel(p3);
+  check_both_oracles(p3, got3, "gemv M3xN520xK4096");
+  for (int r = 0; r < 3; ++r) {
+    Problem p1;
+    p1.m = 1;
+    p1.n = p3.n;
+    p1.k = p3.k;
+    p1.act.assign(p3.act.begin() + static_cast<long>(r) * p3.k,
+                  p3.act.begin() + static_cast<long>(r + 1) * p3.k);
+    p1.payload = p3.payload;
+    p1.scales = p3.scales;
+    const std::vector<uint16_t> got1 = run_kernel(p1);
+    require(std::memcmp(got1.data(), got3.data() + static_cast<size_t>(r) * p3.n,
+                        static_cast<size_t>(p3.n) * 2) == 0,
+            "row bits independent of m");
+  }
+  // AND m=4 (the largest GEMV row count) still matches the oracles.
+  const Problem p4 = make_problem(4, 264, 2048, 0xE4);
+  check_both_oracles(p4, run_kernel(p4), "gemv M4xN264xK2048");
+  std::printf("[ OK ] gemv rows independent of m (1 vs 3), m=4 oracle\n");
+}
+
+DGPP_TEST(scale_gemm_gemv_path_propagates_nan_exactly) {
+  // GIVEN m=1 with two poisoned weights: exactly their output columns NaN.
+  Problem p = make_problem(1, 300, 1024, 0xE5);
+  p.payload[static_cast<size_t>(9) * p.k + 700] = 0x7F;
+  p.payload[static_cast<size_t>(250) * p.k + 3] = 0xFF;
+  const std::vector<uint16_t> got = run_kernel(p);
+  for (int nn = 0; nn < p.n; ++nn) {
+    const bool got_nan = std::isnan(bf16_to_float(got[static_cast<size_t>(nn)]));
+    if (nn == 9 || nn == 250)
+      require(got_nan, "poisoned column is NaN (gemv)");
+    else
+      require(!got_nan, "unpoisoned column stays finite (gemv)");
+  }
+  std::printf("[ OK ] gemv nan propagation: columns 9 and 250 NaN\n");
 }
 
 // Real-checkpoint slice parity lives in scale_gemm_checkpoint.cpp (host-only

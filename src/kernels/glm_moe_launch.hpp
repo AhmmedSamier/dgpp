@@ -50,13 +50,15 @@ void launch_moe_accum(uint16_t* acc, const uint16_t* y, const int32_t* rows,
 // s = t*(K+1)+j; j<K is row t's routed expert j (ascending expert id),
 // j==K is the shared expert (all rows, weight 1, accumulated last).
 //
-// slot_gemv: one m=1 scale-GEMV per (slot, n-tile). `views` is the
-// device expert table [count, 3] (gate,up,down); `which` selects the
-// matrix. Routed dims (n_routed, k_routed) vs the shared expert's
-// (n_shared, k_shared — the TP-sliced inter differs); shared matrices
-// arrive as args (they are host-known constants, not table entries).
-// The tile arithmetic is scale_gemm.cu's verbatim (BM/BN/BK/mma, same
-// dequant rounding) — glm_moe_test's bitwise gate pins the equivalence.
+// slot_gemv: one m=1 fp8 GEMV per slot (the fp8_gemv core: warp per weight
+// row, 16-byte loads). `views` is the device expert table [count, 3]
+// (gate,up,down); `which` selects the matrix. Routed dims (n_routed,
+// k_routed) vs the shared expert's (n_shared, k_shared — the TP-sliced
+// inter differs); shared matrices arrive as args (they are host-known
+// constants, not table entries). Contract: both k a multiple of 16,
+// payloads 16B-aligned (the loader's). The arithmetic is exactly
+// launch_scale_gemm_bf16's at m<=4 (same core) — glm_moe_test's bitwise
+// gate pins the equivalence.
 void launch_moe_slot_gemv(
     const uint16_t* x, size_t x_stride, const int32_t* ids,
     const MoeExpertView* views, int which, int n_routed, int k_routed,
