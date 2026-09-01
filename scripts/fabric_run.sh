@@ -222,6 +222,16 @@ while kill -0 "$HEAD_PID" 2>/dev/null; do
 done
 HEAD_RC=0; wait "$HEAD_PID" || HEAD_RC=$?
 
+# A failed head leaves the peers wedged in collectives forever (they
+# wait for a rank that will never post again — the 2026-09-01 hunt
+# measured 39s+ stalls and manual pkill on every box). Kill them here so
+# a failed run needs no cleanup; the peers' logs were already flushed by
+# their own nohup redirection.
+if [[ $HEAD_RC -ne 0 ]]; then
+  echo "fabric_run: head failed — killing wedged peers"
+  kill_all
+fi
+
 # ------------------------------------------------------------ collect
 echo "fabric_run: rank 0 exited rc=$HEAD_RC — collecting verdicts"
 # md5 over EVERY "generated ids" line (scheduler mode logs one per

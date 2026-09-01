@@ -544,8 +544,11 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
 
   // ---- fabric TP: bus, sharded head, resident by default ---------------
   uint16_t* pick_scratch = nullptr;
-  DGPP_CUDA_OK(cudaMallocManaged(&pick_scratch,
-                                  sizeof(uint16_t) * 4 * world));
+  // Pinned (see the fabric-path note below): no UVM residency dependence
+  // on the decode path, no migration ping-pong per pick.
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&pick_scratch),
+                              sizeof(uint16_t) * 4 * world,
+                              cudaHostAllocDefault));
   std::unique_ptr<CollectiveBus> bus;
   try {
     bus = std::make_unique<CollectiveBus>(
@@ -605,10 +608,10 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
                   stats.bulk.latency_us.size());
     bus->stop();
   } catch (...) {
-    if (pick_scratch) cudaFree(pick_scratch);
+    if (pick_scratch) cudaFreeHost(pick_scratch);
     throw;
   }
-  cudaFree(pick_scratch);
+  cudaFreeHost(pick_scratch);
   return 0;
 }
 
@@ -716,8 +719,15 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
   // separate processes put a spinning peer kernel on the PEER's device;
   // it cannot block this rank's construction-phase device syncs.
   uint16_t* pick_scratch = nullptr;
-  DGPP_CUDA_OK(cudaMallocManaged(&pick_scratch,
-                                 sizeof(uint16_t) * 4 * world));
+  // Pinned, not managed: the pick scratch is host-written between
+  // collectives and device-read by the kernel — pinning removes the UVM
+  // migration ping-pong (two faults per pick) and the coherence
+  // dependence entirely; the bus's own cells are pinned for the same
+  // reason (the 2026-09-01 hunt's lesson: the decode path's shared
+  // buffers do not ride managed memory).
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&pick_scratch),
+                             sizeof(uint16_t) * 4 * world,
+                             cudaHostAllocDefault));
   std::unique_ptr<CollectiveBus> bus;
   try {
     bus = std::make_unique<CollectiveBus>(
@@ -860,10 +870,10 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         bulk_tails.second);
     bus->stop();
   } catch (...) {
-    if (pick_scratch) cudaFree(pick_scratch);
+    if (pick_scratch) cudaFreeHost(pick_scratch);
     throw;
   }
-  cudaFree(pick_scratch);
+  cudaFreeHost(pick_scratch);
   return 0;
 }
 

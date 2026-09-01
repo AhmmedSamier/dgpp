@@ -21,11 +21,27 @@ constexpr uint32_t kFlagStopSequence = std::numeric_limits<uint32_t>::max();
 // eats the early doorbell (folding N+1's payload into N — corruption) and
 // starves N+1's own kernel (the stall; at fabric skew this is the gen-1825
 // wedge). The gate: door->ctl == this kernel's collective sequence.
+//
+// `hash` is the PLACEMENT gate (the 2026-09-01 small-collective hunt): the
+// sender's fold of the payload, published in the same doorbell DMA. RC
+// ordering promises the payload CQE precedes the doorbell CQE — a promise
+// that protects the CQE consumer (the engine), NOT a third-party poller:
+// the per-collective kernels poll the door CELLS directly, and a doorbell
+// placement can become GPU-visible before the payload's own DMA placement
+// (measured on loopback AND the fabric: a fresh, ctl-correct doorbell whose
+// claimed payload buffer still read zeros/virgin — the fold consumed stale
+// bytes while the real data landed microseconds later; the fabric flavor
+// folded the previous collective's boundary data and the range check
+// caught a garbage token id). The claim now spins until the payload folds
+// to the door's hash — a stale buffer folds to the old value and cannot
+// pass. Flag/harness traffic keeps 0 (its consumers never hash-gate).
 struct alignas(64) StartSlot {
   uint32_t seq = 0;
   uint32_t len = 0;
   uint32_t ctl = 0;
-  uint32_t pad[13];
+  uint32_t pad0 = 0;
+  uint64_t hash = 0;
+  uint32_t pad[10];
 };
 
 static_assert(sizeof(StartSlot) == 64, "StartSlot must occupy one cache line");

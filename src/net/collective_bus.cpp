@@ -715,6 +715,8 @@ struct CollectiveBus::Impl {
       ar_ctl->stamp_stage = 0;
       ar_ctl->stamp_first_claim = 0;
       ar_ctl->stamp_reduce_done = 0;
+      __atomic_store_n(&ar_ctl->dbg_gate_waits, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ar_ctl->dbg_gate_spins, 0, __ATOMIC_RELAXED);
       for (size_t p = 0; p < peer_ranks.size(); ++p)
         __atomic_store_n(&bulk_staged_counters()[p], 0, __ATOMIC_RELAXED);
 
@@ -806,11 +808,21 @@ struct CollectiveBus::Impl {
         std::string error;
         DGPP_LOG_DEBUG("bulk stripe: peer={} stripe={} len={}", peer_ranks[p],
                        k, len);
+        // The door carries the stripe's fold — the bulk kernel's PLACEMENT
+        // gate (StartSlot::hash). ~10us per 256KB stripe on the CPU: the
+        // prefill class's posting wave can afford the exact proof; the
+        // harness send path stays ungated (its consumers are the flag
+        // kernels, which never hash-gate).
         if (!rc.post_send_pair(BusPool::kBulk, slot, seq, len, &error,
                                bulk_arena_row(p) +
                                    static_cast<size_t>(k) *
                                        opt.bulk_slot_bytes,
-                               lane.stage_lkey, req.ctl_seq)) {
+                               lane.stage_lkey, req.ctl_seq,
+                               bus_fold64(reinterpret_cast<const uint64_t*>(
+                                              bulk_arena_row(p) +
+                                              static_cast<size_t>(k) *
+                                                  opt.bulk_slot_bytes),
+                                          len / 8))) {
           fail_lane(lane, error);
           poison_collective(req);
           finish_flight(coll.req, false, "bulk post failed: " + error);
@@ -1105,14 +1117,18 @@ struct CollectiveBus::Impl {
         if (ss.in_flight) break;  // ring position busy; retry next pass
         const uint32_t pair_seq = ss.gen + 1;
         // The row the kernel wrote: generation g stages ring slot
-        // (g-1)%kStageRing — the eager machine's rotation.
+        // (g-1)%kStageRing — the eager machine's rotation. The door
+        // carries the row's fold: the graph kernel's PLACEMENT gate
+        // (StartSlot::hash), same as the eager posting path.
         const uint8_t* row =
             stage_buf(p, static_cast<int>((gen - 1) % Impl::kStageRing));
         std::string error;
         if (!lane.lane->post_send_pair(
                 BusPool::kLatency, slot, pair_seq,
                 static_cast<uint32_t>(elems) * 2, &error, row,
-                lane.stage_lkey, gen)) {
+                lane.stage_lkey, gen,
+                bus_fold64(reinterpret_cast<const uint64_t*>(row),
+                           static_cast<size_t>(elems) / 4))) {
           fail_lane(lane, error);
           graph_fail("graph post failed: " + error);
           return true;
@@ -1186,9 +1202,23 @@ struct CollectiveBus::Impl {
           for (int s = 0; s < opt.lat_slots; ++s) {
             const StartSlot* door =
                 recv_view_of(lane).doorbell_lat;  // per-lane view
-            lanes += std::to_string(door[s].seq) + "/" +
-                     std::to_string(recv_view_of(lane).ack_lat[s].seq) +
-                     (lane.send[0][s].in_flight ? "!" : ".");
+            // The door's ctl rides the stall dump: a stranded doorbell's
+            // ctl discriminates a parked FUTURE collective (benign — the
+            // generation gate's design) from THIS collective's claim
+            // stuck in the placement-gate spin (seq/ctl vs ack). The
+            // payload's first word rides with it — if a claimed door's
+            // payload never hashes, the missing bytes are somewhere in
+            // the ring (a payload/door split), and this finds them.
+            const uint32_t* pay = reinterpret_cast<const uint32_t*>(
+                reinterpret_cast<const uint8_t*>(
+                    recv_view_of(lane).payload_lat) +
+                static_cast<size_t>(s) * recv_view_of(lane).lat_slot_bytes);
+            char cellbuf[64];
+            std::snprintf(cellbuf, sizeof(cellbuf), "%uc%u/%u=%#010x",
+                          door[s].seq, door[s].ctl,
+                          recv_view_of(lane).ack_lat[s].seq, pay[0]);
+            lanes += cellbuf;
+            lanes += lane.send[0][s].in_flight ? "!" : ".";
           }
           lanes += " B[";
           for (int s = 0; s < opt.bulk_slots; ++s) {
@@ -1214,13 +1244,19 @@ struct CollectiveBus::Impl {
           "hunt qp: rank {} seq {} {}", opt.my_rank, coll.req->ctl_seq, qps);
       DGPP_LOG_INFO(
           "allreduce: rank {} seq {} STALLED {:.0f}ms posted={:#x} "
-          "ctl(ready={:#x} done={} status={}) {}",
+          "ctl(ready={:#x} done={} status={} gate(waits={} spins={}) "
+          "first_claim(cell={} len={} seq={})) {}",
           opt.my_rank, coll.req->ctl_seq,
           std::chrono::duration<double, std::milli>(Clock::now() -
                                                      coll.launched_at)
               .count(),
           coll.posted_bits, acquire_u64(&ar_ctl->ready_bits),
           acquire_u64(&ar_ctl->done_seq), acquire_u32(&ar_ctl->status),
+          acquire_u32(&ar_ctl->dbg_gate_waits),
+          acquire_u32(&ar_ctl->dbg_gate_spins),
+          ar_ctl->dbg_first_cell ? static_cast<int>(ar_ctl->dbg_first_cell) - 1 : -1,
+          ar_ctl->dbg_first_len ? static_cast<int>(ar_ctl->dbg_first_len) : -1,
+          ar_ctl->dbg_first_seq ? static_cast<int>(ar_ctl->dbg_first_seq) : -1,
           lanes);
       if (coll.req->is_bulk) {
         std::string posted_counts;
@@ -1234,6 +1270,46 @@ struct CollectiveBus::Impl {
             opt.my_rank, coll.req->ctl_seq, bulk.phase == 0 ? "RS" : "AG",
             bulk.segment + 1, coll.req->bulk_seg_count, bulk_doorbell_ce_seen,
             bulk_pairs_posted, posted_counts);
+      } else if (!coll.claims.empty()) {
+        // The KERNEL's actual claimed cells (ctl-cell claim records),
+        // not the engine's send-side bookkeeping: for each record, the
+        // door's triple + hash, the payload's first words, and the
+        // engine's own CPU-side fold of those words — the placement-
+        // gate stall discriminator. A folded hash that differs from the
+        // door's with recognizable foreign words is a payload/door
+        // split; matching words with a wrong door hash is a sender
+        // discrepancy; the fold matching the door means the gate has
+        // already passed and the stall is elsewhere.
+        for (int i = 0; i < 3; ++i) {
+          const uint32_t rec = ar_ctl->dbg_cl_cell[i];
+          if (rec == 0) continue;
+          const int lat_slots = opt.lat_slots;
+          const int views_per_peer = lane_count();
+          const int cell = static_cast<int>(rec) - 1;
+          const int slot = cell % lat_slots;
+          const int view_idx = cell / lat_slots;
+          const int peer_rank_i = peer_ranks[view_idx / views_per_peer];
+          const BusRecvView view = recv_view_of(
+              peers[static_cast<size_t>(view_idx / views_per_peer)]
+                    [static_cast<size_t>(view_idx % views_per_peer)]);
+          const StartSlot* door = view.doorbell_lat + slot;
+          const uint32_t* pay = reinterpret_cast<const uint32_t*>(
+              reinterpret_cast<const uint8_t*>(view.payload_lat) +
+              static_cast<size_t>(slot) * view.lat_slot_bytes);
+          const uint32_t words = door->len / 8;
+          uint64_t folded = 0;
+          for (uint32_t w = 0; w < words && w < 16; ++w)
+            folded ^= (pay[w] + w + 1) * 0x9E3779B97F4A7C15ULL;
+          DGPP_LOG_INFO(
+              "kernel claim: rank {} seq {} rec{} peer {} lane {} slot {} "
+              "door(seq={} len={} ctl={} hash={:#x}) pay(w0={:#x} w1={:#x} "
+              "w2={:#x} w3={:#x} w4={:#x} w5={:#x} w6={:#x} w7={:#x}) "
+              "folded16={:#x}",
+              opt.my_rank, coll.req->ctl_seq, i, peer_rank_i,
+              view_idx % views_per_peer, slot, door->seq, door->len,
+              door->ctl, door->hash, pay[0], pay[1], pay[2], pay[3], pay[4],
+              pay[5], pay[6], pay[7], folded);
+        }
       }
     }
     // A held flight whose request is already done was reaped out from
@@ -1313,6 +1389,15 @@ struct CollectiveBus::Impl {
       __atomic_store_n(&ar_ctl->dbg_first_cell, 0, __ATOMIC_RELAXED);
       __atomic_store_n(&ar_ctl->dbg_first_len, 0, __ATOMIC_RELAXED);
       __atomic_store_n(&ar_ctl->dbg_first_seq, 0, __ATOMIC_RELAXED);
+      // PLACEMENT-gate telemetry reset (the 2026-09-01 fix's proof).
+      __atomic_store_n(&ar_ctl->dbg_gate_waits, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&ar_ctl->dbg_gate_spins, 0, __ATOMIC_RELAXED);
+      for (int i = 0; i < 3; ++i) {
+        ar_ctl->dbg_cl_cell[i] = 0;
+        ar_ctl->dbg_cl_len[i] = 0;
+        ar_ctl->dbg_cl_seq[i] = 0;
+        ar_ctl->dbg_cl_hash[i] = 0;
+      }
 
       BusAllReduceView view{};
       int vi = 0;
@@ -1413,10 +1498,29 @@ struct CollectiveBus::Impl {
       std::string error;
       // Payload from the staging generation (the slot argument remains the
       // doorbell's remote ring position — the unchanged cursor discipline).
+      // The door carries the payload's fold: the kernels' PLACEMENT gate
+      // (the doorbell's DMA can be visible before the payload's — see
+      // StartSlot::hash). The engine reads the pinned row coherently: the
+      // kernel's snapshot preceded its ready_bits release, acquired here.
+      // TEMP hunt: the hashed row's own words — the fabric racer caught a
+      // door hash that folds NEITHER the old nor the new way over the
+      // received bytes; this line pins what the sender actually hashed.
+      {
+        const uint64_t* hw = reinterpret_cast<const uint64_t*>(
+            stage_buf(p, coll.stage_gen));
+        DGPP_LOG_DEBUG(
+            "hunt hash: rank {} seq {} peer {} gen {} words({:#x},{:#x},"
+            "{:#x},{:#x})",
+            opt.my_rank, req.ctl_seq, peer_ranks[p], coll.stage_gen, hw[0],
+            hw[1], hw[2], hw[3]);
+      }
       if (!rc.post_send_pair(BusPool::kLatency, slot, seq,
                               static_cast<uint32_t>(req.elems * 2), &error,
                               stage_buf(p, coll.stage_gen),
-                              lane.stage_lkey, req.ctl_seq)) {
+                              lane.stage_lkey, req.ctl_seq,
+                              bus_fold64(reinterpret_cast<const uint64_t*>(
+                                             stage_buf(p, coll.stage_gen)),
+                                         req.elems / 4))) {
         fail_lane(lane, error);
         poison_collective(req);
         coll_poisoned = true;
@@ -1491,6 +1595,25 @@ struct CollectiveBus::Impl {
               ? -1
               : static_cast<int>(ar_ctl->dbg_first_seq));
       const bool reduced = acquire_u32(&ar_ctl->status) == 0;
+      // Small-collective microscope (the pick class, elems <= 64): the
+      // first-claim triple at INFO, always on. The 2026-09-01 fabric race
+      // (rank 0 folded garbage while all peers held the correct token)
+      // died with no observables — every per-collective log was gated to
+      // the first 16 sequences or DEBUG, whose volume changes the very
+      // timing under hunt. One line per pick phase is the compromise: a
+      // recurrence now carries its discriminating evidence (stale len vs
+      // misaligned cell vs fresh-door/stale-payload) at production timing.
+      if (req.elems <= 64) {
+        DGPP_LOG_INFO(
+            "allreduce: rank {} seq {} small done status={} gate(waits={} "
+            "spins={}) first_claim(cell={} len={} seq={})",
+            opt.my_rank, req.ctl_seq, acquire_u32(&ar_ctl->status),
+            acquire_u32(&ar_ctl->dbg_gate_waits),
+            acquire_u32(&ar_ctl->dbg_gate_spins),
+            ar_ctl->dbg_first_cell ? static_cast<int>(ar_ctl->dbg_first_cell) - 1 : -1,
+            ar_ctl->dbg_first_len ? static_cast<int>(ar_ctl->dbg_first_len) : -1,
+            ar_ctl->dbg_first_seq ? static_cast<int>(ar_ctl->dbg_first_seq) : -1);
+      }
       // Clear the flight BEFORE completing (finish_flight): the woken
       // waiter's next submission races the cleanup against the
       // single-outstanding check (measured as a spurious "one
@@ -1549,7 +1672,18 @@ struct CollectiveBus::Impl {
               fail_lane(lane, bus_wc_error(wc));
               break;
             }
-            if (bus_wr_kind(wc.wr_id) != BusWr::kDoorbell) continue;
+            if (bus_wr_kind(wc.wr_id) != BusWr::kDoorbell) {
+              // The payload WR's own CQE: which slot's recv buffer
+              // consumed THIS payload — the RQ-order ground truth for
+              // the placement hunt (the doorbell CE below names its own
+              // slot; if the two ever diverge for one message, the RQ
+              // alternation is broken).
+              DGPP_LOG_DEBUG(
+                  "payload CE: myrank={} peer={} lane={} pool={} slot={}",
+                  opt.my_rank, lane.stats.peer_rank, lane.stats.lane, pool_i,
+                  bus_wr_slot(wc.wr_id));
+              continue;
+            }
             const uint32_t slot = bus_wr_slot(wc.wr_id);
             RecvSlot& rs = lane.recv[pool_i][slot];
             // RC ordering: the payload CQE preceded this doorbell CQE on

@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <vector>
 
 #include "common/log.hpp"
@@ -207,9 +208,29 @@ inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
   }
   if (allreduce_wait(&err) == 0)
     throw std::runtime_error("bus_greedy_pick broadcast: " + err);
-  return static_cast<int32_t>(scratch[0]) |
-         (static_cast<int32_t>(scratch[1]) << 6) |
-         (static_cast<int32_t>(scratch[2]) << 12);
+  const int32_t decoded = static_cast<int32_t>(scratch[0]) |
+                          (static_cast<int32_t>(scratch[1]) << 6) |
+                          (static_cast<int32_t>(scratch[2]) << 12);
+  // Load-bearing readback invariant: every rank folds an identical
+  // candidate table (the allreduce is bitwise-stable by contract), so
+  // every rank computes the same winner and every rank must decode rank
+  // 0's broadcast of it. A mismatch means THIS rank's broadcast-phase
+  // readback is corrupt — the 2026-09-01 fabric race folded
+  // boundary-class bf16 into the digit slots on one rank while its peers
+  // were correct; this check turns that silent corruption into a loud,
+  // located failure at the exact collective, on the exact rank.
+  if (decoded != winner) {
+    std::string words;
+    for (size_t i = 0; i < gather_elems; ++i) {
+      if (i) words += ",";
+      words += std::format("{:#06x}", scratch[i]);
+    }
+    throw std::runtime_error(
+        std::format("bus_greedy_pick: broadcast readback corrupt on rank {} "
+                    "(winner {} decoded {}): scratch[{}]",
+                    rank, winner, decoded, words));
+  }
+  return decoded;
 }
 
 }  // namespace dgpp

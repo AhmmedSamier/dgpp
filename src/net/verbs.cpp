@@ -279,13 +279,15 @@ BusLaneEndpoint RcLane::endpoint() const {
 bool RcLane::post_send_pair(BusPool pool, uint32_t slot, uint32_t seq,
                             uint32_t len, std::string* error,
                             const void* payload_local, uint32_t payload_lkey,
-                            uint32_t ctl) {
+                            uint32_t ctl, uint64_t payload_hash) {
   ibv_qp* qp = qp_[pool == BusPool::kLatency ? 0 : 1];
   uint8_t* payload = layout_.send_payload(slab_, pool, slot);
   StartSlot* doorbell = layout_.send_doorbell(slab_, pool, slot);
-  // Publish order: len and ctl first, seq last (readers acquire on seq and
-  // then read them — the same discipline as FlagAck), payload bytes
-  // precede all three.
+  // Publish order: hash, len and ctl first, seq last (readers acquire on
+  // seq and then read them — the same discipline as FlagAck), payload
+  // bytes precede all three. The hash rides the same doorbell DMA as
+  // seq, so a claim that acquires seq sees the placement gate's target.
+  doorbell->hash = payload_hash;
   doorbell->len = len;
   doorbell->ctl = ctl;
   std::atomic_thread_fence(std::memory_order_release);

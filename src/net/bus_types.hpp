@@ -53,9 +53,18 @@ inline BusWr bus_wr_kind(uint64_t wr_id) {
 // the flag protocol uses. Payload length must be a multiple of 8.
 constexpr uint64_t kFoldMultiplier = 0x9E3779B97F4A7C15ULL;
 
+// The positional fold: (word + position + 1) * golden-ratio, XOR-combined.
+// The plain XOR-of-(w*M) canceled identical words — a uniform 4-word
+// payload folded to 0 exactly like all-zeros, and the 2026-09-01 hunt
+// watched a stale uniform payload pass a placement gate meant to catch it.
+// The position mix breaks every uniform-cancel; the XOR combine keeps the
+// result order-independent and bit-replicable on host and device (the
+// kernels' strided partials XOR the same per-position contributions).
+// Payload length must be a multiple of 8.
 inline uint64_t bus_fold64(const uint64_t* words, size_t word_count) {
   uint64_t hash = 0;
-  for (size_t i = 0; i < word_count; ++i) hash ^= words[i] * kFoldMultiplier;
+  for (size_t i = 0; i < word_count; ++i)
+    hash ^= (words[i] + i + 1) * kFoldMultiplier;
   return hash;
 }
 

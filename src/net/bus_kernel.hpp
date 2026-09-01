@@ -93,9 +93,27 @@ struct alignas(64) BusAllReduceCtl {
   uint32_t dbg_first_cell = 0;
   uint32_t dbg_first_len = 0;
   uint32_t dbg_first_seq = 0;
+  // PLACEMENT-gate telemetry (the 2026-09-01 hunt's fix): how many claims
+  // had to WAIT for the payload's DMA placement to become visible after
+  // the doorbell did (the race the gate exists to close — any nonzero
+  // count in a passing run is live proof the race was real), and the
+  // total spin iterations those waits took.
+  uint32_t dbg_gate_waits = 0;
+  uint32_t dbg_gate_spins = 0;
+  // Per-claim records (all rounds, not just the first): the kernel's
+  // ACTUAL claimed cells with their doors' len/seq/hash-low — the
+  // engine's stall dump reads these to print what the kernel really
+  // claimed (the engine's own claim slots are send-side bookkeeping
+  // and do not track the kernel's scan). One entry per round, in claim
+  // order; 0 = no claim in that slot.
+  uint32_t dbg_cl_cell[3] = {};
+  uint32_t dbg_cl_len[3] = {};
+  uint32_t dbg_cl_seq[3] = {};
+  uint32_t dbg_cl_hash[3] = {};  // the claimed door's hash, low 32 bits
+  uint64_t pad3 = 0;
 };
-static_assert(sizeof(BusAllReduceCtl) == 64,
-              "BusAllReduceCtl must occupy one cache line");
+static_assert(sizeof(BusAllReduceCtl) == 128,
+              "BusAllReduceCtl occupies its two cache lines");
 
 // Everything the kernel needs, built by the engine at claim time.
 struct BusAllReduceView {

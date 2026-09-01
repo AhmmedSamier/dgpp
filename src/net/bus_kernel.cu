@@ -13,6 +13,30 @@ namespace {
 
 constexpr int kConsumerThreads = 256;
 
+// PLACEMENT-visibility loaders (the 2026-09-01 hunt's root cause): the
+// NIC places doorbells and payloads into host DRAM with DMA writes the
+// GPU's caches do not snoop — a PLAIN cached load of a pinned cell can
+// return pre-arrival bytes forever (the placement gate spun 55M
+// iterations on zeros the CPU could see beside them; the pre-gate
+// kernels folded the same stale lines into garbage). Every read of
+// NIC-written memory follows the doorbell polls' system-scope
+// discipline. (atomic_ref wants non-const; the loads are read-only.)
+__device__ inline uint32_t sys_load_u32(const uint32_t* p) {
+  cuda::atomic_ref<uint32_t, cuda::thread_scope_system> ref(
+      *const_cast<uint32_t*>(p));
+  return ref.load(cuda::memory_order_relaxed);
+}
+__device__ inline uint64_t sys_load_u64(const uint64_t* p) {
+  cuda::atomic_ref<uint64_t, cuda::thread_scope_system> ref(
+      *const_cast<uint64_t*>(p));
+  return ref.load(cuda::memory_order_relaxed);
+}
+__device__ inline uint16_t sys_load_u16(const uint16_t* p) {
+  cuda::atomic_ref<uint16_t, cuda::thread_scope_system> ref(
+      *const_cast<uint16_t*>(p));
+  return ref.load(cuda::memory_order_relaxed);
+}
+
 using FlagRef = cuda::atomic_ref<int, cuda::thread_scope_block>;
 
 // Persistent consumer. Every iteration: all threads scan a subset of the
@@ -105,7 +129,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_consumer_kernel(
     uint64_t h = 0;
     for (size_t i = static_cast<size_t>(threadIdx.x); i < words;
          i += kConsumerThreads)
-      h ^= base[i] * kFoldMultiplier;
+      h ^= (sys_load_u64(&base[i]) + i + 1) * kFoldMultiplier;
     s_hash[threadIdx.x] = h;
     __syncthreads();
 
@@ -146,6 +170,9 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
   __shared__ size_t s_words[kBusMaxPeers];
   __shared__ const uint16_t* s_payload[kBusMaxPeers];
   __shared__ uint64_t s_hash[kConsumerThreads];
+  __shared__ uint64_t s_hash_want;   // the claimed door's placement-gate hash
+  __shared__ int s_gate_matched;     // 1 once the payload folds to s_hash_want
+  __shared__ int s_round;            // claim records filled so far
   __shared__ int s_go;    // 0 none, >0 = flat cell index + 1
   __shared__ int s_stop;  // any exit condition
   __shared__ int s_failed;
@@ -157,6 +184,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
   if (threadIdx.x == 0) {
     s_stop = 0;
     s_failed = 0;
+    s_round = 0;
   }
   __syncthreads();
 
@@ -231,7 +259,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
       // blind claim would fold the wrong collective's payload into ours
       // and starve its own kernel (the M6 greedy-loop corruption; at
       // fabric skew, the gen-1825 wedge).
-      if (door->ctl != ctl_seq) continue;
+      if (sys_load_u32(&door->ctl) != ctl_seq) continue;
       const FlagAck* ack = &v.recv[view_idx].ack_lat[slot];
       if (seq == ack->seq) continue;  // already consumed
       // TEMP hunt stamp: the go-ref CAS winner records the FIRST claim's
@@ -248,7 +276,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
           atomicExch(reinterpret_cast<unsigned*>(&ctl->dbg_first_seq), seq);
         }
         s_seq[peer] = seq;
-        s_words[peer] = door->len / 8;
+        s_words[peer] = sys_load_u32(&door->len) / 8;
       }
     }
     __syncthreads();
@@ -262,6 +290,16 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
     // Fold the claimed payload (credit-hash continuity: the engine's
     // recycle harvests this into the peer's credit WRITE), then publish
     // the standard ack — hash/cycles first, seq last (release).
+    // PLACEMENT GATE: the doorbell's DMA placement can become visible
+    // before the payload's own placement (RC's CQE ordering protects the
+    // engine, not this cell-polling kernel — the 2026-09-01 hunt: a
+    // fresh, ctl-correct doorbell whose payload buffer still read
+    // virgin/stale bytes). Spin until the payload folds to the door's
+    // hash; a stale buffer folds to the previous generation's value and
+    // cannot pass. The wait is bounded by the collective deadline (a
+    // never-landing payload is a lost message — the failure paths own
+    // that), and counted for the record: dbg_gate_waits > 0 in a
+    // passing run is live proof the race fired and the gate held.
     const int cell = go - 1;
     const int view_idx = cell / lat_slots_per_view;
     const int slot = cell % lat_slots_per_view;
@@ -269,10 +307,50 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
     const BusRecvView& rv = v.recv[view_idx];
     const uint64_t* base = rv.payload_lat +
                            static_cast<size_t>(slot) * (rv.lat_slot_bytes / 8);
-    uint64_t h = 0;
-    for (size_t i = threadIdx.x; i < s_words[peer]; i += kConsumerThreads)
-      h ^= base[i] * kFoldMultiplier;
-    s_hash[threadIdx.x] = h;
+    const StartSlot* door = &v.recv[view_idx].doorbell_lat[slot];
+    if (threadIdx.x == 0) {
+      s_hash_want = sys_load_u64(&door->hash);
+      s_gate_matched = 0;
+      // The claim record for this round (the hunt's stall dump reads it):
+      // the kernel's ACTUAL cell + its door's triple.
+      const int rn = s_round < 3 ? s_round : 2;
+      ctl->dbg_cl_cell[rn] = static_cast<uint32_t>(cell + 1);
+      ctl->dbg_cl_len[rn] = sys_load_u32(&door->len);
+      ctl->dbg_cl_seq[rn] = s_seq[peer];
+      ctl->dbg_cl_hash[rn] = static_cast<uint32_t>(
+          sys_load_u64(&door->hash) & 0xFFFFFFFFu);
+      s_round = rn + 1;
+    }
+    __syncthreads();
+    for (int spin = 0;; ++spin) {
+      uint64_t h = 0;
+      for (size_t i = threadIdx.x; i < s_words[peer]; i += kConsumerThreads)
+        h ^= (sys_load_u64(&base[i]) + i + 1) * kFoldMultiplier;
+      s_hash[threadIdx.x] = h;
+      __syncthreads();
+      if (threadIdx.x == 0) {
+        uint64_t total_hash = 0;
+        for (int t = 0; t < kConsumerThreads; ++t) total_hash ^= s_hash[t];
+        if (total_hash == s_hash_want) {
+          s_gate_matched = 1;
+        } else {
+          // thread 0 is the gate's only writer; the engine reads after the
+          // done stamp (release) — plain increments are ordered and cheap.
+          if (spin == 0) ctl->dbg_gate_waits += 1;
+          ctl->dbg_gate_spins += 1;
+        }
+      }
+      __syncthreads();
+      if (s_gate_matched != 0) break;
+      if (stop_ref.load(cuda::memory_order_relaxed) != 0 ||
+          clock64() - start > deadline_cycles) {
+        s_failed = 1;
+        stop_ref.store(1, cuda::memory_order_relaxed);
+        break;
+      }
+      flag_poll_pause();
+    }
+    if (s_gate_matched == 0) continue;  // deadline: exit via the loop top
     __syncthreads();
     if (threadIdx.x == 0) {
       uint64_t total_hash = 0;
@@ -304,7 +382,11 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
         // r (below us) or r-1 (above us).
         const uint16_t* vec =
             r == my_rank ? local : s_payload[r < my_rank ? r : r - 1];
-        acc += bf16_to_f32(vec[i]);
+        // Peer vectors are NIC-placed bytes: system-scope loads (a
+        // cached line can predate the DMA placement — the corruption's
+        // root). Our own `local` is ours alone; plain reads suffice.
+        acc += r == my_rank ? bf16_to_f32(vec[i])
+                            : bf16_to_f32(sys_load_u16(&vec[i]));
       }
       dst[i] = __float2bfloat16(acc);
     }
@@ -351,6 +433,9 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
   __shared__ size_t s_words[kBusMaxPeers];
   __shared__ const uint16_t* s_payload[kBusMaxPeers];
   __shared__ uint64_t s_hash[kConsumerThreads];
+  __shared__ uint64_t s_hash_want;   // the claimed door's placement-gate hash
+  __shared__ int s_gate_matched;     // 1 once the payload folds to s_hash_want
+  __shared__ int s_round;            // claim records filled so far
   __shared__ int s_go;    // 0 none, >0 = flat cell index + 1
   __shared__ int s_stop;  // any exit condition
   __shared__ int s_failed;
@@ -362,6 +447,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
   if (threadIdx.x == 0) {
     s_stop = 0;
     s_failed = 0;
+    s_round = 0;
   }
   __syncthreads();
 
@@ -420,7 +506,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
       if (seq == 0) continue;
       // Generation gate (see bus_allreduce_kernel's claim — the graph
       // kernel must not eat a neighbor replay's early doorbell either).
-      if (door->ctl != gen) continue;
+      if (sys_load_u32(&door->ctl) != gen) continue;
       const FlagAck* ack = &v.recv[view_idx].ack_lat[slot];
       if (seq == ack->seq) continue;  // already consumed
       int expected = 0;
@@ -428,7 +514,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
                                          cuda::memory_order_relaxed,
                                          cuda::memory_order_relaxed)) {
         s_seq[peer] = seq;
-        s_words[peer] = door->len / 8;
+        s_words[peer] = sys_load_u32(&door->len) / 8;
       }
     }
     __syncthreads();
@@ -446,10 +532,51 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
     const BusRecvView& rv = v.recv[view_idx];
     const uint64_t* base = rv.payload_lat +
                            static_cast<size_t>(slot) * (rv.lat_slot_bytes / 8);
-    uint64_t h = 0;
-    for (size_t i = threadIdx.x; i < s_words[peer]; i += kConsumerThreads)
-      h ^= base[i] * kFoldMultiplier;
-    s_hash[threadIdx.x] = h;
+    // PLACEMENT gate (identical to the eager kernel's — see there).
+    const StartSlot* door = &v.recv[view_idx].doorbell_lat[slot];
+    if (threadIdx.x == 0) {
+      s_hash_want = sys_load_u64(&door->hash);
+      s_gate_matched = 0;
+      // The claim record for this round (the hunt's stall dump reads it):
+      // the kernel's ACTUAL cell + its door's triple.
+      const int rn = s_round < 3 ? s_round : 2;
+      ctl->dbg_cl_cell[rn] = static_cast<uint32_t>(cell + 1);
+      ctl->dbg_cl_len[rn] = sys_load_u32(&door->len);
+      ctl->dbg_cl_seq[rn] = s_seq[peer];
+      ctl->dbg_cl_hash[rn] = static_cast<uint32_t>(
+          sys_load_u64(&door->hash) & 0xFFFFFFFFu);
+      s_round = rn + 1;
+    }
+    __syncthreads();
+    for (int spin = 0;; ++spin) {
+      uint64_t h = 0;
+      for (size_t i = threadIdx.x; i < s_words[peer]; i += kConsumerThreads)
+        h ^= (sys_load_u64(&base[i]) + i + 1) * kFoldMultiplier;
+      s_hash[threadIdx.x] = h;
+      __syncthreads();
+      if (threadIdx.x == 0) {
+        uint64_t total_hash = 0;
+        for (int t = 0; t < kConsumerThreads; ++t) total_hash ^= s_hash[t];
+        if (total_hash == s_hash_want) {
+          s_gate_matched = 1;
+        } else {
+          // thread 0 is the gate's only writer; the engine reads after the
+          // done stamp (release) — plain increments are ordered and cheap.
+          if (spin == 0) ctl->dbg_gate_waits += 1;
+          ctl->dbg_gate_spins += 1;
+        }
+      }
+      __syncthreads();
+      if (s_gate_matched != 0) break;
+      if (stop_ref.load(cuda::memory_order_relaxed) != 0 ||
+          clock64() - start > deadline_cycles) {
+        s_failed = 1;
+        stop_ref.store(1, cuda::memory_order_relaxed);
+        break;
+      }
+      flag_poll_pause();
+    }
+    if (s_gate_matched == 0) continue;
     __syncthreads();
     if (threadIdx.x == 0) {
       uint64_t total_hash = 0;
@@ -473,7 +600,11 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
       for (int r = 0; r < v.send_peers + 1; ++r) {
         const uint16_t* vec =
             r == my_rank ? local : s_payload[r < my_rank ? r : r - 1];
-        acc += bf16_to_f32(vec[i]);
+        // Peer vectors are NIC-placed bytes: system-scope loads (a
+        // cached line can predate the DMA placement — the corruption's
+        // root). Our own `local` is ours alone; plain reads suffice.
+        acc += r == my_rank ? bf16_to_f32(vec[i])
+                            : bf16_to_f32(sys_load_u16(&vec[i]));
       }
       dst[i] = __float2bfloat16(acc);
     }
@@ -542,6 +673,11 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
   __shared__ uint32_t s_seq;   // claimed doorbell seq
   __shared__ uint32_t s_len;   // claimed doorbell len (bytes)
   __shared__ int s_total_arrived;
+  // PLACEMENT gate state (see the one-shot kernel's claim): the door's
+  // hash target and the matched flag, plus the per-thread fold sums.
+  __shared__ uint64_t s_gate_hash[kConsumerThreads];
+  __shared__ uint64_t s_gate_want;
+  __shared__ int s_gate_matched;
   __shared__ int s_expected[kBusMaxPeersSized];
   // Per (peer, lane): bulk arrivals consumed before this segment, summed
   // from our own ack cells — this kernel chain is their only writer, so
@@ -707,7 +843,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
       // separates THIS collective's phases; a NEXT collective's early
       // bulk pair would be claimed and acked away from its own kernel
       // just as eagerly — see the one-shot kernel's gate).
-      if (door->ctl != ctl_seq) continue;
+      if (sys_load_u32(&door->ctl) != ctl_seq) continue;
       const uint32_t ack_seq = flag_load_acquire(
           const_cast<uint32_t*>(&v.recv[view_idx].ack_bulk[slot].seq));
       // Bring-up scan record (see BKFIN): what THIS kernel's acquire
@@ -747,7 +883,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
                                          cuda::memory_order_relaxed,
                                          cuda::memory_order_relaxed)) {
         s_seq = seq;
-        s_len = door->len;
+        s_len = sys_load_u32(&door->len);
       }
     }
     __syncthreads();
@@ -763,10 +899,54 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
     const int lane = view_idx % lanes;
     const int peer = view_idx / lanes;
     const BusRecvView& rv = v.recv[view_idx];
+    const StartSlot* door = &rv.doorbell_bulk[slot];
     const uint16_t* payload =
         reinterpret_cast<const uint16_t*>(
             rv.payload_bulk +
             static_cast<size_t>(slot) * (rv.bulk_slot_bytes / 8));
+
+    // PLACEMENT GATE (identical contract to the one-shot kernel's claim):
+    // the door's DMA placement may be visible before the stripe's own
+    // placement — spin until the payload folds to the door's hash before
+    // ANY consumption (the AG copy below reads it directly; the RS fold
+    // re-reads it at exit, safely AFTER this proof, and the deferred ack
+    // keeps the sender from overwriting the slot until then).
+    if (threadIdx.x == 0) {
+      s_gate_want = sys_load_u64(&door->hash);
+      s_gate_matched = 0;
+    }
+    __syncthreads();
+    for (int spin = 0;; ++spin) {
+      uint64_t h = 0;
+      for (uint32_t w = threadIdx.x; w < s_len / 8; w += kConsumerThreads)
+        h ^= (sys_load_u64(reinterpret_cast<const uint64_t*>(payload) + w) +
+              w + 1) * kFoldMultiplier;
+      s_gate_hash[threadIdx.x] = h;
+      __syncthreads();
+      if (threadIdx.x == 0) {
+        uint64_t total_hash = 0;
+        for (int t = 0; t < kConsumerThreads; ++t)
+          total_hash ^= s_gate_hash[t];
+        if (total_hash == s_gate_want) {
+          s_gate_matched = 1;
+        } else {
+          // thread 0 is the gate's only writer; the engine reads after the
+          // done stamp (release) — plain increments are ordered and cheap.
+          if (spin == 0) ctl->dbg_gate_waits += 1;
+          ctl->dbg_gate_spins += 1;
+        }
+      }
+      __syncthreads();
+      if (s_gate_matched != 0) break;
+      if (stop_ref.load(cuda::memory_order_relaxed) != 0 ||
+          clock64() - start > deadline_cycles) {
+        s_failed = 1;
+        stop_ref.store(1, cuda::memory_order_relaxed);
+        break;
+      }
+      flag_poll_pause();
+    }
+    if (s_gate_matched == 0) continue;  // deadline: exit via the loop top
 
     // AG lands the arrival directly: it is peer p's sub-range stripe k,
     // a pure copy into dst (byte-identical for every receiver, so a
@@ -781,7 +961,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
       const uint32_t gs = plan.seg_first + plan.out_base[peer] + k;
       uint16_t* d = dst + static_cast<uint64_t>(gs) * stripe;
       for (uint32_t e = threadIdx.x; e < s_len / 2; e += kConsumerThreads)
-        d[e] = payload[e];
+        d[e] = sys_load_u16(&payload[e]);
     }
     __syncthreads();
 
@@ -856,7 +1036,8 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
           const uint16_t* vec = r == my_rank
                                     ? local
                                     : s_ptr[k][r < my_rank ? r : r - 1];
-          acc += bf16_to_f32(vec[e]);
+          acc += r == my_rank ? bf16_to_f32(vec[e])
+                              : bf16_to_f32(sys_load_u16(&vec[e]));
         }
         // The bit-reinterpret is load-bearing: __nv_bfloat16 converts to
         // uint16_t through its float operator (integer truncation — the
