@@ -425,6 +425,7 @@ class GlmDiagnosticModel {
   float* moe_trace_biased_ = nullptr;   // [n_moe_layers_ * kDecodeRows * E]
   uint16_t* streams_[2] = {nullptr, nullptr};  // [T, 4, hidden]
   uint16_t* post_ = nullptr;                   // [T, 4]
+  float* mhc_logits_ = nullptr;                // [T, 24] mHC dots scratch
   uint16_t* comb_ = nullptr;                   // [T, 4, 4]
   uint16_t* collapsed_ = nullptr;              // [T, hidden] (also final mean)
   uint16_t* normed_ = nullptr;                 // [T, hidden] (also final out)

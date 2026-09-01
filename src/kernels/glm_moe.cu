@@ -8,54 +8,99 @@
 namespace dgpp {
 namespace {
 
-constexpr int kRouterThreads = 256;
+constexpr int kRouterDotThreads = 128;
+constexpr int kRouterSelectThreads = 32;
 constexpr int kElemThreads = 256;
 
 __device__ inline float sigmoidf_acc(float x) {
   return 1.0f / (1.0f + expf(-x));
 }
 
-// One block per token; one thread fully owns each expert's dot (experts are
-// strided by thread count), so every expert's logit has one fixed sequential
-// reduction order regardless of launch shape. Thread 0 then selects top-k
-// (biased score descending, ties to the lower id), sorts the k ids ascending
-// — the accumulation order — and normalizes weights with per-element
-// division, matching the reference's elementwise ops.
-__global__ void moe_router_kernel(const uint16_t* __restrict__ hidden,
-                                  const uint16_t* __restrict__ gate,
-                                  const float* __restrict__ bias,
-                                  int32_t* __restrict__ ids,
-                                  float* __restrict__ weights,
-                                  float* __restrict__ biased_out, int tokens,
-                                  int hidden_dim, int n_experts, int top_k,
-                                  float routed_scaling_factor,
-                                  int norm_topk) {
-  extern __shared__ float smem[];
-  float* scores = smem;            // sigmoid scores
-  float* biased = smem + n_experts;
-
-  const int token = blockIdx.x;
-  if (token >= tokens) return;
+// The router in two kernels (2026-09-01, the T=1 profile). The original
+// one-block-per-token design put every expert's 4096-long dot on ONE SM
+// with each thread striding a different weight row (1/16 sector
+// efficiency) — 617us per layer at decode, 26ms of a 190ms step for a
+// 2.4MB read that costs 10us at line rate. Here each block owns ONE
+// (expert, token) pair: the block stages both rows through shared memory
+// with coalesced 16-byte loads, then thread 0 runs the SAME sequential
+// FMA chain over k the old kernel ran — the per-expert reduction order is
+// unchanged (fixed sequential, launch-shape independent), so the logits,
+// the selection, and every near-tie land on the identical bits. The chain
+// is ~7us of dependent FMAs; 288 blocks spread it over every SM.
+__global__ void moe_router_dots_kernel(const uint16_t* __restrict__ hidden,
+                                       const uint16_t* __restrict__ gate,
+                                       const float* __restrict__ bias,
+                                       float* __restrict__ scores,
+                                       float* __restrict__ biased, int tokens,
+                                       int hidden_dim, int n_experts,
+                                       int vector_loads) {
+  extern __shared__ uint16_t rows_smem[];  // [2][hidden_dim]: x row | w row
+  uint16_t* sx = rows_smem;
+  uint16_t* sw = rows_smem + hidden_dim;
+  const int e = blockIdx.x;
+  const int token = blockIdx.y;
+  if (e >= n_experts || token >= tokens) return;
   const uint16_t* x = hidden + static_cast<size_t>(token) * hidden_dim;
+  const uint16_t* w = gate + static_cast<size_t>(e) * hidden_dim;
 
-  for (int e = threadIdx.x; e < n_experts; e += kRouterThreads) {
-    const uint16_t* w = gate + static_cast<size_t>(e) * hidden_dim;
-    float dot = 0.f;
-    for (int k = 0; k < hidden_dim; ++k)
-      dot = __fmaf_rn(bf16_bits_to_float(x[k]), bf16_bits_to_float(w[k]),
-                      dot);
-    const float s = 1.0f / (1.0f + expf(-dot));
-    scores[e] = s;
-    biased[e] = s + bias[e];
-    // Export BEFORE the selection loop scribbles -INFINITY into the smem
-    // copy: near-tie certification needs every expert's true biased score,
-    // not just the selected ones'.
-    if (biased_out)
-      biased_out[static_cast<size_t>(token) * n_experts + e] = biased[e];
+  if (vector_loads) {
+    // 16-byte vectors: the launcher verified 16B alignment of both bases
+    // and hidden_dim % 8 == 0 (row strides stay aligned).
+    const int vecs = hidden_dim / 8;
+    const uint4* xv = reinterpret_cast<const uint4*>(x);
+    const uint4* wv = reinterpret_cast<const uint4*>(w);
+    uint4* sxv = reinterpret_cast<uint4*>(sx);
+    uint4* swv = reinterpret_cast<uint4*>(sw);
+    for (int i = threadIdx.x; i < vecs; i += kRouterDotThreads) {
+      sxv[i] = xv[i];
+      swv[i] = wv[i];
+    }
+  } else {
+    for (int i = threadIdx.x; i < hidden_dim; i += kRouterDotThreads) {
+      sx[i] = x[i];
+      sw[i] = w[i];
+    }
   }
   __syncthreads();
-
   if (threadIdx.x != 0) return;
+
+  // The one fixed sequential reduction order (k ascending) — the bits the
+  // old kernel produced, from the same bf16 operands.
+  float dot = 0.f;
+  for (int k = 0; k < hidden_dim; ++k)
+    dot = __fmaf_rn(bf16_bits_to_float(sx[k]), bf16_bits_to_float(sw[k]), dot);
+  const float s = 1.0f / (1.0f + expf(-dot));
+  const size_t at = static_cast<size_t>(token) * n_experts + e;
+  scores[at] = s;
+  biased[at] = s + bias[e];
+}
+
+// One block per token: top-k over the biased scores (strict > keeps the
+// LOWER expert id on ties), ids sorted ascending (the accumulation order),
+// weights normalized with per-element division — the reference's
+// elementwise ops, op for op. The selection scribbles -INFINITY into a
+// shared-memory COPY so the exported biased row (near-tie certification
+// reads every expert's true score) survives intact.
+__global__ void moe_router_select_kernel(const float* __restrict__ scores,
+                                         const float* __restrict__ biased,
+                                         int32_t* __restrict__ ids,
+                                         float* __restrict__ weights,
+                                         int tokens, int n_experts, int top_k,
+                                         float routed_scaling_factor,
+                                         int norm_topk) {
+  extern __shared__ float sel_smem[];  // [2][n_experts]: scores | biased
+  float* s_scores = sel_smem;
+  float* s_biased = sel_smem + n_experts;
+  const int token = blockIdx.x;
+  if (token >= tokens) return;
+  const size_t row = static_cast<size_t>(token) * n_experts;
+  for (int e = threadIdx.x; e < n_experts; e += kRouterSelectThreads) {
+    s_scores[e] = scores[row + e];
+    s_biased[e] = biased[row + e];
+  }
+  __syncthreads();
+  if (threadIdx.x != 0) return;
+
   int sel[16];
   float wsel[16];
   for (int r = 0; r < top_k; ++r) {
@@ -63,14 +108,14 @@ __global__ void moe_router_kernel(const uint16_t* __restrict__ hidden,
     float bv = -INFINITY;
     for (int e = 0; e < n_experts; ++e) {
       // strict >: equal biased scores keep the LOWER expert id.
-      if (biased[e] > bv) {
-        bv = biased[e];
+      if (s_biased[e] > bv) {
+        bv = s_biased[e];
         best = e;
       }
     }
     sel[r] = best;
-    wsel[r] = scores[best];
-    biased[best] = -INFINITY;
+    wsel[r] = s_scores[best];
+    s_biased[best] = -INFINITY;
   }
   // Ascending expert order (insertion sort; top_k <= 16).
   for (int i = 1; i < top_k; ++i) {
@@ -317,25 +362,42 @@ __global__ void moe_slot_accum_kernel(
 }
 
 void check_router_args(const uint16_t* hidden, const uint16_t* gate,
-                       const float* bias, int32_t* ids, float* weights) {
-  if (!hidden || !gate || !bias || !ids || !weights)
+                       const float* bias, int32_t* ids, float* weights,
+                       const float* scores, const float* biased) {
+  if (!hidden || !gate || !bias || !ids || !weights || !scores || !biased)
     throw std::invalid_argument("moe_router: null pointer");
+  if (scores == biased)
+    throw std::invalid_argument("moe_router: scores and biased must not alias");
+}
+
+bool aligned16(const void* p) {
+  return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
 }
 
 }  // namespace
 
 void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
                        const float* bias, int32_t* ids, float* weights,
-                       const GlmMoeConfig& cfg, int tokens,
-                       cudaStream_t stream, float* biased_out) {
+                       float* scores, float* biased, const GlmMoeConfig& cfg,
+                       int tokens, cudaStream_t stream) {
   GlmMoeConfig::validate_config(cfg);
   if (tokens <= 0) return;
-  check_router_args(hidden, gate, bias, ids, weights);
-  const size_t smem = 2 * static_cast<size_t>(cfg.n_experts) * sizeof(float);
-  moe_router_kernel<<<tokens, kRouterThreads, smem, stream>>>(
-      hidden, gate, bias, ids, weights, biased_out, tokens, cfg.hidden,
-      cfg.n_experts, cfg.top_k, cfg.routed_scaling_factor,
-      cfg.norm_topk_prob ? 1 : 0);
+  check_router_args(hidden, gate, bias, ids, weights, scores, biased);
+  if (cfg.n_experts > 65535 || tokens > 65535)
+    throw std::invalid_argument("moe_router: grid dimension overflow");
+  const int vector_loads =
+      (cfg.hidden % 8 == 0 && aligned16(hidden) && aligned16(gate)) ? 1 : 0;
+  const size_t dots_smem = 2 * static_cast<size_t>(cfg.hidden) * sizeof(uint16_t);
+  const dim3 dots_grid(static_cast<unsigned>(cfg.n_experts),
+                       static_cast<unsigned>(tokens));
+  moe_router_dots_kernel<<<dots_grid, kRouterDotThreads, dots_smem, stream>>>(
+      hidden, gate, bias, scores, biased, tokens, cfg.hidden, cfg.n_experts,
+      vector_loads);
+  DGPP_CUDA_OK(cudaGetLastError());
+  const size_t sel_smem = 2 * static_cast<size_t>(cfg.n_experts) * sizeof(float);
+  moe_router_select_kernel<<<tokens, kRouterSelectThreads, sel_smem, stream>>>(
+      scores, biased, ids, weights, tokens, cfg.n_experts, cfg.top_k,
+      cfg.routed_scaling_factor, cfg.norm_topk_prob ? 1 : 0);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

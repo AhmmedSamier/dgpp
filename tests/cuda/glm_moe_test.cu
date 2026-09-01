@@ -73,12 +73,16 @@ void check_router(const GlmMoeConfig& cfg, int tokens, uint64_t seed) {
   DGPP_CUDA_OK(cudaMallocManaged(&d_bias, bias.size() * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_ids, static_cast<size_t>(tokens) * K * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_w, static_cast<size_t>(tokens) * K * 4));
+  float* d_scores = nullptr;
+  float* d_biased = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&d_scores, static_cast<size_t>(tokens) * E * 4));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_biased, static_cast<size_t>(tokens) * E * 4));
   std::memcpy(d_hidden, hidden.data(), hidden.size() * 2);
   std::memcpy(d_gate, gate.data(), gate.size() * 2);
   std::memcpy(d_bias, bias.data(), bias.size() * 4);
 
-  dgpp::launch_moe_router(d_hidden, d_gate, d_bias, d_ids, d_w, cfg, tokens,
-                          nullptr);
+  dgpp::launch_moe_router(d_hidden, d_gate, d_bias, d_ids, d_w, d_scores,
+                          d_biased, cfg, tokens, nullptr);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
 
   GlmMoeRouterRef ref;
@@ -116,6 +120,8 @@ void check_router(const GlmMoeConfig& cfg, int tokens, uint64_t seed) {
   DGPP_CUDA_OK(cudaFree(d_bias));
   DGPP_CUDA_OK(cudaFree(d_ids));
   DGPP_CUDA_OK(cudaFree(d_w));
+  DGPP_CUDA_OK(cudaFree(d_scores));
+  DGPP_CUDA_OK(cudaFree(d_biased));
 
   require(hard == 0, "router id mismatch beyond near-tie certification");
   require(max_rel < 1e-5, "router weights within 1e-5 relative of oracle");
@@ -296,10 +302,15 @@ DGPP_TEST(moe_router_ties_break_to_lower_expert_id) {
   DGPP_CUDA_OK(cudaMallocManaged(&d_b, bias.size() * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_ids, static_cast<size_t>(tokens) * K * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_w, static_cast<size_t>(tokens) * K * 4));
+  float* d_scores = nullptr;
+  float* d_biased = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&d_scores, static_cast<size_t>(tokens) * E * 4));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_biased, static_cast<size_t>(tokens) * E * 4));
   std::memcpy(d_h, hidden.data(), hidden.size() * 2);
   std::memcpy(d_g, gate.data(), gate.size() * 2);
   std::memcpy(d_b, bias.data(), bias.size() * 4);
-  dgpp::launch_moe_router(d_h, d_g, d_b, d_ids, d_w, cfg, tokens, nullptr);
+  dgpp::launch_moe_router(d_h, d_g, d_b, d_ids, d_w, d_scores, d_biased, cfg,
+                          tokens, nullptr);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
 
   const float want_w = 0.5f / (8 * 0.5f) * 2.5f;
@@ -315,6 +326,8 @@ DGPP_TEST(moe_router_ties_break_to_lower_expert_id) {
   DGPP_CUDA_OK(cudaFree(d_b));
   DGPP_CUDA_OK(cudaFree(d_ids));
   DGPP_CUDA_OK(cudaFree(d_w));
+  DGPP_CUDA_OK(cudaFree(d_scores));
+  DGPP_CUDA_OK(cudaFree(d_biased));
   std::printf("[ OK ] router ties: experts 0..7, uniform weights\n");
 }
 

@@ -1,7 +1,8 @@
 #pragma once
 // Launchers for the mHC module kernels (DESIGN §7.3; semantics documented in
 // models/glm_mhc.hpp). All kernels are deterministic (fixed reduction order)
-// and CUDA-graph capturable: no scratch, no host reads, no dynamic smem.
+// and CUDA-graph capturable: caller-owned scratch only, no host reads, no
+// dynamic smem.
 #include <cuda_runtime.h>
 
 #include "models/glm_mhc.hpp"
@@ -15,10 +16,13 @@ namespace dgpp {
 //   post      bf16 [tokens, n] out     (block-output placement weights)
 //   comb      bf16 [tokens, n, n] out  (stream mixer, ~doubly stochastic)
 // pre is internal (consumed by the collapse) and not exported.
+// logits_scratch: f32 [tokens, cfg.coeff_rows()] device scratch the caller
+// owns — the hand-off between the per-coefficient dots kernel and the
+// finish kernel (two launches; see glm_mhc.cu for why).
 void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
                         const GlmMhcConfig& cfg, uint16_t* collapsed,
-                        uint16_t* post, uint16_t* comb, int tokens,
-                        cudaStream_t stream);
+                        uint16_t* post, uint16_t* comb, float* logits_scratch,
+                        int tokens, cudaStream_t stream);
 
 // Stream update after the sublayer: for every token,
 //   streams_out[i] = bf16(bf16(post[i] * sublayer_out)

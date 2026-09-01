@@ -10,13 +10,17 @@ namespace dgpp {
 
 // Router: hidden bf16 [tokens, hidden] -> ids int32 [tokens, top_k] in
 // ASCENDING expert order (the accumulation order the reference's index_add
-// produces), weights f32 [tokens, top_k] normalized and scaled. When
-// biased_out is non-null it receives the full biased score row
-// f32 [tokens, n_experts] (selection inputs; near-tie certification).
+// produces), weights f32 [tokens, top_k] normalized and scaled. Two
+// kernels: per-(expert, token) dots, then per-token selection. `scores`
+// and `biased` are f32 [tokens, n_experts] device buffers the caller owns:
+// scores is kernel-internal scratch (the sigmoid scores the selection reads
+// back), biased receives the full biased score row — the hand-off between
+// the two kernels AND the exported selection inputs (near-tie
+// certification needs every expert's true biased score).
 void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
                        const float* bias, int32_t* ids, float* weights,
-                       const GlmMoeConfig& cfg, int tokens,
-                       cudaStream_t stream, float* biased_out = nullptr);
+                       float* scores, float* biased, const GlmMoeConfig& cfg,
+                       int tokens, cudaStream_t stream);
 
 // swiglu with asymmetric clamps: gate clamp_max only, up clamp both; two
 // bf16 rounding points (silu result, then the product). n = rows*inter.

@@ -68,6 +68,7 @@ struct Case {
   float* d_scale = nullptr;
   uint16_t* d_collapsed = nullptr;
   uint16_t* d_post = nullptr;
+  float* d_logits = nullptr;  // launch_mhc_compute's dots scratch
   uint16_t* d_comb = nullptr;
   uint16_t* d_sub = nullptr;
   uint16_t* d_streams_out = nullptr;
@@ -81,6 +82,8 @@ struct Case {
     DGPP_CUDA_OK(cudaMallocManaged(&d_scale, 3 * 4));
     DGPP_CUDA_OK(cudaMallocManaged(&d_collapsed, static_cast<size_t>(tokens) * D * 2));
     DGPP_CUDA_OK(cudaMallocManaged(&d_post, static_cast<size_t>(tokens) * n * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(
+        &d_logits, static_cast<size_t>(tokens) * cfg.coeff_rows() * 4));
     DGPP_CUDA_OK(cudaMallocManaged(&d_comb, static_cast<size_t>(tokens) * n * n * 2));
     DGPP_CUDA_OK(cudaMallocManaged(&d_sub, sublayer_out.size() * 2));
     DGPP_CUDA_OK(cudaMallocManaged(&d_streams_out, streams.size() * 2));
@@ -94,7 +97,8 @@ struct Case {
   }
   void free_all() {
     cudaFree(d_streams); cudaFree(d_fn); cudaFree(d_base); cudaFree(d_scale);
-    cudaFree(d_collapsed); cudaFree(d_post); cudaFree(d_comb); cudaFree(d_sub);
+    cudaFree(d_collapsed); cudaFree(d_post); cudaFree(d_logits);
+    cudaFree(d_comb); cudaFree(d_sub);
     cudaFree(d_streams_out); cudaFree(d_mean);
   }
 };
@@ -196,7 +200,7 @@ void run_case(const Case& c, const char* label) {
   dgpp::glm_mhc_ref_compute(c.d_streams, c.host_w, c.cfg, c.tokens, ref);
 
   dgpp::launch_mhc_compute(c.d_streams, c.dev_w, c.cfg, c.d_collapsed,
-                           c.d_post, c.d_comb, c.tokens, nullptr);
+                           c.d_post, c.d_comb, c.d_logits, c.tokens, nullptr);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
 
   // post/comb: oracle rounded to bf16 (the choreography point).
@@ -296,7 +300,7 @@ DGPP_TEST(mhc_end_to_end_pipeline_is_deterministic) {
   c.alloc();
   auto pipeline = [&] {
     dgpp::launch_mhc_compute(c.d_streams, c.dev_w, c.cfg, c.d_collapsed,
-                             c.d_post, c.d_comb, c.tokens, nullptr);
+                             c.d_post, c.d_comb, c.d_logits, c.tokens, nullptr);
     dgpp::launch_mhc_stream_update(c.d_post, c.d_comb, c.d_sub, c.d_streams,
                                    c.d_streams_out, c.cfg, c.tokens,
                                    nullptr);

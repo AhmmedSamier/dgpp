@@ -12,33 +12,38 @@ constexpr int kThreads = 256;
 // n = 4 pinned by GlmMhcConfig::validate; static smem sized for exactly that.
 constexpr int kN = 4;
 constexpr int kCoeffs = (2 + kN) * kN;  // 24: pre[4] | post[4] | comb[16]
-constexpr int kReduce = kCoeffs + 1;    // + sum of squares
 
 __device__ inline float sigmoidf_acc(float x) {
   return 1.0f / (1.0f + expf(-x));
 }
 
-// One block per token. Phase A: cooperative sum-of-squares (pass 1) then the
-// 24 coefficient dots against the NORMED flat vector (pass 2 — the reference
-// normalizes every element before the linear, and we reproduce that rounding
-// order); Phase B: fixed-order sequential reduction across the 256 partials;
-// Phase C: thread 0 derives pre/post/comb (sigmoid/softmax/Sinkhorn in
-// registers) and everyone folds pre into the collapse.
-__global__ void mhc_compute_kernel(const uint16_t* __restrict__ streams,
-                                   const uint16_t* __restrict__ fn,
-                                   const float* __restrict__ base,
-                                   const float* __restrict__ scale,
-                                   uint16_t* __restrict__ collapsed,
-                                   uint16_t* __restrict__ post_out,
-                                   uint16_t* __restrict__ comb_out, int tokens,
-                                   int hidden, float hc_eps, float norm_eps,
-                                   int sinkhorn_iters) {
-  __shared__ float partial[kReduce][kThreads];
-  __shared__ float pre[kN];
+// The mHC site in two kernels (2026-09-01, the T=1 profile). The original
+// one-block-per-token kernel streamed the 24 x (4*hidden) coefficient
+// matrix (786KB at real dims) through ONE SM with one thread's worth of
+// loads in flight — 212us per site, 90 sites a step, 19ms of a 190ms
+// decode step for what is ~4us of reads at line rate. Split: the dots
+// kernel gives each COEFFICIENT its own block, the finish kernel derives
+// pre/post/comb and collapses. The numerics are the old kernel's bit for
+// bit: every thread computes the same strided partials (d = tid + 256*m,
+// FMA-sequential in m), thread 0 sums the 256 partials in the same
+// sequential order, and each block re-derives the identical inv_rms from
+// the identical sum-of-squares chain (deterministic, so 24 copies agree).
+//
+// dots kernel: grid (kCoeffs, tokens). Phase A: cooperative sum of squares
+// (pass 1) then THIS block's coefficient dot against the NORMED flat vector
+// (pass 2 — the reference normalizes every element before the linear, and
+// we reproduce that rounding order). Phase B: fixed-order sequential
+// reduction across the 256 partials -> logits[token][coeff].
+__global__ void mhc_dots_kernel(const uint16_t* __restrict__ streams,
+                                const uint16_t* __restrict__ fn,
+                                float* __restrict__ logits, int tokens,
+                                int hidden, float norm_eps) {
+  __shared__ float partial[kThreads];
   __shared__ float inv_rms;
 
-  const int token = blockIdx.x;
-  if (token >= tokens) return;
+  const int coeff = blockIdx.x;
+  const int token = blockIdx.y;
+  if (coeff >= kCoeffs || token >= tokens) return;
   const int K = kN * hidden;
   const uint16_t* x = streams + static_cast<size_t>(token) * K;
 
@@ -48,50 +53,60 @@ __global__ void mhc_compute_kernel(const uint16_t* __restrict__ streams,
     const float v = bf16_bits_to_float(x[d]);
     ssq = __fmaf_rn(v, v, ssq);
   }
-  partial[kCoeffs][threadIdx.x] = ssq;
-
-  // Pass 2 runs after the reduction publishes inv_rms — but the dots need
-  // the normalized values, so the dot pass itself waits for the barrier
-  // below. Simpler and faithful: reduce ssq first, sync, then dots.
+  partial[threadIdx.x] = ssq;
   __syncthreads();
   if (threadIdx.x == 0) {
     float s = 0.f;
     for (int t = 0; t < kThreads; ++t)
-      s += partial[kCoeffs][t];  // deterministic sequential order
+      s += partial[t];  // deterministic sequential order
     inv_rms = rsqrtf(s / static_cast<float>(K) + norm_eps);
   }
   __syncthreads();
   const float r = inv_rms;
 
-  // Pass 2: 24 dots against flat_norm[d] = round_bf16->f32(x[d]) * r,
-  // matching the reference's elementwise-normalized linear input.
-  float dots[kCoeffs];
-#pragma unroll
-  for (int i = 0; i < kCoeffs; ++i) dots[i] = 0.f;
+  // Pass 2: this coefficient's dot against flat_norm[d] = x[d] * r — the
+  // reference norm output is fp32 (not rounded to bf16) and stays fp32
+  // into the linear; x[d]*r in fp32 is exactly its per-element multiply.
+  const uint16_t* fn_row = fn + static_cast<size_t>(coeff) * K;
+  float dot = 0.f;
   for (int d = threadIdx.x; d < K; d += kThreads) {
-    // The reference norm output is fp32 (not rounded to bf16); it stays
-    // fp32 into the linear. x[d]*r in fp32, one rounding, exactly the
-    // reference's per-element multiply.
     const float v = bf16_bits_to_float(x[d]) * r;
-    const int fn_col = d;  // fn rows are the n*D flattened stream layout
-#pragma unroll
-    for (int i = 0; i < kCoeffs; ++i)
-      dots[i] = __fmaf_rn(
-          v, bf16_bits_to_float(fn[static_cast<size_t>(i) * K + fn_col]),
-          dots[i]);
+    dot = __fmaf_rn(v, bf16_bits_to_float(fn_row[d]), dot);
   }
-#pragma unroll
-  for (int i = 0; i < kCoeffs; ++i) partial[i][threadIdx.x] = dots[i];
+  __syncthreads();  // partial[] reuse: pass-1 reads are done
+  partial[threadIdx.x] = dot;
   __syncthreads();
+  if (threadIdx.x == 0) {
+    float s = 0.f;
+    for (int t = 0; t < kThreads; ++t) s += partial[t];
+    logits[static_cast<size_t>(token) * kCoeffs + coeff] = s;
+  }
+}
+
+// finish kernel: grid (tokens). Thread 0 derives pre/post/comb from the 24
+// logits (sigmoid/softmax/Sinkhorn in registers) and everyone folds pre
+// into the collapse.
+__global__ void mhc_finish_kernel(const uint16_t* __restrict__ streams,
+                                  const float* __restrict__ logits_in,
+                                  const float* __restrict__ base,
+                                  const float* __restrict__ scale,
+                                  uint16_t* __restrict__ collapsed,
+                                  uint16_t* __restrict__ post_out,
+                                  uint16_t* __restrict__ comb_out, int tokens,
+                                  int hidden, float hc_eps,
+                                  int sinkhorn_iters) {
+  __shared__ float pre[kN];
+
+  const int token = blockIdx.x;
+  if (token >= tokens) return;
+  const int K = kN * hidden;
+  const uint16_t* x = streams + static_cast<size_t>(token) * K;
 
   if (threadIdx.x == 0) {
     float logits[kCoeffs];
 #pragma unroll
-    for (int i = 0; i < kCoeffs; ++i) {
-      float s = 0.f;
-      for (int t = 0; t < kThreads; ++t) s += partial[i][t];
-      logits[i] = s;
-    }
+    for (int i = 0; i < kCoeffs; ++i)
+      logits[i] = logits_in[static_cast<size_t>(token) * kCoeffs + i];
     // pre = sigmoid(pre_w * scale[0] + pre_b) + eps
     float pre_v[kN];
 #pragma unroll
@@ -256,16 +271,22 @@ __global__ void mhc_final_mean_kernel(const uint16_t* __restrict__ streams,
 
 void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
                         const GlmMhcConfig& cfg, uint16_t* collapsed,
-                        uint16_t* post, uint16_t* comb, int tokens,
-                        cudaStream_t stream) {
+                        uint16_t* post, uint16_t* comb, float* logits_scratch,
+                        int tokens, cudaStream_t stream) {
   GlmMhcConfig::validate_config(cfg);
   if (tokens <= 0) return;
   if (!streams || !w.fn || !w.base || !w.scale || !collapsed || !post ||
-      !comb)
+      !comb || !logits_scratch)
     throw std::invalid_argument("mhc_compute: null pointer");
-  mhc_compute_kernel<<<tokens, kThreads, 0, stream>>>(
-      streams, w.fn, w.base, w.scale, collapsed, post, comb, tokens,
-      cfg.hidden, cfg.hc_eps, cfg.norm_eps, cfg.sinkhorn_iters);
+  if (tokens > 65535)
+    throw std::invalid_argument("mhc_compute: grid dimension overflow");
+  const dim3 dots_grid(kCoeffs, static_cast<unsigned>(tokens));
+  mhc_dots_kernel<<<dots_grid, kThreads, 0, stream>>>(
+      streams, w.fn, logits_scratch, tokens, cfg.hidden, cfg.norm_eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+  mhc_finish_kernel<<<tokens, kThreads, 0, stream>>>(
+      streams, logits_scratch, w.base, w.scale, collapsed, post, comb, tokens,
+      cfg.hidden, cfg.hc_eps, cfg.sinkhorn_iters);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

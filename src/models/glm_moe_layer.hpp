@@ -114,7 +114,8 @@ class GlmMoeLayer {
   // device scratch (managed; sized to max_tokens)
   int32_t* d_ids_ = nullptr;
   float* d_weights_ = nullptr;
-  float* d_biased_ = nullptr;  // [max_tokens, n_experts] router scores
+  float* d_biased_ = nullptr;  // [max_tokens, n_experts] biased router scores
+  float* d_scores_ = nullptr;  // [max_tokens, n_experts] sigmoid scores (router scratch)
   int32_t* d_rows_ = nullptr;
   float* d_row_w_ = nullptr;
   uint16_t* d_gather_ = nullptr;

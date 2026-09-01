@@ -46,6 +46,12 @@
 #                  binary and costs nothing to ship.
 #   --force         pkill -x glm_gen_check on all ranks before starting
 #   --log-dir DIR   logs land here (default $BUILD/fabric-runs/<UTC ts>)
+#   --head-wrap CMD prefix rank 0's command line with CMD (word-split) —
+#                  the profiling hook: e.g. --head-wrap "nsys profile
+#                  --trace=cuda -o /tmp/r0" traces rank 0's kernels while
+#                  the peers run bare. The wrapper must pass stdout
+#                  through (the launch waits on the "rendezvous
+#                  listening" log line) and exit with the app.
 #
 # Examples:
 #   scripts/fabric_run.sh -- --model unsloth/GLM-5.3-Flash-FP8 \
@@ -77,6 +83,7 @@ STAGE=1
 STAGE_FILE=""
 FORCE=0
 LOG_DIR=""
+HEAD_WRAP=()
 
 die() { echo "fabric_run: $*" >&2; exit 1; }
 peer_ssh() { timeout 20 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$1" "${2:-true}"; }
@@ -91,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     --stage-file) STAGE_FILE="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --log-dir) LOG_DIR="$2"; shift 2 ;;
+    --head-wrap) read -r -a HEAD_WRAP <<< "$2"; shift 2 ;;
     --) shift; break ;;
     *) die "unknown option $1 (app args go after --)" ;;
   esac
@@ -157,7 +165,7 @@ fi
 
 # ------------------------------------------------------------- rank 0
 echo "fabric_run: world $WORLD, port $PORT, logs in $LOG_DIR"
-nohup "$APP" "${APP_ARGS[@]}" --world "$WORLD" --rank 0 --port "$PORT" \
+nohup "${HEAD_WRAP[@]}" "$APP" "${APP_ARGS[@]}" --world "$WORLD" --rank 0 --port "$PORT" \
   > "$LOG_DIR/r0.log" 2>&1 < /dev/null &
 HEAD_PID=$!
 # plain nohup (no setsid): the head stays our child so `wait` reaps its code

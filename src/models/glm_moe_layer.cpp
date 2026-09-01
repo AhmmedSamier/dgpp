@@ -34,6 +34,8 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
   DGPP_CUDA_OK(cudaMallocManaged(&d_weights_, static_cast<size_t>(M) * cfg_.top_k * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_biased_,
                                   static_cast<size_t>(M) * cfg_.n_experts * 4));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_scores_,
+                                  static_cast<size_t>(M) * cfg_.n_experts * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_rows_, static_cast<size_t>(M) * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_row_w_, static_cast<size_t>(M) * 4));
   DGPP_CUDA_OK(cudaMallocManaged(&d_gather_, M * H * 2));
@@ -82,6 +84,7 @@ GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_ids_);
   cudaFree(d_weights_);
   cudaFree(d_biased_);
+  cudaFree(d_scores_);
   cudaFree(d_rows_);
   cudaFree(d_row_w_);
   cudaFree(d_gather_);
@@ -144,7 +147,7 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
   // 1. Router + one sync: the ids/weights round-trip is the diagnostic
   //    mode's cost; the production path keeps segmentation device-side.
   launch_moe_router(hidden, w_.router_gate, w_.router_bias, d_ids_,
-                    d_weights_, cfg_, tokens, stream, d_biased_);
+                    d_weights_, d_scores_, d_biased_, cfg_, tokens, stream);
   h_ids_.resize(static_cast<size_t>(tokens) * K);
   h_weights_.resize(static_cast<size_t>(tokens) * K);
   h_biased_.resize(static_cast<size_t>(tokens) * E);
@@ -252,7 +255,7 @@ void GlmMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out,
 
   // 1. Router: unchanged kernel — ids ASCENDING per row, on device.
   launch_moe_router(hidden, w_.router_gate, w_.router_bias, d_ids_,
-                    d_weights_, cfg_, tokens, stream, d_biased_);
+                    d_weights_, d_scores_, d_biased_, cfg_, tokens, stream);
   // 2. Route traces ride ASYNC copies into the caller's pinned staging;
   //    the caller materializes them after its next stream sync (the
   //    decode step's final sync). No round-trip on the hot path.

@@ -184,6 +184,8 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   streams_[0] = static_cast<uint16_t*>(alloc_managed(T * 4 * H * 2));
   streams_[1] = static_cast<uint16_t*>(alloc_managed(T * 4 * H * 2));
   post_ = static_cast<uint16_t*>(alloc_managed(T * 4 * 2));
+  mhc_logits_ = static_cast<float*>(
+      alloc_managed(T * static_cast<size_t>(mhc_cfg_.coeff_rows()) * 4));
   comb_ = static_cast<uint16_t*>(alloc_managed(T * 16 * 2));
   collapsed_ = static_cast<uint16_t*>(alloc_managed(T * H * 2));
   normed_ = static_cast<uint16_t*>(alloc_managed(T * H * 2));
@@ -219,6 +221,7 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(streams_[0]);
   cudaFree(streams_[1]);
   cudaFree(post_);
+  cudaFree(mhc_logits_);
   cudaFree(comb_);
   cudaFree(collapsed_);
   cudaFree(normed_);
@@ -446,7 +449,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
     hw.fn = b.mhc->attn_fn;
     hw.base = b.mhc->attn_base;
     hw.scale = b.mhc->attn_scale;
-    launch_mhc_compute(cur, hw, mhc_cfg_, collapsed_, post_, comb_, T,
+    launch_mhc_compute(cur, hw, mhc_cfg_, collapsed_, post_, comb_,
+                       mhc_logits_, T,
                         stream_);    glm_rmsnorm_bf16(collapsed_, b.ln1, normed_, T, H, eps, stream_);
     // Block boundary 1 (DESIGN §5.1): the attention output projection is
     // row-parallel over this rank's heads, so the block output is a partial
@@ -524,7 +528,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
     fw.fn = b.mhc->ffn_fn;
     fw.base = b.mhc->ffn_base;
     fw.scale = b.mhc->ffn_scale;
-    launch_mhc_compute(cur, fw, mhc_cfg_, collapsed_, post_, comb_, T,
+    launch_mhc_compute(cur, fw, mhc_cfg_, collapsed_, post_, comb_,
+                       mhc_logits_, T,
                         stream_);
     glm_rmsnorm_bf16(collapsed_, b.ln2, normed_, T, H, eps, stream_);
     // Block boundary 2 destination: same staging-seam decision before the
