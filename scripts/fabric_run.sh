@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# fabric_run: launch glm_gen_check across the fabric (this node as rank 0
+# head + the peer ranks via ssh) as ONE atomic job.
+#
+# WHY THIS EXISTS: the bus rendezvous is a 120s window that opens when rank 0
+# starts listening, and peers reach bus-start ~1s after launch. Manual
+# attempts that launched peers first, or took minutes to fumble ssh, burned
+# the window and died with "rendezvous connect: Connection refused" /
+# "rendezvous: table read failed" (the 2026-09-01 Stage 3b smoke needed
+# three tries to get the ORDER right). The working order, encoded here:
+#   0. refuse if any glm_gen_check is already running on any rank
+#      (--force kills them first)
+#   1. stage the binary to the peers — scp BEFORE the window opens
+#   2. pick a free rendezvous port (probe; --port overrides) so rebinds
+#      never collide with TIME_WAIT or a stale listener
+#   3. launch rank 0, wait for "rendezvous listening" in its log
+#   4. launch ranks 1..N by ssh, fire-and-forget — ssh sessions may
+#      linger even with -n and </dev/null, so peers are verified by
+#      OBSERVING the remote process (pgrep), never by ssh's exit code
+#   5. monitor rank 0 until it exits; a --timeout watchdog kills every
+#      rank on the head's behalf if it wedges
+#   6. collect: EOS line, per-rank generated-ids md5 (the log line's
+#      rank prefix stripped — the 2026-09-01 lesson: hash the payload,
+#      not the line), rank-consensus verdict, bus stats
+#
+# The model resolves from each node's own HF cache (--model ID), so the
+# only artifact the peers need is the staged binary.
+#
+# Usage (from the repo root, ON THE HEAD NODE — rank 0 is this box):
+#   scripts/fabric_run.sh [options] -- APP_ARGS...
+#
+#   APP_ARGS are passed verbatim to glm_gen_check on EVERY rank; the
+#   script appends --world/--rank/--peer/--port itself (do not pass
+#   them yourself).
+#
+# Options:
+#   --app PATH      binary to stage + run (default $BUILD/glm_gen_check)
+#   --port N        rendezvous port (default: first free of 29970..29989)
+#   --timeout SECS  head watchdog; 0 disables (default 1800)
+#   --no-stage      skip the peer scp (peers already carry this binary)
+#   --force         pkill -x glm_gen_check on all ranks before starting
+#   --log-dir DIR   logs land here (default $BUILD/fabric-runs/<UTC ts>)
+#
+# Examples:
+#   scripts/fabric_run.sh -- --model unsloth/GLM-5.3-Flash-FP8 \
+#       --chat "The capital of France is" \
+#       --system "You are a concise assistant." --steps 64
+#   scripts/fabric_run.sh --no-stage -- \
+#       --model unsloth/GLM-5.3-Flash-FP8 --text "Hello" --steps 2
+#
+# Fabric layout via env (defaults are the lab fabric):
+#   DGPP_FABRIC_HEAD   head's fabric IP as peers --peer it (192.0.2.11)
+#   DGPP_FABRIC_PEERS  space-separated peer IPs (192.0.2.12..14)
+#   DGPP_FABRIC_USER   ssh user (user)
+#   DGPP_PEER_DIR      staging dir on peers (/tmp/bus4)
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD="${DGPP_BUILD_DIR:-$ROOT/build-ci}"
+APP="$BUILD/glm_gen_check"
+FABRIC_HEAD="${DGPP_FABRIC_HEAD:-192.0.2.11}"
+FABRIC_PEERS=(${DGPP_FABRIC_PEERS:-192.0.2.12 192.0.2.13 192.0.2.14})
+FABRIC_USER="${DGPP_FABRIC_USER:-user}"
+PEER_DIR="${DGPP_PEER_DIR:-/tmp/bus4}"
+SSH_OPTS=(-n -o BatchMode=yes -o ConnectTimeout=8)
+MONITOR_TIMEOUT=1800
+STAGE=1
+FORCE=0
+LOG_DIR=""
+
+die() { echo "fabric_run: $*" >&2; exit 1; }
+peer_ssh() { timeout 20 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$1" "${2:-true}"; }
+
+# ---------------------------------------------------------------- options
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --app) APP="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --timeout) MONITOR_TIMEOUT="$2"; shift 2 ;;
+    --no-stage) STAGE=0; shift ;;
+    --force) FORCE=1; shift ;;
+    --log-dir) LOG_DIR="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) die "unknown option $1 (app args go after --)" ;;
+  esac
+done
+APP_ARGS=("$@")
+[[ ${#APP_ARGS[@]} -gt 0 ]] || die "no app args after -- (e.g. -- --model ID --chat TEXT)"
+[[ -x "$APP" ]] || die "app not found/executable: $APP (build it, or pass --app)"
+WORLD=$((1 + ${#FABRIC_PEERS[@]}))
+LOG_DIR="${LOG_DIR:-$BUILD/fabric-runs/$(date -u +%Y%m%d-%H%M%S)}"
+mkdir -p "$LOG_DIR"
+export DGPP_LOG_LEVEL="${DGPP_LOG_LEVEL:-info}"  # render/eos lines are INFO
+
+# ------------------------------------------------------------- cleanup
+kill_all() {
+  pkill -x glm_gen_check 2>/dev/null || true
+  for ip in "${FABRIC_PEERS[@]}"; do
+    timeout 15 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
+      "pkill -x glm_gen_check" 2>/dev/null || true
+  done
+}
+trap 'kill_all' INT TERM
+# (pkill -x matches the process NAME exactly — it can never kill this script)
+
+# ------------------------------------------------------- stale / staging
+if [[ $FORCE -eq 1 ]]; then
+  echo "fabric_run: --force — killing any stale glm_gen_check on all ranks"
+  kill_all
+  sleep 2
+fi
+pgrep -x glm_gen_check >/dev/null && die "a glm_gen_check already runs here (--force to kill)"
+for ip in "${FABRIC_PEERS[@]}"; do
+  peer_ssh "$ip" "pgrep -x glm_gen_check" >/dev/null 2>&1 \
+    && die "a glm_gen_check already runs on $ip (--force to kill)"
+done
+
+if [[ $STAGE -eq 1 ]]; then
+  for ip in "${FABRIC_PEERS[@]}"; do
+    echo "fabric_run: staging $APP -> $FABRIC_USER@$ip:$PEER_DIR/"
+    scp -o BatchMode=yes -o ConnectTimeout=8 "$APP" \
+      "$FABRIC_USER@$ip:$PEER_DIR/" >/dev/null || die "staging to $ip failed"
+  done
+fi
+
+# ------------------------------------------------------------ the port
+if [[ -z "${PORT:-}" ]]; then
+  for p in $(seq 29970 29989); do
+    # connect_ex == 0 means something answers: not free. Probe, don't bind —
+    # rank 0 owns the listener, TIME_WAIT on peers' sides is not our problem.
+    if ! python3 -c "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('127.0.0.1',$p))==0 else 1)" "$p"; then
+      PORT="$p"; break
+    fi
+  done
+fi
+[[ -n "${PORT:-}" ]] || die "no free port in 29970..29989 (pass --port)"
+
+# ------------------------------------------------------------- rank 0
+echo "fabric_run: world $WORLD, port $PORT, logs in $LOG_DIR"
+nohup "$APP" "${APP_ARGS[@]}" --world "$WORLD" --rank 0 --port "$PORT" \
+  > "$LOG_DIR/r0.log" 2>&1 < /dev/null &
+HEAD_PID=$!
+# plain nohup (no setsid): the head stays our child so `wait` reaps its code
+
+for _ in $(seq 1 60); do
+  grep -q "rendezvous listening" "$LOG_DIR/r0.log" 2>/dev/null && break
+  kill -0 "$HEAD_PID" 2>/dev/null \
+    || { tail -5 "$LOG_DIR/r0.log"; die "rank 0 died before listening"; }
+  sleep 0.5
+done
+grep -q "rendezvous listening" "$LOG_DIR/r0.log" \
+  || die "rank 0 never listened (30s) — see $LOG_DIR/r0.log"
+echo "fabric_run: rank 0 listening on :$PORT"
+
+# ------------------------------------------------------- peers 1..N-1
+REMOTE_ARGS="$(printf '%q ' "${APP_ARGS[@]}")"
+for i in "${!FABRIC_PEERS[@]}"; do
+  rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
+  # Fire-and-forget on purpose (see header): the remote side is fully
+  # detached; whether THIS ssh returns is irrelevant to the launch.
+  ( timeout 25 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
+      "cd $PEER_DIR && DGPP_LOG_LEVEL=$DGPP_LOG_LEVEL nohup ./glm_gen_check $REMOTE_ARGS \
+       --world $WORLD --rank $rank --peer $FABRIC_HEAD --port $PORT \
+       > $PEER_DIR/fabric_r$rank.log 2>&1 < /dev/null &" \
+      >/dev/null 2>&1 ) &
+done
+for i in "${!FABRIC_PEERS[@]}"; do
+  rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
+  up=0
+  for _ in $(seq 1 20); do
+    peer_ssh "$ip" "pgrep -x glm_gen_check" >/dev/null 2>&1 && { up=1; break; }
+    sleep 1
+  done
+  if [[ $up -ne 1 ]]; then
+    peer_ssh "$ip" "tail -5 $PEER_DIR/fabric_r$rank.log" || true
+    kill_all
+    die "peer rank $rank ($ip) never started (20s) — everything killed"
+  fi
+  echo "fabric_run: rank $rank up on $ip"
+done
+
+# ------------------------------------------------------------- monitor
+elapsed=0
+while kill -0 "$HEAD_PID" 2>/dev/null; do
+  if [[ $MONITOR_TIMEOUT -gt 0 && $elapsed -ge $MONITOR_TIMEOUT ]]; then
+    kill_all
+    die "watchdog: rank 0 still running after ${MONITOR_TIMEOUT}s — everything killed; logs in $LOG_DIR"
+  fi
+  sleep 10; elapsed=$((elapsed + 10))
+done
+HEAD_RC=0; wait "$HEAD_PID" || HEAD_RC=$?
+
+# ------------------------------------------------------------ collect
+echo "fabric_run: rank 0 exited rc=$HEAD_RC — collecting verdicts"
+md5_of_generated() { grep -m1 "generated ids" "$1" | sed 's/^.*generated ids: //' | md5sum | awk '{print $1}'; }
+head_md5="$(md5_of_generated "$LOG_DIR/r0.log" || true)"
+echo "  head : ${head_md5:-<no generated line>}"
+for i in "${!FABRIC_PEERS[@]}"; do
+  rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
+  peer_md5="$(peer_ssh "$ip" \
+    "grep -m1 'generated ids' $PEER_DIR/fabric_r$rank.log | sed 's/^.*generated ids: //' | md5sum | awk '{print \$1}'" 2>/dev/null || true)"
+  echo "  rank $rank: ${peer_md5:-<no generated line>}"
+  [[ -n "$peer_md5" && "$peer_md5" == "$head_md5" ]] || HEAD_RC=1
+done
+echo "fabric_run: rank consistency $([[ -n "$head_md5" ]] && echo "$head_md5" || echo 'n/a') — $([[ $HEAD_RC -eq 0 ]] && echo 'ALL RANKS IDENTICAL' || echo 'MISMATCH or missing')"
+grep -m1 "eos stop" "$LOG_DIR/r0.log" || true
+grep -m1 -E "steps in" "$LOG_DIR/r0.log" || true
+echo "fabric_run: full logs in $LOG_DIR (r0.log local, fabric_rN.log on peers)"
+exit "$HEAD_RC"

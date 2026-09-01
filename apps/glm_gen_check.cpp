@@ -394,14 +394,20 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 int main(int argc, char** argv) {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
 
+  static constexpr const char* kUsage =
+      "usage: glm_gen_check --model ORG/NAME | --checkpoint-dir DIR\n"
+      "  (--prompt ID,ID,... | --text TEXT | --chat TEXT [--system TEXT])\n"
+      "  [--steps N] [--world N --rank R --peer HOST --port N]\n"
+      "  [--streaming] [--engine incremental|reforward] [--no-eos]\n"
+      "  [--rendezvous-timeout-ms N] [--out PREFIX]\n";
+
   std::string config_path, ckpt, peer, prompt_text, text_prompt, out_prefix =
                                                    "glm_gen",
               model_id;
   int world = 1, rank = 0, steps = 8, rendezvous_timeout_ms = 120000;
   uint16_t port = 29970;
   bool resident = true, incremental = true, no_eos = false;
-  bool chat = false;
-  std::string system_prompt;
+  std::string system_prompt, chat_text;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -416,7 +422,7 @@ int main(int argc, char** argv) {
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--prompt") prompt_text = next();
     else if (a == "--text") text_prompt = next();
-    else if (a == "--chat") chat = true;
+    else if (a == "--chat") chat_text = next();
     else if (a == "--system") system_prompt = next();
     else if (a == "--steps") steps = std::stoi(next());
     else if (a == "--streaming") resident = false;
@@ -433,11 +439,7 @@ int main(int argc, char** argv) {
     else if (a == "--rendezvous-timeout-ms") rendezvous_timeout_ms = std::stoi(next());
     else if (a == "--out") out_prefix = next();
     else {
-      std::fprintf(stderr,
-                   "usage: glm_gen_check --model ORG/NAME | --checkpoint-dir "
-                   "DIR --prompt ID,ID,... [--steps N] [--world N --rank R "
-                   "--peer HOST --port N] [--streaming] [--engine "
-                   "incremental|reforward] [--no-eos] [--out PREFIX]\n");
+      std::fputs(kUsage, stderr);
       return a == "--help" ? 0 : 1;
     }
   }
@@ -465,10 +467,7 @@ int main(int argc, char** argv) {
     DGPP_LOG_INFO("model {} -> {}", model_id, snapshot);
   }
   if (ckpt.empty()) {
-    std::fprintf(stderr,
-                 "usage: glm_gen_check --model ORG/NAME | --checkpoint-dir "
-                 "DIR --prompt ID,ID,... [--steps N] [--world N --rank R "
-                 "--peer HOST --port N] [--streaming] [--out PREFIX]\n");
+    std::fputs(kUsage, stderr);
     return 1;
   }
 
@@ -488,11 +487,11 @@ int main(int argc, char** argv) {
       return 1;
     }
     // --text goes through the exact tokenizer (Stage 3); --prompt stays for
-    // raw ids; --chat renders the chat template (Stage 3b) with the user
-    // text as the message body. They are mutually exclusive.
+    // raw ids; --chat renders the chat template (Stage 3b) with the value as
+    // the user message body. They are mutually exclusive.
     const int prompt_kinds = static_cast<int>(!text_prompt.empty()) +
-                            static_cast<int>(!prompt_text.empty()) +
-                            static_cast<int>(chat);
+                             static_cast<int>(!prompt_text.empty()) +
+                             static_cast<int>(!chat_text.empty());
     if (prompt_kinds > 1) {
       DGPP_LOG_ERROR("--text, --prompt and --chat are mutually exclusive");
       return 1;
@@ -500,7 +499,7 @@ int main(int argc, char** argv) {
     std::vector<int64_t> prompt;
     const dgpp::GlmTokenizer tok = dgpp::GlmTokenizer::load(
         (fs::path(ckpt) / "tokenizer.json").string());
-    if (chat) {
+    if (!chat_text.empty()) {
       const dgpp::glm::ChatTemplate chat_tpl = dgpp::glm::ChatTemplate::load(
           (fs::path(ckpt) / "chat_template.jinja").string());
       std::vector<dgpp::glm::Value> messages;
@@ -512,7 +511,7 @@ int main(int argc, char** argv) {
       }
       dgpp::glm::Value::Members user_msg;
       user_msg.emplace_back("role", dgpp::glm::Value::string_value("user"));
-      user_msg.emplace_back("content", dgpp::glm::Value::string_value(text_prompt));
+      user_msg.emplace_back("content", dgpp::glm::Value::string_value(chat_text));
       messages.push_back(dgpp::glm::Value::map_value(std::move(user_msg)));
       dgpp::glm::Value::Members globals;
       globals.emplace_back("messages",
