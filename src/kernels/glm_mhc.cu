@@ -83,9 +83,12 @@ __global__ void mhc_dots_kernel(const uint16_t* __restrict__ streams,
   }
 }
 
-// finish kernel: grid (tokens). Thread 0 derives pre/post/comb from the 24
-// logits (sigmoid/softmax/Sinkhorn in registers) and everyone folds pre
-// into the collapse.
+// finish kernel: grid (tokens). Thread 0 derives pre/post and the softmax
+// rows; the first 16 lanes run the Sinkhorn (one matrix entry each, the
+// row/column sums as 4 shuffles in the SAME sequential order thread 0's
+// loops used — ((c0 + c1) + c2) + c3 — so the bits are the serial
+// version's; 20 iterations of 32 dependent divides on one thread were
+// ~8us of the site's 20us); everyone folds pre into the collapse.
 __global__ void mhc_finish_kernel(const uint16_t* __restrict__ streams,
                                   const float* __restrict__ logits_in,
                                   const float* __restrict__ base,
@@ -96,35 +99,32 @@ __global__ void mhc_finish_kernel(const uint16_t* __restrict__ streams,
                                   int hidden, float hc_eps,
                                   int sinkhorn_iters) {
   __shared__ float pre[kN];
+  __shared__ float comb_seed[kN * kN];  // softmax rows + eps, row-major
 
   const int token = blockIdx.x;
   if (token >= tokens) return;
   const int K = kN * hidden;
   const uint16_t* x = streams + static_cast<size_t>(token) * K;
+  const size_t t = static_cast<size_t>(token);
 
   if (threadIdx.x == 0) {
     float logits[kCoeffs];
 #pragma unroll
     for (int i = 0; i < kCoeffs; ++i)
-      logits[i] = logits_in[static_cast<size_t>(token) * kCoeffs + i];
+      logits[i] = logits_in[t * kCoeffs + i];
     // pre = sigmoid(pre_w * scale[0] + pre_b) + eps
-    float pre_v[kN];
 #pragma unroll
     for (int i = 0; i < kN; ++i)
-      pre_v[i] = sigmoidf_acc(logits[i] * scale[0] + base[i]) + hc_eps;
-#pragma unroll
-    for (int i = 0; i < kN; ++i) pre[i] = pre_v[i];
+      pre[i] = sigmoidf_acc(logits[i] * scale[0] + base[i]) + hc_eps;
     // post = 2 * sigmoid(post_w * scale[1] + post_b)
-    float post_v[kN];
 #pragma unroll
     for (int i = 0; i < kN; ++i)
-      post_v[i] = 2.f * sigmoidf_acc(logits[kN + i] * scale[1] +
-                                     base[kN + i]);
+      post_out[t * kN + i] = float_to_bf16_bits(
+          2.f * sigmoidf_acc(logits[kN + i] * scale[1] + base[kN + i]));
     // comb = softmax over each ROW of comb_logits * scale[2] + base, + eps.
     // The softmax max is taken AFTER the affine transform: scale[2] may be
     // negative, in which case it is not a plain shift and the raw-logit max
     // would not stabilize the exponentials.
-    float c[kN][kN];
 #pragma unroll
     for (int row = 0; row < kN; ++row) {
       float m = -INFINITY;
@@ -134,77 +134,60 @@ __global__ void mhc_finish_kernel(const uint16_t* __restrict__ streams,
                         base[2 * kN + row * kN + col];
         m = fmaxf(m, v);
       }
+      float c[kN];
       float denom = 0.f;
 #pragma unroll
       for (int col = 0; col < kN; ++col) {
         const float v = logits[2 * kN + row * kN + col] * scale[2] +
                         base[2 * kN + row * kN + col];
-        c[row][col] = expf(v - m);
-        denom += c[row][col];
+        c[col] = expf(v - m);
+        denom += c[col];
       }
       const float inv = 1.0f / denom;
+      // Two statements, as the serial version had them (a fused
+      // multiply-add here would move the bits).
 #pragma unroll
-      for (int col = 0; col < kN; ++col) c[row][col] = c[row][col] * inv;
-    }
-#pragma unroll
-    for (int row = 0; row < kN; ++row)
-#pragma unroll
-      for (int col = 0; col < kN; ++col) c[row][col] += hc_eps;
-    // Sinkhorn: one column pass, then (iters-1) row+column passes.
-    // column sum = sum over the FIRST index (torch dim=-2).
-    {
-      float colsum[kN];
-#pragma unroll
-      for (int col = 0; col < kN; ++col) colsum[col] = 0.f;
-#pragma unroll
-      for (int row = 0; row < kN; ++row)
-#pragma unroll
-        for (int col = 0; col < kN; ++col) colsum[col] += c[row][col];
-#pragma unroll
-      for (int row = 0; row < kN; ++row)
-#pragma unroll
-        for (int col = 0; col < kN; ++col)
-          c[row][col] = c[row][col] / (colsum[col] + hc_eps);
-    }
-    for (int it = 1; it < sinkhorn_iters; ++it) {
-      float rowsum[kN];
-#pragma unroll
-      for (int row = 0; row < kN; ++row) rowsum[row] = 0.f;
-#pragma unroll
-      for (int row = 0; row < kN; ++row)
-#pragma unroll
-        for (int col = 0; col < kN; ++col) rowsum[row] += c[row][col];
-#pragma unroll
-      for (int row = 0; row < kN; ++row)
-#pragma unroll
-        for (int col = 0; col < kN; ++col)
-          c[row][col] = c[row][col] / (rowsum[row] + hc_eps);
-      float colsum[kN];
-#pragma unroll
-      for (int col = 0; col < kN; ++col) colsum[col] = 0.f;
-#pragma unroll
-      for (int row = 0; row < kN; ++row)
-#pragma unroll
-        for (int col = 0; col < kN; ++col) colsum[col] += c[row][col];
-#pragma unroll
-      for (int row = 0; row < kN; ++row)
-#pragma unroll
-        for (int col = 0; col < kN; ++col)
-          c[row][col] = c[row][col] / (colsum[col] + hc_eps);
-    }
-
-    const size_t t = static_cast<size_t>(token);
-#pragma unroll
-    for (int i = 0; i < kN; ++i)
-      post_out[t * kN + i] = float_to_bf16_bits(post_v[i]);
-#pragma unroll
-    for (int row = 0; row < kN; ++row)
+      for (int col = 0; col < kN; ++col) c[col] = c[col] * inv;
 #pragma unroll
       for (int col = 0; col < kN; ++col)
-        comb_out[t * kN * kN + row * kN + col] =
-            float_to_bf16_bits(c[row][col]);
+        comb_seed[row * kN + col] = c[col] + hc_eps;
+    }
   }
-  __syncthreads();  // pre[] published
+  __syncthreads();  // pre[] and comb_seed[] published
+
+  // Sinkhorn on lanes 0..15 of warp 0: lane = row * kN + col. One column
+  // pass, then (iters-1) row+column passes. column sum = sum over the
+  // FIRST index (torch dim=-2). Sums are assembled in index order 0..3
+  // (four shuffles), exactly the serial loops' ((c0 + c1) + c2) + c3.
+  if (threadIdx.x < 32) {
+    const int lane = threadIdx.x;
+    const bool live = lane < kN * kN;
+    const int row = lane / kN;
+    const int col = lane - row * kN;
+    float c = live ? comb_seed[lane] : 0.f;
+    // Every lane in the warp participates in the shuffles (full mask);
+    // dead lanes hold zeros and never write.
+    const auto col_sum = [&](float v) {
+      float s = 0.f;
+#pragma unroll
+      for (int r = 0; r < kN; ++r)
+        s += __shfl_sync(0xFFFFFFFFu, v, r * kN + col);
+      return s;
+    };
+    const auto row_sum = [&](float v) {
+      float s = 0.f;
+#pragma unroll
+      for (int cc = 0; cc < kN; ++cc)
+        s += __shfl_sync(0xFFFFFFFFu, v, row * kN + cc);
+      return s;
+    };
+    c = c / (col_sum(c) + hc_eps);
+    for (int it = 1; it < sinkhorn_iters; ++it) {
+      c = c / (row_sum(c) + hc_eps);
+      c = c / (col_sum(c) + hc_eps);
+    }
+    if (live) comb_out[t * kN * kN + lane] = float_to_bf16_bits(c);
+  }
 
   // Phase C: collapsed[d] = bf16(sum_j pre[j] * streams[j][d]), fp32.
   const float p0 = pre[0], p1 = pre[1], p2 = pre[2], p3 = pre[3];

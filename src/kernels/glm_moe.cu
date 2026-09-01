@@ -66,13 +66,37 @@ __global__ void moe_router_dots_kernel(const uint16_t* __restrict__ hidden,
   if (threadIdx.x != 0) return;
 
   // The one fixed sequential reduction order (k ascending) — the bits the
-  // old kernel produced, from the same bf16 operands. The unroll only lets
-  // the smem loads run ahead of the dependent FMA chain (measured 53us ->
-  // the chain's own ~7us); the FMA order is untouched.
+  // old kernel produced, from the same bf16 operands. The chain is
+  // FMA-latency bound (~7us at 4096); scalar 2-byte smem loads made it
+  // load-bound (53us, 41us unrolled), so the operands stream in as
+  // 16-byte vectors — 8 elements per pair of loads — and the FMAs run
+  // from registers. The FMA order is untouched.
   float dot = 0.f;
-#pragma unroll 16
-  for (int k = 0; k < hidden_dim; ++k)
-    dot = __fmaf_rn(bf16_bits_to_float(sx[k]), bf16_bits_to_float(sw[k]), dot);
+  if (vector_loads) {
+    const uint4* xv = reinterpret_cast<const uint4*>(sx);
+    const uint4* wv = reinterpret_cast<const uint4*>(sw);
+    const int vecs = hidden_dim / 8;
+#pragma unroll 4
+    for (int v = 0; v < vecs; ++v) {
+      const uint4 xq = xv[v];
+      const uint4 wq = wv[v];
+      const uint32_t xw[4] = {xq.x, xq.y, xq.z, xq.w};
+      const uint32_t ww[4] = {wq.x, wq.y, wq.z, wq.w};
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        dot = __fmaf_rn(bf16_bits_to_float(static_cast<uint16_t>(xw[i] & 0xFFFFu)),
+                        bf16_bits_to_float(static_cast<uint16_t>(ww[i] & 0xFFFFu)),
+                        dot);
+        dot = __fmaf_rn(bf16_bits_to_float(static_cast<uint16_t>(xw[i] >> 16)),
+                        bf16_bits_to_float(static_cast<uint16_t>(ww[i] >> 16)),
+                        dot);
+      }
+    }
+  } else {
+    for (int k = 0; k < hidden_dim; ++k)
+      dot = __fmaf_rn(bf16_bits_to_float(sx[k]), bf16_bits_to_float(sw[k]),
+                      dot);
+  }
   const float s = 1.0f / (1.0f + expf(-dot));
   const size_t at = static_cast<size_t>(token) * n_experts + e;
   scores[at] = s;
