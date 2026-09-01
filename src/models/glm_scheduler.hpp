@@ -48,7 +48,37 @@
 // state-index surgery) and is a COMMITTED follow-up stage; the policy
 // above is unchanged by op granularity, so that stage changes only what
 // one step contains.
+//
+// STAGE 4 EVOLUTION (the service surface; additive — the manifest path
+// is untouched by construction, and every gate below still pins it):
+//   * tick() — one policy quantum: the run_to_completion() body
+//     extracted verbatim (cancel sweep, at most one admission, exactly
+//     one decode step). Dynamic arrival = submit between ticks;
+//     run_to_completion() is now a tick loop, so manifest runs are the
+//     degenerate "submit everything, then tick to quiet" case.
+//   * SchedulerObserver — per-token and retire events fired INLINE on
+//     the ticking thread (the SSE tap). Observers must not throw and
+//     must not call back into the Scheduler.
+//   * try_submit()/queue_limit — a bounded admission queue. A full
+//     queue is a normal load-shed event (the service answers 503 and
+//     the client retries); manifest errors still throw identically on
+//     every rank.
+//   * cancel(id) — an external retire (a client disconnect maps onto
+//     the same path as scripted cancellation). Applied by a
+//     fixed-position sweep at the TOP of the next tick, BEFORE any
+//     admission or step: a cancelled request never pays one more engine
+//     op, and the fabric journal (Stage 4b) can stamp the effect-tick
+//     so every rank retires the same request at the same quantum.
+//   * meters() — the /v1/metrics snapshot (queue depth, active slots,
+//     pool use, cumulative tokens).
+//
+// THREADING: single-threaded by contract (§11 determinism leaves no
+// room for lock-mediated interleavings on decision paths). The service
+// funnels every mutation — submit, cancel — through its engine-loop
+// queue; results(), meters(), and the observer all run on the ticking
+// thread.
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -91,6 +121,15 @@ struct SchedulerRequest {
                            // tokens have been generated. N in [1, max_steps].
 };
 
+// The bounded admission queue at capacity (submit() only). A load-shed
+// event, not a manifest error — the service answers 503 + Retry-After.
+struct QueueFullError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
+// Defined after Scheduler (it carries Scheduler::Result by value).
+class SchedulerObserver;
+
 class Scheduler {
  public:
   struct Result {
@@ -103,26 +142,66 @@ class Scheduler {
     std::vector<int64_t> generated;
   };
 
+  // The /v1/metrics snapshot.
+  struct Meters {
+    int active = 0;        // requests with an open engine slot
+    int queued = 0;        // admitted-not, waiting on slots/budget
+    int terminal = 0;      // retired (any reason)
+    int64_t pool_blocks_total = 0;
+    int64_t pool_blocks_in_use = 0;
+    int64_t tokens_generated = 0;  // cumulative across all requests
+  };
+
   // `eos_token_ids` — the config's end-of-sequence set (empty disables
-  // EOS retirement, e.g. --no-eos).
-  Scheduler(SchedulerEngine* engine, std::vector<int64_t> eos_token_ids);
+  // EOS retirement, e.g. --no-eos). `queue_limit` — the admission
+  // queue's bound (0 = unbounded, the manifest default; a service sets
+  // it so a full queue sheds load with a 503 instead of eating memory).
+  Scheduler(SchedulerEngine* engine, std::vector<int64_t> eos_token_ids,
+            int queue_limit = 0);
 
   // Arrival order = FCFS priority. Throws on an empty/duplicate id, a
   // nonpositive max_steps, or a cancel_after outside [1, max_steps] —
   // manifest errors are operator errors, and they must fail identically
   // on every rank (a request that only exists on some ranks would
-  // deadlock the fabric).
+  // deadlock the fabric). Throws QueueFullError when the bounded queue
+  // is full.
   void submit(SchedulerRequest request);
 
-  // Runs every request to a terminal state. Single-threaded and
-  // allocation-free on the hot path (the engine owns all buffers).
-  // Throws std::runtime_error on admission deadlock or an engine
-  // contract violation (out-of-range token).
+  // The service form: false ONLY on a full bounded queue (a normal,
+  // load-shedding event). Validation failures still throw — they are
+  // client bugs, not load.
+  bool try_submit(SchedulerRequest request);
+
+  // Flags a live request for retirement at the next tick boundary (a
+  // client disconnect). Returns false when the id is unknown or already
+  // terminal — a late cancel is a no-op, never an error.
+  bool cancel(const std::string& id);
+
+  // One policy quantum: the cancel sweep, at most one admission, exactly
+  // one decode step. Returns false when nothing is pending AFTER the
+  // tick — the final retirement may ride on the false. Throws on
+  // admission deadlock exactly like run_to_completion().
+  bool tick();
+
+  // Any queued or active request remains.
+  bool has_pending() const;
+
+  // Runs every request to a terminal state: a tick loop. Single-threaded
+  // and allocation-free on the hot path (the engine owns all buffers).
   void run_to_completion();
 
   // Parallel to submit() order; entries reach their terminal Status
-  // only via run_to_completion().
+  // only via run_to_completion()/tick().
   const std::vector<Result>& results() const { return results_; }
+
+  // Result by request id (nullptr when unknown) — the service's
+  // non-streaming lookup.
+  const Result* find(const std::string& id) const;
+
+  // Lifecycle events (the SSE tap). Not owned; may be null.
+  void set_observer(SchedulerObserver* observer) { observer_ = observer; }
+
+  Meters meters() const;
 
  private:
   enum class State : int { kQueued, kActive, kTerminal };
@@ -133,6 +212,8 @@ class Scheduler {
     int slot = -1;
     int steps_done = 0;
     std::vector<int64_t> generated;
+    bool cancel_requested = false;  // external cancel, applied at the
+                                    // next tick's sweep
   };
 
   bool is_eos(int32_t token) const;
@@ -141,6 +222,9 @@ class Scheduler {
   // The oldest queued request whose reservation fits a free slot (no
   // head-of-line blocking), or -1.
   int next_admissible() const;
+  // The submit() validations, shared by submit()/try_submit().
+  void validate_new(const SchedulerRequest& request) const;
+  int queued_count() const;
   void admit(int arrival);
   void step_one(int arrival);
   // Retire conditions are checked in this order: natural EOS first, then
@@ -153,9 +237,27 @@ class Scheduler {
   std::vector<int64_t> eos_ids_;
   std::vector<Request> requests_;  // arrival order — the FCFS order
   std::vector<int> slots_;         // engine slot -> arrival index, or -1
-  std::vector<Result> results_;    // parallel to requests_
+  std::vector<Result> results_;     // parallel to requests_
   int cursor_ = -1;                // last-stepped arrival (round-robin)
   int deferred_logged_ = -1;       // arrival of the current deferral log
+  SchedulerObserver* observer_ = nullptr;
+  int queue_limit_ = 0;            // 0 = unbounded
+  int64_t tokens_generated_ = 0;   // cumulative on_token counter
+};
+
+// Streaming lifecycle events for the service (SSE). Fired inline on the
+// ticking thread — see the threading note above.
+class SchedulerObserver {
+ public:
+  virtual ~SchedulerObserver() = default;
+  // One generated token (the prefill pick is steps_done == 1). Always
+  // fires BEFORE the matching retire when the token ends the request.
+  virtual void on_token(const std::string& id, int64_t token,
+                        int steps_done) = 0;
+  // The request's terminal state, exactly once (EOS, steps cap,
+  // scripted or external cancellation all land here).
+  virtual void on_retire(const std::string& id,
+                         const Scheduler::Result& result) = 0;
 };
 
 }  // namespace dgpp::glm

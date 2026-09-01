@@ -73,6 +73,7 @@
 #include "loaders/minijson.hpp"
 #include "models/glm_chat_template.hpp"
 #include "models/glm_forward.hpp"
+#include "models/glm_gen_engine.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_scheduler.hpp"
 #include "models/glm_tokenizer.hpp"
@@ -83,6 +84,7 @@ namespace fs = std::filesystem;
 using dgpp::DsaConfig;
 using dgpp::DsaGeometry;
 using dgpp::DsaStatePool;
+using dgpp::GenEngineAdapter;
 using dgpp::GlmDiagnosticModel;
 using dgpp::GlmTextConfig;
 using dgpp::KdaConfig;
@@ -407,38 +409,9 @@ void print_memory_receipt(const GlmTextConfig& cfg, int world,
   }
 }
 
-// The engine binding: session ops + the pick, fused (the scheduler stays
-// pure host code; at TP>1 the pick is the distributed greedy pick — a
-// collective — so the adapter's call order IS the collective order).
-class GenEngineAdapter : public dgpp::glm::SchedulerEngine {
- public:
-  using Pick = std::function<int32_t(const GlmDiagnosticModel::Outputs&)>;
-  GenEngineAdapter(GlmDiagnosticModel* model, int max_requests, Pick pick)
-      : model_(model), slots_(max_requests), pick_(std::move(pick)) {}
-
-  int max_concurrent_requests() const override { return slots_; }
-  int64_t pool_blocks_total() const override {
-    return model_->dsa_blocks_total();
-  }
-  int64_t pool_blocks_in_use() const override {
-    return model_->dsa_blocks_in_use();
-  }
-  int64_t blocks_for_tokens(int64_t tokens) const override {
-    return model_->dsa_blocks_for_tokens(tokens);
-  }
-  int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
-    return pick_(model_->session_prefill(req, prompt));
-  }
-  int32_t step(int req, int64_t prev_token) override {
-    return pick_(model_->session_step(req, prev_token));
-  }
-  void close(int req) override { model_->session_close(req); }
-
- private:
-  GlmDiagnosticModel* model_;
-  int slots_;
-  Pick pick_;
-};
+// The engine binding lives in src/models/glm_gen_engine.hpp (shared
+// with the Stage 4 serving app): GenEngineAdapter + the w1/fabric
+// picks. Both worlds keep their local pick closures below.
 
 const char* sched_status_name(const dgpp::glm::Scheduler::Result& r) {
   using S = dgpp::glm::Scheduler::Result::Status;
@@ -508,21 +481,9 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
                                       t_construct)
                 .count(),
         max_requests);
-    std::vector<float> frow;  // hoisted: no per-pick allocation
-    const auto pick = [&](const GlmDiagnosticModel::Outputs& out) -> int32_t {
-      require(out.lm_vocab_count == vocab, "w1 head must be full-vocab");
-      frow.resize(static_cast<size_t>(out.lm_vocab_count));
-      for (int i = 0; i < out.lm_vocab_count; ++i)
-        frow[static_cast<size_t>(i)] =
-            dgpp::bf16_bits_to_float(out.logits_bits[static_cast<size_t>(i)]);
-      const int32_t t =
-          dgpp::glm_sample::local_max(frow.data(),
-                                      static_cast<int>(out.lm_vocab_count), 0)
-              .id;
-      require(t >= 0 && t < vocab, "picked id out of range");
-      return t;
-    };
-    GenEngineAdapter engine(&model, max_requests, pick);
+    // The shared w1 pick (full-vocab argmax; the float row is hoisted
+    // inside the closure — no per-token allocation).
+    GenEngineAdapter engine(&model, max_requests, dgpp::make_w1_pick(vocab));
     dgpp::glm::Scheduler sched(&engine, eos);
     // Submit COPIES: the manifest entries stay intact for the audit
     // trail below (log_results reads spec.id/spec.prompt AFTER the run —

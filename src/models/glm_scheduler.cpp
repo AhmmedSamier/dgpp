@@ -31,10 +31,15 @@ const char* reason_name(Scheduler::Result::Reason r) {
 }  // namespace
 
 Scheduler::Scheduler(SchedulerEngine* engine,
-                     std::vector<int64_t> eos_token_ids)
-    : engine_(engine), eos_ids_(std::move(eos_token_ids)) {
+                     std::vector<int64_t> eos_token_ids, int queue_limit)
+    : engine_(engine),
+      eos_ids_(std::move(eos_token_ids)),
+      queue_limit_(queue_limit) {
   if (engine_ == nullptr)
     throw std::invalid_argument("Scheduler: engine must not be null");
+  if (queue_limit_ < 0)
+    throw std::invalid_argument(
+        "Scheduler: queue_limit must be 0 (unbounded) or positive");
   slots_.assign(static_cast<size_t>(engine_->max_concurrent_requests()), -1);
   if (slots_.empty())
     throw std::invalid_argument(
@@ -73,29 +78,73 @@ int Scheduler::next_admissible() const {
   return -1;
 }
 
-void Scheduler::submit(SchedulerRequest request) {
+void Scheduler::validate_new(const SchedulerRequest& request) const {
   if (request.id.empty())
     throw std::invalid_argument("Scheduler: request id must not be empty");
   for (const Request& r : requests_) {
     if (r.spec.id == request.id)
       throw std::invalid_argument("Scheduler: duplicate request id '" +
-                                 request.id + "'");
+                                  request.id + "'");
   }
   if (request.prompt.empty())
     throw std::invalid_argument("Scheduler: request '" + request.id +
                                "' has an empty prompt");
   if (request.max_steps < 1)
     throw std::invalid_argument("Scheduler: request '" + request.id +
-                               "' must generate at least one token");
+                                "' must generate at least one token");
   if (request.cancel_after < 0 || request.cancel_after > request.max_steps)
     throw std::invalid_argument(
         "Scheduler: request '" + request.id + "' cancel_after must be in "
         "[0, max_steps] — a cancel that can never fire is a manifest error");
+}
+
+int Scheduler::queued_count() const {
+  int n = 0;
+  for (const Request& r : requests_)
+    if (r.state == State::kQueued) ++n;
+  return n;
+}
+
+bool Scheduler::try_submit(SchedulerRequest request) {
+  validate_new(request);
+  if (queue_limit_ > 0 && queued_count() >= queue_limit_) return false;
   Request r;
   r.spec = std::move(request);
   requests_.push_back(std::move(r));
-  Result res;
-  results_.push_back(res);
+  results_.emplace_back();
+  return true;
+}
+
+void Scheduler::submit(SchedulerRequest request) {
+  if (!try_submit(std::move(request)))
+    throw QueueFullError(
+        "Scheduler: admission queue full (" +
+        std::to_string(queued_count()) + " queued, limit " +
+        std::to_string(queue_limit_) + ") — shed load or raise the limit");
+}
+
+bool Scheduler::cancel(const std::string& id) {
+  for (Request& r : requests_) {
+    if (r.spec.id != id) continue;
+    if (r.state == State::kQueued || r.state == State::kActive) {
+      r.cancel_requested = true;
+      return true;
+    }
+    return false;  // terminal: a late cancel is a no-op, never an error
+  }
+  return false;
+}
+
+bool Scheduler::has_pending() const {
+  for (const Request& r : requests_)
+    if (r.state == State::kQueued || r.state == State::kActive) return true;
+  return false;
+}
+
+const Scheduler::Result* Scheduler::find(const std::string& id) const {
+  for (size_t i = 0; i < requests_.size(); ++i)
+    if (requests_[i].spec.id == id) return &results_[i];
+  return nullptr;
 }
 
 void Scheduler::admit(int arrival) {
@@ -114,6 +163,8 @@ void Scheduler::admit(int arrival) {
   r.steps_done = 1;
   r.generated.push_back(static_cast<int64_t>(token));
   slots_[static_cast<size_t>(slot)] = arrival;
+  ++tokens_generated_;
+  if (observer_) observer_->on_token(r.spec.id, token, r.steps_done);
   if (arrival == deferred_logged_) deferred_logged_ = -1;
   DGPP_LOG_INFO(
       "sched: request '{}' admitted to slot {} (reserve {} blocks; pool "
@@ -136,6 +187,8 @@ void Scheduler::step_one(int arrival) {
   r.steps_done += 1;
   r.generated.push_back(static_cast<int64_t>(token));
   cursor_ = arrival;
+  ++tokens_generated_;
+  if (observer_) observer_->on_token(r.spec.id, token, r.steps_done);
   DGPP_LOG_INFO("sched: request '{}' step {}: token {}", r.spec.id,
                 r.steps_done, token);
   if (is_eos(token)) {
@@ -151,8 +204,11 @@ void Scheduler::step_one(int arrival) {
 void Scheduler::retire(int arrival, Result::Status status,
                        Result::Reason reason) {
   Request& r = requests_[static_cast<size_t>(arrival)];
-  engine_->close(r.slot);
-  slots_[static_cast<size_t>(r.slot)] = -1;
+  // An externally cancelled QUEUED request never held a slot or blocks.
+  if (r.slot >= 0) {
+    engine_->close(r.slot);
+    slots_[static_cast<size_t>(r.slot)] = -1;
+  }
   r.state = State::kTerminal;
   Result& res = results_[static_cast<size_t>(arrival)];
   res.status = status;
@@ -161,86 +217,118 @@ void Scheduler::retire(int arrival, Result::Status status,
   res.steps_done = r.steps_done;
   res.generated = r.generated;
   r.slot = -1;
+  if (observer_) observer_->on_retire(r.spec.id, res);
   DGPP_LOG_INFO("sched: request '{}' retired ({}, {} tokens generated)",
-               r.spec.id, reason_name(reason), r.steps_done);
+                r.spec.id, reason_name(reason), r.steps_done);
+}
+
+bool Scheduler::tick() {
+  // The external-cancel sweep — FIXED POSITION, before any admission
+  // or step: a request cancelled BETWEEN ticks never pays another
+  // engine op; one cancelled MID-TICK waits out the in-flight op (the
+  // price of a single fixed position the fabric journal can stamp —
+  // every rank retires the same request at the same quantum, and
+  // arrival order keeps it deterministic). Observed live at w1: a flag
+  // that arrived during a 5-minute prefill rode out the whole tick.
+  for (size_t i = 0; i < requests_.size(); ++i) {
+    Request& r = requests_[i];
+    if (r.cancel_requested &&
+        (r.state == State::kQueued || r.state == State::kActive))
+      retire(static_cast<int>(i), Result::Status::kCancelled,
+             Result::Reason::kCancelled);
+  }
+
+  const bool any_active = std::any_of(
+      requests_.begin(), requests_.end(),
+      [](const Request& r) { return r.state == State::kActive; });
+  const bool any_queued = std::any_of(
+      requests_.begin(), requests_.end(),
+      [](const Request& r) { return r.state == State::kQueued; });
+  if (!any_active && !any_queued) return false;
+
+  bool progressed = false;
+
+  // (1) Strict alternation: at most ONE admission per tick, before the
+  // step, so a queued request's first token is not delayed behind a
+  // step — and mid-answer requests never wait behind more than one
+  // read-in.
+  const int admit_arrival = next_admissible();
+  if (admit_arrival >= 0) {
+    admit(admit_arrival);
+    progressed = true;
+  } else if (any_queued) {
+    // Deferral bookkeeping: log the head of the queue once per
+    // deferral episode, with the numbers an operator needs.
+    const auto head = std::find_if(
+        requests_.begin(), requests_.end(),
+        [](const Request& r) { return r.state == State::kQueued; });
+    const int head_arrival =
+        static_cast<int>(head - requests_.begin());
+    if (deferred_logged_ != head_arrival) {
+      deferred_logged_ = head_arrival;
+      const int64_t free_blocks = engine_->pool_blocks_total() -
+                                  engine_->pool_blocks_in_use();
+      DGPP_LOG_INFO(
+          "sched: request '{}' deferred (needs {} blocks, {} free, {} "
+          "slot(s) open) — admits when a peer retires",
+          head->spec.id, reserve_blocks(*head), free_blocks,
+          std::count(slots_.begin(), slots_.end(), -1));
+    }
+  }
+
+  // (2) Exactly one decode step per tick, round-robin by arrival over
+  // the active set. The just-admitted request is eligible only if the
+  // rotation reaches it — admission does not jump the queue.
+  const auto next_active_after_cursor = [&]() -> int {
+    for (int off = 1; off <= static_cast<int>(requests_.size()); ++off) {
+      const int i = (cursor_ + off) % static_cast<int>(requests_.size());
+      if (requests_[static_cast<size_t>(i)].state == State::kActive)
+        return i;
+    }
+    return -1;
+  };
+  const int step_arrival = next_active_after_cursor();
+  if (step_arrival >= 0) {
+    step_one(step_arrival);
+    progressed = true;
+  }
+
+  if (!progressed) {
+    // No admission, no step, work remaining. With any active request
+    // the rotation always yields one, so this is the admission
+    // deadlock: the queue cannot fit the pool ever (its head's
+    // reservation exceeds the total capacity) or every slot is held
+    // by requests that can never retire (impossible under full-reserve
+    // — they are bounded by max_steps). Either way: LOUD.
+    const auto head = std::find_if(
+        requests_.begin(), requests_.end(),
+        [](const Request& r) { return r.state == State::kQueued; });
+    throw std::runtime_error(
+        "Scheduler: admission deadlock — request '" + head->spec.id +
+        "' needs " + std::to_string(reserve_blocks(*head)) +
+        " blocks against a pool of " +
+        std::to_string(engine_->pool_blocks_total()) +
+        " (grow --kv-capacity or shed requests)");
+  }
+  return true;
 }
 
 void Scheduler::run_to_completion() {
-  if (requests_.empty()) return;
-  while (true) {
-    const bool any_active = std::any_of(
-        requests_.begin(), requests_.end(),
-        [](const Request& r) { return r.state == State::kActive; });
-    const bool any_queued = std::any_of(
-        requests_.begin(), requests_.end(),
-        [](const Request& r) { return r.state == State::kQueued; });
-    if (!any_active && !any_queued) break;
-
-    bool progressed = false;
-
-    // (1) Strict alternation: at most ONE admission per tick, before the
-    // step, so a queued request's first token is not delayed behind a
-    // step — and mid-answer requests never wait behind more than one
-    // read-in.
-    const int admit_arrival = next_admissible();
-    if (admit_arrival >= 0) {
-      admit(admit_arrival);
-      progressed = true;
-    } else if (any_queued) {
-      // Deferral bookkeeping: log the head of the queue once per
-      // deferral episode, with the numbers an operator needs.
-      const auto head = std::find_if(
-          requests_.begin(), requests_.end(),
-          [](const Request& r) { return r.state == State::kQueued; });
-      const int head_arrival =
-          static_cast<int>(head - requests_.begin());
-      if (deferred_logged_ != head_arrival) {
-        deferred_logged_ = head_arrival;
-        const int64_t free_blocks = engine_->pool_blocks_total() -
-                                    engine_->pool_blocks_in_use();
-        DGPP_LOG_INFO(
-            "sched: request '{}' deferred (needs {} blocks, {} free, {} "
-            "slot(s) open) — admits when a peer retires",
-            head->spec.id, reserve_blocks(*head), free_blocks,
-            std::count(slots_.begin(), slots_.end(), -1));
-      }
-    }
-
-    // (2) Exactly one decode step per tick, round-robin by arrival over
-    // the active set. The just-admitted request is eligible only if the
-    // rotation reaches it — admission does not jump the queue.
-    const auto next_active_after_cursor = [&]() -> int {
-      for (int off = 1; off <= static_cast<int>(requests_.size()); ++off) {
-        const int i = (cursor_ + off) % static_cast<int>(requests_.size());
-        if (requests_[static_cast<size_t>(i)].state == State::kActive)
-          return i;
-      }
-      return -1;
-    };
-    const int step_arrival = next_active_after_cursor();
-    if (step_arrival >= 0) {
-      step_one(step_arrival);
-      progressed = true;
-    }
-
-    if (!progressed) {
-      // No admission, no step, work remaining. With any active request
-      // the rotation always yields one, so this is the admission
-      // deadlock: the queue cannot fit the pool ever (its head's
-      // reservation exceeds the total capacity) or every slot is held
-      // by requests that can never retire (impossible under full-reserve
-      // — they are bounded by max_steps). Either way: LOUD.
-      const auto head = std::find_if(
-          requests_.begin(), requests_.end(),
-          [](const Request& r) { return r.state == State::kQueued; });
-      throw std::runtime_error(
-          "Scheduler: admission deadlock — request '" + head->spec.id +
-          "' needs " + std::to_string(reserve_blocks(*head)) +
-          " blocks against a pool of " +
-          std::to_string(engine_->pool_blocks_total()) +
-          " (grow --kv-capacity or shed requests)");
-    }
+  while (tick()) {
   }
+}
+
+Scheduler::Meters Scheduler::meters() const {
+  Meters m;
+  for (const Request& r : requests_) {
+    if (r.state == State::kActive) ++m.active;
+    else if (r.state == State::kQueued) ++m.queued;
+    else ++m.terminal;
+  }
+  m.pool_blocks_total = engine_->pool_blocks_total();
+  m.pool_blocks_in_use = engine_->pool_blocks_in_use();
+  m.tokens_generated = tokens_generated_;
+  return m;
 }
 
 }  // namespace dgpp::glm

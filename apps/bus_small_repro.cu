@@ -82,6 +82,8 @@ struct Config {
   // 4-process fabric mode: my rank fixed, world formed across hosts.
   int my_rank = -1;
   std::string host = "";
+  int rendezvous_ms = 20000;  // the roster window (launch scripts need
+                              // more than a human's interactive launch)
 };
 
 BusOptions loop_options(const Config& c, int rank, uint16_t port,
@@ -92,7 +94,7 @@ BusOptions loop_options(const Config& c, int rank, uint16_t port,
   o.lane_devices = {"rocep1s0f0", "roceP2p1s0f0"};
   o.rendezvous_port = port;
   o.rendezvous_host = rank == 0 ? "" : "127.0.0.1";
-  o.rendezvous_timeout_ms = 20000;
+  o.rendezvous_timeout_ms = c.rendezvous_ms;
   o.lat_slots = c.lat_slots;
   o.lat_slot_bytes = 8192;
   o.bulk_slots = 8;
@@ -372,7 +374,7 @@ int run(const Config& c) {
     o.lane_devices = {"rocep1s0f0", "roceP2p1s0f0"};
     o.rendezvous_port = c.port;
     o.rendezvous_host = c.host;
-    o.rendezvous_timeout_ms = 20000;
+    o.rendezvous_timeout_ms = c.rendezvous_ms;
     o.lat_slots = c.lat_slots;
     o.lat_slot_bytes = 8192;
     o.bulk_slots = 8;
@@ -468,6 +470,8 @@ int main(int argc, char** argv) {
     else if (a == "--plain-iters") c.plain_iters = std::atoi(next().c_str());
     else if (a == "--plain-elems") c.plain_elems = std::atoi(next().c_str());
     else if (a == "--timeout-ms") c.timeout_ms = std::atoi(next().c_str());
+    else if (a == "--rendezvous-timeout-ms")
+      c.rendezvous_ms = std::atoi(next().c_str());
     else if (a == "--pick-race") c.pick_race_iters = std::atoi(next().c_str());
     else if (a == "--staged-per-pick") c.staged_per_pick = std::atoi(next().c_str());
     else if (a == "--skew-us") c.skew_us = std::atoi(next().c_str());

@@ -260,6 +260,13 @@ if(DGPP_ENABLE_IBV)
   target_link_libraries(glm_gen_check PRIVATE dgpp_models_glm_loader dgpp_bus
                                             CUDA::cudart Threads::Threads)
   dgpp_set_common(glm_gen_check)
+
+  # M6 Stage 4a: the OpenAI-compatible serving app (world 1 — the local
+  # reference engine; Stage 4b adds the fabric journal + resident TP).
+  add_executable(glm_serve apps/glm_serve.cpp)
+  target_link_libraries(glm_serve PRIVATE dgpp_models_glm_loader dgpp_service
+                                         CUDA::cudart Threads::Threads)
+  dgpp_set_common(glm_serve)
 endif()
 
 enable_testing()
@@ -305,6 +312,29 @@ dgpp_set_common(glm_chat_template_test)
 add_test(NAME glm_chat_template_test
   COMMAND glm_chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_chat_template_goldens.jsonl)
 set_tests_properties(glm_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# M6 Stage 4: the serving capstone — HTTP/SSE over epoll + the OpenAI
+# generation service (host-only; the engine adapters live in the apps,
+# dgpp_service never links CUDA — CI runs the service gate with a fake
+# engine and frontend, no model cache).
+add_library(dgpp_service STATIC
+  src/service/http_server.cpp
+  src/service/generation_service.cpp)
+target_link_libraries(dgpp_service
+  PUBLIC dgpp_core dgpp_models_glm dgpp_loaders Threads::Threads)
+dgpp_set_common(dgpp_service)
+
+add_executable(http_server_test tests/host/http_server_test.cpp)
+target_link_libraries(http_server_test PRIVATE dgpp_service Threads::Threads)
+dgpp_set_common(http_server_test)
+add_test(NAME http_server_test COMMAND http_server_test)
+
+# M6 Stage 4 service gate: the REAL HTTP/SSE service over a fake engine
+# + fake frontend — the OpenAI surface, host-only, always runs.
+add_executable(glm_serve_test tests/host/glm_serve_test.cpp)
+target_link_libraries(glm_serve_test PRIVATE dgpp_service Threads::Threads)
+dgpp_set_common(glm_serve_test)
+add_test(NAME glm_serve_test COMMAND glm_serve_test)
 
 # M6 Stage 2b: the scheduler policy gate (host, no model, no skip path —
 # the FakeEngine replaces the engine, so the policy is pinned everywhere

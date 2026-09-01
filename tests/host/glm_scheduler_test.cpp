@@ -377,6 +377,53 @@ DGPP_TEST(scheduler_eosMidRun_retiresBeforeStepsCap) {
           "Done/eos at 3 tokens");
 }
 
+using dgpp::glm::QueueFullError;
+using dgpp::glm::SchedulerObserver;
+
+// The recording observer: every event in global fire order (the SSE tap
+// in miniature — ordering IS the contract being tested).
+class RecordingObserver : public SchedulerObserver {
+ public:
+  struct Event {
+    std::string kind;  // "tok" | "end"
+    std::string id;
+    int64_t token = -1;
+    int steps_done = -1;
+    Scheduler::Result::Status status{};
+  };
+  void on_token(const std::string& id, int64_t token,
+                int steps_done) override {
+    events_.push_back({"tok", id, token, steps_done, {}});
+  }
+  void on_retire(const std::string& id,
+                 const Scheduler::Result& result) override {
+    events_.push_back({"end", id, -1, result.steps_done, result.status});
+  }
+  const std::vector<Event>& events() const { return events_; }
+  std::string replay() const {
+    std::string s;
+    for (const Event& e : events_) {
+      if (!s.empty()) s += " ";
+      if (e.kind == "tok") s += "T(" + e.id + "," + std::to_string(e.token) + ")";
+      else s += "E(" + e.id + "," + std::to_string(e.steps_done) + ")";
+    }
+    return s;
+  }
+
+ private:
+  std::vector<Event> events_;
+};
+
+// DGPP_TEST(scheduler_observer...) uses this; keep helpers below the
+// observer so the replay formatting stays next to the contract.
+size_t count_kind(const RecordingObserver& o, const std::string& kind,
+                  const std::string& id) {
+  size_t n = 0;
+  for (const auto& e : o.events())
+    if (e.kind == kind && e.id == id) ++n;
+  return n;
+}
+
 DGPP_TEST(scheduler_submit_rejectsManifestErrorsLoudly) {
   // GIVEN a scheduler with one request,
   FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
@@ -400,6 +447,237 @@ DGPP_TEST(scheduler_submit_rejectsManifestErrorsLoudly) {
   throws_with(make_request("b", 0, 3), "empty prompt");
   throws_with(make_request("b", 5, 0), "at least one token");
   throws_with(make_request("b", 5, 3, /*cancel_after=*/4), "cancel_after");
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4 surface: tick mode, dynamic arrival, bounded queue, external
+// cancel, the observer, meters.
+// ---------------------------------------------------------------------------
+
+DGPP_TEST(scheduler_tickLoop_matchesRunToCompletion_exactly) {
+  // GIVEN a scenario mixing deferral, scripted cancellation, and EOS,
+  const auto run = [&](bool tick_mode) {
+    FakeEngine engine(/*slots=*/2, /*total_blocks=*/3, /*block_tokens=*/4);
+    engine.arm(0, {1, 2, kEos}, /*max_steps=*/4);  // x -> slot 0
+    engine.arm(0, {7, 8}, /*max_steps=*/2);        // y -> reuses slot 0
+    Scheduler sched(&engine, {kEos});
+    sched.submit(make_request("x", 5, 4));
+    sched.submit(make_request("y", 5, 2, /*cancel_after=*/1));
+    // WHEN driven either by run_to_completion or by raw ticks,
+    if (tick_mode)
+      while (sched.tick()) {
+      }
+    else
+      sched.run_to_completion();
+    std::vector<std::string> summary;
+    for (const auto& r : sched.results())
+      summary.push_back(std::to_string(static_cast<int>(r.status)) + ":" +
+                        ids_joined(r.generated));
+    return std::make_pair(engine.op_stream(), summary);
+  };
+
+  // THEN both drivers produce the IDENTICAL op stream and results — the
+  // tick extraction must be a pure refactor (the fabric's manifest path
+  // rides on it staying bit-equal).
+  const auto batch = run(false);
+  const auto ticked = run(true);
+  require(batch.first == ticked.first,
+          "tick-mode op stream drifted from run_to_completion:\n  batch: " +
+              batch.first + "\n  tick:  " + ticked.first);
+  require(batch.second == ticked.second,
+          "tick-mode results drifted from run_to_completion");
+}
+
+DGPP_TEST(scheduler_dynamicArrival_transcriptsMatchSolo) {
+  // GIVEN a generating mid-answer, with b arriving mid-run,
+  const auto solo = [&](const char* id, std::vector<int32_t> script,
+                        int max_steps) {
+    FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+    engine.arm(0, std::move(script), max_steps);
+    Scheduler sched(&engine, {kEos});
+    sched.submit(make_request(id, 5, max_steps));
+    sched.run_to_completion();
+    return ids_joined(sched.results()[0].generated);
+  };
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.arm(0, {1, 2, 3, 4}, /*max_steps=*/4);  // a -> slot 0
+  engine.arm(1, {5, 6}, /*max_steps=*/2);       // b -> slot 1
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 5, 4));
+
+  // WHEN a ticks twice alone, b submits mid-run, and the loop drives to
+  // completion (the service's exact arrival shape),
+  require(sched.tick(), "tick 1 works");
+  require(sched.tick(), "tick 2 works");
+  sched.submit(make_request("b", 5, 2));
+  while (sched.tick()) {
+  }
+
+  // THEN the op stream shows b admitted at the next tick's alternation
+  // slot, and BOTH transcripts equal their solo runs — dynamic arrival
+  // preserves the isolation property.
+  const std::string expected =
+      "P:0:5 S:0:1 S:0:2 P:1:5 S:1:5 C:1 S:0:3 C:0";
+  require(engine.op_stream() == expected,
+          "dynamic-arrival stream drifted:\n  got:      " +
+              engine.op_stream() + "\n  expected: " + expected);
+  require(ids_joined(sched.results()[0].generated) ==
+              solo("a", {1, 2, 3, 4}, 4),
+          "a's transcript must match its solo run");
+  require(ids_joined(sched.results()[1].generated) == solo("b", {5, 6}, 2),
+          "b's transcript must match its solo run");
+  require(!sched.has_pending(), "nothing pending after completion");
+}
+
+DGPP_TEST(scheduler_boundedQueue_shedsWhenFullThenAdmits) {
+  // GIVEN a scheduler with a one-deep admission queue,
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.arm(0, {1, 2, 3}, /*max_steps=*/3);  // a -> slot 0
+  engine.arm(1, {4, 5, 6}, /*max_steps=*/3);  // b -> slot 1
+  Scheduler sched(&engine, {kEos}, /*queue_limit=*/1);
+  sched.submit(make_request("a", 5, 3));
+
+  // WHEN the queue is full, try_submit sheds (no throw — this is load,
+  // not an error) and submit throws QueueFullError; after a's admission
+  // drains the queue, b lands and runs normally.
+  require(!sched.try_submit(make_request("b", 5, 3)),
+          "try_submit must shed when the queue is full");
+  bool shed = false;
+  try {
+    sched.submit(make_request("b", 5, 3));
+  } catch (const QueueFullError&) {
+    shed = true;
+  }
+  require(shed, "submit must throw QueueFullError at the bound");
+  require(sched.tick(), "tick admits a (draining the queue)");
+  require(sched.try_submit(make_request("b", 5, 3)),
+          "b lands once the queue has room");
+  while (sched.tick()) {
+  }
+  require(sched.results().size() == 2,
+          "exactly a and the landed b — a shed request is never recorded");
+}
+
+DGPP_TEST(scheduler_externalCancel_retiresAtNextTickWithoutExtraStep) {
+  // GIVEN a mid-generation request (three tokens served, one to go),
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.arm(0, {1, 2, 3, 4}, /*max_steps=*/4);
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 5, 4));
+  require(sched.tick(), "tick 1: admit + first step");
+  require(sched.tick(), "tick 2: second step");
+
+  // WHEN the client disconnects (external cancel) before the next tick,
+  require(sched.cancel("a"), "cancel flags a live request");
+
+  // THEN the next tick's SWEEP retires a — Cancelled with the tokens
+  // served so far, NO fourth engine op (a cancelled request never pays
+  // one more step), and the tick reports idle-after (the retirement
+  // rode on the false — the documented tick contract). A late re-cancel
+  // is a no-op.
+  require(!sched.tick(), "the sweep tick retires a and reports idle-after");
+  const std::string expected = "P:0:5 S:0:1 S:0:2 C:0";
+  require(engine.op_stream() == expected,
+          "cancel must retire without an extra step:\n  got:      " +
+              engine.op_stream() + "\n  expected: " + expected);
+  const auto& a = sched.results()[0];
+  require(a.status == Scheduler::Result::Status::kCancelled &&
+              a.reason == Scheduler::Result::Reason::kCancelled &&
+              a.steps_done == 3 && ids_joined(a.generated) == "1,2,3",
+          "a: Cancelled at 3 tokens");
+  require(!sched.cancel("a"), "re-cancel of a terminal request is a no-op");
+  require(!sched.has_pending(), "idle after the cancel");
+  require(!sched.tick(), "a further tick is idle");
+}
+
+DGPP_TEST(scheduler_externalCancel_queuedRequestNeverAdmits) {
+  // GIVEN a pool that fits one reservation at a time: a active, b queued,
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/2, /*block_tokens=*/4);
+  engine.arm(0, {1, 2, 3}, /*max_steps=*/3);  // a -> slot 0
+  engine.arm(1, {4, 5, 6}, /*max_steps=*/3);  // b -> slot 1 (never used)
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 5, 3));
+  sched.submit(make_request("b", 5, 3));
+  require(sched.tick(), "tick 1 admits a; b defers on budget");
+
+  // WHEN b is cancelled while queued,
+  require(sched.cancel("b"), "cancel flags the queued request");
+  while (sched.tick()) {
+  }
+
+  // THEN b retires Cancelled having never touched an engine slot (no
+  // prefill, no close — the op stream is a's solo stream) and a
+  // finishes untouched.
+  const std::string expected = "P:0:5 S:0:1 S:0:2 C:0";
+  require(engine.op_stream() == expected,
+          "queued cancel must be invisible to the engine:\n  got:      " +
+              engine.op_stream() + "\n  expected: " + expected);
+  const auto& b = sched.results()[1];
+  require(b.status == Scheduler::Result::Status::kCancelled &&
+              b.steps_done == 0 && b.generated.empty() && b.slot == -1,
+          "b: Cancelled, never admitted");
+  require(sched.results()[0].status == Scheduler::Result::Status::kDone &&
+              ids_joined(sched.results()[0].generated) == "1,2,3",
+          "a finished normally");
+}
+
+DGPP_TEST(scheduler_observer_eventsInFireOrderWithLifecycle) {
+  // GIVEN a scenario with EOS, a steps cap, and a cancellation (b reuses
+  // slot 0 after a's EOS retires it — lowest-free-slot policy),
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.arm(0, {1, kEos}, /*max_steps=*/5);  // a: EOS at token 2
+  engine.arm(0, {4, 5, 6}, /*max_steps=*/3);  // b: reuses slot 0
+  Scheduler sched(&engine, {kEos});
+  RecordingObserver observer;
+  sched.set_observer(&observer);
+  sched.submit(make_request("a", 5, 5));
+  sched.submit(make_request("b", 5, 3, /*cancel_after=*/2));
+
+  // WHEN run to completion,
+  sched.run_to_completion();
+
+  // THEN the observer saw every token BEFORE the retire that may follow
+  // it, one retire per request, and the counts/steps match the results.
+  const std::string expected =
+      "T(a,1) T(a,999) E(a,2) T(b,4) T(b,5) E(b,2)";
+  require(observer.replay() == expected,
+          "event order drifted:\n  got:      " + observer.replay() +
+              "\n  expected: " + expected);
+  require(count_kind(observer, "end", "a") == 1 &&
+              count_kind(observer, "end", "b") == 1,
+          "exactly one retire event per request");
+  const auto& a = sched.results()[0];
+  const auto& b = sched.results()[1];
+  require(a.reason == Scheduler::Result::Reason::kEos && a.steps_done == 2,
+          "a: EOS at 2 tokens");
+  require(b.status == Scheduler::Result::Status::kCancelled &&
+              b.steps_done == 2,
+          "b: cancelled after 2 tokens");
+}
+
+DGPP_TEST(scheduler_meters_trackQueueActiveTerminalAndTokens) {
+  // GIVEN a bounded queue with one request landing,
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/2, /*block_tokens=*/4);
+  engine.arm(0, {1, 2, 3}, /*max_steps=*/3);  // a
+  engine.arm(0, {7, 8}, /*max_steps=*/2);     // b: admits after a retires
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 5, 3));
+  sched.submit(make_request("b", 5, 2));
+
+  // WHEN sampled mid-run and after completion,
+  const auto mid = sched.meters();  // everything queued pre-tick
+  while (sched.tick()) {
+  }
+  const auto end = sched.meters();
+
+  // THEN the meters agree with the policy at both points (pool meters
+  // read the engine's own accounting, so in-use matches its arithmetic).
+  require(mid.queued == 2 && mid.active == 0 && mid.terminal == 0 &&
+              mid.tokens_generated == 0 && mid.pool_blocks_total == 2,
+          "pre-tick meters: two queued, nothing moving");
+  require(end.queued == 0 && end.active == 0 && end.terminal == 2 &&
+              end.tokens_generated == 5 && end.pool_blocks_in_use == 0,
+          "post-run meters: both terminal, 5 tokens total, pool drained");
 }
 
 }  // namespace

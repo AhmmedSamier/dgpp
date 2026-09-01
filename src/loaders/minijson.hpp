@@ -78,6 +78,7 @@ class Value {
   bool is_array() const { return kind_ == Kind::Array; }
   bool is_string() const { return kind_ == Kind::String; }
   bool is_number() const { return kind_ == Kind::Int || kind_ == Kind::Double; }
+  bool is_bool() const { return kind_ == Kind::Bool; }
 
   bool as_bool(bool dflt = false) const { return kind_ == Kind::Bool ? bool_ : dflt; }
   double as_double(double dflt = 0) const {

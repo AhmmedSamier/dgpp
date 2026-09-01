@@ -1,0 +1,415 @@
+// M6 Stage 4: the HTTP/SSE server gate. A routing TestHandler stands in
+// for the generation service; the test acts as a raw-socket client. No
+// GPU, no model — this gate always runs, pinning:
+//   * one-shot requests with keep-alive (a second request rides the same
+//     connection);
+//   * POST bodies by Content-Length (the handler sees the exact bytes);
+//   * SSE: chunked framing, immediate events, and events drained across
+//     idle() passes (the service's ring-drain shape);
+//   * client disconnect mid-stream → on_disconnect(tag) — the scheduler
+//     cancellation hook;
+//   * the refusal ladder: malformed → 400 close, chunked request bodies
+//     → 501, POST without length → 411, oversized headers → 431,
+//     connection cap → 503 at the door;
+//   * stop() returns the loop promptly.
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "common/log.hpp"
+
+#include "common/test.hpp"
+#include "service/http_server.hpp"
+
+namespace {
+
+using dgpp::service::HttpHandler;
+using dgpp::service::HttpRequest;
+using dgpp::service::HttpResponseWriter;
+using dgpp::service::HttpServer;
+
+void require(bool cond, const std::string& what) {
+  if (!cond) throw std::runtime_error(what);
+}
+
+// --- a raw-socket client (the test never needs TcpConn's deadline
+// discipline — it wants "read whatever arrived within N ms") ----------
+class Client {
+ public:
+  explicit Client(uint16_t port) {
+    fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    require(fd_ >= 0, "client socket");
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    require(::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) == 1,
+            "client inet_pton");
+    require(::connect(fd_, reinterpret_cast<sockaddr*>(&addr),
+                      sizeof(addr)) == 0,
+            "client connect");
+    int yes = 1;
+    ::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+  }
+  ~Client() {
+    if (fd_ >= 0) ::close(fd_);
+  }
+  Client(const Client&) = delete;
+  Client& operator=(const Client&) = delete;
+
+  void send_all(std::string_view s) {
+    size_t off = 0;
+    while (off < s.size()) {
+      const ssize_t put = ::send(fd_, s.data() + off, s.size() - off, 0);
+      require(put > 0, "client send");
+      off += static_cast<size_t>(put);
+    }
+  }
+  // Everything that arrives within the timeout (EOF sets closed()).
+  std::string read_available(int timeout_ms) {
+    std::string out;
+    int waited = 0;
+    while (true) {
+      pollfd p{fd_, POLLIN, 0};
+      const int r = ::poll(&p, 1, 10);
+      if (r < 0) {
+        if (errno == EINTR) continue;
+        break;
+      }
+      if (r == 0) {
+        waited += 10;
+        if (waited >= timeout_ms) break;
+        continue;
+      }
+      char buf[4096];
+      const ssize_t got = ::recv(fd_, buf, sizeof(buf), 0);
+      if (got > 0) {
+        out.append(buf, static_cast<size_t>(got));
+        waited = 0;  // reset: responses may span segments
+        continue;
+      }
+      if (got == 0) closed_ = true;
+      break;
+    }
+    return out;
+  }
+  // The disconnect-test move: kill the socket without a goodbye byte.
+  void hard_close() {
+    ::shutdown(fd_, SHUT_RDWR);
+    ::close(fd_);
+    fd_ = -1;
+  }
+
+ private:
+  int fd_ = -1;
+  bool closed_ = false;
+};
+
+// --- the TestHandler: routes the gate exercises -----------------------
+class TestHandler : public HttpHandler {
+ public:
+  std::atomic<int> disconnects{0};
+  std::atomic<uint64_t> last_tag{0};
+
+  // GET  /hello  → 200 JSON
+  // POST /echo   → 200 body verbatim
+  // GET  /gone   → 404
+  // GET  /stream → SSE: 3 immediate events + end
+  // GET  /drip   → SSE: 4 events from idle(), one per pass, + end
+  // GET  /tagged → SSE with tag 42; only the client's close ends it
+  void handle(const HttpRequest& req, HttpResponseWriter& w) override {
+    if (req.path == "/hello" && req.method == "GET") {
+      w.respond(200, "application/json", "{\"ok\":true}");
+    } else if (req.path == "/echo" && req.method == "POST") {
+      w.respond(200, "text/plain", req.body);
+    } else if (req.path == "/stream" && req.method == "GET") {
+      w.begin_stream();
+      w.write_event("first");
+      w.write_event("second");
+      w.write_event("third");
+      w.end_stream();
+    } else if (req.path == "/drip" && req.method == "GET") {
+      w.begin_stream();
+      drip_.push_back(&w);  // drained from idle(), like the service
+    } else if (req.path == "/tagged" && req.method == "GET") {
+      // Silent stream: only the client's close ends it (the drip list
+      // would end_stream() after 4 events, defusing the disconnect).
+      w.begin_stream();
+      w.set_stream_tag(42);
+    } else {
+      w.respond(404, "application/json", "{\"error\":\"no route\"}");
+    }
+  }
+
+  void idle() override {
+    // One event per pass per drip stream; the 4th event ends it.
+    for (auto* w : drip_) {
+      if (w->stream_open()) {
+        w->write_event("drip");
+        if (++drip_sent_ >= 4) {
+          w->end_stream();
+          drip_sent_ = 0;
+        }
+      }
+    }
+  }
+
+  void on_disconnect(uint64_t tag) override {
+    ++disconnects;
+    last_tag = tag;
+    drip_.clear();
+  }
+
+ private:
+  std::vector<HttpResponseWriter*> drip_;  // epoll-thread only
+  int drip_sent_ = 0;
+};
+
+// Server + serve thread; stops/joins in the destructor so a failed
+// require still unwinds cleanly.
+struct ServerHandle {
+  TestHandler handler;
+  HttpServer server;
+  std::thread loop;
+
+  explicit ServerHandle(int max_connections = 64)
+      : server(0, &handler, max_connections),
+        loop([this] { server.serve(); }) {}
+  ~ServerHandle() {
+    server.stop();
+    if (loop.joinable()) loop.join();  // the stop test joins first
+  }
+  ServerHandle(const ServerHandle&) = delete;
+  ServerHandle& operator=(const ServerHandle&) = delete;
+
+  uint16_t port() const { return server.port(); }
+};
+
+const char* kGetHello = "GET /hello HTTP/1.1\r\nHost: t\r\n\r\n";
+
+DGPP_TEST(http_oneShot_keepAliveSecondRequestSameConnection) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN two requests ride one connection,
+  Client c(sh.port());
+  c.send_all(kGetHello);
+  const std::string first = c.read_available(500);
+  c.send_all(kGetHello);
+  const std::string second = c.read_available(500);
+
+  // THEN both answer 200 with the exact body, and the connection stays
+  // open for the second (no close byte between them).
+  require(first.find("200 OK") != std::string::npos &&
+              first.find("{\"ok\":true}") != std::string::npos,
+          "first response: " + first);
+  require(second.find("200 OK") != std::string::npos &&
+              second.find("{\"ok\":true}") != std::string::npos,
+          "second response (keep-alive): " + second);
+}
+
+DGPP_TEST(http_postBody_contentLengthDeliveredVerbatim) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN a POST carries a JSON body by Content-Length,
+  Client c(sh.port());
+  const std::string body = "{\"text\":\"hello world\",\"n\":7}";
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nContent-Type: "
+             "application/json\r\nContent-Length: " +
+             std::to_string(body.size()) + "\r\n\r\n" + body);
+
+  // THEN the handler's echo returns the exact bytes (the parser did not
+  // clip or buffer-shift the body).
+  const std::string resp = c.read_available(500);
+  require(resp.find("200 OK") != std::string::npos,
+          "echo status: " + resp);
+  require(resp.find(body) != std::string::npos, "echo body: " + resp);
+}
+
+DGPP_TEST(http_malformedRequestLine_400AndClose) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN garbage arrives,
+  Client c(sh.port());
+  c.send_all("not-a-request-line\r\n\r\n");
+
+  // THEN the server answers 400 and closes (the read hits EOF).
+  const std::string resp = c.read_available(500);
+  require(resp.find("400") != std::string::npos, "400 on garbage: " + resp);
+  const std::string tail = c.read_available(500);
+  require(resp.find("400") != std::string::npos && tail.empty(),
+          "connection closed after the 400");
+}
+
+DGPP_TEST(http_chunkedRequestBody_refused501) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN a request declares Transfer-Encoding: chunked (we only accept
+  // Content-Length bodies),
+  Client c(sh.port());
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: "
+             "chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+
+  // THEN it is refused loudly with 501 — never guessed at.
+  const std::string resp = c.read_available(500);
+  require(resp.find("501") != std::string::npos,
+          "chunked request bodies must be refused: " + resp);
+}
+
+DGPP_TEST(http_postWithoutContentLength_411) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN a POST arrives with no body length,
+  Client c(sh.port());
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\n\r\n");
+
+  // THEN the server demands one (411).
+  const std::string resp = c.read_available(500);
+  require(resp.find("411") != std::string::npos,
+          "length required: " + resp);
+}
+
+DGPP_TEST(http_sseStream_chunkedEventsInOrderWithTerminal) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN an immediate-event stream is requested,
+  Client c(sh.port());
+  c.send_all("GET /stream HTTP/1.1\r\nHost: t\r\n\r\n");
+
+  // THEN the response is SSE over chunked framing: the stream headers,
+  // three data events in order, and the terminal chunk.
+  const std::string resp = c.read_available(500);
+  require(resp.find("200 OK") != std::string::npos &&
+              resp.find("text/event-stream") != std::string::npos &&
+              resp.find("chunked") != std::string::npos,
+          "stream headers: " + resp.substr(0, 200));
+  const size_t first = resp.find("data: first");
+  const size_t second = resp.find("data: second");
+  const size_t third = resp.find("data: third");
+  const size_t terminal = resp.find("0\r\n\r\n");
+  require(first != std::string::npos && second != std::string::npos &&
+              third != std::string::npos,
+          "all three events present");
+  require(first < second && second < third, "events in order");
+  require(terminal != std::string::npos && terminal > third,
+          "terminal chunk after the last event");
+}
+
+DGPP_TEST(http_sseIdleDrain_eventsArriveAcrossLoopPasses) {
+  // GIVEN a running server whose drip stream emits one event per idle
+  // pass,
+  ServerHandle sh;
+
+  // WHEN the stream is requested,
+  Client c(sh.port());
+  c.send_all("GET /drip HTTP/1.1\r\nHost: t\r\n\r\n");
+
+  // THEN four drip events arrive (each on its own loop pass — this is
+  // the service's ring-drain shape) followed by the terminal chunk.
+  const std::string resp = c.read_available(2000);
+  int drips = 0;
+  for (size_t pos = resp.find("data: drip"); pos != std::string::npos;
+       pos = resp.find("data: drip", pos + 1))
+    ++drips;
+  require(drips == 4, "exactly four drip events (got " +
+                         std::to_string(drips) + ")");
+  require(resp.find("0\r\n\r\n") != std::string::npos,
+          "the stream terminated");
+}
+
+DGPP_TEST(http_clientDisconnectMidStream_firesOnDisconnectWithTag) {
+  // GIVEN a running server with a tagged stream,
+  ServerHandle sh;
+  Client c(sh.port());
+  c.send_all("GET /tagged HTTP/1.1\r\nHost: t\r\n\r\n");
+  require(!c.read_available(300).empty(), "stream headers arrived");
+
+  // WHEN the client vanishes mid-stream,
+  c.hard_close();
+
+  // THEN on_disconnect fires with the tag (the service's cancellation
+  // hook) within the loop's cadence.
+  for (int waited = 0; sh.handler.disconnects.load() == 0 && waited < 2000;
+       waited += 10)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  require(sh.handler.disconnects.load() == 1,
+          "on_disconnect fired exactly once");
+  require(sh.handler.last_tag.load() == 42, "the stream tag reached us");
+}
+
+DGPP_TEST(http_oversizedHeaders_431) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN headers exceed the 16 KiB cap with no end in sight,
+  Client c(sh.port());
+  std::string huge = "GET /hello HTTP/1.1\r\nHost: t\r\nX-Big: ";
+  huge.append(20 * 1024, 'a');
+  huge.append("\r\n\r\n");
+  c.send_all(huge);
+
+  // THEN the server refuses with 431 and closes.
+  const std::string resp = c.read_available(500);
+  require(resp.find("431") != std::string::npos, "431 on huge headers: " +
+                                                     resp.substr(0, 80));
+}
+
+DGPP_TEST(http_connectionCap_shedsAtTheDoorWith503) {
+  // GIVEN a server that admits exactly one connection,
+  ServerHandle sh(/*max_connections=*/1);
+
+  // WHEN a second client arrives while the first holds its connection,
+  Client holder(sh.port());
+  holder.send_all(kGetHello);
+  require(!holder.read_available(500).empty(), "holder served");
+
+  Client extra(sh.port());
+
+  // THEN the extra connection is shed at the door with 503 — no state
+  // allocated, no request parsed.
+  const std::string resp = extra.read_available(500);
+  require(resp.find("503") != std::string::npos, "503 at the door: " + resp);
+}
+
+DGPP_TEST(http_stop_serveLoopReturnsPromptly) {
+  // GIVEN a running server,
+  ServerHandle sh;
+
+  // WHEN stop() is called from this (non-HTTP) thread,
+  const auto t0 = std::chrono::steady_clock::now();
+  sh.server.stop();
+  sh.loop.join();
+  const double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+
+  // THEN the loop exits within one epoll timeout's grace (25ms bound,
+  // generous allowance for scheduling). The destructor's own stop+join
+  // is a no-op thanks to joinable().
+  require(ms < 500.0, "stop returned promptly (took " +
+                         std::to_string(ms) + "ms)");
+}
+
+}  // namespace
+
+int main() {
+  dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
+  return dgpp::test::run_all();
+}
