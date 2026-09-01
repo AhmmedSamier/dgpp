@@ -1946,6 +1946,19 @@ struct CollectiveBus::Impl {
     return total;
   }
 
+  // A graph window is in progress: armed and not yet walked past. The
+  // engine must never enter its idle sleep here — the replay's kernels
+  // stage a generation every few hundred microseconds and each one waits
+  // on THIS thread's post; a 50-110us sleep cadence would land inside
+  // every collective of the step (the eager one-shot path's round trip is
+  // covered by the spin phase; a graph window's inter-node compute gaps
+  // are not, and they are where the engine goes idle).
+  bool graph_window_live() const {
+    const uint64_t count = graph.window_count.load(std::memory_order_acquire);
+    return count > 0 && (count != graph.adopted_count ||
+                         graph.walk_seq <= graph.adopted_last);
+  }
+
   bool drained() {
     std::lock_guard<std::mutex> lq(lat_q_mu);
     if (!lat_q.empty()) return false;
@@ -1980,7 +1993,7 @@ struct CollectiveBus::Impl {
       if (graph_worked || coll_worked || worked || polled || recycled ||
           credited || watched) {
         idle = 0;
-      } else if (++idle > kEngineSpinIterations) {
+      } else if (++idle > kEngineSpinIterations && !graph_window_live()) {
         std::this_thread::sleep_for(
             std::chrono::microseconds(kEngineIdleSleepUs));
       }
