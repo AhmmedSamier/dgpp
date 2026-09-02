@@ -233,6 +233,8 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   post_ = static_cast<uint16_t*>(alloc_device(T * 4 * 2));
   mhc_logits_ = static_cast<float*>(
       alloc_device(T * static_cast<size_t>(mhc_cfg_.coeff_rows()) * 4));
+  mhc_counters_ = static_cast<int*>(alloc_device(T * sizeof(int)));
+  DGPP_CUDA_OK(cudaMemset(mhc_counters_, 0, T * sizeof(int)));
   comb_ = static_cast<uint16_t*>(alloc_device(T * 16 * 2));
   collapsed_ = static_cast<uint16_t*>(alloc_device(T * H * 2));
   normed_ = static_cast<uint16_t*>(alloc_device(T * H * 2));
@@ -289,6 +291,7 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(streams_[1]);
   cudaFree(post_);
   cudaFree(mhc_logits_);
+  cudaFree(mhc_counters_);
   cudaFree(comb_);
   cudaFree(collapsed_);
   cudaFree(normed_);
