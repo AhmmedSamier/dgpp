@@ -202,15 +202,18 @@ cudaError_t launch_bus_allreduce(const BusAllReduceView& v, int my_rank,
 constexpr int kBusMaxGraphGens = 128;       // recorded nodes per graph
 constexpr int kBusMaxGraphStageRing = 8;    // staging rows (kStageRing)
 
-// The graph twin of BusAllReduceView: staging rows are bases, not
-// precomputed rows — the kernel picks the row at runtime from its
-// generation. `stage_row_base[p]` is peer p's row 0; rows are
-// stage_row_bytes apart, stage_ring deep.
+// The graph twin of BusAllReduceView: the staging row is a base, not a
+// precomputed row — the kernel picks the row at runtime from its
+// generation. `stage_row_base` is the SHARED send row 0 (one snapshot
+// serves every peer's post: a SEND's local address is any registered
+// memory, and the ring-depth reuse argument holds per peer exactly as it
+// did with a row per peer); rows are stage_row_bytes apart, stage_ring
+// deep.
 struct BusAllReduceGraphView {
   BusRecvView recv[kBusMaxPeers * kBusMaxLanes] = {};  // peer-major
   int recv_views = 0;
   int lanes_per_peer = 0;
-  uint16_t* stage_row_base[kBusMaxPeers] = {};
+  uint16_t* stage_row_base = nullptr;
   int send_peers = 0;
   uint32_t stage_ring = 0;      // rows per peer (kBusMaxGraphStageRing)
   uint32_t stage_row_bytes = 0; // == lat_slot_bytes

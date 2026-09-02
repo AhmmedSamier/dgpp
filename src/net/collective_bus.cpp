@@ -393,6 +393,12 @@ struct CollectiveBus::Impl {
       uint64_t n = 0;
       double copy_us = 0, handshake_us = 0, skew_us = 0, fold_us = 0,
              total_us = 0, post_us = 0;
+      uint64_t passes = 0;  // engine passes while the window was live
+      // previous generation's fold done -> this generation's entry: THIS
+      // rank's compute between collectives (the ranks' spread here is
+      // what the skew measures).
+      double compute_us = 0;
+      uint64_t prev_gt_done = 0;
       double max_handshake_us = 0, max_skew_us = 0, max_total_us = 0;
       uint64_t max_total_gen = 0;  // gen_seq of the window's worst total
       uint64_t first_gt_start = 0; // the window's first generation's entry
@@ -1041,6 +1047,8 @@ struct CollectiveBus::Impl {
     GraphState::Timeline& t = graph.tl;
     ++t.n;
     if (t.n == 1) t.first_gt_start = c.gt_start;
+    if (t.prev_gt_done != 0) t.compute_us += us(t.prev_gt_done, c.gt_start);
+    t.prev_gt_done = c.gt_done;
     const double copy = us(c.gt_start, c.gt_stage);
     const double hs = us(c.gt_stage, c.gt_first);
     const double skew = us(c.gt_first, c.gt_last);
@@ -1079,14 +1087,18 @@ struct CollectiveBus::Impl {
     DGPP_LOG_INFO(
         "graph window timeline: rank {} gens {} avg us: total {:.1f} = copy "
         "{:.1f} + handshake {:.1f} + skew {:.1f} + fold {:.1f}; engine post "
-        "{:.1f}; max handshake {:.1f} skew {:.1f} total {:.1f} (gen {}); "
-        "gate waits {}; arm->gen0 {:.1f} us",
+        "{:.1f}; max handshake {:.1f} skew {:.1f} total {:.1f} "
+        "(gen {}); gate waits {}; arm->gen0 {:.1f} us; passes/gen {:.0f}; "
+        "compute between gens {:.1f} us",
         opt.my_rank, t.n, t.total_us / n, t.copy_us / n, t.handshake_us / n,
-        t.skew_us / n, t.fold_us / n, t.post_us / n, t.max_handshake_us,
+        t.skew_us / n, t.fold_us / n, t.post_us / n,
+        t.max_handshake_us,
         t.max_skew_us, t.max_total_us, t.max_total_gen, t.gate_waits,
         t.first_gt_start > graph.armed_gt
             ? static_cast<double>(t.first_gt_start - graph.armed_gt) / 1000.0
-            : 0.0);
+            : 0.0,
+        static_cast<double>(t.passes) / n,
+        t.n > 1 ? t.compute_us / static_cast<double>(t.n - 1) : 0.0);
     DGPP_LOG_INFO(
         "graph window wait: rank {} hist(<20 <50 <100 <200 <500 >=500 us) {} "
         "{} {} {} {} {}; even gens {} avg {:.1f} us, odd gens {} avg {:.1f} us",
@@ -1222,6 +1234,7 @@ struct CollectiveBus::Impl {
     BusAllReduceCtl* const cell =
         &graph_cells[(gen - graph.adopted_first) % gens];
     const uint32_t seq = static_cast<uint32_t>(gen);
+    ++graph.tl.passes;
     const uint64_t ready = acquire_u64(&cell->ready_bits);
     const uint64_t done = acquire_u64(&cell->done_seq);
 
@@ -1312,6 +1325,16 @@ struct CollectiveBus::Impl {
       const auto post_t0 = Clock::now();
       const uint32_t elems =
           graph.meta[(gen - graph.adopted_first) % gens].elems;
+      // The row the kernel wrote — peer row 0 of ring slot
+      // (g-1)%kStageRing, shared by every peer's post (the graph kernel
+      // snapshots once; the eager machine's per-peer rows are untouched).
+      // The door carries the row's fold: the graph kernel's PLACEMENT gate
+      // (StartSlot::hash), same as the eager posting path — computed once,
+      // not once per peer.
+      const uint8_t* row =
+          stage_buf(0, static_cast<int>((gen - 1) % Impl::kStageRing));
+      const uint64_t row_hash = bus_fold64(
+          reinterpret_cast<const uint64_t*>(row), static_cast<size_t>(elems) / 4);
       for (size_t p = 0; p < peer_ranks.size(); ++p) {
         if ((graph.flight.posted_bits >> p) & 1) continue;
         if (!((ready >> p) & 1)) continue;  // row not staged (belt+braces)
@@ -1320,19 +1343,11 @@ struct CollectiveBus::Impl {
         SendSlot& ss = lane.send[0][slot];
         if (ss.in_flight) break;  // ring position busy; retry next pass
         const uint32_t pair_seq = ss.gen + 1;
-        // The row the kernel wrote: generation g stages ring slot
-        // (g-1)%kStageRing — the eager machine's rotation. The door
-        // carries the row's fold: the graph kernel's PLACEMENT gate
-        // (StartSlot::hash), same as the eager posting path.
-        const uint8_t* row =
-            stage_buf(p, static_cast<int>((gen - 1) % Impl::kStageRing));
         std::string error;
         if (!lane.lane->post_send_pair(
                 BusPool::kLatency, slot, pair_seq,
                 static_cast<uint32_t>(elems) * 2, &error, row,
-                lane.stage_lkey, gen,
-                bus_fold64(reinterpret_cast<const uint64_t*>(row),
-                           static_cast<size_t>(elems) / 4))) {
+                lane.stage_lkey, gen, row_hash)) {
           fail_lane(lane, error);
           graph_fail("graph post failed: " + error);
           return true;
@@ -3502,9 +3517,7 @@ bool CollectiveBus::allreduce_record(cudaStream_t capture_stream,
       v.recv[vi++] = impl.recv_view_of(lane);
   v.recv_views = vi;
   v.lanes_per_peer = static_cast<int>(impl.lane_count());
-  for (size_t p = 0; p < impl.peer_ranks.size(); ++p)
-    v.stage_row_base[p] =
-        reinterpret_cast<uint16_t*>(impl.stage_buf(p, 0));
+  v.stage_row_base = reinterpret_cast<uint16_t*>(impl.stage_buf(0, 0));
   v.send_peers = static_cast<int>(impl.peer_ranks.size());
   v.stage_ring = Impl::kStageRing;
   v.stage_row_bytes = static_cast<uint32_t>(options_.lat_slot_bytes);

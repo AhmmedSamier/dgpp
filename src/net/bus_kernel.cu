@@ -577,16 +577,16 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
   }
   __syncthreads();
 
-  // Phase 1 — snapshot the source vector into every peer's staging row
-  // (the generation's row of the peer's ring). Same contract as the eager
-  // kernel's phase 1: the fold overwrites src in place, so each row holds
-  // a copy taken BEFORE the fold — the engine's post reads these.
+  // Phase 1 — snapshot the source vector into the generation's shared
+  // staging row (one copy; every peer's post is sourced from it — three
+  // 8 KB writes into pinned memory were ~4 us of a 34 us collective).
+  // Same contract as the eager kernel's phase 1: the fold overwrites src
+  // in place, so the row holds a copy taken BEFORE the fold.
   const uint32_t words = elems / 2;
-  for (int p = 0; p < v.send_peers; ++p)
-    block_copy_row(reinterpret_cast<const uint32_t*>(src),
-                   reinterpret_cast<uint32_t*>(
-                       const_cast<uint16_t*>(v.stage_row_base[p] + row_off)),
-                   words);
+  block_copy_row(reinterpret_cast<const uint32_t*>(src),
+                 reinterpret_cast<uint32_t*>(
+                     const_cast<uint16_t*>(v.stage_row_base + row_off)),
+                 words);
   __threadfence_system();
   __syncthreads();
   if (threadIdx.x == 0) {
