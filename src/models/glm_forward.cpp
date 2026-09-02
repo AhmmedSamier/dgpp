@@ -18,10 +18,40 @@ namespace {
 
 constexpr size_t kGemmWsBase = 64ull << 20;
 
-void* alloc_managed(size_t bytes) {
+// Activation scratch lives in DEVICE memory (2026-09-02; it was managed).
+// Managed pages that both sides touch are a UVM fault factory: the host's
+// per-step read of the logits row had the GPU re-faulting the page next
+// step, and ~2% of decode steps paid a 9-10 ms fault-servicing stall that
+// every other rank then waited out at the pick. Every host touch below
+// goes through an explicit copy behind a stream sync (the diagnostic
+// forward's captures) or a pinned mirror (the decode tail).
+void* alloc_device(size_t bytes) {
   void* p = nullptr;
-  DGPP_CUDA_OK(cudaMallocManaged(&p, bytes));
+  DGPP_CUDA_OK(cudaMalloc(&p, bytes));
   return p;
+}
+
+// Host vector of `n` bf16 from a device buffer, through the model's own
+// stream — never the synchronous cudaMemcpy: that one waits on the legacy
+// default stream, which in the in-process multi-rank tests means a PEER's
+// collective kernel spinning on our doorbell (the deadlock class the
+// lazy-loading fix documented). Our stream, our sync, nobody else's.
+std::vector<uint16_t> fetch_bf16(const uint16_t* dev, size_t n,
+                                 cudaStream_t stream) {
+  std::vector<uint16_t> host(n);
+  if (n) {
+    DGPP_CUDA_OK(cudaMemcpyAsync(host.data(), dev, n * sizeof(uint16_t),
+                                 cudaMemcpyDeviceToHost, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+  }
+  return host;
+}
+
+void upload_bf16(uint16_t* dev, const uint16_t* host, size_t n,
+                 cudaStream_t stream) {
+  DGPP_CUDA_OK(cudaMemcpyAsync(dev, host, n * sizeof(uint16_t),
+                               cudaMemcpyHostToDevice, stream));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream));
 }
 
 // TP configs: the geometry validators run inside from_config, so the
@@ -112,16 +142,16 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     arena_.init(ac);
     pool_.init(arena_, dsa_cfg_, max_requests_, dsa_slots);
     dsa_scratch_ = static_cast<uint8_t*>(
-        alloc_managed(DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
+        alloc_device(DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
                                               dsa_slots)));
     // Decode-session metadata (enqueue_decode's caller-owned device
     // buffers): allocated HERE, at construction — never mid-session (the
     // synchronizing-call discipline applies between collectives).
-    d_req_ids_ = static_cast<int32_t*>(alloc_managed(sizeof(int32_t) *
+    d_req_ids_ = static_cast<int32_t*>(alloc_device(sizeof(int32_t) *
                                                      kDecodeRows));
-    d_step_pos_ = static_cast<int64_t*>(alloc_managed(sizeof(int64_t) *
+    d_step_pos_ = static_cast<int64_t*>(alloc_device(sizeof(int64_t) *
                                                       kDecodeRows));
-    d_req_spans_ = static_cast<int32_t*>(alloc_managed(sizeof(int32_t) * 2 *
+    d_req_spans_ = static_cast<int32_t*>(alloc_device(sizeof(int32_t) * 2 *
                                                        kDecodeRows));
   } else {
     arena_.init(ac);
@@ -148,10 +178,10 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   // Per-request, per-layer KDA state (slot-major: one memset pair per
   // request open — see the header's layout note).
   if (kda_cfg_.num_kda_layers > 0) {
-    kda_rec_ = static_cast<float*>(alloc_managed(
+    kda_rec_ = static_cast<float*>(alloc_device(
         static_cast<size_t>(kda_cfg_.num_kda_layers) * max_requests_ *
         kda_geo_.recurrent_bytes));
-    kda_conv_ = static_cast<uint16_t*>(alloc_managed(
+    kda_conv_ = static_cast<uint16_t*>(alloc_device(
         static_cast<size_t>(kda_cfg_.num_kda_layers) * max_requests_ *
         kda_geo_.conv_committed_bytes));
   }
@@ -180,24 +210,34 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   // Activations.
   const size_t T = static_cast<size_t>(max_tokens_);
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
-  d_tokens_ = static_cast<int64_t*>(alloc_managed(T * 8));
-  streams_[0] = static_cast<uint16_t*>(alloc_managed(T * 4 * H * 2));
-  streams_[1] = static_cast<uint16_t*>(alloc_managed(T * 4 * H * 2));
-  post_ = static_cast<uint16_t*>(alloc_managed(T * 4 * 2));
+  d_tokens_ = static_cast<int64_t*>(alloc_device(T * 8));
+  streams_[0] = static_cast<uint16_t*>(alloc_device(T * 4 * H * 2));
+  streams_[1] = static_cast<uint16_t*>(alloc_device(T * 4 * H * 2));
+  post_ = static_cast<uint16_t*>(alloc_device(T * 4 * 2));
   mhc_logits_ = static_cast<float*>(
-      alloc_managed(T * static_cast<size_t>(mhc_cfg_.coeff_rows()) * 4));
-  comb_ = static_cast<uint16_t*>(alloc_managed(T * 16 * 2));
-  collapsed_ = static_cast<uint16_t*>(alloc_managed(T * H * 2));
-  normed_ = static_cast<uint16_t*>(alloc_managed(T * H * 2));
-  sub_out_ = static_cast<uint16_t*>(alloc_managed(T * H * 2));
+      alloc_device(T * static_cast<size_t>(mhc_cfg_.coeff_rows()) * 4));
+  comb_ = static_cast<uint16_t*>(alloc_device(T * 16 * 2));
+  collapsed_ = static_cast<uint16_t*>(alloc_device(T * H * 2));
+  normed_ = static_cast<uint16_t*>(alloc_device(T * H * 2));
+  sub_out_ = static_cast<uint16_t*>(alloc_device(T * H * 2));
   if (cfg_.first_k_dense_replace > 0) {
     const size_t I = static_cast<size_t>(cfg_.intermediate_size);
-    dense_g_ = static_cast<uint16_t*>(alloc_managed(T * I * 2));
-    dense_u_ = static_cast<uint16_t*>(alloc_managed(T * I * 2));
-    dense_act_ = static_cast<uint16_t*>(alloc_managed(T * I * 2));
+    dense_g_ = static_cast<uint16_t*>(alloc_device(T * I * 2));
+    dense_u_ = static_cast<uint16_t*>(alloc_device(T * I * 2));
+    dense_act_ = static_cast<uint16_t*>(alloc_device(T * I * 2));
   }
   logits_ =
-      static_cast<uint16_t*>(alloc_managed(T * lm_vocab_count_ * 2));
+      static_cast<uint16_t*>(alloc_device(T * lm_vocab_count_ * 2));
+  DGPP_CUDA_OK(cudaHostAlloc(
+      reinterpret_cast<void**>(&h_tail_logits_),
+      static_cast<size_t>(kDecodeRows) * lm_vocab_count_ * 2,
+      cudaHostAllocDefault));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_tail_hidden_),
+                             static_cast<size_t>(kDecodeRows) * H * 2,
+                             cudaHostAllocDefault));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_graph_start_gt_),
+                             sizeof(uint64_t), cudaHostAllocDefault));
+  *h_graph_start_gt_ = 0;
 
   // Every device allocation happens above (see preconstruct_layers): the
   // TP runners barrier after construction so no rank's first collective
@@ -230,6 +270,9 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(dense_u_);
   cudaFree(dense_act_);
   cudaFree(logits_);
+  cudaFreeHost(h_tail_logits_);
+  cudaFreeHost(h_tail_hidden_);
+  cudaFreeHost(h_graph_start_gt_);
   cudaFreeHost(moe_trace_ids_);
   cudaFreeHost(moe_trace_weights_);
   cudaFreeHost(moe_trace_biased_);
@@ -258,6 +301,15 @@ GlmMoeWeights GlmDiagnosticModel::moe_weights(const GlmMoeResident& r) {
   w.experts = r.experts.data();
   for (int i = 0; i < 3; ++i) w.shared[i] = r.shared[i];
   return w;
+}
+
+const GlmLayerResident& GlmDiagnosticModel::stack_layer(int layer) {
+  const GlmLayerResident& r = loader_.load_layer(layer);
+  if (layer + 1 == cfg_.num_hidden_layers &&
+      loader_.residency() == GlmResidency::Resident &&
+      !loader_.sources_released())
+    loader_.release_sources();
+  return r;
 }
 
 GlmLayerBound GlmDiagnosticModel::bind_layer(const GlmLayerResident& r,
@@ -301,7 +353,7 @@ void GlmDiagnosticModel::preconstruct_layers() {
   for (int layer = 0; layer < cfg_.num_hidden_layers &&
                        (need_kda || need_dsa || need_moe);
        ++layer) {
-    const GlmLayerResident& r = loader_.load_layer(layer);
+    const GlmLayerResident& r = stack_layer(layer);
     const GlmLayerBound b =
         bind_layer(r, cfg_.mlps[layer] == GlmMlpKind::Dense);
     if (r.kind == GlmLayerKind::Kda && need_kda && !kda_) {
@@ -420,11 +472,11 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
                           stream_);
   if (layer_inputs) {
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-    std::memcpy(streams_[0], layer_inputs[0],
-                static_cast<size_t>(T) * 4 * H * 2);
+    upload_bf16(streams_[0], layer_inputs[0], static_cast<size_t>(T) * 4 * H,
+                stream_);
     if (capture)
-      capture->push_back(std::vector<uint16_t>(
-          streams_[0], streams_[0] + static_cast<size_t>(T) * 4 * H));
+      capture->push_back(
+          fetch_bf16(streams_[0], static_cast<size_t>(T) * 4 * H, stream_));
   }
 
   Outputs out;
@@ -438,10 +490,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
     if (layer_inputs && layer > 0) {
       // Isolated mode: every layer starts from the reference trajectory.
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-      std::memcpy(cur, layer_inputs[layer],
-                  static_cast<size_t>(T) * 4 * H * 2);
+      upload_bf16(cur, layer_inputs[layer], static_cast<size_t>(T) * 4 * H,
+                  stream_);
     }
-    const GlmLayerResident& r = loader_.load_layer(layer);
+    const GlmLayerResident& r = stack_layer(layer);
     const GlmLayerBound b = bind_layer(r, cfg_.mlps[layer] == GlmMlpKind::Dense);
 
     // ---- attention site --------------------------------------------
@@ -516,8 +568,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
       // the comparison target). Captured before the FFN site reuses the
       // device buffer.
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-      boundary_capture->push_back(std::vector<uint16_t>(
-          attn_out, attn_out + static_cast<size_t>(T) * H));
+      boundary_capture->push_back(
+          fetch_bf16(attn_out, static_cast<size_t>(T) * H, stream_));
     }
     launch_mhc_stream_update(post_, comb_, attn_out, cur, nxt, mhc_cfg_, T,
                              stream_);
@@ -568,16 +620,16 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
       // raw fold surface — dense/shared-expert slicing errors appear here
       // at full magnitude.
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-      boundary_capture->push_back(std::vector<uint16_t>(
-          ffn_out, ffn_out + static_cast<size_t>(T) * H));
+      boundary_capture->push_back(
+          fetch_bf16(ffn_out, static_cast<size_t>(T) * H, stream_));
     }
     launch_mhc_stream_update(post_, comb_, ffn_out, cur, nxt, mhc_cfg_, T,
                              stream_);
     std::swap(cur, nxt);
     if (capture) {
       DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-      capture->push_back(std::vector<uint16_t>(
-          cur, cur + static_cast<size_t>(T) * 4 * H));
+      capture->push_back(
+          fetch_bf16(cur, static_cast<size_t>(T) * 4 * H, stream_));
     }
   }
 
@@ -592,8 +644,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
 
     const size_t TH = static_cast<size_t>(T) * H;
   const size_t TV = static_cast<size_t>(T) * lm_vocab_count_;
-  out.final_hidden_bits.assign(normed_, normed_ + TH);
-  out.logits_bits.assign(logits_, logits_ + TV);
+  out.final_hidden_bits = fetch_bf16(normed_, TH, stream_);
+  out.logits_bits = fetch_bf16(logits_, TV, stream_);
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
   return out;

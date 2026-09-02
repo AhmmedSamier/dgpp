@@ -263,6 +263,9 @@ class GlmDiagnosticModel {
 
   const GlmTextConfig& config() const { return cfg_; }
   int max_tokens() const { return max_tokens_; }
+  // The last replayed decode step's first-node %globaltimer (see
+  // launch_globaltimer_stamp); 0 before any decode step.
+  uint64_t graph_start_globaltimer() const { return *h_graph_start_gt_; }
 
   // Boot digest over the replicated weights (d4, §5.2 "boot checks hash
   // all replicated tensors"): computed at construction when tp_world > 1,
@@ -287,6 +290,14 @@ class GlmDiagnosticModel {
   // the M4 path) or this rank's slice (GlmTpViews). `dense_mlp` mirrors
   // cfg_.mlps[layer]; exactly one attention and one MLP view is set.
   GlmLayerBound bind_layer(const GlmLayerResident& r, bool dense_mlp);
+
+  // The stack's ONLY layer-load path: load_layer plus the resident-mode
+  // hand-off — the stack walks layers in order, so the last main layer's
+  // materialization means every layer this model will ever read is on the
+  // device, and the loader can drop its checkpoint mappings + page cache
+  // right there (GlmLayerStream::release_sources: the memory-watermark
+  // fix). Streaming mode and repeat passes are no-ops.
+  const GlmLayerResident& stack_layer(int layer);
 
   // Constructs every layer object with throwaway layer loads so run_stack
   // never allocates (allocations are implicit device syncs; a lazily
@@ -423,6 +434,18 @@ class GlmDiagnosticModel {
   int32_t* moe_trace_ids_ = nullptr;    // [n_moe_layers_ * kDecodeRows * K]
   float* moe_trace_weights_ = nullptr;  // same shape
   float* moe_trace_biased_ = nullptr;   // [n_moe_layers_ * kDecodeRows * E]
+  // The decode tail's PINNED mirrors of the last-row logits and final
+  // hidden (2026-09-02). The host used to read those rows straight out of
+  // the managed logits_/normed_ after the step's sync — a CPU access to a
+  // page the GPU wrote, then a GPU write to a page the CPU touched, every
+  // step: UVM fault servicing, and ~2% of steps paid it as a 9-10 ms
+  // stall (a cudaLaunchKernel or the collect itself blocked behind the
+  // fault) that every other rank then waited out at the pick. The rows now
+  // ride D2H copies (graph memcpy nodes in the replay) into these, and the
+  // managed pages stay GPU-resident.
+  uint64_t* h_graph_start_gt_ = nullptr;  // pinned: %globaltimer at the step's first node
+  uint16_t* h_tail_logits_ = nullptr;   // pinned [kDecodeRows * lm_vocab_count_]
+  uint16_t* h_tail_hidden_ = nullptr;   // pinned [kDecodeRows * H]
   uint16_t* streams_[2] = {nullptr, nullptr};  // [T, 4, hidden]
   uint16_t* post_ = nullptr;                   // [T, 4]
   float* mhc_logits_ = nullptr;                // [T, 24] mHC dots scratch

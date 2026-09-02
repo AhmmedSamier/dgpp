@@ -6,12 +6,18 @@
 
 #include "net/collective_bus.hpp"
 
+#include <sched.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <deque>
+#include <fstream>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -39,10 +45,28 @@ constexpr int kMaxPollPerCq = 32;        // CQEs drained per CQ per iteration
 constexpr int kEngineSpinIterations = 2000;
 constexpr int kEngineIdleSleepUs = 50;
 constexpr size_t kMaxLatencySamples = 100000;
-constexpr int kWaitSpinUs = 500;  // spin before entering the scheduler
+// Spin before entering the scheduler on a request wait. LONG on purpose
+// (2026-09-02): the decode step's eager pick (two ~150us collectives
+// between graph windows) fell out of a 500us spin into the futex in ~2% of
+// steps, and the wake back came 7-10ms later — the woken main thread
+// landed behind a hot spinner and waited out a CFS slice (PREEMPT_NONE,
+// HZ=250). Every other rank then waited for that rank at the next step's
+// first collective: the whole fabric's p99 was one thread's nap. A
+// waiter whose request completes in the spin window costs nothing; one
+// that does not burns at most this much of one core before sleeping.
+constexpr int kWaitSpinUs = 20000;
 constexpr int kConnectRetryMs = 500;
 constexpr size_t kMaxErrorText = 4096;
 
+inline uint64_t monotonic_ns() {
+  timespec ts{};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
+         static_cast<uint64_t>(ts.tv_nsec);
+}
+inline double elapsed_us_between(Clock::time_point a, Clock::time_point b) {
+  return std::chrono::duration<double, std::micro>(b - a).count();
+}
 double elapsed_us(Clock::time_point from) {
   return std::chrono::duration<double, std::micro>(Clock::now() - from)
       .count();
@@ -216,6 +240,9 @@ struct CollectiveBus::Impl {
     std::vector<BusStripe> claims;  // per peer: claimed lane/slot
     uint64_t posted_bits = 0;       // bit p once peer p's stripe is posted
     Clock::time_point launched_at{};
+    Clock::time_point picked_at{};  // engine pickup (queue wait ends)
+    double launch_call_us = 0;      // the cudaLaunchKernel call itself
+    uint64_t launched_gt_ns = 0;  // launch return, on the globaltimer base
     int stall_dumps = 0;            // bring-up microscope rate control
     int stage_gen = -1;              // staging ring generation in flight
   } coll;                            // engine thread only
@@ -367,6 +394,8 @@ struct CollectiveBus::Impl {
       double copy_us = 0, handshake_us = 0, skew_us = 0, fold_us = 0,
              total_us = 0, post_us = 0;
       double max_handshake_us = 0, max_skew_us = 0, max_total_us = 0;
+      uint64_t max_total_gen = 0;  // gen_seq of the window's worst total
+      uint64_t first_gt_start = 0; // the window's first generation's entry
       uint64_t gate_waits = 0;
       // Wait (handshake + skew) histogram: <20 <50 <100 <200 <500 >=500 us,
       // and the split by generation parity (the decode step alternates
@@ -378,6 +407,7 @@ struct CollectiveBus::Impl {
       double peer_lag_us[kBusMaxPeers] = {};  // staging written -> peer gated
       uint64_t peer_last[kBusMaxPeers] = {};  // times this peer arrived last
     } tl;
+    uint64_t armed_gt = 0;  // graph_replay_arm's host time, on the gt base
     // The window's slot-credit carrier: graph posts have no request of
     // their own, but SendSlot ownership (fail_lane completion, credit
     // harvest, the in_flight gate) is request-shaped. A per-window
@@ -391,6 +421,7 @@ struct CollectiveBus::Impl {
   BusAllReduceCtl* graph_cells = nullptr;
 
   BusRankExchange ex_{};  // our frame, built once during start()
+  int64_t gt_offset_ns = 0;  // %globaltimer - CLOCK_MONOTONIC (start())
 
   // ---- helpers -----------------------------------------------------------
 
@@ -751,6 +782,9 @@ struct CollectiveBus::Impl {
       __atomic_store_n(&ar_ctl->status, 0, __ATOMIC_RELAXED);
       ar_ctl->stamp_stage = 0;
       ar_ctl->stamp_first_claim = 0;
+      ar_ctl->gt_start = ar_ctl->gt_stage = ar_ctl->gt_first =
+          ar_ctl->gt_last = ar_ctl->gt_done = 0;
+      for (uint64_t& g : ar_ctl->gt_claim) g = 0;
       ar_ctl->stamp_reduce_done = 0;
       __atomic_store_n(&ar_ctl->dbg_gate_waits, 0, __ATOMIC_RELAXED);
       __atomic_store_n(&ar_ctl->dbg_gate_spins, 0, __ATOMIC_RELAXED);
@@ -1006,6 +1040,7 @@ struct CollectiveBus::Impl {
     };
     GraphState::Timeline& t = graph.tl;
     ++t.n;
+    if (t.n == 1) t.first_gt_start = c.gt_start;
     const double copy = us(c.gt_start, c.gt_stage);
     const double hs = us(c.gt_stage, c.gt_first);
     const double skew = us(c.gt_first, c.gt_last);
@@ -1018,7 +1053,10 @@ struct CollectiveBus::Impl {
     t.total_us += total;
     t.max_handshake_us = std::max(t.max_handshake_us, hs);
     t.max_skew_us = std::max(t.max_skew_us, skew);
-    t.max_total_us = std::max(t.max_total_us, total);
+    if (total > t.max_total_us) {
+      t.max_total_us = total;
+      t.max_total_gen = c.gen_seq;
+    }
     t.gate_waits += acquire_u32(&c.dbg_gate_waits);
     const double wait = hs + skew;
     const int b = wait < 20 ? 0 : wait < 50 ? 1 : wait < 100 ? 2
@@ -1041,10 +1079,14 @@ struct CollectiveBus::Impl {
     DGPP_LOG_INFO(
         "graph window timeline: rank {} gens {} avg us: total {:.1f} = copy "
         "{:.1f} + handshake {:.1f} + skew {:.1f} + fold {:.1f}; engine post "
-        "{:.1f}; max handshake {:.1f} skew {:.1f} total {:.1f}; gate waits {}",
+        "{:.1f}; max handshake {:.1f} skew {:.1f} total {:.1f} (gen {}); "
+        "gate waits {}; arm->gen0 {:.1f} us",
         opt.my_rank, t.n, t.total_us / n, t.copy_us / n, t.handshake_us / n,
         t.skew_us / n, t.fold_us / n, t.post_us / n, t.max_handshake_us,
-        t.max_skew_us, t.max_total_us, t.gate_waits);
+        t.max_skew_us, t.max_total_us, t.max_total_gen, t.gate_waits,
+        t.first_gt_start > graph.armed_gt
+            ? static_cast<double>(t.first_gt_start - graph.armed_gt) / 1000.0
+            : 0.0);
     DGPP_LOG_INFO(
         "graph window wait: rank {} hist(<20 <50 <100 <200 <500 >=500 us) {} "
         "{} {} {} {} {}; even gens {} avg {:.1f} us, odd gens {} avg {:.1f} us",
@@ -1345,6 +1387,7 @@ struct CollectiveBus::Impl {
         coll_active.store(true, std::memory_order_relaxed);
         coll_mode.store(true, std::memory_order_relaxed);  // engine-owned
         coll.launched_at = Clock::now();  // flight clock starts at pickup
+        coll.picked_at = coll.launched_at;
       }
     }
     if (!coll.req) return worked;
@@ -1547,6 +1590,9 @@ struct CollectiveBus::Impl {
       __atomic_store_n(&ar_ctl->status, 0, __ATOMIC_RELAXED);
       ar_ctl->stamp_stage = 0;
       ar_ctl->stamp_first_claim = 0;
+      ar_ctl->gt_start = ar_ctl->gt_stage = ar_ctl->gt_first =
+          ar_ctl->gt_last = ar_ctl->gt_done = 0;
+      for (uint64_t& g : ar_ctl->gt_claim) g = 0;
       ar_ctl->stamp_reduce_done = 0;
       // TEMP hunt stamp reset (small-collective corruption).
       __atomic_store_n(&ar_ctl->dbg_first_cell, 0, __ATOMIC_RELAXED);
@@ -1628,6 +1674,9 @@ struct CollectiveBus::Impl {
       }
       coll.claims = std::move(claims);
       coll.launched_at = Clock::now();
+      coll.launch_call_us = elapsed_us(t_launch0);
+      coll.launched_gt_ns = static_cast<uint64_t>(
+          static_cast<int64_t>(monotonic_ns()) + gt_offset_ns);
       coll.stage_gen = stage_gen;
       // First-flight diagnostics at INFO (not DEBUG): the loopback TP
       // bring-up had a stall whose DEBUG logging changed the timing, so
@@ -1766,16 +1815,46 @@ struct CollectiveBus::Impl {
       // timing under hunt. One line per pick phase is the compromise: a
       // recurrence now carries its discriminating evidence (stale len vs
       // misaligned cell vs fresh-door/stale-payload) at production timing.
-      if (req.elems <= 64) {
+      // The eager collective's timeline (2026-09-02): host side (queue
+      // wait, the launch call) and GPU side (%globaltimer stamps: copy,
+      // handshake, skew, fold) plus the two seams between them — launch
+      // call -> kernel start and kernel done -> engine noticed — read
+      // against CLOCK_REALTIME, which %globaltimer tracks on this driver.
+      // Always for the pick class (elems <= 64: two lines per decode
+      // step), and for ANY eager collective slower than 2 ms — the
+      // decode step's p99 lived in exactly one of these seams.
+      const double total_us = elapsed_us(req.submitted);
+      if (req.elems <= 64 || total_us > 2000.0) {
+        auto us = [](uint64_t a, uint64_t b) {
+          return b > a ? static_cast<double>(b - a) / 1000.0 : 0.0;
+        };
+        const uint64_t now_gt = static_cast<uint64_t>(
+            static_cast<int64_t>(monotonic_ns()) + gt_offset_ns);
         DGPP_LOG_INFO(
-            "allreduce: rank {} seq {} small done status={} gate(waits={} "
-            "spins={}) first_claim(cell={} len={} seq={})",
-            opt.my_rank, req.ctl_seq, acquire_u32(&ar_ctl->status),
+            "allreduce: rank {} seq {} elems {} done status={} total {:.1f}us"
+            " = queue {:.1f} + claim {:.1f} + launch_call {:.1f} + "
+            "launch->start {:.1f} + "
+            "copy {:.1f} + handshake {:.1f} + skew {:.1f} + fold {:.1f} + "
+            "done->notice {:.1f}; gate(waits={} spins={}); peer lags us:{}",
+            opt.my_rank, req.ctl_seq, req.elems, acquire_u32(&ar_ctl->status),
+            total_us, elapsed_us_between(req.submitted, coll.picked_at),
+            elapsed_us_between(coll.picked_at, coll.launched_at) -
+                coll.launch_call_us,
+            coll.launch_call_us,
+            us(coll.launched_gt_ns, ar_ctl->gt_start),
+            us(ar_ctl->gt_start, ar_ctl->gt_stage),
+            us(ar_ctl->gt_stage, ar_ctl->gt_first),
+            us(ar_ctl->gt_first, ar_ctl->gt_last),
+            us(ar_ctl->gt_last, ar_ctl->gt_done), us(ar_ctl->gt_done, now_gt),
             acquire_u32(&ar_ctl->dbg_gate_waits),
-            acquire_u32(&ar_ctl->dbg_gate_spins),
-            ar_ctl->dbg_first_cell ? static_cast<int>(ar_ctl->dbg_first_cell) - 1 : -1,
-            ar_ctl->dbg_first_len ? static_cast<int>(ar_ctl->dbg_first_len) : -1,
-            ar_ctl->dbg_first_seq ? static_cast<int>(ar_ctl->dbg_first_seq) : -1);
+            acquire_u32(&ar_ctl->dbg_gate_spins), [&] {
+              std::string lags;
+              for (size_t p = 0; p < peer_ranks.size(); ++p)
+                lags += " r" + std::to_string(peer_ranks[p]) + "=" +
+                        std::to_string(static_cast<int>(
+                            us(ar_ctl->gt_stage, ar_ctl->gt_claim[p])));
+              return lags;
+            }());
       }
       // Clear the flight BEFORE completing (finish_flight): the woken
       // waiter's next submission races the cleanup against the
@@ -2073,7 +2152,57 @@ struct CollectiveBus::Impl {
     return true;
   }
 
+  // Pins the engine to one FAST core. The engine's poll loop IS the
+  // handshake latency (staging seen -> post -> peer's payload), and the
+  // GB10's two core classes differ by 40% in clock: an engine the
+  // scheduler parked on a 2.8 GHz core polled measurably slower than one
+  // on a 3.9 GHz core (2026-09-02, ranks 1 and 3). A fixed core also
+  // keeps the spinner from wandering under a sleeping main thread's
+  // wake-affine placement. DGPP_BUS_ENGINE_CPU=n overrides; an
+  // unreadable sysfs leaves the thread unpinned.
+  void pin_engine_thread() {
+    int cpu = -1;
+    if (const char* env = std::getenv("DGPP_BUS_ENGINE_CPU")) {
+      cpu = std::atoi(env);
+    } else {
+      // Every online core with its max clock, fastest first (ties: the
+      // HIGHER index first — core 0's neighbourhood carries the interrupt
+      // load). Bus instances in one process (the loopback tests run a
+      // whole world in-process) take successive cores: four engines on
+      // one core is four spinners sharing a timeslice, and the 5 s
+      // collective watchdog measured exactly that (ctest -j4, 2026-09-02).
+      std::vector<std::pair<long, int>> cores;  // (khz, cpu)
+      const long n = sysconf(_SC_NPROCESSORS_ONLN);
+      for (long c = 0; c < n; ++c) {
+        std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(c) +
+                        "/cpufreq/cpuinfo_max_freq");
+        long khz = -1;
+        if (f >> khz) cores.emplace_back(khz, static_cast<int>(c));
+      }
+      if (cores.empty()) return;
+      std::sort(cores.begin(), cores.end(),
+                [](const auto& a, const auto& b) {
+                  return a.first != b.first ? a.first > b.first
+                                            : a.second > b.second;
+                });
+      static std::atomic<unsigned> next_instance{0};
+      const unsigned i = next_instance.fetch_add(1, std::memory_order_relaxed);
+      cpu = cores[i % cores.size()].second;
+    }
+    if (cpu < 0) return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+      DGPP_LOG_WARN("bus engine: could not pin to cpu {} (errno {})", cpu,
+                    errno);
+      return;
+    }
+    DGPP_LOG_INFO("bus engine: rank {} pinned to cpu {}", opt.my_rank, cpu);
+  }
+
   void engine_loop() {
+    pin_engine_thread();
     int idle = 0;
     for (;;) {
       if (stopping.load(std::memory_order_relaxed) && drained()) break;
@@ -2087,7 +2216,17 @@ struct CollectiveBus::Impl {
       if (graph_worked || coll_worked || worked || polled || recycled ||
           credited || watched) {
         idle = 0;
-      } else if (++idle > kEngineSpinIterations && !graph_window_live()) {
+      } else if (++idle > kEngineSpinIterations && !graph_window_live() &&
+                 !graph.recorded.load(std::memory_order_relaxed)) {
+        // The nap is for the pre-serving idle only. Once a decode graph
+        // exists this thread never sleeps (2026-09-02): a 50 us nap between
+        // windows made its core look idle, the scheduler parked another
+        // runnable thread there (the main thread's sync spin, a driver
+        // thread), and the wake-up waited out that thread's CFS slice —
+        // 7-10 ms, PREEMPT_NONE/HZ=250 — exactly when the next window's
+        // first generation needed the post. Every other rank then waited
+        // at gen 0; the fabric's p99 was one core-share. One core at 100%
+        // while serving is the dedicated poller's contract anyway.
         std::this_thread::sleep_for(
             std::chrono::microseconds(kEngineIdleSleepUs));
       }
@@ -2447,6 +2586,18 @@ bool CollectiveBus::start(std::string* error) {
     *error = std::string("bus kernel preload failed: ") +
              cudaGetErrorString(err);
     return false;
+  }
+  {
+    uint64_t uncertainty = 0;
+    if (const cudaError_t err =
+            bus_globaltimer_offset(&impl.gt_offset_ns, &uncertainty);
+        err != cudaSuccess) {
+      *error = std::string("globaltimer calibration failed: ") +
+               cudaGetErrorString(err);
+      return false;
+    }
+    DGPP_LOG_INFO("bus: globaltimer offset {} ns (+-{} us)", impl.gt_offset_ns,
+                  uncertainty / 1000);
   }
   if (opt.lane_devices.empty() || opt.lane_devices.size() > kBusMaxLanes) {
     *error = "1..2 lane devices required";
@@ -3089,6 +3240,10 @@ BusAllReduceResult CollectiveBus::wait_allreduce(uint64_t id,
 // the kernels by one engine poll cadence (microseconds when healthy), so
 // the spin phase is the whole story; the sleep phase and the backstop are
 // for a wedged engine — and to fail legibly instead of hanging forever.
+int64_t CollectiveBus::globaltimer_offset_ns() const {
+  return impl_->gt_offset_ns;
+}
+
 bool CollectiveBus::graph_replay_arm(std::string* error) {
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
@@ -3108,6 +3263,8 @@ bool CollectiveBus::graph_replay_arm(std::string* error) {
       return false;
     }
     const int gens = impl.graph.gens;
+    impl.graph.armed_gt = static_cast<uint64_t>(
+        static_cast<int64_t>(monotonic_ns()) + impl.gt_offset_ns);
     if (impl.stage_held_ptr != nullptr) {
       // The handout's row was picked for "the next collective" — a window
       // would claim that number range and rewrite the row out from

@@ -352,6 +352,7 @@ int main(int argc, char** argv) {
         }
 
         dgpp::GlmBusBoundaryReducer reducer(*bus);
+        dgpp::pin_serving_process(rank);
         const auto t_model = std::chrono::steady_clock::now();
         GlmDiagnosticModel model(cfg, ckpt, context_bound, pool_tokens,
                                  &reducer, rank, world,
@@ -404,6 +405,7 @@ int main(int argc, char** argv) {
     }
 
     // ---- world 1: the local reference (Stage 4a) -----------------------
+    dgpp::pin_serving_process(/*rank=*/0);
     const auto t_model = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(cfg, ckpt, context_bound, pool_tokens,
                              /*boundary=*/nullptr, /*tp_rank=*/0,

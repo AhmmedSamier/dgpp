@@ -51,6 +51,11 @@
 // device allocation — the pick scratch included — happens BEFORE the
 // world forms. Nothing allocates between collectives; the per-step
 // host buffers are hoisted out of the loop.
+#include <fcntl.h>
+#include <sched.h>
+#include <sys/resource.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -99,6 +104,66 @@ namespace {
 void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
 }
+
+// "Where did the calling thread go?" — a snapshot of the scheduler's and
+// the VM's view of THIS thread: on-CPU time and runnable-but-waiting time
+// (/proc/thread-self/schedstat), page faults and context switches
+// (getrusage), and the core it runs on. Two snapshots bracket a code region
+// that has no business taking milliseconds; their delta says whether the
+// thread was preempted (wait grows), stuck in the kernel on its own behalf
+// (run grows — direct reclaim, a slow syscall), paging (majflt), or moved.
+// The 2026-09-02 hunt needed exactly this for the ~10 ms the peers lost
+// between two log lines while every bus and GPU stamp read "fine".
+class ThreadProbe {
+ public:
+  struct Sample {
+    double run_ms = 0, wait_ms = 0;
+    long majflt = 0, minflt = 0, nvcsw = 0, nivcsw = 0;
+    int cpu = -1;
+  };
+
+  ThreadProbe() : fd_(::open("/proc/thread-self/schedstat", O_RDONLY)) {}
+  ~ThreadProbe() {
+    if (fd_ >= 0) ::close(fd_);
+  }
+  ThreadProbe(const ThreadProbe&) = delete;
+  ThreadProbe& operator=(const ThreadProbe&) = delete;
+
+  Sample sample() const {
+    Sample s;
+    // procfs regenerates the file on every read from offset 0: one pread on
+    // the fd opened once, not open/read/close per step.
+    char buf[96] = {};
+    if (fd_ >= 0 && ::pread(fd_, buf, sizeof(buf) - 1, 0) > 0) {
+      unsigned long long run_ns = 0, wait_ns = 0, slices = 0;
+      if (std::sscanf(buf, "%llu %llu %llu", &run_ns, &wait_ns, &slices) >= 2) {
+        s.run_ms = static_cast<double>(run_ns) / 1e6;
+        s.wait_ms = static_cast<double>(wait_ns) / 1e6;
+      }
+    }
+    rusage ru{};
+    if (::getrusage(RUSAGE_THREAD, &ru) == 0) {
+      s.majflt = ru.ru_majflt;
+      s.minflt = ru.ru_minflt;
+      s.nvcsw = ru.ru_nvcsw;
+      s.nivcsw = ru.ru_nivcsw;
+    }
+    s.cpu = ::sched_getcpu();
+    return s;
+  }
+
+  static std::string delta_text(const Sample& a, const Sample& b) {
+    return std::format(
+        "sched run {:.2f} wait {:.2f} majflt {} minflt {} nvcsw {} nivcsw {} "
+        "cpu {}->{}",
+        b.run_ms - a.run_ms, b.wait_ms - a.wait_ms, b.majflt - a.majflt,
+        b.minflt - a.minflt, b.nvcsw - a.nvcsw, b.nivcsw - a.nivcsw, a.cpu,
+        b.cpu);
+  }
+
+ private:
+  int fd_;
+};
 
 // Real-mesh bus budgets + the fabric pick now live in the shared seam
 // (models/glm_fabric_engine.hpp) — glm_serve and this app ride the
@@ -453,6 +518,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
 
   // ---- world 1: no bus, full head, plain argmax pick ------------------
   if (world == 1) {
+    dgpp::pin_serving_process(rank);
     const auto t_construct = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(cfg, ckpt, max_tokens, z.pool_tokens,
                              /*boundary=*/nullptr, /*tp_rank=*/0,
@@ -502,6 +568,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
       throw std::runtime_error("rank " + std::to_string(rank) +
                               " bus start: " + err);
     dgpp::GlmBusBoundaryReducer reducer(*bus);
+    dgpp::pin_serving_process(rank);
     const auto t_construct = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(
         cfg, ckpt, max_tokens, z.pool_tokens, &reducer, rank, world,
@@ -567,6 +634,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 
   // ---- world 1: no bus, full head, plain argmax ----------------------
   if (world == 1) {
+    dgpp::pin_serving_process(rank);
     const auto t_construct = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(cfg, ckpt, max_tokens, cache);
     const double construct_s = std::chrono::duration<double>(
@@ -676,6 +744,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                " bus start: " + err);
 
     dgpp::GlmBusBoundaryReducer reducer(*bus);
+    dgpp::pin_serving_process(rank);
     const auto t_construct = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(
         cfg, ckpt, max_tokens, cache, &reducer, rank, world,
@@ -780,6 +849,17 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                 .count());
       }
 
+      // The inter-step seam (t_pick of step k -> t0s of step k+1) is the
+      // ONLY host region no phase below times, and it is where the peers
+      // lost ~10 ms in lockstep (2026-09-02, seen only as rank 0's gen-0
+      // handshake). It holds two log lines and a token decode — so the
+      // probe brackets it and the next step's phases line reports it.
+      using Clock = std::chrono::steady_clock;
+      ThreadProbe probe;
+      Clock::time_point t_pick_prev{}, t_logged_prev{};
+      ThreadProbe::Sample probe_prev{};
+      bool have_prev = false;
+
       for (int s = 0; s < steps; ++s) {
         generated.push_back(token);
         toks.push_back(token);
@@ -790,7 +870,25 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
           break;
         }
         if (s + 1 == steps) break;
-        const auto t0s = std::chrono::steady_clock::now();
+        // Boundary phases, timed: where a step's time goes OUTSIDE the
+        // replay (stage+arm+launch, the sync, the window finish, the
+        // collect, the eager pick) is exactly what the bus's in-window
+        // timeline cannot see — and a stall there on one rank shows up on
+        // every other rank as "everyone else was late".
+        const auto t0s = Clock::now();
+        const ThreadProbe::Sample probe_start = probe.sample();
+        std::string gap_text;
+        if (have_prev) {
+          const auto ms_of = [](Clock::time_point a, Clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+          };
+          gap_text = std::format(
+              "; gap {:.2f} = log {:.2f} + top {:.2f}; {}",
+              ms_of(t_pick_prev, t0s), ms_of(t_pick_prev, t_logged_prev),
+              ms_of(t_logged_prev, t0s),
+              ThreadProbe::delta_text(probe_prev, probe_start));
+        }
+        auto t_launch = t0s, t_sync = t0s, t_finish = t0s, t_collect = t0s;
         const GlmDiagnosticModel::Outputs step = [&] {
           if (graph_exec == nullptr)
             return model.session_step(generated.back());
@@ -802,18 +900,47 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
           require(bus->graph_replay_arm(&gerr),
                   "graph_replay_arm: " + gerr);
           DGPP_CUDA_OK(cudaGraphLaunch(graph_exec, model.stream()));
+          t_launch = Clock::now();
           DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
+          t_sync = Clock::now();
           require(bus->graph_replay_finish(60000, &gerr),
                   "graph_replay_finish: " + gerr);
-          return model.session_graph_collect(0);
+          t_finish = Clock::now();
+          GlmDiagnosticModel::Outputs out = model.session_graph_collect(0);
+          t_collect = Clock::now();
+          return out;
         }();
         token = run_step(step, "step", s + 1);
-        const double ms = std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - t0s)
-                              .count();
+        const auto t_pick = Clock::now();
+        probe_prev = probe.sample();
+        const auto ms_between = [](Clock::time_point a, Clock::time_point b) {
+          return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const double ms = ms_between(t0s, t_pick);
         forward_ms_total += ms;
         DGPP_LOG_INFO("rank {} step {:.0f}ms ({} + pick)", rank, ms,
                       graph_exec ? "graph replay" : "stateful step");
+        if (graph_exec != nullptr) {
+          // launch -> the graph's first node, through the bus's calibrated
+          // globaltimer offset (CLOCK_MONOTONIC == steady_clock on Linux).
+          const int64_t launch_gt =
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  t_launch.time_since_epoch())
+                  .count() +
+              bus->globaltimer_offset_ns();
+          const int64_t start_gt =
+              static_cast<int64_t>(model.graph_start_globaltimer());
+          DGPP_LOG_INFO(
+              "rank {} step phases ms: launch {:.2f} sync {:.2f} finish {:.2f} "
+              "collect {:.2f} pick {:.2f}; launch->gpu_start {:.2f}{}",
+              rank, ms_between(t0s, t_launch), ms_between(t_launch, t_sync),
+              ms_between(t_sync, t_finish), ms_between(t_finish, t_collect),
+              ms_between(t_collect, t_pick),
+              static_cast<double>(start_gt - launch_gt) / 1e6, gap_text);
+        }
+        t_pick_prev = t_pick;
+        t_logged_prev = Clock::now();
+        have_prev = true;
       }
       if (graph_exec != nullptr) cudaGraphExecDestroy(graph_exec);
     } else {

@@ -35,12 +35,33 @@ struct TensorInfo {
 
 class SafetensorsFile {
  public:
-  ~SafetensorsFile() {
-    if (map_ != MAP_FAILED && map_) munmap(map_, map_len_);
-    if (fd_ >= 0) ::close(fd_);
-  }
+  ~SafetensorsFile() { close_mapping(/*drop_page_cache=*/false); }
   SafetensorsFile(const SafetensorsFile&) = delete;
   SafetensorsFile& operator=(const SafetensorsFile&) = delete;
+
+  // Tears the mapping down and, when asked, evicts the file's pages from
+  // the page cache (POSIX_FADV_DONTNEED — only effective AFTER munmap: the
+  // kernel will not drop pages a live mapping still references). A
+  // resident loader calls this once every byte it needs has been copied
+  // out: a 70 GB checkpoint left cached next to an 80 GB resident model
+  // pins the box at its memory watermark for the whole run, and the
+  // kernel then swaps the process's own cold pages out from under it
+  // (2026-09-02: ~10 ms swap-in faults in the decode loop). Every tensor
+  // view handed out from this file dangles afterwards — callers drop
+  // theirs first.
+  void close_mapping(bool drop_page_cache) {
+    if (map_ && map_ != MAP_FAILED) {
+      munmap(map_, map_len_);
+      map_ = nullptr;
+    }
+    if (fd_ >= 0) {
+      if (drop_page_cache) posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
+      ::close(fd_);
+      fd_ = -1;
+    }
+    tensors_.clear();
+  }
+  bool mapped() const { return map_ != nullptr && map_ != MAP_FAILED; }
 
   static std::unique_ptr<SafetensorsFile> open(const std::string& path) {
     int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);

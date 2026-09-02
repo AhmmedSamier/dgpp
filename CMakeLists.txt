@@ -87,6 +87,7 @@ endif()
 
 add_library(dgpp_core STATIC
   src/common/log.cpp
+  src/common/process_memory.cpp
   src/core/trace.cpp)
 dgpp_set_common(dgpp_core)
 

@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "common/cuda_check.hpp"
+#include "common/log.hpp"
 #include "kernels/fp8_dequant.hpp"
 
 namespace dgpp {
@@ -915,6 +916,26 @@ size_t GlmLayerStream::layer_capacity() const {
   return capacity_;
 }
 
+void GlmLayerStream::release_sources() {
+  if (residency_ != GlmResidency::Resident || sources_released_) return;
+  sources_released_ = true;
+  // The header index points into the shards' TensorInfo records; clear it
+  // before the mappings go so nothing can follow a dangling view.
+  tensors_.clear();
+  const size_t shard_count = shards_.size();
+  uint64_t mapped_bytes = 0;
+  for (auto& shard : shards_) {
+    mapped_bytes += shard->map_size();
+    shard->close_mapping(/*drop_page_cache=*/true);
+  }
+  shards_.clear();
+  DGPP_LOG_INFO(
+      "glm loader: rank {} resident load complete — released {} shard "
+      "mappings ({:.1f} GiB) and evicted their page cache",
+      rank_, shard_count,
+      static_cast<double>(mapped_bytes) / (1024.0 * 1024.0 * 1024.0));
+}
+
 // The one layer build both residency modes share: the grant sequence,
 // the byte accounting, the formula check, and the dequant/pack phases.
 // Resident bytes are streaming bytes by construction — the parity
@@ -981,6 +1002,11 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
     GlmLayerResident& slot =
         resident_layers_[static_cast<size_t>(layer)];
     if (slot.layer == layer) return slot;
+    if (sources_released_)
+      throw std::runtime_error(
+          "glm loader: layer " + std::to_string(layer) +
+          " was never materialized before release_sources() (load every "
+          "layer you need — the MTP draft included — before releasing)");
 
     auto bump = std::make_unique<GlmLayerBump>();
     bump->init(layer_bytes(cfg_, layer, rank_, world_));
@@ -1008,6 +1034,11 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
 }
 
 GlmReplicatedDigest GlmLayerStream::hash_replicated() const {
+  if (sources_released_)
+    throw std::runtime_error(
+        "glm loader: hash_replicated after the checkpoint sources were "
+        "released — the digest is a BOOT check; take it before the first "
+        "forward");
   const auto lookup = [this](const std::string& name) -> const TensorInfo& {
     auto it = tensors_.find(name);
     if (it == tensors_.end() || !it->second)
@@ -1057,6 +1088,11 @@ GlmReplicatedDigest GlmLayerStream::hash_replicated() const {
 
 const GlmGlobalsResident& GlmLayerStream::load_globals() {
   if (globals_.embed) return globals_;
+  if (sources_released_)
+    throw std::runtime_error(
+        "glm loader: load_globals after the checkpoint sources were released "
+        "(globals are loaded at construction; a release_globals/load_globals "
+        "cycle is a streaming-mode pattern)");
   // Same entry-sync discipline as load_layer (phase-one CPU writes; the
   // boundary sync covers exactly the globals bump's readers).
   sync_load_boundary(reader_, stream_);

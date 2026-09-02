@@ -310,6 +310,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
   __shared__ uint64_t s_hash[kConsumerThreads / 32];  // per-warp fold partials
   __shared__ uint64_t s_hash_want;   // the claimed door's placement-gate hash
   __shared__ int s_gate_matched;     // 1 once the payload folds to s_hash_want
+  if (threadIdx.x == 0) ctl->gt_start = globaltimer_ns();
   __shared__ int s_round;            // claim records filled so far
   __shared__ int s_go;    // 0 none, >0 = flat cell index + 1
   __shared__ int s_stop;  // any exit condition
@@ -347,6 +348,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
   __syncthreads();
   if (threadIdx.x == 0) {
     ctl->stamp_stage = clock64();
+    ctl->gt_stage = globaltimer_ns();
     SysRef ready(ctl->ready_bits);
     uint64_t bits = 0;
     for (int p = 0; p < v.send_peers; ++p) bits |= 1ULL << p;
@@ -491,7 +493,13 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
       flag_store_release(&ack->seq, s_seq[peer]);
       s_payload[peer] = reinterpret_cast<const uint16_t*>(base);
       s_got[peer] = 1;
-      if (ctl->stamp_first_claim == 0) ctl->stamp_first_claim = clock64();
+      const uint64_t now = globaltimer_ns();
+      ctl->gt_claim[peer] = now;
+      if (ctl->stamp_first_claim == 0) {
+        ctl->stamp_first_claim = clock64();
+        ctl->gt_first = now;
+      }
+      ctl->gt_last = now;
     }
     __syncthreads();  // ack published and claim state stable before next round
   }
@@ -510,6 +518,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
   }
   __syncthreads();
   if (threadIdx.x == 0) {
+    ctl->gt_done = globaltimer_ns();
     ctl->status = s_failed == 0 ? 0 : 1;
     done_ref.store(ctl_seq, cuda::memory_order_release);
   }
@@ -1269,6 +1278,44 @@ cudaError_t launch_bus_warm_work(cudaStream_t stream, float* buf, int spins) {
   return cudaGetLastError();
 }
 
+__global__ void bus_globaltimer_stamp_kernel(uint64_t* out) {
+  *out = globaltimer_ns();
+}
+
+cudaError_t bus_globaltimer_offset(int64_t* offset_ns, uint64_t* uncertainty_ns) {
+  // %globaltimer runs on its own base (measured ~40 s off CLOCK_MONOTONIC
+  // on the GB10 driver), so host and device stamps are comparable only
+  // through this offset: one stamp kernel bracketed by two host reads; the
+  // GPU read happened somewhere in between, so offset = gt - midpoint,
+  // uncertain by half the bracket (~10 us, launch + sync — fine for the
+  // millisecond stalls the timelines hunt).
+  uint64_t* d = nullptr;
+  cudaError_t err = cudaMallocHost(reinterpret_cast<void**>(&d), sizeof(uint64_t));
+  if (err != cudaSuccess) return err;
+  int64_t best_offset = 0;
+  uint64_t best_uncertainty = ~0ull;
+  for (int i = 0; i < 8; ++i) {  // the first launches carry warm-up; keep the tightest bracket
+    timespec t0{}, t1{};
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    bus_globaltimer_stamp_kernel<<<1, 1>>>(d);
+    err = cudaDeviceSynchronize();
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    if (err != cudaSuccess) break;
+    const uint64_t h0 = static_cast<uint64_t>(t0.tv_sec) * 1000000000ull + t0.tv_nsec;
+    const uint64_t h1 = static_cast<uint64_t>(t1.tv_sec) * 1000000000ull + t1.tv_nsec;
+    const uint64_t half = (h1 - h0) / 2;
+    if (half < best_uncertainty) {
+      best_uncertainty = half;
+      best_offset = static_cast<int64_t>(*d) - static_cast<int64_t>(h0 + half);
+    }
+  }
+  cudaFreeHost(d);
+  if (err != cudaSuccess) return err;
+  *offset_ns = best_offset;
+  *uncertainty_ns = best_uncertainty;
+  return cudaSuccess;
+}
+
 cudaError_t bus_preload_kernels() {
   // cudaFuncGetAttributes forces the lazy loader to materialize a kernel
   // NOW, while nothing spins on the device — see the header for why that
@@ -1281,6 +1328,7 @@ cudaError_t bus_preload_kernels() {
       reinterpret_cast<const void*>(bus_allreduce_graph_kernel),
       reinterpret_cast<const void*>(bus_bulk_collective_kernel),
       reinterpret_cast<const void*>(bus_warm_work_kernel),
+      reinterpret_cast<const void*>(bus_globaltimer_stamp_kernel),
   };
   for (const void* k : kernels) {
     const cudaError_t err = cudaFuncGetAttributes(&attr, k);

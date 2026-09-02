@@ -440,4 +440,14 @@ void fill_random_normal_f32(void* dst, uint64_t n, uint64_t seed,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+__global__ void globaltimer_stamp_kernel(uint64_t* out) {
+  uint64_t t;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+  *out = t;
+}
+
+void launch_globaltimer_stamp(uint64_t* out, cudaStream_t stream) {
+  globaltimer_stamp_kernel<<<1, 1, 0, stream>>>(out);
+}
+
 }  // namespace dgpp

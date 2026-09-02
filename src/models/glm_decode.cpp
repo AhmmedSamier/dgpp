@@ -8,6 +8,7 @@
 #include "common/log.hpp"
 #include "kernels/glm_mhc_launch.hpp"
 #include "kernels/glm_moe_launch.hpp"
+#include "kernels/kernels.hpp"
 #include "kernels/glm_norm.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "models/glm_step_timing.hpp"
@@ -234,6 +235,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, ids_src,
                                static_cast<size_t>(T) * 8,
                                cudaMemcpyHostToDevice, stream_));
+  // The step's first node: when did the GPU actually start this replay?
+  // (The bus logs arm -> first collective; this splits it at the graph's
+  // own start.) One 1-thread kernel; decode rows only.
+  if (decode_row) launch_globaltimer_stamp(h_graph_start_gt_, stream_);
   glm_embed_bcast_streams(globals_.embed, d_tokens_, streams_[0], T, H,
                           stream_);
 
@@ -249,7 +254,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   int moe_decode_calls = 0;
 
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
-    const GlmLayerResident& r = loader_.load_layer(layer);
+    const GlmLayerResident& r = stack_layer(layer);
     const GlmLayerBound b = bind_layer(r, cfg_.mlps[layer] == GlmMlpKind::Dense);
 
     // ---- attention site --------------------------------------------
@@ -413,6 +418,23 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   gemm_.matmul(normed_, globals_.lm_head, logits_, T, lm_vocab_count_, H,
                 DType::BF16, GemmOut::BF16, H, gemm_ws_, gemm_ws_bytes_,
                 stream_);
+  // The decode tail's rows ride D2H into pinned mirrors (graph nodes when
+  // capturing) so the host never touches the managed activations — see
+  // h_tail_logits_'s comment for the 9 ms stall that bought this.
+  {
+    // Decode rows: all T rows (T <= kDecodeRows). Prefill chunks: the
+    // LAST row only, into mirror row 0 (a prompt-sized logits matrix is
+    // 100s of MB; greedy needs one row).
+    const size_t first = decode_row ? 0 : static_cast<size_t>(T - 1);
+    const size_t rows = decode_row ? static_cast<size_t>(T) : 1;
+    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_,
+                                 logits_ + first * lm_vocab_count_,
+                                 rows * lm_vocab_count_ * 2,
+                                 cudaMemcpyDeviceToHost, stream_));
+    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_hidden_, normed_ + first * H,
+                                 rows * H * 2, cudaMemcpyDeviceToHost,
+                                 stream_));
+  }
 
   // Capture ends HERE: nothing executed, so there is nothing to sync
   // or materialize — the caller ends the capture, instantiates, and the
@@ -430,13 +452,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // byte-identical Outputs through it.
   if (decode_row) return session_decode_tail(T);
 
-  // Last row only (see the runner's header note).
-  const uint16_t* last_hidden =
-      normed_ + static_cast<size_t>(T - 1) * H;
-  const uint16_t* last_logits =
-      logits_ + static_cast<size_t>(T - 1) * lm_vocab_count_;
-  out.final_hidden_bits.assign(last_hidden, last_hidden + H);
-  out.logits_bits.assign(last_logits, last_logits + lm_vocab_count_);
+  // Last row only (see the runner's header note) — from the pinned
+  // mirrors' row 0, which the D2H above filled with row T-1.
+  out.final_hidden_bits.assign(h_tail_hidden_, h_tail_hidden_ + H);
+  out.logits_bits.assign(h_tail_logits_, h_tail_logits_ + lm_vocab_count_);
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
   return out;
@@ -474,10 +493,12 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_decode_tail(int T) {
     out.route_biased.emplace_back(bs, bs + rows * E);
     ++moe_ordinal;
   }
+  // From the pinned mirrors the step's D2H copies filled (the caller
+  // synced), never from the managed activations.
   const uint16_t* last_hidden =
-      normed_ + static_cast<size_t>(T - 1) * H;
+      h_tail_hidden_ + static_cast<size_t>(T - 1) * H;
   const uint16_t* last_logits =
-      logits_ + static_cast<size_t>(T - 1) * lm_vocab_count_;
+      h_tail_logits_ + static_cast<size_t>(T - 1) * lm_vocab_count_;
   out.final_hidden_bits.assign(last_hidden, last_hidden + H);
   out.logits_bits.assign(last_logits, last_logits + lm_vocab_count_);
   out.lm_vocab_begin = lm_vocab_begin_;

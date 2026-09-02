@@ -170,3 +170,28 @@ pass vacuously) are pinned in `DESIGN.md` §12.
 
 Cross-node RoCE and NIC→GPU checks are intentionally manual/deployment tests;
 they require a peer and are documented under `benchmarks/README.md`.
+
+### Deploying a serving rank: memory
+
+A resident rank owns its box. The model is ~82 GiB of the 121 GB, and the
+serving apps (`glm_serve`, `glm_gen_check`) do two things to keep the decode
+loop's *host* side from being paged out beside it:
+
+- the loader drops the checkpoint's mmaps and evicts their page cache the
+  moment the last layer is on the device (`GlmLayerStream::release_sources`),
+  so the box is not held at its memory watermark by a duplicate of bytes it
+  will never read again;
+- the process locks its memory (`mlockall(MCL_CURRENT)`, before the model is
+  constructed) so the tokenizer tables and the bus engine's heap cannot be
+  swapped out during the load. This needs `RLIMIT_MEMLOCK` to cover the
+  process's footprint (~14 GiB with the CUDA context); the app raises the soft
+  limit to the hard one and logs a `WARN` if the kernel still refuses. Give
+  ranks an unlimited hard limit: `ulimit -l unlimited` in the launch
+  environment, or `LimitMEMLOCK=infinity` in the unit / `/etc/security/limits.conf`
+  for ssh-spawned ranks. An unpinned rank still serves correctly — it pays
+  2–10 ms swap-in faults in the decode loop instead (the 2026-09-02 jitter).
+
+`scripts/fabric_run.sh --node-probe` samples each node's reclaim/swap/GPU
+counters at 1 Hz for the run; `scripts/fabric_xrank.py LOGDIR` reads the
+fetched logs and reports host gaps, stall windows, and step distributions per
+rank.

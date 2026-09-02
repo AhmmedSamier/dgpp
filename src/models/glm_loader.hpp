@@ -202,6 +202,21 @@ class GlmLayerStream {
   void release_layer();
   void release_globals();
 
+  // RESIDENT mode: drops the checkpoint mappings and evicts their page
+  // cache. The caller decides when the load is complete (the model calls
+  // it after its first full forward — every layer its stack will ever
+  // read is on the device by then; a caller that also wants the MTP draft
+  // loads it first). Why it matters: the mmapped checkpoint (~70 GB at
+  // GLM) cannot be dropped by the kernel while mapped, so an 80 GB
+  // resident model + the cache pinned every decode box at its memory
+  // watermark — and the kernel answered by swapping the process's own
+  // cold pages (tokenizer tables, heap), each faulting back in at 2-10 ms
+  // in the decode loop (2026-09-02). After this, load_layer of a
+  // never-materialized layer and hash_replicated() throw: the bytes are
+  // gone by design. Streaming mode ignores the call.
+  void release_sources();
+  bool sources_released() const { return sources_released_; }
+
   // Exact device bytes load_layer will use for a layer — the same formula
   // that sizes the bump; load_layer throws if actual usage ever differs,
   // so the formula and the allocator cannot silently drift apart. At
@@ -271,6 +286,7 @@ class GlmLayerStream {
   cudaStream_t reader_ = nullptr;  // bump readers' stream (see above)
   uint64_t source_bytes_ = 0;
   uint64_t verbatim_bytes_ = 0;
+  bool sources_released_ = false;
   std::vector<std::unique_ptr<SafetensorsFile>> shards_;
   std::unordered_map<std::string, const TensorInfo*> tensors_;
   std::unique_ptr<GlmLayerBump> layer_bump_;  // streaming only

@@ -237,6 +237,8 @@ class CollectiveBus {
                         std::string* error);
   bool graph_record_end(std::string* error);
   bool graph_replay_arm(std::string* error);
+  // %globaltimer - CLOCK_MONOTONIC, calibrated at start() (bus_kernel.hpp).
+  int64_t globaltimer_offset_ns() const;
   bool graph_replay_finish(int timeout_ms, std::string* error);
 
   // TEMP bring-up microscope: the per-gen cells' gen/ready/done/status,

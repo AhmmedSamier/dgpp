@@ -52,6 +52,21 @@
 #                  the peers run bare. The wrapper must pass stdout
 #                  through (the launch waits on the "rendezvous
 #                  listening" log line) and exit with the app.
+#   --fetch-logs    after the run, scp every peer's log into LOG_DIR as
+#                  rN.log next to r0.log — the cross-rank analysis tools
+#                  (scripts/fabric_xrank.py) read the directory as a unit.
+#                  Cross-rank correlation by wall clock is hopeless (the
+#                  boxes disagree by hours); by bus generation it is exact.
+#   --node-probe    run scripts/node_probe.sh on EVERY node for the run's
+#                  duration (1 Hz /proc/vmstat + meminfo deltas into the
+#                  node's $PEER_DIR/probe_rN.log; fetched with the logs).
+#                  The 2026-09-02 jitter hunt's question was "is the box
+#                  reclaiming memory under us?" — this answers it per node.
+#   --node-cmd CMD  run CMD (a shell string) on every node in the
+#                  background for the run's duration, killed at the end —
+#                  the knob hook for "what if the node did X during the
+#                  run" (e.g. a drop_caches loop). Runs as $FABRIC_USER;
+#                  passwordless sudo is available on the lab fabric.
 #
 # Examples:
 #   scripts/fabric_run.sh -- --model unsloth/GLM-5.3-Flash-FP8 \
@@ -84,6 +99,9 @@ STAGE_FILE=""
 FORCE=0
 LOG_DIR=""
 HEAD_WRAP=()
+FETCH_LOGS=0
+NODE_PROBE=0
+NODE_CMD=""
 
 die() { echo "fabric_run: $*" >&2; exit 1; }
 peer_ssh() { timeout 20 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$1" "${2:-true}"; }
@@ -99,6 +117,9 @@ while [[ $# -gt 0 ]]; do
     --force) FORCE=1; shift ;;
     --log-dir) LOG_DIR="$2"; shift 2 ;;
     --head-wrap) read -r -a HEAD_WRAP <<< "$2"; shift 2 ;;
+    --fetch-logs) FETCH_LOGS=1; shift ;;
+    --node-probe) NODE_PROBE=1; shift ;;
+    --node-cmd) NODE_CMD="$2"; shift 2 ;;
     --) shift; break ;;
     *) die "unknown option $1 (app args go after --)" ;;
   esac
@@ -106,17 +127,36 @@ done
 APP_ARGS=("$@")
 [[ ${#APP_ARGS[@]} -gt 0 ]] || die "no app args after -- (e.g. -- --model ID --chat TEXT)"
 [[ -x "$APP" ]] || die "app not found/executable: $APP (build it, or pass --app)"
+# The staged binary keeps its name on the peers; every pkill/pgrep below
+# matches THAT name, so --app works for any fabric app, not just the
+# default (the 2026-09-02 hunt wanted bus_check and a synthetic decode
+# loop through the same launcher).
+APP_NAME="$(basename "$APP")"
 WORLD=$((1 + ${#FABRIC_PEERS[@]}))
 LOG_DIR="${LOG_DIR:-$BUILD/fabric-runs/$(date -u +%Y%m%d-%H%M%S)}"
 mkdir -p "$LOG_DIR"
 export DGPP_LOG_LEVEL="${DGPP_LOG_LEVEL:-info}"  # render/eos lines are INFO
+PROBE_SCRIPT="$ROOT/scripts/node_probe.sh"
+ALL_NODES=(127.0.0.1 "${FABRIC_PEERS[@]}")  # index == rank
 
 # ------------------------------------------------------------- cleanup
 kill_all() {
-  pkill -x glm_gen_check 2>/dev/null || true
+  pkill -x "$APP_NAME" 2>/dev/null || true
   for ip in "${FABRIC_PEERS[@]}"; do
     timeout 15 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
-      "pkill -x glm_gen_check" 2>/dev/null || true
+      "pkill -x $APP_NAME" 2>/dev/null || true
+  done
+  stop_node_helpers
+}
+# Per-node helpers (probe sampler, --node-cmd) are tagged by a marker in
+# their command line so they can be killed by pattern without touching
+# anything else; the marker carries the run's log dir name for uniqueness.
+HELPER_TAG="fabric_run_helper_$(basename "$LOG_DIR")"
+stop_node_helpers() {
+  [[ $NODE_PROBE -eq 1 || -n "$NODE_CMD" ]] || return 0
+  for ip in "${ALL_NODES[@]}"; do
+    timeout 15 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
+      "pkill -f $HELPER_TAG" >/dev/null 2>&1 || true
   done
 }
 trap 'kill_all' INT TERM
@@ -124,14 +164,14 @@ trap 'kill_all' INT TERM
 
 # ------------------------------------------------------- stale / staging
 if [[ $FORCE -eq 1 ]]; then
-  echo "fabric_run: --force — killing any stale glm_gen_check on all ranks"
+  echo "fabric_run: --force — killing any stale $APP_NAME on all ranks"
   kill_all
   sleep 2
 fi
-pgrep -x glm_gen_check >/dev/null && die "a glm_gen_check already runs here (--force to kill)"
+pgrep -x "$APP_NAME" >/dev/null && die "a $APP_NAME already runs here (--force to kill)"
 for ip in "${FABRIC_PEERS[@]}"; do
-  peer_ssh "$ip" "pgrep -x glm_gen_check" >/dev/null 2>&1 \
-    && die "a glm_gen_check already runs on $ip (--force to kill)"
+  peer_ssh "$ip" "pgrep -x $APP_NAME" >/dev/null 2>&1 \
+    && die "a $APP_NAME already runs on $ip (--force to kill)"
 done
 
 if [[ $STAGE -eq 1 ]]; then
@@ -139,6 +179,13 @@ if [[ $STAGE -eq 1 ]]; then
     echo "fabric_run: staging $APP -> $FABRIC_USER@$ip:$PEER_DIR/"
     scp -o BatchMode=yes -o ConnectTimeout=8 "$APP" \
       "$FABRIC_USER@$ip:$PEER_DIR/" >/dev/null || die "staging to $ip failed"
+  done
+fi
+if [[ $NODE_PROBE -eq 1 || -n "$NODE_CMD" ]]; then
+  [[ -x "$PROBE_SCRIPT" ]] || die "node probe script missing: $PROBE_SCRIPT"
+  for ip in "${FABRIC_PEERS[@]}"; do
+    scp -o BatchMode=yes -o ConnectTimeout=8 "$PROBE_SCRIPT" \
+      "$FABRIC_USER@$ip:$PEER_DIR/" >/dev/null || die "staging probe to $ip failed"
   done
 fi
 if [[ -n "$STAGE_FILE" ]]; then
@@ -165,6 +212,27 @@ fi
 
 # ------------------------------------------------------------- rank 0
 echo "fabric_run: world $WORLD, port $PORT, logs in $LOG_DIR"
+
+# Per-node helpers start BEFORE the ranks so the probe's first sample is
+# the pre-load baseline. Rank 0's helpers write next to r0.log; peers'
+# into $PEER_DIR (fetched with --fetch-logs). The tag makes them killable.
+start_node_helpers() {
+  for i in "${!ALL_NODES[@]}"; do
+    ip="${ALL_NODES[$i]}"
+    local dir="$PEER_DIR" runner="peer_ssh $ip"
+    [[ $i -eq 0 ]] && { dir="$LOG_DIR"; runner="bash -c"; }
+    if [[ $NODE_PROBE -eq 1 ]]; then
+      local probe="$dir/node_probe.sh"; [[ $i -eq 0 ]] && probe="$PROBE_SCRIPT"
+      $runner "nohup $probe $HELPER_TAG > $dir/probe_r$i.log 2>&1 < /dev/null &" || true
+    fi
+    if [[ -n "$NODE_CMD" ]]; then
+      # sh -c with the tag as $0: pgrep -f sees the tag, the command runs verbatim.
+      $runner "nohup sh -c $(printf '%q' "$NODE_CMD") $HELPER_TAG > $dir/nodecmd_r$i.log 2>&1 < /dev/null &" || true
+    fi
+  done
+}
+start_node_helpers
+
 nohup "${HEAD_WRAP[@]}" "$APP" "${APP_ARGS[@]}" --world "$WORLD" --rank 0 --port "$PORT" \
   > "$LOG_DIR/r0.log" 2>&1 < /dev/null &
 HEAD_PID=$!
@@ -199,7 +267,7 @@ for i in "${!FABRIC_PEERS[@]}"; do
   # Fire-and-forget on purpose (see header): the remote side is fully
   # detached; whether THIS ssh returns is irrelevant to the launch.
   ( timeout 25 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
-      "cd $PEER_DIR && DGPP_LOG_LEVEL=$DGPP_LOG_LEVEL nohup ./glm_gen_check $REMOTE_ARGS \
+      "cd $PEER_DIR && DGPP_LOG_LEVEL=$DGPP_LOG_LEVEL nohup ./$APP_NAME $REMOTE_ARGS \
        --world $WORLD --rank $rank --peer $FABRIC_HEAD --port $PORT \
        > $PEER_DIR/fabric_r$rank.log 2>&1 < /dev/null &" \
       >/dev/null 2>&1 ) &
@@ -208,7 +276,7 @@ for i in "${!FABRIC_PEERS[@]}"; do
   rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
   up=0
   for _ in $(seq 1 20); do
-    peer_ssh "$ip" "pgrep -x glm_gen_check" >/dev/null 2>&1 && { up=1; break; }
+    peer_ssh "$ip" "pgrep -x $APP_NAME" >/dev/null 2>&1 && { up=1; break; }
     sleep 1
   done
   if [[ $up -ne 1 ]]; then
@@ -239,6 +307,7 @@ if [[ $HEAD_RC -ne 0 ]]; then
   echo "fabric_run: head failed — killing wedged peers"
   kill_all
 fi
+stop_node_helpers
 
 # ------------------------------------------------------------ collect
 echo "fabric_run: rank 0 exited rc=$HEAD_RC — collecting verdicts"
@@ -259,5 +328,24 @@ echo "fabric_run: rank consistency $([[ -n "$head_md5" ]] && echo "$head_md5" ||
 grep -m1 "eos stop" "$LOG_DIR/r0.log" || true
 grep "retired (" "$LOG_DIR/r0.log" || true
 grep -m1 -E "steps in|step cap in" "$LOG_DIR/r0.log" || true
-echo "fabric_run: full logs in $LOG_DIR (r0.log local, fabric_rN.log on peers)"
+
+if [[ $FETCH_LOGS -eq 1 ]]; then
+  for i in "${!FABRIC_PEERS[@]}"; do
+    rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
+    scp -q -o BatchMode=yes -o ConnectTimeout=8 \
+      "$FABRIC_USER@$ip:$PEER_DIR/fabric_r$rank.log" "$LOG_DIR/r$rank.log" \
+      || echo "fabric_run: could not fetch rank $rank's log"
+    # One scp per file: OpenSSH's sftp-backed scp expands no remote globs.
+    [[ $NODE_PROBE -eq 1 ]] && scp -q -o BatchMode=yes -o ConnectTimeout=8 \
+        "$FABRIC_USER@$ip:$PEER_DIR/probe_r$rank.log" "$LOG_DIR/" 2>/dev/null || true
+    [[ -n "$NODE_CMD" ]] && scp -q -o BatchMode=yes -o ConnectTimeout=8 \
+        "$FABRIC_USER@$ip:$PEER_DIR/nodecmd_r$rank.log" "$LOG_DIR/" 2>/dev/null || true
+  done
+  # The cross-rank verdict the hunt lives on: per-rank step distribution,
+  # inter-step host gaps, and every gen-0 stall with all ranks' views.
+  if [[ -x "$ROOT/scripts/fabric_xrank.py" ]]; then
+    python3 "$ROOT/scripts/fabric_xrank.py" "$LOG_DIR" --summary || true
+  fi
+fi
+echo "fabric_run: full logs in $LOG_DIR $([[ $FETCH_LOGS -eq 1 ]] && echo '(r0..rN.log fetched)' || echo '(r0.log local, fabric_rN.log on peers)')"
 exit "$HEAD_RC"

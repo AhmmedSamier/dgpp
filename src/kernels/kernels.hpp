@@ -73,4 +73,10 @@ void fill_random_normal_fp8(void* dst, uint64_t n, uint64_t seed,
 void fill_random_normal_f32(void* dst, uint64_t n, uint64_t seed,
                             float stddev, cudaStream_t stream);
 
+// Writes %globaltimer (the GPU's 64-bit ns clock) to *out when the stream
+// reaches this point — a timeline probe for replayed graphs (the decode
+// step's launch-to-first-kernel latency; compare against the bus's
+// calibrated globaltimer offset).
+void launch_globaltimer_stamp(uint64_t* out, cudaStream_t stream);
+
 }  // namespace dgpp

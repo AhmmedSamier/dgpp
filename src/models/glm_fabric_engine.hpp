@@ -10,12 +10,36 @@
 #include <string>
 #include <vector>
 
+#include "common/log.hpp"
+#include "common/process_memory.hpp"
 #include "models/glm_gen_engine.hpp"
 #include "models/glm_step_timing.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "net/collective_bus.hpp"
 
 namespace dgpp {
+
+// Pins the process's current pages BEFORE the model is constructed — the
+// decode loop's host state (tokenizer tables, the bus, this binary) must
+// survive the load phase, which drives every box to its memory watermark
+// and had the kernel swapping exactly those pages out (2026-09-02: the
+// fabric's p99 was a ~10 ms swap-in fault per shared token, in lockstep
+// across ranks). Before construction on purpose: the loader's checkpoint
+// mmaps (~70 GB) do not exist yet, so MCL_CURRENT cannot try to pin them;
+// the loader releases them itself once the resident load completes.
+// Best effort — a refusal is logged and serving proceeds unpinned.
+inline void pin_serving_process(int rank) {
+  std::string why;
+  size_t locked = 0;
+  if (lock_process_memory(&why, &locked))
+    DGPP_LOG_INFO("rank {}: process memory locked (mlockall MCL_CURRENT, "
+                  "{:.0f} MiB)",
+                  rank, static_cast<double>(locked) / (1024.0 * 1024.0));
+  else
+    DGPP_LOG_WARN("rank {}: process memory NOT locked — decode latency may "
+                  "see swap-in faults ({})",
+                  rank, why);
+}
 
 // Real-mesh budgets, not loopback budgets (found by the first fabric
 // gate run, 2026-08-30: a cold peer's first boundary waits behind

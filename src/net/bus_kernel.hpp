@@ -61,6 +61,12 @@ uint64_t bus_consumer_deadline_cycles(double seconds);
 // still need CUDA_MODULE_LOADING=EAGER or their own preload.
 cudaError_t bus_preload_kernels();
 
+// %globaltimer's offset from CLOCK_MONOTONIC (gt = mono + offset), with
+// the bracket half-width as its uncertainty — the bridge between the
+// engine's host stamps and the kernels' gt_* stamps (see the .cu).
+cudaError_t bus_globaltimer_offset(int64_t* offset_ns,
+                                   uint64_t* uncertainty_ns);
+
 // Host mirror of the consumer fold (bus_types.hpp's mix); the sender uses
 // it to verify the receiver's hash. `bytes` must be a multiple of 8.
 uint64_t bus_fold(const void* data, size_t bytes);
