@@ -22,15 +22,22 @@
 namespace dgpp {
 
 // Pins the process's current pages BEFORE the model is constructed — the
-// decode loop's host state (tokenizer tables, the bus, this binary) must
-// survive the load phase, which drives every box to its memory watermark
-// and had the kernel swapping exactly those pages out (2026-09-02: the
-// fabric's p99 was a ~10 ms swap-in fault per shared token, in lockstep
-// across ranks). Before construction on purpose: the loader's checkpoint
-// mmaps (~70 GB) do not exist yet, so MCL_CURRENT cannot try to pin them;
-// the loader releases them itself once the resident load completes.
-// Best effort — a refusal is logged and serving proceeds unpinned.
+// decode loop's host state (tokenizer tables, the bus, this binary) once
+// had to survive a load phase that drove every box to its memory
+// watermark and had the kernel swapping exactly those pages out
+// (2026-09-02: a ~10 ms swap-in fault per shared token, in lockstep across
+// ranks). The one-pass loader removed that pressure, and a 1000-step run
+// with the pin OFF was indistinguishable (p99 46, 0 stalls, no swap
+// traffic) — so this is a belt-and-braces safety net, NOT a requirement:
+// a box whose RLIMIT_MEMLOCK refuses it serves exactly as well, and the
+// refusal is informational. Before construction on purpose: the loader's
+// checkpoint mmaps do not exist yet, so MCL_CURRENT cannot try to pin
+// them. DGPP_MLOCK=off skips the attempt.
 inline void pin_serving_process(int rank) {
+  if (const char* m = std::getenv("DGPP_MLOCK"); m && std::string(m) == "off") {
+    DGPP_LOG_INFO("rank {}: process memory not locked (DGPP_MLOCK=off)", rank);
+    return;
+  }
   std::string why;
   size_t locked = 0;
   if (lock_process_memory(&why, &locked))
@@ -38,8 +45,8 @@ inline void pin_serving_process(int rank) {
                   "{:.0f} MiB)",
                   rank, static_cast<double>(locked) / (1024.0 * 1024.0));
   else
-    DGPP_LOG_WARN("rank {}: process memory NOT locked — decode latency may "
-                  "see swap-in faults ({})",
+    DGPP_LOG_INFO("rank {}: process memory not locked ({}); serving "
+                  "proceeds — the pin is optional",
                   rank, why);
 }
 

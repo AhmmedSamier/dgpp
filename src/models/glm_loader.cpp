@@ -923,6 +923,7 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
     resident_bumps_.resize(static_cast<size_t>(max_layer));  // null bumps
     resident_layers_.assign(static_cast<size_t>(max_layer),
                             GlmLayerResident{});
+    check_resident_footprint_fits();
   } else {
     layer_bump_->init(capacity);
   }
@@ -935,6 +936,34 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
   DGPP_CUDA_OK(cudaStreamCreate(&stream_));
   checkpoint_dir_ = checkpoint_dir;
   if (residency_ == GlmResidency::Resident) open_resident_image();
+}
+
+// Fail in the constructor, not three minutes into the load: the resident
+// footprint is known from the byte formula before a single byte moves.
+// The device's free memory is the measure (the GB10's unified pool: the
+// same bytes the host would otherwise call MemAvailable); the headroom
+// covers the staging mirror, the CUDA context and the bus's buffers.
+void GlmLayerStream::check_resident_footprint_fits() const {
+  const int max_layer =
+      cfg_.num_hidden_layers + (cfg_.mtp_layer() >= 0 ? 1 : 0);
+  size_t footprint = globals_bytes(cfg_, rank_, world_, head_);
+  for (int l = 0; l < cfg_.num_hidden_layers; ++l)
+    footprint += layer_bytes(cfg_, l, rank_, world_);
+  (void)max_layer;  // the MTP draft is loaded on demand, not counted here
+  size_t free_bytes = 0, total_bytes = 0;
+  if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) return;
+  constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+  const size_t headroom = static_cast<size_t>(8 * kGiB);
+  DGPP_LOG_INFO("glm loader: rank {} resident footprint {:.1f} GiB; device "
+                "free {:.1f} of {:.1f} GiB",
+                rank_, footprint / kGiB, free_bytes / kGiB, total_bytes / kGiB);
+  if (footprint + headroom > free_bytes)
+    throw std::runtime_error(
+        "glm loader: the resident model (" + std::to_string(footprint >> 30) +
+        " GiB + 8 GiB headroom) does not fit in the device's free memory (" +
+        std::to_string(free_bytes >> 30) +
+        " GiB) — free memory on this node, use a larger world, or run in "
+        "streaming residency");
 }
 
 // ---- the resident image cache ----------------------------------------------

@@ -174,22 +174,29 @@ they require a peer and are documented under `benchmarks/README.md`.
 ### Deploying a serving rank: memory
 
 A resident rank owns its box. The model is ~82 GiB of the 121 GB, and the
-serving apps (`glm_serve`, `glm_gen_check`) do two things to keep the decode
-loop's *host* side from being paged out beside it:
+serving apps (`glm_serve`, `glm_gen_check`) configure themselves for that
+without any privileged setup on the node:
 
-- the loader drops the checkpoint's mmaps and evicts their page cache the
-  moment the last layer is on the device (`GlmLayerStream::release_sources`),
-  so the box is not held at its memory watermark by a duplicate of bytes it
-  will never read again;
-- the process locks its memory (`mlockall(MCL_CURRENT)`, before the model is
-  constructed) so the tokenizer tables and the bus engine's heap cannot be
-  swapped out during the load. This needs `RLIMIT_MEMLOCK` to cover the
-  process's footprint (~14 GiB with the CUDA context); the app raises the soft
-  limit to the hard one and logs a `WARN` if the kernel still refuses. Give
-  ranks an unlimited hard limit: `ulimit -l unlimited` in the launch
-  environment, or `LimitMEMLOCK=infinity` in the unit / `/etc/security/limits.conf`
-  for ssh-spawned ranks. An unpinned rank still serves correctly — it pays
-  2–10 ms swap-in faults in the decode loop instead (the 2026-09-02 jitter).
+- the constructor checks that the resident footprint (+ 8 GiB headroom)
+  fits the device's free memory and fails immediately with a clear message
+  if it does not — never three minutes into a load;
+- the loader reads each source tensor exactly once (prefetch, copy, drop),
+  so the page cache stays under ~10 GB during the load and the box never
+  reaches its memory watermark; the checkpoint's mmaps are released the
+  moment the last layer is on the device (`GlmLayerStream::release_sources`);
+- the process *tries* to lock its memory (`mlockall(MCL_CURRENT)`, before
+  the model is constructed) as a safety net against swap-in faults in the
+  decode loop. This is optional: with the one-pass loader a rank with the
+  pin off measured identically (p99 46 ms, 0 stalls, no swap traffic over
+  1000 steps). A finite `RLIMIT_MEMLOCK` is logged, not warned about;
+  `DGPP_MLOCK=off` skips the attempt.
+
+Nothing else on the node needs setting. In particular a locked GPU clock
+(`nvidia-smi -lgc`) is **not** required: the governor sits at 2400-2560 MHz
+throughout decode on its own and the measured step distribution is the same
+locked or unlocked. NTP between nodes only matters for reading logs side by
+side, and `scripts/fabric_run.sh --node-probe` records each node's clock
+offset per run so even that works without it.
 
 ### Deploying a serving rank: the resident image cache
 

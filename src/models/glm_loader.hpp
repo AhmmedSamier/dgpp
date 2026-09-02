@@ -309,6 +309,7 @@ class GlmLayerStream {
   std::unique_ptr<GlmResidentImage> image_;  // resident mode, when configured
   int image_restored_ = 0;
   int image_captured_ = 0;
+  void check_resident_footprint_fits() const;
   uint64_t resident_image_key() const;
   void open_resident_image();
   GlmReplicatedDigest compute_replicated_digest() const;

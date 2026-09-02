@@ -282,12 +282,22 @@ for a in "${APP_ARGS[@]}"; do
   fi
   prev="$a"
 done
+# Every DGPP_* knob in our environment reaches the peers too (the app's
+# knobs: DGPP_MLOCK, DGPP_RESIDENT_CACHE*, DGPP_LOG_LEVEL, ...) — except
+# this script's own, which describe the head's side of the world.
+REMOTE_ENV=""
+while IFS='=' read -r name value; do
+  case "$name" in
+    DGPP_PEER_DIR|DGPP_BUILD_DIR|DGPP_FABRIC_*) continue ;;
+    DGPP_*) REMOTE_ENV+="$name=$(printf '%q' "$value") " ;;
+  esac
+done < <(env)
 for i in "${!FABRIC_PEERS[@]}"; do
   rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
   # Fire-and-forget on purpose (see header): the remote side is fully
   # detached; whether THIS ssh returns is irrelevant to the launch.
   ( timeout 25 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
-      "cd $PEER_DIR && DGPP_LOG_LEVEL=$DGPP_LOG_LEVEL nohup ./$APP_NAME $REMOTE_ARGS \
+      "cd $PEER_DIR && $REMOTE_ENV nohup ./$APP_NAME $REMOTE_ARGS \
        --world $WORLD --rank $rank --peer $FABRIC_HEAD --port $PORT \
        > $PEER_DIR/fabric_r$rank.log 2>&1 < /dev/null &" \
       >/dev/null 2>&1 ) &
