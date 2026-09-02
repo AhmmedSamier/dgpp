@@ -1,6 +1,7 @@
 #include "models/glm_forward.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
 
@@ -15,6 +16,11 @@
 namespace dgpp {
 
 namespace {
+
+double ms_between(std::chrono::steady_clock::time_point a,
+                  std::chrono::steady_clock::time_point b) {
+  return std::chrono::duration<double, std::milli>(b - a).count();
+}
 
 constexpr size_t kGemmWsBase = 64ull << 20;
 
@@ -99,9 +105,12 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   // Boot check (§5.2): hash every replicated tensor BEFORE anything else
   // runs — runners exchange this across ranks at startup, and a mismatch
   // pinpoints the diverging layer. Pure mmap reads; no residency needed.
+  const auto t_digest = std::chrono::steady_clock::now();
   if (tp_world > 1) boot_digest_ = loader_.hash_replicated();
-
+  const auto t_globals = std::chrono::steady_clock::now();
   globals_ = loader_.load_globals();
+  boot_digest_ms_ = ms_between(t_digest, t_globals);
+  boot_globals_ms_ = ms_between(t_globals, std::chrono::steady_clock::now());
   lm_vocab_begin_ = globals_.lm_vocab_begin;
   lm_vocab_count_ =
       globals_.lm_vocab_count > 0 ? globals_.lm_vocab_count : cfg_.vocab_size;
@@ -242,7 +251,17 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   // Every device allocation happens above (see preconstruct_layers): the
   // TP runners barrier after construction so no rank's first collective
   // can spin while a peer is still inside allocation-phase device syncs.
+  const auto t_layers = std::chrono::steady_clock::now();
   preconstruct_layers();
+  // The startup budget, itemized — what the resident image cache leaves
+  // behind is the digest and the globals, both still read from the shards.
+  DGPP_LOG_INFO("rank {} boot phases: digest {:.1f} s ({:.2f} GiB hashed), "
+                "globals {:.1f} s, layers {:.1f} s",
+                tp_rank, boot_digest_ms_ / 1000.0,
+                static_cast<double>(boot_digest_.bytes) /
+                    (1024.0 * 1024.0 * 1024.0),
+                boot_globals_ms_ / 1000.0,
+                ms_between(t_layers, std::chrono::steady_clock::now()) / 1000.0);
 }
 
 GlmDiagnosticModel::~GlmDiagnosticModel() {

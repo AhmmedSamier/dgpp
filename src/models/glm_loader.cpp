@@ -1007,8 +1007,10 @@ void GlmLayerStream::open_resident_image() {
     image_.reset();
     return;
   }
-  DGPP_LOG_INFO("glm loader: rank {} resident image {} — {}/{} layers present",
-                rank_, image_->path(), image_->present(), image_->layers());
+  DGPP_LOG_INFO("glm loader: rank {} resident image {} — {}/{} layers present, "
+                "{} I/O",
+                rank_, image_->path(), image_->present(), image_->layers(),
+                image_->direct_io() ? "direct" : "buffered");
 }
 
 void GlmLayerStream::restore_layer_from_image(int layer, GlmLayerBump& bump,
@@ -1195,12 +1197,71 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
   return resident_;
 }
 
+// The digest note: u64 words [format, tensors, bytes, globals, n, layer...].
+namespace {
+constexpr uint64_t kDigestNoteFormat = 0x4447505044494731ull;  // "DGPPDIG1"
+constexpr const char* kDigestNoteName = "digest";
+
+std::vector<uint64_t> serialize_digest(const GlmReplicatedDigest& d) {
+  std::vector<uint64_t> w = {kDigestNoteFormat, d.tensors, d.bytes, d.globals,
+                             d.layer.size()};
+  w.insert(w.end(), d.layer.begin(), d.layer.end());
+  return w;
+}
+
+bool deserialize_digest(const std::vector<uint64_t>& w, size_t layers,
+                        GlmReplicatedDigest& d) {
+  if (w.size() != 5 + layers || w[0] != kDigestNoteFormat || w[4] != layers)
+    return false;
+  d.tensors = w[1];
+  d.bytes = w[2];
+  d.globals = w[3];
+  d.layer.assign(w.begin() + 5, w.end());
+  return true;
+}
+}  // namespace
+
 GlmReplicatedDigest GlmLayerStream::hash_replicated() const {
   if (sources_released_)
     throw std::runtime_error(
         "glm loader: hash_replicated after the checkpoint sources were "
         "released — the digest is a BOOT check; take it before the first "
         "forward");
+  // An image carries its digest: the layers it serves and the digest it
+  // reports derive from the same checkpoint bytes under the same key, so
+  // trusting one is trusting the other (a rebuilt layer gets the same
+  // digest — the digest is over the SOURCE). Missing note: compute from
+  // the shards and publish it for the next start.
+  const size_t layers = static_cast<size_t>(
+      cfg_.num_hidden_layers + (cfg_.mtp_layer() >= 0 ? 1 : 0));
+  if (image_) {
+    std::vector<uint64_t> words(5 + layers);
+    GlmReplicatedDigest d;
+    if (image_->read_note(kDigestNoteName, words.data(),
+                          words.size() * sizeof(uint64_t)) &&
+        deserialize_digest(words, layers, d)) {
+      DGPP_LOG_INFO("glm loader: rank {} boot digest from the resident image "
+                    "({} tensors, {:.2f} GiB)",
+                    rank_, d.tensors,
+                    static_cast<double>(d.bytes) / (1024.0 * 1024.0 * 1024.0));
+      return d;
+    }
+  }
+  GlmReplicatedDigest d = compute_replicated_digest();
+  if (image_) {
+    try {
+      const std::vector<uint64_t> words = serialize_digest(d);
+      image_->write_note(kDigestNoteName, words.data(),
+                         words.size() * sizeof(uint64_t));
+    } catch (const std::exception& e) {
+      DGPP_LOG_WARN("glm loader: rank {} could not publish the digest note ({})",
+                    rank_, e.what());
+    }
+  }
+  return d;
+}
+
+GlmReplicatedDigest GlmLayerStream::compute_replicated_digest() const {
   const auto lookup = [this](const std::string& name) -> const TensorInfo& {
     auto it = tensors_.find(name);
     if (it == tensors_.end() || !it->second)

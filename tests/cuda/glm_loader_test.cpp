@@ -18,6 +18,7 @@
 // [1000, 1000] test against the host oracle.
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +36,7 @@
 #include "models/glm_binding.hpp"
 #include "models/glm_config.hpp"
 #include "models/glm_loader.hpp"
+#include "models/glm_resident_image.hpp"
 
 namespace {
 
@@ -579,9 +581,11 @@ DGPP_TEST(glm_loader_resident_image_restore_is_bitwise_and_reads_no_source) {
   // GIVEN a resident stream that builds every layer from the checkpoint
   // with the image cache enabled (so it CAPTURES each one):
   std::vector<std::vector<uint8_t>> built(static_cast<size_t>(max_layer));
+  dgpp::GlmReplicatedDigest computed;
   {
     dgpp::GlmLayerStream first(fx.cfg, fx.dir.string(), 0, 1,
                                dgpp::GlmResidency::Resident);
+    computed = first.hash_replicated();  // from the shards; publishes the note
     for (int l = 0; l < max_layer; ++l) {
       (void)first.load_layer(l);
       const auto [base, bytes] = first.resident_layer_span(l);
@@ -596,6 +600,10 @@ DGPP_TEST(glm_loader_resident_image_restore_is_bitwise_and_reads_no_source) {
                 first.image_layers_restored() == 0,
             "first stream should capture every layer");
   }
+  bool note_seen = false;
+  for (const auto& e : fs::directory_iterator(cache))
+    note_seen |= e.path().extension() == ".digest";
+  require(note_seen, "hash_replicated publishes its digest note beside the image");
 
   // WHEN a second stream opens the same checkpoint with the same cache,
   // THEN every layer restores from the image — zero checkpoint bytes read
@@ -604,6 +612,11 @@ DGPP_TEST(glm_loader_resident_image_restore_is_bitwise_and_reads_no_source) {
   {
     dgpp::GlmLayerStream second(fx.cfg, fx.dir.string(), 0, 1,
                                 dgpp::GlmResidency::Resident);
+    // The digest comes back from the note, equal in every word:
+    const dgpp::GlmReplicatedDigest noted = second.hash_replicated();
+    require(noted.layer == computed.layer && noted.globals == computed.globals &&
+                noted.bytes == computed.bytes && noted.tensors == computed.tensors,
+            "digest from the image note must equal the computed digest");
     const uint64_t before = second.source_bytes_read();
     for (int l = 0; l < max_layer; ++l) {
       const dgpp::GlmLayerResident& r = second.load_layer(l);
@@ -649,6 +662,63 @@ DGPP_TEST(glm_loader_resident_image_restore_is_bitwise_and_reads_no_source) {
     { std::ofstream out(cfg_path); out << text; }
   }
   dgpp::GlmLayerStream::set_resident_image_dir(saved);
+}
+
+DGPP_TEST(glm_resident_image_direct_and_buffered_paths_agree_on_odd_sizes) {
+  // GIVEN an image in a real filesystem directory (ext4 in CI: O_DIRECT is
+  // available, so aligned prefixes go direct and sub-page tails buffered)
+  // and blobs whose sizes straddle the page boundary in every way:
+  const fs::path dir = fs::temp_directory_path() / "dgpp_resident_image_test";
+  fs::remove_all(dir);
+  const std::vector<size_t> sizes = {4096 * 3 + 17, 100, 4096 * 2, 1, 4096 + 4095};
+  std::vector<std::vector<uint8_t>> blobs;
+  for (size_t i = 0; i < sizes.size(); ++i) {
+    std::vector<uint8_t> b(sizes[i]);
+    for (size_t k = 0; k < b.size(); ++k)
+      b[k] = static_cast<uint8_t>((k * 7 + i * 131) & 0xFF);
+    blobs.push_back(std::move(b));
+  }
+  // Page-aligned source/destination (the loader's pinned staging is) so the
+  // direct path is actually taken; +1 for the deliberately unaligned case.
+  void* aligned = nullptr;
+  require(posix_memalign(&aligned, 4096, 64 * 1024) == 0, "posix_memalign");
+  auto* al = static_cast<uint8_t*>(aligned);
+  {
+    dgpp::GlmResidentImage img(dir.string(), 0xABCDEFULL, static_cast<int>(sizes.size()));
+    require(img.present() == 0, "fresh image has no layers");
+
+    // WHEN each blob is written from an aligned buffer and read back into
+    // both an aligned buffer (direct prefix + buffered tail) and an
+    // unaligned one (all buffered),
+    for (size_t i = 0; i < sizes.size(); ++i) {
+      std::memcpy(al, blobs[i].data(), sizes[i]);
+      img.write_layer(static_cast<int>(i), al, sizes[i]);
+    }
+    for (size_t i = 0; i < sizes.size(); ++i) {
+      // THEN both reads are bitwise the blob and pass verification:
+      std::memset(al, 0, 64 * 1024);
+      img.read_layer(static_cast<int>(i), al, sizes[i], /*verify=*/true);
+      require(std::memcmp(al, blobs[i].data(), sizes[i]) == 0,
+              ("aligned read of layer " + std::to_string(i)).c_str());
+      std::memset(al, 0, 64 * 1024);
+      img.read_layer(static_cast<int>(i), al + 1, sizes[i], /*verify=*/true);
+      require(std::memcmp(al + 1, blobs[i].data(), sizes[i]) == 0,
+              ("unaligned read of layer " + std::to_string(i)).c_str());
+    }
+    require(img.present() == static_cast<int>(sizes.size()), "all layers present");
+  }
+  // AND a reopened image still serves them (the table round-trips):
+  {
+    dgpp::GlmResidentImage again(dir.string(), 0xABCDEFULL, static_cast<int>(sizes.size()));
+    require(again.present() == static_cast<int>(sizes.size()), "reopen keeps layers");
+    again.read_layer(0, al, sizes[0], true);
+    require(std::memcmp(al, blobs[0].data(), sizes[0]) == 0, "reopen read");
+    bool threw = false;
+    try { again.read_layer(0, al, sizes[0] + 1, false); } catch (const std::exception&) { threw = true; }
+    require(threw, "size mismatch must throw");
+  }
+  free(aligned);
+  fs::remove_all(dir);
 }
 
 DGPP_TEST(fp8_dequant_blocks_handles_ragged_tails_bitwise) {

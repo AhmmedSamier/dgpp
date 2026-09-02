@@ -311,6 +311,7 @@ class GlmLayerStream {
   int image_captured_ = 0;
   uint64_t resident_image_key() const;
   void open_resident_image();
+  GlmReplicatedDigest compute_replicated_digest() const;
   // The image paths of load_layer (resident): lay out the views without a
   // source byte, then stream the blob in; or dump a freshly built bump.
   void restore_layer_from_image(int layer, GlmLayerBump& bump,

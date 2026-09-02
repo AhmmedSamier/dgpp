@@ -216,7 +216,27 @@ echo "fabric_run: world $WORLD, port $PORT, logs in $LOG_DIR"
 # Per-node helpers start BEFORE the ranks so the probe's first sample is
 # the pre-load baseline. Rank 0's helpers write next to r0.log; peers'
 # into $PEER_DIR (fetched with --fetch-logs). The tag makes them killable.
+# The lab boxes' clocks disagree by hours (no NTP on two of them), and the
+# probes stamp with THEIR clock. Record each node's offset from the head
+# (peer_now - head_now, seconds; half an ssh round trip of error, well
+# under the probes' 1 s grain) so fabric_xrank.py can line probe rows up
+# with rank 0's log.
+record_clock_offsets() {
+  : > "$LOG_DIR/clock_offsets.txt"
+  for i in "${!ALL_NODES[@]}"; do
+    ip="${ALL_NODES[$i]}"
+    local t0 t1 peer
+    t0=$(date -u +%s.%N)
+    peer=$( [[ $i -eq 0 ]] && date -u +%s.%N || peer_ssh "$ip" "date -u +%s.%N" ) || peer=""
+    t1=$(date -u +%s.%N)
+    [[ -n "$peer" ]] || { echo "r$i ?" >> "$LOG_DIR/clock_offsets.txt"; continue; }
+    awk -v r="$i" -v p="$peer" -v a="$t0" -v b="$t1" \
+      'BEGIN { printf "r%s %.3f\n", r, p - (a + b) / 2 }' >> "$LOG_DIR/clock_offsets.txt"
+  done
+}
+
 start_node_helpers() {
+  [[ $NODE_PROBE -eq 1 ]] && record_clock_offsets
   for i in "${!ALL_NODES[@]}"; do
     ip="${ALL_NODES[$i]}"
     local dir="$PEER_DIR" runner="peer_ssh $ip"

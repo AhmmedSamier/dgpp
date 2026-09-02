@@ -60,6 +60,11 @@ void pread_all(int fd, void* dst, size_t bytes, uint64_t offset,
 }
 
 uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
+uint64_t align_down(uint64_t v, uint64_t a) { return v / a * a; }
+
+bool page_aligned(const void* p) {
+  return reinterpret_cast<uintptr_t>(p) % kBlobAlign == 0;
+}
 
 }  // namespace
 
@@ -89,8 +94,12 @@ GlmResidentImage::GlmResidentImage(const std::string& dir, uint64_t key,
   std::snprintf(name, sizeof(name), "%016llx.img",
                 static_cast<unsigned long long>(key));
   path_ = (std::filesystem::path(dir) / name).string();
+  stem_ = path_.substr(0, path_.size() - 4);
   fd_ = ::open(path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
   if (fd_ < 0) fail("open failed", path_);
+  // Best effort: a filesystem without O_DIRECT (tmpfs, some overlays)
+  // returns EINVAL and every blob simply goes through fd_.
+  direct_fd_ = ::open(path_.c_str(), O_RDWR | O_DIRECT | O_CLOEXEC);
   entries_.assign(static_cast<size_t>(layers), Entry{});
 
   struct stat st{};
@@ -123,6 +132,7 @@ GlmResidentImage::GlmResidentImage(const std::string& dir, uint64_t key,
 }
 
 GlmResidentImage::~GlmResidentImage() {
+  if (direct_fd_ >= 0) ::close(direct_fd_);
   if (fd_ >= 0) ::close(fd_);
 }
 
@@ -164,6 +174,32 @@ void GlmResidentImage::write_entry(int layer) const {
              table_offset(layer), path_);
 }
 
+// Blob bodies: the page-aligned prefix rides O_DIRECT when the buffer and
+// the descriptor allow it; the sub-page tail (and everything, when they
+// don't) goes buffered. Blob offsets are 4 KiB-aligned by construction, so
+// only the buffer's alignment and the byte count decide the split.
+void GlmResidentImage::read_blob(void* dst, size_t bytes,
+                                 uint64_t offset) const {
+  size_t direct = 0;
+  if (direct_fd_ >= 0 && page_aligned(dst))
+    direct = align_down(bytes, kBlobAlign);
+  if (direct > 0) pread_all(direct_fd_, dst, direct, offset, path_);
+  if (direct < bytes)
+    pread_all(fd_, static_cast<uint8_t*>(dst) + direct, bytes - direct,
+              offset + direct, path_);
+}
+
+void GlmResidentImage::write_blob(const void* src, size_t bytes,
+                                  uint64_t offset) const {
+  size_t direct = 0;
+  if (direct_fd_ >= 0 && page_aligned(src))
+    direct = align_down(bytes, kBlobAlign);
+  if (direct > 0) pwrite_all(direct_fd_, src, direct, offset, path_);
+  if (direct < bytes)
+    pwrite_all(fd_, static_cast<const uint8_t*>(src) + direct,
+               bytes - direct, offset + direct, path_);
+}
+
 void GlmResidentImage::read_layer(int layer, void* dst, size_t bytes,
                                   bool verify) const {
   if (!has_layer(layer))
@@ -175,7 +211,7 @@ void GlmResidentImage::read_layer(int layer, void* dst, size_t bytes,
         "resident image " + path_ + ": layer " + std::to_string(layer) +
         " holds " + std::to_string(e.bytes) + " bytes, the build formula says " +
         std::to_string(bytes) + " (stale image for this loader — delete it)");
-  pread_all(fd_, dst, bytes, e.offset, path_);
+  read_blob(dst, bytes, e.offset);
   if (verify && fold(dst, bytes) != e.fold)
     throw std::runtime_error("resident image " + path_ + ": layer " +
                              std::to_string(layer) +
@@ -189,14 +225,56 @@ void GlmResidentImage::write_layer(int layer, const void* src, size_t bytes) {
   if (fstat(fd_, &st) != 0) fail("fstat failed", path_);
   const uint64_t offset =
       align_up(static_cast<uint64_t>(st.st_size), kBlobAlign);
-  pwrite_all(fd_, src, bytes, offset, path_);
-  // The blob must be durable before its entry says it exists.
+  write_blob(src, bytes, offset);
+  // The blob must be durable before its entry says it exists. (The direct
+  // part already is; this covers the buffered tail and the file size.)
   if (fdatasync(fd_) != 0) fail("fdatasync failed", path_);
   Entry& e = entries_[static_cast<size_t>(layer)];
   e.offset = offset;
   e.bytes = bytes;
   e.fold = fold(src, bytes);
   write_entry(layer);
+}
+
+std::string GlmResidentImage::note_path(const std::string& name) const {
+  return stem_ + "." + name;
+}
+
+bool GlmResidentImage::read_note(const std::string& name, void* dst,
+                                 size_t bytes) const {
+  const std::string path = note_path(name);
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  struct stat st{};
+  bool ok = fstat(fd, &st) == 0 && static_cast<uint64_t>(st.st_size) == bytes;
+  if (ok) {
+    try {
+      pread_all(fd, dst, bytes, 0, path);
+    } catch (const std::exception&) {
+      ok = false;
+    }
+  }
+  ::close(fd);
+  return ok;
+}
+
+void GlmResidentImage::write_note(const std::string& name, const void* src,
+                                  size_t bytes) const {
+  const std::string path = note_path(name);
+  const std::string tmp = path + ".tmp";
+  const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                        0644);
+  if (fd < 0) fail("note open failed", tmp);
+  try {
+    pwrite_all(fd, src, bytes, 0, tmp);
+    if (fdatasync(fd) != 0) fail("note fdatasync failed", tmp);
+  } catch (...) {
+    ::close(fd);
+    ::unlink(tmp.c_str());
+    throw;
+  }
+  ::close(fd);
+  if (::rename(tmp.c_str(), path.c_str()) != 0) fail("note rename failed", path);
 }
 
 }  // namespace dgpp

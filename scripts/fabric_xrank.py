@@ -18,6 +18,14 @@ never by wall clock (the lab boxes disagree by hours). For each rank:
 
 --show N prints N stall windows with every rank's view (window max, phases,
 the previous step's two pick collectives).
+
+--laggard prints a per-second table from rank 0's view: median step ms, the
+rank that arrived LAST at most of that second's generations (the
+"laggard", when one rank takes >= 2/3 of them) with its average lag, and —
+when LOGDIR holds probe_rN.log + clock_offsets.txt — that laggard node's
+probe row (GPU clock/power/throttle, CPU busy/iowait, top processes). The
+rotating ~30% slow rank of 2026-09-02 lives here: this is the join between
+"who was slow" and "what else was that box doing".
 """
 import glob
 import os
@@ -29,7 +37,7 @@ GRAPH_GENS = 90
 
 re_tl = re.compile(
     r"graph window timeline: rank (\d+) gens (\d+) avg us: total ([\d.]+) = copy ([\d.]+) \+ handshake ([\d.]+) \+ skew ([\d.]+) \+ fold ([\d.]+); engine post ([\d.]+); max handshake ([\d.]+) skew ([\d.]+) total ([\d.]+) \(gen (\d+)\)")
-re_peers = re.compile(r"graph window peers: rank (\d+) .*?:(.*)$")
+re_peers = re.compile(r"^\S+ (\S+) .*graph window peers: rank (\d+) .*?:(.*)$")
 re_lag = re.compile(r"rank(\d+) lag (-?\d+)us last (\d+)x")
 re_ph = re.compile(
     r"^\S+ (\S+) .*rank (\d+) step phases ms: launch ([\d.]+) sync ([\d.]+) finish ([\d.]+) collect ([\d.]+) pick ([\d.]+); launch->gpu_start (-?[\d.]+)(.*)$")
@@ -57,7 +65,8 @@ def parse(path):
                 continue
             m = re_peers.search(line)
             if m:
-                rec["peers"].append({int(r): (int(l), int(n)) for r, l, n in re_lag.findall(m.group(2))})
+                rec["peers"].append({int(r): (int(l), int(n)) for r, l, n in re_lag.findall(m.group(3))})
+                rec.setdefault("peers_ts", []).append(ts_ms(m.group(1)))
                 continue
             m = re_ph.search(line)
             if m:
@@ -103,12 +112,78 @@ def host_gaps(rec):
             for i in range(n)]
 
 
+def load_probes(logdir):
+    """probe_rN.log rows keyed by the HEAD's second (offset-corrected)."""
+    offsets = {}
+    try:
+        with open(os.path.join(logdir, "clock_offsets.txt")) as f:
+            for line in f:
+                r, off = line.split()
+                offsets[int(r[1:])] = None if off == "?" else float(off)
+    except OSError:
+        pass
+    probes = {}
+    for path in glob.glob(os.path.join(logdir, "probe_r[0-9].log")):
+        r = int(os.path.basename(path)[7])
+        off = offsets.get(r, 0.0 if r == 0 else None)
+        if off is None:
+            continue
+        rows = {}
+        with open(path, errors="replace") as f:
+            for line in f:
+                if line.startswith("#") or len(line) < 9:
+                    continue
+                sec = int(round(ts_ms(line[:8]) / 1000.0 - off))
+                rows[sec] = line[9:].rstrip()
+        probes[r] = rows
+    return probes
+
+
+def probe_brief(row):
+    """The witness columns only: gpu clock/power/throttle + cpu group."""
+    parts = row.split(" | ")
+    gpu = parts[2] if len(parts) > 2 else ""
+    cpu = parts[3] if len(parts) > 3 else ""
+    gpu = re.sub(r"throttle=0x0+([0-9a-f]*)", lambda m: "throttle=0x" + (m.group(1) or "0"), gpu)
+    return f"{gpu} | {cpu}"
+
+
+def laggard_table(ranks, skip, logdir):
+    r0 = ranks[0]
+    peers, pts, steps = r0["peers"], r0.get("peers_ts", []), r0["step"]
+    n = min(len(peers), len(pts), len(steps))
+    probes = load_probes(logdir)
+    by_sec = defaultdict(list)
+    for w in range(skip, n):
+        by_sec[int(pts[w] // 1000)].append(w)
+    print(f"  laggard per second (rank 0's clock; probes {sorted(probes) or 'none'}):")
+    print("    time     win  step_med  laggard  share  lag_us  probe(laggard node)")
+    for sec in sorted(by_sec):
+        ws = by_sec[sec]
+        med = sorted(steps[w] for w in ws)[len(ws) // 2]
+        last = defaultdict(int)
+        lag = defaultdict(list)
+        for w in ws:
+            for r, (l, c) in peers[w].items():
+                last[r] += c
+                lag[r].append(l)
+        total = sum(last.values()) or 1
+        r_max = max(last, key=last.get) if last else None
+        share = last[r_max] / total if r_max is not None else 0
+        who = f"r{r_max}" if r_max is not None and share >= 2 / 3 else "-"
+        lag_us = sum(lag[r_max]) / len(lag[r_max]) if r_max is not None and lag[r_max] else 0
+        hms = f"{sec // 3600 % 24:02d}:{sec // 60 % 60:02d}:{sec % 60:02d}"
+        row = probes.get(r_max, {}).get(sec) if who != "-" else None
+        print(f"    {hms} {len(ws):4d} {med:8.0f}  {who:7} {share:5.2f} {lag_us:7.0f}  "
+              f"{probe_brief(row) if row else ''}")
+
+
 def main():
     args = sys.argv[1:]
     if not args:
         print(__doc__)
         sys.exit(2)
-    logdir, thresh, skip, show, summary = args[0], 3000.0, 100, 0, False
+    logdir, thresh, skip, show, summary, laggard = args[0], 3000.0, 100, 0, False, False
     i = 1
     while i < len(args):
         if args[i] == "--thresh-ms":
@@ -119,6 +194,8 @@ def main():
             show = int(args[i + 1]); i += 2
         elif args[i] == "--summary":
             summary = True; i += 1
+        elif args[i] == "--laggard":
+            laggard = True; i += 1
         else:
             i += 1
     ranks = {int(os.path.basename(p)[1]): parse(p)
@@ -184,6 +261,8 @@ def main():
     for (r, where, kind), c in sorted(by_kind.items()):
         print(f"    r{r} {where:4} {kind:9} {c}")
 
+    if laggard:
+        laggard_table(ranks, skip, logdir)
     if summary and show == 0:
         return
     for w, f, stalled, views in gen0[:show]:

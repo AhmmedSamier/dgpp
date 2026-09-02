@@ -198,8 +198,10 @@ The first start of a resident rank builds its layers from the checkpoint
 `~/.cache/dgpp/resident/<key>.img` on that node (~82 GiB per rank for GLM;
 the key covers the checkpoint's shard headers, `config.json`, world, rank,
 head sharding and the loader's format version, so a stale image can never
-load by accident). Every later start streams that image instead — about a
-minute to a ready model against ~4.5 minutes from the checkpoint. Knobs:
+load by accident). Every later start streams that image instead with
+O_DIRECT reads at the drive's line rate — 15-25 s to a ready model against
+~4.5 minutes from the checkpoint. The boot digest is cached beside it
+(`<key>.digest`). Knobs:
 
 ```
 DGPP_RESIDENT_CACHE=off            disable (always build from the checkpoint)

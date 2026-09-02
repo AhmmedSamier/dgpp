@@ -272,6 +272,9 @@ class GlmDiagnosticModel {
   // BEFORE the first forward — runners exchange it across ranks and a
   // mismatch pinpoints the layer. Empty at world=1 (no peers to convince).
   const GlmReplicatedDigest& boot_digest() const { return boot_digest_; }
+  // Startup phase durations (ms), for the record and the load-time work.
+  double boot_digest_ms() const { return boot_digest_ms_; }
+  double boot_globals_ms() const { return boot_globals_ms_; }
 
   // Checkpoint source bytes this rank's loads have touched (the
   // per-rank byte-total reconcile input; see GlmLayerStream).
@@ -361,6 +364,8 @@ class GlmDiagnosticModel {
   KdaGeometry kda_geo_;
   int max_tokens_ = 0;
   GlmReplicatedDigest boot_digest_{};
+  double boot_digest_ms_ = 0;
+  double boot_globals_ms_ = 0;
   // The logits slice this model computes (Full: [0, vocab)).
   int lm_vocab_begin_ = 0;
   int lm_vocab_count_ = 0;
