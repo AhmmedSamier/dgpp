@@ -353,10 +353,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     hw.fn = b.mhc->attn_fn;
     hw.base = b.mhc->attn_base;
     hw.scale = b.mhc->attn_scale;
-    launch_mhc_compute(cur, hw, mhc_cfg_, collapsed_, post_, comb_,
-                       mhc_logits_, T,
-                       stream_);
-    glm_rmsnorm_bf16(collapsed_, b.ln1, normed_, T, H, eps, stream_);
+    launch_mhc_compute_normed(cur, hw, mhc_cfg_, collapsed_, post_, comb_,
+                              mhc_logits_, b.ln1, normed_, eps, T, stream_);
     uint16_t* attn_out = sub_out_;
     if (boundary_) {
       if (uint16_t* staged = boundary_->stage(T, H)) attn_out = staged;
@@ -433,10 +431,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     fw.fn = b.mhc->ffn_fn;
     fw.base = b.mhc->ffn_base;
     fw.scale = b.mhc->ffn_scale;
-    launch_mhc_compute(cur, fw, mhc_cfg_, collapsed_, post_, comb_,
-                       mhc_logits_, T,
-                       stream_);
-    glm_rmsnorm_bf16(collapsed_, b.ln2, normed_, T, H, eps, stream_);
+    launch_mhc_compute_normed(cur, fw, mhc_cfg_, collapsed_, post_, comb_,
+                              mhc_logits_, b.ln2, normed_, eps, T, stream_);
     uint16_t* ffn_out = sub_out_;
     if (boundary_) {
       if (uint16_t* staged = boundary_->stage(T, H)) ffn_out = staged;

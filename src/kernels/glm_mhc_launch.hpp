@@ -24,6 +24,18 @@ void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
                         uint16_t* post, uint16_t* comb, float* logits_scratch,
                         int tokens, cudaStream_t stream);
 
+// The same, plus the sublayer's two-rounding RMSNorm of the collapsed row
+// (glm_norm.hpp's semantics) in the finish kernel's tail:
+//   normed bf16 [tokens, D] out = rmsnorm(collapsed, ln, ln_eps)
+// One launch fewer per site than launch_mhc_compute + glm_rmsnorm_bf16;
+// ln and normed are both null (plain compute) or both set.
+void launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
+                               const GlmMhcConfig& cfg, uint16_t* collapsed,
+                               uint16_t* post, uint16_t* comb,
+                               float* logits_scratch, const uint16_t* ln,
+                               uint16_t* normed, float ln_eps, int tokens,
+                               cudaStream_t stream);
+
 // Stream update after the sublayer: for every token,
 //   streams_out[i] = bf16(bf16(post[i] * sublayer_out)
 //                         + bf16(sum_j comb[j,i] * streams_in[j]))

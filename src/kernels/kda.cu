@@ -104,11 +104,76 @@ __global__ void kda_gated_rmsnorm_kernel(const uint16_t* __restrict__ x,
 // Recurrent KDA update
 // ---------------------------------------------------------------------------
 
-constexpr int kRecurrentLanes = 4;   // k-dim lanes cooperating on one v-row
-constexpr int kRecurrentRows = 32;   // v-rows per block
+// 16 lanes share a v-row (8 columns each at K=128): 4 lanes x 32 columns
+// left the decode kernel at 1.3 warps per scheduler with 188 registers,
+// latency-bound on its own state loads (15 us for 2 MB of state traffic);
+// four times the warps hide it. The lane split changes the order of the
+// row reductions (q/k norms, <S,k>, <S,q>) by fp32 rounding — accepted
+// 2026-09-02, the kda oracle tests measure it.
+constexpr int kRecurrentLanes = 16;  // k-dim lanes cooperating on one v-row
+constexpr int kRecurrentRows = 8;    // v-rows per block
 constexpr int kRecurrentBlock = kRecurrentLanes * kRecurrentRows;  // 128
 
-template <int K>
+// A lane's kCols-wide slice of a row, loaded/stored as 16-byte vectors when
+// the launcher verified alignment (kVec) and scalar otherwise. Purely the
+// access pattern: the values, and every operation on them, are identical.
+// With scalar accesses each warp-wide load touched 32 sectors for 128
+// useful bytes, and the decode kernel spent half its cycles with the L1's
+// load/store queue full (ncu: 33 cycles per issued instruction, 1.3
+// active warps per scheduler) — 32 us for 2 MB of state traffic.
+template <int kCols, bool kVec>
+__device__ __forceinline__ void load_f32_slice(const float* __restrict__ p,
+                                               float (&v)[kCols]) {
+  if constexpr (kVec && kCols % 4 == 0) {
+#pragma unroll
+    for (int i = 0; i < kCols / 4; ++i) {
+      const float4 q = reinterpret_cast<const float4*>(p)[i];
+      v[4 * i] = q.x;
+      v[4 * i + 1] = q.y;
+      v[4 * i + 2] = q.z;
+      v[4 * i + 3] = q.w;
+    }
+  } else {
+#pragma unroll
+    for (int i = 0; i < kCols; ++i) v[i] = p[i];
+  }
+}
+
+template <int kCols, bool kVec>
+__device__ __forceinline__ void store_f32_slice(float* __restrict__ p,
+                                                const float (&v)[kCols]) {
+  if constexpr (kVec && kCols % 4 == 0) {
+#pragma unroll
+    for (int i = 0; i < kCols / 4; ++i)
+      reinterpret_cast<float4*>(p)[i] =
+          make_float4(v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]);
+  } else {
+#pragma unroll
+    for (int i = 0; i < kCols; ++i) p[i] = v[i];
+  }
+}
+
+template <int kCols, bool kVec>
+__device__ __forceinline__ void load_bf16_slice(const uint16_t* __restrict__ p,
+                                                float (&v)[kCols]) {
+  if constexpr (kVec && kCols % 4 == 0) {
+#pragma unroll
+    for (int i = 0; i < kCols / 4; ++i) {
+      const uint2 q = reinterpret_cast<const uint2*>(p)[i];
+      const uint32_t w[2] = {q.x, q.y};
+#pragma unroll
+      for (int j = 0; j < 2; ++j) {
+        v[4 * i + 2 * j] = bf16_bits_to_float(static_cast<uint16_t>(w[j] & 0xFFFFu));
+        v[4 * i + 2 * j + 1] = bf16_bits_to_float(static_cast<uint16_t>(w[j] >> 16));
+      }
+    }
+  } else {
+#pragma unroll
+    for (int i = 0; i < kCols; ++i) v[i] = bf16_bits_to_float(p[i]);
+  }
+}
+
+template <int K, bool kVec>
 __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
     const uint16_t* __restrict__ qkv, const uint16_t* __restrict__ g_raw,
     const uint16_t* __restrict__ beta_raw, int64_t beta_stride,
@@ -116,7 +181,7 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
     float* __restrict__ state, uint16_t* __restrict__ out, int tokens,
     int heads, int v_dim, float lower_bound, float scale) {
   constexpr int kCols = K / kRecurrentLanes;  // columns owned per lane
-  static_assert(K % kRecurrentLanes == 0, "K must split across 4 lanes");
+  static_assert(K % kRecurrentLanes == 0, "K must split across the lanes");
 
   const int h = blockIdx.y;
   const int v = blockIdx.x * kRecurrentRows + threadIdx.x / kRecurrentLanes;
@@ -129,8 +194,16 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
   // state bandwidth by design.
   float s[kCols];
   float* st = state + (static_cast<int64_t>(h) * v_dim + v) * K + c0;
+  if (row_valid) {
+    load_f32_slice<kCols, kVec>(st, s);
+  } else {
 #pragma unroll
-  for (int i = 0; i < kCols; ++i) s[i] = row_valid ? st[i] : 0.0f;
+    for (int i = 0; i < kCols; ++i) s[i] = 0.0f;
+  }
+  // The per-head decay bias slice is token-invariant: hoist it.
+  float bias_v[kCols];
+  load_f32_slice<kCols, kVec>(dt_bias + static_cast<int64_t>(h) * K + c0,
+                              bias_v);
 
   const float a = expf(a_log[h]);
   // Fused qkv row: [q (H*K) | k (H*K) | v (H*V)].
@@ -146,20 +219,20 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
         static_cast<int64_t>(2) * heads * K + static_cast<int64_t>(h) * v_dim;
     const uint16_t* grow =
         g_raw + (static_cast<int64_t>(t) * heads + h) * K + c0;
-    const float* bias = dt_bias + static_cast<int64_t>(h) * K + c0;
 
-    float q[kCols], k[kCols], u = 0.0f;
+    float q[kCols], k[kCols], gv[kCols], u = 0.0f;
+    load_bf16_slice<kCols, kVec>(qrow + c0, q);
+    load_bf16_slice<kCols, kVec>(krow + c0, k);
+    load_bf16_slice<kCols, kVec>(grow, gv);
     float qs = 0.0f, ks = 0.0f;
 #pragma unroll
     for (int i = 0; i < kCols; ++i) {
-      q[i] = bf16_bits_to_float(qrow[c0 + i]);
-      k[i] = bf16_bits_to_float(krow[c0 + i]);
       qs = fmaf(q[i], q[i], qs);
       ks = fmaf(k[i], k[i], ks);
       // Gate: lower_bound / (1 + exp(-exp(A_log) * (g_raw + dt_bias))).
       // Bounded to (lower_bound, 0), so exp(gate) in (exp(lb), 1] — the
       // decay can never blow the state up. Computed fused with the decay.
-      const float g = bf16_bits_to_float(grow[i]) + bias[i];
+      const float g = gv[i] + bias_v[i];
       const float gate = lower_bound / (1.0f + expf(-(a * g)));
       s[i] *= expf(gate);
     }
@@ -207,10 +280,7 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
           float_to_bf16_bits(o);
   }
 
-  if (row_valid) {
-#pragma unroll
-    for (int i = 0; i < kCols; ++i) st[i] = s[i];
-  }
+  if (row_valid) store_f32_slice<kCols, kVec>(st, s);
 }
 
 template <int CW>
@@ -315,11 +385,31 @@ void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
   const uint16_t* b16 = static_cast<const uint16_t*>(beta_raw);
   uint16_t* o16 = static_cast<uint16_t*>(out);
 
+  // Vector slices need 16-byte-aligned bases and strides: the fused qkv
+  // row (2*heads*K + heads*v_dim bf16), the per-head K offsets, and the
+  // per-lane column offsets.
+  const auto aligned16 = [](const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+  };
+  const int64_t qkv_stride = static_cast<int64_t>(2) * heads * k_dim +
+                             static_cast<int64_t>(heads) * v_dim;
+  // Per-lane slices are K/16 wide: float4 state slices need K >= 64
+  // (4 columns, 16 bytes); the bf16 slices then are 8-byte uint2s.
+  const bool vec = k_dim >= 64 && aligned16(qkv16) && aligned16(g16) &&
+                   aligned16(dt_bias) && aligned16(state) &&
+                   (qkv_stride * 2) % 16 == 0 &&
+                   (static_cast<int64_t>(v_dim) * k_dim * 4) % 16 == 0;
+
 #define DGPP_KDA_RECURRENT_DISPATCH(KLIT)                                      \
   do {                                                                         \
-    kda_recurrent_kernel<KLIT><<<grid, kRecurrentBlock, 0, stream>>>(          \
-        qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state, o16, tokens,  \
-        heads, v_dim, lower_bound, scale);                                     \
+    if (vec)                                                                   \
+      kda_recurrent_kernel<KLIT, true><<<grid, kRecurrentBlock, 0, stream>>>(  \
+          qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state, o16,        \
+          tokens, heads, v_dim, lower_bound, scale);                           \
+    else                                                                       \
+      kda_recurrent_kernel<KLIT, false><<<grid, kRecurrentBlock, 0, stream>>>( \
+          qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state, o16,        \
+          tokens, heads, v_dim, lower_bound, scale);                           \
     DGPP_CUDA_OK(cudaGetLastError());                                          \
   } while (0)
 

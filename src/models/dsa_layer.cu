@@ -494,10 +494,11 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   // Everything from here to the output projection is latency-bound at
   // decode (~130 us of small kernels): the longest window in the step, so
   // the budget is the whole projection, capped only by L2 headroom.
-  if (prefetch)
-    prefetch->prefetch_after(stream, w_.o_proj, o_proj_bytes(),
-                             std::min<size_t>(o_proj_bytes(), size_t{16} << 20),
-                             prefetch->layer_rate());
+  if (prefetch) {
+    prefetch->open_window(stream, size_t{16} << 20, prefetch->layer_rate());
+    prefetch->add(w_.kv_b, kv_b_bytes());  // absorb_q and vout read it first
+    prefetch->add(w_.o_proj, o_proj_bytes());
+  }
 
   // Latent rows first (this batch's own tokens are readable by this
   // batch's attention — causal self-include, reference semantics).

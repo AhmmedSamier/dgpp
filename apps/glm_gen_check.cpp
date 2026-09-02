@@ -64,6 +64,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <cmath>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -779,15 +780,24 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
             dgpp::bf16_bits_to_float(row[static_cast<size_t>(i)]);
       const dgpp::glm_sample::Candidate local = dgpp::glm_sample::local_max(
           fslice.data(), out.lm_vocab_count, out.lm_vocab_begin);
+      // The slice's runner-up: with the four ranks' lines side by side
+      // (fabric_xrank), the global top-2 margin of every pick follows, and
+      // a transcript that diverges between two builds can be judged — a
+      // near-tie flip is rounding, a wide-margin flip is a bug.
+      float second = -INFINITY;
+      for (int i = 0; i < out.lm_vocab_count; ++i)
+        if (out.lm_vocab_begin + i != local.id && fslice[i] > second)
+          second = fslice[i];
       const int32_t token =
           dgpp::bus_greedy_pick(*bus, rank, world, local, pick_scratch, 60000);
       require(token >= 0 && token < cfg.vocab_size,
               "generated id out of range: " + std::to_string(token));
       DGPP_LOG_INFO(
           "[gen] rank {} {} {}: token {} (local slice [{},{}) best "
-          "{} logit {:.4f})",
+          "{} logit {:.4f} second {:.4f})",
           rank, what, s, token, out.lm_vocab_begin,
-          out.lm_vocab_begin + out.lm_vocab_count, local.id, local.logit);
+          out.lm_vocab_begin + out.lm_vocab_count, local.id, local.logit,
+          second);
       return token;
     };
     std::string generated_text;

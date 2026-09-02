@@ -871,33 +871,45 @@ __global__ void select_prefill_kernel(const float* dot, int64_t dot_stride,
 // MLA absorbed attention
 // ---------------------------------------------------------------------
 
-__global__ void absorb_q_kernel(const uint16_t* q, const uint16_t* kv_b,
-                                uint16_t* q_tilde, int local_heads, int nope,
-                                int v, int kv_lora) {
-  // One block per (row, head); each thread owns 4 output columns, so a warp
-  // reads 32*4 consecutive bf16 of every W row (coalesced). kv_b is the
-  // checkpoint's interleaved layout: head h owns rows
-  // [h*(nope+v), h*(nope+v)+nope) of W_uk.
+// absorb_q: q_tilde[r, h, :] = q[r, h, :] (nope) x W_uk[h] (nope x kv_lora).
+// One block of kAbsorbGroups x 128 threads per (row, head). Every thread
+// owns 8 output columns (one uint4 of W per row it visits); the groups
+// split the nope rows round-robin, so a block keeps kAbsorbGroups x 128 x
+// (rows in flight) loads outstanding instead of 128 x 4 — the previous
+// one-group form was latency-bound at ~40 us per layer for 2 MB of
+// weights. The groups' partials meet in shared memory and are summed in
+// group order (deterministic; the reassociation vs. the single-chain
+// version is fp32 rounding, accepted 2026-09-02). kv_b is the
+// checkpoint's interleaved layout: head h owns rows [h*(nope+v),
+// h*(nope+v)+nope) of W_uk.
+constexpr int kAbsorbGroups = 8;
+constexpr int kAbsorbGroupThreads = 128;
+constexpr int kAbsorbThreads = kAbsorbGroups * kAbsorbGroupThreads;
+
+__global__ __launch_bounds__(kAbsorbThreads) void absorb_q_kernel(
+    const uint16_t* q, const uint16_t* kv_b, uint16_t* q_tilde,
+    int local_heads, int nope, int v, int kv_lora) {
   const int64_t r = blockIdx.x;
   const int h = blockIdx.y;
   const int head_rows = nope + v;
   const uint16_t* qh = q + (r * local_heads + h) * nope;
   const uint16_t* wuk = kv_b + int64_t(h) * head_rows * kv_lora;
   uint16_t* out = q_tilde + (r * local_heads + h) * kv_lora;
-  __shared__ uint16_t qs[256];
-  for (int d = threadIdx.x; d < nope; d += blockDim.x) qs[d] = qh[d];
+  __shared__ float qs[256];
+  __shared__ __align__(16) float partial[kAbsorbGroups][512];
+  for (int d = threadIdx.x; d < nope; d += blockDim.x)
+    qs[d] = bf16_bits_to_float(qh[d]);
   __syncthreads();
-  // Each thread owns 8 output columns (kv_lora % 8 == 0 validated at
-  // launch): one uint4 of W per row, native bf16x2->float2 conversion.
-  // 128 threads x 8 covers kv_lora == 512 (this checkpoint); smaller ranks
+  const int group = threadIdx.x / kAbsorbGroupThreads;
+  const int col = (threadIdx.x % kAbsorbGroupThreads) * 8;
+  // kv_lora % 8 == 0 and kv_lora <= 512 validated at launch; smaller ranks
   // idle their excess threads (an unguarded write would land in the next
   // head's row — silent corruption, not an error).
-  const int col = threadIdx.x * 8;
   if (col < kv_lora) {
     float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll 4
-    for (int d = 0; d < nope; ++d) {
-      const float qv = bf16_bits_to_float(qs[d]);
+    for (int d = group; d < nope; d += kAbsorbGroups) {
+      const float qv = qs[d];
       const uint4 wv =
           *reinterpret_cast<const uint4*>(wuk + int64_t(d) * kv_lora + col);
       const uint32_t* w32 = reinterpret_cast<const uint32_t*>(&wv);
@@ -909,8 +921,17 @@ __global__ void absorb_q_kernel(const uint16_t* q, const uint16_t* kv_b,
       }
     }
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
-      out[col + j] = float_to_bf16_bits(acc[j]);
+    for (int j = 0; j < 8; ++j) partial[group][col + j] = acc[j];
+  }
+  __syncthreads();
+  if (group == 0 && col < kv_lora) {
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      float total = partial[0][col + j];
+#pragma unroll
+      for (int g = 1; g < kAbsorbGroups; ++g) total += partial[g][col + j];
+      out[col + j] = float_to_bf16_bits(total);
+    }
   }
 }
 
@@ -1176,50 +1197,58 @@ __global__ void attn_combine_kernel(const float* m_ws, const float* l_ws,
   }
 }
 
-__global__ void vout_gemm_kernel(const float* c, const uint16_t* kv_b,
-                                 uint16_t* out, int local_heads, int nope,
-                                 int v, int kv_lora) {
-  // One block per (row, head); thread owns output rows, streaming W rows
-  // through L1 in uint4 chunks (8 bf16 per load, native conversion — the
-  // scalar form was the bottleneck of the whole vout path). kv_b
-  // interleaved: head h's W_uv rows are [h*(nope+v)+nope, (h+1)*(nope+v)).
+// vout: out[r, h, d] = <c[r, h, :], W_uv[h][d, :]> over kv_lora, for the v
+// output rows of every head. One WARP per output row: the lanes read the
+// row's kv_lora bf16 as consecutive uint4s (512 contiguous bytes per warp
+// instruction), multiply by the shared c row, and a shuffle tree sums the
+// 32 partials. Blocks are kVoutRowsPerBlock warps of one head. The
+// previous thread-per-row form streamed each row through one thread's
+// L1 (34 us per layer for 4 MB); the reassociation is fp32 rounding
+// (accepted 2026-09-02). kv_b interleaved: head h's W_uv rows are
+// [h*(nope+v)+nope, (h+1)*(nope+v)).
+constexpr int kVoutRowsPerBlock = 8;
+constexpr int kVoutThreads = 32 * kVoutRowsPerBlock;
+
+__global__ __launch_bounds__(kVoutThreads) void vout_gemm_kernel(
+    const float* c, const uint16_t* kv_b, uint16_t* out, int local_heads,
+    int nope, int v, int kv_lora) {
   const int64_t r = blockIdx.x;
   const int h = blockIdx.y;
+  const int d0 = blockIdx.z * kVoutRowsPerBlock;
   const int head_rows = nope + v;
   __shared__ __align__(16) float cs[512];
   for (int cc = threadIdx.x; cc < kv_lora; cc += blockDim.x)
     cs[cc] = c[(r * local_heads + h) * kv_lora + cc];
   __syncthreads();
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int d = d0 + warp;
+  if (d >= v) return;
   const uint16_t* wuv =
       kv_b + (int64_t(h) * head_rows + nope) * kv_lora;
-  uint16_t* orow = out + (r * local_heads + h) * v;
-  for (int d = threadIdx.x; d < v; d += blockDim.x) {
-    float acc = 0.0f;
-    const uint4* w4 =
-        reinterpret_cast<const uint4*>(wuv + int64_t(d) * kv_lora);
-#pragma unroll 4
-    for (int u = 0; u < kv_lora / 8; ++u) {
-      const uint4 wv = w4[u];
-      const uint32_t* w32 = reinterpret_cast<const uint32_t*>(&wv);
-      const float4 cs4 = *reinterpret_cast<const float4*>(cs + u * 8);
-      const float4 cs4b = *reinterpret_cast<const float4*>(cs + u * 8 + 4);
-      const float2 w0 = bf16x2_to_float2(w32[0]);
-      const float2 w1 = bf16x2_to_float2(w32[1]);
-      const float2 w2 = bf16x2_to_float2(w32[2]);
-      const float2 w3 = bf16x2_to_float2(w32[3]);
-      // Element order cc = 8u..8u+7 preserved (same sequence as the scalar
-      // loop — accumulation order is part of the numeric contract).
-      acc += w0.x * cs4.x;
-      acc += w0.y * cs4.y;
-      acc += w1.x * cs4.z;
-      acc += w1.y * cs4.w;
-      acc += w2.x * cs4b.x;
-      acc += w2.y * cs4b.y;
-      acc += w3.x * cs4b.z;
-      acc += w3.y * cs4b.w;
-    }
-    orow[d] = float_to_bf16_bits(acc);
+  const uint4* w4 = reinterpret_cast<const uint4*>(wuv + int64_t(d) * kv_lora);
+  float acc = 0.0f;
+  for (int u = lane; u < kv_lora / 8; u += 32) {
+    const uint4 wv = w4[u];
+    const uint32_t* w32 = reinterpret_cast<const uint32_t*>(&wv);
+    const float4 cs4 = *reinterpret_cast<const float4*>(cs + u * 8);
+    const float4 cs4b = *reinterpret_cast<const float4*>(cs + u * 8 + 4);
+    const float2 w0 = bf16x2_to_float2(w32[0]);
+    const float2 w1 = bf16x2_to_float2(w32[1]);
+    const float2 w2 = bf16x2_to_float2(w32[2]);
+    const float2 w3 = bf16x2_to_float2(w32[3]);
+    acc += w0.x * cs4.x;
+    acc += w0.y * cs4.y;
+    acc += w1.x * cs4.z;
+    acc += w1.y * cs4.w;
+    acc += w2.x * cs4b.x;
+    acc += w2.y * cs4b.y;
+    acc += w3.x * cs4b.z;
+    acc += w3.y * cs4b.w;
   }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1)
+    acc += __shfl_xor_sync(0xFFFFFFFFu, acc, off);
+  if (lane == 0) out[(r * local_heads + h) * v + d] = float_to_bf16_bits(acc);
 }
 
 }  // namespace
@@ -1425,7 +1454,7 @@ void dsa_absorb_q(const void* q, const void* kv_b, void* q_tilde,
   if (nope > 256 || kv_lora % 8 != 0 || 512 % kv_lora != 0)
     DGPP_CUDA_OK(cudaErrorInvalidValue);
   dim3 grid{unsigned(rows), unsigned(local_heads)};
-  absorb_q_kernel<<<grid, 128, 0, stream>>>(
+  absorb_q_kernel<<<grid, kAbsorbThreads, 0, stream>>>(
       static_cast<const uint16_t*>(q), static_cast<const uint16_t*>(kv_b),
       static_cast<uint16_t*>(q_tilde), local_heads, nope, v, kv_lora);
   DGPP_CUDA_OK(cudaGetLastError());
@@ -1489,8 +1518,9 @@ void dsa_vout_gemm(const void* c, const void* kv_b, void* out,
   // kv_lora % 8: uint4 weight streaming; <= 512: static c smem.
   if (kv_lora > 512 || kv_lora % 8 != 0)
     DGPP_CUDA_OK(cudaErrorInvalidValue);
-  dim3 grid{unsigned(rows), unsigned(local_heads)};
-  vout_gemm_kernel<<<grid, 128, 0, stream>>>(
+  dim3 grid{unsigned(rows), unsigned(local_heads),
+            unsigned((v + kVoutRowsPerBlock - 1) / kVoutRowsPerBlock)};
+  vout_gemm_kernel<<<grid, kVoutThreads, 0, stream>>>(
       static_cast<const float*>(c), static_cast<const uint16_t*>(kv_b),
       static_cast<uint16_t*>(out), local_heads, nope, v, kv_lora);
   DGPP_CUDA_OK(cudaGetLastError());

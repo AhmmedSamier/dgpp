@@ -139,6 +139,11 @@ class DsaLayer {
   size_t o_proj_bytes() const {
     return static_cast<size_t>(cfg_.hidden) * geo_.local_v_rows * 2;
   }
+  // Bytes of the bf16 kv_b [local_heads * (nope + v), kv_lora] (W_uk | W_uv).
+  size_t kv_b_bytes() const {
+    return static_cast<size_t>(geo_.local_heads) *
+           (cfg_.qk_nope_head_dim + cfg_.v_head_dim) * cfg_.kv_lora_rank * 2;
+  }
   // Bytes of the fused bf16 [q_a | kv_a] projection, the layer's first read.
   size_t qkv_a_bytes() const {
     return static_cast<size_t>(cfg_.q_lora_rank + cfg_.kv_lora_rank) *
