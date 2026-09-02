@@ -66,6 +66,21 @@ void launch_moe_slot_gemv(
     const float* sh_scales, uint16_t* out, int out_stride, int slots,
     int top_k, int begin, int count, cudaStream_t stream);
 
+// slot_gate_up_swiglu: slot_gemv(which=0), slot_gemv(which=1) and
+// swiglu_clamp in one launch — act[slot, row] = swiglu(gate_dot, up_dot)
+// with the same bf16 rounding points the three-launch chain has (the gate
+// and up dots are rounded to bf16 exactly where the intermediate buffers
+// rounded them), so the result is bit-identical; the intermediates never
+// touch memory. Gate and up share n and k (routed: the expert matrices'
+// contract; shared: the caller's).
+void launch_moe_slot_gate_up_swiglu(
+    const uint16_t* x, size_t x_stride, const int32_t* ids,
+    const MoeExpertView* views, int n_routed, int k_routed, int n_shared,
+    int k_shared, const uint8_t* sh_gate_payload, const float* sh_gate_scales,
+    const uint8_t* sh_up_payload, const float* sh_up_scales, uint16_t* act,
+    int act_stride, int slots, int top_k, int begin, int count, float limit,
+    cudaStream_t stream);
+
 // slot_accum: per (token, element), the ordered chain
 //   out = bf16( ... bf16(bf16(0) + bf16(w_j * y_j)) ... ) + shared last
 // — exactly the host path's ascending-expert accumulation with the same

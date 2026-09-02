@@ -51,8 +51,6 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
   if (decode_slots_ > 0) {
     const size_t rows =
         static_cast<size_t>(decode_slots_) * (cfg_.top_k + 1);
-    DGPP_CUDA_OK(cudaMallocManaged(&d_slot_gate_, rows * I * 2));
-    DGPP_CUDA_OK(cudaMallocManaged(&d_slot_up_, rows * I * 2));
     DGPP_CUDA_OK(cudaMallocManaged(&d_slot_act_, rows * I * 2));
     DGPP_CUDA_OK(cudaMallocManaged(&d_slot_down_, rows * H * 2));
     // Max-sized for any partition (w1 holds every expert; a TP rank a
@@ -92,8 +90,6 @@ GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_up_);
   cudaFree(d_act_);
   cudaFree(d_down_);
-  cudaFree(d_slot_gate_);
-  cudaFree(d_slot_up_);
   cudaFree(d_slot_act_);
   cudaFree(d_slot_down_);
   cudaFree(d_expert_views_);
@@ -316,18 +312,14 @@ void GlmMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out,
   const int I_r = count > 0 ? static_cast<int>(w_.experts[0].rows)
                             : cfg_.inter;  // routed inter (whole experts)
   const int I_s = static_cast<int>(w_.shared[0].rows);  // shared inter
-  launch_moe_slot_gemv(hidden, H, d_ids_, views, /*which=*/0, I_r, H, I_s,
-                       H, w_.shared[0].payload, w_.shared[0].scales,
-                       d_slot_gate_, I_r, slots, K, begin, count, stream);
-  launch_moe_slot_gemv(hidden, H, d_ids_, views, /*which=*/1, I_r, H, I_s,
-                       H, w_.shared[1].payload, w_.shared[1].scales,
-                       d_slot_up_, I_r, slots, K, begin, count, stream);
-  // The same elementwise swiglu the host path runs per segment; per-slot
-  // bounds are consumed downstream (the down GEMV reads only k=I_s of
-  // the shared slot; foreign slots are never read at all).
-  launch_moe_swiglu_clamp(d_slot_gate_, d_slot_up_, d_slot_act_,
-                          static_cast<int64_t>(slots) * I_r,
-                          cfg_.swiglu_limit, stream);
+  // Gate + up + swiglu in one launch (bit-identical to the three-launch
+  // chain — see the launcher). Per-slot bounds are consumed downstream
+  // (the down GEMV reads only k=I_s of the shared slot; foreign slots are
+  // never read at all).
+  launch_moe_slot_gate_up_swiglu(
+      hidden, H, d_ids_, views, I_r, H, I_s, H, w_.shared[0].payload,
+      w_.shared[0].scales, w_.shared[1].payload, w_.shared[1].scales,
+      d_slot_act_, I_r, slots, K, begin, count, cfg_.swiglu_limit, stream);
   launch_moe_slot_gemv(d_slot_act_, I_r, d_ids_, views, /*which=*/2, H, I_r,
                        H, I_s, w_.shared[2].payload, w_.shared[2].scales,
                        d_slot_down_, H, slots, K, begin, count, stream);

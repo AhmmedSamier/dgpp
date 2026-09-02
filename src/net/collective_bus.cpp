@@ -359,6 +359,25 @@ struct CollectiveBus::Impl {
       bool active = false;
     } flight;
     int stall_dumps = 0;  // TEMP bring-up: rate control for the walk dump
+    // Per-window timeline accumulators (the kernels' %globaltimer stamps
+    // plus the engine's post cost), logged when the window's walk
+    // completes — see log_window_timeline.
+    struct Timeline {
+      uint64_t n = 0;
+      double copy_us = 0, handshake_us = 0, skew_us = 0, fold_us = 0,
+             total_us = 0, post_us = 0;
+      double max_handshake_us = 0, max_skew_us = 0, max_total_us = 0;
+      uint64_t gate_waits = 0;
+      // Wait (handshake + skew) histogram: <20 <50 <100 <200 <500 >=500 us,
+      // and the split by generation parity (the decode step alternates
+      // attention / FFN boundaries, so parity separates the MoE's
+      // imbalance from everything else).
+      uint64_t wait_hist[6] = {};
+      double wait_even_us = 0, wait_odd_us = 0;
+      uint64_t n_even = 0, n_odd = 0;
+      double peer_lag_us[kBusMaxPeers] = {};  // staging written -> peer gated
+      uint64_t peer_last[kBusMaxPeers] = {};  // times this peer arrived last
+    } tl;
     // The window's slot-credit carrier: graph posts have no request of
     // their own, but SendSlot ownership (fail_lane completion, credit
     // harvest, the in_flight gate) is request-shaped. A per-window
@@ -973,6 +992,77 @@ struct CollectiveBus::Impl {
     graph_fail("bus stopped with a graph window in flight");
   }
 
+  // The generation's kernel timeline, from its cell's %globaltimer stamps:
+  //   copy       entry -> staging rows written (phase 1)
+  //   handshake  staging written -> FIRST peer payload gated: engine notice
+  //              + post + wire + the peer's own readiness (the fastest
+  //              peer's arrival)
+  //   skew       first -> last peer gated: the slowest peer's lag
+  //   fold       last peer gated -> fold done
+  void accumulate_timeline(const BusAllReduceCtl& c) {
+    if (c.gt_start == 0 || c.gt_done < c.gt_start) return;
+    auto us = [](uint64_t a, uint64_t b) {
+      return b > a ? static_cast<double>(b - a) / 1000.0 : 0.0;
+    };
+    GraphState::Timeline& t = graph.tl;
+    ++t.n;
+    const double copy = us(c.gt_start, c.gt_stage);
+    const double hs = us(c.gt_stage, c.gt_first);
+    const double skew = us(c.gt_first, c.gt_last);
+    const double fold = us(c.gt_last, c.gt_done);
+    const double total = us(c.gt_start, c.gt_done);
+    t.copy_us += copy;
+    t.handshake_us += hs;
+    t.skew_us += skew;
+    t.fold_us += fold;
+    t.total_us += total;
+    t.max_handshake_us = std::max(t.max_handshake_us, hs);
+    t.max_skew_us = std::max(t.max_skew_us, skew);
+    t.max_total_us = std::max(t.max_total_us, total);
+    t.gate_waits += acquire_u32(&c.dbg_gate_waits);
+    const double wait = hs + skew;
+    const int b = wait < 20 ? 0 : wait < 50 ? 1 : wait < 100 ? 2
+                : wait < 200 ? 3 : wait < 500 ? 4 : 5;
+    ++t.wait_hist[b];
+    if ((c.gen_seq & 1) == 0) { t.wait_even_us += wait; ++t.n_even; }
+    else { t.wait_odd_us += wait; ++t.n_odd; }
+    size_t last = 0;
+    for (size_t p = 0; p < peer_ranks.size(); ++p) {
+      t.peer_lag_us[p] += us(c.gt_stage, c.gt_claim[p]);
+      if (c.gt_claim[p] > c.gt_claim[last]) last = p;
+    }
+    ++t.peer_last[last];
+  }
+
+  void log_window_timeline() {
+    GraphState::Timeline& t = graph.tl;
+    if (t.n == 0) return;
+    const double n = static_cast<double>(t.n);
+    DGPP_LOG_INFO(
+        "graph window timeline: rank {} gens {} avg us: total {:.1f} = copy "
+        "{:.1f} + handshake {:.1f} + skew {:.1f} + fold {:.1f}; engine post "
+        "{:.1f}; max handshake {:.1f} skew {:.1f} total {:.1f}; gate waits {}",
+        opt.my_rank, t.n, t.total_us / n, t.copy_us / n, t.handshake_us / n,
+        t.skew_us / n, t.fold_us / n, t.post_us / n, t.max_handshake_us,
+        t.max_skew_us, t.max_total_us, t.gate_waits);
+    DGPP_LOG_INFO(
+        "graph window wait: rank {} hist(<20 <50 <100 <200 <500 >=500 us) {} "
+        "{} {} {} {} {}; even gens {} avg {:.1f} us, odd gens {} avg {:.1f} us",
+        opt.my_rank, t.wait_hist[0], t.wait_hist[1], t.wait_hist[2],
+        t.wait_hist[3], t.wait_hist[4], t.wait_hist[5], t.n_even,
+        t.n_even ? t.wait_even_us / t.n_even : 0.0, t.n_odd,
+        t.n_odd ? t.wait_odd_us / t.n_odd : 0.0);
+    std::string peers_txt;
+    for (size_t p = 0; p < peer_ranks.size(); ++p)
+      peers_txt += " rank" + std::to_string(peer_ranks[p]) + " lag " +
+                   std::to_string(static_cast<int>(t.peer_lag_us[p] / n)) +
+                   "us last " + std::to_string(t.peer_last[p]) + "x;";
+    DGPP_LOG_INFO("graph window peers: rank {} (staging written -> peer "
+                  "payload gated, avg; times arrived last):{}",
+                  opt.my_rank, peers_txt);
+    t = GraphState::Timeline{};
+  }
+
   bool graph_pass() {
     const uint64_t count = graph.window_count.load(std::memory_order_acquire);
     if (count == 0) return false;  // recorded but never armed
@@ -1120,11 +1210,13 @@ struct CollectiveBus::Impl {
         return true;
       }
       if (graph.flight.posted_bits == all_peers_mask()) {
+        accumulate_timeline(*cell);
         ++graph.walk_seq;
         graph.walk_pub.store(graph.walk_seq, std::memory_order_release);
         record_latency(BusMessageClass::kLatency,
                        elapsed_us(graph.flight.started_at));
         graph.flight = {};
+        if (graph.walk_seq > graph.adopted_last) log_window_timeline();
         return true;
       }
       // else: posting not drained — fall through, post, advance next pass.
@@ -1175,6 +1267,7 @@ struct CollectiveBus::Impl {
     // generation, in order, so the cursor and the claim never diverge
     // and a later eager era — if ever opened — stays ring-aligned).
     if (graph.flight.posted_bits != all_peers_mask() && ready != 0) {
+      const auto post_t0 = Clock::now();
       const uint32_t elems =
           graph.meta[(gen - graph.adopted_first) % gens].elems;
       for (size_t p = 0; p < peer_ranks.size(); ++p) {
@@ -1218,6 +1311,7 @@ struct CollectiveBus::Impl {
         DGPP_LOG_DEBUG("graph stripe: gen={} peer={} lane=0 slot={} seq={}",
                        seq, peer_ranks[p], slot, pair_seq);
       }
+      graph.tl.post_us += elapsed_us(post_t0);
     }
 
     // The flight watchdog: graph generations carry no registry entry, so
@@ -2185,7 +2279,31 @@ struct CollectiveBus::Impl {
       }
     }
     install_table(table);
+    // Connect barrier: no rank may post until EVERY rank's QPs are RTS
+    // with receives posted (see kBusReadyMagic).
+    for (size_t i = 0; i < conns.size(); ++i) {
+      if (!read_barrier_frame(conns[i], kBusReadyMagic)) {
+        *error = "rendezvous: connect barrier — rank " +
+                 std::to_string(frames[i].rank) + " never reported READY";
+        return false;
+      }
+    }
+    for (TcpConn& conn : conns) {
+      if (!write_barrier_frame(conn, kBusGoMagic)) {
+        *error = "rendezvous: connect barrier GO write failed";
+        return false;
+      }
+    }
     return true;
+  }
+
+  static bool write_barrier_frame(TcpConn& conn, uint32_t magic) {
+    return conn.write_all(&magic, sizeof magic);
+  }
+
+  static bool read_barrier_frame(TcpConn& conn, uint32_t want) {
+    uint32_t got = 0;
+    return conn.read_exact(&got, sizeof got) && got == want;
   }
 
   bool rendezvous_connect(std::string* error) {
@@ -2248,6 +2366,15 @@ struct CollectiveBus::Impl {
       }
     }
     install_table(table);
+    if (!write_barrier_frame(conn, kBusReadyMagic)) {
+      *error = "rendezvous: connect barrier READY write failed";
+      return false;
+    }
+    if (!read_barrier_frame(conn, kBusGoMagic)) {
+      *error = "rendezvous: connect barrier — rank 0 never sent GO (a peer "
+               "failed to connect its QPs, or the barrier timed out)";
+      return false;
+    }
     return true;
   }
 
@@ -2312,6 +2439,13 @@ bool CollectiveBus::start(std::string* error) {
   }
   if (opt.my_rank < 0 || opt.my_rank >= opt.world_size) {
     *error = "my_rank out of range";
+    return false;
+  }
+  // Before anything can spin: materialize the bus kernels (bus_kernel.hpp,
+  // bus_preload_kernels — the lazy-loading deadlock).
+  if (const cudaError_t err = bus_preload_kernels(); err != cudaSuccess) {
+    *error = std::string("bus kernel preload failed: ") +
+             cudaGetErrorString(err);
     return false;
   }
   if (opt.lane_devices.empty() || opt.lane_devices.size() > kBusMaxLanes) {
@@ -3049,6 +3183,11 @@ bool CollectiveBus::graph_replay_arm(std::string* error) {
       cell->stamp_stage = 0;
       cell->stamp_first_claim = 0;
       cell->stamp_reduce_done = 0;
+      cell->gt_start = cell->gt_stage = cell->gt_first = cell->gt_last =
+          cell->gt_done = 0;
+      for (uint64_t& g : cell->gt_claim) g = 0;
+      __atomic_store_n(&cell->dbg_gate_waits, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&cell->dbg_gate_spins, 0, __ATOMIC_RELAXED);
       __atomic_store_n(&cell->gen_seq, first + g, __ATOMIC_RELEASE);
     }
     // Close the era's eager gate (arm .. finish), then publish. window_first

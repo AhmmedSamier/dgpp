@@ -48,6 +48,19 @@ cudaError_t launch_bus_consumer(const BusRecvView& view,
 // Watchdog deadline in device cycles for the given inactivity seconds.
 uint64_t bus_consumer_deadline_cycles(double seconds);
 
+// Loads every bus kernel's module up front. CUDA 12+ loads modules LAZILY
+// (CUDA_MODULE_LOADING=LAZY): a kernel's FIRST launch in the process loads
+// it, and that load waits for the device to go idle. A collective kernel
+// spinning on a doorbell is not idle — so in a one-process multi-rank
+// world, rank B's first launch of the very kernel rank A is already
+// spinning in waits for A, and A waits for B: the 2026-09-02 seq-1 wedge
+// (1 start in ~10; a 40-stream probe showed 0/40 kernels starting beside a
+// spinner under LAZY, 40/40 under EAGER). The bus never relies on the
+// environment for this: start() preloads. Callers with their OWN kernels
+// launched beside a live collective (the loopback tests' forward passes)
+// still need CUDA_MODULE_LOADING=EAGER or their own preload.
+cudaError_t bus_preload_kernels();
+
 // Host mirror of the consumer fold (bus_types.hpp's mix); the sender uses
 // it to verify the receiver's hash. `bytes` must be a multiple of 8.
 uint64_t bus_fold(const void* data, size_t bytes);
@@ -110,10 +123,20 @@ struct alignas(64) BusAllReduceCtl {
   uint32_t dbg_cl_len[3] = {};
   uint32_t dbg_cl_seq[3] = {};
   uint32_t dbg_cl_hash[3] = {};  // the claimed door's hash, low 32 bits
-  uint64_t pad3 = 0;
+  // Phase timeline in %globaltimer ns (constant-rate, unlike clock64 under
+  // a ramping SM clock): kernel entry, staging rows written, first peer
+  // claimed (payload gated), last peer claimed, fold done. The graph walk
+  // folds these into the per-window "graph window timeline" summary —
+  // the collective's cost decomposed into copy / handshake+skew / fold.
+  uint64_t gt_start = 0;
+  uint64_t gt_stage = 0;
+  uint64_t gt_first = 0;
+  uint64_t gt_last = 0;
+  uint64_t gt_done = 0;
+  uint64_t gt_claim[kBusMaxPeers] = {};  // per peer (peer index), gated
 };
-static_assert(sizeof(BusAllReduceCtl) == 128,
-              "BusAllReduceCtl occupies its two cache lines");
+static_assert(sizeof(BusAllReduceCtl) == 192,
+              "BusAllReduceCtl occupies exactly three cache lines");
 
 // Everything the kernel needs, built by the engine at claim time.
 struct BusAllReduceView {

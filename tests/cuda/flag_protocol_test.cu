@@ -6,6 +6,8 @@
 // here before it fails in production.
 #include <cuda_runtime.h>
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -245,6 +247,13 @@ DGPP_TEST(flag_protocol_with_dead_wakeup_times_out_and_device_remains_usable) {
 }
 
 int main() {
+  // One process, several ranks, each with kernels that spin on a peer's
+  // doorbell: CUDA's default LAZY module loading deadlocks that shape (a
+  // first launch waits for an idle device — see bus_kernel.hpp,
+  // bus_preload_kernels). The bus preloads its own kernels; the model's
+  // compute kernels launched beside a live collective are loaded eagerly
+  // here, before the first CUDA call. Production is one rank per box.
+  setenv("CUDA_MODULE_LOADING", "EAGER", /*overwrite=*/0);
   int devices = 0;
   const cudaError_t err = cudaGetDeviceCount(&devices);
   if (err != cudaSuccess || devices < 1) return 2;  // ctest: skip, no GPU

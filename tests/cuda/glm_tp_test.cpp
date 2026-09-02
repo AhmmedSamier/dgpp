@@ -1131,6 +1131,15 @@ DGPP_TEST(glm_tp_decode_session_parity) {
         GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)]);
         GlmDiagnosticModel eng(cfg, dir, max_tokens, 128, &reducer, r, kWorld);
         GlmDiagnosticModel ref(cfg, dir, max_tokens, 128, &reducer, r, kWorld);
+        // Construction barrier (the same one every other world-4 section
+        // has): the constructors cudaDeviceSynchronize (the loader's
+        // sync_load_boundary), which waits for EVERY kernel on the device
+        // — including a faster peer's first collective kernel spinning on
+        // this rank's doorbell. Without it: 1 start in ~8 deadlocked until
+        // the 5 s watchdog (the 2026-09-02 "seq-1 wedge" hunt, caught by a
+        // backtrace: two ranks in cudaDeviceSynchronize, two in
+        // spin_then_wait).
+        arrive_once();
 
         // BITWISE prefill tier through the bus (identical collective
         // sequences on both sides).
@@ -1407,6 +1416,13 @@ DGPP_TEST(glm_tp_forward_parity_real) {
 
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
+  // One process, several ranks, each with kernels that spin on a peer's
+  // doorbell: CUDA's default LAZY module loading deadlocks that shape (a
+  // first launch waits for an idle device — see bus_kernel.hpp,
+  // bus_preload_kernels). The bus preloads its own kernels; the model's
+  // compute kernels launched beside a live collective are loaded eagerly
+  // here, before the first CUDA call. Production is one rank per box.
+  setenv("CUDA_MODULE_LOADING", "EAGER", /*overwrite=*/0);
 
   int devices = 0;
   if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {

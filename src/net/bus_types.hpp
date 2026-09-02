@@ -87,6 +87,13 @@ inline uint64_t bus_fold64(const uint64_t* words, size_t word_count) {
 constexpr uint32_t kBusExchangeMagic = 0x53424744;  // 'DGBS' little-endian
 constexpr uint32_t kBusTableMagic = 0x54424744;     // 'DGBT' little-endian
 constexpr uint32_t kBusErrorMagic = 0x52424744;     // 'DGBR' little-endian
+// Post-connect barrier frames (4 bytes each). Every rank reports READY once
+// its QPs are RTS with the initial receives posted; rank 0 answers GO once
+// it has every READY. Without this a fast rank's first RDMA WRITE can land
+// on a peer QP that is still in INIT — the IB CM's RTR-before-RTU rule,
+// re-learned the hard way (the 2026-09-02 seq-1 loopback wedge).
+constexpr uint32_t kBusReadyMagic = 0x59424744;     // 'DGBY' little-endian
+constexpr uint32_t kBusGoMagic = 0x4f424744;        // 'DGBO' little-endian
 constexpr uint8_t kBusExchangeVersion = 1;
 constexpr size_t kBusExchangeHeaderBytes = 32;
 constexpr size_t kBusExchangeLaneBytes = 48;

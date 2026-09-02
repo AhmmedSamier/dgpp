@@ -1535,6 +1535,13 @@ void scenario_stop_releases_waiters() {
 
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
+  // One process, several ranks, each with kernels that spin on a peer's
+  // doorbell: CUDA's default LAZY module loading deadlocks that shape (a
+  // first launch waits for an idle device — see bus_kernel.hpp,
+  // bus_preload_kernels). The bus preloads its own kernels; the model's
+  // compute kernels launched beside a live collective are loaded eagerly
+  // here, before the first CUDA call. Production is one rank per box.
+  setenv("CUDA_MODULE_LOADING", "EAGER", /*overwrite=*/0);
 
   int devices = 0;
   const cudaError_t err = cudaGetDeviceCount(&devices);

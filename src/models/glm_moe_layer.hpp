@@ -126,9 +126,7 @@ class GlmMoeLayer {
 
   // decode-slot scratch (managed; sized to decode_slots*(top_k+1) rows —
   // the slot layout the kernels index: routed K + shared, per token)
-  uint16_t* d_slot_gate_ = nullptr;  // [slots, inter]
-  uint16_t* d_slot_up_ = nullptr;    // [slots, inter]
-  uint16_t* d_slot_act_ = nullptr;   // [slots, inter]
+  uint16_t* d_slot_act_ = nullptr;   // [slots, inter] (fused gate/up/swiglu)
   uint16_t* d_slot_down_ = nullptr;  // [slots, hidden] (contributions)
   // The device expert-view table, re-uploaded per enqueue_decode call.
   // NO CACHE, DELIBERATELY: the streaming loader refills ONE
