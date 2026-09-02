@@ -45,6 +45,7 @@
 #include <cuda_runtime.h>
 
 #include "kernels/gemm.hpp"
+#include "kernels/l2_prefetch.hpp"
 #include "models/dsa_geometry.hpp"
 
 namespace dgpp {
@@ -124,10 +125,25 @@ class DsaLayer {
   //              into the token batch; a request's rows must be contiguous
   //   out:       bf16 [tokens, hidden]
   // The caller must already have grown the block tables to cover pos+1.
+  //   prefetch:  optional L2 weight prefetcher; after the projections it
+  //              is pointed at o_proj, so the layer's long latency-bound
+  //              middle (select, absorb, attention, v-out: ~130 us at
+  //              decode) pulls the output projection into L2.
   void enqueue_decode(const void* hidden_in, DsaStatePool& state, int layer,
                       const int32_t* req_ids, const int64_t* pos,
                       const int32_t* req_spans, int num_requests, int tokens,
-                      void* out, cudaStream_t stream);
+                      void* out, cudaStream_t stream,
+                      WeightPrefetcher* prefetch = nullptr);
+
+  // Bytes of the bf16 output projection [hidden, local_v_rows].
+  size_t o_proj_bytes() const {
+    return static_cast<size_t>(cfg_.hidden) * geo_.local_v_rows * 2;
+  }
+  // Bytes of the fused bf16 [q_a | kv_a] projection, the layer's first read.
+  size_t qkv_a_bytes() const {
+    return static_cast<size_t>(cfg_.q_lora_rank + cfg_.kv_lora_rank) *
+           cfg_.hidden * 2;
+  }
 
   const DsaConfig& config() const { return cfg_; }
   const DsaGeometry& geometry() const { return geo_; }

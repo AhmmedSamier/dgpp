@@ -115,7 +115,15 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   lm_vocab_count_ =
       globals_.lm_vocab_count > 0 ? globals_.lm_vocab_count : cfg_.vocab_size;
 
-  DGPP_CUDA_OK(cudaStreamCreate(&stream_));
+  // Highest priority: the decode chain's kernels take SM slots ahead of
+  // the L2 prefetch stream's (kernels/l2_prefetch.hpp), which is created
+  // at the lowest. Blocking w.r.t. the legacy stream, as before.
+  {
+    int least = 0, greatest = 0;
+    DGPP_CUDA_OK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
+    DGPP_CUDA_OK(cudaStreamCreateWithPriority(&stream_, cudaStreamDefault,
+                                              greatest));
+  }
   // The model's kernels are the resident layers' readers: load boundaries
   // synchronize exactly this stream (+ the loader's dequant stream), not
   // the whole device — a device-wide wait in a one-process multi-rank

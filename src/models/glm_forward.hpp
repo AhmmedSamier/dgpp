@@ -25,6 +25,7 @@
 
 #include "core/arena.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/l2_prefetch.hpp"
 #include "models/dsa_layer.hpp"
 #include "models/dsa_state.hpp"
 #include "models/glm_loader.hpp"
@@ -217,9 +218,25 @@ class GlmDiagnosticModel {
     boundary_ = boundary;
     return prev;
   }
+  //   session_graph_prepare()     — BEFORE cudaStreamBeginCapture: uploads
+  //                                 each MoE layer's expert-view table to
+  //                                 its graph slot (a sync follows), so
+  //                                 the recorded kernels read fixed device
+  //                                 tables and the replay moves no table
+  //                                 bytes. Resident stacks only.
+  void session_graph_prepare();
   void session_graph_capture_step(int req, int64_t token_id);
   void session_graph_stage(int req, int64_t token_id);
   Outputs session_graph_collect(int req);
+
+  // Decode-step route traces (Outputs.routes / route_biased): the per-MoE-
+  // layer ids, weights and biased scores the parity gates and the near-tie
+  // audit read. They cost three D2H nodes per MoE layer per step (126 per
+  // token here), which a serving loop that only wants logits should not
+  // pay. Default on; the serving apps turn them off. Takes effect at the
+  // next capture / eager step.
+  void set_decode_route_traces(bool on) { decode_route_traces_ = on; }
+  bool decode_route_traces() const { return decode_route_traces_; }
 
   // v1 single-request shims (slot 0) — the Stage 2 parity gates' shape.
   Outputs session_prefill(const std::vector<int64_t>& prompt_ids) {
@@ -293,6 +310,12 @@ class GlmDiagnosticModel {
   // the M4 path) or this rank's slice (GlmTpViews). `dense_mlp` mirrors
   // cfg_.mlps[layer]; exactly one attention and one MLP view is set.
   GlmLayerBound bind_layer(const GlmLayerResident& r, bool dense_mlp);
+
+  // The block-boundary prefetch windows (decode rows): while the bus folds
+  // one side of a layer, pull the OTHER side's first weights into L2.
+  void prefetch_ffn_side(const GlmLayerBound& b, bool dense_mlp);
+  void prefetch_attention_side(int layer);
+  void prefetch_head();
 
   // The stack's ONLY layer-load path: load_layer plus the resident-mode
   // hand-off — the stack walks layers in order, so the last main layer's
@@ -383,10 +406,16 @@ class GlmDiagnosticModel {
   std::unique_ptr<DsaLayer> dsa_;
   std::unique_ptr<GlmMoeLayer> moe_;
   cudaStream_t stream_ = nullptr;
+  // L2 weight prefetch for decode rows (kernels/l2_prefetch.hpp): fed at
+  // the block boundaries and by the attention layers; joined before the
+  // step's tail so a capture closes cleanly.
+  WeightPrefetcher prefetch_;
 
   // TP state: null at world=1 (the M4 path).
   GlmBoundaryReducer* boundary_ = nullptr;
   std::unique_ptr<GlmTpViews> tp_;
+
+  bool decode_route_traces_ = true;
 
   // World=1 bind scratch (owned so the returned views outlive the call).
   GlmLayerBound full_{};

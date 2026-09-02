@@ -475,7 +475,8 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                               int layer, const int32_t* req_ids,
                               const int64_t* pos, const int32_t* req_spans,
                               int num_requests, int tokens, void* out,
-                              cudaStream_t stream) {
+                              cudaStream_t stream,
+                              WeightPrefetcher* prefetch) {
   validate_pool(state, layer);
   if (tokens <= 0 || tokens > max_decode_rows_)
     throw std::invalid_argument("dsa layer: decode rows out of range");
@@ -490,6 +491,13 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   dot_stride_last_ = 0;  // decode selects consume no dot buffer (debug probe)
 
   project_common(hidden_in, tokens, stream);
+  // Everything from here to the output projection is latency-bound at
+  // decode (~130 us of small kernels): the longest window in the step, so
+  // the budget is the whole projection, capped only by L2 headroom.
+  if (prefetch)
+    prefetch->prefetch_after(stream, w_.o_proj, o_proj_bytes(),
+                             std::min<size_t>(o_proj_bytes(), size_t{16} << 20),
+                             prefetch->layer_rate());
 
   // Latent rows first (this batch's own tokens are readable by this
   // batch's attention — causal self-include, reference semantics).

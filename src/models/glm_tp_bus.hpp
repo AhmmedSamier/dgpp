@@ -133,28 +133,31 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
 // stream), then restore the eager reducer; the replay path never calls
 // a reducer (the graph's collective nodes do the folds).
 //
-// stage() hands out ONE stable pinned buffer — the decode shape is
+// stage() hands out ONE stable DEVICE buffer — the decode shape is
 // strictly one-boundary-at-a-time, and within a recorded graph the
 // producing kernel of boundary N+1 is stream-ordered behind boundary
 // N's fold, so a single buffer is the whole lifetime contract. The
-// buffer is pinned: the producing GEMMs write it over the fabric, the
-// recorded collective kernels read AND fold it in place (the eager
-// staged machine's discipline), and the baked src/dst addresses must
-// outlive the graph.
+// baked src/dst addresses must outlive the graph. Device memory on
+// purpose (2026-09-02): only GPU kernels ever touch this buffer — the
+// producing GEMV writes it, the recorded collective kernel snapshots it
+// into the pinned staging rows and folds into it — and a GEMV whose 4096
+// lane-0 stores land in cudaMallocHost memory pays ~20 us per launch for
+// the fabric round trips (measured: N4096xK2048 76 -> 97 us), i.e. ~1.8
+// ms/token across the 90 boundaries, for no reason at all.
 // ---------------------------------------------------------------------------
 struct GlmGraphRecordReducer final : GlmBoundaryReducer {
   static constexpr size_t kMaxCollectiveElems = 4096;  // one latency slot
 
   GlmGraphRecordReducer(net::CollectiveBus& bus, cudaStream_t capture_stream)
       : bus_(bus), stream_(capture_stream) {
-    const cudaError_t alloc = cudaMallocHost(
+    const cudaError_t alloc = cudaMalloc(
         reinterpret_cast<void**>(&stable_), kMaxCollectiveElems * 2);
     if (alloc != cudaSuccess)
-      throw std::runtime_error("graph record reducer: pinned stable "
+      throw std::runtime_error("graph record reducer: stable device "
                                "buffer alloc failed");
   }
   ~GlmGraphRecordReducer() override {
-    if (stable_) cudaFreeHost(stable_);
+    if (stable_) cudaFree(stable_);
   }
   GlmGraphRecordReducer(const GlmGraphRecordReducer&) = delete;
   GlmGraphRecordReducer& operator=(const GlmGraphRecordReducer&) = delete;
@@ -190,7 +193,7 @@ struct GlmGraphRecordReducer final : GlmBoundaryReducer {
  private:
   net::CollectiveBus& bus_;
   cudaStream_t stream_ = nullptr;
-  uint16_t* stable_ = nullptr;  // pinned; baked into every recorded node
+  uint16_t* stable_ = nullptr;  // device; baked into every recorded node
 };
 
 // ---------------------------------------------------------------------------

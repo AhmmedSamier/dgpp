@@ -26,6 +26,7 @@
 
 #include "core/arena.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/l2_prefetch.hpp"
 #include "models/kda_geometry.hpp"
 
 namespace dgpp {
@@ -65,9 +66,24 @@ class KdaLayer {
   //   conv_state:      bf16 [conv_channels, state_width] (state pool slot
   //                    block); committed history columns are updated in place
   //   out:             bf16 [tokens, hidden]
+  //   prefetch:        optional L2 weight prefetcher; after the fused
+  //                    in-projection it is pointed at o_proj, so the
+  //                    latency-bound middle of the layer (f_b/g_b, conv,
+  //                    recurrence, norm) pulls the output projection's
+  //                    bytes into L2 instead of leaving DRAM idle.
   void enqueue(const void* hidden_in, float* recurrent_state,
                uint16_t* conv_state, int conv_state_width, void* out,
-               int tokens, cudaStream_t stream);
+               int tokens, cudaStream_t stream,
+               WeightPrefetcher* prefetch = nullptr);
+
+  // Bytes of the bf16 output projection [hidden, local_proj].
+  size_t o_proj_bytes() const {
+    return static_cast<size_t>(cfg_.hidden) * geo_.local_proj * 2;
+  }
+  // Bytes of the fused bf16 in-projection [in_proj_cols, hidden].
+  size_t in_proj_bytes() const {
+    return static_cast<size_t>(geo_.in_proj_cols) * cfg_.hidden * 2;
+  }
 
   const KdaConfig& config() const { return cfg_; }
   const KdaGeometry& geometry() const { return geo_; }

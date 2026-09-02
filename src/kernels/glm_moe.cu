@@ -1,5 +1,6 @@
 #include "kernels/glm_moe_launch.hpp"
 
+#include <climits>
 #include <stdexcept>
 #include <string>
 
@@ -104,12 +105,31 @@ __global__ void moe_router_dots_kernel(const uint16_t* __restrict__ hidden,
   biased[at] = s + bias[e];
 }
 
-// One block per token: top-k over the biased scores (strict > keeps the
+// One warp per token: top-k over the biased scores (strict > keeps the
 // LOWER expert id on ties), ids sorted ascending (the accumulation order),
 // weights normalized with per-element division — the reference's
 // elementwise ops, op for op. The selection scribbles -INFINITY into a
 // shared-memory COPY so the exported biased row (near-tie certification
 // reads every expert's true score) survives intact.
+//
+// The argmax is exact arithmetic (compares, no rounding), so spreading it
+// over the warp is bit-identical to the serial scan it replaces: each lane
+// scans its strided experts with the same "strict >, from -inf" rule, and
+// the shuffle reduction keeps the greater value, the LOWER id on equal
+// values — the serial scan's outcome by definition. The serial version
+// ran 8 x 288 dependent smem loads on one thread: 16 us per layer.
+__device__ __forceinline__ void warp_argmax_lowest_id(float& v, int& id) {
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) {
+    const float ov = __shfl_xor_sync(0xFFFFFFFFu, v, off);
+    const int oid = __shfl_xor_sync(0xFFFFFFFFu, id, off);
+    if (ov > v || (ov == v && oid < id)) {
+      v = ov;
+      id = oid;
+    }
+  }
+}
+
 __global__ void moe_router_select_kernel(const float* __restrict__ scores,
                                          const float* __restrict__ biased,
                                          int32_t* __restrict__ ids,
@@ -117,35 +137,41 @@ __global__ void moe_router_select_kernel(const float* __restrict__ scores,
                                          int tokens, int n_experts, int top_k,
                                          float routed_scaling_factor,
                                          int norm_topk) {
+  static_assert(kRouterSelectThreads == 32, "one warp per token");
   extern __shared__ float sel_smem[];  // [2][n_experts]: scores | biased
   float* s_scores = sel_smem;
   float* s_biased = sel_smem + n_experts;
   const int token = blockIdx.x;
   if (token >= tokens) return;
   const size_t row = static_cast<size_t>(token) * n_experts;
-  for (int e = threadIdx.x; e < n_experts; e += kRouterSelectThreads) {
+  const int lane = threadIdx.x;
+  for (int e = lane; e < n_experts; e += kRouterSelectThreads) {
     s_scores[e] = scores[row + e];
     s_biased[e] = biased[row + e];
   }
-  __syncthreads();
-  if (threadIdx.x != 0) return;
+  __syncwarp();
 
   int sel[16];
   float wsel[16];
   for (int r = 0; r < top_k; ++r) {
-    int best = -1;
+    // Lane-local scan, the serial rule verbatim; a lane with no candidate
+    // holds (-inf, INT_MAX) and loses every comparison.
+    int best = INT_MAX;
     float bv = -INFINITY;
-    for (int e = 0; e < n_experts; ++e) {
-      // strict >: equal biased scores keep the LOWER expert id.
+    for (int e = lane; e < n_experts; e += kRouterSelectThreads) {
       if (s_biased[e] > bv) {
         bv = s_biased[e];
         best = e;
       }
     }
+    warp_argmax_lowest_id(bv, best);
     sel[r] = best;
     wsel[r] = s_scores[best];
-    s_biased[best] = -INFINITY;
+    __syncwarp();
+    if (lane == 0) s_biased[best] = -INFINITY;
+    __syncwarp();
   }
+  if (lane != 0) return;
   // Ascending expert order (insertion sort; top_k <= 16).
   for (int i = 1; i < top_k; ++i) {
     const int id = sel[i];

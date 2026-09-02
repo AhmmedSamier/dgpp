@@ -114,6 +114,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/fp8_dequant.cu
   src/kernels/scale_gemm.cu
   src/kernels/bf16_gemv.cu
+  src/kernels/l2_prefetch.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
   src/kernels/glm_norm.cu)

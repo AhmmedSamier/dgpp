@@ -21,7 +21,79 @@ namespace {
 // FINAL chunk may end mid-pool (the tail persists into decode).
 constexpr int kPrefillChunkTokens = 2048;
 
+// A quantized matrix's two device ranges (payload and block scales are
+// separate allocations), handed to the prefetcher as such.
+void prefetch_quant(WeightPrefetcher& pf, const GlmQuantMatrix& m) {
+  pf.add(m.payload, static_cast<size_t>(m.rows) * m.cols);
+  pf.add(m.scales,
+         static_cast<size_t>((m.rows + 127) / 128) * ((m.cols + 127) / 128) *
+             sizeof(float));
+}
+
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// The boundary prefetch windows. Each block boundary is a bus all-reduce
+// the chain waits on (~30 us) followed by the mHC site and a norm (~30 us
+// more of latency-bound kernels) before the next weight-streaming kernel
+// starts: ~60 us during which DRAM would idle. The window opened here
+// runs through all of it, so the other side's first ~12 MB of weights are
+// in L2 when their kernels arrive. Only the weights that exist regardless
+// of routing are prefetchable — the routed experts wait for the router.
+// ---------------------------------------------------------------------------
+void GlmDiagnosticModel::prefetch_ffn_side(const GlmLayerBound& b,
+                                           bool dense_mlp) {
+  if (!prefetch_.enabled()) return;
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  prefetch_.open_window(stream_, 0, prefetch_.boundary_rate());
+  prefetch_.add(b.mhc->ffn_fn,
+                static_cast<size_t>(mhc_cfg_.coeff_rows()) * mhc_cfg_.hc_mult *
+                    H * 2);
+  prefetch_.add(b.ln2, H * 2);
+  if (dense_mlp) {
+    for (int i = 0; i < 3; ++i) prefetch_quant(prefetch_, b.dense[i]);
+    return;
+  }
+  prefetch_.add(b.moe->router_gate,
+                static_cast<size_t>(moe_cfg_.n_experts) * H * 2);
+  prefetch_.add(b.moe->router_bias,
+                static_cast<size_t>(moe_cfg_.n_experts) * sizeof(float));
+  for (int i = 0; i < 3; ++i) prefetch_quant(prefetch_, b.moe->shared[i]);
+}
+
+void GlmDiagnosticModel::prefetch_attention_side(int layer) {
+  if (!prefetch_.enabled()) return;
+  if (layer >= cfg_.num_hidden_layers) {
+    prefetch_head();
+    return;
+  }
+  // Resident stacks only: load_layer is a lookup there. A streaming stack
+  // loads on demand, and touching layer N+1 during layer N would reorder
+  // the loader's one-layer-at-a-time contract.
+  if (loader_.residency() != GlmResidency::Resident) return;
+  const GlmLayerResident& r = loader_.load_layer(layer);
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  prefetch_.open_window(stream_, 0, prefetch_.boundary_rate());
+  prefetch_.add(r.mhc.attn_fn,
+                static_cast<size_t>(mhc_cfg_.coeff_rows()) * mhc_cfg_.hc_mult *
+                    H * 2);
+  prefetch_.add(r.ln1, H * 2);
+  // The first projection is far larger than the window; add() clamps to
+  // the budget and the GEMV's leading blocks are the ones that hit.
+  if (r.kind == GlmLayerKind::Kda) {
+    if (kda_) prefetch_.add(r.kda.in_proj, kda_->in_proj_bytes());
+  } else {
+    if (dsa_) prefetch_.add(r.dsa.qkv_a, dsa_->qkv_a_bytes());
+  }
+}
+
+void GlmDiagnosticModel::prefetch_head() {
+  if (!prefetch_.enabled()) return;
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  prefetch_.open_window(stream_, 0, prefetch_.boundary_rate());
+  prefetch_.add(globals_.final_norm, H * 2);
+  prefetch_.add(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2);
+}
 
 // ---------------------------------------------------------------------------
 // session_prefill: opens request slot `req` and processes the prompt.
@@ -158,6 +230,25 @@ void GlmDiagnosticModel::session_decode_host_prep(int req, int64_t token_id,
 // The graph era (DESIGN §6.2). The three replay-side halves the caller
 // sequences around ITS bus arm/launch/finish dance — see the header.
 // ---------------------------------------------------------------------------
+void GlmDiagnosticModel::session_graph_prepare() {
+  if (loader_.residency() != GlmResidency::Resident)
+    throw std::logic_error(
+        "session_graph_prepare: the decode graph needs a resident stack "
+        "(a streaming stack rebinds every layer through one slot)");
+  int moe_ordinal = 0;
+  for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+    if (cfg_.mlps[layer] != GlmMlpKind::Moe) continue;
+    const GlmLayerResident& r = stack_layer(layer);
+    const GlmLayerBound b = bind_layer(r, /*dense_mlp=*/false);
+    if (!moe_)
+      moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
+                                           kDecodeRows, n_moe_layers_);
+    moe_->rebind(*b.moe);
+    moe_->prepare_graph_table(moe_ordinal++, stream_);
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+}
+
 void GlmDiagnosticModel::session_graph_capture_step(int req,
                                                     int64_t token_id) {
   session_decode_host_prep(req, token_id, /*upload=*/true);
@@ -295,7 +386,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       // recurrence implementation, so the state this enqueue leaves is
       // exactly the state the next row needs (DESIGN §7.1).
       kda_->enqueue(normed_, rec, conv, kda_geo_.conv_hist, attn_out, T,
-                    stream_);
+                    stream_, decode_row ? &prefetch_ : nullptr);
       ++kda_ordinal;
     } else {
       if (!dsa_) {
@@ -315,13 +406,15 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         // session_step); num_requests=1 — time-multiplexed steps.
         dsa_->enqueue_decode(normed_, pool_, dsa_ordinal, d_req_ids_,
                              d_step_pos_, d_req_spans_, /*num_requests=*/1, T,
-                             attn_out, stream_);
+                             attn_out, stream_, &prefetch_);
       } else {
         dsa_->enqueue_prefill(normed_, pool_, dsa_ordinal, /*req=*/req,
                               token_start, T, attn_out, stream_);
       }
       ++dsa_ordinal;
     }
+    const bool dense_mlp = cfg_.mlps[layer] == GlmMlpKind::Dense;
+    if (decode_row) prefetch_ffn_side(b, dense_mlp);
     if (boundary_) {
       // A captured sync is an error — under capture the fold is a
       // recorded node and the stream order IS the drain.
@@ -348,7 +441,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     if (boundary_) {
       if (uint16_t* staged = boundary_->stage(T, H)) ffn_out = staged;
     }
-    if (cfg_.mlps[layer] == GlmMlpKind::Dense) {
+    if (dense_mlp) {
       enqueue_dense_mlp(normed_, ffn_out, b.dense, T, stream_);
     } else {
       if (!moe_) {
@@ -373,7 +466,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         // Capture passes the layer's OWN graph table slot so the
         // recorded upload node replays THIS layer's expert views; the
         // eager path's shared pinned buffer serves both callers.
-        moe_->enqueue_decode(normed_, ffn_out, T, &trace, stream_,
+        moe_->enqueue_decode(normed_, ffn_out, T,
+                             decode_route_traces_ ? &trace : nullptr, stream_,
                              capture_mode ? moe_decode_calls : -1);
         GlmRouteTraceLayer route;
         route.layer_idx = static_cast<uint32_t>(layer);
@@ -397,6 +491,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         out.route_biased.push_back(moe_->last_biased());
       }
     }
+    if (decode_row) prefetch_attention_side(layer + 1);
     if (boundary_) {
       // A captured sync is an error — under capture the fold is a
       // recorded node and the stream order IS the drain.
@@ -418,6 +513,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   gemm_.matmul(normed_, globals_.lm_head, logits_, T, lm_vocab_count_, H,
                 DType::BF16, GemmOut::BF16, H, gemm_ws_, gemm_ws_bytes_,
                 stream_);
+  // The prefetch side stream rejoins here: a capture must end with every
+  // forked stream joined, and the eager tail's sync below should cover
+  // the prefetches too (they read weights, nothing else).
+  if (decode_row) prefetch_.join(stream_);
   // The decode tail's rows ride D2H into pinned mirrors (graph nodes when
   // capturing) so the host never touches the managed activations — see
   // h_tail_logits_'s comment for the 9 ms stall that bought this.
@@ -474,7 +573,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_decode_tail(int T) {
   const size_t rows = static_cast<size_t>(T);
   Outputs out;
   int moe_ordinal = 0;
-  for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+  // Traces off: the staging was never written this step; report no routes
+  // rather than stale ones.
+  for (int layer = 0; decode_route_traces_ && layer < cfg_.num_hidden_layers;
+       ++layer) {
     if (cfg_.mlps[layer] != GlmMlpKind::Moe) continue;
     const size_t lay = static_cast<size_t>(moe_ordinal);
     const int32_t* ids =

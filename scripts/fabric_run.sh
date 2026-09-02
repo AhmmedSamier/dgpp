@@ -154,7 +154,11 @@ kill_all() {
 HELPER_TAG="fabric_run_helper_$(basename "$LOG_DIR")"
 stop_node_helpers() {
   [[ $NODE_PROBE -eq 1 || -n "$NODE_CMD" ]] || return 0
-  for ip in "${ALL_NODES[@]}"; do
+  # The head's helpers are killed locally: ssh to our own address is not
+  # guaranteed to work (host keys), and a dozen runs' worth of probe loops
+  # were found still running here for exactly that reason.
+  pkill -f "$HELPER_TAG" >/dev/null 2>&1 || true
+  for ip in "${FABRIC_PEERS[@]}"; do
     timeout 15 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
       "pkill -f $HELPER_TAG" >/dev/null 2>&1 || true
   done

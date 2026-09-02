@@ -820,11 +820,23 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       // so the first replay performs step 1 exactly as the eager path
       // would.
       cudaGraphExec_t graph_exec = nullptr;
+      // The recorder OWNS the stable boundary buffer every recorded node
+      // bakes in, so it must outlive the graph exec, not just the capture
+      // (a block-scoped recorder here was a use-after-free that pinned
+      // memory's sticky mapping happened to forgive).
+      std::unique_ptr<dgpp::GlmGraphRecordReducer> recorder;
       if (decode_graph) {
         const auto t_capture = std::chrono::steady_clock::now();
-        dgpp::GlmGraphRecordReducer recorder(*bus, model.stream());
+        // The serving loop reads logits only; the per-layer route traces
+        // are 126 D2H nodes per token it would otherwise replay for nobody.
+        model.set_decode_route_traces(false);
+        // The MoE expert-view tables land in their graph slots here, once;
+        // the capture below records kernels that read them in place.
+        model.session_graph_prepare();
+        recorder =
+            std::make_unique<dgpp::GlmGraphRecordReducer>(*bus, model.stream());
         dgpp::GlmBoundaryReducer* eager_reducer =
-            model.set_boundary(&recorder);
+            model.set_boundary(recorder.get());
         std::string gerr;
         require(bus->graph_record_begin(&gerr),
                 "graph_record_begin: " + gerr);
@@ -943,6 +955,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         have_prev = true;
       }
       if (graph_exec != nullptr) cudaGraphExecDestroy(graph_exec);
+      recorder.reset();  // after the exec: its buffer is baked into the nodes
     } else {
       // The re-forward reference (the T^2 loop).
       for (int s = 0; s < steps; ++s) {

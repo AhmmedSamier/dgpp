@@ -87,12 +87,23 @@ class GlmMoeLayer {
 
   // The decode fast path: same contract, no host round-trip. tokens
   // must fit decode_slots. Bitwise-equal to enqueue() at the same
-  // routing (the unit gate's pin); traces land async in `trace`.
-  // table_slot >= 0 uploads the expert views from graph slot's pinned
-  // buffer (capture mode; see the ctor) instead of the shared one.
+  // routing (the unit gate's pin); traces land async in `trace` (null:
+  // no trace copies at all).
+  // table_slot >= 0 is capture mode: the kernels read graph slot's OWN
+  // device table, uploaded beforehand by prepare_graph_table() — no
+  // upload node is recorded, so a replay moves no table bytes at all.
   void enqueue_decode(const uint16_t* hidden, uint16_t* out, int tokens,
                       MoeTraceStaging* trace, cudaStream_t stream,
                       int table_slot = -1);
+
+  // Fills graph slot `table_slot`'s device expert-view table from the
+  // CURRENT binding (an async H2D on `stream`; the caller syncs before
+  // capturing). Must run OUTSIDE stream capture, once per slot, before
+  // the capture that records the slot; the contents freeze from then on
+  // (resident bindings). Rebinding to different weights afterwards
+  // without re-preparing is the wrong-weights class — enqueue_decode
+  // refuses an unprepared slot.
+  void prepare_graph_table(int table_slot, cudaStream_t stream);
 
   // Host copies of the most recent enqueue's routing decision. last_biased()
   // holds every expert's biased score for the same enqueue
@@ -121,7 +132,7 @@ class GlmMoeLayer {
   int max_tokens_;
   int decode_slots_ = 0;
 
-  // device scratch (managed; sized to max_tokens)
+  // device scratch (cudaMalloc; sized to max_tokens)
   int32_t* d_ids_ = nullptr;
   float* d_weights_ = nullptr;
   float* d_biased_ = nullptr;  // [max_tokens, n_experts] biased router scores
@@ -135,7 +146,7 @@ class GlmMoeLayer {
   float* d_down_ = nullptr;  // [max_tokens, hidden] fp32 segment output
   float* d_acc_ = nullptr;   // [max_tokens, hidden] the fp32 chain
 
-  // decode-slot scratch (managed; sized to decode_slots*(top_k+1) rows —
+  // decode-slot scratch (cudaMalloc; sized to decode_slots*(top_k+1) rows —
   // the slot layout the kernels index: routed K + shared, per token)
   uint16_t* d_slot_act_ = nullptr;  // [slots, inter] (fused gate/up/swiglu)
   float* d_slot_down_ = nullptr;    // [slots, hidden] fp32 partial dots
@@ -163,11 +174,14 @@ class GlmMoeLayer {
   // path paid 49ms/token for exactly that. Pinned sources are true
   // async DMA.
   MoeExpertView* h_expert_views_pinned_ = nullptr;  // [n_experts * 3]
-  // Per-graph-slot table sources (capture mode): [graph_table_slots_]
-  // rows of [n_experts * 3] each, frozen at capture time. One shared
-  // device table is safe because the replay serializes each call's
-  // upload node before its kernels on the stream.
+  // Per-graph-slot tables (capture mode): [graph_table_slots_] rows of
+  // [n_experts * 3] each. The pinned rows are the upload sources, the
+  // device rows are what the recorded kernels read — each slot its own,
+  // uploaded once by prepare_graph_table() (a replay copies nothing; the
+  // former per-replay upload node cost 42 H2D nodes per token).
   MoeExpertView* h_expert_views_graph_ = nullptr;
+  MoeExpertView* d_expert_views_graph_ = nullptr;
+  std::vector<bool> graph_table_ready_;
   int graph_table_slots_ = 0;
 };
 

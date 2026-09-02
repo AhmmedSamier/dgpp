@@ -83,7 +83,8 @@ bool KdaLayer::prepare(int tokens) {
 
 void KdaLayer::enqueue(const void* hidden_in, float* recurrent_state,
                        uint16_t* conv_state, int conv_state_width, void* out,
-                       int tokens, cudaStream_t stream) {
+                       int tokens, cudaStream_t stream,
+                       WeightPrefetcher* prefetch) {
   if (tokens <= 0 || tokens > max_tokens_)
     throw std::invalid_argument("kda layer: token count out of range");
   if (!hidden_in || !recurrent_state || !conv_state || !out)
@@ -109,6 +110,11 @@ void KdaLayer::enqueue(const void* hidden_in, float* recurrent_state,
   gemm_.matmul(hidden_in, w_.in_proj, proj_, tokens, n_in, hid, DType::BF16,
                GemmOut::BF16, static_cast<size_t>(hid), gemm_ws_,
                gemm_ws_bytes_, stream);
+  // Steps 2-5 below are latency-bound (~45 us at decode) and the output
+  // projection is the next weight the chain reads: start it now.
+  if (prefetch)
+    prefetch->prefetch_after(stream, w_.o_proj, o_proj_bytes(), 0,
+                             prefetch->layer_rate());
   // 2) decay logits g1 = f_b(f_a) and o_norm gate g2 = g_b(g_a); both read
   //    K-column slices of the fused projection row (strided activations).
   gemm_.matmul(proj_, w_.f_b, g1_, tokens, lp, cfg_.head_dim, DType::BF16,
