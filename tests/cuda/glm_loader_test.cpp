@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -565,6 +566,89 @@ DGPP_TEST(glm_loader_resident_mode_serves_cache_hits_without_storage_reads) {
     formula += dgpp::GlmLayerStream::layer_bytes(fx.cfg, l);
   require(dgpp::GlmLayerStream::resident_bytes(fx.cfg) == formula,
           "resident_bytes formula differs from the per-layer sum");
+}
+
+DGPP_TEST(glm_loader_resident_image_restore_is_bitwise_and_reads_no_source) {
+  const Fixture fx = write_fixture();
+  const int max_layer =
+      fx.cfg.num_hidden_layers + (fx.cfg.mtp_layer() >= 0 ? 1 : 0);
+  const fs::path cache = fx.dir / "resident-cache";
+  const std::string saved = dgpp::GlmLayerStream::resident_image_dir();
+  dgpp::GlmLayerStream::set_resident_image_dir(cache.string());
+
+  // GIVEN a resident stream that builds every layer from the checkpoint
+  // with the image cache enabled (so it CAPTURES each one):
+  std::vector<std::vector<uint8_t>> built(static_cast<size_t>(max_layer));
+  {
+    dgpp::GlmLayerStream first(fx.cfg, fx.dir.string(), 0, 1,
+                               dgpp::GlmResidency::Resident);
+    for (int l = 0; l < max_layer; ++l) {
+      (void)first.load_layer(l);
+      const auto [base, bytes] = first.resident_layer_span(l);
+      require(base != nullptr && bytes ==
+                                     dgpp::GlmLayerStream::layer_bytes(fx.cfg, l),
+              "built layer span");
+      built[static_cast<size_t>(l)].resize(bytes);
+      DGPP_CUDA_OK(cudaMemcpy(built[static_cast<size_t>(l)].data(), base, bytes,
+                              cudaMemcpyDeviceToHost));
+    }
+    require(first.image_layers_captured() == max_layer &&
+                first.image_layers_restored() == 0,
+            "first stream should capture every layer");
+  }
+
+  // WHEN a second stream opens the same checkpoint with the same cache,
+  // THEN every layer restores from the image — zero checkpoint bytes read
+  // for layers (globals are not cached) — and the device bytes are
+  // bitwise the built ones, view pointers laid out identically.
+  {
+    dgpp::GlmLayerStream second(fx.cfg, fx.dir.string(), 0, 1,
+                                dgpp::GlmResidency::Resident);
+    const uint64_t before = second.source_bytes_read();
+    for (int l = 0; l < max_layer; ++l) {
+      const dgpp::GlmLayerResident& r = second.load_layer(l);
+      require(r.layer == l && r.bytes == built[static_cast<size_t>(l)].size(),
+              "restored layer identity/bytes");
+      const auto [base, bytes] = second.resident_layer_span(l);
+      std::vector<uint8_t> got(bytes);
+      DGPP_CUDA_OK(cudaMemcpy(got.data(), base, bytes, cudaMemcpyDeviceToHost));
+      require(got == built[static_cast<size_t>(l)],
+              ("restored layer " + std::to_string(l) + " differs from built").c_str());
+      // The layout pass must hand out the same relative offsets: ln1 is a
+      // grant in every layer but the MTP draft's mhc-less shape still has
+      // one; compare its offset from the bump base.
+      require(r.ln1 != nullptr &&
+                  static_cast<const uint8_t*>(static_cast<const void*>(r.ln1)) >=
+                      static_cast<const uint8_t*>(base),
+              "restored view points into the bump");
+    }
+    require(second.source_bytes_read() == before,
+            "restore read checkpoint bytes for layers");
+    require(second.image_layers_restored() == max_layer &&
+                second.image_layers_captured() == 0,
+            "second stream should restore every layer");
+  }
+
+  // AND a checkpoint whose config differs gets its own image — the key
+  // covers config.json (and world/rank/headers) — so nothing restores
+  // across checkpoints: touch the config, expect a fresh capture.
+  {
+    const fs::path cfg_path = fx.dir / "config.json";
+    std::string text;
+    {
+      std::ifstream in(cfg_path);
+      text.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    { std::ofstream out(cfg_path); out << text << "\n"; }  // same JSON, new bytes
+    dgpp::GlmLayerStream other(fx.cfg, fx.dir.string(), 0, 1,
+                               dgpp::GlmResidency::Resident);
+    (void)other.load_layer(0);
+    require(other.image_layers_restored() == 0 &&
+                other.image_layers_captured() == 1,
+            "a changed config.json must not restore the old image");
+    { std::ofstream out(cfg_path); out << text; }
+  }
+  dgpp::GlmLayerStream::set_resident_image_dir(saved);
 }
 
 DGPP_TEST(fp8_dequant_blocks_handles_ragged_tails_bitwise) {

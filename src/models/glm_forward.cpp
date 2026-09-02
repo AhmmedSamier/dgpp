@@ -350,8 +350,16 @@ void GlmDiagnosticModel::preconstruct_layers() {
   bool need_moe =
       std::any_of(cfg_.mlps.begin(), cfg_.mlps.end(),
                   [](GlmMlpKind k) { return k == GlmMlpKind::Moe; });
+  // RESIDENT: every layer materializes here, eagerly — a serving process
+  // is ready when its constructor returns, not four minutes into its first
+  // request (the lazy load put ~260 s inside the first prefill while every
+  // peer's bulk collective sat waiting on the slowest disk, 2026-09-02).
+  // Walking all layers also lets stack_layer release the checkpoint
+  // sources before any forward. STREAMING keeps the historical shape:
+  // throwaway loads until every layer kind has been seen.
+  const bool eager_all = loader_.residency() == GlmResidency::Resident;
   for (int layer = 0; layer < cfg_.num_hidden_layers &&
-                       (need_kda || need_dsa || need_moe);
+                       (eager_all || need_kda || need_dsa || need_moe);
        ++layer) {
     const GlmLayerResident& r = stack_layer(layer);
     const GlmLayerBound b =

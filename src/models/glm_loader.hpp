@@ -46,6 +46,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -53,6 +54,7 @@
 #include "common/dtypes.hpp"
 #include "models/quant_matrix.hpp"
 #include "loaders/safetensors.hpp"
+#include "models/glm_resident_image.hpp"
 #include "models/dsa_layer.hpp"
 #include "models/glm_binding.hpp"
 #include "models/glm_config.hpp"
@@ -217,6 +219,22 @@ class GlmLayerStream {
   void release_sources();
   bool sources_released() const { return sources_released_; }
 
+  // The resident image cache (GlmResidentImage): process-wide location,
+  // set once by the app before any stream is constructed; "" (the
+  // default) disables it. Every RESIDENT stream then restores layers from
+  // `dir/<key>.img` when present and captures the ones it had to build.
+  // The key covers the checkpoint (every shard's header fold), config.json,
+  // world, rank, head sharding, and the loader's format version.
+  static void set_resident_image_dir(const std::string& dir);
+  static const std::string& resident_image_dir();
+  // Layers restored from / captured to the image by this stream.
+  int image_layers_restored() const { return image_restored_; }
+  int image_layers_captured() const { return image_captured_; }
+  // RESIDENT: a materialized layer's whole device byte range (the bump) —
+  // what the image stores; the round-trip test compares it bitwise.
+  // {nullptr, 0} when the layer is not materialized.
+  std::pair<const void*, size_t> resident_layer_span(int layer) const;
+
   // Exact device bytes load_layer will use for a layer — the same formula
   // that sizes the bump; load_layer throws if actual usage ever differs,
   // so the formula and the allocator cannot silently drift apart. At
@@ -287,6 +305,18 @@ class GlmLayerStream {
   uint64_t source_bytes_ = 0;
   uint64_t verbatim_bytes_ = 0;
   bool sources_released_ = false;
+  std::string checkpoint_dir_;
+  std::unique_ptr<GlmResidentImage> image_;  // resident mode, when configured
+  int image_restored_ = 0;
+  int image_captured_ = 0;
+  uint64_t resident_image_key() const;
+  void open_resident_image();
+  // The image paths of load_layer (resident): lay out the views without a
+  // source byte, then stream the blob in; or dump a freshly built bump.
+  void restore_layer_from_image(int layer, GlmLayerBump& bump,
+                                GlmLayerResident& out);
+  void capture_layer_to_image(int layer, const GlmLayerBump& bump,
+                              size_t bytes);
   std::vector<std::unique_ptr<SafetensorsFile>> shards_;
   std::unordered_map<std::string, const TensorInfo*> tensors_;
   std::unique_ptr<GlmLayerBump> layer_bump_;  // streaming only

@@ -191,6 +191,25 @@ loop's *host* side from being paged out beside it:
   for ssh-spawned ranks. An unpinned rank still serves correctly — it pays
   2–10 ms swap-in faults in the decode loop instead (the 2026-09-02 jitter).
 
+### Deploying a serving rank: the resident image cache
+
+The first start of a resident rank builds its layers from the checkpoint
+(slice, stage, dequantize, pack) and writes the finished device bytes to
+`~/.cache/dgpp/resident/<key>.img` on that node (~82 GiB per rank for GLM;
+the key covers the checkpoint's shard headers, `config.json`, world, rank,
+head sharding and the loader's format version, so a stale image can never
+load by accident). Every later start streams that image instead — about a
+minute to a ready model against ~4.5 minutes from the checkpoint. Knobs:
+
+```
+DGPP_RESIDENT_CACHE=off            disable (always build from the checkpoint)
+DGPP_RESIDENT_CACHE_DIR=/path      put the images somewhere else
+DGPP_RESIDENT_CACHE_VERIFY=1       re-fold every blob on read (a pass over 82 GiB)
+```
+
+Delete the file to force a rebuild; the loader's log line says how many
+layers were restored versus captured on each start.
+
 `scripts/fabric_run.sh --node-probe` samples each node's reclaim/swap/GPU
 counters at 1 Hz for the run; `scripts/fabric_xrank.py LOGDIR` reads the
 fetched logs and reports host gaps, stall windows, and step distributions per

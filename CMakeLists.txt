@@ -162,6 +162,7 @@ dgpp_set_common(dgpp_models_glm)
 # modules, hence the kda/dsa library links.
 add_library(dgpp_models_glm_loader STATIC
   src/models/glm_loader.cpp
+  src/models/glm_resident_image.cpp
   src/models/glm_moe_layer.cpp
   src/models/glm_dump.cpp
   src/models/glm_forward.cpp

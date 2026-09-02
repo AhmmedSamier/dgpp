@@ -518,7 +518,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
 
   // ---- world 1: no bus, full head, plain argmax pick ------------------
   if (world == 1) {
-    dgpp::pin_serving_process(rank);
+    dgpp::prepare_serving_process(rank);
     const auto t_construct = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(cfg, ckpt, max_tokens, z.pool_tokens,
                              /*boundary=*/nullptr, /*tp_rank=*/0,
@@ -568,7 +568,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
       throw std::runtime_error("rank " + std::to_string(rank) +
                               " bus start: " + err);
     dgpp::GlmBusBoundaryReducer reducer(*bus);
-    dgpp::pin_serving_process(rank);
+    dgpp::prepare_serving_process(rank);
     const auto t_construct = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(
         cfg, ckpt, max_tokens, z.pool_tokens, &reducer, rank, world,
@@ -634,7 +634,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 
   // ---- world 1: no bus, full head, plain argmax ----------------------
   if (world == 1) {
-    dgpp::pin_serving_process(rank);
+    dgpp::prepare_serving_process(rank);
     const auto t_construct = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(cfg, ckpt, max_tokens, cache);
     const double construct_s = std::chrono::duration<double>(
@@ -744,7 +744,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                " bus start: " + err);
 
     dgpp::GlmBusBoundaryReducer reducer(*bus);
-    dgpp::pin_serving_process(rank);
+    dgpp::prepare_serving_process(rank);
     const auto t_construct = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(
         cfg, ckpt, max_tokens, cache, &reducer, rank, world,

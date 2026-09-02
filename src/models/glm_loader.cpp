@@ -1,8 +1,10 @@
 #include "models/glm_loader.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -230,6 +232,11 @@ struct BuildCtx {
   bool copy;
   int rank = 0;
   int world = 1;
+  // Resident builds read each source tensor exactly once: stream it in
+  // ahead of the copy and drop it from the mapping + page cache after
+  // (SafetensorsFile::prefetch/discard). Streaming builds re-read layers
+  // every forward and want the cache kept.
+  bool one_pass_sources = false;
   uint64_t source_bytes = 0;   // checkpoint bytes touched (copy mode)
   uint64_t verbatim_bytes = 0;  // the rank-invariant re-read subset
 
@@ -270,7 +277,15 @@ struct BuildCtx {
     auto it = tensors.find(name);
     if (it == tensors.end() || !it->second)
       throw std::runtime_error("glm loader: tensor not in checkpoint: " + name);
-    return *it->second;
+    const TensorInfo& t = *it->second;
+    if (one_pass_sources && t.owner) t.owner->prefetch(t);
+    return t;
+  }
+  // The read is complete: every byte this rank wants from `t` sits in the
+  // staging mirror. A sliced read still consumed the whole tensor's pages
+  // (column slices touch every row), so the whole tensor goes.
+  void consumed(const TensorInfo& t) const {
+    if (one_pass_sources && t.owner) t.owner->discard(t);
   }
 
   // Byte accounting chokepoint: every checkpoint byte this build touches
@@ -294,8 +309,10 @@ struct BuildCtx {
           "the replicated classifier disagree; fix one of them)");
     void* dst = bump.alloc(e.nbytes());
     if (copy) {
-      std::memcpy(bump.host(dst), source(name).data, e.nbytes());
+      const TensorInfo& t = source(name);
+      std::memcpy(bump.host(dst), t.data, e.nbytes());
       note_read(e, e.nbytes());
+      consumed(t);
     }
     return dst;
   }
@@ -316,10 +333,12 @@ struct BuildCtx {
         bump.alloc(static_cast<size_t>(rows) * static_cast<size_t>(width) *
                    2));
     if (copy) {
-      const uint8_t* src = static_cast<const uint8_t*>(source(name).data);
+      const TensorInfo& t = source(name);
+      const uint8_t* src = static_cast<const uint8_t*>(t.data);
       std::memcpy(bump.host(dst), src + static_cast<size_t>(row_start) * width * 2,
                   static_cast<size_t>(rows) * width * 2);
       note_read(e, static_cast<size_t>(rows) * width * 2);
+      consumed(t);
     }
     return dst;
   }
@@ -329,10 +348,12 @@ struct BuildCtx {
     check_range(name, start, count, e.shape[0]);
     float* dst = static_cast<float*>(bump.alloc(static_cast<size_t>(count) * 4));
     if (copy) {
-      const uint8_t* src = static_cast<const uint8_t*>(source(name).data);
+      const TensorInfo& t = source(name);
+      const uint8_t* src = static_cast<const uint8_t*>(t.data);
       std::memcpy(bump.host(dst), src + static_cast<size_t>(start) * 4,
                   static_cast<size_t>(count) * 4);
       note_read(e, static_cast<size_t>(count) * 4);
+      consumed(t);
     }
     return dst;
   }
@@ -361,17 +382,20 @@ struct BuildCtx {
     q.scales = static_cast<const float*>(
         bump.alloc(static_cast<size_t>(scale_rows) * sb * 4));
     if (copy) {
+      const TensorInfo& tp = source(name);
+      const TensorInfo& ts = source(es.name);
       std::memcpy(bump.host(const_cast<uint8_t*>(q.payload)),
-                  static_cast<const uint8_t*>(source(name).data) +
+                  static_cast<const uint8_t*>(tp.data) +
                       static_cast<size_t>(row_start) * cols,
                   static_cast<size_t>(rows) * cols);
       std::memcpy(bump.host(const_cast<float*>(q.scales)),
-                  static_cast<const float*>(source(es.name).data) +
-                      (row_start / 128) * sb,
+                  static_cast<const float*>(ts.data) + (row_start / 128) * sb,
                   static_cast<size_t>(scale_rows) * sb * 4);
       note_read(e,
                static_cast<size_t>(rows) * cols +
                    static_cast<size_t>(scale_rows) * sb * 4);
+      consumed(tp);
+      consumed(ts);
     }
     return q;
   }
@@ -402,8 +426,10 @@ struct BuildCtx {
     q.scales = static_cast<const float*>(
         bump.alloc(static_cast<size_t>(scale_rows) * sb_s * 4));
     if (copy) {
-      const uint8_t* sp = static_cast<const uint8_t*>(source(name).data);
-      const float* ss = static_cast<const float*>(source(es.name).data);
+      const TensorInfo& tp = source(name);
+      const TensorInfo& ts = source(es.name);
+      const uint8_t* sp = static_cast<const uint8_t*>(tp.data);
+      const float* ss = static_cast<const float*>(ts.data);
       uint8_t* hp = bump.host(const_cast<uint8_t*>(q.payload));
       float* hs = bump.host(const_cast<float*>(q.scales));
       if (cols == full_cols && col_start == 0) {
@@ -419,6 +445,8 @@ struct BuildCtx {
       note_read(e,
                static_cast<size_t>(rows) * cols +
                    static_cast<size_t>(scale_rows) * sb_s * 4);
+      consumed(tp);
+      consumed(ts);
     }
     return q;
   }
@@ -905,6 +933,132 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
   staging_bytes_ = std::max(capacity, globals_cap);
   DGPP_CUDA_OK(cudaHostAlloc(&staging_, staging_bytes_, cudaHostAllocDefault));
   DGPP_CUDA_OK(cudaStreamCreate(&stream_));
+  checkpoint_dir_ = checkpoint_dir;
+  if (residency_ == GlmResidency::Resident) open_resident_image();
+}
+
+// ---- the resident image cache ----------------------------------------------
+
+namespace {
+std::string& resident_image_dir_storage() {
+  static std::string dir;
+  return dir;
+}
+uint64_t fnv_mix(uint64_t h, uint64_t v) {
+  for (int i = 0; i < 8; ++i) {
+    h = (h ^ (v & 0xFF)) * 1099511628211ull;
+    v >>= 8;
+  }
+  return h;
+}
+}  // namespace
+
+std::pair<const void*, size_t> GlmLayerStream::resident_layer_span(
+    int layer) const {
+  if (residency_ != GlmResidency::Resident || layer < 0 ||
+      layer >= static_cast<int>(resident_layers_.size()) ||
+      resident_layers_[static_cast<size_t>(layer)].layer != layer)
+    return {nullptr, 0};
+  const GlmLayerBump& b = *resident_bumps_[static_cast<size_t>(layer)];
+  return {b.base, b.cursor};
+}
+
+void GlmLayerStream::set_resident_image_dir(const std::string& dir) {
+  resident_image_dir_storage() = dir;
+}
+const std::string& GlmLayerStream::resident_image_dir() {
+  return resident_image_dir_storage();
+}
+
+uint64_t GlmLayerStream::resident_image_key() const {
+  uint64_t h = 1469598103934665603ull;
+  h = fnv_mix(h, GlmResidentImage::kFormatVersion);
+  h = fnv_mix(h, static_cast<uint64_t>(world_));
+  h = fnv_mix(h, static_cast<uint64_t>(rank_));
+  h = fnv_mix(h, static_cast<uint64_t>(head_));
+  // config.json bytes: every geometry decision the build makes reads it.
+  {
+    std::ifstream f(std::filesystem::path(checkpoint_dir_) / "config.json",
+                    std::ios::binary);
+    char c;
+    while (f.get(c)) h = (h ^ static_cast<uint8_t>(c)) * 1099511628211ull;
+  }
+  // The shards, in the loader's (sorted) order: header identity + size.
+  for (const auto& shard : shards_) {
+    h = fnv_mix(h, shard->header_fold());
+    h = fnv_mix(h, shard->map_size());
+  }
+  return h;
+}
+
+void GlmLayerStream::open_resident_image() {
+  const std::string& dir = resident_image_dir();
+  if (dir.empty()) return;
+  const int max_layer =
+      cfg_.num_hidden_layers + (cfg_.mtp_layer() >= 0 ? 1 : 0);
+  try {
+    image_ = std::make_unique<GlmResidentImage>(dir, resident_image_key(),
+                                                max_layer);
+  } catch (const std::exception& e) {
+    // A cache that cannot open is a slower start, not a failed one.
+    DGPP_LOG_WARN("glm loader: rank {} resident image unavailable ({}) — "
+                  "building from the checkpoint",
+                  rank_, e.what());
+    image_.reset();
+    return;
+  }
+  DGPP_LOG_INFO("glm loader: rank {} resident image {} — {}/{} layers present",
+                rank_, image_->path(), image_->present(), image_->layers());
+}
+
+void GlmLayerStream::restore_layer_from_image(int layer, GlmLayerBump& bump,
+                                              GlmLayerResident& out) {
+  // Layout pass: the build with copy=false against a REAL bump hands out
+  // the exact grant sequence (hence the exact view pointers) without
+  // reading a source byte; jobs and packs are recorded and ignored — the
+  // blob already holds their results.
+  bump.stage = staging_;
+  std::vector<GlmExpectedTensor> table =
+      glm_expected_layer_tensors(cfg_, layer);
+  std::unordered_map<std::string, const GlmExpectedTensor*> by_name;
+  for (const auto& e : table) by_name.emplace(e.name, &e);
+  std::vector<DequantJob> jobs;
+  std::vector<PackJob> packs;
+  std::unordered_map<std::string, const TensorInfo*> no_tensors;
+  BuildCtx ctx{cfg_,       table, by_name, bump,  out,
+               no_tensors, jobs,  packs,   false, rank_, world_};
+  ctx.build_layer(layer);
+  const size_t bytes = bump.cursor;
+  if (bytes != layer_bytes(cfg_, layer, rank_, world_))
+    throw std::runtime_error("glm loader: layout pass drifted from the byte "
+                             "formula on layer " + std::to_string(layer));
+  static const bool verify = [] {
+    const char* v = std::getenv("DGPP_RESIDENT_CACHE_VERIFY");
+    return v && *v && std::string(v) != "0";
+  }();
+  image_->read_layer(layer, staging_, bytes, verify);
+  sync_load_boundary(reader_, stream_);
+  DGPP_CUDA_OK(cudaMemcpyAsync(bump.base, staging_, bytes,
+                               cudaMemcpyHostToDevice, stream_));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  out.bytes = bytes;
+  ++image_restored_;
+}
+
+void GlmLayerStream::capture_layer_to_image(int layer, const GlmLayerBump& bump,
+                                            size_t bytes) {
+  // The bump is final and the stream is synced (build_layer_into's exit);
+  // the staging mirror is free again, so it carries the D2H.
+  DGPP_CUDA_OK(cudaMemcpy(staging_, bump.base, bytes, cudaMemcpyDeviceToHost));
+  try {
+    image_->write_layer(layer, staging_, bytes);
+    ++image_captured_;
+  } catch (const std::exception& e) {
+    DGPP_LOG_WARN("glm loader: rank {} could not capture layer {} to the "
+                  "resident image ({}) — cache disabled for this stream",
+                  rank_, layer, e.what());
+    image_.reset();
+  }
 }
 
 GlmLayerStream::~GlmLayerStream() {
@@ -931,9 +1085,11 @@ void GlmLayerStream::release_sources() {
   shards_.clear();
   DGPP_LOG_INFO(
       "glm loader: rank {} resident load complete — released {} shard "
-      "mappings ({:.1f} GiB) and evicted their page cache",
+      "mappings ({:.1f} GiB) and evicted their page cache; image: {} layers "
+      "restored, {} captured",
       rank_, shard_count,
-      static_cast<double>(mapped_bytes) / (1024.0 * 1024.0 * 1024.0));
+      static_cast<double>(mapped_bytes) / (1024.0 * 1024.0 * 1024.0),
+      image_restored_, image_captured_);
 }
 
 // The one layer build both residency modes share: the grant sequence,
@@ -952,6 +1108,7 @@ void GlmLayerStream::build_layer_into(int layer, GlmLayerBump& bump,
   std::vector<PackJob> packs;
   BuildCtx ctx{cfg_,    table, by_name, bump,          out,
                tensors_, jobs,  packs,   true,         rank_,   world_};
+  ctx.one_pass_sources = residency_ == GlmResidency::Resident;
   ctx.build_layer(layer);
 
   // Phase one, continued: host-source packs land in the staging mirror
@@ -1010,8 +1167,13 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
 
     auto bump = std::make_unique<GlmLayerBump>();
     bump->init(layer_bytes(cfg_, layer, rank_, world_));
-    sync_load_boundary(reader_, stream_);
-    build_layer_into(layer, *bump, slot);
+    if (image_ && image_->has_layer(layer)) {
+      restore_layer_from_image(layer, *bump, slot);
+    } else {
+      sync_load_boundary(reader_, stream_);
+      build_layer_into(layer, *bump, slot);
+      if (image_) capture_layer_to_image(layer, *bump, slot.bytes);
+    }
     resident_bumps_[static_cast<size_t>(layer)] = std::move(bump);
     return slot;
   }

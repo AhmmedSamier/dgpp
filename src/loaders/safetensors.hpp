@@ -17,13 +17,16 @@
 
 namespace dgpp {
 
+class SafetensorsFile;
+
 struct TensorInfo {
   std::string name;
   DType dtype{};
   std::vector<int64_t> shape;
-  uint64_t data_begin = 0;  // byte offset into file data region
+  uint64_t data_begin = 0;  // byte offset into the FILE (header included)
   uint64_t data_end = 0;
   const void* data = nullptr;  // mapped pointer (file lifetime)
+  const SafetensorsFile* owner = nullptr;  // the shard the bytes live in
 
   size_t numel() const {
     size_t n = 1;
@@ -62,6 +65,29 @@ class SafetensorsFile {
     tensors_.clear();
   }
   bool mapped() const { return map_ != nullptr && map_ != MAP_FAILED; }
+
+  // Streaming hints for a one-pass reader (the resident loader): ask the
+  // kernel to read the tensor's pages ahead as one sequential burst
+  // (MADV_WILLNEED — a page-fault walk otherwise serves 4 KB faults with
+  // fault-around, a fraction of the NVMe's rate), and, once copied out,
+  // drop them from both the private mapping and the page cache
+  // (MADV_DONTNEED + POSIX_FADV_DONTNEED). Without the drop, a 300 GB
+  // checkpoint read through the cache beside an 80 GB resident model
+  // drives every fault through direct reclaim (2026-09-02: allocstall
+  // ~1300/s for the whole ~260 s load). Page-rounded; the neighbours'
+  // boundary pages are refaulted if still needed. Both are advisory.
+  void prefetch(const TensorInfo& t) const {
+    if (!mapped() || t.data_end <= t.data_begin) return;
+    const auto [begin, len] = page_span(t);
+    madvise(map_ + begin, len, MADV_WILLNEED);
+  }
+  void discard(const TensorInfo& t) const {
+    if (!mapped() || t.data_end <= t.data_begin) return;
+    const auto [begin, len] = page_span(t);
+    madvise(map_ + begin, len, MADV_DONTNEED);
+    posix_fadvise(fd_, static_cast<off_t>(begin), static_cast<off_t>(len),
+                  POSIX_FADV_DONTNEED);
+  }
 
   static std::unique_ptr<SafetensorsFile> open(const std::string& path) {
     int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -114,6 +140,9 @@ class SafetensorsFile {
   size_t map_size() const { return map_len_; }
   const std::string& path() const { return path_; }
   const minijson::Value& header_meta() const { return meta_; }
+  // FNV-1a of the raw header JSON: the shard's identity for cache keys
+  // (names, dtypes, shapes, offsets — a swapped checkpoint changes it).
+  uint64_t header_fold() const { return header_fold_; }
 
   // Header-truth iteration (bind-check tooling): visits every tensor of this
   // shard. Fn takes const TensorInfo&.
@@ -133,6 +162,9 @@ class SafetensorsFile {
     if (8 + hlen > map_len_)
       throw std::runtime_error(path_ + ": header length overruns file");
     std::string_view json(reinterpret_cast<const char*>(map_ + 8), hlen);
+    header_fold_ = 1469598103934665603ull;
+    for (const char c : json)
+      header_fold_ = (header_fold_ ^ static_cast<uint8_t>(c)) * 1099511628211ull;
     auto parsed = minijson::parse(json);
     const minijson::Value& root = parsed.root;
     if (!root.is_object())
@@ -159,14 +191,24 @@ class SafetensorsFile {
       if (t->data_end > map_len_)
         throw std::runtime_error(path_ + ": tensor " + m.key + " overruns file");
       t->data = map_ + t->data_begin;
+      t->owner = this;
       tensors_[t->name] = std::move(t);
     }
+  }
+
+  std::pair<size_t, size_t> page_span(const TensorInfo& t) const {
+    static const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    const size_t begin = (t.data_begin / page) * page;
+    size_t end = ((t.data_end + page - 1) / page) * page;
+    if (end > map_len_) end = map_len_;
+    return {begin, end - begin};
   }
 
   std::string path_;
   int fd_ = -1;
   uint8_t* map_ = nullptr;
   size_t map_len_ = 0;
+  uint64_t header_fold_ = 0;
   std::unordered_map<std::string, std::unique_ptr<TensorInfo>> tensors_;
   minijson::Value meta_{};
 };

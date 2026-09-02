@@ -7,12 +7,14 @@
 // CUDA-app-only header: it drags the bus (verbs) headers. Host gates
 // fake the engine instead; nothing in dgpp_service includes this.
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 #include "common/log.hpp"
 #include "common/process_memory.hpp"
 #include "models/glm_gen_engine.hpp"
+#include "models/glm_loader.hpp"
 #include "models/glm_step_timing.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "net/collective_bus.hpp"
@@ -39,6 +41,38 @@ inline void pin_serving_process(int rank) {
     DGPP_LOG_WARN("rank {}: process memory NOT locked — decode latency may "
                   "see swap-in faults ({})",
                   rank, why);
+}
+
+// The resident image cache's location (GlmLayerStream::set_resident_image_dir):
+//   DGPP_RESIDENT_CACHE=off        disabled
+//   DGPP_RESIDENT_CACHE_DIR=DIR    explicit directory
+//   otherwise                      $XDG_CACHE_HOME/dgpp/resident, or
+//                                  $HOME/.cache/dgpp/resident
+// On by default on purpose: a serving box's disk exists to make the next
+// start fast, and the key (checkpoint headers + config + world/rank +
+// format version) makes a stale image impossible to load by accident.
+inline void configure_resident_image_cache(int rank) {
+  std::string dir;
+  if (const char* mode = std::getenv("DGPP_RESIDENT_CACHE");
+      mode && std::string(mode) == "off") {
+    DGPP_LOG_INFO("rank {}: resident image cache off (DGPP_RESIDENT_CACHE)",
+                  rank);
+  } else if (const char* d = std::getenv("DGPP_RESIDENT_CACHE_DIR"); d && *d) {
+    dir = d;
+  } else if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x) {
+    dir = std::string(x) + "/dgpp/resident";
+  } else if (const char* h = std::getenv("HOME"); h && *h) {
+    dir = std::string(h) + "/.cache/dgpp/resident";
+  }
+  GlmLayerStream::set_resident_image_dir(dir);
+  if (!dir.empty())
+    DGPP_LOG_INFO("rank {}: resident image cache at {}", rank, dir);
+}
+
+// Everything a serving process does before it constructs its model.
+inline void prepare_serving_process(int rank) {
+  pin_serving_process(rank);
+  configure_resident_image_cache(rank);
 }
 
 // Real-mesh budgets, not loopback budgets (found by the first fabric
