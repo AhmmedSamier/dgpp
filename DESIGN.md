@@ -228,7 +228,7 @@ makes replicated norms, mHC, routers, and indexers well-defined.
 | q/k/v or KDA projections | replicated hidden | column/head shard | none |
 | attention output projection | head shard | partial hidden | all-reduce sum |
 | MoE router | replicated hidden | identical top-8 IDs/weights | checksum in debug only |
-| routed experts | local whole experts | partial hidden sum | FFN all-reduce sum |
+| routed experts | intermediate-dim slice of every expert | partial hidden sum | FFN all-reduce sum |
 | shared/dense MLP | column/row TP | partial hidden | same FFN all-reduce |
 | block exit | all-reduced hidden | replicated hidden/residual | none |
 | lm head | replicated hidden | vocab-sharded logits | sampling-dependent merge |
@@ -270,7 +270,15 @@ and the M5 results file; the contract in brief:
 
 ### 5.2 Weight placement
 
-- routed experts: 72 whole experts per rank initially;
+- routed experts: every expert on every rank, sliced on the intermediate
+  dimension (gate/up rows, down columns) exactly like the shared expert —
+  per-rank expert bytes are top-k x 3 slices whatever the routing, so no
+  rank is the busiest at an FFN boundary. (72 whole experts per rank was
+  the initial placement, retired 2026-09-02: its expected busiest rank
+  read 3.5 experts against the mean 2.0 and every other rank waited for
+  it.) The per-rank chain runs in fp32 — unrounded partial down dots, one
+  fma per expert ascending, shared last — and rounds to bf16 once for
+  the all-reduce;
 - attention, shared-expert, and dense matrices: standard column/row TP;
 - router, mHC, norms, and DSA indexer: replicated;
 - embeddings and lm head: vocabulary-sharded;
@@ -296,8 +304,8 @@ kernel's masked-tile case, which is correct and separately covered.
 
 **Sharded load (the loader IS the slicer):** at TP>1 the resident loader
 builds each layer DIRECTLY at this rank's local geometry — head row
-ranges, contiguous whole-expert ranges, 128-aligned quantized row/column
-slices — so only rank-local checkpoint bytes are ever read (measured on
+ranges and 128-aligned quantized row/column slices of every MLP matrix,
+routed experts included — so only rank-local checkpoint bytes are ever read (measured on
 the fixture: 57% per rank at world=2, 36% at world=4; the re-read
 residue is the replicated set plus the DSA dequant-bridge tensors). The
 full-load+`GlmTpViews::bind` path remains as the independent reference

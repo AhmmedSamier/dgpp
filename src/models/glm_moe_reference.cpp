@@ -1,5 +1,6 @@
 #include "models/glm_moe_reference.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -40,6 +41,26 @@ void strict_gemm(const std::vector<uint16_t>& act, int64_t act_stride,
       for (int kk = 0; kk < k; ++kk)
         acc += bf16_to_d(arow[kk]) * wrow[kk];
       out[static_cast<size_t>(mm) * n + nn] = d_to_bf16(acc);
+    }
+  }
+}
+
+// The down projection: the same strict GEMM with the accumulator handed
+// back UNROUNDED (the engine's launch_scale_gemm_f32) — the accumulation
+// chain owns the single rounding.
+void strict_gemm_raw(const std::vector<uint16_t>& act, int64_t act_stride,
+                     const std::vector<double>& weights_bf16, int m, int n,
+                     int k, std::vector<double>& out) {
+  out.assign(static_cast<size_t>(m) * n, 0.0);
+  for (int nn = 0; nn < n; ++nn) {
+    const double* wrow = weights_bf16.data() + static_cast<size_t>(nn) * k;
+    for (int mm = 0; mm < m; ++mm) {
+      double acc = 0.0;
+      const uint16_t* arow =
+          act.data() + static_cast<size_t>(mm) * act_stride;
+      for (int kk = 0; kk < k; ++kk)
+        acc += bf16_to_d(arow[kk]) * wrow[kk];
+      out[static_cast<size_t>(mm) * n + nn] = acc;
     }
   }
 }
@@ -183,12 +204,18 @@ void glm_moe_ref_forward(const uint16_t* hidden, const GlmMoeHostWeights& w,
     return dequant_bf16_weights(glm_moe_host_view(w, cfg, index));
   };
 
-  // Per token: contributions in ASCENDING expert order (the reference's
-  // index_add order), then the shared add.
-  std::vector<uint16_t> gate_out, up_out, act, down_out;
+  // Per token: the fp32-chain semantics in double — the down projection's
+  // dots stay unrounded, each expert's contribution is one fma (weight x
+  // dot + acc) in ASCENDING expert order, the shared expert last with
+  // weight 1, and the sum rounds to bf16 exactly once. (The transformers
+  // reference rounds per expert add; the engine deliberately does not —
+  // see glm_moe_layer.hpp.)
+  std::vector<uint16_t> gate_out, up_out, act;
+  std::vector<double> down_out, acc(static_cast<size_t>(H));
   for (int t = 0; t < tokens; ++t) {
     const uint16_t* x = hidden + static_cast<size_t>(t) * H;
     std::vector<uint16_t> xrow(x, x + H);
+    std::fill(acc.begin(), acc.end(), 0.0);
     for (int i = 0; i < K; ++i) {
       const int e = route.ids[static_cast<size_t>(t) * K + i];
       const double we =
@@ -199,14 +226,8 @@ void glm_moe_ref_forward(const uint16_t* hidden, const GlmMoeHostWeights& w,
       strict_gemm(xrow, H, wg, 1, I, H, gate_out);
       strict_gemm(xrow, H, wu, 1, I, H, up_out);
       swiglu_oracle(gate_out, up_out, I, cfg.swiglu_limit, act);
-      strict_gemm(act, I, wd, 1, H, I, down_out);
-      for (int d = 0; d < H; ++d) {
-        const uint16_t contrib =
-            d_to_bf16(we * bf16_to_d(down_out[d]));
-        const uint16_t prev = out[static_cast<size_t>(t) * H + d];
-        out[static_cast<size_t>(t) * H + d] =
-            d_to_bf16(bf16_to_d(prev) + bf16_to_d(contrib));
-      }
+      strict_gemm_raw(act, I, wd, 1, H, I, down_out);
+      for (int d = 0; d < H; ++d) acc[d] += we * down_out[d];
     }
     // Shared expert, weight 1, added last.
     {
@@ -216,13 +237,11 @@ void glm_moe_ref_forward(const uint16_t* hidden, const GlmMoeHostWeights& w,
       strict_gemm(xrow, H, wg, 1, I, H, gate_out);
       strict_gemm(xrow, H, wu, 1, I, H, up_out);
       swiglu_oracle(gate_out, up_out, I, cfg.swiglu_limit, act);
-      strict_gemm(act, I, wd, 1, H, I, down_out);
-      for (int d = 0; d < H; ++d) {
-        const uint16_t prev = out[static_cast<size_t>(t) * H + d];
-        out[static_cast<size_t>(t) * H + d] =
-            d_to_bf16(bf16_to_d(prev) + bf16_to_d(down_out[d]));
-      }
+      strict_gemm_raw(act, I, wd, 1, H, I, down_out);
+      for (int d = 0; d < H; ++d) acc[d] += down_out[d];
     }
+    for (int d = 0; d < H; ++d)
+      out[static_cast<size_t>(t) * H + d] = d_to_bf16(acc[d]);
   }
 }
 

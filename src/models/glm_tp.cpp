@@ -41,8 +41,8 @@ GlmTpViews::GlmTpViews(const GlmTextConfig& cfg, int rank, int world,
   dsa_cfg_.tp_size = world;
   kda_geo_ = KdaGeometry::from_config(kda_cfg_);
   dsa_geo_ = DsaGeometry::from_config(dsa_cfg_);
-  local_experts_ = moe_cfg_.n_experts / world;
   dense_inter_ = cfg.intermediate_size / world;
+  moe_inter_ = moe_cfg_.inter / world;
 
   const SlabLayout lay = layout(cfg_, world_);
   slab_bytes_ = lay.total;
@@ -51,6 +51,7 @@ GlmTpViews::GlmTpViews(const GlmTextConfig& cfg, int rank, int world,
 
 GlmTpViews::~GlmTpViews() {
   if (slab_) cudaFree(slab_);
+  if (expert_pack_) cudaFree(expert_pack_);
 }
 
 GlmTpViews::SlabLayout GlmTpViews::layout(const GlmTextConfig& cfg,
@@ -88,6 +89,53 @@ GlmTpViews::SlabLayout GlmTpViews::layout(const GlmTextConfig& cfg,
 
 size_t GlmTpViews::slice_bytes(const GlmTextConfig& cfg, int world) {
   return layout(cfg, world).total;
+}
+
+// Per expert: the packed down payload [H, M] then its scale grid, each
+// 256-aligned (the loader's grant alignment — the GEMV core wants 16).
+size_t GlmTpViews::expert_pack_bytes(const GlmTextConfig& cfg, int world) {
+  const GlmMoeConfig mc = cfg.moe_config();
+  const size_t H = static_cast<size_t>(cfg.hidden_size);
+  const size_t M = static_cast<size_t>(mc.inter / world);
+  const size_t per_expert =
+      align256(H * M) + align256(((H + 127) / 128) * ((M + 127) / 128) * 4);
+  return per_expert * static_cast<size_t>(mc.n_experts);
+}
+
+void GlmTpViews::ensure_expert_pack() {
+  if (expert_pack_) return;
+  const size_t bytes = expert_pack_bytes(cfg_, world_);
+  DGPP_CUDA_OK(cudaMalloc(&expert_pack_, bytes));
+  experts_.assign(static_cast<size_t>(moe_cfg_.n_experts) * 3,
+                  GlmQuantMatrix{});
+}
+
+// Column slice -> PACKED payload + packed scale columns, on the model
+// stream. Column starts carry the same 128-alignment contract as row
+// slices: the local scale grid re-anchors at the pack origin, which is
+// exact only when the origin sits on a scale-block boundary.
+GlmQuantMatrix GlmTpViews::pack_quant_cols(const GlmQuantMatrix& m,
+                                           int64_t col_start, int64_t cols,
+                                           uint8_t* payload, float* scales) {
+  if (col_start < 0 || cols <= 0 || cols > m.cols || col_start > m.cols - cols)
+    throw std::invalid_argument("GlmTpViews: column slice out of bounds");
+  if (col_start % 128 != 0)
+    throw std::invalid_argument(
+        "GlmTpViews: quantized column slice must start 128-aligned "
+        "(scale-grid slice contract)");
+  const int64_t sb_full = (m.cols + 127) / 128;
+  const int64_t sb_s = (cols + 127) / 128;
+  copy2d(m.payload + col_start, size_t(m.cols), payload, size_t(cols),
+         size_t(cols), size_t(m.rows), stream_);
+  copy2d(m.scales + col_start / 128, size_t(sb_full) * 4, scales,
+         size_t(sb_s) * 4, size_t(sb_s) * 4, size_t((m.rows + 127) / 128),
+         stream_);
+  GlmQuantMatrix v;
+  v.payload = payload;
+  v.scales = scales;
+  v.rows = m.rows;
+  v.cols = cols;
+  return v;
 }
 
 void GlmTpViews::pack2d_bf16(const void* src, size_t src_pitch_bytes,
@@ -181,58 +229,49 @@ GlmLayerBound GlmTpViews::bind(const GlmLayerResident& r, bool dense_mlp) {
     const int64_t I = dense_inter_;
     dense_[0] = quant_rows_view(r.dense[0], rank_ * I, I);
     dense_[1] = quant_rows_view(r.dense[1], rank_ * I, I);
-    // down [H, I_full]: column slice -> packed payload + scale columns.
-    // The slab carve is non-const for the copies; the views store const.
-    // Column starts carry the same 128-alignment contract as row slices
-    // (the local scale grid re-anchors at the pack origin).
-    const GlmQuantMatrix& dn = r.dense[2];
-    if (rank_ * I % 128 != 0)
-      throw std::invalid_argument(
-          "GlmTpViews: dense down column slice must start 128-aligned");
-    const int64_t sb_full = (dn.cols + 127) / 128;
-    const int64_t sb_s = (I + 127) / 128;
-    uint8_t* down_payload = slab + lay.off_dense_down;
-    float* down_scales =
-        reinterpret_cast<float*>(slab + lay.off_dense_scales);
-    copy2d(dn.payload + rank_ * I, size_t(dn.cols), down_payload,
-           size_t(I), size_t(I), size_t(dn.rows), stream_);
-    copy2d(dn.scales + (rank_ * I) / 128, size_t(sb_full) * 4, down_scales,
-           size_t(sb_s) * 4, size_t(sb_s) * 4,
-           size_t((dn.rows + 127) / 128), stream_);
-    dense_[2].payload = down_payload;
-    dense_[2].scales = down_scales;
-    dense_[2].rows = dn.rows;
-    dense_[2].cols = I;
+    // down [H, I_full]: column slice -> packed payload + scale columns in
+    // the slab (the carve is non-const for the copies; the views store
+    // const).
+    dense_[2] = pack_quant_cols(
+        r.dense[2], rank_ * I, I, slab + lay.off_dense_down,
+        reinterpret_cast<float*>(slab + lay.off_dense_scales));
     bound_.dense = dense_;
   } else {
     const GlmMoeResident& m = r.moe;
-    const int64_t M = moe_cfg_.inter / world_;
+    const int64_t M = moe_inter_;
     moe_.router_gate = m.router_gate;
     moe_.router_bias = m.router_bias;
     shared_[0] = quant_rows_view(m.shared[0], rank_ * M, M);
     shared_[1] = quant_rows_view(m.shared[1], rank_ * M, M);
-    const GlmQuantMatrix& dn = m.shared[2];
-    if (rank_ * M % 128 != 0)
-      throw std::invalid_argument(
-          "GlmTpViews: shared down column slice must start 128-aligned");
-    const int64_t sb_full = (dn.cols + 127) / 128;
-    const int64_t sb_s = (M + 127) / 128;
-    uint8_t* down_payload = slab + lay.off_shared_down;
-    float* down_scales =
-        reinterpret_cast<float*>(slab + lay.off_shared_scales);
-    copy2d(dn.payload + rank_ * M, size_t(dn.cols), down_payload,
-           size_t(M), size_t(M), size_t(dn.rows), stream_);
-    copy2d(dn.scales + (rank_ * M) / 128, size_t(sb_full) * 4, down_scales,
-           size_t(sb_s) * 4, size_t(sb_s) * 4,
-           size_t((dn.rows + 127) / 128), stream_);
-    shared_[2].payload = down_payload;
-    shared_[2].scales = down_scales;
-    shared_[2].rows = dn.rows;
-    shared_[2].cols = M;
+    shared_[2] = pack_quant_cols(
+        m.shared[2], rank_ * M, M, slab + lay.off_shared_down,
+        reinterpret_cast<float*>(slab + lay.off_shared_scales));
     for (int i = 0; i < 3; ++i) moe_.shared[i] = shared_[i];
-    moe_.experts = m.experts.data() + size_t(rank_) * local_experts_ * 3;
-    moe_.expert_begin = rank_ * static_cast<int>(local_experts_);
-    moe_.expert_count = static_cast<int>(local_experts_);
+    // Every routed expert, sliced like the shared one: gate/up row views
+    // into the full resident, down column-packed into the (lazily
+    // allocated) expert pack region.
+    const int E = moe_cfg_.n_experts;
+    if (m.experts.size() != static_cast<size_t>(E) * 3)
+      throw std::invalid_argument(
+          "GlmTpViews::bind: full resident layer does not carry every "
+          "expert");
+    ensure_expert_pack();
+    const size_t H = static_cast<size_t>(cfg_.hidden_size);
+    const size_t payload_bytes = align256(H * static_cast<size_t>(M));
+    const size_t scale_bytes = align256(
+        ((H + 127) / 128) * ((static_cast<size_t>(M) + 127) / 128) * 4);
+    uint8_t* cursor = expert_pack_;
+    for (int e = 0; e < E; ++e) {
+      const size_t at = static_cast<size_t>(e) * 3;
+      experts_[at + 0] = quant_rows_view(m.experts[at + 0], rank_ * M, M);
+      experts_[at + 1] = quant_rows_view(m.experts[at + 1], rank_ * M, M);
+      uint8_t* payload = cursor;
+      float* scales = reinterpret_cast<float*>(cursor + payload_bytes);
+      experts_[at + 2] =
+          pack_quant_cols(m.experts[at + 2], rank_ * M, M, payload, scales);
+      cursor += payload_bytes + scale_bytes;
+    }
+    moe_.experts = experts_.data();
     bound_.moe = &moe_;
   }
   return bound_;
@@ -259,18 +298,19 @@ GlmLayerBound GlmTpViews::bind_sharded(const GlmLayerResident& r,
     for (int i = 0; i < 3; ++i) dense_[i] = r.dense[i];
     bound_.dense = dense_;
   } else {
-    // A full-resident layer here would silently execute every expert as
-    // this rank's "partition" — the one footgun worth a guard at the seam.
-    if (r.moe.expert_count <= 0)
+    // A full-resident layer here would silently execute every expert
+    // UNSLICED as this rank's "partial" — the one footgun worth a guard at
+    // the seam. The slice width is the geometry's signature.
+    if (r.moe.experts.size() != static_cast<size_t>(moe_cfg_.n_experts) * 3 ||
+        r.moe.experts[0].rows != moe_inter_ ||
+        r.moe.shared[0].rows != moe_inter_)
       throw std::invalid_argument(
-          "GlmTpViews::bind_sharded: resident MoE layer carries no TP "
-          "partition — was it loaded by a world=1 stream?");
+          "GlmTpViews::bind_sharded: resident MoE layer is not this world's "
+          "slice geometry — was it loaded by a world=1 stream?");
     moe_.router_gate = r.moe.router_gate;
     moe_.router_bias = r.moe.router_bias;
     for (int i = 0; i < 3; ++i) moe_.shared[i] = r.moe.shared[i];
     moe_.experts = r.moe.experts.data();
-    moe_.expert_begin = r.moe.expert_begin;
-    moe_.expert_count = r.moe.expert_count;
     bound_.moe = &moe_;
   }
   return bound_;

@@ -88,18 +88,15 @@ enum class GlmHeadSharding {
 // which is how the byte formula and the allocator share one code path.
 struct GlmLayerBump;
 
-// One layer's routed-expert neighborhood in compressed form. At world>1
-// (M5 d4) `experts` holds ONLY this rank's contiguous whole-expert range,
-// [expert_begin, expert_begin + expert_count); world=1 keeps the M4
-// "every expert" sentinel (count -1) so the single-rank forward is
-// byte-identical.
+// One layer's routed experts in compressed form. At world>1 (M5 d4, resliced
+// 2026-09-02) `experts` holds EVERY expert's slice of the intermediate dim —
+// gate/up rows and down columns [rank*I/world, (rank+1)*I/world) — the same
+// slicing the shared expert carries; world=1 holds the full matrices.
 struct GlmMoeResident {
   const uint16_t* router_gate = nullptr;  // BF16 [n_routed_experts, hidden]
   const float* router_bias = nullptr;     // F32 [n_routed_experts]
   GlmQuantMatrix shared[3];               // gate, up, down
-  std::vector<GlmQuantMatrix> experts;    // gate, up, down per LOCAL expert
-  int expert_begin = 0;    // first global expert id resident here
-  int expert_count = -1;   // -1 = every expert (the M4 single-rank default)
+  std::vector<GlmQuantMatrix> experts;    // gate, up, down per expert (sliced)
   const GlmQuantMatrix& expert(int e, int i) const {
     return experts[static_cast<size_t>(e) * 3 + i];
   }
@@ -176,10 +173,10 @@ class GlmLayerStream {
   // any mismatch. Allocates the layer bump at the max layer size.
   //
   // Sharded load (M5 d4): `world` > 1 builds each resident layer DIRECTLY
-  // at this rank's local geometry — head row ranges, contiguous
-  // whole-expert ranges, and 128-aligned quantized row/column slices (the
-  // §5.2 scale-grid contract) — so only rank-local checkpoint bytes are
-  // ever read. world=1 is the degenerate rank 0: the M4 full-geometry
+  // at this rank's local geometry — head row ranges and 128-aligned
+  // quantized row/column slices of every MLP matrix, routed experts
+  // included (the §5.2 scale-grid contract) — so only rank-local
+  // checkpoint bytes are ever read. world=1 is the degenerate rank 0: the M4 full-geometry
   // build, byte-for-byte (same grant sequence, same bytes — the layer
   // formula cannot drift). TP geometry is validated BEFORE any shard is
   // opened; misaligned inter quotients fail there, loudly.

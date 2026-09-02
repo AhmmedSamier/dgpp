@@ -7,14 +7,14 @@
 //     (wq_b/wk/wp/gate/k_norm/ape), DSA latents (qkv_a, q_aln, kv_aln —
 //     the latent caches are replicated so every rank selects the same
 //     sparse tokens), KDA f_a/g_a, o_norm.
-//   head/expert sharded: KDA in_proj/conv (per-section row ranges packed
+//   head/inter sharded: KDA in_proj/conv (per-section row ranges packed
 //     into the layer's fused layout), f_b/g_b/a_log/dt_bias contiguous
 //     row ranges, o_proj column packs; DSA q_b/kv_b contiguous head
-//     blocks, o_proj column pack; dense and shared-expert gate/up row
-//     views with the down projection column-packed.
-//   whole experts: routed experts are never split — a rank owns a
-//     contiguous expert id range and GlmMoeLayer executes only that
-//     partition (the router still scores all experts on every rank).
+//     blocks, o_proj column pack; dense, shared-expert AND every routed
+//     expert's gate/up row views with the down projection column-packed
+//     (the routed experts were whole-per-rank until 2026-09-02; slicing
+//     them equalizes the ranks' per-token expert bytes — the router still
+//     scores all experts on every rank).
 //
 // Quantized (E4M3 + 128x128 block scale) row/column slices must start
 // 128-ALIGNED in the sliced dimension: the local-frame consumer re-anchors
@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <cuda_runtime.h>
 
@@ -53,34 +54,8 @@ struct GlmLayerBound {
   const GlmMoeWeights* moe = nullptr;     // MoE layers only
 };
 
-// Quant-matrix row-range view: payload rows are contiguous, so this is a
-// pure pointer view — no copy. A 128-ALIGNED row_start re-anchors the scale
-// grid exactly (local row r's true block is row_start/128 + r/128, which is
-// what the local-frame consumer computes); a MISALIGNED start that crosses
-// a block boundary would need two different scale values inside one local
-// block — unrepresentable — and is rejected here, loudly. The real
-// checkpoint's inter dims (12288 dense / 2048 shared) are 128-multiples at
-// every TP world; the loader-era fixture's 200 was this contract's
-// counterexample and produced silently wrong scales (measured: layer folds
-// 0.30 l2-wrong, invisible to the stream-state metric that attenuated it
-// 300x — see the M5 record).
-inline GlmQuantMatrix quant_rows_view(const GlmQuantMatrix& m,
-                                       int64_t row_start, int64_t rows) {
-  if (row_start < 0 || rows < 0 || rows > m.rows || row_start > m.rows - rows)
-    throw std::invalid_argument("quant_rows_view: range out of bounds");
-  if (row_start % 128 != 0)
-    throw std::invalid_argument(
-        "quant_rows_view: row_start must be 128-aligned (quantized "
-        "scale-grid slice contract; misaligned slices cannot re-anchor "
-        "the block scales)");
-  const int64_t sb = (m.cols + 127) / 128;  // scale blocks per scale row
-  GlmQuantMatrix v;
-  v.payload = m.payload + row_start * m.cols;
-  v.scales = m.scales + (row_start / 128) * sb;
-  v.rows = rows;
-  v.cols = m.cols;
-  return v;
-}
+// quant_rows_view (the row-range view with the 128-aligned scale-grid
+// contract) lives in models/quant_matrix.hpp, next to the type.
 
 class GlmTpViews {
  public:
@@ -108,12 +83,16 @@ class GlmTpViews {
   // spec (§5.2), and the test is what keeps them from drifting.
   GlmLayerBound bind_sharded(const GlmLayerResident& r, bool dense_mlp);
 
-  // Exact device bytes of the slice slab (same layout bind carves).
+  // Exact device bytes of the slice slab (same layout bind carves). The
+  // routed experts' down packs are NOT in it: bind() allocates that region
+  // on first use (see expert_pack_bytes) — it is the parity reference's
+  // cost, and production ranks (bind_sharded) never bind a full layer.
   static size_t slice_bytes(const GlmTextConfig& cfg, int world);
+  // Device bytes of the routed experts' column-packed down slices.
+  static size_t expert_pack_bytes(const GlmTextConfig& cfg, int world);
 
   int rank() const { return rank_; }
   int world() const { return world_; }
-  int64_t local_experts() const { return local_experts_; }
 
  private:
   // Fixed region slots, 256-byte aligned; one layout feeds the allocator
@@ -132,6 +111,12 @@ class GlmTpViews {
   // caller sets pointer/pitch) into a contiguous destination region.
   void pack2d_bf16(const void* src, size_t src_pitch_bytes, uint16_t* dst,
                    size_t dst_pitch_bytes, size_t width_bytes, size_t rows);
+  // Column-slices a quantized [rows, full_cols] matrix into a packed
+  // [rows, cols] payload + scale grid at `payload`/`scales` (device).
+  GlmQuantMatrix pack_quant_cols(const GlmQuantMatrix& m, int64_t col_start,
+                                 int64_t cols, uint8_t* payload,
+                                 float* scales);
+  void ensure_expert_pack();
 
   GlmTextConfig cfg_;
   KdaConfig kda_cfg_;
@@ -141,11 +126,12 @@ class GlmTpViews {
   GlmMoeConfig moe_cfg_;
   int rank_ = 0;
   int world_ = 1;
-  int64_t local_experts_ = 0;
-  int64_t dense_inter_ = 0;  // this rank's dense/shared inter slice
+  int64_t dense_inter_ = 0;  // this rank's dense inter slice
+  int64_t moe_inter_ = 0;    // this rank's shared/routed inter slice
   cudaStream_t stream_ = nullptr;
   uint8_t* slab_ = nullptr;
   size_t slab_bytes_ = 0;
+  uint8_t* expert_pack_ = nullptr;  // lazily allocated (bind() only)
 
   // Last-bound views (owned; rebind overwrites them).
   GlmLayerBound bound_{};
@@ -154,6 +140,7 @@ class GlmTpViews {
   GlmMoeWeights moe_{};
   GlmQuantMatrix dense_[3]{};
   GlmQuantMatrix shared_[3]{};
+  std::vector<GlmQuantMatrix> experts_;  // [n_experts * 3] sliced views
 };
 
 }  // namespace dgpp

@@ -11,14 +11,23 @@
 // grouped-expert path for the decode shape — the router leaves its
 // decision on the DEVICE (ids ascending per row, its kernel contract),
 // the slot kernels read the route and the expert weight views from
-// device memory, foreign experts early-exit, and one ordered
-// accumulation reproduces the host path's exact bf16 chain (bitwise —
-// glm_moe_test pins it). NO stream sync, NO host segmentation, NO
-// per-segment H2D round trips; route traces ride async copies into
-// caller-pinned staging (MoeTraceStaging) and materialize after the
-// step's final sync. The prefill path keeps enqueue(): its sync
-// amortizes over 2048-token chunks, and it warms the decode path's
-// device expert tables (see ensure_device_views).
+// device memory, and one ordered accumulation reproduces the host path's
+// exact chain (bitwise — glm_moe_test pins it). NO stream sync, NO host
+// segmentation, NO per-segment H2D round trips; route traces ride async
+// copies into caller-pinned staging (MoeTraceStaging) and materialize
+// after the step's final sync. The prefill path keeps enqueue(): its sync
+// amortizes over 2048-token chunks.
+//
+// NUMERICS (2026-09-02, expert slicing): every rank holds a slice of every
+// expert's intermediate dim (see GlmMoeWeights), so an expert's down
+// projection is a PARTIAL sum on each rank. The per-rank chain runs in
+// fp32 — unrounded partial dots, fma per expert in ascending id order, the
+// shared expert last — and rounds to bf16 exactly once, as the sum leaves
+// for the FFN all-reduce (bf16 on the wire, folded in rank order there).
+// The reference's per-expert bf16 roundings are deliberately not
+// reproduced: fewer roundings, and a slice cannot reproduce a whole
+// expert's rounding anyway. The oracle (glm_moe_reference) carries the
+// same chain in double.
 //
 // Route-trace capture (M4 deliverable 5): the most recent routing decision
 // is retained on the host (last_ids/last_weights) so callers can record it
@@ -101,10 +110,11 @@ class GlmMoeLayer {
 
  private:
   void run_expert_segment(const uint16_t* x, const int32_t* rows_dev,
-                          const float* row_w_dev, uint16_t* acc, int n_rows,
+                          const float* row_w_dev, int n_rows,
                           const GlmQuantMatrix& gate,
                           const GlmQuantMatrix& up,
                           const GlmQuantMatrix& down, cudaStream_t stream);
+  void check_expert_geometry() const;
 
   GlmMoeWeights w_;
   GlmMoeConfig cfg_;
@@ -122,22 +132,22 @@ class GlmMoeLayer {
   uint16_t* d_gate_ = nullptr;
   uint16_t* d_up_ = nullptr;
   uint16_t* d_act_ = nullptr;
-  uint16_t* d_down_ = nullptr;
+  float* d_down_ = nullptr;  // [max_tokens, hidden] fp32 segment output
+  float* d_acc_ = nullptr;   // [max_tokens, hidden] the fp32 chain
 
   // decode-slot scratch (managed; sized to decode_slots*(top_k+1) rows —
   // the slot layout the kernels index: routed K + shared, per token)
-  uint16_t* d_slot_act_ = nullptr;   // [slots, inter] (fused gate/up/swiglu)
-  uint16_t* d_slot_down_ = nullptr;  // [slots, hidden] (contributions)
+  uint16_t* d_slot_act_ = nullptr;  // [slots, inter] (fused gate/up/swiglu)
+  float* d_slot_down_ = nullptr;    // [slots, hidden] fp32 partial dots
   // The device expert-view table, re-uploaded per enqueue_decode call.
   // NO CACHE, DELIBERATELY: the streaming loader refills ONE
   // GlmLayerResident per layer, so a binding-keyed cache collides across
   // layers (the first MoE layer's table served to every layer after it
   // — glm_tp_test's decode-parity gate caught exactly that, an
-  // uncertifiable top-1 flip with infinite margin). One 3.5KB async
-  // upload per MoE layer per step (~150us/step at real dims) buys
-  // lifetime correctness with zero cleverness; the graph era bakes the
-  // tables in properly.
-  MoeExpertView* d_expert_views_ = nullptr;  // [n_experts * 3], max-sized
+  // uncertifiable top-1 flip with infinite margin). One ~14KB async
+  // upload per MoE layer per step buys lifetime correctness with zero
+  // cleverness; the graph era bakes the tables in properly.
+  MoeExpertView* d_expert_views_ = nullptr;  // [n_experts * 3]
 
   // host staging
   std::vector<int32_t> h_ids_;

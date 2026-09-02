@@ -236,8 +236,7 @@ struct BuildCtx {
   KdaGeometry kgeo{};
   DsaGeometry dgeo{};
   int64_t dense_inter = 0;    // intermediate_size/world
-  int64_t shared_inter = 0;   // moe_intermediate_size/world
-  int64_t local_experts = 0;  // n_routed_experts/world
+  int64_t shared_inter = 0;   // moe_intermediate_size/world (routed too)
   int64_t dsa_kv_rows_head = 0;  // qk_nope + v per head
 
   bool sharded() const { return world > 1; }
@@ -255,7 +254,6 @@ struct BuildCtx {
     dgeo = DsaGeometry::from_config(dc);
     dense_inter = cfg.intermediate_size / world;
     shared_inter = cfg.moe_config().inter / world;
-    local_experts = cfg.moe_config().n_experts / world;
     dsa_kv_rows_head = cfg.qk_nope_head_dim + cfg.v_head_dim;
   }
 
@@ -278,8 +276,7 @@ struct BuildCtx {
   // flows through here, with its tensor. Replicated and DSA-bridge reads
   // form the rank-invariant re-read set (re-read by every rank at world>1
   // — the reconcile's constant term). Sharded-class tensors arrive as
-  // slices or as whole-expert verbatim loads (the routed-expert partition
-  // owns entire tensors); the drift guard that matters is in load_raw.
+  // slices; the drift guard that matters is in load_raw.
   void note_read(const GlmExpectedTensor& e, size_t bytes) {
     if (!copy) return;
     source_bytes += bytes;
@@ -692,24 +689,22 @@ struct BuildCtx {
     out.moe.shared[0] = load_quant_rows(sp + "gate_proj.weight", rank * M, M);
     out.moe.shared[1] = load_quant_rows(sp + "up_proj.weight", rank * M, M);
     out.moe.shared[2] = load_quant_cols(sp + "down_proj.weight", rank * M, M);
-    // Whole-expert partition: only this rank's contiguous expert ids load.
-    const int64_t first = rank * local_experts;
-    out.moe.experts.resize(static_cast<size_t>(local_experts) * 3);
-    for (int64_t e = 0; e < local_experts; ++e) {
-      const std::string ep = p + "mlp.experts." +
-                             std::to_string(first + e) + ".";
-      const int64_t full = cfg.moe_intermediate_size;
+    // Every expert, sliced on the intermediate dim exactly like the shared
+    // expert: this rank's M gate/up rows and M down columns. Each rank's
+    // per-token expert bytes are then top_k * 3 slices whatever the routing
+    // — no busiest rank at the FFN boundary (2026-09-02). The column pack
+    // runs on the CPU straight from the mmap (strided rows of M bytes).
+    const int64_t E = cfg.moe_config().n_experts;
+    out.moe.experts.resize(static_cast<size_t>(E) * 3);
+    for (int64_t e = 0; e < E; ++e) {
+      const std::string ep = p + "mlp.experts." + std::to_string(e) + ".";
       out.moe.experts[static_cast<size_t>(e) * 3 + 0] =
-          load_quant_rows(ep + "gate_proj.weight", 0, full);
+          load_quant_rows(ep + "gate_proj.weight", rank * M, M);
       out.moe.experts[static_cast<size_t>(e) * 3 + 1] =
-          load_quant_rows(ep + "up_proj.weight", 0, full);
+          load_quant_rows(ep + "up_proj.weight", rank * M, M);
       out.moe.experts[static_cast<size_t>(e) * 3 + 2] =
-          load_quant_cols(ep + "down_proj.weight", 0, full);
+          load_quant_cols(ep + "down_proj.weight", rank * M, M);
     }
-    out.moe.expert_begin = sharded() ? static_cast<int>(first) : 0;
-    // world=1 keeps the M4 "every expert" sentinel; the sharded forward
-    // consumes the stamped range, the world=1 forward the sentinel.
-    out.moe.expert_count = sharded() ? static_cast<int>(local_experts) : -1;
   }
 
   void build_mtp_head(int layer) {

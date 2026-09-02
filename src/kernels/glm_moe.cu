@@ -1,6 +1,7 @@
 #include "kernels/glm_moe_launch.hpp"
 
 #include <stdexcept>
+#include <string>
 
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
@@ -200,8 +201,18 @@ __global__ void moe_gather_rows_kernel(const uint16_t* __restrict__ src,
   dst[i] = src[static_cast<int64_t>(rows[r]) * hidden + (i - r * hidden)];
 }
 
-__global__ void moe_accum_kernel(uint16_t* __restrict__ acc,
-                                 const uint16_t* __restrict__ y,
+// The fp32 accumulation chain (2026-09-02, expert slicing). Each expert's
+// down projection arrives UNROUNDED (fp32 partial dots over this rank's
+// slice of the intermediate dim); the chain is one fma per expert in
+// ascending expert order, the shared expert last with weight 1, and the
+// sum rounds to bf16 exactly once — when it leaves for the wire. The
+// per-expert bf16 roundings the reference's index_add happened to perform
+// are gone on purpose: fewer roundings, and a slice of an expert cannot
+// reproduce the whole expert's rounding anyway. fmaf(w, y, acc) is the one
+// op both paths (host segments, decode slots) issue, in the same order, so
+// the decode path's pin against the host path stays bitwise.
+__global__ void moe_accum_kernel(float* __restrict__ acc,
+                                 const float* __restrict__ y,
                                  const int32_t* __restrict__ rows,
                                  const float* __restrict__ row_w, int64_t n,
                                  int hidden) {
@@ -209,14 +220,17 @@ __global__ void moe_accum_kernel(uint16_t* __restrict__ acc,
                     threadIdx.x;
   if (i >= n) return;
   const int64_t r = i / hidden;
-  // contribution = bf16(w * y) — the reference's .to(bf16) before the add.
-  const uint16_t contrib =
-      float_to_bf16_bits(row_w[r] * bf16_bits_to_float(y[i]));
-  uint16_t* dst = acc + static_cast<int64_t>(rows[r]) * hidden +
-                  (i - r * hidden);
-  // bf16 accumulation, exactly one rounding per expert add.
-  *dst = float_to_bf16_bits(bf16_bits_to_float(*dst) +
-                            bf16_bits_to_float(contrib));
+  float* dst = acc + static_cast<int64_t>(rows[r]) * hidden + (i - r * hidden);
+  *dst = __fmaf_rn(row_w[r], y[i], *dst);
+}
+
+__global__ void moe_round_bf16_kernel(uint16_t* __restrict__ out,
+                                      const float* __restrict__ acc,
+                                      int64_t n) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x +
+                    threadIdx.x;
+  if (i >= n) return;
+  out[i] = float_to_bf16_bits(acc[i]);
 }
 
 // ---- decode-slot path (the sync-free MoE, 2026-09-01) --------------------
@@ -224,14 +238,15 @@ __global__ void moe_accum_kernel(uint16_t* __restrict__ acc,
 // One block per (8-row group, slot); the block resolves its slot's expert
 // from the DEVICE route, stages the slot's activation row in smem, and each
 // warp runs the fp8_gemv core on one weight row. The host-orchestrated path
-// computes each expert's contribution through launch_scale_gemm_bf16, which
+// computes each expert's contribution through launch_scale_gemm_*, which
 // dispatches m<=4 to the SAME core — glm_moe_test's bitwise gate pins the
 // two (any change to one side's arithmetic breaks it; that gate is the
-// twin-keeping mechanism).
+// twin-keeping mechanism). Every expert is local (each rank holds a slice
+// of all of them), so there is no foreign-expert case.
 
 // The slot's matrix for `which` (0 gate, 1 up, 2 down): routed slots read
 // the ROUTE (device data — the whole point); the shared slot (j == top_k)
-// uses the launch-arg matrices. Returns false for another rank's expert.
+// uses the launch-arg matrices.
 struct SlotMatrix {
   const uint8_t* payload;
   const float* scales;
@@ -239,48 +254,41 @@ struct SlotMatrix {
   int k;
 };
 
-__device__ __forceinline__ bool resolve_slot_matrix(
+__device__ __forceinline__ SlotMatrix resolve_slot_matrix(
     int slot, int top_k, const int32_t* __restrict__ ids,
     const MoeExpertView* __restrict__ views, int which, int n_routed,
     int k_routed, int n_shared, int k_shared,
     const uint8_t* __restrict__ sh_payload,
-    const float* __restrict__ sh_scales, int begin, int count,
-    SlotMatrix* out) {
+    const float* __restrict__ sh_scales) {
   const int t = slot / (top_k + 1);
   const int j = slot - t * (top_k + 1);
   if (j < top_k) {
     const int e = ids[static_cast<size_t>(t) * top_k + j];
-    if (e < begin || e >= begin + count) return false;
-    const MoeExpertView& v = views[static_cast<size_t>(e - begin) * 3 + which];
-    *out = SlotMatrix{v.payload, v.scales, n_routed, k_routed};
-  } else {
-    *out = SlotMatrix{sh_payload, sh_scales, n_shared, k_shared};
+    const MoeExpertView& v = views[static_cast<size_t>(e) * 3 + which];
+    return SlotMatrix{v.payload, v.scales, n_routed, k_routed};
   }
-  return true;
+  return SlotMatrix{sh_payload, sh_scales, n_shared, k_shared};
 }
 
-__global__ void moe_slot_gemv_kernel(
-    const uint16_t* __restrict__ x, size_t x_stride,
+// The down projection per slot: out[slot, :] = fp32 dot(down_row, act[slot]).
+// Unrounded — the accumulation chain below owns the single rounding.
+__global__ void moe_slot_down_kernel(
+    const uint16_t* __restrict__ act, size_t act_stride,
     const int32_t* __restrict__ ids, const MoeExpertView* __restrict__ views,
-    int which, int n_routed, int k_routed, int n_shared, int k_shared,
+    int n_routed, int k_routed, int n_shared, int k_shared,
     const uint8_t* __restrict__ sh_payload, const float* __restrict__ sh_scales,
-    uint16_t* __restrict__ out, int out_stride, int slots, int top_k,
-    int begin, int count) {
+    float* __restrict__ out, int out_stride, int slots, int top_k) {
   extern __shared__ __align__(16) uint16_t sx[];
   const int n0 = blockIdx.x * fp8_gemv::kWarps;
   const int slot = blockIdx.y;
   if (slot >= slots) return;
-  SlotMatrix m;
-  if (!resolve_slot_matrix(slot, top_k, ids, views, which, n_routed, k_routed,
-                           n_shared, k_shared, sh_payload, sh_scales, begin,
-                           count, &m))
-    return;  // another rank's expert
+  const SlotMatrix m =
+      resolve_slot_matrix(slot, top_k, ids, views, /*which=*/2, n_routed,
+                          k_routed, n_shared, k_shared, sh_payload, sh_scales);
   if (n0 >= m.n) return;  // entirely outside (shared's shorter n)
-  // The activation row: gate/up consume token t's hidden; down consumes
-  // THIS SLOT's activation (each slot's act row is its own).
-  const size_t act_row = (which == 2) ? static_cast<size_t>(slot)
-                                      : static_cast<size_t>(slot / (top_k + 1));
-  fp8_gemv::stage_activations<1>(x + act_row * x_stride, x_stride, m.k, sx);
+  // The down projection consumes THIS SLOT's activation row.
+  fp8_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride,
+                                 act_stride, m.k, sx);
   __syncthreads();
   fp8_gemv::block_rows<1>(m.payload, m.scales, sx, n0, m.n, m.k,
                           out + static_cast<size_t>(slot) * out_stride,
@@ -292,8 +300,8 @@ __global__ void moe_slot_gemv_kernel(
 // moe_swiglu_clamp_kernel's math to the bf16-rounded dots in registers.
 // Bit-identical to the three-launch chain (the dots are block_rows' dots,
 // rounded to bf16 exactly where the intermediate buffers rounded them);
-// what disappears is two launches, the gate/up round trip through memory,
-// and the swiglu's pass over every foreign slot.
+// what disappears is two launches and the gate/up round trip through
+// memory.
 __global__ void moe_slot_gate_up_swiglu_kernel(
     const uint16_t* __restrict__ x, size_t x_stride,
     const int32_t* __restrict__ ids, const MoeExpertView* __restrict__ views,
@@ -302,19 +310,17 @@ __global__ void moe_slot_gate_up_swiglu_kernel(
     const float* __restrict__ sh_gate_scales,
     const uint8_t* __restrict__ sh_up_payload,
     const float* __restrict__ sh_up_scales, uint16_t* __restrict__ act,
-    int act_stride, int slots, int top_k, int begin, int count, float limit) {
+    int act_stride, int slots, int top_k, float limit) {
   extern __shared__ __align__(16) uint16_t sx[];
   const int n0 = blockIdx.x * fp8_gemv::kWarps;
   const int slot = blockIdx.y;
   if (slot >= slots) return;
-  SlotMatrix gate, up;
-  if (!resolve_slot_matrix(slot, top_k, ids, views, /*which=*/0, n_routed,
-                           k_routed, n_shared, k_shared, sh_gate_payload,
-                           sh_gate_scales, begin, count, &gate))
-    return;
-  resolve_slot_matrix(slot, top_k, ids, views, /*which=*/1, n_routed, k_routed,
-                      n_shared, k_shared, sh_up_payload, sh_up_scales, begin,
-                      count, &up);
+  const SlotMatrix gate = resolve_slot_matrix(
+      slot, top_k, ids, views, /*which=*/0, n_routed, k_routed, n_shared,
+      k_shared, sh_gate_payload, sh_gate_scales);
+  const SlotMatrix up = resolve_slot_matrix(
+      slot, top_k, ids, views, /*which=*/1, n_routed, k_routed, n_shared,
+      k_shared, sh_up_payload, sh_up_scales);
   if (n0 >= gate.n) return;
   const size_t token = static_cast<size_t>(slot / (top_k + 1));
   fp8_gemv::stage_activations<1>(x + token * x_stride, x_stride, gate.k, sx);
@@ -342,43 +348,27 @@ __global__ void moe_slot_gate_up_swiglu_kernel(
       float_to_bf16_bits(bf16_bits_to_float(t) * u);  // rounding 2
 }
 
-// The ordered decode accumulation — the host path's chain, op for op:
-// start at 0 (its memset), add each locally-owned expert ascending (one
-// bf16 rounding per add: bf16(acc + bf16(w * y))), shared LAST with
-// weight 1. Foreign experts contribute nothing on this rank; their
-// partials arrive via the FFN all-reduce (rank order after).
+// The ordered decode accumulation — moe_accum_kernel's chain, op for op:
+// start at 0 (the host path's memset), fma each expert ascending (the
+// router's id order), the shared expert last with weight 1 (fmaf(1, y, a)
+// is exactly a + y), round to bf16 once.
 __global__ void moe_slot_accum_kernel(
-    uint16_t* __restrict__ acc, const uint16_t* __restrict__ contrib,
-    const int32_t* __restrict__ ids, const float* __restrict__ weights,
-    int64_t n, int hidden, int top_k, int begin, int count) {
+    uint16_t* __restrict__ out, const float* __restrict__ contrib,
+    const float* __restrict__ weights, int64_t n, int hidden, int top_k) {
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x +
                     threadIdx.x;
   if (i >= n) return;
   const int64_t t = i / hidden;
   const int c = static_cast<int>(i - t * hidden);
   const int K = top_k;
-  const int S = K + 1;  // routed slots + shared, per token
-  const int64_t base = t * S;
+  const int64_t base = t * (K + 1);  // routed slots + shared, per token
 
-  uint16_t a = float_to_bf16_bits(0.f);  // the host path's memset start
-  for (int j = 0; j < K; ++j) {
-    const int e = ids[static_cast<size_t>(t) * K + j];
-    if (e < begin || e >= begin + count) continue;  // foreign: skip
-    // contribution = bf16(w * y) — moe_accum_kernel's exact math.
-    const uint16_t contrib_bits = float_to_bf16_bits(
-        weights[static_cast<size_t>(t) * K + j] *
-        bf16_bits_to_float(
-            contrib[static_cast<size_t>(base + j) * hidden + c]));
-    a = float_to_bf16_bits(bf16_bits_to_float(a) +
-                           bf16_bits_to_float(contrib_bits));
-  }
-  // Shared last, weight 1: bf16(1.0f * y) == y bits (exact), so the
-  // explicit multiply is elided — value-identical to the host segment.
-  const uint16_t shared_bits =
-      contrib[static_cast<size_t>(base + K) * hidden + c];
-  a = float_to_bf16_bits(bf16_bits_to_float(a) +
-                         bf16_bits_to_float(shared_bits));
-  acc[t * hidden + c] = a;
+  float a = 0.f;
+  for (int j = 0; j < K; ++j)
+    a = __fmaf_rn(weights[static_cast<size_t>(t) * K + j],
+                  contrib[static_cast<size_t>(base + j) * hidden + c], a);
+  a = __fmaf_rn(1.0f, contrib[static_cast<size_t>(base + K) * hidden + c], a);
+  out[t * hidden + c] = float_to_bf16_bits(a);
 }
 
 void check_router_args(const uint16_t* hidden, const uint16_t* gate,
@@ -446,7 +436,7 @@ void launch_moe_gather_rows(const uint16_t* src, const int32_t* rows,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void launch_moe_accum(uint16_t* acc, const uint16_t* y, const int32_t* rows,
+void launch_moe_accum(float* acc, const float* y, const int32_t* rows,
                       const float* row_weights, int n_rows, int hidden,
                       cudaStream_t stream) {
   if (n_rows <= 0) return;
@@ -459,38 +449,60 @@ void launch_moe_accum(uint16_t* acc, const uint16_t* y, const int32_t* rows,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void launch_moe_slot_gemv(
-    const uint16_t* x, size_t x_stride, const int32_t* ids,
-    const MoeExpertView* views, int which, int n_routed, int k_routed,
-    int n_shared, int k_shared, const uint8_t* sh_payload,
-    const float* sh_scales, uint16_t* out, int out_stride, int slots,
-    int top_k, int begin, int count, cudaStream_t stream) {
-  if (slots <= 0) return;
-  if (!x || !ids || !out || !sh_payload || !sh_scales)
-    throw std::invalid_argument("moe_slot_gemv: null pointer");
-  if (count > 0 && views == nullptr)
-    throw std::invalid_argument("moe_slot_gemv: null expert table");
-  if (which < 0 || which > 2)
-    throw std::invalid_argument("moe_slot_gemv: which must be 0..2");
+void launch_moe_round_bf16(uint16_t* out, const float* acc, int64_t n,
+                           cudaStream_t stream) {
+  if (n <= 0) return;
+  if (!out || !acc) throw std::invalid_argument("moe_round: null pointer");
+  const int64_t blocks = (n + kElemThreads - 1) / kElemThreads;
+  moe_round_bf16_kernel<<<static_cast<int>(blocks), kElemThreads, 0, stream>>>(
+      out, acc, n);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+namespace {
+
+void check_slot_args(const void* x, const int32_t* ids,
+                     const MoeExpertView* views, const void* out,
+                     int n_routed, int k_routed, int n_shared, int k_shared,
+                     const char* who) {
+  if (!x || !ids || !views || !out)
+    throw std::invalid_argument(std::string(who) + ": null pointer");
   if (n_routed <= 0 || k_routed <= 0 || n_shared <= 0 || k_shared <= 0)
-    throw std::invalid_argument("moe_slot_gemv: degenerate dims");
+    throw std::invalid_argument(std::string(who) + ": degenerate dims");
   // The GEMV core's contract (fp8_gemv.cuh): k a multiple of 16 so every
-  // 16-byte chunk lies inside one scale block. The shared payload is
-  // checked here; the routed payloads live in the device table and ride
-  // the loader's 256-byte alignment contract.
-  if (k_routed % fp8_gemv::kChunkBytes != 0 ||
-      !gemv::smem_fits(1, k_routed) ||
-      !fp8_gemv::shape_ok(sh_payload, 1, k_shared))
+  // 16-byte chunk lies inside one scale block. The routed payloads live in
+  // the device table and ride the loader's 256-byte alignment contract;
+  // the shared payloads are checked by the callers below.
+  if (k_routed % fp8_gemv::kChunkBytes != 0 || !gemv::smem_fits(1, k_routed))
     throw std::invalid_argument(
-        "moe_slot_gemv: k must be a multiple of 16 with 16B-aligned payloads");
+        std::string(who) + ": k must be a multiple of 16 (16B-aligned "
+                           "payloads)");
+}
+
+}  // namespace
+
+void launch_moe_slot_down(const uint16_t* act, size_t act_stride,
+                          const int32_t* ids, const MoeExpertView* views,
+                          int n_routed, int k_routed, int n_shared,
+                          int k_shared, const uint8_t* sh_payload,
+                          const float* sh_scales, float* out, int out_stride,
+                          int slots, int top_k, cudaStream_t stream) {
+  if (slots <= 0) return;
+  check_slot_args(act, ids, views, out, n_routed, k_routed, n_shared, k_shared,
+                  "moe_slot_down");
+  if (!sh_payload || !sh_scales || !fp8_gemv::shape_ok(sh_payload, 1, k_shared))
+    throw std::invalid_argument(
+        "moe_slot_down: shared payload must be 16B-aligned with k % 16 == 0");
+  if (out_stride < n_routed || out_stride < n_shared)
+    throw std::invalid_argument("moe_slot_down: out_stride below n");
   const int max_n = n_routed > n_shared ? n_routed : n_shared;
   const int max_k = k_routed > k_shared ? k_routed : k_shared;
   const dim3 grid((max_n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps,
                   static_cast<unsigned>(slots));
-  moe_slot_gemv_kernel<<<grid, fp8_gemv::kThreads,
+  moe_slot_down_kernel<<<grid, fp8_gemv::kThreads,
                          fp8_gemv::smem_bytes(1, max_k), stream>>>(
-      x, x_stride, ids, views, which, n_routed, k_routed, n_shared, k_shared,
-      sh_payload, sh_scales, out, out_stride, slots, top_k, begin, count);
+      act, act_stride, ids, views, n_routed, k_routed, n_shared, k_shared,
+      sh_payload, sh_scales, out, out_stride, slots, top_k);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -499,25 +511,18 @@ void launch_moe_slot_gate_up_swiglu(
     const MoeExpertView* views, int n_routed, int k_routed, int n_shared,
     int k_shared, const uint8_t* sh_gate_payload, const float* sh_gate_scales,
     const uint8_t* sh_up_payload, const float* sh_up_scales, uint16_t* act,
-    int act_stride, int slots, int top_k, int begin, int count, float limit,
-    cudaStream_t stream) {
+    int act_stride, int slots, int top_k, float limit, cudaStream_t stream) {
   if (slots <= 0) return;
-  if (!x || !ids || !act || !sh_gate_payload || !sh_gate_scales ||
-      !sh_up_payload || !sh_up_scales)
-    throw std::invalid_argument("moe_slot_gate_up: null pointer");
-  if (count > 0 && views == nullptr)
-    throw std::invalid_argument("moe_slot_gate_up: null expert table");
-  if (n_routed <= 0 || k_routed <= 0 || n_shared <= 0 || k_shared <= 0)
-    throw std::invalid_argument("moe_slot_gate_up: degenerate dims");
-  if (act_stride < n_routed || act_stride < n_shared)
-    throw std::invalid_argument("moe_slot_gate_up: act_stride below n");
-  if (k_routed % fp8_gemv::kChunkBytes != 0 ||
-      !gemv::smem_fits(1, k_routed) ||
+  check_slot_args(x, ids, views, act, n_routed, k_routed, n_shared, k_shared,
+                  "moe_slot_gate_up");
+  if (!sh_gate_payload || !sh_gate_scales || !sh_up_payload || !sh_up_scales ||
       !fp8_gemv::shape_ok(sh_gate_payload, 1, k_shared) ||
       !fp8_gemv::shape_ok(sh_up_payload, 1, k_shared))
     throw std::invalid_argument(
-        "moe_slot_gate_up: k must be a multiple of 16 with 16B-aligned "
-        "payloads");
+        "moe_slot_gate_up: shared payloads must be 16B-aligned with "
+        "k % 16 == 0");
+  if (act_stride < n_routed || act_stride < n_shared)
+    throw std::invalid_argument("moe_slot_gate_up: act_stride below n");
   const int max_n = n_routed > n_shared ? n_routed : n_shared;
   const int max_k = k_routed > k_shared ? k_routed : k_shared;
   const dim3 grid((max_n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps,
@@ -526,21 +531,20 @@ void launch_moe_slot_gate_up_swiglu(
                                    fp8_gemv::smem_bytes(1, max_k), stream>>>(
       x, x_stride, ids, views, n_routed, k_routed, n_shared, k_shared,
       sh_gate_payload, sh_gate_scales, sh_up_payload, sh_up_scales, act,
-      act_stride, slots, top_k, begin, count, limit);
+      act_stride, slots, top_k, limit);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void launch_moe_slot_accum(uint16_t* acc, const uint16_t* contrib,
-                           const int32_t* ids, const float* weights,
-                           int tokens, int hidden, int top_k, int begin,
-                           int count, cudaStream_t stream) {
+void launch_moe_slot_accum(uint16_t* out, const float* contrib,
+                           const float* weights, int tokens, int hidden,
+                           int top_k, cudaStream_t stream) {
   if (tokens <= 0) return;
-  if (!acc || !contrib || !ids || !weights)
+  if (!out || !contrib || !weights)
     throw std::invalid_argument("moe_slot_accum: null pointer");
   const int64_t n = static_cast<int64_t>(tokens) * hidden;
   const int64_t blocks = (n + kElemThreads - 1) / kElemThreads;
   moe_slot_accum_kernel<<<static_cast<int>(blocks), kElemThreads, 0, stream>>>(
-      acc, contrib, ids, weights, n, hidden, top_k, begin, count);
+      out, contrib, weights, n, hidden, top_k);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

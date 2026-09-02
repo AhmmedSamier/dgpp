@@ -1,13 +1,17 @@
 // Parity tests for the MoE module (M4): router kernel vs the double oracle
 // at REAL geometry (E=288, H=4096), the full expert path (router ->
 // ascending-accumulation -> shared) on small geometry, swiglu clamp edge
-// cases, accumulation-order exposure, and determinism. Tolerance design:
+// cases, accumulation-order exposure, determinism, the decode slot path's
+// bitwise pin against the host path, and the TP expert slicing (every
+// rank a slice of every expert's intermediate dim, partials folded like
+// the FFN all-reduce) against the unsliced oracle. Tolerance design:
 // the router's fp32 pipeline vs the oracle's double differs by ~1e-6
 // relative, so id swaps are certified against the biased-score gap (the
 // near-tie discipline the DSA selection audit established); the expert path
 // adds the scale-gemm mma-order gap on top (same class as scale_gemm_test's
 // strict oracle, budgeted there at 0 mismatches — here slightly loosened
 // for the extra chained roundings).
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -27,6 +31,7 @@
 #include "models/glm_moe.hpp"
 #include "models/glm_moe_layer.hpp"
 #include "models/glm_moe_reference.hpp"
+#include "models/quant_matrix.hpp"
 #include "scale_gemm_test_helpers.hpp"
 
 namespace {
@@ -229,17 +234,12 @@ SmallCase make_small_case(int E, int H, int I, int K, int tokens,
   return c;
 }
 
-void run_small_case(SmallCase& c, const char* label) {
-  std::vector<uint16_t> oracle;
-  dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
-
-  GlmMoeLayer layer(c.dev_w, c.cfg, c.tokens);
-  layer.enqueue(c.d_hidden, c.d_out, c.tokens, nullptr);
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
-
-  std::vector<uint16_t> got(static_cast<size_t>(c.tokens) * c.cfg.hidden);
-  std::memcpy(got.data(), c.d_out, got.size() * 2);
-
+// The expert-path budgets: per-element bf16 ulps against the double oracle
+// (hard 12, soft 4 on < 2% of elements) and a relative l2.
+void require_within_expert_budget(const std::vector<uint16_t>& got,
+                                  const std::vector<uint16_t>& oracle,
+                                  const char* label) {
+  require(got.size() == oracle.size(), "expert path: size mismatch");
   long hard = 0, soft = 0;
   double max_ulps = 0, sum_d2 = 0, sum_o2 = 0;
   for (size_t i = 0; i < got.size(); ++i) {
@@ -252,13 +252,28 @@ void run_small_case(SmallCase& c, const char* label) {
     if (u > 12) ++hard;
   }
   const double l2 = sum_o2 > 0 ? std::sqrt(sum_d2 / sum_o2) : 0;
+  // Report before asserting: a failing run must still yield its numbers.
+  std::printf("[ .. ] %s: max %g ulps, %ld/%zu over soft, %ld hard, l2=%.2g\n",
+              label, max_ulps, soft, got.size(), hard, l2);
   require(hard == 0, "expert path: hard ulp violations");
   require(static_cast<double>(soft) / got.size() < 0.02,
           "expert path: soft ulp budget");
   require(l2 < 4e-3, "expert path: l2 budget");
+}
+
+void run_small_case(SmallCase& c, const char* label) {
+  std::vector<uint16_t> oracle;
+  dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
+
+  GlmMoeLayer layer(c.dev_w, c.cfg, c.tokens);
+  layer.enqueue(c.d_hidden, c.d_out, c.tokens, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+  std::vector<uint16_t> got(static_cast<size_t>(c.tokens) * c.cfg.hidden);
+  std::memcpy(got.data(), c.d_out, got.size() * 2);
+  require_within_expert_budget(got, oracle, label);
 
   // Determinism: a second enqueue must be bitwise identical.
-  std::vector<uint16_t> again(got.size(), 0x7F7F);
   DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, got.size() * 2));
   layer.enqueue(c.d_hidden, c.d_out, c.tokens, nullptr);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
@@ -266,9 +281,121 @@ void run_small_case(SmallCase& c, const char* label) {
   std::memcpy(second.data(), c.d_out, second.size() * 2);
   require(std::memcmp(got.data(), second.data(), got.size() * 2) == 0,
           "expert path: second run bitwise identical");
+}
 
-  std::printf("[ OK ] %s: max %g ulps, %ld/%zu over soft, l2=%.2g\n", label,
-              max_ulps, soft, got.size(), l2);
+// One rank's slice of a SmallCase (the loader's contract, in miniature):
+// gate/up rows [rank*M, (rank+1)*M) as pointer views, down columns packed
+// into fresh device matrices — for every routed expert and the shared one.
+struct RankSlice {
+  std::vector<GlmQuantMatrix> mats;  // (E+1)*3, sliced
+  std::vector<uint8_t*> owned_payloads;
+  std::vector<float*> owned_scales;
+  GlmMoeWeights dev_w;
+  uint16_t* d_out = nullptr;
+
+  static RankSlice make(const SmallCase& c, int rank, int world) {
+    RankSlice r;
+    const int E = c.cfg.n_experts, H = c.cfg.hidden;
+    const int64_t I = c.cfg.inter, M = I / world;
+    require(M % 128 == 0, "slice test geometry: inter/world must be a "
+                          "128-multiple (the scale-grid contract)");
+    r.mats.resize(static_cast<size_t>(E + 1) * 3);
+    for (int m = 0; m < (E + 1) * 3; ++m) {
+      const GlmQuantMatrix& full = c.expert_mats[static_cast<size_t>(m)];
+      if (m % 3 != 2) {
+        r.mats[static_cast<size_t>(m)] = dgpp::quant_rows_view(full, rank * M, M);
+        continue;
+      }
+      // down [H, I] -> packed [H, M] from column rank*M.
+      uint8_t* payload = nullptr;
+      float* scales = nullptr;
+      const int64_t sb_full = (I + 127) / 128, sb_s = (M + 127) / 128;
+      const int64_t scale_rows = (H + 127) / 128;
+      DGPP_CUDA_OK(cudaMallocManaged(&payload, static_cast<size_t>(H) * M));
+      DGPP_CUDA_OK(cudaMallocManaged(&scales, scale_rows * sb_s * 4));
+      for (int64_t row = 0; row < H; ++row)
+        std::memcpy(payload + row * M, full.payload + row * I + rank * M, M);
+      for (int64_t row = 0; row < scale_rows; ++row)
+        std::memcpy(scales + row * sb_s,
+                    full.scales + row * sb_full + (rank * M) / 128, sb_s * 4);
+      r.owned_payloads.push_back(payload);
+      r.owned_scales.push_back(scales);
+      r.mats[static_cast<size_t>(m)] = GlmQuantMatrix{payload, scales, H, M};
+    }
+    r.dev_w.router_gate = c.dev_w.router_gate;
+    r.dev_w.router_bias = c.dev_w.router_bias;
+    r.dev_w.experts = r.mats.data();
+    for (int m = 0; m < 3; ++m)
+      r.dev_w.shared[m] = r.mats[static_cast<size_t>(E) * 3 + m];
+    DGPP_CUDA_OK(cudaMallocManaged(&r.d_out,
+                                   static_cast<size_t>(c.tokens) * H * 2));
+    return r;
+  }
+  void free_all() {
+    for (auto* p : owned_payloads) cudaFree(p);
+    for (auto* s : owned_scales) cudaFree(s);
+    cudaFree(d_out);
+  }
+};
+
+// The FFN all-reduce's fold (bus_fold semantics): per element, an fp32
+// chain over the ranks' bf16 partials in rank order from 0.0f, rounded to
+// bf16 once.
+std::vector<uint16_t> fold_ranks(const std::vector<std::vector<uint16_t>>& parts) {
+  std::vector<uint16_t> out(parts.at(0).size());
+  for (size_t i = 0; i < out.size(); ++i) {
+    float acc = 0.f;
+    for (const auto& p : parts) acc += bf16_bits_to_float(p[i]);
+    out[i] = float_to_bf16_bits(acc);
+  }
+  return out;
+}
+
+// One bf16 ulp at v's magnitude (7 explicit mantissa bits): v = m*2^e with
+// m in [0.5, 1) puts the leading bit at 2^(e-1), the last at 2^(e-8).
+double bf16_ulp_at(double v) {
+  int e = 0;
+  std::frexp(v == 0.0 ? 1e-30 : v, &e);
+  return std::ldexp(1.0, e - 8);
+}
+
+// The sliced fold's certification. A fixed per-element ulp budget is the
+// wrong ruler here: where the ranks' partials cancel (|sum| << |partial|),
+// each partial's OWN half-ulp of bf16 rounding on the wire is many ulps of
+// the small result — that is the bf16-on-the-wire cost the attention
+// o_proj already pays, not a slicing bug. The bound is therefore built
+// from the partials the test has in hand: every element's error against
+// the unsliced oracle must stay within the partials' rounding budget
+// (half an ulp of each partial, plus each partial's own engine-vs-double
+// gap of at most one ulp — the unsliced path measures <= 1) and half an
+// ulp of the folded result. A slicing bug (wrong scale block, wrong column
+// origin) is O(value), thousands of times this bound.
+void require_within_fold_budget(
+    const std::vector<uint16_t>& folded,
+    const std::vector<std::vector<uint16_t>>& partials,
+    const std::vector<uint16_t>& oracle, const char* label) {
+  double worst_ratio = 0;
+  long violations = 0;
+  double sum_d2 = 0, sum_o2 = 0;
+  for (size_t i = 0; i < folded.size(); ++i) {
+    const double got = bf16_bits_to_float(folded[i]);
+    const double want = bf16_bits_to_float(oracle[i]);
+    double budget = 0.5 * bf16_ulp_at(want);
+    for (const auto& p : partials)
+      budget += 1.5 * bf16_ulp_at(bf16_bits_to_float(p[i]));
+    const double err = std::abs(got - want);
+    worst_ratio = std::max(worst_ratio, err / budget);
+    if (err > budget) ++violations;
+    sum_d2 += (got - want) * (got - want);
+    sum_o2 += want * want;
+  }
+  const double l2 = sum_o2 > 0 ? std::sqrt(sum_d2 / sum_o2) : 0;
+  std::printf("[ .. ] %s: worst err/budget %.3f, %ld/%zu over budget, "
+              "l2=%.2g\n",
+              label, worst_ratio, violations, folded.size(), l2);
+  require(violations == 0, "sliced fold: element outside the partials' "
+                           "rounding budget");
+  require(l2 < 4e-3, "sliced fold: l2 budget");
 }
 
 }  // namespace
@@ -429,25 +556,23 @@ DGPP_TEST(moe_accumulation_order_is_ascending_expert) {
 // The decode fast path's pin (2026-09-01): the slot kernels must
 // reproduce the host-orchestrated path's EXACT bits at the same
 // routing — same tile arithmetic (slot GEMV vs scale_gemm at m=1), same
-// swiglu, same ascending accumulation, same shared-last add. Also pins
-// the deferred traces (pinned staging vs the host path's
-// last_ids/last_weights/last_biased) and the TP partition's
-// foreign-expert skip, and exercises both the prefill-warmed and the
-// cold (lazy table upload) entry into enqueue_decode.
+// swiglu, same ascending fp32 accumulation, same shared-last fma, same
+// single rounding. Also pins the deferred traces (pinned staging vs the
+// host path's last_ids/last_weights/last_biased), and exercises both the
+// prefill-warmed and the cold (lazy table upload) entry into
+// enqueue_decode.
 DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path) {
   struct Case {
-    int E, H, I, K, M, begin, count;
+    int E, H, I, K, M;
   };
   const Case cases[] = {
-      {8, 512, 256, 2, 1, 0, -1},   // world-1 shape, one decode row
-      {8, 512, 256, 2, 3, 0, -1},   // multi-row steps
-      {16, 1024, 512, 4, 2, 3, 5},  // TP partition: experts [3,8) local
+      {8, 512, 256, 2, 1},   // one decode row
+      {8, 512, 256, 2, 3},   // multi-row steps
+      {16, 1024, 512, 4, 2},  // wider geometry, K=4
   };
   for (const Case& cs : cases) {
     SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M,
                                   0xFACADE + cs.E + cs.M);
-    c.dev_w.expert_begin = cs.begin;
-    c.dev_w.expert_count = cs.count;
     c.alloc();
 
     // GIVEN the host-orchestrated run (which also warms the decode
@@ -505,11 +630,63 @@ DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path) {
     cudaFreeHost(pin_w);
     cudaFreeHost(pin_b);
     c.free_all();
-    std::printf(
-        "[ OK ] decode slot path E=%d H=%d I=%d K=%d M=%d partition "
-        "[%d, %d): bitwise\n",
-        cs.E, cs.H, cs.I, cs.K, cs.M, cs.begin,
-        cs.count < 0 ? cs.E : cs.begin + cs.count);
+    std::printf("[ OK ] decode slot path E=%d H=%d I=%d K=%d M=%d: bitwise\n",
+                cs.E, cs.H, cs.I, cs.K, cs.M);
+  }
+}
+
+// The TP expert slicing (2026-09-02): every rank holds every expert's
+// slice of the intermediate dim, computes its fp32 partial chain, rounds
+// once, and the FFN all-reduce folds the ranks. GIVEN a small MoE sliced
+// across `world` ranks the way the loader slices it, WHEN each rank runs
+// the layer (host path AND decode slot path — the two must stay bitwise on
+// the sliced geometry too) and the partials are folded in rank order, THEN
+// the fold sits inside the expert-path budget of the UNSLICED oracle: the
+// slice partials' roundings and the fold's are the only difference.
+DGPP_TEST(moe_sliced_ranks_fold_matches_unsliced_oracle) {
+  struct Case {
+    int E, H, I, K, M, world;
+  };
+  const Case cases[] = {
+      {8, 512, 256, 2, 3, 2},    // slice 128
+      {16, 1024, 512, 4, 2, 4},  // slice 128, four ranks
+      {8, 512, 512, 2, 4, 2},    // slice 256 (M <= 4: the slot/host pin
+                                 // needs every segment on the GEMV core)
+  };
+  for (const Case& cs : cases) {
+    SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M,
+                                  0x511CE + cs.E + cs.world);
+    c.alloc();
+    std::vector<uint16_t> oracle;
+    dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
+
+    std::vector<std::vector<uint16_t>> partials;
+    for (int rank = 0; rank < cs.world; ++rank) {
+      RankSlice slice = RankSlice::make(c, rank, cs.world);
+      GlmMoeLayer layer(slice.dev_w, c.cfg, cs.M, /*decode_slots=*/cs.M);
+      const size_t n = static_cast<size_t>(cs.M) * cs.H;
+      layer.enqueue(c.d_hidden, slice.d_out, cs.M, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::vector<uint16_t> host(n);
+      std::memcpy(host.data(), slice.d_out, n * 2);
+
+      DGPP_CUDA_OK(cudaMemset(slice.d_out, 0x7F, n * 2));
+      layer.enqueue_decode(c.d_hidden, slice.d_out, cs.M, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::vector<uint16_t> slot(n);
+      std::memcpy(slot.data(), slice.d_out, n * 2);
+      require(host == slot,
+              "sliced rank: decode slot path must be bitwise the host path");
+      partials.push_back(std::move(host));
+      slice.free_all();
+    }
+    const std::vector<uint16_t> folded = fold_ranks(partials);
+    require_within_fold_budget(
+        folded, partials, oracle,
+        ("sliced fold E=" + std::to_string(cs.E) + " I=" +
+         std::to_string(cs.I) + " world=" + std::to_string(cs.world))
+            .c_str());
+    c.free_all();
   }
 }
 

@@ -147,20 +147,20 @@ struct BoundCmp {
         quant(tag("dense"), a.dense[i], b.dense[i]);
     } else {
       const int64_t E = cfg.moe_config().n_experts;
-      const int64_t local_e = cfg.moe_config().n_experts / world;
+      const int64_t M = cfg.moe_config().inter / world;
       bytes(tag("moe.router_gate"), a.moe->router_gate, b.moe->router_gate,
             E * H * 2);
       bytes(tag("moe.router_bias"), a.moe->router_bias, b.moe->router_bias,
             E * 4);
       for (int i = 0; i < 3; ++i)
         quant(tag("moe.shared"), a.moe->shared[i], b.moe->shared[i]);
-      // The full+bind path points at the rank's range inside the full
-      // expert array; the sharded path OWNS exactly those experts.
-      ints(tag("moe.expert_begin"), a.moe->expert_begin, b.moe->expert_begin);
-      ints(tag("moe.expert_count"), a.moe->expert_count, b.moe->expert_count);
-      require(a.moe->expert_count == local_e,
-              tag("expert partition is not the whole-expert range"));
-      for (int64_t e = 0; e < local_e; ++e)
+      // Every expert, sliced: the full+bind path views/packs the rank's
+      // inter slice out of the full expert; the sharded path loaded exactly
+      // that slice. Same width on both sides, by construction — assert it
+      // once so a whole-expert resident cannot pass as "equal".
+      require(a.moe->experts[0].rows == M && b.moe->experts[0].rows == M,
+              tag("expert slice width is not inter/world"));
+      for (int64_t e = 0; e < E; ++e)
         for (int i = 0; i < 3; ++i)
           quant(tag("moe.expert"),
                 a.moe->experts[static_cast<size_t>(e) * 3 + i],

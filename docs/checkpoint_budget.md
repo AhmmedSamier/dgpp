@@ -37,7 +37,7 @@ Vision, input embedding, and MTP weights are excluded from the base decode step.
 
 | component | unique active bytes/token | placement |
 |---|---:|---|
-| routed experts (top-8 of 288) | 8.458 GB | whole experts |
+| routed experts (top-8 of 288) | 8.458 GB | TP-sharded (inter sliced) |
 | shared experts | 1.057 GB | TP-sharded |
 | dense MLP | 0.453 GB | TP-sharded |
 | KDA | 9.366 GB | TP-sharded |
@@ -49,16 +49,13 @@ Vision, input embedding, and MTP weights are excluded from the base decode step.
 
 Replicated modules are read on every rank. Their duplicate reads raise actual aggregate cluster traffic to **23.420 GB/token**; the unique-active total is an inventory value, not physical cluster traffic.
 
-For TP=4, uniformly distributed top-8 selections over contiguous expert partitions give an exact expected busiest-rank occupancy of **3.515 experts/layer** (multivariate hypergeometric), versus 2.000 on the average rank.
-The headers contain 42 routed base layers with all 288 whole experts present and equal in byte size within each layer.
+The routed experts are sliced on their intermediate dimension across the TP ranks exactly like the shared expert and the dense MLPs (since 2026-09-02; before that a rank owned 72 whole experts). Every rank therefore reads top-8 x 3 slices per MoE layer — 2.000 expert-equivalents — whatever the routing, and the per-rank view IS the critical path. The headers contain 42 routed base layers with all 288 experts present and equal in byte size within each layer.
 
 | per-rank view | GB/token | floor at 230 GB/s |
 |---|---:|---:|
-| mean rank (includes replicated modules) | 5.855 | 25.46 ms |
-| **expected synchronized critical path** | **7.457** | **32.42 ms / 30.8 token/s** |
-| worst placement (all selected experts on one rank) | 12.198 | 53.04 ms |
+| **every rank (= synchronized critical path)** | **5.855** | **25.46 ms / 39.3 token/s** |
 
-The critical path sums the busiest rank independently at every MoE layer; it does not imply that one physical rank is busiest for the whole token.
+For the record, the whole-expert partition this replaced: uniformly distributed top-8 selections over contiguous 72-expert partitions give an exact expected busiest-rank occupancy of 3.515 experts/layer (multivariate hypergeometric) versus 2.000 on the mean rank, an expected synchronized critical path of 7.457 GB/token (32.42 ms), and a worst placement of 12.198 GB/token (53.04 ms). Slicing removes both the extra bytes on the busiest rank and the wait every other rank spent on it (measured ~4.8 ms/token at the FFN boundaries before the change, 2026-09-02).
 
 This is a weight-bandwidth floor, not a throughput prediction: collectives, cache misses, routing skew/correlation, kernels, state traffic, and MTP add work. Real router traces must replace the uniform model before a performance target is frozen.
 

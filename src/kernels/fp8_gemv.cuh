@@ -136,15 +136,23 @@ __device__ __forceinline__ void row_dots(const uint8_t* __restrict__ w_row,
   gemv::warp_reduce<kRows>(acc);
 }
 
+// The output policy of one dot: bf16 (the activation dtype — one rounding
+// here) or raw fp32 (the MoE down projection's partials, which the fp32
+// accumulation chain consumes unrounded; see glm_moe.cu).
+__device__ __forceinline__ void store_dot(uint16_t* out, float v) {
+  *out = float_to_bf16_bits(v);
+}
+__device__ __forceinline__ void store_dot(float* out, float v) { *out = v; }
+
 // The block body shared by the dense and slot launchers: this block's kWarps
 // rows [n0, n0+kWarps) of an [n, k] fp8 matrix against the staged rows.
-//   out[r * out_stride + col] = bf16(acc[r])
-template <int kRows>
+//   out[r * out_stride + col] = store_dot(acc[r])  (bf16 or fp32 by OutT)
+template <int kRows, typename OutT>
 __device__ __forceinline__ void block_rows(const uint8_t* __restrict__ w,
                                            const float* __restrict__ scales,
                                            const uint16_t* __restrict__ sx,
                                            int n0, int n, int k,
-                                           uint16_t* __restrict__ out,
+                                           OutT* __restrict__ out,
                                            size_t out_stride) {
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
@@ -157,7 +165,7 @@ __device__ __forceinline__ void block_rows(const uint8_t* __restrict__ w,
   if (lane == 0) {
 #pragma unroll
     for (int r = 0; r < kRows; ++r)
-      out[static_cast<size_t>(r) * out_stride + row] = float_to_bf16_bits(acc[r]);
+      store_dot(out + static_cast<size_t>(r) * out_stride + row, acc[r]);
   }
 }
 

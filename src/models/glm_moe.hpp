@@ -69,19 +69,22 @@ struct GlmMoeConfig {
 };
 
 // Device-pointer weight view (GlmLayerStream's GlmMoeResident wires this).
+//
+// TP partition (2026-09-02, expert slicing): the router is REPLICATED and
+// scores all cfg.n_experts on every rank (selection must be rank-identical);
+// EVERY rank holds EVERY expert, sliced on the intermediate dimension —
+// gate/up rows and down columns [rank*I/world, (rank+1)*I/world), exactly as
+// the shared expert and the dense MLPs are sliced — and produces a partial
+// hidden sum for the FFN all-reduce. `experts` therefore always holds
+// n_experts triples; the slice width is the matrices' own rows/cols (world=1:
+// the full I). Slicing instead of assigning whole experts to ranks keeps the
+// per-rank bytes identical for every routing (top_k * 3 slices, always),
+// which is what removes the busiest-rank wait at the FFN boundary.
 struct GlmMoeWeights {
   const uint16_t* router_gate = nullptr;  // bf16 [n_experts, hidden]
   const float* router_bias = nullptr;     // f32 [n_experts]
   GlmQuantMatrix shared[3];               // gate, up, down (compressed)
-  const GlmQuantMatrix* experts = nullptr;  // [expert_count * 3] gate,up,down
-  // TP partition (M5): the router is REPLICATED and scores all
-  // cfg.n_experts on every rank (selection must be rank-identical); this
-  // rank executes only the contiguous id range
-  // [expert_begin, expert_begin + expert_count) of the whole-expert
-  // partition, producing a partial hidden sum for the FFN all-reduce.
-  // expert_count < 0 means "every expert" — the M4 single-rank default.
-  int expert_begin = 0;
-  int expert_count = -1;
+  const GlmQuantMatrix* experts = nullptr;  // [n_experts * 3] gate,up,down
 };
 
 // The decode path's device-side expert table entry (2026-09-01): the
@@ -89,7 +92,7 @@ struct GlmMoeWeights {
 // they indirect through must live there too. Dims stay kernel args (all
 // routed experts share them; only the shared expert's inter differs).
 // Layout-compatible with nothing — one type, one producer (the layer's
-// per-binding upload), one consumer (launch_moe_slot_gemv).
+// per-binding upload), the slot kernels its consumers.
 struct MoeExpertView {
   const uint8_t* payload = nullptr;  // E4M3 fp8 payload (GlmQuantMatrix)
   const float* scales = nullptr;     // F32 block scales

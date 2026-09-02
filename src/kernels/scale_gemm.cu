@@ -19,12 +19,13 @@ constexpr int BK = 32;
 constexpr int BK_PAD = BK + 8;  // u16 pad breaks the worst bank conflicts
 constexpr int kBlockThreads = (BN / 8) * 32;  // 8 warps, one n8 group each
 
-__global__ void scale_gemm_bf16_kernel(const uint16_t* __restrict__ act,
-                                       size_t act_stride,
-                                       const uint8_t* __restrict__ w,
-                                       const float* __restrict__ scales,
-                                       uint16_t* __restrict__ out, int m,
-                                       int n, int k) {
+template <typename OutT>
+__global__ void scale_gemm_kernel(const uint16_t* __restrict__ act,
+                                  size_t act_stride,
+                                  const uint8_t* __restrict__ w,
+                                  const float* __restrict__ scales,
+                                  OutT* __restrict__ out, int m, int n,
+                                  int k) {
   const int n0 = blockIdx.x * BN;
   const int m0 = blockIdx.y * BM;
   const int scale_cols = (k + 127) / 128;
@@ -102,7 +103,8 @@ __global__ void scale_gemm_bf16_kernel(const uint16_t* __restrict__ act,
   auto store = [&](int row_off, int col_off, float v) {
     const int gm = m0 + row_off;
     const int gn = out_col + col_off;
-    if (gm < m && gn < n) out[(size_t)gm * n + gn] = float_to_bf16_bits(v);
+    if (gm < m && gn < n)
+      fp8_gemv::store_dot(out + (size_t)gm * n + gn, v);
   };
   store(r, 0, c0);
   store(r, 1, c1);
@@ -114,13 +116,12 @@ __global__ void scale_gemm_bf16_kernel(const uint16_t* __restrict__ act,
 // warp per weight row, activations staged in dynamic smem. Same dequant
 // values as the tile kernel above, a different (deterministic) fp32
 // accumulation order — see fp8_gemv.cuh.
-template <int kRows>
-__global__ void scale_gemv_bf16_kernel(const uint16_t* __restrict__ act,
-                                       size_t act_stride,
-                                       const uint8_t* __restrict__ w,
-                                       const float* __restrict__ scales,
-                                       uint16_t* __restrict__ out, int n,
-                                       int k) {
+template <int kRows, typename OutT>
+__global__ void scale_gemv_kernel(const uint16_t* __restrict__ act,
+                                  size_t act_stride,
+                                  const uint8_t* __restrict__ w,
+                                  const float* __restrict__ scales,
+                                  OutT* __restrict__ out, int n, int k) {
   extern __shared__ __align__(16) uint16_t sx[];
   fp8_gemv::stage_activations<kRows>(act, act_stride, k, sx);
   __syncthreads();
@@ -128,14 +129,62 @@ __global__ void scale_gemv_bf16_kernel(const uint16_t* __restrict__ act,
                               k, out, static_cast<size_t>(n));
 }
 
-template <int kRows>
+template <int kRows, typename OutT>
 void launch_scale_gemv(const uint16_t* act, size_t act_stride,
-                       const uint8_t* w, const float* scales, uint16_t* out,
-                       int n, int k, cudaStream_t stream) {
+                       const uint8_t* w, const float* scales, OutT* out, int n,
+                       int k, cudaStream_t stream) {
   const dim3 grid((n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps);
-  scale_gemv_bf16_kernel<kRows>
+  scale_gemv_kernel<kRows, OutT>
       <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(kRows, k), stream>>>(
           act, act_stride, w, scales, out, n, k);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+// One dispatch for both output dtypes: the epilogue store is the ONLY
+// difference between the bf16 and fp32 products (same tiles, same GEMV
+// core, same accumulation order), so a value that rounds to bf16 in one
+// is the unrounded fp32 of the other.
+template <typename OutT>
+void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
+                       const uint8_t* w_payload, const float* w_scales,
+                       OutT* out, int m, int n, int k, cudaStream_t stream) {
+  if (m <= 0 || n <= 0) return;  // empty output by definition
+  if (!act || !w_payload || !w_scales || !out)
+    throw std::invalid_argument("scale_gemm: null pointer");
+  if (k <= 0) {
+    // Degenerate contraction: zero outputs (matches the fp64 oracle).
+    DGPP_CUDA_OK(cudaMemsetAsync(
+        out, 0, static_cast<size_t>(m) * n * sizeof(OutT), stream));
+    return;
+  }
+  // Decode-shaped calls take the bandwidth GEMV (the tile below is
+  // latency-bound at m=1 — see fp8_gemv.cuh); ragged k or an unaligned
+  // payload keeps the general tile.
+  if (m <= fp8_gemv::kMaxRows && fp8_gemv::shape_ok(w_payload, m, k)) {
+    switch (m) {
+      case 1:
+        launch_scale_gemv<1, OutT>(act, act_row_stride_elems, w_payload,
+                                   w_scales, out, n, k, stream);
+        return;
+      case 2:
+        launch_scale_gemv<2, OutT>(act, act_row_stride_elems, w_payload,
+                                   w_scales, out, n, k, stream);
+        return;
+      case 3:
+        launch_scale_gemv<3, OutT>(act, act_row_stride_elems, w_payload,
+                                   w_scales, out, n, k, stream);
+        return;
+      case 4:
+        launch_scale_gemv<4, OutT>(act, act_row_stride_elems, w_payload,
+                                   w_scales, out, n, k, stream);
+        return;
+      default:
+        break;
+    }
+  }
+  const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
+  scale_gemm_kernel<OutT><<<grid, kBlockThreads, 0, stream>>>(
+      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -145,44 +194,16 @@ void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
                             uint16_t* out, int m, int n, int k,
                             cudaStream_t stream) {
-  if (m <= 0 || n <= 0) return;  // empty output by definition
-  if (!act || !w_payload || !w_scales || !out)
-    throw std::invalid_argument("scale_gemm: null pointer");
-  if (k <= 0) {
-    // Degenerate contraction: zero outputs (matches the fp64 oracle).
-    DGPP_CUDA_OK(cudaMemsetAsync(out, 0, static_cast<size_t>(m) * n * 2,
-                                 stream));
-    return;
-  }
-  // Decode-shaped calls take the bandwidth GEMV (the tile below is
-  // latency-bound at m=1 — see fp8_gemv.cuh); ragged k or an unaligned
-  // payload keeps the general tile.
-  if (m <= fp8_gemv::kMaxRows && fp8_gemv::shape_ok(w_payload, m, k)) {
-    switch (m) {
-      case 1:
-        launch_scale_gemv<1>(act, act_row_stride_elems, w_payload, w_scales,
-                             out, n, k, stream);
-        return;
-      case 2:
-        launch_scale_gemv<2>(act, act_row_stride_elems, w_payload, w_scales,
-                             out, n, k, stream);
-        return;
-      case 3:
-        launch_scale_gemv<3>(act, act_row_stride_elems, w_payload, w_scales,
-                             out, n, k, stream);
-        return;
-      case 4:
-        launch_scale_gemv<4>(act, act_row_stride_elems, w_payload, w_scales,
-                             out, n, k, stream);
-        return;
-      default:
-        break;
-    }
-  }
-  const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
-  scale_gemm_bf16_kernel<<<grid, kBlockThreads, 0, stream>>>(
-      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k);
-  DGPP_CUDA_OK(cudaGetLastError());
+  launch_scale_gemm<uint16_t>(act, act_row_stride_elems, w_payload, w_scales,
+                              out, m, n, k, stream);
+}
+
+void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
+                           const uint8_t* w_payload, const float* w_scales,
+                           float* out, int m, int n, int k,
+                           cudaStream_t stream) {
+  launch_scale_gemm<float>(act, act_row_stride_elems, w_payload, w_scales,
+                           out, m, n, k, stream);
 }
 
 }  // namespace dgpp

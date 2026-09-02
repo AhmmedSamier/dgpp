@@ -391,19 +391,19 @@ void glm_tp_validate_geometry(const GlmTextConfig& cfg, int rank, int world) {
   // which the quotient being a 128-multiple guarantees for all ranks at
   // once. Misaligned quotients would silently mis-scale at the fold —
   // they fail here, loudly, before any load.
-  if (mc.n_experts % world != 0)
-    fail("n_routed_experts must divide by world (whole-expert shards)");
   if (cfg.intermediate_size % world != 0)
     fail("intermediate_size must divide by world (dense MLP TP)");
   if (mc.inter % world != 0)
-    fail("moe_intermediate_size must divide by world (shared expert TP)");
+    fail("moe_intermediate_size must divide by world (shared and routed "
+         "expert TP)");
   if (cfg.intermediate_size / world % 128 != 0)
     fail("intermediate_size/world must be a multiple of 128 (quantized "
          "scale-grid slice alignment — misaligned slices throw at the view "
          "seam instead of corrupting the fold)");
   if (mc.inter / world % 128 != 0)
     fail("moe_intermediate_size/world must be a multiple of 128 (quantized "
-         "scale-grid slice alignment)");
+         "scale-grid slice alignment; every routed expert and the shared "
+         "expert are sliced there)");
 }
 
 }  // namespace dgpp

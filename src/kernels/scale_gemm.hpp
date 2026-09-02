@@ -34,4 +34,14 @@ void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
                             uint16_t* out, int m, int n, int k,
                             cudaStream_t stream);
 
+// The same product with the fp32 accumulators stored UNROUNDED: out is f32
+// row-major [M, N]. bf16(out_f32[i]) == out_bf16[i] bit for bit — the two
+// launchers differ only in the epilogue store. This is the MoE down
+// projection's output (its partials feed an fp32 accumulation chain that
+// rounds to bf16 once, at the end — see models/glm_moe_layer.hpp).
+void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
+                           const uint8_t* w_payload, const float* w_scales,
+                           float* out, int m, int n, int k,
+                           cudaStream_t stream);
+
 }  // namespace dgpp

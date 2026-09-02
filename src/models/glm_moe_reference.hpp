@@ -1,9 +1,11 @@
 #pragma once
-// Double-precision oracle for the MoE module (DESIGN §7.4), mirroring the
-// transformers reference's dtype choreography (fp32 router math, bf16 expert
-// chain) while accumulating in double. The strict expert path reproduces
-// every bf16 rounding point of the engine pipeline, isolating the fp32-vs-
-// double and mma-order gaps into the parity budgets.
+// Double-precision oracle for the MoE module (DESIGN §7.4): fp32 router
+// math, the bf16 expert chain up to the activations, then the engine's
+// fp32 accumulation semantics in double — unrounded down dots, one fma per
+// expert (ascending), shared last, ONE bf16 rounding of the sum (see
+// glm_moe_layer.hpp). The strict path reproduces every bf16 rounding point
+// the engine has, isolating the fp32-vs-double and mma-order gaps into the
+// parity budgets.
 #include <cstdint>
 #include <vector>
 
@@ -44,8 +46,8 @@ void glm_moe_ref_router(const uint16_t* hidden, const uint16_t* gate,
 
 // Full expert-path oracle (strict: bf16 rounding points exactly where the
 // engine rounds): router -> per-expert swiglu MLPs in ascending order ->
-// shared expert -> final add. hidden [tokens, H] bf16 in, out [tokens, H]
-// bf16 bits out.
+// shared expert -> the chain's single rounding. hidden [tokens, H] bf16
+// in, out [tokens, H] bf16 bits out.
 void glm_moe_ref_forward(const uint16_t* hidden,
                          const GlmMoeHostWeights& w, const GlmMoeConfig& cfg,
                          int tokens, std::vector<uint16_t>& out);

@@ -33,63 +33,64 @@ void launch_moe_gather_rows(const uint16_t* src, const int32_t* rows,
                             uint16_t* dst, int n_rows, int hidden,
                             cudaStream_t stream);
 
-// acc[rows[r], c] = bf16(acc + bf16(row_w[r] * y[r, c])) — the reference's
-// per-expert contribution rounding and bf16 accumulation, one expert's
-// segment at a time (host loops experts in ascending order).
-void launch_moe_accum(uint16_t* acc, const uint16_t* y, const int32_t* rows,
+// acc[rows[r], c] = fma(row_w[r], y[r, c], acc[rows[r], c]) — the fp32
+// accumulation chain, one expert's segment at a time (the host loops
+// experts in ascending order, the shared expert last with weight 1). y is
+// the down projection's UNROUNDED fp32 output (launch_scale_gemm_f32).
+void launch_moe_accum(float* acc, const float* y, const int32_t* rows,
                       const float* row_weights, int n_rows, int hidden,
                       cudaStream_t stream);
+
+// out[i] = bf16(acc[i]) — the chain's single rounding, as the sum leaves for
+// the FFN all-reduce (bf16 on the wire).
+void launch_moe_round_bf16(uint16_t* out, const float* acc, int64_t n,
+                           cudaStream_t stream);
 
 // ---- decode-slot path (the sync-free MoE, 2026-09-01) --------------------
 //
 // The decode step's MoE without host round-trips: the router leaves
 // ids/weights on the device (ids ASCENDING per row — the router kernel's
-// contract), the slot kernels read the route from device memory and
-// early-exit foreign experts, and the accumulation reproduces the host
-// path's exact op order. Slot layout: tokens*(top_k+1) slots, slot
-// s = t*(K+1)+j; j<K is row t's routed expert j (ascending expert id),
-// j==K is the shared expert (all rows, weight 1, accumulated last).
+// contract), the slot kernels read the route from device memory, and the
+// accumulation reproduces the host path's exact op order. Slot layout:
+// tokens*(top_k+1) slots, slot s = t*(K+1)+j; j<K is row t's routed expert
+// j (ascending expert id), j==K is the shared expert (all rows, weight 1,
+// accumulated last). Every expert is local: each rank holds a slice of all
+// of them (gate/up rows, down columns of the intermediate dim), so `views`
+// is the device expert table [n_experts, 3] (gate,up,down). Routed dims
+// (n_routed, k_routed) vs the shared expert's (n_shared, k_shared); shared
+// matrices arrive as args (host-known constants, not table entries).
+// Contract: both k a multiple of 16, payloads 16B-aligned (the loader's).
+// The arithmetic is exactly launch_scale_gemm_*'s at m<=4 (same core) —
+// glm_moe_test's bitwise gate pins the equivalence.
 //
-// slot_gemv: one m=1 fp8 GEMV per slot (the fp8_gemv core: warp per weight
-// row, 16-byte loads). `views` is the device expert table [count, 3]
-// (gate,up,down); `which` selects the matrix. Routed dims (n_routed,
-// k_routed) vs the shared expert's (n_shared, k_shared — the TP-sliced
-// inter differs); shared matrices arrive as args (they are host-known
-// constants, not table entries). Contract: both k a multiple of 16,
-// payloads 16B-aligned (the loader's). The arithmetic is exactly
-// launch_scale_gemm_bf16's at m<=4 (same core) — glm_moe_test's bitwise
-// gate pins the equivalence.
-void launch_moe_slot_gemv(
-    const uint16_t* x, size_t x_stride, const int32_t* ids,
-    const MoeExpertView* views, int which, int n_routed, int k_routed,
-    int n_shared, int k_shared, const uint8_t* sh_payload,
-    const float* sh_scales, uint16_t* out, int out_stride, int slots,
-    int top_k, int begin, int count, cudaStream_t stream);
-
-// slot_gate_up_swiglu: slot_gemv(which=0), slot_gemv(which=1) and
-// swiglu_clamp in one launch — act[slot, row] = swiglu(gate_dot, up_dot)
-// with the same bf16 rounding points the three-launch chain has (the gate
-// and up dots are rounded to bf16 exactly where the intermediate buffers
-// rounded them), so the result is bit-identical; the intermediates never
-// touch memory. Gate and up share n and k (routed: the expert matrices'
-// contract; shared: the caller's).
+// slot_gate_up_swiglu: the gate and up GEMVs and the swiglu in one launch —
+// act[slot, row] = swiglu(gate_dot, up_dot) with the bf16 rounding points of
+// the three-launch chain (the dots round to bf16 exactly where the
+// intermediate buffers rounded them), so the result is bit-identical; the
+// intermediates never touch memory. Gate and up share n and k.
 void launch_moe_slot_gate_up_swiglu(
     const uint16_t* x, size_t x_stride, const int32_t* ids,
     const MoeExpertView* views, int n_routed, int k_routed, int n_shared,
     int k_shared, const uint8_t* sh_gate_payload, const float* sh_gate_scales,
     const uint8_t* sh_up_payload, const float* sh_up_scales, uint16_t* act,
-    int act_stride, int slots, int top_k, int begin, int count, float limit,
-    cudaStream_t stream);
+    int act_stride, int slots, int top_k, float limit, cudaStream_t stream);
 
-// slot_accum: per (token, element), the ordered chain
-//   out = bf16( ... bf16(bf16(0) + bf16(w_j * y_j)) ... ) + shared last
-// — exactly the host path's ascending-expert accumulation with the same
-// per-add rounding; foreign experts contribute nothing on this rank
-// (their partials arrive via the FFN all-reduce, which folds in rank
-// order after).
-void launch_moe_slot_accum(uint16_t* acc, const uint16_t* contrib,
-                           const int32_t* ids, const float* weights,
-                           int tokens, int hidden, int top_k, int begin,
-                           int count, cudaStream_t stream);
+// slot_down: out[slot, :] = fp32 dot(down rows, act[slot]) per slot,
+// UNROUNDED (the accumulation owns the single rounding). Routed slots read
+// act row 0..k_routed, the shared slot 0..k_shared.
+void launch_moe_slot_down(const uint16_t* act, size_t act_stride,
+                          const int32_t* ids, const MoeExpertView* views,
+                          int n_routed, int k_routed, int n_shared,
+                          int k_shared, const uint8_t* sh_payload,
+                          const float* sh_scales, float* out, int out_stride,
+                          int slots, int top_k, cudaStream_t stream);
+
+// slot_accum: per (token, element), the ordered fp32 chain
+//   out = bf16( fma(1, y_shared, fma(w_{K-1}, y_{K-1}, ... fma(w_0, y_0, 0))) )
+// — exactly the host path's ascending-expert accumulation (launch_moe_accum
+// per segment, then launch_moe_round_bf16).
+void launch_moe_slot_accum(uint16_t* out, const float* contrib,
+                           const float* weights, int tokens, int hidden,
+                           int top_k, cudaStream_t stream);
 
 }  // namespace dgpp

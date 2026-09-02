@@ -120,8 +120,9 @@ GlmBindReport glm_validate_text_binding(
 // sharded GlmLayerStream): both consumers must reject the same configs
 // BEFORE any bytes move. Throws std::invalid_argument naming the offending
 // dim. Checks: rank range, KDA/DSA head divisibility (via the geometry
-// validators), whole-expert divisibility, dense/shared inter divisibility,
-// and the 128-alignment of the inter quotients (the quantized scale-grid
+// validators), dense/MoE inter divisibility (the MoE inter slices the
+// shared AND every routed expert), and the 128-alignment of the inter
+// quotients (the quantized scale-grid
 // slice contract — a misaligned slice start cannot re-anchor the block
 // scales and is unrepresentable, §5.2).
 void glm_tp_validate_geometry(const GlmTextConfig& cfg, int rank, int world);
