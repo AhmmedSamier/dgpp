@@ -1164,8 +1164,16 @@ session is open throws (the pools are shared — the corruption would have
 looked like noise); every host op that moves a position pushes it to the
 device mirrors (`d_session_pos_`, `d_mtp_pos_`), so the device-driven
 graph (§9) always starts from the host's view. Decode across requests is
-time-multiplexed today (one row per step op; the KDA kernels take one
-state pointer per launch) — the row-batched form is PLAN M6 6a phase 2.
+time-multiplexed today (one request's row span per step op). The pieces
+the row-batched form needs underneath are in: every stateful decode kernel
+takes the same request-indexed row map (a dense list of active spans,
+per-row request ids selecting the actual state slot, positions with −1
+marking a padding row; `KdaRequestRows` for the KDA conv and recurrence,
+which used to take one state pointer per launch, and the map the DSA decode
+path always took — its ring update now honours the per-row id instead of
+the span ordinal), and the scheduler seam carries a fixed decode-batch
+capacity with an ordered `step_batch`. The model-wide row-batched step is
+PLAN M6 6a phase 2.
 
 Parity at real depth is chaos-limited, and the curated suite is designed
 around the measured facts, not around an aspiration of bit-parity:
@@ -1663,8 +1671,11 @@ unordered iteration, no thread arrival — so all ranks issue the same ops on
 the same slots in the same order (the §5 rule, made mechanical). Policy,
 decided with the user:
 STRICT ALTERNATION (each tick admits at most ONE queued request, then runs
-exactly one round-robin decode step — a mid-answer request never waits
-behind a burst of read-ins); FCFS admission WITHOUT head-of-line blocking
+one engine pass over the next round-robin slice of up to
+`decode_batch_capacity()` active requests — one for the scalar engines, so
+their op stream is unchanged; a row-batched engine advertises its row
+count and takes every active request in one pass — a mid-answer request
+never waits behind a burst of read-ins); FCFS admission WITHOUT head-of-line blocking
 (the oldest request that fits admits); FULL-RESERVE admission
 (`blocks_for(prompt + max_steps)` held for the request's lifetime — no
 mid-generation exhaustion, at the cost of over-reservation on early EOS);

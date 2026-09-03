@@ -507,12 +507,11 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                     int(state.total_blocks()), cfg_.block_tokens,
                     state.latent(layer), cfg_.kv_lora_rank, stream);
   // Ring update + pool compression for any pool completed by this batch.
-  dsa_kpool_decode_update(k_rows_, dim, gate_rows_, dim, w_.ape, pos,
-                          req_spans, num_requests, state.block_tables(),
-                          int(state.total_blocks()), state.tail(layer),
-                          state.index_k(layer), state.index_scale(layer),
-                          geo_.pools_per_block, kpool, dim, stream,
-                          tail_snapshots);
+  dsa_kpool_decode_update(
+      k_rows_, dim, gate_rows_, dim, w_.ape, req_ids, pos, req_spans,
+      num_requests, state.block_tables(), int(state.total_blocks()),
+      state.tail(layer), state.index_k(layer), state.index_scale(layer),
+      geo_.pools_per_block, kpool, dim, stream, tail_snapshots);
   // Fused select straight from the blocked index cache.
   dsa_select_decode(q_fp8_, w_folded_, req_ids, pos, tokens,
                     state.block_tables(), int(state.total_blocks()),

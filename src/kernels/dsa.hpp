@@ -95,16 +95,20 @@ void dsa_kpool_tail_seed(const void* k, int64_t k_stride, const void* gate,
 // the ring (with the current token overriding its ring slot, exactly the
 // reference's is_current rule) and writes the pool to the block-mapped slot.
 //   req_spans: int32 [num_requests, 2] (start, len) into the token batch;
-//   tokens of a request must be batch-contiguous; pos: [tokens] (may be -1
-//   for padding rows — skipped).
+//   this is a dense list of active spans, while req_ids selects the actual
+//   state slot (active slots need not be 0..num_requests-1). Tokens of a
+//   request must be batch-contiguous; pos: [tokens] (may be -1 for padding
+//   rows — skipped). A span whose rows are ALL padding (an unoccupied slot
+//   of a fixed-shape batch) touches nothing; its req_ids may be a sentinel.
 //   tail_snapshots (optional, speculative decode): bf16 [tokens, 2, kpool,
 //   dim]; after every batch row t that is not its request's last, the
 //   request's ring as it stands is copied to row t. Rolling a request back
 //   to `a` accepted rows = copying row (start + a - 1) over its ring.
 void dsa_kpool_decode_update(const void* k, int64_t k_stride,
                              const void* gate, int64_t gate_stride,
-                             const float* ape, const int64_t* pos,
-                             const int32_t* req_spans, int num_requests,
+                             const float* ape, const int32_t* req_ids,
+                             const int64_t* pos, const int32_t* req_spans,
+                             int num_requests,
                              const int32_t* block_tables,
                              int blocks_per_request, void* tail,
                              void* index_k, float* index_scale,

@@ -421,6 +421,7 @@ DGPP_TEST(dsa_decode_update_ring_continuation_matches_host) {
         static_cast<const uint16_t*>(dkd.p) + size_t(t) * dim, dim,
         static_cast<const uint16_t*>(dgd.p) + size_t(t) * dim, dim,
         static_cast<const float*>(dape.p),
+        static_cast<const int32_t*>(dri.p),
         static_cast<const int64_t*>(dpos.p),
         static_cast<const int32_t*>(dspans.p), 1,
         static_cast<const int32_t*>(dbt.p), 1, dtail.p, dki.p,
@@ -476,6 +477,7 @@ DGPP_TEST(dsa_decode_update_ring_continuation_matches_host) {
                 dsnaps.bytes);
   dsa_kpool_decode_update(dkd.p, dim, dgd.p, dim,
                           static_cast<const float*>(dape.p),
+                          static_cast<const int32_t*>(dri.p),
                           static_cast<const int64_t*>(dpos_all.p),
                           static_cast<const int32_t*>(dspans.p), 1,
                           static_cast<const int32_t*>(dbt.p), 1, dtail2.p,
@@ -1306,20 +1308,25 @@ DGPP_TEST(dsa_elementwise_norms_and_fold) {
   }
 }
 
-// Multi-request decode update: two requests in one batch with a padding row
-// (pos = -1, skipped) and a multi-block pool space; hard-max gates keep the
-// pool contents bitwise.
+// Multi-request decode update: two NONCONTIGUOUS request slots in one batch
+// with a padding row (pos = -1, skipped), a third span that is ENTIRELY
+// padding (an unoccupied fixed-shape slot, sentinel ids), and a multi-block
+// pool space; hard-max gates keep the pool contents bitwise. The
+// nonzero/non-dense ids pin that req_spans is a dense list of active
+// requests, not a slot index.
 DGPP_TEST(dsa_decode_update_multi_request_and_padding) {
   const int kpool = 4, dim = 128;
   const int ppb = 8;  // small blocks: 5 blocks for ~37 pools
   std::vector<float> ape(size_t(kpool) * dim);
   for (int i = 0; i < kpool * dim; ++i) ape[i] = random_f32(110, i) * 0.1f;
-  // Tokens: req0 at pos 50..55 (6 tokens, one padding at index 2), req1 at
-  // pos 30..32 (3 tokens). Pools 12 (pos 51), 13 (pos 55), 7 (pos 31)
-  // complete within the batch.
-  const int tokens = 9;
-  std::vector<int32_t> req_ids = {0, 0, 0, 0, 0, 0, 1, 1, 1};
-  std::vector<int64_t> pos = {50, 51, -1, 52, 53, 54, 30, 31, 32};
+  // Tokens: req1 at pos 50..55 (6 tokens, one padding at index 2), req3 at
+  // pos 30..32 (3 tokens), then two all-padding rows whose span names no
+  // request. Pools 12 (pos 51), 13 (pos 55), 7 (pos 31) complete within the
+  // batch.
+  const int tokens = 11;
+  constexpr int max_requests = 4;
+  std::vector<int32_t> req_ids = {1, 1, 1, 1, 1, 1, 3, 3, 3, -1, -1};
+  std::vector<int64_t> pos = {50, 51, -1, 52, 53, 54, 30, 31, 32, -1, -1};
   // NOTE: pos 51 completes pool 12 (48..51) — but its earlier members
   // (48..50) are NOT in this batch: they live in the seeded ring.
   auto k = random_bf16_bits(111, int64_t(tokens) * dim, -2, 1);
@@ -1329,10 +1336,10 @@ DGPP_TEST(dsa_decode_update_multi_request_and_padding) {
     for (int d = 0; d < dim; ++d)
       gate[size_t(t) * dim + d] = float_to_bf16_bits(dom ? 50.0f : -50.0f);
   }
-  // Seed rings with the tokens just before the batch: req0 pos 47..49,
-  // req1 pos 26..29 (their last kpool tokens before the batch).
+  // Seed rings with the tokens just before the batch: req1 pos 47..49,
+  // req3 pos 26..29 (their last kpool tokens before the batch).
   const int seed_tokens = 7;
-  std::vector<int32_t> seed_req = {0, 0, 0, 1, 1, 1, 1};
+  std::vector<int32_t> seed_req = {1, 1, 1, 3, 3, 3, 3};
   std::vector<int64_t> seed_pos = {47, 48, 49, 26, 27, 28, 29};
   auto seed_k = random_bf16_bits(112, int64_t(seed_tokens) * dim, -2, 1);
   auto seed_gate = std::vector<uint16_t>(size_t(seed_tokens) * dim);
@@ -1347,29 +1354,32 @@ DGPP_TEST(dsa_decode_update_multi_request_and_padding) {
   const int total_slots = n_blocks * ppb;
   std::vector<int32_t> bt(n_blocks);
   for (int b = 0; b < n_blocks; ++b) bt[size_t(b)] = (b * 3 + 1) % n_blocks;
-  // Both requests' rows of the block table ([max_requests, n_blocks]).
-  std::vector<int32_t> bt2(2 * n_blocks);
-  for (int b = 0; b < n_blocks; ++b) {
-    bt2[size_t(b)] = bt[size_t(b)];
-    bt2[size_t(n_blocks + b)] = bt[size_t(b)];
-  }
+  // Every slot's row of the block table ([max_requests, n_blocks]).
+  std::vector<int32_t> bt2(size_t(max_requests) * n_blocks);
+  for (int req = 0; req < max_requests; ++req)
+    for (int b = 0; b < n_blocks; ++b)
+      bt2[size_t(req) * n_blocks + b] = bt[size_t(b)];
 
   DevBuf dk(k.size() * 2), dgate(gate.size() * 2), dape(ape.size() * 4),
-      dpos(pos.size() * 8), dspans(2 * 2 * 4), dbt(bt2.size() * 4),
+      dreq(req_ids.size() * 4), dpos(pos.size() * 8),
+      dspans(3 * 2 * 4), dbt(bt2.size() * 4),
       dki(size_t(total_slots) * dim), dks(total_slots * 4),
-      dtail(2ull * 2 * kpool * dim * 2), dsk(seed_k.size() * 2),
+      dtail(size_t(max_requests) * 2 * kpool * dim * 2),
+      dsk(seed_k.size() * 2),
       dsg(seed_gate.size() * 2), dsr(seed_req.size() * 4),
       dsp(seed_pos.size() * 8);
   dk.upload(k.data(), k.size() * 2);
   dgate.upload(gate.data(), gate.size() * 2);
   dape.upload(ape.data(), ape.size() * 4);
+  dreq.upload(req_ids.data(), req_ids.size() * 4);
   dpos.upload(pos.data(), pos.size() * 8);
   dbt.upload(bt2.data(), bt2.size() * 4);
   dki.upload(std::vector<uint8_t>(size_t(total_slots) * dim, 0).data(),
              size_t(total_slots) * dim);
   dks.upload(std::vector<float>(total_slots, 0.0f).data(), total_slots * 4);
-  dtail.upload(std::vector<uint16_t>(2ull * 2 * kpool * dim, 0).data(),
-               2ull * 2 * kpool * dim * 2);
+  dtail.upload(
+      std::vector<uint16_t>(size_t(max_requests) * 2 * kpool * dim, 0).data(),
+      size_t(max_requests) * 2 * kpool * dim * 2);
   dsk.upload(seed_k.data(), seed_k.size() * 2);
   dsg.upload(seed_gate.data(), seed_gate.size() * 2);
   dsr.upload(seed_req.data(), seed_req.size() * 4);
@@ -1379,19 +1389,21 @@ DGPP_TEST(dsa_decode_update_multi_request_and_padding) {
                       static_cast<const int32_t*>(dsr.p),
                       static_cast<const int64_t*>(dsp.p), seed_tokens,
                       dtail.p, kpool, dim, 0);
-  // spans: req0 = tokens [0, 6), req1 = tokens [6, 9).
-  std::vector<int32_t> spans = {0, 6, 6, 3};
+  // Dense active spans: slot 1 = tokens [0, 6), slot 3 = [6, 9), and the
+  // unoccupied span [9, 11) that must touch no ring and no pool.
+  std::vector<int32_t> spans = {0, 6, 6, 3, 9, 2};
   dspans.upload(spans.data(), spans.size() * 4);
   dsa_kpool_decode_update(dk.p, dim, dgate.p, dim,
                           static_cast<const float*>(dape.p),
+                          static_cast<const int32_t*>(dreq.p),
                           static_cast<const int64_t*>(dpos.p),
-                          static_cast<const int32_t*>(dspans.p), 2,
+                          static_cast<const int32_t*>(dspans.p), 3,
                           static_cast<const int32_t*>(dbt.p), n_blocks,
                           dtail.p, dki.p, static_cast<float*>(dks.p), ppb,
                           kpool, dim, 0);
 
   // Host expectation: simulate ring + completions.
-  std::vector<uint16_t> tail(2ull * 2 * kpool * dim, 0);
+  std::vector<uint16_t> tail(size_t(max_requests) * 2 * kpool * dim, 0);
   auto stash = [&](int req, int64_t p, const uint16_t* krow,
                    const uint16_t* grow) {
     const int slot = int(p % kpool);
@@ -1434,7 +1446,7 @@ DGPP_TEST(dsa_decode_update_multi_request_and_padding) {
     stash(req, p, &k[size_t(t) * dim], &gate[size_t(t) * dim]);
   }
 
-  std::vector<uint16_t> got_tail(2ull * 2 * kpool * dim);
+  std::vector<uint16_t> got_tail(size_t(max_requests) * 2 * kpool * dim);
   std::vector<uint8_t> got_kk(size_t(total_slots) * dim);
   std::vector<float> got_ss(total_slots, 0.0f);
   cudaDeviceSynchronize();

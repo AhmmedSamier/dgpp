@@ -33,7 +33,9 @@
 //     mid-generation; the cost is reserved-but-unused blocks when a
 //     request EOSes early (the grow-on-demand + shed evolution is
 //     documented in the Stage 2b record);
-//   * round-robin decode over active requests, by arrival order;
+//   * round-robin decode over active requests, by arrival order; engines
+//     advertise how many requests one physical pass can carry (one for the
+//     eager engine, all occupied rows for the row-batched graph);
 //   * cancellation is deterministic (cancel_after N tokens) — Stage 4's
 //     client disconnects map onto the same retire path;
 //   * retirement frees the slot and blocks immediately; a queued
@@ -42,12 +44,11 @@
 //     LOUD admission deadlock (the pool is sized below the smallest
 //     reservation — an operator error, never papered over).
 //
-// WHAT THIS IS NOT (yet): batched decode. Steps are time-multiplexed
-// (one request per op) — batching multiple requests' rows into one step
-// needs per-row state indexing in the KDA recurrence (the DESIGN §9 MTP
-// state-index surgery) and is a COMMITTED follow-up stage; the policy
-// above is unchanged by op granularity, so that stage changes only what
-// one step contains.
+// BATCH GRANULARITY: the policy is independent of the engine's physical
+// step width. Scalar engines advertise one and preserve the original
+// time-multiplexed op stream. A row-batched engine advertises a larger
+// bound; one tick then hands it the next round-robin slice in one call and
+// applies the returned token batches in that same canonical order.
 //
 // STAGE 4 EVOLUTION (the service surface; additive — the manifest path
 // is untouched by construction, and every gate below still pins it):
@@ -114,6 +115,17 @@ class SchedulerEngine {
   // order. Must return at least one nonnegative token. The engine owns its
   // pending input token(s), which lets a recorded graph feed itself.
   virtual std::vector<int32_t> step(int req) = 0;
+  // Maximum number of independent request slots one physical decode pass
+  // can advance. Scalar engines inherit one. A row-batched graph overrides
+  // this together with step_batch(); the value must stay fixed for the
+  // engine's lifetime and cannot exceed max_concurrent_requests().
+  virtual int decode_batch_capacity() const { return 1; }
+  // Advances `reqs` in order and returns one token vector per request in the
+  // same order. The default deliberately lowers to scalar step() calls, so
+  // existing engines keep their exact op stream. Batch-capable engines
+  // override this method with one physical pass.
+  virtual std::vector<std::vector<int32_t>> step_batch(
+      const std::vector<int>& reqs);
   // Retires the slot: blocks return to the pool; the slot may reopen.
   virtual void close(int req) = 0;
 };
@@ -184,10 +196,11 @@ class Scheduler {
   // terminal — a late cancel is a no-op, never an error.
   bool cancel(const std::string& id);
 
-  // One policy quantum: the cancel sweep, at most one admission, exactly
-  // one decode step. Returns false when nothing is pending AFTER the
-  // tick — the final retirement may ride on the false. Throws on
-  // admission deadlock exactly like run_to_completion().
+  // One policy quantum: the cancel sweep, at most one admission, then one
+  // engine pass over up to decode_batch_capacity() active requests. Returns
+  // false when nothing is pending AFTER the tick — the final retirement may
+  // ride on the false. Throws on admission deadlock exactly like
+  // run_to_completion().
   bool tick();
 
   // Any queued or active request remains.
@@ -233,7 +246,7 @@ class Scheduler {
   void validate_new(const SchedulerRequest& request) const;
   int queued_count() const;
   void admit(int arrival);
-  void step_one(int arrival);
+  void step_batch(const std::vector<int>& arrivals);
   // Appends one token and applies terminal conditions in their canonical
   // order. Returns true when the request retired.
   bool append_token(int arrival, int32_t token);
@@ -252,6 +265,7 @@ class Scheduler {
   int deferred_logged_ = -1;       // arrival of the current deferral log
   SchedulerObserver* observer_ = nullptr;
   int queue_limit_ = 0;            // 0 = unbounded
+  int decode_batch_capacity_ = 1;  // fixed engine pass width
   int64_t tokens_generated_ = 0;   // cumulative on_token counter
 };
 

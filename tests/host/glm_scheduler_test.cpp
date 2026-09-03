@@ -43,10 +43,12 @@ void require(bool cond, const std::string& what) {
 // block reservations, and the op stream the tests pin.
 class FakeEngine : public SchedulerEngine {
  public:
-  FakeEngine(int slots, int64_t total_blocks, int64_t block_tokens)
+  FakeEngine(int slots, int64_t total_blocks, int64_t block_tokens,
+             int batch_capacity = 1)
       : slots_(slots),
         total_blocks_(total_blocks),
-        block_tokens_(block_tokens) {}
+        block_tokens_(block_tokens),
+        batch_capacity_(batch_capacity) {}
 
   // Arms `slot`'s NEXT scalar episode: prefill returns tokens[0], then each
   // step returns one following token.
@@ -68,6 +70,9 @@ class FakeEngine : public SchedulerEngine {
   }
 
   const std::vector<std::string>& ops() const { return ops_; }
+  const std::vector<std::vector<int>>& batch_calls() const {
+    return batch_calls_;
+  }
   std::string op_stream() const {
     std::string s;
     for (const std::string& op : ops_) {
@@ -78,6 +83,7 @@ class FakeEngine : public SchedulerEngine {
   }
 
   int max_concurrent_requests() const override { return slots_; }
+  int decode_batch_capacity() const override { return batch_capacity_; }
   int64_t pool_blocks_total() const override { return total_blocks_; }
   int64_t pool_blocks_in_use() const override {
     int64_t sum = 0;
@@ -129,6 +135,12 @@ class FakeEngine : public SchedulerEngine {
     return out;
   }
 
+  std::vector<std::vector<int32_t>> step_batch(
+      const std::vector<int>& reqs) override {
+    batch_calls_.push_back(reqs);
+    return SchedulerEngine::step_batch(reqs);
+  }
+
   void close(int req) override {
     require(live_.count(req) != 0,
             "fake: close on unopened slot " + std::to_string(req));
@@ -156,9 +168,11 @@ class FakeEngine : public SchedulerEngine {
   int slots_;
   int64_t total_blocks_;
   int64_t block_tokens_;
+  int batch_capacity_ = 1;
   std::map<int, std::vector<Episode>> episodes_;
   std::map<int, Live> live_;
   std::vector<std::string> ops_;
+  std::vector<std::vector<int>> batch_calls_;
 };
 
 SchedulerRequest make_request(const std::string& id, int prompt_len,
@@ -218,6 +232,64 @@ DGPP_TEST(scheduler_strictAlternation_pinnedOpSequence) {
   require(ids_joined(sched.results()[0].generated) == "1,2,3", "a ids");
   require(ids_joined(sched.results()[1].generated) == "4,5,6", "b ids");
   require(ids_joined(sched.results()[2].generated) == "7,8,9", "c ids");
+}
+
+DGPP_TEST(scheduler_batchEngine_stepsRoundRobinSliceInOnePass) {
+  // GIVEN a two-row engine and two requests. Strict admission still opens
+  // at most one request per tick; once both are active, one physical pass
+  // receives both slots in round-robin order.
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4,
+                    /*batch_capacity=*/2);
+  engine.arm(0, {10, 11, 12}, /*max_steps=*/3);  // a
+  engine.arm(1, {20, 21, 22}, /*max_steps=*/3);  // b
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 5, 3));
+  sched.submit(make_request("b", 5, 3));
+
+  sched.run_to_completion();
+
+  // Tick 1 carries a. Tick 2 admits b, then rotates from a to [b,a] in one
+  // call (a retires independently at its cap). Tick 3 carries b alone.
+  const std::vector<std::vector<int>> want_batches = {{0}, {1, 0}, {1}};
+  require(engine.batch_calls() == want_batches,
+          "batch engine did not receive the canonical round-robin slices");
+  require(ids_joined(sched.results()[0].generated) == "10,11,12",
+          "batched a transcript");
+  require(ids_joined(sched.results()[1].generated) == "20,21,22",
+          "batched b transcript");
+}
+
+DGPP_TEST(scheduler_batchEngine_capacityBelowActive_rotatesFairly) {
+  // GIVEN a three-slot engine whose physical pass carries only two rows.
+  // Once three requests are active, each tick advances the next two in
+  // arrival rotation and the cursor lands on the slice's last member, so
+  // every request is stepped in two of every three ticks.
+  FakeEngine engine(/*slots=*/3, /*total_blocks=*/100, /*block_tokens=*/4,
+                    /*batch_capacity=*/2);
+  engine.arm(0, {10, 11, 12, 13, 14}, /*max_steps=*/5);  // a
+  engine.arm(1, {20, 21, 22, 23, 24}, /*max_steps=*/5);  // b
+  engine.arm(2, {30, 31, 32, 33, 34}, /*max_steps=*/5);  // c
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 5, 5));
+  sched.submit(make_request("b", 5, 5));
+  sched.submit(make_request("c", 5, 5));
+
+  sched.run_to_completion();
+
+  // Tick 1: admit a, step {a}. Tick 2: admit b, rotate from a: {b, a}.
+  // Tick 3: admit c, rotate from a: {b, c}. Tick 4: from c: {a, b}.
+  // Tick 5: from b: {c, a} — a reaches its cap here. Tick 6: {b, c}; b
+  // retires. Tick 7: {c}; c retires.
+  const std::vector<std::vector<int>> want_batches = {
+      {0}, {1, 0}, {1, 2}, {0, 1}, {2, 0}, {1, 2}, {2}};
+  require(engine.batch_calls() == want_batches,
+          "capacity-2 slices did not rotate fairly over three requests");
+  require(ids_joined(sched.results()[0].generated) == "10,11,12,13,14",
+          "rotated a transcript");
+  require(ids_joined(sched.results()[1].generated) == "20,21,22,23,24",
+          "rotated b transcript");
+  require(ids_joined(sched.results()[2].generated) == "30,31,32,33,34",
+          "rotated c transcript");
 }
 
 DGPP_TEST(scheduler_poolBudget_defersAdmissionUntilPeerRetires) {

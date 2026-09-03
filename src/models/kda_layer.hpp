@@ -39,6 +39,17 @@ struct KdaSpeculativeSinks {
   KdaConvSnapshots conv;
 };
 
+// State layout for a request-indexed decode batch. `recurrent_state` and
+// `conv_state` passed to enqueue() point at this layer's state in slot 0;
+// these strides select the same layer in subsequent request slots.
+struct KdaLayerBatch {
+  KdaRequestRows rows;
+  int64_t recurrent_request_stride_elems = 0;
+  int64_t conv_request_stride_elems = 0;
+
+  bool enabled() const { return rows.num_requests > 0; }
+};
+
 struct KdaLayerWeights {
   const void* in_proj = nullptr;
   const void* f_b = nullptr;
@@ -82,11 +93,16 @@ class KdaLayer {
   //   spec:            optional post-row state snapshot sinks (speculative
   //                    verify rows; rows > accepted are rolled back by the
   //                    caller from these).
+  //   batch:           optional request-indexed decode layout. When enabled,
+  //                    the state pointers name this layer in slot 0 and the
+  //                    request strides select each row span's actual slot;
+  //                    omitted for prefill and scalar decode.
   void enqueue(const void* hidden_in, float* recurrent_state,
                uint16_t* conv_state, int conv_state_width, void* out,
                int tokens, cudaStream_t stream,
                WeightPrefetcher* prefetch = nullptr,
-               const KdaSpeculativeSinks& spec = {});
+               const KdaSpeculativeSinks& spec = {},
+               const KdaLayerBatch& batch = {});
 
   // Bytes of the bf16 output projection [hidden, local_proj].
   size_t o_proj_bytes() const {

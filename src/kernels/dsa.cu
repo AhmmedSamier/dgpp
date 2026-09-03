@@ -515,14 +515,19 @@ __global__ void kpool_tail_seed_kernel(const uint16_t* k, int64_t k_stride,
 
 __global__ void kpool_decode_update_kernel(
     const uint16_t* k, int64_t k_stride, const uint16_t* gate,
-    int64_t gate_stride, const float* ape, const int64_t* pos,
-    const int32_t* req_spans, const int32_t* block_tables,
+    int64_t gate_stride, const float* ape, const int32_t* req_ids,
+    const int64_t* pos, const int32_t* req_spans,
+    const int32_t* block_tables,
     int blocks_per_request, uint16_t* tail, uint8_t* index_k,
     float* index_scale, int pools_per_block, int kpool, int dim,
     uint16_t* tail_snapshots) {
-  const int req = blockIdx.x;
-  const int t0 = req_spans[req * 2];
-  const int t1 = t0 + req_spans[req * 2 + 1];
+  const int span = blockIdx.x;
+  const int t0 = req_spans[span * 2];
+  const int t1 = t0 + req_spans[span * 2 + 1];
+  int first_real = t0;
+  while (first_real < t1 && pos[first_real] < 0) ++first_real;
+  if (first_real == t1) return;
+  const int req = req_ids[first_real];
   const int d = threadIdx.x;
   extern __shared__ float xs[];  // [dim]
   const int ring_elems = 2 * kpool * dim;
@@ -1370,8 +1375,9 @@ void dsa_kpool_tail_seed(const void* k, int64_t k_stride, const void* gate,
 
 void dsa_kpool_decode_update(const void* k, int64_t k_stride,
                              const void* gate, int64_t gate_stride,
-                             const float* ape, const int64_t* pos,
-                             const int32_t* req_spans, int num_requests,
+                             const float* ape, const int32_t* req_ids,
+                             const int64_t* pos, const int32_t* req_spans,
+                             int num_requests,
                              const int32_t* block_tables,
                              int blocks_per_request, void* tail,
                              void* index_k, float* index_scale,
@@ -1381,10 +1387,11 @@ void dsa_kpool_decode_update(const void* k, int64_t k_stride,
   kpool_decode_update_kernel<<<unsigned(num_requests), 128,
                                dim * sizeof(float), stream>>>(
       static_cast<const uint16_t*>(k), k_stride,
-      static_cast<const uint16_t*>(gate), gate_stride, ape, pos, req_spans,
-      block_tables, blocks_per_request, static_cast<uint16_t*>(tail),
-      static_cast<uint8_t*>(index_k), index_scale, pools_per_block, kpool,
-      dim, static_cast<uint16_t*>(tail_snapshots));
+      static_cast<const uint16_t*>(gate), gate_stride, ape, req_ids, pos,
+      req_spans, block_tables, blocks_per_request,
+      static_cast<uint16_t*>(tail), static_cast<uint8_t*>(index_k),
+      index_scale, pools_per_block, kpool, dim,
+      static_cast<uint16_t*>(tail_snapshots));
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

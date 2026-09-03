@@ -40,6 +40,20 @@ struct KdaConvSnapshots {
   int64_t stride_elems = 0;  // >= channels * state_width (bf16 elems)
 };
 
+// A decode batch's device-side row map. Spans are a dense list of active
+// requests, not request-slot indexed: span i is (start, length) in the row
+// batch, every non-padding row in that span carries the same request id, and
+// a negative position marks a fixed-shape padding row. The kernels obtain the
+// state slot from request_ids[start..start+length), so active slots may be any
+// subset (for example {1, 6}) without empty spans for the slots between them.
+// Rows for one request must be contiguous because its recurrence is ordered.
+struct KdaRequestRows {
+  const int32_t* request_ids = nullptr;  // device [rows]
+  const int64_t* positions = nullptr;    // device [rows], -1 = padding
+  const int32_t* spans = nullptr;        // device [num_requests, 2]
+  int num_requests = 0;
+};
+
 // Causal depthwise short conv over the merged q|k|v channels with silu
 // activation, matching the reference's runtime-merged causal_conv1d call.
 //   src:            bf16 [tokens, channels], row stride src_row_stride elems
@@ -57,6 +71,18 @@ void kda_causal_conv_silu_bf16(const void* src, int64_t src_row_stride,
                                int channels, int conv_width,
                                cudaStream_t stream,
                                const KdaConvSnapshots& snap = {});
+
+// Request-indexed decode form. `conv_states` is the layer's state for slot 0
+// and request_state_stride is the distance between slots in bf16 elements.
+// Each active span rolls only its selected slot; padding rows write zero to
+// dst and leave all state untouched. Snapshot row indices are global batch
+// row indices, which lets a later per-request commit select its own row.
+void kda_causal_conv_silu_bf16_batched(
+    const void* src, int64_t src_row_stride, const void* weight,
+    void* conv_states, int64_t request_state_stride, int state_width,
+    void* dst, int rows, int channels, int conv_width,
+    const KdaRequestRows& requests, cudaStream_t stream,
+    const KdaConvSnapshots& snap = {});
 
 // Gated RMSNorm with sigmoid gate (reference o_norm: FusedRMSNormGated,
 // activation="sigmoid"): y = rmsnorm(x) * w * sigmoid(gate), fp32 internal.
@@ -81,5 +107,18 @@ void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
                        int tokens, int heads, int k_dim, int v_dim,
                        float lower_bound, float scale, cudaStream_t stream,
                        const KdaStateSnapshots& snap = {});
+
+// Request-indexed decode form. `states` is this layer's recurrent state for
+// slot 0 and request_state_stride is the distance between slots in fp32
+// elements. Spans run independently in one launch; rows within each span run
+// sequentially against that request's register-resident state. Padding rows
+// produce zero output and do not advance state.
+void kda_recurrent_fwd_batched(
+    const void* qkv, const void* g_raw, const void* beta_raw,
+    int64_t beta_row_stride, const float* a_log, const float* dt_bias,
+    float* states, int64_t request_state_stride, void* out, int rows,
+    int heads, int k_dim, int v_dim, float lower_bound, float scale,
+    const KdaRequestRows& requests, cudaStream_t stream,
+    const KdaStateSnapshots& snap = {});
 
 }  // namespace dgpp

@@ -29,6 +29,8 @@ namespace {
 using namespace dgpp::kda_test;
 using dgpp::kda_causal_conv_silu_bf16;
 using dgpp::kda_recurrent_fwd;
+using dgpp::KdaLayerBatch;
+using dgpp::KdaRequestRows;
 
 ptrdiff_t byte_diff(const void* a, const void* b) {
   return reinterpret_cast<const uint8_t*>(a) - reinterpret_cast<const uint8_t*>(b);
@@ -436,6 +438,157 @@ DGPP_TEST(kda_chunked_vs_unchunked_recurrence_is_bitwise) {
   require_bitwise("chunked recurrent state", st_a.data(), st_b.data(),
                   state_a.bytes);
   require_bitwise("chunked conv state", cv_a.data(), cv_b.data(), conv_a.bytes);
+}
+
+// ---------------------------------------------------------------------------
+// Request-indexed row batch: noncontiguous slots, padding, and snapshots
+// ---------------------------------------------------------------------------
+
+DGPP_TEST(kda_layer_requestIndexedBatch_matchesIndependentRequestsBitwise) {
+  cudaStream_t s = test_stream();
+  KdaConfig cfg;
+  cfg.hidden = 64;
+  cfg.heads = 4;
+  cfg.head_dim = 32;
+  cfg.num_kda_layers = 1;
+  cfg.spec_width = 0;
+  const KdaGeometry g = KdaGeometry::from_config(cfg);
+  constexpr int rows = 6;
+  constexpr int slots = 3;
+  const int64_t rec_elems = static_cast<int64_t>(g.recurrent_elems);
+  const int64_t conv_elems =
+      static_cast<int64_t>(g.conv_channels) * g.conv_hist;
+
+  TestWeights tw = TestWeights::random(cfg, 0xB471u);
+  DeviceWeights dw(tw);
+  LayerEnv env(cfg, rows, s);
+  KdaLayer layer(env.arena, env.gemm, dw.views(), cfg, rows, env.ws.p,
+                 env.ws.bytes);
+  for (int n : {1, 2, rows})
+    if (!layer.prepare(n)) throw std::runtime_error("batch GEMM plan");
+
+  const std::vector<uint16_t> hidden =
+      random_bf16_bits(0xB472u, int64_t(rows) * cfg.hidden, -2, 0);
+  const std::vector<float> rec_init =
+      random_f32_uniform(0xB473u, int64_t(slots) * rec_elems, 0.05f);
+  const std::vector<uint16_t> conv_init =
+      random_bf16_normal(0xB474u, int64_t(slots) * conv_elems, 0.25f);
+  DevBuf d_hidden(hidden.size() * 2);
+  d_hidden.upload(hidden.data(), hidden.size() * 2);
+  DevBuf rec_batch(rec_init.size() * 4), rec_seq(rec_init.size() * 4),
+      conv_batch(conv_init.size() * 2), conv_seq(conv_init.size() * 2),
+      out_batch(int64_t(rows) * cfg.hidden * 2),
+      out_seq(int64_t(rows) * cfg.hidden * 2),
+      rec_snaps(int64_t(rows) * rec_elems * 4),
+      conv_snaps(int64_t(rows) * conv_elems * 2);
+  rec_batch.upload(rec_init.data(), rec_init.size() * 4);
+  rec_seq.upload(rec_init.data(), rec_init.size() * 4);
+  conv_batch.upload(conv_init.data(), conv_init.size() * 2);
+  conv_seq.upload(conv_init.data(), conv_init.size() * 2);
+  DGPP_CUDA_OK(cudaMemsetAsync(out_batch.p, 0, out_batch.bytes, s));
+  DGPP_CUDA_OK(cudaMemsetAsync(out_seq.p, 0, out_seq.bytes, s));
+  DGPP_CUDA_OK(cudaMemsetAsync(rec_snaps.p, 0xA5, rec_snaps.bytes, s));
+  DGPP_CUDA_OK(cudaMemsetAsync(conv_snaps.p, 0xA5, conv_snaps.bytes, s));
+
+  // Dense span list, actual slots {0, 2}. Row 1 pads slot 0; it must not
+  // advance state. Slot 1 is absent and must remain byte-for-byte untouched.
+  // Span 2 (rows 4..5) is an UNOCCUPIED fixed-shape slot: every row padding,
+  // request id a sentinel the kernels must never turn into a state pointer.
+  const std::vector<int32_t> req_ids = {0, 0, 2, 2, -1, -1};
+  const std::vector<int64_t> positions = {7, -1, 11, 12, -1, -1};
+  const std::vector<int32_t> spans = {0, 2, 2, 2, 4, 2};
+  DevBuf d_req(req_ids.size() * 4), d_pos(positions.size() * 8),
+      d_spans(spans.size() * 4);
+  d_req.upload(req_ids.data(), req_ids.size() * 4);
+  d_pos.upload(positions.data(), positions.size() * 8);
+  d_spans.upload(spans.data(), spans.size() * 4);
+
+  KdaLayerBatch batch;
+  batch.rows = KdaRequestRows{d_req.as<int32_t>(), d_pos.as<int64_t>(),
+                              d_spans.as<int32_t>(), 3};
+  batch.recurrent_request_stride_elems = rec_elems;
+  batch.conv_request_stride_elems = conv_elems;
+  dgpp::KdaSpeculativeSinks snapshots;
+  snapshots.recurrent = {rec_snaps.as<float>(), rec_elems};
+  snapshots.conv = {conv_snaps.p, conv_elems};
+
+  // WHEN all six fixed rows run in one layer call,
+  layer.enqueue(d_hidden.p, rec_batch.as<float>(), conv_batch.as<uint16_t>(),
+                g.conv_hist, out_batch.p, rows, s, nullptr, snapshots, batch);
+
+  // and the real rows run independently against their selected slots,
+  uint16_t* hidden_d = d_hidden.as<uint16_t>();
+  uint16_t* out_d = out_seq.as<uint16_t>();
+  layer.enqueue(hidden_d, rec_seq.as<float>(), conv_seq.as<uint16_t>(),
+                g.conv_hist, out_d, 1, s);
+  layer.enqueue(hidden_d + int64_t(2) * cfg.hidden,
+                rec_seq.as<float>() + int64_t(2) * rec_elems,
+                conv_seq.as<uint16_t>() + int64_t(2) * conv_elems,
+                g.conv_hist, out_d + int64_t(2) * cfg.hidden, 1, s);
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  std::vector<float> slot2_after_first(static_cast<size_t>(rec_elems));
+  std::vector<uint16_t> conv2_after_first(static_cast<size_t>(conv_elems));
+  DGPP_CUDA_OK(cudaMemcpy(slot2_after_first.data(),
+                          rec_seq.as<float>() + int64_t(2) * rec_elems,
+                          size_t(rec_elems) * 4, cudaMemcpyDeviceToHost));
+  DGPP_CUDA_OK(cudaMemcpy(conv2_after_first.data(),
+                          conv_seq.as<uint16_t>() + int64_t(2) * conv_elems,
+                          size_t(conv_elems) * 2, cudaMemcpyDeviceToHost));
+  layer.enqueue(hidden_d + int64_t(3) * cfg.hidden,
+                rec_seq.as<float>() + int64_t(2) * rec_elems,
+                conv_seq.as<uint16_t>() + int64_t(2) * conv_elems,
+                g.conv_hist, out_d + int64_t(3) * cfg.hidden, 1, s);
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+
+  // THEN every visible real-row output and every slot state is identical;
+  // padding output is zero (rows 1, 4, 5 of want_out were never written),
+  // and snapshots use GLOBAL row indices (0 and 2).
+  std::vector<uint16_t> got_out(size_t(rows) * cfg.hidden);
+  std::vector<uint16_t> want_out(got_out.size());
+  std::vector<float> got_rec(rec_init.size()), want_rec(rec_init.size());
+  std::vector<uint16_t> got_conv(conv_init.size()), want_conv(conv_init.size());
+  std::vector<float> got_rec_snaps(size_t(rows) * rec_elems);
+  std::vector<uint16_t> got_conv_snaps(size_t(rows) * conv_elems);
+  out_batch.download(got_out.data(), out_batch.bytes);
+  out_seq.download(want_out.data(), out_seq.bytes);
+  rec_batch.download(got_rec.data(), rec_batch.bytes);
+  rec_seq.download(want_rec.data(), rec_seq.bytes);
+  conv_batch.download(got_conv.data(), conv_batch.bytes);
+  conv_seq.download(want_conv.data(), conv_seq.bytes);
+  rec_snaps.download(got_rec_snaps.data(), rec_snaps.bytes);
+  conv_snaps.download(got_conv_snaps.data(), conv_snaps.bytes);
+  require_bitwise("request-indexed outputs", got_out.data(), want_out.data(),
+                  got_out.size() * 2);
+  require_bitwise("request-indexed recurrent states", got_rec.data(),
+                  want_rec.data(), got_rec.size() * 4);
+  require_bitwise("request-indexed conv states", got_conv.data(),
+                  want_conv.data(), got_conv.size() * 2);
+  require_bitwise("slot0 recurrent snapshot at global row 0",
+                  want_rec.data(), got_rec_snaps.data(), size_t(rec_elems) * 4);
+  require_bitwise("slot0 conv snapshot at global row 0", want_conv.data(),
+                  got_conv_snaps.data(), size_t(conv_elems) * 2);
+  require_bitwise("slot2 recurrent snapshot at global row 2",
+                  slot2_after_first.data(),
+                  got_rec_snaps.data() + int64_t(2) * rec_elems,
+                  size_t(rec_elems) * 4);
+  require_bitwise("slot2 conv snapshot at global row 2",
+                  conv2_after_first.data(),
+                  got_conv_snaps.data() + int64_t(2) * conv_elems,
+                  size_t(conv_elems) * 2);
+  // Only a non-last REAL row snapshots: the padding row 1, the last real
+  // row 3 and the unoccupied span's rows 4..5 keep their 0xA5 fill.
+  const std::vector<uint8_t> rec_fill(size_t(rec_elems) * 4, 0xA5);
+  const std::vector<uint8_t> conv_fill(size_t(conv_elems) * 2, 0xA5);
+  for (int row : {1, 3, 4, 5}) {
+    require_bitwise("untouched recurrent snapshot row " + std::to_string(row),
+                    rec_fill.data(),
+                    got_rec_snaps.data() + int64_t(row) * rec_elems,
+                    rec_fill.size());
+    require_bitwise("untouched conv snapshot row " + std::to_string(row),
+                    conv_fill.data(),
+                    got_conv_snaps.data() + int64_t(row) * conv_elems,
+                    conv_fill.size());
+  }
 }
 
 // ---------------------------------------------------------------------------

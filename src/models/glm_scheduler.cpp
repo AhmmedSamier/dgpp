@@ -9,6 +9,19 @@
 
 namespace dgpp::glm {
 
+std::vector<std::vector<int32_t>> SchedulerEngine::step_batch(
+    const std::vector<int>& reqs) {
+  if (reqs.empty())
+    throw std::invalid_argument("SchedulerEngine: empty decode batch");
+  if (reqs.size() > static_cast<size_t>(decode_batch_capacity()))
+    throw std::invalid_argument(
+        "SchedulerEngine: decode batch exceeds advertised capacity");
+  std::vector<std::vector<int32_t>> out;
+  out.reserve(reqs.size());
+  for (const int req : reqs) out.push_back(step(req));
+  return out;
+}
+
 namespace {
 
 // A request's lifetime token footprint: the prompt plus every token it
@@ -48,6 +61,12 @@ Scheduler::Scheduler(SchedulerEngine* engine,
   if (slots_.empty())
     throw std::invalid_argument(
         "Scheduler: engine reports zero concurrent request slots");
+  decode_batch_capacity_ = engine_->decode_batch_capacity();
+  if (decode_batch_capacity_ < 1 ||
+      decode_batch_capacity_ > static_cast<int>(slots_.size()))
+    throw std::invalid_argument(
+        "Scheduler: engine decode batch capacity must be in [1, " +
+        std::to_string(slots_.size()) + "]");
 }
 
 bool Scheduler::is_eos(int32_t token) const {
@@ -185,18 +204,52 @@ void Scheduler::admit(int arrival) {
   (void)append_token(arrival, token);
 }
 
-void Scheduler::step_one(int arrival) {
-  Request& r = requests_[static_cast<size_t>(arrival)];
-  const std::vector<int32_t> tokens = engine_->step(r.slot);
-  if (tokens.empty())
-    throw std::runtime_error("Scheduler: engine step returned no tokens for "
-                             "request '" + r.spec.id + "'");
-  cursor_ = arrival;
-  for (const int32_t token : tokens) {
-    // A speculative pass can have advanced farther than the public request
-    // survives. EOS/cap/cancel retires the slot and deliberately drops the
-    // rest of this batch; its extra device state can never be observed.
-    if (append_token(arrival, token)) break;
+void Scheduler::step_batch(const std::vector<int>& arrivals) {
+  if (arrivals.empty())
+    throw std::logic_error("Scheduler: empty decode batch");
+  std::vector<int> slots;
+  slots.reserve(arrivals.size());
+  for (const int arrival : arrivals) {
+    const Request& r = requests_[static_cast<size_t>(arrival)];
+    if (r.state != State::kActive || r.slot < 0)
+      throw std::logic_error("Scheduler: decode batch contains an inactive "
+                             "request");
+    slots.push_back(r.slot);
+  }
+
+  // Validate the outer shape before publishing any token. A malformed
+  // engine result must not leave half a physical pass visible to clients.
+  const std::vector<std::vector<int32_t>> batches =
+      engine_->step_batch(slots);
+  if (batches.size() != arrivals.size())
+    throw std::runtime_error(
+        "Scheduler: engine returned " + std::to_string(batches.size()) +
+        " request results for a decode batch of " +
+        std::to_string(arrivals.size()));
+  for (size_t i = 0; i < arrivals.size(); ++i) {
+    const Request& r = requests_[static_cast<size_t>(arrivals[i])];
+    if (batches[i].empty())
+      throw std::runtime_error("Scheduler: engine step returned no tokens for "
+                               "request '" + r.spec.id + "'");
+    for (const int32_t token : batches[i])
+      if (token < 0)
+        throw std::runtime_error("Scheduler: engine returned token " +
+                                 std::to_string(token) + " for request '" +
+                                 r.spec.id + "'");
+  }
+
+  cursor_ = arrivals.back();
+  for (size_t i = 0; i < arrivals.size(); ++i) {
+    const int arrival = arrivals[i];
+    const std::vector<int32_t>& tokens = batches[i];
+    for (const int32_t token : tokens) {
+      // A speculative pass can have advanced farther than the public request
+      // survives. EOS/cap/cancel retires the slot and deliberately drops the
+      // rest of this request's batch; its extra device state is never seen.
+      // Other requests in the same physical pass remain independent and are
+      // still published below.
+      if (append_token(arrival, token)) break;
+    }
   }
 }
 
@@ -298,20 +351,22 @@ bool Scheduler::tick() {
     }
   }
 
-  // (2) Exactly one decode step per tick, round-robin by arrival over
-  // the active set. The just-admitted request is eligible only if the
-  // rotation reaches it — admission does not jump the queue.
-  const auto next_active_after_cursor = [&]() -> int {
-    for (int off = 1; off <= static_cast<int>(requests_.size()); ++off) {
-      const int i = (cursor_ + off) % static_cast<int>(requests_.size());
-      if (requests_[static_cast<size_t>(i)].state == State::kActive)
-        return i;
-    }
-    return -1;
-  };
-  const int step_arrival = next_active_after_cursor();
-  if (step_arrival >= 0) {
-    step_one(step_arrival);
+  // (2) One physical decode pass per tick, over the next round-robin slice.
+  // Scalar engines advertise capacity one and retain the original policy
+  // bit-for-bit. A batched graph normally advertises the slot count, so this
+  // slice contains every active request exactly once.
+  std::vector<int> step_arrivals;
+  step_arrivals.reserve(static_cast<size_t>(decode_batch_capacity_));
+  for (int off = 1;
+       off <= static_cast<int>(requests_.size()) &&
+       static_cast<int>(step_arrivals.size()) < decode_batch_capacity_;
+       ++off) {
+    const int i = (cursor_ + off) % static_cast<int>(requests_.size());
+    if (requests_[static_cast<size_t>(i)].state == State::kActive)
+      step_arrivals.push_back(i);
+  }
+  if (!step_arrivals.empty()) {
+    step_batch(step_arrivals);
     progressed = true;
   }
 

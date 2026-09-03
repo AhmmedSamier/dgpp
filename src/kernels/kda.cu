@@ -14,19 +14,42 @@ namespace {
 // Causal depthwise conv + silu
 // ---------------------------------------------------------------------------
 
-template <int CW>
+template <int CW, bool kBatched>
 __global__ void kda_conv_kernel(const uint16_t* __restrict__ src,
                                 int64_t src_stride,
                                 const uint16_t* __restrict__ weight,
                                 uint16_t* __restrict__ state,
-                                int state_width, uint16_t* __restrict__ dst,
-                                int tokens, int channels,
+                                int64_t request_state_stride, int state_width,
+                                uint16_t* __restrict__ dst, int tokens,
+                                int channels,
                                 uint16_t* __restrict__ snapshots,
-                                int64_t snapshot_stride) {
+                                int64_t snapshot_stride,
+                                const int32_t* __restrict__ request_ids,
+                                const int64_t* __restrict__ positions,
+                                const int32_t* __restrict__ request_spans) {
   const int c = blockIdx.x * blockDim.x + threadIdx.x;
   if (c >= channels) return;
+  int t0 = 0;
+  int t1 = tokens;
+  int req = 0;
+  if constexpr (kBatched) {
+    const int span = blockIdx.y;
+    t0 = request_spans[span * 2];
+    t1 = t0 + request_spans[span * 2 + 1];
+    // An inactive fixed-shape span may consist entirely of padding. Do not
+    // even form a state pointer from its sentinel request id.
+    int first_real = t0;
+    while (first_real < t1 && positions[first_real] < 0) ++first_real;
+    if (first_real == t1) {
+      for (int t = t0; t < t1; ++t)
+        dst[static_cast<int64_t>(t) * channels + c] = 0;
+      return;
+    }
+    req = request_ids[first_real];
+  }
   const uint16_t* wc = weight + static_cast<int64_t>(c) * CW;
-  uint16_t* sc = state + static_cast<int64_t>(c) * state_width;
+  uint16_t* sc = state + static_cast<int64_t>(req) * request_state_stride +
+                 static_cast<int64_t>(c) * state_width;
 
   float wv[CW];
 #pragma unroll
@@ -38,7 +61,13 @@ __global__ void kda_conv_kernel(const uint16_t* __restrict__ src,
 #pragma unroll
   for (int j = 0; j < CW - 1; ++j) hist[j] = bf16_bits_to_float(sc[j]);
 
-  for (int t = 0; t < tokens; ++t) {
+  for (int t = t0; t < t1; ++t) {
+    if constexpr (kBatched) {
+      if (positions[t] < 0) {
+        dst[static_cast<int64_t>(t) * channels + c] = 0;
+        continue;
+      }
+    }
     const float x =
         bf16_bits_to_float(src[static_cast<int64_t>(t) * src_stride + c]);
     // Same association order as the host reference so the fp32 fma chains
@@ -54,7 +83,7 @@ __global__ void kda_conv_kernel(const uint16_t* __restrict__ src,
     // Speculative rows: the history as it stands after row t is what the
     // committed state must become if rows > t are rejected. The last row
     // lands in place below, so it needs no snapshot.
-    if (snapshots && t + 1 < tokens) {
+    if (snapshots && t + 1 < t1) {
       uint16_t* snap = snapshots + static_cast<int64_t>(t) * snapshot_stride +
                        static_cast<int64_t>(c) * state_width;
 #pragma unroll
@@ -184,14 +213,17 @@ __device__ __forceinline__ void load_bf16_slice(const uint16_t* __restrict__ p,
   }
 }
 
-template <int K, bool kVec>
+template <int K, bool kVec, bool kBatched>
 __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
     const uint16_t* __restrict__ qkv, const uint16_t* __restrict__ g_raw,
     const uint16_t* __restrict__ beta_raw, int64_t beta_stride,
     const float* __restrict__ a_log, const float* __restrict__ dt_bias,
-    float* __restrict__ state, uint16_t* __restrict__ out, int tokens,
-    int heads, int v_dim, float lower_bound, float scale,
-    float* __restrict__ snapshots, int64_t snapshot_stride) {
+    float* __restrict__ state, int64_t request_state_stride,
+    uint16_t* __restrict__ out, int tokens, int heads, int v_dim,
+    float lower_bound, float scale, float* __restrict__ snapshots,
+    int64_t snapshot_stride, const int32_t* __restrict__ request_ids,
+    const int64_t* __restrict__ positions,
+    const int32_t* __restrict__ request_spans) {
   constexpr int kCols = K / kRecurrentLanes;  // columns owned per lane
   static_assert(K % kRecurrentLanes == 0, "K must split across the lanes");
 
@@ -201,11 +233,33 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
   const int c0 = lane * kCols;
   const bool row_valid = v < v_dim;
 
+  int t0 = 0;
+  int t1 = tokens;
+  int req = 0;
+  if constexpr (kBatched) {
+    const int span = blockIdx.z;
+    t0 = request_spans[span * 2];
+    t1 = t0 + request_spans[span * 2 + 1];
+    int first_real = t0;
+    while (first_real < t1 && positions[first_real] < 0) ++first_real;
+    if (first_real == t1) {
+      if (row_valid && lane == 0) {
+        for (int t = t0; t < t1; ++t)
+          out[(static_cast<int64_t>(t) * heads + h) * v_dim + v] = 0;
+      }
+      return;
+    }
+    req = request_ids[first_real];
+  }
+
   // State slice S[v, c0:c0+kCols] lives in registers for the whole call:
   // one load + one store per head per chunk — the decode hot path is pure
   // state bandwidth by design.
   float s[kCols];
-  float* st = state + (static_cast<int64_t>(h) * v_dim + v) * K + c0;
+  const int64_t state_elem =
+      (static_cast<int64_t>(h) * v_dim + v) * K + c0;
+  float* st = state + static_cast<int64_t>(req) * request_state_stride +
+              state_elem;
   if (row_valid) {
     load_f32_slice<kCols, kVec>(st, s);
   } else {
@@ -222,7 +276,14 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
   const int64_t qkv_stride = static_cast<int64_t>(2) * heads * K +
                              static_cast<int64_t>(heads) * v_dim;
 
-  for (int t = 0; t < tokens; ++t) {
+  for (int t = t0; t < t1; ++t) {
+    if constexpr (kBatched) {
+      if (positions[t] < 0) {
+        if (row_valid && lane == 0)
+          out[(static_cast<int64_t>(t) * heads + h) * v_dim + v] = 0;
+        continue;
+      }
+    }
     const uint16_t* qrow =
         qkv + static_cast<int64_t>(t) * qkv_stride + static_cast<int64_t>(h) * K;
     const uint16_t* krow = qrow + static_cast<int64_t>(heads) * K;
@@ -293,30 +354,33 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
     // Speculative rows: S after row t is the state to restore if rows > t
     // are rejected (the last row's S lands in place below). One extra
     // state-sized store per speculative row; nothing on the T=1 path.
-    if (snapshots && t + 1 < tokens && row_valid)
+    if (snapshots && t + 1 < t1 && row_valid)
       store_f32_slice<kCols, kVec>(
           snapshots + static_cast<int64_t>(t) * snapshot_stride +
-              (st - state),
+              state_elem,
           s);
   }
 
   if (row_valid) store_f32_slice<kCols, kVec>(st, s);
 }
 
-template <int CW>
+template <int CW, bool kBatched>
 void conv_launch(const void* src, int64_t src_stride, const void* weight,
-                 void* conv_state, int state_width, void* dst, int tokens,
-                 int channels, const KdaConvSnapshots& snap,
-                 cudaStream_t stream) {
+                 void* conv_state, int64_t request_state_stride,
+                 int state_width, void* dst, int tokens, int channels,
+                 const KdaRequestRows& requests,
+                 const KdaConvSnapshots& snap, cudaStream_t stream) {
   constexpr int kBlock = 256;
-  const unsigned grid =
-      static_cast<unsigned>((channels + kBlock - 1) / kBlock);
-  kda_conv_kernel<CW><<<grid, kBlock, 0, stream>>>(
+  const dim3 grid(static_cast<unsigned>((channels + kBlock - 1) / kBlock),
+                  static_cast<unsigned>(kBatched ? requests.num_requests : 1),
+                  1);
+  kda_conv_kernel<CW, kBatched><<<grid, kBlock, 0, stream>>>(
       static_cast<const uint16_t*>(src), src_stride,
       static_cast<const uint16_t*>(weight),
-      static_cast<uint16_t*>(conv_state), state_width,
+      static_cast<uint16_t*>(conv_state), request_state_stride, state_width,
       static_cast<uint16_t*>(dst), tokens, channels,
-      static_cast<uint16_t*>(snap.states), snap.stride_elems);
+      static_cast<uint16_t*>(snap.states), snap.stride_elems,
+      requests.request_ids, requests.positions, requests.spans);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -339,36 +403,89 @@ void kda_causal_conv_silu_bf16(const void* src, int64_t src_row_stride,
   if (snap.states && tokens > 1 &&
       snap.stride_elems < static_cast<int64_t>(channels) * state_width)
     throw std::invalid_argument("kda conv: snapshot stride smaller than a state");
+  const KdaRequestRows requests{};
+  const int64_t state_stride = static_cast<int64_t>(channels) * state_width;
   switch (conv_width) {
     case 2:
-      conv_launch<2>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, snap, stream);
+      conv_launch<2, false>(src, src_row_stride, weight, conv_state,
+                            state_stride, state_width, dst, tokens, channels,
+                            requests, snap, stream);
       return;
     case 3:
-      conv_launch<3>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, snap, stream);
+      conv_launch<3, false>(src, src_row_stride, weight, conv_state,
+                            state_stride, state_width, dst, tokens, channels,
+                            requests, snap, stream);
       return;
     case 4:
-      conv_launch<4>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, snap, stream);
+      conv_launch<4, false>(src, src_row_stride, weight, conv_state,
+                            state_stride, state_width, dst, tokens, channels,
+                            requests, snap, stream);
       return;
     case 5:
-      conv_launch<5>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, snap, stream);
+      conv_launch<5, false>(src, src_row_stride, weight, conv_state,
+                            state_stride, state_width, dst, tokens, channels,
+                            requests, snap, stream);
       return;
     case 6:
-      conv_launch<6>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, snap, stream);
+      conv_launch<6, false>(src, src_row_stride, weight, conv_state,
+                            state_stride, state_width, dst, tokens, channels,
+                            requests, snap, stream);
       return;
     case 7:
-      conv_launch<7>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, snap, stream);
+      conv_launch<7, false>(src, src_row_stride, weight, conv_state,
+                            state_stride, state_width, dst, tokens, channels,
+                            requests, snap, stream);
       return;
     default:
-      conv_launch<8>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, snap, stream);
+      conv_launch<8, false>(src, src_row_stride, weight, conv_state,
+                            state_stride, state_width, dst, tokens, channels,
+                            requests, snap, stream);
       return;
   }
+}
+
+void kda_causal_conv_silu_bf16_batched(
+    const void* src, int64_t src_row_stride, const void* weight,
+    void* conv_states, int64_t request_state_stride, int state_width,
+    void* dst, int rows, int channels, int conv_width,
+    const KdaRequestRows& requests, cudaStream_t stream,
+    const KdaConvSnapshots& snap) {
+  if (rows <= 0 || channels <= 0)
+    throw std::invalid_argument("kda batched conv: empty problem");
+  if (conv_width < 2 || conv_width > 8)
+    throw std::invalid_argument(
+        "kda batched conv: conv_width must be in [2, 8]");
+  if (state_width < conv_width - 1)
+    throw std::invalid_argument(
+        "kda batched conv: state narrower than history");
+  if (src_row_stride < channels)
+    throw std::invalid_argument(
+        "kda batched conv: src row stride smaller than row");
+  const int64_t state_elems = static_cast<int64_t>(channels) * state_width;
+  if (request_state_stride < state_elems)
+    throw std::invalid_argument(
+        "kda batched conv: request stride smaller than a state");
+  if (!requests.request_ids || !requests.positions || !requests.spans ||
+      requests.num_requests <= 0)
+    throw std::invalid_argument("kda batched conv: incomplete request map");
+  if (snap.states && snap.stride_elems < state_elems)
+    throw std::invalid_argument(
+        "kda batched conv: snapshot stride smaller than a state");
+
+#define DGPP_KDA_CONV_BATCH_DISPATCH(CW)                                      \
+  conv_launch<CW, true>(src, src_row_stride, weight, conv_states,             \
+                        request_state_stride, state_width, dst, rows,          \
+                        channels, requests, snap, stream)
+  switch (conv_width) {
+    case 2: DGPP_KDA_CONV_BATCH_DISPATCH(2); return;
+    case 3: DGPP_KDA_CONV_BATCH_DISPATCH(3); return;
+    case 4: DGPP_KDA_CONV_BATCH_DISPATCH(4); return;
+    case 5: DGPP_KDA_CONV_BATCH_DISPATCH(5); return;
+    case 6: DGPP_KDA_CONV_BATCH_DISPATCH(6); return;
+    case 7: DGPP_KDA_CONV_BATCH_DISPATCH(7); return;
+    default: DGPP_KDA_CONV_BATCH_DISPATCH(8); return;
+  }
+#undef DGPP_KDA_CONV_BATCH_DISPATCH
 }
 
 void kda_gated_rmsnorm_sigmoid_bf16(const void* x, const void* gate,
@@ -424,6 +541,8 @@ void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
   };
   const int64_t qkv_stride = static_cast<int64_t>(2) * heads * k_dim +
                              static_cast<int64_t>(heads) * v_dim;
+  const int64_t state_stride =
+      static_cast<int64_t>(heads) * v_dim * k_dim;
   // Per-lane slices are K/16 wide: float4 state slices need K >= 64
   // (4 columns, 16 bytes); the bf16 slices then are 8-byte uint2s.
   const bool vec = k_dim >= 64 && aligned16(qkv16) && aligned16(g16) &&
@@ -436,15 +555,17 @@ void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
 #define DGPP_KDA_RECURRENT_DISPATCH(KLIT)                                      \
   do {                                                                         \
     if (vec)                                                                   \
-      kda_recurrent_kernel<KLIT, true><<<grid, kRecurrentBlock, 0, stream>>>(  \
-          qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state, o16,        \
-          tokens, heads, v_dim, lower_bound, scale, snap.states,               \
-          snap.stride_elems);                                                  \
+      kda_recurrent_kernel<KLIT, true, false>                                   \
+          <<<grid, kRecurrentBlock, 0, stream>>>(                               \
+              qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state,          \
+              state_stride, o16, tokens, heads, v_dim, lower_bound, scale,      \
+              snap.states, snap.stride_elems, nullptr, nullptr, nullptr);       \
     else                                                                       \
-      kda_recurrent_kernel<KLIT, false><<<grid, kRecurrentBlock, 0, stream>>>( \
-          qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state, o16,        \
-          tokens, heads, v_dim, lower_bound, scale, snap.states,               \
-          snap.stride_elems);                                                  \
+      kda_recurrent_kernel<KLIT, false, false>                                  \
+          <<<grid, kRecurrentBlock, 0, stream>>>(                               \
+              qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state,          \
+              state_stride, o16, tokens, heads, v_dim, lower_bound, scale,      \
+              snap.states, snap.stride_elems, nullptr, nullptr, nullptr);       \
     DGPP_CUDA_OK(cudaGetLastError());                                          \
   } while (0)
 
@@ -457,6 +578,86 @@ void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
           "kda recurrent: k_dim must be one of {32, 64, 128}");
   }
 #undef DGPP_KDA_RECURRENT_DISPATCH
+}
+
+void kda_recurrent_fwd_batched(
+    const void* qkv, const void* g_raw, const void* beta_raw,
+    int64_t beta_row_stride, const float* a_log, const float* dt_bias,
+    float* states, int64_t request_state_stride, void* out, int rows,
+    int heads, int k_dim, int v_dim, float lower_bound, float scale,
+    const KdaRequestRows& requests, cudaStream_t stream,
+    const KdaStateSnapshots& snap) {
+  if (rows <= 0 || heads <= 0 || v_dim <= 0)
+    throw std::invalid_argument("kda batched recurrent: empty problem");
+  if (k_dim % kRecurrentLanes != 0)
+    throw std::invalid_argument(
+        "kda batched recurrent: k_dim must be a multiple of 16");
+  if (beta_row_stride < heads)
+    throw std::invalid_argument(
+        "kda batched recurrent: beta stride smaller than row");
+  const int64_t state_elems =
+      static_cast<int64_t>(heads) * v_dim * k_dim;
+  if (request_state_stride < state_elems)
+    throw std::invalid_argument(
+        "kda batched recurrent: request stride smaller than a state");
+  if (!requests.request_ids || !requests.positions || !requests.spans ||
+      requests.num_requests <= 0)
+    throw std::invalid_argument(
+        "kda batched recurrent: incomplete request map");
+  if (snap.states && snap.stride_elems < state_elems)
+    throw std::invalid_argument(
+        "kda batched recurrent: snapshot stride smaller than a state");
+
+  const dim3 grid(static_cast<unsigned>((v_dim + kRecurrentRows - 1) /
+                                        kRecurrentRows),
+                  static_cast<unsigned>(heads),
+                  static_cast<unsigned>(requests.num_requests));
+  const uint16_t* qkv16 = static_cast<const uint16_t*>(qkv);
+  const uint16_t* g16 = static_cast<const uint16_t*>(g_raw);
+  const uint16_t* b16 = static_cast<const uint16_t*>(beta_raw);
+  uint16_t* o16 = static_cast<uint16_t*>(out);
+  const auto aligned16 = [](const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+  };
+  const int64_t qkv_stride = static_cast<int64_t>(2) * heads * k_dim +
+                             static_cast<int64_t>(heads) * v_dim;
+  const bool vec =
+      k_dim >= 64 && aligned16(qkv16) && aligned16(g16) &&
+      aligned16(dt_bias) && aligned16(states) &&
+      (qkv_stride * 2) % 16 == 0 &&
+      (static_cast<int64_t>(v_dim) * k_dim * 4) % 16 == 0 &&
+      (request_state_stride * 4) % 16 == 0 &&
+      (!snap.states || (aligned16(snap.states) &&
+                        (snap.stride_elems * 4) % 16 == 0));
+
+#define DGPP_KDA_BATCH_RECURRENT_DISPATCH(KLIT)                                \
+  do {                                                                         \
+    if (vec)                                                                   \
+      kda_recurrent_kernel<KLIT, true, true>                                    \
+          <<<grid, kRecurrentBlock, 0, stream>>>(                               \
+              qkv16, g16, b16, beta_row_stride, a_log, dt_bias, states,         \
+              request_state_stride, o16, rows, heads, v_dim, lower_bound,       \
+              scale, snap.states, snap.stride_elems, requests.request_ids,      \
+              requests.positions, requests.spans);                             \
+    else                                                                       \
+      kda_recurrent_kernel<KLIT, false, true>                                   \
+          <<<grid, kRecurrentBlock, 0, stream>>>(                               \
+              qkv16, g16, b16, beta_row_stride, a_log, dt_bias, states,         \
+              request_state_stride, o16, rows, heads, v_dim, lower_bound,       \
+              scale, snap.states, snap.stride_elems, requests.request_ids,      \
+              requests.positions, requests.spans);                             \
+    DGPP_CUDA_OK(cudaGetLastError());                                          \
+  } while (0)
+
+  switch (k_dim) {
+    case 32: DGPP_KDA_BATCH_RECURRENT_DISPATCH(32); return;
+    case 64: DGPP_KDA_BATCH_RECURRENT_DISPATCH(64); return;
+    case 128: DGPP_KDA_BATCH_RECURRENT_DISPATCH(128); return;
+    default:
+      throw std::invalid_argument(
+          "kda batched recurrent: k_dim must be one of {32, 64, 128}");
+  }
+#undef DGPP_KDA_BATCH_RECURRENT_DISPATCH
 }
 
 }  // namespace dgpp

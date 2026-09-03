@@ -538,6 +538,35 @@ available; the graph must be request-indexed on the device. Two phases:
   row set, not the graph; a padded row costs its share of the small
   kernels and nothing at the weights.
 
+  IMPLEMENTATION STARTED 2026-09-03: `SchedulerEngine` now advertises a
+  fixed decode-batch capacity and has an ordered `step_batch(slots)` seam;
+  scalar engines inherit capacity 1 and preserve the existing op stream,
+  while a future graph adapter can advance the scheduler's canonical
+  round-robin slice in one physical pass. `KdaLayer` and both stateful KDA
+  kernels now accept the DSA-shaped device row map (dense active spans,
+  actual request ids, positions with `-1` padding), select noncontiguous
+  request slots, keep each request's rows sequential, and write snapshots
+  at global batch-row offsets. While wiring the shared row-map contract,
+  the DSA ring update was fixed to select the actual `req_ids` slot instead
+  of mistaking the dense span ordinal for a slot id. Blast radius: the
+  latent append and the select already used the per-row ids, so under the
+  eager engine at `--max-concurrency 2` (serve_run.sh's default knobs) a
+  request decoding in slot 1 would have stashed into slot 0's ring and
+  compressed its completed pools into slot 0's block table while its own
+  select read pools that were never written. Unobserved so far: the
+  record's service measurements ran one slot at a time, and no model-level
+  gate decodes at a slot other than 0 — that gate comes before phase 2
+  occupies a second slot. Both kernels and both tests also pin the
+  unoccupied-slot case: a span that is entirely padding (sentinel request
+  id) touches no state and writes zero output; a non-last real row is the
+  only row that snapshots. Gates:
+  `scheduler_batchEngine_stepsRoundRobinSliceInOnePass`,
+  `kda_layer_requestIndexedBatch_matchesIndependentRequestsBitwise`, and
+  the noncontiguous-slot form of
+  `dsa_decode_update_multi_request_and_padding`. Still to wire: model-wide
+  batch staging/run/settle, per-request pick+commit/token feeds, the fixed
+  padded graph adapter, and the 64 KB fabric latency slot.
+
 **6b. Sampling on the bus** (deliverable 3's distributed half; DESIGN §10).
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's
