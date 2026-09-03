@@ -558,7 +558,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
   // Pinned (see the fabric-path note below): no UVM residency dependence
   // on the decode path, no migration ping-pong per pick.
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&pick_scratch),
-                              sizeof(uint16_t) * 4 * world,
+                              sizeof(uint16_t) * dgpp::kPickSlotsPerRank * world,
                               cudaHostAllocDefault));
   std::unique_ptr<CollectiveBus> bus;
   try {
@@ -631,8 +631,8 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
 // the mean NLL over a fixed text says exactly how far the distribution
 // moved. World 1 logs the same line over the full head.
 void log_teacher_stats(int rank, int step, const GlmDiagnosticModel::Outputs& out,
-                       const std::vector<float>& slice, int64_t target,
-                       int32_t argmax) {
+                       int64_t target, int32_t argmax) {
+  const std::vector<float>& slice = out.logits;
   double lmax = -INFINITY;
   for (int i = 0; i < out.lm_vocab_count; ++i)
     lmax = std::max(lmax, static_cast<double>(slice[static_cast<size_t>(i)]));
@@ -687,7 +687,6 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                  cfg.eos_token_ids.end(), id) !=
                            cfg.eos_token_ids.end();
     };
-    std::vector<float> frow(static_cast<size_t>(cfg.vocab_size));
     if (incremental) {
       // The serving path (Stage 2): prefill once, then one stateful
       // step per token — constant work per step, no T^2 re-forward.
@@ -696,19 +695,15 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       const double prefill_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - t0)
                                     .count();
-      for (int i = 0; i < out.lm_vocab_count; ++i)
-        frow[static_cast<size_t>(i)] =
-            dgpp::bf16_bits_to_float(out.logits_bits[static_cast<size_t>(i)]);
       dgpp::glm_sample::Candidate best =
-          dgpp::glm_sample::local_max(frow.data(), cfg.vocab_size, 0);
+          dgpp::glm_sample::local_max(out.logits.data(), cfg.vocab_size, 0);
       DGPP_LOG_INFO("[gen] prefill: {} tokens in {:.0f}ms", prompt.size(),
                     prefill_ms);
       // Under teacher forcing the fed token is the text's; the pick is
       // still computed (and logged) as the top-1 hit signal.
       const auto force = [&](int s, const GlmDiagnosticModel::Outputs& o) {
         if (!teaching) return;
-        log_teacher_stats(0, s, o, frow, teacher[static_cast<size_t>(s)],
-                          best.id);
+        log_teacher_stats(0, s, o, teacher[static_cast<size_t>(s)], best.id);
         best.id = static_cast<int32_t>(teacher[static_cast<size_t>(s)]);
       };
       force(0, out);
@@ -726,10 +721,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0s)
                               .count();
-        for (int i = 0; i < step.lm_vocab_count; ++i)
-          frow[static_cast<size_t>(i)] =
-              dgpp::bf16_bits_to_float(step.logits_bits[static_cast<size_t>(i)]);
-        best = dgpp::glm_sample::local_max(frow.data(), cfg.vocab_size, 0);
+        best = dgpp::glm_sample::local_max(step.logits.data(), cfg.vocab_size,
+                                           0);
         DGPP_LOG_INFO("[gen] step {}: token {} (logit {:.4f}) [{:.0f}ms]",
                       s + 1, best.id, best.logit, ms);
         force(s + 1, step);
@@ -743,12 +736,10 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         const int T = static_cast<int>(toks.size());
         require(out.lm_vocab_count == cfg.vocab_size,
                 "w1 head must be full-vocab");
-        const uint16_t* row = out.logits_bits.data() +
-                              static_cast<size_t>(T - 1) * cfg.vocab_size;
-        for (int i = 0; i < cfg.vocab_size; ++i)
-          frow[static_cast<size_t>(i)] = dgpp::bf16_bits_to_float(row[i]);
+        const float* row = out.logits.data() +
+                           static_cast<size_t>(T - 1) * cfg.vocab_size;
         const dgpp::glm_sample::Candidate best =
-            dgpp::glm_sample::local_max(frow.data(), cfg.vocab_size, 0);
+            dgpp::glm_sample::local_max(row, cfg.vocab_size, 0);
         toks.push_back(best.id);
         generated.push_back(best.id);
         generated_text += tok.decode(best.id, /*skip_special_tokens=*/false);
@@ -780,7 +771,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
   // reason (the 2026-09-01 hunt's lesson: the decode path's shared
   // buffers do not ride managed memory).
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&pick_scratch),
-                             sizeof(uint16_t) * 4 * world,
+                             sizeof(uint16_t) * dgpp::kPickSlotsPerRank * world,
                              cudaHostAllocDefault));
   std::unique_ptr<CollectiveBus> bus;
   try {
@@ -809,7 +800,6 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 
     std::vector<int64_t> toks = prompt;
     std::vector<int64_t> generated;
-    std::vector<float> fslice;  // hoisted: no per-step device-adjacent work
     double forward_ms_total = 0.0;
     const auto is_eos = [&](int64_t id) {
       return !no_eos && std::find(cfg.eos_token_ids.begin(),
@@ -820,11 +810,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     // winner through the bus, record it. Returns the picked token.
     const auto run_step = [&](const GlmDiagnosticModel::Outputs& out,
                               const char* what, int s) -> int32_t {
-      const uint16_t* row = out.logits_bits.data();
-      fslice.resize(static_cast<size_t>(out.lm_vocab_count));
-      for (int i = 0; i < out.lm_vocab_count; ++i)
-        fslice[static_cast<size_t>(i)] =
-            dgpp::bf16_bits_to_float(row[static_cast<size_t>(i)]);
+      const std::vector<float>& fslice = out.logits;
       const dgpp::glm_sample::Candidate local = dgpp::glm_sample::local_max(
           fslice.data(), out.lm_vocab_count, out.lm_vocab_begin);
       // The slice's runner-up: with the four ranks' lines side by side
@@ -865,8 +851,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       const auto force = [&](int s, const GlmDiagnosticModel::Outputs& o,
                              int32_t picked) -> int32_t {
         if (!teaching) return picked;
-        log_teacher_stats(rank, s, o, fslice, teacher[static_cast<size_t>(s)],
-                          picked);
+        log_teacher_stats(rank, s, o, teacher[static_cast<size_t>(s)], picked);
         return static_cast<int32_t>(teacher[static_cast<size_t>(s)]);
       };
       const auto tp0 = std::chrono::steady_clock::now();

@@ -61,10 +61,14 @@ class GlmDiagnosticModel {
  public:
   struct Outputs {
     std::vector<uint16_t> final_hidden_bits;  // bf16 [tokens, hidden]
-    // bf16 [tokens, lm_vocab_count] — the rank's logits COLUMNS of the
-    // full [tokens, vocab] matrix (Full head: the whole thing).
-    std::vector<uint16_t> logits_bits;
-    int lm_vocab_begin = 0;  // first vocab column of logits_bits
+    // fp32 [tokens, lm_vocab_count] — the rank's logits COLUMNS of the
+    // full [tokens, vocab] matrix (Full head: the whole thing). The head
+    // GEMV's fp32 accumulators, unrounded (2026-09-03): the bf16 rounding
+    // the reference applies here was the dominant noise on every pick and
+    // every log-prob comparison — half a bf16 ulp at |logit| ~16 is 0.06
+    // nat — and it bought nothing; the sampler consumes floats anyway.
+    std::vector<float> logits;
+    int lm_vocab_begin = 0;  // first vocab column of logits
     int lm_vocab_count = 0;
     // One entry per MoE layer, in layer order (ids ascending per token).
     std::vector<GlmRouteTraceLayer> routes;
@@ -89,7 +93,7 @@ class GlmDiagnosticModel {
   // GlmLayerStream::resident_bytes() fits can use it (real dims: world 4).
   //
   // HEAD (M6 d3): `GlmHeadSharding::VocabSharded` loads only this rank's
-  // lm-head rows; Outputs.logits_bits is then the rank's [tokens,
+  // lm-head rows; Outputs.logits is then the rank's [tokens,
   // lm_vocab_count] slice (lm_vocab_begin/count report the bounds — the
   // sampling merge consumes exactly those). Default Full: byte-stable
   // with every M4/M5 parity gate.
@@ -297,13 +301,12 @@ class GlmDiagnosticModel {
   // per-rank byte-total reconcile input; see GlmLayerStream).
   uint64_t source_bytes_read() const { return loader_.source_bytes_read(); }
 
-  // Host-side top-k over bf16 logits: value-descending, lowest-id
+  // Host-side top-k over fp32 logits: value-descending, lowest-id
   // tie-break. k <= 64. One entry per row. FULL-vocab logits only — a
   // sharded-head consumer must merge its slice with glm_sample's
   // helpers instead (this helper cannot see the other ranks' slices).
   static std::vector<std::vector<std::pair<int32_t, float>>> topk(
-      const std::vector<uint16_t>& logits_bits, int64_t rows, int vocab,
-      int k);
+      const std::vector<float>& logits, int64_t rows, int vocab, int k);
 
  private:
   // Produces the layer's weight views — full (world=1, byte-identical to
@@ -478,7 +481,7 @@ class GlmDiagnosticModel {
   // ride D2H copies (graph memcpy nodes in the replay) into these, and the
   // managed pages stay GPU-resident.
   uint64_t* h_graph_start_gt_ = nullptr;  // pinned: %globaltimer at the step's first node
-  uint16_t* h_tail_logits_ = nullptr;   // pinned [kDecodeRows * lm_vocab_count_]
+  float* h_tail_logits_ = nullptr;      // pinned [kDecodeRows * lm_vocab_count_]
   uint16_t* h_tail_hidden_ = nullptr;   // pinned [kDecodeRows * H]
   uint16_t* streams_[2] = {nullptr, nullptr};  // [T, 4, hidden]
   uint16_t* post_ = nullptr;                   // [T, 4]
@@ -491,7 +494,7 @@ class GlmDiagnosticModel {
   uint16_t* dense_g_ = nullptr;                // [T, dense_inter]
   uint16_t* dense_u_ = nullptr;
   uint16_t* dense_act_ = nullptr;
-  uint16_t* logits_ = nullptr;                 // [T, vocab]
+  float* logits_ = nullptr;                    // [T, vocab] fp32
 };
 
 }  // namespace dgpp

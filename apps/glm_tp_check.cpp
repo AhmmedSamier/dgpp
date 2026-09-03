@@ -2,7 +2,7 @@
 // block-boundary forward across real nodes over the CollectiveBus and
 // writes this rank's observables for offline comparison:
 //   {out}.final_hidden.bf16   [T, hidden]   — must be BITWISE identical on
-//   {out}.logits.bf16        [T, vocab]      every rank (the canonical
+//   {out}.logits.f32         [T, vocab]      every rank (the canonical
 //   {out}.routes.txt         per-MoE-layer   rank-order fold's guarantee)
 //   ids/weights fp32
 //   {out}.oracle.*           rank 0 only: the world=1 M4-path forward
@@ -134,9 +134,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     write_out(out_prefix + ".oracle.final_hidden.bf16",
               oracle_out.final_hidden_bits.data(),
               oracle_out.final_hidden_bits.size() * 2);
-    write_out(out_prefix + ".oracle.logits.bf16",
-              oracle_out.logits_bits.data(),
-              oracle_out.logits_bits.size() * 2);
+    write_out(out_prefix + ".oracle.logits.f32", oracle_out.logits.data(),
+              oracle_out.logits.size() * sizeof(float));
     DGPP_LOG_INFO("oracle forward written ({} tokens)", tokens);
   }
 
@@ -176,8 +175,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 
   write_out(out_prefix + ".final_hidden.bf16", out.final_hidden_bits.data(),
             out.final_hidden_bits.size() * 2);
-  write_out(out_prefix + ".logits.bf16", out.logits_bits.data(),
-            out.logits_bits.size() * 2);
+  write_out(out_prefix + ".logits.f32", out.logits.data(),
+            out.logits.size() * sizeof(float));
   {
     std::string routes;
     for (size_t l = 0; l < out.routes.size(); ++l) {
@@ -237,7 +236,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
           out.final_hidden_bits, oracle_out.final_hidden_bits);
       const dgpp::glm_route::Top1AuditSummary top1 =
           dgpp::glm_route::audit_top1_near_ties(
-              out.logits_bits.data(), oracle_out.logits_bits.data(),
+              out.logits.data(), oracle_out.logits.data(),
               cfg.vocab_size, ids.size());
       dgpp::glm_route::certify_top1_near_ties(top1, ids.size(), "fabric");
       DGPP_LOG_INFO(

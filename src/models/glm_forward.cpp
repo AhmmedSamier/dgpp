@@ -53,6 +53,17 @@ std::vector<uint16_t> fetch_bf16(const uint16_t* dev, size_t n,
   return host;
 }
 
+std::vector<float> fetch_f32(const float* dev, size_t n,
+                             cudaStream_t stream) {
+  std::vector<float> host(n);
+  if (n) {
+    DGPP_CUDA_OK(cudaMemcpyAsync(host.data(), dev, n * sizeof(float),
+                                 cudaMemcpyDeviceToHost, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+  }
+  return host;
+}
+
 void upload_bf16(uint16_t* dev, const uint16_t* host, size_t n,
                  cudaStream_t stream) {
   DGPP_CUDA_OK(cudaMemcpyAsync(dev, host, n * sizeof(uint16_t),
@@ -245,11 +256,11 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     dense_u_ = static_cast<uint16_t*>(alloc_device(T * I * 2));
     dense_act_ = static_cast<uint16_t*>(alloc_device(T * I * 2));
   }
-  logits_ =
-      static_cast<uint16_t*>(alloc_device(T * lm_vocab_count_ * 2));
+  logits_ = static_cast<float*>(
+      alloc_device(T * lm_vocab_count_ * sizeof(float)));
   DGPP_CUDA_OK(cudaHostAlloc(
       reinterpret_cast<void**>(&h_tail_logits_),
-      static_cast<size_t>(kDecodeRows) * lm_vocab_count_ * 2,
+      static_cast<size_t>(kDecodeRows) * lm_vocab_count_ * sizeof(float),
       cudaHostAllocDefault));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_tail_hidden_),
                              static_cast<size_t>(kDecodeRows) * H * 2,
@@ -481,7 +492,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
   const float eps = cfg_.rms_norm_eps;
 
   // Shape-keyed plans (cache hits after the first forward of this size).
-  if (!gemm_.ensure_plan(T, lm_vocab_count_, H, DType::BF16, GemmOut::BF16,
+  if (!gemm_.ensure_plan(T, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
                          H))
     throw std::runtime_error("forward: lm head GEMM plan unavailable");
 
@@ -676,14 +687,14 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
   glm_rmsnorm_bf16(collapsed_, globals_.final_norm, normed_, T, H, eps,
                    stream_);
   gemm_.matmul(normed_, globals_.lm_head, logits_, T, lm_vocab_count_, H,
-               DType::BF16, GemmOut::BF16, H, gemm_ws_, gemm_ws_bytes_,
+               DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_,
                stream_);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 
     const size_t TH = static_cast<size_t>(T) * H;
   const size_t TV = static_cast<size_t>(T) * lm_vocab_count_;
   out.final_hidden_bits = fetch_bf16(normed_, TH, stream_);
-  out.logits_bits = fetch_bf16(logits_, TV, stream_);
+  out.logits = fetch_f32(logits_, TV, stream_);
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
   return out;
@@ -707,18 +718,17 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::forward_isolated(
 }
 
 std::vector<std::vector<std::pair<int32_t, float>>> GlmDiagnosticModel::topk(
-    const std::vector<uint16_t>& logits_bits, int64_t rows, int vocab,
-    int k) {
+    const std::vector<float>& logits, int64_t rows, int vocab, int k) {
   if (k <= 0 || k > 64 || k > vocab)
     throw std::invalid_argument("topk: k out of range");
   std::vector<std::vector<std::pair<int32_t, float>>> out(
       static_cast<size_t>(rows));
   for (int64_t r = 0; r < rows; ++r) {
-    const uint16_t* row = logits_bits.data() + static_cast<size_t>(r) * vocab;
+    const float* row = logits.data() + static_cast<size_t>(r) * vocab;
     std::vector<std::pair<float, int32_t>> best;
     best.reserve(static_cast<size_t>(k));
     for (int c = 0; c < vocab; ++c) {
-      const float v = bf16_bits_to_float(row[c]);
+      const float v = row[c];
       // Lowest-id tie-break: a later column only displaces on a strictly
       // greater value (insertion into the sorted-descending prefix).
       bool placed = false;

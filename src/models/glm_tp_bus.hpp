@@ -209,33 +209,51 @@ struct GlmGraphRecordReducer final : GlmBoundaryReducer {
 // glm_sample's canonical (value desc, id asc) — rank-consistent by
 // construction, the same discipline the unit tests pin.
 //
-// Encoding: ids travel as three 6-bit digits (bf16 holds integers only
-// 0..256 exactly; vocab ids run past 150k); values travel as their own
-// bf16 (they were bf16 logits to begin with). Wire shape: one latency
-// collective for the candidate gather, one for the winner broadcast —
-// both padded to the boundary folds' 2048 elements (see the OPEN ENGINE
-// BUG note inside). A proper (value, id) arg-max all-reduce is the M9
-// optimization; this is exact and rides the proven collective contract
-// (single outstanding, no other latency traffic in flight — the pick is
-// serialized behind the forward's collectives in every consumer of it).
+// Encoding: everything travels as 6-bit digits (bf16 holds integers only
+// 0..256 exactly): ids as three (vocab ids run past 150k), the fp32 logit
+// as six — its 32 bits, exactly, since 2026-09-03 the logits are the
+// head's unrounded accumulators and a bf16 on the wire would put the
+// rounding back at the merge. Wire shape: one latency collective for the
+// candidate gather, one for the winner broadcast — both padded to the
+// boundary folds' 2048 elements (see the OPEN ENGINE BUG note inside). A
+// proper (value, id) arg-max all-reduce is the M9 optimization; this is
+// exact and rides the proven collective contract (single outstanding, no
+// other latency traffic in flight — the pick is serialized behind the
+// forward's collectives in every consumer of it).
 //
-// `scratch` is a device (managed) buffer of >= 4*world bf16 elements,
-// host-writable — caller-owned so this helper allocates nothing inside
-// the decode loop.
+// `scratch` is a device (managed) buffer of >= kPickSlotsPerRank*world
+// bf16 elements, host-writable — caller-owned so this helper allocates
+// nothing inside the decode loop.
+constexpr int kPickLogitDigits = 6;  // 36 bits carry the float's 32
+constexpr int kPickIdDigits = 3;     // 18 bits carry a vocab id
+constexpr int kPickSlotsPerRank = kPickLogitDigits + kPickIdDigits;
+
+inline void pick_encode_digits(uint16_t* slots, uint64_t value, int digits) {
+  for (int d = 0; d < digits; ++d)
+    slots[d] = static_cast<uint16_t>((value >> (6 * d)) & 63);
+}
+inline uint64_t pick_decode_digits(const uint16_t* slots, int digits) {
+  uint64_t value = 0;
+  for (int d = 0; d < digits; ++d)
+    value |= static_cast<uint64_t>(slots[d] & 63) << (6 * d);
+  return value;
+}
+
 inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
                                glm_sample::Candidate local, uint16_t* scratch,
                                int timeout_ms) {
   step_timing::Scope tick(step_timing::kPick);
-  if (local.id < 0 || local.id >= (1 << 18)) {
+  if (local.id < 0 || local.id >= (1 << (6 * kPickIdDigits))) {
     throw std::invalid_argument("bus_greedy_pick: token id outside the "
                                  "6-bit-triplet encoding range");
   }
-  // The historically-vulnerable shape, now the regression proof: 16
-  // elems (world 4) — a small plain collective after a run of staged
-  // ones. Before the generation-gated claim this raced a peer's
-  // in-flight collective kernel (corruption or stall, whichever way the
-  // claim fell); the gate pins the claim to this collective's doorbells.
-  const size_t gather_elems = static_cast<size_t>(world) * 4;
+  // The historically-vulnerable shape, now the regression proof: a small
+  // plain collective (world 4: 36 elems) after a run of staged ones.
+  // Before the generation-gated claim this raced a peer's in-flight
+  // collective kernel (corruption or stall, whichever way the claim
+  // fell); the gate pins the claim to this collective's doorbells.
+  const size_t gather_elems =
+      static_cast<size_t>(world) * kPickSlotsPerRank;
   const auto allreduce_wait = [&](std::string* err) -> uint64_t {
     const uint64_t id = bus.allreduce(scratch, scratch, gather_elems, err);
     if (id == 0) return 0;
@@ -249,42 +267,39 @@ inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
 
   // ---- gather: every rank's (value, id) in its own slots -------------
   std::memset(scratch, 0, gather_elems * 2);
-  scratch[static_cast<size_t>(rank) * 4 + 0] =
-      float_to_bf16_bits(local.logit);
-  scratch[static_cast<size_t>(rank) * 4 + 1] =
-      static_cast<uint16_t>(local.id & 63);
-  scratch[static_cast<size_t>(rank) * 4 + 2] =
-      static_cast<uint16_t>((local.id >> 6) & 63);
-  scratch[static_cast<size_t>(rank) * 4 + 3] =
-      static_cast<uint16_t>((local.id >> 12) & 63);
+  {
+    uint16_t* mine = scratch + static_cast<size_t>(rank) * kPickSlotsPerRank;
+    uint32_t logit_bits = 0;
+    std::memcpy(&logit_bits, &local.logit, sizeof(logit_bits));
+    pick_encode_digits(mine, logit_bits, kPickLogitDigits);
+    pick_encode_digits(mine + kPickLogitDigits,
+                       static_cast<uint64_t>(local.id), kPickIdDigits);
+  }
   std::string err;
   if (allreduce_wait(&err) == 0)
     throw std::runtime_error("bus_greedy_pick gather: " + err);
   std::vector<glm_sample::Candidate> cands;
   cands.reserve(static_cast<size_t>(world));
   for (int r = 0; r < world; ++r) {
-    const uint16_t* q = scratch + static_cast<size_t>(r) * 4;
+    const uint16_t* q = scratch + static_cast<size_t>(r) * kPickSlotsPerRank;
     glm_sample::Candidate c;
-    c.logit = bf16_bits_to_float(q[0]);
-    c.id = static_cast<int32_t>(q[1]) | (static_cast<int32_t>(q[2]) << 6) |
-           (static_cast<int32_t>(q[3]) << 12);
+    const uint32_t logit_bits =
+        static_cast<uint32_t>(pick_decode_digits(q, kPickLogitDigits));
+    std::memcpy(&c.logit, &logit_bits, sizeof(c.logit));
+    c.id = static_cast<int32_t>(
+        pick_decode_digits(q + kPickLogitDigits, kPickIdDigits));
     cands.push_back(c);
   }
   const int32_t winner = glm_sample::merge_greedy(cands);
 
   // ---- broadcast: rank 0's winner digits reach every rank -----------
   std::memset(scratch, 0, gather_elems * 2);
-  if (rank == 0) {
-    scratch[0] = static_cast<uint16_t>(winner & 63);
-    scratch[1] = static_cast<uint16_t>((winner >> 6) & 63);
-    scratch[2] = static_cast<uint16_t>((winner >> 12) & 63);
-    scratch[3] = 0;
-  }
+  if (rank == 0)
+    pick_encode_digits(scratch, static_cast<uint64_t>(winner), kPickIdDigits);
   if (allreduce_wait(&err) == 0)
     throw std::runtime_error("bus_greedy_pick broadcast: " + err);
-  const int32_t decoded = static_cast<int32_t>(scratch[0]) |
-                          (static_cast<int32_t>(scratch[1]) << 6) |
-                          (static_cast<int32_t>(scratch[2]) << 12);
+  const int32_t decoded =
+      static_cast<int32_t>(pick_decode_digits(scratch, kPickIdDigits));
   // Load-bearing readback invariant: every rank folds an identical
   // candidate table (the allreduce is bitwise-stable by contract), so
   // every rank computes the same winner and every rank must decode rank

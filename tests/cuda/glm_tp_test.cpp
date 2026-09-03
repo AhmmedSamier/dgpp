@@ -252,6 +252,11 @@ bool bits_equal(const std::vector<uint16_t>& a,
          std::memcmp(a.data(), b.data(), a.size() * 2) == 0;
 }
 
+bool bits_equal(const std::vector<float>& a, const std::vector<float>& b) {
+  return a.size() == b.size() &&
+         std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+}
+
 // Runs one loopback TP world end to end and asserts the full parity
 // surface against the supplied oracle references: cross-rank bitwise at
 // every observable, free-run l2 + top-1 near-tie certification, per-layer
@@ -290,7 +295,7 @@ void check_world(int world, uint16_t port, const std::string& dir,
     require(bits_equal(a.free_out.final_hidden_bits,
                        b.free_out.final_hidden_bits),
             "free-run final hidden differs bitwise across ranks");
-    require(bits_equal(a.free_out.logits_bits, b.free_out.logits_bits),
+    require(bits_equal(a.free_out.logits, b.free_out.logits),
             "logits differ bitwise across ranks");
     require(a.captures.size() == b.captures.size() &&
                 a.captures.size() == ref_captures.size(),
@@ -326,7 +331,14 @@ void check_world(int world, uint16_t port, const std::string& dir,
       std::fclose(f);
     };
     dump(".final_hidden.bf16", ranks[0].free_out.final_hidden_bits);
-    dump(".logits.bf16", ranks[0].free_out.logits_bits);
+    {
+      const std::vector<float>& lg = ranks[0].free_out.logits;
+      std::FILE* f = std::fopen((p + ".logits.f32").c_str(), "wb");
+      if (!f) throw std::runtime_error("cannot write " + p + ".logits.f32");
+      if (std::fwrite(lg.data(), sizeof(float), lg.size(), f) != lg.size())
+        throw std::runtime_error("short write to " + p + ".logits.f32");
+      std::fclose(f);
+    }
     const bool have_folds = ranks[0].boundary.size() ==
                                 2 * static_cast<size_t>(cfg.num_hidden_layers) &&
                             ref_boundary.size() == ranks[0].boundary.size();
@@ -353,7 +365,7 @@ void check_world(int world, uint16_t port, const std::string& dir,
   const double free_l2 = l2_bf16(ranks[0].free_out.final_hidden_bits,
                                  ref_free.final_hidden_bits);
   const Top1AuditSummary top1 = audit_top1_near_ties(
-      ranks[0].free_out.logits_bits.data(), ref_free.logits_bits.data(),
+      ranks[0].free_out.logits.data(), ref_free.logits.data(),
       cfg.vocab_size, tokens.size());
   certify_top1_near_ties(top1, tokens.size(), what);
   // Reported IMMEDIATELY (the parity sections below can throw before the
@@ -623,7 +635,7 @@ OracleRef run_oracle(const GlmTextConfig& cfg, const std::string& dir,
   ref.free_out = oracle.forward(tokens);
   const GlmDiagnosticModel::Outputs again = oracle.forward(tokens);
   require(ref.free_out.final_hidden_bits == again.final_hidden_bits &&
-              ref.free_out.logits_bits == again.logits_bits,
+              ref.free_out.logits == again.logits,
           "oracle forward is not deterministic across calls");
   ref.iso_out =
       oracle.forward_isolated(tokens, state_ptrs, ref.captures, &ref.boundary);
@@ -700,7 +712,7 @@ DGPP_TEST(glm_tp_head_shard_parity) {
     require(shard.lm_vocab_begin == 0 &&
                 shard.lm_vocab_count == cfg.vocab_size,
             "world-1 sharded slice must be the full vocab");
-    require(bits_equal(full.logits_bits, shard.logits_bits),
+    require(bits_equal(full.logits, shard.logits),
             "world-1 sharded head drifted from the full head");
   }
 
@@ -747,13 +759,12 @@ DGPP_TEST(glm_tp_head_shard_parity) {
         // The bitwise claim, row by row: b's row must equal a's row
         // restricted to columns [begin, begin+count).
         for (int t = 0; t < static_cast<int>(tokens.size()); ++t) {
-          const uint16_t* full_row = a.logits_bits.data() +
+          const float* full_row = a.logits.data() +
               static_cast<size_t>(t) * cfg.vocab_size + begin;
-          const uint16_t* shard_row =
-              b.logits_bits.data() +
-              static_cast<size_t>(t) * b.lm_vocab_count;
+          const float* shard_row =
+              b.logits.data() + static_cast<size_t>(t) * b.lm_vocab_count;
           if (std::memcmp(full_row, shard_row,
-                          static_cast<size_t>(count) * 2) != 0)
+                          static_cast<size_t>(count) * sizeof(float)) != 0)
             throw std::runtime_error(
                 "head shard logits row " + std::to_string(t) +
                 " differs from the replicated head's columns (rank " +
@@ -802,14 +813,9 @@ DGPP_TEST(glm_tp_greedy_gen_loopback) {
     for (int s = 0; s < kSteps; ++s) {
       const GlmDiagnosticModel::Outputs out = model.forward(toks);
       const int T = static_cast<int>(toks.size());
-      const uint16_t* row =
-          out.logits_bits.data() +
-          static_cast<size_t>(T - 1) * cfg.vocab_size;
-      std::vector<float> frow(cfg.vocab_size);
-      for (int i = 0; i < cfg.vocab_size; ++i)
-        frow[static_cast<size_t>(i)] = bf16_bits_to_float(row[i]);
-      const Candidate c =
-          local_max(frow.data(), cfg.vocab_size, 0);
+      const float* row =
+          out.logits.data() + static_cast<size_t>(T - 1) * cfg.vocab_size;
+      const Candidate c = local_max(row, cfg.vocab_size, 0);
       toks.push_back(c.id);
       w1_seq.push_back(c.id);
     }
@@ -890,24 +896,16 @@ DGPP_TEST(glm_tp_greedy_gen_loopback) {
           const GlmDiagnosticModel::Outputs shard_out = shard.forward(toks);
           const int T = static_cast<int>(toks.size());
           // centralized pick: the full head's last row, whole vocab
-          const uint16_t* full_row =
-              full_out.logits_bits.data() +
+          const float* full_row =
+              full_out.logits.data() +
               static_cast<size_t>(T - 1) * cfg.vocab_size;
-          std::vector<float> ffull(cfg.vocab_size);
-          for (int i = 0; i < cfg.vocab_size; ++i)
-            ffull[static_cast<size_t>(i)] = bf16_bits_to_float(full_row[i]);
-          const Candidate central =
-              local_max(ffull.data(), cfg.vocab_size, 0);
+          const Candidate central = local_max(full_row, cfg.vocab_size, 0);
           // distributed pick: this rank's slice through the bus
-          const uint16_t* slice_row =
-              shard_out.logits_bits.data() +
+          const float* slice_row =
+              shard_out.logits.data() +
               static_cast<size_t>(T - 1) * shard_out.lm_vocab_count;
-          std::vector<float> fslice(shard_out.lm_vocab_count);
-          for (int i = 0; i < shard_out.lm_vocab_count; ++i)
-            fslice[static_cast<size_t>(i)] =
-                bf16_bits_to_float(slice_row[i]);
           const Candidate local =
-              local_max(fslice.data(), shard_out.lm_vocab_count,
+              local_max(slice_row, shard_out.lm_vocab_count,
                         shard_out.lm_vocab_begin);
           const int32_t token = bus_greedy_pick(
               *buses[static_cast<size_t>(r)], r, kWorld, local, scratch,
@@ -980,19 +978,16 @@ DGPP_TEST(glm_tp_decode_session_parity) {
   // position. Engine and reference are SEPARATE model instances: a plain
   // forward mid-session would clobber the session's state pools (and now
   // throws — the hazard is pinned in the negative test below).
-  const auto bits_argmax = [&](const std::vector<uint16_t>& bits,
-                               int count, int begin) {
-    std::vector<float> f(static_cast<size_t>(count));
-    for (int i = 0; i < count; ++i)
-      f[static_cast<size_t>(i)] = bf16_bits_to_float(bits[static_cast<size_t>(i)]);
-    return local_max(f.data(), count, begin);
+  const auto bits_argmax = [&](const std::vector<float>& row, int count,
+                               int begin) {
+    return local_max(row.data(), count, begin);
   };
   const auto engine_transcript = [&](GlmDiagnosticModel& eng,
                                      std::vector<int64_t>* gen_out,
-                                     std::vector<std::vector<uint16_t>>* rows) {
+                                     std::vector<std::vector<float>>* rows) {
     const GlmDiagnosticModel::Outputs pre = eng.session_prefill(prompt);
     std::vector<int64_t> gen;
-    int32_t token = bits_argmax(pre.logits_bits, pre.lm_vocab_count,
+    int32_t token = bits_argmax(pre.logits, pre.lm_vocab_count,
                                 pre.lm_vocab_begin).id;
     for (int s = 0; s < kSteps; ++s) {
       const auto t0 = std::chrono::steady_clock::now();
@@ -1001,9 +996,9 @@ DGPP_TEST(glm_tp_decode_session_parity) {
                             std::chrono::steady_clock::now() - t0)
                             .count();
       gen.push_back(token);
-      if (rows) rows->push_back(out.logits_bits);
+      if (rows) rows->push_back(out.logits);
       DGPP_LOG_DEBUG("session step {} ({}ms): token {}", s, ms, token);
-      token = bits_argmax(out.logits_bits, out.lm_vocab_count,
+      token = bits_argmax(out.logits, out.lm_vocab_count,
                         out.lm_vocab_begin)
                   .id;
     }
@@ -1012,7 +1007,7 @@ DGPP_TEST(glm_tp_decode_session_parity) {
 
   // ---- phase A: world 1 ------------------------------------------------
   std::vector<int64_t> w1_gen;
-  std::vector<std::vector<uint16_t>> w1_rows;
+  std::vector<std::vector<float>> w1_rows;
   {
     GlmDiagnosticModel eng(cfg, dir, max_tokens, 128);
     GlmDiagnosticModel ref(cfg, dir, max_tokens, 128);
@@ -1022,10 +1017,10 @@ DGPP_TEST(glm_tp_decode_session_parity) {
     const GlmDiagnosticModel::Outputs ref_pre = ref.forward(prompt);
     const size_t rowV = (prompt.size() - 1) * V;
     const size_t rowH = (prompt.size() - 1) * H;
-    require(pre.logits_bits.size() == V, "prefill row shape");
+    require(pre.logits.size() == V, "prefill row shape");
     require(pre.final_hidden_bits.size() == H, "prefill hidden shape");
-    require(std::equal(pre.logits_bits.begin(), pre.logits_bits.end(),
-                       ref_pre.logits_bits.begin() + rowV),
+    require(std::equal(pre.logits.begin(), pre.logits.end(),
+                       ref_pre.logits.begin() + rowV),
             "single-chunk prefill logits must be BITWISE the re-forward's "
             "last row (same op sequence on fresh state)");
     require(std::equal(pre.final_hidden_bits.begin(),
@@ -1039,14 +1034,14 @@ DGPP_TEST(glm_tp_decode_session_parity) {
     std::vector<int64_t> seq = prompt;
     seq.insert(seq.end(), w1_gen.begin(), w1_gen.end());
     const GlmDiagnosticModel::Outputs ref_all = ref.forward(seq);
-    require(ref_all.logits_bits.size() == seq.size() * V,
+    require(ref_all.logits.size() == seq.size() * V,
             "reference forward row count");
 
     // Steps: row s is position P+s (the step consumed gen[s] there).
     for (int s = 0; s < kSteps; ++s) {
       const size_t pos = prompt.size() + static_cast<size_t>(s);
-      std::vector<uint16_t> rr(ref_all.logits_bits.begin() + pos * V,
-                               ref_all.logits_bits.begin() + (pos + 1) * V);
+      std::vector<float> rr(ref_all.logits.begin() + pos * V,
+                               ref_all.logits.begin() + (pos + 1) * V);
       const double rel = dgpp::glm_route::l2_rel(w1_rows[s], rr);
       const Top1AuditSummary t1 =
           audit_top1_near_ties(w1_rows[s].data(), rr.data(), cfg.vocab_size, 1);
@@ -1065,15 +1060,15 @@ DGPP_TEST(glm_tp_decode_session_parity) {
     const GlmDiagnosticModel::Outputs pre2 = eng2.session_prefill(big);
     std::vector<int64_t> gen2;
     int32_t token2 =
-        bits_argmax(pre2.logits_bits, pre2.lm_vocab_count,
+        bits_argmax(pre2.logits, pre2.lm_vocab_count,
                   pre2.lm_vocab_begin)
             .id;
-    std::vector<std::vector<uint16_t>> rows2;
+    std::vector<std::vector<float>> rows2;
     for (int s = 0; s < kBigSteps; ++s) {
       const GlmDiagnosticModel::Outputs out = eng2.session_step(token2);
-      rows2.push_back(out.logits_bits);
+      rows2.push_back(out.logits);
       gen2.push_back(token2);
-      token2 = bits_argmax(out.logits_bits, out.lm_vocab_count,
+      token2 = bits_argmax(out.logits, out.lm_vocab_count,
                          out.lm_vocab_begin)
                    .id;
     }
@@ -1084,11 +1079,11 @@ DGPP_TEST(glm_tp_decode_session_parity) {
     // Prefill chunking tier: last row, chunked (2048+2) vs single-shot.
     {
       const size_t pos = 2049;
-      std::vector<uint16_t> rr(ref2_all.logits_bits.begin() + pos * V,
-                               ref2_all.logits_bits.begin() + (pos + 1) * V);
-      const double rel = dgpp::glm_route::l2_rel(pre2.logits_bits, rr);
+      std::vector<float> rr(ref2_all.logits.begin() + pos * V,
+                               ref2_all.logits.begin() + (pos + 1) * V);
+      const double rel = dgpp::glm_route::l2_rel(pre2.logits, rr);
       const Top1AuditSummary t1 = audit_top1_near_ties(
-          pre2.logits_bits.data(), rr.data(), cfg.vocab_size, 1);
+          pre2.logits.data(), rr.data(), cfg.vocab_size, 1);
       certify_top1_near_ties(t1, 1, "multi-chunk prefill (w1)");
       DGPP_LOG_INFO("multi-chunk prefill (2048+2) vs re-forward: rel_l2 "
                     "{:.6f}, top1 misses {} — the KDA recurrence crossed "
@@ -1098,8 +1093,8 @@ DGPP_TEST(glm_tp_decode_session_parity) {
     }
     for (int s = 0; s < kBigSteps; ++s) {
       const size_t pos = 2050 + static_cast<size_t>(s);
-      std::vector<uint16_t> rr(ref2_all.logits_bits.begin() + pos * V,
-                               ref2_all.logits_bits.begin() + (pos + 1) * V);
+      std::vector<float> rr(ref2_all.logits.begin() + pos * V,
+                               ref2_all.logits.begin() + (pos + 1) * V);
       const double rel = dgpp::glm_route::l2_rel(rows2[s], rr);
       const Top1AuditSummary t1 =
           audit_top1_near_ties(rows2[s].data(), rr.data(), cfg.vocab_size, 1);
@@ -1146,13 +1141,13 @@ DGPP_TEST(glm_tp_decode_session_parity) {
         const GlmDiagnosticModel::Outputs pre = eng.session_prefill(prompt);
         const GlmDiagnosticModel::Outputs ref_pre = ref.forward(prompt);
         const size_t rowV = (prompt.size() - 1) * V;
-        require(std::equal(pre.logits_bits.begin(), pre.logits_bits.end(),
-                           ref_pre.logits_bits.begin() + rowV),
+        require(std::equal(pre.logits.begin(), pre.logits.end(),
+                           ref_pre.logits.begin() + rowV),
                 "w4 single-chunk prefill must be BITWISE the re-forward's "
                 "last row");
 
         std::vector<int64_t> gen;
-        std::vector<std::vector<uint16_t>> rows;
+        std::vector<std::vector<float>> rows;
         engine_transcript(eng, &gen, &rows);
         for (int s = 0; s < kSteps; ++s)
           rank_seqs[static_cast<size_t>(r)][static_cast<size_t>(s)] =
@@ -1163,8 +1158,8 @@ DGPP_TEST(glm_tp_decode_session_parity) {
         const GlmDiagnosticModel::Outputs ref_all = ref.forward(seq);
         for (int s = 0; s < kSteps; ++s) {
           const size_t pos = prompt.size() + static_cast<size_t>(s);
-          std::vector<uint16_t> rr(ref_all.logits_bits.begin() + pos * V,
-                                   ref_all.logits_bits.begin() + (pos + 1) * V);
+          std::vector<float> rr(ref_all.logits.begin() + pos * V,
+                                   ref_all.logits.begin() + (pos + 1) * V);
           const double rel = dgpp::glm_route::l2_rel(rows[s], rr);
           const Top1AuditSummary t1 = audit_top1_near_ties(
               rows[s].data(), rr.data(), cfg.vocab_size, 1);

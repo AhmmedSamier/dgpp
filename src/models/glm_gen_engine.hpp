@@ -57,15 +57,11 @@ class GenEngineAdapter : public glm::SchedulerEngine {
 // float conversion is hoisted into the returned closure so the decode
 // path allocates nothing per token.
 inline GenEngineAdapter::Pick make_w1_pick(int64_t vocab) {
-  return [vocab, row = std::vector<float>()](
-             const GlmDiagnosticModel::Outputs& out) mutable -> int32_t {
-    row.resize(static_cast<size_t>(out.lm_vocab_count));
-    for (int i = 0; i < out.lm_vocab_count; ++i)
-      row[static_cast<size_t>(i)] =
-          bf16_bits_to_float(out.logits_bits[static_cast<size_t>(i)]);
+  return [vocab](const GlmDiagnosticModel::Outputs& out) -> int32_t {
     const int32_t t =
-        glm_sample::local_max(row.data(), static_cast<int>(out.lm_vocab_count),
-                               /*vocab_begin=*/0)
+        glm_sample::local_max(out.logits.data(),
+                              static_cast<int>(out.lm_vocab_count),
+                              /*vocab_begin=*/0)
             .id;
     if (t < 0 || t >= vocab)
       throw std::runtime_error("w1 pick out of range: " + std::to_string(t));

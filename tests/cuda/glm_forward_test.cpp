@@ -213,11 +213,8 @@ DGPP_TEST(glm_embed_bcast_streams_copies_all_four) {
 
 DGPP_TEST(topk_breaks_ties_by_lowest_id) {
   // values: idx 0..4 = [5, 5, 3, 5, 1]; k=2 -> ids [0, 1].
-  std::vector<uint16_t> bits = {
-      float_to_bf16_bits(5.0f), float_to_bf16_bits(5.0f),
-      float_to_bf16_bits(3.0f), float_to_bf16_bits(5.0f),
-      float_to_bf16_bits(1.0f)};
-  const auto got = dgpp::GlmDiagnosticModel::topk(bits, 1, 5, 2);
+  const std::vector<float> logits = {5.0f, 5.0f, 3.0f, 5.0f, 1.0f};
+  const auto got = dgpp::GlmDiagnosticModel::topk(logits, 1, 5, 2);
   require(got.size() == 1 && got[0].size() == 2, "topk shape");
   require(got[0][0].first == 0 && got[0][0].second == 5.0f, "topk[0]");
   require(got[0][1].first == 1 && got[0][1].second == 5.0f, "topk[1]");
@@ -274,7 +271,7 @@ int run_dump_parity(const std::string& checkpoint_dir,
   // Determinism: a second run replays bitwise (no cross-call state).
   const dgpp::GlmDiagnosticModel::Outputs out2 = model.forward(tokens);
   require(out.final_hidden_bits == out2.final_hidden_bits &&
-              out.logits_bits == out2.logits_bits,
+              out.logits == out2.logits,
           "forward is not deterministic across calls");
 
   // ---- final hidden -------------------------------------------------
@@ -304,7 +301,7 @@ int run_dump_parity(const std::string& checkpoint_dir,
 
   // ---- logits: top-1 exact, top-8 set overlap ------------------------
   const auto got_top = dgpp::GlmDiagnosticModel::topk(
-      out.logits_bits, T, cfg.vocab_size, dump.top_k());
+      out.logits, T, cfg.vocab_size, dump.top_k());
   const int32_t* ref_ids = dump.topk_ids();
   const float* ref_vals = dump.topk_logits();
   int top1_mismatch = 0, set_miss = 0;

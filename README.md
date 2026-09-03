@@ -250,8 +250,10 @@ whether a difference is rounding or a bug:
   ```
 
   A run of the same binary twice must show a delta of exactly 0 (the decode
-  path is deterministic); bf16 logits make single-token deltas of ~0.1 nat
-  normal between builds, so the mean over the text is the signal. Three
+  path is deterministic). The logits are fp32 (the head's accumulators,
+  unrounded), but the residual stream feeding the head is bf16, so
+  single-token deltas of ~0.1 nat are normal between builds that differ in
+  reduction order; the mean over the text is the signal. Three
   texts ship: `teacher_text.txt` (556 tokens, a quick look),
   `teacher_text_hard.txt` (7,331 tokens of unmemorized technical prose,
   perplexity ~10.8 — the sensitive one; use it for the verdict) and

@@ -324,7 +324,7 @@ int main(int argc, char** argv) {
       // between collectives.
       uint16_t* pick_scratch = nullptr;
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&pick_scratch),
-                                 sizeof(uint16_t) * 4 * world,
+                                 sizeof(uint16_t) * dgpp::kPickSlotsPerRank * world,
                                  cudaHostAllocDefault));
       std::unique_ptr<dgpp::net::CollectiveBus> bus;
       try {

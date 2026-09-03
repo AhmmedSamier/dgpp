@@ -119,15 +119,10 @@ inline GenEngineAdapter::Pick make_fabric_pick(net::CollectiveBus* bus,
                                                uint16_t* pick_scratch,
                                                int64_t vocab,
                                                int pick_timeout_ms = 60000) {
-  return [bus, rank, world, pick_scratch, vocab, pick_timeout_ms,
-          row = std::vector<float>()](
-             const GlmDiagnosticModel::Outputs& out) mutable -> int32_t {
-    row.resize(static_cast<size_t>(out.lm_vocab_count));
-    for (int i = 0; i < out.lm_vocab_count; ++i)
-      row[static_cast<size_t>(i)] =
-          bf16_bits_to_float(out.logits_bits[static_cast<size_t>(i)]);
+  return [bus, rank, world, pick_scratch, vocab, pick_timeout_ms](
+             const GlmDiagnosticModel::Outputs& out) -> int32_t {
     const glm_sample::Candidate local = glm_sample::local_max(
-        row.data(), static_cast<int>(out.lm_vocab_count),
+        out.logits.data(), static_cast<int>(out.lm_vocab_count),
         out.lm_vocab_begin);
     const int32_t t = bus_greedy_pick(*bus, rank, world, local,
                                       pick_scratch, pick_timeout_ms);

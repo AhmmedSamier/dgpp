@@ -202,7 +202,7 @@ CaseReport run_case(dgpp::GlmDiagnosticModel& model,
     rep.head_hidden_l2 = std::sqrt(d2 / (o2 + 1e-30));
   }
   const auto got_top = dgpp::GlmDiagnosticModel::topk(
-      iso.logits_bits, T, model.config().vocab_size, dump.top_k());
+      iso.logits, T, model.config().vocab_size, dump.top_k());
   const int32_t* ref_ids = dump.topk_ids();
   const float* ref_logits = dump.topk_logits();
   // The head's top-1 boundary can be a near tie like any selection: at a

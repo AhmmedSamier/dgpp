@@ -60,7 +60,11 @@ def global_margin(ranks, step):
 
 
 def bf16_ulp(x):
-    """The logits are bf16 (8 significand bits): one ulp at magnitude x."""
+    """One bf16 ulp (8 significand bits) at magnitude x — the rounding
+    scale of the residual stream that feeds the head. The logits themselves
+    are fp32 since 2026-09-03, so an exact tie no longer happens, but a
+    margin inside one bf16 ulp is still what a rounding-level kernel change
+    can flip."""
     import math
     if x == 0 or math.isinf(x) or math.isnan(x):
         return 2.0 ** -133
@@ -105,8 +109,8 @@ def main():
     print(f"DIVERGENCE at step {step} (token index {first} of {n}): "
           f"ref token {ref_toks[first]} new token {new_toks[first]}")
     print(f"  global top-2 margin at that step: ref {m_ref:.4f}, new {m_new:.4f}")
-    # The logits are bf16: a pick decided by one ulp (0.125 at |logit| ~20)
-    # is a coin the hidden state's last rounding flips — expected after any
+    # A pick decided within one bf16 ulp of the winner (0.125 at |logit|
+    # ~20) is a coin the hidden state's last rounding flips — expected after any
     # reassociation. Wider than a couple of ulps is not rounding.
     ulp = bf16_ulp(ref[0][step][2])
     near = min(m_ref, m_new) <= 1.5 * ulp

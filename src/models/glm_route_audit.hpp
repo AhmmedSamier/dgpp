@@ -276,6 +276,17 @@ inline double l2_rel(const std::vector<uint16_t>& got,
   return r2 > 0 ? std::sqrt(d2) / std::sqrt(r2) : 0.0;
 }
 
+inline double l2_rel(const std::vector<float>& got,
+                     const std::vector<float>& ref) {
+  double d2 = 0, r2 = 0;
+  for (size_t i = 0; i < got.size(); ++i) {
+    const double d = static_cast<double>(got[i]) - ref[i];
+    d2 += d * d;
+    r2 += static_cast<double>(ref[i]) * ref[i];
+  }
+  return r2 > 0 ? std::sqrt(d2) / std::sqrt(r2) : 0.0;
+}
+
 // Cascade-aware route-audit discipline, shared by the free-run and
 // isolated comparisons: every token's FIRST route divergence vs its
 // reference must certify (audit_route_flips on that token alone — near-tie
@@ -369,33 +380,30 @@ struct Top1AuditSummary {
   double worst_margin_ratio = 0;   // worst miss: oracle top-2 margin / noise
 };
 
-inline Top1AuditSummary audit_top1_near_ties(const uint16_t* tp_logits,
-                                             const uint16_t* ref_logits,
+inline Top1AuditSummary audit_top1_near_ties(const float* tp_logits,
+                                             const float* ref_logits,
                                              int vocab, size_t tokens) {
   Top1AuditSummary sum;
   for (size_t t = 0; t < tokens; ++t) {
-    const uint16_t* tr = tp_logits + t * vocab;
-    const uint16_t* rr = ref_logits + t * vocab;
+    const float* tr = tp_logits + t * vocab;
+    const float* rr = ref_logits + t * vocab;
     int tp_top = 0, rf_top = 0, rf_second = -1;
     double noise = 0;
     for (int c = 0; c < vocab; ++c) {
-      const double d =
-          std::abs(bf16_bits_to_float(tr[c]) - bf16_bits_to_float(rr[c]));
+      const double d = std::abs(static_cast<double>(tr[c]) - rr[c]);
       noise = std::max(noise, d);
-      if (bf16_bits_to_float(tr[c]) > bf16_bits_to_float(tr[tp_top]))
-        tp_top = c;
-      if (bf16_bits_to_float(rr[c]) > bf16_bits_to_float(rr[rf_top])) {
+      if (tr[c] > tr[tp_top]) tp_top = c;
+      if (rr[c] > rr[rf_top]) {
         rf_second = rf_top;
         rf_top = c;
-      } else if (rf_second < 0 || bf16_bits_to_float(rr[c]) >
-                                     bf16_bits_to_float(rr[rf_second])) {
+      } else if (rf_second < 0 || rr[c] > rr[rf_second]) {
         if (c != rf_top) rf_second = c;
       }
     }
     if (tp_top == rf_top) continue;
     ++sum.misses;
-    const double margin = std::abs(
-        bf16_bits_to_float(rr[rf_top]) - bf16_bits_to_float(rr[rf_second]));
+    const double margin =
+        std::abs(static_cast<double>(rr[rf_top]) - rr[rf_second]);
     sum.worst_margin_ratio = std::max(sum.worst_margin_ratio, margin / noise);
     if (noise <= 0 || margin > 32.0 * noise) ++sum.uncertified;
   }

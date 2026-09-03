@@ -160,7 +160,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
         std::vector<int64_t>(prompt_ids.begin() + c0,
                              prompt_ids.begin() + c0 + n),
         c0, /*decode_row=*/false);
-    out.logits_bits = std::move(chunk.logits_bits);
+    out.logits = std::move(chunk.logits);
     out.final_hidden_bits = std::move(chunk.final_hidden_bits);
     out.lm_vocab_begin = chunk.lm_vocab_begin;
     out.lm_vocab_count = chunk.lm_vocab_count;
@@ -316,7 +316,13 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
 
-  if (!gemm_.ensure_plan(T, lm_vocab_count_, H, DType::BF16, GemmOut::BF16, H))
+  // The head runs on every row of a prefill chunk although greedy reads
+  // only the last: a last-row head would come off the m=1 GEMV while the
+  // re-forward reference's comes off the m=T GEMM, and the prefill ==
+  // re-forward BITWISE gate (glm_tp_test) is worth more than the ~6 ms
+  // and 300 MB a 2048-row head costs per chunk.
+  if (!gemm_.ensure_plan(T, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
+                         H))
     throw std::runtime_error("session: lm head GEMM plan unavailable");
 
   // The decode rows' token id rides the PINNED member (a memcpy node's
@@ -509,8 +515,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   glm_rmsnorm_bf16(collapsed_, globals_.final_norm, normed_, T, H, eps,
                    stream_);
   gemm_.matmul(normed_, globals_.lm_head, logits_, T, lm_vocab_count_, H,
-                DType::BF16, GemmOut::BF16, H, gemm_ws_, gemm_ws_bytes_,
-                stream_);
+               DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_,
+               stream_);
   // The prefetch side stream rejoins here: a capture must end with every
   // forked stream joined, and the eager tail's sync below should cover
   // the prefetches too (they read weights, nothing else).
@@ -526,7 +532,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     const size_t rows = decode_row ? static_cast<size_t>(T) : 1;
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_,
                                  logits_ + first * lm_vocab_count_,
-                                 rows * lm_vocab_count_ * 2,
+                                 rows * lm_vocab_count_ * sizeof(float),
                                  cudaMemcpyDeviceToHost, stream_));
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_hidden_, normed_ + first * H,
                                  rows * H * 2, cudaMemcpyDeviceToHost,
@@ -552,7 +558,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // Last row only (see the runner's header note) — from the pinned
   // mirrors' row 0, which the D2H above filled with row T-1.
   out.final_hidden_bits.assign(h_tail_hidden_, h_tail_hidden_ + H);
-  out.logits_bits.assign(h_tail_logits_, h_tail_logits_ + lm_vocab_count_);
+  out.logits.assign(h_tail_logits_, h_tail_logits_ + lm_vocab_count_);
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
   return out;
@@ -597,10 +603,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_decode_tail(int T) {
   // synced), never from the managed activations.
   const uint16_t* last_hidden =
       h_tail_hidden_ + static_cast<size_t>(T - 1) * H;
-  const uint16_t* last_logits =
+  const float* last_logits =
       h_tail_logits_ + static_cast<size_t>(T - 1) * lm_vocab_count_;
   out.final_hidden_bits.assign(last_hidden, last_hidden + H);
-  out.logits_bits.assign(last_logits, last_logits + lm_vocab_count_);
+  out.logits.assign(last_logits, last_logits + lm_vocab_count_);
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
   return out;
