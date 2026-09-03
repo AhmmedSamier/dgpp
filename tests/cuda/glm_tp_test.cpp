@@ -1530,6 +1530,190 @@ DGPP_TEST(glm_tp_speculative_loopback_matches_plain_greedy) {
                 rank_steps[0], kTokens);
 }
 
+// ---------------------------------------------------------------------------
+// The on-device step (DESIGN §9, phase A): the T=2 verify recorded as a
+// graph WITH the pick behind it — glm_pick_local, the gather as a recorded
+// collective node, glm_pick_verdict — replayed over the loopback bus at
+// world 4. Pins, per step: the device verdict (winners, accepted, next) ==
+// the host pick + judge over the SAME replayed logits; the draft's eager
+// device pick == the host pick; and the whole transcript == the plain
+// sharded session's, identical on every rank. Also the first in-process
+// capture of the model's decode graph (the fabric app was the only
+// exerciser before).
+// ---------------------------------------------------------------------------
+DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kTokens = 12;
+  constexpr int kWorld = 4;
+  const int max_tokens = static_cast<int>(prompt.size()) + kTokens + 4;
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29919);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int32_t>> rank_seqs(kWorld);
+  std::vector<int> rank_steps(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      cudaGraphExec_t graph_exec = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus);
+        GlmDiagnosticModel plain_shard(cfg, dir, max_tokens, 128, &reducer,
+                                       r, kWorld, GlmResidency::Streaming,
+                                       GlmHeadSharding::VocabSharded);
+        // Resident: the graph era's precondition (session_graph_prepare).
+        GlmDiagnosticModel shard(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded, 1,
+                                 /*mtp=*/true);
+        shard.set_decode_route_traces(false);
+        dgpp::GlmDevicePicker picker(bus, r, kWorld);
+        dgpp::GlmGraphRecordReducer recorder(bus, shard.stream());
+        DGPP_CUDA_OK(cudaMallocManaged(
+            &scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld)));
+        arrive_once();
+        const auto host_pick = [&](const GlmDiagnosticModel::Outputs& o,
+                                   int rows) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld,
+                                            dgpp::local_row_maxes(o, rows),
+                                            scratch, 60000);
+        };
+        // ---- reference: the plain sharded session on the same bus ------
+        std::vector<int32_t> plain4;
+        {
+          GlmDiagnosticModel::Outputs o = plain_shard.session_prefill(prompt);
+          int32_t tok = host_pick(o, 1)[0];
+          for (int s = 0; s < kTokens; ++s) {
+            plain4.push_back(tok);
+            o = plain_shard.session_step(tok);
+            tok = host_pick(o, 1)[0];
+          }
+        }
+        // ---- the speculative session: prefill, first pick, first draft --
+        GlmDiagnosticModel::Outputs pre = shard.session_prefill(prompt);
+        int32_t next = host_pick(pre, 1)[0];
+        const auto device_inputs = [&](int rows) {
+          dgpp::GlmDevicePicker::Inputs in;
+          in.logits = shard.device_logits();
+          in.rows = rows;
+          in.vocab_count = shard.lm_vocab_count();
+          in.vocab_begin = shard.lm_vocab_begin();
+          in.fed = shard.device_tokens();
+          return in;
+        };
+        // The draft's pick, eager on the device; checked against the host.
+        const auto draft_after = [&](const std::vector<int64_t>& rows) {
+          const GlmDiagnosticModel::Outputs d = shard.session_draft(0, rows);
+          const int32_t host = host_pick(d, 1)[0];
+          const dgpp::GlmPickVerdict& v =
+              picker.run(shard.stream(), device_inputs(1));
+          if (v.accepted != 1 || v.next != host || v.winners[0] != host)
+            throw std::runtime_error("draft: device pick " +
+                                     std::to_string(v.next) + " != host " +
+                                     std::to_string(host));
+          return v.next;
+        };
+        int32_t draft = draft_after({next});
+
+        // ---- capture: the T=2 verify + the recorded pick ----------------
+        shard.session_graph_prepare();
+        dgpp::GlmBoundaryReducer* eager = shard.set_boundary(&recorder);
+        std::string gerr;
+        require(bus.graph_record_begin(&gerr), "graph_record_begin: " + gerr);
+        cudaGraph_t graph = nullptr;
+        DGPP_CUDA_OK(cudaStreamBeginCapture(shard.stream(),
+                                            cudaStreamCaptureModeThreadLocal));
+        shard.session_graph_capture_step(0, std::vector<int64_t>{next, next});
+        picker.record(shard.stream(), device_inputs(2));
+        DGPP_CUDA_OK(cudaStreamEndCapture(shard.stream(), &graph));
+        require(graph != nullptr, "capture produced no graph");
+        require(bus.graph_record_end(&gerr), "graph_record_end: " + gerr);
+        shard.set_boundary(eager);
+        DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr,
+                                          nullptr, 0));
+        cudaGraphDestroy(graph);
+
+        // ---- the replay loop -------------------------------------------
+        std::vector<int32_t>& got = rank_seqs[static_cast<size_t>(r)];
+        int steps = 0;
+        while (static_cast<int>(got.size()) < kTokens) {
+          const std::vector<int64_t> fed{next, draft};
+          shard.session_graph_stage(0, fed);
+          require(bus.graph_replay_arm(&gerr), "graph_replay_arm: " + gerr);
+          DGPP_CUDA_OK(cudaGraphLaunch(graph_exec, shard.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(shard.stream()));
+          require(bus.graph_replay_finish(60000, &gerr),
+                  "graph_replay_finish: " + gerr);
+          const GlmDiagnosticModel::Outputs out = shard.session_graph_collect(0);
+          const dgpp::GlmPickVerdict& v = picker.verdict();
+          // The host judge over the same logits the graph produced.
+          const std::vector<int32_t> winners = host_pick(out, 2);
+          const dgpp::SpecVerdict want = dgpp::judge_verify(fed, winners);
+          const std::vector<Candidate> locals = dgpp::local_row_maxes(out, 2);
+          for (int row = 0; row < 2; ++row) {
+            if (v.winners[row] != winners[static_cast<size_t>(row)])
+              throw std::runtime_error(
+                  "step " + std::to_string(steps) + " row " +
+                  std::to_string(row) + ": device winner " +
+                  std::to_string(v.winners[row]) + " != host " +
+                  std::to_string(winners[static_cast<size_t>(row)]));
+            const Candidate& local = locals[static_cast<size_t>(row)];
+            if (picker.local(row).best_id != local.id ||
+                std::memcmp(&picker.local(row).best_logit, &local.logit, 4) != 0)
+              throw std::runtime_error("device local argmax != host's");
+          }
+          if (v.accepted != want.accepted || v.next != want.next)
+            throw std::runtime_error("device verdict != judge_verify");
+          if (v.accepted < 2) shard.session_rollback(0, v.accepted);
+          ++steps;
+          for (int row = 0; row < v.accepted; ++row)
+            got.push_back(static_cast<int32_t>(fed[static_cast<size_t>(row)]));
+          next = v.next;
+          draft = draft_after(
+              std::vector<int64_t>(v.winners, v.winners + v.accepted));
+        }
+        got.resize(kTokens);
+        rank_steps[static_cast<size_t>(r)] = steps;
+        if (got != plain4)
+          throw std::runtime_error(
+              "graph verify + device pick transcript != the plain sharded "
+              "session's on the same bus");
+        cudaGraphExecDestroy(graph_exec);
+        graph_exec = nullptr;
+        cudaFree(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (graph_exec) cudaGraphExecDestroy(graph_exec);
+        if (scratch) cudaFree(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r)
+    require(rank_seqs[static_cast<size_t>(r)] == rank_seqs[0],
+            "rank " + std::to_string(r) + ": transcript differs across ranks");
+  DGPP_LOG_INFO("device pick graph w4: {} steps for {} tokens; device "
+                "verdicts == host picks every step, transcript == plain",
+                rank_steps[0], kTokens);
+}
+
 DGPP_TEST(glm_tp_decode_session_hazard) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";

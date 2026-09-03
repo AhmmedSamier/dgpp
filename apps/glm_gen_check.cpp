@@ -655,13 +655,16 @@ void log_teacher_stats(int rank, int step, const GlmDiagnosticModel::Outputs& ou
 // --mtp: greedy speculative decode on the fabric (DESIGN §9).
 //
 // Every step verifies [next, draft] as ONE T=2 replay of the recorded
-// decode graph, picks both rows' winners in one two-row bus pick, retracts
-// the second row when the draft missed (session_rollback), and drafts the
-// accepted rows through the MTP block EAGERLY between windows (one layer +
-// the head, two eager folds; the bus's one graph session is the verify's).
-// The transcript is the plain loop's, token for token — the [gen] lines
-// below carry the same fields per generated token, so fabric_xcript judges
-// an --mtp run against a plain run directly (and must say IDENTICAL).
+// decode graph WITH THE PICK RECORDED BEHIND THE HEAD (GlmDevicePicker: the
+// local argmax kernel, the candidate gather as a collective node, the
+// verdict kernel) — the replay ends with the verdict in pinned memory —
+// retracts the second row when the draft missed (session_rollback), and
+// drafts the accepted rows through the MTP block EAGERLY between windows
+// (one layer + the head, two eager folds and the draft's eager device
+// pick; the bus's one graph session is the verify's). The transcript is
+// the plain loop's, token for token — the [gen] lines below carry the same
+// fields per generated token, so fabric_xcript judges an --mtp run against
+// a plain run directly (and must say IDENTICAL).
 // ---------------------------------------------------------------------------
 struct SpecRunStats {
   int steps = 0;
@@ -671,6 +674,18 @@ struct SpecRunStats {
   double pick_ms = 0;
 };
 
+// The per-generated-token line fabric_xcript/fabric_logprob read: the
+// committed token and this rank's slice argmax with its runner-up.
+void log_gen_line(int rank, int gen_index, int vocab_begin, int vocab_count,
+                  int32_t best_id, float best_logit, float second,
+                  int32_t token) {
+  DGPP_LOG_INFO(
+      "[gen] rank {} step {}: token {} (local slice [{},{}) best {} logit "
+      "{:.4f} second {:.4f})",
+      rank, gen_index, token, vocab_begin, vocab_begin + vocab_count, best_id,
+      best_logit, second);
+}
+
 void log_row_pick(int rank, int gen_index, const GlmDiagnosticModel::Outputs& o,
                   int row, const dgpp::glm_sample::Candidate& local,
                   int32_t token) {
@@ -679,11 +694,8 @@ void log_row_pick(int rank, int gen_index, const GlmDiagnosticModel::Outputs& o,
   float second = -INFINITY;
   for (int i = 0; i < o.lm_vocab_count; ++i)
     if (o.lm_vocab_begin + i != local.id && slice[i] > second) second = slice[i];
-  DGPP_LOG_INFO(
-      "[gen] rank {} step {}: token {} (local slice [{},{}) best {} logit "
-      "{:.4f} second {:.4f})",
-      rank, gen_index, token, o.lm_vocab_begin,
-      o.lm_vocab_begin + o.lm_vocab_count, local.id, local.logit, second);
+  log_gen_line(rank, gen_index, o.lm_vocab_begin, o.lm_vocab_count, local.id,
+               local.logit, second, token);
 }
 
 void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
@@ -702,11 +714,22 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
                                 cfg.eos_token_ids.end(), id) !=
                           cfg.eos_token_ids.end();
   };
-  const auto pick_rows = [&](const std::vector<dgpp::glm_sample::Candidate>& l) {
-    return dgpp::bus_greedy_pick_rows(bus, rank, world, l, pick_scratch, 60000);
+  // The picker outlives the graph it records into (its buffers are the
+  // recorded nodes' baked addresses).
+  dgpp::GlmDevicePicker picker(bus, rank, world, 60000);
+  const auto pick_inputs = [&](int rows) {
+    dgpp::GlmDevicePicker::Inputs in;
+    in.logits = model.device_logits();
+    in.rows = rows;
+    in.vocab_count = model.lm_vocab_count();
+    in.vocab_begin = model.lm_vocab_begin();
+    in.fed = model.device_tokens();
+    return in;
   };
 
   // ---- prefill (main stack + the draft block over the prompt) -----------
+  // The prefill's pick stays on the host path: its logits row is the last
+  // row of a prompt-sized chunk, already mirrored to the host.
   const auto t_pre = Clock::now();
   const GlmDiagnosticModel::Outputs pre = model.session_prefill(prompt);
   const double prefill_ms = ms_since(t_pre);
@@ -714,24 +737,25 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
                 "block)", rank, prompt.size(), prefill_ms);
   const std::vector<dgpp::glm_sample::Candidate> pre_local =
       dgpp::local_row_maxes(pre, 1);
-  int32_t next = pick_rows(pre_local)[0];
+  int32_t next = dgpp::bus_greedy_pick_rows(bus, rank, world, pre_local,
+                                            pick_scratch, 60000)[0];
   log_row_pick(rank, 0, pre, 0, pre_local[0], next);
   *forward_ms_total = prefill_ms;
   dgpp::step_timing::reset();
 
-  // ---- the draft (eager; T = rows accepted) ------------------------------
+  // ---- the draft (eager; T = rows accepted; device pick) -----------------
   SpecRunStats st;
   const auto draft_after = [&](const std::vector<int64_t>& rows) -> int32_t {
     const auto t0 = Clock::now();
-    const GlmDiagnosticModel::Outputs d = model.session_draft(0, rows);
+    (void)model.session_draft(0, rows);
     st.draft_ms += ms_since(t0);
     const auto t1 = Clock::now();
-    const int32_t id = pick_rows(dgpp::local_row_maxes(d, 1))[0];
+    const int32_t id = picker.run(model.stream(), pick_inputs(1)).next;
     st.pick_ms += ms_since(t1);
     return id;
   };
 
-  // ---- the verify graph (T=2), recorded once -----------------------------
+  // ---- the verify graph (T=2) + the recorded pick, once ------------------
   cudaGraphExec_t graph_exec = nullptr;
   std::unique_ptr<dgpp::GlmGraphRecordReducer> recorder;
   if (decode_graph) {
@@ -746,32 +770,37 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     DGPP_CUDA_OK(cudaStreamBeginCapture(model.stream(),
                                         cudaStreamCaptureModeThreadLocal));
     model.session_graph_capture_step(0, std::vector<int64_t>{next, next});
+    picker.record(model.stream(), pick_inputs(2));
     DGPP_CUDA_OK(cudaStreamEndCapture(model.stream(), &graph));
     require(graph != nullptr, "verify-graph capture produced no graph");
     require(bus.graph_record_end(&gerr), "graph_record_end: " + gerr);
     model.set_boundary(eager_reducer);
     DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
     cudaGraphDestroy(graph);
-    DGPP_LOG_INFO("rank {} verify graph (T=2) recorded+instantiated in {:.0f}ms",
-                  rank, ms_since(t_capture));
+    DGPP_LOG_INFO("rank {} verify graph (T=2 + device pick) recorded+"
+                  "instantiated in {:.0f}ms", rank, ms_since(t_capture));
   }
-  const auto verify = [&](const std::vector<int64_t>& fed) {
+  // Verify [next, draft]; returns the device verdict (graph: read off the
+  // replay's pinned mirror; eager: the eager device pick after the rows).
+  const auto verify = [&](const std::vector<int64_t>& fed)
+      -> const dgpp::GlmPickVerdict& {
     const auto t0 = Clock::now();
-    GlmDiagnosticModel::Outputs out;
     if (graph_exec == nullptr) {
-      out = model.session_verify(0, fed);
-    } else {
-      std::string gerr;
-      model.session_graph_stage(0, fed);
-      require(bus.graph_replay_arm(&gerr), "graph_replay_arm: " + gerr);
-      DGPP_CUDA_OK(cudaGraphLaunch(graph_exec, model.stream()));
-      DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
-      require(bus.graph_replay_finish(60000, &gerr),
-              "graph_replay_finish: " + gerr);
-      out = model.session_graph_collect(0);
+      (void)model.session_verify(0, fed);
+      const dgpp::GlmPickVerdict& v = picker.run(model.stream(), pick_inputs(2));
+      st.verify_ms += ms_since(t0);
+      return v;
     }
+    std::string gerr;
+    model.session_graph_stage(0, fed);
+    require(bus.graph_replay_arm(&gerr), "graph_replay_arm: " + gerr);
+    DGPP_CUDA_OK(cudaGraphLaunch(graph_exec, model.stream()));
+    DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
+    require(bus.graph_replay_finish(60000, &gerr),
+            "graph_replay_finish: " + gerr);
+    (void)model.session_graph_collect(0);  // advances the position
     st.verify_ms += ms_since(t0);
-    return out;
+    return picker.verdict();
   };
 
   // ---- the loop -----------------------------------------------------------
@@ -784,13 +813,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   while (!stop && static_cast<int>(generated->size()) < steps) {
     const auto t_step = Clock::now();
     const std::vector<int64_t> fed{next, draft};
-    const GlmDiagnosticModel::Outputs out = verify(fed);
-    const auto t_pick = Clock::now();
-    const std::vector<dgpp::glm_sample::Candidate> locals =
-        dgpp::local_row_maxes(out, 2);
-    const std::vector<int32_t> winners = pick_rows(locals);
-    st.pick_ms += ms_since(t_pick);
-    const dgpp::SpecVerdict v = dgpp::judge_verify(fed, winners);
+    const dgpp::GlmPickVerdict& v = verify(fed);
     if (v.accepted < 2) model.session_rollback(0, v.accepted);
     ++st.steps;
     st.accepted += v.accepted - 1;
@@ -800,10 +823,13 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     // position in the transcript.
     for (int r = 0; r < v.accepted; ++r) {
       const int gen_index = static_cast<int>(generated->size());
-      commit(v.committed[static_cast<size_t>(r)]);
-      log_row_pick(rank, gen_index + 1, out, r, locals[static_cast<size_t>(r)],
-                   winners[static_cast<size_t>(r)]);
-      if (is_eos(v.committed[static_cast<size_t>(r)])) {
+      const int32_t committed = static_cast<int32_t>(fed[static_cast<size_t>(r)]);
+      commit(committed);
+      const dgpp::GlmPickLocal& local = picker.local(r);
+      log_gen_line(rank, gen_index + 1, model.lm_vocab_begin(),
+                   model.lm_vocab_count(), local.best_id, local.best_logit,
+                   local.second_logit, v.winners[r]);
+      if (is_eos(committed)) {
         DGPP_LOG_INFO("rank {} eos stop at token {}", rank, gen_index);
         stop = true;
         break;
@@ -814,8 +840,9 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
       }
     }
     next = v.next;
+    const std::vector<int64_t> draft_rows(v.winners, v.winners + v.accepted);
     const double step_ms = ms_since(t_step);
-    if (!stop) draft = draft_after(v.draft_rows);
+    if (!stop) draft = draft_after(draft_rows);
     const double total_ms = ms_since(t_step);
     *forward_ms_total += total_ms;
     DGPP_LOG_INFO("rank {} spec step {}: verify+pick {:.1f}ms, draft {:.1f}ms, "

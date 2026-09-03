@@ -269,6 +269,14 @@ class GlmDiagnosticModel {
   // recorded kernels ARE the eager kernels; the bus gate pins its
   // eager-vs-graph fold equality).
   cudaStream_t stream() const { return stream_; }
+  // The on-device pick's inputs (glm_tp_bus.hpp GlmDevicePicker): the head's
+  // fp32 logits [rows, lm_vocab_count] and the decode call's token ids
+  // [rows] as the last run/capture left them on the device. A verify's
+  // rows are its fed tokens in order; a draft's head lands in row 0.
+  const float* device_logits() const { return logits_; }
+  const int64_t* device_tokens() const { return d_tokens_; }
+  int lm_vocab_begin() const { return lm_vocab_begin_; }
+  int lm_vocab_count() const { return lm_vocab_count_; }
   GlmBoundaryReducer* set_boundary(GlmBoundaryReducer* boundary) {
     GlmBoundaryReducer* prev = boundary_;
     boundary_ = boundary;

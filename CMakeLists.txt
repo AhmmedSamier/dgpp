@@ -117,7 +117,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/l2_prefetch.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
-  src/kernels/glm_norm.cu)
+  src/kernels/glm_norm.cu
+  src/kernels/glm_pick.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
 
@@ -251,7 +252,15 @@ if(DGPP_ENABLE_IBV)
                                          CUDA::cudart Threads::Threads)
   dgpp_set_common(glm_tp_test)
   add_test(NAME glm_tp_test COMMAND glm_tp_test)
-  set_tests_properties(glm_tp_test PROPERTIES SKIP_RETURN_CODE 2)
+  # One process hosts every rank's streams (main, prefetch side streams, the
+  # bus engines' streams); with the default 8 hardware work queues, two
+  # ranks' streams share a queue and a spinning collective kernel of one
+  # rank FIFO-blocks the other rank's chain kernels behind it — a deadlock
+  # the watchdog breaks after 5 s (the in-process graph era stalled 3 of 4
+  # runs at the first prefetch-heavy layer). Each fabric rank is its own
+  # process and never shares; the loopback worlds get more queues instead.
+  set_tests_properties(glm_tp_test PROPERTIES SKIP_RETURN_CODE 2
+                       ENVIRONMENT "CUDA_DEVICE_MAX_CONNECTIONS=32")
 
   # M5 deliverable 3 fabric runner: TP forward on real nodes.
   add_executable(glm_tp_check apps/glm_tp_check.cpp)
@@ -431,6 +440,15 @@ dgpp_set_common(glm_mhc_test)
 add_test(NAME glm_mhc_test COMMAND glm_mhc_test)
 set_tests_properties(glm_mhc_test PROPERTIES SKIP_RETURN_CODE 2)
 
+# The on-device greedy pick (DESIGN §9): local top-2 vs glm_sample::local_max,
+# verdict vs merge_greedy/judge_verify over a simulated world, digest check.
+add_executable(glm_pick_test tests/cuda/glm_pick_test.cpp)
+target_include_directories(glm_pick_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(glm_pick_test PRIVATE dgpp_kernels dgpp_models_glm CUDA::cudart)
+dgpp_set_common(glm_pick_test)
+add_test(NAME glm_pick_test COMMAND glm_pick_test)
+set_tests_properties(glm_pick_test PROPERTIES SKIP_RETURN_CODE 2)
+
 # MoE module parity (M4): router vs oracle at real geometry, expert path on
 # small geometry, swiglu clamps, accumulation order, determinism.
 add_executable(glm_moe_test tests/cuda/glm_moe_test.cu)
@@ -512,7 +530,8 @@ if(DGPP_ENABLE_IBV)
   target_link_libraries(bus_test PRIVATE dgpp_bus)
   dgpp_set_common(bus_test)
   add_test(NAME bus_test COMMAND bus_test)
-  set_tests_properties(bus_test PROPERTIES SKIP_RETURN_CODE 2)
+  set_tests_properties(bus_test PROPERTIES SKIP_RETURN_CODE 2
+                       ENVIRONMENT "CUDA_DEVICE_MAX_CONNECTIONS=32")
   add_test(NAME bus_selftest COMMAND bus_check selftest)
   set_tests_properties(bus_selftest PROPERTIES SKIP_RETURN_CODE 2)
 endif()
