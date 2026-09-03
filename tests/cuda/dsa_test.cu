@@ -2578,6 +2578,106 @@ DGPP_TEST(dsa_layer_decode_graph_replay_matches_eager) {
   if (graphs.hits() < 1) throw std::runtime_error("graph was never replayed");
 }
 
+// A fixed-shape padding row (pos -1) inside a request's span — the in-graph
+// draft's shape after a rejected draft, and every unoccupied row of the
+// row-batched serving graph. The live rows' outputs must be bitwise the
+// padding-free batch and the padding row's output must be all zeros: inert by
+// construction, not merely unobserved downstream.
+DGPP_TEST(dsa_layer_decode_padding_row_is_zero_and_leaves_live_rows_bitwise) {
+  cudaStream_t s = dgpp::kda_test::test_stream();
+  const DsaConfig cfg = small_cfg();
+  const int prefill = 96;
+
+  TestWeights tw(cfg, 4500);
+  LayerEnv env(cfg, 128, 128, 2, 8 * cfg.block_tokens, s);
+  DsaStatePool pool;
+  pool.init(env.arena, cfg, 2, 8 * cfg.block_tokens);
+  DsaLayer layer(env.gemm, tw.layer_views, cfg, 128, 128,
+                 env.arena.alloc_persistent(MemClass::DeviceHot,
+                                            DsaLayer::scratch_bytes(cfg, 128,
+                                                                    128),
+                                            256),
+                 DsaLayer::scratch_bytes(cfg, 128, 128), env.ws.p,
+                 env.ws.bytes);
+  if (!layer.prepare(prefill) || !layer.prepare(2) || !layer.prepare(3))
+    throw std::runtime_error("gemm plans");
+
+  std::vector<uint16_t> hidden =
+      random_bf16_bits(4501, int64_t(prefill + 20) * cfg.hidden, -2, 1);
+  DevBuf din(hidden.size() * 2);
+  din.upload(hidden.data(), hidden.size() * 2);
+  const int64_t pos_a = prefill;       // request 0
+  const int64_t pos_b = prefill + 20;  // request 1
+  DevBuf dpre(size_t(prefill + 20) * cfg.hidden * 2);
+  layer.enqueue_prefill(din.p, pool, 0, 0, 0, prefill, dpre.p, s);
+  layer.enqueue_prefill(din.p, pool, 0, 1, 0, prefill + 20, dpre.p, s);
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  if (!pool.ensure_request_blocks(0, pos_a + 2, s) ||
+      !pool.ensure_request_blocks(1, pos_b + 2, s))
+    throw std::runtime_error("pool exhaustion");
+
+  const std::vector<uint16_t> row_a = random_bf16_bits(4502, cfg.hidden, -2, 1);
+  const std::vector<uint16_t> row_b = random_bf16_bits(4503, cfg.hidden, -2, 1);
+
+  // Reference: the padding-free two-row batch [req0 | req1].
+  DevBuf dreq2(8), dpos2(16), dspans2(16), dhid2(2 * cfg.hidden * 2),
+      dout2(2 * cfg.hidden * 2);
+  {
+    const std::vector<int32_t> req = {0, 1};
+    const std::vector<int64_t> pos = {pos_a, pos_b};
+    const std::vector<int32_t> spans = {0, 1, 1, 1};
+    std::vector<uint16_t> hid = row_a;
+    hid.insert(hid.end(), row_b.begin(), row_b.end());
+    dreq2.upload(req.data(), 8);
+    dpos2.upload(pos.data(), 16);
+    dspans2.upload(spans.data(), 16);
+    dhid2.upload(hid.data(), hid.size() * 2);
+    layer.enqueue_decode(dhid2.p, pool, 0,
+                         static_cast<const int32_t*>(dreq2.p),
+                         static_cast<const int64_t*>(dpos2.p),
+                         static_cast<const int32_t*>(dspans2.p), 2, 2,
+                         dout2.p, s);
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  }
+
+  // The same step with a padding row after req0's real row. Its input is a
+  // real (nonzero) row and the output buffer is pre-filled, so zeros must
+  // be WRITTEN, not inherited.
+  DevBuf dreq3(12), dpos3(24), dspans3(16), dhid3(3 * cfg.hidden * 2),
+      dout3(3 * cfg.hidden * 2);
+  {
+    const std::vector<int32_t> req = {0, 0, 1};
+    const std::vector<int64_t> pos = {pos_a, -1, pos_b};
+    const std::vector<int32_t> spans = {0, 2, 2, 1};
+    std::vector<uint16_t> hid = row_a;
+    hid.insert(hid.end(), row_b.begin(), row_b.end());
+    hid.insert(hid.end(), row_b.begin(), row_b.end());
+    dreq3.upload(req.data(), 12);
+    dpos3.upload(pos.data(), 24);
+    dspans3.upload(spans.data(), 16);
+    dhid3.upload(hid.data(), hid.size() * 2);
+    DGPP_CUDA_OK(cudaMemsetAsync(dout3.p, 0xA5, dout3.bytes, s));
+    layer.enqueue_decode(dhid3.p, pool, 0,
+                         static_cast<const int32_t*>(dreq3.p),
+                         static_cast<const int64_t*>(dpos3.p),
+                         static_cast<const int32_t*>(dspans3.p), 2, 3,
+                         dout3.p, s);
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  }
+
+  std::vector<uint16_t> two(2 * cfg.hidden), three(3 * cfg.hidden);
+  dout2.download(two.data(), two.size() * 2);
+  dout3.download(three.data(), three.size() * 2);
+  require_bitwise("req0 row beside a padding row", two.data(), three.data(),
+                  size_t(cfg.hidden) * 2);
+  require_bitwise("req1 row after a padding row", two.data() + cfg.hidden,
+                  three.data() + 2 * size_t(cfg.hidden),
+                  size_t(cfg.hidden) * 2);
+  const std::vector<uint16_t> zeros(size_t(cfg.hidden), 0);
+  require_bitwise("padding row output is zero", zeros.data(),
+                  three.data() + size_t(cfg.hidden), size_t(cfg.hidden) * 2);
+}
+
 DGPP_TEST(dsa_layer_tp2_head_slice_matches_tp1) {
   cudaStream_t s = dgpp::kda_test::test_stream();
   // 8 MLA heads: tp1 sees all 8, tp2 rank 0 owns heads [0, 4). The indexer

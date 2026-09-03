@@ -35,7 +35,10 @@
 //   fabric: --world N --rank R (--peer HOST when rank > 0)
 //     [--fabric-port N (29970)] [--journal-port N (29971)]
 //     [--rendezvous-timeout-ms N (120000)]
-//     [--decode-graph [--mtp]] (phase 1: --max-concurrency 1)
+//     [--decode-graph [--mtp]] [--graph-batch-min-live N]
+//       (adaptive scalar/fixed batch; concurrency * T <= 8; N defaults to
+//        min(4, max-concurrency) and must lie in [1, max-concurrency])
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -202,12 +205,16 @@ int main(int argc, char** argv) {
       "  fabric (Stage 4b): --world N --rank R (--peer HOST when rank>0)\n"
       "    [--fabric-port N (29970)] [--journal-port N (29971)]\n"
       "    [--rendezvous-timeout-ms N (120000)]\n"
-      "    [--decode-graph [--mtp]] (requires --max-concurrency 1)\n";
+      "    [--decode-graph [--mtp]]\n"
+      "    [--graph-batch-min-live N (default min(4, max-concurrency);\n"
+      "      must be in [1, max-concurrency])]\n"
+      "      (requires max-concurrency * (mtp?2:1) <= 8)\n";
 
   std::string ckpt, model_id, peer;
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
   int64_t kv_capacity = 8192;
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
+  int graph_batch_min_live = 0;  // 0 = min(4, max_concurrency)
   int max_connections = 64;
   int world = 1, rank = 0, rendezvous_timeout_ms = 120000;
   bool no_eos = false, decode_graph = false, mtp = false;
@@ -227,6 +234,8 @@ int main(int argc, char** argv) {
     else if (a == "--max-connections") max_connections = std::stoi(next());
     else if (a == "--no-eos") no_eos = true;
     else if (a == "--decode-graph") decode_graph = true;
+    else if (a == "--graph-batch-min-live")
+      graph_batch_min_live = std::stoi(next());
     else if (a == "--mtp") mtp = true;
     else if (a == "--world") world = std::stoi(next());
     else if (a == "--rank") rank = std::stoi(next());
@@ -277,9 +286,29 @@ int main(int argc, char** argv) {
         "--decode-graph currently requires the fabric (--world > 1)");
     return 1;
   }
-  if (decode_graph && max_concurrency != 1) {
+  const int graph_rows_per_request = mtp ? 2 : 1;
+  if (decode_graph &&
+      max_concurrency >
+          GlmDiagnosticModel::kDecodeRows / graph_rows_per_request) {
     DGPP_LOG_ERROR(
-        "--decode-graph phase 1 requires --max-concurrency 1");
+        "--decode-graph needs --max-concurrency * speculative rows <= {} "
+        "(got {} * {})",
+        GlmDiagnosticModel::kDecodeRows, max_concurrency,
+        graph_rows_per_request);
+    return 1;
+  }
+  // The crossover is a fraction of the configured slots: the default is
+  // four (the measured crossover of the eight-row graph) or full occupancy
+  // when fewer slots exist; an explicit value outside [1, slots] is an
+  // operator error, never silently clamped.
+  if (graph_batch_min_live == 0) {
+    graph_batch_min_live = std::min(4, max_concurrency);
+  } else if (graph_batch_min_live < 1 ||
+             graph_batch_min_live > max_concurrency) {
+    DGPP_LOG_ERROR(
+        "--graph-batch-min-live must be in [1, --max-concurrency] (got {} "
+        "with {} slot(s))",
+        graph_batch_min_live, max_concurrency);
     return 1;
   }
 
@@ -387,8 +416,34 @@ int main(int argc, char** argv) {
 
         std::unique_ptr<dgpp::glm::SchedulerEngine> engine;
         if (decode_graph) {
-          engine = std::make_unique<dgpp::GlmGraphEngineAdapter>(
-              &model, bus.get(), rank, world, pick_scratch, cfg.vocab_size);
+          auto graph_engine = std::make_unique<dgpp::GlmGraphEngineAdapter>(
+              &model, bus.get(), rank, world, pick_scratch, cfg.vocab_size,
+              /*pick_timeout_ms=*/60000, graph_batch_min_live);
+          // Record every graph variant now, on every rank at this same
+          // point, so no capture pauses a live stream later. The warm-up
+          // is a run of collectives, so it starts on the journal's clock:
+          // rank 0 announces it with the warm record once its (slower)
+          // construction is done; a peer holds at that record rather than
+          // spinning its first collective in stall diagnostics.
+          if (rank == 0) {
+            journal->broadcast(dgpp::service::encode_journal_warm());
+          } else if (!dgpp::service::wait_journal_warm(
+                         &*reader, [] { return g_stop_requested.load(); })) {
+            graph_engine.reset();
+            cudaFreeHost(pick_scratch);
+            bus->stop();
+            DGPP_LOG_INFO("rank {}: exited cleanly", rank);
+            return 0;
+          }
+          const auto t_warm = std::chrono::steady_clock::now();
+          graph_engine->warm_captures(std::vector<int64_t>(4, 0));
+          DGPP_LOG_INFO(
+              "rank {}: graph variants warm-captured in {:.2f}s",
+              rank,
+              std::chrono::duration<double>(
+                  std::chrono::steady_clock::now() - t_warm)
+                  .count());
+          engine = std::move(graph_engine);
         } else {
           engine = std::make_unique<dgpp::GenEngineAdapter>(
               &model, max_concurrency,

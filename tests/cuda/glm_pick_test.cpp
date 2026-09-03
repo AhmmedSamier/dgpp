@@ -4,7 +4,8 @@
 // and its judge vs judge_verify, over a SIMULATED world (each rank's table
 // produced by the kernel on its slice, the fold emulated as an exact host
 // sum — which is what the bus's SUM over disjoint slots is); the digest
-// group's agreement/mismatch detection; the wire table's layout.
+// group's agreement/mismatch detection; the wire table's layout; and the
+// fixed-batch MTP control/cache helpers.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -16,7 +17,9 @@
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "common/dtypes.hpp"
 #include "common/test.hpp"
+#include "kernels/glm_norm.hpp"
 #include "kernels/glm_pick.hpp"
 #include "kernels/glm_spec.hpp"
 #include "models/glm_sampler.hpp"
@@ -143,6 +146,40 @@ GlmPickVerdict run_verdict(const std::vector<uint16_t>& table, int rows,
   cudaFree(d_carry);
   cudaFree(d_verdict);
   return v;
+}
+
+std::vector<GlmPickVerdict> run_verdict_batch(
+    const std::vector<uint16_t>& table, int rows, int world, int rank,
+    const std::vector<int64_t>& fed, const std::vector<int64_t>& positions,
+    int requests, int rows_per_request, uint64_t* carry_out) {
+  uint16_t* d_table = device_alloc<uint16_t>(table.size());
+  int64_t* d_fed = device_alloc<int64_t>(fed.size());
+  int64_t* d_positions = device_alloc<int64_t>(positions.size());
+  uint64_t* d_carry = device_alloc<uint64_t>(1);
+  GlmPickVerdict* d_verdict =
+      device_alloc<GlmPickVerdict>(static_cast<size_t>(requests));
+  DGPP_CUDA_OK(cudaMemcpy(d_table, table.data(), table.size() * 2,
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_fed, fed.data(), fed.size() * 8,
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_positions, positions.data(), positions.size() * 8,
+                          cudaMemcpyHostToDevice));
+  dgpp::glm_pick_verdict_batched(
+      d_table, rows, world, rank, d_fed, d_positions, requests,
+      rows_per_request, rows_per_request, d_verdict,
+      /*device_verdicts=*/nullptr, d_carry, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<GlmPickVerdict> out(static_cast<size_t>(requests));
+  DGPP_CUDA_OK(cudaMemcpy(out.data(), d_verdict,
+                          out.size() * sizeof(GlmPickVerdict),
+                          cudaMemcpyDeviceToHost));
+  DGPP_CUDA_OK(cudaMemcpy(carry_out, d_carry, 8, cudaMemcpyDeviceToHost));
+  cudaFree(d_table);
+  cudaFree(d_fed);
+  cudaFree(d_positions);
+  cudaFree(d_carry);
+  cudaFree(d_verdict);
+  return out;
 }
 
 }  // namespace
@@ -316,6 +353,79 @@ DGPP_TEST(pick_verdict_flags_the_rank_whose_carried_digest_differs) {
           "peer digests must decode to what each rank carried");
 }
 
+DGPP_TEST(pick_batch_judges_each_request_and_skips_padding) {
+  constexpr int requests = 3;
+  constexpr int per = 2;
+  constexpr int rows = requests * per;
+  constexpr int count = 32;
+  std::vector<float> logits(static_cast<size_t>(rows) * count, -10.0f);
+  const int32_t winners[rows] = {3, 5, 7, 9, 11, 13};
+  for (int r = 0; r < rows; ++r)
+    logits[static_cast<size_t>(r) * count + winners[r]] = 10.0f + r;
+  const LocalRun local =
+      run_local(logits, rows, count, /*vocab_begin=*/0, /*rank=*/0,
+                /*world=*/1, /*carry=*/0x1234);
+  std::vector<int64_t> fed = {17, winners[0], 19, winners[2], 23, 24};
+  const std::vector<int64_t> positions = {100, 101, -1, -1, 300, 301};
+  uint64_t carry = 0;
+  const std::vector<GlmPickVerdict> got = run_verdict_batch(
+      local.table, rows, /*world=*/1, /*rank=*/0, fed, positions, requests,
+      per, &carry);
+  require(got[0].rows == 2 && got[0].accepted == 2 &&
+              got[0].next == winners[1],
+          "request 0 must accept both rows");
+  require(got[1].rows == 0 && got[1].accepted == 0 && got[1].next == -1,
+          "request 1 must be an inactive padding verdict");
+  require(got[2].rows == 2 && got[2].accepted == 1 &&
+              got[2].next == winners[4],
+          "request 2 must reject its draft row");
+  for (const GlmPickVerdict& v : got)
+    require(v.digest == carry && v.digest_mismatch == 0,
+            "every request must carry the physical pass digest");
+  require((carry >> dgpp::kPickDigestBits) == 0,
+          "batched digest must fit the wire's carried digit group");
+}
+
+DGPP_TEST(pick_batch_draft_selects_last_accepted_row_per_request) {
+  constexpr int requests = 3;
+  constexpr int stride = 2;
+  constexpr int count = 24;
+  std::vector<float> logits(static_cast<size_t>(requests * stride) * count,
+                            -20.0f);
+  const int32_t winners[requests * stride] = {2, 3, 5, 7, 11, 13};
+  for (int r = 0; r < requests * stride; ++r)
+    logits[static_cast<size_t>(r) * count + winners[r]] = 20.0f;
+  float* d_logits = device_alloc<float>(logits.size());
+  uint16_t* d_table = device_alloc<uint16_t>(
+      dgpp::glm_pick_table_elems(requests, /*world=*/1));
+  uint64_t* d_carry = device_alloc<uint64_t>(1);
+  GlmPickLocal* d_locals = device_alloc<GlmPickLocal>(requests);
+  GlmPickVerdict select[requests];
+  select[0].accepted = 1;
+  select[1].accepted = 0;  // inactive: harmless first padding row
+  select[2].accepted = 2;
+  GlmPickVerdict* d_select = device_alloc<GlmPickVerdict>(requests);
+  DGPP_CUDA_OK(cudaMemcpy(d_logits, logits.data(), logits.size() * 4,
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemset(d_carry, 0, sizeof(uint64_t)));
+  DGPP_CUDA_OK(cudaMemcpy(d_select, select, sizeof(select),
+                          cudaMemcpyHostToDevice));
+  dgpp::glm_pick_local_batched(
+      d_logits, requests, count, /*vocab_begin=*/0, /*rank=*/0, /*world=*/1,
+      d_carry, d_table, d_locals, nullptr, d_select, requests, stride);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  GlmPickLocal got[requests];
+  DGPP_CUDA_OK(cudaMemcpy(got, d_locals, sizeof(got), cudaMemcpyDeviceToHost));
+  require(got[0].best_id == winners[0], "request 0 selected wrong draft row");
+  require(got[1].best_id == winners[2], "inactive request must select row 0");
+  require(got[2].best_id == winners[5], "request 2 selected wrong draft row");
+  cudaFree(d_logits);
+  cudaFree(d_table);
+  cudaFree(d_carry);
+  cudaFree(d_locals);
+  cudaFree(d_select);
+}
+
 // The commit: with rows = 3 and a verdict accepting a rows, every segment's
 // live state must become snapshot row a-1 when a < 3 and stay untouched
 // when a == 3; the position advances by a either way; the positions kernel
@@ -377,6 +487,25 @@ DGPP_TEST(spec_commit_copies_snapshot_row_when_rejected_and_advances_position) {
     for (size_t i = 0; i < kBytesB; ++i)
       require(got_b[i] == want_b, "family B: accepted " + std::to_string(accepted));
   }
+  // A model with no stateful KDA/DSA family still uses the commit kernel to
+  // advance its device position. A rejection must not index the empty
+  // segment table.
+  GlmPickVerdict position_only;
+  position_only.rows = rows;
+  position_only.accepted = 1;
+  DGPP_CUDA_OK(cudaMemcpy(d_verdict, &position_only, sizeof(position_only),
+                          cudaMemcpyHostToDevice));
+  const int64_t position_only_start = 77;
+  DGPP_CUDA_OK(cudaMemcpy(d_pos, &position_only_start, sizeof(int64_t),
+                          cudaMemcpyHostToDevice));
+  dgpp::glm_spec_commit(d_verdict, rows, dgpp::GlmSpecSegments{}, d_pos,
+                        nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  int64_t position_only_got = 0;
+  DGPP_CUDA_OK(cudaMemcpy(&position_only_got, d_pos, sizeof(int64_t),
+                          cudaMemcpyDeviceToHost));
+  require(position_only_got == position_only_start + 1,
+          "position-only commit did not advance exactly once");
   cudaFree(d_live_a);
   cudaFree(d_live_b);
   cudaFree(d_snaps_a);
@@ -384,6 +513,224 @@ DGPP_TEST(spec_commit_copies_snapshot_row_when_rejected_and_advances_position) {
   cudaFree(d_verdict);
   cudaFree(d_pos);
   cudaFree(d_step_pos);
+}
+
+DGPP_TEST(spec_batch_positions_draft_rows_and_token_feeds_are_slot_local) {
+  constexpr int requests = 3;
+  constexpr int per = 2;
+  constexpr int rows = requests * per;
+  const int64_t session_pos[requests] = {100, 0, 300};
+  const int32_t req_ids[rows] = {0, 0, 1, 1, 2, 2};
+  int64_t* d_session = device_alloc<int64_t>(requests);
+  int32_t* d_req = device_alloc<int32_t>(rows);
+  int64_t* d_pos = device_alloc<int64_t>(rows);
+  int64_t* d_tokens = device_alloc<int64_t>(rows);
+  int64_t* d_next = device_alloc<int64_t>(requests);
+  int64_t* d_block = device_alloc<int64_t>(requests);
+  GlmPickVerdict verify[requests];
+  verify[0].rows = 2;
+  verify[0].accepted = 2;
+  verify[0].next = 31;
+  verify[0].winners[0] = 29;
+  verify[0].winners[1] = 31;
+  verify[1].rows = 0;
+  verify[1].accepted = 0;
+  verify[2].rows = 2;
+  verify[2].accepted = 1;
+  verify[2].next = 41;
+  verify[2].winners[0] = 41;
+  verify[2].winners[1] = 43;
+  GlmPickVerdict* d_verify = device_alloc<GlmPickVerdict>(requests);
+  DGPP_CUDA_OK(cudaMemcpy(d_session, session_pos, sizeof(session_pos),
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_req, req_ids, sizeof(req_ids),
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_verify, verify, sizeof(verify),
+                          cudaMemcpyHostToDevice));
+  dgpp::glm_spec_positions_batched(d_session, d_req, rows, per, d_pos,
+                                   nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  int64_t pos[rows];
+  DGPP_CUDA_OK(cudaMemcpy(pos, d_pos, sizeof(pos), cudaMemcpyDeviceToHost));
+  const int64_t want_verify_pos[rows] = {100, 101, -1, -1, 300, 301};
+  require(std::equal(std::begin(pos), std::end(pos),
+                     std::begin(want_verify_pos)),
+          "batched verify positions differ");
+
+  const int64_t block_pos[requests] = {90, 190, 290};
+  DGPP_CUDA_OK(cudaMemcpy(d_block, block_pos, sizeof(block_pos),
+                          cudaMemcpyHostToDevice));
+  dgpp::glm_spec_draft_rows_batched(d_verify, requests, per, d_block, d_pos,
+                                    d_tokens, d_next, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  int64_t draft_pos[rows], draft_tokens[rows], next[requests], block[requests];
+  DGPP_CUDA_OK(cudaMemcpy(draft_pos, d_pos, sizeof(draft_pos),
+                          cudaMemcpyDeviceToHost));
+  DGPP_CUDA_OK(cudaMemcpy(draft_tokens, d_tokens, sizeof(draft_tokens),
+                          cudaMemcpyDeviceToHost));
+  DGPP_CUDA_OK(cudaMemcpy(next, d_next, sizeof(next), cudaMemcpyDeviceToHost));
+  DGPP_CUDA_OK(cudaMemcpy(block, d_block, sizeof(block), cudaMemcpyDeviceToHost));
+  const int64_t want_draft_pos[rows] = {90, 91, -1, -1, 290, -1};
+  const int64_t want_draft_tokens[rows] = {29, 31, 0, 0, 41, 41};
+  require(std::equal(std::begin(draft_pos), std::end(draft_pos),
+                     std::begin(want_draft_pos)),
+          "batched draft positions differ");
+  require(std::equal(std::begin(draft_tokens), std::end(draft_tokens),
+                     std::begin(want_draft_tokens)),
+          "batched draft tokens differ");
+  require(block[0] == 92 && block[1] == 190 && block[2] == 291 &&
+              next[0] == 31 && next[2] == 41,
+          "batched draft counters/next tokens are not slot-local");
+
+  GlmPickVerdict draft[requests];
+  draft[0].rows = 1;
+  draft[0].accepted = 1;
+  draft[0].next = 37;
+  draft[1].rows = 0;
+  draft[1].accepted = 0;
+  draft[2].rows = 1;
+  draft[2].accepted = 1;
+  draft[2].next = 47;
+  GlmPickVerdict* d_draft = device_alloc<GlmPickVerdict>(requests);
+  DGPP_CUDA_OK(cudaMemcpy(d_draft, draft, sizeof(draft),
+                          cudaMemcpyHostToDevice));
+  dgpp::glm_spec_next_tokens_batched(d_next, d_draft, requests, per,
+                                     d_tokens, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  DGPP_CUDA_OK(cudaMemcpy(draft_tokens, d_tokens, sizeof(draft_tokens),
+                          cudaMemcpyDeviceToHost));
+  const int64_t want_next_tokens[rows] = {31, 37, 0, 0, 41, 47};
+  require(std::equal(std::begin(draft_tokens), std::end(draft_tokens),
+                     std::begin(want_next_tokens)),
+          "batched next token feed differs");
+
+  cudaFree(d_session);
+  cudaFree(d_req);
+  cudaFree(d_pos);
+  cudaFree(d_tokens);
+  cudaFree(d_next);
+  cudaFree(d_block);
+  cudaFree(d_verify);
+  cudaFree(d_draft);
+}
+
+DGPP_TEST(mtp_batch_hidden_cache_input_and_scatter_are_request_indexed) {
+  constexpr int requests = 3;
+  constexpr int rows = 6;
+  constexpr int hidden = 8;
+  constexpr int vocab = 4;
+  constexpr int cache_positions = 4;
+  constexpr int64_t cache_stride = cache_positions * hidden;
+  const int64_t tokens[rows] = {0, 1, 2, 3, 1, 0};
+  const int32_t req_ids[rows] = {2, 2, 1, 1, 0, 0};
+  const int64_t positions[rows] = {0, 1, -1, -1, 2, 3};
+
+  std::vector<uint16_t> embed(vocab * hidden);
+  std::vector<uint16_t> cache(requests * cache_stride);
+  std::vector<uint16_t> enorm(hidden), hnorm(hidden);
+  for (int v = 0; v < vocab; ++v)
+    for (int h = 0; h < hidden; ++h)
+      embed[static_cast<size_t>(v) * hidden + h] =
+          dgpp::float_to_bf16_bits((v + 1) * 0.25f + (h + 1) * 0.03125f);
+  for (int q = 0; q < requests; ++q)
+    for (int p = 0; p < cache_positions; ++p)
+      for (int h = 0; h < hidden; ++h)
+        cache[static_cast<size_t>(q) * cache_stride + p * hidden + h] =
+            dgpp::float_to_bf16_bits((q + 1) * 2.0f + p * 0.25f +
+                                     (h + 1) * 0.015625f);
+  for (int h = 0; h < hidden; ++h) {
+    enorm[h] = dgpp::float_to_bf16_bits(0.5f + h * 0.0625f);
+    hnorm[h] = dgpp::float_to_bf16_bits(1.0f + h * 0.03125f);
+  }
+
+  uint16_t* d_embed = device_alloc<uint16_t>(embed.size());
+  uint16_t* d_cache = device_alloc<uint16_t>(cache.size());
+  uint16_t* d_enorm = device_alloc<uint16_t>(enorm.size());
+  uint16_t* d_hnorm = device_alloc<uint16_t>(hnorm.size());
+  int64_t* d_tokens = device_alloc<int64_t>(rows);
+  int32_t* d_req = device_alloc<int32_t>(rows);
+  int64_t* d_pos = device_alloc<int64_t>(rows);
+  uint16_t* d_batch = device_alloc<uint16_t>(rows * 2 * hidden);
+  uint16_t* d_scalar = device_alloc<uint16_t>(rows * 2 * hidden);
+  DGPP_CUDA_OK(cudaMemcpy(d_embed, embed.data(), embed.size() * 2,
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_cache, cache.data(), cache.size() * 2,
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_enorm, enorm.data(), enorm.size() * 2,
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_hnorm, hnorm.data(), hnorm.size() * 2,
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_tokens, tokens, sizeof(tokens),
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_req, req_ids, sizeof(req_ids),
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_pos, positions, sizeof(positions),
+                          cudaMemcpyHostToDevice));
+
+  dgpp::glm_mtp_input_bf16_batched(
+      d_embed, d_tokens, d_cache, cache_stride, d_req, d_pos, d_enorm,
+      d_hnorm, d_batch, rows, hidden, 1e-5f, nullptr);
+  for (int r = 0; r < rows; ++r) {
+    const uint16_t* request_cache =
+        d_cache + static_cast<int64_t>(req_ids[r]) * cache_stride;
+    dgpp::glm_mtp_input_bf16(
+        d_embed, d_tokens + r, request_cache, d_pos + r, /*first_pos=*/0,
+        d_enorm, d_hnorm, d_scalar + r * 2 * hidden, /*rows=*/1, hidden,
+        1e-5f, nullptr);
+  }
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<uint16_t> batch(rows * 2 * hidden);
+  std::vector<uint16_t> scalar(rows * 2 * hidden);
+  DGPP_CUDA_OK(cudaMemcpy(batch.data(), d_batch, batch.size() * 2,
+                          cudaMemcpyDeviceToHost));
+  DGPP_CUDA_OK(cudaMemcpy(scalar.data(), d_scalar, scalar.size() * 2,
+                          cudaMemcpyDeviceToHost));
+  require(batch == scalar,
+          "batched MTP input differs from request-based scalar rows");
+  for (int r : {2, 3})
+    require(std::all_of(batch.begin() + r * 2 * hidden,
+                        batch.begin() + (r + 1) * 2 * hidden,
+                        [](uint16_t v) { return v == 0; }),
+            "negative-position MTP input row was not zero padded");
+
+  std::vector<uint16_t> scatter_rows(rows * hidden);
+  for (int r = 0; r < rows; ++r)
+    for (int h = 0; h < hidden; ++h)
+      scatter_rows[static_cast<size_t>(r) * hidden + h] =
+          static_cast<uint16_t>(0x100 + r * hidden + h);
+  std::vector<uint16_t> scatter_want(requests * cache_stride, 0x5a5a);
+  for (int r = 0; r < rows; ++r) {
+    if (positions[r] < 0) continue;
+    std::copy_n(scatter_rows.begin() + r * hidden, hidden,
+                scatter_want.begin() +
+                    static_cast<int64_t>(req_ids[r]) * cache_stride +
+                    positions[r] * hidden);
+  }
+  uint16_t* d_rows = device_alloc<uint16_t>(scatter_rows.size());
+  uint16_t* d_scatter = device_alloc<uint16_t>(scatter_want.size());
+  DGPP_CUDA_OK(cudaMemcpy(d_rows, scatter_rows.data(), scatter_rows.size() * 2,
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemset(d_scatter, 0x5a, scatter_want.size() * 2));
+  dgpp::glm_rows_scatter_bf16_batched(
+      d_rows, d_req, d_pos, d_scatter, cache_stride, rows, hidden, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<uint16_t> scatter_got(scatter_want.size());
+  DGPP_CUDA_OK(cudaMemcpy(scatter_got.data(), d_scatter,
+                          scatter_got.size() * 2, cudaMemcpyDeviceToHost));
+  require(scatter_got == scatter_want,
+          "batched hidden scatter crossed a request slot or wrote padding");
+
+  cudaFree(d_embed);
+  cudaFree(d_cache);
+  cudaFree(d_enorm);
+  cudaFree(d_hnorm);
+  cudaFree(d_tokens);
+  cudaFree(d_req);
+  cudaFree(d_pos);
+  cudaFree(d_batch);
+  cudaFree(d_scalar);
+  cudaFree(d_rows);
+  cudaFree(d_scatter);
 }
 
 int main() {

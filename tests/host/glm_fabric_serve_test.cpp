@@ -242,6 +242,15 @@ void test_journal_codec() {
   require(dgpp::service::decode_journal_line(
               dgpp::service::encode_journal_stop()).stop,
           "codec: stop round-trip");
+  {
+    const dgpp::service::JournalRecord warm =
+        dgpp::service::decode_journal_line(
+            dgpp::service::encode_journal_warm());
+    require(warm.warm && !warm.stop && warm.submits.empty() &&
+                warm.cancels.empty(),
+            "codec: warm round-trip");
+    require(!back.warm, "codec: tick decoded as warm");
+  }
 
   bool threw = false;
   try {
@@ -265,6 +274,7 @@ struct PeerRig {
   std::unique_ptr<dgpp::service::JournalReader> reader;
   std::thread thread;
   std::string error;  // empty = the peer never complained
+  std::atomic<bool> warmed{false};  // held at and released by the warm record
 
   explicit PeerRig(uint16_t journal_port, const std::atomic<bool>& stop_flag)
       : sched(&engine, {kFakeEos}, kQueue) {
@@ -276,6 +286,13 @@ struct PeerRig {
         // only connects after its first record.
         reader = std::make_unique<dgpp::service::JournalReader>(
             "127.0.0.1", journal_port, 5000);
+        // The production peer holds here for the graph engine's warm
+        // capture start signal; the rig holds the same way so the first
+        // record's order (warm, then ticks) is pinned end to end.
+        if (!dgpp::service::wait_journal_warm(
+                reader.get(), [&stop_flag] { return stop_flag.load(); }))
+          return;
+        warmed.store(true);
         dgpp::service::run_journal_peer(
             &sched, reader.get(), [&stop_flag] { return stop_flag.load(); });
       } catch (const std::exception& e) {
@@ -321,6 +338,9 @@ struct FabricRig {
     for (int r = 1; r < kWorld; ++r)
       peers.push_back(std::make_unique<PeerRig>(journal.port(), stopping));
     journal.accept_peers(kWorld, 5000);
+    // The warm record precedes every tick (glm_serve broadcasts it
+    // before its warm capture); the peers are holding for it.
+    journal.broadcast(dgpp::service::encode_journal_warm());
     http_loop = std::thread([this] { http.serve(); });
     engine_loop = std::thread([this] {
       while (!stopping.load()) {
@@ -373,9 +393,12 @@ struct FabricRig {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     require(oplogs_agree(), "op streams diverged after " + what + ":\n" +
                                 oplog_diff());
-    for (size_t i = 0; i < peers.size(); ++i)
+    for (size_t i = 0; i < peers.size(); ++i) {
       require(peers[i]->error.empty(), "peer " + std::to_string(i + 1) +
                                            " errored: " + peers[i]->error);
+      require(peers[i]->warmed.load(),
+              "peer " + std::to_string(i + 1) + " never saw the warm record");
+    }
   }
 };
 

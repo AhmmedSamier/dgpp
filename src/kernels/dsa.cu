@@ -1395,6 +1395,25 @@ void dsa_kpool_decode_update(const void* k, int64_t k_stride,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+__global__ void dsa_zero_padding_rows_kernel(const int64_t* __restrict__ pos,
+                                             uint16_t* __restrict__ out,
+                                             int hidden) {
+  const int t = blockIdx.x;
+  if (pos[t] >= 0) return;
+  uint16_t* row = out + static_cast<size_t>(t) * hidden;
+  for (int h = threadIdx.x; h < hidden; h += blockDim.x) row[h] = 0;
+}
+
+void dsa_zero_padding_rows(void* out, const int64_t* pos, int tokens,
+                           int hidden, cudaStream_t stream) {
+  if (tokens <= 0 || hidden <= 0) return;
+  if (out == nullptr || pos == nullptr)
+    throw std::invalid_argument("dsa_zero_padding_rows: null buffer");
+  dsa_zero_padding_rows_kernel<<<unsigned(tokens), 256, 0, stream>>>(
+      pos, static_cast<uint16_t*>(out), hidden);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 void dsa_latent_append(const void* latent_rows, const int32_t* req_ids,
                        const int64_t* pos, int64_t tokens,
                        const int32_t* block_tables, int blocks_per_request,

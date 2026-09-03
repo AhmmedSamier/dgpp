@@ -117,13 +117,15 @@ class DsaLayer {
                        cudaStream_t stream);
 
   // Decodes a batch of `tokens` rows over `num_requests` requests.
-  //   hidden_in: bf16 [tokens, hidden] (padding rows: garbage in, garbage
-  //              out — kernels skip latent/ring writes for pos < 0)
+  //   hidden_in: bf16 [tokens, hidden] (padding rows: any input — kernels
+  //              skip latent/ring writes for pos < 0 and the row's output
+  //              is written as zeros)
   //   req_ids:   device int32 [tokens] — request id per row
   //   pos:       device int64 [tokens] — absolute position (-1 = padding)
   //   req_spans: device int32 [num_requests, 2] — (start, len) row spans
-  //              into the token batch; a request's rows must be contiguous
-  //   out:       bf16 [tokens, hidden]
+  //              into the token batch; fixed graphs may include all-padding
+  //              spans, and a live request's rows must be contiguous
+  //   out:       bf16 [tokens, hidden]; padding rows are all-zero
   // The caller must already have grown the block tables to cover pos+1.
   //   prefetch:  optional L2 weight prefetcher; after the projections it
   //              is pointed at o_proj, so the layer's long latency-bound

@@ -200,6 +200,11 @@ cudaError_t launch_bus_allreduce(const BusAllReduceView& v, int my_rank,
 // = 90 collective nodes, plus margin for nodes a future era might record
 // beside them.
 constexpr int kBusMaxGraphGens = 128;       // recorded nodes per graph
+// A serving era can register several mutually exclusive graph shapes and
+// select one per replay (for example one scalar graph per request slot plus
+// the full row batch). Each variant owns a disjoint generation-cell set;
+// windows still execute strictly one at a time.
+constexpr int kBusMaxGraphVariants = 16;
 constexpr int kBusMaxGraphStageRing = 8;    // staging rows (kStageRing)
 
 // The graph twin of BusAllReduceView: the staging row is a base, not a

@@ -40,13 +40,14 @@ struct KdaConvSnapshots {
   int64_t stride_elems = 0;  // >= channels * state_width (bf16 elems)
 };
 
-// A decode batch's device-side row map. Spans are a dense list of active
-// requests, not request-slot indexed: span i is (start, length) in the row
+// A decode batch's device-side row map. Span i is (start, length) in the row
 // batch, every non-padding row in that span carries the same request id, and
-// a negative position marks a fixed-shape padding row. The kernels obtain the
-// state slot from request_ids[start..start+length), so active slots may be any
-// subset (for example {1, 6}) without empty spans for the slots between them.
-// Rows for one request must be contiguous because its recurrence is ordered.
+// a negative position marks a fixed-shape padding row. Eager callers may pass
+// only active spans; a fixed-shape graph may pass one span per configured slot,
+// including all-padding spans. The kernels obtain the state slot from
+// request_ids[start..start+length), so active slots may be any subset (for
+// example {1, 6}) without placeholder spans for the slots between them. Rows
+// for one request must be contiguous because its recurrence is ordered.
 struct KdaRequestRows {
   const int32_t* request_ids = nullptr;  // device [rows]
   const int64_t* positions = nullptr;    // device [rows], -1 = padding

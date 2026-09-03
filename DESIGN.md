@@ -10,12 +10,14 @@ engine with request sessions, the exact tokenizer and chat-template
 interpreter, the deterministic scheduler and admission journal, the
 OpenAI-compatible HTTP/SSE service (`glm_serve`, M6), the recorded decode
 step with the collectives as graph nodes, greedy MTP speculative decode as
-one graph replay per step (M8), and the concurrency-1 T=1/MTP graph adapter
-behind the service (loopback-gated and measured on the four-node service,
-2026-09-03). It does **not** yet contain the prefix cache (§8 is a design),
-stochastic sampling on the distributed path (§10), or row-batched service
-decode (§11). Sections marked "as built" describe the code; sections marked
-"design" describe what remains.
+one graph replay per step (M8), and the adaptive scalar/row-batched T=1/MTP
+graph adapter behind the service (up to 8×T=1 or 4×T=2, loopback-gated and
+four-node performance-gated 2026-09-03). Scalar execution below the measured
+four-request crossover removes the fixed graph's low-occupancy regression;
+scalar-order GEMV chunks keep transcripts invariant when a live request
+crosses graph widths. It does **not** yet contain the prefix cache (§8 is a design)
+or stochastic sampling on the distributed path (§10). Sections marked "as
+built" describe the code; sections marked "design" describe what remains.
 
 Target: text serving for `unsloth/GLM-5.3-Flash-FP8` on four NVIDIA DGX Spark
 systems. Vision execution is post-v1.
@@ -554,21 +556,21 @@ of the ~32 ms decode-step floor at ~90 collectives, and amortized inside a
 replayed graph. A persistent doorbell-watcher hybrid remains a measured
 optimization option for a future launch-bound path, not a starting bet.
 
-**Graph capture (d3): the decode step's fixed launch sequence records once
+**Graph capture (d3): each decode shape's fixed launch sequence records once
 and replays per token.** The collective kernel becomes a graph node like
 any other — the engine no longer launches it and instead *reacts*. The
 seams that make replay-stable what capture bakes:
 
 - *Per-generation cells.* One pinned 64B ctl per recorded collective node
-  (vs. the eager machine's single one-flight cell). The arm step — before
-  each replay — resets them and assigns the window's monotonic
+  per graph variant (vs. the eager machine's single one-flight cell). The
+  arm step selects a variant, then resets its cells and assigns the window's monotonic
   generations, `gen_seq` published release-last; the replayed kernel
   acquires it at start and derives its staging row `(g−1)%ring` and its
   exit match from it. Monotonicity means a previous replay's stale
   `done_seq` can never match, so replays of one node are distinct without
   re-recording.
-- *The engine generation walk.* `window_count` (one atomic; first/last
-  derive arithmetically) publishes the window; the engine adopts, posts
+- *The engine generation walk.* `window_count` publishes `window_first` and
+  `window_variant`; the engine adopts that shape, posts
   each generation's peer pairs when the kernel's `ready_bits` land (lane 0,
   the cursor ring position — deterministic under the era's exclusivity:
   every latency post in the era is a graph generation, in order), and
@@ -576,10 +578,13 @@ seams that make replay-stable what capture bakes:
   kernels, so at most one generation is un-done at a time — a single-flight
   state machine, not a queue. Arm waits for the previous window's walk
   (bounded); finish joins the walk and returns the verdict.
-- *The era.* One graph per bus (the decode step shape is fixed); harness
-  sends close and eager collectives reject from `record_begin` — the
-  recorded kernels claim doorbells exactly like eager collectives, and the
-  ring positions must stay generation-ordered.
+- *The era.* Up to 16 graph variants share one bus era, with disjoint cell
+  slabs and write-once node metadata. Harness sends close at the first
+  `record_begin`. Eager collectives reject while a variant records or a
+  replay window is armed, but run between windows (prefill and its first
+  pick need this). Graph reservations and eager pickups share one monotonic
+  generation counter, keeping ring positions execution-ordered across shape
+  switches.
 - *Slot ownership without requests.* Graph posts carry no `BusRequest`,
   but the SendSlot/credit machinery is request-shaped — a per-window
   carrier request (unregistered, `is_collective`) gives the posts owners so
@@ -1163,17 +1168,19 @@ borrows one pool from its predecessor; a plain `forward()` while any
 session is open throws (the pools are shared — the corruption would have
 looked like noise); every host op that moves a position pushes it to the
 device mirrors (`d_session_pos_`, `d_mtp_pos_`), so the device-driven
-graph (§9) always starts from the host's view. Decode across requests is
-time-multiplexed today (one request's row span per step op). The pieces
-the row-batched form needs underneath are in: every stateful decode kernel
-takes the same request-indexed row map (a dense list of active spans,
-per-row request ids selecting the actual state slot, positions with −1
-marking a padding row; `KdaRequestRows` for the KDA conv and recurrence,
-which used to take one state pointer per launch, and the map the DSA decode
-path always took — its ring update now honours the per-row id instead of
-the span ordinal), and the scheduler seam carries a fixed decode-batch
-capacity with an ordered `step_batch`. The model-wide row-batched step is
-PLAN M6 6a phase 2.
+graph (§9) always starts from the host's view. Eager decode remains
+time-multiplexed. M6.6a's batched graph runs one fixed slot-major row batch:
+every stateful decode kernel takes the same request-indexed map (one span per
+configured slot, per-row request ids selecting the actual state slot, and
+positions with −1 marking padding). `KdaRequestRows` gives KDA conv and
+recurrence the map DSA already used; DSA's ring update honours the per-row id
+rather than the span ordinal, and both layers write zeros for padding rows so
+a padded row's block output is deterministic by construction. Snapshots use global physical-row offsets so
+each request's commit can independently restore its first accepted state.
+The adaptive adapter also owns one slot-specific scalar graph per request
+slot. The scheduler's ordered `step_batch` still hands it every live slot;
+the adapter executes those scalar variants sequentially below the crossover
+or advances all slots in the single row-batched replay above it.
 
 Parity at real depth is chaos-limited, and the curated suite is designed
 around the measured facts, not around an aspiration of bit-parity:
@@ -1237,8 +1244,9 @@ plain step is 31.3 ms of which ~24.5 is the weight floor.
 The pieces that make the number:
 
 - *GEMV cores* (`bf16_gemv.{hpp,cu}`, `fp8_gemv.cuh`): warp per weight
-  row, 16-byte loads, row-independent for m ≤ 4 (`kSpecRows`) so a
-  multi-row verify is bitwise the single-row step; the fp8 core applies the
+  row, 16-byte loads, row-independent for each m ≤ 4 launch; decode shapes
+  through m=8 are split into legal chunks, so a multi-row verify or serving
+  batch is bitwise the single-row step. The fp8 core applies the
   128×128 scale grid in its epilogue and reproduces `scale_gemm.cu`'s
   tile arithmetic verbatim. Weights live in DEVICE memory (`cudaMalloc`):
   the managed-memory placement cost the eager step 86.4 → 75.0 ms/token
@@ -1393,9 +1401,9 @@ need no rollback: they are positional writes the rewound position simply
 overwrites, and a query's visible pool count is derived from its own
 position. `session_verify` runs T ≤ 4 rows (`kSpecRows`, the bf16 GEMV's
 row bound: at T ≤ 4 every projection takes the row-independent GEMV, so
-the verify rows are bitwise the T=1 rows); the bus's latency slot is 32 KB
-to fold them in one collective, and `bus_greedy_pick_rows` picks them in
-one gather + one broadcast (the eager path).
+the verify rows are bitwise the T=1 rows). The Phase-2 fabric latency slot
+is 64 KiB and folds up to eight hidden-4096 rows in one collective;
+`bus_greedy_pick_rows` remains the eager gather + broadcast path.
 
 The draft block (`glm_mtp.cpp`) is the checkpoint's layer 45: a plain
 pre-norm DSA + MoE block (no mHC) over `eh_proj([enorm(embed(tok_{q+1})) |
@@ -1488,18 +1496,20 @@ sharing its queue — a deadlock the watchdog breaks after 5 s.
 fabric ranks are separate processes and never see it.
 
 Where the step's time is after the on-device work, and the small-kernel
-round that found the floor, are §7.6. The step is driven by
-`glm_gen_check --decode-graph --mtp` and by `glm_serve --max-concurrency 1
---decode-graph --mtp`. The latter is gated through the real scheduler on a
-two-rank loopback bus and measured on the four-node service at 43.6–44.1 ms
-per replay, 21.8–26.0 ms/token by acceptance (§11).
+round that found the floor, are §7.6. The scalar step is driven by
+`glm_gen_check --decode-graph --mtp`; `glm_serve --decode-graph --mtp`
+generalizes it to at most four request slots. The concurrency-1 service
+shape is gated through the real scheduler on a two-rank loopback bus and
+measured on the four-node service at 43.6–44.1 ms per replay,
+21.8–26.0 ms/token by acceptance (§11). The fixed eight-row Phase-2 worlds
+first measured 78.94 tok/s at eight live T=1 requests and 65.79 tok/s at four
+MTP requests, but regressed one-live throughput. The accepted adaptive path
+selects scalar below four live requests and reaches 76.18/60.27 tok/s at
+full T=1/MTP occupancy, with the complete curves in §11 and the measurement
+record.
 
 ### What remains (design)
 
-- *Row-batched service:* Phase 1 bakes request slot 0 into the one reusable
-  graph. Phase 2 makes it request-indexed on the device, because the bus has
-  one graph era per process (§6.2): rows = (request, spec row) with padding
-  rows — PLAN M6 6a.
 - *Sampling under MTP:* exact speculative sampling with a deterministic
   draft accepts draft `x` with probability `p(x)` under the verify row and
   otherwise samples from `p` with `x` removed. `p(x)` needs the row's
@@ -1755,12 +1765,99 @@ chunk per replay. Op-stream md5 identical on all four ranks of the eager,
 T=1 and MTP worlds over the same 1144 tokens. Time to first token is the
 eager prefill, ~30 ms per prompt token in every mode.
 
-### Design for what remains (PLAN M6 6a/6c/6d, M9)
+**The adaptive graph engine** (`GlmGraphEngineAdapter`, M6.6a Phase 2): the
+adapter owns two execution shapes. It lazily captures one Phase-1 scalar graph
+for every physical request slot and one fixed request-major row batch, T=1
+without MTP and T=2 with it, subject to `requests * T <= kDecodeRows` (8).
+The scheduler advertises the configured slot count so its canonical
+round-robin slice contains every live request. Below four live requests the
+adapter replays those requests' scalar variants sequentially; at four or more
+it selects the batch and advances every live request in one replay. The
+crossover defaults to four and is exposed as `--graph-batch-min-live`.
 
-- *The row-batched graph:* generalize Phase 1's slot-0 graph to device-side
-  request indexing and padded (request, spec-row) rows (§9), so one replay
-  advances every active request. Prefill stays eager between windows (the
-  mixed era); admission changes occupancy, not graph shape.
+`CollectiveBus` supports up to 16 recorded variants inside one graph era.
+Each owns a disjoint pinned generation-cell slab and immutable per-node
+metadata. `graph_replay_arm(variant)` waits for the previous window using
+that previous variant's generation count, resets the selected cells, reserves
+the shared generation range, then release-publishes shape and window together.
+`bus_test` alternates two variants with different node counts and widths.
+The adapter serializes every capture through one reducer; variants 0..slots-1
+are scalar and variant `slots` is the row batch, all recorded at startup
+behind the journal's warm record (below).
+
+The fixed batch remains fully request-indexed. Device position kernels turn a
+closed slot into −1 padding; KDA, DSA, speculative snapshots, MTP hidden-cache
+access, pick/verdict, commit, draft, and next-token feeds independently select
+the request. The fabric latency slot is 64 KiB for all eight hidden-4096 rows.
+Prefill and the initial draft stay eager between graph windows. Because those
+paths reuse pinned row-map sources whose addresses CUDA memcpy nodes retain,
+the adapter restores the immutable batch ids/spans before each batch replay
+and reseeds every live device token feed after scalar work or an admission.
+
+The first adaptive version restored throughput but failed transcript
+isolation: scalar decode used the row-independent GEMV cores at m≤4 while an
+eight-row graph selected cuBLASLt or the FP8 tile GEMM, so a request that
+changed shape could flip a later near-tie token. The accepted implementation
+lowers every decode shape up to eight rows through scalar-order GEMV chunks of
+at most four rows (fewer when K reaches the 48-KiB shared-memory ceiling).
+Every row retains the exact M=1 FMA/reduction chain while still amortizing a
+weight read across the rows in its chunk. `bf16_gemv_test` and
+`scale_gemm_test` pin M=8 versus eight M=1 calls bitwise for BF16 and FP8
+weights, BF16 and FP32 outputs. The loopback serving gates explicitly cross
+scalar→batch→scalar with noncontiguous MTP slots and compare independent
+sessions/speculators after every replay.
+
+Three follow-ups from the review of the closed phase (2026-09-03, after the
+measured binary): padding rows are inert by construction — the DSA decode
+path zeroes them as the KDA path always did, so a padded row's block output
+and its share of the boundary all-reduce are deterministic without appeal to
+downstream row independence; `glm_serve` warm-captures every variant at
+startup (`warm_captures`: one throwaway session at a time, prefill → capture
+→ close, 1.1 s for eight slots), so no record + instantiate lands on a live
+stream and the warm sessions leave nothing behind (both loopback serving
+gates run it first). The warm-up is a run of collectives, so it starts on
+the journal's clock: a third record, `{"op":"warm"}`, broadcast by rank 0
+once its model is built and held on by every peer before its warm-up — the
+peers build their model ~8 s faster than rank 0 and otherwise spun their
+first collective in stall diagnostics; a tick before the warm record, or a
+warm record inside the serving loop, is a protocol violation and dies
+loudly. The crossover flag defaults to min(4, slots) with out-of-range
+values rejected rather than clamped. All three were validated on the four
+nodes (record entry of 2026-09-03): curves within noise of the closure,
+transcripts and op-stream md5s identical to it, no STALLED line on any
+rank. The
+per-user reading of the measured curve: 32/63/96/105 ms per token at 1/2/4/8
+live T=1 requests and 26/51/66 at 1/2/4 with MTP — below the crossover a
+user's latency is the live count times the scalar replay; at it the batch is
+also the faster choice per user (four scalar replays would be ~129 and ~104
+ms per token). The m ≤ 8 GEMV lowering also changed the path of 5–8-row
+prefill chunks and per-expert prefill GEMMs with 5–8 routed tokens; that is
+unmeasured and is the first item of the TTFT work.
+
+The original always-eight-row four-node gate measured
+12.55/23.78/43.59/78.94 tok/s at 1/2/4/8 live T=1 requests and
+19.32/35.90/65.79 at 1/2/4 live MTP requests. Same-binary scalar controls were
+31.51 and 38.48 tok/s, making the one-live points 60.2% and 49.8% regressions.
+The final adaptive gate on the same 43-token prompt and 256-token responses is
+30.97/31.67/41.76/76.18 tok/s at T=1 and 38.48/38.97/60.27 with MTP. Thus low
+occupancy retains scalar throughput, while row batching still wins 2.46× at
+eight-way T=1 and 1.57× at four-way MTP over their low-occupancy plateaus.
+The MTP tok/s numerator is acceptance-dependent. The Phase-2 prompt accepted
+1.678 tokens/replay, so its unchanged 43.603 ms scalar replay reports 25.99
+ms/token. Re-running the exact Phase-1 controls on the final adaptive binary
+gave 21.93–22.21 ms/token for the 16-token Germany workload (21.79
+previously), 21.83 on a 32-token repeat, and 24.58 for the 200-token CUDA-graph
+explanation (24.81–24.85 previously). The 21-versus-26 ms comparison is
+therefore a workload/acceptance comparison, not a graph execution regression.
+All 22 full responses across both modes, every occupancy, and every graph
+transition have one token hash. Each world's four op streams match, all ranks
+shut down cleanly, and no current-run log contains a transport warning. Phase
+2's performance gate is closed. Exact commands, latency distributions, and
+artifact hashes are in the 2026-09-03 Phase-2 entries of
+`benchmarks/results/2026-08-29-bus-m5.md`.
+
+### Design for what remains (PLAN M6 6c/6d/6f, M9)
+
 - *Drain-on-stop:* stop is a flag read at tick top; active streams get an
   error event, requests retire, the stop record goes out, THEN the bus
   tears down — never under an in-flight collective (today SIGINT
@@ -1936,9 +2033,9 @@ tools/                checkpoint audit, shard plan, reference-dump generators,
 ## 14. Future validation scope
 
 The recorded evidence satisfies the exit criteria of M0–M5 and M8 and the
-built parts of M6 (PLAN). It does not replace the serving-workload
-measurements still owed: the service's own latency/throughput on a
-committed workload, 32K-context TTFT, the 24-hour serving soak, and the
+built parts of M6 (PLAN), including scalar and row-batched service
+latency/throughput on a committed workload. It does not replace the
+measurements still owed: 32K-context TTFT, the 24-hour serving soak, and the
 failure drills (PLAN M9). If fabric runs develop drops, retries, unstable
 throughput, or latency spikes, capture node and switch counter deltas and
 inspect flow-control configuration. Comparisons with other inference engines

@@ -3,6 +3,7 @@
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <format>
 #include <map>
@@ -148,13 +149,30 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                           size_t act_row_stride, void* workspace,
                           size_t ws_bytes, cudaStream_t stream) {
   // Decode-shaped bf16 calls take the bandwidth GEMV (bf16_gemv.hpp):
-  // cuBLASLt's m=1 kernel sits at ~128 GB/s on this part. Same
-  // determinism contract (fixed order, no heuristic), different bits than
-  // the Lt path — the layer oracles gate it.
-  if (io_dtype == DType::BF16 && bf16_gemv_accepts(weight, m, k)) {
-    launch_bf16_gemv(static_cast<const uint16_t*>(act), act_row_stride,
-                     static_cast<const uint16_t*>(weight), out,
-                     out_dtype == GemmOut::F32, m, n, k, stream);
+  // cuBLASLt's m=1 kernel sits at ~128 GB/s on this part. Each GEMV row has
+  // the scalar reduction order regardless of the rows sharing its launch.
+  // The serving ceiling is eight rows, while one launch is capped by both
+  // register pressure and the 48-KiB default dynamic-smem limit. Split a
+  // wider decode into the largest legal chunks instead of falling through
+  // to an Lt algorithm with shape-dependent reduction order. This is the
+  // numerical seam that lets a live request move between scalar and batched
+  // graph variants without changing its transcript.
+  if (io_dtype == DType::BF16 && m >= 1 && m <= 8 &&
+      bf16_gemv_accepts(weight, /*m=*/1, k)) {
+    const auto* x = static_cast<const uint16_t*>(act);
+    const auto* w = static_cast<const uint16_t*>(weight);
+    const size_t out_elem = out_dtype == GemmOut::F32 ? sizeof(float)
+                                                       : sizeof(uint16_t);
+    auto* y = static_cast<uint8_t*>(out);
+    for (int row0 = 0; row0 < m;) {
+      int rows = std::min(4, m - row0);
+      while (!bf16_gemv_accepts(weight, rows, k)) --rows;
+      launch_bf16_gemv(x + static_cast<size_t>(row0) * act_row_stride,
+                       act_row_stride, w,
+                       y + static_cast<size_t>(row0) * n * out_elem,
+                       out_dtype == GemmOut::F32, rows, n, k, stream);
+      row0 += rows;
+    }
     return;
   }
   Impl::Plan& p = impl_->get_plan(m, n, k, io_dtype, out_dtype,

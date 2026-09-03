@@ -183,18 +183,19 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     dsa_scratch_ = static_cast<uint8_t*>(
         alloc_device(DsaLayer::scratch_bytes(dsa_cfg_, max_tokens_,
                                               dsa_slots)));
-    // Decode-session metadata (enqueue_decode's caller-owned device
-    // buffers): allocated HERE, at construction — never mid-session (the
-    // synchronizing-call discipline applies between collectives).
-    d_req_ids_ = static_cast<int32_t*>(alloc_device(sizeof(int32_t) *
-                                                     kDecodeRows));
-    d_step_pos_ = static_cast<int64_t*>(alloc_device(sizeof(int64_t) *
-                                                      kDecodeRows));
-    d_req_spans_ = static_cast<int32_t*>(alloc_device(sizeof(int32_t) * 2 *
-                                                       kDecodeRows));
   } else {
     arena_.init(ac);
   }
+
+  // Decode-session row metadata is shared by DSA, request-indexed KDA, and
+  // the Phase-2 position/pick kernels. Allocate it even on a KDA-only
+  // configuration; it is lifetime-stable because CUDA graphs bake it.
+  d_req_ids_ = static_cast<int32_t*>(
+      alloc_device(sizeof(int32_t) * kDecodeRows));
+  d_step_pos_ = static_cast<int64_t*>(
+      alloc_device(sizeof(int64_t) * kDecodeRows));
+  d_req_spans_ = static_cast<int32_t*>(
+      alloc_device(sizeof(int32_t) * 2 * kDecodeRows));
 
   // The decode path's H2D upload sources, PINNED at construction
   // (pageable async copies stream-sync before initiating — a per-step
@@ -242,13 +243,13 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   if (kda_cfg_.num_kda_layers > 0) {
     const size_t per_row = static_cast<size_t>(kda_cfg_.num_kda_layers);
     spec_rec_ = static_cast<float*>(
-        alloc_device((kSpecRows - 1) * per_row * kda_geo_.recurrent_bytes));
+        alloc_device(kDecodeRows * per_row * kda_geo_.recurrent_bytes));
     spec_conv_ = static_cast<uint16_t*>(alloc_device(
-        (kSpecRows - 1) * per_row * kda_geo_.conv_committed_bytes));
+        kDecodeRows * per_row * kda_geo_.conv_committed_bytes));
   }
   if (main_dsa_layers_ > 0)
     spec_tail_ = static_cast<uint16_t*>(
-        alloc_device(static_cast<size_t>(main_dsa_layers_) * kSpecRows *
+        alloc_device(static_cast<size_t>(main_dsa_layers_) * kDecodeRows *
                      spec_tail_ring_elems() * 2));
   if (mtp_) {
     const size_t H = static_cast<size_t>(cfg_.hidden_size);
@@ -292,6 +293,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   const size_t T = static_cast<size_t>(max_tokens_);
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
   d_tokens_ = static_cast<int64_t*>(alloc_device(T * 8));
+  DGPP_CUDA_OK(cudaMemset(d_tokens_, 0, T * 8));
   streams_[0] = static_cast<uint16_t*>(alloc_device(T * 4 * H * 2));
   streams_[1] = static_cast<uint16_t*>(alloc_device(T * 4 * H * 2));
   post_ = static_cast<uint16_t*>(alloc_device(T * 4 * 2));
@@ -489,8 +491,8 @@ void GlmDiagnosticModel::preconstruct_layers() {
       need_dsa = false;
     }
     if (need_moe && !moe_ && cfg_.mlps[layer] == GlmMlpKind::Moe) {
-      // kDecodeRows: the decode fast path's slot bound (session_step's
-      // time-multiplexed rows; the batched-decode ceiling). The graph
+      // kDecodeRows: the decode fast path's physical row bound (scalar
+      // session_step rows or the Phase-2 fixed batch). The graph
       // table slots (one per MoE layer) provision the capture path's
       // per-layer pinned expert-table sources unconditionally — a few
       // hundred KB of pinned memory; the eager path never touches them.

@@ -1,8 +1,9 @@
 // Parity tests for the bf16 decode GEMV (M6 Stage 2 round 3): the GEMM
-// seam's m<=4 bf16 path, against an fp64 oracle over the same bf16
+// seam's m<=8 decode path (chunked above four rows), against an fp64 oracle
+// over the same bf16
 // operands. Exercises both outputs (bf16, f32), strided activation views
 // (the KDA f_a/g_a K-column slices), ragged n, short and long k, and the
-// row-independence property (row r's bits at m=1 == its bits at m=3).
+// row-independence property (row r's bits at m=1 == its bits in m=3/m=8).
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -190,6 +191,34 @@ DGPP_TEST(bf16_gemv_ragged_n_short_k_and_multi_row) {
     const Problem p4 = make_problem(4, 96, 1024, 1024, 0xAC);
     Device d4(p4);
     check_bf16(p4, run_bf16(gemm, p4, d4), "bf16_gemv M4xN96xK1024");
+  }
+  // AND the serving ceiling m=8 is lowered to deterministic GEMV chunks.
+  // K=4096 means a single eight-row launch would exceed the default 48-KiB
+  // smem ceiling, so this also pins output offsets between chunks. Both
+  // epilogues must retain the scalar row bits.
+  {
+    const Problem p8 = make_problem(8, 136, 4096, 4352, 0xAD);
+    Device d8(p8);
+    const auto got8 = run_bf16(gemm, p8, d8);
+    const auto got8f = run_f32(gemm, p8, d8);
+    check_bf16(p8, got8, "bf16_gemv chunked M8xN136xK4096");
+    check_f32(p8, got8f, "bf16_gemv chunked M8xN136xK4096");
+    for (int r = 0; r < p8.m; ++r) {
+      Problem p1{1, p8.n, p8.k, p8.act_stride, {}, p8.weight};
+      p1.act.assign(p8.act.begin() + static_cast<long>(r) * p8.act_stride,
+                    p8.act.begin() + static_cast<long>(r + 1) * p8.act_stride);
+      Device d1(p1);
+      const auto got1 = run_bf16(gemm, p1, d1);
+      const auto got1f = run_f32(gemm, p1, d1);
+      require(std::memcmp(got1.data(),
+                          got8.data() + static_cast<size_t>(r) * p8.n,
+                          static_cast<size_t>(p8.n) * sizeof(uint16_t)) == 0,
+              "chunked bf16 row bits independent of m");
+      require(std::memcmp(got1f.data(),
+                          got8f.data() + static_cast<size_t>(r) * p8.n,
+                          static_cast<size_t>(p8.n) * sizeof(float)) == 0,
+              "chunked f32 row bits independent of m");
+    }
   }
 }
 

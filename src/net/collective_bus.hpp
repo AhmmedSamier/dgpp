@@ -179,14 +179,16 @@ class CollectiveBus {
   // nodes; the engine stops launching them and instead walks the
   // generations each replay produces (per-gen cells carry the handoff).
   //
-  // Session (once per bus, v1):
-  //   graph_record_begin()    — open. Requires a quiet bus: no held
-  //                              staging handout, no eager collective in
+  // Session (one or more variants per bus):
+  //   graph_record_begin(error, variant) — open one variant. Requires a
+  //                              quiet bus: no held staging handout, no eager collective in
   //                              flight or queued, consumers not running.
   //                              Harness send() closes from here (the
   //                              graph kernels claim doorbells exactly
   //                              like eager collectives) and stays closed
   //                              for the bus's lifetime — one graph era.
+  //                              A variant id may be recorded once; every
+  //                              variant owns a disjoint cell set.
   //   allreduce_record()      — per collective node, between the caller's
   //                              cudaStreamBeginCapture/EndCapture on the
   //                              SAME stream. src/dst are device pointers
@@ -199,7 +201,8 @@ class CollectiveBus {
   //                              kBusMaxGraphGens nodes.
   //
   // Replay (per step):
-  //   graph_replay_arm()      — reset the per-gen cells, reserve the
+  //   graph_replay_arm(error, variant) — select a recorded variant, reset
+  //                              its per-gen cells, reserve the
   //                              window's generations from the shared
   //                              collective counter (the kernels read
   //                              them at start), publish the window.
@@ -231,12 +234,12 @@ class CollectiveBus {
   // Any graph failure (a generation exits on deadline/poison, a lane
   // fails, a post fails) poisons the era: further arm/finish report it,
   // and the eager gate stays closed (the bus must be restarted).
-  bool graph_record_begin(std::string* error);
+  bool graph_record_begin(std::string* error, int variant = 0);
   bool allreduce_record(cudaStream_t capture_stream, const void* device_src,
                         void* device_dst, size_t bf16_elems,
                         std::string* error);
   bool graph_record_end(std::string* error);
-  bool graph_replay_arm(std::string* error);
+  bool graph_replay_arm(std::string* error, int variant = 0);
   // %globaltimer - CLOCK_MONOTONIC, calibrated at start() (bus_kernel.hpp).
   int64_t globaltimer_offset_ns() const;
   bool graph_replay_finish(int timeout_ms, std::string* error);

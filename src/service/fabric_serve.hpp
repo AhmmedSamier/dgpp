@@ -6,8 +6,17 @@
 //
 // THE PROTOCOL (newline-framed JSON over the TCP star; one line, one
 // record):
+//   {"op":"warm"}
 //   {"op":"tick","s":[{"id":"…","p":[ids],"m":N}],"c":["id"]}
 //   {"op":"stop"}
+// The "warm" record is the start signal for the graph engine's startup
+// warm capture (GlmGraphEngineAdapter::warm_captures): a run of bus
+// collectives every rank must enter together, before any tick. Rank 0
+// broadcasts it once its model is built; a peer holds at the record
+// instead of spinning its first collective in stall diagnostics for the
+// seconds rank 0's slower construction takes (seen 2026-09-03: ~8 s of
+// STALLED dumps per peer). It is the only record allowed before the
+// first tick and never valid after it.
 // Every rank-0 engine pass is exactly one "tick" record, broadcast
 // AFTER the pass's drain and BEFORE its sched.tick() — the record and
 // the tick are one atomic unit. Peers apply the record's
@@ -73,9 +82,11 @@ class OpStreamObserver final : public dgpp::glm::SchedulerObserver {
 
 std::string encode_journal_tick(const GenerationService::PassEvents& events);
 std::string encode_journal_stop();
+std::string encode_journal_warm();
 
 struct JournalRecord {
   bool stop = false;
+  bool warm = false;
   std::vector<dgpp::glm::SchedulerRequest> submits;
   std::vector<std::string> cancels;
 };
@@ -133,6 +144,14 @@ class JournalReader {
   dgpp::net::TcpConn conn_;
   std::string pending_;
 };
+
+// The peer's startup hold: blocks until rank 0's warm record. Returns
+// false when the journal ended (EOF or the caller's stop flag) — the
+// peer exits cleanly, as it would from the loop. Throws when the first
+// record is anything else: rank 0 ticked before warming, a protocol
+// order this design says cannot happen.
+bool wait_journal_warm(JournalReader* reader,
+                       const std::function<bool()>& should_stop);
 
 // The peer serving loop: apply each record, then tick — the exact
 // mirror of rank 0's engine passes (§11). Returns on the stop record,

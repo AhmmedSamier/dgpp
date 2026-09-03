@@ -1213,10 +1213,65 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
         fail("graph instantiate failed");
       }
     }
-    if (exec != nullptr) {
+    // A second, shorter/narrower shape gets its own cell slab. Replaying it
+    // once before variant 0 pins selection in both directions and, because
+    // its generation count differs, catches using the newly selected G when
+    // waiting for the previous window.
+    cudaGraph_t alt_graph = nullptr;
+    cudaGraphExec_t alt_exec = nullptr;
+    const int alt_gens = gens_per_step - 3;
+    const size_t alt_elems = elems / 2;
+    if (failures == 0) {
+      if (!bus.graph_record_begin(&error, /*variant=*/1)) {
+        fail("second graph variant record_begin rejected: " + error);
+      } else {
+        const cudaError_t cap = cudaStreamBeginCapture(
+            stream, cudaStreamCaptureModeThreadLocal);
+        if (cap != cudaSuccess) {
+          fail("second graph variant capture begin failed");
+        } else {
+          for (int g = 0; g < alt_gens; ++g) {
+            dgpp::net::launch_bus_warm_work(stream, warm_buf, 12000);
+            if (!bus.allreduce_record(stream, dev_src, dev_dst, alt_elems,
+                                      &error)) {
+              fail("second graph variant allreduce_record rejected: " +
+                   error);
+              break;
+            }
+          }
+          dgpp::net::launch_bus_warm_work(stream, warm_buf, 12000);
+          if (cudaStreamEndCapture(stream, &alt_graph) != cudaSuccess ||
+              alt_graph == nullptr)
+            fail("second graph variant capture end failed");
+        }
+        if (failures == 0 && !bus.graph_record_end(&error))
+          fail("second graph variant record_end rejected: " + error);
+      }
+      if (failures == 0 &&
+          cudaGraphInstantiate(&alt_exec, alt_graph, nullptr, nullptr, 0) !=
+              cudaSuccess)
+        fail("second graph variant instantiate failed");
+    }
+    if (exec != nullptr && alt_exec != nullptr) {
       std::vector<double> step_us;
       std::vector<uint16_t> got(elems, 0);
       std::vector<uint16_t> bulk_got(bulk_elems, 0);
+      if (!bus.graph_replay_arm(&error, /*variant=*/1)) {
+        fail("second graph variant arm rejected: " + error);
+      } else if (cudaGraphLaunch(alt_exec, stream) != cudaSuccess ||
+                 cudaStreamSynchronize(stream) != cudaSuccess) {
+        fail("second graph variant replay failed");
+      } else if (!bus.graph_replay_finish(30000, &error)) {
+        fail("second graph variant finish rejected: " + error);
+      } else if (cudaMemcpyAsync(got.data(), dev_dst, alt_elems * 2,
+                                 cudaMemcpyDeviceToHost, stream) !=
+                     cudaSuccess ||
+                 cudaStreamSynchronize(stream) != cudaSuccess) {
+        fail("second graph variant D2H failed");
+      } else if (std::memcmp(got.data(), eager_bytes.data(), alt_elems * 2) !=
+                 0) {
+        fail("second graph variant diverged from eager bitwise");
+      }
       for (int replay = 0; replay < 2 + replays && failures == 0; ++replay) {
         if (!bus.graph_replay_arm(&error)) {
           fail("arm rejected: " + error);
@@ -1355,8 +1410,10 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
             my_rank, replays, gens_per_step, percentile(step_us, 0.5),
             percentile(step_us, 0.5) / gens_per_step);
       }
-      cudaGraphExecDestroy(exec);
     }
+    if (exec != nullptr) cudaGraphExecDestroy(exec);
+    if (alt_exec != nullptr) cudaGraphExecDestroy(alt_exec);
+    if (alt_graph) cudaGraphDestroy(alt_graph);
     if (graph) cudaGraphDestroy(graph);
   }
 

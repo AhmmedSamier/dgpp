@@ -201,7 +201,8 @@ void GlmDiagnosticModel::push_position(int req) {
                                stream_));
 }
 
-GlmSpecSegments GlmDiagnosticModel::spec_segments(int req) {
+GlmSpecSegments GlmDiagnosticModel::spec_segments(int req,
+                                                  int snapshot_row0) {
   GlmSpecSegments segs;
   const auto add = [&](void* dst, const void* snapshots, size_t row_stride,
                        size_t bytes) {
@@ -212,10 +213,13 @@ GlmSpecSegments GlmDiagnosticModel::spec_segments(int req) {
   if (kda_cfg_.num_kda_layers > 0) {
     const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
     add(kda_rec_ + static_cast<size_t>(req) * layers * kda_geo_.recurrent_elems,
-        spec_rec_, layers * kda_geo_.recurrent_bytes,
+        spec_rec_ + static_cast<size_t>(snapshot_row0) * layers *
+                        kda_geo_.recurrent_elems,
+        layers * kda_geo_.recurrent_bytes,
         layers * kda_geo_.recurrent_bytes);
     const size_t conv_elems = kda_geo_.conv_committed_bytes / 2;
-    add(kda_conv_ + static_cast<size_t>(req) * layers * conv_elems, spec_conv_,
+    add(kda_conv_ + static_cast<size_t>(req) * layers * conv_elems,
+        spec_conv_ + static_cast<size_t>(snapshot_row0) * layers * conv_elems,
         layers * kda_geo_.conv_committed_bytes,
         layers * kda_geo_.conv_committed_bytes);
   }
@@ -223,7 +227,9 @@ GlmSpecSegments GlmDiagnosticModel::spec_segments(int req) {
   for (int layer = 0; layer < main_dsa_layers_; ++layer)
     add(static_cast<uint16_t*>(pool_.tail(layer)) +
             static_cast<size_t>(req) * ring,
-        spec_tail_ + static_cast<size_t>(layer) * kSpecRows * ring, ring * 2,
+        spec_tail_ +
+            (static_cast<size_t>(layer) * kDecodeRows + snapshot_row0) * ring,
+        ring * 2,
         ring * 2);
   return segs;
 }
@@ -267,7 +273,7 @@ void GlmDiagnosticModel::session_rollback(int req, int accepted) {
     uint16_t* tail = static_cast<uint16_t*>(pool_.tail(layer)) +
                      static_cast<size_t>(req) * ring;
     const uint16_t* snap =
-        spec_tail_ + (static_cast<size_t>(layer) * kSpecRows + row) * ring;
+        spec_tail_ + (static_cast<size_t>(layer) * kDecodeRows + row) * ring;
     DGPP_CUDA_OK(cudaMemcpyAsync(tail, snap, ring * 2,
                                  cudaMemcpyDeviceToDevice, stream_));
   }
@@ -388,6 +394,8 @@ void GlmDiagnosticModel::session_graph_capture_step(
   graph_device_positions_ = device_positions;
   graph_device_tokens_ = device_tokens;
   graph_has_draft_ = false;
+  graph_batch_requests_ = 0;
+  graph_rows_per_request_ = 0;
   session_decode_host_prep(req, ids, /*upload=*/true, device_positions);
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   // The uploads and every launch record; the walk's syncs are skipped
@@ -395,6 +403,79 @@ void GlmDiagnosticModel::session_graph_capture_step(
   Outputs out = session_run_rows(req, ids, pos, /*decode_row=*/true,
                                  /*capture_mode=*/true);
   (void)out;  // empty by contract; the caller instantiates the graph
+}
+
+void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request) {
+  if (rows_per_request < 1 || rows_per_request > kSpecRows ||
+      max_requests_ > kDecodeRows ||
+      max_requests_ * rows_per_request > kDecodeRows)
+    throw std::invalid_argument(
+        "session_graph_capture_batch: requests * rows_per_request must fit "
+        "the fixed decode-row ceiling");
+  if (std::none_of(session_pos_.begin(), session_pos_.end(),
+                   [](int64_t p) { return p > 0; }))
+    throw std::logic_error(
+        "session_graph_capture_batch: capture needs one open request");
+
+  const int requests = max_requests_;
+  const int rows = requests * rows_per_request;
+  if (rows > max_tokens_)
+    throw std::invalid_argument(
+        "session_graph_capture_batch: fixed rows exceed model max_tokens");
+  graph_device_positions_ = true;
+  graph_device_tokens_ = true;
+  graph_has_draft_ = false;
+  graph_batch_requests_ = requests;
+  graph_rows_per_request_ = rows_per_request;
+  decode_rows_ = rows;
+  for (int q = 0; q < requests; ++q) {
+    h_req_spans_[2 * q] = q * rows_per_request;
+    h_req_spans_[2 * q + 1] = rows_per_request;
+    for (int r = 0; r < rows_per_request; ++r)
+      h_req_ids_[q * rows_per_request + r] = q;
+  }
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_req_ids_, h_req_ids_,
+                               sizeof(int32_t) * rows,
+                               cudaMemcpyHostToDevice, stream_));
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_req_spans_, h_req_spans_,
+                               sizeof(int32_t) * 2 * requests,
+                               cudaMemcpyHostToDevice, stream_));
+  glm_spec_positions_batched(d_session_pos_, d_req_ids_, rows,
+                             rows_per_request, d_step_pos_, stream_);
+
+  // Device tokens persist from one replay to the next; inactive groups were
+  // zero-initialized and admissions seed their group before a replay.
+  const std::vector<int64_t> shape(static_cast<size_t>(rows), 0);
+  (void)session_run_rows(/*req=*/0, shape, /*token_start=*/0,
+                         /*decode_row=*/true, /*capture_mode=*/true,
+                         requests);
+}
+
+void GlmDiagnosticModel::session_graph_stage_batch() {
+  if (graph_batch_requests_ <= 0 || graph_rows_per_request_ <= 0)
+    throw std::logic_error(
+        "session_graph_stage_batch: no fixed batch was captured");
+  for (int q = 0; q < graph_batch_requests_; ++q) {
+    h_req_spans_[2 * q] = q * graph_rows_per_request_;
+    h_req_spans_[2 * q + 1] = graph_rows_per_request_;
+    for (int r = 0; r < graph_rows_per_request_; ++r)
+      h_req_ids_[q * graph_rows_per_request_ + r] = q;
+  }
+}
+
+void GlmDiagnosticModel::session_graph_use_batch_contract(
+    int rows_per_request) {
+  if (rows_per_request < 1 || rows_per_request > kSpecRows ||
+      max_requests_ * rows_per_request > kDecodeRows)
+    throw std::invalid_argument(
+        "session_graph_use_batch_contract: invalid fixed batch shape");
+  graph_device_positions_ = true;
+  graph_device_tokens_ = true;
+  graph_has_draft_ = mtp_;
+  graph_batch_requests_ = max_requests_;
+  graph_rows_per_request_ = rows_per_request;
+  decode_rows_ = max_requests_ * rows_per_request;
+  if (mtp_) draft_rows_ = decode_rows_;
 }
 
 void GlmDiagnosticModel::session_graph_capture_commit(
@@ -408,6 +489,32 @@ void GlmDiagnosticModel::session_graph_capture_commit(
         "device positions (the commit advances the device position)");
   glm_spec_commit(device_verdict, decode_rows_, spec_segments(req),
                   d_session_pos_ + req, stream_);
+}
+
+void GlmDiagnosticModel::session_graph_capture_commit_batch(
+    const GlmPickVerdict* device_verdicts) {
+  if (graph_batch_requests_ <= 0 || graph_rows_per_request_ <= 0)
+    throw std::logic_error(
+        "session_graph_capture_commit_batch: no fixed batch was captured");
+  if (device_verdicts == nullptr)
+    throw std::invalid_argument(
+        "session_graph_capture_commit_batch: null verdicts");
+  for (int req = 0; req < graph_batch_requests_; ++req) {
+    const int row0 = req * graph_rows_per_request_;
+    glm_spec_commit(device_verdicts + req, graph_rows_per_request_,
+                    spec_segments(req, row0), d_session_pos_ + req, stream_);
+  }
+}
+
+void GlmDiagnosticModel::session_graph_capture_verify_next_tokens_batch(
+    const GlmPickVerdict* verify_verdicts) {
+  if (graph_batch_requests_ <= 0 || graph_rows_per_request_ != 1 || mtp_)
+    throw std::logic_error(
+        "session_graph_capture_verify_next_tokens_batch: requires the plain "
+        "T=1 fixed graph");
+  glm_spec_verify_next_tokens_batched(
+      verify_verdicts, graph_batch_requests_, graph_rows_per_request_,
+      d_tokens_, stream_);
 }
 
 void GlmDiagnosticModel::session_reserve_blocks(int req, int64_t tokens) {
@@ -432,9 +539,12 @@ void GlmDiagnosticModel::session_graph_settle(int req, int accepted) {
   if (!graph_device_positions_)
     throw std::logic_error("session_graph_settle: the graph was not captured "
                            "with device positions (use session_graph_collect)");
-  if (accepted < 1 || accepted > decode_rows_)
+  const int accepted_bound = graph_batch_requests_ > 0
+                                 ? graph_rows_per_request_
+                                 : decode_rows_;
+  if (accepted < 1 || accepted > accepted_bound)
     throw std::invalid_argument("session_graph_settle: accepted rows outside "
-                                "[1, " + std::to_string(decode_rows_) + "]");
+                                "[1, " + std::to_string(accepted_bound) + "]");
   if (session_pos_[static_cast<size_t>(req)] <= 0)
     throw std::invalid_argument("session_graph_settle: no open session");
   // The device advanced its own position in the recorded commit; the
@@ -493,7 +603,11 @@ void GlmDiagnosticModel::session_close(int req) {
   if (dsa_cfg_.num_dsa_layers > 0)
     pool_.release_request_blocks(req, stream_);
   session_pos_[static_cast<size_t>(req)] = 0;
-  if (mtp_) mtp_pos_[static_cast<size_t>(req)] = 0;
+  push_position(req);
+  if (mtp_) {
+    mtp_pos_[static_cast<size_t>(req)] = 0;
+    push_mtp_position(req);
+  }
 }
 
 int64_t GlmDiagnosticModel::session_position(int req) const {
@@ -513,10 +627,11 @@ int64_t GlmDiagnosticModel::session_position(int req) const {
 // ---------------------------------------------------------------------------
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     int req, const std::vector<int64_t>& ids, int64_t token_start,
-    bool decode_row, bool capture_mode) {
+    bool decode_row, bool capture_mode, int batch_requests) {
   const int T = static_cast<int>(ids.size());
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
+  const bool batched = batch_requests > 0;
 
   // The head runs on every row of a prefill chunk although greedy reads
   // only the last: a last-row head would come off the m=1 GEMV while the
@@ -581,36 +696,50 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       }
       if (!kda_->prepare(T))
         throw std::runtime_error("session: KDA GEMM plans unavailable");
-      // Slot-major state: request `req`'s layer-`kda_ordinal` slice.
+      // Scalar calls bind one request's layer state. A fixed batch binds
+      // this layer in slot 0 and lets the KDA row map select later slots by
+      // the full per-request (all-layers) stride.
+      const size_t state_req = batched ? 0 : static_cast<size_t>(req);
       float* rec =
           kda_rec_ +
-          (static_cast<size_t>(req) * kda_cfg_.num_kda_layers +
+          (state_req * kda_cfg_.num_kda_layers +
            static_cast<size_t>(kda_ordinal)) *
               kda_geo_.recurrent_elems;
+      const size_t conv_elems = kda_geo_.conv_committed_bytes / 2;
       uint16_t* conv =
           kda_conv_ +
-          (static_cast<size_t>(req) * kda_cfg_.num_kda_layers +
-           static_cast<size_t>(kda_ordinal)) *
-              (kda_geo_.conv_committed_bytes / 2);
+          (state_req * kda_cfg_.num_kda_layers +
+           static_cast<size_t>(kda_ordinal)) * conv_elems;
       // In-place state update: prefill chunks and steps share ONE
       // recurrence implementation, so the state this enqueue leaves is
       // exactly the state the next row needs (DESIGN §7.1). Speculative
       // rows (decode, T > 1) also leave post-row snapshots for
       // session_rollback; the snapshot row stride spans every KDA layer.
       KdaSpeculativeSinks spec;
-      if (decode_row && T > 1) {
+      if (decode_row && (T > 1 || batched)) {
         const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
         spec.recurrent.states =
             spec_rec_ + static_cast<size_t>(kda_ordinal) * kda_geo_.recurrent_elems;
         spec.recurrent.stride_elems =
             static_cast<int64_t>(layers * kda_geo_.recurrent_elems);
-        const size_t conv_elems = kda_geo_.conv_committed_bytes / 2;
         spec.conv.states =
             spec_conv_ + static_cast<size_t>(kda_ordinal) * conv_elems;
         spec.conv.stride_elems = static_cast<int64_t>(layers * conv_elems);
       }
+      KdaLayerBatch batch;
+      if (batched) {
+        batch.rows.request_ids = d_req_ids_;
+        batch.rows.positions = d_step_pos_;
+        batch.rows.spans = d_req_spans_;
+        batch.rows.num_requests = batch_requests;
+        batch.recurrent_request_stride_elems =
+            static_cast<int64_t>(kda_cfg_.num_kda_layers) *
+            kda_geo_.recurrent_elems;
+        batch.conv_request_stride_elems =
+            static_cast<int64_t>(kda_cfg_.num_kda_layers) * conv_elems;
+      }
       kda_->enqueue(normed_, rec, conv, kda_geo_.conv_hist, attn_out, T,
-                    stream_, decode_row ? &prefetch_ : nullptr, spec);
+                    stream_, decode_row ? &prefetch_ : nullptr, spec, batch);
       ++kda_ordinal;
     } else {
       if (!dsa_) {
@@ -629,13 +758,15 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         // The decode table's T rows all serve `req` (staged in
         // session_decode_host_prep); num_requests=1 — time-multiplexed
         // steps. Speculative rows leave post-row ring snapshots.
-        void* tail_snaps =
-            T > 1 ? spec_tail_ + static_cast<size_t>(dsa_ordinal) *
-                                     kSpecRows * spec_tail_ring_elems()
-                  : nullptr;
+        void* tail_snaps = (T > 1 || batched)
+                               ? spec_tail_ +
+                                     static_cast<size_t>(dsa_ordinal) *
+                                         kDecodeRows * spec_tail_ring_elems()
+                               : nullptr;
         dsa_->enqueue_decode(normed_, pool_, dsa_ordinal, d_req_ids_,
-                             d_step_pos_, d_req_spans_, /*num_requests=*/1, T,
-                             attn_out, stream_, &prefetch_, tail_snaps);
+                             d_step_pos_, d_req_spans_,
+                             batched ? batch_requests : 1, T, attn_out,
+                             stream_, &prefetch_, tail_snaps);
       } else {
         dsa_->enqueue_prefill(normed_, pool_, dsa_ordinal, /*req=*/req,
                               token_start, T, attn_out, stream_);
@@ -740,13 +871,19 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // it per position. Decode rows scatter by device position (the graph
   // replays at moving positions); prefill chunks are contiguous.
   if (mtp_) {
-    uint16_t* cache = mtp_hidden_cache(req);
-    if (decode_row)
-      glm_rows_scatter_bf16(collapsed_, d_step_pos_, cache, T, H, stream_);
-    else
+    if (decode_row && batched) {
+      glm_rows_scatter_bf16_batched(
+          collapsed_, d_req_ids_, d_step_pos_, mtp_hidden_,
+          static_cast<int64_t>(max_tokens_) * H, T, H, stream_);
+    } else if (decode_row) {
+      glm_rows_scatter_bf16(collapsed_, d_step_pos_, mtp_hidden_cache(req), T,
+                            H, stream_);
+    } else {
+      uint16_t* cache = mtp_hidden_cache(req);
       DGPP_CUDA_OK(cudaMemcpyAsync(
           cache + static_cast<size_t>(token_start) * H, collapsed_,
           static_cast<size_t>(T) * H * 2, cudaMemcpyDeviceToDevice, stream_));
+    }
   }
   glm_rmsnorm_bf16(collapsed_, globals_.final_norm, normed_, T, H, eps,
                    stream_);

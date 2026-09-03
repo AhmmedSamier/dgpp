@@ -14,8 +14,9 @@
 // Tile geometry (BM=16, BN=64, BK=32) divides the 128-wide scale block
 // exactly, so every stage applies ONE scalar scale (no per-element scale
 // gather) and ragged N/K tails — anything not a multiple of 128 — read the
-// true last block row/col with masked tile loads. Deterministic at fixed
-// shapes (fixed k-loop order) and CUDA-graph capturable.
+// true last block row/col with masked tile loads. Decode shapes up to eight
+// rows use row-independent GEMV chunks, keeping each row bitwise invariant
+// to serving occupancy. Both paths are deterministic and graph-capturable.
 #include <cstddef>
 #include <cstdint>
 

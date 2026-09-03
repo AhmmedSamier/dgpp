@@ -85,9 +85,11 @@ __global__ __launch_bounds__(kLocalThreads) void pick_local_kernel(
     int vocab_begin, int rank, int world,
     const uint64_t* __restrict__ carry_digest, uint16_t* __restrict__ table,
     GlmPickLocal* __restrict__ locals,
-    const GlmPickVerdict* __restrict__ row_select) {
+    const GlmPickVerdict* __restrict__ row_select, int source_row_stride) {
   const int row = blockIdx.x;
-  const int logits_row = row_select ? row_select->accepted - 1 : row;
+  const int selected = row_select ? max(row_select[row].accepted - 1, 0) : 0;
+  const int logits_row =
+      row_select ? row * source_row_stride + selected : row;
   const int tid = threadIdx.x;
   const int group_slots = world * kPickSlotsPerRank;
 
@@ -149,12 +151,15 @@ __host__ __device__ inline uint64_t verdict_digest(int rows, int accepted,
   return h & ((1ull << kPickDigestBits) - 1);
 }
 
-// One thread: the table is at most 5 x 8 x 9 slots.
+// One thread: the table is at most 9 x 8 x 9 slots.
 __global__ void pick_verdict_kernel(const uint16_t* __restrict__ table,
                                     int rows, int world, int rank,
                                     const int64_t* __restrict__ fed,
-                                    GlmPickVerdict* __restrict__ verdict,
-                                    GlmPickVerdict* __restrict__ device_verdict,
+                                    const int64_t* __restrict__ positions,
+                                    int requests, int rows_per_request,
+                                    int position_stride,
+                                    GlmPickVerdict* __restrict__ verdicts,
+                                    GlmPickVerdict* __restrict__ device_verdicts,
                                     uint64_t* __restrict__ carry_digest) {
   int32_t winners[kPickMaxRows];
   for (int r = 0; r < rows; ++r) {
@@ -171,30 +176,52 @@ __global__ void pick_verdict_kernel(const uint16_t* __restrict__ table,
     }
     winners[r] = best.id;
   }
-  int accepted = 1;
-  while (accepted < rows && winners[accepted - 1] == fed[accepted]) ++accepted;
-
-  GlmPickVerdict v;
-  v.rows = rows;
-  v.accepted = accepted;
-  v.next = winners[accepted - 1];
-  for (int r = 0; r < rows; ++r) v.winners[r] = winners[r];
-  v.digest = verdict_digest(rows, accepted, winners);
+  int accepted[kPickMaxRequests];
+  bool active[kPickMaxRequests];
+  uint64_t digest = requests == 1 ? 0 : splitmix64(requests);
+  for (int q = 0; q < requests; ++q) {
+    const int row0 = q * rows_per_request;
+    active[q] = positions == nullptr || positions[q * position_stride] >= 0;
+    accepted[q] = active[q] ? 1 : 0;
+    while (active[q] && accepted[q] < rows_per_request &&
+           winners[row0 + accepted[q] - 1] == fed[row0 + accepted[q]])
+      ++accepted[q];
+    const uint64_t one = verdict_digest(
+        active[q] ? rows_per_request : 0, accepted[q], winners + row0);
+    if (requests == 1)
+      digest = one;
+    else
+      digest = splitmix64(digest ^ one);
+  }
+  digest &= (1ull << kPickDigestBits) - 1;
 
   const uint16_t* digests =
       table + static_cast<size_t>(rows) * world * kPickSlotsPerRank;
   const uint64_t mine =
       decode_digits(digests + rank * kPickSlotsPerRank, kPickSlotsPerRank);
-  v.digest_mismatch = 0;
+  uint32_t digest_mismatch = 0;
+  uint64_t peer_digests[kPickMaxWorld] = {};
   for (int k = 0; k < world; ++k) {
     const uint64_t d =
         decode_digits(digests + k * kPickSlotsPerRank, kPickSlotsPerRank);
-    v.peer_digests[k] = d;
-    if (d != mine) v.digest_mismatch |= 1u << k;
+    peer_digests[k] = d;
+    if (d != mine) digest_mismatch |= 1u << k;
   }
-  *verdict = v;
-  if (device_verdict != nullptr) *device_verdict = v;
-  *carry_digest = v.digest;
+  for (int q = 0; q < requests; ++q) {
+    const int row0 = q * rows_per_request;
+    GlmPickVerdict v;
+    v.rows = active[q] ? rows_per_request : 0;
+    v.accepted = accepted[q];
+    v.next = active[q] ? winners[row0 + accepted[q] - 1] : -1;
+    for (int r = 0; r < rows_per_request; ++r)
+      v.winners[r] = active[q] ? winners[row0 + r] : -1;
+    v.digest = digest;
+    v.digest_mismatch = digest_mismatch;
+    for (int k = 0; k < world; ++k) v.peer_digests[k] = peer_digests[k];
+    verdicts[q] = v;
+    if (device_verdicts != nullptr) device_verdicts[q] = v;
+  }
+  *carry_digest = digest;
 }
 
 void check_shape(int rows, int world, int rank, const char* what) {
@@ -225,7 +252,30 @@ void glm_pick_local(const float* logits, int rows, int vocab_count,
   static_assert(kPickMaxWorld * kPickSlotsPerRank + 1 <= kLocalThreads);
   pick_local_kernel<<<rows, kLocalThreads, 0, stream>>>(
       logits, rows, vocab_count, vocab_begin, rank, world, carry_digest, table,
-      locals, row_select);
+      locals, row_select, /*source_row_stride=*/rows);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_pick_local_batched(
+    const float* logits, int rows, int vocab_count, int vocab_begin, int rank,
+    int world, const uint64_t* carry_digest, uint16_t* table,
+    GlmPickLocal* locals, cudaStream_t stream,
+    const GlmPickVerdict* row_select, int requests, int source_row_stride) {
+  check_shape(rows, world, rank, "glm_pick_local_batched");
+  if (requests < 1 || requests > kPickMaxRequests)
+    throw std::invalid_argument("glm_pick_local_batched: requests");
+  if (row_select != nullptr &&
+      (rows != requests || source_row_stride < 1))
+    throw std::invalid_argument(
+        "glm_pick_local_batched: selected rows need one candidate per "
+        "request and a positive source stride");
+  if (vocab_count < 1 || vocab_begin < 0 ||
+      vocab_begin + vocab_count > (1 << (6 * kPickIdDigits)))
+    throw std::invalid_argument(
+        "glm_pick_local_batched: vocab slice outside the 18-bit id encoding");
+  pick_local_kernel<<<rows, kLocalThreads, 0, stream>>>(
+      logits, rows, vocab_count, vocab_begin, rank, world, carry_digest, table,
+      locals, row_select, source_row_stride);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -234,9 +284,31 @@ void glm_pick_verdict(const uint16_t* table, int rows, int world, int rank,
                       GlmPickVerdict* device_verdict, uint64_t* carry_digest,
                       cudaStream_t stream) {
   check_shape(rows, world, rank, "glm_pick_verdict");
-  pick_verdict_kernel<<<1, 1, 0, stream>>>(table, rows, world, rank, fed,
-                                           verdict, device_verdict,
-                                           carry_digest);
+  pick_verdict_kernel<<<1, 1, 0, stream>>>(
+      table, rows, world, rank, fed, /*positions=*/nullptr, /*requests=*/1,
+      /*rows_per_request=*/rows, /*position_stride=*/rows, verdict,
+      device_verdict, carry_digest);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_pick_verdict_batched(
+    const uint16_t* table, int rows, int world, int rank, const int64_t* fed,
+    const int64_t* positions, int requests, int rows_per_request,
+    int position_stride, GlmPickVerdict* verdicts,
+    GlmPickVerdict* device_verdicts, uint64_t* carry_digest,
+    cudaStream_t stream) {
+  check_shape(rows, world, rank, "glm_pick_verdict_batched");
+  if (requests < 1 || requests > kPickMaxRequests || rows_per_request < 1 ||
+      requests * rows_per_request != rows)
+    throw std::invalid_argument("glm_pick_verdict_batched: request shape");
+  if (positions != nullptr && position_stride < rows_per_request)
+    throw std::invalid_argument("glm_pick_verdict_batched: position stride");
+  if (table == nullptr || fed == nullptr || verdicts == nullptr ||
+      carry_digest == nullptr)
+    throw std::invalid_argument("glm_pick_verdict_batched: null argument");
+  pick_verdict_kernel<<<1, 1, 0, stream>>>(
+      table, rows, world, rank, fed, positions, requests, rows_per_request,
+      position_stride, verdicts, device_verdicts, carry_digest);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

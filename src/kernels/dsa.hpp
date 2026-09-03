@@ -95,11 +95,12 @@ void dsa_kpool_tail_seed(const void* k, int64_t k_stride, const void* gate,
 // the ring (with the current token overriding its ring slot, exactly the
 // reference's is_current rule) and writes the pool to the block-mapped slot.
 //   req_spans: int32 [num_requests, 2] (start, len) into the token batch;
-//   this is a dense list of active spans, while req_ids selects the actual
-//   state slot (active slots need not be 0..num_requests-1). Tokens of a
-//   request must be batch-contiguous; pos: [tokens] (may be -1 for padding
-//   rows — skipped). A span whose rows are ALL padding (an unoccupied slot
-//   of a fixed-shape batch) touches nothing; its req_ids may be a sentinel.
+//   eager callers may pass only active spans, while a fixed-shape graph may
+//   include an all-padding span for every unoccupied configured slot. req_ids
+//   selects the actual state slot (active slots need not be
+//   0..num_requests-1). Tokens of a request must be batch-contiguous; pos:
+//   [tokens] (may be -1 for padding rows — skipped). An all-padding span
+//   touches nothing; its req_ids may be a sentinel.
 //   tail_snapshots (optional, speculative decode): bf16 [tokens, 2, kpool,
 //   dim]; after every batch row t that is not its request's last, the
 //   request's ring as it stands is copied to row t. Rolling a request back
@@ -115,6 +116,15 @@ void dsa_kpool_decode_update(const void* k, int64_t k_stride,
                              int pools_per_block, int kpool, int dim,
                              cudaStream_t stream,
                              void* tail_snapshots = nullptr);
+
+// Writes zeros to every output row whose position is negative (a fixed-shape
+// padding row). The decode kernels skip such rows' state writes and leave
+// their attention output unwritten, so without this the row's block output
+// is whatever the scratch held; zeroing makes a padding row inert by
+// construction (deterministic, finite, rank-identical) rather than merely
+// unobserved downstream.
+void dsa_zero_padding_rows(void* out, const int64_t* pos, int tokens,
+                           int hidden, cudaStream_t stream);
 
 // Append normed latent rows to the blocked latent cache. One block per row.
 //   latent_rows: bf16 [tokens, kv_lora]; block_tables: int32

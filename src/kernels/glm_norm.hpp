@@ -39,6 +39,16 @@ void glm_mtp_input_bf16(const void* embed_table, const int64_t* tokens,
                         void* out, int rows, int hidden, float eps,
                         cudaStream_t stream);
 
+// Request-indexed fixed-batch form. hidden_cache starts at slot 0 and
+// request_cache_stride is its bf16-element distance between slots;
+// request_ids[t] chooses the cache for row t. Negative positions are
+// deterministic zero padding rows (both halves are zero).
+void glm_mtp_input_bf16_batched(
+    const void* embed_table, const int64_t* tokens, const void* hidden_cache,
+    int64_t request_cache_stride, const int32_t* request_ids,
+    const int64_t* positions, const void* enorm, const void* hnorm, void* out,
+    int rows, int hidden, float eps, cudaStream_t stream);
+
 // x[n] += y[n] in bf16 (fp32 add, one rounding): the plain pre-norm
 // residual the draft block uses (the main stack's residual is mHC's).
 void glm_residual_add_bf16(void* x, const void* y, int64_t n,
@@ -49,5 +59,12 @@ void glm_residual_add_bf16(void* x, const void* y, int64_t n,
 void glm_rows_scatter_bf16(const void* rows, const int64_t* positions,
                            void* cache, int num_rows, int hidden,
                            cudaStream_t stream);
+
+// Request-indexed scatter into cache[request_ids[t], positions[t], :].
+// Padding rows (negative positions) do not touch the cache.
+void glm_rows_scatter_bf16_batched(
+    const void* rows, const int32_t* request_ids, const int64_t* positions,
+    void* cache, int64_t request_cache_stride, int num_rows, int hidden,
+    cudaStream_t stream);
 
 }  // namespace dgpp

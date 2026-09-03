@@ -32,7 +32,8 @@ namespace dgpp {
 constexpr int kPickLogitDigits = 6;  // 36 bits carry the float's 32
 constexpr int kPickIdDigits = 3;     // 18 bits carry a vocab id (< 262144)
 constexpr int kPickSlotsPerRank = kPickLogitDigits + kPickIdDigits;
-constexpr int kPickMaxRows = 4;      // GlmDiagnosticModel::kSpecRows
+constexpr int kPickMaxRows = 8;      // GlmDiagnosticModel::kDecodeRows
+constexpr int kPickMaxRequests = 8;  // one verdict per fixed request slot
 constexpr int kPickMaxWorld = 8;
 constexpr uint64_t kPickDigestBits = 6ull * kPickSlotsPerRank;  // 54
 
@@ -65,7 +66,7 @@ struct GlmPickVerdict {
   int32_t rows = 0;
   int32_t accepted = 0;
   int32_t next = -1;
-  int32_t winners[kPickMaxRows] = {-1, -1, -1, -1};
+  int32_t winners[kPickMaxRows] = {-1, -1, -1, -1, -1, -1, -1, -1};
   uint64_t digest = 0;
   uint32_t digest_mismatch = 0;
   uint64_t peer_digests[kPickMaxWorld] = {};
@@ -85,6 +86,18 @@ void glm_pick_local(const float* logits, int rows, int vocab_count,
                     GlmPickLocal* locals, cudaStream_t stream,
                     const GlmPickVerdict* row_select = nullptr);
 
+// Fixed request-slot batch form. Without row_select, `rows` candidate rows
+// are contiguous in logits exactly as in glm_pick_local. With row_select,
+// there is one candidate per request (`rows == requests`): request q reads
+// logits[q * source_row_stride + max(row_select[q].accepted - 1, 0)]. This
+// is the MTP draft pick over a fixed [request, spec-row] head output; an
+// inactive request has accepted == 0 and reads its harmless padding row.
+void glm_pick_local_batched(
+    const float* logits, int rows, int vocab_count, int vocab_begin, int rank,
+    int world, const uint64_t* carry_digest, uint16_t* table,
+    GlmPickLocal* locals, cudaStream_t stream,
+    const GlmPickVerdict* row_select, int requests, int source_row_stride);
+
 // Kernel 2 (after the fold): decodes every rank's candidates and digests,
 // merges per row, judges against fed[rows] (the verify's tokens), writes
 // *verdict (the host's pinned mirror), *device_verdict (the device-side
@@ -94,6 +107,21 @@ void glm_pick_verdict(const uint16_t* table, int rows, int world, int rank,
                       const int64_t* fed, GlmPickVerdict* verdict,
                       GlmPickVerdict* device_verdict, uint64_t* carry_digest,
                       cudaStream_t stream);
+
+// Decodes `requests` independent verdicts from one folded table. Candidate
+// rows are packed request-major (`rows == requests * rows_per_request`).
+// `positions` is the source row layout and marks an unoccupied request when
+// its first position is negative; position_stride permits the draft pick's
+// packed one-candidate table to refer back to a wider fixed row group.
+// Inactive verdicts have rows/accepted == 0 and next == -1. All verdicts
+// carry the same aggregate digest, so the one transport digest chain still
+// covers the complete physical pass.
+void glm_pick_verdict_batched(
+    const uint16_t* table, int rows, int world, int rank, const int64_t* fed,
+    const int64_t* positions, int requests, int rows_per_request,
+    int position_stride, GlmPickVerdict* verdicts,
+    GlmPickVerdict* device_verdicts, uint64_t* carry_digest,
+    cudaStream_t stream);
 
 // The host mirror of the kernels' digest (the tests' oracle).
 uint64_t glm_pick_digest(int rows, int accepted, const int32_t* winners);

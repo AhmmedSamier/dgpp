@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; the concurrency-1 T=1/MTP graph engine is wired, loopback-gated and measured on the four-node service (21.8–26.0 ms/token with MTP, 32.1 at T=1, eager 36.4; 2026-09-03); sampling modes and batched decode are not behind the service yet |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling modes and tool calls remain |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -26,18 +26,45 @@ chat/completions contract over HTTP/SSE with rank 0 as the sole ingress,
 and every rank executes an identical op stream (the 4-way op-stream md5 is
 the standing ritual). Its default engine seam remains the eager single-token
 step: prefill + pick, then one token in / one token out per tick,
-time-multiplexed across up to 8 request slots. The optional concurrency-1
-`--decode-graph [--mtp]` seam is wired, passes the real two-rank loopback
-scheduler/graph gates including slot reuse, and is measured on the
-four-node service (2026-09-03, the record entry of that date): 32.0–33.2
-ms/token at T=1 and 21.8–26.0 with MTP (43.6–44.1 ms per replay at
-1.69–1.88 tokens per replay, text-dependent), against 31.3 and 22.45 in
+time-multiplexed across up to 8 request slots. The optional
+`--decode-graph [--mtp]` seam records one scalar graph per physical request
+slot as it is first used and one fixed row-batched graph over all configured
+slots (up to 8 requests at T=1 or 4 at T=2). Below the measured crossover it
+executes the live slots through their scalar variants; at four or more live
+requests it selects the row-batched variant and pads closed slots at device
+position -1. `CollectiveBus` owns a disjoint generation-cell set for every
+recorded variant, so shape switches do not restart the process or graph era.
+The T=1 and MTP paths pass the real two-rank loopback gates, including mixed
+acceptance, noncontiguous occupancy, scalar↔batch transitions, request-order
+reversal, close, and slot reuse without recapture. The scalar, fixed-batch,
+and final adaptive shapes are measured on the four-node service (2026-09-03,
+the record entries of that date). The scalar shape runs at
+32.0–33.2 ms/token at T=1 and 21.8–26.0 with MTP (43.6–44.1 ms per replay
+at 1.69–1.88 tokens per replay, text-dependent), against 31.3 and 22.45 in
 `glm_gen_check` — the service adds under 1 ms per replay at T=1 and ~1.5
-with MTP. The eager service, re-measured in the same session, is 36.4
-ms/token (the kernel rounds took it from Stage 4c's ~175 without a service
-change). The op-stream md5 was identical on all four ranks of all three
-worlds. Time to first token is the eager prefill in every mode, ~30 ms per
-prompt token.
+with MTP. The original always-eight-row graph measured
+12.55/23.78/43.59/78.94 tok/s for 1/2/4/8 live T=1 requests and
+19.32/35.90/65.79 tok/s for 1/2/4 live MTP requests, versus same-binary
+scalar controls of 31.51 and 38.48 tok/s. That failed low-occupancy gate led
+to the adaptive path. Its final curves are 30.97/31.67/41.76/76.18 tok/s at
+T=1 and 38.48/38.97/60.27 tok/s with MTP: scalar throughput is retained below
+four live requests, and batching still wins at and above the crossover. The
+MTP rate must be read with its acceptance denominator: the Phase-2 prompt's
+1.678 tokens/replay makes 43.603 ms/replay equal 25.99 ms/token. A follow-up
+on the current adaptive binary with the exact Phase-1 controls reproduced
+21.93–22.21 ms/token on the 16-token Germany workload (previously 21.79),
+21.83 on a 32-token repeat, and 24.58 on the 200-token CUDA-graph explanation
+(previously 24.81–24.85); replay latency remains 43.6–44.4 ms. There is no
+residual single-stream execution regression hidden by the new workload. The
+eight-row kernels use scalar-order GEMV chunks so a request is bitwise
+invariant across scalar↔batch switches; all 22 full responses in the final
+T=1/MTP sweep share one token hash. Phase 2's performance gate is closed. The
+eager service, re-measured in the same session, is 36.4 ms/token (the
+kernel rounds took it from Stage 4c's ~175 without a service change). The
+op-stream md5 was identical across all four ranks of every measured world;
+the fixed-batch run's 22 full 256-token answers were token-identical across
+both modes and every occupancy. Time to first token is the eager prefill in
+every mode, ~30 ms per prompt token.
 
 The fast path exists beside it, in `glm_gen_check`: the recorded decode
 step (`--decode-graph`, one CUDA graph per token, 90 collective nodes) runs
@@ -45,8 +72,9 @@ at 31.3 ms/token plain, and with the MTP layer (`--mtp`) the whole
 speculative step — two-row verify, on-device pick and verdict, predicated
 rollback, the draft block and its pick, the next tokens written on the
 device — is ONE graph replay at 22.45 ms/token effective, transcript
-identical to the plain loop. The Phase-1 service adapter drives that step
-behind `glm_serve` at the pace above. The weight floor for a step is
+identical to the plain loop. The service adapter preserves that scalar path
+and generalizes it to the fixed Phase-2 request batch behind `glm_serve`.
+The weight floor for a step is
 ~24.5 ms (5.9 GB at ~240 GB/s); the plain step sits 6.8 ms above it, of
 which the 90 collectives are ~3.1 ms.
 
@@ -65,9 +93,11 @@ build-ci -j4`). `glm_tp_test` and `bus_test` run with
 
 Suggested order for what remains, each item's design in its section:
 
-1. M6: the row-batched graph (batched decode), sampling on the bus, tool
-   calls and `reasoning_content`, drain-on-stop, grow-on-demand admission;
-   the prefill behind the time to first token (~30 ms per prompt token).
+1. M6: sampling on the bus, tool calls and `reasoning_content`, drain-on-stop,
+   grow-on-demand admission; the prefill behind the time to first token
+   (~30 ms per prompt token — first re-measure it: phase 2's m ≤ 8 GEMV
+   routing changed the path of 5–8-row prefill chunks and per-expert
+   prefill GEMMs with 5–8 routed tokens, unmeasured).
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).
@@ -413,9 +443,12 @@ Deliverables as written, with their state:
    lifetime), external cancellation swept at fixed tick top, bounded queue
    (503 at the door), up to 8 request slots. `step(req)` now returns a token
    vector, and EOS/cancellation/cap are applied token-by-token so a
-   speculative batch cannot overshoot the public transcript. Decode across
-   requests is TIME-MULTIPLEXED (one request's row per step op); the batched
-   row is the remaining piece (below).
+   speculative batch cannot overshoot the public transcript. Engines
+   advertise a decode-batch capacity and take the tick's round-robin slice
+   through `step_batch`: the eager engine stays time-multiplexed (capacity
+   1), while the adaptive graph engine advertises every slot and advances
+   the live set through per-slot scalar graphs below four live requests or
+   one row-batched replay at four and above (6a phase 2, below).
 2. Exact ByteLevel-BPE tokenizer and model-load-time chat-template compiler,
    keyed by tokenizer/template revision hashes. BUILT (Stages 3, 3b):
    `glm_tokenizer` byte-exact against HF tokenizers 0.23.1 on a 55-case
@@ -470,10 +503,13 @@ Exit criteria, status:
   `--decode-graph [--mtp]`, records of 2026-09-02/03) and, since
   2026-09-03, for the concurrency-1 service (nine fixed requests through
   `scripts/serve_bench.py`, paced by `scripts/serve_pace.py`: 21.8–26.0
-  ms/token with MTP, 32.1 at T=1, 36.4 eager; 32 tokens in 1.44 s warm);
-  NOT for the multi-request service.
+  ms/token with MTP, 32.1 at T=1, 36.4 eager; 32 tokens in 1.44 s warm) and
+  the adaptive multi-request service (`serve_pace.py --waves`: complete
+  1/2/4/8 T=1 and 1/2/4 MTP occupancy curves, including fixed-width controls,
+  latency distributions, aggregate throughput, graph-mode transitions,
+  transcript and rank hashes).
 
-### Remaining M6 work, designed
+### M6 work and implementation status
 
 **6a. The one-graph step behind the service.** The service's old seam
 (`SchedulerEngine`: `prefill(req, prompt) → token`, `step(req, prev) →
@@ -491,9 +527,10 @@ pure function of the token stream, so the §11 rank-identity invariant is
 untouched, and the fake engine in `glm_scheduler_test` scripts multi-token
 steps to pin the EOS-in-the-middle and cap-overshoot rules.
 
-The bus has ONE graph era per process (`graph_record_begin` once; the
-window's cells are per recorded node), so "a graph per request slot" is not
-available; the graph must be request-indexed on the device. Two phases:
+The bus has one graph era per process. It originally exposed only one recorded
+cell set, so Phase 2 first made the graph request-indexed on the device; the
+adaptive closure extends that era with selectable, disjoint graph variants.
+Two phases:
 
 - *Phase 1 — concurrency 1: BUILT AND MEASURED 2026-09-03.* `glm_serve
   --max-concurrency 1 --decode-graph [--mtp]`: prefill is eager (bulk
@@ -518,54 +555,147 @@ available; the graph must be request-indexed on the device. Two phases:
   moved it). Op-stream md5 identical on all four ranks of all three worlds
   over the same 1144 tokens. Time to first token is the prefill (~30 ms per
   prompt token, all modes), the next single-user item.
-- *Phase 2 — the row-batched graph.* Rows = (request slot, spec row)
-  pairs, up to `kDecodeRows = 8` (e.g. 4 requests × T=2) with the shape
-  fixed at capture and unoccupied rows padded at position −1 (the
-  mechanism the draft block already uses). Requires per-row request
-  indexing in the KDA recurrence/conv kernels (today one state pointer per
-  launch — the DSA decode path already takes device-side `req/pos` tables
-  per row), per-row positions and commit verdicts (the pick/verdict/commit
-  kernels are already `rows`-shaped; they gain a row→request map), and a
-  per-request `d_session_pos_`/`d_mtp_pos_`. The MoE decode slots scale
-  with rows (`top_k+1` GEMVs per row; shared experts across rows are L2
-  hits when slots run in expert order, the same effect the T=2 verify
-  measured at ~7 ms for the unshared remainder). This is also the
-  "batched decode" the scheduler record committed to: with it a tick
-  steps every active request in one replay instead of R replays, and the
-  bus carries R×T rows per collective (the latency slot is 32 KB = 4 bf16
-  rows of 4096 today; 8 rows need a 64 KB slot — a bus configuration
-  knob, not a protocol change). Admission/retire changes the occupied
-  row set, not the graph; a padded row costs its share of the small
-  kernels and nothing at the weights.
+- *Phase 2 — adaptive scalar/row-batched graphs: IMPLEMENTED, FUNCTIONALLY
+  GATED, AND FOUR-NODE PERFORMANCE-GATED 2026-09-03.* Rows are (request slot,
+  speculative row) pairs, up to `kDecodeRows = 8`: eight requests at T=1
+  or four at the served MTP T=2. The row-batched variant records every
+  configured slot once, derives each group's positions from its
+  `d_session_pos_`, and turns a closed slot's zero position into -1 padding.
+  Admission and retirement therefore change occupancy, not graph shape;
+  one scheduler tick advances every live slot in a single replay. Beside it,
+  `GlmGraphEngineAdapter` lazily records the exact Phase-1 scalar graph for
+  each physical slot. It runs those variants sequentially below four live
+  requests and selects the fixed batch at four or more (configurable with
+  `--graph-batch-min-live`).
 
-  IMPLEMENTATION STARTED 2026-09-03: `SchedulerEngine` now advertises a
-  fixed decode-batch capacity and has an ordered `step_batch(slots)` seam;
-  scalar engines inherit capacity 1 and preserve the existing op stream,
-  while a future graph adapter can advance the scheduler's canonical
-  round-robin slice in one physical pass. `KdaLayer` and both stateful KDA
-  kernels now accept the DSA-shaped device row map (dense active spans,
-  actual request ids, positions with `-1` padding), select noncontiguous
-  request slots, keep each request's rows sequential, and write snapshots
-  at global batch-row offsets. While wiring the shared row-map contract,
-  the DSA ring update was fixed to select the actual `req_ids` slot instead
-  of mistaking the dense span ordinal for a slot id. Blast radius: the
-  latent append and the select already used the per-row ids, so under the
-  eager engine at `--max-concurrency 2` (serve_run.sh's default knobs) a
-  request decoding in slot 1 would have stashed into slot 0's ring and
-  compressed its completed pools into slot 0's block table while its own
-  select read pools that were never written. Unobserved so far: the
-  record's service measurements ran one slot at a time, and no model-level
-  gate decodes at a slot other than 0 — that gate comes before phase 2
-  occupies a second slot. Both kernels and both tests also pin the
-  unoccupied-slot case: a span that is entirely padding (sentinel request
-  id) touches no state and writes zero output; a non-last real row is the
-  only row that snapshots. Gates:
-  `scheduler_batchEngine_stepsRoundRobinSliceInOnePass`,
-  `kda_layer_requestIndexedBatch_matchesIndependentRequestsBitwise`, and
-  the noncontiguous-slot form of
-  `dsa_decode_update_multi_request_and_padding`. Still to wire: model-wide
-  batch staging/run/settle, per-request pick+commit/token feeds, the fixed
-  padded graph adapter, and the 64 KB fabric latency slot.
+  The complete device path is request-indexed. KDA conv/recurrence and DSA
+  consume the same slot-major row map, preserve per-request row order, skip
+  padding without touching state, and snapshot speculative state at global
+  batch-row offsets. Main-stack and MTP hidden-cache scatters select the
+  actual request cache. The picker folds all R×T candidates in one
+  collective, emits one verdict per request, carries one aggregate digest,
+  and the commit/draft/token-feed kernels independently roll back and feed
+  each group. The fabric latency slot is now 64 KiB, enough for eight bf16
+  hidden-4096 rows; this is a sizing knob, not a protocol change. Padding is
+  semantically inert but still pays the fixed graph's stateless compute,
+  expert routing/reads, and collective width — the measured curve below
+  makes that occupancy tradeoff visible.
+
+  CUDA graph memcpy nodes retain their pinned source addresses, not captured
+  values. Eager admissions reuse the model's row-map staging buffers, so the
+  adapter restores the immutable slot-major ids/spans before every replay;
+  the recorded H2D nodes then publish them. The close/reuse gates deliberately
+  pressure this invariant. While establishing the shared map contract, the
+  DSA ring update was also fixed to select the actual `req_ids` slot rather
+  than the dense span ordinal (the eager multi-slot path could otherwise
+  write slot 1's ring/pools into slot 0).
+
+  Gates: `scheduler_batchEngine_stepsRoundRobinSliceInOnePass`,
+  `kda_layer_requestIndexedBatch_matchesIndependentRequestsBitwise`, the
+  noncontiguous/padded `dsa_decode_update_multi_request_and_padding`,
+  `pick_batch_judges_each_request_and_skips_padding`,
+  `pick_batch_draft_selects_last_accepted_row_per_request`,
+  `spec_batch_positions_draft_rows_and_token_feeds_are_slot_local`, the
+  request-indexed cache gate
+  `mtp_batch_hidden_cache_input_and_scatter_are_request_indexed`, and the
+  real two-rank model gates
+  `glm_tp_serving_plain_batched_graph_matches_independent_sessions` and
+  `glm_tp_serving_mtp_batched_graph_matches_independent_speculators`. The
+  latter occupies noncontiguous slots 0/3 in the exact 4×T=2 eight-row
+  shape, reverses request result order, mixes acceptance counts, pads the
+  middle slots, closes/reuses slot 3 without recapture, and checks every
+  device `[next,draft]` feed against independent eager speculators.
+
+  `CollectiveBus` now registers up to 16 graph variants. Each variant owns
+  its own pinned generation-cell slab and recorded node metadata; arm selects
+  a variant and waits against the previous variant's generation count before
+  publishing the new window. `bus_test` alternates two shapes with different
+  node counts and payload widths. The adapter assigns variants 0..slots-1 to
+  slot-specific scalar captures and `slots` to the row batch, all sharing one
+  serialized reducer and one fabric graph era.
+
+  Four-node gate: two production worlds kept the full eight-row graph fixed
+  while occupancy rose. T=1 at 1/2/4/8 live requests measured
+  79.65/84.11/91.77/101.35 ms per replay and
+  12.55/23.78/43.59/78.94 tok/s. MTP at 1/2/4 live requests measured
+  88.60/95.42/104.22 ms per replay, 1.711/3.426/6.856 aggregate tokens per
+  replay, and 19.32/35.90/65.79 tok/s. These are steady all-live windows
+  from the final admission through the first retirement, over identical
+  43-token prompts and 256-token responses with EOS disabled; prefill and
+  staggered admission are outside the window. The 22 complete responses
+  across both worlds, every slot, and every occupancy had the same token
+  sha256 `7fb21f5fc9b67cb27d329fd22e8c0f236dbacec742222e314dd315c084c4a91b`.
+  All four ranks' op streams matched within each world (T=1 md5
+  `7e8a2b5db0ea6fa67a5b41e463b8fb0e`; MTP
+  `69cf9000949118914b659f7abf33c633`), every peer exited cleanly, and no
+  rank logged WARN, ERROR, STALLED, or transport retry. Same-binary scalar
+  controls on the identical prompt measured 31.732 ms/replay and 31.51 tok/s
+  at T=1, and 43.596 ms/replay, 1.678 tokens/replay, and 38.48 tok/s with
+  MTP. The fixed-width one-live points therefore lose 60.2% and 49.8% of
+  scalar throughput. That was a failed performance gate, not an acceptable
+  padding trade: low occupancy loses to the scalar graph, while
+  full occupancy reaches 6.29× its one-live T=1 throughput and 3.40× its
+  one-live MTP throughput.
+
+  The first adaptive cut restored the speed curve immediately, but exposed a
+  subtler gate: rows that began in a scalar graph and later entered the
+  eight-row graph could diverge at near-tie picks because m≤4 used the
+  row-independent GEMV cores while m=8 selected cuBLASLt/FP8 tile reduction
+  orders. It was rejected. The final path lowers every decode shape through
+  scalar-order GEMV chunks of at most four rows (and smaller chunks when the
+  48-KiB shared-memory ceiling requires it). New `bf16_gemv_test` and
+  `scale_gemm_test` cases prove every M=8 BF16/FP8 output row, including FP32
+  epilogues, is bitwise its M=1 result.
+
+  Final four-node gate, same 43-token prompt and 256-token responses: adaptive
+  T=1 at 1/2/4/8 live requests measured 32.29/31.58/95.79/105.02 ms per
+  physical replay and 30.97/31.67/41.76/76.18 tok/s. Adaptive MTP at 1/2/4
+  measured 43.60/43.00/111.13 ms per replay, 1.678/1.675/6.698 aggregate
+  tokens per replay, and 38.48/38.97/60.27 tok/s. The comparison denominator
+  below the crossover is a physical scalar replay (two live requests execute
+  two such replays per scheduler tick). All 22 full responses—T=1 and MTP,
+  every occupancy and scalar↔batch history—share token sha256
+  `d5e4e1cfff7c3e7c319e0507417db423f04fde9d0b8db9c8ad8ae11ae57cb640`.
+  Each world's four rank streams match, every peer exited cleanly, and no
+  current-run log contains WARN, ERROR, STALLED, or transport retry. Phase 2
+  is closed; full commands, distributions, binary/rank hashes, and the
+  rejected first-cut evidence are in the measurement record.
+
+  Per-request latency, read off the same runs (the aggregate curve alone
+  hides it): a user's ms per token is 32/63/96/105 at 1/2/4/8 live T=1
+  requests and 26/51/66 at 1/2/4 live MTP requests. Below the crossover the
+  scalar mode multiplies every user's latency by the live count (two live
+  requests are two sequential replays per tick); at the crossover the batch
+  is better for the individual user as well as in aggregate — four live T=1
+  requests in scalar mode would cost each user ~129 ms/token against the
+  batch's 96, and four MTP users ~104 against 66. So the crossover trades no
+  per-user latency away; what a user pays for concurrency is the multiplied
+  scalar latency below it and the padded replay above it.
+
+  Review follow-ups (2026-09-03, validated on the four nodes — the record's
+  last entry has the new binary hash, curves within noise of the closure,
+  transcripts and op-stream md5s identical to it): (i) the
+  DSA decode path now writes zeros for padding rows (KDA already did), so a
+  padded row's block output and its share of the boundary all-reduce are
+  deterministic by construction rather than by the row-independence
+  argument — gate `dsa_layer_decode_padding_row_is_zero_and_leaves_live_rows_bitwise`;
+  (ii) `glm_serve --decode-graph` warm-captures every scalar variant and the
+  row batch at startup through one throwaway session at a time
+  (`GlmGraphEngineAdapter::warm_captures`; 1.1 s for 8 slots, 0.7 s for 4,
+  on every rank), so no capture pauses a live stream; both loopback serving
+  gates run it first and still match their eager references, which pins
+  that the warm sessions leave no residue. The warm-up starts on the
+  journal's clock: a `warm` record rank 0 broadcasts once its model is
+  built and the peers hold on before their collectives — without it the
+  peers' first collective spun ~8 s in stall diagnostics waiting for rank
+  0's slower construction (found by the validation run);
+  (iii) `--graph-batch-min-live` defaults to min(4, max-concurrency) and an
+  explicit value outside [1, max-concurrency] is rejected instead of
+  silently clamped (the adapter still logs if it ever clamps). OWED: the
+  GEMM seam now lowers every m ≤ 8 through the GEMV chunks, which moved
+  prefill tail chunks and per-expert prefill GEMMs of 5–8 routed tokens off
+  cuBLASLt — bitwise different at those shapes and unmeasured; measure
+  prefill before the TTFT work starts (below).
 
 **6b. Sampling on the bus** (deliverable 3's distributed half; DESIGN §10).
 The facts that shape it: the model card's recommended and evaluated
@@ -606,7 +736,7 @@ cost. Design:
 - *k is sized for T=1.0 / top_p=0.95.* At that setting the cut must reach
   95% of the mass, so k=32 would fall back on every flat position. Plan:
   k=128 per rank (the exact global top-128; 9 bf16 digits per candidate →
-  ~9.2 KB per row, two rows plus the digest group inside the 32 KB latency
+  ~9.2 KB per row, two rows plus the digest group inside the 64 KiB latency
   slot), with the local top-128 as a block-wide composite-key select (the
   DSA decode select's shared-memory machinery, ~10–20 µs once per step).
   Before fixing k, MEASURE: an instrumented teacher-forced run logs per
@@ -794,8 +924,8 @@ Deliverables:
 
 1. Three-token initial draft path and verifier microbatch. BUILT at depth 1:
    `session_verify` runs T ≤ 4 rows (`kSpecRows`); the served shape is
-   T=2 (`[next, draft]`), the bus's latency slot is 32 KB to fold 4 rows
-   in one collective.
+   T=2 (`[next, draft]`). The Phase-2 fabric latency slot is 64 KiB so one
+   collective can fold the full eight-row request batch.
 2. `k+1` KDA candidate states, speculative convolution width, reserved MLA
    slots, and scratch index tail/pool updates. BUILT with a simpler
    mechanism: post-row snapshots (`spec_rec_/spec_conv_/spec_tail_`) taken
@@ -841,7 +971,7 @@ Exit criteria, status:
   31.34 ms/token; the draft layer adds ~7.3 GiB/rank; record entries of
   2026-09-03).
 
-Remaining, ranked: serve integration (M6 6a); sampling under MTP (6b);
+Remaining, ranked: sampling under MTP (6b);
 `FabricPicker` refactor so the plain loop's host pick and the graph loop's
 device pick share one driver; the prefill's last-row head through the
 draft (the first draft is eager today); a forced pool-boundary rejection
@@ -860,8 +990,12 @@ their numbers) — further gains need fewer, bigger kernels or a change of
 shape, not fusions. Route placement is settled (sliced experts); grouped
 MoE kernels exist for decode (prefill stays host-orchestrated —
 acceptable while prefill is chunk-amortized; revisit if TTFT at 32K
-matters); graph buckets become relevant with 6a phase 2 (one shape per
-occupied-row count, or padding — padding is the current answer).
+matters). Phase 2's fixed graph exposed the padding cost (12.55 T=1 and
+19.32 MTP tok/s at one live request); the completed multi-variant adapter
+now selects scalar graphs below four live requests and the row batch above
+it without restarting the fabric era. The final curve is
+30.97/31.67/41.76/76.18 tok/s at T=1 and 38.48/38.97/60.27 with MTP, with
+transcripts bitwise invariant across graph-width transitions.
 
 Hardening, not started, designed:
 

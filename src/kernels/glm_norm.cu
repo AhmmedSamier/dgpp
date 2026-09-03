@@ -63,6 +63,8 @@ __global__ void glm_rmsnorm_kernel(const uint16_t* __restrict__ x,
 __global__ void glm_mtp_input_kernel(const uint16_t* __restrict__ embed,
                                      const int64_t* __restrict__ tokens,
                                      const uint16_t* __restrict__ hidden_cache,
+                                     int64_t request_cache_stride,
+                                     const int32_t* __restrict__ request_ids,
                                      const int64_t* __restrict__ positions,
                                      int64_t first_pos,
                                      const uint16_t* __restrict__ enorm,
@@ -72,16 +74,20 @@ __global__ void glm_mtp_input_kernel(const uint16_t* __restrict__ embed,
   const int t = blockIdx.x;
   extern __shared__ float smem[];
   uint16_t* dst = out + static_cast<size_t>(t) * 2 * hidden;
+  const int64_t staged = positions ? positions[t] : first_pos + t;
+  if (staged < 0) {
+    for (int h = threadIdx.x; h < hidden; h += blockDim.x)
+      dst[blockIdx.y * hidden + h] = 0;
+    return;
+  }
   if (blockIdx.y == 0) {
     rmsnorm_row_two_rounding(embed + tokens[t] * hidden, enorm, dst, hidden,
                              eps, smem);
   } else {
-    // A padding row (position -1: the in-graph draft's second row after a
-    // rejected draft) reads position 0's hidden — any finite row will do,
-    // the DSA path skips the row and nothing downstream is kept.
-    const int64_t staged = positions ? positions[t] : first_pos + t;
-    const int64_t pos = staged < 0 ? 0 : staged;
-    rmsnorm_row_two_rounding(hidden_cache + pos * hidden, hnorm, dst + hidden,
+    const int req = request_ids ? request_ids[t] : 0;
+    const uint16_t* cache =
+        hidden_cache + static_cast<int64_t>(req) * request_cache_stride;
+    rmsnorm_row_two_rounding(cache + staged * hidden, hnorm, dst + hidden,
                              hidden, eps, smem);
   }
 }
@@ -100,13 +106,19 @@ __global__ void glm_residual_add_kernel(uint16_t* __restrict__ x,
 // cache[positions[t], :] = rows[t, :] — 16-byte vectors (hidden % 8 == 0,
 // aligned bases: the launcher checks).
 __global__ void glm_rows_scatter_kernel(const uint16_t* __restrict__ rows,
+                                        const int32_t* __restrict__ request_ids,
                                         const int64_t* __restrict__ positions,
                                         uint16_t* __restrict__ cache,
+                                        int64_t request_cache_stride,
                                         int hidden) {
   const int t = blockIdx.x;
+  const int64_t pos = positions[t];
+  if (pos < 0) return;
+  const int req = request_ids ? request_ids[t] : 0;
   const uint4* src =
       reinterpret_cast<const uint4*>(rows + static_cast<size_t>(t) * hidden);
-  uint4* dst = reinterpret_cast<uint4*>(cache + positions[t] * hidden);
+  uint4* dst = reinterpret_cast<uint4*>(
+      cache + static_cast<int64_t>(req) * request_cache_stride + pos * hidden);
   for (int j = threadIdx.x; j < hidden / 8; j += blockDim.x) dst[j] = src[j];
 }
 
@@ -178,7 +190,34 @@ void glm_mtp_input_bf16(const void* embed_table, const int64_t* tokens,
   glm_mtp_input_kernel<<<dim3(static_cast<unsigned>(rows), 2), kBlock, shmem,
                          stream>>>(
       static_cast<const uint16_t*>(embed_table), tokens,
-      static_cast<const uint16_t*>(hidden_cache), positions, first_pos,
+      static_cast<const uint16_t*>(hidden_cache), /*request_cache_stride=*/0,
+      /*request_ids=*/nullptr, positions, first_pos,
+      static_cast<const uint16_t*>(enorm), static_cast<const uint16_t*>(hnorm),
+      static_cast<uint16_t*>(out), hidden, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_mtp_input_bf16_batched(
+    const void* embed_table, const int64_t* tokens, const void* hidden_cache,
+    int64_t request_cache_stride, const int32_t* request_ids,
+    const int64_t* positions, const void* enorm, const void* hnorm, void* out,
+    int rows, int hidden, float eps, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!embed_table || !tokens || !hidden_cache || !request_ids || !positions ||
+      !enorm || !hnorm || !out)
+    throw std::invalid_argument("glm_mtp_input_batched: null buffer");
+  if (request_cache_stride < hidden)
+    throw std::invalid_argument("glm_mtp_input_batched: cache stride");
+  const size_t shmem = sizeof(float) * static_cast<size_t>(hidden);
+  if (shmem > 49152)
+    throw std::invalid_argument(
+        "glm_mtp_input_batched: hidden exceeds the smem stage");
+  cudaGetLastError();
+  glm_mtp_input_kernel<<<dim3(static_cast<unsigned>(rows), 2), kBlock, shmem,
+                         stream>>>(
+      static_cast<const uint16_t*>(embed_table), tokens,
+      static_cast<const uint16_t*>(hidden_cache), request_cache_stride,
+      request_ids, positions, /*first_pos=*/0,
       static_cast<const uint16_t*>(enorm), static_cast<const uint16_t*>(hnorm),
       static_cast<uint16_t*>(out), hidden, eps);
   DGPP_CUDA_OK(cudaGetLastError());
@@ -201,13 +240,34 @@ void glm_rows_scatter_bf16(const void* rows, const int64_t* positions,
   const auto aligned16 = [](const void* p) {
     return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
   };
-  if (hidden % 8 != 0 || !aligned16(rows) || !aligned16(cache))
+  if (!rows || !positions || !cache || hidden % 8 != 0 ||
+      !aligned16(rows) || !aligned16(cache))
     throw std::invalid_argument(
         "glm_rows_scatter: hidden must be a multiple of 8 and the buffers "
         "16-byte aligned");
   glm_rows_scatter_kernel<<<static_cast<unsigned>(num_rows), 256, 0, stream>>>(
-      static_cast<const uint16_t*>(rows), positions,
-      static_cast<uint16_t*>(cache), hidden);
+      static_cast<const uint16_t*>(rows), /*request_ids=*/nullptr, positions,
+      static_cast<uint16_t*>(cache), /*request_cache_stride=*/0, hidden);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_rows_scatter_bf16_batched(
+    const void* rows, const int32_t* request_ids, const int64_t* positions,
+    void* cache, int64_t request_cache_stride, int num_rows, int hidden,
+    cudaStream_t stream) {
+  if (num_rows <= 0) return;
+  const auto aligned16 = [](const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+  };
+  if (!rows || !request_ids || !positions || !cache ||
+      request_cache_stride < hidden || hidden % 8 != 0 ||
+      !aligned16(rows) || !aligned16(cache) ||
+      (request_cache_stride * 2) % 16 != 0)
+    throw std::invalid_argument(
+        "glm_rows_scatter_batched: invalid map, stride, or alignment");
+  glm_rows_scatter_kernel<<<static_cast<unsigned>(num_rows), 256, 0, stream>>>(
+      static_cast<const uint16_t*>(rows), request_ids, positions,
+      static_cast<uint16_t*>(cache), request_cache_stride, hidden);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

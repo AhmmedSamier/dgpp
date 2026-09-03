@@ -76,6 +76,7 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
 }
 
 std::string encode_journal_stop() { return "{\"op\":\"stop\"}"; }
+std::string encode_journal_warm() { return "{\"op\":\"warm\"}"; }
 
 namespace {
 
@@ -139,6 +140,10 @@ JournalRecord decode_journal_line(std::string_view line) {
   const std::string op(field(v, "op", "record").as_string());
   if (op == "stop") {
     rec.stop = true;
+    return rec;
+  }
+  if (op == "warm") {
+    rec.warm = true;
     return rec;
   }
   if (op != "tick")
@@ -259,6 +264,26 @@ bool JournalReader::read_line(const std::function<bool()>& should_stop,
   }
 }
 
+bool wait_journal_warm(JournalReader* reader,
+                       const std::function<bool()>& should_stop) {
+  std::string line;
+  if (!reader->read_line(should_stop, &line)) {
+    DGPP_LOG_INFO("journal: rank 0's stream ended before the warm record — "
+                  "exiting");
+    return false;
+  }
+  const JournalRecord rec = decode_journal_line(line);
+  if (rec.stop) {
+    DGPP_LOG_INFO("journal: stop record before the warm record — exiting");
+    return false;
+  }
+  if (!rec.warm)
+    throw std::runtime_error(
+        "journal: rank 0 ticked before the warm record — protocol order "
+        "violated (§11); fabric emergency");
+  return true;
+}
+
 void run_journal_peer(Scheduler* sched, JournalReader* reader,
                       const std::function<bool()>& should_stop) {
   for (;;) {
@@ -276,6 +301,10 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
       DGPP_LOG_INFO("journal: stop record — exiting");
       return;
     }
+    if (rec.warm)
+      throw std::runtime_error(
+          "journal: warm record inside the serving loop — protocol order "
+          "violated (§11); fabric emergency");
     for (auto& r : rec.submits) {
       const std::string id = r.id;  // try_submit takes by value
       // Rank 0 admitted this against a queue state identical to ours

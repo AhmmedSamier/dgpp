@@ -20,9 +20,11 @@ __global__ void spec_commit_kernel(const GlmPickVerdict* __restrict__ verdict,
                                    int rows, GlmSpecSegments segments,
                                    int64_t* __restrict__ session_pos) {
   const int accepted = verdict->accepted;
+  if (accepted <= 0) return;  // fixed-batch padding slot
   if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0)
     *session_pos += accepted;
   if (accepted >= rows) return;  // every row stood: nothing to retract
+  if (blockIdx.y >= segments.count) return;  // position-only configuration
 
   const GlmSpecSegment& s = segments.seg[blockIdx.y];
   const size_t units = s.bytes / kUnit;
@@ -39,6 +41,17 @@ __global__ void spec_positions_kernel(const int64_t* __restrict__ session_pos,
                                       int rows, int64_t* __restrict__ step_pos) {
   const int r = threadIdx.x;
   if (r < rows) step_pos[r] = *session_pos + r;
+}
+
+__global__ void spec_positions_batched_kernel(
+    const int64_t* __restrict__ session_pos,
+    const int32_t* __restrict__ request_ids, int rows, int rows_per_request,
+    int64_t* __restrict__ step_pos) {
+  const int r = threadIdx.x + blockIdx.x * blockDim.x;
+  if (r >= rows) return;
+  const int req = request_ids[r];
+  const int64_t base = session_pos[req];
+  step_pos[r] = base > 0 ? base + (r % rows_per_request) : -1;
 }
 
 __global__ void spec_draft_rows_kernel(const GlmPickVerdict* __restrict__ verdict,
@@ -65,6 +78,52 @@ __global__ void spec_next_tokens_kernel(const int64_t* __restrict__ next,
                                         int64_t* __restrict__ tokens) {
   tokens[0] = *next;
   tokens[1] = draft->next;
+}
+
+__global__ void spec_draft_rows_batched_kernel(
+    const GlmPickVerdict* __restrict__ verdicts, int rows_per_request,
+    int64_t* __restrict__ block_pos, int64_t* __restrict__ step_pos,
+    int64_t* __restrict__ tokens, int64_t* __restrict__ next_out) {
+  const int q = blockIdx.x;
+  const GlmPickVerdict& verdict = verdicts[q];
+  const int accepted = verdict.accepted;
+  const bool active = accepted > 0;
+  const int r = threadIdx.x;
+  const int row = q * rows_per_request + r;
+  if (r < rows_per_request) {
+    const bool real = active && r < accepted;
+    step_pos[row] = real ? block_pos[q] + r : -1;
+    tokens[row] = active ? verdict.winners[real ? r : 0] : 0;
+  }
+  __syncthreads();
+  if (r == 0 && active) {
+    block_pos[q] += accepted;
+    next_out[q] = verdict.next;
+  }
+}
+
+__global__ void spec_verify_next_tokens_batched_kernel(
+    const GlmPickVerdict* __restrict__ verify, int rows_per_request,
+    int64_t* __restrict__ tokens) {
+  const int q = blockIdx.x;
+  const bool active = verify[q].accepted > 0;
+  for (int r = threadIdx.x; r < rows_per_request; r += blockDim.x)
+    tokens[q * rows_per_request + r] =
+        active && r == 0 ? verify[q].next : 0;
+}
+
+__global__ void spec_next_tokens_batched_kernel(
+    const int64_t* __restrict__ next,
+    const GlmPickVerdict* __restrict__ draft, int rows_per_request,
+    int64_t* __restrict__ tokens) {
+  const int q = blockIdx.x;
+  const bool active = draft[q].accepted > 0;
+  for (int r = threadIdx.x; r < rows_per_request; r += blockDim.x) {
+    int64_t token = 0;
+    if (active && r == 0) token = next[q];
+    if (active && r == 1) token = draft[q].next;
+    tokens[q * rows_per_request + r] = token;
+  }
 }
 
 bool aligned16(const void* p) {
@@ -112,6 +171,20 @@ void glm_spec_positions(const int64_t* session_pos, int rows,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+void glm_spec_positions_batched(const int64_t* session_pos,
+                                const int32_t* request_ids, int rows,
+                                int rows_per_request, int64_t* step_pos,
+                                cudaStream_t stream) {
+  if (session_pos == nullptr || request_ids == nullptr || step_pos == nullptr)
+    throw std::invalid_argument("glm_spec_positions_batched: null argument");
+  if (rows < 1 || rows > kPickMaxRows || rows_per_request < 1 ||
+      rows % rows_per_request != 0)
+    throw std::invalid_argument("glm_spec_positions_batched: row shape");
+  spec_positions_batched_kernel<<<1, 32, 0, stream>>>(
+      session_pos, request_ids, rows, rows_per_request, step_pos);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 void glm_spec_draft_rows(const GlmPickVerdict* verdict, int rows,
                          int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
                          int64_t* next_out, cudaStream_t stream) {
@@ -126,12 +199,58 @@ void glm_spec_draft_rows(const GlmPickVerdict* verdict, int rows,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+void glm_spec_draft_rows_batched(
+    const GlmPickVerdict* verdicts, int requests, int rows_per_request,
+    int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
+    int64_t* next_out, cudaStream_t stream) {
+  if (verdicts == nullptr || block_pos == nullptr || step_pos == nullptr ||
+      tokens == nullptr || next_out == nullptr)
+    throw std::invalid_argument("glm_spec_draft_rows_batched: null argument");
+  if (requests < 1 || requests > kPickMaxRequests ||
+      rows_per_request < 1 || requests * rows_per_request > kPickMaxRows)
+    throw std::invalid_argument("glm_spec_draft_rows_batched: request shape");
+  spec_draft_rows_batched_kernel<<<requests, 32, 0, stream>>>(
+      verdicts, rows_per_request, block_pos, step_pos, tokens, next_out);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 void glm_spec_next_tokens(const int64_t* next,
                           const GlmPickVerdict* draft_verdict, int64_t* tokens,
                           cudaStream_t stream) {
   if (next == nullptr || draft_verdict == nullptr || tokens == nullptr)
     throw std::invalid_argument("glm_spec_next_tokens: null argument");
   spec_next_tokens_kernel<<<1, 1, 0, stream>>>(next, draft_verdict, tokens);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_spec_verify_next_tokens_batched(const GlmPickVerdict* verify_verdicts,
+                                         int requests, int rows_per_request,
+                                         int64_t* tokens,
+                                         cudaStream_t stream) {
+  if (verify_verdicts == nullptr || tokens == nullptr)
+    throw std::invalid_argument(
+        "glm_spec_verify_next_tokens_batched: null argument");
+  if (requests < 1 || requests > kPickMaxRequests ||
+      rows_per_request < 1 || requests * rows_per_request > kPickMaxRows)
+    throw std::invalid_argument(
+        "glm_spec_verify_next_tokens_batched: request shape");
+  spec_verify_next_tokens_batched_kernel<<<requests, 32, 0, stream>>>(
+      verify_verdicts, rows_per_request, tokens);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_spec_next_tokens_batched(const int64_t* next,
+                                  const GlmPickVerdict* draft_verdicts,
+                                  int requests, int rows_per_request,
+                                  int64_t* tokens, cudaStream_t stream) {
+  if (next == nullptr || draft_verdicts == nullptr || tokens == nullptr)
+    throw std::invalid_argument("glm_spec_next_tokens_batched: null argument");
+  if (requests < 1 || requests > kPickMaxRequests || rows_per_request != 2 ||
+      requests * rows_per_request > kPickMaxRows)
+    throw std::invalid_argument(
+        "glm_spec_next_tokens_batched: MTP requires two rows per request");
+  spec_next_tokens_batched_kernel<<<requests, 32, 0, stream>>>(
+      next, draft_verdicts, rows_per_request, tokens);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

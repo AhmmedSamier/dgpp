@@ -1,5 +1,6 @@
 #include "kernels/scale_gemm.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "common/cuda_check.hpp"
@@ -140,6 +141,32 @@ void launch_scale_gemv(const uint16_t* act, size_t act_stride,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+template <typename OutT>
+void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
+                            const uint8_t* w, const float* scales, OutT* out,
+                            int rows, int n, int k, cudaStream_t stream) {
+  switch (rows) {
+    case 1:
+      launch_scale_gemv<1, OutT>(act, act_stride, w, scales, out, n, k,
+                                 stream);
+      return;
+    case 2:
+      launch_scale_gemv<2, OutT>(act, act_stride, w, scales, out, n, k,
+                                 stream);
+      return;
+    case 3:
+      launch_scale_gemv<3, OutT>(act, act_stride, w, scales, out, n, k,
+                                 stream);
+      return;
+    case 4:
+      launch_scale_gemv<4, OutT>(act, act_stride, w, scales, out, n, k,
+                                 stream);
+      return;
+    default:
+      throw std::invalid_argument("scale_gemv: rows outside [1,4]");
+  }
+}
+
 // One dispatch for both output dtypes: the epilogue store is the ONLY
 // difference between the bf16 and fp32 products (same tiles, same GEMV
 // core, same accumulation order), so a value that rounds to bf16 in one
@@ -157,30 +184,24 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
         out, 0, static_cast<size_t>(m) * n * sizeof(OutT), stream));
     return;
   }
-  // Decode-shaped calls take the bandwidth GEMV (the tile below is
-  // latency-bound at m=1 — see fp8_gemv.cuh); ragged k or an unaligned
-  // payload keeps the general tile.
-  if (m <= fp8_gemv::kMaxRows && fp8_gemv::shape_ok(w_payload, m, k)) {
-    switch (m) {
-      case 1:
-        launch_scale_gemv<1, OutT>(act, act_row_stride_elems, w_payload,
-                                   w_scales, out, n, k, stream);
-        return;
-      case 2:
-        launch_scale_gemv<2, OutT>(act, act_row_stride_elems, w_payload,
-                                   w_scales, out, n, k, stream);
-        return;
-      case 3:
-        launch_scale_gemv<3, OutT>(act, act_row_stride_elems, w_payload,
-                                   w_scales, out, n, k, stream);
-        return;
-      case 4:
-        launch_scale_gemv<4, OutT>(act, act_row_stride_elems, w_payload,
-                                   w_scales, out, n, k, stream);
-        return;
-      default:
-        break;
+  // Decode-shaped calls take the row-independent bandwidth GEMV (the tile
+  // below is latency-bound at m=1 — see fp8_gemv.cuh). A serving graph can
+  // contain eight rows, while one GEMV launch carries at most four (and may
+  // carry fewer when K fills the 48-KiB smem budget). Chunk that decode
+  // ceiling through the same scalar-order core instead of changing to the
+  // tile kernel solely because occupancy grew. Each output row is therefore
+  // bitwise invariant to the selected graph width.
+  if (m >= 1 && m <= 8 && fp8_gemv::shape_ok(w_payload, /*rows=*/1, k)) {
+    for (int row0 = 0; row0 < m;) {
+      int rows = std::min(fp8_gemv::kMaxRows, m - row0);
+      while (!fp8_gemv::shape_ok(w_payload, rows, k)) --rows;
+      launch_scale_gemv_rows(
+          act + static_cast<size_t>(row0) * act_row_stride_elems,
+          act_row_stride_elems, w_payload, w_scales,
+          out + static_cast<size_t>(row0) * n, rows, n, k, stream);
+      row0 += rows;
     }
+    return;
   }
   const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
   scale_gemm_kernel<OutT><<<grid, kBlockThreads, 0, stream>>>(

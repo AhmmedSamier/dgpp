@@ -37,7 +37,7 @@ namespace dgpp {
 
 // One latency slot's bf16 capacity: the decode boundary's row ceiling.
 // 8192-byte slots hold one hidden-4096 row (the classic decode unit);
-// the fabric's 32 KB slots hold a kSpecRows-row speculative verify.
+// the Phase-2 fabric configuration holds kDecodeRows in a 64 KiB slot.
 inline size_t bus_latency_slot_elems(const net::CollectiveBus& bus) {
   return bus.slot_bytes(net::BusMessageClass::kLatency) / 2;
 }
@@ -396,14 +396,19 @@ class GlmDevicePicker {
     DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&table_), table_bytes));
     DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&carry_), sizeof(uint64_t)));
     DGPP_CUDA_OK(cudaMemset(carry_, 0, sizeof(uint64_t)));
-    DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&verdict_),
-                                sizeof(GlmPickVerdict) * kSlots));
+    DGPP_CUDA_OK(cudaMallocHost(
+        reinterpret_cast<void**>(&verdict_),
+        sizeof(GlmPickVerdict) * kSlots * kPickMaxRequests));
     DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&device_verdict_),
-                            sizeof(GlmPickVerdict) * kSlots));
-    DGPP_CUDA_OK(cudaMemset(device_verdict_, 0, sizeof(GlmPickVerdict) * kSlots));
+                            sizeof(GlmPickVerdict) * kSlots *
+                                kPickMaxRequests));
+    DGPP_CUDA_OK(cudaMemset(device_verdict_, 0,
+                            sizeof(GlmPickVerdict) * kSlots *
+                                kPickMaxRequests));
     DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&locals_),
                                 sizeof(GlmPickLocal) * kPickMaxRows * kSlots));
-    for (int s = 0; s < kSlots; ++s) verdict_[s] = GlmPickVerdict{};
+    for (int i = 0; i < kSlots * kPickMaxRequests; ++i)
+      verdict_[i] = GlmPickVerdict{};
   }
   ~GlmDevicePicker() {
     if (table_) cudaFree(table_);
@@ -418,11 +423,11 @@ class GlmDevicePicker {
   // The pick's inputs: this rank's fp32 logits [rows, vocab_count] on the
   // device (the model's head output), the slice's first vocab id, and the
   // rows' fed tokens on the device (the judge's right-hand side; any valid
-  // pointer at rows == 1, where row 0 always stands). `slot` names the
-  // mirrors the verdict lands in. `row_select` (rows == 1 only) makes the
-  // pick read logits row (row_select->accepted - 1): the in-graph draft's
-  // head runs on every row of a fixed batch and its pick takes the last
-  // accepted one.
+  // pointer at one row per request, where row 0 always stands). `slot` names
+  // the mirrors the verdict lands in. `row_select` makes a scalar pick, or
+  // one candidate per request in a fixed batch, read that request's last
+  // accepted logits row: the in-graph draft's head runs on the wider verify
+  // layout and its pick selects one row from each group.
   struct Inputs {
     const float* logits = nullptr;
     int rows = 0;
@@ -430,7 +435,16 @@ class GlmDevicePicker {
     int vocab_begin = 0;
     const int64_t* fed = nullptr;
     int slot = 0;
+    // One (default) or several independent request verdicts. Candidate rows
+    // are packed request-major. positions marks fixed-shape padding; its
+    // stride defaults to rows_per_request. A selected draft pick has one
+    // candidate per request and reads from wider source_row_stride groups.
+    int requests = 1;
+    int rows_per_request = 0;
+    const int64_t* positions = nullptr;
+    int position_stride = 0;
     const GlmPickVerdict* row_select = nullptr;
+    int source_row_stride = 0;
   };
 
   // CAPTURE: enqueues the three nodes on `stream` (the caller is between
@@ -439,16 +453,19 @@ class GlmDevicePicker {
   // graph_replay_finish, via verdict(slot).
   void record(cudaStream_t stream, const Inputs& in) {
     validate(in);
-    glm_pick_local(in.logits, in.rows, in.vocab_count, in.vocab_begin, rank_,
-                   world_, carry_, table_, locals_ + in.slot * kPickMaxRows,
-                   stream, in.row_select);
+    glm_pick_local_batched(
+        in.logits, in.rows, in.vocab_count, in.vocab_begin, rank_, world_,
+        carry_, table_, locals_ + in.slot * kPickMaxRows, stream,
+        in.row_select, in.requests, source_stride(in));
     std::string err;
     if (!bus_.allreduce_record(stream, table_, table_,
                                glm_pick_table_elems(in.rows, world_), &err))
       throw std::runtime_error("device pick: allreduce_record rejected: " +
                                err);
-    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_ + in.slot,
-                     device_verdict_ + in.slot, carry_, stream);
+    glm_pick_verdict_batched(
+        table_, in.rows, world_, rank_, in.fed, in.positions, in.requests,
+        rows_per_request(in), position_stride(in), verdict_slot(in.slot),
+        device_verdict_slot(in.slot), carry_, stream);
   }
 
   // EAGER: the same three with the eager collective between (the draft
@@ -457,9 +474,10 @@ class GlmDevicePicker {
   const GlmPickVerdict& run(cudaStream_t stream, const Inputs& in) {
     step_timing::Scope tick(step_timing::kPick);
     validate(in);
-    glm_pick_local(in.logits, in.rows, in.vocab_count, in.vocab_begin, rank_,
-                   world_, carry_, table_, locals_ + in.slot * kPickMaxRows,
-                   stream, in.row_select);
+    glm_pick_local_batched(
+        in.logits, in.rows, in.vocab_count, in.vocab_begin, rank_, world_,
+        carry_, table_, locals_ + in.slot * kPickMaxRows, stream,
+        in.row_select, in.requests, source_stride(in));
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
     std::string err;
     const uint64_t id = bus_.allreduce(
@@ -468,8 +486,10 @@ class GlmDevicePicker {
       throw std::runtime_error("device pick: allreduce rejected: " + err);
     const net::BusAllReduceResult res = bus_.wait_allreduce(id, timeout_ms_);
     if (!res.ok) throw std::runtime_error("device pick gather: " + res.error);
-    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_ + in.slot,
-                     device_verdict_ + in.slot, carry_, stream);
+    glm_pick_verdict_batched(
+        table_, in.rows, world_, rank_, in.fed, in.positions, in.requests,
+        rows_per_request(in), position_stride(in), verdict_slot(in.slot),
+        device_verdict_slot(in.slot), carry_, stream);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
     return verdict(in.slot);
   }
@@ -478,9 +498,11 @@ class GlmDevicePicker {
   // completed). Throws when the digest group disagreed: some rank
   // computed a different verdict at the PREVIOUS pick — its table was not
   // the others' table.
-  const GlmPickVerdict& verdict(int slot = 0) const {
+  const GlmPickVerdict& verdict(int slot = 0, int request = 0) const {
     check_slot(slot);
-    const GlmPickVerdict& v = verdict_[slot];
+    check_request(request);
+    const GlmPickVerdict& v =
+        verdict_[slot * kPickMaxRequests + request];
     if (v.digest_mismatch != 0) {
       std::string digests;
       for (int k = 0; k < world_; ++k)
@@ -505,7 +527,7 @@ class GlmDevicePicker {
   // consumers (the model's commit kernel, the in-graph draft) read.
   const GlmPickVerdict* device_verdict(int slot = 0) const {
     check_slot(slot);
-    return device_verdict_ + slot;
+    return device_verdict_slot(slot);
   }
   int rank() const { return rank_; }
   int world() const { return world_; }
@@ -514,6 +536,27 @@ class GlmDevicePicker {
   static void check_slot(int slot) {
     if (slot < 0 || slot >= kSlots)
       throw std::out_of_range("device pick: slot");
+  }
+  static void check_request(int request) {
+    if (request < 0 || request >= kPickMaxRequests)
+      throw std::out_of_range("device pick: request");
+  }
+  static int rows_per_request(const Inputs& in) {
+    return in.rows_per_request > 0 ? in.rows_per_request : in.rows;
+  }
+  static int position_stride(const Inputs& in) {
+    return in.position_stride > 0 ? in.position_stride
+                                  : rows_per_request(in);
+  }
+  static int source_stride(const Inputs& in) {
+    return in.source_row_stride > 0 ? in.source_row_stride
+                                    : rows_per_request(in);
+  }
+  GlmPickVerdict* verdict_slot(int slot) const {
+    return verdict_ + slot * kPickMaxRequests;
+  }
+  GlmPickVerdict* device_verdict_slot(int slot) const {
+    return device_verdict_ + slot * kPickMaxRequests;
   }
   void validate(const Inputs& in) const {
     check_slot(in.slot);
@@ -524,8 +567,17 @@ class GlmDevicePicker {
                                   std::to_string(kPickMaxRows) + "]");
     if (in.vocab_count < 1 || in.vocab_begin < 0)
       throw std::invalid_argument("device pick: vocab slice");
-    if (in.row_select != nullptr && in.rows != 1)
-      throw std::invalid_argument("device pick: row_select needs rows == 1");
+    if (in.requests < 1 || in.requests > kPickMaxRequests ||
+        rows_per_request(in) < 1 ||
+        in.requests * rows_per_request(in) != in.rows)
+      throw std::invalid_argument("device pick: request shape");
+    if (in.positions != nullptr &&
+        position_stride(in) < rows_per_request(in))
+      throw std::invalid_argument("device pick: position stride");
+    if (in.row_select != nullptr &&
+        (rows_per_request(in) != 1 || source_stride(in) < 1))
+      throw std::invalid_argument(
+          "device pick: row_select needs one candidate per request");
   }
 
   net::CollectiveBus& bus_;
@@ -534,8 +586,8 @@ class GlmDevicePicker {
   int timeout_ms_ = 60000;
   uint16_t* table_ = nullptr;          // device: the wire table
   uint64_t* carry_ = nullptr;          // device: last verdict's digest
-  GlmPickVerdict* verdict_ = nullptr;  // pinned [kSlots]
-  GlmPickVerdict* device_verdict_ = nullptr;  // device [kSlots]
+  GlmPickVerdict* verdict_ = nullptr;  // pinned [kSlots][kPickMaxRequests]
+  GlmPickVerdict* device_verdict_ = nullptr;  // device, same shape
   GlmPickLocal* locals_ = nullptr;     // pinned [kSlots][kPickMaxRows]
 };
 

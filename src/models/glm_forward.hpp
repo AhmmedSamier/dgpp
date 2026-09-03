@@ -145,14 +145,13 @@ class GlmDiagnosticModel {
   // sequence and must match the re-forward bitwise — the gate pins that
   // tier too.
   //
-  // CONCURRENT REQUESTS (Stage 2b): slots are independent — prefilling or
-  // stepping one never touches another's state, so a request's transcript
-  // is invariant to whatever else the scheduler interleaves (the property
-  // the 2b gates pin and the fabric smoke proves). Steps are
-  // TIME-MULTIPLEXED (one request per call): batching multiple requests'
-  // rows into one step needs per-row state indexing in the KDA recurrence
-  // (the DESIGN §9 MTP state-index surgery) and stays a later
-  // optimization — the scheduler's policy is unchanged by it.
+  // CONCURRENT REQUESTS (Stage 2b/M6.6a): slots are independent —
+  // prefilling or stepping one never touches another's state, so a request's
+  // transcript is invariant to whatever else the scheduler interleaves. The
+  // eager session calls remain time-multiplexed; the fixed graph below runs
+  // request-slot-major batches through device-side state indexing and pads
+  // closed slots at position -1. The scheduler policy is unchanged by which
+  // physical step form the adapter advertises.
   //
   // Slot assignment and op ORDER are the caller's contract (the
   // scheduler): every rank must issue the same ops on the same slots in
@@ -188,6 +187,9 @@ class GlmDiagnosticModel {
   // takes the row-independent GEMV, so the rows' bits are the T=1 bits;
   // T >= 5 would fall to cuBLASLt and break the equality above.
   static constexpr int kSpecRows = 4;
+  // Phase-2 physical decode ceiling. A captured batch is request-slot major
+  // and must satisfy requests * spec_rows <= this bound.
+  static constexpr int kDecodeRows = 8;
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
   void session_rollback(int req, int accepted);
 
@@ -276,6 +278,7 @@ class GlmDiagnosticModel {
   // rows are its fed tokens in order; a draft's head lands in row 0.
   const float* device_logits() const { return logits_; }
   const int64_t* device_tokens() const { return d_tokens_; }
+  const int64_t* device_positions() const { return d_step_pos_; }
   int lm_vocab_begin() const { return lm_vocab_begin_; }
   int lm_vocab_count() const { return lm_vocab_count_; }
   GlmBoundaryReducer* set_boundary(GlmBoundaryReducer* boundary) {
@@ -362,11 +365,43 @@ class GlmDiagnosticModel {
   void session_graph_capture_next_tokens(int req,
                                          const GlmPickVerdict* draft_verdict);
   void session_graph_seed_tokens(int req, const std::vector<int64_t>& ids);
+  // Seeds the shared row-zero feed used by a slot-specific scalar graph.
+  // Adaptive serving owns one such graph per physical request slot; its
+  // state pointers are slot-specific, while its token rows stay compact.
+  void session_graph_seed_scalar_tokens(const std::vector<int64_t>& ids);
   void session_graph_settle(int req, int accepted);
   void set_decode_tail_mirrors(bool on) { decode_tail_mirrors_ = on; }
   // Materializes the replay's Outputs WITHOUT moving the position (the
   // device-driven flow's cross-check surface; needs the tail mirrors on).
   Outputs session_graph_outputs(int req);
+
+  // ---- the fixed row-batched graph (M6.6a Phase 2) ----------------------
+  // Captures every configured request slot in slot-major groups of
+  // rows_per_request rows. Closed slots derive position -1 on device and
+  // therefore touch no KDA/DSA/cache state; admissions only seed that
+  // slot's persistent token group and push a positive device position.
+  // These calls are capture-time counterparts of the scalar device-driven
+  // sequence above. The verdict arrays contain one entry per request slot.
+  void session_graph_capture_batch(int rows_per_request);
+  // Restores the immutable slot-major row map in the graph's pinned memcpy
+  // sources. Eager prefill/draft operations reuse those staging buffers, so
+  // the adapter calls this before every replay; the recorded H2D nodes then
+  // publish the restored map without changing graph structure.
+  void session_graph_stage_batch();
+  void session_graph_capture_commit_batch(
+      const GlmPickVerdict* device_verdicts);
+  void session_graph_capture_draft_batch(
+      const GlmPickVerdict* verify_verdicts);
+  void session_graph_capture_verify_next_tokens_batch(
+      const GlmPickVerdict* verify_verdicts);
+  void session_graph_capture_next_tokens_batch(
+      const GlmPickVerdict* draft_verdicts);
+  // Restores the host-side validation/staging contract after capturing a
+  // scalar variant beside an already-recorded fixed batch. CUDA graph nodes
+  // have their own baked arguments; these fields govern replay-side helpers.
+  void session_graph_use_batch_contract(int rows_per_request);
+  int graph_batch_requests() const { return graph_batch_requests_; }
+  int graph_rows_per_request() const { return graph_rows_per_request_; }
 
   // Decode-step route traces (Outputs.routes / route_biased): the per-MoE-
   // layer ids, weights and biased scores the parity gates and the near-tie
@@ -492,7 +527,8 @@ class GlmDiagnosticModel {
   // call in BeginCapture/EndCapture and installs a recorder reducer.
   Outputs session_run_rows(int req, const std::vector<int64_t>& ids,
                            int64_t token_start, bool decode_row,
-                           bool capture_mode = false);
+                           bool capture_mode = false,
+                           int batch_requests = 0);
   // The decode step's host-side half, shared by the eager step, the
   // capture step, and the replay stage: validation, DSA admission, the
   // pinned member writes (request id, position, spans, token id), and
@@ -506,7 +542,7 @@ class GlmDiagnosticModel {
   void push_position(int req);
   // The rollback segment table for slot `req` (glm_spec_commit's input):
   // the live KDA state slices and DSA tail rings with their snapshots.
-  GlmSpecSegments spec_segments(int req);
+  GlmSpecSegments spec_segments(int req, int snapshot_row0 = 0);
   // ---- MTP (glm_mtp.cpp) ----
   // The draft block over T rows at the block's positions [first_pos,
   // first_pos + T): tokens from d_tokens_, hidden from the position
@@ -516,7 +552,8 @@ class GlmDiagnosticModel {
   // head_rows: 1 = the last row only (the eager draft), T = every row (the
   // in-graph draft; the pick selects the last accepted row).
   void mtp_run_rows(int req, int64_t first_pos, int T, bool decode_row,
-                    bool capture_mode, int head_rows = 1);
+                    bool capture_mode, int head_rows = 1,
+                    int batch_requests = 0);
   void push_mtp_position(int req);
   // The block over a prompt's rows 0..P-2 in pool-aligned chunks.
   void mtp_prefill(int req, const std::vector<int64_t>& prompt_ids);
@@ -603,9 +640,9 @@ class GlmDiagnosticModel {
   // closed) and the DSA decode-path metadata (enqueue_decode's
   // caller-owned device buffers — allocation happens at construction,
   // never mid-session; the synchronizing-call discipline applies between
-  // collectives). One ROW per step call (time-multiplexed requests);
-  // kDecodeRows=8 is DsaLayer's select-kernel bound and the batched-decode
-  // ceiling the Stage 2b scheduler inherits.
+  // collectives). Scalar calls stage one request's rows; the Phase-2 graph
+  // stages every configured request slot. kDecodeRows=8 is both DsaLayer's
+  // select-kernel bound and the fixed graph's physical row ceiling.
   int max_requests_ = 1;
   std::vector<int64_t> session_pos_;  // [max_requests]; 0 = closed slot
   int64_t* d_session_pos_ = nullptr;  // device [max_requests] — the
@@ -614,6 +651,8 @@ class GlmDiagnosticModel {
   bool graph_device_positions_ = false;  // the captured graph's mode
   bool graph_device_tokens_ = false;     // no token upload node
   bool graph_has_draft_ = false;         // the draft block is in the graph
+  int graph_batch_requests_ = 0;         // 0 = scalar graph contract
+  int graph_rows_per_request_ = 0;
   bool decode_tail_mirrors_ = true;
   int64_t* d_next_ = nullptr;  // device [max_requests]: the verify's next
                                // token, parked for the token feed
@@ -632,7 +671,6 @@ class GlmDiagnosticModel {
                                      // token id (the decode walk's H2D
                                      // source; a memcpy node's baked
                                      // address)
-  static constexpr int kDecodeRows = 8;  // DsaLayer's select-kernel bound
   // DESIGN §7.1: pool-aligned prefill chunks. Must be a multiple of DSA's
   // kpool so continuation chunks stay pool-aligned; the FINAL chunk may end
   // mid-pool (the tail persists into decode).
@@ -642,9 +680,9 @@ class GlmDiagnosticModel {
   int decode_rows_ = 1;
   // Speculative post-row state snapshots (kernels/kda.hpp
   // KdaStateSnapshots, dsa.hpp tail_snapshots), one in-flight verify:
-  //   spec_rec_  [kSpecRows-1][num_kda_layers][rec elems]  fp32
-  //   spec_conv_ [kSpecRows-1][num_kda_layers][conv elems] bf16
-  //   spec_tail_ [num_dsa_layers][kSpecRows][2, kpool, dim] bf16
+  //   spec_rec_  [kDecodeRows][num_kda_layers][rec elems]  fp32
+  //   spec_conv_ [kDecodeRows][num_kda_layers][conv elems] bf16
+  //   spec_tail_ [num_dsa_layers][kDecodeRows][2, kpool, dim] bf16
   // Row-major over the layers so rolling every KDA layer back is ONE
   // memcpy from row a-1 onto the request's contiguous layer slots.
   float* spec_rec_ = nullptr;

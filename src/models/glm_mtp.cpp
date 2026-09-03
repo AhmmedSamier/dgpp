@@ -42,21 +42,29 @@ uint16_t* GlmDiagnosticModel::mtp_hidden_cache(int req) const {
 // ---------------------------------------------------------------------------
 void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
                                       bool decode_row, bool capture_mode,
-                                      int head_rows) {
+                                      int head_rows, int batch_requests) {
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
   if (head_rows != 1 && head_rows != T)
     throw std::invalid_argument("mtp_run_rows: head_rows must be 1 or T");
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
+  const bool batched = batch_requests > 0;
   const GlmLayerResident& r = stack_layer(cfg_.mtp_layer());
   if (!r.enorm || !r.hnorm || !r.eh_proj || !r.shared_head_norm)
     throw std::runtime_error("mtp: the draft layer's head tensors are unbound");
   const GlmLayerBound b = bind_layer(r, /*dense_mlp=*/false);
 
   // ---- input: [enorm(embed) | hnorm(hidden)] -> eh_proj ------------------
-  glm_mtp_input_bf16(globals_.embed, d_tokens_, mtp_hidden_cache(req),
-                     decode_row ? d_step_pos_ : nullptr, first_pos, r.enorm,
-                     r.hnorm, mtp_cat_, T, H, eps, stream_);
+  if (decode_row && batched) {
+    glm_mtp_input_bf16_batched(
+        globals_.embed, d_tokens_, mtp_hidden_,
+        static_cast<int64_t>(max_tokens_) * H, d_req_ids_, d_step_pos_,
+        r.enorm, r.hnorm, mtp_cat_, T, H, eps, stream_);
+  } else {
+    glm_mtp_input_bf16(globals_.embed, d_tokens_, mtp_hidden_cache(req),
+                       decode_row ? d_step_pos_ : nullptr, first_pos, r.enorm,
+                       r.hnorm, mtp_cat_, T, H, eps, stream_);
+  }
   gemm_.matmul(mtp_cat_, r.eh_proj, mtp_x_, T, H, 2 * H, DType::BF16,
                GemmOut::BF16, static_cast<size_t>(2 * H), gemm_ws_,
                gemm_ws_bytes_, stream_);
@@ -84,7 +92,7 @@ void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
   const int ordinal = main_dsa_layers_;
   if (decode_row) {
     dsa_->enqueue_decode(normed_, pool_, ordinal, d_req_ids_, d_step_pos_,
-                         d_req_spans_, /*num_requests=*/1, T, attn_out,
+                         d_req_spans_, batched ? batch_requests : 1, T, attn_out,
                          stream_, &prefetch_);
   } else {
     dsa_->enqueue_prefill(normed_, pool_, ordinal, req, first_pos, T,
@@ -299,6 +307,28 @@ void GlmDiagnosticModel::session_graph_capture_draft(
   graph_has_draft_ = true;
 }
 
+void GlmDiagnosticModel::session_graph_capture_draft_batch(
+    const GlmPickVerdict* verify_verdicts) {
+  if (!mtp_)
+    throw std::logic_error("session_graph_capture_draft_batch: no MTP");
+  if (graph_batch_requests_ <= 0 || graph_rows_per_request_ != 2 ||
+      !graph_device_positions_ || !graph_device_tokens_)
+    throw std::logic_error(
+        "session_graph_capture_draft_batch: requires a device-driven T=2 "
+        "fixed batch");
+  if (verify_verdicts == nullptr)
+    throw std::invalid_argument(
+        "session_graph_capture_draft_batch: null verdicts");
+  glm_spec_draft_rows_batched(
+      verify_verdicts, graph_batch_requests_, graph_rows_per_request_,
+      d_mtp_pos_, d_step_pos_, d_tokens_, d_next_, stream_);
+  draft_rows_ = decode_rows_;
+  mtp_run_rows(/*req=*/0, /*first_pos=*/0, decode_rows_,
+               /*decode_row=*/true, /*capture_mode=*/true,
+               /*head_rows=*/decode_rows_, graph_batch_requests_);
+  graph_has_draft_ = true;
+}
+
 void GlmDiagnosticModel::session_graph_capture_next_tokens(
     int req, const GlmPickVerdict* draft_verdict) {
   if (req < 0 || req >= max_requests_)
@@ -317,12 +347,30 @@ void GlmDiagnosticModel::session_graph_capture_next_tokens(
   glm_spec_next_tokens(d_next_ + req, draft_verdict, d_tokens_, stream_);
 }
 
+void GlmDiagnosticModel::session_graph_capture_next_tokens_batch(
+    const GlmPickVerdict* draft_verdicts) {
+  if (!graph_device_tokens_ || !graph_has_draft_ ||
+      graph_batch_requests_ <= 0 || graph_rows_per_request_ != 2)
+    throw std::logic_error(
+        "session_graph_capture_next_tokens_batch: requires the fixed T=2 "
+        "draft graph");
+  if (draft_verdicts == nullptr)
+    throw std::invalid_argument(
+        "session_graph_capture_next_tokens_batch: null verdicts");
+  glm_spec_next_tokens_batched(
+      d_next_, draft_verdicts, graph_batch_requests_,
+      graph_rows_per_request_, d_tokens_, stream_);
+}
+
 void GlmDiagnosticModel::session_graph_seed_tokens(
     int req, const std::vector<int64_t>& ids) {
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_graph_seed_tokens: request slot " +
                             std::to_string(req));
-  if (ids.size() != static_cast<size_t>(decode_rows_))
+  const int rows_per_request = graph_batch_requests_ > 0
+                                   ? graph_rows_per_request_
+                                   : decode_rows_;
+  if (ids.size() != static_cast<size_t>(rows_per_request))
     throw std::invalid_argument("session_graph_seed_tokens: the seed must "
                                 "have the graph's row count");
   for (int64_t id : ids)
@@ -331,8 +379,28 @@ void GlmDiagnosticModel::session_graph_seed_tokens(
   // On the model's stream, never the legacy stream: a peer rank in the same
   // process (the loopback worlds) may be mid-capture, and a legacy-stream
   // copy would try to synchronize with its capturing stream.
+  const size_t row0 = graph_batch_requests_ > 0
+                          ? static_cast<size_t>(req) * rows_per_request
+                          : 0;
+  for (size_t i = 0; i < ids.size(); ++i) h_token_[row0 + i] = ids[i];
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_ + row0, h_token_ + row0,
+                               ids.size() * sizeof(int64_t),
+                               cudaMemcpyHostToDevice, stream_));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+}
+
+void GlmDiagnosticModel::session_graph_seed_scalar_tokens(
+    const std::vector<int64_t>& ids) {
+  if (ids.empty() || ids.size() > static_cast<size_t>(kSpecRows))
+    throw std::invalid_argument(
+        "session_graph_seed_scalar_tokens: invalid row count");
+  for (int64_t id : ids)
+    if (id < 0 || id >= cfg_.vocab_size)
+      throw std::invalid_argument(
+          "session_graph_seed_scalar_tokens: token id");
   for (size_t i = 0; i < ids.size(); ++i) h_token_[i] = ids[i];
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, h_token_, ids.size() * sizeof(int64_t),
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, h_token_,
+                               ids.size() * sizeof(int64_t),
                                cudaMemcpyHostToDevice, stream_));
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 }

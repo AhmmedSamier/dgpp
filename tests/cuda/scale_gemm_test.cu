@@ -67,6 +67,32 @@ std::vector<uint16_t> run_kernel(const Problem& p) {
   return got;
 }
 
+// The same production dispatch with its unrounded f32 epilogue. Used by the
+// row-independence gate because the MoE accumulation consumes these bits.
+std::vector<float> run_kernel_f32(const Problem& p) {
+  uint16_t* act = nullptr;
+  uint8_t* w = nullptr;
+  float* s = nullptr;
+  float* out = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&act, p.act.size() * 2));
+  DGPP_CUDA_OK(cudaMallocManaged(&w, p.payload.size()));
+  DGPP_CUDA_OK(cudaMallocManaged(&s, p.scales.size() * 4));
+  DGPP_CUDA_OK(
+      cudaMallocManaged(&out, static_cast<size_t>(p.m) * p.n * 4));
+  std::memcpy(act, p.act.data(), p.act.size() * 2);
+  std::memcpy(w, p.payload.data(), p.payload.size());
+  std::memcpy(s, p.scales.data(), p.scales.size() * 4);
+  dgpp::launch_scale_gemm_f32(act, p.k, w, s, out, p.m, p.n, p.k, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<float> got(static_cast<size_t>(p.m) * p.n);
+  std::memcpy(got.data(), out, got.size() * 4);
+  DGPP_CUDA_OK(cudaFree(act));
+  DGPP_CUDA_OK(cudaFree(w));
+  DGPP_CUDA_OK(cudaFree(s));
+  DGPP_CUDA_OK(cudaFree(out));
+  return got;
+}
+
 // Runs both oracles and asserts the budgets.
 void check_both_oracles(const Problem& p, const std::vector<uint16_t>& got,
                         const char* label) {
@@ -282,7 +308,35 @@ DGPP_TEST(scale_gemm_gemv_rows_are_independent_of_row_count) {
   // AND m=4 (the largest GEMV row count) still matches the oracles.
   const Problem p4 = make_problem(4, 264, 2048, 0xE4);
   check_both_oracles(p4, run_kernel(p4), "gemv M4xN264xK2048");
-  std::printf("[ OK ] gemv rows independent of m (1 vs 3), m=4 oracle\n");
+  // AND m=8 at real hidden width must take row-independent GEMV chunks,
+  // not the numerically different tile kernel. Check both epilogues against
+  // eight scalar invocations so chunk boundaries and output offsets are
+  // covered directly.
+  const Problem p8 = make_problem(8, 136, 4096, 0xE8);
+  const std::vector<uint16_t> got8 = run_kernel(p8);
+  const std::vector<float> got8f = run_kernel_f32(p8);
+  check_both_oracles(p8, got8, "gemv chunked M8xN136xK4096");
+  for (int r = 0; r < p8.m; ++r) {
+    Problem p1;
+    p1.m = 1;
+    p1.n = p8.n;
+    p1.k = p8.k;
+    p1.act.assign(p8.act.begin() + static_cast<long>(r) * p8.k,
+                  p8.act.begin() + static_cast<long>(r + 1) * p8.k);
+    p1.payload = p8.payload;
+    p1.scales = p8.scales;
+    const std::vector<uint16_t> got1 = run_kernel(p1);
+    const std::vector<float> got1f = run_kernel_f32(p1);
+    require(std::memcmp(got1.data(),
+                        got8.data() + static_cast<size_t>(r) * p8.n,
+                        static_cast<size_t>(p8.n) * sizeof(uint16_t)) == 0,
+            "chunked fp8/bf16 row bits independent of m");
+    require(std::memcmp(got1f.data(),
+                        got8f.data() + static_cast<size_t>(r) * p8.n,
+                        static_cast<size_t>(p8.n) * sizeof(float)) == 0,
+            "chunked fp8/f32 row bits independent of m");
+  }
+  std::printf("[ OK ] gemv rows independent of m through m=8 chunks\n");
 }
 
 DGPP_TEST(scale_gemm_gemv_path_propagates_nan_exactly) {

@@ -524,6 +524,13 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   gemm_.matmul(attn_out_, w_.o_proj, out, tokens, cfg_.hidden,
                geo_.local_v_rows, DType::BF16, GemmOut::BF16,
                size_t(geo_.local_v_rows), gemm_ws_, gemm_ws_bytes_, stream);
+  // Padding rows (pos < 0: a fixed-shape batch's unoccupied rows, the
+  // in-graph draft's rejected row) skipped every state write above but
+  // still carry whatever the attention scratch held into the projection.
+  // Zero them so a padding row's block output — and its share of the
+  // boundary all-reduce — is deterministic by construction, the same
+  // contract the KDA layer's padding rows already keep.
+  dsa_zero_padding_rows(out, pos, tokens, cfg_.hidden, stream);
 }
 
 // ---------------------------------------------------------------------
