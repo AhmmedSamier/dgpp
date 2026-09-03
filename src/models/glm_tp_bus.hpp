@@ -33,16 +33,22 @@
 
 namespace dgpp {
 
-struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
-  static constexpr size_t kMaxCollectiveElems = 4096;  // one latency slot
+// One latency slot's bf16 capacity: the decode boundary's row ceiling.
+// 8192-byte slots hold one hidden-4096 row (the classic decode unit);
+// the fabric's 32 KB slots hold a kSpecRows-row speculative verify.
+inline size_t bus_latency_slot_elems(const net::CollectiveBus& bus) {
+  return bus.slot_bytes(net::BusMessageClass::kLatency) / 2;
+}
 
+struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
   explicit GlmBusBoundaryReducer(net::CollectiveBus& bus, int timeout_ms = 60000)
-      : bus_(bus), timeout_ms_(timeout_ms) {}
+      : bus_(bus),
+        timeout_ms_(timeout_ms),
+        max_elems_(bus_latency_slot_elems(bus)) {}
 
   uint16_t* stage(int rows, int hidden) override {
     if (hidden <= 0 || rows <= 0 || hidden % 2 != 0 ||
-        static_cast<size_t>(rows) * static_cast<size_t>(hidden) >
-            kMaxCollectiveElems)
+        static_cast<size_t>(rows) * static_cast<size_t>(hidden) > max_elems_)
       return nullptr;  // prefill-shaped boundary: device path
     std::string err;
     void* p = bus_.stage_next(&err);
@@ -54,7 +60,7 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
 
   void reduce(uint16_t* partial, int rows, int hidden) override {
     step_timing::Scope tick(step_timing::kFold);
-    if (hidden <= 0 || hidden > static_cast<int>(kMaxCollectiveElems) ||
+    if (hidden <= 0 || static_cast<size_t>(hidden) > max_elems_ ||
         hidden % 2 != 0)
       throw std::invalid_argument(
           "boundary reduce: hidden must be even and fit one latency slot");
@@ -82,7 +88,7 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
     // take the bulk machine: segment-quantized reduce-scatter + allgather,
     // the same canonical per-element chain (bitwise-equal to chunking —
     // the bus_test cross-path gate pins exactly that).
-    if (total > 2 * kMaxCollectiveElems) {
+    if (total > 2 * max_elems_) {
       std::string err;
       const uint64_t id = bus_.allreduce_bulk(partial, partial, total, &err);
       if (id == 0)
@@ -92,7 +98,7 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
     }
     // Floor: rows folded per collective (hidden itself when hidden fills
     // the slot — the decode shape, one collective per boundary).
-    const int rows_per = static_cast<int>(kMaxCollectiveElems / hidden);
+    const int rows_per = static_cast<int>(max_elems_ / hidden);
     for (int row0 = 0; row0 < rows; row0 += rows_per) {
       const int n = std::min(rows_per, rows - row0);
       const size_t elems = static_cast<size_t>(n) * hidden;
@@ -122,6 +128,7 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
 
   net::CollectiveBus& bus_;
   int timeout_ms_ = 60000;
+  size_t max_elems_ = 0;        // one latency slot, in bf16
   uint16_t* staged_ = nullptr;  // held pre-stage handout, if any
 };
 
@@ -146,12 +153,12 @@ struct GlmBusBoundaryReducer final : GlmBoundaryReducer {
 // ms/token across the 90 boundaries, for no reason at all.
 // ---------------------------------------------------------------------------
 struct GlmGraphRecordReducer final : GlmBoundaryReducer {
-  static constexpr size_t kMaxCollectiveElems = 4096;  // one latency slot
-
   GlmGraphRecordReducer(net::CollectiveBus& bus, cudaStream_t capture_stream)
-      : bus_(bus), stream_(capture_stream) {
-    const cudaError_t alloc = cudaMalloc(
-        reinterpret_cast<void**>(&stable_), kMaxCollectiveElems * 2);
+      : bus_(bus),
+        stream_(capture_stream),
+        max_elems_(bus_latency_slot_elems(bus)) {
+    const cudaError_t alloc =
+        cudaMalloc(reinterpret_cast<void**>(&stable_), max_elems_ * 2);
     if (alloc != cudaSuccess)
       throw std::runtime_error("graph record reducer: stable device "
                                "buffer alloc failed");
@@ -163,12 +170,12 @@ struct GlmGraphRecordReducer final : GlmBoundaryReducer {
   GlmGraphRecordReducer& operator=(const GlmGraphRecordReducer&) = delete;
 
   uint16_t* stage(int rows, int hidden) override {
-    // Decode-shaped only: the capture walk is one row at hidden 4096.
+    // Decode-shaped only: the capture walk is a few rows at hidden 4096
+    // (one, or a speculative verify's kSpecRows), within one slot.
     // Anything else is the prefill shape, which never reaches this
     // reducer (the app captures after prefill, restore-before-prefill).
     if (hidden <= 0 || rows <= 0 || hidden % 2 != 0 ||
-        static_cast<size_t>(rows) * static_cast<size_t>(hidden) >
-            kMaxCollectiveElems)
+        static_cast<size_t>(rows) * static_cast<size_t>(hidden) > max_elems_)
       return nullptr;
     return stable_;
   }
@@ -179,8 +186,7 @@ struct GlmGraphRecordReducer final : GlmBoundaryReducer {
           "graph record reducer: the capture walk must fold the staged "
           "buffer (the prefill-shaped device path cannot record)");
     if (hidden <= 0 || rows <= 0 || hidden % 2 != 0 ||
-        static_cast<size_t>(rows) * static_cast<size_t>(hidden) >
-            kMaxCollectiveElems)
+        static_cast<size_t>(rows) * static_cast<size_t>(hidden) > max_elems_)
       throw std::invalid_argument(
           "graph record reducer: boundary must be decode-shaped");
     std::string err;
@@ -193,6 +199,7 @@ struct GlmGraphRecordReducer final : GlmBoundaryReducer {
  private:
   net::CollectiveBus& bus_;
   cudaStream_t stream_ = nullptr;
+  size_t max_elems_ = 0;
   uint16_t* stable_ = nullptr;  // device; baked into every recorded node
 };
 
@@ -221,12 +228,17 @@ struct GlmGraphRecordReducer final : GlmBoundaryReducer {
 // other latency traffic in flight — the pick is serialized behind the
 // forward's collectives in every consumer of it).
 //
-// `scratch` is a device (managed) buffer of >= kPickSlotsPerRank*world
+// `scratch` is a device (managed) buffer of >= kPickScratchElems(world)
 // bf16 elements, host-writable — caller-owned so this helper allocates
-// nothing inside the decode loop.
+// nothing inside the decode loop. A speculative verify picks R rows in
+// the same two collectives (row r's quadruple in slots [r*world + rank]).
 constexpr int kPickLogitDigits = 6;  // 36 bits carry the float's 32
 constexpr int kPickIdDigits = 3;     // 18 bits carry a vocab id
 constexpr int kPickSlotsPerRank = kPickLogitDigits + kPickIdDigits;
+constexpr int kPickMaxRows = 4;      // GlmDiagnosticModel::kSpecRows
+constexpr size_t kPickScratchElems(int world) {
+  return static_cast<size_t>(kPickMaxRows) * world * kPickSlotsPerRank;
+}
 
 inline void pick_encode_digits(uint16_t* slots, uint64_t value, int digits) {
   for (int d = 0; d < digits; ++d)
@@ -239,21 +251,25 @@ inline uint64_t pick_decode_digits(const uint16_t* slots, int digits) {
   return value;
 }
 
-inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
-                               glm_sample::Candidate local, uint16_t* scratch,
-                               int timeout_ms) {
+inline std::vector<int32_t> bus_greedy_pick_rows(
+    net::CollectiveBus& bus, int rank, int world,
+    const std::vector<glm_sample::Candidate>& locals, uint16_t* scratch,
+    int timeout_ms) {
   step_timing::Scope tick(step_timing::kPick);
-  if (local.id < 0 || local.id >= (1 << (6 * kPickIdDigits))) {
-    throw std::invalid_argument("bus_greedy_pick: token id outside the "
-                                 "6-bit-triplet encoding range");
-  }
+  const int rows = static_cast<int>(locals.size());
+  if (rows < 1 || rows > kPickMaxRows)
+    throw std::invalid_argument("bus_greedy_pick: row count out of range");
+  for (const glm_sample::Candidate& local : locals)
+    if (local.id < 0 || local.id >= (1 << (6 * kPickIdDigits)))
+      throw std::invalid_argument("bus_greedy_pick: token id outside the "
+                                   "6-bit-triplet encoding range");
   // The historically-vulnerable shape, now the regression proof: a small
   // plain collective (world 4: 36 elems) after a run of staged ones.
   // Before the generation-gated claim this raced a peer's in-flight
   // collective kernel (corruption or stall, whichever way the claim
   // fell); the gate pins the claim to this collective's doorbells.
   const size_t gather_elems =
-      static_cast<size_t>(world) * kPickSlotsPerRank;
+      static_cast<size_t>(rows) * world * kPickSlotsPerRank;
   const auto allreduce_wait = [&](std::string* err) -> uint64_t {
     const uint64_t id = bus.allreduce(scratch, scratch, gather_elems, err);
     if (id == 0) return 0;
@@ -264,62 +280,79 @@ inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
     }
     return id;
   };
+  const auto slot = [&](int row, int r) {
+    return scratch + (static_cast<size_t>(row) * world + r) * kPickSlotsPerRank;
+  };
 
-  // ---- gather: every rank's (value, id) in its own slots -------------
+  // ---- gather: every rank's (value, id) per row in its own slots ------
   std::memset(scratch, 0, gather_elems * 2);
-  {
-    uint16_t* mine = scratch + static_cast<size_t>(rank) * kPickSlotsPerRank;
+  for (int row = 0; row < rows; ++row) {
+    uint16_t* mine = slot(row, rank);
     uint32_t logit_bits = 0;
-    std::memcpy(&logit_bits, &local.logit, sizeof(logit_bits));
+    std::memcpy(&logit_bits, &locals[row].logit, sizeof(logit_bits));
     pick_encode_digits(mine, logit_bits, kPickLogitDigits);
     pick_encode_digits(mine + kPickLogitDigits,
-                       static_cast<uint64_t>(local.id), kPickIdDigits);
+                       static_cast<uint64_t>(locals[row].id), kPickIdDigits);
   }
   std::string err;
   if (allreduce_wait(&err) == 0)
     throw std::runtime_error("bus_greedy_pick gather: " + err);
-  std::vector<glm_sample::Candidate> cands;
-  cands.reserve(static_cast<size_t>(world));
-  for (int r = 0; r < world; ++r) {
-    const uint16_t* q = scratch + static_cast<size_t>(r) * kPickSlotsPerRank;
-    glm_sample::Candidate c;
-    const uint32_t logit_bits =
-        static_cast<uint32_t>(pick_decode_digits(q, kPickLogitDigits));
-    std::memcpy(&c.logit, &logit_bits, sizeof(c.logit));
-    c.id = static_cast<int32_t>(
-        pick_decode_digits(q + kPickLogitDigits, kPickIdDigits));
-    cands.push_back(c);
+  std::vector<int32_t> winners(static_cast<size_t>(rows));
+  for (int row = 0; row < rows; ++row) {
+    std::vector<glm_sample::Candidate> cands;
+    cands.reserve(static_cast<size_t>(world));
+    for (int r = 0; r < world; ++r) {
+      const uint16_t* q = slot(row, r);
+      glm_sample::Candidate c;
+      const uint32_t logit_bits =
+          static_cast<uint32_t>(pick_decode_digits(q, kPickLogitDigits));
+      std::memcpy(&c.logit, &logit_bits, sizeof(c.logit));
+      c.id = static_cast<int32_t>(
+          pick_decode_digits(q + kPickLogitDigits, kPickIdDigits));
+      cands.push_back(c);
+    }
+    winners[static_cast<size_t>(row)] = glm_sample::merge_greedy(cands);
   }
-  const int32_t winner = glm_sample::merge_greedy(cands);
 
   // ---- broadcast: rank 0's winner digits reach every rank -----------
   std::memset(scratch, 0, gather_elems * 2);
   if (rank == 0)
-    pick_encode_digits(scratch, static_cast<uint64_t>(winner), kPickIdDigits);
+    for (int row = 0; row < rows; ++row)
+      pick_encode_digits(scratch + static_cast<size_t>(row) * kPickIdDigits,
+                         static_cast<uint64_t>(winners[row]), kPickIdDigits);
   if (allreduce_wait(&err) == 0)
     throw std::runtime_error("bus_greedy_pick broadcast: " + err);
-  const int32_t decoded =
-      static_cast<int32_t>(pick_decode_digits(scratch, kPickIdDigits));
-  // Load-bearing readback invariant: every rank folds an identical
-  // candidate table (the allreduce is bitwise-stable by contract), so
-  // every rank computes the same winner and every rank must decode rank
-  // 0's broadcast of it. A mismatch means THIS rank's broadcast-phase
-  // readback is corrupt — the 2026-09-01 fabric race folded
-  // boundary-class bf16 into the digit slots on one rank while its peers
-  // were correct; this check turns that silent corruption into a loud,
-  // located failure at the exact collective, on the exact rank.
-  if (decoded != winner) {
-    std::string words;
-    for (size_t i = 0; i < gather_elems; ++i) {
-      if (i) words += ",";
-      words += std::format("{:#06x}", scratch[i]);
+  for (int row = 0; row < rows; ++row) {
+    const int32_t decoded = static_cast<int32_t>(pick_decode_digits(
+        scratch + static_cast<size_t>(row) * kPickIdDigits, kPickIdDigits));
+    // Load-bearing readback invariant: every rank folds an identical
+    // candidate table (the allreduce is bitwise-stable by contract), so
+    // every rank computes the same winner and every rank must decode rank
+    // 0's broadcast of it. A mismatch means THIS rank's broadcast-phase
+    // readback is corrupt — the 2026-09-01 fabric race folded
+    // boundary-class bf16 into the digit slots on one rank while its peers
+    // were correct; this check turns that silent corruption into a loud,
+    // located failure at the exact collective, on the exact rank.
+    if (decoded != winners[row]) {
+      std::string words;
+      for (size_t i = 0; i < gather_elems; ++i) {
+        if (i) words += ",";
+        words += std::format("{:#06x}", scratch[i]);
+      }
+      throw std::runtime_error(std::format(
+          "bus_greedy_pick: broadcast readback corrupt on rank {} row {} "
+          "(winner {} decoded {}): scratch[{}]",
+          rank, row, winners[row], decoded, words));
     }
-    throw std::runtime_error(
-        std::format("bus_greedy_pick: broadcast readback corrupt on rank {} "
-                    "(winner {} decoded {}): scratch[{}]",
-                    rank, winner, decoded, words));
   }
-  return decoded;
+  return winners;
+}
+
+inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
+                               glm_sample::Candidate local, uint16_t* scratch,
+                               int timeout_ms) {
+  return bus_greedy_pick_rows(bus, rank, world, {local}, scratch,
+                              timeout_ms)[0];
 }
 
 }  // namespace dgpp

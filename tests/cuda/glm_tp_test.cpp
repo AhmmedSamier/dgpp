@@ -57,6 +57,7 @@
 #include "models/glm_forward.hpp"
 #include "models/glm_route_audit.hpp"
 #include "models/glm_sampler.hpp"
+#include "models/glm_speculative.hpp"
 #include "models/glm_tp.hpp"
 #include "models/glm_tp_parity.hpp"
 #include "models/glm_tp_bus.hpp"
@@ -1360,6 +1361,173 @@ DGPP_TEST(glm_tp_mtp_draft_batched_matches_sequential_bitwise) {
   try { (void)a.session_draft(0, {toks[5]}); } catch (const std::invalid_argument&) { threw = true; }
   require(threw, "a draft that does not reach the session position must throw");
   (void)a.session_draft(0, {toks[5], toks[0]});
+}
+
+// The exit criterion at fixture scale (DESIGN §9, PLAN M8): the greedy
+// speculative loop — sharded heads, bus folds of T=2 verify rows, the
+// two-row bus pick, rollbacks, drafts — must produce the plain greedy
+// session's transcript EXACTLY, on every rank. The fixture's random
+// draft layer accepts what it accepts (reported); the equality holds
+// regardless, which is the point: MTP changes the cost, never the output.
+DGPP_TEST(glm_tp_speculative_loopback_matches_plain_greedy) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kTokens = 10;  // generated tokens to compare
+  constexpr int kWorld = 4;
+  // Verify rows may run one past the compared length; the block trails.
+  const int max_tokens = static_cast<int>(prompt.size()) + kTokens + 4;
+
+  // ---- reference: the plain greedy session, world 1, no MTP ------------
+  std::vector<int32_t> plain;
+  {
+    GlmDiagnosticModel model(cfg, dir, max_tokens, 128);
+    GlmDiagnosticModel::Outputs out = model.session_prefill(prompt);
+    int32_t tok = local_max(out.logits.data(), cfg.vocab_size, 0).id;
+    for (int s = 0; s < kTokens; ++s) {
+      plain.push_back(tok);
+      out = model.session_step(tok);
+      tok = local_max(out.logits.data(), cfg.vocab_size, 0).id;
+    }
+  }
+
+  // ---- world 1 speculative (the eager driver, identity pick) ------------
+  {
+    GlmDiagnosticModel model(cfg, dir, max_tokens, 128, nullptr, 0, 1,
+                             GlmResidency::Streaming, GlmHeadSharding::Full, 1,
+                             /*mtp=*/true);
+    dgpp::GreedySpeculator spec(model, 0, [](const std::vector<Candidate>& l) {
+      std::vector<int32_t> w;
+      for (const Candidate& c : l) w.push_back(c.id);
+      return w;
+    });
+    const GlmDiagnosticModel::Outputs out = model.session_prefill(prompt);
+    spec.start(local_max(out.logits.data(), cfg.vocab_size, 0).id);
+    std::vector<int32_t> got;
+    while (static_cast<int>(got.size()) < kTokens)
+      for (int32_t t : spec.step()) got.push_back(t);
+    got.resize(kTokens);
+    require(got == plain, "world-1 speculative transcript != plain greedy");
+    DGPP_LOG_INFO("speculative w1: {} steps for {} tokens, {} drafts accepted",
+                  spec.steps(), kTokens, spec.accepted_drafts());
+  }
+
+  // ---- world 4: sharded heads, bus folds, two-row bus pick --------------
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29917);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int32_t>> rank_seqs(kWorld);
+  std::vector<int> rank_steps(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus);
+        // The reference at world 4 is the PLAIN sharded session on the
+        // same bus (the fold order differs from world 1 by rounding, and
+        // the random fixture's vocab of 96 has near ties everywhere).
+        GlmDiagnosticModel plain_shard(cfg, dir, max_tokens, 128, &reducer,
+                                       r, kWorld, GlmResidency::Streaming,
+                                       GlmHeadSharding::VocabSharded);
+        GlmDiagnosticModel shard(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded, 1,
+                                 /*mtp=*/true);
+        DGPP_CUDA_OK(cudaMallocManaged(
+            &scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld)));
+        arrive_once();
+        const auto pick1 = [&](const GlmDiagnosticModel::Outputs& o) {
+          return dgpp::bus_greedy_pick(
+              bus, r, kWorld,
+              local_max(o.logits.data(), o.lm_vocab_count, o.lm_vocab_begin),
+              scratch, 60000);
+        };
+        std::vector<int32_t> plain4;
+        {
+          GlmDiagnosticModel::Outputs o = plain_shard.session_prefill(prompt);
+          int32_t tok = pick1(o);
+          for (int s = 0; s < kTokens; ++s) {
+            plain4.push_back(tok);
+            o = plain_shard.session_step(tok);
+            tok = pick1(o);
+          }
+        }
+        dgpp::GreedySpeculator spec(
+            shard, 0, [&](const std::vector<Candidate>& locals) {
+              return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals,
+                                                scratch, 60000);
+            });
+        const GlmDiagnosticModel::Outputs out = shard.session_prefill(prompt);
+        spec.start(pick1(out));
+        std::vector<int32_t>& got = rank_seqs[static_cast<size_t>(r)];
+        while (static_cast<int>(got.size()) < kTokens)
+          for (int32_t t : spec.step()) got.push_back(t);
+        got.resize(kTokens);
+        rank_steps[static_cast<size_t>(r)] = spec.steps();
+        if (got != plain4)
+          throw std::runtime_error(
+              "speculative transcript over the bus != the plain sharded "
+              "session's on the same bus");
+        // The ACCEPT path over the bus (the random draft layer never
+        // takes it): feed the plain transcript's next token as the
+        // "draft" so every verify accepts both rows, then the two-row
+        // draft runs the block's T=2 folds and its two-row DSA/MoE.
+        {
+          GlmDiagnosticModel::Outputs o = shard.session_prefill(prompt);
+          int32_t next = pick1(o);
+          std::vector<int32_t> committed;
+          size_t i = 0;
+          (void)shard.session_draft(0, {next});  // the block's row P-1
+          while (i + 1 < plain4.size()) {
+            const std::vector<int64_t> fed{next, plain4[i + 1]};
+            o = shard.session_verify(0, fed);
+            const std::vector<int32_t> winners = dgpp::bus_greedy_pick_rows(
+                bus, r, kWorld, dgpp::local_row_maxes(o, 2), scratch, 60000);
+            const dgpp::SpecVerdict v = dgpp::judge_verify(fed, winners);
+            if (v.accepted != 2)
+              throw std::runtime_error(
+                  "a verify fed the true next token must accept both rows "
+                  "(step " + std::to_string(i) + ")");
+            for (int32_t t : v.committed) committed.push_back(t);
+            next = v.next;
+            (void)shard.session_draft(0, v.draft_rows);  // T=2 draft
+            i += 2;
+          }
+          committed.push_back(next);
+          committed.resize(plain4.size());
+          if (committed != plain4)
+            throw std::runtime_error(
+                "accept-all verify transcript over the bus != plain");
+        }
+        cudaFree(scratch);
+      } catch (const std::exception& e) {
+        if (scratch) cudaFree(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r)
+    require(rank_seqs[static_cast<size_t>(r)] == rank_seqs[0],
+            "rank " + std::to_string(r) +
+                ": speculative transcript differs across ranks");
+  DGPP_LOG_INFO("speculative w4: {} steps for {} tokens; transcript == the "
+                "plain sharded session's on every rank",
+                rank_steps[0], kTokens);
 }
 
 DGPP_TEST(glm_tp_decode_session_hazard) {

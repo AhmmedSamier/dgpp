@@ -98,7 +98,9 @@ inline net::BusOptions fabric_bus_options(int rank, int world, uint16_t port,
   o.rendezvous_host = rank == 0 ? "" : peer;
   o.rendezvous_timeout_ms = rendezvous_timeout_ms;
   o.lat_slots = 8;
-  o.lat_slot_bytes = 8192;
+  // One slot holds a speculative verify's kSpecRows rows of hidden 4096
+  // (the collective kernels are element-driven; the slot only strides).
+  o.lat_slot_bytes = GlmDiagnosticModel::kSpecRows * 4096 * 2;
   o.bulk_slots = 8;
   o.bulk_slot_bytes = 262144;
   o.qp_depth = 1024;
