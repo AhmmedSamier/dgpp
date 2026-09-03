@@ -10,16 +10,20 @@ Current status (2026-09-03): the engine serves. `glm_serve` boots a resident
 TP=4 model on the four-node fabric in 15–25 s (per-rank image cache), answers
 the OpenAI chat/completions contract over HTTP/SSE with rank 0 as the sole
 ingress, and every rank executes an identical op stream by construction. The
-serving path today is greedy-only and steps one token at a time (last
-measured ~175 ms/token before the kernel rounds). The fast path lives beside
-it in `glm_gen_check`: the decode step as one CUDA graph replay with the
+default serving path today is greedy-only and steps one token at a time
+(36.4 ms/token on the four-node service, 2026-09-03). A concurrency-1
+service mode drives the same T=1 or MTP graph with `--max-concurrency 1
+--decode-graph [--mtp]`, loopback-gated and measured on the four-node
+service at 32.1 ms/token (T=1) and 21.8–26.0 ms/token (MTP, by acceptance).
+The fast path also lives in `glm_gen_check`: the
+decode step as one CUDA graph replay with the
 collectives as graph nodes runs at 31.3 ms/token, and greedy speculative
 decode with the checkpoint's MTP layer — verify, on-device pick, rollback,
 draft and next tokens all inside one replay — at 22.45 ms/token with a
-transcript identical to plain decode. Bringing that step behind the service,
-stochastic sampling on the distributed path, and the prefix cache are the
-open items; `PLAN.md` has the status per milestone and the designs for what
-remains, `DESIGN.md` the contracts as built.
+transcript identical to plain decode. The row-batched graph, stochastic
+sampling on the distributed path, the prefill behind the time to first
+token, and the prefix cache are open items; `PLAN.md` has the status per milestone and the
+designs for what remains, `DESIGN.md` the contracts as built.
 
 ## Documentation
 
@@ -95,9 +99,10 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `glm_tp_check --model ID --world W --rank R --peer HEAD` | fabric TP parity: final hidden/logits/routes/digests bitwise across ranks and against the loopback verdict dumps |
 | `glm_shard_parity` | the sharded loader vs full-load + `GlmTpViews::bind`, bitwise on every bound surface |
 | `glm_gen_check --model ID --chat TEXT [--system S] --steps N [--decode-graph] [--mtp]` | generation on the fabric (or `--text`, `--prompt IDS`): resident TP, distributed greedy pick, EOS stop; `--decode-graph` replays the step as one CUDA graph, `--mtp` adds speculative decode (see below); `--requests FILE` runs a JSONL manifest through the scheduler, `--sched-plan` prints the memory receipt without a GPU, `--teacher-file F` scores a text instead of generating, `--step-timing` prints the per-phase budget |
-| `glm_serve --model ID --port P [--world W --rank R --peer HEAD --journal-port J] [--max-concurrency N --kv-capacity T --queue-limit Q]` | the OpenAI-compatible service: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/v1/metrics`; rank 0 is the HTTP ingress and journals admissions to the peers |
+| `glm_serve --model ID --port P [--world W --rank R --peer HEAD --journal-port J] [--max-concurrency N --kv-capacity T --queue-limit Q] [--decode-graph [--mtp]]` | the OpenAI-compatible service: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/v1/metrics`; rank 0 is the HTTP ingress and journals admissions to the peers; graph mode currently requires the fabric and `--max-concurrency 1` |
 | `scripts/fabric_run.sh [--stage-file F] [--fetch-logs] [--node-probe] -- APP-ARGS` | launches any app on the four-node fabric with the rendezvous discipline (head first, peers fire-and-forget, verified by pgrep, swept on head death); collects rank-invariant md5s and bus stats |
-| `scripts/serve_run.sh up/down/status` | boots/stops the serving world; `down` fetches and md5s every rank's op stream |
+| `scripts/serve_run.sh up/down/status` | boots/stops the serving world (`DGPP_SERVE_KNOBS` overrides the engine flags on every rank, e.g. `--max-concurrency 1 ... --decode-graph --mtp`); `down` fetches and md5s every rank's op stream |
+| `scripts/serve_bench.py HOST PORT MAX_TOKENS LABEL [PROMPT]`, `scripts/serve_pace.py RANK_LOG` | the service's pace: the client-side SSE chunk stamps (time to first token, ms per chunk, wall) and the server-side per-request ms/token, replays and tokens per replay from a rank's scheduler lines |
 | `scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`, `scripts/fabric_xrank.py` | the judges (first divergence by bf16-ulp margin; teacher-forced perplexity delta) and the cross-rank step/stall reader — see "Judging a numerics change" |
 
 The GDR probe exits successfully when the probe itself completes, including
@@ -169,8 +174,11 @@ CTest currently runs 32 entries:
   plus the app-level smoke;
 - the TP forward over loopback buses (`glm_tp_test`): per-layer isolated
   parity vs the world=1 oracle at worlds 2 and 4, decode sessions, the
-  greedy generation loop, the device pick, and the one-graph MTP step in
-  lockstep with the eager speculator; the pick/spec kernels against their
+  greedy generation loop, the device pick, the one-graph MTP step in
+  lockstep with the eager speculator, and the T=1/MTP serving graph adapters
+  through the real scheduler (including slot reuse, the in-graph draft
+  checked against the eager speculator after every replay); the pick/spec
+  kernels against their
   host oracles (`glm_pick_test`); the GEMV cores (`bf16_gemv_test`) and the
   loader's resident-image round trip (`glm_loader_test`);
 - Python checkpoint classification, exact expert-occupancy tests, and the
@@ -323,5 +331,8 @@ Every rank computes the verdict itself from an identical gathered table; a
 rank whose table was corrupt is caught at the next pick by a digest every
 rank carries (`GlmDevicePicker`). Without `--decode-graph` the same step
 runs eagerly (26 ms/token). The draft layer adds ~7.3 GiB per rank to the
-resident footprint. Serving (`glm_serve`) does not use it yet — its engine
-seam is single-token in/out.
+resident footprint. Serving uses the same graph at concurrency 1 with
+`--decode-graph --mtp`: on the four-node service (2026-09-03) a replay is
+43.6–44.1 ms and carries 1.69–1.88 tokens by the text's acceptance, 21.8–26.0
+ms/token, with the op-stream md5 identical on every rank. The default
+multi-request mode remains eager until the row-batched graph lands.

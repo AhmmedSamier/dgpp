@@ -95,8 +95,6 @@ class FakeEngine : public SchedulerEngine {
       throw std::runtime_error("fake: prefill on live slot");
     Live live;
     live.prompt_len = prompt.size();
-    live.held_blocks = blocks_for_tokens(static_cast<int64_t>(prompt.size()) +
-                                         kReserveSteps);
     live.served = 1;
     live.last_token = fake_eos_prefill(live.prompt_len)
                           ? kFakeEos
@@ -105,24 +103,26 @@ class FakeEngine : public SchedulerEngine {
     return live.last_token;
   }
 
-  int32_t step(int req, int64_t prev_token) override {
+  void reserve(int req, int64_t tokens) override {
+    Live& live = live_.at(req);
+    live.held_blocks = blocks_for_tokens(tokens);
+  }
+
+  std::vector<int32_t> step(int req) override {
     if (int d = op_delay_ms_.load())
       std::this_thread::sleep_for(std::chrono::milliseconds(d));
     Live& live = live_.at(req);
-    if (static_cast<int64_t>(live.last_token) != prev_token)
-      throw std::runtime_error("fake: prev-token mismatch");
     live.last_token =
         fake_eos_second(live.prompt_len) && live.served == 1
             ? kFakeEos
             : fake_token(live.prompt_len, static_cast<int>(live.served));
     ++live.served;
-    return live.last_token;
+    return {live.last_token};
   }
 
   void close(int req) override { live_.erase(req); }
 
  private:
-  static constexpr int64_t kReserveSteps = 64;
   struct Live {
     size_t prompt_len = 0;
     int64_t held_blocks = 0;

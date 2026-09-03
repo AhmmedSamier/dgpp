@@ -81,10 +81,6 @@ class FakeEngine : public SchedulerEngine {
       throw std::runtime_error("fake: prefill on live slot");
     Live live;
     live.prompt_len = prompt.size();
-    // A reserve mirror plausibly near the scheduler's own arithmetic
-    // (prompt + a generation budget) so pool meters read sanely.
-    live.held_blocks = blocks_for_tokens(static_cast<int64_t>(prompt.size()) +
-                                         kReserveSteps);
     live.served = 1;
     live.last_token = fake_eos_prefill(live.prompt_len)
                           ? kFakeEos
@@ -93,22 +89,24 @@ class FakeEngine : public SchedulerEngine {
     return live.last_token;
   }
 
-  int32_t step(int req, int64_t prev_token) override {
+  void reserve(int req, int64_t tokens) override {
     Live& live = live_.at(req);
-    if (static_cast<int64_t>(live.last_token) != prev_token)
-      throw std::runtime_error("fake: prev-token mismatch");
+    live.held_blocks = blocks_for_tokens(tokens);
+  }
+
+  std::vector<int32_t> step(int req) override {
+    Live& live = live_.at(req);
     live.last_token =
         fake_eos_second(live.prompt_len) && live.served == 1
             ? kFakeEos
             : fake_token(live.prompt_len, static_cast<int>(live.served));
     ++live.served;
-    return live.last_token;
+    return {live.last_token};
   }
 
   void close(int req) override { live_.erase(req); }
 
  private:
-  static constexpr int64_t kReserveSteps = 64;  // the reserve mirror
   struct Live {
     size_t prompt_len = 0;
     int64_t held_blocks = 0;
@@ -324,6 +322,27 @@ DGPP_TEST(serve_chatNonStream_exactCompletionShape) {
   require(resp.find("\"prompt_tokens\":4,\"completion_tokens\":3,"
                     "\"total_tokens\":7") != std::string::npos,
           "usage arithmetic: " + resp);
+}
+
+DGPP_TEST(serve_chatOneTokenLimit_returnsExactlyOneToken) {
+  // The prefill pick is completion token one. This boundary used to fall
+  // through to the same tick's decode because only step() checked the cap.
+  ServiceRig rig;
+  Client c(rig.port());
+  const std::string body = chat_body("abcd", 1);
+  c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+             "Content-Type: application/json\r\nContent-Length: " +
+             std::to_string(body.size()) + "\r\n\r\n" + body);
+  const std::string resp = c.read_until("usage", 5000);
+
+  require(resp.find("\"role\":\"assistant\",\"content\":\"" +
+                    fake_text(4, 1) + "\"") != std::string::npos,
+          "max_tokens=1 content: " + resp);
+  require(resp.find("\"prompt_tokens\":4,\"completion_tokens\":1,"
+                    "\"total_tokens\":5") != std::string::npos,
+          "max_tokens=1 usage: " + resp);
+  require(resp.find("\"finish_reason\":\"length\"") != std::string::npos,
+          "one-token cap finishes by length");
 }
 
 DGPP_TEST(serve_chatStream_chunkLifecycleInOrder) {

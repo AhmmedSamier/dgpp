@@ -54,6 +54,7 @@
 #include "common/test.hpp"
 #include "loaders/hf_cache.hpp"
 #include "models/dsa_geometry.hpp"
+#include "models/glm_fabric_engine.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_route_audit.hpp"
 #include "models/glm_sampler.hpp"
@@ -1935,6 +1936,274 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
                 "(accepted, next, draft) == the eager speculator's, "
                 "transcript == plain on every rank",
                 rank_steps[0], kTokens);
+}
+
+// ---------------------------------------------------------------------------
+// M6.6a phase 1 as the service drives it: Scheduler -> graph engine -> the
+// whole on-device MTP replay. Unlike the lower-level gate above, this pins the
+// public token timing: prefill emits token 0; a replay returns the verify
+// winners after it (one on a miss, two on a hit); the scheduler truncates at
+// the request cap. It then closes and reuses slot 0 with the SAME graph.
+//
+// An eager GreedySpeculator on a second MTP model is stepped in lockstep, one
+// step per scheduler tick, and after every tick the graph's device token feed
+// [next, draft] (written by the replay's last node) must equal the eager
+// speculator's (next, draft). The transcript alone cannot see this: a draft
+// block left stale by the slot reuse (its cache, its device row counter) only
+// lowers acceptance, while the verify rows still decide the plain transcript
+// — so this is the check that the reuse reseeds the draft side too.
+// ---------------------------------------------------------------------------
+DGPP_TEST(glm_tp_serving_graph_adapter_matches_plain_and_reuses_slot) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kTokens = 8;
+  constexpr int kReuseTokens = 5;
+  constexpr int kWorld = 2;
+  const int max_tokens = static_cast<int>(prompt.size()) + kTokens + 2;
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29922);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> first_seqs(kWorld);
+  std::vector<std::vector<int64_t>> reuse_seqs(kWorld);
+  std::vector<int> first_steps(kWorld, 0);
+  std::vector<int> reuse_steps(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus);
+        GlmDiagnosticModel plain(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded);
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/1, /*mtp=*/true);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/1, /*mtp=*/true);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        arrive_once();
+
+        const auto pick_rows = [&](const std::vector<Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
+                                            60000);
+        };
+        const auto host_pick = [&](const GlmDiagnosticModel::Outputs& out) {
+          return pick_rows(dgpp::local_row_maxes(out, 1))[0];
+        };
+        std::vector<int64_t> want;
+        GlmDiagnosticModel::Outputs out = plain.session_prefill(prompt);
+        int32_t token = host_pick(out);
+        for (int i = 0; i < kTokens; ++i) {
+          want.push_back(token);
+          if (i + 1 < kTokens) {
+            out = plain.session_step(token);
+            token = host_pick(out);
+          }
+        }
+        plain.session_close(0);
+
+        {
+          dgpp::GlmGraphEngineAdapter engine(
+              &graph, &bus, r, kWorld, scratch, cfg.vocab_size);
+          dgpp::glm::Scheduler sched(&engine, /*eos_token_ids=*/{});
+          // One request through the scheduler, tick by tick. With no EOS
+          // set and max_steps > 1 no request retires at admission, so
+          // every tick that returns true ran exactly one replay; the eager
+          // speculator takes its step after each and the two must agree on
+          // what the device will feed next. Returns the replay count.
+          const auto run_request = [&](const std::string& id,
+                                       int max_steps) {
+            dgpp::GreedySpeculator spec(eager, 0, pick_rows);
+            spec.start(host_pick(eager.session_prefill(prompt)));
+            dgpp::glm::SchedulerRequest req;
+            req.id = id;
+            req.prompt = prompt;
+            req.max_steps = max_steps;
+            sched.submit(std::move(req));
+            int steps = 0;
+            while (sched.tick()) {
+              ++steps;
+              (void)spec.step();
+              int64_t fed[2] = {-1, -1};
+              // The model's stream, never the legacy stream: the peer
+              // rank's thread may be mid-capture (the note on
+              // session_graph_seed_tokens).
+              DGPP_CUDA_OK(cudaMemcpyAsync(fed, graph.device_tokens(),
+                                           sizeof(fed),
+                                           cudaMemcpyDeviceToHost,
+                                           graph.stream()));
+              DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
+              if (fed[0] != spec.next() || fed[1] != spec.draft())
+                throw std::runtime_error(
+                    "request '" + id + "' replay " + std::to_string(steps) +
+                    ": the graph feeds [" + std::to_string(fed[0]) + ", " +
+                    std::to_string(fed[1]) +
+                    "] but the eager speculator has next " +
+                    std::to_string(spec.next()) + ", draft " +
+                    std::to_string(spec.draft()));
+            }
+            eager.session_close(0);
+            return steps;
+          };
+
+          first_steps[static_cast<size_t>(r)] = run_request("first", kTokens);
+          first_seqs[static_cast<size_t>(r)] = sched.results()[0].generated;
+          if (first_seqs[static_cast<size_t>(r)] != want)
+            throw std::runtime_error(
+                "serving graph transcript differs from plain decode");
+
+          // A second admission must use the graph era already recorded: its
+          // eager prefill/draft happen between windows, then slot 0 is seeded
+          // and replayed without another graph_record_begin.
+          reuse_steps[static_cast<size_t>(r)] =
+              run_request("reuse", kReuseTokens);
+          reuse_seqs[static_cast<size_t>(r)] = sched.results()[1].generated;
+          if (reuse_seqs[static_cast<size_t>(r)].size() !=
+                  static_cast<size_t>(kReuseTokens) ||
+              !std::equal(reuse_seqs[static_cast<size_t>(r)].begin(),
+                          reuse_seqs[static_cast<size_t>(r)].end(),
+                          want.begin()))
+            throw std::runtime_error(
+                "reused serving graph transcript differs from plain prefix");
+        }
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(),
+            errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r) {
+    require(first_seqs[static_cast<size_t>(r)] == first_seqs[0],
+            "serving graph first transcript differs across ranks");
+    require(reuse_seqs[static_cast<size_t>(r)] == reuse_seqs[0],
+            "serving graph reused transcript differs across ranks");
+    require(first_steps[static_cast<size_t>(r)] == first_steps[0] &&
+                reuse_steps[static_cast<size_t>(r)] == reuse_steps[0],
+            "serving graph replay counts differ across ranks");
+  }
+  DGPP_LOG_INFO("serving graph adapter w2: {} replays for {} tokens, then {} "
+                "replays for {} tokens on the reused slot; every replay's "
+                "device token feed == the eager speculator's (next, draft)",
+                first_steps[0], kTokens, reuse_steps[0], kReuseTokens);
+}
+
+// The T=1 form of the same adapter: a device-pick + commit graph with the
+// token upload node fed from the staged pending token. The 9-token prompt is
+// the one whose plain transcript varies token to token on this fixture (the
+// 7-token prompt's is a constant, which a stale feed would also reproduce).
+DGPP_TEST(glm_tp_serving_plain_graph_adapter_matches_plain) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kTokens = 6;
+  constexpr int kWorld = 2;
+  const int max_tokens = static_cast<int>(prompt.size()) + kTokens + 1;
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29923);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> rank_seqs(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus);
+        GlmDiagnosticModel plain(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/1, /*mtp=*/false);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        arrive_once();
+        const auto pick = [&](const GlmDiagnosticModel::Outputs& out) {
+          return dgpp::bus_greedy_pick_rows(
+              bus, r, kWorld, dgpp::local_row_maxes(out, 1), scratch,
+              60000)[0];
+        };
+
+        std::vector<int64_t> want;
+        GlmDiagnosticModel::Outputs out = plain.session_prefill(prompt);
+        int32_t token = pick(out);
+        for (int i = 0; i < kTokens; ++i) {
+          want.push_back(token);
+          if (i + 1 < kTokens) {
+            out = plain.session_step(token);
+            token = pick(out);
+          }
+        }
+
+        {
+          dgpp::GlmGraphEngineAdapter engine(
+              &graph, &bus, r, kWorld, scratch, cfg.vocab_size);
+          dgpp::glm::Scheduler sched(&engine, /*eos_token_ids=*/{});
+          dgpp::glm::SchedulerRequest request;
+          request.id = "plain-graph";
+          request.prompt = prompt;
+          request.max_steps = kTokens;
+          sched.submit(std::move(request));
+          sched.run_to_completion();
+          rank_seqs[static_cast<size_t>(r)] = sched.results()[0].generated;
+          if (rank_seqs[static_cast<size_t>(r)] != want)
+            throw std::runtime_error(
+                "T=1 serving graph transcript differs from plain decode");
+        }
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(),
+            errors[static_cast<size_t>(r)]);
+  require(rank_seqs[0] == rank_seqs[1],
+          "T=1 serving graph transcript differs across ranks");
 }
 
 DGPP_TEST(glm_tp_decode_session_hazard) {

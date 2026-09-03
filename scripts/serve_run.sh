@@ -25,8 +25,12 @@ HTTP_PORT=18080
 FABRIC_PORT=29970
 JOURNAL_PORT=29971
 MODEL=unsloth/GLM-5.3-Flash-FP8
-KNOBS="--max-concurrency 2 --kv-capacity 4096 --default-max-tokens 32 --queue-limit 8"
-LOG=/tmp/opencode/serve_fabric
+# DGPP_SERVE_KNOBS overrides the engine knobs on EVERY rank (the graph
+# modes: "--max-concurrency 1 --kv-capacity 4096 --default-max-tokens 256
+# --queue-limit 8 --decode-graph --mtp"); the peers must run the same
+# flags as rank 0, which is why this is one string for the whole world.
+KNOBS="${DGPP_SERVE_KNOBS:---max-concurrency 2 --kv-capacity 4096 --default-max-tokens 32 --queue-limit 8}"
+LOG="${DGPP_SERVE_LOG:-/tmp/opencode/serve_fabric}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5)
 
 mkdir -p "$LOG"

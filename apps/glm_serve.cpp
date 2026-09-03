@@ -35,6 +35,7 @@
 //   fabric: --world N --rank R (--peer HOST when rank > 0)
 //     [--fabric-port N (29970)] [--journal-port N (29971)]
 //     [--rendezvous-timeout-ms N (120000)]
+//     [--decode-graph [--mtp]] (phase 1: --max-concurrency 1)
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -99,15 +100,15 @@ struct ServeKnobs {
 // the engine seam (tokenizer/template, service, HTTP, the engine
 // loop). The fabric passes the journal — its hook rides engine_pass,
 // one record per pass between the drain and the tick — plus the oplog
-// audit tap (the 4-way consistency evidence) and the bus (stopped
-// last on exit). w1 passes null for all three and the loop is exactly
-// Stage 4a's.
-int serve_openai(dgpp::GenEngineAdapter* engine, const dgpp::GlmTextConfig& cfg,
+// audit tap (the 4-way consistency evidence). w1 passes null for both and
+// the loop is exactly Stage 4a's. The caller destroys the engine adapter
+// and stops the bus after this loop has joined.
+int serve_openai(dgpp::glm::SchedulerEngine* engine,
+                 const dgpp::GlmTextConfig& cfg,
                  const std::string& ckpt,
                  const std::string& model_display, const ServeKnobs& k,
                  bool no_eos, double boot_s,
                  dgpp::service::JournalWriter* journal,
-                 dgpp::net::CollectiveBus* bus,
                  dgpp::service::OpStreamObserver* oplog) {
   const dgpp::GlmTokenizer tok =
       dgpp::GlmTokenizer::load((fs::path(ckpt) / "tokenizer.json").string());
@@ -179,7 +180,6 @@ int serve_openai(dgpp::GenEngineAdapter* engine, const dgpp::GlmTextConfig& cfg,
   engine_loop.join();
   if (oplog)
     write_ops_file("serve_rank0.ops", oplog->text());  // the 4-way leg
-  if (bus) bus->stop();
   DGPP_LOG_INFO("serve: stopped cleanly");
   return 0;
 }
@@ -201,7 +201,8 @@ int main(int argc, char** argv) {
       "  [--max-connections N (default 64)] [--no-eos]\n"
       "  fabric (Stage 4b): --world N --rank R (--peer HOST when rank>0)\n"
       "    [--fabric-port N (29970)] [--journal-port N (29971)]\n"
-      "    [--rendezvous-timeout-ms N (120000)]\n";
+      "    [--rendezvous-timeout-ms N (120000)]\n"
+      "    [--decode-graph [--mtp]] (requires --max-concurrency 1)\n";
 
   std::string ckpt, model_id, peer;
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
@@ -209,7 +210,7 @@ int main(int argc, char** argv) {
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
   int max_connections = 64;
   int world = 1, rank = 0, rendezvous_timeout_ms = 120000;
-  bool no_eos = false;
+  bool no_eos = false, decode_graph = false, mtp = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -225,6 +226,8 @@ int main(int argc, char** argv) {
     else if (a == "--default-max-tokens") default_max_tokens = std::stoi(next());
     else if (a == "--max-connections") max_connections = std::stoi(next());
     else if (a == "--no-eos") no_eos = true;
+    else if (a == "--decode-graph") decode_graph = true;
+    else if (a == "--mtp") mtp = true;
     else if (a == "--world") world = std::stoi(next());
     else if (a == "--rank") rank = std::stoi(next());
     else if (a == "--peer") peer = next();
@@ -264,6 +267,20 @@ int main(int argc, char** argv) {
             "ranks > 0 need --peer (rank 0's fabric IP)");
     require(journal_port != fabric_port,
             "--journal-port must differ from --fabric-port");
+  }
+  if (mtp && !decode_graph) {
+    DGPP_LOG_ERROR("--mtp currently requires --decode-graph");
+    return 1;
+  }
+  if (decode_graph && world == 1) {
+    DGPP_LOG_ERROR(
+        "--decode-graph currently requires the fabric (--world > 1)");
+    return 1;
+  }
+  if (decode_graph && max_concurrency != 1) {
+    DGPP_LOG_ERROR(
+        "--decode-graph phase 1 requires --max-concurrency 1");
+    return 1;
   }
 
   std::signal(SIGINT, on_signal);
@@ -358,7 +375,7 @@ int main(int argc, char** argv) {
                                  &reducer, rank, world,
                                  dgpp::GlmResidency::Resident,
                                  dgpp::GlmHeadSharding::VocabSharded,
-                                 max_concurrency);
+                                 max_concurrency, mtp);
         DGPP_LOG_INFO(
             "rank {}: model constructed in {:.1f}s (resident, {} request "
             "slots, {}-token pool)",
@@ -368,10 +385,16 @@ int main(int argc, char** argv) {
                 .count(),
             max_concurrency, pool_tokens);
 
-        dgpp::GenEngineAdapter engine(
-            &model, max_concurrency,
-            dgpp::make_fabric_pick(bus.get(), rank, world, pick_scratch,
-                                   cfg.vocab_size));
+        std::unique_ptr<dgpp::glm::SchedulerEngine> engine;
+        if (decode_graph) {
+          engine = std::make_unique<dgpp::GlmGraphEngineAdapter>(
+              &model, bus.get(), rank, world, pick_scratch, cfg.vocab_size);
+        } else {
+          engine = std::make_unique<dgpp::GenEngineAdapter>(
+              &model, max_concurrency,
+              dgpp::make_fabric_pick(bus.get(), rank, world, pick_scratch,
+                                     cfg.vocab_size));
+        }
 
         if (rank != 0) {
           // THE PEER: no HTTP, no tokenizer — journal records carry
@@ -379,7 +402,7 @@ int main(int argc, char** argv) {
           // repeat: this loop is the whole peer (§11's mirror). The
           // scheduler is constructed with rank 0's queue_limit — the
           // streams are identical, so the bound must be too.
-          dgpp::glm::Scheduler sched(&engine, eos, queue_limit);
+          dgpp::glm::Scheduler sched(engine.get(), eos, queue_limit);
           dgpp::service::OpStreamObserver oplog;
           sched.set_observer(&oplog);
           DGPP_LOG_INFO("rank {}: following rank 0's journal", rank);
@@ -387,16 +410,19 @@ int main(int argc, char** argv) {
               &sched, &*reader, [] { return g_stop_requested.load(); });
           write_ops_file("serve_rank" + std::to_string(rank) + ".ops",
                          oplog.text());
+          engine.reset();
           cudaFreeHost(pick_scratch);
           bus->stop();
           DGPP_LOG_INFO("rank {}: exited cleanly", rank);
           return 0;
         }
         dgpp::service::OpStreamObserver oplog;  // rank 0's audit leg
-        const int rc = serve_openai(&engine, cfg, ckpt, model_display, knobs,
-                                    no_eos, boot_s(), &*journal, bus.get(),
+        const int rc = serve_openai(engine.get(), cfg, ckpt, model_display,
+                                    knobs, no_eos, boot_s(), &*journal,
                                     &oplog);
+        engine.reset();
         cudaFreeHost(pick_scratch);
+        bus->stop();
         return rc;
       } catch (...) {
         if (pick_scratch) cudaFreeHost(pick_scratch);
@@ -422,8 +448,7 @@ int main(int argc, char** argv) {
     dgpp::GenEngineAdapter engine(&model, max_concurrency,
                                   dgpp::make_w1_pick(cfg.vocab_size));
     return serve_openai(&engine, cfg, ckpt, model_display, knobs, no_eos,
-                         boot_s(), /*journal=*/nullptr, /*bus=*/nullptr,
-                         /*oplog=*/nullptr);
+                         boot_s(), /*journal=*/nullptr, /*oplog=*/nullptr);
   } catch (const std::exception& e) {
     DGPP_LOG_ERROR("serve: {}", e.what());
     return 1;

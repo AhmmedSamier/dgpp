@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4 (greedy, eager single-token step); the graph/MTP step, sampling modes, and batched decode are not behind the service yet |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; the concurrency-1 T=1/MTP graph engine is wired, loopback-gated and measured on the four-node service (21.8–26.0 ms/token with MTP, 32.1 at T=1, eager 36.4; 2026-09-03); sampling modes and batched decode are not behind the service yet |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -24,11 +24,20 @@ The engine generates text on four DGX Sparks: `glm_serve` boots a resident
 TP=4 model in 15–25 s from the per-rank image cache, answers the OpenAI
 chat/completions contract over HTTP/SSE with rank 0 as the sole ingress,
 and every rank executes an identical op stream (the 4-way op-stream md5 is
-the standing ritual). The service's engine seam is the eager single-token
+the standing ritual). Its default engine seam remains the eager single-token
 step: prefill + pick, then one token in / one token out per tick,
-time-multiplexed across up to 8 request slots. Its pace was last measured
-at Stage 4c (~175 ms/token warm) and has not been re-measured behind the
-service since the kernel rounds.
+time-multiplexed across up to 8 request slots. The optional concurrency-1
+`--decode-graph [--mtp]` seam is wired, passes the real two-rank loopback
+scheduler/graph gates including slot reuse, and is measured on the
+four-node service (2026-09-03, the record entry of that date): 32.0–33.2
+ms/token at T=1 and 21.8–26.0 with MTP (43.6–44.1 ms per replay at
+1.69–1.88 tokens per replay, text-dependent), against 31.3 and 22.45 in
+`glm_gen_check` — the service adds under 1 ms per replay at T=1 and ~1.5
+with MTP. The eager service, re-measured in the same session, is 36.4
+ms/token (the kernel rounds took it from Stage 4c's ~175 without a service
+change). The op-stream md5 was identical on all four ranks of all three
+worlds. Time to first token is the eager prefill in every mode, ~30 ms per
+prompt token.
 
 The fast path exists beside it, in `glm_gen_check`: the recorded decode
 step (`--decode-graph`, one CUDA graph per token, 90 collective nodes) runs
@@ -36,10 +45,10 @@ at 31.3 ms/token plain, and with the MTP layer (`--mtp`) the whole
 speculative step — two-row verify, on-device pick and verdict, predicated
 rollback, the draft block and its pick, the next tokens written on the
 device — is ONE graph replay at 22.45 ms/token effective, transcript
-identical to the plain loop. Bringing that step behind the service is the
-first remaining M6 item (design in M6 below). The weight floor for a step
-is ~24.5 ms (5.9 GB at ~240 GB/s); the plain step sits 6.8 ms above it,
-of which the 90 collectives are ~3.1 ms.
+identical to the plain loop. The Phase-1 service adapter drives that step
+behind `glm_serve` at the pace above. The weight floor for a step is
+~24.5 ms (5.9 GB at ~240 GB/s); the plain step sits 6.8 ms above it, of
+which the 90 collectives are ~3.1 ms.
 
 Numerics discipline as it stands: kernels may reassociate fp32 reductions
 when it buys latency (decision of 2026-09-02), so the transcript md5 is no
@@ -56,10 +65,9 @@ build-ci -j4`). `glm_tp_test` and `bus_test` run with
 
 Suggested order for what remains, each item's design in its section:
 
-1. M6: the one-graph MTP step behind `glm_serve` (concurrency 1 first, then
-   the row-batched graph, which is batched decode), sampling on the bus,
-   tool calls and `reasoning_content`, drain-on-stop, grow-on-demand
-   admission.
+1. M6: the row-batched graph (batched decode), sampling on the bus, tool
+   calls and `reasoning_content`, drain-on-stop, grow-on-demand admission;
+   the prefill behind the time to first token (~30 ms per prompt token).
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).
@@ -403,9 +411,11 @@ Deliverables as written, with their state:
    decode step), FCFS admission without head-of-line blocking, full-reserve
    admission (`blocks_for(prompt + max_steps)` held for the request's
    lifetime), external cancellation swept at fixed tick top, bounded queue
-   (503 at the door), up to 8 request slots. Decode across requests is
-   TIME-MULTIPLEXED (one request's row per step op); the batched row is
-   the remaining piece (below).
+   (503 at the door), up to 8 request slots. `step(req)` now returns a token
+   vector, and EOS/cancellation/cap are applied token-by-token so a
+   speculative batch cannot overshoot the public transcript. Decode across
+   requests is TIME-MULTIPLEXED (one request's row per step op); the batched
+   row is the remaining piece (below).
 2. Exact ByteLevel-BPE tokenizer and model-load-time chat-template compiler,
    keyed by tokenizer/template revision hashes. BUILT (Stages 3, 3b):
    `glm_tokenizer` byte-exact against HF tokenizers 0.23.1 on a 55-case
@@ -457,39 +467,57 @@ Exit criteria, status:
 - latency and throughput results are committed with the reproducible
   workload definition used to obtain them — ✓ for the single-stream fast
   path (`glm_gen_check`, the 300-step "Roman Republic" chat prompt,
-  `--decode-graph [--mtp]`, records of 2026-09-02/03); NOT for the service
-  (last: 32 tokens in 5.82 s warm at Stage 4c).
+  `--decode-graph [--mtp]`, records of 2026-09-02/03) and, since
+  2026-09-03, for the concurrency-1 service (nine fixed requests through
+  `scripts/serve_bench.py`, paced by `scripts/serve_pace.py`: 21.8–26.0
+  ms/token with MTP, 32.1 at T=1, 36.4 eager; 32 tokens in 1.44 s warm);
+  NOT for the multi-request service.
 
 ### Remaining M6 work, designed
 
-**6a. The one-graph step behind the service.** The service's seam
+**6a. The one-graph step behind the service.** The service's old seam
 (`SchedulerEngine`: `prefill(req, prompt) → token`, `step(req, prev) →
 token`, `close(req)`) is one token in, one out, and the scheduler feeds the
 token it was handed back. The recorded MTP step neither takes a token nor
 returns exactly one: the device feeds itself (`d_tokens_ = [next, draft]`,
 written by the replay's last node) and a step yields 1 or 2 accepted
-tokens. Seam change: `step(req)` returns the accepted tokens
-(`std::vector<int32_t>`, size 1..T, the first always the verify's `next`);
-the scheduler appends them in order, stops at the first EOS (dropping
-anything after it — the request retires, so the state's extra token is
-never observed), and truncates at `max_steps` the same way. The scheduler
-stays a pure function of the token stream, so the §11 rank-identity
-invariant is untouched, and the fake engine in `glm_scheduler_test` scripts
-multi-token steps to pin the EOS-in-the-middle and cap-overshoot rules.
+tokens. The implemented seam adds `reserve(req, prompt + max_steps)`, and
+`step(req)` returns the newly decided tokens (`std::vector<int32_t>`, size
+1..T; for MTP these are the verify winners through its accepted row). The
+scheduler appends them in order, stops at the first EOS (dropping anything
+after it — the request retires, so the state's extra token is never
+observed), and truncates at `max_steps` the same way. The scheduler stays a
+pure function of the token stream, so the §11 rank-identity invariant is
+untouched, and the fake engine in `glm_scheduler_test` scripts multi-token
+steps to pin the EOS-in-the-middle and cap-overshoot rules.
 
 The bus has ONE graph era per process (`graph_record_begin` once; the
 window's cells are per recorded node), so "a graph per request slot" is not
 available; the graph must be request-indexed on the device. Two phases:
 
-- *Phase 1 — concurrency 1.* `glm_serve --max-concurrency 1 --decode-graph
-  [--mtp]`: prefill eager (bulk collectives between windows — the mixed
-  era, DESIGN §6.2), first pick eager, then the one-graph step per tick
-  with slot 0 baked in. On `close`, the next request reuses slot 0, so
-  the graph stays valid; `session_reserve_blocks` (DSA admission for the
-  whole reservation) runs at admission before the first replay, which is
-  exactly the scheduler's full-reserve policy. This is a wiring change
-  only (`GenEngineAdapter` learns the graph loop `glm_gen_check` already
-  runs) and moves the single-user service from ~175 to ~22 ms/token.
+- *Phase 1 — concurrency 1: BUILT AND MEASURED 2026-09-03.* `glm_serve
+  --max-concurrency 1 --decode-graph [--mtp]`: prefill is eager (bulk
+  collectives between windows — the mixed era, DESIGN §6.2),
+  first pick is eager, then `GlmGraphEngineAdapter` drives one graph replay
+  per tick with slot 0 baked in. On `close`, the next request reuses slot 0,
+  reseeds the graph, and does not record a second era.
+  `session_reserve_blocks` now runs at admission for both eager and graph
+  engines, before the first replay. Gates:
+  `scheduler_oneTokenCap_retiresOnPrefillWithoutDecode`, the in-batch EOS
+  and cap-overshoot host cases, and real two-rank loopback
+  `glm_tp_serving_{plain_,}graph_adapter_matches_plain...` (T=1 and MTP,
+  transcript == plain, cross-rank identical, MTP slot reuse with the graph's
+  device token feed `[next, draft]` checked against an eager speculator
+  after every replay — a stale draft block would not show in the
+  transcript, only in the acceptance rate). Measured on the four-node
+  service (the record's 2026-09-03 entry): 43.6–44.1 ms per replay at
+  1.69–1.88 tokens per replay = 21.8–26.0 ms/token with MTP, 32.0–33.2 at
+  T=1, against `glm_gen_check`'s 42.36/22.45 and 31.3 — the service adds
+  ~1.5 ms per replay with MTP and under 1 ms at T=1; the eager service
+  re-measured at 36.4 ms/token (not Stage 4c's 175: the kernel rounds had
+  moved it). Op-stream md5 identical on all four ranks of all three worlds
+  over the same 1144 tokens. Time to first token is the prefill (~30 ms per
+  prompt token, all modes), the next single-user item.
 - *Phase 2 — the row-batched graph.* Rows = (request slot, spec row)
   pairs, up to `kDecodeRows = 8` (e.g. 4 requests × T=2) with the shape
   fixed at capture and unoccupied rows padded at position −1 (the

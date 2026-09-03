@@ -9,11 +9,13 @@ sharded load and the per-rank image cache (M4/M5), the incremental decode
 engine with request sessions, the exact tokenizer and chat-template
 interpreter, the deterministic scheduler and admission journal, the
 OpenAI-compatible HTTP/SSE service (`glm_serve`, M6), the recorded decode
-step with the collectives as graph nodes, and greedy MTP speculative decode
-as one graph replay per step (M8). It does **not** yet contain the prefix
-cache (§8 is a design), stochastic sampling on the distributed path (§10),
-or the graph/MTP step behind the service (§11). Sections marked "as built"
-describe the code; sections marked "design" describe what remains.
+step with the collectives as graph nodes, greedy MTP speculative decode as
+one graph replay per step (M8), and the concurrency-1 T=1/MTP graph adapter
+behind the service (loopback-gated and measured on the four-node service,
+2026-09-03). It does **not** yet contain the prefix cache (§8 is a design),
+stochastic sampling on the distributed path (§10), or row-batched service
+decode (§11). Sections marked "as built" describe the code; sections marked
+"design" describe what remains.
 
 Target: text serving for `unsloth/GLM-5.3-Flash-FP8` on four NVIDIA DGX Spark
 systems. Vision execution is post-v1.
@@ -1479,14 +1481,17 @@ fabric ranks are separate processes and never see it.
 
 Where the step's time is after the on-device work, and the small-kernel
 round that found the floor, are §7.6. The step is driven by
-`glm_gen_check --decode-graph --mtp`; the service does not use it yet.
+`glm_gen_check --decode-graph --mtp` and by `glm_serve --max-concurrency 1
+--decode-graph --mtp`. The latter is gated through the real scheduler on a
+two-rank loopback bus and measured on the four-node service at 43.6–44.1 ms
+per replay, 21.8–26.0 ms/token by acceptance (§11).
 
 ### What remains (design)
 
-- *Behind the service:* the engine seam becomes "step(req) → the accepted
-  tokens" and the graph must be request-indexed on the device, because the
-  bus has one graph era per process (§6.2). Concurrency-1 first, then
-  rows = (request, spec row) with padding rows — PLAN M6 6a.
+- *Row-batched service:* Phase 1 bakes request slot 0 into the one reusable
+  graph. Phase 2 makes it request-indexed on the device, because the bus has
+  one graph era per process (§6.2): rows = (request, spec row) with padding
+  rows — PLAN M6 6a.
 - *Sampling under MTP:* exact speculative sampling with a deterministic
   draft accepts draft `x` with probability `p(x)` under the verify row and
   otherwise samples from `p` with `x` removed. `p(x)` needs the row's
@@ -1644,13 +1649,19 @@ batch/shape bucket and contain no allocation or host synchronization.
 
 **The scheduler** (`glm_scheduler.{hpp,cpp}`) is a pure-host policy
 component — no CUDA, no bus, no model — over two seams: `SchedulerEngine`
-(`prefill(req, prompt) → token`, `step(req, prev) → token`, `close(req)`;
-the pick is fused into the op because at TP>1 the pick is a collective and
-the seam's call order IS the collective order — the scheduler never sees
-logits) and the DSA pool meters. Invariant: every rank runs the same pure
-function of (requests, meters) — no clocks, no unordered iteration, no
-thread arrival — so all ranks issue the same ops on the same slots in the
-same order (the §5 rule, made mechanical). Policy, decided with the user:
+(`prefill(req, prompt) → token`, `reserve(req, prompt + max_steps)`,
+`step(req) → vector<token>`, `close(req)`; the pick is fused into the op
+because at TP>1 the pick is a collective and the seam's call order IS the
+collective order — the scheduler never sees logits) and the DSA pool meters.
+The eager adapter owns one pending input token per slot and returns a
+one-token vector; the graph adapter owns `[next,draft]` on the device and
+returns one or two newly decided verify winners. EOS, scripted cancellation,
+and the request cap are applied after each returned token, including the
+prefill pick, and any suffix after retirement is dropped. Invariant: every
+rank runs the same pure function of (requests, meters) — no clocks, no
+unordered iteration, no thread arrival — so all ranks issue the same ops on
+the same slots in the same order (the §5 rule, made mechanical). Policy,
+decided with the user:
 STRICT ALTERNATION (each tick admits at most ONE queued request, then runs
 exactly one round-robin decode step — a mid-answer request never waits
 behind a burst of read-ins); FCFS admission WITHOUT head-of-line blocking
@@ -1702,23 +1713,43 @@ its window (a single-shot connect lost a 30 ms race to rank 0's bind);
 minijson views its input, so a parsed record is copied out before the
 buffer dies.
 
-**Measured** (fabric TP=4, Stage 4b/4c, 2026-09-01): bus world in 2.4 s,
-journal peers in 30 ms, HTTP up with the model — since the image cache a
-ready model is 15–25 s (§3); "What is the capital of Germany?" 32 tokens
-in 5.82 s warm (~175 ms/token — the eager single-token step before the
-kernel rounds; not re-measured behind the service since); the fabric's
-distributed greedy pick produced the same token sequence as w1's
-full-vocab argmax.
+**Measured** (fabric TP=4, Stage 4b/4c, 2026-09-01; re-measured
+2026-09-03): bus world in 2.4 s, journal peers in 30 ms, HTTP up with the
+model — since the image cache a ready model is 15–25 s (§3; 24.4 s to
+serving with the MTP layer); "What is the capital of Germany?" 32 tokens in
+5.82 s warm at Stage 4c (~175 ms/token) and 1.80 s on 2026-09-03 (36.4
+ms/token — the kernel rounds' gain on the same eager single-token step);
+the fabric's distributed greedy pick produced the same token sequence as
+w1's full-vocab argmax.
+
+**The concurrency-1 graph engine** (`GlmGraphEngineAdapter`, M6.6a Phase 1):
+`glm_serve --max-concurrency 1 --decode-graph [--mtp]` keeps prefill and its
+first pick eager, records the T=1 or T=2 device-pick graph lazily before the
+first decode, and replays it once per scheduler step. The scheduler's
+explicit reserve call materializes its full-reserve policy in the DSA block
+table before replay. Closing releases slot 0; a later admission eagerly
+prefills and reseeds the graph's stable addresses, then reuses the same graph
+era. Local gates run both T=1 and MTP through the real scheduler on a
+two-rank loopback bus, compare against plain decode, check cross-rank
+identity, and reuse the MTP graph for a second request with an eager
+speculator stepped in lockstep (the device's `[next, draft]` feed after every
+replay equals the eager `(next, draft)`, so the reused draft block is
+checked, not only the transcript it cannot change). Measured on the
+four-node service (2026-09-03, the record): 32.0–33.2 ms/token at T=1 and
+43.6–44.1 ms per replay at 1.69–1.88 tokens per replay with MTP (21.8–26.0
+ms/token, text-dependent acceptance), against `glm_gen_check`'s 31.3 and
+42.36 — the scheduler tick, observer, journal record and SSE pump cost
+under 1 ms per replay at T=1 and ~1.5 with MTP; the client sees one SSE
+chunk per replay. Op-stream md5 identical on all four ranks of the eager,
+T=1 and MTP worlds over the same 1144 tokens. Time to first token is the
+eager prefill, ~30 ms per prompt token in every mode.
 
 ### Design for what remains (PLAN M6 6a/6c/6d, M9)
 
-- *The one-graph step behind the seam:* `step(req)` returns the accepted
-  tokens (1..T; the scheduler stops at the first EOS and truncates at the
-  cap — the retired request's extra device token is never observed);
-  concurrency 1 first with slot 0 baked in, then the row-batched graph
-  with padding rows (§9). Prefill stays eager between windows (the mixed
-  era); `session_reserve_blocks` at admission is the full-reserve policy
-  in device form.
+- *The row-batched graph:* generalize Phase 1's slot-0 graph to device-side
+  request indexing and padded (request, spec-row) rows (§9), so one replay
+  advances every active request. Prefill stays eager between windows (the
+  mixed era); admission changes occupancy, not graph shape.
 - *Drain-on-stop:* stop is a flag read at tick top; active streams get an
   error event, requests retire, the stop record goes out, THEN the bus
   tears down — never under an in-flight collective (today SIGINT

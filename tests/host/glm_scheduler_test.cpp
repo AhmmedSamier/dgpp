@@ -14,9 +14,8 @@
 //     with (and cancelled around) other requests;
 //   * determinism — the same scenario produces the identical op stream.
 //
-// The fake also enforces the engine seam: step()'s prev_token must equal
-// the last token served for that slot (cross-request contamination fails
-// loudly), scripts are consumed in order, and close() must find a live
+// The fake also enforces the engine seam: scripts are consumed in order,
+// each slot owns its pending transcript, and close() must find a live
 // reservation to release.
 #include <cstdio>
 #include <map>
@@ -49,11 +48,23 @@ class FakeEngine : public SchedulerEngine {
         total_blocks_(total_blocks),
         block_tokens_(block_tokens) {}
 
-  // Arms `slot`'s NEXT episode: the token stream (prefill picks tokens[0],
-  // each step picks the next) and the max_steps the reservation mirrors.
+  // Arms `slot`'s NEXT scalar episode: prefill returns tokens[0], then each
+  // step returns one following token.
   void arm(int slot, std::vector<int32_t> tokens, int max_steps) {
-    episodes_[slot].push_back(
-        Episode{std::move(tokens), max_steps});
+    require(!tokens.empty(), "fake: cannot arm an empty token script");
+    Episode e;
+    e.first = tokens.front();
+    e.max_steps = max_steps;
+    for (size_t i = 1; i < tokens.size(); ++i)
+      e.steps.push_back({tokens[i]});
+    episodes_[slot].push_back(std::move(e));
+  }
+
+  // Arms the new speculative seam directly: prefill returns `first`, and
+  // each subsequent engine step returns one scripted batch.
+  void arm_batches(int slot, int32_t first,
+                   std::vector<std::vector<int32_t>> steps, int max_steps) {
+    episodes_[slot].push_back(Episode{first, std::move(steps), max_steps});
   }
 
   const std::vector<std::string>& ops() const { return ops_; }
@@ -84,38 +95,38 @@ class FakeEngine : public SchedulerEngine {
     Live live;
     live.episode = std::move(queue.front());
     queue.erase(queue.begin());
-    require(!live.episode.tokens.empty(),
-            "fake: empty token script for slot " + std::to_string(req));
-    // Mirror the scheduler's reserve: prompt + max_steps, block-rounded.
-    live.held_blocks =
-        blocks_for_tokens(static_cast<int64_t>(prompt.size()) +
-                           live.episode.max_steps);
-    live.served = 1;
-    live.last_token = live.episode.tokens[0];
+    live.prompt_tokens = static_cast<int64_t>(prompt.size());
+    live.last_token = live.episode.first;
     live_[req] = live;
     ops_.push_back("P:" + std::to_string(req) + ":" +
                    std::to_string(prompt.size()));
     return live.last_token;
   }
 
-  int32_t step(int req, int64_t prev_token) override {
+  void reserve(int req, int64_t tokens) override {
+    require(live_.count(req) != 0,
+            "fake: reserve on unopened slot " + std::to_string(req));
+    Live& live = live_[req];
+    require(live.held_blocks == 0, "fake: slot reserved twice");
+    require(tokens == live.prompt_tokens + live.episode.max_steps,
+            "fake: scheduler reservation token count drifted");
+    live.held_blocks = blocks_for_tokens(tokens);
+  }
+
+  std::vector<int32_t> step(int req) override {
     require(live_.count(req) != 0,
             "fake: step on unopened slot " + std::to_string(req));
     Live& live = live_[req];
-    require(static_cast<int64_t>(live.last_token) == prev_token,
-            "fake: slot " + std::to_string(req) + " stepped with prev " +
-                std::to_string(prev_token) + " but was last served " +
-                std::to_string(live.last_token) +
-                " — cross-request contamination");
-    require(live.served < live.episode.tokens.size(),
+    require(live.next_step < live.episode.steps.size(),
             "fake: token script exhausted for slot " +
                 std::to_string(req) + " (a step the policy should not "
                 "have issued — script the test correctly)");
-    live.last_token = live.episode.tokens[live.served];
-    ++live.served;
+    std::vector<int32_t> out = live.episode.steps[live.next_step++];
+    const int32_t prev_token = live.last_token;
+    if (!out.empty()) live.last_token = out.back();
     ops_.push_back("S:" + std::to_string(req) + ":" +
                    std::to_string(prev_token));
-    return live.last_token;
+    return out;
   }
 
   void close(int req) override {
@@ -130,13 +141,15 @@ class FakeEngine : public SchedulerEngine {
 
  private:
   struct Episode {
-    std::vector<int32_t> tokens;
-    int max_steps;
+    int32_t first = -1;
+    std::vector<std::vector<int32_t>> steps;
+    int max_steps = 0;
   };
   struct Live {
     Episode episode;
     int64_t held_blocks = 0;
-    size_t served = 0;
+    int64_t prompt_tokens = 0;
+    size_t next_step = 0;
     int32_t last_token = -1;
   };
 
@@ -375,6 +388,58 @@ DGPP_TEST(scheduler_eosMidRun_retiresBeforeStepsCap) {
   const auto& a = sched.results()[0];
   require(a.reason == Scheduler::Result::Reason::kEos && a.steps_done == 3,
           "Done/eos at 3 tokens");
+}
+
+DGPP_TEST(scheduler_oneTokenCap_retiresOnPrefillWithoutDecode) {
+  // GIVEN a request whose whole output budget is the prefill pick,
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.arm(0, {17}, /*max_steps=*/1);
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("one", 5, 1));
+
+  // WHEN it runs, THEN no decode step is issued: the prefill pick is token
+  // one by the SchedulerRequest contract and therefore meets the cap.
+  sched.run_to_completion();
+  require(engine.op_stream() == "P:0:5 C:0",
+          "max_steps=1 must not issue an extra decode: " +
+              engine.op_stream());
+  const auto& out = sched.results()[0];
+  require(out.reason == Scheduler::Result::Reason::kSteps &&
+              out.steps_done == 1 && ids_joined(out.generated) == "17",
+          "one-token cap must return exactly the prefill pick");
+}
+
+DGPP_TEST(scheduler_multiTokenStep_eosInMiddleDropsSuffix) {
+  // GIVEN one speculative pass that returns a token, EOS, then a token the
+  // device happened to decide after the public request had ended,
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.arm_batches(0, /*first=*/1, {{2, kEos, 77}}, /*max_steps=*/8);
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("spec", 5, 8));
+
+  // WHEN it runs, THEN EOS is observable and the suffix is not.
+  sched.run_to_completion();
+  require(engine.op_stream() == "P:0:5 S:0:1 C:0",
+          "one speculative pass then close");
+  const auto& out = sched.results()[0];
+  require(out.reason == Scheduler::Result::Reason::kEos &&
+              out.steps_done == 3 && ids_joined(out.generated) == "1,2,999",
+          "tokens after an in-batch EOS must be dropped");
+}
+
+DGPP_TEST(scheduler_multiTokenStep_capOvershootDropsSuffix) {
+  // GIVEN two output slots left and a speculative pass returning three,
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.arm_batches(0, /*first=*/1, {{2, 3, 4}}, /*max_steps=*/3);
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("spec", 5, 3));
+
+  // WHEN it runs, THEN exactly the remaining two land in the transcript.
+  sched.run_to_completion();
+  const auto& out = sched.results()[0];
+  require(out.reason == Scheduler::Result::Reason::kSteps &&
+              out.steps_done == 3 && ids_joined(out.generated) == "1,2,3",
+          "a speculative batch must truncate exactly at max_steps");
 }
 
 using dgpp::glm::QueueFullError;

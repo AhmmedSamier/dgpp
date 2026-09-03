@@ -27,7 +27,10 @@ class GenEngineAdapter : public glm::SchedulerEngine {
  public:
   using Pick = std::function<int32_t(const GlmDiagnosticModel::Outputs&)>;
   GenEngineAdapter(GlmDiagnosticModel* model, int max_requests, Pick pick)
-      : model_(model), slots_(max_requests), pick_(std::move(pick)) {}
+      : model_(model),
+        slots_(max_requests),
+        pick_(std::move(pick)),
+        pending_(static_cast<size_t>(max_requests), -1) {}
 
   int max_concurrent_requests() const override { return slots_; }
   int64_t pool_blocks_total() const override {
@@ -40,22 +43,36 @@ class GenEngineAdapter : public glm::SchedulerEngine {
     return model_->dsa_blocks_for_tokens(tokens);
   }
   int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
-    return pick_(model_->session_prefill(req, prompt));
+    const int32_t token = pick_(model_->session_prefill(req, prompt));
+    pending_.at(static_cast<size_t>(req)) = token;
+    return token;
   }
-  int32_t step(int req, int64_t prev_token) override {
-    return pick_(model_->session_step(req, prev_token));
+  void reserve(int req, int64_t tokens) override {
+    model_->session_reserve_blocks(req, tokens);
   }
-  void close(int req) override { model_->session_close(req); }
+  std::vector<int32_t> step(int req) override {
+    int64_t& pending = pending_.at(static_cast<size_t>(req));
+    if (pending < 0)
+      throw std::logic_error("generation step on a slot without a pending "
+                             "token");
+    const int32_t next = pick_(model_->session_step(req, pending));
+    pending = next;
+    return {next};
+  }
+  void close(int req) override {
+    pending_.at(static_cast<size_t>(req)) = -1;
+    model_->session_close(req);
+  }
 
  private:
   GlmDiagnosticModel* model_;
   int slots_;
   Pick pick_;
+  std::vector<int64_t> pending_;
 };
 
-// The world-1 pick: full-vocab argmax over the bf16 logits row. The
-// float conversion is hoisted into the returned closure so the decode
-// path allocates nothing per token.
+// The world-1 pick: full-vocab argmax over the fp32 logits row. The closure
+// keeps the decode path allocation-free.
 inline GenEngineAdapter::Pick make_w1_pick(int64_t vocab) {
   return [vocab](const GlmDiagnosticModel::Outputs& out) -> int32_t {
     const int32_t t =

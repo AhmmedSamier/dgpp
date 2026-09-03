@@ -12,9 +12,13 @@ namespace dgpp::glm {
 namespace {
 
 // A request's lifetime token footprint: the prompt plus every token it
-// can generate. One token of deliberate slack (the single-request path's
-// sizing convention) — the block rounding makes it matter only at exact
-// block boundaries, and over-reserving is the safe direction.
+// can generate. The last generated token is never fed back, so a one-row
+// decode writes no position past prompt + max_steps - 2 and this count
+// carries one token of slack; a two-row speculative verify (the MTP graph
+// engine, which steps only while fewer than max_steps tokens stand) writes
+// its second row at prompt + max_steps - 1 at the latest, so the slack is
+// exactly its second row. This count is also what SchedulerEngine::reserve
+// pins in the engine, so it must not shrink.
 int64_t reserve_tokens(const SchedulerRequest& r) {
   return static_cast<int64_t>(r.prompt.size()) + r.max_steps;
 }
@@ -154,39 +158,56 @@ void Scheduler::admit(int arrival) {
     throw std::logic_error("Scheduler: admit without a free slot");
   const int64_t reserve = reserve_blocks(r);
   const int32_t token = engine_->prefill(slot, r.spec.prompt);
-  if (token < 0)
+  if (token < 0) {
+    engine_->close(slot);
     throw std::runtime_error("Scheduler: engine prefill returned token " +
                              std::to_string(token) + " for request '" +
                              r.spec.id + "'");
+  }
+  // Capture/device-position decode may not grow the DSA table during a
+  // replay. Admission has already proved this reservation fits, and no
+  // other scheduler mutation can interleave between that proof and here.
+  try {
+    engine_->reserve(slot, reserve_tokens(r.spec));
+  } catch (...) {
+    engine_->close(slot);
+    throw;
+  }
   r.state = State::kActive;
   r.slot = slot;
-  r.steps_done = 1;
-  r.generated.push_back(static_cast<int64_t>(token));
   slots_[static_cast<size_t>(slot)] = arrival;
-  ++tokens_generated_;
-  if (observer_) observer_->on_token(r.spec.id, token, r.steps_done);
   if (arrival == deferred_logged_) deferred_logged_ = -1;
   DGPP_LOG_INFO(
       "sched: request '{}' admitted to slot {} (reserve {} blocks; pool "
       "{}/{} blocks in use) — first token {}",
       r.spec.id, slot, reserve, engine_->pool_blocks_in_use(),
       engine_->pool_blocks_total(), token);
-  if (is_eos(token)) {
-    // EOS on the prefill pick: the model answered in one token.
-    retire(arrival, Result::Status::kDone, Result::Reason::kEos);
-  }
+  (void)append_token(arrival, token);
 }
 
 void Scheduler::step_one(int arrival) {
   Request& r = requests_[static_cast<size_t>(arrival)];
-  const int32_t token = engine_->step(r.slot, r.generated.back());
+  const std::vector<int32_t> tokens = engine_->step(r.slot);
+  if (tokens.empty())
+    throw std::runtime_error("Scheduler: engine step returned no tokens for "
+                             "request '" + r.spec.id + "'");
+  cursor_ = arrival;
+  for (const int32_t token : tokens) {
+    // A speculative pass can have advanced farther than the public request
+    // survives. EOS/cap/cancel retires the slot and deliberately drops the
+    // rest of this batch; its extra device state can never be observed.
+    if (append_token(arrival, token)) break;
+  }
+}
+
+bool Scheduler::append_token(int arrival, int32_t token) {
+  Request& r = requests_[static_cast<size_t>(arrival)];
   if (token < 0)
-    throw std::runtime_error("Scheduler: engine step returned token " +
+    throw std::runtime_error("Scheduler: engine returned token " +
                              std::to_string(token) + " for request '" +
                              r.spec.id + "'");
-  r.steps_done += 1;
+  ++r.steps_done;
   r.generated.push_back(static_cast<int64_t>(token));
-  cursor_ = arrival;
   ++tokens_generated_;
   if (observer_) observer_->on_token(r.spec.id, token, r.steps_done);
   DGPP_LOG_INFO("sched: request '{}' step {}: token {}", r.spec.id,
@@ -199,6 +220,7 @@ void Scheduler::step_one(int arrival) {
   } else if (r.steps_done >= r.spec.max_steps) {
     retire(arrival, Result::Status::kDone, Result::Reason::kSteps);
   }
+  return r.state == State::kTerminal;
 }
 
 void Scheduler::retire(int arrival, Result::Status status,

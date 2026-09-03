@@ -86,9 +86,10 @@ namespace dgpp::glm {
 
 // The engine seam the scheduler drives. The real binding (glm_gen_check)
 // closes over GlmDiagnosticModel + the pick; the host gate binds a
-// recording fake. prefill/step RETURN the picked token — the pick rides
-// inside the op (at TP>1 it is the distributed greedy pick, a
-// collective), which is what keeps the scheduler pure host code.
+// recording fake. The pick rides inside each op (at TP>1 it is a
+// distributed collective), which is what keeps the scheduler pure host
+// code. A step returns every token newly decided by that engine pass: one
+// for ordinary decode, or 1..T for a speculative step.
 class SchedulerEngine {
  public:
   virtual ~SchedulerEngine() = default;
@@ -104,9 +105,15 @@ class SchedulerEngine {
   // Opens slot `req` (fresh state), prefills `prompt`, picks the first
   // generated token. Returns a token id in [0, vocab).
   virtual int32_t prefill(int req, const std::vector<int64_t>& prompt) = 0;
-  // Processes `prev_token` at slot `req`'s next position and picks the
-  // next token.
-  virtual int32_t step(int req, int64_t prev_token) = 0;
+  // Pins the slot's lifetime block reservation. The scheduler calls this
+  // immediately after prefill and before the first step; `tokens` is
+  // prompt.size() + max_steps. Device-driven graphs rely on this because
+  // they cannot grow a host-owned block table during replay.
+  virtual void reserve(int req, int64_t tokens) = 0;
+  // Advances slot `req` and returns the newly decided tokens in transcript
+  // order. Must return at least one nonnegative token. The engine owns its
+  // pending input token(s), which lets a recorded graph feed itself.
+  virtual std::vector<int32_t> step(int req) = 0;
   // Retires the slot: blocks return to the pool; the slot may reopen.
   virtual void close(int req) = 0;
 };
@@ -227,6 +234,9 @@ class Scheduler {
   int queued_count() const;
   void admit(int arrival);
   void step_one(int arrival);
+  // Appends one token and applies terminal conditions in their canonical
+  // order. Returns true when the request retired.
+  bool append_token(int arrival, int32_t token);
   // Retire conditions are checked in this order: natural EOS first, then
   // scripted cancellation, then the steps cap — a cancelled request that
   // had already finished naturally reports Done (client intent cannot
