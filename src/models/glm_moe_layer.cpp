@@ -60,6 +60,7 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
         static_cast<size_t>(decode_slots_) * (cfg_.top_k + 1);
     DGPP_CUDA_OK(cudaMalloc(&d_slot_act_, rows * I * 2));
     DGPP_CUDA_OK(cudaMalloc(&d_slot_down_, rows * H * sizeof(float)));
+    DGPP_CUDA_OK(cudaMalloc(&d_slot_order_, rows * sizeof(int32_t)));
     // One table of every expert's three views, re-uploaded per
     // enqueue_decode. The source is PINNED (see the member's comment):
     // pageable async H2D syncs the stream before initiating, which would
@@ -103,6 +104,7 @@ GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_acc_);
   cudaFree(d_slot_act_);
   cudaFree(d_slot_down_);
+  cudaFree(d_slot_order_);
   cudaFree(d_expert_views_);
   cudaFree(d_expert_views_graph_);
   cudaFreeHost(h_expert_views_pinned_);
@@ -332,14 +334,22 @@ void GlmMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out,
   const int slots = tokens * (K + 1);
   const int I_r = static_cast<int>(w_.experts[0].rows);  // routed inter slice
   const int I_s = static_cast<int>(w_.shared[0].rows);   // shared inter slice
+  // Multi-token batches (a speculative verify) run their slots in
+  // expert order so an expert two rows share is read from DRAM once (see
+  // launch_moe_slot_order); one token has nothing to share.
+  const int32_t* order = nullptr;
+  if (tokens > 1) {
+    launch_moe_slot_order(d_ids_, d_slot_order_, slots, K, E, stream);
+    order = d_slot_order_;
+  }
   // Gate + up + swiglu in one launch (bit-identical to the three-launch
   // chain — see the launcher). Per-slot bounds are consumed downstream
   // (the down GEMV reads only k=I_s of the shared slot).
   launch_moe_slot_gate_up_swiglu(
-      hidden, H, d_ids_, table, I_r, H, I_s, H, w_.shared[0].payload,
+      hidden, H, d_ids_, order, table, I_r, H, I_s, H, w_.shared[0].payload,
       w_.shared[0].scales, w_.shared[1].payload, w_.shared[1].scales,
       d_slot_act_, I_r, slots, K, cfg_.swiglu_limit, stream);
-  launch_moe_slot_down(d_slot_act_, I_r, d_ids_, table, H, I_r, H,
+  launch_moe_slot_down(d_slot_act_, I_r, d_ids_, order, table, H, I_r, H,
                        I_s, w_.shared[2].payload, w_.shared[2].scales,
                        d_slot_down_, H, slots, K, stream);
   launch_moe_slot_accum(out, d_slot_down_, d_weights_, tokens, H, K, stream);

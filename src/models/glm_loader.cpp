@@ -939,11 +939,30 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
   if (residency_ == GlmResidency::Resident) open_resident_image();
 }
 
+namespace {
+// /proc/meminfo MemAvailable in bytes (0 when unreadable): what the kernel
+// will hand out once it reclaims the page cache — which cudaMemGetInfo's
+// "free" on the GB10's unified pool does NOT count. After one resident
+// load the checkpoint's ~30 GiB of file pages sit in that cache, and the
+// next process's footprint check would refuse memory that is available
+// (2026-09-03: rank 2 reported 88 GiB free of 120 with 117 available).
+size_t host_mem_available_bytes() {
+  std::ifstream in("/proc/meminfo");
+  std::string key;
+  uint64_t kib = 0;
+  std::string unit;
+  while (in >> key >> kib >> unit)
+    if (key == "MemAvailable:") return static_cast<size_t>(kib) * 1024;
+  return 0;
+}
+}  // namespace
+
 // Fail in the constructor, not three minutes into the load: the resident
 // footprint is known from the byte formula before a single byte moves.
-// The device's free memory is the measure (the GB10's unified pool: the
-// same bytes the host would otherwise call MemAvailable); the headroom
-// covers the staging mirror, the CUDA context and the bus's buffers.
+// The measure is the larger of the device's free memory and the host's
+// MemAvailable (the GB10's unified pool is the host's memory; the page
+// cache is reclaimable); the headroom covers the staging mirror, the CUDA
+// context and the bus's buffers.
 void GlmLayerStream::check_resident_footprint_fits() const {
   size_t footprint = globals_bytes(cfg_, rank_, world_, head_);
   for (int l = 0; l < cfg_.num_hidden_layers; ++l)
@@ -953,11 +972,14 @@ void GlmLayerStream::check_resident_footprint_fits() const {
     footprint += layer_bytes(cfg_, cfg_.mtp_layer(), rank_, world_);
   size_t free_bytes = 0, total_bytes = 0;
   if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) return;
+  const size_t available = host_mem_available_bytes();
   constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
   const size_t headroom = static_cast<size_t>(8 * kGiB);
   DGPP_LOG_INFO("glm loader: rank {} resident footprint {:.1f} GiB; device "
-                "free {:.1f} of {:.1f} GiB",
-                rank_, footprint / kGiB, free_bytes / kGiB, total_bytes / kGiB);
+                "free {:.1f} of {:.1f} GiB, host available {:.1f} GiB",
+                rank_, footprint / kGiB, free_bytes / kGiB, total_bytes / kGiB,
+                available / kGiB);
+  free_bytes = std::max(free_bytes, available);
   if (footprint + headroom > free_bytes)
     throw std::runtime_error(
         "glm loader: the resident model (" + std::to_string(footprint >> 30) +

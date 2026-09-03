@@ -68,18 +68,27 @@ void launch_moe_round_bf16(uint16_t* out, const float* acc, int64_t n,
 // the three-launch chain (the dots round to bf16 exactly where the
 // intermediate buffers rounded them), so the result is bit-identical; the
 // intermediates never touch memory. Gate and up share n and k.
+//
+// `order` (nullable): the slots' EXECUTION order, blockIdx.y -> logical
+// slot, from launch_moe_slot_order — a multi-token batch sorted by expert
+// so a shared expert's second read is an L2 hit. Null = identity. Results
+// are indexed by logical slot either way (bitwise identical).
+void launch_moe_slot_order(const int32_t* ids, int32_t* order, int slots,
+                           int top_k, int n_experts, cudaStream_t stream);
 void launch_moe_slot_gate_up_swiglu(
     const uint16_t* x, size_t x_stride, const int32_t* ids,
-    const MoeExpertView* views, int n_routed, int k_routed, int n_shared,
-    int k_shared, const uint8_t* sh_gate_payload, const float* sh_gate_scales,
-    const uint8_t* sh_up_payload, const float* sh_up_scales, uint16_t* act,
-    int act_stride, int slots, int top_k, float limit, cudaStream_t stream);
+    const int32_t* order, const MoeExpertView* views, int n_routed,
+    int k_routed, int n_shared, int k_shared, const uint8_t* sh_gate_payload,
+    const float* sh_gate_scales, const uint8_t* sh_up_payload,
+    const float* sh_up_scales, uint16_t* act, int act_stride, int slots,
+    int top_k, float limit, cudaStream_t stream);
 
 // slot_down: out[slot, :] = fp32 dot(down rows, act[slot]) per slot,
 // UNROUNDED (the accumulation owns the single rounding). Routed slots read
 // act row 0..k_routed, the shared slot 0..k_shared.
 void launch_moe_slot_down(const uint16_t* act, size_t act_stride,
-                          const int32_t* ids, const MoeExpertView* views,
+                          const int32_t* ids, const int32_t* order,
+                          const MoeExpertView* views,
                           int n_routed, int k_routed, int n_shared,
                           int k_shared, const uint8_t* sh_payload,
                           const float* sh_scales, float* out, int out_stride,

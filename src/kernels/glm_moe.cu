@@ -273,18 +273,49 @@ __device__ __forceinline__ SlotMatrix resolve_slot_matrix(
   return SlotMatrix{sh_payload, sh_scales, n_shared, k_shared};
 }
 
+// Slot EXECUTION order for a multi-token batch: slots sorted by expert
+// (routed ids ascending, the shared expert last), stable in slot index.
+// Two tokens routed to the same expert then run as ADJACENT blockIdx.y
+// values, and the second's weight rows come out of L2 (one expert is ~6 MB
+// per rank, the L2 24 MB) instead of DRAM — the only expert traffic a
+// speculative verify row can share with its neighbour. Results are written
+// by LOGICAL slot, so the accumulation (and every bit) is unchanged; only
+// the dispatch order moves. One block, one thread per slot: 18-72 keys.
+__global__ void moe_slot_order_kernel(const int32_t* __restrict__ ids,
+                                      int32_t* __restrict__ order, int slots,
+                                      int top_k, int n_experts) {
+  extern __shared__ int32_t keys[];
+  const int s = threadIdx.x;
+  if (s < slots) {
+    const int t = s / (top_k + 1);
+    const int j = s - t * (top_k + 1);
+    keys[s] = j < top_k ? ids[static_cast<size_t>(t) * top_k + j] : n_experts;
+  }
+  __syncthreads();
+  if (s >= slots) return;
+  int pos = 0;
+  for (int o = 0; o < slots; ++o)
+    pos += (keys[o] < keys[s]) || (keys[o] == keys[s] && o < s);
+  order[pos] = s;
+}
+
+__device__ __forceinline__ int logical_slot(const int32_t* __restrict__ order) {
+  return order ? order[blockIdx.y] : static_cast<int>(blockIdx.y);
+}
+
 // The down projection per slot: out[slot, :] = fp32 dot(down_row, act[slot]).
 // Unrounded — the accumulation chain below owns the single rounding.
 __global__ void moe_slot_down_kernel(
     const uint16_t* __restrict__ act, size_t act_stride,
-    const int32_t* __restrict__ ids, const MoeExpertView* __restrict__ views,
+    const int32_t* __restrict__ ids, const int32_t* __restrict__ order,
+    const MoeExpertView* __restrict__ views,
     int n_routed, int k_routed, int n_shared, int k_shared,
     const uint8_t* __restrict__ sh_payload, const float* __restrict__ sh_scales,
     float* __restrict__ out, int out_stride, int slots, int top_k) {
   extern __shared__ __align__(16) uint16_t sx[];
   const int n0 = blockIdx.x * fp8_gemv::kWarps;
-  const int slot = blockIdx.y;
-  if (slot >= slots) return;
+  if (static_cast<int>(blockIdx.y) >= slots) return;
+  const int slot = logical_slot(order);
   const SlotMatrix m =
       resolve_slot_matrix(slot, top_k, ids, views, /*which=*/2, n_routed,
                           k_routed, n_shared, k_shared, sh_payload, sh_scales);
@@ -307,7 +338,8 @@ __global__ void moe_slot_down_kernel(
 // memory.
 __global__ void moe_slot_gate_up_swiglu_kernel(
     const uint16_t* __restrict__ x, size_t x_stride,
-    const int32_t* __restrict__ ids, const MoeExpertView* __restrict__ views,
+    const int32_t* __restrict__ ids, const int32_t* __restrict__ order,
+    const MoeExpertView* __restrict__ views,
     int n_routed, int k_routed, int n_shared, int k_shared,
     const uint8_t* __restrict__ sh_gate_payload,
     const float* __restrict__ sh_gate_scales,
@@ -316,8 +348,8 @@ __global__ void moe_slot_gate_up_swiglu_kernel(
     int act_stride, int slots, int top_k, float limit) {
   extern __shared__ __align__(16) uint16_t sx[];
   const int n0 = blockIdx.x * fp8_gemv::kWarps;
-  const int slot = blockIdx.y;
-  if (slot >= slots) return;
+  if (static_cast<int>(blockIdx.y) >= slots) return;
+  const int slot = logical_slot(order);
   const SlotMatrix gate = resolve_slot_matrix(
       slot, top_k, ids, views, /*which=*/0, n_routed, k_routed, n_shared,
       k_shared, sh_gate_payload, sh_gate_scales);
@@ -485,8 +517,21 @@ void check_slot_args(const void* x, const int32_t* ids,
 
 }  // namespace
 
+void launch_moe_slot_order(const int32_t* ids, int32_t* order, int slots,
+                           int top_k, int n_experts, cudaStream_t stream) {
+  if (slots <= 0) return;
+  if (!ids || !order) throw std::invalid_argument("moe_slot_order: null");
+  if (slots > 1024)
+    throw std::invalid_argument("moe_slot_order: more slots than one block");
+  moe_slot_order_kernel<<<1, static_cast<unsigned>(slots),
+                          sizeof(int32_t) * static_cast<size_t>(slots),
+                          stream>>>(ids, order, slots, top_k, n_experts);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 void launch_moe_slot_down(const uint16_t* act, size_t act_stride,
-                          const int32_t* ids, const MoeExpertView* views,
+                          const int32_t* ids, const int32_t* order,
+                          const MoeExpertView* views,
                           int n_routed, int k_routed, int n_shared,
                           int k_shared, const uint8_t* sh_payload,
                           const float* sh_scales, float* out, int out_stride,
@@ -505,17 +550,18 @@ void launch_moe_slot_down(const uint16_t* act, size_t act_stride,
                   static_cast<unsigned>(slots));
   moe_slot_down_kernel<<<grid, fp8_gemv::kThreads,
                          fp8_gemv::smem_bytes(1, max_k), stream>>>(
-      act, act_stride, ids, views, n_routed, k_routed, n_shared, k_shared,
-      sh_payload, sh_scales, out, out_stride, slots, top_k);
+      act, act_stride, ids, order, views, n_routed, k_routed, n_shared,
+      k_shared, sh_payload, sh_scales, out, out_stride, slots, top_k);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
 void launch_moe_slot_gate_up_swiglu(
     const uint16_t* x, size_t x_stride, const int32_t* ids,
-    const MoeExpertView* views, int n_routed, int k_routed, int n_shared,
-    int k_shared, const uint8_t* sh_gate_payload, const float* sh_gate_scales,
-    const uint8_t* sh_up_payload, const float* sh_up_scales, uint16_t* act,
-    int act_stride, int slots, int top_k, float limit, cudaStream_t stream) {
+    const int32_t* order, const MoeExpertView* views, int n_routed,
+    int k_routed, int n_shared, int k_shared, const uint8_t* sh_gate_payload,
+    const float* sh_gate_scales, const uint8_t* sh_up_payload,
+    const float* sh_up_scales, uint16_t* act, int act_stride, int slots,
+    int top_k, float limit, cudaStream_t stream) {
   if (slots <= 0) return;
   check_slot_args(x, ids, views, act, n_routed, k_routed, n_shared, k_shared,
                   "moe_slot_gate_up");
@@ -533,7 +579,7 @@ void launch_moe_slot_gate_up_swiglu(
                   static_cast<unsigned>(slots));
   moe_slot_gate_up_swiglu_kernel<<<grid, fp8_gemv::kThreads,
                                    fp8_gemv::smem_bytes(1, max_k), stream>>>(
-      x, x_stride, ids, views, n_routed, k_routed, n_shared, k_shared,
+      x, x_stride, ids, order, views, n_routed, k_routed, n_shared, k_shared,
       sh_gate_payload, sh_gate_scales, sh_up_payload, sh_up_scales, act,
       act_stride, slots, top_k, limit);
   DGPP_CUDA_OK(cudaGetLastError());
