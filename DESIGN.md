@@ -1,13 +1,19 @@
 # DGPP Engine Design
 
 Status: architecture contract for the staged implementation described in
-`PLAN.md`. The repository currently contains the M0/M1 platform probes, core
-runtime, checkpoint loader, synthetic transformer, the M2 KDA operators
-(state pool, recurrence kernels, snapshot format, reference-dump harness),
-and the complete M3 DSA/MLA path (indexer compression, deterministic pooled
-top-k, split-KV absorbed attention, blocked state pool, layer orchestration,
-dump harness, benchmarks); it does **not** yet contain a complete GLM
-runtime, distributed serving daemon, or HTTP server.
+`PLAN.md`, kept in step with the code. As of 2026-09-03 the repository
+contains the full serving stack for the text path at TP=4: the platform
+probes and CollectiveBus (M0/M5), the KDA and DSA/MLA operators with their
+state pools (M2/M3), the assembled 45-layer GLM forward with resident
+sharded load and the per-rank image cache (M4/M5), the incremental decode
+engine with request sessions, the exact tokenizer and chat-template
+interpreter, the deterministic scheduler and admission journal, the
+OpenAI-compatible HTTP/SSE service (`glm_serve`, M6), the recorded decode
+step with the collectives as graph nodes, and greedy MTP speculative decode
+as one graph replay per step (M8). It does **not** yet contain the prefix
+cache (§8 is a design), stochastic sampling on the distributed path (§10),
+or the graph/MTP step behind the service (§11). Sections marked "as built"
+describe the code; sections marked "design" describe what remains.
 
 Target: text serving for `unsloth/GLM-5.3-Flash-FP8` on four NVIDIA DGX Spark
 systems. Vision execution is post-v1.
@@ -25,9 +31,19 @@ systems. Vision execution is post-v1.
 Performance targets are set from the completed runtime and a reproducible
 workload, not from a third-party implementation. Router traces and a
 full-model step profile are mandatory inputs at M4–M6; comparisons with other
-engines are optional. The audited pre-speculation weight-bandwidth floor is
-about 30.8 token/s on the expected busiest expert rank, not the previous
-39 token/s average-rank estimate.
+engines are optional. The weight floor of a single-stream decode step is
+~24.5 ms (5.855 GB/rank/token at the ~240 GB/s the L2-prefetched GEMVs
+reach — §3, §7.6); the plain step measures 31.3 ms/token and the MTP step
+22.45 ms/token effective (2026-09-03). The earlier 30.8 token/s "busiest
+rank" floor belonged to the whole-expert placement retired on 2026-09-02.
+
+One numerics rule, decided 2026-09-02 with the user: a kernel may change
+its floating-point reduction ORDER (reassociate an fp32 sum, split a chain
+across lanes) when that buys latency, provided the change stays at rounding
+level. Cross-build regression is therefore judged by margin and by
+perplexity (`scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`; §12),
+not by transcript identity — except for MTP against plain decode, which
+must stay IDENTICAL by construction (§9).
 
 ## 2. Validated platform facts
 
@@ -121,6 +137,19 @@ sustained dual-lane ingress provisionally derate simultaneous GPU memory
 bandwidth by 15%. This is a stress-case planning value, not a fixed inference
 penalty; M5 replaces it with measurements of the actual collective schedule.
 
+GPUDirect RDMA is closed as unavailable on this platform (re-tested
+2026-09-02): `cuMemGetHandleForAddressRange(DMA_BUF_FD)` returns
+`CUDA_ERROR_INVALID_VALUE` for `cudaMalloc` memory and `ibv_reg_mr` on a
+device pointer fails with EFAULT (no peermem) on all four RoCE functions.
+The bus's host-pinned staging, read by the GPU with system-scope loads
+(§6.3), is the design the GB10 allows, not a fallback.
+
+The memory controller is shared by the GPU, the CPU cores and the NIC, and it
+is a single queue: 3 MB of GPU prefetch in flight added ~12 µs to every
+access on the box, including the bus handshake and the engine's posts
+(§7.6). Anything that adds memory traffic on a serving node is measured
+against the step, not in isolation.
+
 ## 3. Checkpoint and decode traffic
 
 The checked revision contains 62 safetensors shards, 76,108 tensors, and
@@ -147,21 +176,51 @@ Production residency contract (deployment decision, M5 exit gates): in
 production, serving loads the rank's weights ONCE at startup and keeps
 them fully resident for the process's lifetime — storage is never
 touched during inference. Only TP=4 can honor this contract on a 128 GB
-GB10: ~79 GiB of weights per rank leaves ~49 GB of headroom; TP=2
-(~155 GiB/rank) and TP=1 (~306 GiB) cannot fit, which is the memory
-rationale for the four-rank deployment target. The current forward is
-the DIAGNOSTIC streaming instrument (§7.5: one layer resident at a time,
-~98 GB reclaimable page-cache pass-through per pass) and its ~1 GB/s
-read pace is a software artifact of 4 KB mmap faults across 62 shards,
-not a bus limit. The resident serving mode IS implemented (M5,
-2026-08-31, ahead of the M6 serving integration): resident mode is
-the streaming build path with each layer's bump adopted into a
-per-layer exact-formula allocation — resident bytes are streaming
-bytes by construction, pinned bitwise at every world; a materialized
-layer re-serves from cache with no storage reads and no sync, and the
-zero-reread contract is proven on all four ranks at real dims (81.77
-GiB materialized in ~120 s warm; re-pass 0.10-0.14 ms, 0 bytes read).
-M6 integrates it into the serving path.
+GB10: ~82 GiB of weights per rank (81.77 GiB main stack; the MTP draft
+layer adds ~7.3 GiB when enabled) leaves headroom for the CUDA context
+(~14 GiB locked), the DSA pool, and the caches; TP=2 (~155 GiB/rank) and
+TP=1 (~306 GiB) cannot fit, which is the memory rationale for the
+four-rank deployment target. The streaming forward (§7.5: one layer
+resident at a time, the whole checkpoint re-read per pass) remains the
+world-1 DIAGNOSTIC instrument — parity harnesses and dumps run on it; a
+w1 decode step takes minutes.
+
+Resident mode as built (M5, then M6 rounds 9–10): resident mode is the
+streaming build path with each layer's bump adopted into a per-layer
+exact-formula allocation — resident bytes are streaming bytes by
+construction, pinned bitwise at every world. The loader IS the slicer at
+TP>1 (§5.2). Three load-time facts became rules:
+
+- *One-pass sources.* Every source tensor read is bracketed
+  `MADV_WILLNEED` → copy → `MADV_DONTNEED` + `POSIX_FADV_DONTNEED`, so
+  the page cache stays under ~10 GB during a load and the box never
+  reaches its memory watermark; the moment the last layer materializes
+  the model releases every shard mapping (`GlmLayerStream::
+  release_sources`). Before this the boxes sat at the watermark for the
+  whole run and the kernel swapped the process's own cold pages — the
+  tokenizer's vocab among them — producing 7–10 ms lockstep decode stalls
+  on every rank at the same step (a major fault in `tok.decode`).
+- *Eager construction.* `preconstruct_layers` walks every layer in
+  resident mode, so the constructor returns a READY model; prefill is a
+  prefill again, not a lazy load parked on the slowest disk.
+- *The resident image.* A layer's resident bytes are the END of the
+  pipeline (slice, stage, H2D, dequant, pack) and reproducible without a
+  source byte, so `GlmResidentImage` dumps each built layer once (D2H,
+  `pwrite`, `fdatasync`, THEN the table entry — a torn write is an absent
+  layer) into one file per checkpoint × config × world × rank × head ×
+  format version, keyed by every shard's header fold + `config.json`, and
+  restores it forever after with O_DIRECT reads at the drive's line rate
+  (5.6 GB/s measured; the buffered path was 1.2 GB/s and forced reclaim).
+  The boot digest rides beside it (`<key>.digest`). 15–25 s to a ready
+  model, against ~4.5 min from the checkpoint and 258 s at the start of
+  the round. Knobs: `DGPP_RESIDENT_CACHE{,_DIR,_VERIFY}` (README).
+  Streaming mode is untouched.
+
+Node setup: nothing privileged. The clock lock (`nvidia-smi -lgc`) was
+re-tested and does nothing (the governor sits at 2400–2560 MHz through
+decode); `mlockall` is an optional safety net (measured identical with it
+off once the one-pass loader landed); the loader refuses at construction
+if the resident footprint + 8 GiB does not fit the device's free memory.
 
 Main text configuration:
 
@@ -177,24 +236,22 @@ Main text configuration:
 The unique base-text weight set touched at batch size one is 22.415 GB/token.
 Vision, input-embedding storage, and the inactive MTP layer are excluded.
 Because the DSA indexer, router, mHC, and norms are replicated, their duplicate
-reads make aggregate physical traffic 23.420 GB/token across TP=4. With whole
-experts partitioned 72 per rank, uniform top-8 routing has an exact expected
-busiest-rank occupancy of 3.515 experts/layer. The resulting per-rank views
-are:
+reads make aggregate physical traffic 23.420 GB/token across TP=4. The
+per-rank view depends on the expert placement:
 
-| TP=4 view | traffic/rank/token | 230 GB/s floor |
-|---|---:|---:|
-| mean rank | 5.855 GB | 25.46 ms |
-| expected synchronized critical path | **7.457 GB** | **32.42 ms / 30.8 token/s** |
-| all selected experts on one rank | 12.198 GB | 53.04 ms |
+| TP=4 view | traffic/rank/token | 230 GB/s floor | 240 GB/s (prefetched) |
+|---|---:|---:|---:|
+| **every expert sliced across the ranks (as built since 2026-09-02)** | **5.855 GB** | **25.46 ms** | **24.4 ms** |
+| whole experts, 72 per rank — expected synchronized busiest rank (retired) | 7.457 GB | 32.42 ms | — |
+| whole experts — all selected experts on one rank (retired) | 12.198 GB | 53.04 ms | — |
 
-The synchronized figure sums the busiest rank separately at every MoE layer;
-it does not assume one physical rank stays busiest for the whole token. The
-model is still optimistic when routes are correlated. M4 must capture
-layer-by-layer router choices from representative prompts and replace the
-uniform distribution before performance sign-off. If imbalance is material,
-the remedies are measured expert placement, selective replication, or
-intra-expert TP—not wishful division by four.
+With every expert sliced on its intermediate dimension (§5.2) each rank
+reads exactly top-k × 3 slices per MoE layer whatever the routing, so the
+critical path IS the mean rank and the routing distribution no longer
+enters the FFN-side traffic model. The busiest-rank arithmetic and the
+route-trace tool (`tools/route_trace_traffic.py`, validated against the
+first real trace to +0.4%) remain for any future placement change. The
+measured step (§7.6) sits ~6.8 ms above the 24.4 ms floor at T=1.
 
 ## 4. Quantized-weight contract
 
@@ -214,7 +271,11 @@ resident byte count must update the generated checkpoint budget.
 There is one process and one CUDA context per node. Rank 0 additionally owns
 request admission, scheduling decisions, and cache-eviction epochs. Every
 rank executes the same request order and treats a coordinator epoch mismatch
-as fatal to the current batch.
+as fatal to the current batch. As built (M6, §11), rank 0's ownership is
+realized by the admission journal: rank 0 is the sole HTTP ingress, every
+scheduler tick it runs is one journal record the peers apply before
+running the identical tick, and every engine op is a bus collective, so a
+record can never interleave a peer's in-flight tick.
 
 ### 5.1 Block-boundary invariant
 
@@ -240,33 +301,6 @@ chunks only if it restores the same replicated boundary and passes parity.
 KDA heads and recurrent state are head-sharded. DSA MLA latent and indexer
 caches are replicated because every rank begins with the same hidden state and
 must make the same sparse-token selection; there is no global score gather.
-
-### 5.3 Control plane: roster, epochs, health (M5)
-
-Membership and coordination run over TCP — never on the CUDA critical path.
-The wire protocol and its validated semantics live in `src/net/roster.hpp`
-and the M5 results file; the contract in brief:
-
-- The coordinator (rank 0) seals the roster at epoch 1 once every
-  configured rank has announced, or fails startup with exact progress.
-  Its own rank is an implicit member (it needs no loopback connection to
-  itself). Late joins and rejoins are refused in v1: a replacement member
-  would need a state-consistency story that does not exist yet.
-- Epochs are owned by the coordinator and carried by every roster frame;
-  they advance on membership change (eviction). A rank that observes a
-  non-monotonic epoch treats the batch as fatal — the same rule as the
-  coordinator epoch mismatch above.
-- A rank is evicted on process death (connection EOF) or on a heartbeat
-  deadline that applies **only after the roster is sealed** — before the
-  seal there is no batch to protect and slow announces are normal. The
-  evicted rank receives its final roster so it can tell eviction from
-  coordinator loss.
-- Rejections carry a reason string, not a bare close: cluster-start config
-  errors must be legible in the rank's log. `join()` returns the first
-  sealed roster frozen at receipt — a later eviction racing the caller's
-  wakeup must not rewrite what the rank was sealed with.
-- Coordinator loss (ack deadline) is fatal for the batch; there is no
-  coordinator failover in v1.
 
 ### 5.2 Weight placement
 
@@ -331,6 +365,33 @@ the loader's dequant stream), never the whole device: a device-wide wait
 in a one-process multi-rank world blocks on peers' spinning collective
 kernels — the first-collective stall measured under ~15 ms of thread skew.
 
+### 5.3 Control plane: roster, epochs, health (M5)
+
+Membership and coordination run over TCP — never on the CUDA critical path.
+The wire protocol and its validated semantics live in `src/net/roster.hpp`
+and the M5 results file; the contract in brief:
+
+- The coordinator (rank 0) seals the roster at epoch 1 once every
+  configured rank has announced, or fails startup with exact progress.
+  Its own rank is an implicit member (it needs no loopback connection to
+  itself). Late joins and rejoins are refused in v1: a replacement member
+  would need a state-consistency story that does not exist yet.
+- Epochs are owned by the coordinator and carried by every roster frame;
+  they advance on membership change (eviction). A rank that observes a
+  non-monotonic epoch treats the batch as fatal — the same rule as the
+  coordinator epoch mismatch above.
+- A rank is evicted on process death (connection EOF) or on a heartbeat
+  deadline that applies **only after the roster is sealed** — before the
+  seal there is no batch to protect and slow announces are normal. The
+  evicted rank receives its final roster so it can tell eviction from
+  coordinator loss.
+- Rejections carry a reason string, not a bare close: cluster-start config
+  errors must be legible in the rank's log. `join()` returns the first
+  sealed roster frozen at receipt — a later eviction racing the caller's
+  wakeup must not rewrite what the rank was sealed with.
+- Coordinator loss (ack deadline) is fatal for the batch; there is no
+  coordinator failover in v1.
+
 ## 6. CollectiveBus protocol
 
 Each peer pair owns RC QPs on both active lanes — one QP per slot pool per
@@ -367,12 +428,16 @@ return in ring order. Persistent kernels use an **inactivity** watchdog whose
 deadline resets after every message; a reserved stop sequence provides orderly
 shutdown. The cross-node hash test and CUDA regression test pin this behavior.
 
-The initial implementation uses all-reduce, not an incorrectly named
-three-destination “tree.” Algorithm selection is size-based:
+Algorithm selection is size-based, and both machines are built (§6.3):
 
-- small replicated hidden vectors: latency-oriented recursive doubling/tree;
-- large prefill chunks: striped reduce-scatter + all-gather or ring all-reduce;
-- control messages: TCP, never on the CUDA critical path.
+- replicated hidden vectors (the decode step's 90 boundary folds, the
+  pick): the one-shot all-to-all all-reduce over the latency pool, folded
+  by a per-collective kernel — recorded as graph nodes in the decode step
+  (§6.2);
+- prefill chunks: the striped reduce-scatter + allgather over the bulk pool
+  (`allreduce_bulk`), both lanes;
+- control messages: TCP, never on the CUDA critical path (the roster, §5.3,
+  and the admission journal, §11).
 
 ### 6.1 Threading and concurrency model
 
@@ -545,6 +610,40 @@ submit/launch cost amortizes to near-zero, and the step pays one arm +
 one finish for all twelve collectives. The wire floor (measured 2.4–2.7
 µs one-way) is what remains.
 
+**The mixed era (M6 Stage 4d).** The era as first shipped was exclusive:
+once a session opened, eager collectives were rejected for the bus's
+lifetime — unlivable for serving, where prefill's bulk folds and the
+eager pick must run BETWEEN decode windows. The seam is one generation
+counter: `graph_replay_arm` reserves its window's G generations from the
+same `ctl_seq_counter` eager pickups increment, so execution order equals
+generation order across eras and every staging-ring reuse fence holds
+verbatim (those proofs only ever needed monotonic numbering). Eager
+collectives are rejected only while a session RECORDS or a window is
+ARMED (arm .. finish); every gen→cell mapping is window-relative
+(`(gen − adopted_first) % G` — the first mixed-era run stalled on the
+absolute form). The counter is 32-bit; an arm that would cross its top
+fails the era loudly (~48M decode tokens; remedy: restart). Session
+discipline: one forward thread for arm/finish/eager submissions.
+
+**The decode step as a graph, in the model (as built):** capture happens
+once after prefill and the first pick, on the model's stream, with a
+`GlmGraphRecordReducer` installed at the boundary seam: the boundary GEMV
+writes ONE stable device buffer (cudaMalloc — a pinned buffer cost every
+o_proj ~20 µs of fabric round trips for its lane-0 stores), `reduce()` is
+`allreduce_record`, and the recorded kernel snapshots the buffer into the
+generation's staging row itself (one row per generation, every peer's
+SEND posted from it, hashed once). Every per-step host input (request
+ids, positions, tokens, the MoE expert-view tables) is either a pinned
+member the graph's memcpy nodes re-read or, since the on-device step, a
+device buffer the previous replay wrote (§9). Plain decode replays 90
+collective nodes per token; the MTP step 94. Capture + instantiate ~38 ms,
+once. Per collective in the step (rank 0, steady): ~35 µs at T=1 (copy
+2.7 + handshake 8–16 + skew ~15 + fold 4–5) and ~48 µs at T=2 (two rows
+copied and folded); the "skew" is the ranks' ~3% compute spread, not the
+transport. In-process worlds (the loopback tests) need
+`CUDA_DEVICE_MAX_CONNECTIONS=32` or a spinning collective kernel FIFO-
+blocks a peer's chain sharing one of the default 8 hardware queues (§9).
+
 One compiler lesson for the record: the shared eager/graph kernel body
 refactor (a mechanical template extraction, pure renames, reference-based
 row policies) *miscompiled* at -O3 — the fold read doorbell cells as
@@ -688,7 +787,47 @@ tail is a power courtesy, never a latency mechanism), and bare
 condition-variable waits pay a CFS-timeslice wake against the hot
 engine (fixed: spin-then-futex on a release-published done flag — spun
 before the mutex, since spinning under it deadlocks the completer). The
-same fixes took the harness send path from 16.5 to 12.1 µs p50.
+same fixes took the harness send path from 16.5 to 12.1 µs p50. The
+engine also never naps once a graph is recorded, and it pins itself to a
+fast core (the GB10's big.LITTLE mix put it on an A725 at times).
+
+**What a kernel may believe about NIC-written memory (the pick-path race,
+2026-09-01 — three bugs deep, all in the record):**
+
+- *A doorbell does not certify its payload — for a kernel.* RC's CQE
+  ordering protects the ENGINE (the CQE consumer); a kernel polling cells
+  saw ctl-correct doorbells beside payload buffers still holding stale
+  bytes, and folded garbage. Every doorbell therefore carries a 64-bit
+  FOLD of its payload (`StartSlot.hash`; the sender's engine hashes the
+  staged row it posts), and every collective kernel — latency, graph and
+  bulk — spins until the payload folds to it before consuming. The fold
+  is positional (`(word + position + 1) · golden ratio`, XOR-combined):
+  the first XOR fold cancelled on uniform payloads and let a stale
+  `bf16(2.0)`-fill pass as an all-zero broadcast.
+- *Plain loads of pinned memory cache.* The GPU's plain loads of pinned
+  sysmem allocate in its caches and the NIC's DMA writes never snoop them:
+  the first spin pass fetched the pre-arrival zeros and every later read
+  hit the cache, forever (a 56 s spin beside a payload the CPU could see
+  complete). The doorbell polls always worked because `flag_load_acquire`
+  is a system-scope atomic; the payload reads never had the discipline.
+  EVERY kernel read of NIC-written memory — door fields, gate words, the
+  fold's peer vectors, the bulk copies and exit fold, the claim records —
+  is a system-scope atomic load (`sys_load_u16/u32/u64`). This was the
+  mechanism of the original fabric pick corruption AND, almost certainly,
+  the gen-1825 "sent-but-never-received" wedge family.
+- The gate fires in production: 1–2 waits per scheduler smoke, thousands
+  under the hostile racer (`bus_small_repro --pick-race`, loopback and
+  fabric, an exact oracle after every collective under injected skew).
+  Telemetry stays in the ctl cell (waits/spins + three claim records with
+  door len/seq/hash); the STALLED dump prints the kernel's actual claimed
+  cells beside the engine's own CPU fold.
+
+Consequences upstream: the pick scratch is pinned (`cudaHostAlloc`), never
+managed — a `cudaMallocManaged` buffer shared across loopback rank-threads
+on one 2 MB UVM page is the documented concurrent-access race and hid
+behind this bug for a day; and the readback invariant (a decoded broadcast
+must equal the locally computed winner; today the digest group, §9) is
+what turns any surviving corruption into a loud, located failure.
 
 ## 7. Attention and state semantics
 
@@ -707,8 +846,9 @@ The M2 implementation pins the concrete layouts (tested in
   K dimension contiguous — the indexing of the reference recurrent kernel;
 - conv state is `[3*local_proj, conv_state_width]` BF16 with the width
   contiguous ("dim-first"), committed history in columns
-  `[0, conv_kernel-1)` and the speculative reserve after it, zeroed and
-  untouched until M8;
+  `[0, conv_kernel-1)` and the speculative reserve after it — used since
+  M8 by the multi-row verify (§9), whose rows but the last also leave
+  their post-row snapshots in `spec_conv_`;
 - the fused in-projection row is `[f_a | g_a | q | k | v | b]` — the two
   replicated shards lead so the strided f_b/g_b GEMM inputs land on
   16-byte-aligned column offsets (cuBLASLt returns wrong results, not
@@ -928,10 +1068,47 @@ Experts are swiglu MLPs with ASYMMETRIC clamps: the gate clamps only its
 maximum (no lower bound), `up` clamps both sides at `swiglu_limit` (10);
 `act = bf16(bf16(silu(g)) · up)` — two rounding points, matching torch's
 opmath. The engine executes experts through the scale-aware GEMM on the
-compressed E4M3+scale weights (§4): gather per-expert token segments,
-gate/up GEMMs, swiglu, down GEMM, accumulate. The M4 diagnostic path
-segments on the host after one router round-trip (correctness first); the
-device-side grouped execution without host segmentation is M5+ work.
+compressed E4M3+scale weights (§4).
+
+Two execution paths, as built:
+
+- *Prefill* (chunk-amortized, correctness first): the router's ids come to
+  the host once per layer, the host segments tokens per expert, and each
+  segment runs gather → gate/up GEMMs → swiglu → down GEMM → ordered
+  accumulate through `IGemm`. One device sync per MoE layer per chunk,
+  amortized over up to 2048 tokens.
+- *Decode* (`GlmMoeLayer::enqueue_decode`, M6 Stage 4c and rounds 2/7/8):
+  zero host round trips. The router leaves ids ascending per row on the
+  device; a slot-ranking kernel orders the (row, slot) work by expert id
+  so experts shared across rows are L2 hits; the gate+up+swiglu kernel and
+  the down kernel are fp8 GEMV cores (warp per weight row, 16-byte fp8
+  loads, the scale grid applied in the epilogue — `fp8_gemv.cuh`; every
+  row a slot, `top_k+1` slots per row, the +1 the shared expert) reading
+  the route and the expert-view table from device memory; the down dots
+  stay fp32 (unrounded) and one ordered accumulation kernel runs the
+  chain — one fma per expert ascending, shared last — rounding to bf16
+  exactly once as the sum leaves for the all-reduce. Since the sliced
+  placement (§5.2) a rank's slice cannot reproduce the whole expert's
+  bf16 per-expert rounding, so this fp32 chain is the more accurate of the
+  two reachable deviations (decision with the user, 2026-09-02); the
+  unsliced engine sits at max 1 ulp against the double oracle, and the
+  sliced form is certified against the UNSLICED oracle with a per-element
+  bound built from the partials in hand (bf16-on-the-wire's cost, the
+  class the attention o_proj already pays). The expert-view tables live
+  in per-graph-slot DEVICE tables uploaded once before capture (a
+  binding-keyed cache was a wrong-weights factory under the streaming
+  loader, whose bindings are not identity-stable — the rule stands). The
+  router's select runs behind its dots kernel (last-block ticket), and
+  the top-k is a warp with the exact strict-> rule (bit-identical). Both
+  paths are pinned bitwise against each other by `glm_moe_test` at three
+  geometries including a TP partition.
+
+Fusions tried on the decode MoE and rejected with numbers (2026-09-03):
+the accumulation behind the down kernel (+22 µs/layer — a barrier + fence
++ atomic per block over 9216 blocks), the slot ranking in the gate_up/down
+prologues (+10 µs on the 9216-block down launch against a 1.6 µs kernel).
+At that grid a per-block prologue is 24 waves deep; the launch it saves is
+~1 µs.
 
 Route traces (deliverable 5): the router records per-layer ids/weights in
 the `DGPPTC1` format, and `tools/route_trace_traffic.py` replaces §3's
@@ -945,19 +1122,48 @@ come from representative prompts through the assembled model.
 
 ### 7.5 The assembled forward and the parity discipline at depth
 
-`GlmDiagnosticModel` (M4 deliverable 1) runs the full text stack over the
-streaming resident loader: embedding -> 4-stream mHC init -> per layer
-[attn_hc -> ln1 -> KDA or DSA -> stream update] and [ffn_hc -> ln2 ->
+`GlmDiagnosticModel` (M4 deliverable 1; the name predates its serving role
+and stayed) runs the full text stack: embedding -> 4-stream mHC init -> per
+layer [attn_hc -> ln1 -> KDA or DSA -> stream update] and [ffn_hc -> ln2 ->
 dense MLP or MoE -> update] -> unweighted stream mean -> final norm ->
-bf16 lm head. One layer is resident at a time; the KDA/DSA/MoE layer
-objects are constructed once (shape-keyed scratch and GEMM plans) and
-REBOUND to each layer's resident views. The two layer norms and the
-final norm are the Glm5NextTextRMSNorm TWO-rounding choreography
-(u = bf16(x*rsqrt); y = bf16(w*u)) — a dedicated kernel, because the
-generic single-round rmsnorm drifts the GLM path systematically.
-The MTP draft layer (index 45) is bound and loadable but outside the
-forward, matching the reference model class, which ignores it; its
-transaction model is §9 (M5+).
+lm head (fp32 accumulators since 2026-09-03: `GemmOut::F32`, the same
+GEMV template — the bf16 rounding of the logits was the first thing the
+teacher-forced gate could see). In streaming mode one layer is resident at
+a time and the KDA/DSA/MoE layer objects are REBOUND to each layer's
+resident views; in resident mode every layer is materialized at
+construction (§3) and the bindings are lifetime-stable, which is what
+graph capture requires. The two layer norms and the final norm are the
+Glm5NextTextRMSNorm TWO-rounding choreography (u = bf16(x*rsqrt); y =
+bf16(w*u)) — a dedicated kernel, because the generic single-round rmsnorm
+drifts the GLM path systematically. The MTP draft layer (index 45) is
+loaded when `--mtp` asks for it and runs as §9's draft block; the reference
+model class ignores it.
+
+**Sessions (the incremental engine, M6 Stage 2/2b).** The layer pipeline
+is ELEMENTWISE IN TIME: the mHC streams are recomputed per layer from each
+token's embedding, so all temporal recurrence lives in the KDA
+recurrent/conv state and the DSA latent/index/tail caches, and a stateful
+step is "don't reset the state, feed one token". `session_prefill(req,
+prompt)` opens a request slot (fresh state) and runs the prompt in
+pool-aligned 2048-token chunks keeping state across them, returning the
+last row's logits; `session_step(req, token)` runs one token at the slot's
+next position (the same recurrence implementation as prefill — what keeps
+cross-path noise at GEMM ulps); `session_close(req)` releases the slot's
+blocks immediately (a meter that lags a retire is an admission deadlock).
+Slots: `max_requests` (≤ `kDecodeRows` = 8, the DSA select bound) with
+slot-major KDA state so one open is one memset pair; the DSA pool's
+per-request tail rings are zeroed at open and the latent/index caches are
+deliberately not scrubbed (a new owner rewrites every row it reads — the
+pool's release contract, confirmed by the real-model gates). Rules the
+gates pinned: a continuation chunk must carry ≥ kpool tokens (the DSA
+tail-seed read is pinned to in-chunk rows), so a 1..kpool−1 token tail
+borrows one pool from its predecessor; a plain `forward()` while any
+session is open throws (the pools are shared — the corruption would have
+looked like noise); every host op that moves a position pushes it to the
+device mirrors (`d_session_pos_`, `d_mtp_pos_`), so the device-driven
+graph (§9) always starts from the host's view. Decode across requests is
+time-multiplexed today (one row per step op; the KDA kernels take one
+state pointer per launch) — the row-batched form is PLAN M6 6a phase 2.
 
 Parity at real depth is chaos-limited, and the curated suite is designed
 around the measured facts, not around an aspiration of bit-parity:
@@ -1003,7 +1209,79 @@ null within measurement noise: busiest-rank 3.541 experts/token (uniform
 sampling other prompt classes (code, multilingual) is future work and the
 tool accepts their traces unchanged.
 
-## 8. Prefix cache
+### 7.6 The decode step as built: kernels, prefetch, and where the time is
+
+The single-stream decode step is one serial chain of ~1,600 kernels per
+step (90 collectives among them at T=1, 94 with the draft), replayed as one
+graph (§6.2). Its
+composition after the 2026-09-01..03 rounds (nsys node trace, rank 0,
+steady steps), for the T=2 MTP step of 42.4 ms: bf16 GEMVs 14.6 ms (every
+non-expert matrix: KDA in/out projections, DSA projections, the two heads
+— 3.9 GB at 267 GB/s effective), MoE gate_up 10.9 + down 7.05 (fp8 GEMV
+cores, 43 layers × two rows), collectives 4.56 (94 × 48.5 µs), mHC 1.6,
+and ~3 ms of small kernels (KDA recurrence 34 × 10.5 µs, DSA select and
+attention 12 × ~27 µs each, routers, norms, the step's own control kernels
+~60 µs in total), with ~1.15 ms of launch gaps (0.7 µs each). At T=1 the
+plain step is 31.3 ms of which ~24.5 is the weight floor.
+
+The pieces that make the number:
+
+- *GEMV cores* (`bf16_gemv.{hpp,cu}`, `fp8_gemv.cuh`): warp per weight
+  row, 16-byte loads, row-independent for m ≤ 4 (`kSpecRows`) so a
+  multi-row verify is bitwise the single-row step; the fp8 core applies the
+  128×128 scale grid in its epilogue and reproduces `scale_gemm.cu`'s
+  tile arithmetic verbatim. Weights live in DEVICE memory (`cudaMalloc`):
+  the managed-memory placement cost the eager step 86.4 → 75.0 ms/token
+  when it was fixed (round 3), and a pinned-host DESTINATION costs a GEMV
+  ~20 µs of fabric round trips for its lane-0 stores.
+- *The L2 weight prefetcher* (`l2_prefetch.{hpp,cu}`, `WeightPrefetcher`):
+  the chain sits in latency-bound phases (the bus, the KDA recurrence, the
+  DSA select/attention, mHC + norm) where DRAM idles, and the GB10 has
+  24 MB of L2. A lowest-priority side stream, forked from the chain by
+  events (graph edges under capture), reads the NEXT kernels' weights into
+  L2 during those phases: a window at every block boundary (the other
+  side's mHC fn, norm, router, shared expert / next layer's fn, ln1, the
+  first 12 MB of the in-projection; the head after the last layer) and one
+  after each attention layer's in-projection. The rate is the design
+  point: 3 MB in flight made the step SLOWER (the shared memory controller
+  queued every access on the box — bus handshake 9.7 → 26 µs); 16 blocks
+  × 2 loads (128 KB in flight, "light") everywhere is the measured optimum
+  and puts the GEMVs' effective rate above DRAM's. Knobs
+  `DGPP_L2_PREFETCH{,_MB,_LIGHT_BLOCKS,_BOUNDARY,_LAYER}`; re-checked at
+  the T=2 shape (layer off +0.8 ms, boundary full +1.9, off +2.6). A side
+  effect: the step-time distribution collapsed (p90−p50 ~5 → ~0.5 ms) —
+  the memory system never idles long enough to downclock.
+- *Kernel reshapes under the reassociation rule* (§1): router dots one warp
+  per (expert, token) with a shuffle tree (30.8 → 10.8 µs for dots +
+  select); mHC dots vectorized, the finish (Sinkhorn on xor butterflies)
+  running in the LAST dots block per token behind a ticket, the sublayer's
+  RMSNorm fused into its tail — a site is one launch; KDA recurrence 16
+  lanes × 8 columns per v-row (32 → 10.9 µs against an 8.7 µs floor); DSA
+  absorb_q with shared partial sums (40 → 8.8), vout one warp per row
+  (34 → 5.8). Measured cost of all of it: perplexity 2.573 → 2.583 on the
+  556-token text, delta −0.0037 ± 0.0044 nat/token (not distinguishable
+  from zero), and not worse at 14k tokens.
+- *Fewer graph nodes:* route traces off in serving (126 D2H nodes), expert
+  tables uploaded once before capture (42 H2D nodes), the logits/hidden
+  tail mirrors off in the on-device step (§9).
+
+What is left, and why it is where it is: the 94 collectives (~4.6 ms at
+T=2 — handshake 8–16 µs and the ranks' ~3% compute spread, not the wire;
+decomposing the handshake needs a globaltimer calibration project first),
+~1.1 ms of launch gaps only fewer, bigger kernels would remove, the second
+verify row's ~7 ms of unshared experts (the price of depth 1), and the
+weights. The small kernels are at their floor: fusions that add per-block
+work lose on the 9216-block MoE launches and fusions that only remove a
+launch save ~1 µs against 42,000 (§7.4).
+
+Two host-side facts the rounds turned into rules: every async copy on the
+decode path needs a PINNED source (a pageable `cudaMemcpyAsync` performs a
+stream sync before initiating — the whole pipeline drained once per MoE
+layer until the expert-table staging was pinned); and nothing on the
+serving node may push the box to its memory watermark (§3 — the swapped
+vocab page).
+
+## 8. Prefix cache (design; M7, not built)
 
 V1 uses exact state snapshots only. The previous unproven 24 KB/token
 “linear-aux replay record” is removed.
@@ -1013,6 +1291,8 @@ A reusable prefix entry contains:
 - immutable token blocks and tokenizer/chat-template revision hashes;
 - attached DSA MLA/index blocks and the exact incomplete tail;
 - one final KDA recurrent+convolution snapshot for that prefix boundary;
+- the draft block's last hidden row (`h_q`, 8 KB) so a resumed request can
+  draft immediately (§9);
 - model/checkpoint revision and numerical-mode identifiers.
 
 Only a radix node with a complete snapshot is attachable. A match without one
@@ -1025,9 +1305,48 @@ prefix snapshots before metadata. Admission and eviction are agreed by epoch
 on all ranks. Eviction cannot free blocks until all request and snapshot
 references reach zero.
 
+**How it fits the built engine.** Everything the entry needs already has a
+home: the DSA pool shares blocks by reference through one block table per
+request (latent and index blocks co-located; block = 128 tokens = 32
+pools); the KDA slot is a fixed 36.39 MiB per request with an
+export/import format carrying revision and geometry (`kda_snapshot.hpp`);
+the tail ring is 22.5 KB per request; the position mirrors are pushed to
+the device by every host op. The new pieces are the radix over token ids,
+the snapshot arena (42 D2D slots), refcounts on blocks, and the decisions.
+
+- *When to snapshot:* at prefill end and at request close (the whole
+  exchange, so the next turn attaches to it). Cost: one D2D copy of 36.39
+  MiB (~0.2 ms) + tail + `h_q`.
+- *Attach:* copy snapshot → the request's KDA slot; bump block refcounts
+  and write the block table; copy the tail ring; set `d_session_pos_` and
+  `d_mtp_pos_` to P; then the suffix. A suffix shorter than kpool cannot
+  run as a prefill chunk (§7.5's continuation rule) and runs token by
+  token through the decode path, which handles any position and yields
+  the last row's logits the pick needs anyway.
+- *Rank agreement:* rank 0 decides lookup/attach/snapshot/evict at
+  admission and journals the decisions in the tick record (§11); peers
+  apply. The radix is a pure function of the journaled prompt stream, so
+  a peer whose own derivation disagrees dies loudly — the same discipline
+  as a scheduler divergence. Eviction is LRU over refcount-0 entries;
+  blocks held by entries count against the pool meters, so admission
+  sees them.
+- *Hot == cold:* bitwise only when the hot path replays the cold path's
+  chunk sequence (bf16 GEMM outputs differ by ulps across chunk sizes,
+  M2). Either snapshots are taken only where cold prefill would chunk
+  (2048-token multiples and the prompt end) with turn-end snapshots
+  compared at the certified near-tie tier, or cold prefill chunks at
+  message boundaries too, making every turn-end snapshot a cold chunk
+  boundary and the criterion bitwise everywhere. Decided 2026-09-03: the
+  second — prefill chunks at message boundaries as well as at 2048-token
+  multiples, so a snapshot at any turn end replays the cold path's exact
+  chunk sequence and the cache is bitwise invisible.
+- *Keys:* tokenizer hash, template hash, checkpoint revision, numerics
+  mode; the radix is per process (no persistence in v1).
+
 ## 9. MTP transaction model
 
-Draft depth starts at three but is adaptive. Verification never writes over
+The contract (draft depth was to start at three and adapt; as built it is
+one, for the measured reasons below). Verification never writes over
 committed state in place.
 
 1. At transaction start, each request records its committed token length,
@@ -1158,6 +1477,41 @@ sharing its queue — a deadlock the watchdog breaks after 5 s.
 `glm_tp_test` and `bus_test` run with `CUDA_DEVICE_MAX_CONNECTIONS=32`;
 fabric ranks are separate processes and never see it.
 
+Where the step's time is after the on-device work, and the small-kernel
+round that found the floor, are §7.6. The step is driven by
+`glm_gen_check --decode-graph --mtp`; the service does not use it yet.
+
+### What remains (design)
+
+- *Behind the service:* the engine seam becomes "step(req) → the accepted
+  tokens" and the graph must be request-indexed on the device, because the
+  bus has one graph era per process (§6.2). Concurrency-1 first, then
+  rows = (request, spec row) with padding rows — PLAN M6 6a.
+- *Sampling under MTP:* exact speculative sampling with a deterministic
+  draft accepts draft `x` with probability `p(x)` under the verify row and
+  otherwise samples from `p` with `x` removed. `p(x)` needs the row's
+  global log-sum-exp: one more digit group in the pick table carrying each
+  rank's slice lse, folded as logaddexp on the device. The same field
+  enables a confidence-gated T (skip the draft row when its margin is
+  thin). Until then `--mtp` is greedy-only (§10). At the card's
+  recommended `temperature=1.0, top_p=0.95` the acceptance becomes
+  ≈ E[p(draft)] rather than the 89% argmax agreement; the second verify
+  row costs ~9–11 ms of a 42 ms step, so MTP pays above ~30% acceptance —
+  expected to hold, to be measured. (vLLM's recipe for this checkpoint
+  runs the MTP layer at depth 5; our depth-2 measurement — a second draft
+  accepted ~60% of the time — is consistent with the layer drafting well
+  recursively, and depth stays 1 here for step-time variance, a decision
+  that can be revisited with the lse in hand.)
+- *Depth:* fixed at 1. A second draft row was measured accepted ~60% of
+  the time against a ~29% break-even for its ~7 ms of unshared experts,
+  but it makes the step bimodal; declined for variance, not for mean.
+- *The eager first draft:* the prompt's last row goes through the draft
+  block eagerly after prefill; moving it into the prefill's tail is a
+  small item.
+- *A `FabricPicker` seam* so the plain loop's host pick and the graph
+  loop's device pick share one driver (`glm_gen_check` has three
+  pick-and-log variants today).
+
 ## 10. Tokenization, templates, logits, and sampling
 
 The bundled tokenizer is BPE with `byte_fallback=false` and no normalizer. Its
@@ -1168,10 +1522,35 @@ ByteLevel with `add_prefix_space=false`, `trim_offsets=true`, and
 settings and the special-token policy exactly; it must not invent a
 byte-fallback or normalization algorithm.
 
+As built (`glm_tokenizer.{hpp,cpp}`, M6 Stage 3): the Split regex is matched
+EXACTLY against the pinned string at load and implemented as a hand-written
+leftmost-first scanner over committed Unicode 15.0.0 range tables
+(`tools/gen_unicode_tables.py`); BPE with `ignore_merges=true` (whole-word
+vocab check first — ~97k GLM words diverge from a plain merge walk), no
+unk; 36 added tokens by byte-trie leftmost-longest extraction; decode
+skips special tokens by default (HF 0.23's default — the EOS decodes to
+the empty string). 55 golden cases byte-exact against HF tokenizers 0.23.1
+and against gigatoken (three oracles), the corpus keyed by
+tokenizer.json's FNV-1a-64 so a different revision refuses rather than
+compares. 20 MB tokenizer.json parses in 0.08 s; encode/decode are const
+and thread-safe.
+
 `chat_template.jinja` is loaded or compiled when a model revision is installed,
 not at engine build time. The compiled artifact is keyed by the template and
 tokenizer hashes. Golden tests cover English, Chinese, code, reasoning blocks,
 and tool calls against reference-rendered strings.
+
+As built (`glm_chat_template.{hpp,cpp}`, Stage 3b): a from-scratch Jinja
+interpreter (lexer with trim_blocks/lstrip_blocks and the trim-marker set,
+AST, Python-semantics truthiness/equality/str, `tojson` with raw UTF-8 —
+the override transformers installs) that implements exactly what the GLM
+template uses and REFUSES everything else at parse time (`{% do %}`,
+`include`, `join`, `is number`, macro defaults, …): a template revision
+that grows constructs fails loudly at install. 26 goldens (text AND
+encoded ids) vs jinja2 running transformers' own compile config, keyed by
+the template's hash; the four ranks render identical bytes. No library was
+usable: none of the C++ Jinja engines carry the transformers semantics,
+and there is no Python on the serving path.
 
 The lm head is vocabulary-sharded:
 
@@ -1185,18 +1564,190 @@ The full-logit fallback moves about 619.5 KB/token for this vocabulary; it is
 not described as a tiny merge. More elaborate distributed selection is an
 optimization only after parity and profiling.
 
-## 11. Runtime and API outline
+As built (`glm_sampler.hpp`, M6 d3): the three paths share ONE selection
+semantics — every path funnels into `select_from_sorted()` over candidates
+in the canonical total order (logit descending, id ascending), and the
+merge provably yields the same set in the same order as sorting the full
+vocabulary, so the distributed paths are exactly equal to the centralized
+oracle (the gate asserts float equality). Numerics in HF warper order:
+penalties (repetition, frequency, presence) → temperature (≤ 0 = greedy) →
+top-k → min-p → top-p (the crossing token stays in) → one uniform draw
+(fp64 walk over fp32 probabilities). The RNG is counter-based: `splitmix64`
+over (seed, counter), one counter advance per stochastic draw, none for
+greedy — any rank reconstructs any request's draw sequence from the seed
+and the step count. Wired: the greedy path only — host `bus_greedy_pick`
+(gather + broadcast with the readback invariant) on the eager path and the
+on-device `GlmDevicePicker` in the graph step (§9); the service refuses
+`temperature != 0` and `top_p != 1` with a named-parameter 400.
 
-The eventual daemon is a hand-rolled C++ service with:
+Design for the rest (PLAN M6 6b). Three facts fix the shape. The model
+card's recommended and evaluated settings are `temperature=1.0,
+top_p=0.95` (the checkpoint's `generation_config.json`), so the served
+DEFAULT is full-temperature nucleus sampling and the fast path must be
+exact and free in THAT regime; the OpenAI API has no `top_k`, so
+exactness is over the full vocabulary, not a client-declared prefix; and
+`temperature: 0` must remain today's greedy path at zero cost.
 
-- `/v1/chat/completions`, `/v1/completions`, `/v1/models`;
-- `/healthz` and `/metrics`;
-- SSE streaming, cancellation, deterministic seeds, and bounded request queues.
+*Defaults from the model, overrides from the command line.* The loader
+parses `generation_config.json` (`GlmGenerationDefaults`; the EOS ids
+already come from it) and the service fills every field a request omits
+from it — the HF contract — rather than from the OpenAI wire defaults;
+`glm_serve`/`glm_gen_check` override per process with `--temperature
+--top-p --top-k --min-p --seed`; a missing file or field falls back to
+greedy with a log line, never to a silent value. `/v1/models` reports the
+effective defaults.
+
+*The device path.* The pick table (§9) generalizes from 2 to k candidates
+per rank and gains a digit group for each rank's slice log-sum-exp; the
+one recorded gather then delivers the exact global top-k (the
+canonical-order merge of per-rank top-k) AND the exact normalizer
+(logaddexp of the slices), so the verdict kernel knows every candidate's
+true probability after temperature. Penalties and `logit_bias` apply
+before the local top-k from a per-request count table the commit kernel
+keeps. The kernel decides on the device whether the request RESOLVES
+INSIDE the candidates — the top-p cut lies within them if their
+cumulative mass reaches `top_p`; the draw `u` (the counter RNG, identical
+on every rank — no broadcast; the digest group catches a divergent draw)
+lies within them if it lands under the kept mass — and samples exactly
+when it does. Otherwise it flags a fallback in the pinned verdict and
+every rank runs the exact gather (fp32 slices as a bulk collective
+between windows, the host sampler with the same `u`). k is sized so the
+fallback is rare AT T=1/top_p=0.95: the plan is k=128 per rank (~9.2 KB
+per row of table; the local top-128 is a block-wide composite-key select
+in the DSA decode select's style), fixed after measuring the top-k mass
+per position on the teacher texts. Inside the one-graph MTP step a
+fallback means the draft ran on a provisional token: the draft's tail
+ring rolls back from its snapshot and the draft re-runs eagerly on the
+true token. Sampling under MTP is exact speculative sampling with a
+deterministic draft (§9): accept with probability `p(draft)`, else sample
+from `p` with the draft removed — acceptance ≈ E[p(draft)], lower than
+greedy's argmax agreement by physics, still above the ~30% break-even at
+T=1 by expectation; measured before it is claimed.
+
+## 11. Runtime and API
+
+The daemon is a hand-rolled C++ service (`glm_serve`; `src/service/`) with:
+
+- `POST /v1/chat/completions` (stream and non-stream), `POST
+  /v1/completions` (string prompt), `GET /v1/models`, `GET /health`,
+  `GET /v1/metrics`;
+- SSE streaming, disconnect → cancellation, deterministic (greedy) output,
+  and a bounded request queue;
+- tool calls and `reasoning_content`: designed, not built (below).
 
 The scheduler separates prefill and decode work, preserves identical rank
 order, and admits requests only when weights, mutable state, DSA cache, MTP
 scratch, network slabs, and snapshot copies fit. CUDA graphs are keyed by
 batch/shape bucket and contain no allocation or host synchronization.
+
+### As built (M6 Stages 2b, 4a, 4b)
+
+**The scheduler** (`glm_scheduler.{hpp,cpp}`) is a pure-host policy
+component — no CUDA, no bus, no model — over two seams: `SchedulerEngine`
+(`prefill(req, prompt) → token`, `step(req, prev) → token`, `close(req)`;
+the pick is fused into the op because at TP>1 the pick is a collective and
+the seam's call order IS the collective order — the scheduler never sees
+logits) and the DSA pool meters. Invariant: every rank runs the same pure
+function of (requests, meters) — no clocks, no unordered iteration, no
+thread arrival — so all ranks issue the same ops on the same slots in the
+same order (the §5 rule, made mechanical). Policy, decided with the user:
+STRICT ALTERNATION (each tick admits at most ONE queued request, then runs
+exactly one round-robin decode step — a mid-answer request never waits
+behind a burst of read-ins); FCFS admission WITHOUT head-of-line blocking
+(the oldest request that fits admits); FULL-RESERVE admission
+(`blocks_for(prompt + max_steps)` held for the request's lifetime — no
+mid-generation exhaustion, at the cost of over-reservation on early EOS);
+external cancellation swept at FIXED TICK TOP; a queued head that can never
+fit is refused at the door (`context_length_exceeded`), so the admission
+deadlock is unreachable by construction. The isolation property is the
+headline and is gate-pinned: a request's ids are identical whether it runs
+alone or interleaved with and cancelled around others (`glm_scheduler_test`
+with a scripted fake engine that fails loudly on cross-request
+contamination; the fabric smoke reproduced a solo transcript inside a
+three-request manifest with a cancellation).
+
+**The service** (`generation_service.{hpp,cpp}`, `http_server.{hpp,cpp}`):
+two threads, one mutex. The HTTP thread (single-threaded epoll, zero
+dependencies: keep-alive, chunked SSE, the limit ladder 431/413/503/501/
+411/400, mark-and-sweep close) parses, tokenizes and renders — rank 0's
+job only, never the fabric critical path — and pumps SSE; the engine
+thread drains admissions → `try_submit`, drains cancels → `cancel`, runs
+ONE tick, publishes meters. Records enter the table AT ENQUEUE so
+pre-admission requests are visible to disconnect and to the pump. The
+refusal ladder: every accepted field behaves per the schema; every
+unimplemented one (stop, n, logprobs, penalties, seed, tools,
+response_format, …, and non-greedy sampling) refuses with a 400 carrying
+the OpenAI error object naming the param — silent-ignore is the bug class
+the ladder exists to prevent. Incremental text is the suffix-diff of
+successive full decodes, so UTF-8 and special-token boundaries are exact
+without tokenizer state on the hot path.
+
+**The admission journal** (`fabric_serve.{hpp,cpp}`): rank 0 is the sole
+ingress; every engine pass's scheduler-state changes ride ONE
+newline-framed JSON record (`{"op":"tick","s":[{id,p,m,ca}…],"c":[…]}`)
+broadcast over TCP after the drain and before the tick, so the record and
+the tick are one atomic unit and tick counts are identical by
+construction. Only state changes rank 0 MADE ride it — accepted submits
+(with the prompt ids; rank 0 tokenized) and cancels that hit; door sheds
+die on rank 0; steps, retires and tokens are derived state. Because every
+engine op is a bus collective, a record cannot interleave a peer's
+in-flight tick. Death discipline: journal EOF means rank 0 is gone and the
+peers exit; a peer that stops reading makes rank 0's broadcast throw. The
+metronome's idle chatter (200 noop records/s, ~3 KB/s per peer) buys zero
+branching. Peers run `run_journal_peer` — no HTTP, no tokenizer. The §5
+identity is checked live by the 4-way op-stream md5 after every run
+(`glm_fabric_serve_test` pins it with two real peer loops over localhost).
+Bring-up lessons kept as code: the peer's journal connect retries inside
+its window (a single-shot connect lost a 30 ms race to rank 0's bind);
+minijson views its input, so a parsed record is copied out before the
+buffer dies.
+
+**Measured** (fabric TP=4, Stage 4b/4c, 2026-09-01): bus world in 2.4 s,
+journal peers in 30 ms, HTTP up with the model — since the image cache a
+ready model is 15–25 s (§3); "What is the capital of Germany?" 32 tokens
+in 5.82 s warm (~175 ms/token — the eager single-token step before the
+kernel rounds; not re-measured behind the service since); the fabric's
+distributed greedy pick produced the same token sequence as w1's
+full-vocab argmax.
+
+### Design for what remains (PLAN M6 6a/6c/6d, M9)
+
+- *The one-graph step behind the seam:* `step(req)` returns the accepted
+  tokens (1..T; the scheduler stops at the first EOS and truncates at the
+  cap — the retired request's extra device token is never observed);
+  concurrency 1 first with slot 0 baked in, then the row-batched graph
+  with padding rows (§9). Prefill stays eager between windows (the mixed
+  era); `session_reserve_blocks` at admission is the full-reserve policy
+  in device form.
+- *Drain-on-stop:* stop is a flag read at tick top; active streams get an
+  error event, requests retire, the stop record goes out, THEN the bus
+  tears down — never under an in-flight collective (today SIGINT
+  mid-prefill leaves the peers on transport-retry-exceeded).
+- *Grow-on-demand admission:* reserve to a window, grow at tick top,
+  shed the youngest deterministically when growth fails — a pure function
+  of (meters, positions), so the journal keeps it identical.
+- *Tool calls and reasoning (PLAN 6f):* the template already renders
+  `tools`, assistant `tool_calls` and `tool` messages; the API accepts
+  them plus `tool_choice` (`required`/named → a forced `<tool_call>`
+  prefix on the generation prompt), `reasoning_effort` and
+  `enable_thinking`. The output parser is a state machine over TOKEN IDS
+  on rank 0's HTTP thread — the added tokens `<tool_call>` 154843,
+  `</tool_call>` 154844, `<arg_key>` 154847/8, `<arg_value>` 154849/50
+  and `</think>` 154842 are invisible in decoded text (special tokens
+  skip) but exact in the id stream. Values parse as JSON when they parse,
+  else as strings (the inverse of the template's `tojson`-unless-string).
+  OpenAI shapes: `tool_calls[{id, type, function{name, arguments}}]`,
+  streamed as one id/name delta and one complete-arguments delta per
+  call, `finish_reason: "tool_calls"`; ids before `</think>` become
+  `reasoning_content`. Golden: render(assistant tool_calls) → encode →
+  parse must round-trip, since the template's rendering IS the model's
+  output format. The fabric never sees any of it — the parser is
+  downstream of the token stream.
+- *Failure semantics (v1):* no failover. Any rank's death fails the world
+  legibly (journal EOF / bus watchdog), active streams get an error event,
+  a supervisor restarts the world in ~25 s from the image cache. The
+  4-way md5 becomes continuous (rank 0's running op fold every N ticks in
+  the journal; a differing peer dies with the tick number).
 
 ## 12. Correctness and performance gates
 
@@ -1281,43 +1832,72 @@ cuBLASLt heuristic sweep, not a proof of hardware peak. Network claims use
 perftest as the authoritative throughput source and the project benchmark for
 protocol validation.
 
+**Cross-build numerics gates (since the reassociation rule, §1):** the
+transcript md5 is the regression signal only for changes that claim to be
+bit-identical (and for MTP against plain, §9). For rounding-level changes
+the judges are `scripts/fabric_xcript.py REF NEW` — the first divergent
+token, judged by the global top-2 margin in bf16 ulps of the winning logit
+(a flip within 1–2 ulps is a coin the hidden state's last rounding turned;
+the reference transcript has 14 of 300 picks decided by ≤ 1 ulp) — and
+`scripts/fabric_logprob.py NEW REF` over a teacher-forced run
+(`glm_gen_check --teacher-file`): per-token log p from the joined
+vocabulary slices, perplexity, the mean-NLL delta with a standard error
+and a PASS/FAIL at 0.02 nat. Three texts ship (556 tokens of prose; 7,331
+of unmemorized technical prose at perplexity ~10.8 — the sensitive one;
+6,549 of Conan Doyle at 1.04). The same binary twice must show a delta of
+exactly 0: the decode path is deterministic end to end. Fabric runs are
+correlated across ranks by BUS GENERATION, never by wall clock (the boxes
+disagree by hours; `scripts/fabric_xrank.py`).
+
 ## 13. Repository layout
 
-Current source-tree implementation (including the audit-remediation files that
-must be added to the next commit):
+Current source tree:
 
 ```text
-apps/                 dgppctl, glm_bind_check, and synthetic gpt_doll driver
+apps/                 glm_serve (the service), glm_gen_check (generation,
+                      teacher forcing, --decode-graph, --mtp, --requests),
+                      glm_tp_check (fabric parity), glm_forward_check
+                      (curated suite, traces), glm_shard_parity,
+                      glm_stream_check, glm_bind_check, bus_check,
+                      bus_small_repro (the pick racer), nic_regress,
+                      roster_check, dgppctl, gpt_doll
 benchmarks/micro/     platform and transport probes (incl. kda_bench, dsa_bench)
+benchmarks/results/   the dated records; 2026-08-29-bus-m5.md carries M5–M8
+benchmarks/           teacher texts, the curated glm-suite
 docs/                 generated checkpoint budget and validated measurements
-src/common/           logging, dtypes, tests
+scripts/              fabric_run.sh (the fabric launcher), serve_run.sh
+                      (up/down/status), fabric_xcript.py / fabric_logprob.py
+                      / fabric_xrank.py / fabric_logs.py (the judges and the
+                      cross-rank reader), node_probe.sh, soak.sh, ci-local.sh
+src/common/           logging, dtypes, process memory (mlock), tests
 src/core/             arena, graph, streams, trace
-src/kernels/          synthetic kernels, GEMM wrapper, flag protocol, KDA and DSA ops
-src/loaders/          JSON, safetensors, shardspec
-src/models/           synthetic GPT doll; KDA layer/state/reference/dump; DSA
-                      reference/geometry/state/layer/dump; GLM text config,
-                      expected-tensor binding, and streaming resident loader
-                      (M4)
-src/net/              M5 control + data planes: TCP primitives, the
-                      epoch-based roster (startup, health, eviction), and
-                      the CollectiveBus — verbs RC QPs, per-class slot
-                      pools with ring discipline, credit-grant RDMA writes,
-                      the single-threaded engine loop, and the
-                      watchdog-bounded receive consumers
-tests/                host, CUDA, and Python tests
-tools/                checkpoint audit, shard-plan, KDA/DSA reference-dump generators
+src/kernels/          GEMM wrapper and scale-aware GEMM, bf16/fp8 GEMV cores,
+                      KDA and DSA ops, mHC, MoE (router, slot GEMVs,
+                      accumulation), norms, L2 prefetcher, the pick and spec
+                      (commit/positions/draft rows) kernels, flag protocol
+src/loaders/          JSON, safetensors, shardspec, the HF hub cache resolver
+src/models/           GLM config/binding/loader/resident image; the model
+                      (glm_forward, glm_decode sessions, glm_mtp, glm_tp views
+                      and bus reducers, glm_tp_bus picker); KDA and DSA
+                      layers/state/references/dumps; mHC and MoE layers and
+                      oracles; tokenizer, chat template, sampler, scheduler,
+                      speculative judge, engine adapters, step timing
+src/net/              TCP primitives, the epoch-based roster, the CollectiveBus
+                      (verbs RC QPs, slot pools, credits, the engine loop, the
+                      collective kernels: latency one-shot, graph, bulk RS+AG)
+src/service/          HTTP server, generation service, fabric serve (journal)
+tests/                host, CUDA, and Python tests (32 CTest entries)
+tools/                checkpoint audit, shard plan, reference-dump generators,
+                      tokenizer/template golden generators, unicode tables
 ```
-
-Planned directories such as `models/glm53`, `net`, `server`, `cache`, and
-`deploy` are added only with their milestones; they are not represented as
-existing code.
 
 ## 14. Future validation scope
 
-The recorded evidence satisfies the completed M0/M1 exit criteria. It does not
-replace the workload-specific correctness, stability, and performance
-measurements required by later milestones, including four-node CollectiveBus
-and full-model validation. If those runs develop drops, retries, unstable
+The recorded evidence satisfies the exit criteria of M0–M5 and M8 and the
+built parts of M6 (PLAN). It does not replace the serving-workload
+measurements still owed: the service's own latency/throughput on a
+committed workload, 32K-context TTFT, the 24-hour serving soak, and the
+failure drills (PLAN M9). If fabric runs develop drops, retries, unstable
 throughput, or latency spikes, capture node and switch counter deltas and
 inspect flow-control configuration. Comparisons with other inference engines
 are optional and are not an implementation milestone or performance gate.

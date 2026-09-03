@@ -1,33 +1,25 @@
 # DGPP Engine
 
-DGPP is an early-stage C++/CUDA inference-engine project for serving the text
-path of `unsloth/GLM-5.3-Flash-FP8` across four NVIDIA DGX Spark systems.
+DGPP is a C++/CUDA inference engine for serving the text path of
+`unsloth/GLM-5.3-Flash-FP8` across four NVIDIA DGX Spark systems, with no
+framework underneath it: the kernels, the RoCE collective bus, the tokenizer,
+the chat-template interpreter, the scheduler and the HTTP service are all in
+this tree.
 
-Current status: M0–M4 prototype. The repository implements platform and RoCE
-validation tools, checkpoint/shard inspection, core CUDA runtime utilities, a
-synthetic transformer testbed, the KDA linear-attention operators with their
-per-request state manager and reference-dump harness, the complete
-DSA/MLA sparse-attention path: indexer compression, deterministic pooled
-top-k, split-KV absorbed attention, a dual-precision host oracle, the blocked
-state pool with shared block tables, layer orchestration (graph-capturable
-decode, pool-tiled prefill), and the reference-dump parity harness; and the
-full single-node GLM diagnostic forward: config adapter and binding
-validation, mHC residual streams, the streaming resident loader (one layer
-resident at a time), block-scale-aware GEMMs, MoE routing with route-trace
-capture, and a curated real-checkpoint parity suite where every selection
-flip — router or head — is certified as a measured near tie. M5 (four-rank
-tensor parallelism) is in flight: the TCP control plane — epoch-based
-roster/startup, rank health, eviction on death or heartbeat deadline — is
-validated on all four nodes, and the CollectiveBus data plane (RC QPs per
-pool per peer-lane on both f0 lanes, per-class slot pools, credit-grant RDMA
-writes, watchdog-bounded GPU consumers) is unit- and sanitizer-tested and
-validated two-node: verified payload integrity, dual-lane striping, and
-latency-under-bulk contention on the fabric. It does
-**not** yet implement replicated-boundary collectives (the attention/FFN
-all-reduces of deliverable 3),
-the TP placement,
-prefix cache, MTP generation loop, or OpenAI-compatible server. See
-`PLAN.md` for milestone status.
+Current status (2026-09-03): the engine serves. `glm_serve` boots a resident
+TP=4 model on the four-node fabric in 15–25 s (per-rank image cache), answers
+the OpenAI chat/completions contract over HTTP/SSE with rank 0 as the sole
+ingress, and every rank executes an identical op stream by construction. The
+serving path today is greedy-only and steps one token at a time (last
+measured ~175 ms/token before the kernel rounds). The fast path lives beside
+it in `glm_gen_check`: the decode step as one CUDA graph replay with the
+collectives as graph nodes runs at 31.3 ms/token, and greedy speculative
+decode with the checkpoint's MTP layer — verify, on-device pick, rollback,
+draft and next tokens all inside one replay — at 22.45 ms/token with a
+transcript identical to plain decode. Bringing that step behind the service,
+stochastic sampling on the distributed path, and the prefix cache are the
+open items; `PLAN.md` has the status per milestone and the designs for what
+remains, `DESIGN.md` the contracts as built.
 
 ## Documentation
 
@@ -97,7 +89,16 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `tools/dsa_reference_dump.py` | DSA parity dumps: `selftest`, `gen-pure` (CI oracle), `gen-torch` (real checkpoint slices; needs torch) |
 | `tools/glm_reference_dump.py` | full-model parity dumps: `selftest`, `gen-pure` (CI oracle, mini checkpoint), `gen-torch` (real checkpoint, per-layer streams + router scores; `--layers N` for reduced budgets) |
 | `roster_check coordinator/rank/selftest` | M5 control plane on real nodes: epoch-based roster startup, rank health, eviction on death/deadline; `selftest` is the loopback in-process smoke |
-| `bus_check serve/ping/selftest` | M5 data plane on real nodes: RC/RoCE CollectiveBus — per-class slot pools, credit-grant RDMA writes, dual-lane striping, latency-under-bulk contention; `selftest` is the loopback in-process smoke |
+| `bus_check serve/ping/selftest` | M5 data plane on real nodes: RC/RoCE CollectiveBus — per-class slot pools, credit-grant RDMA writes, dual-lane striping, latency-under-bulk contention; `selftest` is the loopback in-process smoke; `--contend --soak-ms` is the duration-bounded soak |
+| `bus_small_repro --pick-race` | the pick-path racer: the decode step's collective shape with an exact oracle after every collective under injected skew, loopback or fabric |
+| `nic_regress mesh/pair/serve/selftest` | NIC→GPU visibility regression over every directed node pair on both lanes (rerun after driver/firmware changes) |
+| `glm_tp_check --model ID --world W --rank R --peer HEAD` | fabric TP parity: final hidden/logits/routes/digests bitwise across ranks and against the loopback verdict dumps |
+| `glm_shard_parity` | the sharded loader vs full-load + `GlmTpViews::bind`, bitwise on every bound surface |
+| `glm_gen_check --model ID --chat TEXT [--system S] --steps N [--decode-graph] [--mtp]` | generation on the fabric (or `--text`, `--prompt IDS`): resident TP, distributed greedy pick, EOS stop; `--decode-graph` replays the step as one CUDA graph, `--mtp` adds speculative decode (see below); `--requests FILE` runs a JSONL manifest through the scheduler, `--sched-plan` prints the memory receipt without a GPU, `--teacher-file F` scores a text instead of generating, `--step-timing` prints the per-phase budget |
+| `glm_serve --model ID --port P [--world W --rank R --peer HEAD --journal-port J] [--max-concurrency N --kv-capacity T --queue-limit Q]` | the OpenAI-compatible service: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/v1/metrics`; rank 0 is the HTTP ingress and journals admissions to the peers |
+| `scripts/fabric_run.sh [--stage-file F] [--fetch-logs] [--node-probe] -- APP-ARGS` | launches any app on the four-node fabric with the rendezvous discipline (head first, peers fire-and-forget, verified by pgrep, swept on head death); collects rank-invariant md5s and bus stats |
+| `scripts/serve_run.sh up/down/status` | boots/stops the serving world; `down` fetches and md5s every rank's op stream |
+| `scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`, `scripts/fabric_xrank.py` | the judges (first divergence by bf16-ulp margin; teacher-forced perplexity delta) and the cross-rank step/stall reader — see "Judging a numerics change" |
 
 The GDR probe exits successfully when the probe itself completes, including
 the expected “unsupported” result on GB10. It does not prescribe a bounce
@@ -106,16 +107,23 @@ GPU.
 
 ## Tests
 
-CTest currently runs:
+CTest currently runs 32 entries:
 
-- 54 host unit cases covering logging/tracing, JSON, arenas, safetensors,
-  FP8, shard plans, KDA/DSA geometry contracts (against DESIGN §7.2's
+- host unit cases covering logging/tracing, JSON, arenas, safetensors,
+  FP8, shard plans, the HF cache resolver, the sampler against its
+  centralized oracle, KDA/DSA geometry contracts (against DESIGN §7.2's
   transcribed literals), route-trace golden bytes shared with the python
   reader, the MoE route-flip certifier's rejection paths (near-tie
   accepted; far-rank, zero-noise, own-scores-inconsistent, and duplicate-id
   divergences rejected), and the TCP/roster control plane (seal, epoch
   bumps, eviction by death and by deadline, rejection reasons, coordinator
   loss);
+- the M6 host suites: the tokenizer (55 byte-exact goldens, hash-keyed),
+  the chat template (26 goldens + 8 refusal negatives), the scheduler
+  (isolation, determinism, cancellation, bounded queue, tick ≡
+  run_to_completion), the HTTP server's limit ladder, the OpenAI shapes
+  over real HTTP with a fake engine, and the admission journal with two
+  real peer loops over localhost;
 - synthetic CUDA graph/eager parity;
 - the KDA operator suite: conv/recurrent kernel parity against host
   fp32/fp64 references, chunked-vs-unchunked bitwise equivalence, decode
@@ -156,10 +164,23 @@ CTest currently runs:
 - the M5 CollectiveBus data plane (needs the fabric + ibverbs): loopback
   scenarios with real RC QPs — payload integrity via fold-hash, credit
   recycling, dual-lane striping asserted on both sides, latency under bulk
-  contention, watchdog failures, config-mismatch rejection, and orderly
-  stop — plus the app-level smoke;
+  contention, watchdog failures, config-mismatch rejection, the graph era
+  with the mixed-era interlude, the bulk RS+AG machine, and orderly stop —
+  plus the app-level smoke;
+- the TP forward over loopback buses (`glm_tp_test`): per-layer isolated
+  parity vs the world=1 oracle at worlds 2 and 4, decode sessions, the
+  greedy generation loop, the device pick, and the one-graph MTP step in
+  lockstep with the eager speculator; the pick/spec kernels against their
+  host oracles (`glm_pick_test`); the GEMV cores (`bf16_gemv_test`) and the
+  loader's resident-image round trip (`glm_loader_test`);
 - Python checkpoint classification, exact expert-occupancy tests, and the
   route-trace traffic-model contract.
+
+`glm_tp_test` and `bus_test` run with `CUDA_DEVICE_MAX_CONNECTIONS=32`: one
+process hosting every rank's streams overflows CUDA's default 8 hardware
+work queues, and a rank's spinning collective kernel then blocks a peer's
+chain sharing its queue (DESIGN §9). Fabric ranks are separate processes
+and never see it.
 
 All CUDA suites are verified clean under `compute-sanitizer` memcheck (full
 suite every milestone; racecheck and initcheck per-phase on the tests
