@@ -1296,6 +1296,72 @@ DGPP_TEST(glm_tp_session_verify_rollback_matches_sequential_bitwise) {
   require(threw, "rollback to 0 rows must be rejected");
 }
 
+// The MTP draft block (DESIGN §9), world 1: deterministic across model
+// instances; a two-row draft's last row is BITWISE the same row drafted
+// alone after a one-row draft (the block's rows are causal + per-token,
+// exactly as the main stack's verify rows are); the prefill filled the
+// block's cache (drafting after a prompt works at all); and the row-
+// accounting invariant (draft exactly the rows since the last draft) is
+// enforced. The block's numerics against the reference are not pinnable
+// here (no host reference); the real model's acceptance rate is that gate.
+DGPP_TEST(glm_tp_mtp_draft_batched_matches_sequential_bitwise) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  // GIVEN a prompt and the tokens the "picks" will feed:
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  const std::vector<int64_t> toks = make_tokens(6, cfg.vocab_size);
+  const int max_tokens = static_cast<int>(prompt.size() + toks.size()) + 4;
+  const size_t V = static_cast<size_t>(cfg.vocab_size);
+  GlmDiagnosticModel a(cfg, dir, max_tokens, 128, nullptr, 0, 1,
+                       GlmResidency::Streaming, GlmHeadSharding::Full, 1,
+                       /*mtp=*/true);
+  GlmDiagnosticModel b(cfg, dir, max_tokens, 128, nullptr, 0, 1,
+                       GlmResidency::Streaming, GlmHeadSharding::Full, 1,
+                       /*mtp=*/true);
+  require(a.mtp_enabled(), "mtp enabled");
+
+  // WHEN both prefill (the block runs over rows 0..P-2) and draft row P-1:
+  a.session_prefill(prompt);
+  b.session_prefill(prompt);
+  const GlmDiagnosticModel::Outputs da = a.session_draft(0, {toks[0]});
+  const GlmDiagnosticModel::Outputs db = b.session_draft(0, {toks[0]});
+  require(da.logits.size() == V, "draft logits are one vocab row");
+  require(da.logits == db.logits, "draft must be deterministic across instances");
+
+  // A verifies two rows and accepts both, then drafts the two rows in ONE
+  // call; B takes the same rows one at a time (verify 1, draft 1, twice).
+  a.session_verify(0, {toks[0], toks[1]});
+  const GlmDiagnosticModel::Outputs two = a.session_draft(0, {toks[1], toks[2]});
+  b.session_verify(0, {toks[0]});
+  (void)b.session_draft(0, {toks[1]});
+  b.session_verify(0, {toks[1]});
+  const GlmDiagnosticModel::Outputs one = b.session_draft(0, {toks[2]});
+  // THEN the drafted distributions agree bitwise:
+  require(two.logits == one.logits,
+          "a two-row draft's last row must be BITWISE the same row drafted "
+          "alone (causal DSA with self-include, per-token MoE, row-independent "
+          "GEMV)");
+
+  // A rejected verify row, rolled back, then the one accepted row drafted:
+  a.session_verify(0, {toks[2], toks[3]});
+  a.session_rollback(0, 1);
+  (void)a.session_draft(0, {toks[3]});
+  b.session_verify(0, {toks[2]});
+  (void)b.session_draft(0, {toks[3]});
+  a.session_verify(0, {toks[3]});
+  b.session_verify(0, {toks[3]});
+  require(a.session_draft(0, {toks[4]}).logits == b.session_draft(0, {toks[4]}).logits,
+          "drafts after a rollback must match the sequential path bitwise");
+
+  // The invariant: the draft must cover exactly the rows since the last one.
+  a.session_verify(0, {toks[4], toks[5]});
+  bool threw = false;
+  try { (void)a.session_draft(0, {toks[5]}); } catch (const std::invalid_argument&) { threw = true; }
+  require(threw, "a draft that does not reach the session position must throw");
+  (void)a.session_draft(0, {toks[5], toks[0]});
+}
+
 DGPP_TEST(glm_tp_decode_session_hazard) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";

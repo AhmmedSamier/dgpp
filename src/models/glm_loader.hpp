@@ -182,10 +182,13 @@ class GlmLayerStream {
   // build, byte-for-byte (same grant sequence, same bytes — the layer
   // formula cannot drift). TP geometry is validated BEFORE any shard is
   // opened; misaligned inter quotients fail there, loudly.
+  // `resident_mtp`: the model will materialize the MTP draft layer too
+  // (counted in the resident footprint check; loaded like any layer).
   GlmLayerStream(const GlmTextConfig& cfg, const std::string& checkpoint_dir,
                  int rank = 0, int world = 1,
                  GlmResidency residency = GlmResidency::Streaming,
-                 GlmHeadSharding head = GlmHeadSharding::Full);
+                 GlmHeadSharding head = GlmHeadSharding::Full,
+                 bool resident_mtp = false);
   ~GlmLayerStream();
   GlmLayerStream(const GlmLayerStream&) = delete;
   GlmLayerStream& operator=(const GlmLayerStream&) = delete;
@@ -305,6 +308,7 @@ class GlmLayerStream {
   uint64_t source_bytes_ = 0;
   uint64_t verbatim_bytes_ = 0;
   bool sources_released_ = false;
+  bool resident_mtp_ = false;
   std::string checkpoint_dir_;
   std::unique_ptr<GlmResidentImage> image_;  // resident mode, when configured
   int image_restored_ = 0;

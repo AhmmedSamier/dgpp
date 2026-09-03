@@ -855,12 +855,13 @@ size_t GlmLayerStream::resident_bytes(const GlmTextConfig& cfg, int rank,
 GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
                                const std::string& checkpoint_dir, int rank,
                                int world, GlmResidency residency,
-                               GlmHeadSharding head)
+                               GlmHeadSharding head, bool resident_mtp)
     : cfg_(cfg),
       rank_(rank),
       world_(world),
       residency_(residency),
       head_(head),
+      resident_mtp_(resident_mtp),
       layer_bump_(std::make_unique<GlmLayerBump>()),
       globals_bump_(std::make_unique<GlmLayerBump>()) {
   if (world < 1 || rank < 0 || rank >= world)
@@ -944,12 +945,12 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
 // same bytes the host would otherwise call MemAvailable); the headroom
 // covers the staging mirror, the CUDA context and the bus's buffers.
 void GlmLayerStream::check_resident_footprint_fits() const {
-  const int max_layer =
-      cfg_.num_hidden_layers + (cfg_.mtp_layer() >= 0 ? 1 : 0);
   size_t footprint = globals_bytes(cfg_, rank_, world_, head_);
   for (int l = 0; l < cfg_.num_hidden_layers; ++l)
     footprint += layer_bytes(cfg_, l, rank_, world_);
-  (void)max_layer;  // the MTP draft is loaded on demand, not counted here
+  // The MTP draft layer counts only when the model asked for it.
+  if (resident_mtp_ && cfg_.mtp_layer() >= 0)
+    footprint += layer_bytes(cfg_, cfg_.mtp_layer(), rank_, world_);
   size_t free_bytes = 0, total_bytes = 0;
   if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) return;
   constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;

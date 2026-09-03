@@ -98,6 +98,11 @@ class GlmDiagnosticModel {
   // sampling merge consumes exactly those). Default Full: byte-stable
   // with every M4/M5 parity gate.
   //
+  // MTP (DESIGN §9): `mtp` = true materializes the draft layer
+  // (cfg.mtp_layer(), ~7.3 GiB/rank resident) and its DSA cache ordinal,
+  // keeps a per-position hidden cache for the draft block's hnorm input,
+  // and enables session_draft. Requires cfg.num_nextn_predict_layers == 1.
+  //
   // SESSIONS (M6 Stage 2b): `max_requests` sizes the concurrent-session
   // machinery — the DSA pool's per-request block tables/tail rings and the
   // per-request KDA state slots. Default 1 is byte-stable with every
@@ -112,7 +117,7 @@ class GlmDiagnosticModel {
                      int tp_world = 1,
                      GlmResidency residency = GlmResidency::Streaming,
                      GlmHeadSharding head = GlmHeadSharding::Full,
-                     int max_requests = 1);
+                     int max_requests = 1, bool mtp = false);
   ~GlmDiagnosticModel();
   GlmDiagnosticModel(const GlmDiagnosticModel&) = delete;
   GlmDiagnosticModel& operator=(const GlmDiagnosticModel&) = delete;
@@ -184,6 +189,29 @@ class GlmDiagnosticModel {
   static constexpr int kSpecRows = 4;
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
   void session_rollback(int req, int accepted);
+
+  // The MTP draft block (constructed with mtp = true). The block's row at
+  // main-stack position q takes [enorm(embed(tok_{q+1})) | hnorm(h_q)] and
+  // predicts tok_{q+2}; h_q is the pre-final-norm mean of the mHC streams
+  // the main stack left at position q (kept in a per-position cache by
+  // session_prefill/session_verify). session_prefill also runs the block
+  // over the prompt (rows 0..P-2) so its DSA cache covers it; the block's
+  // row counter then trails the main stack's position by one.
+  //
+  // session_draft(req, tokens) runs the block over the rows the main stack
+  // has advanced past since the last draft: tokens[j] is tok_{q_j+1} for
+  // consecutive q_j starting at the block's row counter, and tokens.size()
+  // must equal session_position - draft rows so far (after a verify that
+  // accepted `a` rows: the a accepted rows' argmaxes). Returns the LAST
+  // row's logits (this rank's vocab slice): the draft for the next verify.
+  // Draft rows only ever carry accepted tokens, so the block's state
+  // never rolls back.
+  bool mtp_enabled() const { return mtp_; }
+  Outputs session_draft(int req, const std::vector<int64_t>& tokens);
+  // The draft's graph-era halves (a graph per row count, as for verify).
+  void session_graph_capture_draft(int req, const std::vector<int64_t>& tokens);
+  void session_graph_stage_draft(int req, const std::vector<int64_t>& tokens);
+  Outputs session_graph_collect_draft(int req);
   // Retires slot `req`: its DSA blocks return to the free pool (admission
   // meters see the capacity again) and the slot may be reopened by a
   // later prefill. No collective — safe between any two session ops.
@@ -397,6 +425,22 @@ class GlmDiagnosticModel {
   // graph re-uploads at launch).
   void session_decode_host_prep(int req, const std::vector<int64_t>& ids,
                                 bool upload);
+  // ---- MTP (glm_mtp.cpp) ----
+  // The draft block over T rows at the block's positions [first_pos,
+  // first_pos + T): tokens from d_tokens_, hidden from the position
+  // cache. decode_row selects the DSA decode path (positions from
+  // d_step_pos_) and runs the head on the LAST row into logits_ row 0 +
+  // the pinned mirror; prefill rows run the block only (no head).
+  void mtp_run_rows(int req, int64_t first_pos, int T, bool decode_row,
+                    bool capture_mode);
+  // The block over a prompt's rows 0..P-2 in pool-aligned chunks.
+  void mtp_prefill(int req, const std::vector<int64_t>& prompt_ids);
+  // The draft's host half: validation, positions/tokens staging, uploads.
+  void mtp_decode_host_prep(int req, const std::vector<int64_t>& tokens,
+                            bool upload);
+  Outputs mtp_decode_tail();
+  uint16_t* mtp_hidden_cache(int req) const;
+  int moe_graph_slots() const { return n_moe_layers_ + (mtp_ ? 1 : 0); }
   // The decode tail shared by the eager step and the graph-era collect:
   // materializes the route traces from the pinned per-MoE-layer staging
   // (the D2H copies must have joined — the eager final sync or the
@@ -495,6 +539,10 @@ class GlmDiagnosticModel {
                                      // source; a memcpy node's baked
                                      // address)
   static constexpr int kDecodeRows = 8;  // DsaLayer's select-kernel bound
+  // DESIGN §7.1: pool-aligned prefill chunks. Must be a multiple of DSA's
+  // kpool so continuation chunks stay pool-aligned; the FINAL chunk may end
+  // mid-pool (the tail persists into decode).
+  static constexpr int kPrefillChunkTokens = 2048;
   // The row count of the most recent decode call (staged or run): what
   // session_graph_collect materializes and session_rollback bounds.
   int decode_rows_ = 1;
@@ -509,6 +557,19 @@ class GlmDiagnosticModel {
   uint16_t* spec_conv_ = nullptr;
   uint16_t* spec_tail_ = nullptr;
   size_t spec_tail_ring_elems() const;
+  // MTP draft layer (DESIGN §9). The draft's DSA cache is one more pool
+  // ordinal (main_dsa_layers_) after the main stack's; its MoE table slot
+  // is n_moe_layers_. mtp_hidden_ is the per-request, per-position cache
+  // of the main stack's pre-final-norm hidden ([max_requests, max_tokens,
+  // hidden] bf16) the draft block's hnorm reads; mtp_pos_ counts the
+  // block's rows per request.
+  bool mtp_ = false;
+  int main_dsa_layers_ = 0;  // dsa_cfg_.num_dsa_layers minus the draft's
+  std::vector<int64_t> mtp_pos_;
+  int draft_rows_ = 1;
+  uint16_t* mtp_hidden_ = nullptr;  // [max_requests, max_tokens, H]
+  uint16_t* mtp_cat_ = nullptr;     // [T, 2H] the eh_proj input
+  uint16_t* mtp_x_ = nullptr;       // [T, H] the block's residual
   // Decode-path route traces (2026-09-01): per-MoE-layer pinned staging
   // filled by enqueue_decode's async D2H copies, materialized into
   // Outputs.routes after the step's final sync (the copies are

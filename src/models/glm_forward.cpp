@@ -89,7 +89,7 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
                                         int tp_rank, int tp_world,
                                         GlmResidency residency,
                                         GlmHeadSharding head,
-                                        int max_requests)
+                                        int max_requests, bool mtp)
     : cfg_(cfg),
       kda_cfg_(with_tp(cfg.kda_config(), tp_world)),
       dsa_cfg_(with_tp(cfg.dsa_config(), tp_world)),
@@ -97,9 +97,20 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
       moe_cfg_(cfg.moe_config()),
       kda_geo_(KdaGeometry::from_config(kda_cfg_)),
       max_tokens_(max_tokens),
-      loader_(cfg, checkpoint_dir, tp_rank, tp_world, residency, head) {
+      loader_(cfg, checkpoint_dir, tp_rank, tp_world, residency, head,
+              /*resident_mtp=*/mtp),
+      mtp_(mtp) {
   if (max_tokens_ <= 0)
     throw std::invalid_argument("GlmDiagnosticModel: max_tokens must be positive");
+  if (mtp_ && cfg_.mtp_layer() < 0)
+    throw std::invalid_argument(
+        "GlmDiagnosticModel: mtp requested but the config has no draft layer "
+        "(num_nextn_predict_layers == 0)");
+  // The draft layer is a DSA layer with its own cache: one more pool
+  // ordinal, after the main stack's (the pool and the layer object share
+  // the config, so both see the extra ordinal).
+  main_dsa_layers_ = dsa_cfg_.num_dsa_layers;
+  if (mtp_) dsa_cfg_.num_dsa_layers += 1;
   if (max_cache_tokens < max_tokens_)
     max_cache_tokens = max_tokens_;
   if (max_requests <= 0)
@@ -222,10 +233,20 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     spec_conv_ = static_cast<uint16_t*>(alloc_device(
         (kSpecRows - 1) * per_row * kda_geo_.conv_committed_bytes));
   }
-  if (dsa_cfg_.num_dsa_layers > 0)
+  if (main_dsa_layers_ > 0)
     spec_tail_ = static_cast<uint16_t*>(
-        alloc_device(static_cast<size_t>(dsa_cfg_.num_dsa_layers) *
-                     kSpecRows * spec_tail_ring_elems() * 2));
+        alloc_device(static_cast<size_t>(main_dsa_layers_) * kSpecRows *
+                     spec_tail_ring_elems() * 2));
+  if (mtp_) {
+    const size_t H = static_cast<size_t>(cfg_.hidden_size);
+    mtp_pos_.assign(static_cast<size_t>(max_requests_), 0);
+    mtp_hidden_ = static_cast<uint16_t*>(alloc_device(
+        static_cast<size_t>(max_requests_) * max_tokens_ * H * 2));
+    mtp_cat_ = static_cast<uint16_t*>(
+        alloc_device(static_cast<size_t>(max_tokens_) * 2 * H * 2));
+    mtp_x_ = static_cast<uint16_t*>(
+        alloc_device(static_cast<size_t>(max_tokens_) * H * 2));
+  }
 
   // Decode-path route traces: pinned staging the decode MoE's async
   // copies land in (see glm_moe_layer.hpp's MoeTraceStaging). Pinned —
@@ -312,6 +333,9 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(spec_rec_);
   cudaFree(spec_conv_);
   cudaFree(spec_tail_);
+  cudaFree(mtp_hidden_);
+  cudaFree(mtp_cat_);
+  cudaFree(mtp_x_);
   cudaFree(d_tokens_);
   cudaFree(streams_[0]);
   cudaFree(streams_[1]);
@@ -361,7 +385,11 @@ GlmMoeWeights GlmDiagnosticModel::moe_weights(const GlmMoeResident& r) {
 
 const GlmLayerResident& GlmDiagnosticModel::stack_layer(int layer) {
   const GlmLayerResident& r = loader_.load_layer(layer);
-  if (layer + 1 == cfg_.num_hidden_layers &&
+  // The last layer this model will ever read: the main stack's last, or
+  // the draft layer when MTP is on (preconstruct_layers walks it after
+  // the main stack).
+  const int last_layer = mtp_ ? cfg_.mtp_layer() : cfg_.num_hidden_layers - 1;
+  if (layer == last_layer &&
       loader_.residency() == GlmResidency::Resident &&
       !loader_.sources_released())
     loader_.release_sources();
@@ -442,10 +470,13 @@ void GlmDiagnosticModel::preconstruct_layers() {
       // per-layer pinned expert-table sources unconditionally — a few
       // hundred KB of pinned memory; the eager path never touches them.
       moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
-                                           kDecodeRows, n_moe_layers_);
+                                           kDecodeRows, moe_graph_slots());
       need_moe = false;
     }
   }
+  // The draft layer materializes last (stack_layer releases the sources
+  // on it); it is DSA + MoE, so the layer objects above already exist.
+  if (mtp_) (void)stack_layer(cfg_.mtp_layer());
   loader_.release_layer();
 }
 

@@ -16,10 +16,6 @@
 namespace dgpp {
 namespace {
 
-// DESIGN §7.1: pool-aligned prefill chunks (initially 2048). Must be a
-// multiple of DSA's kpool so continuation chunks stay pool-aligned; the
-// FINAL chunk may end mid-pool (the tail persists into decode).
-constexpr int kPrefillChunkTokens = 2048;
 
 // A quantized matrix's two device ranges (payload and block scales are
 // separate allocations), handed to the prefetcher as such.
@@ -138,6 +134,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
   }
   if (dsa_cfg_.num_dsa_layers > 0) pool_.reset_request(req, stream_);
   session_pos_[static_cast<size_t>(req)] = 0;
+  if (mtp_) mtp_pos_[static_cast<size_t>(req)] = 0;
 
   Outputs out;  // last row's logits/final_hidden; routes cover ALL rows
   // Chunking: boundaries stay pool-aligned (starts ≡ 0 mod kpool) and a
@@ -168,6 +165,9 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
     c0 += n;
   }
   session_pos_[static_cast<size_t>(req)] = P;
+  // The draft block over the prompt (its cache must cover every position
+  // before the first draft); the chunks above left h_q in the cache.
+  if (mtp_) mtp_prefill(req, prompt_ids);
   return out;
 }
 // ---------------------------------------------------------------------------
@@ -226,7 +226,7 @@ void GlmDiagnosticModel::session_rollback(int req, int accepted) {
         stream_));
   }
   const size_t ring = spec_tail_ring_elems();
-  for (int layer = 0; layer < dsa_cfg_.num_dsa_layers; ++layer) {
+  for (int layer = 0; layer < main_dsa_layers_; ++layer) {
     uint16_t* tail = static_cast<uint16_t*>(pool_.tail(layer)) +
                      static_cast<size_t>(req) * ring;
     const uint16_t* snap =
@@ -306,9 +306,16 @@ void GlmDiagnosticModel::session_graph_prepare() {
     const GlmLayerBound b = bind_layer(r, /*dense_mlp=*/false);
     if (!moe_)
       moe_ = std::make_unique<GlmMoeLayer>(*b.moe, moe_cfg_, max_tokens_,
-                                           kDecodeRows, n_moe_layers_);
+                                           kDecodeRows, moe_graph_slots());
     moe_->rebind(*b.moe);
     moe_->prepare_graph_table(moe_ordinal++, stream_);
+  }
+  if (mtp_) {
+    // The draft layer's MoE takes the slot after the main stack's.
+    const GlmLayerResident& r = stack_layer(cfg_.mtp_layer());
+    const GlmLayerBound b = bind_layer(r, /*dense_mlp=*/false);
+    moe_->rebind(*b.moe);
+    moe_->prepare_graph_table(n_moe_layers_, stream_);
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 }
@@ -366,6 +373,7 @@ void GlmDiagnosticModel::session_close(int req) {
   if (dsa_cfg_.num_dsa_layers > 0)
     pool_.release_request_blocks(req, stream_);
   session_pos_[static_cast<size_t>(req)] = 0;
+  if (mtp_) mtp_pos_[static_cast<size_t>(req)] = 0;
 }
 
 int64_t GlmDiagnosticModel::session_position(int req) const {
@@ -605,6 +613,18 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
 
   // ---- head: mean over streams, final norm, lm head -----------------
   launch_mhc_final_mean(cur, collapsed_, mhc_cfg_, T, stream_);
+  // The draft block's hnorm input is THIS (pre-final-norm) hidden: keep
+  // it per position. Decode rows scatter by device position (the graph
+  // replays at moving positions); prefill chunks are contiguous.
+  if (mtp_) {
+    uint16_t* cache = mtp_hidden_cache(req);
+    if (decode_row)
+      glm_rows_scatter_bf16(collapsed_, d_step_pos_, cache, T, H, stream_);
+    else
+      DGPP_CUDA_OK(cudaMemcpyAsync(
+          cache + static_cast<size_t>(token_start) * H, collapsed_,
+          static_cast<size_t>(T) * H * 2, cudaMemcpyDeviceToDevice, stream_));
+  }
   glm_rmsnorm_bf16(collapsed_, globals_.final_norm, normed_, T, H, eps,
                    stream_);
   gemm_.matmul(normed_, globals_.lm_head, logits_, T, lm_vocab_count_, H,

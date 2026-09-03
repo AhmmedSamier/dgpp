@@ -168,6 +168,7 @@ add_library(dgpp_models_glm_loader STATIC
   src/models/glm_dump.cpp
   src/models/glm_forward.cpp
   src/models/glm_decode.cpp
+  src/models/glm_mtp.cpp
   src/models/glm_tp.cpp
   src/models/glm_tp_parity.cpp)
 target_link_libraries(dgpp_models_glm_loader

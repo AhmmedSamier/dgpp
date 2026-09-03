@@ -1,5 +1,7 @@
 #include "kernels/glm_norm.hpp"
 
+#include <stdexcept>
+
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 
@@ -9,22 +11,17 @@ namespace {
 
 constexpr int kBlock = 512;
 
-// Two-rounding RMSNorm (the Glm5NextTextRMSNorm choreography): fp32 mean of
-// squares, u = bf16(x * rstd), y = bf16(w * u). The intermediate bf16 round
-// of u is semantics, not noise — the reference multiplies the bf16 tensor.
-__global__ void glm_rmsnorm_kernel(const uint16_t* __restrict__ x,
-                                   const uint16_t* __restrict__ w,
-                                   uint16_t* __restrict__ y, int dim,
-                                   float eps) {
-  const int row = blockIdx.x;
+// Two-rounding RMSNorm of one row (the Glm5NextTextRMSNorm choreography):
+// fp32 mean of squares, u = bf16(x * rstd), y = bf16(w * u). The
+// intermediate bf16 round of u is semantics, not noise — the reference
+// multiplies the bf16 tensor. Block-wide: every thread of the block takes
+// part; `sx` is a [dim] staging area for the second pass.
+__device__ void rmsnorm_row_two_rounding(const uint16_t* __restrict__ xr,
+                                         const uint16_t* __restrict__ w,
+                                         uint16_t* __restrict__ yr, int dim,
+                                         float eps, float* sx) {
   const int tid = threadIdx.x;
   const int nthreads = blockDim.x;
-  extern __shared__ float smem[];  // [dim] staging for the second pass
-  float* sx = smem;
-
-  const uint16_t* xr = x + static_cast<size_t>(row) * dim;
-  uint16_t* yr = y + static_cast<size_t>(row) * dim;
-
   double ssq = 0.0;
   for (int i = tid; i < dim; i += nthreads) {
     const float v = bf16_bits_to_float(xr[i]);
@@ -47,6 +44,66 @@ __global__ void glm_rmsnorm_kernel(const uint16_t* __restrict__ x,
     yr[i] = float_to_bf16_bits(bf16_bits_to_float(w[i]) *
                                bf16_bits_to_float(u));
   }
+}
+
+__global__ void glm_rmsnorm_kernel(const uint16_t* __restrict__ x,
+                                   const uint16_t* __restrict__ w,
+                                   uint16_t* __restrict__ y, int dim,
+                                   float eps) {
+  const int row = blockIdx.x;
+  extern __shared__ float smem[];  // [dim] staging for the second pass
+  rmsnorm_row_two_rounding(x + static_cast<size_t>(row) * dim, w,
+                           y + static_cast<size_t>(row) * dim, dim, eps, smem);
+}
+
+// The MTP draft block's input row: [enorm(embed[token]) | hnorm(hidden)].
+// blockIdx.y selects the half — the embedding half normalizes the token's
+// embedding row, the hidden half the cached main-stack hidden at the row's
+// position (positions[t], or first_pos + t when positions is null).
+__global__ void glm_mtp_input_kernel(const uint16_t* __restrict__ embed,
+                                     const int64_t* __restrict__ tokens,
+                                     const uint16_t* __restrict__ hidden_cache,
+                                     const int64_t* __restrict__ positions,
+                                     int64_t first_pos,
+                                     const uint16_t* __restrict__ enorm,
+                                     const uint16_t* __restrict__ hnorm,
+                                     uint16_t* __restrict__ out, int hidden,
+                                     float eps) {
+  const int t = blockIdx.x;
+  extern __shared__ float smem[];
+  uint16_t* dst = out + static_cast<size_t>(t) * 2 * hidden;
+  if (blockIdx.y == 0) {
+    rmsnorm_row_two_rounding(embed + tokens[t] * hidden, enorm, dst, hidden,
+                             eps, smem);
+  } else {
+    const int64_t pos = positions ? positions[t] : first_pos + t;
+    rmsnorm_row_two_rounding(hidden_cache + pos * hidden, hnorm, dst + hidden,
+                             hidden, eps, smem);
+  }
+}
+
+// x += y in bf16: the reference's `residual + hidden_states` on bf16
+// tensors (fp32 add, one rounding).
+__global__ void glm_residual_add_kernel(uint16_t* __restrict__ x,
+                                        const uint16_t* __restrict__ y,
+                                        int64_t n) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < n)
+    x[i] = float_to_bf16_bits(bf16_bits_to_float(x[i]) +
+                              bf16_bits_to_float(y[i]));
+}
+
+// cache[positions[t], :] = rows[t, :] — 16-byte vectors (hidden % 8 == 0,
+// aligned bases: the launcher checks).
+__global__ void glm_rows_scatter_kernel(const uint16_t* __restrict__ rows,
+                                        const int64_t* __restrict__ positions,
+                                        uint16_t* __restrict__ cache,
+                                        int hidden) {
+  const int t = blockIdx.x;
+  const uint4* src =
+      reinterpret_cast<const uint4*>(rows + static_cast<size_t>(t) * hidden);
+  uint4* dst = reinterpret_cast<uint4*>(cache + positions[t] * hidden);
+  for (int j = threadIdx.x; j < hidden / 8; j += blockDim.x) dst[j] = src[j];
 }
 
 // streams[t, s, :] = embed[tokens[t], :] for the four residual streams —
@@ -99,6 +156,54 @@ void glm_rmsnorm_bf16(const void* x, const void* weight, void* y, int rows,
       static_cast<const uint16_t*>(x),
       static_cast<const uint16_t*>(weight),
       static_cast<uint16_t*>(y), dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_mtp_input_bf16(const void* embed_table, const int64_t* tokens,
+                        const void* hidden_cache, const int64_t* positions,
+                        int64_t first_pos, const void* enorm, const void* hnorm,
+                        void* out, int rows, int hidden, float eps,
+                        cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!embed_table || !tokens || !hidden_cache || !enorm || !hnorm || !out)
+    throw std::invalid_argument("glm_mtp_input: null buffer");
+  const size_t shmem = sizeof(float) * static_cast<size_t>(hidden);
+  if (shmem > 49152)
+    throw std::invalid_argument("glm_mtp_input: hidden exceeds the smem stage");
+  cudaGetLastError();
+  glm_mtp_input_kernel<<<dim3(static_cast<unsigned>(rows), 2), kBlock, shmem,
+                         stream>>>(
+      static_cast<const uint16_t*>(embed_table), tokens,
+      static_cast<const uint16_t*>(hidden_cache), positions, first_pos,
+      static_cast<const uint16_t*>(enorm), static_cast<const uint16_t*>(hnorm),
+      static_cast<uint16_t*>(out), hidden, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_residual_add_bf16(void* x, const void* y, int64_t n,
+                           cudaStream_t stream) {
+  if (n <= 0) return;
+  if (!x || !y) throw std::invalid_argument("glm_residual_add: null buffer");
+  const unsigned grid = static_cast<unsigned>((n + kBlock - 1) / kBlock);
+  glm_residual_add_kernel<<<grid, kBlock, 0, stream>>>(
+      static_cast<uint16_t*>(x), static_cast<const uint16_t*>(y), n);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_rows_scatter_bf16(const void* rows, const int64_t* positions,
+                           void* cache, int num_rows, int hidden,
+                           cudaStream_t stream) {
+  if (num_rows <= 0) return;
+  const auto aligned16 = [](const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+  };
+  if (hidden % 8 != 0 || !aligned16(rows) || !aligned16(cache))
+    throw std::invalid_argument(
+        "glm_rows_scatter: hidden must be a multiple of 8 and the buffers "
+        "16-byte aligned");
+  glm_rows_scatter_kernel<<<static_cast<unsigned>(num_rows), 256, 0, stream>>>(
+      static_cast<const uint16_t*>(rows), positions,
+      static_cast<uint16_t*>(cache), hidden);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
