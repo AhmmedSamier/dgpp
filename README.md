@@ -278,21 +278,29 @@ scripts/fabric_run.sh -- --model unsloth/GLM-5.3-Flash-FP8 \
     --decode-graph --mtp
 ```
 
-Every step verifies `[next, draft]` as one two-row decode (a T=2 CUDA graph
-replay), picks both rows' winners in one bus collective, and either commits
-both tokens or retracts the second row (`session_rollback`: the KDA/DSA
-kernels snapshot their state after every speculative row, so a retraction
-is one memcpy per state family). The MTP block then drafts over the
-accepted rows. **The transcript is exactly the plain loop's** — the verify
-rows are bitwise the single-token rows, and `scripts/fabric_xcript.py
-PLAIN_DIR MTP_DIR` must print `IDENTICAL`; MTP only changes what a token
-costs. Measured (2026-09-03, TP=4): 88.7% of drafts accepted on coherent
-text, 1.89 tokens per step, **22.7 ms/token effective vs 31.3 plain**
-(−28%). The step itself is 39.8 ms verify + 2.9 ms draft: the second row
-costs ~8 ms because its MoE experts are extra DRAM bytes (only the experts
-both rows share are read once — the slots run in expert order so the
-second read is an L2 hit). Acceptance drops on incoherent text (63% on the
-post-EOS rambling `--no-eos` produces), and below ~45% speculation stops
-paying; the summary line reports the rate. The draft layer adds ~7.3 GiB
-per rank to the resident footprint. Serving (`glm_serve`) does not use it
-yet — its engine seam is single-token in/out.
+Every step is **one CUDA graph replay** that carries its own control flow:
+the two-row verify of `[next, draft]`, the pick behind the head (each
+rank's argmax gathered through one bus collective and judged on the
+device), the commit (a rejected second row is rolled back on the device —
+the KDA/DSA kernels snapshot their state after every speculative row, so a
+retraction is a predicated copy per state family — and the position
+advances), the MTP block over the accepted rows (a fixed two-row batch; the
+second row is padding after a miss), its own pick, and the next step's
+tokens written on the device. The host launches, waits, reads two small
+pinned verdicts and logs. **The transcript is exactly the plain loop's** —
+the verify rows are bitwise the single-token rows, and
+`scripts/fabric_xcript.py PLAIN_DIR MTP_DIR` must print `IDENTICAL`; MTP
+only changes what a token costs. Measured (2026-09-03, TP=4): 88.7% of
+drafts accepted on coherent text, 1.89 tokens per step, **22.45 ms/token
+effective vs 31.3 plain** (−28%). The step is 42.4 ms: the second verify
+row costs ~7 ms because its MoE experts are extra DRAM bytes (only the
+experts both rows share are read once — the slots run in expert order so
+the second read is an L2 hit), the draft block ~2 ms. Acceptance drops on
+incoherent text (63% on the post-EOS rambling `--no-eos` produces), and
+below ~45% speculation stops paying; the summary line reports the rate.
+Every rank computes the verdict itself from an identical gathered table; a
+rank whose table was corrupt is caught at the next pick by a digest every
+rank carries (`GlmDevicePicker`). Without `--decode-graph` the same step
+runs eagerly (26 ms/token). The draft layer adds ~7.3 GiB per rank to the
+resident footprint. Serving (`glm_serve`) does not use it yet — its engine
+seam is single-token in/out.

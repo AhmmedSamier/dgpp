@@ -1066,7 +1066,7 @@ position. `session_verify` runs T ≤ 4 rows (`kSpecRows`, the bf16 GEMV's
 row bound: at T ≤ 4 every projection takes the row-independent GEMV, so
 the verify rows are bitwise the T=1 rows); the bus's latency slot is 32 KB
 to fold them in one collective, and `bus_greedy_pick_rows` picks them in
-one gather + one broadcast.
+one gather + one broadcast (the eager path).
 
 The draft block (`glm_mtp.cpp`) is the checkpoint's layer 45: a plain
 pre-norm DSA + MoE block (no mHC) over `eh_proj([enorm(embed(tok_{q+1})) |
@@ -1085,6 +1085,78 @@ a k-th draft must be accepted well over half the time to pay. Rank 0 does
 not broadcast an accepted count: every rank folds the identical
 candidate table and computes the identical verdict (`judge_verify`); the
 pick's readback check pins the equality.
+
+### The on-device step (2026-09-03): one graph per step
+
+The graph era's step used to end at the head: the host scanned the logits
+slice, ran two pick collectives, judged, rolled back, staged positions and
+tokens, ran the draft block eagerly with its own folds and pick, and
+launched again. All of that is now inside the replay, so a step is one
+`cudaGraphLaunch` whose recorded nodes carry the control flow:
+
+1. `glm_spec_positions` derives the rows' positions from the device-side
+   session position (`d_session_pos_`); the fed tokens are already in
+   `d_tokens_` (written by the previous replay's last node).
+2. The T=2 verify (the 90 boundary folds as recorded collective nodes).
+3. The pick (`kernels/glm_pick.{hpp,cu}`, `GlmDevicePicker` in
+   `glm_tp_bus.hpp`): `glm_pick_local` computes each row's canonical top-2
+   (bitwise `glm_sample::local_max`) and encodes this rank's (fp32 logit
+   bits, id) as the wire's six-bit digits into a device table; ONE recorded
+   collective SUM-folds the table (a gather over disjoint slots — every slot
+   has exactly one nonzero contributor, so the fold is exact);
+   `glm_pick_verdict` decodes every rank's identical table, merges per row
+   (`merge_greedy`), judges against the fed tokens and writes the verdict
+   (`accepted`, `next`, `winners`) to a pinned mirror and a device copy. The
+   broadcast collective is gone; its readback invariant is the **digest
+   group**: one more row of slots carries each rank's 54-bit digest of its
+   previous verdict, and a rank whose digest differs is flagged on every
+   rank at the next pick (`GlmDevicePicker::verdict()` throws with every
+   rank's digest) — the 2026-09-01 corruption class, caught one pick late.
+4. `glm_spec_commit` (`kernels/glm_spec.{hpp,cu}`): when `accepted < T`,
+   a predicated copy of every snapshot family's row `accepted-1` over the
+   live state (KDA recurrent and conv slices, one DSA tail ring per main
+   layer — a memcpy node cannot be conditional, a kernel can); always
+   `d_session_pos_ += accepted`.
+5. `glm_spec_draft_rows`: the draft block's FIXED two rows off the verdict —
+   accepted rows real at the block's device row counter, the rest padding
+   at position −1 (the DSA decode path skips negative positions, so nothing
+   is written anywhere; the input kernel reads position 0's hidden for it).
+   The verify's `next` is parked in `d_next_` because the draft's pick is
+   about to overwrite the verdict slot.
+6. The draft block (two folds), its head on BOTH rows (the lm head is
+   bandwidth-bound; m=2 costs what m=1 costs), and the draft's recorded pick
+   reading the last ACCEPTED row (`Inputs::row_select`) into the picker's
+   second slot.
+7. `glm_spec_next_tokens`: `d_tokens_ = [next, draft]` for the next replay.
+
+The host arms the bus window, launches, syncs, finishes the window, reads
+the two pinned verdicts, advances its position mirrors
+(`session_graph_settle`) and logs. DSA admission for the whole run happens
+once before the capture (`session_reserve_blocks`); the tail's logits and
+hidden never cross to the host (`set_decode_tail_mirrors(false)`). Every
+host op that moves a position on the eager path pushes it to the device, so
+the device-driven graph always starts from the host's view.
+
+Measured (rome_onegraph vs rome_mtp2): 42.36 vs 42.85 ms/step, 22.45 vs
+22.71 ms/token, step p50 42.3 vs 42.8, p99 44.6 vs 45.2, max 44.8 vs 46.2
+— mean and median moved together, the tail a little more. Honest
+accounting: the host's share of a step was smaller than budgeted (the eager
+draft's overhead beyond its weight floor was ~0.3 ms, the host seams were
+already hidden behind the GPU); what remains is inside the graph — 94
+collectives at ~41 µs and ~3.5 ms of small kernels and launch gaps around a
+~34 ms weight floor. Tests: `glm_pick_test` (kernels vs the host oracles),
+`glm_tp_device_pick_graph_loopback_matches_host_pick` (the device verdict
+== the host pick + judge over the same replayed logits, every step) and
+`glm_tp_full_graph_step_loopback_matches_eager_speculator` (the one-graph
+step in lockstep with an eager `GreedySpeculator` on a second model over
+the same bus: every step's (accepted, next, draft) equal; transcript ==
+plain on every rank). Those tests capture the model's graph in-process at
+world 4, which surfaced a test-environment hazard: one process hosting
+every rank's streams overflows CUDA's default 8 hardware work queues, and
+a rank's spinning collective kernel then FIFO-blocks a peer's chain kernels
+sharing its queue — a deadlock the watchdog breaks after 5 s.
+`glm_tp_test` and `bus_test` run with `CUDA_DEVICE_MAX_CONNECTIONS=32`;
+fabric ranks are separate processes and never see it.
 
 ## 10. Tokenization, templates, logits, and sampling
 

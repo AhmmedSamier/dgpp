@@ -14,7 +14,7 @@ means it has not been implemented.
 | M5 | Four-rank TP and dual-lane CollectiveBus | [ ] |
 | M6 | Generation scheduler, tokenizer, and API | [ ] |
 | M7 | Exact snapshot prefix cache | [ ] |
-| M8 | Transactional MTP decoding | [x] depth 1, greedy (2026-09-03; see DESIGN §9 "as built") |
+| M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; see DESIGN §9 "as built" and "the on-device step") |
 | M9 | Evidence-driven optimization and hardening | [ ] |
 
 M0 is complete. The paired network tests showed no congestion symptom; switch
@@ -381,7 +381,14 @@ Deliverables:
 2. `k+1` KDA candidate states, speculative convolution width, reserved MLA
    slots, and scratch index tail/pool updates.
 3. Rank-broadcast accepted count/RNG counter and atomic commit/discard epoch.
+   As built: no broadcast — every rank computes the verdict from an
+   identical gathered table on the device, and a digest carried into the
+   next gather catches a divergent rank; commit/discard is a recorded
+   predicated kernel behind the verdict (DESIGN §9 "the on-device step").
 4. Adaptive draft depth based on measured acceptance and memory pressure.
+   Not built: depth 2 was declined for its step-to-step variance (a second
+   draft accepted ~60% of the time against a ~29% break-even), and the
+   fixed-depth step's remaining cost is inside the graph.
 
 Exit criteria:
 
