@@ -39,7 +39,7 @@
 #   --timeout SECS  head watchdog; 0 disables (default 1800)
 #   --no-stage      skip the peer scp (peers already carry this binary)
 #   --stage-file F  ALSO scp F to the peers and rewrite the peers'
-#                  --requests argument to the staged copy (rank 0 keeps
+#                  --requests / --teacher-file argument to the copy (rank 0 keeps
 #                  the local path — the app's manifest-hash log line is
 #                  the cross-rank identity check). Stages even under
 #                  --no-stage: the manifest changes more often than the
@@ -273,13 +273,14 @@ grep -q "rendezvous listening" "$LOG_DIR/r0.log" \
 echo "fabric_run: rank 0 listening on :$PORT"
 
 # ------------------------------------------------------- peers 1..N-1
-# The peers' args: verbatim, except a staged --requests path points at
-# the peer's copy (rank 0 reads the local file — identical bytes, and
-# the app logs the manifest hash on every rank as the identity check).
+# The peers' args: verbatim, except a staged --requests / --teacher-file
+# path points at the peer's copy (rank 0 reads the local file — identical
+# bytes, and the app logs the file's hash on every rank as the identity
+# check).
 REMOTE_ARGS=""
 prev=""
 for a in "${APP_ARGS[@]}"; do
-  if [[ -n "$STAGE_FILE" && "$prev" == "--requests" ]]; then
+  if [[ -n "$STAGE_FILE" && ( "$prev" == "--requests" || "$prev" == "--teacher-file" ) ]]; then
     REMOTE_ARGS+="$(printf '%q ' "$PEER_DIR/$(basename "$STAGE_FILE")")"
   else
     REMOTE_ARGS+="$(printf '%q ' "$a")"

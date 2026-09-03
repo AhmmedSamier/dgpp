@@ -223,3 +223,32 @@ layers were restored versus captured on each start.
 counters at 1 Hz for the run; `scripts/fabric_xrank.py LOGDIR` reads the
 fetched logs and reports host gaps, stall windows, and step distributions per
 rank.
+
+### Judging a numerics change
+
+Kernel work is allowed to change floating-point reduction order when it buys
+latency, so two builds can legitimately produce different bits. Two tools say
+whether a difference is rounding or a bug:
+
+- `scripts/fabric_xcript.py REF_DIR NEW_DIR` — for ordinary generation runs:
+  finds the first token where the transcripts diverge and reports the global
+  top-2 logit margin there in bf16 ulps. A flip at ≤ 1-2 ulp is a near-tie;
+  a flip at a wide margin is a defect.
+- `scripts/fabric_logprob.py NEW_DIR REF_DIR` — the quantitative gate. Run
+  both builds with `--teacher-file benchmarks/teacher_text.txt` (the app
+  scores the text's own tokens instead of generating; `--stage-file` puts the
+  text on every rank), and the tool joins the ranks' vocabulary slices into
+  log p(token) per position and reports the text's perplexity, the per-token
+  deltas with a standard error, and a PASS/FAIL against a mean-NLL bound
+  (default 0.02 nat ≈ 2% of perplexity):
+
+  ```
+  scripts/fabric_run.sh --stage-file benchmarks/teacher_text.txt -- \
+      --model unsloth/GLM-5.3-Flash-FP8 --text "Encyclopedia article." \
+      --teacher-file benchmarks/teacher_text.txt --decode-graph
+  scripts/fabric_logprob.py /path/to/new_logs /path/to/ref_logs
+  ```
+
+  A run of the same binary twice must show a delta of exactly 0 (the decode
+  path is deterministic); bf16 logits make single-token deltas of ~0.1 nat
+  normal between builds, so the mean over the text is the signal.

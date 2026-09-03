@@ -620,13 +620,50 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
   return 0;
 }
 
+// Teacher forcing (--teacher-file): the step's logits are scored against
+// the KNOWN next token instead of driving the pick. Each rank logs what it
+// can compute from its slice — its max, its log-sum-exp (double, over the
+// bf16 logits as the sampler would see them), and the target's logit when
+// the target lives in the slice; scripts/fabric_logprob.py joins the ranks
+// (logaddexp over the slices' lse) into log p(target) per position and a
+// perplexity. That is the numerics gate for reassociated kernels: a
+// transcript md5 flips on a 1-ulp tie and says nothing about magnitude;
+// the mean NLL over a fixed text says exactly how far the distribution
+// moved. World 1 logs the same line over the full head.
+void log_teacher_stats(int rank, int step, const GlmDiagnosticModel::Outputs& out,
+                       const std::vector<float>& slice, int64_t target,
+                       int32_t argmax) {
+  double lmax = -INFINITY;
+  for (int i = 0; i < out.lm_vocab_count; ++i)
+    lmax = std::max(lmax, static_cast<double>(slice[static_cast<size_t>(i)]));
+  double sum = 0.0;
+  for (int i = 0; i < out.lm_vocab_count; ++i)
+    sum += std::exp(static_cast<double>(slice[static_cast<size_t>(i)]) - lmax);
+  const double lse = lmax + std::log(sum);
+  const int64_t local = target - out.lm_vocab_begin;
+  const bool in_slice = local >= 0 && local < out.lm_vocab_count;
+  DGPP_LOG_INFO("[tf] rank {} step {}: target {} argmax {} lmax {:.4f} lse "
+                "{:.6f} target_logit {}",
+                rank, step, target, argmax, lmax, lse,
+                in_slice ? std::format("{:.4f}",
+                                       slice[static_cast<size_t>(local)])
+                         : std::string("nan"));
+}
+
 int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         int rank, uint16_t port, const std::string& peer,
         const std::vector<int64_t>& prompt, int steps, bool resident,
         bool incremental, bool no_eos, bool decode_graph,
         const dgpp::GlmTokenizer& tok,
         const std::string& out_prefix, int rendezvous_timeout_ms,
-        int64_t kv_capacity) {
+        int64_t kv_capacity, const std::vector<int64_t>& teacher) {
+  // Teacher forcing runs the text's length and never stops at EOS: the
+  // scored positions are the text's, not the model's choices.
+  const bool teaching = !teacher.empty();
+  if (teaching) {
+    steps = static_cast<int>(teacher.size());
+    no_eos = true;
+  }
   const int max_tokens = static_cast<int>(prompt.size()) + steps + 1;
   // --kv-capacity overrides the pool bound here too (0 = the historical
   // default); the model rounds it up to a block multiple.
@@ -666,6 +703,15 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
           dgpp::glm_sample::local_max(frow.data(), cfg.vocab_size, 0);
       DGPP_LOG_INFO("[gen] prefill: {} tokens in {:.0f}ms", prompt.size(),
                     prefill_ms);
+      // Under teacher forcing the fed token is the text's; the pick is
+      // still computed (and logged) as the top-1 hit signal.
+      const auto force = [&](int s, const GlmDiagnosticModel::Outputs& o) {
+        if (!teaching) return;
+        log_teacher_stats(0, s, o, frow, teacher[static_cast<size_t>(s)],
+                          best.id);
+        best.id = static_cast<int32_t>(teacher[static_cast<size_t>(s)]);
+      };
+      force(0, out);
       for (int s = 0; s < steps; ++s) {
         generated.push_back(best.id);
         generated_text += tok.decode(best.id, /*skip_special_tokens=*/false);
@@ -686,6 +732,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         best = dgpp::glm_sample::local_max(frow.data(), cfg.vocab_size, 0);
         DGPP_LOG_INFO("[gen] step {}: token {} (logit {:.4f}) [{:.0f}ms]",
                       s + 1, best.id, best.logit, ms);
+        force(s + 1, step);
       }
     } else {
       // The re-forward reference (the T^2 diagnostic loop).
@@ -811,8 +858,19 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                     .count();
       DGPP_LOG_INFO("rank {} prefill: {} tokens in {:.0f}ms", rank,
                     prompt.size(), prefill_ms);
+      // Teacher forcing: score this step's logits against the text's next
+      // token, then feed THAT token (every rank holds the same text, so
+      // the ranks agree without the pick; the pick still runs for its
+      // argmax and to keep the step's shape identical to serving).
+      const auto force = [&](int s, const GlmDiagnosticModel::Outputs& o,
+                             int32_t picked) -> int32_t {
+        if (!teaching) return picked;
+        log_teacher_stats(rank, s, o, fslice, teacher[static_cast<size_t>(s)],
+                          picked);
+        return static_cast<int32_t>(teacher[static_cast<size_t>(s)]);
+      };
       const auto tp0 = std::chrono::steady_clock::now();
-      int32_t token = run_step(pre, "prefill+pick", 0);
+      int32_t token = force(0, pre, run_step(pre, "prefill+pick", 0));
       forward_ms_total =
           prefill_ms + std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - tp0)
@@ -932,7 +990,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
           t_collect = Clock::now();
           return out;
         }();
-        token = run_step(step, "step", s + 1);
+        token = force(s + 1, step, run_step(step, "step", s + 1));
         const auto t_pick = Clock::now();
         probe_prev = probe.sample();
         const auto ms_between = [](Clock::time_point a, Clock::time_point b) {
@@ -1034,6 +1092,9 @@ int main(int argc, char** argv) {
       "   | --requests FILE)\n"
       "  [--steps N] [--world N --rank R --peer HOST --port N]\n"
       "  [--streaming] [--engine incremental|reforward] [--no-eos]\n"
+      "  [--teacher-file F  score the text's tokens instead of generating:\n"
+      "   per-step [tf] lines for scripts/fabric_logprob.py; steps = its\n"
+      "   token count; the file must exist on every rank (--stage-file)]\n"
       "  [--decode-graph] (fabric decode step as a CUDA graph: record once,\n"
       "   replay per token, eager pick between windows; resident only)\n"
       "  [--step-timing] [--rendezvous-timeout-ms N] [--out PREFIX]\n"
@@ -1049,7 +1110,7 @@ int main(int argc, char** argv) {
   uint16_t port = 29970;
   bool resident = true, incremental = true, no_eos = false;
   bool decode_graph = false;
-  std::string system_prompt, chat_text;
+  std::string system_prompt, chat_text, teacher_file;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -1080,6 +1141,7 @@ int main(int argc, char** argv) {
       }
     }
     else if (a == "--no-eos") no_eos = true;
+    else if (a == "--teacher-file") teacher_file = next();
     else if (a == "--requests") requests_path = next();
     else if (a == "--max-concurrency") max_concurrency = std::stoi(next());
     else if (a == "--kv-capacity") kv_capacity = std::stoll(next());
@@ -1250,8 +1312,23 @@ int main(int argc, char** argv) {
     } else {
       prompt = parse_prompt_ids(prompt_text, cfg.vocab_size);
     }
+    std::vector<int64_t> teacher;
+    if (!teacher_file.empty()) {
+      require(requests_path.empty() && incremental,
+              "--teacher-file needs the incremental engine and no --requests");
+      std::ifstream in(teacher_file, std::ios::binary);
+      require(in.good(), "--teacher-file not readable: " + teacher_file);
+      std::stringstream buf;
+      buf << in.rdbuf();
+      teacher = tok.encode(buf.str());
+      require(!teacher.empty(), "--teacher-file produced no tokens");
+      DGPP_LOG_INFO("teacher text {} bytes -> {} ids (fnv1a {:016x}); "
+                    "--steps ignored",
+                    buf.str().size(), teacher.size(),
+                    fnv1a64(buf.str()));
+    }
     return run(cfg, ckpt, world, rank, port, peer, prompt, steps, resident, incremental, no_eos, decode_graph, tok,
-               out_prefix, rendezvous_timeout_ms, kv_capacity);
+               out_prefix, rendezvous_timeout_ms, kv_capacity, teacher);
   } catch (const std::exception& e) {
     DGPP_LOG_ERROR("rank {}: {}", rank, e.what());
     return 1;
