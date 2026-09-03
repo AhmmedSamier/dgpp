@@ -25,6 +25,21 @@
 
 namespace dgpp {
 
+// Post-row state snapshots for speculative decode (DESIGN §9). When
+// `states` is set and a call carries T > 1 rows, the state as it stands
+// after row t (t < T-1) is stored to states + t * stride_elems, in the
+// state's own layout. Row T-1's state lands in place as always, so a
+// caller that accepts every row does nothing; a caller that accepts only
+// rows [0, a) copies snapshot a-1 over the committed state. Null = off.
+struct KdaStateSnapshots {
+  float* states = nullptr;
+  int64_t stride_elems = 0;  // >= heads * v_dim * k_dim
+};
+struct KdaConvSnapshots {
+  void* states = nullptr;
+  int64_t stride_elems = 0;  // >= channels * state_width (bf16 elems)
+};
+
 // Causal depthwise short conv over the merged q|k|v channels with silu
 // activation, matching the reference's runtime-merged causal_conv1d call.
 //   src:            bf16 [tokens, channels], row stride src_row_stride elems
@@ -40,7 +55,8 @@ void kda_causal_conv_silu_bf16(const void* src, int64_t src_row_stride,
                                const void* weight, void* conv_state,
                                int state_width, void* dst, int tokens,
                                int channels, int conv_width,
-                               cudaStream_t stream);
+                               cudaStream_t stream,
+                               const KdaConvSnapshots& snap = {});
 
 // Gated RMSNorm with sigmoid gate (reference o_norm: FusedRMSNormGated,
 // activation="sigmoid"): y = rmsnorm(x) * w * sigmoid(gate), fp32 internal.
@@ -63,6 +79,7 @@ void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
                        int64_t beta_row_stride, const float* a_log,
                        const float* dt_bias, float* state, void* out,
                        int tokens, int heads, int k_dim, int v_dim,
-                       float lower_bound, float scale, cudaStream_t stream);
+                       float lower_bound, float scale, cudaStream_t stream,
+                       const KdaStateSnapshots& snap = {});
 
 }  // namespace dgpp

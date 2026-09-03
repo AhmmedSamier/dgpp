@@ -175,51 +175,115 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
 // ---------------------------------------------------------------------------
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_step(int req,
                                                              int64_t token_id) {
+  return session_verify(req, std::vector<int64_t>{token_id});
+}
+
+// ---------------------------------------------------------------------------
+// session_verify / session_rollback: T rows in one call, retract the tail.
+// ---------------------------------------------------------------------------
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_verify(
+    int req, const std::vector<int64_t>& token_ids) {
   step_timing::Scope tick(step_timing::kStep);
-  session_decode_host_prep(req, token_id, /*upload=*/true);
+  session_decode_host_prep(req, token_ids, /*upload=*/true);
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
-  Outputs out = session_run_rows(req, std::vector<int64_t>{token_id}, pos,
-                                 /*decode_row=*/true);
-  session_pos_[static_cast<size_t>(req)] = pos + 1;
+  Outputs out = session_run_rows(req, token_ids, pos, /*decode_row=*/true);
+  session_pos_[static_cast<size_t>(req)] += static_cast<int64_t>(token_ids.size());
   return out;
+}
+
+size_t GlmDiagnosticModel::spec_tail_ring_elems() const {
+  return static_cast<size_t>(2) * dsa_cfg_.index_kpool * dsa_cfg_.index_head_dim;
+}
+
+void GlmDiagnosticModel::session_rollback(int req, int accepted) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_rollback: request slot " +
+                            std::to_string(req));
+  const int T = decode_rows_;
+  if (accepted < 1 || accepted > T)
+    throw std::invalid_argument("session_rollback: accepted rows must be in "
+                                "[1, " + std::to_string(T) + "]");
+  const int64_t pos = session_pos_[static_cast<size_t>(req)];
+  if (pos < T)
+    throw std::invalid_argument("session_rollback: no verify to retract");
+  if (accepted == T) return;  // every row landed in place already
+
+  // The state after row `accepted-1` lives in snapshot row accepted-1;
+  // the request's committed layer slots are contiguous, so each state
+  // family rolls back in one copy (the DSA rings per layer).
+  const size_t row = static_cast<size_t>(accepted - 1);
+  if (kda_cfg_.num_kda_layers > 0) {
+    const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
+    DGPP_CUDA_OK(cudaMemcpyAsync(
+        kda_rec_ + static_cast<size_t>(req) * layers * kda_geo_.recurrent_elems,
+        spec_rec_ + row * layers * kda_geo_.recurrent_elems,
+        layers * kda_geo_.recurrent_bytes, cudaMemcpyDeviceToDevice, stream_));
+    const size_t conv_elems = kda_geo_.conv_committed_bytes / 2;
+    DGPP_CUDA_OK(cudaMemcpyAsync(
+        kda_conv_ + static_cast<size_t>(req) * layers * conv_elems,
+        spec_conv_ + row * layers * conv_elems,
+        layers * kda_geo_.conv_committed_bytes, cudaMemcpyDeviceToDevice,
+        stream_));
+  }
+  const size_t ring = spec_tail_ring_elems();
+  for (int layer = 0; layer < dsa_cfg_.num_dsa_layers; ++layer) {
+    uint16_t* tail = static_cast<uint16_t*>(pool_.tail(layer)) +
+                     static_cast<size_t>(req) * ring;
+    const uint16_t* snap =
+        spec_tail_ + (static_cast<size_t>(layer) * kSpecRows + row) * ring;
+    DGPP_CUDA_OK(cudaMemcpyAsync(tail, snap, ring * 2,
+                                 cudaMemcpyDeviceToDevice, stream_));
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  session_pos_[static_cast<size_t>(req)] = pos - (T - accepted);
 }
 
 // The decode step's host-side half (see the header): one implementation
 // so the eager, capture, and replay paths validate and stage IDENTICALLY.
-void GlmDiagnosticModel::session_decode_host_prep(int req, int64_t token_id,
-                                                  bool upload) {
+void GlmDiagnosticModel::session_decode_host_prep(
+    int req, const std::vector<int64_t>& ids, bool upload) {
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_decode: request slot " +
                             std::to_string(req));
+  const int T = static_cast<int>(ids.size());
+  if (T < 1 || T > kSpecRows)
+    throw std::invalid_argument("session_decode: row count must be in [1, " +
+                                std::to_string(kSpecRows) + "]");
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   if (pos <= 0)
     throw std::invalid_argument("session_decode: no open session on slot " +
                                 std::to_string(req));
-  if (token_id < 0 || token_id >= cfg_.vocab_size)
-    throw std::invalid_argument("session_decode: token id out of range");
-  if (pos + 1 > max_tokens_)
+  for (int64_t id : ids)
+    if (id < 0 || id >= cfg_.vocab_size)
+      throw std::invalid_argument("session_decode: token id out of range");
+  if (pos + T > max_tokens_)
     throw std::invalid_argument("session_decode: position exceeds max_tokens");
 
-  // DSA admission: the block table must cover this position BEFORE
-  // enqueue_decode (its pos is device state; growth is host control).
+  // DSA admission: the block table must cover every row's position
+  // BEFORE enqueue_decode (its pos is device state; growth is host
+  // control). Blocks a rolled-back row reserved stay reserved — harmless,
+  // the scheduler budgets prompt + max_steps up front anyway.
   if (dsa_cfg_.num_dsa_layers > 0 &&
-      !pool_.ensure_request_blocks(req, pos + 1, stream_))
+      !pool_.ensure_request_blocks(req, pos + T, stream_))
     throw std::runtime_error("session_decode: DSA pool exhausted (admission "
                             "budget) — grow the pool or shed requests");
 
-  // Decode-batch metadata: one row per call (time-multiplexed requests),
-  // row 0 serves `req`. The PINNED members are the upload sources —
+  // Decode-batch metadata: T consecutive rows of ONE request (time-
+  // multiplexed requests). The PINNED members are the upload sources —
   // eager issues the H2Ds, capture records them as memcpy nodes, the
   // replay stage only writes the members (its graph re-uploads).
-  h_req_ids_[0] = req;
-  h_step_pos_[0] = pos;
+  for (int r = 0; r < T; ++r) {
+    h_req_ids_[r] = req;
+    h_step_pos_[r] = pos + r;
+    h_token_[r] = ids[static_cast<size_t>(r)];
+  }
   h_req_spans_[0] = 0;
-  h_req_spans_[1] = 1;
-  h_token_[0] = token_id;
+  h_req_spans_[1] = T;
+  decode_rows_ = T;
   if (upload) {
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_req_ids_, h_req_ids_, sizeof(int32_t),
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_req_ids_, h_req_ids_, sizeof(int32_t) * T,
                                  cudaMemcpyHostToDevice, stream_));
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_step_pos_, h_step_pos_, sizeof(int64_t),
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_step_pos_, h_step_pos_, sizeof(int64_t) * T,
                                  cudaMemcpyHostToDevice, stream_));
     DGPP_CUDA_OK(cudaMemcpyAsync(d_req_spans_, h_req_spans_, 2 * sizeof(int32_t),
                                  cudaMemcpyHostToDevice, stream_));
@@ -251,17 +315,27 @@ void GlmDiagnosticModel::session_graph_prepare() {
 
 void GlmDiagnosticModel::session_graph_capture_step(int req,
                                                     int64_t token_id) {
-  session_decode_host_prep(req, token_id, /*upload=*/true);
+  session_graph_capture_step(req, std::vector<int64_t>{token_id});
+}
+
+void GlmDiagnosticModel::session_graph_capture_step(
+    int req, const std::vector<int64_t>& ids) {
+  session_decode_host_prep(req, ids, /*upload=*/true);
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   // The uploads and every launch record; the walk's syncs are skipped
   // inside (capture_mode). NOTHING EXECUTES — no state, no position.
-  Outputs out = session_run_rows(req, std::vector<int64_t>{token_id}, pos,
-                                 /*decode_row=*/true, /*capture_mode=*/true);
+  Outputs out = session_run_rows(req, ids, pos, /*decode_row=*/true,
+                                 /*capture_mode=*/true);
   (void)out;  // empty by contract; the caller instantiates the graph
 }
 
 void GlmDiagnosticModel::session_graph_stage(int req, int64_t token_id) {
-  session_decode_host_prep(req, token_id, /*upload=*/false);
+  session_graph_stage(req, std::vector<int64_t>{token_id});
+}
+
+void GlmDiagnosticModel::session_graph_stage(int req,
+                                             const std::vector<int64_t>& ids) {
+  session_decode_host_prep(req, ids, /*upload=*/false);
 }
 
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_graph_collect(
@@ -275,8 +349,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_graph_collect(
   // The caller synced the stream and finished the bus window: the
   // graph's D2H nodes joined, the state advanced in place, the logits
   // are stable. Materialize exactly as the eager tail does.
-  Outputs out = session_decode_tail(1);
-  session_pos_[static_cast<size_t>(req)] = pos + 1;
+  Outputs out = session_decode_tail(decode_rows_);
+  session_pos_[static_cast<size_t>(req)] = pos + decode_rows_;
   return out;
 }
 
@@ -389,9 +463,23 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
               (kda_geo_.conv_committed_bytes / 2);
       // In-place state update: prefill chunks and steps share ONE
       // recurrence implementation, so the state this enqueue leaves is
-      // exactly the state the next row needs (DESIGN §7.1).
+      // exactly the state the next row needs (DESIGN §7.1). Speculative
+      // rows (decode, T > 1) also leave post-row snapshots for
+      // session_rollback; the snapshot row stride spans every KDA layer.
+      KdaSpeculativeSinks spec;
+      if (decode_row && T > 1) {
+        const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
+        spec.recurrent.states =
+            spec_rec_ + static_cast<size_t>(kda_ordinal) * kda_geo_.recurrent_elems;
+        spec.recurrent.stride_elems =
+            static_cast<int64_t>(layers * kda_geo_.recurrent_elems);
+        const size_t conv_elems = kda_geo_.conv_committed_bytes / 2;
+        spec.conv.states =
+            spec_conv_ + static_cast<size_t>(kda_ordinal) * conv_elems;
+        spec.conv.stride_elems = static_cast<int64_t>(layers * conv_elems);
+      }
       kda_->enqueue(normed_, rec, conv, kda_geo_.conv_hist, attn_out, T,
-                    stream_, decode_row ? &prefetch_ : nullptr);
+                    stream_, decode_row ? &prefetch_ : nullptr, spec);
       ++kda_ordinal;
     } else {
       if (!dsa_) {
@@ -407,11 +495,16 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       if (!dsa_->prepare(T))
         throw std::runtime_error("session: DSA GEMM plans unavailable");
       if (decode_row) {
-        // Row 0 of the decode table serves `req` (uploaded in
-        // session_step); num_requests=1 — time-multiplexed steps.
+        // The decode table's T rows all serve `req` (staged in
+        // session_decode_host_prep); num_requests=1 — time-multiplexed
+        // steps. Speculative rows leave post-row ring snapshots.
+        void* tail_snaps =
+            T > 1 ? spec_tail_ + static_cast<size_t>(dsa_ordinal) *
+                                     kSpecRows * spec_tail_ring_elems()
+                  : nullptr;
         dsa_->enqueue_decode(normed_, pool_, dsa_ordinal, d_req_ids_,
                              d_step_pos_, d_req_spans_, /*num_requests=*/1, T,
-                             attn_out, stream_, &prefetch_);
+                             attn_out, stream_, &prefetch_, tail_snaps);
       } else {
         dsa_->enqueue_prefill(normed_, pool_, dsa_ordinal, /*req=*/req,
                               token_start, T, attn_out, stream_);
@@ -600,13 +693,11 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_decode_tail(int T) {
     ++moe_ordinal;
   }
   // From the pinned mirrors the step's D2H copies filled (the caller
-  // synced), never from the managed activations.
-  const uint16_t* last_hidden =
-      h_tail_hidden_ + static_cast<size_t>(T - 1) * H;
-  const float* last_logits =
-      h_tail_logits_ + static_cast<size_t>(T - 1) * lm_vocab_count_;
-  out.final_hidden_bits.assign(last_hidden, last_hidden + H);
-  out.logits.assign(last_logits, last_logits + lm_vocab_count_);
+  // synced), never from the managed activations. Every row: a verify's
+  // consumer compares each row's argmax with the next row's token.
+  out.final_hidden_bits.assign(h_tail_hidden_, h_tail_hidden_ + rows * H);
+  out.logits.assign(h_tail_logits_,
+                    h_tail_logits_ + rows * static_cast<size_t>(lm_vocab_count_));
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
   return out;

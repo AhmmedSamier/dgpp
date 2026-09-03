@@ -518,12 +518,14 @@ __global__ void kpool_decode_update_kernel(
     int64_t gate_stride, const float* ape, const int64_t* pos,
     const int32_t* req_spans, const int32_t* block_tables,
     int blocks_per_request, uint16_t* tail, uint8_t* index_k,
-    float* index_scale, int pools_per_block, int kpool, int dim) {
+    float* index_scale, int pools_per_block, int kpool, int dim,
+    uint16_t* tail_snapshots) {
   const int req = blockIdx.x;
   const int t0 = req_spans[req * 2];
   const int t1 = t0 + req_spans[req * 2 + 1];
   const int d = threadIdx.x;
   extern __shared__ float xs[];  // [dim]
+  const int ring_elems = 2 * kpool * dim;
 
   for (int t = t0; t < t1; ++t) {
     const int64_t p = pos[t];
@@ -585,6 +587,17 @@ __global__ void kpool_decode_update_kernel(
           k[int64_t(t) * k_stride + d];
       tail[(int64_t(req) * 2 * kpool + kpool + slot) * dim + d] =
           gate[int64_t(t) * gate_stride + d];
+    }
+    // Speculative rows: the ring after batch row t is the state to restore
+    // if rows > t are rejected (the last row's ring stays in place). The
+    // ring is the ONE non-idempotent DSA write — latent rows and completed
+    // pools are positional and a rewound position simply overwrites them.
+    if (tail_snapshots && t + 1 < t1) {
+      __syncthreads();  // every thread's stash is visible before the copy
+      const uint16_t* ring = tail + int64_t(req) * ring_elems;
+      uint16_t* snap = tail_snapshots + int64_t(t) * ring_elems;
+      for (int e = threadIdx.x; e < ring_elems; e += blockDim.x)
+        snap[e] = ring[e];
     }
   }
 }
@@ -1363,7 +1376,7 @@ void dsa_kpool_decode_update(const void* k, int64_t k_stride,
                              int blocks_per_request, void* tail,
                              void* index_k, float* index_scale,
                              int pools_per_block, int kpool, int dim,
-                             cudaStream_t stream) {
+                             cudaStream_t stream, void* tail_snapshots) {
   if (num_requests <= 0) return;
   kpool_decode_update_kernel<<<unsigned(num_requests), 128,
                                dim * sizeof(float), stream>>>(
@@ -1371,7 +1384,7 @@ void dsa_kpool_decode_update(const void* k, int64_t k_stride,
       static_cast<const uint16_t*>(gate), gate_stride, ape, pos, req_spans,
       block_tables, blocks_per_request, static_cast<uint16_t*>(tail),
       static_cast<uint8_t*>(index_k), index_scale, pools_per_block, kpool,
-      dim);
+      dim, static_cast<uint16_t*>(tail_snapshots));
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

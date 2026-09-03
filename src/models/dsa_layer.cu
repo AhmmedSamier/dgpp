@@ -476,7 +476,8 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                               const int64_t* pos, const int32_t* req_spans,
                               int num_requests, int tokens, void* out,
                               cudaStream_t stream,
-                              WeightPrefetcher* prefetch) {
+                              WeightPrefetcher* prefetch,
+                              void* tail_snapshots) {
   validate_pool(state, layer);
   if (tokens <= 0 || tokens > max_decode_rows_)
     throw std::invalid_argument("dsa layer: decode rows out of range");
@@ -510,7 +511,8 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                           req_spans, num_requests, state.block_tables(),
                           int(state.total_blocks()), state.tail(layer),
                           state.index_k(layer), state.index_scale(layer),
-                          geo_.pools_per_block, kpool, dim, stream);
+                          geo_.pools_per_block, kpool, dim, stream,
+                          tail_snapshots);
   // Fused select straight from the blocked index cache.
   dsa_select_decode(q_fp8_, w_folded_, req_ids, pos, tokens,
                     state.block_tables(), int(state.total_blocks()),

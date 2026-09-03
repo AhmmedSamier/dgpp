@@ -97,6 +97,10 @@ void dsa_kpool_tail_seed(const void* k, int64_t k_stride, const void* gate,
 //   req_spans: int32 [num_requests, 2] (start, len) into the token batch;
 //   tokens of a request must be batch-contiguous; pos: [tokens] (may be -1
 //   for padding rows — skipped).
+//   tail_snapshots (optional, speculative decode): bf16 [tokens, 2, kpool,
+//   dim]; after every batch row t that is not its request's last, the
+//   request's ring as it stands is copied to row t. Rolling a request back
+//   to `a` accepted rows = copying row (start + a - 1) over its ring.
 void dsa_kpool_decode_update(const void* k, int64_t k_stride,
                              const void* gate, int64_t gate_stride,
                              const float* ape, const int64_t* pos,
@@ -105,7 +109,8 @@ void dsa_kpool_decode_update(const void* k, int64_t k_stride,
                              int blocks_per_request, void* tail,
                              void* index_k, float* index_scale,
                              int pools_per_block, int kpool, int dim,
-                             cudaStream_t stream);
+                             cudaStream_t stream,
+                             void* tail_snapshots = nullptr);
 
 // Append normed latent rows to the blocked latent cache. One block per row.
 //   latent_rows: bf16 [tokens, kv_lora]; block_tables: int32

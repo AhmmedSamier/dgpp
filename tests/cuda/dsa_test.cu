@@ -410,6 +410,10 @@ DGPP_TEST(dsa_decode_update_ring_continuation_matches_host) {
   dgd.upload(ddg_rows.data(), ddg_rows.size() * 2);
   std::vector<int32_t> spans = {0, 1};
   dspans.upload(spans.data(), 8);
+  // The ring after every single-token step: the speculative snapshots of
+  // the multi-token call below must reproduce these bitwise.
+  const size_t ring_elems = 2ull * kpool * dim;
+  std::vector<uint16_t> ring_after(size_t(decode_tokens) * ring_elems);
   for (int64_t t = 0; t < decode_tokens; ++t) {
     const int64_t pos = prefill_tokens + t;
     dpos.upload(&pos, 8);
@@ -421,6 +425,7 @@ DGPP_TEST(dsa_decode_update_ring_continuation_matches_host) {
         static_cast<const int32_t*>(dspans.p), 1,
         static_cast<const int32_t*>(dbt.p), 1, dtail.p, dki.p,
         static_cast<float*>(dks.p), max_pools, kpool, dim, 0);
+    dtail.download(&ring_after[size_t(t) * ring_elems], ring_elems * 2);
   }
 
   std::vector<uint16_t> got_tail(2ull * kpool * dim);
@@ -465,13 +470,25 @@ DGPP_TEST(dsa_decode_update_ring_continuation_matches_host) {
   dpos_all.upload(pos_all.data(), pos_all.size() * 8);
   std::vector<int32_t> spans_all = {0, int(decode_tokens)};
   dspans.upload(spans_all.data(), 8);
+  DevBuf dsnaps(size_t(decode_tokens) * ring_elems * 2);
+  dsnaps.upload(std::vector<uint16_t>(size_t(decode_tokens) * ring_elems, 0)
+                    .data(),
+                dsnaps.bytes);
   dsa_kpool_decode_update(dkd.p, dim, dgd.p, dim,
                           static_cast<const float*>(dape.p),
                           static_cast<const int64_t*>(dpos_all.p),
                           static_cast<const int32_t*>(dspans.p), 1,
                           static_cast<const int32_t*>(dbt.p), 1, dtail2.p,
                           dki2.p, static_cast<float*>(dks2.p), max_pools,
-                          kpool, dim, 0);
+                          kpool, dim, 0, dsnaps.p);
+  // Speculative snapshots: row t of the batch == the ring after the t-th
+  // single-token step (the last row's ring stays in place: no snapshot).
+  std::vector<uint16_t> got_snaps(size_t(decode_tokens) * ring_elems);
+  dsnaps.download(got_snaps.data(), dsnaps.bytes);
+  for (int64_t t = 0; t + 1 < decode_tokens; ++t)
+    require_bitwise("ring snapshot " + std::to_string(t),
+                    &got_snaps[size_t(t) * ring_elems],
+                    &ring_after[size_t(t) * ring_elems], ring_elems * 2);
   std::vector<uint8_t> got_k2(size_t(max_pools) * dim);
   std::vector<float> got_s2(max_pools);
   std::vector<uint16_t> got_tail2(2ull * kpool * dim);

@@ -20,7 +20,9 @@ __global__ void kda_conv_kernel(const uint16_t* __restrict__ src,
                                 const uint16_t* __restrict__ weight,
                                 uint16_t* __restrict__ state,
                                 int state_width, uint16_t* __restrict__ dst,
-                                int tokens, int channels) {
+                                int tokens, int channels,
+                                uint16_t* __restrict__ snapshots,
+                                int64_t snapshot_stride) {
   const int c = blockIdx.x * blockDim.x + threadIdx.x;
   if (c >= channels) return;
   const uint16_t* wc = weight + static_cast<int64_t>(c) * CW;
@@ -49,6 +51,15 @@ __global__ void kda_conv_kernel(const uint16_t* __restrict__ src,
 #pragma unroll
     for (int j = 0; j < CW - 2; ++j) hist[j] = hist[j + 1];
     hist[CW - 2] = x;
+    // Speculative rows: the history as it stands after row t is what the
+    // committed state must become if rows > t are rejected. The last row
+    // lands in place below, so it needs no snapshot.
+    if (snapshots && t + 1 < tokens) {
+      uint16_t* snap = snapshots + static_cast<int64_t>(t) * snapshot_stride +
+                       static_cast<int64_t>(c) * state_width;
+#pragma unroll
+      for (int j = 0; j < CW - 1; ++j) snap[j] = float_to_bf16_bits(hist[j]);
+    }
   }
 
 #pragma unroll
@@ -179,7 +190,8 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
     const uint16_t* __restrict__ beta_raw, int64_t beta_stride,
     const float* __restrict__ a_log, const float* __restrict__ dt_bias,
     float* __restrict__ state, uint16_t* __restrict__ out, int tokens,
-    int heads, int v_dim, float lower_bound, float scale) {
+    int heads, int v_dim, float lower_bound, float scale,
+    float* __restrict__ snapshots, int64_t snapshot_stride) {
   constexpr int kCols = K / kRecurrentLanes;  // columns owned per lane
   static_assert(K % kRecurrentLanes == 0, "K must split across the lanes");
 
@@ -278,6 +290,14 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
     if (row_valid && lane == 0)
       out[(static_cast<int64_t>(t) * heads + h) * v_dim + v] =
           float_to_bf16_bits(o);
+    // Speculative rows: S after row t is the state to restore if rows > t
+    // are rejected (the last row's S lands in place below). One extra
+    // state-sized store per speculative row; nothing on the T=1 path.
+    if (snapshots && t + 1 < tokens && row_valid)
+      store_f32_slice<kCols, kVec>(
+          snapshots + static_cast<int64_t>(t) * snapshot_stride +
+              (st - state),
+          s);
   }
 
   if (row_valid) store_f32_slice<kCols, kVec>(st, s);
@@ -286,7 +306,8 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
 template <int CW>
 void conv_launch(const void* src, int64_t src_stride, const void* weight,
                  void* conv_state, int state_width, void* dst, int tokens,
-                 int channels, cudaStream_t stream) {
+                 int channels, const KdaConvSnapshots& snap,
+                 cudaStream_t stream) {
   constexpr int kBlock = 256;
   const unsigned grid =
       static_cast<unsigned>((channels + kBlock - 1) / kBlock);
@@ -294,7 +315,8 @@ void conv_launch(const void* src, int64_t src_stride, const void* weight,
       static_cast<const uint16_t*>(src), src_stride,
       static_cast<const uint16_t*>(weight),
       static_cast<uint16_t*>(conv_state), state_width,
-      static_cast<uint16_t*>(dst), tokens, channels);
+      static_cast<uint16_t*>(dst), tokens, channels,
+      static_cast<uint16_t*>(snap.states), snap.stride_elems);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -304,7 +326,8 @@ void kda_causal_conv_silu_bf16(const void* src, int64_t src_row_stride,
                                const void* weight, void* conv_state,
                                int state_width, void* dst, int tokens,
                                int channels, int conv_width,
-                               cudaStream_t stream) {
+                               cudaStream_t stream,
+                               const KdaConvSnapshots& snap) {
   if (tokens <= 0 || channels <= 0)
     throw std::invalid_argument("kda conv: empty problem");
   if (conv_width < 2 || conv_width > 8)
@@ -313,34 +336,37 @@ void kda_causal_conv_silu_bf16(const void* src, int64_t src_row_stride,
     throw std::invalid_argument("kda conv: state narrower than history");
   if (src_row_stride < channels)
     throw std::invalid_argument("kda conv: src row stride smaller than row");
+  if (snap.states && tokens > 1 &&
+      snap.stride_elems < static_cast<int64_t>(channels) * state_width)
+    throw std::invalid_argument("kda conv: snapshot stride smaller than a state");
   switch (conv_width) {
     case 2:
       conv_launch<2>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, stream);
+                     tokens, channels, snap, stream);
       return;
     case 3:
       conv_launch<3>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, stream);
+                     tokens, channels, snap, stream);
       return;
     case 4:
       conv_launch<4>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, stream);
+                     tokens, channels, snap, stream);
       return;
     case 5:
       conv_launch<5>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, stream);
+                     tokens, channels, snap, stream);
       return;
     case 6:
       conv_launch<6>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, stream);
+                     tokens, channels, snap, stream);
       return;
     case 7:
       conv_launch<7>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, stream);
+                     tokens, channels, snap, stream);
       return;
     default:
       conv_launch<8>(src, src_row_stride, weight, conv_state, state_width, dst,
-                     tokens, channels, stream);
+                     tokens, channels, snap, stream);
       return;
   }
 }
@@ -369,13 +395,18 @@ void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
                        int64_t beta_row_stride, const float* a_log,
                        const float* dt_bias, float* state, void* out,
                        int tokens, int heads, int k_dim, int v_dim,
-                       float lower_bound, float scale, cudaStream_t stream) {
+                       float lower_bound, float scale, cudaStream_t stream,
+                       const KdaStateSnapshots& snap) {
   if (tokens <= 0 || heads <= 0 || v_dim <= 0)
     throw std::invalid_argument("kda recurrent: empty problem");
   if (k_dim % kRecurrentLanes != 0)
     throw std::invalid_argument("kda recurrent: k_dim must be a multiple of 4");
   if (beta_row_stride < heads)
     throw std::invalid_argument("kda recurrent: beta stride smaller than row");
+  if (snap.states && tokens > 1 &&
+      snap.stride_elems < static_cast<int64_t>(heads) * v_dim * k_dim)
+    throw std::invalid_argument(
+        "kda recurrent: snapshot stride smaller than a state");
 
   const dim3 grid(static_cast<unsigned>((v_dim + kRecurrentRows - 1) /
                                         kRecurrentRows),
@@ -398,18 +429,22 @@ void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
   const bool vec = k_dim >= 64 && aligned16(qkv16) && aligned16(g16) &&
                    aligned16(dt_bias) && aligned16(state) &&
                    (qkv_stride * 2) % 16 == 0 &&
-                   (static_cast<int64_t>(v_dim) * k_dim * 4) % 16 == 0;
+                   (static_cast<int64_t>(v_dim) * k_dim * 4) % 16 == 0 &&
+                   (!snap.states || (aligned16(snap.states) &&
+                                     (snap.stride_elems * 4) % 16 == 0));
 
 #define DGPP_KDA_RECURRENT_DISPATCH(KLIT)                                      \
   do {                                                                         \
     if (vec)                                                                   \
       kda_recurrent_kernel<KLIT, true><<<grid, kRecurrentBlock, 0, stream>>>(  \
           qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state, o16,        \
-          tokens, heads, v_dim, lower_bound, scale);                           \
+          tokens, heads, v_dim, lower_bound, scale, snap.states,               \
+          snap.stride_elems);                                                  \
     else                                                                       \
       kda_recurrent_kernel<KLIT, false><<<grid, kRecurrentBlock, 0, stream>>>( \
           qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state, o16,        \
-          tokens, heads, v_dim, lower_bound, scale);                           \
+          tokens, heads, v_dim, lower_bound, scale, snap.states,               \
+          snap.stride_elems);                                                  \
     DGPP_CUDA_OK(cudaGetLastError());                                          \
   } while (0)
 

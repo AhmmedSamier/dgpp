@@ -26,10 +26,18 @@
 
 #include "core/arena.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/kda.hpp"
 #include "kernels/l2_prefetch.hpp"
 #include "models/kda_geometry.hpp"
 
 namespace dgpp {
+
+// Where a speculative (T > 1 decode) enqueue leaves its post-row state
+// snapshots — see KdaStateSnapshots in kernels/kda.hpp. Default: none.
+struct KdaSpeculativeSinks {
+  KdaStateSnapshots recurrent;
+  KdaConvSnapshots conv;
+};
 
 struct KdaLayerWeights {
   const void* in_proj = nullptr;
@@ -71,10 +79,14 @@ class KdaLayer {
   //                    latency-bound middle of the layer (f_b/g_b, conv,
   //                    recurrence, norm) pulls the output projection's
   //                    bytes into L2 instead of leaving DRAM idle.
+  //   spec:            optional post-row state snapshot sinks (speculative
+  //                    verify rows; rows > accepted are rolled back by the
+  //                    caller from these).
   void enqueue(const void* hidden_in, float* recurrent_state,
                uint16_t* conv_state, int conv_state_width, void* out,
                int tokens, cudaStream_t stream,
-               WeightPrefetcher* prefetch = nullptr);
+               WeightPrefetcher* prefetch = nullptr,
+               const KdaSpeculativeSinks& spec = {});
 
   // Bytes of the bf16 output projection [hidden, local_proj].
   size_t o_proj_bytes() const {

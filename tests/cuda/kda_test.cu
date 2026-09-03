@@ -439,6 +439,120 @@ DGPP_TEST(kda_chunked_vs_unchunked_recurrence_is_bitwise) {
 }
 
 // ---------------------------------------------------------------------------
+// Speculative snapshots: the state after row t of a T-row call equals the
+// state a sequential run reaches after t+1 single-token steps.
+// ---------------------------------------------------------------------------
+
+DGPP_TEST(kda_speculative_snapshots_match_sequential_steps_bitwise) {
+  cudaStream_t s = test_stream();
+  // Real-shaped head geometry (K=128 hits the vectorized path) with a
+  // warm-up prefix so the state is not zero when the speculative rows
+  // arrive; T=4 is the kMaxRows verify batch.
+  const int heads = 4, dim = 128, prefix = 37, spec = 4;
+  const int tokens = prefix + spec;
+  const int64_t qkv_stride = 3 * heads * dim;
+  const int64_t n_state = int64_t(heads) * dim * dim;
+  const int channels = 3 * heads * dim, conv_width = 4, state_width = 3;
+  const int64_t conv_elems = int64_t(channels) * state_width;
+
+  std::vector<uint16_t> qkv_pre =
+      random_bf16_normal(80, int64_t(tokens) * qkv_stride, 1.0f);
+  std::vector<uint16_t> g1 =
+      random_bf16_normal(81, int64_t(tokens) * heads * dim, 1.0f);
+  std::vector<uint16_t> beta =
+      random_bf16_normal(82, int64_t(tokens) * heads, 1.0f);
+  std::vector<float> a_log = random_f32_uniform(83, heads, 0.5f);
+  std::vector<float> dt_bias = random_f32_uniform(84, heads * dim, 0.5f);
+  std::vector<uint16_t> conv_w =
+      random_bf16_uniform(85, int64_t(channels) * conv_width, 0.2f);
+  const float lower_bound = -5.0f, scale = ref_scale(dim);
+
+  DevBuf dpre(qkv_pre.size() * 2), dg1(g1.size() * 2), dbeta(beta.size() * 2),
+      dalog(a_log.size() * 4), dtb(dt_bias.size() * 4), dcw(conv_w.size() * 2);
+  dpre.upload(qkv_pre.data(), qkv_pre.size() * 2);
+  dg1.upload(g1.data(), g1.size() * 2);
+  dbeta.upload(beta.data(), beta.size() * 2);
+  dalog.upload(a_log.data(), a_log.size() * 4);
+  dtb.upload(dt_bias.data(), dt_bias.size() * 4);
+  dcw.upload(conv_w.data(), conv_w.size() * 2);
+
+  DevBuf state_a(n_state * 4), state_b(n_state * 4);
+  DevBuf conv_a(conv_elems * 2), conv_b(conv_elems * 2);
+  DevBuf qkv_a(int64_t(tokens) * qkv_stride * 2), qkv_b(qkv_a.bytes);
+  DevBuf out_a(int64_t(tokens) * heads * dim * 2), out_b(out_a.bytes);
+  DevBuf rec_snaps(int64_t(spec - 1) * n_state * 4);
+  DevBuf conv_snaps(int64_t(spec - 1) * conv_elems * 2);
+  DGPP_CUDA_OK(cudaMemsetAsync(state_a.p, 0, state_a.bytes, s));
+  DGPP_CUDA_OK(cudaMemsetAsync(state_b.p, 0, state_b.bytes, s));
+  DGPP_CUDA_OK(cudaMemsetAsync(conv_a.p, 0, conv_a.bytes, s));
+  DGPP_CUDA_OK(cudaMemsetAsync(conv_b.p, 0, conv_b.bytes, s));
+
+  auto run_rows = [&](int offset, int len, DevBuf& state, DevBuf& conv,
+                      DevBuf& qkv_out_buf, DevBuf& out_buf,
+                      dgpp::KdaStateSnapshots rs, dgpp::KdaConvSnapshots cs) {
+    const uint16_t* pre = dpre.as<uint16_t>() + int64_t(offset) * qkv_stride;
+    const uint16_t* g = dg1.as<uint16_t>() + int64_t(offset) * heads * dim;
+    const uint16_t* b = dbeta.as<uint16_t>() + int64_t(offset) * heads;
+    uint16_t* qkv_out = qkv_out_buf.as<uint16_t>() + int64_t(offset) * qkv_stride;
+    uint16_t* o = out_buf.as<uint16_t>() + int64_t(offset) * heads * dim;
+    kda_causal_conv_silu_bf16(pre, qkv_stride, dcw.p, conv.p, state_width,
+                              qkv_out, len, channels, conv_width, s, cs);
+    kda_recurrent_fwd(qkv_out, g, b, heads, dalog.as<float>(),
+                      dtb.as<float>(), state.as<float>(), o, len, heads, dim,
+                      dim, lower_bound, scale, s, rs);
+  };
+
+  // GIVEN both runs share the warm-up prefix (one call each):
+  run_rows(0, prefix, state_a, conv_a, qkv_a, out_a, {}, {});
+  run_rows(0, prefix, state_b, conv_b, qkv_b, out_b, {}, {});
+
+  // WHEN run A takes the speculative rows in ONE call with snapshots on,
+  //      and run B takes them one token at a time, checkpointing the
+  //      committed state after each:
+  run_rows(prefix, spec, state_a, conv_a, qkv_a, out_a,
+           {rec_snaps.as<float>(), n_state}, {conv_snaps.p, conv_elems});
+  std::vector<std::vector<float>> seq_rec(spec, std::vector<float>(n_state));
+  std::vector<std::vector<uint16_t>> seq_conv(spec,
+                                              std::vector<uint16_t>(conv_elems));
+  for (int t = 0; t < spec; ++t) {
+    run_rows(prefix + t, 1, state_b, conv_b, qkv_b, out_b, {}, {});
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    state_b.download(seq_rec[t].data(), state_b.bytes);
+    conv_b.download(seq_conv[t].data(), conv_b.bytes);
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+
+  // THEN snapshot t == the sequential state after row t, the in-place
+  // final state == the sequential final state, and the outputs agree —
+  // all bitwise (fp32 state, bf16 conv inputs, identical op order).
+  std::vector<float> snaps((spec - 1) * n_state);
+  std::vector<uint16_t> csnaps((spec - 1) * conv_elems);
+  rec_snaps.download(snaps.data(), rec_snaps.bytes);
+  conv_snaps.download(csnaps.data(), conv_snaps.bytes);
+  for (int t = 0; t + 1 < spec; ++t) {
+    require_bitwise(("recurrent snapshot " + std::to_string(t)).c_str(),
+                    seq_rec[t].data(), snaps.data() + int64_t(t) * n_state,
+                    n_state * 4);
+    require_bitwise(("conv snapshot " + std::to_string(t)).c_str(),
+                    seq_conv[t].data(), csnaps.data() + int64_t(t) * conv_elems,
+                    conv_elems * 2);
+  }
+  std::vector<float> final_a(n_state);
+  std::vector<uint16_t> cfinal_a(conv_elems);
+  state_a.download(final_a.data(), state_a.bytes);
+  conv_a.download(cfinal_a.data(), conv_a.bytes);
+  require_bitwise("final recurrent state", seq_rec[spec - 1].data(),
+                  final_a.data(), n_state * 4);
+  require_bitwise("final conv state", seq_conv[spec - 1].data(),
+                  cfinal_a.data(), conv_elems * 2);
+  std::vector<uint16_t> host_a(out_a.bytes / 2), host_b(out_b.bytes / 2);
+  out_a.download(host_a.data(), out_a.bytes);
+  out_b.download(host_b.data(), out_b.bytes);
+  require_bitwise("speculative outputs", host_a.data(), host_b.data(),
+                  out_a.bytes);
+}
+
+// ---------------------------------------------------------------------------
 // Full layer parity vs host reference
 // ---------------------------------------------------------------------------
 

@@ -1195,6 +1195,107 @@ DGPP_TEST(glm_tp_decode_session_parity) {
 // instance with an open decode session must THROW (it would silently
 // clobber the session's KDA/DSA state pools — the exact corruption this
 // gate's phase-A design would otherwise have absorbed as noise).
+// Speculative verify + rollback (DESIGN §9), world 1. A T-row verify's
+// rows must be BITWISE the single-token steps over the same tokens, and a
+// rollback to `a` rows must leave the state bitwise where `a` steps would
+// have — pinned by stepping ON from the rolled-back state and comparing
+// the continuation's logits with the sequential transcript's. Covers:
+// accept-all (T=2, T=4), reject to 1 of 2, reject to 2 of 4 (mid-batch),
+// and a verify whose rows straddle a kpool boundary (the DSA ring/pool
+// completion path). Every comparison is bitwise: same kernels, same op
+// order per row, fp32 state.
+DGPP_TEST(glm_tp_session_verify_rollback_matches_sequential_bitwise) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  // GIVEN a prompt whose length puts the first verify rows mid-pool
+  // (9 % 4 == 1), a tokens stream, and the sequential reference transcript:
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  const std::vector<int64_t> toks = make_tokens(12, cfg.vocab_size);
+  const int max_tokens = static_cast<int>(prompt.size() + toks.size()) + 2;
+  const size_t V = static_cast<size_t>(cfg.vocab_size);
+  const size_t H = static_cast<size_t>(cfg.hidden_size);
+  GlmDiagnosticModel model(cfg, dir, max_tokens, 128);
+
+  std::vector<std::vector<float>> seq_logits;
+  std::vector<std::vector<uint16_t>> seq_hidden;
+  model.session_prefill(prompt);
+  for (int64_t t : toks) {
+    const GlmDiagnosticModel::Outputs o = model.session_step(t);
+    seq_logits.push_back(o.logits);
+    seq_hidden.push_back(o.final_hidden_bits);
+  }
+  const auto row_of = [&](const std::vector<float>& m, size_t r) {
+    return std::vector<float>(m.begin() + r * V, m.begin() + (r + 1) * V);
+  };
+  const auto hrow_of = [&](const std::vector<uint16_t>& m, size_t r) {
+    return std::vector<uint16_t>(m.begin() + r * H, m.begin() + (r + 1) * H);
+  };
+  // Checks the first `good` rows of a T-row verify of toks[i..) against
+  // the sequential rows (rows >= good carried wrong tokens).
+  const auto check_rows = [&](const GlmDiagnosticModel::Outputs& o, size_t i,
+                              size_t T, size_t good, const char* what) {
+    require(o.logits.size() == T * V && o.final_hidden_bits.size() == T * H,
+            std::string(what) + ": verify output shape");
+    for (size_t r = 0; r < good; ++r) {
+      require(row_of(o.logits, r) == seq_logits[i + r],
+              std::string(what) + ": verify row " + std::to_string(r) +
+                  " logits must be BITWISE the sequential step's");
+      require(hrow_of(o.final_hidden_bits, r) == seq_hidden[i + r],
+              std::string(what) + ": verify row " + std::to_string(r) +
+                  " hidden must be BITWISE the sequential step's");
+    }
+  };
+  const auto slice = [&](size_t i, size_t n) {
+    return std::vector<int64_t>(toks.begin() + i, toks.begin() + i + n);
+  };
+
+  // WHEN the same tokens go through verify/rollback in a mixed schedule:
+  model.session_prefill(prompt);
+  size_t i = 0;
+  // T=2, accept both (positions 9,10).
+  check_rows(model.session_verify(0, slice(i, 2)), i, 2, 2, "accept-all T=2");
+  i += 2;
+  // T=2 with a WRONG second token, reject to 1: the retracted row must
+  // leave no trace — the next step over the right token matches.
+  {
+    std::vector<int64_t> ids = slice(i, 2);
+    ids[1] = (ids[1] + 7) % cfg.vocab_size;  // the rejected draft
+    const GlmDiagnosticModel::Outputs o = model.session_verify(0, ids);
+    check_rows(o, i, 2, 1, "reject-to-1 row 0");
+    model.session_rollback(0, 1);
+    require(model.session_position(0) == static_cast<int64_t>(prompt.size() + i + 1),
+            "rollback rewinds the position by the rejected rows");
+    i += 1;
+  }
+  // T=4 straddling the pool boundary at position 12 (i=3: positions
+  // 12..15), accept all.
+  check_rows(model.session_verify(0, slice(i, 4)), i, 4, 4, "accept-all T=4");
+  i += 4;
+  // T=4 with wrong rows 2,3: reject to 2 (a mid-batch snapshot).
+  {
+    std::vector<int64_t> ids = slice(i, 4);
+    ids[2] = (ids[2] + 3) % cfg.vocab_size;
+    ids[3] = (ids[3] + 5) % cfg.vocab_size;
+    const GlmDiagnosticModel::Outputs o = model.session_verify(0, ids);
+    check_rows(o, i, 4, 2, "reject-to-2 rows 0,1");
+    model.session_rollback(0, 2);
+    i += 2;
+  }
+  // THEN plain steps from the rolled-back state continue the sequential
+  // transcript bitwise:
+  for (; i < toks.size(); ++i) {
+    const GlmDiagnosticModel::Outputs o = model.session_step(toks[i]);
+    require(o.logits == seq_logits[i],
+            "post-rollback step " + std::to_string(i) +
+                " logits must be BITWISE the sequential step's");
+  }
+  // rollback bounds
+  bool threw = false;
+  try { model.session_rollback(0, 0); } catch (const std::invalid_argument&) { threw = true; }
+  require(threw, "rollback to 0 rows must be rejected");
+}
+
 DGPP_TEST(glm_tp_decode_session_hazard) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";

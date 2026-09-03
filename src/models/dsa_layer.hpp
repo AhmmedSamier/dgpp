@@ -129,11 +129,16 @@ class DsaLayer {
   //              is pointed at o_proj, so the layer's long latency-bound
   //              middle (select, absorb, attention, v-out: ~130 us at
   //              decode) pulls the output projection into L2.
+  //   tail_snapshots: optional bf16 [tokens, 2, kpool, index_head_dim]
+  //              post-row ring snapshots for speculative rows (see
+  //              dsa_kpool_decode_update); the layer's other state writes
+  //              are positional and need no rollback.
   void enqueue_decode(const void* hidden_in, DsaStatePool& state, int layer,
                       const int32_t* req_ids, const int64_t* pos,
                       const int32_t* req_spans, int num_requests, int tokens,
                       void* out, cudaStream_t stream,
-                      WeightPrefetcher* prefetch = nullptr);
+                      WeightPrefetcher* prefetch = nullptr,
+                      void* tail_snapshots = nullptr);
 
   // Bytes of the bf16 output projection [hidden, local_v_rows].
   size_t o_proj_bytes() const {

@@ -160,6 +160,30 @@ class GlmDiagnosticModel {
   // parity harness runs engine and reference on SEPARATE instances.
   Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids);
   Outputs session_step(int req, int64_t token_id);
+
+  // ---- speculative decode (DESIGN §9) -----------------------------------
+  // session_verify runs T (1..kSpecRows) tokens at the slot's next T
+  // positions in ONE decode call and returns EVERY row's logits
+  // ([T, lm_vocab_count]) and final hidden ([T, hidden]). Row r's bits
+  // equal what session_step would have produced for that token after
+  // rows < r (the head GEMV's rows are independent, the KDA recurrence is
+  // sequential, DSA rows attend causally including themselves, MoE and
+  // mHC are per token) — so a verifier compares row r's argmax with the
+  // draft it fed as row r+1. The state advances by T in place; the state
+  // after every row < T-1 is snapshotted on the way, so session_rollback
+  // can then retract the rows the verifier rejected:
+  //   session_rollback(req, a) with 1 <= a <= T restores the KDA
+  //   recurrent/conv state and the DSA tail rings to what they were after
+  //   row a-1 and rewinds the position by T-a. Latent rows and index pools
+  //   at the retracted positions are simply overwritten by the next call.
+  // a == T is a no-op. The snapshot scratch serves ONE in-flight verify:
+  // roll a request back before verifying another. kSpecRows = 4 is the
+  // bf16 GEMV's row bound (gemv::kMaxRows): at T <= 4 every projection
+  // takes the row-independent GEMV, so the rows' bits are the T=1 bits;
+  // T >= 5 would fall to cuBLASLt and break the equality above.
+  static constexpr int kSpecRows = 4;
+  Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
+  void session_rollback(int req, int accepted);
   // Retires slot `req`: its DSA blocks return to the free pool (admission
   // meters see the capacity again) and the slot may be reopened by a
   // later prefill. No collective — safe between any two session ops.
@@ -232,6 +256,13 @@ class GlmDiagnosticModel {
   void session_graph_capture_step(int req, int64_t token_id);
   void session_graph_stage(int req, int64_t token_id);
   Outputs session_graph_collect(int req);
+  // The T-row (speculative verify) graph: a separate graph per row count
+  // — T is baked into every grid, GEMV m, and memcpy size. Stage the same
+  // T you captured; collect materializes all T rows (session_verify's
+  // Outputs shape) and advances the position by T, session_rollback then
+  // retracts as in the eager path.
+  void session_graph_capture_step(int req, const std::vector<int64_t>& ids);
+  void session_graph_stage(int req, const std::vector<int64_t>& ids);
 
   // Decode-step route traces (Outputs.routes / route_biased): the per-MoE-
   // layer ids, weights and biased scores the parity gates and the near-tie
@@ -364,12 +395,13 @@ class GlmDiagnosticModel {
   // (when `upload`) the metadata H2Ds — eager issues them, capture
   // records them as memcpy nodes, the replay stage skips them (its
   // graph re-uploads at launch).
-  void session_decode_host_prep(int req, int64_t token_id, bool upload);
+  void session_decode_host_prep(int req, const std::vector<int64_t>& ids,
+                                bool upload);
   // The decode tail shared by the eager step and the graph-era collect:
   // materializes the route traces from the pinned per-MoE-layer staging
   // (the D2H copies must have joined — the eager final sync or the
-  // replay's stream sync) and assigns the LAST row's logits/final_hidden
-  // from the stable device buffers. The route shape (one entry per MoE
+  // replay's stream sync) and assigns EVERY row's logits/final_hidden
+  // ([T, ...]) from the pinned mirrors the step's D2H copies filled. The route shape (one entry per MoE
   // layer, actual layer indices, [tokens, K]/[tokens, E] values) is the
   // eager path's exactly.
   Outputs session_decode_tail(int T);
@@ -463,6 +495,20 @@ class GlmDiagnosticModel {
                                      // source; a memcpy node's baked
                                      // address)
   static constexpr int kDecodeRows = 8;  // DsaLayer's select-kernel bound
+  // The row count of the most recent decode call (staged or run): what
+  // session_graph_collect materializes and session_rollback bounds.
+  int decode_rows_ = 1;
+  // Speculative post-row state snapshots (kernels/kda.hpp
+  // KdaStateSnapshots, dsa.hpp tail_snapshots), one in-flight verify:
+  //   spec_rec_  [kSpecRows-1][num_kda_layers][rec elems]  fp32
+  //   spec_conv_ [kSpecRows-1][num_kda_layers][conv elems] bf16
+  //   spec_tail_ [num_dsa_layers][kSpecRows][2, kpool, dim] bf16
+  // Row-major over the layers so rolling every KDA layer back is ONE
+  // memcpy from row a-1 onto the request's contiguous layer slots.
+  float* spec_rec_ = nullptr;
+  uint16_t* spec_conv_ = nullptr;
+  uint16_t* spec_tail_ = nullptr;
+  size_t spec_tail_ring_elems() const;
   // Decode-path route traces (2026-09-01): per-MoE-layer pinned staging
   // filled by enqueue_decode's async D2H copies, materialized into
   // Outputs.routes after the step's final sync (the copies are

@@ -84,7 +84,8 @@ bool KdaLayer::prepare(int tokens) {
 void KdaLayer::enqueue(const void* hidden_in, float* recurrent_state,
                        uint16_t* conv_state, int conv_state_width, void* out,
                        int tokens, cudaStream_t stream,
-                       WeightPrefetcher* prefetch) {
+                       WeightPrefetcher* prefetch,
+                       const KdaSpeculativeSinks& spec) {
   if (tokens <= 0 || tokens > max_tokens_)
     throw std::invalid_argument("kda layer: token count out of range");
   if (!hidden_in || !recurrent_state || !conv_state || !out)
@@ -127,13 +128,14 @@ void KdaLayer::enqueue(const void* hidden_in, float* recurrent_state,
   //    the committed conv history in place.
   kda_causal_conv_silu_bf16(proj_ + off_q, n_in, w_.conv, conv_state,
                             conv_state_width, qkv_conv_, tokens,
-                            geo_.conv_channels, cfg_.conv_width, stream);
+                            geo_.conv_channels, cfg_.conv_width, stream,
+                            spec.conv);
   // 4) FP32 recurrent update; beta is the raw b-column slice of the fused
   //    projection (strided), sigmoid applied in-kernel like the reference.
   kda_recurrent_fwd(qkv_conv_, g1_, proj_ + off_b, n_in, w_.a_log, w_.dt_bias,
                     recurrent_state, core_, tokens, geo_.local_heads,
                     cfg_.head_dim, cfg_.head_dim, cfg_.lower_bound, scale_,
-                    stream);
+                    stream, spec.recurrent);
   // 5) gated RMSNorm (sigmoid) on the recurrent output: one row per
   // (token, head), each of width head_dim.
   kda_gated_rmsnorm_sigmoid_bf16(core_, g2_, w_.o_norm, normed_,

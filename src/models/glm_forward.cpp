@@ -214,6 +214,18 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
         kda_geo_.conv_committed_bytes));
   }
   session_pos_.assign(static_cast<size_t>(max_requests_), 0);
+  // Speculative verify snapshots (one in-flight verify; see the header).
+  if (kda_cfg_.num_kda_layers > 0) {
+    const size_t per_row = static_cast<size_t>(kda_cfg_.num_kda_layers);
+    spec_rec_ = static_cast<float*>(
+        alloc_device((kSpecRows - 1) * per_row * kda_geo_.recurrent_bytes));
+    spec_conv_ = static_cast<uint16_t*>(alloc_device(
+        (kSpecRows - 1) * per_row * kda_geo_.conv_committed_bytes));
+  }
+  if (dsa_cfg_.num_dsa_layers > 0)
+    spec_tail_ = static_cast<uint16_t*>(
+        alloc_device(static_cast<size_t>(dsa_cfg_.num_dsa_layers) *
+                     kSpecRows * spec_tail_ring_elems() * 2));
 
   // Decode-path route traces: pinned staging the decode MoE's async
   // copies land in (see glm_moe_layer.hpp's MoeTraceStaging). Pinned —
@@ -297,6 +309,9 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFreeHost(h_token_);
   cudaFree(kda_rec_);
   cudaFree(kda_conv_);
+  cudaFree(spec_rec_);
+  cudaFree(spec_conv_);
+  cudaFree(spec_tail_);
   cudaFree(d_tokens_);
   cudaFree(streams_[0]);
   cudaFree(streams_[1]);
