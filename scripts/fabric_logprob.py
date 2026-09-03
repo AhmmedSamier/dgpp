@@ -33,45 +33,27 @@ the long ones.
 """
 import argparse
 import math
-import os
-import re
 import sys
 
-RE_TF = re.compile(
-    r"\[tf\] rank (\d+) step (\d+): target (\d+) argmax (\d+) lmax ([-\d.]+) "
-    r"lse ([-\d.]+) target_logit ([-\d.]+|nan)")
+from fabric_logs import load_teacher, logaddexp_all
 
 
 def load_run(directory):
-    """step -> {"target", "argmax", "lse": [per rank], "target_logit"}"""
+    """(step -> {"target", "argmax", "lse": {rank: lse}, "target_logit"},
+    sorted ranks)"""
+    per_rank = load_teacher(directory)
     steps = {}
-    ranks = set()
-    for name in sorted(os.listdir(directory)):
-        m = re.fullmatch(r"r(\d+)\.log", name)
-        if not m:
-            continue
-        rank = int(m.group(1))
-        ranks.add(rank)
-        with open(os.path.join(directory, name), errors="replace") as f:
-            for line in f:
-                g = RE_TF.search(line)
-                if not g:
-                    continue
-                step = int(g.group(2))
-                rec = steps.setdefault(
-                    step, {"target": int(g.group(3)), "argmax": int(g.group(4)),
-                           "lse": {}, "target_logit": None})
-                rec["lse"][rank] = float(g.group(6))
-                if g.group(7) != "nan":
-                    rec["target_logit"] = float(g.group(7))
+    for rank, lines in per_rank.items():
+        for step, t in lines.items():
+            rec = steps.setdefault(
+                step, {"target": t.target, "argmax": t.argmax, "lse": {},
+                       "target_logit": None})
+            rec["lse"][rank] = t.lse
+            if t.target_logit is not None:
+                rec["target_logit"] = t.target_logit
     if not steps:
         sys.exit(f"{directory}: no [tf] lines (run with --teacher-file)")
-    return steps, sorted(ranks)
-
-
-def logaddexp_all(values):
-    top = max(values)
-    return top + math.log(sum(math.exp(v - top) for v in values))
+    return steps, sorted(per_rank)
 
 
 def logprobs(steps, ranks):

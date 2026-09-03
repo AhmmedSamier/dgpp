@@ -228,7 +228,9 @@ rank.
 
 Kernel work is allowed to change floating-point reduction order when it buys
 latency, so two builds can legitimately produce different bits. Two tools say
-whether a difference is rounding or a bug:
+whether a difference is rounding or a bug (both read a run directory through
+`scripts/fabric_logs.py`, the shared parser for the per-rank `[gen]`/`[tf]`
+step lines — start there when writing the next one):
 
 - `scripts/fabric_xcript.py REF_DIR NEW_DIR` — for ordinary generation runs:
   finds the first token where the transcripts diverge and reports the global
