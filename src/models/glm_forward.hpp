@@ -25,6 +25,7 @@
 
 #include "core/arena.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/glm_spec.hpp"
 #include "kernels/l2_prefetch.hpp"
 #include "models/dsa_layer.hpp"
 #include "models/dsa_state.hpp"
@@ -300,6 +301,51 @@ class GlmDiagnosticModel {
   void session_graph_capture_step(int req, const std::vector<int64_t>& ids);
   void session_graph_stage(int req, const std::vector<int64_t>& ids);
 
+  // ---- the DEVICE-DRIVEN graph (DESIGN §9, the on-device step) ---------
+  // The speculative step's control flow moves onto the device so a replay
+  // carries it: the rows' positions come from the device-side session
+  // position (glm_spec_positions off d_session_pos_, not the host's staged
+  // h_step_pos_ upload), and a recorded COMMIT behind the caller's device
+  // pick (kernels/glm_spec.hpp glm_spec_commit) reads the verdict on the
+  // device, copies the post-row-(accepted-1) snapshots over the live KDA
+  // recurrent/conv state and the DSA tail rings when accepted < T (the
+  // bytes session_rollback copies, without the host, the sync, or the
+  // unconditional-memcpy problem), and advances the device position by
+  // `accepted`. The host keeps a MIRROR of the position (session_position)
+  // for validation and the draft's invariant: every op that moves the
+  // position on the host pushes it to the device (push_position), and
+  // after a device-driven replay the host advances its mirror from the
+  // pinned verdict with session_graph_settle — the device already moved.
+  //
+  //   session_reserve_blocks(req, tokens) — DSA admission for the whole
+  //         run, BEFORE the capture (the per-step admission the staged path
+  //         does in session_graph_stage would be a device copy inside a
+  //         replay); throws when the pool cannot cover `tokens`.
+  //   session_graph_capture_step(req, ids, device_positions = true) — the
+  //         capture with the positions kernel in place of the position
+  //         upload and no per-step admission.
+  //   session_graph_capture_commit(req, device_verdict) — the commit,
+  //         recorded right after the caller's recorded pick; decode_rows_
+  //         (the captured T) bounds it.
+  //   session_graph_stage(req, ids) — in this mode only validates and
+  //         writes the token upload source (the graph reads positions from
+  //         the device).
+  //   session_graph_settle(req, accepted) — after the replay's sync and
+  //         the bus finish: the host mirror advances by `accepted`. No
+  //         collect, no rollback — the device did both.
+  //   set_decode_tail_mirrors(false) — drops the tail's logits/hidden D2H
+  //         nodes (a device-pick consumer reads neither); default on.
+  void session_reserve_blocks(int req, int64_t tokens);
+  void session_graph_capture_step(int req, const std::vector<int64_t>& ids,
+                                  bool device_positions);
+  void session_graph_capture_commit(int req,
+                                    const GlmPickVerdict* device_verdict);
+  void session_graph_settle(int req, int accepted);
+  void set_decode_tail_mirrors(bool on) { decode_tail_mirrors_ = on; }
+  // Materializes the replay's Outputs WITHOUT moving the position (the
+  // device-driven flow's cross-check surface; needs the tail mirrors on).
+  Outputs session_graph_outputs(int req);
+
   // Decode-step route traces (Outputs.routes / route_biased): the per-MoE-
   // layer ids, weights and biased scores the parity gates and the near-tie
   // audit read. They cost three D2H nodes per MoE layer per step (126 per
@@ -432,7 +478,13 @@ class GlmDiagnosticModel {
   // records them as memcpy nodes, the replay stage skips them (its
   // graph re-uploads at launch).
   void session_decode_host_prep(int req, const std::vector<int64_t>& ids,
-                                bool upload);
+                                bool upload, bool device_positions = false);
+  // Pushes the host position mirror of slot `req` to the device (the
+  // device-driven graph's positions source); async on stream_.
+  void push_position(int req);
+  // The rollback segment table for slot `req` (glm_spec_commit's input):
+  // the live KDA state slices and DSA tail rings with their snapshots.
+  GlmSpecSegments spec_segments(int req);
   // ---- MTP (glm_mtp.cpp) ----
   // The draft block over T rows at the block's positions [first_pos,
   // first_pos + T): tokens from d_tokens_, hidden from the position
@@ -531,6 +583,11 @@ class GlmDiagnosticModel {
   // ceiling the Stage 2b scheduler inherits.
   int max_requests_ = 1;
   std::vector<int64_t> session_pos_;  // [max_requests]; 0 = closed slot
+  int64_t* d_session_pos_ = nullptr;  // device [max_requests] — the
+                                      // device-driven graph's position
+  int64_t* h_session_pos_ = nullptr;  // pinned upload mirror
+  bool graph_device_positions_ = false;  // the captured graph's mode
+  bool decode_tail_mirrors_ = true;
   int32_t* d_req_ids_ = nullptr;      // device [kDecodeRows]
   int64_t* d_step_pos_ = nullptr;     // device [kDecodeRows]
   int32_t* d_req_spans_ = nullptr;    // device [kDecodeRows, 2]

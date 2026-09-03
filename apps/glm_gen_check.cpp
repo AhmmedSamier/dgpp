@@ -755,13 +755,19 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     return id;
   };
 
-  // ---- the verify graph (T=2) + the recorded pick, once ------------------
+  // ---- the verify graph (T=2) + the recorded pick + the commit, once ------
+  // Device-driven: the rows' positions come off the device position, the
+  // commit behind the pick rolls a rejected row back and advances the
+  // position on the device, the whole run's DSA blocks are reserved before
+  // the capture, and the tail's logits/hidden never cross to the host.
   cudaGraphExec_t graph_exec = nullptr;
   std::unique_ptr<dgpp::GlmGraphRecordReducer> recorder;
   if (decode_graph) {
     const auto t_capture = Clock::now();
     model.set_decode_route_traces(false);
+    model.set_decode_tail_mirrors(false);
     model.session_graph_prepare();
+    model.session_reserve_blocks(0, model.max_tokens());
     recorder = std::make_unique<dgpp::GlmGraphRecordReducer>(bus, model.stream());
     dgpp::GlmBoundaryReducer* eager_reducer = model.set_boundary(recorder.get());
     std::string gerr;
@@ -769,25 +775,29 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     cudaGraph_t graph = nullptr;
     DGPP_CUDA_OK(cudaStreamBeginCapture(model.stream(),
                                         cudaStreamCaptureModeThreadLocal));
-    model.session_graph_capture_step(0, std::vector<int64_t>{next, next});
+    model.session_graph_capture_step(0, std::vector<int64_t>{next, next},
+                                     /*device_positions=*/true);
     picker.record(model.stream(), pick_inputs(2));
+    model.session_graph_capture_commit(0, picker.device_verdict());
     DGPP_CUDA_OK(cudaStreamEndCapture(model.stream(), &graph));
     require(graph != nullptr, "verify-graph capture produced no graph");
     require(bus.graph_record_end(&gerr), "graph_record_end: " + gerr);
     model.set_boundary(eager_reducer);
     DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
     cudaGraphDestroy(graph);
-    DGPP_LOG_INFO("rank {} verify graph (T=2 + device pick) recorded+"
+    DGPP_LOG_INFO("rank {} verify graph (T=2 + device pick + commit) recorded+"
                   "instantiated in {:.0f}ms", rank, ms_since(t_capture));
   }
-  // Verify [next, draft]; returns the device verdict (graph: read off the
-  // replay's pinned mirror; eager: the eager device pick after the rows).
+  // Verify [next, draft]; returns the device verdict with the state and
+  // positions already settled (graph: the recorded commit; eager: the host
+  // rollback after the eager device pick).
   const auto verify = [&](const std::vector<int64_t>& fed)
       -> const dgpp::GlmPickVerdict& {
     const auto t0 = Clock::now();
     if (graph_exec == nullptr) {
       (void)model.session_verify(0, fed);
       const dgpp::GlmPickVerdict& v = picker.run(model.stream(), pick_inputs(2));
+      if (v.accepted < 2) model.session_rollback(0, v.accepted);
       st.verify_ms += ms_since(t0);
       return v;
     }
@@ -798,9 +808,10 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
     require(bus.graph_replay_finish(60000, &gerr),
             "graph_replay_finish: " + gerr);
-    (void)model.session_graph_collect(0);  // advances the position
+    const dgpp::GlmPickVerdict& v = picker.verdict();
+    model.session_graph_settle(0, v.accepted);
     st.verify_ms += ms_since(t0);
-    return picker.verdict();
+    return v;
   };
 
   // ---- the loop -----------------------------------------------------------
@@ -814,7 +825,6 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     const auto t_step = Clock::now();
     const std::vector<int64_t> fed{next, draft};
     const dgpp::GlmPickVerdict& v = verify(fed);
-    if (v.accepted < 2) model.session_rollback(0, v.accepted);
     ++st.steps;
     st.accepted += v.accepted - 1;
     // Commit: fed[0] was decided last step; a standing row 1 makes the

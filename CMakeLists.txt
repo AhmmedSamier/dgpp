@@ -118,7 +118,8 @@ add_library(dgpp_kernels STATIC
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
   src/kernels/glm_norm.cu
-  src/kernels/glm_pick.cu)
+  src/kernels/glm_pick.cu
+  src/kernels/glm_spec.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
 

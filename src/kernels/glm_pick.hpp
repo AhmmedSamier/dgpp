@@ -83,11 +83,13 @@ void glm_pick_local(const float* logits, int rows, int vocab_count,
 
 // Kernel 2 (after the fold): decodes every rank's candidates and digests,
 // merges per row, judges against fed[rows] (the verify's tokens), writes
-// *verdict (host-pinned or device) and *carry_digest = verdict->digest —
-// the next pick's digest group source.
+// *verdict (the host's pinned mirror), *device_verdict (the device-side
+// consumers' copy — the commit kernel, the draft; may be null) and
+// *carry_digest = verdict->digest — the next pick's digest group source.
 void glm_pick_verdict(const uint16_t* table, int rows, int world, int rank,
                       const int64_t* fed, GlmPickVerdict* verdict,
-                      uint64_t* carry_digest, cudaStream_t stream);
+                      GlmPickVerdict* device_verdict, uint64_t* carry_digest,
+                      cudaStream_t stream);
 
 // The host mirror of the kernels' digest (the tests' oracle).
 uint64_t glm_pick_digest(int rows, int accepted, const int32_t* winners);

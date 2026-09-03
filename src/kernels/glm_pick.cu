@@ -152,6 +152,7 @@ __global__ void pick_verdict_kernel(const uint16_t* __restrict__ table,
                                     int rows, int world, int rank,
                                     const int64_t* __restrict__ fed,
                                     GlmPickVerdict* __restrict__ verdict,
+                                    GlmPickVerdict* __restrict__ device_verdict,
                                     uint64_t* __restrict__ carry_digest) {
   int32_t winners[kPickMaxRows];
   for (int r = 0; r < rows; ++r) {
@@ -190,6 +191,7 @@ __global__ void pick_verdict_kernel(const uint16_t* __restrict__ table,
     if (d != mine) v.digest_mismatch |= 1u << k;
   }
   *verdict = v;
+  if (device_verdict != nullptr) *device_verdict = v;
   *carry_digest = v.digest;
 }
 
@@ -224,10 +226,12 @@ void glm_pick_local(const float* logits, int rows, int vocab_count,
 
 void glm_pick_verdict(const uint16_t* table, int rows, int world, int rank,
                       const int64_t* fed, GlmPickVerdict* verdict,
-                      uint64_t* carry_digest, cudaStream_t stream) {
+                      GlmPickVerdict* device_verdict, uint64_t* carry_digest,
+                      cudaStream_t stream) {
   check_shape(rows, world, rank, "glm_pick_verdict");
   pick_verdict_kernel<<<1, 1, 0, stream>>>(table, rows, world, rank, fed,
-                                           verdict, carry_digest);
+                                           verdict, device_verdict,
+                                           carry_digest);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

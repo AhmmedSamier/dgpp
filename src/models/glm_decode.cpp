@@ -165,9 +165,11 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
     c0 += n;
   }
   session_pos_[static_cast<size_t>(req)] = P;
+  push_position(req);
   // The draft block over the prompt (its cache must cover every position
   // before the first draft); the chunks above left h_q in the cache.
   if (mtp_) mtp_prefill(req, prompt_ids);
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   return out;
 }
 // ---------------------------------------------------------------------------
@@ -188,7 +190,42 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_verify(
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   Outputs out = session_run_rows(req, token_ids, pos, /*decode_row=*/true);
   session_pos_[static_cast<size_t>(req)] += static_cast<int64_t>(token_ids.size());
+  push_position(req);
   return out;
+}
+
+void GlmDiagnosticModel::push_position(int req) {
+  h_session_pos_[req] = session_pos_[static_cast<size_t>(req)];
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_session_pos_ + req, h_session_pos_ + req,
+                               sizeof(int64_t), cudaMemcpyHostToDevice,
+                               stream_));
+}
+
+GlmSpecSegments GlmDiagnosticModel::spec_segments(int req) {
+  GlmSpecSegments segs;
+  const auto add = [&](void* dst, const void* snapshots, size_t row_stride,
+                       size_t bytes) {
+    if (segs.count >= kSpecMaxSegments)
+      throw std::logic_error("spec_segments: too many state families");
+    segs.seg[segs.count++] = GlmSpecSegment{dst, snapshots, row_stride, bytes};
+  };
+  if (kda_cfg_.num_kda_layers > 0) {
+    const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
+    add(kda_rec_ + static_cast<size_t>(req) * layers * kda_geo_.recurrent_elems,
+        spec_rec_, layers * kda_geo_.recurrent_bytes,
+        layers * kda_geo_.recurrent_bytes);
+    const size_t conv_elems = kda_geo_.conv_committed_bytes / 2;
+    add(kda_conv_ + static_cast<size_t>(req) * layers * conv_elems, spec_conv_,
+        layers * kda_geo_.conv_committed_bytes,
+        layers * kda_geo_.conv_committed_bytes);
+  }
+  const size_t ring = spec_tail_ring_elems();
+  for (int layer = 0; layer < main_dsa_layers_; ++layer)
+    add(static_cast<uint16_t*>(pool_.tail(layer)) +
+            static_cast<size_t>(req) * ring,
+        spec_tail_ + static_cast<size_t>(layer) * kSpecRows * ring, ring * 2,
+        ring * 2);
+  return segs;
 }
 
 size_t GlmDiagnosticModel::spec_tail_ring_elems() const {
@@ -236,12 +273,14 @@ void GlmDiagnosticModel::session_rollback(int req, int accepted) {
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   session_pos_[static_cast<size_t>(req)] = pos - (T - accepted);
+  push_position(req);
 }
 
 // The decode step's host-side half (see the header): one implementation
 // so the eager, capture, and replay paths validate and stage IDENTICALLY.
 void GlmDiagnosticModel::session_decode_host_prep(
-    int req, const std::vector<int64_t>& ids, bool upload) {
+    int req, const std::vector<int64_t>& ids, bool upload,
+    bool device_positions) {
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_decode: request slot " +
                             std::to_string(req));
@@ -262,8 +301,10 @@ void GlmDiagnosticModel::session_decode_host_prep(
   // DSA admission: the block table must cover every row's position
   // BEFORE enqueue_decode (its pos is device state; growth is host
   // control). Blocks a rolled-back row reserved stay reserved — harmless,
-  // the scheduler budgets prompt + max_steps up front anyway.
-  if (dsa_cfg_.num_dsa_layers > 0 &&
+  // the scheduler budgets prompt + max_steps up front anyway. The device-
+  // driven graph reserved its whole run up front (session_reserve_blocks)
+  // and must not grow the table inside a replay.
+  if (dsa_cfg_.num_dsa_layers > 0 && !device_positions &&
       !pool_.ensure_request_blocks(req, pos + T, stream_))
     throw std::runtime_error("session_decode: DSA pool exhausted (admission "
                             "budget) — grow the pool or shed requests");
@@ -271,7 +312,9 @@ void GlmDiagnosticModel::session_decode_host_prep(
   // Decode-batch metadata: T consecutive rows of ONE request (time-
   // multiplexed requests). The PINNED members are the upload sources —
   // eager issues the H2Ds, capture records them as memcpy nodes, the
-  // replay stage only writes the members (its graph re-uploads).
+  // replay stage only writes the members (its graph re-uploads). With
+  // device positions the rows' positions come off d_session_pos_ by a
+  // kernel instead of the h_step_pos_ upload.
   for (int r = 0; r < T; ++r) {
     h_req_ids_[r] = req;
     h_step_pos_[r] = pos + r;
@@ -283,8 +326,14 @@ void GlmDiagnosticModel::session_decode_host_prep(
   if (upload) {
     DGPP_CUDA_OK(cudaMemcpyAsync(d_req_ids_, h_req_ids_, sizeof(int32_t) * T,
                                  cudaMemcpyHostToDevice, stream_));
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_step_pos_, h_step_pos_, sizeof(int64_t) * T,
-                                 cudaMemcpyHostToDevice, stream_));
+    if (device_positions) {
+      if (d_step_pos_ != nullptr)
+        glm_spec_positions(d_session_pos_ + req, T, d_step_pos_, stream_);
+    } else {
+      DGPP_CUDA_OK(cudaMemcpyAsync(d_step_pos_, h_step_pos_,
+                                   sizeof(int64_t) * T, cudaMemcpyHostToDevice,
+                                   stream_));
+    }
     DGPP_CUDA_OK(cudaMemcpyAsync(d_req_spans_, h_req_spans_, 2 * sizeof(int32_t),
                                  cudaMemcpyHostToDevice, stream_));
   }
@@ -327,7 +376,13 @@ void GlmDiagnosticModel::session_graph_capture_step(int req,
 
 void GlmDiagnosticModel::session_graph_capture_step(
     int req, const std::vector<int64_t>& ids) {
-  session_decode_host_prep(req, ids, /*upload=*/true);
+  session_graph_capture_step(req, ids, /*device_positions=*/false);
+}
+
+void GlmDiagnosticModel::session_graph_capture_step(
+    int req, const std::vector<int64_t>& ids, bool device_positions) {
+  graph_device_positions_ = device_positions;
+  session_decode_host_prep(req, ids, /*upload=*/true, device_positions);
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   // The uploads and every launch record; the walk's syncs are skipped
   // inside (capture_mode). NOTHING EXECUTES — no state, no position.
@@ -336,28 +391,85 @@ void GlmDiagnosticModel::session_graph_capture_step(
   (void)out;  // empty by contract; the caller instantiates the graph
 }
 
+void GlmDiagnosticModel::session_graph_capture_commit(
+    int req, const GlmPickVerdict* device_verdict) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_graph_capture_commit: request slot " +
+                            std::to_string(req));
+  if (!graph_device_positions_)
+    throw std::logic_error(
+        "session_graph_capture_commit: the step must be captured with "
+        "device positions (the commit advances the device position)");
+  glm_spec_commit(device_verdict, decode_rows_, spec_segments(req),
+                  d_session_pos_ + req, stream_);
+}
+
+void GlmDiagnosticModel::session_reserve_blocks(int req, int64_t tokens) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_reserve_blocks: request slot " +
+                            std::to_string(req));
+  if (tokens < 1 || tokens > max_tokens_)
+    throw std::invalid_argument("session_reserve_blocks: tokens outside "
+                                "[1, max_tokens]");
+  if (dsa_cfg_.num_dsa_layers == 0) return;
+  if (!pool_.ensure_request_blocks(req, tokens, stream_))
+    throw std::runtime_error(
+        "session_reserve_blocks: DSA pool cannot cover " +
+        std::to_string(tokens) + " tokens for slot " + std::to_string(req));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+}
+
+void GlmDiagnosticModel::session_graph_settle(int req, int accepted) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_graph_settle: request slot " +
+                            std::to_string(req));
+  if (!graph_device_positions_)
+    throw std::logic_error("session_graph_settle: the graph was not captured "
+                           "with device positions (use session_graph_collect)");
+  if (accepted < 1 || accepted > decode_rows_)
+    throw std::invalid_argument("session_graph_settle: accepted rows outside "
+                                "[1, " + std::to_string(decode_rows_) + "]");
+  if (session_pos_[static_cast<size_t>(req)] <= 0)
+    throw std::invalid_argument("session_graph_settle: no open session");
+  // The device advanced its own position in the recorded commit; the
+  // mirror follows. No push: the device is the source of truth here.
+  session_pos_[static_cast<size_t>(req)] += accepted;
+}
+
 void GlmDiagnosticModel::session_graph_stage(int req, int64_t token_id) {
   session_graph_stage(req, std::vector<int64_t>{token_id});
 }
 
 void GlmDiagnosticModel::session_graph_stage(int req,
                                              const std::vector<int64_t>& ids) {
-  session_decode_host_prep(req, ids, /*upload=*/false);
+  session_decode_host_prep(req, ids, /*upload=*/false,
+                           graph_device_positions_);
+}
+
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_graph_outputs(
+    int req) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_graph_outputs: request slot " +
+                           std::to_string(req));
+  if (session_pos_[static_cast<size_t>(req)] <= 0)
+    throw std::invalid_argument("session_graph_outputs: no open session");
+  if (!decode_tail_mirrors_)
+    throw std::logic_error("session_graph_outputs: the tail mirrors are off "
+                           "(set_decode_tail_mirrors)");
+  // The caller synced the stream and finished the bus window: the
+  // graph's D2H nodes joined, the state advanced in place, the logits
+  // are stable. Materialize exactly as the eager tail does.
+  return session_decode_tail(decode_rows_);
 }
 
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_graph_collect(
     int req) {
-  if (req < 0 || req >= max_requests_)
-    throw std::out_of_range("session_graph_collect: request slot " +
-                           std::to_string(req));
-  const int64_t pos = session_pos_[static_cast<size_t>(req)];
-  if (pos <= 0)
-    throw std::invalid_argument("session_graph_collect: no open session");
-  // The caller synced the stream and finished the bus window: the
-  // graph's D2H nodes joined, the state advanced in place, the logits
-  // are stable. Materialize exactly as the eager tail does.
-  Outputs out = session_decode_tail(decode_rows_);
-  session_pos_[static_cast<size_t>(req)] = pos + decode_rows_;
+  if (graph_device_positions_)
+    throw std::logic_error("session_graph_collect: a device-driven graph "
+                           "settles (session_graph_settle)");
+  Outputs out = session_graph_outputs(req);
+  session_pos_[static_cast<size_t>(req)] += decode_rows_;
+  push_position(req);
   return out;
 }
 
@@ -636,8 +748,9 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   if (decode_row) prefetch_.join(stream_);
   // The decode tail's rows ride D2H into pinned mirrors (graph nodes when
   // capturing) so the host never touches the managed activations — see
-  // h_tail_logits_'s comment for the 9 ms stall that bought this.
-  {
+  // h_tail_logits_'s comment for the 9 ms stall that bought this. A
+  // device-pick consumer turns the decode rows' copies off.
+  if (!decode_row || decode_tail_mirrors_) {
     // Decode rows: all T rows (T <= kDecodeRows). Prefill chunks: the
     // LAST row only, into mirror row 0 (a prompt-sized logits matrix is
     // 100s of MB; greedy needs one row).

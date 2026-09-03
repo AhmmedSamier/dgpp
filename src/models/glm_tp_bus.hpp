@@ -390,6 +390,9 @@ class GlmDevicePicker {
     DGPP_CUDA_OK(cudaMemset(carry_, 0, sizeof(uint64_t)));
     DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&verdict_),
                                 sizeof(GlmPickVerdict)));
+    DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&device_verdict_),
+                            sizeof(GlmPickVerdict)));
+    DGPP_CUDA_OK(cudaMemset(device_verdict_, 0, sizeof(GlmPickVerdict)));
     DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&locals_),
                                 sizeof(GlmPickLocal) * kPickMaxRows));
     *verdict_ = GlmPickVerdict{};
@@ -397,6 +400,7 @@ class GlmDevicePicker {
   ~GlmDevicePicker() {
     if (table_) cudaFree(table_);
     if (carry_) cudaFree(carry_);
+    if (device_verdict_) cudaFree(device_verdict_);
     if (verdict_) cudaFreeHost(verdict_);
     if (locals_) cudaFreeHost(locals_);
   }
@@ -428,8 +432,8 @@ class GlmDevicePicker {
                                glm_pick_table_elems(in.rows, world_), &err))
       throw std::runtime_error("device pick: allreduce_record rejected: " +
                                err);
-    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_, carry_,
-                     stream);
+    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_,
+                     device_verdict_, carry_, stream);
   }
 
   // EAGER: the same three with the eager collective between (the draft
@@ -448,8 +452,8 @@ class GlmDevicePicker {
       throw std::runtime_error("device pick: allreduce rejected: " + err);
     const net::BusAllReduceResult res = bus_.wait_allreduce(id, timeout_ms_);
     if (!res.ok) throw std::runtime_error("device pick gather: " + res.error);
-    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_, carry_,
-                     stream);
+    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_,
+                     device_verdict_, carry_, stream);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
     return verdict();
   }
@@ -476,6 +480,9 @@ class GlmDevicePicker {
       throw std::out_of_range("device pick: local row");
     return locals_[row];
   }
+  // The verdict's device copy: the address the device-side consumers
+  // (the model's commit kernel, the in-graph draft) read after the pick.
+  const GlmPickVerdict* device_verdict() const { return device_verdict_; }
   int rank() const { return rank_; }
   int world() const { return world_; }
 
@@ -497,6 +504,7 @@ class GlmDevicePicker {
   uint16_t* table_ = nullptr;         // device: the wire table
   uint64_t* carry_ = nullptr;         // device: last verdict's digest
   GlmPickVerdict* verdict_ = nullptr;  // pinned
+  GlmPickVerdict* device_verdict_ = nullptr;
   GlmPickLocal* locals_ = nullptr;     // pinned [kPickMaxRows]
 };
 

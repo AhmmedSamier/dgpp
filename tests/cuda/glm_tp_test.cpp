@@ -1531,15 +1531,20 @@ DGPP_TEST(glm_tp_speculative_loopback_matches_plain_greedy) {
 }
 
 // ---------------------------------------------------------------------------
-// The on-device step (DESIGN §9, phase A): the T=2 verify recorded as a
+// The on-device step (DESIGN §9, phases A+B): the T=2 verify recorded as a
 // graph WITH the pick behind it — glm_pick_local, the gather as a recorded
-// collective node, glm_pick_verdict — replayed over the loopback bus at
-// world 4. Pins, per step: the device verdict (winners, accepted, next) ==
-// the host pick + judge over the SAME replayed logits; the draft's eager
-// device pick == the host pick; and the whole transcript == the plain
-// sharded session's, identical on every rank. Also the first in-process
-// capture of the model's decode graph (the fabric app was the only
-// exerciser before).
+// collective node, glm_pick_verdict — and the COMMIT behind the pick (the
+// conditional rollback + the device position advance), the rows' positions
+// off the device position, replayed over the loopback bus at world 4. The
+// host never rolls back, never stages a position, never admits blocks per
+// step. Pins, per step: the device verdict (winners, accepted, next) == the
+// host pick + judge over the SAME replayed logits; the draft's eager device
+// pick == the host pick; the host position mirror == the device's; and the
+// whole transcript == the plain sharded session's, identical on every rank
+// (the random fixture's draft is rejected nearly every step, so the device
+// rollback runs nearly every step — a wrong copy would derail the KDA
+// state and the transcript with it). Also the first in-process capture of
+// the model's decode graph (the fabric app was the only exerciser before).
 // ---------------------------------------------------------------------------
 DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
   const GlmTextConfig cfg = glm_tp_test_config();
@@ -1627,16 +1632,19 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
         };
         int32_t draft = draft_after({next});
 
-        // ---- capture: the T=2 verify + the recorded pick ----------------
+        // ---- capture: the T=2 verify + the recorded pick + the commit --
         shard.session_graph_prepare();
+        shard.session_reserve_blocks(0, max_tokens);
         dgpp::GlmBoundaryReducer* eager = shard.set_boundary(&recorder);
         std::string gerr;
         require(bus.graph_record_begin(&gerr), "graph_record_begin: " + gerr);
         cudaGraph_t graph = nullptr;
         DGPP_CUDA_OK(cudaStreamBeginCapture(shard.stream(),
                                             cudaStreamCaptureModeThreadLocal));
-        shard.session_graph_capture_step(0, std::vector<int64_t>{next, next});
+        shard.session_graph_capture_step(0, std::vector<int64_t>{next, next},
+                                         /*device_positions=*/true);
         picker.record(shard.stream(), device_inputs(2));
+        shard.session_graph_capture_commit(0, picker.device_verdict());
         DGPP_CUDA_OK(cudaStreamEndCapture(shard.stream(), &graph));
         require(graph != nullptr, "capture produced no graph");
         require(bus.graph_record_end(&gerr), "graph_record_end: " + gerr);
@@ -1656,7 +1664,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
           DGPP_CUDA_OK(cudaStreamSynchronize(shard.stream()));
           require(bus.graph_replay_finish(60000, &gerr),
                   "graph_replay_finish: " + gerr);
-          const GlmDiagnosticModel::Outputs out = shard.session_graph_collect(0);
+          const GlmDiagnosticModel::Outputs out = shard.session_graph_outputs(0);
           const dgpp::GlmPickVerdict& v = picker.verdict();
           // The host judge over the same logits the graph produced.
           const std::vector<int32_t> winners = host_pick(out, 2);
@@ -1676,7 +1684,11 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
           }
           if (v.accepted != want.accepted || v.next != want.next)
             throw std::runtime_error("device verdict != judge_verify");
-          if (v.accepted < 2) shard.session_rollback(0, v.accepted);
+          // The device rolled back and advanced; the host mirror follows.
+          const int64_t before = shard.session_position(0);
+          shard.session_graph_settle(0, v.accepted);
+          if (shard.session_position(0) != before + v.accepted)
+            throw std::runtime_error("host position mirror did not settle");
           ++steps;
           for (int row = 0; row < v.accepted; ++row)
             got.push_back(static_cast<int32_t>(fed[static_cast<size_t>(row)]));

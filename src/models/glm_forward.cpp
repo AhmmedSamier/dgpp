@@ -213,6 +213,15 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_token_),
                              sizeof(int64_t) * kDecodeRows,
                              cudaHostAllocDefault));
+  // The device-side session positions (the device-driven graph's source of
+  // truth; see push_position) and their pinned upload mirror.
+  d_session_pos_ = static_cast<int64_t*>(
+      alloc_device(sizeof(int64_t) * static_cast<size_t>(max_requests_)));
+  DGPP_CUDA_OK(cudaMemset(d_session_pos_, 0,
+                          sizeof(int64_t) * static_cast<size_t>(max_requests_)));
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_session_pos_),
+                             sizeof(int64_t) * static_cast<size_t>(max_requests_),
+                             cudaHostAllocDefault));
 
   // Per-request, per-layer KDA state (slot-major: one memset pair per
   // request open — see the header's layout note).
@@ -328,6 +337,8 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFreeHost(h_step_pos_);
   cudaFreeHost(h_req_spans_);
   cudaFreeHost(h_token_);
+  cudaFree(d_session_pos_);
+  cudaFreeHost(h_session_pos_);
   cudaFree(kda_rec_);
   cudaFree(kda_conv_);
   cudaFree(spec_rec_);

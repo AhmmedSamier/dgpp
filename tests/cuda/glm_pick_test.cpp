@@ -1,10 +1,11 @@
-// The on-device greedy pick (kernels/glm_pick.hpp) against its host
-// oracles: glm_pick_local's top-2 vs glm_sample::local_max plus the gen
+// The on-device greedy pick (kernels/glm_pick.hpp) and the step's device
+// commit (kernels/glm_spec.hpp) against their host oracles: glm_pick_local's top-2 vs glm_sample::local_max plus the gen
 // log's runner-up scan; glm_pick_verdict's merge vs glm_sample::merge_greedy
 // and its judge vs judge_verify, over a SIMULATED world (each rank's table
 // produced by the kernel on its slice, the fold emulated as an exact host
 // sum — which is what the bus's SUM over disjoint slots is); the digest
 // group's agreement/mismatch detection; the wire table's layout.
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -17,6 +18,7 @@
 #include "common/cuda_check.hpp"
 #include "common/test.hpp"
 #include "kernels/glm_pick.hpp"
+#include "kernels/glm_spec.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_speculative.hpp"
 
@@ -130,8 +132,8 @@ GlmPickVerdict run_verdict(const std::vector<uint16_t>& table, int rows,
                           cudaMemcpyHostToDevice));
   DGPP_CUDA_OK(cudaMemcpy(d_fed, fed.data(), fed.size() * 8,
                           cudaMemcpyHostToDevice));
-  dgpp::glm_pick_verdict(d_table, rows, world, rank, d_fed, d_verdict, d_carry,
-                         nullptr);
+  dgpp::glm_pick_verdict(d_table, rows, world, rank, d_fed, d_verdict,
+                         /*device_verdict=*/nullptr, d_carry, nullptr);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
   GlmPickVerdict v;
   DGPP_CUDA_OK(cudaMemcpy(&v, d_verdict, sizeof(v), cudaMemcpyDeviceToHost));
@@ -312,6 +314,76 @@ DGPP_TEST(pick_verdict_flags_the_rank_whose_carried_digest_differs) {
   require(from_rank0.peer_digests[2] == 0xbadull &&
               from_rank0.peer_digests[1] == 0x600dull,
           "peer digests must decode to what each rank carried");
+}
+
+// The commit: with rows = 3 and a verdict accepting a rows, every segment's
+// live state must become snapshot row a-1 when a < 3 and stay untouched
+// when a == 3; the position advances by a either way; the positions kernel
+// derives the rows' positions from the device position.
+DGPP_TEST(spec_commit_copies_snapshot_row_when_rejected_and_advances_position) {
+  constexpr int rows = 3;
+  constexpr size_t kBytesA = 4096, kBytesB = 64;  // two families, uneven
+  std::vector<uint8_t> live_a(kBytesA, 0xaa), live_b(kBytesB, 0xbb);
+  // Snapshot rows: row r of family A is filled with 0x10 + r, B with 0x20 + r.
+  std::vector<uint8_t> snaps_a(kBytesA * (rows - 1)), snaps_b(kBytesB * (rows - 1));
+  for (int r = 0; r < rows - 1; ++r) {
+    std::fill_n(snaps_a.data() + r * kBytesA, kBytesA, static_cast<uint8_t>(0x10 + r));
+    std::fill_n(snaps_b.data() + r * kBytesB, kBytesB, static_cast<uint8_t>(0x20 + r));
+  }
+  uint8_t* d_live_a = device_alloc<uint8_t>(kBytesA);
+  uint8_t* d_live_b = device_alloc<uint8_t>(kBytesB);
+  uint8_t* d_snaps_a = device_alloc<uint8_t>(snaps_a.size());
+  uint8_t* d_snaps_b = device_alloc<uint8_t>(snaps_b.size());
+  GlmPickVerdict* d_verdict = device_alloc<GlmPickVerdict>(1);
+  int64_t* d_pos = device_alloc<int64_t>(1);
+  int64_t* d_step_pos = device_alloc<int64_t>(rows);
+  DGPP_CUDA_OK(cudaMemcpy(d_snaps_a, snaps_a.data(), snaps_a.size(),
+                          cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_snaps_b, snaps_b.data(), snaps_b.size(),
+                          cudaMemcpyHostToDevice));
+  dgpp::GlmSpecSegments segs;
+  segs.count = 2;
+  segs.seg[0] = dgpp::GlmSpecSegment{d_live_a, d_snaps_a, kBytesA, kBytesA};
+  segs.seg[1] = dgpp::GlmSpecSegment{d_live_b, d_snaps_b, kBytesB, kBytesB};
+
+  for (int accepted = 1; accepted <= rows; ++accepted) {
+    DGPP_CUDA_OK(cudaMemcpy(d_live_a, live_a.data(), kBytesA, cudaMemcpyHostToDevice));
+    DGPP_CUDA_OK(cudaMemcpy(d_live_b, live_b.data(), kBytesB, cudaMemcpyHostToDevice));
+    GlmPickVerdict v;
+    v.rows = rows;
+    v.accepted = accepted;
+    DGPP_CUDA_OK(cudaMemcpy(d_verdict, &v, sizeof(v), cudaMemcpyHostToDevice));
+    const int64_t pos0 = 1000;
+    DGPP_CUDA_OK(cudaMemcpy(d_pos, &pos0, 8, cudaMemcpyHostToDevice));
+    dgpp::glm_spec_commit(d_verdict, rows, segs, d_pos, nullptr);
+    dgpp::glm_spec_positions(d_pos, rows, d_step_pos, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint8_t> got_a(kBytesA), got_b(kBytesB);
+    int64_t pos = 0;
+    std::vector<int64_t> step_pos(rows);
+    DGPP_CUDA_OK(cudaMemcpy(got_a.data(), d_live_a, kBytesA, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(got_b.data(), d_live_b, kBytesB, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(&pos, d_pos, 8, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(step_pos.data(), d_step_pos, 8 * rows, cudaMemcpyDeviceToHost));
+    require(pos == pos0 + accepted, "position must advance by accepted");
+    for (int r = 0; r < rows; ++r)
+      require(step_pos[static_cast<size_t>(r)] == pos + r,
+              "step positions must follow the device position");
+    const uint8_t want_a = accepted == rows ? 0xaa : static_cast<uint8_t>(0x10 + accepted - 1);
+    const uint8_t want_b = accepted == rows ? 0xbb : static_cast<uint8_t>(0x20 + accepted - 1);
+    for (size_t i = 0; i < kBytesA; ++i)
+      require(got_a[i] == want_a, "family A: accepted " + std::to_string(accepted) +
+                                       " byte " + std::to_string(i));
+    for (size_t i = 0; i < kBytesB; ++i)
+      require(got_b[i] == want_b, "family B: accepted " + std::to_string(accepted));
+  }
+  cudaFree(d_live_a);
+  cudaFree(d_live_b);
+  cudaFree(d_snaps_a);
+  cudaFree(d_snaps_b);
+  cudaFree(d_verdict);
+  cudaFree(d_pos);
+  cudaFree(d_step_pos);
 }
 
 int main() {
