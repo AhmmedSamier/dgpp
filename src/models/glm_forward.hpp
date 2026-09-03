@@ -335,11 +335,33 @@ class GlmDiagnosticModel {
   //         collect, no rollback — the device did both.
   //   set_decode_tail_mirrors(false) — drops the tail's logits/hidden D2H
   //         nodes (a device-pick consumer reads neither); default on.
+  //   session_graph_capture_draft(req, verify_verdict) — the draft block
+  //         IN the graph (phase C), behind the commit: glm_spec_draft_rows
+  //         turns the verify's verdict into the block's T rows (accepted
+  //         rows real at the block's device position, the rest padding at
+  //         position -1 — the DSA path skips them, nothing is written),
+  //         the block runs its fixed T rows, its head runs on EVERY row,
+  //         and the caller's second recorded pick reads the last accepted
+  //         one (GlmDevicePicker::Inputs::row_select). The verify's `next`
+  //         is parked on the device for the token feed.
+  //   session_graph_capture_next_tokens(req, draft_verdict) — the graph's
+  //         last node (phase D): d_tokens_ = [next, the draft's pick] for
+  //         the next replay. Requires device_tokens at the capture (no
+  //         token upload node) and session_graph_seed_tokens once before
+  //         the first replay.
+  //   session_graph_settle(req, accepted) — with the draft in the graph the
+  //         block's row counter mirror advances by `accepted` too.
   void session_reserve_blocks(int req, int64_t tokens);
   void session_graph_capture_step(int req, const std::vector<int64_t>& ids,
-                                  bool device_positions);
+                                  bool device_positions,
+                                  bool device_tokens = false);
   void session_graph_capture_commit(int req,
                                     const GlmPickVerdict* device_verdict);
+  void session_graph_capture_draft(int req,
+                                   const GlmPickVerdict* verify_verdict);
+  void session_graph_capture_next_tokens(int req,
+                                         const GlmPickVerdict* draft_verdict);
+  void session_graph_seed_tokens(int req, const std::vector<int64_t>& ids);
   void session_graph_settle(int req, int accepted);
   void set_decode_tail_mirrors(bool on) { decode_tail_mirrors_ = on; }
   // Materializes the replay's Outputs WITHOUT moving the position (the
@@ -491,8 +513,11 @@ class GlmDiagnosticModel {
   // cache. decode_row selects the DSA decode path (positions from
   // d_step_pos_) and runs the head on the LAST row into logits_ row 0 +
   // the pinned mirror; prefill rows run the block only (no head).
+  // head_rows: 1 = the last row only (the eager draft), T = every row (the
+  // in-graph draft; the pick selects the last accepted row).
   void mtp_run_rows(int req, int64_t first_pos, int T, bool decode_row,
-                    bool capture_mode);
+                    bool capture_mode, int head_rows = 1);
+  void push_mtp_position(int req);
   // The block over a prompt's rows 0..P-2 in pool-aligned chunks.
   void mtp_prefill(int req, const std::vector<int64_t>& prompt_ids);
   // The draft's host half: validation, positions/tokens staging, uploads.
@@ -587,7 +612,11 @@ class GlmDiagnosticModel {
                                       // device-driven graph's position
   int64_t* h_session_pos_ = nullptr;  // pinned upload mirror
   bool graph_device_positions_ = false;  // the captured graph's mode
+  bool graph_device_tokens_ = false;     // no token upload node
+  bool graph_has_draft_ = false;         // the draft block is in the graph
   bool decode_tail_mirrors_ = true;
+  int64_t* d_next_ = nullptr;  // device [max_requests]: the verify's next
+                               // token, parked for the token feed
   int32_t* d_req_ids_ = nullptr;      // device [kDecodeRows]
   int64_t* d_step_pos_ = nullptr;     // device [kDecodeRows]
   int32_t* d_req_spans_ = nullptr;    // device [kDecodeRows, 2]
@@ -631,6 +660,9 @@ class GlmDiagnosticModel {
   bool mtp_ = false;
   int main_dsa_layers_ = 0;  // dsa_cfg_.num_dsa_layers minus the draft's
   std::vector<int64_t> mtp_pos_;
+  int64_t* d_mtp_pos_ = nullptr;  // device [max_requests]: the block's row
+                                  // counter for the in-graph draft
+  int64_t* h_mtp_pos_ = nullptr;  // pinned upload mirror
   int draft_rows_ = 1;
   uint16_t* mtp_hidden_ = nullptr;  // [max_requests, max_tokens, H]
   uint16_t* mtp_cat_ = nullptr;     // [T, 2H] the eh_proj input

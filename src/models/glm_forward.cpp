@@ -222,6 +222,10 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_session_pos_),
                              sizeof(int64_t) * static_cast<size_t>(max_requests_),
                              cudaHostAllocDefault));
+  d_next_ = static_cast<int64_t*>(
+      alloc_device(sizeof(int64_t) * static_cast<size_t>(max_requests_)));
+  DGPP_CUDA_OK(cudaMemset(d_next_, 0,
+                          sizeof(int64_t) * static_cast<size_t>(max_requests_)));
 
   // Per-request, per-layer KDA state (slot-major: one memset pair per
   // request open — see the header's layout note).
@@ -249,6 +253,13 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   if (mtp_) {
     const size_t H = static_cast<size_t>(cfg_.hidden_size);
     mtp_pos_.assign(static_cast<size_t>(max_requests_), 0);
+    d_mtp_pos_ = static_cast<int64_t*>(
+        alloc_device(sizeof(int64_t) * static_cast<size_t>(max_requests_)));
+    DGPP_CUDA_OK(cudaMemset(d_mtp_pos_, 0,
+                            sizeof(int64_t) * static_cast<size_t>(max_requests_)));
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_mtp_pos_),
+                               sizeof(int64_t) * static_cast<size_t>(max_requests_),
+                               cudaHostAllocDefault));
     mtp_hidden_ = static_cast<uint16_t*>(alloc_device(
         static_cast<size_t>(max_requests_) * max_tokens_ * H * 2));
     mtp_cat_ = static_cast<uint16_t*>(
@@ -339,6 +350,9 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFreeHost(h_token_);
   cudaFree(d_session_pos_);
   cudaFreeHost(h_session_pos_);
+  cudaFree(d_next_);
+  cudaFree(d_mtp_pos_);
+  cudaFreeHost(h_mtp_pos_);
   cudaFree(kda_rec_);
   cudaFree(kda_conv_);
   cudaFree(spec_rec_);

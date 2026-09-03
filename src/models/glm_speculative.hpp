@@ -87,6 +87,13 @@ class GreedySpeculator {
     next_ = first;
     draft_ = draft_after({first});
   }
+  // Test seam: the block still drafts its first row (its counter must
+  // move), but the proposal fed to the first verify is `forced_draft` —
+  // feeding the true next token makes the first step an accept-all.
+  void start(int32_t first, int32_t forced_draft) {
+    start(first);
+    draft_ = forced_draft;
+  }
 
   // One speculative step. Returns the tokens that became final this step
   // (1 or 2); next() is then the following token, already decided but not
@@ -105,6 +112,8 @@ class GreedySpeculator {
   }
 
   int32_t next() const { return next_; }
+  // The block's current proposal for the token after next().
+  int32_t draft() const { return draft_; }
   int steps() const { return steps_; }
   int accepted_drafts() const { return accepted_drafts_; }
 

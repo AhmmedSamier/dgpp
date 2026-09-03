@@ -41,6 +41,32 @@ __global__ void spec_positions_kernel(const int64_t* __restrict__ session_pos,
   if (r < rows) step_pos[r] = *session_pos + r;
 }
 
+__global__ void spec_draft_rows_kernel(const GlmPickVerdict* __restrict__ verdict,
+                                       int rows, int64_t* __restrict__ block_pos,
+                                       int64_t* __restrict__ step_pos,
+                                       int64_t* __restrict__ tokens,
+                                       int64_t* __restrict__ next_out) {
+  const int accepted = verdict->accepted;
+  const int r = threadIdx.x;
+  if (r < rows) {
+    const bool real = r < accepted;
+    step_pos[r] = real ? *block_pos + r : -1;
+    tokens[r] = verdict->winners[real ? r : 0];
+  }
+  __syncthreads();  // every row read *block_pos before it moves
+  if (r == 0) {
+    *block_pos += accepted;
+    *next_out = verdict->next;
+  }
+}
+
+__global__ void spec_next_tokens_kernel(const int64_t* __restrict__ next,
+                                        const GlmPickVerdict* __restrict__ draft,
+                                        int64_t* __restrict__ tokens) {
+  tokens[0] = *next;
+  tokens[1] = draft->next;
+}
+
 bool aligned16(const void* p) {
   return (reinterpret_cast<uintptr_t>(p) & 15) == 0;
 }
@@ -83,6 +109,29 @@ void glm_spec_positions(const int64_t* session_pos, int rows,
   if (rows < 1 || rows > 32)
     throw std::invalid_argument("glm_spec_positions: rows");
   spec_positions_kernel<<<1, 32, 0, stream>>>(session_pos, rows, step_pos);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_spec_draft_rows(const GlmPickVerdict* verdict, int rows,
+                         int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
+                         int64_t* next_out, cudaStream_t stream) {
+  if (verdict == nullptr || block_pos == nullptr || step_pos == nullptr ||
+      tokens == nullptr || next_out == nullptr)
+    throw std::invalid_argument("glm_spec_draft_rows: null argument");
+  if (rows < 1 || rows > kPickMaxRows)
+    throw std::invalid_argument("glm_spec_draft_rows: rows outside [1, " +
+                                std::to_string(kPickMaxRows) + "]");
+  spec_draft_rows_kernel<<<1, 32, 0, stream>>>(verdict, rows, block_pos,
+                                               step_pos, tokens, next_out);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_spec_next_tokens(const int64_t* next,
+                          const GlmPickVerdict* draft_verdict, int64_t* tokens,
+                          cudaStream_t stream) {
+  if (next == nullptr || draft_verdict == nullptr || tokens == nullptr)
+    throw std::invalid_argument("glm_spec_next_tokens: null argument");
+  spec_next_tokens_kernel<<<1, 1, 0, stream>>>(next, draft_verdict, tokens);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

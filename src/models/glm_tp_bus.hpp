@@ -369,13 +369,21 @@ inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
 // it carried is the digest group (see kernels/glm_pick.hpp), checked at
 // the NEXT pick — one step late, still loud and located.
 //
+// SLOTS: a step may hold more than one pick before the host looks (the
+// verify's and the in-graph draft's); each pick names a slot and its
+// verdict/locals land in that slot's mirrors. The digest carry is one
+// chain across every pick of every slot.
+//
 // Buffers are owned here and baked into the recorded nodes (device table,
-// device carry digest, pinned verdict/locals), so the picker must outlive
-// the graphs it recorded. One picker per rank per bus; picks are stream-
-// ordered, never concurrent (the decode contract).
+// device carry digest, per-slot pinned verdict/locals and device verdict),
+// so the picker must outlive the graphs it recorded. One picker per rank
+// per bus; picks are stream-ordered, never concurrent (the decode
+// contract).
 // ---------------------------------------------------------------------------
 class GlmDevicePicker {
  public:
+  static constexpr int kSlots = 2;
+
   GlmDevicePicker(net::CollectiveBus& bus, int rank, int world,
                   int timeout_ms = 60000)
       : bus_(bus), rank_(rank), world_(world), timeout_ms_(timeout_ms) {
@@ -389,13 +397,13 @@ class GlmDevicePicker {
     DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&carry_), sizeof(uint64_t)));
     DGPP_CUDA_OK(cudaMemset(carry_, 0, sizeof(uint64_t)));
     DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&verdict_),
-                                sizeof(GlmPickVerdict)));
+                                sizeof(GlmPickVerdict) * kSlots));
     DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&device_verdict_),
-                            sizeof(GlmPickVerdict)));
-    DGPP_CUDA_OK(cudaMemset(device_verdict_, 0, sizeof(GlmPickVerdict)));
+                            sizeof(GlmPickVerdict) * kSlots));
+    DGPP_CUDA_OK(cudaMemset(device_verdict_, 0, sizeof(GlmPickVerdict) * kSlots));
     DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&locals_),
-                                sizeof(GlmPickLocal) * kPickMaxRows));
-    *verdict_ = GlmPickVerdict{};
+                                sizeof(GlmPickLocal) * kPickMaxRows * kSlots));
+    for (int s = 0; s < kSlots; ++s) verdict_[s] = GlmPickVerdict{};
   }
   ~GlmDevicePicker() {
     if (table_) cudaFree(table_);
@@ -410,30 +418,37 @@ class GlmDevicePicker {
   // The pick's inputs: this rank's fp32 logits [rows, vocab_count] on the
   // device (the model's head output), the slice's first vocab id, and the
   // rows' fed tokens on the device (the judge's right-hand side; any valid
-  // pointer at rows == 1, where row 0 always stands).
+  // pointer at rows == 1, where row 0 always stands). `slot` names the
+  // mirrors the verdict lands in. `row_select` (rows == 1 only) makes the
+  // pick read logits row (row_select->accepted - 1): the in-graph draft's
+  // head runs on every row of a fixed batch and its pick takes the last
+  // accepted one.
   struct Inputs {
     const float* logits = nullptr;
     int rows = 0;
     int vocab_count = 0;
     int vocab_begin = 0;
     const int64_t* fed = nullptr;
+    int slot = 0;
+    const GlmPickVerdict* row_select = nullptr;
   };
 
   // CAPTURE: enqueues the three nodes on `stream` (the caller is between
   // cudaStreamBeginCapture/EndCapture on it, inside the bus's record
   // session). The verdict is readable after the replay's stream sync and
-  // graph_replay_finish, via verdict().
+  // graph_replay_finish, via verdict(slot).
   void record(cudaStream_t stream, const Inputs& in) {
     validate(in);
     glm_pick_local(in.logits, in.rows, in.vocab_count, in.vocab_begin, rank_,
-                   world_, carry_, table_, locals_, stream);
+                   world_, carry_, table_, locals_ + in.slot * kPickMaxRows,
+                   stream, in.row_select);
     std::string err;
     if (!bus_.allreduce_record(stream, table_, table_,
                                glm_pick_table_elems(in.rows, world_), &err))
       throw std::runtime_error("device pick: allreduce_record rejected: " +
                                err);
-    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_,
-                     device_verdict_, carry_, stream);
+    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_ + in.slot,
+                     device_verdict_ + in.slot, carry_, stream);
   }
 
   // EAGER: the same three with the eager collective between (the draft
@@ -443,7 +458,8 @@ class GlmDevicePicker {
     step_timing::Scope tick(step_timing::kPick);
     validate(in);
     glm_pick_local(in.logits, in.rows, in.vocab_count, in.vocab_begin, rank_,
-                   world_, carry_, table_, locals_, stream);
+                   world_, carry_, table_, locals_ + in.slot * kPickMaxRows,
+                   stream, in.row_select);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
     std::string err;
     const uint64_t id = bus_.allreduce(
@@ -452,42 +468,55 @@ class GlmDevicePicker {
       throw std::runtime_error("device pick: allreduce rejected: " + err);
     const net::BusAllReduceResult res = bus_.wait_allreduce(id, timeout_ms_);
     if (!res.ok) throw std::runtime_error("device pick gather: " + res.error);
-    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_,
-                     device_verdict_, carry_, stream);
+    glm_pick_verdict(table_, in.rows, world_, rank_, in.fed, verdict_ + in.slot,
+                     device_verdict_ + in.slot, carry_, stream);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
-    return verdict();
+    return verdict(in.slot);
   }
 
-  // The last pick's verdict (pinned; valid once its stream work completed).
-  // Throws when the digest group disagreed: some rank computed a different
-  // verdict at the PREVIOUS pick — its table was not the others' table.
-  const GlmPickVerdict& verdict() const {
-    if (verdict_->digest_mismatch != 0) {
+  // Slot `slot`'s last verdict (pinned; valid once its stream work
+  // completed). Throws when the digest group disagreed: some rank
+  // computed a different verdict at the PREVIOUS pick — its table was not
+  // the others' table.
+  const GlmPickVerdict& verdict(int slot = 0) const {
+    check_slot(slot);
+    const GlmPickVerdict& v = verdict_[slot];
+    if (v.digest_mismatch != 0) {
       std::string digests;
       for (int k = 0; k < world_; ++k)
         digests += std::format("{}rank {}: {:#016x}", k ? ", " : "", k,
-                               verdict_->peer_digests[k]);
+                               v.peer_digests[k]);
       throw std::runtime_error(std::format(
           "device pick: verdict digests diverged at the previous pick "
-          "(rank {} sees mismatch mask {:#x}): {}",
-          rank_, verdict_->digest_mismatch, digests));
+          "(rank {} sees mismatch mask {:#x} at slot {}): {}",
+          rank_, v.digest_mismatch, slot, digests));
     }
-    return *verdict_;
+    return v;
   }
-  // Row `row`'s local argmax / runner-up (the gen log's fields).
-  const GlmPickLocal& local(int row) const {
+  // Row `row`'s local argmax / runner-up in slot `slot` (the gen log's
+  // fields).
+  const GlmPickLocal& local(int row, int slot = 0) const {
+    check_slot(slot);
     if (row < 0 || row >= kPickMaxRows)
       throw std::out_of_range("device pick: local row");
-    return locals_[row];
+    return locals_[slot * kPickMaxRows + row];
   }
-  // The verdict's device copy: the address the device-side consumers
-  // (the model's commit kernel, the in-graph draft) read after the pick.
-  const GlmPickVerdict* device_verdict() const { return device_verdict_; }
+  // Slot `slot`'s verdict on the device: the address the device-side
+  // consumers (the model's commit kernel, the in-graph draft) read.
+  const GlmPickVerdict* device_verdict(int slot = 0) const {
+    check_slot(slot);
+    return device_verdict_ + slot;
+  }
   int rank() const { return rank_; }
   int world() const { return world_; }
 
  private:
+  static void check_slot(int slot) {
+    if (slot < 0 || slot >= kSlots)
+      throw std::out_of_range("device pick: slot");
+  }
   void validate(const Inputs& in) const {
+    check_slot(in.slot);
     if (in.logits == nullptr || in.fed == nullptr)
       throw std::invalid_argument("device pick: null inputs");
     if (in.rows < 1 || in.rows > kPickMaxRows)
@@ -495,17 +524,19 @@ class GlmDevicePicker {
                                   std::to_string(kPickMaxRows) + "]");
     if (in.vocab_count < 1 || in.vocab_begin < 0)
       throw std::invalid_argument("device pick: vocab slice");
+    if (in.row_select != nullptr && in.rows != 1)
+      throw std::invalid_argument("device pick: row_select needs rows == 1");
   }
 
   net::CollectiveBus& bus_;
   int rank_ = 0;
   int world_ = 1;
   int timeout_ms_ = 60000;
-  uint16_t* table_ = nullptr;         // device: the wire table
-  uint64_t* carry_ = nullptr;         // device: last verdict's digest
-  GlmPickVerdict* verdict_ = nullptr;  // pinned
-  GlmPickVerdict* device_verdict_ = nullptr;
-  GlmPickLocal* locals_ = nullptr;     // pinned [kPickMaxRows]
+  uint16_t* table_ = nullptr;          // device: the wire table
+  uint64_t* carry_ = nullptr;          // device: last verdict's digest
+  GlmPickVerdict* verdict_ = nullptr;  // pinned [kSlots]
+  GlmPickVerdict* device_verdict_ = nullptr;  // device [kSlots]
+  GlmPickLocal* locals_ = nullptr;     // pinned [kSlots][kPickMaxRows]
 };
 
 }  // namespace dgpp

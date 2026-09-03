@@ -652,26 +652,27 @@ void log_teacher_stats(int rank, int step, const GlmDiagnosticModel::Outputs& ou
 }
 
 // ---------------------------------------------------------------------------
-// --mtp: greedy speculative decode on the fabric (DESIGN §9).
-//
-// Every step verifies [next, draft] as ONE T=2 replay of the recorded
-// decode graph WITH THE PICK RECORDED BEHIND THE HEAD (GlmDevicePicker: the
-// local argmax kernel, the candidate gather as a collective node, the
-// verdict kernel) — the replay ends with the verdict in pinned memory —
-// retracts the second row when the draft missed (session_rollback), and
-// drafts the accepted rows through the MTP block EAGERLY between windows
-// (one layer + the head, two eager folds and the draft's eager device
-// pick; the bus's one graph session is the verify's). The transcript is
-// the plain loop's, token for token — the [gen] lines below carry the same
-// fields per generated token, so fabric_xcript judges an --mtp run against
-// a plain run directly (and must say IDENTICAL).
+// --mtp: greedy speculative decode on the fabric (DESIGN §9), the on-device
+// step. With --decode-graph EVERY step is ONE graph replay: the T=2 verify
+// of [next, draft], the recorded pick behind the head (GlmDevicePicker: the
+// local argmax, the candidate gather as a collective node, the verdict),
+// the commit (the rejected row's rollback and the position advance, on the
+// device), the draft block's fixed two rows off the verdict (the second a
+// padding row after a miss), its head on both rows, the recorded draft pick
+// on the last accepted row, and the next replay's fed tokens written on the
+// device. The host launches, syncs, finishes the bus window, reads two
+// pinned verdicts, settles its position mirrors and logs. Without the graph
+// the same step runs eagerly (host rollback, eager draft, eager picks). The
+// transcript is the plain loop's, token for token — the [gen] lines below
+// carry the same fields per generated token, so fabric_xcript judges an
+// --mtp run against a plain run directly (and must say IDENTICAL).
 // ---------------------------------------------------------------------------
 struct SpecRunStats {
   int steps = 0;
   int accepted = 0;
-  double verify_ms = 0;
-  double draft_ms = 0;
-  double pick_ms = 0;
+  double step_ms = 0;   // graph: the replay (launch..bus finish); eager: verify
+  double draft_ms = 0;  // eager only
+  double pick_ms = 0;   // eager only
 };
 
 // The per-generated-token line fabric_xcript/fabric_logprob read: the
@@ -715,15 +716,18 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
                           cfg.eos_token_ids.end();
   };
   // The picker outlives the graph it records into (its buffers are the
-  // recorded nodes' baked addresses).
+  // recorded nodes' baked addresses). Slot 0: the verify; slot 1: the draft.
   dgpp::GlmDevicePicker picker(bus, rank, world, 60000);
-  const auto pick_inputs = [&](int rows) {
+  const auto pick_inputs = [&](int rows, int slot,
+                               const dgpp::GlmPickVerdict* row_select) {
     dgpp::GlmDevicePicker::Inputs in;
     in.logits = model.device_logits();
     in.rows = rows;
     in.vocab_count = model.lm_vocab_count();
     in.vocab_begin = model.lm_vocab_begin();
     in.fed = model.device_tokens();
+    in.slot = slot;
+    in.row_select = row_select;
     return in;
   };
 
@@ -743,23 +747,21 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   *forward_ms_total = prefill_ms;
   dgpp::step_timing::reset();
 
-  // ---- the draft (eager; T = rows accepted; device pick) -----------------
+  // ---- the eager draft (the first proposal; every step's, without graph) --
   SpecRunStats st;
   const auto draft_after = [&](const std::vector<int64_t>& rows) -> int32_t {
     const auto t0 = Clock::now();
     (void)model.session_draft(0, rows);
     st.draft_ms += ms_since(t0);
     const auto t1 = Clock::now();
-    const int32_t id = picker.run(model.stream(), pick_inputs(1)).next;
+    const int32_t id =
+        picker.run(model.stream(), pick_inputs(1, 1, nullptr)).next;
     st.pick_ms += ms_since(t1);
     return id;
   };
+  int32_t draft = draft_after({next});
 
-  // ---- the verify graph (T=2) + the recorded pick + the commit, once ------
-  // Device-driven: the rows' positions come off the device position, the
-  // commit behind the pick rolls a rejected row back and advances the
-  // position on the device, the whole run's DSA blocks are reserved before
-  // the capture, and the tail's logits/hidden never cross to the host.
+  // ---- the step graph, once -----------------------------------------------
   cudaGraphExec_t graph_exec = nullptr;
   std::unique_ptr<dgpp::GlmGraphRecordReducer> recorder;
   if (decode_graph) {
@@ -775,47 +777,52 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     cudaGraph_t graph = nullptr;
     DGPP_CUDA_OK(cudaStreamBeginCapture(model.stream(),
                                         cudaStreamCaptureModeThreadLocal));
-    model.session_graph_capture_step(0, std::vector<int64_t>{next, next},
-                                     /*device_positions=*/true);
-    picker.record(model.stream(), pick_inputs(2));
-    model.session_graph_capture_commit(0, picker.device_verdict());
+    model.session_graph_capture_step(0, std::vector<int64_t>{next, draft},
+                                     /*device_positions=*/true,
+                                     /*device_tokens=*/true);
+    picker.record(model.stream(), pick_inputs(2, 0, nullptr));
+    model.session_graph_capture_commit(0, picker.device_verdict(0));
+    model.session_graph_capture_draft(0, picker.device_verdict(0));
+    picker.record(model.stream(), pick_inputs(1, 1, picker.device_verdict(0)));
+    model.session_graph_capture_next_tokens(0, picker.device_verdict(1));
     DGPP_CUDA_OK(cudaStreamEndCapture(model.stream(), &graph));
-    require(graph != nullptr, "verify-graph capture produced no graph");
+    require(graph != nullptr, "step-graph capture produced no graph");
     require(bus.graph_record_end(&gerr), "graph_record_end: " + gerr);
     model.set_boundary(eager_reducer);
     DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
     cudaGraphDestroy(graph);
-    DGPP_LOG_INFO("rank {} verify graph (T=2 + device pick + commit) recorded+"
-                  "instantiated in {:.0f}ms", rank, ms_since(t_capture));
+    model.session_graph_seed_tokens(0, {next, draft});
+    DGPP_LOG_INFO("rank {} step graph (verify T=2 + pick + commit + draft + "
+                  "pick + token feed) recorded+instantiated in {:.0f}ms",
+                  rank, ms_since(t_capture));
   }
-  // Verify [next, draft]; returns the device verdict with the state and
-  // positions already settled (graph: the recorded commit; eager: the host
-  // rollback after the eager device pick).
-  const auto verify = [&](const std::vector<int64_t>& fed)
-      -> const dgpp::GlmPickVerdict& {
+
+  // One step. Returns the verify's verdict with the state, positions and
+  // (graph) the next draft settled; `draft` is updated for the next step.
+  const auto step = [&](const std::vector<int64_t>& fed) -> dgpp::GlmPickVerdict {
     const auto t0 = Clock::now();
     if (graph_exec == nullptr) {
       (void)model.session_verify(0, fed);
-      const dgpp::GlmPickVerdict& v = picker.run(model.stream(), pick_inputs(2));
+      const dgpp::GlmPickVerdict v =
+          picker.run(model.stream(), pick_inputs(2, 0, nullptr));
       if (v.accepted < 2) model.session_rollback(0, v.accepted);
-      st.verify_ms += ms_since(t0);
+      st.step_ms += ms_since(t0);
       return v;
     }
     std::string gerr;
-    model.session_graph_stage(0, fed);
     require(bus.graph_replay_arm(&gerr), "graph_replay_arm: " + gerr);
     DGPP_CUDA_OK(cudaGraphLaunch(graph_exec, model.stream()));
     DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
     require(bus.graph_replay_finish(60000, &gerr),
             "graph_replay_finish: " + gerr);
-    const dgpp::GlmPickVerdict& v = picker.verdict();
+    const dgpp::GlmPickVerdict v = picker.verdict(0);
+    draft = picker.verdict(1).next;
     model.session_graph_settle(0, v.accepted);
-    st.verify_ms += ms_since(t0);
+    st.step_ms += ms_since(t0);
     return v;
   };
 
   // ---- the loop -----------------------------------------------------------
-  int32_t draft = draft_after({next});
   const auto commit = [&](int32_t token) {
     generated->push_back(token);
     *text += tok.decode(token, /*skip_special_tokens=*/false);
@@ -824,7 +831,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   while (!stop && static_cast<int>(generated->size()) < steps) {
     const auto t_step = Clock::now();
     const std::vector<int64_t> fed{next, draft};
-    const dgpp::GlmPickVerdict& v = verify(fed);
+    const dgpp::GlmPickVerdict v = step(fed);
     ++st.steps;
     st.accepted += v.accepted - 1;
     // Commit: fed[0] was decided last step; a standing row 1 makes the
@@ -835,7 +842,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
       const int gen_index = static_cast<int>(generated->size());
       const int32_t committed = static_cast<int32_t>(fed[static_cast<size_t>(r)]);
       commit(committed);
-      const dgpp::GlmPickLocal& local = picker.local(r);
+      const dgpp::GlmPickLocal& local = picker.local(r, 0);
       log_gen_line(rank, gen_index + 1, model.lm_vocab_begin(),
                    model.lm_vocab_count(), local.best_id, local.best_logit,
                    local.second_logit, v.winners[r]);
@@ -850,32 +857,35 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
       }
     }
     next = v.next;
-    const std::vector<int64_t> draft_rows(v.winners, v.winners + v.accepted);
-    const double step_ms = ms_since(t_step);
-    if (!stop) draft = draft_after(draft_rows);
+    const double device_ms = ms_since(t_step);
+    if (!stop && graph_exec == nullptr)
+      draft = draft_after(std::vector<int64_t>(v.winners, v.winners + v.accepted));
     const double total_ms = ms_since(t_step);
     *forward_ms_total += total_ms;
-    DGPP_LOG_INFO("rank {} spec step {}: verify+pick {:.1f}ms, draft {:.1f}ms, "
+    DGPP_LOG_INFO("rank {} spec step {}: {} {:.1f}ms, draft {:.1f}ms, "
                   "accepted {} ({} tokens)",
-                  rank, st.steps, step_ms, total_ms - step_ms, v.accepted - 1,
-                  v.accepted);
+                  rank, st.steps, graph_exec ? "graph" : "verify+pick",
+                  device_ms, total_ms - device_ms, v.accepted - 1, v.accepted);
   }
   if (graph_exec != nullptr) cudaGraphExecDestroy(graph_exec);
   recorder.reset();
   const double decode_ms = *forward_ms_total - prefill_ms;
+  const double per_step = st.steps ? decode_ms / st.steps : 0.0;
+  const double device_per_step = st.steps ? st.step_ms / st.steps : 0.0;
   DGPP_LOG_INFO(
       "rank {} speculative summary: {} tokens in {} steps ({:.1f}% drafts "
       "accepted, {:.3f} tokens/step); decode {:.1f}ms = {:.2f} ms/token "
-      "effective, {:.2f} ms/step (verify {:.2f} + draft {:.2f} + picks {:.2f} "
-      "per step)",
+      "effective, {:.2f} ms/step ({} {:.2f} + draft {:.2f} + picks {:.2f} + "
+      "host {:.2f} per step)",
       rank, generated->size(), st.steps,
       st.steps ? 100.0 * st.accepted / st.steps : 0.0,
       st.steps ? static_cast<double>(generated->size()) / st.steps : 0.0,
       decode_ms, generated->empty() ? 0.0 : decode_ms / generated->size(),
-      st.steps ? decode_ms / st.steps : 0.0,
-      st.steps ? st.verify_ms / st.steps : 0.0,
-      st.steps ? st.draft_ms / st.steps : 0.0,
-      st.steps ? st.pick_ms / st.steps : 0.0);
+      per_step, graph_exec || decode_graph ? "graph" : "verify",
+      device_per_step, st.steps ? st.draft_ms / st.steps : 0.0,
+      st.steps ? st.pick_ms / st.steps : 0.0,
+      per_step - device_per_step -
+          (st.steps ? (st.draft_ms + st.pick_ms) / st.steps : 0.0));
 }
 
 int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,

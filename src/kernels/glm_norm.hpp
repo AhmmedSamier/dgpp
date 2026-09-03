@@ -30,8 +30,9 @@ void glm_embed_bcast_streams(const void* embed_table, const int64_t* tokens,
 // ---- MTP draft block (DESIGN §9) -------------------------------------------
 // out[t] = [rmsnorm(embed[tokens[t]]) * enorm | rmsnorm(hidden_cache[pos_t])
 // * hnorm], bf16 [rows, 2*hidden] — the eh_proj input. pos_t = positions[t]
-// (device) or first_pos + t when positions is null. Both norms are the
-// two-rounding GLM norm above.
+// (device) or first_pos + t when positions is null; a negative position is
+// a padding row and reads position 0. Both norms are the two-rounding GLM
+// norm above.
 void glm_mtp_input_bf16(const void* embed_table, const int64_t* tokens,
                         const void* hidden_cache, const int64_t* positions,
                         int64_t first_pos, const void* enorm, const void* hnorm,

@@ -76,10 +76,14 @@ struct GlmPickVerdict {
 // `vocab_begin`), the top-2 under the canonical order -> locals[row], and
 // the zeroed table with this rank's (best logit bits, best id) digits in
 // group `row` and *carry_digest's digits in the digest group.
+// `row_select` (optional, rows == 1): the one row read is logits row
+// (row_select->accepted - 1) — the in-graph draft's head runs on every
+// row of a fixed-size batch and its pick reads the last ACCEPTED one.
 void glm_pick_local(const float* logits, int rows, int vocab_count,
                     int vocab_begin, int rank, int world,
                     const uint64_t* carry_digest, uint16_t* table,
-                    GlmPickLocal* locals, cudaStream_t stream);
+                    GlmPickLocal* locals, cudaStream_t stream,
+                    const GlmPickVerdict* row_select = nullptr);
 
 // Kernel 2 (after the fold): decodes every rank's candidates and digests,
 // merges per row, judges against fed[rows] (the verify's tokens), writes

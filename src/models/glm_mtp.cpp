@@ -24,6 +24,7 @@
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
 #include "kernels/glm_norm.hpp"
+#include "kernels/glm_spec.hpp"
 #include "kernels/kernels.hpp"
 #include "models/glm_step_timing.hpp"
 
@@ -40,8 +41,11 @@ uint16_t* GlmDiagnosticModel::mtp_hidden_cache(int req) const {
 // prefill: first_pos + t).
 // ---------------------------------------------------------------------------
 void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
-                                      bool decode_row, bool capture_mode) {
+                                      bool decode_row, bool capture_mode,
+                                      int head_rows) {
   if (!mtp_) throw std::logic_error("mtp_run_rows: MTP is not enabled");
+  if (head_rows != 1 && head_rows != T)
+    throw std::invalid_argument("mtp_run_rows: head_rows must be 1 or T");
   const int H = cfg_.hidden_size;
   const float eps = cfg_.rms_norm_eps;
   const GlmLayerResident& r = stack_layer(cfg_.mtp_layer());
@@ -106,16 +110,30 @@ void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
   if (decode_row) prefetch_.join(stream_);
   if (!decode_row) return;  // prefill rows fill the cache; no head
 
-  // ---- head on the LAST row: the draft distribution -----------------------
-  glm_rmsnorm_bf16(mtp_x_ + static_cast<size_t>(T - 1) * H,
-                   r.shared_head_norm, normed_, 1, H, eps, stream_);
-  gemm_.matmul(normed_, globals_.lm_head, logits_, 1, lm_vocab_count_, H,
-               DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_,
+  // ---- head: the draft distribution ---------------------------------------
+  // The eager draft heads its LAST row (the one after the accepted rows);
+  // the in-graph draft heads every row of its fixed batch and the pick
+  // selects the last ACCEPTED one — the lm head is bandwidth-bound, m=2
+  // costs what m=1 costs.
+  const uint16_t* head_in =
+      mtp_x_ + static_cast<size_t>(T - head_rows) * H;
+  glm_rmsnorm_bf16(head_in, r.shared_head_norm, normed_, head_rows, H, eps,
+                   stream_);
+  gemm_.matmul(normed_, globals_.lm_head, logits_, head_rows, lm_vocab_count_,
+               H, DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_,
                stream_);
-  DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_,
-                               static_cast<size_t>(lm_vocab_count_) *
-                                   sizeof(float),
-                               cudaMemcpyDeviceToHost, stream_));
+  if (decode_tail_mirrors_)
+    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_,
+                                 static_cast<size_t>(head_rows) *
+                                     lm_vocab_count_ * sizeof(float),
+                                 cudaMemcpyDeviceToHost, stream_));
+}
+
+void GlmDiagnosticModel::push_mtp_position(int req) {
+  h_mtp_pos_[req] = mtp_pos_[static_cast<size_t>(req)];
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_mtp_pos_ + req, h_mtp_pos_ + req,
+                               sizeof(int64_t), cudaMemcpyHostToDevice,
+                               stream_));
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +144,10 @@ void GlmDiagnosticModel::mtp_prefill(int req,
                                      const std::vector<int64_t>& prompt_ids) {
   const int64_t rows_total = static_cast<int64_t>(prompt_ids.size()) - 1;
   mtp_pos_[static_cast<size_t>(req)] = 0;
-  if (rows_total <= 0) return;  // a one-token prompt: the first draft is row 0
+  if (rows_total <= 0) {  // a one-token prompt: the first draft is row 0
+    push_mtp_position(req);
+    return;
+  }
   const int64_t kpool = dsa_cfg_.index_kpool;
   int64_t c0 = 0;
   while (c0 < rows_total) {
@@ -145,6 +166,7 @@ void GlmDiagnosticModel::mtp_prefill(int req,
     c0 += n;
   }
   mtp_pos_[static_cast<size_t>(req)] = rows_total;
+  push_mtp_position(req);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +241,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_draft(
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   }
   mtp_pos_[static_cast<size_t>(req)] = q + static_cast<int64_t>(tokens.size());
+  push_mtp_position(req);
   return mtp_decode_tail();
 }
 
@@ -244,7 +267,74 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_graph_collect_draft(
     throw std::out_of_range("session_graph_collect_draft: request slot " +
                             std::to_string(req));
   mtp_pos_[static_cast<size_t>(req)] += draft_rows_;
+  push_mtp_position(req);
   return mtp_decode_tail();
+}
+
+// ---------------------------------------------------------------------------
+// The in-graph draft (phase C): the block's rows come off the verify's
+// verdict on the device, the block runs its fixed T rows, the head runs on
+// every row. Recorded behind the caller's recorded pick and the commit.
+// ---------------------------------------------------------------------------
+void GlmDiagnosticModel::session_graph_capture_draft(
+    int req, const GlmPickVerdict* verify_verdict) {
+  if (!mtp_) throw std::logic_error("session_graph_capture_draft: no MTP");
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_graph_capture_draft: request slot " +
+                            std::to_string(req));
+  if (!graph_device_positions_)
+    throw std::logic_error(
+        "session_graph_capture_draft: the step must be captured with device "
+        "positions (the draft's rows come off the device verdict)");
+  if (verify_verdict == nullptr)
+    throw std::invalid_argument("session_graph_capture_draft: null verdict");
+  const int T = decode_rows_;
+  // d_req_ids_/d_req_spans_ still describe T rows of `req` from the verify
+  // (same batch shape); the rows' positions and tokens come off the verdict.
+  glm_spec_draft_rows(verify_verdict, T, d_mtp_pos_ + req, d_step_pos_,
+                      d_tokens_, d_next_ + req, stream_);
+  draft_rows_ = T;
+  mtp_run_rows(req, /*first_pos=*/0, T, /*decode_row=*/true,
+               /*capture_mode=*/true, /*head_rows=*/T);
+  graph_has_draft_ = true;
+}
+
+void GlmDiagnosticModel::session_graph_capture_next_tokens(
+    int req, const GlmPickVerdict* draft_verdict) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_graph_capture_next_tokens: request slot " +
+                            std::to_string(req));
+  if (!graph_device_tokens_ || !graph_has_draft_)
+    throw std::logic_error(
+        "session_graph_capture_next_tokens: needs a device-token capture "
+        "with the draft in the graph");
+  if (decode_rows_ != 2)
+    throw std::logic_error(
+        "session_graph_capture_next_tokens: the token feed is [next, draft] "
+        "(T = 2)");
+  if (draft_verdict == nullptr)
+    throw std::invalid_argument("session_graph_capture_next_tokens: null verdict");
+  glm_spec_next_tokens(d_next_ + req, draft_verdict, d_tokens_, stream_);
+}
+
+void GlmDiagnosticModel::session_graph_seed_tokens(
+    int req, const std::vector<int64_t>& ids) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_graph_seed_tokens: request slot " +
+                            std::to_string(req));
+  if (ids.size() != static_cast<size_t>(decode_rows_))
+    throw std::invalid_argument("session_graph_seed_tokens: the seed must "
+                                "have the graph's row count");
+  for (int64_t id : ids)
+    if (id < 0 || id >= cfg_.vocab_size)
+      throw std::invalid_argument("session_graph_seed_tokens: token id");
+  // On the model's stream, never the legacy stream: a peer rank in the same
+  // process (the loopback worlds) may be mid-capture, and a legacy-stream
+  // copy would try to synchronize with its capturing stream.
+  for (size_t i = 0; i < ids.size(); ++i) h_token_[i] = ids[i];
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, h_token_, ids.size() * sizeof(int64_t),
+                               cudaMemcpyHostToDevice, stream_));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 }
 
 }  // namespace dgpp

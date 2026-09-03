@@ -53,4 +53,23 @@ void glm_spec_commit(const GlmPickVerdict* verdict, int rows,
 void glm_spec_positions(const int64_t* session_pos, int rows,
                         int64_t* step_pos, cudaStream_t stream);
 
+// The in-graph draft's rows off the verify's verdict (phase C). The draft
+// block runs a FIXED `rows` rows per step; the accepted rows are real
+// (step_pos[r] = *block_pos + r, tokens[r] = winners[r]) and the rest are
+// padding (step_pos[r] = -1, which the DSA decode path skips — nothing is
+// written at any position — and tokens[r] = winners[0], any valid id).
+// Then *block_pos += accepted and *next_out = verdict->next (the verify's
+// pick is about to be overwritten by the draft's; the token the main stack
+// consumes next survives here for glm_spec_next_tokens).
+void glm_spec_draft_rows(const GlmPickVerdict* verdict, int rows,
+                         int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
+                         int64_t* next_out, cudaStream_t stream);
+
+// The next replay's fed tokens, written at the end of this one (phase D):
+// tokens[0] = *next (the verify's), tokens[1] = draft_verdict->next (the
+// block's guess for the token after it).
+void glm_spec_next_tokens(const int64_t* next,
+                          const GlmPickVerdict* draft_verdict, int64_t* tokens,
+                          cudaStream_t stream);
+
 }  // namespace dgpp

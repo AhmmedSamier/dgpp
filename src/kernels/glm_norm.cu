@@ -76,7 +76,11 @@ __global__ void glm_mtp_input_kernel(const uint16_t* __restrict__ embed,
     rmsnorm_row_two_rounding(embed + tokens[t] * hidden, enorm, dst, hidden,
                              eps, smem);
   } else {
-    const int64_t pos = positions ? positions[t] : first_pos + t;
+    // A padding row (position -1: the in-graph draft's second row after a
+    // rejected draft) reads position 0's hidden — any finite row will do,
+    // the DSA path skips the row and nothing downstream is kept.
+    const int64_t staged = positions ? positions[t] : first_pos + t;
+    const int64_t pos = staged < 0 ? 0 : staged;
     rmsnorm_row_two_rounding(hidden_cache + pos * hidden, hnorm, dst + hidden,
                              hidden, eps, smem);
   }

@@ -84,8 +84,10 @@ __global__ __launch_bounds__(kLocalThreads) void pick_local_kernel(
     const float* __restrict__ logits, int rows, int vocab_count,
     int vocab_begin, int rank, int world,
     const uint64_t* __restrict__ carry_digest, uint16_t* __restrict__ table,
-    GlmPickLocal* __restrict__ locals) {
+    GlmPickLocal* __restrict__ locals,
+    const GlmPickVerdict* __restrict__ row_select) {
   const int row = blockIdx.x;
+  const int logits_row = row_select ? row_select->accepted - 1 : row;
   const int tid = threadIdx.x;
   const int group_slots = world * kPickSlotsPerRank;
 
@@ -101,7 +103,7 @@ __global__ __launch_bounds__(kLocalThreads) void pick_local_kernel(
   }
 
   Top2 mine = empty_top2();
-  const float* slice = logits + static_cast<size_t>(row) * vocab_count;
+  const float* slice = logits + static_cast<size_t>(logits_row) * vocab_count;
   for (int i = tid; i < vocab_count; i += kLocalThreads)
     push(mine, Pair{slice[i], vocab_begin + i});
 
@@ -210,8 +212,11 @@ void check_shape(int rows, int world, int rank, const char* what) {
 void glm_pick_local(const float* logits, int rows, int vocab_count,
                     int vocab_begin, int rank, int world,
                     const uint64_t* carry_digest, uint16_t* table,
-                    GlmPickLocal* locals, cudaStream_t stream) {
+                    GlmPickLocal* locals, cudaStream_t stream,
+                    const GlmPickVerdict* row_select) {
   check_shape(rows, world, rank, "glm_pick_local");
+  if (row_select != nullptr && rows != 1)
+    throw std::invalid_argument("glm_pick_local: row_select needs rows == 1");
   if (vocab_count < 1 || vocab_begin < 0 ||
       vocab_begin + vocab_count > (1 << (6 * kPickIdDigits)))
     throw std::invalid_argument(
@@ -220,7 +225,7 @@ void glm_pick_local(const float* logits, int rows, int vocab_count,
   static_assert(kPickMaxWorld * kPickSlotsPerRank + 1 <= kLocalThreads);
   pick_local_kernel<<<rows, kLocalThreads, 0, stream>>>(
       logits, rows, vocab_count, vocab_begin, rank, world, carry_digest, table,
-      locals);
+      locals, row_select);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

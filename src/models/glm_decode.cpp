@@ -380,8 +380,14 @@ void GlmDiagnosticModel::session_graph_capture_step(
 }
 
 void GlmDiagnosticModel::session_graph_capture_step(
-    int req, const std::vector<int64_t>& ids, bool device_positions) {
+    int req, const std::vector<int64_t>& ids, bool device_positions,
+    bool device_tokens) {
+  if (device_tokens && !device_positions)
+    throw std::invalid_argument("session_graph_capture_step: device tokens "
+                                "need device positions");
   graph_device_positions_ = device_positions;
+  graph_device_tokens_ = device_tokens;
+  graph_has_draft_ = false;
   session_decode_host_prep(req, ids, /*upload=*/true, device_positions);
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   // The uploads and every launch record; the walk's syncs are skipped
@@ -432,8 +438,10 @@ void GlmDiagnosticModel::session_graph_settle(int req, int accepted) {
   if (session_pos_[static_cast<size_t>(req)] <= 0)
     throw std::invalid_argument("session_graph_settle: no open session");
   // The device advanced its own position in the recorded commit; the
-  // mirror follows. No push: the device is the source of truth here.
+  // mirror follows. No push: the device is the source of truth here. With
+  // the draft in the graph the block's counter moved by the same rows.
   session_pos_[static_cast<size_t>(req)] += accepted;
+  if (graph_has_draft_) mtp_pos_[static_cast<size_t>(req)] += accepted;
 }
 
 void GlmDiagnosticModel::session_graph_stage(int req, int64_t token_id) {
@@ -521,11 +529,14 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
 
   // The decode rows' token id rides the PINNED member (a memcpy node's
   // baked source; a pageable async copy would stream-sync anyway).
-  // Prefill keeps the caller's vector (its syncs amortize over chunks).
+  // Prefill keeps the caller's vector (its syncs amortize over chunks). A
+  // device-token capture records no upload: the previous replay's last
+  // node (glm_spec_next_tokens) left the fed tokens in d_tokens_.
   const int64_t* ids_src = decode_row ? h_token_ : ids.data();
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, ids_src,
-                               static_cast<size_t>(T) * 8,
-                               cudaMemcpyHostToDevice, stream_));
+  if (!(capture_mode && graph_device_tokens_))
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, ids_src,
+                                 static_cast<size_t>(T) * 8,
+                                 cudaMemcpyHostToDevice, stream_));
   // The step's first node: when did the GPU actually start this replay?
   // (The bus logs arm -> first collective; this splits it at the graph's
   // own start.) One 1-thread kernel; decode rows only.
