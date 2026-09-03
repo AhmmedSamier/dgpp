@@ -1050,6 +1050,42 @@ Tests reject at every depth from zero through `k`, including a rejection that
 crosses an index-pool boundary. Greedy output and all subsequent states must
 match non-speculative execution.
 
+### As built (2026-09-03): depth 1, greedy, post-row snapshots
+
+The implementation keeps the contract above with a simpler mechanism than
+the `k+1` candidate-state indices: the KDA recurrence/conv kernels and the
+DSA ring-stash kernel take an optional snapshot sink and store the state as
+it stands after every speculative row but the last (`KdaStateSnapshots`,
+`dsa_kpool_decode_update`'s `tail_snapshots`); the last row lands in place
+as always. Accepting every row is therefore free, and retracting to `a` rows
+is one memcpy per state family from snapshot `a-1`
+(`GlmDiagnosticModel::session_rollback`). DSA latent rows and index pools
+need no rollback: they are positional writes the rewound position simply
+overwrites, and a query's visible pool count is derived from its own
+position. `session_verify` runs T ≤ 4 rows (`kSpecRows`, the bf16 GEMV's
+row bound: at T ≤ 4 every projection takes the row-independent GEMV, so
+the verify rows are bitwise the T=1 rows); the bus's latency slot is 32 KB
+to fold them in one collective, and `bus_greedy_pick_rows` picks them in
+one gather + one broadcast.
+
+The draft block (`glm_mtp.cpp`) is the checkpoint's layer 45: a plain
+pre-norm DSA + MoE block (no mHC) over `eh_proj([enorm(embed(tok_{q+1})) |
+hnorm(h_q)])`, where `h_q` is the main stack's pre-final-norm stream mean
+kept in a per-position cache, headed by `shared_head.norm` and the shared
+lm head. It owns one more DSA pool ordinal and MoE graph slot, runs over the
+prompt's rows 0..P-2 at prefill, and afterwards over exactly the rows the
+main stack accepted (only accepted tokens ever enter it, so it never rolls
+back); its row for hidden position q uses position q (vLLM's convention —
+a uniform shift is RoPE-invariant but not kpool-invariant). Depth is 1
+because the layer is trained at depth 1 and because the verify's cost is
+linear in rows through the MoE (a second row's experts are new DRAM bytes
+unless shared with the first; the decode slots run in expert order so
+shared experts are L2 hits): measured 39.8 ms for T=2 vs 31.3 for T=1, so
+a k-th draft must be accepted well over half the time to pay. Rank 0 does
+not broadcast an accepted count: every rank folds the identical
+candidate table and computes the identical verdict (`judge_verify`); the
+pick's readback check pins the equality.
+
 ## 10. Tokenization, templates, logits, and sampling
 
 The bundled tokenizer is BPE with `byte_fallback=false` and no normalizer. Its

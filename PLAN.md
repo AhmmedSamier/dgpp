@@ -14,7 +14,7 @@ means it has not been implemented.
 | M5 | Four-rank TP and dual-lane CollectiveBus | [ ] |
 | M6 | Generation scheduler, tokenizer, and API | [ ] |
 | M7 | Exact snapshot prefix cache | [ ] |
-| M8 | Transactional MTP decoding | [ ] |
+| M8 | Transactional MTP decoding | [x] depth 1, greedy (2026-09-03; see DESIGN §9 "as built") |
 | M9 | Evidence-driven optimization and hardening | [ ] |
 
 M0 is complete. The paired network tests showed no congestion symptom; switch

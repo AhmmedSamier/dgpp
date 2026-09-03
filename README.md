@@ -264,3 +264,35 @@ step lines — start there when writing the next one):
   to move by more than 1 nat between any two rounding-level builds: a
   router's top-k boundary flipped an expert there. The tool bounds the
   *rate* of those, not the worst one.
+
+### Speculative decode with the MTP layer (`--mtp`)
+
+The checkpoint ships a multi-token-prediction layer (`num_nextn_predict_layers
+= 1`): one extra DSA + MoE block that, given the main stack's hidden at
+position q and the token chosen for q+1, guesses the token at q+2.
+`glm_gen_check --mtp` uses it for greedy speculative decoding on the fabric:
+
+```
+scripts/fabric_run.sh -- --model unsloth/GLM-5.3-Flash-FP8 \
+    --chat "Write a history of the Roman Republic." --steps 300 \
+    --decode-graph --mtp
+```
+
+Every step verifies `[next, draft]` as one two-row decode (a T=2 CUDA graph
+replay), picks both rows' winners in one bus collective, and either commits
+both tokens or retracts the second row (`session_rollback`: the KDA/DSA
+kernels snapshot their state after every speculative row, so a retraction
+is one memcpy per state family). The MTP block then drafts over the
+accepted rows. **The transcript is exactly the plain loop's** — the verify
+rows are bitwise the single-token rows, and `scripts/fabric_xcript.py
+PLAIN_DIR MTP_DIR` must print `IDENTICAL`; MTP only changes what a token
+costs. Measured (2026-09-03, TP=4): 88.7% of drafts accepted on coherent
+text, 1.89 tokens per step, **22.7 ms/token effective vs 31.3 plain**
+(−28%). The step itself is 39.8 ms verify + 2.9 ms draft: the second row
+costs ~8 ms because its MoE experts are extra DRAM bytes (only the experts
+both rows share are read once — the slots run in expert order so the
+second read is an L2 hit). Acceptance drops on incoherent text (63% on the
+post-EOS rambling `--no-eos` produces), and below ~45% speculation stops
+paying; the summary line reports the rate. The draft layer adds ~7.3 GiB
+per rank to the resident footprint. Serving (`glm_serve`) does not use it
+yet — its engine seam is single-token in/out.
