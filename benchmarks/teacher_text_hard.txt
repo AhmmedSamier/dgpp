@@ -1,0 +1,476 @@
+# M5 deliverable 2 — CollectiveBus over RC/RoCE (2026-08-29)
+
+Implementation: `src/net/` (`bus_types.{hpp,cpp}`, `verbs.{hpp,cpp}`,
+`bus_kernel.{hpp,cu}`, `collective_bus.{hpp,cpp}`), deployment driver
+`bus_check` (serve/ping/selftest), deep scenarios in `tests/cuda/bus_test.cu`
+(8 scenarios, real verbs QPs loopback through the fabric switch + real
+consumer kernels). Library `dgpp_bus` (links ibverbs + cudart), gated on
+`DGPP_ENABLE_IBV`.
+
+## Protocol (as built; DESIGN §6/§6.1/§6.2)
+
+Per (peer, lane) the bus owns TWO RC QPs — one per slot pool — so every
+receive queue stays type-predictable: latency (8 KiB × 32) and bulk
+(256 KiB × 16) traffic can never consume each other's differently-sized
+receive buffers. Both pools share one pinned, remotely-writable slab per
+(peer, lane), registered as one MR. Per-message traffic is the validated
+flag-protocol shape: payload SEND (unsignaled) then doorbell SEND (signaled,
+64-byte `StartSlot{seq, len}`); the doorbell receive CQE means the whole
+message landed (RC ordering).
+
+The credit grant is an unsignaled 64-byte RDMA WRITE of `BusCredit{hash,
+slot, seq}` into the sender's registered completion cells — no CQE, no
+consumed receive WR; the sender's engine polls the cell as a pinned flag,
+the same visibility contract as the GPU acks. Slot recycling follows §6.4:
+repost both receive WRs, then the credit WRITE, only after the doorbell CQE
+*and* the consumer's ack are known.
+
+Ring discipline (the non-obvious part): plain SENDs are consumed FIFO by
+the peer's receive ring, so "slot" is a ring position, not a free buffer.
+The sender assigns slots round-robin per (lane, pool) and may not skip a
+busy position; the receiver recycles in ring order; credits return in ring
+order. Break any leg of that and the doorbells claim the wrong buffers —
+silently at first, loudly at the first sequence check.
+
+The receive consumer is a persistent watchdog-bounded kernel per (peer,
+lane), one block × 256 threads: all threads scan doorbell cells, one
+message is claimed by shared-memory CAS, the payload is folded
+cooperatively (golden-ratio pair mix, host-mirrored), and thread 0
+publishes the ack with a system-scope release. The engine's real
+per-collective consumers (§6.2, deliverable 3) replace it by launching with
+`launch_consumers=false`.
+
+## Validation
+
+Loopback (in-process pair, real QPs through the fabric switch), 3× clean:
+
+- latency ping 64 msgs: integrity via fold-hash per stripe, p50 ≈ 16–19 µs;
+- credit recycling: 96 messages through a 4-slot ring;
+- bulk 64 MiB: ≥ 4 stripes, **both lanes must contribute** (asserted on
+  sender credits and receiver doorbells), xor-hash verified;
+- latency-under-bulk: 256 latency messages while 24 × 16 MiB streams —
+  all verified, p99 held under the CI budget;
+- watchdogs: no receiver consumer → the request fails loudly in ≤ 600 ms
+  (per-request or lane watchdog, whichever fires first); a consumer with a
+  300 ms deadline exits on inactivity in 0.30 s;
+- config mismatch (slot geometry) → rejected over TCP with a legible
+  reason before any QP transition;
+- stop while in flight → the waiter resolves, never hangs.
+
+Two-node on the fabric (node-a ↔ node-b, both f0 lanes):
+
+**Four-node mesh validation** (all four nodes, world=4, after the GID fix
+below): every rank exchanges with every peer — 12 directed pairs, each
+8/8 latency + 2/2 bulk (4 MiB), zero failures, orderly stops. The
+endpoint-table distribution (rank 0 broadcasts everyone's per-peer lane
+endpoints) and 12-QP bring-up are validated on real nodes; deliverable 3's
+collectives start on known-good plumbing. Also reproduced in-process: the
+bus_test `mesh_three_way` scenario runs a world=3 loopback mesh, 6 directed
+pairs, in CI.
+
+**The mesh found platform bug #8 — link-local GID selection.** Each port's
+GID table sorts a `fe80::` RoCEv2 entry (index 1) ahead of the routable
+IPv4-mapped one (index 3); the GID picker (inherited from the M0 tools)
+took the first v2 entry. Link-local forwarding through the switch is
+pair-dependent: some directed pairs worked, and everything into one node
+was silently dropped — the same QP pair ran perfectly one way and RNR'd
+forever the other. Fix: prefer the first non-link-local v2 GID (validated
+across the mesh; loopback bulk also rose ~2.6→9.9 GB/s). The M0 per-lane
+measurements were taken on link-local GIDs and remain valid for those
+pairs, but the routable GIDs are now the deployment selection.
+
+| run | result |
+|---|---|
+| latency 200 × 8 KiB | 200/200 verified, min 15.6 µs, p50 16.7 µs, p99 33.6 µs (full post→credit round trip incl. GPU fold + hash check) |
+| bulk sequential 16 × 4 MiB | 16/16 verified, 256 stripes split 128/128 across lanes, 22.75 Gbps — correctness run; sequential messages drain the rings every message, so this is a floor, not the transport rate |
+| bulk flood, window 16, 128 × 4 MiB | 128/128 verified, 164.89 Gbps |
+| **bulk flood, window 32, 256 × 4 MiB (1 GiB)** | **256/256 verified, 178.45 Gbps = 91% of the measured 196.03 Gb/s wire ceiling**, stripes 2042/2041 across lanes |
+| bulk flood, window 64, 512 × 4 MiB | 512/512 verified but 91.78 Gbps — deeper windows serialize in the engine's per-iteration budget; open tuning item |
+| contention (400 latency + 64 MiB bulk) | 400/400 verified at p50 18.6 µs, p99 2.4 ms while both lanes striped |
+
+The flood mode (`bus_check ping --window N`) keeps N requests in flight and
+defers hash verification out of the timed section — every message is still
+verified, but the per-message host costs stop polluting the throughput
+number. Per-message latency under the window-32 flood (p50 5.66 ms) matches
+the pipeline arithmetic (32 × 4 MiB ÷ ~22.6 GB/s), so the pipeline is
+behaving as designed.
+
+The flood also found a real protocol bug the correctness runs could not:
+**the verbs contract retires an unsignaled WR's send-queue entry only at the
+next signaled completion on that QP.** A QP that posts only unsignaled
+credit writes — the receiver's bulk pool — fills its SQ monotonically and
+dies at exactly `qp_depth` (observed: both lanes at 1024 credits posted).
+Sequential and window-16 runs never crossed ~1024 recycles per lane, so the
+bomb sat under every earlier validation; sustained prefill would have hit it
+within ~256 MiB per lane-pair, and the one-hour soak would eventually have
+found what the flood found in one run. Fix: signal every 16th credit
+generation — bounded SQ occupancy plus real error visibility for the credit
+path, at a small fraction of the CQ load.
+
+Remaining gap to line rate (18 Gb/s, ~9%) and the window-64 regression are
+measured open items for deliverable 3's tuning pass: engine memcpy per
+stripe is in the timed path, the harness consumer processes one stripe at a
+time, and ring recycling is strictly in-order. The M0 196 Gb/s ceiling was
+measured with a raw SEND flood — no doorbells, acks, credits, or folding —
+so some of that gap is the price of the correctness machinery.
+
+## Bugs found and fixed during bring-up (all real, all in the record)
+
+1. **Credit WRITE targeted our own endpoint** (rkey/slab_base of the local
+   lane instead of the peer's) — the peer's HCA rejected the rkey, both
+   QP ends flushed, the surviving lane wedged until its watchdog. The
+   exchange table now stores the peer's lane endpoint at bring-up.
+2. **Free-buffer slot choice broke ring alignment.** Plain SENDs are
+   consumed FIFO by receive WRs, so the receiver cannot choose which slot
+   a message lands in; picking "first free" send buffer desynchronized
+   sender bookkeeping from receiver ring positions (doorbell seq 2 into a
+   slot expecting 1). Fix: round-robin cursors, in-order recycle, credits
+   in ring order.
+3. **One QP per (peer, lane) mixed pool sizes on one receive queue.**
+   With latency and bulk WRs interleaving on the same RQ, a 256 KiB bulk
+   message could land in an 8 KiB latency receive buffer. Fix: one QP per
+   pool (2 per peer-lane; 12 per node at TP=4).
+4. **Persistent-kernel stream starvation.** Both lane consumers launched
+   on one stream: kernel 0 never exits, so the lane-1 consumer never
+   started — every scenario touching lane 1 froze. Fix: one stream per
+   consumer. (§6.2's per-collective kernels avoid this class entirely.)
+5. **`cudaFreeHost`'s implicit device synchronization.** In-process
+   teardown of bus A waited out bus B's live persistent consumers (an
+   idle-poll loop that never ends). Fix: two-phase stop —
+   `quiesce()` stops engines and consumers and frees nothing; `stop()`
+   tears down. Loopback pairs quiesce both sides before either stops;
+   one-bus-per-process deployments never notice.
+6. A watchdog-failed request could be reaped by `wait()` while a receive
+   slot still referenced it — send slots now hold owning
+   `shared_ptr`s until the credit clears.
+7. **Unsignaled credit WRITEs never retire send-queue entries** (verbs
+   contract: only a later signaled completion frees them). The receiver's
+   bulk QP died at exactly `qp_depth` posts once the flood sustained >1024
+   recycles per lane. Fix: signal every 16th credit generation.
+8. **Link-local GID selection** (above): the first RoCEv2 GID per port is
+   `fe80::`, and switch forwarding of link-local is pair-dependent —
+   one-way silent drops. Fix: prefer the routable IPv4-mapped v2 GID.
+   Found by the four-node mesh; invisible to any two-node test on the
+   healthy pairs.
+
+## Verification
+
+- ci-local (WERROR) 21/21 including `bus_test` (deep scenarios) and
+  `bus_selftest` (app smoke), release `bus_test` 3× clean;
+- ASan ctest 21/21; UBSan ctest 21/21;
+- TSan one-off 3× clean with driver-internal suppressions
+  (`tests/tsan.supp`: libcuda's launch path is opaque to TSan and
+  false-positives on concurrent launches from different threads; the
+  runtime is thread-safe by contract). Our engine/queue/registry/waiter
+  code surfaced zero warnings;
+- two-node runs above (serve on node-b, ping from node-a).
+
+## Deliverable 3 — one-shot all-to-all all-reduce (in progress)
+
+Design (DESIGN §6.3): every rank posts its full vector to every peer in one
+dependency-free wave; one per-collective kernel stages the outbound slots
+(GPU→engine handoff via a pinned control cell), waits the peers' doorbells,
+folds with fp32 accumulation in canonical global-rank order (all ranks'
+destinations bitwise identical — replicated compute stays in lockstep),
+publishes standard acks, and stamps done. Credits stay off the critical
+path: completion is the kernel's stamp, not the credit round trip.
+Recursive doubling was recorded and rejected for this class (round j's
+payload is round j−1's reduced output — a data dependency that serializes
+the GPU→host→post→wire chain per round); reduce-scatter/allgather remains
+the choice for the bulk/prefill class.
+
+Correctness matrix (bitwise vs the canonical-chain host oracle):
+
+| world | where | verify |
+|---|---|---|
+| 2, 4 | loopback, in CI (bus_test scenario_allreduce) | 8 collectives/rank, per-iteration bitwise, plus contract pins (consumers-running rejection, mode-closed sends, single-outstanding) |
+| 2 | this node ↔ node-b | 30/30 final-iteration bitwise (earlier builds: 200/200 + 20/20 full-verify) |
+| 4 | full mesh, all four nodes | 30/30 bitwise on every rank |
+
+Latency (submit→wait, final engine policy):
+
+| run | result |
+|---|---|
+| allreduce TP=2 | min 26.6 µs, p50 37.6 µs, p99 65-70 µs |
+| allreduce TP=4 (full mesh) | min 36.7 µs, p50 ~44 µs, p99 ~143 µs, all four ranks in lock-step |
+
+Kernel-internal spans at 2.42 GHz (ctl stamps): stage ~6 µs, doorbell
+claim ~6 µs (message already arrived), fold+ack+reduce ~10 µs. The launch
+(~10-30 µs, stream sync round trip ~150 µs amortized out of the loop)
+dominates the fixed cost; §6.2's graph capture is the designed amortizer
+for the decode path (next: forward integration).
+
+Postmortem — the 2.5 ms phantom (found and fixed): the first collective
+measurements sat at ~2.5 ms p50. GPU-side spans showed the doorbell waits
+alternating 5 µs / 2.8 ms in a two-rank lock-step, ping-ponging which rank
+ate the delay. Eliminated one by one: GPU idle/DVFS (a single multi-second
+kernel kept the device busy the whole run — tail persisted; clock stamps
+show 2.4 GHz in-kernel), module loading (CUDA_MODULE_LOADING=EAGER — no
+change), engine poll cadence (pure hot spin — no change), write
+visibility (kernel heartbeat — no change), cross-thread stream sync
+(removed — no change). The tail was the engine's own idle policy
+compounding with the waiter's wake: `std::this_thread::yield()` on the
+"idle" path is a syscall that surrenders the timeslice (~2.2 ms of poll
+latency per idle stretch, in a loop whose header says "never a syscall on
+the hot path"), and bare condition-variable waits paid a CFS-timeslice
+futex wake against the hot engine. The fixes — hot-spin window with no
+syscall (2000 iterations, then a 50 µs sleep that is a power courtesy,
+never a latency mechanism), spin-then-futex waits on a release-published
+done flag (spin before taking the mutex; spinning under the mutex
+deadlocks the completer — written, caught by measurement, fixed) — also
+improved the harness path: latency_ping p50 16.5 → 12.1 µs,
+latency-under-bulk 13.3 → 11.7 µs. Lesson recorded: idle-path policy is
+latency policy; a "spin" branch that calls sched_yield is neither.
+
+Gates on the final state: ci-local (WERROR) 21/21 (now 10 scenarios),
+ASan 21/21, UBSan 21/21.
+
+## Deliverable 3 — forward integration: TP block boundaries (loopback, in CI)
+
+The M4 `GlmDiagnosticModel` gained the M5 TP seam; the world=1 path is
+byte-identical (the M4 dump-parity chain re-runs green in CI).
+
+Shape: `GlmBoundaryReducer` (models/glm_forward.hpp) folds the two
+row-parallel partials — attention out, FFN/MoE out — at the block boundary,
+with the producing stream quiesced first (the collective kernel runs on
+the bus's stream; the graph-mode decode path will restore stream order).
+`GlmTpViews` (models/glm_tp) slices every resident layer to the shard
+rules of DESIGN §5.2: replicated mHC/norms/router/DSA-latent/indexer/KDA
+f_a-g_a full views; KDA in_proj/conv/o_proj, DSA q_b/kv_b/o_proj,
+dense/shared gate-up/down sliced (packed 2D copies for the strided
+pieces); routed experts whole per rank with `GlmMoeLayer` executing only
+its contiguous expert range while the router still scores all experts on
+every rank (selection is rank-identical by the boundary invariant).
+Quantized scale-grid views offset by floor(start/128) — partial blocks
+are shared between straddling ranks, and the fixture's
+intermediate_size 200 lands one on every grid.
+
+CI: `glm_tp_test` (ibv-gated), world=1 oracle (in-process, deterministic
+re-run bitwise) vs world=2 and world=4 loopback buses (real QPs over
+127.0.0.1, launch_consumers=false), free-run + per-layer ISOLATED parity
+with synthetic stream states replayed into every rank (the curated-suite
+discipline — both sides compute each layer from the same entering state).
+Deterministic 20-run stress: identical numbers every run.
+
+| world | kept-row isolated l2 (worst layer) | free-run l2 (reported) | route flips | head top-1 |
+|---|---|---|---|---|
+| 2 | 0.0033 | 0.041 | 5, all certified (worst 2.1x noise) | 2 misses, certified 0.5x |
+| 4 | 0.0187 (< 2e-2 tier) | 0.254 | 11, all certified (worst 3.8x noise) | 4 misses, certified 0.5x |
+
+Cross-rank, every observable is BITWISE identical: final hidden, logits,
+per-layer stream captures, route ids and weights — the canonical
+rank-order fold's guarantee, now asserted end-to-end through a real
+6-layer mHC/KDA/DSA/MoE stack. Free-run divergence is reported, not
+asserted (the M4 discipline: cross-implementation bf16 at depth
+compounds legitimately; the isolated kept-row bound is the surface).
+
+### Bugs found by the loopback (and fixed)
+
+9. **Collective completion raced its own cleanup.** `complete_request`
+   woke the waiter BEFORE the engine cleared the flight, so the woken
+   model thread's next chunk submission raced the single-outstanding
+   check and was rejected "one outstanding" — and the watchdog/fail_lane
+   reap paths never cleared the flight at all, wedging the bus forever.
+   Fix: every completion path clears the flight (and poisons) BEFORE
+   completing the request; the watchdog clears a flight it reaps; a
+   done-but-held flight is detected and cleared at the next pass.
+10. **Allocation-phase device syncs vs spinning first collectives.**
+    `cudaMallocManaged`/`cudaFree` and the loader's
+    `cudaDeviceSynchronize` are whole-device barriers; a rank still
+    constructing while a peer's first collective kernel spins on
+    doorbells is a process-wide deadlock (the kernel waits for the
+    constructing rank's post, the constructing rank's allocation waits
+    for the spinning kernel). bus_check never allocated concurrently
+    with collectives; the TP loopback was the first. Fix:
+    `preconstruct_layers()` builds every layer object in the model ctor
+    (no allocation ever happens in run_stack), and the runners barrier
+    after construction — no rank's first collective can start while a
+    peer still holds an allocation-phase sync. Post-startup the shape is
+    safe (engines post from free threads; staggered per-layer loads and
+    collectives coexist by construction).
+11. **Stale-binary measurements** (again, third occurrence): ambiguous
+    build output ("grep -c error" printed 0 on silent no-ops and a bare
+    count on failures) plus failed-verify patches burned hours on runs
+    of binaries that predated the fix under test. House rule now:
+    verify the rebuild by content (`strings` for a new log line) or
+    mtime before interpreting any run.
+
+Engine hygiene from the bring-up: the collective kernel deadline is now
+sized per deployment (the TP loopback uses 20 s — the 600 s consumer
+default turns a wedged peer into a frozen process); the engine logs the
+first-flight lifecycle (launch/ready/done) at INFO and dumps a stalled
+flight's doorbell/ack state every 500 ms — the failure modes above were
+found with exactly this class of probe and future ones will be legible.
+
+TSan (one-off, not a house gate): the engine's submit/complete protocol
+shows clean; the multi-model process surfaces the documented
+driver-internal staging races inside libcuda (concurrent cuBLASLt
+managed-memory staging — `tests/tsan.supp`), same class as the M4
+baseline.
+
+Verification: ci-local (WERROR) 22/22, ASan 2/2, UBSan 2/2, glm_tp_test
+20/20 stress under the release build.
+
+### Fabric validation (two-node, mini fixture)
+
+`glm_tp_check` (apps/): rank 0 runs the world=1 oracle first, then the
+TP forward over a real bus; every rank writes final hidden, logits, and
+routes for offline comparison. Rank 0 (this node) + rank 1 (node-b,
+192.0.2.12), 21 tokens, 6-layer fixture:
+
+- final hidden, logits, routes: **md5-identical across the two nodes**
+  (the canonical fold's bitwise guarantee, end to end over the fabric);
+- TP vs oracle final hidden l2 = **0.0410 — the exact CI loopback value**
+  (deterministic engine, same computation on the wire);
+- 12 collectives (2 boundaries x 6 layers x 21-token chunking... 24
+  total), submit->wait p50 32.5 / 38.3 µs per rank — matching the
+  primitive's standalone 37.6 µs measurement; the 313 ms p99 is the
+  cold-start first collective (module load), amortized by graph capture
+  later. No construction barrier on the fabric: ranks are separate
+  processes, so a spinning peer kernel occupies the peer's device and
+  cannot block this rank's allocation-phase syncs (bug 10 is a
+  one-process multi-rank hazard only).
+
+### The staging seam: producing GEMMs write the collective source (d3)
+
+`stage_next()` hands the model a pinned, device-writable buffer (a
+dedicated self row in a new per-bus staging block, 8 generations deep);
+the boundary GEMM writes the transport's fold source directly and
+`allreduce_staged()` submits it. The kernel's snapshot pass (source ->
+every peer's send row) stays — but it becomes a pinned fan-out, and the
+device->slot copy disappears. The send-side insight: an RDMA SEND's local
+address is any MR-registered memory, so only the doorbell's remote ring
+position participates in ring discipline; the payload leaves from fixed
+staging rows while the engine's cursor/credit machinery is untouched.
+
+Three bugs the validation caught (all now recorded as design rules):
+
+- **The alias race (the important one).** First cut: the handout WAS peer
+  0's send row, and the kernel "skipped" its snapshot for pre-staged
+  sources — so peer 0's post read a buffer the in-place fold was
+  concurrently overwriting. The engine posts asynchronously when the
+  ready bit lands; the fold starts after the claims — no ordering exists
+  between them, so the post read pre-fold or post-fold bytes depending
+  on timing. Loopback bus_test PASSED this twice (the post usually wins),
+  then failed 4089/4096 elements on the third run — a silent-corruption
+  class hiding behind a race we were winning. Fix: a dedicated self row —
+  peer rows are send sources, the handout row folds in place, disjoint
+  by construction. The kernel needs no pre-staged mode at all; it is the
+  normal kernel with a pinned src that aliases dst (thread-per-element
+  in-place fold is safe; the snapshots are taken before it).
+- **The loopback device-sync hazard reintroduced by the test itself.**
+  The staged bus_test rank worker used cudaDeviceSynchronize() after the
+  producing kernel; at world 4 that is a whole-device barrier against
+  three peer collective kernels spinning on this rank's doorbells — the
+  §6.3 allocation-phase rule, exactly. 5 s of stall until the kernel
+  deadline, then the watchdog cascade. Producing kernels run on a
+  private stream and the worker STREAM-syncs; the model seam already had
+  this right.
+- **The harness barrier double-arrive.** rank_work's catch called
+  arrive_and_wait() again when a forward-phase throw happened after the
+  barrier had passed — `left` went negative, every rank futexed at the
+  barrier forever, and the rank's error message was swallowed (the hang
+  had no evidence in it). Rank workers now arrive exactly once and log
+  the error loudly. The reducer's staged path also submitted through
+  the normal allreduce() (rejected: handout held) — the visible symptom
+  of that bug was entirely the swallowed hang.
+
+Measured (two-node fabric, 6-layer mini fixture, T=8 x hidden 256 — one
+collective per boundary, 12 collectives): md5-identical outputs across
+ranks; TP-vs-oracle final hidden l2 0.0316 — the exact CI loopback value
+(determinism across transports); collective p50 34.7 us on the clean rank
+vs 38.3 us for the chunked device-path baseline (T=21) — the removed
+device->slot pass, visible and repeatable. CI: bus_test staged worlds
+2+4 bitwise (3 consecutive clean runs), glm_tp_test staged case green
+alongside the byte-identical chunked baseline (0.0410/0.0033 world 2,
+0.2537/0.0187 world 4 — the committed numbers, reproduced exactly).
+
+### d3 bulk (RS+AG) bring-up — state at session end (WORKING TREE, not committed)
+
+The bulk machine is implemented end to end (kernel, engine segment walk,
+allreduce_bulk, reducer routing, tests) with four real bugs found and
+fixed along the way, and ONE residual blocker narrowed to a fingerprint.
+Not committed — the bus_test bulk scenario still fails on it.
+
+Bugs found and fixed (all in the working tree):
+
+- **The staging word-size mismatch.** The staging loop indexed u32
+  pointers with a u64-word bound (`w*8 < bytes` with `d[w]=s[w]` copying
+  4 bytes) — exactly half of every stripe staged. The engine and NIC
+  faithfully shipped the half; the receiver's second half was zeros.
+  The values-at-the-post instrument caught it (arena[2046]=0000 at post
+  time). u64 words throughout now.
+- **The __nv_bfloat16 truncation.** `uint16_t out = __float2bfloat16(x)`
+  converts through __nv_bfloat16's float operator and TRUNCATES TO THE
+  INTEGER — the fold wrote literal 1s (0x0001) for every element. The
+  latency kernel never hit this (its dst is typed __nv_bfloat16*); any
+  bf16 store through a uint16_t* must use __bfloat16_as_ushort.
+- **The double-claim / early exit.** The claim scan's "already consumed"
+  check on the pinned ack can read stale right after THIS kernel's own
+  release-store published it (a visibility window on pinned flags);
+  the same cell re-claims, arrived double-counts, the loop exits with a
+  stripe's contribution missing (fingerprint: 16 claims, k=15 empty).
+  The latency kernel survives the identical hazard ONLY through its
+  per-peer s_got guard. Fix: claims are deduped in CTA-coherent shared
+  (RS: per-(stripe,peer) bits; AG: per-(peer,stripe) bits) — correctness
+  no longer hangs on pinned-flag visibility windows.
+- **The segment-advance arena race.** A segment's done stamp does NOT
+  imply its outbound posted (the posting loop can be credit-starved);
+  advancing on done alone let the next segment's kernel overwrite arena
+  rows the NIC had not read yet. The advance now waits for the global
+  bulk TX retirement (doorbell CE seen == posted — exact, since harness
+  bulk sends are closed under coll_mode).
+
+Test-harness bugs (the loopback device-sync class bit THREE times this
+session — now a recorded rule): cudaDeviceSynchronize in a rank worker
+(staged scenario), then synchronous cudaMemcpy, then cudaMemset — all
+device-wide barriers against peer spinning kernels. Every device op in
+a loopback worker goes through a private stream. Plus the rank_work
+catch arriving at the construction barrier twice (left goes negative,
+every rank hangs with the error swallowed) — workers arrive exactly once
+and log failures loudly.
+
+The residual blocker, narrowed to a fingerprint on both loopback AND
+two-node fabric (one rank per process — not a loopback artifact): the
+bulk kernel's claim scan never sees mid-kernel NIC doorbell writes —
+arrived=0/2 and arrived=0/4 with the arrivals visibly in the cells
+(engine reads door=2; slot-0-of-each-lane acks even show a claim, then
+the count stops), spinning to the 5s watchdog. Acquire loads
+(ld.acquire.sys), volatile, and ld.global.cv were ALL tried. Pre-launch
+arrivals ARE visible (segment-1 kernels claim fine; a pre-staged slot-0
+claims fine). The LATENCY kernel sees its mid-kernel arrivals with the
+same acquire helper — bitwise-proven — so the primitive works; something
+in the bulk kernel's compiled claim loop specifically serves
+launch-time state. Next session entry: with the double-claim noise now
+removed from the experiment, diff the PTX/SASS of the two kernels' scan
+loops from a clean slate (the latency scan compiles to
+ld.acquire.sys.b32 — verify the bulk scan's does too after the recent
+edits), and instrument the exit-state masks (BKFIN, kept in-tree, fires
+only on failure).
+
+## Bulk RS+AG: the residual closed — two protocol bugs, not a visibility anomaly
+
+The "mid-kernel NIC-write blindness" was a misdiagnosis, and the path to
+seeing that is the interesting part. Fresh loopback runs with kernel-side
+instrumentation (per-cell scan records, a claim log, exit-state cell dumps —
+all failure-only prints, in-tree) replaced the CPU-side microscope as ground
+truth, and the fingerprints diverged from the old story immediately:
+
+- Run-to-run variance in WHICH segments failed (RS seg 2 one run, AG the
+  next) — deterministic arithmetic bugs do not do that; races do.
+- W4 kernels claimed SOME arrivals and mapped them correctly (mask bits at
+  exactly the right k) while OTHERS sat unclaimed in the cells — "blindness"
+  cannot be partial per-cell.
+- The BKFIN `arrived=0` was ambiguous by construction: the kernel acks a
+  claim BEFORE the k-guard, so "acked cell" never meant "counted arrival".
+
+### Root cause 1: no cross-rank phase alignment + eager claiming
+
+Doorbell rings are flight- and phase-agnostic per-(peer,lane) FIFOs, and the
+shard geometry guarantees senders do NOT progress in lockstep: rank 0's shard
+ends in segment 0, so its RS flight completes while rank 1 still folds RS —
+rank 0 enters AG and posts AG doorbells into rank 1's still-spinning RS
+kernel. The eager claim loop ate them: claimed (acked — CONSUMED), mapped
+past the segment's stripe guard, rejected, and the arrival was permanently
+lost to the phase that needed it. Both phases then deadlocked on each
+other's starvation (the observed mutual 5s stalls, all "poison" exits).

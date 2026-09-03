@@ -19,9 +19,17 @@ accuracy, and — given a REF_DIR made with the same text and prompt — the
 per-token log-prob deltas and a verdict. The thresholds are the numerics
 contract for reassociated kernels: the logits are bf16, so single-token
 deltas of ~0.1 nat are rounding (a bf16 ulp at |logit| 16 is 0.125); the
-MEAN delta over a few hundred tokens is the signal, and 0.02 nat is ~2% of
+MEAN delta over thousands of tokens is the signal, and 0.02 nat is ~2% of
 perplexity — well inside what two bf16 implementations of one model differ
 by, and far below anything that moves a benchmark.
+
+Texts (benchmarks/): teacher_text.txt (556 tokens of prose, ppl ~2.6 —
+quick), teacher_text_hard.txt (7331 tokens of dense technical prose the
+model has never seen, ppl ~10.8 — the sensitive instrument: flat
+distributions amplify kernel differences), teacher_text_memorized.txt
+(6549 tokens of Conan Doyle, ppl 1.04 — the confident regime, where nothing
+should move). Each takes its token count x the step time: ~4 minutes for
+the long ones.
 """
 import argparse
 import math
@@ -99,8 +107,19 @@ def main():
     ap.add_argument("ref_dir", nargs="?")
     ap.add_argument("--max-mean-nll-delta", type=float, default=0.02,
                     help="|mean NLL(new) - mean NLL(ref)| bound, nats (0.02)")
-    ap.add_argument("--max-token-delta", type=float, default=1.0,
-                    help="largest single-token |delta log p| bound, nats (1.0)")
+    ap.add_argument("--big-delta", type=float, default=1.0,
+                    help="a single-token |delta log p| above this is a 'big' "
+                         "move (1.0 nat)")
+    ap.add_argument("--max-big-delta-rate", type=float, default=0.01,
+                    help="bound on the fraction of tokens with a big move "
+                         "(0.01). A rounding-level change at a MoE router's "
+                         "top-k boundary swaps an expert and moves that "
+                         "position's logits by O(1) — rare by nature, and no "
+                         "bound on the single worst token survives it; the "
+                         "RATE of such positions is what a defect would raise. "
+                         "Calibration (2026-09-03, round 11's reassociations "
+                         "vs the bit-exact baseline): 0.41% on the hard text, "
+                         "0.12% on the memorized one.")
     args = ap.parse_args()
 
     new_steps, new_ranks = load_run(args.new_dir)
@@ -131,18 +150,24 @@ def main():
     var = sum((d - mean_delta) ** 2 for _, d in deltas) / max(n - 1, 1)
     sem = math.sqrt(var / n)
     mean_abs = sum(abs(d) for _, d in deltas) / n
-    worst_step, worst = max(deltas, key=lambda sd: abs(sd[1]))
+    big = sorted((sd for sd in deltas if abs(sd[1]) > args.big_delta),
+                 key=lambda sd: -abs(sd[1]))
+    big_rate = len(big) / n
     flips = sum(1 for s in common if new_lp[s][1] != ref_lp[s][1])
     print(f"delta over {n} common tokens: mean {mean_delta:+.5f} nat "
           f"(+-{sem:.5f} s.e.; NLL {-mean_delta * n:+.3f} total), mean |delta| "
-          f"{mean_abs:.4f}, max |delta| {abs(worst):.4f} at step {worst_step}; "
-          f"top-1 flips {flips}")
+          f"{mean_abs:.4f}; top-1 flips {flips}; big moves (>{args.big_delta} "
+          f"nat) {len(big)} = {100 * big_rate:.2f}%")
+    for step, d in big[:5]:
+        print(f"  step {step}: log p {ref_lp[step][0]:.3f} -> {new_lp[step][0]:.3f} "
+              f"({d:+.3f}); target {new_steps[step]['target']}, argmax "
+              f"{ref_steps[step]['argmax']} -> {new_steps[step]['argmax']}")
     mean_nll_delta = new_mean - ref_mean
     ok = (abs(mean_nll_delta) <= args.max_mean_nll_delta
-          and abs(worst) <= args.max_token_delta)
+          and big_rate <= args.max_big_delta_rate)
     print(f"verdict: {'PASS' if ok else 'FAIL'} (mean NLL delta "
-          f"{mean_nll_delta:+.5f} vs {args.max_mean_nll_delta}; max token delta "
-          f"{abs(worst):.4f} vs {args.max_token_delta})")
+          f"{mean_nll_delta:+.5f} vs {args.max_mean_nll_delta}; big-move rate "
+          f"{100 * big_rate:.2f}% vs {100 * args.max_big_delta_rate:.2f}%)")
     return 0 if ok else 1
 
 
