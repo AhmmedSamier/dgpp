@@ -89,6 +89,35 @@ void check_router(const GlmMoeConfig& cfg, int tokens, uint64_t seed) {
   dgpp::launch_moe_router(d_hidden, d_gate, d_bias, d_ids, d_w, d_scores,
                           d_biased, cfg, tokens, nullptr);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
+  // The FUSED form (the last dots block per token selects) must reproduce
+  // the two-kernel form's ids, weights and biased row bit for bit, and
+  // leave its tickets at zero (replay-safe).
+  {
+    std::vector<int32_t> ids2(static_cast<size_t>(tokens) * K);
+    std::vector<float> w2(static_cast<size_t>(tokens) * K);
+    std::vector<float> biased2(static_cast<size_t>(tokens) * E);
+    std::memcpy(ids2.data(), d_ids, ids2.size() * 4);
+    std::memcpy(w2.data(), d_w, w2.size() * 4);
+    std::memcpy(biased2.data(), d_biased, biased2.size() * 4);
+    int* d_counters = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_counters, static_cast<size_t>(tokens) * 4));
+    std::memset(d_counters, 0, static_cast<size_t>(tokens) * 4);
+    std::memset(d_ids, 0xff, ids2.size() * 4);
+    std::memset(d_w, 0, w2.size() * 4);
+    for (int rep = 0; rep < 3; ++rep) {  // replays reuse the zeroed tickets
+      dgpp::launch_moe_router(d_hidden, d_gate, d_bias, d_ids, d_w, d_scores,
+                              d_biased, cfg, tokens, nullptr, d_counters);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+    }
+    if (std::memcmp(d_ids, ids2.data(), ids2.size() * 4) != 0 ||
+        std::memcmp(d_w, w2.data(), w2.size() * 4) != 0 ||
+        std::memcmp(d_biased, biased2.data(), biased2.size() * 4) != 0)
+      throw std::runtime_error("fused router select != two-kernel router");
+    for (int t = 0; t < tokens; ++t)
+      if (d_counters[t] != 0)
+        throw std::runtime_error("fused router left a ticket counter set");
+    cudaFree(d_counters);
+  }
 
   GlmMoeRouterRef ref;
   dgpp::glm_moe_ref_router(hidden.data(), gate.data(), bias.data(), cfg,

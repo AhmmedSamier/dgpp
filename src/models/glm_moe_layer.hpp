@@ -149,8 +149,9 @@ class GlmMoeLayer {
   // decode-slot scratch (cudaMalloc; sized to decode_slots*(top_k+1) rows —
   // the slot layout the kernels index: routed K + shared, per token)
   uint16_t* d_slot_act_ = nullptr;  // [slots, inter] (fused gate/up/swiglu)
-  float* d_slot_down_ = nullptr;    // [slots, hidden] fp32 partial dots
+  float* d_slot_down_ = nullptr;
   int32_t* d_slot_order_ = nullptr; // [slots] expert-sorted execution order
+  int* d_router_counters_ = nullptr;  // [decode_slots] fused-select tickets    // [slots, hidden] fp32 partial dots
   // The device expert-view table, re-uploaded per enqueue_decode call.
   // NO CACHE, DELIBERATELY: the streaming loader refills ONE
   // GlmLayerResident per layer, so a binding-keyed cache collides across

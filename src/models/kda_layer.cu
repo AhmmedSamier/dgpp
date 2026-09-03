@@ -1,5 +1,7 @@
 #include "models/kda_layer.hpp"
 
+#include "kernels/bf16_gemv.hpp"
+
 #include <cmath>
 #include <stdexcept>
 
@@ -118,12 +120,31 @@ void KdaLayer::enqueue(const void* hidden_in, float* recurrent_state,
                              prefetch->layer_rate());
   // 2) decay logits g1 = f_b(f_a) and o_norm gate g2 = g_b(g_a); both read
   //    K-column slices of the fused projection row (strided activations).
-  gemm_.matmul(proj_, w_.f_b, g1_, tokens, lp, cfg_.head_dim, DType::BF16,
-               GemmOut::BF16, static_cast<size_t>(n_in), gemm_ws_,
-               gemm_ws_bytes_, stream);
-  gemm_.matmul(proj_ + cfg_.head_dim, w_.g_b, g2_, tokens, lp, cfg_.head_dim,
-               DType::BF16, GemmOut::BF16, static_cast<size_t>(n_in), gemm_ws_,
-               gemm_ws_bytes_, stream);
+  //    At decode both are 5 us launches of mostly fixed cost: one dual
+  //    GEMV launch (bitwise the two launches) when the GEMV takes them.
+  if (bf16_gemv_accepts(w_.f_b, tokens, cfg_.head_dim) &&
+      bf16_gemv_accepts(w_.g_b, tokens, cfg_.head_dim)) {
+    Bf16GemvProblem fb, gb;
+    fb.act = proj_;
+    fb.act_row_stride = static_cast<size_t>(n_in);
+    fb.weight = static_cast<const uint16_t*>(w_.f_b);
+    fb.out = g1_;
+    fb.n = lp;
+    gb.act = proj_ + cfg_.head_dim;
+    gb.act_row_stride = static_cast<size_t>(n_in);
+    gb.weight = static_cast<const uint16_t*>(w_.g_b);
+    gb.out = g2_;
+    gb.n = lp;
+    launch_bf16_gemv_dual(fb, gb, /*out_f32=*/false, tokens, cfg_.head_dim,
+                          stream);
+  } else {
+    gemm_.matmul(proj_, w_.f_b, g1_, tokens, lp, cfg_.head_dim, DType::BF16,
+                 GemmOut::BF16, static_cast<size_t>(n_in), gemm_ws_,
+                 gemm_ws_bytes_, stream);
+    gemm_.matmul(proj_ + cfg_.head_dim, w_.g_b, g2_, tokens, lp, cfg_.head_dim,
+                 DType::BF16, GemmOut::BF16, static_cast<size_t>(n_in),
+                 gemm_ws_, gemm_ws_bytes_, stream);
+  }
   // 3) causal depthwise conv + silu over the merged q|k|v channels; rolls
   //    the committed conv history in place.
   kda_causal_conv_silu_bf16(proj_ + off_q, n_in, w_.conv, conv_state,

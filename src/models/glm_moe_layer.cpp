@@ -61,6 +61,12 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
     DGPP_CUDA_OK(cudaMalloc(&d_slot_act_, rows * I * 2));
     DGPP_CUDA_OK(cudaMalloc(&d_slot_down_, rows * H * sizeof(float)));
     DGPP_CUDA_OK(cudaMalloc(&d_slot_order_, rows * sizeof(int32_t)));
+    // The fused router selection's tickets: one per decode row, zero at
+    // rest (the last block of each launch resets its own).
+    DGPP_CUDA_OK(cudaMalloc(&d_router_counters_,
+                            static_cast<size_t>(decode_slots_) * sizeof(int)));
+    DGPP_CUDA_OK(cudaMemset(d_router_counters_, 0,
+                            static_cast<size_t>(decode_slots_) * sizeof(int)));
     // One table of every expert's three views, re-uploaded per
     // enqueue_decode. The source is PINNED (see the member's comment):
     // pageable async H2D syncs the stream before initiating, which would
@@ -105,6 +111,7 @@ GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_slot_act_);
   cudaFree(d_slot_down_);
   cudaFree(d_slot_order_);
+  cudaFree(d_router_counters_);
   cudaFree(d_expert_views_);
   cudaFree(d_expert_views_graph_);
   cudaFreeHost(h_expert_views_pinned_);
@@ -278,9 +285,11 @@ void GlmMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out,
   const int H = cfg_.hidden, E = cfg_.n_experts, K = cfg_.top_k;
   check_expert_geometry();
 
-  // 1. Router: unchanged kernel — ids ASCENDING per row, on device.
+  // 1. Router, dots and selection in one launch — ids ASCENDING per row,
+  //    on device.
   launch_moe_router(hidden, w_.router_gate, w_.router_bias, d_ids_,
-                    d_weights_, d_scores_, d_biased_, cfg_, tokens, stream);
+                    d_weights_, d_scores_, d_biased_, cfg_, tokens, stream,
+                    d_router_counters_);
   // 2. Route traces ride ASYNC copies into the caller's pinned staging;
   //    the caller materializes them after its next stream sync (the
   //    decode step's final sync). No round-trip on the hot path.

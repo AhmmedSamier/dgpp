@@ -193,6 +193,42 @@ DGPP_TEST(bf16_gemv_ragged_n_short_k_and_multi_row) {
   }
 }
 
+// The dual launch (the KDA layer's f_b/g_b pair) must be BITWISE the two
+// single launches on both outputs, for every row count and both output
+// types, including the strided-activation view and a ragged second n.
+DGPP_TEST(bf16_gemv_dual_matches_two_single_launches_bitwise) {
+  dgpp::CublasLtGemm gemm;
+  for (int m = 1; m <= 4; ++m) {
+    const Problem a = make_problem(m, 1024, 128, 4352, 0x0d0a + m);
+    const Problem b = make_problem(m, 1000, 128, 4352, 0x0d0b + m);  // ragged n
+    Device da(a), db(b);
+    // GIVEN the two single-launch results (through the seam, bf16 and f32)
+    const std::vector<uint16_t> want_a = run_bf16(gemm, a, da);
+    const std::vector<uint16_t> want_b = run_bf16(gemm, b, db);
+    const std::vector<float> want_a32 = run_f32(gemm, a, da);
+    const std::vector<float> want_b32 = run_f32(gemm, b, db);
+    // WHEN the same pair runs as one dual launch
+    dgpp::Bf16GemvProblem p0, p1;
+    p0.act = da.act; p0.act_row_stride = a.act_stride; p0.weight = da.w;
+    p0.out = da.out; p0.n = a.n;
+    p1.act = db.act; p1.act_row_stride = b.act_stride; p1.weight = db.w;
+    p1.out = db.out; p1.n = b.n;
+    dgpp::launch_bf16_gemv_dual(p0, p1, /*out_f32=*/false, m, a.k, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    // THEN both outputs are the single launches' bits
+    if (std::memcmp(da.out, want_a.data(), want_a.size() * 2) != 0 ||
+        std::memcmp(db.out, want_b.data(), want_b.size() * 2) != 0)
+      throw std::runtime_error("dual bf16 GEMV differs from two launches (m=" +
+                               std::to_string(m) + ")");
+    dgpp::launch_bf16_gemv_dual(p0, p1, /*out_f32=*/true, m, a.k, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    if (std::memcmp(da.out, want_a32.data(), want_a32.size() * 4) != 0 ||
+        std::memcmp(db.out, want_b32.data(), want_b32.size() * 4) != 0)
+      throw std::runtime_error("dual f32 GEMV differs from two launches (m=" +
+                               std::to_string(m) + ")");
+  }
+}
+
 DGPP_TEST(bf16_gemv_contract_rejects_odd_k_and_falls_back) {
   // GIVEN k % 8 != 0: the seam must NOT take the GEMV (bf16_gemv_accepts
   // says so) — and the launcher refuses it outright.

@@ -82,6 +82,58 @@ __global__ void bf16_gemv_kernel(const uint16_t* __restrict__ act,
   }
 }
 
+// The single kernel's body over one of two problems, chosen by block
+// range; the staged activations are the chosen problem's.
+template <int kRows, bool kOutF32>
+__global__ void bf16_gemv_dual_kernel(Bf16GemvProblem p0, Bf16GemvProblem p1,
+                                      int blocks0, int k) {
+  extern __shared__ __align__(16) uint16_t sx[];
+  const bool second = static_cast<int>(blockIdx.x) >= blocks0;
+  // Field-wise selects, not a reference into the parameter space: a
+  // runtime-chosen reference to a kernel parameter struct forces the
+  // parameters into local memory and every field read through it.
+  const uint16_t* act = second ? p1.act : p0.act;
+  const size_t act_stride = second ? p1.act_row_stride : p0.act_row_stride;
+  const uint16_t* w = second ? p1.weight : p0.weight;
+  void* out = second ? p1.out : p0.out;
+  const int n = second ? p1.n : p0.n;
+  const int block = second ? static_cast<int>(blockIdx.x) - blocks0
+                           : static_cast<int>(blockIdx.x);
+  gemv::stage_activations<kRows>(act, act_stride, k, sx);
+  __syncthreads();
+  const int warp = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int row = block * gemv::kWarps + warp;
+  if (row >= n) return;
+  float acc[kRows];
+  row_dots<kRows>(w + static_cast<size_t>(row) * k, sx, k, lane, acc);
+  if (lane != 0) return;
+#pragma unroll
+  for (int r = 0; r < kRows; ++r) {
+    const size_t at = static_cast<size_t>(r) * n + row;
+    if (kOutF32)
+      static_cast<float*>(out)[at] = acc[r];
+    else
+      static_cast<uint16_t*>(out)[at] = float_to_bf16_bits(acc[r]);
+  }
+}
+
+template <int kRows>
+void launch_dual_rows(const Bf16GemvProblem& p0, const Bf16GemvProblem& p1,
+                      bool out_f32, int k, cudaStream_t stream) {
+  const int blocks0 = (p0.n + gemv::kWarps - 1) / gemv::kWarps;
+  const int blocks1 = (p1.n + gemv::kWarps - 1) / gemv::kWarps;
+  const dim3 grid(static_cast<unsigned>(blocks0 + blocks1));
+  const size_t smem = gemv::smem_bytes(kRows, k);
+  if (out_f32)
+    bf16_gemv_dual_kernel<kRows, true>
+        <<<grid, gemv::kThreads, smem, stream>>>(p0, p1, blocks0, k);
+  else
+    bf16_gemv_dual_kernel<kRows, false>
+        <<<grid, gemv::kThreads, smem, stream>>>(p0, p1, blocks0, k);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 template <int kRows>
 void launch_rows(const uint16_t* act, size_t act_stride, const uint16_t* w,
                  void* out, bool out_f32, int n, int k, cudaStream_t stream) {
@@ -119,6 +171,27 @@ void launch_bf16_gemv(const uint16_t* act, size_t act_row_stride,
     case 3: launch_rows<3>(act, act_row_stride, weight, out, out_f32, n, k, stream); break;
     case 4: launch_rows<4>(act, act_row_stride, weight, out, out_f32, n, k, stream); break;
     default: throw std::invalid_argument("bf16_gemv: m outside 1..4");
+  }
+}
+
+void launch_bf16_gemv_dual(const Bf16GemvProblem& p0, const Bf16GemvProblem& p1,
+                           bool out_f32, int m, int k, cudaStream_t stream) {
+  for (const Bf16GemvProblem* p : {&p0, &p1}) {
+    if (p->n <= 0 || !p->act || !p->weight || !p->out)
+      throw std::invalid_argument("bf16_gemv_dual: empty or null problem");
+    if (!bf16_gemv_accepts(p->weight, m, k))
+      throw std::invalid_argument("bf16_gemv_dual: shape outside the GEMV "
+                                  "contract");
+    if (p->act_row_stride < static_cast<size_t>(k))
+      throw std::invalid_argument("bf16_gemv_dual: activation stride narrower "
+                                  "than k");
+  }
+  switch (m) {
+    case 1: launch_dual_rows<1>(p0, p1, out_f32, k, stream); break;
+    case 2: launch_dual_rows<2>(p0, p1, out_f32, k, stream); break;
+    case 3: launch_dual_rows<3>(p0, p1, out_f32, k, stream); break;
+    case 4: launch_dual_rows<4>(p0, p1, out_f32, k, stream); break;
+    default: throw std::invalid_argument("bf16_gemv_dual: m outside 1..4");
   }
 }
 

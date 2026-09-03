@@ -34,4 +34,19 @@ void launch_bf16_gemv(const uint16_t* act, size_t act_row_stride,
                       const uint16_t* weight, void* out, bool out_f32, int m,
                       int n, int k, cudaStream_t stream);
 
+// Two GEMVs of the same m, k and output type in ONE launch: blocks
+// [0, blocks(n0)) run problem 0, the rest problem 1. Each warp's work is
+// exactly what the single launch would do, so both outputs are bitwise the
+// two-launch outputs; what is saved is a launch and a graph gap per pair
+// (the KDA layer's f_b/g_b, 5 us each at decode, mostly fixed cost).
+struct Bf16GemvProblem {
+  const uint16_t* act = nullptr;
+  size_t act_row_stride = 0;
+  const uint16_t* weight = nullptr;
+  void* out = nullptr;
+  int n = 0;
+};
+void launch_bf16_gemv_dual(const Bf16GemvProblem& p0, const Bf16GemvProblem& p1,
+                           bool out_f32, int m, int k, cudaStream_t stream);
+
 }  // namespace dgpp

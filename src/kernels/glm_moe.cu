@@ -31,17 +31,71 @@ __device__ inline float sigmoidf_acc(float x) {
 constexpr int kRouterDotWarps = 8;
 constexpr int kRouterDotThreads = 32 * kRouterDotWarps;
 
+__device__ __forceinline__ void router_dot(const uint16_t* __restrict__ hidden,
+                                           const uint16_t* __restrict__ gate,
+                                           const float* __restrict__ bias,
+                                           float* __restrict__ scores,
+                                           float* __restrict__ biased,
+                                           int token, int e, int hidden_dim,
+                                           int n_experts, int vector_loads,
+                                           int lane);
+__device__ __forceinline__ void router_select_warp(
+    const float* __restrict__ scores, const float* __restrict__ biased,
+    int32_t* __restrict__ ids, float* __restrict__ weights, int token,
+    int n_experts, int top_k, float routed_scaling_factor, int norm_topk,
+    float* s_scores, float* s_biased, int lane);
+
+// With `sel_ids` set the select is FUSED (2026-09-03): the token's dots
+// blocks take a ticket (`counters[token]`, zeroed once, reset by the last —
+// replay-safe) and the last one runs router_select_warp on warp 0, so the
+// separate select launch (5 us + a graph gap per MoE layer) disappears.
+// The fence/ticket order is the mHC finish's: a block fences its scores
+// before its ticket; the last block fences again before reading them.
 __global__ void moe_router_dots_kernel(const uint16_t* __restrict__ hidden,
                                        const uint16_t* __restrict__ gate,
                                        const float* __restrict__ bias,
                                        float* __restrict__ scores,
                                        float* __restrict__ biased, int tokens,
                                        int hidden_dim, int n_experts,
-                                       int vector_loads) {
+                                       int vector_loads,
+                                       int32_t* __restrict__ sel_ids,
+                                       float* __restrict__ sel_weights,
+                                       int top_k, float routed_scaling_factor,
+                                       int norm_topk,
+                                       int* __restrict__ counters) {
+  extern __shared__ float sel_smem[];  // [2][n_experts] when fused
+  __shared__ int s_last;
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int e = blockIdx.x * kRouterDotWarps + warp;
   const int token = blockIdx.y;
-  if (e >= n_experts || token >= tokens) return;
+  if (token >= tokens) return;
+  if (e < n_experts) router_dot(hidden, gate, bias, scores, biased, token, e,
+                                hidden_dim, n_experts, vector_loads, lane);
+  if (sel_ids == nullptr) return;
+  __syncthreads();  // every warp's score is written
+  if (threadIdx.x == 0) {
+    __threadfence();
+    const int ticket = atomicAdd(counters + token, 1);
+    s_last = (ticket == static_cast<int>(gridDim.x) - 1) ? 1 : 0;
+    if (s_last) counters[token] = 0;  // reset for the next launch
+  }
+  __syncthreads();
+  if (!s_last || warp != 0) return;
+  __threadfence();
+  router_select_warp(scores, biased, sel_ids, sel_weights, token, n_experts,
+                     top_k, routed_scaling_factor, norm_topk, sel_smem,
+                     sel_smem + n_experts, lane);
+}
+
+// One warp's dot for (token, expert e): sigmoid(dot) and the biased copy.
+__device__ __forceinline__ void router_dot(const uint16_t* __restrict__ hidden,
+                                           const uint16_t* __restrict__ gate,
+                                           const float* __restrict__ bias,
+                                           float* __restrict__ scores,
+                                           float* __restrict__ biased,
+                                           int token, int e, int hidden_dim,
+                                           int n_experts, int vector_loads,
+                                           int lane) {
   const uint16_t* x = hidden + static_cast<size_t>(token) * hidden_dim;
   const uint16_t* w = gate + static_cast<size_t>(e) * hidden_dim;
 
@@ -107,24 +161,18 @@ __device__ __forceinline__ void warp_argmax_lowest_id(float& v, int& id) {
   }
 }
 
-__global__ void moe_router_select_kernel(const float* __restrict__ scores,
-                                         const float* __restrict__ biased,
-                                         int32_t* __restrict__ ids,
-                                         float* __restrict__ weights,
-                                         int tokens, int n_experts, int top_k,
-                                         float routed_scaling_factor,
-                                         int norm_topk) {
-  static_assert(kRouterSelectThreads == 32, "one warp per token");
-  extern __shared__ float sel_smem[];  // [2][n_experts]: scores | biased
-  float* s_scores = sel_smem;
-  float* s_biased = sel_smem + n_experts;
-  const int token = blockIdx.x;
-  if (token >= tokens) return;
+// The select, as one warp's work: the token's scores/biased rows land in
+// shared memory (the selection scribbles -INFINITY into the copy so the
+// exported biased row survives), then top_k rounds of argmax.
+__device__ __forceinline__ void router_select_warp(
+    const float* __restrict__ scores, const float* __restrict__ biased,
+    int32_t* __restrict__ ids, float* __restrict__ weights, int token,
+    int n_experts, int top_k, float routed_scaling_factor, int norm_topk,
+    float* s_scores, float* s_biased, int lane) {
   const size_t row = static_cast<size_t>(token) * n_experts;
-  const int lane = threadIdx.x;
-  for (int e = lane; e < n_experts; e += kRouterSelectThreads) {
-    s_scores[e] = scores[row + e];
-    s_biased[e] = biased[row + e];
+  for (int e = lane; e < n_experts; e += 32) {
+    s_scores[e] = __ldcg(scores + row + e);
+    s_biased[e] = __ldcg(biased + row + e);
   }
   __syncwarp();
 
@@ -135,7 +183,7 @@ __global__ void moe_router_select_kernel(const float* __restrict__ scores,
     // holds (-inf, INT_MAX) and loses every comparison.
     int best = INT_MAX;
     float bv = -INFINITY;
-    for (int e = lane; e < n_experts; e += kRouterSelectThreads) {
+    for (int e = lane; e < n_experts; e += 32) {
       if (s_biased[e] > bv) {
         bv = s_biased[e];
         best = e;
@@ -174,6 +222,22 @@ __global__ void moe_router_select_kernel(const float* __restrict__ scores,
     ids[static_cast<size_t>(token) * top_k + i] = sel[i];
     weights[static_cast<size_t>(token) * top_k + i] = w;
   }
+}
+
+__global__ void moe_router_select_kernel(const float* __restrict__ scores,
+                                         const float* __restrict__ biased,
+                                         int32_t* __restrict__ ids,
+                                         float* __restrict__ weights,
+                                         int tokens, int n_experts, int top_k,
+                                         float routed_scaling_factor,
+                                         int norm_topk) {
+  static_assert(kRouterSelectThreads == 32, "one warp per token");
+  extern __shared__ float sel_smem[];  // [2][n_experts]: scores | biased
+  const int token = blockIdx.x;
+  if (token >= tokens) return;
+  router_select_warp(scores, biased, ids, weights, token, n_experts, top_k,
+                     routed_scaling_factor, norm_topk, sel_smem,
+                     sel_smem + n_experts, threadIdx.x);
 }
 
 __global__ void moe_swiglu_clamp_kernel(const uint16_t* __restrict__ gate,
@@ -274,13 +338,15 @@ __device__ __forceinline__ SlotMatrix resolve_slot_matrix(
 }
 
 // Slot EXECUTION order for a multi-token batch: slots sorted by expert
-// (routed ids ascending, the shared expert last), stable in slot index.
-// Two tokens routed to the same expert then run as ADJACENT blockIdx.y
-// values, and the second's weight rows come out of L2 (one expert is ~6 MB
-// per rank, the L2 24 MB) instead of DRAM — the only expert traffic a
-// speculative verify row can share with its neighbour. Results are written
-// by LOGICAL slot, so the accumulation (and every bit) is unchanged; only
-// the dispatch order moves. One block, one thread per slot: 18-72 keys.
+// id (the shared expert last, ties by slot — stable), so an expert two
+// rows share is read from DRAM once and the second time from L2 (each fp8
+// expert is ~6 MB per rank, the L2 24 MB) instead of DRAM — the only
+// expert traffic a speculative verify row can share with its neighbour.
+// Results are written by LOGICAL slot, so the accumulation (and every bit)
+// is unchanged; only the dispatch order moves. One block, one thread per
+// slot: 18-72 keys. (TRIED 2026-09-03 and reverted: ranking in the
+// consuming kernels' prologue instead — two barriers and a key loop per
+// block cost the 9216-block down launch +10 us, six times this kernel.)
 __global__ void moe_slot_order_kernel(const int32_t* __restrict__ ids,
                                       int32_t* __restrict__ order, int slots,
                                       int top_k, int n_experts) {
@@ -305,6 +371,10 @@ __device__ __forceinline__ int logical_slot(const int32_t* __restrict__ order) {
 
 // The down projection per slot: out[slot, :] = fp32 dot(down_row, act[slot]).
 // Unrounded — the accumulation chain below owns the single rounding.
+// (TRIED 2026-09-03 and reverted: the accumulation fused behind the last
+// block per column chunk. The ticket's __syncthreads + fence per block and
+// the last block's 18 dependent L2 loads on the kernel's tail cost +22 us
+// per layer against the 1.7 us launch they replaced.)
 __global__ void moe_slot_down_kernel(
     const uint16_t* __restrict__ act, size_t act_stride,
     const int32_t* __restrict__ ids, const int32_t* __restrict__ order,
@@ -424,7 +494,7 @@ bool aligned16(const void* p) {
 void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
                        const float* bias, int32_t* ids, float* weights,
                        float* scores, float* biased, const GlmMoeConfig& cfg,
-                       int tokens, cudaStream_t stream) {
+                       int tokens, cudaStream_t stream, int* counters) {
   GlmMoeConfig::validate_config(cfg);
   if (tokens <= 0) return;
   check_router_args(hidden, gate, bias, ids, weights, scores, biased);
@@ -436,11 +506,20 @@ void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
       static_cast<unsigned>((cfg.n_experts + kRouterDotWarps - 1) /
                             kRouterDotWarps),
       static_cast<unsigned>(tokens));
+  const size_t sel_smem = 2 * static_cast<size_t>(cfg.n_experts) * sizeof(float);
+  if (counters != nullptr) {
+    // Fused: the last dots block per token selects.
+    moe_router_dots_kernel<<<dots_grid, kRouterDotThreads, sel_smem, stream>>>(
+        hidden, gate, bias, scores, biased, tokens, cfg.hidden, cfg.n_experts,
+        vector_loads, ids, weights, cfg.top_k, cfg.routed_scaling_factor,
+        cfg.norm_topk_prob ? 1 : 0, counters);
+    DGPP_CUDA_OK(cudaGetLastError());
+    return;
+  }
   moe_router_dots_kernel<<<dots_grid, kRouterDotThreads, 0, stream>>>(
       hidden, gate, bias, scores, biased, tokens, cfg.hidden, cfg.n_experts,
-      vector_loads);
+      vector_loads, nullptr, nullptr, 0, 0.f, 0, nullptr);
   DGPP_CUDA_OK(cudaGetLastError());
-  const size_t sel_smem = 2 * static_cast<size_t>(cfg.n_experts) * sizeof(float);
   moe_router_select_kernel<<<tokens, kRouterSelectThreads, sel_smem, stream>>>(
       scores, biased, ids, weights, tokens, cfg.n_experts, cfg.top_k,
       cfg.routed_scaling_factor, cfg.norm_topk_prob ? 1 : 0);
@@ -524,7 +603,7 @@ void launch_moe_slot_order(const int32_t* ids, int32_t* order, int slots,
   if (slots > 1024)
     throw std::invalid_argument("moe_slot_order: more slots than one block");
   moe_slot_order_kernel<<<1, static_cast<unsigned>(slots),
-                          sizeof(int32_t) * static_cast<size_t>(slots),
+                          static_cast<size_t>(slots) * sizeof(int32_t),
                           stream>>>(ids, order, slots, top_k, n_experts);
   DGPP_CUDA_OK(cudaGetLastError());
 }

@@ -10,17 +10,20 @@ namespace dgpp {
 
 // Router: hidden bf16 [tokens, hidden] -> ids int32 [tokens, top_k] in
 // ASCENDING expert order (the accumulation order the reference's index_add
-// produces), weights f32 [tokens, top_k] normalized and scaled. Two
-// kernels: per-(expert, token) dots, then per-token selection. `scores`
-// and `biased` are f32 [tokens, n_experts] device buffers the caller owns:
-// scores is kernel-internal scratch (the sigmoid scores the selection reads
-// back), biased receives the full biased score row — the hand-off between
-// the two kernels AND the exported selection inputs (near-tie
-// certification needs every expert's true biased score).
+// produces), weights f32 [tokens, top_k] normalized and scaled. Per-(expert,
+// token) dots, then per-token selection — two kernels, or ONE when
+// `counters` (an int per token, zeroed once; the kernel leaves them zero)
+// is given: the last dots block of a token runs the selection, bitwise the
+// two-kernel form. `scores` and `biased` are f32 [tokens, n_experts] device
+// buffers the caller owns: scores is kernel-internal scratch (the sigmoid
+// scores the selection reads back), biased receives the full biased score
+// row — the hand-off between the two phases AND the exported selection
+// inputs (near-tie certification needs every expert's true biased score).
 void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
                        const float* bias, int32_t* ids, float* weights,
                        float* scores, float* biased, const GlmMoeConfig& cfg,
-                       int tokens, cudaStream_t stream);
+                       int tokens, cudaStream_t stream,
+                       int* counters = nullptr);
 
 // swiglu with asymmetric clamps: gate clamp_max only, up clamp both; two
 // bf16 rounding points (silu result, then the product). n = rows*inter.
