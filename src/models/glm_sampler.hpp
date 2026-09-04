@@ -5,6 +5,12 @@
 //   greedy  : reduce the per-rank (value, token_id) maxima
 //   top_k   : merge each rank's exact local top-k, filter/sample at rank 0
 //   gather  : pull the full FP32 vocab to rank 0, sample centrally
+//   prefix  : (M6 6b) merge each rank's exact local top-k AND fold each
+//             slice's log-sum-exp; every rank decides identically whether
+//             the request resolves inside the prefix, else falls back to
+//             the gather — see sample_from_prefix() for its width-
+//             independence contract and sample_reference_sharded() for
+//             the reference it is measured against
 //
 // The distributed paths are BITWISE-EQUAL to the centralized oracle by
 // construction, not by tolerance: every path funnels into
@@ -101,6 +107,20 @@ struct Result {
   int32_t token = -1;
   float logprob = 0.0f;  // log-softmax of the chosen token, final dist
   std::vector<std::pair<int32_t, float>> top_logprobs;  // if logprobs > 0
+};
+
+// Result of the bounded candidate-table path used by the distributed
+// sampler. A fallback is not an approximation: it says that the prefix does
+// not contain enough of the distribution to make the exact decision, so the
+// caller must gather the full logits and run the SAME decision over the
+// complete list (sample_reference_sharded()). The RNG is deliberately left
+// untouched on fallback, so that slow path consumes the very same
+// (seed, counter) draw and the request's outcome does not depend on the
+// transported width.
+struct PrefixDecision {
+  bool resolved = false;
+  Result result;
+  double covered_mass = 0.0;  // pre-filter mass represented by the prefix
 };
 
 // ---------------------------------------------------------------------------
@@ -349,6 +369,283 @@ inline double slice_logsumexp(const float* logits, int n) {
   for (int i = 0; i < n; ++i)
     sum += std::exp(static_cast<double>(logits[i]) - top);
   return top + std::log(sum);
+}
+
+// The production candidate path needs the normalizer after temperature.
+// Match select_from_sorted()'s fp32 division before promoting to fp64 for the
+// measurement/fold arithmetic; doing the division in fp64 would describe a
+// subtly different distribution.
+inline double slice_logsumexp(const float* logits, int n,
+                              float temperature) {
+  if (logits == nullptr || n <= 0)
+    throw std::invalid_argument("glm_sample: empty logit slice");
+  if (!(temperature > 0.0f) || !std::isfinite(temperature))
+    throw std::invalid_argument(
+        "glm_sample: temperature-scaled lse requires finite temperature > 0");
+  double top = -INFINITY;
+  for (int i = 0; i < n; ++i) {
+    const float scaled = logits[i] / temperature;
+    top = std::max(top, static_cast<double>(scaled));
+  }
+  double sum = 0.0;
+  for (int i = 0; i < n; ++i) {
+    const float scaled = logits[i] / temperature;
+    sum += std::exp(static_cast<double>(scaled) - top);
+  }
+  return top + std::log(sum);
+}
+
+// Canonical rank-order fold of per-slice log-sum-exp values. The centralized
+// test oracle uses this same fold, so the candidate decision is judged
+// against the exact normalizer the distributed path actually transports.
+inline double merge_logsumexp(const std::vector<double>& slice_lses) {
+  if (slice_lses.empty())
+    throw std::invalid_argument("glm_sample: no slice log-sum-exp values");
+  const double top =
+      *std::max_element(slice_lses.begin(), slice_lses.end());
+  if (!std::isfinite(top))
+    throw std::invalid_argument("glm_sample: non-finite slice log-sum-exp");
+  double sum = 0.0;
+  for (double lse : slice_lses) {
+    if (!std::isfinite(lse))
+      throw std::invalid_argument("glm_sample: non-finite slice log-sum-exp");
+    sum += std::exp(lse - top);
+  }
+  return top + std::log(sum);
+}
+
+// Attempts an EXACT stochastic decision from the canonical global top-k
+// prefix plus the fold normalizer of the complete temperature-scaled
+// distribution (merge_logsumexp over the per-slice values in rank order).
+//
+// This is the host oracle for M6.6b's device verdict kernel, and it is
+// WIDTH-INDEPENDENT by construction: every step whose value depends on the
+// unseen tail is expressed through the fold normalizer, never through a
+// materialized full-vocabulary sum, and the same code runs whether the list
+// is a prefix or the complete vocabulary. A prefix that resolves therefore
+// yields bitwise the result the complete list yields, and the complete list
+// is the full-logit fallback (sample_reference_sharded) — so a request's
+// outcome never depends on the transported width k, only on whether the
+// fast path could decide it. (A shortcut that hands a complete list to a
+// different arithmetic breaks exactly this: at an exact-tie crossing the
+// fp32 and fp64 cumulative sums disagree on the nucleus, and the token with
+// it.)
+//
+// Regimes, in HF warper order:
+//   finite top_k : the post-top-k support is materialized once the prefix
+//                  holds top_k candidates and the shared selector runs over
+//                  it with the request unchanged — bitwise sample_reference()
+//                  by the M6 d3 merge proof; below top_k candidates, fallback.
+//   min_p > 0    : survivors are a prefix (descending candidates, positive
+//                  temperature), decided against p_max in the scaled-logit
+//                  domain; the first failure proves every later token fails.
+//                  The survivor set is then materialized and the shared
+//                  selector finishes it (top-p over the survivors' own
+//                  denominator, the walk). No failure inside an incomplete
+//                  prefix: fallback.
+//   top_p < 1    : the crossing is decided on the fp64 fold masses in listed
+//                  order; inside the prefix, the nucleus is materialized and
+//                  the shared selector finishes it. No crossing inside an
+//                  incomplete prefix: fallback.
+//   otherwise    : pure temperature sampling. The survivor set is the whole
+//                  vocabulary and is never materialized: the draw walks the
+//                  fp64 fold masses and resolves when it lands inside the
+//                  prefix (logprobs against the fold normalizer); in the
+//                  unseen tail, fallback.
+// A fallback consumes NO RNG draw: the full-logit path re-runs this decision
+// over the complete list with the same (seed, counter).
+inline PrefixDecision sample_from_prefix(
+    const std::vector<Candidate>& sorted_prefix, int vocab_size,
+    double global_scaled_logsumexp, const Params& p, Rng& rng) {
+  if (sorted_prefix.empty())
+    throw std::invalid_argument("glm_sample: empty sampling prefix");
+  if (vocab_size <= 0 || sorted_prefix.size() > static_cast<size_t>(vocab_size))
+    throw std::invalid_argument("glm_sample: sampling prefix/vocab mismatch");
+  if (!(p.temperature > 0.0f) || !std::isfinite(p.temperature))
+    throw std::invalid_argument(
+        "glm_sample: prefix sampling requires finite temperature > 0");
+  if (!(p.top_p > 0.0f && p.top_p <= 1.0f) || !std::isfinite(p.top_p))
+    throw std::invalid_argument("glm_sample: top_p must be in (0, 1]");
+  if (!(p.min_p >= 0.0f && p.min_p <= 1.0f) || !std::isfinite(p.min_p))
+    throw std::invalid_argument("glm_sample: min_p must be in [0, 1]");
+  if (p.top_k < 0)
+    throw std::invalid_argument("glm_sample: top_k must be nonnegative");
+  if (!std::isfinite(global_scaled_logsumexp))
+    throw std::invalid_argument(
+        "glm_sample: non-finite global sampling log-sum-exp");
+  for (size_t i = 1; i < sorted_prefix.size(); ++i) {
+    if (candidate_before(sorted_prefix[i], sorted_prefix[i - 1]))
+      throw std::invalid_argument(
+          "glm_sample: sampling prefix is not in canonical order");
+  }
+
+  const size_t held = sorted_prefix.size();
+  const bool complete = held == static_cast<size_t>(vocab_size);
+  // fp32 temperature division, exactly as the shared selector scales.
+  const auto scaled_at = [&](size_t i) {
+    return sorted_prefix[i].logit / p.temperature;
+  };
+  // The candidate's exact probability under the fold normalizer.
+  const auto mass_at = [&](size_t i) {
+    return std::exp(static_cast<double>(scaled_at(i)) -
+                    global_scaled_logsumexp);
+  };
+
+  PrefixDecision decision;
+  for (size_t i = 0; i < held; ++i) decision.covered_mass += mass_at(i);
+
+  // The survivor set is known and materialized: the shared selector finishes
+  // over precisely that list, so the final denominator, the logprobs and the
+  // counter semantics are its own — identical for a prefix and for the
+  // complete list, because both hand it the same candidates.
+  const auto resolve = [&](size_t support, const Params& exact) {
+    const std::vector<Candidate> materialized(
+        sorted_prefix.begin(), sorted_prefix.begin() + support);
+    decision.result = select_from_sorted(materialized, exact, rng);
+    decision.resolved = true;
+    return decision;
+  };
+
+  if (p.top_k > 0) {
+    const size_t required = std::min(static_cast<size_t>(p.top_k),
+                                     static_cast<size_t>(vocab_size));
+    if (held < required) return decision;
+    return resolve(required, p);
+  }
+
+  if (p.min_p > 0.0f) {
+    const float threshold = scaled_at(0) + std::log(p.min_p);
+    size_t survivors = held;
+    bool bounded = complete;
+    for (size_t i = 0; i < held; ++i) {
+      if (scaled_at(i) < threshold) {
+        survivors = i;  // index 0 never fails: log(min_p) <= 0
+        bounded = true;
+        break;
+      }
+    }
+    if (!bounded) return decision;
+    Params exact = p;
+    exact.min_p = 0.0f;
+    return resolve(survivors, exact);
+  }
+
+  if (p.top_p < 1.0f) {
+    const double top_p = static_cast<double>(p.top_p);
+    double cumulative = 0.0;
+    size_t nucleus = 0;
+    for (size_t i = 0; i < held; ++i) {
+      cumulative += mass_at(i);
+      if (cumulative >= top_p) {
+        nucleus = i + 1;
+        break;
+      }
+    }
+    if (nucleus == 0) {
+      if (!complete) return decision;
+      nucleus = held;  // the selector's rule: a sum that falls short keeps all
+    }
+    Params exact = p;
+    exact.top_p = 1.0f;
+    return resolve(nucleus, exact);
+  }
+
+  // Pure temperature sampling over the whole vocabulary.
+  if (!complete && p.logprobs > static_cast<int>(held)) return decision;
+  const double draw = uniform01(rng);
+  double cumulative = 0.0;
+  size_t chosen = held;
+  for (size_t i = 0; i < held; ++i) {
+    cumulative += mass_at(i);
+    if (cumulative > draw) {
+      chosen = i;
+      break;
+    }
+  }
+  if (chosen == held) {
+    if (!complete) return decision;  // in the unseen tail; the RNG is untouched
+    chosen = held - 1;               // the selector's rounding guard
+  }
+  ++rng.counter;
+  const float lse = static_cast<float>(global_scaled_logsumexp);
+  decision.result.token = sorted_prefix[chosen].id;
+  decision.result.logprob = scaled_at(chosen) - lse;
+  const int n = std::min<int>(p.logprobs, static_cast<int>(held));
+  for (int j = 0; j < n; ++j) {
+    decision.result.top_logprobs.emplace_back(
+        sorted_prefix[static_cast<size_t>(j)].id,
+        scaled_at(static_cast<size_t>(j)) - lse);
+  }
+  decision.resolved = true;
+  return decision;
+}
+
+// One contiguous vocabulary slice of the sharded lm head: rank r owns
+// [begin, begin + count). The fold normalizer is defined over the slices in
+// rank order, so the layout is part of the sharded sampler's semantics, not
+// an implementation detail.
+struct VocabSlice {
+  int begin = 0;
+  int count = 0;
+};
+
+inline void validate_vocab_slices(const std::vector<VocabSlice>& slices,
+                                  int vocab) {
+  if (slices.empty() || vocab <= 0)
+    throw std::invalid_argument("glm_sample: empty vocabulary layout");
+  int next = 0;
+  for (const VocabSlice& s : slices) {
+    if (s.begin != next || s.count <= 0)
+      throw std::invalid_argument(
+          "glm_sample: vocabulary slices must be contiguous, non-empty and "
+          "in rank order");
+    next += s.count;
+  }
+  if (next != vocab)
+    throw std::invalid_argument(
+        "glm_sample: vocabulary slices must cover the vocabulary exactly");
+}
+
+// The fold normalizer of the complete temperature-scaled distribution: each
+// slice's fp64 log-sum-exp, folded in rank order — bitwise what the bus
+// transports and folds.
+inline double sharded_scaled_logsumexp(const float* logits,
+                                       const std::vector<VocabSlice>& slices,
+                                       float temperature) {
+  std::vector<double> lses;
+  lses.reserve(slices.size());
+  for (const VocabSlice& s : slices)
+    lses.push_back(slice_logsumexp(logits + s.begin, s.count, temperature));
+  return merge_logsumexp(lses);
+}
+
+// The centralized reference for the sharded sampler at a given layout, and
+// the full-logit FALLBACK's exact computation: penalties, the canonical
+// sort, the fold normalizer, then the very same decision over the complete
+// list — which always resolves. For finite top_k it equals
+// sample_reference() bitwise (the shared selector over the same materialized
+// support); in the unbounded regimes it coincides with sample_reference()
+// except where the fp64 fold and that oracle's single fp32 denominator
+// disagree on a crossing — a boundary event whose outcome must not depend
+// on k, which is why the fold, not the fp32 sum, is the definition there.
+inline Result sample_reference_sharded(
+    const float* logits, int vocab, const std::vector<VocabSlice>& slices,
+    const Params& p, Rng& rng, const std::vector<int32_t>& context_ids) {
+  if (!(p.temperature > 0.0f) || !std::isfinite(p.temperature))
+    throw std::invalid_argument(
+        "glm_sample: the sharded reference is the stochastic path; "
+        "temperature <= 0 is the greedy pick's");
+  validate_vocab_slices(slices, vocab);
+  std::vector<float> v(logits, logits + vocab);
+  apply_penalties(v.data(), vocab, 0, p, count_context(context_ids));
+  const double lse = sharded_scaled_logsumexp(v.data(), slices, p.temperature);
+  const std::vector<Candidate> sorted = sort_slice(v.data(), vocab, 0);
+  const PrefixDecision decision =
+      sample_from_prefix(sorted, vocab, lse, p, rng);
+  if (!decision.resolved)
+    throw std::logic_error(
+        "glm_sample: the complete candidate list must resolve");
+  return decision.result;
 }
 
 // Probability mass covered by each requested prefix of an already

@@ -732,9 +732,29 @@ checkpoints. The width-sizing instrument is also built: `glm_gen_check
 of global top-{32,64,128,256} at every T=1 teacher position (one diagnostic
 candidate/LSE gather), and `scripts/fabric_sampling_profile.py` refuses
 incomplete or cross-rank-divergent logs before selecting the smallest width at
-or below the 1% fallback bound. The three real-text fabric runs, request/CLI
-overrides, and distributed production sampler are not wired yet; no k is fixed
-until those runs land in the measurement record.
+or below the 1% fallback bound. The next correctness slice landed 2026-09-04:
+`sample_from_prefix` is the host oracle for the eventual device verdict. Given
+the canonical global candidate prefix and the fold normalizer of the complete
+temperature-scaled distribution, it either samples exactly or returns an
+explicit fallback WITHOUT consuming the counter RNG draw — and it is
+width-independent by construction: the same arithmetic runs on a prefix and
+on the complete list, so a resolved prefix equals the full-logit fallback
+(`sample_reference_sharded`, the reference at a vocabulary layout) bitwise,
+and a request's outcome never depends on the transported k. (The review of
+the first cut found a complete-list shortcut that used a different
+cumulative sum and so chose a different nucleus at an exact-tie crossing;
+unit gates now pin that case, all four regimes at three widths, and the
+pure-temperature walk.) `bus_sampling_prefix` drives that contract through
+one real candidate/LSE fold, with penalties before each rank's local top-k,
+and carries rank 0's decision digest back to every rank (the greedy pick's
+readback invariant); its two-rank loopback gate covers the target
+checkpoint's actual default (`temperature=1.0`, `top_p=0.95`, no semantic
+`top_k`), a cross-shard tie that survives the penalties, rank identity over
+a run of draws, and the flat-distribution fallback. This is a host
+correctness seam, not the production hot path. The three real-text fabric
+runs, request/CLI overrides, the full-logit fallback's collective, and the
+device sampler are not wired yet; no k is fixed until those runs land in the
+measurement record.
 
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's

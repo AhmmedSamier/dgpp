@@ -382,6 +382,34 @@ inline constexpr size_t sampling_profile_scratch_elems(int world) {
   return elems + (elems & 1);  // CollectiveBus requires an even bf16 count.
 }
 
+// The decision digest rank 0 broadcasts after the fold — bus_greedy_pick's
+// load-bearing readback invariant, for the sampler: every rank folds an
+// identical table and so reaches an identical decision, and every rank must
+// decode rank 0's digest of it. covered_mass is a function of every
+// transported digit (all merged candidates and every slice lse), so a
+// corrupt readback on one rank is loud at this collective rather than a
+// silently divergent token a layer later.
+inline constexpr size_t kSamplingPrefixDigestDigits =
+    1 + kPickIdDigits + kPickLogitDigits + kSamplingProfileLseDigits;
+inline constexpr size_t kSamplingPrefixDigestElems =
+    kSamplingPrefixDigestDigits + (kSamplingPrefixDigestDigits & 1);
+
+// Width-independent form used by the production-sampler bring-up. Keeping
+// this dynamic is intentional: PLAN M6.6b does not fix the device candidate
+// width until the three real teacher-text profiles have landed. The scratch
+// also hosts the decision digest, hence the floor.
+inline constexpr size_t sampling_prefix_scratch_elems(int world,
+                                                      int candidate_k) {
+  if (world <= 0 || candidate_k <= 0) return 0;
+  const size_t rank_elems =
+      static_cast<size_t>(candidate_k) * kPickSlotsPerRank +
+      kSamplingProfileLseDigits;
+  const size_t elems = static_cast<size_t>(world) * rank_elems;
+  const size_t table = elems + (elems & 1);  // even bf16 count for the bus
+  return table > kSamplingPrefixDigestElems ? table
+                                            : kSamplingPrefixDigestElems;
+}
+
 inline std::array<double, kSamplingProfileTopKs.size()>
 bus_sampling_topk_masses(net::CollectiveBus& bus, int rank, int world,
                          const float* logits, int vocab_count,
@@ -480,6 +508,179 @@ bus_sampling_topk_masses(net::CollectiveBus& bus, int rank, int world,
   std::array<double, kSamplingProfileTopKs.size()> out{};
   std::copy(masses.begin(), masses.end(), out.begin());
   return out;
+}
+
+// M6.6b correctness seam: gather an exact global candidate prefix plus every
+// slice normalizer through one latency-class fold, make the exact
+// resolved-vs-fallback decision on every rank, then carry rank 0's decision
+// digest back through a second latency collective that every rank must
+// decode identically. This is deliberately HOST code for now; the final hot
+// path lowers the same contract into glm_pick_local/verdict (where the
+// pinned verdict's digest group plays the digest collective's role). It is
+// nevertheless a real bus path, and the loopback gate below it catches
+// encoding, rank ordering, penalties, RNG, fallback-counter and readback
+// mistakes before CUDA is involved.
+//
+// `scratch` is caller-owned pinned memory of at least
+// sampling_prefix_scratch_elems(world, candidate_k) bf16 words. On fallback
+// the RNG counter is unchanged so the later full-logit gather can consume the
+// same draw — it must run sample_reference_sharded() over the same layout,
+// which is this decision over the complete list. Candidate bytes, params,
+// context, seed and counter are identical on every rank by contract, which
+// is exactly the invariant the 2026-09-01 fabric race broke on one rank's
+// readback; the digest makes a breach loud at the collective.
+inline glm_sample::PrefixDecision bus_sampling_prefix(
+    net::CollectiveBus& bus, int rank, int world, const float* logits,
+    int vocab_count, int vocab_begin, int vocab_size,
+    const glm_sample::Params& params, glm_sample::Rng& rng,
+    const std::vector<int32_t>& context_ids, int candidate_k,
+    uint16_t* scratch, int timeout_ms) {
+  if (world < 1 || world > kPickMaxWorld || rank < 0 || rank >= world)
+    throw std::invalid_argument("sampling prefix: rank/world");
+  if (!(params.temperature > 0.0f) || !std::isfinite(params.temperature))
+    throw std::invalid_argument(
+        "sampling prefix: temperature must be finite and > 0 "
+        "(temperature <= 0 is bus_greedy_pick's path)");
+  if (logits == nullptr || scratch == nullptr || vocab_count <= 0 ||
+      vocab_begin < 0 || vocab_size <= 0 ||
+      vocab_begin + vocab_count > vocab_size)
+    throw std::invalid_argument("sampling prefix: invalid vocab slice");
+  if (candidate_k < 1 || candidate_k > kSamplingProfileMaxK)
+    throw std::invalid_argument(
+        "sampling prefix: candidate_k must be in [1, 256]");
+  if (vocab_count < candidate_k)
+    throw std::invalid_argument(
+        "sampling prefix: every vocab shard must contain candidate_k ids");
+
+  const size_t rank_elems =
+      static_cast<size_t>(candidate_k) * kPickSlotsPerRank +
+      kSamplingProfileLseDigits;
+  const size_t elems = sampling_prefix_scratch_elems(world, candidate_k);
+  if (elems * sizeof(uint16_t) >
+      bus.slot_bytes(net::BusMessageClass::kLatency))
+    throw std::invalid_argument(
+        "sampling prefix: candidate table exceeds one latency slot");
+
+  std::vector<float> adjusted(logits, logits + vocab_count);
+  glm_sample::apply_penalties(adjusted.data(), vocab_count, vocab_begin,
+                              params,
+                              glm_sample::count_context(context_ids));
+  const std::vector<glm_sample::Candidate> local = glm_sample::local_topk(
+      adjusted.data(), vocab_count, vocab_begin, candidate_k);
+  const double local_lse = glm_sample::slice_logsumexp(
+      adjusted.data(), vocab_count, params.temperature);
+
+  std::memset(scratch, 0, elems * sizeof(uint16_t));
+  uint16_t* mine = scratch + static_cast<size_t>(rank) * rank_elems;
+  for (int i = 0; i < candidate_k; ++i) {
+    const glm_sample::Candidate& candidate = local[static_cast<size_t>(i)];
+    if (candidate.id < 0 || candidate.id >= (1 << (6 * kPickIdDigits)))
+      throw std::invalid_argument(
+          "sampling prefix: token id outside the pick encoding");
+    uint32_t logit_bits = 0;
+    std::memcpy(&logit_bits, &candidate.logit, sizeof(logit_bits));
+    uint16_t* encoded = mine + static_cast<size_t>(i) * kPickSlotsPerRank;
+    pick_encode_digits(encoded, logit_bits, kPickLogitDigits);
+    pick_encode_digits(encoded + kPickLogitDigits,
+                       static_cast<uint64_t>(candidate.id), kPickIdDigits);
+  }
+  uint64_t lse_bits = 0;
+  std::memcpy(&lse_bits, &local_lse, sizeof(lse_bits));
+  pick_encode_digits(
+      mine + static_cast<size_t>(candidate_k) * kPickSlotsPerRank, lse_bits,
+      kSamplingProfileLseDigits);
+
+  std::string err;
+  const uint64_t id = bus.allreduce(scratch, scratch, elems, &err);
+  if (id == 0)
+    throw std::runtime_error("sampling prefix gather: " + err);
+  const net::BusAllReduceResult folded = bus.wait_allreduce(id, timeout_ms);
+  if (!folded.ok)
+    throw std::runtime_error("sampling prefix gather: " + folded.error);
+
+  std::vector<std::vector<glm_sample::Candidate>> shards;
+  std::vector<double> slice_lses;
+  shards.reserve(static_cast<size_t>(world));
+  slice_lses.reserve(static_cast<size_t>(world));
+  for (int r = 0; r < world; ++r) {
+    const uint16_t* encoded_rank =
+        scratch + static_cast<size_t>(r) * rank_elems;
+    std::vector<glm_sample::Candidate> candidates;
+    candidates.reserve(static_cast<size_t>(candidate_k));
+    for (int i = 0; i < candidate_k; ++i) {
+      const uint16_t* encoded =
+          encoded_rank + static_cast<size_t>(i) * kPickSlotsPerRank;
+      glm_sample::Candidate candidate;
+      const uint32_t logit_bits = static_cast<uint32_t>(
+          pick_decode_digits(encoded, kPickLogitDigits));
+      std::memcpy(&candidate.logit, &logit_bits, sizeof(candidate.logit));
+      candidate.id = static_cast<int32_t>(pick_decode_digits(
+          encoded + kPickLogitDigits, kPickIdDigits));
+      candidates.push_back(candidate);
+    }
+    shards.push_back(std::move(candidates));
+
+    const uint64_t bits = pick_decode_digits(
+        encoded_rank + static_cast<size_t>(candidate_k) * kPickSlotsPerRank,
+        kSamplingProfileLseDigits);
+    double lse = 0.0;
+    std::memcpy(&lse, &bits, sizeof(lse));
+    slice_lses.push_back(lse);
+  }
+
+  const std::vector<glm_sample::Candidate> global =
+      glm_sample::merge_topk(std::move(shards), candidate_k);
+  const glm_sample::PrefixDecision decision = glm_sample::sample_from_prefix(
+      global, vocab_size, glm_sample::merge_logsumexp(slice_lses), params,
+      rng);
+
+  // ---- readback invariant: rank 0's decision digest reaches every rank --
+  const auto encode_digest = [](const glm_sample::PrefixDecision& d,
+                                uint16_t* out) {
+    pick_encode_digits(out, d.resolved ? 1u : 0u, 1);
+    pick_encode_digits(out + 1,
+                       static_cast<uint64_t>(
+                           static_cast<uint32_t>(d.result.token)) &
+                           ((1ull << (6 * kPickIdDigits)) - 1),
+                       kPickIdDigits);
+    uint32_t logprob_bits = 0;
+    std::memcpy(&logprob_bits, &d.result.logprob, sizeof(logprob_bits));
+    pick_encode_digits(out + 1 + kPickIdDigits, logprob_bits,
+                       kPickLogitDigits);
+    uint64_t mass_bits = 0;
+    std::memcpy(&mass_bits, &d.covered_mass, sizeof(mass_bits));
+    pick_encode_digits(out + 1 + kPickIdDigits + kPickLogitDigits, mass_bits,
+                       kSamplingProfileLseDigits);
+  };
+  std::array<uint16_t, kSamplingPrefixDigestElems> mine_digest{};
+  encode_digest(decision, mine_digest.data());
+  std::memset(scratch, 0, kSamplingPrefixDigestElems * sizeof(uint16_t));
+  if (rank == 0) std::copy(mine_digest.begin(), mine_digest.end(), scratch);
+  const uint64_t digest_id =
+      bus.allreduce(scratch, scratch, kSamplingPrefixDigestElems, &err);
+  if (digest_id == 0)
+    throw std::runtime_error("sampling prefix digest: " + err);
+  const net::BusAllReduceResult echoed =
+      bus.wait_allreduce(digest_id, timeout_ms);
+  if (!echoed.ok)
+    throw std::runtime_error("sampling prefix digest: " + echoed.error);
+  if (!std::equal(mine_digest.begin(), mine_digest.end(), scratch)) {
+    const bool peer_resolved = pick_decode_digits(scratch, 1) != 0;
+    const int32_t peer_token = static_cast<int32_t>(
+        pick_decode_digits(scratch + 1, kPickIdDigits));
+    std::string words;
+    for (size_t i = 0; i < kSamplingPrefixDigestElems; ++i) {
+      if (i) words += ",";
+      words += std::format("{:#06x}", scratch[i]);
+    }
+    throw std::runtime_error(std::format(
+        "bus_sampling_prefix: decision digest mismatch on rank {} (mine: "
+        "resolved={} token={} covered_mass={:.17g}; rank 0's decode: "
+        "resolved={} token={}): scratch[{}]",
+        rank, decision.resolved, decision.result.token,
+        decision.covered_mass, peer_resolved, peer_token, words));
+  }
+  return decision;
 }
 
 // ---------------------------------------------------------------------------

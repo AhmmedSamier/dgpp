@@ -885,6 +885,197 @@ DGPP_TEST(glm_sampling_profile_mass_gather_matches_centralized_loopback) {
                 std::to_string(dgpp::kSamplingProfileTopKs[i]));
 }
 
+// M6.6b's width-independent correctness seam over the real bus, in
+// GLM-5.3-Flash-FP8's actual default regime (temperature=1, top_p=.95, no
+// semantic top_k — the checkpoint's generation_config.json carries exactly
+// those two sampling fields). A peaked distribution resolves inside the
+// candidate prefix over a run of draws and must equal the sharded reference
+// bitwise on every rank; a deliberately flat distribution requests the exact
+// full-logit fallback without consuming its RNG draw. Penalties are applied
+// before the per-rank top-k on context ids owned by both shards, and the
+// cross-shard tie SURVIVES them (equal counts on both ids), so the id half
+// of the canonical order is on the wire and decides draws. Every call also
+// carries rank 0's decision digest back to every rank.
+DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
+  constexpr int kWorld = 2;
+  constexpr int kSlice = 300;
+  constexpr int kVocab = kWorld * kSlice;
+  constexpr int kCandidates = 32;
+  constexpr uint16_t kPort = 29926;
+  constexpr uint64_t kSeed = 0x53f1a5ull;
+  const std::vector<uint64_t> counters{4, 5, 6, 7, 8, 9, 10, 11};
+  constexpr uint64_t kFallbackCounter = 9;
+
+  std::vector<float> peaked(kVocab, -10.0f);
+  peaked[11] = 9.0f;
+  peaked[350] = 9.0f;  // cross-shard tie; the penalties below keep it one
+  peaked[207] = 8.5f;
+  const std::vector<float> flat(kVocab, 0.0f);
+  const std::vector<int32_t> context{11, 350, 401};
+  const std::vector<dgpp::glm_sample::VocabSlice> layout{{0, kSlice},
+                                                         {kSlice, kSlice}};
+  dgpp::glm_sample::Params params;
+  params.temperature = 1.0f;
+  params.top_p = 0.95f;
+  params.top_k = 0;
+  params.frequency_penalty = 0.05f;
+  params.presence_penalty = 0.10f;
+  params.logprobs = 3;
+
+  const auto identical = [](const dgpp::glm_sample::Result& a,
+                            const dgpp::glm_sample::Result& b) {
+    return a.token == b.token &&
+           std::memcmp(&a.logprob, &b.logprob, sizeof(float)) == 0 &&
+           a.top_logprobs == b.top_logprobs;
+  };
+
+  // Fixture sanity: the tie survives the penalties and the canonical order
+  // breaks it by id, so a draw can land on either shard's member.
+  {
+    std::vector<float> adjusted = peaked;
+    dgpp::glm_sample::apply_penalties(
+        adjusted.data(), kVocab, 0, params,
+        dgpp::glm_sample::count_context(context));
+    require(adjusted[11] == adjusted[350],
+            "fixture: the cross-shard tie must survive the penalties");
+    const std::vector<Candidate> top =
+        dgpp::glm_sample::local_topk(adjusted.data(), kVocab, 0, 2);
+    require(top[0].id == 11 && top[1].id == 350,
+            "fixture: the canonical order breaks the tie by id");
+  }
+
+  // Expectations: the sharded reference per counter. On this unambiguous
+  // nucleus it also equals sample_reference() bitwise (same three survivors,
+  // the shared selector's final arithmetic).
+  std::vector<dgpp::glm_sample::Result> expected;
+  bool both_tied_ids_drawn_11 = false;
+  bool both_tied_ids_drawn_350 = false;
+  for (uint64_t counter : counters) {
+    dgpp::glm_sample::Rng rng{kSeed, counter};
+    expected.push_back(dgpp::glm_sample::sample_reference_sharded(
+        peaked.data(), kVocab, layout, params, rng, context));
+    require(rng.counter == counter + 1, "the reference draws exactly once");
+    dgpp::glm_sample::Rng plain{kSeed, counter};
+    const dgpp::glm_sample::Result reference =
+        dgpp::glm_sample::sample_reference(peaked.data(), kVocab, params,
+                                           plain, context);
+    require(identical(expected.back(), reference),
+            "sharded reference differs from sample_reference on an "
+            "unambiguous nucleus at counter " + std::to_string(counter));
+    both_tied_ids_drawn_11 |= expected.back().token == 11;
+    both_tied_ids_drawn_350 |= expected.back().token == 350;
+  }
+  require(both_tied_ids_drawn_11 && both_tied_ids_drawn_350,
+          "fixture: the run of draws must land on both tied ids");
+  double expected_fallback_mass = 0.0;
+  {
+    // The flat fixture's transported mass: 32 of 600 equal tokens.
+    std::vector<float> adjusted = flat;
+    dgpp::glm_sample::apply_penalties(
+        adjusted.data(), kVocab, 0, params,
+        dgpp::glm_sample::count_context(context));
+    const std::vector<Candidate> prefix = dgpp::glm_sample::local_topk(
+        adjusted.data(), kVocab, 0, kCandidates);
+    dgpp::glm_sample::Rng rng{77, kFallbackCounter};
+    const dgpp::glm_sample::PrefixDecision d =
+        dgpp::glm_sample::sample_from_prefix(
+            prefix, kVocab,
+            dgpp::glm_sample::sharded_scaled_logsumexp(adjusted.data(), layout,
+                                                       params.temperature),
+            params, rng);
+    require(!d.resolved && rng.counter == kFallbackCounter,
+            "fixture: the flat prefix must be a fallback");
+    expected_fallback_mass = d.covered_mass;
+    // ... and the fallback's own answer exists: the complete list resolves
+    // with the draw the prefix left behind.
+    dgpp::glm_sample::Rng again{77, kFallbackCounter};
+    (void)dgpp::glm_sample::sample_reference_sharded(
+        flat.data(), kVocab, layout, params, again, context);
+    require(again.counter == kFallbackCounter + 1,
+            "fixture: the complete list consumes the reserved draw");
+  }
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses =
+      start_world(kWorld, kPort, 64 * 1024);
+  require(!buses.empty(), "sampling-prefix bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<dgpp::glm_sample::PrefixDecision>> resolved(kWorld);
+  std::vector<std::vector<uint64_t>> resolved_counters(kWorld);
+  std::vector<dgpp::glm_sample::PrefixDecision> fallback(kWorld);
+  std::vector<uint64_t> fallback_counters(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int rank = 0; rank < kWorld; ++rank) {
+    workers.emplace_back([&, rank] {
+      uint16_t* scratch = nullptr;
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      try {
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::sampling_prefix_scratch_elems(
+                                   kWorld, kCandidates),
+            cudaHostAllocDefault));
+        arrive_once();
+        for (uint64_t counter : counters) {
+          dgpp::glm_sample::Rng rng{kSeed, counter};
+          resolved[static_cast<size_t>(rank)].push_back(
+              dgpp::bus_sampling_prefix(
+                  *buses[static_cast<size_t>(rank)], rank, kWorld,
+                  peaked.data() + rank * kSlice, kSlice, rank * kSlice,
+                  kVocab, params, rng, context, kCandidates, scratch,
+                  test_wait_timeout_ms()));
+          resolved_counters[static_cast<size_t>(rank)].push_back(rng.counter);
+        }
+        dgpp::glm_sample::Rng fallback_rng{77, kFallbackCounter};
+        fallback[static_cast<size_t>(rank)] = dgpp::bus_sampling_prefix(
+            *buses[static_cast<size_t>(rank)], rank, kWorld,
+            flat.data() + rank * kSlice, kSlice, rank * kSlice, kVocab,
+            params, fallback_rng, context, kCandidates, scratch,
+            test_wait_timeout_ms());
+        fallback_counters[static_cast<size_t>(rank)] = fallback_rng.counter;
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& error) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(rank)] = error.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  for (int rank = 0; rank < kWorld; ++rank)
+    require(errors[static_cast<size_t>(rank)].empty(),
+            "sampling-prefix rank " + std::to_string(rank) + ": " +
+                errors[static_cast<size_t>(rank)]);
+  for (int rank = 0; rank < kWorld; ++rank) {
+    const auto& got = resolved[static_cast<size_t>(rank)];
+    require(got.size() == counters.size(), "every draw returned");
+    for (size_t i = 0; i < counters.size(); ++i) {
+      const std::string where = "rank " + std::to_string(rank) +
+                                " counter " + std::to_string(counters[i]);
+      require(got[i].resolved, "peaked bus prefix must resolve: " + where);
+      require(identical(got[i].result, expected[i]),
+              "bus prefix result differs from the sharded reference: " +
+                  where);
+      require(resolved_counters[static_cast<size_t>(rank)][i] ==
+                  counters[i] + 1,
+              "resolved bus prefix consumed the wrong RNG count: " + where);
+    }
+    require(!fallback[static_cast<size_t>(rank)].resolved,
+            "flat bus prefix must request full-logit fallback");
+    require(fallback_counters[static_cast<size_t>(rank)] == kFallbackCounter,
+            "bus fallback consumed the reserved RNG draw");
+    require(fallback[static_cast<size_t>(rank)].covered_mass ==
+                expected_fallback_mass,
+            "bus fallback mass differs from the centralized prefix");
+  }
+}
+
 // ---- M6 d3: end-to-end greedy generation ----------------------------------
 // The d3 criterion on the fixture, stated as the invariant that actually
 // holds: the DISTRIBUTED pick (per-rank slice argmax + the bus

@@ -29,6 +29,10 @@ using dgpp::glm_sample::Params;
 using dgpp::glm_sample::Rng;
 using dgpp::glm_sample::Result;
 using dgpp::glm_sample::sample_reference;
+using dgpp::glm_sample::sample_from_prefix;
+using dgpp::glm_sample::sample_reference_sharded;
+using dgpp::glm_sample::sharded_scaled_logsumexp;
+using dgpp::glm_sample::VocabSlice;
 using dgpp::glm_sample::select_from_sorted;
 using dgpp::glm_sample::sort_slice;
 using dgpp::glm_sample::slice_logsumexp;
@@ -78,6 +82,14 @@ std::vector<std::pair<int, int>> slices_for(int n, int world) {
     out.push_back({begin, len});
     begin += len;
   }
+  return out;
+}
+
+// The same split as a vocabulary layout for the sharded sampler.
+std::vector<VocabSlice> layout_for(int n, int world) {
+  std::vector<VocabSlice> out;
+  for (const auto& [begin, len] : slices_for(n, world))
+    out.push_back({begin, len});
   return out;
 }
 
@@ -368,4 +380,290 @@ DGPP_TEST(topk_probability_mass_rejects_bad_measurement_inputs) {
     threw = true;
   }
   require(threw, "empty lse slice must fail");
+}
+
+DGPP_TEST(sampling_prefix_resolves_exact_top_p_nucleus) {
+  // The first three tokens carry >95% of the full distribution, while the
+  // first two do not. A three-candidate prefix therefore knows the exact
+  // nucleus and must produce the same result/counter as the full oracle for
+  // every draw.
+  std::vector<float> logits{9.0f, 8.0f, 7.0f};
+  logits.resize(100, -10.0f);
+  const std::vector<Candidate> sorted =
+      sort_slice(logits.data(), logits.size(), 0);
+  const std::vector<Candidate> prefix(sorted.begin(), sorted.begin() + 3);
+  Params p;
+  p.temperature = 1.0f;
+  p.top_p = 0.95f;
+  p.logprobs = 3;
+  const double lse = slice_logsumexp(logits.data(), logits.size(),
+                                     p.temperature);
+  for (uint64_t seed = 0; seed < 100; ++seed) {
+    Rng expected_rng{seed, 7};
+    Rng actual_rng = expected_rng;
+    const Result expected = sample_reference(logits.data(), logits.size(), p,
+                                             expected_rng, {});
+    const auto actual = sample_from_prefix(prefix, logits.size(), lse, p,
+                                           actual_rng);
+    require(actual.resolved, "top-p crossing inside prefix must resolve");
+    require(results_identical(actual.result, expected),
+            "resolved prefix result differs from full oracle");
+    require(actual_rng.counter == expected_rng.counter,
+            "resolved prefix must consume exactly one oracle draw");
+  }
+}
+
+DGPP_TEST(sampling_prefix_fallback_preserves_rng_draw) {
+  // A flat 100-token distribution gives this 32-token prefix only 32% mass,
+  // nowhere near the model default's 95% nucleus.
+  const std::vector<float> logits(100, 0.0f);
+  const std::vector<Candidate> sorted =
+      sort_slice(logits.data(), logits.size(), 0);
+  const std::vector<Candidate> prefix(sorted.begin(), sorted.begin() + 32);
+  Params p;
+  p.temperature = 1.0f;
+  p.top_p = 0.95f;
+  Rng rng{1234, 19};
+  const auto decision = sample_from_prefix(
+      prefix, logits.size(),
+      slice_logsumexp(logits.data(), logits.size(), p.temperature), p, rng);
+  require(!decision.resolved, "incomplete top-p prefix must request fallback");
+  require(std::abs(decision.covered_mass - 0.32) < 1e-14,
+          "fallback must report the exact transported mass");
+  require(rng.counter == 19,
+          "fallback must preserve the RNG draw for the full gather");
+}
+
+DGPP_TEST(sampling_prefix_finite_topk_is_complete_support) {
+  FixtureRng fx;
+  const std::vector<float> logits = make_logits(73, fx);
+  const std::vector<int32_t> context{1, 1, 8, 55};
+  Params p;
+  p.temperature = 0.8f;
+  p.top_k = 12;
+  p.top_p = 0.87f;
+  p.min_p = 0.03f;
+  p.repetition_penalty = 1.2f;
+  p.frequency_penalty = 0.1f;
+  p.presence_penalty = 0.2f;
+
+  std::vector<float> adjusted = logits;
+  apply_penalties(adjusted.data(), adjusted.size(), 0, p,
+                  count_context(context));
+  const std::vector<Candidate> prefix =
+      local_topk(adjusted.data(), adjusted.size(), 0, p.top_k);
+  const double lse =
+      slice_logsumexp(adjusted.data(), adjusted.size(), p.temperature);
+  for (uint64_t seed = 0; seed < 32; ++seed) {
+    Rng expected_rng{seed, 0};
+    Rng actual_rng = expected_rng;
+    const Result expected = sample_reference(logits.data(), logits.size(), p,
+                                             expected_rng, context);
+    const auto actual = sample_from_prefix(prefix, logits.size(), lse, p,
+                                           actual_rng);
+    require(actual.resolved, "complete finite top-k support must resolve");
+    require(results_identical(actual.result, expected),
+            "finite top-k prefix differs from full oracle");
+    require(actual_rng.counter == expected_rng.counter,
+            "finite top-k prefix counter differs from oracle");
+  }
+}
+
+// The load-bearing property of the seam: a prefix that resolves is bitwise
+// the complete list's result (which is the full-logit fallback), for every
+// regime a request can ask for, at several widths, on flat and on peaked
+// distributions with penalties across shards. A fallback leaves the counter
+// where it was and the complete list then consumes that same draw.
+DGPP_TEST(sampling_prefix_is_width_independent_in_every_regime) {
+  struct Regime {
+    const char* name;
+    Params p;
+  };
+  std::vector<Regime> regimes;
+  {
+    Params p;  // GLM-5.3-Flash-FP8's generation_config.json
+    p.temperature = 1.0f;
+    p.top_p = 0.95f;
+    p.logprobs = 2;
+    regimes.push_back({"model default", p});
+  }
+  {
+    Params p;
+    p.temperature = 0.7f;
+    p.top_p = 0.9f;
+    p.logprobs = 2;
+    regimes.push_back({"cool nucleus", p});
+  }
+  {
+    Params p;
+    p.temperature = 1.0f;
+    p.top_p = 1.0f;
+    p.logprobs = 2;
+    regimes.push_back({"pure temperature", p});
+  }
+  {
+    Params p;
+    p.temperature = 0.8f;
+    p.top_p = 0.9f;
+    p.min_p = 0.05f;
+    p.logprobs = 2;
+    regimes.push_back({"min-p", p});
+  }
+  const std::vector<int32_t> context{3, 3, 40, 77, 128};
+  FixtureRng fx;
+  for (const Regime& regime : regimes) {
+    int resolved = 0;
+    int fallbacks = 0;
+    for (int fixture = 0; fixture < 40; ++fixture) {
+      const int n = 129 + fixture * 3;  // uneven three-way layouts
+      const float spread = (fixture % 2) ? 1.5f : 8.0f;  // flat / peaked
+      const std::vector<float> logits = make_logits(n, fx, spread);
+      const std::vector<VocabSlice> layout = layout_for(n, 3);
+      // What the sharded pipeline feeds the decision: penalties, the
+      // canonical order, the fold normalizer.
+      std::vector<float> adjusted = logits;
+      apply_penalties(adjusted.data(), n, 0, regime.p, count_context(context));
+      const std::vector<Candidate> sorted = sort_slice(adjusted.data(), n, 0);
+      const double lse =
+          sharded_scaled_logsumexp(adjusted.data(), layout, regime.p.temperature);
+      for (int k : {4, 16, 64}) {
+        const std::vector<Candidate> prefix(sorted.begin(),
+                                            sorted.begin() + std::min(k, n));
+        for (uint64_t seed = 0; seed < 8; ++seed) {
+          const std::string where = std::string(regime.name) + " n=" +
+                                    std::to_string(n) + " k=" +
+                                    std::to_string(k) + " seed=" +
+                                    std::to_string(seed);
+          Rng oracle_rng{seed, 11};
+          Rng rng = oracle_rng;
+          const Result oracle = sample_reference_sharded(
+              logits.data(), n, layout, regime.p, oracle_rng, context);
+          require(oracle_rng.counter == 12,
+                  "the sharded reference draws exactly once: " + where);
+          const auto got = sample_from_prefix(prefix, n, lse, regime.p, rng);
+          if (got.resolved) {
+            ++resolved;
+            require(results_identical(got.result, oracle),
+                    "resolved prefix differs from the complete list: " + where);
+            require(rng.counter == 12,
+                    "resolved prefix must consume exactly one draw: " + where);
+          } else {
+            ++fallbacks;
+            require(rng.counter == 11,
+                    "fallback must leave the draw for the gather: " + where);
+            Rng again{seed, 11};
+            const auto full =
+                sample_from_prefix(sorted, n, lse, regime.p, again);
+            require(full.resolved && results_identical(full.result, oracle) &&
+                        again.counter == 12,
+                    "the complete list must resolve the fallback: " + where);
+          }
+        }
+      }
+    }
+    require(resolved > 0 && fallbacks > 0,
+            std::string("regime must exercise both outcomes: ") + regime.name +
+                " resolved=" + std::to_string(resolved) +
+                " fallbacks=" + std::to_string(fallbacks));
+  }
+}
+
+// The case a complete-list shortcut got wrong: twenty equal logits at
+// top_p=0.5 put the nucleus crossing on an exact tie, where a single fp32
+// cumulative sum and the fp64 fold disagree (10 vs 11 survivors, and the
+// token with them on half the draws). One arithmetic, one nucleus.
+DGPP_TEST(sampling_prefix_exact_tie_crossing_is_width_independent) {
+  const int n = 20;
+  const std::vector<float> logits(n, 0.25f);
+  const std::vector<VocabSlice> layout{{0, 10}, {10, 10}};
+  Params p;
+  p.temperature = 1.0f;
+  p.top_p = 0.5f;
+  p.logprobs = 11;  // reports min(11, nucleus): the nucleus size is pinned
+  const std::vector<Candidate> sorted = sort_slice(logits.data(), n, 0);
+  const std::vector<Candidate> prefix(sorted.begin(), sorted.begin() + 15);
+  const double lse = sharded_scaled_logsumexp(logits.data(), layout, 1.0f);
+  size_t nucleus = 0;
+  for (uint64_t seed = 0; seed < 200; ++seed) {
+    Rng oracle_rng{seed, 0};
+    Rng rng{seed, 0};
+    const Result oracle =
+        sample_reference_sharded(logits.data(), n, layout, p, oracle_rng, {});
+    const auto got = sample_from_prefix(prefix, n, lse, p, rng);
+    require(got.resolved, "the crossing lies inside a 15-wide prefix");
+    require(results_identical(got.result, oracle),
+            "tie crossing: prefix and complete list disagree at seed " +
+                std::to_string(seed));
+    require(rng.counter == 1 && oracle_rng.counter == 1, "one draw each");
+    nucleus = oracle.top_logprobs.size();
+  }
+  require(nucleus == 10 || nucleus == 11,
+          "fixture sanity: the nucleus is the boundary set");
+}
+
+DGPP_TEST(sampling_prefix_pure_walk_needs_the_requested_logprobs) {
+  // Pure temperature sampling can only report logprobs it holds; asking for
+  // more than the prefix width is a fallback before any draw is consumed.
+  const std::vector<float> logits{3.0f, 2.0f, 1.0f, 0.0f, -1.0f};
+  const std::vector<VocabSlice> layout{{0, 5}};
+  const std::vector<Candidate> sorted = sort_slice(logits.data(), 5, 0);
+  const std::vector<Candidate> prefix(sorted.begin(), sorted.begin() + 2);
+  const double lse = sharded_scaled_logsumexp(logits.data(), layout, 1.0f);
+  Params p;
+  p.temperature = 1.0f;
+  p.top_p = 1.0f;
+  p.logprobs = 3;
+  Rng rng{5, 21};
+  const auto got = sample_from_prefix(prefix, 5, lse, p, rng);
+  require(!got.resolved && rng.counter == 21,
+          "logprobs beyond the prefix must fall back without a draw");
+  p.logprobs = 2;
+  int inside = 0;
+  for (uint64_t seed = 0; seed < 64; ++seed) {
+    Rng oracle_rng{seed, 21};
+    Rng walk{seed, 21};
+    const Result oracle =
+        sample_reference_sharded(logits.data(), 5, layout, p, oracle_rng, {});
+    const auto d = sample_from_prefix(prefix, 5, lse, p, walk);
+    if (d.resolved) {
+      ++inside;
+      require(results_identical(d.result, oracle) && walk.counter == 22,
+              "pure walk inside the prefix must equal the complete list");
+    } else {
+      require(walk.counter == 21, "pure walk in the tail must not draw");
+    }
+  }
+  require(inside > 0 && inside < 64, "the walk must land on both sides");
+}
+
+DGPP_TEST(sample_reference_sharded_rejects_bad_layouts) {
+  FixtureRng fx;
+  const std::vector<float> logits = make_logits(30, fx);
+  Params p;
+  p.temperature = 1.0f;
+  const auto rejects = [&](const std::vector<VocabSlice>& layout) {
+    Rng rng{1, 0};
+    try {
+      (void)sample_reference_sharded(logits.data(), 30, layout, p, rng, {});
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+    return false;
+  };
+  require(rejects({}), "empty layout");
+  require(rejects({{0, 10}, {11, 19}}), "a gap between slices");
+  require(rejects({{0, 10}, {5, 25}}), "overlapping slices");
+  require(rejects({{0, 10}, {10, 10}}), "a layout short of the vocabulary");
+  require(rejects({{10, 20}, {0, 10}}), "slices out of rank order");
+  require(!rejects({{0, 10}, {10, 20}}), "a covering layout is accepted");
+  Rng greedy{1, 0};
+  bool threw = false;
+  try {
+    Params g;
+    g.temperature = 0.0f;
+    (void)sample_reference_sharded(logits.data(), 30, {{0, 30}}, g, greedy, {});
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "temperature <= 0 is not the sharded sampler's path");
 }

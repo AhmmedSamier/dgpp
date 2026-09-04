@@ -1670,6 +1670,43 @@ choose the smallest measured k at or below a 1% fallback rate. The profiler is
 not the device path and its eager collective is not a throughput measurement;
 the three-text fabric evidence is still owed before k is fixed.
 
+The width-independent correctness seam is built (2026-09-04), before fixing
+that k. `sample_from_prefix` consumes the canonical global candidate prefix
+and the fold normalizer of the complete temperature-scaled distribution (each
+slice's fp64 log-sum-exp folded in rank order), and returns either an exact
+sample or an explicit fallback. Width independence is by construction: every
+step whose value depends on the unseen tail goes through the fold normalizer,
+and the same code runs on a prefix and on the complete list, so a prefix that
+resolves yields bitwise what the complete list yields — and the complete list
+IS the full-logit fallback (`sample_reference_sharded`, the reference at a
+given vocabulary layout). A fallback leaves `(seed, counter)` untouched so
+that path consumes the SAME draw. The regimes: finite `top_k` materializes
+its support and runs the shared selector unchanged (bitwise
+`sample_reference`); `min_p` and `top_p` decide their survivor set on the
+prefix (the first min-p failure in the scaled-logit domain; the nucleus
+crossing on the fp64 fold masses) and hand the materialized set to the shared
+selector; pure temperature sampling walks the fold masses and resolves only
+when the draw lands inside the prefix. In the unbounded regimes the fold is
+therefore the definition of the normalizer; `sample_reference`'s single fp32
+denominator coincides with it except where the two disagree on a crossing
+(an exact-tie boundary) — precisely the event a complete-list shortcut in the
+first cut got wrong, now pinned by a unit gate. `bus_sampling_prefix` applies
+request penalties before the local top-k, transports every fp32 candidate and
+fp64 slice LSE losslessly as six-bit bf16 digits, runs the decision
+identically on every rank, and then carries rank 0's decision digest
+(resolved flag, token, logprob, covered mass — a function of every
+transported digit) back through a second latency collective that every rank
+must decode identically: the greedy pick's load-bearing readback invariant,
+so a corrupt readback on one rank is loud at the collective rather than a
+silently divergent token. The two-rank loopback gate exercises
+GLM-5.3-Flash-FP8's actual default regime (`temperature=1.0`, `top_p=0.95`,
+no semantic `top_k` — the checkpoint's `generation_config.json` carries
+exactly those two sampling fields) over a run of draws against the sharded
+reference bitwise, with a cross-shard tie that survives the penalties and
+decides draws, rank-identical RNG state, and the flat-distribution fallback.
+It is deliberately a host oracle/transport gate; the device lowering, the
+full-logit fallback's collective, and the request seam remain below.
+
 *The device path.* The pick table (§9) generalizes from 2 to k candidates
 per rank and gains a digit group for each rank's slice log-sum-exp; the
 one recorded gather then delivers the exact global top-k (the
