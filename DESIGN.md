@@ -2289,7 +2289,9 @@ ms/token, text-dependent acceptance), against `glm_gen_check`'s 31.3 and
 under 1 ms per replay at T=1 and ~1.5 with MTP; the client sees one SSE
 chunk per replay. Op-stream md5 identical on all four ranks of the eager,
 T=1 and MTP worlds over the same 1144 tokens. Time to first token is the
-eager prefill, ~30 ms per prompt token in every mode.
+eager prefill in every mode — measured 2026-09-04 at 25.5 / 19.4 / 13.2 /
+9.7 ms per prompt token for 64 / 256 / 1024 / 2048-token prompts, each one
+2048-token chunk (PLAN's M6 tail; the record).
 
 **The adaptive graph engine** (`GlmGraphEngineAdapter`, M6.6a Phase 2): the
 adapter owns two execution shapes. It lazily captures one Phase-1 scalar graph

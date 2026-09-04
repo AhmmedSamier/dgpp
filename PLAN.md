@@ -66,7 +66,10 @@ kernel rounds took it from Stage 4c's ~175 without a service change). The
 op-stream md5 was identical across all four ranks of every measured world;
 the fixed-batch run's 22 full 256-token answers were token-identical across
 both modes and every occupancy. Time to first token is the eager prefill in
-every mode, ~30 ms per prompt token.
+every mode: re-measured 2026-09-04 at 25.5 / 19.4 / 13.2 / 9.7 ms per prompt
+token for 64 / 256 / 1024 / 2048-token prompts (one 2048-token chunk each;
+the record's twelfth 2026-09-04 entry) — about 5 s for a typical chat
+prompt, and the next thing to attack.
 
 The fast path exists beside it, in `glm_gen_check`: the recorded decode
 step (`--decode-graph`, one CUDA graph per token, 90 collective nodes) runs
@@ -102,10 +105,15 @@ Suggested order for what remains, each item's design in its section:
 1. M6: the prefill behind the time to first token (sampling on the bus,
    tool calls / `reasoning_content`, constrained decoding,
    `response_format`, typed arguments, drain-on-stop and grow-on-demand
-   admission all landed 2026-09-04)
-   (~30 ms per prompt token — first re-measure it: phase 2's m ≤ 8 GEMV
-   routing changed the path of 5–8-row prefill chunks and per-expert
-   prefill GEMMs with 5–8 routed tokens, unmeasured).
+   admission all landed 2026-09-04). RE-MEASURED 2026-09-04
+   (`scripts/fabric_prefill_check.sh`, the record's twelfth entry): 25.5 /
+   19.4 / 13.2 / 9.7 ms per prompt token at 64 / 256 / 1024 / 2048 tokens,
+   every prompt one 2048-token chunk, so the falling per-token cost is
+   per-row work that amortizes with M — small-M kernels, the per-expert
+   prefill GEMMs with few routed tokens — not the weight read (one pass's
+   5.9 GB is ~25 ms). A 256-token chat prompt waits ~5 s for its first
+   token; the marginal cost at 2048 is still ~6 ms/token against a
+   bandwidth floor of well under 1 ms/token per row. This is the work.
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).
