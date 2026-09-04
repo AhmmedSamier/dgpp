@@ -59,8 +59,11 @@ through the journal on every rank and their clients get a `server_shutdown`
 error before the bus comes down. Admission is full-reserve by default, with
 grow-on-demand as an opt-in policy that admits optimistically and sheds the
 youngest request when the KV pool runs out, rank-identical by construction.
-The prefill behind the time to first token and the prefix cache are open
-items; `PLAN.md` has the status per milestone and the designs
+The prefill behind the time to first token is
+being taken down (a 256-token prompt's first token went from 5 s to 1.26 s
+on 2026-09-04 with the MoE experts on one grouped launch per layer; the
+folds, the per-layer sync and long-segment GEMMs are next) and the prefix
+cache is open; `PLAN.md` has the status per milestone and the designs
 for what remains, `DESIGN.md` the contracts as built.
 
 ## Documentation

@@ -16,6 +16,10 @@ namespace {
 // k-slice [k0, k0+BK) (BK | 128) lies inside scale column k0/128.
 constexpr int BM = 16;
 constexpr int BN = 64;
+// Rows at or below which the chunked GEMV beats the tile kernel (measured
+// 2026-09-04: the crossover sits near 128-256 rows for the MoE experts'
+// n=512 slabs; the tile kernel's grid is n/64 x m/16 blocks).
+constexpr int kGemvMaxM = 128;
 constexpr int BK = 32;
 constexpr int BK_PAD = BK + 8;  // u16 pad breaks the worst bank conflicts
 constexpr int kBlockThreads = (BN / 8) * 32;  // 8 warps, one n8 group each
@@ -184,14 +188,18 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
         out, 0, static_cast<size_t>(m) * n * sizeof(OutT), stream));
     return;
   }
-  // Decode-shaped calls take the row-independent bandwidth GEMV (the tile
-  // below is latency-bound at m=1 — see fp8_gemv.cuh). A serving graph can
-  // contain eight rows, while one GEMV launch carries at most four (and may
-  // carry fewer when K fills the 48-KiB smem budget). Chunk that decode
-  // ceiling through the same scalar-order core instead of changing to the
-  // tile kernel solely because occupancy grew. Each output row is therefore
-  // bitwise invariant to the selected graph width.
-  if (m >= 1 && m <= 8 && fp8_gemv::shape_ok(w_payload, /*rows=*/1, k)) {
+  // Small-M calls take the row-independent bandwidth GEMV (the tile below
+  // is latency-bound at small m — see fp8_gemv.cuh): one GEMV launch
+  // carries at most four rows (fewer when K fills the 48-KiB smem budget),
+  // and the rows are chunked through the same scalar-order core, so each
+  // output row is bitwise invariant to m and to the path — the two kernels
+  // agree bit for bit, which is what makes this threshold a pure
+  // performance knob. It was 8 (the decode-row bound); the 2026-09-04
+  // prefill profile found the tile kernel at 578 us for the MoE experts'
+  // 9..30-row segments (grid 8 x 1..2 blocks on a 48-SM part) against 15 us
+  // per four-row GEMV launch, so prefill-sized segments go this way too.
+  // The tile kernel keeps the large-m shapes where its grid fills the GPU.
+  if (m >= 1 && m <= kGemvMaxM && fp8_gemv::shape_ok(w_payload, /*rows=*/1, k)) {
     for (int row0 = 0; row0 < m;) {
       int rows = std::min(fp8_gemv::kMaxRows, m - row0);
       while (!fp8_gemv::shape_ok(w_payload, rows, k)) --rows;

@@ -38,6 +38,7 @@
 
 #include <cuda_runtime.h>
 
+#include "kernels/glm_moe_launch.hpp"
 #include "models/glm_moe.hpp"
 
 namespace dgpp {
@@ -120,11 +121,6 @@ class GlmMoeLayer {
   void rebind(const GlmMoeWeights& w) { w_ = w; }
 
  private:
-  void run_expert_segment(const uint16_t* x, const int32_t* rows_dev,
-                          const float* row_w_dev, int n_rows,
-                          const GlmQuantMatrix& gate,
-                          const GlmQuantMatrix& up,
-                          const GlmQuantMatrix& down, cudaStream_t stream);
   void check_expert_geometry() const;
 
   GlmMoeWeights w_;
@@ -169,6 +165,30 @@ class GlmMoeLayer {
   std::vector<int32_t> h_rows_;
   std::vector<float> h_row_w_;
   std::vector<int> h_counts_;
+  // The prefill path's staging (2026-09-04): PINNED, so its copies are
+  // truly asynchronous — a pageable async copy is a synchronous staged
+  // copy, and the per-expert form of it cost 1.4 s of a 5 s 256-token
+  // prefill. The router's ids/weights/biased come down into the pinned
+  // mirrors (then into the vectors above, which callers keep references
+  // to); the segmented rows/weights go up ONCE per layer from the pinned
+  // arrays, each segment addressed by offset; the shared expert's identity
+  // rows and unit weights live on the device from construction.
+  // The grouped expert path (2026-09-04): the layer's rows — every routed
+  // (token, slot) in ascending-expert segment order, then the tokens once
+  // more for the shared expert — gathered at once; one grouped launch per
+  // matrix over the routed segments and one over the shared segment; the
+  // per-token ordered accumulation in one pass. Buffers are sized to
+  // max_tokens * (top_k + 1) rows.
+  int32_t* h_ids_pinned_ = nullptr;      // [max_tokens * top_k]
+  float* h_weights_pinned_ = nullptr;    // [max_tokens * top_k]
+  float* h_biased_pinned_ = nullptr;     // [max_tokens * n_experts]
+  int32_t* h_seg_rows_ = nullptr;        // [rows_total], pinned
+  int32_t* h_slot_row_ = nullptr;        // [max_tokens * top_k], pinned
+  MoeSegment* h_segs_ = nullptr;         // [n_experts + 1], pinned
+  MoeExpertView* h_views_prefill_ = nullptr;  // [(n_experts + 1) * 3], pinned
+  int32_t* d_slot_row_ = nullptr;        // [max_tokens * top_k]
+  MoeSegment* d_segs_ = nullptr;         // [n_experts + 1]
+  MoeExpertView* d_views_prefill_ = nullptr;  // [(n_experts + 1) * 3]
   // The expert-view upload source. PINNED, not a plain vector: a
   // pageable-source cudaMemcpyAsync performs a stream sync before the
   // copy initiates (driver contract), which drains the whole step's

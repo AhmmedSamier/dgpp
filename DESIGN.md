@@ -1089,11 +1089,25 @@ compressed E4M3+scale weights (§4).
 
 Two execution paths, as built:
 
-- *Prefill* (chunk-amortized, correctness first): the router's ids come to
-  the host once per layer, the host segments tokens per expert, and each
-  segment runs gather → gate/up GEMMs → swiglu → down GEMM → ordered
-  accumulate through `IGemm`. One device sync per MoE layer per chunk,
-  amortized over up to 2048 tokens.
+- *Prefill* (chunk-amortized; the grouped path since 2026-09-04): the
+  router's ids come to the host once per layer (one sync per MoE layer per
+  chunk) and the host segments the (token, slot) pairs by ascending expert
+  into pinned staging uploaded once; then the layer's rows — every routed
+  pair in segment order, the tokens once more for the shared expert — are
+  gathered at once and run as ONE launch per matrix over every non-empty
+  segment (`moe_grouped_gemv_kernel`: block (x, y) is segment y against
+  eight weight rows of its expert, rows staged four at a time through the
+  same `fp8_gemv::block_rows` the decode GEMV uses, so every output row is
+  bitwise the chunked GEMV's; the shared segment alone splits across
+  blocks), swiglu over every row, the fp32 down the same way, and the
+  per-token ordered accumulation in one pass (`moe_accum_ordered_kernel`:
+  the K slots sorted by expert id, `__fmaf_rn` from zero, the shared row
+  at weight 1, one bf16 rounding — the same chain). The gate/up launches
+  run at the DRAM floor of reading every touched expert once per chunk;
+  on long segments (a 2048-token chunk's ~57 rows) the scalar core is
+  compute-bound and a tensor-core grouped GEMM is the next step. Before
+  this the experts ran per segment through the small-M tile GEMM — 578 µs
+  a call on an 8-block grid — which was 3.5 of a 256-token prefill's 5.2 s.
 - *Decode* (`GlmMoeLayer::enqueue_decode`, M6 Stage 4c and rounds 2/7/8):
   zero host round trips. The router leaves ids ascending per row on the
   device; a slot-ranking kernel orders the (row, slot) work by expert id
@@ -2291,7 +2305,9 @@ chunk per replay. Op-stream md5 identical on all four ranks of the eager,
 T=1 and MTP worlds over the same 1144 tokens. Time to first token is the
 eager prefill in every mode — measured 2026-09-04 at 25.5 / 19.4 / 13.2 /
 9.7 ms per prompt token for 64 / 256 / 1024 / 2048-token prompts, each one
-2048-token chunk (PLAN's M6 tail; the record).
+2048-token chunk, then 4.9 ms per token at 256 after the grouped MoE path
+of the same day (PLAN's M6 tail; the record's twelfth and thirteenth
+entries).
 
 **The adaptive graph engine** (`GlmGraphEngineAdapter`, M6.6a Phase 2): the
 adapter owns two execution shapes. It lazily captures one Phase-1 scalar graph

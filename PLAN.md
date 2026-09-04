@@ -66,10 +66,13 @@ kernel rounds took it from Stage 4c's ~175 without a service change). The
 op-stream md5 was identical across all four ranks of every measured world;
 the fixed-batch run's 22 full 256-token answers were token-identical across
 both modes and every occupancy. Time to first token is the eager prefill in
-every mode: re-measured 2026-09-04 at 25.5 / 19.4 / 13.2 / 9.7 ms per prompt
+every mode: measured 2026-09-04 at 25.5 / 19.4 / 13.2 / 9.7 ms per prompt
 token for 64 / 256 / 1024 / 2048-token prompts (one 2048-token chunk each;
-the record's twelfth 2026-09-04 entry) — about 5 s for a typical chat
-prompt, and the next thing to attack.
+the record's twelfth 2026-09-04 entry), then cut the same day to 4.9 ms per
+token at 256 (1.26 s for a chat prompt, from 5 s) and ~5.0 at 2048 by
+moving the MoE experts onto one grouped launch per matrix per layer (the
+thirteenth entry); the folds, the per-layer sync and the long-segment
+GEMM are next.
 
 The fast path exists beside it, in `glm_gen_check`: the recorded decode
 step (`--decode-graph`, one CUDA graph per token, 90 collective nodes) runs
@@ -114,6 +117,20 @@ Suggested order for what remains, each item's design in its section:
    5.9 GB is ~25 ms). A 256-token chat prompt waits ~5 s for its first
    token; the marginal cost at 2048 is still ~6 ms/token against a
    bandwidth floor of well under 1 ms/token per row. This is the work.
+   ROUND 1 (2026-09-04, the record's thirteenth entry): the profile put
+   3.5 of the 5.2 s in the MoE experts' small-M tile GEMM (578 µs a call,
+   an 8-block grid) and 1.4 s of API time in per-expert pageable copies;
+   the experts now run as ONE grouped launch per matrix per layer on the
+   fp8 GEMV core (bitwise the chunked GEMV, gated), the staging is pinned,
+   and the scale GEMM routes m <= 128 through the GEMV — 256 tokens 4958 →
+   1257 ms (4.9 ms/token), 2048 tokens 19786 → ~10300, generated ids
+   unchanged on every rank. What remains at 256 tokens: MoE at the DRAM
+   floor 0.58 s, the bulk folds 0.26 s (2 MB in 1.4 ms — ~1.5 GB/s), host
+   gaps ~0.3 s (the per-MoE-layer router sync); at 2048: the folds 2.9 s
+   (16 MB in 16 ms), the GEMV core compute-bound on long segments 3.4 s,
+   the 8-row DSA attention tiles 0.9 s. Next, in order: the bulk fold's
+   throughput; device-side segmentation to drop the per-layer sync; a
+   grouped tensor-core GEMM for long segments; wider DSA prefill tiles.
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).

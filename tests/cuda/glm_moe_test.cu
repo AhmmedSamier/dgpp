@@ -25,6 +25,8 @@
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "kernels/glm_moe_launch.hpp"
+#include "kernels/scale_gemm.hpp"
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
 #include "kernels/glm_moe_launch.hpp"
@@ -425,6 +427,160 @@ void require_within_fold_budget(
   require(violations == 0, "sliced fold: element outside the partials' "
                            "rounding budget");
   require(l2 < 4e-3, "sliced fold: l2 budget");
+}
+
+// ---- the grouped prefill path (2026-09-04) --------------------------------
+
+DGPP_TEST(moe_grouped_gemv_is_bitwise_the_chunked_scale_gemm_per_segment) {
+  // GIVEN segments of every shape the prefill produces — one row, a partial
+  // group, several full groups plus a remainder (the multi-group loop, which
+  // no other gate reaches), a long shared-style segment — over an output
+  // width that leaves dead warps in the last block (n % kWarps != 0), and
+  // the fp32 down variant with a 16-multiple k,
+  // THEN every output row is bitwise the per-segment scale GEMM's (the same
+  // fp8_gemv core, four rows per group).
+  struct Shape { int I; bool test_down; };
+  for (const Shape sh : {Shape{204, false}, Shape{208, true}}) {
+    SmallCase c = make_small_case(/*E=*/6, /*H=*/4096, /*I=*/sh.I, /*K=*/2,
+                                  /*tokens=*/64, 0x6D0 + sh.I);
+    c.alloc();
+    const int H = c.cfg.hidden, I = sh.I, E = c.cfg.n_experts;
+    // Segments partition the 64 activation rows: lengths 1,5,4,9,13,2,30.
+    const int lens[] = {1, 5, 4, 9, 13, 2, 30};
+    std::vector<dgpp::MoeSegment> segs;
+    int row0 = 0;
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); ++i) {
+      segs.push_back(dgpp::MoeSegment{row0, lens[i], static_cast<int>(i % (E + 1))});
+      row0 += lens[i];
+    }
+    require(row0 == 64, "segments cover the rows");
+    dgpp::MoeSegment* d_segs = nullptr;
+    dgpp::MoeExpertView* d_views = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_segs, segs.size() * sizeof(dgpp::MoeSegment)));
+    std::memcpy(d_segs, segs.data(), segs.size() * sizeof(dgpp::MoeSegment));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_views, (E + 1) * 3 * sizeof(dgpp::MoeExpertView)));
+    for (int m = 0; m < (E + 1) * 3; ++m)
+      d_views[m] = dgpp::MoeExpertView{c.expert_mats[m].payload, c.expert_mats[m].scales};
+    // gate (which = 0): [64][I] bf16 from act [64][H].
+    uint16_t *d_grouped = nullptr, *d_ref = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_grouped, 64 * I * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_ref, 64 * I * 2));
+    DGPP_CUDA_OK(cudaMemset(d_grouped, 0xA5, 64 * I * 2));
+    DGPP_CUDA_OK(cudaMemset(d_ref, 0x5A, 64 * I * 2));
+    dgpp::launch_moe_grouped_gemv_bf16(c.d_hidden, H, d_segs, static_cast<int>(segs.size()),
+                                 30, /*rows_per_block=*/8, d_views, 0, d_grouped, I, I, H, nullptr);
+    for (const dgpp::MoeSegment& sg : segs) {
+      const GlmQuantMatrix& g = c.expert_mats[sg.expert * 3 + 0];
+      dgpp::launch_scale_gemm_bf16(c.d_hidden + static_cast<size_t>(sg.row0) * H, H,
+                             g.payload, g.scales,
+                             d_ref + static_cast<size_t>(sg.row0) * I, sg.rows, I, H,
+                             nullptr);
+    }
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    require(std::memcmp(d_grouped, d_ref, 64 * I * 2) == 0,
+            ("grouped gate output bitwise the per-segment scale GEMM (I=" +
+             std::to_string(I) + ")").c_str());
+    if (sh.test_down) {
+      // down (which = 2): [64][H] fp32 from act [64][I] (the gate output
+      // above serves as the activation; k = I is a multiple of 16).
+      float *d_gd = nullptr, *d_rd = nullptr;
+      DGPP_CUDA_OK(cudaMallocManaged(&d_gd, 64 * H * 4));
+      DGPP_CUDA_OK(cudaMallocManaged(&d_rd, 64 * H * 4));
+      DGPP_CUDA_OK(cudaMemset(d_gd, 0xA5, 64 * H * 4));
+      DGPP_CUDA_OK(cudaMemset(d_rd, 0x5A, 64 * H * 4));
+      dgpp::launch_moe_grouped_gemv_f32(d_grouped, I, d_segs, static_cast<int>(segs.size()),
+                                  30, /*rows_per_block=*/0, d_views, 2, d_gd, H, H, I, nullptr);
+      for (const dgpp::MoeSegment& sg : segs) {
+        const GlmQuantMatrix& d = c.expert_mats[sg.expert * 3 + 2];
+        dgpp::launch_scale_gemm_f32(d_grouped + static_cast<size_t>(sg.row0) * I, I,
+                              d.payload, d.scales,
+                              d_rd + static_cast<size_t>(sg.row0) * H, sg.rows, H, I,
+                              nullptr);
+      }
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      require(std::memcmp(d_gd, d_rd, 64 * H * 4) == 0,
+              "grouped down output bitwise the per-segment scale GEMM (fp32)");
+      cudaFree(d_gd);
+      cudaFree(d_rd);
+    }
+    std::printf("[ OK ] grouped gemv I=%d: %zu segments (1..30 rows) bitwise the "
+                "chunked GEMV%s\n",
+                I, segs.size(), sh.test_down ? ", down fp32 too" : "");
+    cudaFree(d_grouped);
+    cudaFree(d_ref);
+    cudaFree(d_segs);
+    cudaFree(d_views);
+    c.free_all();
+  }
+}
+
+DGPP_TEST(moe_accum_ordered_is_bitwise_the_fmaf_chain) {
+  // GIVEN random fp32 down rows, a permuted slot->row map, UNSORTED slot
+  // ids per token and random weights, THEN the device's per-token result is
+  // bitwise the host's chain: slots in ascending expert id, acc = fmaf(w,
+  // y, acc) from zero, then fmaf(1, shared, acc), one bf16 rounding.
+  const int tokens = 16, K = 4, H = 64;
+  const int tk = tokens * K;
+  Rng rng(0xACC);
+  std::vector<int32_t> slot_row(tk), slot_ids(tk);
+  std::vector<float> slot_w(tk), down(static_cast<size_t>(tk + tokens) * H);
+  for (int i = 0; i < tk; ++i) slot_row[i] = i;
+  for (int i = tk - 1; i > 0; --i) {  // a permutation
+    const int j = static_cast<int>(rng.next() % static_cast<uint64_t>(i + 1));
+    std::swap(slot_row[i], slot_row[j]);
+  }
+  for (int t = 0; t < tokens; ++t) {
+    // K distinct ids in [0, 40), deliberately unsorted.
+    std::vector<int> pool;
+    while (static_cast<int>(pool.size()) < K) {
+      const int e = static_cast<int>(rng.next() % 40);
+      bool dup = false;
+      for (const int q : pool) dup = dup || q == e;
+      if (!dup) pool.push_back(e);
+    }
+    for (int i = 0; i < K; ++i) {
+      slot_ids[t * K + i] = pool[i];
+      slot_w[t * K + i] = 0.5f + 0.5f * static_cast<float>(rng.unit());
+    }
+  }
+  for (auto& v : down) v = 4.0f * static_cast<float>(rng.unit());
+  int32_t *d_row = nullptr, *d_ids = nullptr;
+  float *d_w = nullptr, *d_down = nullptr;
+  uint16_t* d_out = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&d_row, tk * 4));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_ids, tk * 4));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_w, tk * 4));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_down, down.size() * 4));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_out, static_cast<size_t>(tokens) * H * 2));
+  std::memcpy(d_row, slot_row.data(), tk * 4);
+  std::memcpy(d_ids, slot_ids.data(), tk * 4);
+  std::memcpy(d_w, slot_w.data(), tk * 4);
+  std::memcpy(d_down, down.data(), down.size() * 4);
+  dgpp::launch_moe_accum_ordered(d_out, d_down, H, d_row, d_ids, d_w, tk, tokens, K, H,
+                           nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  int mismatches = 0;
+  for (int t = 0; t < tokens; ++t) {
+    std::vector<int> order(K);
+    for (int i = 0; i < K; ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+      return slot_ids[t * K + a] < slot_ids[t * K + b];
+    });
+    for (int h = 0; h < H; ++h) {
+      float acc = 0.f;
+      for (const int i : order) {
+        const int s = t * K + i;
+        acc = std::fmaf(slot_w[s], down[static_cast<size_t>(slot_row[s]) * H + h], acc);
+      }
+      acc = std::fmaf(1.0f, down[static_cast<size_t>(tk + t) * H + h], acc);
+      if (d_out[static_cast<size_t>(t) * H + h] != float_to_bf16_bits(acc)) ++mismatches;
+    }
+  }
+  require(mismatches == 0, ("ordered accumulate bitwise the host chain: " +
+                            std::to_string(mismatches) + " mismatches").c_str());
+  std::printf("[ OK ] accum ordered: %d tokens x %d slots bitwise the fmaf chain\n",
+              tokens, K);
+  cudaFree(d_row); cudaFree(d_ids); cudaFree(d_w); cudaFree(d_down); cudaFree(d_out);
 }
 
 }  // namespace

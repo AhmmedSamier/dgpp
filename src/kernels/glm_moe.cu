@@ -551,6 +551,181 @@ void launch_moe_gather_rows(const uint16_t* src, const int32_t* rows,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+namespace {
+
+
+// The prefill's grouped GEMV (2026-09-04): see glm_moe_launch.hpp. Every
+// thread reaches every __syncthreads — the per-warp row bound is checked
+// around block_rows instead of inside it (block_rows' own early return
+// would strand a warp before the next group's barrier).
+template <typename OutT>
+__global__ void moe_grouped_gemv_kernel(const uint16_t* __restrict__ act,
+                                        size_t act_stride,
+                                        const MoeSegment* __restrict__ segs,
+                                        const MoeExpertView* __restrict__ views,
+                                        int which, OutT* __restrict__ out,
+                                        size_t out_stride, int n, int k,
+                                        int rows_per_block) {
+  extern __shared__ __align__(16) uint16_t sx[];
+  const MoeSegment seg = segs[blockIdx.y];
+  // A launch may split its segments across blocks along z, rows_per_block
+  // rows each (the weight slab re-read from L2 by every block) — the
+  // shared expert's segment is every token, and one block walking 64
+  // groups serially was that launch's latency floor. Routed launches keep
+  // z = 1: their segments are short and uneven, and a z extent sized to
+  // the longest one launches blocks that only exit (measured: +40 % on the
+  // down launch at 256 tokens).
+  const int z0 = static_cast<int>(blockIdx.z) * rows_per_block;
+  if (z0 >= seg.rows) return;  // beyond this segment's rows (no barrier yet)
+  const int z1 = min(seg.rows, z0 + rows_per_block);
+  const MoeExpertView v = views[seg.expert * 3 + which];
+  const int n0 = blockIdx.x * fp8_gemv::kWarps;
+  const bool warp_live = n0 + static_cast<int>(threadIdx.x / 32) < n;
+  for (int g = z0; g < z1; g += gemv::kMaxRows) {
+    const int rows = min(gemv::kMaxRows, z1 - g);
+    const uint16_t* x = act + static_cast<size_t>(seg.row0 + g) * act_stride;
+    OutT* o = out + static_cast<size_t>(seg.row0 + g) * out_stride;
+    if (g > z0) __syncthreads();  // the previous group is done reading sx
+    switch (rows) {
+      case 4:
+        fp8_gemv::stage_activations<4>(x, act_stride, k, sx);
+        __syncthreads();
+        if (warp_live)
+          fp8_gemv::block_rows<4, OutT>(v.payload, v.scales, sx, n0, n, k, o,
+                                        out_stride);
+        break;
+      case 3:
+        fp8_gemv::stage_activations<3>(x, act_stride, k, sx);
+        __syncthreads();
+        if (warp_live)
+          fp8_gemv::block_rows<3, OutT>(v.payload, v.scales, sx, n0, n, k, o,
+                                        out_stride);
+        break;
+      case 2:
+        fp8_gemv::stage_activations<2>(x, act_stride, k, sx);
+        __syncthreads();
+        if (warp_live)
+          fp8_gemv::block_rows<2, OutT>(v.payload, v.scales, sx, n0, n, k, o,
+                                        out_stride);
+        break;
+      default:
+        fp8_gemv::stage_activations<1>(x, act_stride, k, sx);
+        __syncthreads();
+        if (warp_live)
+          fp8_gemv::block_rows<1, OutT>(v.payload, v.scales, sx, n0, n, k, o,
+                                        out_stride);
+        break;
+    }
+  }
+}
+
+template <typename OutT>
+void launch_moe_grouped_gemv(const uint16_t* act, size_t act_stride,
+                             const MoeSegment* segs, int n_segs, int max_rows,
+                             int rows_per_block, const MoeExpertView* views,
+                             int which, OutT* out, size_t out_stride, int n,
+                             int k, cudaStream_t stream) {
+  if (n_segs <= 0 || n <= 0) return;
+  if (!act || !segs || !views || !out)
+    throw std::invalid_argument("moe grouped gemv: null pointer");
+  if (k <= 0 || (k % fp8_gemv::kChunkBytes) != 0)
+    throw std::invalid_argument("moe grouped gemv: k must be a positive multiple of 16");
+  if (!gemv::smem_fits(gemv::kMaxRows, k))
+    throw std::invalid_argument("moe grouped gemv: k exceeds the smem budget");
+  if (max_rows <= 0)
+    throw std::invalid_argument("moe grouped gemv: max_rows must be positive");
+  if (rows_per_block <= 0) rows_per_block = max_rows;  // no split
+  const dim3 grid((n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps,
+                  static_cast<unsigned>(n_segs),
+                  static_cast<unsigned>((max_rows + rows_per_block - 1) /
+                                        rows_per_block));
+  moe_grouped_gemv_kernel<OutT>
+      <<<grid, fp8_gemv::kThreads, gemv::smem_bytes(gemv::kMaxRows, k), stream>>>(
+          act, act_stride, segs, views, which, out, out_stride, n, k,
+          rows_per_block);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+constexpr int kAccumMaxTopK = 16;
+
+__global__ void moe_accum_ordered_kernel(uint16_t* __restrict__ out,
+                                         const float* __restrict__ down,
+                                         size_t down_stride,
+                                         const int32_t* __restrict__ slot_row,
+                                         const int32_t* __restrict__ slot_ids,
+                                         const float* __restrict__ slot_w,
+                                         int shared_row0, int tokens, int K,
+                                         int hidden) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x +
+                    threadIdx.x;
+  if (i >= static_cast<int64_t>(tokens) * hidden) return;
+  const int t = static_cast<int>(i / hidden);
+  const int h = static_cast<int>(i - static_cast<int64_t>(t) * hidden);
+  // Ascending expert id: the chain's order (an insertion sort of K <= 16).
+  int order[kAccumMaxTopK];
+  for (int j = 0; j < K; ++j) order[j] = j;
+  for (int j = 1; j < K; ++j) {
+    const int cur = order[j];
+    const int key = slot_ids[t * K + cur];
+    int p = j - 1;
+    while (p >= 0 && slot_ids[t * K + order[p]] > key) {
+      order[p + 1] = order[p];
+      --p;
+    }
+    order[p + 1] = cur;
+  }
+  float acc = 0.f;
+  for (int j = 0; j < K; ++j) {
+    const int s = t * K + order[j];
+    acc = __fmaf_rn(slot_w[s],
+                    down[static_cast<size_t>(slot_row[s]) * down_stride + h], acc);
+  }
+  acc = __fmaf_rn(1.0f,
+                  down[static_cast<size_t>(shared_row0 + t) * down_stride + h], acc);
+  out[i] = float_to_bf16_bits(acc);
+}
+
+}  // namespace
+
+void launch_moe_grouped_gemv_bf16(const uint16_t* act, size_t act_stride,
+                                  const MoeSegment* segs, int n_segs,
+                                  int max_rows, int rows_per_block,
+                                  const MoeExpertView* views, int which,
+                                  uint16_t* out, size_t out_stride, int n, int k,
+                                  cudaStream_t stream) {
+  launch_moe_grouped_gemv<uint16_t>(act, act_stride, segs, n_segs, max_rows,
+                                    rows_per_block, views, which, out, out_stride,
+                                    n, k, stream);
+}
+
+void launch_moe_grouped_gemv_f32(const uint16_t* act, size_t act_stride,
+                                 const MoeSegment* segs, int n_segs, int max_rows,
+                                 int rows_per_block, const MoeExpertView* views,
+                                 int which, float* out, size_t out_stride, int n,
+                                 int k, cudaStream_t stream) {
+  launch_moe_grouped_gemv<float>(act, act_stride, segs, n_segs, max_rows,
+                                 rows_per_block, views, which, out, out_stride, n,
+                                 k, stream);
+}
+
+void launch_moe_accum_ordered(uint16_t* out, const float* down,
+                              size_t down_stride, const int32_t* slot_row,
+                              const int32_t* slot_ids, const float* slot_w,
+                              int shared_row0, int tokens, int top_k,
+                              int hidden, cudaStream_t stream) {
+  if (tokens <= 0) return;
+  if (!out || !down || !slot_row || !slot_ids || !slot_w)
+    throw std::invalid_argument("moe accum ordered: null pointer");
+  if (top_k < 1 || top_k > kAccumMaxTopK)
+    throw std::invalid_argument("moe accum ordered: top_k outside [1, 16]");
+  const int64_t n = static_cast<int64_t>(tokens) * hidden;
+  const int64_t blocks = (n + kElemThreads - 1) / kElemThreads;
+  moe_accum_ordered_kernel<<<static_cast<int>(blocks), kElemThreads, 0, stream>>>(
+      out, down, down_stride, slot_row, slot_ids, slot_w, shared_row0, tokens,
+      top_k, hidden);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 void launch_moe_accum(float* acc, const float* y, const int32_t* rows,
                       const float* row_weights, int n_rows, int hidden,
                       cudaStream_t stream) {

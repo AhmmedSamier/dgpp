@@ -44,6 +44,46 @@ void launch_moe_accum(float* acc, const float* y, const int32_t* rows,
                       const float* row_weights, int n_rows, int hidden,
                       cudaStream_t stream);
 
+// ---- the prefill's grouped expert path (2026-09-04) ----------------------
+// One launch per matrix per layer over EVERY non-empty expert segment: block
+// (x, y) is the y-th segment against weight rows [x*kWarps, +kWarps) of its
+// expert's [n, k] matrix (views[segment.expert * 3 + which]), its rows
+// staged four at a time through the same fp8_gemv core the per-segment
+// scale GEMM used — every output row bitwise that path's. `act` rows are
+// bf16 with stride `act_stride`; `out` rows have stride `out_stride`.
+struct MoeSegment {
+  int32_t row0 = 0;    // first row of the segment in `act` / `out`
+  int32_t rows = 0;    // rows in the segment
+  int32_t expert = 0;  // view-table expert index (the shared expert last)
+};
+// `max_rows` is the longest segment's row count; `rows_per_block` (0 = no
+// split) splits every segment across blocks along z in pieces of that many
+// rows — for a launch whose segments are long and even (the shared
+// expert's), never for the routed segments (short, uneven: the extra
+// blocks only exit, and their launch cost showed).
+void launch_moe_grouped_gemv_bf16(const uint16_t* act, size_t act_stride,
+                                  const MoeSegment* segs, int n_segs,
+                                  int max_rows, int rows_per_block,
+                                  const MoeExpertView* views, int which,
+                                  uint16_t* out, size_t out_stride, int n, int k,
+                                  cudaStream_t stream);
+void launch_moe_grouped_gemv_f32(const uint16_t* act, size_t act_stride,
+                                 const MoeSegment* segs, int n_segs, int max_rows,
+                                 int rows_per_block, const MoeExpertView* views,
+                                 int which, float* out, size_t out_stride, int n,
+                                 int k, cudaStream_t stream);
+// The ordered accumulation in one pass: for every token, its top_k routed
+// slots in ASCENDING expert id (sorted here, whatever order the router left)
+// then the shared expert's row — moe_accum_kernel's __fmaf_rn chain from
+// zero, op for op (the shared row's weight is 1) — rounded once to bf16.
+// slot_row[t*K + j] is the gathered row of token t's j-th slot; the shared
+// rows sit at shared_row0 + t. top_k <= 16.
+void launch_moe_accum_ordered(uint16_t* out, const float* down,
+                              size_t down_stride, const int32_t* slot_row,
+                              const int32_t* slot_ids, const float* slot_w,
+                              int shared_row0, int tokens, int top_k,
+                              int hidden, cudaStream_t stream);
+
 // out[i] = bf16(acc[i]) — the chain's single rounding, as the sum leaves for
 // the FFN all-reduce (bf16 on the wire).
 void launch_moe_round_bf16(uint16_t* out, const float* acc, int64_t n,
