@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04); drain-on-stop (6c) and grow-on-demand admission (6d) remain |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop (6c) and grow-on-demand admission (6d) remain |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -1096,10 +1096,8 @@ reasons first then calls; the named function is the one call; `auto` with
 exactly one call even where the model's reasoning had planned two; the
 op-stream md5 identical on all four ranks; 0 fallbacks over 658 sampled
 steps; the pace unchanged (the record's fifth 2026-09-04 entry).
-`response_format` followed the same day as 6h (below). Not built: value
-typing inside the tool-call grammar (values are free text; the parser
-types them from the schema, the client validates, as OpenAI's non-strict
-tools) — the JSON machine of 6h is the piece that would do it.
+`response_format` followed the same day as 6h, and typed argument values
+as 6i (both below).
 
 **6h. `response_format` — JSON-constrained output — BUILT 2026-09-04**
 (decision of 2026-09-04 with the user: "Feature parity is absolutely the
@@ -1165,6 +1163,59 @@ a structural position under a closed schema), and the two constrained
 loopbacks with json_object and schema cases beside the tool-call ones
 (the fixture vocabulary now spells JSON); ctest 34/34. On the four nodes:
 see the record's 2026-09-04 `response_format` entry.
+
+**6i. Typed tool arguments — BUILT 2026-09-04** (the user: "Let's proceed
+with the value typing inside the tool-call grammar"). Each `<arg_value>`
+is constrained by its property's schema, through the 6h machine, and
+`tool_choice: auto` arms the grammar too. The rule follows the template,
+which writes a string argument RAW and every other value through tojson:
+a JSON-typed property — integer, number, boolean, null, object, array, a
+type list without string, an `anyOf` of such — is a JSON text the
+`JsonMachine` enforces under the property's own compiled schema (types,
+closed keys, required, enums, bounds, integers without fractions), with
+`</arg_value>` admitted only when the text is complete; a string property
+with an `enum` (or an untyped enum) is one of its texts exactly, spelled
+by the name/key automaton (a non-string member renders as tojson would);
+a plain string, a type list with string in it, an untyped property, and
+a key the schema does not declare stay free text (the parser types them
+afterwards, as before). `GrammarArg {key, kind free|json|text, schema,
+texts}` on `GrammarTool::args`, riding the journal as `gr.t[].a` (the
+constrained ones only); `grammar_tool_from_function` derives a tool's
+entry from its OpenAI definition — the closed key set under
+`additionalProperties: false` and every property's `GrammarArg` — and is
+what the service and the golden gate both use; under `function.strict:
+true` every property must compile inside the constrained subset, else a
+400 naming `tools[i].function.parameters.properties.<key>.<keyword>`
+(`unsupported_schema`), while a non-strict JSON-typed property outside
+the subset stays free with a WARN. `GrammarState` binds the argument when
+the key closes (`key_` → `arg_`), runs a per-value `JsonMachine` or the
+text automaton in `kValue`, and dies on a disallowed byte as everywhere.
+The auto mode: `tool_choice: auto` (the default with tools) now arms
+`kAuto` with the parallel flag deciding the count (calls at will, or one
+when `parallel_tool_calls: false`) — free text and calls as the model
+chooses, but every call well-formed: a known name, the closed keys, the
+typed values; without masks (a greedy engine) auto with parallel calls
+degrades to unconstrained as before, since it asked for no guarantee. On
+the fabric this could have moved a sampled token wherever a masked id
+carried nucleus mass (the renormalized draw lands elsewhere); in the run
+of the day it moved none — all twelve responses byte-identical to the
+previous run's, the op-stream md5 the same on all four ranks (the
+record's eighth 2026-09-04 entry). Gates:
+`glm_tool_grammar_test`'s `tool_grammar_typedValuesFollowTheSchema` (an
+integer value with the closer waiting until complete, an enum spelled
+from its texts, a nested object under its closed schema, a free string,
+an unknown key free, auto's calls at will, death on a bad byte, the
+refusal of an unsupported argument schema), the codec round trip with
+typed arguments, `glm_serve_test`'s tool_choice gate (six armed grammars
+with auto among them, the typed arguments on the wire, the strict
+refusal by keyword path and the non-strict fallback),
+`glm_chat_template_test` (the six golden tool-call turns accepted under
+the typing derived from their own schemas; the derivation facts for
+string / integer / enum / type list / untyped enum / object / strict),
+the two constrained loopbacks with the fixture's tools typed; ctest
+34/34. Not built: required keys and duplicate-key exclusion inside a
+call (OpenAI's strict mode guarantees them; the automaton has the used
+keys, the enforcement is a small follow-on).
 
 **6c. Drain-on-stop.** SIGINT during a collective tears the bus down
 under the in-flight collective (the peers eat transport-retry-exceeded).

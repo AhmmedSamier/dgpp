@@ -3195,9 +3195,19 @@ dgpp::glm::GrammarSpec fixture_grammar(dgpp::glm::GrammarSpec::Mode mode,
   g.mode = mode;
   g.parallel = parallel;
   g.named = named;
-  g.tools.push_back(dgpp::glm::GrammarTool{"ab", true, {"x", "y"}});
-  g.tools.push_back(dgpp::glm::GrammarTool{"ac", false, {}});
-  g.tools.push_back(dgpp::glm::GrammarTool{"b", true, {}});
+  // Typed arguments (M6 6i): x an integer (a JSON value), y one of two
+  // texts, z (of the open-keyed tool) a boolean; the rest free.
+  dgpp::glm::GrammarTool ab{"ab", true, {"x", "y"}, {}};
+  ab.args.push_back(dgpp::glm::GrammarArg{"x", dgpp::glm::GrammarArg::Kind::kJson,
+                                          "{\"type\":\"integer\"}", {}});
+  ab.args.push_back(dgpp::glm::GrammarArg{"y", dgpp::glm::GrammarArg::Kind::kText, "",
+                                          {"cd", "ce"}});
+  g.tools.push_back(std::move(ab));
+  dgpp::glm::GrammarTool ac{"ac", false, {}, {}};
+  ac.args.push_back(dgpp::glm::GrammarArg{"z", dgpp::glm::GrammarArg::Kind::kJson,
+                                          "{\"type\":\"boolean\"}", {}});
+  g.tools.push_back(std::move(ac));
+  g.tools.push_back(dgpp::glm::GrammarTool{"b", true, {}, {}});
   return g;
 }
 

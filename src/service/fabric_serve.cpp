@@ -133,6 +133,34 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
             }
             out.push_back(']');
           }
+          // The typed arguments (M6 6i): only the constrained ones ride.
+          bool any_typed = false;
+          for (const auto& a : gr.tools[t].args)
+            any_typed = any_typed || a.kind != dgpp::glm::GrammarArg::Kind::kFree;
+          if (any_typed) {
+            out += ",\"a\":[";
+            bool first = true;
+            for (const auto& a : gr.tools[t].args) {
+              if (a.kind == dgpp::glm::GrammarArg::Kind::kFree) continue;
+              if (!first) out.push_back(',');
+              first = false;
+              out += "{\"k\":";
+              append_json_string(&out, a.key);
+              if (a.kind == dgpp::glm::GrammarArg::Kind::kJson) {
+                out += ",\"j\":";
+                append_json_string(&out, a.schema);
+              } else {
+                out += ",\"t\":[";
+                for (size_t i = 0; i < a.texts.size(); ++i) {
+                  if (i != 0) out.push_back(',');
+                  append_json_string(&out, a.texts[i]);
+                }
+                out.push_back(']');
+              }
+              out.push_back('}');
+            }
+            out.push_back(']');
+          }
           out.push_back('}');
         }
         out += "]";
@@ -347,6 +375,31 @@ JournalRecord decode_journal_line(std::string_view line) {
             tool.constrain_keys = true;
             for (const dgpp::minijson::Value& key : k->items())
               tool.keys.emplace_back(key.as_string());
+          }
+          if (const dgpp::minijson::Value* args = t.find("a")) {
+            if (!args->is_array())
+              throw std::runtime_error("journal: submit '" + r.id +
+                                       "' has non-array grammar arguments");
+            for (const dgpp::minijson::Value& a : args->items()) {
+              dgpp::glm::GrammarArg arg;
+              arg.key = std::string(field(a, "k", "grammar argument").as_string());
+              if (const dgpp::minijson::Value* j = a.find("j")) {
+                if (!j->is_string())
+                  throw std::runtime_error("journal: submit '" + r.id +
+                                           "' has a non-string argument schema");
+                arg.kind = dgpp::glm::GrammarArg::Kind::kJson;
+                arg.schema = std::string(j->as_string());
+              } else {
+                const dgpp::minijson::Value& texts = field(a, "t", "grammar argument");
+                if (!texts.is_array())
+                  throw std::runtime_error("journal: submit '" + r.id +
+                                           "' has non-array argument texts");
+                arg.kind = dgpp::glm::GrammarArg::Kind::kText;
+                for (const dgpp::minijson::Value& x : texts.items())
+                  arg.texts.emplace_back(x.as_string());
+              }
+              tool.args.push_back(std::move(arg));
+            }
           }
           g.tools.push_back(std::move(tool));
         }

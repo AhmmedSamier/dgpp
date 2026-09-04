@@ -1958,9 +1958,17 @@ pick, not a prompt trick: a grammar of the template's tool-call format
 vocabulary's token TEXTS across the request's tool names, so any BPE
 tokenization of a name passes and nothing else; KEY the schema's property
 names when it closes them with `additionalProperties: false`, else free;
-VALUE free text; the turn ends on `<|observation|>`; EOS is withheld while
-a call is owed; thinking stays free) yields, per position, the set of ids
-the model may emit next. The mask's meaning to the sampler is one rule
+VALUE typed by the property's schema since 6i — a JSON text under the
+JSON machine below for a JSON-typed property (the template writes those
+through tojson), one of the enum texts for an enum string, free text for
+a plain string, a type list with string, an untyped or undeclared key;
+the turn ends on `<|observation|>`; EOS is withheld while a call is owed;
+thinking stays free) yields, per position, the set of ids the model may
+emit next. `tool_choice: auto` arms it too (6i): calls at will, or one
+under `parallel_tool_calls: false`, every call well-formed; the
+derivation from a function definition is `grammar_tool_from_function`,
+and `function.strict: true` refuses a property outside the enforceable
+subset by keyword path. The mask's meaning to the sampler is one rule
 everywhere: a masked id is an ABSENT candidate — `-inf` in place, never
 listed by the local top-k, zero mass in every normalizer (a slice with
 every id masked folds as `-inf`, skipped), and the decision's vocabulary
@@ -2378,9 +2386,9 @@ artifact hashes are in the 2026-09-03 Phase-2 entries of
 - *Grow-on-demand admission:* reserve to a window, grow at tick top,
   shed the youngest deterministically when growth fails — a pure function
   of (meters, positions), so the journal keeps it identical.
-- *Tool calls and reasoning (PLAN 6f, 6g), `response_format` (6h):*
-  BUILT 2026-09-04 — the as-built paragraph above and §10's constrained
-  decoding and JSON-constrained output. Three things
+- *Tool calls and reasoning (PLAN 6f, 6g), `response_format` (6h), typed
+  arguments (6i):* BUILT 2026-09-04 — the as-built paragraph above and
+  §10's constrained decoding and JSON-constrained output. Three things
   the design had wrong, corrected in the build: the markers are not
   special tokens (decode prints them, which is why a malformed block can
   fall back to literal text); "JSON if it parses" alone is lossy, so

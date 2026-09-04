@@ -1330,26 +1330,62 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
                                                 "\"parallel_tool_calls\":false"));
   (void)post_until_usage(rig, chat_body("abcd", 64, closed_tools));  // auto
   const std::vector<dgpp::glm::GrammarSpec> g = rig.engine.grammars();
-  require(g.size() == 5, "five constrained requests armed a grammar (auto "
-                         "arms none), got " + std::to_string(g.size()));
+  require(g.size() == 6, "six tool requests armed a grammar (auto arms the "
+                         "well-formed-call grammar too, M6 6i), got " +
+                             std::to_string(g.size()));
   require(g[0].mode == Mode::kRequired && g[0].parallel &&
               g[0].tools.size() == 2 && g[0].tools[0].name == "get_weather" &&
               g[0].tools[0].constrain_keys &&
               g[0].tools[0].keys == std::vector<std::string>{"city", "days"} &&
               g[0].tools[1].name == "get_time" && !g[0].tools[1].constrain_keys,
           "required: the tools with their closed key set");
+  // The typed arguments (M6 6i): city a free string, days an integer
+  // under the JSON machine.
+  using Kind = dgpp::glm::GrammarArg::Kind;
+  require(g[0].tools[0].args.size() == 2 && g[0].tools[0].args[0].key == "city" &&
+              g[0].tools[0].args[0].kind == Kind::kFree &&
+              g[0].tools[0].args[1].key == "days" && g[0].tools[0].args[1].kind == Kind::kJson &&
+              g[0].tools[0].args[1].schema.find("integer") != std::string::npos &&
+              g[0].tools[1].args.empty(),
+          "the typed arguments ride with the tools");
   require(g[1].mode == Mode::kNamed && g[1].named == "get_time", "named");
   require(g[2].mode == Mode::kForbidCalls, "none forbids calls");
   require(rig.frontend.last_globals().find("\"tools\"") != std::string::npos,
           "the last (auto) request rendered the tools");
   require(g[3].mode == Mode::kAuto && !g[3].parallel, "auto + single call");
   require(g[4].mode == Mode::kRequired && !g[4].parallel, "required + single");
+  require(g[5].mode == Mode::kAuto && g[5].parallel && g[5].tools.size() == 2,
+          "auto: calls at will, every call well-formed");
   // An open schema (no additionalProperties: false) leaves the keys free.
   (void)post_until_usage(
       rig, chat_body("abcd", 64, kWeatherTools + ",\"tool_choice\":\"required\""));
   const std::vector<dgpp::glm::GrammarSpec> g2 = rig.engine.grammars();
-  require(g2.size() == 6 && !g2[5].tools[0].constrain_keys,
+  require(g2.size() == 7 && !g2[6].tools[0].constrain_keys,
           "JSON Schema's default is open: keys unconstrained");
+  // A strict function whose schema leaves the enforceable subset is a 400
+  // naming the keyword path; the same schema without strict is served
+  // with that value free.
+  const std::string strict_tools =
+      ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"strict\":STRICT,"
+      "\"parameters\":{\"type\":\"object\",\"properties\":{\"days\":{\"type\":"
+      "\"integer\",\"minimum\":0}}}}}]";
+  {
+    std::string body = strict_tools;
+    body.replace(body.find("STRICT"), 6, "true");
+    const std::string resp = post_chat(rig, chat_body("abcd", 2, body));
+    require(resp.find("400 ") != std::string::npos &&
+                resp.find("\"param\":\"tools[0].function.parameters.properties.days.minimum\"") !=
+                    std::string::npos &&
+                resp.find("\"code\":\"unsupported_schema\"") != std::string::npos,
+            "strict refuses by keyword path: " + resp.substr(0, 400));
+    body = strict_tools;
+    body.replace(body.find("STRICT"), 6, "false");
+    (void)post_until_usage(rig, chat_body("abcd", 64, body));
+    const std::vector<dgpp::glm::GrammarSpec> g3 = rig.engine.grammars();
+    require(g3.size() == 8 && g3[7].tools[0].args.size() == 1 &&
+                g3[7].tools[0].args[0].kind == Kind::kFree,
+            "non-strict: the value stays free");
+  }
 }
 
 DGPP_TEST(serve_reasoning_foldKnobAndUnterminatedCallAtTheCap) {

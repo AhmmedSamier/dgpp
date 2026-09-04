@@ -19,6 +19,7 @@ namespace {
 
 using dgpp::glm::ChatMarker;
 using dgpp::glm::ChatMarkers;
+using dgpp::glm::GrammarArg;
 using dgpp::glm::GrammarSpec;
 using dgpp::glm::GrammarState;
 using dgpp::glm::GrammarTool;
@@ -341,6 +342,130 @@ DGPP_TEST(tool_grammar_jsonModeSpellsOneTextThenEos) {
   require(!(spec == typed), "specs differ by schema");
   GrammarSpec same = typed;
   require(same == typed, "equal specs");
+}
+
+DGPP_TEST(tool_grammar_typedValuesFollowTheSchema) {
+  // Typed arguments (M6 6i): a JSON-typed value runs the JSON machine
+  // under the property's schema with </arg_value> only when complete; an
+  // enum string is spelled from its texts; a plain string and an unknown
+  // key stay free; auto mode arms the shape with calls at will.
+  const GrammarVocab v = fake_vocab();
+  GrammarSpec spec;
+  spec.mode = GrammarSpec::Mode::kAuto;
+  spec.parallel = true;
+  GrammarTool w;
+  w.name = "get_weather";
+  w.constrain_keys = false;  // open keys: an unknown key is allowed and free
+  w.args.push_back(GrammarArg{"city", GrammarArg::Kind::kFree, "", {}});
+  w.args.push_back(GrammarArg{"days", GrammarArg::Kind::kJson, "{\"type\":\"integer\"}", {}});
+  w.args.push_back(GrammarArg{"unit", GrammarArg::Kind::kText, "", {"celsius", "fahrenheit"}});
+  w.args.push_back(GrammarArg{"opts", GrammarArg::Kind::kJson,
+                              "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"boolean\"}},"
+                              "\"required\":[\"a\"],\"additionalProperties\":false}", {}});
+  spec.tools.push_back(w);
+  GrammarState g(&v, spec, /*prompt_opens_thinking=*/false);
+  const auto feed = [&](const std::string& text) {
+    for (const char c : text) {
+      require(g.allows(static_cast<unsigned char>(c)),
+              std::string("byte '") + c + "' refused in state " + g.state_name());
+      g.advance(static_cast<unsigned char>(c));
+    }
+  };
+  const auto marker = [&](int64_t id) {
+    require(g.allows(id), "marker refused in state " + std::string(g.state_name()));
+    g.advance(id);
+  };
+  require(g.allows(kToolOpen) && g.allows(kEosText) && g.allows('x'), "auto: free top");
+  marker(kToolOpen);
+  feed("get_weather");
+  marker(kKeyOpen);
+  feed("days");
+  marker(kKeyClose);
+  marker(kValueOpen);
+  // An integer: digits, no quote, no fraction; the closer once complete.
+  require(g.allows('-') && g.allows('7') && !g.allows('"') && !g.allows('t') &&
+              !g.allows(kValueClose),
+          "integer value: the closer waits");
+  feed("12");
+  require(g.allows('3') && !g.allows('.') && !g.allows('e') && g.allows(kValueClose) &&
+              !g.allows(kToolClose) && !g.allows(kEosText),
+          "12 is complete: only the closer or more digits");
+  TokenMask m;
+  g.mask(&m);
+  require(m.constrained() && m.allows(kValueClose) && m.allows('3') && !m.allows('.'),
+          "the value mask agrees with allows()");
+  marker(kValueClose);
+  // An enum string: spelled from its texts.
+  marker(kKeyOpen);
+  feed("unit");
+  marker(kKeyClose);
+  marker(kValueOpen);
+  require(g.allows('c') && g.allows('f') && !g.allows('k') && !g.allows(kValueClose),
+          "enum: first bytes only");
+  feed("celsiu");
+  require(!g.allows(kValueClose) && g.allows('s'), "enum: incomplete");
+  feed("s");
+  require(g.allows(kValueClose) && !g.allows('x'), "enum: complete");
+  marker(kValueClose);
+  // A nested object under its schema: closed keys, a boolean, required.
+  marker(kKeyOpen);
+  feed("opts");
+  marker(kKeyClose);
+  marker(kValueOpen);
+  require(g.allows('{') && !g.allows('[') && !g.allows('1'), "an object value");
+  feed("{\"");
+  require(g.allows('a') && !g.allows('b'), "closed key");
+  feed("a\":");
+  require(g.allows('t') && g.allows('f') && !g.allows('1'), "boolean");
+  feed("true");
+  require(!g.allows(kValueClose) && g.allows('}'), "not closed yet");
+  feed("}");
+  require(g.allows(kValueClose) && !g.allows(','), "complete object");
+  marker(kValueClose);
+  // A free string, then an unknown key (open schema): free text.
+  marker(kKeyOpen);
+  feed("city");
+  marker(kKeyClose);
+  marker(kValueOpen);
+  require(g.allows('P') && g.allows('"') && g.allows(' ') && g.allows(kValueClose) &&
+              !g.allows(kToolClose),
+          "a string is free (closer allowed at once)");
+  feed("Paris 75");
+  marker(kValueClose);
+  marker(kKeyOpen);
+  feed("zzz");
+  marker(kKeyClose);
+  marker(kValueOpen);
+  require(g.allows('{') && g.allows('x') && g.allows(kValueClose), "unknown key: free value");
+  marker(kValueClose);
+  marker(kToolClose);
+  // auto with parallel: another call may open, or the turn may end.
+  require(g.allows(kToolOpen) && g.allows(kEosText) && g.allows('x'), "auto: calls at will");
+  g.advance(kEosText);
+  require(std::string(g.state_name()) == "done", "done");
+  // A disallowed byte inside a typed value kills the grammar.
+  GrammarState k(&v, spec, false);
+  k.advance(kToolOpen);
+  for (const char c : std::string("get_weather")) k.advance(static_cast<unsigned char>(c));
+  k.advance(kKeyOpen);
+  for (const char c : std::string("days")) k.advance(static_cast<unsigned char>(c));
+  k.advance(kKeyClose);
+  k.advance(kValueOpen);
+  k.advance('x');
+  require(!k.active(), "a non-integer byte kills the grammar");
+  // A JSON-typed argument's schema outside the subset refuses at construction.
+  GrammarSpec bad = spec;
+  bad.tools[0].args[1].schema = "{\"type\":\"integer\",\"minimum\":0}";
+  bool threw = false;
+  try {
+    GrammarState b(&v, bad, false);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "an unsupported argument schema refused");
+  // Equality covers the arguments.
+  GrammarSpec same = spec;
+  require(same == spec && !(bad == spec), "spec equality over arguments");
 }
 
 }  // namespace

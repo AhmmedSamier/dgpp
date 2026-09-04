@@ -249,15 +249,28 @@ void test_journal_codec() {
     s.grammar.mode = dgpp::glm::GrammarSpec::Mode::kNamed;
     s.grammar.parallel = false;
     s.grammar.named = "get_weather";
-    s.grammar.tools.push_back(
-        dgpp::glm::GrammarTool{"get_weather", true, {"city", "days"}});
-    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"get_time", false, {}});
-    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"ping", true, {}});
+    // The typed arguments (M6 6i): a free string, a JSON-typed integer, an
+    // enum's texts; only the constrained ones ride.
+    dgpp::glm::GrammarTool weather{"get_weather", true, {"city", "days", "unit"}, {}};
+    weather.args.push_back(dgpp::glm::GrammarArg{"city", dgpp::glm::GrammarArg::Kind::kFree, "", {}});
+    weather.args.push_back(dgpp::glm::GrammarArg{"days", dgpp::glm::GrammarArg::Kind::kJson,
+                                                 "{\"type\": \"integer\"}", {}});
+    weather.args.push_back(dgpp::glm::GrammarArg{"unit", dgpp::glm::GrammarArg::Kind::kText, "",
+                                                 {"celsius", "fahrenheit"}});
+    s.grammar.tools.push_back(std::move(weather));
+    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"get_time", false, {}, {}});
+    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"ping", true, {}, {}});
     ev.submits.push_back(s);
     const dgpp::service::JournalRecord got = dgpp::service::decode_journal_line(
         dgpp::service::encode_journal_tick(ev));
+    // A free argument does not ride; equality is over the constrained ones.
+    s.grammar.tools[0].args.erase(s.grammar.tools[0].args.begin());
     require(got.submits.size() == 1 && got.submits[0].grammar == s.grammar,
-            "codec: grammar round-trip");
+            "codec: grammar round-trip (typed arguments included)");
+    require(got.submits[0].grammar.tools[0].args.size() == 2 &&
+                got.submits[0].grammar.tools[0].args[0].kind == dgpp::glm::GrammarArg::Kind::kJson &&
+                got.submits[0].grammar.tools[0].args[1].texts.size() == 2,
+            "codec: the typed arguments survive");
     require(got.submits[0].grammar.tools[2].constrain_keys &&
                 got.submits[0].grammar.tools[2].keys.empty(),
             "codec: a closed empty key set survives");

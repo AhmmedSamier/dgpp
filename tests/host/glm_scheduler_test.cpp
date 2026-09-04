@@ -919,7 +919,7 @@ DGPP_TEST(scheduler_sampling_specArmsTheSlotBeforeItsPrefillPick) {
   c.sampling.temperature = 1.0f;
   c.seed = 7;
   c.grammar.mode = dgpp::glm::GrammarSpec::Mode::kRequired;
-  c.grammar.tools.push_back(dgpp::glm::GrammarTool{"f", false, {}});
+  c.grammar.tools.push_back(dgpp::glm::GrammarTool{"f", false, {}, {}});
   constrained.submit(std::move(c));
   constrained.run_to_completion();
   require(constrained_engine.op_stream() == "A:0:7 G:0:3:1 P:0:5 S:0:1 C:0",

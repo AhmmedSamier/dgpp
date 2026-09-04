@@ -576,7 +576,9 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
     GrammarSpec& g = plan->grammar;
     switch (choice) {
       case Choice::kAuto:
-        g.mode = parallel ? GrammarSpec::Mode::kNone : GrammarSpec::Mode::kAuto;
+        // auto arms the grammar too (M6 6i): calls at will, but every call
+        // well-formed — a known name, the closed keys, typed values.
+        g.mode = have_tools ? GrammarSpec::Mode::kAuto : GrammarSpec::Mode::kNone;
         break;
       case Choice::kNone: g.mode = GrammarSpec::Mode::kForbidCalls; break;
       case Choice::kRequired: g.mode = GrammarSpec::Mode::kRequired; break;
@@ -588,9 +590,10 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
     g.parallel = parallel;
     if (g.active() && !constraints_available()) {
       // tool_choice none is served by leaving the tools out of the render
-      // on any engine (the grammar is belt and braces); required, named and
+      // on any engine (the grammar is belt and braces), and auto with
+      // parallel calls asked for no guarantee; required, named and
       // parallel_tool_calls false are guarantees only a masked pick gives.
-      if (choice == Choice::kNone) {
+      if (choice == Choice::kNone || (choice == Choice::kAuto && parallel)) {
         g = GrammarSpec{};
       } else {
         const char* field = choice == Choice::kAuto ? "parallel_tool_calls"
@@ -604,24 +607,27 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
       }
     }
     if (g.active()) {
-      for (const Value& t : tools->items()) {
+      for (size_t i = 0; i < tools->items().size(); ++i) {
+        const Value& t = tools->items()[i];
         const Value* fn = t.find("function");
         const Value& def = fn != nullptr && fn->is_object() ? *fn : t;
-        dgpp::glm::GrammarTool tool;
-        tool.name = std::string(def.at("name").as_string());
-        // Keys close only when the schema says so (additionalProperties
-        // false — JSON Schema's default is open) and declares properties.
-        if (const Value* params = def.find("parameters")) {
-          const Value* props = params->find("properties");
-          const Value* extra = params->find("additionalProperties");
-          const bool closed = extra != nullptr && extra->is_bool() &&
-                              !extra->as_bool(true);
-          if (closed && props != nullptr && props->is_object()) {
-            tool.constrain_keys = true;
-            for (const Member& pm : props->members()) tool.keys.push_back(pm.key);
-          }
+        // The closed key set and the typed arguments (M6 6g / 6i); a
+        // strict function outside the enforceable subset is a 400 naming
+        // the keyword path, a non-strict one leaves that value free.
+        std::vector<std::string> warnings;
+        try {
+          g.tools.push_back(dgpp::glm::grammar_tool_from_function(def, &warnings));
+        } catch (const std::invalid_argument& e) {
+          const std::string prefix =
+              "tools[" + std::to_string(i) + "]" + (fn != nullptr ? ".function." : ".");
+          const std::string what = e.what();
+          const size_t colon = what.find(':');
+          return refuse(prefix + what,
+                        prefix + (colon == std::string::npos ? what : what.substr(0, colon)),
+                        "unsupported_schema");
         }
-        g.tools.push_back(std::move(tool));
+        for (const std::string& w : warnings)
+          DGPP_LOG_WARN("serve: tools[{}] {}", i, w);
       }
     }
   }

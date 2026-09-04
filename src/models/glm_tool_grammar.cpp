@@ -79,6 +79,118 @@ bool GrammarVocab::is_eos(int64_t id) const {
 }
 
 // ---------------------------------------------------------------------------
+// The tool entry from a function definition (M6 6g keys, 6i typed values)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string rendered_enum_text(const minijson::Value& v) {
+  // What the template writes for the value: a string raw, anything else
+  // through tojson.
+  return v.is_string() ? std::string(v.as_string()) : json_text_of(v);
+}
+
+bool names_string(const minijson::Value& type) {
+  if (type.is_string()) return type.as_string() == "string";
+  if (type.is_array())
+    for (const minijson::Value& e : type.items())
+      if (e.is_string() && e.as_string() == "string") return true;
+  return false;
+}
+
+// The property admits a raw-text value (string-typed, untyped, or a type
+// list / anyOf with such an alternative): the grammar cannot type it.
+bool string_possible(const minijson::Value& prop) {
+  if (const minijson::Value* any = prop.find("anyOf")) {
+    if (!any->is_array()) return true;
+    for (const minijson::Value& alt : any->items())
+      if (!alt.is_object() || string_possible(alt)) return true;
+    return false;
+  }
+  const minijson::Value* type = prop.find("type");
+  if (type == nullptr) return true;
+  if (type->is_string()) return type->as_string() == "string";
+  if (type->is_array()) {
+    if (type->items().empty()) return true;
+    return names_string(*type);
+  }
+  return true;  // an unrecognised type value: leave it free
+}
+
+}  // namespace
+
+GrammarTool grammar_tool_from_function(const minijson::Value& def,
+                                       std::vector<std::string>* warnings) {
+  GrammarTool tool;
+  if (const minijson::Value* name = def.find("name"))
+    tool.name = std::string(name->as_string());
+  const minijson::Value* strict_v = def.find("strict");
+  const bool strict = strict_v != nullptr && strict_v->is_bool() && strict_v->as_bool();
+  const minijson::Value* params = def.find("parameters");
+  if (params == nullptr || !params->is_object()) return tool;
+  const minijson::Value* props = params->find("properties");
+  const minijson::Value* extra = params->find("additionalProperties");
+  const bool closed = extra != nullptr && extra->is_bool() && !extra->as_bool(true);
+  if (props == nullptr || !props->is_object()) return tool;
+  // Keys close only when the schema says so (additionalProperties false —
+  // JSON Schema's default is open) and declares properties.
+  if (closed) {
+    tool.constrain_keys = true;
+    for (const minijson::Member& pm : props->members()) tool.keys.push_back(pm.key);
+  }
+  for (const minijson::Member& pm : props->members()) {
+    GrammarArg arg;
+    arg.key = pm.key;
+    const minijson::Value& prop = pm.value;
+    const std::string path = "parameters.properties." + pm.key;
+    if (!prop.is_object()) {
+      if (strict) throw std::invalid_argument(path + ": must be a schema object");
+      tool.args.push_back(std::move(arg));
+      continue;
+    }
+    if (strict) {
+      // Every property must lie inside the enforceable subset.
+      try {
+        compile_json_schema(prop);
+      } catch (const std::invalid_argument& e) {
+        const std::string what = e.what();  // "schema.<path>: reason"
+        throw std::invalid_argument(
+            path + (what.rfind("schema", 0) == 0 ? what.substr(6) : ": " + what));
+      }
+    }
+    const minijson::Value* en = prop.find("enum");
+    const minijson::Value* cs = prop.find("const");
+    if (string_possible(prop)) {
+      // Raw text — typable only through an enum's exact texts.
+      if (en != nullptr && en->is_array() && !en->items().empty() &&
+          prop.find("anyOf") == nullptr) {
+        arg.kind = GrammarArg::Kind::kText;
+        for (const minijson::Value& e : en->items())
+          arg.texts.push_back(rendered_enum_text(e));
+      } else if (cs != nullptr && prop.find("anyOf") == nullptr) {
+        arg.kind = GrammarArg::Kind::kText;
+        arg.texts.push_back(rendered_enum_text(*cs));
+      }
+      tool.args.push_back(std::move(arg));
+      continue;
+    }
+    // A JSON-typed property: the machine under its own schema.
+    try {
+      compile_json_schema(prop);
+      arg.kind = GrammarArg::Kind::kJson;
+      arg.schema = json_text_of(prop);
+    } catch (const std::invalid_argument& e) {
+      if (warnings != nullptr)
+        warnings->push_back("argument '" + pm.key + "' of '" + tool.name +
+                            "' is outside the constrained subset (" + e.what() +
+                            "); its value stays free text");
+    }
+    tool.args.push_back(std::move(arg));
+  }
+  return tool;
+}
+
+// ---------------------------------------------------------------------------
 // GrammarState
 // ---------------------------------------------------------------------------
 
@@ -125,9 +237,36 @@ GrammarState::GrammarState(const GrammarVocab* vocab, GrammarSpec spec,
        spec_.mode == GrammarSpec::Mode::kNamed) &&
       spec_.tools.empty())
     throw std::invalid_argument("GrammarState: a required call needs tools");
+  // The typed arguments' schemas, compiled once per request.
+  arg_schemas_.resize(spec_.tools.size());
+  for (size_t t = 0; t < spec_.tools.size(); ++t) {
+    const GrammarTool& tool = spec_.tools[t];
+    arg_schemas_[t].resize(tool.args.size());
+    for (size_t a = 0; a < tool.args.size(); ++a) {
+      const GrammarArg& arg = tool.args[a];
+      if (arg.kind != GrammarArg::Kind::kJson) continue;
+      minijson::ParseResult parsed;
+      try {
+        parsed = minijson::parse(arg.schema);
+      } catch (const std::exception& e) {
+        throw std::invalid_argument("GrammarState: the schema text of argument '" +
+                                    arg.key + "' of '" + tool.name +
+                                    "' does not parse: " + e.what());
+      }
+      arg_schemas_[t][a] =
+          std::make_shared<const JsonSchema>(compile_json_schema(parsed.root));
+    }
+  }
   state_ = prompt_opens_thinking && vocab_->markers().think_close.available()
                ? State::kThink
                : State::kTop;
+}
+
+const GrammarArg* GrammarState::current_arg() const {
+  const GrammarTool* t = current_tool();
+  if (t == nullptr || arg_ < 0 || arg_ >= static_cast<int>(t->args.size()))
+    return nullptr;
+  return &t->args[static_cast<size_t>(arg_)];
 }
 
 const char* GrammarState::state_name() const {
@@ -158,7 +297,7 @@ bool GrammarState::calls_remaining() const {
   switch (spec_.mode) {
     case GrammarSpec::Mode::kNone: return true;
     case GrammarSpec::Mode::kForbidCalls: return false;
-    case GrammarSpec::Mode::kAuto: return calls_ == 0;
+    case GrammarSpec::Mode::kAuto: return spec_.parallel || calls_ == 0;
     case GrammarSpec::Mode::kRequired: return spec_.parallel || calls_ == 0;
     case GrammarSpec::Mode::kNamed: return calls_ == 0;
     case GrammarSpec::Mode::kJson: return false;
@@ -191,6 +330,21 @@ void GrammarState::enter(State s) {
   } else if (s == State::kKey) {
     const GrammarTool* t = current_tool();
     if (t != nullptr && t->constrain_keys) match_.targets = t->keys;
+  } else if (s == State::kValue) {
+    // The value's constraint is the key's declared argument, if any.
+    arg_ = -1;
+    const GrammarTool* t = current_tool();
+    if (t != nullptr)
+      for (size_t i = 0; i < t->args.size(); ++i)
+        if (t->args[i].key == key_) arg_ = static_cast<int>(i);
+    const GrammarArg* a = current_arg();
+    if (a != nullptr && a->kind == GrammarArg::Kind::kText) {
+      match_.targets = a->texts;
+    } else if (a != nullptr && a->kind == GrammarArg::Kind::kJson) {
+      value_json_ = JsonMachine(
+          arg_schemas_[static_cast<size_t>(tool_)][static_cast<size_t>(arg_)],
+          &vocab_->json_tables());
+    }
   } else if (s == State::kTop) {
     tool_ = -1;
   }
@@ -307,9 +461,17 @@ void GrammarState::mask(TokenMask* out) const {
     case State::kAfterKey:
       list_mask(out, {m.arg_value_open.id});
       return;
-    case State::kValue:
-      free_mask(out, m.arg_value_close.id);
+    case State::kValue: {
+      const GrammarArg* a = current_arg();
+      if (a == nullptr || a->kind == GrammarArg::Kind::kFree) {
+        free_mask(out, m.arg_value_close.id);
+      } else if (a->kind == GrammarArg::Kind::kText) {
+        list_mask(out, match_ids(match_, m.arg_value_close.id));
+      } else {
+        json_mask(value_json_, m.arg_value_close.id, out);
+      }
       return;
+    }
     case State::kAfterValue: {
       std::vector<int64_t> ids;
       if (keys_possible()) ids.push_back(m.arg_key_open.id);
@@ -322,16 +484,17 @@ void GrammarState::mask(TokenMask* out) const {
       list_mask(out, {vocab_->call_turn_eos()});
       return;
     case State::kJsonBody:
-      json_mask(out);
+      json_mask(json_, /*closer=*/-1, out);
       return;
   }
 }
 
-// The JSON body's position: the machine's mask (token texts), never a
-// marker (a "<think>" would be legal string content), EOS once the text
-// is complete.
-void GrammarState::json_mask(TokenMask* out) const {
-  json_.mask(*vocab_, out);
+// A JSON machine's position: its mask over token texts, never a marker (a
+// "<think>" would be legal string content), and the closer — EOS for the
+// body, </arg_value> for a typed argument — once the text is complete.
+void GrammarState::json_mask(const JsonMachine& machine, int64_t closer,
+                             TokenMask* out) const {
+  machine.mask(*vocab_, out);
   const int vocab = vocab_->vocab_size();
   const auto set = [&](int64_t id, bool on) {
     if (id < 0 || id >= vocab) return;
@@ -348,19 +511,25 @@ void GrammarState::json_mask(TokenMask* out) const {
   for (const int64_t m : vocab_->marker_ids()) set(m, false);
   set(vocab_->markers().think_open.id, false);
   set(vocab_->markers().think_close.id, false);
-  if (json_.done())
-    for (const int64_t e : vocab_->eos_ids()) set(e, true);
+  if (machine.done()) {
+    if (closer < 0)
+      for (const int64_t e : vocab_->eos_ids()) set(e, true);
+    else
+      set(closer, true);
+  }
   if (out->allowed == 0)
     throw std::logic_error("GrammarState: a JSON position with no allowed id");
 }
 
-bool GrammarState::json_allows(int64_t id) const {
-  if (vocab_->is_eos(id)) return json_.done();
+bool GrammarState::json_allows(const JsonMachine& machine, int64_t closer,
+                               int64_t id) const {
+  if (closer < 0 ? vocab_->is_eos(id) : id == closer) return machine.done();
+  if (vocab_->is_eos(id)) return false;
   for (const int64_t m : vocab_->marker_ids())
     if (m == id) return false;
   if (id == vocab_->markers().think_open.id || id == vocab_->markers().think_close.id)
     return false;
-  return json_.allows(*vocab_, id);
+  return machine.allows(*vocab_, id);
 }
 
 bool GrammarState::keys_possible_for(const std::string& name) const {
@@ -371,7 +540,12 @@ bool GrammarState::keys_possible_for(const std::string& name) const {
 
 bool GrammarState::allows(int64_t id) const {
   if (!active()) return true;
-  if (state_ == State::kJsonBody) return json_allows(id);
+  if (state_ == State::kJsonBody) return json_allows(json_, -1, id);
+  if (state_ == State::kValue) {
+    const GrammarArg* a = current_arg();
+    if (a != nullptr && a->kind == GrammarArg::Kind::kJson)
+      return json_allows(value_json_, vocab_->markers().arg_value_close.id, id);
+  }
   TokenMask m;
   mask(&m);
   return m.allows(id);
@@ -431,6 +605,7 @@ void GrammarState::advance(int64_t id) {
       return;
     case State::kKey:
       if (id == m.arg_key_close.id) {
+        key_ = match_.emitted;
         enter(State::kAfterKey);
         return;
       }
@@ -439,9 +614,23 @@ void GrammarState::advance(int64_t id) {
     case State::kAfterKey:
       enter(State::kValue);
       return;
-    case State::kValue:
-      if (id == m.arg_value_close.id) enter(State::kAfterValue);
+    case State::kValue: {
+      if (id == m.arg_value_close.id) {
+        enter(State::kAfterValue);
+        return;
+      }
+      const GrammarArg* a = current_arg();
+      if (a != nullptr && a->kind == GrammarArg::Kind::kText) {
+        match_.emitted += vocab_->text(id);
+      } else if (a != nullptr && a->kind == GrammarArg::Kind::kJson) {
+        for (const char c : vocab_->text(id))
+          if (!value_json_.feed(static_cast<uint8_t>(c))) {
+            dead_ = true;
+            return;
+          }
+      }
       return;
+    }
     case State::kAfterValue:
       if (id == m.arg_key_open.id)
         enter(State::kKey);

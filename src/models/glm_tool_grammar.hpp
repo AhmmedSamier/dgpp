@@ -21,8 +21,10 @@
 //               is accepted and nothing else)
 //   KEY      := a property name of that tool's schema when the schema
 //               closes its keys, else free text
-//   VALUE    := free text (the schema types values afterwards, in the
-//               parser); the closing marker is the only marker allowed
+//   VALUE    := typed by the property's schema (M6 6i): a JSON text under
+//               the 6h machine for a JSON-typed property, one of the enum
+//               texts for an enum string, free text otherwise; the closing
+//               marker is the only marker allowed
 //   EOS      := <|observation|> — the id that ends a tool-call turn
 // Free text means every id except the structural markers and, while a
 // call obligation is unmet, the EOS ids. Thinking is left free: the
@@ -55,12 +57,46 @@ class GlmTokenizer;
 
 namespace dgpp::glm {
 
-// One tool the grammar may name, and its closed key set (when it has one).
+// One declared argument's value constraint (M6 6i): what the schema's
+// `type` lets the grammar enforce inside <arg_value>...</arg_value>. The
+// template writes a string argument RAW and every other value through
+// tojson, so a JSON-typed property (integer, number, boolean, null,
+// object, array, or a type list without string) is a JSON text the 6h
+// machine can enforce under the property's own schema; a string property
+// with an enum is one of its texts exactly; a plain string, a type list
+// with string in it, an untyped property, and an unknown key are free
+// text (the parser types them afterwards).
+struct GrammarArg {
+  enum class Kind : int { kFree = 0, kJson, kText };
+  std::string key;
+  Kind kind = Kind::kFree;
+  std::string schema;              // kJson: the property's schema JSON text
+  std::vector<std::string> texts;  // kText: the exact values allowed
+  bool operator==(const GrammarArg& o) const {
+    return key == o.key && kind == o.kind && schema == o.schema && texts == o.texts;
+  }
+};
+
+// One tool the grammar may name, its closed key set (when it has one) and
+// its typed arguments.
 struct GrammarTool {
   std::string name;
   bool constrain_keys = false;     // the schema closes its properties
   std::vector<std::string> keys;   // the property names, when closed
+  std::vector<GrammarArg> args;    // the declared properties' value constraints
 };
+
+// Derives a tool's grammar entry from its OpenAI function definition
+// ({name, parameters, strict?} — the `function` object, or the flat form):
+// the key set closes under `additionalProperties: false`, and every
+// declared property gets its GrammarArg. Under `strict: true` every
+// property's schema must lie inside the constrained subset, else
+// std::invalid_argument whose message starts with the offending path
+// ("parameters.properties.city.pattern: ..."); otherwise a JSON-typed
+// property outside the subset stays free and `warnings` (when given)
+// receives one line saying so.
+GrammarTool grammar_tool_from_function(const minijson::Value& def,
+                                       std::vector<std::string>* warnings);
 
 // The request's constraint — what rides the journal (fabric_serve.cpp) and
 // reaches every rank's engine through SchedulerEngine::configure_constraint.
@@ -68,8 +104,9 @@ struct GrammarSpec {
   enum class Mode : int {
     kNone = 0,        // unconstrained
     kForbidCalls,     // tool_choice none: <tool_call> never
-    kAuto,            // tool_choice auto with parallel_tool_calls false:
-                      // free, but at most one call, then EOS
+    kAuto,            // tool_choice auto: free text and calls at will (as
+                      // many as `parallel` allows: one when false), every
+                      // call well-formed with typed arguments
     kRequired,        // one or more calls (parallel) or exactly one
     kNamed,           // exactly one call to `named`
     kJson,            // response_format (M6 6h): the content is one JSON
@@ -90,7 +127,7 @@ struct GrammarSpec {
     for (size_t i = 0; i < tools.size(); ++i)
       if (tools[i].name != o.tools[i].name ||
           tools[i].constrain_keys != o.tools[i].constrain_keys ||
-          tools[i].keys != o.tools[i].keys)
+          tools[i].keys != o.tools[i].keys || tools[i].args != o.tools[i].args)
         return false;
     return true;
   }
@@ -230,8 +267,11 @@ class GrammarState {
   void free_mask(TokenMask* out, int64_t extra_allowed,
                  bool forbid_markers = true) const;
   void list_mask(TokenMask* out, const std::vector<int64_t>& ids) const;
-  void json_mask(TokenMask* out) const;
-  bool json_allows(int64_t id) const;
+  // A JSON machine's position: its mask without the markers, plus the
+  // closer once the text is complete (`closer` -1: the EOS ids).
+  void json_mask(const JsonMachine& machine, int64_t closer, TokenMask* out) const;
+  bool json_allows(const JsonMachine& machine, int64_t closer, int64_t id) const;
+  const GrammarArg* current_arg() const;
   // The ids that continue the match (and the closer when a target is
   // complete).
   std::vector<int64_t> match_ids(const TextMatch& m, int64_t closer) const;
@@ -242,8 +282,14 @@ class GrammarState {
   bool dead_ = false;
   int calls_ = 0;          // calls closed so far
   int tool_ = -1;          // the open call's tool (index into spec_.tools)
-  TextMatch match_;        // kName / kKey
+  TextMatch match_;        // kName / kKey / a kText value
+  std::string key_;        // the open argument's key (kAfterKey / kValue)
+  int arg_ = -1;           // the open argument (index into the tool's args)
   JsonMachine json_;       // kJson: the body's machine (inactive otherwise)
+  JsonMachine value_json_; // a kJson argument's machine
+  // The compiled schemas of every kJson argument, [tool][arg] (null
+  // where the argument is not kJson).
+  std::vector<std::vector<std::shared_ptr<const JsonSchema>>> arg_schemas_;
 };
 
 }  // namespace dgpp::glm

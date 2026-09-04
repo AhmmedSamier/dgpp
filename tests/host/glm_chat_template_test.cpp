@@ -409,8 +409,9 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       for (const dgpp::minijson::Value& t : tools->items()) {
         const dgpp::minijson::Value* fn = t.find("function");
         const dgpp::minijson::Value& def = fn ? *fn : t;
-        g.tools.push_back(dgpp::glm::GrammarTool{
-            std::string(def.at("name").as_string()), false, {}});
+        // The closed keys and typed values as the service derives them
+        // (M6 6i): every golden turn must pass under the typing too.
+        g.tools.push_back(dgpp::glm::grammar_tool_from_function(def, nullptr));
       }
     return g;
   };
@@ -491,6 +492,51 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
   }
   require(turns >= 6, "expected at least 6 tool-call turns, got " +
                           std::to_string(turns));
+  // The typing derived from a function definition: a plain string is
+  // free, an integer is a JSON value, an enum string is its texts, a type
+  // list with string is free, an untyped enum renders its members as the
+  // template would, strict refuses an unsupported keyword by path.
+  {
+    const dgpp::minijson::ParseResult fn = dgpp::minijson::parse(
+        R"({"name": "f", "parameters": {"type": "object", "properties": {
+              "city": {"type": "string"},
+              "days": {"type": "integer", "minimum": 0},
+              "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+              "note": {"type": ["string", "null"]},
+              "mode": {"enum": ["fast", 3, true]},
+              "opts": {"type": "object", "properties": {"a": {"type": "boolean"}}},
+              "n": {"type": ["integer", "null"]}},
+            "required": ["city"], "additionalProperties": false}})");
+    std::vector<std::string> warnings;
+    const dgpp::glm::GrammarTool t = dgpp::glm::grammar_tool_from_function(fn.root, &warnings);
+    using Kind = dgpp::glm::GrammarArg::Kind;
+    require(t.constrain_keys && t.keys.size() == 7 && t.args.size() == 7, "keys and args");
+    require(t.args[0].kind == Kind::kFree, "a plain string is free");
+    require(t.args[1].kind == Kind::kFree && warnings.size() == 1 &&
+                warnings[0].find("minimum") != std::string::npos,
+            "an integer with an unsupported keyword stays free, with a warning");
+    require(t.args[2].kind == Kind::kText &&
+                t.args[2].texts == std::vector<std::string>{"celsius", "fahrenheit"},
+            "an enum string is its texts");
+    require(t.args[3].kind == Kind::kFree, "string|null is free");
+    require(t.args[4].kind == Kind::kText &&
+                t.args[4].texts == std::vector<std::string>{"fast", "3", "true"},
+            "an untyped enum renders as the template would");
+    require(t.args[5].kind == Kind::kJson && t.args[5].schema.find("boolean") != std::string::npos,
+            "an object is a JSON value under its schema");
+    require(t.args[6].kind == Kind::kJson && t.args[6].schema.find("null") != std::string::npos,
+            "integer|null is a JSON value");
+    const dgpp::minijson::ParseResult strict = dgpp::minijson::parse(
+        R"({"name": "f", "strict": true, "parameters": {"type": "object", "properties": {
+              "days": {"type": "integer", "minimum": 0}}}})");
+    bool threw = false;
+    try {
+      dgpp::glm::grammar_tool_from_function(strict.root, nullptr);
+    } catch (const std::invalid_argument& e) {
+      threw = std::string(e.what()).rfind("parameters.properties.days.minimum", 0) == 0;
+    }
+    require(threw, "strict refuses the keyword by path");
+  }
   DGPP_LOG_INFO("glm_chat_template_test: the grammar accepts {} golden tool-call "
                 "turns over the real tokenizer and refuses the forbidden shapes",
                 turns);
