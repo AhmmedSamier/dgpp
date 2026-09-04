@@ -640,19 +640,26 @@ o_proj ~20 µs of fabric round trips for its lane-0 stores), `reduce()` is
 `allreduce_record`, and the recorded kernel snapshots the buffer into the
 generation's staging row itself (one row per generation, every peer's
 SEND posted from it, hashed once). Every per-step host input (request
-ids, positions, tokens, the MoE expert-view tables) is either a pinned
-member the graph's memcpy nodes re-read or, since the on-device step, a
-device buffer the previous replay wrote (§9). Plain decode replays 90
+ids, positions, tokens, the MoE expert-view tables) is either a pinned,
+device-mapped member a KERNEL node re-reads (`glm_upload_i32/i64` —
+never a memcpy node, see below) or, since the on-device step, a device
+buffer the previous replay wrote (§9). Plain decode replays 90
 collective nodes per token; the MTP step 94. Capture + instantiate ~38 ms,
 once. Per collective in the step (rank 0, steady): ~35 µs at T=1 (copy
 2.7 + handshake 8–16 + skew ~15 + fold 4–5) and ~48 µs at T=2 (two rows
 copied and folded); the "skew" is the ranks' ~3% compute spread, not the
-transport. In-process worlds (the loopback tests) need more CUDA connections
-or a spinning collective kernel can FIFO-block a peer's chain sharing a
-hardware queue (§9). The multi-branch MTP graph can still reproduce this
-scheduler deadlock at 32 connections, so `glm_tp_test` also disables the
-pure-performance L2 prefetcher; fabric keeps it enabled because every rank
-has a separate process/context.
+transport. The captured graph is KERNELS-ONLY by contract
+(`glm_check_decode_graph` at every capture site): a memset or memcpy node
+executes on the copy-engine queue, one in-order queue shared by every
+stream in the process, where a queued node's dependency wait blocks
+everything behind it — in the one-process loopback worlds a peer's queued
+post-collective memset held this rank's pre-collective memset while the
+peer's collective spun on ours (the 2026-09-03 stall, §9 and
+`docs/batched_mtp_graph_stall.md`). Kernel nodes never share that queue,
+so a spinning collective blocks nothing: the loopback worlds pass at
+`CUDA_DEVICE_MAX_CONNECTIONS=1` with the prefetcher on. Fabric ranks are
+one process each and never shared the queue; the contract costs them a
+handful of 32-thread launches per step.
 
 One compiler lesson for the record: the shared eager/graph kernel body
 refactor (a mechanical template extraction, pure renames, reference-based
@@ -1284,7 +1291,10 @@ The pieces that make the number:
   from zero), and not worse at 14k tokens.
 - *Fewer graph nodes:* route traces off in serving (126 D2H nodes), expert
   tables uploaded once before capture (42 H2D nodes), the logits/hidden
-  tail mirrors off in the on-device step (§9).
+  tail mirrors off in the on-device step (§9); since 2026-09-03 the graph
+  carries no memset/memcpy node at all — the DSA select-counter reset and
+  the row-table/token/position uploads are kernels (§6.2, the copy-engine
+  queue deadlock of the loopback worlds).
 
 What is left, and why it is where it is: the 94 collectives (~4.6 ms at
 T=2 — handshake 8–16 µs and the ranks' ~3% compute spread, not the wire;
@@ -1830,9 +1840,10 @@ closed slot into −1 padding; KDA, DSA, speculative snapshots, MTP hidden-cache
 access, pick/verdict, commit, draft, and next-token feeds independently select
 the request. The fabric latency slot is 64 KiB for all eight hidden-4096 rows.
 Prefill and the initial draft stay eager between graph windows. Because those
-paths reuse pinned row-map sources whose addresses CUDA memcpy nodes retain,
-the adapter restores the immutable batch ids/spans before each batch replay
-and reseeds every live device token feed after scalar work or an admission.
+paths reuse pinned row-map sources whose addresses the graph's kernel-upload
+nodes retain (`glm_upload_i32/i64`; §6.2), the adapter restores the
+immutable batch ids/spans before each batch replay and reseeds every live
+device token feed after scalar work or an admission.
 
 The first adaptive version restored throughput but failed transcript
 isolation: scalar decode used the row-independent GEMV cores at m≤4 while an
@@ -1997,10 +2008,27 @@ error return regardless of the application's handling. Never make a call
 that can fail: query the driver-computed per-kernel ceiling
 (`cudaFuncAttributes::maxDynamicSharedSizeBytes`) and request within it.
 
+A fourth class no sanitizer sees, found 2026-09-03 with an nsys node trace
+(`docs/batched_mtp_graph_stall.md`): a graph's memset/memcpy nodes ride the
+process-shared, in-order copy-engine queue, and a queued node's dependency
+wait blocks the peer rank's node behind it — a deadlock that needs two
+ranks in one process and a kernel that waits on the peer, which is exactly
+the loopback gates. The rule it left is structural, not a timing knob: the
+captured decode graph is kernels-only, checked at every capture site
+(§6.2); a spinning kernel never blocks another stream's kernels, so with
+that contract the worlds pass at one hardware connection. The trace, not
+reasoning, settled it — the first diagnosis (compute work queues, a
+non-resident collective as the remedy) had the right shape on the wrong
+queue and would not have fixed it.
+
 Sanitizer scope is chosen per phase, deliberately: full-suite memcheck for
 orchestration code (pointer/size bugs — it caught two undersized test
 buffers that made a graph test pass vacuously), targeted racecheck/initcheck
-for new kernel shapes. Instrumenting vendor kernels (cuBLASLt's cutlass
+for new kernel shapes. The loopback worlds under memcheck need their time
+budgets lifted (`DGPP_TEST_BUS_TIMEOUT_MS`, `DGPP_TEST_CONSUMER_DEADLINE_S`;
+the boundary reducer's 60 s wait backstop is still hard-coded) — instrumented
+kernels outlast the release budgets by orders of magnitude, on the baseline
+as on any change. Instrumenting vendor kernels (cuBLASLt's cutlass
 implementations dominate long benchmarks) buys no coverage of our code and
 costs orders of magnitude in wall time; the decision and reasoning are
 recorded with the results.

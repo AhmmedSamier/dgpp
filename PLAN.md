@@ -36,7 +36,9 @@ position -1. `CollectiveBus` owns a disjoint generation-cell set for every
 recorded variant, so shape switches do not restart the process or graph era.
 The T=1 and MTP paths pass the real two-rank loopback gates, including mixed
 acceptance, noncontiguous occupancy, scalar↔batch transitions, request-order
-reversal, close, and slot reuse without recapture. The scalar, fixed-batch,
+reversal, close, and slot reuse without recapture — with the prefetcher on,
+after the 2026-09-03 stall hunt made the decode graph kernels-only
+(`docs/batched_mtp_graph_stall.md`). The scalar, fixed-batch,
 and final adaptive shapes are measured on the four-node service (2026-09-03,
 the record entries of that date). The scalar shape runs at
 32.0–33.2 ms/token at T=1 and 21.8–26.0 with MTP (43.6–44.1 ms per replay
@@ -695,11 +697,21 @@ Two phases:
   0's slower construction (found by the validation run);
   (iii) `--graph-batch-min-live` defaults to min(4, max-concurrency) and an
   explicit value outside [1, max-concurrency] is rejected instead of
-  silently clamped (the adapter still logs if it ever clamps). OWED: the
+  silently clamped (the adapter still logs if it ever clamps);
+  (iv) 2026-09-03/04: the batched-MTP loopback gate's intermittent graph
+  stall was root-caused (nsys node trace) to the graph's memset/memcpy
+  nodes on the process-shared copy-engine queue — the peer's queued
+  post-collective memset held this rank's pre-collective memset while the
+  peer's collective spun — and fixed by making the decode graph kernels-only
+  (`glm_check_decode_graph` at every capture site; `docs/batched_mtp_graph_stall.md`).
+  The CTest prefetch-off mitigation is gone; the MTP gate passes 100/100 at
+  32 and at 1 CUDA connection, ctest 33/33 with prefetch on. OWED: the
   GEMM seam now lowers every m ≤ 8 through the GEMV chunks, which moved
   prefill tail chunks and per-expert prefill GEMMs of 5–8 routed tokens off
   cuBLASLt — bitwise different at those shapes and unmeasured; measure
-  prefill before the TTFT work starts (below).
+  prefill before the TTFT work starts (below). Also OWED: one fabric decode
+  run confirming the kernels-only graph's per-step cost is in the noise (a
+  few 32-thread launches replace the memset/memcpy nodes).
 
 **6b. Sampling on the bus — IMPLEMENTATION STARTED 2026-09-03**
 (deliverable 3's distributed half; DESIGN §10). The configuration slice is
