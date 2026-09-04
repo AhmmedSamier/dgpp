@@ -461,6 +461,12 @@ int main(int argc, char** argv) {
           cfg.vocab_size,
           v.markers().tool_calls_available() ? "present" : "absent",
           v.call_turn_eos());
+      // The JSON grammar's tables (M6 6h): built now, on every rank, so
+      // the first response_format request pays nothing.
+      const auto t0 = std::chrono::steady_clock::now();
+      v.prepare_json();
+      DGPP_LOG_INFO("serve: JSON grammar tables built in {:.2f} s",
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
       return v;
     }();
     const auto boot_s = [&] {

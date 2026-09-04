@@ -2011,6 +2011,62 @@ rows), and `glm_chat_template_test`'s
 tokenizer; a second call refused under a single-call spec, EOS refused
 while a call is owed, a foreign name refused at its first token).
 
+**JSON-constrained output (M6 6h, built 2026-09-04;
+`glm_json_grammar.{hpp,cpp}`).** `response_format` `json_object` /
+`json_schema` is the second grammar behind the same mask: the content is
+one JSON text — an object in `json_object` mode, a text conforming to the
+schema in `json_schema` mode — then EOS; no tool calls (a turn is JSON or
+calls). Three layers. `JsonLexer` is a byte automaton for RFC 8259 JSON
+with a container stack (the structural states, strings with their
+escapes, the number grammar, the literals); every byte advances or
+rejects, and a top-level number counts as complete while it may still
+grow. `compile_json_schema` turns OpenAI's structured-output subset into
+nodes — `type` (and lists), `properties` / `required` /
+`additionalProperties`, `items` / `minItems` / `maxItems`, `enum` /
+`const` over scalars, `anyOf` — and refuses anything else at compile time
+NAMING THE KEYWORD PATH; `json_object` is the schema "a root object
+holding anything". `JsonMachine` is the lexer plus schema cursors: at a
+value position the expected node filters the value class (an `anyOf`
+splits the cursor per alternative; the frontier shrinks as bytes
+disambiguate, union semantics), a closed object's keys are spelled from
+the declared names byte by byte and an enum's value from its JSON texts,
+`,` and the closers obey `required` and the item bounds, integer-typed
+numbers admit no fraction or exponent. The mask is the set of ids whose
+text the machine accepts byte by byte; computing it by simulating 155k
+tokens per position would cost milliseconds, so `JsonTables` precomputes,
+once per vocabulary (0.06 s, in parallel), the static lexical answer for
+every tabled (state, container context, integer flag) over every token —
+a token that pops its frame and goes on is stack-dependent and
+re-simulated per position — and classifies every token by where free
+string content can begin or end inside it (its structural prefix before
+its one unescaped quote, its tail after it, its tail after a scalar). At
+a position the schema is applied by simulating REPRESENTATIVES: one per
+distinct prefix or tail, the pure-structure tokens and the few
+multi-quote tokens individually, group members only where the content
+itself is constrained (a closed object's key, an enum, a literal's
+spelling, an escape); inside a string the answer is cached until the next
+structural event or a cursor's death. Measured over the real tokenizer:
+36 µs per position on average, 198 µs at the worst structural position
+under a closed schema. EXACTNESS is a gate, not an argument:
+`glm_json_grammar_test` proves `mask()` equal to the brute-force answer
+(every token simulated) at every position of mask-driven random walks
+over the free machine and schemas exercising every node kind, and every
+finished walk parses and conforms. In the grammar layer
+(`GrammarSpec::Mode::kJson`, the schema text riding the journal as
+`gr.js`, `""` = json_object) thinking stays free but EOS is withheld
+until the text is complete, `</think>` opens the body, the markers are
+forbidden inside it (a `<think>` would be legal string content), and EOS
+is admitted only when the machine is done. The engines are unchanged: a
+JSON grammar is another `GrammarState` behind the masks above, host and
+device, the MTP row 1 under the pending draft, the unconstrained in-graph
+draft rejected wherever the mask excludes it. The service compiles the
+schema on rank 0: `strict: true` with a keyword outside the subset is a
+400 naming `response_format.json_schema.schema.<path>`
+(`unsupported_schema`); non-strict falls back to `json_object` with a
+warning (OpenAI's non-strict mode promises no conformance); the prompt is
+untouched; the content is the JSON text. Every rank rebuilds the same
+machine from the same record and the same tokenizer.
+
 ## 11. Runtime and API
 
 The daemon is a hand-rolled C++ service (`glm_serve`; `src/service/`) with:
@@ -2073,8 +2129,8 @@ thread drains admissions → `try_submit`, drains cancels → `cancel`, runs
 ONE tick, publishes meters. Records enter the table AT ENQUEUE so
 pre-admission requests are visible to disconnect and to the pump. The
 refusal ladder: every accepted field behaves per the schema; every
-unimplemented one (stop, n, logit_bias, response_format, …, and
-non-greedy sampling on an engine that cannot sample) refuses with a
+unimplemented one (stop, n, logit_bias, …, and non-greedy sampling on
+an engine that cannot sample) refuses with a
 400 carrying the OpenAI error object naming the param — silent-ignore is
 the bug class the ladder exists to prevent. The sampling fields
 (temperature, top_p, presence/frequency penalties, seed; top_k, min_p,
@@ -2322,8 +2378,9 @@ artifact hashes are in the 2026-09-03 Phase-2 entries of
 - *Grow-on-demand admission:* reserve to a window, grow at tick top,
   shed the youngest deterministically when growth fails — a pure function
   of (meters, positions), so the journal keeps it identical.
-- *Tool calls and reasoning (PLAN 6f, 6g):* BUILT 2026-09-04 — the
-  as-built paragraph above and §10's constrained decoding. Three things
+- *Tool calls and reasoning (PLAN 6f, 6g), `response_format` (6h):*
+  BUILT 2026-09-04 — the as-built paragraph above and §10's constrained
+  decoding and JSON-constrained output. Three things
   the design had wrong, corrected in the build: the markers are not
   special tokens (decode prints them, which is why a malformed block can
   fall back to literal text); "JSON if it parses" alone is lossy, so

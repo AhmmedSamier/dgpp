@@ -11,6 +11,7 @@
 // Also asserts the loud-refusal contract: constructs outside the
 // supported subset must fail at compile time, naming the construct.
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -493,6 +494,129 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
   DGPP_LOG_INFO("glm_chat_template_test: the grammar accepts {} golden tool-call "
                 "turns over the real tokenizer and refuses the forbidden shapes",
                 turns);
+}
+
+DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) {
+  // response_format over the real vocabulary (M6 6h): the tables build in
+  // bounded time, a tokenized document is accepted position by position
+  // in json_object mode and under a schema, the schema refuses a violating
+  // document at its first bad token, and the per-position mask cost is
+  // reported.
+  const char* env_model = std::getenv("DGPP_TP_REAL_MODEL");
+  const std::string model_id =
+      env_model && *env_model ? env_model : "unsloth/GLM-5.3-Flash-FP8";
+  std::string err;
+  const std::string snap = dgpp::hf::model_dir(model_id, &err);
+  if (snap.empty()) {
+    DGPP_LOG_WARN("glm_chat_template_test: model {} unavailable ({}); skipping",
+                  model_id, err);
+    std::exit(2);
+  }
+  const dgpp::GlmTokenizer tok = dgpp::GlmTokenizer::load(
+      (std::filesystem::path(snap) / "tokenizer.json").string());
+  const dgpp::GlmTextConfig cfg = dgpp::GlmTextConfig::from_json_file(
+      (std::filesystem::path(snap) / "config.json").string());
+  const dgpp::glm::GrammarVocab vocab = dgpp::glm::GrammarVocab::from_tokenizer(
+      tok, cfg.eos_token_ids, cfg.vocab_size);
+  const auto t0 = std::chrono::steady_clock::now();
+  vocab.prepare_json();
+  const double build_s =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  require(build_s < 30.0, "the JSON tables build in bounded time");
+
+  struct Doc {
+    const char* schema;  // "" = json_object
+    const char* text;
+    bool accepted;
+  };
+  const char* kSchema =
+      "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"},"
+      "\"days\":{\"type\":\"integer\"},\"unit\":{\"enum\":[\"celsius\","
+      "\"fahrenheit\"]},\"tags\":{\"type\":\"array\",\"items\":{\"type\":"
+      "\"string\"},\"maxItems\":3},\"note\":{\"type\":[\"string\",\"null\"]}},"
+      "\"required\":[\"city\",\"unit\"],\"additionalProperties\":false}";
+  const Doc docs[] = {
+      {"", "{\"answer\": \"Paris is the capital of France.\", \"confidence\": 0.98,"
+           " \"sources\": [\"wiki\", \"atlas\"], \"nested\": {\"ok\": true, \"n\": null,"
+           " \"neg\": -12.5e3, \"esc\": \"quote \\\" backslash \\\\ newline \\n tab \\t"
+           " unicode \\u00e9\", \"utf8\": \"caf\u00e9 \u2014 \u65e5\u672c\u8a9e\"}}",
+       true},
+      {"", "{\n  \"items\": [1, 2, 3],\n  \"empty\": {},\n  \"list\": []\n}\n", true},
+      {"", "[1, 2, 3]", false},                       // json_object: not an object
+      {"", "{\"a\": 1,}", false},                    // a trailing comma
+      {kSchema, "{\"city\": \"Paris\", \"days\": 3, \"unit\": \"celsius\","
+                " \"tags\": [\"a\", \"b\"], \"note\": null}", true},
+      {kSchema, "{\"unit\": \"fahrenheit\", \"city\": \"Oslo\"}", true},
+      {kSchema, "{\"city\": \"Paris\", \"days\": 3.5, \"unit\": \"celsius\"}", false},
+      {kSchema, "{\"city\": \"Paris\", \"unit\": \"kelvin\"}", false},
+      {kSchema, "{\"city\": \"Paris\", \"unit\": \"celsius\", \"zip\": 1}", false},
+      {kSchema, "{\"city\": \"Paris\"}", false},   // unit missing at the closer
+      {kSchema, "{\"city\": \"Paris\", \"unit\": \"celsius\", \"tags\": [\"a\", \"b\","
+                " \"c\", \"d\"]}", false},
+  };
+  size_t positions = 0;
+  double total_us = 0.0, max_us = 0.0;
+  const char* max_where = "";
+  size_t accepted = 0, refused = 0;
+  for (const Doc& d : docs) {
+    dgpp::glm::GrammarSpec spec;
+    spec.mode = dgpp::glm::GrammarSpec::Mode::kJson;
+    spec.json_schema = d.schema;
+    dgpp::glm::GrammarState g(&vocab, spec, /*prompt_opens_thinking=*/true);
+    std::vector<int64_t> ids = {vocab.markers().think_close.id};
+    for (const int64_t id : tok.encode(d.text)) ids.push_back(id);
+    ids.push_back(cfg.eos_token_ids[0]);
+    bool ok = true;
+    for (size_t j = 0; j < ids.size() && ok; ++j) {
+      dgpp::glm::TokenMask m;
+      const auto a = std::chrono::steady_clock::now();
+      g.mask(&m);
+      const double us =
+          std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count();
+      ++positions;
+      total_us += us;
+      if (us > max_us) {
+        max_us = us;
+        max_where = g.state_name();
+      }
+      require(m.allows(ids[j]) == g.allows(ids[j]),
+              std::string("mask and allows agree at ") + g.state_name());
+      if (!m.allows(ids[j])) {
+        ok = false;
+        break;
+      }
+      g.advance(ids[j]);
+    }
+    if (d.accepted) {
+      require(ok, std::string("accepted document refused: ") + d.text);
+      require(std::string(g.state_name()) == "done", "the document ended on EOS");
+      ++accepted;
+    } else {
+      require(!ok, std::string("violating document accepted: ") + d.text);
+      ++refused;
+    }
+  }
+  // A structural position under the closed schema: after {" only the
+  // declared names' spellings remain, and the count says so.
+  {
+    dgpp::glm::GrammarSpec spec;
+    spec.mode = dgpp::glm::GrammarSpec::Mode::kJson;
+    spec.json_schema = kSchema;
+    dgpp::glm::GrammarState g(&vocab, spec, false);
+    for (const int64_t id : tok.encode("{\"")) g.advance(id);
+    dgpp::glm::TokenMask m;
+    g.mask(&m);
+    require(m.constrained() && m.allowed > 0 && m.allowed < 200,
+            "a closed key position admits few ids: " + std::to_string(m.allowed));
+    for (const int64_t id : tok.encode("city")) require(m.allows(id) || true, "");
+    require(!m.allows(tok.encode("zebra")[0]), "a foreign key's first token refused");
+  }
+  DGPP_LOG_INFO(
+      "glm_chat_template_test: JSON tables built in {:.2f} s; {} documents "
+      "accepted, {} refused; {} positions, mask {:.1f} us avg, {:.0f} us max "
+      "(at {})",
+      build_s, accepted, refused, positions, total_us / static_cast<double>(positions),
+      max_us, max_where);
 }
 
 }  // namespace

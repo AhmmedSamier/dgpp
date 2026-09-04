@@ -285,6 +285,10 @@ std::string model_object(const std::string& model_id, int64_t created,
   out.append(tools_available ? "true" : "false");
   out.append(",\"constrained\":");
   out.append(constraints_available ? "true" : "false");
+  out.append("},\"response_format\":{\"json_object\":");
+  out.append(constraints_available ? "true" : "false");
+  out.append(",\"json_schema\":");
+  out.append(constraints_available ? "true" : "false");
   out.append("},\"reasoning\":{\"in_content\":");
   out.append(reasoning_in_content ? "true" : "false");
   out.append("}}");
@@ -618,6 +622,89 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
           }
         }
         g.tools.push_back(std::move(tool));
+      }
+    }
+  }
+
+  // ---- response_format (M6 6h) -------------------------------------------
+  // json_object and json_schema are guarantees of the same masked pick: the
+  // content is one JSON text (an object in json_object mode; conforming to
+  // the schema in json_schema mode), then the turn ends. The prompt is
+  // untouched; the model reasons first when the template opens thinking.
+  if (const Value* rf = body.find("response_format")) {
+    if (!rf->is_object())
+      return refuse("response_format must be an object", "response_format");
+    const Value* type = rf->find("type");
+    if (type == nullptr || !type->is_string())
+      return refuse("response_format.type must be a string", "response_format.type");
+    const std::string_view kind = type->as_string();
+    if (kind != "text" && kind != "json_object" && kind != "json_schema")
+      return refuse("response_format.type must be \"text\", \"json_object\" or "
+                    "\"json_schema\"",
+                    "response_format.type");
+    if (kind != "text") {
+      if (have_tools)
+        return refuse(
+            "response_format json_object / json_schema cannot be combined "
+            "with tools in this server version (a turn is either JSON or "
+            "tool calls)",
+            "response_format", "unsupported_parameter");
+      if (!constraints_available())
+        return refuse(
+            "response_format json_object / json_schema cannot be enforced "
+            "on this engine (it has no constrained decoding)",
+            "response_format", "constrained_decoding_unsupported");
+      using dgpp::glm::GrammarSpec;
+      GrammarSpec& g = plan->grammar;
+      g = GrammarSpec{};
+      g.mode = GrammarSpec::Mode::kJson;
+      if (kind == "json_schema") {
+        const Value* js = rf->find("json_schema");
+        if (js == nullptr || !js->is_object())
+          return refuse("response_format.json_schema must be an object",
+                        "response_format.json_schema");
+        const Value* name = js->find("name");
+        if (name == nullptr || !name->is_string() || name->as_string().empty())
+          return refuse("response_format.json_schema.name must be a non-empty "
+                        "string",
+                        "response_format.json_schema.name");
+        const Value* strict_v = js->find("strict");
+        if (strict_v != nullptr && !strict_v->is_bool() && !strict_v->is_null())
+          return refuse("response_format.json_schema.strict must be a boolean",
+                        "response_format.json_schema.strict");
+        const bool strict = strict_v != nullptr && strict_v->as_bool(false);
+        const Value* schema = js->find("schema");
+        if (schema != nullptr && !schema->is_object())
+          return refuse("response_format.json_schema.schema must be an object "
+                        "(a JSON schema)",
+                        "response_format.json_schema.schema");
+        if (schema != nullptr) {
+          // Compile here to refuse loudly: the subset is type, properties,
+          // required, additionalProperties, items, minItems, maxItems,
+          // enum, const, anyOf. strict: anything outside it is a 400 naming
+          // the keyword; otherwise the schema falls back to free JSON with a
+          // warning (OpenAI's non-strict mode promises no conformance).
+          try {
+            dgpp::glm::compile_json_schema(*schema);
+            g.json_schema = dgpp::glm::json_text_of(*schema);
+          } catch (const std::invalid_argument& e) {
+            const std::string what = e.what();  // "schema.<path>: reason"
+            const size_t colon = what.find(':');
+            const std::string where =
+                "response_format.json_schema." +
+                (colon == std::string::npos ? std::string("schema") : what.substr(0, colon));
+            if (strict)
+              return refuse("response_format.json_schema.schema cannot be enforced: " +
+                                what,
+                            where, "unsupported_schema");
+            DGPP_LOG_WARN(
+                "serve: response_format json_schema '{}' is not strict and "
+                "its schema is outside the enforceable subset ({}); serving "
+                "it as json_object",
+                std::string(name->as_string()), what);
+            g.json_schema.clear();
+          }
+        }
       }
     }
   }
@@ -1024,10 +1111,10 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
 
   // The loud-refusal ladder for everything not implemented in v1.
   const char* unsupported[] = {
-      "stop",          "n",           "logit_bias",  "user",
-      "response_format", "store",     "metadata",    "service_tier",
-      "prediction",    "audio",       "modalities",  "web_search_options",
-      "functions",     "function_call",
+      "stop",       "n",           "logit_bias", "user",
+      "store",      "metadata",    "service_tier", "prediction",
+      "audio",      "modalities",  "web_search_options", "functions",
+      "function_call",
   };
   for (const char* param : unsupported) {
     if (body.find(param) != nullptr) {

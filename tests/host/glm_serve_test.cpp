@@ -1060,6 +1060,7 @@ DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
     models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
     const std::string ml = models.read_available(800);
     require(ml.find("\"tools\":{\"available\":true,\"constrained\":false},"
+                    "\"response_format\":{\"json_object\":false,\"json_schema\":false},"
                     "\"reasoning\":{\"in_content\":false}") != std::string::npos,
             "models advertise the tool surface (no masks on a greedy engine): " +
                 ml.substr(0, 400));
@@ -1396,6 +1397,95 @@ DGPP_TEST(serve_reasoning_foldKnobAndUnterminatedCallAtTheCap) {
               capped.find("\"finish_reason\":\"length\"") != std::string::npos &&
               capped.find("\"completion_tokens\":6,") != std::string::npos,
           "capped block: " + capped);
+}
+
+DGPP_TEST(serve_responseFormat_armsTheJsonGrammar) {
+  // response_format (M6 6h): json_object and json_schema ride the request
+  // as the JSON grammar — the prompt untouched, the engine armed with the
+  // schema text — and the content is the JSON the model produced.
+  using Mode = dgpp::glm::GrammarSpec::Mode;
+  ServiceRig rig(/*queue_limit=*/8, model_defaults(), /*can_sample=*/true,
+                 std::nullopt, /*with_markers=*/true);
+  {
+    Client models(rig.port());
+    models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    require(models.read_available(800).find(
+                "\"response_format\":{\"json_object\":true,\"json_schema\":true}") !=
+                std::string::npos,
+            "models advertise response_format");
+  }
+  rig.engine.script(5, script_of(rig, "Think</think>{\"city\": \"Rome\"}"));
+  const std::string json_object = post_until_usage(
+      rig, chat_body("abcd", 64, ",\"response_format\":{\"type\":\"json_object\"}"));
+  require(json_object.find("\"prompt_tokens\":5,") != std::string::npos &&
+              json_object.find("\"reasoning_content\":\"Think\"") != std::string::npos &&
+              json_object.find("\"content\":\"{\\\"city\\\": \\\"Rome\\\"}\"") !=
+                  std::string::npos &&
+              json_object.find("\"finish_reason\":\"stop\"") != std::string::npos,
+          "json_object: reasoning then the JSON as content: " + json_object);
+  const std::string schema =
+      "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},"
+      "\"required\":[\"city\"],\"additionalProperties\":false}";
+  (void)post_until_usage(
+      rig, chat_body("abcd", 64,
+                     ",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":"
+                     "{\"name\":\"place\",\"strict\":true,\"schema\":" + schema + "}}"));
+  // Not strict and outside the subset: served as json_object (a warning).
+  (void)post_until_usage(
+      rig, chat_body("abcd", 64,
+                     ",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":"
+                     "{\"name\":\"p\",\"schema\":{\"type\":\"string\",\"pattern\":\"^a\"}}}"));
+  // type text: no grammar.
+  (void)post_until_usage(rig, chat_body("abcd", 64, ",\"response_format\":{\"type\":\"text\"}"));
+  const std::vector<dgpp::glm::GrammarSpec> g = rig.engine.grammars();
+  require(g.size() == 3, "three JSON requests armed a grammar (text arms none), got " +
+                             std::to_string(g.size()));
+  require(g[0].mode == Mode::kJson && g[0].json_schema.empty() && g[0].tools.empty(),
+          "json_object: the free JSON grammar");
+  require(g[1].mode == Mode::kJson && g[1].json_schema.find("\"city\"") != std::string::npos &&
+              g[1].json_schema.find("additionalProperties") != std::string::npos,
+          "json_schema: the schema text rides: " + g[1].json_schema);
+  require(g[2].mode == Mode::kJson && g[2].json_schema.empty(),
+          "non-strict unsupported schema falls back to json_object");
+  require(rig.frontend.last_globals().find("response_format") == std::string::npos,
+          "the prompt does not carry the format");
+
+  // The refusals: strict + unsupported keyword names the keyword; tools
+  // and JSON together; a bad type; a missing name.
+  const auto refused = [&](const std::string& extra, const std::string& param,
+                           const std::string& code) {
+    const std::string resp = post_chat(rig, chat_body("abcd", 2, extra));
+    require(resp.find("400 ") != std::string::npos &&
+                resp.find("\"param\":\"" + param + "\"") != std::string::npos &&
+                (code.empty() || resp.find("\"code\":\"" + code + "\"") != std::string::npos),
+            "expected a 400 naming " + param + " / " + code + ": " + resp.substr(0, 400));
+  };
+  refused(",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"p\","
+          "\"strict\":true,\"schema\":{\"type\":\"object\",\"properties\":{\"city\":"
+          "{\"type\":\"string\",\"pattern\":\"^a\"}}}}}",
+          "response_format.json_schema.schema.properties.city.pattern", "unsupported_schema");
+  refused(kWeatherTools + ",\"response_format\":{\"type\":\"json_object\"}",
+          "response_format", "unsupported_parameter");
+  refused(",\"response_format\":{\"type\":\"yaml\"}", "response_format.type", "");
+  refused(",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"schema\":{}}}",
+          "response_format.json_schema.name", "");
+  refused(",\"response_format\":\"json_object\"", "response_format", "");
+  // A greedy engine has no masks: JSON modes are refused, text is fine.
+  ServiceRig greedy(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                    /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  {
+    const std::string resp = post_chat(
+        greedy, chat_body("abcd", 2, ",\"response_format\":{\"type\":\"json_object\"}"));
+    require(resp.find("400 ") != std::string::npos &&
+                resp.find("\"code\":\"constrained_decoding_unsupported\"") != std::string::npos,
+            "greedy engine refuses json_object: " + resp.substr(0, 300));
+    Client models(greedy.port());
+    models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    require(models.read_available(800).find(
+                "\"response_format\":{\"json_object\":false,\"json_schema\":false}") !=
+                std::string::npos,
+            "models report the absence");
+  }
 }
 
 }  // namespace

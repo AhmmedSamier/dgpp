@@ -1,12 +1,19 @@
 #include "models/glm_tool_grammar.hpp"
 
 #include <algorithm>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
+#include "loaders/minijson.hpp"
 #include "models/glm_tokenizer.hpp"
 
 namespace dgpp::glm {
+
+struct GrammarVocab::JsonHolder {
+  std::once_flag once;
+  std::unique_ptr<JsonTables> tables;
+};
 
 // ---------------------------------------------------------------------------
 // GrammarVocab
@@ -15,7 +22,8 @@ namespace dgpp::glm {
 GrammarVocab::GrammarVocab(std::vector<std::string> texts, ChatMarkers markers,
                            std::vector<int64_t> eos_ids, int vocab_size,
                            int64_t call_turn_eos)
-    : texts_(std::move(texts)),
+    : json_(std::make_shared<JsonHolder>()),
+      texts_(std::move(texts)),
       markers_(std::move(markers)),
       eos_(std::move(eos_ids)),
       call_eos_(call_turn_eos),
@@ -54,6 +62,16 @@ GrammarVocab GrammarVocab::from_tokenizer(const GlmTokenizer& tok,
                       eos_ids, vocab_size, call_eos);
 }
 
+void GrammarVocab::prepare_json() const {
+  std::call_once(json_->once,
+                 [&] { json_->tables = std::make_unique<JsonTables>(*this); });
+}
+
+const JsonTables& GrammarVocab::json_tables() const {
+  prepare_json();
+  return *json_->tables;
+}
+
 bool GrammarVocab::is_eos(int64_t id) const {
   for (const int64_t e : eos_)
     if (e == id) return true;
@@ -68,6 +86,30 @@ GrammarState::GrammarState(const GrammarVocab* vocab, GrammarSpec spec,
                            bool prompt_opens_thinking)
     : vocab_(vocab), spec_(std::move(spec)) {
   if (!spec_.active()) return;
+  if (spec_.mode == GrammarSpec::Mode::kJson) {
+    if (vocab_ == nullptr || vocab_->eos_ids().empty())
+      throw std::invalid_argument(
+          "GrammarState: a JSON grammar needs a vocabulary with an EOS id");
+    std::shared_ptr<const JsonSchema> schema;
+    if (spec_.json_schema.empty()) {
+      schema = std::make_shared<const JsonSchema>(json_object_schema());
+    } else {
+      minijson::ParseResult parsed;
+      try {
+        parsed = minijson::parse(spec_.json_schema);
+      } catch (const std::exception& e) {
+        throw std::invalid_argument(
+            std::string("GrammarState: the JSON schema text does not parse: ") +
+            e.what());
+      }
+      schema = std::make_shared<const JsonSchema>(compile_json_schema(parsed.root));
+    }
+    json_ = JsonMachine(std::move(schema), &vocab_->json_tables());
+    state_ = prompt_opens_thinking && vocab_->markers().think_close.available()
+                 ? State::kThink
+                 : State::kJsonBody;
+    return;
+  }
   if (vocab_ == nullptr || !vocab_->usable())
     throw std::invalid_argument(
         "GrammarState: an active grammar needs a vocabulary with the "
@@ -100,11 +142,13 @@ const char* GrammarState::state_name() const {
     case State::kAfterValue: return "after-value";
     case State::kEnd: return "end";
     case State::kDone: return "done";
+    case State::kJsonBody: return json_.state_name();
   }
   return "?";
 }
 
 bool GrammarState::obligation_open() const {
+  if (spec_.mode == GrammarSpec::Mode::kJson) return !json_.done();
   return (spec_.mode == GrammarSpec::Mode::kRequired ||
           spec_.mode == GrammarSpec::Mode::kNamed) &&
          calls_ == 0;
@@ -117,6 +161,7 @@ bool GrammarState::calls_remaining() const {
     case GrammarSpec::Mode::kAuto: return calls_ == 0;
     case GrammarSpec::Mode::kRequired: return spec_.parallel || calls_ == 0;
     case GrammarSpec::Mode::kNamed: return calls_ == 0;
+    case GrammarSpec::Mode::kJson: return false;
   }
   return false;
 }
@@ -276,7 +321,46 @@ void GrammarState::mask(TokenMask* out) const {
     case State::kDone:
       list_mask(out, {vocab_->call_turn_eos()});
       return;
+    case State::kJsonBody:
+      json_mask(out);
+      return;
   }
+}
+
+// The JSON body's position: the machine's mask (token texts), never a
+// marker (a "<think>" would be legal string content), EOS once the text
+// is complete.
+void GrammarState::json_mask(TokenMask* out) const {
+  json_.mask(*vocab_, out);
+  const int vocab = vocab_->vocab_size();
+  const auto set = [&](int64_t id, bool on) {
+    if (id < 0 || id >= vocab) return;
+    uint32_t& w = out->words[static_cast<size_t>(id >> 5)];
+    const uint32_t bit = 1u << (id & 31);
+    if (on && !(w & bit)) {
+      w |= bit;
+      ++out->allowed;
+    } else if (!on && (w & bit)) {
+      w &= ~bit;
+      --out->allowed;
+    }
+  };
+  for (const int64_t m : vocab_->marker_ids()) set(m, false);
+  set(vocab_->markers().think_open.id, false);
+  set(vocab_->markers().think_close.id, false);
+  if (json_.done())
+    for (const int64_t e : vocab_->eos_ids()) set(e, true);
+  if (out->allowed == 0)
+    throw std::logic_error("GrammarState: a JSON position with no allowed id");
+}
+
+bool GrammarState::json_allows(int64_t id) const {
+  if (vocab_->is_eos(id)) return json_.done();
+  for (const int64_t m : vocab_->marker_ids())
+    if (m == id) return false;
+  if (id == vocab_->markers().think_open.id || id == vocab_->markers().think_close.id)
+    return false;
+  return json_.allows(*vocab_, id);
 }
 
 bool GrammarState::keys_possible_for(const std::string& name) const {
@@ -287,6 +371,7 @@ bool GrammarState::keys_possible_for(const std::string& name) const {
 
 bool GrammarState::allows(int64_t id) const {
   if (!active()) return true;
+  if (state_ == State::kJsonBody) return json_allows(id);
   TokenMask m;
   mask(&m);
   return m.allows(id);
@@ -308,7 +393,20 @@ void GrammarState::advance(int64_t id) {
   };
   switch (state_) {
     case State::kThink:
-      if (id == m.think_close.id) enter(State::kTop);
+      if (id == m.think_close.id)
+        enter(spec_.mode == GrammarSpec::Mode::kJson ? State::kJsonBody
+                                                     : State::kTop);
+      return;
+    case State::kJsonBody:
+      if (vocab_->is_eos(id)) {
+        state_ = State::kDone;
+        return;
+      }
+      for (const char c : vocab_->text(id))
+        if (!json_.feed(static_cast<uint8_t>(c))) {
+          dead_ = true;
+          return;
+        }
       return;
     case State::kTop:
       if (id == m.tool_call_open.id) {

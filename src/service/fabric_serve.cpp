@@ -135,7 +135,12 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
           }
           out.push_back('}');
         }
-        out += "]}";
+        out += "]";
+        if (gr.mode == dgpp::glm::GrammarSpec::Mode::kJson) {
+          out += ",\"js\":";
+          append_json_string(&out, gr.json_schema);
+        }
+        out.push_back('}');
       }
       out.push_back('}');
     }
@@ -315,7 +320,7 @@ JournalRecord decode_journal_line(std::string_view line) {
         dgpp::glm::GrammarSpec& g = r.grammar;
         const dgpp::minijson::Value& m = field(*gr, "m", "grammar");
         if (!m.is_number() || m.as_int() < 1 ||
-            m.as_int() > static_cast<int64_t>(dgpp::glm::GrammarSpec::Mode::kNamed))
+            m.as_int() > static_cast<int64_t>(dgpp::glm::GrammarSpec::Mode::kJson))
           throw std::runtime_error("journal: submit '" + r.id +
                                    "' has a bad grammar mode");
         g.mode = static_cast<dgpp::glm::GrammarSpec::Mode>(m.as_int());
@@ -351,6 +356,14 @@ JournalRecord decode_journal_line(std::string_view line) {
           if (!found)
             throw std::runtime_error("journal: submit '" + r.id +
                                      "' names a function outside its tools");
+        }
+        // The JSON grammar (M6 6h) carries its schema text ("" = json_object).
+        if (g.mode == dgpp::glm::GrammarSpec::Mode::kJson) {
+          const dgpp::minijson::Value& js = field(*gr, "js", "grammar");
+          if (!js.is_string())
+            throw std::runtime_error("journal: submit '" + r.id +
+                                     "' has a non-string JSON schema");
+          g.json_schema = std::string(js.as_string());
         }
       }
       rec.submits.push_back(std::move(r));

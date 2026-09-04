@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04); drain-on-stop (6c) and grow-on-demand admission (6d) remain |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04); drain-on-stop (6c) and grow-on-demand admission (6d) remain |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -485,9 +485,9 @@ Deliverables as written, with their state:
    `POST /v1/completions` (string prompt), `GET /v1/models`, `GET /health`,
    `GET /v1/metrics`; single-threaded epoll server with the limit ladder
    (431/413/503/501/411/400); the refusal ladder for unimplemented fields
-   (stop, n, logit_bias, response_format, … — logprobs, penalties and
-   seed left it with 6b, tools and reasoning_effort with 6f) as OpenAI
-   error objects naming the param. Gates: `http_server_test`,
+   (stop, n, logit_bias, … — logprobs, penalties and seed left it with
+   6b, tools and reasoning_effort with 6f, response_format with 6h) as
+   OpenAI error objects naming the param. Gates: `http_server_test`,
    `glm_serve_test`, `glm_fabric_serve_test`.
 5. Resident serving mode. BUILT (M5, then rounds 9–10): one-pass sources,
    eager construction, sources released after the last layer, the per-rank
@@ -1095,12 +1095,76 @@ reasons first then calls; the named function is the one call; `auto` with
 `parallel_tool_calls: false` and `required` with it end the turn after
 exactly one call even where the model's reasoning had planned two; the
 op-stream md5 identical on all four ranks; 0 fallbacks over 658 sampled
-steps; the pace unchanged (the record's fifth 2026-09-04 entry). Not
-built: `response_format` (`json_object` / `json_schema`), which is the
-same mask machinery under a JSON grammar over token texts — the next
-consumer of this seam; and value typing inside the grammar (values are
-free text; the parser types them from the schema, the client validates,
-as OpenAI's non-strict tools).
+steps; the pace unchanged (the record's fifth 2026-09-04 entry).
+`response_format` followed the same day as 6h (below). Not built: value
+typing inside the tool-call grammar (values are free text; the parser
+types them from the schema, the client validates, as OpenAI's non-strict
+tools) — the JSON machine of 6h is the piece that would do it.
+
+**6h. `response_format` — JSON-constrained output — BUILT 2026-09-04**
+(decision of 2026-09-04 with the user: "Feature parity is absolutely the
+goal — here and elsewhere. We should implement this now"). `json_object`
+and `json_schema` as the second consumer of 6g's mask seam: a JSON
+grammar over token texts, DESIGN §10's JSON paragraph. Built:
+`glm_json_grammar.{hpp,cpp}` — `JsonLexer` (a byte automaton for RFC 8259
+JSON with a container stack: the structural states, strings with their
+escapes, the number grammar, the literals; every byte advances or
+rejects; a top-level number counts as complete while it may still grow),
+`compile_json_schema` (OpenAI's structured-output subset into nodes:
+`type` and type lists, `properties` / `required` / `additionalProperties`,
+`items` / `minItems` / `maxItems`, `enum` / `const` over scalar values,
+`anyOf`; anything else refuses at compile time NAMING THE KEYWORD PATH,
+`schema.properties.city.pattern`), `JsonMachine` (the lexer plus schema
+cursors — an `anyOf` splits the cursor per alternative and the frontier
+shrinks as bytes disambiguate; a closed object's keys are spelled from
+the declared names byte by byte, an enum's value from its JSON texts;
+commas and closers obey `required` and the item bounds; `json_object` is
+the schema "a root object holding anything"), and `JsonTables` — the
+per-vocabulary precomputation that keeps the mask at microseconds: the
+static lexical answer for every tabled (state, container context, integer
+flag) over every token, built once per rank (0.06 s over 155k ids, in
+parallel), tokens classified by where free string content can begin or
+end inside them (the structural prefix before their one unescaped quote,
+the tail after it, the tail after a scalar), so that at a position the
+schema is applied by simulating REPRESENTATIVES (one per distinct prefix
+or tail, the pure-structure and the few multi-quote tokens individually,
+group members only where the content itself is constrained), with the
+answer inside a string cached until the next structural event or a
+cursor's death. The grammar layer: `GrammarSpec::Mode::kJson` with the
+schema text (`""` = json_object) riding the journal's `gr.js`;
+`GrammarState` in JSON mode keeps thinking free but withholds EOS until
+the text is complete, enters the body on `</think>` (or at once when the
+prompt opens no think block), forbids every marker inside the body (a
+`<think>` would be legal string content), and admits EOS only when the
+machine is done; `GrammarVocab::prepare_json()` builds the tables at boot
+on every rank. The service: `response_format` `{type: text | json_object
+| json_schema{name, schema, strict}}` — the schema compiled on rank 0;
+`strict: true` with a keyword outside the subset is a 400 naming
+`response_format.json_schema.schema.<path>` (`unsupported_schema`),
+non-strict falls back to `json_object` with a WARN (OpenAI's non-strict
+mode promises no conformance); combined with `tools` refused (a turn is
+JSON or calls); on an engine without masks `constrained_decoding_unsupported`;
+the prompt untouched; the content is the JSON text; `/v1/models` reports
+`response_format.json_object / json_schema`. The engines are unchanged —
+the JSON grammar is another `GrammarState` behind the same masks, host
+and device, the MTP row 1 under the pending draft, the in-graph draft
+rejected wherever the mask excludes it. Gates: `glm_json_grammar_test`
+(the lexer on a corpus; the compiler's subset and its refusals by keyword
+path; THE EXACTNESS GATE — `mask()` equal to the brute-force answer, every
+token simulated, at every position of mask-driven random walks over the
+free machine and three schemas exercising every node kind, 17k
+positions, every finished walk parsing and conforming; the edge facts),
+`glm_tool_grammar_test`'s JSON-mode gate, the codec round trip
+(`gr.js`), `glm_serve_test`'s `serve_responseFormat_armsTheJsonGrammar`
+(the arming, the fallback, every refusal, the greedy engine),
+`glm_chat_template_test`'s
+`glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer`
+(four documents accepted and seven violating ones refused position by
+position over the real tokenizer; the mask 36 µs average, 198 µs worst at
+a structural position under a closed schema), and the two constrained
+loopbacks with json_object and schema cases beside the tool-call ones
+(the fixture vocabulary now spells JSON); ctest 34/34. On the four nodes:
+see the record's 2026-09-04 `response_format` entry.
 
 **6c. Drain-on-stop.** SIGINT during a collective tears the bus down
 under the in-flight collective (the peers eat transport-retry-exceeded).

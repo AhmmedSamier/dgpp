@@ -253,4 +253,94 @@ DGPP_TEST(tool_grammar_disallowedIdKillsTheGrammar) {
   require(threw, "named outside tools refuses");
 }
 
+DGPP_TEST(tool_grammar_jsonModeSpellsOneTextThenEos) {
+  // response_format (M6 6h) as a grammar: thinking stays free but the
+  // turn cannot end; </think> opens the JSON body, where the machine's
+  // mask rules, the markers never appear, and EOS comes only once the
+  // text is complete.
+  const GrammarVocab v = fake_vocab();
+  GrammarSpec spec;
+  spec.mode = GrammarSpec::Mode::kJson;  // json_schema "" = json_object
+  GrammarState g(&v, spec, /*prompt_opens_thinking=*/true);
+  require(g.active() && std::string(g.state_name()) == "think", "starts thinking");
+  require(g.allows('x') && g.allows(kThinkClose) && g.allows(kToolOpen) &&
+              !g.allows(kEosText) && !g.allows(kEosObs),
+          "thinking is free, EOS withheld");
+  g.advance(kThinkClose);
+  require(std::string(g.state_name()) == "json-value", "the body opens");
+  require(g.allows('{') && g.allows(' ') && g.allows('\n') && !g.allows('"') &&
+              !g.allows('[') && !g.allows('1') && !g.allows(kEosText) &&
+              !g.allows(kThinkOpen) && !g.allows(kThinkClose) && !g.allows(kToolOpen),
+          "json_object: an object opens, nothing else");
+  TokenMask m;
+  g.mask(&m);
+  require(m.constrained() && m.allows('{') && !m.allows(kEosText) && m.allowed >= 5,
+          "the body mask is a real constraint");
+  for (const char c : std::string("{\"a\":1")) g.advance(static_cast<unsigned char>(c));
+  require(g.active() && !g.allows(kEosText) && g.allows(',') && g.allows('}'),
+          "inside the object: no EOS yet");
+  g.advance('}');
+  require(g.allows(kEosText) && g.allows(kEosObs) && g.allows(' ') && !g.allows(',') &&
+              !g.allows('{'),
+          "complete: EOS or whitespace only");
+  g.mask(&m);
+  require(m.allows(kEosText) && m.allows(kEosUser) && !m.allows('}'), "done mask");
+  g.advance(kEosText);
+  require(std::string(g.state_name()) == "done", "EOS ends the turn");
+
+  // A schema: closed keys spelled from the declared names, an integer
+  // value, the closer only once the required key is in.
+  GrammarSpec typed;
+  typed.mode = GrammarSpec::Mode::kJson;
+  typed.json_schema =
+      "{\"type\":\"object\",\"properties\":{\"k\":{\"type\":\"integer\"},"
+      "\"s\":{\"enum\":[\"on\",\"off\"]}},\"required\":[\"k\"],"
+      "\"additionalProperties\":false}";
+  GrammarState t(&v, typed, /*prompt_opens_thinking=*/false);
+  require(std::string(t.state_name()) == "json-value", "no think block: body at once");
+  t.advance('{');
+  require(t.allows('"') && !t.allows('}'), "the required key is owed");
+  t.advance('"');
+  require(t.allows('k') && t.allows('s') && !t.allows('z') && !t.allows('"'),
+          "keys from the declared names");
+  for (const char c : std::string("k\":")) t.advance(static_cast<unsigned char>(c));
+  require(t.allows('-') && t.allows('7') && !t.allows('"') && !t.allows('t'),
+          "an integer value");
+  t.advance('4');
+  require(!t.allows('.') && !t.allows('e') && t.allows('}') && t.allows(','),
+          "integer: no fraction; the object may close");
+  for (const char c : std::string(",\"s\":\"o")) t.advance(static_cast<unsigned char>(c));
+  require(t.allows('n') && t.allows('f') && !t.allows('x') && !t.allows('"'),
+          "an enum string is spelled from its targets");
+  for (const char c : std::string("ff\"}")) t.advance(static_cast<unsigned char>(c));
+  require(t.allows(kEosText), "done under the schema");
+  // A disallowed id kills the grammar (the sampler never produces one).
+  GrammarState k(&v, typed, false);
+  k.advance('[');
+  require(!k.active(), "a disallowed id kills the JSON grammar");
+  // A schema text that does not parse, or is outside the subset, refuses
+  // at construction.
+  GrammarSpec bad = typed;
+  bad.json_schema = "{not json";
+  bool threw = false;
+  try {
+    GrammarState b(&v, bad, false);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "unparsable schema text refused");
+  bad.json_schema = "{\"type\":\"string\",\"pattern\":\"^a\"}";
+  threw = false;
+  try {
+    GrammarState b(&v, bad, false);
+  } catch (const std::invalid_argument& e) {
+    threw = std::string(e.what()).rfind("schema.pattern", 0) == 0;
+  }
+  require(threw, "an unsupported keyword refused by name");
+  // The spec's equality covers the schema text.
+  require(!(spec == typed), "specs differ by schema");
+  GrammarSpec same = typed;
+  require(same == typed, "equal specs");
+}
+
 }  // namespace

@@ -46,6 +46,7 @@
 #include <string>
 #include <vector>
 
+#include "models/glm_json_grammar.hpp"
 #include "models/glm_tool_parser.hpp"
 
 namespace dgpp {
@@ -71,16 +72,20 @@ struct GrammarSpec {
                       // free, but at most one call, then EOS
     kRequired,        // one or more calls (parallel) or exactly one
     kNamed,           // exactly one call to `named`
+    kJson,            // response_format (M6 6h): the content is one JSON
+                      // text under `json_schema` ("" = json_object: any
+                      // object), then EOS; no tool calls
   };
   Mode mode = Mode::kNone;
   bool parallel = true;            // several calls per turn allowed
   std::string named;               // kNamed's function
   std::vector<GrammarTool> tools;  // the callable functions (kRequired/kAuto:
                                    // all; kNamed: the one)
+  std::string json_schema;         // kJson: the schema's JSON text ("" = free)
   bool active() const { return mode != Mode::kNone; }
   bool operator==(const GrammarSpec& o) const {
     if (mode != o.mode || parallel != o.parallel || named != o.named ||
-        tools.size() != o.tools.size())
+        json_schema != o.json_schema || tools.size() != o.tools.size())
       return false;
     for (size_t i = 0; i < tools.size(); ++i)
       if (tools[i].name != o.tools[i].name ||
@@ -130,8 +135,15 @@ class GrammarVocab {
   bool usable() const {
     return markers_.tool_calls_available() && !eos_.empty();
   }
+  // The JSON grammar's per-vocabulary tables (M6 6h), built once on first
+  // use — or eagerly here, so a serving rank pays the second or so at
+  // boot rather than on the first json request. Copies share them.
+  void prepare_json() const;
+  const JsonTables& json_tables() const;
 
  private:
+  struct JsonHolder;
+  mutable std::shared_ptr<JsonHolder> json_;
   std::vector<std::string> texts_;
   std::vector<int32_t> by_first_[256];
   ChatMarkers markers_;
@@ -193,6 +205,7 @@ class GrammarState {
     kAfterValue,  // <arg_key> or </tool_call>
     kEnd,         // the turn must end: EOS
     kDone,        // EOS emitted: nothing more (the scheduler retires)
+    kJsonBody,    // kJson: the JSON text (JsonMachine), then EOS
   };
   // The automaton over token texts: the targets still consistent with the
   // bytes emitted so far, and those bytes.
@@ -217,6 +230,8 @@ class GrammarState {
   void free_mask(TokenMask* out, int64_t extra_allowed,
                  bool forbid_markers = true) const;
   void list_mask(TokenMask* out, const std::vector<int64_t>& ids) const;
+  void json_mask(TokenMask* out) const;
+  bool json_allows(int64_t id) const;
   // The ids that continue the match (and the closer when a target is
   // complete).
   std::vector<int64_t> match_ids(const TextMatch& m, int64_t closer) const;
@@ -228,6 +243,7 @@ class GrammarState {
   int calls_ = 0;          // calls closed so far
   int tool_ = -1;          // the open call's tool (index into spec_.tools)
   TextMatch match_;        // kName / kKey
+  JsonMachine json_;       // kJson: the body's machine (inactive otherwise)
 };
 
 }  // namespace dgpp::glm

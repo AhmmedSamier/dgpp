@@ -262,6 +262,23 @@ void test_journal_codec() {
                 got.submits[0].grammar.tools[2].keys.empty(),
             "codec: a closed empty key set survives");
   }
+  // The JSON grammar (M6 6h) carries its schema text; json_object is the
+  // empty text and survives as such.
+  for (const char* schema :
+       {"", "{\"type\": \"object\", \"properties\": {\"city\": {\"type\": "
+            "\"string\"}, \"n\": {\"enum\": [1, \"a\\\"b\", null]}}, "
+            "\"required\": [\"city\"], \"additionalProperties\": false}"}) {
+    GenerationService::PassEvents ev;
+    dgpp::glm::SchedulerRequest s = submit;
+    s.grammar.mode = dgpp::glm::GrammarSpec::Mode::kJson;
+    s.grammar.json_schema = schema;
+    ev.submits.push_back(s);
+    const dgpp::service::JournalRecord got = dgpp::service::decode_journal_line(
+        dgpp::service::encode_journal_tick(ev));
+    require(got.submits.size() == 1 && got.submits[0].grammar == s.grammar &&
+                got.submits[0].grammar.json_schema == schema,
+            std::string("codec: JSON grammar round-trip for '") + schema + "'");
+  }
 
   require(dgpp::service::decode_journal_line(
               dgpp::service::encode_journal_stop()).stop,

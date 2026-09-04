@@ -3161,10 +3161,20 @@ constexpr int64_t kGxThinkOpen = 80, kGxThinkClose = 81, kGxToolOpen = 82,
                   kGxValueOpen = 86, kGxValueClose = 87, kGxEos = 88,
                   kGxEos2 = 89;
 
+// The fixture's token texts: two alphabets (ids 0..51) for the tool-call
+// names and keys, then JSON pieces (ids 52..79) so the JSON grammar has
+// structure, digits, literals and whitespace to spell with.
+const char* kGxJsonTexts[] = {
+    "{", "}", "[", "]", "\"", ":", ",", "0", "1", "2", "3", "4", "5", "6", "7",
+    "8", "9", "-", ".", " ", "true", "false", "null", "\n", "\":", ",\"", "{\"",
+    "\"}",
+};
 dgpp::glm::GrammarVocab fixture_grammar_vocab(int vocab) {
   std::vector<std::string> texts(static_cast<size_t>(vocab));
-  for (int id = 0; id < 80 && id < vocab; ++id)
+  for (int id = 0; id < 52 && id < vocab; ++id)
     texts[static_cast<size_t>(id)] = std::string(1, static_cast<char>('a' + id % 26));
+  for (int id = 52; id < 80 && id < vocab; ++id)
+    texts[static_cast<size_t>(id)] = kGxJsonTexts[id - 52];
   dgpp::glm::ChatMarkers m;
   m.think_open = {kGxThinkOpen, "<think>"};
   m.think_close = {kGxThinkClose, "</think>"};
@@ -3188,6 +3198,21 @@ dgpp::glm::GrammarSpec fixture_grammar(dgpp::glm::GrammarSpec::Mode mode,
   g.tools.push_back(dgpp::glm::GrammarTool{"ab", true, {"x", "y"}});
   g.tools.push_back(dgpp::glm::GrammarTool{"ac", false, {}});
   g.tools.push_back(dgpp::glm::GrammarTool{"b", true, {}});
+  return g;
+}
+
+// The JSON grammar (M6 6h): json_object ("") or a schema over the
+// fixture's pieces — a closed object with an integer, an enum and a
+// bounded array of literals.
+const char* kGxJsonSchema =
+    "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},"
+    "\"b\":{\"enum\":[\"cd\",\"ce\",null]},\"c\":{\"type\":\"array\","
+    "\"items\":{\"type\":\"boolean\"},\"maxItems\":2}},\"required\":[\"a\"],"
+    "\"additionalProperties\":false}";
+dgpp::glm::GrammarSpec fixture_json(const std::string& schema) {
+  dgpp::glm::GrammarSpec g;
+  g.mode = dgpp::glm::GrammarSpec::Mode::kJson;
+  g.json_schema = schema;
   return g;
 }
 
@@ -3257,6 +3282,9 @@ DGPP_TEST(glm_tp_serving_graph_constrained_matches_eager_engine_and_grammar) {
       {{"none", 6, sampled, 17, fixture_grammar(Mode::kForbidCalls), false},
        {"think", 8, sampled, 19, fixture_grammar(Mode::kRequired), true}},
       {{"auto1", 8, sampled, 23, fixture_grammar(Mode::kAuto, false), false}},
+      // response_format (M6 6h): free JSON and a schema, side by side.
+      {{"json", 12, sampled, 37, fixture_json(""), false},
+       {"jsonS", 12, pure, 41, fixture_json(kGxJsonSchema), false}},
   };
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29936);
@@ -3430,6 +3458,10 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
         fixture_grammar(Mode::kRequired), true}},
       {{"think", 10, sampled, 29, fixture_grammar(Mode::kRequired), true},
        {"think2", 10, sampled, 31, fixture_grammar(Mode::kNamed, true, "ac"), true}},
+      // response_format (M6 6h) under MTP: the unconstrained in-graph
+      // draft is rejected wherever the JSON mask excludes it.
+      {{"json", 12, sampled, 43, fixture_json(""), false},
+       {"jsonS", 11, sampled, 47, fixture_json(kGxJsonSchema), true}},
   };
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29937);
