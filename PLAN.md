@@ -1199,7 +1199,13 @@ position over the real tokenizer; the mask 36 µs average, 198 µs worst at
 a structural position under a closed schema), and the two constrained
 loopbacks with json_object and schema cases beside the tool-call ones
 (the fixture vocabulary now spells JSON); ctest 34/34. On the four nodes:
-see the record's 2026-09-04 `response_format` entry.
+see the record's 2026-09-04 `response_format` entry. FOUND the same
+evening (the prefill round's service check): the grammar admitted
+unbounded structural whitespace, and a strict `json_schema` reply spent
+its 1,024 tokens on tabs and newlines at the root — `JsonLexer::kMaxWsRun`
+now caps a run at 16 bytes (a string's content never counts), enforced in
+the lexer and, through per-token leading-whitespace buckets, in the mask;
+gated in the machine, the tool grammar's JSON mode and the oracle walks.
 
 **6i. Typed tool arguments — BUILT 2026-09-04** (the user: "Let's proceed
 with the value typing inside the tool-call grammar"). Each `<arg_value>`

@@ -286,6 +286,11 @@ DGPP_TEST(tool_grammar_jsonModeSpellsOneTextThenEos) {
           "complete: EOS or whitespace only");
   g.mask(&m);
   require(m.allows(kEosText) && m.allows(kEosUser) && !m.allows('}'), "done mask");
+  // Trailing whitespace is capped: past sixteen bytes only EOS remains.
+  for (int i = 0; i < 16; ++i) g.advance(' ');
+  g.mask(&m);
+  require(m.allows(kEosText) && !m.allows(' ') && !m.allows('\n') && m.allowed == 3,
+          "the whitespace cap leaves the EOS ids alone");
   g.advance(kEosText);
   require(std::string(g.state_name()) == "done", "EOS ends the turn");
 

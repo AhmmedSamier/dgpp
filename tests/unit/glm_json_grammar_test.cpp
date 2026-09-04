@@ -440,6 +440,35 @@ DGPP_TEST(json_grammar_machineFactsAtTheEdges) {
   require(!mask.allows('.') && !mask.allows('e') && mask.allows('}') && !mask.allows(','),
           "integer-only, no keys left");
   require(c.feed('}') && c.done(), "closed done");
+  // The whitespace-run cap: sixteen structural whitespace bytes pass, the
+  // seventeenth is refused, a structural byte is still allowed; the mask
+  // drops the tokens whose leading run would overflow the budget; and a
+  // complete text with the cap reached admits nothing (the grammar layer
+  // adds EOS).
+  JsonMachine w(std::make_shared<const JsonSchema>(dgpp::glm::json_object_schema()), &tables());
+  for (int i = 0; i < 15; ++i) require(w.feed('\n'), "whitespace within the cap");
+  w.mask(vocab(), &mask);
+  require(mask.allows(' ') && mask.allows('{') && !mask.allows(kWordBase + 44) /* "  " */ &&
+              !mask.allows(kWordBase + 42) /* "\n  " */,
+          "one byte of budget left: single whitespace and structure only");
+  require(w.feed('\n'), "the sixteenth whitespace byte");
+  w.mask(vocab(), &mask);
+  require(!mask.allows(' ') && !mask.allows('\n') && mask.allows('{') && !mask.allows(kWordBase + 43),
+          "budget spent: structure only");
+  {
+    JsonMachine over = w;
+    require(!over.feed('\n'), "the seventeenth whitespace byte is refused");
+  }
+  require(w.feed('{') && w.feed('}') && w.done(), "the brace resets the run");
+  for (int i = 0; i < 16; ++i) require(w.feed(' '), "trailing whitespace within the cap");
+  w.mask(vocab(), &mask);
+  require(mask.allowed == 0 && w.done(), "complete and capped: nothing but the end");
+  // Content whitespace inside a string never counts.
+  JsonMachine sw(std::make_shared<const JsonSchema>(dgpp::glm::json_object_schema()), &tables());
+  for (const char ch : std::string("{\"a\": \"")) require(sw.feed(static_cast<uint8_t>(ch)), "open string");
+  for (int i = 0; i < 40; ++i) require(sw.feed(' '), "spaces are string content");
+  require(sw.feed('"'), "the string closes");
+  require(sw.lexer().ws_run() == 0, "the run is zero after content");
   // Required keys missing: the closer is refused.
   JsonMachine r(closed, &tables());
   for (const char ch : std::string("{\"days\":1")) require(r.feed(static_cast<uint8_t>(ch)), "days only");

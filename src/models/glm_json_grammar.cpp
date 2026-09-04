@@ -316,6 +316,16 @@ JsonLexer::Step JsonLexer::feed(uint8_t b) {
     s.ok = false;
     return s;
   };
+  // The whitespace-run cap: structural whitespace counts, anything else
+  // (a string's content included) resets.
+  if (in_string()) {
+    ws_run_ = 0;
+  } else if (is_ws(b)) {
+    if (ws_run_ >= kMaxWsRun) return reject();
+    ++ws_run_;
+  } else {
+    ws_run_ = 0;
+  }
   for (int pass = 0; pass < 2; ++pass) {
     switch (state_) {
       case State::kValue:
@@ -514,6 +524,7 @@ bool JsonLexer::make_base(State state, char ctx, bool integer_only,
     if (!lx.feed(static_cast<uint8_t>(c)).ok) return false;
   if (lx.state() != state || lx.top() != ctx) return false;
   lx.integer_only_ = integer_only;
+  lx.ws_run_ = 0;  // a canonical base: the run is the machine's, applied by mask()
   *out = lx;
   return true;
 }
@@ -583,6 +594,7 @@ JsonTables::JsonTables(const GrammarVocab& vocab)
   for (auto& c : class_) c.assign(static_cast<size_t>(words_), 0u);
   ws_.assign(static_cast<size_t>(words_), 0u);
   shapes_.resize(static_cast<size_t>(vocab_));
+  lead_ws_ids_.assign(static_cast<size_t>(JsonLexer::kMaxWsRun) + 1, {});
   std::map<std::string, int32_t> prefix_ids, tail_ids, scalar_tail_ids;
   // Shapes and class masks.
   for (int id = 0; id < vocab_; ++id) {
@@ -591,6 +603,10 @@ JsonTables::JsonTables(const GrammarVocab& vocab)
     if (text.empty()) continue;
     size_t i = 0;
     while (i < text.size() && JsonLexer::is_ws(static_cast<uint8_t>(text[i]))) ++i;
+    sh.lead_ws = static_cast<int32_t>(i);
+    if (i > 0)
+      lead_ws_ids_[static_cast<size_t>(std::min<size_t>(i, JsonLexer::kMaxWsRun))]
+          .push_back(id);
     if (i == text.size()) {
       set_bit(ws_, id);
     } else {
@@ -1137,12 +1153,24 @@ void JsonMachine::mask(const GrammarVocab& vocab, TokenMask* out) const {
   out->allowed = 0;
   if (!alive_) return;
   const JsonLexer::State st = lexer_.state();
+  // The whitespace budget left at this position: a token whose leading
+  // whitespace run exceeds it would be rejected by the lexer's cap.
+  const auto apply_ws_budget = [&] {
+    const int run = lexer_.ws_run();
+    if (run <= 0 || lexer_.in_string()) return;
+    const int budget = JsonLexer::kMaxWsRun - run;
+    for (int n = budget + 1; n <= JsonLexer::kMaxWsRun; ++n)
+      for (const int32_t id : tables_->lead_ws_ids(n)) clear_bit(out->words, id);
+  };
+  const auto finish = [&] {
+    apply_ws_budget();
+    out->allowed = popcount(out->words);
+  };
   if (st == JsonLexer::State::kDone) {
     out->words = tables_->whitespace_mask();
-    out->allowed = popcount(out->words);
+    finish();
     return;
   }
-  const auto finish = [&] { out->allowed = popcount(out->words); };
 
   // Content the schema constrains byte by byte: a closed object's key, an
   // enum text (in any escape state). The remainders name the bytes that

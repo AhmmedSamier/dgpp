@@ -2084,10 +2084,18 @@ finished walk parses and conforms. In the grammar layer
 `gr.js`, `""` = json_object) thinking stays free but EOS is withheld
 until the text is complete, `</think>` opens the body, the markers are
 forbidden inside it (a `<think>` would be legal string content), and EOS
-is admitted only when the machine is done. The engines are unchanged: a
-JSON grammar is another `GrammarState` behind the masks above, host and
-device, the MTP row 1 under the pending draft, the unconstrained in-graph
-draft rejected wherever the mask excludes it. The service compiles the
+is admitted only when the machine is done. Structural whitespace is
+capped at 16 consecutive bytes (`JsonLexer::kMaxWsRun`; a string's content
+resets and never counts): without the cap a model whose mass sits on
+masked tokens can spend its whole budget on the whitespace the grammar
+always admits — seen on the service on 2026-09-04, 2,667 bytes of tabs
+and newlines before a brace that never came — and past it only a
+structural byte, or the end when the text is complete, remains; the mask
+applies the same budget through per-token leading-whitespace buckets, and
+the brute-force oracle covers it. The engines are unchanged: a JSON
+grammar is another `GrammarState` behind the masks above, host and device,
+the MTP row 1 under the pending draft, the unconstrained in-graph draft
+rejected wherever the mask excludes it. The service compiles the
 schema on rank 0: `strict: true` with a keyword outside the subset is a
 400 naming `response_format.json_schema.schema.<path>`
 (`unsupported_schema`); non-strict falls back to `json_object` with a

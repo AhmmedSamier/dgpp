@@ -170,6 +170,15 @@ class JsonLexer {
   std::string literal_rest() const;
   // The escape sub-state: 0 none, 1 after '\', 2..5 hex digits pending.
   uint8_t escape() const { return esc_; }
+  // Structural whitespace is capped at kMaxWsRun consecutive bytes (a
+  // string's content resets and never counts): without the cap a model
+  // whose mass sits on masked tokens can spend its whole budget on the
+  // whitespace the grammar always admits — seen on the service, 2,667
+  // bytes of tabs and newlines before a brace it never wrote. Sixteen bytes
+  // covers any sane indentation; past it only a structural byte (or, when
+  // the text is complete, the end) is allowed.
+  static constexpr int kMaxWsRun = 16;
+  uint8_t ws_run() const { return ws_run_; }
 
   Step feed(uint8_t b);
 
@@ -187,6 +196,7 @@ class JsonLexer {
 
   State state_ = State::kValue;
   uint8_t esc_ = 0;
+  uint8_t ws_run_ = 0;   // consecutive structural whitespace bytes so far
   uint8_t lit_ = 0;      // 1 true, 2 false, 3 null
   uint8_t lit_pos_ = 0;
   bool integer_only_ = false;
@@ -224,6 +234,7 @@ class JsonTables {
                                // structural or whitespace byte after its
                                // leading whitespace (-1: none — pure content)
     bool structural_only = false;  // no quote, bytes all structure/ws
+    int32_t lead_ws = 0;           // leading whitespace bytes (the run cap)
   };
   const Shape& shape(int id) const { return shapes_[static_cast<size_t>(id)]; }
   const std::vector<std::string>& prefixes() const { return prefixes_; }
@@ -233,6 +244,11 @@ class JsonTables {
   const std::vector<int32_t>& multi_quote_ids() const { return multi_; }
   const std::vector<int32_t>& structural_ids() const { return structural_; }
   const std::vector<int32_t>& scalar_tail_ids() const { return scalar_tail_ids_; }
+  // Ids whose leading whitespace run is exactly `n` bytes (n in
+  // 1..kMaxWsRun-1) or at least kMaxWsRun (n == kMaxWsRun).
+  const std::vector<int32_t>& lead_ws_ids(int n) const {
+    return lead_ws_ids_[static_cast<size_t>(n)];
+  }
 
  private:
   static int index(JsonLexer::State s, char ctx, bool integer_only);
@@ -244,6 +260,7 @@ class JsonTables {
   std::vector<Shape> shapes_;
   std::vector<std::string> prefixes_, tails_, scalar_tails_;
   std::vector<int32_t> single_, multi_, structural_, scalar_tail_ids_;
+  std::vector<std::vector<int32_t>> lead_ws_ids_;  // [kMaxWsRun + 1]
 };
 
 // ---------------------------------------------------------------------------
