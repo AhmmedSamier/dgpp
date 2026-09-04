@@ -150,9 +150,9 @@ class FakeFrontend : public ModelFrontend {
       if (id != kFakeEos) out.push_back(static_cast<char>(id));
     return out;
   }
-  std::string render_chat(const dgpp::minijson::Value& messages) const override {
+  std::string render_chat(const dgpp::minijson::Value& globals) const override {
     std::string out;
-    for (const auto& msg : messages.items())
+    for (const auto& msg : globals.at("messages").items())
       if (const auto* content = msg.find("content"))
         out.append(content->as_string());
     return out;

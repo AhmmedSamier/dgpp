@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling modes and tool calls remain |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f, 2026-09-04); drain-on-stop (6c) and grow-on-demand admission (6d) remain |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -99,8 +99,9 @@ Records live in `benchmarks/results/`; the M5/M6/M8 trail is
 
 Suggested order for what remains, each item's design in its section:
 
-1. M6: sampling on the bus, tool calls and `reasoning_content`, drain-on-stop,
-   grow-on-demand admission; the prefill behind the time to first token
+1. M6: drain-on-stop, grow-on-demand admission (sampling on the bus and
+   tool calls / `reasoning_content` landed 2026-09-04); the prefill behind
+   the time to first token
    (~30 ms per prompt token — first re-measure it: phase 2's m ≤ 8 GEMV
    routing changed the path of 5–8-row prefill chunks and per-expert
    prefill GEMMs with 5–8 routed tokens, unmeasured).
@@ -464,20 +465,29 @@ Deliverables as written, with their state:
    refusing the rest at parse time, 26 goldens keyed by the template's
    hash, rendered identically on every rank.
 3. Greedy and finite-top-k distributed fast paths plus full-logit gather for
-   exact unrestricted top-p/min-p/logprobs behavior. PARTLY BUILT: the
-   sampler (`glm_sampler.hpp`) implements all three paths with one
-   selection semantics and a counter-based RNG, unit-gated against the
-   centralized oracle; on the bus only the greedy pick is wired (host
-   gather+broadcast on the eager path, the on-device pick in the graph
-   step), and the service refuses `temperature != 0` / `top_p != 1` with
-   a named-parameter 400. Design for the rest below.
+   exact unrestricted top-p/min-p/logprobs behavior. BUILT (6b,
+   2026-09-04): the sampler (`glm_sampler.hpp`) implements all three
+   paths with one selection semantics and a counter-based RNG, unit-gated
+   against the centralized oracle; on the bus the pick table carries each
+   rank's exact local top-k and its slice's log-sum-exp, the verdict
+   decides on the device whether the request resolves inside the
+   candidates, and the exact full-logit gather serves the rest (the eager
+   path samples on the host over the same table and gather); MTP samples
+   under the exact speculative accept test. The service serves the
+   checkpoint's `generation_config.json` defaults (`temperature=1.0,
+   top_p=0.95`), a request's explicit `temperature`/`top_p`/`top_k`/
+   `min_p`/penalties/`seed`/`logprobs`, and greedy at zero cost when
+   `temperature: 0`. Measured on the four nodes: identical on every rank
+   and across runs at a fixed seed, the greedy pace kept. What stays open
+   is the candidate-width decision for teacher-forced-like workloads.
 4. HTTP/SSE endpoints for chat, completions, models, health, and metrics.
    BUILT (Stage 4a): `POST /v1/chat/completions` (stream and non-stream),
    `POST /v1/completions` (string prompt), `GET /v1/models`, `GET /health`,
    `GET /v1/metrics`; single-threaded epoll server with the limit ladder
    (431/413/503/501/411/400); the refusal ladder for unimplemented fields
-   (stop, n, logprobs, penalties, seed, tools, response_format, …) as
-   OpenAI error objects naming the param. Gates: `http_server_test`,
+   (stop, n, logit_bias, response_format, … — logprobs, penalties and
+   seed left it with 6b, tools and reasoning_effort with 6f) as OpenAI
+   error objects naming the param. Gates: `http_server_test`,
    `glm_serve_test`, `glm_fabric_serve_test`.
 5. Resident serving mode. BUILT (M5, then rounds 9–10): one-pass sources,
    eager construction, sources released after the last layer, the per-rank
@@ -493,16 +503,24 @@ fast-core pin — 393 ms/token (Stage 2) → 31.45 ms/token (round 11).
 
 Exit criteria, status:
 
-- streamed multi-turn chat and tool calls work on TP=4 — chat works
-  (multi-turn messages render through the template; SSE streams
-  word-by-word with finish_reason/usage/[DONE]); TOOL CALLS DO NOT: the
-  template renders `tools`, but the API refuses the field and no
-  tool-call parser exists (in scope — 6f);
+- streamed multi-turn chat and tool calls work on TP=4 — ✓ (2026-09-04,
+  `scripts/serve_tools_check.sh` on the four nodes under `--decode-graph
+  --mtp` at the card's settings: a two-tool question answered with two
+  parsed calls and `finish_reason: "tool_calls"`, the follow-up turn
+  carrying the tool result answered from it, `tool_choice` none /
+  required / named, `reasoning_effort`, and the streamed call's chunk
+  sequence — role, reasoning deltas, the announcing and the arguments
+  delta, the final chunk, usage, [DONE]; op-stream md5 identical on all
+  four ranks, the pace the sampled-MTP record's; the record's last
+  2026-09-04 entry);
 - tokenizer/template goldens match the checkpoint reference — ✓ (55/55 and
   26/26 byte-exact, hash-keyed);
-- all sampling modes match a centralized-logit oracle for fixed seeds — the
-  sampler does (unit gate); the distributed paths for non-greedy modes are
-  not built;
+- all sampling modes match a centralized-logit oracle for fixed seeds — ✓
+  (the unit gate on the sampler; the bitwise simulated-world kernel gates
+  on the device pick and the T=2 verdict; the two-rank loopback gates of
+  the plain and MTP graphs against the eager sampler with forced
+  fallbacks; the four-way md5 at the card's settings on the fabric,
+  2026-09-04);
 - latency and throughput results are committed with the reproducible
   workload definition used to obtain them — ✓ for the single-stream fast
   path (`glm_gen_check`, the 300-step "Roman Republic" chat prompt,
@@ -944,41 +962,84 @@ cost. Design:
   stays the numerics judge; (4) the measured fallback rate and MTP
   acceptance at T=1/0.95 go in the record.
 
-**6f. Tool calls and reasoning** (the M6 exit criterion; in scope by
-decision 2026-09-03). The template already renders `tools`, assistant
-`tool_calls` and `tool` messages (goldens exist); the API refuses the
-fields. Design:
+**6f. Tool calls and reasoning — BUILT 2026-09-04** (the M6 exit
+criterion; in scope by decision 2026-09-03). The template already rendered
+`tools`, assistant `tool_calls` and `tool` messages (goldens exist); the
+API refused the fields. Built as designed below, with the corrections the
+build forced (annotated): `glm_tool_parser.{hpp,cpp}` (the id-keyed state
+machine, the schema-typed values, the literal fallback for malformed
+blocks), the chat route's request side (`GenerationService::parse_chat`:
+tools, tool_choice, parallel_tool_calls, reasoning_effort,
+chat_template_kwargs, the message normalization), the event-driven
+response side (reasoning / content / tool-call deltas in arrival order,
+the one-shot message, `finish_reason: "tool_calls"`),
+`GlmFrontend::markers()` (the marker ids looked up by text in the
+tokenizer's added tokens), `glm_serve --reasoning-in-content`. Gates:
+`glm_tool_parser_test` (6 unit gates over a fake decoder),
+`glm_tool_call_render_encode_parse_roundTrip` in `glm_chat_template_test`
+(every golden assistant tool-call message: render → encode with the real
+tokenizer → parse → names and arguments structurally exact, 6 turns / 9
+calls), five 6f gates in `glm_serve_test` (the request side's
+normalization and refusals by field, the one-shot shape, the stream's
+chunk order, the forced prefix seeding the parser, the fold knob and the
+cap inside a block). On the four nodes (`scripts/serve_tools_check.sh`,
+2026-09-04, `--decode-graph --mtp` at the card's settings): every request
+shape answered as designed — two calls parsed from one turn, the forced
+forms, the follow-up from a tool result, the streamed chunk sequence — with
+the op-stream md5 identical on all four ranks and the pace the sampled-MTP
+record's (the record's last 2026-09-04 entry). DESIGN §11 has the as-built
+paragraph. Design:
 
 - *Request side:* accept `tools`, `tool_choice` (`auto` renders the tools;
-  `none` omits them; `required` / `{function: name}` prepend `<tool_call>`
-  resp. `<tool_call>{name}` to the generation prompt as a forced prefix —
-  the template has no native forced mode), `tool` role messages
-  (string content or the template's output lists), and assistant messages
-  carrying `tool_calls`. Also `reasoning_effort` (top-level field or
-  `chat_template_kwargs`; the template resolves anything but `low`/`high`
-  to `max` and injects `Reasoning Effort: …` into the system prompt —
-  goldens for low/high exist) and `chat_template_kwargs` generally.
-  Thinking is always on for this model: the generation prompt opens
-  `<think>` unconditionally.
-- *Response side — a parser over TOKEN IDS, rank 0's HTTP thread only:* a
-  state machine keyed on the added tokens `<tool_call>` 154843,
-  `</tool_call>` 154844, `<arg_key>`/`</arg_key>` 154847/8,
-  `<arg_value>`/`</arg_value>` 154849/50 (decode skips special tokens, so
-  the text stream cannot see them; the ids can). Segments decode to the
-  function name, keys and values; a value is JSON if it parses, else a
-  string (the template emits `v | tojson` for non-strings and raw strings
-  otherwise — the parse is the inverse). Output per OpenAI: `tool_calls:
-  [{id: "call_<16hex>", type: "function", function: {name, arguments:
-  <JSON string>}}]`; in streams one delta with `index`, `id`, `name`, then
-  one delta with the complete `arguments` string (clients concatenate
-  fragments — one fragment is valid); `finish_reason: "tool_calls"` when
-  at least one call parsed (the model ends a call turn with
-  `<|observation|>` 154829, one of the three EOS ids — that id alone is
-  also a signal). Text outside `<tool_call>` blocks streams as content.
+  `none` omits them; `required` / `{function: name}` append
+  `</think><tool_call>` resp. `</think><tool_call>{name}` to the
+  generation prompt as a forced prefix — the template has no native forced
+  mode; BUILT THAT WAY: the prefix closes the `<think>` block the
+  generation prompt opened, so a forced turn does not reason first, and
+  the parser starts inside the block with the name seeded), `tool` role
+  messages (string content or the template's output lists), and assistant
+  messages carrying `tool_calls` (the OpenAI JSON-object STRING for
+  `arguments` is parsed into the mapping the template iterates; a null
+  content with calls becomes ""). Also `reasoning_effort` (top-level field
+  or `chat_template_kwargs`; the template resolves anything but
+  `low`/`high` to `max` and injects `Reasoning Effort: …` into the system
+  prompt — goldens for low/high exist) and `chat_template_kwargs`
+  (BUILT as `clear_thinking` and `reasoning_effort` only; `enable_thinking`
+  and unknown keys refuse by name — this template has no such knobs).
+  `parallel_tool_calls: false` refuses (unenforceable without a stop
+  machinery). Thinking is always on for this model: the generation prompt
+  opens `<think>` unconditionally.
+- *Response side — a parser over TOKEN IDS, rank 0 only:* a state
+  machine keyed on the added tokens `<tool_call>` 154843, `</tool_call>`
+  154844, `<arg_key>`/`</arg_key>` 154847/8, `<arg_value>`/`</arg_value>`
+  154849/50 (CORRECTED IN THE BUILD: these are added tokens but NOT
+  special ones — decode prints them literally, so a text stream would see
+  them ambiguously while the id stream is exact; the ids are looked up by
+  text at load, never assumed). Segments decode to the function name, keys
+  and values; a value is JSON if it parses, else a string (the template
+  emits `v | tojson` for non-strings and raw strings otherwise — the parse
+  is the inverse; CORRECTED: that inverse is lossy alone, so a value is
+  typed from the request's tool schema first — a string-typed parameter
+  keeps its text, a JSON-typed one parses — and the JSON-if-it-parses rule
+  covers keys the schema does not know). A malformed block (value without
+  key, stray marker, nested `<tool_call>`, the generation ending inside)
+  flushes its literal text as content — nothing lost, no half-parsed call.
+  Output per OpenAI: `tool_calls: [{id: "call_<16hex>", type: "function",
+  function: {name, arguments: <JSON string>}}]`; in streams one delta with
+  `index`, `id`, `name`, then one delta with the complete `arguments`
+  string (clients concatenate fragments — one fragment is valid);
+  `finish_reason: "tool_calls"` when at least one call parsed and the turn
+  ended naturally (the model ends a call turn with `<|observation|>`
+  154829, one of the three EOS ids); `"length"` at the cap whatever was
+  parsed. Text outside `<tool_call>` blocks streams as content. The parser
+  runs on the engine thread under the service lock (pure host work; the
+  journal and the op stream are untouched).
 - *Reasoning:* the generation prompt ends in `<think>`; the split on
   `</think>` 154842 routes ids before it to `reasoning_content` (the
-  vLLM/DeepSeek convention) and after it to `content`; a knob folds
-  reasoning into content for clients that expect it.
+  vLLM/DeepSeek convention) and after it to `content`; a knob
+  (`--reasoning-in-content`) folds reasoning into content — with the
+  model's own `</think>` where it produced it — for clients that expect
+  the raw transcript.
 - *Gates:* the template's own rendering of assistant tool-call messages
   IS the model's output format, so render → encode → parse → compare is
   the golden round trip over the template cases with tool calls (plus

@@ -6,7 +6,7 @@ framework underneath it: the kernels, the RoCE collective bus, the tokenizer,
 the chat-template interpreter, the scheduler and the HTTP service are all in
 this tree.
 
-Current status (2026-09-03): the engine serves. `glm_serve` boots a resident
+Current status (2026-09-04): the engine serves. `glm_serve` boots a resident
 TP=4 model on the four-node fabric in 15–25 s (per-rank image cache), answers
 the OpenAI chat/completions contract over HTTP/SSE with rank 0 as the sole
 ingress, and every rank executes an identical op stream by construction. The
@@ -41,10 +41,14 @@ decode step as one CUDA graph replay with the
 collectives as graph nodes runs at 31.3 ms/token, and greedy speculative
 decode with the checkpoint's MTP layer — verify, on-device pick, rollback,
 draft and next tokens all inside one replay — at 22.45 ms/token with a
-transcript identical to plain decode. Stochastic sampling on the distributed
-path, the prefill behind the time to first token, and the prefix cache are
-open items; `PLAN.md` has the status per milestone and the designs for what
-remains, `DESIGN.md` the contracts as built.
+transcript identical to plain decode. Tool calls and reasoning are on the
+wire (2026-09-04): the service accepts `tools`, `tool_choice`,
+`reasoning_effort` and `chat_template_kwargs`, parses the model's calls from
+the token ids on rank 0, and answers the OpenAI `tool_calls` /
+`reasoning_content` shapes, one-shot and streamed. The prefill behind the
+time to first token, drain-on-stop, grow-on-demand admission and the prefix
+cache are open items; `PLAN.md` has the status per milestone and the designs
+for what remains, `DESIGN.md` the contracts as built.
 
 ## Documentation
 
@@ -120,7 +124,7 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `glm_tp_check --model ID --world W --rank R --peer HEAD` | fabric TP parity: final hidden/logits/routes/digests bitwise across ranks and against the loopback verdict dumps |
 | `glm_shard_parity` | the sharded loader vs full-load + `GlmTpViews::bind`, bitwise on every bound surface |
 | `glm_gen_check --model ID --chat TEXT [--system S] --steps N [--decode-graph] [--mtp]` | generation on the fabric (or `--text`, `--prompt IDS`): resident TP, distributed greedy pick, EOS stop; `--decode-graph` replays the step as one CUDA graph, `--mtp` adds speculative decode (see below); `--requests FILE` runs a JSONL manifest through the scheduler, `--sched-plan` prints the memory receipt without a GPU, `--teacher-file F` scores a text instead of generating, `--sampling-profile` adds the exact top-k-mass sizing probe, `--sample` (or any of `--temperature --top-p --top-k --min-p --repetition-penalty`, with `--seed N`) samples exactly at the checkpoint's defaults on the eager engines (with `--mtp`: the eager exact speculative sampler) instead of the default greedy loop, and `--step-timing` prints the per-phase budget |
-| `glm_serve --model ID --port P [--world W --rank R --peer HEAD --journal-port J] [--max-concurrency N --kv-capacity T --queue-limit Q] [--decode-graph [--mtp] --graph-batch-min-live N] [--temperature X --top-p X --top-k N --min-p X --repetition-penalty X --seed N]` | the OpenAI-compatible service: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/v1/metrics`; rank 0 is the HTTP ingress and journals admissions to the peers; sampling defaults come from the checkpoint's `generation_config.json` (temperature 1.0 / top_p 0.95 for GLM-5.3-Flash-FP8) with the flags overriding them per process, requests may set `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `seed`, `top_k`, `min_p`, `repetition_penalty`, `logprobs` and `top_logprobs` (exact, the OpenAI shapes), and `/v1/models` reports the effective defaults; the eager engines and the `--decode-graph` graphs, with or without `--mtp`, sample exactly (DESIGN §10, the on-device verdict with the gather fallback between windows; under MTP the exact speculative accept test, DESIGN §9); graph mode requires the fabric and `max-concurrency * (mtp ? 2 : 1) <= 8`, warm-captures every graph variant at startup (the journal's `warm` record starts it on every rank together), and batches at `--graph-batch-min-live` live requests (default min(4, max-concurrency); must be in [1, max-concurrency]) |
+| `glm_serve --model ID --port P [--world W --rank R --peer HEAD --journal-port J] [--max-concurrency N --kv-capacity T --queue-limit Q] [--decode-graph [--mtp] --graph-batch-min-live N] [--temperature X --top-p X --top-k N --min-p X --repetition-penalty X --seed N] [--reasoning-in-content]` | the OpenAI-compatible service: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/v1/metrics`; rank 0 is the HTTP ingress and journals admissions to the peers; sampling defaults come from the checkpoint's `generation_config.json` (temperature 1.0 / top_p 0.95 for GLM-5.3-Flash-FP8) with the flags overriding them per process, requests may set `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `seed`, `top_k`, `min_p`, `repetition_penalty`, `logprobs` and `top_logprobs` (exact, the OpenAI shapes), and `/v1/models` reports the effective defaults; chat requests may carry `tools`, `tool_choice` (`auto`/`none`/`required`/a named function — the forced forms append `</think><tool_call>[name]` to the prompt), `reasoning_effort`, `chat_template_kwargs` (`clear_thinking`, `reasoning_effort`), assistant `tool_calls` and `tool` messages, all rendered through the checkpoint's template, and the response carries `reasoning_content` (or, with `--reasoning-in-content`, the reasoning folded into `content`), `content` and `tool_calls` parsed from the token ids on rank 0 with `finish_reason: "tool_calls"` (DESIGN §11); the eager engines and the `--decode-graph` graphs, with or without `--mtp`, sample exactly (DESIGN §10, the on-device verdict with the gather fallback between windows; under MTP the exact speculative accept test, DESIGN §9); graph mode requires the fabric and `max-concurrency * (mtp ? 2 : 1) <= 8`, warm-captures every graph variant at startup (the journal's `warm` record starts it on every rank together), and batches at `--graph-batch-min-live` live requests (default min(4, max-concurrency); must be in [1, max-concurrency]) |
 | `scripts/fabric_run.sh [--stage-file F] [--fetch-logs] [--node-probe] -- APP-ARGS` | launches any app on the four-node fabric with the rendezvous discipline (head first, peers fire-and-forget, verified by pgrep, swept on head death); collects rank-invariant md5s and bus stats |
 | `scripts/serve_run.sh up/down/status` | boots/stops the serving world (`DGPP_SERVE_KNOBS` overrides the engine flags on every rank, e.g. `--max-concurrency 1 ... --decode-graph --mtp`); `down` fetches and md5s every rank's op stream |
 | `scripts/serve_bench.py HOST PORT MAX_TOKENS LABEL [PROMPT]`, `scripts/serve_pace.py RANK_LOG [--waves]` | the service's pace: client-side SSE stamps; server-side per-request pace; and, with `--waves`, the steady peak-occupancy replay latency, tokens/replay, and aggregate tok/s used by the Phase-2 gate |

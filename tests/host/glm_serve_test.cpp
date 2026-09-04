@@ -64,6 +64,12 @@ bool fake_eos_prefill(size_t prompt_len) { return prompt_len % 4 == 2; }
 
 class FakeEngine : public SchedulerEngine {
  public:
+  struct Live {
+    size_t prompt_len = 0;
+    int64_t held_blocks = 0;
+    int served = 0;
+    int32_t last_token = -1;
+  };
   FakeEngine(int slots, int64_t total_blocks, int64_t block_tokens,
              bool can_sample = false)
       : slots_(slots), total_blocks_(total_blocks),
@@ -117,15 +123,31 @@ class FakeEngine : public SchedulerEngine {
     return (tokens + block_tokens_ - 1) / block_tokens_;
   }
 
+  // A scripted answer for prompts of exactly `prompt_len` ids (the 6f
+  // gates: tool-call and reasoning id streams); EOS once it runs out.
+  void script(size_t prompt_len, std::vector<int32_t> ids) {
+    scripts_[prompt_len] = std::move(ids);
+  }
+  int32_t next_token(const Live& live, int index) const {
+    const auto s = scripts_.find(live.prompt_len);
+    if (s != scripts_.end())
+      return index < static_cast<int>(s->second.size()) ? s->second[index]
+                                                        : kFakeEos;
+    if (index == 0)
+      return fake_eos_prefill(live.prompt_len) ? kFakeEos
+                                               : fake_token(live.prompt_len, 0);
+    return fake_eos_second(live.prompt_len) && index == 1
+               ? kFakeEos
+               : fake_token(live.prompt_len, index);
+  }
+
   int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
     if (live_.count(req) != 0)
       throw std::runtime_error("fake: prefill on live slot");
     Live live;
     live.prompt_len = prompt.size();
     live.served = 1;
-    live.last_token = fake_eos_prefill(live.prompt_len)
-                          ? kFakeEos
-                          : fake_token(live.prompt_len, 0);
+    live.last_token = next_token(live, 0);
     live_[req] = live;
     note_logprobs(req, live.last_token, 0);
     return live.last_token;
@@ -147,10 +169,7 @@ class FakeEngine : public SchedulerEngine {
 
   std::vector<int32_t> step(int req) override {
     Live& live = live_.at(req);
-    live.last_token =
-        fake_eos_second(live.prompt_len) && live.served == 1
-            ? kFakeEos
-            : fake_token(live.prompt_len, static_cast<int>(live.served));
+    live.last_token = next_token(live, live.served);
     note_logprobs(req, live.last_token, live.served);
     ++live.served;
     return {live.last_token};
@@ -159,12 +178,7 @@ class FakeEngine : public SchedulerEngine {
   void close(int req) override { live_.erase(req); }
 
  private:
-  struct Live {
-    size_t prompt_len = 0;
-    int64_t held_blocks = 0;
-    int served = 0;
-    int32_t last_token = -1;
-  };
+  std::map<size_t, std::vector<int32_t>> scripts_;
   int slots_;
   int64_t total_blocks_;
   int64_t block_tokens_;
@@ -176,29 +190,135 @@ class FakeEngine : public SchedulerEngine {
   std::vector<Armed> armed_;
 };
 
-// The fake frontend: bytes ↔ ids, and a deterministic chat render (the
-// concatenation of every message's content — the test computes prompt
-// lengths from the same rule).
+// The 6f markers of the fake tokenizer: 1001..1008, decoding to their
+// literal text (not special, exactly like the real added tokens).
+constexpr int64_t kThinkOpen = 1001, kThinkClose = 1002, kToolOpen = 1003,
+                  kToolClose = 1004, kKeyOpen = 1005, kKeyClose = 1006,
+                  kValueOpen = 1007, kValueClose = 1008;
+const std::vector<std::pair<std::string, int64_t>>& marker_table() {
+  static const std::vector<std::pair<std::string, int64_t>> t = {
+      {"</tool_call>", kToolClose}, {"<tool_call>", kToolOpen},
+      {"</arg_value>", kValueClose}, {"<arg_value>", kValueOpen},
+      {"</arg_key>", kKeyClose},   {"<arg_key>", kKeyOpen},
+      {"</think>", kThinkClose},   {"<think>", kThinkOpen},
+  };
+  return t;
+}
+
+// A minijson value back to compact JSON (the tests read what the service
+// handed the template).
+std::string json_of(const dgpp::minijson::Value& v) {
+  using K = dgpp::minijson::Value::Kind;
+  switch (v.kind()) {
+    case K::Null: return "null";
+    case K::Bool: return v.as_bool() ? "true" : "false";
+    case K::Int: return std::to_string(v.as_int());
+    case K::Double: {
+      char buf[32];
+      std::snprintf(buf, sizeof(buf), "%g", v.as_double());
+      return buf;
+    }
+    case K::String: return "\"" + std::string(v.as_string()) + "\"";
+    case K::Array: {
+      std::string out = "[";
+      for (size_t i = 0; i < v.items().size(); ++i)
+        out += (i ? "," : "") + json_of(v.items()[i]);
+      return out + "]";
+    }
+    case K::Object: {
+      std::string out = "{";
+      for (size_t i = 0; i < v.members().size(); ++i)
+        out += (i ? "," : "") + ("\"" + v.members()[i].key + "\":") +
+               json_of(v.members()[i].value);
+      return out + "}";
+    }
+  }
+  return "?";
+}
+
+// The fake frontend: bytes ↔ ids (the marker strings map to their ids,
+// leftmost-longest like the real added-token scan), and a deterministic
+// chat render — the concatenation of every message's content (string, or
+// the text of its parts), plus "<think>" when the fake models this
+// template's generation prompt — the test computes prompt lengths from
+// the same rule. It keeps the last globals the service handed it.
 class FakeFrontend : public ModelFrontend {
  public:
+  explicit FakeFrontend(bool with_markers = false)
+      : with_markers_(with_markers) {}
+
   std::vector<int64_t> encode_text(std::string_view text) const override {
     std::vector<int64_t> ids;
-    for (const char c : text) ids.push_back(static_cast<unsigned char>(c));
+    for (size_t i = 0; i < text.size();) {
+      bool matched = false;
+      for (const auto& [s, id] : marker_table()) {
+        if (text.compare(i, s.size(), s) == 0) {
+          ids.push_back(id);
+          i += s.size();
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) ids.push_back(static_cast<unsigned char>(text[i++]));
+    }
     return ids;
   }
   std::string decode_ids(const std::vector<int64_t>& ids) const override {
     std::string out;
-    for (int64_t id : ids)
-      if (id != kFakeEos) out.push_back(static_cast<char>(id));
+    for (int64_t id : ids) {
+      if (id == kFakeEos) continue;
+      bool matched = false;
+      for (const auto& [s, mid] : marker_table())
+        if (mid == id) {
+          out += s;
+          matched = true;
+          break;
+        }
+      if (!matched && id >= 0 && id < 256) out.push_back(static_cast<char>(id));
+    }
     return out;
   }
-  std::string render_chat(const dgpp::minijson::Value& messages) const override {
+  std::string render_chat(const dgpp::minijson::Value& globals) const override {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      last_globals_ = json_of(globals);
+    }
     std::string out;
-    for (const auto& msg : messages.items())
-      if (const auto* content = msg.find("content"))
+    for (const auto& msg : globals.at("messages").items()) {
+      const auto* content = msg.find("content");
+      if (content == nullptr) continue;
+      if (content->is_string()) {
         out.append(content->as_string());
+      } else {
+        for (const auto& part : content->items())
+          if (const auto* text = part.find("text")) out.append(text->as_string());
+      }
+    }
+    if (with_markers_) out.append("<think>");
     return out;
   }
+  dgpp::glm::ChatMarkers markers() const override {
+    dgpp::glm::ChatMarkers m;
+    if (!with_markers_) return m;
+    m.think_open = {kThinkOpen, "<think>"};
+    m.think_close = {kThinkClose, "</think>"};
+    m.tool_call_open = {kToolOpen, "<tool_call>"};
+    m.tool_call_close = {kToolClose, "</tool_call>"};
+    m.arg_key_open = {kKeyOpen, "<arg_key>"};
+    m.arg_key_close = {kKeyClose, "</arg_key>"};
+    m.arg_value_open = {kValueOpen, "<arg_value>"};
+    m.arg_value_close = {kValueClose, "</arg_value>"};
+    return m;
+  }
+  std::string last_globals() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return last_globals_;
+  }
+
+ private:
+  bool with_markers_;
+  mutable std::mutex mu_;
+  mutable std::string last_globals_;
 };
 
 // --- the raw-socket client (as the http gate's) ------------------------
@@ -303,12 +423,18 @@ struct ServiceRig {
   // `sampling_defaults`: the served defaults (greedy unless a test hands
   // the checkpoint's stochastic ones); `can_sample`: whether the fake
   // engine advertises the sampler.
+  // `with_markers`: the fake tokenizer carries the template's markers and
+  // the fake render opens <think> (the 6f rigs); `reasoning_in_content`:
+  // the fold knob.
   explicit ServiceRig(int queue_limit = 8,
                       dgpp::glm_sample::Params sampling_defaults =
                           dgpp::glm_sample::greedy_params(),
                       bool can_sample = false,
-                      std::optional<uint64_t> fixed_seed = std::nullopt)
+                      std::optional<uint64_t> fixed_seed = std::nullopt,
+                      bool with_markers = false,
+                      bool reasoning_in_content = false)
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
+        frontend(with_markers),
         cfg([&] {
           ServiceConfig c;
           c.model_id = "glm-5.3-flash-fp8";
@@ -316,6 +442,7 @@ struct ServiceRig {
           c.queue_limit = queue_limit;
           c.sampling_defaults = sampling_defaults;
           c.fixed_seed = fixed_seed;
+          c.reasoning_in_content = reasoning_in_content;
           return c;
         }()),
         service(cfg, &engine, &frontend, {kFakeEos}),
@@ -522,17 +649,28 @@ DGPP_TEST(serve_refusalLadder_openAIErrorObjects) {
                   "\"param\":\"logit_bias\"");
   post_and_expect(chat_body("abcd", 3,
                             ",\"tools\":[{\"type\":\"function\"}]"),
-                  400, "\"param\":\"tools\"");
+                  400, "\"param\":\"tools[0].function.name\"");
   post_and_expect(chat_body("abcd", 3, ",\"n\":2"), 400, "\"param\":\"n\"");
   post_and_expect(
       "{\"model\":\"wrong-model\",\"messages\":[{\"role\":\"user\","
       "\"content\":\"hi\"}]}",
       404, "\"code\":\"model_not_found\"");
   post_and_expect("{not json", 400, "invalid JSON body");
+  // Content parts render through the template (6f); a part without a
+  // type, a role the template does not know, and tools on a frontend
+  // without the markers all refuse by name.
   post_and_expect(
       "{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"user\","
-      "\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}]}",
-      400, "\"param\":\"messages.content\"");
+      "\"content\":[{\"text\":\"hi\"}]}]}",
+      400, "\"param\":\"messages[0].content\"");
+  post_and_expect(
+      "{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"developer\","
+      "\"content\":\"hi\"}]}",
+      400, "\"param\":\"messages[0].role\"");
+  post_and_expect(chat_body("abcd", 3,
+                            ",\"tools\":[{\"type\":\"function\","
+                            "\"function\":{\"name\":\"f\"}}]"),
+                  400, "\"code\":\"tools_unsupported\"");
 }
 
 DGPP_TEST(serve_overloadedQueue_503AtTheDoor) {
@@ -854,6 +992,351 @@ DGPP_TEST(serve_logprobs_openAIShapesOnEveryRoute) {
       post_chat(greedy_rig, chat_body("abcd", 2, ",\"logprobs\":true"));
   require(unsupported.find("\"code\":\"logprobs_unsupported\"") != std::string::npos,
           "an engine without logprobs refuses");
+}
+
+
+// ---- M6 6f: tools and reasoning ------------------------------------------
+
+std::string post_until_usage(ServiceRig& rig, const std::string& body) {
+  return post_chat(rig, body, "usage", 5000);
+}
+
+std::vector<int32_t> script_of(const ServiceRig& rig, const std::string& text,
+                               bool eos = true) {
+  std::vector<int32_t> out;
+  for (const int64_t id : rig.frontend.encode_text(text))
+    out.push_back(static_cast<int32_t>(id));
+  if (eos) out.push_back(kFakeEos);
+  return out;
+}
+
+const std::string kWeatherTools =
+    ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+    "\"description\":\"Weather\",\"parameters\":{\"type\":\"object\","
+    "\"properties\":{\"city\":{\"type\":\"string\"},\"days\":{\"type\":"
+    "\"integer\"}},\"required\":[\"city\"]}}}]";
+
+// Concatenates every `"<field>":"..."` payload in arrival order (the SSE
+// delta contract: clients concatenate fragments).
+std::string concat_field(const std::string& resp, const std::string& field) {
+  std::string out;
+  const std::string needle = "\"" + field + "\":\"";
+  size_t pos = 0;
+  while ((pos = resp.find(needle, pos)) != std::string::npos) {
+    const size_t vstart = pos + needle.size();
+    size_t vend = vstart;
+    while (vend < resp.size() && resp[vend] != '"') vend += resp[vend] == '\\' ? 2 : 1;
+    out.append(resp, vstart, vend - vstart);
+    pos = vend;
+  }
+  return out;
+}
+
+DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
+  // GIVEN a frontend with the template's markers (tool calls available),
+  ServiceRig rig(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  {
+    Client models(rig.port());
+    models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string ml = models.read_available(800);
+    require(ml.find("\"tools\":{\"available\":true},\"reasoning\":"
+                    "{\"in_content\":false}") != std::string::npos,
+            "models advertise the tool surface: " + ml.substr(0, 400));
+  }
+
+  // WHEN requests carry tools and template knobs, THEN the template sees
+  // exactly what OpenAI semantics prescribe.
+  (void)post_until_usage(rig, chat_body("abcd", 2, kWeatherTools));
+  std::string g = rig.frontend.last_globals();
+  require(g.find("\"tools\":[{\"type\":\"function\",\"function\":{\"name\":"
+                 "\"get_weather\"") != std::string::npos,
+          "tools reach the template (tool_choice auto): " + g);
+  require(g.find("\"messages\":[{\"role\":\"user\",\"content\":\"abcd\"}]") !=
+              std::string::npos,
+          "messages pass through: " + g);
+
+  (void)post_until_usage(
+      rig, chat_body("abcd", 2, kWeatherTools + ",\"tool_choice\":\"none\""));
+  g = rig.frontend.last_globals();
+  require(g.find("\"tools\"") == std::string::npos,
+          "tool_choice none omits the tools from the render: " + g);
+
+  (void)post_until_usage(
+      rig, chat_body("abcd", 2,
+                     ",\"reasoning_effort\":\"low\",\"chat_template_kwargs\":"
+                     "{\"clear_thinking\":false}"));
+  g = rig.frontend.last_globals();
+  require(g.find("\"reasoning_effort\":\"low\"") != std::string::npos &&
+              g.find("\"clear_thinking\":false") != std::string::npos,
+          "reasoning_effort and chat_template_kwargs render: " + g);
+
+  // The assistant tool_calls wire form (arguments as a JSON string) is
+  // parsed into the mapping the template iterates; a null assistant
+  // content becomes ""; tool messages pass with their tool_call_id, in
+  // both content forms.
+  const std::string conversation =
+      "{\"model\":\"" + kModel + "\",\"max_tokens\":2,\"messages\":["
+      "{\"role\":\"user\",\"content\":\"hi\"},"
+      "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":"
+      "\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+      "\"arguments\":\"{\\\"city\\\": \\\"Paris\\\", \\\"days\\\": 2}\"}}]},"
+      "{\"role\":\"tool\",\"content\":\"18C\",\"tool_call_id\":\"call_1\"},"
+      "{\"role\":\"assistant\",\"content\":\"It is 18C.\",\"reasoning_content\":"
+      "\"looked it up\"},"
+      "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"and Rome?\"}]},"
+      "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_2\",\"type\":"
+      "\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":"
+      "{\"city\":\"Rome\"}}}]},"
+      "{\"role\":\"tool\",\"content\":[{\"tool_call_id\":\"call_2\",\"output\":"
+      "\"20C\"}]}]" + kWeatherTools + "}";
+  const std::string ok = post_until_usage(rig, conversation);
+  require(ok.find("\"object\":\"chat.completion\"") != std::string::npos,
+          "the tool conversation is served: " + ok.substr(0, 300));
+  g = rig.frontend.last_globals();
+  require(g.find("{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":"
+                 "\"call_1\",\"type\":\"function\",\"function\":{\"name\":"
+                 "\"get_weather\",\"arguments\":{\"city\":\"Paris\",\"days\":2}}}]}") !=
+              std::string::npos,
+          "string arguments parsed to a mapping, null content to \"\": " + g);
+  require(g.find("\"arguments\":{\"city\":\"Rome\"}") != std::string::npos,
+          "object arguments pass through: " + g);
+  require(g.find("\"reasoning_content\":\"looked it up\"") != std::string::npos,
+          "reasoning_content passes through: " + g);
+  require(g.find("{\"role\":\"tool\",\"content\":[{\"tool_call_id\":\"call_2\","
+                 "\"output\":\"20C\"}]}") != std::string::npos,
+          "the tool output list passes through: " + g);
+
+  // The refusals name the field.
+  const auto refused = [&](const std::string& body, const std::string& needle) {
+    const std::string resp = post_chat(rig, body);
+    require(resp.find("400 ") != std::string::npos &&
+                resp.find(needle) != std::string::npos,
+            "expected a 400 with " + needle + ": " + resp.substr(0, 400));
+  };
+  refused(chat_body("abcd", 2, ",\"tool_choice\":\"required\""),
+          "\"param\":\"tool_choice\"");
+  refused(chat_body("abcd", 2, kWeatherTools + ",\"tool_choice\":\"sometimes\""),
+          "\"param\":\"tool_choice\"");
+  refused(chat_body("abcd", 2,
+                    kWeatherTools + ",\"tool_choice\":{\"type\":\"function\","
+                                    "\"function\":{\"name\":\"nope\"}}"),
+          "\"param\":\"tool_choice.function.name\"");
+  refused(chat_body("abcd", 2, kWeatherTools + ",\"parallel_tool_calls\":false"),
+          "\"code\":\"unsupported_parameter_value\"");
+  refused(chat_body("abcd", 2, ",\"tools\":[{\"type\":\"function\","
+                               "\"function\":{\"description\":\"x\"}}]"),
+          "\"param\":\"tools[0].function.name\"");
+  refused(chat_body("abcd", 2, ",\"reasoning_effort\":\"extreme\""),
+          "\"param\":\"reasoning_effort\"");
+  refused(chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"enable_thinking\":false}"),
+          "\"param\":\"chat_template_kwargs.enable_thinking\"");
+  refused(chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"foo\":1}"),
+          "\"param\":\"chat_template_kwargs.foo\"");
+  refused(chat_body("abcd", 2,
+                    ",\"reasoning_effort\":\"low\",\"chat_template_kwargs\":"
+                    "{\"reasoning_effort\":\"high\"}"),
+          "\"param\":\"chat_template_kwargs.reasoning_effort\"");
+  refused("{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"user\","
+          "\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":null}]}",
+          "\"param\":\"messages[1].content\"");
+  refused("{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"user\","
+          "\"content\":\"hi\"},{\"role\":\"assistant\",\"tool_calls\":[{\"function\":"
+          "{\"name\":\"f\",\"arguments\":\"[1]\"}}]}]}",
+          "\"param\":\"messages[1].tool_calls[0].function.arguments\"");
+  refused("{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"tool\","
+          "\"content\":7}]}",
+          "\"param\":\"messages[0].content\"");
+}
+
+DGPP_TEST(serve_toolCalls_oneShotMessageShapeAndFinishReason) {
+  // GIVEN a scripted turn: reasoning, </think>, content, one call with a
+  // string and an integer argument, EOS (prompt "abcd" + <think> = 5 ids),
+  ServiceRig rig(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  const std::string turn =
+      "Think</think>Sure<tool_call>get_weather<arg_key>city</arg_key>"
+      "<arg_value>Paris</arg_value><arg_key>days</arg_key><arg_value>3"
+      "</arg_value></tool_call>";
+  const std::vector<int32_t> script = script_of(rig, turn);
+  rig.engine.script(5, script);
+
+  // WHEN the chat completion completes,
+  const std::string resp =
+      post_until_usage(rig, chat_body("abcd", 64, kWeatherTools));
+
+  // THEN the message carries content, reasoning_content and the parsed
+  // call with json.dumps-form arguments; finish_reason is "tool_calls".
+  require(resp.find("\"message\":{\"role\":\"assistant\",\"content\":\"Sure\","
+                    "\"reasoning_content\":\"Think\",\"tool_calls\":[{\"id\":"
+                    "\"call_") != std::string::npos,
+          "message shape: " + resp);
+  require(resp.find("\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+                    "\"arguments\":\"{\\\"city\\\": \\\"Paris\\\", \\\"days\\\": 3}\"}}]}") !=
+              std::string::npos,
+          "tool call shape: " + resp);
+  require(resp.find("\"finish_reason\":\"tool_calls\"") != std::string::npos,
+          "finish_reason tool_calls: " + resp);
+  require(resp.find("\"prompt_tokens\":5,\"completion_tokens\":" +
+                    std::to_string(script.size())) != std::string::npos,
+          "usage counts every id (EOS included): " + resp);
+
+  // A turn with calls only reports content null.
+  ServiceRig rig2(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                  /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  rig2.engine.script(
+      6, script_of(rig2, "Think</think><tool_call>get_weather<arg_key>city"
+                         "</arg_key><arg_value>Rome</arg_value></tool_call>"));
+  const std::string only =
+      post_until_usage(rig2, chat_body("abcde", 64, kWeatherTools));
+  require(only.find("\"content\":null,\"reasoning_content\":\"Think\","
+                    "\"tool_calls\":[") != std::string::npos,
+          "content null with calls only: " + only);
+  Client m(rig2.port());
+  m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+  const std::string metrics = m.read_until("tool_calls_out", 2000);
+  require(metrics.find("\"tool_calls_out\":1") != std::string::npos,
+          "metrics count the call: " + metrics);
+}
+
+DGPP_TEST(serve_toolCalls_streamDeltasInOrder) {
+  ServiceRig rig(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  rig.engine.script(
+      5, script_of(rig, "Think</think>Sure<tool_call>get_weather<arg_key>city"
+                        "</arg_key><arg_value>Paris</arg_value><arg_key>days"
+                        "</arg_key><arg_value>3</arg_value></tool_call>"
+                        "<tool_call>get_weather<arg_key>city</arg_key>"
+                        "<arg_value>Oslo</arg_value></tool_call>"));
+  Client c(rig.port());
+  const std::string body =
+      chat_body("abcd", 128, kWeatherTools + ",\"stream\":true");
+  c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+             "Content-Type: application/json\r\nContent-Length: " +
+             std::to_string(body.size()) + "\r\n\r\n" + body);
+  const std::string resp = c.read_until("[DONE]", 5000);
+
+  // The deltas: reasoning_content fragments, content fragments, then per
+  // call one announcing delta (index, id, name, empty arguments) and one
+  // with the complete arguments; the final chunk says tool_calls.
+  require(concat_field(resp, "reasoning_content") == "Think",
+          "reasoning deltas concatenate: " + resp);
+  require(concat_field(resp, "content") == "Sure",
+          "content deltas concatenate: " + resp);
+  const size_t role = resp.find("\"delta\":{\"role\":\"assistant\"");
+  const size_t reasoning = resp.find("\"delta\":{\"reasoning_content\":\"");
+  const size_t content = resp.find("\"delta\":{\"content\":\"");
+  const size_t start0 = resp.find(
+      "\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_");
+  const size_t args0 = resp.find(
+      "\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":"
+      "\"{\\\"city\\\": \\\"Paris\\\", \\\"days\\\": 3}\"}}]}");
+  const size_t start1 = resp.find(
+      "\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_");
+  const size_t args1 = resp.find(
+      "\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":"
+      "\"{\\\"city\\\": \\\"Oslo\\\"}\"}}]}");
+  const size_t final = resp.find("\"delta\":{},\"logprobs\":null,"
+                                 "\"finish_reason\":\"tool_calls\"");
+  const size_t done = resp.find("data: [DONE]");
+  require(role != std::string::npos && reasoning != std::string::npos &&
+              content != std::string::npos && start0 != std::string::npos &&
+              args0 != std::string::npos && start1 != std::string::npos &&
+              args1 != std::string::npos && final != std::string::npos &&
+              done != std::string::npos,
+          "every chunk kind present: " + resp);
+  require(role < reasoning && reasoning < content && content < start0 &&
+              start0 < args0 && args0 < start1 && start1 < args1 &&
+              args1 < final && final < done,
+          "chunks in arrival order: " + resp);
+  require(resp.find("\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+                    "\"arguments\":\"\"}}]}") != std::string::npos,
+          "the announcing delta carries the name and empty arguments");
+  // The two calls carry distinct ids.
+  const size_t id0 = resp.find("\"id\":\"call_", start0);
+  const size_t id1 = resp.find("\"id\":\"call_", start1);
+  require(resp.substr(id0, 27) != resp.substr(id1, 27), "distinct call ids");
+}
+
+DGPP_TEST(serve_toolChoice_forcedPrefixSeedsTheParser) {
+  // tool_choice required: the prompt gains "</think><tool_call>" (two
+  // ids on the fake), the turn starts with the name, no reasoning.
+  ServiceRig rig(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  rig.engine.script(7, script_of(rig, "get_weather<arg_key>city</arg_key>"
+                                      "<arg_value>Rome</arg_value></tool_call>"));
+  const std::string required = post_until_usage(
+      rig, chat_body("abcd", 64, kWeatherTools + ",\"tool_choice\":\"required\""));
+  require(required.find("\"content\":null,\"tool_calls\":[{\"id\":\"call_") !=
+                  std::string::npos &&
+              required.find("\"name\":\"get_weather\",\"arguments\":"
+                            "\"{\\\"city\\\": \\\"Rome\\\"}\"") != std::string::npos &&
+              required.find("reasoning_content") == std::string::npos &&
+              required.find("\"prompt_tokens\":7,") != std::string::npos,
+          "required: " + required);
+  require(rig.frontend.last_globals().find("\"tools\":[") != std::string::npos,
+          "the tools still render for a forced call");
+
+  // A named function: its name rides in the prompt (11 more ids) and
+  // seeds the parser; the turn starts at the first argument.
+  rig.engine.script(18, script_of(rig, "<arg_key>city</arg_key><arg_value>Oslo"
+                                       "</arg_value></tool_call>"));
+  const std::string named = post_until_usage(
+      rig, chat_body("abcd", 64,
+                     kWeatherTools + ",\"tool_choice\":{\"type\":\"function\","
+                                     "\"function\":{\"name\":\"get_weather\"}}"));
+  require(named.find("\"name\":\"get_weather\",\"arguments\":"
+                     "\"{\\\"city\\\": \\\"Oslo\\\"}\"") != std::string::npos &&
+              named.find("\"prompt_tokens\":18,") != std::string::npos &&
+              named.find("\"finish_reason\":\"tool_calls\"") != std::string::npos,
+          "named: " + named);
+}
+
+DGPP_TEST(serve_reasoning_foldKnobAndUnterminatedCallAtTheCap) {
+  // The fold knob: reasoning rides as content with the model's own
+  // </think>, no reasoning_content field.
+  ServiceRig fold(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                  /*can_sample=*/false, std::nullopt, /*with_markers=*/true,
+                  /*reasoning_in_content=*/true);
+  fold.engine.script(5, script_of(fold, "Think</think>Sure"));
+  const std::string folded = post_until_usage(fold, chat_body("abcd", 64));
+  require(folded.find("\"content\":\"Think</think>Sure\"") != std::string::npos &&
+              folded.find("reasoning_content") == std::string::npos &&
+              folded.find("\"finish_reason\":\"stop\"") != std::string::npos,
+          "folded: " + folded);
+  {
+    Client models(fold.port());
+    models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    require(models.read_available(800).find("\"reasoning\":{\"in_content\":true}") !=
+                std::string::npos,
+            "models report the fold");
+  }
+  // Streamed, the fold's </think> is a content delta in place.
+  {
+    Client c(fold.port());
+    const std::string body = chat_body("abcd", 64, ",\"stream\":true");
+    c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+               "Content-Type: application/json\r\nContent-Length: " +
+               std::to_string(body.size()) + "\r\n\r\n" + body);
+    const std::string resp = c.read_until("[DONE]", 5000);
+    require(concat_field(resp, "content") == "Think</think>Sure" &&
+                resp.find("reasoning_content") == std::string::npos,
+            "folded stream: " + resp);
+  }
+
+  // The steps cap inside a block: the literal text is content,
+  // finish_reason length, no tool_calls.
+  ServiceRig cap(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  cap.engine.script(5, script_of(cap, "</think><tool_call>get_weather<arg_key>"
+                                      "city</arg_key><arg_value>Paris"));
+  const std::string capped =
+      post_until_usage(cap, chat_body("abcd", 6, kWeatherTools));
+  require(capped.find("\"content\":\"<tool_call>get_\"") != std::string::npos &&
+              capped.find("tool_calls") == std::string::npos &&
+              capped.find("\"finish_reason\":\"length\"") != std::string::npos &&
+              capped.find("\"completion_tokens\":6,") != std::string::npos,
+          "capped block: " + capped);
 }
 
 }  // namespace

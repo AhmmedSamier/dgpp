@@ -1957,7 +1957,9 @@ The daemon is a hand-rolled C++ service (`glm_serve`; `src/service/`) with:
   `GET /v1/metrics`;
 - SSE streaming, disconnect → cancellation, deterministic (greedy) output,
   and a bounded request queue;
-- tool calls and `reasoning_content`: designed, not built (below).
+- tool calls and `reasoning_content` on the wire (M6 6f, 2026-09-04):
+  the template's tool format parsed from the token ids on rank 0, the
+  OpenAI shapes streamed and one-shot (as built, below).
 
 The scheduler separates prefill and decode work, preserves identical rank
 order, and admits requests only when weights, mutable state, DSA cache, MTP
@@ -2008,8 +2010,8 @@ thread drains admissions → `try_submit`, drains cancels → `cancel`, runs
 ONE tick, publishes meters. Records enter the table AT ENQUEUE so
 pre-admission requests are visible to disconnect and to the pump. The
 refusal ladder: every accepted field behaves per the schema; every
-unimplemented one (stop, n, logit_bias, tools, response_format,
-…, and non-greedy sampling on an engine that cannot sample) refuses with a
+unimplemented one (stop, n, logit_bias, response_format, …, and
+non-greedy sampling on an engine that cannot sample) refuses with a
 400 carrying the OpenAI error object naming the param — silent-ignore is
 the bug class the ladder exists to prevent. The sampling fields
 (temperature, top_p, presence/frequency penalties, seed; top_k, min_p,
@@ -2018,6 +2020,88 @@ accepted since 2026-09-04 and behave exactly per §10, with omitted fields
 taking the checkpoint's defaults. Incremental text is the suffix-diff of
 successive full decodes, so UTF-8 and special-token boundaries are exact
 without tokenizer state on the hot path.
+
+**Tool calls and reasoning (M6 6f, built 2026-09-04;
+`glm_tool_parser.{hpp,cpp}`, the chat route of `generation_service.cpp`).**
+The chat template's rendering of an assistant turn IS the model's output
+format — `<think>{reasoning}</think>{content}<tool_call>{name}<arg_key>{k}
+</arg_key><arg_value>{v}</arg_value>…</tool_call>…` — and its markers are
+ADDED TOKENS (`<think>` 154841, `</think>` 154842, `<tool_call>` 154843,
+`</tool_call>` 154844, `<arg_key>`/`</arg_key>` 154847/8,
+`<arg_value>`/`</arg_value>` 154849/50 for the pinned revision; looked up
+by text at load, never assumed), one id each and never produced by BPE for
+ordinary text. They are not "special" in the tokenizer's sense — `decode()`
+prints them literally — so a text-keyed parser would be ambiguous where an
+id-keyed one is exact. *Request side:* `tools` (flat or `{type:
+"function", function}`), `tool_choice` (`auto`; `none` omits the tools
+from the render; `required` and `{function: {name}}` append
+`</think><tool_call>` resp. `</think><tool_call>{name}` to the rendered
+prompt — the template has no forced mode, so a forced turn closes the
+`<think>` block the generation prompt opened and does not reason first;
+the model may extend a seeded name), `parallel_tool_calls` (`true` only:
+`false` cannot be enforced without a stop machinery and refuses by name),
+`reasoning_effort` (the OpenAI values; the template renders `low`/`high`
+and treats the rest as its maximum) and `chat_template_kwargs`
+(`clear_thinking`, `reasoning_effort`; `enable_thinking` refuses with the
+explanation that thinking is always on; any other key refuses by name).
+Messages: system/user/assistant/tool (any other role refuses — the
+template would render nothing for it); content as a string or the
+template's content-part list; assistant `tool_calls` with `arguments` as
+the OpenAI JSON-object string (parsed into the mapping the template
+iterates, as vLLM's postprocess does) or an object; a null assistant
+content with tool_calls becomes ""; `reasoning_content` and tool
+`tool_call_id` pass through. *Response side:* one `ToolCallParser` per
+chat request, fed each generated id on the engine thread under the
+service's lock (pure host work on rank 0 — the fabric never sees it; the
+journal and the op stream are unchanged). Its state machine starts in
+Reasoning when the prompt ends in `<think>` (ids stream as
+`reasoning_content` deltas until `</think>`), then Content (deltas as
+`content`; a `<tool_call>` opens a block), then inside a block Name → Key
+→ Value with the six markers structural and everything else text of the
+current segment. A block is a call only when `</tool_call>` closes a
+consistent name/(key, value)* sequence; a value without a key, a stray
+marker, text between `</arg_key>` and `<arg_value>`, a nested
+`<tool_call>` (which also starts a fresh block) or the generation ending
+inside a block flushes the block's LITERAL text (the decode of its ids,
+markers included) as content — nothing the model produced is lost and no
+half-parsed call reaches a client. Values: the template writes strings
+raw and everything else through `tojson`, an inverse that is lossy alone
+(`"123"` and `123` render alike), so a value is typed from the request's
+tool schema when it names the key (`parameters.properties[key].type`: a
+string type keeps the text; a JSON type parses it, the text standing when
+the parse fails) and otherwise "JSON if the whole text parses, else a
+string" — vLLM's GLM parser makes the same call. Arguments re-serialize
+in json.dumps form (`{"city": "Paris", "days": 3}`), the template's own
+tojson dialect. Wire shapes per OpenAI: the message carries `content`
+(null when the turn is calls only), `reasoning_content` when non-empty,
+and `tool_calls: [{id: "call_<16 hex>", type: "function", function:
+{name, arguments: <JSON string>}}]` (ids a pure function of the record and
+the call index); streams carry `delta.reasoning_content` and
+`delta.content` fragments as the runs' exact suffix diffs, and per call
+one delta announcing `{index, id, type, function: {name, arguments: ""}}`
+followed by one with the complete `arguments` string (a client that
+concatenates fragments sees one fragment); `finish_reason` is
+`"tool_calls"` when the turn ended naturally after at least one parsed
+call, `"length"` at the cap whatever was parsed, `"stop"` otherwise. The
+final chunk carries the logprobs entries no content chunk took (the EOS
+pick's, which decodes to nothing). `--reasoning-in-content` folds the
+reasoning into content with the model's own `</think>` where it produced
+it (the decode a client of a parser-less server would see) instead of
+splitting it. Gates: `glm_tool_parser_test` (unit, a fake decoder: the
+split, exact deltas, schema-typed and inferred values, nested JSON,
+several calls per turn, every malformed shape falling back to literal
+content, the forced prefix, missing markers disabling the features),
+`glm_chat_template_test`'s `glm_tool_call_render_encode_parse_roundTrip`
+(every golden assistant tool-call message rendered by the template,
+encoded by the real tokenizer and parsed back — 6 turns, 9 calls, names
+and arguments structurally exact), and `glm_serve_test`'s five 6f gates
+(the request side's normalization and refusals by field name, the
+one-shot message shape and `finish_reason`, the stream's chunk order, the
+forced prefix seeding the parser with the prompt length as evidence, the
+fold knob and the cap inside a block). On the four nodes
+(`scripts/serve_tools_check.sh`, 2026-09-04, `--decode-graph --mtp` at the
+card's settings) every request shape answered as designed with the
+op-stream md5 identical on all ranks — the record's last 2026-09-04 entry.
 
 **The admission journal** (`fabric_serve.{hpp,cpp}`): rank 0 is the sole
 ingress; every engine pass's scheduler-state changes ride ONE
@@ -2162,7 +2246,7 @@ shut down cleanly, and no current-run log contains a transport warning. Phase
 artifact hashes are in the 2026-09-03 Phase-2 entries of
 `benchmarks/results/2026-08-29-bus-m5.md`.
 
-### Design for what remains (PLAN M6 6c/6d/6f, M9)
+### Design for what remains (PLAN M6 6c/6d, M9)
 
 - *Drain-on-stop:* stop is a flag read at tick top; active streams get an
   error event, requests retire, the stop record goes out, THEN the bus
@@ -2171,23 +2255,12 @@ artifact hashes are in the 2026-09-03 Phase-2 entries of
 - *Grow-on-demand admission:* reserve to a window, grow at tick top,
   shed the youngest deterministically when growth fails — a pure function
   of (meters, positions), so the journal keeps it identical.
-- *Tool calls and reasoning (PLAN 6f):* the template already renders
-  `tools`, assistant `tool_calls` and `tool` messages; the API accepts
-  them plus `tool_choice` (`required`/named → a forced `<tool_call>`
-  prefix on the generation prompt), `reasoning_effort` and
-  `enable_thinking`. The output parser is a state machine over TOKEN IDS
-  on rank 0's HTTP thread — the added tokens `<tool_call>` 154843,
-  `</tool_call>` 154844, `<arg_key>` 154847/8, `<arg_value>` 154849/50
-  and `</think>` 154842 are invisible in decoded text (special tokens
-  skip) but exact in the id stream. Values parse as JSON when they parse,
-  else as strings (the inverse of the template's `tojson`-unless-string).
-  OpenAI shapes: `tool_calls[{id, type, function{name, arguments}}]`,
-  streamed as one id/name delta and one complete-arguments delta per
-  call, `finish_reason: "tool_calls"`; ids before `</think>` become
-  `reasoning_content`. Golden: render(assistant tool_calls) → encode →
-  parse must round-trip, since the template's rendering IS the model's
-  output format. The fabric never sees any of it — the parser is
-  downstream of the token stream.
+- *Tool calls and reasoning (PLAN 6f):* BUILT 2026-09-04 — the as-built
+  paragraph above. Two things the design had wrong, corrected in the
+  build: the markers are not special tokens (decode prints them, which
+  is why a malformed block can fall back to literal text), and "JSON if
+  it parses" alone is lossy, so values are typed from the tool schema
+  first.
 - *Failure semantics (v1):* no failover. Any rank's death fails the world
   legibly (journal EOF / bus watchdog), active streams get an error event,
   a supervisor restarts the world in ~25 s from the image cache. The

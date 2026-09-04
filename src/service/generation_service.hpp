@@ -9,8 +9,11 @@
 // naming the offending parameter. Silently ignoring a sampling knob
 // would be the one dishonest behavior on the menu.
 //
-//   POST /v1/chat/completions   messages[] (string content), max_tokens
-//                               or max_completion_tokens, stream,
+//   POST /v1/chat/completions   messages[] (system/user/assistant/tool;
+//                               string or content-part content, assistant
+//                               tool_calls and reasoning_content, tool
+//                               tool_call_id), max_tokens or
+//                               max_completion_tokens, stream,
 //                               stream_options.include_usage; sampling:
 //                               temperature, top_p, presence_penalty,
 //                               frequency_penalty, seed (the OpenAI
@@ -28,6 +31,21 @@
 //                               alternatives (the OpenAI content shape),
 //                               exact from the same sampler; temperature
 //                               0 reports under the raw distribution.
+//                               Tools (M6 6f, DESIGN §11): tools,
+//                               tool_choice (auto / none / required /
+//                               {function: name}), parallel_tool_calls
+//                               (true only), reasoning_effort and
+//                               chat_template_kwargs render through the
+//                               checkpoint's template; the response
+//                               carries reasoning_content, content and
+//                               tool_calls parsed from the token ids,
+//                               finish_reason "tool_calls" when a call
+//                               parsed. Thinking is always on for this
+//                               template (the generation prompt opens
+//                               <think>); required / named tool_choice
+//                               forces "</think><tool_call>[name]" onto
+//                               the prompt, so such a turn does not
+//                               reason first.
 //   POST /v1/completions        the legacy prompt API (string prompt).
 //   GET  /v1/models, /v1/models/{id}
 //   GET  /health               liveness (the fabric harnesses' probe).
@@ -42,7 +60,8 @@
 //     the admission/cancel queue into the scheduler and runs ONE
 //     scheduler quantum (sched.tick()). The scheduler observer (which
 //     IS this service) appends token/retire events to the request
-//     records under the lock.
+//     records under the lock; the chat records' tool-call parser runs
+//     there too (pure host work, rank 0 only — the fabric never sees it).
 //   * The single mutex covers the event queue and the record list;
 //     sockets are only ever written by the HTTP thread (idle()).
 #include <atomic>
@@ -57,6 +76,7 @@
 
 #include "loaders/minijson.hpp"
 #include "models/glm_scheduler.hpp"
+#include "models/glm_tool_parser.hpp"
 #include "service/http_server.hpp"
 
 namespace dgpp::service {
@@ -73,10 +93,18 @@ class ModelFrontend {
   // semantics; decode(ids) == decode(ids[0..n-1]) + suffix deltas, so
   // incremental text is the suffix diff of successive full decodes).
   virtual std::string decode_ids(const std::vector<int64_t>& ids) const = 0;
-  // The OpenAI messages array (minijson DOM: [{role, content}, ...])
-  // rendered through the checkpoint's chat template, generation prompt
-  // appended — the prompt the scheduler will prefill.
-  virtual std::string render_chat(const minijson::Value& messages) const = 0;
+  // The template globals (minijson DOM object: "messages" — the OpenAI
+  // messages array, normalized — plus optional "tools",
+  // "reasoning_effort", "clear_thinking" and whatever else the request's
+  // chat_template_kwargs carried) rendered through the checkpoint's chat
+  // template with the generation prompt appended — the prompt the
+  // scheduler will prefill.
+  virtual std::string render_chat(const minijson::Value& globals) const = 0;
+  // The template's marker tokens (DESIGN §11): the reasoning split and
+  // the tool-call parser key on their ids. A frontend without them
+  // (the default) serves plain chat: tool requests refuse, nothing is
+  // split.
+  virtual dgpp::glm::ChatMarkers markers() const { return {}; }
 };
 
 struct ServiceConfig {
@@ -94,6 +122,11 @@ struct ServiceConfig {
   // per request (and the journal carries it). Set: every seedless request
   // uses it — the gates' reproducible runs.
   std::optional<uint64_t> fixed_seed;
+  // Reasoning on the wire: false (default) routes the ids before </think>
+  // to the message's reasoning_content (the vLLM/DeepSeek convention);
+  // true folds them into content as "<think>…</think>" text for clients
+  // that expect the raw transcript.
+  bool reasoning_in_content = false;
 };
 
 class GenerationService : public HttpHandler,
@@ -152,6 +185,7 @@ class GenerationService : public HttpHandler,
     uint64_t requests_cancelled = 0;  // client disconnects
     uint64_t tokens_out = 0;
     uint64_t rejects_bad = 0;        // 400-class refusals
+    uint64_t tool_calls_out = 0;     // parsed tool calls
   };
   Stats stats() const;
 
@@ -161,13 +195,21 @@ class GenerationService : public HttpHandler,
     return cfg_.sampling_defaults;
   }
   bool sampling_available() const { return sampling_available_; }
+  // Whether requests may carry tools (the frontend has the markers).
+  bool tool_calls_available() const {
+    return markers_.tool_calls_available();
+  }
 
  private:
+  using ParserEvent = dgpp::glm::ToolCallParser::Event;
+  using ToolCall = dgpp::glm::ToolCallParser::Call;
+
   struct StreamRecord {
     uint64_t tag = 0;        // on_disconnect correlation
     std::string id;          // response id == the scheduler request id
     std::string model;
     int64_t created_unix = 0;
+    bool chat = false;       // chat route (the parser path) vs legacy
     bool stream = false;
     bool include_usage = false;
     bool first_chunk_sent = false;
@@ -183,8 +225,16 @@ class GenerationService : public HttpHandler,
     std::vector<glm_sample::Result> lps;  // one per id when logprobs >= 0
     size_t lps_flushed = 0;    // streaming: entries already sent
     std::vector<int64_t> ids;  // generated so far
+    // Legacy completions: the suffix-diff text path.
     std::string text;          // decoded so far (the suffix-diff base)
     std::string delta;         // unflushed text delta (the ring)
+    // Chat: the parser splits the ids into reasoning / content / calls.
+    std::unique_ptr<dgpp::glm::ToolCallParser> parser;
+    std::vector<ParserEvent> pending;  // streams: events not yet flushed
+    std::string reasoning;     // accumulated (one-shots)
+    std::string content;       // accumulated (one-shots)
+    std::vector<ToolCall> calls;
+    int calls_announced = 0;   // streaming: calls already sent (HTTP thread)
     HttpResponseWriter* writer = nullptr;  // HTTP thread only
   };
 
@@ -204,6 +254,22 @@ class GenerationService : public HttpHandler,
                       HttpResponseWriter& w, glm_sample::Params* sampling,
                       uint64_t* seed);
 
+  // The chat request's conversation and tool fields (M6 6f): validates
+  // the messages (roles, content forms, assistant tool_calls, tool
+  // messages), tools, tool_choice, parallel_tool_calls, reasoning_effort
+  // and chat_template_kwargs; produces the template globals, the forced
+  // prefix (tool_choice required / named), the parser's schemas and the
+  // seeded function name. Responds 400 and returns false on any refusal.
+  struct ChatPlan {
+    dgpp::minijson::Value globals;
+    std::string forced_prefix;   // appended to the render ("" = none)
+    std::string seeded_name;     // the named tool_choice's function
+    bool tools_requested = false;
+    dgpp::glm::ToolSchemas schemas;
+  };
+  bool parse_chat(const dgpp::minijson::Value& body, HttpResponseWriter& w,
+                  ChatPlan* plan);
+
   // The OpenAI error body (never a bare string).
   void respond_error(HttpResponseWriter& w, int status,
                      const std::string& message, const std::string& type,
@@ -221,6 +287,9 @@ class GenerationService : public HttpHandler,
                 int steps_done) override;
   void on_token_logprobs(const std::string& id, int steps_done,
                          const glm_sample::Result& logprobs) override;
+  // Folds one parser event into a chat record (under the lock): the
+  // accumulated texts and calls, the fold knob, the stream's queue.
+  void absorb(StreamRecord& r, ParserEvent ev);
   // The OpenAI logprobs content entries for record tokens [from, to).
   std::string logprobs_content(const StreamRecord& r, size_t from,
                                size_t to) const;
@@ -231,10 +300,14 @@ class GenerationService : public HttpHandler,
 
   // idle()'s record pump: flushes deltas, finishes done records.
   void pump_records();
+  // One stream's unflushed events (and logprobs) as SSE chunks.
+  void flush_chat_stream(StreamRecord& r);
+  void flush_legacy_stream(StreamRecord& r);
 
   ServiceConfig cfg_;
   dgpp::glm::SchedulerEngine* engine_;
   const ModelFrontend* frontend_;
+  dgpp::glm::ChatMarkers markers_;
   dgpp::glm::Scheduler sched_;  // engine thread only (except try_submit
                                  // under the lock via engine_pass)
   // Engine-thread-only (set once before the loop, read in the observer

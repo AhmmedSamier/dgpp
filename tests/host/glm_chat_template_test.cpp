@@ -26,6 +26,7 @@ char** g_argv = nullptr;
 #include "loaders/hf_cache.hpp"
 #include "models/glm_chat_template.hpp"
 #include "models/glm_tokenizer.hpp"
+#include "models/glm_tool_parser.hpp"
 
 namespace {
 
@@ -197,6 +198,164 @@ DGPP_TEST(glm_chat_template_differential_goldens) {
     threw = true;
   }
   require(threw, "empty source must refuse");
+}
+
+
+// Structural JSON equality: kinds must match (3 and 3.0 differ, as they do
+// on the wire), arrays elementwise, objects member-wise in order.
+bool json_equal(const dgpp::minijson::Value& a, const dgpp::minijson::Value& b) {
+  using K = dgpp::minijson::Value::Kind;
+  if (a.kind() != b.kind()) return false;
+  switch (a.kind()) {
+    case K::Null: return true;
+    case K::Bool: return a.as_bool() == b.as_bool();
+    case K::Int: return a.as_int() == b.as_int();
+    case K::Double: return a.as_double() == b.as_double();
+    case K::String: return a.as_string() == b.as_string();
+    case K::Array: {
+      if (a.items().size() != b.items().size()) return false;
+      for (size_t i = 0; i < a.items().size(); ++i)
+        if (!json_equal(a.items()[i], b.items()[i])) return false;
+      return true;
+    }
+    case K::Object: {
+      if (a.members().size() != b.members().size()) return false;
+      for (size_t i = 0; i < a.members().size(); ++i)
+        if (a.members()[i].key != b.members()[i].key ||
+            !json_equal(a.members()[i].value, b.members()[i].value))
+          return false;
+      return true;
+    }
+  }
+  return false;
+}
+
+// M6 6f: the template's rendering of an assistant tool-call message IS
+// the model's output format, so render → encode → parse must round-trip
+// over every golden case that carries one: the parser (the real
+// tokenizer's markers and decode, the case's tool schemas) must recover
+// each call's name and arguments exactly.
+DGPP_TEST(glm_tool_call_render_encode_parse_roundTrip) {
+  const std::string kGoldenPath = golden_path(g_argc, g_argv);
+  const char* env_model = std::getenv("DGPP_TP_REAL_MODEL");
+  const std::string model_id =
+      env_model && *env_model ? env_model : "unsloth/GLM-5.3-Flash-FP8";
+  std::string err;
+  const std::string snap = dgpp::hf::model_dir(model_id, &err);
+  if (snap.empty()) {
+    DGPP_LOG_WARN("glm_chat_template_test: model {} unavailable ({}); skipping",
+                  model_id, err);
+    std::exit(2);
+  }
+  const dgpp::glm::ChatTemplate tpl = dgpp::glm::ChatTemplate::load(
+      (std::filesystem::path(snap) / "chat_template.jinja").string());
+  const dgpp::GlmTokenizer tok = dgpp::GlmTokenizer::load(
+      (std::filesystem::path(snap) / "tokenizer.json").string());
+  const dgpp::glm::ChatMarkers markers = dgpp::glm::ChatMarkers::from_tokenizer(tok);
+  require(markers.reasoning_available() && markers.tool_calls_available(),
+          "the tokenizer carries the template's markers");
+  DGPP_LOG_INFO(
+      "glm_chat_template_test: markers <think> {} </think> {} <tool_call> {} "
+      "</tool_call> {} <arg_key> {}/{} <arg_value> {}/{}",
+      markers.think_open.id, markers.think_close.id, markers.tool_call_open.id,
+      markers.tool_call_close.id, markers.arg_key_open.id,
+      markers.arg_key_close.id, markers.arg_value_open.id,
+      markers.arg_value_close.id);
+  const std::vector<int64_t> observation = tok.encode("<|observation|>");
+  require(observation.size() == 1, "<|observation|> is one added token");
+
+  std::vector<std::string> lines;
+  {
+    std::istringstream f(read_text_file(kGoldenPath));
+    std::string line;
+    while (std::getline(f, line))
+      if (!line.empty()) lines.push_back(line);
+  }
+  size_t turns = 0, calls = 0;
+  for (size_t i = 1; i < lines.size(); ++i) {
+    const dgpp::minijson::ParseResult parsed = dgpp::minijson::parse(lines[i]);
+    const dgpp::minijson::Value& rec = parsed.root;
+    const std::string name(rec.at("name").as_string());
+    const dgpp::minijson::Value& kwargs = rec.at("kwargs");
+    const dgpp::minijson::Value& messages = kwargs.at("messages");
+    const dgpp::minijson::Value* tools = kwargs.find("tools");
+    for (size_t k = 0; k < messages.items().size(); ++k) {
+      const dgpp::minijson::Value& msg = messages.items()[k];
+      const dgpp::minijson::Value* tcs = msg.find("tool_calls");
+      if (msg.at("role").as_string() != "assistant" || tcs == nullptr) continue;
+
+      // The assistant turn's text: the render through message k minus the
+      // render through message k-1 (no generation prompt on either).
+      const auto render_through = [&](size_t count) {
+        std::vector<dgpp::glm::Value> ms;
+        for (size_t j = 0; j < count; ++j)
+          ms.push_back(dgpp::glm::Value::from_minijson(messages.items()[j]));
+        dgpp::glm::Value::Members g;
+        g.emplace_back("messages", dgpp::glm::Value::list_value(std::move(ms)));
+        if (tools) g.emplace_back("tools", dgpp::glm::Value::from_minijson(*tools));
+        g.emplace_back("add_generation_prompt", dgpp::glm::Value::boolean(false));
+        return tpl.render(dgpp::glm::Value::map_value(std::move(g)));
+      };
+      const std::string before = render_through(k);
+      const std::string through = render_through(k + 1);
+      require(through.compare(0, before.size(), before) == 0,
+              name + ": the render grows by the assistant turn");
+      std::string turn = through.substr(before.size());
+      const std::string kAssistant = "<|assistant|>";
+      require(turn.compare(0, kAssistant.size(), kAssistant) == 0,
+              name + ": the turn opens with <|assistant|>: " + turn);
+      turn.erase(0, kAssistant.size());
+
+      // The model's ids for that turn, EOS appended; parsed as the service
+      // parses them (the prompt ended in <think>).
+      std::vector<int64_t> ids = tok.encode(turn);
+      ids.push_back(observation[0]);
+      dgpp::glm::ToolCallParser::Options opts;
+      opts.start_in_reasoning = true;
+      dgpp::glm::ToolCallParser parser(
+          markers,
+          [&](const std::vector<int64_t>& v) { return tok.decode(v, true); },
+          tools ? dgpp::glm::ToolSchemas(*tools) : dgpp::glm::ToolSchemas(),
+          opts);
+      std::vector<dgpp::glm::ToolCallParser::Event> events;
+      for (const int64_t id : ids) parser.feed(id, &events);
+      parser.finish(&events);
+      std::string reasoning, content;
+      std::vector<dgpp::glm::ToolCallParser::Call> got;
+      for (const auto& ev : events) {
+        using Kind = dgpp::glm::ToolCallParser::Event::Kind;
+        if (ev.kind == Kind::kReasoning) reasoning += ev.text;
+        if (ev.kind == Kind::kContent) content += ev.text;
+        if (ev.kind == Kind::kToolCall) got.push_back(ev.call);
+      }
+      require(reasoning.empty() && content.empty(),
+              name + ": a tool-call turn has no text (got reasoning '" +
+                  reasoning + "', content '" + content + "')");
+      require(got.size() == tcs->items().size(),
+              name + ": " + std::to_string(got.size()) + " calls parsed, " +
+                  std::to_string(tcs->items().size()) + " expected");
+      for (size_t c = 0; c < got.size(); ++c) {
+        const dgpp::minijson::Value& tc = tcs->items()[c];
+        const dgpp::minijson::Value* fn = tc.find("function");
+        const dgpp::minijson::Value& def = fn ? *fn : tc;
+        require(got[c].name == def.at("name").as_string(),
+                name + ": call " + std::to_string(c) + " name '" + got[c].name +
+                    "' != '" + std::string(def.at("name").as_string()) + "'");
+        const dgpp::minijson::ParseResult args = dgpp::minijson::parse(got[c].arguments);
+        require(json_equal(args.root, def.at("arguments")),
+                name + ": call " + std::to_string(c) + " arguments " +
+                    got[c].arguments + " differ from the case's");
+        ++calls;
+      }
+      ++turns;
+    }
+  }
+  require(turns >= 6 && calls >= 9,
+          "expected at least 6 tool-call turns / 9 calls in the corpus, got " +
+              std::to_string(turns) + " / " + std::to_string(calls));
+  DGPP_LOG_INFO("glm_chat_template_test: {} tool-call turns ({} calls) round-trip "
+                "render -> encode -> parse exactly",
+                turns, calls);
 }
 
 }  // namespace

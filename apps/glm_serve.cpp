@@ -41,7 +41,12 @@
 //   sampling (M6 6b): the defaults come from generation_config.json;
 //     [--temperature X] [--top-p X] [--top-k N] [--min-p X]
 //     [--repetition-penalty X] override them for the process, [--seed N]
-//     fixes the seed of every request that omits one. Every engine samples
+//     fixes the seed of every request that omits one.
+//   tools and reasoning (M6 6f): requests may carry tools / tool_choice /
+//     reasoning_effort / chat_template_kwargs; the response splits
+//     reasoning_content, content and tool_calls from the token ids on
+//     rank 0 (DESIGN §11); [--reasoning-in-content] folds the reasoning
+//     into content for clients that expect the raw transcript. Every engine samples
 //     exactly (DESIGN §10, the device path; §9 under --mtp, the exact
 //     speculative accept test on the device).
 #include <algorithm>
@@ -105,6 +110,7 @@ struct ServeKnobs {
   int default_max_tokens = 256;
   dgpp::glm_sample::Params sampling_defaults = dgpp::glm_sample::greedy_params();
   std::optional<uint64_t> fixed_seed;
+  bool reasoning_in_content = false;
 };
 
 // Pinned words for the sampler's collectives, allocated BEFORE the world
@@ -151,6 +157,7 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
   scfg.queue_limit = k.queue_limit;
   scfg.sampling_defaults = k.sampling_defaults;
   scfg.fixed_seed = k.fixed_seed;
+  scfg.reasoning_in_content = k.reasoning_in_content;
   std::vector<int64_t> eos =
       no_eos ? std::vector<int64_t>{} : cfg.eos_token_ids;
 
@@ -237,7 +244,9 @@ int main(int argc, char** argv) {
       "      (requires max-concurrency * (mtp?2:1) <= 8)\n"
       "  sampling (defaults from generation_config.json; temperature 0 =\n"
       "  greedy): [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
-      "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n";
+      "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n"
+      "  reasoning (M6 6f): [--reasoning-in-content] folds the ids before\n"
+      "    </think> into content instead of reasoning_content\n";
 
   std::string ckpt, model_id, peer;
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
@@ -250,6 +259,7 @@ int main(int argc, char** argv) {
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<int> top_k;
   std::optional<uint64_t> fixed_seed;
+  bool reasoning_in_content = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -284,6 +294,7 @@ int main(int argc, char** argv) {
     else if (a == "--min-p") min_p = std::stof(next());
     else if (a == "--repetition-penalty") repetition_penalty = std::stof(next());
     else if (a == "--seed") fixed_seed = std::stoull(next());
+    else if (a == "--reasoning-in-content") reasoning_in_content = true;
     else {
       std::fputs(kUsage, stderr);
       return a == "--help" ? 0 : 1;
@@ -446,6 +457,7 @@ int main(int argc, char** argv) {
     knobs.default_max_tokens = default_max_tokens;
     knobs.sampling_defaults = sampling_defaults;
     knobs.fixed_seed = fixed_seed;
+    knobs.reasoning_in_content = reasoning_in_content;
 
     // ---- world > 1: the fabric (Stage 4b) ------------------------------
     if (world > 1) {
