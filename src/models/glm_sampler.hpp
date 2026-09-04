@@ -222,39 +222,38 @@ inline std::vector<Candidate> sort_slice(const float* logits, int n,
 // Selection core (shared by every path — the bitwise-parity anchor)
 // ---------------------------------------------------------------------------
 
-// `sorted` is the (already canonical-order) candidate list covering the
-// global top-k-or-more set with penalties applied and is NOT modified.
-// Selects per the documented pipeline; returns the chosen token with
-// its logprob (and the top-N survivors' logprobs when requested).
-// Throws on an empty list.
-inline Result select_from_sorted(const std::vector<Candidate>& sorted,
-                                const Params& p, Rng& rng) {
-  if (sorted.empty()) {
-    throw std::runtime_error("glm_sample: empty candidate list");
-  }
+// Stages 2-5 of the pipeline over a canonical list: the temperature scale,
+// the top-k/min-p/top-p survivors, the final distribution's fp32 exps and
+// denominator, and its log-sum-exp. select_from_sorted draws over it; the
+// speculative accept/residual (spec_select_from_sorted) evaluates one
+// candidate's probability and walks the rest over the SAME state.
+struct SelectorState {
+  std::vector<float> scaled;  // logit / temperature, every candidate
+  std::vector<float> exps;    // the survivors' exp(scaled - scaled[0])
+  size_t final_count = 0;     // the final set is the first final_count
+  float final_den = 0.0f;
+  float lse = 0.0f;
 
-  // Greedy: argmax under the canonical order; reported probabilities are
-  // the RAW distribution's (what a greedy consumer expects logprobs to
-  // mean), not a renormalized singleton.
-  if (p.temperature <= 0.0f) {
-    Result r;
-    r.token = sorted[0].id;
-    float mx = sorted[0].logit;
-    double acc = 0.0;
-    for (const Candidate& c : sorted) acc += detmath::exp_f(c.logit - mx);
-    const float lse = mx + static_cast<float>(detmath::log_d(acc));
-    r.logprob = sorted[0].logit - lse;
-    const int n = std::min<int>(p.logprobs, static_cast<int>(sorted.size()));
-    for (int i = 0; i < n; ++i) {
-      r.top_logprobs.emplace_back(sorted[i].id, sorted[i].logit - lse);
-    }
-    return r;
+  Result result_for(const std::vector<Candidate>& sorted, size_t chosen,
+                    int logprobs) const {
+    Result out;
+    out.token = sorted[chosen].id;
+    out.logprob = scaled[chosen] - lse;
+    const int n = std::min<int>(logprobs, static_cast<int>(final_count));
+    for (int i = 0; i < n; ++i)
+      out.top_logprobs.emplace_back(sorted[static_cast<size_t>(i)].id,
+                                    scaled[static_cast<size_t>(i)] - lse);
+    return out;
   }
+};
 
+inline SelectorState selector_state(const std::vector<Candidate>& sorted,
+                                    const Params& p) {
+  SelectorState s;
   // Temperature scale (fp32 division — IEEE-deterministic everywhere).
-  std::vector<float> scaled;
-  scaled.reserve(sorted.size());
-  for (const Candidate& c : sorted) scaled.push_back(c.logit / p.temperature);
+  s.scaled.reserve(sorted.size());
+  for (const Candidate& c : sorted) s.scaled.push_back(c.logit / p.temperature);
+  std::vector<float>& scaled = s.scaled;
 
   // top-k truncation (k >= size: no-op).
   size_t kept = sorted.size();
@@ -301,7 +300,43 @@ inline Result select_from_sorted(const std::vector<Candidate>& sorted,
   // Final distribution over the surviving set.
   float final_den = 0.0f;
   for (size_t i = 0; i < final_count; ++i) final_den += exps[i];
-  const float lse = scaled[0] + detmath::log_f(final_den);
+  s.exps = std::move(exps);
+  s.final_count = final_count;
+  s.final_den = final_den;
+  s.lse = scaled[0] + detmath::log_f(final_den);
+  return s;
+}
+
+// `sorted` is the (already canonical-order) candidate list covering the
+// global top-k-or-more set with penalties applied and is NOT modified.
+// Selects per the documented pipeline; returns the chosen token with
+// its logprob (and the top-N survivors' logprobs when requested).
+// Throws on an empty list.
+inline Result select_from_sorted(const std::vector<Candidate>& sorted,
+                                const Params& p, Rng& rng) {
+  if (sorted.empty()) {
+    throw std::runtime_error("glm_sample: empty candidate list");
+  }
+
+  // Greedy: argmax under the canonical order; reported probabilities are
+  // the RAW distribution's (what a greedy consumer expects logprobs to
+  // mean), not a renormalized singleton.
+  if (p.temperature <= 0.0f) {
+    Result r;
+    r.token = sorted[0].id;
+    float mx = sorted[0].logit;
+    double acc = 0.0;
+    for (const Candidate& c : sorted) acc += detmath::exp_f(c.logit - mx);
+    const float lse = mx + static_cast<float>(detmath::log_d(acc));
+    r.logprob = sorted[0].logit - lse;
+    const int n = std::min<int>(p.logprobs, static_cast<int>(sorted.size()));
+    for (int i = 0; i < n; ++i) {
+      r.top_logprobs.emplace_back(sorted[i].id, sorted[i].logit - lse);
+    }
+    return r;
+  }
+
+  const SelectorState s = selector_state(sorted, p);
 
   // One draw. fp64 walk over the fp32 probabilities: the walk order is
   // the listed order, so every rank that computes this computes it
@@ -309,22 +344,73 @@ inline Result select_from_sorted(const std::vector<Candidate>& sorted,
   const double r = uniform01(rng);
   ++rng.counter;
   double cum = 0.0;
-  size_t chosen = final_count - 1;
-  for (size_t i = 0; i < final_count; ++i) {
-    cum += exps[i] / final_den;
+  size_t chosen = s.final_count - 1;
+  for (size_t i = 0; i < s.final_count; ++i) {
+    cum += s.exps[i] / s.final_den;
     if (cum > r) {
       chosen = i;
       break;
     }
   }
+  return s.result_for(sorted, chosen, p.logprobs);
+}
 
-  Result out;
-  out.token = sorted[chosen].id;
-  out.logprob = scaled[chosen] - lse;
-  const int n = std::min<int>(p.logprobs, static_cast<int>(final_count));
-  for (int i = 0; i < n; ++i) {
-    out.top_logprobs.emplace_back(sorted[i].id, scaled[i] - lse);
+// The speculative step's row-0 decision over a materialized final set
+// (DESIGN §9/§10, exact speculative sampling with a deterministic draft):
+// with P the final distribution the plain sampler would draw from, accept
+// `draft` iff u1 < P(draft) (a token outside the final set has P = 0), else
+// sample the residual — P with the draft removed and renormalized — with
+// u2. Two draws every step, whichever way the test falls (the accepted
+// row's own next token is drawn from row 1 with u2 by the caller). The
+// marginal over the row-0 token is exactly P; the residual walk mirrors
+// select_from_sorted's (fp32 quotients over the residual denominator,
+// fp64 accumulation, listed order), logprobs are reported under P.
+struct SpecOutcome {
+  bool accepted = false;
+  Result result;  // the draft when accepted, else the residual sample
+};
+
+inline SpecOutcome spec_select_from_sorted(const std::vector<Candidate>& sorted,
+                                           const Params& p, int32_t draft,
+                                           Rng& rng) {
+  if (sorted.empty()) throw std::runtime_error("glm_sample: empty candidate list");
+  if (!(p.temperature > 0.0f))
+    throw std::invalid_argument("glm_sample: speculative sampling needs T > 0");
+  const SelectorState s = selector_state(sorted, p);
+  size_t j = s.final_count;  // the draft's index in the final set, if any
+  for (size_t i = 0; i < s.final_count; ++i)
+    if (sorted[i].id == draft) {
+      j = i;
+      break;
+    }
+  const float p_draft = j < s.final_count ? s.exps[j] / s.final_den : 0.0f;
+  const double u1 = uniform01(rng);
+  ++rng.counter;
+  SpecOutcome out;
+  if (static_cast<double>(p_draft) > u1) {
+    out.accepted = true;
+    out.result = s.result_for(sorted, j, p.logprobs);
+    return out;
   }
+  const double u2 = uniform01(rng);
+  ++rng.counter;
+  const float res_den = j < s.final_count ? s.final_den - s.exps[j] : s.final_den;
+  double cum = 0.0;
+  size_t chosen = s.final_count;
+  size_t last = s.final_count;
+  for (size_t i = 0; i < s.final_count; ++i) {
+    if (i == j) continue;
+    last = i;
+    cum += s.exps[i] / res_den;
+    if (cum > u2) {
+      chosen = i;
+      break;
+    }
+  }
+  if (chosen == s.final_count) chosen = last;
+  if (chosen == s.final_count)
+    throw std::logic_error("glm_sample: the residual has no candidate");
+  out.result = s.result_for(sorted, chosen, p.logprobs);
   return out;
 }
 
@@ -508,9 +594,22 @@ inline double merge_logsumexp(const std::vector<double>& slice_lses) {
 //                  unseen tail, fallback.
 // A fallback consumes NO RNG draw: the full-logit path re-runs this decision
 // over the complete list with the same (seed, counter).
-inline PrefixDecision sample_from_prefix(
-    const std::vector<Candidate>& sorted_prefix, int vocab_size,
-    double global_scaled_logsumexp, const Params& p, Rng& rng) {
+// What a canonical prefix knows about the request's final support under
+// the fold normalizer: materialized (the first `n` candidates with the
+// selector's params over them), pure (no truncation: the walk decides
+// against the fold masses), or nothing yet (fallback).
+struct PrefixSupport {
+  enum class Kind { kFallback, kMaterialized, kPure };
+  Kind kind = Kind::kFallback;
+  size_t n = 0;
+  Params exact;
+  double covered_mass = 0.0;
+};
+
+inline PrefixSupport resolve_support(const std::vector<Candidate>& sorted_prefix,
+                                     int vocab_size,
+                                     double global_scaled_logsumexp,
+                                     const Params& p) {
   if (sorted_prefix.empty())
     throw std::invalid_argument("glm_sample: empty sampling prefix");
   if (vocab_size <= 0 || sorted_prefix.size() > static_cast<size_t>(vocab_size))
@@ -535,39 +634,25 @@ inline PrefixDecision sample_from_prefix(
 
   const size_t held = sorted_prefix.size();
   const bool complete = held == static_cast<size_t>(vocab_size);
-  // fp32 temperature division, exactly as the shared selector scales.
   const auto scaled_at = [&](size_t i) {
     return sorted_prefix[i].logit / p.temperature;
   };
-  // The candidate's exact probability under the fold normalizer.
   const auto mass_at = [&](size_t i) {
     return detmath::exp_d(static_cast<double>(scaled_at(i)) -
                           global_scaled_logsumexp);
   };
-
-  PrefixDecision decision;
-  decision.normalizer = global_scaled_logsumexp;
-  for (size_t i = 0; i < held; ++i) decision.covered_mass += mass_at(i);
-
-  // The survivor set is known and materialized: the shared selector finishes
-  // over precisely that list, so the final denominator, the logprobs and the
-  // counter semantics are its own — identical for a prefix and for the
-  // complete list, because both hand it the same candidates.
-  const auto resolve = [&](size_t support, const Params& exact) {
-    const std::vector<Candidate> materialized(
-        sorted_prefix.begin(), sorted_prefix.begin() + support);
-    decision.result = select_from_sorted(materialized, exact, rng);
-    decision.resolved = true;
-    return decision;
-  };
+  PrefixSupport out;
+  for (size_t i = 0; i < held; ++i) out.covered_mass += mass_at(i);
+  out.exact = p;
 
   if (p.top_k > 0) {
     const size_t required = std::min(static_cast<size_t>(p.top_k),
                                      static_cast<size_t>(vocab_size));
-    if (held < required) return decision;
-    return resolve(required, p);
+    if (held < required) return out;
+    out.kind = PrefixSupport::Kind::kMaterialized;
+    out.n = required;
+    return out;
   }
-
   if (p.min_p > 0.0f) {
     const float threshold = scaled_at(0) + detmath::log_f(p.min_p);
     size_t survivors = held;
@@ -579,12 +664,12 @@ inline PrefixDecision sample_from_prefix(
         break;
       }
     }
-    if (!bounded) return decision;
-    Params exact = p;
-    exact.min_p = 0.0f;
-    return resolve(survivors, exact);
+    if (!bounded) return out;
+    out.kind = PrefixSupport::Kind::kMaterialized;
+    out.n = survivors;
+    out.exact.min_p = 0.0f;
+    return out;
   }
-
   if (p.top_p < 1.0f) {
     const double top_p = static_cast<double>(p.top_p);
     double cumulative = 0.0;
@@ -597,15 +682,91 @@ inline PrefixDecision sample_from_prefix(
       }
     }
     if (nucleus == 0) {
-      if (!complete) return decision;
+      if (!complete) return out;
       nucleus = held;  // the selector's rule: a sum that falls short keeps all
     }
-    Params exact = p;
-    exact.top_p = 1.0f;
-    return resolve(nucleus, exact);
+    out.kind = PrefixSupport::Kind::kMaterialized;
+    out.n = nucleus;
+    out.exact.top_p = 1.0f;
+    return out;
+  }
+  out.kind = PrefixSupport::Kind::kPure;
+  out.n = held;
+  return out;
+}
+
+// Attempts an EXACT stochastic decision from the canonical global top-k
+// prefix plus the fold normalizer of the complete temperature-scaled
+// distribution (merge_logsumexp over the per-slice values in rank order).
+//
+// This is the host oracle for M6.6b's device verdict kernel, and it is
+// WIDTH-INDEPENDENT by construction: every step whose value depends on the
+// unseen tail is expressed through the fold normalizer, never through a
+// materialized full-vocabulary sum, and the same code runs whether the list
+// is a prefix or the complete vocabulary. A prefix that resolves therefore
+// yields bitwise the result the complete list yields, and the complete list
+// is the full-logit fallback (sample_reference_sharded) — so a request's
+// outcome never depends on the transported width k, only on whether the
+// fast path could decide it. (A shortcut that hands a complete list to a
+// different arithmetic breaks exactly this: at an exact-tie crossing the
+// fp32 and fp64 cumulative sums disagree on the nucleus, and the token with
+// it.)
+//
+// Regimes, in HF warper order (resolve_support):
+//   finite top_k : the post-top-k support is materialized once the prefix
+//                  holds top_k candidates and the shared selector runs over
+//                  it with the request unchanged — bitwise sample_reference()
+//                  by the M6 d3 merge proof; below top_k candidates, fallback.
+//   min_p > 0    : survivors are a prefix (descending candidates, positive
+//                  temperature), decided against p_max in the scaled-logit
+//                  domain; the first failure proves every later token fails.
+//                  The survivor set is then materialized and the shared
+//                  selector finishes it (top-p over the survivors' own
+//                  denominator, the walk). No failure inside an incomplete
+//                  prefix: fallback.
+//   top_p < 1    : the crossing is decided on the fp64 fold masses in listed
+//                  order; inside the prefix, the nucleus is materialized and
+//                  the shared selector finishes it. No crossing inside an
+//                  incomplete prefix: fallback.
+//   otherwise    : pure temperature sampling. The survivor set is the whole
+//                  vocabulary and is never materialized: the draw walks the
+//                  fp64 fold masses and resolves when it lands inside the
+//                  prefix (logprobs against the fold normalizer); in the
+//                  unseen tail, fallback.
+// A fallback consumes NO RNG draw: the full-logit path re-runs this decision
+// over the complete list with the same (seed, counter).
+inline PrefixDecision sample_from_prefix(
+    const std::vector<Candidate>& sorted_prefix, int vocab_size,
+    double global_scaled_logsumexp, const Params& p, Rng& rng) {
+  const PrefixSupport support =
+      resolve_support(sorted_prefix, vocab_size, global_scaled_logsumexp, p);
+  PrefixDecision decision;
+  decision.normalizer = global_scaled_logsumexp;
+  decision.covered_mass = support.covered_mass;
+  if (support.kind == PrefixSupport::Kind::kFallback) return decision;
+  if (support.kind == PrefixSupport::Kind::kMaterialized) {
+    // The survivor set is known and materialized: the shared selector
+    // finishes over precisely that list, so the final denominator, the
+    // logprobs and the counter semantics are its own — identical for a
+    // prefix and for the complete list, because both hand it the same
+    // candidates.
+    const std::vector<Candidate> materialized(
+        sorted_prefix.begin(), sorted_prefix.begin() + support.n);
+    decision.result = select_from_sorted(materialized, support.exact, rng);
+    decision.resolved = true;
+    return decision;
   }
 
   // Pure temperature sampling over the whole vocabulary.
+  const size_t held = sorted_prefix.size();
+  const bool complete = held == static_cast<size_t>(vocab_size);
+  const auto scaled_at = [&](size_t i) {
+    return sorted_prefix[i].logit / p.temperature;
+  };
+  const auto mass_at = [&](size_t i) {
+    return detmath::exp_d(static_cast<double>(scaled_at(i)) -
+                          global_scaled_logsumexp);
+  };
   if (!complete && p.logprobs > static_cast<int>(held)) return decision;
   const double draw = uniform01(rng);
   double cumulative = 0.0;
@@ -632,6 +793,103 @@ inline PrefixDecision sample_from_prefix(
         scaled_at(static_cast<size_t>(j)) - lse);
   }
   decision.resolved = true;
+  return decision;
+}
+
+// The speculative step's row-0 decision from a prefix (DESIGN §9): accept
+// `draft` with its exact probability under the final distribution, else
+// sample the residual — width-independent exactly as sample_from_prefix
+// is, and the host oracle for the device's T=2 verdict. Materialized
+// supports hand the same list to spec_select_from_sorted; the pure regime
+// evaluates the draft's fold mass (the draft must be inside the prefix or
+// the list complete — else fallback) and walks the residual against
+// u2 * (1 - P(draft)). A fallback consumes NO draw (the complete-list
+// re-run redoes the accept test with the same u1).
+struct SpecPrefixDecision {
+  bool resolved = false;
+  bool accepted = false;
+  Result result;  // the draft when accepted, else the residual sample
+  double covered_mass = 0.0;
+  double normalizer = 0.0;
+};
+
+inline SpecPrefixDecision spec_accept_from_prefix(
+    const std::vector<Candidate>& sorted_prefix, int vocab_size,
+    double global_scaled_logsumexp, int32_t draft, const Params& p,
+    Rng& rng) {
+  const PrefixSupport support =
+      resolve_support(sorted_prefix, vocab_size, global_scaled_logsumexp, p);
+  SpecPrefixDecision decision;
+  decision.normalizer = global_scaled_logsumexp;
+  decision.covered_mass = support.covered_mass;
+  if (support.kind == PrefixSupport::Kind::kFallback) return decision;
+  if (support.kind == PrefixSupport::Kind::kMaterialized) {
+    const std::vector<Candidate> materialized(
+        sorted_prefix.begin(), sorted_prefix.begin() + support.n);
+    const SpecOutcome o =
+        spec_select_from_sorted(materialized, support.exact, draft, rng);
+    decision.resolved = true;
+    decision.accepted = o.accepted;
+    decision.result = o.result;
+    return decision;
+  }
+
+  // Pure temperature sampling.
+  const size_t held = sorted_prefix.size();
+  const bool complete = held == static_cast<size_t>(vocab_size);
+  const auto scaled_at = [&](size_t i) {
+    return sorted_prefix[i].logit / p.temperature;
+  };
+  const auto mass_at = [&](size_t i) {
+    return detmath::exp_d(static_cast<double>(scaled_at(i)) -
+                          global_scaled_logsumexp);
+  };
+  size_t j = held;
+  for (size_t i = 0; i < held; ++i)
+    if (sorted_prefix[i].id == draft) {
+      j = i;
+      break;
+    }
+  if (j == held && !complete) return decision;  // the draft's mass is unseen
+  const double p_draft = j < held ? mass_at(j) : 0.0;
+  const Rng entry = rng;
+  const double u1 = uniform01(rng);
+  ++rng.counter;
+  const float lse = static_cast<float>(global_scaled_logsumexp);
+  if (p_draft > u1) {
+    decision.resolved = true;
+    decision.accepted = true;
+    decision.result.token = draft;
+    decision.result.logprob = scaled_at(j) - lse;
+    return decision;
+  }
+  const double u2 = uniform01(rng);
+  ++rng.counter;
+  const double threshold = u2 * (1.0 - p_draft);
+  double cumulative = 0.0;
+  size_t chosen = held;
+  size_t last = held;
+  for (size_t i = 0; i < held; ++i) {
+    if (i == j) continue;
+    last = i;
+    cumulative += mass_at(i);
+    if (cumulative > threshold) {
+      chosen = i;
+      break;
+    }
+  }
+  if (chosen == held) {
+    if (!complete) {
+      rng = entry;  // the residual lies in the unseen tail: nothing consumed
+      return decision;
+    }
+    chosen = last;
+  }
+  if (chosen == held)
+    throw std::logic_error("glm_sample: the residual has no candidate");
+  decision.resolved = true;
+  decision.result.token = sorted_prefix[chosen].id;
+  decision.result.logprob = scaled_at(chosen) - lse;
   return decision;
 }
 
@@ -748,6 +1006,30 @@ inline Result sample_complete_logits(const float* adjusted, int vocab,
   return d.result;
 }
 
+// The speculative row-0 decision over the complete penalized logits (the
+// fallback's, and the reference's) — widening exact prefixes then the full
+// sort, bitwise what a resolving prefix decides.
+inline SpecPrefixDecision spec_accept_complete(const float* adjusted, int vocab,
+                                               double normalizer, int32_t draft,
+                                               const Params& p, Rng& rng) {
+  if (adjusted == nullptr || vocab <= 0)
+    throw std::invalid_argument("glm_sample: empty complete logits");
+  static constexpr int kWidths[] = {1024, 8192, 65536};
+  for (int width : kWidths) {
+    if (width >= vocab) break;
+    const std::vector<Candidate> prefix = local_topk(adjusted, vocab, 0, width);
+    const SpecPrefixDecision d =
+        spec_accept_from_prefix(prefix, vocab, normalizer, draft, p, rng);
+    if (d.resolved) return d;
+  }
+  const std::vector<Candidate> sorted = sort_slice(adjusted, vocab, 0);
+  const SpecPrefixDecision d =
+      spec_accept_from_prefix(sorted, vocab, normalizer, draft, p, rng);
+  if (!d.resolved)
+    throw std::logic_error("glm_sample: the complete logits must resolve");
+  return d;
+}
+
 // The sampler for a host that holds EVERY logit (world 1's full head, or a
 // diagnostic over gathered slices): penalties, the fold normalizer over the
 // layout, the widening decision. Bitwise sample_reference_sharded() at the
@@ -764,6 +1046,49 @@ inline Result sample_full_logits(const float* logits, int vocab,
   apply_penalties(v.data(), vocab, 0, p, count_context(context_ids));
   const double lse = sharded_scaled_logsumexp(v.data(), layout, p.temperature);
   return sample_complete_logits(v.data(), vocab, lse, p, rng);
+}
+
+// The speculative T=2 step's reference at a layout (DESIGN §9): row 0's
+// accept/residual under context C (prompt + committed + the fed token),
+// then — when the draft stands — row 1's ordinary sample under C + draft.
+// Two draws per step. `winners` is the verify's shape: winners[0] the row-0
+// outcome, winners[1] the row-1 sample when accepted; accepted is 2 or 1.
+struct SpecStepReference {
+  bool accepted = false;
+  int32_t winners[2] = {-1, -1};
+  Result row0;
+  Result row1;
+};
+
+inline SpecStepReference spec_reference_sharded(
+    const float* row0, const float* row1, int vocab,
+    const std::vector<VocabSlice>& layout, int32_t draft, const Params& p,
+    Rng& rng, const std::vector<int32_t>& context_ids) {
+  if (!(p.temperature > 0.0f) || !std::isfinite(p.temperature))
+    throw std::invalid_argument("glm_sample: the speculative reference is the "
+                                "stochastic path");
+  validate_vocab_slices(layout, vocab);
+  SpecStepReference out;
+  {
+    std::vector<float> v(row0, row0 + vocab);
+    apply_penalties(v.data(), vocab, 0, p, count_context(context_ids));
+    const double lse = sharded_scaled_logsumexp(v.data(), layout, p.temperature);
+    const SpecPrefixDecision d =
+        spec_accept_complete(v.data(), vocab, lse, draft, p, rng);
+    out.accepted = d.accepted;
+    out.row0 = d.result;
+    out.winners[0] = d.result.token;
+  }
+  if (out.accepted) {
+    std::vector<int32_t> context = context_ids;
+    context.push_back(draft);
+    std::vector<float> v(row1, row1 + vocab);
+    apply_penalties(v.data(), vocab, 0, p, count_context(context));
+    const double lse = sharded_scaled_logsumexp(v.data(), layout, p.temperature);
+    out.row1 = sample_complete_logits(v.data(), vocab, lse, p, rng);
+    out.winners[1] = out.row1.token;
+  }
+  return out;
 }
 
 // Probability mass covered by each requested prefix of an already

@@ -651,10 +651,20 @@ inline void bus_gather_logits(net::CollectiveBus& bus, int rank, int world,
 // context, seed and counter are identical on every rank by contract, which
 // is exactly the invariant the 2026-09-01 fabric race broke on one rank's
 // readback; the digest makes a breach loud at the collective.
-inline glm_sample::PrefixDecision bus_sampling_prefix(
+// The fold half: this rank's penalized slice, the exact global candidate
+// prefix and the fold normalizer every rank now holds identically. The
+// decisions (bus_sampling_prefix, bus_sample_row, bus_spec_accept) run
+// over it; the penalized slice is the gather fallback's source.
+struct SamplingFold {
+  std::vector<glm_sample::Candidate> prefix;
+  double normalizer = 0.0;
+  std::vector<float> adjusted;
+};
+
+inline SamplingFold bus_sampling_fold(
     net::CollectiveBus& bus, int rank, int world, const float* logits,
     int vocab_count, int vocab_begin, int vocab_size,
-    const glm_sample::Params& params, glm_sample::Rng& rng,
+    const glm_sample::Params& params,
     const std::vector<int32_t>& context_ids, int candidate_k,
     uint16_t* scratch, int timeout_ms) {
   if (world < 1 || world > kPickMaxWorld || rank < 0 || rank >= world)
@@ -758,17 +768,90 @@ inline glm_sample::PrefixDecision bus_sampling_prefix(
     slice_lses.push_back(lse);
   }
 
-  const std::vector<glm_sample::Candidate> global =
-      glm_sample::merge_topk(std::move(shards), candidate_k);
+  SamplingFold fold;
+  fold.prefix = glm_sample::merge_topk(std::move(shards), candidate_k);
+  fold.normalizer = glm_sample::merge_logsumexp(slice_lses);
+  fold.adjusted = std::move(adjusted);
+  return fold;
+}
+
+inline glm_sample::PrefixDecision bus_sampling_prefix(
+    net::CollectiveBus& bus, int rank, int world, const float* logits,
+    int vocab_count, int vocab_begin, int vocab_size,
+    const glm_sample::Params& params, glm_sample::Rng& rng,
+    const std::vector<int32_t>& context_ids, int candidate_k,
+    uint16_t* scratch, int timeout_ms) {
+  const SamplingFold fold = bus_sampling_fold(
+      bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, params,
+      context_ids, candidate_k, scratch, timeout_ms);
   const glm_sample::PrefixDecision decision = glm_sample::sample_from_prefix(
-      global, vocab_size, glm_sample::merge_logsumexp(slice_lses), params,
-      rng);
+      fold.prefix, vocab_size, fold.normalizer, params, rng);
 
   // ---- readback invariant: rank 0's decision digest reaches every rank --
   bus_check_decision_digest(bus, rank, decision.resolved, decision.result,
                             decision.covered_mass, scratch, timeout_ms,
                             "bus_sampling_prefix");
   return decision;
+}
+
+// One row's exact sample over the bus, fallback included (the eager
+// engines' step): the fold, the prefix decision, else the gather of the
+// penalized slices and the complete decision under the transported
+// normalizer with the reserved draw; rank 0's digest either way.
+inline glm_sample::Result bus_sample_row(
+    net::CollectiveBus& bus, int rank, int world, const float* logits,
+    int vocab_count, int vocab_begin, int vocab_size,
+    const glm_sample::Params& params, glm_sample::Rng& rng,
+    const std::vector<int32_t>& context_ids, int candidate_k,
+    uint16_t* prefix_scratch, uint16_t* gather_scratch, int timeout_ms,
+    std::vector<float>* gather_buffer) {
+  const SamplingFold fold = bus_sampling_fold(
+      bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, params,
+      context_ids, candidate_k, prefix_scratch, timeout_ms);
+  const glm_sample::PrefixDecision d = glm_sample::sample_from_prefix(
+      fold.prefix, vocab_size, fold.normalizer, params, rng);
+  if (d.resolved) {
+    bus_check_decision_digest(bus, rank, true, d.result, d.covered_mass,
+                              prefix_scratch, timeout_ms, "bus_sample_row");
+    return d.result;
+  }
+  bus_gather_logits(bus, rank, world, fold.adjusted.data(), vocab_count,
+                    vocab_begin, vocab_size, gather_scratch, timeout_ms,
+                    gather_buffer);
+  const glm_sample::Result r = glm_sample::sample_complete_logits(
+      gather_buffer->data(), vocab_size, fold.normalizer, params, rng);
+  bus_check_decision_digest(bus, rank, true, r, fold.normalizer,
+                            prefix_scratch, timeout_ms,
+                            "bus_sample_row fallback");
+  return r;
+}
+
+// The speculative step's row-0 decision over the bus (DESIGN §9): accept
+// the draft with its exact probability or sample the residual — the fold,
+// spec_accept_from_prefix, else the gather and spec_accept_complete; the
+// digest carries the accept flag as its `resolved` bit.
+inline glm_sample::SpecPrefixDecision bus_spec_accept(
+    net::CollectiveBus& bus, int rank, int world, const float* logits,
+    int vocab_count, int vocab_begin, int vocab_size, int32_t draft,
+    const glm_sample::Params& params, glm_sample::Rng& rng,
+    const std::vector<int32_t>& context_ids, int candidate_k,
+    uint16_t* prefix_scratch, uint16_t* gather_scratch, int timeout_ms,
+    std::vector<float>* gather_buffer) {
+  const SamplingFold fold = bus_sampling_fold(
+      bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, params,
+      context_ids, candidate_k, prefix_scratch, timeout_ms);
+  glm_sample::SpecPrefixDecision d = glm_sample::spec_accept_from_prefix(
+      fold.prefix, vocab_size, fold.normalizer, draft, params, rng);
+  if (!d.resolved) {
+    bus_gather_logits(bus, rank, world, fold.adjusted.data(), vocab_count,
+                      vocab_begin, vocab_size, gather_scratch, timeout_ms,
+                      gather_buffer);
+    d = glm_sample::spec_accept_complete(gather_buffer->data(), vocab_size,
+                                         fold.normalizer, draft, params, rng);
+  }
+  bus_check_decision_digest(bus, rank, d.accepted, d.result, d.normalizer,
+                            prefix_scratch, timeout_ms, "bus_spec_accept");
+  return d;
 }
 
 // ---------------------------------------------------------------------------

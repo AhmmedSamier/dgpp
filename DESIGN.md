@@ -1547,7 +1547,27 @@ record.
   global log-sum-exp: one more digit group in the pick table carrying each
   rank's slice lse, folded as logaddexp on the device. The same field
   enables a confidence-gated T (skip the draft row when its margin is
-  thin). Until then `--mtp` is greedy-only (§10). At the card's
+  thin). The EAGER half is built (2026-09-04): `spec_select_from_sorted`
+  is the accept test and residual over the plain sampler's final set
+  (accept iff `u1 < P(x)`, else the residual walk with `u2` over the same
+  fp32 exps, the residual denominator `final_den - exps[x]`; two draws
+  per step whichever way the test falls, row 1's ordinary sample taking
+  `u2` when the draft stands), `spec_accept_from_prefix` /
+  `spec_accept_complete` make it width-independent exactly as the plain
+  decision (the pure regime evaluates the draft's fold mass and walks the
+  residual against `u2 (1 - P(x))`), `spec_reference_sharded` is the
+  step's reference at a layout, `bus_spec_accept` / `bus_sample_row` run
+  it over the bus with the gather fallback and rank 0's digest, and
+  `SampledSpeculator` (glm_speculative.hpp) is the eager driver — the
+  count table is prompt + committed + next, the draft joining it only when
+  it stands; `glm_gen_check --mtp --sample` runs it. Gates: the
+  width-independence and marginal-distribution unit gates, the synthetic
+  two-rank `glm_spec_accept_matches_reference_loopback` (accepts, rejects,
+  fallbacks, bitwise the reference, two draws per step) and the
+  rank-identity gate on the MTP fixture. The one-graph MTP step's device
+  verdict (the T=2 accept test on the device, and the draft's rollback
+  when a fallback lands inside the graph) remains: `--decode-graph --mtp`
+  is greedy-only (§10). At the card's
   recommended `temperature=1.0, top_p=0.95` the acceptance becomes
   ≈ E[p(draft)] rather than the 89% argmax agreement; the second verify
   row costs ~9–11 ms of a 42 ms step, so MTP pays above ~30% acceptance —

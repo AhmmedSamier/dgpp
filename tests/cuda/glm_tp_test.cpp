@@ -1293,6 +1293,294 @@ DGPP_TEST(glm_fabric_sample_matches_sharded_reference_loopback) {
   }
 }
 
+// The speculative step's row deciders over the real bus — bus_spec_accept
+// (the accept test and residual, with the gather fallback) and bus_sample_row
+// (row 1) — against the speculative reference at the loader's layout,
+// bitwise, over a run of steps whose drafts are sometimes the likely token
+// and sometimes an unlikely one, with a flat row that forces the fallback.
+// Two draws per step on every rank.
+DGPP_TEST(glm_spec_accept_matches_reference_loopback) {
+  constexpr int kWorld = 2;
+  constexpr int kVocab = 700;
+  constexpr uint16_t kPort = 29930;
+  constexpr int kSteps = 8;
+  const std::vector<dgpp::glm_sample::VocabSlice> layout =
+      dgpp::glm_sample::vocab_layout(kVocab, kWorld);
+  dgpp::glm_sample::Params params;
+  params.temperature = 1.0f;
+  params.top_p = 0.95f;
+  params.presence_penalty = 0.15f;
+  const std::vector<int64_t> prompt{3, 3, 250, 699};
+  const auto row_for = [&](int step, int row) {
+    // Even steps peaked (resolves in the 128-wide prefix), odd steps flat
+    // (the fallback); row 1 differs from row 0 by a shift.
+    std::vector<float> v(kVocab, step % 2 == 0 ? -7.0f : 0.0f);
+    if (step % 2 == 0) {
+      // The argmax holds ~98% of the mass: a draft equal to it is accepted
+      // unless the accept draw lands in the top two percent.
+      v[static_cast<size_t>((41 * step + 5 + 100 * row) % kVocab)] = 6.0f;
+      v[static_cast<size_t>((41 * step + 360 + 100 * row) % kVocab)] = 2.0f;
+      v[static_cast<size_t>((41 * step + 690 + 100 * row) % kVocab)] = 1.5f;
+    } else {
+      for (int i = 0; i < kVocab; ++i)
+        v[static_cast<size_t>(i)] += 0.002f * static_cast<float>((i + row) % 5);
+    }
+    return v;
+  };
+  // Drafts: the row-0 argmax on steps 0,1 mod 4 (likely), a tail token else.
+  const auto draft_for = [&](int step) -> int32_t {
+    const std::vector<float> v = row_for(step, 0);
+    if (step % 4 < 2)
+      return dgpp::glm_sample::local_max(v.data(), kVocab, 0).id;
+    return static_cast<int32_t>((step * 97 + 13) % kVocab);
+  };
+
+  // The centralized expectation.
+  struct Expected {
+    dgpp::glm_sample::SpecStepReference ref;
+    uint64_t counter_after;
+  };
+  std::vector<Expected> expected;
+  {
+    dgpp::glm_sample::Rng rng{0x5eedull, 0};
+    std::vector<int32_t> context(prompt.begin(), prompt.end());
+    for (int step = 0; step < kSteps; ++step) {
+      const std::vector<float> r0 = row_for(step, 0);
+      const std::vector<float> r1 = row_for(step, 1);
+      const int32_t draft = draft_for(step);
+      Expected e;
+      e.ref = dgpp::glm_sample::spec_reference_sharded(
+          r0.data(), r1.data(), kVocab, layout, draft, params, rng, context);
+      e.counter_after = rng.counter;
+      expected.push_back(e);
+      if (e.ref.accepted) context.push_back(draft);
+      context.push_back(e.ref.accepted ? e.ref.winners[1] : e.ref.winners[0]);
+    }
+  }
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses =
+      start_world(kWorld, kPort, 64 * 1024);
+  require(!buses.empty(), "spec-accept bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<dgpp::glm_sample::SpecStepReference>> got(kWorld);
+  std::vector<std::vector<uint64_t>> counters(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int rank = 0; rank < kWorld; ++rank) {
+    workers.emplace_back([&, rank] {
+      uint16_t* prefix_scratch = nullptr;
+      uint16_t* gather_scratch = nullptr;
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      const auto release = [&] {
+        if (prefix_scratch) cudaFreeHost(prefix_scratch);
+        if (gather_scratch) cudaFreeHost(gather_scratch);
+        prefix_scratch = gather_scratch = nullptr;
+      };
+      try {
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(kVocab),
+            cudaHostAllocDefault));
+        arrive_once();
+        CollectiveBus& bus = *buses[static_cast<size_t>(rank)];
+        const auto& slice = layout[static_cast<size_t>(rank)];
+        std::vector<float> gather_buffer;
+        dgpp::glm_sample::Rng rng{0x5eedull, 0};
+        std::vector<int32_t> context(prompt.begin(), prompt.end());
+        for (int step = 0; step < kSteps; ++step) {
+          const std::vector<float> r0 = row_for(step, 0);
+          const std::vector<float> r1 = row_for(step, 1);
+          const int32_t draft = draft_for(step);
+          dgpp::glm_sample::SpecStepReference s;
+          const dgpp::glm_sample::SpecPrefixDecision d0 = dgpp::bus_spec_accept(
+              bus, rank, kWorld, r0.data() + slice.begin, slice.count,
+              slice.begin, kVocab, draft, params, rng, context,
+              dgpp::kSamplingCandidates, prefix_scratch, gather_scratch,
+              test_wait_timeout_ms(), &gather_buffer);
+          s.accepted = d0.accepted;
+          s.row0 = d0.result;
+          s.winners[0] = d0.result.token;
+          if (d0.accepted) {
+            context.push_back(draft);
+            s.row1 = dgpp::bus_sample_row(
+                bus, rank, kWorld, r1.data() + slice.begin, slice.count,
+                slice.begin, kVocab, params, rng, context,
+                dgpp::kSamplingCandidates, prefix_scratch, gather_scratch,
+                test_wait_timeout_ms(), &gather_buffer);
+            s.winners[1] = s.row1.token;
+          }
+          context.push_back(s.accepted ? s.winners[1] : s.winners[0]);
+          got[static_cast<size_t>(rank)].push_back(s);
+          counters[static_cast<size_t>(rank)].push_back(rng.counter);
+        }
+        release();
+      } catch (const std::exception& error) {
+        release();
+        errors[static_cast<size_t>(rank)] = error.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  for (int rank = 0; rank < kWorld; ++rank)
+    require(errors[static_cast<size_t>(rank)].empty(),
+            "spec-accept rank " + std::to_string(rank) + ": " +
+                errors[static_cast<size_t>(rank)]);
+  int accepts = 0;
+  for (int rank = 0; rank < kWorld; ++rank) {
+    require(got[static_cast<size_t>(rank)].size() == expected.size(), "every step ran");
+    for (int step = 0; step < kSteps; ++step) {
+      const auto& g = got[static_cast<size_t>(rank)][static_cast<size_t>(step)];
+      const auto& e = expected[static_cast<size_t>(step)].ref;
+      const auto same = [](const dgpp::glm_sample::Result& a,
+                           const dgpp::glm_sample::Result& b) {
+        return a.token == b.token &&
+               std::memcmp(&a.logprob, &b.logprob, sizeof(float)) == 0;
+      };
+      require(g.accepted == e.accepted && g.winners[0] == e.winners[0] &&
+                  g.winners[1] == e.winners[1] && same(g.row0, e.row0) &&
+                  (!e.accepted || same(g.row1, e.row1)),
+              "bus speculative step " + std::to_string(step) + " on rank " +
+                  std::to_string(rank) + " differs from the reference");
+      require(counters[static_cast<size_t>(rank)][static_cast<size_t>(step)] ==
+                  expected[static_cast<size_t>(step)].counter_after,
+              "counter differs at step " + std::to_string(step));
+      if (rank == 0 && e.accepted) ++accepts;
+    }
+  }
+  require(accepts > 0 && accepts < kSteps, "the run must accept and reject");
+}
+
+// The eager sampled speculator on the MTP fixture over the real bus: every
+// rank produces the same transcript (the accept test, the residual, the
+// row-1 sample and the greedy draft are collectives or rank-identical
+// decisions) and the RNG consumes one draw for the prefill and two per
+// step. The fixture's untrained draft block rarely proposes a token the
+// sampler keeps, so acceptance is reported, not required; the exactness of
+// the decisions is the synthetic gate above's.
+DGPP_TEST(glm_tp_sampled_speculator_loopback_rank_identical) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kTokens = 12;
+  constexpr int kWorld = 2;
+  const int max_tokens = static_cast<int>(prompt.size()) + kTokens + 4;
+  dgpp::glm_sample::Params params;
+  params.temperature = 0.6f;  // peaked enough for some drafts to stand
+  params.top_p = 0.95f;
+  params.presence_penalty = 0.1f;
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29931);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int32_t>> seqs(kWorld);
+  std::vector<int> steps(kWorld, 0), accepted(kWorld, 0);
+  std::vector<uint64_t> counters(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      uint16_t* prefix_scratch = nullptr;
+      uint16_t* gather_scratch = nullptr;
+      const auto release = [&] {
+        if (scratch) cudaFreeHost(scratch);
+        if (prefix_scratch) cudaFreeHost(prefix_scratch);
+        if (gather_scratch) cudaFreeHost(gather_scratch);
+        scratch = prefix_scratch = gather_scratch = nullptr;
+      };
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel shard(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/1, /*mtp=*/true);
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                                   sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+                                   cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+            cudaHostAllocDefault));
+        arrive_once();
+        const auto pick_rows = [&](const std::vector<Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
+                                            test_wait_timeout_ms());
+        };
+        const dgpp::GenEngineAdapter::Sample row1 = dgpp::make_fabric_sample(
+            &bus, r, kWorld, prefix_scratch, gather_scratch, cfg.vocab_size,
+            test_wait_timeout_ms());
+        dgpp::glm_sample::Rng rng{0x77ull, 0};
+        const GlmDiagnosticModel::Outputs pre = shard.session_prefill(prompt);
+        const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
+        const int32_t first = row1(pre, params, rng, prompt_context).token;
+        dgpp::SampledSpeculator spec(
+            shard, 0, pick_rows,
+            dgpp::make_fabric_spec_row0(&bus, r, kWorld, prefix_scratch,
+                                        gather_scratch, cfg.vocab_size,
+                                        test_wait_timeout_ms()),
+            row1, params, rng, prompt);
+        spec.start(first);
+        std::vector<int32_t>& got = seqs[static_cast<size_t>(r)];
+        while (static_cast<int>(got.size()) < kTokens) {
+          const std::vector<int32_t> committed = spec.step();
+          got.insert(got.end(), committed.begin(), committed.end());
+        }
+        got.resize(kTokens);
+        steps[static_cast<size_t>(r)] = spec.steps();
+        accepted[static_cast<size_t>(r)] = spec.accepted_drafts();
+        counters[static_cast<size_t>(r)] = spec.rng().counter;
+        release();
+      } catch (const std::exception& e) {
+        release();
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("sampled speculator rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r) {
+    require(seqs[static_cast<size_t>(r)] == seqs[0],
+            "sampled speculator transcript differs across ranks");
+    require(steps[static_cast<size_t>(r)] == steps[0] &&
+                accepted[static_cast<size_t>(r)] == accepted[0] &&
+                counters[static_cast<size_t>(r)] == counters[0],
+            "sampled speculator step/acceptance/counter differ across ranks");
+  }
+  require(counters[0] == 1 + 2 * static_cast<uint64_t>(steps[0]),
+          "one draw for the prefill and two per step");
+  for (const int32_t t : seqs[0])
+    require(t >= 0 && t < cfg.vocab_size, "token in range");
+  DGPP_LOG_INFO("sampled speculator w2: {} tokens in {} steps, {} drafts "
+                "accepted; transcripts identical across ranks",
+                kTokens, steps[0], accepted[0]);
+}
+
 // ---- M6 d3: end-to-end greedy generation ----------------------------------
 // The d3 criterion on the fixture, stated as the invariant that actually
 // holds: the DISTRIBUTED pick (per-rank slice argmax + the bus

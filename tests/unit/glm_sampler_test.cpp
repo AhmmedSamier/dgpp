@@ -801,3 +801,130 @@ DGPP_TEST(validate_params_rejects_bad_specs_and_accepts_the_defaults) {
   p.presence_penalty = std::nanf("");
   require(rejects(p), "NaN penalty");
 }
+
+// The speculative row-0 decision (accept the draft with its exact
+// probability, else the residual) is width-independent exactly as the plain
+// decision: a prefix that resolves equals the complete list bitwise, in
+// every regime, for drafts inside and outside the nucleus; a fallback leaves
+// the RNG untouched; a resolved step consumes exactly two draws on a reject
+// and one on an accept (row 1's draw is the caller's).
+DGPP_TEST(spec_accept_is_width_independent_in_every_regime) {
+  using dgpp::glm_sample::spec_accept_complete;
+  using dgpp::glm_sample::spec_accept_from_prefix;
+  using dgpp::glm_sample::SpecPrefixDecision;
+  std::vector<Params> regimes;
+  {
+    Params p;
+    p.temperature = 1.0f;
+    p.top_p = 0.95f;
+    regimes.push_back(p);
+  }
+  {
+    Params p;
+    p.temperature = 0.9f;
+    p.top_p = 1.0f;  // pure: the draft's fold mass and the residual walk
+    regimes.push_back(p);
+  }
+  {
+    Params p;
+    p.temperature = 0.7f;
+    p.top_k = 30;
+    p.min_p = 0.02f;
+    regimes.push_back(p);
+  }
+  FixtureRng fx;
+  int resolved = 0, fallbacks = 0, accepts = 0, rejects = 0;
+  for (const Params& p : regimes) {
+    for (int fixture = 0; fixture < 24; ++fixture) {
+      const int n = 200 + fixture * 5;
+      const float spread = (fixture % 2) ? 2.0f : 9.0f;
+      std::vector<float> logits = make_logits(n, fx, spread);
+      const std::vector<VocabSlice> layout = vocab_layout(n, 3);
+      const std::vector<Candidate> sorted = sort_slice(logits.data(), n, 0);
+      const double lse = sharded_scaled_logsumexp(logits.data(), layout, p.temperature);
+      // Drafts: the argmax (often accepted), a mid-rank token, a tail token.
+      const int32_t drafts[3] = {sorted[0].id, sorted[static_cast<size_t>(n / 4)].id,
+                                 sorted[static_cast<size_t>(n - 1)].id};
+      for (int di = 0; di < 3; ++di) {
+        const int32_t draft = drafts[di];
+        for (int k : {8, 32, 96}) {
+          const std::vector<Candidate> prefix(sorted.begin(), sorted.begin() + k);
+          for (uint64_t s = 0; s < 6; ++s) {
+            // Distinct draws per fixture and draft (a fixed seed set would
+            // reuse the same six accept tests everywhere).
+            const uint64_t seed = s + 1000 * static_cast<uint64_t>(fixture) +
+                                  77 * static_cast<uint64_t>(di) +
+                                  9001 * static_cast<uint64_t>(k);
+            Rng full_rng{seed, 5};
+            Rng rng{seed, 5};
+            const SpecPrefixDecision want =
+                spec_accept_complete(logits.data(), n, lse, draft, p, full_rng);
+            require(want.resolved, "the complete list resolves");
+            require(full_rng.counter == (want.accepted ? 6 : 7),
+                    "an accept draws once, a reject twice");
+            const SpecPrefixDecision got =
+                spec_accept_from_prefix(prefix, n, lse, draft, p, rng);
+            if (got.resolved) {
+              ++resolved;
+              require(got.accepted == want.accepted &&
+                          results_identical(got.result, want.result) &&
+                          rng.counter == full_rng.counter,
+                      "resolved prefix differs from the complete list (k " +
+                          std::to_string(k) + ")");
+            } else {
+              ++fallbacks;
+              require(rng.counter == 5, "a fallback consumes no draw");
+            }
+            if (want.accepted) ++accepts; else ++rejects;
+          }
+        }
+      }
+    }
+  }
+  require(resolved > 0 && fallbacks > 0 && accepts > 0 && rejects > 0,
+          "the sweep must exercise every outcome (resolved " +
+              std::to_string(resolved) + ", fallbacks " +
+              std::to_string(fallbacks) + ", accepts " +
+              std::to_string(accepts) + ", rejects " +
+              std::to_string(rejects) + ")");
+}
+
+// Exact speculative sampling: whichever token the draft proposes, the
+// row-0 outcome's distribution is the plain sampler's. Over many seeds the
+// outcome frequencies must track the target distribution for a draft that
+// is likely and one that is unlikely (a loose, deterministic statistical
+// sanity check; the bitwise property is the gate above).
+DGPP_TEST(spec_accept_marginal_tracks_the_target_distribution) {
+  using dgpp::glm_sample::spec_accept_complete;
+  const std::vector<float> logits{2.0f, 1.5f, 1.0f, 0.0f, -3.0f, -3.0f};
+  const int n = static_cast<int>(logits.size());
+  const std::vector<VocabSlice> layout{{0, n}};
+  Params p;
+  p.temperature = 1.0f;
+  p.top_p = 1.0f;  // the full distribution: every token reachable
+  const double lse = sharded_scaled_logsumexp(logits.data(), layout, 1.0f);
+  std::vector<double> target(logits.size());
+  for (int i = 0; i < n; ++i)
+    target[static_cast<size_t>(i)] = std::exp(logits[static_cast<size_t>(i)] - lse);
+  constexpr int kTrials = 4000;
+  for (const int32_t draft : {0, 3, 5}) {
+    std::vector<int> counts(logits.size(), 0);
+    int accepted = 0;
+    for (uint64_t seed = 0; seed < kTrials; ++seed) {
+      Rng rng{seed * 7919 + 1, 0};
+      const auto d = spec_accept_complete(logits.data(), n, lse, draft, p, rng);
+      counts[static_cast<size_t>(d.result.token)] += 1;
+      accepted += d.accepted ? 1 : 0;
+    }
+    for (int i = 0; i < n; ++i) {
+      const double freq = static_cast<double>(counts[static_cast<size_t>(i)]) / kTrials;
+      require(std::abs(freq - target[static_cast<size_t>(i)]) < 0.03,
+              "draft " + std::to_string(draft) + ": token " + std::to_string(i) +
+                  " frequency " + std::to_string(freq) + " vs target " +
+                  std::to_string(target[static_cast<size_t>(i)]));
+    }
+    const double accept_rate = static_cast<double>(accepted) / kTrials;
+    require(std::abs(accept_rate - target[static_cast<size_t>(draft)]) < 0.03,
+            "the acceptance rate is the draft's probability");
+  }
+}

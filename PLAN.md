@@ -867,7 +867,10 @@ cost. Design:
   the eager draft path `glm_gen_check` already has. Budget ~3–5 ms per
   fallback; at a <1% rate it is invisible.
 - *Sampling under MTP* is exact speculative sampling with a deterministic
-  draft: accept draft `x` with probability `p(x)` under the verify row
+  draft (the EAGER driver is BUILT 2026-09-04: `spec_accept_from_prefix`,
+  `bus_spec_accept`, `SampledSpeculator`, `glm_gen_check --mtp --sample`;
+  the one-graph step's device verdict and draft rollback remain): accept
+  draft `x` with probability `p(x)` under the verify row
   (the lse gives `p(x)`), else sample from `p` with `x` removed — the same
   inside/outside test. Acceptance at T=1 is ≈ E[p(draft)], lower than the
   89% argmax agreement (expect 55–70%); the T=2 step's extra row costs

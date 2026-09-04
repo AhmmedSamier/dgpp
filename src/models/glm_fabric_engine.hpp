@@ -19,6 +19,7 @@
 #include "common/process_memory.hpp"
 #include "models/glm_gen_engine.hpp"
 #include "models/glm_graph_check.hpp"
+#include "models/glm_speculative.hpp"
 #include "models/glm_loader.hpp"
 #include "models/glm_step_timing.hpp"
 #include "models/glm_tp_bus.hpp"
@@ -159,44 +160,46 @@ inline GenEngineAdapter::Sample make_fabric_sample(
     uint16_t* gather_scratch, int64_t vocab, int pick_timeout_ms = 60000) {
   if (bus == nullptr || prefix_scratch == nullptr || gather_scratch == nullptr)
     throw std::invalid_argument("fabric sample: null bus/scratch");
+  auto gather_buffer = std::make_shared<std::vector<float>>();
   return [bus, rank, world, prefix_scratch, gather_scratch, vocab,
-          pick_timeout_ms](const GlmDiagnosticModel::Outputs& out,
-                           const glm_sample::Params& p, glm_sample::Rng& rng,
-                           const std::vector<int32_t>& context)
-             -> glm_sample::Result {
+          pick_timeout_ms, gather_buffer](
+             const GlmDiagnosticModel::Outputs& out,
+             const glm_sample::Params& p, glm_sample::Rng& rng,
+             const std::vector<int32_t>& context) -> glm_sample::Result {
     step_timing::Scope tick(step_timing::kPick);
-    const int count = static_cast<int>(out.lm_vocab_count);
-    const int begin = out.lm_vocab_begin;
-    const glm_sample::PrefixDecision d = bus_sampling_prefix(
-        *bus, rank, world, out.logits.data(), count, begin,
+    const glm_sample::Result r = bus_sample_row(
+        *bus, rank, world, out.logits.data(),
+        static_cast<int>(out.lm_vocab_count), out.lm_vocab_begin,
         static_cast<int>(vocab), p, rng, context, kSamplingCandidates,
-        prefix_scratch, pick_timeout_ms);
-    glm_sample::Result r;
-    if (d.resolved) {
-      r = d.result;
-    } else {
-      // The exact fallback (DESIGN §10): the penalized slices to every rank,
-      // the complete decision under the normalizer the prefix step already
-      // folded, the draw the prefix left untouched.
-      std::vector<float> adjusted(out.logits.begin(),
-                                  out.logits.begin() + count);
-      glm_sample::apply_penalties(adjusted.data(), count, begin, p,
-                                  glm_sample::count_context(context));
-      std::vector<float> full;
-      bus_gather_logits(*bus, rank, world, adjusted.data(), count, begin,
-                        static_cast<int>(vocab), gather_scratch,
-                        pick_timeout_ms, &full);
-      r = glm_sample::sample_complete_logits(full.data(),
-                                             static_cast<int>(vocab),
-                                             d.normalizer, p, rng);
-      bus_check_decision_digest(*bus, rank, /*resolved=*/true, r,
-                                d.normalizer, prefix_scratch,
-                                pick_timeout_ms, "fabric sample fallback");
-    }
+        prefix_scratch, gather_scratch, pick_timeout_ms, gather_buffer.get());
     if (r.token < 0 || r.token >= vocab)
       throw std::runtime_error("fabric sample out of range: " +
                                std::to_string(r.token));
     return r;
+  };
+}
+
+// The fabric row deciders of the eager SAMPLED speculator (glm_speculative.hpp
+// SampledSpeculator): row 0's accept/residual and row 1's sample, each one
+// fold plus the gather fallback plus rank 0's digest, in the same order on
+// every rank.
+inline SampledSpeculator::Row0 make_fabric_spec_row0(
+    net::CollectiveBus* bus, int rank, int world, uint16_t* prefix_scratch,
+    uint16_t* gather_scratch, int64_t vocab, int pick_timeout_ms = 60000) {
+  auto gather_buffer = std::make_shared<std::vector<float>>();
+  return [bus, rank, world, prefix_scratch, gather_scratch, vocab,
+          pick_timeout_ms, gather_buffer](
+             const GlmDiagnosticModel::Outputs& row0, int32_t draft,
+             const glm_sample::Params& p, glm_sample::Rng& rng,
+             const std::vector<int32_t>& context)
+             -> glm_sample::SpecPrefixDecision {
+    step_timing::Scope tick(step_timing::kPick);
+    return bus_spec_accept(*bus, rank, world, row0.logits.data(),
+                           static_cast<int>(row0.lm_vocab_count),
+                           row0.lm_vocab_begin, static_cast<int>(vocab), draft,
+                           p, rng, context, kSamplingCandidates,
+                           prefix_scratch, gather_scratch, pick_timeout_ms,
+                           gather_buffer.get());
   };
 }
 

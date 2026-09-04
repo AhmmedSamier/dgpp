@@ -826,7 +826,9 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
                      const std::vector<int64_t>& prompt, int steps,
                      bool no_eos, bool decode_graph, uint16_t* pick_scratch,
                      std::vector<int64_t>* generated, std::string* text,
-                     double* forward_ms_total) {
+                     double* forward_ms_total, const SamplingRun& sampling,
+                     uint16_t* sample_prefix_scratch,
+                     uint16_t* sample_gather_scratch) {
   using Clock = std::chrono::steady_clock;
   const auto ms_since = [](Clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
@@ -862,11 +864,74 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
                 "block)", rank, prompt.size(), prefill_ms);
   const std::vector<dgpp::glm_sample::Candidate> pre_local =
       dgpp::local_row_maxes(pre, 1);
+  *forward_ms_total = prefill_ms;
+  dgpp::step_timing::reset();
+
+  // ---- exact speculative SAMPLING, the eager driver (M6 6b) --------------
+  // The sampled prefill pick, then SampledSpeculator: row 0's accept test
+  // and residual over the bus, row 1's sample when the draft stands, the
+  // block's argmax draft over the accepted rows; two draws per step.
+  if (sampling.on()) {
+    const auto pick_rows =
+        [&](const std::vector<dgpp::glm_sample::Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, rank, world, locals,
+                                            pick_scratch, 60000);
+        };
+    const dgpp::GenEngineAdapter::Sample row1 = dgpp::make_fabric_sample(
+        &bus, rank, world, sample_prefix_scratch, sample_gather_scratch,
+        cfg.vocab_size);
+    dgpp::glm_sample::Rng rng{sampling.seed, 0};
+    const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
+    const dgpp::glm_sample::Result first =
+        row1(pre, *sampling.params, rng, prompt_context);
+    DGPP_LOG_INFO("[gen] rank {} prefill+sample: token {} logprob {:.4f}",
+                  rank, first.token, first.logprob);
+    dgpp::SampledSpeculator spec(
+        model, 0, pick_rows,
+        dgpp::make_fabric_spec_row0(&bus, rank, world, sample_prefix_scratch,
+                                    sample_gather_scratch, cfg.vocab_size),
+        row1, *sampling.params, rng, prompt);
+    spec.start(first.token);
+    bool stop = false;
+    while (!stop && static_cast<int>(generated->size()) < steps) {
+      const auto t_step = Clock::now();
+      const std::vector<int32_t> committed = spec.step();
+      for (const int32_t token : committed) {
+        generated->push_back(token);
+        *text += tok.decode(token, /*skip_special_tokens=*/false);
+        if (is_eos(token)) {
+          DGPP_LOG_INFO("rank {} eos stop at token {}", rank,
+                        generated->size() - 1);
+          stop = true;
+          break;
+        }
+        if (static_cast<int>(generated->size()) >= steps) {
+          stop = true;
+          break;
+        }
+      }
+      const double ms = ms_since(t_step);
+      *forward_ms_total += ms;
+      DGPP_LOG_INFO(
+          "rank {} sampled spec step {}: {:.1f}ms, accepted {} ({} tokens), "
+          "counter {}",
+          rank, spec.steps(), ms, static_cast<int>(committed.size()) - 1,
+          committed.size(), spec.rng().counter);
+    }
+    DGPP_LOG_INFO(
+        "rank {} sampled speculative summary: {} tokens in {} steps ({:.1f}% "
+        "drafts accepted, {:.3f} tokens/step); the transcript is an exact "
+        "sample at the request's settings",
+        rank, generated->size(), spec.steps(),
+        spec.steps() ? 100.0 * spec.accepted_drafts() / spec.steps() : 0.0,
+        spec.steps() ? static_cast<double>(generated->size()) / spec.steps()
+                     : 0.0);
+    return;
+  }
+
   int32_t next = dgpp::bus_greedy_pick_rows(bus, rank, world, pre_local,
                                             pick_scratch, 60000)[0];
   log_row_pick(rank, 0, pre, 0, pre_local[0], next);
-  *forward_ms_total = prefill_ms;
-  dgpp::step_timing::reset();
 
   // ---- the eager draft (the first proposal; every step's, without graph) --
   SpecRunStats st;
@@ -1249,7 +1314,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     if (mtp) {
       run_speculative(model, *bus, rank, world, cfg, tok, prompt, steps,
                       no_eos, decode_graph, pick_scratch, &generated,
-                      &generated_text, &forward_ms_total);
+                      &generated_text, &forward_ms_total, sampling,
+                      sample_prefix.data, sample_gather.data);
     } else if (incremental) {
       // The serving path (Stage 2): prefill once, one stateful step per
       // token, distributed pick over the sharded head's slices.
@@ -1522,7 +1588,8 @@ int main(int argc, char** argv) {
       "   defaults] [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
       "  [--repetition-penalty X] (each implies --sample and overrides the\n"
       "   file) [--seed N (default 0; manifest request i draws from N+i)]\n"
-      "   (not with --mtp, --teacher-file or --engine reforward)\n"
+      "   (--mtp: the eager sampled speculator; not with --mtp\n"
+      "    --decode-graph, --teacher-file or --engine reforward)\n"
       "scheduler mode (--requests): [--max-concurrency N] [--kv-capacity N]\n"
       "  [--sched-plan]\n";
 
@@ -1617,12 +1684,14 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("--sampling-profile requires --teacher-file");
     return 1;
   }
-  if (sample && (mtp || !incremental || !teacher_file.empty())) {
+  if (sample && ((mtp && decode_graph) || !incremental ||
+                 !teacher_file.empty())) {
     DGPP_LOG_ERROR(
         "--sample/--temperature/... drive the exact sampler on the eager "
-        "engines (and this app's --decode-graph loop, whose pick stays on "
-        "the host between windows): not with --mtp, --teacher-file or "
-        "--engine reforward (sampling under MTP is M6 6b's next slice)");
+        "engines, the eager --mtp speculator, and this app's plain "
+        "--decode-graph loop (its pick stays on the host between windows): "
+        "not with --mtp --decode-graph, --teacher-file or --engine reforward "
+        "(the one-graph MTP step's sampler is M6 6b's next slice)");
     return 1;
   }
   if (!teacher_file.empty() && (!requests_path.empty() || !incremental)) {
