@@ -299,6 +299,9 @@ void GlmDiagnosticModel::session_graph_capture_draft(
   if (verify_verdict == nullptr)
     throw std::invalid_argument("session_graph_capture_draft: null verdict");
   const int T = decode_rows_;
+  // The block's ring before its rows: the sampled step's fallback rolls
+  // the draft back to here (session_draft_rollback).
+  snapshot_draft_ring(req);
   // d_req_ids_/d_req_spans_ still describe T rows of `req` from the verify
   // (same batch shape); the rows' positions and tokens come off the verdict.
   glm_spec_draft_rows(verify_verdict, T, d_mtp_pos_ + req, d_step_pos_,
@@ -321,6 +324,8 @@ void GlmDiagnosticModel::session_graph_capture_draft_batch(
   if (verify_verdicts == nullptr)
     throw std::invalid_argument(
         "session_graph_capture_draft_batch: null verdicts");
+  for (int req = 0; req < graph_batch_requests_; ++req)
+    snapshot_draft_ring(req);
   glm_spec_draft_rows_batched(
       verify_verdicts, graph_batch_requests_, graph_rows_per_request_,
       d_mtp_pos_, d_step_pos_, d_tokens_, d_next_, stream_);
@@ -329,6 +334,34 @@ void GlmDiagnosticModel::session_graph_capture_draft_batch(
                /*decode_row=*/true, /*capture_mode=*/true,
                /*head_rows=*/decode_rows_, graph_batch_requests_);
   graph_has_draft_ = true;
+}
+
+void GlmDiagnosticModel::snapshot_draft_ring(int req) {
+  const size_t ring = spec_tail_ring_elems();
+  glm_device_copy(mtp_ring_snapshot_ + static_cast<size_t>(req) * ring,
+                  static_cast<const uint16_t*>(pool_.tail(main_dsa_layers_)) +
+                      static_cast<size_t>(req) * ring,
+                  ring * 2, stream_);
+}
+
+void GlmDiagnosticModel::session_draft_rollback(int req, int rows) {
+  if (!mtp_) throw std::logic_error("session_draft_rollback: no MTP");
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_draft_rollback: request slot " +
+                            std::to_string(req));
+  if (rows < 1 || rows > mtp_pos_[static_cast<size_t>(req)])
+    throw std::invalid_argument("session_draft_rollback: rows outside the "
+                                "block's counter");
+  const size_t ring = spec_tail_ring_elems();
+  DGPP_CUDA_OK(cudaMemcpyAsync(
+      static_cast<uint16_t*>(pool_.tail(main_dsa_layers_)) +
+          static_cast<size_t>(req) * ring,
+      mtp_ring_snapshot_ + static_cast<size_t>(req) * ring, ring * 2,
+      cudaMemcpyDeviceToDevice, stream_));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  mtp_pos_[static_cast<size_t>(req)] -= rows;
+  push_mtp_position(req);
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 }
 
 void GlmDiagnosticModel::session_graph_capture_next_tokens(

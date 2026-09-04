@@ -270,6 +270,8 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   if (mtp_) {
     const size_t H = static_cast<size_t>(cfg_.hidden_size);
     mtp_pos_.assign(static_cast<size_t>(max_requests_), 0);
+    mtp_ring_snapshot_ = static_cast<uint16_t*>(alloc_device(
+        static_cast<size_t>(max_requests_) * spec_tail_ring_elems() * 2));
     d_mtp_pos_ = static_cast<int64_t*>(
         alloc_device(sizeof(int64_t) * static_cast<size_t>(max_requests_)));
     DGPP_CUDA_OK(cudaMemset(d_mtp_pos_, 0,
@@ -377,6 +379,7 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(spec_conv_);
   cudaFree(spec_tail_);
   cudaFree(mtp_hidden_);
+  cudaFree(mtp_ring_snapshot_);
   cudaFree(mtp_cat_);
   cudaFree(mtp_x_);
   cudaFree(d_tokens_);

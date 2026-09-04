@@ -41,10 +41,9 @@
 //   sampling (M6 6b): the defaults come from generation_config.json;
 //     [--temperature X] [--top-p X] [--top-k N] [--min-p X]
 //     [--repetition-penalty X] override them for the process, [--seed N]
-//     fixes the seed of every request that omits one. The eager engines
-//     and the plain (T=1) graphs sample exactly (DESIGN §10, the device
-//     path); the MTP graphs cannot yet, so under --decode-graph --mtp the
-//     service serves greedy defaults and refuses temperature > 0, loudly.
+//     fixes the seed of every request that omits one. Every engine samples
+//     exactly (DESIGN §10, the device path; §9 under --mtp, the exact
+//     speculative accept test on the device).
 #include <algorithm>
 #include <atomic>
 #include <chrono>

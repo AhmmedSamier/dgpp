@@ -18,9 +18,18 @@
 // bits as eleven digits). A greedy row writes one candidate (its canonical
 // argmax) and no lse; a padding row writes nothing but zeros.
 //
-// Regimes on the device: T=1 rows only for now (one row per request; the
-// verdict is accepted = 1, next = the decision). Sampling under MTP's T=2
-// verify is the next slice.
+// Two shapes: T=1 (one row per request: accepted 1, next the decision)
+// and the MTP T=2 verify (rows [next, draft] per request): row 0 accepts
+// the draft with its exact probability or samples the residual
+// (glm_sample::spec_accept_from_prefix), and when the draft stands row 1
+// is sampled as any step's token (sample_from_prefix) — so accepted is 2
+// or 1 and next = winners[accepted-1], the greedy judge's shape. A row
+// that cannot decide inside its prefix flags the fallback: row 0 by
+// provisionally REJECTING (the commit then keeps only the post-row-0
+// state, which is right for a reject and recoverable for an accept), row 1
+// by feeding its provisional argmax; the host serves both between windows
+// (GlmGraphEngineAdapter). The request's count table takes both fed
+// tokens before the penalties and drops the draft again on a reject.
 #include <cstddef>
 #include <cstdint>
 
@@ -50,14 +59,19 @@ struct GlmSampleSpec {
 // The sampling verdict's outcome per request, beside the GlmPickVerdict the
 // device consumers (commit, token feeds) keep reading.
 struct GlmSampleOutcome {
-  int32_t fallback = 0;   // the prefix could not decide: the host gathers and
-                          // decides with `counter` (untouched)
+  int32_t fallback = 0;   // a row could not decide inside its prefix
   int32_t sampled = 0;    // a stochastic decision was made (0: greedy row)
-  uint64_t counter = 0;   // the spec's counter after this pick
-  double normalizer = 0.0;    // the fold log-sum-exp the decision used
-  double covered_mass = 0.0;  // the prefix's mass under it
-  float logprob = 0.0f;       // the chosen token's log-probability
-  float pad = 0.0f;
+  uint64_t counter = 0;   // the spec's counter after this pick (the draws
+                          // the device consumed; a fallback row's draw is
+                          // reserved for the host)
+  double normalizer = 0.0;    // row 0's fold log-sum-exp
+  double covered_mass = 0.0;  // row 0's prefix mass under it
+  float logprob = 0.0f;       // row 0's outcome log-probability
+  float logprob1 = 0.0f;      // row 1's (T=2, the draft stood)
+  int32_t fallback_row = -1;  // which row fell back (0 or 1), -1 none
+  int32_t accepted_draft = 0; // T=2: the draft stood (provisional 0 on a
+                              // row-0 fallback)
+  double normalizer1 = 0.0;   // row 1's fold log-sum-exp (T=2)
 };
 
 constexpr int kSampleLseDigits = 11;         // 66 bits carry the fp64 lse
@@ -115,12 +129,17 @@ void glm_sample_local(float* logits, int rows, int vocab_count,
 // copy, the GlmSampleOutcome, and the spec's advanced counter.
 void glm_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         int candidates, int vocab_size, GlmSampleSpec* specs,
-                        int requests, int rows_per_request,
+                        int requests, int rows_per_request, const int64_t* fed,
                         const int64_t* positions, int position_stride,
-                        GlmPickVerdict* verdicts,
+                        int32_t* counts, GlmPickVerdict* verdicts,
                         GlmPickVerdict* device_verdicts,
                         GlmSampleOutcome* outcomes, uint64_t* carry_digest,
                         cudaStream_t stream);
+
+// counts[token] += delta (the host's correction of a request's context after
+// a fallback it decided: the draft leaves the table on a reject).
+void glm_sample_adjust_count(int32_t* counts_row, int64_t token, int delta,
+                             int vocab_size, cudaStream_t stream);
 
 // The prefill's context: counts[ids[i]] += 1 for i < n (a request's prompt).
 void glm_sample_count_tokens(int32_t* counts_row, const int64_t* ids, int n,

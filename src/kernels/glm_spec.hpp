@@ -96,6 +96,14 @@ void glm_spec_draft_rows_batched(
     int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
     int64_t* next_out, cudaStream_t stream);
 
+// A plain device-to-device copy as a KERNEL (a memcpy node may not enter
+// the captured decode graph): `bytes` a multiple of 16, both pointers
+// 16-byte aligned. The in-graph draft snapshots its DSA tail ring with it
+// before its rows run, so a fallback decided on the host can roll the block
+// back (GlmDiagnosticModel::session_draft_rollback).
+void glm_device_copy(void* dst, const void* src, size_t bytes,
+                     cudaStream_t stream);
+
 // The next replay's fed tokens, written at the end of this one (phase D):
 // tokens[0] = *next (the verify's), tokens[1] = draft_verdict->next (the
 // block's guess for the token after it).

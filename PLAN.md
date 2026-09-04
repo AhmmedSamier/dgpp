@@ -799,15 +799,16 @@ serves fallbacks between windows exactly as the eager engine and reseeds
 the graph's token feed, and reports `fallbacks()`. The width fits the
 batch's rows into the 64 KiB latency slot (112 per rank at eight rows and
 world 4; 128 below seven rows) — the measured profiles still decide
-whether that is the right k. `glm_serve --decode-graph` now samples at the
-checkpoint's defaults; `--decode-graph --mtp` is still greedy-only and
-says so. Gates: det_math_test, the bitwise simulated-world kernel gate in
-glm_pick_test, and the two-rank loopback gate of the scalar and batched
-graphs against the eager sampling engine with forced fallbacks. Not wired
-yet: sampling under MTP (the T=2 accept test, the residual sample, the
-draft rollback on a fallback), logprobs on the wire, and the three
-real-text fabric runs — no k is fixed until those land in the
-measurement record.
+whether that is the right k. `glm_serve --decode-graph` samples at the
+checkpoint's defaults, with or without `--mtp` (DESIGN §9: the T=2
+verdict on the device, the draft ring snapshot and rollback, the host's
+row re-run and re-draft on a fallback). Gates: det_math_test, the bitwise
+simulated-world kernel gates in glm_pick_test (T=1 and the T=2 verify),
+and the two-rank loopback gates of the scalar and batched plain and MTP
+graphs against the eager sampling engine and speculator with forced
+fallbacks. Not wired yet: logprobs on the wire, and the three real-text
+fabric runs — no k is fixed until those land in the measurement record,
+and the MTP acceptance at the card's settings is unmeasured.
 
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's
@@ -867,9 +868,12 @@ cost. Design:
   the eager draft path `glm_gen_check` already has. Budget ~3–5 ms per
   fallback; at a <1% rate it is invisible.
 - *Sampling under MTP* is exact speculative sampling with a deterministic
-  draft (the EAGER driver is BUILT 2026-09-04: `spec_accept_from_prefix`,
+  draft (BUILT 2026-09-04, eager and device: `spec_accept_from_prefix`,
   `bus_spec_accept`, `SampledSpeculator`, `glm_gen_check --mtp --sample`;
-  the one-graph step's device verdict and draft rollback remain): accept
+  the one-graph step's T=2 device verdict, the draft ring snapshot and
+  `session_draft_rollback`, `GlmGraphEngineAdapter::serve_mtp_fallback`;
+  `glm_serve --decode-graph --mtp` samples — the acceptance at T=1/0.95 is
+  still to be measured on the fabric): accept
   draft `x` with probability `p(x)` under the verify row
   (the lse gives `p(x)`), else sample from `p` with `x` removed — the same
   inside/outside test. Acceptance at T=1 is ≈ E[p(draft)], lower than the

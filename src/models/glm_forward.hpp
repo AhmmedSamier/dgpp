@@ -192,6 +192,15 @@ class GlmDiagnosticModel {
   static constexpr int kDecodeRows = 8;
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
   void session_rollback(int req, int accepted);
+  // The draft block's rollback (M6 6b, the sampled one-graph step): the
+  // in-graph draft snapshots the block's DSA tail ring BEFORE its rows run
+  // (a recorded copy kernel per request), so when a verdict row fell back
+  // and the draft ran on provisional rows the host can restore the ring,
+  // rewind the block's row counter by `rows` (the rows it ran), and re-run
+  // the true rows eagerly through session_draft. The block's other state
+  // is positional (latents, pools, the hidden cache) and the re-run
+  // overwrites it.
+  void session_draft_rollback(int req, int rows);
 
   // The MTP draft block (constructed with mtp = true). The block's row at
   // main-stack position q takes [enorm(embed(tok_{q+1})) | hnorm(h_q)] and
@@ -557,6 +566,9 @@ class GlmDiagnosticModel {
   // the pinned mirror; prefill rows run the block only (no head).
   // head_rows: 1 = the last row only (the eager draft), T = every row (the
   // in-graph draft; the pick selects the last accepted row).
+  // Records the draft ring snapshot node for slot `req` (the in-graph
+  // draft's rollback point).
+  void snapshot_draft_ring(int req);
   void mtp_run_rows(int req, int64_t first_pos, int T, bool decode_row,
                     bool capture_mode, int head_rows = 1,
                     int batch_requests = 0);
@@ -709,6 +721,9 @@ class GlmDiagnosticModel {
   int64_t* h_mtp_pos_ = nullptr;  // pinned upload mirror
   int draft_rows_ = 1;
   uint16_t* mtp_hidden_ = nullptr;  // [max_requests, max_tokens, H]
+  uint16_t* mtp_ring_snapshot_ = nullptr;  // [max_requests][ring] bf16: the
+                                           // draft's tail ring before its
+                                           // in-graph rows
   uint16_t* mtp_cat_ = nullptr;     // [T, 2H] the eh_proj input
   uint16_t* mtp_x_ = nullptr;       // [T, H] the block's residual
   // Decode-path route traces (2026-09-01): per-MoE-layer pinned staging

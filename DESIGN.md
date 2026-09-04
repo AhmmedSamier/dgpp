@@ -1564,10 +1564,37 @@ record.
   width-independence and marginal-distribution unit gates, the synthetic
   two-rank `glm_spec_accept_matches_reference_loopback` (accepts, rejects,
   fallbacks, bitwise the reference, two draws per step) and the
-  rank-identity gate on the MTP fixture. The one-graph MTP step's device
-  verdict (the T=2 accept test on the device, and the draft's rollback
-  when a fallback lands inside the graph) remains: `--decode-graph --mtp`
-  is greedy-only (§10). At the card's
+  rank-identity gate on the MTP fixture. The one-graph step's DEVICE
+  verdict is built too (2026-09-04): the sampling pick's local kernel runs
+  one block per request over both verify rows in order (row 1 penalizes
+  with the draft already counted), and the verdict kernel ports
+  `spec_accept_from_prefix` for row 0 and `sample_from_prefix` for row 1,
+  writing the greedy judge's shape (winners[0] the draft or the residual,
+  winners[1] row 1's sample, accepted 2 or 1, next = winners[accepted-1])
+  so the commit, draft-row and token-feed kernels are unchanged, dropping
+  the draft from the count table on a reject, and flagging a fallback per
+  row: row 0 undecided REJECTS provisionally (the commit keeps the
+  post-row-0 state, right for a reject and recoverable for an accept), row
+  1 undecided feeds its argmax. The in-graph draft snapshots its DSA tail
+  ring before its rows (a recorded copy kernel, `glm_device_copy`), and
+  the adapter's fallback (`serve_mtp_fallback`) rolls the block back
+  (`session_draft_rollback`), decides on the host — row 0 through
+  `spec_accept_complete` over the gathered row, re-running the verify's
+  second row eagerly (`session_verify`) and sampling it when the draft
+  stood after all; row 1 through `sample_complete_logits` — re-drafts the
+  true rows eagerly, reseeds the [next, draft] feed and pushes the
+  counter; the host context mirror follows the device count table (the
+  draft joins only when it stands). Gates:
+  `sample_pick_t2_matches_spec_oracle_over_simulated_world` (accepts,
+  rejects, both fallback rows, the greedy judge and the count table,
+  bitwise the oracle) and
+  `glm_tp_serving_mtp_graph_sampling_matches_eager_speculator` (the scalar
+  and batched MTP graphs in lockstep with the eager sampled speculator,
+  transcripts and [next, draft] feeds equal on every rank through 17
+  fallbacks of both kinds). `glm_serve --decode-graph --mtp` samples at
+  the checkpoint's defaults; the acceptance rate at those settings is
+  still to be measured on the fabric (§10). Until then `--mtp` is
+  measured greedy-only; the sampled path is gated, not yet timed. At the card's
   recommended `temperature=1.0, top_p=0.95` the acceptance becomes
   ≈ E[p(draft)] rather than the 89% argmax agreement; the second verify
   row costs ~9–11 ms of a 42 ms step, so MTP pays above ~30% acceptance —
@@ -1817,9 +1844,9 @@ and `glm_tp_serving_graph_sampling_matches_eager_engine` (the scalar and
 batch variants with a greedy request beside a sampled one, in lockstep
 with the eager sampling engine on the same bus; capped at six candidates
 per rank so the 96-token fixture forces fallbacks, transcripts equal on
-every rank). Remaining below: sampling under MTP (the T=2 verify's accept
-test and residual sample, and the draft rollback on a fallback), logprobs
-on the wire, and the fabric profiles that fix k.
+every rank). Sampling under MTP followed the same day (§9: the T=2
+verdict on the device, the draft rollback on a fallback). Remaining below:
+logprobs on the wire, and the fabric profiles that fix k.
 
 *The device path.* The pick table (§9) generalizes from 2 to k candidates
 per rank and gains a digit group for each rank's slice log-sum-exp; the

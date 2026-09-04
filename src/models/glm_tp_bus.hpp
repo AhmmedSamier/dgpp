@@ -1154,9 +1154,11 @@ class GlmDevicePicker {
     if (in.counts == nullptr || in.vocab_size < 1)
       throw std::invalid_argument(
           "device pick: sampling needs the count table and the vocabulary");
-    if (rows_per_request(in) != 1 || in.row_select != nullptr)
+    if ((rows_per_request(in) != 1 && rows_per_request(in) != 2) ||
+        in.row_select != nullptr)
       throw std::invalid_argument(
-          "device pick: the sampling verdict decides T=1 rows only");
+          "device pick: the sampling verdict decides T=1 rows or the MTP "
+          "T=2 verify");
     if (glm_sample_table_elems(in.rows, world_, candidates_) * 2 >
         bus_.slot_bytes(net::BusMessageClass::kLatency))
       throw std::invalid_argument(
@@ -1173,8 +1175,8 @@ class GlmDevicePicker {
   void sample_verdict(cudaStream_t stream, const Inputs& in) {
     glm_sample_verdict(table_, in.rows, world_, rank_, candidates_,
                        in.vocab_size, in.specs, in.requests,
-                       rows_per_request(in), in.positions,
-                       position_stride(in), verdict_slot(in.slot),
+                       rows_per_request(in), in.fed, in.positions,
+                       position_stride(in), in.counts, verdict_slot(in.slot),
                        device_verdict_slot(in.slot),
                        outcomes_ + in.slot * kPickMaxRequests, carry_,
                        stream);

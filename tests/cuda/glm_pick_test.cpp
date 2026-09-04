@@ -761,6 +761,7 @@ struct SampleWorldRun {
   std::vector<std::vector<dgpp::GlmSampleOutcome>> outcomes;
   std::vector<std::vector<dgpp::GlmSampleSpec>> specs_after;
   std::vector<uint64_t> carry_out;
+  std::vector<std::vector<int32_t>> counts_after;  // per rank, post-verdict
 };
 
 // Runs the two kernels on every rank of a simulated world: rank k holds
@@ -771,26 +772,35 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                                 const std::vector<int32_t>& counts_in,
                                 const std::vector<int64_t>& fed,
                                 const std::vector<int64_t>& positions,
-                                int candidates, uint64_t carry) {
+                                int candidates, uint64_t carry,
+                                int rows_per_request = 1) {
   const int vocab = world * count;
+  const int rows = requests * rows_per_request;
   const size_t table_elems =
-      dgpp::glm_sample_table_elems(requests, world, candidates);
+      dgpp::glm_sample_table_elems(rows, world, candidates);
+  // Per-row positions with the request stride, as the graph's step
+  // positions are laid out.
+  std::vector<int64_t> row_positions(static_cast<size_t>(rows));
+  for (int q = 0; q < requests; ++q)
+    for (int t = 0; t < rows_per_request; ++t)
+      row_positions[static_cast<size_t>(q * rows_per_request + t)] =
+          positions[static_cast<size_t>(q)] < 0 ? -1 : positions[static_cast<size_t>(q)] + t;
   SampleWorldRun out;
   out.folded.assign(table_elems, 0);
   for (int k = 0; k < world; ++k) {
-    std::vector<float> slice(static_cast<size_t>(requests) * count);
-    for (int q = 0; q < requests; ++q)
+    std::vector<float> slice(static_cast<size_t>(rows) * count);
+    for (int q = 0; q < rows; ++q)
       std::memcpy(slice.data() + static_cast<size_t>(q) * count,
                   full.data() + (static_cast<size_t>(q) * world + k) * count,
                   count * sizeof(float));
     float* d_logits = device_alloc<float>(slice.size());
     uint16_t* d_table = device_alloc<uint16_t>(table_elems);
     uint64_t* d_carry = device_alloc<uint64_t>(1);
-    GlmPickLocal* d_locals = device_alloc<GlmPickLocal>(requests);
+    GlmPickLocal* d_locals = device_alloc<GlmPickLocal>(rows);
     dgpp::GlmSampleSpec* d_specs = device_alloc<dgpp::GlmSampleSpec>(requests);
     int32_t* d_counts = device_alloc<int32_t>(counts_in.size());
     int64_t* d_fed = device_alloc<int64_t>(fed.size());
-    int64_t* d_pos = device_alloc<int64_t>(positions.size());
+    int64_t* d_pos = device_alloc<int64_t>(row_positions.size());
     DGPP_CUDA_OK(cudaMemcpy(d_logits, slice.data(), slice.size() * 4,
                             cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemcpy(d_carry, &carry, 8, cudaMemcpyHostToDevice));
@@ -801,13 +811,13 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                             cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemcpy(d_fed, fed.data(), fed.size() * 8,
                             cudaMemcpyHostToDevice));
-    DGPP_CUDA_OK(cudaMemcpy(d_pos, positions.data(), positions.size() * 8,
+    DGPP_CUDA_OK(cudaMemcpy(d_pos, row_positions.data(), row_positions.size() * 8,
                             cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemset(d_table, 0xff, table_elems * 2));  // poison
-    dgpp::glm_sample_local(d_logits, requests, count, k * count, vocab, k,
-                           world, candidates, d_specs, /*rows_per_request=*/1,
-                           d_fed, d_pos, /*position_stride=*/1, d_counts,
-                           d_carry, d_table, d_locals, nullptr);
+    dgpp::glm_sample_local(d_logits, rows, count, k * count, vocab, k,
+                           world, candidates, d_specs, rows_per_request,
+                           d_fed, d_pos, /*position_stride=*/rows_per_request,
+                           d_counts, d_carry, d_table, d_locals, nullptr);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
     std::vector<uint16_t> table(table_elems);
     DGPP_CUDA_OK(cudaMemcpy(table.data(), d_table, table_elems * 2,
@@ -818,9 +828,9 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     std::vector<int32_t> counts(counts_in.size());
     DGPP_CUDA_OK(cudaMemcpy(counts.data(), d_counts, counts.size() * 4,
                             cudaMemcpyDeviceToHost));
-    std::vector<GlmPickLocal> locals(requests);
+    std::vector<GlmPickLocal> locals(rows);
     DGPP_CUDA_OK(cudaMemcpy(locals.data(), d_locals,
-                            sizeof(GlmPickLocal) * requests,
+                            sizeof(GlmPickLocal) * rows,
                             cudaMemcpyDeviceToHost));
     for (size_t i = 0; i < table_elems; ++i) {
       require(out.folded[i] == 0 || table[i] == 0,
@@ -840,12 +850,15 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     cudaFree(d_fed);
     cudaFree(d_pos);
   }
-  // The verdict on every rank over the folded table.
+  // The verdict on every rank over the folded table (the count table as the
+  // local kernel left it: every rank's is identical).
   for (int k = 0; k < world; ++k) {
     uint16_t* d_table = device_alloc<uint16_t>(table_elems);
     uint64_t* d_carry = device_alloc<uint64_t>(1);
     dgpp::GlmSampleSpec* d_specs = device_alloc<dgpp::GlmSampleSpec>(requests);
-    int64_t* d_pos = device_alloc<int64_t>(positions.size());
+    int64_t* d_pos = device_alloc<int64_t>(row_positions.size());
+    int64_t* d_fed = device_alloc<int64_t>(fed.size());
+    int32_t* d_counts = device_alloc<int32_t>(counts_in.size());
     GlmPickVerdict* d_verdicts = device_alloc<GlmPickVerdict>(requests);
     dgpp::GlmSampleOutcome* d_out = device_alloc<dgpp::GlmSampleOutcome>(requests);
     DGPP_CUDA_OK(cudaMemcpy(d_table, out.folded.data(), table_elems * 2,
@@ -853,14 +866,23 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     DGPP_CUDA_OK(cudaMemcpy(d_specs, specs.data(),
                             specs.size() * sizeof(dgpp::GlmSampleSpec),
                             cudaMemcpyHostToDevice));
-    DGPP_CUDA_OK(cudaMemcpy(d_pos, positions.data(), positions.size() * 8,
+    DGPP_CUDA_OK(cudaMemcpy(d_pos, row_positions.data(), row_positions.size() * 8,
                             cudaMemcpyHostToDevice));
-    dgpp::glm_sample_verdict(d_table, requests, world, k, candidates, vocab,
-                             d_specs, requests, /*rows_per_request=*/1, d_pos,
-                             /*position_stride=*/1, d_verdicts,
+    DGPP_CUDA_OK(cudaMemcpy(d_fed, fed.data(), fed.size() * 8,
+                            cudaMemcpyHostToDevice));
+    DGPP_CUDA_OK(cudaMemcpy(d_counts, out.counts[0].data(),
+                            counts_in.size() * 4, cudaMemcpyHostToDevice));
+    dgpp::glm_sample_verdict(d_table, rows, world, k, candidates, vocab,
+                             d_specs, requests, rows_per_request, d_fed, d_pos,
+                             /*position_stride=*/rows_per_request, d_counts,
+                             d_verdicts,
                              /*device_verdicts=*/nullptr, d_out, d_carry,
                              nullptr);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<int32_t> counts_after(counts_in.size());
+    DGPP_CUDA_OK(cudaMemcpy(counts_after.data(), d_counts,
+                            counts_in.size() * 4, cudaMemcpyDeviceToHost));
+    out.counts_after.push_back(std::move(counts_after));
     std::vector<GlmPickVerdict> verdicts(requests);
     std::vector<dgpp::GlmSampleOutcome> outcomes(requests);
     std::vector<dgpp::GlmSampleSpec> specs_after(requests);
@@ -883,6 +905,8 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     cudaFree(d_carry);
     cudaFree(d_specs);
     cudaFree(d_pos);
+    cudaFree(d_fed);
+    cudaFree(d_counts);
     cudaFree(d_verdicts);
     cudaFree(d_out);
   }
@@ -1151,4 +1175,188 @@ DGPP_TEST(sample_count_tokens_accumulates_the_prompt) {
   require(total == static_cast<int>(ids.size()), "no stray counts");
   cudaFree(d_counts);
   cudaFree(d_ids);
+}
+
+
+// The MTP T=2 verify on the device against the speculative host oracle
+// (glm_sample::spec_accept_from_prefix for row 0, sample_from_prefix for row 1)
+// over a simulated world: a greedy request under the greedy judge, sampled
+// requests whose drafts are accepted (then row 1 decides) or rejected (the
+// residual, and the draft leaves the count table), and the two fallbacks —
+// row 0 undecidable (a provisional reject with the counter untouched) and
+// row 1 undecidable after an accept (u1 consumed, u2 reserved).
+DGPP_TEST(sample_pick_t2_matches_spec_oracle_over_simulated_world) {
+  Rng rng(0x7e2a);
+  constexpr int kWorld = 4;
+  constexpr int count = 96;
+  constexpr int vocab = kWorld * count;
+  constexpr int candidates = 32;
+  constexpr int requests = 4;
+  constexpr int rpr = 2;
+  int accepts = 0, rejects = 0, fallback0 = 0, fallback1 = 0;
+  for (int trial = 0; trial < 10; ++trial) {
+    // Rows: request q's rows are 2q (row 0) and 2q+1 (row 1).
+    std::vector<float> full(static_cast<size_t>(requests * rpr) * vocab);
+    const auto fill = [&](int row, bool flat) {
+      float* v = full.data() + static_cast<size_t>(row) * vocab;
+      for (int i = 0; i < vocab; ++i) {
+        const uint64_t r = rng.next();
+        v[i] = flat ? static_cast<float>(r % 3) * 0.01f
+                    : static_cast<float>((r >> 8) % 41) * 0.25f - 5.0f;
+      }
+      if (!flat) {
+        // Two peaks holding ~97% of the mass: the nucleus resolves inside
+        // 128 candidates and a draft at the argmax stands ~92% of the time.
+        v[static_cast<size_t>(rng.next() % vocab)] = 12.0f;
+        v[static_cast<size_t>(rng.next() % vocab)] = 9.0f;
+      }
+    };
+    // 0: greedy. 1: sampled, row 0 peaked, row 1 flat on odd trials (the
+    // row-1 fallback). 2: sampled, row 0 flat (the row-0 fallback). 3:
+    // sampled, both peaked.
+    fill(0, false); fill(1, false);
+    fill(2, false); fill(3, trial % 2 == 1);
+    fill(4, true);  fill(5, false);
+    fill(6, false); fill(7, false);
+    std::vector<dgpp::GlmSampleSpec> specs(requests);
+    specs[0].temperature = 0.0f;
+    for (int q = 1; q < requests; ++q) {
+      specs[q].temperature = 1.0f;
+      specs[q].top_p = 0.95f;
+      specs[q].presence_penalty = 0.1f;
+      specs[q].seed = 0x2000 + q + 31 * trial;
+      specs[q].counter = 4;
+    }
+    std::vector<int32_t> counts(static_cast<size_t>(requests) * vocab, 0);
+    std::vector<int64_t> fed(requests * rpr), positions(requests);
+    for (int q = 0; q < requests; ++q) {
+      positions[q] = 5 + q;
+      fed[2 * q] = static_cast<int64_t>(rng.next() % vocab);
+      const Candidate argmax0 =
+          dgpp::glm_sample::local_max(full.data() + static_cast<size_t>(2 * q) * vocab, vocab, 0);
+      // The draft: request 1's is always the row-0 argmax (so its odd
+      // trials reach the flat row 1 and fall back there); requests 0 and 3
+      // take the argmax on even trials and a random token otherwise
+      // (accepts and rejects); request 2's row 0 is flat and falls back.
+      const bool likely = q == 1 || (q != 2 && trial % 2 == 0);
+      fed[2 * q + 1] = likely ? argmax0.id
+                              : static_cast<int64_t>(rng.next() % vocab);
+      for (int j = 0; j < 3; ++j)
+        counts[static_cast<size_t>(q) * vocab + rng.next() % vocab] += 1;
+    }
+    const uint64_t carry = 0x3c3c3c3c3c3cull;
+    const SampleWorldRun run = run_sample_world(
+        full, requests, kWorld, count, specs, counts, fed, positions,
+        candidates, carry, rpr);
+
+    for (int q = 0; q < requests; ++q) {
+      const float* row0 = full.data() + static_cast<size_t>(2 * q) * vocab;
+      const float* row1 = full.data() + static_cast<size_t>(2 * q + 1) * vocab;
+      const int32_t draft = static_cast<int32_t>(fed[2 * q + 1]);
+      if (specs[q].temperature <= 0.0f) {
+        const int32_t w0 = dgpp::glm_sample::local_max(row0, vocab, 0).id;
+        const int32_t w1 = dgpp::glm_sample::local_max(row1, vocab, 0).id;
+        const int accepted = w0 == draft ? 2 : 1;
+        for (int k = 0; k < kWorld; ++k) {
+          const GlmPickVerdict& v = run.verdicts[k][q];
+          require(v.rows == 2 && v.accepted == accepted && v.winners[0] == w0 &&
+                      v.winners[1] == w1 && v.next == (accepted == 2 ? w1 : w0),
+                  "greedy T=2 request: the greedy judge");
+        }
+        continue;
+      }
+      // The host oracle over the same inputs.
+      const dgpp::glm_sample::Params p = params_of(specs[q]);
+      std::vector<int32_t> ctx0(counts.begin() + static_cast<long>(q) * vocab,
+                                counts.begin() + static_cast<long>(q + 1) * vocab);
+      ctx0[static_cast<size_t>(fed[2 * q])] += 1;
+      std::vector<int32_t> ctx1 = ctx0;
+      ctx1[static_cast<size_t>(draft)] += 1;
+      const auto as_map = [&](const std::vector<int32_t>& c) {
+        std::unordered_map<int32_t, int32_t> m;
+        for (int v = 0; v < vocab; ++v)
+          if (c[static_cast<size_t>(v)]) m[v] = c[static_cast<size_t>(v)];
+        return m;
+      };
+      std::vector<float> adj0(row0, row0 + vocab), adj1(row1, row1 + vocab);
+      dgpp::glm_sample::apply_penalties(adj0.data(), vocab, 0, p, as_map(ctx0));
+      dgpp::glm_sample::apply_penalties(adj1.data(), vocab, 0, p, as_map(ctx1));
+      const auto merged_of = [&](const std::vector<float>& adj, double* Z) {
+        std::vector<std::vector<Candidate>> shards;
+        std::vector<double> lses;
+        for (int k = 0; k < kWorld; ++k) {
+          shards.push_back(dgpp::glm_sample::local_topk(adj.data() + k * count, count,
+                                                        k * count, candidates));
+          lses.push_back(dgpp::glm_sample::slice_logsumexp(adj.data() + k * count,
+                                                            count, p.temperature));
+        }
+        *Z = dgpp::glm_sample::merge_logsumexp(lses);
+        return dgpp::glm_sample::merge_topk(shards, candidates);
+      };
+      double Z0 = 0.0, Z1 = 0.0;
+      const std::vector<Candidate> m0 = merged_of(adj0, &Z0);
+      const std::vector<Candidate> m1 = merged_of(adj1, &Z1);
+      dgpp::glm_sample::Rng host{specs[q].seed, specs[q].counter};
+      const dgpp::glm_sample::SpecPrefixDecision d0 =
+          dgpp::glm_sample::spec_accept_from_prefix(m0, vocab, Z0, draft, p, host);
+      // Expected verdict/outcome and the count table after the step.
+      int want_accepted = 1, want_fallback_row = -1;
+      int32_t want_w0 = -1, want_w1 = -1;
+      std::vector<int32_t> want_counts = ctx1;
+      if (!d0.resolved) {
+        ++fallback0;
+        want_fallback_row = 0;
+        want_w0 = m0[0].id;  // provisional reject: the count table keeps both
+      } else if (!d0.accepted) {
+        ++rejects;
+        want_w0 = d0.result.token;
+        want_counts[static_cast<size_t>(draft)] -= 1;
+      } else {
+        ++accepts;
+        want_accepted = 2;
+        want_w0 = draft;
+        const dgpp::glm_sample::PrefixDecision d1 =
+            dgpp::glm_sample::sample_from_prefix(m1, vocab, Z1, p, host);
+        if (d1.resolved) {
+          want_w1 = d1.result.token;
+        } else {
+          ++fallback1;
+          want_fallback_row = 1;
+          want_w1 = m1[0].id;
+        }
+      }
+      for (int k = 0; k < kWorld; ++k) {
+        const GlmPickVerdict& v = run.verdicts[k][q];
+        const dgpp::GlmSampleOutcome& o = run.outcomes[k][q];
+        require(v.rows == 2 && v.accepted == want_accepted &&
+                    v.winners[0] == want_w0 && v.winners[1] == want_w1 &&
+                    v.next == (want_accepted == 2 ? want_w1 : want_w0),
+                "T=2 verdict differs from the speculative oracle (trial " +
+                    std::to_string(trial) + " request " + std::to_string(q) +
+                    ": got accepted " + std::to_string(v.accepted) + " winners " +
+                    std::to_string(v.winners[0]) + "/" + std::to_string(v.winners[1]) +
+                    ", want " + std::to_string(want_accepted) + " " +
+                    std::to_string(want_w0) + "/" + std::to_string(want_w1) + ")");
+        require(o.sampled == 1 && o.fallback_row == want_fallback_row &&
+                    o.fallback == (want_fallback_row >= 0 ? 1 : 0) &&
+                    o.accepted_draft == (want_accepted == 2 ? 1 : 0),
+                "T=2 outcome flags");
+        require(o.counter == host.counter, "T=2 counter differs from the oracle");
+        require(bits_equal(o.normalizer, Z0), "row-0 normalizer");
+        if (want_accepted == 2) require(bits_equal(o.normalizer1, Z1), "row-1 normalizer");
+        if (d0.resolved) require(bits_equal(o.logprob, d0.result.logprob), "row-0 logprob");
+        require(run.counts_after[k] .size() == counts.size(), "counts shape");
+        for (int vtok = 0; vtok < vocab; ++vtok)
+          require(run.counts_after[k][static_cast<size_t>(q) * vocab + vtok] ==
+                      want_counts[static_cast<size_t>(vtok)],
+                  "count table after the T=2 verdict differs");
+        require(v.digest_mismatch == 0 && run.carry_out[k] == v.digest, "digest chain");
+      }
+    }
+  }
+  require(accepts > 0 && rejects > 0 && fallback0 > 0 && fallback1 > 0,
+          "the sweep must exercise every outcome (accepts " +
+              std::to_string(accepts) + ", rejects " + std::to_string(rejects) +
+              ", row-0 fallbacks " + std::to_string(fallback0) +
+              ", row-1 fallbacks " + std::to_string(fallback1) + ")");
 }

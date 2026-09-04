@@ -221,7 +221,11 @@ inline SampledSpeculator::Row0 make_fabric_spec_row0(
 // bulk gather, the complete decision under the transported normalizer with
 // the reserved draw, rank 0's digest — and the true token overrides the
 // provisional one in the graph's token feed before the next replay. The
-// MTP graphs stay greedy-only (sampling under MTP is the next slice).
+// MTP graphs sample too (the T=2 verify's accept test and row-1 sample on
+// the device); a fallback there rolls the in-graph draft back to its ring
+// snapshot, decides on the host (re-running the verify's second row eagerly
+// when a provisionally rejected draft turns out to stand), re-drafts
+// eagerly on the true rows and reseeds the [next, draft] feed.
 class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
  public:
   GlmGraphEngineAdapter(GlmDiagnosticModel* model, net::CollectiveBus* bus,
@@ -250,8 +254,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
           "decode-row ceiling");
     prefill_pick_ = make_fabric_pick(bus_, rank_, world, pick_scratch, vocab_,
                                      pick_timeout_ms_);
-    if (sample_prefix_scratch_ != nullptr && sample_gather_scratch_ != nullptr &&
-        !model_->mtp_enabled()) {
+    if (sample_prefix_scratch_ != nullptr && sample_gather_scratch_ != nullptr) {
       // The planned width, or a lower cap (the loopback gates narrow it so
       // the tiny fixture vocabulary still exercises the fallback).
       if (sampling_candidates_cap < 1 ||
@@ -300,6 +303,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
                                                 pick_timeout_ms_, candidates_);
     params_.assign(static_cast<size_t>(slots_), glm_sample::greedy_params());
     rng_.assign(static_cast<size_t>(slots_), glm_sample::Rng{});
+    context_.assign(static_cast<size_t>(slots_), {});
     pending_.assign(static_cast<size_t>(slots_), -1);
     draft_.assign(static_cast<size_t>(slots_), -1);
     live_.assign(static_cast<size_t>(slots_), false);
@@ -346,6 +350,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
           "the sampler scratch are greedy-only)");
     params_[static_cast<size_t>(req)] = sampling;
     rng_[static_cast<size_t>(req)] = glm_sample::Rng{seed, 0};
+    context_[static_cast<size_t>(req)].clear();
     if (!sampling_) return;
     GlmSampleSpec spec;
     spec.temperature = sampling.temperature;
@@ -434,7 +439,11 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       if (sampled) {
         // The prompt is the request's context on the device (the first
         // token is the next step's fed token and counts itself there), and
-        // the prefill's draw moved the counter.
+        // the prefill's draw moved the counter. The host mirror of the
+        // context serves the MTP fallbacks' penalties.
+        std::vector<int32_t>& context = context_[static_cast<size_t>(req)];
+        context.assign(prompt.begin(), prompt.end());
+        context.push_back(first);
         const int n = static_cast<int>(prompt.size());
         if (n > model_->max_tokens())
           throw std::invalid_argument("graph engine: prompt exceeds max_tokens");
@@ -529,6 +538,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     // device too, so a padded replay of this slot never draws.
     params_[static_cast<size_t>(req)] = glm_sample::greedy_params();
     rng_[static_cast<size_t>(req)] = glm_sample::Rng{};
+    context_[static_cast<size_t>(req)].clear();
     if (sampling_) push_spec(req, GlmSampleSpec{});
   }
 
@@ -564,8 +574,9 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
 
   // The scalar variant of request slot `req`: its own spec and count table
   // are baked into the recorded nodes (the verdict indexes request 0).
-  GlmDevicePicker::Inputs scalar_sampling_inputs(int req) const {
+  GlmDevicePicker::Inputs scalar_sampling_inputs(int req, int rows = 1) const {
     GlmDevicePicker::Inputs in = scalar_pick_inputs(/*slot=*/0);
+    in.rows = rows;
     if (sampling_) {
       in.specs = d_specs_ + req;
       in.counts = d_counts_ + static_cast<size_t>(req) * vocab_;
@@ -710,9 +721,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
             std::vector<int64_t>{pending_[static_cast<size_t>(req)],
                                  draft_[static_cast<size_t>(req)]},
             /*device_positions=*/true, /*device_tokens=*/true);
-        GlmDevicePicker::Inputs verify = scalar_pick_inputs(/*slot=*/0);
-        verify.rows = 2;
-        picker_->record(model_->stream(), verify);
+        picker_->record(model_->stream(), scalar_sampling_inputs(req, /*rows=*/2));
         model_->session_graph_capture_commit(
             req, picker_->device_verdict(0));
         model_->session_graph_capture_draft(
@@ -799,7 +808,37 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       decided.push_back(token);
     }
     int32_t next = verify.next;
-    if (sampled_slot(req)) {
+    if (sampled_slot(req) && model_->mtp_enabled()) {
+      // The T=2 verify's sampled verdict. The context mirror follows the
+      // device count table: the draft joins it only when it stands.
+      const GlmSampleOutcome& o = picker_->outcome(0, verdict_request);
+      glm_sample::Rng& rng = rng_[static_cast<size_t>(req)];
+      std::vector<int32_t>& context = context_[static_cast<size_t>(req)];
+      const int32_t fed_draft =
+          static_cast<int32_t>(draft_[static_cast<size_t>(req)]);
+      if (!o.sampled)
+        throw std::runtime_error(
+            "graph engine: the device made no stochastic decision for a "
+            "sampled MTP slot " + std::to_string(req));
+      DGPP_LOG_DEBUG(
+          "rank {}: slot {} device MTP sampling outcome: fallback_row {} "
+          "accepted_draft {} counter {} winners {}/{} accepted {}",
+          rank_, req, o.fallback_row, o.accepted_draft, o.counter,
+          verify.winners[0], verify.winners[1], verify.accepted);
+      if (o.fallback_row < 0) {
+        if (o.counter != rng.counter + 2)
+          throw std::runtime_error(
+              "graph engine: the device consumed " +
+              std::to_string(o.counter - rng.counter) +
+              " draws for one T=2 step");
+        rng.counter = o.counter;
+        if (verify.accepted == 2) context.push_back(fed_draft);
+        context.push_back(next);
+      } else {
+        next = serve_mtp_fallback(req, verdict_request, o, verify, fed_draft,
+                                  &decided, batched);
+      }
+    } else if (sampled_slot(req)) {
       const GlmSampleOutcome& o = picker_->outcome(0, verdict_request);
       glm_sample::Rng& rng = rng_[static_cast<size_t>(req)];
       if (!o.sampled)
@@ -830,9 +869,10 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
               " draws for one T=1 step");
         rng.counter = o.counter;
       }
+      context_[static_cast<size_t>(req)].push_back(next);
     }
     pending_[static_cast<size_t>(req)] = next;
-    if (model_->mtp_enabled()) {
+    if (model_->mtp_enabled() && !mtp_redrafted_) {
       const GlmPickVerdict draft = picker_->verdict(1, verdict_request);
       if (draft.rows != 1 || draft.accepted != 1 || draft.next < 0 ||
           draft.next >= vocab_)
@@ -841,7 +881,106 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
             std::to_string(req));
       draft_[static_cast<size_t>(req)] = draft.next;
     }
+    mtp_redrafted_ = false;
     return decided;
+  }
+
+  // The sampled MTP step's fallback (DESIGN §9/§10): the in-graph draft ran
+  // on provisional rows, so it rolls back to its ring snapshot first. Row 0
+  // undecided (the device rejected provisionally, the commit kept the
+  // post-row-0 state): the host gathers row 0 and decides; a reject is the
+  // residual token; an accept means the draft stood after all, so the
+  // verify's second row re-runs eagerly and its token is sampled on the
+  // host. Row 1 undecided (the draft stood on the device): the host gathers
+  // row 1 and samples it. Either way the true rows re-draft eagerly, the
+  // [next, draft] feed is reseeded, the counter is pushed. Returns the new
+  // next token and rewrites `decided`.
+  int32_t serve_mtp_fallback(int req, int verdict_request,
+                             const GlmSampleOutcome& o,
+                             const GlmPickVerdict& verify, int32_t fed_draft,
+                             std::vector<int32_t>* decided, bool batched) {
+    glm_sample::Rng& rng = rng_[static_cast<size_t>(req)];
+    std::vector<int32_t>& context = context_[static_cast<size_t>(req)];
+    const glm_sample::Params& p = params_[static_cast<size_t>(req)];
+    const int count = model_->lm_vocab_count();
+    const int begin = model_->lm_vocab_begin();
+    const size_t row0 =
+        static_cast<size_t>(verdict_request) * rows_per_request_;
+    // The draft block ran on the provisional rows: back to its snapshot.
+    model_->session_draft_rollback(req, verify.accepted);
+    const auto gather_row = [&](size_t row) {
+      DGPP_CUDA_OK(cudaMemcpyAsync(h_fallback_row_,
+                                   model_->device_logits() + row * count,
+                                   sizeof(float) * count,
+                                   cudaMemcpyDeviceToHost, model_->stream()));
+      DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+      bus_gather_logits(*bus_, rank_, world_, h_fallback_row_, count, begin,
+                        static_cast<int>(vocab_), sample_gather_scratch_,
+                        pick_timeout_ms_, &fallback_full_);
+    };
+    std::vector<int64_t> rows;
+    int32_t next = -1;
+    if (o.fallback_row == 0) {
+      if (o.counter != rng.counter || verify.accepted != 1)
+        throw std::runtime_error(
+            "graph engine: a row-0 fallback must leave the counter and "
+            "commit one row");
+      gather_row(row0);
+      const glm_sample::SpecPrefixDecision d0 =
+          glm_sample::spec_accept_complete(fallback_full_.data(),
+                                           static_cast<int>(vocab_),
+                                           o.normalizer, fed_draft, p, rng);
+      bus_check_decision_digest(*bus_, rank_, d0.accepted, d0.result,
+                                o.normalizer, sample_prefix_scratch_,
+                                pick_timeout_ms_, "graph MTP fallback row 0");
+      if (!d0.accepted) {
+        next = d0.result.token;
+        *decided = {next};
+        rows = {next};
+        // The draft leaves the device count table it was counted into.
+        glm_sample_adjust_count(d_counts_ + static_cast<size_t>(req) * vocab_,
+                                fed_draft, -1, static_cast<int>(vocab_),
+                                model_->stream());
+        DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+      } else {
+        // The draft stood: the verify's second row, eagerly, then its sample.
+        context.push_back(fed_draft);
+        const GlmDiagnosticModel::Outputs row1 =
+            model_->session_verify(req, std::vector<int64_t>{fed_draft});
+        const glm_sample::Result r1 = prefill_sample_(row1, p, rng, context);
+        next = r1.token;
+        *decided = {fed_draft, next};
+        rows = {fed_draft, next};
+      }
+    } else {
+      if (o.counter != rng.counter + 1 || verify.accepted != 2)
+        throw std::runtime_error(
+            "graph engine: a row-1 fallback must consume the accept draw "
+            "and commit two rows");
+      rng.counter = o.counter;
+      context.push_back(fed_draft);
+      gather_row(row0 + 1);
+      const glm_sample::Result r1 = glm_sample::sample_complete_logits(
+          fallback_full_.data(), static_cast<int>(vocab_), o.normalizer1, p,
+          rng);
+      bus_check_decision_digest(*bus_, rank_, true, r1, o.normalizer1,
+                                sample_prefix_scratch_, pick_timeout_ms_,
+                                "graph MTP fallback row 1");
+      next = r1.token;
+      *decided = {fed_draft, next};
+      rows = {fed_draft, next};
+    }
+    if (next < 0 || next >= vocab_)
+      throw std::runtime_error("graph engine MTP fallback token out of range");
+    context.push_back(next);
+    // The true rows through the draft block, eagerly; the greedy draft pick.
+    const int32_t draft_new = prefill_pick_(model_->session_draft(req, rows));
+    draft_[static_cast<size_t>(req)] = draft_new;
+    mtp_redrafted_ = true;
+    if (batched) model_->session_graph_seed_tokens(req, {next, draft_new});
+    push_counter(req);
+    ++fallbacks_;
+    return next;
   }
 
   std::vector<int32_t> step_scalar(int req) {
@@ -946,8 +1085,10 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   std::vector<float> fallback_full_;
   std::vector<glm_sample::Params> params_;
   std::vector<glm_sample::Rng> rng_;
+  std::vector<std::vector<int32_t>> context_;  // prompt + decided, per slot
   GenEngineAdapter::Sample prefill_sample_;
   uint64_t fallbacks_ = 0;
+  bool mtp_redrafted_ = false;  // this collect re-drafted on the host
   int slots_ = 0;
   int rows_per_request_ = 1;
   int batch_min_live_ = 1;
