@@ -121,7 +121,34 @@ struct PrefixDecision {
   bool resolved = false;
   Result result;
   double covered_mass = 0.0;  // pre-filter mass represented by the prefix
+  double normalizer = 0.0;    // the fold log-sum-exp the decision used; the
+                              // fallback re-runs the decision under it
 };
+
+// The greedy spec: no draw, no seed consumed, the exact argmax path.
+inline Params greedy_params() {
+  Params p;
+  p.temperature = 0.0f;
+  return p;
+}
+
+// The request-spec contract every path assumes. Throws invalid_argument so a
+// bad spec fails identically on every rank (the scheduler validates at
+// submit; the service turns the same failure into a 400).
+inline void validate_params(const Params& p) {
+  if (!std::isfinite(p.temperature) || p.temperature < 0.0f)
+    throw std::invalid_argument("temperature must be finite and >= 0");
+  if (!std::isfinite(p.top_p) || !(p.top_p > 0.0f && p.top_p <= 1.0f))
+    throw std::invalid_argument("top_p must be in (0, 1]");
+  if (!std::isfinite(p.min_p) || p.min_p < 0.0f || p.min_p > 1.0f)
+    throw std::invalid_argument("min_p must be in [0, 1]");
+  if (p.top_k < 0) throw std::invalid_argument("top_k must be >= 0");
+  if (!std::isfinite(p.repetition_penalty) || !(p.repetition_penalty > 0.0f))
+    throw std::invalid_argument("repetition_penalty must be > 0");
+  if (!std::isfinite(p.frequency_penalty) || !std::isfinite(p.presence_penalty))
+    throw std::invalid_argument("penalties must be finite");
+  if (p.logprobs < 0) throw std::invalid_argument("logprobs must be >= 0");
+}
 
 // ---------------------------------------------------------------------------
 // Penalties (warper stage 1)
@@ -492,6 +519,7 @@ inline PrefixDecision sample_from_prefix(
   };
 
   PrefixDecision decision;
+  decision.normalizer = global_scaled_logsumexp;
   for (size_t i = 0; i < held; ++i) decision.covered_mass += mass_at(i);
 
   // The survivor set is known and materialized: the shared selector finishes
@@ -606,6 +634,24 @@ inline void validate_vocab_slices(const std::vector<VocabSlice>& slices,
         "glm_sample: vocabulary slices must cover the vocabulary exactly");
 }
 
+// The sharded lm head's layout — the loader's lm_head_slice rule (an
+// integer split, gap-free and overlap-free at any vocab/world) — which is
+// the fold order the sharded sampler is defined over. World 1 is one slice.
+inline std::vector<VocabSlice> vocab_layout(int vocab, int world) {
+  if (vocab <= 0 || world <= 0 || world > vocab)
+    throw std::invalid_argument("glm_sample: vocab/world layout");
+  std::vector<VocabSlice> out;
+  out.reserve(static_cast<size_t>(world));
+  for (int r = 0; r < world; ++r) {
+    const int begin =
+        static_cast<int>(static_cast<int64_t>(vocab) * r / world);
+    const int end =
+        static_cast<int>(static_cast<int64_t>(vocab) * (r + 1) / world);
+    out.push_back({begin, end - begin});
+  }
+  return out;
+}
+
 // The fold normalizer of the complete temperature-scaled distribution: each
 // slice's fp64 log-sum-exp, folded in rank order — bitwise what the bus
 // transports and folds.
@@ -646,6 +692,51 @@ inline Result sample_reference_sharded(
     throw std::logic_error(
         "glm_sample: the complete candidate list must resolve");
   return decision.result;
+}
+
+// The full-logit FALLBACK's decision, given the complete PENALIZED logits
+// (every rank's slice gathered) and the fold normalizer the prefix step
+// already transported. Bitwise sample_reference_sharded()'s result, by width
+// independence: widening exact prefixes are tried first (a partial sort of
+// the vocabulary costs O(V log k), the complete sort O(V log V)), and the
+// first width whose decision resolves is the complete list's decision; the
+// complete list is the last width and always resolves. A fallback here
+// consumes no draw until it resolves, so the counter advances exactly once.
+inline Result sample_complete_logits(const float* adjusted, int vocab,
+                                     double normalizer, const Params& p,
+                                     Rng& rng) {
+  if (adjusted == nullptr || vocab <= 0)
+    throw std::invalid_argument("glm_sample: empty complete logits");
+  static constexpr int kWidths[] = {1024, 8192, 65536};
+  for (int width : kWidths) {
+    if (width >= vocab) break;
+    const std::vector<Candidate> prefix = local_topk(adjusted, vocab, 0, width);
+    const PrefixDecision d = sample_from_prefix(prefix, vocab, normalizer, p, rng);
+    if (d.resolved) return d.result;
+  }
+  const std::vector<Candidate> sorted = sort_slice(adjusted, vocab, 0);
+  const PrefixDecision d = sample_from_prefix(sorted, vocab, normalizer, p, rng);
+  if (!d.resolved)
+    throw std::logic_error("glm_sample: the complete logits must resolve");
+  return d.result;
+}
+
+// The sampler for a host that holds EVERY logit (world 1's full head, or a
+// diagnostic over gathered slices): penalties, the fold normalizer over the
+// layout, the widening decision. Bitwise sample_reference_sharded() at the
+// same layout, in O(V log k) rather than a full sort on most calls.
+inline Result sample_full_logits(const float* logits, int vocab,
+                                 const std::vector<VocabSlice>& layout,
+                                 const Params& p, Rng& rng,
+                                 const std::vector<int32_t>& context_ids) {
+  if (!(p.temperature > 0.0f) || !std::isfinite(p.temperature))
+    throw std::invalid_argument(
+        "glm_sample: sample_full_logits is the stochastic path");
+  validate_vocab_slices(layout, vocab);
+  std::vector<float> v(logits, logits + vocab);
+  apply_penalties(v.data(), vocab, 0, p, count_context(context_ids));
+  const double lse = sharded_scaled_logsumexp(v.data(), layout, p.temperature);
+  return sample_complete_logits(v.data(), vocab, lse, p, rng);
 }
 
 // Probability mass covered by each requested prefix of an already

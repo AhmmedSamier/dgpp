@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -31,6 +32,9 @@ using dgpp::glm_sample::Result;
 using dgpp::glm_sample::sample_reference;
 using dgpp::glm_sample::sample_from_prefix;
 using dgpp::glm_sample::sample_reference_sharded;
+using dgpp::glm_sample::sample_full_logits;
+using dgpp::glm_sample::validate_params;
+using dgpp::glm_sample::vocab_layout;
 using dgpp::glm_sample::sharded_scaled_logsumexp;
 using dgpp::glm_sample::VocabSlice;
 using dgpp::glm_sample::select_from_sorted;
@@ -666,4 +670,134 @@ DGPP_TEST(sample_reference_sharded_rejects_bad_layouts) {
     threw = true;
   }
   require(threw, "temperature <= 0 is not the sharded sampler's path");
+}
+
+DGPP_TEST(vocab_layout_matches_the_loader_rule) {
+  // The loader's lm_head_slice: begin = V*r/W in integer arithmetic,
+  // contiguous and covering for any V/W.
+  for (const auto& [vocab, world] : {std::pair{154880, 4}, std::pair{7, 3},
+                                    std::pair{600, 2}, std::pair{5, 5},
+                                    std::pair{1000, 1}}) {
+    const std::vector<VocabSlice> layout = vocab_layout(vocab, world);
+    require(static_cast<int>(layout.size()) == world, "one slice per rank");
+    int next = 0;
+    for (int r = 0; r < world; ++r) {
+      require(layout[static_cast<size_t>(r)].begin == next, "contiguous");
+      require(layout[static_cast<size_t>(r)].begin ==
+                  static_cast<int>(static_cast<int64_t>(vocab) * r / world),
+              "the loader's begin");
+      require(layout[static_cast<size_t>(r)].count > 0, "non-empty");
+      next += layout[static_cast<size_t>(r)].count;
+    }
+    require(next == vocab, "covers the vocabulary");
+  }
+  bool threw = false;
+  try {
+    (void)vocab_layout(3, 4);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "more ranks than ids is not a layout");
+}
+
+// The fallback's decision over the complete logits — widening partial sorts,
+// then the full sort — is the sharded reference bitwise, in every regime,
+// with penalties, at vocabularies both below and above the first width.
+DGPP_TEST(sample_full_logits_is_the_sharded_reference_bitwise) {
+  FixtureRng fx;
+  std::vector<Params> regimes;
+  {
+    Params p;
+    p.temperature = 1.0f;
+    p.top_p = 0.95f;
+    p.logprobs = 2;
+    regimes.push_back(p);
+  }
+  {
+    Params p;
+    p.temperature = 1.0f;
+    p.top_p = 1.0f;  // the pure walk: the widening actually widens
+    p.logprobs = 2;
+    regimes.push_back(p);
+  }
+  {
+    Params p;
+    p.temperature = 0.6f;
+    p.top_p = 0.9f;
+    p.min_p = 0.02f;
+    p.frequency_penalty = 0.3f;
+    regimes.push_back(p);
+  }
+  {
+    Params p;
+    p.temperature = 1.3f;
+    p.top_k = 50;
+    p.top_p = 0.8f;
+    regimes.push_back(p);
+  }
+  const std::vector<int32_t> context{1, 1, 2, 500, 1500, 2999};
+  int cases = 0;
+  for (const int vocab : {300, 3000}) {
+    for (const int world : {1, 3}) {
+      const std::vector<VocabSlice> layout = vocab_layout(vocab, world);
+      for (int fixture = 0; fixture < 6; ++fixture) {
+        const float spread = (fixture % 2) ? 1.0f : 10.0f;
+        const std::vector<float> logits = make_logits(vocab, fx, spread);
+        for (const Params& p : regimes) {
+          for (uint64_t seed = 0; seed < 4; ++seed) {
+            Rng a{seed, 3}, b{seed, 3};
+            const Result oracle = sample_reference_sharded(
+                logits.data(), vocab, layout, p, a, context);
+            const Result got = sample_full_logits(logits.data(), vocab,
+                                                  layout, p, b, context);
+            require(results_identical(got, oracle) && a.counter == b.counter,
+                    "sample_full_logits drifted from the sharded reference "
+                    "at vocab " + std::to_string(vocab) + " world " +
+                        std::to_string(world) + " seed " +
+                        std::to_string(seed));
+            ++cases;
+          }
+        }
+      }
+    }
+  }
+  require(cases == 2 * 2 * 6 * 4 * 4, "the sweep ran");
+}
+
+DGPP_TEST(validate_params_rejects_bad_specs_and_accepts_the_defaults) {
+  const auto rejects = [](const Params& p) {
+    try {
+      validate_params(p);
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+    return false;
+  };
+  Params ok;
+  require(!rejects(ok), "the neutral spec is valid");
+  require(!rejects(dgpp::glm_sample::greedy_params()), "greedy is valid");
+  Params p = ok;
+  p.temperature = -0.1f;
+  require(rejects(p), "negative temperature");
+  p = ok;
+  p.temperature = std::numeric_limits<float>::infinity();
+  require(rejects(p), "infinite temperature");
+  p = ok;
+  p.top_p = 0.0f;
+  require(rejects(p), "top_p 0");
+  p = ok;
+  p.top_p = 1.5f;
+  require(rejects(p), "top_p above 1");
+  p = ok;
+  p.min_p = 1.5f;
+  require(rejects(p), "min_p above 1");
+  p = ok;
+  p.top_k = -1;
+  require(rejects(p), "negative top_k");
+  p = ok;
+  p.repetition_penalty = 0.0f;
+  require(rejects(p), "zero repetition penalty");
+  p = ok;
+  p.presence_penalty = std::nanf("");
+  require(rejects(p), "NaN penalty");
 }

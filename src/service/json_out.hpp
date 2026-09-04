@@ -63,4 +63,23 @@ inline std::string json_int(int64_t v) {
   return out;
 }
 
+// The one float surface: the effective sampling defaults /v1/models reports.
+// Shortest round-trip form (std::to_chars), so the number a client reads
+// back parses to the exact value the server applies. Callers pass finite
+// values only (a non-finite default is refused at load).
+inline void append_json_float(std::string* out, double v) {
+  char buf[32];
+  const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v);
+  (void)ec;
+  out->append(buf, end - buf);
+}
+// The spec's fields are fp32: format at float precision, so 0.95f reads
+// back as 0.95 (and parses to the same float), not as its double expansion.
+inline void append_json_float(std::string* out, float v) {
+  char buf[32];
+  const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v);
+  (void)ec;
+  out->append(buf, end - buf);
+}
+
 }  // namespace dgpp::service

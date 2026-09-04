@@ -1629,10 +1629,14 @@ top-k → min-p → top-p (the crossing token stays in) → one uniform draw
 (fp64 walk over fp32 probabilities). The RNG is counter-based: `splitmix64`
 over (seed, counter), one counter advance per stochastic draw, none for
 greedy — any rank reconstructs any request's draw sequence from the seed
-and the step count. Wired: the greedy path only — host `bus_greedy_pick`
-(gather + broadcast with the readback invariant) on the eager path and the
-on-device `GlmDevicePicker` in the graph step (§9); the service refuses
-`temperature != 0` and `top_p != 1` with a named-parameter 400.
+and the step count. Wired: the greedy path everywhere — host
+`bus_greedy_pick` (gather + broadcast with the readback invariant) on the
+eager path and the on-device `GlmDevicePicker` in the graph step (§9) —
+and, since 2026-09-04, the exact stochastic sampler on the EAGER engines
+(below: the width-independent seam, `make_fabric_sample`, the request
+seam). The graph engine still picks greedily only; bound to it, the service
+serves greedy defaults and refuses `temperature > 0` with a named-parameter
+400 (`sampling_unsupported`).
 
 Design for the rest (PLAN M6 6b). Three facts fix the shape. The model
 card's recommended and evaluated settings are `temperature=1.0,
@@ -1654,10 +1658,26 @@ effective defaults.
 The loader half is built (2026-09-03): present fields and EOS ids are parsed
 strictly, missing fields retain explicit presence information and log their
 greedy-safe/neutral fallback, and both generation executables give the
-generation file's EOS set precedence over `config.json`. Applying these
-defaults at the request seam, command-line overrides, and `/v1/models`
-reporting land with the distributed sampler so the service never advertises
-or silently applies a stochastic mode it cannot execute yet.
+generation file's EOS set precedence over `config.json`. The request seam
+is built (2026-09-04): `SchedulerRequest` carries the `glm_sample::Params`
+spec and the seed (greedy by default, so every older manifest and gate
+keeps its exact op stream); `SchedulerEngine::supports_sampling` /
+`configure_sampling` arm a slot immediately before its prefill pick, and
+the scheduler refuses a stochastic request on a greedy-only engine at
+submit, identically on every rank; the journal's tick record carries the
+spec as float BITS plus the seed for stochastic submits only. The service
+accepts `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`,
+`seed` and the HF extensions `top_k`, `min_p`, `repetition_penalty`
+(validated, the 400 names the field), fills every omitted field from the
+checkpoint's defaults with the process overrides applied, draws a fresh
+seed per seedless request (or the `--seed` one) so every rank replays the
+same draw sequence from the journal, and reports the effective defaults on
+`/v1/models` as `"sampling":{"available":…,"defaults":{…}}`. Bound to an
+engine that cannot sample (today's graph engine) it collapses the defaults
+to greedy with a WARN line and refuses `temperature > 0` — never a silently
+applied mode. `glm_gen_check` deliberately keeps its greedy loop as the
+default (its transcripts are the regression instrument) and samples under
+`--sample` or any override, eager engines only.
 
 The k-sizing instrument is built (2026-09-03), separately from the production
 sampler. With `--teacher-file F --sampling-profile`, every rank selects its
@@ -1704,8 +1724,29 @@ no semantic `top_k` — the checkpoint's `generation_config.json` carries
 exactly those two sampling fields) over a run of draws against the sharded
 reference bitwise, with a cross-shard tie that survives the penalties and
 decides draws, rank-identical RNG state, and the flat-distribution fallback.
-It is deliberately a host oracle/transport gate; the device lowering, the
-full-logit fallback's collective, and the request seam remain below.
+It is deliberately a host oracle/transport gate.
+
+*The eager engines sample end to end* (2026-09-04). The fallback's
+collective is `bus_gather_logits`: every rank's PENALIZED fp32 slice to
+every rank as ONE bulk-class collective between windows, each fp32 as four
+8-bit digits in bf16 words — bf16 holds every integer in [0, 256] exactly,
+exactly one rank writes any slot, and the fold's fp32 accumulation of
+x + 0 + … + 0 followed by the bf16 store returns x, so NaN payloads,
+infinities, denormals and -0 (which raw bf16 halves would canonicalize or
+flush) arrive bit for bit; 8 bytes per vocab id, ~1.24 MB per fallback
+token, gate-pinned across two bulk stripes with adversarial payloads.
+`make_fabric_sample` is the closure the eager engines run: the prefix
+decision at `kSamplingCandidates` = 128 per rank (the bring-up width; the
+profiles fix it), else the gather and `sample_complete_logits` — widening
+exact prefixes (1024, 8192, 65536, then the complete sort) under the
+normalizer the prefix step already transported, with the draw the prefix
+left untouched; rank 0's decision digest echoed after either. Its loopback
+gate runs six steps alternating a resolved and a fallback shape over a
+growing penalized context and is bitwise the sharded reference at the
+loader's layout (`vocab_layout`), one draw per step. `GenEngineAdapter`
+keeps per-slot spec/RNG/context and picks greedily at temperature 0; world 1
+runs `sample_full_logits` at the one-slice layout. Remaining below: the
+device (graph) sampler, sampling under MTP, logprobs on the wire.
 
 *The device path.* The pick table (§9) generalizes from 2 to k candidates
 per rank and gains a digit group for each rank's slice log-sum-exp; the
@@ -1794,10 +1835,13 @@ thread drains admissions → `try_submit`, drains cancels → `cancel`, runs
 ONE tick, publishes meters. Records enter the table AT ENQUEUE so
 pre-admission requests are visible to disconnect and to the pump. The
 refusal ladder: every accepted field behaves per the schema; every
-unimplemented one (stop, n, logprobs, penalties, seed, tools,
-response_format, …, and non-greedy sampling) refuses with a 400 carrying
-the OpenAI error object naming the param — silent-ignore is the bug class
-the ladder exists to prevent. Incremental text is the suffix-diff of
+unimplemented one (stop, n, logprobs, logit_bias, tools, response_format,
+…, and non-greedy sampling on an engine that cannot sample) refuses with a
+400 carrying the OpenAI error object naming the param — silent-ignore is
+the bug class the ladder exists to prevent. The sampling fields
+(temperature, top_p, presence/frequency penalties, seed; top_k, min_p,
+repetition_penalty as extensions) are accepted since 2026-09-04 and behave
+exactly per §10, with omitted fields taking the checkpoint's defaults. Incremental text is the suffix-diff of
 successive full decodes, so UTF-8 and special-token boundaries are exact
 without tokenizer state on the hot path.
 

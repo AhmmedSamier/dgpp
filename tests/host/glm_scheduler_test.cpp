@@ -44,11 +44,26 @@ void require(bool cond, const std::string& what) {
 class FakeEngine : public SchedulerEngine {
  public:
   FakeEngine(int slots, int64_t total_blocks, int64_t block_tokens,
-             int batch_capacity = 1)
+             int batch_capacity = 1, bool can_sample = false)
       : slots_(slots),
         total_blocks_(total_blocks),
         block_tokens_(block_tokens),
-        batch_capacity_(batch_capacity) {}
+        batch_capacity_(batch_capacity),
+        can_sample_(can_sample) {}
+
+  // The sampling seam (M6 6b): a sampling-capable fake records the arming
+  // in the op stream ("A:slot:seed"), so its position relative to the
+  // prefill is pinned; a greedy fake inherits the base refusal.
+  bool supports_sampling() const override { return can_sample_; }
+  void configure_sampling(int req, const dgpp::glm_sample::Params& p,
+                          uint64_t seed) override {
+    if (!can_sample_) {
+      SchedulerEngine::configure_sampling(req, p, seed);
+      return;
+    }
+    if (p.temperature > 0.0f)
+      ops_.push_back("A:" + std::to_string(req) + ":" + std::to_string(seed));
+  }
 
   // Arms `slot`'s NEXT scalar episode: prefill returns tokens[0], then each
   // step returns one following token.
@@ -169,6 +184,7 @@ class FakeEngine : public SchedulerEngine {
   int64_t total_blocks_;
   int64_t block_tokens_;
   int batch_capacity_ = 1;
+  bool can_sample_ = false;
   std::map<int, std::vector<Episode>> episodes_;
   std::map<int, Live> live_;
   std::vector<std::string> ops_;
@@ -818,6 +834,69 @@ DGPP_TEST(scheduler_meters_trackQueueActiveTerminalAndTokens) {
 }
 
 }  // namespace
+
+DGPP_TEST(scheduler_sampling_specArmsTheSlotBeforeItsPrefillPick) {
+  // GIVEN a sampling-capable engine and one stochastic request,
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4,
+                    /*batch_capacity=*/1, /*can_sample=*/true);
+  engine.arm(0, {1, 2}, /*max_steps=*/2);
+  Scheduler sched(&engine, {kEos});
+  SchedulerRequest r = make_request("a", 5, 2);
+  r.sampling.temperature = 1.0f;
+  r.sampling.top_p = 0.95f;
+  r.seed = 99;
+  sched.submit(std::move(r));
+
+  // WHEN it runs,
+  sched.run_to_completion();
+
+  // THEN the slot was armed with the request's seed immediately before its
+  // prefill (the prefill pick is the first draw), and nothing else moved.
+  require(engine.op_stream() == "A:0:99 P:0:5 S:0:1 C:0",
+          "arming must precede the prefill: " + engine.op_stream());
+
+  // AND a greedy request on the same engine arms nothing.
+  FakeEngine greedy_engine(1, 100, 4, 1, /*can_sample=*/true);
+  greedy_engine.arm(0, {1, 2}, 2);
+  Scheduler greedy(&greedy_engine, {kEos});
+  greedy.submit(make_request("g", 5, 2));
+  greedy.run_to_completion();
+  require(greedy_engine.op_stream() == "P:0:5 S:0:1 C:0",
+          "greedy requests keep the exact op stream: " +
+              greedy_engine.op_stream());
+}
+
+DGPP_TEST(scheduler_sampling_refusalsAreManifestErrors) {
+  // A stochastic request against a greedy-only engine, and an invalid spec
+  // against any engine, throw at submit — identically on every rank, never
+  // reaching the engine.
+  FakeEngine greedy_engine(1, 100, 4);
+  Scheduler greedy(&greedy_engine, {kEos});
+  SchedulerRequest stochastic = make_request("s", 5, 2);
+  stochastic.sampling.temperature = 0.8f;
+  bool threw = false;
+  try {
+    greedy.submit(stochastic);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "a greedy engine must refuse a stochastic request");
+  require(greedy_engine.op_stream().empty(), "nothing reached the engine");
+
+  FakeEngine sampling_engine(1, 100, 4, 1, /*can_sample=*/true);
+  Scheduler sampler(&sampling_engine, {kEos});
+  SchedulerRequest bad = make_request("b", 5, 2);
+  bad.sampling.temperature = 1.0f;
+  bad.sampling.top_p = 2.0f;
+  threw = false;
+  try {
+    sampler.submit(bad);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "an invalid spec must be refused at submit");
+  require(!sampler.has_pending(), "the refused request was never queued");
+}
 
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");

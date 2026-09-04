@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <map>
 #include <stdexcept>
@@ -259,6 +260,56 @@ void test_journal_codec() {
     threw = true;
   }
   require(threw, "codec: unknown op must throw");
+
+  // The sampling spec (M6 6b): a greedy submit's record carries no spec
+  // (byte-identical to the pre-sampling format); a stochastic submit's
+  // spec and seed round-trip BITWISE; a corrupt spec is refused.
+  {
+    const std::string greedy_line =
+        dgpp::service::encode_journal_tick(events);
+    require(greedy_line.find("\"g\"") == std::string::npos,
+            "codec: greedy submit must not carry a sampling spec");
+    GenerationService::PassEvents stochastic;
+    dgpp::glm::SchedulerRequest s = submit;
+    s.sampling.temperature = 0.7f;
+    s.sampling.top_p = 0.95f;
+    s.sampling.top_k = 40;
+    s.sampling.min_p = 0.0125f;
+    s.sampling.repetition_penalty = 1.1f;
+    s.sampling.frequency_penalty = -0.3f;
+    s.sampling.presence_penalty = 1.0e-7f;
+    s.sampling.logprobs = 3;
+    s.seed = 0xfedcba9876543210ull;
+    stochastic.submits.push_back(s);
+    const dgpp::service::JournalRecord got = dgpp::service::decode_journal_line(
+        dgpp::service::encode_journal_tick(stochastic));
+    require(got.submits.size() == 1, "codec: stochastic submit count");
+    const dgpp::glm::SchedulerRequest& b = got.submits[0];
+    const auto bits_equal = [](float x, float y) {
+      return std::memcmp(&x, &y, sizeof(float)) == 0;
+    };
+    require(bits_equal(b.sampling.temperature, 0.7f) &&
+                bits_equal(b.sampling.top_p, 0.95f) &&
+                b.sampling.top_k == 40 &&
+                bits_equal(b.sampling.min_p, 0.0125f) &&
+                bits_equal(b.sampling.repetition_penalty, 1.1f) &&
+                bits_equal(b.sampling.frequency_penalty, -0.3f) &&
+                bits_equal(b.sampling.presence_penalty, 1.0e-7f) &&
+                b.sampling.logprobs == 3 && b.seed == 0xfedcba9876543210ull,
+            "codec: sampling spec must round-trip bitwise");
+    bool bad = false;
+    try {
+      // top_p bits of 2.0f: a spec no rank may apply.
+      (void)dgpp::service::decode_journal_line(
+          "{\"op\":\"tick\",\"s\":[{\"id\":\"x\",\"p\":[1],\"m\":2,"
+          "\"g\":{\"t\":1065353216,\"p\":1073741824,\"k\":0,\"m\":0,"
+          "\"r\":1065353216,\"f\":0,\"q\":0,\"l\":0,"
+          "\"s\":\"0000000000000001\"}}]}");
+    } catch (const std::exception&) {
+      bad = true;
+    }
+    require(bad, "codec: an invalid sampling spec must throw");
+  }
   std::puts("ok 1 - journal codec round-trip");
 }
 

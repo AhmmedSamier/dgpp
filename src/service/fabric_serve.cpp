@@ -1,6 +1,7 @@
 #include "service/fabric_serve.hpp"
 
 #include <chrono>
+#include <cstring>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -39,6 +40,29 @@ std::string OpStreamObserver::text() const {
 
 // ---- wire codec -----------------------------------------------------------
 
+namespace {
+
+// Floats ride as their IEEE bit patterns: the peers must apply the EXACT
+// spec rank 0 applied, and a decimal round trip is one more place for a
+// rank to differ by an ulp.
+uint32_t float_bits(float f) {
+  uint32_t u = 0;
+  std::memcpy(&u, &f, sizeof(u));
+  return u;
+}
+float float_from_bits(uint32_t u) {
+  float f = 0.0f;
+  std::memcpy(&f, &u, sizeof(f));
+  return f;
+}
+std::string hex64(uint64_t v) {
+  char buf[17];
+  std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(v));
+  return buf;
+}
+
+}  // namespace
+
 std::string encode_journal_tick(const GenerationService::PassEvents& events) {
   std::string out = "{\"op\":\"tick\"";
   if (!events.submits.empty()) {
@@ -58,6 +82,28 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
       if (r.cancel_after > 0) {
         out += ",\"ca\":";
         append_json_int(&out, r.cancel_after);
+      }
+      // The sampling spec rides only for stochastic requests; a greedy
+      // request's record is byte-identical to the pre-sampling format.
+      if (r.sampling.temperature > 0.0f) {
+        const glm_sample::Params& g = r.sampling;
+        out += ",\"g\":{\"t\":";
+        append_json_int(&out, float_bits(g.temperature));
+        out += ",\"p\":";
+        append_json_int(&out, float_bits(g.top_p));
+        out += ",\"k\":";
+        append_json_int(&out, g.top_k);
+        out += ",\"m\":";
+        append_json_int(&out, float_bits(g.min_p));
+        out += ",\"r\":";
+        append_json_int(&out, float_bits(g.repetition_penalty));
+        out += ",\"f\":";
+        append_json_int(&out, float_bits(g.frequency_penalty));
+        out += ",\"q\":";
+        append_json_int(&out, float_bits(g.presence_penalty));
+        out += ",\"l\":";
+        append_json_int(&out, g.logprobs);
+        out += ",\"s\":\"" + hex64(r.seed) + "\"}";
       }
       out.push_back('}');
     }
@@ -177,6 +223,49 @@ JournalRecord decode_journal_line(std::string_view line) {
           throw std::runtime_error("journal: submit '" + r.id +
                                    "' has bad cancel_after");
         r.cancel_after = static_cast<int>(ca->as_int());
+      }
+      if (const dgpp::minijson::Value* g = item.find("g")) {
+        if (!g->is_object())
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has a non-object sampling spec");
+        const auto bits = [&](const char* name) -> uint32_t {
+          const dgpp::minijson::Value& f = field(*g, name, "sampling spec");
+          if (!f.is_number() || f.as_int() < 0 || f.as_int() > 0xFFFFFFFFll)
+            throw std::runtime_error("journal: submit '" + r.id +
+                                     "' has bad sampling field " + name);
+          return static_cast<uint32_t>(f.as_int());
+        };
+        glm_sample::Params& p = r.sampling;
+        p.temperature = float_from_bits(bits("t"));
+        p.top_p = float_from_bits(bits("p"));
+        p.min_p = float_from_bits(bits("m"));
+        p.repetition_penalty = float_from_bits(bits("r"));
+        p.frequency_penalty = float_from_bits(bits("f"));
+        p.presence_penalty = float_from_bits(bits("q"));
+        const dgpp::minijson::Value& k = field(*g, "k", "sampling spec");
+        const dgpp::minijson::Value& l = field(*g, "l", "sampling spec");
+        if (!k.is_number() || !l.is_number())
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has bad top_k/logprobs");
+        p.top_k = static_cast<int>(k.as_int());
+        p.logprobs = static_cast<int>(l.as_int());
+        const std::string seed_hex(
+            field(*g, "s", "sampling spec").as_string());
+        if (seed_hex.size() != 16 ||
+            seed_hex.find_first_not_of("0123456789abcdef") != std::string::npos)
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has a bad seed");
+        r.seed = std::stoull(seed_hex, nullptr, 16);
+        try {
+          glm_sample::validate_params(p);
+        } catch (const std::invalid_argument& e) {
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' carries an invalid sampling spec: " +
+                                   e.what());
+        }
+        if (!(p.temperature > 0.0f))
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' carries a greedy sampling spec");
       }
       rec.submits.push_back(std::move(r));
     }

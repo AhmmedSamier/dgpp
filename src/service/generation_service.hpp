@@ -12,10 +12,17 @@
 //   POST /v1/chat/completions   messages[] (string content), max_tokens
 //                               or max_completion_tokens, stream,
 //                               stream_options.include_usage; sampling:
-//                               temperature absent-or-0 and top_p
-//                               absent-or-1 only (greedy is the
-//                               implemented sampler; the sampling stage
-//                               is M6 deliverable 3).
+//                               temperature, top_p, presence_penalty,
+//                               frequency_penalty, seed (the OpenAI
+//                               fields) plus top_k, min_p and
+//                               repetition_penalty (HF extensions) —
+//                               every omitted field takes the model's
+//                               generation_config.json default (M6 6b,
+//                               DESIGN §10); temperature 0 is the exact
+//                               greedy path. An engine that cannot
+//                               sample yet serves greedy defaults and
+//                               refuses temperature > 0 with
+//                               sampling_unsupported.
 //   POST /v1/completions        the legacy prompt API (string prompt).
 //   GET  /v1/models, /v1/models/{id}
 //   GET  /health               liveness (the fabric harnesses' probe).
@@ -38,6 +45,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -70,6 +79,16 @@ struct ServiceConfig {
   std::string model_id;
   int default_max_tokens = 256;  // when the request omits max_tokens
   int queue_limit = 64;          // admission bound; beyond → 503
+  // The sampling defaults every omitted request field takes: the
+  // checkpoint's generation_config.json with the process's overrides
+  // applied (DESIGN §10's HF contract). temperature 0 is greedy. When the
+  // bound engine cannot sample, the constructor collapses them to greedy
+  // and logs it — the service never advertises a mode it cannot execute.
+  glm_sample::Params sampling_defaults = glm_sample::greedy_params();
+  // The seed for requests that omit one. Absent: rank 0 draws a fresh seed
+  // per request (and the journal carries it). Set: every seedless request
+  // uses it — the gates' reproducible runs.
+  std::optional<uint64_t> fixed_seed;
 };
 
 class GenerationService : public HttpHandler,
@@ -131,6 +150,13 @@ class GenerationService : public HttpHandler,
   };
   Stats stats() const;
 
+  // The defaults actually served (after the engine-capability collapse)
+  // and whether stochastic requests are executable at all.
+  const glm_sample::Params& sampling_defaults() const {
+    return cfg_.sampling_defaults;
+  }
+  bool sampling_available() const { return sampling_available_; }
+
  private:
   struct StreamRecord {
     uint64_t tag = 0;        // on_disconnect correlation
@@ -162,6 +188,13 @@ class GenerationService : public HttpHandler,
   void route_models(const HttpRequest& req, HttpResponseWriter& w);
   void route_health(HttpResponseWriter& w) const;
   void route_metrics(HttpResponseWriter& w);
+
+  // The request's sampling spec: every present field validated and
+  // applied over the defaults, the seed drawn when omitted. Responds 400
+  // (naming the field) and returns false on any refusal.
+  bool parse_sampling(const dgpp::minijson::Value& body,
+                      HttpResponseWriter& w, glm_sample::Params* sampling,
+                      uint64_t* seed);
 
   // The OpenAI error body (never a bare string).
   void respond_error(HttpResponseWriter& w, int status,
@@ -211,6 +244,8 @@ class GenerationService : public HttpHandler,
   // HTTP-thread-only counters guarded by std::atomic where cross-thread.
   std::atomic<uint64_t> next_tag_{1};
   Stats stats_;  // written under mutex_ (cheap, exact)
+  bool sampling_available_ = false;
+  std::mt19937_64 seed_rng_;  // HTTP thread only (route handlers)
 };
 
 }  // namespace dgpp::service

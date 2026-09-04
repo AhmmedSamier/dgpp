@@ -25,6 +25,9 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <mutex>
+#include <optional>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -61,9 +64,32 @@ bool fake_eos_prefill(size_t prompt_len) { return prompt_len % 4 == 2; }
 
 class FakeEngine : public SchedulerEngine {
  public:
-  FakeEngine(int slots, int64_t total_blocks, int64_t block_tokens)
+  FakeEngine(int slots, int64_t total_blocks, int64_t block_tokens,
+             bool can_sample = false)
       : slots_(slots), total_blocks_(total_blocks),
-        block_tokens_(block_tokens) {}
+        block_tokens_(block_tokens), can_sample_(can_sample) {}
+
+  // The sampling seam: a sampling-capable fake records the spec each slot
+  // was armed with (the request seam's evidence); a greedy fake inherits
+  // the base refusal.
+  struct Armed {
+    dgpp::glm_sample::Params params;
+    uint64_t seed = 0;
+  };
+  bool supports_sampling() const override { return can_sample_; }
+  void configure_sampling(int req, const dgpp::glm_sample::Params& p,
+                          uint64_t seed) override {
+    if (!can_sample_) {
+      SchedulerEngine::configure_sampling(req, p, seed);
+      return;
+    }
+    std::lock_guard<std::mutex> lock(armed_mu_);
+    armed_.push_back(Armed{p, seed});
+  }
+  std::vector<Armed> armed() const {
+    std::lock_guard<std::mutex> lock(armed_mu_);
+    return armed_;
+  }
 
   int max_concurrent_requests() const override { return slots_; }
   int64_t pool_blocks_total() const override { return total_blocks_; }
@@ -116,7 +142,10 @@ class FakeEngine : public SchedulerEngine {
   int slots_;
   int64_t total_blocks_;
   int64_t block_tokens_;
+  bool can_sample_ = false;
   std::map<int, Live> live_;
+  mutable std::mutex armed_mu_;
+  std::vector<Armed> armed_;
 };
 
 // The fake frontend: bytes ↔ ids, and a deterministic chat render (the
@@ -232,7 +261,7 @@ class Client {
 // --- the service rig: HTTP thread + gated engine thread ---------------
 struct ServiceRig {
   static constexpr int kSlots = 4;
-  FakeEngine engine{kSlots, /*total_blocks=*/100, /*block_tokens=*/4};
+  FakeEngine engine;
   FakeFrontend frontend;
   ServiceConfig cfg;
   GenerationService service;
@@ -243,14 +272,24 @@ struct ServiceRig {
   std::atomic<bool> gate{false};   // pause the engine thread (tests)
   std::atomic<bool> stopping{false};
 
-  explicit ServiceRig(int queue_limit = 8)
-      : cfg([](int q) {
+  // `sampling_defaults`: the served defaults (greedy unless a test hands
+  // the checkpoint's stochastic ones); `can_sample`: whether the fake
+  // engine advertises the sampler.
+  explicit ServiceRig(int queue_limit = 8,
+                      dgpp::glm_sample::Params sampling_defaults =
+                          dgpp::glm_sample::greedy_params(),
+                      bool can_sample = false,
+                      std::optional<uint64_t> fixed_seed = std::nullopt)
+      : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
+        cfg([&] {
           ServiceConfig c;
           c.model_id = "glm-5.3-flash-fp8";
           c.default_max_tokens = 8;
-          c.queue_limit = q;
+          c.queue_limit = queue_limit;
+          c.sampling_defaults = sampling_defaults;
+          c.fixed_seed = fixed_seed;
           return c;
-        }(queue_limit)),
+        }()),
         service(cfg, &engine, &frontend, {kFakeEos}),
         http(0, &service, /*max_connections=*/64) {
     http_loop = std::thread([this] { http.serve(); });
@@ -445,10 +484,14 @@ DGPP_TEST(serve_refusalLadder_openAIErrorObjects) {
     require(resp.find(needle) != std::string::npos,
             "needle " + needle + ": " + resp.substr(0, 400));
   };
+  // A greedy-only engine refuses stochastic requests by capability; an
+  // out-of-range top_p is refused by validation regardless of engine.
   post_and_expect(chat_body("abcd", 3, ",\"temperature\":0.7"), 400,
-                  "\"param\":\"temperature\"");
-  post_and_expect(chat_body("abcd", 3, ",\"top_p\":0.5"), 400,
+                  "\"code\":\"sampling_unsupported\"");
+  post_and_expect(chat_body("abcd", 3, ",\"top_p\":5"), 400,
                   "\"param\":\"top_p\"");
+  post_and_expect(chat_body("abcd", 3, ",\"logit_bias\":{\"1\":2}"), 400,
+                  "\"param\":\"logit_bias\"");
   post_and_expect(chat_body("abcd", 3,
                             ",\"tools\":[{\"type\":\"function\"}]"),
                   400, "\"param\":\"tools\"");
@@ -579,6 +622,141 @@ DGPP_TEST(serve_legacyCompletions_theTextCompletionObject) {
   require(resp.find("\"prompt_tokens\":5,\"completion_tokens\":2,"
                     "\"total_tokens\":7") != std::string::npos,
           "legacy usage");
+}
+
+// The checkpoint's defaults for the sampling rigs (generation_config.json:
+// temperature 1.0, top_p 0.95, nothing else).
+dgpp::glm_sample::Params model_defaults() {
+  dgpp::glm_sample::Params p;
+  p.temperature = 1.0f;
+  p.top_p = 0.95f;
+  return p;
+}
+
+std::string post_chat(ServiceRig& rig, const std::string& body,
+                      const std::string& until = "", int budget_ms = 3000) {
+  Client c(rig.port());
+  c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+             "Content-Type: application/json\r\nContent-Length: " +
+             std::to_string(body.size()) + "\r\n\r\n" + body);
+  return until.empty() ? c.read_available(800) : c.read_until(until, budget_ms);
+}
+
+bool same_float(float a, float b) {
+  return std::memcmp(&a, &b, sizeof(float)) == 0;
+}
+
+DGPP_TEST(serve_sampling_defaultsFillOmittedFieldsAndReachTheEngine) {
+  // GIVEN a sampling-capable engine and the checkpoint's defaults,
+  ServiceRig rig(/*queue_limit=*/8, model_defaults(), /*can_sample=*/true);
+
+  // THEN /v1/models advertises the surface and the exact defaults,
+  {
+    Client models(rig.port());
+    models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string ml = models.read_available(800);
+    require(ml.find("\"sampling\":{\"available\":true,\"defaults\":{"
+                    "\"temperature\":1,\"top_p\":0.95,\"top_k\":0,"
+                    "\"min_p\":0,\"repetition_penalty\":1}}") !=
+                std::string::npos,
+            "models sampling surface: " + ml.substr(0, 400));
+  }
+
+  // WHEN a request omits every sampling field, one names a seed and
+  // overrides, and one asks for greedy explicitly,
+  const std::string r1 = post_chat(rig, chat_body("abcd", 2), "usage");
+  const std::string r2 = post_chat(
+      rig,
+      chat_body("abcd", 2,
+                ",\"seed\":42,\"temperature\":0.7,\"top_p\":0.5,"
+                "\"presence_penalty\":1.5,\"frequency_penalty\":-0.25,"
+                "\"top_k\":40,\"min_p\":0.05,\"repetition_penalty\":1.1"),
+      "usage");
+  const std::string r3 =
+      post_chat(rig, chat_body("abcd", 2, ",\"temperature\":0"), "usage");
+  require(r1.find("\"object\":\"chat.completion\"") != std::string::npos &&
+              r2.find("\"object\":\"chat.completion\"") != std::string::npos &&
+              r3.find("\"object\":\"chat.completion\"") != std::string::npos,
+          "all three requests complete");
+
+  // THEN the engine was armed, in order, with the defaults + a drawn seed,
+  // the explicit spec + seed 42, and the greedy spec.
+  const std::vector<FakeEngine::Armed> armed = rig.engine.armed();
+  require(armed.size() == 3, "three slots armed, got " +
+                                 std::to_string(armed.size()));
+  require(same_float(armed[0].params.temperature, 1.0f) &&
+              same_float(armed[0].params.top_p, 0.95f) &&
+              armed[0].params.top_k == 0,
+          "omitted fields take the model defaults");
+  require(same_float(armed[1].params.temperature, 0.7f) &&
+              same_float(armed[1].params.top_p, 0.5f) &&
+              same_float(armed[1].params.presence_penalty, 1.5f) &&
+              same_float(armed[1].params.frequency_penalty, -0.25f) &&
+              armed[1].params.top_k == 40 &&
+              same_float(armed[1].params.min_p, 0.05f) &&
+              same_float(armed[1].params.repetition_penalty, 1.1f) &&
+              armed[1].seed == 42,
+          "explicit fields override the defaults exactly");
+  require(same_float(armed[2].params.temperature, 0.0f),
+          "temperature 0 is the greedy spec");
+  require(armed[0].seed != armed[2].seed,
+          "seedless requests draw distinct seeds");
+}
+
+DGPP_TEST(serve_sampling_validationNamesTheField) {
+  ServiceRig rig(/*queue_limit=*/8, model_defaults(), /*can_sample=*/true);
+  const auto refused = [&](const std::string& extra, const std::string& param) {
+    const std::string resp = post_chat(rig, chat_body("abcd", 2, extra));
+    require(resp.find("400 ") != std::string::npos &&
+                resp.find("\"param\":\"" + param + "\"") != std::string::npos,
+            "expected a 400 naming " + param + ": " + resp.substr(0, 300));
+  };
+  refused(",\"temperature\":2.5", "temperature");
+  refused(",\"temperature\":\"hot\"", "temperature");
+  refused(",\"top_p\":0", "top_p");
+  refused(",\"top_p\":1.01", "top_p");
+  refused(",\"presence_penalty\":2.5", "presence_penalty");
+  refused(",\"frequency_penalty\":-3", "frequency_penalty");
+  refused(",\"top_k\":1.5", "top_k");
+  refused(",\"top_k\":-1", "top_k");
+  refused(",\"min_p\":2", "min_p");
+  refused(",\"repetition_penalty\":0", "repetition_penalty");
+  refused(",\"seed\":1.5", "seed");
+  require(rig.engine.armed().empty(), "no refused request reached the engine");
+}
+
+DGPP_TEST(serve_sampling_greedyEngineCollapsesDefaultsLoudly) {
+  // GIVEN the checkpoint's stochastic defaults but an engine that cannot
+  // sample (today's graph engine),
+  ServiceRig rig(/*queue_limit=*/8, model_defaults(), /*can_sample=*/false);
+
+  // THEN the served defaults are greedy and say so,
+  Client models(rig.port());
+  models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+  const std::string ml = models.read_available(800);
+  require(ml.find("\"sampling\":{\"available\":false,\"defaults\":{"
+                  "\"temperature\":0,") != std::string::npos,
+          "collapsed defaults: " + ml.substr(0, 400));
+  // a field-less request is served (greedy),
+  const std::string ok = post_chat(rig, chat_body("abcd", 2), "usage");
+  require(ok.find("\"object\":\"chat.completion\"") != std::string::npos,
+          "the greedy default is served");
+  // and an explicit stochastic request is refused by capability.
+  const std::string refused =
+      post_chat(rig, chat_body("abcd", 2, ",\"temperature\":1"));
+  require(refused.find("\"code\":\"sampling_unsupported\"") !=
+              std::string::npos,
+          "stochastic request refused: " + refused.substr(0, 300));
+}
+
+DGPP_TEST(serve_sampling_fixedSeedAppliesToSeedlessRequests) {
+  ServiceRig rig(/*queue_limit=*/8, model_defaults(), /*can_sample=*/true,
+                 /*fixed_seed=*/uint64_t{777});
+  (void)post_chat(rig, chat_body("abcd", 2), "usage");
+  (void)post_chat(rig, chat_body("abcd", 2, ",\"seed\":5"), "usage");
+  const std::vector<FakeEngine::Armed> armed = rig.engine.armed();
+  require(armed.size() == 2 && armed[0].seed == 777 && armed[1].seed == 5,
+          "the fixed seed fills seedless requests; explicit seeds win");
 }
 
 }  // namespace

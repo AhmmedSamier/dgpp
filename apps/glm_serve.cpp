@@ -38,6 +38,13 @@
 //     [--decode-graph [--mtp]] [--graph-batch-min-live N]
 //       (adaptive scalar/fixed batch; concurrency * T <= 8; N defaults to
 //        min(4, max-concurrency) and must lie in [1, max-concurrency])
+//   sampling (M6 6b): the defaults come from generation_config.json;
+//     [--temperature X] [--top-p X] [--top-k N] [--min-p X]
+//     [--repetition-penalty X] override them for the process, [--seed N]
+//     fixes the seed of every request that omits one. The eager engines
+//     sample exactly (DESIGN §10); the graph engine cannot yet, so under
+//     --decode-graph the service serves greedy defaults and refuses
+//     temperature > 0, loudly.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -97,6 +104,24 @@ struct ServeKnobs {
   int max_connections = 64;
   int queue_limit = 64;
   int default_max_tokens = 256;
+  dgpp::glm_sample::Params sampling_defaults = dgpp::glm_sample::greedy_params();
+  std::optional<uint64_t> fixed_seed;
+};
+
+// Pinned words for the sampler's collectives, allocated BEFORE the world
+// forms (the allocation discipline) and released after the bus stops.
+struct PinnedWords {
+  uint16_t* data = nullptr;
+  explicit PinnedWords(size_t elems) {
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&data),
+                               sizeof(uint16_t) * std::max<size_t>(elems, 2),
+                               cudaHostAllocDefault));
+  }
+  ~PinnedWords() {
+    if (data) cudaFreeHost(data);
+  }
+  PinnedWords(const PinnedWords&) = delete;
+  PinnedWords& operator=(const PinnedWords&) = delete;
 };
 
 // The rank-0 serving stack, shared by both worlds: everything above
@@ -125,6 +150,8 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
   scfg.model_id = model_display;
   scfg.default_max_tokens = k.default_max_tokens;
   scfg.queue_limit = k.queue_limit;
+  scfg.sampling_defaults = k.sampling_defaults;
+  scfg.fixed_seed = k.fixed_seed;
   std::vector<int64_t> eos =
       no_eos ? std::vector<int64_t>{} : cfg.eos_token_ids;
 
@@ -208,7 +235,10 @@ int main(int argc, char** argv) {
       "    [--decode-graph [--mtp]]\n"
       "    [--graph-batch-min-live N (default min(4, max-concurrency);\n"
       "      must be in [1, max-concurrency])]\n"
-      "      (requires max-concurrency * (mtp?2:1) <= 8)\n";
+      "      (requires max-concurrency * (mtp?2:1) <= 8)\n"
+      "  sampling (defaults from generation_config.json; temperature 0 =\n"
+      "  greedy): [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
+      "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n";
 
   std::string ckpt, model_id, peer;
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
@@ -218,6 +248,9 @@ int main(int argc, char** argv) {
   int max_connections = 64;
   int world = 1, rank = 0, rendezvous_timeout_ms = 120000;
   bool no_eos = false, decode_graph = false, mtp = false;
+  std::optional<float> temperature, top_p, min_p, repetition_penalty;
+  std::optional<int> top_k;
+  std::optional<uint64_t> fixed_seed;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -246,6 +279,12 @@ int main(int argc, char** argv) {
       journal_port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--rendezvous-timeout-ms")
       rendezvous_timeout_ms = std::stoi(next());
+    else if (a == "--temperature") temperature = std::stof(next());
+    else if (a == "--top-p") top_p = std::stof(next());
+    else if (a == "--top-k") top_k = std::stoi(next());
+    else if (a == "--min-p") min_p = std::stof(next());
+    else if (a == "--repetition-penalty") repetition_penalty = std::stof(next());
+    else if (a == "--seed") fixed_seed = std::stoull(next());
     else {
       std::fputs(kUsage, stderr);
       return a == "--help" ? 0 : 1;
@@ -333,6 +372,43 @@ int main(int argc, char** argv) {
     if (generation_defaults.eos_token_ids.has_value())
       cfg.eos_token_ids = *generation_defaults.eos_token_ids;
 
+    // The served sampling defaults: the file's values, then the process
+    // overrides (DESIGN §10 — defaults from the model, overrides from the
+    // command line). Validated here so an operator typo dies at boot.
+    dgpp::glm_sample::Params sampling_defaults;
+    sampling_defaults.temperature = generation_defaults.effective_temperature();
+    sampling_defaults.top_p = generation_defaults.effective_top_p();
+    sampling_defaults.top_k = generation_defaults.effective_top_k();
+    sampling_defaults.min_p = generation_defaults.effective_min_p();
+    sampling_defaults.repetition_penalty =
+        generation_defaults.effective_repetition_penalty();
+    if (temperature) sampling_defaults.temperature = *temperature;
+    if (top_p) sampling_defaults.top_p = *top_p;
+    if (top_k) sampling_defaults.top_k = *top_k;
+    if (min_p) sampling_defaults.min_p = *min_p;
+    if (repetition_penalty)
+      sampling_defaults.repetition_penalty = *repetition_penalty;
+    try {
+      dgpp::glm_sample::validate_params(sampling_defaults);
+    } catch (const std::invalid_argument& e) {
+      DGPP_LOG_ERROR("serve: invalid sampling defaults: {}", e.what());
+      return 1;
+    }
+    DGPP_LOG_INFO(
+        "serve: sampling defaults temperature {} top_p {} top_k {} min_p {} "
+        "repetition_penalty {} ({}; overrides: {}{}{}{}{}{})",
+        sampling_defaults.temperature, sampling_defaults.top_p,
+        sampling_defaults.top_k, sampling_defaults.min_p,
+        sampling_defaults.repetition_penalty,
+        generation_defaults.file_found ? "from generation_config.json"
+                                       : "no generation_config.json: greedy",
+        temperature ? "temperature " : "", top_p ? "top_p " : "",
+        top_k ? "top_k " : "", min_p ? "min_p " : "",
+        repetition_penalty ? "repetition_penalty " : "",
+        (temperature || top_p || top_k || min_p || repetition_penalty)
+            ? ""
+            : "none");
+
     // Pool sizing: the shared DSA pool is the admission budget (the
     // same arithmetic as the scheduler receipt), sliced per rank at
     // world>1 — every rank computes the same numbers from the same
@@ -369,6 +445,8 @@ int main(int argc, char** argv) {
     knobs.max_connections = max_connections;
     knobs.queue_limit = queue_limit;
     knobs.default_max_tokens = default_max_tokens;
+    knobs.sampling_defaults = sampling_defaults;
+    knobs.fixed_seed = fixed_seed;
 
     // ---- world > 1: the fabric (Stage 4b) ------------------------------
     if (world > 1) {
@@ -379,6 +457,10 @@ int main(int argc, char** argv) {
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&pick_scratch),
                                  sizeof(uint16_t) * dgpp::kPickScratchElems(world),
                                  cudaHostAllocDefault));
+      // The sampler's two tables (the candidate/LSE fold and the fallback
+      // gather), pinned before the world forms like the pick scratch.
+      PinnedWords sample_prefix(dgpp::fabric_sampling_prefix_scratch_elems(world));
+      PinnedWords sample_gather(dgpp::sampling_gather_scratch_elems(cfg.vocab_size));
       std::unique_ptr<dgpp::net::CollectiveBus> bus;
       try {
         bus = std::make_unique<dgpp::net::CollectiveBus>(dgpp::fabric_bus_options(
@@ -455,7 +537,10 @@ int main(int argc, char** argv) {
           engine = std::make_unique<dgpp::GenEngineAdapter>(
               &model, max_concurrency,
               dgpp::make_fabric_pick(bus.get(), rank, world, pick_scratch,
-                                     cfg.vocab_size));
+                                     cfg.vocab_size),
+              dgpp::make_fabric_sample(bus.get(), rank, world,
+                                       sample_prefix.data, sample_gather.data,
+                                       cfg.vocab_size));
         }
 
         if (rank != 0) {
@@ -508,7 +593,8 @@ int main(int argc, char** argv) {
         max_concurrency, pool_tokens);
 
     dgpp::GenEngineAdapter engine(&model, max_concurrency,
-                                  dgpp::make_w1_pick(cfg.vocab_size));
+                                  dgpp::make_w1_pick(cfg.vocab_size),
+                                  dgpp::make_w1_sample(cfg.vocab_size));
     return serve_openai(&engine, cfg, ckpt, model_display, knobs, no_eos,
                          boot_s(), /*journal=*/nullptr, /*oplog=*/nullptr);
   } catch (const std::exception& e) {

@@ -83,6 +83,8 @@
 #include <string>
 #include <vector>
 
+#include "models/glm_sampler.hpp"
+
 namespace dgpp::glm {
 
 // The engine seam the scheduler drives. The real binding (glm_gen_check)
@@ -128,6 +130,23 @@ class SchedulerEngine {
       const std::vector<int>& reqs);
   // Retires the slot: blocks return to the pool; the slot may reopen.
   virtual void close(int req) = 0;
+
+  // ---- sampling (M6 6b) ---------------------------------------------------
+  // An engine that can draw stochastically advertises it; the scheduler
+  // then hands every admitted request's spec to its slot immediately BEFORE
+  // prefill (the prefill pick is the first draw). The default engine is
+  // greedy-only: the scheduler refuses a stochastic request at submit —
+  // identically on every rank — so this default only ever sees greedy specs,
+  // and treats anything else as the contract violation it is.
+  virtual bool supports_sampling() const { return false; }
+  virtual void configure_sampling(int req, const glm_sample::Params& sampling,
+                                  uint64_t seed) {
+    (void)req;
+    (void)seed;
+    if (sampling.temperature > 0.0f)
+      throw std::logic_error(
+          "SchedulerEngine: this engine samples greedily only");
+  }
 };
 
 // One request, in arrival (manifest) order. `prompt` ids are validated by
@@ -138,6 +157,13 @@ struct SchedulerRequest {
   int max_steps = 1;      // tokens to generate (prefill pick included)
   int cancel_after = 0;    // 0 = never; N = retire (Cancelled) once N
                            // tokens have been generated. N in [1, max_steps].
+  // The sampling spec (glm_sampler.hpp's warper contract). The default is
+  // GREEDY — temperature 0, no draw, no seed consumed — so every manifest
+  // and gate that predates sampling keeps its exact op stream.
+  glm_sample::Params sampling = glm_sample::greedy_params();
+  // The counter RNG's seed. Rank 0 assigns one when the client omits it and
+  // the journal carries it, so every rank draws the same sequence.
+  uint64_t seed = 0;
 };
 
 // The bounded admission queue at capacity (submit() only). A load-shed

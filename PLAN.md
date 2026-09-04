@@ -750,11 +750,44 @@ and carries rank 0's decision digest back to every rank (the greedy pick's
 readback invariant); its two-rank loopback gate covers the target
 checkpoint's actual default (`temperature=1.0`, `top_p=0.95`, no semantic
 `top_k`), a cross-shard tie that survives the penalties, rank identity over
-a run of draws, and the flat-distribution fallback. This is a host
-correctness seam, not the production hot path. The three real-text fabric
-runs, request/CLI overrides, the full-logit fallback's collective, and the
-device sampler are not wired yet; no k is fixed until those runs land in the
-measurement record.
+a run of draws, and the flat-distribution fallback.
+
+The eager engines SAMPLE end to end (2026-09-04, the same day): the exact
+gather fallback is built (`bus_gather_logits`: the penalized fp32 slices as
+ONE bulk collective, four 8-bit digits per logit in bf16 words so NaN
+payloads, infinities, denormals and -0 survive the fold bit for bit —
+gate-pinned at two stripes), and `make_fabric_sample` is the closure
+`glm_serve`'s eager engine and `glm_gen_check` run: the prefix decision at
+`kSamplingCandidates` = 128 per rank, else the gather and the complete-list
+decision under the transported normalizer with the reserved draw, rank 0's
+digest echoed either way (loopback gate: six steps alternating resolved and
+fallback shapes, penalties over a growing context, bitwise the sharded
+reference at the loader's layout, one draw per step). The request seam:
+`SchedulerRequest` carries the `glm_sample::Params` spec and the seed
+(greedy by default, so every older manifest keeps its op stream);
+`SchedulerEngine::supports_sampling`/`configure_sampling` arm the slot
+immediately before its prefill pick (the scheduler refuses a stochastic
+request on a greedy-only engine at submit, identically on every rank);
+`GenEngineAdapter` keeps per-slot spec/RNG/context and picks greedily at
+temperature 0; the journal's tick record carries the spec as float BITS
+plus the seed for stochastic submits only (greedy records are
+byte-identical to before). The service accepts `temperature`, `top_p`,
+`presence_penalty`, `frequency_penalty`, `seed` and the extensions `top_k`,
+`min_p`, `repetition_penalty`, validated with the field named in the 400,
+fills every omitted field from the checkpoint's defaults, draws a fresh
+seed per seedless request (or `--seed`'s), and reports the effective
+defaults on `/v1/models` (`"sampling":{"available","defaults"}`); with the
+graph engine bound (`--decode-graph`) it collapses the defaults to greedy
+with a WARN line and refuses `temperature > 0` with `sampling_unsupported`
+rather than advertise a mode it cannot run. `glm_serve --temperature
+--top-p --top-k --min-p --repetition-penalty --seed` override the file;
+`glm_gen_check` keeps its exact greedy loop by default (its transcripts are
+the regression instrument) and samples under `--sample` or any override,
+eager engines only. `logprobs`/`logit_bias` stay refused. Not wired yet:
+the device (graph) sampler, sampling under MTP, logprobs on the wire, and
+the three real-text fabric runs — no k is fixed until those land in the
+measurement record, and the on-device path is what makes the served
+default cheap.
 
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's
@@ -766,7 +799,8 @@ request is `temperature`/`top_p` (plus penalties and `logit_bias`); and a
 `temperature: 0` request must keep running the exact greedy path at zero
 cost. Design:
 
-- *Defaults come from the model, overrides from the command line.* The
+- *Defaults come from the model, overrides from the command line* (BUILT
+  2026-09-04 for the service and both apps; see above). The
   loader parses `generation_config.json` beside `config.json`
   (`GlmGenerationDefaults`: temperature, top_p, top_k, min_p,
   repetition_penalty when present; the EOS ids already come from it) and
@@ -802,8 +836,9 @@ cost. Design:
   three teacher texts and feed the fetched rank logs to
   `scripts/fabric_sampling_profile.py`. The smallest k with a fallback rate
   at or below ~1% wins.
-- *The fallback is the exact gather:* the fp32 vocab slices to every rank
-  as a bulk-class collective between windows (619.5 KB/token), the host
+- *The fallback is the exact gather* (BUILT 2026-09-04 on the eager path:
+  `bus_gather_logits`, 1.24 MB/token as 8-bit digits): the fp32 vocab
+  slices to every rank as a bulk-class collective between windows, the host
   sampler on every rank with the same `u`. Inside the one-graph MTP step a
   fallback means the draft block ran on a provisional token: the host
   rolls the draft's tail ring back (its snapshot sink exists, unused by

@@ -510,6 +510,127 @@ bus_sampling_topk_masses(net::CollectiveBus& bus, int rank, int world,
   return out;
 }
 
+// The bring-up candidate width of the host sampling path: PLAN M6 6b's
+// planned k=128 per rank (~9.2 KB of table per row at world 4), to be FIXED
+// by the three teacher-text profiles (scripts/fabric_sampling_profile.py).
+// A width that resolves less often costs fallbacks, never correctness: the
+// decision is width-independent by construction (glm_sampler.hpp).
+inline constexpr int kSamplingCandidates = 128;
+
+// Rank 0's decision digest, echoed to every rank through one small latency
+// collective and compared against the rank's own — bus_greedy_pick's
+// load-bearing readback invariant, for every stochastic decision (the
+// prefix's and the fallback's). `resolved`, the token, the logprob bits and
+// one fp64 `witness` (the prefix's covered mass — a function of every
+// transported digit — or the fallback's normalizer) make the digest.
+inline void bus_check_decision_digest(net::CollectiveBus& bus, int rank,
+                                      bool resolved,
+                                      const glm_sample::Result& result,
+                                      double witness, uint16_t* scratch,
+                                      int timeout_ms, const char* what) {
+  std::array<uint16_t, kSamplingPrefixDigestElems> mine{};
+  pick_encode_digits(mine.data(), resolved ? 1u : 0u, 1);
+  pick_encode_digits(mine.data() + 1,
+                     static_cast<uint64_t>(static_cast<uint32_t>(result.token)) &
+                         ((1ull << (6 * kPickIdDigits)) - 1),
+                     kPickIdDigits);
+  uint32_t logprob_bits = 0;
+  std::memcpy(&logprob_bits, &result.logprob, sizeof(logprob_bits));
+  pick_encode_digits(mine.data() + 1 + kPickIdDigits, logprob_bits,
+                     kPickLogitDigits);
+  uint64_t witness_bits = 0;
+  std::memcpy(&witness_bits, &witness, sizeof(witness_bits));
+  pick_encode_digits(mine.data() + 1 + kPickIdDigits + kPickLogitDigits,
+                     witness_bits, kSamplingProfileLseDigits);
+  std::memset(scratch, 0, kSamplingPrefixDigestElems * sizeof(uint16_t));
+  if (rank == 0) std::copy(mine.begin(), mine.end(), scratch);
+  std::string err;
+  const uint64_t id =
+      bus.allreduce(scratch, scratch, kSamplingPrefixDigestElems, &err);
+  if (id == 0) throw std::runtime_error(std::string(what) + " digest: " + err);
+  const net::BusAllReduceResult echoed = bus.wait_allreduce(id, timeout_ms);
+  if (!echoed.ok)
+    throw std::runtime_error(std::string(what) + " digest: " + echoed.error);
+  if (!std::equal(mine.begin(), mine.end(), scratch)) {
+    const bool peer_resolved = pick_decode_digits(scratch, 1) != 0;
+    const int32_t peer_token =
+        static_cast<int32_t>(pick_decode_digits(scratch + 1, kPickIdDigits));
+    std::string words;
+    for (size_t i = 0; i < kSamplingPrefixDigestElems; ++i) {
+      if (i) words += ",";
+      words += std::format("{:#06x}", scratch[i]);
+    }
+    throw std::runtime_error(std::format(
+        "{}: decision digest mismatch on rank {} (mine: resolved={} token={} "
+        "witness={:.17g}; rank 0's decode: resolved={} token={}): scratch[{}]",
+        what, rank, resolved, result.token, witness, peer_resolved,
+        peer_token, words));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The full-logit gather (DESIGN §10, the fallback): every rank's PENALIZED
+// fp32 vocab slice to every rank, as ONE bulk-class collective between
+// windows. The wire carries each fp32 as four 8-bit digits in bf16 words:
+// bf16 holds every integer in [0, 256] exactly, exactly one rank writes any
+// slot (the others contribute +0), and the fold's fp32 accumulation of
+// x + 0 + ... + 0 followed by the bf16 store returns x — so no logit is
+// rounded, and NaN/inf/denormal/-0 payloads (which raw bf16 halves would
+// canonicalize or flush) survive as digits. Cost: 8 bytes per vocab id,
+// ~1.24 MB per token for this vocabulary; the design budgets it at a <1%
+// fallback rate. `scratch` is caller-owned pinned memory of
+// sampling_gather_scratch_elems(vocab) words, allocated before the world
+// forms.
+// ---------------------------------------------------------------------------
+inline constexpr int kGatherDigitsPerLogit = 4;
+
+inline constexpr size_t sampling_gather_scratch_elems(int64_t vocab) {
+  return vocab <= 0 ? 0
+                    : static_cast<size_t>(vocab) * kGatherDigitsPerLogit;
+}
+
+inline void bus_gather_logits(net::CollectiveBus& bus, int rank, int world,
+                              const float* slice, int vocab_count,
+                              int vocab_begin, int vocab_size,
+                              uint16_t* scratch, int timeout_ms,
+                              std::vector<float>* full) {
+  if (world < 1 || world > kPickMaxWorld || rank < 0 || rank >= world)
+    throw std::invalid_argument("logit gather: rank/world");
+  if (slice == nullptr || scratch == nullptr || full == nullptr ||
+      vocab_count <= 0 || vocab_begin < 0 || vocab_size <= 0 ||
+      vocab_begin + vocab_count > vocab_size)
+    throw std::invalid_argument("logit gather: invalid vocab slice");
+  const size_t elems = sampling_gather_scratch_elems(vocab_size);
+  std::memset(scratch, 0, elems * sizeof(uint16_t));
+  for (int i = 0; i < vocab_count; ++i) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, slice + i, sizeof(bits));
+    uint16_t* digits = scratch + static_cast<size_t>(vocab_begin + i) *
+                                     kGatherDigitsPerLogit;
+    for (int d = 0; d < kGatherDigitsPerLogit; ++d)
+      digits[d] = static_cast<uint16_t>((bits >> (8 * d)) & 0xFFu);
+  }
+  std::string err;
+  const uint64_t id = bus.allreduce_bulk(scratch, scratch, elems, &err);
+  if (id == 0) throw std::runtime_error("logit gather: " + err);
+  const net::BusAllReduceResult folded = bus.wait_allreduce(id, timeout_ms);
+  if (!folded.ok) throw std::runtime_error("logit gather: " + folded.error);
+  full->resize(static_cast<size_t>(vocab_size));
+  for (int v = 0; v < vocab_size; ++v) {
+    const uint16_t* digits =
+        scratch + static_cast<size_t>(v) * kGatherDigitsPerLogit;
+    uint32_t bits = 0;
+    for (int d = 0; d < kGatherDigitsPerLogit; ++d) {
+      if (digits[d] > 0xFFu)
+        throw std::runtime_error(std::format(
+            "logit gather: corrupt digit {:#06x} at vocab id {} on rank {}",
+            digits[d], v, rank));
+      bits |= static_cast<uint32_t>(digits[d]) << (8 * d);
+    }
+    std::memcpy(&(*full)[static_cast<size_t>(v)], &bits, sizeof(bits));
+  }
+}
+
 // M6.6b correctness seam: gather an exact global candidate prefix plus every
 // slice normalizer through one latency-class fold, make the exact
 // resolved-vs-fallback decision on every rank, then carry rank 0's decision
@@ -635,51 +756,9 @@ inline glm_sample::PrefixDecision bus_sampling_prefix(
       rng);
 
   // ---- readback invariant: rank 0's decision digest reaches every rank --
-  const auto encode_digest = [](const glm_sample::PrefixDecision& d,
-                                uint16_t* out) {
-    pick_encode_digits(out, d.resolved ? 1u : 0u, 1);
-    pick_encode_digits(out + 1,
-                       static_cast<uint64_t>(
-                           static_cast<uint32_t>(d.result.token)) &
-                           ((1ull << (6 * kPickIdDigits)) - 1),
-                       kPickIdDigits);
-    uint32_t logprob_bits = 0;
-    std::memcpy(&logprob_bits, &d.result.logprob, sizeof(logprob_bits));
-    pick_encode_digits(out + 1 + kPickIdDigits, logprob_bits,
-                       kPickLogitDigits);
-    uint64_t mass_bits = 0;
-    std::memcpy(&mass_bits, &d.covered_mass, sizeof(mass_bits));
-    pick_encode_digits(out + 1 + kPickIdDigits + kPickLogitDigits, mass_bits,
-                       kSamplingProfileLseDigits);
-  };
-  std::array<uint16_t, kSamplingPrefixDigestElems> mine_digest{};
-  encode_digest(decision, mine_digest.data());
-  std::memset(scratch, 0, kSamplingPrefixDigestElems * sizeof(uint16_t));
-  if (rank == 0) std::copy(mine_digest.begin(), mine_digest.end(), scratch);
-  const uint64_t digest_id =
-      bus.allreduce(scratch, scratch, kSamplingPrefixDigestElems, &err);
-  if (digest_id == 0)
-    throw std::runtime_error("sampling prefix digest: " + err);
-  const net::BusAllReduceResult echoed =
-      bus.wait_allreduce(digest_id, timeout_ms);
-  if (!echoed.ok)
-    throw std::runtime_error("sampling prefix digest: " + echoed.error);
-  if (!std::equal(mine_digest.begin(), mine_digest.end(), scratch)) {
-    const bool peer_resolved = pick_decode_digits(scratch, 1) != 0;
-    const int32_t peer_token = static_cast<int32_t>(
-        pick_decode_digits(scratch + 1, kPickIdDigits));
-    std::string words;
-    for (size_t i = 0; i < kSamplingPrefixDigestElems; ++i) {
-      if (i) words += ",";
-      words += std::format("{:#06x}", scratch[i]);
-    }
-    throw std::runtime_error(std::format(
-        "bus_sampling_prefix: decision digest mismatch on rank {} (mine: "
-        "resolved={} token={} covered_mass={:.17g}; rank 0's decode: "
-        "resolved={} token={}): scratch[{}]",
-        rank, decision.resolved, decision.result.token,
-        decision.covered_mass, peer_resolved, peer_token, words));
-  }
+  bus_check_decision_digest(bus, rank, decision.resolved, decision.result,
+                            decision.covered_mass, scratch, timeout_ms,
+                            "bus_sampling_prefix");
   return decision;
 }
 

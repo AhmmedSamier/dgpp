@@ -141,6 +141,65 @@ inline GenEngineAdapter::Pick make_fabric_pick(net::CollectiveBus* bus,
   };
 }
 
+// The fabric SAMPLER (M6 6b, the eager engines): the request's penalized
+// slice through the exact candidate/LSE fold (bus_sampling_prefix at
+// kSamplingCandidates per rank); when the prefix cannot decide, the exact
+// fallback — the penalized slices gathered as one bulk collective and the
+// SAME decision over the complete list under the transported normalizer,
+// with the same draw — and rank 0's digest echoed either way. Both scratch
+// buffers are caller-pinned BEFORE the world forms:
+// fabric_sampling_prefix_scratch_elems(world) and
+// sampling_gather_scratch_elems(vocab) words.
+inline size_t fabric_sampling_prefix_scratch_elems(int world) {
+  return sampling_prefix_scratch_elems(world, kSamplingCandidates);
+}
+
+inline GenEngineAdapter::Sample make_fabric_sample(
+    net::CollectiveBus* bus, int rank, int world, uint16_t* prefix_scratch,
+    uint16_t* gather_scratch, int64_t vocab, int pick_timeout_ms = 60000) {
+  if (bus == nullptr || prefix_scratch == nullptr || gather_scratch == nullptr)
+    throw std::invalid_argument("fabric sample: null bus/scratch");
+  return [bus, rank, world, prefix_scratch, gather_scratch, vocab,
+          pick_timeout_ms](const GlmDiagnosticModel::Outputs& out,
+                           const glm_sample::Params& p, glm_sample::Rng& rng,
+                           const std::vector<int32_t>& context)
+             -> glm_sample::Result {
+    step_timing::Scope tick(step_timing::kPick);
+    const int count = static_cast<int>(out.lm_vocab_count);
+    const int begin = out.lm_vocab_begin;
+    const glm_sample::PrefixDecision d = bus_sampling_prefix(
+        *bus, rank, world, out.logits.data(), count, begin,
+        static_cast<int>(vocab), p, rng, context, kSamplingCandidates,
+        prefix_scratch, pick_timeout_ms);
+    glm_sample::Result r;
+    if (d.resolved) {
+      r = d.result;
+    } else {
+      // The exact fallback (DESIGN §10): the penalized slices to every rank,
+      // the complete decision under the normalizer the prefix step already
+      // folded, the draw the prefix left untouched.
+      std::vector<float> adjusted(out.logits.begin(),
+                                  out.logits.begin() + count);
+      glm_sample::apply_penalties(adjusted.data(), count, begin, p,
+                                  glm_sample::count_context(context));
+      std::vector<float> full;
+      bus_gather_logits(*bus, rank, world, adjusted.data(), count, begin,
+                        static_cast<int>(vocab), gather_scratch,
+                        pick_timeout_ms, &full);
+      r = glm_sample::sample_complete_logits(full.data(),
+                                             static_cast<int>(vocab),
+                                             d.normalizer, p, rng);
+      bus_check_decision_digest(*bus, rank, /*resolved=*/true, r,
+                                d.normalizer, prefix_scratch,
+                                pick_timeout_ms, "fabric sample fallback");
+    }
+    if (r.token < 0 || r.token >= vocab)
+      throw std::runtime_error("fabric sample out of range: " +
+                               std::to_string(r.token));
+    return r;
+  };
+}
+
 // M6.6a Phase 2: adaptive scalar/row-batched graphs. Each physical request
 // slot lazily gets the exact Phase-1 scalar capture; one fixed batch covers
 // every configured slot, with rows [slot, speculative-row] (T=1 plain, T=2

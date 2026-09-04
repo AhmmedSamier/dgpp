@@ -115,6 +115,16 @@ void Scheduler::validate_new(const SchedulerRequest& request) const {
   if (request.max_steps < 1)
     throw std::invalid_argument("Scheduler: request '" + request.id +
                                 "' must generate at least one token");
+  try {
+    glm_sample::validate_params(request.sampling);
+  } catch (const std::invalid_argument& e) {
+    throw std::invalid_argument("Scheduler: request '" + request.id +
+                                "' has an invalid sampling spec: " + e.what());
+  }
+  if (request.sampling.temperature > 0.0f && !engine_->supports_sampling())
+    throw std::invalid_argument(
+        "Scheduler: request '" + request.id +
+        "' asks for stochastic sampling but the engine is greedy-only");
   if (request.cancel_after < 0 || request.cancel_after > request.max_steps)
     throw std::invalid_argument(
         "Scheduler: request '" + request.id + "' cancel_after must be in "
@@ -176,6 +186,8 @@ void Scheduler::admit(int arrival) {
   if (slot < 0)
     throw std::logic_error("Scheduler: admit without a free slot");
   const int64_t reserve = reserve_blocks(r);
+  // The spec lands on the slot before its first pick (the prefill's).
+  engine_->configure_sampling(slot, r.spec.sampling, r.spec.seed);
   const int32_t token = engine_->prefill(slot, r.spec.prompt);
   if (token < 0) {
     engine_->close(slot);

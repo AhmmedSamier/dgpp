@@ -1,6 +1,7 @@
 #include "service/generation_service.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <utility>
@@ -189,13 +190,30 @@ std::string text_completion_body(const std::string& id, int64_t created,
   return out;
 }
 
-std::string model_object(const std::string& model_id, int64_t created) {
+// The model object, with the served sampling surface as an extension: the
+// effective defaults (what an omitted field becomes) and whether stochastic
+// requests are executable on this engine at all.
+std::string model_object(const std::string& model_id, int64_t created,
+                         bool sampling_available,
+                         const glm_sample::Params& d) {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, model_id);
   out.append(",\"object\":\"model\",\"created\":");
   append_json_int(&out, created);
-  out.append(",\"owned_by\":\"dgpp\"}");
+  out.append(",\"owned_by\":\"dgpp\",\"sampling\":{\"available\":");
+  out.append(sampling_available ? "true" : "false");
+  out.append(",\"defaults\":{\"temperature\":");
+  append_json_float(&out, d.temperature);
+  out.append(",\"top_p\":");
+  append_json_float(&out, d.top_p);
+  out.append(",\"top_k\":");
+  append_json_int(&out, d.top_k);
+  out.append(",\"min_p\":");
+  append_json_float(&out, d.min_p);
+  out.append(",\"repetition_penalty\":");
+  append_json_float(&out, d.repetition_penalty);
+  out.append("}}}");
   return out;
 }
 
@@ -215,9 +233,118 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
     throw std::invalid_argument("GenerationService: frontend required");
   if (cfg_.model_id.empty())
     throw std::invalid_argument("GenerationService: model_id required");
+  // The sampling surface: the defaults must be a valid spec (an operator
+  // error otherwise), and an engine that cannot draw serves GREEDY defaults
+  // — loudly — rather than a stochastic mode it would silently ignore.
+  glm_sample::validate_params(cfg_.sampling_defaults);
+  sampling_available_ = engine_->supports_sampling();
+  if (!sampling_available_ && cfg_.sampling_defaults.temperature > 0.0f) {
+    DGPP_LOG_WARN(
+        "serve: the bound engine cannot sample yet — the model's default "
+        "(temperature {} top_p {}) is NOT served; omitted fields default to "
+        "greedy and temperature > 0 is refused (400 sampling_unsupported)",
+        cfg_.sampling_defaults.temperature, cfg_.sampling_defaults.top_p);
+    cfg_.sampling_defaults = glm_sample::greedy_params();
+  }
+  seed_rng_.seed(cfg_.fixed_seed.has_value()
+                     ? *cfg_.fixed_seed
+                     : static_cast<uint64_t>(std::random_device{}()) << 32 ^
+                           static_cast<uint64_t>(std::random_device{}()));
+  DGPP_LOG_INFO(
+      "serve: sampling {} — defaults temperature {} top_p {} top_k {} min_p "
+      "{} repetition_penalty {}; seedless requests {}",
+      sampling_available_ ? "available" : "unavailable (greedy engine)",
+      cfg_.sampling_defaults.temperature, cfg_.sampling_defaults.top_p,
+      cfg_.sampling_defaults.top_k, cfg_.sampling_defaults.min_p,
+      cfg_.sampling_defaults.repetition_penalty,
+      cfg_.fixed_seed.has_value()
+          ? "use the fixed seed " + std::to_string(*cfg_.fixed_seed)
+          : std::string("draw a fresh seed each"));
   // The SSE tap: tokens and retires ride the scheduler's observer
   // callbacks straight into the request records.
   sched_.set_observer(this);
+}
+
+// ---------------------------------------------------------------------------
+// The sampling spec (both completion routes)
+// ---------------------------------------------------------------------------
+
+bool GenerationService::parse_sampling(const dgpp::minijson::Value& body,
+                                       HttpResponseWriter& w,
+                                       glm_sample::Params* sampling,
+                                       uint64_t* seed) {
+  glm_sample::Params p = cfg_.sampling_defaults;
+  // One numeric field: present → a finite number inside [lo, hi] (an
+  // integer when asked), else the 400 names it.
+  const auto field = [&](const char* name, double lo, double hi,
+                         bool integer, const auto& apply) -> bool {
+    const dgpp::minijson::Value* v = body.find(name);
+    if (v == nullptr) return true;
+    const double x = v->is_number() ? v->as_double(0.0) : 0.0;
+    if (!v->is_number() || !std::isfinite(x) ||
+        (integer && x != std::floor(x))) {
+      respond_error(w, 400,
+                    std::string(name) + " must be " +
+                        (integer ? "an integer" : "a finite number"),
+                    "invalid_request_error", name);
+      return false;
+    }
+    if (x < lo || x > hi) {
+      std::string range = "[";
+      append_json_float(&range, lo);
+      range += ", ";
+      append_json_float(&range, hi);
+      range += "]";
+      respond_error(w, 400, std::string(name) + " must be in " + range,
+                    "invalid_request_error", name);
+      return false;
+    }
+    apply(x);
+    return true;
+  };
+  bool has_seed = false;
+  if (!field("temperature", 0.0, 2.0, false,
+             [&](double x) { p.temperature = static_cast<float>(x); }) ||
+      !field("top_p", 0.0, 1.0, false,
+             [&](double x) { p.top_p = static_cast<float>(x); }) ||
+      !field("top_k", 0.0, 2147483647.0, true,
+             [&](double x) { p.top_k = static_cast<int>(x); }) ||
+      !field("min_p", 0.0, 1.0, false,
+             [&](double x) { p.min_p = static_cast<float>(x); }) ||
+      !field("repetition_penalty", 0.0, 100.0, false,
+             [&](double x) { p.repetition_penalty = static_cast<float>(x); }) ||
+      !field("presence_penalty", -2.0, 2.0, false,
+             [&](double x) { p.presence_penalty = static_cast<float>(x); }) ||
+      !field("frequency_penalty", -2.0, 2.0, false,
+             [&](double x) { p.frequency_penalty = static_cast<float>(x); }) ||
+      !field("seed", -9223372036854775808.0, 9223372036854775807.0, true,
+             [&](double) {
+               has_seed = true;
+               *seed = static_cast<uint64_t>(body.find("seed")->as_int(0));
+             }))
+    return false;
+  try {
+    glm_sample::validate_params(p);
+  } catch (const std::invalid_argument& e) {
+    // The message starts with the field's name ("top_p must be in (0, 1]").
+    const std::string what = e.what();
+    respond_error(w, 400, what, "invalid_request_error",
+                  what.substr(0, what.find(' ')));
+    return false;
+  }
+  if (p.temperature > 0.0f && !sampling_available_) {
+    respond_error(w, 400,
+                  "temperature > 0 asks for stochastic sampling, which this "
+                  "engine cannot execute yet (the graph engine's sampler is "
+                  "the next slice); omit temperature or set it to 0",
+                  "invalid_request_error", "temperature",
+                  "sampling_unsupported");
+    return false;
+  }
+  if (!has_seed)
+    *seed = cfg_.fixed_seed.has_value() ? *cfg_.fixed_seed : seed_rng_();
+  *sampling = p;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,40 +532,20 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     include_usage = iu != nullptr && iu->as_bool(false);
   }
 
-  // Sampling: greedy only in v1 — temperature absent-or-0, top_p
-  // absent-or-1. Anything else names the param and the future stage.
-  const auto sampling_only_greedy = [&](const char* param,
-                                        double only_value) {
-    const dgpp::minijson::Value* v = body.find(param);
-    if (v == nullptr) return true;
-    if (!v->is_number()) return false;
-    return v->as_double(-1.0) == only_value;
-  };
-  if (!sampling_only_greedy("temperature", 0.0)) {
-    respond_error(w, 400,
-                  "temperature != 0 is not supported yet — greedy sampling "
-                  "is the implemented path (the sampling stage is next); "
-                  "omit temperature or set it to 0",
-                  "invalid_request_error", "temperature",
-                  "sampling_unsupported");
-    return;
-  }
-  if (!sampling_only_greedy("top_p", 1.0)) {
-    respond_error(w, 400,
-                  "top_p != 1 is not supported yet — greedy sampling is "
-                  "the implemented path; omit top_p or set it to 1",
-                  "invalid_request_error", "top_p", "sampling_unsupported");
-    return;
-  }
+  // Sampling: the spec over the model's defaults (M6 6b). temperature 0
+  // is the exact greedy path; anything the engine cannot execute is a 400.
+  glm_sample::Params sampling;
+  uint64_t seed = 0;
+  if (!parse_sampling(body, w, &sampling, &seed)) return;
 
   // The loud-refusal ladder for everything not implemented in v1.
   const char* unsupported[] = {
       "stop",           "n",                 "logprobs",
-      "top_logprobs",   "presence_penalty",   "frequency_penalty",
-      "seed",           "user",              "tools",
-      "tool_choice",    "response_format",    "parallel_tool_calls",
-      "store",          "metadata",          "reasoning_effort",
-      "service_tier",   "prediction",        "audio",
+      "top_logprobs",   "logit_bias",        "user",
+      "tools",          "tool_choice",       "response_format",
+      "parallel_tool_calls", "store",        "metadata",
+      "reasoning_effort", "service_tier",    "prediction",
+      "audio",
   };
   for (const char* param : unsupported) {
     if (body.find(param) != nullptr) {
@@ -505,6 +612,8 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   sr.id = record->id;
   sr.prompt = std::move(prompt);
   sr.max_steps = steps;
+  sr.sampling = sampling;
+  sr.seed = seed;
   enqueue_admission(std::move(record), std::move(sr));
 }
 
@@ -570,11 +679,13 @@ void GenerationService::route_completions(const HttpRequest& req,
     stream = sv->as_bool(false);
   }
 
+  glm_sample::Params sampling;
+  uint64_t seed = 0;
+  if (!parse_sampling(body, w, &sampling, &seed)) return;
+
   const char* unsupported[] = {"echo",        "suffix",        "logprobs",
                               "top_logprobs", "n",             "best_of",
-                              "stop",         "presence_penalty",
-                              "frequency_penalty", "seed",      "user",
-                              "temperature", "top_p"};
+                              "stop",         "logit_bias",    "user"};
   for (const char* param : unsupported) {
     if (body.find(param) != nullptr) {
       respond_error(w, 400,
@@ -621,6 +732,8 @@ void GenerationService::route_completions(const HttpRequest& req,
   sr.id = record->id;
   sr.prompt = std::move(ids);
   sr.max_steps = steps;
+  sr.sampling = sampling;
+  sr.seed = seed;
   enqueue_admission(std::move(record), std::move(sr));
 }
 
@@ -634,12 +747,16 @@ void GenerationService::route_models(const HttpRequest& req,
   if (req.path == "/v1/models") {
     w.respond(200, "application/json",
               "{\"object\":\"list\",\"data\":[" +
-                  model_object(cfg_.model_id, created) + "]}");
+                  model_object(cfg_.model_id, created, sampling_available_,
+                               cfg_.sampling_defaults) +
+                  "]}");
     return;
   }
   const std::string id = req.path.substr(std::string("/v1/models/").size());
   if (id == cfg_.model_id) {
-    w.respond(200, "application/json", model_object(id, created));
+    w.respond(200, "application/json",
+              model_object(id, created, sampling_available_,
+                           cfg_.sampling_defaults));
     return;
   }
   respond_error(w, 404, "the model '" + id + "' does not exist",

@@ -1076,6 +1076,223 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
   }
 }
 
+// M6 6b's full-logit fallback transport: every rank's fp32 slice reaches
+// every rank bit-for-bit through the bulk collective's 8-bit-digit
+// encoding, including the payloads a raw bf16 wire would canonicalize or
+// flush (NaN payloads, infinities, denormals, negative zero). The vocab
+// spans two bulk stripes at the loopback slot size, so the striped path
+// (not just a single-stripe corner) is the one under test.
+DGPP_TEST(glm_logit_gather_is_lossless_loopback) {
+  constexpr int kWorld = 2;
+  constexpr int kVocab = 40000;  // 160000 words: two 131072-word stripes
+  constexpr uint16_t kPort = 29927;
+  const std::vector<dgpp::glm_sample::VocabSlice> layout =
+      dgpp::glm_sample::vocab_layout(kVocab, kWorld);
+  std::vector<float> full(kVocab);
+  {
+    uint64_t x = 0x9e3779b97f4a7c15ull;
+    for (int i = 0; i < kVocab; ++i) {
+      x ^= x << 13;
+      x ^= x >> 7;
+      x ^= x << 17;
+      uint32_t bits = static_cast<uint32_t>(x);
+      switch (i % 11) {
+        case 0: bits = 0x7fc00001u; break;  // NaN with a payload
+        case 1: bits = 0xffbfffffu; break;  // negative signalling-ish NaN
+        case 2: bits = 0x7f800000u; break;  // +inf
+        case 3: bits = 0xff800000u; break;  // -inf
+        case 4: bits = 0x80000000u; break;  // -0
+        case 5: bits = 0x00000001u; break;  // the smallest denormal
+        case 6: bits = 0x807fffffu; break;  // the largest negative denormal
+        default: break;                     // random bits
+      }
+      std::memcpy(&full[static_cast<size_t>(i)], &bits, sizeof(bits));
+    }
+  }
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses =
+      start_world(kWorld, kPort, 64 * 1024);
+  require(!buses.empty(), "logit-gather bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<float>> got(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int rank = 0; rank < kWorld; ++rank) {
+    workers.emplace_back([&, rank] {
+      uint16_t* scratch = nullptr;
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      try {
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(kVocab),
+            cudaHostAllocDefault));
+        arrive_once();
+        const auto& slice = layout[static_cast<size_t>(rank)];
+        dgpp::bus_gather_logits(*buses[static_cast<size_t>(rank)], rank,
+                                kWorld, full.data() + slice.begin,
+                                slice.count, slice.begin, kVocab, scratch,
+                                test_wait_timeout_ms(),
+                                &got[static_cast<size_t>(rank)]);
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& error) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(rank)] = error.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  for (int rank = 0; rank < kWorld; ++rank)
+    require(errors[static_cast<size_t>(rank)].empty(),
+            "logit-gather rank " + std::to_string(rank) + ": " +
+                errors[static_cast<size_t>(rank)]);
+  for (int rank = 0; rank < kWorld; ++rank) {
+    require(got[static_cast<size_t>(rank)].size() == full.size(),
+            "gathered vocabulary size");
+    require(std::memcmp(got[static_cast<size_t>(rank)].data(), full.data(),
+                        sizeof(float) * full.size()) == 0,
+            "gathered logits differ bitwise on rank " + std::to_string(rank));
+  }
+}
+
+// The eager fabric sampler end to end over the real bus — the closure
+// glm_serve's eager engine and glm_gen_check run — against the sharded
+// reference at the loader's layout, bitwise, across a run of steps whose
+// context grows (penalties) and whose distributions alternate between a
+// peaked shape the prefix resolves and a flat shape that takes the exact
+// gather fallback. The counter advances once per step either way.
+DGPP_TEST(glm_fabric_sample_matches_sharded_reference_loopback) {
+  constexpr int kWorld = 2;
+  constexpr int kVocab = 700;
+  constexpr uint16_t kPort = 29928;
+  constexpr int kSteps = 6;
+  const std::vector<dgpp::glm_sample::VocabSlice> layout =
+      dgpp::glm_sample::vocab_layout(kVocab, kWorld);
+  dgpp::glm_sample::Params params;
+  params.temperature = 1.0f;
+  params.top_p = 0.95f;
+  params.presence_penalty = 0.2f;
+  params.frequency_penalty = 0.1f;
+  params.logprobs = 2;
+  const std::vector<int64_t> prompt{5, 9, 9, 400, 699};
+  // Step s's full distribution: even steps peaked (a handful of tokens
+  // carry the nucleus), odd steps flat (the 128-wide prefix holds ~37% of
+  // the mass: fallback).
+  const auto logits_for = [&](int step) {
+    std::vector<float> v(kVocab, step % 2 == 0 ? -8.0f : 0.0f);
+    if (step % 2 == 0) {
+      v[static_cast<size_t>((37 * step + 3) % kVocab)] = 6.0f;
+      v[static_cast<size_t>((37 * step + 351) % kVocab)] = 5.5f;
+      v[static_cast<size_t>((37 * step + 690) % kVocab)] = 5.0f;
+    } else {
+      for (int i = 0; i < kVocab; ++i)
+        v[static_cast<size_t>(i)] += 0.001f * static_cast<float>(i % 7);
+    }
+    return v;
+  };
+
+  // The centralized expectation: the sharded reference, one draw per step,
+  // the context growing with each sampled token.
+  std::vector<dgpp::glm_sample::Result> expected;
+  {
+    dgpp::glm_sample::Rng rng{0xabcdefull, 0};
+    std::vector<int32_t> context(prompt.begin(), prompt.end());
+    for (int step = 0; step < kSteps; ++step) {
+      const std::vector<float> full = logits_for(step);
+      expected.push_back(dgpp::glm_sample::sample_reference_sharded(
+          full.data(), kVocab, layout, params, rng, context));
+      context.push_back(expected.back().token);
+    }
+    require(rng.counter == kSteps, "one draw per step");
+  }
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses =
+      start_world(kWorld, kPort, 64 * 1024);
+  require(!buses.empty(), "fabric-sample bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<dgpp::glm_sample::Result>> got(kWorld);
+  std::vector<uint64_t> counters(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int rank = 0; rank < kWorld; ++rank) {
+    workers.emplace_back([&, rank] {
+      uint16_t* prefix_scratch = nullptr;
+      uint16_t* gather_scratch = nullptr;
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      const auto release = [&] {
+        if (prefix_scratch != nullptr) cudaFreeHost(prefix_scratch);
+        if (gather_scratch != nullptr) cudaFreeHost(gather_scratch);
+        prefix_scratch = gather_scratch = nullptr;
+      };
+      try {
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(kVocab),
+            cudaHostAllocDefault));
+        arrive_once();
+        const dgpp::GenEngineAdapter::Sample sample = dgpp::make_fabric_sample(
+            buses[static_cast<size_t>(rank)].get(), rank, kWorld,
+            prefix_scratch, gather_scratch, kVocab, test_wait_timeout_ms());
+        const auto& slice = layout[static_cast<size_t>(rank)];
+        dgpp::glm_sample::Rng rng{0xabcdefull, 0};
+        std::vector<int32_t> context(prompt.begin(), prompt.end());
+        for (int step = 0; step < kSteps; ++step) {
+          const std::vector<float> full = logits_for(step);
+          dgpp::GlmDiagnosticModel::Outputs out;
+          out.logits.assign(full.begin() + slice.begin,
+                            full.begin() + slice.begin + slice.count);
+          out.lm_vocab_begin = slice.begin;
+          out.lm_vocab_count = slice.count;
+          got[static_cast<size_t>(rank)].push_back(
+              sample(out, params, rng, context));
+          context.push_back(got[static_cast<size_t>(rank)].back().token);
+        }
+        counters[static_cast<size_t>(rank)] = rng.counter;
+        release();
+      } catch (const std::exception& error) {
+        release();
+        errors[static_cast<size_t>(rank)] = error.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  for (int rank = 0; rank < kWorld; ++rank)
+    require(errors[static_cast<size_t>(rank)].empty(),
+            "fabric-sample rank " + std::to_string(rank) + ": " +
+                errors[static_cast<size_t>(rank)]);
+  for (int rank = 0; rank < kWorld; ++rank) {
+    require(got[static_cast<size_t>(rank)].size() == expected.size(),
+            "every step sampled");
+    for (int step = 0; step < kSteps; ++step) {
+      const auto& g = got[static_cast<size_t>(rank)][static_cast<size_t>(step)];
+      const auto& e = expected[static_cast<size_t>(step)];
+      require(g.token == e.token &&
+                  std::memcmp(&g.logprob, &e.logprob, sizeof(float)) == 0 &&
+                  g.top_logprobs == e.top_logprobs,
+              "fabric sample differs from the sharded reference at step " +
+                  std::to_string(step) + " on rank " + std::to_string(rank));
+    }
+    require(counters[static_cast<size_t>(rank)] == kSteps,
+            "the fabric sampler consumed one draw per step");
+  }
+}
+
 // ---- M6 d3: end-to-end greedy generation ----------------------------------
 // The d3 criterion on the fixture, stated as the invariant that actually
 // holds: the DISTRIBUTED pick (per-rank slice argmax + the bus
