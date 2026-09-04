@@ -783,11 +783,31 @@ rather than advertise a mode it cannot run. `glm_serve --temperature
 --top-p --top-k --min-p --repetition-penalty --seed` override the file;
 `glm_gen_check` keeps its exact greedy loop by default (its transcripts are
 the regression instrument) and samples under `--sample` or any override,
-eager engines only. `logprobs`/`logit_bias` stay refused. Not wired yet:
-the device (graph) sampler, sampling under MTP, logprobs on the wire, and
-the three real-text fabric runs — no k is fixed until those land in the
-measurement record, and the on-device path is what makes the served
-default cheap.
+eager engines only. `logprobs`/`logit_bias` stay refused.
+
+The DEVICE path landed for the plain (T=1) graphs the same day (DESIGN
+§10 "the device path"): `common/det_math.hpp` makes exp/log bitwise
+host/device (and node/node), the sampler runs on it; `kernels/
+glm_sample_pick.{hpp,cu}` generalize the pick table to k candidates + the
+slice lse per rank (empty-id slots for narrow shards and greedy rows),
+apply the penalties in place from a per-request device count table the
+kernel itself maintains, select the local top-k with the lifted DSA
+composite-key machinery (`kernels/topk_select.cuh`), and decide
+`sample_from_prefix` on the device or flag the fallback; `GlmDevicePicker`
+records either pick; `GlmGraphEngineAdapter` arms per-slot device specs,
+serves fallbacks between windows exactly as the eager engine and reseeds
+the graph's token feed, and reports `fallbacks()`. The width fits the
+batch's rows into the 64 KiB latency slot (112 per rank at eight rows and
+world 4; 128 below seven rows) — the measured profiles still decide
+whether that is the right k. `glm_serve --decode-graph` now samples at the
+checkpoint's defaults; `--decode-graph --mtp` is still greedy-only and
+says so. Gates: det_math_test, the bitwise simulated-world kernel gate in
+glm_pick_test, and the two-rank loopback gate of the scalar and batched
+graphs against the eager sampling engine with forced fallbacks. Not wired
+yet: sampling under MTP (the T=2 accept test, the residual sample, the
+draft rollback on a fallback), logprobs on the wire, and the three
+real-text fabric runs — no k is fixed until those land in the
+measurement record.
 
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's
@@ -813,7 +833,8 @@ cost. Design:
   line naming the gap, never to a silent 1.0). A request's explicit fields
   override both. `/v1/models` reports the effective defaults.
 - *The pick table carries each rank's exact local top-k and its slice's
-  log-sum-exp* (`kPickSlotsPerRank` 2 → k per candidate row, one more
+  log-sum-exp* (BUILT 2026-09-04 for the plain graphs; the MTP verify row
+  remains) (`kPickSlotsPerRank` 2 → k per candidate row, one more
   digit group for the lse). Penalties and `logit_bias` apply BEFORE the
   local top-k in `glm_pick_local`, from a per-request token-count table
   the commit kernel maintains. The verdict kernel merges the k-way prefix

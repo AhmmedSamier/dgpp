@@ -42,9 +42,9 @@
 //     [--temperature X] [--top-p X] [--top-k N] [--min-p X]
 //     [--repetition-penalty X] override them for the process, [--seed N]
 //     fixes the seed of every request that omits one. The eager engines
-//     sample exactly (DESIGN §10); the graph engine cannot yet, so under
-//     --decode-graph the service serves greedy defaults and refuses
-//     temperature > 0, loudly.
+//     and the plain (T=1) graphs sample exactly (DESIGN §10, the device
+//     path); the MTP graphs cannot yet, so under --decode-graph --mtp the
+//     service serves greedy defaults and refuses temperature > 0, loudly.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -507,7 +507,8 @@ int main(int argc, char** argv) {
         if (decode_graph) {
           auto graph_engine = std::make_unique<dgpp::GlmGraphEngineAdapter>(
               &model, bus.get(), rank, world, pick_scratch, cfg.vocab_size,
-              /*pick_timeout_ms=*/60000, graph_batch_min_live);
+              /*pick_timeout_ms=*/60000, graph_batch_min_live,
+              sample_prefix.data, sample_gather.data);
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up
           // is a run of collectives, so it starts on the journal's clock:

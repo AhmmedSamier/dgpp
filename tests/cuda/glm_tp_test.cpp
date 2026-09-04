@@ -2629,6 +2629,194 @@ DGPP_TEST(glm_tp_serving_graph_adapter_matches_plain_and_reuses_slot) {
                 first_steps[0], kTokens, reuse_steps[0], kReuseTokens);
 }
 
+// M6 6b, the device path: the plain graphs with the ON-DEVICE sampling pick
+// (scalar variant, then the two-slot batch with a greedy request beside a
+// sampled one, then a slot reused) in lockstep with the eager sampling engine
+// on the same bus. Every request's transcript must equal the eager engine's
+// and agree across ranks; with the candidate width capped at six per rank on
+// this 96-token vocabulary, the model-default request must fall back on some
+// steps (served between windows through the bulk gather) and a narrow
+// top-p request must resolve on the device on others.
+DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kWorld = 2;
+  constexpr int kSlots = 2;
+  // 24 of 48 ids per rank: the model-default nucleus (95%) cannot fit the
+  // 48-candidate prefix of this near-flat fixture, a 10% one can.
+  constexpr int kCap = 24;
+  const int max_tokens = static_cast<int>(prompt.size()) + 12;
+
+  struct Spec {
+    const char* id;
+    int max_steps;
+    dgpp::glm_sample::Params params;
+    uint64_t seed;
+  };
+  const auto model_default = [] {
+    dgpp::glm_sample::Params p;
+    p.temperature = 1.0f;
+    p.top_p = 0.95f;
+    p.frequency_penalty = 0.2f;
+    p.presence_penalty = 0.1f;
+    return p;
+  }();
+  const auto narrow = [] {
+    dgpp::glm_sample::Params p;
+    p.temperature = 0.8f;
+    p.top_p = 0.1f;
+    return p;
+  }();
+  // Phase 1: one sampled request alone (the scalar variant). Phase 2: a
+  // sampled request and a greedy one together (the batch), then the greedy
+  // one's slot reused by a narrow-top-p request (device resolutions).
+  const std::vector<std::vector<Spec>> phases{
+      {{"solo", 8, model_default, 7}},
+      {{"a", 8, model_default, 11},
+       {"g", 5, dgpp::glm_sample::greedy_params(), 0}},
+      {{"n", 6, narrow, 23}},
+  };
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29929);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<std::vector<int64_t>>> graph_seqs(kWorld);
+  std::vector<uint64_t> fallbacks(kWorld, 0);
+  std::vector<int> sampled_steps(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      uint16_t* prefix_scratch = nullptr;
+      uint16_t* gather_scratch = nullptr;
+      const auto release = [&] {
+        if (scratch) cudaFreeHost(scratch);
+        if (prefix_scratch) cudaFreeHost(prefix_scratch);
+        if (gather_scratch) cudaFreeHost(gather_scratch);
+        scratch = prefix_scratch = gather_scratch = nullptr;
+      };
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded, kSlots);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded, kSlots);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+            cudaHostAllocDefault));
+        arrive_once();
+
+        dgpp::GenEngineAdapter eager_engine(
+            &eager, kSlots,
+            dgpp::make_fabric_pick(&bus, r, kWorld, scratch, cfg.vocab_size,
+                                   test_wait_timeout_ms()),
+            dgpp::make_fabric_sample(&bus, r, kWorld, prefix_scratch,
+                                     gather_scratch, cfg.vocab_size,
+                                     test_wait_timeout_ms()));
+        dgpp::GlmGraphEngineAdapter graph_engine(
+            &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+            test_wait_timeout_ms(), /*batch_min_live=*/kSlots, prefix_scratch,
+            gather_scratch, kCap);
+        if (!graph_engine.supports_sampling() ||
+            graph_engine.sampling_candidates() != kCap)
+          throw std::runtime_error("graph engine did not arm the device "
+                                   "sampler at the capped width");
+        dgpp::glm::Scheduler eager_sched(&eager_engine, /*eos=*/{});
+        dgpp::glm::Scheduler graph_sched(&graph_engine, /*eos=*/{});
+
+        size_t result_index = 0;
+        for (const std::vector<Spec>& phase : phases) {
+          for (const Spec& spec : phase) {
+            dgpp::glm::SchedulerRequest req;
+            req.id = spec.id;
+            req.prompt = prompt;
+            req.max_steps = spec.max_steps;
+            req.sampling = spec.params;
+            req.seed = spec.seed;
+            eager_sched.submit(req);
+            graph_sched.submit(req);
+          }
+          // Lockstep ticks: the eager engine's collectives, then the graph's
+          // (its replay window plus the eager fallback/prefill collectives
+          // between windows), in the same order on every rank.
+          bool more = true;
+          while (more) {
+            const bool e = eager_sched.tick();
+            const bool g = graph_sched.tick();
+            if (e != g)
+              throw std::runtime_error("the two schedulers disagree on "
+                                       "pending work");
+            more = e;
+          }
+          for (const Spec& spec : phase) {
+            const auto& want = eager_sched.results()[result_index].generated;
+            const auto& got = graph_sched.results()[result_index].generated;
+            ++result_index;
+            if (want.size() != static_cast<size_t>(spec.max_steps))
+              throw std::runtime_error(std::string("eager transcript length "
+                                                   "for ") + spec.id);
+            if (got != want)
+              throw std::runtime_error(
+                  std::string("graph sampling transcript for '") + spec.id +
+                  "' differs from the eager sampling engine's");
+            graph_seqs[static_cast<size_t>(r)].push_back(got);
+            if (spec.params.temperature > 0.0f)
+              sampled_steps[static_cast<size_t>(r)] += spec.max_steps;
+          }
+        }
+        fallbacks[static_cast<size_t>(r)] = graph_engine.fallbacks();
+        release();
+      } catch (const std::exception& e) {
+        release();
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("graph sampling rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r) {
+    require(graph_seqs[static_cast<size_t>(r)] == graph_seqs[0],
+            "graph sampling transcripts differ across ranks");
+    require(fallbacks[static_cast<size_t>(r)] == fallbacks[0],
+            "fallback counts differ across ranks");
+  }
+  // The prefill picks are host decisions; the device decided every other
+  // sampled step, some inside the prefix and some through the fallback.
+  const int device_steps = sampled_steps[0] - 3;  // three sampled prefills
+  require(fallbacks[0] > 0, "the capped width must force some fallbacks");
+  require(static_cast<int>(fallbacks[0]) < device_steps,
+          "some sampled steps must resolve on the device");
+  DGPP_LOG_INFO("graph sampling w2: {} sampled device steps, {} served by the "
+                "fallback; transcripts == the eager sampling engine's on "
+                "every rank",
+                device_steps, fallbacks[0]);
+}
+
 // The full Phase-2 MTP shape: four slots x two speculative rows make one
 // eight-row replay. Only noncontiguous slots 0 and 3 are live; the middle
 // groups are padding, then slot 3 closes and is reused without recording

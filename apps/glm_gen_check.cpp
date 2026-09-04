@@ -1522,8 +1522,7 @@ int main(int argc, char** argv) {
       "   defaults] [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
       "  [--repetition-penalty X] (each implies --sample and overrides the\n"
       "   file) [--seed N (default 0; manifest request i draws from N+i)]\n"
-      "   (eager engines only: not with --mtp, --decode-graph,\n"
-      "    --teacher-file or --engine reforward)\n"
+      "   (not with --mtp, --teacher-file or --engine reforward)\n"
       "scheduler mode (--requests): [--max-concurrency N] [--kv-capacity N]\n"
       "  [--sched-plan]\n";
 
@@ -1618,11 +1617,12 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("--sampling-profile requires --teacher-file");
     return 1;
   }
-  if (sample && (mtp || decode_graph || !incremental || !teacher_file.empty())) {
+  if (sample && (mtp || !incremental || !teacher_file.empty())) {
     DGPP_LOG_ERROR(
-        "--sample/--temperature/... drive the eager engines' exact sampler: "
-        "not with --mtp, --decode-graph, --teacher-file or --engine "
-        "reforward (the graph sampler is M6 6b's next slice)");
+        "--sample/--temperature/... drive the exact sampler on the eager "
+        "engines (and this app's --decode-graph loop, whose pick stays on "
+        "the host between windows): not with --mtp, --teacher-file or "
+        "--engine reforward (sampling under MTP is M6 6b's next slice)");
     return 1;
   }
   if (!teacher_file.empty() && (!requests_path.empty() || !incremental)) {

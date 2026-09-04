@@ -1745,8 +1745,61 @@ gate runs six steps alternating a resolved and a fallback shape over a
 growing penalized context and is bitwise the sharded reference at the
 loader's layout (`vocab_layout`), one draw per step. `GenEngineAdapter`
 keeps per-slot spec/RNG/context and picks greedily at temperature 0; world 1
-runs `sample_full_logits` at the one-slice layout. Remaining below: the
-device (graph) sampler, sampling under MTP, logprobs on the wire.
+runs `sample_full_logits` at the one-slice layout.
+
+*The device path is built for the plain (T=1) graphs* (2026-09-04,
+`kernels/glm_sample_pick.{hpp,cu}`, `GlmDevicePicker`'s sampling mode,
+`GlmGraphEngineAdapter`). The arithmetic contract first: the sampler's
+transcendentals are `common/det_math.hpp` — Cody-Waite exp and atanh-series
+log with every multiply-add an explicit fma, bitwise identical on the host
+and the device (`det_math_test`: two million inputs, and within 1–2 ulps of
+libm) — the penalties' frequency step is one fused op, the slice
+normalizer sums in fixed 256-element chunks, and the kernel file builds
+with `--fmad=false` beside the host's `-ffp-contract=off`, so no
+contraction can differ between the two sides (or between two fabric nodes'
+libm builds). The wire table is the greedy pick's generalized:
+`[rows][world][k candidates × 9 digits + the slice lse × 11 digits]` plus
+the digest group; unused candidate slots carry an EMPTY id no vocabulary
+reaches (a shard narrower than k, or a greedy row's single argmax). Kernel
+1, one block per row: for a sampled request (its device spec's
+temperature > 0) it counts the fed token into the request's `[vocab]` count
+table, applies the penalties IN PLACE on the row's logits slice, computes
+the temperature-scaled slice log-sum-exp in the host's chunked order, and
+selects the exact local top-k in canonical order with the DSA decode
+select's streaming composite-key machinery (`kernels/topk_select.cuh`,
+lifted); a greedy row writes its canonical argmax as the one candidate and
+touches nothing. Kernel 2, one block per request: decodes every rank's
+group, k-way-merges the canonical prefix (`merge_topk`), folds the lse
+(`merge_logsumexp`) and runs `sample_from_prefix` — the same regimes, the
+same fp32 selector and fp64 walk, the same counter RNG — writing the
+`GlmPickVerdict` the commit and token-feed kernels already read (accepted
+1, `next` the decision or, on a fallback, the provisional argmax) plus a
+`GlmSampleOutcome` (fallback flag, counter after, normalizer, covered
+mass, logprob) and the spec's advanced counter; a third pass computes the
+digest chain exactly as `glm_pick_verdict_batched`. The width is the
+widest k that fits the fixed batch's rows in one latency slot
+(`glm_sample_candidates_that_fit`: 112 per rank for eight rows at world 4
+in the 64 KiB slot, 128 below seven rows), logged at startup. The
+adapter's slot state is the eager engine's: `configure_sampling` pushes
+the spec and zeroes the count table between windows, the prefill decides
+on the host (`make_fabric_sample`) and uploads the prompt's counts, and
+after a replay `collect_verdict` either takes the device's counter or
+serves the fallback exactly as the eager engine does — the penalized row
+to the host, `bus_gather_logits`, `sample_complete_logits` under the
+transported normalizer with the reserved draw, rank 0's digest — and puts
+the true token where the graph fed itself the provisional one (the scalar
+variant restages `pending_`; the batch reseeds its device feed). Gates:
+`sample_pick_matches_host_oracle_bitwise_over_simulated_world` (greedy,
+resolving, falling-back and padding requests side by side at two slice
+widths: candidates, lse bits, penalized logits, counts, tokens, logprobs,
+counters, normalizers and the digest chain all bitwise the host oracle's)
+and `glm_tp_serving_graph_sampling_matches_eager_engine` (the scalar and
+batch variants with a greedy request beside a sampled one, in lockstep
+with the eager sampling engine on the same bus; capped at six candidates
+per rank so the 96-token fixture forces fallbacks, transcripts equal on
+every rank). Remaining below: sampling under MTP (the T=2 verify's accept
+test and residual sample, and the draft rollback on a fallback), logprobs
+on the wire, and the fabric profiles that fix k.
 
 *The device path.* The pick table (§9) generalizes from 2 to k candidates
 per rank and gains a digit group for each rank's slice log-sum-exp; the

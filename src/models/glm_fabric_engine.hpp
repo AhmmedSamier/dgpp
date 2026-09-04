@@ -207,17 +207,35 @@ inline GenEngineAdapter::Sample make_fabric_sample(
 // variant; above it, one batch replay advances them all. Closed batch slots
 // derive position -1 and remain padding. Both paths return one independently
 // judged token vector per live slot.
+// SAMPLING (M6 6b, the device path): with both sampler scratch tables the
+// plain (T=1) graphs carry the on-device sampling pick
+// (kernels/glm_sample_pick.hpp) — per-slot device specs and count tables,
+// the exact local top-k + slice normalizer, and the verdict that decides
+// bit for bit what the host oracle decides or flags a fallback. The
+// candidate width is the widest that fits the fixed batch's rows in one
+// latency slot (at most kSamplingCandidates). A fallback is served between
+// windows exactly as the eager engine's: the penalized row to the host, the
+// bulk gather, the complete decision under the transported normalizer with
+// the reserved draw, rank 0's digest — and the true token overrides the
+// provisional one in the graph's token feed before the next replay. The
+// MTP graphs stay greedy-only (sampling under MTP is the next slice).
 class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
  public:
   GlmGraphEngineAdapter(GlmDiagnosticModel* model, net::CollectiveBus* bus,
                         int rank, int world, uint16_t* pick_scratch,
                         int64_t vocab, int pick_timeout_ms = 60000,
-                        int batch_min_live = 4)
+                        int batch_min_live = 4,
+                        uint16_t* sample_prefix_scratch = nullptr,
+                        uint16_t* sample_gather_scratch = nullptr,
+                        int sampling_candidates_cap = kSamplingCandidates)
       : model_(model),
         bus_(bus),
         rank_(rank),
+        world_(world),
         vocab_(vocab),
-        pick_timeout_ms_(pick_timeout_ms) {
+        pick_timeout_ms_(pick_timeout_ms),
+        sample_prefix_scratch_(sample_prefix_scratch),
+        sample_gather_scratch_(sample_gather_scratch) {
     if (model_ == nullptr || bus_ == nullptr || pick_scratch == nullptr)
       throw std::invalid_argument("graph engine: null model/bus/pick scratch");
     slots_ = model_->max_session_requests();
@@ -229,8 +247,56 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
           "decode-row ceiling");
     prefill_pick_ = make_fabric_pick(bus_, rank_, world, pick_scratch, vocab_,
                                      pick_timeout_ms_);
+    if (sample_prefix_scratch_ != nullptr && sample_gather_scratch_ != nullptr &&
+        !model_->mtp_enabled()) {
+      // The planned width, or a lower cap (the loopback gates narrow it so
+      // the tiny fixture vocabulary still exercises the fallback).
+      if (sampling_candidates_cap < 1 ||
+          sampling_candidates_cap > kSampleMaxCandidates)
+        throw std::invalid_argument("graph engine: sampling candidates cap");
+      candidates_ = glm_sample_candidates_that_fit(
+          slots_ * rows_per_request_, world_,
+          bus_->slot_bytes(net::BusMessageClass::kLatency),
+          sampling_candidates_cap);
+      if (candidates_ > 0) {
+        sampling_ = true;
+        prefill_sample_ = make_fabric_sample(
+            bus_, rank_, world_, sample_prefix_scratch_,
+            sample_gather_scratch_, vocab_, pick_timeout_ms_);
+        DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_specs_),
+                                sizeof(GlmSampleSpec) * slots_));
+        DGPP_CUDA_OK(cudaMemset(d_specs_, 0, sizeof(GlmSampleSpec) * slots_));
+        DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_specs_),
+                                    sizeof(GlmSampleSpec) * slots_));
+        for (int i = 0; i < slots_; ++i) h_specs_[i] = GlmSampleSpec{};
+        DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_counts_),
+                                sizeof(int32_t) * slots_ * vocab_));
+        DGPP_CUDA_OK(cudaMemset(d_counts_, 0, sizeof(int32_t) * slots_ * vocab_));
+        DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_prompt_ids_),
+                                sizeof(int64_t) * model_->max_tokens()));
+        DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_prompt_ids_),
+                                    sizeof(int64_t) * model_->max_tokens()));
+        DGPP_CUDA_OK(cudaMallocHost(
+            reinterpret_cast<void**>(&h_fallback_row_),
+            sizeof(float) * model_->lm_vocab_count()));
+        DGPP_LOG_INFO(
+            "rank {}: graph engine samples on the device — {} candidates per "
+            "rank ({} rows x {} ranks in a {}-byte latency slot; the planned "
+            "width is {})",
+            rank_, candidates_, slots_ * rows_per_request_, world_,
+            bus_->slot_bytes(net::BusMessageClass::kLatency),
+            sampling_candidates_cap);
+      } else {
+        DGPP_LOG_WARN(
+            "rank {}: graph engine cannot sample — not even one candidate per "
+            "rank fits the latency slot for {} rows; greedy only",
+            rank_, slots_ * rows_per_request_);
+      }
+    }
     picker_ = std::make_unique<GlmDevicePicker>(*bus_, rank_, world,
-                                                pick_timeout_ms_);
+                                                pick_timeout_ms_, candidates_);
+    params_.assign(static_cast<size_t>(slots_), glm_sample::greedy_params());
+    rng_.assign(static_cast<size_t>(slots_), glm_sample::Rng{});
     pending_.assign(static_cast<size_t>(slots_), -1);
     draft_.assign(static_cast<size_t>(slots_), -1);
     live_.assign(static_cast<size_t>(slots_), false);
@@ -251,6 +317,12 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     for (cudaGraphExec_t exec : scalar_execs_)
       if (exec != nullptr) cudaGraphExecDestroy(exec);
     if (batch_exec_ != nullptr) cudaGraphExecDestroy(batch_exec_);
+    if (d_specs_) cudaFree(d_specs_);
+    if (h_specs_) cudaFreeHost(h_specs_);
+    if (d_counts_) cudaFree(d_counts_);
+    if (d_prompt_ids_) cudaFree(d_prompt_ids_);
+    if (h_prompt_ids_) cudaFreeHost(h_prompt_ids_);
+    if (h_fallback_row_) cudaFreeHost(h_fallback_row_);
   }
   GlmGraphEngineAdapter(const GlmGraphEngineAdapter&) = delete;
   GlmGraphEngineAdapter& operator=(const GlmGraphEngineAdapter&) = delete;
@@ -258,6 +330,37 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   int max_concurrent_requests() const override { return slots_; }
   int decode_batch_capacity() const override { return slots_; }
   int batch_min_live() const { return batch_min_live_; }
+  int sampling_candidates() const { return candidates_; }
+
+  bool supports_sampling() const override { return sampling_; }
+  void configure_sampling(int req, const glm_sample::Params& sampling,
+                          uint64_t seed) override {
+    check_req(req);
+    glm_sample::validate_params(sampling);
+    if (sampling.temperature > 0.0f && !sampling_)
+      throw std::logic_error(
+          "graph engine: no device sampler (MTP graphs and engines without "
+          "the sampler scratch are greedy-only)");
+    params_[static_cast<size_t>(req)] = sampling;
+    rng_[static_cast<size_t>(req)] = glm_sample::Rng{seed, 0};
+    if (!sampling_) return;
+    GlmSampleSpec spec;
+    spec.temperature = sampling.temperature;
+    spec.top_p = sampling.top_p;
+    spec.min_p = sampling.min_p;
+    spec.repetition_penalty = sampling.repetition_penalty;
+    spec.frequency_penalty = sampling.frequency_penalty;
+    spec.presence_penalty = sampling.presence_penalty;
+    spec.top_k = sampling.top_k;
+    spec.seed = seed;
+    spec.counter = 0;
+    push_spec(req, spec);
+    // A fresh context: the prompt's counts arrive with the prefill.
+    DGPP_CUDA_OK(cudaMemsetAsync(d_counts_ + static_cast<size_t>(req) * vocab_,
+                                 0, sizeof(int32_t) * vocab_,
+                                 model_->stream()));
+    DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+  }
 
   // Startup warm-up: records every scalar variant and, above one slot, the
   // row batch BEFORE the first client request, so no capture (record +
@@ -311,7 +414,37 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     if (live_[static_cast<size_t>(req)])
       throw std::logic_error("graph engine: prefill on a live request");
     try {
-      const int32_t first = prefill_pick_(model_->session_prefill(req, prompt));
+      const bool sampled = sampled_slot(req);
+      int32_t first = -1;
+      {
+        const GlmDiagnosticModel::Outputs out =
+            model_->session_prefill(req, prompt);
+        if (sampled) {
+          std::vector<int32_t> context(prompt.begin(), prompt.end());
+          first = prefill_sample_(out, params_[static_cast<size_t>(req)],
+                                  rng_[static_cast<size_t>(req)], context)
+                      .token;
+        } else {
+          first = prefill_pick_(out);
+        }
+      }
+      if (sampled) {
+        // The prompt is the request's context on the device (the first
+        // token is the next step's fed token and counts itself there), and
+        // the prefill's draw moved the counter.
+        const int n = static_cast<int>(prompt.size());
+        if (n > model_->max_tokens())
+          throw std::invalid_argument("graph engine: prompt exceeds max_tokens");
+        std::copy(prompt.begin(), prompt.end(), h_prompt_ids_);
+        DGPP_CUDA_OK(cudaMemcpyAsync(d_prompt_ids_, h_prompt_ids_,
+                                     sizeof(int64_t) * n,
+                                     cudaMemcpyHostToDevice, model_->stream()));
+        glm_sample_count_tokens(d_counts_ + static_cast<size_t>(req) * vocab_,
+                                d_prompt_ids_, n, static_cast<int>(vocab_),
+                                model_->stream());
+        DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+        push_counter(req);
+      }
       pending_[static_cast<size_t>(req)] = first;
       if (model_->mtp_enabled()) {
         // session_prefill filled the draft cache through the prompt. Advance
@@ -376,7 +509,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     std::vector<std::vector<int32_t>> batches;
     batches.reserve(reqs.size());
     for (const int req : reqs)
-      batches.push_back(collect_verdict(req, /*verdict_request=*/req));
+      batches.push_back(
+          collect_verdict(req, /*verdict_request=*/req, /*batched=*/true));
     batch_feeds_dirty_ = false;
     return batches;
   }
@@ -388,6 +522,17 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     reserved_[static_cast<size_t>(req)] = false;
     pending_[static_cast<size_t>(req)] = -1;
     draft_[static_cast<size_t>(req)] = -1;
+    // A reopened slot is greedy until the scheduler arms it again — on the
+    // device too, so a padded replay of this slot never draws.
+    params_[static_cast<size_t>(req)] = glm_sample::greedy_params();
+    rng_[static_cast<size_t>(req)] = glm_sample::Rng{};
+    if (sampling_) push_spec(req, GlmSampleSpec{});
+  }
+
+  // The slot's RNG state — the audit's view of the draws consumed.
+  const glm_sample::Rng& rng(int req) const {
+    check_req(req);
+    return rng_[static_cast<size_t>(req)];
   }
 
  private:
@@ -414,6 +559,18 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     return in;
   }
 
+  // The scalar variant of request slot `req`: its own spec and count table
+  // are baked into the recorded nodes (the verdict indexes request 0).
+  GlmDevicePicker::Inputs scalar_sampling_inputs(int req) const {
+    GlmDevicePicker::Inputs in = scalar_pick_inputs(/*slot=*/0);
+    if (sampling_) {
+      in.specs = d_specs_ + req;
+      in.counts = d_counts_ + static_cast<size_t>(req) * vocab_;
+      in.vocab_size = static_cast<int>(vocab_);
+    }
+    return in;
+  }
+
   GlmDevicePicker::Inputs verify_pick_inputs() const {
     GlmDevicePicker::Inputs in = scalar_pick_inputs(/*slot=*/0);
     in.rows = slots_ * rows_per_request_;
@@ -421,6 +578,11 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     in.rows_per_request = rows_per_request_;
     in.positions = model_->device_positions();
     in.position_stride = rows_per_request_;
+    if (sampling_) {
+      in.specs = d_specs_;
+      in.counts = d_counts_;
+      in.vocab_size = static_cast<int>(vocab_);
+    }
     return in;
   }
 
@@ -561,7 +723,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
         model_->session_graph_capture_step(
             req, std::vector<int64_t>{pending_[static_cast<size_t>(req)]},
             /*device_positions=*/true, /*device_tokens=*/false);
-        picker_->record(model_->stream(), scalar_pick_inputs(/*slot=*/0));
+        picker_->record(model_->stream(), scalar_sampling_inputs(req));
         model_->session_graph_capture_commit(
             req, picker_->device_verdict(0));
       }
@@ -612,7 +774,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       throw std::runtime_error("graph engine replay finish: " + err);
   }
 
-  std::vector<int32_t> collect_verdict(int req, int verdict_request) {
+  std::vector<int32_t> collect_verdict(int req, int verdict_request,
+                                       bool batched) {
     const GlmPickVerdict verify = picker_->verdict(0, verdict_request);
     if (verify.rows != rows_per_request_ || verify.accepted < 1 ||
         verify.accepted > rows_per_request_)
@@ -632,7 +795,40 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
             std::to_string(req) + ": " + std::to_string(token));
       decided.push_back(token);
     }
-    pending_[static_cast<size_t>(req)] = verify.next;
+    int32_t next = verify.next;
+    if (sampled_slot(req)) {
+      const GlmSampleOutcome& o = picker_->outcome(0, verdict_request);
+      glm_sample::Rng& rng = rng_[static_cast<size_t>(req)];
+      if (!o.sampled)
+        throw std::runtime_error(
+            "graph engine: the device made no stochastic decision for a "
+            "sampled slot " + std::to_string(req));
+      DGPP_LOG_DEBUG(
+          "rank {}: slot {} device sampling outcome: fallback {} counter {} "
+          "normalizer {:.6f} covered {:.6f} next {} logprob {:.4f}",
+          rank_, req, o.fallback, o.counter, o.normalizer, o.covered_mass,
+          verify.next, o.logprob);
+      if (o.fallback) {
+        if (o.counter != rng.counter)
+          throw std::runtime_error(
+              "graph engine: the device's counter drifted from the host's "
+              "on a fallback");
+        next = serve_fallback(req, verdict_request, o);
+        decided.back() = next;
+        // The graph fed itself the provisional token; the true one replaces
+        // it before the next replay (the scalar variant stages pending_,
+        // the batch keeps its persistent feed on the device).
+        if (batched) model_->session_graph_seed_tokens(req, {next});
+      } else {
+        if (o.counter != rng.counter + 1)
+          throw std::runtime_error(
+              "graph engine: the device consumed " +
+              std::to_string(o.counter - rng.counter) +
+              " draws for one T=1 step");
+        rng.counter = o.counter;
+      }
+    }
+    pending_[static_cast<size_t>(req)] = next;
     if (model_->mtp_enabled()) {
       const GlmPickVerdict draft = picker_->verdict(1, verdict_request);
       if (draft.rows != 1 || draft.accepted != 1 || draft.next < 0 ||
@@ -658,8 +854,64 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
                                   pending_[static_cast<size_t>(req)]);
     }
     replay(scalar_execs_[static_cast<size_t>(req)], req);
-    return collect_verdict(req, /*verdict_request=*/0);
+    return collect_verdict(req, /*verdict_request=*/0, /*batched=*/false);
   }
+
+  bool sampled_slot(int req) const {
+    return sampling_ && params_[static_cast<size_t>(req)].temperature > 0.0f;
+  }
+
+  void push_spec(int req, const GlmSampleSpec& spec) {
+    h_specs_[req] = spec;
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_specs_ + req, h_specs_ + req,
+                                 sizeof(GlmSampleSpec), cudaMemcpyHostToDevice,
+                                 model_->stream()));
+    DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+  }
+  void push_counter(int req) {
+    GlmSampleSpec spec = h_specs_[req];
+    spec.counter = rng_[static_cast<size_t>(req)].counter;
+    push_spec(req, spec);
+  }
+
+  // The exact fallback between windows (DESIGN §10): the device penalized
+  // the request's logits row in place and folded the normalizer; the host
+  // gathers the row from every rank, decides over the complete list with
+  // the reserved draw, echoes rank 0's digest, and pushes the advanced
+  // counter back to the device spec.
+  int32_t serve_fallback(int req, int verdict_request,
+                         const GlmSampleOutcome& o) {
+    const int count = model_->lm_vocab_count();
+    const int begin = model_->lm_vocab_begin();
+    const size_t row = static_cast<size_t>(verdict_request) * rows_per_request_;
+    DGPP_CUDA_OK(cudaMemcpyAsync(h_fallback_row_,
+                                 model_->device_logits() + row * count,
+                                 sizeof(float) * count, cudaMemcpyDeviceToHost,
+                                 model_->stream()));
+    DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+    bus_gather_logits(*bus_, rank_, world_, h_fallback_row_, count, begin,
+                      static_cast<int>(vocab_), sample_gather_scratch_,
+                      pick_timeout_ms_, &fallback_full_);
+    glm_sample::Rng& rng = rng_[static_cast<size_t>(req)];
+    const glm_sample::Result r = glm_sample::sample_complete_logits(
+        fallback_full_.data(), static_cast<int>(vocab_), o.normalizer,
+        params_[static_cast<size_t>(req)], rng);
+    bus_check_decision_digest(*bus_, rank_, /*resolved=*/true, r,
+                              o.normalizer, sample_prefix_scratch_,
+                              pick_timeout_ms_, "graph sample fallback");
+    if (r.token < 0 || r.token >= vocab_)
+      throw std::runtime_error("graph engine fallback token out of range: " +
+                               std::to_string(r.token));
+    push_counter(req);
+    ++fallbacks_;
+    return r.token;
+  }
+
+ public:
+  // Fallbacks served so far (the measurement record's fallback rate).
+  uint64_t fallbacks() const { return fallbacks_; }
+
+ private:
 
   void log_mode_change(bool batched, size_t live) {
     const int mode = batched ? 1 : 0;
@@ -675,8 +927,24 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   GlmDiagnosticModel* model_ = nullptr;
   net::CollectiveBus* bus_ = nullptr;
   int rank_ = 0;
+  int world_ = 1;
   int64_t vocab_ = 0;
   int pick_timeout_ms_ = 60000;
+  uint16_t* sample_prefix_scratch_ = nullptr;
+  uint16_t* sample_gather_scratch_ = nullptr;
+  bool sampling_ = false;
+  int candidates_ = 0;
+  GlmSampleSpec* d_specs_ = nullptr;   // device [slots]
+  GlmSampleSpec* h_specs_ = nullptr;   // pinned mirror
+  int32_t* d_counts_ = nullptr;        // device [slots][vocab]
+  int64_t* d_prompt_ids_ = nullptr;    // device [max_tokens]
+  int64_t* h_prompt_ids_ = nullptr;    // pinned [max_tokens]
+  float* h_fallback_row_ = nullptr;    // pinned [lm_vocab_count]
+  std::vector<float> fallback_full_;
+  std::vector<glm_sample::Params> params_;
+  std::vector<glm_sample::Rng> rng_;
+  GenEngineAdapter::Sample prefill_sample_;
+  uint64_t fallbacks_ = 0;
   int slots_ = 0;
   int rows_per_request_ = 1;
   int batch_min_live_ = 1;

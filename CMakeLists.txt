@@ -119,9 +119,14 @@ add_library(dgpp_kernels STATIC
   src/kernels/glm_moe.cu
   src/kernels/glm_norm.cu
   src/kernels/glm_pick.cu
+  src/kernels/glm_sample_pick.cu
   src/kernels/glm_spec.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
+# The device sampler mirrors the host oracle bit for bit: no contraction of
+# its multiplies and adds (the host builds with -ffp-contract=off).
+set_source_files_properties(src/kernels/glm_sample_pick.cu PROPERTIES
+  COMPILE_OPTIONS "--fmad=false")
 
 add_library(dgpp_models_doll STATIC
   src/models/gpt_doll.cu)
@@ -456,6 +461,13 @@ set_tests_properties(glm_mhc_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # The on-device greedy pick (DESIGN §9): local top-2 vs glm_sample::local_max,
 # verdict vs merge_greedy/judge_verify over a simulated world, digest check.
+add_executable(det_math_test tests/cuda/det_math_test.cu)
+target_include_directories(det_math_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(det_math_test PRIVATE CUDA::cudart)
+dgpp_set_common(det_math_test)
+add_test(NAME det_math_test COMMAND det_math_test)
+set_tests_properties(det_math_test PROPERTIES SKIP_RETURN_CODE 2)
+
 add_executable(glm_pick_test tests/cuda/glm_pick_test.cpp)
 target_include_directories(glm_pick_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(glm_pick_test PRIVATE dgpp_kernels dgpp_models_glm CUDA::cudart)

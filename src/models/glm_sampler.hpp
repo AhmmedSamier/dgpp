@@ -54,6 +54,16 @@
 #include <utility>
 #include <vector>
 
+#include "common/det_math.hpp"
+
+// ARITHMETIC CONTRACT (M6 6b): every transcendental here is the
+// deterministic host/device implementation (common/det_math.hpp), every
+// multiply-add an explicit fma, and every reduction a fixed order — so the
+// device verdict kernel reproduces this file bit for bit, and so do two
+// fabric nodes with different libm builds. The slice normalizer's sum runs
+// in kLseChunk-sized chunks (chunk partials sequential, then folded in
+// chunk order), the order a parallel kernel can keep exactly.
+
 namespace dgpp::glm_sample {
 
 // ---------------------------------------------------------------------------
@@ -179,8 +189,10 @@ inline void apply_penalties(float* logits, int n, int slice_begin,
       // HF semantics: divide positive logits, multiply negative ones.
       v = v > 0.0f ? v / p.repetition_penalty : v * p.repetition_penalty;
     }
-    v -= p.frequency_penalty * static_cast<float>(count);
-    v -= p.presence_penalty * 1.0f;
+    // One fused step (never a separate product and subtraction the two
+    // sides could round differently).
+    v = std::fma(-p.frequency_penalty, static_cast<float>(count), v);
+    v -= p.presence_penalty;
     logits[i] = v;
   }
 }
@@ -229,8 +241,8 @@ inline Result select_from_sorted(const std::vector<Candidate>& sorted,
     r.token = sorted[0].id;
     float mx = sorted[0].logit;
     double acc = 0.0;
-    for (const Candidate& c : sorted) acc += std::exp(c.logit - mx);
-    const float lse = mx + static_cast<float>(std::log(acc));
+    for (const Candidate& c : sorted) acc += detmath::exp_f(c.logit - mx);
+    const float lse = mx + static_cast<float>(detmath::log_d(acc));
     r.logprob = sorted[0].logit - lse;
     const int n = std::min<int>(p.logprobs, static_cast<int>(sorted.size()));
     for (int i = 0; i < n; ++i) {
@@ -253,7 +265,7 @@ inline Result select_from_sorted(const std::vector<Candidate>& sorted,
   // can drift. Denominators always sum survivors in listed order.
   std::vector<float> exps(kept);
   for (size_t i = 0; i < kept; ++i) {
-    exps[i] = std::exp(scaled[i] - scaled[0]);
+    exps[i] = detmath::exp_f(scaled[i] - scaled[0]);
   }
   float den = 0.0f;
   for (size_t i = 0; i < kept; ++i) den += exps[i];
@@ -289,7 +301,7 @@ inline Result select_from_sorted(const std::vector<Candidate>& sorted,
   // Final distribution over the surviving set.
   float final_den = 0.0f;
   for (size_t i = 0; i < final_count; ++i) final_den += exps[i];
-  const float lse = scaled[0] + std::log(final_den);
+  const float lse = scaled[0] + detmath::log_f(final_den);
 
   // One draw. fp64 walk over the fp32 probabilities: the walk order is
   // the listed order, so every rank that computes this computes it
@@ -386,16 +398,34 @@ inline std::vector<Candidate> merge_topk(
 // teacher-forced sampling profiler uses one value per vocab shard and folds
 // those with logaddexp; this is intentionally fp64 measurement arithmetic,
 // separate from the fp32 device verdict that the production sampler will use.
+// The slice normalizer's summation order, shared with the device kernel
+// that computes it in parallel: chunks of kLseChunk consecutive elements
+// summed sequentially, the chunk partials folded sequentially in chunk
+// order. A parallel implementation that keeps this order is bitwise this.
+inline constexpr int kLseChunk = 256;
+
+template <typename ScaledAt>
+inline double chunked_exp_sum(int n, double top, ScaledAt scaled_at) {
+  double sum = 0.0;
+  for (int c0 = 0; c0 < n; c0 += kLseChunk) {
+    const int c1 = std::min(n, c0 + kLseChunk);
+    double partial = 0.0;
+    for (int i = c0; i < c1; ++i)
+      partial += detmath::exp_d(static_cast<double>(scaled_at(i)) - top);
+    sum += partial;
+  }
+  return sum;
+}
+
 inline double slice_logsumexp(const float* logits, int n) {
   if (logits == nullptr || n <= 0)
     throw std::invalid_argument("glm_sample: empty logit slice");
   double top = -INFINITY;
   for (int i = 0; i < n; ++i)
     top = std::max(top, static_cast<double>(logits[i]));
-  double sum = 0.0;
-  for (int i = 0; i < n; ++i)
-    sum += std::exp(static_cast<double>(logits[i]) - top);
-  return top + std::log(sum);
+  const double sum =
+      chunked_exp_sum(n, top, [&](int i) { return logits[i]; });
+  return top + detmath::log_d(sum);
 }
 
 // The production candidate path needs the normalizer after temperature.
@@ -414,12 +444,9 @@ inline double slice_logsumexp(const float* logits, int n,
     const float scaled = logits[i] / temperature;
     top = std::max(top, static_cast<double>(scaled));
   }
-  double sum = 0.0;
-  for (int i = 0; i < n; ++i) {
-    const float scaled = logits[i] / temperature;
-    sum += std::exp(static_cast<double>(scaled) - top);
-  }
-  return top + std::log(sum);
+  const double sum = chunked_exp_sum(
+      n, top, [&](int i) { return logits[i] / temperature; });
+  return top + detmath::log_d(sum);
 }
 
 // Canonical rank-order fold of per-slice log-sum-exp values. The centralized
@@ -436,9 +463,9 @@ inline double merge_logsumexp(const std::vector<double>& slice_lses) {
   for (double lse : slice_lses) {
     if (!std::isfinite(lse))
       throw std::invalid_argument("glm_sample: non-finite slice log-sum-exp");
-    sum += std::exp(lse - top);
+    sum += detmath::exp_d(lse - top);
   }
-  return top + std::log(sum);
+  return top + detmath::log_d(sum);
 }
 
 // Attempts an EXACT stochastic decision from the canonical global top-k
@@ -514,8 +541,8 @@ inline PrefixDecision sample_from_prefix(
   };
   // The candidate's exact probability under the fold normalizer.
   const auto mass_at = [&](size_t i) {
-    return std::exp(static_cast<double>(scaled_at(i)) -
-                    global_scaled_logsumexp);
+    return detmath::exp_d(static_cast<double>(scaled_at(i)) -
+                          global_scaled_logsumexp);
   };
 
   PrefixDecision decision;
@@ -542,7 +569,7 @@ inline PrefixDecision sample_from_prefix(
   }
 
   if (p.min_p > 0.0f) {
-    const float threshold = scaled_at(0) + std::log(p.min_p);
+    const float threshold = scaled_at(0) + detmath::log_f(p.min_p);
     size_t survivors = held;
     bool bounded = complete;
     for (size_t i = 0; i < held; ++i) {
@@ -764,7 +791,8 @@ inline std::vector<double> topk_probability_masses(
   double mass = 0.0;
   size_t next_k = 0;
   for (size_t i = 0; i < sorted.size() && next_k < ks.size(); ++i) {
-    mass += std::exp(static_cast<double>(sorted[i].logit) - global_logsumexp);
+    mass += detmath::exp_d(static_cast<double>(sorted[i].logit) -
+                           global_logsumexp);
     while (next_k < ks.size() && i + 1 >= static_cast<size_t>(ks[next_k])) {
       out.push_back(mass);
       ++next_k;

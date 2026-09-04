@@ -30,6 +30,7 @@
 #include <string>
 
 #include "kernels/glm_pick.hpp"
+#include "kernels/glm_sample_pick.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_step_timing.hpp"
@@ -669,9 +670,9 @@ inline glm_sample::PrefixDecision bus_sampling_prefix(
   if (candidate_k < 1 || candidate_k > kSamplingProfileMaxK)
     throw std::invalid_argument(
         "sampling prefix: candidate_k must be in [1, 256]");
-  if (vocab_count < candidate_k)
-    throw std::invalid_argument(
-        "sampling prefix: every vocab shard must contain candidate_k ids");
+  // A shard narrower than k transports every id it has; the remaining
+  // candidate slots carry the EMPTY id (an id no vocabulary reaches, the
+  // device kernel's convention too) and the decoder skips them.
 
   const size_t rank_elems =
       static_cast<size_t>(candidate_k) * kPickSlotsPerRank +
@@ -694,13 +695,19 @@ inline glm_sample::PrefixDecision bus_sampling_prefix(
   std::memset(scratch, 0, elems * sizeof(uint16_t));
   uint16_t* mine = scratch + static_cast<size_t>(rank) * rank_elems;
   for (int i = 0; i < candidate_k; ++i) {
+    uint16_t* encoded = mine + static_cast<size_t>(i) * kPickSlotsPerRank;
+    if (i >= static_cast<int>(local.size())) {
+      pick_encode_digits(encoded + kPickLogitDigits, kSampleEmptyId,
+                         kPickIdDigits);
+      continue;
+    }
     const glm_sample::Candidate& candidate = local[static_cast<size_t>(i)];
-    if (candidate.id < 0 || candidate.id >= (1 << (6 * kPickIdDigits)))
+    if (candidate.id < 0 || candidate.id >= vocab_size ||
+        candidate.id >= (1 << (6 * kPickIdDigits)))
       throw std::invalid_argument(
           "sampling prefix: token id outside the pick encoding");
     uint32_t logit_bits = 0;
     std::memcpy(&logit_bits, &candidate.logit, sizeof(logit_bits));
-    uint16_t* encoded = mine + static_cast<size_t>(i) * kPickSlotsPerRank;
     pick_encode_digits(encoded, logit_bits, kPickLogitDigits);
     pick_encode_digits(encoded + kPickLogitDigits,
                        static_cast<uint64_t>(candidate.id), kPickIdDigits);
@@ -732,11 +739,13 @@ inline glm_sample::PrefixDecision bus_sampling_prefix(
       const uint16_t* encoded =
           encoded_rank + static_cast<size_t>(i) * kPickSlotsPerRank;
       glm_sample::Candidate candidate;
+      const uint32_t id = static_cast<uint32_t>(
+          pick_decode_digits(encoded + kPickLogitDigits, kPickIdDigits));
+      if (id >= static_cast<uint32_t>(vocab_size)) break;  // the empty tail
       const uint32_t logit_bits = static_cast<uint32_t>(
           pick_decode_digits(encoded, kPickLogitDigits));
       std::memcpy(&candidate.logit, &logit_bits, sizeof(candidate.logit));
-      candidate.id = static_cast<int32_t>(pick_decode_digits(
-          encoded + kPickLogitDigits, kPickIdDigits));
+      candidate.id = static_cast<int32_t>(id);
       candidates.push_back(candidate);
     }
     shards.push_back(std::move(candidates));
@@ -791,16 +800,39 @@ class GlmDevicePicker {
  public:
   static constexpr int kSlots = 2;
 
+  // `sampling_candidates` > 0 arms the SAMPLING pick (kernels/
+  // glm_sample_pick.hpp): a wider table (k candidates + the slice lse per
+  // rank per row) and the sampling verdict, selected per record/run by
+  // Inputs::specs. The table is allocated for the widest shape; whether a
+  // given row count fits one latency slot is checked when it is recorded
+  // (glm_sample_candidates_that_fit sizes k for the caller).
   GlmDevicePicker(net::CollectiveBus& bus, int rank, int world,
-                  int timeout_ms = 60000)
-      : bus_(bus), rank_(rank), world_(world), timeout_ms_(timeout_ms) {
+                  int timeout_ms = 60000, int sampling_candidates = 0)
+      : bus_(bus),
+        rank_(rank),
+        world_(world),
+        timeout_ms_(timeout_ms),
+        candidates_(sampling_candidates) {
     if (world < 1 || world > kPickMaxWorld || rank < 0 || rank >= world)
       throw std::invalid_argument("GlmDevicePicker: rank/world");
-    const size_t table_bytes = glm_pick_table_elems(kPickMaxRows, world) * 2;
+    if (candidates_ < 0 || candidates_ > kSampleMaxCandidates)
+      throw std::invalid_argument("GlmDevicePicker: sampling candidates");
+    size_t table_bytes = glm_pick_table_elems(kPickMaxRows, world) * 2;
     if (table_bytes > bus.slot_bytes(net::BusMessageClass::kLatency))
       throw std::invalid_argument(
           "GlmDevicePicker: the pick table exceeds one latency slot");
+    if (candidates_ > 0)
+      table_bytes = std::max(
+          table_bytes,
+          glm_sample_table_elems(kPickMaxRows, world, candidates_) * 2);
     DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&table_), table_bytes));
+    if (candidates_ > 0) {
+      DGPP_CUDA_OK(cudaMallocHost(
+          reinterpret_cast<void**>(&outcomes_),
+          sizeof(GlmSampleOutcome) * kSlots * kPickMaxRequests));
+      for (int i = 0; i < kSlots * kPickMaxRequests; ++i)
+        outcomes_[i] = GlmSampleOutcome{};
+    }
     DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&carry_), sizeof(uint64_t)));
     DGPP_CUDA_OK(cudaMemset(carry_, 0, sizeof(uint64_t)));
     DGPP_CUDA_OK(cudaMallocHost(
@@ -823,6 +855,7 @@ class GlmDevicePicker {
     if (device_verdict_) cudaFree(device_verdict_);
     if (verdict_) cudaFreeHost(verdict_);
     if (locals_) cudaFreeHost(locals_);
+    if (outcomes_) cudaFreeHost(outcomes_);
   }
   GlmDevicePicker(const GlmDevicePicker&) = delete;
   GlmDevicePicker& operator=(const GlmDevicePicker&) = delete;
@@ -852,7 +885,16 @@ class GlmDevicePicker {
     int position_stride = 0;
     const GlmPickVerdict* row_select = nullptr;
     int source_row_stride = 0;
+    // The SAMPLING pick (a picker built with sampling_candidates > 0): the
+    // per-request device specs, the [requests][vocab_size] count table and
+    // the vocabulary size. Rows per request must be 1 (T=1) for now; the
+    // logits are penalized IN PLACE for sampled requests.
+    GlmSampleSpec* specs = nullptr;
+    int32_t* counts = nullptr;
+    int vocab_size = 0;
   };
+  bool sampling() const { return candidates_ > 0; }
+  int sampling_candidates() const { return candidates_; }
 
   // CAPTURE: enqueues the three nodes on `stream` (the caller is between
   // cudaStreamBeginCapture/EndCapture on it, inside the bus's record
@@ -860,11 +902,22 @@ class GlmDevicePicker {
   // graph_replay_finish, via verdict(slot).
   void record(cudaStream_t stream, const Inputs& in) {
     validate(in);
+    std::string err;
+    if (in.specs != nullptr) {
+      validate_sampling(in);
+      sample_local(stream, in);
+      if (!bus_.allreduce_record(
+              stream, table_, table_,
+              glm_sample_table_elems(in.rows, world_, candidates_), &err))
+        throw std::runtime_error(
+            "device sampling pick: allreduce_record rejected: " + err);
+      sample_verdict(stream, in);
+      return;
+    }
     glm_pick_local_batched(
         in.logits, in.rows, in.vocab_count, in.vocab_begin, rank_, world_,
         carry_, table_, locals_ + in.slot * kPickMaxRows, stream,
         in.row_select, in.requests, source_stride(in));
-    std::string err;
     if (!bus_.allreduce_record(stream, table_, table_,
                                glm_pick_table_elems(in.rows, world_), &err))
       throw std::runtime_error("device pick: allreduce_record rejected: " +
@@ -881,24 +934,47 @@ class GlmDevicePicker {
   const GlmPickVerdict& run(cudaStream_t stream, const Inputs& in) {
     step_timing::Scope tick(step_timing::kPick);
     validate(in);
-    glm_pick_local_batched(
-        in.logits, in.rows, in.vocab_count, in.vocab_begin, rank_, world_,
-        carry_, table_, locals_ + in.slot * kPickMaxRows, stream,
-        in.row_select, in.requests, source_stride(in));
+    const bool sampling = in.specs != nullptr;
+    if (sampling) {
+      validate_sampling(in);
+      sample_local(stream, in);
+    } else {
+      glm_pick_local_batched(
+          in.logits, in.rows, in.vocab_count, in.vocab_begin, rank_, world_,
+          carry_, table_, locals_ + in.slot * kPickMaxRows, stream,
+          in.row_select, in.requests, source_stride(in));
+    }
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
     std::string err;
-    const uint64_t id = bus_.allreduce(
-        table_, table_, glm_pick_table_elems(in.rows, world_), &err);
+    const size_t elems =
+        sampling ? glm_sample_table_elems(in.rows, world_, candidates_)
+                 : glm_pick_table_elems(in.rows, world_);
+    const uint64_t id = bus_.allreduce(table_, table_, elems, &err);
     if (id == 0)
       throw std::runtime_error("device pick: allreduce rejected: " + err);
     const net::BusAllReduceResult res = bus_.wait_allreduce(id, timeout_ms_);
     if (!res.ok) throw std::runtime_error("device pick gather: " + res.error);
-    glm_pick_verdict_batched(
-        table_, in.rows, world_, rank_, in.fed, in.positions, in.requests,
-        rows_per_request(in), position_stride(in), verdict_slot(in.slot),
-        device_verdict_slot(in.slot), carry_, stream);
+    if (sampling)
+      sample_verdict(stream, in);
+    else
+      glm_pick_verdict_batched(
+          table_, in.rows, world_, rank_, in.fed, in.positions, in.requests,
+          rows_per_request(in), position_stride(in), verdict_slot(in.slot),
+          device_verdict_slot(in.slot), carry_, stream);
     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
     return verdict(in.slot);
+  }
+
+  // The sampling verdict's outcome beside verdict(slot, request): fallback,
+  // counter, normalizer, logprob. Valid once the pick's stream work
+  // completed (pinned).
+  const GlmSampleOutcome& outcome(int slot = 0, int request = 0) const {
+    if (!sampling())
+      throw std::logic_error("device pick: no sampling outcome on a greedy "
+                             "picker");
+    check_slot(slot);
+    check_request(request);
+    return outcomes_[slot * kPickMaxRequests + request];
   }
 
   // Slot `slot`'s last verdict (pinned; valid once its stream work
@@ -987,10 +1063,46 @@ class GlmDevicePicker {
           "device pick: row_select needs one candidate per request");
   }
 
+  void validate_sampling(const Inputs& in) const {
+    if (!sampling())
+      throw std::logic_error(
+          "device pick: sampling inputs on a picker built without "
+          "sampling candidates");
+    if (in.counts == nullptr || in.vocab_size < 1)
+      throw std::invalid_argument(
+          "device pick: sampling needs the count table and the vocabulary");
+    if (rows_per_request(in) != 1 || in.row_select != nullptr)
+      throw std::invalid_argument(
+          "device pick: the sampling verdict decides T=1 rows only");
+    if (glm_sample_table_elems(in.rows, world_, candidates_) * 2 >
+        bus_.slot_bytes(net::BusMessageClass::kLatency))
+      throw std::invalid_argument(
+          "device pick: the sampling table for these rows exceeds one "
+          "latency slot (glm_sample_candidates_that_fit sizes k)");
+  }
+  void sample_local(cudaStream_t stream, const Inputs& in) {
+    glm_sample_local(const_cast<float*>(in.logits), in.rows, in.vocab_count,
+                     in.vocab_begin, in.vocab_size, rank_, world_,
+                     candidates_, in.specs, rows_per_request(in), in.fed,
+                     in.positions, position_stride(in), in.counts, carry_,
+                     table_, locals_ + in.slot * kPickMaxRows, stream);
+  }
+  void sample_verdict(cudaStream_t stream, const Inputs& in) {
+    glm_sample_verdict(table_, in.rows, world_, rank_, candidates_,
+                       in.vocab_size, in.specs, in.requests,
+                       rows_per_request(in), in.positions,
+                       position_stride(in), verdict_slot(in.slot),
+                       device_verdict_slot(in.slot),
+                       outcomes_ + in.slot * kPickMaxRequests, carry_,
+                       stream);
+  }
+
   net::CollectiveBus& bus_;
   int rank_ = 0;
   int world_ = 1;
   int timeout_ms_ = 60000;
+  int candidates_ = 0;
+  GlmSampleOutcome* outcomes_ = nullptr;
   uint16_t* table_ = nullptr;          // device: the wire table
   uint64_t* carry_ = nullptr;          // device: last verdict's digest
   GlmPickVerdict* verdict_ = nullptr;  // pinned [kSlots][kPickMaxRequests]
