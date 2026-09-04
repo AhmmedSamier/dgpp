@@ -344,6 +344,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     context_.assign(static_cast<size_t>(slots_), {});
     report_.assign(static_cast<size_t>(slots_), false);
     pending_logprobs_.assign(static_cast<size_t>(slots_), {});
+    slot_sampled_.assign(static_cast<size_t>(slots_), 0);
+    slot_fallbacks_.assign(static_cast<size_t>(slots_), 0);
     pending_.assign(static_cast<size_t>(slots_), -1);
     draft_.assign(static_cast<size_t>(slots_), -1);
     live_.assign(static_cast<size_t>(slots_), false);
@@ -641,6 +643,15 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
 
   void close(int req) override {
     check_live(req, "close");
+    // The slot's sampling tally, for the width sweep and the record: how
+    // many of its stochastic steps the exact gather fallback served.
+    if (sampling_ && slot_sampled_[static_cast<size_t>(req)] > 0)
+      DGPP_LOG_INFO(
+          "rank {}: slot {} closed: {} sampled decode steps, {} fallbacks",
+          rank_, req, slot_sampled_[static_cast<size_t>(req)],
+          slot_fallbacks_[static_cast<size_t>(req)]);
+    slot_sampled_[static_cast<size_t>(req)] = 0;
+    slot_fallbacks_[static_cast<size_t>(req)] = 0;
     model_->session_close(req);
     live_[static_cast<size_t>(req)] = false;
     reserved_[static_cast<size_t>(req)] = false;
@@ -937,7 +948,10 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     int32_t next = verify.next;
     const bool stochastic = sampled_slot(req);
     const bool full_path = full_path_slot(req);
-    if (stochastic) ++sampled_steps_;
+    if (stochastic) {
+      ++sampled_steps_;
+      ++slot_sampled_[static_cast<size_t>(req)];
+    }
     std::vector<glm_sample::Result>& report =
         pending_logprobs_[static_cast<size_t>(req)];
     if (full_path && !stochastic) {
@@ -1161,6 +1175,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     if (batched) model_->session_graph_seed_tokens(req, {next, draft_new});
     push_counter(req);
     ++fallbacks_;
+    ++slot_fallbacks_[static_cast<size_t>(req)];
     return next;
   }
 
@@ -1334,6 +1349,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
                                std::to_string(r.token));
     push_counter(req);
     ++fallbacks_;
+    ++slot_fallbacks_[static_cast<size_t>(req)];
     return r;
   }
 
@@ -1389,6 +1405,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   GenEngineAdapter::Sample prefill_sample_;
   uint64_t fallbacks_ = 0;
   uint64_t sampled_steps_ = 0;  // stochastic collects (the fallback rate's base)
+  std::vector<uint64_t> slot_sampled_, slot_fallbacks_;  // per slot, reset at close
   bool mtp_redrafted_ = false;  // this collect re-drafted on the host
   int slots_ = 0;
   int rows_per_request_ = 1;

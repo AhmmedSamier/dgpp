@@ -478,8 +478,10 @@ Deliverables as written, with their state:
    top_p=0.95`), a request's explicit `temperature`/`top_p`/`top_k`/
    `min_p`/penalties/`seed`/`logprobs`, and greedy at zero cost when
    `temperature: 0`. Measured on the four nodes: identical on every rank
-   and across runs at a fixed seed, the greedy pace kept. What stays open
-   is the candidate-width decision for teacher-forced-like workloads.
+   and across runs at a fixed seed, the greedy pace kept. The
+   candidate-width decision was closed by the sweep of 2026-09-04: 128
+   per rank stays, a fallback costs 5.65 ms plain / 14.3 ms under MTP,
+   and no served workload reaches a rate that pays for a wider tier.
 4. HTTP/SSE endpoints for chat, completions, models, health, and metrics.
    BUILT (Stage 4a): `POST /v1/chat/completions` (stream and non-stream),
    `POST /v1/completions` (string prompt), `GET /v1/models`, `GET /health`,
@@ -738,7 +740,7 @@ Two phases:
   after the fix — a harness limitation to take up if memcheck of the
   loopback graph tests is wanted end to end.
 
-**6b. Sampling on the bus — BUILT AND MEASURED 2026-09-04 (the sizing decision for teacher-forced text is open)**
+**6b. Sampling on the bus — BUILT AND MEASURED 2026-09-04 (the sizing decision closed by the width sweep the same day)**
 (deliverable 3's distributed half; DESIGN §10). The configuration slice is
 built: `GlmGenerationDefaults` strictly parses `generation_config.json`, keeps
 missing-vs-present fields explicit, supplies logged greedy-safe/neutral
@@ -849,9 +851,21 @@ greedy 43.55–44.28 (23.9–26.3 ms/token at 1.67–1.81 tokens per replay)
 and the plain sampled step 31.83–32.02 ms/token, i.e. the greedy record
 — every one of the twelve responses identical to the earlier run's, the
 op-stream md5 identical on all four ranks of every run, 0 fallbacks. The
-four gates of this item are met; what stays open is the sizing decision
-for workloads that look like the teacher-forced profile rather than like
-the model's own generations.
+four gates of this item are met. The sizing decision for workloads that
+look like the teacher-forced profile was settled by the width sweep
+(`scripts/serve_width_sweep.sh`, `--sampling-candidates`, the record's
+ninth 2026-09-04 entry): on the service the fallback rate at k=128 is
+0.0% at the card's settings and 0.9–1.2% at temperature 1.2 / top_p 1.0,
+flat down to k=32 and rising only at 16 and 4; one fallback costs 5.65 ms
+(± 0.5) on the plain graph and 14.3 ms (± 1.2) under MTP, most of it the
+host round trip and, under MTP, the eager re-draft — not the transfer;
+every request returned byte-identical output at every width (the
+width-independence proof on the service). Width 128 stays. Even the
+recorded teacher-forced worst case (34% at k=128) would cost +1.9 ms per
+plain step or +4.8 ms per MTP replay, and a wider tier could recover at
+most a third of that; the cheaper lever, should a workload ever need it,
+is the fallback's own cost (an on-device or single-pass host decision;
+avoiding the eager re-draft under MTP), not the slot.
 
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's
@@ -920,13 +934,10 @@ cost. Design:
   of ids, beyond any per-rank width one latency slot carries (k=128 per
   rank is 512 candidates in all). The width stays at the planned 128 per
   rank (112 at eight rows in the 64 KiB slot) and the fallback is served
-  exactly; its COST per step at these rates is the next measurement (the
-  serving pace at the card's settings vs greedy). The design decision is
-  open: accept ~a fallback per 3–6 steps on hard text (a bulk gather, a
-  host decision and a digest per fallback), add a second, wider tier
-  (thousands of candidates as a bulk-class collective before the full
-  gather), or size the slot for a wider k — none of which this instrument
-  can settle alone.
+  exactly; its cost per occurrence was measured by the width sweep of
+  2026-09-04 (5.65 ms plain, 14.3 ms under MTP) and the decision closed:
+  accept the rate, keep 128, no second tier — see the closing paragraph
+  above.
 - *The fallback is the exact gather* (BUILT 2026-09-04 on the eager path:
   `bus_gather_logits`, 1.24 MB/token as 8-bit digits): the fp32 vocab
   slices to every rank as a bulk-class collective between windows, the host
@@ -1241,9 +1252,10 @@ positions), which the journal already keeps identical. Admission forecast
 Decisions taken 2026-09-03 (with the user): tool calls are in scope (6f);
 sampling ships as the on-device exact path with the gather fallback (6b;
 built 2026-09-04, the fabric profile then showed the card's
-`temperature=1.0, top_p=0.95` falls back on 17–34% of natural-text
-positions at any width one latency slot carries — the sizing decision is
-open in 6b), with defaults
+`temperature=1.0, top_p=0.95` falls back on 17–34% of teacher-forced
+natural-text positions at any width one latency slot carries, and the
+width sweep on the service then showed 0% on the model's own generations
+and a 5.65 / 14.3 ms fallback — the sizing decision is closed in 6b), with defaults
 parsed from `generation_config.json` and overridable on the command line,
 greedy remaining the throughput ceiling; MTP stays configurable
 (`--mtp`) and is the expected first-class serving mode, so the T=1 graph

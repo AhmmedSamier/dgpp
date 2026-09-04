@@ -1737,7 +1737,8 @@ at k={32,64,128,256}. `scripts/fabric_sampling_profile.py` requires identical,
 contiguous evidence from every fetched rank and combines the teacher runs to
 choose the smallest measured k at or below a 1% fallback rate. The profiler is
 not the device path and its eager collective is not a throughput measurement;
-the three-text fabric evidence is still owed before k is fixed.
+the serving-side complement is `scripts/serve_width_sweep.sh` over
+`glm_serve --sampling-candidates`, which fixed k at 128 on 2026-09-04 (below).
 
 The width-independent correctness seam is built (2026-09-04), before fixing
 that k. `sample_from_prefix` consumes the canonical global candidate prefix
@@ -1937,9 +1938,14 @@ carries: the exact-gather rate is 34% of positions at k=128 on the hard
 text (25% at k=256; 17% combined over the three texts, 0.08% on the
 memorized one). The width is 128 per rank (112 at eight rows in the
 64 KiB slot; the local top-k is the DSA decode select's composite-key
-machinery), the fallback is exact and its per-step cost at these rates is
-the open measurement; the wider second tier or the wider slot is the open
-design decision. Inside the one-graph MTP step a
+machinery), the fallback is exact, and its cost per occurrence is
+measured (the width sweep of 2026-09-04, on the service, same tokens at
+every width): 5.65 ms on the plain graph and 14.3 ms under MTP, against
+a 0.0% rate at the card's settings and ~1% at temperature 1.2 / top_p 1.0
+at k=128 — so the width stays 128 and no wider tier is built; the lever,
+should a workload ever run hot enough to need one, is the fallback's own
+cost (the host round trip and the eager re-draft), not the slot. Inside
+the one-graph MTP step a
 fallback means the draft ran on a provisional token: the draft's tail
 ring rolls back from its snapshot and the draft re-runs eagerly on the
 true token. Sampling under MTP is exact speculative sampling with a

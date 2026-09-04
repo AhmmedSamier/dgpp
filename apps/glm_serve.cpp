@@ -243,6 +243,8 @@ int main(int argc, char** argv) {
       "    [--graph-batch-min-live N (default min(4, max-concurrency);\n"
       "      must be in [1, max-concurrency])]\n"
       "      (requires max-concurrency * (mtp?2:1) <= 8)\n"
+      "    [--sampling-candidates N (default 128, in [1, 256]): the sampled\n"
+      "      pick's per-rank candidate width; narrower falls back more]\n"
       "  sampling (defaults from generation_config.json; temperature 0 =\n"
       "  greedy): [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
       "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n"
@@ -254,6 +256,10 @@ int main(int argc, char** argv) {
   int64_t kv_capacity = 8192;
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
   int graph_batch_min_live = 0;  // 0 = min(4, max_concurrency)
+  // The sampled pick's candidate width per rank on the graph engines (the
+  // planned 128; narrower forces the exact gather fallback more often —
+  // the width sweep's knob, scripts/serve_width_sweep.sh).
+  int sampling_candidates = dgpp::kSamplingCandidates;
   int max_connections = 64;
   int world = 1, rank = 0, rendezvous_timeout_ms = 120000;
   bool no_eos = false, decode_graph = false, mtp = false;
@@ -280,6 +286,7 @@ int main(int argc, char** argv) {
     else if (a == "--graph-batch-min-live")
       graph_batch_min_live = std::stoi(next());
     else if (a == "--mtp") mtp = true;
+    else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--world") world = std::stoi(next());
     else if (a == "--rank") rank = std::stoi(next());
     else if (a == "--peer") peer = next();
@@ -351,6 +358,11 @@ int main(int argc, char** argv) {
   // four (the measured crossover of the eight-row graph) or full occupancy
   // when fewer slots exist; an explicit value outside [1, slots] is an
   // operator error, never silently clamped.
+  if (sampling_candidates < 1 || sampling_candidates > dgpp::kSampleMaxCandidates) {
+    DGPP_LOG_ERROR("--sampling-candidates must be in [1, {}], got {}",
+                   dgpp::kSampleMaxCandidates, sampling_candidates);
+    return 2;
+  }
   if (graph_batch_min_live == 0) {
     graph_batch_min_live = std::min(4, max_concurrency);
   } else if (graph_batch_min_live < 1 ||
@@ -545,7 +557,7 @@ int main(int argc, char** argv) {
               &model, bus.get(), rank, world, pick_scratch, cfg.vocab_size,
               /*pick_timeout_ms=*/60000, graph_batch_min_live,
               sample_prefix.data, sample_gather.data,
-              dgpp::kSamplingCandidates, &grammar_vocab);
+              sampling_candidates, &grammar_vocab);
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up
           // is a run of collectives, so it starts on the journal's clock:
