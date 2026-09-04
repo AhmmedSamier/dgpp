@@ -309,6 +309,23 @@ void test_journal_codec() {
       bad = true;
     }
     require(bad, "codec: an invalid sampling spec must throw");
+    // logprobs ride as "lp" with the spec (a greedy request that asks
+    // carries the spec too, at temperature 0).
+    GenerationService::PassEvents asking;
+    dgpp::glm::SchedulerRequest g = submit;
+    g.logprobs = 3;
+    g.sampling.logprobs = 3;
+    asking.submits.push_back(g);
+    const std::string line = dgpp::service::encode_journal_tick(asking);
+    require(line.find("\"lp\":3") != std::string::npos &&
+                line.find("\"g\":{") != std::string::npos,
+            "codec: logprobs field and spec on a greedy request");
+    const dgpp::service::JournalRecord back2 =
+        dgpp::service::decode_journal_line(line);
+    require(back2.submits.size() == 1 && back2.submits[0].logprobs == 3 &&
+                back2.submits[0].sampling.logprobs == 3 &&
+                back2.submits[0].sampling.temperature == 0.0f,
+            "codec: logprobs round-trip");
   }
   std::puts("ok 1 - journal codec round-trip");
 }

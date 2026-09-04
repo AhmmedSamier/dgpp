@@ -1845,8 +1845,37 @@ batch variants with a greedy request beside a sampled one, in lockstep
 with the eager sampling engine on the same bus; capped at six candidates
 per rank so the 96-token fixture forces fallbacks, transcripts equal on
 every rank). Sampling under MTP followed the same day (§9: the T=2
-verdict on the device, the draft rollback on a fallback). Remaining below:
-logprobs on the wire, and the fabric profiles that fix k.
+verdict on the device, the draft rollback on a fallback).
+
+*Logprobs on the wire* (2026-09-04): a request that asks (`logprobs`,
+`top_logprobs` 0–20 on chat; the legacy integer on completions) reports
+every generated token's log-probability and top-N alternatives — the
+sampler's own `Result` (the final distribution's `scaled − lse`, exact
+for the top-k). The seam: `SchedulerRequest::logprobs` (−1 none, else N,
+also `sampling.logprobs`), `SchedulerEngine::supports_logprobs` /
+`configure_logprobs` / `take_logprobs` (one Result per token an op
+returned), the scheduler's `on_token_logprobs` observer event right after
+each `on_token`, the journal's `lp` field (a greedy request that asks
+carries its spec too). A greedy request that reports (or carries
+penalties) takes the FULL path on every engine — the fold at temperature
+1 with the penalties applied, the canonical argmax under the raw
+normalizer (`greedy_from_prefix`; bitwise the greedy pick's token, as
+`select_from_sorted`'s greedy branch reports over a complete list); the
+plain greedy pick stays for the common case. On the device the spec's
+`logprobs` field switches greedy rows onto the full path and the verdict
+fills the outcome's per-row top-N (`report_top`, min(N, the final set)
+under the decided lse); the adapter turns outcomes and host fallbacks into
+Results. The service renders the OpenAI shapes: chat `logprobs.content`
+entries with `token`, `logprob`, `bytes` and `top_logprobs` (streamed with
+each content chunk), the legacy `tokens`/`token_logprobs`/`top_logprobs`/
+`text_offset` object. Gates: `greedy_from_prefix_reports_the_raw_distribution`,
+`scheduler_logprobs_rideWithEveryTokenWhenAsked`,
+`serve_logprobs_openAIShapesOnEveryRoute`, the codec round-trip,
+`sample_pick_reports_logprobs_bitwise` (greedy-with-penalty, nucleus and
+pure rows), and the plain graph sampling loopback gate now compares every
+token's report between the eager and the graph engine bitwise, a greedy
+logprobs request among them. Remaining below: the fabric profiles that fix
+k, and the measurements.
 
 *The device path.* The pick table (§9) generalizes from 2 to k candidates
 per rank and gains a digit group for each rank's slice log-sum-exp; the
@@ -1862,11 +1891,16 @@ on every rank — no broadcast; the digest group catches a divergent draw)
 lies within them if it lands under the kept mass — and samples exactly
 when it does. Otherwise it flags a fallback in the pinned verdict and
 every rank runs the exact gather (fp32 slices as a bulk collective
-between windows, the host sampler with the same `u`). k is sized so the
-fallback is rare AT T=1/top_p=0.95: the candidate is k=128 per rank (~9.2 KB
-per row of table; the local top-128 is a block-wide composite-key select
-in the DSA decode select's style), fixed after measuring the top-k mass
-per position on the teacher texts. Inside the one-graph MTP step a
+between windows, the host sampler with the same `u`). k was to be sized
+so the fallback is rare AT T=1/top_p=0.95; the teacher-text profiles
+(2026-09-04, PLAN 6b) say it cannot be, at any width one latency slot
+carries: the exact-gather rate is 34% of positions at k=128 on the hard
+text (25% at k=256; 17% combined over the three texts, 0.08% on the
+memorized one). The width is 128 per rank (112 at eight rows in the
+64 KiB slot; the local top-k is the DSA decode select's composite-key
+machinery), the fallback is exact and its per-step cost at these rates is
+the open measurement; the wider second tier or the wider slot is the open
+design decision. Inside the one-graph MTP step a
 fallback means the draft ran on a provisional token: the draft's tail
 ring rolls back from its snapshot and the draft re-runs eagerly on the
 true token. Sampling under MTP is exact speculative sampling with a
@@ -1935,13 +1969,14 @@ thread drains admissions → `try_submit`, drains cancels → `cancel`, runs
 ONE tick, publishes meters. Records enter the table AT ENQUEUE so
 pre-admission requests are visible to disconnect and to the pump. The
 refusal ladder: every accepted field behaves per the schema; every
-unimplemented one (stop, n, logprobs, logit_bias, tools, response_format,
+unimplemented one (stop, n, logit_bias, tools, response_format,
 …, and non-greedy sampling on an engine that cannot sample) refuses with a
 400 carrying the OpenAI error object naming the param — silent-ignore is
 the bug class the ladder exists to prevent. The sampling fields
 (temperature, top_p, presence/frequency penalties, seed; top_k, min_p,
-repetition_penalty as extensions) are accepted since 2026-09-04 and behave
-exactly per §10, with omitted fields taking the checkpoint's defaults. Incremental text is the suffix-diff of
+repetition_penalty as extensions) and `logprobs`/`top_logprobs` are
+accepted since 2026-09-04 and behave exactly per §10, with omitted fields
+taking the checkpoint's defaults. Incremental text is the suffix-diff of
 successive full decodes, so UTF-8 and special-token boundaries are exact
 without tokenizer state on the hot path.
 

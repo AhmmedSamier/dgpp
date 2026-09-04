@@ -2960,11 +2960,38 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
   // Phase 1: one sampled request alone (the scalar variant). Phase 2: a
   // sampled request and a greedy one together (the batch), then the greedy
   // one's slot reused by a narrow-top-p request (device resolutions).
+  // Every request asks for logprobs with two alternatives: the greedy
+  // request then takes the full path too (the argmax under the raw
+  // distribution), and both engines must report the same entries bitwise.
+  const auto with_logprobs = [](dgpp::glm_sample::Params p) {
+    p.logprobs = 2;
+    return p;
+  };
   const std::vector<std::vector<Spec>> phases{
-      {{"solo", 8, model_default, 7}},
-      {{"a", 8, model_default, 11},
-       {"g", 5, dgpp::glm_sample::greedy_params(), 0}},
-      {{"n", 6, narrow, 23}},
+      {{"solo", 8, with_logprobs(model_default), 7}},
+      {{"a", 8, with_logprobs(model_default), 11},
+       {"g", 5, with_logprobs(dgpp::glm_sample::greedy_params()), 0}},
+      {{"n", 6, with_logprobs(narrow), 23}},
+  };
+  // The observer records every token's report as text: token, logprob bits,
+  // and the alternatives' ids and logprob bits.
+  struct Recorder : dgpp::glm::SchedulerObserver {
+    std::vector<std::string> events;
+    void on_token(const std::string&, int64_t, int) override {}
+    void on_retire(const std::string&, const dgpp::glm::Scheduler::Result&) override {}
+    void on_token_logprobs(const std::string& id, int steps_done,
+                           const dgpp::glm_sample::Result& lp) override {
+      uint32_t bits = 0;
+      std::memcpy(&bits, &lp.logprob, sizeof(bits));
+      std::string e = id + ":" + std::to_string(steps_done) + ":" +
+                      std::to_string(lp.token) + ":" + std::to_string(bits);
+      for (const auto& [tok, val] : lp.top_logprobs) {
+        uint32_t b = 0;
+        std::memcpy(&b, &val, sizeof(b));
+        e += "/" + std::to_string(tok) + ":" + std::to_string(b);
+      }
+      events.push_back(e);
+    }
   };
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29929);
@@ -3032,6 +3059,9 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
                                    "sampler at the capped width");
         dgpp::glm::Scheduler eager_sched(&eager_engine, /*eos=*/{});
         dgpp::glm::Scheduler graph_sched(&graph_engine, /*eos=*/{});
+        Recorder eager_lps, graph_lps;
+        eager_sched.set_observer(&eager_lps);
+        graph_sched.set_observer(&graph_lps);
 
         size_t result_index = 0;
         for (const std::vector<Spec>& phase : phases) {
@@ -3042,6 +3072,7 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
             req.max_steps = spec.max_steps;
             req.sampling = spec.params;
             req.seed = spec.seed;
+            req.logprobs = spec.params.logprobs;
             eager_sched.submit(req);
             graph_sched.submit(req);
           }
@@ -3073,6 +3104,11 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
               sampled_steps[static_cast<size_t>(r)] += spec.max_steps;
           }
         }
+        if (eager_lps.events.empty() || eager_lps.events != graph_lps.events)
+          throw std::runtime_error(
+              "the graph engine's logprobs differ from the eager engine's (" +
+              std::to_string(eager_lps.events.size()) + " vs " +
+              std::to_string(graph_lps.events.size()) + " entries)");
         fallbacks[static_cast<size_t>(r)] = graph_engine.fallbacks();
         release();
       } catch (const std::exception& e) {

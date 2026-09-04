@@ -805,6 +805,21 @@ inline glm_sample::Result bus_sample_row(
     const std::vector<int32_t>& context_ids, int candidate_k,
     uint16_t* prefix_scratch, uint16_t* gather_scratch, int timeout_ms,
     std::vector<float>* gather_buffer) {
+  if (params.temperature <= 0.0f) {
+    // The greedy decision with logprobs (or penalties): the fold at
+    // temperature 1 (penalties applied), the canonical first candidate
+    // under the raw normalizer — the greedy pick's token, no draw.
+    glm_sample::Params raw = params;
+    raw.temperature = 1.0f;
+    const SamplingFold fold = bus_sampling_fold(
+        bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, raw,
+        context_ids, candidate_k, prefix_scratch, timeout_ms);
+    const glm_sample::Result r = glm_sample::greedy_from_prefix(
+        fold.prefix, fold.normalizer, params.logprobs);
+    bus_check_decision_digest(bus, rank, true, r, fold.normalizer,
+                              prefix_scratch, timeout_ms, "bus_sample_row greedy");
+    return r;
+  }
   const SamplingFold fold = bus_sampling_fold(
       bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, params,
       context_ids, candidate_k, prefix_scratch, timeout_ms);

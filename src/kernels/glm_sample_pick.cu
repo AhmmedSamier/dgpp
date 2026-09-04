@@ -175,8 +175,16 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
   const size_t row_slots = static_cast<size_t>(world) * group;
   const bool active =
       positions == nullptr || positions[q * position_stride] >= 0;
-  const GlmSampleSpec spec = specs[q];
-  const bool sampled = active && spec.temperature > 0.0f;
+  GlmSampleSpec spec = specs[q];
+  const bool penalized = spec.repetition_penalty != 1.0f ||
+                         spec.frequency_penalty != 0.0f ||
+                         spec.presence_penalty != 0.0f;
+  // The full path: stochastic rows, and greedy rows that report logprobs or
+  // carry penalties (their normalizer and scaled logits are the raw
+  // distribution's: temperature 1).
+  const bool sampled =
+      active && (spec.temperature > 0.0f || spec.logprobs >= 0 || penalized);
+  if (spec.temperature <= 0.0f) spec.temperature = 1.0f;
   int32_t* my_counts = counts + static_cast<size_t>(q) * vocab_size;
 
   for (int t = 0; t < rows_per_request; ++t) {
@@ -335,6 +343,20 @@ struct Decision {
   double covered;
 };
 
+// The reported top-N (the host's Result::top_logprobs): the first
+// min(N, n) candidates of the decided list under `lse`.
+__device__ inline void report_top(const float* logit, const int32_t* id, int n,
+                                  float temperature, float lse, int N,
+                                  int32_t* out_ids, float* out_lps,
+                                  int32_t* out_count) {
+  const int count = min(min(N, n), kSampleMaxTopLogprobs);
+  for (int i = 0; i < count; ++i) {
+    out_ids[i] = id[i];
+    out_lps[i] = __fsub_rn(__fdiv_rn(logit[i], temperature), lse);
+  }
+  *out_count = count;
+}
+
 // glm_sample::selector_state's stages 2-5 over prefix [0, n) of the merged
 // candidates; exps[] receives the survivors' exps. Returns final_count,
 // final_den, lse through the out-params.
@@ -380,16 +402,27 @@ __device__ inline void selector_state(const float* logit, int n,
   *lse = __fadd_rn(scaled0, detmath::log_f(fd));
 }
 
-// glm_sample::select_from_sorted's draw over the state.
+// glm_sample::select_from_sorted's draw over the state. `top` (optional)
+// receives the final set's top-N report.
+struct TopReport {
+  int N;
+  int32_t* ids;
+  float* lps;
+  int32_t* count;
+};
+
 __device__ inline void selector(const float* logit, const int32_t* id, int n,
                                 float temperature, int top_k, float min_p,
                                 float top_p, float* exps, uint64_t seed,
                                 uint64_t* counter, int32_t* token,
-                                float* logprob) {
+                                float* logprob, const TopReport* top = nullptr) {
   int final_count = 0;
   float final_den = 0.0f, lse = 0.0f;
   selector_state(logit, n, temperature, top_k, min_p, top_p, exps,
                  &final_count, &final_den, &lse);
+  if (top != nullptr)
+    report_top(logit, id, final_count, temperature, lse, top->N, top->ids,
+               top->lps, top->count);
   const double r = uniform01(seed, *counter);
   *counter += 1;
   double cum = 0.0;
@@ -412,11 +445,14 @@ __device__ inline bool spec_select(const float* logit, const int32_t* id,
                                    float min_p, float top_p, int32_t draft,
                                    float* exps, uint64_t seed,
                                    uint64_t* counter, int32_t* token,
-                                   float* logprob) {
+                                   float* logprob, const TopReport* top = nullptr) {
   int final_count = 0;
   float final_den = 0.0f, lse = 0.0f;
   selector_state(logit, n, temperature, top_k, min_p, top_p, exps,
                  &final_count, &final_den, &lse);
+  if (top != nullptr)
+    report_top(logit, id, final_count, temperature, lse, top->N, top->ids,
+               top->lps, top->count);
   int j = final_count;
   for (int i = 0; i < final_count; ++i)
     if (id[i] == draft) {
@@ -525,7 +561,8 @@ __device__ inline Support resolve_support(const float* logit, int held,
 __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
                                          int held, int vocab_size, double Z,
                                          const GlmSampleSpec& s, float* exps,
-                                         uint64_t* counter) {
+                                         uint64_t* counter,
+                                         const TopReport* top = nullptr) {
   Decision d{false, false, kNoId, 0.0f, 0.0};
   const Support sup = resolve_support(logit, held, vocab_size, Z, s);
   d.covered = sup.covered;
@@ -533,12 +570,13 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
   const float T = s.temperature;
   if (sup.kind == 1) {
     selector(logit, id, sup.n, T, sup.top_k, sup.min_p, sup.top_p, exps,
-             s.seed, counter, &d.token, &d.logprob);
+             s.seed, counter, &d.token, &d.logprob, top);
     d.resolved = true;
     return d;
   }
   // Pure temperature sampling: the fp64 walk over the fold masses.
   const bool complete = held == vocab_size;
+  if (top != nullptr && !complete && top->N > held) return d;  // the host's rule
   const double draw = uniform01(s.seed, *counter);
   double cumulative = 0.0;
   int chosen = held;
@@ -556,6 +594,9 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
   *counter += 1;
   d.token = id[chosen];
   d.logprob = __fsub_rn(__fdiv_rn(logit[chosen], T), static_cast<float>(Z));
+  if (top != nullptr)
+    report_top(logit, id, held, T, static_cast<float>(Z), top->N, top->ids,
+               top->lps, top->count);
   d.resolved = true;
   return d;
 }
@@ -566,7 +607,8 @@ __device__ inline Decision spec_decide_prefix(const float* logit,
                                               int vocab_size, double Z,
                                               int32_t draft,
                                               const GlmSampleSpec& s,
-                                              float* exps, uint64_t* counter) {
+                                              float* exps, uint64_t* counter,
+                                              const TopReport* top = nullptr) {
   Decision d{false, false, kNoId, 0.0f, 0.0};
   const Support sup = resolve_support(logit, held, vocab_size, Z, s);
   d.covered = sup.covered;
@@ -575,7 +617,7 @@ __device__ inline Decision spec_decide_prefix(const float* logit,
   if (sup.kind == 1) {
     d.accepted = spec_select(logit, id, sup.n, T, sup.top_k, sup.min_p,
                              sup.top_p, draft, exps, s.seed, counter,
-                             &d.token, &d.logprob);
+                             &d.token, &d.logprob, top);
     d.resolved = true;
     return d;
   }
@@ -744,13 +786,23 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     return;
   }
   const GlmSampleSpec spec = specs[q];
+  const bool penalized = spec.repetition_penalty != 1.0f ||
+                         spec.frequency_penalty != 0.0f ||
+                         spec.presence_penalty != 0.0f;
   int held[2] = {0, 0};
   for (int t = 0; t < rows_per_request; ++t)
     held[t] = merge_row(c_logit[t], c_id[t], world, candidates, m_logit[t], m_id[t]);
+  const TopReport top0{spec.logprobs, o.top_ids[0], o.top_logprobs[0], &o.top_count[0]};
+  const TopReport top1{spec.logprobs, o.top_ids[1], o.top_logprobs[1], &o.top_count[1]};
+  const TopReport* rep0 = spec.logprobs >= 0 ? &top0 : nullptr;
+  const TopReport* rep1 = spec.logprobs >= 0 ? &top1 : nullptr;
 
   v.rows = rows_per_request;
   if (spec.temperature <= 0.0f || held[0] == 0) {
-    // The greedy request: merge_greedy per row, the greedy judge.
+    // The greedy request: merge_greedy per row, the greedy judge. With
+    // logprobs (or penalties) the rows came through the full path at
+    // temperature 1 and report under the raw normalizer
+    // (glm_sample::greedy_from_prefix).
     for (int t = 0; t < rows_per_request; ++t)
       v.winners[t] = held[t] > 0 ? m_id[t][0] : kNoId;
     v.accepted = 1;
@@ -760,6 +812,28 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     v.next = v.winners[v.accepted - 1];
     o.sampled = 0;
     o.counter = spec.counter;
+    if ((spec.logprobs >= 0 || penalized) && held[0] > 0) {
+      const double Z0 = fold_lse(lses[0], world);
+      o.normalizer = Z0;
+      o.logprob = __fsub_rn(m_logit[0][0], static_cast<float>(Z0));
+      if (rep0 != nullptr)
+        report_top(m_logit[0], m_id[0], held[0], 1.0f, static_cast<float>(Z0),
+                   spec.logprobs, o.top_ids[0], o.top_logprobs[0], &o.top_count[0]);
+      if (rows_per_request == 2 && held[1] > 0) {
+        const double Z1 = fold_lse(lses[1], world);
+        o.normalizer1 = Z1;
+        o.logprob1 = __fsub_rn(m_logit[1][0], static_cast<float>(Z1));
+        if (rep1 != nullptr)
+          report_top(m_logit[1], m_id[1], held[1], 1.0f, static_cast<float>(Z1),
+                     spec.logprobs, o.top_ids[1], o.top_logprobs[1], &o.top_count[1]);
+      }
+      // The draft leaves the count table on a greedy reject too.
+      if (rows_per_request == 2 && v.accepted == 1) {
+        const int32_t draft = static_cast<int32_t>(fed[row0 + 1]);
+        if (draft >= 0 && draft < vocab_size)
+          counts[static_cast<size_t>(q) * vocab_size + draft] -= 1;
+      }
+    }
   } else {
     uint64_t counter = spec.counter;
     o.sampled = 1;
@@ -767,7 +841,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     o.normalizer = Z0;
     if (rows_per_request == 1) {
       const Decision d = decide_prefix(m_logit[0], m_id[0], held[0], vocab_size,
-                                       Z0, spec, exps, &counter);
+                                       Z0, spec, exps, &counter, rep0);
       o.covered_mass = d.covered;
       v.accepted = 1;
       if (d.resolved) {
@@ -784,7 +858,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
       const int32_t draft = static_cast<int32_t>(fed[row0 + 1]);
       const Decision d0 = spec_decide_prefix(m_logit[0], m_id[0], held[0],
                                              vocab_size, Z0, draft, spec, exps,
-                                             &counter);
+                                             &counter, rep0);
       o.covered_mass = d0.covered;
       if (!d0.resolved) {
         // Provisional REJECT: the commit keeps the post-row-0 state, the
@@ -811,7 +885,8 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
         o.normalizer1 = Z1;
         const Decision d1 =
             held[1] > 0 ? decide_prefix(m_logit[1], m_id[1], held[1],
-                                        vocab_size, Z1, spec, exps, &counter)
+                                        vocab_size, Z1, spec, exps, &counter,
+                                        rep1)
                         : Decision{false, false, kNoId, 0.0f, 0.0};
         if (d1.resolved) {
           v.winners[1] = d1.token;

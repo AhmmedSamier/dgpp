@@ -64,6 +64,22 @@ class FakeEngine : public SchedulerEngine {
     if (p.temperature > 0.0f)
       ops_.push_back("A:" + std::to_string(req) + ":" + std::to_string(seed));
   }
+  // Logprobs: a sampling-capable fake reports one entry per token it
+  // returns (logprob = -token, one alternative), only for armed slots.
+  bool supports_logprobs() const override { return can_sample_; }
+  void configure_logprobs(int req, int logprobs) override {
+    if (!can_sample_) {
+      SchedulerEngine::configure_logprobs(req, logprobs);
+      return;
+    }
+    report_[req] = logprobs;
+    if (logprobs >= 0) ops_.push_back("L:" + std::to_string(req));
+  }
+  std::vector<dgpp::glm_sample::Result> take_logprobs(int req) override {
+    std::vector<dgpp::glm_sample::Result> out;
+    out.swap(pending_lps_[req]);
+    return out;
+  }
 
   // Arms `slot`'s NEXT scalar episode: prefill returns tokens[0], then each
   // step returns one following token.
@@ -121,7 +137,18 @@ class FakeEngine : public SchedulerEngine {
     live_[req] = live;
     ops_.push_back("P:" + std::to_string(req) + ":" +
                    std::to_string(prompt.size()));
+    note_logprobs(req, {live.last_token});
     return live.last_token;
+  }
+  void note_logprobs(int req, const std::vector<int32_t>& tokens) {
+    if (report_.count(req) == 0 || report_[req] < 0) return;
+    for (const int32_t t : tokens) {
+      dgpp::glm_sample::Result r;
+      r.token = t;
+      r.logprob = -static_cast<float>(t);
+      r.top_logprobs.emplace_back(t, -static_cast<float>(t));
+      pending_lps_[req].push_back(r);
+    }
   }
 
   void reserve(int req, int64_t tokens) override {
@@ -147,6 +174,7 @@ class FakeEngine : public SchedulerEngine {
     if (!out.empty()) live.last_token = out.back();
     ops_.push_back("S:" + std::to_string(req) + ":" +
                    std::to_string(prev_token));
+    note_logprobs(req, out);
     return out;
   }
 
@@ -185,6 +213,8 @@ class FakeEngine : public SchedulerEngine {
   int64_t block_tokens_;
   int batch_capacity_ = 1;
   bool can_sample_ = false;
+  std::map<int, int> report_;
+  std::map<int, std::vector<dgpp::glm_sample::Result>> pending_lps_;
   std::map<int, std::vector<Episode>> episodes_;
   std::map<int, Live> live_;
   std::vector<std::string> ops_;
@@ -896,6 +926,58 @@ DGPP_TEST(scheduler_sampling_refusalsAreManifestErrors) {
   }
   require(threw, "an invalid spec must be refused at submit");
   require(!sampler.has_pending(), "the refused request was never queued");
+}
+
+// The logprobs channel: a request that asks arms the slot ("L") before the
+// prefill, every token's entry reaches the observer right after its
+// on_token — including the two tokens of a speculative step — and a
+// request that asks on an engine that reports none is refused at submit.
+class LogprobObserver : public dgpp::glm::SchedulerObserver {
+ public:
+  void on_token(const std::string& id, int64_t token, int steps_done) override {
+    events.push_back("T:" + id + ":" + std::to_string(token) + ":" +
+                     std::to_string(steps_done));
+  }
+  void on_token_logprobs(const std::string& id, int steps_done,
+                         const dgpp::glm_sample::Result& lp) override {
+    events.push_back("L:" + id + ":" + std::to_string(lp.token) + ":" +
+                     std::to_string(steps_done) + ":" +
+                     std::to_string(lp.top_logprobs.size()));
+  }
+  void on_retire(const std::string&, const Scheduler::Result&) override {}
+  std::vector<std::string> events;
+};
+
+DGPP_TEST(scheduler_logprobs_rideWithEveryTokenWhenAsked) {
+  FakeEngine engine(1, 100, 4, 1, /*can_sample=*/true);
+  engine.arm_batches(0, 10, {{11, 12}, {13}}, /*max_steps=*/4);
+  Scheduler sched(&engine, {kEos});
+  LogprobObserver observer;
+  sched.set_observer(&observer);
+  SchedulerRequest r = make_request("a", 5, 4);
+  r.logprobs = 1;
+  r.sampling.logprobs = 1;
+  sched.submit(std::move(r));
+  sched.run_to_completion();
+  require(engine.op_stream() == "L:0 P:0:5 S:0:10 S:0:12 C:0",
+          "arming precedes the prefill: " + engine.op_stream());
+  const std::vector<std::string> want{
+      "T:a:10:1", "L:a:10:1:1", "T:a:11:2", "L:a:11:2:1", "T:a:12:3",
+      "L:a:12:3:1", "T:a:13:4", "L:a:13:4:1"};
+  require(observer.events == want, "every token's logprobs follow its on_token");
+
+  FakeEngine greedy_engine(1, 100, 4);
+  Scheduler greedy(&greedy_engine, {kEos});
+  SchedulerRequest ask = make_request("b", 5, 2);
+  ask.logprobs = 0;
+  ask.sampling.logprobs = 0;
+  bool threw = false;
+  try {
+    greedy.submit(ask);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "an engine without logprobs refuses at submit");
 }
 
 int main() {

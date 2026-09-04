@@ -893,6 +893,29 @@ inline SpecPrefixDecision spec_accept_from_prefix(
   return decision;
 }
 
+// The GREEDY decision with logprobs (temperature 0 requests that ask for
+// them, or carry penalties): the canonical first candidate of the prefix —
+// the global argmax, bitwise the greedy pick's token — reported under the
+// raw distribution (the fold normalizer at temperature 1, as
+// select_from_sorted's greedy branch reports over a complete list). No
+// draw. `logprobs` top entries, all inside the prefix.
+inline Result greedy_from_prefix(const std::vector<Candidate>& sorted_prefix,
+                                 double raw_logsumexp, int logprobs) {
+  if (sorted_prefix.empty())
+    throw std::invalid_argument("glm_sample: empty greedy prefix");
+  if (!std::isfinite(raw_logsumexp))
+    throw std::invalid_argument("glm_sample: non-finite raw log-sum-exp");
+  const float lse = static_cast<float>(raw_logsumexp);
+  Result out;
+  out.token = sorted_prefix[0].id;
+  out.logprob = sorted_prefix[0].logit - lse;
+  const int n = std::min<int>(logprobs, static_cast<int>(sorted_prefix.size()));
+  for (int i = 0; i < n; ++i)
+    out.top_logprobs.emplace_back(sorted_prefix[static_cast<size_t>(i)].id,
+                                  sorted_prefix[static_cast<size_t>(i)].logit - lse);
+  return out;
+}
+
 // One contiguous vocabulary slice of the sharded lm head: rank r owns
 // [begin, begin + count). The fold normalizer is defined over the slices in
 // rank order, so the layout is part of the sharded sampler's semantics, not

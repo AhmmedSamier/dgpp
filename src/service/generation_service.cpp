@@ -63,12 +63,15 @@ std::string chat_chunk_first(const std::string& id, int64_t created,
 
 std::string chat_chunk_content(const std::string& id, int64_t created,
                                const std::string& model,
-                               const std::string& delta) {
+                               const std::string& delta,
+                               const std::string& logprobs_json = "") {
   std::string out;
   append_chunk_preamble(&out, id, created, model);
   out.append("{\"index\":0,\"delta\":{\"content\":");
   append_json_string(&out, delta);
-  out.append("},\"logprobs\":null,\"finish_reason\":null}]}");
+  out.append("},\"logprobs\":");
+  out.append(logprobs_json.empty() ? "null" : logprobs_json);
+  out.append(",\"finish_reason\":null}]}");
   return out;
 }
 
@@ -105,7 +108,8 @@ std::string chat_completion_body(const std::string& id, int64_t created,
                                  const std::string& model,
                                  const std::string& text,
                                  Scheduler::Result::Reason reason,
-                                 int prompt_tokens, int completion_tokens) {
+                                 int prompt_tokens, int completion_tokens,
+                                 const std::string& logprobs_json = "") {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, id);
@@ -116,7 +120,9 @@ std::string chat_completion_body(const std::string& id, int64_t created,
   out.append(",\"system_fingerprint\":null,\"choices\":[{\"index\":0,"
               "\"message\":{\"role\":\"assistant\",\"content\":");
   append_json_string(&out, text);
-  out.append("},\"logprobs\":null,\"finish_reason\":");
+  out.append("},\"logprobs\":");
+  out.append(logprobs_json.empty() ? "null" : logprobs_json);
+  out.append(",\"finish_reason\":");
   append_json_string(&out, finish_reason(reason));
   out.append("}],");
   append_usage(&out, prompt_tokens, completion_tokens);
@@ -148,11 +154,14 @@ std::string text_chunk_first(const std::string& id, int64_t created,
 
 std::string text_chunk_delta(const std::string& id, int64_t created,
                              const std::string& model,
-                             const std::string& delta) {
+                             const std::string& delta,
+                             const std::string& logprobs_json = "") {
   std::string out = text_chunk_preamble_fields(id, created, model);
   out.append("{\"index\":0,\"text\":");
   append_json_string(&out, delta);
-  out.append(",\"logprobs\":null,\"finish_reason\":null}]}");
+  out.append(",\"logprobs\":");
+  out.append(logprobs_json.empty() ? "null" : logprobs_json);
+  out.append(",\"finish_reason\":null}]}");
   return out;
 }
 
@@ -171,7 +180,8 @@ std::string text_completion_body(const std::string& id, int64_t created,
                                  const std::string& model,
                                  const std::string& text,
                                  Scheduler::Result::Reason reason,
-                                 int prompt_tokens, int completion_tokens) {
+                                 int prompt_tokens, int completion_tokens,
+                                 const std::string& logprobs_json = "") {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, id);
@@ -182,7 +192,9 @@ std::string text_completion_body(const std::string& id, int64_t created,
   out.append(",\"system_fingerprint\":null,\"choices\":[{\"index\":0,"
               "\"text\":");
   append_json_string(&out, text);
-  out.append(",\"logprobs\":null,\"finish_reason\":");
+  out.append(",\"logprobs\":");
+  out.append(logprobs_json.empty() ? "null" : logprobs_json);
+  out.append(",\"finish_reason\":");
   append_json_string(&out, finish_reason(reason));
   out.append("}],");
   append_usage(&out, prompt_tokens, completion_tokens);
@@ -538,14 +550,50 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   uint64_t seed = 0;
   if (!parse_sampling(body, w, &sampling, &seed)) return;
 
+  // logprobs (bool) + top_logprobs (0..20): exact from the same sampler.
+  int logprobs = -1;
+  {
+    const dgpp::minijson::Value* lp = body.find("logprobs");
+    const dgpp::minijson::Value* top = body.find("top_logprobs");
+    if (lp != nullptr && !lp->is_bool()) {
+      respond_error(w, 400, "logprobs must be a boolean",
+                    "invalid_request_error", "logprobs");
+      return;
+    }
+    const bool want = lp != nullptr && lp->as_bool(false);
+    if (top != nullptr) {
+      const double x = top->is_number() ? top->as_double(-1.0) : -1.0;
+      if (!top->is_number() || x != std::floor(x) || x < 0.0 || x > 20.0) {
+        respond_error(w, 400, "top_logprobs must be an integer in [0, 20]",
+                      "invalid_request_error", "top_logprobs");
+        return;
+      }
+      if (!want) {
+        respond_error(w, 400, "top_logprobs requires logprobs: true",
+                      "invalid_request_error", "top_logprobs");
+        return;
+      }
+    }
+    if (want) {
+      if (!engine_->supports_logprobs()) {
+        respond_error(w, 400,
+                      "logprobs are not available on this engine",
+                      "invalid_request_error", "logprobs",
+                      "logprobs_unsupported");
+        return;
+      }
+      logprobs = top != nullptr ? static_cast<int>(top->as_double(0.0)) : 0;
+      sampling.logprobs = logprobs;
+    }
+  }
+
   // The loud-refusal ladder for everything not implemented in v1.
   const char* unsupported[] = {
-      "stop",           "n",                 "logprobs",
-      "top_logprobs",   "logit_bias",        "user",
-      "tools",          "tool_choice",       "response_format",
-      "parallel_tool_calls", "store",        "metadata",
-      "reasoning_effort", "service_tier",    "prediction",
-      "audio",
+      "stop",           "n",                 "logit_bias",
+      "user",           "tools",             "tool_choice",
+      "response_format", "parallel_tool_calls", "store",
+      "metadata",       "reasoning_effort",  "service_tier",
+      "prediction",     "audio",
   };
   for (const char* param : unsupported) {
     if (body.find(param) != nullptr) {
@@ -614,6 +662,8 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   sr.max_steps = steps;
   sr.sampling = sampling;
   sr.seed = seed;
+  sr.logprobs = logprobs;
+  record->logprobs = logprobs;
   enqueue_admission(std::move(record), std::move(sr));
 }
 
@@ -682,10 +732,28 @@ void GenerationService::route_completions(const HttpRequest& req,
   glm_sample::Params sampling;
   uint64_t seed = 0;
   if (!parse_sampling(body, w, &sampling, &seed)) return;
+  // The legacy logprobs: an integer 0..5 (null = none).
+  int logprobs = -1;
+  if (const dgpp::minijson::Value* lp = body.find("logprobs")) {
+    const double x = lp->is_number() ? lp->as_double(-1.0) : -1.0;
+    if (!lp->is_number() || x != std::floor(x) || x < 0.0 || x > 5.0) {
+      respond_error(w, 400, "logprobs must be an integer in [0, 5]",
+                    "invalid_request_error", "logprobs");
+      return;
+    }
+    if (!engine_->supports_logprobs()) {
+      respond_error(w, 400, "logprobs are not available on this engine",
+                    "invalid_request_error", "logprobs",
+                    "logprobs_unsupported");
+      return;
+    }
+    logprobs = static_cast<int>(x);
+    sampling.logprobs = logprobs;
+  }
 
-  const char* unsupported[] = {"echo",        "suffix",        "logprobs",
-                              "top_logprobs", "n",             "best_of",
-                              "stop",         "logit_bias",    "user"};
+  const char* unsupported[] = {"echo",        "suffix",        "top_logprobs",
+                              "n",           "best_of",       "stop",
+                              "logit_bias",  "user"};
   for (const char* param : unsupported) {
     if (body.find(param) != nullptr) {
       respond_error(w, 400,
@@ -734,6 +802,8 @@ void GenerationService::route_completions(const HttpRequest& req,
   sr.max_steps = steps;
   sr.sampling = sampling;
   sr.seed = seed;
+  sr.logprobs = logprobs;
+  record->logprobs = logprobs;
   enqueue_admission(std::move(record), std::move(sr));
 }
 
@@ -877,6 +947,93 @@ void GenerationService::on_token(const std::string& id, int64_t token,
   if (audit_) audit_->on_token(id, token, steps_done);
 }
 
+void GenerationService::on_token_logprobs(const std::string& id,
+                                          int steps_done,
+                                          const glm_sample::Result& logprobs) {
+  (void)steps_done;
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto& r : records_) {
+    if (r->id != id || r->done) continue;
+    if (r->logprobs >= 0) r->lps.push_back(logprobs);
+    break;
+  }
+}
+
+namespace {
+
+void append_bytes_array(std::string* out, const std::string& s) {
+  out->push_back('[');
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (i) out->push_back(',');
+    append_json_int(out, static_cast<unsigned char>(s[i]));
+  }
+  out->push_back(']');
+}
+
+}  // namespace
+
+std::string GenerationService::logprobs_content(const StreamRecord& r,
+                                                size_t from, size_t to) const {
+  // {"content":[{"token","logprob","bytes","top_logprobs":[...]}, ...]}
+  std::string out = "{\"content\":[";
+  for (size_t i = from; i < to && i < r.lps.size(); ++i) {
+    if (i != from) out.push_back(',');
+    const glm_sample::Result& lp = r.lps[i];
+    const std::string tok = frontend_->decode_ids({r.ids[i]});
+    out.append("{\"token\":");
+    append_json_string(&out, tok);
+    out.append(",\"logprob\":");
+    append_json_float(&out, lp.logprob);
+    out.append(",\"bytes\":");
+    append_bytes_array(&out, tok);
+    out.append(",\"top_logprobs\":[");
+    for (size_t j = 0; j < lp.top_logprobs.size(); ++j) {
+      if (j) out.push_back(',');
+      const std::string alt = frontend_->decode_ids({lp.top_logprobs[j].first});
+      out.append("{\"token\":");
+      append_json_string(&out, alt);
+      out.append(",\"logprob\":");
+      append_json_float(&out, lp.top_logprobs[j].second);
+      out.append(",\"bytes\":");
+      append_bytes_array(&out, alt);
+      out.push_back('}');
+    }
+    out.append("]}");
+  }
+  out.append("]}");
+  return out;
+}
+
+std::string GenerationService::legacy_logprobs(const StreamRecord& r) const {
+  // {"tokens":[...],"token_logprobs":[...],"top_logprobs":[{tok: lp}],
+  //  "text_offset":[...]}
+  std::string tokens = "[", lps = "[", tops = "[", offsets = "[";
+  size_t offset = 0;
+  for (size_t i = 0; i < r.lps.size(); ++i) {
+    if (i) {
+      tokens.push_back(',');
+      lps.push_back(',');
+      tops.push_back(',');
+      offsets.push_back(',');
+    }
+    const std::string tok = frontend_->decode_ids({r.ids[i]});
+    append_json_string(&tokens, tok);
+    append_json_float(&lps, r.lps[i].logprob);
+    tops.push_back('{');
+    for (size_t j = 0; j < r.lps[i].top_logprobs.size(); ++j) {
+      if (j) tops.push_back(',');
+      append_json_string(&tops, frontend_->decode_ids({r.lps[i].top_logprobs[j].first}));
+      tops.push_back(':');
+      append_json_float(&tops, r.lps[i].top_logprobs[j].second);
+    }
+    tops.push_back('}');
+    append_json_int(&offsets, static_cast<int64_t>(offset));
+    offset += tok.size();
+  }
+  return "{\"tokens\":" + tokens + "],\"token_logprobs\":" + lps +
+         "],\"top_logprobs\":" + tops + "],\"text_offset\":" + offsets + "]}";
+}
+
 void GenerationService::on_retire(const std::string& id,
                                  const Scheduler::Result& result) {
   {
@@ -925,10 +1082,21 @@ void GenerationService::pump_records() {
                                                     r->model));
     }
     if (!r->delta.empty()) {
+      std::string lp_json;
+      if (r->logprobs >= 0) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const size_t to = r->lps.size();
+        if (to > r->lps_flushed) {
+          lp_json = logprobs_content(*r, r->lps_flushed, to);
+          r->lps_flushed = to;
+        }
+      }
       r->writer->write_event(
           r->id.rfind("cmpl-", 0) == 0
-              ? text_chunk_delta(r->id, r->created_unix, r->model, r->delta)
-              : chat_chunk_content(r->id, r->created_unix, r->model, r->delta));
+              ? text_chunk_delta(r->id, r->created_unix, r->model, r->delta,
+                                 lp_json)
+              : chat_chunk_content(r->id, r->created_unix, r->model, r->delta,
+                                   lp_json));
       r->delta.clear();
     }
   }
@@ -968,12 +1136,21 @@ void GenerationService::pump_records() {
           r->first_chunk_sent = true;
         }
         if (!r->delta.empty()) {
+          std::string lp_json;
+          if (r->logprobs >= 0) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const size_t to = r->lps.size();
+            if (to > r->lps_flushed) {
+              lp_json = logprobs_content(*r, r->lps_flushed, to);
+              r->lps_flushed = to;
+            }
+          }
           r->writer->write_event(
               r->id.rfind("cmpl-", 0) == 0
                   ? text_chunk_delta(r->id, r->created_unix, r->model,
-                                     r->delta)
+                                     r->delta, lp_json)
                   : chat_chunk_content(r->id, r->created_unix, r->model,
-                                       r->delta));
+                                       r->delta, lp_json));
           r->delta.clear();
         }
         r->writer->write_event(
@@ -994,16 +1171,24 @@ void GenerationService::pump_records() {
         r->writer->end_stream();
       } else {
         // The one-shot completion object.
+        std::string lp_json;
+        if (r->logprobs >= 0) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          lp_json = r->id.rfind("cmpl-", 0) == 0
+                        ? legacy_logprobs(*r)
+                        : logprobs_content(*r, 0, r->lps.size());
+        }
         r->writer->respond(
             200, "application/json",
             r->id.rfind("cmpl-", 0) == 0
                 ? text_completion_body(r->id, r->created_unix, r->model,
                                        r->text, r->reason,
                                        r->prompt_tokens,
-                                       r->completion_tokens)
+                                       r->completion_tokens, lp_json)
                 : chat_completion_body(r->id, r->created_unix, r->model,
                                         r->text, r->reason,
-                                        r->prompt_tokens, r->completion_tokens));
+                                        r->prompt_tokens, r->completion_tokens,
+                                        lp_json));
       }
     }
     // Records leave the list only here — done and (writer drained or

@@ -22,7 +22,12 @@
 //                               greedy path. An engine that cannot
 //                               sample yet serves greedy defaults and
 //                               refuses temperature > 0 with
-//                               sampling_unsupported.
+//                               sampling_unsupported. logprobs (bool) and
+//                               top_logprobs (0..20) report every
+//                               generated token's log-probability and
+//                               alternatives (the OpenAI content shape),
+//                               exact from the same sampler; temperature
+//                               0 reports under the raw distribution.
 //   POST /v1/completions        the legacy prompt API (string prompt).
 //   GET  /v1/models, /v1/models/{id}
 //   GET  /health               liveness (the fabric harnesses' probe).
@@ -174,6 +179,9 @@ class GenerationService : public HttpHandler,
         dgpp::glm::Scheduler::Result::Reason::kNone;
     int prompt_tokens = 0;
     int completion_tokens = 0;
+    int logprobs = -1;         // -1 none; N = top-N alternatives requested
+    std::vector<glm_sample::Result> lps;  // one per id when logprobs >= 0
+    size_t lps_flushed = 0;    // streaming: entries already sent
     std::vector<int64_t> ids;  // generated so far
     std::string text;          // decoded so far (the suffix-diff base)
     std::string delta;         // unflushed text delta (the ring)
@@ -211,6 +219,13 @@ class GenerationService : public HttpHandler,
   // (the observer, engine thread) and decodes the text suffix.
   void on_token(const std::string& id, int64_t token,
                 int steps_done) override;
+  void on_token_logprobs(const std::string& id, int steps_done,
+                         const glm_sample::Result& logprobs) override;
+  // The OpenAI logprobs content entries for record tokens [from, to).
+  std::string logprobs_content(const StreamRecord& r, size_t from,
+                               size_t to) const;
+  // The legacy text_completion logprobs object over every token.
+  std::string legacy_logprobs(const StreamRecord& r) const;
   void on_retire(const std::string& id,
                  const dgpp::glm::Scheduler::Result& result) override;
 

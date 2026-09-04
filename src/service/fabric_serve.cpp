@@ -83,9 +83,14 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out += ",\"ca\":";
         append_json_int(&out, r.cancel_after);
       }
-      // The sampling spec rides only for stochastic requests; a greedy
-      // request's record is byte-identical to the pre-sampling format.
-      if (r.sampling.temperature > 0.0f) {
+      // The sampling spec rides for stochastic requests and for greedy ones
+      // that ask for logprobs; a plain greedy request's record is
+      // byte-identical to the pre-sampling format.
+      if (r.logprobs >= 0) {
+        out += ",\"lp\":";
+        append_json_int(&out, r.logprobs);
+      }
+      if (r.sampling.temperature > 0.0f || r.logprobs >= 0) {
         const glm_sample::Params& g = r.sampling;
         out += ",\"g\":{\"t\":";
         append_json_int(&out, float_bits(g.temperature));
@@ -224,6 +229,12 @@ JournalRecord decode_journal_line(std::string_view line) {
                                    "' has bad cancel_after");
         r.cancel_after = static_cast<int>(ca->as_int());
       }
+      if (const dgpp::minijson::Value* lp = item.find("lp")) {
+        if (!lp->is_number() || lp->as_int() < 0 || lp->as_int() > 20)
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has bad logprobs");
+        r.logprobs = static_cast<int>(lp->as_int());
+      }
       if (const dgpp::minijson::Value* g = item.find("g")) {
         if (!g->is_object())
           throw std::runtime_error("journal: submit '" + r.id +
@@ -263,9 +274,12 @@ JournalRecord decode_journal_line(std::string_view line) {
                                    "' carries an invalid sampling spec: " +
                                    e.what());
         }
-        if (!(p.temperature > 0.0f))
+        if (!(p.temperature > 0.0f) && r.logprobs < 0)
           throw std::runtime_error("journal: submit '" + r.id +
                                    "' carries a greedy sampling spec");
+        if (r.logprobs >= 0 && p.logprobs != r.logprobs)
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' logprobs fields disagree");
       }
       rec.submits.push_back(std::move(r));
     }

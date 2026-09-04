@@ -1360,3 +1360,113 @@ DGPP_TEST(sample_pick_t2_matches_spec_oracle_over_simulated_world) {
               ", row-0 fallbacks " + std::to_string(fallback0) +
               ", row-1 fallbacks " + std::to_string(fallback1) + ")");
 }
+
+
+// Logprobs on the device: a greedy request that reports takes the full path
+// at temperature 1 (penalties applied) and reports the argmax under the raw
+// normalizer with its top-N — glm_sample::greedy_from_prefix — and a
+// sampled request's report is its Result's top_logprobs; both bitwise.
+DGPP_TEST(sample_pick_reports_logprobs_bitwise) {
+  Rng rng(0x10b5);
+  constexpr int kWorld = 4;
+  constexpr int count = 96;
+  constexpr int vocab = kWorld * count;
+  constexpr int candidates = 32;
+  constexpr int requests = 3;
+  for (int trial = 0; trial < 4; ++trial) {
+    std::vector<float> full(static_cast<size_t>(requests) * vocab);
+    for (int q = 0; q < requests; ++q) {
+      float* row = full.data() + static_cast<size_t>(q) * vocab;
+      for (int v = 0; v < vocab; ++v)
+        row[v] = static_cast<float>((rng.next() >> 8) % 41) * 0.25f - 5.0f;
+      row[static_cast<size_t>(rng.next() % vocab)] = 11.0f;
+      row[static_cast<size_t>(rng.next() % vocab)] = 8.5f;
+    }
+    std::vector<dgpp::GlmSampleSpec> specs(requests);
+    // 0: greedy with logprobs and a penalty; 1: sampled with top-4; 2:
+    // pure temperature with top-3.
+    specs[0].temperature = 0.0f;
+    specs[0].logprobs = 3;
+    specs[0].presence_penalty = 0.2f;
+    specs[1].temperature = 1.0f;
+    specs[1].top_p = 0.95f;
+    specs[1].logprobs = 4;
+    specs[2].temperature = 0.8f;
+    specs[2].top_p = 1.0f;
+    specs[2].logprobs = 3;
+    for (int q = 0; q < requests; ++q) {
+      specs[q].seed = 0x3000 + q + 11 * trial;
+      specs[q].counter = 2;
+    }
+    std::vector<int32_t> counts(static_cast<size_t>(requests) * vocab, 0);
+    std::vector<int64_t> fed(requests), positions(requests, 7);
+    for (int q = 0; q < requests; ++q) {
+      fed[q] = static_cast<int64_t>(rng.next() % vocab);
+      counts[static_cast<size_t>(q) * vocab + rng.next() % vocab] += 1;
+    }
+    const SampleWorldRun run = run_sample_world(full, requests, kWorld, count,
+                                                specs, counts, fed, positions,
+                                                candidates, 0x1111ull);
+    for (int q = 0; q < requests; ++q) {
+      const float* row = full.data() + static_cast<size_t>(q) * vocab;
+      std::vector<int32_t> ctx(counts.begin() + static_cast<long>(q) * vocab,
+                               counts.begin() + static_cast<long>(q + 1) * vocab);
+      ctx[static_cast<size_t>(fed[q])] += 1;
+      std::unordered_map<int32_t, int32_t> m;
+      for (int v = 0; v < vocab; ++v)
+        if (ctx[static_cast<size_t>(v)]) m[v] = ctx[static_cast<size_t>(v)];
+      dgpp::glm_sample::Params p = params_of(specs[q]);
+      p.logprobs = specs[q].logprobs;
+      std::vector<float> adj(row, row + vocab);
+      dgpp::glm_sample::apply_penalties(adj.data(), vocab, 0, p, m);
+      const float T = p.temperature > 0.0f ? p.temperature : 1.0f;
+      std::vector<std::vector<Candidate>> shards;
+      std::vector<double> lses;
+      for (int k = 0; k < kWorld; ++k) {
+        shards.push_back(dgpp::glm_sample::local_topk(adj.data() + k * count, count,
+                                                      k * count, candidates));
+        lses.push_back(dgpp::glm_sample::slice_logsumexp(adj.data() + k * count, count, T));
+      }
+      const std::vector<Candidate> merged = dgpp::glm_sample::merge_topk(shards, candidates);
+      const double Z = dgpp::glm_sample::merge_logsumexp(lses);
+      dgpp::glm_sample::Result want;
+      bool want_resolved = true;
+      if (p.temperature <= 0.0f) {
+        want = dgpp::glm_sample::greedy_from_prefix(merged, Z, p.logprobs);
+      } else {
+        dgpp::glm_sample::Rng host{specs[q].seed, specs[q].counter};
+        const auto d = dgpp::glm_sample::sample_from_prefix(merged, vocab, Z, p, host);
+        want_resolved = d.resolved;
+        want = d.result;
+      }
+      for (int k = 0; k < kWorld; ++k) {
+        const GlmPickVerdict& v = run.verdicts[k][q];
+        const dgpp::GlmSampleOutcome& o = run.outcomes[k][q];
+        if (!want_resolved) {
+          require(o.fallback == 1, "the host fell back, the device must too");
+          continue;
+        }
+        require(v.next == want.token, "reported token differs (request " +
+                                          std::to_string(q) + ")");
+        require(bits_equal(o.logprob, want.logprob),
+                "the token's logprob differs (request " + std::to_string(q) + ")");
+        require(o.top_count[0] == static_cast<int>(want.top_logprobs.size()),
+                "top-N count differs (request " + std::to_string(q) + "): " +
+                    std::to_string(o.top_count[0]) + " vs " +
+                    std::to_string(want.top_logprobs.size()));
+        for (int i = 0; i < o.top_count[0]; ++i)
+          require(o.top_ids[0][i] == want.top_logprobs[static_cast<size_t>(i)].first &&
+                      bits_equal(o.top_logprobs[0][i],
+                                 want.top_logprobs[static_cast<size_t>(i)].second),
+                  "top-N entry differs (request " + std::to_string(q) + ")");
+        if (q == 0) {
+          // The greedy row penalized in place at temperature 1.
+          for (int i = 0; i < count; ++i)
+            require(bits_equal(run.penalized[k][static_cast<size_t>(q) * count + i],
+                               adj[static_cast<size_t>(k * count + i)]),
+                    "greedy-with-logprobs row must be penalized in place");
+        }
+      }
+    }
+  }
+}

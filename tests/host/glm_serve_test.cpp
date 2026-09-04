@@ -90,6 +90,21 @@ class FakeEngine : public SchedulerEngine {
     std::lock_guard<std::mutex> lock(armed_mu_);
     return armed_;
   }
+  // Logprobs: the sampling-capable fake reports every token with logprob
+  // -(index+1)/4 and top-N alternatives (the token itself first).
+  bool supports_logprobs() const override { return can_sample_; }
+  void configure_logprobs(int req, int logprobs) override {
+    if (!can_sample_) {
+      SchedulerEngine::configure_logprobs(req, logprobs);
+      return;
+    }
+    report_[req] = logprobs;
+  }
+  std::vector<dgpp::glm_sample::Result> take_logprobs(int req) override {
+    std::vector<dgpp::glm_sample::Result> out;
+    out.swap(pending_lps_[req]);
+    return out;
+  }
 
   int max_concurrent_requests() const override { return slots_; }
   int64_t pool_blocks_total() const override { return total_blocks_; }
@@ -112,7 +127,17 @@ class FakeEngine : public SchedulerEngine {
                           ? kFakeEos
                           : fake_token(live.prompt_len, 0);
     live_[req] = live;
+    note_logprobs(req, live.last_token, 0);
     return live.last_token;
+  }
+  void note_logprobs(int req, int32_t token, int index) {
+    if (report_.count(req) == 0 || report_[req] < 0) return;
+    dgpp::glm_sample::Result r;
+    r.token = token;
+    r.logprob = -static_cast<float>(index + 1) / 4.0f;
+    for (int j = 0; j < report_[req]; ++j)
+      r.top_logprobs.emplace_back(token + j, r.logprob - static_cast<float>(j));
+    pending_lps_[req].push_back(r);
   }
 
   void reserve(int req, int64_t tokens) override {
@@ -126,6 +151,7 @@ class FakeEngine : public SchedulerEngine {
         fake_eos_second(live.prompt_len) && live.served == 1
             ? kFakeEos
             : fake_token(live.prompt_len, static_cast<int>(live.served));
+    note_logprobs(req, live.last_token, live.served);
     ++live.served;
     return {live.last_token};
   }
@@ -144,6 +170,8 @@ class FakeEngine : public SchedulerEngine {
   int64_t block_tokens_;
   bool can_sample_ = false;
   std::map<int, Live> live_;
+  std::map<int, int> report_;
+  std::map<int, std::vector<dgpp::glm_sample::Result>> pending_lps_;
   mutable std::mutex armed_mu_;
   std::vector<Armed> armed_;
 };
@@ -757,6 +785,75 @@ DGPP_TEST(serve_sampling_fixedSeedAppliesToSeedlessRequests) {
   const std::vector<FakeEngine::Armed> armed = rig.engine.armed();
   require(armed.size() == 2 && armed[0].seed == 777 && armed[1].seed == 5,
           "the fixed seed fills seedless requests; explicit seeds win");
+}
+
+DGPP_TEST(serve_logprobs_openAIShapesOnEveryRoute) {
+  ServiceRig rig(/*queue_limit=*/8, model_defaults(), /*can_sample=*/true);
+  // Non-stream chat: the content array with one entry per token, each with
+  // the token text, its bytes and top_logprobs.
+  const std::string one =
+      post_chat(rig, chat_body("abcd", 3, ",\"logprobs\":true,\"top_logprobs\":2"),
+                "usage");
+  require(one.find("\"logprobs\":{\"content\":[{\"token\":") != std::string::npos,
+          "chat logprobs content: " + one.substr(0, 400));
+  require(one.find("\"logprob\":-0.25,\"bytes\":[") != std::string::npos,
+          "the first token's logprob and bytes: " + one.substr(0, 600));
+  require(one.find("\"top_logprobs\":[{\"token\":") != std::string::npos,
+          "top_logprobs entries");
+  {
+    size_t count = 0, pos = 0;
+    while ((pos = one.find("\"bytes\":[", pos)) != std::string::npos) {
+      ++count;
+      pos += 8;
+    }
+    // 3 tokens, each with 2 alternatives: 9 bytes arrays.
+    require(count == 9, "three entries with two alternatives each, got " +
+                            std::to_string(count));
+  }
+  // Streaming chat: content chunks carry the entries since the last one.
+  {
+    Client c(rig.port());
+    const std::string body =
+        chat_body("abcd", 3, ",\"stream\":true,\"logprobs\":true");
+    c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+               "Content-Type: application/json\r\nContent-Length: " +
+               std::to_string(body.size()) + "\r\n\r\n" + body);
+    const std::string resp = c.read_until("[DONE]", 5000);
+    require(resp.find("\"logprobs\":{\"content\":[{\"token\":") != std::string::npos,
+            "streamed logprobs: " + resp.substr(0, 400));
+    require(resp.find("\"top_logprobs\":[]") != std::string::npos,
+            "logprobs without top_logprobs report empty alternatives");
+  }
+  // Legacy completions: the tokens/token_logprobs/top_logprobs/text_offset
+  // object.
+  {
+    Client c(rig.port());
+    const std::string body =
+        "{\"model\":\"" + kModel + "\",\"prompt\":\"hello\",\"max_tokens\":2,"
+        "\"logprobs\":1}";
+    c.send_all("POST /v1/completions HTTP/1.1\r\nHost: t\r\n"
+               "Content-Type: application/json\r\nContent-Length: " +
+               std::to_string(body.size()) + "\r\n\r\n" + body);
+    const std::string resp = c.read_until("usage", 5000);
+    require(resp.find("\"logprobs\":{\"tokens\":[") != std::string::npos &&
+                resp.find("\"token_logprobs\":[-0.25,-0.5]") != std::string::npos &&
+                resp.find("\"text_offset\":[0,1]") != std::string::npos,
+            "legacy logprobs object: " + resp.substr(0, 500));
+  }
+  // Refusals name the field.
+  const std::string no_flag =
+      post_chat(rig, chat_body("abcd", 2, ",\"top_logprobs\":2"));
+  require(no_flag.find("\"param\":\"top_logprobs\"") != std::string::npos,
+          "top_logprobs without logprobs");
+  const std::string too_many =
+      post_chat(rig, chat_body("abcd", 2, ",\"logprobs\":true,\"top_logprobs\":25"));
+  require(too_many.find("\"param\":\"top_logprobs\"") != std::string::npos,
+          "top_logprobs above 20");
+  ServiceRig greedy_rig(/*queue_limit=*/8);
+  const std::string unsupported =
+      post_chat(greedy_rig, chat_body("abcd", 2, ",\"logprobs\":true"));
+  require(unsupported.find("\"code\":\"logprobs_unsupported\"") != std::string::npos,
+          "an engine without logprobs refuses");
 }
 
 }  // namespace

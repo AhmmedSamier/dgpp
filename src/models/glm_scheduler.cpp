@@ -125,6 +125,14 @@ void Scheduler::validate_new(const SchedulerRequest& request) const {
     throw std::invalid_argument(
         "Scheduler: request '" + request.id +
         "' asks for stochastic sampling but the engine is greedy-only");
+  if (request.logprobs >= 0 && !engine_->supports_logprobs())
+    throw std::invalid_argument(
+        "Scheduler: request '" + request.id +
+        "' asks for logprobs but the engine reports none");
+  if (request.logprobs >= 0 && request.sampling.logprobs != request.logprobs)
+    throw std::invalid_argument(
+        "Scheduler: request '" + request.id +
+        "' logprobs and sampling.logprobs disagree");
   if (request.cancel_after < 0 || request.cancel_after > request.max_steps)
     throw std::invalid_argument(
         "Scheduler: request '" + request.id + "' cancel_after must be in "
@@ -188,6 +196,7 @@ void Scheduler::admit(int arrival) {
   const int64_t reserve = reserve_blocks(r);
   // The spec lands on the slot before its first pick (the prefill's).
   engine_->configure_sampling(slot, r.spec.sampling, r.spec.seed);
+  engine_->configure_logprobs(slot, r.spec.logprobs);
   const int32_t token = engine_->prefill(slot, r.spec.prompt);
   if (token < 0) {
     engine_->close(slot);
@@ -213,7 +222,22 @@ void Scheduler::admit(int arrival) {
       "{}/{} blocks in use) — first token {}",
       r.spec.id, slot, reserve, engine_->pool_blocks_in_use(),
       engine_->pool_blocks_total(), token);
-  (void)append_token(arrival, token);
+  const std::vector<glm_sample::Result> lps = collect_logprobs(arrival, slot, 1);
+  (void)append_token(arrival, token, lps.empty() ? nullptr : &lps[0]);
+}
+
+std::vector<glm_sample::Result> Scheduler::collect_logprobs(int arrival,
+                                                            int slot,
+                                                            size_t tokens) {
+  const Request& r = requests_[static_cast<size_t>(arrival)];
+  if (r.spec.logprobs < 0) return {};
+  std::vector<glm_sample::Result> lps = engine_->take_logprobs(slot);
+  if (lps.size() != tokens)
+    throw std::runtime_error(
+        "Scheduler: engine reported " + std::to_string(lps.size()) +
+        " logprob entries for " + std::to_string(tokens) +
+        " tokens of request '" + r.spec.id + "'");
+  return lps;
 }
 
 void Scheduler::step_batch(const std::vector<int>& arrivals) {
@@ -254,18 +278,22 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
   for (size_t i = 0; i < arrivals.size(); ++i) {
     const int arrival = arrivals[i];
     const std::vector<int32_t>& tokens = batches[i];
-    for (const int32_t token : tokens) {
+    const std::vector<glm_sample::Result> lps =
+        collect_logprobs(arrival, slots[i], tokens.size());
+    for (size_t t = 0; t < tokens.size(); ++t) {
       // A speculative pass can have advanced farther than the public request
       // survives. EOS/cap/cancel retires the slot and deliberately drops the
       // rest of this request's batch; its extra device state is never seen.
       // Other requests in the same physical pass remain independent and are
       // still published below.
-      if (append_token(arrival, token)) break;
+      if (append_token(arrival, tokens[t], lps.empty() ? nullptr : &lps[t]))
+        break;
     }
   }
 }
 
-bool Scheduler::append_token(int arrival, int32_t token) {
+bool Scheduler::append_token(int arrival, int32_t token,
+                             const glm_sample::Result* logprobs) {
   Request& r = requests_[static_cast<size_t>(arrival)];
   if (token < 0)
     throw std::runtime_error("Scheduler: engine returned token " +
@@ -274,7 +302,11 @@ bool Scheduler::append_token(int arrival, int32_t token) {
   ++r.steps_done;
   r.generated.push_back(static_cast<int64_t>(token));
   ++tokens_generated_;
-  if (observer_) observer_->on_token(r.spec.id, token, r.steps_done);
+  if (observer_) {
+    observer_->on_token(r.spec.id, token, r.steps_done);
+    if (logprobs != nullptr)
+      observer_->on_token_logprobs(r.spec.id, r.steps_done, *logprobs);
+  }
   DGPP_LOG_INFO("sched: request '{}' step {}: token {}", r.spec.id,
                 r.steps_done, token);
   if (is_eos(token)) {

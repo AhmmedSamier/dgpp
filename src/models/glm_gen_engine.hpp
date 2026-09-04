@@ -64,6 +64,9 @@ class GenEngineAdapter : public glm::SchedulerEngine {
   bool supports_sampling() const override {
     return static_cast<bool>(sample_);
   }
+  bool supports_logprobs() const override {
+    return static_cast<bool>(sample_);
+  }
   void configure_sampling(int req, const glm_sample::Params& sampling,
                           uint64_t seed) override {
     glm_sample::validate_params(sampling);
@@ -74,6 +77,21 @@ class GenEngineAdapter : public glm::SchedulerEngine {
     s.params = sampling;
     s.rng = glm_sample::Rng{seed, 0};
     s.context.clear();
+    s.logprobs.clear();
+  }
+  void configure_logprobs(int req, int logprobs) override {
+    if (logprobs >= 0 && !sample_)
+      throw std::logic_error(
+          "generation engine: no sampler bound — no logprobs either");
+    SlotState& s = state_.at(static_cast<size_t>(req));
+    s.report_logprobs = logprobs >= 0;
+    s.logprobs.clear();
+  }
+  std::vector<glm_sample::Result> take_logprobs(int req) override {
+    SlotState& s = state_.at(static_cast<size_t>(req));
+    std::vector<glm_sample::Result> out;
+    out.swap(s.logprobs);
+    return out;
   }
 
   int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
@@ -118,11 +136,23 @@ class GenEngineAdapter : public glm::SchedulerEngine {
     glm_sample::Params params = glm_sample::greedy_params();
     glm_sample::Rng rng;
     std::vector<int32_t> context;  // prompt + generated: the count table
+    std::vector<glm_sample::Result> logprobs;  // the last op's, when asked
+    bool report_logprobs = false;
   };
 
+  // The plain greedy pick serves temperature 0 with neither logprobs nor
+  // penalties (zero cost, the exact op stream every gate pins); anything
+  // else goes through the sampler closure, which handles temperature 0 as
+  // the greedy decision under the raw distribution.
   int32_t decide(SlotState& s, const GlmDiagnosticModel::Outputs& out) {
-    if (s.params.temperature <= 0.0f) return pick_(out);
-    return sample_(out, s.params, s.rng, s.context).token;
+    const bool penalized = s.params.repetition_penalty != 1.0f ||
+                           s.params.frequency_penalty != 0.0f ||
+                           s.params.presence_penalty != 0.0f;
+    if (s.params.temperature <= 0.0f && !s.report_logprobs && !penalized)
+      return pick_(out);
+    const glm_sample::Result r = sample_(out, s.params, s.rng, s.context);
+    if (s.report_logprobs) s.logprobs.push_back(r);
+    return r.token;
   }
 
   GlmDiagnosticModel* model_;
@@ -160,6 +190,19 @@ inline GenEngineAdapter::Sample make_w1_sample(int64_t vocab) {
              -> glm_sample::Result {
     if (out.lm_vocab_begin != 0 || out.lm_vocab_count != vocab)
       throw std::runtime_error("w1 sample: the head is not the full vocab");
+    if (p.temperature <= 0.0f) {
+      // The greedy decision with logprobs or penalties: penalties, the raw
+      // normalizer, the canonical argmax under it.
+      std::vector<float> v(out.logits.begin(), out.logits.begin() + vocab);
+      glm_sample::apply_penalties(v.data(), static_cast<int>(vocab), 0, p,
+                                  glm_sample::count_context(context));
+      const double lse =
+          glm_sample::sharded_scaled_logsumexp(v.data(), layout, 1.0f);
+      const int n = std::max(1, p.logprobs);
+      const std::vector<glm_sample::Candidate> top =
+          glm_sample::local_topk(v.data(), static_cast<int>(vocab), 0, n);
+      return glm_sample::greedy_from_prefix(top, lse, p.logprobs);
+    }
     glm_sample::Result r = glm_sample::sample_full_logits(
         out.logits.data(), static_cast<int>(vocab), layout, p, rng, context);
     if (r.token < 0 || r.token >= vocab)

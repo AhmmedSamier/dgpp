@@ -51,10 +51,16 @@ struct GlmSampleSpec {
   float frequency_penalty = 0.0f;
   float presence_penalty = 0.0f;
   int32_t top_k = 0;
-  int32_t pad = 0;
+  int32_t logprobs = -1;  // -1: none; N >= 0: report the chosen token's
+                          // logprob and its top-N alternatives. A greedy
+                          // request that reports (or carries penalties)
+                          // runs the full path at temperature 1 — the
+                          // argmax under the raw normalizer, no draw.
   uint64_t seed = 0;
   uint64_t counter = 0;
 };
+
+constexpr int kSampleMaxTopLogprobs = 20;
 
 // The sampling verdict's outcome per request, beside the GlmPickVerdict the
 // device consumers (commit, token feeds) keep reading.
@@ -72,6 +78,11 @@ struct GlmSampleOutcome {
   int32_t accepted_draft = 0; // T=2: the draft stood (provisional 0 on a
                               // row-0 fallback)
   double normalizer1 = 0.0;   // row 1's fold log-sum-exp (T=2)
+  // The reported top logprobs per row (spec.logprobs >= 0, rows the device
+  // decided): min(N, the final set) entries, as the host's Result.
+  int32_t top_count[2] = {0, 0};
+  int32_t top_ids[2][kSampleMaxTopLogprobs] = {};
+  float top_logprobs[2][kSampleMaxTopLogprobs] = {};
 };
 
 constexpr int kSampleLseDigits = 11;         // 66 bits carry the fp64 lse

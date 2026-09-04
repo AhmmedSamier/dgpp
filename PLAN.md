@@ -806,9 +806,12 @@ row re-run and re-draft on a fallback). Gates: det_math_test, the bitwise
 simulated-world kernel gates in glm_pick_test (T=1 and the T=2 verify),
 and the two-rank loopback gates of the scalar and batched plain and MTP
 graphs against the eager sampling engine and speculator with forced
-fallbacks. Not wired yet: logprobs on the wire, and the three real-text
-fabric runs — no k is fixed until those land in the measurement record,
-and the MTP acceptance at the card's settings is unmeasured.
+fallbacks. Logprobs are on the wire too (`logprobs`/`top_logprobs`, the legacy
+integer; exact from the same sampler on every engine, a greedy request
+that asks taking the full path at temperature 1 — DESIGN §10). What
+remains is measurement: the three real-text fabric profiles that fix k
+(running 2026-09-04), the four-way md5 at the card's settings with a fixed
+seed, the fallback rate and the MTP acceptance at T=1/0.95 in the record.
 
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's
@@ -853,11 +856,27 @@ cost. Design:
   ~9.2 KB per row, two rows plus the digest group inside the 64 KiB latency
   slot), with the local top-128 as a block-wide composite-key select (the
   DSA decode select's shared-memory machinery, ~10–20 µs once per step).
-  Before fixing k, MEASURE: the instrumented path now logs per position the
-  mass of the global top-k at T=1 for k ∈ {32, 64, 128, 256}; run it on all
-  three teacher texts and feed the fetched rank logs to
-  `scripts/fabric_sampling_profile.py`. The smallest k with a fallback rate
-  at or below ~1% wins.
+  MEASURED 2026-09-04 (the three teacher texts on the four-node fabric,
+  `--sampling-profile --decode-graph`, all ranks identical, logs under
+  `build-ci/fabric-runs/profile_*`): the exact-gather fallback rate at
+  T=1/top_p=0.95 is FAR above the 1% bound at every measured width —
+  quick text (556 positions) 8.5/5.4/3.2/2.2% at k=32/64/128/256, the
+  hard text (7,331 positions, unmemorized prose) 48.8/41.5/33.8/25.0%,
+  the memorized text (6,549) 0.15/0.14/0.08/0.08%; combined 14,436
+  positions 25.2/21.3/17.3/12.8%, top-k mass min 0.15–0.37, p50 ≥ 0.9997.
+  `scripts/fabric_sampling_profile.py` verdict: FAIL — no k meets the
+  bound. The premise "fallback rare at the card's settings" does not hold
+  on natural text: a flat position's 95% nucleus runs into the thousands
+  of ids, beyond any per-rank width one latency slot carries (k=128 per
+  rank is 512 candidates in all). The width stays at the planned 128 per
+  rank (112 at eight rows in the 64 KiB slot) and the fallback is served
+  exactly; its COST per step at these rates is the next measurement (the
+  serving pace at the card's settings vs greedy). The design decision is
+  open: accept ~a fallback per 3–6 steps on hard text (a bulk gather, a
+  host decision and a digest per fallback), add a second, wider tier
+  (thousands of candidates as a bulk-class collective before the full
+  gather), or size the slot for a wider k — none of which this instrument
+  can settle alone.
 - *The fallback is the exact gather* (BUILT 2026-09-04 on the eager path:
   `bus_gather_logits`, 1.24 MB/token as 8-bit digits): the fp32 vocab
   slices to every rank as a bulk-class collective between windows, the host
@@ -880,9 +899,10 @@ cost. Design:
   89% argmax agreement (expect 55–70%); the T=2 step's extra row costs
   ~9–11 ms of 42, so the break-even is ~30% and MTP still pays at the
   recommended settings — to be measured, and reported per setting.
-- `logprobs`/`top_logprobs` ride the same table (exact for the top-k). A
+- `logprobs`/`top_logprobs` ride the same table (exact for the top-k)
+  (BUILT 2026-09-04). A
   request's `seed` is its RNG seed; without one, rank 0 draws it and
-  journals it, so every rank draws identically.
+  journals it, so every rank draws identically (BUILT).
 - *Gates:* (1) unit — the device verdict path vs the host sampler on
   synthetic logits, bitwise per (seed, counter), including the
   inside/outside decision at the boundary; (2) fabric — a run at the

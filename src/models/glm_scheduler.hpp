@@ -147,6 +147,24 @@ class SchedulerEngine {
       throw std::logic_error(
           "SchedulerEngine: this engine samples greedily only");
   }
+  // Logprobs: an engine that reports them returns, after each prefill/step,
+  // one Result per token that op returned (in order) for a slot whose spec
+  // asked (sampling.logprobs >= 0 through configure_sampling with
+  // `logprobs`). The default reports none; the scheduler refuses a request
+  // that asks at submit.
+  virtual bool supports_logprobs() const { return false; }
+  // Arms slot `req` to report logprobs (`logprobs` >= 0: the top-N count,
+  // also carried in the spec's sampling.logprobs) or not (-1). Called right
+  // after configure_sampling, before the prefill pick.
+  virtual void configure_logprobs(int req, int logprobs) {
+    (void)req;
+    if (logprobs >= 0)
+      throw std::logic_error("SchedulerEngine: this engine reports no logprobs");
+  }
+  virtual std::vector<glm_sample::Result> take_logprobs(int req) {
+    (void)req;
+    return {};
+  }
 };
 
 // One request, in arrival (manifest) order. `prompt` ids are validated by
@@ -164,6 +182,11 @@ struct SchedulerRequest {
   // The counter RNG's seed. Rank 0 assigns one when the client omits it and
   // the journal carries it, so every rank draws the same sequence.
   uint64_t seed = 0;
+  // Logprobs on the wire: -1 = none; N >= 0 = report every generated
+  // token's log-probability and its top-N alternatives (sampling.logprobs
+  // carries N to the sampler). Greedy requests report under the raw
+  // distribution.
+  int logprobs = -1;
 };
 
 // The bounded admission queue at capacity (submit() only). A load-shed
@@ -274,8 +297,15 @@ class Scheduler {
   void admit(int arrival);
   void step_batch(const std::vector<int>& arrivals);
   // Appends one token and applies terminal conditions in their canonical
-  // order. Returns true when the request retired.
-  bool append_token(int arrival, int32_t token);
+  // order. Returns true when the request retired. `logprobs` (optional)
+  // rides to the observer with it.
+  bool append_token(int arrival, int32_t token,
+                    const glm_sample::Result* logprobs = nullptr);
+  // The engine's logprobs for the tokens it just returned, when the request
+  // asked; empty otherwise. Throws when the engine returned a different
+  // count than tokens.
+  std::vector<glm_sample::Result> collect_logprobs(int arrival, int slot,
+                                                   size_t tokens);
   // Retire conditions are checked in this order: natural EOS first, then
   // scripted cancellation, then the steps cap — a cancelled request that
   // had already finished naturally reports Done (client intent cannot
@@ -304,6 +334,14 @@ class SchedulerObserver {
   // fires BEFORE the matching retire when the token ends the request.
   virtual void on_token(const std::string& id, int64_t token,
                         int steps_done) = 0;
+  // The token's logprobs, right after its on_token, for requests that
+  // asked (SchedulerRequest::logprobs >= 0). Default: ignored.
+  virtual void on_token_logprobs(const std::string& id, int steps_done,
+                                 const glm_sample::Result& logprobs) {
+    (void)id;
+    (void)steps_done;
+    (void)logprobs;
+  }
   // The request's terminal state, exactly once (EOS, steps cap,
   // scripted or external cancellation all land here).
   virtual void on_retire(const std::string& id,

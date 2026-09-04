@@ -928,3 +928,38 @@ DGPP_TEST(spec_accept_marginal_tracks_the_target_distribution) {
             "the acceptance rate is the draft's probability");
   }
 }
+
+
+// The greedy decision with logprobs: the canonical first candidate (the
+// greedy pick's token) reported under the raw normalizer — exactly what
+// select_from_sorted's greedy branch reports over a complete list — with
+// the top-N alternatives inside the prefix.
+DGPP_TEST(greedy_from_prefix_reports_the_raw_distribution) {
+  using dgpp::glm_sample::greedy_from_prefix;
+  FixtureRng fx;
+  const std::vector<float> logits = make_logits(300, fx, 6.0f);
+  const std::vector<VocabSlice> layout = vocab_layout(300, 2);
+  const std::vector<Candidate> sorted = sort_slice(logits.data(), 300, 0);
+  const double lse = sharded_scaled_logsumexp(logits.data(), layout, 1.0f);
+  Params greedy;
+  greedy.temperature = 0.0f;
+  greedy.logprobs = 5;
+  Rng rng{1, 0};
+  const Result complete = select_from_sorted(sorted, greedy, rng);
+  const std::vector<Candidate> prefix(sorted.begin(), sorted.begin() + 16);
+  const Result got = greedy_from_prefix(prefix, lse, 5);
+  require(got.token == complete.token, "the greedy token");
+  require(got.top_logprobs.size() == 5, "five alternatives");
+  for (size_t i = 0; i < 5; ++i)
+    require(got.top_logprobs[i].first == complete.top_logprobs[i].first,
+            "the alternatives are the canonical prefix");
+  // The raw normalizer: exp(logprob) sums to one over the vocabulary.
+  double mass = 0.0;
+  for (const Candidate& c : sorted)
+    mass += std::exp(static_cast<double>(c.logit) - lse);
+  require(std::abs(mass - 1.0) < 1e-9, "the fold normalizer is the raw one");
+  require(std::abs(static_cast<double>(got.logprob) -
+                   (static_cast<double>(sorted[0].logit) - lse)) < 1e-6,
+          "the token's logprob under the raw distribution");
+  require(rng.counter == 0, "no draw");
+}
