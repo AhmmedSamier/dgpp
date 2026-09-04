@@ -720,7 +720,7 @@ Two phases:
   after the fix — a harness limitation to take up if memcheck of the
   loopback graph tests is wanted end to end.
 
-**6b. Sampling on the bus — IMPLEMENTATION STARTED 2026-09-03**
+**6b. Sampling on the bus — BUILT AND MEASURED 2026-09-04 (the sizing decision for teacher-forced text is open)**
 (deliverable 3's distributed half; DESIGN §10). The configuration slice is
 built: `GlmGenerationDefaults` strictly parses `generation_config.json`, keeps
 missing-vs-present fields explicit, supplies logged greedy-safe/neutral
@@ -808,10 +808,21 @@ and the two-rank loopback gates of the scalar and batched plain and MTP
 graphs against the eager sampling engine and speculator with forced
 fallbacks. Logprobs are on the wire too (`logprobs`/`top_logprobs`, the legacy
 integer; exact from the same sampler on every engine, a greedy request
-that asks taking the full path at temperature 1 — DESIGN §10). What
-remains is measurement: the three real-text fabric profiles that fix k
-(running 2026-09-04), the four-way md5 at the card's settings with a fixed
-seed, the fallback rate and the MTP acceptance at T=1/0.95 in the record.
+that asks taking the full path at temperature 1 — DESIGN §10). The
+measurements are in the record (benchmarks/results/2026-08-29-bus-m5.md,
+the two 2026-09-04 entries): the three teacher-text profiles (no width
+meets the 1% bound on teacher-forced prose: 34% at k=128 on the hard text,
+0.08% on the memorized one), the four-way md5 at the card's settings with
+a fixed seed (identical on every rank in every run; every prompt's
+response identical across two runs, text and logprobs), the pace (33.2
+ms/token at one live request on the plain graph — the greedy record's
+32.0–33.2 — with 0 of 508 sampled steps falling back at k=128 on the
+model's own generations; ~2 ms per replay under MTP), and the MTP
+acceptance under the exact accept test (1.67–1.81 tokens per replay vs
+1.74–1.87 greedy, 25.0–27.6 ms/token vs 33.2 plain — MTP pays at the
+recommended settings). The four gates of this item are met; what stays
+open is the sizing decision for workloads that look like the
+teacher-forced profile rather than like the model's own generations.
 
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's
@@ -977,8 +988,11 @@ positions), which the journal already keeps identical. Admission forecast
 **6e. Batched decode** — subsumed by 6a phase 2.
 
 Decisions taken 2026-09-03 (with the user): tool calls are in scope (6f);
-sampling ships as the on-device exact path with the gather fallback (6b),
-sized for the model card's `temperature=1.0, top_p=0.95`, with defaults
+sampling ships as the on-device exact path with the gather fallback (6b;
+built 2026-09-04, the fabric profile then showed the card's
+`temperature=1.0, top_p=0.95` falls back on 17–34% of natural-text
+positions at any width one latency slot carries — the sizing decision is
+open in 6b), with defaults
 parsed from `generation_config.json` and overridable on the command line,
 greedy remaining the throughput ceiling; MTP stays configurable
 (`--mtp`) and is the expected first-class serving mode, so the T=1 graph
@@ -1081,8 +1095,9 @@ Deliverables:
    identical gathered table on the device, and a digest carried into the
    next gather catches a divergent rank; commit/discard is a recorded
    predicated kernel behind the verdict (DESIGN §9 "the on-device step").
-   The RNG counter is moot while MTP is greedy-only (M6 6b designs the
-   sampled form).
+   The sampled form is built (M6 6b, 2026-09-04): the T=2 verdict draws
+   twice per step on the device, the accept test and the residual or the
+   row-1 sample, with the draft rollback when a row falls back.
 4. Adaptive draft depth based on measured acceptance and memory pressure.
    MTP stays a configurable mode (`--mtp`) and is expected to be the
    first-class serving mode (decision 2026-09-03). Not built: depth 2
@@ -1113,7 +1128,7 @@ Exit criteria, status:
   31.34 ms/token; the draft layer adds ~7.3 GiB/rank; record entries of
   2026-09-03).
 
-Remaining, ranked: sampling under MTP (6b);
+Remaining, ranked:
 `FabricPicker` refactor so the plain loop's host pick and the graph loop's
 device pick share one driver; the prefill's last-row head through the
 draft (the first draft is eager today); a forced pool-boundary rejection

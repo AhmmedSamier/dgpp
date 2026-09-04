@@ -1851,7 +1851,14 @@ verdict on the device, the draft rollback on a fallback).
 `top_logprobs` 0–20 on chat; the legacy integer on completions) reports
 every generated token's log-probability and top-N alternatives — the
 sampler's own `Result` (the final distribution's `scaled − lse`, exact
-for the top-k). The seam: `SchedulerRequest::logprobs` (−1 none, else N,
+for the top-k). SEMANTICS, stated because they differ from some servers'
+defaults: at temperature > 0 the values are under the request's FINAL
+distribution — after temperature, top-k, min-p and top-p, renormalized —
+so a token that is the whole nucleus reports logprob 0 and one
+alternative; at temperature 0 they are under the raw model distribution.
+The raw-at-temperature form (`scaled − Z`) is one line away on every
+path; the temperature-independent raw form would need the T=1 normalizer
+folded beside the request's, a second lse digit group. The seam: `SchedulerRequest::logprobs` (−1 none, else N,
 also `sampling.logprobs`), `SchedulerEngine::supports_logprobs` /
 `configure_logprobs` / `take_logprobs` (one Result per token an op
 returned), the scheduler's `on_token_logprobs` observer event right after

@@ -323,6 +323,16 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   }
 
   ~GlmGraphEngineAdapter() override {
+    if (sampling_)
+      DGPP_LOG_INFO(
+          "rank {}: graph engine sampling summary — {} sampled decode steps, "
+          "{} served by the exact gather fallback ({:.1f}%), {} candidates "
+          "per rank",
+          rank_, sampled_steps_, fallbacks_,
+          sampled_steps_ ? 100.0 * static_cast<double>(fallbacks_) /
+                               static_cast<double>(sampled_steps_)
+                         : 0.0,
+          candidates_);
     for (cudaGraphExec_t exec : scalar_execs_)
       if (exec != nullptr) cudaGraphExecDestroy(exec);
     if (batch_exec_ != nullptr) cudaGraphExecDestroy(batch_exec_);
@@ -838,6 +848,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     int32_t next = verify.next;
     const bool stochastic = sampled_slot(req);
     const bool full_path = full_path_slot(req);
+    if (stochastic) ++sampled_steps_;
     std::vector<glm_sample::Result>& report =
         pending_logprobs_[static_cast<size_t>(req)];
     if (full_path && !stochastic) {
@@ -1172,6 +1183,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   std::vector<std::vector<glm_sample::Result>> pending_logprobs_;
   GenEngineAdapter::Sample prefill_sample_;
   uint64_t fallbacks_ = 0;
+  uint64_t sampled_steps_ = 0;  // stochastic collects (the fallback rate's base)
   bool mtp_redrafted_ = false;  // this collect re-drafted on the host
   int slots_ = 0;
   int rows_per_request_ = 1;

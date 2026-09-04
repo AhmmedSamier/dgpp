@@ -10,8 +10,12 @@ Current status (2026-09-03): the engine serves. `glm_serve` boots a resident
 TP=4 model on the four-node fabric in 15–25 s (per-rank image cache), answers
 the OpenAI chat/completions contract over HTTP/SSE with rank 0 as the sole
 ingress, and every rank executes an identical op stream by construction. The
-default serving path today is greedy-only and steps one token at a time
-(36.4 ms/token on the four-node service, 2026-09-03). Graph mode is adaptive:
+service samples exactly at the checkpoint's defaults (temperature 1.0 /
+top_p 0.95; the on-device verdict with the exact gather fallback, 2026-09-04)
+at 33.2 ms/token on the plain graph — the greedy pace — and 25–28 ms/token
+under MTP at one live request, with logprobs on the wire; temperature 0 is
+the exact greedy path (36.4 ms/token on the four-node service, 2026-09-03).
+Graph mode is adaptive:
 with `--decode-graph [--mtp]` it lazily records a scalar graph for each
 physical slot plus one fixed request-major batch, then selects scalar below
 four live requests and the row batch at or above four. It supports up to eight
