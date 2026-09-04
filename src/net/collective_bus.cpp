@@ -114,15 +114,13 @@ struct BusRequest {
   int stage_gen = -1;
 
   // Bulk (prefill-class) collective: geometry precomputed at submit.
-  // Stripes are bulk-slot units of the whole buffer; shards are
-  // contiguous stripe ranges per global rank (ceil split); the engine
-  // walks segments of at most bulk_seg_stripes stripes.
+  // Stripes are bulk-slot units of the whole buffer; the engine walks
+  // segments of at most bulk_seg_stripes stripes and splits each
+  // segment's stripes across the ranks (its plan).
   bool is_bulk = false;
   uint32_t bulk_stripes = 0;       // C = ceil(elems / stripe_elems)
   uint32_t bulk_seg_stripes = 0;    // bulk_slots * lanes (pool-bounded)
   uint32_t bulk_seg_count = 0;     // ceil(C / bulk_seg_stripes)
-  uint32_t shard_base[5] = {};     // per global rank (world <= 4 + guard)
-  uint32_t shard_count[5] = {};
 
   int outstanding = 0;  // stripes credited back so far are subtracted
   std::vector<BusStripe> stripes;
@@ -813,26 +811,38 @@ struct CollectiveBus::Impl {
 
       // The segment plan: sub-range table = each rank's owned stripes of
       // this segment (RS stages peers' ranges out; AG broadcasts mine;
-      // RS folds mine; AG lands peers').
+      // RS folds mine; AG lands peers'). Shards are split PER SEGMENT
+      // (2026-09-04): a contiguous ceil split of this segment's stripes
+      // across the ranks, so every rank folds and broadcasts in every
+      // segment. The earlier global-contiguous split put each rank's whole
+      // shard inside one segment of a multi-segment buffer, and the world
+      // serialized — one rank folding per segment while the others'
+      // kernels exited empty (measured: a 16 MiB all-reduce at 42 ms, four
+      // 6.8 ms folds end to end per phase). The per-element fold order is
+      // the canonical ascending-rank chain whoever owns the stripe, so the
+      // result is bitwise the same.
       BusBulkSegPlan plan{};
       plan.total_elems = static_cast<uint32_t>(req.elems);
       plan.stripe_elems = static_cast<uint32_t>(opt.bulk_slot_bytes / 2);
       plan.seg_first = bulk.segment * req.bulk_seg_stripes;
       plan.seg_stripe_count =
           std::min(req.bulk_seg_stripes, req.bulk_stripes - plan.seg_first);
-      for (int r = 0; r < opt.world_size; ++r) {
-        const uint32_t b = std::max(req.shard_base[r], plan.seg_first);
-        const uint32_t e = std::min(req.shard_base[r] + req.shard_count[r],
-                                    plan.seg_first + plan.seg_stripe_count);
-        const uint32_t count = e > b ? e - b : 0;
-        const uint32_t base = count ? b - plan.seg_first : 0;
-        if (r == opt.my_rank) {
-          plan.my_base = base;
-          plan.my_count = count;
-        } else {
-          const size_t p = peer_index(r);
-          plan.out_base[p] = base;
-          plan.out_count[p] = count;
+      {
+        const uint32_t world = static_cast<uint32_t>(opt.world_size);
+        const uint32_t per = plan.seg_stripe_count / world;
+        const uint32_t rem = plan.seg_stripe_count % world;
+        uint32_t base = 0;
+        for (int r = 0; r < opt.world_size; ++r) {
+          const uint32_t count = per + (static_cast<uint32_t>(r) < rem ? 1 : 0);
+          if (r == opt.my_rank) {
+            plan.my_base = base;
+            plan.my_count = count;
+          } else {
+            const size_t p = peer_index(r);
+            plan.out_base[p] = base;
+            plan.out_count[p] = count;
+          }
+          base += count;
         }
       }
 
@@ -3196,9 +3206,9 @@ uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
     }
   }
 
-  // Geometry: the bulk-slot grid, ceil-split shards per rank, segments of
-  // at most bulk_slots x lanes stripes (every posting wave then fits the
-  // pool depths by construction).
+  // Geometry: the bulk-slot grid and segments of at most bulk_slots x
+  // lanes stripes (every posting wave then fits the pool depths by
+  // construction); the shards are split per segment in the engine's plan.
   const size_t stripe_elems = options_.lat_slot_bytes == 0
                                   ? 0
                                   : options_.bulk_slot_bytes / 2;
@@ -3206,16 +3216,6 @@ uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
       (bf16_elems + stripe_elems - 1) / stripe_elems);
   const uint32_t seg_stripes = impl.bulk_seg_stripes();
   const uint32_t seg_count = (C + seg_stripes - 1) / seg_stripes;
-  uint32_t shard_base[5] = {}, shard_count[5] = {};
-  for (int r = 0; r < options_.world_size; ++r) {
-    // Contiguous ceil split: earlier ranks carry the remainder.
-    const uint32_t per = C / static_cast<uint32_t>(options_.world_size);
-    const uint32_t rem =
-        C % static_cast<uint32_t>(options_.world_size);
-    shard_count[r] = per + (static_cast<uint32_t>(r) < rem ? 1 : 0);
-  }
-  for (int r = 1; r < options_.world_size; ++r)
-    shard_base[r] = shard_base[r - 1] + shard_count[r - 1];
 
   auto req = std::make_shared<BusRequest>();
   req->cls = BusMessageClass::kBulk;  // stats/records bucket
@@ -3228,10 +3228,6 @@ uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
   req->bulk_stripes = C;
   req->bulk_seg_stripes = seg_stripes;
   req->bulk_seg_count = seg_count;
-  for (int r = 0; r < options_.world_size; ++r) {
-    req->shard_base[r] = shard_base[r];
-    req->shard_count[r] = shard_count[r];
-  }
   req->submitted = Clock::now();
   {
     std::lock_guard<std::mutex> lock(impl.registry_mu);

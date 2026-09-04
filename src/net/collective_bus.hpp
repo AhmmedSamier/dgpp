@@ -152,10 +152,13 @@ class CollectiveBus {
 
   // Segment-quantized reduce-scatter + allgather over the bulk pool
   // (DESIGN §6.3, the prefill class): for boundaries well above one
-  // latency slot. The buffer stripes on the bulk-slot grid; shards are
-  // contiguous stripe ranges per rank; the bus drives segments of at
-  // most bulk_slots x lanes stripes internally (one kernel launch and one
-  // posting wave per segment, within every pool depth). The RS fold is
+  // latency slot. The buffer stripes on the bulk-slot grid; the bus drives
+  // segments of at most bulk_slots x lanes stripes internally (one kernel
+  // launch and one posting wave per segment, within every pool depth) and
+  // splits EACH SEGMENT's stripes across the ranks (a contiguous ceil
+  // split within the segment), so every rank folds and broadcasts in every
+  // segment — a global split had one rank working per segment of a
+  // multi-segment buffer (2026-09-04). The RS fold is
   // the canonical ascending-rank chain per element — bitwise identical
   // to the latency one-shot, so both paths against one oracle agree
   // exactly. src/dst are device pointers and may alias (staging reads

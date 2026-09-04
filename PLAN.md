@@ -128,9 +128,23 @@ Suggested order for what remains, each item's design in its section:
    floor 0.58 s, the bulk folds 0.26 s (2 MB in 1.4 ms — ~1.5 GB/s), host
    gaps ~0.3 s (the per-MoE-layer router sync); at 2048: the folds 2.9 s
    (16 MB in 16 ms), the GEMV core compute-bound on long segments 3.4 s,
-   the 8-row DSA attention tiles 0.9 s. Next, in order: the bulk fold's
-   throughput; device-side segmentation to drop the per-layer sync; a
-   grouped tensor-core GEMM for long segments; wider DSA prefill tiles.
+   the 8-row DSA attention tiles 0.9 s. ROUND 2 (the same evening, the
+   fourteenth entry): `glm_gen_check --bulk-bench` timed the bulk
+   all-reduce by size on the formed world and found the world SERIALIZING
+   on multi-segment buffers — shards were contiguous over the whole
+   buffer, so on a 16 MiB payload each rank's shard sat inside one of the
+   four segments and one rank folded per segment while the others' kernels
+   exited empty (42 ms, four 6.8 ms folds end to end per phase); the shards
+   are now split per segment (bitwise the same chain) — 16 MiB 42 → 22.5
+   ms, 8 MiB 15 → 11, the 2048-token prefill 10.3 → 8.1 s. What remains in
+   the fold is the single-block collective kernel's own data movement
+   (~1.1 GB/s of wire traffic at every size, linear in bytes; 2 MiB still
+   2.6 ms): staging and the fold belong on the copy engines and a
+   multi-block kernel, with the one-block kernel keeping only the claims.
+   Next, in order: device-side segmentation to drop the per-layer sync
+   (the ~0.3 s of host gaps at 256 tokens); the bulk kernel's data
+   movement; a grouped tensor-core GEMM for long segments; wider DSA
+   prefill tiles.
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).

@@ -391,6 +391,14 @@ SchedSizing sched_sizing(const GlmTextConfig& cfg, int world,
 // --admission full|grow, --admission-window N.
 dgpp::glm::AdmissionPolicy g_admission;
 
+// The bulk all-reduce bench (2026-09-04, the prefill fold's cost): the
+// world forms, no model — bf16 all-reduces of 2, 4, .. g_bulk_bench_mb MiB,
+// g_bulk_bench_iters each, timed submit-to-completion; the pool overrides
+// size the experiment. --bulk-bench MIB [--bulk-bench-iters N]
+// [--bulk-slots N] [--bulk-slot-bytes B].
+int g_bulk_bench_mb = 0, g_bulk_bench_iters = 10, g_bulk_slots_override = 0;
+int64_t g_bulk_slot_bytes_override = 0;
+
 // The memory receipt: EXACTLY what the model pre-allocates for this knob
 // combination, by region, plus the per-request reserve math. Runs with or
 // without a GPU (--sched-plan uses it before any device work).
@@ -1265,12 +1273,57 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       dgpp::sampling_gather_scratch_elems(cfg.vocab_size));
   std::unique_ptr<CollectiveBus> bus;
   try {
-    bus = std::make_unique<CollectiveBus>(dgpp::fabric_bus_options(
-        rank, world, port, peer, rendezvous_timeout_ms));
+    auto bus_options = dgpp::fabric_bus_options(rank, world, port, peer,
+                                                rendezvous_timeout_ms);
+    if (g_bulk_slots_override > 0) bus_options.bulk_slots = g_bulk_slots_override;
+    if (g_bulk_slot_bytes_override > 0)
+      bus_options.bulk_slot_bytes = static_cast<size_t>(g_bulk_slot_bytes_override);
+    bus = std::make_unique<CollectiveBus>(bus_options);
     std::string err;
     if (!bus->start(&err))
       throw std::runtime_error("rank " + std::to_string(rank) +
                                " bus start: " + err);
+
+    if (g_bulk_bench_mb > 0) {
+      // The bulk all-reduce bench: the prefill fold's collective, timed by
+      // payload size on the formed world, nothing else running.
+      const size_t max_bytes = static_cast<size_t>(g_bulk_bench_mb) << 20;
+      void* d_buf = nullptr;
+      DGPP_CUDA_OK(cudaMalloc(&d_buf, max_bytes));
+      DGPP_CUDA_OK(cudaMemset(d_buf, 0x3c, max_bytes));  // bf16 1.0-ish
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      DGPP_LOG_INFO("rank {} bulk bench: world {}, pool {} x {} B, {} iters per size",
+                    rank, world, bus_options.bulk_slots, bus_options.bulk_slot_bytes,
+                    g_bulk_bench_iters);
+      for (size_t bytes = size_t{2} << 20; bytes <= max_bytes; bytes <<= 1) {
+        const size_t elems = bytes / 2;
+        std::vector<double> ms;
+        for (int it = 0; it < g_bulk_bench_iters + 2; ++it) {
+          const auto t0 = std::chrono::steady_clock::now();
+          std::string berr;
+          const uint64_t id = bus->allreduce_bulk(d_buf, d_buf, elems, &berr);
+          if (id == 0) throw std::runtime_error("bulk bench: rejected: " + berr);
+          const dgpp::net::BusAllReduceResult res = bus->wait_allreduce(id, 60000);
+          if (!res.ok) throw std::runtime_error("bulk bench: " + res.error);
+          const double t = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - t0)
+                               .count();
+          if (it >= 2) ms.push_back(t);  // two warm-ups
+        }
+        std::sort(ms.begin(), ms.end());
+        const double p50 = ms[ms.size() / 2];
+        // Wire bytes per rank: 2(W-1)/W of the buffer (RS + AG).
+        const double wire_mb = 2.0 * (world - 1) / world * bytes / 1048576.0;
+        DGPP_LOG_INFO(
+            "rank {} bulk bench: {:>5} MiB  min {:7.2f} ms  p50 {:7.2f} ms  max "
+            "{:7.2f} ms  ({:.2f} GB/s of wire traffic at p50)",
+            rank, bytes >> 20, ms.front(), p50, ms.back(),
+            wire_mb / 1024.0 / (p50 / 1000.0));
+      }
+      cudaFree(d_buf);
+      bus->stop();
+      return 0;
+    }
 
     dgpp::GlmBusBoundaryReducer reducer(*bus);
     dgpp::prepare_serving_process(rank);
@@ -1623,6 +1676,9 @@ int main(int argc, char** argv) {
       "   (--mtp: the eager sampled speculator; not with --mtp\n"
       "    --decode-graph, --teacher-file or --engine reforward)\n"
       "scheduler mode (--requests): [--max-concurrency N] [--kv-capacity N]\n"
+      "  [--bulk-bench MIB [--bulk-bench-iters N] [--bulk-slots N]\n"
+      "   [--bulk-slot-bytes B]]  (the fabric's bulk all-reduce timed by size;\n"
+      "   the world forms, no model loads)\n"
       "  [--sched-plan]\n"
       "  [--admission full|grow] [--admission-window N (256)]  (M6 6d)\n";
 
@@ -1632,6 +1688,7 @@ int main(int argc, char** argv) {
   int world = 1, rank = 0, steps = 8, rendezvous_timeout_ms = 120000;
   int max_concurrency = 0, kv_capacity = 0;
   bool sched_plan = false, step_timing = false;
+
   uint16_t port = 29970;
   bool resident = true, incremental = true, no_eos = false;
   bool decode_graph = false;
@@ -1696,6 +1753,10 @@ int main(int argc, char** argv) {
       }
     }
     else if (a == "--rendezvous-timeout-ms") rendezvous_timeout_ms = std::stoi(next());
+    else if (a == "--bulk-bench") g_bulk_bench_mb = std::stoi(next());
+    else if (a == "--bulk-bench-iters") g_bulk_bench_iters = std::stoi(next());
+    else if (a == "--bulk-slots") g_bulk_slots_override = std::stoi(next());
+    else if (a == "--bulk-slot-bytes") g_bulk_slot_bytes_override = std::stoll(next());
     else if (a == "--out") out_prefix = next();
     else if (a == "--sample") sample = true;
     else if (a == "--temperature") { temperature = std::stof(next()); sample = true; }
