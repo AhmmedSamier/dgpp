@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop (6c) and grow-on-demand admission (6d) remain |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission (6d) remains |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -99,8 +99,9 @@ Records live in `benchmarks/results/`; the M5/M6/M8 trail is
 
 Suggested order for what remains, each item's design in its section:
 
-1. M6: drain-on-stop, grow-on-demand admission (sampling on the bus and
-   tool calls / `reasoning_content` landed 2026-09-04); the prefill behind
+1. M6: grow-on-demand admission (sampling on the bus, tool calls /
+   `reasoning_content`, constrained decoding, `response_format`, typed
+   arguments and drain-on-stop landed 2026-09-04); the prefill behind
    the time to first token
    (~30 ms per prompt token — first re-measure it: phase 2's m ≤ 8 GEMV
    routing changed the path of 5–8-row prefill chunks and per-expert
@@ -1228,15 +1229,38 @@ the two constrained loopbacks with the fixture's tools typed; ctest
 call (OpenAI's strict mode guarantees them; the automaton has the used
 keys, the enforcement is a small follow-on).
 
-**6c. Drain-on-stop.** SIGINT during a collective tears the bus down
-under the in-flight collective (the peers eat transport-retry-exceeded).
-The stop record must be sent only at a tick boundary: `stop()` sets a
-flag the engine thread reads at fixed tick top, answers every active
-stream with an error event (`finish_reason` absent, an `error` object),
-retires the requests, broadcasts the stop record, then tears down. A stop
-arriving mid-prefill waits for the prefill (bounded by the longest chunk:
-~1.3 s warm; the cold first-touch case is a startup-only phenomenon since
-the image cache).
+**6c. Drain-on-stop — BUILT 2026-09-04.** The debt: in-flight requests
+died with the world (their cancels were queued by `begin_shutdown()` but
+never applied — the engine loop had already exited), clients of
+interrupted streams got the "overloaded" error, and the HTTP server was
+stopped on a fixed 200 ms timer that a final pass longer than that (any
+prefill) beat, cutting clients off with nothing. Built, in `glm_serve` and
+`GenerationService`: the signal sets a flag the engine loop reads at the
+pass boundary (a stop that lands mid-prefill waits the pass out — no
+collective is ever in flight at the drain); `begin_shutdown()` closes the
+door (new requests answer 503 `server_shutdown`), sheds the not-yet-admitted
+queue the same way, and flags every live request; ONE more `engine_pass()`
+carries the cancels through the journal so every rank's cancel sweep
+retires them at the same quantum with no engine op; then the stop record
+releases the peers. The HTTP pump answers every interrupted stream with
+the tokens it did produce, the `server_shutdown` error event and `[DONE]`
+(no finish chunk), and every interrupted one-shot with a 503; the stop
+watcher keeps the server up until `drained()` says every answer is out
+(bounded by a 3 s grace for a client that never reads); the interruptions
+count as cancellations in `/v1/metrics`. A PEER never leaves on its own
+signal: it follows the journal to rank 0's stop record (a warning says so;
+a second signal forces the exit), so neither side ever tears the bus down
+under the other's collective. Gates: `glm_serve_test`'s
+`serve_shutdown_drainsInFlightWorkWithTheShutdownError` (a stream
+mid-generation ends with the error event after its tokens and no finish
+chunk; a queued one-shot is shed 503 `server_shutdown`; a late request is
+refused; the metrics count one cancellation and two sheds; `drained()`
+false while work is live, true after), `glm_fabric_serve_test`'s
+`test_drain_on_stop` (the in-flight stream retired as cancelled on rank 0
+and on every peer at the same quantum, the op streams identical, the peers
+released with no errors; the rigs now stop in the app's order and can slow
+the engine to a human pace); `scripts/serve_stop_check.sh` on the four
+nodes (the record's tenth 2026-09-04 entry).
 
 **6d. Grow-on-demand admission.** Full-reserve over-reserves when a
 request EOSes early. Evolution: reserve `blocks_for(prompt + min(max_steps,

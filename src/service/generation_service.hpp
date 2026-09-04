@@ -179,9 +179,21 @@ class GenerationService : public HttpHandler,
   }
 
   // Stops accepting: every pending record is answered 503 and the
-  // queues drained. Called by the app on shutdown (before stopping the
-  // HTTP server, so the answers can actually flush).
-  void begin_shutdown();
+  // Drain-on-stop (M6 6c). begin_shutdown() — engine thread, at a pass
+  // boundary — marks the service closed (new requests answer 503
+  // server_shutdown), sheds the not-yet-admitted queue the same way, and
+  // flags every live request for cancellation; the caller then runs ONE
+  // more engine_pass(): the cancels ride the journal and the tick's cancel
+  // sweep retires them on every rank at the same quantum, with no engine
+  // op (so the bus never comes down under a collective). The interrupted
+  // streams get the shutdown error event and [DONE], one-shots a 503 —
+  // pumped by the HTTP thread, which the app keeps alive until drained()
+  // says every answer is out. Returns the number of live requests
+  // interrupted.
+  int begin_shutdown();
+  // Every record is answered (or its client is gone) and nothing is
+  // pending: the HTTP server may stop without cutting a client off.
+  bool drained() const;
 
   struct Stats {
     uint64_t requests_total = 0;
@@ -224,6 +236,8 @@ class GenerationService : public HttpHandler,
     bool first_chunk_sent = false;
     bool done = false;         // retired or rejected — ready to finish
     bool reject_overloaded = false;
+    bool shutting_down = false;  // interrupted or shed by the stop (M6 6c):
+                                 // answered with the server_shutdown error
     bool writer_dead = false;  // on_disconnect fired; never touch it
     bool cancel_armed = false; // disconnect seen; cancel enqueued
     dgpp::glm::Scheduler::Result::Reason reason =

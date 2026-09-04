@@ -437,6 +437,7 @@ struct ServiceRig {
   std::thread http_loop;
   std::thread engine_loop;
   std::atomic<bool> gate{false};   // pause the engine thread (tests)
+  std::atomic<int> pass_delay_ms{0};  // slow the engine to a human pace (tests)
   std::atomic<bool> stopping{false};
 
   // `sampling_defaults`: the served defaults (greedy unless a test hands
@@ -475,8 +476,28 @@ struct ServiceRig {
         }
         if (!service.engine_pass())
           std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        else if (pass_delay_ms.load() > 0)
+          std::this_thread::sleep_for(std::chrono::milliseconds(pass_delay_ms.load()));
       }
     });
+  }
+  // The app's drain-on-stop (M6 6c), minus the journal: the engine thread
+  // stops at a pass boundary, begin_shutdown() flags the live requests and
+  // sheds the queue, one more pass retires them, and the HTTP pump answers
+  // everything before the server stops.
+  int drain(bool stop_http) {
+    stopping = true;
+    gate = false;
+    if (engine_loop.joinable()) engine_loop.join();
+    const int interrupted = service.begin_shutdown();
+    service.engine_pass();
+    for (int i = 0; i < 200 && !service.drained(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    if (stop_http) {
+      http.stop();
+      if (http_loop.joinable()) http_loop.join();
+    }
+    return interrupted;
   }
   ~ServiceRig() {
     stopping = true;
@@ -1521,6 +1542,72 @@ DGPP_TEST(serve_responseFormat_armsTheJsonGrammar) {
                 "\"response_format\":{\"json_object\":false,\"json_schema\":false}") !=
                 std::string::npos,
             "models report the absence");
+  }
+}
+
+DGPP_TEST(serve_shutdown_drainsInFlightWorkWithTheShutdownError) {
+  // Drain-on-stop (M6 6c): a stream mid-generation is retired by the drain
+  // pass and answered with the server_shutdown error event and [DONE]
+  // after the tokens it produced (no finish chunk); a request still in
+  // the admission queue is shed with a 503 server_shutdown; a request
+  // arriving after the door closed gets the same 503; the metrics count
+  // the interruption as a cancellation; drained() turns true only once
+  // every answer is out.
+  ServiceRig rig(/*queue_limit=*/8);
+  rig.engine.script(5, script_of(rig, std::string(300, 'x')));
+  rig.pass_delay_ms = 2;  // ~2 ms per token: the pump sees it mid-generation
+  // A stream: let it produce a few chunks, then hold the engine between
+  // passes — the request is live in the scheduler, mid-generation.
+  Client stream(rig.port());
+  {
+    const std::string body = chat_body("abcd", 300, ",\"stream\":true");
+    stream.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+                    "Content-Type: application/json\r\nContent-Length: " +
+                    std::to_string(body.size()) + "\r\n\r\n" + body);
+  }
+  std::string head = stream.read_until("\"content\":\"x", 3000);
+  require(head.find("\"content\":\"x") != std::string::npos,
+          "the stream produced content before the stop: " + head.substr(0, 300));
+  rig.gate = true;
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  // A one-shot that lands in the admission queue while the engine is held.
+  Client queued(rig.port());
+  {
+    const std::string body = chat_body("efgh", 8);
+    queued.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+                    "Content-Type: application/json\r\nContent-Length: " +
+                    std::to_string(body.size()) + "\r\n\r\n" + body);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  require(!rig.service.drained(), "not drained while work is live");
+  const int interrupted = rig.drain(/*stop_http=*/false);
+  require(interrupted == 1, "one live request interrupted, got " + std::to_string(interrupted));
+  const std::string tail = head + stream.read_until("[DONE]", 3000);
+  require(tail.find("\"code\":\"server_shutdown\"") != std::string::npos &&
+              tail.find("this response is incomplete") != std::string::npos &&
+              tail.find("data: [DONE]") != std::string::npos,
+          "the interrupted stream ends with the shutdown error event: " + tail.substr(tail.size() > 600 ? tail.size() - 600 : 0));
+  require(tail.find("\"finish_reason\":\"stop\"") == std::string::npos &&
+              tail.find("\"finish_reason\":\"length\"") == std::string::npos,
+          "no finish chunk on an interrupted stream");
+  const std::string shed = queued.read_until("}}", 3000);
+  require(shed.find("503 ") != std::string::npos &&
+              shed.find("\"code\":\"server_shutdown\"") != std::string::npos &&
+              shed.find("retry on another instance") != std::string::npos,
+          "the queued one-shot is shed with 503 server_shutdown: " + shed.substr(0, 400));
+  // The door is closed: a new request gets the same 503.
+  const std::string late = post_chat(rig, chat_body("ijkl", 4));
+  require(late.find("503 ") != std::string::npos &&
+              late.find("\"code\":\"server_shutdown\"") != std::string::npos,
+          "a request after the stop is refused: " + late.substr(0, 300));
+  require(rig.service.drained(), "drained once every answer is out");
+  {
+    Client m(rig.port());
+    m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string metrics = m.read_until("requests_cancelled", 2000);
+    require(metrics.find("\"requests_cancelled\":1") != std::string::npos &&
+                metrics.find("\"requests_shed\":2") != std::string::npos,
+            "metrics: one interruption, two sheds: " + metrics.substr(0, 400));
   }
 }
 

@@ -1442,6 +1442,7 @@ void GenerationService::enqueue_admission(std::shared_ptr<StreamRecord> record,
         pending_admissions_.size() >=
             static_cast<size_t>(cfg_.queue_limit)) {
       record->reject_overloaded = true;
+      record->shutting_down = shutdown_;
       stats_.requests_shed++;
       return;
     }
@@ -1744,28 +1745,41 @@ void GenerationService::pump_records() {
 
   for (auto& r : finished) {
     if (r->writer != nullptr && !r->writer_dead) {
-      if (r->reject_overloaded) {
-        // A shed request: one-shot gets the 503 object; a stream that
-        // already began gets the error event + [DONE] (the only shape
-        // an SSE client can see).
+      if (r->reject_overloaded || r->shutting_down) {
+        // A shed request, or one the stop interrupted (M6 6c): the
+        // one-shot gets the 503 object; a stream that already began gets
+        // the error event + [DONE] (the only shape an SSE client can
+        // see) — after the tokens it did produce, which were real.
+        const bool shutdown = r->shutting_down;
         const std::string msg =
-            "the server is overloaded — the admission queue is full; "
-            "retry after backing off";
+            !shutdown ? "the server is overloaded — the admission queue is "
+                        "full; retry after backing off"
+            : r->reject_overloaded
+                ? "the server is shutting down; retry on another instance"
+                : "the server is shutting down — this response is "
+                  "incomplete; retry on another instance";
+        const char* code = shutdown ? "server_shutdown" : "overloaded";
         if (r->stream) {
+          if (shutdown && !r->reject_overloaded) {
+            if (r->chat)
+              flush_chat_stream(*r);
+            else
+              flush_legacy_stream(*r);
+          }
           // Headers were already sent in handle(); an SSE client can
           // only see an error event + [DONE] (OpenAI's stream-error
           // shape), whether or not a role chunk preceded it.
           std::string ev = "{\"error\":{\"message\":";
           append_json_string(&ev, msg);
-          ev.append(",\"type\":\"server_error\",\"param\":null,"
-                    "\"code\":\"overloaded\"}}");
+          ev.append(",\"type\":\"server_error\",\"param\":null,\"code\":\"");
+          ev.append(code);
+          ev.append("\"}}");
           r->writer->write_event(ev);
           r->writer->write_event("[DONE]");
           r->writer->end_stream();
           r->first_chunk_sent = true;
         } else {
-          respond_error(*r->writer, 503, msg, "server_error", "",
-                        "overloaded");
+          respond_error(*r->writer, 503, msg, "server_error", "", code);
         }
       } else if (r->stream) {
         // Flush any straggler events, then the terminal sequence. The
@@ -1925,21 +1939,36 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
   }
 }
 
-void GenerationService::begin_shutdown() {
+int GenerationService::begin_shutdown() {
   std::lock_guard<std::mutex> lock(mutex_);
   shutdown_ = true;
   for (auto& a : pending_admissions_) {
     a.record->reject_overloaded = true;
+    a.record->shutting_down = true;
     stats_.requests_shed++;
   }
   pending_admissions_.clear();
+  int interrupted = 0;
   for (auto& r : records_) {
-    if (!r->done && !r->reject_overloaded) {
-      r->reject_overloaded = true;
-      stats_.requests_shed++;
-      pending_cancels_.push_back(PendingCancel{r->id});
-    }
+    if (r->done || r->reject_overloaded || r->shutting_down) continue;
+    // Live (queued or generating): the next pass's cancel sweep retires
+    // it on every rank before any engine op — exact, since the sweep
+    // precedes the step — and on_retire marks it done; the pump then
+    // answers it with the shutdown error, not a finish.
+    r->shutting_down = true;
+    stats_.requests_cancelled++;
+    pending_cancels_.push_back(PendingCancel{r->id});
+    ++interrupted;
   }
+  return interrupted;
+}
+
+bool GenerationService::drained() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!pending_admissions_.empty() || !pending_cancels_.empty()) return false;
+  for (const auto& r : records_)
+    if (r->writer != nullptr && !r->writer_dead) return false;  // an answer owed
+  return true;
 }
 
 GenerationService::Stats GenerationService::stats() const {

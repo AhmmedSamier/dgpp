@@ -2385,10 +2385,16 @@ artifact hashes are in the 2026-09-03 Phase-2 entries of
 
 ### Design for what remains (PLAN M6 6c/6d, M9)
 
-- *Drain-on-stop:* stop is a flag read at tick top; active streams get an
-  error event, requests retire, the stop record goes out, THEN the bus
-  tears down — never under an in-flight collective (today SIGINT
-  mid-prefill leaves the peers on transport-retry-exceeded).
+- *Drain-on-stop (PLAN 6c):* BUILT 2026-09-04 — the signal is a flag the
+  engine loop reads at the pass boundary; `begin_shutdown()` closes the
+  door, sheds the queue and flags every live request; one more pass
+  carries the cancels through the journal so every rank retires them at
+  the same quantum with no engine op; the stop record goes out; the HTTP
+  pump answers every interrupted stream (its tokens, the `server_shutdown`
+  error event, `[DONE]`) and one-shot (503) before the server stops
+  (`drained()`); a peer follows the journal to the stop record even on its
+  own signal (a second one forces). The bus never comes down under a
+  collective on either side.
 - *Grow-on-demand admission:* reserve to a window, grow at tick top,
   shed the youngest deterministically when growth fails — a pure function
   of (meters, positions), so the journal keeps it identical.

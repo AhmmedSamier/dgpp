@@ -91,7 +91,27 @@ void require(bool cond, const std::string& what) {
 // SIGINT/SIGTERM → the orderly stop (flush, then exit). Installed for
 // every rank: peers poll the flag between journal reads.
 std::atomic<bool> g_stop_requested{false};
-void on_signal(int) { g_stop_requested.store(true); }
+std::atomic<int> g_stop_signals{0};
+void on_signal(int) {
+  g_stop_requested.store(true);
+  g_stop_signals.fetch_add(1);
+}
+
+// A PEER never leaves on its own signal (M6 6c): it follows rank 0's
+// journal to the stop record, which rank 0 sends only after its final
+// pass — so the bus never comes down under a collective on either side.
+// A second signal forces the exit, under whatever is in flight.
+bool peer_should_stop(int rank) {
+  static std::atomic<bool> warned{false};
+  const int n = g_stop_signals.load();
+  if (n == 1 && !warned.exchange(true))
+    DGPP_LOG_WARN(
+        "rank {}: signal — following rank 0's journal to its stop record "
+        "(drain-on-stop); a second signal exits now, under whatever "
+        "collective is in flight",
+        rank);
+  return n >= 2;
+}
 
 void write_ops_file(const std::string& path, const std::string& text) {
   std::FILE* f = std::fopen(path.c_str(), "wb");
@@ -167,42 +187,59 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
   if (oplog) service.set_audit_observer(oplog);
   dgpp::service::HttpServer http(k.http_port, &service, k.max_connections);
 
+  std::atomic<bool> drained{false};  // the engine thread's drain is done
   std::thread engine_loop([&] {
+    const auto pass = [&] {
+      return journal
+                 ? service.engine_pass(
+                       [&](const dgpp::service::GenerationService::PassEvents&
+                               events) {
+                         journal->broadcast(
+                             dgpp::service::encode_journal_tick(events));
+                       })
+                 : service.engine_pass();
+    };
     while (!g_stop_requested.load()) {
-      const bool progressed =
-          journal
-              ? service.engine_pass(
-                    [&](const dgpp::service::GenerationService::PassEvents&
-                            events) {
-                      journal->broadcast(
-                          dgpp::service::encode_journal_tick(events));
-                    })
-              : service.engine_pass();
-      if (!progressed)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      if (!pass()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    // Answers pending requests (503), cancels in-flight ones; the
-    // HTTP thread's idle() drains the answers before the server
-    // stops (the stop watcher below gives it one extra grace pass).
-    service.begin_shutdown();
-    if (journal) {
-      // In-flight requests die with the world (drain-on-stop is a
-      // later refinement, noted in the record); the peers mirror
-      // everything rank 0 already drained, and the stop record
-      // releases their read loops.
-      try {
-        journal->broadcast(dgpp::service::encode_journal_stop());
-      } catch (const std::exception& e) {
-        DGPP_LOG_ERROR("serve: stop broadcast failed: {}", e.what());
-      }
+    // Drain-on-stop (M6 6c). This is a pass boundary: no collective is in
+    // flight on any rank (a stop that lands mid-prefill waited the pass
+    // out above). Close the door, shed the queue, flag every live request,
+    // then ONE more pass: the cancels ride the journal and every rank's
+    // cancel sweep retires them at this same quantum with no engine op;
+    // only then the stop record, which releases the peers' read loops.
+    const auto t0 = std::chrono::steady_clock::now();
+    const int interrupted = service.begin_shutdown();
+    try {
+      pass();
+      if (journal) journal->broadcast(dgpp::service::encode_journal_stop());
+    } catch (const std::exception& e) {
+      DGPP_LOG_ERROR("serve: the drain pass or the stop broadcast failed: {}",
+                     e.what());
     }
+    DGPP_LOG_INFO(
+        "serve: stop — {} in-flight request(s) retired through the drain "
+        "pass{}, the queue shed, in {:.0f} ms",
+        interrupted, journal ? " on every rank" : "",
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0)
+            .count());
+    drained.store(true);
   });
   std::thread stop_watcher([&] {
     while (!g_stop_requested.load())
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    // Give the final pump a beat to flush shutdown answers, then
-    // unblock http.serve().
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // The final pass may be a prefill: wait it out, then let the HTTP
+    // thread's pump answer every interrupted stream (the error event and
+    // [DONE]) and shed one-shot (503) before the server stops — bounded,
+    // so a client that never reads cannot hold the process.
+    while (!drained.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    for (int i = 0; i < 150 && !service.drained(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (!service.drained())
+      DGPP_LOG_WARN("serve: stop — answers still owed after the 3 s grace; "
+                    "closing the server");
     http.stop();
   });
 
@@ -567,7 +604,7 @@ int main(int argc, char** argv) {
           if (rank == 0) {
             journal->broadcast(dgpp::service::encode_journal_warm());
           } else if (!dgpp::service::wait_journal_warm(
-                         &*reader, [] { return g_stop_requested.load(); })) {
+                         &*reader, [rank] { return peer_should_stop(rank); })) {
             graph_engine.reset();
             cudaFreeHost(pick_scratch);
             bus->stop();
@@ -605,7 +642,7 @@ int main(int argc, char** argv) {
           sched.set_observer(&oplog);
           DGPP_LOG_INFO("rank {}: following rank 0's journal", rank);
           dgpp::service::run_journal_peer(
-              &sched, &*reader, [] { return g_stop_requested.load(); });
+              &sched, &*reader, [rank] { return peer_should_stop(rank); });
           write_ops_file("serve_rank" + std::to_string(rank) + ".ops",
                          oplog.text());
           engine.reset();

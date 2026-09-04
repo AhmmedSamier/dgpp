@@ -54,9 +54,10 @@ the vocabulary's token texts, the schema's types, keys, enums and bounds
 enforced token by token, the mask proven equal to brute force; the same
 machine types every tool argument by its property schema, and plain
 `tool_choice: auto` arms the grammar, so every call the model writes is
-well-formed. The prefill behind the
-time to first token, drain-on-stop, grow-on-demand admission and the prefix
-cache are open items; `PLAN.md` has the status per milestone and the designs
+well-formed. Stopping the service drains: in-flight requests retire
+through the journal on every rank and their clients get a `server_shutdown`
+error before the bus comes down. The prefill behind the time to first
+token, grow-on-demand admission and the prefix cache are open items; `PLAN.md` has the status per milestone and the designs
 for what remains, `DESIGN.md` the contracts as built.
 
 ## Documentation

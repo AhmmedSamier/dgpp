@@ -441,6 +441,8 @@ struct FabricRig {
   std::thread http_loop;
   std::thread engine_loop;
   std::atomic<bool> stopping{false};
+  std::atomic<bool> gate{false};  // holds the engine between passes (tests)
+  std::atomic<int> pass_delay_ms{0};  // slows the engine to a human pace (tests)
 
   FabricRig()
       : cfg([] {
@@ -464,28 +466,47 @@ struct FabricRig {
     journal.broadcast(dgpp::service::encode_journal_warm());
     http_loop = std::thread([this] { http.serve(); });
     engine_loop = std::thread([this] {
-      while (!stopping.load()) {
-        const bool progressed = service.engine_pass(
+      const auto pass = [this] {
+        return service.engine_pass(
             [this](const GenerationService::PassEvents& events) {
               journal.broadcast(dgpp::service::encode_journal_tick(events));
             });
-        if (!progressed)
+      };
+      while (!stopping.load()) {
+        if (gate.load()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          continue;
+        }
+        if (!pass())
           std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        else if (pass_delay_ms.load() > 0)
+          std::this_thread::sleep_for(std::chrono::milliseconds(pass_delay_ms.load()));
       }
+      // Drain-on-stop (M6 6c), as glm_serve does it: flag the live
+      // requests, one more pass so the cancels ride the journal and every
+      // rank retires them at this quantum, then the stop record.
       service.begin_shutdown();
       try {
+        pass();
         journal.broadcast(dgpp::service::encode_journal_stop());
       } catch (const std::exception& e) {
-        DGPP_LOG_ERROR("rig: stop broadcast failed: {}", e.what());
+        DGPP_LOG_ERROR("rig: the drain pass or the stop broadcast failed: {}",
+                       e.what());
       }
     });
   }
 
+  // The app's stop order: the engine thread drains and broadcasts the
+  // stop record, the HTTP pump answers every interrupted client, THEN the
+  // server stops and the peers are joined.
   void stop() {
     if (stopping.exchange(true)) return;
+    gate.store(false);
+    if (engine_loop.joinable()) engine_loop.join();  // drains, broadcasts stop
+    for (int i = 0; i < 400 && !service.drained(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
     http.stop();
     if (http_loop.joinable()) http_loop.join();
-    if (engine_loop.joinable()) engine_loop.join();  // broadcasts stop
     for (auto& p : peers)
       if (p->thread.joinable()) p->thread.join();
   }
@@ -672,6 +693,65 @@ void test_disconnect_cancel(FabricRig& rig) {
   std::puts("ok 4 - disconnect-cancel crossed the journal on every rank");
 }
 
+// --- scenario 5: drain-on-stop (M6 6c) -----------------------------------
+
+void test_drain_on_stop(FabricRig& rig) {
+  // A stream is mid-generation when the stop lands: the drain pass
+  // cancels it THROUGH THE JOURNAL — rank 0 and every peer retire it as
+  // cancelled at the same quantum, with no engine op — the client's
+  // stream ends with the server_shutdown error event and [DONE] after the
+  // tokens it got (no finish chunk), and the stop record releases the
+  // peers with nothing in flight.
+  rig.pass_delay_ms = 2;  // ~2 ms per token: the pump sees it mid-generation
+  Client c(rig.port());
+  c.send_all(post_request("/v1/chat/completions",
+                          R"({"model":"glm-5.3-flash-fp8","messages":[)"
+                          R"({"role":"user","content":"x"})"
+                          R"(],"max_tokens":300,"stream":true})"));
+  // Wait for a real token, not the role chunk's empty content: only then
+  // is the request admitted and generating (a pending admission would be
+  // shed, not retired, by the drain).
+  const auto has_token = [](const std::string& raw) {
+    size_t at = 0;
+    while ((at = raw.find("\"content\":\"", at)) != std::string::npos) {
+      at += 11;
+      if (at < raw.size() && raw[at] != '"') return true;
+    }
+    return false;
+  };
+  std::string head;
+  for (int i = 0; i < 100 && !has_token(head); ++i)
+    head += c.read_until("\"content\":\"", 50);
+  require(head.find("200") != std::string::npos && has_token(head),
+          "drain: the stream produced a token before the stop: " + head);
+  const size_t id_at = head.find("\"id\":\"");
+  require(id_at != std::string::npos, "drain: no response id");
+  const std::string id =
+      head.substr(id_at + 6, head.find('"', id_at + 6) - (id_at + 6));
+  rig.gate = true;  // hold the engine between passes: live on every rank
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  require(!rig.service.drained(), "drain: not drained while a stream is live");
+  rig.stop();
+  const std::string tail = head + c.read_until("data: [DONE]", 5000);
+  require(tail.find("\"code\":\"server_shutdown\"") != std::string::npos &&
+              tail.find("data: [DONE]") != std::string::npos,
+          "drain: the stream ends with the shutdown error event and [DONE]: " +
+              tail.substr(tail.size() > 500 ? tail.size() - 500 : 0));
+  require(tail.find("\"finish_reason\":\"") == std::string::npos,
+          "drain: no finish chunk on an interrupted stream");
+  // The retirement crossed the journal: reason 3 (kCancelled) on rank 0
+  // and on every peer, identically.
+  const std::string rank0 = rig.oplog.text();
+  require(rank0.find("R " + id + " 3") != std::string::npos,
+          "drain: the interrupted request retired as cancelled on rank 0: " + rank0);
+  rig.require_oplogs_agree("drain");
+  for (size_t i = 0; i < rig.peers.size(); ++i)
+    require(rig.peers[i]->error.empty(),
+            "drain: peer " + std::to_string(i + 1) + " errored: " +
+                rig.peers[i]->error);
+  require(rig.service.drained(), "drain: every answer out");
+}
+
 }  // namespace
 
 int main() {
@@ -683,6 +763,9 @@ int main() {
       test_non_stream_and_identity(rig);
       test_stream_lifecycle(rig);
       test_disconnect_cancel(rig);
+      test_drain_on_stop(rig);
+      std::puts("ok 5 - drain-on-stop: the in-flight stream retired through "
+                "the journal on every rank, answered with server_shutdown");
       // The stop discipline: the stop record releases the peers (a
       // hang here joins forever and the gate times out), and nobody
       // errored on the way down.
@@ -693,7 +776,7 @@ int main() {
                     rig.peers[i]->error);
       rig.require_oplogs_agree("stop");
     }
-    std::puts("ok 5 - stop discipline: peers released, no peer errors");
+    std::puts("ok 6 - stop discipline: peers released, no peer errors");
     std::puts("glm_fabric_serve_test: ALL PASS");
     return 0;
   } catch (const std::exception& e) {
