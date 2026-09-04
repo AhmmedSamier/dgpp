@@ -130,7 +130,9 @@ void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
   gemm_.matmul(normed_, globals_.lm_head, logits_, head_rows, lm_vocab_count_,
                H, DType::BF16, GemmOut::F32, H, gemm_ws_, gemm_ws_bytes_,
                stream_);
-  if (decode_tail_mirrors_)
+  // A memcpy NODE only while the mirrors are on (the kernels-only decode
+  // graph, docs/batched_mtp_graph_stall.md); an eager draft always mirrors.
+  if (decode_tail_mirrors_ || !capture_mode)
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_,
                                  static_cast<size_t>(head_rows) *
                                      lm_vocab_count_ * sizeof(float),

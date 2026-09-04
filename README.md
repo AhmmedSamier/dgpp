@@ -115,12 +115,12 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `nic_regress mesh/pair/serve/selftest` | NIC→GPU visibility regression over every directed node pair on both lanes (rerun after driver/firmware changes) |
 | `glm_tp_check --model ID --world W --rank R --peer HEAD` | fabric TP parity: final hidden/logits/routes/digests bitwise across ranks and against the loopback verdict dumps |
 | `glm_shard_parity` | the sharded loader vs full-load + `GlmTpViews::bind`, bitwise on every bound surface |
-| `glm_gen_check --model ID --chat TEXT [--system S] --steps N [--decode-graph] [--mtp]` | generation on the fabric (or `--text`, `--prompt IDS`): resident TP, distributed greedy pick, EOS stop; `--decode-graph` replays the step as one CUDA graph, `--mtp` adds speculative decode (see below); `--requests FILE` runs a JSONL manifest through the scheduler, `--sched-plan` prints the memory receipt without a GPU, `--teacher-file F` scores a text instead of generating, `--step-timing` prints the per-phase budget |
+| `glm_gen_check --model ID --chat TEXT [--system S] --steps N [--decode-graph] [--mtp]` | generation on the fabric (or `--text`, `--prompt IDS`): resident TP, distributed greedy pick, EOS stop; `--decode-graph` replays the step as one CUDA graph, `--mtp` adds speculative decode (see below); `--requests FILE` runs a JSONL manifest through the scheduler, `--sched-plan` prints the memory receipt without a GPU, `--teacher-file F` scores a text instead of generating, `--sampling-profile` adds the exact top-k-mass sizing probe, and `--step-timing` prints the per-phase budget |
 | `glm_serve --model ID --port P [--world W --rank R --peer HEAD --journal-port J] [--max-concurrency N --kv-capacity T --queue-limit Q] [--decode-graph [--mtp] --graph-batch-min-live N]` | the OpenAI-compatible service: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/v1/metrics`; rank 0 is the HTTP ingress and journals admissions to the peers; graph mode requires the fabric and `max-concurrency * (mtp ? 2 : 1) <= 8`, warm-captures every graph variant at startup (the journal's `warm` record starts it on every rank together), and batches at `--graph-batch-min-live` live requests (default min(4, max-concurrency); must be in [1, max-concurrency]) |
 | `scripts/fabric_run.sh [--stage-file F] [--fetch-logs] [--node-probe] -- APP-ARGS` | launches any app on the four-node fabric with the rendezvous discipline (head first, peers fire-and-forget, verified by pgrep, swept on head death); collects rank-invariant md5s and bus stats |
 | `scripts/serve_run.sh up/down/status` | boots/stops the serving world (`DGPP_SERVE_KNOBS` overrides the engine flags on every rank, e.g. `--max-concurrency 1 ... --decode-graph --mtp`); `down` fetches and md5s every rank's op stream |
 | `scripts/serve_bench.py HOST PORT MAX_TOKENS LABEL [PROMPT]`, `scripts/serve_pace.py RANK_LOG [--waves]` | the service's pace: client-side SSE stamps; server-side per-request pace; and, with `--waves`, the steady peak-occupancy replay latency, tokens/replay, and aggregate tok/s used by the Phase-2 gate |
-| `scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`, `scripts/fabric_xrank.py` | the judges (first divergence by bf16-ulp margin; teacher-forced perplexity delta) and the cross-rank step/stall reader — see "Judging a numerics change" |
+| `scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`, `scripts/fabric_sampling_profile.py`, `scripts/fabric_xrank.py` | the judges (first divergence by bf16-ulp margin; teacher-forced perplexity delta; sampling-width evidence) and the cross-rank step/stall reader — see "Judging a numerics change" |
 
 The GDR probe exits successfully when the probe itself completes, including
 the expected “unsupported” result on GB10. It does not prescribe a bounce
@@ -129,7 +129,7 @@ GPU.
 
 ## Tests
 
-CTest currently runs 32 entries:
+CTest currently runs 33 entries:
 
 - host unit cases covering logging/tracing, JSON, arenas, safetensors,
   FP8, shard plans, the HF cache resolver, the sampler against its
@@ -201,15 +201,22 @@ CTest currently runs 32 entries:
 - Python checkpoint classification, exact expert-occupancy tests, and the
   route-trace traffic-model contract.
 
-`glm_tp_test` and `bus_test` run with `CUDA_DEVICE_MAX_CONNECTIONS=32`: one
-process hosting every rank's streams overflows CUDA's default 8 hardware
-work queues, and a rank's spinning collective kernel then blocks a peer's
-chain sharing its queue (DESIGN §9). Fabric ranks are separate processes
-and never see it.
+`glm_tp_test` and `bus_test` run with `CUDA_DEVICE_MAX_CONNECTIONS=32`; the
+prefetcher stays enabled everywhere. The captured decode graph is
+kernels-only by contract, checked at every capture site
+(`glm_check_decode_graph`): a memset/memcpy node executes on the process-
+shared copy-engine queue, where one rank's queued dependency wait blocked
+the peer rank's node behind it while its own collective spun waiting on
+that peer — the batched-MTP loopback stall, root-caused from an nsys node
+trace and fixed on 2026-09-03 (`docs/batched_mtp_graph_stall.md`; the
+loopback gates now pass with prefetch on at 1 and 32 connections).
 
 All CUDA suites are verified clean under `compute-sanitizer` memcheck (full
 suite every milestone; racecheck and initcheck per-phase on the tests
-exercising new kernel shapes); the sanitizer findings that motivated this
+exercising new kernel shapes; the loopback worlds need
+`DGPP_TEST_BUS_TIMEOUT_MS=120000 DGPP_TEST_CONSUMER_DEADLINE_S=120` under
+memcheck, whose instrumented kernels outlast the 5 s / 20 s release
+budgets); the sanitizer findings that motivated this
 (speculated loads past short-circuit guards, shared-memory reuse races
 that pass by scheduling luck, undersized test buffers that made a graph test
 pass vacuously) are pinned in `DESIGN.md` §12.
@@ -273,10 +280,11 @@ rank.
 ### Judging a numerics change
 
 Kernel work is allowed to change floating-point reduction order when it buys
-latency, so two builds can legitimately produce different bits. Two tools say
-whether a difference is rounding or a bug (both read a run directory through
-`scripts/fabric_logs.py`, the shared parser for the per-rank `[gen]`/`[tf]`
-step lines — start there when writing the next one):
+latency, so two builds can legitimately produce different bits. These evidence
+tools judge numerical changes and size sampling; all read run directories through
+`scripts/fabric_logs.py`, the shared parser for the per-rank
+`[gen]`/`[tf]`/`[sample_mass]` step lines — start there when writing the next
+one:
 
 - `scripts/fabric_xcript.py REF_DIR NEW_DIR` — for ordinary generation runs:
   finds the first token where the transcripts diverge and reports the global
@@ -310,6 +318,27 @@ step lines — start there when writing the next one):
   to move by more than 1 nat between any two rounding-level builds: a
   router's top-k boundary flipped an expert there. The tool bounds the
   *rate* of those, not the worst one.
+
+- `scripts/fabric_sampling_profile.py DIR...` — the M6 sampling-width gate.
+  Make one teacher-forced run per shipped text with `--sampling-profile` and
+  fetched rank logs, then pass all three directories together:
+
+  ```
+  scripts/fabric_run.sh --fetch-logs \
+      --stage-file benchmarks/teacher_text.txt --log-dir /tmp/mass-quick -- \
+      --model unsloth/GLM-5.3-Flash-FP8 --text "Encyclopedia article." \
+      --teacher-file benchmarks/teacher_text.txt --sampling-profile \
+      --decode-graph
+  # Repeat as /tmp/mass-hard and /tmp/mass-memorized with the other texts.
+  python3 scripts/fabric_sampling_profile.py \
+      /tmp/mass-quick /tmp/mass-hard /tmp/mass-memorized
+  ```
+
+  The tool requires identical contiguous measurements on every rank, reports
+  top-{32,64,128,256} mass and exact-gather fallback rate at T=1/top_p=0.95,
+  and chooses the smallest k at or below 1%. The extra diagnostic gather is
+  intentionally outside the production path, so these runs are not throughput
+  measurements.
 
 ### Speculative decode with the MTP layer (`--mtp`)
 

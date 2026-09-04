@@ -86,10 +86,14 @@ longer the regression signal between builds; `scripts/fabric_xcript.py`
 texts shipped) are. MTP must still print `IDENTICAL` against plain — the
 verify rows are bitwise the single-token rows by construction.
 
-CI is 32 CTest entries (`cmake --build build-ci && ctest --test-dir
+CI is 33 CTest entries (`cmake --build build-ci && ctest --test-dir
 build-ci -j4`). `glm_tp_test` and `bus_test` run with
-`CUDA_DEVICE_MAX_CONNECTIONS=32` (DESIGN §9). Records live in
-`benchmarks/results/`; the M5/M6/M8 trail is `2026-08-29-bus-m5.md`.
+`CUDA_DEVICE_MAX_CONNECTIONS=32`; prefetch is enabled everywhere. The
+decode graph is kernels-only by contract (DESIGN §9; the batched-MTP
+loopback stall was a copy-engine head-of-line deadlock between the two
+ranks' memset nodes, fixed 2026-09-03 — `docs/batched_mtp_graph_stall.md`).
+Records live in `benchmarks/results/`; the M5/M6/M8 trail is
+`2026-08-29-bus-m5.md`.
 
 Suggested order for what remains, each item's design in its section:
 
@@ -697,7 +701,22 @@ Two phases:
   cuBLASLt — bitwise different at those shapes and unmeasured; measure
   prefill before the TTFT work starts (below).
 
-**6b. Sampling on the bus** (deliverable 3's distributed half; DESIGN §10).
+**6b. Sampling on the bus — IMPLEMENTATION STARTED 2026-09-03**
+(deliverable 3's distributed half; DESIGN §10). The configuration slice is
+built: `GlmGenerationDefaults` strictly parses `generation_config.json`, keeps
+missing-vs-present fields explicit, supplies logged greedy-safe/neutral
+fallbacks, and validates generation EOS ids against the vocabulary. Both
+generation executables load it beside `config.json`, with its EOS set taking
+precedence and the old config value retained only for fixtures/older
+checkpoints. The width-sizing instrument is also built: `glm_gen_check
+--teacher-file F --sampling-profile` computes the exact full-distribution mass
+of global top-{32,64,128,256} at every T=1 teacher position (one diagnostic
+candidate/LSE gather), and `scripts/fabric_sampling_profile.py` refuses
+incomplete or cross-rank-divergent logs before selecting the smallest width at
+or below the 1% fallback bound. The three real-text fabric runs, request/CLI
+overrides, and distributed production sampler are not wired yet; no k is fixed
+until those runs land in the measurement record.
+
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's
 `generation_config.json`; also `1.0/1.0` and `0.95/1.0` for the agentic
@@ -735,14 +754,15 @@ cost. Design:
   ~0 µs. Outside → a fallback flag in the pinned verdict.
 - *k is sized for T=1.0 / top_p=0.95.* At that setting the cut must reach
   95% of the mass, so k=32 would fall back on every flat position. Plan:
-  k=128 per rank (the exact global top-128; 9 bf16 digits per candidate →
+  candidate k=128 per rank (the exact global top-128; 9 bf16 digits per candidate →
   ~9.2 KB per row, two rows plus the digest group inside the 64 KiB latency
   slot), with the local top-128 as a block-wide composite-key select (the
   DSA decode select's shared-memory machinery, ~10–20 µs once per step).
-  Before fixing k, MEASURE: an instrumented teacher-forced run logs per
-  position the mass of the global top-k at T=1 for k ∈ {32, 64, 128, 256}
-  on the three teacher texts; the smallest k with a fallback rate under
-  ~1% wins.
+  Before fixing k, MEASURE: the instrumented path now logs per position the
+  mass of the global top-k at T=1 for k ∈ {32, 64, 128, 256}; run it on all
+  three teacher texts and feed the fetched rank logs to
+  `scripts/fabric_sampling_profile.py`. The smallest k with a fallback rate
+  at or below ~1% wins.
 - *The fallback is the exact gather:* the fp32 vocab slices to every rank
   as a bulk-class collective between windows (619.5 KB/token), the host
   sampler on every rank with the same `u`. Inside the one-graph MTP step a

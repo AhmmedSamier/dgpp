@@ -10,6 +10,7 @@
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/kernels.hpp"
 #include "kernels/glm_norm.hpp"
+#include "kernels/glm_spec.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "models/glm_step_timing.hpp"
 
@@ -330,18 +331,16 @@ void GlmDiagnosticModel::session_decode_host_prep(
   h_req_spans_[1] = T;
   decode_rows_ = T;
   if (upload) {
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_req_ids_, h_req_ids_, sizeof(int32_t) * T,
-                                 cudaMemcpyHostToDevice, stream_));
+    // Kernel uploads, never memcpy nodes: the captured decode graph must be
+    // kernels-only (docs/batched_mtp_graph_stall.md; glm_upload_i32).
+    glm_upload_i32(h_req_ids_, d_req_ids_, T, stream_);
     if (device_positions) {
       if (d_step_pos_ != nullptr)
         glm_spec_positions(d_session_pos_ + req, T, d_step_pos_, stream_);
     } else {
-      DGPP_CUDA_OK(cudaMemcpyAsync(d_step_pos_, h_step_pos_,
-                                   sizeof(int64_t) * T, cudaMemcpyHostToDevice,
-                                   stream_));
+      glm_upload_i64(h_step_pos_, d_step_pos_, T, stream_);
     }
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_req_spans_, h_req_spans_, 2 * sizeof(int32_t),
-                                 cudaMemcpyHostToDevice, stream_));
+    glm_upload_i32(h_req_spans_, d_req_spans_, 2, stream_);
   }
 }
 
@@ -434,12 +433,9 @@ void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request) {
     for (int r = 0; r < rows_per_request; ++r)
       h_req_ids_[q * rows_per_request + r] = q;
   }
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_req_ids_, h_req_ids_,
-                               sizeof(int32_t) * rows,
-                               cudaMemcpyHostToDevice, stream_));
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_req_spans_, h_req_spans_,
-                               sizeof(int32_t) * 2 * requests,
-                               cudaMemcpyHostToDevice, stream_));
+  // Kernel uploads, never memcpy nodes (docs/batched_mtp_graph_stall.md).
+  glm_upload_i32(h_req_ids_, d_req_ids_, rows, stream_);
+  glm_upload_i32(h_req_spans_, d_req_spans_, 2 * requests, stream_);
   glm_spec_positions_batched(d_session_pos_, d_req_ids_, rows,
                              rows_per_request, d_step_pos_, stream_);
 
@@ -571,12 +567,24 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_graph_outputs(
                            std::to_string(req));
   if (session_pos_[static_cast<size_t>(req)] <= 0)
     throw std::invalid_argument("session_graph_outputs: no open session");
-  if (!decode_tail_mirrors_)
-    throw std::logic_error("session_graph_outputs: the tail mirrors are off "
-                           "(set_decode_tail_mirrors)");
-  // The caller synced the stream and finished the bus window: the
-  // graph's D2H nodes joined, the state advanced in place, the logits
-  // are stable. Materialize exactly as the eager tail does.
+  // The caller synced the stream and finished the bus window: the state
+  // advanced in place and the logits are stable. With the mirrors on, the
+  // graph's D2H nodes joined; with them off (the kernels-only decode
+  // graph, docs/batched_mtp_graph_stall.md — a D2H node rides the
+  // process-shared copy-engine queue and deadlocked the world-4 loopback
+  // at one hardware connection, 10/10), mirror the tail NOW: an eager copy
+  // issued after the replay's sync depends on nothing in flight.
+  if (!decode_tail_mirrors_) {
+    const size_t rows = static_cast<size_t>(decode_rows_);
+    const size_t H = static_cast<size_t>(cfg_.hidden_size);
+    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_,
+                                 rows * lm_vocab_count_ * sizeof(float),
+                                 cudaMemcpyDeviceToHost, stream_));
+    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_hidden_, normed_, rows * H * 2,
+                                 cudaMemcpyDeviceToHost, stream_));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  }
+  // Materialize exactly as the eager tail does.
   return session_decode_tail(decode_rows_);
 }
 
@@ -642,16 +650,20 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
                          H))
     throw std::runtime_error("session: lm head GEMM plan unavailable");
 
-  // The decode rows' token id rides the PINNED member (a memcpy node's
-  // baked source; a pageable async copy would stream-sync anyway).
-  // Prefill keeps the caller's vector (its syncs amortize over chunks). A
-  // device-token capture records no upload: the previous replay's last
+  // The decode rows' token ids ride the PINNED, device-mapped member
+  // through a kernel upload — never a memcpy node in a captured graph
+  // (docs/batched_mtp_graph_stall.md). Prefill keeps the caller's vector
+  // and a plain memcpy (never captured; its syncs amortize over chunks).
+  // A device-token capture records no upload: the previous replay's last
   // node (glm_spec_next_tokens) left the fed tokens in d_tokens_.
-  const int64_t* ids_src = decode_row ? h_token_ : ids.data();
-  if (!(capture_mode && graph_device_tokens_))
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, ids_src,
-                                 static_cast<size_t>(T) * 8,
-                                 cudaMemcpyHostToDevice, stream_));
+  if (!(capture_mode && graph_device_tokens_)) {
+    if (decode_row)
+      glm_upload_i64(h_token_, d_tokens_, T, stream_);
+    else
+      DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, ids.data(),
+                                   static_cast<size_t>(T) * 8,
+                                   cudaMemcpyHostToDevice, stream_));
+  }
   // The step's first node: when did the GPU actually start this replay?
   // (The bus logs arm -> first collective; this splits it at the graph's
   // own start.) One 1-thread kernel; decode rows only.
@@ -894,11 +906,15 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // forked stream joined, and the eager tail's sync below should cover
   // the prefetches too (they read weights, nothing else).
   if (decode_row) prefetch_.join(stream_);
-  // The decode tail's rows ride D2H into pinned mirrors (graph nodes when
-  // capturing) so the host never touches the managed activations — see
-  // h_tail_logits_'s comment for the 9 ms stall that bought this. A
-  // device-pick consumer turns the decode rows' copies off.
-  if (!decode_row || decode_tail_mirrors_) {
+  // The decode tail's rows ride D2H into pinned mirrors so the host never
+  // touches the managed activations — see h_tail_logits_'s comment for the
+  // 9 ms stall that bought this. Under CAPTURE the copies would be memcpy
+  // nodes, which the decode graph must not carry (the process-shared
+  // copy-engine queue, docs/batched_mtp_graph_stall.md): a capture records
+  // them only while the mirrors are on, and a device-pick consumer turns
+  // them off (session_graph_outputs then copies eagerly after a replay).
+  // An eager step always mirrors — it syncs right below.
+  if (!decode_row || decode_tail_mirrors_ || !capture_mode) {
     // Decode rows: all T rows (T <= kDecodeRows). Prefill chunks: the
     // LAST row only, into mirror row 0 (a prompt-sized logits matrix is
     // 100s of MB; greedy needs one row).

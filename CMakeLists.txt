@@ -201,6 +201,14 @@ dgpp_set_common(glm_stream_check)
                                                 Threads::Threads)
   dgpp_set_common(bus_small_repro)
 
+  # The in-process two-rank graph scheduling model that root-caused the
+  # batched-MTP loopback stall (docs/batched_mtp_graph_stall.md): kernels-only
+  # graphs never deadlock; one memset node per collective does at
+  # CUDA_DEVICE_MAX_CONNECTIONS=1. Diagnostic, not a test.
+  add_executable(graph_queue_repro apps/graph_queue_repro.cu)
+  target_link_libraries(graph_queue_repro PRIVATE CUDA::cudart Threads::Threads)
+  dgpp_set_common(graph_queue_repro)
+
 # M4 deliverables 1+5 deployment run: the curated reference suite over the
 # real checkpoint (dumps from tools/glm_reference_dump.py gen-torch) and
 # DGPPTC1 route-trace capture for the traffic model.
@@ -254,12 +262,14 @@ if(DGPP_ENABLE_IBV)
   dgpp_set_common(glm_tp_test)
   add_test(NAME glm_tp_test COMMAND glm_tp_test)
   # One process hosts every rank's streams (main, prefetch side streams, the
-  # bus engines' streams); with the default 8 hardware work queues, two
-  # ranks' streams share a queue and a spinning collective kernel of one
-  # rank FIFO-blocks the other rank's chain kernels behind it — a deadlock
-  # the watchdog breaks after 5 s (the in-process graph era stalled 3 of 4
-  # runs at the first prefetch-heavy layer). Each fabric rank is its own
-  # process and never shares; the loopback worlds get more queues instead.
+  # bus engines' streams). The decode graph is kernels-only by contract
+  # (glm_check_decode_graph at every capture site): a memset/memcpy node rides
+  # the process-shared copy-engine queue, where a peer rank's queued
+  # dependency wait blocked this rank's node behind it while the peer's
+  # collective spun waiting on ours (docs/batched_mtp_graph_stall.md, fixed
+  # 2026-09-03). With that contract the loopback world runs with prefetch on
+  # at any connection count (gated at 1 and 32); 32 keeps the streams from
+  # sharing queues for the eager collectives' sake.
   set_tests_properties(glm_tp_test PROPERTIES SKIP_RETURN_CODE 2
                        ENVIRONMENT "CUDA_DEVICE_MAX_CONNECTIONS=32")
 
@@ -383,6 +393,9 @@ add_test(NAME checkpoint_audit_test
 add_test(NAME route_trace_test
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/route_trace_test.py)
+add_test(NAME sampling_profile_test
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/sampling_profile_test.py)
 
 # KDA operator tests (CUDA); skip without a device as above. The dump-parity
 # runner is a host-only TU (minijson + nvcc don't mix).

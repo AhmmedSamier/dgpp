@@ -337,7 +337,13 @@ class GlmDiagnosticModel {
   //         the bus finish: the host mirror advances by `accepted`. No
   //         collect, no rollback — the device did both.
   //   set_decode_tail_mirrors(false) — drops the tail's logits/hidden D2H
-  //         nodes (a device-pick consumer reads neither); default on.
+  //         nodes from CAPTURES; default on. REQUIRED for a captured decode
+  //         graph: a memcpy node rides the process-shared copy-engine
+  //         queue, the in-process multi-rank deadlock of
+  //         docs/batched_mtp_graph_stall.md (glm_check_decode_graph refuses
+  //         the capture). Eager steps mirror regardless (they sync), and a
+  //         host consumer still gets a replay's tail: session_graph_outputs
+  //         copies it eagerly after the replay when the mirrors are off.
   //   session_graph_capture_draft(req, verify_verdict) — the draft block
   //         IN the graph (phase C), behind the commit: glm_spec_draft_rows
   //         turns the verify's verdict into the block's T rows (accepted

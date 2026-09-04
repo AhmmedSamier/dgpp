@@ -199,21 +199,37 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
 
   // The decode path's H2D upload sources, PINNED at construction
   // (pageable async copies stream-sync before initiating — a per-step
-  // pipeline drain the decode path refuses; and the graph era's memcpy
-  // nodes require page-locked sources). Addresses are stable for the
-  // model's lifetime — the graph bakes them.
+  // pipeline drain the decode path refuses). Addresses are stable for the
+  // model's lifetime — the graph bakes them. All four are DEVICE-MAPPED:
+  // the graph uploads them with kernels that read the pinned buffers
+  // directly (glm_upload_i32/i64), never memcpy nodes — a memcpy node
+  // rides the process-shared copy-engine queue, the batched-MTP graph
+  // stall (docs/batched_mtp_graph_stall.md). Under UVA the host pointer
+  // IS the device pointer; the check below pins that.
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_req_ids_),
                              sizeof(int32_t) * kDecodeRows,
-                             cudaHostAllocDefault));
+                             cudaHostAllocMapped));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_step_pos_),
                              sizeof(int64_t) * kDecodeRows,
-                             cudaHostAllocDefault));
+                             cudaHostAllocMapped));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_req_spans_),
                              sizeof(int32_t) * 2 * kDecodeRows,
-                             cudaHostAllocDefault));
+                             cudaHostAllocMapped));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_token_),
                              sizeof(int64_t) * kDecodeRows,
-                             cudaHostAllocDefault));
+                             cudaHostAllocMapped));
+  for (void* host : {static_cast<void*>(h_req_ids_),
+                     static_cast<void*>(h_step_pos_),
+                     static_cast<void*>(h_req_spans_),
+                     static_cast<void*>(h_token_)}) {
+    void* dev = nullptr;
+    DGPP_CUDA_OK(cudaHostGetDevicePointer(&dev, host, 0));
+    if (dev != host)
+      throw std::runtime_error(
+          "decode upload sources: the mapped pinned buffer's device address "
+          "differs from its host address (no UVA?) — the kernel upload "
+          "needs one address");
+  }
   // The device-side session positions (the device-driven graph's source of
   // truth; see push_position) and their pinned upload mirror.
   d_session_pos_ = static_cast<int64_t*>(

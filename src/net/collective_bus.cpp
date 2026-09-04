@@ -1327,7 +1327,10 @@ struct CollectiveBus::Impl {
                  std::to_string(acquire_u64(&c.gen_seq)) + ",r=" +
                  std::to_string(acquire_u64(&c.ready_bits)) + ",d=" +
                  std::to_string(acquire_u64(&c.done_seq)) + ",s=" +
-                 std::to_string(acquire_u32(&c.status));
+                 std::to_string(acquire_u32(&c.status)) + ",e=" +
+                 // kernel ENTRY seen (gt_start stamped): 0 = the node never
+                 // started; distinguishes a scheduling stall from a wedge
+                 std::to_string(acquire_u64(&c.gt_start) != 0 ? 1 : 0);
       }
       std::string lanes;
       for (size_t p = 0; p < peer_ranks.size(); ++p) {

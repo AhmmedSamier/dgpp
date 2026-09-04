@@ -30,6 +30,7 @@
 //   * Chunking: 21 tokens over hidden 256 folds two collectives per
 //     boundary (16-row slot + 5-row tail), exercising the row loop.
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -56,6 +57,7 @@
 #include "models/dsa_geometry.hpp"
 #include "models/glm_fabric_engine.hpp"
 #include "models/glm_forward.hpp"
+#include "models/glm_graph_check.hpp"
 #include "models/glm_route_audit.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_speculative.hpp"
@@ -101,7 +103,8 @@ void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
 }
 
-BusOptions loop_options(int rank, int world, uint16_t port) {
+BusOptions loop_options(int rank, int world, uint16_t port,
+                        size_t lat_slot_bytes = 8192) {
   BusOptions o;
   o.world_size = world;
   o.my_rank = rank;
@@ -110,7 +113,7 @@ BusOptions loop_options(int rank, int world, uint16_t port) {
   o.rendezvous_host = rank == 0 ? "" : "127.0.0.1";
   o.rendezvous_timeout_ms = 20000;
   o.lat_slots = 8;
-  o.lat_slot_bytes = 8192;
+  o.lat_slot_bytes = lat_slot_bytes;
   o.bulk_slots = 8;
   o.bulk_slot_bytes = 262144;
   o.qp_depth = 1024;
@@ -124,18 +127,26 @@ BusOptions loop_options(int rank, int world, uint16_t port) {
     const char* ms = std::getenv("DGPP_TEST_BUS_TIMEOUT_MS");
     return ms ? std::atoi(ms) : 5000;
   }();
-  o.consumer_deadline_s = 20.0;
+  // The kernel-side deadline follows the same rule (compute-sanitizer
+  // memcheck slows every instrumented kernel enough that a peer's prefill
+  // outlasts 20 s of a spinning collective).
+  o.consumer_deadline_s = [] {
+    const char* s = std::getenv("DGPP_TEST_CONSUMER_DEADLINE_S");
+    return s ? std::atof(s) : 20.0;
+  }();
   o.launch_consumers = false;     // per-collective kernels own doorbells
   return o;
 }
 
 // Starts a loopback world of buses (rank 0 listens), or returns empty.
 std::vector<std::unique_ptr<CollectiveBus>> start_world(int world,
-                                                        uint16_t port) {
+                                                        uint16_t port,
+                                                        size_t lat_slot_bytes =
+                                                            8192) {
   std::vector<std::unique_ptr<CollectiveBus>> out;
   for (int r = 0; r < world; ++r)
     out.push_back(std::make_unique<CollectiveBus>(
-        loop_options(r, world, port)));
+        loop_options(r, world, port, lat_slot_bytes)));
   std::vector<std::string> errors(static_cast<size_t>(world));
   std::thread listener([&] {
     if (!out[0]->start(&errors[0]))
@@ -783,6 +794,82 @@ DGPP_TEST(glm_tp_head_shard_parity) {
   for (auto& t : workers) t.join();
   for (int r = 0; r < kWorld; ++r)
     require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+}
+
+// M6 6b's sizing probe over the real collective: local top-256 candidates and
+// fp64 slice normalizers survive the bf16 digit wire exactly, every rank
+// reconstructs the same global table, and its masses match a centralized
+// full-vocabulary oracle. The fixture includes ties across shards so the token
+// id half of canonical ordering is part of the check.
+DGPP_TEST(glm_sampling_profile_mass_gather_matches_centralized_loopback) {
+  constexpr int kWorld = 2;
+  constexpr int kSlice = 300;
+  constexpr uint16_t kPort = 29925;
+  std::vector<float> logits(kWorld * kSlice);
+  for (int id = 0; id < static_cast<int>(logits.size()); ++id) {
+    logits[static_cast<size_t>(id)] =
+        static_cast<float>((id * 37) % 211 - 105) / 16.0f;
+  }
+
+  const double full_lse =
+      dgpp::glm_sample::slice_logsumexp(logits.data(), logits.size());
+  const std::vector<Candidate> full_top = dgpp::glm_sample::local_topk(
+      logits.data(), logits.size(), 0, dgpp::kSamplingProfileMaxK);
+  const std::vector<double> expected =
+      dgpp::glm_sample::topk_probability_masses(
+          full_top, full_lse,
+          std::vector<int>(dgpp::kSamplingProfileTopKs.begin(),
+                           dgpp::kSamplingProfileTopKs.end()));
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses =
+      start_world(kWorld, kPort, 64 * 1024);
+  require(!buses.empty(), "sampling-profile bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::array<double, dgpp::kSamplingProfileTopKs.size()>> got(
+      kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int rank = 0; rank < kWorld; ++rank) {
+    workers.emplace_back([&, rank] {
+      uint16_t* scratch = nullptr;
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      try {
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) *
+                dgpp::sampling_profile_scratch_elems(kWorld),
+            cudaHostAllocDefault));
+        const float* slice = logits.data() + rank * kSlice;
+        const double local_lse =
+            dgpp::glm_sample::slice_logsumexp(slice, kSlice);
+        arrive_once();
+        got[static_cast<size_t>(rank)] = dgpp::bus_sampling_topk_masses(
+            *buses[static_cast<size_t>(rank)], rank, kWorld, slice, kSlice,
+            rank * kSlice, local_lse, scratch, 60000);
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& error) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(rank)] = error.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  for (int rank = 0; rank < kWorld; ++rank)
+    require(errors[static_cast<size_t>(rank)].empty(),
+            "sampling-profile rank " + std::to_string(rank) + ": " +
+                errors[static_cast<size_t>(rank)]);
+  require(got[0] == got[1], "sampling-profile masses differ across ranks");
+  for (size_t i = 0; i < expected.size(); ++i)
+    require(std::abs(got[0][i] - expected[i]) < 2e-14,
+            "sampling-profile mass differs from centralized oracle at k=" +
+                std::to_string(dgpp::kSamplingProfileTopKs[i]));
 }
 
 // ---- M6 d3: end-to-end greedy generation ----------------------------------
@@ -1585,6 +1672,10 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
                                  GlmHeadSharding::VocabSharded, 1,
                                  /*mtp=*/true);
         shard.set_decode_route_traces(false);
+        // Kernels-only graph (glm_check_decode_graph): the tail's D2H mirror
+        // nodes deadlocked this world at one hardware connection (10/10) —
+        // session_graph_outputs copies the tail eagerly after each replay.
+        shard.set_decode_tail_mirrors(false);
         dgpp::GlmDevicePicker picker(bus, r, kWorld);
         dgpp::GlmGraphRecordReducer recorder(bus, shard.stream());
         DGPP_CUDA_OK(cudaMallocManaged(
@@ -1650,6 +1741,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
         require(graph != nullptr, "capture produced no graph");
         require(bus.graph_record_end(&gerr), "graph_record_end: " + gerr);
         shard.set_boundary(eager);
+        dgpp::glm_check_decode_graph(graph, r, "device-pick graph");
         DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr,
                                           nullptr, 0));
         cudaGraphDestroy(graph);
@@ -1862,6 +1954,7 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
         require(graph != nullptr, "capture produced no graph");
         require(bus.graph_record_end(&gerr), "graph_record_end: " + gerr);
         shard.set_boundary(eager_reducer);
+        dgpp::glm_check_decode_graph(graph, r, "full-step graph");
         DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr,
                                           nullptr, 0));
         cudaGraphDestroy(graph);

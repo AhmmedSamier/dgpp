@@ -57,6 +57,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -81,6 +82,7 @@
 #include "models/glm_fabric_engine.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_gen_engine.hpp"
+#include "models/glm_graph_check.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_scheduler.hpp"
 #include "models/glm_speculative.hpp"
@@ -631,16 +633,16 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
 // transcript md5 flips on a 1-ulp tie and says nothing about magnitude;
 // the mean NLL over a fixed text says exactly how far the distribution
 // moved. World 1 logs the same line over the full head.
-void log_teacher_stats(int rank, int step, const GlmDiagnosticModel::Outputs& out,
-                       int64_t target, int32_t argmax) {
+double log_teacher_stats(int rank, int step,
+                         const GlmDiagnosticModel::Outputs& out,
+                         int64_t target, int32_t argmax) {
   const std::vector<float>& slice = out.logits;
+  const double lse =
+      dgpp::glm_sample::slice_logsumexp(slice.data(), out.lm_vocab_count);
   double lmax = -INFINITY;
   for (int i = 0; i < out.lm_vocab_count; ++i)
-    lmax = std::max(lmax, static_cast<double>(slice[static_cast<size_t>(i)]));
-  double sum = 0.0;
-  for (int i = 0; i < out.lm_vocab_count; ++i)
-    sum += std::exp(static_cast<double>(slice[static_cast<size_t>(i)]) - lmax);
-  const double lse = lmax + std::log(sum);
+    lmax = std::max(lmax,
+                    static_cast<double>(slice[static_cast<size_t>(i)]));
   const int64_t local = target - out.lm_vocab_begin;
   const bool in_slice = local >= 0 && local < out.lm_vocab_count;
   DGPP_LOG_INFO("[tf] rank {} step {}: target {} argmax {} lmax {:.4f} lse "
@@ -649,6 +651,83 @@ void log_teacher_stats(int rank, int step, const GlmDiagnosticModel::Outputs& ou
                 in_slice ? std::format("{:.4f}",
                                        slice[static_cast<size_t>(local)])
                          : std::string("nan"));
+  return lse;
+}
+
+// The exact sizing evidence for M6 6b. A point is global (every rank gets
+// the same candidate table), but every rank logs it so the analysis script
+// can make rank consistency part of the measurement rather than an
+// assumption. At top_p=0.95, mass below 0.95 means the candidate prefix
+// cannot contain the nucleus cut and that position must fall back.
+class SamplingMassSummary {
+ public:
+  static constexpr double kTopP = 0.95;
+
+  void add(int rank, int step,
+           const std::array<double, dgpp::kSamplingProfileTopKs.size()>&
+               masses) {
+    DGPP_LOG_INFO(
+        "[sample_mass] rank {} step {}: k32 {:.17f} k64 {:.17f} k128 "
+        "{:.17f} k256 {:.17f}",
+        rank, step, masses[0], masses[1], masses[2], masses[3]);
+    for (size_t i = 0; i < masses.size(); ++i) {
+      require(std::isfinite(masses[i]) && masses[i] >= 0.0 &&
+                  masses[i] <= 1.0 + 1e-9,
+              "sampling profile mass outside [0,1]");
+      if (i > 0)
+        require(masses[i] + 1e-15 >= masses[i - 1],
+                "sampling profile mass is not monotonic");
+      values_[i].push_back(masses[i]);
+    }
+  }
+
+  void report(int rank) const {
+    require(!values_[0].empty(), "sampling profile has no positions");
+    for (size_t i = 0; i < values_.size(); ++i) {
+      std::vector<double> sorted = values_[i];
+      std::sort(sorted.begin(), sorted.end());
+      double sum = 0.0;
+      int fallbacks = 0;
+      for (double mass : sorted) {
+        sum += mass;
+        fallbacks += mass < kTopP;
+      }
+      const auto percentile = [&](double p) {
+        const size_t at = std::min(
+            sorted.size() - 1,
+            static_cast<size_t>(p * static_cast<double>(sorted.size())));
+        return sorted[at];
+      };
+      DGPP_LOG_INFO(
+          "[sample_mass_summary] rank {}: T=1 top_p={:.2f} k={} "
+          "positions={} mass min/mean/p50/p99={:.6f}/{:.6f}/{:.6f}/"
+          "{:.6f} fallback={}/{} ({:.3f}%)",
+          rank, kTopP, dgpp::kSamplingProfileTopKs[i], sorted.size(),
+          sorted.front(), sum / sorted.size(), percentile(0.50),
+          percentile(0.99), fallbacks, sorted.size(),
+          100.0 * static_cast<double>(fallbacks) / sorted.size());
+    }
+  }
+
+ private:
+  std::array<std::vector<double>, dgpp::kSamplingProfileTopKs.size()> values_;
+};
+
+std::array<double, dgpp::kSamplingProfileTopKs.size()>
+local_sampling_topk_masses(const GlmDiagnosticModel::Outputs& out,
+                           double logsumexp) {
+  const std::vector<dgpp::glm_sample::Candidate> top =
+      dgpp::glm_sample::local_topk(
+          out.logits.data(), out.lm_vocab_count, out.lm_vocab_begin,
+          dgpp::kSamplingProfileMaxK);
+  const std::vector<double> masses =
+      dgpp::glm_sample::topk_probability_masses(
+          top, logsumexp,
+          std::vector<int>(dgpp::kSamplingProfileTopKs.begin(),
+                           dgpp::kSamplingProfileTopKs.end()));
+  std::array<double, dgpp::kSamplingProfileTopKs.size()> out_masses{};
+  std::copy(masses.begin(), masses.end(), out_masses.begin());
+  return out_masses;
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +868,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     require(graph != nullptr, "step-graph capture produced no graph");
     require(bus.graph_record_end(&gerr), "graph_record_end: " + gerr);
     model.set_boundary(eager_reducer);
+    dgpp::glm_check_decode_graph(graph, rank, "step graph");
     DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
     cudaGraphDestroy(graph);
     model.session_graph_seed_tokens(0, {next, draft});
@@ -892,6 +972,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         int rank, uint16_t port, const std::string& peer,
         const std::vector<int64_t>& prompt, int steps, bool resident,
         bool incremental, bool no_eos, bool decode_graph, bool mtp,
+        bool sampling_profile,
         const dgpp::GlmTokenizer& tok,
         const std::string& out_prefix, int rendezvous_timeout_ms,
         int64_t kv_capacity, const std::vector<int64_t>& teacher) {
@@ -919,6 +1000,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                    .count();
     DGPP_LOG_INFO("w1 model constructed in {:.1f}s (streaming)", construct_s);
     std::vector<int64_t> generated;
+    SamplingMassSummary mass_summary;
     std::string generated_text;  // decoded via the exact tokenizer
     const auto is_eos = [&](int64_t id) {
       return !no_eos && std::find(cfg.eos_token_ids.begin(),
@@ -941,7 +1023,11 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       // still computed (and logged) as the top-1 hit signal.
       const auto force = [&](int s, const GlmDiagnosticModel::Outputs& o) {
         if (!teaching) return;
-        log_teacher_stats(0, s, o, teacher[static_cast<size_t>(s)], best.id);
+        const double lse =
+            log_teacher_stats(0, s, o, teacher[static_cast<size_t>(s)],
+                              best.id);
+        if (sampling_profile)
+          mass_summary.add(0, s, local_sampling_topk_masses(o, lse));
         best.id = static_cast<int32_t>(teacher[static_cast<size_t>(s)]);
       };
       force(0, out);
@@ -990,6 +1076,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     }
     write_tokens_file(out_prefix + ".tokens.txt", rank, world, prompt,
                       generated);
+    if (sampling_profile) mass_summary.report(rank);
     DGPP_LOG_INFO("w1 generated ids: {}", ids_line(generated));
     DGPP_LOG_INFO("w1 generated text: {}", generated_text);
     return 0;
@@ -1008,8 +1095,13 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
   // dependence entirely; the bus's own cells are pinned for the same
   // reason (the 2026-09-01 hunt's lesson: the decode path's shared
   // buffers do not ride managed memory).
+  const size_t pick_scratch_elems =
+      sampling_profile
+          ? std::max(dgpp::kPickScratchElems(world),
+                     dgpp::sampling_profile_scratch_elems(world))
+          : dgpp::kPickScratchElems(world);
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&pick_scratch),
-                             sizeof(uint16_t) * dgpp::kPickScratchElems(world),
+                             sizeof(uint16_t) * pick_scratch_elems,
                              cudaHostAllocDefault));
   std::unique_ptr<CollectiveBus> bus;
   try {
@@ -1038,6 +1130,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 
     std::vector<int64_t> toks = prompt;
     std::vector<int64_t> generated;
+    SamplingMassSummary mass_summary;
     double forward_ms_total = 0.0;
     const auto is_eos = [&](int64_t id) {
       return !no_eos && std::find(cfg.eos_token_ids.begin(),
@@ -1093,7 +1186,15 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       const auto force = [&](int s, const GlmDiagnosticModel::Outputs& o,
                              int32_t picked) -> int32_t {
         if (!teaching) return picked;
-        log_teacher_stats(rank, s, o, teacher[static_cast<size_t>(s)], picked);
+        const double lse = log_teacher_stats(
+            rank, s, o, teacher[static_cast<size_t>(s)], picked);
+        if (sampling_profile) {
+          mass_summary.add(
+              rank, s,
+              dgpp::bus_sampling_topk_masses(
+                  *bus, rank, world, o.logits.data(), o.lm_vocab_count,
+                  o.lm_vocab_begin, lse, pick_scratch, 60000));
+        }
         return static_cast<int32_t>(teacher[static_cast<size_t>(s)]);
       };
       const auto tp0 = std::chrono::steady_clock::now();
@@ -1144,6 +1245,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         require(bus->graph_record_end(&gerr),
                 "graph_record_end: " + gerr);
         model.set_boundary(eager_reducer);
+        dgpp::glm_check_decode_graph(graph, rank, "decode graph");
         DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr,
                                           nullptr, 0));
         cudaGraphDestroy(graph);
@@ -1269,6 +1371,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
 
     write_tokens_file(out_prefix + ".tokens.txt", rank, world, prompt,
                       generated);
+    if (sampling_profile) mass_summary.report(rank);
     DGPP_LOG_INFO("rank {} generated ids: {}", rank, ids_line(generated));
     DGPP_LOG_INFO("rank {} generated text: {}", rank, generated_text);
     dgpp::step_timing::report(
@@ -1324,6 +1427,8 @@ int main(int argc, char** argv) {
       "  [--teacher-file F  score the text's tokens instead of generating:\n"
       "   per-step [tf] lines for scripts/fabric_logprob.py; steps = its\n"
       "   token count; the file must exist on every rank (--stage-file)]\n"
+      "  [--sampling-profile  with --teacher-file, measure exact global\n"
+      "   top-{32,64,128,256} mass at T=1 for the top_p=0.95 fallback]\n"
       "  [--decode-graph] (fabric decode step as a CUDA graph: record once,\n"
       "   replay per token, eager pick between windows; resident only)\n"
       "  [--step-timing] [--rendezvous-timeout-ms N] [--out PREFIX]\n"
@@ -1340,6 +1445,7 @@ int main(int argc, char** argv) {
   bool resident = true, incremental = true, no_eos = false;
   bool decode_graph = false;
   bool mtp = false;
+  bool sampling_profile = false;
   std::string system_prompt, chat_text, teacher_file;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -1373,6 +1479,7 @@ int main(int argc, char** argv) {
     }
     else if (a == "--no-eos") no_eos = true;
     else if (a == "--teacher-file") teacher_file = next();
+    else if (a == "--sampling-profile") sampling_profile = true;
     else if (a == "--requests") requests_path = next();
     else if (a == "--max-concurrency") max_concurrency = std::stoi(next());
     else if (a == "--kv-capacity") kv_capacity = std::stoll(next());
@@ -1399,6 +1506,15 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR(
         "--mtp is the fabric's speculative single-session decode (world > 1, "
         "incremental engine; no --requests, no --teacher-file)");
+    return 1;
+  }
+  if (sampling_profile && teacher_file.empty()) {
+    DGPP_LOG_ERROR("--sampling-profile requires --teacher-file");
+    return 1;
+  }
+  if (!teacher_file.empty() && (!requests_path.empty() || !incremental)) {
+    DGPP_LOG_ERROR(
+        "--teacher-file needs the incremental engine and no --requests");
     return 1;
   }
   if (decode_graph) {
@@ -1455,8 +1571,16 @@ int main(int argc, char** argv) {
     }
   }
   try {
-    const GlmTextConfig cfg =
+    GlmTextConfig cfg =
         GlmTextConfig::from_json_file((fs::path(ckpt) / "config.json").string());
+    const dgpp::GlmGenerationDefaults generation_defaults =
+        dgpp::GlmGenerationDefaults::from_checkpoint_dir(ckpt,
+                                                         cfg.vocab_size);
+    // The generation file owns EOS for generation programs. config.json's
+    // ids remain the compatibility fallback for synthetic fixtures and old
+    // checkpoints without generation_config.json.
+    if (generation_defaults.eos_token_ids.has_value())
+      cfg.eos_token_ids = *generation_defaults.eos_token_ids;
     if (cfg.vocab_size > (1 << 18)) {
       DGPP_LOG_ERROR(
           "vocab {} exceeds the 6-bit-triplet pick encoding (2^18) — this "
@@ -1565,7 +1689,8 @@ int main(int argc, char** argv) {
                     buf.str().size(), teacher.size(),
                     fnv1a64(buf.str()));
     }
-    return run(cfg, ckpt, world, rank, port, peer, prompt, steps, resident, incremental, no_eos, decode_graph, mtp, tok,
+    return run(cfg, ckpt, world, rank, port, peer, prompt, steps, resident,
+               incremental, no_eos, decode_graph, mtp, sampling_profile, tok,
                out_prefix, rendezvous_timeout_ms, kv_capacity, teacher);
   } catch (const std::exception& e) {
     DGPP_LOG_ERROR("rank {}: {}", rank, e.what());

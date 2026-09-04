@@ -647,9 +647,12 @@ collective nodes per token; the MTP step 94. Capture + instantiate ~38 ms,
 once. Per collective in the step (rank 0, steady): ~35 µs at T=1 (copy
 2.7 + handshake 8–16 + skew ~15 + fold 4–5) and ~48 µs at T=2 (two rows
 copied and folded); the "skew" is the ranks' ~3% compute spread, not the
-transport. In-process worlds (the loopback tests) need
-`CUDA_DEVICE_MAX_CONNECTIONS=32` or a spinning collective kernel FIFO-
-blocks a peer's chain sharing one of the default 8 hardware queues (§9).
+transport. In-process worlds (the loopback tests) need more CUDA connections
+or a spinning collective kernel can FIFO-block a peer's chain sharing a
+hardware queue (§9). The multi-branch MTP graph can still reproduce this
+scheduler deadlock at 32 connections, so `glm_tp_test` also disables the
+pure-performance L2 prefetcher; fabric keeps it enabled because every rank
+has a separate process/context.
 
 One compiler lesson for the record: the shared eager/graph kernel body
 refactor (a mechanical template extraction, pure renames, reference-based
@@ -1487,13 +1490,31 @@ collectives at ~41 µs and ~3.5 ms of small kernels and launch gaps around a
 `glm_tp_full_graph_step_loopback_matches_eager_speculator` (the one-graph
 step in lockstep with an eager `GreedySpeculator` on a second model over
 the same bus: every step's (accepted, next, draft) equal; transcript ==
-plain on every rank). Those tests capture the model's graph in-process at
-world 4, which surfaced a test-environment hazard: one process hosting
-every rank's streams overflows CUDA's default 8 hardware work queues, and
-a rank's spinning collective kernel then FIFO-blocks a peer's chain kernels
-sharing its queue — a deadlock the watchdog breaks after 5 s.
-`glm_tp_test` and `bus_test` run with `CUDA_DEVICE_MAX_CONNECTIONS=32`;
-fabric ranks are separate processes and never see it.
+plain on every rank). Those tests capture the model's graph in-process,
+which surfaced a hazard of the one-process multi-rank world and fixed a
+contract for every world: the captured decode graph is KERNELS-ONLY
+(`glm_check_decode_graph`, called at every capture site). A memset or
+memcpy node executes on the copy-engine queue — one in-order queue shared
+by every stream in the process, where a queued node's dependency wait
+blocks everything behind it. The batched-MTP loopback stall (2026-09-03,
+`docs/batched_mtp_graph_stall.md`) was exactly that: rank B's replay had
+queued its post-collective DSA counter memset (waiting at the queue head
+on B's collective), rank A's pre-collective memset queued behind it, and
+B's collective spun waiting on A's — an nsys node trace shows A's memset
+executing 992 ns after B's, five seconds late, once the watchdog poisoned
+B's kernel; a kernels-only synthetic graph never stalls even at
+`CUDA_DEVICE_MAX_CONNECTIONS=1`, and adding one 4-byte memset node per
+collective stalls it on the first replay there. The decode path's
+non-kernel nodes (the DSA select counter reset; the request-id, span,
+token and step-position uploads; the tail's logits/hidden mirrors, which
+are recorded only while `set_decode_tail_mirrors` is on and copied eagerly
+after a replay otherwise) became kernels or eager copies; the loopback
+gates run with prefetch on at 1 and 32 connections
+(`CUDA_DEVICE_MAX_CONNECTIONS=32` stays for the eager collectives' stream
+spread). A spinning kernel never blocks another
+stream's kernels — the earlier hardware-queue reading was the right
+shape on the wrong queue. Fabric ranks are one process each and never
+share the queue; the contract costs them nothing.
 
 Where the step's time is after the on-device work, and the small-kernel
 round that found the floor, are §7.6. The scalar step is driven by
@@ -1620,6 +1641,25 @@ from it — the HF contract — rather than from the OpenAI wire defaults;
 greedy with a log line, never to a silent value. `/v1/models` reports the
 effective defaults.
 
+The loader half is built (2026-09-03): present fields and EOS ids are parsed
+strictly, missing fields retain explicit presence information and log their
+greedy-safe/neutral fallback, and both generation executables give the
+generation file's EOS set precedence over `config.json`. Applying these
+defaults at the request seam, command-line overrides, and `/v1/models`
+reporting land with the distributed sampler so the service never advertises
+or silently applies a stochastic mode it cannot execute yet.
+
+The k-sizing instrument is built (2026-09-03), separately from the production
+sampler. With `--teacher-file F --sampling-profile`, every rank selects its
+exact local top-256 from the host-visible vocab slice and contributes that
+table plus its fp64 slice log-sum-exp in one diagnostic bus fold. The union
+contains the exact global top-256; every rank logs its full-distribution mass
+at k={32,64,128,256}. `scripts/fabric_sampling_profile.py` requires identical,
+contiguous evidence from every fetched rank and combines the teacher runs to
+choose the smallest measured k at or below a 1% fallback rate. The profiler is
+not the device path and its eager collective is not a throughput measurement;
+the three-text fabric evidence is still owed before k is fixed.
+
 *The device path.* The pick table (§9) generalizes from 2 to k candidates
 per rank and gains a digit group for each rank's slice log-sum-exp; the
 one recorded gather then delivers the exact global top-k (the
@@ -1635,7 +1675,7 @@ lies within them if it lands under the kept mass — and samples exactly
 when it does. Otherwise it flags a fallback in the pinned verdict and
 every rank runs the exact gather (fp32 slices as a bulk collective
 between windows, the host sampler with the same `u`). k is sized so the
-fallback is rare AT T=1/top_p=0.95: the plan is k=128 per rank (~9.2 KB
+fallback is rare AT T=1/top_p=0.95: the candidate is k=128 per rank (~9.2 KB
 per row of table; the local top-128 is a block-wide composite-key select
 in the DSA decode select's style), fixed after measuring the top-k mass
 per position on the teacher texts. Inside the one-graph MTP step a

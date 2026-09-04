@@ -323,8 +323,15 @@ int main(int argc, char** argv) {
     }
 
     const auto t_boot = std::chrono::steady_clock::now();
-    const GlmTextConfig cfg =
+    GlmTextConfig cfg =
         GlmTextConfig::from_json_file((fs::path(ckpt) / "config.json").string());
+    const dgpp::GlmGenerationDefaults generation_defaults =
+        dgpp::GlmGenerationDefaults::from_checkpoint_dir(ckpt,
+                                                         cfg.vocab_size);
+    // generation_config.json is the generation authority. Retain the
+    // config.json value only for old checkpoints/fixtures that omit it.
+    if (generation_defaults.eos_token_ids.has_value())
+      cfg.eos_token_ids = *generation_defaults.eos_token_ids;
 
     // Pool sizing: the shared DSA pool is the admission budget (the
     // same arithmetic as the scheduler receipt), sliced per rank at

@@ -31,6 +31,8 @@ using dgpp::glm_sample::Result;
 using dgpp::glm_sample::sample_reference;
 using dgpp::glm_sample::select_from_sorted;
 using dgpp::glm_sample::sort_slice;
+using dgpp::glm_sample::slice_logsumexp;
+using dgpp::glm_sample::topk_probability_masses;
 using dgpp::glm_sample::uniform01;
 
 void require(bool cond, const std::string& what) {
@@ -329,4 +331,41 @@ DGPP_TEST(empty_candidates_rejected) {
     threw = true;
   }
   require(threw, "empty candidate list must throw");
+}
+
+DGPP_TEST(topk_probability_mass_uses_the_full_distribution_normalizer) {
+  const std::vector<float> logits = {4.0f, 3.0f, 2.0f, 1.0f, -1.0f};
+  const double lse = slice_logsumexp(logits.data(), logits.size());
+  const std::vector<Candidate> sorted =
+      sort_slice(logits.data(), logits.size(), 0);
+  const std::vector<double> masses =
+      topk_probability_masses(sorted, lse, {1, 2, 4, 8});
+  require(masses.size() == 4, "mass count");
+  double den = 0.0;
+  for (float logit : logits) den += std::exp(static_cast<double>(logit) - 4.0);
+  require(std::abs(masses[0] - 1.0 / den) < 1e-15, "top-1 mass");
+  require(std::abs(masses[1] -
+                   (1.0 + std::exp(-1.0)) / den) < 1e-15,
+          "top-2 mass");
+  require(masses[1] < masses[2], "prefix mass must increase");
+  require(std::abs(masses[3] - 1.0) < 1e-15,
+          "k beyond vocab means full mass");
+}
+
+DGPP_TEST(topk_probability_mass_rejects_bad_measurement_inputs) {
+  const std::vector<Candidate> candidates{{0, 1.0f}, {1, 0.0f}};
+  bool threw = false;
+  try {
+    (void)topk_probability_masses(candidates, 1.0, {2, 1});
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "non-increasing k list must fail");
+  threw = false;
+  try {
+    (void)slice_logsumexp(nullptr, 0);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "empty lse slice must fail");
 }

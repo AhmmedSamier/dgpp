@@ -17,6 +17,8 @@
 // staging copies (the kernel only publishes ready). Boundaries above the
 // slot stay on the device path (chunked, or the bulk collective class).
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -353,6 +355,131 @@ inline int32_t bus_greedy_pick(net::CollectiveBus& bus, int rank, int world,
                                int timeout_ms) {
   return bus_greedy_pick_rows(bus, rank, world, {local}, scratch,
                               timeout_ms)[0];
+}
+
+// ---------------------------------------------------------------------------
+// M6 6b sizing instrument: exact global top-k probability mass.
+// ---------------------------------------------------------------------------
+// This is deliberately a teacher-forced HOST profiler, not the production
+// sampler. Each rank selects its exact local top-256 from the host-visible
+// vocab slice, and one disjoint-slot bus fold gathers those candidates plus
+// the slice's fp64 log-sum-exp on every rank. The union contains the exact
+// global top-256; all ranks merge it in canonical order and report the full-
+// distribution probability mass at k={32,64,128,256}. The wire uses the same
+// six-bit-digit identity encoding as the proven greedy gather, so no float is
+// rounded in transport. It adds one eager collective per teacher position
+// only when --sampling-profile is requested.
+inline constexpr std::array<int, 4> kSamplingProfileTopKs = {32, 64, 128,
+                                                             256};
+inline constexpr int kSamplingProfileMaxK = 256;
+inline constexpr int kSamplingProfileLseDigits = 11;  // 66 bits carry fp64
+inline constexpr size_t kSamplingProfileRankElems =
+    static_cast<size_t>(kSamplingProfileMaxK) * kPickSlotsPerRank +
+    kSamplingProfileLseDigits;
+
+inline constexpr size_t sampling_profile_scratch_elems(int world) {
+  const size_t elems = static_cast<size_t>(world) * kSamplingProfileRankElems;
+  return elems + (elems & 1);  // CollectiveBus requires an even bf16 count.
+}
+
+inline std::array<double, kSamplingProfileTopKs.size()>
+bus_sampling_topk_masses(net::CollectiveBus& bus, int rank, int world,
+                         const float* logits, int vocab_count,
+                         int vocab_begin, double local_logsumexp,
+                         uint16_t* scratch, int timeout_ms) {
+  if (world < 1 || world > kPickMaxWorld || rank < 0 || rank >= world)
+    throw std::invalid_argument("sampling profile: rank/world");
+  if (vocab_count < kSamplingProfileMaxK)
+    throw std::invalid_argument(
+        "sampling profile: every vocab shard must contain at least 256 ids");
+  if (!std::isfinite(local_logsumexp))
+    throw std::invalid_argument("sampling profile: non-finite slice lse");
+  const size_t elems = sampling_profile_scratch_elems(world);
+  if (elems * sizeof(uint16_t) >
+      bus.slot_bytes(net::BusMessageClass::kLatency))
+    throw std::invalid_argument(
+        "sampling profile: candidate table exceeds one latency slot");
+
+  const std::vector<glm_sample::Candidate> local = glm_sample::local_topk(
+      logits, vocab_count, vocab_begin, kSamplingProfileMaxK);
+  std::memset(scratch, 0, elems * sizeof(uint16_t));
+  uint16_t* mine = scratch + static_cast<size_t>(rank) *
+                                 kSamplingProfileRankElems;
+  for (int i = 0; i < kSamplingProfileMaxK; ++i) {
+    const glm_sample::Candidate& candidate = local[static_cast<size_t>(i)];
+    if (candidate.id < 0 || candidate.id >= (1 << (6 * kPickIdDigits)))
+      throw std::invalid_argument(
+          "sampling profile: token id outside the pick encoding");
+    uint32_t logit_bits = 0;
+    std::memcpy(&logit_bits, &candidate.logit, sizeof(logit_bits));
+    uint16_t* encoded = mine + static_cast<size_t>(i) * kPickSlotsPerRank;
+    pick_encode_digits(encoded, logit_bits, kPickLogitDigits);
+    pick_encode_digits(encoded + kPickLogitDigits,
+                       static_cast<uint64_t>(candidate.id), kPickIdDigits);
+  }
+  uint64_t lse_bits = 0;
+  static_assert(sizeof(lse_bits) == sizeof(local_logsumexp));
+  std::memcpy(&lse_bits, &local_logsumexp, sizeof(lse_bits));
+  pick_encode_digits(mine + static_cast<size_t>(kSamplingProfileMaxK) *
+                                kPickSlotsPerRank,
+                     lse_bits, kSamplingProfileLseDigits);
+
+  std::string err;
+  const uint64_t id = bus.allreduce(scratch, scratch, elems, &err);
+  if (id == 0)
+    throw std::runtime_error("sampling profile gather: " + err);
+  const net::BusAllReduceResult folded = bus.wait_allreduce(id, timeout_ms);
+  if (!folded.ok)
+    throw std::runtime_error("sampling profile gather: " + folded.error);
+
+  std::vector<std::vector<glm_sample::Candidate>> shards;
+  std::vector<double> slice_lses;
+  shards.reserve(static_cast<size_t>(world));
+  slice_lses.reserve(static_cast<size_t>(world));
+  for (int r = 0; r < world; ++r) {
+    const uint16_t* encoded_rank =
+        scratch + static_cast<size_t>(r) * kSamplingProfileRankElems;
+    std::vector<glm_sample::Candidate> candidates;
+    candidates.reserve(kSamplingProfileMaxK);
+    for (int i = 0; i < kSamplingProfileMaxK; ++i) {
+      const uint16_t* encoded =
+          encoded_rank + static_cast<size_t>(i) * kPickSlotsPerRank;
+      glm_sample::Candidate candidate;
+      const uint32_t logit_bits = static_cast<uint32_t>(
+          pick_decode_digits(encoded, kPickLogitDigits));
+      std::memcpy(&candidate.logit, &logit_bits, sizeof(candidate.logit));
+      candidate.id = static_cast<int32_t>(pick_decode_digits(
+          encoded + kPickLogitDigits, kPickIdDigits));
+      candidates.push_back(candidate);
+    }
+    shards.push_back(std::move(candidates));
+
+    const uint64_t bits = pick_decode_digits(
+        encoded_rank + static_cast<size_t>(kSamplingProfileMaxK) *
+                           kPickSlotsPerRank,
+        kSamplingProfileLseDigits);
+    double lse = 0.0;
+    std::memcpy(&lse, &bits, sizeof(lse));
+    if (!std::isfinite(lse))
+      throw std::runtime_error(
+          "sampling profile: gathered a non-finite slice lse");
+    slice_lses.push_back(lse);
+  }
+
+  const std::vector<glm_sample::Candidate> global =
+      glm_sample::merge_topk(std::move(shards), kSamplingProfileMaxK);
+  const double lse_top =
+      *std::max_element(slice_lses.begin(), slice_lses.end());
+  double lse_sum = 0.0;
+  for (double lse : slice_lses) lse_sum += std::exp(lse - lse_top);
+  const double global_lse = lse_top + std::log(lse_sum);
+  const std::vector<double> masses = glm_sample::topk_probability_masses(
+      global, global_lse,
+      std::vector<int>(kSamplingProfileTopKs.begin(),
+                       kSamplingProfileTopKs.end()));
+  std::array<double, kSamplingProfileTopKs.size()> out{};
+  std::copy(masses.begin(), masses.end(), out.begin());
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -4,11 +4,38 @@
 #include <stdexcept>
 #include <string>
 
+#include <cuda/atomic>
+
 #include "common/cuda_check.hpp"
 
 namespace dgpp {
 
 namespace {
+
+constexpr int kUploadMaxWords = 64;
+
+template <typename Word>
+__global__ void upload_words_kernel(const Word* __restrict__ src,
+                                    Word* __restrict__ dst, int count) {
+  const int i = static_cast<int>(threadIdx.x);
+  if (i >= count) return;
+  cuda::atomic_ref<Word, cuda::thread_scope_system> ref(
+      *const_cast<Word*>(src + i));
+  dst[i] = ref.load(cuda::memory_order_relaxed);
+}
+
+template <typename Word>
+void launch_upload_words(const char* who, const Word* pinned_src, Word* dst,
+                         int count, cudaStream_t stream) {
+  if (pinned_src == nullptr || dst == nullptr)
+    throw std::invalid_argument(std::string(who) + ": null argument");
+  if (count < 1 || count > kUploadMaxWords)
+    throw std::invalid_argument(std::string(who) + ": count outside [1, " +
+                                std::to_string(kUploadMaxWords) + "]");
+  upload_words_kernel<Word><<<1, kUploadMaxWords, 0, stream>>>(pinned_src,
+                                                               dst, count);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
 
 constexpr int kCopyThreads = 256;
 constexpr size_t kUnit = 16;  // one uint4 per thread per iteration
@@ -161,6 +188,16 @@ void glm_spec_commit(const GlmPickVerdict* verdict, int rows,
   spec_commit_kernel<<<grid, kCopyThreads, 0, stream>>>(verdict, rows,
                                                         segments, session_pos);
   DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_upload_i32(const int32_t* pinned_src, int32_t* dst, int count,
+                    cudaStream_t stream) {
+  launch_upload_words("glm_upload_i32", pinned_src, dst, count, stream);
+}
+
+void glm_upload_i64(const int64_t* pinned_src, int64_t* dst, int count,
+                    cudaStream_t stream) {
+  launch_upload_words("glm_upload_i64", pinned_src, dst, count, stream);
 }
 
 void glm_spec_positions(const int64_t* session_pos, int rows,

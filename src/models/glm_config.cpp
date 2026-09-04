@@ -2,10 +2,15 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <limits>
 #include <set>
+
+#include "common/log.hpp"
 
 namespace dgpp {
 
@@ -14,6 +19,57 @@ namespace {
 [[noreturn]] void reject(std::string_view field, std::string_view why) {
   throw std::runtime_error(
       std::format("GLM text_config.{}: {}", field, why));
+}
+
+[[noreturn]] void reject_generation(std::string_view field,
+                                    std::string_view why) {
+  throw std::runtime_error(
+      std::format("GLM generation_config.{}: {}", field, why));
+}
+
+std::optional<float> optional_generation_float(const minijson::Value& root,
+                                               std::string_view field) {
+  const minijson::Value* value = root.find(field);
+  if (value == nullptr || value->is_null()) return std::nullopt;
+  if (!value->is_number()) reject_generation(field, "not a number");
+  const double parsed = value->as_double();
+  if (!std::isfinite(parsed) ||
+      parsed < -static_cast<double>(std::numeric_limits<float>::max()) ||
+      parsed > static_cast<double>(std::numeric_limits<float>::max())) {
+    reject_generation(field, "not a finite float");
+  }
+  return static_cast<float>(parsed);
+}
+
+std::optional<bool> optional_generation_bool(const minijson::Value& root,
+                                             std::string_view field) {
+  const minijson::Value* value = root.find(field);
+  if (value == nullptr || value->is_null()) return std::nullopt;
+  if (!value->is_bool()) reject_generation(field, "not a bool");
+  return value->as_bool();
+}
+
+std::string read_json_file(const std::string& path, std::string_view kind) {
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f)
+    throw std::runtime_error(std::format("cannot open {} {}: {}", kind, path,
+                                         std::strerror(errno)));
+  std::fseek(f, 0, SEEK_END);
+  const long len = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+  if (len < 0) {
+    std::fclose(f);
+    throw std::runtime_error(std::format("cannot size {} {}", kind, path));
+  }
+  std::string text(static_cast<size_t>(len), '\0');
+  if (len > 0 &&
+      std::fread(text.data(), 1, static_cast<size_t>(len), f) !=
+          static_cast<size_t>(len)) {
+    std::fclose(f);
+    throw std::runtime_error(std::format("short read on {} {}", kind, path));
+  }
+  std::fclose(f);
+  return text;
 }
 
 int require_int(const minijson::Value& v, std::string_view field) {
@@ -78,6 +134,125 @@ std::vector<int> require_int_array(const minijson::Value& v,
 }
 
 }  // namespace
+
+std::vector<std::string> GlmGenerationDefaults::fallback_fields() const {
+  std::vector<std::string> out;
+  if (!temperature.has_value()) out.emplace_back("temperature");
+  if (!top_p.has_value()) out.emplace_back("top_p");
+  if (!top_k.has_value()) out.emplace_back("top_k");
+  if (!min_p.has_value()) out.emplace_back("min_p");
+  if (!repetition_penalty.has_value())
+    out.emplace_back("repetition_penalty");
+  return out;
+}
+
+GlmGenerationDefaults GlmGenerationDefaults::parse(
+    const minijson::Value& root, int vocab_size) {
+  if (!root.is_object()) reject_generation("root", "not an object");
+  if (vocab_size <= 0) reject_generation("vocab_size", "must be positive");
+
+  GlmGenerationDefaults out;
+  out.do_sample = optional_generation_bool(root, "do_sample");
+  out.temperature = optional_generation_float(root, "temperature");
+  out.top_p = optional_generation_float(root, "top_p");
+  out.min_p = optional_generation_float(root, "min_p");
+  out.repetition_penalty =
+      optional_generation_float(root, "repetition_penalty");
+
+  if (const minijson::Value* value = root.find("top_k");
+      value != nullptr && !value->is_null()) {
+    if (value->kind() != minijson::Value::Kind::Int)
+      reject_generation("top_k", "not an integer");
+    const int64_t parsed = value->as_int();
+    if (parsed < 0 || parsed > std::numeric_limits<int>::max())
+      reject_generation("top_k", "must be in [0, INT_MAX]");
+    out.top_k = static_cast<int>(parsed);
+  }
+
+  if (out.temperature.has_value() && *out.temperature < 0.0f)
+    reject_generation("temperature", "must be >= 0");
+  if (out.top_p.has_value() &&
+      !(*out.top_p > 0.0f && *out.top_p <= 1.0f))
+    reject_generation("top_p", "must be in (0, 1]");
+  if (out.min_p.has_value() &&
+      !(*out.min_p >= 0.0f && *out.min_p <= 1.0f))
+    reject_generation("min_p", "must be in [0, 1]");
+  if (out.repetition_penalty.has_value() &&
+      !(*out.repetition_penalty > 0.0f))
+    reject_generation("repetition_penalty", "must be > 0");
+
+  if (const minijson::Value* eos = root.find("eos_token_id");
+      eos != nullptr && !eos->is_null()) {
+    std::vector<int64_t> ids;
+    const auto append = [&](const minijson::Value& value) {
+      if (value.kind() != minijson::Value::Kind::Int)
+        reject_generation("eos_token_id", "contains a non-integer");
+      const int64_t id = value.as_int();
+      if (id < 0 || id >= vocab_size)
+        reject_generation("eos_token_id", "id outside [0, vocab_size)");
+      ids.push_back(id);
+    };
+    if (eos->is_array()) {
+      for (const auto& item : eos->items()) append(item);
+    } else {
+      append(*eos);
+    }
+    out.eos_token_ids = std::move(ids);
+  }
+  return out;
+}
+
+GlmGenerationDefaults GlmGenerationDefaults::from_json_file(
+    const std::string& path, int vocab_size) {
+  const std::string text = read_json_file(path, "generation config");
+  return parse(minijson::parse(text).root, vocab_size);
+}
+
+GlmGenerationDefaults GlmGenerationDefaults::from_checkpoint_dir(
+    const std::string& dir, int vocab_size) {
+  const std::filesystem::path path =
+      std::filesystem::path(dir) / "generation_config.json";
+  std::error_code ec;
+  const bool exists = std::filesystem::exists(path, ec);
+  if (ec) {
+    throw std::runtime_error("cannot inspect generation config " +
+                             path.string() + ": " + ec.message());
+  }
+  if (!exists) {
+    GlmGenerationDefaults out;
+    out.file_found = false;
+    DGPP_LOG_WARN(
+        "generation config {} is missing; using greedy-safe sampling "
+        "defaults (temperature=0, top_p=1, top_k=0, min_p=0, "
+        "repetition_penalty=1)",
+        path.string());
+    return out;
+  }
+
+  GlmGenerationDefaults out = from_json_file(path.string(), vocab_size);
+  const std::vector<std::string> missing = out.fallback_fields();
+  if (!missing.empty()) {
+    std::string names;
+    for (const std::string& name : missing) {
+      if (!names.empty()) names += ", ";
+      names += name;
+    }
+    DGPP_LOG_WARN(
+        "generation config {} omits {}; using greedy-safe/neutral "
+        "fallbacks for those fields",
+        path.string(), names);
+  }
+  DGPP_LOG_INFO(
+      "generation defaults: temperature={} top_p={} top_k={} min_p={} "
+      "repetition_penalty={}{}",
+      out.effective_temperature(), out.effective_top_p(),
+      out.effective_top_k(), out.effective_min_p(),
+      out.effective_repetition_penalty(),
+      out.do_sample.has_value() && !*out.do_sample
+          ? " (do_sample=false: greedy)"
+          : "");
+  return out;
+}
 
 GlmTextConfig GlmTextConfig::parse(const minijson::Value& tc) {
   if (!tc.is_object()) reject("text_config", "not an object");
@@ -275,24 +450,7 @@ GlmTextConfig GlmTextConfig::parse(const minijson::Value& tc) {
 }
 
 GlmTextConfig GlmTextConfig::from_json_file(const std::string& path) {
-  std::string json = [&] {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f)
-      throw std::runtime_error("cannot open config " + path + ": " +
-                               std::strerror(errno));
-    std::fseek(f, 0, SEEK_END);
-    long len = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    std::string s(static_cast<size_t>(len), '\0');
-    if (len > 0 &&
-        std::fread(s.data(), 1, static_cast<size_t>(len), f) !=
-            static_cast<size_t>(len)) {
-      std::fclose(f);
-      throw std::runtime_error("short read on config " + path);
-    }
-    std::fclose(f);
-    return s;
-  }();
+  const std::string json = read_json_file(path, "config");
   auto parsed = minijson::parse(json);
   const minijson::Value* tc = parsed.root.find("text_config");
   if (!tc)

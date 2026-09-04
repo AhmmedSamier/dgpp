@@ -335,4 +335,61 @@ inline std::vector<Candidate> merge_topk(
   return merged;
 }
 
+// Exact full-distribution normalizer for a host-visible logit slice. The
+// teacher-forced sampling profiler uses one value per vocab shard and folds
+// those with logaddexp; this is intentionally fp64 measurement arithmetic,
+// separate from the fp32 device verdict that the production sampler will use.
+inline double slice_logsumexp(const float* logits, int n) {
+  if (logits == nullptr || n <= 0)
+    throw std::invalid_argument("glm_sample: empty logit slice");
+  double top = -INFINITY;
+  for (int i = 0; i < n; ++i)
+    top = std::max(top, static_cast<double>(logits[i]));
+  double sum = 0.0;
+  for (int i = 0; i < n; ++i)
+    sum += std::exp(static_cast<double>(logits[i]) - top);
+  return top + std::log(sum);
+}
+
+// Probability mass covered by each requested prefix of an already
+// canonical global candidate list, under the FULL vocabulary normalizer.
+// This is the sizing instrument for the device pick table: at top_p=0.95 a
+// prefix whose mass is below 0.95 cannot resolve nucleus sampling locally
+// and must take the exact full-logit fallback.
+inline std::vector<double> topk_probability_masses(
+    const std::vector<Candidate>& sorted, double global_logsumexp,
+    const std::vector<int>& ks) {
+  if (sorted.empty())
+    throw std::invalid_argument("glm_sample: empty top-k candidate list");
+  if (!std::isfinite(global_logsumexp))
+    throw std::invalid_argument("glm_sample: non-finite global log-sum-exp");
+  int previous = 0;
+  for (int k : ks) {
+    if (k <= previous)
+      throw std::invalid_argument(
+          "glm_sample: top-k mass prefixes must be positive and increasing");
+    previous = k;
+  }
+
+  std::vector<double> out;
+  out.reserve(ks.size());
+  double mass = 0.0;
+  size_t next_k = 0;
+  for (size_t i = 0; i < sorted.size() && next_k < ks.size(); ++i) {
+    mass += std::exp(static_cast<double>(sorted[i].logit) - global_logsumexp);
+    while (next_k < ks.size() && i + 1 >= static_cast<size_t>(ks[next_k])) {
+      out.push_back(mass);
+      ++next_k;
+    }
+  }
+  // A diagnostic over a tiny synthetic vocabulary may request a prefix
+  // wider than the vocabulary. Its mass is simply the complete available
+  // candidate set, matching top-k's k>=vocab no-op semantics.
+  while (next_k < ks.size()) {
+    out.push_back(mass);
+    ++next_k;
+  }
+  return out;
+}
+
 }  // namespace dgpp::glm_sample

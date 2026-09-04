@@ -4,15 +4,16 @@
 `scripts/fabric_run.sh --fetch-logs` leaves one log per rank in the run
 directory. The per-step record lines glm_gen_check writes on every rank
 are parsed here, once, so each analysis tool (fabric_xcript.py,
-fabric_logprob.py, whatever judges MTP acceptance next) is its arithmetic
-and nothing else.
+fabric_logprob.py, fabric_sampling_profile.py, whatever judges MTP
+acceptance next) is its arithmetic and nothing else.
 
-    from fabric_logs import load_gen, load_teacher, bf16_ulp
+    from fabric_logs import load_gen, load_teacher, load_sample_mass, bf16_ulp
 
     gen = load_gen("/mnt/ramlog/fabric48")      # rank -> step -> GenLine
     tf = load_teacher("/mnt/ramlog/tfR_f32")    # rank -> step -> TeacherLine
+    mass = load_sample_mass("/mnt/ramlog/mass") # rank -> step -> SampleMassLine
 
-Both return {} for a directory without the lines; the callers decide what
+They return {} for a directory without the lines; the callers decide what
 that means. Steps are keyed by the app's step number (0 = the pick off the
 prefill's logits).
 """
@@ -20,7 +21,9 @@ import math
 import os
 import re
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, TypeVar
+from typing import Callable, Dict, Optional, Tuple, TypeVar
+
+FLOAT = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 
 # '[gen] rank r step s: token T (local slice [a,b) best B logit L second S)'
 # — `second` (the slice's runner-up) arrived 2026-09-02; older logs lack it.
@@ -32,6 +35,17 @@ RE_GEN = re.compile(
 RE_TEACHER = re.compile(
     r"\[tf\] rank (\d+) step (\d+): target (\d+) argmax (\d+) lmax ([-\d.]+) "
     r"lse ([-\d.]+) target_logit ([-\d.]+|nan)")
+
+# '[sample_mass] rank r step s: k32 M k64 M k128 M k256 M'
+RE_SAMPLE_MASS = re.compile(
+    rf"\[sample_mass\] rank (\d+) step (\d+): k32 ({FLOAT}) "
+    rf"k64 ({FLOAT}) k128 ({FLOAT}) k256 ({FLOAT})")
+
+# One completion line per measured width. The analyzer only needs the
+# protocol fields; it recomputes every statistic from the per-position lines.
+RE_SAMPLE_MASS_SUMMARY = re.compile(
+    r"\[sample_mass_summary\] rank (\d+): .*? k=(32|64|128|256) "
+    r"positions=(\d+)")
 
 
 @dataclass(frozen=True)
@@ -53,6 +67,20 @@ class TeacherLine:
     lmax: float                    # this rank's slice max
     lse: float                     # this rank's slice log-sum-exp
     target_logit: Optional[float]  # None unless the target is in the slice
+
+
+@dataclass(frozen=True)
+class SampleMassLine:
+    rank: int
+    step: int
+    masses: Tuple[float, float, float, float]  # k=32,64,128,256
+
+
+@dataclass(frozen=True)
+class SampleMassSummaryLine:
+    rank: int
+    k: int
+    positions: int
 
 
 T = TypeVar("T")
@@ -103,12 +131,39 @@ def _teacher_of(m: "re.Match[str]") -> TeacherLine:
                        target_logit=None if g7 == "nan" else float(g7))
 
 
+def _sample_mass_of(m: "re.Match[str]") -> SampleMassLine:
+    return SampleMassLine(rank=int(m.group(1)), step=int(m.group(2)),
+                          masses=tuple(float(m.group(i)) for i in range(3, 7)))
+
+
 def load_gen(directory: str) -> Dict[int, Dict[int, GenLine]]:
     return scan(directory, RE_GEN, _gen_of)
 
 
 def load_teacher(directory: str) -> Dict[int, Dict[int, TeacherLine]]:
     return scan(directory, RE_TEACHER, _teacher_of)
+
+
+def load_sample_mass(directory: str) -> Dict[int, Dict[int, SampleMassLine]]:
+    return scan(directory, RE_SAMPLE_MASS, _sample_mass_of)
+
+
+def load_sample_mass_summary(
+        directory: str) -> Dict[int, Dict[int, SampleMassSummaryLine]]:
+    """rank -> k -> final summary marker for a completed profile run."""
+    out: Dict[int, Dict[int, SampleMassSummaryLine]] = {}
+    for file_rank, path in rank_logs(directory).items():
+        widths = {}
+        with open(path, errors="replace") as f:
+            for line in f:
+                match = RE_SAMPLE_MASS_SUMMARY.search(line)
+                if match:
+                    record = SampleMassSummaryLine(
+                        rank=int(match.group(1)), k=int(match.group(2)),
+                        positions=int(match.group(3)))
+                    widths[record.k] = record
+        out[file_rank] = widths
+    return out
 
 
 def bf16_ulp(x: float) -> float:

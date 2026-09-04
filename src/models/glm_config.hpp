@@ -11,6 +11,7 @@
 // checkpoint that loads is one the engine can actually run; "parse-then-pray"
 // on unrecognized enum strings is not a strategy (DESIGN §12).
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -25,6 +26,53 @@ namespace dgpp {
 
 enum class GlmLayerKind : int { Kda, Dsa };
 enum class GlmMlpKind : int { Dense, Moe };
+
+// Sampling defaults shipped beside config.json in generation_config.json.
+// Keep presence separate from the effective value: a missing sampling field
+// is a configuration gap which callers must be able to name in their logs,
+// while the effective getters deliberately choose greedy-safe values instead
+// of silently inheriting the OpenAI wire defaults.
+struct GlmGenerationDefaults {
+  std::optional<bool> do_sample;
+  std::optional<float> temperature;
+  std::optional<float> top_p;
+  std::optional<int> top_k;
+  std::optional<float> min_p;
+  std::optional<float> repetition_penalty;
+  std::optional<std::vector<int64_t>> eos_token_ids;
+  bool file_found = true;
+
+  float effective_temperature() const {
+    if (do_sample.has_value() && !*do_sample) return 0.0f;
+    return temperature.value_or(0.0f);
+  }
+  float effective_top_p() const { return top_p.value_or(1.0f); }
+  int effective_top_k() const { return top_k.value_or(0); }
+  float effective_min_p() const { return min_p.value_or(0.0f); }
+  float effective_repetition_penalty() const {
+    return repetition_penalty.value_or(1.0f);
+  }
+
+  // Names every absent sampler field whose neutral/greedy-safe fallback is
+  // in effect. JSON null is treated as absent, matching generated HF config
+  // files where an unset optional is serialized explicitly.
+  std::vector<std::string> fallback_fields() const;
+
+  // Parse the root object of generation_config.json. Present fields are
+  // strict: wrong types, non-finite values, invalid ranges, and bad EOS ids
+  // fail at model load rather than changing sampling semantics silently.
+  static GlmGenerationDefaults parse(const minijson::Value& root,
+                                     int vocab_size);
+  static GlmGenerationDefaults from_json_file(const std::string& path,
+                                              int vocab_size);
+
+  // Load DIR/generation_config.json. A genuinely absent file is allowed and
+  // returns greedy-safe defaults with file_found=false; malformed or
+  // unreadable files still fail loudly. This function logs the exact missing
+  // file/field fallback required by DESIGN §10.
+  static GlmGenerationDefaults from_checkpoint_dir(const std::string& dir,
+                                                   int vocab_size);
+};
 
 struct GlmTextConfig {
   // --- model shape -------------------------------------------------------
@@ -41,9 +89,9 @@ struct GlmTextConfig {
   std::vector<GlmMlpKind> mlps;
   int first_k_dense_replace = 3;
 
-  // Generation terminators (config's eos_token_id — HF writes either a
-  // bare int or an array; absent means the checkpoint names none and the
-  // decode loop runs to its step budget).
+  // Generation terminators from config.json. generation_config.json is the
+  // serving authority when it contains eos_token_id; this remains the
+  // compatibility fallback for fixtures and older checkpoints.
   std::vector<int64_t> eos_token_ids;
 
   // --- KDA (linear_attn_config) -------------------------------------------

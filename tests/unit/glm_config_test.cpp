@@ -2,7 +2,9 @@
 // assembly consumes is parsed or rejected, the redundant layer-class
 // encodings must agree, and the produced Kda/Dsa geometry configs carry the
 // trained values rather than the header defaults.
+#include <filesystem>
 #include <functional>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 
@@ -14,6 +16,7 @@ namespace {
 
 using dgpp::GlmLayerKind;
 using dgpp::GlmMlpKind;
+using dgpp::GlmGenerationDefaults;
 using dgpp::GlmTextConfig;
 
 // A minimal, internally consistent text_config exercising every class:
@@ -215,4 +218,122 @@ DGPP_TEST(glm_config_mhc_fields_parse_and_propagate) {
   expect_throw(
       [&] { parse_replacing("\"hc_sinkhorn_iters\": 20", "\"hc_sinkhorn_iters\": 0"); },
       "sinkhorn iters 0");
+}
+
+DGPP_TEST(glm_generation_config_parses_sampling_defaults_and_eos) {
+  const auto parsed = dgpp::minijson::parse(R"json({
+    "do_sample": true,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 128,
+    "min_p": 0.02,
+    "repetition_penalty": 1.1,
+    "eos_token_id": [7, 11, 13],
+    "transformers_version": "ignored cold-path metadata"
+  })json");
+  const GlmGenerationDefaults c =
+      GlmGenerationDefaults::parse(parsed.root, /*vocab_size=*/1000);
+  require(c.file_found, "direct parse represents a present file");
+  require(c.do_sample.has_value() && *c.do_sample, "do_sample");
+  require(c.effective_temperature() == 1.0f, "temperature");
+  require(c.effective_top_p() == 0.95f, "top_p");
+  require(c.effective_top_k() == 128, "top_k");
+  require(c.effective_min_p() == 0.02f, "min_p");
+  require(c.effective_repetition_penalty() == 1.1f,
+          "repetition_penalty");
+  require(c.eos_token_ids.has_value() &&
+              *c.eos_token_ids == std::vector<int64_t>({7, 11, 13}),
+          "eos ids");
+  require(c.fallback_fields().empty(), "no parsed field should fall back");
+}
+
+DGPP_TEST(glm_generation_config_missing_fields_are_greedy_safe_and_named) {
+  const auto parsed = dgpp::minijson::parse(
+      R"json({"temperature": null, "top_p": null, "do_sample": false})json");
+  const GlmGenerationDefaults c =
+      GlmGenerationDefaults::parse(parsed.root, /*vocab_size=*/32);
+  require(c.effective_temperature() == 0.0f, "missing temperature is greedy");
+  require(c.effective_top_p() == 1.0f, "missing top_p is neutral");
+  require(c.effective_top_k() == 0, "missing top_k is neutral");
+  require(c.effective_min_p() == 0.0f, "missing min_p is neutral");
+  require(c.effective_repetition_penalty() == 1.0f,
+          "missing repetition penalty is neutral");
+  const std::vector<std::string> missing = c.fallback_fields();
+  require(missing == std::vector<std::string>(
+                         {"temperature", "top_p", "top_k", "min_p",
+                          "repetition_penalty"}),
+          "fallback fields must be complete and stable-order");
+  require(!c.eos_token_ids.has_value(), "missing eos remains distinguishable");
+}
+
+DGPP_TEST(glm_generation_config_do_sample_false_forces_greedy) {
+  const auto parsed = dgpp::minijson::parse(
+      R"json({"do_sample":false,"temperature":0.7,"top_p":0.9})json");
+  const GlmGenerationDefaults c =
+      GlmGenerationDefaults::parse(parsed.root, /*vocab_size=*/16);
+  require(c.temperature.has_value() && *c.temperature == 0.7f,
+          "configured temperature remains inspectable");
+  require(c.effective_temperature() == 0.0f,
+          "do_sample=false must select greedy semantics");
+}
+
+DGPP_TEST(glm_generation_config_rejects_invalid_present_values) {
+  const auto reject_json = [](const char* json, const char* what) {
+    expect_throw(
+        [&] {
+          const auto parsed = dgpp::minijson::parse(json);
+          (void)GlmGenerationDefaults::parse(parsed.root, 32);
+        },
+        what);
+  };
+  reject_json(R"json({"temperature":-0.1})json", "negative temperature");
+  reject_json(R"json({"temperature":"hot"})json", "string temperature");
+  reject_json(R"json({"top_p":0})json", "zero top_p");
+  reject_json(R"json({"top_p":1.01})json", "top_p above one");
+  reject_json(R"json({"top_k":1.5})json", "fractional top_k");
+  reject_json(R"json({"top_k":-1})json", "negative top_k");
+  reject_json(R"json({"min_p":-0.1})json", "negative min_p");
+  reject_json(R"json({"repetition_penalty":0})json",
+              "zero repetition penalty");
+  reject_json(R"json({"do_sample":1})json", "numeric do_sample");
+  reject_json(R"json({"eos_token_id":[1,32]})json", "out-of-range eos");
+  reject_json(R"json({"eos_token_id":1.0})json", "non-integer eos");
+}
+
+DGPP_TEST(glm_generation_config_checkpoint_load_allows_only_absence) {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "dgpp_generation_config_test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  const GlmGenerationDefaults missing =
+      GlmGenerationDefaults::from_checkpoint_dir(dir.string(), 64);
+  require(!missing.file_found, "absent file must select explicit fallback");
+  require(missing.effective_temperature() == 0.0f,
+          "absent file must be greedy");
+
+  {
+    std::ofstream out(dir / "generation_config.json");
+    out << R"json({"temperature":0.8,"top_p":0.9,"top_k":0,
+                   "min_p":0.0,"repetition_penalty":1.0,
+                   "eos_token_id":63})json";
+  }
+  const GlmGenerationDefaults loaded =
+      GlmGenerationDefaults::from_checkpoint_dir(dir.string(), 64);
+  require(loaded.file_found, "present file");
+  require(loaded.eos_token_ids.has_value() &&
+              *loaded.eos_token_ids == std::vector<int64_t>({63}),
+          "scalar eos id");
+
+  {
+    std::ofstream out(dir / "generation_config.json");
+    out << R"json({"temperature":"bad"})json";
+  }
+  expect_throw(
+      [&] {
+        (void)GlmGenerationDefaults::from_checkpoint_dir(dir.string(), 64);
+      },
+      "malformed present generation config");
+  fs::remove_all(dir);
 }

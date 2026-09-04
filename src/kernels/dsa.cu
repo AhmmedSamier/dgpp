@@ -735,6 +735,19 @@ struct MergeKeyFn {
 
 // Fixed grid, grid-striped over each row's visible pools; the last block to
 // finish merges the partials and writes the expanded token rows.
+// The select counter's reset is a KERNEL, not cudaMemsetAsync. A memset
+// node in the captured decode graph executes on the copy-engine queue, an
+// in-order queue shared by every stream in the process; a queued node's
+// dependency wait blocks everything behind it. In a one-process multi-rank
+// world (the loopback gates) a peer rank's queued post-collective memset
+// held this reset behind it while that peer's collective spun waiting on
+// ours — the batched-MTP graph stall (docs/batched_mtp_graph_stall.md).
+// Kernel nodes never share that queue; the graph engine rejects any
+// non-kernel node at capture.
+__global__ void select_counter_reset_kernel(int32_t* counter) {
+  if (threadIdx.x == 0) *counter = 0;
+}
+
 __global__ void select_decode_kernel(
     const uint8_t* q_fp8, const float* w_folded, const int32_t* req_ids,
     const int64_t* pos, int rows, const int32_t* block_tables,
@@ -1457,7 +1470,7 @@ void dsa_select_decode(const void* q_fp8, const float* w_folded,
   dsa_prepare_kernel_smem();
   if (smem > size_t(g_select_smem_cap)) DGPP_CUDA_OK(cudaErrorInvalidValue);
   const int blocks = grid_blocks > 0 ? grid_blocks : 48;
-  DGPP_CUDA_OK(cudaMemsetAsync(counter_ws, 0, sizeof(int32_t), stream));
+  select_counter_reset_kernel<<<1, 32, 0, stream>>>(counter_ws);
   select_decode_kernel<<<blocks, 256, smem, stream>>>(
       static_cast<const uint8_t*>(q_fp8), w_folded, req_ids, pos, rows,
       block_tables, blocks_per_request,

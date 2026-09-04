@@ -47,6 +47,19 @@ void glm_spec_commit(const GlmPickVerdict* verdict, int rows,
                      const GlmSpecSegments& segments, int64_t* session_pos,
                      cudaStream_t stream);
 
+// Uploads `count` (<= 64) int32 words from a PINNED, device-mapped host
+// buffer into device memory with a kernel — the decode path's replacement
+// for a cudaMemcpyAsync H2D of its row tables. A memcpy node in the
+// captured decode graph executes on the copy-engine queue, which is
+// in-order and shared by every stream in the process; in a one-process
+// multi-rank world a peer rank's queued dependency wait at that queue's
+// head blocked the upload (docs/batched_mtp_graph_stall.md). The source is
+// read with system-scope loads: the host wrote it before the launch.
+void glm_upload_i32(const int32_t* pinned_src, int32_t* dst, int count,
+                    cudaStream_t stream);
+void glm_upload_i64(const int64_t* pinned_src, int64_t* dst, int count,
+                    cudaStream_t stream);
+
 // The decode rows' metadata from the device position: step_pos[r] =
 // *session_pos + r for r < rows (the replacement for the host's staged
 // h_step_pos_ upload in a device-driven graph).

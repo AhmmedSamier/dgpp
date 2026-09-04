@@ -18,6 +18,7 @@
 #include "common/log.hpp"
 #include "common/process_memory.hpp"
 #include "models/glm_gen_engine.hpp"
+#include "models/glm_graph_check.hpp"
 #include "models/glm_loader.hpp"
 #include "models/glm_step_timing.hpp"
 #include "models/glm_tp_bus.hpp"
@@ -452,6 +453,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       record_open = false;
       model_->set_boundary(eager);
       eager = nullptr;
+      glm_check_decode_graph(graph, rank_,
+                             "graph variant " + std::to_string(variant));
       DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
       cudaGraphDestroy(graph);
       return exec;

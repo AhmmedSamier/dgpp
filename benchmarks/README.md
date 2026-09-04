@@ -179,6 +179,28 @@ workflow. Engine-only route traces (`--trace-ids-file`) feed
 `tools/route_trace_traffic.py`. Run these on the box that holds the
 checkpoint; dumps are tens of MB and are not stored in the repo.
 
+## GLM sampling-width profile (correctness, not throughput)
+
+M6 sizes its exact distributed nucleus-sampling candidate table from the three
+teacher texts. Run `glm_gen_check` once per text with `--sampling-profile` and
+fetch every rank's log, then analyze the directories together:
+
+```bash
+scripts/fabric_run.sh --fetch-logs \
+    --stage-file benchmarks/teacher_text.txt --log-dir /tmp/mass-quick -- \
+    --model unsloth/GLM-5.3-Flash-FP8 --text "Encyclopedia article." \
+    --teacher-file benchmarks/teacher_text.txt --sampling-profile \
+    --decode-graph
+# Repeat for teacher_text_hard.txt and teacher_text_memorized.txt.
+python3 scripts/fabric_sampling_profile.py \
+    /tmp/mass-quick /tmp/mass-hard /tmp/mass-memorized
+```
+
+The probe computes exact global top-{32,64,128,256} probability mass at T=1;
+the analyzer rejects missing or cross-rank-divergent positions and chooses the
+smallest width with at most 1% fallback for top_p=0.95. Its extra eager
+candidate/LSE collective is measurement overhead, not a serving benchmark.
+
 ## Direct-device registration probe
 
 ```bash
