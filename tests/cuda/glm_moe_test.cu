@@ -583,6 +583,56 @@ DGPP_TEST(moe_accum_ordered_is_bitwise_the_fmaf_chain) {
   cudaFree(d_row); cudaFree(d_ids); cudaFree(d_w); cudaFree(d_down); cudaFree(d_out);
 }
 
+DGPP_TEST(moe_enqueue_prefill_is_bitwise_the_host_path) {
+  // The sync-free prefill path (device segmentation, the grouped chain,
+  // traces by async copy) against the host-orchestrated one: bitwise
+  // outputs and identical traces, on geometries whose segments span
+  // several row groups (M=64, K=4: ~32 rows per expert).
+  struct Case { int E, H, I, K, M; };
+  const Case cases[] = {
+      {8, 512, 256, 2, 1},
+      {8, 512, 256, 2, 3},
+      {16, 1024, 512, 4, 2},
+      {8, 512, 256, 4, 64},
+  };
+  for (const Case& cs : cases) {
+    SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M, 0xB0A7 + cs.E + cs.M);
+    c.alloc();
+    GlmMoeLayer layer(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/0);
+    std::vector<uint16_t> host(static_cast<size_t>(cs.M) * c.cfg.hidden);
+    layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::memcpy(host.data(), c.d_out, host.size() * 2);
+    const std::vector<int32_t> want_ids = layer.last_ids();
+    const std::vector<float> want_w = layer.last_weights();
+    const std::vector<float> want_biased = layer.last_biased();
+    int32_t* pin_ids = nullptr;
+    float* pin_w = nullptr;
+    float* pin_b = nullptr;
+    DGPP_CUDA_OK(cudaHostAlloc(&pin_ids, want_ids.size() * 4, cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(&pin_w, want_w.size() * 4, cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(&pin_b, want_biased.size() * 4, cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+    dgpp::MoeTraceStaging trace{pin_ids, pin_w, pin_b};
+    layer.enqueue_prefill(c.d_hidden, c.d_out, cs.M, &trace, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> dev(host.size(), 0x7F7F);
+    std::memcpy(dev.data(), c.d_out, dev.size() * 2);
+    require(std::memcmp(host.data(), dev.data(), host.size() * 2) == 0,
+            "enqueue_prefill must be bitwise-identical to enqueue");
+    require(std::memcmp(pin_ids, want_ids.data(), want_ids.size() * 4) == 0,
+            "prefill staged ids equal the host path's");
+    require(std::memcmp(pin_w, want_w.data(), want_w.size() * 4) == 0,
+            "prefill staged weights equal the host path's");
+    require(std::memcmp(pin_b, want_biased.data(), want_biased.size() * 4) == 0,
+            "prefill staged biased scores equal the host path's");
+    std::printf("[ OK ] prefill device path E=%d H=%d I=%d K=%d M=%d: bitwise\n",
+                cs.E, cs.H, cs.I, cs.K, cs.M);
+    cudaFreeHost(pin_ids); cudaFreeHost(pin_w); cudaFreeHost(pin_b);
+    c.free_all();
+  }
+}
+
 }  // namespace
 
 DGPP_TEST(moe_router_matches_oracle_real_geometry) {

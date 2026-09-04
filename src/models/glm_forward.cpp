@@ -305,6 +305,17 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&moe_trace_biased_),
                                rows * moe_cfg_.n_experts * sizeof(float),
                                cudaHostAllocDefault));
+    const size_t prows =
+        static_cast<size_t>(n_moe_layers_) * static_cast<size_t>(max_tokens_);
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&moe_prefill_trace_ids_),
+                               prows * moe_cfg_.top_k * sizeof(int32_t),
+                               cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&moe_prefill_trace_weights_),
+                               prows * moe_cfg_.top_k * sizeof(float),
+                               cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&moe_prefill_trace_biased_),
+                               prows * moe_cfg_.n_experts * sizeof(float),
+                               cudaHostAllocDefault));
   }
 
   // Activations.
@@ -402,6 +413,9 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFreeHost(moe_trace_ids_);
   cudaFreeHost(moe_trace_weights_);
   cudaFreeHost(moe_trace_biased_);
+  if (moe_prefill_trace_ids_) cudaFreeHost(moe_prefill_trace_ids_);
+  if (moe_prefill_trace_weights_) cudaFreeHost(moe_prefill_trace_weights_);
+  if (moe_prefill_trace_biased_) cudaFreeHost(moe_prefill_trace_biased_);
   if (stream_) cudaStreamDestroy(stream_);
 }
 

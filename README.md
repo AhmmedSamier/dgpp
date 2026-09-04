@@ -60,9 +60,10 @@ error before the bus comes down. Admission is full-reserve by default, with
 grow-on-demand as an opt-in policy that admits optimistically and sheds the
 youngest request when the KV pool runs out, rank-identical by construction.
 The prefill behind the time to first token is
-being taken down (a 256-token prompt's first token went from 5 s to 1.26 s
-on 2026-09-04 with the MoE experts on one grouped launch per layer; the
-folds, the per-layer sync and long-segment GEMMs are next) and the prefix
+being taken down (a 256-token prompt's first token went from 5 s to 1.0 s
+in steady state on 2026-09-04 with the MoE experts on one grouped launch
+per layer and no host sync, the bulk folds split per segment; the fold
+kernel's data movement and long-segment GEMMs are next) and the prefix
 cache is open; `PLAN.md` has the status per milestone and the designs
 for what remains, `DESIGN.md` the contracts as built.
 

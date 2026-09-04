@@ -141,10 +141,21 @@ Suggested order for what remains, each item's design in its section:
    (~1.1 GB/s of wire traffic at every size, linear in bytes; 2 MiB still
    2.6 ms): staging and the fold belong on the copy engines and a
    multi-block kernel, with the one-block kernel keeping only the claims.
-   Next, in order: device-side segmentation to drop the per-layer sync
-   (the ~0.3 s of host gaps at 256 tokens); the bulk kernel's data
-   movement; a grouped tensor-core GEMM for long segments; wider DSA
-   prefill tiles.
+   ROUND 3 (the sixteenth entry): the per-MoE-layer host sync is gone —
+   `moe_segment_kernel` segments on the device and the traces ride async
+   copies, bitwise the host path (gated at M up to 64) — and it changed
+   NOTHING measurable: the GPU is busy 948 of the 961 ms between the
+   first router kernel and the last accumulate, so there were no host
+   gaps to remove; the "gaps" were the process's ONE-TIME setup in the
+   first prefill (the lazily built layer objects, their scratch, the GEMM
+   plans — ~270 ms), which the service pays at its warm-up, not per
+   request. `glm_gen_check --prefill-repeat N` now reports the steady
+   state: 256 tokens 1,015 ms (4.0 ms/token), 2048 tokens 7,714 ms (3.8),
+   ids identical. The steady-state 256-token prefill is 0.58 s MoE at the
+   DRAM floor, 0.24 s bulk folds, 0.17 s everything else. Next, in order:
+   the bulk kernel's data movement (the folds' 0.24 s at 256 tokens are
+   the last large item there); a grouped tensor-core GEMM for long
+   segments and wider DSA prefill tiles (the 2048-token case).
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).

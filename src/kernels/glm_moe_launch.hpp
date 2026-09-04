@@ -72,6 +72,18 @@ void launch_moe_grouped_gemv_f32(const uint16_t* act, size_t act_stride,
                                  int rows_per_block, const MoeExpertView* views,
                                  int which, float* out, size_t out_stride, int n,
                                  int k, cudaStream_t stream);
+// Device-side segmentation (2026-09-04, the prefill's last host sync): from
+// the router's ids [tokens * top_k] — the same segmentation the host path
+// computes, on the device: rows[] = every routed (token, slot) in
+// ascending-expert segment order (stable in (token, slot) within an
+// expert), then the tokens once more for the shared expert; slot_row[t*K
+// + j] = the gathered row of token t's j-th slot; segs[e] = {row0, rows
+// (possibly 0), e} for every expert and segs[E] = the shared segment. One
+// block; top_k <= 16; n_experts <= 1024.
+void launch_moe_segment(const int32_t* ids, int tokens, int top_k,
+                        int n_experts, int32_t* rows, int32_t* slot_row,
+                        MoeSegment* segs, cudaStream_t stream);
+
 // The ordered accumulation in one pass: for every token, its top_k routed
 // slots in ASCENDING expert id (sorted here, whatever order the router left)
 // then the shared expert's row — moe_accum_kernel's __fmaf_rn chain from

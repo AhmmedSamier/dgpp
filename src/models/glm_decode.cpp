@@ -681,6 +681,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // traces (async pinned copies — no round-trip); the entries pushed
   // during the loop are materialized from staging after the final sync.
   int moe_decode_calls = 0;
+  int moe_prefill_calls = 0;  // prefill's per-layer trace staging slots
 
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const GlmLayerResident& r = stack_layer(layer);
@@ -848,18 +849,23 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         out.route_biased.emplace_back();
         ++moe_decode_calls;
       } else {
-        // Prefill keeps the host-orchestrated path (the sync amortizes
-        // over pool-aligned chunks) — and warms the decode path's
-        // device expert tables on the way through.
-        moe_->enqueue(normed_, ffn_out, T, stream_);
+        // Prefill (2026-09-04): the device-segmented grouped path — no
+        // host sync per layer; the routing traces land in this layer's
+        // pinned staging and are materialized after the final sync.
+        MoeTraceStaging trace;
+        const size_t lay = static_cast<size_t>(moe_prefill_calls);
+        const size_t mt = static_cast<size_t>(max_tokens_);
+        trace.ids = moe_prefill_trace_ids_ + lay * mt * moe_cfg_.top_k;
+        trace.weights = moe_prefill_trace_weights_ + lay * mt * moe_cfg_.top_k;
+        trace.biased = moe_prefill_trace_biased_ + lay * mt * moe_cfg_.n_experts;
+        moe_->enqueue_prefill(normed_, ffn_out, T, &trace, stream_);
         GlmRouteTraceLayer route;
         route.layer_idx = static_cast<uint32_t>(layer);
         route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);
         route.tokens = static_cast<uint64_t>(T);
-        route.ids = moe_->last_ids();
-        route.weights = moe_->last_weights();
-        out.routes.push_back(std::move(route));
-        out.route_biased.push_back(moe_->last_biased());
+        out.routes.push_back(std::move(route));  // ids/weights: post-sync
+        out.route_biased.emplace_back();
+        ++moe_prefill_calls;
       }
     }
     if (decode_row) prefetch_attention_side(layer + 1);
@@ -944,6 +950,24 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // materializer — the eager step and the graph-era collect produce
   // byte-identical Outputs through it.
   if (decode_row) return session_decode_tail(T);
+
+  // Prefill: the route traces from this chunk's pinned staging — the
+  // layers' async D2H copies joined at the sync above — into the
+  // placeholder entries the loop pushed, one per MoE layer in layer order.
+  {
+    const size_t K = static_cast<size_t>(moe_cfg_.top_k);
+    const size_t E = static_cast<size_t>(moe_cfg_.n_experts);
+    const size_t mt = static_cast<size_t>(max_tokens_);
+    const size_t rows = static_cast<size_t>(T);
+    for (size_t li = 0; li < out.routes.size() && li < static_cast<size_t>(moe_prefill_calls); ++li) {
+      const int32_t* ids = moe_prefill_trace_ids_ + li * mt * K;
+      const float* ws = moe_prefill_trace_weights_ + li * mt * K;
+      const float* bs = moe_prefill_trace_biased_ + li * mt * E;
+      out.routes[li].ids.assign(ids, ids + rows * K);
+      out.routes[li].weights.assign(ws, ws + rows * K);
+      out.route_biased[li].assign(bs, bs + rows * E);
+    }
+  }
 
   // Last row only (see the runner's header note) — from the pinned
   // mirrors' row 0, which the D2H above filled with row T-1.

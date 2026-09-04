@@ -83,6 +83,15 @@ class GlmMoeLayer {
 
   // out[tokens, hidden] = routed_sum + shared(hidden); out is zeroed
   // internally and accumulated in place. Synchronizes the stream once.
+  // The prefill path without a host sync (2026-09-04): the router's
+  // ids stay on the device, a segmentation kernel builds the rows, the
+  // slot map and the segment table there, and the grouped chain runs on
+  // them — nothing waits on the host. Routing traces ride async copies
+  // into `trace` (pinned; materialize after the stream's next sync;
+  // last_ids()/last_weights()/last_biased() are NOT updated). Bitwise the
+  // host path's output (glm_moe_test pins it).
+  void enqueue_prefill(const uint16_t* hidden, uint16_t* out, int tokens,
+                       MoeTraceStaging* trace, cudaStream_t stream);
   void enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
                cudaStream_t stream);
 

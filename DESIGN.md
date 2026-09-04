@@ -1089,13 +1089,19 @@ compressed E4M3+scale weights (§4).
 
 Two execution paths, as built:
 
-- *Prefill* (chunk-amortized; the grouped path since 2026-09-04): the
-  router's ids come to the host once per layer (one sync per MoE layer per
-  chunk) and the host segments the (token, slot) pairs by ascending expert
-  into pinned staging uploaded once; then the layer's rows — every routed
-  pair in segment order, the tokens once more for the shared expert — are
-  gathered at once and run as ONE launch per matrix over every non-empty
-  segment (`moe_grouped_gemv_kernel`: block (x, y) is segment y against
+- *Prefill* (chunk-amortized; the grouped path since 2026-09-04, without
+  a host sync since the same evening): the router's ids stay on the
+  device and `moe_segment_kernel` (one block, a thread per expert) builds
+  the segmentation there — the (token, slot) pairs by ascending expert,
+  stable in (token, slot) within one, the slot→row map, a segment table
+  with every expert (empty ones included; their blocks exit) and the
+  shared segment last — while the routing traces ride async copies into
+  per-layer pinned staging materialized after the chunk's final sync
+  (`Outputs.routes` unchanged); the host-orchestrated `enqueue` remains as
+  the reference the gates pin the device path against, bitwise. Then the
+  layer's rows — every routed pair in segment order, the tokens once more
+  for the shared expert — are gathered at once and run as ONE launch per
+  matrix over every segment (`moe_grouped_gemv_kernel`: block (x, y) is segment y against
   eight weight rows of its expert, rows staged four at a time through the
   same `fp8_gemv::block_rows` the decode GEMV uses, so every output row is
   bitwise the chunked GEMV's; the shared segment alone splits across

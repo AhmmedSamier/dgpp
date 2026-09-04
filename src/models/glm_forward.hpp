@@ -734,6 +734,12 @@ class GlmDiagnosticModel {
   int32_t* moe_trace_ids_ = nullptr;    // [n_moe_layers_ * kDecodeRows * K]
   float* moe_trace_weights_ = nullptr;  // same shape
   float* moe_trace_biased_ = nullptr;   // [n_moe_layers_ * kDecodeRows * E]
+  // The prefill's route-trace staging (2026-09-04): the same shapes over
+  // max_tokens rows, filled by async D2H during the chunk and materialized
+  // after its final sync — the prefill runs with no per-layer host sync.
+  int32_t* moe_prefill_trace_ids_ = nullptr;    // [n_moe_layers_ * max_tokens * K]
+  float* moe_prefill_trace_weights_ = nullptr;
+  float* moe_prefill_trace_biased_ = nullptr;   // [n_moe_layers_ * max_tokens * E]
   // The decode tail's PINNED mirrors of the last-row logits and final
   // hidden (2026-09-02). The host used to read those rows straight out of
   // the managed logits_/normed_ after the step's sync — a CPU access to a

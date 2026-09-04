@@ -398,6 +398,11 @@ dgpp::glm::AdmissionPolicy g_admission;
 // [--bulk-slots N] [--bulk-slot-bytes B].
 int g_bulk_bench_mb = 0, g_bulk_bench_iters = 10, g_bulk_slots_override = 0;
 int64_t g_bulk_slot_bytes_override = 0;
+// --prefill-repeat N: prefill the prompt N times (the slot reopens each
+// time) and log each — the first pays the process's one-time setup (the
+// lazily built layer objects, their scratch, the GEMM plans), the later
+// ones are the steady state the service sees after its warm-up.
+int g_prefill_repeat = 1;
 
 // The memory receipt: EXACTLY what the model pre-allocates for this knob
 // combination, by region, plus the per-request reserve math. Runs with or
@@ -1404,13 +1409,25 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     } else if (incremental) {
       // The serving path (Stage 2): prefill once, one stateful step per
       // token, distributed pick over the sharded head's slices.
+      // Repeats before the timed one: the first prefill of a process pays
+      // the one-time setup; --prefill-repeat exposes the steady state.
+      for (int rep = 1; rep < g_prefill_repeat; ++rep) {
+        const auto tr = std::chrono::steady_clock::now();
+        (void)model.session_prefill(prompt);
+        DGPP_LOG_INFO("rank {} prefill (repeat {} of {}): {} tokens in {:.0f}ms",
+                      rank, rep, g_prefill_repeat, prompt.size(),
+                      std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - tr)
+                          .count());
+      }
       const auto t0 = std::chrono::steady_clock::now();
       const GlmDiagnosticModel::Outputs pre = model.session_prefill(prompt);
       const double prefill_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - t0)
                                     .count();
-      DGPP_LOG_INFO("rank {} prefill: {} tokens in {:.0f}ms", rank,
-                    prompt.size(), prefill_ms);
+      DGPP_LOG_INFO("rank {} prefill: {} tokens in {:.0f}ms{}", rank,
+                    prompt.size(), prefill_ms,
+                    g_prefill_repeat > 1 ? " (steady state: after the repeats)" : "");
       // Teacher forcing: score this step's logits against the text's next
       // token, then feed THAT token (every rank holds the same text, so
       // the ranks agree without the pick; the pick still runs for its
@@ -1679,6 +1696,7 @@ int main(int argc, char** argv) {
       "  [--bulk-bench MIB [--bulk-bench-iters N] [--bulk-slots N]\n"
       "   [--bulk-slot-bytes B]]  (the fabric's bulk all-reduce timed by size;\n"
       "   the world forms, no model loads)\n"
+      "  [--prefill-repeat N]  (prefill N times; the last is the steady state)\n"
       "  [--sched-plan]\n"
       "  [--admission full|grow] [--admission-window N (256)]  (M6 6d)\n";
 
@@ -1754,6 +1772,7 @@ int main(int argc, char** argv) {
     }
     else if (a == "--rendezvous-timeout-ms") rendezvous_timeout_ms = std::stoi(next());
     else if (a == "--bulk-bench") g_bulk_bench_mb = std::stoi(next());
+    else if (a == "--prefill-repeat") g_prefill_repeat = std::max(1, std::stoi(next()));
     else if (a == "--bulk-bench-iters") g_bulk_bench_iters = std::stoi(next());
     else if (a == "--bulk-slots") g_bulk_slots_override = std::stoi(next());
     else if (a == "--bulk-slot-bytes") g_bulk_slot_bytes_override = std::stoll(next());

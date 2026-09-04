@@ -1,5 +1,6 @@
 #include "kernels/glm_moe_launch.hpp"
 
+#include <algorithm>
 #include <climits>
 #include <stdexcept>
 #include <string>
@@ -634,11 +635,15 @@ void launch_moe_grouped_gemv(const uint16_t* act, size_t act_stride,
     throw std::invalid_argument("moe grouped gemv: k exceeds the smem budget");
   if (max_rows <= 0)
     throw std::invalid_argument("moe grouped gemv: max_rows must be positive");
-  if (rows_per_block <= 0) rows_per_block = max_rows;  // no split
+  // No split: one z block per segment walking every row (the segments'
+  // lengths need not be known on the host — device segmentation).
+  const unsigned z_ext = rows_per_block > 0
+                             ? static_cast<unsigned>((max_rows + rows_per_block - 1) /
+                                                     rows_per_block)
+                             : 1u;
+  if (rows_per_block <= 0) rows_per_block = INT_MAX;
   const dim3 grid((n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps,
-                  static_cast<unsigned>(n_segs),
-                  static_cast<unsigned>((max_rows + rows_per_block - 1) /
-                                        rows_per_block));
+                  static_cast<unsigned>(n_segs), z_ext);
   moe_grouped_gemv_kernel<OutT>
       <<<grid, fp8_gemv::kThreads, gemv::smem_bytes(gemv::kMaxRows, k), stream>>>(
           act, act_stride, segs, views, which, out, out_stride, n, k,
@@ -647,6 +652,46 @@ void launch_moe_grouped_gemv(const uint16_t* act, size_t act_stride,
 }
 
 constexpr int kAccumMaxTopK = 16;
+constexpr int kSegmentMaxExperts = 1024;
+
+// One block, one thread per expert: counts, an exclusive scan, then each
+// thread places its expert's (token, slot) pairs in (token, slot) order —
+// exactly the host path's stable placement — and writes its segment.
+__global__ void moe_segment_kernel(const int32_t* __restrict__ ids, int tokens,
+                                   int K, int E, int32_t* __restrict__ rows,
+                                   int32_t* __restrict__ slot_row,
+                                   MoeSegment* __restrict__ segs) {
+  __shared__ int s_count[kSegmentMaxExperts];
+  __shared__ int s_begin[kSegmentMaxExperts];
+  const int tk = tokens * K;
+  for (int e = threadIdx.x; e < E; e += blockDim.x) {
+    int c = 0;
+    for (int i = 0; i < tk; ++i) c += ids[i] == e;
+    s_count[e] = c;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    int acc = 0;
+    for (int e = 0; e < E; ++e) {
+      s_begin[e] = acc;
+      acc += s_count[e];
+    }
+  }
+  __syncthreads();
+  for (int e = threadIdx.x; e < E; e += blockDim.x) {
+    int pos = s_begin[e];
+    for (int i = 0; i < tk; ++i) {
+      if (ids[i] != e) continue;
+      rows[pos] = i / K;
+      slot_row[i] = pos;
+      ++pos;
+    }
+    segs[e] = MoeSegment{s_begin[e], s_count[e], e};
+  }
+  // The shared expert: every token once more, after the routed rows.
+  for (int t = threadIdx.x; t < tokens; t += blockDim.x) rows[tk + t] = t;
+  if (threadIdx.x == 0) segs[E] = MoeSegment{tk, tokens, E};
+}
 
 __global__ void moe_accum_ordered_kernel(uint16_t* __restrict__ out,
                                          const float* __restrict__ down,
@@ -706,6 +751,21 @@ void launch_moe_grouped_gemv_f32(const uint16_t* act, size_t act_stride,
   launch_moe_grouped_gemv<float>(act, act_stride, segs, n_segs, max_rows,
                                  rows_per_block, views, which, out, out_stride, n,
                                  k, stream);
+}
+
+void launch_moe_segment(const int32_t* ids, int tokens, int top_k,
+                        int n_experts, int32_t* rows, int32_t* slot_row,
+                        MoeSegment* segs, cudaStream_t stream) {
+  if (tokens <= 0) return;
+  if (!ids || !rows || !slot_row || !segs)
+    throw std::invalid_argument("moe segment: null pointer");
+  if (top_k < 1 || top_k > kAccumMaxTopK || n_experts < 1 ||
+      n_experts > kSegmentMaxExperts)
+    throw std::invalid_argument("moe segment: top_k or n_experts out of range");
+  const int threads = std::min(1024, ((n_experts + 31) / 32) * 32);
+  moe_segment_kernel<<<1, threads, 0, stream>>>(ids, tokens, top_k, n_experts,
+                                                 rows, slot_row, segs);
+  DGPP_CUDA_OK(cudaGetLastError());
 }
 
 void launch_moe_accum_ordered(uint16_t* out, const float* down,
