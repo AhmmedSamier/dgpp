@@ -61,8 +61,9 @@
 // multiply-add an explicit fma, and every reduction a fixed order — so the
 // device verdict kernel reproduces this file bit for bit, and so do two
 // fabric nodes with different libm builds. The slice normalizer's sum runs
-// in kLseChunk-sized chunks (chunk partials sequential, then folded in
-// chunk order), the order a parallel kernel can keep exactly.
+// in fixed pairwise trees (kLseChunk-id chunks halved recursively, the
+// chunk partials halved the same way), the order a parallel kernel keeps
+// exactly with a short dependent chain.
 
 namespace dgpp::glm_sample {
 
@@ -484,23 +485,40 @@ inline std::vector<Candidate> merge_topk(
 // teacher-forced sampling profiler uses one value per vocab shard and folds
 // those with logaddexp; this is intentionally fp64 measurement arithmetic,
 // separate from the fp32 device verdict that the production sampler will use.
-// The slice normalizer's summation order, shared with the device kernel
-// that computes it in parallel: chunks of kLseChunk consecutive elements
-// summed sequentially, the chunk partials folded sequentially in chunk
-// order. A parallel implementation that keeps this order is bitwise this.
+// The slice normalizer's summation order, shared with the device kernels
+// that compute it in parallel: the terms of each kLseChunk-id chunk (ids
+// past the end are zeros) summed by recursive halving — t[i] += t[i + h]
+// for h = kLseChunk/2 down to 1 — and the chunk partials, padded with
+// zeros to a power of two, summed the same way. Every add's operands are
+// fixed by position, so any thread mapping that keeps the trees is
+// bitwise this; the dependent chain is 8 + log2(chunks) adds where a
+// sequential sum's was 256 + chunks (a dependent fp64 add is ~90 ns on
+// GB10, which made the sequential order ~30 µs per slice on the device).
 inline constexpr int kLseChunk = 256;
+
+// t[0, width) summed by recursive halving; width a power of two.
+inline double halving_sum(double* t, int width) {
+  for (int h = width >> 1; h >= 1; h >>= 1)
+    for (int i = 0; i < h; ++i) t[i] += t[i + h];
+  return t[0];
+}
 
 template <typename ScaledAt>
 inline double chunked_exp_sum(int n, double top, ScaledAt scaled_at) {
-  double sum = 0.0;
-  for (int c0 = 0; c0 < n; c0 += kLseChunk) {
-    const int c1 = std::min(n, c0 + kLseChunk);
-    double partial = 0.0;
-    for (int i = c0; i < c1; ++i)
-      partial += detmath::exp_d(static_cast<double>(scaled_at(i)) - top);
-    sum += partial;
+  const int nchunks = (n + kLseChunk - 1) / kLseChunk;
+  int width = 1;
+  while (width < nchunks) width <<= 1;
+  std::vector<double> partials(static_cast<size_t>(width), 0.0);
+  double terms[kLseChunk];
+  for (int c = 0; c < nchunks; ++c) {
+    const int c0 = c * kLseChunk;
+    for (int j = 0; j < kLseChunk; ++j)
+      terms[j] = c0 + j < n
+                     ? detmath::exp_d(static_cast<double>(scaled_at(c0 + j)) - top)
+                     : 0.0;
+    partials[static_cast<size_t>(c)] = halving_sum(terms, kLseChunk);
   }
-  return sum;
+  return halving_sum(partials.data(), width);
 }
 
 inline double slice_logsumexp(const float* logits, int n) {

@@ -1003,13 +1003,14 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
         next = d0.result.token;
         *decided = {next};
         rows = {next};
-        // The draft leaves the device count table it was counted into.
+      } else {
+        // The draft stood after all: it joins the device count table (the
+        // verdict committed only the consumed token on its provisional
+        // reject), then the verify's second row runs eagerly and is sampled.
         glm_sample_adjust_count(d_counts_ + static_cast<size_t>(req) * vocab_,
-                                fed_draft, -1, static_cast<int>(vocab_),
+                                fed_draft, +1, static_cast<int>(vocab_),
                                 model_->stream());
         DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
-      } else {
-        // The draft stood: the verify's second row, eagerly, then its sample.
         context.push_back(fed_draft);
         const GlmDiagnosticModel::Outputs row1 =
             model_->session_verify(req, std::vector<int64_t>{fed_draft});

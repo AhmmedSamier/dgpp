@@ -801,6 +801,8 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     int32_t* d_counts = device_alloc<int32_t>(counts_in.size());
     int64_t* d_fed = device_alloc<int64_t>(fed.size());
     int64_t* d_pos = device_alloc<int64_t>(row_positions.size());
+    double* d_scratch =
+        device_alloc<double>(dgpp::glm_sample_scratch_elems(rows, count));
     DGPP_CUDA_OK(cudaMemcpy(d_logits, slice.data(), slice.size() * 4,
                             cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemcpy(d_carry, &carry, 8, cudaMemcpyHostToDevice));
@@ -817,7 +819,8 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     dgpp::glm_sample_local(d_logits, rows, count, k * count, vocab, k,
                            world, candidates, d_specs, rows_per_request,
                            d_fed, d_pos, /*position_stride=*/rows_per_request,
-                           d_counts, d_carry, d_table, d_locals, nullptr);
+                           d_counts, d_carry, d_table, d_locals, d_scratch,
+                           nullptr);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
     std::vector<uint16_t> table(table_elems);
     DGPP_CUDA_OK(cudaMemcpy(table.data(), d_table, table_elems * 2,
@@ -849,9 +852,10 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     cudaFree(d_counts);
     cudaFree(d_fed);
     cudaFree(d_pos);
+    cudaFree(d_scratch);
   }
   // The verdict on every rank over the folded table (the count table as the
-  // local kernel left it: every rank's is identical).
+  // local kernel left it: untouched, every rank's identical).
   for (int k = 0; k < world; ++k) {
     uint16_t* d_table = device_alloc<uint16_t>(table_elems);
     uint64_t* d_carry = device_alloc<uint64_t>(1);
@@ -1051,11 +1055,16 @@ DGPP_TEST(sample_pick_matches_host_oracle_bitwise_over_simulated_world) {
             require(bits_equal(run.penalized[k][static_cast<size_t>(q) * count + i], aslice[i]),
                     "penalized slice differs from apply_penalties on rank " +
                         std::to_string(k) + " request " + std::to_string(q));
-          // ... and counted the fed token exactly once.
-          for (int v = 0; v < vocab; ++v)
+          // ... without touching the count table; the verdict then
+          // commits the fed token exactly once.
+          for (int v = 0; v < vocab; ++v) {
             require(run.counts[k][static_cast<size_t>(q) * vocab + v] ==
+                        counts[static_cast<size_t>(q) * vocab + v],
+                    "the local kernels must not write the count table");
+            require(run.counts_after[k][static_cast<size_t>(q) * vocab + v] ==
                         host_counts[static_cast<size_t>(v)],
-                    "count table drifted");
+                    "count table after the verdict drifted");
+          }
           const std::vector<Candidate> want =
               dgpp::glm_sample::local_topk(aslice, count, k * count, shape.candidates);
           const uint16_t* grp = run.folded.data() +
@@ -1155,6 +1164,121 @@ DGPP_TEST(sample_pick_matches_host_oracle_bitwise_over_simulated_world) {
           "the sweep must exercise both outcomes (resolved " +
               std::to_string(resolved_total) + ", fallback " +
               std::to_string(fallback_total) + ")");
+}
+
+// The local top-k's three select paths, on slices wider than the shared
+// list: the ids at or above the per-thread-maxima bound taken whole (a
+// slice of distinct values: ~k of them reach the bound), the list radix
+// with its index tie pass (hundreds of ids tied at the top), and the
+// whole-slice radix (thousands tied: the list overflows). Every rank's
+// group is local_topk bitwise, every lse the host's, every decision the
+// oracle's.
+DGPP_TEST(sample_local_topk_tie_paths_match_local_topk) {
+  Rng rng(0x7e5);
+  constexpr int kWorld = 2;
+  constexpr int count = 8192;
+  constexpr int vocab = kWorld * count;
+  constexpr int candidates = 128;
+  constexpr int requests = 3;
+  const int tied_per_slice[] = {0, 450, 3000};
+  for (int fixture = 0; fixture < 3; ++fixture) {
+    std::vector<float> full(static_cast<size_t>(requests) * vocab);
+    for (int q = 0; q < requests; ++q) {
+      float* row = full.data() + static_cast<size_t>(q) * vocab;
+      for (int v = 0; v < vocab; ++v)
+        row[v] = static_cast<float>((rng.next() >> 8) % 100000) * 1e-4f - 5.0f;
+      // The ties sit at the top of EVERY slice (each rank must take the
+      // path under test), on ids drawn without replacement.
+      for (int k = 0; k < kWorld; ++k) {
+        std::vector<int> ids(count);
+        for (int i = 0; i < count; ++i) ids[static_cast<size_t>(i)] = i;
+        for (int j = 0; j < tied_per_slice[fixture]; ++j) {
+          const int pick = j + static_cast<int>(rng.next() % static_cast<uint64_t>(count - j));
+          std::swap(ids[static_cast<size_t>(j)], ids[static_cast<size_t>(pick)]);
+          row[k * count + ids[static_cast<size_t>(j)]] = 9.0f;
+        }
+      }
+    }
+    std::vector<dgpp::GlmSampleSpec> specs(requests);
+    specs[0].temperature = 1.0f;   // nucleus over the merged prefix
+    specs[0].top_p = 0.95f;
+    specs[1].temperature = 0.7f;   // the pure fp64 walk
+    specs[1].top_p = 1.0f;
+    specs[2].temperature = 0.0f;   // greedy through the full path
+    specs[2].logprobs = 2;
+    for (int q = 0; q < requests; ++q) {
+      specs[q].seed = 0x4000 + q + 7 * fixture;
+      specs[q].counter = 1;
+    }
+    std::vector<int32_t> counts(static_cast<size_t>(requests) * vocab, 0);
+    std::vector<int64_t> fed(requests), positions(requests, 3);
+    for (int q = 0; q < requests; ++q) fed[q] = static_cast<int64_t>(rng.next() % vocab);
+    const SampleWorldRun run = run_sample_world(full, requests, kWorld, count,
+                                                specs, counts, fed, positions,
+                                                candidates, 0x5555ull);
+    const size_t group = dgpp::glm_sample_rank_group_slots(candidates);
+    for (int q = 0; q < requests; ++q) {
+      const float* row = full.data() + static_cast<size_t>(q) * vocab;
+      const float T = specs[q].temperature > 0.0f ? specs[q].temperature : 1.0f;
+      std::vector<std::vector<Candidate>> shards;
+      std::vector<double> lses;
+      for (int k = 0; k < kWorld; ++k) {
+        const float* slice = row + k * count;
+        const std::vector<Candidate> want =
+            dgpp::glm_sample::local_topk(slice, count, k * count, candidates);
+        require(static_cast<int>(want.size()) == candidates, "fixture width");
+        const uint16_t* grp = run.folded.data() +
+                              (static_cast<size_t>(q) * kWorld + k) * group;
+        for (int j = 0; j < candidates; ++j) {
+          const uint16_t* slot = grp + static_cast<size_t>(j) * kPickSlotsPerRank;
+          uint32_t bits = 0;
+          std::memcpy(&bits, &want[static_cast<size_t>(j)].logit, 4);
+          require(decode_digits(slot + kPickLogitDigits, kPickIdDigits) ==
+                          static_cast<uint64_t>(want[static_cast<size_t>(j)].id) &&
+                      decode_digits(slot, kPickLogitDigits) == bits,
+                  "fixture " + std::to_string(fixture) + " rank " +
+                      std::to_string(k) + " request " + std::to_string(q) +
+                      ": candidate " + std::to_string(j) + " differs from local_topk");
+        }
+        const double lse = dgpp::glm_sample::slice_logsumexp(slice, count, T);
+        const uint64_t lse_bits = decode_digits(
+            grp + static_cast<size_t>(candidates) * kPickSlotsPerRank,
+            dgpp::kSampleLseDigits);
+        double got = 0.0;
+        std::memcpy(&got, &lse_bits, 8);
+        require(bits_equal(got, lse), "slice log-sum-exp differs");
+        shards.push_back(want);
+        lses.push_back(lse);
+      }
+      const std::vector<Candidate> merged =
+          dgpp::glm_sample::merge_topk(shards, candidates);
+      const double Z = dgpp::glm_sample::merge_logsumexp(lses);
+      dgpp::glm_sample::Params p = params_of(specs[q]);
+      p.logprobs = specs[q].logprobs;
+      int32_t want_token = -1;
+      bool want_resolved = true;
+      if (specs[q].temperature > 0.0f) {
+        dgpp::glm_sample::Rng host{specs[q].seed, specs[q].counter};
+        const dgpp::glm_sample::PrefixDecision d =
+            dgpp::glm_sample::sample_from_prefix(merged, vocab, Z, p, host);
+        want_resolved = d.resolved;
+        want_token = d.resolved ? d.result.token : merged[0].id;
+      } else {
+        want_token = merged[0].id;
+      }
+      for (int k = 0; k < kWorld; ++k) {
+        require(run.verdicts[k][q].next == want_token,
+                "fixture " + std::to_string(fixture) + " request " +
+                    std::to_string(q) + ": device token " +
+                    std::to_string(run.verdicts[k][q].next) + " != host " +
+                    std::to_string(want_token));
+        require((run.outcomes[k][q].fallback == 1) == !want_resolved,
+                "fallback flag differs from the oracle");
+        if (specs[q].temperature > 0.0f)
+          require(bits_equal(run.outcomes[k][q].normalizer, Z), "normalizer differs");
+      }
+    }
+  }
 }
 
 DGPP_TEST(sample_count_tokens_accumulates_the_prompt) {
@@ -1299,22 +1423,24 @@ DGPP_TEST(sample_pick_t2_matches_spec_oracle_over_simulated_world) {
       dgpp::glm_sample::Rng host{specs[q].seed, specs[q].counter};
       const dgpp::glm_sample::SpecPrefixDecision d0 =
           dgpp::glm_sample::spec_accept_from_prefix(m0, vocab, Z0, draft, p, host);
-      // Expected verdict/outcome and the count table after the step.
+      // Expected verdict/outcome and the count table after the step: the
+      // consumed token always, the draft only when it stood (a provisional
+      // reject leaves it to the host).
       int want_accepted = 1, want_fallback_row = -1;
       int32_t want_w0 = -1, want_w1 = -1;
-      std::vector<int32_t> want_counts = ctx1;
+      std::vector<int32_t> want_counts = ctx0;
       if (!d0.resolved) {
         ++fallback0;
         want_fallback_row = 0;
-        want_w0 = m0[0].id;  // provisional reject: the count table keeps both
+        want_w0 = m0[0].id;
       } else if (!d0.accepted) {
         ++rejects;
         want_w0 = d0.result.token;
-        want_counts[static_cast<size_t>(draft)] -= 1;
       } else {
         ++accepts;
         want_accepted = 2;
         want_w0 = draft;
+        want_counts = ctx1;
         const dgpp::glm_sample::PrefixDecision d1 =
             dgpp::glm_sample::sample_from_prefix(m1, vocab, Z1, p, host);
         if (d1.resolved) {

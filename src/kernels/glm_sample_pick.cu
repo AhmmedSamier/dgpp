@@ -11,21 +11,45 @@
 // Compiled with --fmad=false (CMakeLists): no multiply-add here may be
 // contracted, so every expression rounds exactly as the host's does under
 // -ffp-contract=off. The deterministic exp/log name fma() themselves.
+//
+// Cost shape (GB10, 38,720-id slices, k = 128, the kernel bench). The
+// deterministic fp64 exp is a 13-term polynomial and this part runs fp64
+// at 1/64 rate: a slice's 38,720 normalizer terms are ~250 µs of one SM's
+// time however a single block spreads them, so they run on a chunk grid
+// (one block per 256 ids, every SM busy: ~16 µs for the batch). A
+// dependent fp64 add is ~90 ns, so the normalizer's summation order is a
+// fixed pairwise tree (glm_sample::chunked_exp_sum) rather than the
+// sequential chunk sum that cost ~30 µs per slice. The local top-k reads
+// the slice twice: each thread's largest key, whose k-th largest over the
+// block is a lower bound only ~k(1 + a few percent) ids reach, then those
+// ids into shared memory to sort (or, tie-heavy, to radix-select) — in
+// place of the streaming 2,048-key bitonic select, which cost ~680 µs per
+// slice. The verdict decodes, merges (by rank counting) and evaluates
+// every candidate's fp64 mass in parallel; only the decision's ordered
+// walks (one fp64 prefix chain per row) stay on one thread. Measured:
+// the three local launches 2 + 16 + 26 µs over two rows (was ~900 µs per
+// row, rows serial within a request), the verdict 25/33 µs at T=1/T=2
+// (was ~250/290).
 
 namespace dgpp {
 
 namespace {
 
-constexpr int kLocalThreads = 1024;
+constexpr int kLocalThreads = 1024;             // the per-row select block
+constexpr int kChunkThreads = kSampleLseChunk;  // one id per thread
 constexpr int kVerdictThreads = 256;
-constexpr int kKeyIdxBits = 21;  // vocab ids < 2^21
+constexpr int kRadixBins = 256;
+constexpr int kKeyIdxBits = 21;       // vocab ids < 2^21
 constexpr uint64_t kKeyIdxMask = (1ull << kKeyIdxBits) - 1;
 constexpr uint64_t kKeyMax = ~0ull;
+constexpr uint32_t kSplitMax = 0xFFFFFFFFu;
 constexpr int32_t kNoId = -1;
 
 static_assert(kSampleLseChunk == 256, "the host's glm_sample::kLseChunk");
-static_assert(kSelectTile >= 2 * kSampleMaxCandidates,
-              "select_topk_stream needs a tile of at least 2k keys");
+static_assert(kSampleMaxChunks == kLocalThreads,
+              "the row block folds one chunk partial per thread");
+static_assert(kSampleMaxCandidates <= kLocalThreads,
+              "the row block sorts the survivors with one thread per pair");
 
 __device__ inline void encode_digits(uint16_t* slots, uint64_t value,
                                      int digits) {
@@ -39,16 +63,17 @@ __device__ inline uint64_t decode_digits(const uint16_t* slots, int digits) {
   return value;
 }
 
-// (~sortable(logit) << 21) | id: the smallest key is the canonical first
-// candidate (glm_sample::candidate_before as an integer order).
-__device__ inline uint64_t composite_key(float logit, int32_t id) {
-  return (static_cast<uint64_t>(~sortable_f32_dev(logit)) << kKeyIdxBits) |
-         static_cast<uint64_t>(id);
+// The order key of a logit: sortable_f32 of the value with -0 folded onto
+// +0, so that the integer order is exactly glm_sample::candidate_before's
+// float comparison (which cannot tell the zeros apart and breaks their tie
+// by id). Higher key, higher logit.
+__device__ inline uint32_t primary_key(float logit) {
+  return sortable_f32_dev(logit == 0.0f ? 0.0f : logit);
 }
-__device__ inline float key_logit(uint64_t key) {
-  const uint32_t s = ~static_cast<uint32_t>(key >> kKeyIdxBits);
-  const uint32_t u = (s & 0x80000000u) ? (s & 0x7fffffffu) : ~s;
-  return __uint_as_float(u);
+// (~primary << 21) | id: the SMALLEST key is the canonical first candidate.
+__device__ inline uint64_t composite_key(float logit, int32_t id) {
+  return (static_cast<uint64_t>(~primary_key(logit)) << kKeyIdxBits) |
+         static_cast<uint64_t>(id);
 }
 __device__ inline int32_t key_id(uint64_t key) {
   return static_cast<int32_t>(key & kKeyIdxMask);
@@ -138,202 +163,528 @@ __device__ inline float block_max_f(float v, float* scratch) {
   return out;
 }
 
+// The request's spec as a row sees it. The full path (stochastic rows, and
+// greedy rows that report logprobs or carry penalties: their normalizer and
+// scaled logits are the raw distribution's, temperature 1) is `sampled`.
+struct RowSpec {
+  bool active;
+  bool sampled;
+  bool penalized;
+  GlmSampleSpec spec;
+};
+
+__device__ inline RowSpec row_spec(const GlmSampleSpec* specs, int q,
+                                   const int64_t* positions,
+                                   int position_stride) {
+  RowSpec rs;
+  rs.active = positions == nullptr || positions[q * position_stride] >= 0;
+  rs.spec = specs[q];
+  rs.penalized = rs.spec.repetition_penalty != 1.0f ||
+                 rs.spec.frequency_penalty != 0.0f ||
+                 rs.spec.presence_penalty != 0.0f;
+  rs.sampled = rs.active && (rs.spec.temperature > 0.0f ||
+                             rs.spec.logprobs >= 0 || rs.penalized);
+  if (rs.spec.temperature <= 0.0f) rs.spec.temperature = 1.0f;
+  return rs;
+}
+
+// Row t's context count of id v: the request's table (every token
+// committed through the previous step) plus this step's fed tokens up to
+// and including row t's — the table itself is untouched until the verdict
+// commits (glm_sample::SampledSpeculator's rule: the draft joins the
+// context only when it stands).
+__device__ inline int32_t context_count(const int32_t* counts_q, int32_t v,
+                                        const int64_t* fed, int row0, int t) {
+  int32_t c = counts_q[v];
+  for (int j = 0; j <= t; ++j)
+    if (fed[row0 + j] == static_cast<int64_t>(v)) ++c;
+  return c;
+}
+
+// ---------------------------------------------------------------------------
+// Kernel 1a, one block per 256-id chunk of every row: the penalties in
+// place (glm_sample::apply_penalties) and the chunk's max of the
+// temperature-scaled slice.
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
+    float* __restrict__ logits, int vocab_count, int vocab_begin,
+    int vocab_size, const GlmSampleSpec* __restrict__ specs,
+    int rows_per_request, const int64_t* __restrict__ fed,
+    const int64_t* __restrict__ positions, int position_stride,
+    const int32_t* __restrict__ counts, double* __restrict__ maxes) {
+  __shared__ float fred[32];
+  const int c = blockIdx.x;
+  const int row = blockIdx.y;
+  const int q = row / rows_per_request;
+  const int t = row % rows_per_request;
+  const RowSpec rs = row_spec(specs, q, positions, position_stride);
+  if (!rs.sampled) return;
+  const int nchunks = gridDim.x;
+  float* slice = logits + static_cast<size_t>(row) * vocab_count;
+  const int i = c * kChunkThreads + threadIdx.x;
+  float scaled = -INFINITY;
+  if (i < vocab_count) {
+    float l = slice[i];
+    if (rs.penalized) {
+      const int32_t cnt =
+          context_count(counts + static_cast<size_t>(q) * vocab_size,
+                        vocab_begin + i, fed, q * rows_per_request, t);
+      if (cnt != 0) {
+        l = penalize(l, cnt, rs.spec);
+        slice[i] = l;
+      }
+    }
+    scaled = __fdiv_rn(l, rs.spec.temperature);
+  }
+  const float top = block_max_f(scaled, fred);
+  if (threadIdx.x == 0)
+    maxes[static_cast<size_t>(row) * nchunks + c] = static_cast<double>(top);
+}
+
+// ---------------------------------------------------------------------------
+// Kernel 1b, the same grid: each chunk's normalizer partial in the host's
+// order — the slice max, the chunk's terms exp_d(scaled - max) summed by
+// recursive halving (glm_sample::chunked_exp_sum's inner tree).
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(kChunkThreads) sample_partials_kernel(
+    const float* __restrict__ logits, int vocab_count,
+    const GlmSampleSpec* __restrict__ specs, int rows_per_request,
+    const int64_t* __restrict__ positions, int position_stride,
+    const double* __restrict__ maxes, double* __restrict__ partials) {
+  __shared__ double terms[kChunkThreads];
+  __shared__ float fred[32];
+  const int c = blockIdx.x;
+  const int row = blockIdx.y;
+  const int q = row / rows_per_request;
+  const RowSpec rs = row_spec(specs, q, positions, position_stride);
+  if (!rs.sampled) return;
+  const int nchunks = gridDim.x;
+  float m = -INFINITY;
+  for (int j = threadIdx.x; j < nchunks; j += kChunkThreads)
+    m = fmaxf(m, static_cast<float>(maxes[static_cast<size_t>(row) * nchunks + j]));
+  const float top = block_max_f(m, fred);  // exact: any order
+  const float* slice = logits + static_cast<size_t>(row) * vocab_count;
+  const int c0 = c * kChunkThreads;
+  const int i = c0 + threadIdx.x;
+  terms[threadIdx.x] =
+      i < vocab_count
+          ? detmath::exp_d(
+                static_cast<double>(__fdiv_rn(slice[i], rs.spec.temperature)) -
+                static_cast<double>(top))
+          : 0.0;
+  __syncthreads();
+  // glm_sample::halving_sum over the chunk: eight dependent adds.
+  for (int h = kChunkThreads >> 1; h >= 1; h >>= 1) {
+    if (threadIdx.x < h) terms[threadIdx.x] += terms[threadIdx.x + h];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+    partials[static_cast<size_t>(row) * nchunks + c] = terms[0];
+}
+
+// ---------------------------------------------------------------------------
+// The block-wide radix select: the threshold key of the `need` largest
+// 32-bit keys over [0, n) — four 8-bit passes from the top, a shared
+// histogram per pass over the keys still matching the resolved prefix.
+// Returns the threshold, how many of the keys EQUAL to it are wanted
+// (>= 1) and how many there are; keys above it are all wanted. All threads
+// of the block call it. Cheap for the shared-memory key sets it normally
+// runs on (one or two keys per thread); the whole-slice form behind
+// SliceKeyFn is the fallback for tie-heavy slices.
+// ---------------------------------------------------------------------------
+constexpr int kLoadBatch = 8;  // independent loads in flight per thread
+
+template <typename KeyFn>
+__device__ inline void radix_threshold(KeyFn key_of, int n, int need,
+                                       uint32_t* hist, int* found,
+                                       uint32_t* threshold, int* need_at,
+                                       int* count_at) {
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int warp = tid >> 5;
+  uint32_t prefix = 0, mask = 0;
+  int count = 0;
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    for (int b = tid; b < kRadixBins; b += blockDim.x) hist[b] = 0;
+    __syncthreads();
+    for (int base = tid; base < n; base += blockDim.x * kLoadBatch) {
+      uint32_t key[kLoadBatch];
+      bool have[kLoadBatch];
+#pragma unroll
+      for (int b = 0; b < kLoadBatch; ++b) {
+        const int i = base + b * blockDim.x;
+        have[b] = i < n;
+        key[b] = have[b] ? key_of(i) : 0u;
+      }
+#pragma unroll
+      for (int b = 0; b < kLoadBatch; ++b)
+        if (have[b] && (key[b] & mask) == prefix)
+          atomicAdd(&hist[(key[b] >> shift) & 255u], 1u);
+    }
+    __syncthreads();
+    if (warp == 0) {
+      // Lane l owns bins 255-8l .. 248-8l; the cumulative count from the
+      // top bin down locates the bin holding the need-th largest key.
+      int local = 0;
+      for (int j = 0; j < 8; ++j) local += static_cast<int>(hist[255 - 8 * lane - j]);
+      int incl = local;
+      for (int off = 1; off < 32; off <<= 1) {
+        const int v = __shfl_up_sync(0xffffffffu, incl, off);
+        if (lane >= off) incl += v;
+      }
+      const int excl = incl - local;
+      if (excl < need && need <= incl) {
+        int cum = excl;
+        for (int j = 0; j < 8; ++j) {
+          const int b = 255 - 8 * lane - j;
+          const int h = static_cast<int>(hist[b]);
+          if (cum + h >= need) {
+            found[0] = b;
+            found[1] = need - cum;
+            found[2] = h;
+            break;
+          }
+          cum += h;
+        }
+      }
+    }
+    __syncthreads();
+    const int bin = found[0];
+    need = found[1];
+    count = found[2];
+    prefix |= static_cast<uint32_t>(bin) << shift;
+    mask |= 255u << shift;
+    __syncthreads();
+  }
+  *threshold = prefix;
+  *need_at = need;
+  *count_at = count;
+}
+
+// Key sets: a shared-memory list of keys (with the ids' local indices for
+// the tie pass), and the whole slice. Among keys equal to the value
+// threshold the LOWER index wins: the tie pass selects on ~index, every
+// other key 0 (below every tie).
+struct ListKeyFn {
+  const uint32_t* keys;
+  __device__ uint32_t operator()(int i) const { return keys[i]; }
+};
+struct ListTieKeyFn {
+  const uint32_t* keys;
+  const int32_t* idx;
+  uint32_t threshold;
+  __device__ uint32_t operator()(int i) const {
+    return keys[i] == threshold ? ~static_cast<uint32_t>(idx[i]) : 0u;
+  }
+};
 struct SliceKeyFn {
-  static constexpr bool kWarpCooperative = false;
   const float* slice;
-  int vocab_begin;
-  __device__ uint64_t operator()(int64_t i) const {
-    return composite_key(slice[i], vocab_begin + static_cast<int32_t>(i));
+  __device__ uint32_t operator()(int i) const { return primary_key(slice[i]); }
+};
+struct SliceTieKeyFn {
+  const float* slice;
+  uint32_t threshold;
+  __device__ uint32_t operator()(int i) const {
+    return primary_key(slice[i]) == threshold ? ~static_cast<uint32_t>(i) : 0u;
   }
 };
 
+// bitonic_sort_asc for the survivors (n <= kSampleMaxCandidates) on the
+// block's first kSortThreads threads only, synchronized by a named barrier:
+// a 1024-thread __syncthreads per stage cost more than the stage.
+constexpr int kSortThreads = 128;
+static_assert(kSampleMaxCandidates <= 2 * kSortThreads, "two pairs per thread");
+__device__ inline void sort_survivors(uint32_t* hi, uint32_t* lo, int n) {
+  for (int size = 2; size <= n; size <<= 1) {
+    for (int stride = size >> 1; stride > 0; stride >>= 1) {
+      for (int i = threadIdx.x; i < n; i += kSortThreads) {
+        const int j = i ^ stride;
+        if (j > i) cx_split(hi, lo, i, j, (i & size) == 0);
+      }
+      asm volatile("bar.sync 1, %0;" ::"r"(kSortThreads) : "memory");
+    }
+  }
+}
+
+// The ids at or above the per-thread-maxima bound that the row block
+// keeps in shared memory before the exact select; more than this (a
+// tie-heavy slice) falls back to the whole-slice radix passes.
+constexpr int kListCap = 2048;
+
 // ---------------------------------------------------------------------------
-// Kernel 1
+// Kernel 1c, one block per ROW: the row's wire group — the normalizer
+// folded from the chunk partials in chunk order, the exact local top-k in
+// canonical order (radix select, then one bitonic sort of the survivors) —
+// or the greedy row's argmax; the digest carry.
 // ---------------------------------------------------------------------------
 __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
-    float* __restrict__ logits, int rows, int vocab_count, int vocab_begin,
-    int vocab_size, int rank, int world, int candidates,
+    const float* __restrict__ logits, int rows, int vocab_count,
+    int vocab_begin, int rank, int world, int candidates,
     const GlmSampleSpec* __restrict__ specs, int rows_per_request,
-    const int64_t* __restrict__ fed, const int64_t* __restrict__ positions,
-    int position_stride, int32_t* __restrict__ counts,
-    const uint64_t* __restrict__ carry_digest, uint16_t* __restrict__ table,
-    GlmPickLocal* __restrict__ locals) {
-  __shared__ uint32_t best_hi[kSampleMaxCandidates];
-  __shared__ uint32_t best_lo[kSampleMaxCandidates];
-  __shared__ uint32_t tile_hi[kSelectTile];
-  __shared__ uint32_t tile_lo[kSelectTile];
-  __shared__ double partials[kLocalThreads];
+    const int64_t* __restrict__ positions, int position_stride,
+    const double* __restrict__ maxes, const double* __restrict__ partials,
+    int nchunks, const uint64_t* __restrict__ carry_digest,
+    uint16_t* __restrict__ table, GlmPickLocal* __restrict__ locals) {
+  __shared__ uint32_t hist[kRadixBins];
+  __shared__ int found[3];
+  __shared__ int sel_count;
+  __shared__ int list_count;
+  __shared__ uint32_t tmax[kLocalThreads];
+  __shared__ uint32_t list_key[kListCap];
+  __shared__ int32_t list_idx[kListCap];
+  __shared__ uint32_t sel_hi[kSampleMaxCandidates];
+  __shared__ uint32_t sel_lo[kSampleMaxCandidates];
+  __shared__ double fold[kSampleMaxChunks];
   __shared__ float fred[32];
   __shared__ uint64_t kred[32];
 
-  // One block per REQUEST, its rows in order: a T=2 request's second row
-  // penalizes with the draft already counted, which the first row's pass
-  // must precede.
-  const int q = blockIdx.x;
+  const int row = blockIdx.x;
+  const int q = row / rows_per_request;
   const int tid = threadIdx.x;
   const size_t group = glm_sample_rank_group_slots(candidates);
   const size_t row_slots = static_cast<size_t>(world) * group;
-  const bool active =
-      positions == nullptr || positions[q * position_stride] >= 0;
-  GlmSampleSpec spec = specs[q];
-  const bool penalized = spec.repetition_penalty != 1.0f ||
-                         spec.frequency_penalty != 0.0f ||
-                         spec.presence_penalty != 0.0f;
-  // The full path: stochastic rows, and greedy rows that report logprobs or
-  // carry penalties (their normalizer and scaled logits are the raw
-  // distribution's: temperature 1).
-  const bool sampled =
-      active && (spec.temperature > 0.0f || spec.logprobs >= 0 || penalized);
-  if (spec.temperature <= 0.0f) spec.temperature = 1.0f;
-  int32_t* my_counts = counts + static_cast<size_t>(q) * vocab_size;
+  const RowSpec rs = row_spec(specs, q, positions, position_stride);
+  uint16_t* row_base = table + static_cast<size_t>(row) * row_slots;
+  uint16_t* mine = row_base + static_cast<size_t>(rank) * group;
+  const float* slice = logits + static_cast<size_t>(row) * vocab_count;
 
-  for (int t = 0; t < rows_per_request; ++t) {
-    const int row = q * rows_per_request + t;
-    uint16_t* row_base = table + static_cast<size_t>(row) * row_slots;
-    uint16_t* mine = row_base + static_cast<size_t>(rank) * group;
-    float* slice = logits + static_cast<size_t>(row) * vocab_count;
+  // Zero this row's candidate region (every rank's group: the fold needs
+  // zeros in the foreign slots); block 0 also owns the digest group and
+  // the even-count pad.
+  for (size_t i = tid; i < row_slots; i += kLocalThreads) row_base[i] = 0;
+  if (row == 0) {
+    const size_t total = glm_sample_table_elems(rows, world, candidates);
+    const size_t begin = static_cast<size_t>(rows) * row_slots;
+    for (size_t i = begin + tid; i < total; i += kLocalThreads) table[i] = 0;
+  }
+  __syncthreads();
 
-    // Zero this row's candidate region (every rank's group: the fold needs
-    // zeros in the foreign slots); block 0 also owns the digest group and
-    // the even-count pad, once.
-    for (size_t i = tid; i < row_slots; i += kLocalThreads) row_base[i] = 0;
-    if (q == 0 && t == 0) {
-      const size_t total = glm_sample_table_elems(rows, world, candidates);
-      const size_t begin = static_cast<size_t>(rows) * row_slots;
-      for (size_t i = begin + tid; i < total; i += kLocalThreads) table[i] = 0;
-    }
-    __syncthreads();
-
-    if (!active) {
-      if (tid == 0) {
-        locals[row].best_id = kNoId;
-        locals[row].best_logit = -INFINITY;
-        locals[row].second_logit = -INFINITY;
-      }
-      continue;
-    }
-
-    if (!sampled) {
-      // The greedy row: the canonical argmax (the smallest composite key),
-      // written as the one candidate; every other slot carries the empty id.
-      uint64_t best = kKeyMax;
-      for (int i = tid; i < vocab_count; i += kLocalThreads) {
-        const uint64_t key = composite_key(slice[i], vocab_begin + i);
-        best = key < best ? key : best;
-      }
-      best = block_min_key(best, kred);
-      for (int j = tid; j < candidates; j += kLocalThreads) {
-        uint16_t* slot = mine + static_cast<size_t>(j) * kPickSlotsPerRank;
-        if (j == 0) {
-          encode_digits(slot, static_cast<uint64_t>(__float_as_uint(key_logit(best))),
-                        kPickLogitDigits);
-          encode_digits(slot + kPickLogitDigits,
-                        static_cast<uint64_t>(key_id(best)), kPickIdDigits);
-        } else {
-          encode_digits(slot + kPickLogitDigits, kSampleEmptyId, kPickIdDigits);
-        }
-      }
-      if (tid == 0) {
-        locals[row].best_id = key_id(best);
-        locals[row].best_logit = key_logit(best);
-        locals[row].second_logit = -INFINITY;
-      }
-      __syncthreads();
-      continue;
-    }
-
-    // ---- the sampled row ------------------------------------------------
-    // 1. The row's fed token joins the request's context, then the
-    //    penalties apply in place (glm_sample::apply_penalties).
+  if (!rs.active) {
     if (tid == 0) {
-      const int64_t token = fed[row];
-      if (token >= 0 && token < vocab_size) my_counts[token] += 1;
+      locals[row].best_id = kNoId;
+      locals[row].best_logit = -INFINITY;
+      locals[row].second_logit = -INFINITY;
     }
-    __syncthreads();
+  } else if (!rs.sampled) {
+    // The greedy row: the canonical argmax (the smallest composite key),
+    // written as the one candidate; every other slot carries the empty id.
+    uint64_t best = kKeyMax;
     for (int i = tid; i < vocab_count; i += kLocalThreads) {
-      const int32_t c = my_counts[vocab_begin + i];
-      if (c != 0) slice[i] = penalize(slice[i], c, spec);
+      const uint64_t key = composite_key(slice[i], vocab_begin + i);
+      best = key < best ? key : best;
     }
-    __syncthreads();
-
-    // 2. The slice's temperature-scaled log-sum-exp in the host's chunked
-    //    order: the max, then per-chunk sequential fp64 sums, then the
-    //    chunk partials folded in order by one thread.
-    float local_max = -INFINITY;
-    for (int i = tid; i < vocab_count; i += kLocalThreads)
-      local_max = fmaxf(local_max, __fdiv_rn(slice[i], spec.temperature));
-    const float top = block_max_f(local_max, fred);
-    const int nchunks = (vocab_count + kSampleLseChunk - 1) / kSampleLseChunk;
-    for (int c = tid; c < nchunks; c += kLocalThreads) {
-      const int c0 = c * kSampleLseChunk;
-      const int c1 = min(vocab_count, c0 + kSampleLseChunk);
-      double partial = 0.0;
-      for (int i = c0; i < c1; ++i)
-        partial += detmath::exp_d(
-            static_cast<double>(__fdiv_rn(slice[i], spec.temperature)) -
-            static_cast<double>(top));
-      partials[c] = partial;
+    best = block_min_key(best, kred);
+    const int32_t best_id = key_id(best);
+    const float best_logit = slice[best_id - vocab_begin];
+    for (int j = tid; j < candidates; j += kLocalThreads) {
+      uint16_t* slot = mine + static_cast<size_t>(j) * kPickSlotsPerRank;
+      if (j == 0) {
+        encode_digits(slot, static_cast<uint64_t>(__float_as_uint(best_logit)),
+                      kPickLogitDigits);
+        encode_digits(slot + kPickLogitDigits, static_cast<uint64_t>(best_id),
+                      kPickIdDigits);
+      } else {
+        encode_digits(slot + kPickLogitDigits, kSampleEmptyId, kPickIdDigits);
+      }
     }
-    __syncthreads();
     if (tid == 0) {
-      double sum = 0.0;
-      for (int c = 0; c < nchunks; ++c) sum += partials[c];
-      const double lse = static_cast<double>(top) + detmath::log_d(sum);
+      locals[row].best_id = best_id;
+      locals[row].best_logit = best_logit;
+      locals[row].second_logit = -INFINITY;
+    }
+  } else {
+    // ---- the sampled row ------------------------------------------------
+    // 1. The slice's temperature-scaled log-sum-exp: the max over the chunk
+    //    maxes, the chunk partials (zero-padded to a power of two) summed
+    //    by recursive halving, then log (glm_sample::slice_logsumexp).
+    const float m = tid < nchunks
+                        ? static_cast<float>(maxes[static_cast<size_t>(row) * nchunks + tid])
+                        : -INFINITY;
+    const float top = block_max_f(m, fred);
+    fold[tid] = tid < nchunks ? partials[static_cast<size_t>(row) * nchunks + tid]
+                              : 0.0;
+    __syncthreads();
+    int fold_width = 1;
+    while (fold_width < nchunks) fold_width <<= 1;
+    for (int h = fold_width >> 1; h >= 1; h >>= 1) {
+      if (tid < h) fold[tid] += fold[tid + h];
+      __syncthreads();
+    }
+    if (tid == 0) {
+      const double lse = static_cast<double>(top) + detmath::log_d(fold[0]);
       encode_digits(mine + static_cast<size_t>(candidates) * kPickSlotsPerRank,
                     detmath::bits_of(lse), kSampleLseDigits);
     }
 
-    // 3. The exact local top-k in canonical order. The streaming select's
-    //    bitonic merge needs a power-of-two width: select the next power of
-    //    two at or above k (at most kSampleMaxCandidates, half a tile) and
-    //    publish the first k — the same set and order, k being a prefix of
-    //    the sorted selection.
+    // 2. The exact local top-k (glm_sample::local_topk).
+    //    a. Each thread's largest key over its strided share of the slice.
+    //       The k-th largest of those is a lower bound on the k-th largest
+    //       key of the slice (the k largest thread maxima are k distinct
+    //       ids at or above it) and a tight one: with ~38 ids per thread,
+    //       the ids reaching it number ~k(1 + a few percent). The slice
+    //       does not fit L1 beside the block's shared memory, so its
+    //       loads are issued kLoadBatch at a time from L2.
     const int k = min(candidates, vocab_count);
-    int k_sel = 1;
-    while (k_sel < k) k_sel <<= 1;
+    uint32_t my_max = 0;
+    for (int base = tid; base < vocab_count; base += kLocalThreads * kLoadBatch) {
+      uint32_t key[kLoadBatch];
+#pragma unroll
+      for (int b = 0; b < kLoadBatch; ++b) {
+        const int i = base + b * kLocalThreads;
+        key[b] = i < vocab_count ? primary_key(slice[i]) : 0u;
+      }
+#pragma unroll
+      for (int b = 0; b < kLoadBatch; ++b) my_max = max(my_max, key[b]);
+    }
+    tmax[tid] = my_max;
+    if (tid == 0) list_count = 0;
+    __syncthreads();
+    uint32_t bound = 0;
+    int bound_need = 0, bound_count = 0;
+    radix_threshold(ListKeyFn{tmax}, kLocalThreads, k, hist, found, &bound,
+                    &bound_need, &bound_count);
+    //    b. The ids at or above the bound, with their keys, in shared
+    //       memory.
+    for (int base = tid; base < vocab_count; base += kLocalThreads * kLoadBatch) {
+      uint32_t key[kLoadBatch];
+#pragma unroll
+      for (int b = 0; b < kLoadBatch; ++b) {
+        const int i = base + b * kLocalThreads;
+        key[b] = i < vocab_count ? primary_key(slice[i]) : 0u;
+      }
+#pragma unroll
+      for (int b = 0; b < kLoadBatch; ++b) {
+        const int i = base + b * kLocalThreads;
+        if (i < vocab_count && key[b] >= bound) {
+          const int pos = atomicAdd(&list_count, 1);
+          if (pos < kListCap) {
+            list_key[pos] = key[b];
+            list_idx[pos] = i;
+          }
+        }
+      }
+    }
+    if (tid == 0) sel_count = 0;
     for (int i = tid; i < kSampleMaxCandidates; i += kLocalThreads) {
-      best_hi[i] = 0xFFFFFFFFu;
-      best_lo[i] = 0xFFFFFFFFu;
+      sel_hi[i] = kSplitMax;
+      sel_lo[i] = kSplitMax;
     }
     __syncthreads();
-    SliceKeyFn fn{slice, vocab_begin};
-    select_topk_stream(fn, 0, vocab_count, best_hi, best_lo, tile_hi, tile_lo,
-                       k_sel);
+    const int listed = list_count;  // >= k by construction
+    //    c. The survivors into sel (hi = ~key, lo = id; ascending is the
+    //       canonical order): the whole list when it is no wider than the
+    //       sort, else the exact threshold over the list — or, past the
+    //       list's capacity, over the whole slice — and its compaction.
+    int survivors = k;
+    if (listed <= kSampleMaxCandidates) {
+      survivors = listed;
+      for (int i = tid; i < listed; i += kLocalThreads) {
+        sel_hi[i] = ~list_key[i];
+        sel_lo[i] = static_cast<uint32_t>(vocab_begin + list_idx[i]);
+      }
+    } else if (listed <= kListCap) {
+      uint32_t threshold = 0;
+      int need = 0, count = 0;
+      radix_threshold(ListKeyFn{list_key}, listed, k, hist, found, &threshold,
+                      &need, &count);
+      const bool every_tie = need == count;
+      uint32_t tie_threshold = 0;
+      if (!every_tie) {
+        int need2 = 0, count2 = 0;
+        radix_threshold(ListTieKeyFn{list_key, list_idx, threshold}, listed,
+                        need, hist, found, &tie_threshold, &need2, &count2);
+      }
+      for (int i = tid; i < listed; i += kLocalThreads) {
+        const uint32_t u = list_key[i];
+        const int32_t idx = list_idx[i];
+        const bool take =
+            u > threshold ||
+            (u == threshold &&
+             (every_tie || ~static_cast<uint32_t>(idx) >= tie_threshold));
+        if (take) {
+          const int pos = atomicAdd(&sel_count, 1);
+          if (pos < kSampleMaxCandidates) {
+            sel_hi[pos] = ~u;
+            sel_lo[pos] = static_cast<uint32_t>(vocab_begin + idx);
+          }
+        }
+      }
+    } else {
+      uint32_t threshold = 0;
+      int need = 0, count = 0;
+      radix_threshold(SliceKeyFn{slice}, vocab_count, k, hist, found,
+                      &threshold, &need, &count);
+      const bool every_tie = need == count;
+      uint32_t tie_threshold = 0;
+      if (!every_tie) {
+        int need2 = 0, count2 = 0;
+        radix_threshold(SliceTieKeyFn{slice, threshold}, vocab_count, need,
+                        hist, found, &tie_threshold, &need2, &count2);
+      }
+      for (int base = tid; base < vocab_count; base += kLocalThreads * kLoadBatch) {
+        uint32_t key[kLoadBatch];
+#pragma unroll
+        for (int b = 0; b < kLoadBatch; ++b) {
+          const int i = base + b * kLocalThreads;
+          key[b] = i < vocab_count ? primary_key(slice[i]) : 0u;
+        }
+#pragma unroll
+        for (int b = 0; b < kLoadBatch; ++b) {
+          const int i = base + b * kLocalThreads;
+          const uint32_t u = key[b];
+          const bool take =
+              i < vocab_count &&
+              (u > threshold ||
+               (u == threshold &&
+                (every_tie || ~static_cast<uint32_t>(i) >= tie_threshold)));
+          if (take) {
+            const int pos = atomicAdd(&sel_count, 1);
+            if (pos < kSampleMaxCandidates) {
+              sel_hi[pos] = ~u;
+              sel_lo[pos] = static_cast<uint32_t>(vocab_begin + i);
+            }
+          }
+        }
+      }
+    }
+    __syncthreads();
+    //    d. Sorted; the first k are the canonical local top-k.
+    int width = 2;
+    while (width < survivors) width <<= 1;
+    if (tid < kSortThreads) sort_survivors(sel_hi, sel_lo, width);
+    __syncthreads();
     for (int j = tid; j < candidates; j += kLocalThreads) {
       uint16_t* slot = mine + static_cast<size_t>(j) * kPickSlotsPerRank;
-      const uint64_t key =
-          j < k ? (static_cast<uint64_t>(best_hi[j]) << 32) | best_lo[j] : kKeyMax;
-      if (key == kKeyMax) {
-        encode_digits(slot + kPickLogitDigits, kSampleEmptyId, kPickIdDigits);
-      } else {
-        encode_digits(slot, static_cast<uint64_t>(__float_as_uint(key_logit(key))),
+      if (j < k) {
+        const int32_t id = static_cast<int32_t>(sel_lo[j]);
+        const float logit = slice[id - vocab_begin];
+        encode_digits(slot, static_cast<uint64_t>(__float_as_uint(logit)),
                       kPickLogitDigits);
-        encode_digits(slot + kPickLogitDigits,
-                      static_cast<uint64_t>(key_id(key)), kPickIdDigits);
+        encode_digits(slot + kPickLogitDigits, static_cast<uint64_t>(id),
+                      kPickIdDigits);
+      } else {
+        encode_digits(slot + kPickLogitDigits, kSampleEmptyId, kPickIdDigits);
       }
     }
     if (tid == 0) {
-      const uint64_t b0 = (static_cast<uint64_t>(best_hi[0]) << 32) | best_lo[0];
-      locals[row].best_id = key_id(b0);
-      locals[row].best_logit = key_logit(b0);
-      if (k > 1) {
-        const uint64_t b1 = (static_cast<uint64_t>(best_hi[1]) << 32) | best_lo[1];
-        locals[row].second_logit = b1 == kKeyMax ? -INFINITY : key_logit(b1);
-      } else {
-        locals[row].second_logit = -INFINITY;
-      }
+      const int32_t id0 = static_cast<int32_t>(sel_lo[0]);
+      locals[row].best_id = id0;
+      locals[row].best_logit = slice[id0 - vocab_begin];
+      locals[row].second_logit =
+          k > 1 ? slice[static_cast<int32_t>(sel_lo[1]) - vocab_begin]
+                : -INFINITY;
     }
-    __syncthreads();
   }
-  if (q == 0 && tid == 0)
+  if (row == 0 && tid == 0)
     encode_digits(table + static_cast<size_t>(rows) * row_slots +
                       static_cast<size_t>(rank) * kPickSlotsPerRank,
                   *carry_digest, kPickSlotsPerRank);
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 2a: the decision, one block per request (thread 0 decides; the
-// block decodes the table cooperatively).
+// Kernel 2a: the decision, one block per request. The block decodes,
+// merges and evaluates the candidates' masses cooperatively; thread 0 then
+// makes the decision, whose ordered walks are the host's arithmetic.
 // ---------------------------------------------------------------------------
 struct Decision {
   bool resolved;
@@ -358,18 +709,19 @@ __device__ inline void report_top(const float* logit, const int32_t* id, int n,
 }
 
 // glm_sample::selector_state's stages 2-5 over prefix [0, n) of the merged
-// candidates; exps[] receives the survivors' exps. Returns final_count,
-// final_den, lse through the out-params.
-__device__ inline void selector_state(const float* logit, int n,
-                                      float temperature, int top_k,
+// candidates. `expsrc[i]` is exp_f(scaled_i - scaled_0), precomputed in
+// parallel (the same deterministic value the host computes in its loop);
+// exps[] receives the survivors' exps. Returns final_count, final_den, lse
+// through the out-params.
+__device__ inline void selector_state(const float* logit, const float* expsrc,
+                                      int n, float temperature, int top_k,
                                       float min_p, float top_p, float* exps,
                                       int* final_count, float* final_den,
                                       float* lse) {
   const float scaled0 = __fdiv_rn(logit[0], temperature);
   int kept = n;
   if (top_k > 0) kept = min(kept, top_k);
-  for (int i = 0; i < kept; ++i)
-    exps[i] = detmath::exp_f(__fsub_rn(__fdiv_rn(logit[i], temperature), scaled0));
+  for (int i = 0; i < kept; ++i) exps[i] = expsrc[i];
   float den = 0.0f;
   for (int i = 0; i < kept; ++i) den = __fadd_rn(den, exps[i]);
   int survivors = kept;
@@ -411,14 +763,15 @@ struct TopReport {
   int32_t* count;
 };
 
-__device__ inline void selector(const float* logit, const int32_t* id, int n,
-                                float temperature, int top_k, float min_p,
-                                float top_p, float* exps, uint64_t seed,
-                                uint64_t* counter, int32_t* token,
-                                float* logprob, const TopReport* top = nullptr) {
+__device__ inline void selector(const float* logit, const int32_t* id,
+                                const float* expsrc, int n, float temperature,
+                                int top_k, float min_p, float top_p,
+                                float* exps, uint64_t seed, uint64_t* counter,
+                                int32_t* token, float* logprob,
+                                const TopReport* top = nullptr) {
   int final_count = 0;
   float final_den = 0.0f, lse = 0.0f;
-  selector_state(logit, n, temperature, top_k, min_p, top_p, exps,
+  selector_state(logit, expsrc, n, temperature, top_k, min_p, top_p, exps,
                  &final_count, &final_den, &lse);
   if (top != nullptr)
     report_top(logit, id, final_count, temperature, lse, top->N, top->ids,
@@ -441,14 +794,15 @@ __device__ inline void selector(const float* logit, const int32_t* id, int n,
 // glm_sample::spec_select_from_sorted: accept the draft with its exact
 // probability under the final set, else the residual walk.
 __device__ inline bool spec_select(const float* logit, const int32_t* id,
-                                   int n, float temperature, int top_k,
-                                   float min_p, float top_p, int32_t draft,
-                                   float* exps, uint64_t seed,
-                                   uint64_t* counter, int32_t* token,
-                                   float* logprob, const TopReport* top = nullptr) {
+                                   const float* expsrc, int n,
+                                   float temperature, int top_k, float min_p,
+                                   float top_p, int32_t draft, float* exps,
+                                   uint64_t seed, uint64_t* counter,
+                                   int32_t* token, float* logprob,
+                                   const TopReport* top = nullptr) {
   int final_count = 0;
   float final_den = 0.0f, lse = 0.0f;
-  selector_state(logit, n, temperature, top_k, min_p, top_p, exps,
+  selector_state(logit, expsrc, n, temperature, top_k, min_p, top_p, exps,
                  &final_count, &final_den, &lse);
   if (top != nullptr)
     report_top(logit, id, final_count, temperature, lse, top->N, top->ids,
@@ -489,7 +843,11 @@ __device__ inline bool spec_select(const float* logit, const int32_t* id,
   return false;
 }
 
-// glm_sample::resolve_support over the merged prefix [0, held).
+// glm_sample::resolve_support over the merged prefix [0, held). `mass[i]`
+// is exp_d(scaled_i - Z), precomputed in parallel; `prefix[i]` receives
+// the running fp64 sum of the masses through i in the host's order — the
+// covered mass, the nucleus crossing and the pure walk all read the same
+// chain, computed once (a dependent fp64 add is ~90 ns on GB10).
 struct Support {
   int kind;  // 0 fallback, 1 materialized, 2 pure
   int n;
@@ -499,14 +857,21 @@ struct Support {
   double covered;
 };
 
-__device__ inline Support resolve_support(const float* logit, int held,
-                                          int vocab_size, double Z,
+__device__ inline Support resolve_support(const float* logit,
+                                          const double* mass, double* prefix,
+                                          int held, int vocab_size,
                                           const GlmSampleSpec& s) {
   Support out{0, 0, s.top_k, s.min_p, s.top_p, 0.0};
   const bool complete = held == vocab_size;
   const float T = s.temperature;
-  for (int i = 0; i < held; ++i)
-    out.covered += detmath::exp_d(static_cast<double>(__fdiv_rn(logit[i], T)) - Z);
+  {
+    double cumulative = 0.0;
+    for (int i = 0; i < held; ++i) {
+      cumulative += mass[i];
+      prefix[i] = cumulative;
+    }
+    out.covered = cumulative;
+  }
   if (s.top_k > 0) {
     const int required = min(s.top_k, vocab_size);
     if (held < required) return out;
@@ -534,11 +899,9 @@ __device__ inline Support resolve_support(const float* logit, int held,
   }
   if (s.top_p < 1.0f) {
     const double top_p = static_cast<double>(s.top_p);
-    double cumulative = 0.0;
     int nucleus = 0;
     for (int i = 0; i < held; ++i) {
-      cumulative += detmath::exp_d(static_cast<double>(__fdiv_rn(logit[i], T)) - Z);
-      if (cumulative >= top_p) {
+      if (prefix[i] >= top_p) {
         nucleus = i + 1;
         break;
       }
@@ -559,18 +922,21 @@ __device__ inline Support resolve_support(const float* logit, int held,
 
 // glm_sample::sample_from_prefix.
 __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
-                                         int held, int vocab_size, double Z,
+                                         const double* mass, double* prefix,
+                                         const float* expsrc, int held,
+                                         int vocab_size, double Z,
                                          const GlmSampleSpec& s, float* exps,
                                          uint64_t* counter,
                                          const TopReport* top = nullptr) {
   Decision d{false, false, kNoId, 0.0f, 0.0};
-  const Support sup = resolve_support(logit, held, vocab_size, Z, s);
+  const Support sup =
+      resolve_support(logit, mass, prefix, held, vocab_size, s);
   d.covered = sup.covered;
   if (sup.kind == 0) return d;
   const float T = s.temperature;
   if (sup.kind == 1) {
-    selector(logit, id, sup.n, T, sup.top_k, sup.min_p, sup.top_p, exps,
-             s.seed, counter, &d.token, &d.logprob, top);
+    selector(logit, id, expsrc, sup.n, T, sup.top_k, sup.min_p, sup.top_p,
+             exps, s.seed, counter, &d.token, &d.logprob, top);
     d.resolved = true;
     return d;
   }
@@ -578,11 +944,9 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
   const bool complete = held == vocab_size;
   if (top != nullptr && !complete && top->N > held) return d;  // the host's rule
   const double draw = uniform01(s.seed, *counter);
-  double cumulative = 0.0;
   int chosen = held;
   for (int i = 0; i < held; ++i) {
-    cumulative += detmath::exp_d(static_cast<double>(__fdiv_rn(logit[i], T)) - Z);
-    if (cumulative > draw) {
+    if (prefix[i] > draw) {
       chosen = i;
       break;
     }
@@ -602,22 +966,21 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
 }
 
 // glm_sample::spec_accept_from_prefix.
-__device__ inline Decision spec_decide_prefix(const float* logit,
-                                              const int32_t* id, int held,
-                                              int vocab_size, double Z,
-                                              int32_t draft,
-                                              const GlmSampleSpec& s,
-                                              float* exps, uint64_t* counter,
-                                              const TopReport* top = nullptr) {
+__device__ inline Decision spec_decide_prefix(
+    const float* logit, const int32_t* id, const double* mass, double* prefix,
+    const float* expsrc, int held, int vocab_size, double Z, int32_t draft,
+    const GlmSampleSpec& s, float* exps, uint64_t* counter,
+    const TopReport* top = nullptr) {
   Decision d{false, false, kNoId, 0.0f, 0.0};
-  const Support sup = resolve_support(logit, held, vocab_size, Z, s);
+  const Support sup =
+      resolve_support(logit, mass, prefix, held, vocab_size, s);
   d.covered = sup.covered;
   if (sup.kind == 0) return d;
   const float T = s.temperature;
   if (sup.kind == 1) {
-    d.accepted = spec_select(logit, id, sup.n, T, sup.top_k, sup.min_p,
-                             sup.top_p, draft, exps, s.seed, counter,
-                             &d.token, &d.logprob, top);
+    d.accepted = spec_select(logit, id, expsrc, sup.n, T, sup.top_k,
+                             sup.min_p, sup.top_p, draft, exps, s.seed,
+                             counter, &d.token, &d.logprob, top);
     d.resolved = true;
     return d;
   }
@@ -629,9 +992,7 @@ __device__ inline Decision spec_decide_prefix(const float* logit,
       break;
     }
   if (j == held && !complete) return d;
-  const double p_draft =
-      j < held ? detmath::exp_d(static_cast<double>(__fdiv_rn(logit[j], T)) - Z)
-               : 0.0;
+  const double p_draft = j < held ? mass[j] : 0.0;
   const uint64_t entry = *counter;
   const double u1 = uniform01(s.seed, *counter);
   *counter += 1;
@@ -652,7 +1013,7 @@ __device__ inline Decision spec_decide_prefix(const float* logit,
   for (int i = 0; i < held; ++i) {
     if (i == j) continue;
     last = i;
-    cumulative += detmath::exp_d(static_cast<double>(__fdiv_rn(logit[i], T)) - Z);
+    cumulative += mass[i];
     if (cumulative > threshold) {
       chosen = i;
       break;
@@ -671,80 +1032,25 @@ __device__ inline Decision spec_decide_prefix(const float* logit,
   return d;
 }
 
-// Decodes one row's groups into shared memory (cooperative) and returns,
-// through thread 0's merge, the canonical prefix.
-__device__ inline void decode_row(const uint16_t* row_base, int world,
-                                  int candidates, int vocab_size,
-                                  float* c_logit, int32_t* c_id,
-                                  double* lses) {
-  const size_t group = glm_sample_rank_group_slots(candidates);
-  for (int i = threadIdx.x; i < world * candidates; i += kVerdictThreads) {
-    const int r = i / candidates;
-    const int j = i % candidates;
-    const uint16_t* slot = row_base + static_cast<size_t>(r) * group +
-                           static_cast<size_t>(j) * kPickSlotsPerRank;
-    const uint32_t id = static_cast<uint32_t>(
-        decode_digits(slot + kPickLogitDigits, kPickIdDigits));
-    if (id >= static_cast<uint32_t>(vocab_size)) {
-      c_id[i] = kNoId;
-      c_logit[i] = 0.0f;
-    } else {
-      c_id[i] = static_cast<int32_t>(id);
-      c_logit[i] = __uint_as_float(
-          static_cast<uint32_t>(decode_digits(slot, kPickLogitDigits)));
-    }
-  }
-  for (int r = threadIdx.x; r < world; r += kVerdictThreads) {
-    const uint64_t bits = decode_digits(
-        row_base + static_cast<size_t>(r) * group +
-            static_cast<size_t>(candidates) * kPickSlotsPerRank,
-        kSampleLseDigits);
-    lses[r] = detmath::double_of(bits);
-  }
-}
-
-// The k-way merge in canonical order (glm_sample::merge_topk): every rank's
-// list is already canonical, so the union's sorted prefix is the merge.
-__device__ inline int merge_row(const float* c_logit, const int32_t* c_id,
-                                int world, int candidates, float* m_logit,
-                                int32_t* m_id) {
-  int cursor[kPickMaxWorld];
-  for (int r = 0; r < world; ++r) cursor[r] = 0;
-  int held = 0;
-  while (held < candidates) {
-    int best_rank = -1;
-    float best_logit = 0.0f;
-    int32_t best_id = kNoId;
-    for (int r = 0; r < world; ++r) {
-      if (cursor[r] >= candidates) continue;
-      const int i = r * candidates + cursor[r];
-      if (c_id[i] == kNoId) continue;
-      const float l = c_logit[i];
-      const int32_t id = c_id[i];
-      const bool before = best_rank < 0 || l > best_logit ||
-                          (l == best_logit && id < best_id);
-      if (before) {
-        best_rank = r;
-        best_logit = l;
-        best_id = id;
-      }
-    }
-    if (best_rank < 0) break;
-    m_logit[held] = best_logit;
-    m_id[held] = best_id;
-    ++held;
-    ++cursor[best_rank];
-  }
-  return held;
-}
-
-// glm_sample::merge_logsumexp over the slices in rank order.
-__device__ inline double fold_lse(const double* lses, int world) {
+// glm_sample::merge_logsumexp's pivot: the largest slice lse.
+__device__ inline double lse_top(const double* lses, int world) {
   double top = lses[0];
   for (int r = 1; r < world; ++r) top = lses[r] > top ? lses[r] : top;
-  double sum = 0.0;
-  for (int r = 0; r < world; ++r) sum += detmath::exp_d(lses[r] - top);
-  return top + detmath::log_d(sum);
+  return top;
+}
+
+// The number of keys below (hi, lo) in an ascending split-key list.
+__device__ inline int lower_bound_split(const uint32_t* hi, const uint32_t* lo,
+                                        int n, uint32_t khi, uint32_t klo) {
+  int l = 0, r = n;
+  while (l < r) {
+    const int m = (l + r) >> 1;
+    if (key_less(hi[m], lo[m], khi, klo))
+      l = m + 1;
+    else
+      r = m;
+  }
+  return l;
 }
 
 __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
@@ -755,12 +1061,20 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     GlmPickVerdict* __restrict__ verdicts,
     GlmPickVerdict* __restrict__ device_verdicts,
     GlmSampleOutcome* __restrict__ outcomes) {
-  __shared__ float c_logit[2][kPickMaxWorld * kSampleMaxCandidates];
-  __shared__ int32_t c_id[2][kPickMaxWorld * kSampleMaxCandidates];
+  // Every rank's list as split composite keys (hi = ~primary, lo = id;
+  // the empty slot is the maximal key), the merged prefix, its masses.
+  __shared__ uint32_t c_hi[2][kPickMaxWorld * kSampleMaxCandidates];
+  __shared__ uint32_t c_lo[2][kPickMaxWorld * kSampleMaxCandidates];
   __shared__ double lses[2][kPickMaxWorld];
   __shared__ float m_logit[2][kSampleMaxCandidates];
   __shared__ int32_t m_id[2][kSampleMaxCandidates];
+  __shared__ double mass[2][kSampleMaxCandidates];
+  __shared__ float expsrc[2][kSampleMaxCandidates];
   __shared__ float exps[kSampleMaxCandidates];
+  __shared__ double prefix[kSampleMaxCandidates];
+  __shared__ double lse_terms[2][kPickMaxWorld];
+  __shared__ int total[2];
+  __shared__ double Z[2];
 
   const int q = blockIdx.x;
   const int row0 = q * rows_per_request;
@@ -768,37 +1082,132 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   const size_t group = glm_sample_rank_group_slots(candidates);
   const bool active =
       positions == nullptr || positions[q * position_stride] >= 0;
-  for (int t = 0; t < rows_per_request; ++t)
-    decode_row(table + static_cast<size_t>(row0 + t) * world * group, world,
-               candidates, vocab_size, c_logit[t], c_id[t], lses[t]);
-  __syncthreads();
-  if (tid != 0) return;
-
-  GlmPickVerdict v;
-  GlmSampleOutcome o;
   if (!active) {
-    v.rows = 0;
-    v.accepted = 0;
-    v.next = kNoId;
-    verdicts[q] = v;
-    if (device_verdicts != nullptr) device_verdicts[q] = v;
-    outcomes[q] = o;
+    if (tid == 0) {
+      GlmPickVerdict v;
+      v.rows = 0;
+      v.accepted = 0;
+      v.next = kNoId;
+      verdicts[q] = v;
+      if (device_verdicts != nullptr) device_verdicts[q] = v;
+      outcomes[q] = GlmSampleOutcome{};
+    }
     return;
   }
   const GlmSampleSpec spec = specs[q];
+  const int entries = world * candidates;
+  if (tid < 2) total[tid] = 0;
+  __syncthreads();
+
+  // 1. Decode every rank's group of every row (cooperative).
+  for (int t = 0; t < rows_per_request; ++t) {
+    const uint16_t* row_base =
+        table + static_cast<size_t>(row0 + t) * world * group;
+    for (int i = tid; i < entries; i += kVerdictThreads) {
+      const int r = i / candidates;
+      const int j = i % candidates;
+      const uint16_t* slot = row_base + static_cast<size_t>(r) * group +
+                             static_cast<size_t>(j) * kPickSlotsPerRank;
+      const uint32_t id = static_cast<uint32_t>(
+          decode_digits(slot + kPickLogitDigits, kPickIdDigits));
+      if (id >= static_cast<uint32_t>(vocab_size)) {
+        c_hi[t][i] = kSplitMax;
+        c_lo[t][i] = kSplitMax;
+      } else {
+        const float l = __uint_as_float(
+            static_cast<uint32_t>(decode_digits(slot, kPickLogitDigits)));
+        c_hi[t][i] = ~primary_key(l);
+        c_lo[t][i] = id;
+        atomicAdd(&total[t], 1);
+      }
+    }
+    for (int r = tid; r < world; r += kVerdictThreads)
+      lses[t][r] = detmath::double_of(decode_digits(
+          row_base + static_cast<size_t>(r) * group +
+              static_cast<size_t>(candidates) * kPickSlotsPerRank,
+          kSampleLseDigits));
+  }
+  __syncthreads();
+
+  // 2. The k-way merge in canonical order (glm_sample::merge_topk): every
+  //    rank's list is canonical with its empties last, so a candidate's
+  //    rank in the union is its index in its own list plus the count of
+  //    smaller keys in every other list; the ids are disjoint across
+  //    ranks, so the ranks are a permutation and the first `held` land.
+  int held[2] = {0, 0};
+  for (int t = 0; t < rows_per_request; ++t) {
+    held[t] = min(candidates, total[t]);
+    const uint16_t* row_base =
+        table + static_cast<size_t>(row0 + t) * world * group;
+    for (int i = tid; i < entries; i += kVerdictThreads) {
+      const uint32_t khi = c_hi[t][i];
+      const uint32_t klo = c_lo[t][i];
+      if (khi == kSplitMax && klo == kSplitMax) continue;
+      const int r = i / candidates;
+      const int j = i % candidates;
+      int position = j;
+      for (int o = 0; o < world; ++o)
+        if (o != r)
+          position += lower_bound_split(c_hi[t] + o * candidates,
+                                        c_lo[t] + o * candidates, candidates,
+                                        khi, klo);
+      if (position < held[t]) {
+        const uint16_t* slot = row_base + static_cast<size_t>(r) * group +
+                               static_cast<size_t>(j) * kPickSlotsPerRank;
+        m_logit[t][position] = __uint_as_float(
+            static_cast<uint32_t>(decode_digits(slot, kPickLogitDigits)));
+        m_id[t][position] = static_cast<int32_t>(klo);
+      }
+    }
+  }
+  __syncthreads();
+
+  // 3. The fold normalizers (glm_sample::merge_logsumexp: the slices'
+  //    terms in parallel, summed in rank order), and for the stochastic
+  //    decision every candidate's fold mass and selector exp in parallel
+  //    — the very values the host's loops compute one by one.
+  if (tid < rows_per_request * world) {
+    const int t = tid / world;
+    const int r = tid % world;
+    lse_terms[t][r] = detmath::exp_d(lses[t][r] - lse_top(lses[t], world));
+  }
+  __syncthreads();
+  if (tid < rows_per_request) {
+    double sum = 0.0;
+    for (int r = 0; r < world; ++r) sum += lse_terms[tid][r];
+    Z[tid] = held[tid] > 0 ? lse_top(lses[tid], world) + detmath::log_d(sum)
+                           : 0.0;
+  }
+  __syncthreads();
+  const bool stochastic = spec.temperature > 0.0f && held[0] > 0;
+  if (stochastic) {
+    const float T = spec.temperature;
+    for (int t = 0; t < rows_per_request; ++t) {
+      if (held[t] == 0) continue;
+      const float scaled0 = __fdiv_rn(m_logit[t][0], T);
+      for (int i = tid; i < held[t]; i += kVerdictThreads) {
+        const float scaled = __fdiv_rn(m_logit[t][i], T);
+        mass[t][i] = detmath::exp_d(static_cast<double>(scaled) - Z[t]);
+        expsrc[t][i] = detmath::exp_f(__fsub_rn(scaled, scaled0));
+      }
+    }
+  }
+  __syncthreads();
+  if (tid != 0) return;
+
+  // 4. The decision (thread 0).
+  GlmPickVerdict v;
+  GlmSampleOutcome o;
   const bool penalized = spec.repetition_penalty != 1.0f ||
                          spec.frequency_penalty != 0.0f ||
                          spec.presence_penalty != 0.0f;
-  int held[2] = {0, 0};
-  for (int t = 0; t < rows_per_request; ++t)
-    held[t] = merge_row(c_logit[t], c_id[t], world, candidates, m_logit[t], m_id[t]);
   const TopReport top0{spec.logprobs, o.top_ids[0], o.top_logprobs[0], &o.top_count[0]};
   const TopReport top1{spec.logprobs, o.top_ids[1], o.top_logprobs[1], &o.top_count[1]};
   const TopReport* rep0 = spec.logprobs >= 0 ? &top0 : nullptr;
   const TopReport* rep1 = spec.logprobs >= 0 ? &top1 : nullptr;
 
   v.rows = rows_per_request;
-  if (spec.temperature <= 0.0f || held[0] == 0) {
+  if (!stochastic) {
     // The greedy request: merge_greedy per row, the greedy judge. With
     // logprobs (or penalties) the rows came through the full path at
     // temperature 1 and report under the raw normalizer
@@ -813,35 +1222,30 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     o.sampled = 0;
     o.counter = spec.counter;
     if ((spec.logprobs >= 0 || penalized) && held[0] > 0) {
-      const double Z0 = fold_lse(lses[0], world);
+      const double Z0 = Z[0];
       o.normalizer = Z0;
       o.logprob = __fsub_rn(m_logit[0][0], static_cast<float>(Z0));
       if (rep0 != nullptr)
         report_top(m_logit[0], m_id[0], held[0], 1.0f, static_cast<float>(Z0),
                    spec.logprobs, o.top_ids[0], o.top_logprobs[0], &o.top_count[0]);
       if (rows_per_request == 2 && held[1] > 0) {
-        const double Z1 = fold_lse(lses[1], world);
+        const double Z1 = Z[1];
         o.normalizer1 = Z1;
         o.logprob1 = __fsub_rn(m_logit[1][0], static_cast<float>(Z1));
         if (rep1 != nullptr)
           report_top(m_logit[1], m_id[1], held[1], 1.0f, static_cast<float>(Z1),
                      spec.logprobs, o.top_ids[1], o.top_logprobs[1], &o.top_count[1]);
       }
-      // The draft leaves the count table on a greedy reject too.
-      if (rows_per_request == 2 && v.accepted == 1) {
-        const int32_t draft = static_cast<int32_t>(fed[row0 + 1]);
-        if (draft >= 0 && draft < vocab_size)
-          counts[static_cast<size_t>(q) * vocab_size + draft] -= 1;
-      }
     }
   } else {
     uint64_t counter = spec.counter;
     o.sampled = 1;
-    const double Z0 = fold_lse(lses[0], world);
+    const double Z0 = Z[0];
     o.normalizer = Z0;
     if (rows_per_request == 1) {
-      const Decision d = decide_prefix(m_logit[0], m_id[0], held[0], vocab_size,
-                                       Z0, spec, exps, &counter, rep0);
+      const Decision d = decide_prefix(m_logit[0], m_id[0], mass[0], prefix,
+                                       expsrc[0], held[0], vocab_size, Z0,
+                                       spec, exps, &counter, rep0);
       o.covered_mass = d.covered;
       v.accepted = 1;
       if (d.resolved) {
@@ -856,7 +1260,8 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     } else {
       // The T=2 verify: row 0's accept test against the fed draft.
       const int32_t draft = static_cast<int32_t>(fed[row0 + 1]);
-      const Decision d0 = spec_decide_prefix(m_logit[0], m_id[0], held[0],
+      const Decision d0 = spec_decide_prefix(m_logit[0], m_id[0], mass[0],
+                                             prefix, expsrc[0], held[0],
                                              vocab_size, Z0, draft, spec, exps,
                                              &counter, rep0);
       o.covered_mass = d0.covered;
@@ -873,20 +1278,17 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
         v.winners[0] = d0.token;
         v.next = d0.token;
         o.logprob = d0.logprob;
-        // The draft leaves the context it was counted into for row 1.
-        if (draft >= 0 && draft < vocab_size)
-          counts[static_cast<size_t>(q) * vocab_size + draft] -= 1;
       } else {
         o.accepted_draft = 1;
         v.accepted = 2;
         v.winners[0] = draft;
         o.logprob = d0.logprob;
-        const double Z1 = held[1] > 0 ? fold_lse(lses[1], world) : 0.0;
+        const double Z1 = Z[1];
         o.normalizer1 = Z1;
         const Decision d1 =
-            held[1] > 0 ? decide_prefix(m_logit[1], m_id[1], held[1],
-                                        vocab_size, Z1, spec, exps, &counter,
-                                        rep1)
+            held[1] > 0 ? decide_prefix(m_logit[1], m_id[1], mass[1], prefix,
+                                        expsrc[1], held[1], vocab_size, Z1,
+                                        spec, exps, &counter, rep1)
                         : Decision{false, false, kNoId, 0.0f, 0.0};
         if (d1.resolved) {
           v.winners[1] = d1.token;
@@ -902,6 +1304,19 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     o.counter = counter;
     specs[q].counter = counter;
   }
+
+  // 5. The commit of the step's fed tokens into the request's context:
+  //    the token this step consumed always, the draft only when it stood
+  //    (a provisional reject leaves it out; the host adds it back if its
+  //    decision accepts — glm_sample_adjust_count).
+  int32_t* counts_q = counts + static_cast<size_t>(q) * vocab_size;
+  const int64_t consumed = fed[row0];
+  if (consumed >= 0 && consumed < vocab_size) counts_q[consumed] += 1;
+  if (rows_per_request == 2 && v.accepted == 2) {
+    const int64_t draft = fed[row0 + 1];
+    if (draft >= 0 && draft < vocab_size) counts_q[draft] += 1;
+  }
+
   verdicts[q] = v;
   if (device_verdicts != nullptr) device_verdicts[q] = v;
   outcomes[q] = o;
@@ -990,31 +1405,44 @@ void glm_sample_local(float* logits, int rows, int vocab_count,
                       int candidates, const GlmSampleSpec* specs,
                       int rows_per_request, const int64_t* fed,
                       const int64_t* positions, int position_stride,
-                      int32_t* counts, const uint64_t* carry_digest,
-                      uint16_t* table, GlmPickLocal* locals,
+                      const int32_t* counts, const uint64_t* carry_digest,
+                      uint16_t* table, GlmPickLocal* locals, double* scratch,
                       cudaStream_t stream) {
   check_common(rows, world, rank, candidates, rows_per_request,
                "glm_sample_local");
   if (logits == nullptr || specs == nullptr || fed == nullptr ||
       counts == nullptr || carry_digest == nullptr || table == nullptr ||
-      locals == nullptr)
+      locals == nullptr || scratch == nullptr)
     throw std::invalid_argument("glm_sample_local: null argument");
   if (vocab_count < 1 || vocab_begin < 0 || vocab_size < 1 ||
       vocab_begin + vocab_count > vocab_size ||
       vocab_size > (1 << (6 * kPickIdDigits)) || vocab_size > (1 << kKeyIdxBits))
     throw std::invalid_argument(
         "glm_sample_local: vocab slice outside the id encodings");
-  if (vocab_count > kSampleLseChunk * kLocalThreads)
+  const int nchunks = (vocab_count + kSampleLseChunk - 1) / kSampleLseChunk;
+  if (nchunks > kSampleMaxChunks)
     throw std::invalid_argument(
-        "glm_sample_local: the slice has more normalizer chunks than threads");
+        "glm_sample_local: the slice has more normalizer chunks than the "
+        "row block has threads");
   if (positions != nullptr && position_stride < 1)
     throw std::invalid_argument("glm_sample_local: position stride");
   if (rows % rows_per_request != 0)
     throw std::invalid_argument("glm_sample_local: rows per request");
-  sample_local_kernel<<<rows / rows_per_request, kLocalThreads, 0, stream>>>(
-      logits, rows, vocab_count, vocab_begin, vocab_size, rank, world,
-      candidates, specs, rows_per_request, fed, positions, position_stride,
-      counts, carry_digest, table, locals);
+  double* maxes = scratch;
+  double* partials = scratch + static_cast<size_t>(rows) * nchunks;
+  const dim3 chunk_grid(static_cast<unsigned>(nchunks), static_cast<unsigned>(rows));
+  sample_prepare_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
+      logits, vocab_count, vocab_begin, vocab_size, specs, rows_per_request,
+      fed, positions, position_stride, counts, maxes);
+  DGPP_CUDA_OK(cudaGetLastError());
+  sample_partials_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
+      logits, vocab_count, specs, rows_per_request, positions,
+      position_stride, maxes, partials);
+  DGPP_CUDA_OK(cudaGetLastError());
+  sample_local_kernel<<<rows, kLocalThreads, 0, stream>>>(
+      logits, rows, vocab_count, vocab_begin, rank, world, candidates, specs,
+      rows_per_request, positions, position_stride, maxes, partials, nchunks,
+      carry_digest, table, locals);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

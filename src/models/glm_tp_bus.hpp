@@ -930,6 +930,10 @@ class GlmDevicePicker {
           sizeof(GlmSampleOutcome) * kSlots * kPickMaxRequests));
       for (int i = 0; i < kSlots * kPickMaxRequests; ++i)
         outcomes_[i] = GlmSampleOutcome{};
+      DGPP_CUDA_OK(cudaMalloc(
+          reinterpret_cast<void**>(&sample_scratch_),
+          sizeof(double) * glm_sample_scratch_elems(
+                               kPickMaxRows, kSampleLseChunk * kSampleMaxChunks)));
     }
     DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&carry_), sizeof(uint64_t)));
     DGPP_CUDA_OK(cudaMemset(carry_, 0, sizeof(uint64_t)));
@@ -954,6 +958,7 @@ class GlmDevicePicker {
     if (verdict_) cudaFreeHost(verdict_);
     if (locals_) cudaFreeHost(locals_);
     if (outcomes_) cudaFreeHost(outcomes_);
+    if (sample_scratch_) cudaFree(sample_scratch_);
   }
   GlmDevicePicker(const GlmDevicePicker&) = delete;
   GlmDevicePicker& operator=(const GlmDevicePicker&) = delete;
@@ -985,8 +990,8 @@ class GlmDevicePicker {
     int source_row_stride = 0;
     // The SAMPLING pick (a picker built with sampling_candidates > 0): the
     // per-request device specs, the [requests][vocab_size] count table and
-    // the vocabulary size. Rows per request must be 1 (T=1) for now; the
-    // logits are penalized IN PLACE for sampled requests.
+    // the vocabulary size. Rows per request is 1 (T=1) or 2 (the MTP
+    // verify); the logits are penalized IN PLACE for sampled requests.
     GlmSampleSpec* specs = nullptr;
     int32_t* counts = nullptr;
     int vocab_size = 0;
@@ -1185,7 +1190,8 @@ class GlmDevicePicker {
                      in.vocab_begin, in.vocab_size, rank_, world_,
                      candidates_, in.specs, rows_per_request(in), in.fed,
                      in.positions, position_stride(in), in.counts, carry_,
-                     table_, locals_ + in.slot * kPickMaxRows, stream);
+                     table_, locals_ + in.slot * kPickMaxRows, sample_scratch_,
+                     stream);
   }
   void sample_verdict(cudaStream_t stream, const Inputs& in) {
     glm_sample_verdict(table_, in.rows, world_, rank_, candidates_,
@@ -1203,6 +1209,7 @@ class GlmDevicePicker {
   int timeout_ms_ = 60000;
   int candidates_ = 0;
   GlmSampleOutcome* outcomes_ = nullptr;
+  double* sample_scratch_ = nullptr;   // device: the local pick's partials
   uint16_t* table_ = nullptr;          // device: the wire table
   uint64_t* carry_ = nullptr;          // device: last verdict's digest
   GlmPickVerdict* verdict_ = nullptr;  // pinned [kSlots][kPickMaxRequests]

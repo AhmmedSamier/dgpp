@@ -820,9 +820,20 @@ ms/token at one live request on the plain graph — the greedy record's
 model's own generations; ~2 ms per replay under MTP), and the MTP
 acceptance under the exact accept test (1.67–1.81 tokens per replay vs
 1.74–1.87 greedy, 25.0–27.6 ms/token vs 33.2 plain — MTP pays at the
-recommended settings). The four gates of this item are met; what stays
-open is the sizing decision for workloads that look like the
-teacher-forced profile rather than like the model's own generations.
+recommended settings). The ~2 ms per MTP replay was the sampled pick's
+own cost (one block per request over both rows, the streaming bitonic
+select, sequential fp64 sums on a part with fp64 at 1/64 rate: ~900 µs
+per row plus ~250 µs per verdict) and was REMOVED the same day (the
+record's third 2026-09-04 entry): the local pick is three launches at 2
++ 16 + 26 µs and the verdict 25/33 µs; re-measured on the four nodes
+with the same seed, the sampled MTP replay is 43.60–44.20 ms against the
+greedy 43.55–44.28 (23.9–26.3 ms/token at 1.67–1.81 tokens per replay)
+and the plain sampled step 31.83–32.02 ms/token, i.e. the greedy record
+— every one of the twelve responses identical to the earlier run's, the
+op-stream md5 identical on all four ranks of every run, 0 fallbacks. The
+four gates of this item are met; what stays open is the sizing decision
+for workloads that look like the teacher-forced profile rather than like
+the model's own generations.
 
 The facts that shape it: the model card's recommended and evaluated
 settings are `temperature=1.0, top_p=0.95` (the checkpoint's
@@ -867,6 +878,16 @@ cost. Design:
   ~9.2 KB per row, two rows plus the digest group inside the 64 KiB latency
   slot), with the local top-128 as a block-wide composite-key select (the
   DSA decode select's shared-memory machinery, ~10–20 µs once per step).
+  BUILT THAT WAY AND REPLACED 2026-09-04: the streaming 2,048-key bitonic
+  select cost ~680 µs per 38,720-id slice and the sequential fp64
+  normalizer ~250 µs more (GB10 runs fp64 at 1/64 rate; a dependent fp64
+  add is ~90 ns), which the service measured as +2 ms per MTP replay
+  against the greedy control. The local pick is now three launches —
+  penalties and chunk maxima, chunk normalizer partials across the chip,
+  one row block that sums them in a fixed pairwise tree and selects the
+  top-k behind a per-thread-maxima lower bound (DESIGN §10, the device
+  path) — at 2 + 16 + 26 µs for two rows, and the verdict 25/33 µs
+  (T=1/T=2) with the merge, the fold and the masses in parallel.
   MEASURED 2026-09-04 (the three teacher texts on the four-node fabric,
   `--sampling-profile --decode-graph`, all ranks identical, logs under
   `build-ci/fabric-runs/profile_*`): the exact-gather fallback rate at

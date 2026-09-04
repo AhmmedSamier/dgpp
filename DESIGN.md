@@ -1565,17 +1565,19 @@ record.
   two-rank `glm_spec_accept_matches_reference_loopback` (accepts, rejects,
   fallbacks, bitwise the reference, two draws per step) and the
   rank-identity gate on the MTP fixture. The one-graph step's DEVICE
-  verdict is built too (2026-09-04): the sampling pick's local kernel runs
-  one block per request over both verify rows in order (row 1 penalizes
-  with the draft already counted), and the verdict kernel ports
-  `spec_accept_from_prefix` for row 0 and `sample_from_prefix` for row 1,
-  writing the greedy judge's shape (winners[0] the draft or the residual,
-  winners[1] row 1's sample, accepted 2 or 1, next = winners[accepted-1])
-  so the commit, draft-row and token-feed kernels are unchanged, dropping
-  the draft from the count table on a reject, and flagging a fallback per
-  row: row 0 undecided REJECTS provisionally (the commit keeps the
-  post-row-0 state, right for a reject and recoverable for an accept), row
-  1 undecided feeds its argmax. The in-graph draft snapshots its DSA tail
+  verdict is built too (2026-09-04): the sampling pick's local kernels
+  treat the two verify rows independently (row 1 penalizes with the draft
+  counted on top of the request's table, which holds only committed
+  tokens), and the verdict kernel ports `spec_accept_from_prefix` for row
+  0 and `sample_from_prefix` for row 1, writing the greedy judge's shape
+  (winners[0] the draft or the residual, winners[1] row 1's sample,
+  accepted 2 or 1, next = winners[accepted-1]) so the commit, draft-row
+  and token-feed kernels are unchanged, committing the consumed token to
+  the count table and the draft only when it stood, and flagging a
+  fallback per row: row 0 undecided REJECTS provisionally (the commit
+  keeps the post-row-0 state, right for a reject and recoverable for an
+  accept; the host adds the draft to the table if its decision accepts),
+  row 1 undecided feeds its argmax. The in-graph draft snapshots its DSA tail
   ring before its rows (a recorded copy kernel, `glm_device_copy`), and
   the adapter's fallback (`serve_mtp_fallback`) rolls the block back
   (`session_draft_rollback`), decides on the host — row 0 through
@@ -1808,22 +1810,52 @@ libm builds). The wire table is the greedy pick's generalized:
 `[rows][world][k candidates × 9 digits + the slice lse × 11 digits]` plus
 the digest group; unused candidate slots carry an EMPTY id no vocabulary
 reaches (a shard narrower than k, or a greedy row's single argmax). Kernel
-1, one block per row: for a sampled request (its device spec's
-temperature > 0) it counts the fed token into the request's `[vocab]` count
-table, applies the penalties IN PLACE on the row's logits slice, computes
-the temperature-scaled slice log-sum-exp in the host's chunked order, and
-selects the exact local top-k in canonical order with the DSA decode
-select's streaming composite-key machinery (`kernels/topk_select.cuh`,
-lifted); a greedy row writes its canonical argmax as the one candidate and
-touches nothing. Kernel 2, one block per request: decodes every rank's
-group, k-way-merges the canonical prefix (`merge_topk`), folds the lse
-(`merge_logsumexp`) and runs `sample_from_prefix` — the same regimes, the
-same fp32 selector and fp64 walk, the same counter RNG — writing the
-`GlmPickVerdict` the commit and token-feed kernels already read (accepted
-1, `next` the decision or, on a fallback, the provisional argmax) plus a
-`GlmSampleOutcome` (fallback flag, counter after, normalizer, covered
-mass, logprob) and the spec's advanced counter; a third pass computes the
-digest chain exactly as `glm_pick_verdict_batched`. The width is the
+1 is three launches, every row independent (the request's `[vocab]` count
+table holds the tokens committed through the previous step and is only
+read here: a row's context is the table plus the step's fed tokens
+through that row, so the MTP verify's row 1 sees the draft). One block
+per 256-id chunk applies the penalties IN PLACE on the row's logits slice
+and takes the chunk's temperature-scaled max; one block per chunk
+computes the chunk's normalizer partial (the deterministic fp64 exp is a
+13-term polynomial and GB10 runs fp64 at 1/64 rate — a slice's 38,720
+terms are ~250 µs of one SM however one block spreads them, ~16 µs across
+the chip); one block per row sums the partials, selects the exact local
+top-k in canonical order and writes the group. The normalizer's
+summation order is fixed pairwise trees (`glm_sample::chunked_exp_sum`:
+each chunk halved recursively, the chunk partials likewise), which a
+kernel keeps exactly with an 8 + log2(chunks)-deep dependent chain — a
+dependent fp64 add is ~90 ns here, and the sequential chunk order cost
+~30 µs per slice. The select: each thread's largest key over its strided
+share of the slice, the k-th largest of those 1,024 maxima (a radix
+select in shared memory) being a proven lower bound on the slice's k-th
+largest key that only ~k(1 + a few percent) ids reach; those ids are
+listed in shared memory and sorted (bitonic on four warps) when they fit
+the candidate width, else selected exactly by a radix pass over the list
+with an index tie pass, and a slice with more than 2,048 ids tied at the
+bound falls back to the same radix passes over the whole slice
+(`sample_local_topk_tie_paths_match_local_topk` pins all three paths
+against `local_topk`). The first cut — one block per request over both
+verify rows, the DSA select's 2,048-key streaming bitonic machinery,
+sequential chunk sums — cost ~900 µs per row and ~250 µs per verdict,
+which the service measured as +2 ms per MTP replay; the kernel bench now
+reads 2 + 16 + 26 µs for the three local launches over two rows and
+25/33 µs for the T=1/T=2 verdict. A greedy row writes its canonical
+argmax as the one candidate and touches nothing. Kernel 2, one block per
+request: decodes every rank's group into composite keys, merges the
+canonical prefix by rank counting (`merge_topk`: a candidate's position
+is its index in its own list plus the count of smaller keys in every
+other list, in parallel), folds the lse (`merge_logsumexp`, the slices'
+terms in parallel, summed in rank order), evaluates every candidate's
+fold mass and selector exp in parallel, and on one thread runs
+`sample_from_prefix` — the same regimes, the same fp32 selector and fp64
+walk (the running fp64 prefix computed once per row and read by the
+covered mass, the nucleus crossing and the pure walk), the same counter
+RNG — writing the `GlmPickVerdict` the commit and token-feed kernels
+already read (accepted 1, `next` the decision or, on a fallback, the
+provisional argmax) plus a `GlmSampleOutcome` (fallback flag, counter
+after, normalizer, covered mass, logprob) and the spec's advanced
+counter, then commits the step's fed tokens to the count table; a third
+pass computes the digest chain exactly as `glm_pick_verdict_batched`. The width is the
 widest k that fits the fixed batch's rows in one latency slot
 (`glm_sample_candidates_that_fit`: 112 per rank for eight rows at world 4
 in the 64 KiB slot, 128 below seven rows), logged at startup. The

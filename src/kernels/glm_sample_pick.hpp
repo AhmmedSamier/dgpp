@@ -28,8 +28,11 @@
 // provisionally REJECTING (the commit then keeps only the post-row-0
 // state, which is right for a reject and recoverable for an accept), row 1
 // by feeding its provisional argmax; the host serves both between windows
-// (GlmGraphEngineAdapter). The request's count table takes both fed
-// tokens before the penalties and drops the draft again on a reject.
+// (GlmGraphEngineAdapter). The request's count table holds the tokens
+// committed through the previous step: the local kernels read it with the
+// step's fed tokens added per row (row 1 sees the draft), never writing
+// it, and the verdict commits — the consumed token always, the draft only
+// when it stood (glm_sample::SampledSpeculator's context rule).
 #include <cstddef>
 #include <cstdint>
 
@@ -88,6 +91,7 @@ struct GlmSampleOutcome {
 constexpr int kSampleLseDigits = 11;         // 66 bits carry the fp64 lse
 constexpr int kSampleMaxCandidates = 256;    // the profiler's ceiling
 constexpr int kSampleLseChunk = 256;         // == glm_sample::kLseChunk
+constexpr int kSampleMaxChunks = 1024;       // slices up to 262,144 ids
 constexpr uint32_t kSampleEmptyId = (1u << (6 * kPickIdDigits)) - 1;
 
 constexpr size_t glm_sample_rank_group_slots(int candidates) {
@@ -101,6 +105,15 @@ constexpr size_t glm_sample_table_elems(int rows, int world, int candidates) {
       static_cast<size_t>(world) * kPickSlotsPerRank;
   return slots + (slots & 1);
 }
+// The local pick's device scratch, in doubles: the per-chunk maxes and
+// normalizer partials of `rows` rows of `vocab_count` ids (the widest
+// shape is glm_sample_scratch_elems(kPickMaxRows, kSampleLseChunk *
+// kSampleMaxChunks), 128 KiB).
+constexpr size_t glm_sample_scratch_elems(int rows, int vocab_count) {
+  const size_t chunks =
+      (static_cast<size_t>(vocab_count) + kSampleLseChunk - 1) / kSampleLseChunk;
+  return 2 * static_cast<size_t>(rows) * chunks;
+}
 // The widest candidate table for `rows` rows at `world` ranks that fits
 // `slot_bytes` (0 when even one candidate does not).
 constexpr int glm_sample_candidates_that_fit(int rows, int world,
@@ -111,23 +124,29 @@ constexpr int glm_sample_candidates_that_fit(int rows, int world,
   return k;
 }
 
-// Kernel 1 (before the fold), one block per row. Row r belongs to request
-// r / rows_per_request; `positions` (optional) marks a padding request by a
-// negative first position. A sampled row (its spec's temperature > 0)
-// first counts its fed token into the request's count table
-// (counts[request * vocab_size + token] += 1), applies the penalties IN
-// PLACE on its logits slice (glm_sample::apply_penalties), and writes its
-// exact local top-k in canonical order (glm_sample::local_topk) and its
-// temperature-scaled slice log-sum-exp (glm_sample::slice_logsumexp). A
-// greedy row writes its canonical argmax as the one candidate. locals[row]
-// carries the row's best (and, for sampled rows, second-best) for the log.
+// Kernel 1 (before the fold): three launches on `stream`, every row
+// independent. Row r belongs to request r / rows_per_request; `positions`
+// (optional) marks a padding request by a negative first position. A
+// sampled row (its spec's temperature > 0, or a greedy row that reports
+// logprobs or carries penalties) applies the penalties IN PLACE on its
+// logits slice (glm_sample::apply_penalties, the context being the
+// request's count table plus the step's fed tokens through this row) and
+// its temperature-scaled max per 256-id chunk [one block per chunk], the
+// chunk's normalizer partial in the host's order [one block per chunk],
+// then [one block per row] the slice log-sum-exp folded in chunk order
+// (glm_sample::slice_logsumexp) and the exact local top-k in canonical
+// order (glm_sample::local_topk, a radix select). A greedy row writes its
+// canonical argmax as the one candidate. locals[row] carries the row's
+// best (and, for sampled rows, second-best) for the log. `scratch` holds
+// glm_sample_scratch_elems(rows, vocab_count) doubles. The count table is
+// read only.
 void glm_sample_local(float* logits, int rows, int vocab_count,
                       int vocab_begin, int vocab_size, int rank, int world,
                       int candidates, const GlmSampleSpec* specs,
                       int rows_per_request, const int64_t* fed,
                       const int64_t* positions, int position_stride,
-                      int32_t* counts, const uint64_t* carry_digest,
-                      uint16_t* table, GlmPickLocal* locals,
+                      const int32_t* counts, const uint64_t* carry_digest,
+                      uint16_t* table, GlmPickLocal* locals, double* scratch,
                       cudaStream_t stream);
 
 // Kernel 2 (after the fold), one block per request plus the digest pass:
@@ -137,7 +156,9 @@ void glm_sample_local(float* logits, int rows, int vocab_count,
 // Writes the GlmPickVerdict (rows/accepted 1, next and winners[0] the
 // decision — the provisional argmax on a fallback — and the digest chain
 // exactly as glm_pick_verdict_batched) to the pinned mirror and the device
-// copy, the GlmSampleOutcome, and the spec's advanced counter.
+// copy, the GlmSampleOutcome, and the spec's advanced counter; then
+// commits the step's fed tokens into the request's count table (the
+// consumed token; the draft when accepted == 2).
 void glm_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         int candidates, int vocab_size, GlmSampleSpec* specs,
                         int requests, int rows_per_request, const int64_t* fed,
@@ -148,7 +169,8 @@ void glm_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         cudaStream_t stream);
 
 // counts[token] += delta (the host's correction of a request's context after
-// a fallback it decided: the draft leaves the table on a reject).
+// a fallback it decided: a provisionally rejected draft joins the table
+// when the host's decision accepts it after all).
 void glm_sample_adjust_count(int32_t* counts_row, int64_t token, int delta,
                              int vocab_size, cudaStream_t stream);
 
