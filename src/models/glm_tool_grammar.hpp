@@ -1,0 +1,233 @@
+#pragma once
+// Constrained decoding for the tool-call surface (M6 6g, DESIGN §10/§11):
+// the grammar of the template's tool-call format as a state machine over
+// TOKEN IDS that yields, at every position, the set of ids the model may
+// emit next — the mask the sampler applies before the pick on every rank.
+// This is how `tool_choice: required`, a named function, `none` and
+// `parallel_tool_calls: false` become GUARANTEES rather than hints: a
+// sampled token is always inside the mask, so the turn is a valid call to
+// an allowed function (or none, or exactly one), whatever the model would
+// have liked to write.
+//
+// THE GRAMMAR (the format glm_tool_parser.hpp parses):
+//   turn     := think? body
+//   think    := <generated reasoning, any ids but EOS> </think>
+//   body     := required: call+ EOS | named: call(named) EOS
+//             | auto/single: free* (call EOS)? | forbid: free* (no <tool_call>)
+//   call     := <tool_call> NAME (<arg_key> KEY </arg_key> <arg_value> VALUE
+//               </arg_value>)* </tool_call>
+//   NAME     := one of the request's tool names (a byte automaton over the
+//               vocabulary's token texts, so any tokenization of the name
+//               is accepted and nothing else)
+//   KEY      := a property name of that tool's schema when the schema
+//               closes its keys, else free text
+//   VALUE    := free text (the schema types values afterwards, in the
+//               parser); the closing marker is the only marker allowed
+//   EOS      := <|observation|> — the id that ends a tool-call turn
+// Free text means every id except the structural markers and, while a
+// call obligation is unmet, the EOS ids. Thinking is left free: the
+// grammar only forbids ending the turn before its obligation is met.
+//
+// EXACTNESS. The mask is a pure function of (spec, the ids committed so
+// far, the tokenizer's token texts), so every rank computes the same mask
+// from the same journal record — the fabric's identical-rank-order rule
+// holds with no new collective. What a masked id means to the sampler is
+// defined in glm_sampler.hpp: an ABSENT candidate (logit -inf, never
+// listed, zero mass, the normalizer over the allowed set) — the
+// distribution restricted to the mask and renormalized, exactly.
+//
+// Keys and required properties: keys are constrained to the schema's
+// property names when it declares them and admits no others; the presence
+// of required keys and value types are NOT enforced (that is the parser's
+// schema typing and the client's validation, as with OpenAI's non-strict
+// tools).
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "models/glm_tool_parser.hpp"
+
+namespace dgpp {
+class GlmTokenizer;
+}
+
+namespace dgpp::glm {
+
+// One tool the grammar may name, and its closed key set (when it has one).
+struct GrammarTool {
+  std::string name;
+  bool constrain_keys = false;     // the schema closes its properties
+  std::vector<std::string> keys;   // the property names, when closed
+};
+
+// The request's constraint — what rides the journal (fabric_serve.cpp) and
+// reaches every rank's engine through SchedulerEngine::configure_constraint.
+struct GrammarSpec {
+  enum class Mode : int {
+    kNone = 0,        // unconstrained
+    kForbidCalls,     // tool_choice none: <tool_call> never
+    kAuto,            // tool_choice auto with parallel_tool_calls false:
+                      // free, but at most one call, then EOS
+    kRequired,        // one or more calls (parallel) or exactly one
+    kNamed,           // exactly one call to `named`
+  };
+  Mode mode = Mode::kNone;
+  bool parallel = true;            // several calls per turn allowed
+  std::string named;               // kNamed's function
+  std::vector<GrammarTool> tools;  // the callable functions (kRequired/kAuto:
+                                   // all; kNamed: the one)
+  bool active() const { return mode != Mode::kNone; }
+  bool operator==(const GrammarSpec& o) const {
+    if (mode != o.mode || parallel != o.parallel || named != o.named ||
+        tools.size() != o.tools.size())
+      return false;
+    for (size_t i = 0; i < tools.size(); ++i)
+      if (tools[i].name != o.tools[i].name ||
+          tools[i].constrain_keys != o.tools[i].constrain_keys ||
+          tools[i].keys != o.tools[i].keys)
+        return false;
+    return true;
+  }
+};
+
+// The vocabulary as the grammar sees it: every id's text (bytes), indexed by
+// first byte for the name/key automaton; the markers and EOS ids. Built once
+// per process from the tokenizer (every rank has the same tokenizer.json,
+// so every rank builds the same table); shared by all requests.
+class GrammarVocab {
+ public:
+  // `texts[id]` is id's decoded bytes ("" for ids that decode to nothing —
+  // the special tokens — and for ids beyond the table); `vocab_size` is
+  // the lm head's (padded) vocabulary the masks cover; `call_turn_eos` the
+  // id that ends a tool-call turn (<|observation|>; -1 = the first EOS id).
+  GrammarVocab(std::vector<std::string> texts, ChatMarkers markers,
+               std::vector<int64_t> eos_ids, int vocab_size,
+               int64_t call_turn_eos = -1);
+  // From the tokenizer: decode(id) of every id up to its max_id.
+  static GrammarVocab from_tokenizer(const GlmTokenizer& tok,
+                                     const std::vector<int64_t>& eos_ids,
+                                     int vocab_size);
+
+  int vocab_size() const { return vocab_size_; }
+  const ChatMarkers& markers() const { return markers_; }
+  const std::vector<int64_t>& eos_ids() const { return eos_; }
+  // The turn-ending id the grammar forces after the last call:
+  // <|observation|> when the tokenizer has it, else the first EOS id.
+  int64_t call_turn_eos() const { return call_eos_; }
+  const std::string& text(int64_t id) const {
+    static const std::string empty;
+    return id >= 0 && id < static_cast<int64_t>(texts_.size())
+               ? texts_[static_cast<size_t>(id)]
+               : empty;
+  }
+  const std::vector<int32_t>& ids_starting_with(unsigned char b) const {
+    return by_first_[b];
+  }
+  // The structural ids free text may never contain: the eight markers.
+  const std::vector<int64_t>& marker_ids() const { return marker_ids_; }
+  bool is_eos(int64_t id) const;
+  bool usable() const {
+    return markers_.tool_calls_available() && !eos_.empty();
+  }
+
+ private:
+  std::vector<std::string> texts_;
+  std::vector<int32_t> by_first_[256];
+  ChatMarkers markers_;
+  std::vector<int64_t> marker_ids_;
+  std::vector<int64_t> eos_;
+  int64_t call_eos_ = -1;
+  int vocab_size_ = 0;
+};
+
+// One position's mask over [0, vocab_size): bit id set = allowed. `allowed`
+// counts the set bits (0 means "unconstrained — the words are not
+// meaningful"); the sampler treats a constrained row's allowed count as its
+// vocabulary size.
+struct TokenMask {
+  std::vector<uint32_t> words;
+  int vocab = 0;
+  int allowed = 0;
+  static int words_for(int vocab) { return (vocab + 31) / 32; }
+  bool constrained() const { return allowed > 0; }
+  bool allows(int64_t id) const {
+    if (!constrained()) return true;
+    if (id < 0 || id >= vocab) return false;
+    return (words[static_cast<size_t>(id >> 5)] >> (id & 31)) & 1u;
+  }
+};
+
+class GrammarState {
+ public:
+  GrammarState(const GrammarVocab* vocab, GrammarSpec spec,
+               bool prompt_opens_thinking);
+
+  bool active() const { return vocab_ != nullptr && spec_.active() && !dead_; }
+  const GrammarSpec& spec() const { return spec_; }
+
+  // The mask for the next position. An unconstrained position (a free
+  // state with nothing forbidden, or an inactive grammar) leaves
+  // out->allowed == 0.
+  void mask(TokenMask* out) const;
+  // Pointwise: would `id` be allowed next? (The same rule as mask().)
+  bool allows(int64_t id) const;
+  // The id was committed. A disallowed id (which the sampler never
+  // produces; the MTP draft may propose one, to be rejected) kills the
+  // grammar: every later position is free, so a row the step will discard
+  // never carries an empty mask.
+  void advance(int64_t id);
+
+  // For the record: the state's name.
+  const char* state_name() const;
+
+ private:
+  enum class State {
+    kThink,       // before </think>
+    kTop,         // between calls (or before the first)
+    kName,        // inside a call: the function name (complete when a
+                  // target matches; <arg_key> / </tool_call> then close it)
+    kKey,         // an argument key
+    kAfterKey,    // <arg_value>
+    kValue,       // an argument value
+    kAfterValue,  // <arg_key> or </tool_call>
+    kEnd,         // the turn must end: EOS
+    kDone,        // EOS emitted: nothing more (the scheduler retires)
+  };
+  // The automaton over token texts: the targets still consistent with the
+  // bytes emitted so far, and those bytes.
+  struct TextMatch {
+    std::vector<std::string> targets;
+    std::string emitted;
+    bool complete() const {
+      for (const std::string& t : targets)
+        if (t == emitted) return true;
+      return false;
+    }
+  };
+  void enter(State s);
+  bool obligation_open() const;  // a call is still required
+  bool calls_remaining() const;  // another call may open
+  const GrammarTool* current_tool() const;
+  // Whether a key may open: the open tool's key set is not closed-empty.
+  bool keys_possible() const;
+  bool keys_possible_for(const std::string& name) const;
+  // The free-text mask: everything but the markers (when forbidden) and
+  // EOS while the obligation is open; `extra_allowed` reopens one marker.
+  void free_mask(TokenMask* out, int64_t extra_allowed,
+                 bool forbid_markers = true) const;
+  void list_mask(TokenMask* out, const std::vector<int64_t>& ids) const;
+  // The ids that continue the match (and the closer when a target is
+  // complete).
+  std::vector<int64_t> match_ids(const TextMatch& m, int64_t closer) const;
+
+  const GrammarVocab* vocab_ = nullptr;
+  GrammarSpec spec_;
+  State state_ = State::kTop;
+  bool dead_ = false;
+  int calls_ = 0;          // calls closed so far
+  int tool_ = -1;          // the open call's tool (index into spec_.tools)
+  TextMatch match_;        // kName / kKey
+};
+
+}  // namespace dgpp::glm

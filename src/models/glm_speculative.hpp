@@ -25,6 +25,7 @@
 
 #include "models/glm_forward.hpp"
 #include "models/glm_sampler.hpp"
+#include "models/glm_tool_grammar.hpp"
 
 namespace dgpp {
 
@@ -155,9 +156,12 @@ class SampledSpeculator {
       const GlmDiagnosticModel::Outputs& row0, int32_t draft,
       const glm_sample::Params& p, glm_sample::Rng& rng,
       const std::vector<int32_t>& context)>;
+  // Row1 is the engines' Sample closure; the eager speculator has no
+  // grammar and passes a null mask.
   using Row1 = std::function<glm_sample::Result(
       const GlmDiagnosticModel::Outputs& row1, const glm_sample::Params& p,
-      glm_sample::Rng& rng, const std::vector<int32_t>& context)>;
+      glm_sample::Rng& rng, const std::vector<int32_t>& context,
+      const glm::TokenMask* mask)>;
 
   SampledSpeculator(GlmDiagnosticModel& model, int req, PickRows draft_pick,
                     Row0 row0, Row1 row1, const glm_sample::Params& params,
@@ -200,7 +204,7 @@ class SampledSpeculator {
     if (d0.accepted) {
       context_.push_back(draft_);
       const glm_sample::Result r1 =
-          row1_(row_view(out, 1), params_, rng_, context_);
+          row1_(row_view(out, 1), params_, rng_, context_, nullptr);
       winners = {draft_, r1.token};
       next_new = r1.token;
     } else {

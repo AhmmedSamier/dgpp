@@ -56,6 +56,7 @@
 #include "loaders/hf_cache.hpp"
 #include "models/dsa_geometry.hpp"
 #include "models/glm_fabric_engine.hpp"
+#include "models/glm_tool_grammar.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_graph_check.hpp"
 #include "models/glm_route_audit.hpp"
@@ -1259,7 +1260,7 @@ DGPP_TEST(glm_fabric_sample_matches_sharded_reference_loopback) {
           out.lm_vocab_begin = slice.begin;
           out.lm_vocab_count = slice.count;
           got[static_cast<size_t>(rank)].push_back(
-              sample(out, params, rng, context));
+              sample(out, params, rng, context, nullptr));
           context.push_back(got[static_cast<size_t>(rank)].back().token);
         }
         counters[static_cast<size_t>(rank)] = rng.counter;
@@ -1534,7 +1535,7 @@ DGPP_TEST(glm_tp_sampled_speculator_loopback_rank_identical) {
         dgpp::glm_sample::Rng rng{0x77ull, 0};
         const GlmDiagnosticModel::Outputs pre = shard.session_prefill(prompt);
         const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
-        const int32_t first = row1(pre, params, rng, prompt_context).token;
+        const int32_t first = row1(pre, params, rng, prompt_context, nullptr).token;
         dgpp::SampledSpeculator spec(
             shard, 0, pick_rows,
             dgpp::make_fabric_spec_row0(&bus, r, kWorld, prefix_scratch,
@@ -3141,6 +3142,401 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
                 device_steps, fallbacks[0]);
 }
 
+// ---------------------------------------------------------------------------
+// M6 6g: constrained decoding on the bus. A grammar vocabulary over the
+// fixture's 96 ids (single-character texts, the eight markers at 80..87,
+// EOS ids 88/89 — the markers and EOS all on rank 1's slice, so rank 0
+// sees fully masked slices in the structural states) drives every mode
+// (required, named, forbid, auto-single) and both temperatures through the
+// eager engine and the graph adapter in lockstep: the transcripts must be
+// bitwise equal, every token inside the grammar (a shadow state fed the
+// transcript never dies), identical across ranks; the capped candidate
+// width forces the masked gather fallback too. The MTP graphs run the same
+// grammars: rank-identical, grammar-valid, with fallbacks of both rows.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr int64_t kGxThinkOpen = 80, kGxThinkClose = 81, kGxToolOpen = 82,
+                  kGxToolClose = 83, kGxKeyOpen = 84, kGxKeyClose = 85,
+                  kGxValueOpen = 86, kGxValueClose = 87, kGxEos = 88,
+                  kGxEos2 = 89;
+
+dgpp::glm::GrammarVocab fixture_grammar_vocab(int vocab) {
+  std::vector<std::string> texts(static_cast<size_t>(vocab));
+  for (int id = 0; id < 80 && id < vocab; ++id)
+    texts[static_cast<size_t>(id)] = std::string(1, static_cast<char>('a' + id % 26));
+  dgpp::glm::ChatMarkers m;
+  m.think_open = {kGxThinkOpen, "<think>"};
+  m.think_close = {kGxThinkClose, "</think>"};
+  m.tool_call_open = {kGxToolOpen, "<tool_call>"};
+  m.tool_call_close = {kGxToolClose, "</tool_call>"};
+  m.arg_key_open = {kGxKeyOpen, "<arg_key>"};
+  m.arg_key_close = {kGxKeyClose, "</arg_key>"};
+  m.arg_value_open = {kGxValueOpen, "<arg_value>"};
+  m.arg_value_close = {kGxValueClose, "</arg_value>"};
+  return dgpp::glm::GrammarVocab(std::move(texts), m, {kGxEos, kGxEos2}, vocab,
+                                 kGxEos);
+}
+
+dgpp::glm::GrammarSpec fixture_grammar(dgpp::glm::GrammarSpec::Mode mode,
+                                       bool parallel = true,
+                                       const std::string& named = "") {
+  dgpp::glm::GrammarSpec g;
+  g.mode = mode;
+  g.parallel = parallel;
+  g.named = named;
+  g.tools.push_back(dgpp::glm::GrammarTool{"ab", true, {"x", "y"}});
+  g.tools.push_back(dgpp::glm::GrammarTool{"ac", false, {}});
+  g.tools.push_back(dgpp::glm::GrammarTool{"b", true, {}});
+  return g;
+}
+
+// Feeds a transcript through a fresh grammar state: every id must be
+// allowed at its position.
+void require_grammar_valid(const dgpp::glm::GrammarVocab& vocab,
+                           const dgpp::glm::GrammarSpec& spec,
+                           bool opens_thinking,
+                           const std::vector<int64_t>& generated,
+                           const std::string& what) {
+  dgpp::glm::GrammarState shadow(&vocab, spec, opens_thinking);
+  for (size_t i = 0; i < generated.size(); ++i) {
+    if (!shadow.allows(generated[i])) {
+      std::string all;
+      for (const int64_t t : generated) all += std::to_string(t) + " ";
+      throw std::runtime_error(what + ": token " + std::to_string(generated[i]) +
+                               " at position " + std::to_string(i) +
+                               " is outside the grammar (state " +
+                               shadow.state_name() + "); transcript [" + all +
+                               "]");
+    }
+    shadow.advance(generated[i]);
+  }
+  if (spec.active() && !shadow.active())
+    throw std::runtime_error(what + ": the shadow grammar died");
+}
+
+struct GrammarSpecCase {
+  const char* id;
+  int max_steps;
+  dgpp::glm_sample::Params params;
+  uint64_t seed;
+  dgpp::glm::GrammarSpec grammar;
+  bool think_prompt;
+};
+
+}  // namespace
+
+DGPP_TEST(glm_tp_serving_graph_constrained_matches_eager_engine_and_grammar) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  std::vector<int64_t> think_prompt = prompt;
+  think_prompt.back() = kGxThinkOpen;
+  constexpr int kWorld = 2;
+  constexpr int kSlots = 2;
+  constexpr int kCap = 24;
+  const int max_tokens = static_cast<int>(prompt.size()) + 12;
+  const dgpp::glm::GrammarVocab gvocab = fixture_grammar_vocab(cfg.vocab_size);
+  using Mode = dgpp::glm::GrammarSpec::Mode;
+  dgpp::glm_sample::Params sampled;
+  sampled.temperature = 1.0f;
+  sampled.top_p = 0.95f;
+  sampled.presence_penalty = 0.1f;
+  dgpp::glm_sample::Params pure;
+  pure.temperature = 1.2f;
+  pure.top_p = 1.0f;
+  // The fixture model rarely closes a think block by itself, so the calls
+  // are owed from a prompt that does not open one; the think prompts cover
+  // the free-with-EOS-withheld state.
+  const std::vector<std::vector<GrammarSpecCase>> phases{
+      {{"req", 10, sampled, 7, fixture_grammar(Mode::kRequired), false}},
+      {{"named", 9, pure, 11, fixture_grammar(Mode::kNamed, true, "ac"), false},
+       {"greedy", 8, dgpp::glm_sample::greedy_params(), 0,
+        fixture_grammar(Mode::kRequired, false), false}},
+      {{"none", 6, sampled, 17, fixture_grammar(Mode::kForbidCalls), false},
+       {"think", 8, sampled, 19, fixture_grammar(Mode::kRequired), true}},
+      {{"auto1", 8, sampled, 23, fixture_grammar(Mode::kAuto, false), false}},
+  };
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29936);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<std::vector<int64_t>>> graph_seqs(kWorld);
+  std::vector<uint64_t> fallbacks(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      uint16_t* prefix_scratch = nullptr;
+      uint16_t* gather_scratch = nullptr;
+      const auto release = [&] {
+        if (scratch) cudaFreeHost(scratch);
+        if (prefix_scratch) cudaFreeHost(prefix_scratch);
+        if (gather_scratch) cudaFreeHost(gather_scratch);
+        scratch = prefix_scratch = gather_scratch = nullptr;
+      };
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded, kSlots);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded, kSlots);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+            cudaHostAllocDefault));
+        arrive_once();
+
+        dgpp::GenEngineAdapter eager_engine(
+            &eager, kSlots,
+            dgpp::make_fabric_pick(&bus, r, kWorld, scratch, cfg.vocab_size,
+                                   test_wait_timeout_ms()),
+            dgpp::make_fabric_sample(&bus, r, kWorld, prefix_scratch,
+                                     gather_scratch, cfg.vocab_size,
+                                     test_wait_timeout_ms()),
+            &gvocab);
+        dgpp::GlmGraphEngineAdapter graph_engine(
+            &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+            test_wait_timeout_ms(), /*batch_min_live=*/kSlots, prefix_scratch,
+            gather_scratch, kCap, &gvocab);
+        if (!eager_engine.supports_constraints() ||
+            !graph_engine.supports_constraints())
+          throw std::runtime_error("the engines did not arm constrained decoding");
+        dgpp::glm::Scheduler eager_sched(&eager_engine, /*eos=*/{});
+        dgpp::glm::Scheduler graph_sched(&graph_engine, /*eos=*/{});
+
+        size_t result_index = 0;
+        for (const std::vector<GrammarSpecCase>& phase : phases) {
+          for (const GrammarSpecCase& c : phase) {
+            dgpp::glm::SchedulerRequest req;
+            req.id = c.id;
+            req.prompt = c.think_prompt ? think_prompt : prompt;
+            req.max_steps = c.max_steps;
+            req.sampling = c.params;
+            req.seed = c.seed;
+            req.grammar = c.grammar;
+            eager_sched.submit(req);
+            graph_sched.submit(req);
+          }
+          bool more = true;
+          while (more) {
+            const bool e = eager_sched.tick();
+            const bool g = graph_sched.tick();
+            if (e != g)
+              throw std::runtime_error("the two schedulers disagree on "
+                                       "pending work");
+            more = e;
+          }
+          for (const GrammarSpecCase& c : phase) {
+            const auto& want = eager_sched.results()[result_index].generated;
+            const auto& got = graph_sched.results()[result_index].generated;
+            ++result_index;
+            if (want.size() != static_cast<size_t>(c.max_steps))
+              throw std::runtime_error(std::string("eager transcript length for ") +
+                                       c.id);
+            if (got != want) {
+              std::string w, g;
+              for (int64_t t : want) w += std::to_string(t) + " ";
+              for (int64_t t : got) g += std::to_string(t) + " ";
+              throw std::runtime_error(
+                  std::string("constrained graph transcript for '") + c.id +
+                  "' differs from the eager engine's: eager [" + w +
+                  "] graph [" + g + "]");
+            }
+            require_grammar_valid(gvocab, c.grammar, c.think_prompt, got,
+                                  std::string("graph '") + c.id + "'");
+            graph_seqs[static_cast<size_t>(r)].push_back(got);
+          }
+        }
+        fallbacks[static_cast<size_t>(r)] = graph_engine.fallbacks();
+        release();
+      } catch (const std::exception& e) {
+        release();
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("constrained graph rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r) {
+    require(graph_seqs[static_cast<size_t>(r)] == graph_seqs[0],
+            "constrained transcripts differ across ranks");
+    require(fallbacks[static_cast<size_t>(r)] == fallbacks[0],
+            "fallback counts differ across ranks");
+  }
+  // The required request's turn holds a call: <tool_call> must appear and
+  // the structure close.
+  bool saw_call = false;
+  for (const int64_t t : graph_seqs[0][0]) saw_call = saw_call || t == kGxToolOpen;
+  require(saw_call, "the required grammar produced a call");
+  DGPP_LOG_INFO("constrained graph w2: {} transcripts == the eager engine's on "
+                "every rank, every token inside its grammar, {} gather "
+                "fallbacks under masks",
+                graph_seqs[0].size(), fallbacks[0]);
+}
+
+DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  std::vector<int64_t> think_prompt = prompt;
+  think_prompt.back() = kGxThinkOpen;
+  constexpr int kWorld = 2;
+  constexpr int kSlots = 2;
+  constexpr int kCap = 24;
+  const int max_tokens = static_cast<int>(prompt.size()) + 20;
+  const dgpp::glm::GrammarVocab gvocab = fixture_grammar_vocab(cfg.vocab_size);
+  using Mode = dgpp::glm::GrammarSpec::Mode;
+  dgpp::glm_sample::Params sampled;
+  sampled.temperature = 1.0f;
+  sampled.top_p = 0.95f;
+  sampled.presence_penalty = 0.1f;
+  dgpp::glm_sample::Params pure;
+  pure.temperature = 1.1f;
+  pure.top_p = 1.0f;
+  // The required call is owed from a prompt without a think block (the
+  // fixture rarely closes one); the greedy request keeps the think prompt.
+  // A think prompt under the model-default nucleus falls back on nearly
+  // every step (94 allowed ids of a near-flat row against 24 candidates):
+  // the MTP fallback path under masks, both rows.
+  const std::vector<std::vector<GrammarSpecCase>> phases{
+      {{"solo", 12, sampled, 7, fixture_grammar(Mode::kRequired), false}},
+      {{"a", 11, pure, 11, fixture_grammar(Mode::kNamed, true, "ab"), false},
+       {"g", 9, dgpp::glm_sample::greedy_params(), 0,
+        fixture_grammar(Mode::kRequired), true}},
+      {{"think", 10, sampled, 29, fixture_grammar(Mode::kRequired), true},
+       {"think2", 10, sampled, 31, fixture_grammar(Mode::kNamed, true, "ac"), true}},
+  };
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29937);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<std::vector<int64_t>>> seqs(kWorld);
+  std::vector<uint64_t> fallbacks(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      uint16_t* prefix_scratch = nullptr;
+      uint16_t* gather_scratch = nullptr;
+      const auto release = [&] {
+        if (scratch) cudaFreeHost(scratch);
+        if (prefix_scratch) cudaFreeHost(prefix_scratch);
+        if (gather_scratch) cudaFreeHost(gather_scratch);
+        scratch = prefix_scratch = gather_scratch = nullptr;
+      };
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 256, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded, kSlots,
+                                 /*mtp=*/true);
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                                   sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+                                   cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+            cudaHostAllocDefault));
+        arrive_once();
+        dgpp::GlmGraphEngineAdapter engine(
+            &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+            test_wait_timeout_ms(), /*batch_min_live=*/kSlots, prefix_scratch,
+            gather_scratch, kCap, &gvocab);
+        if (!engine.supports_constraints())
+          throw std::runtime_error("the MTP graph engine did not arm "
+                                   "constrained decoding");
+        dgpp::glm::Scheduler sched(&engine, /*eos=*/{});
+        size_t result_index = 0;
+        for (const std::vector<GrammarSpecCase>& phase : phases) {
+          for (const GrammarSpecCase& c : phase) {
+            dgpp::glm::SchedulerRequest req;
+            req.id = c.id;
+            req.prompt = c.think_prompt ? think_prompt : prompt;
+            req.max_steps = c.max_steps;
+            req.sampling = c.params;
+            req.seed = c.seed;
+            req.grammar = c.grammar;
+            sched.submit(req);
+          }
+          while (sched.tick()) {
+          }
+          for (const GrammarSpecCase& c : phase) {
+            const auto& got = sched.results()[result_index].generated;
+            ++result_index;
+            if (got.size() != static_cast<size_t>(c.max_steps))
+              throw std::runtime_error(std::string("MTP transcript length for ") + c.id);
+            require_grammar_valid(gvocab, c.grammar, c.think_prompt, got,
+                                  std::string("MTP graph '") + c.id + "'");
+            seqs[static_cast<size_t>(r)].push_back(got);
+          }
+        }
+        fallbacks[static_cast<size_t>(r)] = engine.fallbacks();
+        release();
+      } catch (const std::exception& e) {
+        release();
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("constrained MTP graph rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r) {
+    require(seqs[static_cast<size_t>(r)] == seqs[0],
+            "constrained MTP transcripts differ across ranks");
+    require(fallbacks[static_cast<size_t>(r)] == fallbacks[0],
+            "MTP fallback counts differ across ranks");
+  }
+  bool saw_call = false;
+  for (const int64_t t : seqs[0][0]) saw_call = saw_call || t == kGxToolOpen;
+  require(saw_call, "the required grammar produced a call under MTP");
+  require(fallbacks[0] > 0, "the think prompts must exercise the MTP fallback "
+                            "under masks");
+  DGPP_LOG_INFO("constrained MTP graph w2: {} transcripts rank-identical and "
+                "inside their grammars, {} fallbacks served",
+                seqs[0].size(), fallbacks[0]);
+}
+
 // M6 6b, the device path under MTP: the one-graph T=2 step with the
 // on-device speculative verdict (the accept test, the residual, row 1's
 // sample) in lockstep with the eager SampledSpeculator on a second model
@@ -3256,7 +3652,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
             const GlmDiagnosticModel::Outputs pre =
                 eager.session_prefill(static_cast<int>(i), prompt);
             const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
-            const int32_t first = row1(pre, params, rng, prompt_context).token;
+            const int32_t first = row1(pre, params, rng, prompt_context, nullptr).token;
             specs.push_back(std::make_unique<dgpp::SampledSpeculator>(
                 eager, static_cast<int>(i), pick_rows, row0, row1, params, rng,
                 prompt));

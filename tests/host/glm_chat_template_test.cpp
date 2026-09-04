@@ -27,6 +27,8 @@ char** g_argv = nullptr;
 #include "models/glm_chat_template.hpp"
 #include "models/glm_tokenizer.hpp"
 #include "models/glm_tool_parser.hpp"
+#include "models/glm_tool_grammar.hpp"
+#include "models/glm_config.hpp"
 
 namespace {
 
@@ -356,6 +358,141 @@ DGPP_TEST(glm_tool_call_render_encode_parse_roundTrip) {
   DGPP_LOG_INFO("glm_chat_template_test: {} tool-call turns ({} calls) round-trip "
                 "render -> encode -> parse exactly",
                 turns, calls);
+}
+
+
+// M6 6g: the grammar over the REAL tokenizer accepts every golden tool-call
+// turn position by position — the name and key automata over BPE token
+// texts, the structural states, the values as free text — under a
+// required-call spec built from the case's tools; and it refuses what the
+// mode forbids (a second call under a single-call spec, a stray EOS while
+// a call is owed, a name outside the tools).
+DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
+  const std::string kGoldenPath = golden_path(g_argc, g_argv);
+  const char* env_model = std::getenv("DGPP_TP_REAL_MODEL");
+  const std::string model_id =
+      env_model && *env_model ? env_model : "unsloth/GLM-5.3-Flash-FP8";
+  std::string err;
+  const std::string snap = dgpp::hf::model_dir(model_id, &err);
+  if (snap.empty()) {
+    DGPP_LOG_WARN("glm_chat_template_test: model {} unavailable ({}); skipping",
+                  model_id, err);
+    std::exit(2);
+  }
+  const dgpp::glm::ChatTemplate tpl = dgpp::glm::ChatTemplate::load(
+      (std::filesystem::path(snap) / "chat_template.jinja").string());
+  const dgpp::GlmTokenizer tok = dgpp::GlmTokenizer::load(
+      (std::filesystem::path(snap) / "tokenizer.json").string());
+  const dgpp::GlmTextConfig cfg = dgpp::GlmTextConfig::from_json_file(
+      (std::filesystem::path(snap) / "config.json").string());
+  const dgpp::glm::GrammarVocab vocab = dgpp::glm::GrammarVocab::from_tokenizer(
+      tok, cfg.eos_token_ids, cfg.vocab_size);
+  require(vocab.usable(), "the grammar vocabulary is usable");
+  require(vocab.call_turn_eos() == 154829, "the call-turn EOS is <|observation|>");
+
+  std::vector<std::string> lines;
+  {
+    std::istringstream f(read_text_file(kGoldenPath));
+    std::string line;
+    while (std::getline(f, line))
+      if (!line.empty()) lines.push_back(line);
+  }
+  const auto spec_of = [](const dgpp::minijson::Value* tools,
+                          dgpp::glm::GrammarSpec::Mode mode, bool parallel,
+                          const std::string& named) {
+    dgpp::glm::GrammarSpec g;
+    g.mode = mode;
+    g.parallel = parallel;
+    g.named = named;
+    if (tools)
+      for (const dgpp::minijson::Value& t : tools->items()) {
+        const dgpp::minijson::Value* fn = t.find("function");
+        const dgpp::minijson::Value& def = fn ? *fn : t;
+        g.tools.push_back(dgpp::glm::GrammarTool{
+            std::string(def.at("name").as_string()), false, {}});
+      }
+    return g;
+  };
+  size_t turns = 0;
+  for (size_t i = 1; i < lines.size(); ++i) {
+    const dgpp::minijson::ParseResult parsed = dgpp::minijson::parse(lines[i]);
+    const dgpp::minijson::Value& rec = parsed.root;
+    const std::string name(rec.at("name").as_string());
+    const dgpp::minijson::Value& kwargs = rec.at("kwargs");
+    const dgpp::minijson::Value& messages = kwargs.at("messages");
+    const dgpp::minijson::Value* tools = kwargs.find("tools");
+    for (size_t k = 0; k < messages.items().size(); ++k) {
+      const dgpp::minijson::Value& msg = messages.items()[k];
+      const dgpp::minijson::Value* tcs = msg.find("tool_calls");
+      if (msg.at("role").as_string() != "assistant" || tcs == nullptr) continue;
+      const auto render_through = [&](size_t count) {
+        std::vector<dgpp::glm::Value> ms;
+        for (size_t j = 0; j < count; ++j)
+          ms.push_back(dgpp::glm::Value::from_minijson(messages.items()[j]));
+        dgpp::glm::Value::Members g;
+        g.emplace_back("messages", dgpp::glm::Value::list_value(std::move(ms)));
+        if (tools) g.emplace_back("tools", dgpp::glm::Value::from_minijson(*tools));
+        g.emplace_back("add_generation_prompt", dgpp::glm::Value::boolean(false));
+        return tpl.render(dgpp::glm::Value::map_value(std::move(g)));
+      };
+      std::string turn = render_through(k + 1).substr(render_through(k).size());
+      turn.erase(0, std::string("<|assistant|>").size());
+      std::vector<int64_t> ids = tok.encode(turn);
+      ids.push_back(vocab.call_turn_eos());
+      // Required (parallel): every turn is accepted; the grammar ends the
+      // turn only on EOS.
+      dgpp::glm::GrammarState g(&vocab, spec_of(tools, dgpp::glm::GrammarSpec::Mode::kRequired, true, ""),
+                                /*prompt_opens_thinking=*/true);
+      for (size_t j = 0; j < ids.size(); ++j) {
+        require(g.allows(ids[j]),
+                name + ": id " + std::to_string(ids[j]) + " (" +
+                    tok.decode(ids[j], false) + ") at position " +
+                    std::to_string(j) + " refused in state " + g.state_name());
+        g.advance(ids[j]);
+      }
+      require(g.active(), name + ": the grammar stayed live");
+      // Named: the first call's function is the one; a second call is
+      // refused under the single-call spec, so a two-call turn's second
+      // <tool_call> must be disallowed there.
+      const dgpp::minijson::Value& first = tcs->items()[0];
+      const dgpp::minijson::Value* ffn = first.find("function");
+      const std::string first_name(
+          (ffn ? *ffn : first).at("name").as_string());
+      dgpp::glm::GrammarState single(&vocab, spec_of(tools, dgpp::glm::GrammarSpec::Mode::kRequired, false, ""), true);
+      int calls_seen = 0;
+      bool refused_second = false;
+      for (size_t j = 0; j < ids.size(); ++j) {
+        if (ids[j] == vocab.markers().tool_call_open.id) ++calls_seen;
+        if (calls_seen == 2 && ids[j] == vocab.markers().tool_call_open.id) {
+          refused_second = !single.allows(ids[j]);
+          break;
+        }
+        require(single.allows(ids[j]), name + ": single-call spec refused id " +
+                                           std::to_string(ids[j]) + " of call 1");
+        single.advance(ids[j]);
+      }
+      if (tcs->items().size() >= 2)
+        require(refused_second, name + ": the single-call spec must refuse the second call");
+      // A stray EOS before the call is refused while the call is owed.
+      dgpp::glm::GrammarState owed(&vocab, spec_of(tools, dgpp::glm::GrammarSpec::Mode::kRequired, true, ""), true);
+      require(!owed.allows(vocab.call_turn_eos()) && !owed.allows(154827),
+              name + ": EOS refused while a call is owed");
+      // A name outside the tools: refused at its first byte.
+      dgpp::glm::GrammarState wrong(&vocab, spec_of(tools, dgpp::glm::GrammarSpec::Mode::kNamed, true, first_name), true);
+      owed.advance(vocab.markers().think_close.id);
+      wrong.advance(vocab.markers().think_close.id);
+      wrong.advance(vocab.markers().tool_call_open.id);
+      const std::vector<int64_t> zebra = tok.encode("zebra_tool");
+      require(!zebra.empty() && !wrong.allows(zebra[0]),
+              name + ": a name outside the tools is refused at its first token");
+      ++turns;
+    }
+  }
+  require(turns >= 6, "expected at least 6 tool-call turns, got " +
+                          std::to_string(turns));
+  DGPP_LOG_INFO("glm_chat_template_test: the grammar accepts {} golden tool-call "
+                "turns over the real tokenizer and refuses the forbidden shapes",
+                turns);
 }
 
 }  // namespace

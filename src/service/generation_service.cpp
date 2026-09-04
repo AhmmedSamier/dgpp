@@ -262,6 +262,7 @@ std::string text_completion_body(const std::string& id, int64_t created,
 std::string model_object(const std::string& model_id, int64_t created,
                          bool sampling_available,
                          const glm_sample::Params& d, bool tools_available,
+                         bool constraints_available,
                          bool reasoning_in_content) {
   std::string out;
   out.append("{\"id\":");
@@ -282,6 +283,8 @@ std::string model_object(const std::string& model_id, int64_t created,
   append_json_float(&out, d.repetition_penalty);
   out.append("}},\"tools\":{\"available\":");
   out.append(tools_available ? "true" : "false");
+  out.append(",\"constrained\":");
+  out.append(constraints_available ? "true" : "false");
   out.append("},\"reasoning\":{\"in_content\":");
   out.append(reasoning_in_content ? "true" : "false");
   out.append("}}");
@@ -350,10 +353,12 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
           ? "use the fixed seed " + std::to_string(*cfg_.fixed_seed)
           : std::string("draw a fresh seed each"));
   DGPP_LOG_INFO(
-      "serve: tool calls {}; reasoning {}",
+      "serve: tool calls {}; tool_choice/parallel_tool_calls {}; reasoning {}",
       markers_.tool_calls_available()
           ? "available (the template's markers are in the tokenizer)"
           : "unavailable (no tool-call markers in this tokenizer)",
+      constraints_available() ? "enforced by constrained decoding"
+                              : "not enforceable (no masks on this engine)",
       !markers_.reasoning_available()
           ? "not split (no </think> marker)"
           : cfg_.reasoning_in_content ? "folded into content"
@@ -549,18 +554,72 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
   }
 
   // ---- parallel_tool_calls ----------------------------------------------
+  bool parallel = true;
   if (const Value* ptc = body.find("parallel_tool_calls")) {
     if (!have_tools)
       return refuse("parallel_tool_calls requires tools", "parallel_tool_calls");
     if (!ptc->is_bool())
       return refuse("parallel_tool_calls must be a boolean",
                     "parallel_tool_calls");
-    if (!ptc->as_bool(true))
-      return refuse(
-          "parallel_tool_calls: false cannot be enforced by this server "
-          "(the model decides how many calls a turn carries); omit it or "
-          "send true",
-          "parallel_tool_calls", "unsupported_parameter_value");
+    parallel = ptc->as_bool(true);
+  }
+
+  // ---- the grammar (M6 6g) ---------------------------------------------
+  // tool_choice none / required / named and parallel_tool_calls false are
+  // enforced by constrained decoding: the pick's mask on every rank.
+  {
+    using dgpp::glm::GrammarSpec;
+    GrammarSpec& g = plan->grammar;
+    switch (choice) {
+      case Choice::kAuto:
+        g.mode = parallel ? GrammarSpec::Mode::kNone : GrammarSpec::Mode::kAuto;
+        break;
+      case Choice::kNone: g.mode = GrammarSpec::Mode::kForbidCalls; break;
+      case Choice::kRequired: g.mode = GrammarSpec::Mode::kRequired; break;
+      case Choice::kNamed:
+        g.mode = GrammarSpec::Mode::kNamed;
+        g.named = named;
+        break;
+    }
+    g.parallel = parallel;
+    if (g.active() && !constraints_available()) {
+      // tool_choice none is served by leaving the tools out of the render
+      // on any engine (the grammar is belt and braces); required, named and
+      // parallel_tool_calls false are guarantees only a masked pick gives.
+      if (choice == Choice::kNone) {
+        g = GrammarSpec{};
+      } else {
+        const char* field = choice == Choice::kAuto ? "parallel_tool_calls"
+                                                    : "tool_choice";
+        return refuse(
+            std::string(field) +
+                " cannot be enforced on this engine (it has no constrained "
+                "decoding); omit it — tool_choice auto with "
+                "parallel_tool_calls true is served",
+            field, "constrained_decoding_unsupported");
+      }
+    }
+    if (g.active()) {
+      for (const Value& t : tools->items()) {
+        const Value* fn = t.find("function");
+        const Value& def = fn != nullptr && fn->is_object() ? *fn : t;
+        dgpp::glm::GrammarTool tool;
+        tool.name = std::string(def.at("name").as_string());
+        // Keys close only when the schema says so (additionalProperties
+        // false — JSON Schema's default is open) and declares properties.
+        if (const Value* params = def.find("parameters")) {
+          const Value* props = params->find("properties");
+          const Value* extra = params->find("additionalProperties");
+          const bool closed = extra != nullptr && extra->is_bool() &&
+                              !extra->as_bool(true);
+          if (closed && props != nullptr && props->is_object()) {
+            tool.constrain_keys = true;
+            for (const Member& pm : props->members()) tool.keys.push_back(pm.key);
+          }
+        }
+        g.tools.push_back(std::move(tool));
+      }
+    }
   }
 
   // ---- reasoning_effort / chat_template_kwargs --------------------------
@@ -759,10 +818,6 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
   plan->globals = Value::make_object(std::move(globals));
   plan->tools_requested = have_tools;
   if (have_tools) plan->schemas = dgpp::glm::ToolSchemas(*tools);
-  if (choice == Choice::kRequired || choice == Choice::kNamed) {
-    plan->forced_prefix = markers_.tool_call_open.text + named;
-    plan->seeded_name = named;
-  }
   return true;
 }
 
@@ -992,9 +1047,8 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   if (!parse_chat(body, w, &plan)) return;
 
   // The prompt: render the chat template over the globals, encode. A
-  // forced tool_choice appends "</think><tool_call>[name]" — closing the
-  // think block the generation prompt opened, then opening the call —
-  // so the model continues inside a call; the parser starts there.
+  // constrained tool_choice changes nothing here — the grammar rides the
+  // scheduler request and masks the pick on every rank (M6 6g).
   std::vector<int64_t> prompt;
   std::string rendered;
   try {
@@ -1016,16 +1070,6 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
                               prompt.back() == markers_.think_open.id;
   ToolCallParser::Options popts;
   popts.start_in_reasoning = opens_thinking;
-  if (!plan.forced_prefix.empty()) {
-    std::string forced;
-    if (opens_thinking) forced += markers_.think_close.text;
-    forced += plan.forced_prefix;
-    prompt = frontend_->encode_text(rendered + forced);
-    popts.start_in_reasoning = false;
-    popts.start_in_tool_call = true;
-    popts.seeded_name = plan.seeded_name;
-    popts.forced_prefix_text = plan.forced_prefix;
-  }
 
   // Full-reserve admission arithmetic — a request that can never fit is
   // a 400, never a scheduler deadlock.
@@ -1072,6 +1116,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   sr.sampling = sampling;
   sr.seed = seed;
   sr.logprobs = logprobs;
+  sr.grammar = std::move(plan.grammar);
   record->logprobs = logprobs;
   enqueue_admission(std::move(record), std::move(sr));
 }
@@ -1229,6 +1274,7 @@ void GenerationService::route_models(const HttpRequest& req,
               "{\"object\":\"list\",\"data\":[" +
                   model_object(cfg_.model_id, created, sampling_available_,
                                cfg_.sampling_defaults, tool_calls_available(),
+                               constraints_available(),
                                cfg_.reasoning_in_content) +
                   "]}");
     return;
@@ -1238,7 +1284,7 @@ void GenerationService::route_models(const HttpRequest& req,
     w.respond(200, "application/json",
               model_object(id, created, sampling_available_,
                            cfg_.sampling_defaults, tool_calls_available(),
-                           cfg_.reasoning_in_content));
+                           constraints_available(), cfg_.reasoning_in_content));
     return;
   }
   respond_error(w, 404, "the model '" + id + "' does not exist",

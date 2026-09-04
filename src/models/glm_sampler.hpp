@@ -199,6 +199,38 @@ inline void apply_penalties(float* logits, int n, int slice_begin,
 }
 
 // ---------------------------------------------------------------------------
+// The token mask (M6 6g, constrained decoding)
+// ---------------------------------------------------------------------------
+
+// A masked id is an ABSENT candidate: its logit is -inf, it is never listed
+// by local_topk/sort_slice, it contributes nothing to any normalizer, and
+// the decision's "vocabulary size" is the count of PRESENT ids (the
+// allowed set) — so a constrained row samples the distribution restricted
+// to the mask and renormalized, exactly, through the unchanged selector.
+// `mask_words` is a bitmask over [0, vocab): bit id set = allowed. Ids of
+// the slice outside the mask become -inf in place.
+inline void apply_mask(float* logits, int n, int slice_begin,
+                       const uint32_t* mask_words, int vocab) {
+  if (mask_words == nullptr) return;
+  for (int i = 0; i < n; ++i) {
+    const int id = slice_begin + i;
+    const bool allowed =
+        id < vocab && ((mask_words[id >> 5] >> (id & 31)) & 1u) != 0u;
+    if (!allowed) logits[i] = -INFINITY;
+  }
+}
+
+inline bool present_logit(float v) { return v != -INFINITY; }
+
+// The number of present (not -inf) logits — a constrained decision's
+// vocabulary size.
+inline int count_present(const float* logits, int n) {
+  int present = 0;
+  for (int i = 0; i < n; ++i) present += present_logit(logits[i]) ? 1 : 0;
+  return present;
+}
+
+// ---------------------------------------------------------------------------
 // Canonical order
 // ---------------------------------------------------------------------------
 
@@ -214,7 +246,8 @@ inline std::vector<Candidate> sort_slice(const float* logits, int n,
                                         int slice_begin) {
   std::vector<Candidate> out;
   out.reserve(n);
-  for (int i = 0; i < n; ++i) out.push_back({slice_begin + i, logits[i]});
+  for (int i = 0; i < n; ++i)
+    if (present_logit(logits[i])) out.push_back({slice_begin + i, logits[i]});
   std::sort(out.begin(), out.end(), candidate_before);
   return out;
 }
@@ -345,14 +378,17 @@ inline Result select_from_sorted(const std::vector<Candidate>& sorted,
   const double r = uniform01(rng);
   ++rng.counter;
   double cum = 0.0;
-  size_t chosen = s.final_count - 1;
+  size_t chosen = s.final_count;
+  size_t last_positive = 0;  // the rounding guard: the last token with mass
   for (size_t i = 0; i < s.final_count; ++i) {
+    if (s.exps[i] > 0.0f) last_positive = i;
     cum += s.exps[i] / s.final_den;
     if (cum > r) {
       chosen = i;
       break;
     }
   }
+  if (chosen == s.final_count) chosen = last_positive;
   return s.result_for(sorted, chosen, p.logprobs);
 }
 
@@ -398,10 +434,10 @@ inline SpecOutcome spec_select_from_sorted(const std::vector<Candidate>& sorted,
   const float res_den = j < s.final_count ? s.final_den - s.exps[j] : s.final_den;
   double cum = 0.0;
   size_t chosen = s.final_count;
-  size_t last = s.final_count;
+  size_t last = s.final_count;  // the last residual token with mass
   for (size_t i = 0; i < s.final_count; ++i) {
     if (i == j) continue;
-    last = i;
+    if (s.exps[i] > 0.0f || last == s.final_count) last = i;
     cum += s.exps[i] / res_den;
     if (cum > u2) {
       chosen = i;
@@ -459,11 +495,12 @@ inline std::vector<Candidate> local_topk(const float* logits, int n,
                                         int slice_begin, int k) {
   std::vector<Candidate> all;
   all.reserve(n);
-  for (int i = 0; i < n; ++i) all.push_back({slice_begin + i, logits[i]});
+  for (int i = 0; i < n; ++i)
+    if (present_logit(logits[i])) all.push_back({slice_begin + i, logits[i]});
   // partial_sort: O(n log k) — this runs per decode step on a ~38k-entry
   // vocab slice, so the full O(n log n) sort would show up in the
   // step-time budget.
-  const size_t k_eff = std::min<size_t>(n, static_cast<size_t>(k));
+  const size_t k_eff = std::min<size_t>(all.size(), static_cast<size_t>(k));
   std::partial_sort(all.begin(), all.begin() + k_eff, all.end(),
                     candidate_before);
   all.resize(k_eff);
@@ -527,6 +564,7 @@ inline double slice_logsumexp(const float* logits, int n) {
   double top = -INFINITY;
   for (int i = 0; i < n; ++i)
     top = std::max(top, static_cast<double>(logits[i]));
+  if (top == -INFINITY) return -INFINITY;  // every id masked: no mass here
   const double sum =
       chunked_exp_sum(n, top, [&](int i) { return logits[i]; });
   return top + detmath::log_d(sum);
@@ -548,6 +586,7 @@ inline double slice_logsumexp(const float* logits, int n,
     const float scaled = logits[i] / temperature;
     top = std::max(top, static_cast<double>(scaled));
   }
+  if (top == -INFINITY) return -INFINITY;  // every id masked: no mass here
   const double sum = chunked_exp_sum(
       n, top, [&](int i) { return logits[i] / temperature; });
   return top + detmath::log_d(sum);
@@ -556,6 +595,8 @@ inline double slice_logsumexp(const float* logits, int n,
 // Canonical rank-order fold of per-slice log-sum-exp values. The centralized
 // test oracle uses this same fold, so the candidate decision is judged
 // against the exact normalizer the distributed path actually transports.
+// A slice whose every id is masked folds as -inf (a zero term); at least
+// one slice must hold mass.
 inline double merge_logsumexp(const std::vector<double>& slice_lses) {
   if (slice_lses.empty())
     throw std::invalid_argument("glm_sample: no slice log-sum-exp values");
@@ -565,6 +606,7 @@ inline double merge_logsumexp(const std::vector<double>& slice_lses) {
     throw std::invalid_argument("glm_sample: non-finite slice log-sum-exp");
   double sum = 0.0;
   for (double lse : slice_lses) {
+    if (lse == -INFINITY) continue;  // exp_d(-inf) is 0: a masked slice
     if (!std::isfinite(lse))
       throw std::invalid_argument("glm_sample: non-finite slice log-sum-exp");
     sum += detmath::exp_d(lse - top);
@@ -789,8 +831,11 @@ inline PrefixDecision sample_from_prefix(
   const double draw = uniform01(rng);
   double cumulative = 0.0;
   size_t chosen = held;
+  size_t last_positive = 0;  // the rounding guard: the last token with mass
   for (size_t i = 0; i < held; ++i) {
-    cumulative += mass_at(i);
+    const double m = mass_at(i);
+    if (m > 0.0) last_positive = i;
+    cumulative += m;
     if (cumulative > draw) {
       chosen = i;
       break;
@@ -798,7 +843,7 @@ inline PrefixDecision sample_from_prefix(
   }
   if (chosen == held) {
     if (!complete) return decision;  // in the unseen tail; the RNG is untouched
-    chosen = held - 1;               // the selector's rounding guard
+    chosen = last_positive;          // the selector's rounding guard
   }
   ++rng.counter;
   const float lse = static_cast<float>(global_scaled_logsumexp);
@@ -831,10 +876,13 @@ struct SpecPrefixDecision {
   double normalizer = 0.0;
 };
 
+// `draft_excluded`: the caller knows the draft is outside the row's
+// support (a masked id): its probability is 0 without the list having to
+// show it, so an incomplete prefix still decides (M6 6g).
 inline SpecPrefixDecision spec_accept_from_prefix(
     const std::vector<Candidate>& sorted_prefix, int vocab_size,
     double global_scaled_logsumexp, int32_t draft, const Params& p,
-    Rng& rng) {
+    Rng& rng, bool draft_excluded = false) {
   const PrefixSupport support =
       resolve_support(sorted_prefix, vocab_size, global_scaled_logsumexp, p);
   SpecPrefixDecision decision;
@@ -863,12 +911,14 @@ inline SpecPrefixDecision spec_accept_from_prefix(
                           global_scaled_logsumexp);
   };
   size_t j = held;
-  for (size_t i = 0; i < held; ++i)
-    if (sorted_prefix[i].id == draft) {
-      j = i;
-      break;
-    }
-  if (j == held && !complete) return decision;  // the draft's mass is unseen
+  if (!draft_excluded)
+    for (size_t i = 0; i < held; ++i)
+      if (sorted_prefix[i].id == draft) {
+        j = i;
+        break;
+      }
+  if (j == held && !complete && !draft_excluded)
+    return decision;  // the draft's mass is unseen
   const double p_draft = j < held ? mass_at(j) : 0.0;
   const Rng entry = rng;
   const double u1 = uniform01(rng);
@@ -886,11 +936,12 @@ inline SpecPrefixDecision spec_accept_from_prefix(
   const double threshold = u2 * (1.0 - p_draft);
   double cumulative = 0.0;
   size_t chosen = held;
-  size_t last = held;
+  size_t last = held;  // the last residual token with mass
   for (size_t i = 0; i < held; ++i) {
     if (i == j) continue;
-    last = i;
-    cumulative += mass_at(i);
+    const double m = mass_at(i);
+    if (m > 0.0 || last == held) last = i;
+    cumulative += m;
     if (cumulative > threshold) {
       chosen = i;
       break;
@@ -1002,7 +1053,8 @@ inline double sharded_scaled_logsumexp(const float* logits,
 // on k, which is why the fold, not the fp32 sum, is the definition there.
 inline Result sample_reference_sharded(
     const float* logits, int vocab, const std::vector<VocabSlice>& slices,
-    const Params& p, Rng& rng, const std::vector<int32_t>& context_ids) {
+    const Params& p, Rng& rng, const std::vector<int32_t>& context_ids,
+    const uint32_t* mask = nullptr) {
   if (!(p.temperature > 0.0f) || !std::isfinite(p.temperature))
     throw std::invalid_argument(
         "glm_sample: the sharded reference is the stochastic path; "
@@ -1010,10 +1062,11 @@ inline Result sample_reference_sharded(
   validate_vocab_slices(slices, vocab);
   std::vector<float> v(logits, logits + vocab);
   apply_penalties(v.data(), vocab, 0, p, count_context(context_ids));
+  apply_mask(v.data(), vocab, 0, mask, vocab);
   const double lse = sharded_scaled_logsumexp(v.data(), slices, p.temperature);
   const std::vector<Candidate> sorted = sort_slice(v.data(), vocab, 0);
-  const PrefixDecision decision =
-      sample_from_prefix(sorted, vocab, lse, p, rng);
+  const PrefixDecision decision = sample_from_prefix(
+      sorted, static_cast<int>(sorted.size()), lse, p, rng);
   if (!decision.resolved)
     throw std::logic_error(
         "glm_sample: the complete candidate list must resolve");
@@ -1028,20 +1081,25 @@ inline Result sample_reference_sharded(
 // first width whose decision resolves is the complete list's decision; the
 // complete list is the last width and always resolves. A fallback here
 // consumes no draw until it resolves, so the counter advances exactly once.
+// Masked (-inf) logits are absent: the decision's vocabulary is the count
+// of present ids, so the complete list is complete over them.
 inline Result sample_complete_logits(const float* adjusted, int vocab,
                                      double normalizer, const Params& p,
                                      Rng& rng) {
   if (adjusted == nullptr || vocab <= 0)
     throw std::invalid_argument("glm_sample: empty complete logits");
+  const int present = count_present(adjusted, vocab);
+  if (present <= 0)
+    throw std::invalid_argument("glm_sample: every logit is masked");
   static constexpr int kWidths[] = {1024, 8192, 65536};
   for (int width : kWidths) {
-    if (width >= vocab) break;
+    if (width >= present) break;
     const std::vector<Candidate> prefix = local_topk(adjusted, vocab, 0, width);
-    const PrefixDecision d = sample_from_prefix(prefix, vocab, normalizer, p, rng);
+    const PrefixDecision d = sample_from_prefix(prefix, present, normalizer, p, rng);
     if (d.resolved) return d.result;
   }
   const std::vector<Candidate> sorted = sort_slice(adjusted, vocab, 0);
-  const PrefixDecision d = sample_from_prefix(sorted, vocab, normalizer, p, rng);
+  const PrefixDecision d = sample_from_prefix(sorted, present, normalizer, p, rng);
   if (!d.resolved)
     throw std::logic_error("glm_sample: the complete logits must resolve");
   return d.result;
@@ -1055,17 +1113,23 @@ inline SpecPrefixDecision spec_accept_complete(const float* adjusted, int vocab,
                                                const Params& p, Rng& rng) {
   if (adjusted == nullptr || vocab <= 0)
     throw std::invalid_argument("glm_sample: empty complete logits");
+  const int present = count_present(adjusted, vocab);
+  if (present <= 0)
+    throw std::invalid_argument("glm_sample: every logit is masked");
+  // A masked draft is known excluded: probability 0 whatever the list shows.
+  const bool draft_excluded =
+      draft < 0 || draft >= vocab || !present_logit(adjusted[draft]);
   static constexpr int kWidths[] = {1024, 8192, 65536};
   for (int width : kWidths) {
-    if (width >= vocab) break;
+    if (width >= present) break;
     const std::vector<Candidate> prefix = local_topk(adjusted, vocab, 0, width);
-    const SpecPrefixDecision d =
-        spec_accept_from_prefix(prefix, vocab, normalizer, draft, p, rng);
+    const SpecPrefixDecision d = spec_accept_from_prefix(
+        prefix, present, normalizer, draft, p, rng, draft_excluded);
     if (d.resolved) return d;
   }
   const std::vector<Candidate> sorted = sort_slice(adjusted, vocab, 0);
-  const SpecPrefixDecision d =
-      spec_accept_from_prefix(sorted, vocab, normalizer, draft, p, rng);
+  const SpecPrefixDecision d = spec_accept_from_prefix(
+      sorted, present, normalizer, draft, p, rng, draft_excluded);
   if (!d.resolved)
     throw std::logic_error("glm_sample: the complete logits must resolve");
   return d;
@@ -1075,16 +1139,19 @@ inline SpecPrefixDecision spec_accept_complete(const float* adjusted, int vocab,
 // diagnostic over gathered slices): penalties, the fold normalizer over the
 // layout, the widening decision. Bitwise sample_reference_sharded() at the
 // same layout, in O(V log k) rather than a full sort on most calls.
+// `mask` (optional): the constrained decoding mask over [0, vocab).
 inline Result sample_full_logits(const float* logits, int vocab,
                                  const std::vector<VocabSlice>& layout,
                                  const Params& p, Rng& rng,
-                                 const std::vector<int32_t>& context_ids) {
+                                 const std::vector<int32_t>& context_ids,
+                                 const uint32_t* mask = nullptr) {
   if (!(p.temperature > 0.0f) || !std::isfinite(p.temperature))
     throw std::invalid_argument(
         "glm_sample: sample_full_logits is the stochastic path");
   validate_vocab_slices(layout, vocab);
   std::vector<float> v(logits, logits + vocab);
   apply_penalties(v.data(), vocab, 0, p, count_context(context_ids));
+  apply_mask(v.data(), vocab, 0, mask, vocab);
   const double lse = sharded_scaled_logsumexp(v.data(), layout, p.temperature);
   return sample_complete_logits(v.data(), vocab, lse, p, rng);
 }
@@ -1101,10 +1168,12 @@ struct SpecStepReference {
   Result row1;
 };
 
+// `mask0`/`mask1` (optional): the rows' constrained decoding masks.
 inline SpecStepReference spec_reference_sharded(
     const float* row0, const float* row1, int vocab,
     const std::vector<VocabSlice>& layout, int32_t draft, const Params& p,
-    Rng& rng, const std::vector<int32_t>& context_ids) {
+    Rng& rng, const std::vector<int32_t>& context_ids,
+    const uint32_t* mask0 = nullptr, const uint32_t* mask1 = nullptr) {
   if (!(p.temperature > 0.0f) || !std::isfinite(p.temperature))
     throw std::invalid_argument("glm_sample: the speculative reference is the "
                                 "stochastic path");
@@ -1113,6 +1182,7 @@ inline SpecStepReference spec_reference_sharded(
   {
     std::vector<float> v(row0, row0 + vocab);
     apply_penalties(v.data(), vocab, 0, p, count_context(context_ids));
+    apply_mask(v.data(), vocab, 0, mask0, vocab);
     const double lse = sharded_scaled_logsumexp(v.data(), layout, p.temperature);
     const SpecPrefixDecision d =
         spec_accept_complete(v.data(), vocab, lse, draft, p, rng);
@@ -1125,6 +1195,7 @@ inline SpecStepReference spec_reference_sharded(
     context.push_back(draft);
     std::vector<float> v(row1, row1 + vocab);
     apply_penalties(v.data(), vocab, 0, p, count_context(context));
+    apply_mask(v.data(), vocab, 0, mask1, vocab);
     const double lse = sharded_scaled_logsumexp(v.data(), layout, p.temperature);
     out.row1 = sample_complete_logits(v.data(), vocab, lse, p, rng);
     out.winners[1] = out.row1.token;

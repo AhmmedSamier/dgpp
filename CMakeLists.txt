@@ -160,6 +160,7 @@ add_library(dgpp_models_glm STATIC
   src/models/glm_tokenizer.cpp
   src/models/glm_chat_template.cpp
   src/models/glm_tool_parser.cpp
+  src/models/glm_tool_grammar.cpp
   src/models/glm_scheduler.cpp)
 target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders)
 dgpp_set_common(dgpp_models_glm)
@@ -318,6 +319,7 @@ add_executable(unit_tests
   tests/unit/glm_route_audit_test.cpp
   tests/unit/glm_sampler_test.cpp
   tests/unit/glm_tool_parser_test.cpp
+  tests/unit/glm_tool_grammar_test.cpp
   tests/unit/net_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

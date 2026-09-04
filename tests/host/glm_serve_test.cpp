@@ -111,6 +111,24 @@ class FakeEngine : public SchedulerEngine {
     out.swap(pending_lps_[req]);
     return out;
   }
+  // Constrained decoding (M6 6g): the sampling-capable fake can mask and
+  // records every active grammar it is armed with (the request seam's
+  // evidence); it does not enforce it — the scripts are the outputs.
+  bool supports_constraints() const override { return can_sample_; }
+  void configure_constraint(int req,
+                            const dgpp::glm::GrammarSpec& g) override {
+    if (!can_sample_) {
+      SchedulerEngine::configure_constraint(req, g);
+      return;
+    }
+    if (!g.active()) return;
+    std::lock_guard<std::mutex> lock(armed_mu_);
+    grammars_.push_back(g);
+  }
+  std::vector<dgpp::glm::GrammarSpec> grammars() const {
+    std::lock_guard<std::mutex> lock(armed_mu_);
+    return grammars_;
+  }
 
   int max_concurrent_requests() const override { return slots_; }
   int64_t pool_blocks_total() const override { return total_blocks_; }
@@ -188,6 +206,7 @@ class FakeEngine : public SchedulerEngine {
   std::map<int, std::vector<dgpp::glm_sample::Result>> pending_lps_;
   mutable std::mutex armed_mu_;
   std::vector<Armed> armed_;
+  std::vector<dgpp::glm::GrammarSpec> grammars_;
 };
 
 // The 6f markers of the fake tokenizer: 1001..1008, decoding to their
@@ -1040,9 +1059,10 @@ DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
     Client models(rig.port());
     models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
     const std::string ml = models.read_available(800);
-    require(ml.find("\"tools\":{\"available\":true},\"reasoning\":"
-                    "{\"in_content\":false}") != std::string::npos,
-            "models advertise the tool surface: " + ml.substr(0, 400));
+    require(ml.find("\"tools\":{\"available\":true,\"constrained\":false},"
+                    "\"reasoning\":{\"in_content\":false}") != std::string::npos,
+            "models advertise the tool surface (no masks on a greedy engine): " +
+                ml.substr(0, 400));
   }
 
   // WHEN requests carry tools and template knobs, THEN the template sees
@@ -1123,7 +1143,9 @@ DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
                                     "\"function\":{\"name\":\"nope\"}}"),
           "\"param\":\"tool_choice.function.name\"");
   refused(chat_body("abcd", 2, kWeatherTools + ",\"parallel_tool_calls\":false"),
-          "\"code\":\"unsupported_parameter_value\"");
+          "\"code\":\"constrained_decoding_unsupported\"");
+  refused(chat_body("abcd", 2, kWeatherTools + ",\"tool_choice\":\"required\""),
+          "\"code\":\"constrained_decoding_unsupported\"");
   refused(chat_body("abcd", 2, ",\"tools\":[{\"type\":\"function\","
                                "\"function\":{\"description\":\"x\"}}]"),
           "\"param\":\"tools[0].function.name\"");
@@ -1258,38 +1280,75 @@ DGPP_TEST(serve_toolCalls_streamDeltasInOrder) {
   require(resp.substr(id0, 27) != resp.substr(id1, 27), "distinct call ids");
 }
 
-DGPP_TEST(serve_toolChoice_forcedPrefixSeedsTheParser) {
-  // tool_choice required: the prompt gains "</think><tool_call>" (two
-  // ids on the fake), the turn starts with the name, no reasoning.
-  ServiceRig rig(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
-                 /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
-  rig.engine.script(7, script_of(rig, "get_weather<arg_key>city</arg_key>"
-                                      "<arg_value>Rome</arg_value></tool_call>"));
+DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
+  // tool_choice required / named / none and parallel_tool_calls false ride
+  // the request as a grammar (M6 6g): the prompt is untouched (the model
+  // reasons first), the engine is armed with the spec, and the parsed
+  // turn carries the reasoning and the call.
+  using Mode = dgpp::glm::GrammarSpec::Mode;
+  ServiceRig rig(/*queue_limit=*/8, model_defaults(), /*can_sample=*/true,
+                 std::nullopt, /*with_markers=*/true);
+  {
+    Client models(rig.port());
+    models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+    require(models.read_available(800).find(
+                "\"tools\":{\"available\":true,\"constrained\":true}") !=
+                std::string::npos,
+            "models advertise constrained decoding");
+  }
+  const std::string closed_tools =
+      ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+      "\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":"
+      "\"string\"},\"days\":{\"type\":\"integer\"}},\"required\":[\"city\"],"
+      "\"additionalProperties\":false}}},{\"type\":\"function\",\"function\":"
+      "{\"name\":\"get_time\"}}]";
+  rig.engine.script(5, script_of(rig, "Think</think><tool_call>get_weather"
+                                      "<arg_key>city</arg_key><arg_value>Rome"
+                                      "</arg_value></tool_call>"));
+  // required: the prompt keeps its 5 ids, the turn reasons then calls.
   const std::string required = post_until_usage(
-      rig, chat_body("abcd", 64, kWeatherTools + ",\"tool_choice\":\"required\""));
-  require(required.find("\"content\":null,\"tool_calls\":[{\"id\":\"call_") !=
-                  std::string::npos &&
+      rig, chat_body("abcd", 64, closed_tools + ",\"tool_choice\":\"required\""));
+  require(required.find("\"prompt_tokens\":5,") != std::string::npos,
+          "no forced prefix on the prompt: " + required);
+  require(required.find("\"reasoning_content\":\"Think\"") != std::string::npos &&
               required.find("\"name\":\"get_weather\",\"arguments\":"
                             "\"{\\\"city\\\": \\\"Rome\\\"}\"") != std::string::npos &&
-              required.find("reasoning_content") == std::string::npos &&
-              required.find("\"prompt_tokens\":7,") != std::string::npos,
-          "required: " + required);
-  require(rig.frontend.last_globals().find("\"tools\":[") != std::string::npos,
-          "the tools still render for a forced call");
-
-  // A named function: its name rides in the prompt (11 more ids) and
-  // seeds the parser; the turn starts at the first argument.
-  rig.engine.script(18, script_of(rig, "<arg_key>city</arg_key><arg_value>Oslo"
-                                       "</arg_value></tool_call>"));
-  const std::string named = post_until_usage(
+              required.find("\"finish_reason\":\"tool_calls\"") != std::string::npos,
+          "the turn reasons first, then calls: " + required);
+  // named, none, auto+single, required+single: the specs the engine got.
+  (void)post_until_usage(
       rig, chat_body("abcd", 64,
-                     kWeatherTools + ",\"tool_choice\":{\"type\":\"function\","
-                                     "\"function\":{\"name\":\"get_weather\"}}"));
-  require(named.find("\"name\":\"get_weather\",\"arguments\":"
-                     "\"{\\\"city\\\": \\\"Oslo\\\"}\"") != std::string::npos &&
-              named.find("\"prompt_tokens\":18,") != std::string::npos &&
-              named.find("\"finish_reason\":\"tool_calls\"") != std::string::npos,
-          "named: " + named);
+                     closed_tools + ",\"tool_choice\":{\"type\":\"function\","
+                                    "\"function\":{\"name\":\"get_time\"}}"));
+  (void)post_until_usage(
+      rig, chat_body("abcd", 64, closed_tools + ",\"tool_choice\":\"none\""));
+  (void)post_until_usage(
+      rig, chat_body("abcd", 64, closed_tools + ",\"parallel_tool_calls\":false"));
+  (void)post_until_usage(
+      rig, chat_body("abcd", 64, closed_tools + ",\"tool_choice\":\"required\","
+                                                "\"parallel_tool_calls\":false"));
+  (void)post_until_usage(rig, chat_body("abcd", 64, closed_tools));  // auto
+  const std::vector<dgpp::glm::GrammarSpec> g = rig.engine.grammars();
+  require(g.size() == 5, "five constrained requests armed a grammar (auto "
+                         "arms none), got " + std::to_string(g.size()));
+  require(g[0].mode == Mode::kRequired && g[0].parallel &&
+              g[0].tools.size() == 2 && g[0].tools[0].name == "get_weather" &&
+              g[0].tools[0].constrain_keys &&
+              g[0].tools[0].keys == std::vector<std::string>{"city", "days"} &&
+              g[0].tools[1].name == "get_time" && !g[0].tools[1].constrain_keys,
+          "required: the tools with their closed key set");
+  require(g[1].mode == Mode::kNamed && g[1].named == "get_time", "named");
+  require(g[2].mode == Mode::kForbidCalls, "none forbids calls");
+  require(rig.frontend.last_globals().find("\"tools\"") != std::string::npos,
+          "the last (auto) request rendered the tools");
+  require(g[3].mode == Mode::kAuto && !g[3].parallel, "auto + single call");
+  require(g[4].mode == Mode::kRequired && !g[4].parallel, "required + single");
+  // An open schema (no additionalProperties: false) leaves the keys free.
+  (void)post_until_usage(
+      rig, chat_body("abcd", 64, kWeatherTools + ",\"tool_choice\":\"required\""));
+  const std::vector<dgpp::glm::GrammarSpec> g2 = rig.engine.grammars();
+  require(g2.size() == 6 && !g2[5].tools[0].constrain_keys,
+          "JSON Schema's default is open: keys unconstrained");
 }
 
 DGPP_TEST(serve_reasoning_foldKnobAndUnterminatedCallAtTheCap) {

@@ -239,6 +239,29 @@ void test_journal_codec() {
   require(back.submits[0].max_steps == 16, "codec: max_steps round-trip");
   require(back.submits[0].cancel_after == 3, "codec: cancel_after round-trip");
   require(back.cancels[0] == "chatcmpl-dead", "codec: cancel round-trip");
+  require(!back.submits[0].grammar.active(), "codec: no grammar unless sent");
+
+  // The grammar (M6 6g) rides with the request: mode, parallel flag, the
+  // named function, the tools with and without closed key sets.
+  {
+    GenerationService::PassEvents ev;
+    dgpp::glm::SchedulerRequest s = submit;
+    s.grammar.mode = dgpp::glm::GrammarSpec::Mode::kNamed;
+    s.grammar.parallel = false;
+    s.grammar.named = "get_weather";
+    s.grammar.tools.push_back(
+        dgpp::glm::GrammarTool{"get_weather", true, {"city", "days"}});
+    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"get_time", false, {}});
+    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"ping", true, {}});
+    ev.submits.push_back(s);
+    const dgpp::service::JournalRecord got = dgpp::service::decode_journal_line(
+        dgpp::service::encode_journal_tick(ev));
+    require(got.submits.size() == 1 && got.submits[0].grammar == s.grammar,
+            "codec: grammar round-trip");
+    require(got.submits[0].grammar.tools[2].constrain_keys &&
+                got.submits[0].grammar.tools[2].keys.empty(),
+            "codec: a closed empty key set survives");
+  }
 
   require(dgpp::service::decode_journal_line(
               dgpp::service::encode_journal_stop()).stop,

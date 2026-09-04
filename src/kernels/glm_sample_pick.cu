@@ -71,6 +71,13 @@ __device__ inline uint32_t primary_key(float logit) {
   return sortable_f32_dev(logit == 0.0f ? 0.0f : logit);
 }
 // (~primary << 21) | id: the SMALLEST key is the canonical first candidate.
+// A masked id is absent (glm_sample::apply_mask writes -inf): its key is 0,
+// below every present key (a finite float never maps to 0), so it is never
+// listed, never selected and never counted.
+__device__ inline uint32_t key_of(float logit) {
+  return logit == -INFINITY ? 0u : primary_key(logit);
+}
+
 __device__ inline uint64_t composite_key(float logit, int32_t id) {
   return (static_cast<uint64_t>(~primary_key(logit)) << kKeyIdxBits) |
          static_cast<uint64_t>(id);
@@ -170,22 +177,47 @@ struct RowSpec {
   bool active;
   bool sampled;
   bool penalized;
+  bool constrained;       // the row carries a token mask (M6 6g)
+  int32_t allowed;        // the mask's allowed count (the row's vocabulary)
+  const uint32_t* mask;   // the mask's bitmask words (after the header)
   GlmSampleSpec spec;
 };
 
+// The row's mask, when the host wrote one: masks[row * mask_stride] is the
+// allowed count (0: unconstrained), the words after it the bitmask over
+// [0, vocab_size). A constrained row takes the full path — its greedy
+// argmax must respect the mask too.
 __device__ inline RowSpec row_spec(const GlmSampleSpec* specs, int q,
                                    const int64_t* positions,
-                                   int position_stride) {
+                                   int position_stride,
+                                   const uint32_t* masks, int mask_stride,
+                                   int row) {
   RowSpec rs;
   rs.active = positions == nullptr || positions[q * position_stride] >= 0;
   rs.spec = specs[q];
   rs.penalized = rs.spec.repetition_penalty != 1.0f ||
                  rs.spec.frequency_penalty != 0.0f ||
                  rs.spec.presence_penalty != 0.0f;
+  rs.mask = nullptr;
+  rs.allowed = 0;
+  rs.constrained = false;
+  if (masks != nullptr) {
+    const uint32_t* m = masks + static_cast<size_t>(row) * mask_stride;
+    if (m[0] != 0u) {
+      rs.constrained = true;
+      rs.allowed = static_cast<int32_t>(m[0]);
+      rs.mask = m + 1;
+    }
+  }
   rs.sampled = rs.active && (rs.spec.temperature > 0.0f ||
-                             rs.spec.logprobs >= 0 || rs.penalized);
+                             rs.spec.logprobs >= 0 || rs.penalized ||
+                             rs.constrained);
   if (rs.spec.temperature <= 0.0f) rs.spec.temperature = 1.0f;
   return rs;
+}
+
+__device__ inline bool mask_allows(const uint32_t* mask, int id) {
+  return ((mask[id >> 5] >> (id & 31)) & 1u) != 0u;
 }
 
 // Row t's context count of id v: the request's table (every token
@@ -211,13 +243,15 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
     int vocab_size, const GlmSampleSpec* __restrict__ specs,
     int rows_per_request, const int64_t* __restrict__ fed,
     const int64_t* __restrict__ positions, int position_stride,
-    const int32_t* __restrict__ counts, double* __restrict__ maxes) {
+    const int32_t* __restrict__ counts, const uint32_t* __restrict__ masks,
+    int mask_stride, double* __restrict__ maxes) {
   __shared__ float fred[32];
   const int c = blockIdx.x;
   const int row = blockIdx.y;
   const int q = row / rows_per_request;
   const int t = row % rows_per_request;
-  const RowSpec rs = row_spec(specs, q, positions, position_stride);
+  const RowSpec rs =
+      row_spec(specs, q, positions, position_stride, masks, mask_stride, row);
   if (!rs.sampled) return;
   const int nchunks = gridDim.x;
   float* slice = logits + static_cast<size_t>(row) * vocab_count;
@@ -233,6 +267,12 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
         l = penalize(l, cnt, rs.spec);
         slice[i] = l;
       }
+    }
+    // The mask: an excluded id becomes -inf in place (absent to every
+    // later stage, the host's gather fallback included).
+    if (rs.constrained && !mask_allows(rs.mask, vocab_begin + i)) {
+      l = -INFINITY;
+      slice[i] = l;
     }
     scaled = __fdiv_rn(l, rs.spec.temperature);
   }
@@ -250,13 +290,15 @@ __global__ void __launch_bounds__(kChunkThreads) sample_partials_kernel(
     const float* __restrict__ logits, int vocab_count,
     const GlmSampleSpec* __restrict__ specs, int rows_per_request,
     const int64_t* __restrict__ positions, int position_stride,
+    const uint32_t* __restrict__ masks, int mask_stride,
     const double* __restrict__ maxes, double* __restrict__ partials) {
   __shared__ double terms[kChunkThreads];
   __shared__ float fred[32];
   const int c = blockIdx.x;
   const int row = blockIdx.y;
   const int q = row / rows_per_request;
-  const RowSpec rs = row_spec(specs, q, positions, position_stride);
+  const RowSpec rs =
+      row_spec(specs, q, positions, position_stride, masks, mask_stride, row);
   if (!rs.sampled) return;
   const int nchunks = gridDim.x;
   float m = -INFINITY;
@@ -266,8 +308,10 @@ __global__ void __launch_bounds__(kChunkThreads) sample_partials_kernel(
   const float* slice = logits + static_cast<size_t>(row) * vocab_count;
   const int c0 = c * kChunkThreads;
   const int i = c0 + threadIdx.x;
+  // A slice with every id masked has no mass (top is -inf): zero terms, so
+  // the row's lse folds as -inf rather than NaN.
   terms[threadIdx.x] =
-      i < vocab_count
+      i < vocab_count && top != -INFINITY
           ? detmath::exp_d(
                 static_cast<double>(__fdiv_rn(slice[i], rs.spec.temperature)) -
                 static_cast<double>(top))
@@ -379,13 +423,13 @@ struct ListTieKeyFn {
 };
 struct SliceKeyFn {
   const float* slice;
-  __device__ uint32_t operator()(int i) const { return primary_key(slice[i]); }
+  __device__ uint32_t operator()(int i) const { return key_of(slice[i]); }
 };
 struct SliceTieKeyFn {
   const float* slice;
   uint32_t threshold;
   __device__ uint32_t operator()(int i) const {
-    return primary_key(slice[i]) == threshold ? ~static_cast<uint32_t>(i) : 0u;
+    return key_of(slice[i]) == threshold ? ~static_cast<uint32_t>(i) : 0u;
   }
 };
 
@@ -422,6 +466,7 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
     int vocab_begin, int rank, int world, int candidates,
     const GlmSampleSpec* __restrict__ specs, int rows_per_request,
     const int64_t* __restrict__ positions, int position_stride,
+    const uint32_t* __restrict__ masks, int mask_stride,
     const double* __restrict__ maxes, const double* __restrict__ partials,
     int nchunks, const uint64_t* __restrict__ carry_digest,
     uint16_t* __restrict__ table, GlmPickLocal* __restrict__ locals) {
@@ -429,6 +474,7 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
   __shared__ int found[3];
   __shared__ int sel_count;
   __shared__ int list_count;
+  __shared__ int present_count;
   __shared__ uint32_t tmax[kLocalThreads];
   __shared__ uint32_t list_key[kListCap];
   __shared__ int32_t list_idx[kListCap];
@@ -443,7 +489,8 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
   const int tid = threadIdx.x;
   const size_t group = glm_sample_rank_group_slots(candidates);
   const size_t row_slots = static_cast<size_t>(world) * group;
-  const RowSpec rs = row_spec(specs, q, positions, position_stride);
+  const RowSpec rs =
+      row_spec(specs, q, positions, position_stride, masks, mask_stride, row);
   uint16_t* row_base = table + static_cast<size_t>(row) * row_slots;
   uint16_t* mine = row_base + static_cast<size_t>(rank) * group;
   const float* slice = logits + static_cast<size_t>(row) * vocab_count;
@@ -511,38 +558,57 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
       __syncthreads();
     }
     if (tid == 0) {
-      const double lse = static_cast<double>(top) + detmath::log_d(fold[0]);
+      // A slice with every id masked carries no mass: lse -inf (the fold
+      // skips it), never log(0).
+      const double lse = top == -INFINITY
+                             ? -INFINITY
+                             : static_cast<double>(top) + detmath::log_d(fold[0]);
       encode_digits(mine + static_cast<size_t>(candidates) * kPickSlotsPerRank,
                     detmath::bits_of(lse), kSampleLseDigits);
     }
 
-    // 2. The exact local top-k (glm_sample::local_topk).
-    //    a. Each thread's largest key over its strided share of the slice.
-    //       The k-th largest of those is a lower bound on the k-th largest
-    //       key of the slice (the k largest thread maxima are k distinct
-    //       ids at or above it) and a tight one: with ~38 ids per thread,
-    //       the ids reaching it number ~k(1 + a few percent). The slice
-    //       does not fit L1 beside the block's shared memory, so its
-    //       loads are issued kLoadBatch at a time from L2.
-    const int k = min(candidates, vocab_count);
+    // 2. The exact local top-k (glm_sample::local_topk) over the PRESENT
+    //    ids (a masked id's key is 0 and it is never listed).
+    //    a. Each thread's largest key over its strided share of the slice,
+    //       and the count of present ids. The k-th largest of the maxima
+    //       is a lower bound on the k-th largest key of the slice (the k
+    //       largest thread maxima are k distinct ids at or above it) and a
+    //       tight one: with ~38 ids per thread, the ids reaching it number
+    //       ~k(1 + a few percent). The slice does not fit L1 beside the
+    //       block's shared memory, so its loads are issued kLoadBatch at a
+    //       time from L2.
     uint32_t my_max = 0;
+    int my_present = 0;
+    if (tid == 0) present_count = 0;
     for (int base = tid; base < vocab_count; base += kLocalThreads * kLoadBatch) {
       uint32_t key[kLoadBatch];
 #pragma unroll
       for (int b = 0; b < kLoadBatch; ++b) {
         const int i = base + b * kLocalThreads;
-        key[b] = i < vocab_count ? primary_key(slice[i]) : 0u;
+        key[b] = i < vocab_count ? key_of(slice[i]) : 0u;
       }
 #pragma unroll
-      for (int b = 0; b < kLoadBatch; ++b) my_max = max(my_max, key[b]);
+      for (int b = 0; b < kLoadBatch; ++b) {
+        my_max = max(my_max, key[b]);
+        my_present += key[b] != 0u ? 1 : 0;
+      }
     }
     tmax[tid] = my_max;
     if (tid == 0) list_count = 0;
     __syncthreads();
+    if (my_present != 0) atomicAdd(&present_count, my_present);
+    __syncthreads();
+    const int present = present_count;
+    const int k = min(candidates, present);
     uint32_t bound = 0;
     int bound_need = 0, bound_count = 0;
-    radix_threshold(ListKeyFn{tmax}, kLocalThreads, k, hist, found, &bound,
-                    &bound_need, &bound_count);
+    if (k > 0)
+      radix_threshold(ListKeyFn{tmax}, kLocalThreads, k, hist, found, &bound,
+                      &bound_need, &bound_count);
+    // Fewer present ids than threads hold maxima: the k-th maximum may be
+    // 0 (an absent id); the bound is then 1 — every present id, and none
+    // of the absent ones.
+    bound = max(bound, 1u);
     //    b. The ids at or above the bound, with their keys, in shared
     //       memory.
     for (int base = tid; base < vocab_count; base += kLocalThreads * kLoadBatch) {
@@ -550,7 +616,7 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
 #pragma unroll
       for (int b = 0; b < kLoadBatch; ++b) {
         const int i = base + b * kLocalThreads;
-        key[b] = i < vocab_count ? primary_key(slice[i]) : 0u;
+        key[b] = i < vocab_count ? key_of(slice[i]) : 0u;
       }
 #pragma unroll
       for (int b = 0; b < kLoadBatch; ++b) {
@@ -576,7 +642,9 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
     //       sort, else the exact threshold over the list — or, past the
     //       list's capacity, over the whole slice — and its compaction.
     int survivors = k;
-    if (listed <= kSampleMaxCandidates) {
+    if (k == 0) {
+      survivors = 0;  // no present id: every slot empty
+    } else if (listed <= kSampleMaxCandidates) {
       survivors = listed;
       for (int i = tid; i < listed; i += kLocalThreads) {
         sel_hi[i] = ~list_key[i];
@@ -626,14 +694,14 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
 #pragma unroll
         for (int b = 0; b < kLoadBatch; ++b) {
           const int i = base + b * kLocalThreads;
-          key[b] = i < vocab_count ? primary_key(slice[i]) : 0u;
+          key[b] = i < vocab_count ? key_of(slice[i]) : 0u;
         }
 #pragma unroll
         for (int b = 0; b < kLoadBatch; ++b) {
           const int i = base + b * kLocalThreads;
           const uint32_t u = key[b];
           const bool take =
-              i < vocab_count &&
+              i < vocab_count && u != 0u &&
               (u > threshold ||
                (u == threshold &&
                 (every_tie || ~static_cast<uint32_t>(i) >= tie_threshold)));
@@ -651,7 +719,7 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
     //    d. Sorted; the first k are the canonical local top-k.
     int width = 2;
     while (width < survivors) width <<= 1;
-    if (tid < kSortThreads) sort_survivors(sel_hi, sel_lo, width);
+    if (tid < kSortThreads && survivors > 0) sort_survivors(sel_hi, sel_lo, width);
     __syncthreads();
     for (int j = tid; j < candidates; j += kLocalThreads) {
       uint16_t* slot = mine + static_cast<size_t>(j) * kPickSlotsPerRank;
@@ -667,12 +735,18 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
       }
     }
     if (tid == 0) {
-      const int32_t id0 = static_cast<int32_t>(sel_lo[0]);
-      locals[row].best_id = id0;
-      locals[row].best_logit = slice[id0 - vocab_begin];
-      locals[row].second_logit =
-          k > 1 ? slice[static_cast<int32_t>(sel_lo[1]) - vocab_begin]
-                : -INFINITY;
+      if (k > 0) {
+        const int32_t id0 = static_cast<int32_t>(sel_lo[0]);
+        locals[row].best_id = id0;
+        locals[row].best_logit = slice[id0 - vocab_begin];
+        locals[row].second_logit =
+            k > 1 ? slice[static_cast<int32_t>(sel_lo[1]) - vocab_begin]
+                  : -INFINITY;
+      } else {
+        locals[row].best_id = kNoId;
+        locals[row].best_logit = -INFINITY;
+        locals[row].second_logit = -INFINITY;
+      }
     }
   }
   if (row == 0 && tid == 0)
@@ -779,14 +853,17 @@ __device__ inline void selector(const float* logit, const int32_t* id,
   const double r = uniform01(seed, *counter);
   *counter += 1;
   double cum = 0.0;
-  int chosen = final_count - 1;
+  int chosen = final_count;
+  int last_positive = 0;  // the rounding guard: the last token with mass
   for (int i = 0; i < final_count; ++i) {
+    if (exps[i] > 0.0f) last_positive = i;
     cum += static_cast<double>(__fdiv_rn(exps[i], final_den));
     if (cum > r) {
       chosen = i;
       break;
     }
   }
+  if (chosen == final_count) chosen = last_positive;
   *token = id[chosen];
   *logprob = __fsub_rn(__fdiv_rn(logit[chosen], temperature), lse);
 }
@@ -827,10 +904,10 @@ __device__ inline bool spec_select(const float* logit, const int32_t* id,
       j < final_count ? __fsub_rn(final_den, exps[j]) : final_den;
   double cum = 0.0;
   int chosen = final_count;
-  int last = final_count;
+  int last = final_count;  // the last residual token with mass
   for (int i = 0; i < final_count; ++i) {
     if (i == j) continue;
-    last = i;
+    if (exps[i] > 0.0f || last == final_count) last = i;
     cum += static_cast<double>(__fdiv_rn(exps[i], res_den));
     if (cum > u2) {
       chosen = i;
@@ -945,7 +1022,9 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
   if (top != nullptr && !complete && top->N > held) return d;  // the host's rule
   const double draw = uniform01(s.seed, *counter);
   int chosen = held;
+  int last_positive = 0;  // the rounding guard: the last token with mass
   for (int i = 0; i < held; ++i) {
+    if (mass[i] > 0.0) last_positive = i;
     if (prefix[i] > draw) {
       chosen = i;
       break;
@@ -953,7 +1032,7 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
   }
   if (chosen == held) {
     if (!complete) return d;
-    chosen = held - 1;
+    chosen = last_positive;
   }
   *counter += 1;
   d.token = id[chosen];
@@ -966,11 +1045,13 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
 }
 
 // glm_sample::spec_accept_from_prefix.
+// `draft_excluded`: the draft is a masked id — probability 0 without the
+// prefix having to show it (glm_sample::spec_accept_from_prefix).
 __device__ inline Decision spec_decide_prefix(
     const float* logit, const int32_t* id, const double* mass, double* prefix,
     const float* expsrc, int held, int vocab_size, double Z, int32_t draft,
     const GlmSampleSpec& s, float* exps, uint64_t* counter,
-    const TopReport* top = nullptr) {
+    const TopReport* top = nullptr, bool draft_excluded = false) {
   Decision d{false, false, kNoId, 0.0f, 0.0};
   const Support sup =
       resolve_support(logit, mass, prefix, held, vocab_size, s);
@@ -986,12 +1067,13 @@ __device__ inline Decision spec_decide_prefix(
   }
   const bool complete = held == vocab_size;
   int j = held;
-  for (int i = 0; i < held; ++i)
-    if (id[i] == draft) {
-      j = i;
-      break;
-    }
-  if (j == held && !complete) return d;
+  if (!draft_excluded)
+    for (int i = 0; i < held; ++i)
+      if (id[i] == draft) {
+        j = i;
+        break;
+      }
+  if (j == held && !complete && !draft_excluded) return d;
   const double p_draft = j < held ? mass[j] : 0.0;
   const uint64_t entry = *counter;
   const double u1 = uniform01(s.seed, *counter);
@@ -1009,10 +1091,10 @@ __device__ inline Decision spec_decide_prefix(
   const double threshold = u2 * (1.0 - p_draft);
   double cumulative = 0.0;
   int chosen = held;
-  int last = held;
+  int last = held;  // the last residual token with mass
   for (int i = 0; i < held; ++i) {
     if (i == j) continue;
-    last = i;
+    if (mass[i] > 0.0 || last == held) last = i;
     cumulative += mass[i];
     if (cumulative > threshold) {
       chosen = i;
@@ -1058,6 +1140,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     int vocab_size, GlmSampleSpec* __restrict__ specs, int rows_per_request,
     const int64_t* __restrict__ fed, const int64_t* __restrict__ positions,
     int position_stride, int32_t* __restrict__ counts,
+    const uint32_t* __restrict__ masks, int mask_stride,
     GlmPickVerdict* __restrict__ verdicts,
     GlmPickVerdict* __restrict__ device_verdicts,
     GlmSampleOutcome* __restrict__ outcomes) {
@@ -1098,6 +1181,20 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   const int entries = world * candidates;
   if (tid < 2) total[tid] = 0;
   __syncthreads();
+  // A constrained row's vocabulary is its allowed count (the complete list
+  // is the allowed set); a masked draft is excluded from row 0 outright.
+  int row_vocab[2] = {vocab_size, vocab_size};
+  bool constrained[2] = {false, false};
+  const uint32_t* mask0 = nullptr;
+  for (int t = 0; t < rows_per_request; ++t) {
+    if (masks == nullptr) continue;
+    const uint32_t* m = masks + static_cast<size_t>(row0 + t) * mask_stride;
+    if (m[0] != 0u) {
+      constrained[t] = true;
+      row_vocab[t] = static_cast<int>(m[0]);
+      if (t == 0) mask0 = m + 1;
+    }
+  }
 
   // 1. Decode every rank's group of every row (cooperative).
   for (int t = 0; t < rows_per_request; ++t) {
@@ -1180,6 +1277,11 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   }
   __syncthreads();
   const bool stochastic = spec.temperature > 0.0f && held[0] > 0;
+  const bool full_path = stochastic || spec.logprobs >= 0 || constrained[0] ||
+                         spec.repetition_penalty != 1.0f ||
+                         spec.frequency_penalty != 0.0f ||
+                         spec.presence_penalty != 0.0f;
+  (void)full_path;
   if (stochastic) {
     const float T = spec.temperature;
     for (int t = 0; t < rows_per_request; ++t) {
@@ -1244,7 +1346,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     o.normalizer = Z0;
     if (rows_per_request == 1) {
       const Decision d = decide_prefix(m_logit[0], m_id[0], mass[0], prefix,
-                                       expsrc[0], held[0], vocab_size, Z0,
+                                       expsrc[0], held[0], row_vocab[0], Z0,
                                        spec, exps, &counter, rep0);
       o.covered_mass = d.covered;
       v.accepted = 1;
@@ -1260,10 +1362,13 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     } else {
       // The T=2 verify: row 0's accept test against the fed draft.
       const int32_t draft = static_cast<int32_t>(fed[row0 + 1]);
+      const bool draft_excluded =
+          mask0 != nullptr &&
+          (draft < 0 || draft >= vocab_size || !mask_allows(mask0, draft));
       const Decision d0 = spec_decide_prefix(m_logit[0], m_id[0], mass[0],
                                              prefix, expsrc[0], held[0],
-                                             vocab_size, Z0, draft, spec, exps,
-                                             &counter, rep0);
+                                             row_vocab[0], Z0, draft, spec, exps,
+                                             &counter, rep0, draft_excluded);
       o.covered_mass = d0.covered;
       if (!d0.resolved) {
         // Provisional REJECT: the commit keeps the post-row-0 state, the
@@ -1287,7 +1392,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
         o.normalizer1 = Z1;
         const Decision d1 =
             held[1] > 0 ? decide_prefix(m_logit[1], m_id[1], mass[1], prefix,
-                                        expsrc[1], held[1], vocab_size, Z1,
+                                        expsrc[1], held[1], row_vocab[1], Z1,
                                         spec, exps, &counter, rep1)
                         : Decision{false, false, kNoId, 0.0f, 0.0};
         if (d1.resolved) {
@@ -1405,11 +1510,14 @@ void glm_sample_local(float* logits, int rows, int vocab_count,
                       int candidates, const GlmSampleSpec* specs,
                       int rows_per_request, const int64_t* fed,
                       const int64_t* positions, int position_stride,
-                      const int32_t* counts, const uint64_t* carry_digest,
+                      const int32_t* counts, const uint32_t* masks,
+                      int mask_stride, const uint64_t* carry_digest,
                       uint16_t* table, GlmPickLocal* locals, double* scratch,
                       cudaStream_t stream) {
   check_common(rows, world, rank, candidates, rows_per_request,
                "glm_sample_local");
+  if (masks != nullptr && mask_stride < glm_sample_mask_words(vocab_size))
+    throw std::invalid_argument("glm_sample_local: mask stride");
   if (logits == nullptr || specs == nullptr || fed == nullptr ||
       counts == nullptr || carry_digest == nullptr || table == nullptr ||
       locals == nullptr || scratch == nullptr)
@@ -1433,16 +1541,16 @@ void glm_sample_local(float* logits, int rows, int vocab_count,
   const dim3 chunk_grid(static_cast<unsigned>(nchunks), static_cast<unsigned>(rows));
   sample_prepare_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
       logits, vocab_count, vocab_begin, vocab_size, specs, rows_per_request,
-      fed, positions, position_stride, counts, maxes);
+      fed, positions, position_stride, counts, masks, mask_stride, maxes);
   DGPP_CUDA_OK(cudaGetLastError());
   sample_partials_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
       logits, vocab_count, specs, rows_per_request, positions,
-      position_stride, maxes, partials);
+      position_stride, masks, mask_stride, maxes, partials);
   DGPP_CUDA_OK(cudaGetLastError());
   sample_local_kernel<<<rows, kLocalThreads, 0, stream>>>(
       logits, rows, vocab_count, vocab_begin, rank, world, candidates, specs,
-      rows_per_request, positions, position_stride, maxes, partials, nchunks,
-      carry_digest, table, locals);
+      rows_per_request, positions, position_stride, masks, mask_stride, maxes,
+      partials, nchunks, carry_digest, table, locals);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -1450,12 +1558,15 @@ void glm_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         int candidates, int vocab_size, GlmSampleSpec* specs,
                         int requests, int rows_per_request, const int64_t* fed,
                         const int64_t* positions, int position_stride,
-                        int32_t* counts, GlmPickVerdict* verdicts,
+                        int32_t* counts, const uint32_t* masks, int mask_stride,
+                        GlmPickVerdict* verdicts,
                         GlmPickVerdict* device_verdicts,
                         GlmSampleOutcome* outcomes, uint64_t* carry_digest,
                         cudaStream_t stream) {
   check_common(rows, world, rank, candidates, rows_per_request,
                "glm_sample_verdict");
+  if (masks != nullptr && mask_stride < glm_sample_mask_words(vocab_size))
+    throw std::invalid_argument("glm_sample_verdict: mask stride");
   if (requests < 1 || requests > kPickMaxRequests ||
       requests * rows_per_request != rows)
     throw std::invalid_argument("glm_sample_verdict: request shape");
@@ -1467,8 +1578,8 @@ void glm_sample_verdict(const uint16_t* table, int rows, int world, int rank,
     throw std::invalid_argument("glm_sample_verdict: position stride");
   sample_verdict_kernel<<<requests, kVerdictThreads, 0, stream>>>(
       table, rows, world, candidates, vocab_size, specs, rows_per_request,
-      fed, positions, position_stride, counts, verdicts, device_verdicts,
-      outcomes);
+      fed, positions, position_stride, counts, masks, mask_stride, verdicts,
+      device_verdicts, outcomes);
   DGPP_CUDA_OK(cudaGetLastError());
   const uint16_t* digests =
       table + static_cast<size_t>(rows) * world *

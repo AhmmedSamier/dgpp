@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f, 2026-09-04); drain-on-stop (6c) and grow-on-demand admission (6d) remain |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04); drain-on-stop (6c) and grow-on-demand admission (6d) remain |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -981,22 +981,23 @@ tokenizer's added tokens), `glm_serve --reasoning-in-content`. Gates:
 tokenizer → parse → names and arguments structurally exact, 6 turns / 9
 calls), five 6f gates in `glm_serve_test` (the request side's
 normalization and refusals by field, the one-shot shape, the stream's
-chunk order, the forced prefix seeding the parser, the fold knob and the
-cap inside a block). On the four nodes (`scripts/serve_tools_check.sh`,
-2026-09-04, `--decode-graph --mtp` at the card's settings): every request
-shape answered as designed — two calls parsed from one turn, the forced
-forms, the follow-up from a tool result, the streamed chunk sequence — with
-the op-stream md5 identical on all four ranks and the pace the sampled-MTP
-record's (the record's last 2026-09-04 entry). DESIGN §11 has the as-built
-paragraph. Design:
+chunk order, the grammar arming the engine with the prompt untouched, the
+fold knob and the cap inside a block). On the four nodes
+(`scripts/serve_tools_check.sh`, 2026-09-04, `--decode-graph --mtp` at the
+card's settings): every request shape answered as designed — two calls
+parsed from one turn, the required / named / single-call forms under the
+grammar of 6g, the follow-up from a tool result, the streamed chunk
+sequence — with the op-stream md5 identical on all four ranks and the pace
+the sampled-MTP record's (the record's 2026-09-04 tool-call entries).
+DESIGN §11 has the as-built paragraph. Design:
 
 - *Request side:* accept `tools`, `tool_choice` (`auto` renders the tools;
-  `none` omits them; `required` / `{function: name}` append
-  `</think><tool_call>` resp. `</think><tool_call>{name}` to the
-  generation prompt as a forced prefix — the template has no native forced
-  mode; BUILT THAT WAY: the prefix closes the `<think>` block the
-  generation prompt opened, so a forced turn does not reason first, and
-  the parser starts inside the block with the name seeded), `tool` role
+  `none` omits them; `required` / `{function: name}` were first BUILT as a
+  forced `</think><tool_call>[name]` prefix on the prompt — the template
+  has no native forced mode — and REPLACED the same day by the constrained
+  decoding of 6g, because the prefix skipped the reasoning and could not
+  stop a second call: the grammar rides the request and masks the pick),
+  `tool` role
   messages (string content or the template's output lists), and assistant
   messages carrying `tool_calls` (the OpenAI JSON-object STRING for
   `arguments` is parsed into the mapping the template iterates; a null
@@ -1006,9 +1007,9 @@ paragraph. Design:
   prompt — goldens for low/high exist) and `chat_template_kwargs`
   (BUILT as `clear_thinking` and `reasoning_effort` only; `enable_thinking`
   and unknown keys refuse by name — this template has no such knobs).
-  `parallel_tool_calls: false` refuses (unenforceable without a stop
-  machinery). Thinking is always on for this model: the generation prompt
-  opens `<think>` unconditionally.
+  `parallel_tool_calls: false` is the single-call grammar of 6g. Thinking
+  is always on for this model: the generation prompt opens `<think>`
+  unconditionally.
 - *Response side — a parser over TOKEN IDS, rank 0 only:* a state
   machine keyed on the added tokens `<tool_call>` 154843, `</tool_call>`
   154844, `<arg_key>`/`</arg_key>` 154847/8, `<arg_value>`/`</arg_value>`
@@ -1047,6 +1048,59 @@ paragraph. Design:
   nested JSON); `glm_serve_test` pins the streaming shapes and
   `finish_reason`. Determinism is unaffected: the parser is downstream of
   the token stream and runs on rank 0 only.
+
+**6g. Constrained decoding — BUILT 2026-09-04** (decision of 2026-09-04
+with the user: "I don't like that shortcut. We should build constrained
+decoding now. We want feature parity"). The tool-call guarantees —
+`tool_choice` required / named / none, `parallel_tool_calls: false` — as a
+mask on the pick, DESIGN §10's constrained-decoding paragraph. Built:
+`glm_tool_grammar.{hpp,cpp}` (GrammarSpec — the journal-able request
+constraint: mode, parallel, the named function, the tools with their
+closed key sets; GrammarVocab — every id's text, indexed by first byte,
+the markers and EOS ids, built once per rank from tokenizer.json;
+GrammarState — the state machine over token ids yielding each position's
+TokenMask, with the name/key automata over token texts), the mask in the
+sampler (`apply_mask`; a masked id is an absent candidate everywhere — the
+one rule host and device share; `count_present` as the constrained
+decision's vocabulary; `draft_excluded` for a masked draft; the rounding
+guards choosing the last token with mass) and in the device kernels (the
+per-row mask table with its allowed-count header; the prepare kernel's
+`-inf` in place; the local kernel selecting among present ids only, with
+a fully masked slice folding as `-inf`; the verdict's per-row vocabulary
+and masked-draft rejection), `SchedulerEngine::supports_constraints /
+configure_constraint` with `SchedulerRequest::grammar` riding the journal
+(`gr`), the three engines keeping a grammar state per slot and staging
+the masks (`GenEngineAdapter`, the eager fabric closure through
+`bus_sample_row(mask)`, `GlmGraphEngineAdapter` with the device table
+baked into both captures and row 1 staged under the pending draft), the
+service turning `tool_choice` / `parallel_tool_calls` into the spec (keys
+closed only under `additionalProperties: false` — JSON Schema's default is
+open) and refusing them on an engine without masks
+(`constrained_decoding_unsupported`; `none` still served by omission).
+FOUND AND FIXED on the way: the MTP graphs' host fallback (6b) decided
+over the in-graph DRAFT head's logits — the draft's head reuses the
+logits buffer, so after a replay the verify's rows were gone — which the
+loopback gate against the eager speculator had not caught; the verify
+rows are now snapshotted in the graph before the draft and the fallback
+checks, bit for bit, that the gathered row's covered mass is the
+device's. Gates: `glm_tool_grammar_test`, the masked cases in
+`glm_sampler_test` and `glm_pick_test`, the codec and scheduler gates, the
+two constrained loopbacks (plain: bitwise the eager engine under every
+mode, 19 masked gather fallbacks; MTP: rank-identical, grammar-valid, 18
+fallbacks of both rows), the grammar's acceptance of every golden
+tool-call turn over the real tokenizer, `glm_serve_test`'s grammar gate;
+ctest 34/34. On the four nodes (`scripts/serve_tools_check.sh`,
+2026-09-04, `--decode-graph --mtp` at the card's settings): `required`
+reasons first then calls; the named function is the one call; `auto` with
+`parallel_tool_calls: false` and `required` with it end the turn after
+exactly one call even where the model's reasoning had planned two; the
+op-stream md5 identical on all four ranks; 0 fallbacks over 658 sampled
+steps; the pace unchanged (the record's fifth 2026-09-04 entry). Not
+built: `response_format` (`json_object` / `json_schema`), which is the
+same mask machinery under a JSON grammar over token texts — the next
+consumer of this seam; and value typing inside the grammar (values are
+free text; the parser types them from the schema, the client validates,
+as OpenAI's non-strict tools).
 
 **6c. Drain-on-stop.** SIGINT during a collective tears the bus down
 under the in-flight collective (the peers eat transport-retry-exceeded).

@@ -51,8 +51,10 @@ PY
 post plain '{"model":"'$M'","messages":[{"role":"user","content":"In one sentence, what is the capital of France?"}],"max_tokens":200}'
 post tools_auto '{"model":"'$M'","messages":[{"role":"user","content":"What is the weather in Paris right now, in celsius? Also what time is it there?"}],'"$TOOLS"',"max_tokens":512}'
 post tools_none '{"model":"'$M'","messages":[{"role":"user","content":"What is the weather in Paris right now?"}],'"$TOOLS"',"tool_choice":"none","max_tokens":200}'
-post tools_required '{"model":"'$M'","messages":[{"role":"user","content":"Tell me about Tokyo."}],'"$TOOLS"',"tool_choice":"required","max_tokens":200}'
-post tools_named '{"model":"'$M'","messages":[{"role":"user","content":"I am travelling to Oslo next week for 3 days."}],'"$TOOLS"',"tool_choice":{"type":"function","function":{"name":"get_weather"}},"max_tokens":200}'
+post tools_required '{"model":"'$M'","messages":[{"role":"user","content":"Tell me about Tokyo."}],'"$TOOLS"',"tool_choice":"required","max_tokens":512}'
+post tools_named '{"model":"'$M'","messages":[{"role":"user","content":"I am travelling to Oslo next week for 3 days."}],'"$TOOLS"',"tool_choice":{"type":"function","function":{"name":"get_weather"}},"max_tokens":512}'
+post tools_single '{"model":"'$M'","messages":[{"role":"user","content":"What is the weather in Paris right now, in celsius? Also what time is it there?"}],'"$TOOLS"',"parallel_tool_calls":false,"max_tokens":512}'
+post tools_required_single '{"model":"'$M'","messages":[{"role":"user","content":"Tell me about Tokyo and what time it is there."}],'"$TOOLS"',"tool_choice":"required","parallel_tool_calls":false,"max_tokens":512}'
 post tools_followup '{"model":"'$M'","messages":[{"role":"user","content":"What is the weather in Paris right now, in celsius?"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Paris\", \"unit\": \"celsius\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"{\"temperature\": 18, \"condition\": \"partly cloudy\"}"}],'"$TOOLS"',"max_tokens":300}'
 post effort_low '{"model":"'$M'","messages":[{"role":"user","content":"What is 17*23?"}],"reasoning_effort":"low","max_tokens":300}'
 

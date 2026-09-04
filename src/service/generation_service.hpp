@@ -33,19 +33,23 @@
 //                               0 reports under the raw distribution.
 //                               Tools (M6 6f, DESIGN §11): tools,
 //                               tool_choice (auto / none / required /
-//                               {function: name}), parallel_tool_calls
-//                               (true only), reasoning_effort and
+//                               {function: name}), parallel_tool_calls,
+//                               reasoning_effort and
 //                               chat_template_kwargs render through the
 //                               checkpoint's template; the response
 //                               carries reasoning_content, content and
 //                               tool_calls parsed from the token ids,
 //                               finish_reason "tool_calls" when a call
-//                               parsed. Thinking is always on for this
-//                               template (the generation prompt opens
-//                               <think>); required / named tool_choice
-//                               forces "</think><tool_call>[name]" onto
-//                               the prompt, so such a turn does not
-//                               reason first.
+//                               parsed. tool_choice required / named /
+//                               none and parallel_tool_calls false are
+//                               GUARANTEES through constrained decoding
+//                               (M6 6g, DESIGN §10): the request carries
+//                               the tool-call grammar and every rank's
+//                               pick obeys its mask — the model reasons
+//                               first, then can only write a valid call
+//                               to an allowed function (or none, or one).
+//                               An engine without masks refuses those
+//                               fields (constrained_decoding_unsupported).
 //   POST /v1/completions        the legacy prompt API (string prompt).
 //   GET  /v1/models, /v1/models/{id}
 //   GET  /health               liveness (the fabric harnesses' probe).
@@ -195,9 +199,14 @@ class GenerationService : public HttpHandler,
     return cfg_.sampling_defaults;
   }
   bool sampling_available() const { return sampling_available_; }
-  // Whether requests may carry tools (the frontend has the markers).
+  // Whether requests may carry tools (the frontend has the markers), and
+  // whether tool_choice / parallel_tool_calls can be enforced (the engine
+  // masks the pick).
   bool tool_calls_available() const {
     return markers_.tool_calls_available();
+  }
+  bool constraints_available() const {
+    return tool_calls_available() && engine_->supports_constraints();
   }
 
  private:
@@ -262,8 +271,7 @@ class GenerationService : public HttpHandler,
   // seeded function name. Responds 400 and returns false on any refusal.
   struct ChatPlan {
     dgpp::minijson::Value globals;
-    std::string forced_prefix;   // appended to the render ("" = none)
-    std::string seeded_name;     // the named tool_choice's function
+    dgpp::glm::GrammarSpec grammar;  // the pick's constraint (inactive: none)
     bool tools_requested = false;
     dgpp::glm::ToolSchemas schemas;
   };

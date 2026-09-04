@@ -142,6 +142,133 @@ bool results_identical(const Result& a, const Result& b) {
   return true;
 }
 
+
+// M6 6g: masked ids are absent everywhere in the host sampler. A masked id
+// is never the token; the fold tolerates a slice with every id masked; a
+// finite-top-k masked sharded decision is bitwise the plain oracle over
+// the masked logits (the merge proof, unchanged by absence); a mask
+// leaving one id makes it the token whatever the draw; the greedy full
+// path picks the masked argmax; a masked draft is rejected outright by the
+// complete accept without a fallback.
+DGPP_TEST(sampler_maskedIdsAreAbsentEverywhere) {
+  using dgpp::glm_sample::apply_mask;
+  using dgpp::glm_sample::count_present;
+  using dgpp::glm_sample::greedy_from_prefix;
+  using dgpp::glm_sample::spec_accept_complete;
+  using dgpp::glm_sample::SpecPrefixDecision;
+  constexpr int vocab = 640;
+  const std::vector<VocabSlice> layout = vocab_layout(vocab, 4);
+  std::vector<float> logits(vocab);
+  uint64_t x = 0x9e37u;
+  for (int i = 0; i < vocab; ++i) {
+    x = x * 6364136223846793005ull + 1442695040888963407ull;
+    logits[static_cast<size_t>(i)] = static_cast<float>((x >> 33) % 97) * 0.1f - 4.0f;
+  }
+  logits[17] = 6.0f;  // a peak the masks may or may not admit
+  const int words = (vocab + 31) / 32;
+  // An allow-list on three of the four slices (slice 3 fully masked).
+  std::vector<uint32_t> allow(static_cast<size_t>(words), 0u);
+  const std::vector<int> allowed = {3, 17, 200, 331, 400};
+  for (const int id : allowed) allow[static_cast<size_t>(id >> 5)] |= 1u << (id & 31);
+  Params p;
+  p.temperature = 1.0f;
+  p.top_p = 0.95f;
+  for (uint64_t seed = 1; seed <= 200; ++seed) {
+    Rng rng{seed, 0};
+    const Result r = sample_reference_sharded(logits.data(), vocab, layout, p, rng, {}, allow.data());
+    bool in = false;
+    for (const int id : allowed) in = in || id == r.token;
+    require(in, "the masked sharded reference never leaves the allow-list");
+    require(rng.counter == 1, "one draw");
+    Rng rng2{seed, 0};
+    const Result f = sample_full_logits(logits.data(), vocab, layout, p, rng2, {}, allow.data());
+    require(f.token == r.token && f.logprob == r.logprob,
+            "the full-logit sampler under the mask is the sharded reference");
+  }
+  // The fully masked slice: lse -inf, the fold skips it.
+  {
+    std::vector<float> v = logits;
+    apply_mask(v.data(), vocab, 0, allow.data(), vocab);
+    const VocabSlice& last = layout[3];
+    require(slice_logsumexp(v.data() + last.begin, last.count, 1.0f) == -INFINITY,
+            "a slice with every id masked has lse -inf");
+    const double z = sharded_scaled_logsumexp(v.data(), layout, 1.0f);
+    // Bitwise the one-slice normalizer over the five allowed logits, in the
+    // fold's order: the three finite slice lses folded.
+    require(std::isfinite(z), "the fold over a masked slice is finite");
+    require(count_present(v.data(), vocab) == 5, "five present ids");
+    require(local_topk(v.data(), vocab, 0, 10).size() == 5,
+            "local_topk lists only the present ids");
+    require(sort_slice(v.data(), vocab, 0).size() == 5,
+            "sort_slice lists only the present ids");
+  }
+  // Finite top_k: the masked sharded decision is the plain oracle over the
+  // masked logits, bitwise (the merge proof holds over absent ids).
+  {
+    Params k = p;
+    k.top_k = 4;
+    k.top_p = 1.0f;
+    std::vector<float> v = logits;
+    apply_mask(v.data(), vocab, 0, allow.data(), vocab);
+    for (uint64_t seed = 1; seed <= 50; ++seed) {
+      Rng a{seed, 0}, b{seed, 0};
+      const Result ra = sample_reference_sharded(logits.data(), vocab, layout, k, a, {}, allow.data());
+      const Result rb = sample_reference(v.data(), vocab, k, b, {});
+      require(ra.token == rb.token && ra.logprob == rb.logprob,
+              "masked sharded top-k == the plain oracle over masked logits");
+    }
+  }
+  // One allowed id: the token, whatever the draw; its logprob is 0.
+  {
+    std::vector<uint32_t> one(static_cast<size_t>(words), 0u);
+    one[static_cast<size_t>(331 >> 5)] |= 1u << (331 & 31);
+    for (uint64_t seed = 1; seed <= 20; ++seed) {
+      Rng rng{seed, 0};
+      const Result r = sample_reference_sharded(logits.data(), vocab, layout, p, rng, {}, one.data());
+      require(r.token == 331 && r.logprob == 0.0f, "one allowed id is certain");
+    }
+  }
+  // The greedy full path under a mask: the masked argmax under the raw
+  // normalizer (the peak at 17 is masked out here).
+  {
+    std::vector<uint32_t> no17 = allow;
+    no17[17 >> 5] &= ~(1u << (17 & 31));
+    std::vector<float> v = logits;
+    apply_mask(v.data(), vocab, 0, no17.data(), vocab);
+    const double lse = sharded_scaled_logsumexp(v.data(), layout, 1.0f);
+    const std::vector<Candidate> top = local_topk(v.data(), vocab, 0, 3);
+    const Result g = greedy_from_prefix(top, lse, 2);
+    require(g.token != 17 && top.size() == 3, "the masked argmax skips the masked peak");
+    for (const auto& [id, lp] : g.top_logprobs) require(id != 17, "no masked alternative");
+  }
+  // A masked draft over the complete masked logits: rejected outright,
+  // two draws consumed (the accept test with p = 0, then the residual),
+  // the residual inside the mask.
+  {
+    std::vector<float> v = logits;
+    apply_mask(v.data(), vocab, 0, allow.data(), vocab);
+    const double z = sharded_scaled_logsumexp(v.data(), layout, 1.0f);
+    Params pure = p;
+    pure.top_p = 1.0f;
+    for (uint64_t seed = 1; seed <= 20; ++seed) {
+      Rng rng{seed, 0};
+      const SpecPrefixDecision d = spec_accept_complete(v.data(), vocab, z, /*draft=*/99, pure, rng);
+      require(d.resolved && !d.accepted && rng.counter == 2, "masked draft: rejected, two draws");
+      bool in = false;
+      for (const int id : allowed) in = in || id == d.result.token;
+      require(in, "the residual is inside the mask");
+    }
+    // An allowed draft at the peak mostly stands.
+    int stood = 0;
+    for (uint64_t seed = 1; seed <= 40; ++seed) {
+      Rng rng{seed, 0};
+      const SpecPrefixDecision d = spec_accept_complete(v.data(), vocab, z, /*draft=*/17, pure, rng);
+      stood += d.accepted ? 1 : 0;
+    }
+    require(stood > 20, "the allowed peak stands most of the time");
+  }
+}
+
 }  // namespace
 
 DGPP_TEST(rng_is_counter_reproducible_and_seed_sensitive) {

@@ -131,8 +131,10 @@ class ToolCallParser {
   struct Options {
     // The prompt ended in <think>: ids route to reasoning until </think>.
     bool start_in_reasoning = true;
-    // A forced "<tool_call>" prefix was appended to the prompt: the first
-    // ids are a function name (tool_choice required / named).
+    // The prompt itself ends inside a "<tool_call>" block (a prompt-side
+    // forced block): the first ids are a function name. The service no
+    // longer forces blocks — tool_choice is the grammar of constrained
+    // decoding (M6 6g) — but the parser keeps the seam.
     bool start_in_tool_call = false;
     // The name text already in the prompt (tool_choice named a function);
     // the model may extend it.

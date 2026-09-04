@@ -80,6 +80,21 @@ class FakeEngine : public SchedulerEngine {
     out.swap(pending_lps_[req]);
     return out;
   }
+  // Constrained decoding (M6 6g): a sampling-capable fake can mask and
+  // records the grammar arming ("G:slot:mode:tools") right after the
+  // sampling arming; a greedy fake inherits the base refusal.
+  bool supports_constraints() const override { return can_sample_; }
+  void configure_constraint(int req,
+                            const dgpp::glm::GrammarSpec& g) override {
+    if (!can_sample_) {
+      SchedulerEngine::configure_constraint(req, g);
+      return;
+    }
+    if (g.active())
+      ops_.push_back("G:" + std::to_string(req) + ":" +
+                     std::to_string(static_cast<int>(g.mode)) + ":" +
+                     std::to_string(g.tools.size()));
+  }
 
   // Arms `slot`'s NEXT scalar episode: prefill returns tokens[0], then each
   // step returns one following token.
@@ -894,6 +909,22 @@ DGPP_TEST(scheduler_sampling_specArmsTheSlotBeforeItsPrefillPick) {
   require(greedy_engine.op_stream() == "P:0:5 S:0:1 C:0",
           "greedy requests keep the exact op stream: " +
               greedy_engine.op_stream());
+
+  // AND a constrained request arms its grammar after the sampling spec and
+  // before the prefill — the prefill pick is the first masked position.
+  FakeEngine constrained_engine(1, 100, 4, 1, /*can_sample=*/true);
+  constrained_engine.arm(0, {1, 2}, 2);
+  Scheduler constrained(&constrained_engine, {kEos});
+  SchedulerRequest c = make_request("c", 5, 2);
+  c.sampling.temperature = 1.0f;
+  c.seed = 7;
+  c.grammar.mode = dgpp::glm::GrammarSpec::Mode::kRequired;
+  c.grammar.tools.push_back(dgpp::glm::GrammarTool{"f", false, {}});
+  constrained.submit(std::move(c));
+  constrained.run_to_completion();
+  require(constrained_engine.op_stream() == "A:0:7 G:0:3:1 P:0:5 S:0:1 C:0",
+          "the grammar arms before the prefill: " +
+              constrained_engine.op_stream());
 }
 
 DGPP_TEST(scheduler_sampling_refusalsAreManifestErrors) {
@@ -911,6 +942,19 @@ DGPP_TEST(scheduler_sampling_refusalsAreManifestErrors) {
     threw = true;
   }
   require(threw, "a greedy engine must refuse a stochastic request");
+  require(greedy_engine.op_stream().empty(), "nothing reached the engine");
+
+  // A constrained request against an engine without masks: refused at
+  // submit too, and identically so on every rank.
+  SchedulerRequest constrained = make_request("c", 5, 2);
+  constrained.grammar.mode = dgpp::glm::GrammarSpec::Mode::kForbidCalls;
+  threw = false;
+  try {
+    greedy.submit(constrained);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "an engine without masks must refuse a constrained request");
   require(greedy_engine.op_stream().empty(), "nothing reached the engine");
 
   FakeEngine sampling_engine(1, 100, 4, 1, /*can_sample=*/true);

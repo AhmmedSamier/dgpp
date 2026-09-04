@@ -110,6 +110,33 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         append_json_int(&out, g.logprobs);
         out += ",\"s\":\"" + hex64(r.seed) + "\"}";
       }
+      // The grammar (M6 6g) rides only when active: mode, the parallel
+      // flag, the named function, the tools with their closed key sets.
+      if (r.grammar.active()) {
+        const dgpp::glm::GrammarSpec& gr = r.grammar;
+        out += ",\"gr\":{\"m\":";
+        append_json_int(&out, static_cast<int>(gr.mode));
+        out += ",\"pl\":";
+        out += gr.parallel ? "true" : "false";
+        out += ",\"n\":";
+        append_json_string(&out, gr.named);
+        out += ",\"t\":[";
+        for (size_t t = 0; t < gr.tools.size(); ++t) {
+          if (t != 0) out.push_back(',');
+          out += "{\"n\":";
+          append_json_string(&out, gr.tools[t].name);
+          if (gr.tools[t].constrain_keys) {
+            out += ",\"k\":[";
+            for (size_t k = 0; k < gr.tools[t].keys.size(); ++k) {
+              if (k != 0) out.push_back(',');
+              append_json_string(&out, gr.tools[t].keys[k]);
+            }
+            out.push_back(']');
+          }
+          out.push_back('}');
+        }
+        out += "]}";
+      }
       out.push_back('}');
     }
     out.push_back(']');
@@ -280,6 +307,51 @@ JournalRecord decode_journal_line(std::string_view line) {
         if (r.logprobs >= 0 && p.logprobs != r.logprobs)
           throw std::runtime_error("journal: submit '" + r.id +
                                    "' logprobs fields disagree");
+      }
+      if (const dgpp::minijson::Value* gr = item.find("gr")) {
+        if (!gr->is_object())
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has a non-object grammar");
+        dgpp::glm::GrammarSpec& g = r.grammar;
+        const dgpp::minijson::Value& m = field(*gr, "m", "grammar");
+        if (!m.is_number() || m.as_int() < 1 ||
+            m.as_int() > static_cast<int64_t>(dgpp::glm::GrammarSpec::Mode::kNamed))
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has a bad grammar mode");
+        g.mode = static_cast<dgpp::glm::GrammarSpec::Mode>(m.as_int());
+        const dgpp::minijson::Value& pl = field(*gr, "pl", "grammar");
+        if (!pl.is_bool())
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has a bad grammar parallel flag");
+        g.parallel = pl.as_bool();
+        g.named = std::string(field(*gr, "n", "grammar").as_string());
+        const dgpp::minijson::Value& tools = field(*gr, "t", "grammar");
+        if (!tools.is_array())
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has non-array grammar tools");
+        for (const dgpp::minijson::Value& t : tools.items()) {
+          dgpp::glm::GrammarTool tool;
+          tool.name = std::string(field(t, "n", "grammar tool").as_string());
+          if (tool.name.empty())
+            throw std::runtime_error("journal: submit '" + r.id +
+                                     "' has a grammar tool without a name");
+          if (const dgpp::minijson::Value* k = t.find("k")) {
+            if (!k->is_array())
+              throw std::runtime_error("journal: submit '" + r.id +
+                                       "' has non-array grammar keys");
+            tool.constrain_keys = true;
+            for (const dgpp::minijson::Value& key : k->items())
+              tool.keys.emplace_back(key.as_string());
+          }
+          g.tools.push_back(std::move(tool));
+        }
+        if (g.mode == dgpp::glm::GrammarSpec::Mode::kNamed) {
+          bool found = false;
+          for (const auto& t : g.tools) found = found || t.name == g.named;
+          if (!found)
+            throw std::runtime_error("journal: submit '" + r.id +
+                                     "' names a function outside its tools");
+        }
       }
       rec.submits.push_back(std::move(r));
     }

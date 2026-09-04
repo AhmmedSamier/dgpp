@@ -88,6 +88,18 @@ struct GlmSampleOutcome {
   float top_logprobs[2][kSampleMaxTopLogprobs] = {};
 };
 
+// The token mask of constrained decoding (M6 6g), per ROW: word 0 is the
+// allowed count (0 = the row is unconstrained and the words after it are
+// not read), words 1.. the bitmask over [0, vocab_size) (bit id set =
+// allowed). glm_sample_mask_words(vocab_size) words per row; the host
+// writes a constrained row's mask before the step (the grammar state's
+// next-position mask; the MTP verify's row 1 under the draft). A masked
+// id is ABSENT: -inf in place, never a candidate, no mass, and the row's
+// vocabulary — the completeness test's — is the allowed count.
+constexpr int glm_sample_mask_words(int vocab_size) {
+  return 1 + (vocab_size + 31) / 32;
+}
+
 constexpr int kSampleLseDigits = 11;         // 66 bits carry the fp64 lse
 constexpr int kSampleMaxCandidates = 256;    // the profiler's ceiling
 constexpr int kSampleLseChunk = 256;         // == glm_sample::kLseChunk
@@ -140,12 +152,15 @@ constexpr int glm_sample_candidates_that_fit(int rows, int world,
 // best (and, for sampled rows, second-best) for the log. `scratch` holds
 // glm_sample_scratch_elems(rows, vocab_count) doubles. The count table is
 // read only.
+// `masks` (optional): the rows' token masks, `mask_stride` words apart
+// (a constrained row takes the full path whatever its temperature).
 void glm_sample_local(float* logits, int rows, int vocab_count,
                       int vocab_begin, int vocab_size, int rank, int world,
                       int candidates, const GlmSampleSpec* specs,
                       int rows_per_request, const int64_t* fed,
                       const int64_t* positions, int position_stride,
-                      const int32_t* counts, const uint64_t* carry_digest,
+                      const int32_t* counts, const uint32_t* masks,
+                      int mask_stride, const uint64_t* carry_digest,
                       uint16_t* table, GlmPickLocal* locals, double* scratch,
                       cudaStream_t stream);
 
@@ -159,11 +174,14 @@ void glm_sample_local(float* logits, int rows, int vocab_count,
 // copy, the GlmSampleOutcome, and the spec's advanced counter; then
 // commits the step's fed tokens into the request's count table (the
 // consumed token; the draft when accepted == 2).
+// `masks`/`mask_stride` as glm_sample_local's: a constrained row decides
+// over its allowed count and a masked draft is rejected outright.
 void glm_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         int candidates, int vocab_size, GlmSampleSpec* specs,
                         int requests, int rows_per_request, const int64_t* fed,
                         const int64_t* positions, int position_stride,
-                        int32_t* counts, GlmPickVerdict* verdicts,
+                        int32_t* counts, const uint32_t* masks, int mask_stride,
+                        GlmPickVerdict* verdicts,
                         GlmPickVerdict* device_verdicts,
                         GlmSampleOutcome* outcomes, uint64_t* carry_digest,
                         cudaStream_t stream);

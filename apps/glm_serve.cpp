@@ -73,6 +73,7 @@
 #include "models/glm_gen_engine.hpp"
 #include "models/glm_scheduler.hpp"
 #include "models/glm_tokenizer.hpp"
+#include "models/glm_tool_grammar.hpp"
 #include "net/collective_bus.hpp"
 #include "service/fabric_serve.hpp"
 #include "service/generation_service.hpp"
@@ -444,6 +445,24 @@ int main(int argc, char** argv) {
     const std::string model_display = model_id.empty()
                                           ? fs::path(ckpt).filename().string()
                                           : model_id;
+    // Constrained decoding (M6 6g): every rank builds the grammar's token
+    // table from the same tokenizer.json, so the masks it derives from a
+    // journal record are identical on every rank. Peers keep no tokenizer
+    // otherwise (records carry ids); this table is the one thing of it
+    // they need.
+    const dgpp::glm::GrammarVocab grammar_vocab = [&] {
+      const dgpp::GlmTokenizer tok = dgpp::GlmTokenizer::load(
+          (fs::path(ckpt) / "tokenizer.json").string());
+      dgpp::glm::GrammarVocab v = dgpp::glm::GrammarVocab::from_tokenizer(
+          tok, cfg.eos_token_ids, static_cast<int>(cfg.vocab_size));
+      DGPP_LOG_INFO(
+          "serve: grammar vocabulary built ({} ids, tool markers {}, "
+          "call-turn EOS {})",
+          cfg.vocab_size,
+          v.markers().tool_calls_available() ? "present" : "absent",
+          v.call_turn_eos());
+      return v;
+    }();
     const auto boot_s = [&] {
       return std::chrono::duration<double>(
                  std::chrono::steady_clock::now() - t_boot)
@@ -519,7 +538,8 @@ int main(int argc, char** argv) {
           auto graph_engine = std::make_unique<dgpp::GlmGraphEngineAdapter>(
               &model, bus.get(), rank, world, pick_scratch, cfg.vocab_size,
               /*pick_timeout_ms=*/60000, graph_batch_min_live,
-              sample_prefix.data, sample_gather.data);
+              sample_prefix.data, sample_gather.data,
+              dgpp::kSamplingCandidates, &grammar_vocab);
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up
           // is a run of collectives, so it starts on the journal's clock:
@@ -552,7 +572,8 @@ int main(int argc, char** argv) {
                                      cfg.vocab_size),
               dgpp::make_fabric_sample(bus.get(), rank, world,
                                        sample_prefix.data, sample_gather.data,
-                                       cfg.vocab_size));
+                                       cfg.vocab_size),
+              &grammar_vocab);
         }
 
         if (rank != 0) {
@@ -606,7 +627,8 @@ int main(int argc, char** argv) {
 
     dgpp::GenEngineAdapter engine(&model, max_concurrency,
                                   dgpp::make_w1_pick(cfg.vocab_size),
-                                  dgpp::make_w1_sample(cfg.vocab_size));
+                                  dgpp::make_w1_sample(cfg.vocab_size),
+                                  &grammar_vocab);
     return serve_openai(&engine, cfg, ckpt, model_display, knobs, no_eos,
                          boot_s(), /*journal=*/nullptr, /*oplog=*/nullptr);
   } catch (const std::exception& e) {

@@ -31,6 +31,7 @@
 
 #include "kernels/glm_pick.hpp"
 #include "kernels/glm_sample_pick.hpp"
+#include "models/glm_tool_grammar.hpp"
 #include "models/glm_forward.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_step_timing.hpp"
@@ -659,14 +660,20 @@ struct SamplingFold {
   std::vector<glm_sample::Candidate> prefix;
   double normalizer = 0.0;
   std::vector<float> adjusted;
+  int vocab = 0;  // the decision's vocabulary: the mask's allowed count
+                  // when constrained (M6 6g), else vocab_size
 };
 
+// `mask` (optional, M6 6g): the position's token mask — the slice's
+// excluded ids become -inf (absent) before the local top-k and lse, the
+// decision's vocabulary becomes the allowed count.
 inline SamplingFold bus_sampling_fold(
     net::CollectiveBus& bus, int rank, int world, const float* logits,
     int vocab_count, int vocab_begin, int vocab_size,
     const glm_sample::Params& params,
     const std::vector<int32_t>& context_ids, int candidate_k,
-    uint16_t* scratch, int timeout_ms) {
+    uint16_t* scratch, int timeout_ms,
+    const glm::TokenMask* mask = nullptr) {
   if (world < 1 || world > kPickMaxWorld || rank < 0 || rank >= world)
     throw std::invalid_argument("sampling prefix: rank/world");
   if (!(params.temperature > 0.0f) || !std::isfinite(params.temperature))
@@ -697,6 +704,10 @@ inline SamplingFold bus_sampling_fold(
   glm_sample::apply_penalties(adjusted.data(), vocab_count, vocab_begin,
                               params,
                               glm_sample::count_context(context_ids));
+  const bool constrained = mask != nullptr && mask->constrained();
+  if (constrained)
+    glm_sample::apply_mask(adjusted.data(), vocab_count, vocab_begin,
+                           mask->words.data(), vocab_size);
   const std::vector<glm_sample::Candidate> local = glm_sample::local_topk(
       adjusted.data(), vocab_count, vocab_begin, candidate_k);
   const double local_lse = glm_sample::slice_logsumexp(
@@ -772,6 +783,7 @@ inline SamplingFold bus_sampling_fold(
   fold.prefix = glm_sample::merge_topk(std::move(shards), candidate_k);
   fold.normalizer = glm_sample::merge_logsumexp(slice_lses);
   fold.adjusted = std::move(adjusted);
+  fold.vocab = constrained ? mask->allowed : vocab_size;
   return fold;
 }
 
@@ -785,7 +797,7 @@ inline glm_sample::PrefixDecision bus_sampling_prefix(
       bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, params,
       context_ids, candidate_k, scratch, timeout_ms);
   const glm_sample::PrefixDecision decision = glm_sample::sample_from_prefix(
-      fold.prefix, vocab_size, fold.normalizer, params, rng);
+      fold.prefix, fold.vocab, fold.normalizer, params, rng);
 
   // ---- readback invariant: rank 0's decision digest reaches every rank --
   bus_check_decision_digest(bus, rank, decision.resolved, decision.result,
@@ -798,22 +810,25 @@ inline glm_sample::PrefixDecision bus_sampling_prefix(
 // engines' step): the fold, the prefix decision, else the gather of the
 // penalized slices and the complete decision under the transported
 // normalizer with the reserved draw; rank 0's digest either way.
+// `mask` (optional, M6 6g): the position's token mask.
 inline glm_sample::Result bus_sample_row(
     net::CollectiveBus& bus, int rank, int world, const float* logits,
     int vocab_count, int vocab_begin, int vocab_size,
     const glm_sample::Params& params, glm_sample::Rng& rng,
     const std::vector<int32_t>& context_ids, int candidate_k,
     uint16_t* prefix_scratch, uint16_t* gather_scratch, int timeout_ms,
-    std::vector<float>* gather_buffer) {
+    std::vector<float>* gather_buffer,
+    const glm::TokenMask* mask = nullptr) {
   if (params.temperature <= 0.0f) {
-    // The greedy decision with logprobs (or penalties): the fold at
-    // temperature 1 (penalties applied), the canonical first candidate
-    // under the raw normalizer — the greedy pick's token, no draw.
+    // The greedy decision with logprobs, penalties or a mask: the fold at
+    // temperature 1 (penalties and the mask applied), the canonical first
+    // candidate under the raw normalizer — the greedy pick's token (the
+    // masked argmax), no draw.
     glm_sample::Params raw = params;
     raw.temperature = 1.0f;
     const SamplingFold fold = bus_sampling_fold(
         bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, raw,
-        context_ids, candidate_k, prefix_scratch, timeout_ms);
+        context_ids, candidate_k, prefix_scratch, timeout_ms, mask);
     const glm_sample::Result r = glm_sample::greedy_from_prefix(
         fold.prefix, fold.normalizer, params.logprobs);
     bus_check_decision_digest(bus, rank, true, r, fold.normalizer,
@@ -822,9 +837,9 @@ inline glm_sample::Result bus_sample_row(
   }
   const SamplingFold fold = bus_sampling_fold(
       bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, params,
-      context_ids, candidate_k, prefix_scratch, timeout_ms);
+      context_ids, candidate_k, prefix_scratch, timeout_ms, mask);
   const glm_sample::PrefixDecision d = glm_sample::sample_from_prefix(
-      fold.prefix, vocab_size, fold.normalizer, params, rng);
+      fold.prefix, fold.vocab, fold.normalizer, params, rng);
   if (d.resolved) {
     bus_check_decision_digest(bus, rank, true, d.result, d.covered_mass,
                               prefix_scratch, timeout_ms, "bus_sample_row");
@@ -845,18 +860,24 @@ inline glm_sample::Result bus_sample_row(
 // the draft with its exact probability or sample the residual — the fold,
 // spec_accept_from_prefix, else the gather and spec_accept_complete; the
 // digest carries the accept flag as its `resolved` bit.
+// `mask` (optional, M6 6g): row 0's token mask; a masked draft is rejected
+// outright (its probability is 0 without the prefix having to show it).
 inline glm_sample::SpecPrefixDecision bus_spec_accept(
     net::CollectiveBus& bus, int rank, int world, const float* logits,
     int vocab_count, int vocab_begin, int vocab_size, int32_t draft,
     const glm_sample::Params& params, glm_sample::Rng& rng,
     const std::vector<int32_t>& context_ids, int candidate_k,
     uint16_t* prefix_scratch, uint16_t* gather_scratch, int timeout_ms,
-    std::vector<float>* gather_buffer) {
+    std::vector<float>* gather_buffer,
+    const glm::TokenMask* mask = nullptr) {
   const SamplingFold fold = bus_sampling_fold(
       bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, params,
-      context_ids, candidate_k, prefix_scratch, timeout_ms);
+      context_ids, candidate_k, prefix_scratch, timeout_ms, mask);
+  const bool draft_excluded =
+      mask != nullptr && mask->constrained() && !mask->allows(draft);
   glm_sample::SpecPrefixDecision d = glm_sample::spec_accept_from_prefix(
-      fold.prefix, vocab_size, fold.normalizer, draft, params, rng);
+      fold.prefix, fold.vocab, fold.normalizer, draft, params, rng,
+      draft_excluded);
   if (!d.resolved) {
     bus_gather_logits(bus, rank, world, fold.adjusted.data(), vocab_count,
                       vocab_begin, vocab_size, gather_scratch, timeout_ms,
@@ -995,6 +1016,10 @@ class GlmDevicePicker {
     GlmSampleSpec* specs = nullptr;
     int32_t* counts = nullptr;
     int vocab_size = 0;
+    // Constrained decoding (M6 6g): the rows' token masks on the device,
+    // glm_sample_mask_words(vocab_size) words per row (null: none).
+    const uint32_t* masks = nullptr;
+    int mask_stride = 0;
   };
   bool sampling() const { return candidates_ > 0; }
   int sampling_candidates() const { return candidates_; }
@@ -1189,15 +1214,17 @@ class GlmDevicePicker {
     glm_sample_local(const_cast<float*>(in.logits), in.rows, in.vocab_count,
                      in.vocab_begin, in.vocab_size, rank_, world_,
                      candidates_, in.specs, rows_per_request(in), in.fed,
-                     in.positions, position_stride(in), in.counts, carry_,
-                     table_, locals_ + in.slot * kPickMaxRows, sample_scratch_,
+                     in.positions, position_stride(in), in.counts, in.masks,
+                     in.mask_stride, carry_, table_,
+                     locals_ + in.slot * kPickMaxRows, sample_scratch_,
                      stream);
   }
   void sample_verdict(cudaStream_t stream, const Inputs& in) {
     glm_sample_verdict(table_, in.rows, world_, rank_, candidates_,
                        in.vocab_size, in.specs, in.requests,
                        rows_per_request(in), in.fed, in.positions,
-                       position_stride(in), in.counts, verdict_slot(in.slot),
+                       position_stride(in), in.counts, in.masks,
+                       in.mask_stride, verdict_slot(in.slot),
                        device_verdict_slot(in.slot),
                        outcomes_ + in.slot * kPickMaxRequests, carry_,
                        stream);

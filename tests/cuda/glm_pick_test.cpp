@@ -766,6 +766,8 @@ struct SampleWorldRun {
 
 // Runs the two kernels on every rank of a simulated world: rank k holds
 // columns [k*count, (k+1)*count) of `full` ([requests, world*count]).
+// `masks` (optional): the rows' token masks, glm_sample_mask_words(vocab)
+// words per row (the header word = the allowed count, 0 = unconstrained).
 SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                                 int world, int count,
                                 const std::vector<dgpp::GlmSampleSpec>& specs,
@@ -773,9 +775,14 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                                 const std::vector<int64_t>& fed,
                                 const std::vector<int64_t>& positions,
                                 int candidates, uint64_t carry,
-                                int rows_per_request = 1) {
+                                int rows_per_request = 1,
+                                const std::vector<uint32_t>& masks = {}) {
   const int vocab = world * count;
   const int rows = requests * rows_per_request;
+  const int mask_stride = dgpp::glm_sample_mask_words(vocab);
+  if (!masks.empty())
+    require(masks.size() == static_cast<size_t>(rows) * mask_stride,
+            "mask table shape");
   const size_t table_elems =
       dgpp::glm_sample_table_elems(rows, world, candidates);
   // Per-row positions with the request stride, as the graph's step
@@ -816,12 +823,19 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
     DGPP_CUDA_OK(cudaMemcpy(d_pos, row_positions.data(), row_positions.size() * 8,
                             cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemset(d_table, 0xff, table_elems * 2));  // poison
+    uint32_t* d_masks = nullptr;
+    if (!masks.empty()) {
+      d_masks = device_alloc<uint32_t>(masks.size());
+      DGPP_CUDA_OK(cudaMemcpy(d_masks, masks.data(), masks.size() * 4,
+                              cudaMemcpyHostToDevice));
+    }
     dgpp::glm_sample_local(d_logits, rows, count, k * count, vocab, k,
                            world, candidates, d_specs, rows_per_request,
                            d_fed, d_pos, /*position_stride=*/rows_per_request,
-                           d_counts, d_carry, d_table, d_locals, d_scratch,
-                           nullptr);
+                           d_counts, d_masks, d_masks ? mask_stride : 0,
+                           d_carry, d_table, d_locals, d_scratch, nullptr);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
+    if (d_masks) cudaFree(d_masks);
     std::vector<uint16_t> table(table_elems);
     DGPP_CUDA_OK(cudaMemcpy(table.data(), d_table, table_elems * 2,
                             cudaMemcpyDeviceToHost));
@@ -876,13 +890,20 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                             cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemcpy(d_counts, out.counts[0].data(),
                             counts_in.size() * 4, cudaMemcpyHostToDevice));
+    uint32_t* d_masks = nullptr;
+    if (!masks.empty()) {
+      d_masks = device_alloc<uint32_t>(masks.size());
+      DGPP_CUDA_OK(cudaMemcpy(d_masks, masks.data(), masks.size() * 4,
+                              cudaMemcpyHostToDevice));
+    }
     dgpp::glm_sample_verdict(d_table, rows, world, k, candidates, vocab,
                              d_specs, requests, rows_per_request, d_fed, d_pos,
                              /*position_stride=*/rows_per_request, d_counts,
-                             d_verdicts,
+                             d_masks, d_masks ? mask_stride : 0, d_verdicts,
                              /*device_verdicts=*/nullptr, d_out, d_carry,
                              nullptr);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
+    if (d_masks) cudaFree(d_masks);
     std::vector<int32_t> counts_after(counts_in.size());
     DGPP_CUDA_OK(cudaMemcpy(counts_after.data(), d_counts,
                             counts_in.size() * 4, cudaMemcpyDeviceToHost));
@@ -1164,6 +1185,343 @@ DGPP_TEST(sample_pick_matches_host_oracle_bitwise_over_simulated_world) {
           "the sweep must exercise both outcomes (resolved " +
               std::to_string(resolved_total) + ", fallback " +
               std::to_string(fallback_total) + ")");
+}
+
+// M6 6g: constrained rows. The host writes a token mask per row; a masked
+// id is absent on the device exactly as on the host (-inf in place, never
+// a candidate, no mass, the row's vocabulary its allowed count): an
+// allow-list of a few ids spanning three ranks with the fourth rank fully
+// masked (its lse -inf, its group empty), a free row with a few forbidden
+// ids, a greedy row under a mask (the masked argmax through the full
+// path), an unconstrained row beside them — every group, lse, decision,
+// counter and logprob bitwise the host oracle over the same masks; then
+// the T=2 verify with a masked draft (rejected outright, no fallback) and
+// row 1 under its own mask.
+namespace {
+
+std::vector<uint32_t> free_mask_words(int vocab) {
+  const int words = dgpp::glm_sample_mask_words(vocab);
+  std::vector<uint32_t> m(static_cast<size_t>(words), 0xffffffffu);
+  m[0] = static_cast<uint32_t>(vocab);
+  if (vocab % 32 != 0) m.back() &= (1u << (vocab % 32)) - 1u;
+  return m;
+}
+void mask_clear(std::vector<uint32_t>& m, int id) {
+  uint32_t& w = m[static_cast<size_t>(1 + (id >> 5))];
+  const uint32_t bit = 1u << (id & 31);
+  if (w & bit) {
+    w &= ~bit;
+    m[0] -= 1;
+  }
+}
+std::vector<uint32_t> list_mask_words(int vocab, const std::vector<int>& ids) {
+  const int words = dgpp::glm_sample_mask_words(vocab);
+  std::vector<uint32_t> m(static_cast<size_t>(words), 0u);
+  for (const int id : ids) {
+    uint32_t& w = m[static_cast<size_t>(1 + (id >> 5))];
+    const uint32_t bit = 1u << (id & 31);
+    if (!(w & bit)) {
+      w |= bit;
+      m[0] += 1;
+    }
+  }
+  return m;
+}
+
+}  // namespace
+
+DGPP_TEST(sample_pick_masked_rows_match_host_oracle_bitwise) {
+  Rng rng(0x6a5c);
+  constexpr int kWorld = 4;
+  constexpr int count = 96;
+  constexpr int vocab = kWorld * count;
+  constexpr int candidates = 32;
+  constexpr int requests = 5;
+  const int stride = dgpp::glm_sample_mask_words(vocab);
+  int list_resolved = 0, free_fallbacks = 0;
+  for (int trial = 0; trial < 8; ++trial) {
+    std::vector<float> full(static_cast<size_t>(requests) * vocab);
+    for (int q = 0; q < requests; ++q) {
+      float* row = full.data() + static_cast<size_t>(q) * vocab;
+      for (int v = 0; v < vocab; ++v)
+        row[v] = static_cast<float>((rng.next() >> 8) % 41) * 0.25f - 5.0f;
+      row[static_cast<size_t>(rng.next() % vocab)] = 7.0f;
+    }
+    // 0: sampled, allow-list of five ids on ranks 0..2 (rank 3 empty);
+    // 1: sampled pure temperature, free mask with 40 forbidden ids (a
+    //    flat-ish row: fallbacks happen; the gather path is the host's);
+    // 2: greedy under the allow-list (the masked argmax);
+    // 3: unconstrained sampled (the mask table's header is 0);
+    // 4: sampled, allow-list of ONE id (the degenerate distribution).
+    std::vector<dgpp::GlmSampleSpec> specs(requests);
+    specs[0].temperature = 1.0f; specs[0].top_p = 0.95f;
+    specs[1].temperature = 1.3f; specs[1].top_p = 1.0f;
+    specs[1].presence_penalty = 0.2f;
+    specs[2].temperature = 0.0f;
+    specs[3].temperature = 1.0f; specs[3].top_p = 0.9f;
+    specs[4].temperature = 0.8f; specs[4].top_p = 0.95f;
+    for (int q = 0; q < requests; ++q) {
+      specs[q].seed = 0x3000 + q + 13 * trial;
+      specs[q].counter = 2 + q;
+    }
+    std::vector<int> allow = {5 + trial, 40, count + 3, count + 70 + trial,
+                              2 * count + 11};
+    const int lone = 2 * count + 50 + trial;
+    std::vector<uint32_t> masks(static_cast<size_t>(requests) * stride, 0u);
+    const auto put = [&](int row, const std::vector<uint32_t>& m) {
+      std::copy(m.begin(), m.end(), masks.begin() + static_cast<long>(row) * stride);
+    };
+    put(0, list_mask_words(vocab, allow));
+    {
+      std::vector<uint32_t> m = free_mask_words(vocab);
+      for (int j = 0; j < 40; ++j) mask_clear(m, static_cast<int>(rng.next() % vocab));
+      put(1, m);
+    }
+    put(2, list_mask_words(vocab, allow));
+    put(4, list_mask_words(vocab, {lone}));
+    std::vector<int32_t> counts(static_cast<size_t>(requests) * vocab, 0);
+    std::vector<int64_t> fed(requests), positions(requests, 1);
+    for (int q = 0; q < requests; ++q) {
+      fed[q] = static_cast<int64_t>(rng.next() % vocab);
+      counts[static_cast<size_t>(q) * vocab + rng.next() % vocab] += 1;
+    }
+    const SampleWorldRun run = run_sample_world(full, requests, kWorld, count,
+                                                specs, counts, fed, positions,
+                                                candidates, 0x4d4dull, 1, masks);
+    for (int q = 0; q < requests; ++q) {
+      const float* row = full.data() + static_cast<size_t>(q) * vocab;
+      const uint32_t* mask = masks.data() + static_cast<size_t>(q) * stride;
+      const bool constrained = mask[0] != 0u;
+      const int allowed = constrained ? static_cast<int>(mask[0]) : vocab;
+      std::vector<int32_t> host_counts(counts.begin() + static_cast<long>(q) * vocab,
+                                       counts.begin() + static_cast<long>(q + 1) * vocab);
+      host_counts[static_cast<size_t>(fed[q])] += 1;
+      std::unordered_map<int32_t, int32_t> ctx;
+      for (int v = 0; v < vocab; ++v)
+        if (host_counts[static_cast<size_t>(v)]) ctx[v] = host_counts[static_cast<size_t>(v)];
+      dgpp::glm_sample::Params p = params_of(specs[q]);
+      const bool greedy = p.temperature <= 0.0f;
+      if (greedy) p.temperature = 1.0f;  // the full path's raw distribution
+      std::vector<float> adjusted(row, row + vocab);
+      dgpp::glm_sample::apply_penalties(adjusted.data(), vocab, 0, p, ctx);
+      if (constrained)
+        dgpp::glm_sample::apply_mask(adjusted.data(), vocab, 0, mask + 1, vocab);
+      std::vector<std::vector<Candidate>> shards;
+      std::vector<double> lses;
+      const size_t group = dgpp::glm_sample_rank_group_slots(candidates);
+      for (int k = 0; k < kWorld; ++k) {
+        const float* aslice = adjusted.data() + k * count;
+        for (int i = 0; i < count; ++i)
+          require(bits_equal(run.penalized[k][static_cast<size_t>(q) * count + i], aslice[i]),
+                  "masked slice differs (-inf in place) on rank " + std::to_string(k) +
+                      " request " + std::to_string(q));
+        const std::vector<Candidate> want =
+            dgpp::glm_sample::local_topk(aslice, count, k * count, candidates);
+        const uint16_t* grp = run.folded.data() +
+                              (static_cast<size_t>(q) * kWorld + k) * group;
+        for (int j = 0; j < candidates; ++j) {
+          const uint16_t* slot = grp + static_cast<size_t>(j) * kPickSlotsPerRank;
+          const uint32_t id = static_cast<uint32_t>(
+              decode_digits(slot + kPickLogitDigits, kPickIdDigits));
+          if (j < static_cast<int>(want.size())) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &want[static_cast<size_t>(j)].logit, 4);
+            require(id == static_cast<uint32_t>(want[static_cast<size_t>(j)].id) &&
+                        decode_digits(slot, kPickLogitDigits) == bits,
+                    "masked local top-k candidate " + std::to_string(j) +
+                        " differs on rank " + std::to_string(k) + " request " +
+                        std::to_string(q));
+          } else {
+            require(id == dgpp::kSampleEmptyId,
+                    "an absent candidate slot must carry the empty id (rank " +
+                        std::to_string(k) + " request " + std::to_string(q) + ")");
+          }
+        }
+        const double lse = dgpp::glm_sample::slice_logsumexp(aslice, count, p.temperature);
+        const uint64_t lse_bits = decode_digits(
+            grp + static_cast<size_t>(candidates) * kPickSlotsPerRank,
+            dgpp::kSampleLseDigits);
+        double got_lse = 0.0;
+        std::memcpy(&got_lse, &lse_bits, 8);
+        require(bits_equal(got_lse, lse),
+                "masked slice lse differs on rank " + std::to_string(k) +
+                    " request " + std::to_string(q) + " (want " +
+                    std::to_string(lse) + ", got " + std::to_string(got_lse) + ")");
+        if (q == 0 && k == 3) require(lse == -INFINITY && want.empty(),
+                                      "the fully masked rank has no mass and no candidates");
+        shards.push_back(want);
+        lses.push_back(lse);
+      }
+      const std::vector<Candidate> merged =
+          dgpp::glm_sample::merge_topk(shards, candidates);
+      const double Z = dgpp::glm_sample::merge_logsumexp(lses);
+      if (greedy) {
+        for (int k = 0; k < kWorld; ++k) {
+          const GlmPickVerdict& v = run.verdicts[k][q];
+          require(v.next == merged[0].id && v.accepted == 1,
+                  "greedy row under a mask: the masked argmax (got " +
+                      std::to_string(v.next) + ", want " + std::to_string(merged[0].id) + ")");
+          require(run.outcomes[k][q].sampled == 0, "greedy row draws nothing");
+          bool in_allow = false;
+          for (const int a : allow) in_allow = in_allow || a == v.next;
+          require(in_allow, "the greedy pick is inside the allow-list");
+        }
+        continue;
+      }
+      dgpp::glm_sample::Rng host_rng{specs[q].seed, specs[q].counter};
+      const dgpp::glm_sample::PrefixDecision want =
+          dgpp::glm_sample::sample_from_prefix(merged, allowed, Z, p, host_rng);
+      if (q == 0 || q == 4) {
+        require(want.resolved, "an allow-list inside the prefix resolves");
+        ++list_resolved;
+      }
+      if (q == 1 && !want.resolved) ++free_fallbacks;
+      for (int k = 0; k < kWorld; ++k) {
+        const GlmPickVerdict& v = run.verdicts[k][q];
+        const dgpp::GlmSampleOutcome& o = run.outcomes[k][q];
+        require(o.sampled == 1, "sampled row reports a decision");
+        require(bits_equal(o.normalizer, Z), "masked normalizer differs (request " +
+                                                 std::to_string(q) + ")");
+        require(o.counter == host_rng.counter, "masked counter differs");
+        if (want.resolved) {
+          require(o.fallback == 0 && v.next == want.result.token,
+                  "masked decision differs: device " + std::to_string(v.next) +
+                      " host " + std::to_string(want.result.token) + " (request " +
+                      std::to_string(q) + ")");
+          require(bits_equal(o.logprob, want.result.logprob), "masked logprob differs");
+          if (constrained)
+            require(((mask[1 + (v.next >> 5)] >> (v.next & 31)) & 1u) != 0u,
+                    "the decided token is inside the mask");
+        } else {
+          require(o.fallback == 1 && v.next == merged[0].id, "masked fallback shape");
+        }
+      }
+      if (q == 4)
+        for (int k = 0; k < kWorld; ++k)
+          require(run.verdicts[k][q].next == lone, "one allowed id: it is the token");
+    }
+  }
+  require(list_resolved == 16, "every allow-list row resolved on the device");
+  (void)free_fallbacks;
+
+  // The T=2 verify under masks: the draft is a masked id on row 0 (rejected
+  // outright: no fallback, the residual from the allowed set) or an
+  // allowed one (the accept test); row 1 carries its own mask.
+  int rejected_masked = 0, accepted = 0;
+  for (int trial = 0; trial < 6; ++trial) {
+    constexpr int rpr = 2;
+    constexpr int reqs = 2;
+    std::vector<float> full(static_cast<size_t>(reqs * rpr) * vocab);
+    for (int r = 0; r < reqs * rpr; ++r) {
+      float* row = full.data() + static_cast<size_t>(r) * vocab;
+      for (int v = 0; v < vocab; ++v)
+        row[v] = static_cast<float>((rng.next() >> 8) % 41) * 0.25f - 5.0f;
+    }
+    const std::vector<int> allow0 = {7, count + 9, 2 * count + 4, 3 * count + 30};
+    const std::vector<int> allow1 = {12, count + 1, 3 * count + 2};
+    // A peak on an allowed id of row 0, so the allowed draft mostly stands.
+    for (int q = 0; q < reqs; ++q) {
+      full[static_cast<size_t>(2 * q) * vocab + allow0[1]] = 9.0f;
+      full[static_cast<size_t>(2 * q + 1) * vocab + allow1[0]] = 8.0f;
+    }
+    std::vector<dgpp::GlmSampleSpec> specs(reqs);
+    for (int q = 0; q < reqs; ++q) {
+      specs[q].temperature = 1.0f;
+      specs[q].top_p = 1.0f;  // pure: the masked draft would fall back
+                              // without the exclusion shortcut
+      specs[q].seed = 0x4000 + q + 7 * trial;
+      specs[q].counter = 1;
+    }
+    std::vector<uint32_t> masks(static_cast<size_t>(reqs * rpr) * stride, 0u);
+    for (int q = 0; q < reqs; ++q) {
+      const std::vector<uint32_t> m0 = list_mask_words(vocab, allow0);
+      const std::vector<uint32_t> m1 = list_mask_words(vocab, allow1);
+      std::copy(m0.begin(), m0.end(), masks.begin() + static_cast<long>(2 * q) * stride);
+      std::copy(m1.begin(), m1.end(), masks.begin() + static_cast<long>(2 * q + 1) * stride);
+    }
+    std::vector<int32_t> counts(static_cast<size_t>(reqs) * vocab, 0);
+    std::vector<int64_t> fed(reqs * rpr), positions(reqs, 3);
+    // Request 0's draft is a MASKED id (an unconstrained MTP head's guess);
+    // request 1's is the allowed peak.
+    fed[0] = 3; fed[1] = 20 + trial;  // 20..25: never in allow0
+    fed[2] = 4; fed[3] = allow0[1];
+    const SampleWorldRun run = run_sample_world(full, reqs, kWorld, count, specs,
+                                                counts, fed, positions,
+                                                candidates, 0x5e5eull, rpr, masks);
+    for (int q = 0; q < reqs; ++q) {
+      const int32_t draft = static_cast<int32_t>(fed[2 * q + 1]);
+      const dgpp::glm_sample::Params p = params_of(specs[q]);
+      const auto merged_of = [&](int row, const std::vector<int>& allow_ids, double* Z) {
+        std::vector<float> adj(full.begin() + static_cast<long>(row) * vocab,
+                               full.begin() + static_cast<long>(row + 1) * vocab);
+        std::unordered_map<int32_t, int32_t> ctx;
+        ctx[static_cast<int32_t>(fed[2 * q])] = 1;
+        if (row % 2 == 1) ctx[draft] += 1;
+        dgpp::glm_sample::apply_penalties(adj.data(), vocab, 0, p, ctx);
+        const std::vector<uint32_t> m = list_mask_words(vocab, allow_ids);
+        dgpp::glm_sample::apply_mask(adj.data(), vocab, 0, m.data() + 1, vocab);
+        std::vector<std::vector<Candidate>> shards;
+        std::vector<double> lses;
+        for (int k = 0; k < kWorld; ++k) {
+          shards.push_back(dgpp::glm_sample::local_topk(adj.data() + k * count, count,
+                                                        k * count, candidates));
+          lses.push_back(dgpp::glm_sample::slice_logsumexp(adj.data() + k * count,
+                                                            count, p.temperature));
+        }
+        *Z = dgpp::glm_sample::merge_logsumexp(lses);
+        return dgpp::glm_sample::merge_topk(shards, candidates);
+      };
+      double Z0 = 0.0, Z1 = 0.0;
+      const std::vector<Candidate> m0 = merged_of(2 * q, allow0, &Z0);
+      const std::vector<Candidate> m1 = merged_of(2 * q + 1, allow1, &Z1);
+      bool draft_allowed = false;
+      for (const int a : allow0) draft_allowed = draft_allowed || a == draft;
+      dgpp::glm_sample::Rng host{specs[q].seed, specs[q].counter};
+      const dgpp::glm_sample::SpecPrefixDecision d0 =
+          dgpp::glm_sample::spec_accept_from_prefix(
+              m0, static_cast<int>(allow0.size()), Z0, draft, p, host,
+              /*draft_excluded=*/!draft_allowed);
+      require(d0.resolved, "a masked-or-allowed draft over a complete allowed prefix decides");
+      int32_t want_w0 = d0.result.token, want_w1 = -1;
+      int want_accepted = 1;
+      if (d0.accepted) {
+        ++accepted;
+        want_accepted = 2;
+        const dgpp::glm_sample::PrefixDecision d1 =
+            dgpp::glm_sample::sample_from_prefix(
+                m1, static_cast<int>(allow1.size()), Z1, p, host);
+        require(d1.resolved, "row 1 over its allowed set decides");
+        want_w1 = d1.result.token;
+      } else if (!draft_allowed) {
+        ++rejected_masked;
+      }
+      for (int k = 0; k < kWorld; ++k) {
+        const GlmPickVerdict& v = run.verdicts[k][q];
+        const dgpp::GlmSampleOutcome& o = run.outcomes[k][q];
+        require(o.fallback == 0, "no fallback under complete allowed prefixes (request " +
+                                     std::to_string(q) + ", trial " + std::to_string(trial) + ")");
+        require(v.accepted == want_accepted && v.winners[0] == want_w0 &&
+                    v.winners[1] == want_w1 && o.counter == host.counter,
+                "masked T=2 verdict differs from the oracle: got accepted " +
+                    std::to_string(v.accepted) + " winners " + std::to_string(v.winners[0]) +
+                    "/" + std::to_string(v.winners[1]) + ", want " +
+                    std::to_string(want_accepted) + " " + std::to_string(want_w0) + "/" +
+                    std::to_string(want_w1));
+        bool in0 = false;
+        for (const int a : allow0) in0 = in0 || a == v.winners[0];
+        require(in0, "row 0's token is inside its mask");
+        if (want_accepted == 2) {
+          bool in1 = false;
+          for (const int a : allow1) in1 = in1 || a == v.winners[1];
+          require(in1, "row 1's token is inside its mask");
+        }
+      }
+    }
+  }
+  require(rejected_masked == 6 && accepted > 0,
+          "every masked draft rejected without a fallback (" +
+              std::to_string(rejected_masked) + "), some allowed drafts stood (" +
+              std::to_string(accepted) + ")");
 }
 
 // The local top-k's three select paths, on slices wider than the shared

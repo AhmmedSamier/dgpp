@@ -84,6 +84,7 @@
 #include <vector>
 
 #include "models/glm_sampler.hpp"
+#include "models/glm_tool_grammar.hpp"
 
 namespace dgpp::glm {
 
@@ -165,6 +166,23 @@ class SchedulerEngine {
     (void)req;
     return {};
   }
+
+  // ---- constrained decoding (M6 6g) ----------------------------------------
+  // An engine that can mask the pick advertises it; the scheduler then hands
+  // every admitted request's grammar spec to its slot right after the
+  // sampling spec, before the prefill pick (the first constrained position).
+  // The engine keeps the grammar state per slot, advances it with every
+  // token it commits, and applies the next position's mask on every rank
+  // identically (the mask is a pure function of the spec, the committed
+  // ids and the tokenizer). The default engine has no masks: the scheduler
+  // refuses an active spec at submit, identically on every rank.
+  virtual bool supports_constraints() const { return false; }
+  virtual void configure_constraint(int req, const GrammarSpec& grammar) {
+    (void)req;
+    if (grammar.active())
+      throw std::logic_error(
+          "SchedulerEngine: this engine cannot constrain the pick");
+  }
 };
 
 // One request, in arrival (manifest) order. `prompt` ids are validated by
@@ -187,6 +205,11 @@ struct SchedulerRequest {
   // carries N to the sampler). Greedy requests report under the raw
   // distribution.
   int logprobs = -1;
+  // Constrained decoding (M6 6g): the tool-call grammar the pick obeys
+  // (tool_choice required / named / none, parallel_tool_calls false). The
+  // default is inactive — unconstrained, the exact op stream every gate
+  // pins. Rides the journal with the request.
+  GrammarSpec grammar;
 };
 
 // The bounded admission queue at capacity (submit() only). A load-shed

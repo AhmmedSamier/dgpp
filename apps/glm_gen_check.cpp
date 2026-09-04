@@ -883,7 +883,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     dgpp::glm_sample::Rng rng{sampling.seed, 0};
     const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
     const dgpp::glm_sample::Result first =
-        row1(pre, *sampling.params, rng, prompt_context);
+        row1(pre, *sampling.params, rng, prompt_context, nullptr);
     DGPP_LOG_INFO("[gen] rank {} prefill+sample: token {} logprob {:.4f}",
                   rank, first.token, first.logprob);
     dgpp::SampledSpeculator spec(
@@ -1135,7 +1135,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
           return dgpp::glm_sample::local_max(o.logits.data(), cfg.vocab_size,
                                              0);
         const dgpp::glm_sample::Result r =
-            w1_sample(o, *sampling.params, rng, context);
+            w1_sample(o, *sampling.params, rng, context, nullptr);
         DGPP_LOG_INFO("[gen] sampled token {} logprob {:.4f} (counter {})",
                       r.token, r.logprob, rng.counter);
         return {r.token, o.logits[static_cast<size_t>(r.token)]};
@@ -1279,7 +1279,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         std::vector<int32_t> context(prompt.begin(), prompt.end());
         context.insert(context.end(), generated.begin(), generated.end());
         const dgpp::glm_sample::Result r =
-            fabric_sample(out, *sampling.params, sample_rng, context);
+            fabric_sample(out, *sampling.params, sample_rng, context, nullptr);
         DGPP_LOG_INFO(
             "[gen] rank {} {} {}: sampled token {} logprob {:.4f} (counter "
             "{}; local slice [{},{}))",

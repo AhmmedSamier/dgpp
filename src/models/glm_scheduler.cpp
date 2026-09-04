@@ -133,6 +133,11 @@ void Scheduler::validate_new(const SchedulerRequest& request) const {
     throw std::invalid_argument(
         "Scheduler: request '" + request.id +
         "' logprobs and sampling.logprobs disagree");
+  if (request.grammar.active() && !engine_->supports_constraints())
+    throw std::invalid_argument(
+        "Scheduler: request '" + request.id +
+        "' asks for constrained decoding but the engine cannot mask the "
+        "pick");
   if (request.cancel_after < 0 || request.cancel_after > request.max_steps)
     throw std::invalid_argument(
         "Scheduler: request '" + request.id + "' cancel_after must be in "
@@ -194,9 +199,11 @@ void Scheduler::admit(int arrival) {
   if (slot < 0)
     throw std::logic_error("Scheduler: admit without a free slot");
   const int64_t reserve = reserve_blocks(r);
-  // The spec lands on the slot before its first pick (the prefill's).
+  // The spec lands on the slot before its first pick (the prefill's); the
+  // grammar with it, so the prefill pick is the first constrained position.
   engine_->configure_sampling(slot, r.spec.sampling, r.spec.seed);
   engine_->configure_logprobs(slot, r.spec.logprobs);
+  engine_->configure_constraint(slot, r.spec.grammar);
   const int32_t token = engine_->prefill(slot, r.spec.prompt);
   if (token < 0) {
     engine_->close(slot);

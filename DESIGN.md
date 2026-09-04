@@ -1948,6 +1948,69 @@ from `p` with the draft removed — acceptance ≈ E[p(draft)], lower than
 greedy's argmax agreement by physics, still above the ~30% break-even at
 T=1 by expectation; measured before it is claimed.
 
+**Constrained decoding (M6 6g, built 2026-09-04;
+`glm_tool_grammar.{hpp,cpp}`, the mask in `glm_sampler.hpp` and
+`glm_sample_pick.cu`).** The tool-call surface's guarantees — `tool_choice`
+required / named / none, `parallel_tool_calls: false` — are a MASK on the
+pick, not a prompt trick: a grammar of the template's tool-call format
+(`turn := think? body; call := <tool_call> NAME (<arg_key> KEY </arg_key>
+<arg_value> VALUE </arg_value>)* </tool_call>`; NAME an automaton over the
+vocabulary's token TEXTS across the request's tool names, so any BPE
+tokenization of a name passes and nothing else; KEY the schema's property
+names when it closes them with `additionalProperties: false`, else free;
+VALUE free text; the turn ends on `<|observation|>`; EOS is withheld while
+a call is owed; thinking stays free) yields, per position, the set of ids
+the model may emit next. The mask's meaning to the sampler is one rule
+everywhere: a masked id is an ABSENT candidate — `-inf` in place, never
+listed by the local top-k, zero mass in every normalizer (a slice with
+every id masked folds as `-inf`, skipped), and the decision's vocabulary
+is the count of present ids, so a constrained row samples the
+distribution restricted to the mask and renormalized, exactly, through
+the unchanged selector. Host and device apply it identically: the host
+paths (`apply_mask` before the local top-k; `sample_complete_logits` /
+`spec_accept_complete` over the present count; a masked draft rejected
+outright with `draft_excluded`), and the device kernels (a per-row mask
+table — the header word is the allowed count, 0 unconstrained — read by
+the prepare kernel, which writes `-inf` in place; the local kernel's keys
+treat `-inf` as absent and select among the present ids; the verdict
+decides over the row's allowed count and rejects a masked draft without a
+fallback). The rounding guards of every walk pick the last token WITH
+mass, never an absent one. The grammar state lives per slot in the
+engines (`SchedulerEngine::configure_constraint`, the spec riding the
+journal's `gr` field), is advanced by every committed token, and stages
+the next position's mask before each step — for the MTP verify, row 0
+under the state and row 1 under the state advanced by the pending draft
+(row 1 is used only when the draft stands, exactly that position); the
+in-graph draft itself stays unconstrained and a disallowed draft is
+rejected at the verify with probability 0, so the acceptance rate falls
+inside structural states and correctness never does. The prefill pick is
+the first constrained position. Every rank derives the same mask from
+the same record and the same tokenizer (peers build the grammar's token
+table from tokenizer.json at startup) — no new collective. Building it
+found a bug in the MTP fallback path from 6b: the in-graph draft's head
+reuses the logits buffer, so after a replay the buffer holds the DRAFT's
+rows and the host's fallback decided over them, not over the verify's
+penalized rows; the graph now snapshots the verify rows (a copy kernel
+node after the pick, before the draft) and the fallback gathers from the
+snapshot, with a loud invariant — the gathered row's covered mass under
+the device's normalizer must equal the device's bit for bit — on every
+fallback of both graph shapes. Gates: `glm_tool_grammar_test` (the
+states' masks and counts, the name/key automaton on shared prefixes and
+partial tokenizations, every mode, EOS withheld, death on a disallowed
+id), the masked cases of `glm_sampler_test` and `glm_pick_test` (absent
+ids everywhere, a fully masked rank, the greedy masked argmax, the masked
+draft — bitwise host = device), the two-rank loopbacks
+`glm_tp_serving_graph_constrained_matches_eager_engine_and_grammar` (the
+plain graphs bitwise the eager engine under every mode and temperature,
+every token inside a shadow grammar, masked gather fallbacks included)
+and `glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid`
+(the MTP graphs rank-identical and grammar-valid with fallbacks of both
+rows), and `glm_chat_template_test`'s
+`glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer`
+(every golden tool-call turn accepted position by position over the real
+tokenizer; a second call refused under a single-call spec, EOS refused
+while a call is owed, a foreign name refused at its first token).
+
 ## 11. Runtime and API
 
 The daemon is a hand-rolled C++ service (`glm_serve`; `src/service/`) with:
@@ -2034,13 +2097,14 @@ ordinary text. They are not "special" in the tokenizer's sense — `decode()`
 prints them literally — so a text-keyed parser would be ambiguous where an
 id-keyed one is exact. *Request side:* `tools` (flat or `{type:
 "function", function}`), `tool_choice` (`auto`; `none` omits the tools
-from the render; `required` and `{function: {name}}` append
-`</think><tool_call>` resp. `</think><tool_call>{name}` to the rendered
-prompt — the template has no forced mode, so a forced turn closes the
-`<think>` block the generation prompt opened and does not reason first;
-the model may extend a seeded name), `parallel_tool_calls` (`true` only:
-`false` cannot be enforced without a stop machinery and refuses by name),
-`reasoning_effort` (the OpenAI values; the template renders `low`/`high`
+from the render and forbids `<tool_call>` in the grammar; `required` and
+`{function: {name}}` ride the request as the grammar of §10's constrained
+decoding — the prompt is untouched, the model reasons first, and then can
+only write a valid call to an allowed function; an engine without masks
+refuses them with `constrained_decoding_unsupported`),
+`parallel_tool_calls` (`false` is the single-call grammar: one call, then
+the turn ends), `reasoning_effort` (the OpenAI values; the template renders
+`low`/`high`
 and treats the rest as its maximum) and `chat_template_kwargs`
 (`clear_thinking`, `reasoning_effort`; `enable_thinking` refuses with the
 explanation that thinking is always on; any other key refuses by name).
@@ -2090,18 +2154,21 @@ it (the decode a client of a parser-less server would see) instead of
 splitting it. Gates: `glm_tool_parser_test` (unit, a fake decoder: the
 split, exact deltas, schema-typed and inferred values, nested JSON,
 several calls per turn, every malformed shape falling back to literal
-content, the forced prefix, missing markers disabling the features),
+content, missing markers disabling the features),
 `glm_chat_template_test`'s `glm_tool_call_render_encode_parse_roundTrip`
 (every golden assistant tool-call message rendered by the template,
 encoded by the real tokenizer and parsed back — 6 turns, 9 calls, names
 and arguments structurally exact), and `glm_serve_test`'s five 6f gates
 (the request side's normalization and refusals by field name, the
 one-shot message shape and `finish_reason`, the stream's chunk order, the
-forced prefix seeding the parser with the prompt length as evidence, the
+grammar arming the engine with the prompt untouched — the closed key set
+from `additionalProperties: false`, the modes, the single-call forms — the
 fold knob and the cap inside a block). On the four nodes
 (`scripts/serve_tools_check.sh`, 2026-09-04, `--decode-graph --mtp` at the
-card's settings) every request shape answered as designed with the
-op-stream md5 identical on all ranks — the record's last 2026-09-04 entry.
+card's settings) every request shape answered as designed — the
+single-call grammars ending the turn after exactly one call while the
+model's reasoning had planned two — with the op-stream md5 identical on
+all ranks; the record's 2026-09-04 tool-call entries.
 
 **The admission journal** (`fabric_serve.{hpp,cpp}`): rank 0 is the sole
 ingress; every engine pass's scheduler-state changes ride ONE
@@ -2255,12 +2322,14 @@ artifact hashes are in the 2026-09-03 Phase-2 entries of
 - *Grow-on-demand admission:* reserve to a window, grow at tick top,
   shed the youngest deterministically when growth fails — a pure function
   of (meters, positions), so the journal keeps it identical.
-- *Tool calls and reasoning (PLAN 6f):* BUILT 2026-09-04 — the as-built
-  paragraph above. Two things the design had wrong, corrected in the
-  build: the markers are not special tokens (decode prints them, which
-  is why a malformed block can fall back to literal text), and "JSON if
-  it parses" alone is lossy, so values are typed from the tool schema
-  first.
+- *Tool calls and reasoning (PLAN 6f, 6g):* BUILT 2026-09-04 — the
+  as-built paragraph above and §10's constrained decoding. Three things
+  the design had wrong, corrected in the build: the markers are not
+  special tokens (decode prints them, which is why a malformed block can
+  fall back to literal text); "JSON if it parses" alone is lossy, so
+  values are typed from the tool schema first; and a forced
+  `<tool_call>` prefix on the prompt is not `tool_choice` (it skips the
+  reasoning and cannot stop a second call) — the grammar mask is.
 - *Failure semantics (v1):* no failover. Any rank's death fails the world
   legibly (journal EOF / bus watchdog), active streams get an error event,
   a supervisor restarts the world in ~25 s from the image cache. The

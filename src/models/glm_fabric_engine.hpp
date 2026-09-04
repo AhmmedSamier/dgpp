@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <format>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -22,6 +24,7 @@
 #include "models/glm_speculative.hpp"
 #include "models/glm_loader.hpp"
 #include "models/glm_step_timing.hpp"
+#include "kernels/glm_spec.hpp"
 #include "models/glm_tp_bus.hpp"
 #include "net/collective_bus.hpp"
 
@@ -165,13 +168,15 @@ inline GenEngineAdapter::Sample make_fabric_sample(
           pick_timeout_ms, gather_buffer](
              const GlmDiagnosticModel::Outputs& out,
              const glm_sample::Params& p, glm_sample::Rng& rng,
-             const std::vector<int32_t>& context) -> glm_sample::Result {
+             const std::vector<int32_t>& context,
+             const glm::TokenMask* mask) -> glm_sample::Result {
     step_timing::Scope tick(step_timing::kPick);
     const glm_sample::Result r = bus_sample_row(
         *bus, rank, world, out.logits.data(),
         static_cast<int>(out.lm_vocab_count), out.lm_vocab_begin,
         static_cast<int>(vocab), p, rng, context, kSamplingCandidates,
-        prefix_scratch, gather_scratch, pick_timeout_ms, gather_buffer.get());
+        prefix_scratch, gather_scratch, pick_timeout_ms, gather_buffer.get(),
+        mask);
     if (r.token < 0 || r.token >= vocab)
       throw std::runtime_error("fabric sample out of range: " +
                                std::to_string(r.token));
@@ -228,13 +233,18 @@ inline SampledSpeculator::Row0 make_fabric_spec_row0(
 // eagerly on the true rows and reseeds the [next, draft] feed.
 class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
  public:
+  // `grammar_vocab` (optional, M6 6g): the tokenizer's token table; with
+  // it and the device sampler the adapter constrains the pick per slot
+  // (configure_constraint) — the masks live in a device table the captures
+  // bake in, staged before every replay.
   GlmGraphEngineAdapter(GlmDiagnosticModel* model, net::CollectiveBus* bus,
                         int rank, int world, uint16_t* pick_scratch,
                         int64_t vocab, int pick_timeout_ms = 60000,
                         int batch_min_live = 4,
                         uint16_t* sample_prefix_scratch = nullptr,
                         uint16_t* sample_gather_scratch = nullptr,
-                        int sampling_candidates_cap = kSamplingCandidates)
+                        int sampling_candidates_cap = kSamplingCandidates,
+                        const glm::GrammarVocab* grammar_vocab = nullptr)
       : model_(model),
         bus_(bus),
         rank_(rank),
@@ -242,7 +252,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
         vocab_(vocab),
         pick_timeout_ms_(pick_timeout_ms),
         sample_prefix_scratch_(sample_prefix_scratch),
-        sample_gather_scratch_(sample_gather_scratch) {
+        sample_gather_scratch_(sample_gather_scratch),
+        grammar_vocab_(grammar_vocab) {
     if (model_ == nullptr || bus_ == nullptr || pick_scratch == nullptr)
       throw std::invalid_argument("graph engine: null model/bus/pick scratch");
     slots_ = model_->max_session_requests();
@@ -285,13 +296,38 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
         DGPP_CUDA_OK(cudaMallocHost(
             reinterpret_cast<void**>(&h_fallback_row_),
             sizeof(float) * model_->lm_vocab_count()));
+        // The verify rows as the pick left them (penalized, masked), kept
+        // for the host's MTP fallback: the in-graph draft's head reuses the
+        // logits buffer, so after a replay the buffer holds the DRAFT's
+        // rows — a fallback deciding over those decides over the wrong
+        // distribution. A copy kernel node after the verify pick, before
+        // the draft, preserves them ([slots][rows_per_request][count]).
+        if (model_->mtp_enabled())
+          DGPP_CUDA_OK(cudaMalloc(
+              reinterpret_cast<void**>(&d_verify_logits_),
+              sizeof(float) * static_cast<size_t>(slots_) * rows_per_request_ *
+                  model_->lm_vocab_count()));
+        // The token masks: one row per physical decode row, the header
+        // word 0 (unconstrained) until a grammar stages one.
+        mask_stride_ = glm_sample_mask_words(static_cast<int>(vocab_));
+        const size_t mask_words =
+            static_cast<size_t>(slots_) * rows_per_request_ * mask_stride_;
+        DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_masks_),
+                                sizeof(uint32_t) * mask_words));
+        DGPP_CUDA_OK(cudaMemset(d_masks_, 0, sizeof(uint32_t) * mask_words));
+        DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_masks_),
+                                    sizeof(uint32_t) * mask_words));
+        std::fill_n(h_masks_, mask_words, 0u);
         DGPP_LOG_INFO(
             "rank {}: graph engine samples on the device — {} candidates per "
             "rank ({} rows x {} ranks in a {}-byte latency slot; the planned "
-            "width is {})",
+            "width is {}); constrained decoding {}",
             rank_, candidates_, slots_ * rows_per_request_, world_,
             bus_->slot_bytes(net::BusMessageClass::kLatency),
-            sampling_candidates_cap);
+            sampling_candidates_cap,
+            grammar_vocab_ != nullptr && grammar_vocab_->usable()
+                ? "available"
+                : "unavailable (no grammar vocabulary)");
       } else {
         DGPP_LOG_WARN(
             "rank {}: graph engine cannot sample — not even one candidate per "
@@ -303,6 +339,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
                                                 pick_timeout_ms_, candidates_);
     params_.assign(static_cast<size_t>(slots_), glm_sample::greedy_params());
     rng_.assign(static_cast<size_t>(slots_), glm_sample::Rng{});
+    grammar_.resize(static_cast<size_t>(slots_));
+    masks_.assign(static_cast<size_t>(slots_) * 2, glm::TokenMask{});
     context_.assign(static_cast<size_t>(slots_), {});
     report_.assign(static_cast<size_t>(slots_), false);
     pending_logprobs_.assign(static_cast<size_t>(slots_), {});
@@ -342,6 +380,9 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     if (d_prompt_ids_) cudaFree(d_prompt_ids_);
     if (h_prompt_ids_) cudaFreeHost(h_prompt_ids_);
     if (h_fallback_row_) cudaFreeHost(h_fallback_row_);
+    if (d_masks_) cudaFree(d_masks_);
+    if (h_masks_) cudaFreeHost(h_masks_);
+    if (d_verify_logits_) cudaFree(d_verify_logits_);
   }
   GlmGraphEngineAdapter(const GlmGraphEngineAdapter&) = delete;
   GlmGraphEngineAdapter& operator=(const GlmGraphEngineAdapter&) = delete;
@@ -402,6 +443,22 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     out.swap(pending_logprobs_[static_cast<size_t>(req)]);
     return out;
   }
+  bool supports_constraints() const override {
+    return sampling_ && grammar_vocab_ != nullptr && grammar_vocab_->usable();
+  }
+  void configure_constraint(int req, const glm::GrammarSpec& grammar) override {
+    check_req(req);
+    grammar_[static_cast<size_t>(req)].reset();
+    if (sampling_) clear_masks(req);
+    if (!grammar.active()) return;
+    if (!supports_constraints())
+      throw std::logic_error(
+          "graph engine: no grammar vocabulary — this engine cannot "
+          "constrain the pick");
+    // The opening state is re-derived at the prefill from the prompt.
+    grammar_[static_cast<size_t>(req)] = std::make_unique<glm::GrammarState>(
+        grammar_vocab_, grammar, /*prompt_opens_thinking=*/true);
+  }
 
   // Startup warm-up: records every scalar variant and, above one slot, the
   // row batch BEFORE the first client request, so no capture (record +
@@ -455,6 +512,17 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     if (live_[static_cast<size_t>(req)])
       throw std::logic_error("graph engine: prefill on a live request");
     try {
+      std::unique_ptr<glm::GrammarState>& grammar =
+          grammar_[static_cast<size_t>(req)];
+      if (grammar) {
+        // The grammar's opening state: thinking iff the prompt ends in
+        // <think> (the template's generation prompt does).
+        const glm::ChatMarkers& m = grammar_vocab_->markers();
+        const bool opens = !prompt.empty() && m.think_open.available() &&
+                           prompt.back() == m.think_open.id;
+        grammar = std::make_unique<glm::GrammarState>(grammar_vocab_,
+                                                      grammar->spec(), opens);
+      }
       const bool sampled = full_path_slot(req);
       int32_t first = -1;
       {
@@ -462,15 +530,22 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
             model_->session_prefill(req, prompt);
         if (sampled) {
           std::vector<int32_t> context(prompt.begin(), prompt.end());
+          const glm::TokenMask* mask = nullptr;
+          if (grammar && grammar->active()) {
+            grammar->mask(&masks_[static_cast<size_t>(req) * 2]);
+            if (masks_[static_cast<size_t>(req) * 2].constrained())
+              mask = &masks_[static_cast<size_t>(req) * 2];
+          }
           const glm_sample::Result r =
               prefill_sample_(out, params_[static_cast<size_t>(req)],
-                              rng_[static_cast<size_t>(req)], context);
+                              rng_[static_cast<size_t>(req)], context, mask);
           first = r.token;
           if (report_[static_cast<size_t>(req)])
             pending_logprobs_[static_cast<size_t>(req)].push_back(r);
         } else {
           first = prefill_pick_(out);
         }
+        if (grammar) grammar->advance(first);
       }
       if (sampled) {
         // The prompt is the request's context on the device (the first
@@ -552,6 +627,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     model_->session_graph_use_batch_contract(rows_per_request_);
     if (batch_feeds_dirty_) seed_all_live_batch();
     model_->session_graph_stage_batch();
+    for (const int req : reqs) stage_masks(req);
     replay(batch_exec_, batch_variant());
 
     std::vector<std::vector<int32_t>> batches;
@@ -577,7 +653,11 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     context_[static_cast<size_t>(req)].clear();
     report_[static_cast<size_t>(req)] = false;
     pending_logprobs_[static_cast<size_t>(req)].clear();
-    if (sampling_) push_spec(req, GlmSampleSpec{});
+    grammar_[static_cast<size_t>(req)].reset();
+    if (sampling_) {
+      push_spec(req, GlmSampleSpec{});
+      clear_masks(req);
+    }
   }
 
   // The slot's RNG state — the audit's view of the draws consumed.
@@ -619,6 +699,9 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       in.specs = d_specs_ + req;
       in.counts = d_counts_ + static_cast<size_t>(req) * vocab_;
       in.vocab_size = static_cast<int>(vocab_);
+      in.masks = d_masks_ + static_cast<size_t>(req) * rows_per_request_ *
+                                mask_stride_;
+      in.mask_stride = mask_stride_;
     }
     return in;
   }
@@ -634,6 +717,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       in.specs = d_specs_;
       in.counts = d_counts_;
       in.vocab_size = static_cast<int>(vocab_);
+      in.masks = d_masks_;
+      in.mask_stride = mask_stride_;
     }
     return in;
   }
@@ -760,6 +845,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
                                  draft_[static_cast<size_t>(req)]},
             /*device_positions=*/true, /*device_tokens=*/true);
         picker_->record(model_->stream(), scalar_sampling_inputs(req, /*rows=*/2));
+        snapshot_verify_rows(req, /*rows=*/2, /*first_row=*/0);
         model_->session_graph_capture_commit(
             req, picker_->device_verdict(0));
         model_->session_graph_capture_draft(
@@ -792,6 +878,9 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     batch_exec_ = capture_variant(batch_variant(), [&] {
       model_->session_graph_capture_batch(rows_per_request_);
       picker_->record(model_->stream(), verify_pick_inputs());
+      if (mtp)
+        snapshot_verify_rows(/*req=*/0, slots_ * rows_per_request_,
+                             /*first_row=*/0);
       model_->session_graph_capture_commit_batch(picker_->device_verdict(0));
       if (mtp) {
         model_->session_graph_capture_draft_batch(
@@ -935,6 +1024,18 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       context_[static_cast<size_t>(req)].push_back(next);
     }
     pending_[static_cast<size_t>(req)] = next;
+    if (std::unique_ptr<glm::GrammarState>& grammar =
+            grammar_[static_cast<size_t>(req)]) {
+      // The committed tokens advance the grammar in transcript order; the
+      // sampler never produced one outside its mask, so the state stays
+      // live (a dead state would mean a contract breach upstream).
+      for (const int32_t token : decided) grammar->advance(token);
+      if (!grammar->active() && grammar->spec().active())
+        DGPP_LOG_WARN(
+            "rank {}: slot {} grammar died on a committed token — the pick "
+            "left its mask (state {})",
+            rank_, req, grammar->state_name());
+    }
     if (model_->mtp_enabled() && !mtp_redrafted_) {
       const GlmPickVerdict draft = picker_->verdict(1, verdict_request);
       if (draft.rows != 1 || draft.accepted != 1 || draft.next < 0 ||
@@ -969,14 +1070,16 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     const glm_sample::Params& p = params_[static_cast<size_t>(req)];
     const int count = model_->lm_vocab_count();
     const int begin = model_->lm_vocab_begin();
-    const size_t row0 =
-        static_cast<size_t>(verdict_request) * rows_per_request_;
+    (void)verdict_request;
     // The draft block ran on the provisional rows: back to its snapshot.
     model_->session_draft_rollback(req, verify.accepted);
-    const auto gather_row = [&](size_t row) {
-      DGPP_CUDA_OK(cudaMemcpyAsync(h_fallback_row_,
-                                   model_->device_logits() + row * count,
-                                   sizeof(float) * count,
+    // The verify rows from the snapshot the graph took before its draft
+    // (the logits buffer itself holds the draft head's rows now); the
+    // snapshot is indexed [slot][row], the scalar and the batch alike.
+    const auto gather_row = [&](size_t t) {
+      const float* src = d_verify_logits_ +
+                         (static_cast<size_t>(req) * rows_per_request_ + t) * count;
+      DGPP_CUDA_OK(cudaMemcpyAsync(h_fallback_row_, src, sizeof(float) * count,
                                    cudaMemcpyDeviceToHost, model_->stream()));
       DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
       bus_gather_logits(*bus_, rank_, world_, h_fallback_row_, count, begin,
@@ -990,7 +1093,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
         throw std::runtime_error(
             "graph engine: a row-0 fallback must leave the counter and "
             "commit one row");
-      gather_row(row0);
+      gather_row(0);
+      check_gathered_row(o.covered_mass, o.normalizer, p, "row 0");
       const glm_sample::SpecPrefixDecision d0 =
           glm_sample::spec_accept_complete(fallback_full_.data(),
                                            static_cast<int>(vocab_),
@@ -1014,7 +1118,11 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
         context.push_back(fed_draft);
         const GlmDiagnosticModel::Outputs row1 =
             model_->session_verify(req, std::vector<int64_t>{fed_draft});
-        const glm_sample::Result r1 = prefill_sample_(row1, p, rng, context);
+        // Row 1 under the mask staged for it (the grammar advanced by the
+        // draft), as the device would have applied it.
+        const glm::TokenMask& m1 = masks_[static_cast<size_t>(req) * 2 + 1];
+        const glm_sample::Result r1 = prefill_sample_(
+            row1, p, rng, context, m1.constrained() ? &m1 : nullptr);
         if (reporting) report->push_back(r1);
         next = r1.token;
         *decided = {fed_draft, next};
@@ -1027,7 +1135,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
             "and commit two rows");
       rng.counter = o.counter;
       context.push_back(fed_draft);
-      gather_row(row0 + 1);
+      gather_row(1);
       const glm_sample::Result r1 = glm_sample::sample_complete_logits(
           fallback_full_.data(), static_cast<int>(vocab_), o.normalizer1, p,
           rng);
@@ -1068,8 +1176,91 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       model_->session_graph_stage(req,
                                   pending_[static_cast<size_t>(req)]);
     }
+    stage_masks(req);
     replay(scalar_execs_[static_cast<size_t>(req)], req);
     return collect_verdict(req, /*verdict_request=*/0, /*batched=*/false);
+  }
+
+  // The slot's masks for the coming replay (M6 6g): row 0 under the
+  // grammar's current state, row 1 (MTP) under the state advanced by the
+  // pending draft (row 1 is used only when the draft stands, in which case
+  // that is exactly its position; a draft outside the mask kills the copy
+  // and leaves row 1 unconstrained — it is discarded either way). Written
+  // to the device table on the model stream ahead of the graph launch; an
+  // unconstrained position writes a zero header.
+  void stage_masks(int req) {
+    if (!sampling_) return;
+    std::unique_ptr<glm::GrammarState>& grammar = grammar_[static_cast<size_t>(req)];
+    if (!grammar) return;  // the headers are zero (configure/close)
+    glm::TokenMask& m0 = masks_[static_cast<size_t>(req) * 2];
+    glm::TokenMask& m1 = masks_[static_cast<size_t>(req) * 2 + 1];
+    grammar->mask(&m0);
+    if (rows_per_request_ == 2) {
+      glm::GrammarState after = *grammar;
+      after.advance(draft_[static_cast<size_t>(req)]);
+      after.mask(&m1);
+    } else {
+      m1.allowed = 0;
+    }
+    uint32_t* h = h_masks_ + static_cast<size_t>(req) * rows_per_request_ * mask_stride_;
+    for (int t = 0; t < rows_per_request_; ++t) {
+      const glm::TokenMask& m = t == 0 ? m0 : m1;
+      uint32_t* row = h + static_cast<size_t>(t) * mask_stride_;
+      row[0] = m.constrained() ? static_cast<uint32_t>(m.allowed) : 0u;
+      if (m.constrained())
+        std::copy(m.words.begin(), m.words.end(), row + 1);
+    }
+    const size_t words = static_cast<size_t>(rows_per_request_) * mask_stride_;
+    DGPP_CUDA_OK(cudaMemcpyAsync(
+        d_masks_ + static_cast<size_t>(req) * rows_per_request_ * mask_stride_,
+        h, sizeof(uint32_t) * words, cudaMemcpyHostToDevice, model_->stream()));
+  }
+  // The gathered row is the row the device decided over iff its prefix's
+  // covered mass under the device's normalizer is the device's, bit for
+  // bit (the same candidates, the same masses, the same order) — the
+  // invariant a wrong row breaks (the draft head's row did, silently,
+  // until the verify snapshot). Loud, never papered over.
+  void check_gathered_row(double device_covered, double normalizer,
+                          const glm_sample::Params& p, const char* what) const {
+    const std::vector<glm_sample::Candidate> top = glm_sample::local_topk(
+        fallback_full_.data(), static_cast<int>(vocab_), 0, candidates_);
+    double covered = 0.0;
+    for (const glm_sample::Candidate& c : top)
+      covered += detmath::exp_d(
+          static_cast<double>(c.logit / p.temperature) - normalizer);
+    if (std::memcmp(&covered, &device_covered, sizeof(double)) != 0)
+      throw std::runtime_error(std::format(
+          "graph engine: the gathered fallback {} is not the row the device "
+          "decided over (covered mass {:.9g} vs the device's {:.9g}) — the "
+          "verify snapshot and the pick disagree",
+          what, covered, device_covered));
+  }
+
+  // Records the copy of the verify's logits rows [first_row, first_row +
+  // rows) — as the pick left them — into the snapshot at slot `req`'s
+  // rows, before the draft block overwrites the buffer (a kernel node:
+  // the decode graph is kernels-only).
+  void snapshot_verify_rows(int req, int rows, int first_row) {
+    if (d_verify_logits_ == nullptr) return;
+    const size_t count = static_cast<size_t>(model_->lm_vocab_count());
+    glm_device_copy(
+        d_verify_logits_ + static_cast<size_t>(req) * rows_per_request_ * count,
+        model_->device_logits() + static_cast<size_t>(first_row) * count,
+        sizeof(float) * static_cast<size_t>(rows) * count, model_->stream());
+  }
+  // Zero headers for the slot's rows: unconstrained until staged again.
+  void clear_masks(int req) {
+    if (!sampling_ || d_masks_ == nullptr) return;
+    uint32_t* h = h_masks_ + static_cast<size_t>(req) * rows_per_request_ * mask_stride_;
+    for (int t = 0; t < rows_per_request_; ++t) h[static_cast<size_t>(t) * mask_stride_] = 0u;
+    for (int t = 0; t < rows_per_request_; ++t) {
+      const size_t off =
+          (static_cast<size_t>(req) * rows_per_request_ + t) * mask_stride_;
+      DGPP_CUDA_OK(cudaMemcpyAsync(d_masks_ + off, h_masks_ + off,
+                                   sizeof(uint32_t), cudaMemcpyHostToDevice,
+                                   model_->stream()));
+    }
+    DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
   }
 
   bool sampled_slot(int req) const {
@@ -1094,7 +1285,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     const glm_sample::Params& p = params_[static_cast<size_t>(req)];
     return p.temperature > 0.0f || report_[static_cast<size_t>(req)] ||
            p.repetition_penalty != 1.0f || p.frequency_penalty != 0.0f ||
-           p.presence_penalty != 0.0f;
+           p.presence_penalty != 0.0f ||
+           grammar_[static_cast<size_t>(req)] != nullptr;
   }
 
   void push_spec(int req, const GlmSampleSpec& spec) {
@@ -1129,6 +1321,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
                       static_cast<int>(vocab_), sample_gather_scratch_,
                       pick_timeout_ms_, &fallback_full_);
     glm_sample::Rng& rng = rng_[static_cast<size_t>(req)];
+    check_gathered_row(o.covered_mass, o.normalizer,
+                       params_[static_cast<size_t>(req)], "row");
     const glm_sample::Result r = glm_sample::sample_complete_logits(
         fallback_full_.data(), static_cast<int>(vocab_), o.normalizer,
         params_[static_cast<size_t>(req)], rng);
@@ -1177,6 +1371,16 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   int64_t* h_prompt_ids_ = nullptr;    // pinned [max_tokens]
   float* h_fallback_row_ = nullptr;    // pinned [lm_vocab_count]
   std::vector<float> fallback_full_;
+  // Constrained decoding (M6 6g): the grammar per slot, the two staged
+  // masks per slot, the device/pinned mask table [slots*rows][stride].
+  const glm::GrammarVocab* grammar_vocab_ = nullptr;
+  std::vector<std::unique_ptr<glm::GrammarState>> grammar_;
+  std::vector<glm::TokenMask> masks_;
+  uint32_t* d_masks_ = nullptr;
+  uint32_t* h_masks_ = nullptr;
+  int mask_stride_ = 0;
+  float* d_verify_logits_ = nullptr;  // device [slots][rows][count]: the
+                                      // verify rows the MTP fallback decides over
   std::vector<glm_sample::Params> params_;
   std::vector<glm_sample::Rng> rng_;
   std::vector<std::vector<int32_t>> context_;  // prompt + decided, per slot
