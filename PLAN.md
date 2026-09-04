@@ -709,9 +709,16 @@ Two phases:
   GEMM seam now lowers every m ≤ 8 through the GEMV chunks, which moved
   prefill tail chunks and per-expert prefill GEMMs of 5–8 routed tokens off
   cuBLASLt — bitwise different at those shapes and unmeasured; measure
-  prefill before the TTFT work starts (below). Also OWED: one fabric decode
-  run confirming the kernels-only graph's per-step cost is in the noise (a
-  few 32-thread launches replace the memset/memcpy nodes).
+  prefill before the TTFT work starts (below). The kernels-only graph's
+  fabric cost is confirmed in the noise (2026-09-04 record entry: T=1 graph
+  31.67 ms/step vs the record's 31.3, MTP graph 42.44 vs 42.36–42.42, eager
+  36.07 vs 36.4; plain vs both graphs IDENTICAL over 300 steps, one md5 on
+  all four ranks). Under compute-sanitizer memcheck the loopback worlds
+  report 0 errors but do not complete: the first instrumented prefill
+  collective outlasts even the lifted budgets (`DGPP_TEST_WAIT_TIMEOUT_MS`
+  joined the bus-timeout and kernel-deadline knobs), on the baseline as
+  after the fix — a harness limitation to take up if memcheck of the
+  loopback graph tests is wanted end to end.
 
 **6b. Sampling on the bus — IMPLEMENTATION STARTED 2026-09-03**
 (deliverable 3's distributed half; DESIGN §10). The configuration slice is

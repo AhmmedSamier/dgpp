@@ -103,6 +103,19 @@ void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
 }
 
+// Every host-side wait budget in these worlds (boundary reducers, picks,
+// replay finishes, the adapter's pick timeout) — 60 s in release, lifted
+// under compute-sanitizer with the bus timeout and the kernel deadline:
+//   DGPP_TEST_BUS_TIMEOUT_MS=120000 DGPP_TEST_CONSUMER_DEADLINE_S=120
+//   DGPP_TEST_WAIT_TIMEOUT_MS=test_wait_timeout_ms()0
+int test_wait_timeout_ms() {
+  static const int ms = [] {
+    const char* v = std::getenv("DGPP_TEST_WAIT_TIMEOUT_MS");
+    return v ? std::atoi(v) : 60000;
+  }();
+  return ms;
+}
+
 BusOptions loop_options(int rank, int world, uint16_t port,
                         size_t lat_slot_bytes = 8192) {
   BusOptions o;
@@ -216,7 +229,7 @@ void rank_work(int rank, int world, const std::string& dir,
   try {
     const auto t0 = std::chrono::steady_clock::now();
     DGPP_LOG_INFO("rank {}: model ctor begin", rank);
-    GlmBusBoundaryReducer reducer(*bus);
+    GlmBusBoundaryReducer reducer(*bus, test_wait_timeout_ms());
     GlmDiagnosticModel model(cfg, dir, static_cast<int>(tokens.size()),
                              cache_tokens, &reducer, rank, world);
     DGPP_LOG_INFO(
@@ -748,7 +761,7 @@ DGPP_TEST(glm_tp_head_shard_parity) {
         barrier.arrive_and_wait();
       };
       try {
-        GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)]);
+        GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)], test_wait_timeout_ms());
         // Two models per rank, constructed back to back so the barrier
         // still guards every allocation phase; forwards run after (the
         // same order on every rank, so collectives stay aligned).
@@ -850,7 +863,7 @@ DGPP_TEST(glm_sampling_profile_mass_gather_matches_centralized_loopback) {
         arrive_once();
         got[static_cast<size_t>(rank)] = dgpp::bus_sampling_topk_masses(
             *buses[static_cast<size_t>(rank)], rank, kWorld, slice, kSlice,
-            rank * kSlice, local_lse, scratch, 60000);
+            rank * kSlice, local_lse, scratch, test_wait_timeout_ms());
         cudaFreeHost(scratch);
         scratch = nullptr;
       } catch (const std::exception& error) {
@@ -940,7 +953,7 @@ DGPP_TEST(glm_tp_greedy_gen_loopback) {
               buses[static_cast<size_t>(r)]->allreduce(s, s, 16, &err);
           if (id == 0) throw std::runtime_error("probe submit: " + err);
           const auto res = buses[static_cast<size_t>(r)]->wait_allreduce(
-              id, 60000);
+              id, test_wait_timeout_ms());
           if (!res.ok) throw std::runtime_error("probe wait: " + res.error);
           cudaFree(s);
         } catch (const std::exception& e) {
@@ -971,7 +984,7 @@ DGPP_TEST(glm_tp_greedy_gen_loopback) {
       };
       uint16_t* scratch = nullptr;  // gather-scratch (2048 bf16)
       try {
-        GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)]);
+        GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)], test_wait_timeout_ms());
         GlmDiagnosticModel full(cfg, dir, max_tokens, 128, &reducer, r,
                                kWorld);
         GlmDiagnosticModel shard(cfg, dir, max_tokens, 128, &reducer, r,
@@ -998,7 +1011,7 @@ DGPP_TEST(glm_tp_greedy_gen_loopback) {
                         shard_out.lm_vocab_begin);
           const int32_t token = bus_greedy_pick(
               *buses[static_cast<size_t>(r)], r, kWorld, local, scratch,
-              60000);
+              test_wait_timeout_ms());
           if (token < 0 || token >= cfg.vocab_size)
             throw std::runtime_error("generated id out of range");
           if (token != central.id)
@@ -1212,7 +1225,7 @@ DGPP_TEST(glm_tp_decode_session_parity) {
         barrier.arrive_and_wait();
       };
       try {
-        GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)]);
+        GlmBusBoundaryReducer reducer(*buses[static_cast<size_t>(r)], test_wait_timeout_ms());
         GlmDiagnosticModel eng(cfg, dir, max_tokens, 128, &reducer, r, kWorld);
         GlmDiagnosticModel ref(cfg, dir, max_tokens, 128, &reducer, r, kWorld);
         // Construction barrier (the same one every other world-4 section
@@ -1520,7 +1533,7 @@ DGPP_TEST(glm_tp_speculative_loopback_matches_plain_greedy) {
       uint16_t* scratch = nullptr;
       try {
         CollectiveBus& bus = *buses[static_cast<size_t>(r)];
-        GlmBusBoundaryReducer reducer(bus);
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
         // The reference at world 4 is the PLAIN sharded session on the
         // same bus (the fold order differs from world 1 by rounding, and
         // the random fixture's vocab of 96 has near ties everywhere).
@@ -1538,7 +1551,7 @@ DGPP_TEST(glm_tp_speculative_loopback_matches_plain_greedy) {
           return dgpp::bus_greedy_pick(
               bus, r, kWorld,
               local_max(o.logits.data(), o.lm_vocab_count, o.lm_vocab_begin),
-              scratch, 60000);
+              scratch, test_wait_timeout_ms());
         };
         std::vector<int32_t> plain4;
         {
@@ -1553,7 +1566,7 @@ DGPP_TEST(glm_tp_speculative_loopback_matches_plain_greedy) {
         dgpp::GreedySpeculator spec(
             shard, 0, [&](const std::vector<Candidate>& locals) {
               return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals,
-                                                scratch, 60000);
+                                                scratch, test_wait_timeout_ms());
             });
         const GlmDiagnosticModel::Outputs out = shard.session_prefill(prompt);
         spec.start(pick1(out));
@@ -1580,7 +1593,7 @@ DGPP_TEST(glm_tp_speculative_loopback_matches_plain_greedy) {
             const std::vector<int64_t> fed{next, plain4[i + 1]};
             o = shard.session_verify(0, fed);
             const std::vector<int32_t> winners = dgpp::bus_greedy_pick_rows(
-                bus, r, kWorld, dgpp::local_row_maxes(o, 2), scratch, 60000);
+                bus, r, kWorld, dgpp::local_row_maxes(o, 2), scratch, test_wait_timeout_ms());
             const dgpp::SpecVerdict v = dgpp::judge_verify(fed, winners);
             if (v.accepted != 2)
               throw std::runtime_error(
@@ -1662,7 +1675,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
       cudaGraphExec_t graph_exec = nullptr;
       try {
         CollectiveBus& bus = *buses[static_cast<size_t>(r)];
-        GlmBusBoundaryReducer reducer(bus);
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
         GlmDiagnosticModel plain_shard(cfg, dir, max_tokens, 128, &reducer,
                                        r, kWorld, GlmResidency::Streaming,
                                        GlmHeadSharding::VocabSharded);
@@ -1676,7 +1689,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
         // nodes deadlocked this world at one hardware connection (10/10) —
         // session_graph_outputs copies the tail eagerly after each replay.
         shard.set_decode_tail_mirrors(false);
-        dgpp::GlmDevicePicker picker(bus, r, kWorld);
+        dgpp::GlmDevicePicker picker(bus, r, kWorld, test_wait_timeout_ms());
         dgpp::GlmGraphRecordReducer recorder(bus, shard.stream());
         DGPP_CUDA_OK(cudaMallocManaged(
             &scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld)));
@@ -1685,7 +1698,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
                                    int rows) {
           return dgpp::bus_greedy_pick_rows(bus, r, kWorld,
                                             dgpp::local_row_maxes(o, rows),
-                                            scratch, 60000);
+                                            scratch, test_wait_timeout_ms());
         };
         // ---- reference: the plain sharded session on the same bus ------
         std::vector<int32_t> plain4;
@@ -1755,7 +1768,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
           require(bus.graph_replay_arm(&gerr), "graph_replay_arm: " + gerr);
           DGPP_CUDA_OK(cudaGraphLaunch(graph_exec, shard.stream()));
           DGPP_CUDA_OK(cudaStreamSynchronize(shard.stream()));
-          require(bus.graph_replay_finish(60000, &gerr),
+          require(bus.graph_replay_finish(test_wait_timeout_ms(), &gerr),
                   "graph_replay_finish: " + gerr);
           const GlmDiagnosticModel::Outputs out = shard.session_graph_outputs(0);
           const dgpp::GlmPickVerdict& v = picker.verdict();
@@ -1861,7 +1874,7 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
       cudaGraphExec_t graph_exec = nullptr;
       try {
         CollectiveBus& bus = *buses[static_cast<size_t>(r)];
-        GlmBusBoundaryReducer reducer(bus);
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
         GlmDiagnosticModel plain_shard(cfg, dir, max_tokens, 128, &reducer,
                                        r, kWorld, GlmResidency::Streaming,
                                        GlmHeadSharding::VocabSharded);
@@ -1875,7 +1888,7 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
                                  /*mtp=*/true);
         shard.set_decode_route_traces(false);
         shard.set_decode_tail_mirrors(false);
-        dgpp::GlmDevicePicker picker(bus, r, kWorld);
+        dgpp::GlmDevicePicker picker(bus, r, kWorld, test_wait_timeout_ms());
         dgpp::GlmGraphRecordReducer recorder(bus, shard.stream());
         DGPP_CUDA_OK(cudaMallocManaged(
             &scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld)));
@@ -1884,7 +1897,7 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
                                    int rows) {
           return dgpp::bus_greedy_pick_rows(bus, r, kWorld,
                                             dgpp::local_row_maxes(o, rows),
-                                            scratch, 60000);
+                                            scratch, test_wait_timeout_ms());
         };
         // ---- reference 1: the plain sharded session ---------------------
         std::vector<int32_t> plain4;
@@ -1901,7 +1914,7 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
         dgpp::GreedySpeculator eager(eager_shard, 0,
                                      [&](const std::vector<Candidate>& l) {
                                        return dgpp::bus_greedy_pick_rows(
-                                           bus, r, kWorld, l, scratch, 60000);
+                                           bus, r, kWorld, l, scratch, test_wait_timeout_ms());
                                      });
         // Both speculators start with the TRUE next token as the first
         // proposal (plain4[1]): the first step accepts both rows, so the
@@ -1967,7 +1980,7 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
           require(bus.graph_replay_arm(&gerr), "graph_replay_arm: " + gerr);
           DGPP_CUDA_OK(cudaGraphLaunch(graph_exec, shard.stream()));
           DGPP_CUDA_OK(cudaStreamSynchronize(shard.stream()));
-          require(bus.graph_replay_finish(60000, &gerr),
+          require(bus.graph_replay_finish(test_wait_timeout_ms(), &gerr),
                   "graph_replay_finish: " + gerr);
           const dgpp::GlmPickVerdict v0 = picker.verdict(0);
           const dgpp::GlmPickVerdict v1 = picker.verdict(1);
@@ -2076,7 +2089,7 @@ DGPP_TEST(glm_tp_serving_graph_adapter_matches_plain_and_reuses_slot) {
       uint16_t* scratch = nullptr;
       try {
         CollectiveBus& bus = *buses[static_cast<size_t>(r)];
-        GlmBusBoundaryReducer reducer(bus);
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
         GlmDiagnosticModel plain(cfg, dir, max_tokens, 128, &reducer, r,
                                  kWorld, GlmResidency::Streaming,
                                  GlmHeadSharding::VocabSharded);
@@ -2096,7 +2109,7 @@ DGPP_TEST(glm_tp_serving_graph_adapter_matches_plain_and_reuses_slot) {
 
         const auto pick_rows = [&](const std::vector<Candidate>& locals) {
           return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
-                                            60000);
+                                            test_wait_timeout_ms());
         };
         const auto host_pick = [&](const GlmDiagnosticModel::Outputs& out) {
           return pick_rows(dgpp::local_row_maxes(out, 1))[0];
@@ -2243,7 +2256,7 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
       uint16_t* scratch = nullptr;
       try {
         CollectiveBus& bus = *buses[static_cast<size_t>(r)];
-        GlmBusBoundaryReducer reducer(bus);
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
         GlmDiagnosticModel eager(cfg, dir, max_tokens, 256, &reducer, r,
                                  kWorld, GlmResidency::Streaming,
                                  GlmHeadSharding::VocabSharded,
@@ -2260,7 +2273,7 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
 
         const auto pick_rows = [&](const std::vector<Candidate>& locals) {
           return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
-                                            60000);
+                                            test_wait_timeout_ms());
         };
         const auto first_pick = [&](GlmDiagnosticModel& model, int req,
                                     const std::vector<int64_t>& prompt) {
@@ -2278,7 +2291,7 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
 
         dgpp::GlmGraphEngineAdapter engine(
             &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
-            /*pick_timeout_ms=*/60000, /*batch_min_live=*/2);
+            /*pick_timeout_ms=*/test_wait_timeout_ms(), /*batch_min_live=*/2);
         require(engine.decode_batch_capacity() == 4,
                 "MTP graph did not advertise its four fixed slots");
         // The service records every variant at startup; the warm sessions
@@ -2420,7 +2433,7 @@ DGPP_TEST(glm_tp_serving_plain_batched_graph_matches_independent_sessions) {
       uint16_t* scratch = nullptr;
       try {
         CollectiveBus& bus = *buses[static_cast<size_t>(r)];
-        GlmBusBoundaryReducer reducer(bus);
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
         GlmDiagnosticModel plain(cfg, dir, max_tokens, 256, &reducer, r,
                                  kWorld, GlmResidency::Streaming,
                                  GlmHeadSharding::VocabSharded);
@@ -2436,7 +2449,7 @@ DGPP_TEST(glm_tp_serving_plain_batched_graph_matches_independent_sessions) {
         const auto pick = [&](const GlmDiagnosticModel::Outputs& out) {
           return dgpp::bus_greedy_pick_rows(
               bus, r, kWorld, dgpp::local_row_maxes(out, 1), scratch,
-              60000)[0];
+              test_wait_timeout_ms())[0];
         };
 
         const auto scalar_generate = [&](const std::vector<int64_t>& prompt,

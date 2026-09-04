@@ -1226,6 +1226,10 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         // The serving loop reads logits only; the per-layer route traces
         // are 126 D2H nodes per token it would otherwise replay for nobody.
         model.set_decode_route_traces(false);
+        // No D2H mirror nodes either: the decode graph is kernels-only
+        // (glm_check_decode_graph; docs/batched_mtp_graph_stall.md) —
+        // session_graph_collect copies the tail eagerly after each replay.
+        model.set_decode_tail_mirrors(false);
         // The MoE expert-view tables land in their graph slots here, once;
         // the capture below records kernels that read them in place.
         model.session_graph_prepare();

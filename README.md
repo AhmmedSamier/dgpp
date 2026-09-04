@@ -213,10 +213,13 @@ loopback gates now pass with prefetch on at 1 and 32 connections).
 
 All CUDA suites are verified clean under `compute-sanitizer` memcheck (full
 suite every milestone; racecheck and initcheck per-phase on the tests
-exercising new kernel shapes; the loopback worlds need
-`DGPP_TEST_BUS_TIMEOUT_MS=120000 DGPP_TEST_CONSUMER_DEADLINE_S=120` under
-memcheck, whose instrumented kernels outlast the 5 s / 20 s release
-budgets); the sanitizer findings that motivated this
+exercising new kernel shapes). The multi-rank loopback worlds of
+`glm_tp_test` are the exception: their budgets are liftable
+(`DGPP_TEST_BUS_TIMEOUT_MS`, `DGPP_TEST_CONSUMER_DEADLINE_S`,
+`DGPP_TEST_WAIT_TIMEOUT_MS`), but even lifted, the instrumented eager prefill
+outlasts the first collective's kernel deadline (baseline and current alike,
+2026-09-04 record entry), so those worlds report 0 errors and exit on a
+budget rather than completing. The sanitizer findings that motivated this
 (speculated loads past short-circuit guards, shared-memory reuse races
 that pass by scheduling luck, undersized test buffers that made a graph test
 pass vacuously) are pinned in `DESIGN.md` §12.

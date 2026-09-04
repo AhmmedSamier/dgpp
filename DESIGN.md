@@ -2025,8 +2025,9 @@ Sanitizer scope is chosen per phase, deliberately: full-suite memcheck for
 orchestration code (pointer/size bugs — it caught two undersized test
 buffers that made a graph test pass vacuously), targeted racecheck/initcheck
 for new kernel shapes. The loopback worlds under memcheck need their time
-budgets lifted (`DGPP_TEST_BUS_TIMEOUT_MS`, `DGPP_TEST_CONSUMER_DEADLINE_S`;
-the boundary reducer's 60 s wait backstop is still hard-coded) — instrumented
+budgets lifted (`DGPP_TEST_BUS_TIMEOUT_MS`, `DGPP_TEST_CONSUMER_DEADLINE_S`,
+`DGPP_TEST_WAIT_TIMEOUT_MS` — the engine watchdog, the kernel deadline and
+every host-side wait: reducers, picks, replay finishes) — instrumented
 kernels outlast the release budgets by orders of magnitude, on the baseline
 as on any change. Instrumenting vendor kernels (cuBLASLt's cutlass
 implementations dominate long benchmarks) buys no coverage of our code and

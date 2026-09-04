@@ -120,9 +120,11 @@ Why the evidence looked the way it did:
 - `apps/graph_queue_repro.cu` (target `graph_queue_repro`): the synthetic
   two-rank model above, kept as the diagnostic for this hazard class.
 - `tests/cuda/glm_tp_test.cpp`: `DGPP_TEST_CONSUMER_DEADLINE_S` overrides
-  the loopback worlds' 20 s kernel-side collective deadline the way
-  `DGPP_TEST_BUS_TIMEOUT_MS` overrides the engine's — compute-sanitizer
-  memcheck slows the instrumented prefill past 20 s of a peer's spin.
+  the loopback worlds' 20 s kernel-side collective deadline and
+  `DGPP_TEST_WAIT_TIMEOUT_MS` every host-side wait (boundary reducers,
+  picks, replay finishes, the adapter's pick timeout; 60 s in release) the
+  way `DGPP_TEST_BUS_TIMEOUT_MS` overrides the engine's — compute-sanitizer
+  memcheck slows the instrumented worlds past every release budget.
 
 The graphs are unchanged in node count (a kernel per replaced node) and the
 numerics are untouched: the fixture transcripts and cross-rank parity gates
@@ -159,21 +161,31 @@ compute-sanitizer memcheck on the MTP and the world-4 device-pick tests:
 zero memcheck errors in every run — the full-instrumentation runs on both
 tests, targeted runs instrumenting only the bus, upload, select, pick, spec
 and prefetch kernels (the new `upload_words_kernel` and
-`select_counter_reset_kernel` included), and the unmodified baseline
-commit. Every run still exits nonzero on a loopback harness time budget
-that instrumentation outlasts: the 5 s engine watchdog and 20 s kernel
-deadline (both env-overridable now) and then `GlmBusBoundaryReducer`'s
-hard-coded 60 s wait backstop (a 235–462 s instrumented run). The baseline
-commit fails the same way at the same first budget, so this is a harness
-limitation under memcheck, not a change in behavior; making the loopback
-suite memcheck-runnable end to end needs that 60 s backstop (and the picks'
-60 s) lifted the same way.
+`select_counter_reset_kernel` included), the unmodified baseline commit,
+and `graph_queue_repro`, which completes under memcheck at 32 connections
+(0.6 s for three replays) but hangs under it at one connection (no replay in
+8 minutes) — the tool's kernel scheduling does starve a spinning peer once
+the streams share a single queue, which is one more reason the worlds are
+run at 32. The loopback worlds
+themselves still exit nonzero under memcheck with every budget lifted
+(`DGPP_TEST_BUS_TIMEOUT_MS=120000 DGPP_TEST_CONSUMER_DEADLINE_S=120
+DGPP_TEST_WAIT_TIMEOUT_MS=600000` — the last knob now covers the boundary
+reducers, picks, replay finishes and the adapter's pick timeout): the first
+eager prefill collective exits on its 120 s kernel deadline after 233 s
+(world 2) / 462 s (world 4) of instrumented execution, identically on the
+baseline commit at its 20 s deadline. A pre-existing harness limitation,
+not a change in behavior; the next step, if memcheck of these worlds is
+wanted end to end, is excluding the loader/dequant kernels from
+instrumentation to see what the instrumented prefill spends >120 s on.
 
 Numerics: every gate above compares transcripts against independent eager
-sessions and across ranks bitwise; all pass unchanged. Not measured here:
-fabric decode latency (the change replaces three memset/memcpy nodes per
-DSA layer and step with 32-thread kernels; a fabric run should confirm the
-per-step cost is in the noise).
+sessions and across ranks bitwise; all pass unchanged.
+
+Fabric (2026-09-04, TP=4, the README's 300-step Roman Republic recipe, the
+record entry of that date): eager 36.07 ms/step (ledger 36.4), T=1 graph
+31.67 (record 31.3), MTP graph 42.44 per step (record 42.36–42.42); plain vs
+both graphs IDENTICAL over 300 steps with one generated-ids md5 on all four
+ranks. The kernels-only graph costs nothing measurable per step.
 
 ### What the handoff got right and wrong
 
