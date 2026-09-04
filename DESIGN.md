@@ -2395,9 +2395,15 @@ artifact hashes are in the 2026-09-03 Phase-2 entries of
   (`drained()`); a peer follows the journal to the stop record even on its
   own signal (a second one forces). The bus never comes down under a
   collective on either side.
-- *Grow-on-demand admission:* reserve to a window, grow at tick top,
-  shed the youngest deterministically when growth fails — a pure function
-  of (meters, positions), so the journal keeps it identical.
+- *Grow-on-demand admission (PLAN 6d):* BUILT 2026-09-04, opt-in
+  (`--admission grow`) — `AdmissionPolicy` on the scheduler: reserve
+  prompt + min(max_steps, window) at admission, grow at tick top before
+  any engine op through the pool's transactional `ensure_request_blocks`
+  (never during a replay), shed the youngest at exhaustion (Done /
+  kPoolExhausted → finish_reason length). A pure function of scheduler
+  state: rank-identical by construction, the growth in the op stream
+  (`W`), the policy on the warm record. Preemption by recompute — the
+  parity answer, never a truncated reply — waits on a fast prefill.
 - *Tool calls and reasoning (PLAN 6f, 6g), `response_format` (6h), typed
   arguments (6i):* BUILT 2026-09-04 — the as-built paragraph above and
   §10's constrained decoding and JSON-constrained output. Three things

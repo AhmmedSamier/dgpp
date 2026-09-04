@@ -131,6 +131,10 @@ class SchedulerEngine {
       const std::vector<int>& reqs);
   // Retires the slot: blocks return to the pool; the slot may reopen.
   virtual void close(int req) = 0;
+  // The most tokens one step() can write into the slot's KV (1 for plain
+  // decode; T for a speculative engine whose verify writes T rows). The
+  // grow-on-demand policy sizes each reservation's headroom by it.
+  virtual int max_tokens_per_step() const { return 1; }
 
   // ---- sampling (M6 6b) ---------------------------------------------------
   // An engine that can draw stochastically advertises it; the scheduler
@@ -221,11 +225,39 @@ struct QueueFullError : std::runtime_error {
 // Defined after Scheduler (it carries Scheduler::Result by value).
 class SchedulerObserver;
 
+// The admission policy (M6 6d). Full-reserve pins blocks_for(prompt +
+// max_steps) at admission — a request never stalls mid-generation, at the
+// cost of blocks held for tokens an early EOS never writes. Grow-on-demand
+// reserves blocks_for(prompt + min(max_steps, window)) at admission and
+// grows the reservation at tick top, BEFORE any engine op, whenever the
+// next step would write past it — by `window_tokens` at a time, or by the
+// minimum when the pool is short — and when even the minimum does not fit,
+// SHEDS the youngest active request (retired Done / kPoolExhausted, the
+// service's finish_reason "length") until it does; a request with no
+// younger peer sheds itself. Every decision is a pure function of the
+// scheduler's state, so the journal keeps it identical on every rank. The
+// trade is explicit and the policy opt-in: optimistic admission for
+// early-EOS workloads against a truncated answer for the youngest when
+// everyone runs long (preemption by recompute — vLLM's answer — waits on a
+// prefill fast enough to re-read a partial answer).
+struct AdmissionPolicy {
+  enum class Mode : int { kFullReserve = 0, kGrowOnDemand = 1 };
+  Mode mode = Mode::kFullReserve;
+  int window_tokens = 256;  // grow: the initial headroom and the growth step
+  bool operator==(const AdmissionPolicy& o) const {
+    return mode == o.mode && window_tokens == o.window_tokens;
+  }
+  bool operator!=(const AdmissionPolicy& o) const { return !(*this == o); }
+  static const char* name(Mode m) {
+    return m == Mode::kGrowOnDemand ? "grow" : "full";
+  }
+};
+
 class Scheduler {
  public:
   struct Result {
     enum class Status : int { kQueued, kActive, kDone, kCancelled };
-    enum class Reason : int { kNone, kEos, kSteps, kCancelled };
+    enum class Reason : int { kNone, kEos, kSteps, kCancelled, kPoolExhausted };
     Status status = Status::kQueued;
     Reason reason = Reason::kNone;
     int slot = -1;          // engine slot used; -1 while queued
@@ -241,6 +273,8 @@ class Scheduler {
     int64_t pool_blocks_total = 0;
     int64_t pool_blocks_in_use = 0;
     int64_t tokens_generated = 0;  // cumulative across all requests
+    int64_t reservations_grown = 0;  // grow-on-demand: growth events
+    int64_t requests_shed_pool = 0;  // grow-on-demand: shed at exhaustion
   };
 
   // `eos_token_ids` — the config's end-of-sequence set (empty disables
@@ -248,7 +282,8 @@ class Scheduler {
   // queue's bound (0 = unbounded, the manifest default; a service sets
   // it so a full queue sheds load with a 503 instead of eating memory).
   Scheduler(SchedulerEngine* engine, std::vector<int64_t> eos_token_ids,
-            int queue_limit = 0);
+            int queue_limit = 0, AdmissionPolicy policy = AdmissionPolicy{});
+  const AdmissionPolicy& admission_policy() const { return policy_; }
 
   // Arrival order = FCFS priority. Throws on an empty/duplicate id, a
   // nonpositive max_steps, or a cancel_after outside [1, max_steps] —
@@ -306,10 +341,20 @@ class Scheduler {
     std::vector<int64_t> generated;
     bool cancel_requested = false;  // external cancel, applied at the
                                     // next tick's sweep
+    int64_t reserved_tokens = 0;    // the slot's current reservation
   };
 
   bool is_eos(int32_t token) const;
+  // The reservation an admission pins: the lifetime under full-reserve,
+  // prompt + min(max_steps, window) under grow-on-demand.
+  int64_t initial_reserve_tokens(const SchedulerRequest& spec) const;
   int64_t reserve_blocks(const Request& r) const;
+  // Grow-on-demand's tick-top pass (after the cancel sweep, before any
+  // admission or step): every active request whose next step would write
+  // past its reservation grows it, shedding the youngest when the pool
+  // cannot cover even the minimum.
+  void grow_reservations();
+  int youngest_active_after(int arrival) const;
   int free_slot() const;
   // The oldest queued request whose reservation fits a free slot (no
   // head-of-line blocking), or -1.
@@ -346,6 +391,9 @@ class Scheduler {
   int queue_limit_ = 0;            // 0 = unbounded
   int decode_batch_capacity_ = 1;  // fixed engine pass width
   int64_t tokens_generated_ = 0;   // cumulative on_token counter
+  AdmissionPolicy policy_;
+  int64_t grows_ = 0;              // growth events (meters)
+  int64_t pool_sheds_ = 0;         // requests shed at exhaustion (meters)
 };
 
 // Streaming lifecycle events for the service (SSE). Fired inline on the
@@ -366,9 +414,15 @@ class SchedulerObserver {
     (void)logprobs;
   }
   // The request's terminal state, exactly once (EOS, steps cap,
-  // scripted or external cancellation all land here).
+  // scripted or external cancellation, pool exhaustion all land here).
   virtual void on_retire(const std::string& id,
                          const Scheduler::Result& result) = 0;
+  // Grow-on-demand grew the request's reservation to `reserved_tokens`
+  // (the op stream records it: a growth decision is rank-identical state).
+  virtual void on_grow(const std::string& id, int64_t reserved_tokens) {
+    (void)id;
+    (void)reserved_tokens;
+  }
 };
 
 }  // namespace dgpp::glm

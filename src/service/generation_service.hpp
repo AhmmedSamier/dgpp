@@ -116,6 +116,7 @@ struct ServiceConfig {
   std::string model_id;
   int default_max_tokens = 256;  // when the request omits max_tokens
   int queue_limit = 64;          // admission bound; beyond → 503
+  dgpp::glm::AdmissionPolicy admission;  // full-reserve unless told otherwise
   // The sampling defaults every omitted request field takes: the
   // checkpoint's generation_config.json with the process's overrides
   // applied (DESIGN §10's HF contract). temperature 0 is greedy. When the
@@ -198,7 +199,8 @@ class GenerationService : public HttpHandler,
   struct Stats {
     uint64_t requests_total = 0;
     uint64_t requests_shed = 0;      // 503s at the door or at admission
-    uint64_t requests_cancelled = 0;  // client disconnects
+    uint64_t requests_cancelled = 0;  // client disconnects (and the stop)
+    uint64_t requests_shed_pool = 0;  // grow-on-demand: cut short at exhaustion
     uint64_t tokens_out = 0;
     uint64_t rejects_bad = 0;        // 400-class refusals
     uint64_t tool_calls_out = 0;     // parsed tool calls
@@ -319,6 +321,11 @@ class GenerationService : public HttpHandler,
   std::string legacy_logprobs(const StreamRecord& r) const;
   void on_retire(const std::string& id,
                  const dgpp::glm::Scheduler::Result& result) override;
+  // Grow-on-demand's growth events (M6 6d) ride to the audit observer:
+  // they are rank-identical scheduler state, so the op streams carry them.
+  void on_grow(const std::string& id, int64_t reserved_tokens) override {
+    if (audit_) audit_->on_grow(id, reserved_tokens);
+  }
 
   // idle()'s record pump: flushes deltas, finishes done records.
   void pump_records();

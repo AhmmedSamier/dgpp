@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission (6d) remains |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill re-measurement remains |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -99,10 +99,10 @@ Records live in `benchmarks/results/`; the M5/M6/M8 trail is
 
 Suggested order for what remains, each item's design in its section:
 
-1. M6: grow-on-demand admission (sampling on the bus, tool calls /
-   `reasoning_content`, constrained decoding, `response_format`, typed
-   arguments and drain-on-stop landed 2026-09-04); the prefill behind
-   the time to first token
+1. M6: the prefill behind the time to first token (sampling on the bus,
+   tool calls / `reasoning_content`, constrained decoding,
+   `response_format`, typed arguments, drain-on-stop and grow-on-demand
+   admission all landed 2026-09-04)
    (~30 ms per prompt token — first re-measure it: phase 2's m ≤ 8 GEMV
    routing changed the path of 5–8-row prefill chunks and per-expert
    prefill GEMMs with 5–8 routed tokens, unmeasured).
@@ -1262,14 +1262,47 @@ released with no errors; the rigs now stop in the app's order and can slow
 the engine to a human pace); `scripts/serve_stop_check.sh` on the four
 nodes (the record's tenth 2026-09-04 entry).
 
-**6d. Grow-on-demand admission.** Full-reserve over-reserves when a
-request EOSes early. Evolution: reserve `blocks_for(prompt + min(max_steps,
-window))`, grow at a tick boundary when a request's next block is needed,
-and SHED (retire with `finish_reason: "length"` and a `pool_exhausted`
-note) the youngest request when growth fails — deterministically on every
-rank, because the growth decision is a pure function of (meters, request
-positions), which the journal already keeps identical. Admission forecast
-(`--sched-plan`) reports both policies.
+**6d. Grow-on-demand admission — BUILT 2026-09-04, opt-in.** Full-reserve
+over-reserves when a request EOSes early. Built as `AdmissionPolicy` on
+the scheduler (`Scheduler(engine, eos, queue_limit, policy)`): grow
+reserves `blocks_for(prompt + min(max_steps, window))` at admission (the
+window never below the engine's step width plus one — `max_tokens_per_step`,
+2 under MTP — so a step never writes past a reservation), and at tick top,
+after the cancel sweep and before any admission or engine op, grows every
+active request whose next step would write past its reservation
+(`prompt + steps_done + width`, by a window at a time or the minimum when
+the pool is short) through the model's transactional
+`ensure_request_blocks` (in place, an H2D of the new table entries between
+replays — the graph engines never grow during one); when even the minimum
+does not fit it SHEDS the youngest active request (Done / `kPoolExhausted`,
+the service's `finish_reason: "length"`, a WARN naming both requests, the
+metrics' `requests_shed_pool`), a request with no younger peer shedding
+itself. Every decision is a pure function of scheduler state, so it is
+rank-identical by construction; the observer's `on_grow` puts each growth
+in the op stream (`W id tokens`) so the four-way md5 covers it, and the
+warm record carries rank 0's policy to the peers (a peer's own flags yield
+to it, with a warning). `glm_serve --admission full|grow
+--admission-window N` (default full, 256); `/v1/metrics` reports
+`admission`, `reservations_grown`, `requests_shed_pool`; the door check
+(prompt + max_tokens against the whole pool) stays; `glm_gen_check
+--sched-plan` forecasts both policies and its manifest runs take the
+flags. OPT-IN, deliberately: the trade is optimistic admission for
+early-EOS workloads against a truncated answer for the youngest when
+everyone runs long. vLLM's answer to exhaustion is preemption by recompute
+(the victim is re-prefilled from prompt + generated and continues, never
+truncated); at ~30 ms per prompt token that recompute is a many-second
+stall here, so it waits on the prefill work — the follow-on that would make
+grow the default. Gates: `glm_scheduler_test`'s two grow gates (both
+admitted at once where full-reserve serializes, growth at tick top with
+monotone targets inside the lifetime, the youngest shed at exhaustion and
+the oldest completing, two runs bitwise identical, a lone request shedding
+itself, the window clamp, a zero window refused), `glm_serve_test`'s grow
+gate (two 300-token requests against a 100-block pool: both admitted, the
+younger cut short with `length`, the metrics), `glm_fabric_serve_test`
+running every scenario under grow with a one-block window (the policy
+riding the warm record to the peers, growth in every rank's identical op
+stream); `scripts/serve_admission_check.sh` on the four nodes (the
+record's eleventh 2026-09-04 entry).
 
 **6e. Batched decode** — subsumed by 6a phase 2.
 

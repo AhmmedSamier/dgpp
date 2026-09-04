@@ -387,6 +387,10 @@ SchedSizing sched_sizing(const GlmTextConfig& cfg, int world,
   return z;
 }
 
+// The admission policy for the manifest runs and the forecast (M6 6d):
+// --admission full|grow, --admission-window N.
+dgpp::glm::AdmissionPolicy g_admission;
+
 // The memory receipt: EXACTLY what the model pre-allocates for this knob
 // combination, by region, plus the per-request reserve math. Runs with or
 // without a GPU (--sched-plan uses it before any device work).
@@ -459,6 +463,34 @@ void print_memory_receipt(const GlmTextConfig& cfg, int world,
         "sched plan: {} of {} requests admitted at start ({} blocks "
         "reserved of {}), {} deferred until peers retire",
         admitted, reqs.size(), held, z.blocks_total, deferred);
+    // The same forecast under grow-on-demand: the initial reservation is
+    // prompt + min(steps, window) (a plain decode's width plus one token
+    // at least); growth and the shed rule take over at tick top.
+    const int64_t window = std::max<int64_t>(g_admission.window_tokens, 2);
+    int64_t held_grow = 0;
+    int used_grow = 0, admitted_grow = 0, deferred_grow = 0;
+    for (const auto& r : reqs) {
+      const int64_t reserve = model_blocks_for(
+          static_cast<int64_t>(r.prompt.size()) +
+              std::min<int64_t>(r.max_steps, window),
+          z.block_tokens);
+      if (used_grow < max_requests && held_grow + reserve <= z.blocks_total) {
+        held_grow += reserve;
+        ++used_grow;
+        ++admitted_grow;
+      } else {
+        ++deferred_grow;
+      }
+    }
+    DGPP_LOG_INFO(
+        "sched plan (grow-on-demand, window {}): {} of {} requests admitted "
+        "at start ({} blocks reserved of {}), {} deferred; reservations grow "
+        "at tick top and the youngest sheds (finish length) at exhaustion{}",
+        window, admitted_grow, reqs.size(), held_grow, z.blocks_total,
+        deferred_grow,
+        g_admission.mode == dgpp::glm::AdmissionPolicy::Mode::kGrowOnDemand
+            ? " — THIS RUN's policy"
+            : " — not this run's policy (--admission grow selects it)");
   }
 }
 
@@ -574,7 +606,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
     // inside the closure — no per-token allocation).
     GenEngineAdapter engine(&model, max_requests, dgpp::make_w1_pick(vocab),
                             dgpp::make_w1_sample(vocab));
-    dgpp::glm::Scheduler sched(&engine, eos);
+    dgpp::glm::Scheduler sched(&engine, eos, 0, g_admission);
     // Submit COPIES: the manifest entries stay intact for the audit
     // trail below (log_results reads spec.id/spec.prompt AFTER the run —
     // moving into the scheduler would leave husks there).
@@ -633,7 +665,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
                             dgpp::make_fabric_sample(
                                 bus.get(), rank, world, sample_prefix.data,
                                 sample_gather.data, vocab));
-    dgpp::glm::Scheduler sched(&engine, eos);
+    dgpp::glm::Scheduler sched(&engine, eos, 0, g_admission);
     // Submit COPIES (the manifest entries stay intact for the audit
     // trail below — log_results reads spec.id/spec.prompt after the run).
     for (const auto& r : requests) {
@@ -1591,7 +1623,8 @@ int main(int argc, char** argv) {
       "   (--mtp: the eager sampled speculator; not with --mtp\n"
       "    --decode-graph, --teacher-file or --engine reforward)\n"
       "scheduler mode (--requests): [--max-concurrency N] [--kv-capacity N]\n"
-      "  [--sched-plan]\n";
+      "  [--sched-plan]\n"
+      "  [--admission full|grow] [--admission-window N (256)]  (M6 6d)\n";
 
   std::string config_path, ckpt, peer, prompt_text, text_prompt, out_prefix =
                                                     "glm_gen",
@@ -1646,6 +1679,22 @@ int main(int argc, char** argv) {
     else if (a == "--max-concurrency") max_concurrency = std::stoi(next());
     else if (a == "--kv-capacity") kv_capacity = std::stoll(next());
     else if (a == "--sched-plan") sched_plan = true;
+    else if (a == "--admission") {
+      const std::string m = next();
+      if (m != "full" && m != "grow") {
+        DGPP_LOG_ERROR("--admission must be full or grow");
+        return 1;
+      }
+      g_admission.mode = m == "grow"
+                             ? dgpp::glm::AdmissionPolicy::Mode::kGrowOnDemand
+                             : dgpp::glm::AdmissionPolicy::Mode::kFullReserve;
+    } else if (a == "--admission-window") {
+      g_admission.window_tokens = std::stoi(next());
+      if (g_admission.window_tokens < 1) {
+        DGPP_LOG_ERROR("--admission-window must be at least 1");
+        return 1;
+      }
+    }
     else if (a == "--rendezvous-timeout-ms") rendezvous_timeout_ms = std::stoi(next());
     else if (a == "--out") out_prefix = next();
     else if (a == "--sample") sample = true;

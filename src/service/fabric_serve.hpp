@@ -71,6 +71,7 @@ class OpStreamObserver final : public dgpp::glm::SchedulerObserver {
                 int steps_done) override;
   void on_retire(const std::string& id,
                  const dgpp::glm::Scheduler::Result& result) override;
+  void on_grow(const std::string& id, int64_t reserved_tokens) override;
   std::string text() const;
 
  private:
@@ -82,11 +83,16 @@ class OpStreamObserver final : public dgpp::glm::SchedulerObserver {
 
 std::string encode_journal_tick(const GenerationService::PassEvents& events);
 std::string encode_journal_stop();
-std::string encode_journal_warm();
+// The warm record carries rank 0's admission policy (M6 6d): every rank's
+// scheduler must run the same one, and the peers take it from here.
+std::string encode_journal_warm(
+    const dgpp::glm::AdmissionPolicy& policy = dgpp::glm::AdmissionPolicy{});
 
 struct JournalRecord {
   bool stop = false;
   bool warm = false;
+  bool has_admission = false;  // warm: the policy rode along
+  dgpp::glm::AdmissionPolicy admission;
   std::vector<dgpp::glm::SchedulerRequest> submits;
   std::vector<std::string> cancels;
 };
@@ -151,7 +157,8 @@ class JournalReader {
 // record is anything else: rank 0 ticked before warming, a protocol
 // order this design says cannot happen.
 bool wait_journal_warm(JournalReader* reader,
-                       const std::function<bool()>& should_stop);
+                       const std::function<bool()>& should_stop,
+                       dgpp::glm::AdmissionPolicy* policy = nullptr);
 
 // The peer serving loop: apply each record, then tick — the exact
 // mirror of rank 0's engine passes (§11). Returns on the stop record,

@@ -170,9 +170,13 @@ class FakeEngine : public SchedulerEngine {
     require(live_.count(req) != 0,
             "fake: reserve on unopened slot " + std::to_string(req));
     Live& live = live_[req];
-    require(live.held_blocks == 0, "fake: slot reserved twice");
-    require(tokens == live.prompt_tokens + live.episode.max_steps,
-            "fake: scheduler reservation token count drifted");
+    // Full-reserve pins the lifetime once; grow-on-demand (M6 6d) starts
+    // inside it and grows monotonically, never past it.
+    require(tokens >= live.prompt_tokens + 1 &&
+                tokens <= live.prompt_tokens + live.episode.max_steps,
+            "fake: reservation outside [prompt + 1, prompt + max_steps]");
+    require(blocks_for_tokens(tokens) >= live.held_blocks,
+            "fake: a reservation shrank");
     live.held_blocks = blocks_for_tokens(tokens);
   }
 
@@ -876,6 +880,131 @@ DGPP_TEST(scheduler_meters_trackQueueActiveTerminalAndTokens) {
   require(end.queued == 0 && end.active == 0 && end.terminal == 2 &&
               end.tokens_generated == 5 && end.pool_blocks_in_use == 0,
           "post-run meters: both terminal, 5 tokens total, pool drained");
+}
+
+// Grow-on-demand (M6 6d): the observer's growth events.
+struct GrowLog final : dgpp::glm::SchedulerObserver {
+  std::vector<std::string> grows, retires;
+  void on_token(const std::string&, int64_t, int) override {}
+  void on_retire(const std::string& id, const Scheduler::Result& r) override {
+    retires.push_back(id + ":" + std::to_string(static_cast<int>(r.reason)) + ":" +
+                      std::to_string(r.steps_done));
+  }
+  void on_grow(const std::string& id, int64_t tokens) override {
+    grows.push_back(id + ":" + std::to_string(tokens));
+  }
+};
+
+std::vector<int32_t> long_script(int n) {
+  std::vector<int32_t> t;
+  for (int i = 0; i < n; ++i) t.push_back(3 + (i % 5));  // never kEos
+  return t;
+}
+
+DGPP_TEST(scheduler_growOnDemand_admitsEarlyGrowsAtTickTopAndShedsTheYoungest) {
+  // Pool 6 blocks of 4 tokens; two requests of prompt 4 + 12 steps (16
+  // tokens = 4 blocks each). Full-reserve admits one at a time. Grow with
+  // a 4-token window reserves 8 tokens = 2 blocks each: both admitted at
+  // once; each grows at tick top when its next step would write past its
+  // reservation; when the pool cannot cover even the minimum the YOUNGEST
+  // is shed (Done / kPoolExhausted) and the oldest completes its 12 steps.
+  // Every decision is a function of scheduler state alone: two identical
+  // runs produce identical engine op streams and observer logs.
+  using Mode = dgpp::glm::AdmissionPolicy::Mode;
+  const auto run = [](Mode mode, std::string* ops, GrowLog* log) {
+    FakeEngine engine(2, 6, 4);
+    engine.arm(0, long_script(12), 12);
+    engine.arm(mode == Mode::kGrowOnDemand ? 1 : 0, long_script(12), 12);
+    dgpp::glm::AdmissionPolicy policy;
+    policy.mode = mode;
+    policy.window_tokens = 4;
+    Scheduler sched(&engine, {kEos}, 0, policy);
+    sched.set_observer(log);
+    sched.submit(make_request("a", 4, 12));
+    sched.submit(make_request("b", 4, 12));
+    sched.run_to_completion();
+    *ops = engine.op_stream();
+    return std::make_pair(sched.results(), sched.meters());
+  };
+  std::string ops1, ops2, ops_full;
+  GrowLog log1, log2, log_full;
+  const auto [res1, m1] = run(Mode::kGrowOnDemand, &ops1, &log1);
+  const auto [res2, m2] = run(Mode::kGrowOnDemand, &ops2, &log2);
+  const auto [resf, mf] = run(Mode::kFullReserve, &ops_full, &log_full);
+  // Both admitted before either retired (P:1 precedes C:0).
+  require(ops1.find("P:1") != std::string::npos &&
+              ops1.find("P:1") < ops1.find("C:0"),
+          "grow: b admitted while a is live: " + ops1);
+  require(ops_full.find("C:0") < ops_full.find("P:0:") + 1 ||
+              ops_full.find("C:0") < ops_full.rfind("P:0"),
+          "full: b admitted only after a retired: " + ops_full);
+  require(res1[0].status == Scheduler::Result::Status::kDone &&
+              res1[0].reason == Scheduler::Result::Reason::kSteps &&
+              res1[0].steps_done == 12,
+          "grow: the oldest completes its 12 steps");
+  require(res1[1].status == Scheduler::Result::Status::kDone &&
+              res1[1].reason == Scheduler::Result::Reason::kPoolExhausted &&
+              res1[1].steps_done < 12 && res1[1].steps_done > 0,
+          "grow: the youngest shed at exhaustion after some tokens, got " +
+              std::to_string(res1[1].steps_done));
+  require(!log1.grows.empty() && m1.reservations_grown ==
+                                     static_cast<int64_t>(log1.grows.size()),
+          "grow: growth events observed and metered");
+  require(m1.requests_shed_pool == 1 && m1.pool_blocks_in_use == 0,
+          "grow: one shed, the pool empty at the end");
+  require(resf[0].reason == Scheduler::Result::Reason::kSteps &&
+              resf[1].reason == Scheduler::Result::Reason::kSteps &&
+              log_full.grows.empty() && mf.requests_shed_pool == 0,
+          "full-reserve: both complete, nothing grows or sheds");
+  // Determinism: the same manifest, the same streams.
+  require(ops1 == ops2 && log1.grows == log2.grows && log1.retires == log2.retires,
+          "grow: two runs are identical");
+  // The growth targets are monotone per request and never exceed the
+  // lifetime (16 tokens); the first grow lands before the 5th step (the
+  // 8-token reservation covers prompt 4 + 3 written tokens + 1).
+  int64_t last_a = 0;
+  for (const std::string& g : log1.grows) {
+    if (g.rfind("a:", 0) != 0) continue;
+    const int64_t t = std::stoll(g.substr(2));
+    require(t > last_a && t <= 16, "grow: a's reservation grows monotonically within its lifetime");
+    last_a = t;
+  }
+  require(last_a == 16, "grow: a reached its full reservation");
+}
+
+DGPP_TEST(scheduler_growOnDemand_aLoneRequestShedsItselfAndAWindowNeverBelowTheStepWidth) {
+  // A single request that can never fit its lifetime is admitted under
+  // grow (the door check is the service's) and sheds ITSELF when the pool
+  // is spent: Done / kPoolExhausted with the tokens it got. And the
+  // window is clamped to the engine's step width plus one, so a step
+  // never writes past a reservation.
+  FakeEngine engine(1, 3, 4);  // 12 tokens of pool
+  engine.arm(0, long_script(40), 40);
+  dgpp::glm::AdmissionPolicy policy;
+  policy.mode = dgpp::glm::AdmissionPolicy::Mode::kGrowOnDemand;
+  policy.window_tokens = 1;  // below the width + 1: clamped to 2
+  Scheduler sched(&engine, {kEos}, 0, policy);
+  sched.submit(make_request("solo", 4, 40));
+  sched.run_to_completion();
+  const Scheduler::Result& r = sched.results()[0];
+  require(r.status == Scheduler::Result::Status::kDone &&
+              r.reason == Scheduler::Result::Reason::kPoolExhausted,
+          "solo: shed itself at exhaustion");
+  // 12 tokens of pool: prompt 4 + the generated tokens the KV holds; the
+  // pending pick is the last one — at most 9 tokens generated.
+  require(r.steps_done >= 7 && r.steps_done <= 9,
+          "solo: generated what the pool allowed, got " + std::to_string(r.steps_done));
+  require(sched.meters().requests_shed_pool == 1 && sched.meters().pool_blocks_in_use == 0,
+          "solo: metered and released");
+  bool threw = false;
+  try {
+    dgpp::glm::AdmissionPolicy bad;
+    bad.window_tokens = 0;
+    Scheduler s(&engine, {kEos}, 0, bad);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "a zero window is refused");
 }
 
 }  // namespace

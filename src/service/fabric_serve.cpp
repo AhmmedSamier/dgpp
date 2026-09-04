@@ -33,6 +33,11 @@ void OpStreamObserver::on_retire(const std::string& id,
            " " + std::to_string(result.steps_done) + "\n";
 }
 
+void OpStreamObserver::on_grow(const std::string& id, int64_t reserved_tokens) {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  text_ += "W " + id + " " + std::to_string(reserved_tokens) + "\n";
+}
+
 std::string OpStreamObserver::text() const {
   const std::lock_guard<std::mutex> lock(mutex_);
   return text_;
@@ -187,7 +192,11 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
 }
 
 std::string encode_journal_stop() { return "{\"op\":\"stop\"}"; }
-std::string encode_journal_warm() { return "{\"op\":\"warm\"}"; }
+std::string encode_journal_warm(const dgpp::glm::AdmissionPolicy& policy) {
+  return "{\"op\":\"warm\",\"adm\":" +
+         std::to_string(static_cast<int>(policy.mode)) +
+         ",\"win\":" + std::to_string(policy.window_tokens) + "}";
+}
 
 namespace {
 
@@ -255,6 +264,16 @@ JournalRecord decode_journal_line(std::string_view line) {
   }
   if (op == "warm") {
     rec.warm = true;
+    if (const dgpp::minijson::Value* adm = v.find("adm")) {
+      const dgpp::minijson::Value& win = field(v, "win", "warm");
+      if (!adm->is_number() || !win.is_number() || adm->as_int() < 0 ||
+          adm->as_int() > 1 || win.as_int() < 1)
+        throw std::runtime_error("journal: warm record with a bad admission policy");
+      rec.has_admission = true;
+      rec.admission.mode =
+          static_cast<dgpp::glm::AdmissionPolicy::Mode>(adm->as_int());
+      rec.admission.window_tokens = static_cast<int>(win.as_int());
+    }
     return rec;
   }
   if (op != "tick")
@@ -506,7 +525,8 @@ bool JournalReader::read_line(const std::function<bool()>& should_stop,
 }
 
 bool wait_journal_warm(JournalReader* reader,
-                       const std::function<bool()>& should_stop) {
+                       const std::function<bool()>& should_stop,
+                       dgpp::glm::AdmissionPolicy* policy) {
   std::string line;
   if (!reader->read_line(should_stop, &line)) {
     DGPP_LOG_INFO("journal: rank 0's stream ended before the warm record — "
@@ -522,6 +542,7 @@ bool wait_journal_warm(JournalReader* reader,
     throw std::runtime_error(
         "journal: rank 0 ticked before the warm record — protocol order "
         "violated (§11); fabric emergency");
+  if (policy != nullptr && rec.has_admission) *policy = rec.admission;
   return true;
 }
 

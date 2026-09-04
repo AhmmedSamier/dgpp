@@ -390,16 +390,16 @@ struct PeerRig {
   static constexpr int kQueue = 8;  // rank 0's ServiceConfig limit —
                                     // the identity is constructive
   FakeEngine engine{kSlots, 100, 4};
-  dgpp::glm::Scheduler sched;
+  // Constructed after the warm record: rank 0's admission policy rides it
+  // (M6 6d), exactly as glm_serve's peer does.
+  std::unique_ptr<dgpp::glm::Scheduler> sched;
   dgpp::service::OpStreamObserver oplog;
   std::unique_ptr<dgpp::service::JournalReader> reader;
   std::thread thread;
   std::string error;  // empty = the peer never complained
   std::atomic<bool> warmed{false};  // held at and released by the warm record
 
-  explicit PeerRig(uint16_t journal_port, const std::atomic<bool>& stop_flag)
-      : sched(&engine, {kFakeEos}, kQueue) {
-    sched.set_observer(&oplog);
+  explicit PeerRig(uint16_t journal_port, const std::atomic<bool>& stop_flag) {
     thread = std::thread([this, journal_port, &stop_flag] {
       try {
         // Connect BEFORE the loop: rank 0's accept_peers is waiting
@@ -410,12 +410,17 @@ struct PeerRig {
         // The production peer holds here for the graph engine's warm
         // capture start signal; the rig holds the same way so the first
         // record's order (warm, then ticks) is pinned end to end.
+        dgpp::glm::AdmissionPolicy policy;
         if (!dgpp::service::wait_journal_warm(
-                reader.get(), [&stop_flag] { return stop_flag.load(); }))
+                reader.get(), [&stop_flag] { return stop_flag.load(); },
+                &policy))
           return;
+        sched = std::make_unique<dgpp::glm::Scheduler>(&engine, std::vector<int64_t>{kFakeEos},
+                                                       kQueue, policy);
+        sched->set_observer(&oplog);
         warmed.store(true);
         dgpp::service::run_journal_peer(
-            &sched, reader.get(), [&stop_flag] { return stop_flag.load(); });
+            sched.get(), reader.get(), [&stop_flag] { return stop_flag.load(); });
       } catch (const std::exception& e) {
         error = e.what();
       }
@@ -450,6 +455,10 @@ struct FabricRig {
           c.model_id = "glm-5.3-flash-fp8";
           c.default_max_tokens = 8;
           c.queue_limit = 8;
+          // Grow-on-demand (M6 6d) for every scenario: a one-block window (the
+          // fake's blocks are 4 tokens) so each request grows several times.
+          c.admission.mode = dgpp::glm::AdmissionPolicy::Mode::kGrowOnDemand;
+          c.admission.window_tokens = 4;
           return c;
         }()),
         service(cfg, &engine, &frontend, {kFakeEos}),
@@ -463,7 +472,7 @@ struct FabricRig {
     journal.accept_peers(kWorld, 5000);
     // The warm record precedes every tick (glm_serve broadcasts it
     // before its warm capture); the peers are holding for it.
-    journal.broadcast(dgpp::service::encode_journal_warm());
+    journal.broadcast(dgpp::service::encode_journal_warm(cfg.admission));
     http_loop = std::thread([this] { http.serve(); });
     engine_loop = std::thread([this] {
       const auto pass = [this] {
@@ -762,6 +771,11 @@ int main() {
       FabricRig rig;
       test_non_stream_and_identity(rig);
       test_stream_lifecycle(rig);
+      // Grow-on-demand rode the warm record to the peers and every growth
+      // crossed the journal identically (the "W" lines are in every op
+      // stream the identity checks above compared).
+      require(rig.oplog.text().find("W chatcmpl-") != std::string::npos,
+              "grow: no growth event in rank 0's op stream");
       test_disconnect_cancel(rig);
       test_drain_on_stop(rig);
       std::puts("ok 5 - drain-on-stop: the in-flight stream retired through "

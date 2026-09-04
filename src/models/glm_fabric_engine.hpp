@@ -391,6 +391,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
 
   int max_concurrent_requests() const override { return slots_; }
   int decode_batch_capacity() const override { return slots_; }
+  // The MTP verify writes two rows per step (next and the draft).
+  int max_tokens_per_step() const override { return rows_per_request_; }
   int batch_min_live() const { return batch_min_live_; }
   int sampling_candidates() const { return candidates_; }
 

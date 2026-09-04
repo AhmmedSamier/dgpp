@@ -41,6 +41,7 @@ const char* reason_name(Scheduler::Result::Reason r) {
     case Scheduler::Result::Reason::kEos: return "eos";
     case Scheduler::Result::Reason::kSteps: return "steps";
     case Scheduler::Result::Reason::kCancelled: return "cancelled";
+    case Scheduler::Result::Reason::kPoolExhausted: return "pool exhausted";
     default: return "none";
   }
 }
@@ -48,12 +49,17 @@ const char* reason_name(Scheduler::Result::Reason r) {
 }  // namespace
 
 Scheduler::Scheduler(SchedulerEngine* engine,
-                     std::vector<int64_t> eos_token_ids, int queue_limit)
+                     std::vector<int64_t> eos_token_ids, int queue_limit,
+                     AdmissionPolicy policy)
     : engine_(engine),
       eos_ids_(std::move(eos_token_ids)),
-      queue_limit_(queue_limit) {
+      queue_limit_(queue_limit),
+      policy_(policy) {
   if (engine_ == nullptr)
     throw std::invalid_argument("Scheduler: engine must not be null");
+  if (policy_.window_tokens < 1)
+    throw std::invalid_argument(
+        "Scheduler: the admission window must be at least one token");
   if (queue_limit_ < 0)
     throw std::invalid_argument(
         "Scheduler: queue_limit must be 0 (unbounded) or positive");
@@ -75,8 +81,75 @@ bool Scheduler::is_eos(int32_t token) const {
                    static_cast<int64_t>(token)) != eos_ids_.end();
 }
 
+int64_t Scheduler::initial_reserve_tokens(const SchedulerRequest& spec) const {
+  const int64_t full = reserve_tokens(spec);
+  if (policy_.mode != AdmissionPolicy::Mode::kGrowOnDemand) return full;
+  // The window, never less than one step's width plus the pending token
+  // (a step writes at most max_tokens_per_step rows past the KV's end).
+  const int64_t headroom =
+      std::max<int64_t>(policy_.window_tokens, engine_->max_tokens_per_step() + 1);
+  return std::min<int64_t>(full, static_cast<int64_t>(spec.prompt.size()) + headroom);
+}
+
 int64_t Scheduler::reserve_blocks(const Request& r) const {
-  return engine_->blocks_for_tokens(reserve_tokens(r.spec));
+  return engine_->blocks_for_tokens(initial_reserve_tokens(r.spec));
+}
+
+int Scheduler::youngest_active_after(int arrival) const {
+  for (int i = static_cast<int>(requests_.size()) - 1; i > arrival; --i)
+    if (requests_[static_cast<size_t>(i)].state == State::kActive) return i;
+  return -1;
+}
+
+void Scheduler::grow_reservations() {
+  if (policy_.mode != AdmissionPolicy::Mode::kGrowOnDemand) return;
+  const int64_t width = engine_->max_tokens_per_step();
+  for (size_t i = 0; i < requests_.size(); ++i) {  // arrival order = priority
+    Request& r = requests_[i];
+    if (r.state != State::kActive) continue;
+    const int64_t prompt = static_cast<int64_t>(r.spec.prompt.size());
+    const int64_t full = prompt + r.spec.max_steps;
+    // The KV holds prompt + steps_done - 1 tokens (the last pick is pending);
+    // the next step writes up to `width` more. One token of slack.
+    const int64_t need = std::min<int64_t>(full, prompt + r.steps_done + width);
+    if (need <= r.reserved_tokens) continue;
+    int64_t target = std::min<int64_t>(
+        full, std::max<int64_t>(need, r.reserved_tokens + policy_.window_tokens));
+    const int64_t held = engine_->blocks_for_tokens(r.reserved_tokens);
+    for (;;) {
+      const int64_t free_blocks =
+          engine_->pool_blocks_total() - engine_->pool_blocks_in_use();
+      if (engine_->blocks_for_tokens(target) - held <= free_blocks) break;
+      if (engine_->blocks_for_tokens(need) - held <= free_blocks) {
+        target = need;  // the minimum, rather than shedding for a full window
+        break;
+      }
+      // Even the minimum does not fit: the youngest active request goes —
+      // this one when nothing younger is live.
+      const int victim = youngest_active_after(static_cast<int>(i));
+      const int shed = victim >= 0 ? victim : static_cast<int>(i);
+      Request& v = requests_[static_cast<size_t>(shed)];
+      DGPP_LOG_WARN(
+          "sched: pool exhausted — request '{}' shed after {} tokens so "
+          "request '{}' can write its next step ({} blocks free of {}; "
+          "finish_reason length)",
+          v.spec.id, v.steps_done, r.spec.id, free_blocks,
+          engine_->pool_blocks_total());
+      ++pool_sheds_;
+      retire(shed, Result::Status::kDone, Result::Reason::kPoolExhausted);
+      if (shed == static_cast<int>(i)) break;
+    }
+    if (r.state != State::kActive) continue;
+    engine_->reserve(r.slot, target);
+    r.reserved_tokens = target;
+    ++grows_;
+    if (observer_) observer_->on_grow(r.spec.id, target);
+    DGPP_LOG_INFO(
+        "sched: request '{}' reservation grown to {} tokens ({} blocks; pool "
+        "{}/{} blocks in use)",
+        r.spec.id, target, engine_->blocks_for_tokens(target),
+        engine_->pool_blocks_in_use(), engine_->pool_blocks_total());
+  }
 }
 
 int Scheduler::free_slot() const {
@@ -214,12 +287,14 @@ void Scheduler::admit(int arrival) {
   // Capture/device-position decode may not grow the DSA table during a
   // replay. Admission has already proved this reservation fits, and no
   // other scheduler mutation can interleave between that proof and here.
+  const int64_t reserved = initial_reserve_tokens(r.spec);
   try {
-    engine_->reserve(slot, reserve_tokens(r.spec));
+    engine_->reserve(slot, reserved);
   } catch (...) {
     engine_->close(slot);
     throw;
   }
+  r.reserved_tokens = reserved;
   r.state = State::kActive;
   r.slot = slot;
   slots_[static_cast<size_t>(slot)] = arrival;
@@ -363,6 +438,10 @@ bool Scheduler::tick() {
       retire(static_cast<int>(i), Result::Status::kCancelled,
              Result::Reason::kCancelled);
   }
+  // Grow-on-demand's fixed position: after the sweep, before any
+  // admission or step — the step below never writes past a reservation,
+  // and every rank grows or sheds the same requests at the same quantum.
+  grow_reservations();
 
   const bool any_active = std::any_of(
       requests_.begin(), requests_.end(),
@@ -456,6 +535,8 @@ Scheduler::Meters Scheduler::meters() const {
   m.pool_blocks_total = engine_->pool_blocks_total();
   m.pool_blocks_in_use = engine_->pool_blocks_in_use();
   m.tokens_generated = tokens_generated_;
+  m.reservations_grown = grows_;
+  m.requests_shed_pool = pool_sheds_;
   return m;
 }
 

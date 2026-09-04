@@ -452,7 +452,8 @@ struct ServiceRig {
                       bool can_sample = false,
                       std::optional<uint64_t> fixed_seed = std::nullopt,
                       bool with_markers = false,
-                      bool reasoning_in_content = false)
+                      bool reasoning_in_content = false,
+                      dgpp::glm::AdmissionPolicy admission = {})
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
         frontend(with_markers),
         cfg([&] {
@@ -463,6 +464,7 @@ struct ServiceRig {
           c.sampling_defaults = sampling_defaults;
           c.fixed_seed = fixed_seed;
           c.reasoning_in_content = reasoning_in_content;
+          c.admission = admission;
           return c;
         }()),
         service(cfg, &engine, &frontend, {kFakeEos}),
@@ -1609,6 +1611,58 @@ DGPP_TEST(serve_shutdown_drainsInFlightWorkWithTheShutdownError) {
                 metrics.find("\"requests_shed\":2") != std::string::npos,
             "metrics: one interruption, two sheds: " + metrics.substr(0, 400));
   }
+}
+
+DGPP_TEST(serve_admission_growPolicyShedsTheYoungestWithFinishLength) {
+  // Grow-on-demand (M6 6d) on the service: two 300-token requests whose
+  // lifetimes (77 blocks each) exceed the 100-block pool together are both
+  // admitted under grow (window 8), grow at tick top, and when the pool is
+  // spent the younger is cut short with finish_reason "length" while the
+  // older completes; the metrics carry the policy, the growth count and
+  // the shed. The default rig reports the full-reserve policy.
+  dgpp::glm::AdmissionPolicy grow;
+  grow.mode = dgpp::glm::AdmissionPolicy::Mode::kGrowOnDemand;
+  grow.window_tokens = 8;
+  ServiceRig rig(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/false,
+                 /*reasoning_in_content=*/false, grow);
+  rig.engine.script(5, script_of(rig, std::string(300, 'x')));
+  Client a(rig.port()), b(rig.port());
+  for (Client* c : {&a, &b}) {
+    const std::string body = chat_body("abcd", 300);
+    c->send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+                "Content-Type: application/json\r\nContent-Length: " +
+                std::to_string(body.size()) + "\r\n\r\n" + body);
+  }
+  const std::string ra = a.read_until("\"usage\"", 10000);
+  const std::string rb = b.read_until("\"usage\"", 10000);
+  const auto completion_tokens = [](const std::string& r) {
+    const size_t at = r.find("\"completion_tokens\":");
+    return at == std::string::npos ? -1 : std::atoi(r.c_str() + at + 20);
+  };
+  const int ta = completion_tokens(ra), tb = completion_tokens(rb);
+  require(ra.find("\"finish_reason\":\"length\"") != std::string::npos &&
+              rb.find("\"finish_reason\":\"length\"") != std::string::npos,
+          "both finish length: " + ra.substr(0, 200) + " / " + rb.substr(0, 200));
+  require((ta == 300 && tb > 0 && tb < 300) || (tb == 300 && ta > 0 && ta < 300),
+          "one completes 300 tokens, the other is cut short: " + std::to_string(ta) +
+              " / " + std::to_string(tb));
+  {
+    Client m(rig.port());
+    m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string metrics = m.read_until("\"admission\"", 2000);
+    require(metrics.find("\"requests_shed_pool\":1") != std::string::npos &&
+                metrics.find("\"admission\":{\"mode\":\"grow\",\"window\":8}") !=
+                    std::string::npos &&
+                metrics.find("\"reservations_grown\":0") == std::string::npos,
+            "metrics: the shed, the policy, the growth: " + metrics.substr(0, 500));
+  }
+  ServiceRig plain(/*queue_limit=*/8);
+  Client m(plain.port());
+  m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+  require(m.read_until("\"admission\"", 2000).find(
+              "\"admission\":{\"mode\":\"full\",\"window\":256}") != std::string::npos,
+          "the default policy is full-reserve");
 }
 
 }  // namespace

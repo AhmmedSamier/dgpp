@@ -132,6 +132,7 @@ struct ServeKnobs {
   dgpp::glm_sample::Params sampling_defaults = dgpp::glm_sample::greedy_params();
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
+  dgpp::glm::AdmissionPolicy admission;  // M6 6d: full (default) or grow
 };
 
 // Pinned words for the sampler's collectives, allocated BEFORE the world
@@ -179,6 +180,7 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
   scfg.sampling_defaults = k.sampling_defaults;
   scfg.fixed_seed = k.fixed_seed;
   scfg.reasoning_in_content = k.reasoning_in_content;
+  scfg.admission = k.admission;
   std::vector<int64_t> eos =
       no_eos ? std::vector<int64_t>{} : cfg.eos_token_ids;
 
@@ -282,6 +284,11 @@ int main(int argc, char** argv) {
       "      (requires max-concurrency * (mtp?2:1) <= 8)\n"
       "    [--sampling-candidates N (default 128, in [1, 256]): the sampled\n"
       "      pick's per-rank candidate width; narrower falls back more]\n"
+      "  admission (M6 6d): [--admission full|grow (default full)]\n"
+      "    [--admission-window N (default 256)]: grow reserves prompt + N\n"
+      "    tokens, grows at tick top, and sheds the youngest request\n"
+      "    (finish_reason length) when the pool runs out; every rank takes\n"
+      "    rank 0's policy from the warm record\n"
       "  sampling (defaults from generation_config.json; temperature 0 =\n"
       "  greedy): [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
       "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n"
@@ -297,6 +304,8 @@ int main(int argc, char** argv) {
   // planned 128; narrower forces the exact gather fallback more often —
   // the width sweep's knob, scripts/serve_width_sweep.sh).
   int sampling_candidates = dgpp::kSamplingCandidates;
+  std::string admission_mode = "full";
+  int admission_window = 256;
   int max_connections = 64;
   int world = 1, rank = 0, rendezvous_timeout_ms = 120000;
   bool no_eos = false, decode_graph = false, mtp = false;
@@ -324,6 +333,8 @@ int main(int argc, char** argv) {
       graph_batch_min_live = std::stoi(next());
     else if (a == "--mtp") mtp = true;
     else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
+    else if (a == "--admission") admission_mode = next();
+    else if (a == "--admission-window") admission_window = std::stoi(next());
     else if (a == "--world") world = std::stoi(next());
     else if (a == "--rank") rank = std::stoi(next());
     else if (a == "--peer") peer = next();
@@ -398,6 +409,14 @@ int main(int argc, char** argv) {
   if (sampling_candidates < 1 || sampling_candidates > dgpp::kSampleMaxCandidates) {
     DGPP_LOG_ERROR("--sampling-candidates must be in [1, {}], got {}",
                    dgpp::kSampleMaxCandidates, sampling_candidates);
+    return 2;
+  }
+  if (admission_mode != "full" && admission_mode != "grow") {
+    DGPP_LOG_ERROR("--admission must be full or grow, got '{}'", admission_mode);
+    return 2;
+  }
+  if (admission_window < 1) {
+    DGPP_LOG_ERROR("--admission-window must be at least 1, got {}", admission_window);
     return 2;
   }
   if (graph_batch_min_live == 0) {
@@ -528,6 +547,10 @@ int main(int argc, char** argv) {
     knobs.http_port = port;
     knobs.max_connections = max_connections;
     knobs.queue_limit = queue_limit;
+    knobs.admission.mode = admission_mode == "grow"
+                               ? dgpp::glm::AdmissionPolicy::Mode::kGrowOnDemand
+                               : dgpp::glm::AdmissionPolicy::Mode::kFullReserve;
+    knobs.admission.window_tokens = admission_window;
     knobs.default_max_tokens = default_max_tokens;
     knobs.sampling_defaults = sampling_defaults;
     knobs.fixed_seed = fixed_seed;
@@ -588,6 +611,9 @@ int main(int argc, char** argv) {
                 .count(),
             max_concurrency, pool_tokens);
 
+        // The admission policy every rank runs (M6 6d): rank 0's, carried
+        // by the warm record; a peer's own flags yield to it.
+        dgpp::glm::AdmissionPolicy peer_policy = knobs.admission;
         std::unique_ptr<dgpp::glm::SchedulerEngine> engine;
         if (decode_graph) {
           auto graph_engine = std::make_unique<dgpp::GlmGraphEngineAdapter>(
@@ -602,9 +628,11 @@ int main(int argc, char** argv) {
           // construction is done; a peer holds at that record rather than
           // spinning its first collective in stall diagnostics.
           if (rank == 0) {
-            journal->broadcast(dgpp::service::encode_journal_warm());
+            journal->broadcast(
+                dgpp::service::encode_journal_warm(knobs.admission));
           } else if (!dgpp::service::wait_journal_warm(
-                         &*reader, [rank] { return peer_should_stop(rank); })) {
+                         &*reader, [rank] { return peer_should_stop(rank); },
+                         &peer_policy)) {
             graph_engine.reset();
             cudaFreeHost(pick_scratch);
             bus->stop();
@@ -629,6 +657,19 @@ int main(int argc, char** argv) {
                                        sample_prefix.data, sample_gather.data,
                                        cfg.vocab_size),
               &grammar_vocab);
+          // The eager fabric path exchanges the warm record too: it
+          // carries the admission policy (no capture to start here).
+          if (rank == 0) {
+            journal->broadcast(
+                dgpp::service::encode_journal_warm(knobs.admission));
+          } else if (!dgpp::service::wait_journal_warm(
+                         &*reader, [rank] { return peer_should_stop(rank); },
+                         &peer_policy)) {
+            engine.reset();
+            cudaFreeHost(pick_scratch);
+            bus->stop();
+            return 0;
+          }
         }
 
         if (rank != 0) {
@@ -637,10 +678,20 @@ int main(int argc, char** argv) {
           // repeat: this loop is the whole peer (§11's mirror). The
           // scheduler is constructed with rank 0's queue_limit — the
           // streams are identical, so the bound must be too.
-          dgpp::glm::Scheduler sched(engine.get(), eos, queue_limit);
+          if (peer_policy != knobs.admission)
+            DGPP_LOG_WARN(
+                "rank {}: admission policy from rank 0's warm record ({} / "
+                "window {}) overrides this rank's flags ({} / {})",
+                rank, dgpp::glm::AdmissionPolicy::name(peer_policy.mode),
+                peer_policy.window_tokens,
+                dgpp::glm::AdmissionPolicy::name(knobs.admission.mode),
+                knobs.admission.window_tokens);
+          dgpp::glm::Scheduler sched(engine.get(), eos, queue_limit, peer_policy);
           dgpp::service::OpStreamObserver oplog;
           sched.set_observer(&oplog);
-          DGPP_LOG_INFO("rank {}: following rank 0's journal", rank);
+          DGPP_LOG_INFO("rank {}: following rank 0's journal (admission {}, window {})",
+                        rank, dgpp::glm::AdmissionPolicy::name(peer_policy.mode),
+                        peer_policy.window_tokens);
           dgpp::service::run_journal_peer(
               &sched, &*reader, [rank] { return peer_should_stop(rank); });
           write_ops_file("serve_rank" + std::to_string(rank) + ".ops",

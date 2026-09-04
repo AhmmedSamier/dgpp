@@ -28,6 +28,10 @@ const char* finish_reason(Scheduler::Result::Reason r, bool tool_calls) {
     // A cancelled stream has no reader; a cancelled non-stream request
     // cannot exist (cancellation only follows a client disconnect).
     case Scheduler::Result::Reason::kCancelled: return "stop";
+    // Shed at pool exhaustion (grow-on-demand): the answer is cut short,
+    // which OpenAI's vocabulary calls "length"; the metrics and the log
+    // carry the cause.
+    case Scheduler::Result::Reason::kPoolExhausted: return "length";
     default: return "stop";
   }
 }
@@ -322,7 +326,8 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
       frontend_(frontend),
       markers_(frontend != nullptr ? frontend->markers()
                                    : dgpp::glm::ChatMarkers{}),
-      sched_(engine, std::move(eos_token_ids), cfg.queue_limit) {
+      sched_(engine, std::move(eos_token_ids), cfg.queue_limit,
+             cfg.admission) {
   if (engine_ == nullptr)
     throw std::invalid_argument("GenerationService: engine must not be null");
   if (frontend_ == nullptr)
@@ -1414,6 +1419,15 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, static_cast<int64_t>(st.requests_shed));
   out.append(",\"requests_cancelled\":");
   append_json_int(&out, static_cast<int64_t>(st.requests_cancelled));
+  out.append(",\"requests_shed_pool\":");
+  append_json_int(&out, static_cast<int64_t>(st.requests_shed_pool));
+  out.append(",\"reservations_grown\":");
+  append_json_int(&out, m.reservations_grown);
+  out.append(",\"admission\":{\"mode\":\"");
+  out.append(dgpp::glm::AdmissionPolicy::name(sched_.admission_policy().mode));
+  out.append("\",\"window\":");
+  append_json_int(&out, sched_.admission_policy().window_tokens);
+  out.append("}");
   out.append(",\"tokens_out\":");
   append_json_int(&out, static_cast<int64_t>(st.tokens_out));
   out.append(",\"rejects_bad\":");
@@ -1641,9 +1655,15 @@ void GenerationService::on_retire(const std::string& id,
       r->done = true;
       r->reason = result.reason;
       r->completion_tokens = result.steps_done;
+      if (result.reason == Scheduler::Result::Reason::kPoolExhausted)
+        stats_.requests_shed_pool++;
       break;
     }
   }
+  if (result.reason == Scheduler::Result::Reason::kPoolExhausted)
+    DGPP_LOG_WARN("serve: request '{}' cut short at KV pool exhaustion after {} "
+                  "tokens (finish_reason length; grow-on-demand shed)",
+                  id, result.steps_done);
   if (audit_) audit_->on_retire(id, result);
 }
 
