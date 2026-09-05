@@ -792,6 +792,24 @@ machine's bring-up (§6.3's striped reduce-scatter + allgather):
   claims meanwhile, or a re-presented claim steals the shared CAS slot
   from a fresh doorbell in the same warp, forever.
 
+- **Done does not imply posted — the one-shot form** (2026-09-05). The
+  one-shot kernel stages, releases its ready bits, claims, folds and
+  stamps done; when every peer has already posted, all of that takes
+  ~20 µs and fits between the engine's two reads of the control cell.
+  The pass read the ready bits first and the done stamp second, so a
+  kernel that finished in between had its flight completed with this
+  rank's own stripe never posted — the peers' kernels waited on it
+  forever and this rank's next generation parked behind their
+  generation gate (glm_tp_test's two-rank loopback, once in fifteen
+  runs: "launched" then "done after 18.5 µs" with no "ready" between,
+  the packet counts one stripe short). The pass now reads done first
+  (a pass that sees the stamp then sees the bits, by release/acquire
+  and kernel program order) and refuses to finish a reduced flight
+  before every peer's stripe is out; `bus_test`'s
+  `scenario_allreduce_done_before_posted` injects a 300 µs sleep between
+  the two reads on rank 0 (`BusOptions::debug_pass_delay_us`) and fails
+  within seconds on the old ordering.
+
 The bulk kernel is a cooperative grid (2026-09-05). Sixteen blocks,
 co-resident by `cudaLaunchCooperativeKernel`'s contract (the launch fails
 rather than deadlocks when it cannot co-schedule; two such grids run

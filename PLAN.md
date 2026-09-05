@@ -803,12 +803,18 @@ Two phases:
   (`glm_check_decode_graph` at every capture site; `docs/batched_mtp_graph_stall.md`).
   The CTest prefetch-off mitigation is gone; the MTP gate passes 100/100 at
   32 and at 1 CUDA connection, ctest 33/33 with prefetch on.
-  (v) OPEN (2026-09-05): the plain batched-graph loopback gate
+  (v) 2026-09-05: the plain batched-graph loopback gate
   (`..._plain_batched_graph_matches_independent_sessions`) stalled once in
   fifteen runs on an eager "boundary staged reduce" with the two ranks one
-  collective apart (rank 0 at seq 5, rank 1 at seq 4, each generation gate
-  refusing the other's doorbell) — the latency path, a different signature
-  from (iv); 14/15 passed, not yet chased. OWED: the
+  collective apart — root-caused from the failing run's log (rank 0's seq 4
+  logged launched then done with no ready between; the QP packet counts one
+  stripe short) to the one-shot pass reading the ready bits before the done
+  stamp: a kernel whose peer had already posted finished between the two
+  reads and the flight completed with its own stripe never posted. Fixed by
+  reading done first and gating completion on every peer's stripe posted
+  (the bulk path's own rule); `bus_test`'s
+  `scenario_allreduce_done_before_posted` injects the delay and fails on
+  the old ordering within seconds (DESIGN §6.3's rule list). OWED: the
   GEMM seam now lowers every m ≤ 8 through the GEMV chunks, which moved
   prefill tail chunks and per-expert prefill GEMMs of 5–8 routed tokens off
   cuBLASLt — bitwise different at those shapes and unmeasured; measure

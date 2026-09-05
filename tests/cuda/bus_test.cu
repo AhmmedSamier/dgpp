@@ -438,15 +438,18 @@ __global__ void staged_fill_kernel(uint16_t* dst, size_t elems, int rank) {
 // Collective mode: no persistent consumers (they would race the
 // per-collective kernel — and their 300s deadlines would turn any
 // implicit-sync call in the workers into a hang).
-std::vector<std::unique_ptr<CollectiveBus>> start_world(int world,
-                                                        uint16_t port,
-                                                        bool one_lane = false) {
+std::vector<std::unique_ptr<CollectiveBus>> start_world(
+    int world, uint16_t port, bool one_lane = false,
+    int rank0_pass_delay_us = 0) {
   std::vector<std::unique_ptr<CollectiveBus>> out;
   for (int r = 0; r < world; ++r) {
     BusOptions o = base_options(r, port);
     o.world_size = world;
     o.launch_consumers = false;
     if (one_lane) o.lane_devices = {o.lane_devices.front()};
+    // Fault injection (scenario_allreduce_done_before_posted): rank 0's
+    // engine dawdles between its control-cell reads.
+    if (r == 0) o.debug_pass_delay_us = rank0_pass_delay_us;
     out.push_back(std::make_unique<CollectiveBus>(o));
   }
   std::vector<std::string> errors(world);
@@ -733,6 +736,55 @@ int allreduce_staged_rank_work(CollectiveBus& bus, int world, int my_rank,
   }
   cudaStreamDestroy(fill_stream);
   return failures;
+}
+
+void scenario_allreduce_done_before_posted() {
+  // DONE DOES NOT IMPLY POSTED, the one-shot form (2026-09-05): rank 0's
+  // engine sleeps 300 us between reading the control cell's done stamp
+  // and its ready bits, so its kernel — whose peers post at once, unpaced
+  // — stages, claims, folds and stamps done inside that gap on every
+  // collective. Before the fix the engine read ready first (0), slept,
+  // read done (== seq) and completed the flight with rank 0's own stripe
+  // never posted: the peers' kernels waited on it forever and rank 0's
+  // next generation parked behind their generation gate (glm_tp_test's
+  // two-rank loopback, once in fifteen runs). Now the pass reads done
+  // first and refuses to finish a reduced flight before every peer's
+  // stripe is out; every collective completes bitwise on every rank.
+  const size_t elems = 4096;
+  int failures = 0;
+  for (const int world : {2, 4}) {
+    const uint16_t port = world == 2 ? 29906 : 29907;
+    std::vector<std::unique_ptr<CollectiveBus>> world_buses =
+        start_world(world, port, /*one_lane=*/false,
+                    /*rank0_pass_delay_us=*/300);
+    if (world_buses.empty()) {
+      DGPP_LOG_ERROR("done-before-posted world {} failed to start", world);
+      ++failures;
+      continue;
+    }
+    std::vector<std::thread> workers;
+    std::vector<int> rank_failures(static_cast<size_t>(world), 0);
+    for (int r = 0; r < world; ++r)
+      workers.emplace_back([&, r] {
+        rank_failures[static_cast<size_t>(r)] = allreduce_rank_work(
+            *world_buses[static_cast<size_t>(r)], world, r, elems, 40);
+      });
+    for (auto& t : workers) t.join();
+    int world_failures = 0;
+    for (int r = 0; r < world; ++r)
+      world_failures += rank_failures[static_cast<size_t>(r)];
+    CHECK(world_failures == 0,
+          "done-before-posted world " + std::to_string(world) + " had " +
+              std::to_string(world_failures) + " collective failures");
+    for (auto& bus : world_buses) bus->quiesce();
+    for (auto& bus : world_buses) bus->stop();
+    DGPP_LOG_INFO("scenario allreduce_done_before_posted: world {} clean "
+                  "(40 collectives with rank 0's engine 300 us late)",
+                  world);
+  }
+  g_failures += failures;
+  DGPP_LOG_INFO("scenario allreduce_done_before_posted: {} total failures",
+                g_failures);
 }
 
 void scenario_allreduce_staged() {
@@ -1615,6 +1667,7 @@ int main() {
   scenario_consumer_inactivity_exit();
   scenario_mesh_three_way();
   scenario_allreduce();
+  scenario_allreduce_done_before_posted();
   scenario_allreduce_staged();
   scenario_allreduce_bulk();
   scenario_allreduce_graph();

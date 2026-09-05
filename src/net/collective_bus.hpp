@@ -66,6 +66,13 @@ struct BusOptions {
   // positive = that rate. bulk_pace_gbps() reports the resolved value.
   double bulk_pace_gbps = -1.0;
 
+  // Fault injection for the tests (2026-09-05): the one-shot collective
+  // pass sleeps this long between its two control-cell reads (the done
+  // stamp, then the ready bits), widening the window in which a kernel
+  // whose peers already posted can finish before its own engine has
+  // posted. Production leaves it 0.
+  int debug_pass_delay_us = 0;
+
   int qp_depth = 1024;
   int completion_timeout_ms = 5000;  // engine watchdog per request
   double consumer_deadline_s = 30.0;  // receive-kernel inactivity bound

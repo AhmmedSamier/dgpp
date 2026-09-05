@@ -1792,6 +1792,24 @@ struct CollectiveBus::Impl {
       worked = true;
     }
 
+    // DONE DOES NOT IMPLY POSTED — the one-shot form (2026-09-05). The
+    // kernel stages, releases the ready bits, claims, folds and stamps
+    // done; when every peer had already posted, all of that takes ~20 us
+    // and can fit between this thread's two reads of the control cell.
+    // Read ready AFTER done: a pass that observes the stamp then
+    // necessarily observes the bits (release/acquire, kernel program
+    // order) and posts in the same pass, and the completion below refuses
+    // to finish a reduced flight before every peer's stripe is out. The
+    // failure this closes (glm_tp_test's two-rank loopback, once in
+    // fifteen runs): rank 0's seq 4 logged launched then done with no
+    // ready between, its stripe never posted, rank 1's kernel waited on
+    // it forever while rank 0's next generation parked behind rank 1's
+    // generation gate.
+    const uint64_t done = acquire_u64(&ar_ctl->done_seq);
+    if (opt.debug_pass_delay_us > 0)
+      std::this_thread::sleep_for(
+          std::chrono::microseconds(opt.debug_pass_delay_us));
+
     // Posting pass: one stripe per staged peer.
     const uint64_t ready = acquire_u64(&ar_ctl->ready_bits);
     if (ready && req.ctl_seq != ar_last_ready_seq) {
@@ -1859,9 +1877,13 @@ struct CollectiveBus::Impl {
                      peer_ranks[p], lane.stats.lane, slot, seq);
     }
 
-    // Completion: the kernel's stamp (or a poison) ends the flight.
-    const uint64_t done = acquire_u64(&ar_ctl->done_seq);
+    // Completion: the kernel's stamp (or a poison) ends the flight — once
+    // every peer's stripe is posted (a poisoned or deadline exit finishes
+    // regardless; its lanes may be dead).
     if (done == req.ctl_seq) {
+      if (acquire_u32(&ar_ctl->status) == 0 &&
+          coll.posted_bits != all_peers_mask())
+        return worked;  // post first (the bits are visible); finish next pass
       if (req.ctl_seq <= 16)
         DGPP_LOG_INFO(
             "allreduce: rank {} seq {} done status={} after {:.1f}us",
