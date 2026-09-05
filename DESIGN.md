@@ -1027,6 +1027,24 @@ The M3 implementation pins the concrete layouts and the selection spec
   Prefill instead materializes per-(row, head) fp8 dots through the IGemm
   seam (FP8×FP8→F32, unit scales, K-cache reads amortized across query
   tiles) and runs the same streaming selection over the dot buffer;
+- **the dense prefill regime** (2026-09-05): while visible pools
+  floor((p+1)/kpool) ≤ select_k = topk/kpool, every visible pool is
+  selected and the tail appended — the query attends to tokens [0, p]
+  exactly — which holds for every position ≤ kpool × (select_k + 1) − 2
+  (2050 at the checkpoint's geometry): the whole prefill of a prompt up
+  to the 2048-token chunk, and the first chunk of a longer one. Those
+  rows run `attn_dense_kernel`, a flash-style kernel over 32 (row, head)
+  M-rows per block — bf16 `mma.sync` for S = Q̃·Lᵀ and for P·L with a
+  32-token latent tile shared by all 32 M-rows, the FA2 online softmax on
+  the C fragments (denominator unrounded, probabilities rounded to bf16
+  as the split kernel pins), causal masking per M-row, the split kernel's
+  (m, l, c) partial layout so `dsa_attn_combine` is shared — in 128-row
+  tiles split four ways; rows past that position keep the per-row split
+  kernel over their selection. Tolerance-equal to the split kernel (the
+  tensor core's summation order), deterministic; gated against it and the
+  host oracle at 64/16 heads × 512/256 latent. Where the split kernel
+  spent 318 µs per eight rows per layer (a 2048-token prefill: 0.6 s of
+  attention), the dense kernel spends ~360 µs per 128 rows;
 - MLA runs absorbed: `q̃ = W_uk^T q` (bf16 GEMM rounding), scores
   `q̃ · latent` in fp32 with split-KV online softmax — the running max lives
   in per-lane registers fed by butterfly group reductions (no shared running
@@ -2461,11 +2479,12 @@ also the faster choice per user (four scalar replays would be ~129 and ~104
 ms per token). The m ≤ 8 GEMV lowering also changed the path of 5–8-row
 prefill chunks and per-expert prefill GEMMs with 5–8 routed tokens; the
 prefill was then re-measured and taken down through five rounds
-(2026-09-04/05, the record: 256 tokens 5 s → 0.65 s, 2048 tokens 19.8 →
-3.1 s in steady state; the expert GEMMs run on a grouped tensor-core
+(2026-09-04/05, the record: 256 tokens 5 s → 0.63 s, 2048 tokens 19.8 →
+2.2 s in steady state; the expert GEMMs run on a grouped tensor-core
 kernel since round 5 — `MoeExpertKernel::kMma`, bitwise the scale GEMM's
 tile kernel per segment, while the decode-class paths keep the GEMV core
-and their bitwise pins; the attention prefill tiles are what remains).
+and their bitwise pins — and the attention prefill as a dense flash
+kernel since round 6 (§7.2); the time outside kernels is what remains).
 
 The original always-eight-row four-node gate measured
 12.55/23.78/43.59/78.94 tok/s at 1/2/4/8 live T=1 requests and

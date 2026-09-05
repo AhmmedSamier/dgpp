@@ -77,11 +77,16 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
   const DsaGeometry g = DsaGeometry::from_config(cfg);
   const int heads = cfg.index_n_heads;
   const int dim = cfg.index_head_dim;
-  const int A = std::max(max_decode_rows, 8);  // attention tile rows
-  // Attention workspace capacity: decode splits wide (rows are scarce),
-  // prefill splits by a fixed 8 — size for whichever is larger so either
-  // path is always in bounds.
+  // Attention tile rows: the decode/split tiles (max_decode_rows, at
+  // least 8) or the dense prefill tiles (kDensePrefillRows), whichever is
+  // larger, for q_tilde/c; the (row, split) workspace covers the wider of
+  // the split path (8 rows x its split) and the dense path (its rows x
+  // its split).
+  const int A = std::max(std::max(max_decode_rows, 8), DsaLayer::kDensePrefillRows);
   const int split_cap = std::max(decode_n_split, 8);
+  const size_t ws_slots = std::max(
+      size_t(std::max(max_decode_rows, 8)) * size_t(split_cap),
+      size_t(DsaLayer::kDensePrefillRows) * size_t(DsaLayer::kDensePrefillSplit));
 
   const int64_t max_pools = round_up_to(
       (max_cache_tokens + g.kpool - 1) / g.kpool, kPoolPadGranularity);
@@ -121,9 +126,9 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
                         size_t(cfg.kv_lora_rank) * 2);
   L.off_c = alloc(size_t(A) * size_t(g.local_heads) *
                   size_t(cfg.kv_lora_rank) * 4);
-  L.off_m = alloc(size_t(A) * size_t(split_cap) * size_t(g.local_heads) * 4);
-  L.off_l = alloc(size_t(A) * size_t(split_cap) * size_t(g.local_heads) * 4);
-  L.off_cws = alloc(size_t(A) * size_t(split_cap) * size_t(g.local_heads) *
+  L.off_m = alloc(ws_slots * size_t(g.local_heads) * 4);
+  L.off_l = alloc(ws_slots * size_t(g.local_heads) * 4);
+  L.off_cws = alloc(ws_slots * size_t(g.local_heads) *
                     size_t(cfg.kv_lora_rank) * 4);
   L.off_dot = alloc(size_t(tile_cap) * size_t(heads) * size_t(max_pools) * 4);
   L.off_gather_k = alloc(size_t(max_pools) * size_t(dim));
@@ -349,6 +354,34 @@ void DsaLayer::attend_tile(DsaStatePool& state, int layer,
   }
 }
 
+void DsaLayer::attend_dense(DsaStatePool& state, int layer,
+                            const int32_t* req_ids, int64_t row0, int rows,
+                            cudaStream_t stream) {
+  for (int64_t a0 = row0; a0 < row0 + rows; a0 += kDensePrefillRows) {
+    const int arows =
+        int(std::min<int64_t>(kDensePrefillRows, row0 + rows - a0));
+    dsa_absorb_q(q_ + a0 * geo_.local_q_rows, w_.kv_b, q_tilde_, arows,
+                 geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
+                 cfg_.kv_lora_rank, stream);
+    const bool launched = dsa_attn_dense(
+        q_tilde_, state.latent(layer), req_ids + a0, pos_dev_ + a0, arows,
+        kDensePrefillSplit, geo_.local_heads, cfg_.kv_lora_rank,
+        cfg_.block_tokens, state.block_tables(), int(state.total_blocks()),
+        attn_scale_, m_ws_, l_ws_, c_ws_, stream);
+    if (!launched) {
+      // Geometry outside the dense kernel's: the split kernel over the
+      // selection (dense by construction here).
+      attend_tile(state, layer, req_ids, a0, arows, 8, stream);
+      continue;
+    }
+    dsa_attn_combine(m_ws_, l_ws_, c_ws_, arows, kDensePrefillSplit,
+                     geo_.local_heads, cfg_.kv_lora_rank, c_, stream);
+    dsa_vout_gemm(c_, w_.kv_b, attn_out_ + a0 * geo_.local_v_rows, arows,
+                  geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
+                  cfg_.kv_lora_rank, stream);
+  }
+}
+
 // ---------------------------------------------------------------------
 // Prefill
 // ---------------------------------------------------------------------
@@ -454,10 +487,24 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
                        kpool, geo_.max_selected,
                        topk_ + size_t(row0) * geo_.max_selected, counts_ + row0,
                        stream);
-    // Prefill's 8-row tiles already give rows*4 blocks of parallelism;
-    // split by a fixed 8 (<= the scratch capacity computed at construction)
-    // so early-row groups with small counts don't pay wide-split c_ws
-    // round trips.
+  }
+
+  // Attention. Rows whose context is below index_topk tokens select
+  // densely — visible pools (pos + 1) / kpool <= select_k means every
+  // visible pool plus the tail, i.e. tokens [0, pos] — and run on the
+  // tensor-core kernel in wide tiles (2026-09-05); the rest keep the
+  // per-row split kernel over their selection, in 8-row tiles split by a
+  // fixed 8 (<= the scratch capacity computed at construction).
+  const int64_t dense_last_pos = int64_t(kpool) * (geo_.select_k + 1) - 2;
+  int dense_rows = 0;
+  if (dense_prefill_) {
+    const int64_t n = dense_last_pos - token_start + 1;
+    dense_rows = int(std::max<int64_t>(0, std::min<int64_t>(n, tokens)));
+  }
+  if (dense_rows > 0)
+    attend_dense(state, layer, req_ids_dev_, 0, dense_rows, stream);
+  for (int row0 = dense_rows; row0 < tokens; row0 += attn_rows_) {
+    const int rows = std::min(attn_rows_, tokens - row0);
     attend_tile(state, layer, req_ids_dev_, row0, rows, 8, stream);
   }
 

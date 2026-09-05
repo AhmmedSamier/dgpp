@@ -164,6 +164,10 @@ class DsaLayer {
   // Test/diagnostic probes into the shared scratch; valid until the next
   // enqueue on any layer sharing it.
   const void* debug_attn_out() const { return attn_out_; }   // [rows, local_v_rows] bf16
+  // Tests: run the per-row split kernel for every prefill row (the dense
+  // tensor-core path is the default where the context is below index_topk).
+  void set_dense_prefill(bool on) { dense_prefill_ = on; }
+  bool dense_prefill() const { return dense_prefill_; }
   const int32_t* debug_topk() const { return topk_; }        // [rows, max_selected]
   const int32_t* debug_counts() const { return counts_; }    // [rows]
   const void* debug_q_fp8() const { return q_fp8_; }         // [rows*heads, 128] fp8
@@ -216,6 +220,12 @@ class DsaLayer {
   // indexed tile-locally (entry r = request of row row0 + r). n_split is
   // the split-KV parallelism for this call (decode: rows are scarce, split
   // wide; prefill: 8-row tiles already parallelize, split narrow).
+  // Dense causal attention for query rows [row0, row0 + rows) of the
+  // current prefill chunk (positions pos_dev_[row0..]), in tiles of
+  // kDensePrefillRows rows; falls back to attend_tile when the geometry
+  // is outside the dense kernel's (kv_lora not 512/256).
+  void attend_dense(DsaStatePool& state, int layer, const int32_t* req_ids,
+                    int64_t row0, int rows, cudaStream_t stream);
   void attend_tile(DsaStatePool& state, int layer, const int32_t* req_ids,
                    int64_t row0, int rows, int n_split, cudaStream_t stream);
 
@@ -230,6 +240,14 @@ class DsaLayer {
   int max_decode_rows_ = 8;
   int decode_n_split_ = 32;  // split-KV parallelism: rows x n_split x 4 head-groups ~ 128 blocks/row
   int attn_rows_ = 8;         // attention tile rows = max(max_decode_rows_, 8)
+  // The dense prefill path (2026-09-05): rows whose context is below
+  // index_topk tokens attend densely on the tensor-core kernel
+  // (dsa_attn_dense) in tiles of kDensePrefillRows query rows split
+  // kDensePrefillSplit ways; the rest keep the per-row split kernel.
+  // set_dense_prefill(false) forces the split kernel everywhere (tests).
+  static constexpr int kDensePrefillRows = 128;
+  static constexpr int kDensePrefillSplit = 4;
+  bool dense_prefill_ = true;
   int tile_cap_ = 0;          // prefill dot-tile rows (dot-budget bound)
   int64_t max_pools_ = 0;     // gather/dot capacity, in padded pools
   int64_t gather_zeroed_ = 0; // gather high-water mark already zeroed

@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.65 s and 2048 tokens 19.8 → 3.1 s in steady state through five rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts on a tensor-core kernel); the attention prefill tiles are next |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.63 s and 2048 tokens 19.8 → 2.2 s in steady state through six rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts and the dense attention prefill on tensor cores); the non-kernel time is next |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -201,6 +201,26 @@ Suggested order for what remains, each item's design in its section:
    eight-row launches), expert GEMMs 0.5, bulk folds 0.18, other kernels
    ~0.7, ~1 s outside kernels. Next: wider attention prefill tiles, then
    the non-kernel second.
+   ROUND 6 (2026-09-05, the record's twenty-first entry): the attention
+   prefill on tensor cores. Below index_topk tokens of context the DSA
+   selection is provably dense (visible pools ≤ select_k → every pool
+   plus the tail, tokens [0, pos]; positions ≤ 2050), so the whole
+   prefill of a prompt up to the chunk size is dense causal absorbed-MLA
+   attention; `attn_dense_kernel` runs it as a flash kernel over 32
+   (row, head) M-rows per block — bf16 mma.sync for S and for P·L, the
+   32-token latent tile shared by all 32 M-rows, the FA2 online softmax
+   with bf16-rounded probabilities as pinned, the split kernel's partial
+   layout so combine is unchanged — and `DsaLayer::enqueue_prefill`
+   attends the dense prefix in 128-row tiles, the rest (positions past
+   2050) on the split kernel over their selection. Gated against the split
+   kernel and the host oracle at 64/16 heads and 512/256 latent; ctest
+   34/34. 2048 tokens 3,058 → 2,156 ms (1.05 ms/token), 256 tokens 653 →
+   628, ids identical to every earlier round's. Attention per 2048-token
+   prefill ~690 → ~125 ms (dense 42, vout 45, absorb 37 — the two scalar
+   neighbours are next there). What remains: ~0.7 s outside kernels (the
+   per-layer launch/sync structure), the expert GEMMs at the weight-read
+   floor (0.5 s), the bulk folds 0.16, the mHC dots 0.14; the sparse
+   regime (positions past 2050) still runs the per-row split kernel.
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).

@@ -1080,6 +1080,279 @@ __global__ void attn_partial_kernel(
   }
 }
 
+// ---------------------------------------------------------------------
+// Dense causal attention on tensor cores (the prefill path, 2026-09-05)
+// ---------------------------------------------------------------------
+// Below index_topk tokens of context the selection is provably dense —
+// every visible pool is selected and the tail appended, so a query at
+// position p attends to tokens [0, p] — and the per-row gather kernel
+// above spends ~130 scalar FMAs per token per thread re-reading the
+// prefix once per row (a 2048-token prefill: 1,903 eight-row launches of
+// 318 us per layer). This kernel is the dense case on mma.sync:
+//   * the M dimension is (row, head) pairs — q_tilde is already the
+//     [rows * local_heads, kv_lora] matrix — 32 M-rows per block as two
+//     slabs of 16; the 8 warps are (slab, column quarter);
+//   * per 32-token latent tile (gathered through the block table into
+//     shared memory, shared by all 32 M-rows): S = Q~ . L^T over the
+//     warp's k-quarter (16 x 32 per warp), the four quarters' partials
+//     summed through shared memory in a FIXED order so every warp of a
+//     slab holds identical S; then the FA2 online softmax on the C
+//     fragments (row max by quad shuffles, l unrounded, probabilities
+//     rounded to bf16 as the split kernel pins) and O += P . L over the
+//     warp's 128 output columns, P re-used straight from the C fragments
+//     as A fragments;
+//   * causal masking per M-row against pos[row]; splits over the token
+//     range exactly as the split kernel, publishing the same (m, l, c)
+//     partials so dsa_attn_combine merges them unchanged.
+// Numerics: bf16 inputs, fp32 accumulation, the same scale/exp/bf16-prob
+// chain as the split kernel in a different summation order (the tensor
+// core's) — tolerance-equal, not bitwise; deterministic (bitwise repeat).
+namespace dense {
+constexpr int kM = 32;             // (row, head) M-rows per block
+constexpr int kTile = 32;          // latent tokens per tile
+constexpr int kThreads = 256;      // 8 warps: 2 slabs x 4 column quarters
+constexpr int kExchangeFloats = 16 * 32;  // one warp's S partial (C layout)
+template <int KV>
+struct Geo {
+  static constexpr int SQ = KV + 8;        // padded smem row (u16 elements)
+  static constexpr int CW = KV / 4;        // output columns per warp
+  static constexpr int NT = CW / 8;        // n8 tiles per warp (PV)
+  static constexpr int KW = KV / 4;        // k dims per warp (S)
+  static constexpr int KS = KW / 16;       // k16 steps per warp (S)
+  static constexpr size_t smem_bytes =
+      size_t(kM + kTile) * SQ * 2 + size_t(8) * kExchangeFloats * 4;
+};
+}  // namespace dense
+
+__device__ __forceinline__ void mma_bf16_16816(float (&c)[4], uint32_t a0,
+                                               uint32_t a1, uint32_t a2,
+                                               uint32_t a3, uint32_t b0,
+                                               uint32_t b1) {
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+
+template <int KV>
+__global__ __launch_bounds__(dense::kThreads, 2) void attn_dense_kernel(
+    const uint16_t* __restrict__ q_tilde, const uint16_t* __restrict__ latent,
+    const int32_t* __restrict__ req_ids, const int64_t* __restrict__ pos,
+    int rows, int n_split, int local_heads, int block_tokens,
+    const int32_t* __restrict__ block_tables, int blocks_per_request,
+    float scale, float* __restrict__ m_ws, float* __restrict__ l_ws,
+    float* __restrict__ c_ws) {
+  using G = dense::Geo<KV>;
+  constexpr int SQ = G::SQ, CW = G::CW, NT = G::NT, KW = G::KW, KS = G::KS;
+  constexpr int M = dense::kM, TILE = dense::kTile;
+  extern __shared__ __align__(16) uint8_t dsmem[];
+  uint16_t* sQ = reinterpret_cast<uint16_t*>(dsmem);          // [M][SQ]
+  uint16_t* sL = sQ + M * SQ;                                  // [TILE][SQ]
+  float* sX = reinterpret_cast<float*>(sL + TILE * SQ);        // [8][16*32]
+
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int slab = warp / 4, quarter = warp % 4;
+  const int r = lane / 4, cc = (lane % 4) * 2;
+  const int total_m = rows * local_heads;
+  const int m0 = blockIdx.x * M;
+  const int s = blockIdx.y;
+
+  // This block's query rows and the split's token range: the range is the
+  // block's longest causal prefix, split n ways; each M-row masks tokens
+  // past its own position.
+  const int qrow_first = m0 / local_heads;
+  const int qrow_last = min(total_m, m0 + M) > m0
+                            ? (min(total_m, m0 + M) - 1) / local_heads
+                            : qrow_first;
+  int64_t p_max = -1;
+  for (int q = qrow_first; q <= qrow_last; ++q) p_max = max(p_max, pos[q]);
+  const int count = static_cast<int>(p_max + 1);
+  const int chunk = (count + n_split - 1) / n_split;
+  const int t_begin = s * chunk;
+  const int t_end = min(count, t_begin + chunk);
+
+  // The lane's two M-rows (slab rows r and r+8): validity and positions.
+  const int m_lo = m0 + slab * 16 + r;
+  const int m_hi = m_lo + 8;
+  const bool v_lo = m_lo < total_m, v_hi = m_hi < total_m;
+  const int64_t p_lo = v_lo ? pos[m_lo / local_heads] : -1;
+  const int64_t p_hi = v_hi ? pos[m_hi / local_heads] : -1;
+  const int32_t req = req_ids[qrow_first];
+  const int32_t* bt = block_tables + int64_t(req) * blocks_per_request;
+
+  // Q~ tile into shared memory (zero past the last M-row).
+  for (int idx = threadIdx.x; idx < M * (KV / 8); idx += dense::kThreads) {
+    const int mm = idx / (KV / 8), c8 = idx % (KV / 8);
+    uint4 val = make_uint4(0, 0, 0, 0);
+    if (m0 + mm < total_m)
+      val = *reinterpret_cast<const uint4*>(q_tilde + int64_t(m0 + mm) * KV +
+                                            c8 * 8);
+    *reinterpret_cast<uint4*>(sQ + mm * SQ + c8 * 8) = val;
+  }
+
+  float acc[NT][4];
+#pragma unroll
+  for (int j = 0; j < NT; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.f;
+  float m_lo_run = -INFINITY, m_hi_run = -INFINITY;
+  float l_lo = 0.f, l_hi = 0.f;
+
+  for (int t0 = t_begin; t0 < t_end; t0 += TILE) {
+    const int n = min(TILE, t_end - t0);
+    __syncthreads();  // the previous tile's readers are done (and sQ landed)
+    // Latent tile gather (zero-filled past n).
+    for (int idx = threadIdx.x; idx < TILE * (KV / 8); idx += dense::kThreads) {
+      const int tt = idx / (KV / 8), c8 = idx % (KV / 8);
+      uint4 val = make_uint4(0, 0, 0, 0);
+      if (tt < n) {
+        const int64_t tok = t0 + tt;
+        const int32_t blk = bt[tok / block_tokens];
+        const int64_t phys = int64_t(blk) * block_tokens + (tok % block_tokens);
+        val = *reinterpret_cast<const uint4*>(latent + phys * KV + c8 * 8);
+      }
+      *reinterpret_cast<uint4*>(sL + tt * SQ + c8 * 8) = val;
+    }
+    __syncthreads();
+
+    // S partial over this warp's k-quarter: 16 rows x 32 tokens.
+    float sp[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) sp[j][0] = sp[j][1] = sp[j][2] = sp[j][3] = 0.f;
+    const int arow_lo = slab * 16 + r;
+#pragma unroll
+    for (int ks = 0; ks < KS; ++ks) {
+      const int k0 = quarter * KW + ks * 16;
+      const uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sQ[arow_lo * SQ + k0 + cc]);
+      const uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sQ[(arow_lo + 8) * SQ + k0 + cc]);
+      const uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sQ[arow_lo * SQ + k0 + cc + 8]);
+      const uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sQ[(arow_lo + 8) * SQ + k0 + cc + 8]);
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        const int tn = j * 8 + r;  // token within the tile (the n index)
+        const uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sL[tn * SQ + k0 + cc]);
+        const uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sL[tn * SQ + k0 + cc + 8]);
+        mma_bf16_16816(sp[j], a0, a1, a2, a3, b0, b1);
+      }
+    }
+    // Exchange: every warp of the slab sums the four quarters in the same
+    // order, so the slab's warps hold bitwise-identical S.
+    float* mine = sX + warp * dense::kExchangeFloats + lane * 16;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      mine[j * 4 + 0] = sp[j][0];
+      mine[j * 4 + 1] = sp[j][1];
+      mine[j * 4 + 2] = sp[j][2];
+      mine[j * 4 + 3] = sp[j][3];
+    }
+    __syncthreads();
+    float sc[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const float* q0 = sX + (slab * 4 + 0) * dense::kExchangeFloats + lane * 16 + j * 4 + i;
+        float v = q0[0];
+        v += q0[1 * dense::kExchangeFloats];
+        v += q0[2 * dense::kExchangeFloats];
+        v += q0[3 * dense::kExchangeFloats];
+        sc[j][i] = v;
+      }
+    }
+    // Scale and causal mask; the row maxima of this tile.
+    float mx_lo = -INFINITY, mx_hi = -INFINITY;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const int tt = j * 8 + cc + (i & 1);
+        const int64_t tok = t0 + tt;
+        const bool hi = i >= 2;
+        const bool ok = tt < n && (hi ? (v_hi && tok <= p_hi) : (v_lo && tok <= p_lo));
+        const float val = ok ? sc[j][i] * scale : -INFINITY;
+        sc[j][i] = val;
+        if (hi) mx_hi = fmaxf(mx_hi, val); else mx_lo = fmaxf(mx_lo, val);
+      }
+    }
+    mx_lo = fmaxf(mx_lo, __shfl_xor_sync(~0u, mx_lo, 1));
+    mx_lo = fmaxf(mx_lo, __shfl_xor_sync(~0u, mx_lo, 2));
+    mx_hi = fmaxf(mx_hi, __shfl_xor_sync(~0u, mx_hi, 1));
+    mx_hi = fmaxf(mx_hi, __shfl_xor_sync(~0u, mx_hi, 2));
+    const float mn_lo = fmaxf(m_lo_run, mx_lo);
+    const float mn_hi = fmaxf(m_hi_run, mx_hi);
+    const float rs_lo = mn_lo == -INFINITY ? 1.f : expf(m_lo_run - mn_lo);
+    const float rs_hi = mn_hi == -INFINITY ? 1.f : expf(m_hi_run - mn_hi);
+    // Probabilities: fp32 for l, bf16 for the c accumulation (the pin).
+    uint32_t pa[2][4];
+    float la_lo = 0.f, la_hi = 0.f;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      float pv[4];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const bool hi = i >= 2;
+        const float mn = hi ? mn_hi : mn_lo;
+        pv[i] = (sc[j][i] == -INFINITY) ? 0.f : expf(sc[j][i] - mn);
+        if (hi) la_hi += pv[i]; else la_lo += pv[i];
+      }
+      const uint32_t lo01 = uint32_t(float_to_bf16_bits(pv[0])) |
+                            (uint32_t(float_to_bf16_bits(pv[1])) << 16);
+      const uint32_t hi01 = uint32_t(float_to_bf16_bits(pv[2])) |
+                            (uint32_t(float_to_bf16_bits(pv[3])) << 16);
+      // k16 step kk = j / 2 holds n8 tiles 2kk (regs 0,1) and 2kk+1 (2,3).
+      pa[j / 2][(j % 2) * 2 + 0] = lo01;
+      pa[j / 2][(j % 2) * 2 + 1] = hi01;
+    }
+    la_lo += __shfl_xor_sync(~0u, la_lo, 1);
+    la_lo += __shfl_xor_sync(~0u, la_lo, 2);
+    la_hi += __shfl_xor_sync(~0u, la_hi, 1);
+    la_hi += __shfl_xor_sync(~0u, la_hi, 2);
+    l_lo = l_lo * rs_lo + la_lo;
+    l_hi = l_hi * rs_hi + la_hi;
+    m_lo_run = mn_lo;
+    m_hi_run = mn_hi;
+    // O rescale, then O += P . L over the warp's columns.
+#pragma unroll
+    for (int j = 0; j < NT; ++j) {
+      acc[j][0] *= rs_lo;
+      acc[j][1] *= rs_lo;
+      acc[j][2] *= rs_hi;
+      acc[j][3] *= rs_hi;
+    }
+#pragma unroll
+    for (int kk = 0; kk < 2; ++kk) {
+      const int tb = kk * 16 + cc;  // the fragment's first token (k index)
+#pragma unroll
+      for (int j = 0; j < NT; ++j) {
+        const int d = quarter * CW + j * 8 + r;  // output column (n index)
+        const uint32_t b0 = uint32_t(sL[tb * SQ + d]) | (uint32_t(sL[(tb + 1) * SQ + d]) << 16);
+        const uint32_t b1 = uint32_t(sL[(tb + 8) * SQ + d]) | (uint32_t(sL[(tb + 9) * SQ + d]) << 16);
+        mma_bf16_16816(acc[j], pa[kk][0], pa[kk][1], pa[kk][2], pa[kk][3], b0, b1);
+      }
+    }
+  }
+
+  // Publish the split partials in the combine kernel's layout.
+  auto publish = [&](int mrow, float mrun, float lrun, int which) {
+    if (mrow >= total_m) return;
+    const int qr = mrow / local_heads, h = mrow % local_heads;
+    const int64_t idx = (int64_t(qr) * n_split + s) * local_heads + h;
+    if (cc == 0) {
+      m_ws[idx] = mrun;
+      l_ws[idx] = lrun;
+    }
+    float* crow = c_ws + idx * KV;
+#pragma unroll
+    for (int j = 0; j < NT; ++j) {
+      const int d = quarter * CW + j * 8 + cc;
+      *reinterpret_cast<float2*>(crow + d) =
+          which == 0 ? make_float2(acc[j][0], acc[j][1])
+                     : make_float2(acc[j][2], acc[j][3]);
+    }
+  };
+  publish(m_lo, m_lo_run, l_lo, 0);
+  publish(m_hi, m_hi_run, l_hi, 1);
+}
+
 __global__ void attn_combine_kernel(const float* m_ws, const float* l_ws,
                                     const float* c_ws, int n_split,
                                     int local_heads, int kv_lora,
@@ -1197,6 +1470,12 @@ void dsa_prepare_kernel_smem() {
     DGPP_CUDA_OK(cudaFuncSetAttribute(
         attn_partial_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
         g_attn_smem_cap));
+    DGPP_CUDA_OK(cudaFuncSetAttribute(
+        attn_dense_kernel<512>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        int(dense::Geo<512>::smem_bytes)));
+    DGPP_CUDA_OK(cudaFuncSetAttribute(
+        attn_dense_kernel<256>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        int(dense::Geo<256>::smem_bytes)));
   }
 }
 
@@ -1433,6 +1712,38 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
       counts, n_split, local_heads, kv_lora, block_tokens, block_tables,
       blocks_per_request, scale, m_ws, l_ws, c_ws);
   DGPP_CUDA_OK(cudaGetLastError());
+}
+
+bool dsa_attn_dense(const void* q_tilde, const void* latent_cache,
+                    const int32_t* req_ids, const int64_t* pos, int rows,
+                    int n_split, int local_heads, int kv_lora, int block_tokens,
+                    const int32_t* block_tables, int blocks_per_request,
+                    float scale, float* m_ws, float* l_ws, float* c_ws,
+                    cudaStream_t stream) {
+  if (rows <= 0) return true;
+  if (kv_lora != 512 && kv_lora != 256) return false;  // caller falls back
+  if (local_heads <= 0 || n_split <= 0 || block_tokens <= 0)
+    DGPP_CUDA_OK(cudaErrorInvalidValue);
+  dsa_prepare_kernel_smem();
+  const int total_m = rows * local_heads;
+  dim3 grid{unsigned((total_m + dense::kM - 1) / dense::kM), unsigned(n_split)};
+  if (kv_lora == 512) {
+    attn_dense_kernel<512><<<grid, dense::kThreads, dense::Geo<512>::smem_bytes,
+                             stream>>>(
+        static_cast<const uint16_t*>(q_tilde),
+        static_cast<const uint16_t*>(latent_cache), req_ids, pos, rows, n_split,
+        local_heads, block_tokens, block_tables, blocks_per_request, scale,
+        m_ws, l_ws, c_ws);
+  } else {
+    attn_dense_kernel<256><<<grid, dense::kThreads, dense::Geo<256>::smem_bytes,
+                             stream>>>(
+        static_cast<const uint16_t*>(q_tilde),
+        static_cast<const uint16_t*>(latent_cache), req_ids, pos, rows, n_split,
+        local_heads, block_tokens, block_tables, blocks_per_request, scale,
+        m_ws, l_ws, c_ws);
+  }
+  DGPP_CUDA_OK(cudaGetLastError());
+  return true;
 }
 
 void dsa_attn_combine(const float* m_ws, const float* l_ws, const float* c_ws,

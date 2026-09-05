@@ -823,6 +823,155 @@ DGPP_TEST(dsa_absorbed_attention_matches_host_reference) {
 }
 
 // ---------------------------------------------------------------------------
+// Dense causal attention on tensor cores (the prefill path below index_topk
+// tokens) against the split kernel over the equivalent dense selection
+// (tolerance: a different fp32 summation order) and the host oracle, at
+// the real geometry (64 heads / 512 latent), at TP=4's 16 heads, and at a
+// 256-wide latent; deterministic; split counts agree within tolerance.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct DenseCase { int num_heads, kv_lora; };
+
+void run_dense_attention_case(const DenseCase& dc) {
+  DsaConfig cfg{};
+  cfg.num_heads = dc.num_heads;
+  cfg.kv_lora_rank = dc.kv_lora;
+  const DsaGeometry g = DsaGeometry::from_config(cfg);
+  const int local_heads = g.local_heads, nope = cfg.qk_nope_head_dim;
+  const int v = cfg.v_head_dim, kv_lora = cfg.kv_lora_rank;
+  const int block_tokens = cfg.block_tokens;
+  // 41 query rows at positions 90..130: rows straddle the 32-token tiles,
+  // the two blocks of the latent cache, and the split boundaries.
+  const int rows = 41;
+  const int64_t pos0 = 90;
+  const int max_selected = int(pos0) + rows;  // dense lists: tokens [0, pos]
+  std::vector<int64_t> pos(rows);
+  std::vector<int32_t> tokens(size_t(rows) * max_selected, -1);
+  std::vector<int32_t> counts(rows), req_ids(rows, 0);
+  for (int r = 0; r < rows; ++r) {
+    pos[r] = pos0 + r;
+    counts[r] = int(pos[r]) + 1;
+    for (int i = 0; i < counts[r]; ++i) tokens[size_t(r) * max_selected + i] = i;
+  }
+  auto q = random_bf16_bits(91 + dc.num_heads, int64_t(rows) * local_heads * nope, -2, 1);
+  auto kv_b = random_bf16_bits(92 + dc.kv_lora,
+                               int64_t(local_heads) * (nope + v) * kv_lora, -2, 1);
+  const int n_blocks = 2, total_tokens = n_blocks * block_tokens;
+  auto latent = random_bf16_bits(93, int64_t(total_tokens) * kv_lora, -2, 1);
+  std::vector<int32_t> bt = {1, 0};  // reversed on purpose
+  const float scale = 1.0f / std::sqrt(float(nope));
+
+  DevBuf dq(q.size() * 2), dkb(kv_b.size() * 2), dlat(latent.size() * 2),
+      dtopk(tokens.size() * 4), dcnt(rows * 4), dri(rows * 4), dpos(rows * 8),
+      dbt(8), dqt(size_t(rows) * local_heads * kv_lora * 2),
+      dc_split(size_t(rows) * local_heads * kv_lora * 4),
+      dc_dense(size_t(rows) * local_heads * kv_lora * 4),
+      dc_dense2(size_t(rows) * local_heads * kv_lora * 4),
+      dc_dense1(size_t(rows) * local_heads * kv_lora * 4),
+      dout(size_t(rows) * local_heads * v * 2);
+  dq.upload(q.data(), q.size() * 2);
+  dkb.upload(kv_b.data(), kv_b.size() * 2);
+  dlat.upload(latent.data(), latent.size() * 2);
+  dtopk.upload(tokens.data(), tokens.size() * 4);
+  dcnt.upload(counts.data(), counts.size() * 4);
+  dri.upload(req_ids.data(), req_ids.size() * 4);
+  dpos.upload(pos.data(), pos.size() * 8);
+  dbt.upload(bt.data(), bt.size() * 4);
+  dsa_absorb_q(dq.p, dkb.p, dqt.p, rows, local_heads, nope, v, kv_lora, 0);
+
+  auto run_split = [&](int n_split, void* c_out) {
+    DevBuf dm(size_t(rows) * n_split * local_heads * 4),
+        dl(size_t(rows) * n_split * local_heads * 4),
+        dc(size_t(rows) * n_split * local_heads * kv_lora * 4);
+    dsa_attn_partial(dqt.p, dlat.p, static_cast<const int32_t*>(dri.p),
+                     static_cast<const int32_t*>(dtopk.p), max_selected,
+                     static_cast<const int32_t*>(dcnt.p), rows, n_split,
+                     local_heads, kv_lora, block_tokens,
+                     static_cast<const int32_t*>(dbt.p), n_blocks, scale,
+                     static_cast<float*>(dm.p), static_cast<float*>(dl.p),
+                     static_cast<float*>(dc.p), 0);
+    dsa_attn_combine(static_cast<const float*>(dm.p), static_cast<const float*>(dl.p),
+                     static_cast<const float*>(dc.p), rows, n_split, local_heads,
+                     kv_lora, static_cast<float*>(c_out), 0);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+  };
+  auto run_dense = [&](int n_split, void* c_out) {
+    DevBuf dm(size_t(rows) * n_split * local_heads * 4),
+        dl(size_t(rows) * n_split * local_heads * 4),
+        dc(size_t(rows) * n_split * local_heads * kv_lora * 4);
+    const bool ok = dsa_attn_dense(
+        dqt.p, dlat.p, static_cast<const int32_t*>(dri.p),
+        static_cast<const int64_t*>(dpos.p), rows, n_split, local_heads, kv_lora,
+        block_tokens, static_cast<const int32_t*>(dbt.p), n_blocks, scale,
+        static_cast<float*>(dm.p), static_cast<float*>(dl.p),
+        static_cast<float*>(dc.p), 0);
+    if (!ok) throw std::runtime_error("dense kernel refused the geometry");
+    dsa_attn_combine(static_cast<const float*>(dm.p), static_cast<const float*>(dl.p),
+                     static_cast<const float*>(dc.p), rows, n_split, local_heads,
+                     kv_lora, static_cast<float*>(c_out), 0);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+  };
+  run_split(4, dc_split.p);
+  run_dense(4, dc_dense.p);
+  run_dense(4, dc_dense2.p);
+  run_dense(1, dc_dense1.p);
+
+  const size_t n = size_t(rows) * local_heads * kv_lora;
+  std::vector<float> a(n), b(n), b2(n), b1(n);
+  dc_split.download(a.data(), n * 4);
+  dc_dense.download(b.data(), n * 4);
+  dc_dense2.download(b2.data(), n * 4);
+  dc_dense1.download(b1.data(), n * 4);
+  require_bitwise("dense attention repeat", b2.data(), b.data(), n * 4);
+  auto l2_rel = [&](const std::vector<float>& x, const std::vector<float>& y) {
+    double d2 = 0, y2 = 0;
+    for (size_t i = 0; i < n; ++i) {
+      const double d = double(x[i]) - double(y[i]);
+      d2 += d * d;
+      y2 += double(y[i]) * double(y[i]);
+    }
+    return std::sqrt(d2 / std::max(y2, 1e-30));
+  };
+  const double vs_split = l2_rel(b, a), vs_split1 = l2_rel(b1, a);
+  std::printf("[ OK ] dense attention heads=%d kv=%d: c vs split kernel l2_rel %.3g "
+              "(n_split 4), %.3g (n_split 1)\n",
+              dc.num_heads, dc.kv_lora, vs_split, vs_split1);
+  // The same split count agrees to ~1e-6 (the same partial structure, the
+  // tensor core's summation order inside); one split against four is the
+  // online-softmax reassociation across splits, ~1.5e-4.
+  if (vs_split > 2e-5 || vs_split1 > 5e-4)
+    throw std::runtime_error("dense attention diverges from the split kernel");
+
+  // Through vout against the host oracle, the split kernel's own budget.
+  dsa_vout_gemm(dc_dense.p, dkb.p, dout.p, rows, local_heads, nope, v, kv_lora, 0);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<uint16_t> phys_latent(size_t(total_tokens) * kv_lora);
+  for (int64_t tok = 0; tok < total_tokens; ++tok) {
+    const int32_t blk = bt[size_t(tok / block_tokens)];
+    const int64_t phys = int64_t(blk) * block_tokens + (tok % block_tokens);
+    std::memcpy(&phys_latent[size_t(tok) * kv_lora], &latent[size_t(phys) * kv_lora],
+                kv_lora * 2);
+  }
+  std::vector<uint16_t> want(size_t(rows) * local_heads * v);
+  for (int r = 0; r < rows; ++r)
+    dsa_ref::absorbed_attn<float>(&q[size_t(r) * local_heads * nope], phys_latent.data(),
+                                  kv_lora, &tokens[size_t(r) * max_selected], counts[r],
+                                  kv_b.data(), local_heads, nope, v, kv_lora, scale,
+                                  &want[size_t(r) * local_heads * v]);
+  std::vector<uint16_t> got(size_t(rows) * local_heads * v);
+  dout.download(got.data(), got.size() * 2);
+  require_bf16("dense attention vs host f32", compare_bf16(got, want, 8), 0.01, 0.006);
+}
+
+}  // namespace
+
+DGPP_TEST(dsa_dense_attention_matches_split_kernel_and_reference) {
+  for (const DenseCase dc : {DenseCase{64, 512}, DenseCase{16, 512}, DenseCase{16, 256}})
+    run_dense_attention_case(dc);
+}
+
+// ---------------------------------------------------------------------------
 // Decode-select scenarios shared by the MTP-row, grid-invariance,
 // long-context, and graph-replay tests. The host expectation mirrors the
 // kernel's contraction-proof arithmetic exactly (see the bitwise test above).

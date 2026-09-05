@@ -223,6 +223,23 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
                       float* m_ws, float* l_ws, float* c_ws,
                       cudaStream_t stream);
 
+// Dense causal attention on tensor cores (2026-09-05): the prefill path
+// below index_topk tokens of context, where the selection is provably
+// dense (every visible pool selected, the tail appended) and a query at
+// position p attends to tokens [0, p]. Same partial layout and split
+// semantics as dsa_attn_partial — combine with dsa_attn_combine. The M
+// dimension is (row, head) pairs; 32 per block. Returns false without
+// launching when kv_lora is not 512 or 256 (the caller keeps the split
+// kernel). Tolerance-equal to the split kernel (a different summation
+// order), deterministic.
+//   pos: int64 [rows] — the rows' token positions (causal bound per row).
+bool dsa_attn_dense(const void* q_tilde, const void* latent_cache,
+                    const int32_t* req_ids, const int64_t* pos, int rows,
+                    int n_split, int local_heads, int kv_lora, int block_tokens,
+                    const int32_t* block_tables, int blocks_per_request,
+                    float scale, float* m_ws, float* l_ws, float* c_ws,
+                    cudaStream_t stream);
+
 // Merge the split partials into normalized c rows: c_out[r,h,:] =
 // (sum_s p_s * c_s) / (sum_s p_s * l_s), p_s = exp(m_s - max m).
 void dsa_attn_combine(const float* m_ws, const float* l_ws, const float* c_ws,
