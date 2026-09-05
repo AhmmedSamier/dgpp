@@ -524,6 +524,93 @@ struct SamplingRun {
   bool on() const { return params.has_value(); }
 };
 
+// The host pick — ONE driver for every loop that picks on the host (PLAN
+// M8's FabricPicker seam, 2026-09-05): world 1's full-head argmax or exact
+// sampler and the fabric's bus merge or bus sampler behind the same
+// greedy / sampling branch, the same RNG, the same log lines (the ones
+// scripts/fabric_xrank.py and fabric_xcript.py read). The plain loops use
+// it at every step, eager or under the T=1 graph (the pick rides between
+// windows); the speculative loop uses it for its prefill pick and its
+// eager row picks. The in-graph pick is GlmDevicePicker (a recorded node)
+// — the other driver, by nature.
+class HostPick {
+ public:
+  HostPick(int world, int rank, CollectiveBus* bus, uint16_t* pick_scratch,
+           GenEngineAdapter::Sample sample, const SamplingRun& sampling,
+           int64_t vocab)
+      : world_(world), rank_(rank), bus_(bus), scratch_(pick_scratch),
+        sample_(std::move(sample)), sampling_(sampling), vocab_(vocab),
+        rng_{sampling.seed, 0} {}
+
+  // One pick over `o`'s (last) row: sampled at the run's settings with
+  // `context` (the penalties' count table) or greedy; `what` and `s` name
+  // the step in the log. The Candidate's logit is the winner's when this
+  // rank holds it (world 1 always), else -inf.
+  dgpp::glm_sample::Candidate pick(const GlmDiagnosticModel::Outputs& o,
+                                   const char* what, int s,
+                                   const std::vector<int32_t>& context) {
+    if (sampling_.on()) {
+      const dgpp::glm_sample::Result r =
+          sample_(o, *sampling_.params, rng_, context, nullptr);
+      if (world_ == 1) {
+        DGPP_LOG_INFO("[gen] sampled token {} logprob {:.4f} (counter {})",
+                      r.token, r.logprob, rng_.counter);
+        return {r.token, o.logits[static_cast<size_t>(r.token)]};
+      }
+      DGPP_LOG_INFO(
+          "[gen] rank {} {} {}: sampled token {} logprob {:.4f} (counter "
+          "{}; local slice [{},{}))",
+          rank_, what, s, r.token, r.logprob, rng_.counter,
+          o.lm_vocab_begin, o.lm_vocab_begin + o.lm_vocab_count);
+      return {r.token, -INFINITY};
+    }
+    const std::vector<float>& fslice = o.logits;
+    const dgpp::glm_sample::Candidate local = dgpp::glm_sample::local_max(
+        fslice.data(), o.lm_vocab_count, o.lm_vocab_begin);
+    if (world_ == 1) return local;  // the full head: the argmax is the pick
+    // The slice's runner-up: with the four ranks' lines side by side
+    // (fabric_xrank), the global top-2 margin of every pick follows, and
+    // a transcript that diverges between two builds can be judged — a
+    // near-tie flip is rounding, a wide-margin flip is a bug.
+    float second = -INFINITY;
+    for (int i = 0; i < o.lm_vocab_count; ++i)
+      if (o.lm_vocab_begin + i != local.id && fslice[i] > second)
+        second = fslice[i];
+    const int32_t token =
+        dgpp::bus_greedy_pick(*bus_, rank_, world_, local, scratch_, 60000);
+    require(token >= 0 && token < vocab_,
+            "generated id out of range: " + std::to_string(token));
+    DGPP_LOG_INFO(
+        "[gen] rank {} {} {}: token {} (local slice [{},{}) best "
+        "{} logit {:.4f} second {:.4f})",
+        rank_, what, s, token, o.lm_vocab_begin,
+        o.lm_vocab_begin + o.lm_vocab_count, local.id, local.logit, second);
+    return {token, token == local.id ? local.logit : -INFINITY};
+  }
+  // Greedy picks over several rows' local maxima (the speculative loop's
+  // prefill and eager row picks): the same bus merge, one collective.
+  std::vector<int32_t> pick_rows(
+      const std::vector<dgpp::glm_sample::Candidate>& locals) {
+    if (world_ == 1) {
+      std::vector<int32_t> out;
+      for (const dgpp::glm_sample::Candidate& c : locals) out.push_back(c.id);
+      return out;
+    }
+    return dgpp::bus_greedy_pick_rows(*bus_, rank_, world_, locals, scratch_,
+                                      60000);
+  }
+
+ private:
+  int world_;
+  int rank_;
+  CollectiveBus* bus_;
+  uint16_t* scratch_;
+  GenEngineAdapter::Sample sample_;
+  SamplingRun sampling_;
+  int64_t vocab_;
+  dgpp::glm_sample::Rng rng_;
+};
+
 // Pinned words for the sampler's two collectives (the candidate/LSE fold
 // and the fallback gather), allocated before the world forms.
 struct PinnedWords {
@@ -913,6 +1000,10 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
       dgpp::local_row_maxes(pre, 1);
   *forward_ms_total = prefill_ms;
   dgpp::step_timing::reset();
+  // The host picks of this loop (the prefill's, the eager rows'): HostPick,
+  // greedy — the sampled speculator below draws through its own seam.
+  HostPick host(world, rank, &bus, pick_scratch, GenEngineAdapter::Sample{},
+                SamplingRun{}, cfg.vocab_size);
 
   // ---- exact speculative SAMPLING, the eager driver (M6 6b) --------------
   // The sampled prefill pick, then SampledSpeculator: row 0's accept test
@@ -921,8 +1012,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   if (sampling.on()) {
     const auto pick_rows =
         [&](const std::vector<dgpp::glm_sample::Candidate>& locals) {
-          return dgpp::bus_greedy_pick_rows(bus, rank, world, locals,
-                                            pick_scratch, 60000);
+          return host.pick_rows(locals);
         };
     const dgpp::GenEngineAdapter::Sample row1 = dgpp::make_fabric_sample(
         &bus, rank, world, sample_prefix_scratch, sample_gather_scratch,
@@ -976,8 +1066,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     return;
   }
 
-  int32_t next = dgpp::bus_greedy_pick_rows(bus, rank, world, pre_local,
-                                            pick_scratch, 60000)[0];
+  int32_t next = host.pick_rows(pre_local)[0];
   log_row_pick(rank, 0, pre, 0, pre_local[0], next);
 
   // ---- the eager draft (the first proposal; every step's, without graph) --
@@ -1170,24 +1259,15 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       const double prefill_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - t0)
                                     .count();
-      // The pick: greedy argmax, or the exact w1 sampler over the full
-      // head (context = prompt + generated, the penalties' count table).
-      const GenEngineAdapter::Sample w1_sample =
-          dgpp::make_w1_sample(cfg.vocab_size);
-      dgpp::glm_sample::Rng rng{sampling.seed, 0};
+      // The pick (HostPick, the one host driver): greedy argmax, or the
+      // exact w1 sampler over the full head (context = prompt + the picks,
+      // the penalties' count table).
+      HostPick picker(/*world=*/1, /*rank=*/0, /*bus=*/nullptr,
+                      /*pick_scratch=*/nullptr,
+                      dgpp::make_w1_sample(cfg.vocab_size), sampling,
+                      cfg.vocab_size);
       std::vector<int32_t> context(prompt.begin(), prompt.end());
-      const auto decide = [&](const GlmDiagnosticModel::Outputs& o)
-          -> dgpp::glm_sample::Candidate {
-        if (!sampling.on())
-          return dgpp::glm_sample::local_max(o.logits.data(), cfg.vocab_size,
-                                             0);
-        const dgpp::glm_sample::Result r =
-            w1_sample(o, *sampling.params, rng, context, nullptr);
-        DGPP_LOG_INFO("[gen] sampled token {} logprob {:.4f} (counter {})",
-                      r.token, r.logprob, rng.counter);
-        return {r.token, o.logits[static_cast<size_t>(r.token)]};
-      };
-      dgpp::glm_sample::Candidate best = decide(out);
+      dgpp::glm_sample::Candidate best = picker.pick(out, "prefill+pick", 0, context);
       context.push_back(best.id);
       DGPP_LOG_INFO("[gen] prefill: {} tokens in {:.0f}ms", prompt.size(),
                     prefill_ms);
@@ -1217,7 +1297,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0s)
                               .count();
-        best = decide(step);
+        best = picker.pick(step, "step", s + 1, context);
         context.push_back(best.id);
         DGPP_LOG_INFO("[gen] step {}: token {} (logit {:.4f}) [{:.0f}ms]",
                       s + 1, best.id, best.logit, ms);
@@ -1379,50 +1459,22 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                   cfg.eos_token_ids.end(), id) !=
                             cfg.eos_token_ids.end();
     };
-    // The fabric sampler (M6 6b): the same closure glm_serve's eager
-    // engine runs; context = prompt + generated so far.
-    const GenEngineAdapter::Sample fabric_sample = dgpp::make_fabric_sample(
-        bus.get(), rank, world, sample_prefix.data, sample_gather.data,
-        cfg.vocab_size);
-    dgpp::glm_sample::Rng sample_rng{sampling.seed, 0};
+    // The pick (HostPick, the one host driver): the fabric sampler is the
+    // same closure glm_serve's eager engine runs (M6 6b), the greedy pick
+    // the bus merge; context = prompt + generated so far.
+    HostPick picker(world, rank, bus.get(), pick_scratch,
+                    dgpp::make_fabric_sample(bus.get(), rank, world,
+                                             sample_prefix.data,
+                                             sample_gather.data,
+                                             cfg.vocab_size),
+                    sampling, cfg.vocab_size);
     // The step body: run one row (forward or stateful step), pick the
-    // winner through the bus, record it. Returns the picked token.
+    // winner, record it. Returns the picked token.
     const auto run_step = [&](const GlmDiagnosticModel::Outputs& out,
                               const char* what, int s) -> int32_t {
-      if (sampling.on()) {
-        std::vector<int32_t> context(prompt.begin(), prompt.end());
-        context.insert(context.end(), generated.begin(), generated.end());
-        const dgpp::glm_sample::Result r =
-            fabric_sample(out, *sampling.params, sample_rng, context, nullptr);
-        DGPP_LOG_INFO(
-            "[gen] rank {} {} {}: sampled token {} logprob {:.4f} (counter "
-            "{}; local slice [{},{}))",
-            rank, what, s, r.token, r.logprob, sample_rng.counter,
-            out.lm_vocab_begin, out.lm_vocab_begin + out.lm_vocab_count);
-        return r.token;
-      }
-      const std::vector<float>& fslice = out.logits;
-      const dgpp::glm_sample::Candidate local = dgpp::glm_sample::local_max(
-          fslice.data(), out.lm_vocab_count, out.lm_vocab_begin);
-      // The slice's runner-up: with the four ranks' lines side by side
-      // (fabric_xrank), the global top-2 margin of every pick follows, and
-      // a transcript that diverges between two builds can be judged — a
-      // near-tie flip is rounding, a wide-margin flip is a bug.
-      float second = -INFINITY;
-      for (int i = 0; i < out.lm_vocab_count; ++i)
-        if (out.lm_vocab_begin + i != local.id && fslice[i] > second)
-          second = fslice[i];
-      const int32_t token =
-          dgpp::bus_greedy_pick(*bus, rank, world, local, pick_scratch, 60000);
-      require(token >= 0 && token < cfg.vocab_size,
-              "generated id out of range: " + std::to_string(token));
-      DGPP_LOG_INFO(
-          "[gen] rank {} {} {}: token {} (local slice [{},{}) best "
-          "{} logit {:.4f} second {:.4f})",
-          rank, what, s, token, out.lm_vocab_begin,
-          out.lm_vocab_begin + out.lm_vocab_count, local.id, local.logit,
-          second);
-      return token;
+      std::vector<int32_t> context(prompt.begin(), prompt.end());
+      context.insert(context.end(), generated.begin(), generated.end());
+      return picker.pick(out, what, s, context).id;
     };
     std::string generated_text;
     if (mtp) {

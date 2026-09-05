@@ -351,6 +351,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     slot_fallbacks_.assign(static_cast<size_t>(slots_), 0);
     pending_.assign(static_cast<size_t>(slots_), -1);
     draft_.assign(static_cast<size_t>(slots_), -1);
+    hop_slot_.assign(static_cast<size_t>(slots_), -1);
+    hop_position_.assign(static_cast<size_t>(slots_), 0);
     live_.assign(static_cast<size_t>(slots_), false);
     reserved_.assign(static_cast<size_t>(slots_), false);
     scalar_execs_.assign(static_cast<size_t>(slots_), nullptr);
@@ -523,6 +525,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   glm::SchedulerEngine::PrefixInfo prefix_info() const override {
     glm::SchedulerEngine::PrefixInfo info;
     info.arena_slots = arena_.slots();
+    info.step_tokens_max = rows_per_request_;
     info.align = model_->session_kpool();
     info.block_tokens = model_->dsa_block_tokens();
     info.chunk_tokens = GlmDiagnosticModel::prefill_chunk_tokens();
@@ -562,6 +565,11 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   void prefix_snapshot(int req, int slot, int64_t position) override {
     check_live(req, "prefix_snapshot");
     arena_.snapshot(req, slot, position);
+  }
+  void prefix_arm_hop(int req, int slot, int64_t position) override {
+    check_live(req, "prefix_arm_hop");
+    hop_slot_[static_cast<size_t>(req)] = slot;
+    hop_position_[static_cast<size_t>(req)] = position;
   }
   void prefix_release(int slot) override { arena_.release(slot); }
   glm::SchedulerEngine::PrefixEngineStats prefix_engine_stats() const override {
@@ -730,6 +738,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     reserved_[static_cast<size_t>(req)] = false;
     pending_[static_cast<size_t>(req)] = -1;
     draft_[static_cast<size_t>(req)] = -1;
+    hop_slot_[static_cast<size_t>(req)] = -1;
     // A reopened slot is greedy until the scheduler arms it again — on the
     // device too, so a padded replay of this slot never draws.
     params_[static_cast<size_t>(req)] = glm_sample::greedy_params();
@@ -1007,6 +1016,26 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
           " (rows " + std::to_string(verify.rows) + ", accepted " +
           std::to_string(verify.accepted) + ")");
     model_->session_graph_settle(req, verify.accepted);
+    // The prefix cache's hop snapshot (M7 under the two-row step): armed by
+    // the scheduler for the aligned position row 1 sat on; taken from the
+    // state after row 0 when both rows stood — here, before another slot's
+    // scalar step can reuse the spec snapshot rows. A one-row verdict landed
+    // ON the position; the scheduler's rolling snapshot follows.
+    if (hop_slot_[static_cast<size_t>(req)] >= 0) {
+      const int slot = hop_slot_[static_cast<size_t>(req)];
+      const int64_t hop = hop_position_[static_cast<size_t>(req)];
+      hop_slot_[static_cast<size_t>(req)] = -1;
+      if (verify.accepted == 2) {
+        if (model_->session_position(req) != hop + 1)
+          throw std::runtime_error(
+              "graph engine: slot " + std::to_string(req) + " sits at " +
+              std::to_string(model_->session_position(req)) +
+              " after a two-row step, the armed hop expects " +
+              std::to_string(hop + 1));
+        arena_.snapshot_post_row0(req, slot, hop,
+                                  batched ? req * rows_per_request_ : 0);
+      }
+    }
 
     std::vector<int32_t> decided;
     decided.reserve(static_cast<size_t>(verify.accepted));
@@ -1482,6 +1511,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   bool mtp_redrafted_ = false;  // this collect re-drafted on the host
   int slots_ = 0;
   int rows_per_request_ = 1;
+  std::vector<int> hop_slot_;          // per slot: the armed hop's arena slot, -1 none
+  std::vector<int64_t> hop_position_;  // per slot: the armed hop's position
   int batch_min_live_ = 1;
   int last_mode_ = -1;  // 0 scalar variants, 1 fixed row batch
   bool batch_feeds_dirty_ = true;

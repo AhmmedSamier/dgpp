@@ -39,10 +39,13 @@
 // distribution restricted to the mask and renormalized, exactly.
 //
 // Keys and required properties: keys are constrained to the schema's
-// property names when it declares them and admits no others; the presence
-// of required keys and value types are NOT enforced (that is the parser's
-// schema typing and the client's validation, as with OpenAI's non-strict
-// tools).
+// property names when it closes them (additionalProperties false), and a
+// closed key is offered at most once per call (a duplicate key is never a
+// valid object); under `strict: true` the call cannot close while a
+// required key is missing (OpenAI's strict guarantee — every required
+// property present, each typed by its schema). A non-strict tool's
+// required keys and its free-text values stay the parser's schema typing
+// and the client's validation, as with OpenAI's non-strict tools.
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -84,6 +87,11 @@ struct GrammarTool {
   bool constrain_keys = false;     // the schema closes its properties
   std::vector<std::string> keys;   // the property names, when closed
   std::vector<GrammarArg> args;    // the declared properties' value constraints
+  // `parameters.required` (the names among the declared properties) and
+  // the definition's `strict` flag: a strict call cannot close while a
+  // required key is missing.
+  std::vector<std::string> required_keys;
+  bool strict = false;
 };
 
 // Derives a tool's grammar entry from its OpenAI function definition
@@ -127,7 +135,9 @@ struct GrammarSpec {
     for (size_t i = 0; i < tools.size(); ++i)
       if (tools[i].name != o.tools[i].name ||
           tools[i].constrain_keys != o.tools[i].constrain_keys ||
-          tools[i].keys != o.tools[i].keys || tools[i].args != o.tools[i].args)
+          tools[i].keys != o.tools[i].keys || tools[i].args != o.tools[i].args ||
+          tools[i].required_keys != o.tools[i].required_keys ||
+          tools[i].strict != o.tools[i].strict)
         return false;
     return true;
   }
@@ -259,9 +269,15 @@ class GrammarState {
   bool obligation_open() const;  // a call is still required
   bool calls_remaining() const;  // another call may open
   const GrammarTool* current_tool() const;
-  // Whether a key may open: the open tool's key set is not closed-empty.
+  // Whether a key may open: the open tool's key set is open, or closed
+  // with a key this call has not used yet (a closed key is offered once).
   bool keys_possible() const;
   bool keys_possible_for(const std::string& name) const;
+  // Whether the call may close: not while a strict tool's required key is
+  // missing.
+  bool call_closable() const;
+  bool call_closable_for(const std::string& name) const;
+  bool key_used(const std::string& key) const;
   // The free-text mask: everything but the markers (when forbidden) and
   // EOS while the obligation is open; `extra_allowed` reopens one marker.
   void free_mask(TokenMask* out, int64_t extra_allowed,
@@ -284,6 +300,7 @@ class GrammarState {
   int tool_ = -1;          // the open call's tool (index into spec_.tools)
   TextMatch match_;        // kName / kKey / a kText value
   std::string key_;        // the open argument's key (kAfterKey / kValue)
+  std::vector<std::string> used_keys_;  // the open call's keys so far
   int arg_ = -1;           // the open argument (index into the tool's args)
   JsonMachine json_;       // kJson: the body's machine (inactive otherwise)
   JsonMachine value_json_; // a kJson argument's machine

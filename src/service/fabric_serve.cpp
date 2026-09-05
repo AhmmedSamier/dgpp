@@ -159,6 +159,16 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
             }
             out.push_back(']');
           }
+          // A strict tool and its required keys (the call's closing gate).
+          if (gr.tools[t].strict) out += ",\"s\":true";
+          if (!gr.tools[t].required_keys.empty()) {
+            out += ",\"r\":[";
+            for (size_t k = 0; k < gr.tools[t].required_keys.size(); ++k) {
+              if (k != 0) out.push_back(',');
+              append_json_string(&out, gr.tools[t].required_keys[k]);
+            }
+            out.push_back(']');
+          }
           // The typed arguments (M6 6i): only the constrained ones ride.
           bool any_typed = false;
           for (const auto& a : gr.tools[t].args)
@@ -457,6 +467,19 @@ JournalRecord decode_journal_line(std::string_view line) {
             for (const dgpp::minijson::Value& key : k->items())
               tool.keys.emplace_back(key.as_string());
           }
+          if (const dgpp::minijson::Value* s = t.find("s")) {
+            if (!s->is_bool())
+              throw std::runtime_error("journal: submit '" + r.id +
+                                       "' has a non-boolean grammar strict flag");
+            tool.strict = s->as_bool();
+          }
+          if (const dgpp::minijson::Value* req = t.find("r")) {
+            if (!req->is_array())
+              throw std::runtime_error("journal: submit '" + r.id +
+                                       "' has non-array grammar required keys");
+            for (const dgpp::minijson::Value& key : req->items())
+              tool.required_keys.emplace_back(key.as_string());
+          }
           if (const dgpp::minijson::Value* args = t.find("a")) {
             if (!args->is_array())
               throw std::runtime_error("journal: submit '" + r.id +
@@ -548,9 +571,38 @@ void JournalWriter::accept_peers(int world, int accept_timeout_ms) {
           std::to_string(peers) + " peers connected within " +
           std::to_string(accept_timeout_ms) +
           "ms — a short world cannot serve (check the peers' logs)");
+    // The peer's hello names the connection by rank; after it a peer never
+    // writes, so a readable connection is a close or a reset (the death
+    // watch's premise).
+    std::string hello;
+    while (hello.find('\n') == std::string::npos) {
+      const int left = static_cast<int>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              deadline - std::chrono::steady_clock::now())
+              .count());
+      if (left <= 0 || !conn.wait_readable(left))
+        throw std::runtime_error("journal: peer connection " + std::to_string(i) +
+                                 " sent no hello within the window");
+      char buf[64];
+      const int n = conn.read_some(buf, sizeof buf);
+      if (n <= 0)
+        throw std::runtime_error("journal: peer connection " + std::to_string(i) +
+                                 " closed before its hello");
+      hello.append(buf, static_cast<size_t>(n));
+      if (hello.size() > sizeof buf)
+        throw std::runtime_error("journal: peer connection " + std::to_string(i) +
+                                 " sent garbage instead of a hello");
+    }
+    int rank = -1;
+    if (std::sscanf(hello.c_str(), "hello %d", &rank) != 1 || rank < 1 ||
+        rank >= world ||
+        std::find(peer_ranks_.begin(), peer_ranks_.end(), rank) != peer_ranks_.end())
+      throw std::runtime_error("journal: bad hello from peer connection " +
+                               std::to_string(i) + ": '" + hello + "'");
     peers_.push_back(std::move(conn));
-    DGPP_LOG_INFO("journal: peer {}/{} connected ({}ms left in window)", i,
-                   peers, left_ms);
+    peer_ranks_.push_back(rank);
+    DGPP_LOG_INFO("journal: rank {} connected ({}/{}, {}ms left in window)",
+                  rank, i, peers, left_ms);
   }
   DGPP_LOG_INFO("journal: world complete ({} peer connection(s))", peers);
 }
@@ -560,18 +612,55 @@ void JournalWriter::broadcast(const std::string& line) {
   for (size_t i = 0; i < peers_.size(); ++i) {
     if (!peers_[i].write_all(framed.data(), framed.size()))
       throw std::runtime_error(
-          "journal: peer connection " + std::to_string(i + 1) + " of " +
-          std::to_string(peers_.size()) +
-          " stopped reading — the fabric is broken; refusing to serve on "
-          "without it");
+          "journal: rank " + std::to_string(peer_ranks_[i]) +
+          "'s connection stopped reading — the fabric is broken; refusing "
+          "to serve on without it");
   }
 }
+
+int JournalWriter::dead_peer() const {
+  for (size_t i = 0; i < peers_.size(); ++i)
+    if (peers_[i].peer_closed()) return peer_ranks_[i];
+  return 0;
+}
+
+void JournalWriter::watch_peers(
+    std::function<void(int, const std::string&)> on_death, int poll_ms) {
+  stop_watch();
+  watch_stop_.store(false);
+  watch_ = std::thread([this, on_death = std::move(on_death), poll_ms] {
+    while (!watch_stop_.load()) {
+      const int dead = dead_peer();
+      if (dead > 0) {
+        if (on_death)
+          on_death(dead, "its journal connection closed — the process is gone");
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+    }
+  });
+}
+
+void JournalWriter::stop_watch() {
+  watch_stop_.store(true);
+  if (watch_.joinable()) watch_.join();
+}
+
+void JournalWriter::close_peers() {
+  for (auto& p : peers_) p.close();
+}
+
+JournalWriter::~JournalWriter() { stop_watch(); }
 
 // ---- peers ------------------------------------------------------------------
 
 JournalReader::JournalReader(const std::string& host, uint16_t port,
-                             int connect_timeout_ms)
-    : conn_(journal_connect_with_retry(host, port, connect_timeout_ms)) {}
+                             int connect_timeout_ms, int rank)
+    : conn_(journal_connect_with_retry(host, port, connect_timeout_ms)) {
+  const std::string hello = "hello " + std::to_string(rank) + "\n";
+  if (!conn_.write_all(hello.data(), hello.size()))
+    throw std::runtime_error("journal: could not send the hello to rank 0");
+}
 
 bool JournalReader::read_line(const std::function<bool()>& should_stop,
                               std::string* line) {
@@ -621,7 +710,40 @@ bool wait_journal_warm(JournalReader* reader,
 }
 
 void run_journal_peer(Scheduler* sched, JournalReader* reader,
-                      const std::function<bool()>& should_stop) {
+                      const std::function<bool()>& should_stop,
+                      const std::function<void()>& on_rank0_death,
+                      int watch_poll_ms) {
+  // The in-tick watch (the death discipline, fabric_serve.hpp): only while
+  // the loop is inside a tick can rank 0's death go unseen by the read
+  // loop, and in the lockstep protocol no record can be pending then, so
+  // a closed connection is the only thing the probe can find.
+  std::atomic<bool> in_tick{false};
+  std::atomic<bool> watch_stop{false};
+  std::thread watch;
+  if (on_rank0_death) {
+    watch = std::thread([&] {
+      while (!watch_stop.load()) {
+        if (in_tick.load() && reader->rank0_closed()) {
+          on_rank0_death();
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(watch_poll_ms));
+      }
+    });
+  }
+  struct WatchJoin {
+    std::atomic<bool>& stop;
+    std::thread& t;
+    ~WatchJoin() {
+      stop.store(true);
+      if (t.joinable()) t.join();
+    }
+  } watch_join{watch_stop, watch};
+  struct TickScope {
+    std::atomic<bool>& flag;
+    explicit TickScope(std::atomic<bool>& f) : flag(f) { flag.store(true); }
+    ~TickScope() { flag.store(false); }
+  };
   for (;;) {
     std::string line;
     if (!reader->read_line(should_stop, &line)) {
@@ -656,7 +778,10 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
             "scheduler divergence (§11); fabric emergency");
     }
     for (const std::string& id : rec.cancels) sched->cancel(id);
-    sched->tick();
+    {
+      TickScope scope(in_tick);
+      sched->tick();
+    }
   }
 }
 

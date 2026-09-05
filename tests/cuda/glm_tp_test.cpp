@@ -3197,17 +3197,17 @@ dgpp::glm::GrammarSpec fixture_grammar(dgpp::glm::GrammarSpec::Mode mode,
   g.named = named;
   // Typed arguments (M6 6i): x an integer (a JSON value), y one of two
   // texts, z (of the open-keyed tool) a boolean; the rest free.
-  dgpp::glm::GrammarTool ab{"ab", true, {"x", "y"}, {}};
+  dgpp::glm::GrammarTool ab{"ab", true, {"x", "y"}, {}, {}, false};
   ab.args.push_back(dgpp::glm::GrammarArg{"x", dgpp::glm::GrammarArg::Kind::kJson,
                                           "{\"type\":\"integer\"}", {}});
   ab.args.push_back(dgpp::glm::GrammarArg{"y", dgpp::glm::GrammarArg::Kind::kText, "",
                                           {"cd", "ce"}});
   g.tools.push_back(std::move(ab));
-  dgpp::glm::GrammarTool ac{"ac", false, {}, {}};
+  dgpp::glm::GrammarTool ac{"ac", false, {}, {}, {}, false};
   ac.args.push_back(dgpp::glm::GrammarArg{"z", dgpp::glm::GrammarArg::Kind::kJson,
                                           "{\"type\":\"boolean\"}", {}});
   g.tools.push_back(std::move(ac));
-  g.tools.push_back(dgpp::glm::GrammarTool{"b", true, {}, {}});
+  g.tools.push_back(dgpp::glm::GrammarTool{"b", true, {}, {}, {}, false});
   return g;
 }
 
@@ -4616,6 +4616,18 @@ DGPP_TEST(glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks) {
               decisions[static_cast<size_t>(r)].find("attach@28") == std::string::npos)
             throw std::runtime_error("expected attaches at 20 and 28, got: " +
                                      decisions[static_cast<size_t>(r)]);
+          // Every aligned committed position past each attach is covered by
+          // a rolling or a hop snapshot whatever the two-token steps'
+          // parity: a's 28 (a 25-token prompt, six tokens: committed 25..30)
+          // and d's 36 (35 + four: 35..38); a's close entry sits at 28.
+          const std::string& dec = decisions[static_cast<size_t>(r)];
+          const auto covered = [&](int64_t p) {
+            return dec.find("rolling@" + std::to_string(p)) != std::string::npos ||
+                   dec.find("hop@" + std::to_string(p)) != std::string::npos;
+          };
+          if (!covered(28) || !covered(36) || dec.find("close@28") == std::string::npos)
+            throw std::runtime_error(
+                "expected snapshots at 28 and 36 and the close entry at 28, got: " + dec);
         }
         if (graph.dsa_blocks_in_use() != blocks0)
           throw std::runtime_error("blocks leaked past the arena");
@@ -4640,6 +4652,443 @@ DGPP_TEST(glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks) {
     require(digests[static_cast<size_t>(r)] == digests[0], "digests differ across ranks");
   }
   DGPP_LOG_INFO("prefix cache under the MTP graph engine, w2: {}", decisions[0]);
+}
+
+
+// ---------------------------------------------------------------------------
+// M8's exit criterion, the forced construction (2026-09-05): a rejection at
+// EVERY pool-boundary shape inside the one-graph step matches normal
+// decode. The lockstep gate above crosses pool boundaries with the verdicts
+// the text happens to produce; here the draft row is POISONED with a token
+// that is not the true next one — the same device feed the replay's last
+// node writes, overwritten between replays — at every step but each
+// fourth, so the rejected row 1 lands on every residue mod kpool: the row
+// that opens a pool (position 4k, the rollback's tail ring must not carry
+// it), the row that would complete one (4k-1, the pool's compression entry
+// must not be built), and the middle slots. After every forced rejection
+// the transcript must still be the plain session's, and the run must end
+// equal to it — the committed state is untouched by any rejected row.
+// ---------------------------------------------------------------------------
+DGPP_TEST(glm_tp_one_graph_step_forced_rejections_at_pool_boundaries_match_plain) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kTokens = 26;
+  constexpr int kWorld = 2;
+  const int V = cfg.vocab_size;
+  const int max_tokens = static_cast<int>(prompt.size()) + kTokens + 4;
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29925);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int32_t>> rank_seqs(kWorld);
+  std::vector<std::string> rank_shapes(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      cudaGraphExec_t graph_exec = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel plain_shard(cfg, dir, max_tokens, 128, &reducer,
+                                       r, kWorld, GlmResidency::Streaming,
+                                       GlmHeadSharding::VocabSharded);
+        GlmDiagnosticModel shard(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded, 1,
+                                 /*mtp=*/true);
+        shard.set_decode_route_traces(false);
+        shard.set_decode_tail_mirrors(false);
+        dgpp::GlmDevicePicker picker(bus, r, kWorld, test_wait_timeout_ms());
+        dgpp::GlmGraphRecordReducer recorder(bus, shard.stream());
+        DGPP_CUDA_OK(cudaMallocManaged(
+            &scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld)));
+        arrive_once();
+        const auto host_pick = [&](const GlmDiagnosticModel::Outputs& o,
+                                   int rows) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld,
+                                            dgpp::local_row_maxes(o, rows),
+                                            scratch, test_wait_timeout_ms());
+        };
+        // The reference: the plain sharded session.
+        std::vector<int32_t> plain;
+        {
+          GlmDiagnosticModel::Outputs o = plain_shard.session_prefill(prompt);
+          int32_t tok = host_pick(o, 1)[0];
+          for (int s = 0; s < kTokens; ++s) {
+            plain.push_back(tok);
+            o = plain_shard.session_step(tok);
+            tok = host_pick(o, 1)[0];
+          }
+        }
+        // The graph model: prefill, the first pick, the eager first draft.
+        const GlmDiagnosticModel::Outputs pre = shard.session_prefill(prompt);
+        int32_t next = host_pick(pre, 1)[0];
+        const auto device_inputs = [&](int rows, int slot,
+                                       const dgpp::GlmPickVerdict* select) {
+          dgpp::GlmDevicePicker::Inputs in;
+          in.logits = shard.device_logits();
+          in.rows = rows;
+          in.vocab_count = shard.lm_vocab_count();
+          in.vocab_begin = shard.lm_vocab_begin();
+          in.fed = shard.device_tokens();
+          in.slot = slot;
+          in.row_select = select;
+          return in;
+        };
+        (void)shard.session_draft(0, {next});
+        int32_t draft = picker.run(shard.stream(), device_inputs(1, 1, nullptr)).next;
+
+        shard.session_graph_prepare();
+        shard.session_reserve_blocks(0, max_tokens);
+        dgpp::GlmBoundaryReducer* eager_reducer = shard.set_boundary(&recorder);
+        std::string gerr;
+        require(bus.graph_record_begin(&gerr), "graph_record_begin: " + gerr);
+        cudaGraph_t graph = nullptr;
+        DGPP_CUDA_OK(cudaStreamBeginCapture(shard.stream(),
+                                            cudaStreamCaptureModeThreadLocal));
+        shard.session_graph_capture_step(0, std::vector<int64_t>{next, draft},
+                                         /*device_positions=*/true,
+                                         /*device_tokens=*/true);
+        picker.record(shard.stream(), device_inputs(2, 0, nullptr));
+        shard.session_graph_capture_commit(0, picker.device_verdict(0));
+        shard.session_graph_capture_draft(0, picker.device_verdict(0));
+        picker.record(shard.stream(),
+                      device_inputs(1, 1, picker.device_verdict(0)));
+        shard.session_graph_capture_next_tokens(0, picker.device_verdict(1));
+        DGPP_CUDA_OK(cudaStreamEndCapture(shard.stream(), &graph));
+        require(graph != nullptr, "capture produced no graph");
+        require(bus.graph_record_end(&gerr), "graph_record_end: " + gerr);
+        shard.set_boundary(eager_reducer);
+        dgpp::glm_check_decode_graph(graph, r, "forced-rejection graph");
+        DGPP_CUDA_OK(cudaGraphInstantiate(&graph_exec, graph, nullptr,
+                                          nullptr, 0));
+        cudaGraphDestroy(graph);
+        shard.session_graph_seed_tokens(0, {next, draft});
+
+        const int kpool = shard.session_kpool();
+        std::vector<int32_t>& got = rank_seqs[static_cast<size_t>(r)];
+        std::vector<int> forced_residues(static_cast<size_t>(kpool), 0);
+        int steps = 0, forced = 0, natural_accepts = 0;
+        while (static_cast<int>(got.size()) < kTokens) {
+          const int64_t p = shard.session_position(0);  // row 0's position
+          const size_t k = got.size();                  // == plain[0..k)
+          // Poison the draft at every step but each fifth (the true next
+          // token after `next` is plain[k + 1]; anything else is rejected):
+          // four forced rejections in a row advance one position each, so
+          // row 1 visits every residue mod kpool whatever the phase.
+          const bool force = (steps % 5) != 4 && k + 1 < plain.size();
+          if (force) {
+            const int32_t truth = plain[k + 1];
+            draft = static_cast<int32_t>((truth + 1) % V);
+            shard.session_graph_seed_tokens(0, {next, draft});
+            ++forced_residues[static_cast<size_t>((p + 1) % kpool)];
+            ++forced;
+          }
+          require(bus.graph_replay_arm(&gerr), "graph_replay_arm: " + gerr);
+          DGPP_CUDA_OK(cudaGraphLaunch(graph_exec, shard.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(shard.stream()));
+          require(bus.graph_replay_finish(test_wait_timeout_ms(), &gerr),
+                  "graph_replay_finish: " + gerr);
+          const dgpp::GlmPickVerdict v0 = picker.verdict(0);
+          const dgpp::GlmPickVerdict v1 = picker.verdict(1);
+          shard.session_graph_settle(0, v0.accepted);
+          if (force && v0.accepted != 1)
+            throw std::runtime_error("step " + std::to_string(steps) +
+                                     ": the poisoned draft was accepted");
+          if (!force && v0.accepted == 2) ++natural_accepts;
+          const int64_t fed[2] = {next, draft};
+          for (int row = 0; row < v0.accepted; ++row)
+            got.push_back(static_cast<int32_t>(fed[row]));
+          for (size_t i = k; i < got.size() && i < plain.size(); ++i)
+            if (got[i] != plain[i])
+              throw std::runtime_error(
+                  "step " + std::to_string(steps) + " (row 1 at position " +
+                  std::to_string(p + 1) + ", " + (force ? "forced" : "natural") +
+                  "): token " + std::to_string(i) + " differs from plain");
+          next = v0.next;
+          draft = v1.next;
+          ++steps;
+        }
+        got.resize(kTokens);
+        if (got != plain)
+          throw std::runtime_error("transcript with forced rejections != plain");
+        std::string shapes;
+        for (int q = 0; q < kpool; ++q) {
+          if (forced_residues[static_cast<size_t>(q)] == 0)
+            throw std::runtime_error("no forced rejection with row 1 at residue " +
+                                     std::to_string(q) + " mod kpool");
+          shapes += std::to_string(q) + ":" +
+                    std::to_string(forced_residues[static_cast<size_t>(q)]) + " ";
+        }
+        rank_shapes[static_cast<size_t>(r)] =
+            std::to_string(forced) + " forced rejections over " +
+            std::to_string(steps) + " steps (row-1 residues " + shapes + "), " +
+            std::to_string(natural_accepts) + " natural accepts";
+        cudaGraphExecDestroy(graph_exec);
+        graph_exec = nullptr;
+        cudaFree(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (graph_exec) cudaGraphExecDestroy(graph_exec);
+        if (scratch) cudaFree(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  require(rank_seqs[1] == rank_seqs[0], "transcripts differ across ranks");
+  DGPP_LOG_INFO("forced pool-boundary rejections w2: {}; transcript == plain on "
+                "every rank",
+                rank_shapes[0]);
+}
+
+// ---------------------------------------------------------------------------
+// M8's exit criterion, the cancellation half (2026-09-05): a request
+// cancelled mid-flight under the MTP graph engine — through the scheduler,
+// as the service does it, with the row-batched variant live and the drop
+// to the scalar variant after the cancel — leaves every other request's
+// transcript bitwise the run without the cancel, and its own emitted
+// tokens a proper prefix of its uncancelled answer (a cancel lands at the
+// tick boundary: nothing uncommitted is ever emitted, nothing committed is
+// lost). Identical on both ranks.
+// ---------------------------------------------------------------------------
+DGPP_TEST(glm_tp_serving_mtp_graph_cancel_leaves_committed_state_unchanged) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const int V = cfg.vocab_size;
+  constexpr int kWorld = 2;
+  const std::vector<int64_t> pa = make_tokens(9, V);
+  const std::vector<int64_t> pb = make_tokens(7, V);
+  const std::vector<int64_t> pc = make_tokens(11, V);
+  const auto request = [](const std::string& id, const std::vector<int64_t>& p,
+                          int steps) {
+    dgpp::glm::SchedulerRequest r;
+    r.id = id;
+    r.prompt = p;
+    r.max_steps = steps;
+    return r;
+  };
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29926);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<std::vector<int64_t>>> outs(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        arrive_once();
+        // One model, adapter and scheduler (the bus records each graph
+        // variant once per era): the reference trio first, then the same
+        // trio again with the cancel. batch_min_live 2: three live requests
+        // take the row-batched variant, two still do, one drops to its
+        // scalar graph. `cancel_after` (>= 0): the run's b is cancelled
+        // after that many of its ticks.
+        GlmDiagnosticModel graph(cfg, dir, /*max_tokens=*/48, /*max_cache_tokens=*/2048,
+                                 &reducer, r, kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/4, /*mtp=*/true);
+        dgpp::GlmGraphEngineAdapter engine(
+            &graph, &bus, r, kWorld, scratch, V,
+            /*pick_timeout_ms=*/test_wait_timeout_ms(), /*batch_min_live=*/2);
+        engine.warm_captures(make_tokens(4, V));
+        dgpp::glm::Scheduler sched(&engine, /*eos_token_ids=*/{});
+        const auto run = [&](const std::string& tag, int cancel_after) {
+          const size_t first = sched.results().size();
+          sched.submit(request("a" + tag, pa, 14));
+          sched.submit(request("b" + tag, pb, 16));
+          sched.submit(request("c" + tag, pc, 10));
+          int ticks = 0;
+          bool more = true;
+          while (more) {
+            if (cancel_after >= 0 && ticks == cancel_after) sched.cancel("b" + tag);
+            more = sched.tick();
+            ++ticks;
+          }
+          std::vector<std::vector<int64_t>> gen;
+          for (size_t i = first; i < sched.results().size(); ++i)
+            gen.push_back(sched.results()[i].generated);
+          if (cancel_after >= 0 &&
+              sched.results()[first + 1].status !=
+                  dgpp::glm::Scheduler::Result::Status::kCancelled)
+            throw std::runtime_error("b was not retired as cancelled");
+          return gen;
+        };
+        const std::vector<std::vector<int64_t>> ref = run("", -1);
+        if (ref.size() != 3 || ref[0].size() != 14 || ref[1].size() != 16 ||
+            ref[2].size() != 10)
+          throw std::runtime_error("the reference run's lengths are off");
+        // Cancel b after 6 ticks: admitted at ticks 1..3, so it has stepped
+        // a few times under the batched variant (its answer is mid-flight).
+        const std::vector<std::vector<int64_t>> cut = run("2", 6);
+        if (cut[0] != ref[0]) throw std::runtime_error("a's transcript changed by b's cancel");
+        if (cut[2] != ref[2]) throw std::runtime_error("c's transcript changed by b's cancel");
+        if (cut[1].empty() || cut[1].size() >= ref[1].size() ||
+            !std::equal(cut[1].begin(), cut[1].end(), ref[1].begin()))
+          throw std::runtime_error(
+              "b's emitted tokens are not a proper prefix of its uncancelled answer (" +
+              std::to_string(cut[1].size()) + " of " + std::to_string(ref[1].size()) + ")");
+        outs[static_cast<size_t>(r)] = {ref[0], ref[1], ref[2], cut[1]};
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("cancel gate rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  require(outs[1] == outs[0], "transcripts differ across ranks");
+  DGPP_LOG_INFO("MTP graph cancel w2: a and c unchanged by b's cancel, b's {} "
+                "emitted tokens a prefix of its {}-token answer, identical on both ranks",
+                outs[0][3].size(), outs[0][1].size());
+}
+
+
+// ---------------------------------------------------------------------------
+// M7's hop snapshot (2026-09-05), world 1, the draft block on: the state a
+// two-row step hopped over, assembled from the step's post-row-0 spec
+// snapshot, the draft block's pre-draft ring and the hidden cache, is
+// BITWISE the snapshot a one-row session takes at that position — and a
+// slot attached to either resumes bitwise the other (and the one-row
+// session itself). Slot 0 walks the tokens one row at a time to position
+// 12 and snapshots there before its draft; slot 1 walks to 11, verifies
+// rows [11, 12] in one call (both stand), records its draft ring as the
+// graph does before the draft rows, drafts, and takes the hop snapshot at
+// 12 from spec row 0.
+// ---------------------------------------------------------------------------
+DGPP_TEST(glm_tp_prefix_hop_snapshot_is_bitwise_the_one_row_snapshot) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const int V = cfg.vocab_size;
+  const std::vector<int64_t> prompt = make_tokens(9, V);
+  std::vector<int64_t> toks = make_tokens(9, V);
+  for (int64_t& t : toks) t = (t * 7 + 3) % V;  // a different continuation
+  GlmDiagnosticModel model(cfg, dir, /*max_tokens=*/48, /*max_cache_tokens=*/2048,
+                           /*boundary=*/nullptr, /*tp_rank=*/0, /*tp_world=*/1,
+                           GlmResidency::Streaming, GlmHeadSharding::Full,
+                           /*max_requests=*/4, /*mtp=*/true);
+  require(model.session_kpool() == 4, "the fixture's kpool is 4");
+  const int64_t blocks0 = model.dsa_blocks_in_use();
+  const size_t bytes = model.session_snapshot_bytes();
+  void* buf_a = nullptr;
+  void* buf_b = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&buf_a, bytes));
+  DGPP_CUDA_OK(cudaMalloc(&buf_b, bytes));
+  const auto verify = [&](int slot, std::vector<int64_t> rows) {
+    return model.session_verify(slot, rows);
+  };
+  // Slot 0: one row at a time (the T=1 path), the draft block one row
+  // behind the main stack between a verify and its draft.
+  model.session_prefill(0, prompt);            // position 9, the draft cache through it
+  (void)model.session_draft(0, {toks[0]});     // the first draft row (as the adapters do)
+  (void)verify(0, {toks[0]});                  // 10
+  (void)model.session_draft(0, {toks[1]});
+  (void)verify(0, {toks[1]});                  // 11
+  (void)model.session_draft(0, {toks[2]});
+  (void)verify(0, {toks[2]});                  // 12: aligned
+  const GlmDiagnosticModel::SessionSnapshotMeta meta_a = model.session_snapshot(0, buf_a);
+  (void)model.session_draft(0, {toks[3]});
+  require(meta_a.position == 12 && meta_a.mtp_position == 11,
+          "slot 0's snapshot: position 12, the draft block at 11");
+  // Slot 1: the same tokens, the last two in one two-row verify that hops
+  // over 12 (rows at 11 and 12), then the draft ring snapshot and the draft
+  // rows exactly as the one-graph step orders them.
+  model.session_prefill(1, prompt);
+  (void)model.session_draft(1, {toks[0]});
+  (void)verify(1, {toks[0]});                  // 10
+  (void)model.session_draft(1, {toks[1]});
+  (void)verify(1, {toks[1]});                  // 11
+  (void)model.session_draft(1, {toks[2]});
+  (void)verify(1, {toks[2], toks[3]});         // 13: both rows stand
+  model.session_draft_ring_snapshot(1);
+  (void)model.session_draft(1, {toks[3], toks[4]});
+  const GlmDiagnosticModel::SessionSnapshotMeta meta_b =
+      model.session_snapshot_post_row0(1, buf_b, /*spec_row=*/0);
+  require(meta_b.position == 12 && meta_b.mtp_position == 11,
+          "the hop snapshot: position 12, the draft block at 11");
+  require(meta_a.full_blocks.size() == meta_b.full_blocks.size() &&
+              (meta_a.partial_block >= 0) == (meta_b.partial_block >= 0),
+          "the two snapshots reference the same block shape");
+  std::vector<uint8_t> host_a(bytes), host_b(bytes);
+  DGPP_CUDA_OK(cudaMemcpyAsync(host_a.data(), buf_a, bytes, cudaMemcpyDeviceToHost, model.stream()));
+  DGPP_CUDA_OK(cudaMemcpyAsync(host_b.data(), buf_b, bytes, cudaMemcpyDeviceToHost, model.stream()));
+  DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
+  size_t first_diff = bytes;
+  for (size_t i = 0; i < bytes; ++i)
+    if (host_a[i] != host_b[i]) {
+      first_diff = i;
+      break;
+    }
+  require(first_diff == bytes,
+          "the hop snapshot is BITWISE the one-row snapshot (first difference at byte " +
+              std::to_string(first_diff) + " of " + std::to_string(bytes) + ")");
+  // Attached and resumed over the same suffix, both continue bitwise the
+  // one-row session itself: the resume's last row, a step, a draft row.
+  model.session_attach(2, buf_a, meta_a);
+  model.session_attach(3, buf_b, meta_b);
+  const std::vector<int64_t> suffix = {toks[3], toks[4], toks[5]};
+  const std::vector<int64_t> none;
+  const GlmDiagnosticModel::Outputs r0 = model.session_prefill_resume(0, suffix, none);
+  const GlmDiagnosticModel::Outputs r2 = model.session_prefill_resume(2, suffix, none);
+  const GlmDiagnosticModel::Outputs r3 = model.session_prefill_resume(3, suffix, none);
+  require(r2.logits == r0.logits && r3.logits == r0.logits,
+          "the resumes' logits are bitwise the one-row session's");
+  const GlmDiagnosticModel::Outputs s0 = model.session_step(0, toks[6]);
+  const GlmDiagnosticModel::Outputs s2 = model.session_step(2, toks[6]);
+  const GlmDiagnosticModel::Outputs s3 = model.session_step(3, toks[6]);
+  require(s2.logits == s0.logits && s3.logits == s0.logits,
+          "the steps after the resume are bitwise");
+  // The resume left each draft block one row behind (its last row needs
+  // the token after the suffix); the step's two rows catch it up.
+  const GlmDiagnosticModel::Outputs d0 = model.session_draft(0, {toks[6], toks[7]});
+  const GlmDiagnosticModel::Outputs d2 = model.session_draft(2, {toks[6], toks[7]});
+  const GlmDiagnosticModel::Outputs d3 = model.session_draft(3, {toks[6], toks[7]});
+  require(d2.logits == d0.logits && d3.logits == d0.logits,
+          "the draft rows after the resume are bitwise");
+  for (int s = 0; s < 4; ++s) model.session_close(s);
+  model.session_release_snapshot(meta_a);
+  model.session_release_snapshot(meta_b);
+  require(model.dsa_blocks_in_use() == blocks0, "every block back");
+  DGPP_CUDA_OK(cudaFree(buf_a));
+  DGPP_CUDA_OK(cudaFree(buf_b));
+  DGPP_LOG_INFO("hop snapshot w1: {} bytes bitwise the one-row snapshot at 12; "
+                "resume, step and draft bitwise across the attach", bytes);
 }
 
 DGPP_TEST(glm_tp_decode_session_hazard) {

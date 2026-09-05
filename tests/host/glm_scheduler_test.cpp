@@ -145,8 +145,20 @@ class FakeEngine : public SchedulerEngine {
     info.align = arena_align_;
     info.block_tokens = block_tokens_;
     info.chunk_tokens = arena_chunk_;
+    info.step_tokens_max = step_tokens_max_;
     return info;
   }
+  // The two-token step's hop (M7): the fake commits whatever its script
+  // says per step; an armed hop is taken ("H:req:pos@slot") when the step
+  // returns two tokens, at the position the scheduler named, which must be
+  // the committed count + 1.
+  void set_step_tokens_max(int n) { step_tokens_max_ = n; }
+  void prefix_arm_hop(int req, int slot, int64_t position) override {
+    require(live_.count(req) != 0, "fake: hop armed on an unopened slot");
+    hop_armed_[req] = {slot, position};
+  }
+  int step_tokens_max_ = 1;
+  std::map<int, std::pair<int, int64_t>> hop_armed_;
   int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
                          dgpp::glm::SchedulerEngine::PrefixPrefill* plan) override {
     require(plan != nullptr && plan->boundaries != nullptr, "fake: plan");
@@ -260,6 +272,20 @@ class FakeEngine : public SchedulerEngine {
     std::vector<int32_t> out = live.episode.steps[live.next_step++];
     const int32_t prev_token = live.last_token;
     if (!out.empty()) live.last_token = out.back();
+    if (hop_armed_.count(req) != 0) {
+      const auto [slot, position] = hop_armed_[req];
+      hop_armed_.erase(req);
+      if (out.size() >= 2) {
+        require(position == live.prompt_tokens + static_cast<int64_t>(live.returned),
+                "fake: hop position " + std::to_string(position) +
+                    " is not the committed count + 1 (" +
+                    std::to_string(live.prompt_tokens + static_cast<int64_t>(live.returned)) + ")");
+        if (pinned_.count(slot) != 0) pinned_.erase(slot);
+        pin(slot, position);
+        ops_.push_back("H:" + std::to_string(req) + ":" + std::to_string(position) +
+                       "@" + std::to_string(slot));
+      }
+    }
     live.returned += out.size();
     ops_.push_back("S:" + std::to_string(req) + ":" +
                    std::to_string(prev_token));
@@ -1128,7 +1154,7 @@ DGPP_TEST(scheduler_sampling_specArmsTheSlotBeforeItsPrefillPick) {
   c.sampling.temperature = 1.0f;
   c.seed = 7;
   c.grammar.mode = dgpp::glm::GrammarSpec::Mode::kRequired;
-  c.grammar.tools.push_back(dgpp::glm::GrammarTool{"f", false, {}, {}});
+  c.grammar.tools.push_back(dgpp::glm::GrammarTool{"f", false, {}, {}, {}, false});
   constrained.submit(std::move(c));
   constrained.run_to_completion();
   require(constrained_engine.op_stream() == "A:0:7 G:0:3:1 P:0:5 S:0:1 C:0",
@@ -1356,6 +1382,61 @@ DGPP_TEST(scheduler_prefixCache_retireAtAnAlignedPositionSnapshotsTheLiveState) 
   require(engine.op_stream() == expected_b,
           "the next turn attaches at 24:\n  got:      " + engine.op_stream() +
               "\n  expected: " + expected_b);
+}
+
+DGPP_TEST(scheduler_prefixCache_twoTokenStepsHopOverAnAlignedPositionAndSnapshotIt) {
+  // The MTP graph's two-token steps (M7's measured limit, closed
+  // 2026-09-05): a 21-token prompt's committed count runs 21, 23, 25 —
+  // never ON 24 — so no rolling snapshot could land there. The scheduler
+  // arms the engine at 23 for the hop over 24 (the fake takes the state
+  // after the step's first row when the step commits two), and the hop
+  // becomes the close entry the next turn (a marker at 24) attaches to.
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/4, /*align=*/4);
+  engine.set_step_tokens_max(2);
+  engine.arm_batches(0, 31, {{32, 33}, {34, 35}, {36, 37}}, 6);
+  engine.arm(0, {41}, 1);
+  Scheduler sched(&engine, {kEos});
+  const std::vector<int64_t> prompt = counted_prompt(21);
+  sched.submit(make_cached_request("a", prompt, {5, 13}, 6));
+  sched.run_to_completion();
+  // Committed 21 (22 is not aligned: no arm) → [32,33] → 23, armed for 24 →
+  // [34,35] commits two: the hop at 24 → 25 (26 not aligned) → [36,37] →
+  // the cap at six tokens (37 dropped) → retire with committed 26: the
+  // close entry is the hop's, at 24.
+  const std::string expected_a = "P:0:21 N:0:12@0 S:0:31 H:0:24@1 S:0:33 S:0:35 C:0";
+  require(engine.op_stream() == expected_a,
+          "the hop:\n  got:      " + engine.op_stream() +
+              "\n  expected: " + expected_a);
+  require(sched.meters().prefix_hops == 1 && sched.meters().prefix_rolling == 1 &&
+              sched.meters().prefix_close_entries == 1,
+          "one hop, counted as a rolling snapshot, one close entry");
+  std::vector<int64_t> next = prompt;
+  next.insert(next.end(), {31, 32, 33, kEos, 200, 201});
+  sched.submit(make_cached_request("b", next, {5, 13, 24}, 1));
+  sched.run_to_completion();
+  const std::string expected_b = expected_a + " X:0:24@1 P:0:27 C:0";
+  require(engine.op_stream() == expected_b,
+          "the next turn attaches at the hop's entry:\n  got:      " + engine.op_stream() +
+              "\n  expected: " + expected_b);
+  // A one-token engine never arms (the plain stream), and a two-token step
+  // that commits ONE token lands on the position: the regular rolling
+  // snapshot takes it at the next tick.
+  FakeEngine one(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  one.set_prefix_arena(/*slots=*/4, /*align=*/4);
+  one.set_step_tokens_max(2);
+  one.arm_batches(0, 31, {{32, 33}, {34}, {35, 36}}, 6);
+  Scheduler sched1(&one, {kEos});
+  sched1.submit(make_cached_request("a", prompt, {5, 13}, 6));
+  sched1.run_to_completion();
+  // 21 → [32,33] → 23 (armed for 24) → [34] commits one: 24, no hop → the
+  // rolling snapshot at 24 before the next step → [35,36] → the cap.
+  const std::string expected_one = "P:0:21 N:0:12@0 S:0:31 S:0:33 RS:0:24@1 S:0:34 C:0";
+  require(one.op_stream() == expected_one,
+          "a one-token step lands on the position:\n  got:      " + one.op_stream() +
+              "\n  expected: " + expected_one);
+  require(sched1.meters().prefix_hops == 0 && sched1.meters().prefix_rolling == 1,
+          "no hop, one rolling snapshot");
 }
 
 DGPP_TEST(scheduler_prefixCache_optOutAndNoArenaKeepThePlainOpStream) {

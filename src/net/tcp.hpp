@@ -45,6 +45,17 @@ class TcpConn {
   // read_exact then returns false), so callers never block past the deadline.
   bool wait_readable(int timeout_ms);
 
+  // Whether the peer has closed or reset the connection: a zero-timeout
+  // poll and a one-byte MSG_PEEK — nothing is consumed, so another
+  // thread's reader is undisturbed, and pending unread data reads as
+  // "alive". The liveness probe of the fabric's death discipline
+  // (fabric_serve.hpp): a rank's process death closes its sockets.
+  bool peer_closed() const;
+  // shutdown(SHUT_RDWR): unblocks a reader on another thread (its poll
+  // sees EOF) and sends the peer a FIN — the tests' stand-in for a process
+  // death without closing the descriptor under the reader.
+  void shutdown_rw();
+
   void close();
   bool valid() const { return fd_ >= 0; }
 

@@ -51,9 +51,28 @@
 // rank 0 aborts loudly instead of serving on without it (the bus
 // watchdogs would catch it at the next collective; the journal
 // catches it BETWEEN collectives, the gap the bus cannot see).
+//
+// THE WATCHES (the v1 failure semantics, M8's exit criterion, built
+// 2026-09-05): a rank that dies INSIDE a collective leaves every other
+// rank waiting in the bus for a completion that never comes — up to the
+// bus watchdog (a minute) before the failure surfaces. The journal
+// sockets see the death at once (a process death closes them), so each
+// side keeps a watch on them: rank 0's JournalWriter::watch_peers()
+// polls the peers' connections (a peer never writes, so readability is
+// a close or a reset) and reports the dead rank; the peer loop's
+// on_rank0_death hook fires when rank 0's connection closes while the
+// peer is inside a tick (between ticks the read loop sees the EOF
+// itself). The reaction is the same on both sides: fail the service
+// (rank 0 answers every live stream with the engine_failure error after
+// its committed tokens), write the op stream, exit nonzero — never wait
+// on the bus. Committed state is never touched: every token a client got
+// was committed on every rank before the failure, and no rank commits
+// anything after it (the step that was in flight never completes).
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "models/glm_scheduler.hpp"
@@ -129,10 +148,12 @@ class JournalWriter {
 
   uint16_t port() const { return listener_.port(); }
 
-  // Accepts world-1 peer connections in any order. Throws when the
-  // full world fails to land within accept_timeout_ms — a short world
-  // cannot serve, and pretending otherwise would wedge every request
-  // at its first collective.
+  // Accepts world-1 peer connections in any order and reads each one's
+  // hello ("hello <rank>\n" — the one thing a peer ever writes), so the
+  // connections are known by rank. Throws when the full world fails to
+  // land within accept_timeout_ms — a short world cannot serve, and
+  // pretending otherwise would wedge every request at its first
+  // collective.
   void accept_peers(int world, int accept_timeout_ms);
 
   // One line to every peer. A peer that cannot take it is a dead
@@ -140,9 +161,28 @@ class JournalWriter {
   // says so loudly.
   void broadcast(const std::string& line);
 
+  // The peer liveness watch (the death discipline above): a thread
+  // polling every peer connection each `poll_ms`; the first closed or
+  // reset one calls `on_death(rank, why)` ONCE, from the watch thread, and
+  // the watch ends. The caller fails the service from that callback
+  // (GenerationService::fail_engine is thread-safe) without waiting for a
+  // bus watchdog. stop_watch() joins the thread (the destructor too).
+  void watch_peers(std::function<void(int, const std::string&)> on_death,
+                   int poll_ms = 100);
+  void stop_watch();
+  // The rank of a closed or reset peer connection, or 0.
+  int dead_peer() const;
+  // Closes every peer connection now — what rank 0's process exit does;
+  // the tests' stand-in for it (the peers see EOF).
+  void close_peers();
+  ~JournalWriter();
+
  private:
   dgpp::net::TcpListener listener_;
-  std::vector<dgpp::net::TcpConn> peers_;  // rank 1..world-1, arrival order
+  std::vector<dgpp::net::TcpConn> peers_;  // arrival order; peer_ranks_ names them
+  std::vector<int> peer_ranks_;
+  std::thread watch_;
+  std::atomic<bool> watch_stop_{false};
 };
 
 // ---- peers ------------------------------------------------------------------
@@ -153,9 +193,11 @@ class JournalReader {
   // peer's bus rendezvous can complete before rank 0 binds the journal
   // (a race measured in tens of milliseconds), and a single-shot
   // connect loses it. Throws once the whole window expires — startup
-  // is exceptional and the peer wants the reason in its log.
+  // is exceptional and the peer wants the reason in its log. Sends the
+  // hello ("hello <rank>\n") that names the connection to rank 0 — the
+  // only bytes a peer ever writes.
   JournalReader(const std::string& host, uint16_t port,
-                int connect_timeout_ms);
+                int connect_timeout_ms, int rank);
 
   // The next complete record (newline stripped). false when rank 0's
   // journal closed (clean stop or crash — EOF either way) or the
@@ -163,6 +205,15 @@ class JournalReader {
   // peer on purpose: both mean "the world is over, exit now".
   bool read_line(const std::function<bool()>& should_stop,
                  std::string* line);
+  // Rank 0's connection is closed or reset (nothing consumed; pending
+  // records read as alive). The in-tick watch's probe.
+  bool rank0_closed() const { return conn_.peer_closed(); }
+  // Closes the connection (a peer's death, from rank 0's side — the
+  // tests' stand-in for the process going away). shutdown() does it
+  // from another thread while the loop reads: the read sees EOF, rank 0
+  // sees the FIN.
+  void close() { conn_.close(); }
+  void shutdown() { conn_.shutdown_rw(); }
 
  private:
   dgpp::net::TcpConn conn_;
@@ -185,7 +236,15 @@ bool wait_journal_warm(JournalReader* reader,
 // corruption or scheduler divergence (both are fabric emergencies).
 // Attach the observer BEFORE calling: the loop drives the scheduler,
 // so whatever the observer should see, it sees here.
+// `on_rank0_death` (optional): the in-tick watch — a thread that, while
+// the loop is inside sched->tick() (a collective a dead rank 0 can never
+// complete), polls rank 0's connection every `watch_poll_ms` and calls
+// the hook ONCE when it closes; the hook is expected not to return to
+// the loop (the app writes its op stream and exits nonzero). Between
+// ticks the read loop sees the EOF itself and returns as before.
 void run_journal_peer(dgpp::glm::Scheduler* sched, JournalReader* reader,
-                      const std::function<bool()>& should_stop);
+                      const std::function<bool()>& should_stop,
+                      const std::function<void()>& on_rank0_death = nullptr,
+                      int watch_poll_ms = 100);
 
 }  // namespace dgpp::service

@@ -205,7 +205,9 @@ DGPP_TEST(glm_tokenizer_boundary_contracts) {
 
   // A minimal malformed tokenizer.json (wrong pattern) must refuse with
   // the pinned-pattern message.
-  const std::string tmp = "/tmp/opencode/bad_tokenizer.json";
+  // In the working directory (the build tree under ctest): a fixed /tmp
+  // subdirectory came and went with other tools (2026-09-05).
+  const std::string tmp = "glm_tokenizer_test_bad_tokenizer.json";
   {
     std::ofstream f(tmp);
     f << R"({"version":"1.0","truncation":null,"padding":null,
@@ -231,6 +233,7 @@ DGPP_TEST(glm_tokenizer_boundary_contracts) {
   require(threw && msg.find("pinned regex") != std::string::npos,
                "a non-pinned Split pattern must refuse loudly (got: " + msg +
                    ")");
+  std::remove(tmp.c_str());
 }
 
 }  // namespace

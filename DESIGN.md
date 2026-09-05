@@ -1591,15 +1591,26 @@ entries pin their DSA blocks in the pool, and an admission short of
 blocks or a snapshot slot evicts the LRU unattached entry (never one a
 live request opened from). Metrics: hits, misses, tokens saved, entries
 taken and evicted, blocks pinned, the arena's copy times, the TTFT split.
-Known limits: the MTP graph's two-token steps fix the committed
-count's parity while the draft is accepted, so an answer can visit no
-aligned position at all (measured: a fully accepted 26-token answer to
-a 25-token prompt) — a request whose committed position is aligned at
-retire snapshots the live state then, the rest fall back to the
-prefill-cut entry, never to a wrong attach; no persistence; the
-close-time entry hits only when the next turn re-renders the previous
-answer to the same ids (the template keeps the reasoning with
-`clear_thinking: false`, and the answer must have ended in EOS).
+The two-token step's parity (closed 2026-09-05): the MTP graph's
+two-token steps fix the committed count's parity while the draft is
+accepted, so an answer can land on no aligned position at all (measured:
+a fully accepted 26-token answer to a 25-token prompt). The HOP snapshot
+covers it: when the next aligned position is committed + 1 the scheduler
+arms the engine (`SchedulerEngine::prefix_arm_hop`), and a step that
+commits both rows takes the state after its first row — the hopped
+position — before returning (`GlmDiagnosticModel::session_snapshot_post_
+row0`: the recurrence, conv and ring kernels' post-row-0 spec snapshot
+rows, the draft block's pre-draft ring from its rollback snapshot, h_q at
+P−1 from the hidden cache, the blocks below P by reference and the
+partial one copied — bitwise the one-row snapshot, gated); a one-row
+step lands on the position and the regular rolling snapshot follows at
+the next tick; the decision ("hop", the same digest code as a rolling
+snapshot) rides the op stream and the journal's digest like every other.
+A request whose committed position is aligned at retire snapshots the
+live state then, as before. Still: no persistence; the close-time entry
+hits only when the next turn re-renders the previous answer to the same
+ids (the template keeps the reasoning with `clear_thinking: false`, and
+the answer must have ended in EOS).
 
 ## 9. MTP transaction model
 
@@ -1621,7 +1632,17 @@ committed state in place.
    entries become committed. On a rejection at position `a`, only the first
    `a` draft states are committed; the rejected suffix is discarded, and the
    replacement token is processed from the state after those `a` tokens.
-6. Cancellation or rank failure discards the entire transaction.
+6. Cancellation or rank failure discards the entire transaction. As
+   built (2026-09-05): a cancel lands at the tick boundary — the step in
+   flight completes on every rank and the request retires before the next
+   engine op, so the other requests' transcripts are untouched and the
+   cancelled one's emitted tokens are a prefix of its answer (gated under
+   the row-batched MTP graph); a rank failure ends the service — the step
+   in flight never completes on any rank, nothing after the last completed
+   step is committed anywhere, every client gets exactly the committed
+   tokens and then the engine_failure error (the failure semantics of
+   §11 and `fabric_serve.hpp`, gated in-process and drilled on the four
+   nodes).
 
 Tests reject at every depth from zero through `k`, including a rejection that
 crosses an index-pool boundary. Greedy output and all subsequent states must
@@ -1821,26 +1842,44 @@ record.
   and batched MTP graphs in lockstep with the eager sampled speculator,
   transcripts and [next, draft] feeds equal on every rank through 17
   fallbacks of both kinds). `glm_serve --decode-graph --mtp` samples at
-  the checkpoint's defaults; the acceptance rate at those settings is
-  still to be measured on the fabric (§10). Until then `--mtp` is
-  measured greedy-only; the sampled path is gated, not yet timed. At the card's
-  recommended `temperature=1.0, top_p=0.95` the acceptance becomes
-  ≈ E[p(draft)] rather than the 89% argmax agreement; the second verify
-  row costs ~9–11 ms of a 42 ms step, so MTP pays above ~30% acceptance —
-  expected to hold, to be measured. (vLLM's recipe for this checkpoint
-  runs the MTP layer at depth 5; our depth-2 measurement — a second draft
-  accepted ~60% of the time — is consistent with the layer drafting well
-  recursively, and depth stays 1 here for step-time variance, a decision
-  that can be revisited with the lse in hand.)
+  the checkpoint's defaults, and the acceptance at those settings was
+  measured on the fabric on 2026-09-04: 67–81 % of drafts accepted under
+  the exact accept test against 74–87 % argmax agreement on the same
+  prompts, 1.67–1.81 tokens per replay, 25.0–27.6 ms/token sampled
+  against 33.2 on the plain graph — well above the ~30 % break-even the
+  second verify row's ~9–11 ms of a 42 ms step sets (the design had
+  expected 55–70 %; the model is more confident on its own generations).
+  (vLLM's recipe for this checkpoint runs the MTP layer at depth 5; our
+  depth-2 measurement — a second draft accepted ~60% of the time — is
+  consistent with the layer drafting well recursively, and depth stays 1
+  here for step-time variance, a decision to reopen explicitly, not an
+  open item.)
 - *Depth:* fixed at 1. A second draft row was measured accepted ~60% of
   the time against a ~29% break-even for its ~7 ms of unshared experts,
   but it makes the step bimodal; declined for variance, not for mean.
-- *The eager first draft:* the prompt's last row goes through the draft
-  block eagerly after prefill; moving it into the prefill's tail is a
-  small item.
-- *A `FabricPicker` seam* so the plain loop's host pick and the graph
-  loop's device pick share one driver (`glm_gen_check` has three
-  pick-and-log variants today).
+- *Confidence-gated T (closed 2026-09-05, declined by its ceiling):* the
+  lse in the pick table (6b) makes the gate possible, but its most it can
+  save is the second row's cost on the steps whose draft would have been
+  rejected — ~0.9 ms of a 42 ms step at the measured 88.7 % greedy
+  acceptance (2 %), ~1.7–3 ms sampled — for a third graph variant per slot
+  (a T=1 step that still runs the draft block) and a rank-identical gate
+  decision. Not worth the shape.
+- *The eager first draft (closed 2026-09-05, measured and left):* the
+  prompt's last row goes through the draft block eagerly after the
+  prefill's pick — one eager draft step and one pick per admission, the
+  block's ~2.1 ms weight floor plus ~0.3 ms of launch overhead (the eager
+  per-step draft's numbers of 2026-09-03), against a hot TTFT of 255 ms
+  and a cold one of 600 ms and more. The pick has to precede it (the
+  draft row embeds the token the pick decides), so it cannot join the
+  prefill's tail; a graph of its own would recover the 0.3 ms.
+- *The `FabricPicker` seam (closed 2026-09-05):* `glm_gen_check`'s host
+  picks — world 1's full-head argmax or exact sampler, the fabric's bus
+  merge or bus sampler, for the plain loops eager and under the T=1 graph
+  and for the speculative loop's prefill and eager row picks — run through
+  one `HostPick` driver with one greedy / sampling branch and the log
+  lines the cross-rank tools read; the in-graph pick is `GlmDevicePicker`
+  (a recorded node), the other driver by nature. The generated ids on the
+  four nodes are unchanged.
 
 ## 10. Tokenization, templates, logits, and sampling
 

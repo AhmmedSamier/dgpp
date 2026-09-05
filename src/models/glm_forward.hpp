@@ -256,6 +256,28 @@ class GlmDiagnosticModel {
   // overwrites it.
   void session_draft_rollback(int req, int rows);
 
+  // The prefix cache's HOP snapshot (M7 under the two-row step, 2026-09-05):
+  // a step that committed both of its rows hopped over the position P after
+  // its first row; when P is pool-aligned the cache still wants the state
+  // there. That state exists: the recurrence, conv and ring kernels leave
+  // every row's post-state but the last in the spec snapshot rows (the
+  // rollback's source), the draft block's tail ring before its rows is in
+  // its own snapshot (session_draft_rollback's source; taken by the graph
+  // before the draft rows, or by session_draft_ring_snapshot on the eager
+  // path), and h_q at P-1 sits in the hidden cache. This assembles the
+  // snapshot session_snapshot would have taken at P — bitwise, since the
+  // rows of a two-row verify are the one-row steps' rows — with the draft
+  // block one row behind (mtp_position P-1, which the attach catches up).
+  // `spec_row` is the step's first spec snapshot row for this slot (0 for a
+  // scalar step, the slot's first row of a fixed batch). The slot must sit
+  // at P+1 with its draft block at P+1 (the rows ran) or at P-1 (they have
+  // not — the live ring is then the pre-draft ring).
+  SessionSnapshotMeta session_snapshot_post_row0(int req, void* dst, int spec_row);
+  // The draft block's tail ring into its rollback snapshot (what the graph
+  // records before its draft rows); the eager path's counterpart, so a hop
+  // snapshot can follow an eager two-row verify.
+  void session_draft_ring_snapshot(int req);
+
   // The MTP draft block (constructed with mtp = true). The block's row at
   // main-stack position q takes [enorm(embed(tok_{q+1})) | hnorm(h_q)] and
   // predicts tok_{q+2}; h_q is the pre-final-norm mean of the mHC streams

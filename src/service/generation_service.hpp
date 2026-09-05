@@ -211,11 +211,28 @@ class GenerationService : public HttpHandler,
   // pending: the HTTP server may stop without cutting a client off.
   bool drained() const;
 
+  // The v1 failure semantics (DESIGN §9 item 6; built 2026-09-05): any
+  // engine or fabric failure fails the service. fail_engine() — from ANY
+  // thread: the engine thread after an engine op threw (a bus watchdog, a
+  // journal write to a dead peer, a contract violation), or rank 0's peer
+  // death watch while the engine thread is inside a collective the dead
+  // rank will never complete — marks the service failed: every live
+  // request is answered with the engine_failure error AFTER the tokens it
+  // produced (each was committed on every rank before the failure, and no
+  // rank commits anything after it — nothing uncommitted ever reaches a
+  // client), queued and later requests get 503 engine_failure, /health
+  // turns 503, and drained() says when the HTTP pump has answered everyone
+  // so the process may exit nonzero. Idempotent. Returns the number of
+  // live requests interrupted.
+  int fail_engine(const std::string& what);
+  bool failed() const;
+
   struct Stats {
     uint64_t requests_total = 0;
     uint64_t requests_shed = 0;      // 503s at the door or at admission
     uint64_t requests_cancelled = 0;  // client disconnects (and the stop)
     uint64_t requests_shed_pool = 0;  // grow-on-demand: cut short at exhaustion
+    uint64_t requests_failed = 0;    // live requests an engine failure cut off
     uint64_t tokens_out = 0;
     uint64_t rejects_bad = 0;        // 400-class refusals
     uint64_t tool_calls_out = 0;     // parsed tool calls
@@ -261,6 +278,8 @@ class GenerationService : public HttpHandler,
     bool reject_overloaded = false;
     bool shutting_down = false;  // interrupted or shed by the stop (M6 6c):
                                  // answered with the server_shutdown error
+    bool engine_failed = false;  // cut off or refused by an engine failure:
+                                 // answered with the engine_failure error
     bool writer_dead = false;  // on_disconnect fired; never touch it
     bool cancel_armed = false; // disconnect seen; cancel enqueued
     dgpp::glm::Scheduler::Result::Reason reason =
@@ -390,6 +409,8 @@ class GenerationService : public HttpHandler,
   std::vector<std::shared_ptr<StreamRecord>> records_;
   dgpp::glm::Scheduler::Meters meters_;  // engine-published, mutex-guarded
   bool shutdown_ = false;
+  bool failed_ = false;      // fail_engine() happened
+  std::string failure_;      // its reason (the clients' message carries it)
   mutable std::mutex mutex_;
 
   // HTTP-thread-only counters guarded by std::atomic where cross-thread.

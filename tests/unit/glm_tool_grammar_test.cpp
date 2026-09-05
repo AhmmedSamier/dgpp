@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "common/test.hpp"
+#include "loaders/minijson.hpp"
 #include "models/glm_tool_grammar.hpp"
 
 namespace {
@@ -471,6 +472,77 @@ DGPP_TEST(tool_grammar_typedValuesFollowTheSchema) {
   // Equality covers the arguments.
   GrammarSpec same = spec;
   require(same == spec && !(bad == spec), "spec equality over arguments");
+}
+
+// The 6i follow-on: a closed key is offered ONCE per call (a duplicate key
+// is never a valid object), and a strict tool's call cannot close while a
+// required key is missing — OpenAI's strict guarantee, enforced by the
+// mask rather than hoped for. A non-strict tool keeps the closer open (its
+// required keys are the client's business) but still spends its keys.
+DGPP_TEST(tool_grammar_closedKeysOnceAndStrictRequiredKeysGateTheClose) {
+  const GrammarVocab v = fake_vocab();
+  GrammarSpec s = spec_of(GrammarSpec::Mode::kNamed, false, "get_weather");
+  s.tools[0].strict = true;
+  s.tools[0].required_keys = {"city"};
+  GrammarState g(&v, s, /*thinking=*/false);
+  feed(g, {kToolOpen, kGetWeather});
+  // The name is complete: a strict tool owing a key cannot close yet.
+  require(same(allowed_ids(g), {kKeyOpen}),
+          "strict name: only <arg_key>: " + show(allowed_ids(g)));
+  feed(g, {kKeyOpen});
+  require(same(allowed_ids(g), {'c', 'd', kCity}), "keys: " + show(allowed_ids(g)));
+  feed(g, {'d', 'a', 'y', 's', kKeyClose, kValueOpen, '3', kValueClose});
+  // "days" used, "city" (required) still missing: another key, no close.
+  require(same(allowed_ids(g), {kKeyOpen}),
+          "after days: city still owed: " + show(allowed_ids(g)));
+  feed(g, {kKeyOpen});
+  // "days" is spent: only "city" continues, and 'd' never starts again.
+  require(same(allowed_ids(g), {'c', kCity}),
+          "keys less the used one: " + show(allowed_ids(g)));
+  require(!g.allows('d'), "a duplicate key never starts");
+  feed(g, {kCity, kKeyClose, kValueOpen, 'X', kValueClose});
+  // Every closed key used: no <arg_key>; every required key present: close.
+  require(same(allowed_ids(g), {kToolClose}),
+          "all keys spent: only </tool_call>: " + show(allowed_ids(g)));
+  feed(g, {kToolClose});
+  require(same(allowed_ids(g), {kEosObs}), "named: the turn ends");
+  require(g.active(), "still active");
+
+  // The same tool, non-strict: the closer stays open from the name on ...
+  GrammarSpec ns = s;
+  ns.tools[0].strict = false;
+  GrammarState h(&v, ns, /*thinking=*/false);
+  feed(h, {kToolOpen, kGetWeather});
+  require(same(allowed_ids(h), {kKeyOpen, kToolClose}),
+          "non-strict: closable at once: " + show(allowed_ids(h)));
+  // ... but a closed key is still offered once.
+  feed(h, {kKeyOpen, kCity, kKeyClose, kValueOpen, kValueClose, kKeyOpen});
+  require(same(allowed_ids(h), {'d'}),
+          "non-strict: the used key is gone: " + show(allowed_ids(h)));
+  feed(h, {'d', 'a', 'y', 's', kKeyClose, kValueOpen, kValueClose});
+  require(same(allowed_ids(h), {kToolClose}),
+          "non-strict, keys spent: only the close: " + show(allowed_ids(h)));
+
+  // The derivation from a function definition: strict rides, required keys
+  // are the declared ones, an undeclared name warns and is dropped.
+  {
+    const dgpp::minijson::ParseResult def = dgpp::minijson::parse(
+        R"({"name":"get_weather","strict":true,"parameters":{"type":"object",)"
+        R"("properties":{"city":{"type":"string"},"days":{"type":"integer"}},)"
+        R"("required":["city","nope","city"],"additionalProperties":false}})");
+    std::vector<std::string> warnings;
+    const GrammarTool t = dgpp::glm::grammar_tool_from_function(def.root, &warnings);
+    require(t.strict && t.constrain_keys &&
+                t.required_keys == std::vector<std::string>{"city"},
+            "derived: strict, closed, the declared required key once");
+    require(warnings.size() == 1 && warnings[0].find("nope") != std::string::npos,
+            "derived: an undeclared required key warns under strict");
+    const dgpp::minijson::ParseResult lax = dgpp::minijson::parse(
+        R"({"name":"f","parameters":{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}})");
+    const GrammarTool u = dgpp::glm::grammar_tool_from_function(lax.root, nullptr);
+    require(!u.strict && !u.constrain_keys && u.required_keys == std::vector<std::string>{"a"},
+            "derived: a non-strict tool records its required keys unenforced");
+  }
 }
 
 }  // namespace

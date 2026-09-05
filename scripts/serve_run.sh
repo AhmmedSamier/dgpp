@@ -42,6 +42,11 @@ peer_ssh() {  # timeout-wrapped: a hung session must not stall the launch
 stage() {
   echo "=== staging glm_serve to peers"
   for h in "${PEERS[@]}"; do
+    # The staging directory lives in /tmp (a reboot empties it), and a
+    # previous run's op stream must never be hashed as this run's evidence
+    # (a rank killed before it writes one would leave the old file behind).
+    peer_ssh "$h" "mkdir -p $PEER_DIR && rm -f $PEER_DIR/serve_rank*.ops" \
+      || { echo "STAGE FAILED to $h (ssh)"; return 1; }
     timeout 30 scp -q "${SSH_OPTS[@]}" "$BIN" "user@$h:$PEER_DIR/glm_serve" \
       || { echo "STAGE FAILED to $h"; return 1; }
   done

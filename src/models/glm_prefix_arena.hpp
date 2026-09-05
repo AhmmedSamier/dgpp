@@ -90,6 +90,34 @@ class PrefixArena {
     filled_[static_cast<size_t>(slot)] = true;
   }
 
+  // The hop snapshot (M7 under the two-row step): the state after the last
+  // step's FIRST row — the aligned position `expected_position` the step
+  // committed past — into `slot`, from the model's spec snapshot rows
+  // (`spec_row` the slot's first row of that step).
+  void snapshot_post_row0(int req, int slot, int64_t expected_position, int spec_row) {
+    check(slot);
+    if (model_->session_position(req) != expected_position + 1)
+      throw std::logic_error(
+          "PrefixArena: session " + std::to_string(req) + " sits at " +
+          std::to_string(model_->session_position(req)) + ", the hop snapshot expects " +
+          std::to_string(expected_position + 1) + " (one past the position)");
+    release(slot);
+    Timer& t = begin_timer();
+    metas_[static_cast<size_t>(slot)] =
+        model_->session_snapshot_post_row0(req, ptr(slot), spec_row);
+    end_timer(t, &snapshot_ms_, &snapshots_);
+    filled_[static_cast<size_t>(slot)] = true;
+  }
+  // The slot's bytes and metadata (the gates compare them).
+  const void* slot_data(int slot) const {
+    check(slot);
+    return ptr(slot);
+  }
+  const GlmDiagnosticModel::SessionSnapshotMeta& meta(int slot) const {
+    check(slot);
+    return metas_.at(static_cast<size_t>(slot));
+  }
+
   // A snapshot request for the model's prefill (taken mid-prefill when a
   // chunk ends at `position`); commit() afterwards records whether it was.
   GlmDiagnosticModel::SnapshotRequest request(int slot, int64_t position) {

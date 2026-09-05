@@ -997,6 +997,19 @@ void GenerationService::handle(const HttpRequest& req,
 }
 
 void GenerationService::route_health(HttpResponseWriter& w) const {
+  std::string failure;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (failed_) failure = failure_;
+  }
+  if (!failure.empty()) {
+    // The engine failed (the v1 failure semantics): the process is on its
+    // way out; a probe sees the reason, not a green light.
+    w.respond(503, "application/json",
+              "{\"status\":\"failed\",\"model\":" + json_string(cfg_.model_id) +
+                  ",\"error\":" + json_string(failure) + "}");
+    return;
+  }
   w.respond(200, "application/json",
             "{\"status\":\"ok\",\"model\":" + json_string(cfg_.model_id) +
                 "}");
@@ -1457,6 +1470,9 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, static_cast<int64_t>(st.requests_cancelled));
   out.append(",\"requests_shed_pool\":");
   append_json_int(&out, static_cast<int64_t>(st.requests_shed_pool));
+  out.append(",\"requests_failed\":");
+  append_json_int(&out, static_cast<int64_t>(st.requests_failed));
+  out.append(failed() ? ",\"engine_failed\":true" : ",\"engine_failed\":false");
   out.append(",\"reservations_grown\":");
   append_json_int(&out, m.reservations_grown);
   out.append(",\"admission\":{\"mode\":\"");
@@ -1500,6 +1516,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, m.prefix_close_entries);
   out.append(",\"rolling_snapshots\":");
   append_json_int(&out, m.prefix_rolling);
+  out.append(",\"hop_snapshots\":");
+  append_json_int(&out, m.prefix_hops);
   out.append(",\"evictions\":");
   append_json_int(&out, m.prefix_evictions);
   out.append(",\"duplicates\":");
@@ -1547,6 +1565,7 @@ void GenerationService::enqueue_admission(std::shared_ptr<StreamRecord> record,
             static_cast<size_t>(cfg_.queue_limit)) {
       record->reject_overloaded = true;
       record->shutting_down = shutdown_;
+      record->engine_failed = failed_;
       stats_.requests_shed++;
       return;
     }
@@ -1892,20 +1911,37 @@ void GenerationService::pump_records() {
 
   for (auto& r : finished) {
     if (r->writer != nullptr && !r->writer_dead) {
-      if (r->reject_overloaded || r->shutting_down) {
+      if (r->reject_overloaded || r->shutting_down || r->engine_failed) {
         // A shed request, or one the stop interrupted (M6 6c): the
         // one-shot gets the 503 object; a stream that already began gets
         // the error event + [DONE] (the only shape an SSE client can
-        // see) — after the tokens it did produce, which were real.
-        const bool shutdown = r->shutting_down;
+        // see) — after the tokens it did produce, which were real. An
+        // engine failure (the v1 failure semantics) takes the same two
+        // shapes under the engine_failure code: the tokens a stream got
+        // were committed on every rank before the failure.
+        const bool failed = r->engine_failed;
+        const bool shutdown = r->shutting_down || failed;
+        std::string failure;
+        if (failed) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          failure = failure_;
+        }
         const std::string msg =
-            !shutdown ? "the server is overloaded — the admission queue is "
-                        "full; retry after backing off"
+            failed ? (r->reject_overloaded
+                          ? "the engine failed (" + failure +
+                                "); the service is restarting — retry"
+                          : "the engine failed (" + failure +
+                                ") — this response is incomplete; the "
+                                "service is restarting, retry")
+            : !shutdown ? "the server is overloaded — the admission queue is "
+                          "full; retry after backing off"
             : r->reject_overloaded
                 ? "the server is shutting down; retry on another instance"
                 : "the server is shutting down — this response is "
                   "incomplete; retry on another instance";
-        const char* code = shutdown ? "server_shutdown" : "overloaded";
+        const char* code = failed     ? "engine_failure"
+                           : shutdown ? "server_shutdown"
+                                      : "overloaded";
         if (r->stream) {
           if (shutdown && !r->reject_overloaded) {
             if (r->chat)
@@ -2121,6 +2157,45 @@ bool GenerationService::drained() const {
   for (const auto& r : records_)
     if (r->writer != nullptr && !r->writer_dead) return false;  // an answer owed
   return true;
+}
+
+int GenerationService::fail_engine(const std::string& what) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!failed_) {
+    failed_ = true;
+    failure_ = what;
+  }
+  shutdown_ = true;  // the door closes with the engine
+  for (auto& a : pending_admissions_) {
+    a.record->reject_overloaded = true;
+    a.record->engine_failed = true;
+    stats_.requests_shed++;
+  }
+  pending_admissions_.clear();
+  pending_cancels_.clear();  // no pass will ever apply them
+  int interrupted = 0;
+  for (auto& r : records_) {
+    if (r->done || r->reject_overloaded || r->shutting_down || r->engine_failed)
+      continue;
+    // Live (queued or generating): no retire will come — the pump finishes
+    // it now, after whatever it produced (an open parser block flushes as
+    // content, as at a retire).
+    if (r->chat && r->parser) {
+      std::vector<ParserEvent> events;
+      r->parser->finish(&events);
+      for (ParserEvent& ev : events) absorb(*r, std::move(ev));
+    }
+    r->engine_failed = true;
+    r->done = true;
+    stats_.requests_failed++;
+    ++interrupted;
+  }
+  return interrupted;
+}
+
+bool GenerationService::failed() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return failed_;
 }
 
 GenerationService::Stats GenerationService::stats() const {

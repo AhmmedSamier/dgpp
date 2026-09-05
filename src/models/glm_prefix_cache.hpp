@@ -62,7 +62,8 @@ class PrefixCache {
     int64_t tokens_saved = 0;   // sum of attach positions
     int64_t snapshots = 0;      // entries taken at a prefill cut
     int64_t close_entries = 0;  // entries taken from a rolling snapshot
-    int64_t rolling = 0;        // rolling snapshots taken
+    int64_t rolling = 0;        // rolling snapshots taken (the hops included)
+    int64_t hops = 0;           // of them, taken from a two-row step's first row
     int64_t evictions = 0;
     int64_t duplicates = 0;     // an entry already existed at the position
     int64_t skipped_no_slot = 0;  // a snapshot wanted, no slot free or evictable

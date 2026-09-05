@@ -494,6 +494,24 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
   }
 
   cursor_ = arrivals.back();
+  // The prefix cache's hops (M7): an armed request whose step committed two
+  // tokens had its state at the armed position taken by the engine inside
+  // the step — recorded before the tokens are applied, so a retire in this
+  // pass finds the rolling slot at the position the close entry wants. A
+  // one-token step landed ON the position: the next tick's rolling
+  // snapshot (or the retire-time one) takes it.
+  for (size_t i = 0; i < arrivals.size(); ++i) {
+    Request& r = requests_[static_cast<size_t>(arrivals[i])];
+    if (r.hop_armed < 0) continue;
+    const int64_t hop = r.hop_armed;
+    r.hop_armed = -1;
+    if (batches[i].size() < 2) continue;
+    r.rolling_position = hop;
+    ++cache_.stats().rolling;
+    ++cache_.stats().hops;
+    cache_.note(4, static_cast<uint64_t>(hop), static_cast<uint64_t>(r.rolling_slot));
+    emit_prefix(r.spec.id, "hop", hop, r.rolling_slot);
+  }
   for (size_t i = 0; i < arrivals.size(); ++i) {
     const int arrival = arrivals[i];
     const std::vector<int32_t>& tokens = batches[i];
@@ -749,6 +767,7 @@ Scheduler::Meters Scheduler::meters() const {
   m.prefix_snapshots = cache_.stats().snapshots;
   m.prefix_close_entries = cache_.stats().close_entries;
   m.prefix_rolling = cache_.stats().rolling;
+  m.prefix_hops = cache_.stats().hops;
   m.prefix_evictions = cache_.stats().evictions;
   m.prefix_duplicates = cache_.stats().duplicates;
   m.prefix_skipped = cache_.stats().skipped_no_slot;
@@ -766,7 +785,26 @@ void Scheduler::rolling_snapshots() {
     // (pending — the next step writes it).
     const int64_t committed =
         static_cast<int64_t>(r.spec.prompt.size()) + r.steps_done - 1;
-    if (committed <= 0 || committed % align != 0) continue;
+    if (committed <= 0) continue;
+    if (committed % align != 0) {
+      // The hop (M7 under the two-token step): the next aligned position is
+      // committed + 1 and a step that commits two tokens passes it without
+      // stopping — arm the engine to take the state after its first row.
+      const int64_t hop = committed + 1;
+      if (prefix_info_.step_tokens_max < 2 || hop % align != 0) continue;
+      if (hop <= r.attach_position || hop == r.rolling_position) continue;
+      if (r.rolling_slot < 0) {
+        const int slot = acquire_arena_slot(r.spec.id);
+        if (slot < 0) {
+          ++cache_.stats().skipped_no_slot;
+          continue;
+        }
+        r.rolling_slot = slot;
+      }
+      engine_->prefix_arm_hop(r.slot, r.rolling_slot, hop);
+      r.hop_armed = hop;
+      continue;
+    }
     if (committed == r.rolling_position) continue;
     // A snapshot at a position the request attached at or below repeats an
     // entry that exists; one at or below the prefill-cut entry likewise.

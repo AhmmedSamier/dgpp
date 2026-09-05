@@ -235,12 +235,19 @@ class FakeEngine : public SchedulerEngine {
   }
 
   std::vector<int32_t> step(int req) override {
+    // The failure injection (the v1 failure semantics gate): the n-th step
+    // call across every slot throws, as a bus watchdog or a journal write
+    // to a dead peer would inside an engine op.
+    if (fail_at_step_ > 0 && ++steps_seen_ == fail_at_step_)
+      throw std::runtime_error("fake: injected engine failure at step " +
+                               std::to_string(fail_at_step_));
     Live& live = live_.at(req);
     live.last_token = next_token(live, live.served);
     note_logprobs(req, live.last_token, live.served);
     ++live.served;
     return {live.last_token};
   }
+  void fail_at_step(int n) { fail_at_step_ = n; }
 
   void close(int req) override { live_.erase(req); }
 
@@ -250,6 +257,7 @@ class FakeEngine : public SchedulerEngine {
   int64_t total_blocks_;
   int64_t block_tokens_;
   bool can_sample_ = false;
+  int fail_at_step_ = 0, steps_seen_ = 0;
   int arena_slots_ = 0;
   int64_t arena_align_ = 1;
   std::map<int, int64_t> pinned_;
@@ -497,6 +505,7 @@ struct ServiceRig {
   std::atomic<bool> gate{false};   // pause the engine thread (tests)
   std::atomic<int> pass_delay_ms{0};  // slow the engine to a human pace (tests)
   std::atomic<bool> stopping{false};
+  std::atomic<bool> failed{false};  // an engine op threw: the app's failure path ran
 
   // `sampling_defaults`: the served defaults (greedy unless a test hands
   // the checkpoint's stochastic ones); `can_sample`: whether the fake
@@ -536,7 +545,18 @@ struct ServiceRig {
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
           continue;
         }
-        if (!service.engine_pass())
+        bool more = false;
+        try {
+          more = service.engine_pass();
+        } catch (const std::exception& e) {
+          // The app's failure path (the v1 failure semantics): fail the
+          // service, leave the loop; the HTTP pump answers everyone.
+          service.fail_engine(e.what());
+          failed = true;
+          stopping = true;
+          break;
+        }
+        if (!more)
           std::this_thread::sleep_for(std::chrono::milliseconds(2));
         else if (pass_delay_ms.load() > 0)
           std::this_thread::sleep_for(std::chrono::milliseconds(pass_delay_ms.load()));
@@ -1671,6 +1691,84 @@ DGPP_TEST(serve_shutdown_drainsInFlightWorkWithTheShutdownError) {
                 metrics.find("\"requests_shed\":2") != std::string::npos,
             "metrics: one interruption, two sheds: " + metrics.substr(0, 400));
   }
+}
+
+DGPP_TEST(serve_engineFailure_answersLiveStreamsAfterTheirCommittedTokensOnly) {
+  // The v1 failure semantics (M8's exit criterion "injected rank failure
+  // leaves committed state unchanged", DESIGN §9 item 6): an engine op
+  // throws mid-generation. The stream gets EXACTLY the tokens the scheduler
+  // committed before the failure (the fake fails on its n-th step, so the
+  // count is known: the prefill's token plus n-1 steps), then the
+  // engine_failure error event and [DONE], no finish chunk; a later request
+  // is refused 503 engine_failure at the door; /health turns 503 with the
+  // reason; the metrics count the interruption; drained() turns true once
+  // every answer is out — the app then exits nonzero.
+  ServiceRig rig(/*queue_limit=*/8);
+  std::string text;
+  for (int i = 0; i < 300; ++i) text.push_back(static_cast<char>('a' + i % 26));
+  rig.engine.script(4, script_of(rig, text));  // "abcd" renders to 4 ids
+  rig.pass_delay_ms = 2;
+  constexpr int kFailAt = 6;  // tokens committed: prefill + 5 steps = 6
+  rig.engine.fail_at_step(kFailAt);
+  Client stream(rig.port());
+  {
+    const std::string body = chat_body("abcd", 300, ",\"stream\":true");
+    stream.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+                    "Content-Type: application/json\r\nContent-Length: " +
+                    std::to_string(body.size()) + "\r\n\r\n" + body);
+  }
+  const std::string raw = stream.read_until("data: [DONE]", 5000);
+  require(rig.failed.load(), "the rig's engine loop ran the failure path");
+  require(rig.service.failed(), "the service reports the failure");
+  // The committed tokens, all of them and nothing more.
+  std::string content;
+  size_t at = 0;
+  while ((at = raw.find("\"content\":\"", at)) != std::string::npos) {
+    at += 11;
+    const size_t end = raw.find('"', at);
+    content.append(raw, at, end - at);
+    at = end;
+  }
+  require(content == text.substr(0, kFailAt),
+          "the stream carries exactly the " + std::to_string(kFailAt) +
+              " committed tokens: got '" + content + "'");
+  require(raw.find("\"code\":\"engine_failure\"") != std::string::npos &&
+              raw.find("injected engine failure") != std::string::npos &&
+              raw.find("this response is incomplete") != std::string::npos,
+          "the stream ends with the engine_failure error event naming the cause: " +
+              raw.substr(raw.size() > 500 ? raw.size() - 500 : 0));
+  require(raw.find("\"finish_reason\":\"") == std::string::npos,
+          "no finish chunk on a failed stream");
+  const size_t err_at = raw.find("\"error\"");
+  require(raw.find("\"content\":\"", err_at) == std::string::npos,
+          "no token after the error event");
+  // The door: a later request is refused with the failure.
+  const std::string late = post_chat(rig, chat_body("ijkl", 4));
+  require(late.find("503 ") != std::string::npos &&
+              late.find("\"code\":\"engine_failure\"") != std::string::npos &&
+              late.find("restarting") != std::string::npos,
+          "a request after the failure is refused 503 engine_failure: " + late.substr(0, 300));
+  {
+    Client h(rig.port());
+    h.send_all("GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string health = h.read_until("}", 2000);
+    require(health.find("503 ") != std::string::npos &&
+                health.find("\"status\":\"failed\"") != std::string::npos &&
+                health.find("injected engine failure") != std::string::npos,
+            "/health reports the failure: " + health.substr(0, 300));
+  }
+  {
+    Client m(rig.port());
+    m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string metrics = m.read_until("engine_failed", 2000);
+    require(metrics.find("\"requests_failed\":1") != std::string::npos &&
+                metrics.find("\"engine_failed\":true") != std::string::npos,
+            "metrics: one request failed, the engine flagged: " + metrics.substr(0, 400));
+  }
+  for (int i = 0; i < 200 && !rig.service.drained(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  require(rig.service.drained(), "drained once every answer is out");
+  require(rig.service.fail_engine("again") == 0, "fail_engine is idempotent");
 }
 
 DGPP_TEST(serve_admission_growPolicyShedsTheYoungestWithFinishLength) {

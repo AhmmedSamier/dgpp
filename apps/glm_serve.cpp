@@ -51,6 +51,7 @@
 //     speculative accept test on the device).
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -210,6 +211,33 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
   dgpp::service::HttpServer http(k.http_port, &service, k.max_connections);
 
   std::atomic<bool> drained{false};  // the engine thread's drain is done
+  // The v1 failure semantics (DESIGN §9 item 6, PLAN M9; built 2026-09-05):
+  // ANY engine or fabric failure fails the service — an engine op that
+  // throws (a bus watchdog, a scheduler contract violation, a journal
+  // write to a dead peer) or a peer's death seen by the journal watch
+  // while the engine thread is inside a collective that rank will never
+  // complete. The service answers every live stream with the engine_failure
+  // error after its committed tokens, one-shots and later requests get a
+  // 503, and the process exits with status 2 once the answers are out
+  // (serve_run.sh or the supervisor restarts the world; the resident image
+  // makes that ~25 s). No drain pass, no stop record, no bus teardown: the
+  // engine thread may be stuck in the bus, and the peers see the journal
+  // close when this process exits.
+  std::atomic<bool> engine_failed{false};
+  const auto fail_service = [&](const std::string& what) {
+    if (engine_failed.exchange(true)) return;
+    const int n = service.fail_engine(what);
+    DGPP_LOG_ERROR(
+        "serve: ENGINE FAILURE — {}; {} in-flight request(s) answered with "
+        "the engine_failure error after their committed tokens; exiting "
+        "nonzero once the answers are out",
+        what, n);
+    g_stop_requested.store(true);
+  };
+  if (journal)
+    journal->watch_peers([&](int peer, const std::string& why) {
+      fail_service("rank " + std::to_string(peer) + " died (" + why + ")");
+    });
   std::thread engine_loop([&] {
     const auto pass = [&] {
       return journal
@@ -222,8 +250,22 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
                  : service.engine_pass();
     };
     while (!g_stop_requested.load()) {
-      if (!pass()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      try {
+        if (!pass()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      } catch (const std::exception& e) {
+        fail_service(e.what());
+        drained.store(true);
+        return;
+      }
     }
+    if (engine_failed.load()) {  // the watch fired: no drain, no stop record
+      drained.store(true);
+      return;
+    }
+    // The peer watch ends before the drain: the stop record releases the
+    // peers, whose exits close their journal connections — an orderly
+    // departure, not a death.
+    if (journal) journal->stop_watch();
     // Drain-on-stop (M6 6c). This is a pass boundary: no collective is in
     // flight on any rank (a stop that lands mid-prefill waited the pass
     // out above). Close the door, shed the queue, flag every live request,
@@ -255,7 +297,7 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
     // thread's pump answer every interrupted stream (the error event and
     // [DONE]) and shed one-shot (503) before the server stops — bounded,
     // so a client that never reads cannot hold the process.
-    while (!drained.load())
+    while (!drained.load() && !engine_failed.load())
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
     for (int i = 0; i < 150 && !service.drained(); ++i)
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -273,6 +315,18 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
   http.serve();
 
   stop_watcher.join();
+  if (engine_failed.load()) {
+    // The failure exit: the answers are out (or the grace expired). The
+    // engine thread may be inside a collective a dead rank will never
+    // complete, so nothing is joined or torn down — the op stream is
+    // written (the evidence of what was committed here) and the process
+    // ends with status 2; the peers see the journal close and exit.
+    if (journal) journal->stop_watch();
+    if (oplog) write_ops_file("serve_rank0.ops", oplog->text());
+    DGPP_LOG_ERROR("serve: exiting with status 2 after the engine failure");
+    std::fflush(nullptr);
+    std::_Exit(2);
+  }
   engine_loop.join();
   if (oplog)
     write_ops_file("serve_rank0.ops", oplog->text());  // the 4-way leg
@@ -635,7 +689,7 @@ int main(int argc, char** argv) {
                         journal->port(), world - 1);
           journal->accept_peers(world, rendezvous_timeout_ms);
         } else {
-          reader.emplace(peer, journal_port, rendezvous_timeout_ms);
+          reader.emplace(peer, journal_port, rendezvous_timeout_ms, rank);
         }
 
         dgpp::GlmBusBoundaryReducer reducer(*bus);
@@ -755,7 +809,21 @@ int main(int argc, char** argv) {
                         rank, dgpp::glm::AdmissionPolicy::name(peer_policy.mode),
                         peer_policy.window_tokens);
           dgpp::service::run_journal_peer(
-              &sched, &*reader, [rank] { return peer_should_stop(rank); });
+              &sched, &*reader, [rank] { return peer_should_stop(rank); },
+              [rank, &oplog] {
+                // Rank 0's journal closed while this rank is inside a tick
+                // — a collective rank 0 will never complete. The v1 failure
+                // semantics: write the op stream (what was committed here)
+                // and exit nonzero at once, never wait on the bus watchdog.
+                DGPP_LOG_ERROR(
+                    "rank {}: rank 0's journal closed under a collective — "
+                    "the world is over; exiting with status 3",
+                    rank);
+                write_ops_file("serve_rank" + std::to_string(rank) + ".ops",
+                               oplog.text());
+                std::fflush(nullptr);
+                std::_Exit(3);
+              });
           write_ops_file("serve_rank" + std::to_string(rank) + ".ops",
                          oplog.text());
           engine.reset();

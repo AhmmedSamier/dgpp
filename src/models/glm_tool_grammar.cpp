@@ -126,6 +126,7 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
     tool.name = std::string(name->as_string());
   const minijson::Value* strict_v = def.find("strict");
   const bool strict = strict_v != nullptr && strict_v->is_bool() && strict_v->as_bool();
+  tool.strict = strict;
   const minijson::Value* params = def.find("parameters");
   if (params == nullptr || !params->is_object()) return tool;
   const minijson::Value* props = params->find("properties");
@@ -137,6 +138,23 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
   if (closed) {
     tool.constrain_keys = true;
     for (const minijson::Member& pm : props->members()) tool.keys.push_back(pm.key);
+  }
+  // `required`: the names among the declared properties (a name outside
+  // them can never be satisfied — dropped, with a warning under strict).
+  if (const minijson::Value* req = params->find("required");
+      req != nullptr && req->is_array()) {
+    for (const minijson::Value& e : req->items()) {
+      if (!e.is_string()) continue;
+      const std::string key(e.as_string());
+      if (props->find(key) != nullptr) {
+        if (std::find(tool.required_keys.begin(), tool.required_keys.end(),
+                      key) == tool.required_keys.end())
+          tool.required_keys.push_back(key);
+      } else if (strict && warnings != nullptr) {
+        warnings->push_back("required key '" + key + "' of '" + tool.name +
+                            "' is not a declared property; not enforced");
+      }
+    }
   }
   for (const minijson::Member& pm : props->members()) {
     GrammarArg arg;
@@ -314,7 +332,29 @@ const GrammarTool* GrammarState::current_tool() const {
 bool GrammarState::keys_possible() const {
   const GrammarTool* t = current_tool();
   if (t == nullptr) return true;
-  return !t->constrain_keys || !t->keys.empty();
+  if (!t->constrain_keys) return true;
+  for (const std::string& k : t->keys)
+    if (!key_used(k)) return true;
+  return false;
+}
+
+bool GrammarState::key_used(const std::string& key) const {
+  return std::find(used_keys_.begin(), used_keys_.end(), key) != used_keys_.end();
+}
+
+bool GrammarState::call_closable() const {
+  const GrammarTool* t = current_tool();
+  if (t == nullptr || !t->strict) return true;
+  for (const std::string& k : t->required_keys)
+    if (!key_used(k)) return false;
+  return true;
+}
+
+bool GrammarState::call_closable_for(const std::string& name) const {
+  // At the name, before any key: closable unless a strict tool requires one.
+  for (const GrammarTool& t : spec_.tools)
+    if (t.name == name) return !t.strict || t.required_keys.empty();
+  return true;
 }
 
 void GrammarState::enter(State s) {
@@ -328,8 +368,11 @@ void GrammarState::enter(State s) {
     }
     tool_ = -1;
   } else if (s == State::kKey) {
+    // A closed key set, less the keys this call has already used.
     const GrammarTool* t = current_tool();
-    if (t != nullptr && t->constrain_keys) match_.targets = t->keys;
+    if (t != nullptr && t->constrain_keys)
+      for (const std::string& k : t->keys)
+        if (!key_used(k)) match_.targets.push_back(k);
   } else if (s == State::kValue) {
     // The value's constraint is the key's declared argument, if any.
     arg_ = -1;
@@ -444,7 +487,7 @@ void GrammarState::mask(TokenMask* out) const {
       std::vector<int64_t> ids = match_ids(match_, -1);
       if (match_.complete()) {
         if (keys_possible_for(match_.emitted)) ids.push_back(m.arg_key_open.id);
-        ids.push_back(m.tool_call_close.id);
+        if (call_closable_for(match_.emitted)) ids.push_back(m.tool_call_close.id);
       }
       list_mask(out, ids);
       return;
@@ -473,9 +516,11 @@ void GrammarState::mask(TokenMask* out) const {
       return;
     }
     case State::kAfterValue: {
+      // A closed set with every key used has every required key used, so
+      // the two conditions are never both false: no dead end.
       std::vector<int64_t> ids;
       if (keys_possible()) ids.push_back(m.arg_key_open.id);
-      ids.push_back(m.tool_call_close.id);
+      if (call_closable()) ids.push_back(m.tool_call_close.id);
       list_mask(out, ids);
       return;
     }
@@ -591,8 +636,9 @@ void GrammarState::advance(int64_t id) {
       return;
     case State::kName:
       if (id == m.arg_key_open.id || id == m.tool_call_close.id) {
-        // The name is complete: bind the tool.
+        // The name is complete: bind the tool; the call's key ledger opens.
         tool_ = -1;
+        used_keys_.clear();
         for (size_t i = 0; i < spec_.tools.size(); ++i)
           if (spec_.tools[i].name == match_.emitted) tool_ = static_cast<int>(i);
         if (id == m.arg_key_open.id)
@@ -606,6 +652,7 @@ void GrammarState::advance(int64_t id) {
     case State::kKey:
       if (id == m.arg_key_close.id) {
         key_ = match_.emitted;
+        used_keys_.push_back(key_);
         enter(State::kAfterKey);
         return;
       }

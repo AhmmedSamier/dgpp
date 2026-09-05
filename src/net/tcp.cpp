@@ -182,6 +182,26 @@ bool TcpConn::wait_readable(int timeout_ms) {
   return poll_one(&p, timeout_ms) == 1;
 }
 
+bool TcpConn::peer_closed() const {
+  if (fd_ < 0) return true;
+  struct pollfd p{};
+  p.fd = fd_;
+  p.events = POLLIN | POLLRDHUP;
+  const int n = ::poll(&p, 1, 0);
+  if (n <= 0) return false;  // quiet (or EINTR): alive as far as we know
+  if (p.revents & (POLLERR | POLLNVAL)) return true;
+  char b = 0;
+  const ssize_t r = ::recv(fd_, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+  if (r == 0) return true;  // orderly close
+  if (r < 0) return errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR;
+  return false;  // data pending: the peer is alive (or died after writing —
+                 // the reader sees the close once it drains)
+}
+
+void TcpConn::shutdown_rw() {
+  if (fd_ >= 0) ::shutdown(fd_, SHUT_RDWR);
+}
+
 void TcpConn::close() {
   if (fd_ >= 0) {
     ::close(fd_);

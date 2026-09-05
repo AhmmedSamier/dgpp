@@ -200,8 +200,21 @@ class SchedulerEngine {
     int64_t align = 1;         // every snapshot position is a multiple (kpool)
     int64_t block_tokens = 0;  // the DSA block; 0 = no pool (nothing pinned)
     int64_t chunk_tokens = 2048;  // the prefill's chunk (the cold cuts)
+    int step_tokens_max = 1;   // tokens one step may commit (2: the MTP step)
   };
   virtual PrefixInfo prefix_info() const { return {}; }
+  // The hop (M7 under a multi-token step): the request's next step may
+  // commit past `position` (= its committed count + 1, pool-aligned) without
+  // stopping there; if it commits two tokens, the engine takes the state
+  // after the step's first row — the state at `position` — into arena slot
+  // `slot` before returning from that step. A one-token step lands ON the
+  // position and the scheduler's rolling snapshot follows at the next tick.
+  // The arm holds until the slot's next step (or its close).
+  virtual void prefix_arm_hop(int req, int slot, int64_t position) {
+    (void)req;
+    (void)slot;
+    (void)position;
+  }
   // The prefill with the cache: `boundaries` (absolute positions, ascending)
   // are the request's structural cut positions — the cold chunking cuts at
   // every chunk multiple and at the aligned image of each; attach_slot >= 0
@@ -357,6 +370,7 @@ class Scheduler {
     int64_t prefix_snapshots = 0;
     int64_t prefix_close_entries = 0;
     int64_t prefix_rolling = 0;
+    int64_t prefix_hops = 0;
     int64_t prefix_evictions = 0;
     int64_t prefix_duplicates = 0;
     int64_t prefix_skipped = 0;
@@ -449,6 +463,7 @@ class Scheduler {
     int64_t attach_position = 0;
     int rolling_slot = -1;
     int64_t rolling_position = -1;
+    int64_t hop_armed = -1;    // the aligned position armed for the next step
   };
   // The admission plan the cache proposes for a queued request: the entry
   // to attach (or -1) and the position, and the cut a new entry would be

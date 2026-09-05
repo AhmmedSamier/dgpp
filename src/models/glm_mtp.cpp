@@ -351,6 +351,14 @@ void GlmDiagnosticModel::snapshot_draft_ring(int req) {
                   ring * 2, stream_);
 }
 
+void GlmDiagnosticModel::session_draft_ring_snapshot(int req) {
+  if (!mtp_) throw std::logic_error("session_draft_ring_snapshot: no MTP");
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_draft_ring_snapshot: request slot " +
+                            std::to_string(req));
+  snapshot_draft_ring(req);
+}
+
 void GlmDiagnosticModel::session_draft_rollback(int req, int rows) {
   if (!mtp_) throw std::logic_error("session_draft_rollback: no MTP");
   if (req < 0 || req >= max_requests_)

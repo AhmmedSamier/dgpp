@@ -13,10 +13,10 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.58 s and 2048 tokens 19.8 → 1.7 s in steady state through seven rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts, the dense attention prefill, its projections, the dense MLPs, the router and the mHC dots restructured, most of them bitwise; 4096 tokens 3.5 s and 8192 tokens 7.3 s with the sparse regime on the same flash kernel); the GPU is busy 98 % of a prefill |
-| M7 | Exact snapshot prefix cache | [x] built 2026-09-05: stage A (the model primitives) and stage B (the cache in the scheduler, the arena in the engines, the service, the journal); hot == cold bitwise, rank-identical by construction and checked per tick |
-| M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
-| M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
+| M6 | Generation scheduler, tokenizer, and API | [x] closed 2026-09-05 — the last open items (the strict tool grammar's required keys and once-per-call closed keys; the stale measurement notes) done in the closure pass, prefill optimization shelved at line rate by decision; serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.58 s and 2048 tokens 19.8 → 1.7 s in steady state through seven rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts, the dense attention prefill, its projections, the dense MLPs, the router and the mHC dots restructured, most of them bitwise; 4096 tokens 3.5 s and 8192 tokens 7.3 s with the sparse regime on the same flash kernel); the GPU is busy 98 % of a prefill |
+| M7 | Exact snapshot prefix cache | [x] built 2026-09-05: stage A (the model primitives) and stage B (the cache in the scheduler, the arena in the engines, the service, the journal); hot == cold bitwise, rank-identical by construction and checked per tick; the two-token step's parity limit closed the same day by the hop snapshot (every aligned position past an attach is snapshotted, bitwise the one-row state) |
+| M8 | Transactional MTP decoding | [x] depth 1, greedy and sampled, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`); buttoned up 2026-09-05: the v1 failure semantics built, gated and drilled on the four nodes (a rank's death answers every live stream with its committed tokens and an error, the ranks exit nonzero within seconds, the restart reproduces the committed tokens), cancellation and forced pool-boundary rejections under the one-graph step gated, the remaining list resolved |
+| M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); of the hardening, the v1 failure semantics are built and drilled (2026-09-05); counter-drift checks, the soak, the fuzzing and the sign-off report are not started |
 
 ## Where we are (2026-09-03)
 
@@ -909,11 +909,12 @@ Two phases:
   reading done first and gating completion on every peer's stripe posted
   (the bulk path's own rule); `bus_test`'s
   `scenario_allreduce_done_before_posted` injects the delay and fails on
-  the old ordering within seconds (DESIGN §6.3's rule list). OWED: the
-  GEMM seam now lowers every m ≤ 8 through the GEMV chunks, which moved
-  prefill tail chunks and per-expert prefill GEMMs of 5–8 routed tokens off
-  cuBLASLt — bitwise different at those shapes and unmeasured; measure
-  prefill before the TTFT work starts (below). The kernels-only graph's
+  the old ordering within seconds (DESIGN §6.3's rule list). (The note
+  that stood here — the GEMM seam lowering every m ≤ 8 through the GEMV
+  chunks, unmeasured — was overtaken by the nine prefill rounds of
+  2026-09-04/05, which measured the prefill end to end at every step and
+  restructured those GEMMs; prefill optimization is shelved at line rate
+  by decision, 2026-09-05.) The kernels-only graph's
   fabric cost is confirmed in the noise (2026-09-04 record entry: T=1 graph
   31.67 ms/step vs the record's 31.3, MTP graph 42.44 vs 42.36–42.42, eager
   36.07 vs 36.4; plain vs both graphs IDENTICAL over 300 steps, one md5 on
@@ -1136,14 +1137,17 @@ cost. Design:
   `bus_spec_accept`, `SampledSpeculator`, `glm_gen_check --mtp --sample`;
   the one-graph step's T=2 device verdict, the draft ring snapshot and
   `session_draft_rollback`, `GlmGraphEngineAdapter::serve_mtp_fallback`;
-  `glm_serve --decode-graph --mtp` samples — the acceptance at T=1/0.95 is
-  still to be measured on the fabric): accept
+  `glm_serve --decode-graph --mtp` samples; the acceptance at T=1/0.95 was
+  measured on the fabric on 2026-09-04 — 67–81 % of drafts accepted,
+  25.0–27.6 ms/token sampled against 33.2 plain): accept
   draft `x` with probability `p(x)` under the verify row
   (the lse gives `p(x)`), else sample from `p` with `x` removed — the same
   inside/outside test. Acceptance at T=1 is ≈ E[p(draft)], lower than the
   89% argmax agreement (expect 55–70%); the T=2 step's extra row costs
   ~9–11 ms of 42, so the break-even is ~30% and MTP still pays at the
-  recommended settings — to be measured, and reported per setting.
+  recommended settings — measured 2026-09-04 (the record's entry): it does,
+  and the model is more confident on its own generations than the 55–70 %
+  estimate assumed.
 - `logprobs`/`top_logprobs` ride the same table (exact for the top-k)
   (BUILT 2026-09-04). A
   request's `seed` is its RNG seed; without one, rank 0 draws it and
@@ -1414,9 +1418,15 @@ refusal by keyword path and the non-strict fallback),
 the typing derived from their own schemas; the derivation facts for
 string / integer / enum / type list / untyped enum / object / strict),
 the two constrained loopbacks with the fixture's tools typed; ctest
-34/34. Not built: required keys and duplicate-key exclusion inside a
-call (OpenAI's strict mode guarantees them; the automaton has the used
-keys, the enforcement is a small follow-on).
+34/34. Built 2026-09-05 (the closure pass): a closed key set is offered
+once per call (a duplicate key is never a valid object — the key
+automaton's targets are the keys not yet used), and under `strict: true`
+the call cannot close while a required key is missing (the closer leaves
+the mask until every `parameters.required` name has been written; a
+non-strict tool keeps its closer, as OpenAI's non-strict tools do); the
+journal carries `s` and `r` per tool; the unit gate
+`tool_grammar_closedKeysOnceAndStrictRequiredKeysGateTheClose` and the
+codec round trip pin it.
 
 **6c. Drain-on-stop — BUILT 2026-09-04.** The debt: in-flight requests
 died with the world (their cancels were queued by `begin_shutdown()` but
@@ -1678,21 +1688,31 @@ be BITWISE and is.
   same sequence, answers and digests identical across ranks). The fabric:
   the service with the cache on, a conversation's second and third turns
   through the cache, op streams identical on four ranks.
-- *Known limits, measured.* The MTP graph commits one or two tokens a
-  step, so the committed count's parity follows the draft's acceptance:
-  a fully accepted answer after an odd-length prompt never visits an
-  aligned position (on the fabric a 26-token answer to a 25-token prompt
-  took no rolling snapshot at all; a 64-token one visited 52, 56, 68, 88
-  and 92 and its close entry sat at 92 against an end of 108). A request
-  whose committed position IS aligned at retire snapshots the live state
-  then (the retire-time snapshot), which recovers those cases exactly;
-  the rest fall back to the prefill-cut entry (the previous prompt's
-  assistant header — still a hit for the whole previous prompt), never
-  to a wrong attach. Entries are per process (no persistence). Turn two
-  reproduces turn one's generated ids only when the template re-renders
-  the assistant turn with its reasoning (`chat_template_kwargs:
-  {clear_thinking: false}`) and the answer ended in EOS — a capped answer
-  has no `</think>` for the re-render to match.
+- *The two-token step's parity, measured and closed (2026-09-05).* The
+  MTP graph commits one or two tokens a step, so the committed count's
+  parity follows the draft's acceptance: a fully accepted answer after an
+  odd-length prompt never lands ON an aligned position (on the fabric a
+  26-token answer to a 25-token prompt took no rolling snapshot at all; a
+  64-token one visited 52, 56, 68, 88 and 92 and its close entry sat at 92
+  against an end of 108). Closed by the HOP snapshot: when the next aligned
+  position is committed + 1, the scheduler arms the engine
+  (`prefix_arm_hop`), and a step that commits both rows takes the state
+  after its FIRST row — the position it hopped over — from the step's
+  spec snapshot rows (the rollback's source), the draft block's pre-draft
+  ring and the hidden cache (`session_snapshot_post_row0`), before another
+  slot's step can reuse those rows; a one-row step lands on the position
+  and the regular rolling snapshot follows. Gated bitwise against the
+  one-row snapshot at world 1 (`glm_tp_prefix_hop_snapshot_is_bitwise_
+  the_one_row_snapshot`: 287,232 bytes equal, the resume, a step and a
+  draft row bitwise through the attach), on the host (the scheduler's
+  arming and bookkeeping: `scheduler_prefixCache_twoTokenStepsHopOverAn
+  AlignedPositionAndSnapshotIt`), on the loopback world (every aligned
+  position past an attach covered), and on the fabric (the 25-token
+  prompt's follow-up turn attaches at its close entry). Entries are per
+  process (no persistence). Turn two reproduces turn one's generated ids
+  only when the template re-renders the assistant turn with its reasoning
+  (`chat_template_kwargs: {clear_thinking: false}`) and the answer ended
+  in EOS — a capped answer has no `</think>` for the re-render to match.
 
 Not in v1: persistence across restarts, cross-instance federation, DSA
 block deduplication below block granularity.
@@ -1723,12 +1743,23 @@ Deliverables:
    row-1 sample, with the draft rollback when a row falls back.
 4. Adaptive draft depth based on measured acceptance and memory pressure.
    MTP stays a configurable mode (`--mtp`) and is expected to be the
-   first-class serving mode (decision 2026-09-03). Not built: depth 2
-   was declined for its step-to-step variance (a second draft accepted
-   ~60% of the time against a ~29% break-even), and the
-   fixed-depth step's remaining cost is inside the graph. Confidence-gated
-   T (skip the draft row when the draft's margin is thin) needs the row's
-   lse in the pick table — the same addition 6b needs.
+   first-class serving mode (decision 2026-09-03). Closed as measured and
+   declined (2026-09-05): depth 2 was declined for its step-to-step
+   variance (a second draft accepted ~60% of the time against a ~29%
+   break-even — worth roughly 7 % on the mean by the record's numbers,
+   declined for the bimodal step; a decision to reopen, not an open
+   item); confidence-gated T (skip the draft row when its margin is thin)
+   is unblocked since the lse rides the pick table (6b), and its ceiling
+   is the second row's cost times the rejection rate — ~0.9 ms of a 42 ms
+   step at the measured 88.7 % greedy acceptance (2 %), ~1.7–3 ms sampled
+   (67–81 %) — for a third graph variant per slot and a rank-identical
+   gate decision; declined at that ceiling. The eager first draft after
+   an admission (the prompt's last row through the draft block, one
+   eager draft step and a pick) costs the block's weight floor, ~2.1 ms,
+   plus ~0.3 ms of launch overhead once per request against a hot TTFT of
+   255 ms and a cold one of 600 ms and more — measured on the per-step
+   eager draft of 2026-09-03 (2.9 ms, the overhead beyond the floor 0.3);
+   left as is.
 
 Exit criteria, status:
 
@@ -1737,11 +1768,28 @@ Exit criteria, status:
   speculator` runs the one-graph step in lockstep with the eager
   speculator across pool boundaries with rejections at every step where
   they occur; the fabric transcript is IDENTICAL to plain over 300 and
-  1000 steps (a dedicated construction that forces a rejection exactly at
-  a pool boundary is not written — the lockstep runs cross boundaries
-  with mixed verdicts, but by chance of the text, not by design);
+  1000 steps; and, since 2026-09-05, the forced construction
+  `glm_tp_one_graph_step_forced_rejections_at_pool_boundaries_match_plain`:
+  the draft row poisoned at four steps of every five, so the rejected row
+  lands on every residue mod kpool (the row that opens a pool, the one
+  that would complete it, the middle slots — 20 forced rejections, five
+  per residue), the transcript equal to the plain session's after every
+  one and at the end, on both ranks (the eager verify's pool-boundary
+  rejection was already forced by
+  `glm_tp_session_verify_rollback_matches_sequential_bitwise`);
 - cancellation and injected rank failure leave committed state unchanged —
-  NOT TESTED (no failure injection exists; M9 hardening);
+  ✓ (2026-09-05): cancellation under the MTP graph engine through the
+  scheduler with the row-batched variant live
+  (`glm_tp_serving_mtp_graph_cancel_leaves_committed_state_unchanged`: the
+  other requests' transcripts bitwise the run without the cancel, the
+  cancelled one's tokens a proper prefix of its answer, both ranks equal);
+  rank failure by injection at three levels — the service's engine-op
+  failure (`serve_engineFailure_answersLiveStreamsAfterTheirCommitted
+  TokensOnly`: the stream carries exactly the committed tokens, then the
+  engine_failure event), a peer's death and rank 0's death through the
+  journal watches (`glm_fabric_serve_test` scenarios 7 and 8), and the
+  four-node drill (`scripts/serve_failure_drill.sh`: kill −9 under load,
+  the committed text a prefix of the restarted service's answer);
 - temperature-zero output is identical with MTP on/off — ✓
   (`scripts/fabric_xcript.py` prints IDENTICAL; the verify rows are
   bitwise the T=1 rows by construction);
@@ -1751,11 +1799,14 @@ Exit criteria, status:
   31.34 ms/token; the draft layer adds ~7.3 GiB/rank; record entries of
   2026-09-03).
 
-Remaining, ranked:
-`FabricPicker` refactor so the plain loop's host pick and the graph loop's
-device pick share one driver; the prefill's last-row head through the
-draft (the first draft is eager today); a forced pool-boundary rejection
-test.
+Remaining: nothing. The list that stood here was resolved on 2026-09-05:
+the `FabricPicker` seam became glm_gen_check's `HostPick` — one driver for
+every host pick (world 1's full-head argmax or sampler, the fabric's bus
+merge or sampler; the plain loops eager and under the T=1 graph, the
+speculative loop's prefill and eager row picks), the in-graph pick being
+`GlmDevicePicker` by nature, the generated ids on the four nodes
+unchanged; the eager first draft measured and left (deliverable 4); the
+forced pool-boundary rejection test written (the exit criteria).
 
 ## M9 — Optimization and hardening
 
@@ -1779,14 +1830,32 @@ transcripts bitwise invariant across graph-width transitions.
 
 Hardening, not started, designed:
 
-- *Failure semantics (v1):* any rank failure fails the service — there is
-  no failover. Rank 0's death: peers see journal EOF and exit. A peer's
-  death: rank 0's next journal write throws or the bus watchdog fails the
-  in-flight collective; rank 0 answers every active stream with an error
-  event, then exits nonzero. `serve_run.sh` (or systemd) restarts the
-  world; the resident image makes that ~25 s. Drill: kill −9 a random
-  rank under load, assert every client got an error event, the peers
-  exited within the watchdog, and the restart serves.
+- *Failure semantics (v1) — BUILT AND DRILLED 2026-09-05 (the M8 closure
+  pass; the record's twenty-eighth entry):* any rank failure fails the
+  service — there is no failover. Rank 0's death: a peer's read loop sees
+  the journal EOF and exits; a peer INSIDE a tick (a collective rank 0 will
+  never complete) is released by its in-tick watch on the journal socket
+  (`run_journal_peer`'s hook: the op stream written, `_Exit(3)`). A peer's
+  death: rank 0's journal watch (`JournalWriter::watch_peers`, a peer
+  never writes, so a readable connection is a close or a reset) fails the
+  service at once, or the engine op throws (a journal write to the dead
+  peer, the bus watchdog); either way `GenerationService::fail_engine`
+  answers every live stream with the engine_failure error event and [DONE]
+  after its committed tokens, one-shots and later requests get 503
+  engine_failure, /health turns 503 with the reason, and the process
+  exits with status 2 once the answers are out — no drain, no stop
+  record, no bus teardown (the engine thread may be stuck in the bus).
+  `serve_run.sh` restarts the world. Gates: the service (an engine op
+  throws mid-stream: exactly the committed tokens, then the error), the
+  in-process journal star (a peer's death fails rank 0 within a poll and
+  releases the survivor; rank 0's death releases a peer stuck inside a
+  tick). Drill (`scripts/serve_failure_drill.sh <victim>`): kill −9 a
+  rank under three streaming clients; every client got its committed
+  tokens then engine_failure + [DONE] (or the connection closed, rank 0
+  the victim), every rank gone within seconds, the restart's answers to
+  the same prompts at temperature 0 carry the committed text as a
+  prefix. Silent deaths (a node powered off: TCP does not close) fall to
+  the bus watchdog, which throws into the same path.
 - *Counter-drift checks:* the 4-way op-stream md5 becomes continuous —
   every N ticks the journal carries rank 0's running fold; a peer whose
   fold differs dies loudly with the tick number (today the check is

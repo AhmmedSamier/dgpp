@@ -78,8 +78,16 @@ anyway, so hot == cold bitwise; the decisions are made identically on
 every rank by the scheduler and checked per tick through the journal;
 `--prefix-cache-gib` sizes the arena, `prefix_cache: false` opts a
 request out, /v1/metrics reports hits, tokens saved and the time to
-first token split. `PLAN.md` has the status per milestone and the designs
-for what remains, `DESIGN.md` the contracts as built.
+first token split; the MTP step's two-token hops over aligned positions
+are snapshotted too, so every conversation turn finds its close entry).
+The v1 failure semantics are built and drilled (2026-09-05): any rank's
+death fails the service at once — every streaming client gets exactly the
+tokens the service had committed, then an `engine_failure` error event,
+every rank exits nonzero within seconds through the journal's death
+watches rather than waiting on the bus watchdog, and a restart reproduces
+the committed tokens (`scripts/serve_failure_drill.sh`). `PLAN.md` has
+the status per milestone and the designs for what remains, `DESIGN.md`
+the contracts as built.
 
 ## Documentation
 

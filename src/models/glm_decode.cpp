@@ -343,6 +343,97 @@ GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot(
   return meta;
 }
 
+GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot_post_row0(
+    int req, void* dst, int spec_row) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_snapshot_post_row0: request slot " + std::to_string(req));
+  const int64_t pos = session_pos_[static_cast<size_t>(req)] - 1;  // after row 0
+  if (pos <= 0) throw std::invalid_argument("session_snapshot_post_row0: no verified rows");
+  if (pos % session_kpool() != 0)
+    throw std::invalid_argument(
+        "session_snapshot_post_row0: the position after row 0 is not pool-aligned");
+  if (spec_row < 0 || spec_row >= kDecodeRows)
+    throw std::out_of_range("session_snapshot_post_row0: spec row " + std::to_string(spec_row));
+  if (dst == nullptr) throw std::invalid_argument("session_snapshot_post_row0: null buffer");
+  // The draft block: its rows ran (counter at P+1, the pre-draft ring is in
+  // the rollback snapshot) or have not (counter at P-1, the live ring IS
+  // the pre-draft ring).
+  bool draft_ring_from_snapshot = false;
+  if (mtp_) {
+    const int64_t q = mtp_pos_[static_cast<size_t>(req)];
+    if (q == pos + 1)
+      draft_ring_from_snapshot = true;
+    else if (q != pos - 1)
+      throw std::logic_error(
+          "session_snapshot_post_row0: the draft block's counter (" + std::to_string(q) +
+          ") is neither before nor after the step's rows (position " + std::to_string(pos) + ")");
+  }
+  const int H = cfg_.hidden_size;
+  uint8_t* d = static_cast<uint8_t*>(dst);
+  if (kda_rec_) {
+    const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
+    const size_t rec_bytes = layers * kda_geo_.recurrent_bytes;
+    const size_t conv_bytes = layers * kda_geo_.conv_committed_bytes;
+    const size_t conv_elems = kda_geo_.conv_committed_bytes / 2;
+    const float* rec =
+        spec_rec_ + static_cast<size_t>(spec_row) * layers * kda_geo_.recurrent_elems;
+    const uint16_t* conv = spec_conv_ + static_cast<size_t>(spec_row) * layers * conv_elems;
+    DGPP_CUDA_OK(cudaMemcpyAsync(d, rec, rec_bytes, cudaMemcpyDeviceToDevice, stream_));
+    d += rec_bytes;
+    DGPP_CUDA_OK(cudaMemcpyAsync(d, conv, conv_bytes, cudaMemcpyDeviceToDevice, stream_));
+    d += conv_bytes;
+  }
+  SessionSnapshotMeta meta;
+  meta.position = pos;
+  meta.mtp_position = mtp_ ? pos - 1 : 0;
+  if (dsa_cfg_.num_dsa_layers > 0) {
+    const size_t tail_bytes = pool_.geometry().tail_bytes_per_request;
+    const size_t ring = spec_tail_ring_elems();
+    if (tail_bytes != ring * 2)
+      throw std::logic_error("session_snapshot_post_row0: tail ring geometry mismatch");
+    for (int layer = 0; layer < dsa_cfg_.num_dsa_layers; ++layer) {
+      const uint16_t* src;
+      if (layer < main_dsa_layers_) {
+        src = spec_tail_ + (static_cast<size_t>(layer) * kDecodeRows +
+                            static_cast<size_t>(spec_row)) * ring;
+      } else if (draft_ring_from_snapshot) {
+        src = mtp_ring_snapshot_ + static_cast<size_t>(req) * ring;
+      } else {
+        src = static_cast<const uint16_t*>(pool_.tail(layer)) + static_cast<size_t>(req) * ring;
+      }
+      DGPP_CUDA_OK(cudaMemcpyAsync(d, src, tail_bytes, cudaMemcpyDeviceToDevice, stream_));
+      d += tail_bytes;
+    }
+    const int64_t block_tokens = dsa_cfg_.block_tokens;
+    const int64_t n_full = pos / block_tokens;
+    const int32_t* row = pool_.request_table_row(req);
+    meta.full_blocks.assign(row, row + n_full);
+    pool_.pin_blocks(meta.full_blocks.data(), n_full);
+    if (pos % block_tokens != 0) {
+      // The partial block as it stands: row 1's latent at P is in it, above
+      // the position — an attached request overwrites it with its own token
+      // at P before anything reads it (positional writes; the visible pool
+      // count derives from the query's position), exactly as the stale rows
+      // of a rolled-back step are.
+      const int32_t b = pool_.acquire_pinned_block();
+      if (b < 0) {
+        pool_.unpin_blocks(meta.full_blocks.data(), n_full);
+        throw std::runtime_error(
+            "session_snapshot_post_row0: cache pool exhausted (the partial block)");
+      }
+      pool_.copy_block_contents(row[n_full], b, stream_);
+      meta.partial_block = b;
+    }
+  }
+  if (mtp_) {
+    const uint16_t* hq = mtp_hidden_cache(req) + static_cast<size_t>(pos - 1) * H;
+    DGPP_CUDA_OK(cudaMemcpyAsync(d, hq, static_cast<size_t>(H) * 2,
+                                 cudaMemcpyDeviceToDevice, stream_));
+    d += static_cast<size_t>(H) * 2;
+  }
+  return meta;
+}
+
 void GlmDiagnosticModel::session_release_snapshot(const SessionSnapshotMeta& meta) {
   if (dsa_cfg_.num_dsa_layers == 0) return;
   if (!meta.full_blocks.empty())

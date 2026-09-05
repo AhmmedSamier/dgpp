@@ -77,6 +77,11 @@ class FakeEngine : public SchedulerEngine {
   // enough for the disconnect test to pull the plug mid-generation
   // (the instant default retires everything before any client could).
   void set_op_delay_ms(int ms) { op_delay_ms_ = ms; }
+  // Scenario knob (the failure gates): while `*block` is set, prefill()
+  // holds inside the engine op — the peer is "inside a tick", where only
+  // the in-tick watch can see rank 0 die; blocked() says it got there.
+  void set_block(std::atomic<bool>* block) { block_ = block; }
+  bool blocked() const { return blocked_.load(); }
 
   int max_concurrent_requests() const override { return slots_; }
   int64_t pool_blocks_total() const override { return total_blocks_; }
@@ -92,6 +97,11 @@ class FakeEngine : public SchedulerEngine {
   int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
     if (int d = op_delay_ms_.load())
       std::this_thread::sleep_for(std::chrono::milliseconds(d));
+    if (block_ != nullptr && block_->load()) {
+      blocked_.store(true);
+      while (block_->load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     if (live_.count(req) != 0)
       throw std::runtime_error("fake: prefill on live slot");
     Live live;
@@ -134,6 +144,8 @@ class FakeEngine : public SchedulerEngine {
   int64_t total_blocks_;
   int64_t block_tokens_;
   std::atomic<int> op_delay_ms_{0};
+  std::atomic<bool>* block_ = nullptr;
+  std::atomic<bool> blocked_{false};
   std::map<int, Live> live_;
 };
 
@@ -290,15 +302,17 @@ void test_journal_codec() {
     s.grammar.named = "get_weather";
     // The typed arguments (M6 6i): a free string, a JSON-typed integer, an
     // enum's texts; only the constrained ones ride.
-    dgpp::glm::GrammarTool weather{"get_weather", true, {"city", "days", "unit"}, {}};
+    dgpp::glm::GrammarTool weather{"get_weather", true, {"city", "days", "unit"}, {}, {}, false};
+    weather.strict = true;                    // the 6i follow-on: strict and
+    weather.required_keys = {"city", "days"};  // its required keys ride too
     weather.args.push_back(dgpp::glm::GrammarArg{"city", dgpp::glm::GrammarArg::Kind::kFree, "", {}});
     weather.args.push_back(dgpp::glm::GrammarArg{"days", dgpp::glm::GrammarArg::Kind::kJson,
                                                  "{\"type\": \"integer\"}", {}});
     weather.args.push_back(dgpp::glm::GrammarArg{"unit", dgpp::glm::GrammarArg::Kind::kText, "",
                                                  {"celsius", "fahrenheit"}});
     s.grammar.tools.push_back(std::move(weather));
-    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"get_time", false, {}, {}});
-    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"ping", true, {}, {}});
+    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"get_time", false, {}, {}, {}, false});
+    s.grammar.tools.push_back(dgpp::glm::GrammarTool{"ping", true, {}, {}, {}, false});
     ev.submits.push_back(s);
     const dgpp::service::JournalRecord got = dgpp::service::decode_journal_line(
         dgpp::service::encode_journal_tick(ev));
@@ -313,6 +327,12 @@ void test_journal_codec() {
     require(got.submits[0].grammar.tools[2].constrain_keys &&
                 got.submits[0].grammar.tools[2].keys.empty(),
             "codec: a closed empty key set survives");
+    require(got.submits[0].grammar.tools[0].strict &&
+                got.submits[0].grammar.tools[0].required_keys ==
+                    std::vector<std::string>{"city", "days"} &&
+                !got.submits[0].grammar.tools[1].strict &&
+                got.submits[0].grammar.tools[1].required_keys.empty(),
+            "codec: strict and the required keys survive; absent ones stay absent");
   }
   // The JSON grammar (M6 6h) carries its schema text; json_object is the
   // empty text and survives as such.
@@ -437,15 +457,30 @@ struct PeerRig {
   std::thread thread;
   std::string error;  // empty = the peer never complained
   std::atomic<bool> warmed{false};  // held at and released by the warm record
+  // The failure gates: `block` holds the peer's engine inside an op (the
+  // in-tick case); `death_seen` is its in-tick watch's report; `finished`
+  // the thread's end; kill() is a process death from rank 0's side (the
+  // connection shut down under the loop, which sees EOF and leaves).
+  std::atomic<bool> block{false};
+  std::atomic<bool> death_seen{false};
+  std::atomic<bool> finished{false};
+  void kill() {
+    if (reader) reader->shutdown();
+  }
 
-  explicit PeerRig(uint16_t journal_port, const std::atomic<bool>& stop_flag) {
-    thread = std::thread([this, journal_port, &stop_flag] {
+  PeerRig(int rank, uint16_t journal_port, const std::atomic<bool>& stop_flag) {
+    engine.set_block(&block);
+    thread = std::thread([this, rank, journal_port, &stop_flag] {
+      struct Done {
+        std::atomic<bool>& f;
+        ~Done() { f.store(true); }
+      } done{finished};
       try {
         // Connect BEFORE the loop: rank 0's accept_peers is waiting
         // for the full world, and it must not wait on a reader that
         // only connects after its first record.
         reader = std::make_unique<dgpp::service::JournalReader>(
-            "127.0.0.1", journal_port, 5000);
+            "127.0.0.1", journal_port, 5000, rank);
         // The production peer holds here for the graph engine's warm
         // capture start signal; the rig holds the same way so the first
         // record's order (warm, then ticks) is pinned end to end.
@@ -459,7 +494,15 @@ struct PeerRig {
         sched->set_observer(&oplog);
         warmed.store(true);
         dgpp::service::run_journal_peer(
-            sched.get(), reader.get(), [&stop_flag] { return stop_flag.load(); });
+            sched.get(), reader.get(), [&stop_flag] { return stop_flag.load(); },
+            [this] {
+              // glm_serve writes its op stream and _Exit(3)s here; the rig
+              // records the sighting and lets the blocked op finish so the
+              // loop can see the EOF and return.
+              death_seen.store(true);
+              block.store(false);
+            },
+            /*watch_poll_ms=*/20);
       } catch (const std::exception& e) {
         error = e.what();
       }
@@ -487,6 +530,18 @@ struct FabricRig {
   std::atomic<bool> stopping{false};
   std::atomic<bool> gate{false};  // holds the engine between passes (tests)
   std::atomic<int> pass_delay_ms{0};  // slows the engine to a human pace (tests)
+  std::atomic<bool> failed{false};  // the failure path ran (a peer died or an op threw)
+  std::string failure;
+
+  // One engine pass with the journal hook — the loop's body, also callable
+  // from a test while the loop is gated (it sleeps then; nothing else
+  // touches the service's engine side).
+  bool pass() {
+    return service.engine_pass(
+        [this](const GenerationService::PassEvents& events) {
+          journal.broadcast(dgpp::service::encode_journal_tick(events));
+        });
+  }
 
   FabricRig()
       : cfg([] {
@@ -507,29 +562,54 @@ struct FabricRig {
     // then rank 0 accepts the full world, then HTTP + the engine.
     // Nothing broadcasts before accept_peers returns.
     for (int r = 1; r < kWorld; ++r)
-      peers.push_back(std::make_unique<PeerRig>(journal.port(), stopping));
+      peers.push_back(std::make_unique<PeerRig>(r, journal.port(), stopping));
     journal.accept_peers(kWorld, 5000);
     // The warm record precedes every tick (glm_serve broadcasts it
     // before its warm capture); the peers are holding for it.
     journal.broadcast(dgpp::service::encode_journal_warm(cfg.admission));
+    // The peer death watch, as glm_serve installs it: a dead peer fails
+    // the service at once (the engine may be inside a collective that
+    // rank will never complete).
+    journal.watch_peers(
+        [this](int peer, const std::string& why) {
+          failure = "rank " + std::to_string(peer) + " died (" + why + ")";
+          service.fail_engine(failure);
+          failed.store(true);
+        },
+        /*poll_ms=*/20);
     http_loop = std::thread([this] { http.serve(); });
     engine_loop = std::thread([this] {
-      const auto pass = [this] {
-        return service.engine_pass(
-            [this](const GenerationService::PassEvents& events) {
-              journal.broadcast(dgpp::service::encode_journal_tick(events));
-            });
-      };
       while (!stopping.load()) {
         if (gate.load()) {
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
           continue;
         }
-        if (!pass())
+        if (failed.load()) break;
+        bool more = false;
+        try {
+          more = pass();
+        } catch (const std::exception& e) {
+          // The app's failure path: the service fails, the loop leaves.
+          failure = e.what();
+          service.fail_engine(failure);
+          failed.store(true);
+          break;
+        }
+        if (!more)
           std::this_thread::sleep_for(std::chrono::milliseconds(2));
         else if (pass_delay_ms.load() > 0)
           std::this_thread::sleep_for(std::chrono::milliseconds(pass_delay_ms.load()));
       }
+      if (failed.load()) {
+        // glm_serve exits here (status 2): its journal connections close
+        // and the surviving peers see EOF. The rig closes them the same way.
+        journal.stop_watch();
+        journal.close_peers();
+        return;
+      }
+      // The peer watch ends before the drain (the stop record releases the
+      // peers; their exits are departures, not deaths), as glm_serve does.
+      journal.stop_watch();
       // Drain-on-stop (M6 6c), as glm_serve does it: flag the live
       // requests, one more pass so the cancels ride the journal and every
       // rank retires them at this quantum, then the stop record.
@@ -557,6 +637,12 @@ struct FabricRig {
     if (http_loop.joinable()) http_loop.join();
     for (auto& p : peers)
       if (p->thread.joinable()) p->thread.join();
+  }
+  // Waits for a peer's thread to end (bounded), true if it did.
+  bool peer_finished(size_t i, int timeout_ms) {
+    for (int t = 0; t < timeout_ms / 5 && !peers[i]->finished.load(); ++t)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return peers[i]->finished.load();
   }
   ~FabricRig() { stop(); }
   FabricRig(const FabricRig&) = delete;
@@ -800,6 +886,138 @@ void test_drain_on_stop(FabricRig& rig) {
   require(rig.service.drained(), "drain: every answer out");
 }
 
+// --- scenario 5: a peer's death fails rank 0 at once ----------------------
+
+void test_peer_death_fails_rank0(FabricRig& rig) {
+  // The v1 failure semantics (M8's exit criterion "injected rank failure
+  // leaves committed state unchanged"; the death discipline of
+  // fabric_serve.hpp): a peer dies while a stream is mid-generation. Rank
+  // 0's journal watch sees the closed connection within a poll, fails the
+  // service, and the stream ends with the engine_failure error naming the
+  // rank AFTER exactly the tokens rank 0 committed (the op stream's T
+  // lines for the request — the same lines every rank wrote for them);
+  // the door closes (503 engine_failure); rank 0 "exits" (the rig closes
+  // its journal connections as the process exit would) and the surviving
+  // peer leaves on the EOF without an error.
+  rig.pass_delay_ms = 20;  // a human pace: a few tokens before the death
+  Client c(rig.port());
+  c.send_all(post_request("/v1/chat/completions",
+                          R"({"model":"glm-5.3-flash-fp8","messages":[)"
+                          R"({"role":"user","content":"x"})"
+                          R"(],"max_tokens":300,"stream":true})"));
+  const auto has_token = [](const std::string& raw) {
+    size_t at = 0;
+    while ((at = raw.find("\"content\":\"", at)) != std::string::npos) {
+      at += 11;
+      if (at < raw.size() && raw[at] != '"') return true;
+    }
+    return false;
+  };
+  std::string head;
+  for (int i = 0; i < 200 && !has_token(head); ++i)
+    head += c.read_until("\"content\":\"", 50);
+  require(head.find("200") != std::string::npos && has_token(head),
+          "peer death: the stream produced a token first: " + head);
+  const size_t id_at = head.find("\"id\":\"");
+  require(id_at != std::string::npos, "peer death: no response id");
+  const std::string id =
+      head.substr(id_at + 6, head.find('"', id_at + 6) - (id_at + 6));
+  // Rank 2 dies.
+  rig.peers[1]->kill();
+  const std::string tail = head + c.read_until("data: [DONE]", 5000);
+  require(rig.failed.load(), "peer death: rank 0's failure path ran");
+  require(rig.failure.find("rank 2 died") != std::string::npos,
+          "peer death: the watch named the rank: " + rig.failure);
+  require(tail.find("\"code\":\"engine_failure\"") != std::string::npos &&
+              tail.find("rank 2 died") != std::string::npos &&
+              tail.find("data: [DONE]") != std::string::npos,
+          "peer death: the stream ends with the engine_failure error and [DONE]: " +
+              tail.substr(tail.size() > 600 ? tail.size() - 600 : 0));
+  require(tail.find("\"finish_reason\":\"") == std::string::npos,
+          "peer death: no finish chunk");
+  // Exactly the committed tokens: the fake's sequence for the prompt, as
+  // many as rank 0's op stream committed for the request.
+  const std::string content = concat_content_deltas(tail);
+  std::string expect;
+  for (size_t i = 0; i < content.size(); ++i)
+    expect.push_back(static_cast<char>(fake_token(1, static_cast<int>(i))));
+  require(!content.empty() && content == expect,
+          "peer death: the tokens are the committed prefix: '" + content + "'");
+  size_t committed = 0;
+  const std::string ops = rig.oplog.text();
+  const std::string needle = "T " + id + " ";
+  for (size_t at = 0; (at = ops.find(needle, at)) != std::string::npos; at += needle.size())
+    ++committed;
+  require(committed == content.size(),
+          "peer death: the stream carries every committed token and nothing more (" +
+              std::to_string(content.size()) + " vs " + std::to_string(committed) + " committed)");
+  // The door.
+  Client late(rig.port());
+  late.send_all(post_request("/v1/chat/completions",
+                             R"({"model":"glm-5.3-flash-fp8","messages":[)"
+                             R"({"role":"user","content":"y"})"
+                             R"(],"max_tokens":2})"));
+  const std::string refused = late.read_until("}}", 3000);
+  require(refused.find("503 ") != std::string::npos &&
+              refused.find("\"code\":\"engine_failure\"") != std::string::npos,
+          "peer death: a later request is refused 503 engine_failure: " + refused.substr(0, 300));
+  // The dead peer's thread ended (the loop saw the EOF); the survivor is
+  // released by rank 0's exit (the journal closing), without an error.
+  require(rig.peer_finished(1, 3000), "peer death: the dead peer's loop ended");
+  require(rig.peer_finished(0, 3000), "peer death: the survivor was released");
+  require(rig.peers[0]->error.empty(),
+          "peer death: the survivor left without an error: " + rig.peers[0]->error);
+  for (int i = 0; i < 400 && !rig.service.drained(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  require(rig.service.drained(), "peer death: every answer out");
+}
+
+// --- scenario 6: rank 0's death releases a peer stuck inside a tick --------
+
+void test_rank0_death_releases_a_peer_mid_tick(FabricRig& rig) {
+  // A peer inside a tick (its engine op holding, as a collective would
+  // with rank 0 gone) cannot see the journal EOF itself; the in-tick watch
+  // does, within a poll, and the app exits nonzero from it. Here: rank
+  // 0's engine is held so exactly one record is out (no pending data on
+  // the wire — the lockstep protocol's invariant, which makes a readable
+  // journal socket inside a tick a death and nothing else), peer 1's
+  // engine blocks inside that tick's prefill, rank 0's connections close
+  // (the watch stopped first: a live rank 0 ending its own life is not a
+  // peer death), and peer 1's watch fires while peer 2 sees the EOF from
+  // its read loop.
+  rig.gate = true;
+  rig.peers[0]->block = true;
+  Client c(rig.port());
+  c.send_all(post_request("/v1/chat/completions",
+                          R"({"model":"glm-5.3-flash-fp8","messages":[)"
+                          R"({"role":"user","content":"x"})"
+                          R"(],"max_tokens":8,"stream":true})"));
+  for (int i = 0; i < 200 && rig.service.drained(); ++i)  // the admission is pending
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  require(rig.pass(), "rank 0 death: the one pass admitted the request");
+  for (int i = 0; i < 400 && !rig.peers[0]->engine.blocked(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  require(rig.peers[0]->engine.blocked(), "rank 0 death: peer 1 is inside the tick");
+  require(!rig.peers[0]->death_seen.load(), "rank 0 death: nothing seen while rank 0 lives");
+  rig.journal.stop_watch();
+  rig.journal.close_peers();  // rank 0's process exit, from the peers' side
+  for (int i = 0; i < 600 && !rig.peers[0]->death_seen.load(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  require(rig.peers[0]->death_seen.load(),
+          "rank 0 death: the in-tick watch saw the journal close");
+  require(rig.peer_finished(0, 3000) && rig.peer_finished(1, 3000),
+          "rank 0 death: both peers left");
+  require(rig.peers[0]->error.empty() && rig.peers[1]->error.empty(),
+          "rank 0 death: no peer errored: " + rig.peers[0]->error + " / " +
+              rig.peers[1]->error);
+  // Rank 0 is "dead" here: its client sees the connection go, not an
+  // event (the app never reaches a pump after its own death); the rig's
+  // stop must still come back (its drain pass throws on the closed peers
+  // and is caught) — a hang here is the failure.
+  rig.stop();
+  (void)c.read_until("data: [DONE]", 500);
+}
+
 }  // namespace
 
 int main() {
@@ -830,6 +1048,19 @@ int main() {
       rig.require_oplogs_agree("stop");
     }
     std::puts("ok 6 - stop discipline: peers released, no peer errors");
+    {
+      FabricRig rig;
+      test_peer_death_fails_rank0(rig);
+    }
+    std::puts("ok 7 - a peer's death fails rank 0 at once: the stream got its "
+              "committed tokens then engine_failure, the door closed, the "
+              "survivor was released");
+    {
+      FabricRig rig;
+      test_rank0_death_releases_a_peer_mid_tick(rig);
+    }
+    std::puts("ok 8 - rank 0's death releases a peer stuck inside a tick "
+              "through the in-tick watch");
     std::puts("glm_fabric_serve_test: ALL PASS");
     return 0;
   } catch (const std::exception& e) {
