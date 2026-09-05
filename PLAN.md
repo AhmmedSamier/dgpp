@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill re-measurement remains |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.80 s and 2048 tokens 19.8 → 5.7 s in steady state through four rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders); the long-segment GEMM is next |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -156,6 +156,28 @@ Suggested order for what remains, each item's design in its section:
    the bulk kernel's data movement (the folds' 0.24 s at 256 tokens are
    the last large item there); a grouped tensor-core GEMM for long
    segments and wider DSA prefill tiles (the 2048-token case).
+   ROUND 4 (2026-09-05, the record's seventeenth entry): the bulk
+   collective kernel is a 16-block cooperative grid — staging, the RS
+   fold and the AG landing in 16 KB tiles over the whole grid, the claim
+   loop and the deferred acks in block 0, the placement proof folded into
+   the consume pass (every tile hashes what it reads; block 0 proves each
+   stripe against its door between rounds and re-folds a miss; zero redos
+   measured) — and the first bench exposed the FABRIC: 2 MiB 2.6 → 0.36
+   ms, but 16 MiB bimodal (3.5 or 30–56 ms) with hundreds of RoCE
+   sequence errors and adaptive retransmissions per run
+   (`scripts/roce_counters.sh`); the old one-block kernel had throttled
+   every sender to ~1 GB/s, the new one let three 200 Gb/s senders burst
+   at one port, and the NICs pace raw-packet QPs only. Software pacing
+   per (peer, lane) QP (`BusOptions::bulk_pace_gbps`, 28) made every size
+   tight with no retransmits; a per-lane window alone changed nothing.
+   Then the door's hash moved from the posting thread onto the staging
+   tiles (the CPU's ~10 µs per stripe was the next ceiling): 16 MiB 22.5
+   → 2.17 ms, 32 MiB 75 → 4.45, 2 MiB → 0.30, ~11 GB/s of wire traffic
+   per rank. Prefill: 256 tokens 1,015 → 796 ms (3.1 ms/token), 2048
+   tokens 7,714 → 5,746 (2.8), ids identical to every earlier round's.
+   Next: the grouped tensor-core GEMM for long expert segments and wider
+   DSA prefill tiles (the 2048-token case: ~3.4 + 0.9 s); the MoE weight
+   read is the floor at 256 (0.58 of 0.80 s).
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).

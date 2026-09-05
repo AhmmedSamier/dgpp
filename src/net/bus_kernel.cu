@@ -1,7 +1,6 @@
-// Receive-side consumer for CollectiveBus validation (see bus_kernel.hpp).
-
 #include "net/bus_kernel.hpp"
 
+#include <cooperative_groups.h>
 #include <cuda/atomic>
 
 #include "kernels/flag_protocol.cuh"
@@ -766,45 +765,162 @@ cudaError_t launch_bus_allreduce_graph(const BusAllReduceGraphView& v,
 
 namespace {
 
-// Bring-up diagnostics (see the BKFIN/BKV*/BKCL records): the failing
-// kernels must report what THEIR reads saw, not what the CPU's stall
-// microscope saw — the two views have diverged, and only the kernel-side
-// record adjudicates scan blindness vs mapping rejection vs CAS loss.
+// ---- the bulk collective kernel: a cooperative grid ----------------------
+// One launch per (phase, segment), kBulkBlocks blocks co-resident by the
+// cooperative-launch contract (2026-09-05; the single-block kernel before
+// it moved every byte through 256 threads at ~1.1 GB/s — a 2 MB fold cost
+// 1.4 ms, a 16 MB one 16). The work that scales with bytes is spread over
+// the whole grid in 16 KB tiles of 16-byte vectors: the outbound staging,
+// the RS fold and the AG landing. What must be serial stays in block 0:
+// the doorbell claim loop (the shared-CAS discipline) and the deferred ack
+// flush. Grid barriers separate the phases: staging | claims | consume
+// rounds | acks.
+//
+// THE PLACEMENT PROOF MOVES INTO THE CONSUME PASS. The claim loop no longer
+// hashes a payload before recording it — every tile hashes the words it
+// reads anyway (bus_fold64's word-indexed XOR, commutative, so tiles and
+// blocks combine through an atomic XOR per (peer, stripe)) and block 0
+// compares the stripe's total against the door's hash after the pass. A
+// stripe whose payload was not yet fully placed when the fold read it is
+// re-folded in the next round (the fold and the landing copy are pure
+// functions of their inputs, so a redo overwrites the same dst bytes with
+// the right ones); dbg_gate_waits/spins count those redos. The proof's
+// invariant is unchanged: no ack, and no done stamp, before every consumed
+// payload has folded to its door's hash.
 constexpr int kBulkScanCap = kBusMaxBulkCells;  // protocol bound, start-validated
 constexpr int kBulkClaimLog = 16;  // first claims of a failing kernel
+constexpr int kBulkBlocks = kBusBulkBlocks;  // the cooperative grid's width
+constexpr uint32_t kBulkTileVecs = 1024;  // 16-byte vectors per tile (16 KB)
+constexpr uint32_t kBulkTileBytes = kBulkTileVecs * 16;
+
+__device__ inline uint64_t bulk_mask_of(uint32_t n) {
+  return n >= 64 ? ~0ULL : ((1ULL << n) - 1);
+}
+
+// 16-byte accesses at vector index vi of a u64-aligned buffer: one v4
+// access when the base is 16-byte aligned, two u64 halves otherwise (the
+// ring slots, arena rows and stripe bases are 16-aligned in every real
+// geometry; the halves keep odd ones correct). System-scope loads for
+// NIC-placed memory, plain ones for device buffers.
+__device__ inline uint4 bulk_words_to_vec(uint64_t a, uint64_t b) {
+  return make_uint4(static_cast<uint32_t>(a), static_cast<uint32_t>(a >> 32),
+                    static_cast<uint32_t>(b), static_cast<uint32_t>(b >> 32));
+}
+__device__ inline uint4 bulk_load_sys(const uint16_t* base, uint32_t vi,
+                                      bool aligned) {
+  if (aligned) return sys_load_u128(reinterpret_cast<const uint4*>(base) + vi);
+  const uint64_t* w =
+      reinterpret_cast<const uint64_t*>(base) + 2 * static_cast<uint64_t>(vi);
+  return bulk_words_to_vec(sys_load_u64(w), sys_load_u64(w + 1));
+}
+__device__ inline uint4 bulk_load_dev(const uint16_t* base, uint32_t vi,
+                                      bool aligned) {
+  if (aligned) return *(reinterpret_cast<const uint4*>(base) + vi);
+  const uint64_t* w =
+      reinterpret_cast<const uint64_t*>(base) + 2 * static_cast<uint64_t>(vi);
+  return bulk_words_to_vec(w[0], w[1]);
+}
+__device__ inline void bulk_store(uint16_t* base, uint32_t vi, bool aligned,
+                                  uint4 x) {
+  if (aligned) {
+    *(reinterpret_cast<uint4*>(base) + vi) = x;
+    return;
+  }
+  uint64_t* w = reinterpret_cast<uint64_t*>(base) + 2 * static_cast<uint64_t>(vi);
+  w[0] = static_cast<uint64_t>(x.x) | (static_cast<uint64_t>(x.y) << 32);
+  w[1] = static_cast<uint64_t>(x.z) | (static_cast<uint64_t>(x.w) << 32);
+}
+// bus_fold64's contribution of one vector = words (i, i+1) of the payload.
+__device__ inline uint64_t bulk_hash_vec(uint4 x, uint64_t i) {
+  const uint64_t w0 = static_cast<uint64_t>(x.x) | (static_cast<uint64_t>(x.y) << 32);
+  const uint64_t w1 = static_cast<uint64_t>(x.z) | (static_cast<uint64_t>(x.w) << 32);
+  return ((w0 + i + 1) * kFoldMultiplier) ^ ((w1 + i + 2) * kFoldMultiplier);
+}
+__device__ inline uint16_t bulk_elem(const uint4& x, int e) {
+  const uint32_t w = e < 2 ? x.x : e < 4 ? x.y : e < 6 ? x.z : x.w;
+  return static_cast<uint16_t>((e & 1) ? (w >> 16) : (w & 0xffffu));
+}
+__device__ inline uint32_t bulk_pack2(uint16_t lo, uint16_t hi) {
+  return static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+}
+
+// The block's per-peer hash partials XORed into the stripe's accumulators
+// (all threads; two barriers).
+__device__ inline void bulk_commit_hashes(const uint64_t (&h)[kBusMaxPeersSized],
+                                          int peers, uint64_t* s_h,
+                                          BusBulkScratch* sc, uint32_t k) {
+#pragma unroll
+  for (int p = 0; p < kBusMaxPeersSized; ++p) {
+    uint64_t x = h[p];
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) x ^= __shfl_xor_sync(0xffffffffu, x, o);
+    if ((threadIdx.x & 31) == 0)
+      s_h[(threadIdx.x / 32) * kBusMaxPeersSized + p] = x;
+  }
+  __syncthreads();
+  if (threadIdx.x < peers) {
+    uint64_t t = 0;
+#pragma unroll
+    for (int w = 0; w < kConsumerThreads / 32; ++w)
+      t ^= s_h[w * kBusMaxPeersSized + threadIdx.x];
+    atomicXor(reinterpret_cast<unsigned long long*>(&sc->hash_acc[threadIdx.x][k]),
+              static_cast<unsigned long long>(t));
+  }
+  __syncthreads();
+}
+// The block's XOR of every thread's h, returned to all threads (two
+// barriers; s_h is free again on return).
+__device__ inline uint64_t bulk_block_xor(uint64_t h, uint64_t* s_h) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) h ^= __shfl_xor_sync(0xffffffffu, h, o);
+  if ((threadIdx.x & 31) == 0) s_h[threadIdx.x / 32] = h;
+  __syncthreads();
+  uint64_t t = 0;
+#pragma unroll
+  for (int w = 0; w < kConsumerThreads / 32; ++w) t ^= s_h[w];
+  __syncthreads();
+  return t;
+}
+__device__ inline void bulk_commit_hash(uint64_t h, uint64_t* s_h,
+                                        uint64_t* acc) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) h ^= __shfl_xor_sync(0xffffffffu, h, o);
+  if ((threadIdx.x & 31) == 0) s_h[threadIdx.x / 32] = h;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    uint64_t t = 0;
+#pragma unroll
+    for (int w = 0; w < kConsumerThreads / 32; ++w) t ^= s_h[w];
+    atomicXor(reinterpret_cast<unsigned long long*>(acc),
+              static_cast<unsigned long long>(t));
+  }
+  __syncthreads();
+}
 
 __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
     BusAllReduceView v, int my_rank, int phase,
     const __nv_bfloat16* src_bf, __nv_bfloat16* dst_bf, BusBulkSegPlan plan,
-    uint64_t* staged_counters, uint32_t ctl_seq, BusAllReduceCtl* ctl,
-    uint64_t deadline_cycles) {
+    uint64_t* staged_counters, uint64_t* staged_hashes, uint32_t ctl_seq,
+    BusAllReduceCtl* ctl, uint64_t deadline_cycles, BusBulkScratch* sc) {
   using BlockRef = cuda::atomic_ref<int, cuda::thread_scope_block>;
   using SysRef = cuda::atomic_ref<uint64_t, cuda::thread_scope_system>;
+  namespace cg = cooperative_groups;
+  cg::grid_group grid = cg::this_grid();
+  const int G = static_cast<int>(gridDim.x);
+  const int B = static_cast<int>(blockIdx.x);
 
+  // Block 0's claim-loop state (the other blocks never touch it).
   __shared__ int s_stop;
   __shared__ int s_failed;
   __shared__ int s_go;         // 0 none, >0 = flat bulk cell index + 1
   __shared__ uint32_t s_seq;   // claimed doorbell seq
   __shared__ uint32_t s_len;   // claimed doorbell len (bytes)
   __shared__ int s_total_arrived;
-  // PLACEMENT gate state (see the one-shot kernel's claim): the door's
-  // hash target and the matched flag, plus the per-thread fold sums.
-  __shared__ uint64_t s_gate_hash[kConsumerThreads / 32];
-  __shared__ uint64_t s_gate_want;
-  __shared__ int s_gate_matched;
   __shared__ int s_expected[kBusMaxPeersSized];
   // Per (peer, lane): bulk arrivals consumed before this segment, summed
   // from our own ack cells — this kernel chain is their only writer, so
   // the base is self-computed and race-free.
   __shared__ uint64_t s_lane_base[kBusMaxPeersSized * 2];
-  // RS claim records: per stripe of my sub-range — the arrived-peer
-  // bitmask and each peer's payload pointer (filled at claim, folded at
-  // the end; the validation pass below refuses to fold a partial mask).
-  __shared__ uint64_t s_ready[kBusMaxBulkSegStripes];
-  __shared__ const uint16_t* s_ptr[kBusMaxBulkSegStripes][kBusMaxPeersSized];
-  // AG claim dedupe: per peer, the bitmask of its sub-range's stripes
-  // already landed (idempotent copies, counted once).
-  __shared__ uint64_t s_agot[kBusMaxPeersSized];
   // Bring-up records: the scan's own view of each cell (max door seq ever
   // returned by the acquire load; last ack seq it read) and the first
   // claims' mapping values. Written by each cell's exclusive scan owner /
@@ -812,10 +928,10 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
   __shared__ uint32_t s_scan_max[kBulkScanCap];
   __shared__ uint32_t s_scan_ack[kBulkScanCap];
   // Ack deferral record: one bit per flat cell this kernel claimed. The
-  // ack means "payload CONSUMED" — for RS that is the exit fold, not the
-  // claim — so acks flush after the fold; until then the sender's credit
-  // cannot return and the payload slots stay put (the overwrite race
-  // the deferred ack exists to close).
+  // ack means "payload CONSUMED" — the consume pass after the claims, for
+  // RS the fold and for AG the landing copy — so acks flush after it;
+  // until then the sender's credit cannot return and the payload slots
+  // stay put (the overwrite race the deferred ack exists to close).
   __shared__ uint8_t s_claimed[kBulkScanCap];
   __shared__ uint32_t s_cl_cell[kBulkClaimLog];
   __shared__ uint32_t s_cl_seq[kBulkClaimLog];
@@ -824,6 +940,9 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
   __shared__ uint32_t s_cl_k[kBulkClaimLog];
   __shared__ uint32_t s_cl_acc[kBulkClaimLog];
   __shared__ uint32_t s_cl_n;
+  // Every block: the tile hash partials and the verify pass's flags.
+  __shared__ uint64_t s_h[(kConsumerThreads / 32) * kBusMaxPeersSized];
+  __shared__ int s_mis[kBusMaxPeersSized * kBusMaxBulkSegStripes];
 
   const int peers = v.send_peers;
   const int lanes = v.lanes_per_peer;
@@ -839,6 +958,9 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
     const uint64_t full = static_cast<uint64_t>(stripe) * 2;
     return left < full ? left : full;
   };
+  auto tiles_of = [&](uint64_t bytes) -> uint32_t {
+    return static_cast<uint32_t>((bytes + kBulkTileBytes - 1) / kBulkTileBytes);
+  };
 
   BlockRef go_ref(s_go);
   BlockRef stop_ref(s_stop);
@@ -848,324 +970,580 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
     s_total_arrived = 0;
     s_cl_n = 0;
   }
-  for (int k = 0; k < kBusMaxBulkSegStripes; ++k) s_ready[k] = 0;
-  for (int p = 0; p < kBusMaxPeersSized; ++p) s_agot[p] = 0;
   for (int i = threadIdx.x; i < kBulkScanCap; i += kConsumerThreads) {
     s_scan_max[i] = 0;
     s_scan_ack[i] = 0;
     s_claimed[i] = 0;
   }
+  if (B == 0) {
+    // The grid's shared records start clean (block 0 owns them until the
+    // claim barrier; every other block reads them only after it).
+    for (int i = threadIdx.x; i < kBusMaxPeersSized * kBusMaxBulkSegStripes;
+         i += kConsumerThreads)
+      (&sc->hash_acc[0][0])[i] = 0;
+    for (int i = threadIdx.x; i < kBusMaxBulkSegStripes; i += kConsumerThreads)
+      sc->ready[i] = 0;
+    if (threadIdx.x < kBusMaxPeersSized) {
+      sc->agot[threadIdx.x] = 0;
+      sc->pending_ag[threadIdx.x] = 0;
+    }
+    if (threadIdx.x == 0) {
+      sc->pending = 0;
+      sc->failed = 0;
+      sc->total_arrived = 0;
+    }
+  }
   __syncthreads();
 
-  // ---- outbound staging into the arena rows -----------------------------
+  // ---- outbound staging into the arena rows (the whole grid) -------------
   // RS: every peer's sub-range, from my src. AG: my (reduced) sub-range,
-  // from dst, to every peer. The per-peer staged counter releases the
-  // engine's posting of that row (stripe k lands at row + k*bulk_slot).
+  // from dst, to every peer. Tiles round-robin over the blocks; each tile
+  // folds the words it copies (bus_fold64's word-indexed XOR) and the
+  // block keeps a partial per stripe. After the grid barrier block 0
+  // reduces the partials into the pinned hash table and then releases
+  // the per-peer staged counters, which gate the engine's posting of that
+  // row (stripe k lands at row + k*bulk_slot; the door carries the hash).
   {
     const uint16_t* from = phase == 0 ? src : dst;
+    uint32_t t = 0;
     for (int p = 0; p < peers; ++p) {
       const uint32_t base = phase == 0 ? plan.out_base[p] : plan.my_base;
       const uint32_t count = phase == 0 ? plan.out_count[p] : plan.my_count;
       for (uint32_t k = 0; k < count; ++k) {
         const uint32_t gs = plan.seg_first + base + k;
-        // u64 words throughout — an earlier cut indexed u32 pointers with a
-        // u64-word bound and staged exactly half of every stripe.
-        const uint64_t* s = reinterpret_cast<const uint64_t*>(
-            from + static_cast<uint64_t>(gs) * stripe);
-        uint64_t* d = reinterpret_cast<uint64_t*>(
-            const_cast<uint16_t*>(v.send_payload[p]) +
-            static_cast<uint64_t>(k) * stripe);
         const uint64_t bytes = stripe_bytes(gs);
-        for (uint64_t w = threadIdx.x; w < bytes / 8; w += kConsumerThreads)
-          d[w] = s[w];
+        const uint32_t nt = tiles_of(bytes);
+        const uint16_t* s = from + static_cast<uint64_t>(gs) * stripe;
+        uint16_t* d = const_cast<uint16_t*>(v.send_payload[p]) +
+                      static_cast<uint64_t>(k) * stripe;
+        const bool al = aligned16(s) && aligned16(d);
+        const uint32_t nvec = static_cast<uint32_t>(bytes / 16);
+        const uint32_t words = static_cast<uint32_t>(bytes / 8);
+        uint64_t hb = 0;  // this block's partial of the stripe's fold
+        for (uint32_t ti = 0; ti < nt; ++ti, ++t) {
+          if (static_cast<int>(t % static_cast<uint32_t>(G)) != B) continue;
+          const uint32_t v0 = ti * kBulkTileVecs;
+          const uint32_t v1 = v0 + kBulkTileVecs < nvec ? v0 + kBulkTileVecs : nvec;
+          uint64_t h = 0;
+          for (uint32_t vi = v0 + threadIdx.x; vi < v1; vi += kConsumerThreads) {
+            const uint4 x = bulk_load_dev(s, vi, al);
+            bulk_store(d, vi, al, x);
+            h ^= bulk_hash_vec(x, 2 * static_cast<uint64_t>(vi));
+          }
+          if (ti + 1 == nt) {
+            // The tail past the last whole vector (bytes is even): an odd
+            // hash word, then the elements.
+            if (threadIdx.x == 0 && (words & 1u) != 0) {
+              const uint64_t i = words - 1;
+              const uint64_t w = reinterpret_cast<const uint64_t*>(s)[i];
+              h ^= (w + i + 1) * kFoldMultiplier;
+            }
+            const uint32_t e0 = nvec * 8;
+            const uint32_t e1 = static_cast<uint32_t>(bytes / 2);
+            for (uint32_t e = e0 + threadIdx.x; e < e1; e += kConsumerThreads)
+              d[e] = s[e];
+          }
+          hb ^= bulk_block_xor(h, s_h);
+        }
+        if (threadIdx.x == 0) sc->stage_part[B][p][k] = hb;
+      }
+    }
+    __threadfence_system();
+    grid.sync();
+    if (B == 0) {
+      for (int i = threadIdx.x; i < peers * kBusMaxBulkSegStripes;
+           i += kConsumerThreads) {
+        const int p = i / kBusMaxBulkSegStripes;
+        const int k = i % kBusMaxBulkSegStripes;
+        const uint32_t count = phase == 0 ? plan.out_count[p] : plan.my_count;
+        if (static_cast<uint32_t>(k) >= count) continue;
+        uint64_t h = 0;
+        for (int b = 0; b < G; ++b) h ^= sc->stage_part[b][p][k];
+        staged_hashes[p * kBusMaxBulkSegStripes + k] = h;
       }
       __threadfence_system();
       __syncthreads();
-      if (threadIdx.x == 0)
-        SysRef(staged_counters[p])
-            .store(static_cast<uint64_t>(count), cuda::memory_order_release);
+      if (threadIdx.x == 0) {
+        __threadfence_system();
+        for (int p = 0; p < peers; ++p) {
+          const uint32_t count = phase == 0 ? plan.out_count[p] : plan.my_count;
+          SysRef(staged_counters[p])
+              .store(static_cast<uint64_t>(count), cuda::memory_order_release);
+        }
+      }
     }
   }
 
-  // ---- expected arrivals + per-lane bases --------------------------------
-  for (int p = threadIdx.x; p < peers; p += kConsumerThreads)
-    s_expected[p] =
-        phase == 0 ? static_cast<int>(plan.my_count)
-                   : static_cast<int>(plan.out_count[p]);
-  // Per (peer, lane) view: sum our ack cells (each slot's seq counts the
-  // claims consumed on that slot). Spread views over threads.
-  for (int idx = threadIdx.x; idx < v.recv_views; idx += kConsumerThreads) {
-    const BusRecvView& rv = v.recv[idx];
-    uint64_t base = 0;
-    for (int c = 0; c < rv.bulk_slots; ++c)
-      base += flag_load_acquire(const_cast<uint32_t*>(&rv.ack_bulk[c].seq));
-    s_lane_base[idx] = base;
-  }
-  __shared__ int s_expected_total;
-  if (threadIdx.x == 0) {
-    int total = 0;
-    for (int p = 0; p < peers; ++p) total += s_expected[p];
-    s_expected_total = total;
-  }
-  __syncthreads();
+// Receive-side consumer for CollectiveBus validation (see bus_kernel.hpp).
 
-  // ---- claim loop ---------------------------------------------------------
-  // One cell per round (the shared-CAS discipline); every claimed arrival
-  // is hashed + acked (credit continuity), then mapped to its stripe:
-  // the j-th arrival on a lane sits in ring slot j%depth with seq
-  // j/depth+1 (RC in-order per lane); the sender's round-robin striping
-  // (stripe k on lane k%lanes) maps the in-segment index i to k=i*lanes+l.
-  const int slots_per_view = v.recv_views > 0 ? v.recv[0].bulk_slots : 0;
-  const int total_cells = v.recv_views * slots_per_view;
   const uint64_t start = clock64();
   SysRef done_ref(ctl->done_seq);
-  for (;;) {
+  const int slots_per_view = v.recv_views > 0 ? v.recv[0].bulk_slots : 0;
+  const int total_cells = v.recv_views * slots_per_view;
+  __shared__ int s_expected_total;
+
+  if (B == 0) {
+    // ---- expected arrivals + per-lane bases ------------------------------
+    for (int p = threadIdx.x; p < peers; p += kConsumerThreads)
+      s_expected[p] =
+          phase == 0 ? static_cast<int>(plan.my_count)
+                     : static_cast<int>(plan.out_count[p]);
+    // Per (peer, lane) view: sum our ack cells (each slot's seq counts the
+    // claims consumed on that slot). Spread views over threads.
+    for (int idx = threadIdx.x; idx < v.recv_views; idx += kConsumerThreads) {
+      const BusRecvView& rv = v.recv[idx];
+      uint64_t base = 0;
+      for (int c = 0; c < rv.bulk_slots; ++c)
+        base += flag_load_acquire(const_cast<uint32_t*>(&rv.ack_bulk[c].seq));
+      s_lane_base[idx] = base;
+    }
     if (threadIdx.x == 0) {
-      go_ref.store(0, cuda::memory_order_relaxed);
-      // Engine poison (the request failed) or the cycle deadline — either
-      // way this segment is over; exit through the common path.
-      if (done_ref.load(cuda::memory_order_acquire) == ctl_seq ||
-          clock64() - start > deadline_cycles) {
-        stop_ref.store(1, cuda::memory_order_relaxed);
-        s_failed = 1;
-      }
+      int total = 0;
+      for (int p = 0; p < peers; ++p) total += s_expected[p];
+      s_expected_total = total;
     }
     __syncthreads();
-    if (s_total_arrived >= s_expected_total ||
-        stop_ref.load(cuda::memory_order_relaxed))
-      break;
 
-    for (int cell = threadIdx.x;
-         cell < total_cells && go_ref.load(cuda::memory_order_relaxed) == 0 &&
-         stop_ref.load(cuda::memory_order_relaxed) == 0;
-         cell += blockDim.x) {
-      // This kernel's own claims re-present until the deferred ack flush
-      // (the ack rides at exit), and a re-presented cell would re-enter
-      // the shared CAS every round — lowest-thread-wins inside a warp —
-      // stealing the claim slot from a fresh doorbell owned by a higher
-      // thread of the same warp, forever (measured: arrived 1/2 with the
-      // second doorbell live in its cell for 5s). Skip our own claims;
-      // the CTA barrier between rounds publishes the bits.
-      if (cell < kBulkScanCap && s_claimed[cell] != 0) continue;
-      const int view_idx = cell / slots_per_view;
-      const int slot = cell % slots_per_view;
-      const StartSlot* door = &v.recv[view_idx].doorbell_bulk[slot];
-      const uint32_t seq =
-          flag_load_acquire(const_cast<uint32_t*>(&door->seq));
-      if (seq == 0) continue;
-      // Cross-collective generation gate (the segment window below only
-      // separates THIS collective's phases; a NEXT collective's early
-      // bulk pair would be claimed and acked away from its own kernel
-      // just as eagerly — see the one-shot kernel's gate).
-      if (sys_load_u32(&door->ctl) != ctl_seq) continue;
-      const uint32_t ack_seq = flag_load_acquire(
-          const_cast<uint32_t*>(&v.recv[view_idx].ack_bulk[slot].seq));
-      // Bring-up scan record (see BKFIN): what THIS kernel's acquire
-      // loads returned, kept per exclusive cell owner.
-      if (cell < kBulkScanCap) {
-        if (seq > s_scan_max[cell]) s_scan_max[cell] = seq;
-        s_scan_ack[cell] = ack_seq;
-      }
-      if (seq == ack_seq) continue;  // already consumed
-      // Segment window — load-bearing, not an optimization. The doorbell
-      // rings are flight- and phase-agnostic FIFOs, and senders do NOT
-      // progress in lockstep (shard geometry sees to that: a rank whose
-      // shard ends in segment 0 enters AG while peers still fold RS). A
-      // future segment/phase's doorbell lands in an active kernel's
-      // cells all the same; claiming it eagerly would ack it away from
-      // the kernel that maps it (measured: an RS kernel ate 16 AG
-      // doorbells — mapped past the stripe guard, acked anyway — and
-      // both phases deadlocked on the loss). j is the doorbell's
-      // ring-lifetime index, so this segment's stripes occupy exactly
-      // [base, base + this lane's stripe share); everything else stays
-      // put for the kernel whose window contains it.
-      const uint64_t j_arr =
-          (static_cast<uint64_t>(seq) - 1) * slots_per_view + slot;
-      const uint64_t in_seg_arr = j_arr - s_lane_base[view_idx];
-      const int lane_idx = view_idx % lanes;
-      const int peer_idx = view_idx / lanes;
-      const uint32_t seg_stripes =
-          phase == 0 ? plan.my_count : plan.out_count[peer_idx];
-      const uint32_t lane_stripes =
-          lane_idx < seg_stripes
-              ? (seg_stripes - lane_idx + static_cast<uint32_t>(lanes) - 1) /
-                    static_cast<uint32_t>(lanes)
-              : 0;
-      if (in_seg_arr >= lane_stripes) continue;  // not ours to claim
-      int expected = 0;
-      if (go_ref.compare_exchange_strong(expected, cell + 1,
-                                         cuda::memory_order_relaxed,
-                                         cuda::memory_order_relaxed)) {
-        s_seq = seq;
-        s_len = sys_load_u32(&door->len);
-      }
-    }
-    __syncthreads();
-    const int go = go_ref.load(cuda::memory_order_relaxed);
-    if (go == 0) {
-      flag_poll_pause();
-      continue;
-    }
-
-    const int cell = go - 1;
-    const int view_idx = cell / slots_per_view;
-    const int slot = cell % slots_per_view;
-    const int lane = view_idx % lanes;
-    const int peer = view_idx / lanes;
-    const BusRecvView& rv = v.recv[view_idx];
-    const StartSlot* door = &rv.doorbell_bulk[slot];
-    const uint16_t* payload =
-        reinterpret_cast<const uint16_t*>(
-            rv.payload_bulk +
-            static_cast<size_t>(slot) * (rv.bulk_slot_bytes / 8));
-
-    // PLACEMENT GATE (identical contract to the one-shot kernel's claim):
-    // the door's DMA placement may be visible before the stripe's own
-    // placement — spin until the payload folds to the door's hash before
-    // ANY consumption (the AG copy below reads it directly; the RS fold
-    // re-reads it at exit, safely AFTER this proof, and the deferred ack
-    // keeps the sender from overwriting the slot until then).
-    if (threadIdx.x == 0) {
-      s_gate_want = sys_load_u64(&door->hash);
-      s_gate_matched = 0;
-    }
-    __syncthreads();
-    for (int spin = 0;; ++spin) {
-      const uint64_t total_hash = block_fold_payload(
-          reinterpret_cast<const uint64_t*>(payload), s_len / 8, s_gate_hash);
+    // ---- claim loop (block 0) ----------------------------------------------
+    // One cell per round (the shared-CAS discipline); every claimed
+    // arrival is mapped to its stripe and RECORDED — pointer, the door's
+    // len and hash — for the grid's consume pass: the j-th arrival on a
+    // lane sits in ring slot j%depth with seq j/depth+1 (RC in-order per
+    // lane); the sender's round-robin striping (stripe k on lane
+    // k%lanes) maps the in-segment index i to k=i*lanes+l.
+    for (;;) {
       if (threadIdx.x == 0) {
-        if (total_hash == s_gate_want) {
-          s_gate_matched = 1;
-        } else {
-          // thread 0 is the gate's only writer; the engine reads after the
-          // done stamp (release) — plain increments are ordered and cheap.
-          if (spin == 0) ctl->dbg_gate_waits += 1;
-          ctl->dbg_gate_spins += 1;
+        go_ref.store(0, cuda::memory_order_relaxed);
+        // Engine poison (the request failed) or the cycle deadline —
+        // either way this segment is over; exit through the common path.
+        if (done_ref.load(cuda::memory_order_acquire) == ctl_seq ||
+            clock64() - start > deadline_cycles) {
+          stop_ref.store(1, cuda::memory_order_relaxed);
+          s_failed = 1;
         }
       }
       __syncthreads();
-      if (s_gate_matched != 0) break;
-      if (stop_ref.load(cuda::memory_order_relaxed) != 0 ||
-          clock64() - start > deadline_cycles) {
-        s_failed = 1;
-        stop_ref.store(1, cuda::memory_order_relaxed);
+      if (s_total_arrived >= s_expected_total ||
+          stop_ref.load(cuda::memory_order_relaxed))
         break;
+
+      for (int cell = threadIdx.x;
+           cell < total_cells && go_ref.load(cuda::memory_order_relaxed) == 0 &&
+           stop_ref.load(cuda::memory_order_relaxed) == 0;
+           cell += blockDim.x) {
+        // This kernel's own claims re-present until the deferred ack flush
+        // (the ack rides at exit), and a re-presented cell would re-enter
+        // the shared CAS every round — lowest-thread-wins inside a warp —
+        // stealing the claim slot from a fresh doorbell owned by a higher
+        // thread of the same warp, forever (measured: arrived 1/2 with the
+        // second doorbell live in its cell for 5s). Skip our own claims;
+        // the CTA barrier between rounds publishes the bits.
+        if (cell < kBulkScanCap && s_claimed[cell] != 0) continue;
+        const int view_idx = cell / slots_per_view;
+        const int slot = cell % slots_per_view;
+        const StartSlot* door = &v.recv[view_idx].doorbell_bulk[slot];
+        const uint32_t seq =
+            flag_load_acquire(const_cast<uint32_t*>(&door->seq));
+        if (seq == 0) continue;
+        // Cross-collective generation gate (the segment window below only
+        // separates THIS collective's phases; a NEXT collective's early
+        // bulk pair would be claimed and acked away from its own kernel
+        // just as eagerly — see the one-shot kernel's gate).
+        if (sys_load_u32(&door->ctl) != ctl_seq) continue;
+        const uint32_t ack_seq = flag_load_acquire(
+            const_cast<uint32_t*>(&v.recv[view_idx].ack_bulk[slot].seq));
+        // Bring-up scan record (see BKFIN): what THIS kernel's acquire
+        // loads returned, kept per exclusive cell owner.
+        if (cell < kBulkScanCap) {
+          if (seq > s_scan_max[cell]) s_scan_max[cell] = seq;
+          s_scan_ack[cell] = ack_seq;
+        }
+        if (seq == ack_seq) continue;  // already consumed
+        // Segment window — load-bearing, not an optimization. The doorbell
+        // rings are flight- and phase-agnostic FIFOs, and senders do NOT
+        // progress in lockstep (shard geometry sees to that: a rank whose
+        // shard ends in segment 0 enters AG while peers still fold RS). A
+        // future segment/phase's doorbell lands in an active kernel's
+        // cells all the same; claiming it eagerly would ack it away from
+        // the kernel that maps it (measured: an RS kernel ate 16 AG
+        // doorbells — mapped past the stripe guard, acked anyway — and
+        // both phases deadlocked on the loss). j is the doorbell's
+        // ring-lifetime index, so this segment's stripes occupy exactly
+        // [base, base + this lane's stripe share); everything else stays
+        // put for the kernel whose window contains it.
+        const uint64_t j_arr =
+            (static_cast<uint64_t>(seq) - 1) * slots_per_view + slot;
+        const uint64_t in_seg_arr = j_arr - s_lane_base[view_idx];
+        const int lane_idx = view_idx % lanes;
+        const int peer_idx = view_idx / lanes;
+        const uint32_t seg_stripes =
+            phase == 0 ? plan.my_count : plan.out_count[peer_idx];
+        const uint32_t lane_stripes =
+            lane_idx < seg_stripes
+                ? (seg_stripes - lane_idx + static_cast<uint32_t>(lanes) - 1) /
+                      static_cast<uint32_t>(lanes)
+                : 0;
+        if (in_seg_arr >= lane_stripes) continue;  // not ours to claim
+        int expected = 0;
+        if (go_ref.compare_exchange_strong(expected, cell + 1,
+                                           cuda::memory_order_relaxed,
+                                           cuda::memory_order_relaxed)) {
+          s_seq = seq;
+          s_len = sys_load_u32(&door->len);
+        }
       }
+      __syncthreads();
+      const int go = go_ref.load(cuda::memory_order_relaxed);
+      if (go == 0) {
+        flag_poll_pause();
+        continue;
+      }
+
+      // Claims are DEDUPED (the ack is deferred to the post-consume
+      // flush, so a claimed cell re-presents every round until then, and
+      // the re-claim must be a no-op — a double-counted arrival exits the
+      // loop early and leaves a stripe's contribution missing (measured:
+      // k=15 empty while 16 claims counted). The record carries the
+      // door's hash; the consume pass proves the payload against it.
+      if (threadIdx.x == 0) {
+        const int cell = go - 1;
+        const int view_idx = cell / slots_per_view;
+        const int slot = cell % slots_per_view;
+        const int lane = view_idx % lanes;
+        const int peer = view_idx / lanes;
+        const BusRecvView& rv = v.recv[view_idx];
+        const StartSlot* door = &rv.doorbell_bulk[slot];
+        const uint16_t* payload = reinterpret_cast<const uint16_t*>(
+            rv.payload_bulk +
+            static_cast<size_t>(slot) * (rv.bulk_slot_bytes / 8));
+        const uint64_t j =
+            (static_cast<uint64_t>(s_seq) - 1) * rv.bulk_slots + slot;
+        const uint64_t in_seg = j - s_lane_base[view_idx];
+        const uint32_t k = static_cast<uint32_t>(in_seg) *
+                               static_cast<uint32_t>(lanes) +
+                           lane;
+        s_claimed[cell] = 1;  // ack deferred; the consume pass reads the slot
+        const uint64_t bit = 1ULL << peer;
+        bool counted = false;
+        if (phase == 0) {
+          // RS: the (stripe k, peer) contribution, once.
+          if (k < plan.my_count && (sc->ready[k] & bit) == 0) {
+            sc->ready[k] |= bit;
+            counted = true;
+          }
+        } else {
+          // AG: peer p's stripe k, once.
+          if (k < plan.out_count[peer] && (sc->agot[peer] & (1ULL << k)) == 0) {
+            sc->agot[peer] |= 1ULL << k;
+            counted = true;
+          }
+        }
+        if (counted) {
+          sc->ptr[peer][k] = payload;
+          sc->len[peer][k] = s_len;
+          sc->want[peer][k] = sys_load_u64(&door->hash);
+          ++s_total_arrived;
+        }
+        // Bring-up claim log (see BKFIN): the mapping values of the first
+        // claims — base==0 or k past the guard here is a mapping
+        // rejection, not scan blindness, and the two need different fixes.
+        if (s_cl_n < kBulkClaimLog) {
+          s_cl_cell[s_cl_n] = static_cast<uint32_t>(cell);
+          s_cl_seq[s_cl_n] = s_seq;
+          s_cl_j[s_cl_n] = j;
+          s_cl_base[s_cl_n] = s_lane_base[view_idx];
+          s_cl_k[s_cl_n] = k;
+          s_cl_acc[s_cl_n] = counted ? 1u : 0u;
+          ++s_cl_n;
+        }
+      }
+      __syncthreads();  // claim records stable before the next claim round
+    }
+
+    // Validation before the grid touches dst: every stripe of my
+    // sub-range must hold all peers' contributions (RS) — a mapping bug
+    // must fail loudly, never fold a partial sum (the silent-corruption
+    // class). The consume plan — the stripes to fold or land — is
+    // published with the failure flag.
+    if (threadIdx.x == 0) {
+      if (s_failed == 0 && phase == 0) {
+        const uint64_t all_peers = bulk_mask_of(static_cast<uint32_t>(peers));
+        for (uint32_t k = 0; k < plan.my_count; ++k)
+          if (sc->ready[k] != all_peers) s_failed = 1;
+      }
+      sc->failed = s_failed;
+      sc->total_arrived = s_total_arrived;
+      if (s_failed == 0) {
+        if (phase == 0) {
+          sc->pending = bulk_mask_of(plan.my_count);
+        } else {
+          for (int p = 0; p < peers; ++p)
+            sc->pending_ag[p] = bulk_mask_of(plan.out_count[p]);
+        }
+      }
+      __threadfence();
+    }
+    __syncthreads();
+  }
+  grid.sync();
+
+  // ---- consume pass (the whole grid): RS fold / AG landing ---------------
+  // Tiles of the pending stripes round-robin over the blocks; every tile
+  // hashes the payload words it reads, and block 0 proves each stripe
+  // against its door's hash between rounds. RS: the canonical
+  // ascending-rank fp32 chain per element, bitwise the one-shot kernel's
+  // (the bit-reinterpret on the way out is load-bearing: __nv_bfloat16
+  // converts to uint16_t through its float operator, never its bits).
+  {
+    int failed = sc->failed;
+    uint64_t pend = sc->pending;
+    uint64_t pend_ag[kBusMaxPeersSized];
+#pragma unroll
+    for (int p = 0; p < kBusMaxPeersSized; ++p) pend_ag[p] = sc->pending_ag[p];
+
+    auto fold_tile = [&](uint32_t k, uint32_t ti, uint32_t nt) {
+      const uint32_t gs = plan.seg_first + plan.my_base + k;
+      const uint64_t bytes = stripe_bytes(gs);
+      const uint16_t* local = src + static_cast<uint64_t>(gs) * stripe;
+      uint16_t* out = dst + static_cast<uint64_t>(gs) * stripe;
+      const uint16_t* pp[kBusMaxPeersSized];
+      uint32_t words[kBusMaxPeersSized];
+      bool al = aligned16(local) && aligned16(out);
+#pragma unroll
+      for (int p = 0; p < kBusMaxPeersSized; ++p) {
+        pp[p] = p < peers ? sc->ptr[p][k] : nullptr;
+        words[p] = p < peers ? sc->len[p][k] / 8 : 0;
+        if (p < peers) al = al && aligned16(pp[p]);
+      }
+      const uint32_t nvec = static_cast<uint32_t>(bytes / 16);
+      const uint32_t v0 = ti * kBulkTileVecs;
+      const uint32_t v1 = v0 + kBulkTileVecs < nvec ? v0 + kBulkTileVecs : nvec;
+      uint64_t h[kBusMaxPeersSized];
+#pragma unroll
+      for (int p = 0; p < kBusMaxPeersSized; ++p) h[p] = 0;
+      for (uint32_t vi = v0 + threadIdx.x; vi < v1; vi += kConsumerThreads) {
+        const uint4 mine = bulk_load_dev(local, vi, al);
+        uint4 y[kBusMaxPeersSized];
+#pragma unroll
+        for (int p = 0; p < kBusMaxPeersSized; ++p) {
+          if (p < peers) {
+            y[p] = bulk_load_sys(pp[p], vi, al);
+            if (vi < words[p] / 2)
+              h[p] ^= bulk_hash_vec(y[p], 2 * static_cast<uint64_t>(vi));
+          } else {
+            y[p] = make_uint4(0, 0, 0, 0);
+          }
+        }
+        uint16_t res[8];
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          // Ascending rank order: peer slot p holds rank p below mine and
+          // rank p+1 above it, so my own row enters at position my_rank.
+          float acc = 0.0f;
+          bool mine_in = false;
+#pragma unroll
+          for (int p = 0; p < kBusMaxPeersSized; ++p) {
+            if (p == my_rank) {
+              acc += bf16_to_f32(bulk_elem(mine, e));
+              mine_in = true;
+            }
+            if (p < peers) acc += bf16_to_f32(bulk_elem(y[p], e));
+          }
+          if (!mine_in) acc += bf16_to_f32(bulk_elem(mine, e));
+          res[e] = __bfloat16_as_ushort(__float2bfloat16(acc));
+        }
+        bulk_store(out, vi, al,
+                   make_uint4(bulk_pack2(res[0], res[1]), bulk_pack2(res[2], res[3]),
+                              bulk_pack2(res[4], res[5]), bulk_pack2(res[6], res[7])));
+      }
+      if (ti + 1 == nt) {
+        // The tail: an odd hash word per peer, and the elements past the
+        // last whole vector (folded, not hashed past the payload's words
+        // — bus_fold64 walks len/8 words exactly as the door does).
+        if (threadIdx.x == 0) {
+#pragma unroll
+          for (int p = 0; p < kBusMaxPeersSized; ++p) {
+            if (p < peers && (words[p] & 1u) != 0) {
+              const uint64_t i = words[p] - 1;
+              const uint64_t w = sys_load_u64(
+                  reinterpret_cast<const uint64_t*>(pp[p]) + i);
+              h[p] ^= (w + i + 1) * kFoldMultiplier;
+            }
+          }
+        }
+        const uint32_t e0 = nvec * 8;
+        const uint32_t e1 = static_cast<uint32_t>(bytes / 2);
+        for (uint32_t e = e0 + threadIdx.x; e < e1; e += kConsumerThreads) {
+          float acc = 0.0f;
+          bool mine_in = false;
+#pragma unroll
+          for (int p = 0; p < kBusMaxPeersSized; ++p) {
+            if (p == my_rank) {
+              acc += bf16_to_f32(local[e]);
+              mine_in = true;
+            }
+            if (p < peers) acc += bf16_to_f32(sys_load_u16(&pp[p][e]));
+          }
+          if (!mine_in) acc += bf16_to_f32(local[e]);
+          out[e] = __bfloat16_as_ushort(__float2bfloat16(acc));
+        }
+      }
+      bulk_commit_hashes(h, peers, s_h, sc, k);
+    };
+
+    auto land_tile = [&](int p, uint32_t k, uint32_t ti, uint32_t nt) {
+      const uint32_t gs = plan.seg_first + plan.out_base[p] + k;
+      const uint16_t* payload = sc->ptr[p][k];
+      const uint32_t len = sc->len[p][k];
+      uint16_t* out = dst + static_cast<uint64_t>(gs) * stripe;
+      const bool al = aligned16(payload) && aligned16(out);
+      const uint32_t words = len / 8;
+      const uint32_t nvec = len / 16;
+      const uint32_t v0 = ti * kBulkTileVecs;
+      const uint32_t v1 = v0 + kBulkTileVecs < nvec ? v0 + kBulkTileVecs : nvec;
+      uint64_t h = 0;
+      for (uint32_t vi = v0 + threadIdx.x; vi < v1; vi += kConsumerThreads) {
+        const uint4 y = bulk_load_sys(payload, vi, al);
+        h ^= bulk_hash_vec(y, 2 * static_cast<uint64_t>(vi));
+        bulk_store(out, vi, al, y);
+      }
+      if (ti + 1 == nt) {
+        if (threadIdx.x == 0 && (words & 1u) != 0) {
+          const uint64_t i = words - 1;
+          const uint64_t w =
+              sys_load_u64(reinterpret_cast<const uint64_t*>(payload) + i);
+          h ^= (w + i + 1) * kFoldMultiplier;
+        }
+        const uint32_t e0 = nvec * 8;
+        const uint32_t e1 = len / 2;
+        for (uint32_t e = e0 + threadIdx.x; e < e1; e += kConsumerThreads)
+          out[e] = sys_load_u16(&payload[e]);
+      }
+      bulk_commit_hash(h, s_h, &sc->hash_acc[p][k]);
+    };
+
+    for (int round = 0;; ++round) {
+      if (failed == 0) {
+        uint32_t t = 0;
+        if (phase == 0) {
+          for (uint32_t k = 0; k < plan.my_count; ++k) {
+            if ((pend >> k & 1ULL) == 0) continue;
+            const uint32_t nt = tiles_of(stripe_bytes(plan.seg_first + plan.my_base + k));
+            for (uint32_t ti = 0; ti < nt; ++ti, ++t)
+              if (static_cast<int>(t % static_cast<uint32_t>(G)) == B)
+                fold_tile(k, ti, nt);
+          }
+        } else {
+          for (int p = 0; p < peers; ++p) {
+            for (uint32_t k = 0; k < plan.out_count[p]; ++k) {
+              if ((pend_ag[p] >> k & 1ULL) == 0) continue;
+              const uint32_t nt = tiles_of(sc->len[p][k]);
+              for (uint32_t ti = 0; ti < nt; ++ti, ++t)
+                if (static_cast<int>(t % static_cast<uint32_t>(G)) == B)
+                  land_tile(p, k, ti, nt);
+            }
+          }
+        }
+      }
+      __threadfence();
+      grid.sync();
+
+      if (B == 0) {
+        // The proof: every consumed (peer, stripe) folded to its door's
+        // hash. A miss means the fold read the slot before the NIC's
+        // placement was fully visible (the door's placement can lead the
+        // stripe's): re-fold that stripe next round, after a pause.
+        if (failed == 0) {
+          for (int i = threadIdx.x; i < kBusMaxPeersSized * kBusMaxBulkSegStripes;
+               i += kConsumerThreads) {
+            const int p = i / kBusMaxBulkSegStripes;
+            const uint32_t k = static_cast<uint32_t>(i % kBusMaxBulkSegStripes);
+            int mis = 0;
+            if (p < peers) {
+              const bool live = phase == 0 ? (k < plan.my_count && (pend >> k & 1ULL) != 0)
+                                           : (k < plan.out_count[p] &&
+                                              (pend_ag[p] >> k & 1ULL) != 0);
+              if (live) mis = sc->hash_acc[p][k] != sc->want[p][k] ? 1 : 0;
+            }
+            s_mis[i] = mis;
+          }
+          __syncthreads();
+          if (threadIdx.x == 0) {
+            uint64_t next = 0;
+            uint64_t next_ag[kBusMaxPeersSized] = {};
+            int redo = 0;
+            if (phase == 0) {
+              for (uint32_t k = 0; k < plan.my_count; ++k) {
+                if ((pend >> k & 1ULL) == 0) continue;
+                bool bad = false;
+                for (int p = 0; p < peers; ++p)
+                  bad = bad || s_mis[p * kBusMaxBulkSegStripes + static_cast<int>(k)] != 0;
+                if (bad) {
+                  next |= 1ULL << k;
+                  ++redo;
+                  for (int p = 0; p < peers; ++p) sc->hash_acc[p][k] = 0;
+                }
+              }
+            } else {
+              for (int p = 0; p < peers; ++p) {
+                for (uint32_t k = 0; k < plan.out_count[p]; ++k) {
+                  if ((pend_ag[p] >> k & 1ULL) == 0) continue;
+                  if (s_mis[p * kBusMaxBulkSegStripes + static_cast<int>(k)] != 0) {
+                    next_ag[p] |= 1ULL << k;
+                    ++redo;
+                    sc->hash_acc[p][k] = 0;
+                  }
+                }
+              }
+            }
+            if (redo != 0) {
+              // thread 0 is the telemetry's only writer; the engine reads
+              // after the done stamp (release).
+              if (round == 0) ctl->dbg_gate_waits += static_cast<uint32_t>(redo);
+              ctl->dbg_gate_spins += static_cast<uint32_t>(redo);
+              if (clock64() - start > deadline_cycles) {
+                s_failed = 1;
+                next = 0;
+                for (int p = 0; p < kBusMaxPeersSized; ++p) next_ag[p] = 0;
+              }
+            } else if (phase == 0) {
+              ctl->stamp_reduce_done = clock64();
+            }
+            sc->failed = s_failed;
+            sc->pending = next;
+            for (int p = 0; p < kBusMaxPeersSized; ++p) sc->pending_ag[p] = next_ag[p];
+            __threadfence();
+          }
+          __syncthreads();
+        }
+      }
+      grid.sync();
+
+      failed = sc->failed;
+      pend = sc->pending;
+      bool more = pend != 0;
+#pragma unroll
+      for (int p = 0; p < kBusMaxPeersSized; ++p) {
+        pend_ag[p] = sc->pending_ag[p];
+        more = more || pend_ag[p] != 0;
+      }
+      if (failed != 0 || !more) break;
       flag_poll_pause();
     }
-    if (s_gate_matched == 0) continue;  // deadline: exit via the loop top
-
-    // AG lands the arrival directly: it is peer p's sub-range stripe k,
-    // a pure copy into dst (byte-identical for every receiver, so a
-    // re-claimed cell's duplicate copy is harmless). The copy consumes
-    // the payload here; RS defers to the exit fold (see the ack flush).
-    const uint64_t j =
-        (static_cast<uint64_t>(s_seq) - 1) * rv.bulk_slots + slot;
-    const uint64_t in_seg = j - s_lane_base[view_idx];
-    const uint32_t k =
-        static_cast<uint32_t>(in_seg) * static_cast<uint32_t>(lanes) + lane;
-    if (phase == 1 && k < plan.out_count[peer]) {
-      const uint32_t gs = plan.seg_first + plan.out_base[peer] + k;
-      uint16_t* d = dst + static_cast<uint64_t>(gs) * stripe;
-      for (uint32_t e = threadIdx.x; e < s_len / 2; e += kConsumerThreads)
-        d[e] = sys_load_u16(&payload[e]);
-    }
-    __syncthreads();
-
-    // Claims are DEDUPED in shared memory (CTA-coherent): the ack no
-    // longer marks a claim (it is deferred to the post-fold flush below),
-    // so a claimed cell re-presents every round until then, and the
-    // re-claim must be a no-op — a double-counted arrival exits the loop
-    // early and leaves a stripe's contribution missing (measured: k=15
-    // empty while 16 claims counted).
-    if (threadIdx.x == 0) {
-      s_claimed[cell] = 1;  // ack deferred; the fold still reads the slot
-      const uint64_t bit = 1ULL << peer;
-      bool counted = false;
-      if (phase == 0) {
-        // RS: the (stripe k, peer) contribution, once.
-        if (k < plan.my_count && (s_ready[k] & bit) == 0) {
-          s_ptr[k][peer] = payload;
-          s_ready[k] |= bit;
-          ++s_total_arrived;
-          counted = true;
-        }
-      } else {
-        // AG: peer p's stripe k, once (the copy above is idempotent).
-        if (k < plan.out_count[peer] && (s_agot[peer] & (1ULL << k)) == 0) {
-          s_agot[peer] |= 1ULL << k;
-          ++s_total_arrived;
-          counted = true;
-        }
-      }
-      // Bring-up claim log (see BKFIN): the mapping values of the first
-      // claims — base==0 or k past the guard here is a mapping rejection,
-      // not scan blindness, and the two need different fixes.
-      if (s_cl_n < kBulkClaimLog) {
-        s_cl_cell[s_cl_n] = static_cast<uint32_t>(cell);
-        s_cl_seq[s_cl_n] = s_seq;
-        s_cl_j[s_cl_n] = j;
-        s_cl_base[s_cl_n] = s_lane_base[view_idx];
-        s_cl_k[s_cl_n] = k;
-        s_cl_acc[s_cl_n] = counted ? 1u : 0u;
-        ++s_cl_n;
-      }
-    }
-    __syncthreads();  // claim records stable before the next claim round
   }
 
-  // ---- reduce (RS only): canonical ascending-rank fold --------------------
-  if (s_failed == 0 && phase == 0) {
-    // Validation before touching dst: every stripe of my sub-range must
-    // hold all peers' contributions — a mapping bug must fail loudly,
-    // never fold a partial sum (the silent-corruption class).
-    const uint64_t all_peers = (peers >= 64) ? ~0ULL : ((1ULL << peers) - 1);
-    if (threadIdx.x == 0) {
-      for (uint32_t k = 0; k < plan.my_count; ++k)
-        if (s_ready[k] != all_peers) s_failed = 1;
-    }
-    __syncthreads();
-    if (s_failed == 0) {
-      // Flat parallel map over my sub-range's elements (uniform stripe
-      // length except the tail; per-element bound check).
-      const uint64_t span =
-          static_cast<uint64_t>(plan.my_count) * stripe;
-      for (uint64_t flat = threadIdx.x; flat < span;
-           flat += kConsumerThreads) {
-        const uint32_t k =
-            static_cast<uint32_t>(flat / stripe);
-        const uint32_t e = static_cast<uint32_t>(flat % stripe);
-        const uint32_t gs = plan.seg_first + plan.my_base + k;
-        if (e >= stripe_bytes(gs) / 2) continue;  // tail padding
-        const uint16_t* local = src + static_cast<uint64_t>(gs) * stripe;
-        float acc = 0.0f;
-        for (int r = 0; r < peers + 1; ++r) {
-          const uint16_t* vec = r == my_rank
-                                    ? local
-                                    : s_ptr[k][r < my_rank ? r : r - 1];
-          acc += r == my_rank ? bf16_to_f32(vec[e])
-                              : bf16_to_f32(sys_load_u16(&vec[e]));
-        }
-        // The bit-reinterpret is load-bearing: __nv_bfloat16 converts to
-        // uint16_t through its float operator (integer truncation — the
-        // fold wrote literal 1s before this), never through its bits.
-        dst[static_cast<uint64_t>(gs) * stripe + e] =
-            __bfloat16_as_ushort(__float2bfloat16(acc));
-      }
-      if (threadIdx.x == 0) ctl->stamp_reduce_done = clock64();
-    }
-  }
-  // ---- deferred ack flush -------------------------------------------------
-  // The ack certifies the payload CONSUMED — for RS that is the fold above
-  // (s_ptr reads the ring slots one last time there), for AG the claim-
-  // time copy. Acking at claim time would return the sender's credit
-  // while this kernel still reads the slot, and the sender's next stripe
-  // would DMA over a fold input (measured: mid-stripe prefix/suffix
-  // corruption under cross-rank skew — a sender a segment ahead wraps the
-  // 8-deep ring inside one claim-to-exit gap). The door cell cannot move
-  // before its credit returns, so the claimed seq is re-read here rather
-  // than carried per claim.
-  __syncthreads();
+  if (B != 0) return;
+
+  // ---- deferred ack flush (block 0) ---------------------------------------
+  // The ack certifies the payload CONSUMED — the consume pass above, whose
+  // last read of the ring slots the grid barrier orders before this
+  // point. Acking at claim time would return the sender's credit while
+  // this kernel still reads the slot, and the sender's next stripe would
+  // DMA over a fold input (measured: mid-stripe prefix/suffix corruption
+  // under cross-rank skew — a sender a segment ahead wraps the 8-deep
+  // ring inside one claim-to-exit gap). The door cell cannot move before
+  // its credit returns, so the claimed seq is re-read here rather than
+  // carried per claim.
   for (int cell = threadIdx.x; cell < total_cells; cell += kConsumerThreads) {
     if (cell >= kBulkScanCap || s_claimed[cell] == 0) continue;
     const int view_idx = cell / slots_per_view;
@@ -1181,7 +1559,8 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
   }
   __syncthreads();
   if (threadIdx.x == 0) {
-    if (s_failed != 0 && s_total_arrived < s_expected_total) {
+    const int failed = sc->failed;
+    if (failed != 0 && s_total_arrived < s_expected_total) {
       printf("BKFIN rank=%d phase=%d seg=%u arrived=%d/%d my_base=%u "
              "my_count=%u t_ms=%llu poison=%d masks:",
              my_rank, phase, plan.seg_first, s_total_arrived,
@@ -1189,7 +1568,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
              (unsigned long long)((clock64() - start) / 1000),
              done_ref.load(cuda::memory_order_acquire) == ctl_seq ? 1 : 0);
       for (uint32_t k = 0; k < plan.my_count; ++k)
-        printf(" k%u=%llx", k, (unsigned long long)s_ready[k]);
+        printf(" k%u=%llx", k, (unsigned long long)sc->ready[k]);
       printf("\n");
       // Exit-state dump: the base each view computed at launch, the
       // cells' freshest state as this kernel reads them now (ld.cv),
@@ -1240,8 +1619,14 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
                my_rank, i, s_cl_cell[i], s_cl_seq[i],
                (unsigned long long)s_cl_j[i],
                (unsigned long long)s_cl_base[i], s_cl_k[i], s_cl_acc[i]);
+    } else if (failed != 0) {
+      printf("BKFIN rank=%d phase=%d seg=%u arrived=%d/%d: the consume pass "
+             "did not prove every stripe before the deadline (gate waits %u, "
+             "spins %u)\n",
+             my_rank, phase, plan.seg_first, s_total_arrived, s_expected_total,
+             ctl->dbg_gate_waits, ctl->dbg_gate_spins);
     }
-    ctl->status = s_failed == 0 ? 0 : 1;
+    ctl->status = failed == 0 ? 0 : 1;
     done_ref.store(ctl_seq, cuda::memory_order_release);
   }
 }
@@ -1253,13 +1638,39 @@ cudaError_t launch_bus_bulk_collective(const BusAllReduceView& v, int my_rank,
                                        __nv_bfloat16* dst,
                                        const BusBulkSegPlan& plan,
                                        uint64_t* staged_counters,
+                                       uint64_t* staged_hashes,
                                        uint32_t ctl_seq, BusAllReduceCtl* ctl,
                                        uint64_t deadline_cycles,
+                                       BusBulkScratch* scratch,
                                        cudaStream_t stream) {
-  bus_bulk_collective_kernel<<<1, kConsumerThreads, 0, stream>>>(
-      v, my_rank, phase, src, dst, plan, staged_counters, ctl_seq, ctl,
-      deadline_cycles);
-  return cudaGetLastError();
+  // The cooperative grid: kBulkBlocks, or fewer if the device cannot hold
+  // that many co-resident (the launch contract the grid barriers rest
+  // on; a cooperative launch that cannot co-schedule fails instead of
+  // deadlocking). Computed once per process — one device per process.
+  static const int blocks = [] {
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return 1;
+    int sms = 0;
+    if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) !=
+        cudaSuccess || sms < 1)
+      return 1;
+    int per_sm = 0;
+    if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, bus_bulk_collective_kernel, kConsumerThreads, 0) !=
+            cudaSuccess || per_sm < 1)
+      return 1;
+    const int cap = sms * per_sm;
+    return cap < kBulkBlocks ? cap : kBulkBlocks;
+  }();
+  BusAllReduceView view = v;
+  BusBulkSegPlan seg = plan;
+  void* args[] = {&view,           &my_rank, &phase,          &src,
+                  &dst,            &seg,     &staged_counters, &staged_hashes,
+                  &ctl_seq,        &ctl,     &deadline_cycles, &scratch};
+  return cudaLaunchCooperativeKernel(
+      reinterpret_cast<const void*>(bus_bulk_collective_kernel),
+      dim3(static_cast<unsigned>(blocks)), dim3(kConsumerThreads), args, 0,
+      stream);
 }
 
 namespace {

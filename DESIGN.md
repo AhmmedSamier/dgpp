@@ -784,13 +784,49 @@ machine's bring-up (§6.3's striped reduce-scatter + allgather):
   next segment launches, or the launch's staged-counter reset strands
   unposted stripes with the release condition inverted forever.
 - **The ack certifies consumption, not arrival.** The RS fold reads
-  payload slots at kernel exit; acking at claim time returns the
-  sender's credit early, and a sender a segment ahead wraps the
-  8-deep ring inside one claim-to-exit gap, DMAing new stripes over a
-  fold input. Acking after the fold makes the credit gate close the
-  race by construction — and the scan must skip the kernel's own claims
-  meanwhile, or a re-presented claim steals the shared CAS slot from a
-  fresh doorbell in the same warp, forever.
+  payload slots in the consume pass after the claims; acking at claim
+  time returns the sender's credit early, and a sender a segment ahead
+  wraps the 8-deep ring inside one claim-to-exit gap, DMAing new stripes
+  over a fold input. Acking after the fold makes the credit gate close
+  the race by construction — and the scan must skip the kernel's own
+  claims meanwhile, or a re-presented claim steals the shared CAS slot
+  from a fresh doorbell in the same warp, forever.
+
+The bulk kernel is a cooperative grid (2026-09-05). Sixteen blocks,
+co-resident by `cudaLaunchCooperativeKernel`'s contract (the launch fails
+rather than deadlocks when it cannot co-schedule; two such grids run
+concurrently, which the loopback test worlds need), with grid barriers
+between staging | claims | consume rounds | acks. Everything that scales
+with bytes runs over the whole grid in 16 KB tiles of 16-byte vectors —
+the outbound staging, the RS fold, the AG landing — while the doorbell
+claim loop (the shared-CAS discipline) and the deferred ack flush stay in
+block 0; the claim records live in a device-resident `BusBulkScratch`.
+The placement proof (a payload folds to its door's hash before anything
+consumes it) moved from the claim into the consume pass: every tile
+hashes the words it reads, the per-(peer, stripe) totals combine by
+atomic XOR, block 0 proves each stripe between rounds and a stripe read
+before its placement was fully visible is re-folded next round (the fold
+and the copy are pure functions of their inputs); no ack and no done
+stamp until every consumed stripe has proved (`BusStats::bulk_gate_redos`
+counts the redos — zero in every measured run). The staging tiles also
+fold each outbound stripe, and block 0 publishes the per-(peer, stripe)
+hash table behind the staged counters, so the engine posts the door's
+hash without folding 256 KB on the collective thread per stripe.
+
+Senders are paced in software (`BusOptions::bulk_pace_gbps`, 28 Gb/s per
+(peer, lane) QP; `bulk_inflight_per_lane` bounds the window and the
+posting order rotates per sender). The one-block kernel had throttled
+every sender to ~1 GB/s; the grid let three 200 Gb/s senders burst
+whole rings at one 200 Gb/s port and the switch dropped packets — RoCE
+sequence errors, adaptive retransmissions, CNPs, 16 MiB all-reduces
+bimodal at 2.4 or 30–56 ms (`scripts/roce_counters.sh` reads the
+counters around a run). The NICs pace raw-packet QPs only, so the engine
+spaces a lane's stripe posts by len / rate: six inbound QPs at the cap
+stay under one port even when the ack timing aligns every sender on the
+same receiver. Measured on the four nodes (`glm_gen_check --bulk-bench`,
+p50): 2 MiB 0.30 ms, 4 MiB 0.53, 8 MiB 1.07, 16 MiB 2.17, 32 MiB 4.45 —
+10.5–11 GB/s of wire traffic per rank, against 2.6 / 5.2 / 11 / 22.5 / 75
+before the grid.
 
 Measured (fabric, bitwise-verified against the canonical-chain oracle):
 TP=2 p50 37.6 µs, TP=4 (full mesh) p50 ~44 µs, submit→wait, credits off
@@ -2390,8 +2426,10 @@ live T=1 requests and 26/51/66 at 1/2/4 with MTP — below the crossover a
 user's latency is the live count times the scalar replay; at it the batch is
 also the faster choice per user (four scalar replays would be ~129 and ~104
 ms per token). The m ≤ 8 GEMV lowering also changed the path of 5–8-row
-prefill chunks and per-expert prefill GEMMs with 5–8 routed tokens; that is
-unmeasured and is the first item of the TTFT work.
+prefill chunks and per-expert prefill GEMMs with 5–8 routed tokens; the
+prefill was then re-measured and taken down through four rounds
+(2026-09-04/05, the record: 256 tokens 5 s → 0.80 s, 2048 tokens 19.8 →
+5.7 s in steady state; the long-segment expert GEMM is what remains).
 
 The original always-eight-row four-node gate measured
 12.55/23.78/43.59/78.94 tok/s at 1/2/4/8 live T=1 requests and

@@ -397,6 +397,8 @@ dgpp::glm::AdmissionPolicy g_admission;
 // size the experiment. --bulk-bench MIB [--bulk-bench-iters N]
 // [--bulk-slots N] [--bulk-slot-bytes B].
 int g_bulk_bench_mb = 0, g_bulk_bench_iters = 10, g_bulk_slots_override = 0;
+int g_bulk_inflight_override = -1;
+double g_bulk_pace_override = -1.0;
 int64_t g_bulk_slot_bytes_override = 0;
 // --prefill-repeat N: prefill the prompt N times (the slot reopens each
 // time) and log each — the first pays the process's one-time setup (the
@@ -1281,6 +1283,9 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     auto bus_options = dgpp::fabric_bus_options(rank, world, port, peer,
                                                 rendezvous_timeout_ms);
     if (g_bulk_slots_override > 0) bus_options.bulk_slots = g_bulk_slots_override;
+    if (g_bulk_inflight_override >= 0)
+      bus_options.bulk_inflight_per_lane = g_bulk_inflight_override;
+    if (g_bulk_pace_override >= 0) bus_options.bulk_pace_gbps = g_bulk_pace_override;
     if (g_bulk_slot_bytes_override > 0)
       bus_options.bulk_slot_bytes = static_cast<size_t>(g_bulk_slot_bytes_override);
     bus = std::make_unique<CollectiveBus>(bus_options);
@@ -1297,12 +1302,15 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       DGPP_CUDA_OK(cudaMalloc(&d_buf, max_bytes));
       DGPP_CUDA_OK(cudaMemset(d_buf, 0x3c, max_bytes));  // bf16 1.0-ish
       DGPP_CUDA_OK(cudaDeviceSynchronize());
-      DGPP_LOG_INFO("rank {} bulk bench: world {}, pool {} x {} B, {} iters per size",
+      DGPP_LOG_INFO("rank {} bulk bench: world {}, pool {} x {} B, inflight cap {} per lane, pace {} Gb/s per QP, {} iters per size",
                     rank, world, bus_options.bulk_slots, bus_options.bulk_slot_bytes,
+                    bus_options.bulk_inflight_per_lane, bus_options.bulk_pace_gbps,
                     g_bulk_bench_iters);
       for (size_t bytes = size_t{2} << 20; bytes <= max_bytes; bytes <<= 1) {
         const size_t elems = bytes / 2;
         std::vector<double> ms;
+        std::vector<double> ms_in_order;
+        const uint64_t redos_before = bus->stats().bulk_gate_redos;
         for (int it = 0; it < g_bulk_bench_iters + 2; ++it) {
           const auto t0 = std::chrono::steady_clock::now();
           std::string berr;
@@ -1314,9 +1322,24 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                std::chrono::steady_clock::now() - t0)
                                .count();
           if (it >= 2) ms.push_back(t);  // two warm-ups
+          ms_in_order.push_back(t);
         }
         std::sort(ms.begin(), ms.end());
         const double p50 = ms[ms.size() / 2];
+        {
+          // Every iteration in run order (the two warm-ups first): the
+          // distribution's shape — a bimodal one is a wire-side event, not
+          // kernel noise.
+          std::string series;
+          for (double t : ms_in_order) {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, " %.2f", t);
+            series += buf;
+          }
+          DGPP_LOG_INFO("rank {} bulk bench: {:>5} MiB iterations (ms):{}  placement redos {}",
+                        rank, bytes >> 20, series,
+                        bus->stats().bulk_gate_redos - redos_before);
+        }
         // Wire bytes per rank: 2(W-1)/W of the buffer (RS + AG).
         const double wire_mb = 2.0 * (world - 1) / world * bytes / 1048576.0;
         DGPP_LOG_INFO(
@@ -1775,6 +1798,8 @@ int main(int argc, char** argv) {
     else if (a == "--prefill-repeat") g_prefill_repeat = std::max(1, std::stoi(next()));
     else if (a == "--bulk-bench-iters") g_bulk_bench_iters = std::stoi(next());
     else if (a == "--bulk-slots") g_bulk_slots_override = std::stoi(next());
+    else if (a == "--bulk-inflight") g_bulk_inflight_override = std::stoi(next());
+    else if (a == "--bulk-pace-gbps") g_bulk_pace_override = std::stod(next());
     else if (a == "--bulk-slot-bytes") g_bulk_slot_bytes_override = std::stoll(next());
     else if (a == "--out") out_prefix = next();
     else if (a == "--sample") sample = true;

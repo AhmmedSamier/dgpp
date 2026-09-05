@@ -44,6 +44,23 @@ struct BusOptions {
   size_t lat_slot_bytes = 8192;  // 4096 hidden x BF16, the decode unit
   int bulk_slots = 16;
   size_t bulk_slot_bytes = 262144;
+  // Bulk collective pacing (2026-09-05): at most this many stripes in
+  // flight per (peer, lane) — the ring depth otherwise. The multi-block
+  // fold made the senders burst whole rings at three peers at once, and
+  // the fabric answered with sequence errors, adaptive retransmissions
+  // and congestion notifications (a 16 MiB all-reduce bimodal at 2.4 or
+  // 30-56 ms). The window bounds every receiver's inbound burst to
+  // peers x lanes x this x slot bytes; the posting order also rotates per
+  // sender (rank + 1 first) so aligned bursts spread across receivers.
+  int bulk_inflight_per_lane = 4;
+  // Software pacing per (peer, lane) queue pair, in Gb/s (0 = unpaced).
+  // The fabric's ports are 200 Gb/s but a receiver has three senders, and
+  // the NICs' packet pacing covers raw-packet QPs only, so the engine
+  // spaces a QP's stripe posts by len / rate: six inbound QPs at the cap
+  // stay under one port's drain even when every sender bursts at the
+  // same receiver (the ack-driven credit return aligns them: the receiver
+  // that finishes a segment releases all three at once).
+  double bulk_pace_gbps = 28.0;
 
   int qp_depth = 1024;
   int completion_timeout_ms = 5000;  // engine watchdog per request
@@ -78,6 +95,13 @@ struct BusStats {
   std::vector<BusLaneStats> lanes;
   BusClassStats latency;
   BusClassStats bulk;
+  // The bulk collective kernel's placement-proof telemetry (2026-09-05):
+  // segment kernels completed, and stripes the consume pass had to
+  // re-fold because the payload's DMA placement was not yet fully visible
+  // when the fold first read it (any nonzero count in a passing run is
+  // live proof the race is real; a large one is a wire-side stall).
+  uint64_t bulk_segments = 0;
+  uint64_t bulk_gate_redos = 0;
 };
 
 struct BusSendResult {

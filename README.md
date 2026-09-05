@@ -6,7 +6,7 @@ framework underneath it: the kernels, the RoCE collective bus, the tokenizer,
 the chat-template interpreter, the scheduler and the HTTP service are all in
 this tree.
 
-Current status (2026-09-04): the engine serves. `glm_serve` boots a resident
+Current status (2026-09-05): the engine serves. `glm_serve` boots a resident
 TP=4 model on the four-node fabric in 15–25 s (per-rank image cache), answers
 the OpenAI chat/completions contract over HTTP/SSE with rank 0 as the sole
 ingress, and every rank executes an identical op stream by construction. The
@@ -60,10 +60,12 @@ error before the bus comes down. Admission is full-reserve by default, with
 grow-on-demand as an opt-in policy that admits optimistically and sheds the
 youngest request when the KV pool runs out, rank-identical by construction.
 The prefill behind the time to first token is
-being taken down (a 256-token prompt's first token went from 5 s to 1.0 s
-in steady state on 2026-09-04 with the MoE experts on one grouped launch
-per layer and no host sync, the bulk folds split per segment; the fold
-kernel's data movement and long-segment GEMMs are next) and the prefix
+being taken down (a 256-token prompt's first token went from 5 s to 0.8 s
+and a 2048-token one from 19.8 to 5.7 s in steady state by 2026-09-05:
+the MoE experts on one grouped launch per layer and no host sync, the
+bulk all-reduce split per segment and run by a 16-block cooperative
+kernel with paced senders — the fabric dropped packets under the faster
+ones; long-segment expert GEMMs are next) and the prefix
 cache is open; `PLAN.md` has the status per milestone and the designs
 for what remains, `DESIGN.md` the contracts as built.
 
@@ -144,6 +146,7 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `glm_serve --model ID --port P [--world W --rank R --peer HEAD --journal-port J] [--max-concurrency N --kv-capacity T --queue-limit Q] [--decode-graph [--mtp] --graph-batch-min-live N] [--temperature X --top-p X --top-k N --min-p X --repetition-penalty X --seed N] [--sampling-candidates N] [--admission full|grow --admission-window N] [--reasoning-in-content]` | the OpenAI-compatible service: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/v1/metrics`; rank 0 is the HTTP ingress and journals admissions to the peers; sampling defaults come from the checkpoint's `generation_config.json` (temperature 1.0 / top_p 0.95 for GLM-5.3-Flash-FP8) with the flags overriding them per process, requests may set `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `seed`, `top_k`, `min_p`, `repetition_penalty`, `logprobs` and `top_logprobs` (exact, the OpenAI shapes), and `/v1/models` reports the effective defaults; chat requests may carry `tools`, `tool_choice` (`auto`/`none`/`required`/a named function) and `parallel_tool_calls` — every call is well-formed by constrained decoding, a grammar mask on the pick applied identically on every rank (DESIGN §10): a declared function name, the closed keys under `additionalProperties: false`, argument values typed by their property schema (JSON-typed properties under the JSON machine, enum strings from their texts, plain strings free; `function.strict: true` refuses a property outside the enforceable subset by keyword), and required, named and single-call turns as guarantees — `response_format` (`text` / `json_object` / `json_schema` with `name`, `schema`, `strict`: the content is one JSON text conforming to the schema's `type`, `properties` / `required` / `additionalProperties`, `items` / `minItems` / `maxItems`, `enum` / `const`, `anyOf`, enforced by the same masks; a strict schema outside that subset is refused naming the keyword, a non-strict one falls back to `json_object`; not combinable with `tools`), `reasoning_effort`, `chat_template_kwargs` (`clear_thinking`, `reasoning_effort`), assistant `tool_calls` and `tool` messages, all rendered through the checkpoint's template, and the response carries `reasoning_content` (or, with `--reasoning-in-content`, the reasoning folded into `content`), `content` and `tool_calls` parsed from the token ids on rank 0 with `finish_reason: "tool_calls"` (DESIGN §11); the eager engines and the `--decode-graph` graphs, with or without `--mtp`, sample exactly (DESIGN §10, the on-device verdict with the gather fallback between windows; under MTP the exact speculative accept test, DESIGN §9); graph mode requires the fabric and `max-concurrency * (mtp ? 2 : 1) <= 8`, warm-captures every graph variant at startup (the journal's `warm` record starts it on every rank together), and batches at `--graph-batch-min-live` live requests (default min(4, max-concurrency); must be in [1, max-concurrency]) |
 | `scripts/fabric_run.sh [--stage-file F] [--fetch-logs] [--node-probe] -- APP-ARGS` | launches any app on the four-node fabric with the rendezvous discipline (head first, peers fire-and-forget, verified by pgrep, swept on head death); collects rank-invariant md5s and bus stats |
 | `scripts/serve_run.sh up/down/status` | boots/stops the serving world (`DGPP_SERVE_KNOBS` overrides the engine flags on every rank, e.g. `--max-concurrency 1 ... --decode-graph --mtp`); `down` fetches and md5s every rank's op stream |
+| `scripts/roce_counters.sh snapshot\|diff` | the fabric's RoCE hardware counters (sequence errors, adaptive retransmissions, CNPs, NIC ingress discards) per node and device, and the deltas between two snapshots — the wire-side view of a collective run |
 | `scripts/serve_bench.py HOST PORT MAX_TOKENS LABEL [PROMPT]`, `scripts/serve_pace.py RANK_LOG [--waves]` | the service's pace: client-side SSE stamps; server-side per-request pace; and, with `--waves`, the steady peak-occupancy replay latency, tokens/replay, and aggregate tok/s used by the Phase-2 gate |
 | `scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`, `scripts/fabric_sampling_profile.py`, `scripts/fabric_xrank.py` | the judges (first divergence by bf16-ulp margin; teacher-forced perplexity delta; sampling-width evidence) and the cross-rank step/stall reader — see "Judging a numerics change" |
 

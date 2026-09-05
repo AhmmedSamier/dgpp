@@ -272,14 +272,34 @@ cudaError_t launch_bus_allreduce_graph(const BusAllReduceGraphView& v,
 //     maps to exactly one window of the receiving flight, in ring order,
 //     at any skew. Eager claiming acks foreign doorbells away and
 //     deadlocks both phases on the loss.
-//   * DEFERRED ACKS: the ack certifies the payload CONSUMED — the RS fold
-//     consumes at kernel exit (s_ptr reads the slots one last time
-//     there), so the ack flushes after the fold. An ack at claim time
-//     returns the sender's credit early and a sender a segment ahead
-//     overwrites a fold input. The flush re-reads the door cell (stable
-//     until its credit returns) and skips the kernel's own claims in the
-//     scan meanwhile — a re-presented claim would steal the shared CAS
-//     from a fresh doorbell in the same warp, forever.
+//   * DEFERRED ACKS: the ack certifies the payload CONSUMED — the consume
+//     pass after the claims (the RS fold, the AG landing copy) reads the
+//     slots, so the ack flushes after it. An ack at claim time returns
+//     the sender's credit early and a sender a segment ahead overwrites a
+//     fold input. The flush re-reads the door cell (stable until its
+//     credit returns) and skips the kernel's own claims in the scan
+//     meanwhile — a re-presented claim would steal the shared CAS from a
+//     fresh doorbell in the same warp, forever.
+//
+// THE KERNEL IS A COOPERATIVE GRID (2026-09-05): kBulkBlocks blocks,
+// co-resident by the cooperative-launch contract, with grid barriers
+// between staging | claims | consume rounds | acks. Everything that scales
+// with bytes — the outbound staging, the RS fold, the AG landing — runs
+// over the whole grid in 16 KB tiles of 16-byte vectors; the claim loop
+// and the ack flush stay in block 0. The placement proof (the payload
+// folds to its door's hash before any consumption counts) moved from the
+// claim into the consume pass: every tile hashes the words it reads, the
+// per-(peer, stripe) totals combine by atomic XOR in BusBulkScratch, and
+// block 0 proves each stripe between rounds — a stripe read before its
+// placement was fully visible is re-folded next round (the fold and the
+// copy are pure functions of their inputs); no ack and no done stamp
+// until every consumed stripe has proved. The single-block kernel before
+// it moved every byte through 256 threads: a 2 MB fold cost 1.4 ms.
+// The staging tiles also compute each outbound stripe's fold — the hash
+// the door carries — and block 0 publishes the per-(peer, stripe) table
+// (`staged_hashes`, pinned, after the staged counters) before releasing
+// the counters; the engine posts from it instead of hashing 256 KB per
+// stripe on the collective thread.
 constexpr int kBusMaxBulkSegStripes = 64;   // >= bulk_slots * kBusMaxLanes
 constexpr int kBusMaxPeersSized = 8;        // >= kBusMaxPeers
 // Flat bulk receive cells the collective kernel can track (the claimed
@@ -287,6 +307,30 @@ constexpr int kBusMaxPeersSized = 8;        // >= kBusMaxPeers
 // fit, or claimed cells stop acking (their credits never return) — the
 // bus validates this at start, config-error class.
 constexpr int kBusMaxBulkCells = 96;
+
+// The bulk kernel's grid-shared records (device memory, one per bus; the
+// kernel resets what it uses at entry). Block 0 writes the claim records
+// during its claim loop; every block reads them after the claim barrier
+// for the consume pass, and the pass's per-(peer, stripe) hash
+// accumulators fold in through atomic XOR. Stripe indices are sub-range
+// local: RS records index my sub-range, AG records the peer's.
+constexpr int kBusBulkBlocks = 16;  // the bulk kernel's cooperative grid
+struct BusBulkScratch {
+  // Staging: each block's partial of every outbound stripe's fold (the
+  // door's hash, computed where the bytes are read; block 0 reduces the
+  // partials into the pinned table the engine posts from).
+  uint64_t stage_part[kBusBulkBlocks][kBusMaxPeersSized][kBusMaxBulkSegStripes];
+  const uint16_t* ptr[kBusMaxPeersSized][kBusMaxBulkSegStripes];  // payload
+  uint64_t want[kBusMaxPeersSized][kBusMaxBulkSegStripes];  // the door's hash
+  uint32_t len[kBusMaxPeersSized][kBusMaxBulkSegStripes];   // the door's len
+  uint64_t hash_acc[kBusMaxPeersSized][kBusMaxBulkSegStripes];  // consumed fold
+  uint64_t ready[kBusMaxBulkSegStripes];  // RS: arrived-peer mask per stripe
+  uint64_t agot[kBusMaxPeersSized];       // AG: landed-stripe mask per peer
+  uint64_t pending;                       // RS: stripes still to fold/prove
+  uint64_t pending_ag[kBusMaxPeersSized]; // AG: per peer
+  int failed;
+  int total_arrived;
+};
 
 // Per-segment launch plan; `send_payload[p]` in the view is peer p's
 // arena row (segment stripes, stripe k at row + k*bulk_slot_bytes).
@@ -308,8 +352,10 @@ cudaError_t launch_bus_bulk_collective(const BusAllReduceView& v, int my_rank,
                                        __nv_bfloat16* dst,
                                        const BusBulkSegPlan& plan,
                                        uint64_t* staged_counters,
+                                       uint64_t* staged_hashes,
                                        uint32_t ctl_seq, BusAllReduceCtl* ctl,
                                        uint64_t deadline_cycles,
+                                       BusBulkScratch* scratch,
                                        cudaStream_t stream);
 
 // Host-side bf16 helpers matching the device intrinsics' round-to-nearest-
