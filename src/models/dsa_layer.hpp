@@ -225,7 +225,7 @@ class DsaLayer {
   // kDensePrefillRows rows; falls back to attend_tile when the geometry
   // is outside the dense kernel's (kv_lora not 512/256).
   void attend_dense(DsaStatePool& state, int layer, const int32_t* req_ids,
-                    int64_t row0, int rows, cudaStream_t stream);
+                    int64_t row0, int rows, bool listed, cudaStream_t stream);
   void attend_tile(DsaStatePool& state, int layer, const int32_t* req_ids,
                    int64_t row0, int rows, int n_split, cudaStream_t stream);
 

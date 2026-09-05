@@ -240,6 +240,18 @@ bool dsa_attn_dense(const void* q_tilde, const void* latent_cache,
                     float scale, float* m_ws, float* l_ws, float* c_ws,
                     cudaStream_t stream);
 
+// The same kernel over each row's SELECTED tokens (2026-09-05, the sparse
+// regime past index_topk tokens of context): topk/counts as
+// dsa_attn_partial takes them, each 16-row slab (one query row) walking its
+// own list. Requires local_heads a multiple of 16 (returns false otherwise,
+// as for kv_lora outside 512/256); combine with dsa_attn_combine.
+bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
+                     const int32_t* req_ids, const int32_t* topk, int topk_stride,
+                     const int32_t* counts, int rows, int n_split, int local_heads,
+                     int kv_lora, int block_tokens, const int32_t* block_tables,
+                     int blocks_per_request, float scale, float* m_ws, float* l_ws,
+                     float* c_ws, cudaStream_t stream);
+
 // Merge the split partials into normalized c rows: c_out[r,h,:] =
 // (sum_s p_s * c_s) / (sum_s p_s * l_s), p_s = exp(m_s - max m).
 void dsa_attn_combine(const float* m_ws, const float* l_ws, const float* c_ws,

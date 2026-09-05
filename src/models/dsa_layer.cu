@@ -356,18 +356,27 @@ void DsaLayer::attend_tile(DsaStatePool& state, int layer,
 
 void DsaLayer::attend_dense(DsaStatePool& state, int layer,
                             const int32_t* req_ids, int64_t row0, int rows,
-                            cudaStream_t stream) {
+                            bool listed, cudaStream_t stream) {
   for (int64_t a0 = row0; a0 < row0 + rows; a0 += kDensePrefillRows) {
     const int arows =
         int(std::min<int64_t>(kDensePrefillRows, row0 + rows - a0));
     dsa_absorb_q(q_ + a0 * geo_.local_q_rows, w_.kv_b, q_tilde_, arows,
                  geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
                  cfg_.kv_lora_rank, stream);
-    const bool launched = dsa_attn_dense(
-        q_tilde_, state.latent(layer), req_ids + a0, pos_dev_ + a0, arows,
-        kDensePrefillSplit, geo_.local_heads, cfg_.kv_lora_rank,
-        cfg_.block_tokens, state.block_tables(), int(state.total_blocks()),
-        attn_scale_, m_ws_, l_ws_, c_ws_, stream);
+    const bool launched =
+        listed ? dsa_attn_listed(q_tilde_, state.latent(layer), req_ids + a0,
+                                 topk_ + a0 * geo_.max_selected, geo_.max_selected,
+                                 counts_ + a0, arows, kDensePrefillSplit,
+                                 geo_.local_heads, cfg_.kv_lora_rank,
+                                 cfg_.block_tokens, state.block_tables(),
+                                 int(state.total_blocks()), attn_scale_, m_ws_,
+                                 l_ws_, c_ws_, stream)
+               : dsa_attn_dense(q_tilde_, state.latent(layer), req_ids + a0,
+                                pos_dev_ + a0, arows, kDensePrefillSplit,
+                                geo_.local_heads, cfg_.kv_lora_rank,
+                                cfg_.block_tokens, state.block_tables(),
+                                int(state.total_blocks()), attn_scale_, m_ws_,
+                                l_ws_, c_ws_, stream);
     if (!launched) {
       // Geometry outside the dense kernel's: the split kernel over the
       // selection (dense by construction here).
@@ -502,11 +511,13 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
     dense_rows = int(std::max<int64_t>(0, std::min<int64_t>(n, tokens)));
   }
   if (dense_rows > 0)
-    attend_dense(state, layer, req_ids_dev_, 0, dense_rows, stream);
-  for (int row0 = dense_rows; row0 < tokens; row0 += attn_rows_) {
-    const int rows = std::min(attn_rows_, tokens - row0);
-    attend_tile(state, layer, req_ids_dev_, row0, rows, 8, stream);
-  }
+    attend_dense(state, layer, req_ids_dev_, 0, dense_rows, /*listed=*/false, stream);
+  // The sparse regime: the same flash kernel over each row's selection,
+  // in the same wide tiles (falls back to the split kernel per 8 rows when
+  // the geometry is outside the kernel's).
+  if (tokens > dense_rows)
+    attend_dense(state, layer, req_ids_dev_, dense_rows, tokens - dense_rows,
+                 /*listed=*/true, stream);
 
   // Output projection.
   gemm_.matmul(attn_out_, w_.o_proj, out, tokens, cfg_.hidden,

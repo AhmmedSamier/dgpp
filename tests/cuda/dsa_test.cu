@@ -1029,6 +1029,116 @@ DGPP_TEST(dsa_absorb_and_vout_mma_match_the_warp_kernels) {
   }
 }
 
+// The flash kernel over per-row SELECTED lists (the sparse regime) against
+// the split kernel on the same lists and the host oracle: 41 rows with
+// counts from 3 to 283 (adjacent rows very different, so a block's two
+// slabs run unequal tile counts and one idles), arbitrary token order with
+// repeats, at 64/512, 16/512 and 16/256; deterministic.
+DGPP_TEST(dsa_listed_attention_matches_split_kernel_and_reference) {
+  for (const DenseCase gc : {DenseCase{64, 512}, DenseCase{16, 512}, DenseCase{16, 256}}) {
+    DsaConfig cfg{};
+    cfg.num_heads = gc.num_heads;
+    cfg.kv_lora_rank = gc.kv_lora;
+    const DsaGeometry g = DsaGeometry::from_config(cfg);
+    const int local_heads = g.local_heads, nope = cfg.qk_nope_head_dim;
+    const int v = cfg.v_head_dim, kv_lora = cfg.kv_lora_rank;
+    const int block_tokens = cfg.block_tokens;
+    const int rows = 41, max_selected = 300;
+    const int n_blocks = 2, total_tokens = n_blocks * block_tokens;
+    std::vector<int32_t> tokens(size_t(rows) * max_selected, -1), counts(rows), req_ids(rows, 0);
+    for (int r = 0; r < rows; ++r) {
+      counts[r] = (r % 2 == 0) ? 3 + r : 283 - 5 * r;  // 3..43 and 283..83, alternating
+      for (int i = 0; i < counts[r]; ++i)
+        tokens[size_t(r) * max_selected + i] = int32_t((r * 131 + i * 17) % total_tokens);
+    }
+    auto q = random_bf16_bits(111 + gc.num_heads, int64_t(rows) * local_heads * nope, -2, 1);
+    auto kv_b = random_bf16_bits(112 + gc.kv_lora, int64_t(local_heads) * (nope + v) * kv_lora, -2, 1);
+    auto latent = random_bf16_bits(113, int64_t(total_tokens) * kv_lora, -2, 1);
+    std::vector<int32_t> bt = {1, 0};
+    const float scale = 1.0f / std::sqrt(float(nope));
+    DevBuf dq(q.size() * 2), dkb(kv_b.size() * 2), dlat(latent.size() * 2),
+        dtopk(tokens.size() * 4), dcnt(rows * 4), dri(rows * 4), dbt(8),
+        dqt(size_t(rows) * local_heads * kv_lora * 2),
+        dc_split(size_t(rows) * local_heads * kv_lora * 4),
+        dc_a(size_t(rows) * local_heads * kv_lora * 4),
+        dc_b(size_t(rows) * local_heads * kv_lora * 4),
+        dout(size_t(rows) * local_heads * v * 2);
+    dq.upload(q.data(), q.size() * 2);
+    dkb.upload(kv_b.data(), kv_b.size() * 2);
+    dlat.upload(latent.data(), latent.size() * 2);
+    dtopk.upload(tokens.data(), tokens.size() * 4);
+    dcnt.upload(counts.data(), counts.size() * 4);
+    dri.upload(req_ids.data(), req_ids.size() * 4);
+    dbt.upload(bt.data(), bt.size() * 4);
+    dsa_absorb_q(dq.p, dkb.p, dqt.p, rows, local_heads, nope, v, kv_lora, 0);
+    const int n_split = 4;
+    DevBuf dm(size_t(rows) * n_split * local_heads * 4), dl(size_t(rows) * n_split * local_heads * 4),
+        dc(size_t(rows) * n_split * local_heads * kv_lora * 4);
+    auto run = [&](bool listed, void* c_out) {
+      if (listed) {
+        const bool ok = dsa_attn_listed(dqt.p, dlat.p, static_cast<const int32_t*>(dri.p),
+                                        static_cast<const int32_t*>(dtopk.p), max_selected,
+                                        static_cast<const int32_t*>(dcnt.p), rows, n_split,
+                                        local_heads, kv_lora, block_tokens,
+                                        static_cast<const int32_t*>(dbt.p), n_blocks, scale,
+                                        static_cast<float*>(dm.p), static_cast<float*>(dl.p),
+                                        static_cast<float*>(dc.p), 0);
+        if (!ok) throw std::runtime_error("listed kernel refused the geometry");
+      } else {
+        dsa_attn_partial(dqt.p, dlat.p, static_cast<const int32_t*>(dri.p),
+                         static_cast<const int32_t*>(dtopk.p), max_selected,
+                         static_cast<const int32_t*>(dcnt.p), rows, n_split, local_heads,
+                         kv_lora, block_tokens, static_cast<const int32_t*>(dbt.p), n_blocks,
+                         scale, static_cast<float*>(dm.p), static_cast<float*>(dl.p),
+                         static_cast<float*>(dc.p), 0);
+      }
+      dsa_attn_combine(static_cast<const float*>(dm.p), static_cast<const float*>(dl.p),
+                       static_cast<const float*>(dc.p), rows, n_split, local_heads, kv_lora,
+                       static_cast<float*>(c_out), 0);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+    };
+    run(false, dc_split.p);
+    run(true, dc_a.p);
+    run(true, dc_b.p);
+    const size_t n = size_t(rows) * local_heads * kv_lora;
+    std::vector<float> a(n), b(n), c(n);
+    dc_split.download(a.data(), n * 4);
+    dc_a.download(b.data(), n * 4);
+    dc_b.download(c.data(), n * 4);
+    require_bitwise("listed attention repeat", c.data(), b.data(), n * 4);
+    double d2 = 0, y2 = 0;
+    for (size_t i = 0; i < n; ++i) {
+      const double d = double(b[i]) - double(a[i]);
+      d2 += d * d;
+      y2 += double(a[i]) * double(a[i]);
+    }
+    const double l2 = std::sqrt(d2 / std::max(y2, 1e-30));
+    std::printf("[ OK ] listed attention heads=%d kv=%d: c vs split kernel l2_rel %.3g\n",
+                gc.num_heads, gc.kv_lora, l2);
+    // 16-token tiles against the split kernel's 32: the online-softmax
+    // rescale points differ within a split (the dense gate's same-tile case
+    // read 7e-7).
+    if (l2 > 1e-4) throw std::runtime_error("listed attention diverges from the split kernel");
+    dsa_vout_gemm(dc_a.p, dkb.p, dout.p, rows, local_heads, nope, v, kv_lora, 0);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> phys_latent(size_t(total_tokens) * kv_lora);
+    for (int64_t tok = 0; tok < total_tokens; ++tok) {
+      const int32_t blk = bt[size_t(tok / block_tokens)];
+      const int64_t phys = int64_t(blk) * block_tokens + (tok % block_tokens);
+      std::memcpy(&phys_latent[size_t(tok) * kv_lora], &latent[size_t(phys) * kv_lora], kv_lora * 2);
+    }
+    std::vector<uint16_t> want(size_t(rows) * local_heads * v);
+    for (int r = 0; r < rows; ++r)
+      dsa_ref::absorbed_attn<float>(&q[size_t(r) * local_heads * nope], phys_latent.data(), kv_lora,
+                                    &tokens[size_t(r) * max_selected], counts[r], kv_b.data(),
+                                    local_heads, nope, v, kv_lora, scale,
+                                    &want[size_t(r) * local_heads * v]);
+    std::vector<uint16_t> got(size_t(rows) * local_heads * v);
+    dout.download(got.data(), got.size() * 2);
+    require_bf16("listed attention vs host f32", compare_bf16(got, want, 8), 0.01, 0.006);
+  }
+}
+
 DGPP_TEST(dsa_dense_attention_matches_split_kernel_and_reference) {
   for (const DenseCase dc : {DenseCase{64, 512}, DenseCase{16, 512}, DenseCase{16, 256}})
     run_dense_attention_case(dc);

@@ -68,8 +68,9 @@ and no host sync, the bulk all-reduce split per segment and run by a
 packets under the faster ones — the attention prefill as a dense flash
 kernel where the selection is provably dense, and the projections, the
 dense MLPs, the router and the mHC dots restructured, most of them
-bitwise; the GPU is busy 98 % of a prefill) and the prefix cache is
-open; `PLAN.md` has the status per milestone and the designs
+bitwise; a 4096-token prompt prefills in 3.5 s and an 8192-token one in
+7.3 s, the sparse attention regime on the same flash kernel; the GPU is
+busy 98 % of a prefill) and the prefix cache is open; `PLAN.md` has the status per milestone and the designs
 for what remains, `DESIGN.md` the contracts as built.
 
 ## Documentation

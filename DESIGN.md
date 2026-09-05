@@ -1046,11 +1046,19 @@ The M3 implementation pins the concrete layouts and the selection spec
   block per SM (this device caps a block at 99 KB and an SM at 100 KB).
   Where the split kernel spent 318 µs per eight rows per layer (a
   2048-token prefill: 0.9 s of attention), the dense kernel spends ~360 µs
-  per 128 rows. The absorb and vout projections around it are tensor-core
-  kernels too at ≥ 16 rows (2026-09-05, round 7): absorb bitwise its warp
-  kernel, vout carrying its fp32 input as a three-way bf16 split (the full
-  mantissa; only the summation order differs); decode keeps the warp
-  kernels;
+  per 128 rows. Past that position the SAME kernel runs over each row's
+  selected list (`dsa_attn_listed`, round 8): a 16-row slab is one query
+  row at local_heads ≥ 16, so each slab walks its own list into its own
+  16-token latent tile and the two slabs run to the longer one's tile
+  count — no union of selections, no membership masks; gated against the
+  split kernel on arbitrary lists with repeats and against the host
+  oracle. Before it a chunk past position 2048 spent 1.8 s in the per-row
+  kernel (every row carrying the full 2048 selected tokens); after, 170
+  ms, and a 2048-token chunk costs the same whether dense or sparse. The
+  absorb and vout projections around it are tensor-core kernels too at
+  ≥ 16 rows (round 7): absorb bitwise its warp kernel, vout carrying its
+  fp32 input as a three-way bf16 split (the full mantissa; only the
+  summation order differs); decode keeps the warp kernels;
 - MLA runs absorbed: `q̃ = W_uk^T q` (bf16 GEMM rounding), scores
   `q̃ · latent` in fp32 with split-KV online softmax — the running max lives
   in per-lane registers fed by butterfly group reductions (no shared running
