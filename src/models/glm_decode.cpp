@@ -97,6 +97,94 @@ void GlmDiagnosticModel::prefetch_head() {
 // ---------------------------------------------------------------------------
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
     int req, const std::vector<int64_t>& prompt_ids) {
+  return session_prefill(req, prompt_ids, {}, nullptr);
+}
+
+int GlmDiagnosticModel::session_kpool() const {
+  return dsa_cfg_.num_dsa_layers > 0 ? dsa_cfg_.index_kpool : 1;
+}
+
+size_t GlmDiagnosticModel::session_snapshot_bytes() const {
+  size_t bytes = 0;
+  if (kda_rec_) {
+    bytes += static_cast<size_t>(kda_cfg_.num_kda_layers) * kda_geo_.recurrent_bytes;
+    bytes += static_cast<size_t>(kda_cfg_.num_kda_layers) * kda_geo_.conv_committed_bytes;
+  }
+  if (dsa_cfg_.num_dsa_layers > 0)
+    bytes += static_cast<size_t>(dsa_cfg_.num_dsa_layers) *
+             pool_.geometry().tail_bytes_per_request;
+  if (mtp_) bytes += static_cast<size_t>(cfg_.hidden_size) * 2;
+  return bytes;
+}
+
+std::vector<int64_t> GlmDiagnosticModel::prefill_cuts(
+    int64_t start, int64_t end, const std::vector<int64_t>& boundaries) const {
+  const int64_t kpool = session_kpool();
+  std::vector<int64_t> cuts;
+  for (int64_t m = (start / kPrefillChunkTokens + 1) * kPrefillChunkTokens; m < end;
+       m += kPrefillChunkTokens)
+    cuts.push_back(m);
+  for (int64_t b : boundaries) {
+    const int64_t a = (b / kpool) * kpool;  // the pool-aligned image
+    if (a > start && a < end) cuts.push_back(a);
+  }
+  std::sort(cuts.begin(), cuts.end());
+  cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+  return cuts;
+}
+
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill_chunks(
+    int req, const int64_t* ids, int64_t start, int64_t count,
+    const std::vector<int64_t>& boundaries, SnapshotRequest* snap) {
+  const int64_t end = start + count;
+  const std::vector<int64_t> cuts = prefill_cuts(start, end, boundaries);
+  if (snap != nullptr) {
+    if (snap->dst == nullptr || snap->meta == nullptr)
+      throw std::invalid_argument("session_prefill: snapshot request without a buffer");
+    const bool at_cut =
+        std::binary_search(cuts.begin(), cuts.end(), snap->position) ||
+        snap->position == end;
+    if (!at_cut)
+      throw std::invalid_argument(
+          "session_prefill: the snapshot position is not a chunk end");
+  }
+  Outputs out;  // last row's logits/final_hidden; routes cover ALL rows
+  int64_t c0 = start;
+  size_t ci = 0;
+  while (c0 < end) {
+    const int64_t c1 = ci < cuts.size() ? cuts[ci++] : end;
+    Outputs chunk = session_run_rows(
+        req, std::vector<int64_t>(ids + (c0 - start), ids + (c1 - start)), c0,
+        /*decode_row=*/false);
+    out.logits = std::move(chunk.logits);
+    out.final_hidden_bits = std::move(chunk.final_hidden_bits);
+    out.lm_vocab_begin = chunk.lm_vocab_begin;
+    out.lm_vocab_count = chunk.lm_vocab_count;
+    session_merge_routes(&out, std::move(chunk));
+    session_pos_[static_cast<size_t>(req)] = c1;
+    push_position(req);
+    // The draft block over this chunk's rows — row q embeds tok_{q+1}, so
+    // the rows stop one short of the prompt end (the first generated token
+    // is that row's input). Interleaving it per chunk keeps its state at
+    // every cut, where a snapshot may be taken.
+    if (mtp_) {
+      const int64_t r1 = std::min<int64_t>(c1, end - 1);
+      if (r1 > c0) mtp_prefill_rows(req, c0, r1, ids + (c0 + 1 - start));
+      mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(mtp_pos_[static_cast<size_t>(req)], r1);
+      push_mtp_position(req);
+    }
+    if (snap != nullptr && !snap->taken && snap->position == c1) {
+      *snap->meta = session_snapshot(req, snap->dst);
+      snap->taken = true;
+    }
+    c0 = c1;
+  }
+  return out;
+}
+
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
+    int req, const std::vector<int64_t>& prompt_ids,
+    const std::vector<int64_t>& boundaries, SnapshotRequest* snap) {
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_prefill: request slot " +
                            std::to_string(req));
@@ -137,42 +225,190 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
   session_pos_[static_cast<size_t>(req)] = 0;
   if (mtp_) mtp_pos_[static_cast<size_t>(req)] = 0;
 
-  Outputs out;  // last row's logits/final_hidden; routes cover ALL rows
-  // Chunking: boundaries stay pool-aligned (starts ≡ 0 mod kpool) and a
-  // CONTINUATION chunk must carry at least kpool tokens — the DSA
-  // tail-seed read is pinned to in-chunk k rows, and enqueue_prefill
-  // rejects shorter continuations. A 1..kpool-1 token tail therefore
-  // borrows one pool from its predecessor (which stays pool-aligned:
-  // the chunk size is a multiple of kpool). First chunk: any size.
-  const int64_t kpool =
-      dsa_cfg_.num_dsa_layers > 0 ? dsa_cfg_.index_kpool : 1;
-  int64_t c0 = 0;
-  while (c0 < static_cast<int64_t>(P)) {
-    int64_t n = std::min<int64_t>(kPrefillChunkTokens, P - c0);
-    if (n < kpool && c0 > 0) {
-      c0 -= kpool;
-      n += kpool;
-    }
-    Outputs chunk = session_run_rows(
-        req,
-        std::vector<int64_t>(prompt_ids.begin() + c0,
-                             prompt_ids.begin() + c0 + n),
-        c0, /*decode_row=*/false);
-    out.logits = std::move(chunk.logits);
-    out.final_hidden_bits = std::move(chunk.final_hidden_bits);
-    out.lm_vocab_begin = chunk.lm_vocab_begin;
-    out.lm_vocab_count = chunk.lm_vocab_count;
-    session_merge_routes(&out, std::move(chunk));
-    c0 += n;
-  }
+  // Chunking (M7's contract, 2026-09-05): cuts at every kPrefillChunkTokens
+  // multiple and at the pool-aligned image of every boundary; chunk starts
+  // pool-aligned, lengths any (the DSA ring handles a short continuation).
+  Outputs out = session_prefill_chunks(req, prompt_ids.data(), 0, P, boundaries, snap);
   session_pos_[static_cast<size_t>(req)] = P;
   push_position(req);
-  // The draft block over the prompt (its cache must cover every position
-  // before the first draft); the chunks above left h_q in the cache.
-  if (mtp_) mtp_prefill(req, prompt_ids);
+  if (mtp_) {
+    mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(P - 1, 0);
+    push_mtp_position(req);
+  }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   return out;
 }
+
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill_resume(
+    int req, const std::vector<int64_t>& suffix_ids,
+    const std::vector<int64_t>& boundaries, SnapshotRequest* snap) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_prefill_resume: request slot " +
+                            std::to_string(req));
+  const int64_t P0 = session_pos_[static_cast<size_t>(req)];
+  const int64_t n = static_cast<int64_t>(suffix_ids.size());
+  if (P0 <= 0)
+    throw std::invalid_argument("session_prefill_resume: the slot is not attached");
+  if (P0 % session_kpool() != 0)
+    throw std::invalid_argument("session_prefill_resume: the position is not pool-aligned");
+  if (n <= 0) throw std::invalid_argument("session_prefill_resume: empty suffix");
+  if (P0 + n > max_tokens_)
+    throw std::invalid_argument("session_prefill_resume: prompt exceeds max_tokens");
+  for (int64_t id : suffix_ids)
+    if (id < 0 || id >= cfg_.vocab_size)
+      throw std::invalid_argument("session_prefill_resume: token id out of range");
+  // A close-time snapshot leaves the draft block one row behind (row P0-1
+  // wants tok_{P0}, the suffix's first token): catch it up through the
+  // decode-path draft, whose row is exactly that one.
+  if (mtp_ && mtp_pos_[static_cast<size_t>(req)] == P0 - 1)
+    (void)session_draft(req, std::vector<int64_t>{suffix_ids[0]});
+  if (mtp_ && mtp_pos_[static_cast<size_t>(req)] != P0)
+    throw std::logic_error("session_prefill_resume: the draft block's row counter is "
+                           "not at the attach position");
+  Outputs out = session_prefill_chunks(req, suffix_ids.data(), P0, n, boundaries, snap);
+  session_pos_[static_cast<size_t>(req)] = P0 + n;
+  push_position(req);
+  if (mtp_) {
+    mtp_pos_[static_cast<size_t>(req)] = P0 + n - 1;
+    push_mtp_position(req);
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  return out;
+}
+
+GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot(
+    int req, void* dst) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_snapshot: request slot " + std::to_string(req));
+  const int64_t pos = session_pos_[static_cast<size_t>(req)];
+  if (pos <= 0) throw std::invalid_argument("session_snapshot: the slot is closed");
+  if (pos % session_kpool() != 0)
+    throw std::invalid_argument("session_snapshot: the position is not pool-aligned");
+  if (dst == nullptr) throw std::invalid_argument("session_snapshot: null buffer");
+  if (mtp_) {
+    const int64_t q = mtp_pos_[static_cast<size_t>(req)];
+    if (q != pos && q != pos - 1)
+      throw std::logic_error("session_snapshot: the draft block is more than one row behind");
+  }
+  const int H = cfg_.hidden_size;
+  uint8_t* d = static_cast<uint8_t*>(dst);
+  if (kda_rec_) {
+    const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
+    const size_t rec_bytes = layers * kda_geo_.recurrent_bytes;
+    const size_t conv_bytes = layers * kda_geo_.conv_committed_bytes;
+    const float* rec = kda_rec_ + static_cast<size_t>(req) * layers * kda_geo_.recurrent_elems;
+    const uint16_t* conv =
+        kda_conv_ + static_cast<size_t>(req) * layers * (kda_geo_.conv_committed_bytes / 2);
+    DGPP_CUDA_OK(cudaMemcpyAsync(d, rec, rec_bytes, cudaMemcpyDeviceToDevice, stream_));
+    d += rec_bytes;
+    DGPP_CUDA_OK(cudaMemcpyAsync(d, conv, conv_bytes, cudaMemcpyDeviceToDevice, stream_));
+    d += conv_bytes;
+  }
+  SessionSnapshotMeta meta;
+  meta.position = pos;
+  meta.mtp_position = mtp_ ? mtp_pos_[static_cast<size_t>(req)] : 0;
+  if (dsa_cfg_.num_dsa_layers > 0) {
+    const size_t tail_bytes = pool_.geometry().tail_bytes_per_request;
+    for (int layer = 0; layer < dsa_cfg_.num_dsa_layers; ++layer) {
+      const uint8_t* src = static_cast<const uint8_t*>(pool_.tail(layer)) +
+                           static_cast<size_t>(req) * tail_bytes;
+      DGPP_CUDA_OK(cudaMemcpyAsync(d, src, tail_bytes, cudaMemcpyDeviceToDevice, stream_));
+      d += tail_bytes;
+    }
+    const int64_t block_tokens = dsa_cfg_.block_tokens;
+    const int64_t n_full = pos / block_tokens;
+    const int32_t* row = pool_.request_table_row(req);
+    meta.full_blocks.assign(row, row + n_full);
+    pool_.pin_blocks(meta.full_blocks.data(), n_full);
+    if (pos % block_tokens != 0) {
+      const int32_t b = pool_.acquire_pinned_block();
+      if (b < 0) {
+        pool_.unpin_blocks(meta.full_blocks.data(), n_full);
+        throw std::runtime_error("session_snapshot: cache pool exhausted (the partial block)");
+      }
+      pool_.copy_block_contents(row[n_full], b, stream_);
+      meta.partial_block = b;
+    }
+  }
+  if (mtp_) {
+    const uint16_t* hq = mtp_hidden_cache(req) + static_cast<size_t>(pos - 1) * H;
+    DGPP_CUDA_OK(cudaMemcpyAsync(d, hq, static_cast<size_t>(H) * 2,
+                                 cudaMemcpyDeviceToDevice, stream_));
+    d += static_cast<size_t>(H) * 2;
+  }
+  return meta;
+}
+
+void GlmDiagnosticModel::session_release_snapshot(const SessionSnapshotMeta& meta) {
+  if (dsa_cfg_.num_dsa_layers == 0) return;
+  if (!meta.full_blocks.empty())
+    pool_.unpin_blocks(meta.full_blocks.data(),
+                       static_cast<int64_t>(meta.full_blocks.size()));
+  if (meta.partial_block >= 0) pool_.unpin_blocks(&meta.partial_block, 1);
+}
+
+void GlmDiagnosticModel::session_attach(int req, const void* src,
+                                        const SessionSnapshotMeta& meta) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("session_attach: request slot " + std::to_string(req));
+  if (session_pos_[static_cast<size_t>(req)] != 0)
+    throw std::logic_error("session_attach: the slot is open");
+  if (meta.position <= 0 || meta.position % session_kpool() != 0)
+    throw std::invalid_argument("session_attach: bad snapshot position");
+  if (meta.position > max_tokens_)
+    throw std::invalid_argument("session_attach: position exceeds max_tokens");
+  if (src == nullptr) throw std::invalid_argument("session_attach: null buffer");
+  const int H = cfg_.hidden_size;
+  const uint8_t* d = static_cast<const uint8_t*>(src);
+  if (kda_rec_) {
+    const size_t layers = static_cast<size_t>(kda_cfg_.num_kda_layers);
+    const size_t rec_bytes = layers * kda_geo_.recurrent_bytes;
+    const size_t conv_bytes = layers * kda_geo_.conv_committed_bytes;
+    float* rec = kda_rec_ + static_cast<size_t>(req) * layers * kda_geo_.recurrent_elems;
+    uint16_t* conv =
+        kda_conv_ + static_cast<size_t>(req) * layers * (kda_geo_.conv_committed_bytes / 2);
+    DGPP_CUDA_OK(cudaMemcpyAsync(rec, d, rec_bytes, cudaMemcpyDeviceToDevice, stream_));
+    d += rec_bytes;
+    DGPP_CUDA_OK(cudaMemcpyAsync(conv, d, conv_bytes, cudaMemcpyDeviceToDevice, stream_));
+    d += conv_bytes;
+  }
+  if (dsa_cfg_.num_dsa_layers > 0) {
+    pool_.release_request_blocks(req, stream_);
+    pool_.reset_request(req, stream_);
+    const size_t tail_bytes = pool_.geometry().tail_bytes_per_request;
+    for (int layer = 0; layer < dsa_cfg_.num_dsa_layers; ++layer) {
+      uint8_t* dstt = static_cast<uint8_t*>(pool_.tail(layer)) +
+                      static_cast<size_t>(req) * tail_bytes;
+      DGPP_CUDA_OK(cudaMemcpyAsync(dstt, d, tail_bytes, cudaMemcpyDeviceToDevice, stream_));
+      d += tail_bytes;
+    }
+    const int64_t block_tokens = dsa_cfg_.block_tokens;
+    const int64_t n_full = meta.position / block_tokens;
+    if (static_cast<int64_t>(meta.full_blocks.size()) != n_full)
+      throw std::invalid_argument("session_attach: block list does not match the position");
+    if (!pool_.share_blocks_into(req, meta.full_blocks.data(), n_full, stream_))
+      throw std::runtime_error("session_attach: could not share the prefix blocks");
+    if (meta.position % block_tokens != 0) {
+      if (meta.partial_block < 0)
+        throw std::invalid_argument("session_attach: the snapshot lacks its partial block");
+      if (!pool_.ensure_request_blocks(req, meta.position, stream_))
+        throw std::runtime_error("session_attach: cache pool exhausted");
+      const int32_t* row = pool_.request_table_row(req);
+      pool_.copy_block_contents(meta.partial_block, row[n_full], stream_);
+    }
+  }
+  session_pos_[static_cast<size_t>(req)] = meta.position;
+  push_position(req);
+  if (mtp_) {
+    uint16_t* hq = mtp_hidden_cache(req) + static_cast<size_t>(meta.position - 1) * H;
+    DGPP_CUDA_OK(cudaMemcpyAsync(hq, d, static_cast<size_t>(H) * 2,
+                                 cudaMemcpyDeviceToDevice, stream_));
+    d += static_cast<size_t>(H) * 2;
+    mtp_pos_[static_cast<size_t>(req)] = meta.mtp_position;
+    push_mtp_position(req);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // session_step: one token at slot `req`'s next position.
 // ---------------------------------------------------------------------------
@@ -837,7 +1073,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
             moe_trace_biased_ + lay * kDecodeRows * moe_cfg_.n_experts;
         // Capture passes the layer's OWN graph table slot so the
         // recorded upload node replays THIS layer's expert views; the
-        // eager path's shared pinned buffer serves both callers.
+        // eager path uploads from the layer's guarded ring instead.
         moe_->enqueue_decode(normed_, ffn_out, T,
                              decode_route_traces_ ? &trace : nullptr, stream_,
                              capture_mode ? moe_decode_calls : -1);

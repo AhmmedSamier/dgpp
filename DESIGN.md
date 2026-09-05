@@ -1465,7 +1465,7 @@ layer until the expert-table staging was pinned); and nothing on the
 serving node may push the box to its memory watermark (§3 — the swapped
 vocab page).
 
-## 8. Prefix cache (design; M7, not built)
+## 8. Prefix cache (M7; the model primitives built 2026-09-05, the cache itself designed)
 
 V1 uses exact state snapshots only. The previous unproven 24 KB/token
 “linear-aux replay record” is removed.
@@ -1526,6 +1526,38 @@ the snapshot arena (42 D2D slots), refcounts on blocks, and the decisions.
   chunk sequence and the cache is bitwise invisible.
 - *Keys:* tokenizer hash, template hash, checkpoint revision, numerics
   mode; the radix is per process (no persistence in v1).
+
+**As built, Stage A (2026-09-05; `glm_forward.hpp` "prefix cache
+primitives").** Three refinements the gate forced on the design above.
+(1) *Snapshots sit at pool-aligned positions.* The DSA tail ring and the
+complete-pool compression index pools from a chunk's first row, so a
+chunk start must be a multiple of kpool (4) — the cold prefill therefore
+cuts at the aligned IMAGE floor(b / kpool) · kpool of each structural
+boundary, not at the boundary, and a turn-end snapshot lands there; the
+few tokens between the image and the boundary belong to the next chunk.
+(2) *Continuation chunks may be shorter than a pool.* The layer used to
+reject them (the reference tail seed read only in-chunk rows); on the
+device ring the seed writes the tokens it has into their slots and the
+rest still hold the previous chunk's, so a short suffix runs as a prefill
+chunk and the decode-path detour above is unnecessary (one- and
+two-token continuations are gated within 1e-7 of the unchunked prefill,
+the steps after them bitwise). (3) *The partial last block is copied,
+the full ones shared.* An attached request keeps writing into the block
+its position falls in, so the entry owns a private copy of it
+(`acquire_pinned_block` + `copy_block_contents`, every layer's latent
+rows, index pools and scales) and the requests that attach each copy it
+again; the full blocks below are shared by reference through the pool's
+new per-block refcounts (a request row holds one reference per block, an
+entry one more; a block frees at zero). The draft block's prefill is
+interleaved per chunk so a snapshot at any cut carries its state, and
+`h_q` is the row at position − 1. The snapshot is one buffer the caller
+owns: [KDA recurrent | KDA conv | one tail ring per DSA layer | h_q];
+`session_snapshot` fills it stream-ordered and returns the block ids,
+`session_attach` opens a closed slot from it, `session_prefill_resume`
+runs the suffix under the same cut rule in the whole prompt's
+coordinates. Hot == cold is bitwise through the resume, the steps and
+the draft rows (the gate), and a second attach to the same entry with a
+different suffix is bitwise its own cold run.
 
 ## 9. MTP transaction model
 

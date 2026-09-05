@@ -147,35 +147,42 @@ void GlmDiagnosticModel::push_mtp_position(int req) {
 }
 
 // ---------------------------------------------------------------------------
-// Prefill: rows 0..P-2 over the prompt, chunked like the main stack (pool-
-// aligned starts, continuation chunks >= kpool — the same borrow rule).
+// Prefill: the draft block over rows [row0, row1) of a chunk — row q embeds
+// tok_{q+1}, so `tokens` points at the prompt's token at position row0 + 1.
+// Called per main-stack chunk (interleaved, 2026-09-05), which keeps the
+// block's state at every chunk cut for the prefix cache's snapshots; the
+// row range is one aligned chunk (<= kPrefillChunkTokens rows).
 // ---------------------------------------------------------------------------
+void GlmDiagnosticModel::mtp_prefill_rows(int req, int64_t row0, int64_t row1,
+                                          const int64_t* tokens) {
+  const int64_t n = row1 - row0;
+  if (n <= 0) return;
+  if (n > kPrefillChunkTokens)
+    throw std::invalid_argument("mtp_prefill_rows: chunk too long");
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, tokens, static_cast<size_t>(n) * 8,
+                               cudaMemcpyHostToDevice, stream_));
+  mtp_run_rows(req, row0, static_cast<int>(n), /*decode_row=*/false,
+               /*capture_mode=*/false);
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+}
+
 void GlmDiagnosticModel::mtp_prefill(int req,
                                      const std::vector<int64_t>& prompt_ids) {
+  // The whole-prompt form (kept for callers outside the session chunk loop):
+  // the same cuts the main stack would take with no boundaries.
   const int64_t rows_total = static_cast<int64_t>(prompt_ids.size()) - 1;
   mtp_pos_[static_cast<size_t>(req)] = 0;
-  if (rows_total <= 0) {  // a one-token prompt: the first draft is row 0
-    push_mtp_position(req);
-    return;
-  }
-  const int64_t kpool = dsa_cfg_.index_kpool;
-  int64_t c0 = 0;
-  while (c0 < rows_total) {
-    int64_t n = std::min<int64_t>(kPrefillChunkTokens, rows_total - c0);
-    if (n < kpool && c0 > 0) {
-      c0 -= kpool;
-      n += kpool;
+  if (rows_total > 0) {
+    const std::vector<int64_t> cuts = prefill_cuts(0, rows_total, {});
+    int64_t c0 = 0;
+    size_t ci = 0;
+    while (c0 < rows_total) {
+      const int64_t c1 = ci < cuts.size() ? cuts[ci++] : rows_total;
+      mtp_prefill_rows(req, c0, c1, prompt_ids.data() + c0 + 1);
+      c0 = c1;
     }
-    // Row q embeds tok_{q+1}: the chunk's tokens are prompt[c0+1 .. c0+n].
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, prompt_ids.data() + c0 + 1,
-                                 static_cast<size_t>(n) * 8,
-                                 cudaMemcpyHostToDevice, stream_));
-    mtp_run_rows(req, c0, static_cast<int>(n), /*decode_row=*/false,
-                 /*capture_mode=*/false);
-    DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-    c0 += n;
   }
-  mtp_pos_[static_cast<size_t>(req)] = rows_total;
+  mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(rows_total, 0);
   push_mtp_position(req);
 }
 

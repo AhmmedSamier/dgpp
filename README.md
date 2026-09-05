@@ -70,7 +70,12 @@ kernel where the selection is provably dense, and the projections, the
 dense MLPs, the router and the mHC dots restructured, most of them
 bitwise; a 4096-token prompt prefills in 3.5 s and an 8192-token one in
 7.3 s, the sparse attention regime on the same flash kernel; the GPU is
-busy 98 % of a prefill) and the prefix cache is open; `PLAN.md` has the status per milestone and the designs
+busy 98 % of a prefill) and the prefix cache (M7) is under way: the
+model-level primitives — a prefill cut at structural boundaries, a
+snapshot of a session at any pool-aligned cut, attach and resume on
+another slot with the prefix's cache blocks shared by reference — are
+built and gated hot == cold bitwise (2026-09-05); the cache itself and
+the service integration are next. `PLAN.md` has the status per milestone and the designs
 for what remains, `DESIGN.md` the contracts as built.
 
 ## Documentation

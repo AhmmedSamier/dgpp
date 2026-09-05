@@ -166,6 +166,60 @@ class GlmDiagnosticModel {
   Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids);
   Outputs session_step(int req, int64_t token_id);
 
+  // ---- prefix cache primitives (M7, DESIGN §8; 2026-09-05) ----------------
+  // A session's state at a pool-aligned position, copied out and later
+  // attached to another slot. The snapshot is the KDA recurrent+conv slot
+  // (every KDA layer), the DSA tail rings (every DSA layer, the draft
+  // block's included), the draft block's last hidden row h_q, and the
+  // request's block ids: the FULL blocks below the position by reference
+  // (the cache pins them in the pool) plus a private copy of the partial
+  // last block, because an attached request keeps writing into it.
+  struct SessionSnapshotMeta {
+    int64_t position = 0;          // tokens in the prefix (a multiple of kpool)
+    int64_t mtp_position = 0;      // the draft block's row counter at that time
+    std::vector<int32_t> full_blocks;  // physical ids, pinned by the entry
+    int32_t partial_block = -1;    // the entry's own copy of the partial block
+  };
+  // Device bytes a snapshot needs (the caller owns the arena).
+  size_t session_snapshot_bytes() const;
+  int session_kpool() const;  // the alignment every snapshot position obeys
+  // Chunking (M7's contract): a prefill is cut at every kPrefillChunkTokens
+  // multiple and at the pool-aligned image of every `boundaries` entry
+  // (floor(b / kpool) * kpool) — structural positions the caller derives
+  // from the rendered prompt (message starts, the prompt end) — so a
+  // snapshot at any such cut replays the cold path's exact chunk sequence.
+  // Chunk starts are pool-aligned; chunk lengths may be shorter than a pool.
+  // `snap` (optional) takes the snapshot when a chunk ends at
+  // snap->position (which must be a cut or the prompt end); the draft
+  // block's prefill is interleaved per chunk so the snapshot carries its
+  // state at the same position.
+  struct SnapshotRequest {
+    int64_t position = 0;
+    void* dst = nullptr;             // session_snapshot_bytes() of device memory
+    SessionSnapshotMeta* meta = nullptr;
+    bool taken = false;
+  };
+  Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids,
+                          const std::vector<int64_t>& boundaries,
+                          SnapshotRequest* snap = nullptr);
+  // Snapshot an open session as it stands (between steps): the position
+  // must be a multiple of kpool. Stream-ordered on the model stream.
+  SessionSnapshotMeta session_snapshot(int req, void* dst);
+  // Drops the entry's block references (the pool frees what nothing holds).
+  void session_release_snapshot(const SessionSnapshotMeta& meta);
+  // Opens CLOSED slot `req` at the snapshot's position: KDA state, tails and
+  // h_q copied in, the full blocks shared by reference, the partial block
+  // copied into a fresh one. The suffix then runs through
+  // session_prefill_resume (chunks from the position) or session_step.
+  void session_attach(int req, const void* src, const SessionSnapshotMeta& meta);
+  // The chunked prefill of `suffix_ids` from the slot's current position
+  // (an attached slot): the same cut rule as session_prefill over the whole
+  // prompt's coordinates (`boundaries` are absolute positions), the draft
+  // block interleaved, the last row's logits returned.
+  Outputs session_prefill_resume(int req, const std::vector<int64_t>& suffix_ids,
+                                 const std::vector<int64_t>& boundaries,
+                                 SnapshotRequest* snap = nullptr);
+
   // ---- speculative decode (DESIGN §9) -----------------------------------
   // session_verify runs T (1..kSpecRows) tokens at the slot's next T
   // positions in ONE decode call and returns EVERY row's logits
@@ -575,6 +629,20 @@ class GlmDiagnosticModel {
   void push_mtp_position(int req);
   // The block over a prompt's rows 0..P-2 in pool-aligned chunks.
   void mtp_prefill(int req, const std::vector<int64_t>& prompt_ids);
+  // The draft block over rows [row0, row1) of a prompt whose token at
+  // absolute position p is tokens_abs(p) — the interleaved per-chunk form.
+  void mtp_prefill_rows(int req, int64_t row0, int64_t row1,
+                        const int64_t* tokens_from_row0_plus_1);
+  // The chunk plan: cut positions in (start, end) — kPrefillChunkTokens
+  // multiples and the aligned images of `boundaries` — ascending, unique.
+  std::vector<int64_t> prefill_cuts(int64_t start, int64_t end,
+                                    const std::vector<int64_t>& boundaries) const;
+  // The shared chunk loop of session_prefill / session_prefill_resume:
+  // `ids` are the tokens at absolute positions [start, start + ids.size()).
+  Outputs session_prefill_chunks(int req, const int64_t* ids, int64_t start,
+                                 int64_t count,
+                                 const std::vector<int64_t>& boundaries,
+                                 SnapshotRequest* snap);
   // The draft's host half: validation, positions/tokens staging, uploads.
   void mtp_decode_host_prep(int req, const std::vector<int64_t>& tokens,
                             bool upload);

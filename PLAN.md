@@ -14,7 +14,7 @@ below; `[ ]` means it has not been implemented.
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
 | M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.58 s and 2048 tokens 19.8 → 1.7 s in steady state through seven rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts, the dense attention prefill, its projections, the dense MLPs, the router and the mHC dots restructured, most of them bitwise; 4096 tokens 3.5 s and 8192 tokens 7.3 s with the sparse regime on the same flash kernel); the GPU is busy 98 % of a prefill |
-| M7 | Exact snapshot prefix cache | [ ] design below |
+| M7 | Exact snapshot prefix cache | [~] Stage A built 2026-09-05 (the model primitives, gated bitwise); Stage B (the cache, the service) next |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
 
@@ -1579,6 +1579,53 @@ costs nothing at decode. DECIDED 2026-09-03: (ii) — prefill chunks at
 message boundaries (the rendered-message offsets are known on every rank)
 as well as at 2048-token multiples, so a snapshot at any turn end replays
 exactly the cold path's chunk sequence.
+
+### Stage A as built (2026-09-05, the record's twenty-sixth entry)
+
+The model-level primitives, in `GlmDiagnosticModel` (DESIGN §8 "as
+built"): `session_prefill(req, ids, boundaries, snap)` cuts at every
+2048-token multiple AND at the pool-aligned image floor(b / kpool) · kpool
+of every structural boundary the caller passes (message starts, the
+prompt end), with the draft block's prefill interleaved per chunk;
+`session_snapshot` copies the KDA slot (every layer's recurrent + conv),
+every DSA layer's tail ring (the draft block's included) and `h_q` into a
+caller-owned device buffer and returns the block ids — the FULL blocks
+below the position pinned by reference (the pool's blocks are refcounted
+now: `share_blocks_into`, `pin_blocks`, `unpin_blocks`,
+`acquire_pinned_block`, `copy_block_contents`) plus a private copy of the
+partial last block, because an attached request keeps writing into it;
+`session_attach` opens a closed slot at the position (state copied in,
+the full blocks shared, the partial copied into a fresh one);
+`session_prefill_resume` runs the suffix through the same cut rule in the
+whole prompt's coordinates. Snapshots only at pool-aligned positions
+(multiples of kpool = 4) — hence the aligned image of a boundary, not the
+boundary itself; a continuation chunk may be SHORTER than a pool (the DSA
+layer's old rejection lifted: the tail seed writes the tokens it has into
+their ring slots and the rest still hold the previous chunk's), so the
+suffix after an aligned cut needs no decode-path detour. Gate
+(`glm_tp_prefix_snapshot_hot_matches_cold_bitwise`): a 300-token prompt
+cut at the image (200) of a boundary at 203, snapshotted mid-prefill on
+one slot (invisible to that run — bitwise the same cut without a
+snapshot), attached on another and resumed: logits bitwise the cold cut
+run through the resume, four greedy steps and the draft block's rows;
+a second attach to the same snapshot with a different suffix bitwise ITS
+cold run while the first keeps stepping; one- and two-token continuation
+chunks within 1e-7 of the unchunked prefill with the steps after them
+bitwise; every block reference returns to zero. What a cut costs against
+an unchunked prefill: GEMM-shape ulps in the dense regime (1.8e-7), and
+in the sparse regime the indexer's shape-dependent dots can flip a
+near-tie selection (4e-3 at 300 tokens, top-1 certified) — the same order
+as two different cuts against each other, which is why hot == cold must
+be BITWISE and is.
+
+Stage B (not started): the `PrefixCache` (radix over token ids keyed by
+tokenizer/template/revision, the 1.5 GiB arena of 42 slots, LRU over
+refcount-0 entries, metrics), rolling aligned snapshots every kpool-th
+decode step for close-time entries, the service's structural boundaries
+(render each message prefix with the chat template and verify the token
+prefix), rank 0's journaled attach/snap/evict decisions, request opt-out,
+TTFT / bytes-saved / capacity metrics, the fabric gate (hot == cold
+bitwise on four nodes).
 
 Not in v1: persistence across restarts, cross-instance federation, DSA
 block deduplication below block granularity.

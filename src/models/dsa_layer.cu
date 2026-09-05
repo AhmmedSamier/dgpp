@@ -406,12 +406,15 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
         "dsa layer: prefill chunks must start pool-aligned");
   if (token_start + tokens > max_cache_tokens_)
     throw std::invalid_argument("dsa layer: chunk exceeds max_cache_tokens");
-  // The reference tail-seed reads only in-chunk k rows; a continuation
-  // chunk shorter than kpool would read before the chunk. (The device ring
-  // would handle it, but parity is pinned to the reference.)
-  if (token_start > 0 && tokens < cfg_.index_kpool)
-    throw std::invalid_argument(
-        "dsa layer: continuation chunks must be at least kpool tokens");
+  // A continuation chunk shorter than kpool is fine on the device ring
+  // (2026-09-05, M7; before, rejected here because the reference tail
+  // seed read only in-chunk k rows and parity was pinned to it): the tail
+  // seed writes only the tokens it has into their slots pos % kpool, and
+  // the other slots still hold the previous chunk's last tokens — exactly
+  // the ring the reference keeps for the whole sequence. Chunk STARTS stay
+  // pool-aligned: the complete-pool compression indexes pools from the
+  // chunk's first row. glm_tp_test's prefix gate runs one- and two-token
+  // continuations against the unchunked prefill and through decode steps.
   if (!hidden_in || !out)
     throw std::invalid_argument("dsa layer: null buffer");
 

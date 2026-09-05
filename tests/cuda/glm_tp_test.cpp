@@ -4100,6 +4100,14 @@ DGPP_TEST(glm_tp_serving_plain_batched_graph_matches_independent_sessions) {
           "T=1 row-batched graph transcripts differ across ranks");
 }
 
+// M7 stage A (2026-09-05): the prefix cache's model primitives. A cold
+// prefill cut at the aligned image of a boundary, a snapshot taken at that
+// cut mid-prefill, and a second slot ATTACHED from the snapshot and resumed
+// over the suffix must produce the cold slot's logits BITWISE — through
+// four greedy steps and the draft block — because the hot path replays the
+// cold path's exact chunk sequence. Two slots may attach to one snapshot
+// with different suffixes; the shared full block is immutable and the
+// partial block is copied per slot; block references return to zero.
 // The MoE layer's expert-view upload ring (2026-09-05): a session prefill
 // enqueues every layer without a host sync, and ONE MoE layer object is
 // rebound per layer, so its pinned view table was refilled with the next
@@ -4107,10 +4115,12 @@ DGPP_TEST(glm_tp_serving_plain_batched_graph_matches_independent_sessions) {
 // pending — that layer's expert chain then ran on the wrong experts, and a
 // fresh model's first prefill disagreed with its second by 0.19 rel_l2
 // whenever the host got a layer ahead (the ring of guarded pinned tables
-// fixed it). The gate: on a fresh instance, three prefills must be bitwise
-// one another and bitwise a separate instance's forward (the parity
-// gate's single-chunk rule — it holds in the sparse attention regime too:
-// the 40-token prompt reaches it, the 30-token one does not). Before the
+// fixed it). The gate: on a fresh instance, three unchunked prefills and
+// three cut prefills must be bitwise one another; the unchunked prefill
+// must be bitwise a separate instance's forward (the parity gate's
+// single-chunk rule — it holds in the sparse attention regime too: the
+// 40-token prompt reaches it, the 30-token one does not) and the cut
+// prefill within the GEMM-shape tier (1e-2; measured 1.5e-7). Before the
 // fix the racing runs sat 0.38–0.41 from forward.
 DGPP_TEST(glm_tp_first_run_is_bitwise_the_second_run) {
   const GlmTextConfig cfg = glm_tp_test_config();
@@ -4121,6 +4131,7 @@ DGPP_TEST(glm_tp_first_run_is_bitwise_the_second_run) {
     return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
   };
   for (const int T : {30, 40}) {
+    const bool dense = T <= 34;
     const std::vector<int64_t> small = make_tokens(T, V);
     // The reference: a SEPARATE instance's forward (a forward on the
     // session instance clobbers its pools — the parity gate's rule).
@@ -4132,27 +4143,240 @@ DGPP_TEST(glm_tp_first_run_is_bitwise_the_second_run) {
       ref.assign(f.logits.begin() + static_cast<size_t>(T - 1) * V,
                  f.logits.begin() + static_cast<size_t>(T) * V);
     }
-    GlmDiagnosticModel m(cfg, dir, 64, 256, nullptr, 0, 1, GlmResidency::Resident,
-                         GlmHeadSharding::Full, 2, /*mtp=*/true);
-    std::vector<float> first;
-    for (int run = 0; run < 3; ++run) {
-      const std::vector<float> got = m.session_prefill(0, small).logits;
-      m.session_close(0);
-      if (run == 0) {
-        first = got;
-        continue;
+    for (int variant = 0; variant < 2; ++variant) {
+      GlmDiagnosticModel m(cfg, dir, 64, 256, nullptr, 0, 1, GlmResidency::Resident,
+                           GlmHeadSharding::Full, 2, /*mtp=*/true);
+      const char* name = variant == 0 ? "unchunked prefill" : "cut prefill";
+      std::vector<float> first;
+      for (int run = 0; run < 3; ++run) {
+        const std::vector<float> got =
+            variant == 0 ? m.session_prefill(0, small).logits
+                         : m.session_prefill(0, small, {T - 13}).logits;
+        m.session_close(0);
+        if (run == 0) {
+          first = got;
+          continue;
+        }
+        require(same(first, got),
+                std::string("fresh model, T=") + std::to_string(T) + ", " + name +
+                    ": run " + std::to_string(run + 1) + " must be BITWISE run 1 (rel_l2 " +
+                    std::to_string(dgpp::glm_route::l2_rel(first, got)) + ")");
       }
-      require(same(first, got),
-              std::string("fresh model, T=") + std::to_string(T) + ": prefill run " +
-                  std::to_string(run + 1) + " must be BITWISE run 1 (rel_l2 " +
-                  std::to_string(dgpp::glm_route::l2_rel(first, got)) + ")");
+      const double vs_ref = dgpp::glm_route::l2_rel(first, ref);
+      std::printf("[ .. ] fresh model, T=%d (%s regime), %s: three runs bitwise; vs forward "
+                  "rel_l2 %.3g\n", T, dense ? "dense" : "sparse", name, vs_ref);
+      if (variant == 0)
+        require(same(first, ref),
+                "the unchunked session prefill must be BITWISE forward's last row");
+      else
+        require(vs_ref < 1e-2, "the cut prefill vs forward exceeds 1e-2");
     }
-    std::printf("[ .. ] fresh model, T=%d (%s regime): three prefills bitwise; vs forward "
-                "rel_l2 %.3g\n", T, T <= 34 ? "dense" : "sparse",
-                dgpp::glm_route::l2_rel(first, ref));
-    require(same(first, ref),
-            "the session prefill must be BITWISE a separate instance's forward's last row");
   }
+}
+
+DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const int V = cfg.vocab_size;
+  const int64_t P = 300, B = 203, A = 200;  // the boundary and its aligned image
+  const std::vector<int64_t> prompt = make_tokens(static_cast<int>(P), V);
+  std::vector<int64_t> prompt2(prompt.begin(), prompt.begin() + A);
+  {
+    const std::vector<int64_t> other = make_tokens(100, V);
+    for (int64_t t : other) prompt2.push_back((t * 7 + 3) % V);
+  }
+  // 16 blocks of 128: three open 300-token slots (nine) at the widest
+  // point, plus the snapshot's private partial block and the attached
+  // slots' copies of it.
+  GlmDiagnosticModel m(cfg, dir, /*max_tokens=*/320, /*max_cache_tokens=*/2048,
+                       nullptr, 0, 1, GlmResidency::Resident, GlmHeadSharding::Full,
+                       /*max_requests=*/4, /*mtp=*/true);
+  require(m.session_kpool() == 4, "fixture kpool");
+  const int64_t blocks0 = m.dsa_blocks_in_use();
+  const auto greedy = [&](const GlmDiagnosticModel::Outputs& o) {
+    return static_cast<int64_t>(
+        local_max(o.logits.data(), o.lm_vocab_count, o.lm_vocab_begin).id);
+  };
+  const auto same = [](const std::vector<float>& a, const std::vector<float>& b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+  };
+
+  // The cut's cost against an unchunked run. Two tiers, because the cut
+  // changes GEMM shapes: in the DENSE attention regime (every position
+  // below index_topk + kpool - 2 = 34 here) the only differences are
+  // GEMM-shape ulps, so a 40-token prompt cut at 24 must sit within 1e-2;
+  // in the sparse regime the indexer's materialized dots are shape-
+  // dependent and a near-tie pool flip changes the attended set, so the
+  // 300-token case is certified at the top-1 near-tie tier and its
+  // distance logged (it is the same order as two sparse cuts against each
+  // other, printed alongside).
+  {
+    const std::vector<int64_t> small = make_tokens(40, V);
+    // DIAGNOSTIC: shape sensitivity without any cut — the unchunked 40-token
+    // prefill's last row against a 41-token re-forward's row 39 (causal:
+    // exact arithmetic gives identical rows; only GEMM shapes differ).
+    {
+      std::vector<int64_t> small41 = small;
+      small41.push_back(small[0]);
+      const GlmDiagnosticModel::Outputs f41 = m.forward(small41);
+      const GlmDiagnosticModel::Outputs f40 = m.session_prefill(0, small);
+      std::vector<float> r39(f41.logits.begin() + 39 * V, f41.logits.begin() + 40 * V);
+      std::printf("[ .. ] shape sensitivity, no cut: prefill(40) last row vs forward(41) row 39: "
+                  "rel_l2 %.3g\n", dgpp::glm_route::l2_rel(f40.logits, r39));
+      m.session_close(0);
+    }
+    {
+      GlmDiagnosticModel nomtp(cfg, dir, 64, 256, nullptr, 0, 1, GlmResidency::Resident,
+                               GlmHeadSharding::Full, 2, /*mtp=*/false);
+      const GlmDiagnosticModel::Outputs f = nomtp.session_prefill(0, small);
+      const GlmDiagnosticModel::Outputs c = nomtp.session_prefill(1, small, {27});
+      std::printf("[ .. ] dense-regime cut at 24 vs unchunked, MTP off: rel_l2 %.3g\n",
+                  dgpp::glm_route::l2_rel(c.logits, f.logits));
+    }
+    const GlmDiagnosticModel::Outputs f = m.session_prefill(0, small);
+    const GlmDiagnosticModel::Outputs c = m.session_prefill(1, small, {27});
+    const double rel = dgpp::glm_route::l2_rel(c.logits, f.logits);
+    std::printf("[ .. ] dense-regime prefill cut at 24 vs unchunked: rel_l2 %.3g\n", rel);
+    require(rel < 1e-2, "dense-regime cut within GEMM-shape tolerance of the unchunked run");
+    m.session_close(0);
+    m.session_close(1);
+  }
+  // Continuation chunks SHORTER than a pool (the rule the DSA layer used to
+  // reject): a 29- and a 30-token prompt cut at 28 leave a one- and a
+  // two-token second chunk in the dense regime, whose only legitimate
+  // difference from the unchunked run is GEMM shape — through the prefill
+  // and three decode steps (the partial pool the short chunk left in the
+  // tail ring completes under the steps). And the hot path: a snapshot at
+  // the cut, attached and resumed over the short suffix, bitwise the cold
+  // cut run through the same steps.
+  for (const int T : {29, 30}) {
+    const std::vector<int64_t> p = make_tokens(T, V);
+    const std::vector<int64_t> cutb = {T - 1};  // aligned image 28
+    GlmDiagnosticModel::Outputs u = m.session_prefill(0, p);
+    void* sb = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(&sb, m.session_snapshot_bytes()));
+    GlmDiagnosticModel::SessionSnapshotMeta sm;
+    GlmDiagnosticModel::SnapshotRequest sr;
+    sr.position = 28;
+    sr.dst = sb;
+    sr.meta = &sm;
+    GlmDiagnosticModel::Outputs cc = m.session_prefill(1, p, cutb, &sr);
+    require(sr.taken && sm.position == 28, "short-chunk case: snapshot at 28");
+    m.session_attach(2, sb, sm);
+    GlmDiagnosticModel::Outputs hh = m.session_prefill_resume(
+        2, std::vector<int64_t>(p.begin() + 28, p.end()), cutb);
+    int64_t tu = greedy(u), tc = greedy(cc), th = greedy(hh);
+    for (int st = 0; st <= 3; ++st) {
+      const double rel = dgpp::glm_route::l2_rel(cc.logits, u.logits);
+      std::printf("[ .. ] %d-token continuation chunk (T=%d), %s: cut vs unchunked rel_l2 %.3g; "
+                  "hot %s cold\n", T - 28, T, st == 0 ? "prefill" : "step", rel,
+                  same(hh.logits, cc.logits) ? "BITWISE" : "DIFFERS FROM");
+      require(rel < 1e-2, "short continuation chunk within GEMM-shape tolerance");
+      require(same(hh.logits, cc.logits), "short-suffix hot resume BITWISE the cold cut run");
+      if (st == 3) break;
+      u = m.session_step(0, tu);
+      cc = m.session_step(1, tc);
+      hh = m.session_step(2, th);
+      tu = greedy(u);
+      tc = greedy(cc);
+      th = greedy(hh);
+    }
+    m.session_close(0);
+    m.session_close(1);
+    m.session_close(2);
+    m.session_release_snapshot(sm);
+    DGPP_CUDA_OK(cudaFree(sb));
+  }
+  require(m.dsa_blocks_in_use() == blocks0, "short-chunk cases: all blocks returned");
+  const GlmDiagnosticModel::Outputs flat = m.session_prefill(0, prompt);
+  const GlmDiagnosticModel::Outputs cold = m.session_prefill(1, prompt, {B});
+  {
+    const double rel = dgpp::glm_route::l2_rel(cold.logits, flat.logits);
+    const Top1AuditSummary t1 =
+        audit_top1_near_ties(cold.logits.data(), flat.logits.data(), V, 1);
+    certify_top1_near_ties(t1, 1, "cut prefill vs unchunked");
+    const GlmDiagnosticModel::Outputs c196 = m.session_prefill(2, prompt, {197});
+    const double rel2 = dgpp::glm_route::l2_rel(c196.logits, cold.logits);
+    m.session_close(2);
+    std::printf("[ .. ] sparse-regime prefill cut at %lld vs unchunked: rel_l2 %.3g, top1 "
+                "misses %ld; cut at 196 vs cut at 200: rel_l2 %.3g\n",
+                static_cast<long long>(A), rel, static_cast<long>(t1.misses), rel2);
+  }
+  m.session_close(0);
+
+  // The snapshot, taken mid-prefill at the cut (slot 2), must not perturb
+  // the run that takes it: bitwise the cut run without a snapshot.
+  void* snap_buf = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&snap_buf, m.session_snapshot_bytes()));
+  GlmDiagnosticModel::SessionSnapshotMeta meta;
+  GlmDiagnosticModel::SnapshotRequest snap;
+  snap.position = A;
+  snap.dst = snap_buf;
+  snap.meta = &meta;
+  const GlmDiagnosticModel::Outputs snapped = m.session_prefill(2, prompt, {B}, &snap);
+  require(snap.taken, "the snapshot was taken at the cut");
+  require(meta.position == A, "snapshot position");
+  require(static_cast<int64_t>(meta.full_blocks.size()) == A / 128, "one full block shared");
+  require(meta.partial_block >= 0, "the partial block was copied");
+  require(same(snapped.logits, cold.logits), "snapshotting is invisible to the run");
+  require(m.dsa_blocks_in_use() == blocks0 + 3 + 3 + 1,
+          "meters: two open 300-token slots (the snapshot's full block is slot 2's own, "
+          "shared) and the snapshot's private partial block");
+  m.session_close(2);
+
+  // Attach slot 3 and resume the suffix: BITWISE the cold slot.
+  m.session_attach(3, snap_buf, meta);
+  require(m.session_position(3) == A, "attached position");
+  const std::vector<int64_t> suffix(prompt.begin() + A, prompt.end());
+  const GlmDiagnosticModel::Outputs hot = m.session_prefill_resume(3, suffix, {B});
+  require(same(hot.logits, cold.logits), "hot resume logits BITWISE the cold prefill");
+  int64_t tok_cold = greedy(cold), tok_hot = greedy(hot);
+  require(tok_cold == tok_hot, "first token identical");
+  {
+    const GlmDiagnosticModel::Outputs dc = m.session_draft(1, std::vector<int64_t>{tok_cold});
+    const GlmDiagnosticModel::Outputs dh = m.session_draft(3, std::vector<int64_t>{tok_hot});
+    require(same(dc.logits, dh.logits), "draft block logits BITWISE after attach");
+  }
+  for (int st = 0; st < 4; ++st) {
+    const GlmDiagnosticModel::Outputs oc = m.session_step(1, tok_cold);
+    const GlmDiagnosticModel::Outputs oh = m.session_step(3, tok_hot);
+    require(same(oc.logits, oh.logits),
+            ("step " + std::to_string(st) + " logits BITWISE hot vs cold").c_str());
+    tok_cold = greedy(oc);
+    tok_hot = greedy(oh);
+    // The draft block follows the accepted row on both slots.
+    const GlmDiagnosticModel::Outputs dc = m.session_draft(1, std::vector<int64_t>{tok_cold});
+    const GlmDiagnosticModel::Outputs dh = m.session_draft(3, std::vector<int64_t>{tok_hot});
+    require(same(dc.logits, dh.logits), "draft logits BITWISE per step");
+  }
+
+  // A second slot on the same snapshot with a different suffix, against a
+  // cold cut run of that prompt: bitwise too, and slot 3 keeps working.
+  m.session_attach(2, snap_buf, meta);
+  const std::vector<int64_t> suffix2(prompt2.begin() + A, prompt2.end());
+  const GlmDiagnosticModel::Outputs hot2 = m.session_prefill_resume(2, suffix2, {B});
+  const GlmDiagnosticModel::Outputs cold2 = m.session_prefill(0, prompt2, {B});
+  require(same(hot2.logits, cold2.logits), "second attach BITWISE its cold run");
+  {
+    const GlmDiagnosticModel::Outputs oc = m.session_step(1, tok_cold);
+    const GlmDiagnosticModel::Outputs oh = m.session_step(3, tok_hot);
+    require(same(oc.logits, oh.logits), "slot 3 unaffected by the second attach");
+  }
+  std::printf("[ OK ] prefix snapshot at %lld: hot == cold bitwise over 5 steps, "
+              "two attaches, %zu full block(s) shared\n",
+              static_cast<long long>(A), meta.full_blocks.size());
+
+  // Accounting: every reference returns.
+  m.session_close(0);
+  m.session_close(1);
+  m.session_close(2);
+  m.session_close(3);
+  require(m.dsa_blocks_in_use() == blocks0 + 1 + static_cast<int64_t>(meta.full_blocks.size()),
+          "the snapshot still pins its blocks after every slot closed");
+  m.session_release_snapshot(meta);
+  require(m.dsa_blocks_in_use() == blocks0, "all blocks returned");
+  DGPP_CUDA_OK(cudaFree(snap_buf));
 }
 
 DGPP_TEST(glm_tp_decode_session_hazard) {

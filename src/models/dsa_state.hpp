@@ -91,6 +91,35 @@ class DsaStatePool {
   // block_count_for_tokens(prompt + max_steps) per request (M6 Stage 2b).
   int64_t block_count_for_tokens(int64_t tokens) const;
 
+  // ---- sharing (M7, DESIGN §8; 2026-09-05) ---------------------------------
+  // Blocks are REFCOUNTED: a request's table row holds one reference per
+  // block, a prefix-cache entry pins its blocks with one more, and a block
+  // returns to the free list when its count reaches zero. release_request_
+  // blocks() only drops the request's references.
+  //
+  // share_blocks_into: a FRESH request row (no blocks held) takes `n`
+  // physical blocks by reference as its logical blocks [0, n) — the shared
+  // immutable prefix — and uploads the slice. Returns false (no side
+  // effects) when n exceeds the pool. The blocks must be live (pinned or
+  // held by another row): the caller's cache entry guarantees it.
+  bool share_blocks_into(int req, const int32_t* blocks, int64_t n,
+                         cudaStream_t stream);
+  // Entry-side references without a request row.
+  void pin_blocks(const int32_t* blocks, int64_t n);
+  void unpin_blocks(const int32_t* blocks, int64_t n);
+  // A fresh block owned by the caller (refcount 1, no row) — the copy-on-
+  // attach home of a prefix's partial last block; -1 when the pool is
+  // empty. Release it with unpin_blocks(&b, 1).
+  int32_t acquire_pinned_block();
+  // Copies every layer's cache rows of physical block `src` into `dst`
+  // (latent rows, index pools and their scales), stream-ordered.
+  void copy_block_contents(int32_t src, int32_t dst, cudaStream_t stream);
+  // The request's logical->physical row (host mirror; request_blocks()
+  // entries are meaningful).
+  const int32_t* request_table_row(int req) const;
+  int64_t free_blocks() const { return int64_t(free_.size()); }
+  int32_t block_refcount(int32_t block) const { return refcount_[size_t(block)]; }
+
   // Cold start: zero every cache, tail ring, and table row, and return all
   // blocks to the free list. One call at init or between test cases.
   void reset_all(cudaStream_t stream);
@@ -133,6 +162,7 @@ class DsaStatePool {
   std::vector<int32_t> tables_host_;  // mirror of block_tables_
   std::vector<int32_t> held_;         // blocks per request
   std::vector<int32_t> free_;         // LIFO free list
+  std::vector<int32_t> refcount_;     // per physical block (M7 sharing)
 };
 
 }  // namespace dgpp

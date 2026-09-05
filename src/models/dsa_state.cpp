@@ -68,6 +68,7 @@ void DsaStatePool::init(Arena& arena, const DsaConfig& cfg, int max_requests,
 
   tables_host_.assign(size_t(max_requests_) * size_t(total_blocks_), 0);
   held_.assign(size_t(max_requests_), 0);
+  refcount_.assign(size_t(total_blocks_), 0);
   free_.reserve(size_t(total_blocks_));
   for (int64_t b = int64_t(total_blocks_) - 1; b >= 0; --b)
     free_.push_back(int32_t(b));  // LIFO: low ids come out first
@@ -147,6 +148,7 @@ bool DsaStatePool::ensure_request_blocks(int req, int64_t tokens,
   for (int64_t i = 0; i < extra; ++i) {
     row[have + i] = free_.back();
     free_.pop_back();
+    refcount_[size_t(row[have + i])] = 1;
   }
   held_[size_t(req)] = int32_t(needed);
   DGPP_CUDA_OK(cudaMemcpyAsync(block_tables_ + size_t(req) * size_t(total_blocks_) +
@@ -162,12 +164,95 @@ void DsaStatePool::release_request_blocks(int req, cudaStream_t stream) {
   const int64_t held = held_[size_t(req)];
   if (held == 0) return;
   int32_t* row = tables_host_.data() + size_t(req) * size_t(total_blocks_);
-  for (int64_t i = held - 1; i >= 0; --i) free_.push_back(row[i]);  // LIFO
+  for (int64_t i = held - 1; i >= 0; --i) {  // LIFO for the freed ones
+    const int32_t b = row[i];
+    if (--refcount_[size_t(b)] == 0) free_.push_back(b);
+  }
   std::fill(row, row + held, 0);
   held_[size_t(req)] = 0;
   DGPP_CUDA_OK(cudaMemcpyAsync(
       block_tables_ + size_t(req) * size_t(total_blocks_), row,
       size_t(held) * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
+}
+
+bool DsaStatePool::share_blocks_into(int req, const int32_t* blocks, int64_t n,
+                                     cudaStream_t stream) {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("dsa state pool: request " + std::to_string(req));
+  if (held_[size_t(req)] != 0)
+    throw std::logic_error("dsa state pool: share_blocks_into needs a fresh row");
+  if (n < 0 || n > total_blocks_) return false;
+  if (n == 0) return true;
+  int32_t* row = tables_host_.data() + size_t(req) * size_t(total_blocks_);
+  for (int64_t i = 0; i < n; ++i) {
+    const int32_t b = blocks[i];
+    if (b < 0 || b >= total_blocks_ || refcount_[size_t(b)] <= 0)
+      throw std::logic_error("dsa state pool: sharing a block that is not live");
+    row[i] = b;
+    ++refcount_[size_t(b)];
+  }
+  held_[size_t(req)] = int32_t(n);
+  DGPP_CUDA_OK(cudaMemcpyAsync(block_tables_ + size_t(req) * size_t(total_blocks_),
+                               row, size_t(n) * sizeof(int32_t),
+                               cudaMemcpyHostToDevice, stream));
+  return true;
+}
+
+void DsaStatePool::pin_blocks(const int32_t* blocks, int64_t n) {
+  for (int64_t i = 0; i < n; ++i) {
+    const int32_t b = blocks[i];
+    if (b < 0 || b >= total_blocks_ || refcount_[size_t(b)] <= 0)
+      throw std::logic_error("dsa state pool: pinning a block that is not live");
+    ++refcount_[size_t(b)];
+  }
+}
+
+void DsaStatePool::unpin_blocks(const int32_t* blocks, int64_t n) {
+  for (int64_t i = 0; i < n; ++i) {
+    const int32_t b = blocks[i];
+    if (b < 0 || b >= total_blocks_ || refcount_[size_t(b)] <= 0)
+      throw std::logic_error("dsa state pool: unpinning a block that is not live");
+    if (--refcount_[size_t(b)] == 0) free_.push_back(b);
+  }
+}
+
+int32_t DsaStatePool::acquire_pinned_block() {
+  if (free_.empty()) return -1;
+  const int32_t b = free_.back();
+  free_.pop_back();
+  refcount_[size_t(b)] = 1;
+  return b;
+}
+
+void DsaStatePool::copy_block_contents(int32_t src, int32_t dst,
+                                       cudaStream_t stream) {
+  if (src < 0 || src >= total_blocks_ || dst < 0 || dst >= total_blocks_)
+    throw std::out_of_range("dsa state pool: block index out of range");
+  if (src == dst) return;
+  const size_t latent_blk = size_t(cfg_.block_tokens) * geo_.latent_bytes_per_token;
+  const size_t pools = size_t(geo_.pools_per_block);
+  const size_t k_blk = pools * geo_.index_k_bytes_per_pool;
+  for (int layer = 0; layer < cfg_.num_dsa_layers; ++layer) {
+    uint8_t* lat = latent_base_ + size_t(layer) * size_t(max_token_slots_) *
+                                      geo_.latent_bytes_per_token;
+    DGPP_CUDA_OK(cudaMemcpyAsync(lat + size_t(dst) * latent_blk,
+                                 lat + size_t(src) * latent_blk, latent_blk,
+                                 cudaMemcpyDeviceToDevice, stream));
+    uint8_t* k = index_k_base_ + size_t(layer) * size_t(max_pool_slots_) *
+                                     geo_.index_k_bytes_per_pool;
+    DGPP_CUDA_OK(cudaMemcpyAsync(k + size_t(dst) * k_blk, k + size_t(src) * k_blk,
+                                 k_blk, cudaMemcpyDeviceToDevice, stream));
+    float* sc = index_scale_base_ + size_t(layer) * size_t(max_pool_slots_);
+    DGPP_CUDA_OK(cudaMemcpyAsync(sc + size_t(dst) * pools, sc + size_t(src) * pools,
+                                 pools * sizeof(float), cudaMemcpyDeviceToDevice,
+                                 stream));
+  }
+}
+
+const int32_t* DsaStatePool::request_table_row(int req) const {
+  if (req < 0 || req >= max_requests_)
+    throw std::out_of_range("dsa state pool: request " + std::to_string(req));
+  return tables_host_.data() + size_t(req) * size_t(total_blocks_);
 }
 
 int64_t DsaStatePool::request_blocks(int req) const {
@@ -199,6 +284,7 @@ void DsaStatePool::reset_all(cudaStream_t stream) {
   std::fill(tables_host_.begin(), tables_host_.end(), 0);
   std::fill(held_.begin(), held_.end(), 0);
   free_.clear();
+  std::fill(refcount_.begin(), refcount_.end(), 0);
   free_.reserve(size_t(total_blocks_));
   for (int64_t b = int64_t(total_blocks_) - 1; b >= 0; --b)
     free_.push_back(int32_t(b));
