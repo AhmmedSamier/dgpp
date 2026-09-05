@@ -4100,6 +4100,61 @@ DGPP_TEST(glm_tp_serving_plain_batched_graph_matches_independent_sessions) {
           "T=1 row-batched graph transcripts differ across ranks");
 }
 
+// The MoE layer's expert-view upload ring (2026-09-05): a session prefill
+// enqueues every layer without a host sync, and ONE MoE layer object is
+// rebound per layer, so its pinned view table was refilled with the next
+// layer's pointers while the previous layer's async upload could still be
+// pending — that layer's expert chain then ran on the wrong experts, and a
+// fresh model's first prefill disagreed with its second by 0.19 rel_l2
+// whenever the host got a layer ahead (the ring of guarded pinned tables
+// fixed it). The gate: on a fresh instance, three prefills must be bitwise
+// one another and bitwise a separate instance's forward (the parity
+// gate's single-chunk rule — it holds in the sparse attention regime too:
+// the 40-token prompt reaches it, the 30-token one does not). Before the
+// fix the racing runs sat 0.38–0.41 from forward.
+DGPP_TEST(glm_tp_first_run_is_bitwise_the_second_run) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const int V = cfg.vocab_size;
+  const auto same = [](const std::vector<float>& a, const std::vector<float>& b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+  };
+  for (const int T : {30, 40}) {
+    const std::vector<int64_t> small = make_tokens(T, V);
+    // The reference: a SEPARATE instance's forward (a forward on the
+    // session instance clobbers its pools — the parity gate's rule).
+    std::vector<float> ref;
+    {
+      GlmDiagnosticModel r(cfg, dir, 64, 256, nullptr, 0, 1, GlmResidency::Resident,
+                           GlmHeadSharding::Full, 2, /*mtp=*/true);
+      const GlmDiagnosticModel::Outputs f = r.forward(small);
+      ref.assign(f.logits.begin() + static_cast<size_t>(T - 1) * V,
+                 f.logits.begin() + static_cast<size_t>(T) * V);
+    }
+    GlmDiagnosticModel m(cfg, dir, 64, 256, nullptr, 0, 1, GlmResidency::Resident,
+                         GlmHeadSharding::Full, 2, /*mtp=*/true);
+    std::vector<float> first;
+    for (int run = 0; run < 3; ++run) {
+      const std::vector<float> got = m.session_prefill(0, small).logits;
+      m.session_close(0);
+      if (run == 0) {
+        first = got;
+        continue;
+      }
+      require(same(first, got),
+              std::string("fresh model, T=") + std::to_string(T) + ": prefill run " +
+                  std::to_string(run + 1) + " must be BITWISE run 1 (rel_l2 " +
+                  std::to_string(dgpp::glm_route::l2_rel(first, got)) + ")");
+    }
+    std::printf("[ .. ] fresh model, T=%d (%s regime): three prefills bitwise; vs forward "
+                "rel_l2 %.3g\n", T, T <= 34 ? "dense" : "sparse",
+                dgpp::glm_route::l2_rel(first, ref));
+    require(same(first, ref),
+            "the session prefill must be BITWISE a separate instance's forward's last row");
+  }
+}
+
 DGPP_TEST(glm_tp_decode_session_hazard) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";

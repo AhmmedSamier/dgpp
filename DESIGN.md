@@ -1233,7 +1233,18 @@ Two execution paths, as built:
   every expert fifteen times per matrix, 3.4 s of the prefill). Before
   either the experts ran per segment through the small-M tile GEMM —
   578 µs a call on an 8-block grid — which was 3.5 of a 256-token
-  prefill's 5.2 s.
+  prefill's 5.2 s. The expert-view table the grouped kernels read is
+  uploaded per layer from a RING of pinned host tables, each guarded by
+  the event its last upload recorded (`upload_expert_views`, 2026-09-05):
+  one MoE layer object is rebound for every layer and the session prefill
+  has no per-layer host sync, so a single pinned table was refilled with
+  the next layer's pointers while the previous layer's asynchronous copy
+  could still be pending — that layer then ran on the wrong experts
+  whenever the host got a layer ahead (a world of one has no collective
+  to wait on; the fabric's per-layer all-reduce had hidden it). The host
+  waits only when it is four uploads ahead, and the copy sits right after
+  the router and segmentation kernels, so the wait never drains the
+  stream.
 - *Decode* (`GlmMoeLayer::enqueue_decode`, M6 Stage 4c and rounds 2/7/8):
   zero host round trips. The router leaves ids ascending per row on the
   device; a slot-ranking kernel orders the (row, slot) work by expert id
@@ -1241,7 +1252,9 @@ Two execution paths, as built:
   the down kernel are fp8 GEMV cores (warp per weight row, 16-byte fp8
   loads, the scale grid applied in the epilogue — `fp8_gemv.cuh`; every
   row a slot, `top_k+1` slots per row, the +1 the shared expert) reading
-  the route and the expert-view table from device memory; the down dots
+  the route and the expert-view table from device memory (the eager path
+  uploads that table from the same guarded ring as the prefill; capture
+  reads its per-slot graph tables); the down dots
   stay fp32 (unrounded) and one ordered accumulation kernel runs the
   chain — one fma per expert ascending, shared last — rounding to bf16
   exactly once as the sum leaves for the all-reduce. Since the sliced

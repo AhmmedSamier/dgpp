@@ -71,9 +71,15 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
                              cudaHostAllocDefault));
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_segs_),
                              segs_max * sizeof(MoeSegment), cudaHostAllocDefault));
-  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_views_prefill_),
-                             segs_max * 3 * sizeof(MoeExpertView),
+  // The expert-view upload ring (see the member's comment).
+  view_table_entries_ = segs_max * 3;
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_view_ring_),
+                             static_cast<size_t>(kViewRing) * view_table_entries_ *
+                                 sizeof(MoeExpertView),
                              cudaHostAllocDefault));
+  for (int i = 0; i < kViewRing; ++i)
+    DGPP_CUDA_OK(cudaEventCreateWithFlags(&view_ring_event_[i],
+                                          cudaEventDisableTiming));
   DGPP_CUDA_OK(cudaMalloc(&d_gather_, rows_total * H * 2));
   DGPP_CUDA_OK(cudaMalloc(&d_gate_, rows_total * I * 2));
   DGPP_CUDA_OK(cudaMalloc(&d_up_, rows_total * I * 2));
@@ -97,17 +103,11 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
                             static_cast<size_t>(decode_slots_) * sizeof(int)));
     DGPP_CUDA_OK(cudaMemset(d_router_counters_, 0,
                             static_cast<size_t>(decode_slots_) * sizeof(int)));
-    // One table of every expert's three views, re-uploaded per
-    // enqueue_decode. The source is PINNED (see the member's comment):
-    // pageable async H2D syncs the stream before initiating, which would
-    // drain the pipeline once per MoE layer per step.
+    // One table of every expert's three views, re-uploaded per eager
+    // enqueue_decode from the upload ring (see h_view_ring_'s comment).
     DGPP_CUDA_OK(cudaMalloc(
         &d_expert_views_,
         sizeof(MoeExpertView) * static_cast<size_t>(cfg_.n_experts) * 3));
-    DGPP_CUDA_OK(cudaHostAlloc(
-        reinterpret_cast<void**>(&h_expert_views_pinned_),
-        sizeof(MoeExpertView) * static_cast<size_t>(cfg_.n_experts) * 3,
-        cudaHostAllocDefault));
     // Per-slot capture sources: each recorded upload node bakes its
     // slot's address, whose contents freeze at capture time (resident
     // bindings). The eager path never touches these.
@@ -136,7 +136,9 @@ GlmMoeLayer::~GlmMoeLayer() {
   if (h_seg_rows_) cudaFreeHost(h_seg_rows_);
   if (h_slot_row_) cudaFreeHost(h_slot_row_);
   if (h_segs_) cudaFreeHost(h_segs_);
-  if (h_views_prefill_) cudaFreeHost(h_views_prefill_);
+  if (h_view_ring_) cudaFreeHost(h_view_ring_);
+  for (int i = 0; i < kViewRing; ++i)
+    if (view_ring_event_[i]) cudaEventDestroy(view_ring_event_[i]);
   cudaFree(d_weights_);
   cudaFree(d_biased_);
   cudaFree(d_scores_);
@@ -154,7 +156,6 @@ GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_router_counters_);
   cudaFree(d_expert_views_);
   cudaFree(d_expert_views_graph_);
-  cudaFreeHost(h_expert_views_pinned_);
   cudaFreeHost(h_expert_views_graph_);
 }
 
@@ -254,14 +255,6 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
     max_rows = std::max(max_rows, h_counts_[e]);
   }
   h_segs_[n_segs] = MoeSegment{shared_row0, tokens, E};  // the shared segment
-  for (int e = 0; e < E; ++e)
-    for (int w = 0; w < 3; ++w) {
-      const GlmQuantMatrix& m = w_.experts[static_cast<size_t>(e) * 3 + w];
-      h_views_prefill_[static_cast<size_t>(e) * 3 + w] = MoeExpertView{m.payload, m.scales};
-    }
-  for (int w = 0; w < 3; ++w)
-    h_views_prefill_[static_cast<size_t>(E) * 3 + w] =
-        MoeExpertView{w_.shared[w].payload, w_.shared[w].scales};
   const size_t rows_total = tk + static_cast<size_t>(tokens);
   DGPP_CUDA_OK(cudaMemcpyAsync(d_rows_, h_seg_rows_, rows_total * 4,
                                cudaMemcpyHostToDevice, stream));
@@ -270,9 +263,7 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
   DGPP_CUDA_OK(cudaMemcpyAsync(d_segs_, h_segs_,
                                static_cast<size_t>(n_segs + 1) * sizeof(MoeSegment),
                                cudaMemcpyHostToDevice, stream));
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_views_prefill_, h_views_prefill_,
-                               static_cast<size_t>(E + 1) * 3 * sizeof(MoeExpertView),
-                               cudaMemcpyHostToDevice, stream));
+  upload_expert_views(d_views_prefill_, /*with_shared=*/true, stream);
 
   // 3. The grouped chain: gather every row once; gate and up over the
   //    routed segments in one launch each and the shared segment in one
@@ -287,6 +278,32 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
   //    rounding onto the wire buffer.
   launch_moe_accum_ordered(out, d_down_, H, d_slot_row_, d_ids_, d_weights_,
                            shared_row0, tokens, K, static_cast<int>(H), stream);
+}
+
+void GlmMoeLayer::upload_expert_views(MoeExpertView* d_dst, bool with_shared,
+                                      cudaStream_t stream) {
+  const int E = cfg_.n_experts;
+  const int slot = view_ring_next_;
+  view_ring_next_ = (view_ring_next_ + 1) % kViewRing;
+  // The entry's previous upload must have executed before the fill
+  // overwrites its source; the host is only ever made to wait here when
+  // it is kViewRing uploads ahead of the stream.
+  if (view_ring_armed_[slot])
+    DGPP_CUDA_OK(cudaEventSynchronize(view_ring_event_[slot]));
+  MoeExpertView* h = h_view_ring_ + static_cast<size_t>(slot) * view_table_entries_;
+  for (size_t i = 0; i < static_cast<size_t>(E) * 3; ++i)
+    h[i] = MoeExpertView{w_.experts[i].payload, w_.experts[i].scales};
+  size_t n = static_cast<size_t>(E) * 3;
+  if (with_shared) {
+    for (int w = 0; w < 3; ++w)
+      h[n + static_cast<size_t>(w)] =
+          MoeExpertView{w_.shared[w].payload, w_.shared[w].scales};
+    n += 3;
+  }
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_dst, h, n * sizeof(MoeExpertView),
+                               cudaMemcpyHostToDevice, stream));
+  DGPP_CUDA_OK(cudaEventRecord(view_ring_event_[slot], stream));
+  view_ring_armed_[slot] = true;
 }
 
 void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
@@ -322,18 +339,10 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
   //    expert, empty ones included; the shared segment last).
   launch_moe_segment(d_ids_, tokens, K, E, d_rows_, d_slot_row_, d_segs_,
                      stream);
-  // The expert views: the same table the host path uploads.
-  for (int e = 0; e < E; ++e)
-    for (int w = 0; w < 3; ++w) {
-      const GlmQuantMatrix& m = w_.experts[static_cast<size_t>(e) * 3 + w];
-      h_views_prefill_[static_cast<size_t>(e) * 3 + w] = MoeExpertView{m.payload, m.scales};
-    }
-  for (int w = 0; w < 3; ++w)
-    h_views_prefill_[static_cast<size_t>(E) * 3 + w] =
-        MoeExpertView{w_.shared[w].payload, w_.shared[w].scales};
-  DGPP_CUDA_OK(cudaMemcpyAsync(d_views_prefill_, h_views_prefill_,
-                               static_cast<size_t>(E + 1) * 3 * sizeof(MoeExpertView),
-                               cudaMemcpyHostToDevice, stream));
+  // The expert views: the same table the host path uploads, from the
+  // upload ring (the host runs ahead of the stream here — no per-layer
+  // sync — so the source must not be a single table; see h_view_ring_).
+  upload_expert_views(d_views_prefill_, /*with_shared=*/true, stream);
 
   // 3. The grouped chain over every expert's segment (an empty one's
   //    blocks exit at once) and the shared segment.
@@ -492,13 +501,7 @@ void GlmMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out,
     table = d_expert_views_graph_ +
             static_cast<size_t>(table_slot) * static_cast<size_t>(E) * 3;
   } else {
-    for (size_t i = 0; i < static_cast<size_t>(E) * 3; ++i)
-      h_expert_views_pinned_[i] =
-          MoeExpertView{w_.experts[i].payload, w_.experts[i].scales};
-    DGPP_CUDA_OK(cudaMemcpyAsync(
-        d_expert_views_, h_expert_views_pinned_,
-        sizeof(MoeExpertView) * static_cast<size_t>(E) * 3,
-        cudaMemcpyHostToDevice, stream));
+    upload_expert_views(d_expert_views_, /*with_shared=*/false, stream);
   }
 
   const int slots = tokens * (K + 1);

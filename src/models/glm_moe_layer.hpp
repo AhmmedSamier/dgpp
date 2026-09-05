@@ -144,6 +144,13 @@ class GlmMoeLayer {
 
  private:
   void check_expert_geometry() const;
+  // The eager paths' expert-table upload: fills the ring's next pinned
+  // entry with every routed expert's three views (and the shared expert's
+  // three after them when with_shared) and copies it to d_dst on stream —
+  // waiting first, only if the host is kViewRing uploads ahead of the
+  // stream, for that entry's previous upload to have executed.
+  void upload_expert_views(MoeExpertView* d_dst, bool with_shared,
+                           cudaStream_t stream);
   // The grouped chain shared by enqueue() and enqueue_prefill(): gather,
   // gate/up over the routed segments and the shared segment, swiglu, the
   // fp32 down projection — on the chosen kernel.
@@ -214,17 +221,36 @@ class GlmMoeLayer {
   int32_t* h_seg_rows_ = nullptr;        // [rows_total], pinned
   int32_t* h_slot_row_ = nullptr;        // [max_tokens * top_k], pinned
   MoeSegment* h_segs_ = nullptr;         // [n_experts + 1], pinned
-  MoeExpertView* h_views_prefill_ = nullptr;  // [(n_experts + 1) * 3], pinned
   int32_t* d_slot_row_ = nullptr;        // [max_tokens * top_k]
   MoeSegment* d_segs_ = nullptr;         // [n_experts + 1]
   MoeExpertView* d_views_prefill_ = nullptr;  // [(n_experts + 1) * 3]
-  // The expert-view upload source. PINNED, not a plain vector: a
-  // pageable-source cudaMemcpyAsync performs a stream sync before the
-  // copy initiates (driver contract), which drains the whole step's
-  // pipeline once per MoE layer — the first fabric run of the fused
-  // path paid 49ms/token for exactly that. Pinned sources are true
-  // async DMA.
-  MoeExpertView* h_expert_views_pinned_ = nullptr;  // [n_experts * 3]
+  // The eager paths' expert-view upload source (the prefill paths' table
+  // of n_experts + 1 rows and eager decode's of n_experts): a RING of
+  // pinned tables, each guarded by the event its last upload recorded.
+  // PINNED, not a plain vector: a pageable-source cudaMemcpyAsync performs
+  // a stream sync before the copy initiates (driver contract), which
+  // drains the whole step's pipeline once per MoE layer — the first fabric
+  // run of the fused path paid 49ms/token for exactly that. Pinned sources
+  // are true async DMA — and so a write-after-read hazard (found
+  // 2026-09-05): ONE layer object is rebound for every MoE layer, and a
+  // host that has run ahead of the stream (the session prefill has no
+  // per-layer sync, and a world of one has no collective to wait on)
+  // refilled the single table with the NEXT layer's pointers before the
+  // previous layer's copy had executed, so that layer's expert chain ran
+  // on the wrong experts' weights — a fresh model's first prefill and its
+  // second disagreed by 0.19 rel_l2 (glm_tp_first_run_is_bitwise_the_
+  // second_run pins it). Each fill takes the ring's next entry and waits
+  // — only when the host is kViewRing uploads ahead — for that entry's
+  // previous upload to have executed; the copy is enqueued right after a
+  // layer's router and segmentation kernels, so the wait admits a host
+  // several layers ahead and never drains the stream. Capture-mode decode
+  // reads its per-slot graph tables instead and never touches the ring.
+  static constexpr int kViewRing = 4;
+  size_t view_table_entries_ = 0;         // (n_experts + 1) * 3
+  MoeExpertView* h_view_ring_ = nullptr;  // [kViewRing][view_table_entries_]
+  cudaEvent_t view_ring_event_[kViewRing] = {};
+  bool view_ring_armed_[kViewRing] = {};
+  int view_ring_next_ = 0;
   // Per-graph-slot tables (capture mode): [graph_table_slots_] rows of
   // [n_experts * 3] each. The pinned rows are the upload sources, the
   // device rows are what the recorded kernels read — each slot its own,

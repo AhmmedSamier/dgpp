@@ -261,6 +261,22 @@ Suggested order for what remains, each item's design in its section:
    reverted. The remaining kernels sit at their floors for their access
    patterns; the prefill work is done unless a structural change (fewer
    expert bytes per chunk) is wanted.
+   DEFECT FOUND AND FIXED (2026-09-05, the record's twenty-fifth entry):
+   M7's first gate compared a cut prefill against an unchunked one on the
+   same fresh instance and found 0.19 rel_l2 where the dense regime
+   allows GEMM-shape ulps; bisected to round 3 (the session prefill's
+   device segmentation) and root-caused to the MoE layer's expert-view
+   upload — one pinned table refilled per layer under an asynchronous
+   copy, one layer object rebound per layer, no per-layer host sync — so
+   a host a layer ahead of the stream ran a layer on the next layer's
+   experts (the eager decode path had the same structure since
+   2026-09-01). Fixed with a ring of event-guarded pinned tables
+   (`upload_expert_views`); gated by
+   `glm_tp_first_run_is_bitwise_the_second_run` (three prefills bitwise
+   one another and bitwise a separate instance's forward at 30 and 40
+   tokens). The fabric never saw it — the per-layer all-reduce is a host
+   wait — and every recorded measurement's ids stand; world-1 sessions
+   were exposed when the host got a layer ahead.
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).
