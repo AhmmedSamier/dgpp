@@ -1161,19 +1161,28 @@ Two execution paths, as built:
   the reference the gates pin the device path against, bitwise. Then the
   layer's rows — every routed pair in segment order, the tokens once more
   for the shared expert — are gathered at once and run as ONE launch per
-  matrix over every segment (`moe_grouped_gemv_kernel`: block (x, y) is segment y against
-  eight weight rows of its expert, rows staged four at a time through the
-  same `fp8_gemv::block_rows` the decode GEMV uses, so every output row is
-  bitwise the chunked GEMV's; the shared segment alone splits across
-  blocks), swiglu over every row, the fp32 down the same way, and the
-  per-token ordered accumulation in one pass (`moe_accum_ordered_kernel`:
-  the K slots sorted by expert id, `__fmaf_rn` from zero, the shared row
-  at weight 1, one bf16 rounding — the same chain). The gate/up launches
-  run at the DRAM floor of reading every touched expert once per chunk;
-  on long segments (a 2048-token chunk's ~57 rows) the scalar core is
-  compute-bound and a tensor-core grouped GEMM is the next step. Before
-  this the experts ran per segment through the small-M tile GEMM — 578 µs
-  a call on an 8-block grid — which was 3.5 of a 256-token prefill's 5.2 s.
+  matrix over every segment (`moe_grouped_mma_kernel`, 2026-09-05: one
+  block per 64-column n-tile and segment walks the segment in 128-row
+  m-tiles, stages the bf16 activations and the fp8 weights — decoded,
+  scaled and rounded to bf16 exactly as the dequant bridge does — in
+  shared memory and runs bf16 `mma.sync` with fp32 accumulation in
+  ascending k16 order, so every output element is bitwise the scale GEMM's
+  tile kernel and a segment up to 128 rows reads its expert's weights
+  once; the shared segment alone splits across blocks in whole m-tiles),
+  swiglu over every row, the fp32 down the same way, and the per-token
+  ordered accumulation in one pass (`moe_accum_ordered_kernel`: the K
+  slots sorted by expert id, `__fmaf_rn` from zero, the shared row at
+  weight 1, one bf16 rounding — the same chain). `MoeExpertKernel` picks
+  the grouped kernel: the prefill and the forward run the tensor-core one;
+  `enqueue()` (the reference) takes it as an argument, GEMV by default,
+  because the decode slot path and the MTP module's multi-row eager rows
+  are pinned bitwise against the GEMV core (`moe_grouped_gemv_kernel`:
+  rows staged four at a time through the same `fp8_gemv::block_rows` the
+  decode GEMV uses — which on a 2048-token chunk's ~57-row segments read
+  every expert fifteen times per matrix, 3.4 s of the prefill). Before
+  either the experts ran per segment through the small-M tile GEMM —
+  578 µs a call on an 8-block grid — which was 3.5 of a 256-token
+  prefill's 5.2 s.
 - *Decode* (`GlmMoeLayer::enqueue_decode`, M6 Stage 4c and rounds 2/7/8):
   zero host round trips. The router leaves ids ascending per row on the
   device; a slot-ranking kernel orders the (row, slot) work by expert id
@@ -2451,9 +2460,12 @@ user's latency is the live count times the scalar replay; at it the batch is
 also the faster choice per user (four scalar replays would be ~129 and ~104
 ms per token). The m ≤ 8 GEMV lowering also changed the path of 5–8-row
 prefill chunks and per-expert prefill GEMMs with 5–8 routed tokens; the
-prefill was then re-measured and taken down through four rounds
-(2026-09-04/05, the record: 256 tokens 5 s → 0.80 s, 2048 tokens 19.8 →
-5.7 s in steady state; the long-segment expert GEMM is what remains).
+prefill was then re-measured and taken down through five rounds
+(2026-09-04/05, the record: 256 tokens 5 s → 0.65 s, 2048 tokens 19.8 →
+3.1 s in steady state; the expert GEMMs run on a grouped tensor-core
+kernel since round 5 — `MoeExpertKernel::kMma`, bitwise the scale GEMM's
+tile kernel per segment, while the decode-class paths keep the GEMV core
+and their bitwise pins; the attention prefill tiles are what remains).
 
 The original always-eight-row four-node gate measured
 12.55/23.78/43.59/78.94 tok/s at 1/2/4/8 live T=1 requests and

@@ -72,6 +72,24 @@ void launch_moe_grouped_gemv_f32(const uint16_t* act, size_t act_stride,
                                  int rows_per_block, const MoeExpertView* views,
                                  int which, float* out, size_t out_stride, int n,
                                  int k, cudaStream_t stream);
+// The grouped tensor-core GEMM (2026-09-05): the same contract and
+// arguments, computed by bf16 mma.sync in 128-row m-tiles per block — every
+// output element bitwise the tile kernel's (scale_gemm_kernel: the same
+// dequantized weights and the same ascending-k16 accumulation), NOT the
+// GEMV core's. The prefill path uses it (a segment up to 128 rows reads
+// its expert's weights once instead of once per four rows); the decode
+// path keeps the GEMV core. rows_per_block, when set, must be a multiple
+// of 128 (the shared expert's z split); k a multiple of 16.
+void launch_moe_grouped_mma_bf16(const uint16_t* act, size_t act_stride,
+                                 const MoeSegment* segs, int n_segs, int max_rows,
+                                 int rows_per_block, const MoeExpertView* views,
+                                 int which, uint16_t* out, size_t out_stride, int n,
+                                 int k, cudaStream_t stream);
+void launch_moe_grouped_mma_f32(const uint16_t* act, size_t act_stride,
+                                const MoeSegment* segs, int n_segs, int max_rows,
+                                int rows_per_block, const MoeExpertView* views,
+                                int which, float* out, size_t out_stride, int n,
+                                int k, cudaStream_t stream);
 // Device-side segmentation (2026-09-04, the prefill's last host sync): from
 // the router's ids [tokens * top_k] — the same segmentation the host path
 // computes, on the device: rows[] = every routed (token, slot) in

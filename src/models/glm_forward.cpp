@@ -754,7 +754,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
       } else {
         moe_->rebind(*b.moe);
       }
-      moe_->enqueue(normed_, ffn_out, T, stream_);
+      // The forward is prefill-class: the tensor-core expert kernel, the
+      // same the session prefill runs (glm_tp_test pins the two bitwise);
+      // only the decode-class paths keep the GEMV core.
+      moe_->enqueue(normed_, ffn_out, T, stream_, MoeExpertKernel::kMma);
       GlmRouteTraceLayer route;
       route.layer_idx = static_cast<uint32_t>(layer);
       route.top_k = static_cast<uint32_t>(moe_cfg_.top_k);

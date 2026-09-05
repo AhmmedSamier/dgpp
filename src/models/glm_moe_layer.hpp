@@ -54,6 +54,14 @@ struct MoeTraceStaging {
   float* biased = nullptr;    // [tokens * n_experts]
 };
 
+// The grouped expert path's kernel (2026-09-05). kGemv: the fp8 GEMV core,
+// four rows per pass — the decode path's kernel, bitwise the decode slot
+// path at the same routing. kMma: the bf16 tensor-core tile path
+// (launch_moe_grouped_mma_*), 128-row m-tiles, bitwise the scale GEMM's
+// tile kernel — the PREFILL's kernel, where segments run to hundreds of
+// rows and the GEMV core re-read every expert once per four of them.
+enum class MoeExpertKernel { kGemv, kMma };
+
 class GlmMoeLayer {
  public:
   // weights: device-visible pointers (e.g. GlmLayerStream's GlmMoeResident
@@ -90,10 +98,15 @@ class GlmMoeLayer {
   // into `trace` (pinned; materialize after the stream's next sync;
   // last_ids()/last_weights()/last_biased() are NOT updated). Bitwise the
   // host path's output (glm_moe_test pins it).
+  // enqueue_prefill runs the grouped chain on the tensor-core kernel
+  // (MoeExpertKernel::kMma); enqueue(), the host-orchestrated reference,
+  // takes the kernel as an argument — kGemv by default (the decode pin),
+  // kMma to serve as the prefill path's bitwise reference.
   void enqueue_prefill(const uint16_t* hidden, uint16_t* out, int tokens,
                        MoeTraceStaging* trace, cudaStream_t stream);
   void enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
-               cudaStream_t stream);
+               cudaStream_t stream,
+               MoeExpertKernel kernel = MoeExpertKernel::kGemv);
 
   // The decode fast path: same contract, no host round-trip. tokens
   // must fit decode_slots. Bitwise-equal to enqueue() at the same
@@ -131,6 +144,13 @@ class GlmMoeLayer {
 
  private:
   void check_expert_geometry() const;
+  // The grouped chain shared by enqueue() and enqueue_prefill(): gather,
+  // gate/up over the routed segments and the shared segment, swiglu, the
+  // fp32 down projection — on the chosen kernel.
+  void grouped_expert_chain(MoeExpertKernel kernel, const uint16_t* hidden,
+                            const MoeSegment* segs, int n_segs, int max_rows,
+                            const MoeSegment* shared_seg, int tokens,
+                            size_t rows_total, cudaStream_t stream);
 
   GlmMoeWeights w_;
   GlmMoeConfig cfg_;

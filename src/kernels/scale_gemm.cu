@@ -235,4 +235,35 @@ void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            out, m, n, k, stream);
 }
 
+namespace {
+template <typename OutT>
+void launch_scale_gemm_tile(const uint16_t* act, size_t act_row_stride_elems,
+                            const uint8_t* w_payload, const float* w_scales,
+                            OutT* out, int m, int n, int k, cudaStream_t stream) {
+  if (m <= 0 || n <= 0) return;
+  if (!act || !w_payload || !w_scales || !out || k <= 0)
+    throw std::invalid_argument("scale_gemm_tile: null pointer or k <= 0");
+  const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
+  scale_gemm_kernel<OutT><<<grid, kBlockThreads, 0, stream>>>(
+      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+}  // namespace
+
+void launch_scale_gemm_tile_bf16(const uint16_t* act, size_t act_row_stride_elems,
+                                 const uint8_t* w_payload, const float* w_scales,
+                                 uint16_t* out, int m, int n, int k,
+                                 cudaStream_t stream) {
+  launch_scale_gemm_tile<uint16_t>(act, act_row_stride_elems, w_payload, w_scales,
+                                   out, m, n, k, stream);
+}
+
+void launch_scale_gemm_tile_f32(const uint16_t* act, size_t act_row_stride_elems,
+                                const uint8_t* w_payload, const float* w_scales,
+                                float* out, int m, int n, int k,
+                                cudaStream_t stream) {
+  launch_scale_gemm_tile<float>(act, act_row_stride_elems, w_payload, w_scales,
+                                out, m, n, k, stream);
+}
+
 }  // namespace dgpp

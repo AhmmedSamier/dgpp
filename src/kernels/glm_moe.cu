@@ -651,6 +651,197 @@ void launch_moe_grouped_gemv(const uint16_t* act, size_t act_stride,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+// ---- the prefill's grouped tensor-core GEMM (2026-09-05) -----------------
+// One block per (64-column n-tile, segment): the block walks its segment in
+// 128-row m-tiles (eight warps, sixteen rows each), and for every 64-deep
+// k-stage stages the activation tile (bf16, 16-byte loads) and the weight
+// tile (fp8 decoded, scaled and rounded to bf16 exactly as the dequant
+// bridge does — the tile kernel's values, bit for bit) in shared memory,
+// then runs mma.sync m16n8k16 bf16 with fp32 accumulation in ascending k16
+// order — the SAME instruction sequence per output element as
+// scale_gemm_kernel, so the outputs are bitwise that kernel's whatever the
+// segment or tile geometry (glm_moe_test pins it). Against the grouped
+// GEMV it replaces on the prefill path: that core re-reads and re-decodes
+// the expert's weights once per four rows, so a 57-row segment paid for
+// the weights fifteen times; here a segment up to 128 rows pays once.
+namespace mma_tile {
+constexpr int BM = 128;              // eight warps x m16
+constexpr int BN = 64;               // eight n8 fragments per warp
+constexpr int BK = 64;               // one scale column per stage (BK | 128)
+constexpr int BK_PAD = BK + 8;       // u16 pad: 144-byte rows, conflict-free
+constexpr int kThreads = 256;
+static_assert(128 % BN == 0 && 128 % BK == 0, "one scale per stage");
+static_assert(BK_PAD * 2 % 16 == 0, "16-byte aligned smem rows");
+}  // namespace mma_tile
+
+template <typename OutT>
+__global__ __launch_bounds__(mma_tile::kThreads) void moe_grouped_mma_kernel(
+    const uint16_t* __restrict__ act, size_t act_stride, int act_vec,
+    const MoeSegment* __restrict__ segs, const MoeExpertView* __restrict__ views,
+    int which, OutT* __restrict__ out, size_t out_stride, int n, int k,
+    int rows_per_block) {
+  using namespace mma_tile;
+  __shared__ __align__(16) uint16_t sA[BM][BK_PAD];
+  __shared__ __align__(16) uint16_t sB[BN][BK_PAD];
+  const MoeSegment seg = segs[blockIdx.y];
+  const int z0 = static_cast<int>(blockIdx.z) * rows_per_block;
+  if (z0 >= seg.rows) return;  // beyond this segment's rows (no barrier yet)
+  const int z1 = min(seg.rows, z0 + rows_per_block);
+  const MoeExpertView v = views[seg.expert * 3 + which];
+  const int n0 = static_cast<int>(blockIdx.x) * BN;
+  const int scale_cols = (k + 127) / 128;
+  const int scale_row = n0 / 128;
+  const int warp = static_cast<int>(threadIdx.x) / 32;
+  const int lane = static_cast<int>(threadIdx.x) % 32;
+  const int r = lane / 4;
+  const int cc = (lane % 4) * 2;
+  // The weight tile's load geometry: thread t decodes 16 consecutive k of
+  // n-row t/4 (64 rows x 4 quads = 256 threads, one 16-byte load each).
+  const int b_row = static_cast<int>(threadIdx.x) / 4;
+  const int b_kq = (static_cast<int>(threadIdx.x) % 4) * 16;
+
+  for (int m0 = z0; m0 < z1; m0 += BM) {
+    const int m_rows = min(BM, z1 - m0);
+    float acc[8][4];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.f;
+
+    for (int k0 = 0; k0 < k; k0 += BK) {
+      const float s = v.scales[static_cast<size_t>(scale_row) * scale_cols + (k0 / 128)];
+      // Weight tile: decode + scale + one BF16 round, zero outside [n, k).
+      {
+        const int gn = n0 + b_row, gk = k0 + b_kq;
+        uint32_t packed[8];
+        if (gn < n && gk + 16 <= k) {
+          const uint4 raw = *reinterpret_cast<const uint4*>(
+              v.payload + static_cast<size_t>(gn) * k + gk);
+          const uint32_t words[4] = {raw.x, raw.y, raw.z, raw.w};
+#pragma unroll
+          for (int i = 0; i < 8; ++i) {
+            const uint32_t w2 = (words[i / 2] >> ((i % 2) * 16)) & 0xffffu;
+            const uint16_t lo = float_to_bf16_bits(
+                fp8_e4m3_bits_to_float(static_cast<uint8_t>(w2 & 0xffu)) * s);
+            const uint16_t hi = float_to_bf16_bits(
+                fp8_e4m3_bits_to_float(static_cast<uint8_t>(w2 >> 8)) * s);
+            packed[i] = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+          }
+        } else {
+#pragma unroll
+          for (int i = 0; i < 8; ++i) {
+            uint16_t e[2];
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+              const int gkk = gk + 2 * i + h;
+              e[h] = (gn < n && gkk < k)
+                         ? float_to_bf16_bits(
+                               fp8_e4m3_bits_to_float(
+                                   v.payload[static_cast<size_t>(gn) * k + gkk]) * s)
+                         : static_cast<uint16_t>(0);
+            }
+            packed[i] = static_cast<uint32_t>(e[0]) | (static_cast<uint32_t>(e[1]) << 16);
+          }
+        }
+        uint4* dst = reinterpret_cast<uint4*>(&sB[b_row][b_kq]);
+        dst[0] = make_uint4(packed[0], packed[1], packed[2], packed[3]);
+        dst[1] = make_uint4(packed[4], packed[5], packed[6], packed[7]);
+      }
+      // Activation tile: rows of this m-tile, zero-filled past the segment
+      // and past k (16-byte loads when the rows are 16-byte aligned).
+      for (int i = static_cast<int>(threadIdx.x); i < BM * (BK / 8); i += kThreads) {
+        const int mm = i / (BK / 8), kq = (i % (BK / 8)) * 8;
+        const int gk = k0 + kq;
+        uint4 val = make_uint4(0, 0, 0, 0);
+        if (mm < m_rows) {
+          const uint16_t* row =
+              act + static_cast<size_t>(seg.row0 + m0 + mm) * act_stride;
+          if (act_vec != 0 && gk + 8 <= k) {
+            val = *reinterpret_cast<const uint4*>(row + gk);
+          } else {
+            uint16_t e[8];
+#pragma unroll
+            for (int h = 0; h < 8; ++h) e[h] = gk + h < k ? row[gk + h] : 0;
+            val = make_uint4(e[0] | (e[1] << 16), e[2] | (e[3] << 16),
+                             e[4] | (e[5] << 16), e[6] | (e[7] << 16));
+          }
+        }
+        *reinterpret_cast<uint4*>(&sA[mm][kq]) = val;
+      }
+      __syncthreads();
+
+#pragma unroll
+      for (int kk = 0; kk < BK; kk += 16) {
+        const int ar = warp * 16 + r;
+        const uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[ar][kk + cc]);
+        const uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[ar + 8][kk + cc]);
+        const uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[ar][kk + cc + 8]);
+        const uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sA[ar + 8][kk + cc + 8]);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          const int bn = j * 8 + r;
+          const uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[bn][kk + cc]);
+          const uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[bn][kk + cc + 8]);
+          asm volatile(
+              "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+              "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+              : "+f"(acc[j][0]), "+f"(acc[j][1]), "+f"(acc[j][2]), "+f"(acc[j][3])
+              : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+        }
+      }
+      __syncthreads();  // tile reads done before the next stage overwrites
+    }
+
+    // Epilogue: per warp a [16 x 64] slice; the thread holds rows r, r+8
+    // and columns cc, cc+1 of each n8 fragment.
+    const int row_lo = warp * 16 + r;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      const int gn = n0 + j * 8 + cc;
+      auto st = [&](int row_off, int col_off, float val) {
+        const int mm = row_lo + row_off;
+        if (mm < m_rows && gn + col_off < n)
+          fp8_gemv::store_dot(
+              out + static_cast<size_t>(seg.row0 + m0 + mm) * out_stride + gn + col_off,
+              val);
+      };
+      st(0, 0, acc[j][0]);
+      st(0, 1, acc[j][1]);
+      st(8, 0, acc[j][2]);
+      st(8, 1, acc[j][3]);
+    }
+  }
+}
+
+template <typename OutT>
+void launch_moe_grouped_mma(const uint16_t* act, size_t act_stride,
+                            const MoeSegment* segs, int n_segs, int max_rows,
+                            int rows_per_block, const MoeExpertView* views,
+                            int which, OutT* out, size_t out_stride, int n,
+                            int k, cudaStream_t stream) {
+  using namespace mma_tile;
+  if (n_segs <= 0 || n <= 0) return;
+  if (!act || !segs || !views || !out)
+    throw std::invalid_argument("moe grouped mma: null pointer");
+  if (k <= 0 || (k % 16) != 0)
+    throw std::invalid_argument("moe grouped mma: k must be a positive multiple of 16");
+  if (max_rows <= 0)
+    throw std::invalid_argument("moe grouped mma: max_rows must be positive");
+  if (rows_per_block > 0 && (rows_per_block % BM) != 0)
+    throw std::invalid_argument("moe grouped mma: rows_per_block must be a multiple of 128");
+  const unsigned z_ext = rows_per_block > 0
+                             ? static_cast<unsigned>((max_rows + rows_per_block - 1) /
+                                                     rows_per_block)
+                             : 1u;
+  if (rows_per_block <= 0) rows_per_block = INT_MAX;
+  // 16-byte activation loads need 16-byte rows: the base and the stride.
+  const int act_vec =
+      (reinterpret_cast<uintptr_t>(act) % 16 == 0 && (act_stride % 8) == 0) ? 1 : 0;
+  const dim3 grid((n + BN - 1) / BN, static_cast<unsigned>(n_segs), z_ext);
+  moe_grouped_mma_kernel<OutT><<<grid, kThreads, 0, stream>>>(
+      act, act_stride, act_vec, segs, views, which, out, out_stride, n, k,
+      rows_per_block);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 constexpr int kAccumMaxTopK = 16;
 constexpr int kSegmentMaxExperts = 1024;
 
@@ -731,6 +922,26 @@ __global__ void moe_accum_ordered_kernel(uint16_t* __restrict__ out,
 }
 
 }  // namespace
+
+void launch_moe_grouped_mma_bf16(const uint16_t* act, size_t act_stride,
+                                 const MoeSegment* segs, int n_segs, int max_rows,
+                                 int rows_per_block, const MoeExpertView* views,
+                                 int which, uint16_t* out, size_t out_stride, int n,
+                                 int k, cudaStream_t stream) {
+  launch_moe_grouped_mma<uint16_t>(act, act_stride, segs, n_segs, max_rows,
+                                   rows_per_block, views, which, out, out_stride,
+                                   n, k, stream);
+}
+
+void launch_moe_grouped_mma_f32(const uint16_t* act, size_t act_stride,
+                                const MoeSegment* segs, int n_segs, int max_rows,
+                                int rows_per_block, const MoeExpertView* views,
+                                int which, float* out, size_t out_stride, int n,
+                                int k, cudaStream_t stream) {
+  launch_moe_grouped_mma<float>(act, act_stride, segs, n_segs, max_rows,
+                                rows_per_block, views, which, out, out_stride, n,
+                                k, stream);
+}
 
 void launch_moe_grouped_gemv_bf16(const uint16_t* act, size_t act_stride,
                                   const MoeSegment* segs, int n_segs,

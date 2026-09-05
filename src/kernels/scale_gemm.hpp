@@ -45,4 +45,17 @@ void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            float* out, int m, int n, int k,
                            cudaStream_t stream);
 
+// The tile kernel regardless of m (the bf16 mma.sync m16n8k16 path the
+// large-m route takes): the reference the grouped tensor-core MoE kernel is
+// pinned bitwise against (glm_moe_test) — the routed launcher above would
+// send small m to the GEMV core instead.
+void launch_scale_gemm_tile_bf16(const uint16_t* act, size_t act_row_stride_elems,
+                                 const uint8_t* w_payload, const float* w_scales,
+                                 uint16_t* out, int m, int n, int k,
+                                 cudaStream_t stream);
+void launch_scale_gemm_tile_f32(const uint16_t* act, size_t act_row_stride_elems,
+                                const uint8_t* w_payload, const float* w_scales,
+                                float* out, int m, int n, int k,
+                                cudaStream_t stream);
+
 }  // namespace dgpp

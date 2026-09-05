@@ -1,12 +1,16 @@
 #include "models/glm_moe_layer.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cmath>
+#include <cstdio>
 
 #include <cstring>
 #include <stdexcept>
 #include <string>
 
 #include "common/cuda_check.hpp"
+#include "common/dtypes.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "models/glm_step_timing.hpp"
@@ -193,7 +197,7 @@ void GlmMoeLayer::check_expert_geometry() const {
 }
 
 void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
-                          cudaStream_t stream) {
+                          cudaStream_t stream, MoeExpertKernel kernel) {
   step_timing::Scope tick(step_timing::kMoe);
   if (tokens <= 0) return;
   if (tokens > max_tokens_)
@@ -275,34 +279,8 @@ void GlmMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
   //    more (its inter may differ); swiglu over every row; the down
   //    projection the same way, fp32 (the chain rounds once, at the end).
   //    The inter dims come from the matrix views (the rank's slices).
-  const int I_r = static_cast<int>(w_.experts[0].rows);
-  const int I_s = static_cast<int>(w_.shared[0].rows);
-  const size_t I_max = static_cast<size_t>(std::max(I_r, I_s));
-  launch_moe_gather_rows(hidden, d_rows_, d_gather_, static_cast<int>(rows_total),
-                         static_cast<int>(H), stream);
-  const MoeSegment* shared_seg = d_segs_ + n_segs;
-  constexpr int kSharedRowsPerBlock = 16;  // the shared segment's z split
-  launch_moe_grouped_gemv_bf16(d_gather_, H, d_segs_, n_segs, max_rows, 0,
-                               d_views_prefill_, 0, d_gate_, I_max, I_r,
-                               static_cast<int>(H), stream);
-  launch_moe_grouped_gemv_bf16(d_gather_, H, shared_seg, 1, tokens,
-                               kSharedRowsPerBlock, d_views_prefill_, 0, d_gate_,
-                               I_max, I_s, static_cast<int>(H), stream);
-  launch_moe_grouped_gemv_bf16(d_gather_, H, d_segs_, n_segs, max_rows, 0,
-                               d_views_prefill_, 1, d_up_, I_max, I_r,
-                               static_cast<int>(H), stream);
-  launch_moe_grouped_gemv_bf16(d_gather_, H, shared_seg, 1, tokens,
-                               kSharedRowsPerBlock, d_views_prefill_, 1, d_up_,
-                               I_max, I_s, static_cast<int>(H), stream);
-  launch_moe_swiglu_clamp(d_gate_, d_up_, d_act_,
-                          static_cast<int64_t>(rows_total) * I_max,
-                          cfg_.swiglu_limit, stream);
-  launch_moe_grouped_gemv_f32(d_act_, I_max, d_segs_, n_segs, max_rows, 0,
-                              d_views_prefill_, 2, d_down_, H, static_cast<int>(H),
-                              I_r, stream);
-  launch_moe_grouped_gemv_f32(d_act_, I_max, shared_seg, 1, tokens,
-                              kSharedRowsPerBlock, d_views_prefill_, 2, d_down_, H,
-                              static_cast<int>(H), I_s, stream);
+  grouped_expert_chain(kernel, hidden, d_segs_, n_segs, max_rows,
+                       d_segs_ + n_segs, tokens, rows_total, stream);
 
   // 4. The ordered accumulation: per token its K slots in ascending expert
   //    id, then the shared row (weight 1), the fmaf chain from zero, one
@@ -361,33 +339,90 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
   //    blocks exit at once) and the shared segment.
   const int shared_row0 = static_cast<int>(tk);
   const size_t rows_total = tk + static_cast<size_t>(tokens);
+  grouped_expert_chain(MoeExpertKernel::kMma, hidden, d_segs_, E,
+                       /*max_rows=*/std::max(tokens, 1), d_segs_ + E, tokens,
+                       rows_total, stream);
+  launch_moe_accum_ordered(out, d_down_, H, d_slot_row_, d_ids_, d_weights_,
+                           shared_row0, tokens, K, H, stream);
+}
+
+void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
+                                       const uint16_t* hidden,
+                                       const MoeSegment* segs, int n_segs,
+                                       int max_rows, const MoeSegment* shared_seg,
+                                       int tokens, size_t rows_total,
+                                       cudaStream_t stream) {
+  const int H = static_cast<int>(cfg_.hidden);
   const int I_r = static_cast<int>(w_.experts[0].rows);
   const int I_s = static_cast<int>(w_.shared[0].rows);
   const size_t I_max = static_cast<size_t>(std::max(I_r, I_s));
-  constexpr int kSharedRowsPerBlock = 16;
   launch_moe_gather_rows(hidden, d_rows_, d_gather_, static_cast<int>(rows_total),
                          H, stream);
-  const MoeSegment* shared_seg = d_segs_ + E;
-  launch_moe_grouped_gemv_bf16(d_gather_, H, d_segs_, E, /*max_rows=*/1, 0,
-                               d_views_prefill_, 0, d_gate_, I_max, I_r, H, stream);
-  launch_moe_grouped_gemv_bf16(d_gather_, H, shared_seg, 1, tokens,
-                               kSharedRowsPerBlock, d_views_prefill_, 0, d_gate_,
-                               I_max, I_s, H, stream);
-  launch_moe_grouped_gemv_bf16(d_gather_, H, d_segs_, E, /*max_rows=*/1, 0,
-                               d_views_prefill_, 1, d_up_, I_max, I_r, H, stream);
-  launch_moe_grouped_gemv_bf16(d_gather_, H, shared_seg, 1, tokens,
-                               kSharedRowsPerBlock, d_views_prefill_, 1, d_up_,
-                               I_max, I_s, H, stream);
+  // The shared segment is every token: split across blocks along z (the
+  // GEMV core in 16-row pieces, the tensor-core kernel in whole m-tiles).
+  const bool mma = kernel == MoeExpertKernel::kMma;
+  const int shared_split = mma ? 128 : 16;
+  auto gemm_bf16 = [&](const MoeSegment* sg, int ns, int mr, int split, int which,
+                       uint16_t* out, int n) {
+    if (mma)
+      launch_moe_grouped_mma_bf16(d_gather_, H, sg, ns, mr, split, d_views_prefill_,
+                                  which, out, I_max, n, H, stream);
+    else
+      launch_moe_grouped_gemv_bf16(d_gather_, H, sg, ns, mr, split, d_views_prefill_,
+                                   which, out, I_max, n, H, stream);
+  };
+  auto gemm_f32 = [&](const MoeSegment* sg, int ns, int mr, int split, int k) {
+    if (mma)
+      launch_moe_grouped_mma_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
+                                 2, d_down_, H, H, k, stream);
+    else
+      launch_moe_grouped_gemv_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
+                                  2, d_down_, H, H, k, stream);
+  };
+  gemm_bf16(segs, n_segs, max_rows, 0, 0, d_gate_, I_r);
+  gemm_bf16(shared_seg, 1, tokens, shared_split, 0, d_gate_, I_s);
+  gemm_bf16(segs, n_segs, max_rows, 0, 1, d_up_, I_r);
+  gemm_bf16(shared_seg, 1, tokens, shared_split, 1, d_up_, I_s);
   launch_moe_swiglu_clamp(d_gate_, d_up_, d_act_,
                           static_cast<int64_t>(rows_total) * I_max,
                           cfg_.swiglu_limit, stream);
-  launch_moe_grouped_gemv_f32(d_act_, I_max, d_segs_, E, /*max_rows=*/1, 0,
-                              d_views_prefill_, 2, d_down_, H, H, I_r, stream);
-  launch_moe_grouped_gemv_f32(d_act_, I_max, shared_seg, 1, tokens,
-                              kSharedRowsPerBlock, d_views_prefill_, 2, d_down_, H,
-                              H, I_s, stream);
-  launch_moe_accum_ordered(out, d_down_, H, d_slot_row_, d_ids_, d_weights_,
-                           shared_row0, tokens, K, H, stream);
+  gemm_f32(segs, n_segs, max_rows, 0, I_r);
+  gemm_f32(shared_seg, 1, tokens, shared_split, I_s);
+  if (std::getenv("DGPP_MOE_CHAIN_DUMP") != nullptr) {
+    // Hunt instrument: per-stage checksums of the chain's buffers.
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    auto sum_bf16 = [&](const uint16_t* d, size_t n) {
+      std::vector<uint16_t> h(n);
+      DGPP_CUDA_OK(cudaMemcpy(h.data(), d, n * 2, cudaMemcpyDeviceToHost));
+      double acc = 0;
+      for (uint16_t v : h) acc += std::fabs(bf16_bits_to_float(v));
+      return acc;
+    };
+    auto sum_f32 = [&](const float* d, size_t n) {
+      std::vector<float> h(n);
+      DGPP_CUDA_OK(cudaMemcpy(h.data(), d, n * 4, cudaMemcpyDeviceToHost));
+      double acc = 0;
+      for (float v : h) acc += std::fabs(v);
+      return acc;
+    };
+    std::vector<MoeSegment> hs(static_cast<size_t>(n_segs) + 1);
+    DGPP_CUDA_OK(cudaMemcpy(hs.data(), segs, n_segs * sizeof(MoeSegment),
+                            cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(&hs[n_segs], shared_seg, sizeof(MoeSegment),
+                            cudaMemcpyDeviceToHost));
+    std::string segtxt;
+    for (const MoeSegment& sg : hs)
+      if (sg.rows > 0)
+        segtxt += " (" + std::to_string(sg.row0) + "," + std::to_string(sg.rows) + ",e" +
+                  std::to_string(sg.expert) + ")";
+    std::fprintf(stderr,
+                 "[chain %s] rows_total=%zu I_r=%d I_s=%d segs:%s | gather %.6g gate %.6g "
+                 "up %.6g act %.6g down %.6g\n",
+                 mma ? "mma" : "gemv", rows_total, I_r, I_s, segtxt.c_str(),
+                 sum_bf16(d_gather_, rows_total * H), sum_bf16(d_gate_, rows_total * I_max),
+                 sum_bf16(d_up_, rows_total * I_max), sum_bf16(d_act_, rows_total * I_max),
+                 sum_f32(d_down_, rows_total * H));
+  }
 }
 
 void GlmMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out,

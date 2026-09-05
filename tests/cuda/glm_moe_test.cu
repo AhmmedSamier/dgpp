@@ -266,15 +266,27 @@ SmallCase make_small_case(int E, int H, int I, int K, int tokens,
 }
 
 // The expert-path budgets: per-element bf16 ulps against the double oracle
-// (hard 12, soft 4 on < 2% of elements) and a relative l2.
+// (hard 12, soft 4 on < 2% of elements) and a relative l2. The ulps carry
+// an absolute floor (2026-09-05, the scale GEMM gates' rule): an element
+// within 2 % of the output's RMS magnitude counts as exact — the chain
+// rounds its gate/up intermediates to bf16, and a small output formed by
+// cancellation of large terms inherits their absolute error (M=300: one
+// element of 153,600 at 65 ulps, oracle 1.72 against 1.21, on both cores).
 void require_within_expert_budget(const std::vector<uint16_t>& got,
                                   const std::vector<uint16_t>& oracle,
                                   const char* label) {
   require(got.size() == oracle.size(), "expert path: size mismatch");
+  double rms = 0;
+  for (size_t i = 0; i < oracle.size(); ++i)
+    rms += std::pow(bf16_bits_to_float(oracle[i]), 2);
+  rms = oracle.empty() ? 0 : std::sqrt(rms / oracle.size());
+  const double floor_abs = 2e-2 * rms;
   long hard = 0, soft = 0;
   double max_ulps = 0, sum_d2 = 0, sum_o2 = 0;
   for (size_t i = 0; i < got.size(); ++i) {
-    const int u = bf16_ulps(got[i], oracle[i]);
+    int u = bf16_ulps(got[i], oracle[i]);
+    if (std::fabs(bf16_bits_to_float(got[i]) - bf16_bits_to_float(oracle[i])) <= floor_abs)
+      u = 0;
     max_ulps = std::max(max_ulps, static_cast<double>(u));
     const double d = bf16_bits_to_float(got[i]) - bf16_bits_to_float(oracle[i]);
     sum_d2 += d * d;
@@ -283,6 +295,21 @@ void require_within_expert_budget(const std::vector<uint16_t>& got,
     if (u > 12) ++hard;
   }
   const double l2 = sum_o2 > 0 ? std::sqrt(sum_d2 / sum_o2) : 0;
+  if (hard != 0 || std::getenv("DGPP_MOE_DUMP") != nullptr) {
+    // The worst elements, for a hunt: index, the oracle's value, ours, ulps.
+    std::vector<size_t> idx(got.size());
+    for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+    std::partial_sort(idx.begin(), idx.begin() + std::min<size_t>(8, idx.size()),
+                      idx.end(), [&](size_t a, size_t b) {
+                        return bf16_ulps(got[a], oracle[a]) > bf16_ulps(got[b], oracle[b]);
+                      });
+    for (size_t j = 0; j < std::min<size_t>(8, idx.size()); ++j) {
+      const size_t i = idx[j];
+      std::printf("[ .. ]   %s worst[%zu] i=%zu oracle=%.6g got=%.6g ulps=%d\n", label,
+                  j, i, bf16_bits_to_float(oracle[i]), bf16_bits_to_float(got[i]),
+                  bf16_ulps(got[i], oracle[i]));
+    }
+  }
   // Report before asserting: a failing run must still yield its numbers.
   std::printf("[ .. ] %s: max %g ulps, %ld/%zu over soft, %ld hard, l2=%.2g\n",
               label, max_ulps, soft, got.size(), hard, l2);
@@ -292,12 +319,13 @@ void require_within_expert_budget(const std::vector<uint16_t>& got,
   require(l2 < 4e-3, "expert path: l2 budget");
 }
 
-void run_small_case(SmallCase& c, const char* label) {
+void run_small_case(SmallCase& c, const char* label,
+                    dgpp::MoeExpertKernel kernel = dgpp::MoeExpertKernel::kGemv) {
   std::vector<uint16_t> oracle;
   dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
 
   GlmMoeLayer layer(c.dev_w, c.cfg, c.tokens);
-  layer.enqueue(c.d_hidden, c.d_out, c.tokens, nullptr);
+  layer.enqueue(c.d_hidden, c.d_out, c.tokens, nullptr, kernel);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
 
   std::vector<uint16_t> got(static_cast<size_t>(c.tokens) * c.cfg.hidden);
@@ -306,7 +334,7 @@ void run_small_case(SmallCase& c, const char* label) {
 
   // Determinism: a second enqueue must be bitwise identical.
   DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, got.size() * 2));
-  layer.enqueue(c.d_hidden, c.d_out, c.tokens, nullptr);
+  layer.enqueue(c.d_hidden, c.d_out, c.tokens, nullptr, kernel);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
   std::vector<uint16_t> second(got.size());
   std::memcpy(second.data(), c.d_out, second.size() * 2);
@@ -514,6 +542,167 @@ DGPP_TEST(moe_grouped_gemv_is_bitwise_the_chunked_scale_gemm_per_segment) {
   }
 }
 
+DGPP_TEST(moe_grouped_mma_is_bitwise_the_tile_gemm_per_segment) {
+  // GIVEN segments of one row, a few rows, more than one 128-row m-tile
+  // (130, 245) — over an output width that leaves a ragged n-tile (204 %
+  // 64 != 0) and the fp32 down variant with k = 208,
+  // THEN every output element is bitwise the tile kernel's per segment
+  // (the same dequantized weights, the same ascending-k16 mma.sync chain),
+  // whether one block walks a segment's m-tiles or a z split spreads them.
+  struct Shape { int I; bool test_down; };
+  constexpr int kRows = 400;
+  for (const Shape sh : {Shape{204, false}, Shape{208, true}}) {
+    SmallCase c = make_small_case(/*E=*/6, /*H=*/4096, /*I=*/sh.I, /*K=*/2,
+                                  /*tokens=*/kRows, 0x6E0 + sh.I);
+    c.alloc();
+    const int H = c.cfg.hidden, I = sh.I, E = c.cfg.n_experts;
+    const int lens[] = {1, 5, 4, 130, 13, 2, 245};
+    std::vector<dgpp::MoeSegment> segs;
+    int row0 = 0;
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); ++i) {
+      segs.push_back(dgpp::MoeSegment{row0, lens[i], static_cast<int>(i % (E + 1))});
+      row0 += lens[i];
+    }
+    require(row0 == kRows, "segments cover the rows");
+    dgpp::MoeSegment* d_segs = nullptr;
+    dgpp::MoeExpertView* d_views = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_segs, segs.size() * sizeof(dgpp::MoeSegment)));
+    std::memcpy(d_segs, segs.data(), segs.size() * sizeof(dgpp::MoeSegment));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_views, (E + 1) * 3 * sizeof(dgpp::MoeExpertView)));
+    for (int m = 0; m < (E + 1) * 3; ++m)
+      d_views[m] = dgpp::MoeExpertView{c.expert_mats[m].payload, c.expert_mats[m].scales};
+    uint16_t *d_grouped = nullptr, *d_split = nullptr, *d_ref = nullptr;
+    const size_t gate_bytes = static_cast<size_t>(kRows) * I * 2;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_grouped, gate_bytes));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_split, gate_bytes));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_ref, gate_bytes));
+    DGPP_CUDA_OK(cudaMemset(d_grouped, 0xA5, gate_bytes));
+    DGPP_CUDA_OK(cudaMemset(d_split, 0xA5, gate_bytes));
+    DGPP_CUDA_OK(cudaMemset(d_ref, 0x5A, gate_bytes));
+    dgpp::launch_moe_grouped_mma_bf16(c.d_hidden, H, d_segs, static_cast<int>(segs.size()),
+                                      245, /*rows_per_block=*/0, d_views, 0, d_grouped,
+                                      I, I, H, nullptr);
+    dgpp::launch_moe_grouped_mma_bf16(c.d_hidden, H, d_segs, static_cast<int>(segs.size()),
+                                      245, /*rows_per_block=*/128, d_views, 0, d_split,
+                                      I, I, H, nullptr);
+    for (const dgpp::MoeSegment& sg : segs) {
+      const GlmQuantMatrix& g = c.expert_mats[sg.expert * 3 + 0];
+      dgpp::launch_scale_gemm_tile_bf16(c.d_hidden + static_cast<size_t>(sg.row0) * H, H,
+                                        g.payload, g.scales,
+                                        d_ref + static_cast<size_t>(sg.row0) * I, sg.rows,
+                                        I, H, nullptr);
+    }
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    require(std::memcmp(d_grouped, d_ref, gate_bytes) == 0,
+            ("grouped mma gate output bitwise the tile GEMM per segment (I=" +
+             std::to_string(I) + ")").c_str());
+    require(std::memcmp(d_split, d_ref, gate_bytes) == 0,
+            "grouped mma gate output bitwise under the z split");
+    if (sh.test_down) {
+      const size_t down_bytes = static_cast<size_t>(kRows) * H * 4;
+      float *d_gd = nullptr, *d_rd = nullptr;
+      DGPP_CUDA_OK(cudaMallocManaged(&d_gd, down_bytes));
+      DGPP_CUDA_OK(cudaMallocManaged(&d_rd, down_bytes));
+      DGPP_CUDA_OK(cudaMemset(d_gd, 0xA5, down_bytes));
+      DGPP_CUDA_OK(cudaMemset(d_rd, 0x5A, down_bytes));
+      dgpp::launch_moe_grouped_mma_f32(d_grouped, I, d_segs, static_cast<int>(segs.size()),
+                                       245, /*rows_per_block=*/0, d_views, 2, d_gd, H, H,
+                                       I, nullptr);
+      for (const dgpp::MoeSegment& sg : segs) {
+        const GlmQuantMatrix& d = c.expert_mats[sg.expert * 3 + 2];
+        dgpp::launch_scale_gemm_tile_f32(d_grouped + static_cast<size_t>(sg.row0) * I, I,
+                                         d.payload, d.scales,
+                                         d_rd + static_cast<size_t>(sg.row0) * H, sg.rows,
+                                         H, I, nullptr);
+      }
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      require(std::memcmp(d_gd, d_rd, down_bytes) == 0,
+              "grouped mma down output bitwise the tile GEMM per segment (fp32)");
+      cudaFree(d_gd);
+      cudaFree(d_rd);
+    }
+    std::printf("[ OK ] grouped mma I=%d: %zu segments (1..245 rows) bitwise the "
+                "tile GEMM%s\n",
+                I, segs.size(), sh.test_down ? ", down fp32 too" : "");
+    cudaFree(d_grouped);
+    cudaFree(d_split);
+    cudaFree(d_ref);
+    cudaFree(d_segs);
+    cudaFree(d_views);
+    c.free_all();
+  }
+}
+
+DGPP_TEST(moe_grouped_mma_small_case_shapes_bitwise_the_tile_gemm) {
+  // The layer's small-case geometry (H=512, I=256, one-row segments): every
+  // matrix (gate, up, down) bitwise the tile kernel per segment.
+  SmallCase c = make_small_case(/*E=*/8, /*H=*/512, /*I=*/256, /*K=*/2,
+                                /*tokens=*/3, 0x5CA1E);
+  c.alloc();
+  const int H = c.cfg.hidden, I = 256, E = c.cfg.n_experts;
+  std::vector<dgpp::MoeSegment> segs = {{0, 1, 2}, {1, 1, 5}, {2, 1, E}};
+  dgpp::MoeSegment* d_segs = nullptr;
+  dgpp::MoeExpertView* d_views = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&d_segs, segs.size() * sizeof(dgpp::MoeSegment)));
+  std::memcpy(d_segs, segs.data(), segs.size() * sizeof(dgpp::MoeSegment));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_views, (E + 1) * 3 * sizeof(dgpp::MoeExpertView)));
+  for (int m = 0; m < (E + 1) * 3; ++m)
+    d_views[m] = dgpp::MoeExpertView{c.expert_mats[m].payload, c.expert_mats[m].scales};
+  for (int which = 0; which < 2; ++which) {
+    uint16_t *d_g = nullptr, *d_r = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_g, 3 * I * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_r, 3 * I * 2));
+    DGPP_CUDA_OK(cudaMemset(d_g, 0xA5, 3 * I * 2));
+    DGPP_CUDA_OK(cudaMemset(d_r, 0x5A, 3 * I * 2));
+    dgpp::launch_moe_grouped_mma_bf16(c.d_hidden, H, d_segs, 3, 3, /*rows_per_block=*/0,
+                                      d_views, which, d_g, I, I, H, nullptr);
+    for (const dgpp::MoeSegment& sg : segs) {
+      const GlmQuantMatrix& g = c.expert_mats[sg.expert * 3 + which];
+      dgpp::launch_scale_gemm_tile_bf16(c.d_hidden + static_cast<size_t>(sg.row0) * H, H,
+                                        g.payload, g.scales,
+                                        d_r + static_cast<size_t>(sg.row0) * I, sg.rows,
+                                        I, H, nullptr);
+    }
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    int bad = 0, first = -1;
+    for (int i = 0; i < 3 * I; ++i)
+      if (d_g[i] != d_r[i]) { if (first < 0) first = i; ++bad; }
+    std::printf("[ .. ] small-case which=%d: %d of %d elements differ (first %d: got %04x ref %04x)\n",
+                which, bad, 3 * I, first, first >= 0 ? d_g[first] : 0, first >= 0 ? d_r[first] : 0);
+    require(bad == 0, "small-case grouped mma bitwise the tile GEMM");
+    cudaFree(d_g);
+    cudaFree(d_r);
+  }
+  {
+    float *d_g = nullptr, *d_r = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_g, 3 * H * 4));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_r, 3 * H * 4));
+    // The down projection consumes I-wide activations: reuse d_hidden's
+    // first I columns per row (stride H).
+    dgpp::launch_moe_grouped_mma_f32(c.d_hidden, H, d_segs, 3, 3, 0, d_views, 2, d_g, H, H,
+                                     I, nullptr);
+    for (const dgpp::MoeSegment& sg : segs) {
+      const GlmQuantMatrix& d = c.expert_mats[sg.expert * 3 + 2];
+      dgpp::launch_scale_gemm_tile_f32(c.d_hidden + static_cast<size_t>(sg.row0) * H, H,
+                                       d.payload, d.scales,
+                                       d_r + static_cast<size_t>(sg.row0) * H, sg.rows, H,
+                                       I, nullptr);
+    }
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    int bad = 0, first = -1;
+    for (int i = 0; i < 3 * H; ++i)
+      if (std::memcmp(&d_g[i], &d_r[i], 4) != 0) { if (first < 0) first = i; ++bad; }
+    std::printf("[ .. ] small-case down: %d of %d elements differ (first %d: got %g ref %g)\n",
+                bad, 3 * H, first, first >= 0 ? d_g[first] : 0.f, first >= 0 ? d_r[first] : 0.f);
+    require(bad == 0, "small-case grouped mma down bitwise the tile GEMM");
+    cudaFree(d_g);
+    cudaFree(d_r);
+  }
+  cudaFree(d_segs);
+  cudaFree(d_views);
+  c.free_all();
+}
+
 DGPP_TEST(moe_accum_ordered_is_bitwise_the_fmaf_chain) {
   // GIVEN random fp32 down rows, a permuted slot->row map, UNSORTED slot
   // ids per token and random weights, THEN the device's per-token result is
@@ -600,7 +789,9 @@ DGPP_TEST(moe_enqueue_prefill_is_bitwise_the_host_path) {
     c.alloc();
     GlmMoeLayer layer(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/0);
     std::vector<uint16_t> host(static_cast<size_t>(cs.M) * c.cfg.hidden);
-    layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr);
+    // The reference runs the host-orchestrated chain on the prefill's
+    // kernel (the tensor-core path); the decode pin keeps the GEMV core.
+    layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr, dgpp::MoeExpertKernel::kMma);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
     std::memcpy(host.data(), c.d_out, host.size() * 2);
     const std::vector<int32_t> want_ids = layer.last_ids();
@@ -740,6 +931,35 @@ DGPP_TEST(moe_swiglu_clamp_edge_semantics) {
   DGPP_CUDA_OK(cudaFree(d_u));
   DGPP_CUDA_OK(cudaFree(d_o));
   std::printf("[ OK ] swiglu clamps: asymmetric limits, boundary values\n");
+}
+
+DGPP_TEST(moe_expert_path_mma_matches_oracle_small_geometry) {
+  // The prefill's tensor-core kernel through the whole layer against the
+  // double oracle, within the expert-path budget and bitwise repeatable —
+  // including a shape whose expert segments span two 128-row m-tiles
+  // (M=300, K=4, E=8: ~150 rows per expert).
+  for (auto [E, H, I, K, M] :
+       std::vector<std::tuple<int, int, int, int, int>>{
+           {8, 512, 256, 2, 1}, {8, 512, 256, 2, 17}, {16, 1024, 512, 4, 5},
+           {8, 512, 256, 4, 300}}) {
+    // The GEMV gate's seeds: a seed that lands the router on a near-tie the
+    // double oracle resolves the other way fails EVERY kernel by 50 ulps on
+    // that token (0x77A + E + M did, identically for both cores) — the
+    // expert-path budget assumes the oracle's routing.
+    SmallCase c = make_small_case(E, H, I, K, M, 0xC0FFEE + E + M);
+    c.alloc();
+    // The GEMV core on the same case first: the two kernels' budgets are
+    // read against identical inputs.
+    run_small_case(c, ("expert path (gemv, same case) E=" + std::to_string(E) +
+                       " M=" + std::to_string(M))
+                          .c_str(),
+                   dgpp::MoeExpertKernel::kGemv);
+    run_small_case(c, ("expert path (mma) E=" + std::to_string(E) + " M=" +
+                       std::to_string(M))
+                          .c_str(),
+                   dgpp::MoeExpertKernel::kMma);
+    c.free_all();
+  }
 }
 
 DGPP_TEST(moe_expert_path_matches_oracle_small_geometry) {

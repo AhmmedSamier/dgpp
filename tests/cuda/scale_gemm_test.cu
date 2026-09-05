@@ -93,6 +93,32 @@ std::vector<float> run_kernel_f32(const Problem& p) {
   return got;
 }
 
+// The tile kernel regardless of m (the routed launcher sends m <= 128 to
+// the GEMV core; the grouped tensor-core MoE kernel is bitwise this one).
+std::vector<uint16_t> run_tile_kernel(const Problem& p) {
+  uint16_t* act = nullptr;
+  uint8_t* w = nullptr;
+  float* s = nullptr;
+  uint16_t* out = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&act, p.act.size() * 2));
+  DGPP_CUDA_OK(cudaMallocManaged(&w, p.payload.size()));
+  DGPP_CUDA_OK(cudaMallocManaged(&s, p.scales.size() * 4));
+  DGPP_CUDA_OK(
+      cudaMallocManaged(&out, static_cast<size_t>(p.m) * p.n * 2));
+  std::memcpy(act, p.act.data(), p.act.size() * 2);
+  std::memcpy(w, p.payload.data(), p.payload.size());
+  std::memcpy(s, p.scales.data(), p.scales.size() * 4);
+  dgpp::launch_scale_gemm_tile_bf16(act, p.k, w, s, out, p.m, p.n, p.k, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<uint16_t> got(static_cast<size_t>(p.m) * p.n);
+  std::memcpy(got.data(), out, got.size() * 2);
+  DGPP_CUDA_OK(cudaFree(act));
+  DGPP_CUDA_OK(cudaFree(w));
+  DGPP_CUDA_OK(cudaFree(s));
+  DGPP_CUDA_OK(cudaFree(out));
+  return got;
+}
+
 // Runs both oracles and asserts the budgets.
 void check_both_oracles(const Problem& p, const std::vector<uint16_t>& got,
                         const char* label) {
@@ -127,6 +153,18 @@ DGPP_TEST(scale_gemm_full_blocks_match_both_oracles) {
   const std::vector<uint16_t> again = run_kernel(p);
   require(std::memcmp(got.data(), again.data(), got.size() * 2) == 0,
           "second run bitwise identical");
+}
+
+DGPP_TEST(scale_gemm_tile_kernel_small_m_matches_both_oracles) {
+  // The tile kernel below the routed launcher's GEMV threshold: partial
+  // m-tiles (M=1, 5, 17) at the MoE small-case geometry — the prefill's
+  // grouped tensor-core kernel is bitwise this kernel per segment, so its
+  // accuracy at every segment length is this gate.
+  for (const int m : {1, 5, 17}) {
+    Problem p = make_problem(m, /*n=*/256, /*k=*/512, 0x7113 + m);
+    const auto got = run_tile_kernel(p);
+    check_both_oracles(p, got, ("tile M" + std::to_string(m) + "xN256xK512").c_str());
+  }
 }
 
 DGPP_TEST(scale_gemm_ragged_tails_match_both_oracles) {

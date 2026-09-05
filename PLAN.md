@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.80 s and 2048 tokens 19.8 → 5.7 s in steady state through four rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders); the long-segment GEMM is next |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.65 s and 2048 tokens 19.8 → 3.1 s in steady state through five rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts on a tensor-core kernel); the attention prefill tiles are next |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -182,6 +182,25 @@ Suggested order for what remains, each item's design in its section:
    Next: the grouped tensor-core GEMM for long expert segments and wider
    DSA prefill tiles (the 2048-token case: ~3.4 + 0.9 s); the MoE weight
    read is the floor at 256 (0.58 of 0.80 s).
+   ROUND 5 (2026-09-05, the record's twentieth entry): the experts on a
+   grouped tensor-core kernel (`moe_grouped_mma_kernel`: one block per
+   64-column n-tile and segment, 128-row m-tiles, bf16 mma.sync with fp32
+   accumulation in ascending k16 order — bitwise the scale GEMM's tile
+   kernel per segment, memcmp-gated, the tile kernel itself now pinned at
+   M = 1/5/17 against both oracles), so a segment up to 128 rows reads its
+   expert's weights once instead of once per four rows. `MoeExpertKernel`
+   on `GlmMoeLayer`: the prefill and the forward run kMma, the decode slot
+   path and the MTP eager rows keep the GEMV core (their bitwise pins).
+   The oracle gate taught two things on the way: a seed can land the
+   router on a near-tie the double oracle resolves the other way (50 ulps
+   on any kernel), and a small output formed by cancellation of
+   bf16-rounded intermediates needs the GEMM gates' absolute floor (one
+   element of 153,600 at M = 300). 2048 tokens 5,746 → 3,058 ms (1.49
+   ms/token), 256 tokens 796 → 653 (2.55), ids identical to every earlier
+   round's. The profile at 2048 now: DSA attention tiles ~0.6 s (1,903
+   eight-row launches), expert GEMMs 0.5, bulk folds 0.18, other kernels
+   ~0.7, ~1 s outside kernels. Next: wider attention prefill tiles, then
+   the non-kernel second.
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).
