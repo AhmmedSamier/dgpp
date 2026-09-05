@@ -130,11 +130,60 @@ class FakeEngine : public SchedulerEngine {
     return grammars_;
   }
 
+  // The prefix cache seam (M7): an arena of `slots` snapshot slots at pool
+  // alignment `align`; the fake records the ops ("X:slot:pos" an attach,
+  // "N:slot:pos" a prefill-cut snapshot, "RS:slot:pos" a rolling one,
+  // "F:arena" a release) and pins the blocks an entry holds.
+  void set_prefix_arena(int slots, int64_t align) {
+    arena_slots_ = slots;
+    arena_align_ = align;
+  }
+  dgpp::glm::SchedulerEngine::PrefixInfo prefix_info() const override {
+    dgpp::glm::SchedulerEngine::PrefixInfo info;
+    info.arena_slots = arena_slots_;
+    info.align = arena_align_;
+    info.block_tokens = block_tokens_;
+    return info;
+  }
+  int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
+                         dgpp::glm::SchedulerEngine::PrefixPrefill* plan) override {
+    if (plan->attach_slot >= 0) {
+      std::lock_guard<std::mutex> lock(armed_mu_);
+      prefix_ops_.push_back("X:" + std::to_string(req) + ":" +
+                            std::to_string(plan->attach_position));
+    }
+    const int32_t token = prefill(req, prompt);
+    if (plan->snap_slot >= 0) {
+      pinned_[plan->snap_slot] = plan->snap_position / block_tokens_ +
+                                 (plan->snap_position % block_tokens_ != 0 ? 1 : 0);
+      plan->snap_taken = true;
+      std::lock_guard<std::mutex> lock(armed_mu_);
+      prefix_ops_.push_back("N:" + std::to_string(req) + ":" +
+                            std::to_string(plan->snap_position));
+    }
+    return token;
+  }
+  void prefix_snapshot(int req, int slot, int64_t position) override {
+    pinned_[slot] = position / block_tokens_ + (position % block_tokens_ != 0 ? 1 : 0);
+    std::lock_guard<std::mutex> lock(armed_mu_);
+    prefix_ops_.push_back("RS:" + std::to_string(req) + ":" + std::to_string(position));
+  }
+  void prefix_release(int slot) override {
+    pinned_.erase(slot);
+    std::lock_guard<std::mutex> lock(armed_mu_);
+    prefix_ops_.push_back("F:" + std::to_string(slot));
+  }
+  std::vector<std::string> prefix_ops() const {
+    std::lock_guard<std::mutex> lock(armed_mu_);
+    return prefix_ops_;
+  }
+
   int max_concurrent_requests() const override { return slots_; }
   int64_t pool_blocks_total() const override { return total_blocks_; }
   int64_t pool_blocks_in_use() const override {
     int64_t sum = 0;
     for (const auto& [slot, live] : live_) sum += live.held_blocks;
+    for (const auto& [slot, blocks] : pinned_) sum += blocks;
     return sum;
   }
   int64_t blocks_for_tokens(int64_t tokens) const override {
@@ -201,6 +250,10 @@ class FakeEngine : public SchedulerEngine {
   int64_t total_blocks_;
   int64_t block_tokens_;
   bool can_sample_ = false;
+  int arena_slots_ = 0;
+  int64_t arena_align_ = 1;
+  std::map<int, int64_t> pinned_;
+  std::vector<std::string> prefix_ops_;  // under armed_mu_
   std::map<int, Live> live_;
   std::map<int, int> report_;
   std::map<int, std::vector<dgpp::glm_sample::Result>> pending_lps_;
@@ -333,6 +386,11 @@ class FakeFrontend : public ModelFrontend {
     std::lock_guard<std::mutex> lock(mu_);
     return last_globals_;
   }
+  // The prefix cache's boundary token (M7): the byte '|' plays the role
+  // marker — a prompt "ab|cd|ef" has boundaries at 2 and 5.
+  std::vector<int64_t> boundary_token_ids() const override {
+    return {static_cast<int64_t>('|')};
+  }
 
  private:
   bool with_markers_;
@@ -453,7 +511,8 @@ struct ServiceRig {
                       std::optional<uint64_t> fixed_seed = std::nullopt,
                       bool with_markers = false,
                       bool reasoning_in_content = false,
-                      dgpp::glm::AdmissionPolicy admission = {})
+                      dgpp::glm::AdmissionPolicy admission = {},
+                      int prefix_slots = 0)
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
         frontend(with_markers),
         cfg([&] {
@@ -467,7 +526,8 @@ struct ServiceRig {
           c.admission = admission;
           return c;
         }()),
-        service(cfg, &engine, &frontend, {kFakeEos}),
+        service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend,
+                {kFakeEos}),
         http(0, &service, /*max_connections=*/64) {
     http_loop = std::thread([this] { http.serve(); });
     engine_loop = std::thread([this] {
@@ -1666,6 +1726,66 @@ DGPP_TEST(serve_admission_growPolicyShedsTheYoungestWithFinishLength) {
 }
 
 }  // namespace
+
+// The prefix cache through the service (M7 stage B): the boundaries come
+// from the frontend's boundary token ('|' here) at their positions in the
+// prompt ids, the second identical request attaches to the first's entry
+// at the deepest cut (position 4 of "ab|cd|ef": the image of the boundary
+// at 5), "prefix_cache": false opts out, a non-boolean is refused by name,
+// and /v1/metrics reports the cache.
+DGPP_TEST(serve_prefixCache_boundariesAttachOptOutAndMetrics) {
+  ServiceRig rig(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                 /*can_sample=*/false, std::nullopt, /*with_markers=*/false,
+                 /*reasoning_in_content=*/false, dgpp::glm::AdmissionPolicy{},
+                 /*prefix_slots=*/4);
+  const auto post = [&](const std::string& body) {
+    Client c(rig.port());
+    c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+               "Content-Type: application/json\r\nContent-Length: " +
+               std::to_string(body.size()) + "\r\n\r\n" + body);
+    return c.read_until("usage", 5000) + c.read_available(300);
+  };
+  // The message content field, JSON-escaped as the wire carries it.
+  const auto content_of = [](const std::string& resp) {
+    const size_t a = resp.find("\"content\":\"");
+    if (a == std::string::npos) return std::string();
+    const size_t b = resp.find("\"}", a);
+    return b == std::string::npos ? std::string() : resp.substr(a, b - a);
+  };
+  const std::string first = post(chat_body("ab|cd|ef", 3));
+  const std::string second = post(chat_body("ab|cd|ef", 3));
+  require(first.find("200 OK") != std::string::npos && second.find("200 OK") != std::string::npos,
+          "both requests answer: " + first.substr(0, 120));
+  const std::string want = content_of(first);
+  require(want.size() > 11 && content_of(second) == want,
+          "identical answers, hot and cold: " + second.substr(0, 400));
+  std::vector<std::string> ops = rig.engine.prefix_ops();
+  // The first: an entry at cut 4, a rolling snapshot at 8 (the prompt end,
+  // aligned), the close entry from it. The second: the attach at 4, its
+  // own rolling at 8 (a duplicate of the close entry — released).
+  std::string joined;
+  for (const std::string& op : ops) joined += op + " ";
+  require(joined.find("N:0:4 ") != std::string::npos && joined.find("X:0:4 ") != std::string::npos,
+          "prefix ops: " + joined);
+
+  const std::string out = post(chat_body("ab|cd|ef", 3, ",\"prefix_cache\":false"));
+  require(out.find("200 OK") != std::string::npos && content_of(out) == want,
+          "the opted-out request answers the same: " + out.substr(0, 400));
+  require(rig.engine.prefix_ops().size() == ops.size(), "opted out: no prefix ops");
+  const std::string bad = post(chat_body("ab|cd|ef", 3, ",\"prefix_cache\":3"));
+  require(bad.find("400") != std::string::npos &&
+              bad.find("\"param\":\"prefix_cache\"") != std::string::npos,
+          "a non-boolean prefix_cache is refused by name: " + bad.substr(0, 300));
+
+  Client metrics(rig.port());
+  metrics.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+  const std::string met = metrics.read_available(800);
+  require(met.find("\"prefix_cache\":{\"enabled\":true,\"slots\":4") != std::string::npos &&
+              met.find("\"hits\":1,\"misses\":1,\"tokens_saved\":4") != std::string::npos &&
+              met.find("\"ttft_hit_count\":1") != std::string::npos &&
+              met.find("\"ttft_miss_count\":2") != std::string::npos,
+          "metrics: " + met);
+}
 
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");

@@ -1465,7 +1465,7 @@ layer until the expert-table staging was pinned); and nothing on the
 serving node may push the box to its memory watermark (§3 — the swapped
 vocab page).
 
-## 8. Prefix cache (M7; the model primitives built 2026-09-05, the cache itself designed)
+## 8. Prefix cache (M7, built 2026-09-05)
 
 V1 uses exact state snapshots only. The previous unproven 24 KB/token
 “linear-aux replay record” is removed.
@@ -1558,6 +1558,48 @@ runs the suffix under the same cut rule in the whole prompt's
 coordinates. Hot == cold is bitwise through the resume, the steps and
 the draft rows (the gate), and a second attach to the same entry with a
 different suffix is bitwise its own cold run.
+
+**As built, Stage B (2026-09-05; `glm_prefix_cache.*`,
+`glm_prefix_arena.hpp`, the scheduler, the adapters, the service, the
+journal).** Four choices, each departing a little from the sketch above.
+(1) *The decisions live in the scheduler, not in a new rank-0 protocol.*
+The scheduler already runs the same deterministic policy on every rank
+over the same journaled requests; the prefix cache is one more pure
+function of that stream, so attach / snapshot / evict are rank-identical
+by construction. The journal carries the INPUTS (a submit's boundaries
+and opt-out) and a CHECK (each tick record's "pd": rank 0's decision
+digest after the previous tick; a peer compares before applying and dies
+on a mismatch) rather than the decisions themselves; the warm record
+carries rank 0's slot count. The decisions also ride the op stream.
+(2) *Boundaries are positions of role-marker tokens in the prompt ids*
+(<|system|>, <|user|>, <|assistant|>, <|observation|>), not offsets
+recovered by re-rendering message prefixes: a pure function of the
+shared prefix, identical across turns, one scan, and the legacy route
+gets them for free. The cold prefill cuts at their aligned images (and
+at 2048 multiples). (3) *Two kinds of entry.* A cold prefill takes one at
+its deepest cut (the assistant header in a chat — the next turn's cut);
+a live request keeps a ROLLING snapshot in one arena slot at every
+aligned committed position, and at retire (EOS or the cap) that slot
+becomes the close-time entry at floor((end − 1) / kpool) · kpool, the
+aligned image of the EOS token's position — where the next turn's
+`<|user|>` (the EOS token itself) cuts. The lookup is exact and confined
+to the prompt's own cuts, so an attach is always at a cold-path cut and
+therefore bitwise. (4) *The arena is the engines'.* `PrefixArena` holds
+device slots of one session's state (`--prefix-cache-gib`, 1.5 GiB → 42
+at real dims), stream-ordered snapshots and attaches, event-timed;
+entries pin their DSA blocks in the pool, and an admission short of
+blocks or a snapshot slot evicts the LRU unattached entry (never one a
+live request opened from). Metrics: hits, misses, tokens saved, entries
+taken and evicted, blocks pinned, the arena's copy times, the TTFT split.
+Known limits: the MTP graph's two-token steps fix the committed
+count's parity while the draft is accepted, so an answer can visit no
+aligned position at all (measured: a fully accepted 26-token answer to
+a 25-token prompt) — a request whose committed position is aligned at
+retire snapshots the live state then, the rest fall back to the
+prefill-cut entry, never to a wrong attach; no persistence; the
+close-time entry hits only when the next turn re-renders the previous
+answer to the same ids (the template keeps the reasoning with
+`clear_thinking: false`, and the answer must have ended in EOS).
 
 ## 9. MTP transaction model
 

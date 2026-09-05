@@ -128,13 +128,81 @@ class FakeEngine : public SchedulerEngine {
     return s;
   }
 
+  // The prefix cache seam (M7): an arena of `slots` snapshot slots with
+  // pool alignment `align`. The fake records every op — "X:slot:pos@arena"
+  // an attach, "N:slot:pos@arena" a snapshot taken at a prefill cut,
+  // "RS:slot:pos@arena" a rolling snapshot, "F:arena" a release — and pins
+  // the blocks an entry holds (position / block_tokens rounded up) so the
+  // pool meters see them exactly as the real pool does.
+  void set_prefix_arena(int slots, int64_t align, int64_t chunk_tokens = 2048) {
+    arena_slots_ = slots;
+    arena_align_ = align;
+    arena_chunk_ = chunk_tokens;
+  }
+  dgpp::glm::SchedulerEngine::PrefixInfo prefix_info() const override {
+    dgpp::glm::SchedulerEngine::PrefixInfo info;
+    info.arena_slots = arena_slots_;
+    info.align = arena_align_;
+    info.block_tokens = block_tokens_;
+    info.chunk_tokens = arena_chunk_;
+    return info;
+  }
+  int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
+                         dgpp::glm::SchedulerEngine::PrefixPrefill* plan) override {
+    require(plan != nullptr && plan->boundaries != nullptr, "fake: plan");
+    if (plan->attach_slot >= 0) {
+      require(pinned_.count(plan->attach_slot) != 0, "fake: attach from an empty arena slot");
+      require(pinned_positions_[plan->attach_slot] == plan->attach_position,
+              "fake: attach position differs from the arena slot's");
+      ops_.push_back("X:" + std::to_string(req) + ":" +
+                     std::to_string(plan->attach_position) + "@" +
+                     std::to_string(plan->attach_slot));
+    }
+    const int32_t token = prefill(req, prompt);
+    if (plan->snap_slot >= 0) {
+      require(pinned_.count(plan->snap_slot) == 0, "fake: snapshot into an occupied arena slot");
+      pin(plan->snap_slot, plan->snap_position);
+      plan->snap_taken = true;
+      ops_.push_back("N:" + std::to_string(req) + ":" +
+                     std::to_string(plan->snap_position) + "@" +
+                     std::to_string(plan->snap_slot));
+    }
+    return token;
+  }
+  void prefix_snapshot(int req, int slot, int64_t position) override {
+    require(live_.count(req) != 0, "fake: rolling snapshot of an unopened slot");
+    const Live& live = live_.at(req);
+    // The scheduler's view of the committed position must be the fake's:
+    // prompt + tokens returned so far - 1 (the last is pending).
+    require(position == live.prompt_tokens + static_cast<int64_t>(live.returned) - 1,
+            "fake: rolling snapshot position " + std::to_string(position) +
+                " differs from the slot's committed " +
+                std::to_string(live.prompt_tokens + static_cast<int64_t>(live.returned) - 1));
+    if (pinned_.count(slot) != 0) pinned_.erase(slot);
+    pin(slot, position);
+    ops_.push_back("RS:" + std::to_string(req) + ":" + std::to_string(position) +
+                   "@" + std::to_string(slot));
+  }
+  void prefix_release(int slot) override {
+    require(pinned_.count(slot) != 0, "fake: release of an empty arena slot " +
+                                          std::to_string(slot));
+    pinned_.erase(slot);
+    pinned_positions_.erase(slot);
+    ops_.push_back("F:" + std::to_string(slot));
+  }
+  int64_t pinned_blocks() const {
+    int64_t n = 0;
+    for (const auto& [slot, blocks] : pinned_) n += blocks;
+    return n;
+  }
+
   int max_concurrent_requests() const override { return slots_; }
   int decode_batch_capacity() const override { return batch_capacity_; }
   int64_t pool_blocks_total() const override { return total_blocks_; }
   int64_t pool_blocks_in_use() const override {
     int64_t sum = 0;
     for (const auto& [slot, live] : live_) sum += live.held_blocks;
-    return sum;
+    return sum + pinned_blocks();
   }
   int64_t blocks_for_tokens(int64_t tokens) const override {
     return (tokens + block_tokens_ - 1) / block_tokens_;
@@ -149,6 +217,7 @@ class FakeEngine : public SchedulerEngine {
     queue.erase(queue.begin());
     live.prompt_tokens = static_cast<int64_t>(prompt.size());
     live.last_token = live.episode.first;
+    live.returned = 1;
     live_[req] = live;
     ops_.push_back("P:" + std::to_string(req) + ":" +
                    std::to_string(prompt.size()));
@@ -191,6 +260,7 @@ class FakeEngine : public SchedulerEngine {
     std::vector<int32_t> out = live.episode.steps[live.next_step++];
     const int32_t prev_token = live.last_token;
     if (!out.empty()) live.last_token = out.back();
+    live.returned += out.size();
     ops_.push_back("S:" + std::to_string(req) + ":" +
                    std::to_string(prev_token));
     note_logprobs(req, out);
@@ -225,9 +295,19 @@ class FakeEngine : public SchedulerEngine {
     int64_t prompt_tokens = 0;
     size_t next_step = 0;
     int32_t last_token = -1;
+    size_t returned = 0;  // tokens handed to the scheduler (the pending one included)
   };
+  void pin(int slot, int64_t position) {
+    pinned_[slot] = position / block_tokens_ + (position % block_tokens_ != 0 ? 1 : 0);
+    pinned_positions_[slot] = position;
+  }
 
   int slots_;
+  int arena_slots_ = 0;
+  int64_t arena_align_ = 1;
+  int64_t arena_chunk_ = 2048;
+  std::map<int, int64_t> pinned_;           // arena slot -> blocks pinned
+  std::map<int, int64_t> pinned_positions_;  // arena slot -> position
   int64_t total_blocks_;
   int64_t block_tokens_;
   int batch_capacity_ = 1;
@@ -1151,6 +1231,252 @@ DGPP_TEST(scheduler_logprobs_rideWithEveryTokenWhenAsked) {
     threw = true;
   }
   require(threw, "an engine without logprobs refuses at submit");
+}
+
+// ---- the prefix cache (M7 stage B) ------------------------------------------
+// The fake's geometry below: blocks of 4 tokens, pool alignment 4, chunks
+// of 2048 (never reached), so a prompt's cuts are the aligned images of its
+// boundaries only.
+
+SchedulerRequest make_cached_request(const std::string& id,
+                                     std::vector<int64_t> prompt,
+                                     std::vector<int64_t> boundaries,
+                                     int max_steps) {
+  SchedulerRequest r;
+  r.id = id;
+  r.prompt = std::move(prompt);
+  r.boundaries = std::move(boundaries);
+  r.max_steps = max_steps;
+  return r;
+}
+
+std::vector<int64_t> counted_prompt(int n, int64_t base = 100) {
+  std::vector<int64_t> p(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) p[static_cast<size_t>(i)] = base + i;
+  return p;
+}
+
+DGPP_TEST(scheduler_prefixCache_secondIdenticalPromptAttachesAtTheDeepestCut) {
+  // GIVEN a 21-token prompt with boundaries at 5 and 13 (cuts 4 and 12) run
+  // twice, back to back, on an engine with a four-slot arena:
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/4, /*align=*/4);
+  engine.arm(0, {1, 2, 3}, 3);
+  engine.arm(1, {1, 2, 3}, 3);
+  Scheduler sched(&engine, {kEos});
+  require(sched.prefix_slots() == 4, "the cache takes the engine's arena");
+  sched.submit(make_cached_request("a", counted_prompt(21), {5, 13}, 3));
+  sched.submit(make_cached_request("b", counted_prompt(21), {5, 13}, 3));
+  sched.run_to_completion();
+
+  // THEN the first prefill takes an entry at the deepest cut (12), the
+  // second attaches to it there and takes none (the cut is the entry's);
+  // both answers are the scripts'. The rolling snapshots: committed
+  // positions 21, 22 — never aligned before the cap — so none.
+  const std::string expected =
+      "P:0:21 N:0:12@0 S:0:1 X:1:12@0 P:1:21 S:1:1 S:0:2 C:0 S:1:2 C:1";
+  require(engine.op_stream() == expected,
+          "prefix cache op stream:\n  got:      " + engine.op_stream() +
+              "\n  expected: " + expected);
+  const Scheduler::Meters m = sched.meters();
+  require(m.prefix_hits == 1 && m.prefix_misses == 1 && m.prefix_snapshots == 1 &&
+              m.prefix_tokens_saved == 12 && m.prefix_entries == 1 &&
+              m.prefix_blocks_pinned == 3,
+          "prefix meters: one miss, one hit of 12 tokens, one entry pinning 3 blocks");
+  require(ids_joined(sched.results()[1].generated) == "1,2,3", "b's ids");
+}
+
+DGPP_TEST(scheduler_prefixCache_rollingSnapshotBecomesTheCloseEntryTheNextTurnAttachesTo) {
+  // GIVEN a 21-token prompt whose answer runs six tokens and ends in EOS:
+  // committed positions 21 (after the prefill pick), 22, 23, 24 <- aligned,
+  // 25, 26 (the EOS pending) — one rolling snapshot at 24; at retire the
+  // entry sits at floor((27 - 1) / 4) * 4 = 24, the aligned image of the
+  // EOS token's position 26.
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/4, /*align=*/4);
+  engine.arm(0, {31, 32, 33, 34, 35, kEos}, 8);
+  Scheduler sched(&engine, {kEos});
+  const std::vector<int64_t> prompt = counted_prompt(21);
+  sched.submit(make_cached_request("a", prompt, {5, 13}, 8));
+  sched.run_to_completion();
+  const std::string expected_a =
+      "P:0:21 N:0:12@0 S:0:31 S:0:32 S:0:33 RS:0:24@1 S:0:34 S:0:35 C:0";
+  require(engine.op_stream() == expected_a,
+          "turn one:\n  got:      " + engine.op_stream() + "\n  expected: " + expected_a);
+  Scheduler::Meters m = sched.meters();
+  require(m.prefix_rolling == 1 && m.prefix_close_entries == 1 && m.prefix_entries == 2,
+          "one rolling snapshot became the close entry; two entries live");
+
+  // WHEN the next turn arrives: the conversation so far (the prompt, the
+  // five answer tokens, the EOS as the next message's marker) and a new
+  // message, with boundaries at the markers (5, 13, 26 -> cuts 4, 12, 24):
+  std::vector<int64_t> next = prompt;
+  next.insert(next.end(), {31, 32, 33, 34, 35, kEos});
+  next.insert(next.end(), {200, 201, 202, 203});
+  engine.arm(0, {41, 42}, 2);
+  sched.submit(make_cached_request("b", next, {5, 13, 26}, 2));
+  sched.run_to_completion();
+
+  // THEN it attaches at 24 (the close entry, the deepest cut) and prefills
+  // the seven remaining tokens; no new entry at a cut (24 is the deepest),
+  // and its own close entry at 32 — the retire-time snapshot, its committed
+  // position 31 + 2 - 1 being aligned.
+  const std::string expected_b = expected_a + " X:0:24@1 P:0:31 S:0:41 RS:0:32@2 C:0";
+  require(engine.op_stream() == expected_b,
+          "turn two:\n  got:      " + engine.op_stream() + "\n  expected: " + expected_b);
+  m = sched.meters();
+  require(m.prefix_hits == 1 && m.prefix_tokens_saved == 24, "the second turn hit at 24");
+}
+
+DGPP_TEST(scheduler_prefixCache_retireAtAnAlignedPositionSnapshotsTheLiveState) {
+  // GIVEN a 21-token prompt whose answer ends at the cap after four tokens:
+  // committed positions 21, 22, 23 — never aligned before the cap — and 24
+  // at retire, aligned. THEN the retire takes the snapshot from the live
+  // slot (before the close) and it becomes the close entry at 24, where
+  // the next turn (a marker at the fourth answer token's position, 24)
+  // cuts and attaches.
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/4, /*align=*/4);
+  engine.arm(0, {31, 32, 33, 34}, 4);
+  engine.arm(0, {41}, 1);
+  Scheduler sched(&engine, {kEos});
+  const std::vector<int64_t> prompt = counted_prompt(21);
+  sched.submit(make_cached_request("a", prompt, {5, 13}, 4));
+  sched.run_to_completion();
+  const std::string expected_a = "P:0:21 N:0:12@0 S:0:31 S:0:32 S:0:33 RS:0:24@1 C:0";
+  require(engine.op_stream() == expected_a,
+          "retire-time snapshot:\n  got:      " + engine.op_stream() +
+              "\n  expected: " + expected_a);
+  require(sched.meters().prefix_close_entries == 1, "the close entry at 24");
+  std::vector<int64_t> next = prompt;
+  next.insert(next.end(), {31, 32, 33, kEos, 200, 201});
+  sched.submit(make_cached_request("b", next, {5, 13, 24}, 1));
+  sched.run_to_completion();
+  const std::string expected_b = expected_a + " X:0:24@1 P:0:27 C:0";
+  require(engine.op_stream() == expected_b,
+          "the next turn attaches at 24:\n  got:      " + engine.op_stream() +
+              "\n  expected: " + expected_b);
+}
+
+DGPP_TEST(scheduler_prefixCache_optOutAndNoArenaKeepThePlainOpStream) {
+  const auto run = [](bool arena, bool no_cache) {
+    FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+    if (arena) engine.set_prefix_arena(2, 4);
+    engine.arm(0, {1, 2}, 2);
+    engine.arm(0, {1, 2}, 2);
+    Scheduler sched(&engine, {kEos});
+    SchedulerRequest a = make_cached_request("a", counted_prompt(21), {5, 13}, 2);
+    SchedulerRequest b = make_cached_request("b", counted_prompt(21), {5, 13}, 2);
+    a.no_cache = no_cache;
+    b.no_cache = no_cache;
+    sched.submit(a);
+    sched.submit(b);
+    sched.run_to_completion();
+    return engine.op_stream();
+  };
+  const std::string plain = "P:0:21 S:0:1 C:0 P:0:21 S:0:1 C:0";
+  require(run(false, false) == plain, "no arena: the plain op stream");
+  require(run(true, true) == plain, "opted out: the plain op stream");
+  require(run(true, false) != plain, "the cache on changes the stream (the control)");
+}
+
+DGPP_TEST(scheduler_prefixCache_evictsTheLeastRecentlyUsedUnattachedEntry) {
+  // GIVEN a one-slot arena and three prompts with different first tokens:
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/1, /*align=*/4);
+  for (int i = 0; i < 4; ++i) engine.arm(0, {1}, 1);
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_cached_request("a", counted_prompt(21, 100), {5, 13}, 1));
+  sched.submit(make_cached_request("b", counted_prompt(21, 300), {5, 13}, 1));
+  sched.submit(make_cached_request("a2", counted_prompt(21, 100), {5, 13}, 1));
+  sched.submit(make_cached_request("b2", counted_prompt(21, 300), {5, 13}, 1));
+  sched.run_to_completion();
+  // THEN each new prompt evicts the other's entry (LRU, unattached — the
+  // previous request retired) before its own snapshot; a2 misses (a's
+  // entry went), b2 misses (b's entry went).
+  const std::string expected =
+      "P:0:21 N:0:12@0 C:0 F:0 P:0:21 N:0:12@0 C:0 F:0 P:0:21 N:0:12@0 C:0 "
+      "F:0 P:0:21 N:0:12@0 C:0";
+  require(engine.op_stream() == expected,
+          "eviction:\n  got:      " + engine.op_stream() + "\n  expected: " + expected);
+  const Scheduler::Meters m = sched.meters();
+  require(m.prefix_evictions == 3 && m.prefix_hits == 0 && m.prefix_misses == 4 &&
+              m.prefix_entries == 1,
+          "three evictions, no hits, one entry live");
+}
+
+DGPP_TEST(scheduler_prefixCache_entriesGiveTheirBlocksToARequestThatNeedsThem) {
+  // GIVEN a pool of 12 blocks (48 tokens): a's entry pins 3 blocks; a
+  // request needing 10 blocks (37 tokens + 3 steps) cannot fit beside it
+  // (12 - 3 = 9 free) — the entry is evicted for it, deterministically.
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/12, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/2, /*align=*/4);
+  engine.arm(0, {1}, 1);
+  engine.arm(0, {2, 3, 4}, 3);
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_cached_request("a", counted_prompt(21), {5, 13}, 1));
+  sched.run_to_completion();
+  require(sched.meters().prefix_blocks_pinned == 3, "a's entry pins 3 blocks");
+  sched.submit(make_cached_request("big", counted_prompt(37, 500), {}, 3));
+  sched.run_to_completion();
+  const std::string expected = "P:0:21 N:0:12@0 C:0 F:0 P:0:37 S:0:2 S:0:3 C:0";
+  require(engine.op_stream() == expected,
+          "block pressure:\n  got:      " + engine.op_stream() + "\n  expected: " + expected);
+  require(sched.meters().prefix_evictions == 1 && sched.meters().prefix_blocks_pinned == 0,
+          "the entry gave its blocks");
+}
+
+DGPP_TEST(scheduler_prefixCache_attachedEntriesAreNeverEvicted) {
+  // GIVEN a one-slot arena: a's entry is attached by b (live, cap 4) when
+  // c (a different prompt) wants a slot for its own snapshot — none is
+  // evictable, so c's snapshot is skipped and counted; b's answer is
+  // unaffected. When b itself retires at an aligned position (24), its
+  // reference has returned first, so a's entry is evictable for b's own
+  // close entry — and is evicted.
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/1, /*align=*/4);
+  engine.arm(0, {1}, 1);
+  engine.arm(0, {5, 6, 7, 8}, 4);
+  engine.arm(1, {9}, 1);
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_cached_request("a", counted_prompt(21), {5, 13}, 1));
+  sched.run_to_completion();
+  sched.submit(make_cached_request("b", counted_prompt(21), {5, 13}, 4));
+  sched.submit(make_cached_request("c", counted_prompt(21, 300), {5, 13}, 1));
+  sched.run_to_completion();
+  const std::string expected =
+      "P:0:21 N:0:12@0 C:0 X:0:12@0 P:0:21 S:0:5 P:1:21 C:1 S:0:6 S:0:7 F:0 RS:0:24@0 C:0";
+  require(engine.op_stream() == expected,
+          "attached entry:\n  got:      " + engine.op_stream() + "\n  expected: " + expected);
+  require(sched.meters().prefix_skipped == 1 && sched.meters().prefix_evictions == 1 &&
+              sched.meters().prefix_close_entries == 1,
+          "c's snapshot skipped while b was attached; a's entry gave way to b's close entry");
+}
+
+DGPP_TEST(scheduler_prefixCache_sameStreamTwice_identicalOpsAndDigests) {
+  // Rank identity in miniature: two schedulers over two fakes, fed the same
+  // requests, produce the same op streams and digests; a third whose last
+  // prompt differs (a miss where the others hit) produces another digest.
+  const auto run = [](bool variant) {
+    FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+    engine.set_prefix_arena(/*slots=*/3, /*align=*/4);
+    engine.arm(0, {1, 2, 3, 4, 5, kEos}, 8);
+    engine.arm(1, {6, 7}, 2);
+    engine.arm(1, {8}, 1);  // c lands on slot 1, freed first (b's two steps)
+    Scheduler sched(&engine, {kEos});
+    sched.submit(make_cached_request("a", counted_prompt(21), {5, 13}, 8));
+    sched.submit(make_cached_request("b", counted_prompt(21, 300), {5, 13}, 2));
+    sched.submit(make_cached_request("c", counted_prompt(21, variant ? 500 : 100),
+                                     {5, 13}, 1));
+    sched.run_to_completion();
+    return std::make_pair(engine.op_stream(), sched.prefix_digest());
+  };
+  const auto one = run(false), two = run(false), three = run(true);
+  require(one.first == two.first && one.second == two.second,
+          "identical streams: identical ops and digests");
+  require(one.second != three.second, "a different stream: a different digest");
+  require(one.first.find("X:1:12@0") != std::string::npos,
+          "c attached to a's entry in the base run: " + one.first);
 }
 
 int main() {

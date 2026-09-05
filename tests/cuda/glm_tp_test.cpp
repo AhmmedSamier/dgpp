@@ -4379,6 +4379,269 @@ DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
   DGPP_CUDA_OK(cudaFree(snap_buf));
 }
 
+
+// M7 stage B (2026-09-05): the prefix cache through the SCHEDULER over the
+// real model at world 1 — the eager engine adapter with a three-slot
+// arena. Token id 5 plays the role marker: its positions are the prompts'
+// boundaries (the service derives them the same way from the template's
+// role tokens). A 25-token prompt with markers at 0 and 21 cuts at 20.
+//   A: cold — an entry at the cut (20), a rolling snapshot at the first
+//      aligned committed position (28), which becomes the close entry.
+//   B: the same prompt — attaches at 20; its answer must equal A's.
+//   C: the same prompt opted out — a cold run, the same answer, no ops.
+//   D: the conversation so far plus a new message (marker at 31, cut 28)
+//      — attaches to the CLOSE entry at 28; its answer must equal a cold
+//      run of D on a cache-less adapter.
+// Every attach is bitwise the cold path by stage A's gate; this one pins
+// the scheduler's decisions (the exact op sequence), the answers through
+// the engine seam, the decision digest across two identical runs, and the
+// block accounting once the arenas are gone.
+DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const int V = cfg.vocab_size;
+  const int64_t kMarker = 5;
+  const auto boundaries_of = [&](const std::vector<int64_t>& p) {
+    std::vector<int64_t> b;
+    for (size_t i = 1; i < p.size(); ++i)
+      if (p[i] == kMarker) b.push_back(static_cast<int64_t>(i));
+    return b;
+  };
+  std::vector<int64_t> p1 = make_tokens(25, V);
+  for (int64_t& t : p1)
+    if (t == kMarker) t = kMarker + 1;
+  p1[0] = kMarker;
+  p1[21] = kMarker;
+  require(boundaries_of(p1) == std::vector<int64_t>{21}, "p1's boundary");
+
+  struct Ops : public dgpp::glm::SchedulerObserver {
+    std::vector<std::string> ops;
+    void on_token(const std::string&, int64_t, int) override {}
+    void on_retire(const std::string&, const dgpp::glm::Scheduler::Result&) override {}
+    void on_prefix(const std::string&, const char* op, int64_t position,
+                   int) override {
+      ops.push_back(std::string(op) + "@" + std::to_string(position));
+    }
+  };
+  const auto request = [&](const std::string& id, const std::vector<int64_t>& p,
+                           int steps, bool no_cache) {
+    dgpp::glm::SchedulerRequest r;
+    r.id = id;
+    r.prompt = p;
+    r.boundaries = boundaries_of(p);
+    r.max_steps = steps;
+    r.no_cache = no_cache;
+    return r;
+  };
+  const auto joined = [](const std::vector<std::string>& v) {
+    std::string s;
+    for (const std::string& x : v) s += (s.empty() ? "" : " ") + x;
+    return s;
+  };
+
+  std::vector<int64_t> gen_a, gen_d;
+  uint64_t digest_first = 0;
+  for (int run = 0; run < 2; ++run) {
+    // No draft block: the eager adapter never drives it (in production the
+    // draft runs only under the graph adapter, whose rolling snapshots the
+    // fabric ritual exercises), and a snapshot of a session whose draft
+    // block was never advanced is refused by design.
+    GlmDiagnosticModel m(cfg, dir, /*max_tokens=*/96, /*max_cache_tokens=*/2048,
+                         nullptr, 0, 1, GlmResidency::Resident, GlmHeadSharding::Full,
+                         /*max_requests=*/2, /*mtp=*/false);
+    const int64_t blocks0 = m.dsa_blocks_in_use();
+    Ops ops;
+    uint64_t digest = 0;
+    std::vector<int64_t> a, b, c, d;
+    {
+      dgpp::GenEngineAdapter eng(&m, 2, dgpp::make_w1_pick(V), nullptr, nullptr,
+                                 /*prefix_slots=*/3);
+      dgpp::glm::Scheduler sched(&eng, /*eos_token_ids=*/{});
+      require(sched.prefix_slots() == 3, "the scheduler took the arena");
+      sched.set_observer(&ops);
+      sched.submit(request("a", p1, 6, false));
+      sched.run_to_completion();
+      a = sched.results()[0].generated;
+      sched.submit(request("b", p1, 6, false));
+      sched.run_to_completion();
+      b = sched.results()[1].generated;
+      sched.submit(request("c", p1, 6, true));
+      sched.run_to_completion();
+      c = sched.results()[2].generated;
+      std::vector<int64_t> p2 = p1;
+      p2.insert(p2.end(), a.begin(), a.end());
+      p2.insert(p2.end(), {kMarker, 40, 41, 42});
+      require(boundaries_of(p2) == (std::vector<int64_t>{21, 31}), "p2's boundaries");
+      sched.submit(request("d", p2, 4, false));
+      sched.run_to_completion();
+      d = sched.results()[3].generated;
+      digest = sched.prefix_digest();
+      require(m.dsa_blocks_in_use() > blocks0, "the entries pin blocks while the arena lives");
+      const std::string expected =
+          "snapshot@20 rolling@28 close@28 attach@20 rolling@28 drop@28 attach@28 "
+          "rolling@36 close@36";
+      require(joined(ops.ops) == expected,
+              "prefix decisions:\n  got:      " + joined(ops.ops) + "\n  expected: " + expected);
+      // D cold: a cache-less adapter over the same model.
+      dgpp::GenEngineAdapter cold(&m, 2, dgpp::make_w1_pick(V));
+      dgpp::glm::Scheduler s2(&cold, {});
+      s2.submit(request("d-cold", p2, 4, false));
+      s2.run_to_completion();
+      require(s2.results()[0].generated == d,
+              "D through the close entry must equal D cold");
+    }
+    require(m.dsa_blocks_in_use() == blocks0, "every block returned once the arenas were destroyed");
+    require(a.size() == 6 && b == a && c == a, "A, B (hot) and C (opted out) agree");
+    if (run == 0) {
+      gen_a = a;
+      gen_d = d;
+      digest_first = digest;
+    } else {
+      require(a == gen_a && d == gen_d, "the second run's answers equal the first's");
+      require(digest == digest_first, "identical runs, identical decision digests");
+    }
+  }
+  std::printf("[ OK ] prefix cache through the scheduler: hot == cold on A/B/C/D, "
+              "decisions and digest identical across two runs\n");
+}
+
+
+// M7 stage B, the production path: the prefix cache under the GRAPH engine
+// adapter with the draft block, on a two-rank loopback world. Each rank
+// runs the scheduler over its own adapter with a three-slot arena; the
+// requests are A (cold), B (the same prompt: attaches at the cut), D (the
+// conversation so far plus a message: attaches to the close entry) and
+// D-cold (opted out). B must answer as A and D as D-cold on every rank;
+// the ranks must agree on every answer, on the decision sequence and on
+// the digest — the rolling snapshots ride between graph replays, on
+// device-driven positions, with the draft block's row counter in step.
+DGPP_TEST(glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const int V = cfg.vocab_size;
+  constexpr int kWorld = 2;
+  const int64_t kMarker = 5;
+  const auto boundaries_of = [&](const std::vector<int64_t>& p) {
+    std::vector<int64_t> b;
+    for (size_t i = 1; i < p.size(); ++i)
+      if (p[i] == kMarker) b.push_back(static_cast<int64_t>(i));
+    return b;
+  };
+  std::vector<int64_t> p1 = make_tokens(25, V);
+  for (int64_t& t : p1)
+    if (t == kMarker) t = kMarker + 1;
+  p1[0] = kMarker;
+  p1[21] = kMarker;
+  struct Ops : public dgpp::glm::SchedulerObserver {
+    std::vector<std::string> ops;
+    void on_token(const std::string&, int64_t, int) override {}
+    void on_retire(const std::string&, const dgpp::glm::Scheduler::Result&) override {}
+    void on_prefix(const std::string&, const char* op, int64_t position,
+                   int) override {
+      ops.push_back(std::string(op) + "@" + std::to_string(position));
+    }
+  };
+  const auto request = [&](const std::string& id, const std::vector<int64_t>& p,
+                           int steps, bool no_cache) {
+    dgpp::glm::SchedulerRequest r;
+    r.id = id;
+    r.prompt = p;
+    r.boundaries = boundaries_of(p);
+    r.max_steps = steps;
+    r.no_cache = no_cache;
+    return r;
+  };
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29924);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<std::vector<int64_t>>> gens(kWorld);
+  std::vector<std::string> decisions(kWorld);
+  std::vector<uint64_t> digests(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel graph(cfg, dir, /*max_tokens=*/96, /*max_cache_tokens=*/2048,
+                                 &reducer, r, kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/1, /*mtp=*/true);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        arrive_once();
+        const int64_t blocks0 = graph.dsa_blocks_in_use();
+        Ops ops;
+        {
+          dgpp::GlmGraphEngineAdapter engine(
+              &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+              /*pick_timeout_ms=*/60000, /*batch_min_live=*/4, nullptr, nullptr,
+              dgpp::kSamplingCandidates, nullptr, /*prefix_slots=*/3);
+          dgpp::glm::Scheduler sched(&engine, /*eos_token_ids=*/{});
+          sched.set_observer(&ops);
+          const auto run = [&](const dgpp::glm::SchedulerRequest& req) {
+            sched.submit(req);
+            while (sched.tick()) {
+            }
+            return sched.results().back().generated;
+          };
+          std::vector<int64_t> a = run(request("a", p1, 6, false));
+          std::vector<int64_t> b = run(request("b", p1, 6, false));
+          std::vector<int64_t> p2 = p1;
+          p2.insert(p2.end(), a.begin(), a.end());
+          p2.insert(p2.end(), {kMarker, 40, 41, 42});
+          std::vector<int64_t> d = run(request("d", p2, 4, false));
+          std::vector<int64_t> dc = run(request("d-cold", p2, 4, true));
+          if (a.size() != 6 || b != a)
+            throw std::runtime_error("B (hot) differs from A (cold)");
+          if (d != dc) throw std::runtime_error("D (via the close entry) differs from D cold");
+          gens[static_cast<size_t>(r)] = {a, b, d, dc};
+          digests[static_cast<size_t>(r)] = sched.prefix_digest();
+          for (const std::string& op : ops.ops)
+            decisions[static_cast<size_t>(r)] += op + " ";
+          if (decisions[static_cast<size_t>(r)].find("attach@20") == std::string::npos ||
+              decisions[static_cast<size_t>(r)].find("attach@28") == std::string::npos)
+            throw std::runtime_error("expected attaches at 20 and 28, got: " +
+                                     decisions[static_cast<size_t>(r)]);
+        }
+        if (graph.dsa_blocks_in_use() != blocks0)
+          throw std::runtime_error("blocks leaked past the arena");
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("prefix cache graph rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r) {
+    require(gens[static_cast<size_t>(r)] == gens[0], "answers differ across ranks");
+    require(decisions[static_cast<size_t>(r)] == decisions[0],
+            "prefix decisions differ across ranks");
+    require(digests[static_cast<size_t>(r)] == digests[0], "digests differ across ranks");
+  }
+  DGPP_LOG_INFO("prefix cache under the MTP graph engine, w2: {}", decisions[0]);
+}
+
 DGPP_TEST(glm_tp_decode_session_hazard) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";

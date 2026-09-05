@@ -31,6 +31,10 @@ ChatMarkers ChatMarkers::from_tokenizer(const GlmTokenizer& tok) {
   m.arg_key_close = lookup("</arg_key>");
   m.arg_value_open = lookup("<arg_value>");
   m.arg_value_close = lookup("</arg_value>");
+  for (const char* role : {"<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"}) {
+    const ChatMarker r = lookup(role);
+    if (r.available()) m.role_markers.push_back(r);
+  }
   return m;
 }
 

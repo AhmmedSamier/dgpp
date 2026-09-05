@@ -52,6 +52,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <csignal>
 #include <cstdio>
@@ -158,6 +159,17 @@ struct PinnedWords {
 // audit tap (the 4-way consistency evidence). w1 passes null for both and
 // the loop is exactly Stage 4a's. The caller destroys the engine adapter
 // and stops the bus after this loop has joined.
+// The prefix cache's arena (M7): the snapshot slots a per-rank budget of
+// `gib` GiB holds at this model's session state size; 0 = off.
+int prefix_arena_slots(const dgpp::GlmDiagnosticModel& model, double gib) {
+  if (gib <= 0.0) return 0;
+  const size_t bytes = model.session_snapshot_bytes();
+  if (bytes == 0) return 0;
+  const double budget = gib * 1024.0 * 1024.0 * 1024.0;
+  const double slots = std::floor(budget / static_cast<double>(bytes));
+  return static_cast<int>(std::min(slots, 4096.0));
+}
+
 int serve_openai(dgpp::glm::SchedulerEngine* engine,
                  const dgpp::GlmTextConfig& cfg,
                  const std::string& ckpt,
@@ -181,6 +193,14 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
   scfg.fixed_seed = k.fixed_seed;
   scfg.reasoning_in_content = k.reasoning_in_content;
   scfg.admission = k.admission;
+  {
+    // The prefix cache's key (M7): what the entries are bound to.
+    char key[96];
+    std::snprintf(key, sizeof(key), "tok:%016llx tpl:%016llx",
+                  static_cast<unsigned long long>(tok.revision_hash()),
+                  static_cast<unsigned long long>(tpl.source_hash()));
+    scfg.prefix_key = std::string(key) + " ckpt:" + fs::path(ckpt).filename().string();
+  }
   std::vector<int64_t> eos =
       no_eos ? std::vector<int64_t>{} : cfg.eos_token_ids;
 
@@ -284,6 +304,10 @@ int main(int argc, char** argv) {
       "      (requires max-concurrency * (mtp?2:1) <= 8)\n"
       "    [--sampling-candidates N (default 128, in [1, 256]): the sampled\n"
       "      pick's per-rank candidate width; narrower falls back more]\n"
+      "  prefix cache (M7): [--prefix-cache-gib X (default 1.5)]: the\n"
+      "    snapshot arena per rank (slots = X GiB / one session's state);\n"
+      "    [--no-prefix-cache] turns it off; every rank takes rank 0's slot\n"
+      "    count from the warm record\n"
       "  admission (M6 6d): [--admission full|grow (default full)]\n"
       "    [--admission-window N (default 256)]: grow reserves prompt + N\n"
       "    tokens, grows at tick top, and sheds the youngest request\n"
@@ -317,6 +341,7 @@ int main(int argc, char** argv) {
   int max_connections = 64;
   int world = 1, rank = 0, rendezvous_timeout_ms = 120000;
   bool no_eos = false, decode_graph = false, mtp = false;
+  double prefix_cache_gib = 1.5;  // M7: the snapshot arena; 0 = off
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<int> top_k;
   std::optional<uint64_t> fixed_seed;
@@ -341,6 +366,8 @@ int main(int argc, char** argv) {
       graph_batch_min_live = std::stoi(next());
     else if (a == "--mtp") mtp = true;
     else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
+    else if (a == "--prefix-cache-gib") prefix_cache_gib = std::stod(next());
+    else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
     else if (a == "--admission") admission_mode = next();
     else if (a == "--admission-window") admission_window = std::stoi(next());
     else if (a == "--bulk-pace-gbps") bulk_pace_gbps = std::stod(next());
@@ -427,6 +454,10 @@ int main(int argc, char** argv) {
   }
   if (admission_window < 1) {
     DGPP_LOG_ERROR("--admission-window must be at least 1, got {}", admission_window);
+    return 2;
+  }
+  if (prefix_cache_gib < 0.0) {
+    DGPP_LOG_ERROR("--prefix-cache-gib must be >= 0, got {}", prefix_cache_gib);
     return 2;
   }
   if (graph_batch_min_live == 0) {
@@ -624,16 +655,28 @@ int main(int argc, char** argv) {
                 .count(),
             max_concurrency, pool_tokens);
 
+        // The prefix cache's arena (M7): as many snapshot slots as the
+        // budget holds; every rank computes the same count from the same
+        // geometry, and the warm record carries rank 0's for the peers to
+        // check against.
+        const int prefix_slots = prefix_arena_slots(model, prefix_cache_gib);
+        DGPP_LOG_INFO(
+            "rank {}: prefix cache {} — {} snapshot slot(s) of {:.1f} MiB "
+            "({:.2f} GiB asked)",
+            rank, prefix_slots > 0 ? "on" : "off", prefix_slots,
+            static_cast<double>(model.session_snapshot_bytes()) / (1024.0 * 1024.0),
+            prefix_cache_gib);
         // The admission policy every rank runs (M6 6d): rank 0's, carried
         // by the warm record; a peer's own flags yield to it.
         dgpp::glm::AdmissionPolicy peer_policy = knobs.admission;
+        int peer_prefix_slots = prefix_slots;
         std::unique_ptr<dgpp::glm::SchedulerEngine> engine;
         if (decode_graph) {
           auto graph_engine = std::make_unique<dgpp::GlmGraphEngineAdapter>(
               &model, bus.get(), rank, world, pick_scratch, cfg.vocab_size,
               /*pick_timeout_ms=*/60000, graph_batch_min_live,
               sample_prefix.data, sample_gather.data,
-              sampling_candidates, &grammar_vocab);
+              sampling_candidates, &grammar_vocab, prefix_slots);
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up
           // is a run of collectives, so it starts on the journal's clock:
@@ -641,11 +684,11 @@ int main(int argc, char** argv) {
           // construction is done; a peer holds at that record rather than
           // spinning its first collective in stall diagnostics.
           if (rank == 0) {
-            journal->broadcast(
-                dgpp::service::encode_journal_warm(knobs.admission));
+            journal->broadcast(dgpp::service::encode_journal_warm(
+                knobs.admission, prefix_slots));
           } else if (!dgpp::service::wait_journal_warm(
                          &*reader, [rank] { return peer_should_stop(rank); },
-                         &peer_policy)) {
+                         &peer_policy, &peer_prefix_slots)) {
             graph_engine.reset();
             cudaFreeHost(pick_scratch);
             bus->stop();
@@ -669,15 +712,15 @@ int main(int argc, char** argv) {
               dgpp::make_fabric_sample(bus.get(), rank, world,
                                        sample_prefix.data, sample_gather.data,
                                        cfg.vocab_size),
-              &grammar_vocab);
+              &grammar_vocab, prefix_slots);
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
           if (rank == 0) {
-            journal->broadcast(
-                dgpp::service::encode_journal_warm(knobs.admission));
+            journal->broadcast(dgpp::service::encode_journal_warm(
+                knobs.admission, prefix_slots));
           } else if (!dgpp::service::wait_journal_warm(
                          &*reader, [rank] { return peer_should_stop(rank); },
-                         &peer_policy)) {
+                         &peer_policy, &peer_prefix_slots)) {
             engine.reset();
             cudaFreeHost(pick_scratch);
             bus->stop();
@@ -699,7 +742,13 @@ int main(int argc, char** argv) {
                 peer_policy.window_tokens,
                 dgpp::glm::AdmissionPolicy::name(knobs.admission.mode),
                 knobs.admission.window_tokens);
-          dgpp::glm::Scheduler sched(engine.get(), eos, queue_limit, peer_policy);
+          if (peer_prefix_slots != prefix_slots)
+            DGPP_LOG_WARN(
+                "rank {}: prefix cache slots from rank 0's warm record ({}) "
+                "override this rank's {} (the arena must hold them)",
+                rank, peer_prefix_slots, prefix_slots);
+          dgpp::glm::Scheduler sched(engine.get(), eos, queue_limit, peer_policy,
+                                     peer_prefix_slots);
           dgpp::service::OpStreamObserver oplog;
           sched.set_observer(&oplog);
           DGPP_LOG_INFO("rank {}: following rank 0's journal (admission {}, window {})",
@@ -744,10 +793,14 @@ int main(int argc, char** argv) {
             .count(),
         max_concurrency, pool_tokens);
 
+    const int prefix_slots = prefix_arena_slots(model, prefix_cache_gib);
+    DGPP_LOG_INFO("serve: prefix cache {} — {} snapshot slot(s) of {:.1f} MiB",
+                  prefix_slots > 0 ? "on" : "off", prefix_slots,
+                  static_cast<double>(model.session_snapshot_bytes()) / (1024.0 * 1024.0));
     dgpp::GenEngineAdapter engine(&model, max_concurrency,
                                   dgpp::make_w1_pick(cfg.vocab_size),
                                   dgpp::make_w1_sample(cfg.vocab_size),
-                                  &grammar_vocab);
+                                  &grammar_vocab, prefix_slots);
     return serve_openai(&engine, cfg, ckpt, model_display, knobs, no_eos,
                          boot_s(), /*journal=*/nullptr, /*oplog=*/nullptr);
   } catch (const std::exception& e) {

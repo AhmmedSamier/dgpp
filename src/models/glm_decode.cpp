@@ -100,6 +100,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
   return session_prefill(req, prompt_ids, {}, nullptr);
 }
 
+int64_t GlmDiagnosticModel::dsa_block_tokens() const {
+  return dsa_cfg_.num_dsa_layers > 0 ? dsa_cfg_.block_tokens : 0;
+}
+
 int GlmDiagnosticModel::session_kpool() const {
   return dsa_cfg_.num_dsa_layers > 0 ? dsa_cfg_.index_kpool : 1;
 }

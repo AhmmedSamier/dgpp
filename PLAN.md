@@ -14,7 +14,7 @@ below; `[ ]` means it has not been implemented.
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
 | M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.58 s and 2048 tokens 19.8 → 1.7 s in steady state through seven rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts, the dense attention prefill, its projections, the dense MLPs, the router and the mHC dots restructured, most of them bitwise; 4096 tokens 3.5 s and 8192 tokens 7.3 s with the sparse regime on the same flash kernel); the GPU is busy 98 % of a prefill |
-| M7 | Exact snapshot prefix cache | [~] Stage A built 2026-09-05 (the model primitives, gated bitwise); Stage B (the cache, the service) next |
+| M7 | Exact snapshot prefix cache | [x] built 2026-09-05: stage A (the model primitives) and stage B (the cache in the scheduler, the arena in the engines, the service, the journal); hot == cold bitwise, rank-identical by construction and checked per tick |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
 
@@ -1618,14 +1618,81 @@ near-tie selection (4e-3 at 300 tokens, top-1 certified) — the same order
 as two different cuts against each other, which is why hot == cold must
 be BITWISE and is.
 
-Stage B (not started): the `PrefixCache` (radix over token ids keyed by
-tokenizer/template/revision, the 1.5 GiB arena of 42 slots, LRU over
-refcount-0 entries, metrics), rolling aligned snapshots every kpool-th
-decode step for close-time entries, the service's structural boundaries
-(render each message prefix with the chat template and verify the token
-prefix), rank 0's journaled attach/snap/evict decisions, request opt-out,
-TTFT / bytes-saved / capacity metrics, the fabric gate (hot == cold
-bitwise on four nodes).
+### Stage B as built (2026-09-05, the record's twenty-seventh entry)
+
+- *Where the decisions live.* In the SCHEDULER (`PrefixCache`,
+  `glm_prefix_cache.*`): every rank runs the same deterministic policy
+  over the same journaled request stream, so attach / snapshot / evict
+  decisions are rank-identical by construction — the same invariant that
+  keeps admission identical. No new protocol: a submit carries its
+  boundaries and opt-out ("b", "nc"), the warm record rank 0's slot count
+  ("pc"), and every tick record rank 0's decision digest after the
+  previous tick ("pd"), which a peer compares before applying — a
+  divergence dies loudly, one tick late at most. The decisions also ride
+  the op stream ("X <op> <id> <position> <slot>"), so the four-way md5
+  covers them.
+- *Boundaries from the ids, not the template.* The structural boundaries
+  are the positions of the template's role-marker tokens (<|system|>,
+  <|user|>, <|assistant|>, <|observation|>) in the prompt ids — a pure
+  function of the shared prefix, so consecutive turns cut at the same
+  positions, the legacy completions route gets them too, and the cost is
+  one scan (re-rendering every message prefix through the template and
+  re-encoding it would have been O(messages × prompt), and the tokenizer
+  exposes no offsets). The cold prefill cuts at the aligned images.
+- *Entries.* (a) At the deepest cut of a cold prefill (in a chat the
+  assistant header — where the next turn cuts too); (b) from a ROLLING
+  snapshot: a live request snapshots its state at every aligned committed
+  position (one arena slot per live request, overwritten), and at retire
+  (EOS or the cap; not a cancel) the slot becomes the close-time entry at
+  floor((end − 1) / kpool) · kpool — the aligned image of the EOS token's
+  position, which is where the next turn's `<|user|>` marker (the EOS
+  token itself) cuts. The lookup is exact (a prefix hash narrows, the ids
+  are compared in full) and only at the prompt's own cuts.
+- *The arena and eviction.* `PrefixArena` in both engine adapters: device
+  slots of one session's state each (`--prefix-cache-gib`, default 1.5;
+  slots = budget / state bytes — 42 at real dims), snapshots and attaches
+  stream-ordered, their device time measured with events. Entries pin
+  their DSA blocks in the pool (the meters see them); an admission that
+  needs blocks or a snapshot slot evicts the least recently used
+  UNATTACHED entry (never one a live request opened from); none evictable
+  → the snapshot is skipped and counted.
+- *The service.* `prefix_cache: false` opts a request out (400 for a
+  non-boolean); /v1/metrics reports the cache (slots, entries, hits,
+  misses, tokens saved, entries taken and evicted, blocks pinned, the
+  arena's snapshot and attach times, the TTFT split by hit and miss, the
+  key: tokenizer revision, template hash, checkpoint).
+- *Gates.* Scheduler (host, a fake with an arena): the deepest-cut entry
+  and the attach, the rolling snapshot becoming the close entry the next
+  turn attaches to, opt-out and no-arena keeping the plain op stream, LRU
+  eviction, entries giving their blocks to a request under pressure,
+  attached entries never evicted, identical streams → identical ops and
+  digests. Service: boundaries from the marker, attach on the second
+  identical request, the opt-out, the refusal, the metrics. Journal: the
+  new fields round-trip and the pre-cache record is byte-identical. Real
+  model: `glm_tp_prefix_cache_scheduler_hot_matches_cold` (world 1, the
+  eager adapter: A cold, B hot == A, C opted out == A, D through the
+  close entry == D cold, the exact decision sequence, the digest across
+  two runs, blocks returned) and
+  `glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks` (the
+  graph adapter with the draft block on a two-rank loopback world: the
+  same sequence, answers and digests identical across ranks). The fabric:
+  the service with the cache on, a conversation's second and third turns
+  through the cache, op streams identical on four ranks.
+- *Known limits, measured.* The MTP graph commits one or two tokens a
+  step, so the committed count's parity follows the draft's acceptance:
+  a fully accepted answer after an odd-length prompt never visits an
+  aligned position (on the fabric a 26-token answer to a 25-token prompt
+  took no rolling snapshot at all; a 64-token one visited 52, 56, 68, 88
+  and 92 and its close entry sat at 92 against an end of 108). A request
+  whose committed position IS aligned at retire snapshots the live state
+  then (the retire-time snapshot), which recovers those cases exactly;
+  the rest fall back to the prefill-cut entry (the previous prompt's
+  assistant header — still a hit for the whole previous prompt), never
+  to a wrong attach. Entries are per process (no persistence). Turn two
+  reproduces turn one's generated ids only when the template re-renders
+  the assistant turn with its reasoning (`chat_template_kwargs:
+  {clear_thinking: false}`) and the answer ended in EOS — a capped answer
+  has no `</think>` for the re-render to match.
 
 Not in v1: persistence across restarts, cross-instance federation, DSA
 block deduplication below block granularity.

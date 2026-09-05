@@ -70,12 +70,15 @@ kernel where the selection is provably dense, and the projections, the
 dense MLPs, the router and the mHC dots restructured, most of them
 bitwise; a 4096-token prompt prefills in 3.5 s and an 8192-token one in
 7.3 s, the sparse attention regime on the same flash kernel; the GPU is
-busy 98 % of a prefill) and the prefix cache (M7) is under way: the
-model-level primitives — a prefill cut at structural boundaries, a
-snapshot of a session at any pool-aligned cut, attach and resume on
-another slot with the prefix's cache blocks shared by reference — are
-built and gated hot == cold bitwise (2026-09-05); the cache itself and
-the service integration are next. `PLAN.md` has the status per milestone and the designs
+busy 98 % of a prefill) and the prefix cache (M7) is built (2026-09-05):
+a conversation's next turn attaches to a snapshot of the previous one
+(the KDA state, the DSA tail rings, the draft block's last row, the
+cache blocks shared by reference) at a cut the cold prefill would take
+anyway, so hot == cold bitwise; the decisions are made identically on
+every rank by the scheduler and checked per tick through the journal;
+`--prefix-cache-gib` sizes the arena, `prefix_cache: false` opts a
+request out, /v1/metrics reports hits, tokens saved and the time to
+first token split. `PLAN.md` has the status per milestone and the designs
 for what remains, `DESIGN.md` the contracts as built.
 
 ## Documentation

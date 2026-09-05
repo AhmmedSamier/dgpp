@@ -69,6 +69,7 @@
 //   * The single mutex covers the event queue and the record list;
 //     sockets are only ever written by the HTTP thread (idle()).
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -109,6 +110,12 @@ class ModelFrontend {
   // (the default) serves plain chat: tool requests refuse, nothing is
   // split.
   virtual dgpp::glm::ChatMarkers markers() const { return {}; }
+  // The prefix cache's boundary tokens (M7): the ids whose positions in a
+  // prompt are its structural boundaries — the template's role markers
+  // (<|system|>, <|user|>, <|assistant|>, <|observation|>), so consecutive
+  // turns of one conversation cut at the same positions. Empty: no
+  // boundaries (the cache still cuts at chunk multiples).
+  virtual std::vector<int64_t> boundary_token_ids() const { return {}; }
 };
 
 struct ServiceConfig {
@@ -132,6 +139,10 @@ struct ServiceConfig {
   // true folds them into content as "<think>…</think>" text for clients
   // that expect the raw transcript.
   bool reasoning_in_content = false;
+  // The prefix cache's key (M7), reported by /v1/metrics: the tokenizer
+  // revision, the template hash and the checkpoint the entries were taken
+  // under (the cache is per process; the key names what it is bound to).
+  std::string prefix_key;
 };
 
 class GenerationService : public HttpHandler,
@@ -157,6 +168,10 @@ class GenerationService : public HttpHandler,
   struct PassEvents {
     std::vector<dgpp::glm::SchedulerRequest> submits;
     std::vector<std::string> cancels;
+    // The prefix cache's decision digest after the previous tick (M7): the
+    // record carries it so every peer compares before applying this one.
+    bool has_prefix_digest = false;
+    uint64_t prefix_digest = 0;
   };
   // Invoked (engine thread) with the pass's events AFTER the drain and
   // immediately BEFORE the tick — the one fixed position where the
@@ -204,6 +219,12 @@ class GenerationService : public HttpHandler,
     uint64_t tokens_out = 0;
     uint64_t rejects_bad = 0;        // 400-class refusals
     uint64_t tool_calls_out = 0;     // parsed tool calls
+    // The prefix cache's time to first token (M7), door to first token, for
+    // requests that attached to an entry and for those that did not.
+    uint64_t ttft_hit_count = 0;
+    double ttft_hit_ms = 0;
+    uint64_t ttft_miss_count = 0;
+    double ttft_miss_ms = 0;
   };
   Stats stats() const;
 
@@ -246,6 +267,11 @@ class GenerationService : public HttpHandler,
         dgpp::glm::Scheduler::Result::Reason::kNone;
     int prompt_tokens = 0;
     int completion_tokens = 0;
+    // The prefix cache (M7): when the request arrived at the door, whether
+    // it attached to an entry and at what position (the TTFT split).
+    std::chrono::steady_clock::time_point arrived;
+    bool prefix_hit = false;
+    int64_t prefix_position = 0;
     int logprobs = -1;         // -1 none; N = top-N alternatives requested
     std::vector<glm_sample::Result> lps;  // one per id when logprobs >= 0
     size_t lps_flushed = 0;    // streaming: entries already sent
@@ -326,6 +352,13 @@ class GenerationService : public HttpHandler,
   void on_grow(const std::string& id, int64_t reserved_tokens) override {
     if (audit_) audit_->on_grow(id, reserved_tokens);
   }
+  // The prefix cache's decisions (M7) ride to the audit observer too; an
+  // attach marks the record for the TTFT split.
+  void on_prefix(const std::string& id, const char* op, int64_t position,
+                 int slot) override;
+  // The prompt's structural boundaries: every position (>= 1) holding one
+  // of the frontend's boundary tokens.
+  std::vector<int64_t> prompt_boundaries(const std::vector<int64_t>& prompt) const;
 
   // idle()'s record pump: flushes deltas, finishes done records.
   void pump_records();
@@ -337,6 +370,7 @@ class GenerationService : public HttpHandler,
   dgpp::glm::SchedulerEngine* engine_;
   const ModelFrontend* frontend_;
   dgpp::glm::ChatMarkers markers_;
+  std::vector<int64_t> boundary_ids_;  // the frontend's, sorted (M7)
   dgpp::glm::Scheduler sched_;  // engine thread only (except try_submit
                                  // under the lock via engine_pass)
   // Engine-thread-only (set once before the loop, read in the observer

@@ -6,9 +6,15 @@
 //
 // THE PROTOCOL (newline-framed JSON over the TCP star; one line, one
 // record):
-//   {"op":"warm"}
-//   {"op":"tick","s":[{"id":"…","p":[ids],"m":N}],"c":["id"]}
+//   {"op":"warm","adm":{...},"pc":N}
+//   {"op":"tick","s":[{"id":"…","p":[ids],"m":N,"b":[...],"nc":1}],"c":["id"],"pd":D}
 //   {"op":"stop"}
+// The prefix cache (M7) rides in three places: a submit's "b" (the
+// prompt's structural boundaries) and "nc" (opted out) — inputs of the
+// scheduler's cache decisions; the warm record's "pc" (rank 0's snapshot
+// slot count, which every peer's scheduler must run); and every tick's
+// "pd", rank 0's decision digest after the PREVIOUS tick — a peer whose
+// own digest differs has diverged and dies loudly, one tick late at most.
 // The "warm" record is the start signal for the graph engine's startup
 // warm capture (GlmGraphEngineAdapter::warm_captures): a run of bus
 // collectives every rank must enter together, before any tick. Rank 0
@@ -72,6 +78,8 @@ class OpStreamObserver final : public dgpp::glm::SchedulerObserver {
   void on_retire(const std::string& id,
                  const dgpp::glm::Scheduler::Result& result) override;
   void on_grow(const std::string& id, int64_t reserved_tokens) override;
+  void on_prefix(const std::string& id, const char* op, int64_t position,
+                 int slot) override;
   std::string text() const;
 
  private:
@@ -83,19 +91,29 @@ class OpStreamObserver final : public dgpp::glm::SchedulerObserver {
 
 std::string encode_journal_tick(const GenerationService::PassEvents& events);
 std::string encode_journal_stop();
-// The warm record carries rank 0's admission policy (M6 6d): every rank's
-// scheduler must run the same one, and the peers take it from here.
+// The warm record carries rank 0's admission policy (M6 6d) and its prefix
+// cache slot count (M7): every rank's scheduler must run the same ones,
+// and the peers take them from here.
 std::string encode_journal_warm(
-    const dgpp::glm::AdmissionPolicy& policy = dgpp::glm::AdmissionPolicy{});
+    const dgpp::glm::AdmissionPolicy& policy = dgpp::glm::AdmissionPolicy{},
+    int prefix_slots = 0);
 
 struct JournalRecord {
   bool stop = false;
   bool warm = false;
   bool has_admission = false;  // warm: the policy rode along
   dgpp::glm::AdmissionPolicy admission;
+  int prefix_slots = 0;          // warm: rank 0's prefix cache slots
+  bool has_prefix_digest = false;  // tick: rank 0's digest rode along
+  uint64_t prefix_digest = 0;
   std::vector<dgpp::glm::SchedulerRequest> submits;
   std::vector<std::string> cancels;
 };
+// The tick record's cross-rank check (M7): rank 0's prefix-cache digest
+// after the previous tick against this rank's. Throws on a mismatch — the
+// schedulers' cache decisions diverged, a fabric emergency.
+void check_prefix_digest(const JournalRecord& rec,
+                         const dgpp::glm::Scheduler& sched);
 // Throws on any malformed record — a corrupt journal is a fabric
 // emergency, not a condition to paper over.
 JournalRecord decode_journal_line(std::string_view line);
@@ -158,7 +176,8 @@ class JournalReader {
 // order this design says cannot happen.
 bool wait_journal_warm(JournalReader* reader,
                        const std::function<bool()>& should_stop,
-                       dgpp::glm::AdmissionPolicy* policy = nullptr);
+                       dgpp::glm::AdmissionPolicy* policy = nullptr,
+                       int* prefix_slots = nullptr);
 
 // The peer serving loop: apply each record, then tick — the exact
 // mirror of rank 0's engine passes (§11). Returns on the stop record,

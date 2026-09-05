@@ -74,6 +74,10 @@ struct ChatMarkers {
   ChatMarker arg_key_close;     // "</arg_key>"
   ChatMarker arg_value_open;    // "<arg_value>"
   ChatMarker arg_value_close;   // "</arg_value>"
+  // The template's role markers (<|system|>, <|user|>, <|assistant|>,
+  // <|observation|>), the ones the tokenizer has: their positions in a
+  // prompt are the prefix cache's structural boundaries (M7).
+  std::vector<ChatMarker> role_markers;
 
   // The reasoning split needs </think>; tool calls need all six markers.
   bool reasoning_available() const { return think_close.available(); }

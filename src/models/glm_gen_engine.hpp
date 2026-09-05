@@ -30,6 +30,7 @@
 
 #include "common/dtypes.hpp"
 #include "models/glm_forward.hpp"
+#include "models/glm_prefix_arena.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_scheduler.hpp"
 #include "models/glm_tool_grammar.hpp"
@@ -52,16 +53,21 @@ class GenEngineAdapter : public glm::SchedulerEngine {
       glm_sample::Rng&, const std::vector<int32_t>& context,
       const glm::TokenMask* mask)>;
 
+  // `prefix_slots` (M7): snapshot slots of the prefix cache's arena this
+  // engine holds (0: no cache; the scheduler then never calls the prefix
+  // ops and the op stream is the pre-cache one).
   GenEngineAdapter(GlmDiagnosticModel* model, int max_requests, Pick pick,
                    Sample sample = nullptr,
-                   const glm::GrammarVocab* grammar_vocab = nullptr)
+                   const glm::GrammarVocab* grammar_vocab = nullptr,
+                   int prefix_slots = 0)
       : model_(model),
         slots_(max_requests),
         pick_(std::move(pick)),
         sample_(std::move(sample)),
         grammar_vocab_(grammar_vocab),
         pending_(static_cast<size_t>(max_requests), -1),
-        state_(static_cast<size_t>(max_requests)) {}
+        state_(static_cast<size_t>(max_requests)),
+        arena_(model, prefix_slots) {}
 
   int max_concurrent_requests() const override { return slots_; }
   int64_t pool_blocks_total() const override {
@@ -123,22 +129,64 @@ class GenEngineAdapter : public glm::SchedulerEngine {
   }
 
   int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
-    SlotState& s = state_.at(static_cast<size_t>(req));
-    s.context.clear();
-    s.context.reserve(prompt.size() + 64);
-    for (int64_t id : prompt) s.context.push_back(static_cast<int32_t>(id));
-    // The grammar's opening state: thinking iff the prompt ends in <think>.
-    if (s.grammar) {
-      const glm::ChatMarkers& m = grammar_vocab_->markers();
-      const bool opens = !prompt.empty() && m.think_open.available() &&
-                         prompt.back() == m.think_open.id;
-      s.grammar = std::make_unique<glm::GrammarState>(
-          grammar_vocab_, s.grammar->spec(), opens);
-    }
-    const int32_t token = decide(s, model_->session_prefill(req, prompt));
-    s.context.push_back(token);
-    pending_.at(static_cast<size_t>(req)) = token;
-    return token;
+    return open_slot(req, prompt, [&] { return model_->session_prefill(req, prompt); });
+  }
+
+  // ---- prefix cache (M7) --------------------------------------------------
+  glm::SchedulerEngine::PrefixInfo prefix_info() const override {
+    glm::SchedulerEngine::PrefixInfo info;
+    info.arena_slots = arena_.slots();
+    info.align = model_->session_kpool();
+    info.block_tokens = model_->dsa_block_tokens();
+    info.chunk_tokens = GlmDiagnosticModel::prefill_chunk_tokens();
+    return info;
+  }
+  int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
+                         glm::SchedulerEngine::PrefixPrefill* plan) override {
+    if (plan == nullptr || plan->boundaries == nullptr)
+      throw std::invalid_argument("generation engine: prefill_cached without a plan");
+    return open_slot(req, prompt, [&] {
+      GlmDiagnosticModel::SnapshotRequest snap;
+      GlmDiagnosticModel::SnapshotRequest* snap_ptr = nullptr;
+      if (plan->snap_slot >= 0) {
+        snap = arena_.request(plan->snap_slot, plan->snap_position);
+        snap_ptr = &snap;
+      }
+      GlmDiagnosticModel::Outputs out;
+      if (plan->attach_slot >= 0) {
+        if (arena_.position(plan->attach_slot) != plan->attach_position)
+          throw std::logic_error("generation engine: the attach slot's position differs from the plan");
+        arena_.attach(req, plan->attach_slot);
+        try {
+          const std::vector<int64_t> suffix(
+              prompt.begin() + plan->attach_position, prompt.end());
+          out = model_->session_prefill_resume(req, suffix, *plan->boundaries, snap_ptr);
+        } catch (...) {
+          model_->session_close(req);  // the attach opened it
+          throw;
+        }
+      } else {
+        out = model_->session_prefill(req, prompt, *plan->boundaries, snap_ptr);
+      }
+      if (snap_ptr != nullptr) {
+        arena_.commit(plan->snap_slot, snap);
+        plan->snap_taken = snap.taken;
+      }
+      return out;
+    });
+  }
+  void prefix_snapshot(int req, int slot, int64_t position) override {
+    arena_.snapshot(req, slot, position);
+  }
+  void prefix_release(int slot) override { arena_.release(slot); }
+  glm::SchedulerEngine::PrefixEngineStats prefix_engine_stats() const override {
+    glm::SchedulerEngine::PrefixEngineStats st;
+    st.snapshots = arena_.snapshots();
+    st.snapshot_ms = arena_.snapshot_ms();
+    st.attaches = arena_.attaches();
+    st.attach_ms = arena_.attach_ms();
+    st.snapshot_bytes = static_cast<int64_t>(arena_.bytes());
+    return st;
   }
   void reserve(int req, int64_t tokens) override {
     model_->session_reserve_blocks(req, tokens);
@@ -178,6 +226,29 @@ class GenEngineAdapter : public glm::SchedulerEngine {
     glm::TokenMask mask;                          // the next position's
   };
 
+  // The prefill's slot-side work around the model call that produces the
+  // last row's logits (a cold prefill, or an attach + resume): the context
+  // for the penalties, the grammar's opening state, the decision.
+  template <typename Run>
+  int32_t open_slot(int req, const std::vector<int64_t>& prompt, Run&& run) {
+    SlotState& s = state_.at(static_cast<size_t>(req));
+    s.context.clear();
+    s.context.reserve(prompt.size() + 64);
+    for (int64_t id : prompt) s.context.push_back(static_cast<int32_t>(id));
+    // The grammar's opening state: thinking iff the prompt ends in <think>.
+    if (s.grammar) {
+      const glm::ChatMarkers& m = grammar_vocab_->markers();
+      const bool opens = !prompt.empty() && m.think_open.available() &&
+                         prompt.back() == m.think_open.id;
+      s.grammar = std::make_unique<glm::GrammarState>(
+          grammar_vocab_, s.grammar->spec(), opens);
+    }
+    const int32_t token = decide(s, run());
+    s.context.push_back(token);
+    pending_.at(static_cast<size_t>(req)) = token;
+    return token;
+  }
+
   // The plain greedy pick serves temperature 0 with neither logprobs nor
   // penalties nor a grammar (zero cost, the exact op stream every gate
   // pins); anything else goes through the sampler closure, which handles
@@ -213,6 +284,7 @@ class GenEngineAdapter : public glm::SchedulerEngine {
   const glm::GrammarVocab* grammar_vocab_ = nullptr;
   std::vector<int64_t> pending_;
   std::vector<SlotState> state_;
+  PrefixArena arena_;  // the prefix cache's snapshot slots (M7)
 };
 
 // The world-1 pick: full-vocab argmax over the fp32 logits row. The closure

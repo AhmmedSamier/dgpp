@@ -1,5 +1,7 @@
 #include "service/generation_service.hpp"
 
+#include <cstring>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -334,6 +336,14 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
     throw std::invalid_argument("GenerationService: frontend required");
   if (cfg_.model_id.empty())
     throw std::invalid_argument("GenerationService: model_id required");
+  boundary_ids_ = frontend_->boundary_token_ids();
+  std::sort(boundary_ids_.begin(), boundary_ids_.end());
+  boundary_ids_.erase(std::unique(boundary_ids_.begin(), boundary_ids_.end()),
+                      boundary_ids_.end());
+  if (sched_.prefix_slots() > 0)
+    DGPP_LOG_INFO(
+        "serve: prefix cache on — {} snapshot slots, {} boundary token(s)",
+        sched_.prefix_slots(), boundary_ids_.size());
   // The sampling surface: the defaults must be a valid spec (an operator
   // error otherwise), and an engine that cannot draw serves GREEDY defaults
   // — loudly — rather than a stochastic mode it would silently ignore.
@@ -1076,6 +1086,17 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     }
     include_usage = iu != nullptr && iu->as_bool(false);
   }
+  // prefix_cache (ours, M7): false opts the request out of the prefix
+  // cache — no attach, no snapshot of its state.
+  bool prefix_cache = true;
+  if (const dgpp::minijson::Value* pcv = body.find("prefix_cache")) {
+    if (!pcv->is_bool()) {
+      respond_error(w, 400, "prefix_cache must be a boolean",
+                    "invalid_request_error", "prefix_cache");
+      return;
+    }
+    prefix_cache = pcv->as_bool(true);
+  }
 
   // Sampling: the spec over the model's defaults (M6 6b). temperature 0
   // is the exact greedy path; anything the engine cannot execute is a 400.
@@ -1209,6 +1230,8 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
 
   SchedulerRequest sr;
   sr.id = record->id;
+  sr.boundaries = prompt_boundaries(prompt);
+  sr.no_cache = !prefix_cache;
   sr.prompt = std::move(prompt);
   sr.max_steps = steps;
   sr.sampling = sampling;
@@ -1216,6 +1239,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   sr.logprobs = logprobs;
   sr.grammar = std::move(plan.grammar);
   record->logprobs = logprobs;
+  record->arrived = std::chrono::steady_clock::now();
   enqueue_admission(std::move(record), std::move(sr));
 }
 
@@ -1279,6 +1303,15 @@ void GenerationService::route_completions(const HttpRequest& req,
       return;
     }
     stream = sv->as_bool(false);
+  }
+  bool prefix_cache = true;
+  if (const dgpp::minijson::Value* pcv = body.find("prefix_cache")) {
+    if (!pcv->is_bool()) {
+      respond_error(w, 400, "prefix_cache must be a boolean",
+                    "invalid_request_error", "prefix_cache");
+      return;
+    }
+    prefix_cache = pcv->as_bool(true);
   }
 
   glm_sample::Params sampling;
@@ -1351,12 +1384,15 @@ void GenerationService::route_completions(const HttpRequest& req,
 
   SchedulerRequest sr;
   sr.id = record->id;
+  sr.boundaries = prompt_boundaries(ids);
+  sr.no_cache = !prefix_cache;
   sr.prompt = std::move(ids);
   sr.max_steps = steps;
   sr.sampling = sampling;
   sr.seed = seed;
   sr.logprobs = logprobs;
   record->logprobs = logprobs;
+  record->arrived = std::chrono::steady_clock::now();
   enqueue_admission(std::move(record), std::move(sr));
 }
 
@@ -1434,6 +1470,60 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, static_cast<int64_t>(st.rejects_bad));
   out.append(",\"tool_calls_out\":");
   append_json_int(&out, static_cast<int64_t>(st.tool_calls_out));
+  out.append("}");
+  // The prefix cache (M7): capacity, hits, tokens saved, entries taken and
+  // evicted, blocks pinned, the arena's measured copy times and the TTFT
+  // split — every number an operator needs to size the arena.
+  const dgpp::glm::SchedulerEngine::PrefixEngineStats pe =
+      engine_->prefix_engine_stats();
+  const auto avg = [](double sum, int64_t n) { return n > 0 ? sum / static_cast<double>(n) : 0.0; };
+  char buf[64];
+  const auto append_ms = [&](const char* key, double v) {
+    std::snprintf(buf, sizeof(buf), ",\"%s\":%.3f", key, v);
+    out.append(buf);
+  };
+  out.append(",\"prefix_cache\":{\"enabled\":");
+  out.append(m.prefix_slots > 0 ? "true" : "false");
+  out.append(",\"slots\":");
+  append_json_int(&out, m.prefix_slots);
+  out.append(",\"entries\":");
+  append_json_int(&out, m.prefix_entries);
+  out.append(",\"hits\":");
+  append_json_int(&out, m.prefix_hits);
+  out.append(",\"misses\":");
+  append_json_int(&out, m.prefix_misses);
+  out.append(",\"tokens_saved\":");
+  append_json_int(&out, m.prefix_tokens_saved);
+  out.append(",\"snapshots\":");
+  append_json_int(&out, m.prefix_snapshots);
+  out.append(",\"close_entries\":");
+  append_json_int(&out, m.prefix_close_entries);
+  out.append(",\"rolling_snapshots\":");
+  append_json_int(&out, m.prefix_rolling);
+  out.append(",\"evictions\":");
+  append_json_int(&out, m.prefix_evictions);
+  out.append(",\"duplicates\":");
+  append_json_int(&out, m.prefix_duplicates);
+  out.append(",\"skipped_no_slot\":");
+  append_json_int(&out, m.prefix_skipped);
+  out.append(",\"blocks_pinned\":");
+  append_json_int(&out, m.prefix_blocks_pinned);
+  out.append(",\"snapshot_bytes\":");
+  append_json_int(&out, pe.snapshot_bytes);
+  out.append(",\"arena_snapshots\":");
+  append_json_int(&out, pe.snapshots);
+  append_ms("snapshot_ms_avg", avg(pe.snapshot_ms, pe.snapshots));
+  out.append(",\"arena_attaches\":");
+  append_json_int(&out, pe.attaches);
+  append_ms("attach_ms_avg", avg(pe.attach_ms, pe.attaches));
+  out.append(",\"ttft_hit_count\":");
+  append_json_int(&out, static_cast<int64_t>(st.ttft_hit_count));
+  append_ms("ttft_hit_ms_avg", avg(st.ttft_hit_ms, static_cast<int64_t>(st.ttft_hit_count)));
+  out.append(",\"ttft_miss_count\":");
+  append_json_int(&out, static_cast<int64_t>(st.ttft_miss_count));
+  append_ms("ttft_miss_ms_avg", avg(st.ttft_miss_ms, static_cast<int64_t>(st.ttft_miss_count)));
+  out.append(",\"key\":");
+  append_json_string(&out, cfg_.prefix_key);
   out.append("}}");
   w.respond(200, "application/json", std::move(out));
 }
@@ -1521,11 +1611,24 @@ void GenerationService::absorb(StreamRecord& r, ParserEvent ev) {
 
 void GenerationService::on_token(const std::string& id, int64_t token,
                                  int steps_done) {
-  (void)steps_done;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& r : records_) {
       if (r->id != id || r->done) continue;
+      if (steps_done == 1) {
+        // The first token: the time to first token, split by whether the
+        // prefix cache served the prompt's head (M7).
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - r->arrived)
+                              .count();
+        if (r->prefix_hit) {
+          stats_.ttft_hit_count++;
+          stats_.ttft_hit_ms += ms;
+        } else {
+          stats_.ttft_miss_count++;
+          stats_.ttft_miss_ms += ms;
+        }
+      }
       r->ids.push_back(token);
       if (r->chat) {
         // The parser routes the id by state (reasoning / content / a tool
@@ -1551,6 +1654,30 @@ void GenerationService::on_token(const std::string& id, int64_t token,
   // no longer knows (post-shutdown ticks) — cross-rank comparability
   // is the tap's entire job.
   if (audit_) audit_->on_token(id, token, steps_done);
+}
+
+void GenerationService::on_prefix(const std::string& id, const char* op,
+                                  int64_t position, int slot) {
+  if (std::strcmp(op, "attach") == 0) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& r : records_) {
+      if (r->id != id) continue;
+      r->prefix_hit = true;
+      r->prefix_position = position;
+      break;
+    }
+  }
+  if (audit_) audit_->on_prefix(id, op, position, slot);
+}
+
+std::vector<int64_t> GenerationService::prompt_boundaries(
+    const std::vector<int64_t>& prompt) const {
+  std::vector<int64_t> out;
+  if (boundary_ids_.empty()) return out;
+  for (size_t i = 1; i < prompt.size(); ++i)
+    if (std::binary_search(boundary_ids_.begin(), boundary_ids_.end(), prompt[i]))
+      out.push_back(static_cast<int64_t>(i));
+  return out;
 }
 
 void GenerationService::on_token_logprobs(const std::string& id,
@@ -1945,7 +2072,12 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
 
   // The fixed journal position: this record and the tick below are one
   // atomic unit — rank 0 never ticks without broadcasting, a peer
-  // never ticks without a record (see fabric_serve.hpp).
+  // never ticks without a record (see fabric_serve.hpp). The prefix
+  // cache's digest after the previous tick rides along (M7).
+  if (sched_.prefix_slots() > 0) {
+    events.has_prefix_digest = true;
+    events.prefix_digest = sched_.prefix_digest();
+  }
   if (pre_tick) pre_tick(events);
 
   const bool more = sched_.tick();  // may throw on scheduler contract

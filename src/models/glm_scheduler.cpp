@@ -50,13 +50,31 @@ const char* reason_name(Scheduler::Result::Reason r) {
 
 Scheduler::Scheduler(SchedulerEngine* engine,
                      std::vector<int64_t> eos_token_ids, int queue_limit,
-                     AdmissionPolicy policy)
+                     AdmissionPolicy policy, int prefix_slots)
     : engine_(engine),
       eos_ids_(std::move(eos_token_ids)),
       queue_limit_(queue_limit),
       policy_(policy) {
   if (engine_ == nullptr)
     throw std::invalid_argument("Scheduler: engine must not be null");
+  // The prefix cache (M7): as many slots as asked, never more than the
+  // engine's arena — every rank must resolve the same count (the warm
+  // record carries rank 0's), and a short arena on one rank is a
+  // configuration error, not a quiet degradation.
+  prefix_info_ = engine_->prefix_info();
+  if (prefix_slots < -1)
+    throw std::invalid_argument("Scheduler: prefix_slots must be -1, 0 or positive");
+  const int slots = prefix_slots < 0 ? prefix_info_.arena_slots : prefix_slots;
+  if (slots > prefix_info_.arena_slots)
+    throw std::invalid_argument(
+        "Scheduler: prefix cache asks for " + std::to_string(slots) +
+        " snapshot slots but the engine's arena holds " +
+        std::to_string(prefix_info_.arena_slots));
+  PrefixCache::Config pc;
+  pc.slots = slots;
+  pc.align = std::max<int64_t>(1, prefix_info_.align);
+  pc.chunk_tokens = std::max<int64_t>(1, prefix_info_.chunk_tokens);
+  cache_ = PrefixCache(pc);
   if (policy_.window_tokens < 1)
     throw std::invalid_argument(
         "Scheduler: the admission window must be at least one token");
@@ -158,8 +176,29 @@ int Scheduler::free_slot() const {
   return -1;
 }
 
-int Scheduler::next_admissible() const {
-  const int64_t free_blocks =
+Scheduler::PrefixPlan Scheduler::plan_prefix(const Request& r) const {
+  PrefixPlan plan;
+  if (!cache_on(r)) return plan;
+  const int e = cache_.lookup(r.spec.prompt, r.cuts, r.cut_hashes);
+  if (e >= 0) {
+    plan.attach_entry = e;
+    plan.attach_position = cache_.entry(e).position;
+  }
+  // A new entry at the deepest cut past the attach — the next turn's cut.
+  if (!r.cuts.empty() && r.cuts.back() > plan.attach_position)
+    plan.snap_position = r.cuts.back();
+  return plan;
+}
+
+int64_t Scheduler::new_blocks(const Request& r, const PrefixPlan& plan) const {
+  int64_t blocks = reserve_blocks(r);
+  if (plan.attach_entry >= 0 && prefix_info_.block_tokens > 0)
+    blocks -= plan.attach_position / prefix_info_.block_tokens;  // shared
+  return std::max<int64_t>(blocks, 0);
+}
+
+int Scheduler::next_admissible() {
+  int64_t free_blocks =
       engine_->pool_blocks_total() - engine_->pool_blocks_in_use();
   for (size_t i = 0; i < requests_.size(); ++i) {
     if (requests_[i].state != State::kQueued) continue;
@@ -168,8 +207,30 @@ int Scheduler::next_admissible() const {
     // starvation it could suffer under an unbounded small-request stream
     // is a Stage 4 bounded-queue problem, not a policy bug.
     if (free_slot() < 0) return -1;
-    if (reserve_blocks(requests_[i]) > free_blocks) continue;
-    return static_cast<int>(i);
+    if (new_blocks(requests_[i], plan_prefix(requests_[i])) <= free_blocks)
+      return static_cast<int>(i);
+    // The prefix cache's entries pin blocks; the LRU unattached ones give
+    // way to a request that needs them (never a block a live request
+    // holds). The planned entry is touched first so it is evicted last —
+    // and the plan is recomputed after every eviction, because the victim
+    // may have been that entry.
+    if (cache_.enabled()) {
+      bool evicted = false;
+      for (;;) {
+        const PrefixPlan plan = plan_prefix(requests_[i]);
+        if (new_blocks(requests_[i], plan) <= free_blocks) break;
+        if (plan.attach_entry >= 0) cache_.touch(plan.attach_entry, ticks_);
+        const int slot = cache_.evict_lru();
+        if (slot < 0) break;
+        free_arena_slot(slot);
+        emit_prefix(requests_[i].spec.id, "evict", 0, slot);
+        evicted = true;
+        free_blocks = engine_->pool_blocks_total() - engine_->pool_blocks_in_use();
+      }
+      if (evicted &&
+          new_blocks(requests_[i], plan_prefix(requests_[i])) <= free_blocks)
+        return static_cast<int>(i);
+    }
   }
   return -1;
 }
@@ -215,6 +276,14 @@ void Scheduler::validate_new(const SchedulerRequest& request) const {
     throw std::invalid_argument(
         "Scheduler: request '" + request.id + "' cancel_after must be in "
         "[0, max_steps] — a cancel that can never fire is a manifest error");
+  int64_t last = 0;
+  for (const int64_t b : request.boundaries) {
+    if (b <= last || b >= static_cast<int64_t>(request.prompt.size()))
+      throw std::invalid_argument(
+          "Scheduler: request '" + request.id +
+          "' boundaries must be ascending positions inside the prompt");
+    last = b;
+  }
 }
 
 int Scheduler::queued_count() const {
@@ -229,6 +298,19 @@ bool Scheduler::try_submit(SchedulerRequest request) {
   if (queue_limit_ > 0 && queued_count() >= queue_limit_) return false;
   Request r;
   r.spec = std::move(request);
+  if (cache_on(r)) {
+    // The prompt's cuts and their prefix hashes, once: the lookups at every
+    // tick this request waits are then O(cuts) probes.
+    r.cuts = cache_.cuts(static_cast<int64_t>(r.spec.prompt.size()),
+                         r.spec.boundaries);
+    r.cut_hashes.reserve(r.cuts.size());
+    uint64_t h = PrefixCache::kSeed;
+    int64_t done = 0;
+    for (const int64_t c : r.cuts) {
+      for (; done < c; ++done) h = PrefixCache::extend_hash(h, r.spec.prompt[static_cast<size_t>(done)]);
+      r.cut_hashes.push_back(h);
+    }
+  }
   requests_.push_back(std::move(r));
   results_.emplace_back();
   return true;
@@ -277,7 +359,62 @@ void Scheduler::admit(int arrival) {
   engine_->configure_sampling(slot, r.spec.sampling, r.spec.seed);
   engine_->configure_logprobs(slot, r.spec.logprobs);
   engine_->configure_constraint(slot, r.spec.grammar);
-  const int32_t token = engine_->prefill(slot, r.spec.prompt);
+  int32_t token = -1;
+  if (!cache_on(r)) {
+    // No cache for this request: the pre-cache op, exactly.
+    token = engine_->prefill(slot, r.spec.prompt);
+  } else {
+    // The prefix cache's plan (M7): attach to the deepest matching entry at
+    // one of the prompt's cuts, and take a new entry at the deepest cut
+    // past it — the position the next turn's cold prefill cuts at. A slot
+    // for the new entry comes from the free list or the LRU unattached
+    // entry; none at all skips the snapshot (a counter says so).
+    const PrefixPlan plan = plan_prefix(r);
+    SchedulerEngine::PrefixPrefill pp;
+    pp.boundaries = &r.spec.boundaries;
+    int snap_slot = -1;
+    if (plan.attach_entry >= 0) {
+      pp.attach_slot = cache_.entry(plan.attach_entry).slot;
+      pp.attach_position = plan.attach_position;
+    }
+    if (plan.snap_position > 0) {
+      snap_slot = acquire_arena_slot(r.spec.id);
+      if (snap_slot >= 0) {
+        pp.snap_slot = snap_slot;
+        pp.snap_position = plan.snap_position;
+      } else {
+        ++cache_.stats().skipped_no_slot;
+      }
+    }
+    try {
+      token = engine_->prefill_cached(slot, r.spec.prompt, &pp);
+    } catch (...) {
+      if (snap_slot >= 0) cache_.give_back_slot(snap_slot);
+      throw;
+    }
+    if (plan.attach_entry >= 0) {
+      cache_.attach(plan.attach_entry, ticks_);
+      r.attach_entry = plan.attach_entry;
+      r.attach_position = plan.attach_position;
+      emit_prefix(r.spec.id, "attach", plan.attach_position, pp.attach_slot);
+    } else {
+      ++cache_.stats().misses;
+    }
+    if (snap_slot >= 0) {
+      if (!pp.snap_taken) {
+        cache_.give_back_slot(snap_slot);
+      } else {
+        const int e = cache_.insert(r.spec.prompt.data(), plan.snap_position,
+                                    snap_slot, ticks_);
+        if (e < 0) {
+          free_arena_slot(snap_slot);
+        } else {
+          ++cache_.stats().snapshots;
+          emit_prefix(r.spec.id, "snapshot", plan.snap_position, snap_slot);
+        }
+      }
+    }
+  }
   if (token < 0) {
     engine_->close(slot);
     throw std::runtime_error("Scheduler: engine prefill returned token " +
@@ -405,10 +542,71 @@ bool Scheduler::append_token(int arrival, int32_t token,
 void Scheduler::retire(int arrival, Result::Status status,
                        Result::Reason reason) {
   Request& r = requests_[static_cast<size_t>(arrival)];
+  // The prefix cache (M7): the request's attach reference returns first,
+  // so the entry it opened from is evictable for its own close entry.
+  if (r.attach_entry >= 0) {
+    cache_.detach(r.attach_entry);
+    r.attach_entry = -1;
+  }
+  // The prefix cache's retire-time snapshot (M7): when the answer completed
+  // with its committed position aligned — the exact position the close
+  // entry wants — take the state now, from the live slot, whether or not
+  // the rolling slot lags (the MTP graph's two-token steps can hop over
+  // every aligned position once the committed count is odd, so the
+  // rolling slot alone may sit a pool or more behind).
+  if (r.slot >= 0 && cache_on(r) &&
+      (reason == Result::Reason::kEos || reason == Result::Reason::kSteps)) {
+    const int64_t align = std::max<int64_t>(1, prefix_info_.align);
+    const int64_t committed =
+        static_cast<int64_t>(r.spec.prompt.size()) + r.steps_done - 1;
+    if (committed > 0 && committed % align == 0 && committed != r.rolling_position &&
+        committed > r.attach_position) {
+      if (r.rolling_slot < 0) r.rolling_slot = acquire_arena_slot(r.spec.id);
+      if (r.rolling_slot < 0) {
+        ++cache_.stats().skipped_no_slot;
+      } else {
+        engine_->prefix_snapshot(r.slot, r.rolling_slot, committed);
+        r.rolling_position = committed;
+        ++cache_.stats().rolling;
+        cache_.note(4, static_cast<uint64_t>(committed),
+                    static_cast<uint64_t>(r.rolling_slot));
+        emit_prefix(r.spec.id, "rolling", committed, r.rolling_slot);
+      }
+    }
+  }
   // An externally cancelled QUEUED request never held a slot or blocks.
   if (r.slot >= 0) {
     engine_->close(r.slot);
     slots_[static_cast<size_t>(r.slot)] = -1;
+  }
+  // The prefix cache (M7): the rolling snapshot — the state at the aligned
+  // image of the last token's position, where the next turn's cold prefill
+  // cuts — becomes an entry when the answer completed (EOS or the cap); a
+  // cancelled or shed request's partial answer is not worth a slot.
+  if (r.rolling_slot >= 0) {
+    const int slot = r.rolling_slot;
+    const int64_t position = r.rolling_position;
+    r.rolling_slot = -1;
+    r.rolling_position = -1;
+    bool kept = false;
+    if (reason == Result::Reason::kEos || reason == Result::Reason::kSteps) {
+      std::vector<int64_t> ids(r.spec.prompt.begin(), r.spec.prompt.end());
+      const int64_t gen = position - static_cast<int64_t>(r.spec.prompt.size());
+      if (gen > 0)
+        ids.insert(ids.end(), r.generated.begin(), r.generated.begin() + gen);
+      if (static_cast<int64_t>(ids.size()) == position) {
+        const int e = cache_.insert(ids.data(), position, slot, ticks_);
+        if (e >= 0) {
+          kept = true;
+          ++cache_.stats().close_entries;
+          emit_prefix(r.spec.id, "close", position, slot);
+        }
+      }
+    }
+    if (!kept) {
+      free_arena_slot(slot);
+      emit_prefix(r.spec.id, "drop", position, slot);
+    }
   }
   r.state = State::kTerminal;
   Result& res = results_[static_cast<size_t>(arrival)];
@@ -424,6 +622,7 @@ void Scheduler::retire(int arrival, Result::Status status,
 }
 
 bool Scheduler::tick() {
+  ++ticks_;
   // The external-cancel sweep — FIXED POSITION, before any admission
   // or step: a request cancelled BETWEEN ticks never pays another
   // engine op; one cancelled MID-TICK waits out the in-flight op (the
@@ -496,6 +695,11 @@ bool Scheduler::tick() {
       step_arrivals.push_back(i);
   }
   if (!step_arrivals.empty()) {
+    // The prefix cache's rolling snapshots (M7) sit right before the step:
+    // a live request at an aligned committed position keeps its state in
+    // its rolling slot (the close-time entry's source) — every rank at the
+    // same quantum, since the position is journaled state.
+    rolling_snapshots();
     step_batch(step_arrivals);
     progressed = true;
   }
@@ -537,7 +741,74 @@ Scheduler::Meters Scheduler::meters() const {
   m.tokens_generated = tokens_generated_;
   m.reservations_grown = grows_;
   m.requests_shed_pool = pool_sheds_;
+  m.prefix_slots = cache_.slots();
+  m.prefix_entries = cache_.live_entries();
+  m.prefix_hits = cache_.stats().hits;
+  m.prefix_misses = cache_.stats().misses;
+  m.prefix_tokens_saved = cache_.stats().tokens_saved;
+  m.prefix_snapshots = cache_.stats().snapshots;
+  m.prefix_close_entries = cache_.stats().close_entries;
+  m.prefix_rolling = cache_.stats().rolling;
+  m.prefix_evictions = cache_.stats().evictions;
+  m.prefix_duplicates = cache_.stats().duplicates;
+  m.prefix_skipped = cache_.stats().skipped_no_slot;
+  m.prefix_blocks_pinned = cache_.blocks_pinned(prefix_info_.block_tokens);
   return m;
+}
+
+void Scheduler::rolling_snapshots() {
+  if (!cache_.enabled()) return;
+  const int64_t align = std::max<int64_t>(1, prefix_info_.align);
+  for (size_t i = 0; i < requests_.size(); ++i) {  // arrival order
+    Request& r = requests_[i];
+    if (r.state != State::kActive || !cache_on(r)) continue;
+    // Committed tokens: the prompt plus every generated token but the last
+    // (pending — the next step writes it).
+    const int64_t committed =
+        static_cast<int64_t>(r.spec.prompt.size()) + r.steps_done - 1;
+    if (committed <= 0 || committed % align != 0) continue;
+    if (committed == r.rolling_position) continue;
+    // A snapshot at a position the request attached at or below repeats an
+    // entry that exists; one at or below the prefill-cut entry likewise.
+    if (committed <= r.attach_position) continue;
+    if (r.rolling_slot < 0) {
+      const int slot = acquire_arena_slot(r.spec.id);
+      if (slot < 0) {
+        ++cache_.stats().skipped_no_slot;
+        continue;
+      }
+      r.rolling_slot = slot;
+    }
+    engine_->prefix_snapshot(r.slot, r.rolling_slot, committed);
+    r.rolling_position = committed;
+    ++cache_.stats().rolling;
+    cache_.note(4, static_cast<uint64_t>(committed),
+                static_cast<uint64_t>(r.rolling_slot));
+    emit_prefix(r.spec.id, "rolling", committed, r.rolling_slot);
+  }
+}
+
+int Scheduler::acquire_arena_slot(const std::string& id) {
+  int slot = cache_.take_free_slot();
+  if (slot >= 0) return slot;
+  slot = cache_.evict_lru();
+  if (slot < 0) return -1;
+  // The victim's state leaves the engine; the slot is the caller's now.
+  engine_->prefix_release(slot);
+  emit_prefix(id, "evict", 0, slot);
+  return slot;
+}
+
+void Scheduler::free_arena_slot(int slot) {
+  engine_->prefix_release(slot);
+  cache_.give_back_slot(slot);
+}
+
+void Scheduler::emit_prefix(const std::string& id, const char* op,
+                            int64_t position, int slot) {
+  DGPP_LOG_INFO("sched: prefix cache {} '{}' position {} slot {}", op, id,
+                position, slot);
+  if (observer_) observer_->on_prefix(id, op, position, slot);
 }
 
 }  // namespace dgpp::glm

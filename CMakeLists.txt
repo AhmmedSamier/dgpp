@@ -162,6 +162,7 @@ add_library(dgpp_models_glm STATIC
   src/models/glm_tool_parser.cpp
   src/models/glm_tool_grammar.cpp
   src/models/glm_json_grammar.cpp
+  src/models/glm_prefix_cache.cpp
   src/models/glm_scheduler.cpp)
 target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders)
 dgpp_set_common(dgpp_models_glm)

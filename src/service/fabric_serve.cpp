@@ -1,5 +1,7 @@
 #include "service/fabric_serve.hpp"
 
+#include <cstdlib>
+
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
@@ -36,6 +38,13 @@ void OpStreamObserver::on_retire(const std::string& id,
 void OpStreamObserver::on_grow(const std::string& id, int64_t reserved_tokens) {
   const std::lock_guard<std::mutex> lock(mutex_);
   text_ += "W " + id + " " + std::to_string(reserved_tokens) + "\n";
+}
+
+void OpStreamObserver::on_prefix(const std::string& id, const char* op,
+                                 int64_t position, int slot) {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  text_ += "X " + std::string(op) + " " + id + " " + std::to_string(position) +
+           " " + std::to_string(slot) + "\n";
 }
 
 std::string OpStreamObserver::text() const {
@@ -88,6 +97,18 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out += ",\"ca\":";
         append_json_int(&out, r.cancel_after);
       }
+      // The prefix cache's inputs (M7): a request without boundaries that
+      // has not opted out writes neither — the pre-cache record, byte for
+      // byte.
+      if (!r.boundaries.empty()) {
+        out += ",\"b\":[";
+        for (size_t j = 0; j < r.boundaries.size(); ++j) {
+          if (j != 0) out.push_back(',');
+          append_json_int(&out, r.boundaries[j]);
+        }
+        out += "]";
+      }
+      if (r.no_cache) out += ",\"nc\":1";
       // The sampling spec rides for stochastic requests and for greedy ones
       // that ask for logprobs; a plain greedy request's record is
       // byte-identical to the pre-sampling format.
@@ -187,15 +208,34 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
     }
     out.push_back(']');
   }
+  // The prefix cache's cross-rank check (M7): rank 0's decision digest
+  // after the previous tick, as a decimal string (a uint64 is not a JSON
+  // number the reader can trust to survive). A cache-less rank 0 writes
+  // none — the pre-cache record.
+  if (events.has_prefix_digest) {
+    out += ",\"pd\":\"" + std::to_string(events.prefix_digest) + "\"";
+  }
   out.push_back('}');
   return out;
 }
 
 std::string encode_journal_stop() { return "{\"op\":\"stop\"}"; }
-std::string encode_journal_warm(const dgpp::glm::AdmissionPolicy& policy) {
+std::string encode_journal_warm(const dgpp::glm::AdmissionPolicy& policy,
+                                int prefix_slots) {
   return "{\"op\":\"warm\",\"adm\":" +
          std::to_string(static_cast<int>(policy.mode)) +
-         ",\"win\":" + std::to_string(policy.window_tokens) + "}";
+         ",\"win\":" + std::to_string(policy.window_tokens) +
+         (prefix_slots > 0 ? ",\"pc\":" + std::to_string(prefix_slots) : "") + "}";
+}
+
+void check_prefix_digest(const JournalRecord& rec,
+                         const dgpp::glm::Scheduler& sched) {
+  if (!rec.has_prefix_digest) return;
+  if (rec.prefix_digest == sched.prefix_digest()) return;
+  throw std::runtime_error(
+      "journal: rank 0's prefix-cache digest " + std::to_string(rec.prefix_digest) +
+      " differs from this rank's " + std::to_string(sched.prefix_digest()) +
+      " — the cache decisions diverged (§11); fabric emergency");
 }
 
 namespace {
@@ -274,6 +314,11 @@ JournalRecord decode_journal_line(std::string_view line) {
           static_cast<dgpp::glm::AdmissionPolicy::Mode>(adm->as_int());
       rec.admission.window_tokens = static_cast<int>(win.as_int());
     }
+    if (const dgpp::minijson::Value* pc = v.find("pc")) {
+      if (!pc->is_number() || pc->as_int() < 0)
+        throw std::runtime_error("journal: warm record with a bad prefix slot count");
+      rec.prefix_slots = static_cast<int>(pc->as_int());
+    }
     return rec;
   }
   if (op != "tick")
@@ -307,6 +352,23 @@ JournalRecord decode_journal_line(std::string_view line) {
           throw std::runtime_error("journal: submit '" + r.id +
                                    "' has bad cancel_after");
         r.cancel_after = static_cast<int>(ca->as_int());
+      }
+      if (const dgpp::minijson::Value* b = item.find("b")) {
+        if (!b->is_array())
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has non-array boundaries");
+        for (const dgpp::minijson::Value& t : b->items()) {
+          if (!t.is_number())
+            throw std::runtime_error("journal: submit '" + r.id +
+                                     "' has a non-numeric boundary");
+          r.boundaries.push_back(t.as_int());
+        }
+      }
+      if (const dgpp::minijson::Value* nc = item.find("nc")) {
+        if (!nc->is_number() || (nc->as_int() != 0 && nc->as_int() != 1))
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has a bad no-cache flag");
+        r.no_cache = nc->as_int() == 1;
       }
       if (const dgpp::minijson::Value* lp = item.find("lp")) {
         if (!lp->is_number() || lp->as_int() < 0 || lp->as_int() > 20)
@@ -450,6 +512,17 @@ JournalRecord decode_journal_line(std::string_view line) {
       rec.cancels.emplace_back(id.as_string());
     }
   }
+  if (const dgpp::minijson::Value* pd = v.find("pd")) {
+    if (!pd->is_string() || pd->as_string().empty())
+      throw std::runtime_error("journal: 'pd' is not a digest string");
+    const std::string text(pd->as_string());
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text.c_str(), &end, 10);
+    if (end == nullptr || *end != '\0')
+      throw std::runtime_error("journal: 'pd' is not a decimal digest");
+    rec.has_prefix_digest = true;
+    rec.prefix_digest = static_cast<uint64_t>(value);
+  }
   return rec;
 }
 
@@ -526,7 +599,7 @@ bool JournalReader::read_line(const std::function<bool()>& should_stop,
 
 bool wait_journal_warm(JournalReader* reader,
                        const std::function<bool()>& should_stop,
-                       dgpp::glm::AdmissionPolicy* policy) {
+                       dgpp::glm::AdmissionPolicy* policy, int* prefix_slots) {
   std::string line;
   if (!reader->read_line(should_stop, &line)) {
     DGPP_LOG_INFO("journal: rank 0's stream ended before the warm record — "
@@ -543,6 +616,7 @@ bool wait_journal_warm(JournalReader* reader,
         "journal: rank 0 ticked before the warm record — protocol order "
         "violated (§11); fabric emergency");
   if (policy != nullptr && rec.has_admission) *policy = rec.admission;
+  if (prefix_slots != nullptr) *prefix_slots = rec.prefix_slots;
   return true;
 }
 
@@ -567,6 +641,9 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
       throw std::runtime_error(
           "journal: warm record inside the serving loop — protocol order "
           "violated (§11); fabric emergency");
+    // The prefix cache's decisions of the previous tick, compared before
+    // this one is applied (M7): a divergence dies here, one tick late.
+    check_prefix_digest(rec, *sched);
     for (auto& r : rec.submits) {
       const std::string id = r.id;  // try_submit takes by value
       // Rank 0 admitted this against a queue state identical to ours

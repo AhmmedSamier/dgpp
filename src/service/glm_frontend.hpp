@@ -56,6 +56,11 @@ class GlmFrontend : public ModelFrontend {
   }
 
   dgpp::glm::ChatMarkers markers() const override { return markers_; }
+  std::vector<int64_t> boundary_token_ids() const override {
+    std::vector<int64_t> ids;
+    for (const dgpp::glm::ChatMarker& m : markers_.role_markers) ids.push_back(m.id);
+    return ids;
+  }
 
  private:
   const dgpp::GlmTokenizer* tok_;

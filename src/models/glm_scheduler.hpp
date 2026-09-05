@@ -83,6 +83,7 @@
 #include <string>
 #include <vector>
 
+#include "models/glm_prefix_cache.hpp"
 #include "models/glm_sampler.hpp"
 #include "models/glm_tool_grammar.hpp"
 
@@ -187,6 +188,66 @@ class SchedulerEngine {
       throw std::logic_error(
           "SchedulerEngine: this engine cannot constrain the pick");
   }
+
+  // ---- prefix cache (M7 stage B, DESIGN §8) ----------------------------------
+  // An engine with a snapshot arena advertises it; the scheduler then keeps
+  // the index (glm_prefix_cache.hpp) and drives these ops — identically on
+  // every rank, because every decision is a function of the journaled
+  // request stream. The default engine has no arena: the scheduler never
+  // calls any of them and the op stream is exactly the pre-cache one.
+  struct PrefixInfo {
+    int arena_slots = 0;       // snapshot slots the engine holds (0: none)
+    int64_t align = 1;         // every snapshot position is a multiple (kpool)
+    int64_t block_tokens = 0;  // the DSA block; 0 = no pool (nothing pinned)
+    int64_t chunk_tokens = 2048;  // the prefill's chunk (the cold cuts)
+  };
+  virtual PrefixInfo prefix_info() const { return {}; }
+  // The prefill with the cache: `boundaries` (absolute positions, ascending)
+  // are the request's structural cut positions — the cold chunking cuts at
+  // every chunk multiple and at the aligned image of each; attach_slot >= 0
+  // opens the slot from that arena entry (at attach_position tokens, one
+  // of the prompt's cuts) and prefills prompt[attach_position..] only;
+  // snap_slot >= 0 asks for a snapshot into that arena slot when a chunk
+  // ends at snap_position (a cut, > attach_position), reported in
+  // snap_taken. Returns the first token, exactly as prefill() does.
+  struct PrefixPrefill {
+    const std::vector<int64_t>* boundaries = nullptr;
+    int attach_slot = -1;
+    int64_t attach_position = 0;
+    int snap_slot = -1;
+    int64_t snap_position = 0;
+    bool snap_taken = false;  // out
+  };
+  virtual int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
+                                 PrefixPrefill* plan) {
+    (void)req;
+    (void)prompt;
+    (void)plan;
+    throw std::logic_error("SchedulerEngine: this engine has no prefix cache");
+  }
+  // The live slot's state at its current position (`position` tokens
+  // committed, a multiple of align — the scheduler's view; the engine
+  // verifies) into arena slot `slot`, replacing whatever the slot held.
+  virtual void prefix_snapshot(int req, int slot, int64_t position) {
+    (void)req;
+    (void)slot;
+    (void)position;
+    throw std::logic_error("SchedulerEngine: this engine has no prefix cache");
+  }
+  // Drops arena slot `slot`'s references (the blocks its entry pinned).
+  virtual void prefix_release(int slot) {
+    (void)slot;
+    throw std::logic_error("SchedulerEngine: this engine has no prefix cache");
+  }
+  // The arena's measured costs, for the metrics.
+  struct PrefixEngineStats {
+    int64_t snapshots = 0;   // arena snapshots taken (prefill and rolling)
+    double snapshot_ms = 0;  // their summed device time, where measured
+    int64_t attaches = 0;
+    double attach_ms = 0;
+    int64_t snapshot_bytes = 0;  // one slot's state bytes
+  };
+  virtual PrefixEngineStats prefix_engine_stats() const { return {}; }
 };
 
 // One request, in arrival (manifest) order. `prompt` ids are validated by
@@ -214,6 +275,14 @@ struct SchedulerRequest {
   // default is inactive — unconstrained, the exact op stream every gate
   // pins. Rides the journal with the request.
   GrammarSpec grammar;
+  // The prefix cache (M7): the prompt's structural boundaries — absolute
+  // positions in [1, prompt.size()), ascending — where the cold prefill
+  // cuts (at their pool-aligned images) so a snapshot of one turn is a cut
+  // of the next; the service derives them from the role-marker tokens in
+  // the prompt ids. Empty: cuts at chunk multiples only. `no_cache` opts
+  // the request out: no attach, no snapshot. Both ride the journal.
+  std::vector<int64_t> boundaries;
+  bool no_cache = false;
 };
 
 // The bounded admission queue at capacity (submit() only). A load-shed
@@ -275,15 +344,43 @@ class Scheduler {
     int64_t tokens_generated = 0;  // cumulative across all requests
     int64_t reservations_grown = 0;  // grow-on-demand: growth events
     int64_t requests_shed_pool = 0;  // grow-on-demand: shed at exhaustion
+    // The prefix cache (M7): its slots and live entries, the attach and
+    // miss counts, the prompt tokens attaches skipped, the entries taken
+    // (at prefill cuts / from rolling snapshots at close), rolling
+    // snapshots, evictions, duplicates, snapshots skipped for want of a
+    // slot, and the DSA blocks entries pin against the pool.
+    int prefix_slots = 0;
+    int prefix_entries = 0;
+    int64_t prefix_hits = 0;
+    int64_t prefix_misses = 0;
+    int64_t prefix_tokens_saved = 0;
+    int64_t prefix_snapshots = 0;
+    int64_t prefix_close_entries = 0;
+    int64_t prefix_rolling = 0;
+    int64_t prefix_evictions = 0;
+    int64_t prefix_duplicates = 0;
+    int64_t prefix_skipped = 0;
+    int64_t prefix_blocks_pinned = 0;
   };
 
   // `eos_token_ids` — the config's end-of-sequence set (empty disables
   // EOS retirement, e.g. --no-eos). `queue_limit` — the admission
   // queue's bound (0 = unbounded, the manifest default; a service sets
   // it so a full queue sheds load with a 503 instead of eating memory).
+  // `prefix_slots` (M7): the snapshot slots the prefix cache may use — -1
+  // = every slot the engine's arena holds, 0 = the cache off, N = at most
+  // N (must not exceed the arena: every rank must run the same count, so
+  // rank 0's resolved value rides the warm record and the peers pass it).
   Scheduler(SchedulerEngine* engine, std::vector<int64_t> eos_token_ids,
-            int queue_limit = 0, AdmissionPolicy policy = AdmissionPolicy{});
+            int queue_limit = 0, AdmissionPolicy policy = AdmissionPolicy{},
+            int prefix_slots = -1);
   const AdmissionPolicy& admission_policy() const { return policy_; }
+  // The prefix cache as configured: its slot count (0 = off) and the
+  // running digest of every decision it made (the journal's cross-rank
+  // check — identical streams, identical digests).
+  int prefix_slots() const { return cache_.slots(); }
+  uint64_t prefix_digest() const { return cache_.digest(); }
+  const PrefixCache& prefix_cache() const { return cache_; }
 
   // Arrival order = FCFS priority. Throws on an empty/duplicate id, a
   // nonpositive max_steps, or a cancel_after outside [1, max_steps] —
@@ -342,7 +439,42 @@ class Scheduler {
     bool cancel_requested = false;  // external cancel, applied at the
                                     // next tick's sweep
     int64_t reserved_tokens = 0;    // the slot's current reservation
+    // The prefix cache (M7): the prompt's cuts and their prefix hashes
+    // (computed once at submit), the entry the request attached to (its
+    // index; -1 cold), the position it attached at, and the rolling
+    // snapshot slot with the position it holds (-1: none yet).
+    std::vector<int64_t> cuts;
+    std::vector<uint64_t> cut_hashes;
+    int attach_entry = -1;
+    int64_t attach_position = 0;
+    int rolling_slot = -1;
+    int64_t rolling_position = -1;
   };
+  // The admission plan the cache proposes for a queued request: the entry
+  // to attach (or -1) and the position, and the cut a new entry would be
+  // taken at (0: none).
+  struct PrefixPlan {
+    int attach_entry = -1;
+    int64_t attach_position = 0;
+    int64_t snap_position = 0;
+  };
+  bool cache_on(const Request& r) const {
+    return cache_.enabled() && !r.spec.no_cache;
+  }
+  PrefixPlan plan_prefix(const Request& r) const;
+  // The blocks an admission must find FREE: the reservation less the full
+  // blocks an attach shares.
+  int64_t new_blocks(const Request& r, const PrefixPlan& plan) const;
+  // Rolling snapshots (tick, before the step): every active cached request
+  // at an aligned committed position it has not snapshotted yet.
+  void rolling_snapshots();
+  // A free arena slot, or the LRU unattached entry's (released on the
+  // engine, an "evict" event under `id`); -1 when neither exists.
+  int acquire_arena_slot(const std::string& id);
+  // Releases a slot on the engine and returns it to the ledger.
+  void free_arena_slot(int slot);
+  void emit_prefix(const std::string& id, const char* op, int64_t position,
+                   int slot);
 
   bool is_eos(int32_t token) const;
   // The reservation an admission pins: the lifetime under full-reserve,
@@ -357,8 +489,9 @@ class Scheduler {
   int youngest_active_after(int arrival) const;
   int free_slot() const;
   // The oldest queued request whose reservation fits a free slot (no
-  // head-of-line blocking), or -1.
-  int next_admissible() const;
+  // head-of-line blocking), or -1. With the prefix cache on it may EVICT
+  // unattached entries (LRU) to make the blocks a request needs.
+  int next_admissible();
   // The submit() validations, shared by submit()/try_submit().
   void validate_new(const SchedulerRequest& request) const;
   int queued_count() const;
@@ -394,6 +527,9 @@ class Scheduler {
   AdmissionPolicy policy_;
   int64_t grows_ = 0;              // growth events (meters)
   int64_t pool_sheds_ = 0;         // requests shed at exhaustion (meters)
+  PrefixCache cache_;              // the prefix cache's index (M7)
+  SchedulerEngine::PrefixInfo prefix_info_;
+  uint64_t ticks_ = 0;             // the LRU clock
 };
 
 // Streaming lifecycle events for the service (SSE). Fired inline on the
@@ -422,6 +558,20 @@ class SchedulerObserver {
   virtual void on_grow(const std::string& id, int64_t reserved_tokens) {
     (void)id;
     (void)reserved_tokens;
+  }
+  // A prefix-cache decision (M7): `op` is "attach" (the request opened from
+  // an entry at `position`, arena `slot`), "snapshot" (an entry taken at a
+  // prefill cut), "rolling" (a live request's rolling snapshot), "close"
+  // (a rolling snapshot became an entry at retire), "evict" (an entry
+  // freed; `id` is the request whose admission needed the slot or blocks)
+  // or "drop" (a rolling slot released without becoming an entry). Rank-
+  // identical state: the op stream records every one.
+  virtual void on_prefix(const std::string& id, const char* op,
+                         int64_t position, int slot) {
+    (void)id;
+    (void)op;
+    (void)position;
+    (void)slot;
   }
 };
 

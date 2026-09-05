@@ -497,6 +497,12 @@ class GlmDiagnosticModel {
   // Block count covering `tokens` tokens — the reserve arithmetic for
   // prompt + max_steps admissions.
   int64_t dsa_blocks_for_tokens(int64_t tokens) const;
+  // The DSA block in tokens (0 without DSA layers) and the prefill's chunk
+  // length — the prefix cache's geometry (M7): an entry pins the full
+  // blocks below its position and one partial; the cold prefill cuts at
+  // chunk multiples.
+  int64_t dsa_block_tokens() const;
+  static constexpr int prefill_chunk_tokens() { return kPrefillChunkTokens; }
 
   // Isolated parity runner (the curated suite's real-checkpoint mode):
   // every layer starts from the REFERENCE trajectory — layer_inputs[L]

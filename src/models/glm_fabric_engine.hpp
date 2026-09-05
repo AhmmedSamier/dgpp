@@ -20,6 +20,7 @@
 #include "common/log.hpp"
 #include "common/process_memory.hpp"
 #include "models/glm_gen_engine.hpp"
+#include "models/glm_prefix_arena.hpp"
 #include "models/glm_graph_check.hpp"
 #include "models/glm_speculative.hpp"
 #include "models/glm_loader.hpp"
@@ -244,7 +245,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
                         uint16_t* sample_prefix_scratch = nullptr,
                         uint16_t* sample_gather_scratch = nullptr,
                         int sampling_candidates_cap = kSamplingCandidates,
-                        const glm::GrammarVocab* grammar_vocab = nullptr)
+                        const glm::GrammarVocab* grammar_vocab = nullptr,
+                        int prefix_slots = 0)
       : model_(model),
         bus_(bus),
         rank_(rank),
@@ -253,7 +255,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
         pick_timeout_ms_(pick_timeout_ms),
         sample_prefix_scratch_(sample_prefix_scratch),
         sample_gather_scratch_(sample_gather_scratch),
-        grammar_vocab_(grammar_vocab) {
+        grammar_vocab_(grammar_vocab),
+        arena_(model, model == nullptr ? 0 : prefix_slots) {
     if (model_ == nullptr || bus_ == nullptr || pick_scratch == nullptr)
       throw std::invalid_argument("graph engine: null model/bus/pick scratch");
     slots_ = model_->max_session_requests();
@@ -512,6 +515,74 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   }
 
   int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
+    return open_slot(req, prompt,
+                     [&] { return model_->session_prefill(req, prompt); });
+  }
+
+  // ---- prefix cache (M7) --------------------------------------------------
+  glm::SchedulerEngine::PrefixInfo prefix_info() const override {
+    glm::SchedulerEngine::PrefixInfo info;
+    info.arena_slots = arena_.slots();
+    info.align = model_->session_kpool();
+    info.block_tokens = model_->dsa_block_tokens();
+    info.chunk_tokens = GlmDiagnosticModel::prefill_chunk_tokens();
+    return info;
+  }
+  int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
+                         glm::SchedulerEngine::PrefixPrefill* plan) override {
+    if (plan == nullptr || plan->boundaries == nullptr)
+      throw std::invalid_argument("graph engine: prefill_cached without a plan");
+    return open_slot(req, prompt, [&] {
+      GlmDiagnosticModel::SnapshotRequest snap;
+      GlmDiagnosticModel::SnapshotRequest* snap_ptr = nullptr;
+      if (plan->snap_slot >= 0) {
+        snap = arena_.request(plan->snap_slot, plan->snap_position);
+        snap_ptr = &snap;
+      }
+      GlmDiagnosticModel::Outputs out;
+      if (plan->attach_slot >= 0) {
+        if (arena_.position(plan->attach_slot) != plan->attach_position)
+          throw std::logic_error(
+              "graph engine: the attach slot's position differs from the plan");
+        arena_.attach(req, plan->attach_slot);
+        const std::vector<int64_t> suffix(prompt.begin() + plan->attach_position,
+                                          prompt.end());
+        out = model_->session_prefill_resume(req, suffix, *plan->boundaries,
+                                             snap_ptr);
+      } else {
+        out = model_->session_prefill(req, prompt, *plan->boundaries, snap_ptr);
+      }
+      if (snap_ptr != nullptr) {
+        arena_.commit(plan->snap_slot, snap);
+        plan->snap_taken = snap.taken;
+      }
+      return out;
+    });
+  }
+  void prefix_snapshot(int req, int slot, int64_t position) override {
+    check_live(req, "prefix_snapshot");
+    arena_.snapshot(req, slot, position);
+  }
+  void prefix_release(int slot) override { arena_.release(slot); }
+  glm::SchedulerEngine::PrefixEngineStats prefix_engine_stats() const override {
+    glm::SchedulerEngine::PrefixEngineStats st;
+    st.snapshots = arena_.snapshots();
+    st.snapshot_ms = arena_.snapshot_ms();
+    st.attaches = arena_.attaches();
+    st.attach_ms = arena_.attach_ms();
+    st.snapshot_bytes = static_cast<int64_t>(arena_.bytes());
+    return st;
+  }
+
+ private:
+  // The prefill's slot-side work around the model call that yields the
+  // last row's logits (a cold prefill, or an attach + resume): the grammar's
+  // opening state, the pick or the sampled draw, the sampled context and
+  // its device count table, the draft block's first proposal, the batch
+  // feeds. `run` opens the slot on the model; a failure after it closes
+  // the slot again (a failed admission must not leak its blocks).
+  template <typename Run>
+  int32_t open_slot(int req, const std::vector<int64_t>& prompt, Run&& run) {
     check_req(req);
     if (live_[static_cast<size_t>(req)])
       throw std::logic_error("graph engine: prefill on a live request");
@@ -530,8 +601,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       const bool sampled = full_path_slot(req);
       int32_t first = -1;
       {
-        const GlmDiagnosticModel::Outputs out =
-            model_->session_prefill(req, prompt);
+        const GlmDiagnosticModel::Outputs out = run();
         if (sampled) {
           std::vector<int32_t> context(prompt.begin(), prompt.end());
           const glm::TokenMask* mask = nullptr;
@@ -602,6 +672,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     }
   }
 
+ public:
   void reserve(int req, int64_t tokens) override {
     check_live(req, "reserve");
     model_->session_reserve_blocks(req, tokens);
@@ -1424,6 +1495,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   std::vector<int64_t> draft_;
   std::vector<bool> live_;
   std::vector<bool> reserved_;
+  PrefixArena arena_;  // the prefix cache's snapshot slots (M7)
 };
 
 }  // namespace dgpp

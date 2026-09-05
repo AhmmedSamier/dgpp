@@ -238,6 +238,45 @@ void test_journal_codec() {
   require(back.submits[0].prompt == submit.prompt, "codec: prompt round-trip");
   require(back.submits[0].max_steps == 16, "codec: max_steps round-trip");
   require(back.submits[0].cancel_after == 3, "codec: cancel_after round-trip");
+  require(back.submits[0].boundaries.empty() && !back.submits[0].no_cache &&
+              !back.has_prefix_digest,
+          "codec: a request without cache inputs decodes without them");
+  {
+    // The prefix cache's fields (M7): boundaries, the opt-out, the tick's
+    // digest and the warm record's slot count round-trip; a record without
+    // them is byte-identical to the pre-cache format.
+    GenerationService::PassEvents ev;
+    dgpp::glm::SchedulerRequest r;
+    r.id = "chatcmpl-0000000000000c01";
+    r.prompt = {9, 8, 7, 6, 5, 4, 3, 2, 1};
+    r.max_steps = 2;
+    r.boundaries = {3, 6};
+    r.no_cache = true;
+    ev.submits.push_back(r);
+    ev.has_prefix_digest = true;
+    ev.prefix_digest = 18446744073709551557ull;  // above int64: the string form
+    const std::string line = dgpp::service::encode_journal_tick(ev);
+    require(line.find("\"b\":[3,6]") != std::string::npos &&
+                line.find("\"nc\":1") != std::string::npos &&
+                line.find("\"pd\":\"18446744073709551557\"") != std::string::npos,
+            "codec: cache fields on the wire: " + line);
+    const dgpp::service::JournalRecord b2 = dgpp::service::decode_journal_line(line);
+    require(b2.submits.size() == 1 && b2.submits[0].boundaries == r.boundaries &&
+                b2.submits[0].no_cache && b2.has_prefix_digest &&
+                b2.prefix_digest == ev.prefix_digest,
+            "codec: cache fields round-trip");
+    const std::string plain = dgpp::service::encode_journal_tick(events);
+    require(plain.find("\"b\"") == std::string::npos &&
+                plain.find("\"nc\"") == std::string::npos &&
+                plain.find("\"pd\"") == std::string::npos,
+            "codec: the pre-cache record is unchanged");
+    const dgpp::service::JournalRecord warm = dgpp::service::decode_journal_line(
+        dgpp::service::encode_journal_warm(dgpp::glm::AdmissionPolicy{}, 42));
+    require(warm.warm && warm.prefix_slots == 42, "codec: warm record slot count");
+    const dgpp::service::JournalRecord warm0 = dgpp::service::decode_journal_line(
+        dgpp::service::encode_journal_warm(dgpp::glm::AdmissionPolicy{}, 0));
+    require(warm0.warm && warm0.prefix_slots == 0, "codec: warm record without a cache");
+  }
   require(back.cancels[0] == "chatcmpl-dead", "codec: cancel round-trip");
   require(!back.submits[0].grammar.active(), "codec: no grammar unless sent");
 
