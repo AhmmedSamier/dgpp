@@ -966,6 +966,69 @@ void run_dense_attention_case(const DenseCase& dc) {
 
 }  // namespace
 
+// The absorb and vout projections on tensor cores against the warp kernels
+// (which the rows path still takes below 16 rows, so the same inputs run
+// through both by chunking the rows): bf16 outputs within one ulp, tight
+// l2, deterministic — at the checkpoint's 64-head geometry and at TP=4's.
+DGPP_TEST(dsa_absorb_and_vout_mma_match_the_warp_kernels) {
+  for (const int heads : {64, 16}) {
+    DsaConfig cfg{};
+    cfg.num_heads = heads;
+    const DsaGeometry g = DsaGeometry::from_config(cfg);
+    const int local_heads = g.local_heads, nope = cfg.qk_nope_head_dim;
+    const int v = cfg.v_head_dim, kv_lora = cfg.kv_lora_rank;
+    const int rows = 41;
+    auto q = random_bf16_bits(101 + heads, int64_t(rows) * local_heads * nope, -2, 1);
+    auto kv_b = random_bf16_bits(102 + heads, int64_t(local_heads) * (nope + v) * kv_lora, -2, 1);
+    std::vector<float> c(size_t(rows) * local_heads * kv_lora);
+    {
+      uint64_t x = 0x9E3779B97F4A7C15ULL + heads;
+      for (auto& f : c) {
+        x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+        f = (float(int64_t(x >> 40)) / float(1 << 23) - 1.f) * 3.f;
+      }
+    }
+    DevBuf dq(q.size() * 2), dkb(kv_b.size() * 2), dc(c.size() * 4),
+        dqt_a(size_t(rows) * local_heads * kv_lora * 2), dqt_b(size_t(rows) * local_heads * kv_lora * 2),
+        dqt_c(size_t(rows) * local_heads * kv_lora * 2),
+        dout_a(size_t(rows) * local_heads * v * 2), dout_b(size_t(rows) * local_heads * v * 2),
+        dout_c(size_t(rows) * local_heads * v * 2);
+    dq.upload(q.data(), q.size() * 2);
+    dkb.upload(kv_b.data(), kv_b.size() * 2);
+    dc.upload(c.data(), c.size() * 4);
+    // Warp kernels: chunks of 15 rows (below the tensor-core threshold).
+    for (int r0 = 0; r0 < rows; r0 += 15) {
+      const int n = std::min(15, rows - r0);
+      dsa_absorb_q(static_cast<const uint16_t*>(dq.p) + size_t(r0) * local_heads * nope, dkb.p,
+                   static_cast<uint16_t*>(dqt_a.p) + size_t(r0) * local_heads * kv_lora, n,
+                   local_heads, nope, v, kv_lora, 0);
+      dsa_vout_gemm(static_cast<const float*>(dc.p) + size_t(r0) * local_heads * kv_lora, dkb.p,
+                    static_cast<uint16_t*>(dout_a.p) + size_t(r0) * local_heads * v, n,
+                    local_heads, nope, v, kv_lora, 0);
+    }
+    // Tensor-core kernels: all rows at once, twice (determinism).
+    dsa_absorb_q(dq.p, dkb.p, dqt_b.p, rows, local_heads, nope, v, kv_lora, 0);
+    dsa_absorb_q(dq.p, dkb.p, dqt_c.p, rows, local_heads, nope, v, kv_lora, 0);
+    dsa_vout_gemm(dc.p, dkb.p, dout_b.p, rows, local_heads, nope, v, kv_lora, 0);
+    dsa_vout_gemm(dc.p, dkb.p, dout_c.p, rows, local_heads, nope, v, kv_lora, 0);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    const size_t nq = size_t(rows) * local_heads * kv_lora, no = size_t(rows) * local_heads * v;
+    std::vector<uint16_t> qa(nq), qb(nq), qc(nq), oa(no), ob(no), oc(no);
+    dqt_a.download(qa.data(), nq * 2); dqt_b.download(qb.data(), nq * 2); dqt_c.download(qc.data(), nq * 2);
+    dout_a.download(oa.data(), no * 2); dout_b.download(ob.data(), no * 2); dout_c.download(oc.data(), no * 2);
+    require_bitwise("absorb mma repeat", qc.data(), qb.data(), nq * 2);
+    require_bitwise("vout mma repeat", oc.data(), ob.data(), no * 2);
+    const auto sq = compare_bf16(qb, qa, 1);
+    const auto so = compare_bf16(ob, oa, 1);
+    std::printf("[ OK ] projections mma heads=%d: absorb l2_rel %.3g max_rel %.3g mismatches %ld/%ld; "
+                "vout l2_rel %.3g max_rel %.3g mismatches %ld/%ld\n",
+                heads, sq.l2_rel, sq.max_rel, sq.mismatches, sq.n, so.l2_rel, so.max_rel,
+                so.mismatches, so.n);
+    require_bf16("absorb mma vs warp kernel", sq, 2e-3, 0.02);
+    require_bf16("vout mma vs warp kernel", so, 2e-3, 0.02);
+  }
+}
+
 DGPP_TEST(dsa_dense_attention_matches_split_kernel_and_reference) {
   for (const DenseCase dc : {DenseCase{64, 512}, DenseCase{16, 512}, DenseCase{16, 256}})
     run_dense_attention_case(dc);

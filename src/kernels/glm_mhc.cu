@@ -320,6 +320,135 @@ __global__ void mhc_dots_kernel(const uint16_t* __restrict__ streams,
   }
 }
 
+// The prefill form of the dots (2026-09-05): one block per FOUR tokens,
+// every coefficient in the same block. The per-coefficient form above
+// re-derives a token's inv_rms in 24 blocks and re-reads its streams 48
+// times and the coefficient matrix once per token (~4.5 GB of L2 traffic
+// per 2048-token site, 1.5 ms); this one streams the four tokens' rows
+// and the coefficient matrix through shared memory in 256-vector chunks,
+// so the matrix is read once per four tokens and each row once per pass
+// (~0.46 GB). BITWISE the per-coefficient form: thread t still walks
+// vectors v = t, t + 256, ... in ascending order (a chunk is exactly 256
+// vectors) with the same fma chain, the same block_sum tree, the same
+// finish — glm_mhc_test pins it. The finish runs in-block for each of the
+// four tokens (no tickets); decode's <= 8 tokens keep the fused form.
+// Tests flip this to compare the tiled form against the per-coefficient
+// form on the same inputs (mhc_set_tiled_form).
+bool g_mhc_tiled_enabled = true;
+constexpr int kTileTokens = 4;
+constexpr int kTileChunkVecs = kThreads;  // 256 vectors = 2048 elements
+// The coefficient matrix is staged in two halves of 12 rows (the device's
+// per-block shared memory cap is below 4 + 24 rows of 4 KB).
+constexpr int kTileCoeffHalf = kCoeffs / 2;
+constexpr size_t kTileSmemBytes =
+    size_t(kTileTokens + kTileCoeffHalf) * kTileChunkVecs * sizeof(uint4);  // 64 KB
+
+template <int kPerThread>
+__global__ __launch_bounds__(kThreads) void mhc_dots_tiled_kernel(
+    const uint16_t* __restrict__ streams, const uint16_t* __restrict__ fn,
+    float* __restrict__ logits, int tokens, int hidden, float norm_eps,
+    MhcFinishArgs fin) {
+  extern __shared__ __align__(16) uint4 tile_smem[];
+  uint4* sX = tile_smem;                                   // [4][256]
+  uint4* sF = tile_smem + kTileTokens * kTileChunkVecs;    // [12][256], two halves
+  __shared__ float scratch[kThreads / 32];
+  const int t0 = blockIdx.x * kTileTokens;
+  const int K = kN * hidden;
+  const int vecs = K / 8;  // the launcher verified K % 8 == 0 and alignment
+  const uint4* xv[kTileTokens];
+#pragma unroll
+  for (int i = 0; i < kTileTokens; ++i) {
+    const int t = min(t0 + i, tokens - 1);  // a tail token clamps (its results are dropped)
+    xv[i] = reinterpret_cast<const uint4*>(streams + static_cast<size_t>(t) * K);
+  }
+
+  // Pass 1: sum of squares per token, the per-coefficient form's order.
+  float ssq[kTileTokens];
+#pragma unroll
+  for (int i = 0; i < kTileTokens; ++i) ssq[i] = 0.f;
+  for (int v = threadIdx.x; v < vecs; v += kThreads) {
+#pragma unroll
+    for (int i = 0; i < kTileTokens; ++i) {
+      float f[8];
+      unpack8(xv[i][v], f);
+#pragma unroll
+      for (int j = 0; j < 8; ++j) ssq[i] = __fmaf_rn(f[j], f[j], ssq[i]);
+    }
+  }
+  float r[kTileTokens];
+#pragma unroll
+  for (int i = 0; i < kTileTokens; ++i)
+    r[i] = rsqrtf(block_sum(ssq[i], scratch) / static_cast<float>(K) + norm_eps);
+
+  // Pass 2: the 24 dots per token over staged chunks.
+  float dot[kTileTokens][kCoeffs];
+#pragma unroll
+  for (int i = 0; i < kTileTokens; ++i)
+#pragma unroll
+    for (int c = 0; c < kCoeffs; ++c) dot[i][c] = 0.f;
+  const uint4* fv = reinterpret_cast<const uint4*>(fn);
+  for (int v0 = 0; v0 < vecs; v0 += kTileChunkVecs) {
+    const int nv = min(kTileChunkVecs, vecs - v0);
+    // Thread t's vector of this chunk is v0 + t (its next in ascending
+    // order); its four tokens' values stay in registers across the two
+    // coefficient halves.
+    const int vv = threadIdx.x;
+    float f[kTileTokens][8];
+    __syncthreads();  // the previous chunk's readers are done
+    for (int idx = threadIdx.x; idx < kTileTokens * kTileChunkVecs; idx += kThreads) {
+      const int row = idx / kTileChunkVecs, v = idx % kTileChunkVecs;
+      if (v < nv) sX[row * kTileChunkVecs + v] = xv[row][v0 + v];
+    }
+    __syncthreads();
+    if (vv < nv) {
+#pragma unroll
+      for (int i = 0; i < kTileTokens; ++i) unpack8(sX[i * kTileChunkVecs + vv], f[i]);
+    }
+#pragma unroll
+    for (int half = 0; half < 2; ++half) {
+      __syncthreads();  // the previous half's readers are done
+      for (int idx = threadIdx.x; idx < kTileCoeffHalf * kTileChunkVecs; idx += kThreads) {
+        const int row = idx / kTileChunkVecs, v = idx % kTileChunkVecs;
+        if (v < nv)
+          sF[row * kTileChunkVecs + v] =
+              fv[static_cast<size_t>(half * kTileCoeffHalf + row) * vecs + v0 + v];
+      }
+      __syncthreads();
+      if (vv < nv) {
+#pragma unroll
+        for (int cl = 0; cl < kTileCoeffHalf; ++cl) {
+          const int c = half * kTileCoeffHalf + cl;
+          float g[8];
+          unpack8(sF[cl * kTileChunkVecs + vv], g);
+#pragma unroll
+          for (int i = 0; i < kTileTokens; ++i)
+#pragma unroll
+            for (int j = 0; j < 8; ++j)
+              dot[i][c] = __fmaf_rn(f[i][j] * r[i], g[j], dot[i][c]);
+        }
+      }
+    }
+  }
+#pragma unroll
+  for (int i = 0; i < kTileTokens; ++i) {
+#pragma unroll
+    for (int c = 0; c < kCoeffs; ++c) {
+      const float total = block_sum(dot[i][c], scratch);
+      if (threadIdx.x == 0 && t0 + i < tokens)
+        logits[static_cast<size_t>(t0 + i) * kCoeffs + c] = total;
+    }
+  }
+  __syncthreads();  // the logits are visible to this block's finish
+  for (int i = 0; i < kTileTokens; ++i) {
+    if (t0 + i >= tokens) break;
+    mhc_finish_block<kPerThread>(t0 + i, streams, logits, fin.base, fin.scale,
+                                 fin.collapsed, fin.post_out, fin.comb_out,
+                                 fin.ln, fin.normed, hidden, fin.hc_eps,
+                                 fin.sinkhorn_iters, fin.ln_eps);
+    __syncthreads();  // the finish's shared state is reused by the next token
+  }
+}
+
 template <int kPerThread>
 __global__ void mhc_finish_kernel(const uint16_t* __restrict__ streams,
                                   const float* __restrict__ logits_in,
@@ -339,6 +468,9 @@ __global__ void mhc_finish_kernel(const uint16_t* __restrict__ streams,
                                hidden, hc_eps, sinkhorn_iters, ln_eps);
 }
 
+// One thread per (token, d) computing all kN output streams (2026-09-05):
+// the per-element form read each residual value kN times. The per-element
+// arithmetic is unchanged (bitwise).
 __global__ void mhc_stream_update_kernel(const uint16_t* __restrict__ post,
                                          const uint16_t* __restrict__ comb,
                                          const uint16_t* __restrict__ sublayer,
@@ -347,27 +479,27 @@ __global__ void mhc_stream_update_kernel(const uint16_t* __restrict__ post,
                                          int tokens, int hidden) {
   const size_t idx =
       static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const size_t total = static_cast<size_t>(tokens) * kN * hidden;
+  const size_t total = static_cast<size_t>(tokens) * hidden;
   if (idx >= total) return;
   const int d = static_cast<int>(idx % hidden);
-  const int i = static_cast<int>(idx / hidden) % kN;
-  const int token = static_cast<int>(idx / (kN * hidden));
-  const size_t t = static_cast<size_t>(token);
-
-  const float pi = bf16_bits_to_float(post[t * kN + i]);
+  const size_t t = idx / hidden;
   const float h = bf16_bits_to_float(sublayer[t * hidden + d]);
-  const uint16_t t1 = float_to_bf16_bits(pi * h);
-
   const uint16_t* res = streams_in + t * kN * hidden;
-  float mix = 0.f;
+  float rv[kN];
 #pragma unroll
-  for (int j = 0; j < kN; ++j)
-    mix = __fmaf_rn(bf16_bits_to_float(comb[t * kN * kN + j * kN + i]),
-                    bf16_bits_to_float(res[j * hidden + d]), mix);
-  const uint16_t t2 = float_to_bf16_bits(mix);
-
-  streams_out[idx] =
-      float_to_bf16_bits(bf16_bits_to_float(t1) + bf16_bits_to_float(t2));
+  for (int j = 0; j < kN; ++j) rv[j] = bf16_bits_to_float(res[j * hidden + d]);
+#pragma unroll
+  for (int i = 0; i < kN; ++i) {
+    const float pi = bf16_bits_to_float(post[t * kN + i]);
+    const uint16_t t1 = float_to_bf16_bits(pi * h);
+    float mix = 0.f;
+#pragma unroll
+    for (int j = 0; j < kN; ++j)
+      mix = __fmaf_rn(bf16_bits_to_float(comb[t * kN * kN + j * kN + i]), rv[j], mix);
+    const uint16_t t2 = float_to_bf16_bits(mix);
+    streams_out[t * kN * hidden + static_cast<size_t>(i) * hidden + d] =
+        float_to_bf16_bits(bf16_bits_to_float(t1) + bf16_bits_to_float(t2));
+  }
 }
 
 __global__ void mhc_final_mean_kernel(const uint16_t* __restrict__ streams,
@@ -417,12 +549,47 @@ void launch_dots(const uint16_t* streams, const GlmMhcWeights& w,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+// Tokens at or above which the vector path takes the tiled form (prefill);
+// decode's rows keep the per-coefficient fused form (graph-captured).
+constexpr int kTileMinTokens = 16;
+
+template <int kPerThread>
+void launch_dots_tiled(const uint16_t* streams, const GlmMhcWeights& w,
+                       const GlmMhcConfig& cfg, float* logits_scratch,
+                       const MhcFinishArgs& fin, int tokens,
+                       cudaStream_t stream) {
+  static bool attr_set = false;  // per instantiation, per process
+  if (!attr_set) {
+    DGPP_CUDA_OK(cudaFuncSetAttribute(
+        mhc_dots_tiled_kernel<kPerThread>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, int(kTileSmemBytes)));
+    attr_set = true;
+  }
+  const unsigned blocks = static_cast<unsigned>((tokens + kTileTokens - 1) / kTileTokens);
+  mhc_dots_tiled_kernel<kPerThread><<<blocks, kThreads, kTileSmemBytes, stream>>>(
+      streams, w.fn, logits_scratch, tokens, cfg.hidden, cfg.norm_eps, fin);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 template <bool kVec>
 void launch_dots_by_width(const uint16_t* streams, const GlmMhcWeights& w,
                           const GlmMhcConfig& cfg, float* logits_scratch,
                           const MhcFinishArgs& fin, bool fused, int tokens,
                           cudaStream_t stream) {
   const int per_thread = (cfg.hidden + kThreads - 1) / kThreads;
+  if (kVec && tokens >= kTileMinTokens && g_mhc_tiled_enabled) {
+    // The tiled prefill form runs the finish in-block whatever `fused`
+    // says (the two-launch form's finish kernel is then skipped).
+    if (per_thread <= 8)
+      launch_dots_tiled<8>(streams, w, cfg, logits_scratch, fin, tokens, stream);
+    else if (per_thread <= 16)
+      launch_dots_tiled<16>(streams, w, cfg, logits_scratch, fin, tokens, stream);
+    else if (per_thread <= 32)
+      launch_dots_tiled<32>(streams, w, cfg, logits_scratch, fin, tokens, stream);
+    else
+      throw std::invalid_argument("mhc_compute: hidden too large (> 8192)");
+    return;
+  }
   if (!fused)
     launch_dots<kVec, 0>(streams, w, cfg, logits_scratch, fin, tokens, stream);
   else if (per_thread <= 8)
@@ -474,6 +641,7 @@ void launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
     launch_dots_by_width<false>(streams, w, cfg, logits_scratch, fin, fused,
                                 tokens, stream);
   if (fused) return;
+  if (vec && tokens >= kTileMinTokens && g_mhc_tiled_enabled) return;  // finished in-block
   // The per-thread register slice must cover hidden / kThreads elements.
   const int per_thread = (cfg.hidden + kThreads - 1) / kThreads;
   if (per_thread <= 8)
@@ -488,6 +656,8 @@ void launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
   else
     throw std::invalid_argument("mhc_compute: hidden too large (> 8192)");
 }
+
+void mhc_set_tiled_form(bool on) { g_mhc_tiled_enabled = on; }
 
 void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
                         const GlmMhcConfig& cfg, uint16_t* collapsed,
@@ -509,7 +679,7 @@ void launch_mhc_stream_update(const uint16_t* post, const uint16_t* comb,
     throw std::invalid_argument("mhc_stream_update: in/out must not alias");
   if (!post || !comb || !sublayer_out || !streams_in || !streams_out)
     throw std::invalid_argument("mhc_stream_update: null pointer");
-  const size_t total = static_cast<size_t>(tokens) * 4 * cfg.hidden;
+  const size_t total = static_cast<size_t>(tokens) * cfg.hidden;
   const int blocks = static_cast<int>((total + kThreads - 1) / kThreads);
   mhc_stream_update_kernel<<<blocks, kThreads, 0, stream>>>(
       post, comb, sublayer_out, streams_in, streams_out, tokens, cfg.hidden);

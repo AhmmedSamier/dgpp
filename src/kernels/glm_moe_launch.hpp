@@ -23,7 +23,8 @@ void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
                        const float* bias, int32_t* ids, float* weights,
                        float* scores, float* biased, const GlmMoeConfig& cfg,
                        int tokens, cudaStream_t stream,
-                       int* counters = nullptr);
+                       int* counters = nullptr,
+                       bool allow_tiled = true);
 
 // swiglu with asymmetric clamps: gate clamp_max only, up clamp both; two
 // bf16 rounding points (silu result, then the product). n = rows*inter.
@@ -80,16 +81,30 @@ void launch_moe_grouped_gemv_f32(const uint16_t* act, size_t act_stride,
 // its expert's weights once instead of once per four rows); the decode
 // path keeps the GEMV core. rows_per_block, when set, must be a multiple
 // of 128 (the shared expert's z split); k a multiple of 16.
+// `act_rows` (nullable, 2026-09-05): the activation row for segment row i is
+// act_rows[i] — the gather folded into the tile load; the values are the
+// gathered buffer's, so the outputs are unchanged.
 void launch_moe_grouped_mma_bf16(const uint16_t* act, size_t act_stride,
                                  const MoeSegment* segs, int n_segs, int max_rows,
                                  int rows_per_block, const MoeExpertView* views,
                                  int which, uint16_t* out, size_t out_stride, int n,
-                                 int k, cudaStream_t stream);
+                                 int k, cudaStream_t stream,
+                                 const int32_t* act_rows = nullptr);
 void launch_moe_grouped_mma_f32(const uint16_t* act, size_t act_stride,
                                 const MoeSegment* segs, int n_segs, int max_rows,
                                 int rows_per_block, const MoeExpertView* views,
                                 int which, float* out, size_t out_stride, int n,
-                                int k, cudaStream_t stream);
+                                int k, cudaStream_t stream,
+                                const int32_t* act_rows = nullptr);
+// The dense form of the same kernel (2026-09-05): out[m, n] = act[m, k] x
+// W[n, k]^T (fp8 payload + block scales, out row stride n) — bitwise the
+// scale GEMM's tile kernel; the scale GEMM routes m > 128 here.
+void launch_dense_mma_bf16(const uint16_t* act, size_t act_stride,
+                           const uint8_t* payload, const float* scales,
+                           uint16_t* out, int m, int n, int k, cudaStream_t stream);
+void launch_dense_mma_f32(const uint16_t* act, size_t act_stride,
+                          const uint8_t* payload, const float* scales, float* out,
+                          int m, int n, int k, cudaStream_t stream);
 // Device-side segmentation (2026-09-04, the prefill's last host sync): from
 // the router's ids [tokens * top_k] — the same segmentation the host path
 // computes, on the device: rows[] = every routed (token, slot) in

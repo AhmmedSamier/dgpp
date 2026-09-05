@@ -6,6 +6,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "kernels/fp8_gemv.cuh"
+#include "kernels/glm_moe_launch.hpp"
 
 namespace dgpp {
 namespace {
@@ -175,6 +176,19 @@ void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
 // difference between the bf16 and fp32 products (same tiles, same GEMV
 // core, same accumulation order), so a value that rounds to bf16 in one
 // is the unrounded fp32 of the other.
+inline void launch_dense_mma(const uint16_t* act, size_t act_stride,
+                             const uint8_t* payload, const float* scales,
+                             uint16_t* out, int m, int n, int k,
+                             cudaStream_t stream) {
+  launch_dense_mma_bf16(act, act_stride, payload, scales, out, m, n, k, stream);
+}
+inline void launch_dense_mma(const uint16_t* act, size_t act_stride,
+                             const uint8_t* payload, const float* scales,
+                             float* out, int m, int n, int k,
+                             cudaStream_t stream) {
+  launch_dense_mma_f32(act, act_stride, payload, scales, out, m, n, k, stream);
+}
+
 template <typename OutT>
 void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
                        const uint8_t* w_payload, const float* w_scales,
@@ -209,6 +223,17 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
           out + static_cast<size_t>(row0) * n, rows, n, k, stream);
       row0 += rows;
     }
+    return;
+  }
+  // Large m (2026-09-05): the 128-row tensor-core kernel (the MoE experts'
+  // dense form) — bitwise this file's tile kernel (the same dequantized
+  // weights and the same ascending-k16 mma chain), with the weight tile
+  // decoded once per 128 rows instead of once per 16 (the dense MLP
+  // layers' 2048-row GEMMs: 9.7 ms a call on the tile kernel). k % 16 != 0
+  // stays on the tile kernel.
+  if (k % 16 == 0) {
+    launch_dense_mma(act, act_row_stride_elems, w_payload, w_scales, out, m, n,
+                     k, stream);
     return;
   }
   const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);

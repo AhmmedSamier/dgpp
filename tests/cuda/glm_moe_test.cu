@@ -12,6 +12,7 @@
 // strict oracle, budgeted there at 0 mismatches — here slightly loosened
 // for the extra chained roundings).
 #include <algorithm>
+#include <random>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -825,6 +826,56 @@ DGPP_TEST(moe_enqueue_prefill_is_bitwise_the_host_path) {
 }
 
 }  // namespace
+
+DGPP_TEST(moe_router_tiled_dots_are_bitwise_the_warp_form) {
+  // The prefill router's tiled dots (16 tokens x 16 experts per block,
+  // operands staged in shared memory) against the warp-per-(token, expert)
+  // form on the real geometry: every score and biased score bitwise, and
+  // the selection with them — the per-lane element order and the shuffle
+  // tree are the same by construction; this pins it. 70 tokens: four full
+  // token tiles and a ragged one; 288 experts: eighteen expert tiles.
+  const int E = 288, H = 4096, K = 8, M = 70;
+  GlmMoeConfig cfg{};
+  cfg.n_experts = E; cfg.hidden = H; cfg.top_k = K;
+  cfg.routed_scaling_factor = 2.5f; cfg.norm_topk_prob = true;
+  std::mt19937 rng(0x7A11ED);
+  std::uniform_real_distribution<float> U(-1.f, 1.f);
+  std::vector<uint16_t> h_hidden(size_t(M) * H), h_gate(size_t(E) * H);
+  std::vector<float> h_bias(E);
+  for (auto& v : h_hidden) v = float_to_bf16_bits(U(rng));
+  for (auto& v : h_gate) v = float_to_bf16_bits(U(rng) * 0.05f);
+  for (auto& v : h_bias) v = U(rng) * 0.01f;
+  uint16_t *d_hidden = nullptr, *d_gate = nullptr;
+  float *d_bias = nullptr, *d_scores_a = nullptr, *d_scores_b = nullptr,
+        *d_biased_a = nullptr, *d_biased_b = nullptr, *d_w_a = nullptr, *d_w_b = nullptr;
+  int32_t *d_ids_a = nullptr, *d_ids_b = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&d_hidden, h_hidden.size() * 2));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_gate, h_gate.size() * 2));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_bias, E * 4));
+  for (float** pp : {&d_scores_a, &d_scores_b, &d_biased_a, &d_biased_b})
+    DGPP_CUDA_OK(cudaMallocManaged(pp, size_t(M) * E * 4));
+  for (float** pp : {&d_w_a, &d_w_b}) DGPP_CUDA_OK(cudaMallocManaged(pp, size_t(M) * K * 4));
+  for (int32_t** pp : {&d_ids_a, &d_ids_b}) DGPP_CUDA_OK(cudaMallocManaged(pp, size_t(M) * K * 4));
+  std::memcpy(d_hidden, h_hidden.data(), h_hidden.size() * 2);
+  std::memcpy(d_gate, h_gate.data(), h_gate.size() * 2);
+  std::memcpy(d_bias, h_bias.data(), E * 4);
+  dgpp::launch_moe_router(d_hidden, d_gate, d_bias, d_ids_a, d_w_a, d_scores_a, d_biased_a,
+                          cfg, M, nullptr, nullptr, /*allow_tiled=*/false);
+  dgpp::launch_moe_router(d_hidden, d_gate, d_bias, d_ids_b, d_w_b, d_scores_b, d_biased_b,
+                          cfg, M, nullptr, nullptr, /*allow_tiled=*/true);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  require(std::memcmp(d_scores_a, d_scores_b, size_t(M) * E * 4) == 0,
+          "tiled router scores bitwise the warp form");
+  require(std::memcmp(d_biased_a, d_biased_b, size_t(M) * E * 4) == 0,
+          "tiled router biased scores bitwise the warp form");
+  require(std::memcmp(d_ids_a, d_ids_b, size_t(M) * K * 4) == 0, "tiled router ids identical");
+  require(std::memcmp(d_w_a, d_w_b, size_t(M) * K * 4) == 0, "tiled router weights identical");
+  std::printf("[ OK ] tiled router: %d tokens x %d experts bitwise the warp form\n", M, E);
+  for (void* pp : {(void*)d_hidden, (void*)d_gate, (void*)d_bias, (void*)d_scores_a,
+                   (void*)d_scores_b, (void*)d_biased_a, (void*)d_biased_b, (void*)d_w_a,
+                   (void*)d_w_b, (void*)d_ids_a, (void*)d_ids_b})
+    cudaFree(pp);
+}
 
 DGPP_TEST(moe_router_matches_oracle_real_geometry) {
   GlmMoeConfig cfg;  // E=288, H=4096, K=8, scale 2.5, norm on, limit 10

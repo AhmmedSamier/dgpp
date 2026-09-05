@@ -1042,9 +1042,15 @@ The M3 implementation pins the concrete layouts and the selection spec
   tiles split four ways; rows past that position keep the per-row split
   kernel over their selection. Tolerance-equal to the split kernel (the
   tensor core's summation order), deterministic; gated against it and the
-  host oracle at 64/16 heads × 512/256 latent. Where the split kernel
-  spent 318 µs per eight rows per layer (a 2048-token prefill: 0.6 s of
-  attention), the dense kernel spends ~360 µs per 128 rows;
+  host oracle at 64/16 heads × 512/256 latent. 82 KB of shared memory, one
+  block per SM (this device caps a block at 99 KB and an SM at 100 KB).
+  Where the split kernel spent 318 µs per eight rows per layer (a
+  2048-token prefill: 0.9 s of attention), the dense kernel spends ~360 µs
+  per 128 rows. The absorb and vout projections around it are tensor-core
+  kernels too at ≥ 16 rows (2026-09-05, round 7): absorb bitwise its warp
+  kernel, vout carrying its fp32 input as a three-way bf16 split (the full
+  mantissa; only the summation order differs); decode keeps the warp
+  kernels;
 - MLA runs absorbed: `q̃ = W_uk^T q` (bf16 GEMM rounding), scores
   `q̃ · latent` in fp32 with split-KV online softmax — the running max lives
   in per-lane registers fed by butterfly group reductions (no shared running
@@ -1142,6 +1148,18 @@ it. Parity: `glm_mhc_test` vs the double oracle
 saturated logits, zero streams (norm-of-zero), and bitwise-deterministic
 end-to-end replay.
 
+The prefill forms of the mHC kernels (2026-09-05, round 7): at ≥ 16
+tokens the dots run four tokens per block with the coefficient matrix
+staged through shared memory (`mhc_dots_tiled_kernel`; the per-coefficient
+form derived a token's inverse RMS in 24 blocks and re-read its streams
+48 times), every thread walking the same vectors in the same order with
+the same block-sum tree, so the outputs are BITWISE the per-coefficient
+form's (glm_mhc_test pins collapsed, post, comb and the fused norm), and
+the finish runs in-block per token; the stream update computes a
+position's four streams in one thread. Decode's fused per-coefficient
+form (graph-captured) is unchanged.
+
+
 ### 7.4 MoE routing (noaux_tc) and expert execution
 
 Pinned to the transformers `Glm5NextTextTopkRouter` / `Glm5NextTextExperts`
@@ -1190,7 +1208,14 @@ Two execution paths, as built:
   swiglu over every row, the fp32 down the same way, and the per-token
   ordered accumulation in one pass (`moe_accum_ordered_kernel`: the K
   slots sorted by expert id, `__fmaf_rn` from zero, the shared row at
-  weight 1, one bf16 rounding — the same chain). `MoeExpertKernel` picks
+  weight 1, one bf16 rounding — the same chain). The device segmentation
+  is three launches (a count per expert, the scan, a placement pass per
+  expert with a block exclusive scan over the match flags — the
+  single-block form's stable order, bitwise) and the tensor-core kernel
+  reads the hidden rows through the row map instead of a gathered copy
+  (2026-09-05, round 7); the prefill router's dots are tiled 16 tokens x
+  16 experts per block with the per-lane order preserved (bitwise the
+  warp form) while decode keeps the fused warp form. `MoeExpertKernel` picks
   the grouped kernel: the prefill and the forward run the tensor-core one;
   `enqueue()` (the reference) takes it as an argument, GEMV by default,
   because the decode slot path and the MTP module's multi-row eager rows
@@ -2479,12 +2504,14 @@ also the faster choice per user (four scalar replays would be ~129 and ~104
 ms per token). The m ≤ 8 GEMV lowering also changed the path of 5–8-row
 prefill chunks and per-expert prefill GEMMs with 5–8 routed tokens; the
 prefill was then re-measured and taken down through five rounds
-(2026-09-04/05, the record: 256 tokens 5 s → 0.63 s, 2048 tokens 19.8 →
-2.2 s in steady state; the expert GEMMs run on a grouped tensor-core
+(2026-09-04/05, the record: 256 tokens 5 s → 0.58 s, 2048 tokens 19.8 →
+1.7 s in steady state; the expert GEMMs run on a grouped tensor-core
 kernel since round 5 — `MoeExpertKernel::kMma`, bitwise the scale GEMM's
 tile kernel per segment, while the decode-class paths keep the GEMV core
-and their bitwise pins — and the attention prefill as a dense flash
-kernel since round 6 (§7.2); the time outside kernels is what remains).
+and their bitwise pins — the attention prefill as a dense flash kernel
+since round 6 (§7.2), and the projections, dense MLPs, router and mHC
+dots restructured in round 7, most of them bitwise; the GPU is busy 98 %
+of a prefill, so what remains is kernel work at or near its floors).
 
 The original always-eight-row four-node gate measured
 12.55/23.78/43.59/78.94 tok/s at 1/2/4/8 live T=1 requests and

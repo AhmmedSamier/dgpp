@@ -293,6 +293,69 @@ DGPP_TEST(mhc_zero_streams_survive_norm_of_zero) {
   c.free_all();
 }
 
+// The prefill's token-tiled dots form against the per-coefficient form on
+// the same inputs (real geometry, 70 tokens: 17 full tiles and a ragged
+// one): collapsed, post, comb and the fused-norm output bitwise — the
+// tiled form keeps every thread's element order and the same reductions,
+// so this is an equality, not a budget. The normed form (ln given) and the
+// two-launch form (no ln) both.
+DGPP_TEST(mhc_tiled_prefill_form_is_bitwise_the_per_coefficient_form) {
+  Case c = make_case(real_config(), 70, 0x71E5);
+  c.alloc();
+  const int n = c.cfg.hc_mult, D = c.cfg.hidden, T = c.tokens;
+  std::vector<uint16_t> ln(D);
+  for (int i = 0; i < D; ++i) ln[i] = float_to_bf16_bits(0.5f + 0.001f * float(i % 97));
+  uint16_t* d_ln = nullptr;
+  uint16_t *d_normed_a = nullptr, *d_normed_b = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&d_ln, D * 2));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_normed_a, size_t(T) * D * 2));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_normed_b, size_t(T) * D * 2));
+  std::memcpy(d_ln, ln.data(), D * 2);
+  std::vector<uint16_t> col_a(size_t(T) * D), post_a(size_t(T) * n), comb_a(size_t(T) * n * n);
+  const auto require = [](bool ok, const char* what) {
+    if (!ok) throw std::runtime_error(what);
+  };
+  for (int form = 0; form < 2; ++form) {
+    // form 0: the normed (fused-finish) call; form 1: the two-launch call.
+    for (int tiled = 0; tiled < 2; ++tiled) {
+      dgpp::mhc_set_tiled_form(tiled == 1);
+      DGPP_CUDA_OK(cudaMemset(c.d_collapsed, 0xA5, size_t(T) * D * 2));
+      DGPP_CUDA_OK(cudaMemset(c.d_post, 0xA5, size_t(T) * n * 2));
+      DGPP_CUDA_OK(cudaMemset(c.d_comb, 0xA5, size_t(T) * n * n * 2));
+      uint16_t* normed = tiled ? d_normed_b : d_normed_a;
+      DGPP_CUDA_OK(cudaMemset(normed, 0xA5, size_t(T) * D * 2));
+      if (form == 0)
+        dgpp::launch_mhc_compute_normed(c.d_streams, c.dev_w, c.cfg, c.d_collapsed, c.d_post,
+                                        c.d_comb, c.d_logits, d_ln, normed, 1e-5f, T, nullptr,
+                                        nullptr);
+      else
+        dgpp::launch_mhc_compute(c.d_streams, c.dev_w, c.cfg, c.d_collapsed, c.d_post, c.d_comb,
+                                 c.d_logits, T, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      if (!tiled) {
+        std::memcpy(col_a.data(), c.d_collapsed, col_a.size() * 2);
+        std::memcpy(post_a.data(), c.d_post, post_a.size() * 2);
+        std::memcpy(comb_a.data(), c.d_comb, comb_a.size() * 2);
+      } else {
+        require(std::memcmp(col_a.data(), c.d_collapsed, col_a.size() * 2) == 0,
+                "tiled mhc collapsed bitwise the per-coefficient form");
+        require(std::memcmp(post_a.data(), c.d_post, post_a.size() * 2) == 0,
+                "tiled mhc post bitwise the per-coefficient form");
+        require(std::memcmp(comb_a.data(), c.d_comb, comb_a.size() * 2) == 0,
+                "tiled mhc comb bitwise the per-coefficient form");
+        if (form == 0)
+          require(std::memcmp(d_normed_a, d_normed_b, size_t(T) * D * 2) == 0,
+                  "tiled mhc normed bitwise the per-coefficient form");
+      }
+    }
+    std::printf("[ OK ] mhc tiled form (%s): %d tokens bitwise the per-coefficient form\n",
+                form == 0 ? "normed" : "two-launch", T);
+  }
+  dgpp::mhc_set_tiled_form(true);
+  cudaFree(d_ln); cudaFree(d_normed_a); cudaFree(d_normed_b);
+  c.free_all();
+}
+
 DGPP_TEST(mhc_end_to_end_pipeline_is_deterministic) {
   // Real pipeline wiring: kernel's own post/comb feed its own update; two
   // full invocations must be bitwise identical (graph-capture premise).

@@ -13,7 +13,7 @@ below; `[ ]` means it has not been implemented.
 | M3 | DSA/MLA sparse attention and index pools | [x] |
 | M4 | Full GLM single-node diagnostic assembly | [x] |
 | M5 | Four-rank TP and dual-lane CollectiveBus | [x] (closed 2026-08-31) |
-| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.63 s and 2048 tokens 19.8 → 2.2 s in steady state through six rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts and the dense attention prefill on tensor cores); the non-kernel time is next |
+| M6 | Generation scheduler, tokenizer, and API | [~] serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.58 s and 2048 tokens 19.8 → 1.7 s in steady state through seven rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts, the dense attention prefill, its projections, the dense MLPs, the router and the mHC dots restructured, most of them bitwise); the GPU is busy 98 % of a prefill |
 | M7 | Exact snapshot prefix cache | [ ] design below |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`) |
 | M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); hardening not started |
@@ -221,6 +221,23 @@ Suggested order for what remains, each item's design in its section:
    per-layer launch/sync structure), the expert GEMMs at the weight-read
    floor (0.5 s), the bulk folds 0.16, the mHC dots 0.14; the sparse
    regime (positions past 2050) still runs the per-row split kernel.
+   ROUND 7 (2026-09-05, the record's twenty-second entry) — first a
+   CORRECTION: rounds 5 and 6 divided two-prefill profiles by three; the
+   GPU is busy 2,100 of a 2,147 ms prefill and there was never a
+   host-side second (the correct round-6 breakdown is in the record).
+   Then the remaining items, four of the six bitwise by construction and
+   pinned: the MoE segmentation in three parallel launches; the gather
+   folded into the tensor-core kernel's tile load (a row map); the
+   dense-MLP GEMMs on the 128-row kernel (the scale GEMM routes m > 128
+   to its dense form, bitwise the tile kernel); the prefill router's dots
+   tiled 16 x 16 with the per-lane order preserved (bitwise the warp
+   form); the absorb and vout projections on tensor cores (absorb came
+   out bitwise its warp kernel; vout carries fp32 as a three-way bf16
+   split); the mHC dots four tokens per block with the coefficient matrix
+   staged (bitwise the per-coefficient form) and the stream update one
+   thread per position. 2048 tokens 2,156 → 1,708 ms (0.83 ms/token; 19,786
+   on the morning of 2026-09-04, 11.6x), 256 tokens 628 → 578 (2.26), ids
+   identical to every earlier round's; ctest 34/34.
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).

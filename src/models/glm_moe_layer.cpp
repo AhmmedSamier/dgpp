@@ -356,17 +356,21 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   const int I_r = static_cast<int>(w_.experts[0].rows);
   const int I_s = static_cast<int>(w_.shared[0].rows);
   const size_t I_max = static_cast<size_t>(std::max(I_r, I_s));
-  launch_moe_gather_rows(hidden, d_rows_, d_gather_, static_cast<int>(rows_total),
-                         H, stream);
   // The shared segment is every token: split across blocks along z (the
   // GEMV core in 16-row pieces, the tensor-core kernel in whole m-tiles).
   const bool mma = kernel == MoeExpertKernel::kMma;
   const int shared_split = mma ? 128 : 16;
+  // The GEMV core reads a gathered copy of the rows; the tensor-core kernel
+  // reads the hidden rows through the row map directly (2026-09-05: the
+  // gather was 1.26 ms per layer at 2048 tokens).
+  if (!mma)
+    launch_moe_gather_rows(hidden, d_rows_, d_gather_, static_cast<int>(rows_total),
+                           H, stream);
   auto gemm_bf16 = [&](const MoeSegment* sg, int ns, int mr, int split, int which,
                        uint16_t* out, int n) {
     if (mma)
-      launch_moe_grouped_mma_bf16(d_gather_, H, sg, ns, mr, split, d_views_prefill_,
-                                  which, out, I_max, n, H, stream);
+      launch_moe_grouped_mma_bf16(hidden, H, sg, ns, mr, split, d_views_prefill_,
+                                  which, out, I_max, n, H, stream, d_rows_);
     else
       launch_moe_grouped_gemv_bf16(d_gather_, H, sg, ns, mr, split, d_views_prefill_,
                                    which, out, I_max, n, H, stream);

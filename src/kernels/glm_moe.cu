@@ -492,10 +492,110 @@ bool aligned16(const void* p) {
 
 }  // namespace
 
+namespace {
+
+// The prefill router's dots (2026-09-05): the warp-per-(token, expert) form
+// above re-streams every gate row per token and every hidden row per
+// expert from L2 (~4.9 GB per 2048-token layer, 1.7 ms). This form tiles
+// 16 tokens x 16 experts per block and stages both operands' K-chunks in
+// shared memory, so each row is read from L2 16x less; every (token,
+// expert) dot is still ONE warp with the SAME per-lane element order (lane
+// l takes 16-byte vectors v = l, l + 32, ... ascending; chunks are 32-vector
+// aligned) and the same shuffle tree, so scores and biased are BITWISE the
+// warp form's (glm_moe_test pins it). Vector path only (the launcher keeps
+// the warp form for unaligned geometry and for decode's fused select).
+constexpr int kRouterTileTokens = 16;
+constexpr int kRouterTileExperts = 16;
+constexpr int kRouterChunkVecs = 64;  // 512 elements per staged chunk
+constexpr int kRouterTileThreads = 256;
+
+__global__ __launch_bounds__(kRouterTileThreads) void moe_router_dots_tiled_kernel(
+    const uint16_t* __restrict__ hidden, const uint16_t* __restrict__ gate,
+    const float* __restrict__ bias, float* __restrict__ scores,
+    float* __restrict__ biased, int tokens, int hidden_dim, int n_experts) {
+  __shared__ __align__(16) uint4 sH[kRouterTileTokens][kRouterChunkVecs];
+  __shared__ __align__(16) uint4 sG[kRouterTileExperts][kRouterChunkVecs];
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int e0 = blockIdx.x * kRouterTileExperts;
+  const int t0 = blockIdx.y * kRouterTileTokens;
+  const int vecs = hidden_dim / 8;
+  // Warp w owns tokens 2w, 2w+1 of the tile against all 16 experts.
+  float dot[2][kRouterTileExperts];
+#pragma unroll
+  for (int i = 0; i < 2; ++i)
+#pragma unroll
+    for (int j = 0; j < kRouterTileExperts; ++j) dot[i][j] = 0.f;
+
+  for (int v0 = 0; v0 < vecs; v0 += kRouterChunkVecs) {
+    const int nv = min(kRouterChunkVecs, vecs - v0);
+    __syncthreads();  // the previous chunk's readers are done
+    for (int idx = threadIdx.x; idx < (kRouterTileTokens + kRouterTileExperts) * kRouterChunkVecs;
+         idx += kRouterTileThreads) {
+      const int row = idx / kRouterChunkVecs, vv = idx % kRouterChunkVecs;
+      if (vv >= nv) continue;
+      if (row < kRouterTileTokens) {
+        const int t = t0 + row;
+        if (t < tokens)
+          sH[row][vv] = reinterpret_cast<const uint4*>(
+              hidden + static_cast<size_t>(t) * hidden_dim)[v0 + vv];
+      } else {
+        const int e = e0 + row - kRouterTileTokens;
+        if (e < n_experts)
+          sG[row - kRouterTileTokens][vv] = reinterpret_cast<const uint4*>(
+              gate + static_cast<size_t>(e) * hidden_dim)[v0 + vv];
+      }
+    }
+    __syncthreads();
+    // Lane l walks vectors v0 + l, v0 + l + 32 — its share of the row, in
+    // ascending order, the warp form's exact sequence.
+    for (int vv = lane; vv < nv; vv += 32) {
+#pragma unroll
+      for (int i = 0; i < 2; ++i) {
+        const uint4 xq = sH[warp * 2 + i][vv];
+        const uint32_t xw[4] = {xq.x, xq.y, xq.z, xq.w};
+#pragma unroll
+        for (int j = 0; j < kRouterTileExperts; ++j) {
+          const uint4 wq = sG[j][vv];
+          const uint32_t ww[4] = {wq.x, wq.y, wq.z, wq.w};
+          float d = dot[i][j];
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            d = __fmaf_rn(bf16_bits_to_float(static_cast<uint16_t>(xw[q] & 0xFFFFu)),
+                          bf16_bits_to_float(static_cast<uint16_t>(ww[q] & 0xFFFFu)), d);
+            d = __fmaf_rn(bf16_bits_to_float(static_cast<uint16_t>(xw[q] >> 16)),
+                          bf16_bits_to_float(static_cast<uint16_t>(ww[q] >> 16)), d);
+          }
+          dot[i][j] = d;
+        }
+      }
+    }
+  }
+#pragma unroll
+  for (int i = 0; i < 2; ++i) {
+    const int t = t0 + warp * 2 + i;
+#pragma unroll
+    for (int j = 0; j < kRouterTileExperts; ++j) {
+      float d = dot[i][j];
+#pragma unroll
+      for (int off = 16; off > 0; off >>= 1) d += __shfl_xor_sync(0xFFFFFFFFu, d, off);
+      const int e = e0 + j;
+      if (lane == 0 && t < tokens && e < n_experts) {
+        const float sc = 1.0f / (1.0f + expf(-d));
+        const size_t at = static_cast<size_t>(t) * n_experts + e;
+        scores[at] = sc;
+        biased[at] = sc + bias[e];
+      }
+    }
+  }
+}
+
+}  // namespace
+
 void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
                        const float* bias, int32_t* ids, float* weights,
                        float* scores, float* biased, const GlmMoeConfig& cfg,
-                       int tokens, cudaStream_t stream, int* counters) {
+                       int tokens, cudaStream_t stream, int* counters,
+                       bool allow_tiled) {
   GlmMoeConfig::validate_config(cfg);
   if (tokens <= 0) return;
   check_router_args(hidden, gate, bias, ids, weights, scores, biased);
@@ -503,6 +603,21 @@ void launch_moe_router(const uint16_t* hidden, const uint16_t* gate,
     throw std::invalid_argument("moe_router: grid dimension overflow");
   const int vector_loads =
       (cfg.hidden % 8 == 0 && aligned16(hidden) && aligned16(gate)) ? 1 : 0;
+  if (counters == nullptr && allow_tiled && vector_loads &&
+      tokens >= kRouterTileTokens) {
+    const dim3 grid(
+        static_cast<unsigned>((cfg.n_experts + kRouterTileExperts - 1) / kRouterTileExperts),
+        static_cast<unsigned>((tokens + kRouterTileTokens - 1) / kRouterTileTokens));
+    moe_router_dots_tiled_kernel<<<grid, kRouterTileThreads, 0, stream>>>(
+        hidden, gate, bias, scores, biased, tokens, cfg.hidden, cfg.n_experts);
+    DGPP_CUDA_OK(cudaGetLastError());
+    const size_t sel_smem = 2 * static_cast<size_t>(cfg.n_experts) * sizeof(float);
+    moe_router_select_kernel<<<tokens, kRouterSelectThreads, sel_smem, stream>>>(
+        scores, biased, ids, weights, tokens, cfg.n_experts, cfg.top_k,
+        cfg.routed_scaling_factor, cfg.norm_topk_prob ? 1 : 0);
+    DGPP_CUDA_OK(cudaGetLastError());
+    return;
+  }
   const dim3 dots_grid(
       static_cast<unsigned>((cfg.n_experts + kRouterDotWarps - 1) /
                             kRouterDotWarps),
@@ -674,20 +789,27 @@ static_assert(128 % BN == 0 && 128 % BK == 0, "one scale per stage");
 static_assert(BK_PAD * 2 % 16 == 0, "16-byte aligned smem rows");
 }  // namespace mma_tile
 
+// `act_rows` (nullable): the activation row for segment row i is
+// act_rows[i] (the gather folded into the tile load — the same values the
+// gathered buffer would hold). `segs == nullptr` is the DENSE form: one
+// segment `dense_seg` against `dense_view`, no tables in memory (the scale
+// GEMM's large-m route).
 template <typename OutT>
 __global__ __launch_bounds__(mma_tile::kThreads) void moe_grouped_mma_kernel(
     const uint16_t* __restrict__ act, size_t act_stride, int act_vec,
+    const int32_t* __restrict__ act_rows,
     const MoeSegment* __restrict__ segs, const MoeExpertView* __restrict__ views,
     int which, OutT* __restrict__ out, size_t out_stride, int n, int k,
-    int rows_per_block) {
+    int rows_per_block, MoeSegment dense_seg, MoeExpertView dense_view) {
   using namespace mma_tile;
   __shared__ __align__(16) uint16_t sA[BM][BK_PAD];
   __shared__ __align__(16) uint16_t sB[BN][BK_PAD];
-  const MoeSegment seg = segs[blockIdx.y];
+  const MoeSegment seg = segs != nullptr ? segs[blockIdx.y] : dense_seg;
   const int z0 = static_cast<int>(blockIdx.z) * rows_per_block;
   if (z0 >= seg.rows) return;  // beyond this segment's rows (no barrier yet)
   const int z1 = min(seg.rows, z0 + rows_per_block);
-  const MoeExpertView v = views[seg.expert * 3 + which];
+  const MoeExpertView v =
+      segs != nullptr ? views[seg.expert * 3 + which] : dense_view;
   const int n0 = static_cast<int>(blockIdx.x) * BN;
   const int scale_cols = (k + 127) / 128;
   const int scale_row = n0 / 128;
@@ -752,8 +874,10 @@ __global__ __launch_bounds__(mma_tile::kThreads) void moe_grouped_mma_kernel(
         const int gk = k0 + kq;
         uint4 val = make_uint4(0, 0, 0, 0);
         if (mm < m_rows) {
+          const int srow = seg.row0 + m0 + mm;
           const uint16_t* row =
-              act + static_cast<size_t>(seg.row0 + m0 + mm) * act_stride;
+              act + static_cast<size_t>(act_rows != nullptr ? act_rows[srow] : srow) *
+                        act_stride;
           if (act_vec != 0 && gk + 8 <= k) {
             val = *reinterpret_cast<const uint4*>(row + gk);
           } else {
@@ -813,6 +937,7 @@ __global__ __launch_bounds__(mma_tile::kThreads) void moe_grouped_mma_kernel(
 
 template <typename OutT>
 void launch_moe_grouped_mma(const uint16_t* act, size_t act_stride,
+                            const int32_t* act_rows,
                             const MoeSegment* segs, int n_segs, int max_rows,
                             int rows_per_block, const MoeExpertView* views,
                             int which, OutT* out, size_t out_stride, int n,
@@ -837,51 +962,130 @@ void launch_moe_grouped_mma(const uint16_t* act, size_t act_stride,
       (reinterpret_cast<uintptr_t>(act) % 16 == 0 && (act_stride % 8) == 0) ? 1 : 0;
   const dim3 grid((n + BN - 1) / BN, static_cast<unsigned>(n_segs), z_ext);
   moe_grouped_mma_kernel<OutT><<<grid, kThreads, 0, stream>>>(
-      act, act_stride, act_vec, segs, views, which, out, out_stride, n, k,
-      rows_per_block);
+      act, act_stride, act_vec, act_rows, segs, views, which, out, out_stride, n,
+      k, rows_per_block, MoeSegment{}, MoeExpertView{});
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+inline size_t out_stride_of(int n) { return static_cast<size_t>(n); }
+
+// The dense form: out[m, n] = act[m, k] x W[n, k]^T on the same kernel, one
+// m-tile per z block (bitwise the tile kernel, like the grouped form).
+template <typename OutT>
+void launch_dense_mma(const uint16_t* act, size_t act_stride,
+                      const uint8_t* payload, const float* scales, OutT* out,
+                      int m, int n, int k, cudaStream_t stream) {
+  using namespace mma_tile;
+  if (m <= 0 || n <= 0) return;
+  if (!act || !payload || !scales || !out)
+    throw std::invalid_argument("dense mma: null pointer");
+  if (k <= 0 || (k % 16) != 0)
+    throw std::invalid_argument("dense mma: k must be a positive multiple of 16");
+  const int act_vec =
+      (reinterpret_cast<uintptr_t>(act) % 16 == 0 && (act_stride % 8) == 0) ? 1 : 0;
+  const dim3 grid((n + BN - 1) / BN, 1u, static_cast<unsigned>((m + BM - 1) / BM));
+  moe_grouped_mma_kernel<OutT><<<grid, kThreads, 0, stream>>>(
+      act, act_stride, act_vec, nullptr, nullptr, nullptr, 0, out, out_stride_of(n),
+      n, k, BM, MoeSegment{0, m, 0}, MoeExpertView{payload, scales});
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
 constexpr int kAccumMaxTopK = 16;
 constexpr int kSegmentMaxExperts = 1024;
 
-// One block, one thread per expert: counts, an exclusive scan, then each
-// thread places its expert's (token, slot) pairs in (token, slot) order —
-// exactly the host path's stable placement — and writes its segment.
-__global__ void moe_segment_kernel(const int32_t* __restrict__ ids, int tokens,
-                                   int K, int E, int32_t* __restrict__ rows,
-                                   int32_t* __restrict__ slot_row,
-                                   MoeSegment* __restrict__ segs) {
-  __shared__ int s_count[kSegmentMaxExperts];
-  __shared__ int s_begin[kSegmentMaxExperts];
-  const int tk = tokens * K;
-  for (int e = threadIdx.x; e < E; e += blockDim.x) {
-    int c = 0;
-    for (int i = 0; i < tk; ++i) c += ids[i] == e;
-    s_count[e] = c;
+// Device segmentation in three launches (2026-09-05; the single-block form
+// before it had one thread per expert walking every id: 0.84 ms per layer
+// at 2048 tokens). (1) counts: one block per expert, a strided count and a
+// block reduction, into segs[e].rows; (2) scan: one block, the exclusive
+// prefix into segs[e].row0, the shared segment and its identity rows;
+// (3) place: one block per expert walks the ids in blockDim-sized chunks
+// with a block exclusive scan over the match flags, so its expert's
+// (token, slot) pairs land in (token, slot) order — exactly the host
+// path's stable placement, exactly the single-block kernel's output.
+constexpr int kSegmentThreads = 256;
+
+__device__ __forceinline__ int block_exclusive_scan_int(int v, int* s_warp,
+                                                        int* total) {
+  const int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+  int x = v;
+#pragma unroll
+  for (int off = 1; off < 32; off <<= 1) {
+    const int y = __shfl_up_sync(0xffffffffu, x, off);
+    if (lane >= off) x += y;
+  }
+  if (lane == 31) s_warp[warp] = x;
+  __syncthreads();
+  if (warp == 0) {
+    int w = lane < (kSegmentThreads / 32) ? s_warp[lane] : 0;
+#pragma unroll
+    for (int off = 1; off < 32; off <<= 1) {
+      const int y = __shfl_up_sync(0xffffffffu, w, off);
+      if (lane >= off) w += y;
+    }
+    if (lane < (kSegmentThreads / 32)) s_warp[lane] = w;  // inclusive per warp
   }
   __syncthreads();
+  const int warp_base = warp == 0 ? 0 : s_warp[warp - 1];
+  *total = s_warp[kSegmentThreads / 32 - 1];
+  const int excl = x - v + warp_base;
+  __syncthreads();  // s_warp reusable by the next call
+  return excl;
+}
+
+__global__ void moe_segment_count_kernel(const int32_t* __restrict__ ids, int tk,
+                                         MoeSegment* __restrict__ segs) {
+  __shared__ int s_warp[kSegmentThreads / 32];
+  const int e = blockIdx.x;
+  int c = 0;
+  for (int i = threadIdx.x; i < tk; i += kSegmentThreads) c += ids[i] == e;
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) c += __shfl_xor_sync(0xffffffffu, c, off);
+  if (threadIdx.x % 32 == 0) s_warp[threadIdx.x / 32] = c;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    int total = 0;
+    for (int w = 0; w < kSegmentThreads / 32; ++w) total += s_warp[w];
+    segs[e] = MoeSegment{0, total, e};
+  }
+}
+
+__global__ void moe_segment_scan_kernel(int tokens, int K, int E,
+                                        int32_t* __restrict__ rows,
+                                        MoeSegment* __restrict__ segs) {
+  const int tk = tokens * K;
   if (threadIdx.x == 0) {
     int acc = 0;
     for (int e = 0; e < E; ++e) {
-      s_begin[e] = acc;
-      acc += s_count[e];
+      segs[e].row0 = acc;
+      acc += segs[e].rows;
     }
-  }
-  __syncthreads();
-  for (int e = threadIdx.x; e < E; e += blockDim.x) {
-    int pos = s_begin[e];
-    for (int i = 0; i < tk; ++i) {
-      if (ids[i] != e) continue;
-      rows[pos] = i / K;
-      slot_row[i] = pos;
-      ++pos;
-    }
-    segs[e] = MoeSegment{s_begin[e], s_count[e], e};
+    segs[E] = MoeSegment{tk, tokens, E};
   }
   // The shared expert: every token once more, after the routed rows.
   for (int t = threadIdx.x; t < tokens; t += blockDim.x) rows[tk + t] = t;
-  if (threadIdx.x == 0) segs[E] = MoeSegment{tk, tokens, E};
+}
+
+__global__ void moe_segment_place_kernel(const int32_t* __restrict__ ids, int tk,
+                                         int K, int32_t* __restrict__ rows,
+                                         int32_t* __restrict__ slot_row,
+                                         const MoeSegment* __restrict__ segs) {
+  __shared__ int s_warp[kSegmentThreads / 32];
+  const int e = blockIdx.x;
+  const MoeSegment seg = segs[e];
+  if (seg.rows == 0) return;
+  int running = seg.row0;
+  for (int base = 0; base < tk; base += kSegmentThreads) {
+    const int i = base + threadIdx.x;
+    const int flag = (i < tk && ids[i] == e) ? 1 : 0;
+    int total = 0;
+    const int excl = block_exclusive_scan_int(flag, s_warp, &total);
+    if (flag) {
+      const int pos = running + excl;
+      rows[pos] = i / K;
+      slot_row[i] = pos;
+    }
+    running += total;
+  }
 }
 
 __global__ void moe_accum_ordered_kernel(uint16_t* __restrict__ out,
@@ -927,8 +1131,8 @@ void launch_moe_grouped_mma_bf16(const uint16_t* act, size_t act_stride,
                                  const MoeSegment* segs, int n_segs, int max_rows,
                                  int rows_per_block, const MoeExpertView* views,
                                  int which, uint16_t* out, size_t out_stride, int n,
-                                 int k, cudaStream_t stream) {
-  launch_moe_grouped_mma<uint16_t>(act, act_stride, segs, n_segs, max_rows,
+                                 int k, cudaStream_t stream, const int32_t* act_rows) {
+  launch_moe_grouped_mma<uint16_t>(act, act_stride, act_rows, segs, n_segs, max_rows,
                                    rows_per_block, views, which, out, out_stride,
                                    n, k, stream);
 }
@@ -937,10 +1141,22 @@ void launch_moe_grouped_mma_f32(const uint16_t* act, size_t act_stride,
                                 const MoeSegment* segs, int n_segs, int max_rows,
                                 int rows_per_block, const MoeExpertView* views,
                                 int which, float* out, size_t out_stride, int n,
-                                int k, cudaStream_t stream) {
-  launch_moe_grouped_mma<float>(act, act_stride, segs, n_segs, max_rows,
+                                int k, cudaStream_t stream, const int32_t* act_rows) {
+  launch_moe_grouped_mma<float>(act, act_stride, act_rows, segs, n_segs, max_rows,
                                 rows_per_block, views, which, out, out_stride, n,
                                 k, stream);
+}
+
+void launch_dense_mma_bf16(const uint16_t* act, size_t act_stride,
+                           const uint8_t* payload, const float* scales,
+                           uint16_t* out, int m, int n, int k, cudaStream_t stream) {
+  launch_dense_mma<uint16_t>(act, act_stride, payload, scales, out, m, n, k, stream);
+}
+
+void launch_dense_mma_f32(const uint16_t* act, size_t act_stride,
+                          const uint8_t* payload, const float* scales, float* out,
+                          int m, int n, int k, cudaStream_t stream) {
+  launch_dense_mma<float>(act, act_stride, payload, scales, out, m, n, k, stream);
 }
 
 void launch_moe_grouped_gemv_bf16(const uint16_t* act, size_t act_stride,
@@ -973,9 +1189,13 @@ void launch_moe_segment(const int32_t* ids, int tokens, int top_k,
   if (top_k < 1 || top_k > kAccumMaxTopK || n_experts < 1 ||
       n_experts > kSegmentMaxExperts)
     throw std::invalid_argument("moe segment: top_k or n_experts out of range");
-  const int threads = std::min(1024, ((n_experts + 31) / 32) * 32);
-  moe_segment_kernel<<<1, threads, 0, stream>>>(ids, tokens, top_k, n_experts,
-                                                 rows, slot_row, segs);
+  const int tk = tokens * top_k;
+  moe_segment_count_kernel<<<n_experts, kSegmentThreads, 0, stream>>>(ids, tk, segs);
+  DGPP_CUDA_OK(cudaGetLastError());
+  moe_segment_scan_kernel<<<1, 256, 0, stream>>>(tokens, top_k, n_experts, rows, segs);
+  DGPP_CUDA_OK(cudaGetLastError());
+  moe_segment_place_kernel<<<n_experts, kSegmentThreads, 0, stream>>>(
+      ids, tk, top_k, rows, slot_row, segs);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

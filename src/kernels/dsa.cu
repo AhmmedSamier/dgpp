@@ -1441,6 +1441,209 @@ __global__ __launch_bounds__(kVoutThreads) void vout_gemm_kernel(
 }  // namespace
 
 // ---------------------------------------------------------------------
+// The absorb and vout projections on tensor cores (the prefill path,
+// 2026-09-05). Both are per-head GEMMs the warp kernels above ran as
+// scalar dots — 56 and 67 ms per 2048-token prefill. Same tile plan as the
+// MoE tensor-core kernel: 128 rows x 64 columns per block, 64-deep
+// k-stages staged in shared memory, bf16 mma.sync m16n8k16 with fp32
+// accumulation, eight warps of sixteen rows.
+//   absorb: q_tilde[r,h,c] = sum_d q[r,h,d] W_uk[h][d][c] — B is W_uk read
+//     transposed into the tile (k = d is W's row);
+//   vout:   out[r,h,d] = sum_c c[r,h,c] W_uv[h][d][c] — c is fp32, carried
+//     as a three-way bf16 split (c = hi + mid + lo, the full fp32 mantissa;
+//     three mmas into one accumulator, so the products are exact and only
+//     the fp32 summation order differs from the warp kernel's chain — a
+//     two-way split left near-zero outputs formed by cancellation with
+//     visible relative error), B is W_uv in its natural [d][c] layout.
+// Tolerance-equal to the warp kernels (fp32 summation order); the rows
+// path keeps them below 16 rows (decode).
+namespace proj {
+constexpr int BM = 128, BN = 64, BK = 64, BK_PAD = BK + 8, kThreads = 256;
+// vout stages three A tiles (hi, mid, lo): a 32-deep k-stage keeps the
+// static shared memory under 48 KB.
+constexpr int VBK = 32, VBK_PAD = VBK + 8;
+}  // namespace proj
+// Rows at or above which the projections take the tensor-core kernels (the
+// prefill tiles); decode's <= 8 rows keep the warp kernels.
+constexpr int kProjMmaMinRows = 16;
+
+__global__ __launch_bounds__(proj::kThreads) void absorb_q_mma_kernel(
+    const uint16_t* __restrict__ q, const uint16_t* __restrict__ kv_b,
+    uint16_t* __restrict__ q_tilde, int rows, int local_heads, int nope, int v,
+    int kv_lora) {
+  using namespace proj;
+  __shared__ __align__(16) uint16_t sA[BM][BK_PAD];
+  __shared__ __align__(16) uint16_t sB[BN][BK_PAD];
+  const int n0 = blockIdx.x * BN;
+  const int h = blockIdx.y;
+  const int m0 = blockIdx.z * BM;
+  const int head_rows = nope + v;
+  const uint16_t* wuk = kv_b + int64_t(h) * head_rows * kv_lora;  // [nope][kv_lora]
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int r = lane / 4, cc = (lane % 4) * 2;
+  float acc[8][4];
+#pragma unroll
+  for (int j = 0; j < 8; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.f;
+  for (int k0 = 0; k0 < nope; k0 += BK) {
+    // A: q rows (bf16, contiguous nope per (row, head)).
+    for (int i = threadIdx.x; i < BM * (BK / 8); i += kThreads) {
+      const int mm = i / (BK / 8), kq = (i % (BK / 8)) * 8;
+      uint4 val = make_uint4(0, 0, 0, 0);
+      const int gm = m0 + mm, gk = k0 + kq;
+      if (gm < rows && gk + 8 <= nope)
+        val = *reinterpret_cast<const uint4*>(q + (int64_t(gm) * local_heads + h) * nope + gk);
+      *reinterpret_cast<uint4*>(&sA[mm][kq]) = val;
+    }
+    // B transposed: sB[c][d] = W_uk[d][n0 + c]; read W row d along c.
+    for (int i = threadIdx.x; i < BK * (BN / 8); i += kThreads) {
+      const int dd = i / (BN / 8), c8 = (i % (BN / 8)) * 8;
+      const int gd = k0 + dd, gc = n0 + c8;
+      uint4 val = make_uint4(0, 0, 0, 0);
+      if (gd < nope && gc + 8 <= kv_lora)
+        val = *reinterpret_cast<const uint4*>(wuk + int64_t(gd) * kv_lora + gc);
+      const uint16_t* e = reinterpret_cast<const uint16_t*>(&val);
+#pragma unroll
+      for (int t = 0; t < 8; ++t) sB[c8 + t][dd] = e[t];
+    }
+    __syncthreads();
+#pragma unroll
+    for (int kk = 0; kk < BK; kk += 16) {
+      const int ar = warp * 16 + r;
+      const uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[ar][kk + cc]);
+      const uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[ar + 8][kk + cc]);
+      const uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[ar][kk + cc + 8]);
+      const uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sA[ar + 8][kk + cc + 8]);
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const int bn = j * 8 + r;
+        const uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[bn][kk + cc]);
+        const uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[bn][kk + cc + 8]);
+        mma_bf16_16816(acc[j], a0, a1, a2, a3, b0, b1);
+      }
+    }
+    __syncthreads();
+  }
+  const int row_lo = m0 + warp * 16 + r;
+#pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    const int gc = n0 + j * 8 + cc;
+    if (gc + 1 < kv_lora || gc < kv_lora) {
+      if (row_lo < rows) {
+        uint16_t* o = q_tilde + (int64_t(row_lo) * local_heads + h) * kv_lora + gc;
+        o[0] = float_to_bf16_bits(acc[j][0]);
+        if (gc + 1 < kv_lora) o[1] = float_to_bf16_bits(acc[j][1]);
+      }
+      if (row_lo + 8 < rows) {
+        uint16_t* o = q_tilde + (int64_t(row_lo + 8) * local_heads + h) * kv_lora + gc;
+        o[0] = float_to_bf16_bits(acc[j][2]);
+        if (gc + 1 < kv_lora) o[1] = float_to_bf16_bits(acc[j][3]);
+      }
+    }
+  }
+}
+
+__global__ __launch_bounds__(proj::kThreads) void vout_mma_kernel(
+    const float* __restrict__ c, const uint16_t* __restrict__ kv_b,
+    uint16_t* __restrict__ out, int rows, int local_heads, int nope, int v,
+    int kv_lora) {
+  using namespace proj;
+  __shared__ __align__(16) uint16_t sHi[BM][VBK_PAD];
+  __shared__ __align__(16) uint16_t sMid[BM][VBK_PAD];
+  __shared__ __align__(16) uint16_t sLo[BM][VBK_PAD];
+  __shared__ __align__(16) uint16_t sB[BN][VBK_PAD];
+  const int n0 = blockIdx.x * BN;  // output columns d
+  const int h = blockIdx.y;
+  const int m0 = blockIdx.z * BM;
+  const int head_rows = nope + v;
+  const uint16_t* wuv = kv_b + (int64_t(h) * head_rows + nope) * kv_lora;  // [v][kv_lora]
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int r = lane / 4, cc = (lane % 4) * 2;
+  float acc[8][4];
+#pragma unroll
+  for (int j = 0; j < 8; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.f;
+  for (int k0 = 0; k0 < kv_lora; k0 += VBK) {
+    // A: c rows (fp32) split into bf16 hi + lo.
+    for (int i = threadIdx.x; i < BM * (VBK / 4); i += kThreads) {
+      const int mm = i / (VBK / 4), kq = (i % (VBK / 4)) * 4;
+      const int gm = m0 + mm, gk = k0 + kq;
+      float4 cv = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (gm < rows && gk + 4 <= kv_lora)
+        cv = *reinterpret_cast<const float4*>(c + (int64_t(gm) * local_heads + h) * kv_lora + gk);
+      const float f[4] = {cv.x, cv.y, cv.z, cv.w};
+      uint16_t hi[4], mid[4], lo[4];
+#pragma unroll
+      for (int t = 0; t < 4; ++t) {
+        hi[t] = float_to_bf16_bits(f[t]);
+        const float r1 = f[t] - bf16_bits_to_float(hi[t]);
+        mid[t] = float_to_bf16_bits(r1);
+        lo[t] = float_to_bf16_bits(r1 - bf16_bits_to_float(mid[t]));
+      }
+      *reinterpret_cast<uint2*>(&sHi[mm][kq]) =
+          make_uint2(uint32_t(hi[0]) | (uint32_t(hi[1]) << 16), uint32_t(hi[2]) | (uint32_t(hi[3]) << 16));
+      *reinterpret_cast<uint2*>(&sMid[mm][kq]) =
+          make_uint2(uint32_t(mid[0]) | (uint32_t(mid[1]) << 16), uint32_t(mid[2]) | (uint32_t(mid[3]) << 16));
+      *reinterpret_cast<uint2*>(&sLo[mm][kq]) =
+          make_uint2(uint32_t(lo[0]) | (uint32_t(lo[1]) << 16), uint32_t(lo[2]) | (uint32_t(lo[3]) << 16));
+    }
+    // B: W_uv rows d, k = c contiguous.
+    for (int i = threadIdx.x; i < BN * (VBK / 8); i += kThreads) {
+      const int dd = i / (VBK / 8), kq = (i % (VBK / 8)) * 8;
+      const int gd = n0 + dd, gk = k0 + kq;
+      uint4 val = make_uint4(0, 0, 0, 0);
+      if (gd < v && gk + 8 <= kv_lora)
+        val = *reinterpret_cast<const uint4*>(wuv + int64_t(gd) * kv_lora + gk);
+      *reinterpret_cast<uint4*>(&sB[dd][kq]) = val;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int kk = 0; kk < VBK; kk += 16) {
+      const int ar = warp * 16 + r;
+      const uint32_t h0 = *reinterpret_cast<const uint32_t*>(&sHi[ar][kk + cc]);
+      const uint32_t h1 = *reinterpret_cast<const uint32_t*>(&sHi[ar + 8][kk + cc]);
+      const uint32_t h2 = *reinterpret_cast<const uint32_t*>(&sHi[ar][kk + cc + 8]);
+      const uint32_t h3 = *reinterpret_cast<const uint32_t*>(&sHi[ar + 8][kk + cc + 8]);
+      const uint32_t m0_ = *reinterpret_cast<const uint32_t*>(&sMid[ar][kk + cc]);
+      const uint32_t m1_ = *reinterpret_cast<const uint32_t*>(&sMid[ar + 8][kk + cc]);
+      const uint32_t m2_ = *reinterpret_cast<const uint32_t*>(&sMid[ar][kk + cc + 8]);
+      const uint32_t m3_ = *reinterpret_cast<const uint32_t*>(&sMid[ar + 8][kk + cc + 8]);
+      const uint32_t l0 = *reinterpret_cast<const uint32_t*>(&sLo[ar][kk + cc]);
+      const uint32_t l1 = *reinterpret_cast<const uint32_t*>(&sLo[ar + 8][kk + cc]);
+      const uint32_t l2 = *reinterpret_cast<const uint32_t*>(&sLo[ar][kk + cc + 8]);
+      const uint32_t l3 = *reinterpret_cast<const uint32_t*>(&sLo[ar + 8][kk + cc + 8]);
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const int bn = j * 8 + r;
+        const uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[bn][kk + cc]);
+        const uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[bn][kk + cc + 8]);
+        // Small terms first: lo, mid, then hi (the classic order that keeps
+        // the small parts from being absorbed by the large partial sums).
+        mma_bf16_16816(acc[j], l0, l1, l2, l3, b0, b1);
+        mma_bf16_16816(acc[j], m0_, m1_, m2_, m3_, b0, b1);
+        mma_bf16_16816(acc[j], h0, h1, h2, h3, b0, b1);
+      }
+    }
+    __syncthreads();
+  }
+  const int row_lo = m0 + warp * 16 + r;
+#pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    const int gd = n0 + j * 8 + cc;
+    if (gd < v) {
+      if (row_lo < rows) {
+        uint16_t* o = out + (int64_t(row_lo) * local_heads + h) * v + gd;
+        o[0] = float_to_bf16_bits(acc[j][0]);
+        if (gd + 1 < v) o[1] = float_to_bf16_bits(acc[j][1]);
+      }
+      if (row_lo + 8 < rows) {
+        uint16_t* o = out + (int64_t(row_lo + 8) * local_heads + h) * v + gd;
+        o[0] = float_to_bf16_bits(acc[j][2]);
+        if (gd + 1 < v) o[1] = float_to_bf16_bits(acc[j][3]);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
 // Shared-memory opt-in
 // ---------------------------------------------------------------------
 
@@ -1667,6 +1870,16 @@ void dsa_absorb_q(const void* q, const void* kv_b, void* q_tilde,
   // static q smem + column mapping.
   if (nope > 256 || kv_lora % 8 != 0 || 512 % kv_lora != 0)
     DGPP_CUDA_OK(cudaErrorInvalidValue);
+  if (rows >= kProjMmaMinRows && nope % 16 == 0 && kv_lora % 8 == 0 &&
+      reinterpret_cast<uintptr_t>(q) % 16 == 0 && (int64_t(local_heads) * nope) % 8 == 0) {
+    dim3 grid{unsigned((kv_lora + proj::BN - 1) / proj::BN), unsigned(local_heads),
+              unsigned((rows + proj::BM - 1) / proj::BM)};
+    absorb_q_mma_kernel<<<grid, proj::kThreads, 0, stream>>>(
+        static_cast<const uint16_t*>(q), static_cast<const uint16_t*>(kv_b),
+        static_cast<uint16_t*>(q_tilde), int(rows), local_heads, nope, v, kv_lora);
+    DGPP_CUDA_OK(cudaGetLastError());
+    return;
+  }
   dim3 grid{unsigned(rows), unsigned(local_heads)};
   absorb_q_kernel<<<grid, kAbsorbThreads, 0, stream>>>(
       static_cast<const uint16_t*>(q), static_cast<const uint16_t*>(kv_b),
@@ -1764,6 +1977,16 @@ void dsa_vout_gemm(const void* c, const void* kv_b, void* out,
   // kv_lora % 8: uint4 weight streaming; <= 512: static c smem.
   if (kv_lora > 512 || kv_lora % 8 != 0)
     DGPP_CUDA_OK(cudaErrorInvalidValue);
+  if (rows >= kProjMmaMinRows && kv_lora % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(c) % 16 == 0) {
+    dim3 grid{unsigned((v + proj::BN - 1) / proj::BN), unsigned(local_heads),
+              unsigned((rows + proj::BM - 1) / proj::BM)};
+    vout_mma_kernel<<<grid, proj::kThreads, 0, stream>>>(
+        static_cast<const float*>(c), static_cast<const uint16_t*>(kv_b),
+        static_cast<uint16_t*>(out), int(rows), local_heads, nope, v, kv_lora);
+    DGPP_CUDA_OK(cudaGetLastError());
+    return;
+  }
   dim3 grid{unsigned(rows), unsigned(local_heads),
             unsigned((v + kVoutRowsPerBlock - 1) / kVoutRowsPerBlock)};
   vout_gemm_kernel<<<grid, kVoutThreads, 0, stream>>>(

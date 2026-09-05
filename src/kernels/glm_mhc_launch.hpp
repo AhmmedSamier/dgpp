@@ -19,6 +19,11 @@ namespace dgpp {
 // logits_scratch: f32 [tokens, cfg.coeff_rows()] device scratch the caller
 // owns — the hand-off between the per-coefficient dots kernel and the
 // finish kernel (two launches; see glm_mhc.cu for why).
+// Tests: switch the prefill-sized (>= 16 tokens, vector path) dots between
+// the token-tiled form (default; bitwise the per-coefficient form) and the
+// per-coefficient form.
+void mhc_set_tiled_form(bool on);
+
 void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
                         const GlmMhcConfig& cfg, uint16_t* collapsed,
                         uint16_t* post, uint16_t* comb, float* logits_scratch,

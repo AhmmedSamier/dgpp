@@ -60,14 +60,16 @@ error before the bus comes down. Admission is full-reserve by default, with
 grow-on-demand as an opt-in policy that admits optimistically and sheds the
 youngest request when the KV pool runs out, rank-identical by construction.
 The prefill behind the time to first token is
-being taken down (a 256-token prompt's first token went from 5 s to 0.63 s
-and a 2048-token one from 19.8 to 2.2 s in steady state by 2026-09-05:
+being taken down (a 256-token prompt's first token went from 5 s to 0.58 s
+and a 2048-token one from 19.8 to 1.7 s in steady state by 2026-09-05:
 the MoE experts on one grouped tensor-core launch per matrix per layer
 and no host sync, the bulk all-reduce split per segment and run by a
 16-block cooperative kernel with paced senders — the fabric dropped
-packets under the faster ones — and the attention prefill as a dense
-flash kernel where the selection is provably dense; the time outside
-kernels is next) and the prefix cache is open; `PLAN.md` has the status per milestone and the designs
+packets under the faster ones — the attention prefill as a dense flash
+kernel where the selection is provably dense, and the projections, the
+dense MLPs, the router and the mHC dots restructured, most of them
+bitwise; the GPU is busy 98 % of a prefill) and the prefix cache is
+open; `PLAN.md` has the status per milestone and the designs
 for what remains, `DESIGN.md` the contracts as built.
 
 ## Documentation

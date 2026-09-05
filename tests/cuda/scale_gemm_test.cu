@@ -167,6 +167,19 @@ DGPP_TEST(scale_gemm_tile_kernel_small_m_matches_both_oracles) {
   }
 }
 
+DGPP_TEST(scale_gemm_large_m_route_is_bitwise_the_tile_kernel) {
+  // m > 128 routes to the 128-row tensor-core kernel (the MoE experts'
+  // dense form): bitwise the tile kernel — the same dequantized weights,
+  // the same ascending-k16 mma chain — at a ragged n and m (three m-tiles,
+  // the last partial), and within both oracles' budgets.
+  Problem p = make_problem(/*m=*/300, /*n=*/200, /*k=*/512, 0x1A26E);
+  const auto routed = run_kernel(p);
+  const auto tile = run_tile_kernel(p);
+  require(std::memcmp(routed.data(), tile.data(), routed.size() * 2) == 0,
+          "large-m route bitwise the tile kernel");
+  check_both_oracles(p, routed, "large-m M300xN200xK512");
+}
+
 DGPP_TEST(scale_gemm_ragged_tails_match_both_oracles) {
   // Nothing aligned: N=K=1000 (7 full blocks + 104-wide tail on both axes),
   // M=17 (ragged m-tile), and the final BK stage only 8 k-values wide.
