@@ -1302,9 +1302,10 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
       DGPP_CUDA_OK(cudaMalloc(&d_buf, max_bytes));
       DGPP_CUDA_OK(cudaMemset(d_buf, 0x3c, max_bytes));  // bf16 1.0-ish
       DGPP_CUDA_OK(cudaDeviceSynchronize());
-      DGPP_LOG_INFO("rank {} bulk bench: world {}, pool {} x {} B, inflight cap {} per lane, pace {} Gb/s per QP, {} iters per size",
+      DGPP_LOG_INFO("rank {} bulk bench: world {}, pool {} x {} B, inflight cap {} per lane, pace {:.1f} Gb/s per QP ({}), {} iters per size",
                     rank, world, bus_options.bulk_slots, bus_options.bulk_slot_bytes,
-                    bus_options.bulk_inflight_per_lane, bus_options.bulk_pace_gbps,
+                    bus_options.bulk_inflight_per_lane, bus->bulk_pace_gbps(),
+                    g_bulk_pace_override >= 0 ? "explicit" : "derived from the port rate",
                     g_bulk_bench_iters);
       for (size_t bytes = size_t{2} << 20; bytes <= max_bytes; bytes <<= 1) {
         const size_t elems = bytes / 2;

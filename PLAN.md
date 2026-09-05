@@ -168,8 +168,12 @@ Suggested order for what remains, each item's design in its section:
    (`scripts/roce_counters.sh`); the old one-block kernel had throttled
    every sender to ~1 GB/s, the new one let three 200 Gb/s senders burst
    at one port, and the NICs pace raw-packet QPs only. Software pacing
-   per (peer, lane) QP (`BusOptions::bulk_pace_gbps`, 28) made every size
-   tight with no retransmits; a per-lane window alone changed nothing.
+   per (peer, lane) QP (`BusOptions::bulk_pace_gbps`, derived at bus
+   start from the port rate: port / ((W − 1) × lanes) × 0.85 = 28.3 here;
+   the sweep's loss knee is between 80 and 120 and throughput is flat
+   from 28 to 120; `--bulk-pace-gbps` on glm_serve and glm_gen_check)
+   made every size tight with no retransmits; a per-lane window alone
+   changed nothing.
    Then the door's hash moved from the posting thread onto the staging
    tiles (the CPU's ~10 µs per stripe was the next ceiling): 16 MiB 22.5
    → 2.17 ms, 32 MiB 75 → 4.45, 2 MiB → 0.30, ~11 GB/s of wire traffic
@@ -798,7 +802,13 @@ Two phases:
   peer's collective spun — and fixed by making the decode graph kernels-only
   (`glm_check_decode_graph` at every capture site; `docs/batched_mtp_graph_stall.md`).
   The CTest prefetch-off mitigation is gone; the MTP gate passes 100/100 at
-  32 and at 1 CUDA connection, ctest 33/33 with prefetch on. OWED: the
+  32 and at 1 CUDA connection, ctest 33/33 with prefetch on.
+  (v) OPEN (2026-09-05): the plain batched-graph loopback gate
+  (`..._plain_batched_graph_matches_independent_sessions`) stalled once in
+  fifteen runs on an eager "boundary staged reduce" with the two ranks one
+  collective apart (rank 0 at seq 5, rank 1 at seq 4, each generation gate
+  refusing the other's doorbell) — the latency path, a different signature
+  from (iv); 14/15 passed, not yet chased. OWED: the
   GEMM seam now lowers every m ≤ 8 through the GEMV chunks, which moved
   prefill tail chunks and per-expert prefill GEMMs of 5–8 routed tokens off
   cuBLASLt — bitwise different at those shapes and unmeasured; measure

@@ -289,6 +289,10 @@ int main(int argc, char** argv) {
       "    tokens, grows at tick top, and sheds the youngest request\n"
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
+      "  bus (the prefill's bulk all-reduce): [--bulk-pace-gbps X]: sender\n"
+      "    pacing per (peer, lane) queue pair (default: derived from the\n"
+      "    port rate, port / ((world-1) x lanes) x 0.85; 0 = unpaced)\n"
+      "    [--bulk-inflight N (default 4)]: stripes in flight per lane\n"
       "  sampling (defaults from generation_config.json; temperature 0 =\n"
       "  greedy): [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
       "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n"
@@ -306,6 +310,10 @@ int main(int argc, char** argv) {
   int sampling_candidates = dgpp::kSamplingCandidates;
   std::string admission_mode = "full";
   int admission_window = 256;
+  // The bulk collective's sender pacing (prefill all-reduces): negative
+  // derives the per-QP rate from the port at bus start.
+  double bulk_pace_gbps = -1.0;
+  int bulk_inflight = -1;
   int max_connections = 64;
   int world = 1, rank = 0, rendezvous_timeout_ms = 120000;
   bool no_eos = false, decode_graph = false, mtp = false;
@@ -335,6 +343,8 @@ int main(int argc, char** argv) {
     else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--admission") admission_mode = next();
     else if (a == "--admission-window") admission_window = std::stoi(next());
+    else if (a == "--bulk-pace-gbps") bulk_pace_gbps = std::stod(next());
+    else if (a == "--bulk-inflight") bulk_inflight = std::stoi(next());
     else if (a == "--world") world = std::stoi(next());
     else if (a == "--rank") rank = std::stoi(next());
     else if (a == "--peer") peer = next();
@@ -571,8 +581,11 @@ int main(int argc, char** argv) {
       PinnedWords sample_gather(dgpp::sampling_gather_scratch_elems(cfg.vocab_size));
       std::unique_ptr<dgpp::net::CollectiveBus> bus;
       try {
-        bus = std::make_unique<dgpp::net::CollectiveBus>(dgpp::fabric_bus_options(
-            rank, world, fabric_port, peer, rendezvous_timeout_ms));
+        dgpp::net::BusOptions bus_options = dgpp::fabric_bus_options(
+            rank, world, fabric_port, peer, rendezvous_timeout_ms);
+        if (bulk_pace_gbps >= 0) bus_options.bulk_pace_gbps = bulk_pace_gbps;
+        if (bulk_inflight >= 0) bus_options.bulk_inflight_per_lane = bulk_inflight;
+        bus = std::make_unique<dgpp::net::CollectiveBus>(bus_options);
         std::string err;
         if (!bus->start(&err))
           throw std::runtime_error("rank " + std::to_string(rank) +

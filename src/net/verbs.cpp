@@ -82,6 +82,15 @@ VerbsDevice::VerbsDevice(const std::string& name_hint, std::string* error) {
           pa.link_layer != IBV_LINK_LAYER_INFINIBAND) {
         port_ = p;
         port_ok = true;
+        // The line rate, as sysfs renders it ("200 Gb/sec (4X HDR)").
+        if (FILE* f = std::fopen(("/sys/class/infiniband/" + candidate +
+                                  "/ports/" + std::to_string(p) + "/rate")
+                                     .c_str(),
+                                 "r")) {
+          double gbps = 0.0;
+          if (std::fscanf(f, "%lf", &gbps) == 1 && gbps > 0) rate_gbps_ = gbps;
+          std::fclose(f);
+        }
         break;
       }
     }

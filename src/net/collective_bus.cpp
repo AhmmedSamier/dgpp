@@ -2799,6 +2799,27 @@ bool CollectiveBus::start(std::string* error) {
                    impl.stage_mrs.size());
   }
 
+  // Bulk pacing: derive the per-QP rate from the geometry unless the
+  // caller fixed it (BusOptions::bulk_pace_gbps).
+  if (impl.opt.bulk_pace_gbps < 0) {
+    double port_gbps = 0.0;
+    for (auto& d : impl.devices)
+      if (d->port_rate_gbps() > 0 &&
+          (port_gbps == 0.0 || d->port_rate_gbps() < port_gbps))
+        port_gbps = d->port_rate_gbps();
+    const int inbound_qps =
+        (opt.world_size - 1) * static_cast<int>(opt.lane_devices.size());
+    if (port_gbps > 0 && inbound_qps > 0) {
+      impl.opt.bulk_pace_gbps = port_gbps / inbound_qps * 0.85;
+    } else {
+      impl.opt.bulk_pace_gbps = 28.0;  // the measured four-node value
+      DGPP_LOG_WARN(
+          "bus: rank {} could not read a port rate; bulk pacing fixed at "
+          "{} Gb/s per QP",
+          opt.my_rank, impl.opt.bulk_pace_gbps);
+    }
+  }
+
   impl.peers.resize(impl.peer_ranks.size());
   for (auto& peer_lanes : impl.peers)
     peer_lanes.resize(opt.lane_devices.size());
@@ -2952,9 +2973,11 @@ bool CollectiveBus::start(std::string* error) {
 
   impl.engine = std::thread([&impl] { impl.engine_loop(); });
   DGPP_LOG_INFO(
-      "bus: rank {} up — {} peer(s) x {} lane(s), lat {}x{}B, bulk {}x{}B",
+      "bus: rank {} up — {} peer(s) x {} lane(s), lat {}x{}B, bulk {}x{}B, "
+      "bulk pace {:.1f} Gb/s per QP, window {} per lane",
       opt.my_rank, impl.peer_ranks.size(), opt.lane_devices.size(),
-      opt.lat_slots, opt.lat_slot_bytes, opt.bulk_slots, opt.bulk_slot_bytes);
+      opt.lat_slots, opt.lat_slot_bytes, opt.bulk_slots, opt.bulk_slot_bytes,
+      impl.opt.bulk_pace_gbps, opt.bulk_inflight_per_lane);
   return true;
 }
 
@@ -3866,6 +3889,10 @@ void CollectiveBus::stop() {
   impl.stage_held_ptr = nullptr;
   impl.peers.clear();
   impl.devices.clear();
+}
+
+double CollectiveBus::bulk_pace_gbps() const {
+  return impl_->opt.bulk_pace_gbps < 0 ? 0.0 : impl_->opt.bulk_pace_gbps;
 }
 
 BusStats CollectiveBus::stats() const {

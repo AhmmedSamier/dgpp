@@ -813,9 +813,15 @@ fold each outbound stripe, and block 0 publishes the per-(peer, stripe)
 hash table behind the staged counters, so the engine posts the door's
 hash without folding 256 KB on the collective thread per stripe.
 
-Senders are paced in software (`BusOptions::bulk_pace_gbps`, 28 Gb/s per
-(peer, lane) QP; `bulk_inflight_per_lane` bounds the window and the
-posting order rotates per sender). The one-block kernel had throttled
+Senders are paced in software (`BusOptions::bulk_pace_gbps` per (peer,
+lane) QP — derived at bus start from the slowest lane's port rate as
+port / ((W − 1) × lanes) × 0.85, 28.3 Gb/s on the four-node 200 Gb/s
+fabric, overridable with `--bulk-pace-gbps` on glm_serve and
+glm_gen_check, 0 = unpaced; `bulk_inflight_per_lane` bounds the window
+and the posting order rotates per sender). The sweep put the loss knee
+between 80 and 120 Gb/s per QP with throughput flat from 28 to 120, so
+the derived value sits at the low end of the flat region with ~3×
+headroom. The one-block kernel had throttled
 every sender to ~1 GB/s; the grid let three 200 Gb/s senders burst
 whole rings at one 200 Gb/s port and the switch dropped packets — RoCE
 sequence errors, adaptive retransmissions, CNPs, 16 MiB all-reduces

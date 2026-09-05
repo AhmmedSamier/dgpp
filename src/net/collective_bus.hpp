@@ -53,14 +53,18 @@ struct BusOptions {
   // peers x lanes x this x slot bytes; the posting order also rotates per
   // sender (rank + 1 first) so aligned bursts spread across receivers.
   int bulk_inflight_per_lane = 4;
-  // Software pacing per (peer, lane) queue pair, in Gb/s (0 = unpaced).
-  // The fabric's ports are 200 Gb/s but a receiver has three senders, and
-  // the NICs' packet pacing covers raw-packet QPs only, so the engine
-  // spaces a QP's stripe posts by len / rate: six inbound QPs at the cap
-  // stay under one port's drain even when every sender bursts at the
-  // same receiver (the ack-driven credit return aligns them: the receiver
-  // that finishes a segment releases all three at once).
-  double bulk_pace_gbps = 28.0;
+  // Software pacing per (peer, lane) queue pair, in Gb/s. A receiver has
+  // (world - 1) x lanes inbound QPs on one port, and the NICs' packet
+  // pacing covers raw-packet QPs only, so the engine spaces a QP's stripe
+  // posts by len / rate. Negative (the default) DERIVES the rate at start
+  // from the slowest lane's port: port rate / ((world - 1) x lanes) x
+  // 0.85, so every inbound QP at the cap stays under the port even when
+  // every sender bursts at the same receiver (the ack-driven credit
+  // return aligns them: the receiver that finishes a segment releases
+  // all three at once) — 28.3 Gb/s on the four-node 200 Gb/s fabric,
+  // where 15/28/40 all ran clean and unpaced lost packets. 0 = unpaced;
+  // positive = that rate. bulk_pace_gbps() reports the resolved value.
+  double bulk_pace_gbps = -1.0;
 
   int qp_depth = 1024;
   int completion_timeout_ms = 5000;  // engine watchdog per request
@@ -288,6 +292,9 @@ class CollectiveBus {
   void stop();
 
   BusStats stats() const;
+  // The bulk pacing rate in effect after start() (the derived one when
+  // the option was negative), Gb/s per (peer, lane) QP; 0 = unpaced.
+  double bulk_pace_gbps() const;
   int lane_count() const { return static_cast<int>(options_.lane_devices.size()); }
   size_t slot_bytes(BusMessageClass cls) const {
     return cls == BusMessageClass::kLatency ? options_.lat_slot_bytes

@@ -45,12 +45,16 @@ class VerbsDevice {
   const ibv_gid& gid() const { return gid_; }
   ibv_pd* pd() const { return pd_; }
   ibv_context* ctx() const { return ctx_; }
+  // The active port's line rate in Gb/s (sysfs `ports/N/rate`; 0 when it
+  // could not be read) — the bus derives its bulk pacing from it.
+  double port_rate_gbps() const { return rate_gbps_; }
 
  private:
   ibv_context* ctx_ = nullptr;
   ibv_pd* pd_ = nullptr;
   std::string name_;
   int port_ = 1;
+  double rate_gbps_ = 0.0;
   int gid_idx_ = 0;
   ibv_gid gid_{};
 };
