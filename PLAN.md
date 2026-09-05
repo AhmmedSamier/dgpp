@@ -251,6 +251,16 @@ Suggested order for what remains, each item's design in its section:
    as a dense one; ids identical to the runs before the kernel. What
    remains for long prompts is the short-prompt list plus the indexer's
    materialized dots and select, which grow with context.
+   ROUND 9 (2026-09-05, the record's twenty-fourth entry): the remaining
+   kernel bundle tried — bulk stripes of 512 KB / 1 MB (help 16 MiB by
+   9–13 %, hurt 2 MiB by 50–100 %; the 256 KB default stays), the expert
+   kernel's k-loop pipelined through registers (slower: occupancy), the
+   mHC dots staged in quarters for two blocks per SM (slower: more
+   barriers than the occupancy returns), `__expf` in the KDA gate (within
+   the ±10 % run-to-run spread of identical code) — none kept, all
+   reverted. The remaining kernels sit at their floors for their access
+   patterns; the prefill work is done unless a structural change (fewer
+   expert bytes per chunk) is wanted.
 2. M7: the prefix cache (the snapshot arena and the radix are new; the
    block sharing, the KDA snapshot format, and the journal it rides already
    exist).
