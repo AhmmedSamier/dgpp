@@ -29,6 +29,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
     "model": "org/name",
     "nodes": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
     "ssh_user": "ops",
+    "release": "0.1.0+gabc",
     "ports": {"http": 8081, "journal": 29001},
     "engine": {"max_concurrency": 2, "decode_graph": true, "prefix_cache_gib": 0.5,
                "admission": "grow", "stats_interval_s": 0},
@@ -36,8 +37,8 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   })";
   const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(json, "t");
   require(c.model == "org/name" && c.world() == 3 && c.nodes[0] == "10.0.0.1" &&
-              c.nodes[2] == "10.0.0.3" && c.ssh_user == "ops",
-          "the model, the nodes and the user");
+              c.nodes[2] == "10.0.0.3" && c.ssh_user == "ops" && c.release == "0.1.0+gabc",
+          "the model, the nodes, the user and the release");
   require(c.http_port == 8081 && c.fabric_port == 29970 && c.journal_port == 29001,
           "the ports: given ones taken, the fabric port defaulted");
   require(c.engine.max_concurrency == 2 && c.engine.decode_graph && !c.engine.mtp &&

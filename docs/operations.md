@@ -71,12 +71,13 @@ longer fires; it stays as the assertion that the push worked.
 `scripts/release.sh` builds the release preset and packs
 `dist/dgpp-<version>.tar.zst` (README's "Release and install" has the
 layout); `scripts/dgpp-cluster install <tarball>` copies it to every node
-in the config, unpacks it under `paths.release_dir`, verifies every file
-against `MANIFEST.sha256`, and flips `<release_dir>/current` to it
-atomically. From then on `up` runs `current/bin/dgpp-serve` on every rank
-and stages only the config. An upgrade is `down`, `install`, `up`; a
-rollback is the same with the previous tarball, or flipping the symlink
-by hand. `dgpp-cluster releases` shows what each node has and points at;
+in the config, unpacks it under `paths.release_dir` and verifies every
+file against `MANIFEST.sha256`. Which release runs is named — the
+config's `release` key or `up --release <version>` — and `up` then runs
+`<release_dir>/dgpp-<version>/bin/dgpp-serve` on every rank, staging only
+the config. An upgrade is `down`, `install`, then `up` naming the new
+version; a rollback is `up` naming the previous one, which is still
+installed. `dgpp-cluster releases` shows what each node has;
 `dgpp-serve --version` prints a binary's version, and rank 0 puts its
 version on the journal's settings record so a peer of another version
 exits before its first tick rather than form a mixed world.

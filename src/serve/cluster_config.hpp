@@ -40,6 +40,7 @@ struct ClusterConfig {
   std::string model;
   std::vector<std::string> nodes;  // rank = index; nodes[0] is the head
   std::string ssh_user;            // empty: the launcher's own user
+  std::string release;             // the installed release the launcher runs (launcher-only; empty: the development binary)
   int http_port = 18080;
   int fabric_port = 29970;
   int journal_port = 29971;

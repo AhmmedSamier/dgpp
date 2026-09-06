@@ -96,6 +96,8 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
       saw_nodes = true;
     } else if (k == "ssh_user") {
       c.ssh_user = text(v, k, what);
+    } else if (k == "release") {
+      c.release = text(v, k, what);
     } else if (k == "ports") {
       if (!v.is_object()) fail(what, "'ports' must be an object");
       for (const Member& p : v.members()) {

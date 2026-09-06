@@ -132,10 +132,13 @@ times; nothing is copied at boot.
 
 ```bash
 scripts/release.sh                                 # build the release preset, stage, verify, pack
-scripts/dgpp-cluster install dist/dgpp-<version>.tar.zst   # every node: unpack, verify, flip `current`
-scripts/dgpp-cluster up                            # runs <release_dir>/current/bin/dgpp-serve on every rank
-scripts/dgpp-cluster releases                      # what each node has installed and points at
+scripts/dgpp-cluster install dist/dgpp-<version>.tar.zst   # every node: unpack under release_dir, verify
+scripts/dgpp-cluster up --release <version>        # runs <release_dir>/dgpp-<version>/bin/dgpp-serve on every rank
+scripts/dgpp-cluster releases                      # what each node has installed
 ```
+
+Which release runs is named, in the config's `release` key or with
+`--release`, never inferred from a pointer on the nodes.
 
 The version is the tree's, stamped at build time by `cmake/version.cmake`
 into the binary (`dgpp-serve --version`; `0.1.0+g<sha12>`, `.dirty` when
@@ -154,9 +157,9 @@ record, so a world of mixed versions refuses to form. Inside the tarball:
 Beyond the tarball a node needs the NVIDIA driver, rdma-core, libnl and
 libstdc++, all part of the DGX OS image, plus the checkpoint and resident
 image caches on its local NVMe. `install` unpacks under `paths.release_dir`
-(`~/dgpp/releases/dgpp-<version>/`), checks every file against the
-manifest and flips the `current` symlink atomically; rolling back is
-installing the previous tarball. There are no boot-time units by decision:
+(`~/dgpp/releases/dgpp-<version>/`) and checks every file against the
+manifest; several versions sit side by side, and rolling back is naming
+the previous one. There are no boot-time units by decision:
 the world starts when an operator says `up`. With no release installed,
 `up` stages the development binary `build-ci/dgpp-serve` to the peers as
 before.
@@ -179,6 +182,7 @@ whose ranks disagree.
 | `model` | yes | the Hugging Face model id every rank loads (`--model`) | — |
 | `nodes` | yes | the ranks' hosts in rank order; `nodes[0]` is the head (rank 0: the HTTP ingress and the journal); the world size is the list's length | — |
 | `ssh_user` | no | the user the launcher uses for ssh and scp to the peers | the launcher's own user |
+| `release` | no | the installed release version `up` runs on every rank (`<release_dir>/dgpp-<version>/bin/dgpp-serve`); launcher-only, `--release` overrides it; rolling back is naming the previous version | empty: the development binary `build-ci/dgpp-serve`, staged to the peers |
 | `ports.http` | no | rank 0's OpenAI-compatible HTTP port | 18080 |
 | `ports.fabric` | no | the bus rendezvous port rank 0 listens on and the peers connect to | 29970 |
 | `ports.journal` | no | the admission journal's port (must differ from `ports.fabric`) | 29971 |

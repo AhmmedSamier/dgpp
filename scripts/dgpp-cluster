@@ -2,11 +2,11 @@
 """dgpp-cluster: the serving world's launcher over the cluster config
 (2026-09-06, the productionizing pass).
 
-    dgpp-cluster up       [--config F] [--bin PATH] [--log-dir DIR] [--knobs "FLAGS"]
+    dgpp-cluster up       [--config F] [--release V | --bin PATH] [--log-dir DIR] [--knobs "FLAGS"]
     dgpp-cluster down     [--config F] [--log-dir DIR]
     dgpp-cluster status   [--config F] [--log-dir DIR]
-    dgpp-cluster install  TARBALL [--config F]    # every node: unpack, verify, flip `current`
-    dgpp-cluster releases [--config F]            # every node: the installed versions and `current`
+    dgpp-cluster install  TARBALL [--config F]    # every node: unpack under paths.release_dir, verify
+    dgpp-cluster releases [--config F]            # every node: the installed versions
 
 The config (deploy/cluster.json by default, or $DGPP_CLUSTER_CONFIG) names
 the model, the nodes (rank = index; node 0 is the head, where this runs),
@@ -30,13 +30,13 @@ the log dir and prints the op streams' md5s — the four must be identical.
 Files in the log dir: r0.pid, serve_r<rank>.log, serve_rank<rank>.ops.
 
 `install` takes the tarball scripts/release.sh packs: on every node it is
-copied to paths.release_dir, unpacked to <release_dir>/dgpp-<version>/,
-checked against its MANIFEST.sha256, and <release_dir>/current is flipped
-to it atomically; rolling back is `install` of the previous tarball (or
-flipping the symlink by hand). When <release_dir>/current/bin/dgpp-serve
-exists on the head, `up` runs it there and on every peer (no binary is
-staged); otherwise the development binary build-ci/dgpp-serve is staged as
-before. `--bin` overrides both.
+copied to paths.release_dir, unpacked to <release_dir>/dgpp-<version>/ and
+checked against its MANIFEST.sha256. Which release runs is named, not
+inferred: the config's "release" key, or `--release V`, makes `up` run
+<release_dir>/dgpp-<V>/bin/dgpp-serve on every rank (no binary is staged;
+a node without it fails the stage step by name); rolling back is naming
+the previous version. Without a release the development binary
+build-ci/dgpp-serve is staged as before. `--bin` overrides both.
 """
 import argparse
 import hashlib
@@ -71,14 +71,20 @@ class Cluster:
         self.log_dir = expand(args.log_dir or paths.get("log_dir", "~/dgpp/log"))
         self.stage_dir = paths.get("stage_dir", "/tmp/bus4")
         self.release_dir = paths.get("release_dir", "~/dgpp/releases")
-        installed = os.path.join(expand(self.release_dir), "current", "bin", "dgpp-serve")
+        # Which binary: --bin, else the named release (--release or the
+        # config's "release"), else the development build.
+        self.release = getattr(args, "release", None) or self.cfg.get("release") or ""
         if getattr(args, "bin", None):
             self.bin, self.installed = os.path.abspath(args.bin), False
-        elif os.path.exists(installed):
-            self.bin, self.installed = installed, True  # the peers run the same path
+        elif self.release:
+            rel = f"{self.release_dir}/dgpp-{self.release}/bin/dgpp-serve"
+            self.bin, self.installed = expand(rel), True
+            if not os.path.exists(self.bin):
+                sys.exit(f"release {self.release} is not installed on this node ({self.bin}); "
+                         f"run `dgpp-cluster install` first")
         else:
             self.bin, self.installed = os.path.join(ROOT, "build-ci", "dgpp-serve"), False
-        self.peer_bin = f"{self.release_dir}/current/bin/dgpp-serve" if self.installed else "./dgpp-serve"
+        self.peer_bin = f"{self.release_dir}/dgpp-{self.release}/bin/dgpp-serve" if self.installed else "./dgpp-serve"
         self.knobs = (getattr(args, "knobs", "") or "").split()
         ports = self.cfg.get("ports", {})
         self.http = int(ports.get("http", 18080))
@@ -172,7 +178,7 @@ class Cluster:
     # ---- up ----------------------------------------------------------------
     def stage(self):
         what = "the config" if self.installed else "dgpp-serve and the config"
-        print(f"=== staging {what} to the peers" + (f" (installed release: {self.bin})" if self.installed else ""))
+        print(f"=== staging {what} to the peers" + (f" (release {self.release}: {self.bin})" if self.installed else ""))
         for rank, host in self.peers:
             # The stage dir may live in /tmp (a reboot empties it); a previous
             # run's op stream must never be hashed as this run's evidence.
@@ -303,11 +309,11 @@ class Cluster:
             return 2
         release = name[: -len(".tar.zst")]
         rd = self.release_dir
-        # Unpack, verify every checksum, then flip `current` atomically.
+        # Unpack and verify every checksum; nothing points at it until the
+        # config (or --release) names it.
         steps = (f"mkdir -p {rd} && cd {rd} && rm -rf {release} && tar -I zstd -xf {rd}/{name} && "
                  f"cd {release} && sha256sum -c --quiet MANIFEST.sha256 && cd .. && "
-                 f"ln -sfn {release} current.tmp && mv -T current.tmp current && rm -f {rd}/{name} && "
-                 f"echo installed $(readlink current)")
+                 f"rm -f {rd}/{name} && echo installed {release}")
         rc = 0
         for rank, host in enumerate(self.nodes):
             if rank == 0:
@@ -324,21 +330,21 @@ class Cluster:
             ok = r.returncode == 0 and "installed" in r.stdout
             print(f"rank {rank} ({host}): " + (r.stdout.strip() if ok else f"FAILED: {(r.stderr or r.stdout).strip()[:200]}"))
             rc = rc or (0 if ok else 1)
+        if rc == 0:
+            print(f'to run it: set "release": "{release[len("dgpp-"):]}" in the config, or `up --release {release[len("dgpp-"):]}`')
         return rc
 
     def releases(self):
         rd = self.release_dir
-        cmd = f"cd {rd} 2>/dev/null && ls -d dgpp-* 2>/dev/null | tr '\\n' ' '; echo; readlink {rd}/current 2>/dev/null || echo none"
+        cmd = f"cd {rd} 2>/dev/null && ls -d dgpp-* 2>/dev/null | tr '\\n' ' '"
+        print(f"configured release: {self.release or '(none: the development binary)'}")
         for rank, host in enumerate(self.nodes):
             if rank == 0:
                 r = subprocess.run(["bash", "-c", cmd.replace(rd, expand(rd))], capture_output=True, text=True)
                 out = r.stdout
             else:
                 out = self.ssh_out(host, cmd)
-            lines = [l for l in out.splitlines()]
-            have = lines[0].strip() if lines else ""
-            current = lines[-1].strip() if len(lines) > 1 else "none"
-            print(f"rank {rank} ({host}): current={current}  installed=[{have}]")
+            print(f"rank {rank} ({host}): installed=[{out.strip()}]")
         return 0
 
     # ---- status ------------------------------------------------------------
@@ -361,7 +367,8 @@ def main():
     ap.add_argument("verb", choices=["up", "down", "status", "install", "releases"])
     ap.add_argument("tarball", nargs="?", help="install: the release tarball from scripts/release.sh")
     ap.add_argument("--config", default=os.environ.get("DGPP_CLUSTER_CONFIG", os.path.join(ROOT, "deploy", "cluster.json")))
-    ap.add_argument("--bin", default=None, help="the dgpp-serve binary (default build-ci/dgpp-serve)")
+    ap.add_argument("--bin", default=None, help="the dgpp-serve binary (default: the named release, else build-ci/dgpp-serve)")
+    ap.add_argument("--release", default=None, help="the installed release version to run (overrides the config's \"release\")")
     ap.add_argument("--log-dir", default=None, help="overrides paths.log_dir")
     ap.add_argument("--knobs", default="", help="flags appended to every rank's command line")
     args = ap.parse_args()
