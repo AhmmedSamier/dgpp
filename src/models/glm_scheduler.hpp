@@ -374,6 +374,7 @@ class Scheduler {
     int64_t prefix_evictions = 0;
     int64_t prefix_duplicates = 0;
     int64_t prefix_skipped = 0;
+    int64_t prefix_skipped_no_block = 0;
     int64_t prefix_blocks_pinned = 0;
   };
 
@@ -464,6 +465,7 @@ class Scheduler {
     int rolling_slot = -1;
     int64_t rolling_position = -1;
     int64_t hop_armed = -1;    // the aligned position armed for the next step
+    bool cache_off = false;    // the pool cannot hold the cache's blocks for it
   };
   // The admission plan the cache proposes for a queued request: the entry
   // to attach (or -1) and the position, and the cut a new entry would be
@@ -474,9 +476,20 @@ class Scheduler {
     int64_t snap_position = 0;
   };
   bool cache_on(const Request& r) const {
-    return cache_.enabled() && !r.spec.no_cache;
+    return cache_.enabled() && !r.spec.no_cache && !r.cache_off;
   }
   PrefixPlan plan_prefix(const Request& r) const;
+  // The pool block a snapshot's private partial-block copy takes: one when
+  // the position is not block-aligned, none otherwise (or without a pool).
+  int64_t snapshot_blocks(int64_t position) const;
+  // Whether a snapshot at `position` into a slot whose current snapshot
+  // sits at `previous` (-1: none) needs a NEW pool block — the arena
+  // releases the old copy before it takes the new one, so only a first
+  // partial copy does.
+  bool snapshot_needs_block(int64_t position, int64_t previous) const;
+  // Frees pool blocks for a snapshot by evicting LRU unattached entries
+  // until `need` blocks are free; false when nothing evictable remains.
+  bool ensure_free_blocks(int64_t need, const std::string& id);
   // The blocks an admission must find FREE: the reservation less the full
   // blocks an attach shares.
   int64_t new_blocks(const Request& r, const PrefixPlan& plan) const;
@@ -552,6 +565,11 @@ class Scheduler {
 class SchedulerObserver {
  public:
   virtual ~SchedulerObserver() = default;
+  // The observer's running fold of everything it has recorded (the
+  // fabric's continuous drift check, M9): has_digest() says it keeps one,
+  // digest() is its value now. The default observer keeps none.
+  virtual bool has_digest() const { return false; }
+  virtual uint64_t digest() const { return 0; }
   // One generated token (the prefill pick is steps_done == 1). Always
   // fires BEFORE the matching retire when the token ends the request.
   virtual void on_token(const std::string& id, int64_t token,

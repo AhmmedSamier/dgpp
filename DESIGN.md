@@ -2699,11 +2699,23 @@ artifact hashes are in the 2026-09-03 Phase-2 entries of
   values are typed from the tool schema first; and a forced
   `<tool_call>` prefix on the prompt is not `tool_choice` (it skips the
   reasoning and cannot stop a second call) — the grammar mask is.
-- *Failure semantics (v1):* no failover. Any rank's death fails the world
-  legibly (journal EOF / bus watchdog), active streams get an error event,
-  a supervisor restarts the world in ~25 s from the image cache. The
-  4-way md5 becomes continuous (rank 0's running op fold every N ticks in
-  the journal; a differing peer dies with the tick number).
+- *Failure semantics (v1) — as built (2026-09-05):* no failover. Any
+  rank's death fails the world legibly and fast: the journal sockets are
+  the liveness probe (a process death closes them), rank 0's watch on the
+  peers' connections and each peer's in-tick watch on rank 0's see it
+  within a poll, and the bus watchdog remains the backstop for a silent
+  node. Rank 0 answers every live stream with its committed tokens and
+  the `engine_failure` event and exits with status 2; a peer stuck inside
+  a tick exits with status 3; `serve_run.sh` (or a supervisor) restarts
+  the world in ~25 s from the image cache. The step in flight never
+  completes on any rank, so committed state is identical everywhere and a
+  restart reproduces the committed tokens (drilled on the four nodes,
+  `scripts/serve_failure_drill.sh`). The 4-way md5 IS continuous: every
+  tick record carries rank 0's running op-stream fold (`od`, FNV-1a over
+  the OpStreamObserver's lines) and, with the prefix cache on, its
+  decision digest (`pd`); a differing peer dies with the tick number, one
+  tick late at most, and rank 0 then fails the service as for any dead
+  peer. `docs/operations.md` is the operator's page.
 
 ## 12. Correctness and performance gates
 

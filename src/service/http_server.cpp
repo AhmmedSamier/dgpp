@@ -96,6 +96,10 @@ struct Conn {
   bool stream = false;       // chunked SSE mode
   bool closing = false;      // close after the outbuf drains
   bool gone = false;         // peer closed / write failed
+  bool busy = false;         // a dispatched request the handler has not
+                             // answered yet: the next pipelined request
+                             // waits in `in` (one record per connection,
+                             // one tag — the fuzzer's third find)
   uint64_t stream_tag = 0;
   std::string in;            // buffered input
   std::string out;           // pending output
@@ -116,6 +120,7 @@ void HttpResponseWriter::respond(int status, std::string_view content_type,
                                  std::string body) {
   if (conn_ == nullptr || conn_->fd < 0) return;
   Conn& c = *conn_;
+  c.busy = false;  // the request is answered: the next one may be read
   char head[256];
   const int n = std::snprintf(
       head, sizeof(head),
@@ -158,6 +163,7 @@ void HttpResponseWriter::end_stream() {
   if (conn_ == nullptr || conn_->fd < 0) return;
   conn_->out.append("0\r\n\r\n", 5);
   conn_->stream = false;
+  conn_->busy = false;
 }
 
 void HttpResponseWriter::set_stream_tag(uint64_t tag) {
@@ -262,6 +268,13 @@ void HttpServer::serve() {
     // MARKS dead connections (fd = -1); the sweep below is the single
     // place nodes leave the map — no iterator is ever invalidated.
     handler_->idle();
+    // A request that was waiting behind one the handler has just answered
+    // (pipelined input is parsed one request at a time): read it now — no
+    // epoll event will announce bytes that already sit in the buffer.
+    for (auto& [fd, c] : conns_) {
+      if (c->fd >= 0 && !c->busy && !c->closing && !c->in.empty())
+        (void)process_requests(*c);
+    }
     for (auto& [fd, c] : conns_) {
       if (c->fd >= 0 && !c->out.empty()) {
         flush_out(*c);
@@ -342,6 +355,7 @@ void HttpServer::on_readable(Conn& c) {
 
 bool HttpServer::process_requests(Conn& c) {
   while (!c.closing && !c.gone) {
+    if (c.busy) return true;  // the handler still owes the previous answer
     // A complete request = headers + Content-Length body.
     const size_t head_end = c.in.find("\r\n\r\n");
     if (head_end == std::string::npos) {
@@ -452,11 +466,18 @@ bool HttpServer::process_requests(Conn& c) {
     c.in.erase(0, head_len + content_length);  // keep-alive: next request
 
     // --- route ------------------------------------------------------------
+    // One request in the handler's hands at a time: the writer and the
+    // disconnect tag are per connection, so a second request dispatched
+    // while the first is pending would orphan the first record (its tag
+    // overwritten, its writer freed at the close without notice — the
+    // fuzzer's third find, 2026-09-05). respond()/end_stream() clear busy.
+    c.busy = true;
     try {
       handler_->handle(req, c.writer);
     } catch (const std::exception& e) {
       DGPP_LOG_ERROR("http: handler threw on {} {} — {}", req.method,
                      req.path, e.what());
+      c.busy = false;
       if (c.fd < 0) return false;  // the handler killed the conn already
       c.out.clear();
       c.flushed = 0;
@@ -533,12 +554,17 @@ void HttpServer::close_conn(Conn& c, bool notify_disconnect) {
   ::close(fd);
   c.fd = -1;
   c.gone = true;
-  // Notify when the handler TAGGED the connection — streams obviously,
-  // but also one-shot responses whose writer the handler still holds
-  // for a later idle() flush. The handler must then drop the writer:
-  // the Conn (writer included) is freed at the pass's sweep.
-  if (notify_disconnect && c.stream_tag != 0)
-    handler_->on_disconnect(c.stream_tag);
+  // Notify whenever the handler TAGGED the connection — streams obviously,
+  // but also one-shot responses whose writer the handler still holds for
+  // a later idle() flush — WHATEVER closed it: the client's goodbye, or
+  // the server's own close after a 400/431 on a later pipelined request,
+  // or the shutdown. The handler must then drop the writer: the Conn
+  // (writer included) is freed at the pass's sweep. (The fuzzer's second
+  // find, 2026-09-05 under ASan: a valid one-shot followed by garbage on
+  // the same connection closed it without notice, and the service's
+  // answer later wrote through the freed writer.)
+  (void)notify_disconnect;
+  if (c.stream_tag != 0) handler_->on_disconnect(c.stream_tag);
   // The node stays in the map (marked) until the pass's sweep — erasing
   // here would invalidate the caller's Conn&/iterator.
 }

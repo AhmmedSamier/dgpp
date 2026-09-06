@@ -324,9 +324,25 @@ class FakeEngine : public SchedulerEngine {
     size_t returned = 0;  // tokens handed to the scheduler (the pending one included)
   };
   void pin(int slot, int64_t position) {
-    pinned_[slot] = position / block_tokens_ + (position % block_tokens_ != 0 ? 1 : 0);
+    // Partial-pin mode models the real pool: an entry's full blocks are the
+    // request's own (shared by reference), only its partial-block copy
+    // costs a block, and the pool throws when overdrawn. The default counts
+    // every block below the position (the older gates' arithmetic).
+    pinned_[slot] = partial_pins_
+                        ? (position % block_tokens_ != 0 ? 1 : 0)
+                        : position / block_tokens_ + (position % block_tokens_ != 0 ? 1 : 0);
     pinned_positions_[slot] = position;
+    if (partial_pins_ && pool_blocks_in_use() > total_blocks_)
+      throw std::runtime_error("fake: pool overdrawn by a snapshot (" +
+                               std::to_string(pool_blocks_in_use()) + " of " +
+                               std::to_string(total_blocks_) + " blocks)");
   }
+
+ public:
+  void set_partial_pins(bool on) { partial_pins_ = on; }
+
+ private:
+  bool partial_pins_ = false;
 
   int slots_;
   int arena_slots_ = 0;
@@ -1437,6 +1453,100 @@ DGPP_TEST(scheduler_prefixCache_twoTokenStepsHopOverAnAlignedPositionAndSnapshot
               "\n  expected: " + expected_one);
   require(sched1.meters().prefix_hops == 0 && sched1.meters().prefix_rolling == 1,
           "no hop, one rolling snapshot");
+}
+
+DGPP_TEST(scheduler_prefixCache_admissionCountsTheSnapshotCopiesAgainstThePool) {
+  // The prefix-cache curve sweep of 2026-09-05 (43 slots, eight
+  // conversations, a 4,096-token pool) killed the service:
+  // session_reserve_blocks found the pool one block short after the prefill.
+  // An entry's snapshot takes a private copy of its partial block, and so
+  // does a request's rolling snapshot; the admission counted neither. It now
+  // counts the cut entry's copy and one block of headroom for the rolling
+  // copy (a position aligned to kpool but not to the block), and a rolling
+  // snapshot that finds no block evicts an unattached entry or skips.
+  // GIVEN a 5-block pool of 8-token blocks at kpool 4, and a 17-token
+  // prompt with a boundary at 13 (the cut at 12: a partial block) and six
+  // steps (23 tokens: 3 blocks reserved): the admission needs 3 + 1 (the
+  // cut's copy) + 1 (headroom) = 5 blocks — exactly the pool.
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/5, /*block_tokens=*/8);
+  engine.set_partial_pins(true);
+  engine.set_prefix_arena(/*slots=*/4, /*align=*/4);
+  engine.arm(0, {31, 32, 33, 34, 35, 36}, 6);
+  Scheduler sched(&engine, {kEos});
+  const std::vector<int64_t> prompt = counted_prompt(17);
+  sched.submit(make_cached_request("a", prompt, {5, 13}, 6));
+  sched.run_to_completion();
+  // Committed 17..22: the rolling snapshot at 20 (a partial block) took the
+  // headroom block; nothing overdrew the pool (the fake would have thrown).
+  const std::string expected_a =
+      "P:0:17 N:0:12@0 S:0:31 S:0:32 S:0:33 RS:0:20@1 S:0:34 S:0:35 C:0";
+  require(engine.op_stream() == expected_a,
+          "the admission left room for both copies:\n  got:      " + engine.op_stream() +
+              "\n  expected: " + expected_a);
+  require(sched.meters().prefix_close_entries == 1 &&
+              sched.meters().prefix_skipped_no_block == 0,
+          "the close entry at 20, no snapshot skipped for blocks");
+  // AND a different prompt while a's two entries pin two blocks: the
+  // admission needs 5 free of 3 — both entries give way (the cut entry
+  // first, the older), then the same sequence in the same slots.
+  engine.arm(0, {31, 32, 33, 34, 35, 36}, 6);
+  sched.submit(make_cached_request("c", counted_prompt(17, 300), {5, 13}, 6));
+  sched.run_to_completion();
+  const std::string expected_c =
+      expected_a + " F:0 F:1 P:0:17 N:0:12@0 S:0:31 S:0:32 S:0:33 RS:0:20@1 S:0:34 S:0:35 C:0";
+  require(engine.op_stream() == expected_c,
+          "entries give their blocks to an admission that needs them:\n  got:      " +
+              engine.op_stream() + "\n  expected: " + expected_c);
+  require(sched.meters().prefix_evictions == 2, "two evictions for the blocks");
+  // AND a 4-block pool: the one-step request (3 blocks + the cache's 2 = 5)
+  // cannot carry the cache; it admits without it.
+  FakeEngine tight(/*slots=*/2, /*total_blocks=*/4, /*block_tokens=*/8);
+  tight.set_partial_pins(true);
+  tight.set_prefix_arena(/*slots=*/4, /*align=*/4);
+  tight.arm(0, {41}, 1);
+  Scheduler sched2(&tight, {kEos});
+  sched2.submit(make_cached_request("d", prompt, {5, 13}, 1));
+  sched2.run_to_completion();
+  // (Three blocks of reservation plus the cache's two exceed the pool, so
+  // the request runs without the cache — never a deadlock, never an
+  // overdraw.)
+  require(tight.op_stream() == "P:0:17 C:0",
+          "a pool too small for the cache's blocks admits the request cache-less: " +
+              tight.op_stream());
+}
+
+DGPP_TEST(scheduler_prefixCache_theAttachTargetSurvivesTheSnapshotSlotsEviction) {
+  // The curve sweep's find (2026-09-05, "PrefixArena: slot 25 is empty"):
+  // with the arena full, an admission that attaches to one entry and takes
+  // a new entry at a deeper cut acquired the snapshot slot by evicting the
+  // LRU unattached entry — its own attach target when that was the oldest —
+  // and then prefilled from an empty slot. The attach now happens before
+  // the acquisition, so the target is protected and the other entry gives
+  // way. GIVEN a two-slot arena filled by a's cut entry (12, the older) and
+  // its close entry (24), and b sharing a's prompt but not its answer, so it
+  // attaches at 12 and snapshots at 24:
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/2, /*align=*/4);
+  engine.arm(0, {31, 32, 33, 34}, 4);
+  engine.arm(0, {41}, 1);
+  Scheduler sched(&engine, {kEos});
+  const std::vector<int64_t> prompt = counted_prompt(21);
+  sched.submit(make_cached_request("a", prompt, {5, 13}, 4));
+  sched.run_to_completion();
+  const std::string expected_a = "P:0:21 N:0:12@0 S:0:31 S:0:32 S:0:33 RS:0:24@1 C:0";
+  require(engine.op_stream() == expected_a, "a fills the arena: " + engine.op_stream());
+  std::vector<int64_t> other = prompt;
+  other.insert(other.end(), {200, 201, 202, 203, 204, 205, 206, 207});
+  sched.submit(make_cached_request("b", other, {5, 13, 25}, 1));
+  sched.run_to_completion();
+  // The close entry (slot 1) is evicted for b's snapshot; the attach at 12
+  // (slot 0) stands.
+  const std::string expected_b = expected_a + " F:1 X:0:12@0 P:0:29 N:0:24@1 C:0";
+  require(engine.op_stream() == expected_b,
+          "the attach target survives:\n  got:      " + engine.op_stream() +
+              "\n  expected: " + expected_b);
+  require(sched.meters().prefix_hits == 1 && sched.meters().prefix_evictions == 1,
+          "one hit, one eviction");
 }
 
 DGPP_TEST(scheduler_prefixCache_optOutAndNoArenaKeepThePlainOpStream) {

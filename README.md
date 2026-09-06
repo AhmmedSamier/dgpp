@@ -85,14 +85,23 @@ death fails the service at once — every streaming client gets exactly the
 tokens the service had committed, then an `engine_failure` error event,
 every rank exits nonzero within seconds through the journal's death
 watches rather than waiting on the bus watchdog, and a restart reproduces
-the committed tokens (`scripts/serve_failure_drill.sh`). `PLAN.md` has
-the status per milestone and the designs for what remains, `DESIGN.md`
-the contracts as built.
+the committed tokens (`scripts/serve_failure_drill.sh`). M9's hardening
+is closed (2026-09-05): every journal record carries rank 0's running
+op-stream fold so a diverging rank dies within a tick, a byte-level HTTP
+fuzzer runs under AddressSanitizer (it found and closed a parser stack
+overflow and a freed-writer write), and the service ran a one-hour mixed
+soak. `docs/operations.md` is the operator's page, `docs/signoff_v1.md`
+the measured sign-off, `docs/next_steps.md` the ranked list of what is
+worth doing next; `PLAN.md` has the status per milestone, `DESIGN.md` the
+contracts as built.
 
 ## Documentation
 
 - `DESIGN.md` — validated architecture and state/collective contracts
 - `PLAN.md` — implementation status, exit gates, and audit closure matrix
+- `docs/operations.md` — booting, stopping and watching the serving world; what happens when a rank dies
+- `docs/signoff_v1.md` — the v1 performance and hardening sign-off, with the measurements
+- `docs/next_steps.md` — what is worth doing next, ranked by cost and benefit
 - `docs/checkpoint_budget.md` — generated checkpoint and decode-traffic audit
 - `docs/measurements.md` — curated, reproducible platform results
 - `benchmarks/README.md` — benchmark commands, scope, and interpretation
@@ -166,6 +175,7 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `glm_serve --model ID --port P [--world W --rank R --peer HEAD --journal-port J] [--max-concurrency N --kv-capacity T --queue-limit Q] [--decode-graph [--mtp] --graph-batch-min-live N] [--temperature X --top-p X --top-k N --min-p X --repetition-penalty X --seed N] [--sampling-candidates N] [--admission full|grow --admission-window N] [--reasoning-in-content]` | the OpenAI-compatible service: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/v1/metrics`; rank 0 is the HTTP ingress and journals admissions to the peers; sampling defaults come from the checkpoint's `generation_config.json` (temperature 1.0 / top_p 0.95 for GLM-5.3-Flash-FP8) with the flags overriding them per process, requests may set `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `seed`, `top_k`, `min_p`, `repetition_penalty`, `logprobs` and `top_logprobs` (exact, the OpenAI shapes), and `/v1/models` reports the effective defaults; chat requests may carry `tools`, `tool_choice` (`auto`/`none`/`required`/a named function) and `parallel_tool_calls` — every call is well-formed by constrained decoding, a grammar mask on the pick applied identically on every rank (DESIGN §10): a declared function name, the closed keys under `additionalProperties: false`, argument values typed by their property schema (JSON-typed properties under the JSON machine, enum strings from their texts, plain strings free; `function.strict: true` refuses a property outside the enforceable subset by keyword), and required, named and single-call turns as guarantees — `response_format` (`text` / `json_object` / `json_schema` with `name`, `schema`, `strict`: the content is one JSON text conforming to the schema's `type`, `properties` / `required` / `additionalProperties`, `items` / `minItems` / `maxItems`, `enum` / `const`, `anyOf`, enforced by the same masks; a strict schema outside that subset is refused naming the keyword, a non-strict one falls back to `json_object`; not combinable with `tools`), `reasoning_effort`, `chat_template_kwargs` (`clear_thinking`, `reasoning_effort`), assistant `tool_calls` and `tool` messages, all rendered through the checkpoint's template, and the response carries `reasoning_content` (or, with `--reasoning-in-content`, the reasoning folded into `content`), `content` and `tool_calls` parsed from the token ids on rank 0 with `finish_reason: "tool_calls"` (DESIGN §11); the eager engines and the `--decode-graph` graphs, with or without `--mtp`, sample exactly (DESIGN §10, the on-device verdict with the gather fallback between windows; under MTP the exact speculative accept test, DESIGN §9); graph mode requires the fabric and `max-concurrency * (mtp ? 2 : 1) <= 8`, warm-captures every graph variant at startup (the journal's `warm` record starts it on every rank together), and batches at `--graph-batch-min-live` live requests (default min(4, max-concurrency); must be in [1, max-concurrency]) |
 | `scripts/fabric_run.sh [--stage-file F] [--fetch-logs] [--node-probe] -- APP-ARGS` | launches any app on the four-node fabric with the rendezvous discipline (head first, peers fire-and-forget, verified by pgrep, swept on head death); collects rank-invariant md5s and bus stats |
 | `scripts/serve_run.sh up/down/status` | boots/stops the serving world (`DGPP_SERVE_KNOBS` overrides the engine flags on every rank, e.g. `--max-concurrency 1 ... --decode-graph --mtp`); `down` fetches and md5s every rank's op stream |
+| `scripts/serve_soak_run.sh MINUTES OUT`, `scripts/serve_failure_drill.sh VICTIM`, `scripts/serve_prefix_curve_sweep.sh`, `scripts/fabric_prefill_repeat.sh`, `scripts/fabric_mtp_classes.sh` | the M9 evidence rituals: the mixed-workload soak with node probes and the four-way md5, the kill −9 drill, the prefix cache's capacity curve, the steady-state prefill per length, MTP acceptance per prompt class (`docs/operations.md`) |
 | `scripts/roce_counters.sh snapshot\|diff` | the fabric's RoCE hardware counters (sequence errors, adaptive retransmissions, CNPs, NIC ingress discards) per node and device, and the deltas between two snapshots — the wire-side view of a collective run |
 | `scripts/serve_bench.py HOST PORT MAX_TOKENS LABEL [PROMPT]`, `scripts/serve_pace.py RANK_LOG [--waves]` | the service's pace: client-side SSE stamps; server-side per-request pace; and, with `--waves`, the steady peak-occupancy replay latency, tokens/replay, and aggregate tok/s used by the Phase-2 gate |
 | `scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`, `scripts/fabric_sampling_profile.py`, `scripts/fabric_xrank.py` | the judges (first divergence by bf16-ulp margin; teacher-forced perplexity delta; sampling-width evidence) and the cross-rank step/stall reader — see "Judging a numerics change" |

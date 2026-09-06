@@ -1,6 +1,8 @@
 #include "loaders/minijson.hpp"
 
 #include <cstring>
+#include <stdexcept>
+#include <string>
 
 #include "common/test.hpp"
 
@@ -47,6 +49,42 @@ DGPP_TEST(minijson_trailing_whitespace_and_consumed_count) {
     throw std::runtime_error("array");
   if (r.consumed != std::strlen("  [1, 2, 3]"))
     throw std::runtime_error("consumed count");
+}
+
+// The nesting bound (2026-09-05, the malformed-HTTP fuzzer's find under
+// ASan): a document deeper than 256 containers is refused as malformed
+// instead of running the parser's stack out; 200 levels still parse.
+DGPP_TEST(minijson_nesting_depth_is_bounded) {
+  std::string ok(200, '[');
+  ok += std::string(200, ']');
+  const dgpp::minijson::ParseResult r = dgpp::minijson::parse(ok);
+  if (!r.root.is_array()) throw std::runtime_error("200 levels parse");
+  for (const size_t depth : {size_t{257}, size_t{100000}}) {
+    std::string deep(depth, '[');
+    deep += std::string(depth, ']');
+    bool threw = false;
+    std::string msg;
+    try {
+      (void)dgpp::minijson::parse(deep);
+    } catch (const std::exception& e) {
+      threw = true;
+      msg = e.what();
+    }
+    if (!threw || msg.find("nesting deeper") == std::string::npos)
+      throw std::runtime_error("depth " + std::to_string(depth) +
+                               " refused loudly (got: " + msg + ")");
+    std::string obj;
+    for (size_t i = 0; i < depth; ++i) obj += "{\"a\":";
+    obj += "1";
+    obj += std::string(depth, '}');
+    threw = false;
+    try {
+      (void)dgpp::minijson::parse(obj);
+    } catch (const std::exception&) {
+      threw = true;
+    }
+    if (!threw) throw std::runtime_error("object depth " + std::to_string(depth) + " refused");
+  }
 }
 
 DGPP_TEST(minijson_malformed_throws) {

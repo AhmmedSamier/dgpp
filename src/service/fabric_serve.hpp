@@ -7,8 +7,14 @@
 // THE PROTOCOL (newline-framed JSON over the TCP star; one line, one
 // record):
 //   {"op":"warm","adm":{...},"pc":N}
-//   {"op":"tick","s":[{"id":"…","p":[ids],"m":N,"b":[...],"nc":1}],"c":["id"],"pd":D}
+//   {"op":"tick","s":[{"id":"…","p":[ids],"m":N,"b":[...],"nc":1}],"c":["id"],"pd":D,"od":F}
 //   {"op":"stop"}
+// The continuous drift check (M9, 2026-09-05): every tick record's "od"
+// is rank 0's running fold of its op stream (OpStreamObserver::digest,
+// FNV-1a over every line it recorded) after the PREVIOUS tick; a peer
+// compares its own fold before applying the record and dies loudly with
+// the tick number when they differ — the 4-way op-stream md5 of the
+// shutdown ritual, made continuous and one tick late at most.
 // The prefix cache (M7) rides in three places: a submit's "b" (the
 // prompt's structural boundaries) and "nc" (opted out) — inputs of the
 // scheduler's cache decisions; the warm record's "pc" (rank 0's snapshot
@@ -100,10 +106,16 @@ class OpStreamObserver final : public dgpp::glm::SchedulerObserver {
   void on_prefix(const std::string& id, const char* op, int64_t position,
                  int slot) override;
   std::string text() const;
+  // The running FNV-1a fold of every line recorded so far (the journal's
+  // "od", the continuous drift check).
+  bool has_digest() const override { return true; }
+  uint64_t digest() const override;
 
  private:
+  void append(const std::string& line);  // under the lock
   mutable std::mutex mutex_;
   std::string text_;
+  uint64_t digest_ = 0xcbf29ce484222325ull;
 };
 
 // ---- wire codec ----------------------------------------------------------
@@ -125,6 +137,8 @@ struct JournalRecord {
   int prefix_slots = 0;          // warm: rank 0's prefix cache slots
   bool has_prefix_digest = false;  // tick: rank 0's digest rode along
   uint64_t prefix_digest = 0;
+  bool has_op_digest = false;      // tick: rank 0's op-stream fold rode along
+  uint64_t op_digest = 0;
   std::vector<dgpp::glm::SchedulerRequest> submits;
   std::vector<std::string> cancels;
 };
@@ -133,6 +147,12 @@ struct JournalRecord {
 // schedulers' cache decisions diverged, a fabric emergency.
 void check_prefix_digest(const JournalRecord& rec,
                          const dgpp::glm::Scheduler& sched);
+// The continuous drift check (M9): rank 0's op-stream fold after the
+// previous tick against this rank's observer's. Throws on a mismatch,
+// naming the tick — the ranks' engine event streams diverged, a fabric
+// emergency. A record without "od", or a null observer, checks nothing.
+void check_op_digest(const JournalRecord& rec,
+                     const dgpp::glm::SchedulerObserver* oplog, int64_t tick);
 // Throws on any malformed record — a corrupt journal is a fabric
 // emergency, not a condition to paper over.
 JournalRecord decode_journal_line(std::string_view line);
@@ -242,9 +262,13 @@ bool wait_journal_warm(JournalReader* reader,
 // the hook ONCE when it closes; the hook is expected not to return to
 // the loop (the app writes its op stream and exits nonzero). Between
 // ticks the read loop sees the EOF itself and returns as before.
+// `oplog` (optional): this rank's op-stream observer, whose fold every
+// record's "od" is compared against before the record is applied (the
+// continuous drift check) — the same observer attached to the scheduler.
 void run_journal_peer(dgpp::glm::Scheduler* sched, JournalReader* reader,
                       const std::function<bool()>& should_stop,
                       const std::function<void()>& on_rank0_death = nullptr,
-                      int watch_poll_ms = 100);
+                      int watch_poll_ms = 100,
+                      const dgpp::glm::SchedulerObserver* oplog = nullptr);
 
 }  // namespace dgpp::service

@@ -19,37 +19,47 @@ using dgpp::glm::SchedulerRequest;
 
 // ---- the audit tap --------------------------------------------------------
 
+void OpStreamObserver::append(const std::string& line) {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  text_ += line;
+  for (const char c : line) {  // FNV-1a over the bytes, line by line
+    digest_ ^= static_cast<unsigned char>(c);
+    digest_ *= 0x100000001b3ull;
+  }
+}
+
 void OpStreamObserver::on_token(const std::string& id, int64_t token,
                                 int steps_done) {
-  const std::lock_guard<std::mutex> lock(mutex_);
-  text_ += "T " + id + " " + std::to_string(token) + " " +
-           std::to_string(steps_done) + "\n";
+  append("T " + id + " " + std::to_string(token) + " " +
+         std::to_string(steps_done) + "\n");
 }
 
 void OpStreamObserver::on_retire(const std::string& id,
                                 const Scheduler::Result& result) {
-  const std::lock_guard<std::mutex> lock(mutex_);
   // The reason rides as its enum ordinal — same binary family, same
   // values, byte-comparable across ranks.
-  text_ += "R " + id + " " + std::to_string(static_cast<int>(result.reason)) +
-           " " + std::to_string(result.steps_done) + "\n";
+  append("R " + id + " " + std::to_string(static_cast<int>(result.reason)) +
+         " " + std::to_string(result.steps_done) + "\n");
 }
 
 void OpStreamObserver::on_grow(const std::string& id, int64_t reserved_tokens) {
-  const std::lock_guard<std::mutex> lock(mutex_);
-  text_ += "W " + id + " " + std::to_string(reserved_tokens) + "\n";
+  append("W " + id + " " + std::to_string(reserved_tokens) + "\n");
 }
 
 void OpStreamObserver::on_prefix(const std::string& id, const char* op,
                                  int64_t position, int slot) {
-  const std::lock_guard<std::mutex> lock(mutex_);
-  text_ += "X " + std::string(op) + " " + id + " " + std::to_string(position) +
-           " " + std::to_string(slot) + "\n";
+  append("X " + std::string(op) + " " + id + " " + std::to_string(position) +
+         " " + std::to_string(slot) + "\n");
 }
 
 std::string OpStreamObserver::text() const {
   const std::lock_guard<std::mutex> lock(mutex_);
   return text_;
+}
+
+uint64_t OpStreamObserver::digest() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return digest_;
 }
 
 // ---- wire codec -----------------------------------------------------------
@@ -225,6 +235,12 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
   if (events.has_prefix_digest) {
     out += ",\"pd\":\"" + std::to_string(events.prefix_digest) + "\"";
   }
+  // The continuous drift check (M9): rank 0's op-stream fold after the
+  // previous tick, the same way. A rank 0 without an audit observer
+  // writes none.
+  if (events.has_op_digest) {
+    out += ",\"od\":\"" + std::to_string(events.op_digest) + "\"";
+  }
   out.push_back('}');
   return out;
 }
@@ -246,6 +262,19 @@ void check_prefix_digest(const JournalRecord& rec,
       "journal: rank 0's prefix-cache digest " + std::to_string(rec.prefix_digest) +
       " differs from this rank's " + std::to_string(sched.prefix_digest()) +
       " — the cache decisions diverged (§11); fabric emergency");
+}
+
+void check_op_digest(const JournalRecord& rec,
+                     const dgpp::glm::SchedulerObserver* oplog, int64_t tick) {
+  if (!rec.has_op_digest || oplog == nullptr || !oplog->has_digest()) return;
+  const uint64_t mine = oplog->digest();
+  if (rec.op_digest == mine) return;
+  throw std::runtime_error(
+      "journal: op-stream divergence at tick " + std::to_string(tick) +
+      " — rank 0's fold " + std::to_string(rec.op_digest) +
+      ", this rank's " + std::to_string(mine) +
+      " (the engine event streams differ within the last tick; §11); "
+      "fabric emergency");
 }
 
 namespace {
@@ -546,6 +575,17 @@ JournalRecord decode_journal_line(std::string_view line) {
     rec.has_prefix_digest = true;
     rec.prefix_digest = static_cast<uint64_t>(value);
   }
+  if (const dgpp::minijson::Value* od = v.find("od")) {
+    if (!od->is_string() || od->as_string().empty())
+      throw std::runtime_error("journal: 'od' is not a digest string");
+    const std::string text(od->as_string());
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text.c_str(), &end, 10);
+    if (end == nullptr || *end != '\0')
+      throw std::runtime_error("journal: 'od' is not a decimal digest");
+    rec.has_op_digest = true;
+    rec.op_digest = static_cast<uint64_t>(value);
+  }
   return rec;
 }
 
@@ -712,7 +752,9 @@ bool wait_journal_warm(JournalReader* reader,
 void run_journal_peer(Scheduler* sched, JournalReader* reader,
                       const std::function<bool()>& should_stop,
                       const std::function<void()>& on_rank0_death,
-                      int watch_poll_ms) {
+                      int watch_poll_ms,
+                      const dgpp::glm::SchedulerObserver* oplog) {
+  int64_t ticks = 0;  // records applied (the drift check names the tick)
   // The in-tick watch (the death discipline, fabric_serve.hpp): only while
   // the loop is inside a tick can rank 0's death go unseen by the read
   // loop, and in the lockstep protocol no record can be pending then, so
@@ -766,6 +808,9 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
     // The prefix cache's decisions of the previous tick, compared before
     // this one is applied (M7): a divergence dies here, one tick late.
     check_prefix_digest(rec, *sched);
+    // The op stream's fold after the previous tick (M9): the same, for
+    // every engine event this rank recorded.
+    check_op_digest(rec, oplog, ticks);
     for (auto& r : rec.submits) {
       const std::string id = r.id;  // try_submit takes by value
       // Rank 0 admitted this against a queue state identical to ours
@@ -782,6 +827,7 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
       TickScope scope(in_tick);
       sched->tick();
     }
+    ++ticks;
   }
 }
 

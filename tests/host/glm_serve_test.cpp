@@ -22,9 +22,11 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <mutex>
 #include <optional>
 #include <cstring>
@@ -56,8 +58,19 @@ constexpr int32_t kFakeEos = 999;  // the fake's end-of-sequence id
 // prompt is P bytes long is ((len*31 + i*7) % 250) + 1 — printable-ish,
 // never 0, never kFakeEos. A prompt with len % 4 == 3 answers EOS as
 // its SECOND token (an early-stop scenario the gate can target).
+// Printable ASCII without the two JSON-escaped characters, so a fake's text
+// appears verbatim in a response (the service renders every text as UTF-8
+// since the 2026-09-05 soak, replacing what is not — the earlier formula's
+// bytes above 0x7F were exactly that).
 int32_t fake_token(size_t prompt_len, int index) {
-  return static_cast<int32_t>((prompt_len * 31 + static_cast<size_t>(index) * 7) % 250) + 1;
+  static const std::string alphabet = []() {
+    std::string a;
+    for (int c = 33; c <= 126; ++c)
+      if (c != '"' && c != '\\') a.push_back(static_cast<char>(c));
+    return a;
+  }();
+  return static_cast<int32_t>(static_cast<unsigned char>(
+      alphabet[(prompt_len * 31 + static_cast<size_t>(index) * 7) % alphabet.size()]));
 }
 bool fake_eos_second(size_t prompt_len) { return prompt_len % 4 == 3; }
 bool fake_eos_prefill(size_t prompt_len) { return prompt_len % 4 == 2; }
@@ -1831,6 +1844,388 @@ DGPP_TEST(serve_admission_growPolicyShedsTheYoungestWithFinishLength) {
 // at the deepest cut (position 4 of "ab|cd|ef": the image of the boundary
 // at 5), "prefix_cache": false opts out, a non-boolean is refused by name,
 // and /v1/metrics reports the cache.
+
+// ---------------------------------------------------------------------------
+// M9's malformed-HTTP fuzzing (2026-09-05): a byte-level mutator over the
+// server's limit ladder. Valid requests (health, models, chat, legacy
+// completions, a stream, a tools call) are mutated — bit flips, byte
+// insertions and deletions, truncations, duplicated slices, hostile
+// Content-Length values, a chunked Transfer-Encoding, oversized request
+// lines, header floods past the 16 KiB cap, JSON garbage and invalid
+// UTF-8 in the body, pipelined pairs, foreign HTTP versions, pure binary —
+// and delivered whole, in fragments, half-closed or abandoned. The server
+// must answer (any status), wait for more (an incomplete request) or
+// close; it must never crash, wedge, or stop serving: after the storm a
+// well-formed health probe and a chat completion answer exactly as before.
+// Deterministic under DGPP_FUZZ_SEED; DGPP_FUZZ_ITERS scales the run
+// (ctest's default is short; the ASan run goes long).
+// ---------------------------------------------------------------------------
+class FuzzConn {
+ public:
+  explicit FuzzConn(uint16_t port) {
+    fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    require(fd_ >= 0, "fuzz socket");
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    require(::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) == 1, "fuzz inet_pton");
+    require(::connect(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0,
+            "fuzz connect");
+    int yes = 1;
+    ::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+  }
+  ~FuzzConn() {
+    if (fd_ >= 0) ::close(fd_);
+  }
+  FuzzConn(const FuzzConn&) = delete;
+  FuzzConn& operator=(const FuzzConn&) = delete;
+  // Sends what it can; a peer that already closed (a 431 + close) is fine.
+  void send_lossy(std::string_view s) {
+    size_t off = 0;
+    while (off < s.size()) {
+      const ssize_t put = ::send(fd_, s.data() + off, s.size() - off, MSG_NOSIGNAL);
+      if (put <= 0) return;
+      off += static_cast<size_t>(put);
+    }
+  }
+  void half_close() { ::shutdown(fd_, SHUT_WR); }
+  // Whatever arrives within the budget; true when the peer closed.
+  std::string read_some(int timeout_ms, bool* closed) {
+    std::string out;
+    *closed = false;
+    int waited = 0;
+    while (waited < timeout_ms) {
+      pollfd p{fd_, POLLIN, 0};
+      const int r = ::poll(&p, 1, 10);
+      if (r < 0) break;
+      if (r == 0) {
+        waited += 10;
+        continue;
+      }
+      char buf[4096];
+      const ssize_t n = ::recv(fd_, buf, sizeof buf, 0);
+      if (n <= 0) {
+        *closed = true;
+        break;
+      }
+      out.append(buf, static_cast<size_t>(n));
+    }
+    return out;
+  }
+
+ private:
+  int fd_ = -1;
+};
+
+DGPP_TEST(serve_fuzz_malformedHttpNeverBreaksTheServer) {
+  ServiceRig rig(/*queue_limit=*/8);
+  uint64_t seed = 0x9e3779b97f4a7c15ull;
+  int iters = 800;
+  if (const char* s = std::getenv("DGPP_FUZZ_SEED"); s && *s) seed = std::strtoull(s, nullptr, 0);
+  if (const char* s = std::getenv("DGPP_FUZZ_ITERS"); s && *s) iters = std::atoi(s);
+  auto next = [&]() {  // splitmix64
+    seed += 0x9e3779b97f4a7c15ull;
+    uint64_t z = seed;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    return z ^ (z >> 31);
+  };
+  const auto pick = [&](size_t n) { return n == 0 ? size_t{0} : static_cast<size_t>(next() % n); };
+  const auto framed = [](const std::string& method, const std::string& path,
+                         const std::string& body) {
+    std::string r = method + " " + path + " HTTP/1.1\r\nHost: t\r\n";
+    if (!body.empty())
+      r += "Content-Type: application/json\r\nContent-Length: " +
+           std::to_string(body.size()) + "\r\n";
+    return r + "\r\n" + body;
+  };
+  const std::vector<std::string> templates = {
+      framed("GET", "/health", ""),
+      framed("GET", "/v1/models", ""),
+      framed("POST", "/v1/chat/completions", chat_body("abcd", 2)),
+      framed("POST", "/v1/chat/completions", chat_body("abcd", 3, ",\"stream\":true")),
+      framed("POST", "/v1/completions",
+             "{\"model\":\"" + kModel + "\",\"prompt\":\"abcd\",\"max_tokens\":2}"),
+      framed("POST", "/v1/chat/completions",
+             chat_body("abcd", 2, kWeatherTools + ",\"tool_choice\":\"auto\"")),
+      framed("POST", "/v1/chat/completions",
+             chat_body("abcd", 2, ",\"temperature\":0.7,\"top_p\":0.9,\"logprobs\":true,"
+                                  "\"top_logprobs\":2,\"seed\":7")),
+  };
+  const char* cl_values[] = {"-1", "0", "99999999999", "abc", "1e9", "", "4294967296",
+                             "18446744073709551616", " 12", "12 13", "0x10"};
+  size_t answered = 0, silent = 0, closed_on_us = 0;
+  std::map<std::string, size_t> statuses;
+  for (int it = 0; it < iters; ++it) {
+    std::string req = templates[pick(templates.size())];
+    const int k = 1 + static_cast<int>(pick(4));
+    for (int m = 0; m < k; ++m) {
+      switch (pick(13)) {
+        case 0: if (!req.empty()) req[pick(req.size())] ^= static_cast<char>(1 << pick(8)); break;
+        case 1: if (!req.empty()) req.erase(pick(req.size()), 1); break;
+        case 2: req.insert(pick(req.size() + 1), 1, static_cast<char>(next() & 0xff)); break;
+        case 3: req.resize(pick(req.size() + 1)); break;
+        case 4: {
+          if (req.empty()) break;
+          const size_t a = pick(req.size()), n = pick(req.size() - a + 1);
+          req.insert(pick(req.size() + 1), req.substr(a, n));
+          break;
+        }
+        case 5: {
+          const size_t at = req.find("Content-Length: ");
+          if (at == std::string::npos) break;
+          const size_t end = req.find("\r\n", at);
+          req.replace(at + 16, end - (at + 16), cl_values[pick(sizeof cl_values / sizeof *cl_values)]);
+          break;
+        }
+        case 6: {
+          const size_t at = req.find("\r\n");
+          if (at != std::string::npos) req.insert(at + 2, "Transfer-Encoding: chunked\r\n");
+          break;
+        }
+        case 7: req = "GET /" + std::string(pick(24 * 1024), 'a') + " HTTP/1.1\r\nHost: t\r\n\r\n" + req; break;
+        case 8: {
+          const size_t at = req.find("\r\n");
+          if (at == std::string::npos) break;
+          std::string flood;
+          const size_t n = 1 + pick(700);
+          for (size_t i = 0; i < n; ++i) flood += "X-F" + std::to_string(i) + ": " + std::string(1 + pick(40), 'y') + "\r\n";
+          req.insert(at + 2, flood);
+          break;
+        }
+        case 9: {
+          const size_t at = req.find("\r\n\r\n");
+          if (at == std::string::npos) break;
+          std::string body;
+          switch (pick(6)) {
+            case 0: body = std::string(1 + pick(200), '{'); break;
+            case 1: body = "{\"messages\":[{\"role\":\"user\",\"content\":\"\xff\xfe\xc3\x28\"}],\"model\":\"" + kModel + "\"}"; break;
+            case 2: body = "{\"model\":\"" + kModel + "\",\"messages\":[],\"max_tokens\":1e400}"; break;
+            case 3: body = "[" + std::string(pick(5000), '[') + "]"; break;
+            case 4: body = "{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"user\",\"content\":" + std::to_string(next()) + "}],\"max_tokens\":-5,\"temperature\":\"hot\",\"tools\":{},\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"schema\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"pattern\":\"^\"}}}}}}"; break;
+            default: for (size_t i = 0; i < 1 + pick(300); ++i) body.push_back(static_cast<char>(next() & 0xff)); break;
+          }
+          req = req.substr(0, at + 4) + body;
+          const size_t cl = req.find("Content-Length: ");
+          if (cl != std::string::npos && pick(2) == 0) {
+            const size_t end = req.find("\r\n", cl);
+            req.replace(cl + 16, end - (cl + 16), std::to_string(body.size()));
+          }
+          break;
+        }
+        case 10: req += templates[pick(templates.size())]; break;
+        case 11: {
+          const size_t at = req.find("HTTP/1.1");
+          if (at != std::string::npos) req.replace(at, 8, pick(2) ? "HTTP/1.0" : "HTTP/2.0");
+          break;
+        }
+        default: {
+          req.clear();
+          for (size_t i = 0; i < 1 + pick(600); ++i) req.push_back(static_cast<char>(next() & 0xff));
+          break;
+        }
+      }
+    }
+    FuzzConn c(rig.port());
+    const size_t style = pick(10);
+    if (style < 7) {
+      c.send_lossy(req);
+    } else {
+      size_t off = 0;
+      const size_t pieces = 1 + pick(5);
+      for (size_t p = 0; p < pieces && off < req.size(); ++p) {
+        const size_t n = p + 1 == pieces ? req.size() - off : 1 + pick(req.size() - off);
+        c.send_lossy(std::string_view(req).substr(off, n));
+        off += n;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
+    if (style == 8) c.half_close();
+    if (style == 9) continue;  // abandoned without reading
+    bool closed = false;
+    const std::string got = c.read_some(style == 8 ? 200 : 40, &closed);
+    if (got.rfind("HTTP/1.1 ", 0) == 0) {
+      ++answered;
+      ++statuses[got.substr(9, 3)];
+    } else if (closed) {
+      ++closed_on_us;
+    } else {
+      require(got.empty(), "a reply that is not an HTTP/1.1 status line: " + got.substr(0, 80));
+      ++silent;
+    }
+  }
+  // The server is unharmed: a health probe and a completion as in the
+  // first test, on fresh connections.
+  {
+    Client h(rig.port());
+    h.send_all("GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string health = h.read_until("}", 3000);
+    require(health.find("200 ") != std::string::npos && health.find("\"status\":\"ok\"") != std::string::npos,
+            "after the fuzz storm /health still answers: " + health.substr(0, 200));
+  }
+  {
+    const std::string resp = post_chat(rig, chat_body("abcd", 3), "usage", 5000);
+    require(resp.find("200 ") != std::string::npos &&
+                resp.find("\"content\":\"" + fake_text(4, 3) + "\"") != std::string::npos,
+            "after the fuzz storm a completion answers exactly: " + resp.substr(0, 300));
+  }
+  require(!rig.failed.load() && !rig.service.failed(), "the engine never failed");
+  std::string table;
+  for (const auto& [code, n] : statuses) table += code + ":" + std::to_string(n) + " ";
+  DGPP_LOG_INFO("fuzz: {} iterations, {} answered ({}), {} closed on us, {} silent (incomplete requests)",
+                iters, answered, table, closed_on_us, silent);
+  require(statuses.count("400") + statuses.count("431") + statuses.count("413") +
+                  statuses.count("411") + statuses.count("501") > 0,
+          "the limit ladder was exercised");
+}
+
+DGPP_TEST(serve_garbageAfterAPendingOneShot_waitsThenClosesCleanly) {
+  // The fuzzer's second find (ASan, 2026-09-05): a valid one-shot followed
+  // on the same connection by a malformed request. The server used to
+  // parse the garbage at once, answer 400 with close, and free the
+  // connection at the pass's sweep without telling the service, whose
+  // pending record still held the writer — a use-after-free when the
+  // engine's answer arrived. Two fixes: every close of a tagged connection
+  // notifies the handler (defense in depth), and a connection carries ONE
+  // request at a time — the garbage waits in the buffer behind the pending
+  // one-shot, is parsed after its answer, and the 400 + close then dangles
+  // nothing. Nothing is cancelled; the service serves on.
+  ServiceRig rig(/*queue_limit=*/8);
+  rig.gate = true;  // the one-shot stays pending in the scheduler
+  Client c(rig.port());
+  const std::string body = chat_body("abcd", 4);
+  c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+             "Content-Type: application/json\r\nContent-Length: " +
+             std::to_string(body.size()) + "\r\n\r\n" + body + "GARBAGE\r\n\r\n");
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  require(c.read_available(50).empty(),
+          "the garbage waits behind the pending one-shot (nothing answered yet)");
+  rig.gate = false;
+  const std::string raw = c.read_until("malformed request line", 5000);
+  const size_t ok = raw.find("HTTP/1.1 200");
+  const size_t bad = raw.find("HTTP/1.1 400");
+  require(ok != std::string::npos && bad != std::string::npos && ok < bad &&
+              raw.find("\"content\":\"" + fake_text(4, 4) + "\"") != std::string::npos,
+          "the one-shot's exact answer, then the 400 for the garbage: " + raw.substr(0, 400));
+  for (int i = 0; i < 200 && !rig.service.drained(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  require(rig.service.drained(), "nothing owed to a closed connection");
+  {
+    Client m(rig.port());
+    m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+    const std::string metrics = m.read_until("engine_failed", 2000);
+    require(metrics.find("\"requests_cancelled\":0") != std::string::npos,
+            "nothing was orphaned or cancelled: " + metrics.substr(0, 300));
+  }
+  const std::string resp = post_chat(rig, chat_body("abcd", 3), "usage", 5000);
+  require(resp.find("\"content\":\"" + fake_text(4, 3) + "\"") != std::string::npos,
+          "the service serves on: " + resp.substr(0, 200));
+}
+
+DGPP_TEST(serve_pipelinedRequests_areAnsweredOneAtATimeInOrder) {
+  // The fuzzer's third find (ASan, 2026-09-05): two requests pipelined on
+  // one connection were dispatched back to back, the second overwrote the
+  // connection's disconnect tag, and the first record's writer was freed
+  // at the close without notice. The server now reads one request at a
+  // time per connection: the second waits in the buffer until the first is
+  // answered, then is parsed at the loop's tail. Both answers arrive, in
+  // order, each exact.
+  ServiceRig rig(/*queue_limit=*/8);
+  rig.gate = true;  // the first request stays pending while the second is buffered
+  Client c(rig.port());
+  const std::string b1 = chat_body("abcd", 2), b2 = chat_body("abcd", 3);
+  const auto framed = [](const std::string& b) {
+    return "POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+           "Content-Type: application/json\r\nContent-Length: " +
+           std::to_string(b.size()) + "\r\n\r\n" + b;
+  };
+  c.send_all(framed(b1) + framed(b2));
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  require(c.read_available(50).empty(), "nothing answered while the engine is held");
+  rig.gate = false;
+  std::string raw;
+  for (int i = 0; i < 400; ++i) {
+    raw += c.read_available(20);
+    size_t n = 0, at = 0;
+    while ((at = raw.find("HTTP/1.1 200", at)) != std::string::npos) { ++n; at += 12; }
+    if (n >= 2 && raw.rfind("usage") != std::string::npos && raw.find("usage") != raw.rfind("usage")) break;
+  }
+  const size_t first = raw.find("\"content\":\"" + fake_text(4, 2) + "\"");
+  const size_t second = raw.find("\"content\":\"" + fake_text(4, 3) + "\"");
+  require(first != std::string::npos && second != std::string::npos && first < second,
+          "both pipelined answers, in order: " + raw.substr(0, 400));
+  require(rig.service.drained(), "nothing owed");
+}
+
+DGPP_TEST(serve_utf8_aCharacterSplitAcrossTokensIsHeldUntilComplete) {
+  // The soak's find (2026-09-05): a byte-level BPE token can end inside a
+  // multi-byte character, and the delta carried its bytes as they came —
+  // a JSON text that is not UTF-8, on which a strict client (Python's
+  // json.loads over the payload bytes) raised; the soak's chat workers died
+  // on the first accented name. A stream now holds an incomplete trailing
+  // sequence back until the next delta completes it, renders one still
+  // held at the end as U+FFFD, and a one-shot's cap-cut last character
+  // becomes U+FFFD too. The fake tokenizer decodes ids below 256 to single
+  // bytes, so "é" is the two tokens 0xC3 0xA9 and a lone 0xE2 an
+  // incomplete character.
+  ServiceRig rig(/*queue_limit=*/8);
+  rig.engine.script(4, {0xC3, 0xA9, 'x', 0xE2});  // é, x, then a cut character
+  const std::string want_e = std::string("\xC3\xA9");
+  const std::string fffd = std::string("\xEF\xBF\xBD");
+  {
+    Client c(rig.port());
+    const std::string body = chat_body("abcd", 4, ",\"stream\":true");
+    c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+               "Content-Type: application/json\r\nContent-Length: " +
+               std::to_string(body.size()) + "\r\n\r\n" + body);
+    const std::string raw = c.read_until("data: [DONE]", 5000);
+    // The split character arrives whole, never as a lone lead byte; the
+    // cut one at the end arrives as U+FFFD; every content string is UTF-8.
+    require(raw.find("\"content\":\"" + want_e + "\"") != std::string::npos,
+            "the split character is delivered whole: " + raw.substr(0, 400));
+    require(raw.find("\"content\":\"\xC3\"") == std::string::npos &&
+                raw.find("\"content\":\"\xE2\"") == std::string::npos,
+            "no delta ends inside a character");
+    require(raw.find("\"content\":\"" + fffd + "\"") != std::string::npos,
+            "the cap-cut character becomes U+FFFD: " + raw.substr(raw.size() > 500 ? raw.size() - 500 : 0));
+    size_t at = 0;
+    while ((at = raw.find("\"content\":\"", at)) != std::string::npos) {
+      at += 11;
+      const size_t end = raw.find('"', at);
+      const std::string piece = raw.substr(at, end - at);
+      // A strict check: every byte >= 0x80 sits inside a complete sequence.
+      for (size_t i = 0; i < piece.size();) {
+        const unsigned char b = static_cast<unsigned char>(piece[i]);
+        const size_t len = b < 0x80 ? 1 : (b & 0xE0) == 0xC0 ? 2 : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 0;
+        require(len > 0 && i + len <= piece.size(), "a delta that is not UTF-8: " + piece);
+        for (size_t k = 1; k < len; ++k)
+          require((static_cast<unsigned char>(piece[i + k]) & 0xC0) == 0x80, "a delta that is not UTF-8: " + piece);
+        i += len;
+      }
+      at = end;
+    }
+  }
+  // The one-shot: "éx" and the cut character as U+FFFD.
+  const std::string resp = post_chat(rig, chat_body("abcd", 4), "usage", 5000);
+  require(resp.find("\"content\":\"" + want_e + "x" + fffd + "\"") != std::string::npos,
+          "the one-shot's content is UTF-8 with the cut character replaced: " + resp.substr(0, 400));
+  // The legacy route streams the same discipline.
+  {
+    Client c(rig.port());
+    const std::string body = "{\"model\":\"" + kModel + "\",\"prompt\":\"abcd\",\"max_tokens\":4,\"stream\":true}";
+    c.send_all("POST /v1/completions HTTP/1.1\r\nHost: t\r\n"
+               "Content-Type: application/json\r\nContent-Length: " +
+               std::to_string(body.size()) + "\r\n\r\n" + body);
+    const std::string raw = c.read_until("data: [DONE]", 5000);
+    // (The legacy path coalesces the tokens a flush finds pending, so the
+    // character may share its delta with the "x" that follows it.)
+    require(raw.find("\"text\":\"" + want_e) != std::string::npos &&
+                raw.find("\"text\":\"\xC3\"") == std::string::npos &&
+                raw.find("\"text\":\"" + fffd + "\"") != std::string::npos,
+            "the legacy stream holds the split character and replaces the cut one: " + raw.substr(0, 4000));
+  }
+}
+
 DGPP_TEST(serve_prefixCache_boundariesAttachOptOutAndMetrics) {
   ServiceRig rig(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
                  /*can_sample=*/false, std::nullopt, /*with_markers=*/false,

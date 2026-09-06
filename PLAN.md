@@ -16,7 +16,7 @@ below; `[ ]` means it has not been implemented.
 | M6 | Generation scheduler, tokenizer, and API | [x] closed 2026-09-05 — the last open items (the strict tool grammar's required keys and once-per-call closed keys; the stale measurement notes) done in the closure pass, prefill optimization shelved at line rate by decision; serving works end to end on the fabric at TP=4; adaptive scalar/row-batched T=1 and MTP graphs are correctness- and performance-gated (one-live MTP restored from 19.3 to 38.5 tok/s while four-live retains 60.3 tok/s; 2026-09-03); sampling is on the bus at the checkpoint's defaults, exact on every rank and measured (6b, 2026-09-04); tool calls and `reasoning_content` are on the wire (6f) with `tool_choice` and `parallel_tool_calls` enforced by constrained decoding (6g, 2026-09-04) and `response_format` json_object / json_schema as JSON-constrained output through the same masks (6h, 2026-09-04) and typed tool arguments with auto armed (6i, 2026-09-04); drain-on-stop retires in-flight requests through the journal and answers their clients before the bus comes down (6c, 2026-09-04); grow-on-demand admission is built as an opt-in policy, rank-identical through the warm record and the op stream (6d, 2026-09-04); the prefill is being taken down — 256 tokens 5 s → 0.58 s and 2048 tokens 19.8 → 1.7 s in steady state through seven rounds (2026-09-04/05: grouped MoE experts, per-segment bulk shards, device segmentation, the cooperative bulk kernel with paced senders, the experts, the dense attention prefill, its projections, the dense MLPs, the router and the mHC dots restructured, most of them bitwise; 4096 tokens 3.5 s and 8192 tokens 7.3 s with the sparse regime on the same flash kernel); the GPU is busy 98 % of a prefill |
 | M7 | Exact snapshot prefix cache | [x] built 2026-09-05: stage A (the model primitives) and stage B (the cache in the scheduler, the arena in the engines, the service, the journal); hot == cold bitwise, rank-identical by construction and checked per tick; the two-token step's parity limit closed the same day by the hop snapshot (every aligned position past an attach is snapshotted, bitwise the one-row state) |
 | M8 | Transactional MTP decoding | [x] depth 1, greedy and sampled, the whole step one graph replay (2026-09-03; `glm_gen_check --mtp`); buttoned up 2026-09-05: the v1 failure semantics built, gated and drilled on the four nodes (a rank's death answers every live stream with its committed tokens and an error, the ranks exit nonzero within seconds, the restart reproduces the committed tokens), cancellation and forced pool-boundary rejections under the one-graph step gated, the remaining list resolved |
-| M9 | Evidence-driven optimization and hardening | [~] the optimization half is well under way (40.65 → 31.45 ms/token plain, 22.45 with MTP); of the hardening, the v1 failure semantics are built and drilled (2026-09-05); counter-drift checks, the soak, the fuzzing and the sign-off report are not started |
+| M9 | Evidence-driven optimization and hardening | [x] closed 2026-09-05: the optimization rounds (40.65 → 31.45 ms/token plain, 22.45 with MTP; prefill to line rate, shelved there by decision); the hardening built and drilled — the v1 failure semantics, the continuous op-stream drift check on every journal record, the malformed-HTTP fuzzer under AddressSanitizer (two defects found and closed), the one-hour mixed soak (the user's bound, not 24 h), the operator's page; the sign-off report written with the measurements (`docs/signoff_v1.md`) and the next steps ranked (`docs/next_steps.md`) |
 
 ## Where we are (2026-09-03)
 
@@ -1856,36 +1856,122 @@ Hardening, not started, designed:
   the same prompts at temperature 0 carry the committed text as a
   prefix. Silent deaths (a node powered off: TCP does not close) fall to
   the bus watchdog, which throws into the same path.
-- *Counter-drift checks:* the 4-way op-stream md5 becomes continuous —
-  every N ticks the journal carries rank 0's running fold; a peer whose
-  fold differs dies loudly with the tick number (today the check is
-  post-mortem).
+- *Counter-drift checks — BUILT 2026-09-05:* the 4-way op-stream md5 is
+  continuous. `OpStreamObserver` keeps a running FNV-1a fold of every line
+  it records (`SchedulerObserver::has_digest/digest`); rank 0's
+  `engine_pass` puts the fold after the previous tick on every tick record
+  (`od`, beside the prefix cache's `pd`); `run_journal_peer` compares its
+  own observer's fold before applying each record and throws
+  `journal: op-stream divergence at tick N` — one tick late at most — and
+  the peer's death then fails the service through rank 0's watch. Gates:
+  the codec round trip, and `glm_fabric_serve_test` scenario 9 (a peer
+  whose engine produces different tokens dies naming the tick, rank 0
+  fails the service, the other peer is released). Live for the whole
+  soak below (no divergence).
 - *Cancellation:* covered at the tick boundary (disconnect → cancel queue →
-  retire; gated); drain-on-stop is 6c.
-- *24-hour soak:* `glm_serve` under a client driver replaying a mixed
-  workload (short chat, long generation, cancellations, a burst above the
-  queue bound), with `--node-probe` and the step distribution per hour;
-  pass = no stall windows, no drift, flat p99.
-- *Malformed-HTTP fuzzing:* a byte-level mutator over the server's limit
-  ladder (`http_server_test` pins the ladder; the fuzzer looks for a way
-  past it), run under ASan.
-- *Restart documentation:* `serve_run.sh up/down/status`, the image cache,
-  the memlock note, the port/rendezvous window (README has the pieces).
+  retire; gated, and under the row-batched MTP graph by the M8 closure);
+  drain-on-stop is 6c.
+- *The soak — RUN 2026-09-05, one hour (the user: "I don't think we need
+  to do a 24 hr soak to verify M9. I would say a 1-hour soak is
+  sufficient"):* `scripts/serve_soak.py` against the four-node service
+  (`--max-concurrency 4 --kv-capacity 8192 --queue-limit 8 --decode-graph
+  --mtp`, the prefix cache on): three multi-turn chat workers, a long
+  generator sampled at the card's defaults, a client that abandons its
+  stream after 5–40 tokens, and every five minutes a burst of 14 one-shots
+  above the queue bound; `/v1/metrics` sampled every minute, the node
+  probes at 1 Hz on every node, the op streams hashed at the end.
+  The second hour (with the UTF-8 defect the first hour found fixed; the
+  record's twenty-ninth entry has both hours): 2,751 client records, 2,692
+  requests by the service's count — 1,980 chat turns, 72 long generations of
+  512 sampled tokens, 516 abandoned streams (507 cancels landed inside the
+  engine), twelve bursts of 14 (88 served, 80 shed 503 `overloaded`, 7–8
+  served per burst) and three streamed requests shed during a burst with the
+  in-stream error event; 157,734 tokens out. 0 failures, 0 STALLED lines on
+  any rank, no divergence, the four op streams md5-identical (ec47fc0e…);
+  every worker alive for the whole hour. Per 10-minute window the chat turns'
+  TTFT p50 737–810 ms, p95 2,257–2,384, p99 3,989–6,875 ms (queueing behind a
+  burst or a long generation at four slots and a queue of eight; no trend
+  across the six windows, the last window's p50 the lowest), the per-stream
+  pace p50 78–79 ms/token in every window (four MTP streams sharing the step
+  plus the admissions' prefill stalls, against 66 ms for the pure four-way
+  batch), p99 97–105; the pool 59–65 of 65 blocks and the cache 38–40 entries
+  at every sample from the tenth minute on — nothing grew; the node probes
+  allocstall 0, swap 0, no throttle mask on any node. The prefix cache under
+  load: 1,785 hits against 824 misses, 149,664 tokens saved, 17,598 hop
+  snapshots, 4,104 evictions, no snapshot skipped for a block or a slot,
+  attaches 0.55 ms and snapshots 0.50 ms on average.
+- *Malformed-HTTP fuzzing — BUILT 2026-09-05:*
+  `serve_fuzz_malformedHttpNeverBreaksTheServer` (glm_serve_test) mutates
+  valid requests byte by byte — flips, insertions, deletions, truncations,
+  duplicated slices, hostile Content-Length values, a chunked
+  Transfer-Encoding, 24 KiB request lines, header floods past the 16 KiB
+  cap, JSON garbage and invalid UTF-8 bodies, pipelined pairs, foreign HTTP
+  versions, pure binary — delivered whole, in fragments, half-closed or
+  abandoned; the server must answer, wait or close, never crash or stop
+  serving. 800 iterations under ctest; FUZZ_ITERS under AddressSanitizer
+  (`cmake -DDGPP_SANITIZE=address`, `DGPP_FUZZ_ITERS`). It found three
+  defects, all fixed and gated: minijson recursed without a depth bound
+  (a body of ten thousand `[` overflowed the stack — now refused past 256
+  levels, `minijson_nesting_depth_is_bounded`); the HTTP server freed a
+  connection it closed itself (a 400 on a malformed request pipelined
+  after a valid one-shot) without notifying the service, whose pending
+  record's writer then wrote through freed memory — every close of a
+  tagged connection now notifies; and pipelined requests were dispatched
+  together, sharing the connection's writer and overwriting its
+  disconnect tag — a connection now carries one request at a time, the
+  next waiting in the buffer until the answer is out
+  (`serve_pipelinedRequests_areAnsweredOneAtATimeInOrder`,
+  `serve_garbageAfterAPendingOneShot_waitsThenClosesCleanly`). The
+  prefix-cache curve sweep found a fourth defect the same day, outside
+  the fuzzer's reach: the admission did not count the pool blocks the
+  cache's partial-block copies take (the cut entry's, the rolling copy's),
+  so a full pool failed the service at a reservation; `Scheduler::
+  new_blocks` counts them now, snapshots evict or skip for a block
+  (`skipped_no_block`), and a pool too small for the cache's blocks admits
+  the request cache-less (`scheduler_prefixCache_admissionCountsThe
+  SnapshotCopiesAgainstThePool`); and a fifth, with the arena full for
+  the first time: an admission's snapshot-slot acquisition evicted its
+  own attach target (the LRU entry) and prefilled from an empty slot —
+  the attach now precedes the acquisition (`scheduler_prefixCache_the
+  AttachTargetSurvivesTheSnapshotSlotsEviction`). And a sixth, from the
+  soak's first hour: a byte-level BPE token can end inside a multi-byte
+  character and the SSE delta carried its bytes as they came — a JSON text
+  that is not UTF-8, on which the soak's strict Python client raised and
+  its chat workers died after four minutes. Every streamed field now keeps
+  a UTF-8 carry (an incomplete trailing sequence waits for the next delta,
+  invalid bytes and a cap-cut last character become U+FFFD; the logprobs'
+  token strings likewise, their exact bytes riding in `bytes`) —
+  `serve_utf8_aCharacterSplitAcrossTokensIsHeldUntilComplete`.
+- *Restart documentation — WRITTEN 2026-09-05:* `docs/operations.md` —
+  boot, stop and status, the knobs, what a node needs (the image cache,
+  the memlock note, `/tmp` staging after a reboot, the rendezvous window),
+  what happens when a rank dies and the exit statuses, how to check the
+  world is healthy (the continuous fold, the shutdown md5s, the metrics,
+  the soak driver, the node probe), the ports.
 
-Final performance sign-off reports:
+Final performance sign-off report — WRITTEN 2026-09-05, `docs/signoff_v1.md`:
 
-- batch-size-one decode and 32K TTFT for a committed workload definition
-  (decode: done for the single-stream path; TTFT at 32K not measured —
-  prefill is the host-orchestrated MoE path at ~2048-token chunks);
-- expected, p95, and worst-rank expert traffic from traces (moot at the
-  FFN boundary since the sliced placement; the trace tool remains for
-  the attention-side and for any future placement change);
-- both-lane utilization and collective share (per-collective timeline
-  exists; the share is ~10% of a plain step, ~11% of an MTP step);
-- prefix-cache capacity/hit curves (M7);
-- MTP acceptance and net speedup (done for one prompt class; report per
-  class);
-- known gaps, rather than silently moving unmet targets.
+- batch-size-one decode and 32K TTFT: decode 31.45 ms/token plain and
+  22.45 with MTP (single stream), the service's occupancy curves; TTFT
+  measured at 256 / 2,048 / 4,096 / 8,192 / 32,768 tokens — the 32K prompt
+  prefills in 33.7 s steady state (1.03 ms per token, 16 chunks), ids
+  identical on all four ranks;
+- expert traffic: moot at the FFN boundary since the sliced placement,
+  stated as such;
+- both-lane utilization and collective share: ~10 % of a plain step, ~11 %
+  of an MTP step, from the per-collective timeline;
+- prefix-cache capacity/hit curves: measured with `scripts/serve_prefix_
+  curve.py` at 7 and 43 slots over 8, 32 and 64 interleaved conversations
+  — the hit rate is capacity against the working set and LRU thrashes to
+  zero past it (the table is in the report);
+- MTP acceptance and net speedup per prompt class: chat 77 %, prose 88 %,
+  math 92 %, code and JSON 97 % of drafts accepted; 21.3–23.9 ms/token
+  (1.31–1.48× the plain graph); the step flat at 41.6–42.9 ms;
+- known gaps, stated: the prefill's stall of other requests, no failover,
+  the LRU cliff, the refused request fields, depth 1, the one-hour soak
+  bound, the memcheck harness limitation.
+
+What is worth doing next, ranked with costs and benefits: `docs/next_steps.md`.
 
 ## Post-v1
 

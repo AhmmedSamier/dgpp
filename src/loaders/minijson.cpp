@@ -129,7 +129,23 @@ struct Parser {
     fail("unexpected token");
   }
 
+  // Nesting is bounded: the parser recurses per container, and a body of
+  // ten thousand '[' would otherwise run the stack out — the malformed-HTTP
+  // fuzzer's first find (2026-09-05, under AddressSanitizer). Real request
+  // bodies nest a handful of levels; a document deeper than this is
+  // refused as malformed, which the routes answer with 400.
+  static constexpr int kMaxDepth = 256;
+  int depth = 0;
+  struct DepthScope {
+    Parser& p;
+    explicit DepthScope(Parser& parser) : p(parser) {
+      if (++p.depth > kMaxDepth) p.fail("nesting deeper than 256 levels");
+    }
+    ~DepthScope() { --p.depth; }
+  };
+
   Value array_value() {
+    DepthScope scope(*this);
     expect('[');
     std::vector<Value> items;
     if (peek() == ']') { ++pos; return Value::make_array(std::move(items)); }
@@ -144,6 +160,7 @@ struct Parser {
   }
 
   Value object_value() {
+    DepthScope scope(*this);
     expect('{');
     std::vector<Member> members;
     if (peek() == '}') { ++pos; return Value::make_object(std::move(members)); }

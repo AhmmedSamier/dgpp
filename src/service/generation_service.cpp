@@ -1522,6 +1522,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, m.prefix_evictions);
   out.append(",\"duplicates\":");
   append_json_int(&out, m.prefix_duplicates);
+  out.append(",\"skipped_no_block\":");
+  append_json_int(&out, m.prefix_skipped_no_block);
   out.append(",\"skipped_no_slot\":");
   append_json_int(&out, m.prefix_skipped);
   out.append(",\"blocks_pinned\":");
@@ -1724,6 +1726,10 @@ void append_bytes_array(std::string* out, const std::string& s) {
 
 }  // namespace
 
+namespace {
+void sanitize_utf8(std::string* text);  // the delta streams' UTF-8 discipline, below
+}  // namespace
+
 std::string GenerationService::logprobs_content(const StreamRecord& r,
                                                 size_t from, size_t to) const {
   // {"content":[{"token","logprob","bytes","top_logprobs":[...]}, ...]}
@@ -1733,7 +1739,11 @@ std::string GenerationService::logprobs_content(const StreamRecord& r,
     const glm_sample::Result& lp = r.lps[i];
     const std::string tok = frontend_->decode_ids({r.ids[i]});
     out.append("{\"token\":");
-    append_json_string(&out, tok);
+    {
+      std::string shown(tok);  // the exact bytes ride in "bytes"; the text is UTF-8
+      sanitize_utf8(&shown);
+      append_json_string(&out, shown);
+    }
     out.append(",\"logprob\":");
     append_json_float(&out, lp.logprob);
     out.append(",\"bytes\":");
@@ -1743,7 +1753,11 @@ std::string GenerationService::logprobs_content(const StreamRecord& r,
       if (j) out.push_back(',');
       const std::string alt = frontend_->decode_ids({lp.top_logprobs[j].first});
       out.append("{\"token\":");
-      append_json_string(&out, alt);
+      {
+        std::string shown(alt);
+        sanitize_utf8(&shown);
+        append_json_string(&out, shown);
+      }
       out.append(",\"logprob\":");
       append_json_float(&out, lp.top_logprobs[j].second);
       out.append(",\"bytes\":");
@@ -1819,6 +1833,77 @@ void GenerationService::on_retire(const std::string& id,
 
 void GenerationService::idle() { pump_records(); }
 
+// ---------------------------------------------------------------------------
+// UTF-8 discipline for the delta streams (the soak's find, 2026-09-05): a
+// token's decoded bytes can end inside a multi-byte character, and a JSON
+// text that is not UTF-8 breaks a strict client (Python's json.loads on
+// the payload bytes raised, and the soak's chat workers died on the first
+// accented name). carry_utf8 prepends the field's held bytes, holds back an
+// incomplete trailing sequence for the next delta, and replaces invalid
+// bytes with U+FFFD; finish_utf8 renders what is still held at the end.
+// ---------------------------------------------------------------------------
+namespace {
+
+size_t utf8_sequence_length(unsigned char b) {
+  if (b < 0x80) return 1;
+  if ((b & 0xE0) == 0xC0) return 2;
+  if ((b & 0xF0) == 0xE0) return 3;
+  if ((b & 0xF8) == 0xF0) return 4;
+  return 0;  // a stray continuation or an invalid lead byte
+}
+
+constexpr const char* kReplacement = "\xEF\xBF\xBD";  // U+FFFD
+
+void carry_utf8(std::string* text, std::string* carry) {
+  if (!carry->empty()) {
+    text->insert(0, *carry);
+    carry->clear();
+  }
+  std::string out;
+  out.reserve(text->size());
+  const size_t n = text->size();
+  size_t i = 0;
+  while (i < n) {
+    const unsigned char b = static_cast<unsigned char>((*text)[i]);
+    const size_t len = utf8_sequence_length(b);
+    if (len == 0) {
+      out.append(kReplacement);
+      ++i;
+      continue;
+    }
+    bool continuation_ok = true;
+    const size_t have = std::min(len, n - i);
+    for (size_t k = 1; k < have; ++k)
+      if ((static_cast<unsigned char>((*text)[i + k]) & 0xC0) != 0x80) continuation_ok = false;
+    if (!continuation_ok) {
+      out.append(kReplacement);
+      ++i;
+      continue;
+    }
+    if (have < len) {  // incomplete at the end: the next delta completes it
+      carry->assign(*text, i, n - i);
+      break;
+    }
+    out.append(*text, i, len);
+    i += len;
+  }
+  text->swap(out);
+}
+
+std::string finish_utf8(std::string* carry) {
+  if (carry->empty()) return {};
+  carry->clear();
+  return kReplacement;  // an incomplete character at the very end
+}
+
+void sanitize_utf8(std::string* text) {
+  std::string carry;
+  carry_utf8(text, &carry);
+  text->append(finish_utf8(&carry));
+}
+
+}  // namespace
+
 void GenerationService::flush_chat_stream(StreamRecord& r) {
   // Take the unflushed events (and, when a chunk will carry them, the
   // logprobs entries since the last flush) under the lock; format and
@@ -1840,12 +1925,20 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
   for (const ParserEvent& ev : events) {
     std::string delta;
     switch (ev.kind) {
-      case ParserEvent::Kind::kReasoning:
-        delta = delta_text("reasoning_content", ev.text);
+      case ParserEvent::Kind::kReasoning: {
+        std::string text = ev.text;
+        carry_utf8(&text, &r.carry_reasoning);
+        if (text.empty()) continue;  // wholly held back: an incomplete character
+        delta = delta_text("reasoning_content", text);
         break;
-      case ParserEvent::Kind::kContent:
-        delta = delta_text("content", ev.text);
+      }
+      case ParserEvent::Kind::kContent: {
+        std::string text = ev.text;
+        carry_utf8(&text, &r.carry_content);
+        if (text.empty()) continue;
+        delta = delta_text("content", text);
         break;
+      }
       case ParserEvent::Kind::kToolCall: {
         const int index = r.calls_announced++;
         const std::string call_id = tool_call_id(r.tag, index);
@@ -1853,7 +1946,9 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
             r.id, r.created_unix, r.model,
             delta_tool_call_start(index, call_id, ev.call.name), lp_json));
         lp_json.clear();
-        delta = delta_tool_call_arguments(index, ev.call.arguments);
+        std::string args = ev.call.arguments;
+        sanitize_utf8(&args);  // a whole call's arguments: complete by construction
+        delta = delta_tool_call_arguments(index, args);
         break;
       }
       case ParserEvent::Kind::kReasoningClosed:
@@ -1863,6 +1958,24 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
         chat_chunk_delta(r.id, r.created_unix, r.model, delta, lp_json));
     lp_json.clear();
   }
+}
+
+// The stream's end: whatever a field still holds is an incomplete
+// character — U+FFFD, in one last delta per field.
+void GenerationService::flush_stream_carries(StreamRecord& r) {
+  if (r.chat) {
+    for (auto [carry, field] : {std::pair{&r.carry_reasoning, "reasoning_content"},
+                                std::pair{&r.carry_content, "content"}}) {
+      const std::string rest = finish_utf8(carry);
+      if (rest.empty()) continue;
+      r.writer->write_event(chat_chunk_delta(r.id, r.created_unix, r.model,
+                                             delta_text(field, rest), ""));
+    }
+    return;
+  }
+  const std::string rest = finish_utf8(&r.carry_text);
+  if (!rest.empty())
+    r.writer->write_event(text_chunk_delta(r.id, r.created_unix, r.model, rest, ""));
 }
 
 void GenerationService::flush_legacy_stream(StreamRecord& r) {
@@ -1880,6 +1993,7 @@ void GenerationService::flush_legacy_stream(StreamRecord& r) {
     r.first_chunk_sent = true;
     r.writer->write_event(text_chunk_first(r.id, r.created_unix, r.model));
   }
+  carry_utf8(&delta, &r.carry_text);
   if (!delta.empty())
     r.writer->write_event(
         text_chunk_delta(r.id, r.created_unix, r.model, delta, lp_json));
@@ -1948,6 +2062,7 @@ void GenerationService::pump_records() {
               flush_chat_stream(*r);
             else
               flush_legacy_stream(*r);
+            flush_stream_carries(*r);
           }
           // Headers were already sent in handle(); an SSE client can
           // only see an error event + [DONE] (OpenAI's stream-error
@@ -1972,6 +2087,7 @@ void GenerationService::pump_records() {
           flush_chat_stream(*r);
         else
           flush_legacy_stream(*r);
+        flush_stream_carries(*r);
         std::string lp_json;
         if (r->logprobs >= 0) {
           std::lock_guard<std::mutex> lock(mutex_);
@@ -1994,7 +2110,13 @@ void GenerationService::pump_records() {
         r->writer->write_event("[DONE]");
         r->writer->end_stream();
       } else {
-        // The one-shot completion object.
+        // The one-shot completion object. Its texts are complete by
+        // construction except for a last character a cap cut in half:
+        // that one becomes U+FFFD (JSON text must be UTF-8).
+        sanitize_utf8(&r->content);
+        sanitize_utf8(&r->reasoning);
+        sanitize_utf8(&r->text);
+        for (ToolCall& call : r->calls) sanitize_utf8(&call.arguments);
         std::string lp_json;
         if (r->logprobs >= 0) {
           std::lock_guard<std::mutex> lock(mutex_);
@@ -2113,6 +2235,12 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
   if (sched_.prefix_slots() > 0) {
     events.has_prefix_digest = true;
     events.prefix_digest = sched_.prefix_digest();
+  }
+  // The op stream's fold after the previous tick (M9): the peers compare
+  // theirs before applying this record.
+  if (audit_ != nullptr && audit_->has_digest()) {
+    events.has_op_digest = true;
+    events.op_digest = audit_->digest();
   }
   if (pre_tick) pre_tick(events);
 

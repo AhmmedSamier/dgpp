@@ -172,6 +172,11 @@ class GenerationService : public HttpHandler,
     // record carries it so every peer compares before applying this one.
     bool has_prefix_digest = false;
     uint64_t prefix_digest = 0;
+    // The audit observer's op-stream fold after the previous tick (M9's
+    // continuous drift check): rides the record when an observer with a
+    // fold is attached.
+    bool has_op_digest = false;
+    uint64_t op_digest = 0;
   };
   // Invoked (engine thread) with the pass's events AFTER the drain and
   // immediately BEFORE the tick — the one fixed position where the
@@ -291,6 +296,11 @@ class GenerationService : public HttpHandler,
     std::chrono::steady_clock::time_point arrived;
     bool prefix_hit = false;
     int64_t prefix_position = 0;
+    // UTF-8 carries (the soak's find, 2026-09-05): a byte-level BPE token
+    // can end inside a multi-byte character, and JSON text must be UTF-8 —
+    // an incomplete trailing sequence is held here and prepended to the
+    // field's next delta; what is left at the end becomes U+FFFD.
+    std::string carry_reasoning, carry_content, carry_args, carry_text;
     int logprobs = -1;         // -1 none; N = top-N alternatives requested
     std::vector<glm_sample::Result> lps;  // one per id when logprobs >= 0
     size_t lps_flushed = 0;    // streaming: entries already sent
@@ -384,6 +394,7 @@ class GenerationService : public HttpHandler,
   // One stream's unflushed events (and logprobs) as SSE chunks.
   void flush_chat_stream(StreamRecord& r);
   void flush_legacy_stream(StreamRecord& r);
+  void flush_stream_carries(StreamRecord& r);  // the held UTF-8 tails, at the end
 
   ServiceConfig cfg_;
   dgpp::glm::SchedulerEngine* engine_;

@@ -82,6 +82,9 @@ class FakeEngine : public SchedulerEngine {
   // the in-tick watch can see rank 0 die; blocked() says it got there.
   void set_block(std::atomic<bool>* block) { block_ = block; }
   bool blocked() const { return blocked_.load(); }
+  // Scenario knob (the drift gate): this fake's tokens are offset by `d` —
+  // a rank whose engine computes differently from the others.
+  void set_token_offset(int d) { token_offset_ = d; }
 
   int max_concurrent_requests() const override { return slots_; }
   int64_t pool_blocks_total() const override { return total_blocks_; }
@@ -109,7 +112,7 @@ class FakeEngine : public SchedulerEngine {
     live.served = 1;
     live.last_token = fake_eos_prefill(live.prompt_len)
                           ? kFakeEos
-                          : fake_token(live.prompt_len, 0);
+                          : fake_token(live.prompt_len, 0) + token_offset_.load();
     live_[req] = live;
     return live.last_token;
   }
@@ -126,7 +129,8 @@ class FakeEngine : public SchedulerEngine {
     live.last_token =
         fake_eos_second(live.prompt_len) && live.served == 1
             ? kFakeEos
-            : fake_token(live.prompt_len, static_cast<int>(live.served));
+            : fake_token(live.prompt_len, static_cast<int>(live.served)) +
+                  token_offset_.load();
     ++live.served;
     return {live.last_token};
   }
@@ -146,6 +150,7 @@ class FakeEngine : public SchedulerEngine {
   std::atomic<int> op_delay_ms_{0};
   std::atomic<bool>* block_ = nullptr;
   std::atomic<bool> blocked_{false};
+  std::atomic<int> token_offset_{0};
   std::map<int, Live> live_;
 };
 
@@ -251,7 +256,7 @@ void test_journal_codec() {
   require(back.submits[0].max_steps == 16, "codec: max_steps round-trip");
   require(back.submits[0].cancel_after == 3, "codec: cancel_after round-trip");
   require(back.submits[0].boundaries.empty() && !back.submits[0].no_cache &&
-              !back.has_prefix_digest,
+              !back.has_prefix_digest && !back.has_op_digest,
           "codec: a request without cache inputs decodes without them");
   {
     // The prefix cache's fields (M7): boundaries, the opt-out, the tick's
@@ -267,15 +272,19 @@ void test_journal_codec() {
     ev.submits.push_back(r);
     ev.has_prefix_digest = true;
     ev.prefix_digest = 18446744073709551557ull;  // above int64: the string form
+    ev.has_op_digest = true;  // the op-stream fold (M9) rides the same way
+    ev.op_digest = 18446744073709551533ull;
     const std::string line = dgpp::service::encode_journal_tick(ev);
     require(line.find("\"b\":[3,6]") != std::string::npos &&
                 line.find("\"nc\":1") != std::string::npos &&
-                line.find("\"pd\":\"18446744073709551557\"") != std::string::npos,
+                line.find("\"pd\":\"18446744073709551557\"") != std::string::npos &&
+                line.find("\"od\":\"18446744073709551533\"") != std::string::npos,
             "codec: cache fields on the wire: " + line);
     const dgpp::service::JournalRecord b2 = dgpp::service::decode_journal_line(line);
     require(b2.submits.size() == 1 && b2.submits[0].boundaries == r.boundaries &&
                 b2.submits[0].no_cache && b2.has_prefix_digest &&
-                b2.prefix_digest == ev.prefix_digest,
+                b2.prefix_digest == ev.prefix_digest && b2.has_op_digest &&
+                b2.op_digest == ev.op_digest,
             "codec: cache fields round-trip");
     const std::string plain = dgpp::service::encode_journal_tick(events);
     require(plain.find("\"b\"") == std::string::npos &&
@@ -502,9 +511,13 @@ struct PeerRig {
               death_seen.store(true);
               block.store(false);
             },
-            /*watch_poll_ms=*/20);
+            /*watch_poll_ms=*/20, &oplog);
       } catch (const std::exception& e) {
         error = e.what();
+        // glm_serve's peer dies of this (the exception leaves main); the
+        // rig closes the connection the way the process exit would, so
+        // rank 0's watch sees it.
+        if (reader) reader->close();
       }
     });
   }
@@ -1018,6 +1031,48 @@ void test_rank0_death_releases_a_peer_mid_tick(FabricRig& rig) {
   (void)c.read_until("data: [DONE]", 500);
 }
 
+// --- scenario 7: the continuous drift check ------------------------------
+
+void test_op_stream_divergence_kills_the_peer(FabricRig& rig) {
+  // M9's counter-drift check: every tick record carries rank 0's op-stream
+  // fold after the previous tick, and a peer whose fold differs dies loudly
+  // with the tick number — one tick late at most — instead of serving on
+  // and being caught by the shutdown ritual's md5. Peer 1's engine is made
+  // to produce different tokens; its loop must throw at the record after
+  // the first diverging tick, naming the tick; its death then fails rank 0
+  // (the watch) and releases the other peer.
+  rig.peers[0]->engine.set_token_offset(1);
+  Client c(rig.port());
+  c.send_all(post_request("/v1/chat/completions",
+                          R"({"model":"glm-5.3-flash-fp8","messages":[)"
+                          R"({"role":"user","content":"x"})"
+                          R"(],"max_tokens":8})"));
+  for (int i = 0; i < 600 && rig.peers[0]->error.empty(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  const std::string& err = rig.peers[0]->error;
+  require(err.find("op-stream divergence at tick") != std::string::npos,
+          "drift: the diverging peer died naming the tick: '" + err + "'");
+  // Caught at the record after the first diverging tick: the request's
+  // first tick is the first or second record (an idle pass may precede
+  // it), so the named tick is small — never the request's eighth.
+  const size_t at = err.find("at tick ");
+  require(at != std::string::npos && std::atoi(err.c_str() + at + 8) <= 3,
+          "drift: caught within a tick of the divergence: '" + err + "'");
+  for (int i = 0; i < 600 && !rig.failed.load(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  // Rank 0 fails on the dead peer by whichever path sees it first: the
+  // watch ("rank 1 died") or the next broadcast to the closed connection
+  // ("rank 1's connection stopped reading").
+  require(rig.failed.load() && rig.failure.find("rank 1") != std::string::npos,
+          "drift: rank 0 failed the service on the dead peer: " + rig.failure);
+  require(rig.peer_finished(1, 3000) && rig.peers[1]->error.empty(),
+          "drift: the other peer was released without an error: " + rig.peers[1]->error);
+  (void)c.read_until("}}", 3000);  // the one-shot: served, or engine_failure
+  for (int i = 0; i < 400 && !rig.service.drained(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  require(rig.service.drained(), "drift: every answer out");
+}
+
 }  // namespace
 
 int main() {
@@ -1061,6 +1116,12 @@ int main() {
     }
     std::puts("ok 8 - rank 0's death releases a peer stuck inside a tick "
               "through the in-tick watch");
+    {
+      FabricRig rig;
+      test_op_stream_divergence_kills_the_peer(rig);
+    }
+    std::puts("ok 9 - the continuous drift check: a diverging peer dies naming "
+              "the tick, rank 0 fails the service, the other peer is released");
     std::puts("glm_fabric_serve_test: ALL PASS");
     return 0;
   } catch (const std::exception& e) {

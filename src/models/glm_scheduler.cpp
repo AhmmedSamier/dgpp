@@ -190,10 +190,42 @@ Scheduler::PrefixPlan Scheduler::plan_prefix(const Request& r) const {
   return plan;
 }
 
+int64_t Scheduler::snapshot_blocks(int64_t position) const {
+  const int64_t bt = prefix_info_.block_tokens;
+  return bt > 0 && position > 0 && position % bt != 0 ? 1 : 0;
+}
+
+bool Scheduler::snapshot_needs_block(int64_t position, int64_t previous) const {
+  return snapshot_blocks(position) > 0 &&
+         (previous < 0 || snapshot_blocks(previous) == 0);
+}
+
+bool Scheduler::ensure_free_blocks(int64_t need, const std::string& id) {
+  if (need <= 0) return true;
+  for (;;) {
+    const int64_t free =
+        engine_->pool_blocks_total() - engine_->pool_blocks_in_use();
+    if (free >= need) return true;
+    const int slot = cache_.evict_lru();
+    if (slot < 0) return false;
+    free_arena_slot(slot);
+    emit_prefix(id, "evict", 0, slot);
+  }
+}
+
 int64_t Scheduler::new_blocks(const Request& r, const PrefixPlan& plan) const {
   int64_t blocks = reserve_blocks(r);
-  if (plan.attach_entry >= 0 && prefix_info_.block_tokens > 0)
-    blocks -= plan.attach_position / prefix_info_.block_tokens;  // shared
+  const int64_t bt = prefix_info_.block_tokens;
+  if (plan.attach_entry >= 0 && bt > 0)
+    blocks -= plan.attach_position / bt;  // the full blocks come shared
+  // The pool blocks the cache takes on top of the reservation (the soak's
+  // sweep of 2026-09-05 found the admission one block short of them): the
+  // cut entry's private partial-block copy, and one block of headroom for
+  // the request's own rolling or hop snapshot's copy — a position aligned
+  // to kpool but not to the block, which exists only when the block is
+  // wider than the alignment.
+  if (plan.snap_position > 0) blocks += snapshot_blocks(plan.snap_position);
+  if (cache_on(r) && bt > std::max<int64_t>(1, prefix_info_.align)) blocks += 1;
   return std::max<int64_t>(blocks, 0);
 }
 
@@ -207,6 +239,20 @@ int Scheduler::next_admissible() {
     // starvation it could suffer under an unbounded small-request stream
     // is a Stage 4 bounded-queue problem, not a policy bug.
     if (free_slot() < 0) return -1;
+    // A pool too small for the request WITH the cache's blocks (the cut
+    // entry's copy, the rolling headroom) but large enough without them
+    // admits the request cache-less rather than never: the same decision on
+    // every rank, from the same journaled request against the same pool.
+    if (cache_on(requests_[i]) &&
+        new_blocks(requests_[i], plan_prefix(requests_[i])) >
+            engine_->pool_blocks_total() &&
+        reserve_blocks(requests_[i]) <= engine_->pool_blocks_total()) {
+      requests_[i].cache_off = true;
+      DGPP_LOG_INFO(
+          "sched: request '{}' runs without the prefix cache — the pool "
+          "({} blocks) cannot hold its reservation and the cache's blocks",
+          requests_[i].spec.id, engine_->pool_blocks_total());
+    }
     if (new_blocks(requests_[i], plan_prefix(requests_[i])) <= free_blocks)
       return static_cast<int>(i);
     // The prefix cache's entries pin blocks; the LRU unattached ones give
@@ -374,6 +420,12 @@ void Scheduler::admit(int arrival) {
     pp.boundaries = &r.spec.boundaries;
     int snap_slot = -1;
     if (plan.attach_entry >= 0) {
+      // Attach FIRST: an attached entry is never evicted, and the snapshot
+      // slot acquired next may evict the LRU unattached entry — which, with
+      // the arena full, was this very entry (the curve sweep's find of
+      // 2026-09-05: "PrefixArena: slot 25 is empty" — the victim's slot came
+      // back as the snapshot slot, and the prefill attached to nothing).
+      cache_.attach(plan.attach_entry, ticks_);
       pp.attach_slot = cache_.entry(plan.attach_entry).slot;
       pp.attach_position = plan.attach_position;
     }
@@ -389,11 +441,11 @@ void Scheduler::admit(int arrival) {
     try {
       token = engine_->prefill_cached(slot, r.spec.prompt, &pp);
     } catch (...) {
+      if (plan.attach_entry >= 0) cache_.detach(plan.attach_entry);
       if (snap_slot >= 0) cache_.give_back_slot(snap_slot);
       throw;
     }
     if (plan.attach_entry >= 0) {
-      cache_.attach(plan.attach_entry, ticks_);
       r.attach_entry = plan.attach_entry;
       r.attach_position = plan.attach_position;
       emit_prefix(r.spec.id, "attach", plan.attach_position, pp.attach_slot);
@@ -582,6 +634,9 @@ void Scheduler::retire(int arrival, Result::Status status,
       if (r.rolling_slot < 0) r.rolling_slot = acquire_arena_slot(r.spec.id);
       if (r.rolling_slot < 0) {
         ++cache_.stats().skipped_no_slot;
+      } else if (snapshot_needs_block(committed, r.rolling_position) &&
+                 !ensure_free_blocks(1, r.spec.id)) {
+        ++cache_.stats().skipped_no_block;
       } else {
         engine_->prefix_snapshot(r.slot, r.rolling_slot, committed);
         r.rolling_position = committed;
@@ -771,6 +826,7 @@ Scheduler::Meters Scheduler::meters() const {
   m.prefix_evictions = cache_.stats().evictions;
   m.prefix_duplicates = cache_.stats().duplicates;
   m.prefix_skipped = cache_.stats().skipped_no_slot;
+  m.prefix_skipped_no_block = cache_.stats().skipped_no_block;
   m.prefix_blocks_pinned = cache_.blocks_pinned(prefix_info_.block_tokens);
   return m;
 }
@@ -778,6 +834,9 @@ Scheduler::Meters Scheduler::meters() const {
 void Scheduler::rolling_snapshots() {
   if (!cache_.enabled()) return;
   const int64_t align = std::max<int64_t>(1, prefix_info_.align);
+  // Blocks the hops armed in this pass will take inside the step, after
+  // the snapshots below have taken theirs: each arm reserves its own.
+  int64_t armed_blocks = 0;
   for (size_t i = 0; i < requests_.size(); ++i) {  // arrival order
     Request& r = requests_[i];
     if (r.state != State::kActive || !cache_on(r)) continue;
@@ -801,6 +860,12 @@ void Scheduler::rolling_snapshots() {
         }
         r.rolling_slot = slot;
       }
+      const bool needs_block = snapshot_needs_block(hop, r.rolling_position);
+      if (needs_block && !ensure_free_blocks(1 + armed_blocks, r.spec.id)) {
+        ++cache_.stats().skipped_no_block;
+        continue;
+      }
+      if (needs_block) ++armed_blocks;
       engine_->prefix_arm_hop(r.slot, r.rolling_slot, hop);
       r.hop_armed = hop;
       continue;
@@ -816,6 +881,11 @@ void Scheduler::rolling_snapshots() {
         continue;
       }
       r.rolling_slot = slot;
+    }
+    if (snapshot_needs_block(committed, r.rolling_position) &&
+        !ensure_free_blocks(1 + armed_blocks, r.spec.id)) {
+      ++cache_.stats().skipped_no_block;
+      continue;
     }
     engine_->prefix_snapshot(r.slot, r.rolling_slot, committed);
     r.rolling_position = committed;

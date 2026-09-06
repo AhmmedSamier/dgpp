@@ -64,6 +64,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <functional>
 #include <cmath>
 #include <memory>
@@ -1750,6 +1751,7 @@ int main(int argc, char** argv) {
       "  (--prompt ID,ID,... | --text TEXT | --chat TEXT [--system TEXT]\n"
       "   | --requests FILE)\n"
       "  [--steps N] [--world N --rank R --peer HOST --port N]\n"
+      "  [--prompt-file PATH (the ids as a comma- or newline-separated file)]\n"
       "  [--mtp  speculative decode through the checkpoint's MTP draft layer\n"
       "          (fabric only; the transcript is the plain loop's, faster)]\n"
       "  [--streaming] [--engine incremental|reforward] [--no-eos]\n"
@@ -1806,6 +1808,18 @@ int main(int argc, char** argv) {
     else if (a == "--peer") peer = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--prompt") prompt_text = next();
+    else if (a == "--prompt-file") {
+      // The ids as a file (a 32K-token prompt outruns the argument limit).
+      std::ifstream in(next());
+      require(in.good(), "--prompt-file: cannot open the ids file");
+      prompt_text.assign(std::istreambuf_iterator<char>(in),
+                         std::istreambuf_iterator<char>());
+      for (char& c : prompt_text)
+        if (c == '\n' || c == '\r') c = ',';
+      while (!prompt_text.empty() &&
+             (prompt_text.back() == ',' || prompt_text.back() == ' '))
+        prompt_text.pop_back();
+    }
     else if (a == "--text") text_prompt = next();
     else if (a == "--chat") chat_text = next();
     else if (a == "--system") system_prompt = next();

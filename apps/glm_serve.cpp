@@ -823,7 +823,8 @@ int main(int argc, char** argv) {
                                oplog.text());
                 std::fflush(nullptr);
                 std::_Exit(3);
-              });
+              },
+              /*watch_poll_ms=*/100, &oplog);
           write_ops_file("serve_rank" + std::to_string(rank) + ".ops",
                          oplog.text());
           engine.reset();
