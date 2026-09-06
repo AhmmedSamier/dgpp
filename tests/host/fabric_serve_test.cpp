@@ -234,6 +234,80 @@ class Client {
   bool closed_ = false;
 };
 
+// --- the settings handshake ------------------------------------------------
+// Rank 0 accepts the world and pushes the settings before anything builds;
+// the peer's first read is that record, applied whole. A stop record first
+// ends the peer cleanly; a tick first is a protocol violation.
+void test_settings_handshake() {
+  dgpp::serve::WorldSettings sent;
+  sent.model = "org/model";
+  sent.world = 2;
+  sent.fabric_port = 29970;
+  sent.max_concurrency = 2;
+  sent.kv_capacity = 4096;
+  sent.default_max_tokens = 32;
+  sent.queue_limit = 8;
+  sent.decode_graph = true;
+  sent.mtp = true;
+  sent.sampling_candidates = 128;
+  sent.prefix_cache_gib = 1.5;
+  sent.admission = "full";
+  sent.admission_window = 256;
+  sent.bulk_pace_gbps = -1.0;
+  sent.bulk_inflight = -1;
+  sent.rendezvous_timeout_ms = 120000;
+  sent.stats_interval_s = 10.0;
+  {
+    dgpp::serve::JournalWriter writer(29938);
+    std::atomic<bool> stop{false};
+    dgpp::serve::WorldSettings got;
+    bool ok = false;
+    std::thread peer([&] {
+      dgpp::serve::JournalReader reader("127.0.0.1", 29938, 5000, 1);
+      ok = dgpp::serve::wait_journal_settings(&reader, [&] { return stop.load(); }, &got);
+    });
+    writer.accept_peers(2, 5000);
+    writer.broadcast(dgpp::serve::encode_journal_settings(sent));
+    peer.join();
+    require(ok && got == sent, "the peer's first read is rank 0's settings, whole");
+  }
+  {
+    dgpp::serve::JournalWriter writer(29939);
+    std::atomic<bool> stop{false};
+    bool ended = true;
+    std::string violation;
+    std::thread peer([&] {
+      dgpp::serve::JournalReader reader("127.0.0.1", 29939, 5000, 1);
+      dgpp::serve::WorldSettings got;
+      try {
+        ended = !dgpp::serve::wait_journal_settings(&reader, [&] { return stop.load(); }, &got);
+      } catch (const std::runtime_error& e) {
+        violation = e.what();
+      }
+    });
+    writer.accept_peers(2, 5000);
+    writer.broadcast(dgpp::serve::encode_journal_warm());  // a warm record first: wrong
+    peer.join();
+    require(violation.find("settings record") != std::string::npos,
+            "a first record that is not the settings is a protocol violation: " + violation);
+  }
+  {
+    dgpp::serve::JournalWriter writer(29940);
+    std::atomic<bool> stop{false};
+    bool ended = false;
+    std::thread peer([&] {
+      dgpp::serve::JournalReader reader("127.0.0.1", 29940, 5000, 1);
+      dgpp::serve::WorldSettings got;
+      ended = !dgpp::serve::wait_journal_settings(&reader, [&] { return stop.load(); }, &got);
+    });
+    writer.accept_peers(2, 5000);
+    writer.broadcast(dgpp::serve::encode_journal_stop());
+    peer.join();
+    require(ended, "a stop record before the settings ends the peer cleanly");
+  }
+  std::printf("settings handshake: ok\n");
+}
+
 // --- the codec micro-gate ------------------------------------------------
 
 void test_journal_codec() {
@@ -297,6 +371,53 @@ void test_journal_codec() {
     const dgpp::serve::JournalRecord warm0 = dgpp::serve::decode_journal_line(
         dgpp::serve::encode_journal_warm(dgpp::sched::AdmissionPolicy{}, 0));
     require(warm0.warm && warm0.prefix_slots == 0, "codec: warm record without a cache");
+    // The configuration digest (2026-09-06) rides the warm record when rank 0
+    // has one; a config-less rank 0's record is unchanged.
+    const dgpp::serve::JournalRecord wcfg = dgpp::serve::decode_journal_line(
+        dgpp::serve::encode_journal_warm(dgpp::sched::AdmissionPolicy{}, 42, "0123456789abcdef"));
+    require(wcfg.warm && wcfg.prefix_slots == 42 && wcfg.config_digest == "0123456789abcdef",
+            "codec: the config digest round-trips on the warm record");
+    require(warm.config_digest.empty() &&
+                dgpp::serve::encode_journal_warm(dgpp::sched::AdmissionPolicy{}, 42).find("cfg") ==
+                    std::string::npos,
+            "codec: no digest, no field");
+    // The settings record (2026-09-06): every field round-trips, the doubles
+    // exactly; a record with an impossible world is refused.
+    dgpp::serve::WorldSettings ws;
+    ws.model = "org/model";
+    ws.checkpoint = "/ckpt/dir";
+    ws.world = 4;
+    ws.fabric_port = 29970;
+    ws.max_concurrency = 4;
+    ws.kv_capacity = 8192;
+    ws.default_max_tokens = 256;
+    ws.queue_limit = 8;
+    ws.no_eos = true;
+    ws.decode_graph = true;
+    ws.mtp = true;
+    ws.graph_batch_min_live = 3;
+    ws.sampling_candidates = 24;
+    ws.prefix_cache_gib = 1.25;
+    ws.admission = "grow";
+    ws.admission_window = 512;
+    ws.bulk_pace_gbps = 28.333333333333332;
+    ws.bulk_inflight = 4;
+    ws.rendezvous_timeout_ms = 120000;
+    ws.stats_interval_s = 0.1;
+    ws.reasoning_in_content = true;
+    const dgpp::serve::JournalRecord sr = dgpp::serve::decode_journal_line(
+        dgpp::serve::encode_journal_settings(ws));
+    require(sr.settings && !sr.warm && !sr.stop && sr.world_settings == ws,
+            "codec: the settings record round-trips");
+    bool refused = false;
+    try {
+      dgpp::serve::WorldSettings one = ws;
+      one.world = 1;
+      (void)dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(one));
+    } catch (const std::runtime_error&) {
+      refused = true;
+    }
+    require(refused, "codec: a settings record with a world of one is refused");
   }
   {
     // The logit bias and the stops (2026-09-06): "lb" pairs round-trip bit
@@ -1111,6 +1232,7 @@ int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   try {
     test_journal_codec();
+    test_settings_handshake();
     {
       FabricRig rig;
       test_non_stream_and_identity(rig);

@@ -2650,7 +2650,18 @@ once its model is built and held on by every peer before its warm-up — the
 peers build their model ~8 s faster than rank 0 and otherwise spun their
 first collective in stall diagnostics; a tick before the warm record, or a
 warm record inside the serving loop, is a protocol violation and dies
-loudly. The crossover flag defaults to min(4, slots) with out-of-range
+loudly. Since 2026-09-06 the journal star forms FIRST — before either side
+builds a model — and its first record is rank 0's settings (`"op":
+"settings"`: the model, the world size, the fabric port and every engine
+knob that shapes the op stream); a peer applies it whole, its own flags
+or file having supplied only the bootstrap and its local paths, so the
+head is the one source of the world's shape. The warm record then
+carries rank 0's effective-configuration digest (`"cfg"`), which every
+peer compares with its own — an assertion that holds by construction
+(the shared knob string that kept the ranks identical by convention is
+gone; the bus world still forms after the builds, its connect retrying
+within the rendezvous window, so the order of the two stars changed and
+nothing else). The crossover flag defaults to min(4, slots) with out-of-range
 values rejected rather than clamped. All three were validated on the four
 nodes (record entry of 2026-09-03): curves within noise of the closure,
 transcripts and op-stream md5s identical to it, no STALLED line on any

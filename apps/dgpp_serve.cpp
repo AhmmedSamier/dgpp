@@ -58,6 +58,7 @@
 #include <csignal>
 #include <cstdio>
 #include <filesystem>
+#include <format>
 #include <memory>
 #include <optional>
 #include <string>
@@ -69,6 +70,7 @@
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
 #include "loaders/hf_cache.hpp"
+#include "serve/cluster_config.hpp"
 #include "text/chat_template.hpp"
 #include "models/glm/fabric_engine.hpp"
 #include "models/glm/forward.hpp"
@@ -356,7 +358,10 @@ int main(int argc, char** argv) {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
 
   static constexpr const char* kUsage =
-      "usage: dgpp-serve --model ORG/NAME | --checkpoint-dir DIR\n"
+      "usage: dgpp-serve --config CLUSTER.json --rank R | --model ORG/NAME | --checkpoint-dir DIR\n"
+      "  [--config PATH]: the cluster config (deploy/cluster.json): the model,\n"
+      "    the world (the node list), this rank's peer, the ports and every\n"
+      "    engine knob below; flags given after it override\n"
       "  [--port N (default 8080; rank 0 only)]\n"
       "  [--kv-capacity TOKENS (default 8192)]\n"
       "  [--max-concurrency N (default 8, the decode-row bound)]\n"
@@ -419,6 +424,55 @@ int main(int argc, char** argv) {
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
   double stats_interval_s = 10.0;  // the throughput line's period
+  // The cluster config (2026-09-06): found first, whatever its position,
+  // because the flags after it override what it sets.
+  std::string config_path;
+  int config_rank = 0;
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::string(argv[i]) == "--config") config_path = argv[i + 1];
+    else if (std::string(argv[i]) == "--rank") config_rank = std::atoi(argv[i + 1]);
+  }
+  if (!config_path.empty()) {
+    dgpp::serve::ClusterConfig c;
+    try {
+      c = dgpp::serve::load_cluster_config(config_path);
+    } catch (const std::exception& e) {
+      DGPP_LOG_ERROR("{}", e.what());
+      return 2;
+    }
+    model_id = c.model;
+    world = c.world();
+    rank = config_rank;
+    if (rank > 0 && rank < world) peer = c.nodes[0];
+    port = static_cast<uint16_t>(c.http_port);
+    fabric_port = static_cast<uint16_t>(c.fabric_port);
+    journal_port = static_cast<uint16_t>(c.journal_port);
+    const dgpp::serve::ClusterConfig::Engine& e = c.engine;
+    max_concurrency = e.max_concurrency;
+    kv_capacity = e.kv_capacity;
+    default_max_tokens = e.default_max_tokens;
+    queue_limit = e.queue_limit;
+    max_connections = e.max_connections;
+    no_eos = e.no_eos;
+    decode_graph = e.decode_graph;
+    mtp = e.mtp;
+    graph_batch_min_live = e.graph_batch_min_live;
+    sampling_candidates = e.sampling_candidates;
+    prefix_cache_gib = e.prefix_cache_gib;
+    admission_mode = e.admission;
+    admission_window = e.admission_window;
+    bulk_pace_gbps = e.bulk_pace_gbps;
+    bulk_inflight = e.bulk_inflight;
+    rendezvous_timeout_ms = e.rendezvous_timeout_ms;
+    stats_interval_s = e.stats_interval_s;
+    reasoning_in_content = e.reasoning_in_content;
+    // The resident image cache's directory, unless the environment says.
+    if (!c.paths.resident_cache.empty())
+      setenv("DGPP_RESIDENT_CACHE_DIR",
+             dgpp::serve::expand_home(c.paths.resident_cache).c_str(), 0);
+    DGPP_LOG_INFO("config {}: model {}, world {}, rank {}, http :{}, fabric :{}, journal :{}",
+                  config_path, model_id, world, rank, port, fabric_port, journal_port);
+  }
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -462,11 +516,114 @@ int main(int argc, char** argv) {
     else if (a == "--seed") fixed_seed = std::stoull(next());
     else if (a == "--reasoning-in-content") reasoning_in_content = true;
     else if (a == "--stats-interval-s") stats_interval_s = std::stod(next());
+    else if (a == "--config") next();  // applied above, before the flags
     else {
       std::fputs(kUsage, stderr);
       return a == "--help" ? 0 : 1;
     }
   }
+  // ---- the fabric's first handshake (2026-09-06): the head pushes the
+  // world's shape. Rank 0 opens the journal and accepts the full world
+  // before building anything; the peers connect (retrying within the
+  // rendezvous window) and take the model, the world size, the fabric port
+  // and every engine knob from rank 0's settings record — their own flags
+  // or file supplied only the bootstrap (rank 0's address, the journal
+  // port, this rank) and the local paths. The bus world forms later, after
+  // the model build, exactly as before (its connect retries too).
+  std::optional<dgpp::serve::JournalWriter> journal;
+  std::optional<dgpp::serve::JournalReader> reader;
+  const auto canonical = [&] {
+    return std::format(
+        "model={} world={} fabric={} journal={} conc={} kv={} maxtok={} queue={} "
+        "eos={} graph={} mtp={} batchmin={} cand={} pcgib={} adm={} win={} "
+        "pace={} inflight={} reasoning_in_content={}",
+        model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
+        max_concurrency, kv_capacity, default_max_tokens, queue_limit,
+        no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, graph_batch_min_live,
+        sampling_candidates, prefix_cache_gib, admission_mode, admission_window,
+        bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0);
+  };
+  if (world > 1 || rank > 0) {
+    try {
+      if (rank == 0) {
+        require(world > 1, "--world must be > 1 for a fabric head");
+        require(journal_port != fabric_port,
+                "--journal-port must differ from --fabric-port");
+        journal.emplace(journal_port);
+        DGPP_LOG_INFO("journal: listening on :{} for {} peer(s)",
+                      journal->port(), world - 1);
+        journal->accept_peers(world, rendezvous_timeout_ms);
+        dgpp::serve::WorldSettings ws;
+        ws.model = model_id;
+        ws.checkpoint = ckpt;
+        ws.world = world;
+        ws.fabric_port = fabric_port;
+        ws.max_concurrency = max_concurrency;
+        ws.kv_capacity = kv_capacity;
+        ws.default_max_tokens = default_max_tokens;
+        ws.queue_limit = queue_limit;
+        ws.no_eos = no_eos;
+        ws.decode_graph = decode_graph;
+        ws.mtp = mtp;
+        ws.graph_batch_min_live = graph_batch_min_live;
+        ws.sampling_candidates = sampling_candidates;
+        ws.prefix_cache_gib = prefix_cache_gib;
+        ws.admission = admission_mode;
+        ws.admission_window = admission_window;
+        ws.bulk_pace_gbps = bulk_pace_gbps;
+        ws.bulk_inflight = bulk_inflight;
+        ws.rendezvous_timeout_ms = rendezvous_timeout_ms;
+        ws.stats_interval_s = stats_interval_s;
+        ws.reasoning_in_content = reasoning_in_content;
+        journal->broadcast(dgpp::serve::encode_journal_settings(ws));
+        DGPP_LOG_INFO("journal: settings pushed to {} peer(s): {}", world - 1,
+                      canonical());
+      } else {
+        require(!peer.empty(), "ranks > 0 need --peer (rank 0's address) or --config");
+        reader.emplace(peer, journal_port, rendezvous_timeout_ms, rank);
+        dgpp::serve::WorldSettings ws;
+        if (!dgpp::serve::wait_journal_settings(
+                &*reader, [rank] { return peer_should_stop(rank); }, &ws)) {
+          DGPP_LOG_INFO("rank {}: no settings from rank 0 — exiting", rank);
+          return 0;
+        }
+        const std::string own = canonical();
+        model_id = ws.model;
+        if (model_id.empty()) ckpt = ws.checkpoint;
+        world = ws.world;
+        fabric_port = static_cast<uint16_t>(ws.fabric_port);
+        max_concurrency = ws.max_concurrency;
+        kv_capacity = ws.kv_capacity;
+        default_max_tokens = ws.default_max_tokens;
+        queue_limit = ws.queue_limit;
+        no_eos = ws.no_eos;
+        decode_graph = ws.decode_graph;
+        mtp = ws.mtp;
+        graph_batch_min_live = ws.graph_batch_min_live;
+        sampling_candidates = ws.sampling_candidates;
+        prefix_cache_gib = ws.prefix_cache_gib;
+        admission_mode = ws.admission;
+        admission_window = ws.admission_window;
+        bulk_pace_gbps = ws.bulk_pace_gbps;
+        bulk_inflight = ws.bulk_inflight;
+        rendezvous_timeout_ms = ws.rendezvous_timeout_ms;
+        stats_interval_s = ws.stats_interval_s;
+        reasoning_in_content = ws.reasoning_in_content;
+        const std::string now = canonical();
+        if (own != now)
+          DGPP_LOG_WARN(
+              "rank {}: rank 0's settings override this rank's own — ran: {} ; "
+              "runs: {}",
+              rank, own, now);
+        else
+          DGPP_LOG_INFO("rank {}: settings from rank 0: {}", rank, now);
+      }
+    } catch (const std::exception& e) {
+      DGPP_LOG_ERROR("rank {}: the settings handshake failed: {}", rank, e.what());
+      return 1;
+    }
+  }
+
   if (!model_id.empty()) {
     std::string err;
     const std::string snapshot = dgpp::hf::model_dir(model_id, &err);
@@ -548,6 +705,17 @@ int main(int argc, char** argv) {
         graph_batch_min_live, max_concurrency);
     return 1;
   }
+
+  // The effective configuration (2026-09-06): what this rank runs after the
+  // config, the flags and (on a peer) rank 0's settings — canonicalized and
+  // digested; rank 0 puts the digest on the warm record and every peer
+  // compares its own before it serves. With the settings pushed by the head
+  // the digests agree by construction; the check stays as the assertion
+  // that they did. Rank-0-only knobs (the HTTP port, the connection cap,
+  // the sampling defaults) are left out.
+  const std::string effective_config = canonical();
+  const std::string config_digest = dgpp::serve::config_digest(effective_config);
+  DGPP_LOG_INFO("config: {} (digest {})", effective_config, config_digest);
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -701,21 +869,10 @@ int main(int argc, char** argv) {
           throw std::runtime_error("rank " + std::to_string(rank) +
                                    " bus start: " + err);
 
-        // The journal star forms AFTER the bus world: every peer's
-        // rendezvous is complete, so the journal connects land at
-        // once. Rank 0 binds a known port and accepts the full world;
-        // a short world is not servable (its first collective would
-        // wedge — better to refuse here, with the reason in the log).
-        std::optional<dgpp::serve::JournalWriter> journal;
-        std::optional<dgpp::serve::JournalReader> reader;
-        if (rank == 0) {
-          journal.emplace(journal_port);
-          DGPP_LOG_INFO("journal: listening on :{} for {} peer(s)",
-                        journal->port(), world - 1);
-          journal->accept_peers(world, rendezvous_timeout_ms);
-        } else {
-          reader.emplace(peer, journal_port, rendezvous_timeout_ms, rank);
-        }
+        // The journal star formed FIRST (above, before either side built a
+        // model): rank 0 accepted the full world and pushed the settings
+        // record, so every rank here runs the same shape. A short world was
+        // refused there, with the reason in the log.
 
         dgpp::GlmBusBoundaryReducer reducer(*bus);
         dgpp::prepare_serving_process(rank);
@@ -749,6 +906,7 @@ int main(int argc, char** argv) {
         // by the warm record; a peer's own flags yield to it.
         dgpp::sched::AdmissionPolicy peer_policy = knobs.admission;
         int peer_prefix_slots = prefix_slots;
+        std::string rank0_config;  // the warm record's config digest
         std::unique_ptr<dgpp::sched::SchedulerEngine> engine;
         if (decode_graph) {
           auto graph_engine = std::make_unique<dgpp::GlmGraphEngineAdapter>(
@@ -764,10 +922,10 @@ int main(int argc, char** argv) {
           // spinning its first collective in stall diagnostics.
           if (rank == 0) {
             journal->broadcast(dgpp::serve::encode_journal_warm(
-                knobs.admission, prefix_slots));
+                knobs.admission, prefix_slots, config_digest));
           } else if (!dgpp::serve::wait_journal_warm(
                          &*reader, [rank] { return peer_should_stop(rank); },
-                         &peer_policy, &peer_prefix_slots)) {
+                         &peer_policy, &peer_prefix_slots, &rank0_config)) {
             graph_engine.reset();
             cudaFreeHost(pick_scratch);
             bus->stop();
@@ -796,10 +954,10 @@ int main(int argc, char** argv) {
           // carries the admission policy (no capture to start here).
           if (rank == 0) {
             journal->broadcast(dgpp::serve::encode_journal_warm(
-                knobs.admission, prefix_slots));
+                knobs.admission, prefix_slots, config_digest));
           } else if (!dgpp::serve::wait_journal_warm(
                          &*reader, [rank] { return peer_should_stop(rank); },
-                         &peer_policy, &peer_prefix_slots)) {
+                         &peer_policy, &peer_prefix_slots, &rank0_config)) {
             engine.reset();
             cudaFreeHost(pick_scratch);
             bus->stop();
@@ -807,6 +965,18 @@ int main(int argc, char** argv) {
           }
         }
 
+        if (rank != 0 && !rank0_config.empty() && rank0_config != config_digest) {
+          // The configuration check (2026-09-06): this rank would run a
+          // different world than rank 0 — a different model, world size,
+          // fabric port or engine knob. The op streams could never agree;
+          // refuse before the first tick, naming what this rank runs (rank
+          // 0's log has its own line).
+          DGPP_LOG_ERROR(
+              "rank {}: configuration differs from rank 0's (digest {} vs {}); "
+              "this rank runs: {} — refusing to serve",
+              rank, config_digest, rank0_config, effective_config);
+          return 1;
+        }
         if (rank != 0) {
           // THE PEER: no HTTP, no tokenizer — journal records carry
           // prompt ids (rank 0 already tokenized). Apply, tick,

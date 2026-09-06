@@ -338,10 +338,13 @@ add_executable(unit_tests
   tests/unit/tool_grammar_test.cpp
   tests/unit/json_grammar_test.cpp
   tests/unit/net_test.cpp
+  tests/unit/cluster_config_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
-                                        dgpp_models_glm dgpp_net Threads::Threads)
+                                        dgpp_models_glm dgpp_net dgpp_serve
+                                        Threads::Threads)
+target_compile_definitions(unit_tests PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 dgpp_set_common(unit_tests)
 add_test(NAME unit_tests COMMAND unit_tests)
 
@@ -371,6 +374,7 @@ set_tests_properties(chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 # engine and frontend, no model cache). Stage 4b adds the admission
 # journal (fabric_serve.cpp over the host-only dgpp_net TCP primitives).
 add_library(dgpp_serve STATIC
+  src/serve/cluster_config.cpp
   src/serve/http_server.cpp
   src/serve/generation_service.cpp
   src/serve/fabric_serve.cpp

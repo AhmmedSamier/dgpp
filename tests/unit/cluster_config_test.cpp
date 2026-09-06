@@ -1,0 +1,117 @@
+// The cluster config (2026-09-06): the schema is checked by name, the
+// engine defaults are the binary's own, the committed deploy/cluster.json
+// parses, and the digest is stable and sensitive.
+#include <stdexcept>
+#include <string>
+
+#include "common/test.hpp"
+#include "serve/cluster_config.hpp"
+
+namespace {
+
+void require(bool cond, const std::string& what) {
+  if (!cond) throw std::runtime_error(what);
+}
+
+std::string refusal(const std::string& json) {
+  try {
+    (void)dgpp::serve::parse_cluster_config(json, "t");
+  } catch (const std::runtime_error& e) {
+    return e.what();
+  }
+  return "";
+}
+
+}  // namespace
+
+DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
+  const std::string json = R"({
+    "model": "org/name",
+    "nodes": ["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+    "ssh_user": "ops",
+    "ports": {"http": 8081, "journal": 29001},
+    "engine": {"max_concurrency": 2, "decode_graph": true, "prefix_cache_gib": 0.5,
+               "admission": "grow", "stats_interval_s": 0},
+    "paths": {"log_dir": "/var/log/dgpp"}
+  })";
+  const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(json, "t");
+  require(c.model == "org/name" && c.world() == 3 && c.nodes[0] == "10.0.0.1" &&
+              c.nodes[2] == "10.0.0.3" && c.ssh_user == "ops",
+          "the model, the nodes and the user");
+  require(c.http_port == 8081 && c.fabric_port == 29970 && c.journal_port == 29001,
+          "the ports: given ones taken, the fabric port defaulted");
+  require(c.engine.max_concurrency == 2 && c.engine.decode_graph && !c.engine.mtp &&
+              c.engine.prefix_cache_gib == 0.5 && c.engine.admission == "grow" &&
+              c.engine.stats_interval_s == 0.0,
+          "the given engine knobs");
+  // The engine defaults are the binary's flag defaults — one set of defaults.
+  require(c.engine.kv_capacity == 8192 && c.engine.default_max_tokens == 256 &&
+              c.engine.queue_limit == 64 && c.engine.max_connections == 64 &&
+              !c.engine.no_eos && c.engine.graph_batch_min_live == 0 &&
+              c.engine.sampling_candidates == 128 && c.engine.admission_window == 256 &&
+              c.engine.bulk_pace_gbps == -1.0 && c.engine.bulk_inflight == -1 &&
+              c.engine.rendezvous_timeout_ms == 120000 && !c.engine.reasoning_in_content,
+          "the engine defaults");
+  require(c.paths.log_dir == "/var/log/dgpp" && c.paths.stage_dir == "/tmp/bus4" &&
+              c.paths.release_dir == "~/dgpp/releases" && c.paths.resident_cache.empty(),
+          "the paths: given one taken, the rest defaulted");
+  // A one-node config is a world of one.
+  const dgpp::serve::ClusterConfig one =
+      dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
+  require(one.world() == 1 && one.http_port == 18080, "a one-node world");
+}
+
+DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
+  const struct {
+    const char* json;
+    const char* needle;
+  } cases[] = {
+      {R"({"nodes":["h"]})", "'model' is required"},
+      {R"({"model":"m"})", "'nodes' is required"},
+      {R"({"model":"m","nodes":[]})", "'nodes' must be a non-empty array"},
+      {R"({"model":"m","nodes":["h"],"nodez":1})", "unknown key 'nodez'"},
+      {R"({"model":"m","nodes":["h"],"engine":{"max_concurency":2}})", "unknown key 'engine.max_concurency'"},
+      {R"({"model":"m","nodes":["h"],"engine":{"max_concurrency":"2"}})", "'engine.max_concurrency' must be an integer"},
+      {R"({"model":"m","nodes":["h"],"engine":{"max_concurrency":1.5}})", "'engine.max_concurrency' must be an integer"},
+      {R"({"model":"m","nodes":["h"],"engine":{"max_concurrency":0}})", "'engine.max_concurrency' must be in [1,"},
+      {R"({"model":"m","nodes":["h"],"engine":{"mtp":"yes"}})", "'engine.mtp' must be true or false"},
+      {R"({"model":"m","nodes":["h"],"engine":{"admission":"fast"}})", "'engine.admission' must be \"full\" or \"grow\""},
+      {R"({"model":"m","nodes":["h"],"engine":{"prefix_cache_gib":-1}})", "'engine.prefix_cache_gib' must be >= 0"},
+      {R"({"model":"m","nodes":["h"],"ports":{"http":70000}})", "'ports.http' must be in [1, 65535]"},
+      {R"({"model":"m","nodes":["h"],"ports":{"fabric":5,"journal":5}})", "'ports.fabric' and 'ports.journal' must differ"},
+      {R"({"model":"m","nodes":["h"],"paths":{"logs":"/x"}})", "unknown key 'paths.logs'"},
+      {R"({"model":"m","nodes":["h"],"paths":{"log_dir":3}})", "'paths.log_dir' must be a string"},
+      {R"({"model":"m","nodes":["h"],)", "invalid JSON"},
+      {R"([1,2])", "must be an object"},
+  };
+  for (const auto& c : cases) {
+    const std::string what = refusal(c.json);
+    require(what.find(c.needle) != std::string::npos,
+            std::string("expected a refusal naming ") + c.needle + " for " + c.json +
+                " — got: " + what);
+  }
+}
+
+DGPP_TEST(cluster_config_theCommittedFileParsesAndTheDigestIsStable) {
+  const dgpp::serve::ClusterConfig lab =
+      dgpp::serve::load_cluster_config(std::string(DGPP_SOURCE_DIR) + "/deploy/cluster.json");
+  require(lab.world() == 4 && lab.nodes[0] == "192.0.2.11" &&
+              lab.model == "unsloth/GLM-5.3-Flash-FP8" && lab.http_port == 18080 &&
+              lab.engine.max_concurrency == 4 && lab.engine.kv_capacity == 8192 &&
+              lab.engine.decode_graph && lab.engine.mtp && lab.engine.queue_limit == 8,
+          "deploy/cluster.json is the production shape");
+  require(dgpp::serve::config_digest("a") == dgpp::serve::config_digest("a") &&
+              dgpp::serve::config_digest("a") != dgpp::serve::config_digest("b") &&
+              dgpp::serve::config_digest("x").size() == 16,
+          "the digest is stable, sensitive and 16 hex digits");
+  require(dgpp::serve::expand_home("~/x") != "~/x" &&
+              dgpp::serve::expand_home("/abs") == "/abs" &&
+              dgpp::serve::expand_home("~user/x") == "~user/x",
+          "~ expands, ~user and absolute paths do not change");
+  try {
+    (void)dgpp::serve::load_cluster_config("/nonexistent/cluster.json");
+    require(false, "a missing file must throw");
+  } catch (const std::runtime_error& e) {
+    require(std::string(e.what()).find("cannot read") != std::string::npos, e.what());
+  }
+}

@@ -10,46 +10,61 @@ record).
 
 ## Boot, stop, status
 
+The world is described by one file, `deploy/cluster.json` (every key,
+its default and what it does: README's "Deploying: the cluster config"
+table), and driven by one launcher:
+
 ```
-scripts/serve_run.sh up       # stage the binary to the peers, boot rank 0, then the peers; waits for READY
-scripts/serve_run.sh down     # SIGINT rank 0 (drain-on-stop), wait for the peers, fetch and md5 every rank's op stream
-scripts/serve_run.sh status   # rank 0 alive? the peers' process counts
+scripts/dgpp-cluster up       # stage the binary and the config to the peers, boot rank 0, then the peers; waits for READY
+scripts/dgpp-cluster down     # SIGINT rank 0 (drain-on-stop), wait for the peers, fetch every rank's op stream and log, md5 the streams
+scripts/dgpp-cluster status   # rank 0 alive? each peer's process count
 ```
 
-`up` stages `build-ci/dgpp-serve` to `/tmp/bus4/` on each peer (the
-directory is created, and any previous run's op-stream files there are
-removed so they can never be mistaken for this run's evidence), boots
-rank 0 (`HTTP :18080`, bus rendezvous `:29970`, journal `:29971`), waits
-for its rendezvous listener, spawns the three peers in parallel by ssh,
-and waits for rank 0's `serve: listening` line. Readiness is that line —
-with the resident image cache warm it takes 15–25 s; a first boot that
-builds the image from the checkpoint takes ~4.5 minutes.
+Options: `--config FILE` (default `deploy/cluster.json`, or
+`$DGPP_CLUSTER_CONFIG`), `--bin PATH` (default `build-ci/dgpp-serve`),
+`--log-dir DIR` (overrides `paths.log_dir`), and `--knobs "FLAGS"`, which
+appends flags to every rank's command line — flags override the file,
+which is how the evidence scripts run their sweeps. `scripts/serve_run.sh
+up|down|status` remains as a shim: `DGPP_SERVE_KNOBS` becomes `--knobs`
+and `DGPP_SERVE_LOG` becomes `--log-dir`.
+
+Every rank starts as `dgpp-serve --config <file> --rank R`: rank 0 takes
+the model, the world (the node list's length), the ports and every engine
+knob from the file; a peer takes its bootstrap (rank 0's address, the
+journal port) and local paths from the file and everything else from
+rank 0's settings record. `up` copies `dgpp-serve` and the
+config to each peer's `paths.stage_dir` (the peers' op streams from an
+earlier run are removed first so they can never be mistaken for this
+run's evidence), boots rank 0 with its working directory in
+`paths.log_dir` (`serve_r0.log`, `r0.pid`, and its op stream
+`serve_rank0.ops` at exit), waits for its rendezvous listener, spawns the
+peers in parallel by ssh, and waits for rank 0's `serve: listening` line.
+Readiness is that line — with the resident image cache warm it takes
+15–25 s; a first boot that builds the image from the checkpoint takes
+~4.5 minutes.
 
 `down` sends rank 0 SIGINT. Rank 0 drains: the door closes (new requests
 get 503 `server_shutdown`), the in-flight requests are cancelled through
 the journal at the next tick and their streams end with the shutdown error
 event, then the stop record releases the peers. `down` waits up to 240 s
 for rank 0 (a stop that lands mid-prefill is honored at the pass
-boundary), then for the peers, then fetches `serve_rank{1,2,3}.ops` from
-the peers next to rank 0's and prints their md5s: **the four hashes must
-be identical** (the §11 op-stream ritual). Logs land in `$DGPP_SERVE_LOG`
-(default `/tmp/opencode/serve_fabric`).
+boundary), then for the peers, then fetches `serve_rank{1,2,3}.ops` and
+`serve_r{1,2,3}.log` from the peers into the log dir and prints the op
+streams' md5s: **the four hashes must be identical** (the §11 op-stream
+ritual; the launcher says so, or says DIFFER).
 
-`DGPP_SERVE_KNOBS` sets the engine flags on **every** rank (they must be
-the same string on all four); the production shape is
-
-```
-DGPP_SERVE_KNOBS="--max-concurrency 4 --kv-capacity 8192 --default-max-tokens 256 --queue-limit 8 --decode-graph --mtp"
-```
-
-`--decode-graph --mtp` is the one-graph speculative step (the measured
-serving mode); `--prefix-cache-gib` sizes the prefix cache's snapshot arena
-(default 1.5 GiB → 43 slots; `--no-prefix-cache` turns it off);
-`--admission grow` enables grow-on-demand admission; `--queue-limit` is the
-admission queue bound past which the door answers 503 `overloaded`;
-`--stats-interval-s` is the period of the throughput line below (default
-10 s; 0 turns it off). `DGPP_LOG_LEVEL` (trace, debug, info, warn, error;
-default info) sets every rank's log level.
+**The head sends the settings.** Rank 0 opens the journal before it
+builds anything, accepts the full world, and pushes a settings record —
+the model, the world size, the fabric port and every engine knob that
+shapes the op stream. A peer's own flags or file supply only the
+bootstrap (rank 0's address, the journal port, its rank) and its local
+paths; everything else it takes from that record, and it logs a WARN
+naming both when its own values differed. So a knob given to one rank by
+hand cannot make a different world: the peer runs what the head runs.
+Each rank still logs the configuration it actually runs (`config: model=…
+world=… … (digest …)`), rank 0 puts the digest on the warm record, and a
+peer whose digest differs exits with status 1 — by construction this no
+longer fires; it stays as the assertion that the push worked.
 
 ## What a node needs
 
@@ -61,8 +76,10 @@ default info) sets every rank's log level.
 - Nothing privileged: the process tries `mlockall(MCL_CURRENT)` as a
   safety net and logs, rather than fails, when `RLIMIT_MEMLOCK` is finite
   (`DGPP_MLOCK=off` skips it); GPU clocks are left to the governor.
-- The staging directory `/tmp/bus4` and the log directory live in `/tmp`:
-  a reboot empties them, and `serve_run.sh up` recreates both.
+- The peers' staging directory (`paths.stage_dir`, `/tmp/bus4` in the
+  committed config) lives in `/tmp`: a reboot empties it, and
+  `dgpp-cluster up` recreates it. The log dir (`paths.log_dir`,
+  `~/dgpp/log`) persists.
 - The bus rendezvous window is 120 s from rank 0's listener appearing; the
   peers connect within ~1 s of their launch, so the order `up` encodes
   (head first, then the peers at once) is the one that works. The
@@ -99,9 +116,9 @@ drilled 2026-09-05).
   committed tokens as a prefix of its answer (the drill checks exactly
   this).
 
-Restart with `scripts/serve_run.sh up` (it sweeps any stray process
-first). A supervisor that restarts rank 0 on a nonzero exit and the peers
-on theirs gets the same behavior unattended.
+Restart with `scripts/dgpp-cluster up` (it sweeps any stray process
+first). There are no boot-time units by decision: the servers start when
+an operator, or whatever the operator runs, says `up`.
 
 The drill: `scripts/serve_failure_drill.sh <victim rank> [clients]` boots
 the world, streams from three clients, kills the victim with `kill -9` at
@@ -171,6 +188,6 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
 | HTTP (rank 0) | 18080 |
 | bus rendezvous | 29970 (rank 0 listens; peers connect) |
 | admission journal | 29971 (rank 0 listens; peers connect and send `hello <rank>`) |
-| peer binary and logs | `/tmp/bus4/dgpp-serve`, `/tmp/bus4/serve_r<rank>.log`, `/tmp/bus4/serve_rank<rank>.ops` |
-| rank 0 log and pid | `$DGPP_SERVE_LOG/serve_r0.log`, `$DGPP_SERVE_LOG/r0.pid`; its op stream `serve_rank0.ops` in the repo root at exit |
-| exit statuses | 0 orderly stop; 1 a startup or contract error; 2 rank 0 after an engine failure; 3 a peer released by its in-tick watch |
+| peer binary, config and logs | `<stage_dir>/dgpp-serve`, `<stage_dir>/cluster.json`, `<stage_dir>/serve_r<rank>.log`, `<stage_dir>/serve_rank<rank>.ops` (fetched into the log dir by `down`) |
+| rank 0 log, pid and op stream | `<log_dir>/serve_r0.log`, `<log_dir>/r0.pid`, `<log_dir>/serve_rank0.ops` at exit |
+| exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure; 3 a peer released by its in-tick watch |

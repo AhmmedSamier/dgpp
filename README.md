@@ -125,6 +125,59 @@ split of 2026-09-06):
 The server binary is `dgpp-serve` (`apps/dgpp_serve.cpp`); the GLM
 tools keep their names (`glm_gen_check`, `glm_forward_check`, …).
 
+## Deploying: the cluster config
+
+The serving world is described by one JSON file, `deploy/cluster.json`,
+that every rank and the launcher read (`dgpp-serve --config FILE --rank R`
+on each node; `scripts/dgpp-cluster up|down|status` boots, stops and
+inspects the world from it). Flags given after `--config` override the
+file. Every key is checked by name: an unknown key or a wrong type refuses
+to start. The engine defaults below are the binary's own flag defaults;
+the committed file states the production values explicitly. Every rank
+digests its effective configuration (the model, the world, the fabric
+ports and the engine knobs) and the journal's warm record refuses a world
+whose ranks disagree.
+
+| key | required | what it does | default |
+|---|---|---|---|
+| `model` | yes | the Hugging Face model id every rank loads (`--model`) | — |
+| `nodes` | yes | the ranks' hosts in rank order; `nodes[0]` is the head (rank 0: the HTTP ingress and the journal); the world size is the list's length | — |
+| `ssh_user` | no | the user the launcher uses for ssh and scp to the peers | the launcher's own user |
+| `ports.http` | no | rank 0's OpenAI-compatible HTTP port | 18080 |
+| `ports.fabric` | no | the bus rendezvous port rank 0 listens on and the peers connect to | 29970 |
+| `ports.journal` | no | the admission journal's port (must differ from `ports.fabric`) | 29971 |
+| `engine.max_concurrency` | no | request slots per rank (the decode rows; with `decode_graph`, slots × rows per request ≤ 8) | 8 |
+| `engine.kv_capacity` | no | the KV pool in tokens per rank (a prompt plus its answer must fit) | 8192 |
+| `engine.default_max_tokens` | no | `max_tokens` for requests that omit it | 256 |
+| `engine.queue_limit` | no | the admission queue's bound; beyond it the door answers 503 `overloaded` | 64 |
+| `engine.max_connections` | no | rank 0's open-connection cap | 64 |
+| `engine.no_eos` | no | ignore the model's end-of-sequence tokens (measurement runs only) | false |
+| `engine.decode_graph` | no | the one-graph decode step (the measured serving mode; needs a world larger than one) | false |
+| `engine.mtp` | no | the speculative two-token step on the decode graph (needs `decode_graph`) | false |
+| `engine.graph_batch_min_live` | no | live requests at which the adaptive engine switches from scalar graphs to the row batch; 0 means min(4, `max_concurrency`) | 0 |
+| `engine.sampling_candidates` | no | the sampled pick's per-rank candidate width in [1, 256]; narrower falls back to the exact gather more often | 128 |
+| `engine.prefix_cache_gib` | no | the prefix cache's snapshot arena per rank in GiB (one slot per session state, ~35 MiB each); 0 turns the cache off | 1.5 |
+| `engine.admission` | no | `full` reserves prompt plus `max_tokens` at admission; `grow` reserves prompt plus `admission_window` and grows on demand, shedding the youngest request at exhaustion | `full` |
+| `engine.admission_window` | no | the tokens `grow` reserves past the prompt | 256 |
+| `engine.bulk_pace_gbps` | no | the prefill all-reduce's sender pacing per queue pair; a negative value derives it from the port rate, 0 is unpaced | derived |
+| `engine.bulk_inflight` | no | bulk stripes in flight per lane; a negative value takes the bus default (4) | default |
+| `engine.rendezvous_timeout_ms` | no | how long the peers may take to join the bus world after rank 0 listens | 120000 |
+| `engine.stats_interval_s` | no | the period of the throughput line in every rank's log; 0 turns it off | 10 |
+| `engine.reasoning_in_content` | no | fold the reasoning into `content` with the model's own `</think>` instead of `reasoning_content` | false |
+| `paths.log_dir` | no | where the launcher writes the head's log, pid and every rank's fetched op stream and log | `~/dgpp/log` |
+| `paths.stage_dir` | no | where the launcher puts the peers' binary and config (a `/tmp` path is emptied by a reboot and recreated at the next `up`) | `/tmp/bus4` |
+| `paths.release_dir` | no | where installed releases live on each node (the install target) | `~/dgpp/releases` |
+| `paths.resident_cache` | no | the resident image cache directory (~80 GiB per rank); empty means the binary's default, `~/.cache/dgpp/resident`, and `DGPP_RESIDENT_CACHE_DIR` in the environment wins over both | `""` |
+
+Only rank 0 reads the `engine` keys, the model and the ports from the
+file: it pushes them to every peer over the journal before any rank builds
+its model, so the peers run what the head runs whatever their own file or
+flags say (a peer's file supplies its bootstrap, `nodes[0]` and
+`ports.journal`, and its `paths`). Sampling defaults (temperature, top-p
+and the rest) are not cluster configuration: they come from the checkpoint's `generation_config.json`
+and the per-request fields, with the `--temperature`-style flags as
+overrides for measurement runs.
+
 ## Documentation
 
 - `DESIGN.md` — validated architecture and state/collective contracts

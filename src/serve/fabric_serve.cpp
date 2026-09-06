@@ -1,5 +1,7 @@
 #include "serve/fabric_serve.hpp"
 
+#include <format>
+
 #include <cstdlib>
 
 #include <chrono>
@@ -270,11 +272,39 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
 
 std::string encode_journal_stop() { return "{\"op\":\"stop\"}"; }
 std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
-                                int prefix_slots) {
-  return "{\"op\":\"warm\",\"adm\":" +
-         std::to_string(static_cast<int>(policy.mode)) +
-         ",\"win\":" + std::to_string(policy.window_tokens) +
-         (prefix_slots > 0 ? ",\"pc\":" + std::to_string(prefix_slots) : "") + "}";
+                                int prefix_slots,
+                                const std::string& config_digest) {
+  std::string out = "{\"op\":\"warm\",\"adm\":" +
+                    std::to_string(static_cast<int>(policy.mode)) +
+                    ",\"win\":" + std::to_string(policy.window_tokens) +
+                    (prefix_slots > 0 ? ",\"pc\":" + std::to_string(prefix_slots) : "");
+  // The effective configuration's digest (2026-09-06): every peer compares
+  // its own before serving; a config-less rank 0 writes none.
+  if (!config_digest.empty()) {
+    out += ",\"cfg\":";
+    append_json_string(&out, config_digest);
+  }
+  out.push_back('}');
+  return out;
+}
+
+std::string encode_journal_settings(const WorldSettings& s) {
+  std::string out = "{\"op\":\"settings\",\"model\":";
+  append_json_string(&out, s.model);
+  out += ",\"ckpt\":";
+  append_json_string(&out, s.checkpoint);
+  out += std::format(
+      ",\"world\":{},\"fabric\":{},\"conc\":{},\"kv\":{},\"maxtok\":{},\"queue\":{},"
+      "\"eos\":{},\"graph\":{},\"mtp\":{},\"batchmin\":{},\"cand\":{},\"pcgib\":{:.17g},"
+      "\"adm\":",
+      s.world, s.fabric_port, s.max_concurrency, s.kv_capacity, s.default_max_tokens,
+      s.queue_limit, s.no_eos ? 1 : 0, s.decode_graph ? 1 : 0, s.mtp ? 1 : 0,
+      s.graph_batch_min_live, s.sampling_candidates, s.prefix_cache_gib);
+  append_json_string(&out, s.admission);
+  out += std::format(",\"win\":{},\"pace\":{:.17g},\"inflight\":{},\"rdv\":{},\"stats\":{:.17g},\"ric\":{}}}",
+      s.admission_window, s.bulk_pace_gbps, s.bulk_inflight, s.rendezvous_timeout_ms,
+      s.stats_interval_s, s.reasoning_in_content ? 1 : 0);
+  return out;
 }
 
 void check_prefix_digest(const JournalRecord& rec,
@@ -364,6 +394,46 @@ JournalRecord decode_journal_line(std::string_view line) {
     rec.stop = true;
     return rec;
   }
+  if (op == "settings") {
+    rec.settings = true;
+    WorldSettings& s = rec.world_settings;
+    const auto num = [&](const char* key) -> const dgpp::minijson::Value& {
+      const dgpp::minijson::Value& f = field(v, key, "settings");
+      if (!f.is_number())
+        throw std::runtime_error(std::string("journal: settings record with a bad ") + key);
+      return f;
+    };
+    const auto flag = [&](const char* key) {
+      const int64_t x = num(key).as_int();
+      if (x != 0 && x != 1)
+        throw std::runtime_error(std::string("journal: settings record with a bad flag ") + key);
+      return x == 1;
+    };
+    s.model = std::string(field(v, "model", "settings").as_string());
+    s.checkpoint = std::string(field(v, "ckpt", "settings").as_string());
+    s.world = static_cast<int>(num("world").as_int());
+    s.fabric_port = static_cast<int>(num("fabric").as_int());
+    s.max_concurrency = static_cast<int>(num("conc").as_int());
+    s.kv_capacity = num("kv").as_int();
+    s.default_max_tokens = static_cast<int>(num("maxtok").as_int());
+    s.queue_limit = static_cast<int>(num("queue").as_int());
+    s.no_eos = flag("eos");
+    s.decode_graph = flag("graph");
+    s.mtp = flag("mtp");
+    s.graph_batch_min_live = static_cast<int>(num("batchmin").as_int());
+    s.sampling_candidates = static_cast<int>(num("cand").as_int());
+    s.prefix_cache_gib = num("pcgib").as_double();
+    s.admission = std::string(field(v, "adm", "settings").as_string());
+    s.admission_window = static_cast<int>(num("win").as_int());
+    s.bulk_pace_gbps = num("pace").as_double();
+    s.bulk_inflight = static_cast<int>(num("inflight").as_int());
+    s.rendezvous_timeout_ms = static_cast<int>(num("rdv").as_int());
+    s.stats_interval_s = num("stats").as_double();
+    s.reasoning_in_content = flag("ric");
+    if (s.world < 2 || s.max_concurrency < 1 || s.kv_capacity < 1 || (s.admission != "full" && s.admission != "grow"))
+      throw std::runtime_error("journal: settings record with impossible values");
+    return rec;
+  }
   if (op == "warm") {
     rec.warm = true;
     if (const dgpp::minijson::Value* adm = v.find("adm")) {
@@ -380,6 +450,11 @@ JournalRecord decode_journal_line(std::string_view line) {
       if (!pc->is_number() || pc->as_int() < 0)
         throw std::runtime_error("journal: warm record with a bad prefix slot count");
       rec.prefix_slots = static_cast<int>(pc->as_int());
+    }
+    if (const dgpp::minijson::Value* cfg = v.find("cfg")) {
+      if (!cfg->is_string() || cfg->as_string().empty())
+        throw std::runtime_error("journal: warm record with a bad config digest");
+      rec.config_digest = std::string(cfg->as_string());
     }
     return rec;
   }
@@ -777,9 +852,31 @@ bool JournalReader::read_line(const std::function<bool()>& should_stop,
   }
 }
 
+bool wait_journal_settings(JournalReader* reader,
+                           const std::function<bool()>& should_stop,
+                           WorldSettings* out) {
+  std::string line;
+  if (!reader->read_line(should_stop, &line)) {
+    DGPP_LOG_INFO("journal: rank 0's stream ended before the settings record — exiting");
+    return false;
+  }
+  const JournalRecord rec = decode_journal_line(line);
+  if (rec.stop) {
+    DGPP_LOG_INFO("journal: stop record before the settings record — exiting");
+    return false;
+  }
+  if (!rec.settings)
+    throw std::runtime_error(
+        "journal: rank 0's first record was not the settings record — protocol "
+        "order violated (§11); fabric emergency");
+  *out = rec.world_settings;
+  return true;
+}
+
 bool wait_journal_warm(JournalReader* reader,
                        const std::function<bool()>& should_stop,
-                       dgpp::sched::AdmissionPolicy* policy, int* prefix_slots) {
+                       dgpp::sched::AdmissionPolicy* policy, int* prefix_slots,
+                       std::string* config_digest) {
   std::string line;
   if (!reader->read_line(should_stop, &line)) {
     DGPP_LOG_INFO("journal: rank 0's stream ended before the warm record — "
@@ -797,6 +894,7 @@ bool wait_journal_warm(JournalReader* reader,
         "violated (§11); fabric emergency");
   if (policy != nullptr && rec.has_admission) *policy = rec.admission;
   if (prefix_slots != nullptr) *prefix_slots = rec.prefix_slots;
+  if (config_digest != nullptr) *config_digest = rec.config_digest;
   return true;
 }
 

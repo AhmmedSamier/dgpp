@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""dgpp-cluster: the serving world's launcher over the cluster config
+(2026-09-06, the productionizing pass).
+
+    dgpp-cluster up     [--config F] [--bin PATH] [--log-dir DIR] [--knobs "FLAGS"]
+    dgpp-cluster down   [--config F] [--log-dir DIR]
+    dgpp-cluster status [--config F] [--log-dir DIR]
+
+The config (deploy/cluster.json by default, or $DGPP_CLUSTER_CONFIG) names
+the model, the nodes (rank = index; node 0 is the head, where this runs),
+the ports, the engine knobs and the paths. Every rank starts as
+`dgpp-serve --config <file> --rank R`; `--knobs` appends flags to every
+rank's command line (flags override the file — the evidence scripts' knob
+strings); on the peers rank 0's settings record overrides both, and the
+journal's warm record asserts that every rank's effective configuration
+digest matches rank 0's.
+
+`up` stages the binary and the config to each peer's stage_dir, boots rank
+0 (head first: its journal listens at once and pushes the world's settings
+to the peers before anyone builds a model — a peer's own flags or file
+supply only the bootstrap and the local paths), spawns the peers in
+parallel over timeout-wrapped ssh (observed by pgrep, never by ssh's exit
+code), and waits for rank 0's listening line. `down`
+sends rank 0 SIGINT (drain-on-stop: the stop record releases the peers),
+waits up to 240 s (a stop that lands mid-prefill is honored at the pass
+boundary), sweeps stragglers, fetches every rank's op stream and log into
+the log dir and prints the op streams' md5s — the four must be identical.
+Files in the log dir: r0.pid, serve_r<rank>.log, serve_rank<rank>.ops.
+"""
+import argparse
+import hashlib
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+
+
+def expand(p):
+    return os.path.expanduser(p)
+
+
+def load_config(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+class Cluster:
+    def __init__(self, args):
+        self.config_path = os.path.abspath(args.config)
+        self.cfg = load_config(self.config_path)
+        self.nodes = self.cfg["nodes"]
+        self.user = self.cfg.get("ssh_user") or os.environ.get("USER", "")
+        paths = self.cfg.get("paths", {})
+        self.log_dir = expand(args.log_dir or paths.get("log_dir", "~/dgpp/log"))
+        self.stage_dir = paths.get("stage_dir", "/tmp/bus4")
+        self.bin = os.path.abspath(args.bin) if getattr(args, "bin", None) else os.path.join(ROOT, "build-ci", "dgpp-serve")
+        self.knobs = (getattr(args, "knobs", "") or "").split()
+        ports = self.cfg.get("ports", {})
+        self.http = int(ports.get("http", 18080))
+        self.fabric = int(ports.get("fabric", 29970))
+        self.journal = int(ports.get("journal", 29971))
+        os.makedirs(self.log_dir, exist_ok=True)
+
+    # ---- helpers -----------------------------------------------------------
+    def target(self, host):
+        return f"{self.user}@{host}" if self.user else host
+
+    def ssh(self, host, cmd, timeout=20):
+        try:
+            return subprocess.run(["timeout", str(timeout), "ssh", *SSH_OPTS, self.target(host), cmd],
+                                  capture_output=True, text=True).returncode == 0
+        except OSError:
+            return False
+
+    def ssh_out(self, host, cmd, timeout=20):
+        try:
+            r = subprocess.run(["timeout", str(timeout), "ssh", *SSH_OPTS, self.target(host), cmd],
+                               capture_output=True, text=True)
+            return r.stdout.strip()
+        except OSError:
+            return ""
+
+    def scp_to(self, host, src, dst, timeout=60):
+        return subprocess.run(["timeout", str(timeout), "scp", "-q", *SSH_OPTS, src, f"{self.target(host)}:{dst}"],
+                              capture_output=True).returncode == 0
+
+    def scp_from(self, host, src, dst, timeout=30):
+        return subprocess.run(["timeout", str(timeout), "scp", "-q", *SSH_OPTS, f"{self.target(host)}:{src}", dst],
+                              capture_output=True).returncode == 0
+
+    @property
+    def peers(self):
+        return list(enumerate(self.nodes))[1:]
+
+    @property
+    def pid_file(self):
+        return os.path.join(self.log_dir, "r0.pid")
+
+    def head_pid(self):
+        try:
+            with open(self.pid_file) as f:
+                return int(f.read().strip())
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def alive(pid):
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def wait_log(self, path, needle, timeout_s, label):
+        waited = 0
+        while waited < timeout_s:
+            try:
+                with open(path, errors="replace") as f:
+                    if needle in f.read():
+                        print(f"{label}: ok ({waited}s)")
+                        return True
+            except OSError:
+                pass
+            time.sleep(2)
+            waited += 2
+        print(f"TIMEOUT waiting for {label} ({timeout_s}s)")
+        return False
+
+    def tail(self, path, n):
+        try:
+            with open(path, errors="replace") as f:
+                lines = f.read().splitlines()
+            for line in lines[-n:]:
+                print("  " + line[:200])
+        except OSError:
+            pass
+
+    def sweep_peers(self):
+        for _, host in self.peers:
+            self.ssh(host, "pkill -x dgpp-serve")
+
+    def peers_gone(self):
+        return all(not self.ssh(host, "pgrep -x dgpp-serve") for _, host in self.peers)
+
+    # ---- up ----------------------------------------------------------------
+    def stage(self):
+        print("=== staging dgpp-serve and the config to the peers")
+        for rank, host in self.peers:
+            # The stage dir may live in /tmp (a reboot empties it); a previous
+            # run's op stream must never be hashed as this run's evidence.
+            if not self.ssh(host, f"mkdir -p {self.stage_dir} && rm -f {self.stage_dir}/serve_rank*.ops"):
+                print(f"STAGE FAILED to {host} (ssh)")
+                return False
+            if not self.scp_to(host, self.bin, f"{self.stage_dir}/dgpp-serve") or \
+               not self.scp_to(host, self.config_path, f"{self.stage_dir}/cluster.json"):
+                print(f"STAGE FAILED to {host}")
+                return False
+        return True
+
+    def boot_head(self):
+        print(f"=== rank 0 on {self.nodes[0]} (HTTP :{self.http}, fabric :{self.fabric}, journal :{self.journal})")
+        ops = os.path.join(self.log_dir, "serve_rank0.ops")
+        if os.path.exists(ops):
+            os.remove(ops)  # rank 0 writes its op stream to its cwd at exit; never hash a stale one
+        env = dict(os.environ)
+        env.setdefault("DGPP_LOG_LEVEL", "info")
+        log = open(os.path.join(self.log_dir, "serve_r0.log"), "wb")
+        proc = subprocess.Popen([self.bin, "--config", self.config_path, "--rank", "0", *self.knobs],
+                                cwd=self.log_dir, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+        with open(self.pid_file, "w") as f:
+            f.write(str(proc.pid))
+        print(f"head pid {proc.pid}")
+        return proc
+
+    def spawn_peer(self, rank, host):
+        knobs = " ".join(self.knobs)
+        cmd = (f"cd {self.stage_dir} && DGPP_LOG_LEVEL=${{DGPP_LOG_LEVEL:-info}} nohup ./dgpp-serve "
+               f"--config {self.stage_dir}/cluster.json --rank {rank} {knobs} > serve_r{rank}.log 2>&1 &")
+        subprocess.run(["timeout", "25", "ssh", *SSH_OPTS, self.target(host), cmd], capture_output=True)
+
+    def up(self):
+        if not self.stage():
+            self.sweep_peers()
+            return 1
+        self.boot_head()
+        r0 = os.path.join(self.log_dir, "serve_r0.log")
+        # The journal star forms first: rank 0 listens on the journal at once
+        # and pushes the settings to the peers before anyone builds a model;
+        # the bus world forms after the builds (the peers' connect retries
+        # within the rendezvous window).
+        if self.peers and not self.wait_log(r0, "journal: listening", 90, "journal listening"):
+            self.tail(r0, 5)
+            self.sweep_peers()
+            return 1
+        if self.peers:
+            print("=== peers " + " ".join(h for _, h in self.peers))
+            threads = [threading.Thread(target=self.spawn_peer, args=(rank, host)) for rank, host in self.peers]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            for rank, host in self.peers:
+                if not self.ssh(host, "pgrep -x dgpp-serve"):
+                    print(f"WARN: peer rank {rank} not observed on {host}")
+        if not self.wait_log(r0, f"listening on :{self.http}", 600, "rank 0 serving"):
+            self.tail(r0, 10)
+            self.sweep_peers()
+            pid = self.head_pid()
+            if self.alive(pid):
+                os.kill(pid, signal.SIGKILL)
+            return 1
+        print(f"READY — curl http://{self.nodes[0]}:{self.http}/v1/models  (stop: dgpp-cluster down)")
+        return 0
+
+    # ---- down --------------------------------------------------------------
+    def down(self):
+        pid = self.head_pid()
+        if self.alive(pid):
+            print(f"=== SIGINT rank 0 ({pid}) — the stop record releases the peers")
+            os.kill(pid, signal.SIGINT)
+            for _ in range(240):
+                if not self.alive(pid):
+                    break
+                time.sleep(1)
+            if self.alive(pid):
+                print("rank 0 wedged; SIGKILL")
+                os.kill(pid, signal.SIGKILL)
+        if self.peers:
+            print("=== waiting for the peers to drain")
+            for _ in range(30):
+                if self.peers_gone():
+                    break
+                time.sleep(2)
+            if not self.peers_gone():
+                print("sweeping wedged peers")
+                self.sweep_peers()
+        # The §11 evidence: every rank's op stream, and its log for the record.
+        for rank, host in self.peers:
+            if not self.scp_from(host, f"{self.stage_dir}/serve_rank{rank}.ops",
+                                 os.path.join(self.log_dir, f"serve_rank{rank}.ops")):
+                print(f"WARN: no serve_rank{rank}.ops on {host}")
+            self.scp_from(host, f"{self.stage_dir}/serve_r{rank}.log",
+                          os.path.join(self.log_dir, f"serve_r{rank}.log"))
+        print("=== op-stream identity (every rank)")
+        digests = {}
+        for rank in range(len(self.nodes)):
+            path = os.path.join(self.log_dir, f"serve_rank{rank}.ops")
+            try:
+                with open(path, "rb") as f:
+                    d = hashlib.md5(f.read()).hexdigest()
+            except OSError:
+                print(f"WARN: no {path}")
+                continue
+            digests[rank] = d
+            print(f"{d}  {path}")
+        if len(digests) == len(self.nodes) and len(set(digests.values())) == 1:
+            print(f"op streams: identical across {len(digests)} ranks")
+        elif digests:
+            print("op streams: DIFFER or missing — the §11 ritual FAILED")
+        print(f"=== logs in {self.log_dir}")
+        return 0
+
+    # ---- status ------------------------------------------------------------
+    def status(self):
+        pid = self.head_pid()
+        print(f"rank 0 ({self.nodes[0]}): " + (f"alive ({pid})" if self.alive(pid) else "DOWN"))
+        self.tail(os.path.join(self.log_dir, "serve_r0.log"), 2)
+        for rank, host in self.peers:
+            print(f"rank {rank} ({host}): {self.ssh_out(host, 'pgrep -x dgpp-serve | wc -l') or '?'} process(es)")
+        return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="the serving world's launcher over the cluster config")
+    ap.add_argument("verb", choices=["up", "down", "status"])
+    ap.add_argument("--config", default=os.environ.get("DGPP_CLUSTER_CONFIG", os.path.join(ROOT, "deploy", "cluster.json")))
+    ap.add_argument("--bin", default=None, help="the dgpp-serve binary (default build-ci/dgpp-serve)")
+    ap.add_argument("--log-dir", default=None, help="overrides paths.log_dir")
+    ap.add_argument("--knobs", default="", help="flags appended to every rank's command line")
+    args = ap.parse_args()
+    c = Cluster(args)
+    return getattr(c, args.verb)()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -6,7 +6,8 @@
 //
 // THE PROTOCOL (newline-framed JSON over the TCP star; one line, one
 // record):
-//   {"op":"warm","adm":{...},"pc":N}
+//   {"op":"settings", ...the world's shape, rank 0 -> every peer first...}
+//   {"op":"warm","adm":{...},"pc":N,"cfg":"<digest>"}
 //   {"op":"tick","s":[{"id":"…","p":[ids],"m":N,"b":[...],"nc":1}],"c":["id"],"pd":D,"od":F}
 //   {"op":"stop"}
 // The continuous drift check (M9, 2026-09-05): every tick record's "od"
@@ -128,14 +129,51 @@ std::string encode_journal_stop();
 // and the peers take them from here.
 std::string encode_journal_warm(
     const dgpp::sched::AdmissionPolicy& policy = dgpp::sched::AdmissionPolicy{},
-    int prefix_slots = 0);
+    int prefix_slots = 0,
+    const std::string& config_digest = "");
+
+// The settings record (2026-09-06, the productionizing pass): what rank 0
+// pushes to every peer over the journal BEFORE anything builds — the first
+// record a peer reads. The head is the one source of the world's shape:
+// the model, the world size, the fabric port and every engine knob that
+// shapes the op stream; a peer's own flags or file yield to it (logged
+// when they differed). The effective-config digest on the warm record
+// then holds by construction and stays as an assertion.
+struct WorldSettings {
+  std::string model;       // the HF model id ("" when rank 0 ran from a directory)
+  std::string checkpoint;  // rank 0's checkpoint directory (a peer without an id uses it)
+  int world = 1;
+  int fabric_port = 0;
+  int max_concurrency = 0;
+  int64_t kv_capacity = 0;
+  int default_max_tokens = 0;
+  int queue_limit = 0;
+  bool no_eos = false;
+  bool decode_graph = false;
+  bool mtp = false;
+  int graph_batch_min_live = 0;
+  int sampling_candidates = 0;
+  double prefix_cache_gib = 0.0;
+  std::string admission;
+  int admission_window = 0;
+  double bulk_pace_gbps = 0.0;
+  int bulk_inflight = 0;
+  int rendezvous_timeout_ms = 0;
+  double stats_interval_s = 0.0;
+  bool reasoning_in_content = false;
+  bool operator==(const WorldSettings&) const = default;
+};
+std::string encode_journal_settings(const WorldSettings& s);
 
 struct JournalRecord {
   bool stop = false;
   bool warm = false;
+  bool settings = false;  // the settings record (2026-09-06)
+  WorldSettings world_settings;
   bool has_admission = false;  // warm: the policy rode along
   dgpp::sched::AdmissionPolicy admission;
   int prefix_slots = 0;          // warm: rank 0's prefix cache slots
+  std::string config_digest;     // warm: rank 0's effective-config digest ("cfg", 2026-09-06)
   bool has_prefix_digest = false;  // tick: rank 0's digest rode along
   uint64_t prefix_digest = 0;
   bool has_op_digest = false;      // tick: rank 0's op-stream fold rode along
@@ -251,7 +289,15 @@ class JournalReader {
 bool wait_journal_warm(JournalReader* reader,
                        const std::function<bool()>& should_stop,
                        dgpp::sched::AdmissionPolicy* policy = nullptr,
-                       int* prefix_slots = nullptr);
+                       int* prefix_slots = nullptr,
+                       std::string* config_digest = nullptr);
+// The peer's first read (2026-09-06): rank 0's settings record, sent right
+// after the journal star forms and before either side builds a model.
+// Returns false when the stream ended or a stop arrived first; throws when
+// the first record is anything else (a protocol violation).
+bool wait_journal_settings(JournalReader* reader,
+                           const std::function<bool()>& should_stop,
+                           WorldSettings* out);
 
 // The peer serving loop: apply each record, then tick — the exact
 // mirror of rank 0's engine passes (§11). Returns on the stop record,

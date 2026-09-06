@@ -22,7 +22,7 @@
 set -u
 ROOT=/home/user/workspace/dgpp
 SR=$ROOT/scripts/serve_run.sh
-LOG="${DGPP_SERVE_LOG:-/tmp/opencode/serve_fabric}"
+LOG="${DGPP_SERVE_LOG:-$HOME/dgpp/log}"
 PEERS=(192.0.2.12 192.0.2.13 192.0.2.14)
 RANK0=192.0.2.11
 HTTP="http://$RANK0:18080"
