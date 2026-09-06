@@ -289,7 +289,9 @@ std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
 }
 
 std::string encode_journal_settings(const WorldSettings& s) {
-  std::string out = "{\"op\":\"settings\",\"model\":";
+  std::string out = "{\"op\":\"settings\",\"ver\":";
+  append_json_string(&out, s.version);
+  out += ",\"model\":";
   append_json_string(&out, s.model);
   out += ",\"ckpt\":";
   append_json_string(&out, s.checkpoint);
@@ -409,6 +411,7 @@ JournalRecord decode_journal_line(std::string_view line) {
         throw std::runtime_error(std::string("journal: settings record with a bad flag ") + key);
       return x == 1;
     };
+    s.version = std::string(field(v, "ver", "settings").as_string());
     s.model = std::string(field(v, "model", "settings").as_string());
     s.checkpoint = std::string(field(v, "ckpt", "settings").as_string());
     s.world = static_cast<int>(num("world").as_int());
@@ -854,7 +857,7 @@ bool JournalReader::read_line(const std::function<bool()>& should_stop,
 
 bool wait_journal_settings(JournalReader* reader,
                            const std::function<bool()>& should_stop,
-                           WorldSettings* out) {
+                           WorldSettings* out, const std::string& my_version) {
   std::string line;
   if (!reader->read_line(should_stop, &line)) {
     DGPP_LOG_INFO("journal: rank 0's stream ended before the settings record — exiting");
@@ -869,6 +872,10 @@ bool wait_journal_settings(JournalReader* reader,
     throw std::runtime_error(
         "journal: rank 0's first record was not the settings record — protocol "
         "order violated (§11); fabric emergency");
+  if (!my_version.empty() && rec.world_settings.version != my_version)
+    throw std::runtime_error("journal: rank 0 runs dgpp " + rec.world_settings.version +
+                             ", this rank runs " + my_version +
+                             " — a mixed-version world refuses to form");
   *out = rec.world_settings;
   return true;
 }

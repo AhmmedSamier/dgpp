@@ -282,7 +282,16 @@ Suggested order for what remains, each item's design in its section:
 3. M9 hardening — CLOSED 2026-09-05 (failure semantics and drills, the
    one-hour soak, HTTP fuzzing under ASan, the continuous drift check, the
    sign-off report; the M9 section). What follows is ranked in
-   `docs/next_steps.md`; its second item's first slice landed 2026-09-06:
+   `docs/next_steps.md`. Its item 0, productionizing, is COMPLETE
+   (2026-09-06, four commits): the layout split (`dgpp::serve`,
+   `dgpp::sched`, `dgpp::sample`, `dgpp::text`, GLM under `src/models/glm/`,
+   the binary `dgpp-serve`); the cluster config (`deploy/cluster.json`,
+   `dgpp-serve --config`, the head pushing the world's settings to every
+   peer over the journal before anything builds); the versioned artifact
+   (`scripts/release.sh`, the version stamped into the binary and refused
+   across a mixed world) and its install (`dgpp-cluster install`, `current`
+   flipped per node, `up` running the installed release). Its second
+   item's first slice landed the same day:
    every rank's log carries one aggregate throughput line per 10 s
    (`--stats-interval-s`; prefill and decode tokens per second, ms per
    step, tokens per request-step, live and queued counts, the pool, the

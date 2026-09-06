@@ -71,6 +71,7 @@
 #include "common/log.hpp"
 #include "loaders/hf_cache.hpp"
 #include "serve/cluster_config.hpp"
+#include "dgpp_version.hpp"
 #include "text/chat_template.hpp"
 #include "models/glm/fabric_engine.hpp"
 #include "models/glm/forward.hpp"
@@ -356,9 +357,18 @@ int main(int argc, char** argv) {
   using dgpp::GlmTextConfig;
 
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--version") {
+      std::printf("dgpp-serve %s (git %s, cuda %d.%d)\n", DGPP_VERSION, DGPP_GIT_SHA,
+                  CUDART_VERSION / 1000, (CUDART_VERSION % 1000) / 10);
+      return 0;
+    }
+  }
+  DGPP_LOG_INFO("dgpp-serve {} (git {})", DGPP_VERSION, DGPP_GIT_SHA);
 
   static constexpr const char* kUsage =
       "usage: dgpp-serve --config CLUSTER.json --rank R | --model ORG/NAME | --checkpoint-dir DIR\n"
+      "  [--version]: print the version and exit\n"
       "  [--config PATH]: the cluster config (deploy/cluster.json): the model,\n"
       "    the world (the node list), this rank's peer, the ports and every\n"
       "    engine knob below; flags given after it override\n"
@@ -554,6 +564,7 @@ int main(int argc, char** argv) {
                       journal->port(), world - 1);
         journal->accept_peers(world, rendezvous_timeout_ms);
         dgpp::serve::WorldSettings ws;
+        ws.version = DGPP_VERSION;
         ws.model = model_id;
         ws.checkpoint = ckpt;
         ws.world = world;
@@ -583,7 +594,8 @@ int main(int argc, char** argv) {
         reader.emplace(peer, journal_port, rendezvous_timeout_ms, rank);
         dgpp::serve::WorldSettings ws;
         if (!dgpp::serve::wait_journal_settings(
-                &*reader, [rank] { return peer_should_stop(rank); }, &ws)) {
+                &*reader, [rank] { return peer_should_stop(rank); }, &ws,
+                DGPP_VERSION)) {
           DGPP_LOG_INFO("rank {}: no settings from rank 0 — exiting", rank);
           return 0;
         }

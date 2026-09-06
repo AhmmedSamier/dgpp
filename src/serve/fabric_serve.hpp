@@ -140,6 +140,7 @@ std::string encode_journal_warm(
 // when they differed). The effective-config digest on the warm record
 // then holds by construction and stays as an assertion.
 struct WorldSettings {
+  std::string version;     // rank 0's dgpp version: a mixed-version world refuses to form
   std::string model;       // the HF model id ("" when rank 0 ran from a directory)
   std::string checkpoint;  // rank 0's checkpoint directory (a peer without an id uses it)
   int world = 1;
@@ -295,9 +296,12 @@ bool wait_journal_warm(JournalReader* reader,
 // after the journal star forms and before either side builds a model.
 // Returns false when the stream ended or a stop arrived first; throws when
 // the first record is anything else (a protocol violation).
+// `my_version` (optional): this rank's dgpp version; a record from another
+// version throws — a mixed-version world refuses to form.
 bool wait_journal_settings(JournalReader* reader,
                            const std::function<bool()>& should_stop,
-                           WorldSettings* out);
+                           WorldSettings* out,
+                           const std::string& my_version = "");
 
 // The peer serving loop: apply each record, then tick — the exact
 // mirror of rank 0's engine passes (§11). Returns on the stop record,

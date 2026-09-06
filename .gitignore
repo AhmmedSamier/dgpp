@@ -41,3 +41,4 @@ core.*
 glm_gen.tokens.txt
 # glm_serve writes rank 0's op stream beside the binary; serve_run.sh moves it into the run log
 /serve_rank*.ops
+dist/

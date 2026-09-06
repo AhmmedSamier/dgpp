@@ -66,6 +66,21 @@ world=… … (digest …)`), rank 0 puts the digest on the warm record, and a
 peer whose digest differs exits with status 1 — by construction this no
 longer fires; it stays as the assertion that the push worked.
 
+## Install, upgrade, roll back
+
+`scripts/release.sh` builds the release preset and packs
+`dist/dgpp-<version>.tar.zst` (README's "Release and install" has the
+layout); `scripts/dgpp-cluster install <tarball>` copies it to every node
+in the config, unpacks it under `paths.release_dir`, verifies every file
+against `MANIFEST.sha256`, and flips `<release_dir>/current` to it
+atomically. From then on `up` runs `current/bin/dgpp-serve` on every rank
+and stages only the config. An upgrade is `down`, `install`, `up`; a
+rollback is the same with the previous tarball, or flipping the symlink
+by hand. `dgpp-cluster releases` shows what each node has and points at;
+`dgpp-serve --version` prints a binary's version, and rank 0 puts its
+version on the journal's settings record so a peer of another version
+exits before its first tick rather than form a mixed world.
+
 ## What a node needs
 
 - The checkpoint in the Hugging Face cache (`--model ORG/NAME` resolves it

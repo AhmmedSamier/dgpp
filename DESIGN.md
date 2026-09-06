@@ -2652,8 +2652,9 @@ first collective in stall diagnostics; a tick before the warm record, or a
 warm record inside the serving loop, is a protocol violation and dies
 loudly. Since 2026-09-06 the journal star forms FIRST — before either side
 builds a model — and its first record is rank 0's settings (`"op":
-"settings"`: the model, the world size, the fabric port and every engine
-knob that shapes the op stream); a peer applies it whole, its own flags
+"settings"`: rank 0's dgpp version, the model, the world size, the fabric
+port and every engine knob that shapes the op stream; a peer of another
+version refuses before its first tick); a peer applies it whole, its own flags
 or file having supplied only the bootstrap and its local paths, so the
 head is the one source of the world's shape. The warm record then
 carries rank 0's effective-configuration digest (`"cfg"`), which every

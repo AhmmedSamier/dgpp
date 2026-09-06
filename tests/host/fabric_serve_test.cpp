@@ -240,6 +240,7 @@ class Client {
 // ends the peer cleanly; a tick first is a protocol violation.
 void test_settings_handshake() {
   dgpp::serve::WorldSettings sent;
+  sent.version = "0.1.0+gtest";
   sent.model = "org/model";
   sent.world = 2;
   sent.fabric_port = 29970;
@@ -264,12 +265,36 @@ void test_settings_handshake() {
     bool ok = false;
     std::thread peer([&] {
       dgpp::serve::JournalReader reader("127.0.0.1", 29938, 5000, 1);
-      ok = dgpp::serve::wait_journal_settings(&reader, [&] { return stop.load(); }, &got);
+      ok = dgpp::serve::wait_journal_settings(&reader, [&] { return stop.load(); }, &got,
+                                              "0.1.0+gtest");
     });
     writer.accept_peers(2, 5000);
     writer.broadcast(dgpp::serve::encode_journal_settings(sent));
     peer.join();
     require(ok && got == sent, "the peer's first read is rank 0's settings, whole");
+  }
+  {
+    // A peer of another version refuses: a mixed-version world cannot form.
+    dgpp::serve::JournalWriter writer(29941);
+    std::atomic<bool> stop{false};
+    std::string violation;
+    std::thread peer([&] {
+      dgpp::serve::JournalReader reader("127.0.0.1", 29941, 5000, 1);
+      dgpp::serve::WorldSettings got;
+      try {
+        (void)dgpp::serve::wait_journal_settings(&reader, [&] { return stop.load(); }, &got,
+                                                 "0.1.0+gother");
+      } catch (const std::runtime_error& e) {
+        violation = e.what();
+      }
+    });
+    writer.accept_peers(2, 5000);
+    writer.broadcast(dgpp::serve::encode_journal_settings(sent));
+    peer.join();
+    require(violation.find("mixed-version") != std::string::npos &&
+                violation.find("0.1.0+gtest") != std::string::npos &&
+                violation.find("0.1.0+gother") != std::string::npos,
+            "a different version refuses naming both: " + violation);
   }
   {
     dgpp::serve::JournalWriter writer(29939);
@@ -384,6 +409,7 @@ void test_journal_codec() {
     // The settings record (2026-09-06): every field round-trips, the doubles
     // exactly; a record with an impossible world is refused.
     dgpp::serve::WorldSettings ws;
+    ws.version = "0.1.0+gabc";
     ws.model = "org/model";
     ws.checkpoint = "/ckpt/dir";
     ws.world = 4;

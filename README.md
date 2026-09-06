@@ -125,6 +125,42 @@ split of 2026-09-06):
 The server binary is `dgpp-serve` (`apps/dgpp_serve.cpp`); the GLM
 tools keep their names (`glm_gen_check`, `glm_forward_check`, …).
 
+## Release and install
+
+A release is one versioned tarball, installed once per node and run many
+times; nothing is copied at boot.
+
+```bash
+scripts/release.sh                                 # build the release preset, stage, verify, pack
+scripts/dgpp-cluster install dist/dgpp-<version>.tar.zst   # every node: unpack, verify, flip `current`
+scripts/dgpp-cluster up                            # runs <release_dir>/current/bin/dgpp-serve on every rank
+scripts/dgpp-cluster releases                      # what each node has installed and points at
+```
+
+The version is the tree's, stamped at build time by `cmake/version.cmake`
+into the binary (`dgpp-serve --version`; `0.1.0+g<sha12>`, `.dirty` when
+the tree had uncommitted changes) and sent on the journal's settings
+record, so a world of mixed versions refuses to form. Inside the tarball:
+
+| path | what |
+|---|---|
+| `bin/dgpp-serve` | the server, rpath `$ORIGIN/../lib` |
+| `lib/libcudart.so.13`, `lib/libcublasLt.so.13` | the CUDA runtime it was built against |
+| `scripts/dgpp-cluster`, `scripts/serve_api_check.py` | the launcher and the request-field check |
+| `deploy/cluster.example.json` | the committed lab config, as a template |
+| `doc/README.md`, `doc/operations.md` | this page and the operator's page |
+| `MANIFEST`, `MANIFEST.sha256` | version, git sha, CUDA, build host and date; every other file's checksum |
+
+Beyond the tarball a node needs the NVIDIA driver, rdma-core, libnl and
+libstdc++, all part of the DGX OS image, plus the checkpoint and resident
+image caches on its local NVMe. `install` unpacks under `paths.release_dir`
+(`~/dgpp/releases/dgpp-<version>/`), checks every file against the
+manifest and flips the `current` symlink atomically; rolling back is
+installing the previous tarball. There are no boot-time units by decision:
+the world starts when an operator says `up`. With no release installed,
+`up` stages the development binary `build-ci/dgpp-serve` to the peers as
+before.
+
 ## Deploying: the cluster config
 
 The serving world is described by one JSON file, `deploy/cluster.json`,

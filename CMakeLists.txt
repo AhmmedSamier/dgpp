@@ -316,6 +316,34 @@ if(DGPP_ENABLE_IBV)
                                              Threads::Threads)
   dgpp_set_common(dgpp_serve_app)
   set_target_properties(dgpp_serve_app PROPERTIES OUTPUT_NAME dgpp-serve)
+  # The version stamp (2026-09-06): cmake/version.cmake rewrites the header
+  # at every build only when the tree's sha or dirtiness changed.
+  set(DGPP_VERSION_HEADER ${CMAKE_BINARY_DIR}/generated/dgpp_version.hpp)
+  add_custom_target(dgpp_version
+    BYPRODUCTS ${DGPP_VERSION_HEADER}
+    COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+            -DOUT=${DGPP_VERSION_HEADER} -DBASE_VERSION=${PROJECT_VERSION}
+            -P ${CMAKE_SOURCE_DIR}/cmake/version.cmake
+    COMMENT "stamping dgpp_version.hpp")
+  add_dependencies(dgpp_serve_app dgpp_version)
+  target_include_directories(dgpp_serve_app PRIVATE ${CMAKE_BINARY_DIR}/generated)
+  # The install layout (the versioned artifact, scripts/release.sh): the
+  # binary finds the CUDA runtime it was built against beside itself, so
+  # a node needs only the driver, rdma-core, libnl and libstdc++.
+  set_target_properties(dgpp_serve_app PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+  install(TARGETS dgpp_serve_app RUNTIME DESTINATION bin)
+  foreach(_lib cudart cublasLt)
+    get_target_property(_loc CUDA::${_lib} IMPORTED_LOCATION)
+    if(NOT _loc)
+      get_target_property(_loc CUDA::${_lib} LOCATION)
+    endif()
+    get_filename_component(_real "${_loc}" REALPATH)
+    install(FILES "${_real}" DESTINATION lib
+            RENAME lib${_lib}.so.${CUDAToolkit_VERSION_MAJOR})
+  endforeach()
+  install(PROGRAMS scripts/dgpp-cluster scripts/serve_api_check.py DESTINATION scripts)
+  install(FILES deploy/cluster.json DESTINATION deploy RENAME cluster.example.json)
+  install(FILES README.md docs/operations.md DESTINATION doc)
 endif()
 
 enable_testing()
