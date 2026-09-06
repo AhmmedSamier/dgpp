@@ -1,0 +1,71 @@
+#pragma once
+// The real ModelFrontend: the Stage 3/3b exact tokenizer and chat
+// template behind the service's seam (M6 Stage 4). The service never
+// links CUDA; this adapter is likewise host-only.
+//
+// Chat rendering: the service's template globals (minijson DOM: the
+// normalized OpenAI messages array plus tools / reasoning_effort /
+// clear_thinking when the request carried them) convert to the
+// template's Value model via text::Value::from_minijson — member order
+// preserved, exactly what the template interpreter consumes — with
+// add_generation_prompt=true (this is a generation request).
+//
+// Markers (M6 6f): the template's reasoning and tool-call tokens looked
+// up by text among the tokenizer's added tokens at construction — the
+// service's parser keys on their ids, the forced tool_choice prefix on
+// their text.
+#include <string>
+#include <vector>
+
+#include "loaders/minijson.hpp"
+#include "text/chat_template.hpp"
+#include "text/tokenizer.hpp"
+#include "text/tool_parser.hpp"
+#include "serve/generation_service.hpp"
+
+namespace dgpp::serve {
+
+class TextFrontend : public ModelFrontend {
+ public:
+  TextFrontend(const dgpp::text::Tokenizer* tok,
+              const dgpp::text::ChatTemplate* tpl)
+      : tok_(tok), tpl_(tpl) {
+    if (tok_ == nullptr || tpl_ == nullptr)
+      throw std::invalid_argument(
+          "TextFrontend: tokenizer and chat template must both be loaded");
+    markers_ = dgpp::text::ChatMarkers::from_tokenizer(*tok_);
+  }
+
+  std::vector<int64_t> encode_text(std::string_view text) const override {
+    return tok_->encode(text);
+  }
+
+  std::string decode_ids(const std::vector<int64_t>& ids) const override {
+    // skip_special_tokens=true — the SSE content contract (EOS and the
+    // other special tokens never appear in generated text).
+    return tok_->decode(ids, /*skip_special_tokens=*/true);
+  }
+
+  std::string render_chat(const minijson::Value& globals) const override {
+    dgpp::text::Value::Members members;
+    for (const minijson::Member& m : globals.members())
+      members.emplace_back(m.key, dgpp::text::Value::from_minijson(m.value));
+    members.emplace_back("add_generation_prompt",
+                         dgpp::text::Value::boolean(true));
+    return tpl_->render(dgpp::text::Value::map_value(std::move(members)));
+  }
+
+  dgpp::text::ChatMarkers markers() const override { return markers_; }
+  std::vector<int64_t> boundary_token_ids() const override {
+    std::vector<int64_t> ids;
+    for (const dgpp::text::ChatMarker& m : markers_.role_markers) ids.push_back(m.id);
+    return ids;
+  }
+
+ private:
+  const dgpp::text::Tokenizer* tok_;
+  const dgpp::text::ChatTemplate* tpl_;
+  dgpp::text::ChatMarkers markers_;
+};
+
+}  // namespace dgpp::serve

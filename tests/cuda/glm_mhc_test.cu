@@ -21,8 +21,8 @@
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
 #include "kernels/glm_mhc_launch.hpp"
-#include "models/glm_mhc.hpp"
-#include "models/glm_mhc_reference.hpp"
+#include "models/glm/mhc.hpp"
+#include "models/glm/mhc_reference.hpp"
 
 namespace {
 

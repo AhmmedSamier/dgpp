@@ -19,8 +19,8 @@
 
 #include "loaders/hf_cache.hpp"
 #include "loaders/safetensors.hpp"
-#include "models/glm_binding.hpp"
-#include "models/glm_config.hpp"
+#include "models/glm/binding.hpp"
+#include "models/glm/config.hpp"
 
 namespace {
 

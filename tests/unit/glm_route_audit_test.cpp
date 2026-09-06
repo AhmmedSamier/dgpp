@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "common/test.hpp"
-#include "models/glm_route_audit.hpp"
+#include "models/glm/route_audit.hpp"
 
 namespace {
 

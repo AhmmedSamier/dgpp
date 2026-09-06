@@ -80,17 +80,17 @@
 #include "common/log.hpp"
 #include "loaders/hf_cache.hpp"
 #include "loaders/minijson.hpp"
-#include "models/glm_chat_template.hpp"
-#include "models/glm_fabric_engine.hpp"
-#include "models/glm_forward.hpp"
-#include "models/glm_gen_engine.hpp"
-#include "models/glm_graph_check.hpp"
-#include "models/glm_sampler.hpp"
-#include "models/glm_scheduler.hpp"
-#include "models/glm_speculative.hpp"
-#include "models/glm_step_timing.hpp"
-#include "models/glm_tokenizer.hpp"
-#include "models/glm_tp_bus.hpp"
+#include "text/chat_template.hpp"
+#include "models/glm/fabric_engine.hpp"
+#include "models/glm/forward.hpp"
+#include "models/glm/gen_engine.hpp"
+#include "models/glm/graph_check.hpp"
+#include "sample/sampler.hpp"
+#include "sched/scheduler.hpp"
+#include "models/glm/speculative.hpp"
+#include "models/glm/step_timing.hpp"
+#include "text/tokenizer.hpp"
+#include "models/glm/tp_bus.hpp"
 #include "net/collective_bus.hpp"
 
 namespace fs = std::filesystem;
@@ -172,7 +172,7 @@ class ThreadProbe {
 };
 
 // Real-mesh bus budgets + the fabric pick now live in the shared seam
-// (models/glm_fabric_engine.hpp) — glm_serve and this app ride the
+// (models/glm_fabric_engine.hpp) — dgpp-serve and this app ride the
 // same closure, so the pick path cannot drift between the smoke
 // instrument and the serving deployment.
 
@@ -242,11 +242,11 @@ uint64_t fnv1a64(const std::string& bytes) {
 // object per line ('#' comments and blanks skipped); throws with the
 // line number on any malformed entry. The SAME bytes must reach every
 // rank (fabric_run.sh --stage-file stages it).
-std::vector<dgpp::glm::SchedulerRequest> parse_manifest(
+std::vector<dgpp::sched::SchedulerRequest> parse_manifest(
     const std::string& manifest, const std::string& display_path,
-    int default_steps, const dgpp::GlmTokenizer& tok, const fs::path& ckpt) {
-  std::vector<dgpp::glm::SchedulerRequest> requests;
-  std::unique_ptr<dgpp::glm::ChatTemplate> chat_tpl;
+    int default_steps, const dgpp::text::Tokenizer& tok, const fs::path& ckpt) {
+  std::vector<dgpp::sched::SchedulerRequest> requests;
+  std::unique_ptr<dgpp::text::ChatTemplate> chat_tpl;
   std::istringstream in(manifest);
   std::string line;
   int line_no = 0;
@@ -297,32 +297,32 @@ std::vector<dgpp::glm::SchedulerRequest> parse_manifest(
     std::vector<int64_t> prompt;
     if (chat != nullptr) {
       if (!chat_tpl)
-        chat_tpl = std::make_unique<dgpp::glm::ChatTemplate>(
-            dgpp::glm::ChatTemplate::load(
+        chat_tpl = std::make_unique<dgpp::text::ChatTemplate>(
+            dgpp::text::ChatTemplate::load(
                 (ckpt / "chat_template.jinja").string()));
-      std::vector<dgpp::glm::Value> messages;
+      std::vector<dgpp::text::Value> messages;
       if (system != nullptr && !system->as_string().empty()) {
-        dgpp::glm::Value::Members sys_msg;
+        dgpp::text::Value::Members sys_msg;
         sys_msg.emplace_back("role",
-                             dgpp::glm::Value::string_value("system"));
+                             dgpp::text::Value::string_value("system"));
         sys_msg.emplace_back(
-            "content", dgpp::glm::Value::string_value(
+            "content", dgpp::text::Value::string_value(
                            std::string(system->as_string())));
-        messages.push_back(dgpp::glm::Value::map_value(std::move(sys_msg)));
+        messages.push_back(dgpp::text::Value::map_value(std::move(sys_msg)));
       }
-      dgpp::glm::Value::Members user_msg;
-      user_msg.emplace_back("role", dgpp::glm::Value::string_value("user"));
+      dgpp::text::Value::Members user_msg;
+      user_msg.emplace_back("role", dgpp::text::Value::string_value("user"));
       user_msg.emplace_back(
           "content",
-          dgpp::glm::Value::string_value(std::string(chat->as_string())));
-      messages.push_back(dgpp::glm::Value::map_value(std::move(user_msg)));
-      dgpp::glm::Value::Members globals;
+          dgpp::text::Value::string_value(std::string(chat->as_string())));
+      messages.push_back(dgpp::text::Value::map_value(std::move(user_msg)));
+      dgpp::text::Value::Members globals;
       globals.emplace_back(
-          "messages", dgpp::glm::Value::list_value(std::move(messages)));
+          "messages", dgpp::text::Value::list_value(std::move(messages)));
       globals.emplace_back("add_generation_prompt",
-                           dgpp::glm::Value::boolean(true));
+                           dgpp::text::Value::boolean(true));
       const std::string rendered = chat_tpl->render(
-          dgpp::glm::Value::map_value(std::move(globals)));
+          dgpp::text::Value::map_value(std::move(globals)));
       prompt = tok.encode(rendered);
       DGPP_LOG_INFO("request '{}': chat template {} rendered to {} ids",
                     rid, chat_tpl->source_hash(), prompt.size());
@@ -334,7 +334,7 @@ std::vector<dgpp::glm::SchedulerRequest> parse_manifest(
     }
     if (prompt.empty()) fail("request '" + rid + "' produced no tokens");
 
-    dgpp::glm::SchedulerRequest r;
+    dgpp::sched::SchedulerRequest r;
     r.id = rid;
     r.prompt = std::move(prompt);
     r.max_steps = steps;
@@ -390,7 +390,7 @@ SchedSizing sched_sizing(const GlmTextConfig& cfg, int world,
 
 // The admission policy for the manifest runs and the forecast (M6 6d):
 // --admission full|grow, --admission-window N.
-dgpp::glm::AdmissionPolicy g_admission;
+dgpp::sched::AdmissionPolicy g_admission;
 
 // The bulk all-reduce bench (2026-09-04, the prefill fold's cost): the
 // world forms, no model — bf16 all-reduces of 2, 4, .. g_bulk_bench_mb MiB,
@@ -412,7 +412,7 @@ int g_prefill_repeat = 1;
 // without a GPU (--sched-plan uses it before any device work).
 void print_memory_receipt(const GlmTextConfig& cfg, int world,
                           int max_requests, const SchedSizing& z,
-                          const std::vector<dgpp::glm::SchedulerRequest>& reqs,
+                          const std::vector<dgpp::sched::SchedulerRequest>& reqs,
                           bool with_forecast) {
   DsaConfig dsa = cfg.dsa_config();
   dsa.tp_size = world;
@@ -504,7 +504,7 @@ void print_memory_receipt(const GlmTextConfig& cfg, int world,
         "at tick top and the youngest sheds (finish length) at exhaustion{}",
         window, admitted_grow, reqs.size(), held_grow, z.blocks_total,
         deferred_grow,
-        g_admission.mode == dgpp::glm::AdmissionPolicy::Mode::kGrowOnDemand
+        g_admission.mode == dgpp::sched::AdmissionPolicy::Mode::kGrowOnDemand
             ? " — THIS RUN's policy"
             : " — not this run's policy (--admission grow selects it)");
   }
@@ -516,11 +516,11 @@ void print_memory_receipt(const GlmTextConfig& cfg, int world,
 
 // The process's sampling mode (M6 6b). Absent params: the exact greedy
 // loop every gate pins — this diagnostic does NOT apply the checkpoint's
-// stochastic defaults on its own (glm_serve does); --sample or any
+// stochastic defaults on its own (dgpp-serve does); --sample or any
 // override opts in, at the model's defaults with the overrides applied.
 // `seed` is the fixed seed (request i of a manifest draws from seed + i).
 struct SamplingRun {
-  std::optional<dgpp::glm_sample::Params> params;
+  std::optional<dgpp::sample::Params> params;
   uint64_t seed = 0;
   bool on() const { return params.has_value(); }
 };
@@ -532,7 +532,7 @@ struct SamplingRun {
 // scripts/fabric_xrank.py and fabric_xcript.py read). The plain loops use
 // it at every step, eager or under the T=1 graph (the pick rides between
 // windows); the speculative loop uses it for its prefill pick and its
-// eager row picks. The in-graph pick is GlmDevicePicker (a recorded node)
+// eager row picks. The in-graph pick is DevicePicker (a recorded node)
 // — the other driver, by nature.
 class HostPick {
  public:
@@ -547,12 +547,12 @@ class HostPick {
   // `context` (the penalties' count table) or greedy; `what` and `s` name
   // the step in the log. The Candidate's logit is the winner's when this
   // rank holds it (world 1 always), else -inf.
-  dgpp::glm_sample::Candidate pick(const GlmDiagnosticModel::Outputs& o,
+  dgpp::sample::Candidate pick(const GlmDiagnosticModel::Outputs& o,
                                    const char* what, int s,
                                    const std::vector<int32_t>& context) {
     if (sampling_.on()) {
-      const dgpp::glm_sample::Result r =
-          sample_(o, *sampling_.params, rng_, context, nullptr);
+      const dgpp::sample::Result r =
+          sample_(o, *sampling_.params, rng_, context, nullptr, nullptr);
       if (world_ == 1) {
         DGPP_LOG_INFO("[gen] sampled token {} logprob {:.4f} (counter {})",
                       r.token, r.logprob, rng_.counter);
@@ -566,7 +566,7 @@ class HostPick {
       return {r.token, -INFINITY};
     }
     const std::vector<float>& fslice = o.logits;
-    const dgpp::glm_sample::Candidate local = dgpp::glm_sample::local_max(
+    const dgpp::sample::Candidate local = dgpp::sample::local_max(
         fslice.data(), o.lm_vocab_count, o.lm_vocab_begin);
     if (world_ == 1) return local;  // the full head: the argmax is the pick
     // The slice's runner-up: with the four ranks' lines side by side
@@ -591,10 +591,10 @@ class HostPick {
   // Greedy picks over several rows' local maxima (the speculative loop's
   // prefill and eager row picks): the same bus merge, one collective.
   std::vector<int32_t> pick_rows(
-      const std::vector<dgpp::glm_sample::Candidate>& locals) {
+      const std::vector<dgpp::sample::Candidate>& locals) {
     if (world_ == 1) {
       std::vector<int32_t> out;
-      for (const dgpp::glm_sample::Candidate& c : locals) out.push_back(c.id);
+      for (const dgpp::sample::Candidate& c : locals) out.push_back(c.id);
       return out;
     }
     return dgpp::bus_greedy_pick_rows(*bus_, rank_, world_, locals, scratch_,
@@ -609,7 +609,7 @@ class HostPick {
   GenEngineAdapter::Sample sample_;
   SamplingRun sampling_;
   int64_t vocab_;
-  dgpp::glm_sample::Rng rng_;
+  dgpp::sample::Rng rng_;
 };
 
 // Pinned words for the sampler's two collectives (the candidate/LSE fold
@@ -628,8 +628,8 @@ struct PinnedWords {
   PinnedWords& operator=(const PinnedWords&) = delete;
 };
 
-const char* sched_status_name(const dgpp::glm::Scheduler::Result& r) {
-  using S = dgpp::glm::Scheduler::Result::Status;
+const char* sched_status_name(const dgpp::sched::Scheduler::Result& r) {
+  using S = dgpp::sched::Scheduler::Result::Status;
   switch (r.status) {
     case S::kDone: return "done";
     case S::kCancelled: return "cancelled";
@@ -642,9 +642,9 @@ const char* sched_status_name(const dgpp::glm::Scheduler::Result& r) {
 // body; only the pick differs (full-head argmax vs the bus merge).
 int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
                   int world, int rank, uint16_t port, const std::string& peer,
-                  std::vector<dgpp::glm::SchedulerRequest> requests,
+                  std::vector<dgpp::sched::SchedulerRequest> requests,
                   int max_requests, int64_t kv_capacity, bool resident,
-                  bool no_eos, const dgpp::GlmTokenizer& tok,
+                  bool no_eos, const dgpp::text::Tokenizer& tok,
                   const std::string& out_prefix, int rendezvous_timeout_ms,
                   int64_t vocab, uint64_t manifest_hash,
                   const SamplingRun& sampling) {
@@ -653,7 +653,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
   // draws from seed + i so the transcripts are reproducible per request.
   for (size_t i = 0; i < requests.size(); ++i) {
     requests[i].sampling = sampling.on() ? *sampling.params
-                                         : dgpp::glm_sample::greedy_params();
+                                         : dgpp::sample::greedy_params();
     requests[i].seed = sampling.seed + i;
   }
   for (const auto& r : requests) {
@@ -673,7 +673,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
   std::vector<int64_t> eos =
       no_eos ? std::vector<int64_t>{} : cfg.eos_token_ids;
 
-  const auto log_results = [&](dgpp::glm::Scheduler& sched) {
+  const auto log_results = [&](dgpp::sched::Scheduler& sched) {
     for (size_t i = 0; i < requests.size(); ++i) {
       const auto& spec = requests[i];
       const auto& res = sched.results()[i];
@@ -709,12 +709,12 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
     // inside the closure — no per-token allocation).
     GenEngineAdapter engine(&model, max_requests, dgpp::make_w1_pick(vocab),
                             dgpp::make_w1_sample(vocab));
-    dgpp::glm::Scheduler sched(&engine, eos, 0, g_admission);
+    dgpp::sched::Scheduler sched(&engine, eos, 0, g_admission);
     // Submit COPIES: the manifest entries stay intact for the audit
     // trail below (log_results reads spec.id/spec.prompt AFTER the run —
     // moving into the scheduler would leave husks there).
     for (const auto& r : requests) {
-      dgpp::glm::SchedulerRequest copy = r;
+      dgpp::sched::SchedulerRequest copy = r;
       sched.submit(std::move(copy));
     }
     const auto t0 = std::chrono::steady_clock::now();
@@ -760,7 +760,7 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
         resident ? "resident" : "streaming", max_requests);
 
     // The shared fabric pick (glm_fabric_engine.hpp) — the same
-    // closure glm_serve runs in production; this app's runs are its
+    // closure dgpp-serve runs in production; this app's runs are its
     // regression gate.
     GenEngineAdapter engine(&model, max_requests,
                             dgpp::make_fabric_pick(bus.get(), rank, world,
@@ -768,11 +768,11 @@ int run_scheduler(const GlmTextConfig& cfg, const std::string& ckpt,
                             dgpp::make_fabric_sample(
                                 bus.get(), rank, world, sample_prefix.data,
                                 sample_gather.data, vocab));
-    dgpp::glm::Scheduler sched(&engine, eos, 0, g_admission);
+    dgpp::sched::Scheduler sched(&engine, eos, 0, g_admission);
     // Submit COPIES (the manifest entries stay intact for the audit
     // trail below — log_results reads spec.id/spec.prompt after the run).
     for (const auto& r : requests) {
-      dgpp::glm::SchedulerRequest copy = r;
+      dgpp::sched::SchedulerRequest copy = r;
       sched.submit(std::move(copy));
     }
     const auto t0 = std::chrono::steady_clock::now();
@@ -815,7 +815,7 @@ double log_teacher_stats(int rank, int step,
                          int64_t target, int32_t argmax) {
   const std::vector<float>& slice = out.logits;
   const double lse =
-      dgpp::glm_sample::slice_logsumexp(slice.data(), out.lm_vocab_count);
+      dgpp::sample::slice_logsumexp(slice.data(), out.lm_vocab_count);
   double lmax = -INFINITY;
   for (int i = 0; i < out.lm_vocab_count; ++i)
     lmax = std::max(lmax,
@@ -893,12 +893,12 @@ class SamplingMassSummary {
 std::array<double, dgpp::kSamplingProfileTopKs.size()>
 local_sampling_topk_masses(const GlmDiagnosticModel::Outputs& out,
                            double logsumexp) {
-  const std::vector<dgpp::glm_sample::Candidate> top =
-      dgpp::glm_sample::local_topk(
+  const std::vector<dgpp::sample::Candidate> top =
+      dgpp::sample::local_topk(
           out.logits.data(), out.lm_vocab_count, out.lm_vocab_begin,
           dgpp::kSamplingProfileMaxK);
   const std::vector<double> masses =
-      dgpp::glm_sample::topk_probability_masses(
+      dgpp::sample::topk_probability_masses(
           top, logsumexp,
           std::vector<int>(dgpp::kSamplingProfileTopKs.begin(),
                            dgpp::kSamplingProfileTopKs.end()));
@@ -910,7 +910,7 @@ local_sampling_topk_masses(const GlmDiagnosticModel::Outputs& out,
 // ---------------------------------------------------------------------------
 // --mtp: greedy speculative decode on the fabric (DESIGN §9), the on-device
 // step. With --decode-graph EVERY step is ONE graph replay: the T=2 verify
-// of [next, draft], the recorded pick behind the head (GlmDevicePicker: the
+// of [next, draft], the recorded pick behind the head (DevicePicker: the
 // local argmax, the candidate gather as a collective node, the verdict),
 // the commit (the rejected row's rollback and the position advance, on the
 // device), the draft block's fixed two rows off the verdict (the second a
@@ -944,7 +944,7 @@ void log_gen_line(int rank, int gen_index, int vocab_begin, int vocab_count,
 }
 
 void log_row_pick(int rank, int gen_index, const GlmDiagnosticModel::Outputs& o,
-                  int row, const dgpp::glm_sample::Candidate& local,
+                  int row, const dgpp::sample::Candidate& local,
                   int32_t token) {
   const float* slice =
       o.logits.data() + static_cast<size_t>(row) * o.lm_vocab_count;
@@ -957,7 +957,7 @@ void log_row_pick(int rank, int gen_index, const GlmDiagnosticModel::Outputs& o,
 
 void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
                      int world, const GlmTextConfig& cfg,
-                     const dgpp::GlmTokenizer& tok,
+                     const dgpp::text::Tokenizer& tok,
                      const std::vector<int64_t>& prompt, int steps,
                      bool no_eos, bool decode_graph, uint16_t* pick_scratch,
                      std::vector<int64_t>* generated, std::string* text,
@@ -975,10 +975,10 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   };
   // The picker outlives the graph it records into (its buffers are the
   // recorded nodes' baked addresses). Slot 0: the verify; slot 1: the draft.
-  dgpp::GlmDevicePicker picker(bus, rank, world, 60000);
+  dgpp::DevicePicker picker(bus, rank, world, 60000);
   const auto pick_inputs = [&](int rows, int slot,
-                               const dgpp::GlmPickVerdict* row_select) {
-    dgpp::GlmDevicePicker::Inputs in;
+                               const dgpp::PickVerdict* row_select) {
+    dgpp::DevicePicker::Inputs in;
     in.logits = model.device_logits();
     in.rows = rows;
     in.vocab_count = model.lm_vocab_count();
@@ -997,7 +997,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   const double prefill_ms = ms_since(t_pre);
   DGPP_LOG_INFO("rank {} prefill: {} tokens in {:.0f}ms (main stack + draft "
                 "block)", rank, prompt.size(), prefill_ms);
-  const std::vector<dgpp::glm_sample::Candidate> pre_local =
+  const std::vector<dgpp::sample::Candidate> pre_local =
       dgpp::local_row_maxes(pre, 1);
   *forward_ms_total = prefill_ms;
   dgpp::step_timing::reset();
@@ -1012,16 +1012,16 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   // block's argmax draft over the accepted rows; two draws per step.
   if (sampling.on()) {
     const auto pick_rows =
-        [&](const std::vector<dgpp::glm_sample::Candidate>& locals) {
+        [&](const std::vector<dgpp::sample::Candidate>& locals) {
           return host.pick_rows(locals);
         };
     const dgpp::GenEngineAdapter::Sample row1 = dgpp::make_fabric_sample(
         &bus, rank, world, sample_prefix_scratch, sample_gather_scratch,
         cfg.vocab_size);
-    dgpp::glm_sample::Rng rng{sampling.seed, 0};
+    dgpp::sample::Rng rng{sampling.seed, 0};
     const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
-    const dgpp::glm_sample::Result first =
-        row1(pre, *sampling.params, rng, prompt_context, nullptr);
+    const dgpp::sample::Result first =
+        row1(pre, *sampling.params, rng, prompt_context, nullptr, nullptr);
     DGPP_LOG_INFO("[gen] rank {} prefill+sample: token {} logprob {:.4f}",
                   rank, first.token, first.logprob);
     dgpp::SampledSpeculator spec(
@@ -1123,11 +1123,11 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
 
   // One step. Returns the verify's verdict with the state, positions and
   // (graph) the next draft settled; `draft` is updated for the next step.
-  const auto step = [&](const std::vector<int64_t>& fed) -> dgpp::GlmPickVerdict {
+  const auto step = [&](const std::vector<int64_t>& fed) -> dgpp::PickVerdict {
     const auto t0 = Clock::now();
     if (graph_exec == nullptr) {
       (void)model.session_verify(0, fed);
-      const dgpp::GlmPickVerdict v =
+      const dgpp::PickVerdict v =
           picker.run(model.stream(), pick_inputs(2, 0, nullptr));
       if (v.accepted < 2) model.session_rollback(0, v.accepted);
       st.step_ms += ms_since(t0);
@@ -1139,7 +1139,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
     require(bus.graph_replay_finish(60000, &gerr),
             "graph_replay_finish: " + gerr);
-    const dgpp::GlmPickVerdict v = picker.verdict(0);
+    const dgpp::PickVerdict v = picker.verdict(0);
     draft = picker.verdict(1).next;
     model.session_graph_settle(0, v.accepted);
     st.step_ms += ms_since(t0);
@@ -1155,7 +1155,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   while (!stop && static_cast<int>(generated->size()) < steps) {
     const auto t_step = Clock::now();
     const std::vector<int64_t> fed{next, draft};
-    const dgpp::GlmPickVerdict v = step(fed);
+    const dgpp::PickVerdict v = step(fed);
     ++st.steps;
     st.accepted += v.accepted - 1;
     // Commit: fed[0] was decided last step; a standing row 1 makes the
@@ -1166,7 +1166,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
       const int gen_index = static_cast<int>(generated->size());
       const int32_t committed = static_cast<int32_t>(fed[static_cast<size_t>(r)]);
       commit(committed);
-      const dgpp::GlmPickLocal& local = picker.local(r, 0);
+      const dgpp::PickLocal& local = picker.local(r, 0);
       log_gen_line(rank, gen_index + 1, model.lm_vocab_begin(),
                    model.lm_vocab_count(), local.best_id, local.best_logit,
                    local.second_logit, v.winners[r]);
@@ -1217,7 +1217,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         const std::vector<int64_t>& prompt, int steps, bool resident,
         bool incremental, bool no_eos, bool decode_graph, bool mtp,
         bool sampling_profile,
-        const dgpp::GlmTokenizer& tok,
+        const dgpp::text::Tokenizer& tok,
         const std::string& out_prefix, int rendezvous_timeout_ms,
         int64_t kv_capacity, const std::vector<int64_t>& teacher,
         const SamplingRun& sampling) {
@@ -1268,7 +1268,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                       dgpp::make_w1_sample(cfg.vocab_size), sampling,
                       cfg.vocab_size);
       std::vector<int32_t> context(prompt.begin(), prompt.end());
-      dgpp::glm_sample::Candidate best = picker.pick(out, "prefill+pick", 0, context);
+      dgpp::sample::Candidate best = picker.pick(out, "prefill+pick", 0, context);
       context.push_back(best.id);
       DGPP_LOG_INFO("[gen] prefill: {} tokens in {:.0f}ms", prompt.size(),
                     prefill_ms);
@@ -1315,8 +1315,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                 "w1 head must be full-vocab");
         const float* row = out.logits.data() +
                            static_cast<size_t>(T - 1) * cfg.vocab_size;
-        const dgpp::glm_sample::Candidate best =
-            dgpp::glm_sample::local_max(row, cfg.vocab_size, 0);
+        const dgpp::sample::Candidate best =
+            dgpp::sample::local_max(row, cfg.vocab_size, 0);
         toks.push_back(best.id);
         generated.push_back(best.id);
         generated_text += tok.decode(best.id, /*skip_special_tokens=*/false);
@@ -1461,7 +1461,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                             cfg.eos_token_ids.end();
     };
     // The pick (HostPick, the one host driver): the fabric sampler is the
-    // same closure glm_serve's eager engine runs (M6 6b), the greedy pick
+    // same closure dgpp-serve's eager engine runs (M6 6b), the greedy pick
     // the bus merge; context = prompt + generated so far.
     HostPick picker(world, rank, bus.get(), pick_scratch,
                     dgpp::make_fabric_sample(bus.get(), rank, world,
@@ -1851,8 +1851,8 @@ int main(int argc, char** argv) {
         return 1;
       }
       g_admission.mode = m == "grow"
-                             ? dgpp::glm::AdmissionPolicy::Mode::kGrowOnDemand
-                             : dgpp::glm::AdmissionPolicy::Mode::kFullReserve;
+                             ? dgpp::sched::AdmissionPolicy::Mode::kGrowOnDemand
+                             : dgpp::sched::AdmissionPolicy::Mode::kFullReserve;
     } else if (a == "--admission-window") {
       g_admission.window_tokens = std::stoi(next());
       if (g_admission.window_tokens < 1) {
@@ -1987,7 +1987,7 @@ int main(int argc, char** argv) {
     SamplingRun sampling;
     sampling.seed = seed;
     if (sample) {
-      dgpp::glm_sample::Params p;
+      dgpp::sample::Params p;
       p.temperature = generation_defaults.effective_temperature();
       p.top_p = generation_defaults.effective_top_p();
       p.top_k = generation_defaults.effective_top_k();
@@ -1999,7 +1999,7 @@ int main(int argc, char** argv) {
       if (top_k) p.top_k = *top_k;
       if (min_p) p.min_p = *min_p;
       if (repetition_penalty) p.repetition_penalty = *repetition_penalty;
-      dgpp::glm_sample::validate_params(p);
+      dgpp::sample::validate_params(p);
       if (p.temperature > 0.0f) sampling.params = p;
       DGPP_LOG_INFO(
           "sampling: temperature {} top_p {} top_k {} min_p {} "
@@ -2030,7 +2030,7 @@ int main(int argc, char** argv) {
       return 1;
     }
     std::vector<int64_t> prompt;
-    const dgpp::GlmTokenizer tok = dgpp::GlmTokenizer::load(
+    const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
         (fs::path(ckpt) / "tokenizer.json").string());
 
     // ---- scheduler mode (M6 Stage 2b) --------------------------------
@@ -2039,7 +2039,7 @@ int main(int argc, char** argv) {
       // bytes that were parsed.
       const std::string manifest = read_whole_file(requests_path);
       const uint64_t manifest_hash = fnv1a64(manifest);
-      std::vector<dgpp::glm::SchedulerRequest> requests = parse_manifest(
+      std::vector<dgpp::sched::SchedulerRequest> requests = parse_manifest(
           manifest, requests_path, steps, tok, fs::path(ckpt));
       const int n = static_cast<int>(requests.size());
       const int slots =
@@ -2071,25 +2071,25 @@ int main(int argc, char** argv) {
     }
 
     if (!chat_text.empty()) {
-      const dgpp::glm::ChatTemplate chat_tpl = dgpp::glm::ChatTemplate::load(
+      const dgpp::text::ChatTemplate chat_tpl = dgpp::text::ChatTemplate::load(
           (fs::path(ckpt) / "chat_template.jinja").string());
-      std::vector<dgpp::glm::Value> messages;
+      std::vector<dgpp::text::Value> messages;
       if (!system_prompt.empty()) {
-        dgpp::glm::Value::Members sys_msg;
-        sys_msg.emplace_back("role", dgpp::glm::Value::string_value("system"));
-        sys_msg.emplace_back("content", dgpp::glm::Value::string_value(system_prompt));
-        messages.push_back(dgpp::glm::Value::map_value(std::move(sys_msg)));
+        dgpp::text::Value::Members sys_msg;
+        sys_msg.emplace_back("role", dgpp::text::Value::string_value("system"));
+        sys_msg.emplace_back("content", dgpp::text::Value::string_value(system_prompt));
+        messages.push_back(dgpp::text::Value::map_value(std::move(sys_msg)));
       }
-      dgpp::glm::Value::Members user_msg;
-      user_msg.emplace_back("role", dgpp::glm::Value::string_value("user"));
-      user_msg.emplace_back("content", dgpp::glm::Value::string_value(chat_text));
-      messages.push_back(dgpp::glm::Value::map_value(std::move(user_msg)));
-      dgpp::glm::Value::Members globals;
+      dgpp::text::Value::Members user_msg;
+      user_msg.emplace_back("role", dgpp::text::Value::string_value("user"));
+      user_msg.emplace_back("content", dgpp::text::Value::string_value(chat_text));
+      messages.push_back(dgpp::text::Value::map_value(std::move(user_msg)));
+      dgpp::text::Value::Members globals;
       globals.emplace_back("messages",
-                           dgpp::glm::Value::list_value(std::move(messages)));
-      globals.emplace_back("add_generation_prompt", dgpp::glm::Value::boolean(true));
+                           dgpp::text::Value::list_value(std::move(messages)));
+      globals.emplace_back("add_generation_prompt", dgpp::text::Value::boolean(true));
       const std::string rendered = chat_tpl.render(
-          dgpp::glm::Value::map_value(std::move(globals)));
+          dgpp::text::Value::map_value(std::move(globals)));
       prompt = tok.encode(rendered);
       DGPP_LOG_INFO("chat template {} rendered to {} bytes, {} ids",
                     chat_tpl.source_hash(), rendered.size(), prompt.size());

@@ -17,7 +17,7 @@
 
 #include <cuda_runtime.h>
 
-#include "kernels/glm_pick.hpp"
+#include "kernels/pick.hpp"
 
 namespace dgpp {
 
@@ -43,7 +43,7 @@ struct GlmSpecSegments {
 // always advances *session_pos by verdict->accepted. `rows` is the
 // verify's row count (the graph's T); the kernel never trusts
 // verdict->rows for the copy bound.
-void glm_spec_commit(const GlmPickVerdict* verdict, int rows,
+void glm_spec_commit(const PickVerdict* verdict, int rows,
                      const GlmSpecSegments& segments, int64_t* session_pos,
                      cudaStream_t stream);
 
@@ -83,7 +83,7 @@ void glm_spec_positions_batched(const int64_t* session_pos,
 // Then *block_pos += accepted and *next_out = verdict->next (the verify's
 // pick is about to be overwritten by the draft's; the token the main stack
 // consumes next survives here for glm_spec_next_tokens).
-void glm_spec_draft_rows(const GlmPickVerdict* verdict, int rows,
+void glm_spec_draft_rows(const PickVerdict* verdict, int rows,
                          int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
                          int64_t* next_out, cudaStream_t stream);
 
@@ -92,7 +92,7 @@ void glm_spec_draft_rows(const GlmPickVerdict* verdict, int rows,
 // only padding and leave block_pos[q] unchanged. The group index is the
 // request slot by construction of the Phase-2 fixed layout.
 void glm_spec_draft_rows_batched(
-    const GlmPickVerdict* verdicts, int requests, int rows_per_request,
+    const PickVerdict* verdicts, int requests, int rows_per_request,
     int64_t* block_pos, int64_t* step_pos, int64_t* tokens,
     int64_t* next_out, cudaStream_t stream);
 
@@ -108,19 +108,19 @@ void glm_device_copy(void* dst, const void* src, size_t bytes,
 // tokens[0] = *next (the verify's), tokens[1] = draft_verdict->next (the
 // block's guess for the token after it).
 void glm_spec_next_tokens(const int64_t* next,
-                          const GlmPickVerdict* draft_verdict, int64_t* tokens,
+                          const PickVerdict* draft_verdict, int64_t* tokens,
                           cudaStream_t stream);
 
 // End-of-replay token feeds for the fixed batch. The plain T=1 graph takes
 // each verify verdict's next token. The MTP T=2 graph takes the parked
 // verify next plus one draft verdict per request. Inactive groups are zeroed
 // so a later padded replay always embeds a valid token id.
-void glm_spec_verify_next_tokens_batched(const GlmPickVerdict* verify_verdicts,
+void glm_spec_verify_next_tokens_batched(const PickVerdict* verify_verdicts,
                                          int requests, int rows_per_request,
                                          int64_t* tokens,
                                          cudaStream_t stream);
 void glm_spec_next_tokens_batched(const int64_t* next,
-                                  const GlmPickVerdict* draft_verdicts,
+                                  const PickVerdict* draft_verdicts,
                                   int requests, int rows_per_request,
                                   int64_t* tokens, cudaStream_t stream);
 

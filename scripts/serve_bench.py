@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the serving pace of one glm_serve endpoint from the client side.
+"""Measure the serving pace of one dgpp-serve endpoint from the client side.
 
 For each request: POST /v1/chat/completions with stream=true, stamp every
 SSE data chunk's arrival, and report

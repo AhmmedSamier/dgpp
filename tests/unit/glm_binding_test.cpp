@@ -12,8 +12,8 @@
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
 #include "loaders/minijson.hpp"
-#include "models/glm_binding.hpp"
-#include "models/glm_config.hpp"
+#include "models/glm/binding.hpp"
+#include "models/glm/config.hpp"
 
 namespace {
 

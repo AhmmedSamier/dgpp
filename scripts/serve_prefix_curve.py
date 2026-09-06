@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The prefix cache's capacity/hit curve (M9's sign-off item for M7).
 
-Against a running glm_serve: C conversations of three short turns each,
+Against a running dgpp-serve: C conversations of three short turns each,
 interleaved round-robin (turn 1 of every conversation, then turn 2 of every
 conversation, then turn 3), at temperature 0 with the template keeping the
 reasoning so a turn re-renders to the previous turn's ids. With S arena

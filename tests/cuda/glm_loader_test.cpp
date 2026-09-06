@@ -33,10 +33,10 @@
 #include "common/test.hpp"
 #include "kernels/fp8_dequant.hpp"
 #include "loaders/minijson.hpp"
-#include "models/glm_binding.hpp"
-#include "models/glm_config.hpp"
-#include "models/glm_loader.hpp"
-#include "models/glm_resident_image.hpp"
+#include "models/glm/binding.hpp"
+#include "models/glm/config.hpp"
+#include "models/glm/loader.hpp"
+#include "models/glm/resident_image.hpp"
 
 namespace {
 

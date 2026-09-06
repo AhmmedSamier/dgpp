@@ -16,7 +16,7 @@
 #   serve_run.sh status — liveness snapshot of every rank
 set -u
 ROOT=/home/user/workspace/dgpp
-BIN=$ROOT/build-ci/glm_serve
+BIN=$ROOT/build-ci/dgpp-serve
 PEER_DIR=/tmp/bus4
 PEERS=(192.0.2.12 192.0.2.13 192.0.2.14)
 RANK0=192.0.2.11
@@ -40,14 +40,14 @@ peer_ssh() {  # timeout-wrapped: a hung session must not stall the launch
 }
 
 stage() {
-  echo "=== staging glm_serve to peers"
+  echo "=== staging dgpp-serve to peers"
   for h in "${PEERS[@]}"; do
     # The staging directory lives in /tmp (a reboot empties it), and a
     # previous run's op stream must never be hashed as this run's evidence
     # (a rank killed before it writes one would leave the old file behind).
     peer_ssh "$h" "mkdir -p $PEER_DIR && rm -f $PEER_DIR/serve_rank*.ops" \
       || { echo "STAGE FAILED to $h (ssh)"; return 1; }
-    timeout 30 scp -q "${SSH_OPTS[@]}" "$BIN" "user@$h:$PEER_DIR/glm_serve" \
+    timeout 30 scp -q "${SSH_OPTS[@]}" "$BIN" "user@$h:$PEER_DIR/dgpp-serve" \
       || { echo "STAGE FAILED to $h"; return 1; }
   done
 }
@@ -79,15 +79,15 @@ wait_log() {  # wait_log FILE NEEDLE TIMEOUT_S LABEL
 
 head_alive() { kill -0 "$(cat "$LOG/r0.pid" 2>/dev/null)" 2>/dev/null; }
 
-sweep_peers() {  # best-effort: any glm_serve left on a peer dies now
+sweep_peers() {  # best-effort: any dgpp-serve left on a peer dies now
   for h in "${PEERS[@]}"; do
-    peer_ssh "$h" "pkill -x glm_serve" >/dev/null 2>&1 || true
+    peer_ssh "$h" "pkill -x dgpp-serve" >/dev/null 2>&1 || true
   done
 }
 
 peers_gone() {
   for h in "${PEERS[@]}"; do
-    if peer_ssh "$h" "pgrep -x glm_serve" >/dev/null 2>&1; then
+    if peer_ssh "$h" "pgrep -x dgpp-serve" >/dev/null 2>&1; then
       return 1
     fi
   done
@@ -109,7 +109,7 @@ cmd_up() {
   for i in 1 2 3; do
     h=${PEERS[$((i - 1))]}
     ( timeout 25 ssh "${SSH_OPTS[@]}" "user@$h" \
-        "cd $PEER_DIR && DGPP_LOG_LEVEL=info nohup ./glm_serve --model $MODEL $KNOBS \
+        "cd $PEER_DIR && DGPP_LOG_LEVEL=info nohup ./dgpp-serve --model $MODEL $KNOBS \
          --world $WORLD --rank $i --peer $RANK0 --fabric-port $FABRIC_PORT \
          --journal-port $JOURNAL_PORT > serve_r$i.log 2>&1 &" \
         >/dev/null 2>&1 ) &
@@ -117,14 +117,14 @@ cmd_up() {
   done
   # Wait ONLY for the spawn subshells: a bare `wait` would also collect
   # rank 0's setsid child (without job control setsid does not fork, so
-  # glm_serve stays a direct child) and block until the whole SERVE
+  # dgpp-serve stays a direct child) and block until the whole SERVE
   # exits — the 2026-09-01 boot appeared to hang on exactly this.
   for p in "${spawn_pids[@]}"; do
     wait "$p" 2>/dev/null || true
   done
   for i in 1 2 3; do
     h=${PEERS[$((i - 1))]}
-    peer_ssh "$h" "pgrep -x glm_serve" >/dev/null 2>&1 \
+    peer_ssh "$h" "pgrep -x dgpp-serve" >/dev/null 2>&1 \
       || echo "WARN: peer $i (rank $i) not observed on $h"
   done
   # Readiness = rank 0's HTTP line: journal world complete + resident
@@ -187,7 +187,7 @@ cmd_status() {
   tail -2 "$LOG/serve_r0.log" 2>/dev/null
   for h in "${PEERS[@]}"; do
     echo -n "$h: "
-    peer_ssh "$h" "pgrep -x glm_serve | wc -l" 2>/dev/null || echo "?"
+    peer_ssh "$h" "pgrep -x dgpp-serve | wc -l" 2>/dev/null || echo "?"
   done
 }
 

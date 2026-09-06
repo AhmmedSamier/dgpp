@@ -31,8 +31,8 @@
 #include <vector>
 
 #include "loaders/hf_cache.hpp"
-#include "models/glm_config.hpp"
-#include "models/glm_loader.hpp"
+#include "models/glm/config.hpp"
+#include "models/glm/loader.hpp"
 
 namespace {
 

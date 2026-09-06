@@ -38,9 +38,9 @@
 #include "common/test.hpp"
 #include "kernels/glm_norm.hpp"
 #include "loaders/minijson.hpp"
-#include "models/glm_binding.hpp"
-#include "models/glm_dump.hpp"
-#include "models/glm_forward.hpp"
+#include "models/glm/binding.hpp"
+#include "models/glm/dump.hpp"
+#include "models/glm/forward.hpp"
 
 #include "glm_fixture.hpp"
 

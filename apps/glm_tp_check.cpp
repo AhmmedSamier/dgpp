@@ -38,10 +38,10 @@
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "loaders/hf_cache.hpp"
-#include "models/glm_config.hpp"
-#include "models/glm_forward.hpp"
-#include "models/glm_route_audit.hpp"
-#include "models/glm_tp_bus.hpp"
+#include "models/glm/config.hpp"
+#include "models/glm/forward.hpp"
+#include "models/glm/route_audit.hpp"
+#include "models/glm/tp_bus.hpp"
 #include "net/collective_bus.hpp"
 
 namespace fs = std::filesystem;

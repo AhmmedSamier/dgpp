@@ -33,8 +33,8 @@
 
 #include "common/log.hpp"
 #include "loaders/hf_cache.hpp"
-#include "models/glm_config.hpp"
-#include "models/glm_tp_parity.hpp"
+#include "models/glm/config.hpp"
+#include "models/glm/tp_parity.hpp"
 
 namespace fs = std::filesystem;
 

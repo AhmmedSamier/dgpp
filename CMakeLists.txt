@@ -118,14 +118,14 @@ add_library(dgpp_kernels STATIC
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
   src/kernels/glm_norm.cu
-  src/kernels/glm_pick.cu
-  src/kernels/glm_sample_pick.cu
+  src/kernels/pick.cu
+  src/kernels/sample_pick.cu
   src/kernels/glm_spec.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt dgpp_core)
 dgpp_set_common(dgpp_kernels)
 # The device sampler mirrors the host oracle bit for bit: no contraction of
 # its multiplies and adds (the host builds with -ffp-contract=off).
-set_source_files_properties(src/kernels/glm_sample_pick.cu PROPERTIES
+set_source_files_properties(src/kernels/sample_pick.cu PROPERTIES
   COMPILE_OPTIONS "--fmad=false")
 
 add_library(dgpp_models_doll STATIC
@@ -151,20 +151,31 @@ dgpp_set_common(dgpp_models_dsa)
 
 # Host-only GLM model assembly (config parsing, expected-tensor binding); no
 # CUDA dependency so the loader/binding layer builds and tests anywhere.
+# The model-agnostic layers (the layout split of 2026-09-06): the text
+# stack (tokenizer, chat template, tool grammar and parser), the scheduler
+# with its prefix cache index, and the sampler (header-only, src/sample/).
+add_library(dgpp_text STATIC
+  src/text/tokenizer.cpp
+  src/text/chat_template.cpp
+  src/text/tool_parser.cpp
+  src/text/tool_grammar.cpp
+  src/text/json_grammar.cpp)
+target_link_libraries(dgpp_text PUBLIC dgpp_loaders)
+dgpp_set_common(dgpp_text)
+
+add_library(dgpp_sched STATIC
+  src/sched/prefix_cache.cpp
+  src/sched/scheduler.cpp)
+target_link_libraries(dgpp_sched PUBLIC dgpp_text dgpp_core)
+dgpp_set_common(dgpp_sched)
+
 add_library(dgpp_models_glm STATIC
-  src/models/glm_config.cpp
-  src/models/glm_binding.cpp
-  src/models/glm_mhc_reference.cpp
-  src/models/glm_moe_reference.cpp
-  src/models/glm_trace.cpp
-  src/models/glm_tokenizer.cpp
-  src/models/glm_chat_template.cpp
-  src/models/glm_tool_parser.cpp
-  src/models/glm_tool_grammar.cpp
-  src/models/glm_json_grammar.cpp
-  src/models/glm_prefix_cache.cpp
-  src/models/glm_scheduler.cpp)
-target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders)
+  src/models/glm/config.cpp
+  src/models/glm/binding.cpp
+  src/models/glm/mhc_reference.cpp
+  src/models/glm/moe_reference.cpp
+  src/models/glm/trace.cpp)
+target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders dgpp_text dgpp_sched)
 dgpp_set_common(dgpp_models_glm)
 
 # Streaming resident loader (M4): managed-memory layer residency over the
@@ -173,15 +184,15 @@ dgpp_set_common(dgpp_models_glm)
 # dump reader (glm_dump) on top; they drive the parity-tested M2/M3 layer
 # modules, hence the kda/dsa library links.
 add_library(dgpp_models_glm_loader STATIC
-  src/models/glm_loader.cpp
-  src/models/glm_resident_image.cpp
-  src/models/glm_moe_layer.cpp
-  src/models/glm_dump.cpp
-  src/models/glm_forward.cpp
-  src/models/glm_decode.cpp
-  src/models/glm_mtp.cpp
-  src/models/glm_tp.cpp
-  src/models/glm_tp_parity.cpp)
+  src/models/glm/loader.cpp
+  src/models/glm/resident_image.cpp
+  src/models/glm/moe_layer.cpp
+  src/models/glm/dump.cpp
+  src/models/glm/forward.cpp
+  src/models/glm/decode.cpp
+  src/models/glm/mtp.cpp
+  src/models/glm/tp.cpp
+  src/models/glm/tp_parity.cpp)
 target_link_libraries(dgpp_models_glm_loader
   PUBLIC dgpp_models_glm dgpp_kernels dgpp_models_kda dgpp_models_dsa)
 dgpp_set_common(dgpp_models_glm_loader)
@@ -297,11 +308,14 @@ if(DGPP_ENABLE_IBV)
 
   # M6 Stage 4a: the OpenAI-compatible serving app (world 1 — the local
   # reference engine; Stage 4b adds the fabric journal + resident TP).
-  add_executable(glm_serve apps/glm_serve.cpp)
-  target_link_libraries(glm_serve PRIVATE dgpp_models_glm_loader dgpp_bus
-                                         dgpp_service CUDA::cudart
-                                         Threads::Threads)
-  dgpp_set_common(glm_serve)
+  # The server binary: target dgpp_serve_app, installed as dgpp-serve (the
+  # layout split of 2026-09-06; dgpp_serve is the library it links).
+  add_executable(dgpp_serve_app apps/dgpp_serve.cpp)
+  target_link_libraries(dgpp_serve_app PRIVATE dgpp_models_glm_loader dgpp_bus
+                                             dgpp_serve CUDA::cudart
+                                             Threads::Threads)
+  dgpp_set_common(dgpp_serve_app)
+  set_target_properties(dgpp_serve_app PROPERTIES OUTPUT_NAME dgpp-serve)
 endif()
 
 enable_testing()
@@ -319,10 +333,10 @@ add_executable(unit_tests
   tests/unit/glm_binding_test.cpp
   tests/unit/glm_trace_test.cpp
   tests/unit/glm_route_audit_test.cpp
-  tests/unit/glm_sampler_test.cpp
-  tests/unit/glm_tool_parser_test.cpp
-  tests/unit/glm_tool_grammar_test.cpp
-  tests/unit/glm_json_grammar_test.cpp
+  tests/unit/sampler_test.cpp
+  tests/unit/tool_parser_test.cpp
+  tests/unit/tool_grammar_test.cpp
+  tests/unit/json_grammar_test.cpp
   tests/unit/net_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -333,67 +347,67 @@ add_test(NAME unit_tests COMMAND unit_tests)
 
 # M6 Stage 3: the tokenizer differential gate (host). Skips with rc 2 when
 # the model cache is absent (same discipline as the real-checkpoint gates).
-add_executable(glm_tokenizer_test tests/host/glm_tokenizer_test.cpp)
-target_include_directories(glm_tokenizer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(glm_tokenizer_test PRIVATE dgpp_models_glm Threads::Threads)
-dgpp_set_common(glm_tokenizer_test)
-add_test(NAME glm_tokenizer_test
-  COMMAND glm_tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_tokenizer_goldens.jsonl)
-set_tests_properties(glm_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
+add_executable(tokenizer_test tests/host/tokenizer_test.cpp)
+target_include_directories(tokenizer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(tokenizer_test PRIVATE dgpp_models_glm Threads::Threads)
+dgpp_set_common(tokenizer_test)
+add_test(NAME tokenizer_test
+  COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_tokenizer_goldens.jsonl)
+set_tests_properties(tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # M6 Stage 3b: the chat-template differential gate (host). Skips with rc 2
 # when the model cache is absent, same as above.
-add_executable(glm_chat_template_test tests/host/glm_chat_template_test.cpp)
-target_include_directories(glm_chat_template_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(glm_chat_template_test PRIVATE dgpp_models_glm Threads::Threads)
-dgpp_set_common(glm_chat_template_test)
-add_test(NAME glm_chat_template_test
-  COMMAND glm_chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_chat_template_goldens.jsonl)
-set_tests_properties(glm_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
+add_executable(chat_template_test tests/host/chat_template_test.cpp)
+target_include_directories(chat_template_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(chat_template_test PRIVATE dgpp_models_glm Threads::Threads)
+dgpp_set_common(chat_template_test)
+add_test(NAME chat_template_test
+  COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_chat_template_goldens.jsonl)
+set_tests_properties(chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # M6 Stage 4: the serving capstone — HTTP/SSE over epoll + the OpenAI
 # generation service (host-only; the engine adapters live in the apps,
-# dgpp_service never links CUDA — CI runs the service gate with a fake
+# dgpp_serve never links CUDA — CI runs the service gate with a fake
 # engine and frontend, no model cache). Stage 4b adds the admission
 # journal (fabric_serve.cpp over the host-only dgpp_net TCP primitives).
-add_library(dgpp_service STATIC
-  src/service/http_server.cpp
-  src/service/generation_service.cpp
-  src/service/fabric_serve.cpp
-  src/service/serve_stats.cpp)
-target_link_libraries(dgpp_service
+add_library(dgpp_serve STATIC
+  src/serve/http_server.cpp
+  src/serve/generation_service.cpp
+  src/serve/fabric_serve.cpp
+  src/serve/serve_stats.cpp)
+target_link_libraries(dgpp_serve
   PUBLIC dgpp_core dgpp_models_glm dgpp_loaders dgpp_net Threads::Threads)
-dgpp_set_common(dgpp_service)
+dgpp_set_common(dgpp_serve)
 
 add_executable(http_server_test tests/host/http_server_test.cpp)
-target_link_libraries(http_server_test PRIVATE dgpp_service Threads::Threads)
+target_link_libraries(http_server_test PRIVATE dgpp_serve Threads::Threads)
 dgpp_set_common(http_server_test)
 add_test(NAME http_server_test COMMAND http_server_test)
 
 # M6 Stage 4 service gate: the REAL HTTP/SSE service over a fake engine
 # + fake frontend — the OpenAI surface, host-only, always runs.
-add_executable(glm_serve_test tests/host/glm_serve_test.cpp)
-target_link_libraries(glm_serve_test PRIVATE dgpp_service Threads::Threads)
-dgpp_set_common(glm_serve_test)
-add_test(NAME glm_serve_test COMMAND glm_serve_test)
+add_executable(serve_test tests/host/serve_test.cpp)
+target_link_libraries(serve_test PRIVATE dgpp_serve Threads::Threads)
+dgpp_set_common(serve_test)
+add_test(NAME serve_test COMMAND serve_test)
 
 # M6 Stage 4b gate: the admission journal (the metronome), both loops,
 # and the §11 identity — real localhost TCP + real HTTP, engine faked
 # (host-only, always runs).
-add_executable(glm_fabric_serve_test tests/host/glm_fabric_serve_test.cpp)
-target_link_libraries(glm_fabric_serve_test PRIVATE dgpp_service
+add_executable(fabric_serve_test tests/host/fabric_serve_test.cpp)
+target_link_libraries(fabric_serve_test PRIVATE dgpp_serve
                                                    Threads::Threads)
-dgpp_set_common(glm_fabric_serve_test)
-add_test(NAME glm_fabric_serve_test COMMAND glm_fabric_serve_test)
+dgpp_set_common(fabric_serve_test)
+add_test(NAME fabric_serve_test COMMAND fabric_serve_test)
 
 # M6 Stage 2b: the scheduler policy gate (host, no model, no skip path —
 # the FakeEngine replaces the engine, so the policy is pinned everywhere
 # CI runs).
-add_executable(glm_scheduler_test tests/host/glm_scheduler_test.cpp)
-target_include_directories(glm_scheduler_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(glm_scheduler_test PRIVATE dgpp_models_glm Threads::Threads)
-dgpp_set_common(glm_scheduler_test)
-add_test(NAME glm_scheduler_test COMMAND glm_scheduler_test)
+add_executable(scheduler_test tests/host/scheduler_test.cpp)
+target_include_directories(scheduler_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(scheduler_test PRIVATE dgpp_models_glm Threads::Threads)
+dgpp_set_common(scheduler_test)
+add_test(NAME scheduler_test COMMAND scheduler_test)
 
 add_executable(flag_protocol_test tests/cuda/flag_protocol_test.cu)
 target_link_libraries(flag_protocol_test PRIVATE CUDA::cudart)

@@ -35,10 +35,10 @@
 
 #include "common/log.hpp"
 #include "loaders/hf_cache.hpp"
-#include "models/glm_dump.hpp"
-#include "models/glm_forward.hpp"
-#include "models/glm_route_audit.hpp"
-#include "models/glm_trace.hpp"
+#include "models/glm/dump.hpp"
+#include "models/glm/forward.hpp"
+#include "models/glm/route_audit.hpp"
+#include "models/glm/trace.hpp"
 
 namespace fs = std::filesystem;
 

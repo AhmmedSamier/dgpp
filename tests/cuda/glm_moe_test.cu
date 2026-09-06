@@ -31,9 +31,9 @@
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
 #include "kernels/glm_moe_launch.hpp"
-#include "models/glm_moe.hpp"
-#include "models/glm_moe_layer.hpp"
-#include "models/glm_moe_reference.hpp"
+#include "models/glm/moe.hpp"
+#include "models/glm/moe_layer.hpp"
+#include "models/glm/moe_reference.hpp"
 #include "models/quant_matrix.hpp"
 #include "scale_gemm_test_helpers.hpp"
 

@@ -119,7 +119,7 @@ if [ "$VICTIM" -eq 0 ]; then
 else
   h=${PEERS[$((VICTIM - 1))]}
   say "=== kill -9 rank $VICTIM on $h at $(date +%T.%N)"
-  peer_ssh "$h" "pkill -9 -x glm_serve"
+  peer_ssh "$h" "pkill -9 -x dgpp-serve"
 fi
 
 # 4. The ranks leave. Rank 0: gone within 30 s of the kill.
@@ -135,7 +135,7 @@ for ((r = 1; r <= 3; ++r)); do
   h=${PEERS[$((r - 1))]}
   gone=""
   for _ in $(seq 1 300); do
-    if ! peer_ssh "$h" "pgrep -x glm_serve" >/dev/null 2>&1; then
+    if ! peer_ssh "$h" "pgrep -x dgpp-serve" >/dev/null 2>&1; then
       gone=$(python3 -c "import time; print(round(time.time() - $T_KILL, 2))"); break
     fi
     sleep 0.1

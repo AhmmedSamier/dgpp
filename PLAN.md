@@ -20,7 +20,7 @@ below; `[ ]` means it has not been implemented.
 
 ## Where we are (2026-09-03)
 
-The engine generates text on four DGX Sparks: `glm_serve` boots a resident
+The engine generates text on four DGX Sparks: `dgpp-serve` boots a resident
 TP=4 model in 15–25 s from the per-rank image cache, answers the OpenAI
 chat/completions contract over HTTP/SSE with rank 0 as the sole ingress,
 and every rank executes an identical op stream (the 4-way op-stream md5 is
@@ -81,7 +81,7 @@ speculative step — two-row verify, on-device pick and verdict, predicated
 rollback, the draft block and its pick, the next tokens written on the
 device — is ONE graph replay at 22.45 ms/token effective, transcript
 identical to the plain loop. The service adapter preserves that scalar path
-and generalizes it to the fixed Phase-2 request batch behind `glm_serve`.
+and generalizes it to the fixed Phase-2 request batch behind `dgpp-serve`.
 The weight floor for a step is
 ~24.5 ms (5.9 GB at ~240 GB/s); the plain step sits 6.8 ms above it, of
 which the 90 collectives are ~3.1 ms.
@@ -171,7 +171,7 @@ Suggested order for what remains, each item's design in its section:
    per (peer, lane) QP (`BusOptions::bulk_pace_gbps`, derived at bus
    start from the port rate: port / ((W − 1) × lanes) × 0.85 = 28.3 here;
    the sweep's loss knee is between 80 and 120 and throughput is flat
-   from 28 to 120; `--bulk-pace-gbps` on glm_serve and glm_gen_check)
+   from 28 to 120; `--bulk-pace-gbps` on dgpp-serve and glm_gen_check)
    made every size tight with no retransmits; a per-lane window alone
    changed nothing.
    Then the door's hash moved from the posting thread onto the staging
@@ -648,7 +648,7 @@ Deliverables as written, with their state:
    hash, rendered identically on every rank.
 3. Greedy and finite-top-k distributed fast paths plus full-logit gather for
    exact unrestricted top-p/min-p/logprobs behavior. BUILT (6b,
-   2026-09-04): the sampler (`glm_sampler.hpp`) implements all three
+   2026-09-04): the sampler (`sample/sampler.hpp`) implements all three
    paths with one selection semantics and a counter-based RNG, unit-gated
    against the centralized oracle; on the bus the pick table carries each
    rank's exact local top-k and its slice's log-sum-exp, the verdict
@@ -674,7 +674,7 @@ Deliverables as written, with their state:
    stop, n and logit_bias with the request-field slice of 2026-09-06,
    DESIGN §10, which also added the usage's cached_tokens and
    reasoning_tokens) as OpenAI error objects naming the param. Gates: `http_server_test`,
-   `glm_serve_test`, `glm_fabric_serve_test`.
+   `serve_test`, `fabric_serve_test`.
 5. Resident serving mode. BUILT (M5, then rounds 9–10): one-pass sources,
    eager construction, sources released after the last layer, the per-rank
    resident image cache (15–25 s to a ready model), optional `mlockall`;
@@ -734,7 +734,7 @@ scheduler appends them in order, stops at the first EOS (dropping anything
 after it — the request retires, so the state's extra token is never
 observed), and truncates at `max_steps` the same way. The scheduler stays a
 pure function of the token stream, so the §11 rank-identity invariant is
-untouched, and the fake engine in `glm_scheduler_test` scripts multi-token
+untouched, and the fake engine in `scheduler_test` scripts multi-token
 steps to pin the EOS-in-the-middle and cap-overshoot rules.
 
 The bus has one graph era per process. It originally exposed only one recorded
@@ -742,7 +742,7 @@ cell set, so Phase 2 first made the graph request-indexed on the device; the
 adaptive closure extends that era with selectable, disjoint graph variants.
 Two phases:
 
-- *Phase 1 — concurrency 1: BUILT AND MEASURED 2026-09-03.* `glm_serve
+- *Phase 1 — concurrency 1: BUILT AND MEASURED 2026-09-03.* `dgpp-serve
   --max-concurrency 1 --decode-graph [--mtp]`: prefill is eager (bulk
   collectives between windows — the mixed era, DESIGN §6.2),
   first pick is eager, then `GlmGraphEngineAdapter` drives one graph replay
@@ -889,7 +889,7 @@ Two phases:
   padded row's block output and its share of the boundary all-reduce are
   deterministic by construction rather than by the row-independence
   argument — gate `dsa_layer_decode_padding_row_is_zero_and_leaves_live_rows_bitwise`;
-  (ii) `glm_serve --decode-graph` warm-captures every scalar variant and the
+  (ii) `dgpp-serve --decode-graph` warm-captures every scalar variant and the
   row batch at startup through one throwaway session at a time
   (`GlmGraphEngineAdapter::warm_captures`; 1.1 s for 8 slots, 0.7 s for 4,
   on every rank), so no capture pauses a live stream; both loopback serving
@@ -974,7 +974,7 @@ gather fallback is built (`bus_gather_logits`: the penalized fp32 slices as
 ONE bulk collective, four 8-bit digits per logit in bf16 words so NaN
 payloads, infinities, denormals and -0 survive the fold bit for bit —
 gate-pinned at two stripes), and `make_fabric_sample` is the closure
-`glm_serve`'s eager engine and `glm_gen_check` run: the prefix decision at
+`dgpp-serve`'s eager engine and `glm_gen_check` run: the prefix decision at
 `kSamplingCandidates` = 128 per rank, else the gather and the complete-list
 decision under the transported normalizer with the reserved draw, rank 0's
 digest echoed either way (loopback gate: six steps alternating resolved and
@@ -996,7 +996,7 @@ seed per seedless request (or `--seed`'s), and reports the effective
 defaults on `/v1/models` (`"sampling":{"available","defaults"}`); with the
 graph engine bound (`--decode-graph`) it collapses the defaults to greedy
 with a WARN line and refuses `temperature > 0` with `sampling_unsupported`
-rather than advertise a mode it cannot run. `glm_serve --temperature
+rather than advertise a mode it cannot run. `dgpp-serve --temperature
 --top-p --top-k --min-p --repetition-penalty --seed` override the file;
 `glm_gen_check` keeps its exact greedy loop by default (its transcripts are
 the regression instrument) and samples under `--sample` or any override,
@@ -1017,7 +1017,7 @@ serves fallbacks between windows exactly as the eager engine and reseeds
 the graph's token feed, and reports `fallbacks()`. The width fits the
 batch's rows into the 64 KiB latency slot (112 per rank at eight rows and
 world 4; 128 below seven rows) — the measured profiles still decide
-whether that is the right k. `glm_serve --decode-graph` samples at the
+whether that is the right k. `dgpp-serve --decode-graph` samples at the
 checkpoint's defaults, with or without `--mtp` (DESIGN §9: the T=2
 verdict on the device, the draft ring snapshot and rollback, the host's
 row re-run and re-draft on a fallback). Gates: det_math_test, the bitwise
@@ -1082,7 +1082,7 @@ cost. Design:
   repetition_penalty when present; the EOS ids already come from it) and
   the service applies them to every field a request omits — the HF
   contract, as vLLM's `--generation-config auto` does — instead of the
-  OpenAI wire defaults (1.0/1.0). `glm_serve` and `glm_gen_check` take
+  OpenAI wire defaults (1.0/1.0). `dgpp-serve` and `glm_gen_check` take
   `--temperature`, `--top-p`, `--top-k`, `--min-p`, `--seed` to override
   the file's values for the process (`glm_gen_check` needs them for the
   fabric gates; a missing file or field falls back to greedy with a log
@@ -1150,7 +1150,7 @@ cost. Design:
   `bus_spec_accept`, `SampledSpeculator`, `glm_gen_check --mtp --sample`;
   the one-graph step's T=2 device verdict, the draft ring snapshot and
   `session_draft_rollback`, `GlmGraphEngineAdapter::serve_mtp_fallback`;
-  `glm_serve --decode-graph --mtp` samples; the acceptance at T=1/0.95 was
+  `dgpp-serve --decode-graph --mtp` samples; the acceptance at T=1/0.95 was
   measured on the fabric on 2026-09-04 — 67–81 % of drafts accepted,
   25.0–27.6 ms/token sampled against 33.2 plain): accept
   draft `x` with probability `p(x)` under the verify row
@@ -1186,12 +1186,12 @@ chat_template_kwargs, the message normalization), the event-driven
 response side (reasoning / content / tool-call deltas in arrival order,
 the one-shot message, `finish_reason: "tool_calls"`),
 `GlmFrontend::markers()` (the marker ids looked up by text in the
-tokenizer's added tokens), `glm_serve --reasoning-in-content`. Gates:
-`glm_tool_parser_test` (6 unit gates over a fake decoder),
-`glm_tool_call_render_encode_parse_roundTrip` in `glm_chat_template_test`
+tokenizer's added tokens), `dgpp-serve --reasoning-in-content`. Gates:
+`tool_parser_test` (6 unit gates over a fake decoder),
+`glm_tool_call_render_encode_parse_roundTrip` in `chat_template_test`
 (every golden assistant tool-call message: render → encode with the real
 tokenizer → parse → names and arguments structurally exact, 6 turns / 9
-calls), five 6f gates in `glm_serve_test` (the request side's
+calls), five 6f gates in `serve_test` (the request side's
 normalization and refusals by field, the one-shot shape, the stream's
 chunk order, the grammar arming the engine with the prompt untouched, the
 fold knob and the cap inside a block). On the four nodes
@@ -1257,7 +1257,7 @@ DESIGN §11 has the as-built paragraph. Design:
   IS the model's output format, so render → encode → parse → compare is
   the golden round trip over the template cases with tool calls (plus
   hand-written malformed streams: unterminated call, value without key,
-  nested JSON); `glm_serve_test` pins the streaming shapes and
+  nested JSON); `serve_test` pins the streaming shapes and
   `finish_reason`. Determinism is unaffected: the parser is downstream of
   the token stream and runs on rank 0 only.
 
@@ -1295,12 +1295,12 @@ logits buffer, so after a replay the verify's rows were gone — which the
 loopback gate against the eager speculator had not caught; the verify
 rows are now snapshotted in the graph before the draft and the fallback
 checks, bit for bit, that the gathered row's covered mass is the
-device's. Gates: `glm_tool_grammar_test`, the masked cases in
-`glm_sampler_test` and `glm_pick_test`, the codec and scheduler gates, the
+device's. Gates: `tool_grammar_test`, the masked cases in
+`sampler_test` and `glm_pick_test`, the codec and scheduler gates, the
 two constrained loopbacks (plain: bitwise the eager engine under every
 mode, 19 masked gather fallbacks; MTP: rank-identical, grammar-valid, 18
 fallbacks of both rows), the grammar's acceptance of every golden
-tool-call turn over the real tokenizer, `glm_serve_test`'s grammar gate;
+tool-call turn over the real tokenizer, `serve_test`'s grammar gate;
 ctest 34/34. On the four nodes (`scripts/serve_tools_check.sh`,
 2026-09-04, `--decode-graph --mtp` at the card's settings): `required`
 reasons first then calls; the named function is the one call; `auto` with
@@ -1358,16 +1358,16 @@ the prompt untouched; the content is the JSON text; `/v1/models` reports
 `response_format.json_object / json_schema`. The engines are unchanged —
 the JSON grammar is another `GrammarState` behind the same masks, host
 and device, the MTP row 1 under the pending draft, the in-graph draft
-rejected wherever the mask excludes it. Gates: `glm_json_grammar_test`
+rejected wherever the mask excludes it. Gates: `json_grammar_test`
 (the lexer on a corpus; the compiler's subset and its refusals by keyword
 path; THE EXACTNESS GATE — `mask()` equal to the brute-force answer, every
 token simulated, at every position of mask-driven random walks over the
 free machine and three schemas exercising every node kind, 17k
 positions, every finished walk parsing and conforming; the edge facts),
-`glm_tool_grammar_test`'s JSON-mode gate, the codec round trip
-(`gr.js`), `glm_serve_test`'s `serve_responseFormat_armsTheJsonGrammar`
+`tool_grammar_test`'s JSON-mode gate, the codec round trip
+(`gr.js`), `serve_test`'s `serve_responseFormat_armsTheJsonGrammar`
 (the arming, the fallback, every refusal, the greedy engine),
-`glm_chat_template_test`'s
+`chat_template_test`'s
 `glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer`
 (four documents accepted and seven violating ones refused position by
 position over the real tokenizer; the mask 36 µs average, 198 µs worst at
@@ -1419,15 +1419,15 @@ carried nucleus mass (the renormalized draw lands elsewhere); in the run
 of the day it moved none — all twelve responses byte-identical to the
 previous run's, the op-stream md5 the same on all four ranks (the
 record's eighth 2026-09-04 entry). Gates:
-`glm_tool_grammar_test`'s `tool_grammar_typedValuesFollowTheSchema` (an
+`tool_grammar_test`'s `tool_grammar_typedValuesFollowTheSchema` (an
 integer value with the closer waiting until complete, an enum spelled
 from its texts, a nested object under its closed schema, a free string,
 an unknown key free, auto's calls at will, death on a bad byte, the
 refusal of an unsupported argument schema), the codec round trip with
-typed arguments, `glm_serve_test`'s tool_choice gate (six armed grammars
+typed arguments, `serve_test`'s tool_choice gate (six armed grammars
 with auto among them, the typed arguments on the wire, the strict
 refusal by keyword path and the non-strict fallback),
-`glm_chat_template_test` (the six golden tool-call turns accepted under
+`chat_template_test` (the six golden tool-call turns accepted under
 the typing derived from their own schemas; the derivation facts for
 string / integer / enum / type list / untyped enum / object / strict),
 the two constrained loopbacks with the fixture's tools typed; ctest
@@ -1446,7 +1446,7 @@ died with the world (their cancels were queued by `begin_shutdown()` but
 never applied — the engine loop had already exited), clients of
 interrupted streams got the "overloaded" error, and the HTTP server was
 stopped on a fixed 200 ms timer that a final pass longer than that (any
-prefill) beat, cutting clients off with nothing. Built, in `glm_serve` and
+prefill) beat, cutting clients off with nothing. Built, in `dgpp-serve` and
 `GenerationService`: the signal sets a flag the engine loop reads at the
 pass boundary (a stop that lands mid-prefill waits the pass out — no
 collective is ever in flight at the drain); `begin_shutdown()` closes the
@@ -1462,12 +1462,12 @@ watcher keeps the server up until `drained()` says every answer is out
 count as cancellations in `/v1/metrics`. A PEER never leaves on its own
 signal: it follows the journal to rank 0's stop record (a warning says so;
 a second signal forces the exit), so neither side ever tears the bus down
-under the other's collective. Gates: `glm_serve_test`'s
+under the other's collective. Gates: `serve_test`'s
 `serve_shutdown_drainsInFlightWorkWithTheShutdownError` (a stream
 mid-generation ends with the error event after its tokens and no finish
 chunk; a queued one-shot is shed 503 `server_shutdown`; a late request is
 refused; the metrics count one cancellation and two sheds; `drained()`
-false while work is live, true after), `glm_fabric_serve_test`'s
+false while work is live, true after), `fabric_serve_test`'s
 `test_drain_on_stop` (the in-flight stream retired as cancelled on rank 0
 and on every peer at the same quantum, the op streams identical, the peers
 released with no errors; the rigs now stop in the app's order and can slow
@@ -1493,7 +1493,7 @@ itself. Every decision is a pure function of scheduler state, so it is
 rank-identical by construction; the observer's `on_grow` puts each growth
 in the op stream (`W id tokens`) so the four-way md5 covers it, and the
 warm record carries rank 0's policy to the peers (a peer's own flags yield
-to it, with a warning). `glm_serve --admission full|grow
+to it, with a warning). `dgpp-serve --admission full|grow
 --admission-window N` (default full, 256); `/v1/metrics` reports
 `admission`, `reservations_grown`, `requests_shed_pool`; the door check
 (prompt + max_tokens against the whole pool) stays; `glm_gen_check
@@ -1504,13 +1504,13 @@ everyone runs long. vLLM's answer to exhaustion is preemption by recompute
 (the victim is re-prefilled from prompt + generated and continues, never
 truncated); at ~30 ms per prompt token that recompute is a many-second
 stall here, so it waits on the prefill work — the follow-on that would make
-grow the default. Gates: `glm_scheduler_test`'s two grow gates (both
+grow the default. Gates: `scheduler_test`'s two grow gates (both
 admitted at once where full-reserve serializes, growth at tick top with
 monotone targets inside the lifetime, the youngest shed at exhaustion and
 the oldest completing, two runs bitwise identical, a lone request shedding
-itself, the window clamp, a zero window refused), `glm_serve_test`'s grow
+itself, the window clamp, a zero window refused), `serve_test`'s grow
 gate (two 300-token requests against a 100-block pool: both admitted, the
-younger cut short with `length`, the metrics), `glm_fabric_serve_test`
+younger cut short with `length`, the metrics), `fabric_serve_test`
 running every scenario under grow with a one-block window (the policy
 riding the warm record to the peers, growth in every rank's identical op
 stream); `scripts/serve_admission_check.sh` on the four nodes (the
@@ -1644,7 +1644,7 @@ be BITWISE and is.
 ### Stage B as built (2026-09-05, the record's twenty-seventh entry)
 
 - *Where the decisions live.* In the SCHEDULER (`PrefixCache`,
-  `glm_prefix_cache.*`): every rank runs the same deterministic policy
+  `sched/prefix_cache.*`): every rank runs the same deterministic policy
   over the same journaled request stream, so attach / snapshot / evict
   decisions are rank-identical by construction — the same invariant that
   keeps admission identical. No new protocol: a submit carries its
@@ -1800,7 +1800,7 @@ Exit criteria, status:
   failure (`serve_engineFailure_answersLiveStreamsAfterTheirCommitted
   TokensOnly`: the stream carries exactly the committed tokens, then the
   engine_failure event), a peer's death and rank 0's death through the
-  journal watches (`glm_fabric_serve_test` scenarios 7 and 8), and the
+  journal watches (`fabric_serve_test` scenarios 7 and 8), and the
   four-node drill (`scripts/serve_failure_drill.sh`: kill −9 under load,
   the committed text a prefix of the restarted service's answer);
 - temperature-zero output is identical with MTP on/off — ✓
@@ -1877,7 +1877,7 @@ Hardening, as built (each bullet says when):
   own observer's fold before applying each record and throws
   `journal: op-stream divergence at tick N` — one tick late at most — and
   the peer's death then fails the service through rank 0's watch. Gates:
-  the codec round trip, and `glm_fabric_serve_test` scenario 9 (a peer
+  the codec round trip, and `fabric_serve_test` scenario 9 (a peer
   whose engine produces different tokens dies naming the tick, rank 0
   fails the service, the other peer is released). Live for the whole
   soak below (no divergence).
@@ -1914,7 +1914,7 @@ Hardening, as built (each bullet says when):
   snapshots, 4,104 evictions, no snapshot skipped for a block or a slot,
   attaches 0.55 ms and snapshots 0.50 ms on average.
 - *Malformed-HTTP fuzzing — BUILT 2026-09-05:*
-  `serve_fuzz_malformedHttpNeverBreaksTheServer` (glm_serve_test) mutates
+  `serve_fuzz_malformedHttpNeverBreaksTheServer` (serve_test) mutates
   valid requests byte by byte — flips, insertions, deletions, truncations,
   duplicated slices, hostile Content-Length values, a chunked
   Transfer-Encoding, 24 KiB request lines, header floods past the 16 KiB

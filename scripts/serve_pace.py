@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-request decode pace from a glm_serve rank log.
+"""Per-request decode pace from a dgpp-serve rank log.
 
 Reads the scheduler's per-token lines (DEBUG since 2026-09-06: run the
 service with DGPP_LOG_LEVEL=debug to record them, and the bus's graph

@@ -1,6 +1,6 @@
 # Operating the serving world
 
-The four-node GLM service as it is run today: one `glm_serve` process per
+The four-node GLM service as it is run today: one `dgpp-serve` process per
 node, rank 0 the only HTTP ingress, the peers following rank 0's admission
 journal. This page collects what an operator needs — boot, stop, status,
 the knobs, what happens when a rank dies, and how to check that the world
@@ -16,7 +16,7 @@ scripts/serve_run.sh down     # SIGINT rank 0 (drain-on-stop), wait for the peer
 scripts/serve_run.sh status   # rank 0 alive? the peers' process counts
 ```
 
-`up` stages `build-ci/glm_serve` to `/tmp/bus4/` on each peer (the
+`up` stages `build-ci/dgpp-serve` to `/tmp/bus4/` on each peer (the
 directory is created, and any previous run's op-stream files there are
 removed so they can never be mistaken for this run's evidence), boots
 rank 0 (`HTTP :18080`, bus rendezvous `:29970`, journal `:29971`), waits
@@ -171,6 +171,6 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
 | HTTP (rank 0) | 18080 |
 | bus rendezvous | 29970 (rank 0 listens; peers connect) |
 | admission journal | 29971 (rank 0 listens; peers connect and send `hello <rank>`) |
-| peer binary and logs | `/tmp/bus4/glm_serve`, `/tmp/bus4/serve_r<rank>.log`, `/tmp/bus4/serve_rank<rank>.ops` |
+| peer binary and logs | `/tmp/bus4/dgpp-serve`, `/tmp/bus4/serve_r<rank>.log`, `/tmp/bus4/serve_rank<rank>.ops` |
 | rank 0 log and pid | `$DGPP_SERVE_LOG/serve_r0.log`, `$DGPP_SERVE_LOG/r0.pid`; its op stream `serve_rank0.ops` in the repo root at exit |
 | exit statuses | 0 orderly stop; 1 a startup or contract error; 2 rank 0 after an engine failure; 3 a peer released by its in-tick watch |

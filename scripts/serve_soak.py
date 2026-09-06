@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The serving soak (M9, 2026-09-05): a mixed workload against one glm_serve
+"""The serving soak (M9, 2026-09-05): a mixed workload against one dgpp-serve
 endpoint for a fixed duration, with the evidence the pass criteria need.
 
 Workers (threads), each looping until the deadline:

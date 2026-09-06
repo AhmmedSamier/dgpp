@@ -5,7 +5,7 @@
 // dynamic smem.
 #include <cuda_runtime.h>
 
-#include "models/glm_mhc.hpp"
+#include "models/glm/mhc.hpp"
 
 namespace dgpp {
 

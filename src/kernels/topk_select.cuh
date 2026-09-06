@@ -3,7 +3,7 @@
 // select's machinery, lifted so the sampler's local top-k shares it):
 //   key = (~sortable_f32(logit) << idx_bits) | idx
 // makes the SMALLEST key the highest logit with ties broken toward the
-// lower index — glm_sample::candidate_before, as an integer order. The
+// lower index — sample::candidate_before, as an integer order. The
 // streaming selection keeps the running best select_k keys in shared
 // memory (split hi/lo 32-bit arrays: one bank per thread at every bitonic
 // stride) and returns them sorted ascending, i.e. in canonical order.

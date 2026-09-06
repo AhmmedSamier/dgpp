@@ -10,7 +10,7 @@
 
 #include "common/test.hpp"
 #include "loaders/minijson.hpp"
-#include "models/glm_config.hpp"
+#include "models/glm/config.hpp"
 
 namespace {
 

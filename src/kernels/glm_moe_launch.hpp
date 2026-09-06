@@ -4,7 +4,7 @@
 // and CUDA-graph capturable: no scratch, no host reads.
 #include <cuda_runtime.h>
 
-#include "models/glm_moe.hpp"
+#include "models/glm/moe.hpp"
 
 namespace dgpp {
 

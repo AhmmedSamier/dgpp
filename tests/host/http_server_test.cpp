@@ -32,14 +32,14 @@
 #include "common/log.hpp"
 
 #include "common/test.hpp"
-#include "service/http_server.hpp"
+#include "serve/http_server.hpp"
 
 namespace {
 
-using dgpp::service::HttpHandler;
-using dgpp::service::HttpRequest;
-using dgpp::service::HttpResponseWriter;
-using dgpp::service::HttpServer;
+using dgpp::serve::HttpHandler;
+using dgpp::serve::HttpRequest;
+using dgpp::serve::HttpResponseWriter;
+using dgpp::serve::HttpServer;
 
 void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);

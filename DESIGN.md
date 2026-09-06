@@ -8,7 +8,7 @@ state pools (M2/M3), the assembled 45-layer GLM forward with resident
 sharded load and the per-rank image cache (M4/M5), the incremental decode
 engine with request sessions, the exact tokenizer and chat-template
 interpreter, the deterministic scheduler and admission journal, the
-OpenAI-compatible HTTP/SSE service (`glm_serve`, M6), the recorded decode
+OpenAI-compatible HTTP/SSE service (`dgpp-serve`, M6), the recorded decode
 step with the collectives as graph nodes, greedy MTP speculative decode as
 one graph replay per step (M8), and the adaptive scalar/row-batched T=1/MTP
 graph adapter behind the service (up to 8×T=1 or 4×T=2, loopback-gated and
@@ -834,7 +834,7 @@ hash without folding 256 KB on the collective thread per stripe.
 Senders are paced in software (`BusOptions::bulk_pace_gbps` per (peer,
 lane) QP — derived at bus start from the slowest lane's port rate as
 port / ((W − 1) × lanes) × 0.85, 28.3 Gb/s on the four-node 200 Gb/s
-fabric, overridable with `--bulk-pace-gbps` on glm_serve and
+fabric, overridable with `--bulk-pace-gbps` on dgpp-serve and
 glm_gen_check, 0 = unpaced; `bulk_inflight_per_lane` bounds the window
 and the posting order rotates per sender). The sweep put the loss knee
 between 80 and 120 Gb/s per QP with throughput flat from 28 to 120, so
@@ -1365,7 +1365,7 @@ around the measured facts, not around an aspiration of bit-parity:
   boundary, so cross-implementation noise flips them). Since the M4
   close-out, every flip is CERTIFIED, not counted: the router kernel
   exports its full biased-score row, the reference dump carries its own,
-  and `models/glm_route_audit.hpp` requires (a) the engine's selection to
+  and `models/glm/route_audit.hpp` requires (a) the engine's selection to
   be the spec top-k of the engine's OWN biased scores and (b) every
   swapped expert pair to straddle the boundary within 32x the token's
   MEASURED cross-implementation noise — the noise yardstick taken over
@@ -1527,7 +1527,7 @@ the snapshot arena (42 D2D slots), refcounts on blocks, and the decisions.
 - *Keys:* tokenizer hash, template hash, checkpoint revision, numerics
   mode; the radix is per process (no persistence in v1).
 
-**As built, Stage A (2026-09-05; `glm_forward.hpp` "prefix cache
+**As built, Stage A (2026-09-05; `models/glm/forward.hpp` "prefix cache
 primitives").** Three refinements the gate forced on the design above.
 (1) *Snapshots sit at pool-aligned positions.* The DSA tail ring and the
 complete-pool compression index pools from a chunk's first row, so a
@@ -1559,8 +1559,8 @@ coordinates. Hot == cold is bitwise through the resume, the steps and
 the draft rows (the gate), and a second attach to the same entry with a
 different suffix is bitwise its own cold run.
 
-**As built, Stage B (2026-09-05; `glm_prefix_cache.*`,
-`glm_prefix_arena.hpp`, the scheduler, the adapters, the service, the
+**As built, Stage B (2026-09-05; `sched/prefix_cache.*`,
+`models/glm/prefix_arena.hpp`, the scheduler, the adapters, the service, the
 journal).** Four choices, each departing a little from the sketch above.
 (1) *The decisions live in the scheduler, not in a new rank-0 protocol.*
 The scheduler already runs the same deterministic policy on every rank
@@ -1666,7 +1666,7 @@ the verify rows are bitwise the T=1 rows). The Phase-2 fabric latency slot
 is 64 KiB and folds up to eight hidden-4096 rows in one collective;
 `bus_greedy_pick_rows` remains the eager gather + broadcast path.
 
-The draft block (`glm_mtp.cpp`) is the checkpoint's layer 45: a plain
+The draft block (`models/glm/mtp.cpp`) is the checkpoint's layer 45: a plain
 pre-norm DSA + MoE block (no mHC) over `eh_proj([enorm(embed(tok_{q+1})) |
 hnorm(h_q)])`, where `h_q` is the main stack's pre-final-norm stream mean
 kept in a per-position cache, headed by `shared_head.norm` and the shared
@@ -1696,8 +1696,8 @@ launched again. All of that is now inside the replay, so a step is one
    session position (`d_session_pos_`); the fed tokens are already in
    `d_tokens_` (written by the previous replay's last node).
 2. The T=2 verify (the 90 boundary folds as recorded collective nodes).
-3. The pick (`kernels/glm_pick.{hpp,cu}`, `GlmDevicePicker` in
-   `glm_tp_bus.hpp`): `glm_pick_local` computes each row's canonical top-2
+3. The pick (`kernels/pick.{hpp,cu}`, `GlmDevicePicker` in
+   `models/glm/tp_bus.hpp`): `glm_pick_local` computes each row's canonical top-2
    (bitwise `glm_sample::local_max`) and encodes this rank's (fp32 logit
    bits, id) as the wire's six-bit digits into a device table; ONE recorded
    collective SUM-folds the table (a gather over disjoint slots — every slot
@@ -1776,7 +1776,7 @@ share the queue; the contract costs them nothing.
 
 Where the step's time is after the on-device work, and the small-kernel
 round that found the floor, are §7.6. The scalar step is driven by
-`glm_gen_check --decode-graph --mtp`; `glm_serve --decode-graph --mtp`
+`glm_gen_check --decode-graph --mtp`; `dgpp-serve --decode-graph --mtp`
 generalizes it to at most four request slots. The concurrency-1 service
 shape is gated through the real scheduler on a two-rank loopback bus and
 measured on the four-node service at 43.6–44.1 ms per replay,
@@ -1806,7 +1806,7 @@ record.
   residual against `u2 (1 - P(x))`), `spec_reference_sharded` is the
   step's reference at a layout, `bus_spec_accept` / `bus_sample_row` run
   it over the bus with the gather fallback and rank 0's digest, and
-  `SampledSpeculator` (glm_speculative.hpp) is the eager driver — the
+  `SampledSpeculator` (models/glm/speculative.hpp) is the eager driver — the
   count table is prompt + committed + next, the draft joining it only when
   it stands; `glm_gen_check --mtp --sample` runs it. Gates: the
   width-independence and marginal-distribution unit gates, the synthetic
@@ -1841,7 +1841,7 @@ record.
   `glm_tp_serving_mtp_graph_sampling_matches_eager_speculator` (the scalar
   and batched MTP graphs in lockstep with the eager sampled speculator,
   transcripts and [next, draft] feeds equal on every rank through 17
-  fallbacks of both kinds). `glm_serve --decode-graph --mtp` samples at
+  fallbacks of both kinds). `dgpp-serve --decode-graph --mtp` samples at
   the checkpoint's defaults, and the acceptance at those settings was
   measured on the fabric on 2026-09-04: 67–81 % of drafts accepted under
   the exact accept test against 74–87 % argmax agreement on the same
@@ -1933,7 +1933,7 @@ The full-logit fallback moves about 619.5 KB/token for this vocabulary; it is
 not described as a tiny merge. More elaborate distributed selection is an
 optimization only after parity and profiling.
 
-As built (`glm_sampler.hpp`, M6 d3): the three paths share ONE selection
+As built (`sample/sampler.hpp`, M6 d3): the three paths share ONE selection
 semantics — every path funnels into `select_from_sorted()` over candidates
 in the canonical total order (logit descending, id ascending), and the
 merge provably yields the same set in the same order as sorting the full
@@ -1965,7 +1965,7 @@ exactness is over the full vocabulary, not a client-declared prefix; and
 parses `generation_config.json` (`GlmGenerationDefaults`; the EOS ids
 already come from it) and the service fills every field a request omits
 from it — the HF contract — rather than from the OpenAI wire defaults;
-`glm_serve`/`glm_gen_check` override per process with `--temperature
+`dgpp-serve`/`glm_gen_check` override per process with `--temperature
 --top-p --top-k --min-p --seed`; a missing file or field falls back to
 greedy with a log line, never to a silent value. `/v1/models` reports the
 effective defaults.
@@ -2004,7 +2004,7 @@ contiguous evidence from every fetched rank and combines the teacher runs to
 choose the smallest measured k at or below a 1% fallback rate. The profiler is
 not the device path and its eager collective is not a throughput measurement;
 the serving-side complement is `scripts/serve_width_sweep.sh` over
-`glm_serve --sampling-candidates`, which fixed k at 128 on 2026-09-04 (below).
+`dgpp-serve --sampling-candidates`, which fixed k at 128 on 2026-09-04 (below).
 
 The width-independent correctness seam is built (2026-09-04), before fixing
 that k. `sample_from_prefix` consumes the canonical global candidate prefix
@@ -2064,7 +2064,7 @@ keeps per-slot spec/RNG/context and picks greedily at temperature 0; world 1
 runs `sample_full_logits` at the one-slice layout.
 
 *The device path is built for the plain (T=1) graphs* (2026-09-04,
-`kernels/glm_sample_pick.{hpp,cu}`, `GlmDevicePicker`'s sampling mode,
+`kernels/sample_pick.{hpp,cu}`, `GlmDevicePicker`'s sampling mode,
 `GlmGraphEngineAdapter`). The arithmetic contract first: the sampler's
 transcendentals are `common/det_math.hpp` — Cody-Waite exp and atanh-series
 log with every multiply-add an explicit fma, bitwise identical on the host
@@ -2221,8 +2221,8 @@ greedy's argmax agreement by physics, still above the ~30% break-even at
 T=1 by expectation; measured before it is claimed.
 
 **Constrained decoding (M6 6g, built 2026-09-04;
-`glm_tool_grammar.{hpp,cpp}`, the mask in `glm_sampler.hpp` and
-`glm_sample_pick.cu`).** The tool-call surface's guarantees — `tool_choice`
+`glm_tool_grammar.{hpp,cpp}`, the mask in `sample/sampler.hpp` and
+`kernels/sample_pick.cu`).** The tool-call surface's guarantees — `tool_choice`
 required / named / none, `parallel_tool_calls: false` — are a MASK on the
 pick, not a prompt trick: a grammar of the template's tool-call format
 (`turn := think? body; call := <tool_call> NAME (<arg_key> KEY </arg_key>
@@ -2274,10 +2274,10 @@ penalized rows; the graph now snapshots the verify rows (a copy kernel
 node after the pick, before the draft) and the fallback gathers from the
 snapshot, with a loud invariant — the gathered row's covered mass under
 the device's normalizer must equal the device's bit for bit — on every
-fallback of both graph shapes. Gates: `glm_tool_grammar_test` (the
+fallback of both graph shapes. Gates: `tool_grammar_test` (the
 states' masks and counts, the name/key automaton on shared prefixes and
 partial tokenizations, every mode, EOS withheld, death on a disallowed
-id), the masked cases of `glm_sampler_test` and `glm_pick_test` (absent
+id), the masked cases of `sampler_test` and `glm_pick_test` (absent
 ids everywhere, a fully masked rank, the greedy masked argmax, the masked
 draft — bitwise host = device), the two-rank loopbacks
 `glm_tp_serving_graph_constrained_matches_eager_engine_and_grammar` (the
@@ -2285,7 +2285,7 @@ plain graphs bitwise the eager engine under every mode and temperature,
 every token inside a shadow grammar, masked gather fallbacks included)
 and `glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid`
 (the MTP graphs rank-identical and grammar-valid with fallbacks of both
-rows), and `glm_chat_template_test`'s
+rows), and `chat_template_test`'s
 `glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer`
 (every golden tool-call turn accepted position by position over the real
 tokenizer; a second call refused under a single-call spec, EOS refused
@@ -2328,7 +2328,7 @@ spelling, an escape); inside a string the answer is cached until the next
 structural event or a cursor's death. Measured over the real tokenizer:
 36 µs per position on average, 198 µs at the worst structural position
 under a closed schema. EXACTNESS is a gate, not an argument:
-`glm_json_grammar_test` proves `mask()` equal to the brute-force answer
+`json_grammar_test` proves `mask()` equal to the brute-force answer
 (every token simulated) at every position of mask-driven random walks
 over the free machine and schemas exercising every node kind, and every
 finished walk parses and conforms. In the grammar layer
@@ -2357,7 +2357,7 @@ machine from the same record and the same tokenizer.
 
 ## 11. Runtime and API
 
-The daemon is a hand-rolled C++ service (`glm_serve`; `src/service/`) with:
+The daemon is a hand-rolled C++ service (`dgpp-serve`; `src/serve/`) with:
 
 - `POST /v1/chat/completions` (stream and non-stream), `POST
   /v1/completions` (string prompt), `GET /v1/models`, `GET /health`,
@@ -2403,7 +2403,7 @@ external cancellation swept at FIXED TICK TOP; a queued head that can never
 fit is refused at the door (`context_length_exceeded`), so the admission
 deadlock is unreachable by construction. The isolation property is the
 headline and is gate-pinned: a request's ids are identical whether it runs
-alone or interleaved with and cancelled around others (`glm_scheduler_test`
+alone or interleaved with and cancelled around others (`scheduler_test`
 with a scripted fake engine that fails loudly on cross-request
 contamination; the fabric smoke reproduced a solo transcript inside a
 three-request manifest with a cancellation).
@@ -2519,14 +2519,14 @@ final chunk carries the logprobs entries no content chunk took (the EOS
 pick's, which decodes to nothing). `--reasoning-in-content` folds the
 reasoning into content with the model's own `</think>` where it produced
 it (the decode a client of a parser-less server would see) instead of
-splitting it. Gates: `glm_tool_parser_test` (unit, a fake decoder: the
+splitting it. Gates: `tool_parser_test` (unit, a fake decoder: the
 split, exact deltas, schema-typed and inferred values, nested JSON,
 several calls per turn, every malformed shape falling back to literal
 content, missing markers disabling the features),
-`glm_chat_template_test`'s `glm_tool_call_render_encode_parse_roundTrip`
+`chat_template_test`'s `glm_tool_call_render_encode_parse_roundTrip`
 (every golden assistant tool-call message rendered by the template,
 encoded by the real tokenizer and parsed back — 6 turns, 9 calls, names
-and arguments structurally exact), and `glm_serve_test`'s five 6f gates
+and arguments structurally exact), and `serve_test`'s five 6f gates
 (the request side's normalization and refusals by field name, the
 one-shot message shape and `finish_reason`, the stream's chunk order, the
 grammar arming the engine with the prompt untouched — the closed key set
@@ -2552,7 +2552,7 @@ peers exit; a peer that stops reading makes rank 0's broadcast throw. The
 metronome's idle chatter (200 noop records/s, ~3 KB/s per peer) buys zero
 branching. Peers run `run_journal_peer` — no HTTP, no tokenizer. The §5
 identity is checked live by the 4-way op-stream md5 after every run
-(`glm_fabric_serve_test` pins it with two real peer loops over localhost).
+(`fabric_serve_test` pins it with two real peer loops over localhost).
 Bring-up lessons kept as code: the peer's journal connect retries inside
 its window (a single-shot connect lost a 30 ms race to rank 0's bind);
 minijson views its input, so a parsed record is copied out before the
@@ -2568,7 +2568,7 @@ the fabric's distributed greedy pick produced the same token sequence as
 w1's full-vocab argmax.
 
 **The concurrency-1 graph engine** (`GlmGraphEngineAdapter`, M6.6a Phase 1):
-`glm_serve --max-concurrency 1 --decode-graph [--mtp]` keeps prefill and its
+`dgpp-serve --max-concurrency 1 --decode-graph [--mtp]` keeps prefill and its
 first pick eager, records the T=1 or T=2 device-pick graph lazily before the
 first decode, and replays it once per scheduler step. The scheduler's
 explicit reserve call materializes its full-reserve policy in the DSA block
@@ -2640,7 +2640,7 @@ Three follow-ups from the review of the closed phase (2026-09-03, after the
 measured binary): padding rows are inert by construction — the DSA decode
 path zeroes them as the KDA path always did, so a padded row's block output
 and its share of the boundary all-reduce are deterministic without appeal to
-downstream row independence; `glm_serve` warm-captures every variant at
+downstream row independence; `dgpp-serve` warm-captures every variant at
 startup (`warm_captures`: one throwaway session at a time, prefill → capture
 → close, 1.1 s for eight slots), so no record + instantiate lands on a live
 stream and the warm sessions leave nothing behind (both loopback serving
@@ -2864,7 +2864,7 @@ disagree by hours; `scripts/fabric_xrank.py`).
 Current source tree:
 
 ```text
-apps/                 glm_serve (the service), glm_gen_check (generation,
+apps/                 dgpp-serve (the service), glm_gen_check (generation,
                       teacher forcing, --decode-graph, --mtp, --requests),
                       glm_tp_check (fabric parity), glm_forward_check
                       (curated suite, traces), glm_shard_parity,
@@ -2895,7 +2895,7 @@ src/models/           GLM config/binding/loader/resident image; the model
 src/net/              TCP primitives, the epoch-based roster, the CollectiveBus
                       (verbs RC QPs, slot pools, credits, the engine loop, the
                       collective kernels: latency one-shot, graph, bulk RS+AG)
-src/service/          HTTP server, generation service, fabric serve (journal)
+src/serve/          HTTP server, generation service, fabric serve (journal)
 tests/                host, CUDA, and Python tests (32 CTest entries)
 tools/                checkpoint audit, shard plan, reference-dump generators,
                       tokenizer/template golden generators, unicode tables

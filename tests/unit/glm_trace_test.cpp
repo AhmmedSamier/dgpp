@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "common/test.hpp"
-#include "models/glm_trace.hpp"
+#include "models/glm/trace.hpp"
 
 namespace {
 

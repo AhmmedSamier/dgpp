@@ -55,16 +55,16 @@
 #include "common/test.hpp"
 #include "loaders/hf_cache.hpp"
 #include "models/dsa_geometry.hpp"
-#include "models/glm_fabric_engine.hpp"
-#include "models/glm_tool_grammar.hpp"
-#include "models/glm_forward.hpp"
-#include "models/glm_graph_check.hpp"
-#include "models/glm_route_audit.hpp"
-#include "models/glm_sampler.hpp"
-#include "models/glm_speculative.hpp"
-#include "models/glm_tp.hpp"
-#include "models/glm_tp_parity.hpp"
-#include "models/glm_tp_bus.hpp"
+#include "models/glm/fabric_engine.hpp"
+#include "text/tool_grammar.hpp"
+#include "models/glm/forward.hpp"
+#include "models/glm/graph_check.hpp"
+#include "models/glm/route_audit.hpp"
+#include "sample/sampler.hpp"
+#include "models/glm/speculative.hpp"
+#include "models/glm/tp.hpp"
+#include "models/glm/tp_parity.hpp"
+#include "models/glm/tp_bus.hpp"
 #include "models/kda_geometry.hpp"
 #include "net/collective_bus.hpp"
 
@@ -81,8 +81,8 @@ using dgpp::GlmResidency;
 using dgpp::GlmLayerBound;
 using dgpp::bf16_bits_to_float;
 using dgpp::bus_greedy_pick;
-using dgpp::glm_sample::Candidate;
-using dgpp::glm_sample::local_max;
+using dgpp::sample::Candidate;
+using dgpp::sample::local_max;
 using dgpp::GlmLayerResident;
 using dgpp::GlmLayerStream;
 using dgpp::GlmMlpKind;
@@ -826,11 +826,11 @@ DGPP_TEST(glm_sampling_profile_mass_gather_matches_centralized_loopback) {
   }
 
   const double full_lse =
-      dgpp::glm_sample::slice_logsumexp(logits.data(), logits.size());
-  const std::vector<Candidate> full_top = dgpp::glm_sample::local_topk(
+      dgpp::sample::slice_logsumexp(logits.data(), logits.size());
+  const std::vector<Candidate> full_top = dgpp::sample::local_topk(
       logits.data(), logits.size(), 0, dgpp::kSamplingProfileMaxK);
   const std::vector<double> expected =
-      dgpp::glm_sample::topk_probability_masses(
+      dgpp::sample::topk_probability_masses(
           full_top, full_lse,
           std::vector<int>(dgpp::kSamplingProfileTopKs.begin(),
                            dgpp::kSamplingProfileTopKs.end()));
@@ -860,7 +860,7 @@ DGPP_TEST(glm_sampling_profile_mass_gather_matches_centralized_loopback) {
             cudaHostAllocDefault));
         const float* slice = logits.data() + rank * kSlice;
         const double local_lse =
-            dgpp::glm_sample::slice_logsumexp(slice, kSlice);
+            dgpp::sample::slice_logsumexp(slice, kSlice);
         arrive_once();
         got[static_cast<size_t>(rank)] = dgpp::bus_sampling_topk_masses(
             *buses[static_cast<size_t>(rank)], rank, kWorld, slice, kSlice,
@@ -913,9 +913,9 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
   peaked[207] = 8.5f;
   const std::vector<float> flat(kVocab, 0.0f);
   const std::vector<int32_t> context{11, 350, 401};
-  const std::vector<dgpp::glm_sample::VocabSlice> layout{{0, kSlice},
+  const std::vector<dgpp::sample::VocabSlice> layout{{0, kSlice},
                                                          {kSlice, kSlice}};
-  dgpp::glm_sample::Params params;
+  dgpp::sample::Params params;
   params.temperature = 1.0f;
   params.top_p = 0.95f;
   params.top_k = 0;
@@ -923,8 +923,8 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
   params.presence_penalty = 0.10f;
   params.logprobs = 3;
 
-  const auto identical = [](const dgpp::glm_sample::Result& a,
-                            const dgpp::glm_sample::Result& b) {
+  const auto identical = [](const dgpp::sample::Result& a,
+                            const dgpp::sample::Result& b) {
     return a.token == b.token &&
            std::memcmp(&a.logprob, &b.logprob, sizeof(float)) == 0 &&
            a.top_logprobs == b.top_logprobs;
@@ -934,13 +934,13 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
   // breaks it by id, so a draw can land on either shard's member.
   {
     std::vector<float> adjusted = peaked;
-    dgpp::glm_sample::apply_penalties(
+    dgpp::sample::apply_penalties(
         adjusted.data(), kVocab, 0, params,
-        dgpp::glm_sample::count_context(context));
+        dgpp::sample::count_context(context));
     require(adjusted[11] == adjusted[350],
             "fixture: the cross-shard tie must survive the penalties");
     const std::vector<Candidate> top =
-        dgpp::glm_sample::local_topk(adjusted.data(), kVocab, 0, 2);
+        dgpp::sample::local_topk(adjusted.data(), kVocab, 0, 2);
     require(top[0].id == 11 && top[1].id == 350,
             "fixture: the canonical order breaks the tie by id");
   }
@@ -948,17 +948,17 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
   // Expectations: the sharded reference per counter. On this unambiguous
   // nucleus it also equals sample_reference() bitwise (same three survivors,
   // the shared selector's final arithmetic).
-  std::vector<dgpp::glm_sample::Result> expected;
+  std::vector<dgpp::sample::Result> expected;
   bool both_tied_ids_drawn_11 = false;
   bool both_tied_ids_drawn_350 = false;
   for (uint64_t counter : counters) {
-    dgpp::glm_sample::Rng rng{kSeed, counter};
-    expected.push_back(dgpp::glm_sample::sample_reference_sharded(
+    dgpp::sample::Rng rng{kSeed, counter};
+    expected.push_back(dgpp::sample::sample_reference_sharded(
         peaked.data(), kVocab, layout, params, rng, context));
     require(rng.counter == counter + 1, "the reference draws exactly once");
-    dgpp::glm_sample::Rng plain{kSeed, counter};
-    const dgpp::glm_sample::Result reference =
-        dgpp::glm_sample::sample_reference(peaked.data(), kVocab, params,
+    dgpp::sample::Rng plain{kSeed, counter};
+    const dgpp::sample::Result reference =
+        dgpp::sample::sample_reference(peaked.data(), kVocab, params,
                                            plain, context);
     require(identical(expected.back(), reference),
             "sharded reference differs from sample_reference on an "
@@ -972,16 +972,16 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
   {
     // The flat fixture's transported mass: 32 of 600 equal tokens.
     std::vector<float> adjusted = flat;
-    dgpp::glm_sample::apply_penalties(
+    dgpp::sample::apply_penalties(
         adjusted.data(), kVocab, 0, params,
-        dgpp::glm_sample::count_context(context));
-    const std::vector<Candidate> prefix = dgpp::glm_sample::local_topk(
+        dgpp::sample::count_context(context));
+    const std::vector<Candidate> prefix = dgpp::sample::local_topk(
         adjusted.data(), kVocab, 0, kCandidates);
-    dgpp::glm_sample::Rng rng{77, kFallbackCounter};
-    const dgpp::glm_sample::PrefixDecision d =
-        dgpp::glm_sample::sample_from_prefix(
+    dgpp::sample::Rng rng{77, kFallbackCounter};
+    const dgpp::sample::PrefixDecision d =
+        dgpp::sample::sample_from_prefix(
             prefix, kVocab,
-            dgpp::glm_sample::sharded_scaled_logsumexp(adjusted.data(), layout,
+            dgpp::sample::sharded_scaled_logsumexp(adjusted.data(), layout,
                                                        params.temperature),
             params, rng);
     require(!d.resolved && rng.counter == kFallbackCounter,
@@ -989,8 +989,8 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
     expected_fallback_mass = d.covered_mass;
     // ... and the fallback's own answer exists: the complete list resolves
     // with the draw the prefix left behind.
-    dgpp::glm_sample::Rng again{77, kFallbackCounter};
-    (void)dgpp::glm_sample::sample_reference_sharded(
+    dgpp::sample::Rng again{77, kFallbackCounter};
+    (void)dgpp::sample::sample_reference_sharded(
         flat.data(), kVocab, layout, params, again, context);
     require(again.counter == kFallbackCounter + 1,
             "fixture: the complete list consumes the reserved draw");
@@ -1000,9 +1000,9 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
       start_world(kWorld, kPort, 64 * 1024);
   require(!buses.empty(), "sampling-prefix bus world failed to start");
   std::vector<std::string> errors(kWorld);
-  std::vector<std::vector<dgpp::glm_sample::PrefixDecision>> resolved(kWorld);
+  std::vector<std::vector<dgpp::sample::PrefixDecision>> resolved(kWorld);
   std::vector<std::vector<uint64_t>> resolved_counters(kWorld);
-  std::vector<dgpp::glm_sample::PrefixDecision> fallback(kWorld);
+  std::vector<dgpp::sample::PrefixDecision> fallback(kWorld);
   std::vector<uint64_t> fallback_counters(kWorld, 0);
   ConstructBarrier barrier(kWorld);
   std::vector<std::thread> workers;
@@ -1023,7 +1023,7 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
             cudaHostAllocDefault));
         arrive_once();
         for (uint64_t counter : counters) {
-          dgpp::glm_sample::Rng rng{kSeed, counter};
+          dgpp::sample::Rng rng{kSeed, counter};
           resolved[static_cast<size_t>(rank)].push_back(
               dgpp::bus_sampling_prefix(
                   *buses[static_cast<size_t>(rank)], rank, kWorld,
@@ -1032,7 +1032,7 @@ DGPP_TEST(glm_sampling_prefix_decision_matches_centralized_loopback) {
                   test_wait_timeout_ms()));
           resolved_counters[static_cast<size_t>(rank)].push_back(rng.counter);
         }
-        dgpp::glm_sample::Rng fallback_rng{77, kFallbackCounter};
+        dgpp::sample::Rng fallback_rng{77, kFallbackCounter};
         fallback[static_cast<size_t>(rank)] = dgpp::bus_sampling_prefix(
             *buses[static_cast<size_t>(rank)], rank, kWorld,
             flat.data() + rank * kSlice, kSlice, rank * kSlice, kVocab,
@@ -1087,8 +1087,8 @@ DGPP_TEST(glm_logit_gather_is_lossless_loopback) {
   constexpr int kWorld = 2;
   constexpr int kVocab = 40000;  // 160000 words: two 131072-word stripes
   constexpr uint16_t kPort = 29927;
-  const std::vector<dgpp::glm_sample::VocabSlice> layout =
-      dgpp::glm_sample::vocab_layout(kVocab, kWorld);
+  const std::vector<dgpp::sample::VocabSlice> layout =
+      dgpp::sample::vocab_layout(kVocab, kWorld);
   std::vector<float> full(kVocab);
   {
     uint64_t x = 0x9e3779b97f4a7c15ull;
@@ -1163,7 +1163,7 @@ DGPP_TEST(glm_logit_gather_is_lossless_loopback) {
 }
 
 // The eager fabric sampler end to end over the real bus — the closure
-// glm_serve's eager engine and glm_gen_check run — against the sharded
+// dgpp-serve's eager engine and glm_gen_check run — against the sharded
 // reference at the loader's layout, bitwise, across a run of steps whose
 // context grows (penalties) and whose distributions alternate between a
 // peaked shape the prefix resolves and a flat shape that takes the exact
@@ -1173,9 +1173,9 @@ DGPP_TEST(glm_fabric_sample_matches_sharded_reference_loopback) {
   constexpr int kVocab = 700;
   constexpr uint16_t kPort = 29928;
   constexpr int kSteps = 6;
-  const std::vector<dgpp::glm_sample::VocabSlice> layout =
-      dgpp::glm_sample::vocab_layout(kVocab, kWorld);
-  dgpp::glm_sample::Params params;
+  const std::vector<dgpp::sample::VocabSlice> layout =
+      dgpp::sample::vocab_layout(kVocab, kWorld);
+  dgpp::sample::Params params;
   params.temperature = 1.0f;
   params.top_p = 0.95f;
   params.presence_penalty = 0.2f;
@@ -1200,13 +1200,13 @@ DGPP_TEST(glm_fabric_sample_matches_sharded_reference_loopback) {
 
   // The centralized expectation: the sharded reference, one draw per step,
   // the context growing with each sampled token.
-  std::vector<dgpp::glm_sample::Result> expected;
+  std::vector<dgpp::sample::Result> expected;
   {
-    dgpp::glm_sample::Rng rng{0xabcdefull, 0};
+    dgpp::sample::Rng rng{0xabcdefull, 0};
     std::vector<int32_t> context(prompt.begin(), prompt.end());
     for (int step = 0; step < kSteps; ++step) {
       const std::vector<float> full = logits_for(step);
-      expected.push_back(dgpp::glm_sample::sample_reference_sharded(
+      expected.push_back(dgpp::sample::sample_reference_sharded(
           full.data(), kVocab, layout, params, rng, context));
       context.push_back(expected.back().token);
     }
@@ -1217,7 +1217,7 @@ DGPP_TEST(glm_fabric_sample_matches_sharded_reference_loopback) {
       start_world(kWorld, kPort, 64 * 1024);
   require(!buses.empty(), "fabric-sample bus world failed to start");
   std::vector<std::string> errors(kWorld);
-  std::vector<std::vector<dgpp::glm_sample::Result>> got(kWorld);
+  std::vector<std::vector<dgpp::sample::Result>> got(kWorld);
   std::vector<uint64_t> counters(kWorld, 0);
   ConstructBarrier barrier(kWorld);
   std::vector<std::thread> workers;
@@ -1250,7 +1250,7 @@ DGPP_TEST(glm_fabric_sample_matches_sharded_reference_loopback) {
             buses[static_cast<size_t>(rank)].get(), rank, kWorld,
             prefix_scratch, gather_scratch, kVocab, test_wait_timeout_ms());
         const auto& slice = layout[static_cast<size_t>(rank)];
-        dgpp::glm_sample::Rng rng{0xabcdefull, 0};
+        dgpp::sample::Rng rng{0xabcdefull, 0};
         std::vector<int32_t> context(prompt.begin(), prompt.end());
         for (int step = 0; step < kSteps; ++step) {
           const std::vector<float> full = logits_for(step);
@@ -1305,9 +1305,9 @@ DGPP_TEST(glm_spec_accept_matches_reference_loopback) {
   constexpr int kVocab = 700;
   constexpr uint16_t kPort = 29930;
   constexpr int kSteps = 8;
-  const std::vector<dgpp::glm_sample::VocabSlice> layout =
-      dgpp::glm_sample::vocab_layout(kVocab, kWorld);
-  dgpp::glm_sample::Params params;
+  const std::vector<dgpp::sample::VocabSlice> layout =
+      dgpp::sample::vocab_layout(kVocab, kWorld);
+  dgpp::sample::Params params;
   params.temperature = 1.0f;
   params.top_p = 0.95f;
   params.presence_penalty = 0.15f;
@@ -1332,25 +1332,25 @@ DGPP_TEST(glm_spec_accept_matches_reference_loopback) {
   const auto draft_for = [&](int step) -> int32_t {
     const std::vector<float> v = row_for(step, 0);
     if (step % 4 < 2)
-      return dgpp::glm_sample::local_max(v.data(), kVocab, 0).id;
+      return dgpp::sample::local_max(v.data(), kVocab, 0).id;
     return static_cast<int32_t>((step * 97 + 13) % kVocab);
   };
 
   // The centralized expectation.
   struct Expected {
-    dgpp::glm_sample::SpecStepReference ref;
+    dgpp::sample::SpecStepReference ref;
     uint64_t counter_after;
   };
   std::vector<Expected> expected;
   {
-    dgpp::glm_sample::Rng rng{0x5eedull, 0};
+    dgpp::sample::Rng rng{0x5eedull, 0};
     std::vector<int32_t> context(prompt.begin(), prompt.end());
     for (int step = 0; step < kSteps; ++step) {
       const std::vector<float> r0 = row_for(step, 0);
       const std::vector<float> r1 = row_for(step, 1);
       const int32_t draft = draft_for(step);
       Expected e;
-      e.ref = dgpp::glm_sample::spec_reference_sharded(
+      e.ref = dgpp::sample::spec_reference_sharded(
           r0.data(), r1.data(), kVocab, layout, draft, params, rng, context);
       e.counter_after = rng.counter;
       expected.push_back(e);
@@ -1363,7 +1363,7 @@ DGPP_TEST(glm_spec_accept_matches_reference_loopback) {
       start_world(kWorld, kPort, 64 * 1024);
   require(!buses.empty(), "spec-accept bus world failed to start");
   std::vector<std::string> errors(kWorld);
-  std::vector<std::vector<dgpp::glm_sample::SpecStepReference>> got(kWorld);
+  std::vector<std::vector<dgpp::sample::SpecStepReference>> got(kWorld);
   std::vector<std::vector<uint64_t>> counters(kWorld);
   ConstructBarrier barrier(kWorld);
   std::vector<std::thread> workers;
@@ -1395,14 +1395,14 @@ DGPP_TEST(glm_spec_accept_matches_reference_loopback) {
         CollectiveBus& bus = *buses[static_cast<size_t>(rank)];
         const auto& slice = layout[static_cast<size_t>(rank)];
         std::vector<float> gather_buffer;
-        dgpp::glm_sample::Rng rng{0x5eedull, 0};
+        dgpp::sample::Rng rng{0x5eedull, 0};
         std::vector<int32_t> context(prompt.begin(), prompt.end());
         for (int step = 0; step < kSteps; ++step) {
           const std::vector<float> r0 = row_for(step, 0);
           const std::vector<float> r1 = row_for(step, 1);
           const int32_t draft = draft_for(step);
-          dgpp::glm_sample::SpecStepReference s;
-          const dgpp::glm_sample::SpecPrefixDecision d0 = dgpp::bus_spec_accept(
+          dgpp::sample::SpecStepReference s;
+          const dgpp::sample::SpecPrefixDecision d0 = dgpp::bus_spec_accept(
               bus, rank, kWorld, r0.data() + slice.begin, slice.count,
               slice.begin, kVocab, draft, params, rng, context,
               dgpp::kSamplingCandidates, prefix_scratch, gather_scratch,
@@ -1442,8 +1442,8 @@ DGPP_TEST(glm_spec_accept_matches_reference_loopback) {
     for (int step = 0; step < kSteps; ++step) {
       const auto& g = got[static_cast<size_t>(rank)][static_cast<size_t>(step)];
       const auto& e = expected[static_cast<size_t>(step)].ref;
-      const auto same = [](const dgpp::glm_sample::Result& a,
-                           const dgpp::glm_sample::Result& b) {
+      const auto same = [](const dgpp::sample::Result& a,
+                           const dgpp::sample::Result& b) {
         return a.token == b.token &&
                std::memcmp(&a.logprob, &b.logprob, sizeof(float)) == 0;
       };
@@ -1476,7 +1476,7 @@ DGPP_TEST(glm_tp_sampled_speculator_loopback_rank_identical) {
   constexpr int kTokens = 12;
   constexpr int kWorld = 2;
   const int max_tokens = static_cast<int>(prompt.size()) + kTokens + 4;
-  dgpp::glm_sample::Params params;
+  dgpp::sample::Params params;
   params.temperature = 0.6f;  // peaked enough for some drafts to stand
   params.top_p = 0.95f;
   params.presence_penalty = 0.1f;
@@ -1532,7 +1532,7 @@ DGPP_TEST(glm_tp_sampled_speculator_loopback_rank_identical) {
         const dgpp::GenEngineAdapter::Sample row1 = dgpp::make_fabric_sample(
             &bus, r, kWorld, prefix_scratch, gather_scratch, cfg.vocab_size,
             test_wait_timeout_ms());
-        dgpp::glm_sample::Rng rng{0x77ull, 0};
+        dgpp::sample::Rng rng{0x77ull, 0};
         const GlmDiagnosticModel::Outputs pre = shard.session_prefill(prompt);
         const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
         const int32_t first =
@@ -2387,7 +2387,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
         // nodes deadlocked this world at one hardware connection (10/10) —
         // session_graph_outputs copies the tail eagerly after each replay.
         shard.set_decode_tail_mirrors(false);
-        dgpp::GlmDevicePicker picker(bus, r, kWorld, test_wait_timeout_ms());
+        dgpp::DevicePicker picker(bus, r, kWorld, test_wait_timeout_ms());
         dgpp::GlmGraphRecordReducer recorder(bus, shard.stream());
         DGPP_CUDA_OK(cudaMallocManaged(
             &scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld)));
@@ -2413,7 +2413,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
         GlmDiagnosticModel::Outputs pre = shard.session_prefill(prompt);
         int32_t next = host_pick(pre, 1)[0];
         const auto device_inputs = [&](int rows) {
-          dgpp::GlmDevicePicker::Inputs in;
+          dgpp::DevicePicker::Inputs in;
           in.logits = shard.device_logits();
           in.rows = rows;
           in.vocab_count = shard.lm_vocab_count();
@@ -2425,7 +2425,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
         const auto draft_after = [&](const std::vector<int64_t>& rows) {
           const GlmDiagnosticModel::Outputs d = shard.session_draft(0, rows);
           const int32_t host = host_pick(d, 1)[0];
-          const dgpp::GlmPickVerdict& v =
+          const dgpp::PickVerdict& v =
               picker.run(shard.stream(), device_inputs(1));
           if (v.accepted != 1 || v.next != host || v.winners[0] != host)
             throw std::runtime_error("draft: device pick " +
@@ -2469,7 +2469,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
           require(bus.graph_replay_finish(test_wait_timeout_ms(), &gerr),
                   "graph_replay_finish: " + gerr);
           const GlmDiagnosticModel::Outputs out = shard.session_graph_outputs(0);
-          const dgpp::GlmPickVerdict& v = picker.verdict();
+          const dgpp::PickVerdict& v = picker.verdict();
           // The host judge over the same logits the graph produced.
           const std::vector<int32_t> winners = host_pick(out, 2);
           const dgpp::SpecVerdict want = dgpp::judge_verify(fed, winners);
@@ -2586,7 +2586,7 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
                                  /*mtp=*/true);
         shard.set_decode_route_traces(false);
         shard.set_decode_tail_mirrors(false);
-        dgpp::GlmDevicePicker picker(bus, r, kWorld, test_wait_timeout_ms());
+        dgpp::DevicePicker picker(bus, r, kWorld, test_wait_timeout_ms());
         dgpp::GlmGraphRecordReducer recorder(bus, shard.stream());
         DGPP_CUDA_OK(cudaMallocManaged(
             &scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld)));
@@ -2625,8 +2625,8 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
         const GlmDiagnosticModel::Outputs pre = shard.session_prefill(prompt);
         int32_t next = host_pick(pre, 1)[0];
         const auto device_inputs = [&](int rows, int slot,
-                                       const dgpp::GlmPickVerdict* select) {
-          dgpp::GlmDevicePicker::Inputs in;
+                                       const dgpp::PickVerdict* select) {
+          dgpp::DevicePicker::Inputs in;
           in.logits = shard.device_logits();
           in.rows = rows;
           in.vocab_count = shard.lm_vocab_count();
@@ -2680,8 +2680,8 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
           DGPP_CUDA_OK(cudaStreamSynchronize(shard.stream()));
           require(bus.graph_replay_finish(test_wait_timeout_ms(), &gerr),
                   "graph_replay_finish: " + gerr);
-          const dgpp::GlmPickVerdict v0 = picker.verdict(0);
-          const dgpp::GlmPickVerdict v1 = picker.verdict(1);
+          const dgpp::PickVerdict v0 = picker.verdict(0);
+          const dgpp::PickVerdict v1 = picker.verdict(1);
           shard.session_graph_settle(0, v0.accepted);
           // The eager reference takes the same step (its own collectives,
           // between windows) and must agree on everything observable.
@@ -2827,7 +2827,7 @@ DGPP_TEST(glm_tp_serving_graph_adapter_matches_plain_and_reuses_slot) {
         {
           dgpp::GlmGraphEngineAdapter engine(
               &graph, &bus, r, kWorld, scratch, cfg.vocab_size);
-          dgpp::glm::Scheduler sched(&engine, /*eos_token_ids=*/{});
+          dgpp::sched::Scheduler sched(&engine, /*eos_token_ids=*/{});
           // One request through the scheduler, tick by tick. With no EOS
           // set and max_steps > 1 no request retires at admission, so
           // every tick that returns true ran exactly one replay; the eager
@@ -2837,7 +2837,7 @@ DGPP_TEST(glm_tp_serving_graph_adapter_matches_plain_and_reuses_slot) {
                                        int max_steps) {
             dgpp::GreedySpeculator spec(eager, 0, pick_rows);
             spec.start(host_pick(eager.session_prefill(prompt)));
-            dgpp::glm::SchedulerRequest req;
+            dgpp::sched::SchedulerRequest req;
             req.id = id;
             req.prompt = prompt;
             req.max_steps = max_steps;
@@ -2942,11 +2942,11 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
   struct Spec {
     const char* id;
     int max_steps;
-    dgpp::glm_sample::Params params;
+    dgpp::sample::Params params;
     uint64_t seed;
   };
   const auto model_default = [] {
-    dgpp::glm_sample::Params p;
+    dgpp::sample::Params p;
     p.temperature = 1.0f;
     p.top_p = 0.95f;
     p.frequency_penalty = 0.2f;
@@ -2954,7 +2954,7 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
     return p;
   }();
   const auto narrow = [] {
-    dgpp::glm_sample::Params p;
+    dgpp::sample::Params p;
     p.temperature = 0.8f;
     p.top_p = 0.1f;
     return p;
@@ -2965,24 +2965,24 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
   // Every request asks for logprobs with two alternatives: the greedy
   // request then takes the full path too (the argmax under the raw
   // distribution), and both engines must report the same entries bitwise.
-  const auto with_logprobs = [](dgpp::glm_sample::Params p) {
+  const auto with_logprobs = [](dgpp::sample::Params p) {
     p.logprobs = 2;
     return p;
   };
   const std::vector<std::vector<Spec>> phases{
       {{"solo", 8, with_logprobs(model_default), 7}},
       {{"a", 8, with_logprobs(model_default), 11},
-       {"g", 5, with_logprobs(dgpp::glm_sample::greedy_params()), 0}},
+       {"g", 5, with_logprobs(dgpp::sample::greedy_params()), 0}},
       {{"n", 6, with_logprobs(narrow), 23}},
   };
   // The observer records every token's report as text: token, logprob bits,
   // and the alternatives' ids and logprob bits.
-  struct Recorder : dgpp::glm::SchedulerObserver {
+  struct Recorder : dgpp::sched::SchedulerObserver {
     std::vector<std::string> events;
     void on_token(const std::string&, int64_t, int) override {}
-    void on_retire(const std::string&, const dgpp::glm::Scheduler::Result&) override {}
+    void on_retire(const std::string&, const dgpp::sched::Scheduler::Result&) override {}
     void on_token_logprobs(const std::string& id, int steps_done,
-                           const dgpp::glm_sample::Result& lp) override {
+                           const dgpp::sample::Result& lp) override {
       uint32_t bits = 0;
       std::memcpy(&bits, &lp.logprob, sizeof(bits));
       std::string e = id + ":" + std::to_string(steps_done) + ":" +
@@ -3059,8 +3059,8 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
             graph_engine.sampling_candidates() != kCap)
           throw std::runtime_error("graph engine did not arm the device "
                                    "sampler at the capped width");
-        dgpp::glm::Scheduler eager_sched(&eager_engine, /*eos=*/{});
-        dgpp::glm::Scheduler graph_sched(&graph_engine, /*eos=*/{});
+        dgpp::sched::Scheduler eager_sched(&eager_engine, /*eos=*/{});
+        dgpp::sched::Scheduler graph_sched(&graph_engine, /*eos=*/{});
         Recorder eager_lps, graph_lps;
         eager_sched.set_observer(&eager_lps);
         graph_sched.set_observer(&graph_lps);
@@ -3068,7 +3068,7 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
         size_t result_index = 0;
         for (const std::vector<Spec>& phase : phases) {
           for (const Spec& spec : phase) {
-            dgpp::glm::SchedulerRequest req;
+            dgpp::sched::SchedulerRequest req;
             req.id = spec.id;
             req.prompt = prompt;
             req.max_steps = spec.max_steps;
@@ -3116,14 +3116,14 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
           const std::vector<int64_t>& g = eager_sched.results()[2].generated;
           const int32_t banned = static_cast<int32_t>(g.at(0));
           const int32_t forced = static_cast<int32_t>(g.at(1));
-          dgpp::glm::SchedulerRequest gb;
+          dgpp::sched::SchedulerRequest gb;
           gb.id = "gb";
           gb.prompt = prompt;
           gb.max_steps = 6;
-          gb.sampling = with_logprobs(dgpp::glm_sample::greedy_params());
+          gb.sampling = with_logprobs(dgpp::sample::greedy_params());
           gb.logprobs = 2;
           gb.logit_bias = {{banned, -100.0f}};
-          dgpp::glm::SchedulerRequest sf;
+          dgpp::sched::SchedulerRequest sf;
           sf.id = "sf";
           sf.prompt = prompt;
           sf.max_steps = 6;
@@ -3131,7 +3131,7 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
           sf.seed = 37;
           sf.logprobs = 2;
           sf.logit_bias = {{forced, 100.0f}, {banned, -2.5f}};
-          for (const dgpp::glm::SchedulerRequest& req : {gb, sf}) {
+          for (const dgpp::sched::SchedulerRequest& req : {gb, sf}) {
             eager_sched.submit(req);
             graph_sched.submit(req);
           }
@@ -3231,13 +3231,13 @@ const char* kGxJsonTexts[] = {
     "8", "9", "-", ".", " ", "true", "false", "null", "\n", "\":", ",\"", "{\"",
     "\"}",
 };
-dgpp::glm::GrammarVocab fixture_grammar_vocab(int vocab) {
+dgpp::text::GrammarVocab fixture_grammar_vocab(int vocab) {
   std::vector<std::string> texts(static_cast<size_t>(vocab));
   for (int id = 0; id < 52 && id < vocab; ++id)
     texts[static_cast<size_t>(id)] = std::string(1, static_cast<char>('a' + id % 26));
   for (int id = 52; id < 80 && id < vocab; ++id)
     texts[static_cast<size_t>(id)] = kGxJsonTexts[id - 52];
-  dgpp::glm::ChatMarkers m;
+  dgpp::text::ChatMarkers m;
   m.think_open = {kGxThinkOpen, "<think>"};
   m.think_close = {kGxThinkClose, "</think>"};
   m.tool_call_open = {kGxToolOpen, "<tool_call>"};
@@ -3246,30 +3246,30 @@ dgpp::glm::GrammarVocab fixture_grammar_vocab(int vocab) {
   m.arg_key_close = {kGxKeyClose, "</arg_key>"};
   m.arg_value_open = {kGxValueOpen, "<arg_value>"};
   m.arg_value_close = {kGxValueClose, "</arg_value>"};
-  return dgpp::glm::GrammarVocab(std::move(texts), m, {kGxEos, kGxEos2}, vocab,
+  return dgpp::text::GrammarVocab(std::move(texts), m, {kGxEos, kGxEos2}, vocab,
                                  kGxEos);
 }
 
-dgpp::glm::GrammarSpec fixture_grammar(dgpp::glm::GrammarSpec::Mode mode,
+dgpp::text::GrammarSpec fixture_grammar(dgpp::text::GrammarSpec::Mode mode,
                                        bool parallel = true,
                                        const std::string& named = "") {
-  dgpp::glm::GrammarSpec g;
+  dgpp::text::GrammarSpec g;
   g.mode = mode;
   g.parallel = parallel;
   g.named = named;
   // Typed arguments (M6 6i): x an integer (a JSON value), y one of two
   // texts, z (of the open-keyed tool) a boolean; the rest free.
-  dgpp::glm::GrammarTool ab{"ab", true, {"x", "y"}, {}, {}, false};
-  ab.args.push_back(dgpp::glm::GrammarArg{"x", dgpp::glm::GrammarArg::Kind::kJson,
+  dgpp::text::GrammarTool ab{"ab", true, {"x", "y"}, {}, {}, false};
+  ab.args.push_back(dgpp::text::GrammarArg{"x", dgpp::text::GrammarArg::Kind::kJson,
                                           "{\"type\":\"integer\"}", {}});
-  ab.args.push_back(dgpp::glm::GrammarArg{"y", dgpp::glm::GrammarArg::Kind::kText, "",
+  ab.args.push_back(dgpp::text::GrammarArg{"y", dgpp::text::GrammarArg::Kind::kText, "",
                                           {"cd", "ce"}});
   g.tools.push_back(std::move(ab));
-  dgpp::glm::GrammarTool ac{"ac", false, {}, {}, {}, false};
-  ac.args.push_back(dgpp::glm::GrammarArg{"z", dgpp::glm::GrammarArg::Kind::kJson,
+  dgpp::text::GrammarTool ac{"ac", false, {}, {}, {}, false};
+  ac.args.push_back(dgpp::text::GrammarArg{"z", dgpp::text::GrammarArg::Kind::kJson,
                                           "{\"type\":\"boolean\"}", {}});
   g.tools.push_back(std::move(ac));
-  g.tools.push_back(dgpp::glm::GrammarTool{"b", true, {}, {}, {}, false});
+  g.tools.push_back(dgpp::text::GrammarTool{"b", true, {}, {}, {}, false});
   return g;
 }
 
@@ -3281,21 +3281,21 @@ const char* kGxJsonSchema =
     "\"b\":{\"enum\":[\"cd\",\"ce\",null]},\"c\":{\"type\":\"array\","
     "\"items\":{\"type\":\"boolean\"},\"maxItems\":2}},\"required\":[\"a\"],"
     "\"additionalProperties\":false}";
-dgpp::glm::GrammarSpec fixture_json(const std::string& schema) {
-  dgpp::glm::GrammarSpec g;
-  g.mode = dgpp::glm::GrammarSpec::Mode::kJson;
+dgpp::text::GrammarSpec fixture_json(const std::string& schema) {
+  dgpp::text::GrammarSpec g;
+  g.mode = dgpp::text::GrammarSpec::Mode::kJson;
   g.json_schema = schema;
   return g;
 }
 
 // Feeds a transcript through a fresh grammar state: every id must be
 // allowed at its position.
-void require_grammar_valid(const dgpp::glm::GrammarVocab& vocab,
-                           const dgpp::glm::GrammarSpec& spec,
+void require_grammar_valid(const dgpp::text::GrammarVocab& vocab,
+                           const dgpp::text::GrammarSpec& spec,
                            bool opens_thinking,
                            const std::vector<int64_t>& generated,
                            const std::string& what) {
-  dgpp::glm::GrammarState shadow(&vocab, spec, opens_thinking);
+  dgpp::text::GrammarState shadow(&vocab, spec, opens_thinking);
   for (size_t i = 0; i < generated.size(); ++i) {
     if (!shadow.allows(generated[i])) {
       std::string all;
@@ -3315,11 +3315,11 @@ void require_grammar_valid(const dgpp::glm::GrammarVocab& vocab,
 struct GrammarSpecCase {
   const char* id;
   int max_steps;
-  dgpp::glm_sample::Params params;
+  dgpp::sample::Params params;
   uint64_t seed;
-  dgpp::glm::GrammarSpec grammar;
+  dgpp::text::GrammarSpec grammar;
   bool think_prompt;
-  std::vector<dgpp::glm::LogitBias> bias;  // the logit bias (2026-09-06)
+  std::vector<dgpp::sched::LogitBias> bias;  // the logit bias (2026-09-06)
 };
 
 }  // namespace
@@ -3335,13 +3335,13 @@ DGPP_TEST(glm_tp_serving_graph_constrained_matches_eager_engine_and_grammar) {
   constexpr int kSlots = 2;
   constexpr int kCap = 24;
   const int max_tokens = static_cast<int>(prompt.size()) + 12;
-  const dgpp::glm::GrammarVocab gvocab = fixture_grammar_vocab(cfg.vocab_size);
-  using Mode = dgpp::glm::GrammarSpec::Mode;
-  dgpp::glm_sample::Params sampled;
+  const dgpp::text::GrammarVocab gvocab = fixture_grammar_vocab(cfg.vocab_size);
+  using Mode = dgpp::text::GrammarSpec::Mode;
+  dgpp::sample::Params sampled;
   sampled.temperature = 1.0f;
   sampled.top_p = 0.95f;
   sampled.presence_penalty = 0.1f;
-  dgpp::glm_sample::Params pure;
+  dgpp::sample::Params pure;
   pure.temperature = 1.2f;
   pure.top_p = 1.0f;
   // The fixture model rarely closes a think block by itself, so the calls
@@ -3350,7 +3350,7 @@ DGPP_TEST(glm_tp_serving_graph_constrained_matches_eager_engine_and_grammar) {
   const std::vector<std::vector<GrammarSpecCase>> phases{
       {{"req", 10, sampled, 7, fixture_grammar(Mode::kRequired), false, {}}},
       {{"named", 9, pure, 11, fixture_grammar(Mode::kNamed, true, "ac"), false, {}},
-       {"greedy", 8, dgpp::glm_sample::greedy_params(), 0,
+       {"greedy", 8, dgpp::sample::greedy_params(), 0,
         fixture_grammar(Mode::kRequired, false), false, {}}},
       {{"none", 6, sampled, 17, fixture_grammar(Mode::kForbidCalls), false, {}},
        {"think", 8, sampled, 19, fixture_grammar(Mode::kRequired), true, {}}},
@@ -3422,13 +3422,13 @@ DGPP_TEST(glm_tp_serving_graph_constrained_matches_eager_engine_and_grammar) {
         if (!eager_engine.supports_constraints() ||
             !graph_engine.supports_constraints())
           throw std::runtime_error("the engines did not arm constrained decoding");
-        dgpp::glm::Scheduler eager_sched(&eager_engine, /*eos=*/{});
-        dgpp::glm::Scheduler graph_sched(&graph_engine, /*eos=*/{});
+        dgpp::sched::Scheduler eager_sched(&eager_engine, /*eos=*/{});
+        dgpp::sched::Scheduler graph_sched(&graph_engine, /*eos=*/{});
 
         size_t result_index = 0;
         for (const std::vector<GrammarSpecCase>& phase : phases) {
           for (const GrammarSpecCase& c : phase) {
-            dgpp::glm::SchedulerRequest req;
+            dgpp::sched::SchedulerRequest req;
             req.id = c.id;
             req.prompt = c.think_prompt ? think_prompt : prompt;
             req.max_steps = c.max_steps;
@@ -3510,13 +3510,13 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
   constexpr int kSlots = 2;
   constexpr int kCap = 24;
   const int max_tokens = static_cast<int>(prompt.size()) + 20;
-  const dgpp::glm::GrammarVocab gvocab = fixture_grammar_vocab(cfg.vocab_size);
-  using Mode = dgpp::glm::GrammarSpec::Mode;
-  dgpp::glm_sample::Params sampled;
+  const dgpp::text::GrammarVocab gvocab = fixture_grammar_vocab(cfg.vocab_size);
+  using Mode = dgpp::text::GrammarSpec::Mode;
+  dgpp::sample::Params sampled;
   sampled.temperature = 1.0f;
   sampled.top_p = 0.95f;
   sampled.presence_penalty = 0.1f;
-  dgpp::glm_sample::Params pure;
+  dgpp::sample::Params pure;
   pure.temperature = 1.1f;
   pure.top_p = 1.0f;
   // The required call is owed from a prompt without a think block (the
@@ -3527,7 +3527,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
   const std::vector<std::vector<GrammarSpecCase>> phases{
       {{"solo", 12, sampled, 7, fixture_grammar(Mode::kRequired), false, {}}},
       {{"a", 11, pure, 11, fixture_grammar(Mode::kNamed, true, "ab"), false, {}},
-       {"g", 9, dgpp::glm_sample::greedy_params(), 0,
+       {"g", 9, dgpp::sample::greedy_params(), 0,
         fixture_grammar(Mode::kRequired), true, {}}},
       {{"think", 10, sampled, 29, fixture_grammar(Mode::kRequired), true, {}},
        {"think2", 10, sampled, 31, fixture_grammar(Mode::kNamed, true, "ac"), true, {}}},
@@ -3539,8 +3539,8 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
       // row picks it; the unbiased in-graph draft is rejected until it
       // happens to propose it) and a moderate bias on a sampled request —
       // both rank-identical, the forced transcript all one token.
-      {{"biasF", 8, sampled, 53, dgpp::glm::GrammarSpec{}, false, {{7, 100.0f}}},
-       {"biasM", 8, sampled, 59, dgpp::glm::GrammarSpec{}, false,
+      {{"biasF", 8, sampled, 53, dgpp::text::GrammarSpec{}, false, {{7, 100.0f}}},
+       {"biasM", 8, sampled, 59, dgpp::text::GrammarSpec{}, false,
         {{3, 2.0f}, {5, -3.0f}}}},
   };
 
@@ -3594,11 +3594,11 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
         if (!engine.supports_constraints())
           throw std::runtime_error("the MTP graph engine did not arm "
                                    "constrained decoding");
-        dgpp::glm::Scheduler sched(&engine, /*eos=*/{});
+        dgpp::sched::Scheduler sched(&engine, /*eos=*/{});
         size_t result_index = 0;
         for (const std::vector<GrammarSpecCase>& phase : phases) {
           for (const GrammarSpecCase& c : phase) {
-            dgpp::glm::SchedulerRequest req;
+            dgpp::sched::SchedulerRequest req;
             req.id = c.id;
             req.prompt = c.think_prompt ? think_prompt : prompt;
             req.max_steps = c.max_steps;
@@ -3674,7 +3674,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
   constexpr int kSlots = 2;
   constexpr int kCap = 24;
   const int max_tokens = static_cast<int>(prompt.size()) + 16;
-  dgpp::glm_sample::Params params;
+  dgpp::sample::Params params;
   params.temperature = 1.0f;
   params.top_p = 0.95f;
   params.frequency_penalty = 0.2f;
@@ -3755,7 +3755,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
         if (!engine.supports_sampling() || engine.sampling_candidates() != kCap)
           throw std::runtime_error("the MTP graph engine did not arm the "
                                    "device sampler at the capped width");
-        dgpp::glm::Scheduler sched(&engine, /*eos=*/{});
+        dgpp::sched::Scheduler sched(&engine, /*eos=*/{});
 
         size_t result_index = 0;
         for (const std::vector<Spec>& phase : phases) {
@@ -3766,7 +3766,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
           // collectives the graph engine's prefill issues at admission ride
           // the bus in the same order on every rank either way).
           for (size_t i = 0; i < n; ++i) {
-            dgpp::glm_sample::Rng rng{phase[i].seed, 0};
+            dgpp::sample::Rng rng{phase[i].seed, 0};
             const GlmDiagnosticModel::Outputs pre =
                 eager.session_prefill(static_cast<int>(i), prompt);
             const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
@@ -3778,7 +3778,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
             specs.back()->start(first);
           }
           for (size_t i = 0; i < n; ++i) {
-            dgpp::glm::SchedulerRequest req;
+            dgpp::sched::SchedulerRequest req;
             req.id = phase[i].id;
             req.prompt = prompt;
             req.max_steps = phase[i].max_steps;
@@ -3803,7 +3803,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
               const std::vector<int32_t> committed = specs[i]->step();
               streams[i].insert(streams[i].end(), committed.begin(),
                                 committed.end());
-              const dgpp::glm::Scheduler::Result* res = sched.find(phase[i].id);
+              const dgpp::sched::Scheduler::Result* res = sched.find(phase[i].id);
               if (res == nullptr) throw std::runtime_error("result lookup");
               // The graph's tokens so far vs the speculator's committed
               // stream plus its pending next, over the same length.
@@ -3819,7 +3819,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
                     "' graph transcript differs from the eager sampled "
                     "speculator's after replay " +
                     std::to_string(replays[static_cast<size_t>(r)]));
-              if (res->status != dgpp::glm::Scheduler::Result::Status::kActive) {
+              if (res->status != dgpp::sched::Scheduler::Result::Status::kActive) {
                 finished[i] = true;
                 continue;
               }
@@ -4135,13 +4135,13 @@ DGPP_TEST(glm_tp_serving_plain_batched_graph_matches_independent_sessions) {
           require(engine.decode_batch_capacity() == 2,
                   "Phase-2 graph did not advertise both fixed slots");
           engine.warm_captures(make_tokens(4, cfg.vocab_size));
-          dgpp::glm::Scheduler sched(&engine, /*eos_token_ids=*/{});
-          dgpp::glm::SchedulerRequest a;
+          dgpp::sched::Scheduler sched(&engine, /*eos_token_ids=*/{});
+          dgpp::sched::SchedulerRequest a;
           a.id = "batch-a";
           a.prompt = prompt_a;
           a.max_steps = kTokensA;
           sched.submit(std::move(a));
-          dgpp::glm::SchedulerRequest b;
+          dgpp::sched::SchedulerRequest b;
           b.id = "batch-b";
           b.prompt = prompt_b;
           b.max_steps = kTokensB;
@@ -4492,10 +4492,10 @@ DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
   p1[21] = kMarker;
   require(boundaries_of(p1) == std::vector<int64_t>{21}, "p1's boundary");
 
-  struct Ops : public dgpp::glm::SchedulerObserver {
+  struct Ops : public dgpp::sched::SchedulerObserver {
     std::vector<std::string> ops;
     void on_token(const std::string&, int64_t, int) override {}
-    void on_retire(const std::string&, const dgpp::glm::Scheduler::Result&) override {}
+    void on_retire(const std::string&, const dgpp::sched::Scheduler::Result&) override {}
     void on_prefix(const std::string&, const char* op, int64_t position,
                    int) override {
       ops.push_back(std::string(op) + "@" + std::to_string(position));
@@ -4503,7 +4503,7 @@ DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
   };
   const auto request = [&](const std::string& id, const std::vector<int64_t>& p,
                            int steps, bool no_cache) {
-    dgpp::glm::SchedulerRequest r;
+    dgpp::sched::SchedulerRequest r;
     r.id = id;
     r.prompt = p;
     r.boundaries = boundaries_of(p);
@@ -4534,7 +4534,7 @@ DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
     {
       dgpp::GenEngineAdapter eng(&m, 2, dgpp::make_w1_pick(V), nullptr, nullptr,
                                  /*prefix_slots=*/3);
-      dgpp::glm::Scheduler sched(&eng, /*eos_token_ids=*/{});
+      dgpp::sched::Scheduler sched(&eng, /*eos_token_ids=*/{});
       require(sched.prefix_slots() == 3, "the scheduler took the arena");
       sched.set_observer(&ops);
       sched.submit(request("a", p1, 6, false));
@@ -4562,7 +4562,7 @@ DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
               "prefix decisions:\n  got:      " + joined(ops.ops) + "\n  expected: " + expected);
       // D cold: a cache-less adapter over the same model.
       dgpp::GenEngineAdapter cold(&m, 2, dgpp::make_w1_pick(V));
-      dgpp::glm::Scheduler s2(&cold, {});
+      dgpp::sched::Scheduler s2(&cold, {});
       s2.submit(request("d-cold", p2, 4, false));
       s2.run_to_completion();
       require(s2.results()[0].generated == d,
@@ -4611,10 +4611,10 @@ DGPP_TEST(glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks) {
     if (t == kMarker) t = kMarker + 1;
   p1[0] = kMarker;
   p1[21] = kMarker;
-  struct Ops : public dgpp::glm::SchedulerObserver {
+  struct Ops : public dgpp::sched::SchedulerObserver {
     std::vector<std::string> ops;
     void on_token(const std::string&, int64_t, int) override {}
-    void on_retire(const std::string&, const dgpp::glm::Scheduler::Result&) override {}
+    void on_retire(const std::string&, const dgpp::sched::Scheduler::Result&) override {}
     void on_prefix(const std::string&, const char* op, int64_t position,
                    int) override {
       ops.push_back(std::string(op) + "@" + std::to_string(position));
@@ -4622,7 +4622,7 @@ DGPP_TEST(glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks) {
   };
   const auto request = [&](const std::string& id, const std::vector<int64_t>& p,
                            int steps, bool no_cache) {
-    dgpp::glm::SchedulerRequest r;
+    dgpp::sched::SchedulerRequest r;
     r.id = id;
     r.prompt = p;
     r.boundaries = boundaries_of(p);
@@ -4667,9 +4667,9 @@ DGPP_TEST(glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks) {
               &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
               /*pick_timeout_ms=*/60000, /*batch_min_live=*/4, nullptr, nullptr,
               dgpp::kSamplingCandidates, nullptr, /*prefix_slots=*/3);
-          dgpp::glm::Scheduler sched(&engine, /*eos_token_ids=*/{});
+          dgpp::sched::Scheduler sched(&engine, /*eos_token_ids=*/{});
           sched.set_observer(&ops);
-          const auto run = [&](const dgpp::glm::SchedulerRequest& req) {
+          const auto run = [&](const dgpp::sched::SchedulerRequest& req) {
             sched.submit(req);
             while (sched.tick()) {
             }
@@ -4785,7 +4785,7 @@ DGPP_TEST(glm_tp_one_graph_step_forced_rejections_at_pool_boundaries_match_plain
                                  /*mtp=*/true);
         shard.set_decode_route_traces(false);
         shard.set_decode_tail_mirrors(false);
-        dgpp::GlmDevicePicker picker(bus, r, kWorld, test_wait_timeout_ms());
+        dgpp::DevicePicker picker(bus, r, kWorld, test_wait_timeout_ms());
         dgpp::GlmGraphRecordReducer recorder(bus, shard.stream());
         DGPP_CUDA_OK(cudaMallocManaged(
             &scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld)));
@@ -4811,8 +4811,8 @@ DGPP_TEST(glm_tp_one_graph_step_forced_rejections_at_pool_boundaries_match_plain
         const GlmDiagnosticModel::Outputs pre = shard.session_prefill(prompt);
         int32_t next = host_pick(pre, 1)[0];
         const auto device_inputs = [&](int rows, int slot,
-                                       const dgpp::GlmPickVerdict* select) {
-          dgpp::GlmDevicePicker::Inputs in;
+                                       const dgpp::PickVerdict* select) {
+          dgpp::DevicePicker::Inputs in;
           in.logits = shard.device_logits();
           in.rows = rows;
           in.vocab_count = shard.lm_vocab_count();
@@ -4876,8 +4876,8 @@ DGPP_TEST(glm_tp_one_graph_step_forced_rejections_at_pool_boundaries_match_plain
           DGPP_CUDA_OK(cudaStreamSynchronize(shard.stream()));
           require(bus.graph_replay_finish(test_wait_timeout_ms(), &gerr),
                   "graph_replay_finish: " + gerr);
-          const dgpp::GlmPickVerdict v0 = picker.verdict(0);
-          const dgpp::GlmPickVerdict v1 = picker.verdict(1);
+          const dgpp::PickVerdict v0 = picker.verdict(0);
+          const dgpp::PickVerdict v1 = picker.verdict(1);
           shard.session_graph_settle(0, v0.accepted);
           if (force && v0.accepted != 1)
             throw std::runtime_error("step " + std::to_string(steps) +
@@ -4954,7 +4954,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_cancel_leaves_committed_state_unchanged) {
   const std::vector<int64_t> pc = make_tokens(11, V);
   const auto request = [](const std::string& id, const std::vector<int64_t>& p,
                           int steps) {
-    dgpp::glm::SchedulerRequest r;
+    dgpp::sched::SchedulerRequest r;
     r.id = id;
     r.prompt = p;
     r.max_steps = steps;
@@ -4998,7 +4998,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_cancel_leaves_committed_state_unchanged) {
             &graph, &bus, r, kWorld, scratch, V,
             /*pick_timeout_ms=*/test_wait_timeout_ms(), /*batch_min_live=*/2);
         engine.warm_captures(make_tokens(4, V));
-        dgpp::glm::Scheduler sched(&engine, /*eos_token_ids=*/{});
+        dgpp::sched::Scheduler sched(&engine, /*eos_token_ids=*/{});
         const auto run = [&](const std::string& tag, int cancel_after) {
           const size_t first = sched.results().size();
           sched.submit(request("a" + tag, pa, 14));
@@ -5016,7 +5016,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_cancel_leaves_committed_state_unchanged) {
             gen.push_back(sched.results()[i].generated);
           if (cancel_after >= 0 &&
               sched.results()[first + 1].status !=
-                  dgpp::glm::Scheduler::Result::Status::kCancelled)
+                  dgpp::sched::Scheduler::Result::Status::kCancelled)
             throw std::runtime_error("b was not retired as cancelled");
           return gen;
         };
