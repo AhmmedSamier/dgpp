@@ -211,7 +211,7 @@ __device__ inline RowSpec row_spec(const GlmSampleSpec* specs, int q,
   }
   rs.sampled = rs.active && (rs.spec.temperature > 0.0f ||
                              rs.spec.logprobs >= 0 || rs.penalized ||
-                             rs.constrained);
+                             rs.constrained || rs.spec.biased != 0);
   if (rs.spec.temperature <= 0.0f) rs.spec.temperature = 1.0f;
   return rs;
 }
@@ -243,8 +243,9 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
     int vocab_size, const GlmSampleSpec* __restrict__ specs,
     int rows_per_request, const int64_t* __restrict__ fed,
     const int64_t* __restrict__ positions, int position_stride,
-    const int32_t* __restrict__ counts, const uint32_t* __restrict__ masks,
-    int mask_stride, double* __restrict__ maxes) {
+    const int32_t* __restrict__ counts, const float* __restrict__ bias,
+    const uint32_t* __restrict__ masks, int mask_stride,
+    double* __restrict__ maxes) {
   __shared__ float fred[32];
   const int c = blockIdx.x;
   const int row = blockIdx.y;
@@ -267,6 +268,13 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
         l = penalize(l, cnt, rs.spec);
         slice[i] = l;
       }
+    }
+    // The logit bias (2026-09-06): the request's dense row, added after the
+    // penalties and before the mask, in place — the host's gather fallback
+    // and every later stage see the biased logit (glm_sample::apply_bias).
+    if (rs.spec.biased != 0 && bias != nullptr) {
+      l = __fadd_rn(l, bias[static_cast<size_t>(q) * vocab_size + vocab_begin + i]);
+      slice[i] = l;
     }
     // The mask: an excluded id becomes -inf in place (absent to every
     // later stage, the host's gather fallback included).
@@ -1510,7 +1518,8 @@ void glm_sample_local(float* logits, int rows, int vocab_count,
                       int candidates, const GlmSampleSpec* specs,
                       int rows_per_request, const int64_t* fed,
                       const int64_t* positions, int position_stride,
-                      const int32_t* counts, const uint32_t* masks,
+                      const int32_t* counts, const float* bias,
+                      const uint32_t* masks,
                       int mask_stride, const uint64_t* carry_digest,
                       uint16_t* table, GlmPickLocal* locals, double* scratch,
                       cudaStream_t stream) {
@@ -1541,7 +1550,7 @@ void glm_sample_local(float* logits, int rows, int vocab_count,
   const dim3 chunk_grid(static_cast<unsigned>(nchunks), static_cast<unsigned>(rows));
   sample_prepare_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
       logits, vocab_count, vocab_begin, vocab_size, specs, rows_per_request,
-      fed, positions, position_stride, counts, masks, mask_stride, maxes);
+      fed, positions, position_stride, counts, bias, masks, mask_stride, maxes);
   DGPP_CUDA_OK(cudaGetLastError());
   sample_partials_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
       logits, vocab_count, specs, rows_per_request, positions,

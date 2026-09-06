@@ -194,8 +194,10 @@ acceptance is the whole story.
   60–120 s, not by the journal watches.
 - The prefix cache is per process (no persistence) and LRU (no
   protection of close entries against a cyclic working set).
-- `stop`, `n`, `logit_bias`, `suffix` and `best_of` are refused with 400
-  naming the field; `stream_options` beyond `include_usage` is ignored.
+- `stop`, `n` and `logit_bias` are served since 2026-09-06 (the day after
+  this report); `user`, `store`, `metadata`, `service_tier`, `suffix` and
+  `best_of` are refused with 400 naming the field; `stream_options`
+  beyond `include_usage` is ignored.
 - MTP depth is fixed at 1 (depth 2 declined for step-time variance); the
   MTP batch is four requests (eight rows).
 - The soak ran for one hour, not the 24 the plan first named (the user's

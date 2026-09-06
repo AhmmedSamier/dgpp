@@ -95,6 +95,18 @@ class FakeEngine : public SchedulerEngine {
                      std::to_string(static_cast<int>(g.mode)) + ":" +
                      std::to_string(g.tools.size()));
   }
+  // The logit bias (2026-09-06): a sampling-capable fake can bias and
+  // records the arming ("B:slot:entries") after the grammar's.
+  bool supports_logit_bias() const override { return can_sample_; }
+  void configure_logit_bias(int req,
+                            const std::vector<dgpp::glm::LogitBias>& b) override {
+    if (!can_sample_) {
+      SchedulerEngine::configure_logit_bias(req, b);
+      return;
+    }
+    if (!b.empty())
+      ops_.push_back("B:" + std::to_string(req) + ":" + std::to_string(b.size()));
+  }
 
   // Arms `slot`'s NEXT scalar episode: prefill returns tokens[0], then each
   // step returns one following token.
@@ -1699,6 +1711,76 @@ DGPP_TEST(scheduler_prefixCache_sameStreamTwice_identicalOpsAndDigests) {
   require(one.second != three.second, "a different stream: a different digest");
   require(one.first.find("X:1:12@0") != std::string::npos,
           "c attached to a's entry in the base run: " + one.first);
+}
+
+DGPP_TEST(scheduler_stop_retiresAtTheNextSweepAsDoneWithReasonStop) {
+  // GIVEN a request generating four tokens over a one-slot engine,
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.arm(0, {10, 11, 12, 13}, /*max_steps=*/4);
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 5, 4));
+  require(sched.tick(), "tick 1: the prefill pick and one step");
+  require(sched.meters().decode_steps == 1 && sched.meters().tokens_generated == 2,
+          "two tokens after tick 1");
+  // WHEN the service's stop lands between ticks (the stop string matched
+  // on rank 0; a peer applies the same one from the journal),
+  require(sched.stop("a"), "a live request takes the stop");
+  require(!sched.stop("nobody"), "an unknown id does not");
+  // THEN the next tick's sweep retires it before any engine op: Done with
+  // Reason::kStop, two tokens, no further step; a late stop is a no-op.
+  require(!sched.tick(), "tick 2: the sweep retires it, nothing remains");
+  const Scheduler::Result& res = sched.results()[0];
+  require(res.status == Scheduler::Result::Status::kDone &&
+              res.reason == Scheduler::Result::Reason::kStop && res.steps_done == 2,
+          "Done with Reason::kStop after two tokens");
+  require(sched.meters().decode_steps == 1, "no step ran in the retiring tick");
+  require(!sched.stop("a"), "a late stop is a no-op");
+  // A cancel that arrives with the stop wins (the client is gone).
+  FakeEngine engine2(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine2.arm(0, {20, 21, 22}, /*max_steps=*/3);
+  Scheduler sched2(&engine2, {kEos});
+  sched2.submit(make_request("b", 5, 3));
+  require(sched2.tick(), "b: tick 1");
+  require(sched2.stop("b") && sched2.cancel("b"), "both land");
+  require(!sched2.tick(), "b: retired at the sweep");
+  require(sched2.results()[0].status == Scheduler::Result::Status::kCancelled &&
+              sched2.results()[0].reason == Scheduler::Result::Reason::kCancelled,
+          "the cancel wins");
+}
+
+DGPP_TEST(scheduler_logitBias_armsTheEngineAfterTheGrammarAndIsRefusedWithoutSupport) {
+  // GIVEN a sampling-capable engine and a request carrying a logit_bias,
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4,
+                    /*batch_capacity=*/1, /*can_sample=*/true);
+  engine.arm(0, {10, 11}, /*max_steps=*/2);
+  Scheduler sched(&engine, {kEos});
+  SchedulerRequest r = make_request("a", 5, 2);
+  r.logit_bias = {{3, -100.0f}, {7, 1.5f}};
+  sched.submit(r);
+  sched.run_to_completion();
+  // THEN the engine was armed with the two entries before the prefill (the
+  // op stream pins the position; a greedy request arms no sampling spec),
+  std::string ops;
+  for (const std::string& op : engine.ops()) ops += op + " ";
+  const size_t b = ops.find("B:0:2 "), p = ops.find("P:0:");
+  require(b != std::string::npos && p != std::string::npos && b < p,
+          "the bias arming precedes the prefill: " + ops);
+  // A greedy-only engine refuses the request at submit; so does an entry
+  // with a negative token id.
+  FakeEngine greedy(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+  Scheduler s2(&greedy, {kEos});
+  const auto refused = [](Scheduler& s, const SchedulerRequest& req) {
+    try {
+      s.submit(req);
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+    return false;
+  };
+  require(refused(s2, r), "a greedy-only engine refuses a logit_bias");
+  SchedulerRequest bad = make_request("c", 5, 2);
+  bad.logit_bias = {{-1, 1.0f}};
+  require(refused(sched, bad), "a negative token id is refused");
 }
 
 int main() {

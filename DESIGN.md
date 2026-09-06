@@ -2417,10 +2417,33 @@ thread drains admissions → `try_submit`, drains cancels → `cancel`, runs
 ONE tick, publishes meters. Records enter the table AT ENQUEUE so
 pre-admission requests are visible to disconnect and to the pump. The
 refusal ladder: every accepted field behaves per the schema; every
-unimplemented one (stop, n, logit_bias, …, and non-greedy sampling on
+unimplemented one (user, store, metadata, service_tier, the audio and
+prediction fields, the deprecated functions, and non-greedy sampling on
 an engine that cannot sample) refuses with a
 400 carrying the OpenAI error object naming the param — silent-ignore is
-the bug class the ladder exists to prevent. The sampling fields
+the bug class the ladder exists to prevent. `stop`, `n` and `logit_bias`
+are served since 2026-09-06: `stop` (a string or up to four) is matched
+on rank 0 over the message content (the legacy route's text) as the
+tokens arrive — a scanner holds back a tail that could still begin a
+stop string and cuts the text at the first match — and the request
+retires through the journal like a cancel, at the next tick's sweep on
+every rank with its own reason (`Reason::kStop`; the step in between is
+run and its tokens dropped; `finish_reason` "stop", the usage counting
+through the token that completed the match); `n` (1–8) admits one
+scheduler request per choice — the same prompt, per-choice seeds
+(seed + index), the prefix cache making every choice past the first an
+attach — admitted or shed together, streamed by `index` with one
+`[DONE]` and one summed usage chunk, answered as one `choices` array;
+`logit_bias` (token id → [−100, 100], up to 1,024 entries, ids below the
+vocabulary) rides the journal with the request and the engine adds it to
+the logits after the penalties and before the mask and the temperature
+— on the device in place (a per-slot dense row the pick kernels read
+when the request's spec says so; a biased greedy row takes the full
+path), on the host the same float in the same place, so the graph and
+the eager engines agree bitwise (the loopback gates). The usage object
+carries `prompt_tokens_details.cached_tokens` (the prefix cache's attach
+position) and `completion_tokens_details.reasoning_tokens` (the ids the
+parser routed to reasoning, `</think>` included). The sampling fields
 (temperature, top_p, presence/frequency penalties, seed; top_k, min_p,
 repetition_penalty as extensions) and `logprobs`/`top_logprobs` are
 accepted since 2026-09-04 and behave exactly per §10, with omitted fields
@@ -2490,7 +2513,8 @@ one delta announcing `{index, id, type, function: {name, arguments: ""}}`
 followed by one with the complete `arguments` string (a client that
 concatenates fragments sees one fragment); `finish_reason` is
 `"tool_calls"` when the turn ended naturally after at least one parsed
-call, `"length"` at the cap whatever was parsed, `"stop"` otherwise. The
+call, `"length"` at the cap whatever was parsed, `"stop"` otherwise (a
+stop-string match included). The
 final chunk carries the logprobs entries no content chunk took (the EOS
 pick's, which decodes to nothing). `--reasoning-in-content` folds the
 reasoning into content with the model's own `</think>` where it produced

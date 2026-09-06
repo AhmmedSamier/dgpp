@@ -142,6 +142,8 @@ struct JournalRecord {
   uint64_t op_digest = 0;
   std::vector<dgpp::glm::SchedulerRequest> submits;
   std::vector<std::string> cancels;
+  std::vector<std::string> stops;  // the stop-string retires (2026-09-06),
+                                   // applied like cancels ("sp")
 };
 // The tick record's cross-rank check (M7): rank 0's prefix-cache digest
 // after the previous tick against this rank's. Throws on a mismatch — the

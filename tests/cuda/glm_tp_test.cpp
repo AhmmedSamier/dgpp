@@ -1260,7 +1260,7 @@ DGPP_TEST(glm_fabric_sample_matches_sharded_reference_loopback) {
           out.lm_vocab_begin = slice.begin;
           out.lm_vocab_count = slice.count;
           got[static_cast<size_t>(rank)].push_back(
-              sample(out, params, rng, context, nullptr));
+              sample(out, params, rng, context, nullptr, nullptr));
           context.push_back(got[static_cast<size_t>(rank)].back().token);
         }
         counters[static_cast<size_t>(rank)] = rng.counter;
@@ -1535,7 +1535,8 @@ DGPP_TEST(glm_tp_sampled_speculator_loopback_rank_identical) {
         dgpp::glm_sample::Rng rng{0x77ull, 0};
         const GlmDiagnosticModel::Outputs pre = shard.session_prefill(prompt);
         const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
-        const int32_t first = row1(pre, params, rng, prompt_context, nullptr).token;
+        const int32_t first =
+            row1(pre, params, rng, prompt_context, nullptr, nullptr).token;
         dgpp::SampledSpeculator spec(
             shard, 0, pick_rows,
             dgpp::make_fabric_spec_row0(&bus, r, kWorld, prefix_scratch,
@@ -3105,6 +3106,67 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
               sampled_steps[static_cast<size_t>(r)] += spec.max_steps;
           }
         }
+        // The logit bias (2026-09-06): a greedy request that bans the greedy
+        // transcript's first token (the full path at temperature 1: the
+        // argmax under the biased logits, with logprobs) and a sampled
+        // request that forces one token with +100 and nudges another — the
+        // device's in-place bias against the host sampler's, transcripts
+        // and logprobs bitwise on both engines.
+        {
+          const std::vector<int64_t>& g = eager_sched.results()[2].generated;
+          const int32_t banned = static_cast<int32_t>(g.at(0));
+          const int32_t forced = static_cast<int32_t>(g.at(1));
+          dgpp::glm::SchedulerRequest gb;
+          gb.id = "gb";
+          gb.prompt = prompt;
+          gb.max_steps = 6;
+          gb.sampling = with_logprobs(dgpp::glm_sample::greedy_params());
+          gb.logprobs = 2;
+          gb.logit_bias = {{banned, -100.0f}};
+          dgpp::glm::SchedulerRequest sf;
+          sf.id = "sf";
+          sf.prompt = prompt;
+          sf.max_steps = 6;
+          sf.sampling = with_logprobs(model_default);
+          sf.seed = 37;
+          sf.logprobs = 2;
+          sf.logit_bias = {{forced, 100.0f}, {banned, -2.5f}};
+          for (const dgpp::glm::SchedulerRequest& req : {gb, sf}) {
+            eager_sched.submit(req);
+            graph_sched.submit(req);
+          }
+          bool more = true;
+          while (more) {
+            const bool e = eager_sched.tick();
+            const bool gt = graph_sched.tick();
+            if (e != gt)
+              throw std::runtime_error("bias phase: the two schedulers "
+                                       "disagree on pending work");
+            more = e;
+          }
+          const auto& want_gb = eager_sched.results()[result_index].generated;
+          const auto& got_gb = graph_sched.results()[result_index].generated;
+          const auto& want_sf = eager_sched.results()[result_index + 1].generated;
+          const auto& got_sf = graph_sched.results()[result_index + 1].generated;
+          result_index += 2;
+          if (want_gb.size() != 6 || want_sf.size() != 6)
+            throw std::runtime_error("bias phase: transcript lengths");
+          if (got_gb != want_gb)
+            throw std::runtime_error("bias phase: the graph's biased greedy "
+                                     "transcript differs from the eager engine's");
+          if (got_sf != want_sf)
+            throw std::runtime_error("bias phase: the graph's biased sampled "
+                                     "transcript differs from the eager engine's");
+          if (std::find(want_gb.begin(), want_gb.end(), banned) != want_gb.end())
+            throw std::runtime_error("bias phase: the banned token was picked");
+          for (const int64_t t : want_sf)
+            if (t != forced)
+              throw std::runtime_error("bias phase: the forced token was not "
+                                       "picked at every step");
+          graph_seqs[static_cast<size_t>(r)].push_back(got_gb);
+          graph_seqs[static_cast<size_t>(r)].push_back(got_sf);
+          sampled_steps[static_cast<size_t>(r)] += 6;
+        }
         if (eager_lps.events.empty() || eager_lps.events != graph_lps.events)
           throw std::runtime_error(
               "the graph engine's logprobs differ from the eager engine's (" +
@@ -3132,7 +3194,7 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
   }
   // The prefill picks are host decisions; the device decided every other
   // sampled step, some inside the prefix and some through the fallback.
-  const int device_steps = sampled_steps[0] - 3;  // three sampled prefills
+  const int device_steps = sampled_steps[0] - 4;  // four sampled prefills
   require(fallbacks[0] > 0, "the capped width must force some fallbacks");
   require(static_cast<int>(fallbacks[0]) < device_steps,
           "some sampled steps must resolve on the device");
@@ -3257,6 +3319,7 @@ struct GrammarSpecCase {
   uint64_t seed;
   dgpp::glm::GrammarSpec grammar;
   bool think_prompt;
+  std::vector<dgpp::glm::LogitBias> bias;  // the logit bias (2026-09-06)
 };
 
 }  // namespace
@@ -3285,16 +3348,16 @@ DGPP_TEST(glm_tp_serving_graph_constrained_matches_eager_engine_and_grammar) {
   // are owed from a prompt that does not open one; the think prompts cover
   // the free-with-EOS-withheld state.
   const std::vector<std::vector<GrammarSpecCase>> phases{
-      {{"req", 10, sampled, 7, fixture_grammar(Mode::kRequired), false}},
-      {{"named", 9, pure, 11, fixture_grammar(Mode::kNamed, true, "ac"), false},
+      {{"req", 10, sampled, 7, fixture_grammar(Mode::kRequired), false, {}}},
+      {{"named", 9, pure, 11, fixture_grammar(Mode::kNamed, true, "ac"), false, {}},
        {"greedy", 8, dgpp::glm_sample::greedy_params(), 0,
-        fixture_grammar(Mode::kRequired, false), false}},
-      {{"none", 6, sampled, 17, fixture_grammar(Mode::kForbidCalls), false},
-       {"think", 8, sampled, 19, fixture_grammar(Mode::kRequired), true}},
-      {{"auto1", 8, sampled, 23, fixture_grammar(Mode::kAuto, false), false}},
+        fixture_grammar(Mode::kRequired, false), false, {}}},
+      {{"none", 6, sampled, 17, fixture_grammar(Mode::kForbidCalls), false, {}},
+       {"think", 8, sampled, 19, fixture_grammar(Mode::kRequired), true, {}}},
+      {{"auto1", 8, sampled, 23, fixture_grammar(Mode::kAuto, false), false, {}}},
       // response_format (M6 6h): free JSON and a schema, side by side.
-      {{"json", 12, sampled, 37, fixture_json(""), false},
-       {"jsonS", 12, pure, 41, fixture_json(kGxJsonSchema), false}},
+      {{"json", 12, sampled, 37, fixture_json(""), false, {}},
+       {"jsonS", 12, pure, 41, fixture_json(kGxJsonSchema), false, {}}},
   };
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29936);
@@ -3462,16 +3525,23 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
   // every step (94 allowed ids of a near-flat row against 24 candidates):
   // the MTP fallback path under masks, both rows.
   const std::vector<std::vector<GrammarSpecCase>> phases{
-      {{"solo", 12, sampled, 7, fixture_grammar(Mode::kRequired), false}},
-      {{"a", 11, pure, 11, fixture_grammar(Mode::kNamed, true, "ab"), false},
+      {{"solo", 12, sampled, 7, fixture_grammar(Mode::kRequired), false, {}}},
+      {{"a", 11, pure, 11, fixture_grammar(Mode::kNamed, true, "ab"), false, {}},
        {"g", 9, dgpp::glm_sample::greedy_params(), 0,
-        fixture_grammar(Mode::kRequired), true}},
-      {{"think", 10, sampled, 29, fixture_grammar(Mode::kRequired), true},
-       {"think2", 10, sampled, 31, fixture_grammar(Mode::kNamed, true, "ac"), true}},
+        fixture_grammar(Mode::kRequired), true, {}}},
+      {{"think", 10, sampled, 29, fixture_grammar(Mode::kRequired), true, {}},
+       {"think2", 10, sampled, 31, fixture_grammar(Mode::kNamed, true, "ac"), true, {}}},
       // response_format (M6 6h) under MTP: the unconstrained in-graph
       // draft is rejected wherever the JSON mask excludes it.
-      {{"json", 12, sampled, 43, fixture_json(""), false},
-       {"jsonS", 11, sampled, 47, fixture_json(kGxJsonSchema), true}},
+      {{"json", 12, sampled, 43, fixture_json(""), false, {}},
+       {"jsonS", 11, sampled, 47, fixture_json(kGxJsonSchema), true, {}}},
+      // The logit bias (2026-09-06) under MTP: a +100 force (every verify
+      // row picks it; the unbiased in-graph draft is rejected until it
+      // happens to propose it) and a moderate bias on a sampled request —
+      // both rank-identical, the forced transcript all one token.
+      {{"biasF", 8, sampled, 53, dgpp::glm::GrammarSpec{}, false, {{7, 100.0f}}},
+       {"biasM", 8, sampled, 59, dgpp::glm::GrammarSpec{}, false,
+        {{3, 2.0f}, {5, -3.0f}}}},
   };
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29937);
@@ -3535,6 +3605,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
             req.sampling = c.params;
             req.seed = c.seed;
             req.grammar = c.grammar;
+            req.logit_bias = c.bias;
             sched.submit(req);
           }
           while (sched.tick()) {
@@ -3572,6 +3643,11 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
   bool saw_call = false;
   for (const int64_t t : seqs[0][0]) saw_call = saw_call || t == kGxToolOpen;
   require(saw_call, "the required grammar produced a call under MTP");
+  // The +100 bias (results index 7: solo, a, g, think, think2, json, jsonS,
+  // biasF): every verify row picked the forced token.
+  require(seqs[0].size() >= 9, "the bias phase ran");
+  for (const int64_t t : seqs[0][7])
+    require(t == 7, "the forced token under MTP: got " + std::to_string(t));
   require(fallbacks[0] > 0, "the think prompts must exercise the MTP fallback "
                             "under masks");
   DGPP_LOG_INFO("constrained MTP graph w2: {} transcripts rank-identical and "
@@ -3694,7 +3770,8 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
             const GlmDiagnosticModel::Outputs pre =
                 eager.session_prefill(static_cast<int>(i), prompt);
             const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
-            const int32_t first = row1(pre, params, rng, prompt_context, nullptr).token;
+            const int32_t first =
+            row1(pre, params, rng, prompt_context, nullptr, nullptr).token;
             specs.push_back(std::make_unique<dgpp::SampledSpeculator>(
                 eager, static_cast<int>(i), pick_rows, row0, row1, params, rng,
                 prompt));

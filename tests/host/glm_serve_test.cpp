@@ -143,6 +143,23 @@ class FakeEngine : public SchedulerEngine {
     std::lock_guard<std::mutex> lock(armed_mu_);
     return grammars_;
   }
+  // The logit bias (2026-09-06): the sampling-capable fake can bias and
+  // records every non-empty table it is armed with (slot, entries).
+  bool supports_logit_bias() const override { return can_sample_; }
+  void configure_logit_bias(int req,
+                            const std::vector<dgpp::glm::LogitBias>& bias) override {
+    if (!can_sample_) {
+      SchedulerEngine::configure_logit_bias(req, bias);
+      return;
+    }
+    if (bias.empty()) return;
+    std::lock_guard<std::mutex> lock(armed_mu_);
+    biases_.emplace_back(req, bias);
+  }
+  std::vector<std::pair<int, std::vector<dgpp::glm::LogitBias>>> biases() const {
+    std::lock_guard<std::mutex> lock(armed_mu_);
+    return biases_;
+  }
 
   // The prefix cache seam (M7): an arena of `slots` snapshot slots at pool
   // alignment `align`; the fake records the ops ("X:slot:pos" an attach,
@@ -282,6 +299,7 @@ class FakeEngine : public SchedulerEngine {
   mutable std::mutex armed_mu_;
   std::vector<Armed> armed_;
   std::vector<dgpp::glm::GrammarSpec> grammars_;
+  std::vector<std::pair<int, std::vector<dgpp::glm::LogitBias>>> biases_;
 };
 
 // The 6f markers of the fake tokenizer: 1001..1008, decoding to their
@@ -547,6 +565,7 @@ struct ServiceRig {
           c.fixed_seed = fixed_seed;
           c.reasoning_in_content = reasoning_in_content;
           c.admission = admission;
+          c.vocab_size = 512;  // the fake's ids are bytes and markers
           return c;
         }()),
         service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend,
@@ -702,7 +721,9 @@ DGPP_TEST(serve_chatStream_chunkLifecycleInOrder) {
       resp.find("\"delta\":{},\"logprobs\":null,\"finish_reason\":\"length\"");
   const size_t usage =
       resp.find("\"choices\":[],\"usage\":{\"prompt_tokens\":5,"
-                "\"completion_tokens\":3,\"total_tokens\":8}");
+                "\"completion_tokens\":3,\"total_tokens\":8,"
+                "\"prompt_tokens_details\":{\"cached_tokens\":0},"
+                "\"completion_tokens_details\":{\"reasoning_tokens\":0}}");
   const size_t done = resp.find("data: [DONE]");
   require(role != std::string::npos, "role chunk present");
   // Concatenate every content payload in arrival order.
@@ -786,7 +807,8 @@ DGPP_TEST(serve_refusalLadder_openAIErrorObjects) {
   post_and_expect(chat_body("abcd", 3,
                             ",\"tools\":[{\"type\":\"function\"}]"),
                   400, "\"param\":\"tools[0].function.name\"");
-  post_and_expect(chat_body("abcd", 3, ",\"n\":2"), 400, "\"param\":\"n\"");
+  post_and_expect(chat_body("abcd", 3, ",\"user\":\"u1\""), 400,
+                  "\"param\":\"user\"");  // n is served since 2026-09-06
   post_and_expect(
       "{\"model\":\"wrong-model\",\"messages\":[{\"role\":\"user\","
       "\"content\":\"hi\"}]}",
@@ -2367,6 +2389,197 @@ DGPP_TEST(serve_throughputLog_oneLinePerIntervalWithTheDeltas_thenQuiet) {
   require(!off.enabled() && off.observe(m, nullptr, at(0)).empty() &&
               off.observe(m, nullptr, at(100)).empty(),
           "interval 0 disables the line");
+}
+
+// A raw POST to /v1/completions (the legacy route), read through `until`.
+std::string post_legacy(ServiceRig& rig, const std::string& body,
+                        const std::string& until, int budget_ms = 5000) {
+  Client c(rig.port());
+  c.send_all("POST /v1/completions HTTP/1.1\r\nHost: t\r\n"
+             "Content-Type: application/json\r\nContent-Length: " +
+             std::to_string(body.size()) + "\r\n\r\n" + body);
+  return c.read_until(until, budget_ms);
+}
+// A one-shot chat read through the usage object's last key.
+std::string post_full(ServiceRig& rig, const std::string& body) {
+  return post_chat(rig, body, "reasoning_tokens\":", 5000);
+}
+
+DGPP_TEST(serve_stop_cutsTheVisibleTextAtTheMatchAndFinishesStop) {
+  // GIVEN the fake's deterministic text for the 4-id prompt "abcd" and a
+  // two-character stop string inside it (two one-character tokens: the
+  // first is held until the second decides the match),
+  ServiceRig rig;
+  const std::string full = fake_text(4, 12);
+  const std::string stop = full.substr(3, 2);
+  const std::string prefix = full.substr(0, 3);
+  // WHEN a one-shot carries it,
+  const std::string one =
+      post_full(rig, chat_body("abcd", 12, ",\"stop\":\"" + stop + "\""));
+  // THEN the content ends before the match, finish_reason is stop, and the
+  // usage counts the tokens through the one that completed the match.
+  require(one.find("\"content\":\"" + prefix + "\"") != std::string::npos &&
+              one.find("\"finish_reason\":\"stop\"") != std::string::npos &&
+              one.find("\"completion_tokens\":5,") != std::string::npos,
+          "one-shot stop: " + one);
+  // Streamed: the deltas concatenate to the same prefix (no delta ever
+  // shows the stop string), the final chunk says stop, the usage agrees.
+  {
+    Client c(rig.port());
+    const std::string body =
+        chat_body("abcd", 12,
+                  ",\"stop\":[\"" + stop + "\"],\"stream\":true,"
+                  "\"stream_options\":{\"include_usage\":true}");
+    c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+               "Content-Type: application/json\r\nContent-Length: " +
+               std::to_string(body.size()) + "\r\n\r\n" + body);
+    const std::string resp = c.read_until("[DONE]", 5000);
+    require(concat_field(resp, "content") == prefix &&
+                resp.find("\"finish_reason\":\"stop\"") != std::string::npos &&
+                resp.find("\"completion_tokens\":5,") != std::string::npos,
+            "streamed stop: " + resp);
+  }
+  // The legacy route cuts its text the same way.
+  {
+    const std::string body = "{\"model\":\"" + kModel +
+                             "\",\"prompt\":\"abcd\",\"max_tokens\":12,"
+                             "\"stop\":\"" + stop + "\"}";
+    const std::string resp = post_legacy(rig, body, "reasoning_tokens\":");
+    require(resp.find("\"text\":\"" + prefix + "\"") != std::string::npos &&
+                resp.find("\"finish_reason\":\"stop\"") != std::string::npos,
+            "legacy stop: " + resp);
+  }
+  // A stop that never matches changes nothing: the whole text, length.
+  {
+    const std::string resp =
+        post_full(rig, chat_body("abcd", 12, ",\"stop\":\"~~~~\""));
+    require(resp.find("\"content\":\"" + full + "\"") != std::string::npos &&
+                resp.find("\"finish_reason\":\"length\"") != std::string::npos,
+            "no match: " + resp);
+  }
+  // A match at the very start: empty content, one token counted.
+  {
+    const std::string resp = post_full(
+        rig, chat_body("abcd", 12, ",\"stop\":\"" + full.substr(0, 1) + "\""));
+    require(resp.find("\"content\":\"\"") != std::string::npos &&
+                resp.find("\"completion_tokens\":1,") != std::string::npos,
+            "match at the start: " + resp);
+  }
+  // The shape is validated by name.
+  for (const std::string bad :
+       {",\"stop\":\"\"", ",\"stop\":[\"a\",\"b\",\"c\",\"d\",\"e\"]",
+        ",\"stop\":5", ",\"stop\":[\"\"]"}) {
+    const std::string resp = post_chat(rig, chat_body("abcd", 3, bad));
+    require(resp.find("400") != std::string::npos &&
+                resp.find("\"param\":\"stop\"") != std::string::npos,
+            "refused by name: " + bad + " -> " + resp.substr(0, 200));
+  }
+}
+
+DGPP_TEST(serve_n_answersEveryChoiceByIndexAndSumsTheUsage) {
+  ServiceRig rig;
+  const std::string text = fake_text(4, 3);
+  // One-shot: two choices, both complete and indexed, the usage summed.
+  const std::string one = post_full(rig, chat_body("abcd", 3, ",\"n\":2"));
+  require(one.find("\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                   "\"content\":\"" + text + "\"}") != std::string::npos &&
+              one.find("{\"index\":1,\"message\":{\"role\":\"assistant\","
+                       "\"content\":\"" + text + "\"}") != std::string::npos &&
+              one.find("\"prompt_tokens\":4,\"completion_tokens\":6,"
+                       "\"total_tokens\":10") != std::string::npos,
+          "n=2 one-shot: " + one);
+  // Streamed: deltas for both indices, one finish per choice, ONE usage
+  // chunk with the sum and ONE [DONE].
+  {
+    Client c(rig.port());
+    const std::string body =
+        chat_body("abcd", 3,
+                  ",\"n\":2,\"stream\":true,"
+                  "\"stream_options\":{\"include_usage\":true}");
+    c.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\n"
+               "Content-Type: application/json\r\nContent-Length: " +
+               std::to_string(body.size()) + "\r\n\r\n" + body);
+    const std::string resp = c.read_until("[DONE]", 5000);
+    const auto count = [&](const std::string& s) {
+      size_t n = 0, p = 0;
+      while ((p = resp.find(s, p)) != std::string::npos) {
+        ++n;
+        p += s.size();
+      }
+      return n;
+    };
+    require(count("\"index\":1,\"delta\"") >= 3 && count("\"index\":0,\"delta\"") >= 3,
+            "deltas for both choices: " + resp);
+    require(count("\"finish_reason\":\"length\"") == 2 && count("[DONE]") == 1 &&
+                count("\"usage\":{") == 1 &&
+                resp.find("\"completion_tokens\":6,") != std::string::npos,
+            "the end sequence once: " + resp);
+  }
+  // The bound: n outside [1, 8], or not an integer, is refused by name.
+  for (const std::string bad : {",\"n\":0", ",\"n\":9", ",\"n\":1.5", ",\"n\":\"2\""}) {
+    const std::string resp = post_chat(rig, chat_body("abcd", 3, bad));
+    require(resp.find("400") != std::string::npos &&
+                resp.find("\"param\":\"n\"") != std::string::npos,
+            "n refused: " + bad + " -> " + resp.substr(0, 200));
+  }
+}
+
+DGPP_TEST(serve_logitBias_reachesTheEngineAndIsValidatedByName) {
+  ServiceRig rig(/*queue_limit=*/8, model_defaults(), /*can_sample=*/true);
+  const std::string ok = post_full(
+      rig, chat_body("abcd", 2,
+                     ",\"logit_bias\":{\"5\":-100,\"7\":2.5},\"temperature\":0"));
+  require(ok.find("200 OK") != std::string::npos, "accepted: " + ok.substr(0, 200));
+  const auto armed = rig.engine.biases();
+  require(armed.size() == 1 && armed[0].second.size() == 2 &&
+              armed[0].second[0].token == 5 && armed[0].second[0].bias == -100.0f &&
+              armed[0].second[1].token == 7 && armed[0].second[1].bias == 2.5f,
+          "the entries reached the engine");
+  // An empty object is no bias.
+  (void)post_full(rig, chat_body("abcd", 2, ",\"logit_bias\":{}"));
+  require(rig.engine.biases().size() == 1, "an empty logit_bias arms nothing");
+  // Refused by name: a non-numeric key, a value outside [-100, 100], an id
+  // outside the vocabulary, a non-object.
+  for (const std::string bad :
+       {",\"logit_bias\":{\"x\":1}", ",\"logit_bias\":{\"5\":101}",
+        ",\"logit_bias\":{\"600\":1}", ",\"logit_bias\":[1,2]"}) {
+    const std::string resp = post_chat(rig, chat_body("abcd", 2, bad));
+    require(resp.find("400") != std::string::npos &&
+                resp.find("\"param\":\"logit_bias\"") != std::string::npos,
+            "refused: " + bad + " -> " + resp.substr(0, 300));
+  }
+  // A greedy-only engine refuses it with its own code.
+  ServiceRig greedy;
+  const std::string un =
+      post_chat(greedy, chat_body("abcd", 2, ",\"logit_bias\":{\"5\":1}"));
+  require(un.find("400") != std::string::npos &&
+              un.find("\"code\":\"logit_bias_unsupported\"") != std::string::npos,
+          "greedy-only: " + un.substr(0, 300));
+}
+
+DGPP_TEST(serve_usage_reportsCachedAndReasoningTokens) {
+  // Reasoning: the ids up to and including </think>.
+  ServiceRig think(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                   /*can_sample=*/false, std::nullopt, /*with_markers=*/true);
+  think.engine.script(5, script_of(think, "Th</think>Sure"));
+  const std::string resp = post_full(think, chat_body("abcd", 64));
+  require(resp.find("\"reasoning_content\":\"Th\"") != std::string::npos &&
+              resp.find("\"completion_tokens_details\":{\"reasoning_tokens\":3") !=
+                  std::string::npos &&
+              resp.find("\"prompt_tokens_details\":{\"cached_tokens\":0}") !=
+                  std::string::npos,
+          "reasoning tokens: " + resp);
+  // Cached: the prefix cache's attach position on the second identical
+  // request (the sweep's cut at 4).
+  ServiceRig cache(/*queue_limit=*/8, dgpp::glm_sample::greedy_params(),
+                   /*can_sample=*/false, std::nullopt, /*with_markers=*/false,
+                   /*reasoning_in_content=*/false, dgpp::glm::AdmissionPolicy{},
+                   /*prefix_slots=*/4);
+  const std::string cold = post_full(cache, chat_body("ab|cd|ef", 3));
+  const std::string hot = post_full(cache, chat_body("ab|cd|ef", 3));
+  require(cold.find("\"cached_tokens\":0}") != std::string::npos &&
+              hot.find("\"cached_tokens\":4}") != std::string::npos,
+          "cached tokens: " + hot);
 }
 
 int main() {

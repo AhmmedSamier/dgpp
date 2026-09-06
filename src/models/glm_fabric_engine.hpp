@@ -170,14 +170,14 @@ inline GenEngineAdapter::Sample make_fabric_sample(
              const GlmDiagnosticModel::Outputs& out,
              const glm_sample::Params& p, glm_sample::Rng& rng,
              const std::vector<int32_t>& context,
-             const glm::TokenMask* mask) -> glm_sample::Result {
+             const glm::TokenMask* mask, const float* bias) -> glm_sample::Result {
     step_timing::Scope tick(step_timing::kPick);
     const glm_sample::Result r = bus_sample_row(
         *bus, rank, world, out.logits.data(),
         static_cast<int>(out.lm_vocab_count), out.lm_vocab_begin,
         static_cast<int>(vocab), p, rng, context, kSamplingCandidates,
         prefix_scratch, gather_scratch, pick_timeout_ms, gather_buffer.get(),
-        mask);
+        mask, bias);
     if (r.token < 0 || r.token >= vocab)
       throw std::runtime_error("fabric sample out of range: " +
                                std::to_string(r.token));
@@ -292,6 +292,12 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
         DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_counts_),
                                 sizeof(int32_t) * slots_ * vocab_));
         DGPP_CUDA_OK(cudaMemset(d_counts_, 0, sizeof(int32_t) * slots_ * vocab_));
+        // The logit bias table (2026-09-06): one dense row per slot.
+        DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_bias_),
+                                sizeof(float) * slots_ * vocab_));
+        DGPP_CUDA_OK(cudaMemset(d_bias_, 0, sizeof(float) * slots_ * vocab_));
+        DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_bias_row_),
+                                    sizeof(float) * vocab_));
         DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_prompt_ids_),
                                 sizeof(int64_t) * model_->max_tokens()));
         DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_prompt_ids_),
@@ -343,6 +349,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     params_.assign(static_cast<size_t>(slots_), glm_sample::greedy_params());
     rng_.assign(static_cast<size_t>(slots_), glm_sample::Rng{});
     grammar_.resize(static_cast<size_t>(slots_));
+    bias_.resize(static_cast<size_t>(slots_));
     masks_.assign(static_cast<size_t>(slots_) * 2, glm::TokenMask{});
     context_.assign(static_cast<size_t>(slots_), {});
     report_.assign(static_cast<size_t>(slots_), false);
@@ -384,6 +391,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     if (d_specs_) cudaFree(d_specs_);
     if (h_specs_) cudaFreeHost(h_specs_);
     if (d_counts_) cudaFree(d_counts_);
+    if (d_bias_) cudaFree(d_bias_);
+    if (h_bias_row_) cudaFreeHost(h_bias_row_);
     if (d_prompt_ids_) cudaFree(d_prompt_ids_);
     if (h_prompt_ids_) cudaFreeHost(h_prompt_ids_);
     if (h_fallback_row_) cudaFreeHost(h_fallback_row_);
@@ -451,6 +460,55 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     std::vector<glm_sample::Result> out;
     out.swap(pending_logprobs_[static_cast<size_t>(req)]);
     return out;
+  }
+  // The logit bias (OpenAI's logit_bias, 2026-09-06): the slot's dense row
+  // on the device (the pick kernels add it after the penalties, in place,
+  // for the rows whose spec says biased — the graphs carry the table's
+  // pointer, the spec flag turns a row on) and on the host (the prefill's
+  // decision and the MTP fallback's row-1 sample go through the host
+  // sampler). Needs the device sampler: a biased slot takes the full path.
+  bool supports_logit_bias() const override { return sampling_; }
+  void configure_logit_bias(int req,
+                            const std::vector<glm::LogitBias>& bias) override {
+    check_req(req);
+    std::vector<float>& row = bias_[static_cast<size_t>(req)];
+    if (bias.empty()) {
+      if (row.empty()) return;
+      row.clear();
+      clear_bias_row(req);
+      return;
+    }
+    if (!sampling_)
+      throw std::logic_error(
+          "graph engine: no device sampler — this engine cannot bias the pick");
+    row.assign(static_cast<size_t>(vocab_), 0.0f);
+    for (const glm::LogitBias& b : bias) {
+      if (b.token < 0 || b.token >= vocab_)
+        throw std::invalid_argument(
+            "graph engine: logit_bias token outside the vocabulary");
+      row[static_cast<size_t>(b.token)] = b.bias;
+    }
+    std::copy(row.begin(), row.end(), h_bias_row_);
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_bias_ + static_cast<size_t>(req) * vocab_,
+                                 h_bias_row_, sizeof(float) * vocab_,
+                                 cudaMemcpyHostToDevice, model_->stream()));
+    DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+    GlmSampleSpec spec = h_specs_[req];
+    spec.biased = 1;
+    push_spec(req, spec);
+  }
+  void clear_bias_row(int req) {
+    if (!sampling_ || d_bias_ == nullptr) return;
+    DGPP_CUDA_OK(cudaMemsetAsync(d_bias_ + static_cast<size_t>(req) * vocab_, 0,
+                                 sizeof(float) * vocab_, model_->stream()));
+    DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+    GlmSampleSpec spec = h_specs_[req];
+    spec.biased = 0;
+    push_spec(req, spec);
+  }
+  const float* bias_row(int req) const {
+    const std::vector<float>& row = bias_[static_cast<size_t>(req)];
+    return row.empty() ? nullptr : row.data();
   }
   bool supports_constraints() const override {
     return sampling_ && grammar_vocab_ != nullptr && grammar_vocab_->usable();
@@ -620,7 +678,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
           }
           const glm_sample::Result r =
               prefill_sample_(out, params_[static_cast<size_t>(req)],
-                              rng_[static_cast<size_t>(req)], context, mask);
+                              rng_[static_cast<size_t>(req)], context, mask,
+                              bias_row(req));
           first = r.token;
           if (report_[static_cast<size_t>(req)])
             pending_logprobs_[static_cast<size_t>(req)].push_back(r);
@@ -751,6 +810,14 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       push_spec(req, GlmSampleSpec{});
       clear_masks(req);
     }
+    if (!bias_[static_cast<size_t>(req)].empty()) {
+      bias_[static_cast<size_t>(req)].clear();
+      if (sampling_ && d_bias_ != nullptr) {
+        DGPP_CUDA_OK(cudaMemsetAsync(d_bias_ + static_cast<size_t>(req) * vocab_,
+                                     0, sizeof(float) * vocab_, model_->stream()));
+        DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+      }
+    }
   }
 
   // The slot's RNG state — the audit's view of the draws consumed.
@@ -795,6 +862,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       in.masks = d_masks_ + static_cast<size_t>(req) * rows_per_request_ *
                                 mask_stride_;
       in.mask_stride = mask_stride_;
+      in.bias = d_bias_ + static_cast<size_t>(req) * vocab_;
     }
     return in;
   }
@@ -812,6 +880,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
       in.vocab_size = static_cast<int>(vocab_);
       in.masks = d_masks_;
       in.mask_stride = mask_stride_;
+      in.bias = d_bias_;
     }
     return in;
   }
@@ -1238,7 +1307,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
         // draft), as the device would have applied it.
         const glm::TokenMask& m1 = masks_[static_cast<size_t>(req) * 2 + 1];
         const glm_sample::Result r1 = prefill_sample_(
-            row1, p, rng, context, m1.constrained() ? &m1 : nullptr);
+            row1, p, rng, context, m1.constrained() ? &m1 : nullptr,
+            bias_row(req));
         if (reporting) report->push_back(r1);
         next = r1.token;
         *decided = {fed_draft, next};
@@ -1403,7 +1473,8 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     return p.temperature > 0.0f || report_[static_cast<size_t>(req)] ||
            p.repetition_penalty != 1.0f || p.frequency_penalty != 0.0f ||
            p.presence_penalty != 0.0f ||
-           grammar_[static_cast<size_t>(req)] != nullptr;
+           grammar_[static_cast<size_t>(req)] != nullptr ||
+           !bias_[static_cast<size_t>(req)].empty();
   }
 
   void push_spec(int req, const GlmSampleSpec& spec) {
@@ -1497,6 +1568,12 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
   uint32_t* d_masks_ = nullptr;
   uint32_t* h_masks_ = nullptr;
   int mask_stride_ = 0;
+  // The logit bias (2026-09-06): the device table [slots][vocab] the pick
+  // reads for the rows whose spec says biased, a pinned row for uploads,
+  // and the host copy per slot for the host-side decisions.
+  float* d_bias_ = nullptr;
+  float* h_bias_row_ = nullptr;
+  std::vector<std::vector<float>> bias_;
   float* d_verify_logits_ = nullptr;  // device [slots][rows][count]: the
                                       // verify rows the MTP fallback decides over
   std::vector<glm_sample::Params> params_;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -319,6 +320,14 @@ void Scheduler::validate_new(const SchedulerRequest& request) const {
         "Scheduler: request '" + request.id +
         "' asks for constrained decoding but the engine cannot mask the "
         "pick");
+  if (!request.logit_bias.empty() && !engine_->supports_logit_bias())
+    throw std::invalid_argument(
+        "Scheduler: request '" + request.id +
+        "' carries a logit_bias but the engine cannot bias the pick");
+  for (const LogitBias& b : request.logit_bias)
+    if (b.token < 0 || !std::isfinite(b.bias))
+      throw std::invalid_argument("Scheduler: request '" + request.id +
+                                  "' has an invalid logit_bias entry");
   if (request.cancel_after < 0 || request.cancel_after > request.max_steps)
     throw std::invalid_argument(
         "Scheduler: request '" + request.id + "' cancel_after must be in "
@@ -383,6 +392,18 @@ bool Scheduler::cancel(const std::string& id) {
   return false;
 }
 
+bool Scheduler::stop(const std::string& id) {
+  for (Request& r : requests_) {
+    if (r.spec.id != id) continue;
+    if (r.state == State::kQueued || r.state == State::kActive) {
+      r.stop_requested = true;
+      return true;
+    }
+    return false;  // terminal: a late stop is a no-op
+  }
+  return false;
+}
+
 bool Scheduler::has_pending() const {
   for (const Request& r : requests_)
     if (r.state == State::kQueued || r.state == State::kActive) return true;
@@ -406,6 +427,7 @@ void Scheduler::admit(int arrival) {
   engine_->configure_sampling(slot, r.spec.sampling, r.spec.seed);
   engine_->configure_logprobs(slot, r.spec.logprobs);
   engine_->configure_constraint(slot, r.spec.grammar);
+  engine_->configure_logit_bias(slot, r.spec.logit_bias);
   int32_t token = -1;
   int64_t attached = 0;  // prompt tokens an attach skipped (meters)
   const auto t_prefill = std::chrono::steady_clock::now();
@@ -723,10 +745,12 @@ bool Scheduler::tick() {
   // that arrived during a 5-minute prefill rode out the whole tick.
   for (size_t i = 0; i < requests_.size(); ++i) {
     Request& r = requests_[i];
-    if (r.cancel_requested &&
-        (r.state == State::kQueued || r.state == State::kActive))
+    if (r.state != State::kQueued && r.state != State::kActive) continue;
+    if (r.cancel_requested)
       retire(static_cast<int>(i), Result::Status::kCancelled,
              Result::Reason::kCancelled);
+    else if (r.stop_requested)  // the stop string's retire (2026-09-06)
+      retire(static_cast<int>(i), Result::Status::kDone, Result::Reason::kStop);
   }
   // Grow-on-demand's fixed position: after the sweep, before any
   // admission or step — the step below never writes past a reservation,

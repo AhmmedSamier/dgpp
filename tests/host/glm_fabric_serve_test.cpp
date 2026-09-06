@@ -298,6 +298,38 @@ void test_journal_codec() {
         dgpp::service::encode_journal_warm(dgpp::glm::AdmissionPolicy{}, 0));
     require(warm0.warm && warm0.prefix_slots == 0, "codec: warm record without a cache");
   }
+  {
+    // The logit bias and the stops (2026-09-06): "lb" pairs round-trip bit
+    // for bit; "sp" rides beside the cancels; a request without them is
+    // unchanged on the wire.
+    GenerationService::PassEvents ev;
+    dgpp::glm::SchedulerRequest r;
+    r.id = "chatcmpl-0000000000000b1a";
+    r.prompt = {1, 2, 3};
+    r.max_steps = 4;
+    r.logit_bias = {{5, -100.0f}, {77, 2.5f}, {154819, -0.125f}};
+    ev.submits.push_back(r);
+    ev.stops.push_back("chatcmpl-halt");
+    const std::string line = dgpp::service::encode_journal_tick(ev);
+    require(line.find("\"lb\":[[5,") != std::string::npos &&
+                line.find("\"sp\":[\"chatcmpl-halt\"]") != std::string::npos,
+            "codec: bias and stops on the wire: " + line);
+    const dgpp::service::JournalRecord b3 = dgpp::service::decode_journal_line(line);
+    require(b3.submits.size() == 1 && b3.submits[0].logit_bias.size() == 3 &&
+                b3.submits[0].logit_bias[0].token == 5 &&
+                b3.submits[0].logit_bias[0].bias == -100.0f &&
+                b3.submits[0].logit_bias[1].token == 77 &&
+                b3.submits[0].logit_bias[1].bias == 2.5f &&
+                b3.submits[0].logit_bias[2].token == 154819 &&
+                b3.submits[0].logit_bias[2].bias == -0.125f &&
+                b3.stops.size() == 1 && b3.stops[0] == "chatcmpl-halt" &&
+                b3.cancels.empty(),
+            "codec: bias and stops round-trip");
+    const std::string plain2 = dgpp::service::encode_journal_tick(events);
+    require(plain2.find("\"lb\"") == std::string::npos &&
+                plain2.find("\"sp\"") == std::string::npos,
+            "codec: a request without them is unchanged");
+  }
   require(back.cancels[0] == "chatcmpl-dead", "codec: cancel round-trip");
   require(!back.submits[0].grammar.active(), "codec: no grammar unless sent");
 

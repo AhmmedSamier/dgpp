@@ -59,6 +59,9 @@ struct GlmSampleSpec {
                           // request that reports (or carries penalties)
                           // runs the full path at temperature 1 — the
                           // argmax under the raw normalizer, no draw.
+  int32_t biased = 0;     // 1: the request's logit_bias row is live (the
+                          // pick adds it after the penalties, in place;
+                          // a biased greedy row takes the full path)
   uint64_t seed = 0;
   uint64_t counter = 0;
 };
@@ -154,12 +157,16 @@ constexpr int glm_sample_candidates_that_fit(int rows, int world,
 // read only.
 // `masks` (optional): the rows' token masks, `mask_stride` words apart
 // (a constrained row takes the full path whatever its temperature).
+// `bias` (optional, 2026-09-06): the requests' logit_bias rows,
+// [requests][vocab_size] floats, added in place for rows whose spec says
+// `biased`.
 void glm_sample_local(float* logits, int rows, int vocab_count,
                       int vocab_begin, int vocab_size, int rank, int world,
                       int candidates, const GlmSampleSpec* specs,
                       int rows_per_request, const int64_t* fed,
                       const int64_t* positions, int position_stride,
-                      const int32_t* counts, const uint32_t* masks,
+                      const int32_t* counts, const float* bias,
+                      const uint32_t* masks,
                       int mask_stride, const uint64_t* carry_digest,
                       uint16_t* table, GlmPickLocal* locals, double* scratch,
                       cudaStream_t stream);

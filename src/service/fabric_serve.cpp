@@ -119,6 +119,19 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out += "]";
       }
       if (r.no_cache) out += ",\"nc\":1";
+      // The logit bias (2026-09-06): [id, float bits] pairs.
+      if (!r.logit_bias.empty()) {
+        out += ",\"lb\":[";
+        for (size_t i = 0; i < r.logit_bias.size(); ++i) {
+          if (i != 0) out.push_back(',');
+          out.push_back('[');
+          append_json_int(&out, r.logit_bias[i].token);
+          out.push_back(',');
+          append_json_int(&out, float_bits(r.logit_bias[i].bias));
+          out.push_back(']');
+        }
+        out.push_back(']');
+      }
       // The sampling spec rides for stochastic requests and for greedy ones
       // that ask for logprobs; a plain greedy request's record is
       // byte-identical to the pre-sampling format.
@@ -225,6 +238,16 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
     for (size_t i = 0; i < events.cancels.size(); ++i) {
       if (i != 0) out.push_back(',');
       append_json_string(&out, events.cancels[i]);
+    }
+    out.push_back(']');
+  }
+  // The stop-string retires (2026-09-06): applied at the tick's sweep on
+  // every rank, exactly like cancels, with their own reason.
+  if (!events.stops.empty()) {
+    out += ",\"sp\":[";
+    for (size_t i = 0; i < events.stops.size(); ++i) {
+      if (i != 0) out.push_back(',');
+      append_json_string(&out, events.stops[i]);
     }
     out.push_back(']');
   }
@@ -409,6 +432,25 @@ JournalRecord decode_journal_line(std::string_view line) {
                                    "' has a bad no-cache flag");
         r.no_cache = nc->as_int() == 1;
       }
+      if (const dgpp::minijson::Value* lb = item.find("lb")) {
+        if (!lb->is_array())
+          throw std::runtime_error("journal: submit '" + r.id +
+                                   "' has a non-array logit_bias");
+        for (const dgpp::minijson::Value& e : lb->items()) {
+          if (!e.is_array() || e.items().size() != 2 ||
+              !e.items()[0].is_number() || !e.items()[1].is_number())
+            throw std::runtime_error("journal: submit '" + r.id +
+                                     "' has a bad logit_bias entry");
+          const int64_t bits = e.items()[1].as_int();
+          if (bits < 0 || bits > 0xFFFFFFFFll)
+            throw std::runtime_error("journal: submit '" + r.id +
+                                     "' has bad logit_bias bits");
+          dgpp::glm::LogitBias b;
+          b.token = static_cast<int32_t>(e.items()[0].as_int());
+          b.bias = float_from_bits(static_cast<uint32_t>(bits));
+          r.logit_bias.push_back(b);
+        }
+      }
       if (const dgpp::minijson::Value* lp = item.find("lp")) {
         if (!lp->is_number() || lp->as_int() < 0 || lp->as_int() > 20)
           throw std::runtime_error("journal: submit '" + r.id +
@@ -562,6 +604,15 @@ JournalRecord decode_journal_line(std::string_view line) {
       if (id.as_string().empty())
         throw std::runtime_error("journal: empty cancel id");
       rec.cancels.emplace_back(id.as_string());
+    }
+  }
+  if (const dgpp::minijson::Value* s = v.find("sp")) {
+    if (!s->is_array())
+      throw std::runtime_error("journal: 'sp' is not an array");
+    for (const dgpp::minijson::Value& id : s->items()) {
+      if (id.as_string().empty())
+        throw std::runtime_error("journal: empty stop id");
+      rec.stops.emplace_back(id.as_string());
     }
   }
   if (const dgpp::minijson::Value* pd = v.find("pd")) {
@@ -824,6 +875,7 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
             "scheduler divergence (§11); fabric emergency");
     }
     for (const std::string& id : rec.cancels) sched->cancel(id);
+    for (const std::string& id : rec.stops) sched->stop(id);
     {
       TickScope scope(in_tick);
       sched->tick();

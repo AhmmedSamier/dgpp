@@ -220,6 +220,16 @@ inline void apply_mask(float* logits, int n, int slice_begin,
   }
 }
 
+// The request's logit bias (OpenAI's logit_bias, 2026-09-06): `bias` is a
+// dense table over [0, vocab) — null: none — added to the slice's logits
+// AFTER the penalties and BEFORE the mask and the temperature. The device
+// kernel adds the same float in the same place (bitwise the same sum).
+inline void apply_bias(float* logits, int n, int slice_begin,
+                       const float* bias) {
+  if (bias == nullptr) return;
+  for (int i = 0; i < n; ++i) logits[i] += bias[slice_begin + i];
+}
+
 inline bool present_logit(float v) { return v != -INFINITY; }
 
 // The number of present (not -inf) logits — a constrained decision's
@@ -1144,13 +1154,15 @@ inline Result sample_full_logits(const float* logits, int vocab,
                                  const std::vector<VocabSlice>& layout,
                                  const Params& p, Rng& rng,
                                  const std::vector<int32_t>& context_ids,
-                                 const uint32_t* mask = nullptr) {
+                                 const uint32_t* mask = nullptr,
+                                 const float* bias = nullptr) {
   if (!(p.temperature > 0.0f) || !std::isfinite(p.temperature))
     throw std::invalid_argument(
         "glm_sample: sample_full_logits is the stochastic path");
   validate_vocab_slices(layout, vocab);
   std::vector<float> v(logits, logits + vocab);
   apply_penalties(v.data(), vocab, 0, p, count_context(context_ids));
+  apply_bias(v.data(), vocab, 0, bias);
   apply_mask(v.data(), vocab, 0, mask, vocab);
   const double lse = sharded_scaled_logsumexp(v.data(), layout, p.temperature);
   return sample_complete_logits(v.data(), vocab, lse, p, rng);

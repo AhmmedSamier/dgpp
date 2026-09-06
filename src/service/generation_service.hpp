@@ -143,6 +143,25 @@ struct ServiceConfig {
   // revision, the template hash and the checkpoint the entries were taken
   // under (the cache is per process; the key names what it is bound to).
   std::string prefix_key;
+  // The vocabulary bound for logit_bias ids (2026-09-06): the model's
+  // vocab_size; 0 refuses logit_bias (the bound is unknown).
+  int64_t vocab_size = 0;
+};
+
+// The stop-string scanner (OpenAI's `stop`, 2026-09-06). Fed the visible
+// text as it is produced, it returns what may be shown now: everything up
+// to the first match of a stop string (the match and what follows are
+// never shown; `hit` stays set), or everything but a tail that could still
+// begin a stop string across the next piece (held, and prepended to the
+// next piece). `finish()` releases the hold at the end of a stream that
+// never matched.
+struct StopScanner {
+  std::vector<std::string> stops;
+  std::string hold;
+  bool hit = false;
+  bool active() const { return !stops.empty(); }
+  std::string feed(std::string text);
+  std::string finish();
 };
 
 class GenerationService : public HttpHandler,
@@ -168,6 +187,7 @@ class GenerationService : public HttpHandler,
   struct PassEvents {
     std::vector<dgpp::glm::SchedulerRequest> submits;
     std::vector<std::string> cancels;
+    std::vector<std::string> stops;  // the stop-string retires (2026-09-06)
     // The prefix cache's decision digest after the previous tick (M7): the
     // record carries it so every peer compares before applying this one.
     bool has_prefix_digest = false;
@@ -273,9 +293,27 @@ class GenerationService : public HttpHandler,
   using ParserEvent = dgpp::glm::ToolCallParser::Event;
   using ToolCall = dgpp::glm::ToolCallParser::Call;
 
+  // A request's n choices (2026-09-06): one record per choice, one writer,
+  // one end sequence once every choice is done — the usage summed, the
+  // one-shot's choices assembled by index.
+  struct ChoiceGroup {
+    int n = 1;
+    int finished = 0;            // choices whose end sequence is written
+    bool ended = false;          // the stream ended / the one-shot answered
+    int completion_tokens = 0;   // summed over the choices
+    int reasoning_tokens = 0;
+    int cached_tokens = 0;       // choice 0's prefix-cache attach position
+    std::vector<std::string> choices;  // one-shot: each choice's JSON
+  };
+
   struct StreamRecord {
-    uint64_t tag = 0;        // on_disconnect correlation
-    std::string id;          // response id == the scheduler request id
+    uint64_t tag = 0;        // on_disconnect correlation (one per connection)
+    std::string id;          // the response id (shared by a request's choices)
+    std::string sched_id;    // the scheduler request id: `id` for choice 0,
+                             // `id-<choice>` for the others (n, 2026-09-06)
+    int choice = 0;          // the choice index this record fills
+    std::shared_ptr<ChoiceGroup> group;  // the request's choices together
+    uint64_t call_seed = 0;  // tool_call ids: the tag and the choice
     std::string model;
     int64_t created_unix = 0;
     bool chat = false;       // chat route (the parser path) vs legacy
@@ -294,6 +332,17 @@ class GenerationService : public HttpHandler,
         dgpp::glm::Scheduler::Result::Reason::kNone;
     int prompt_tokens = 0;
     int completion_tokens = 0;
+    // The stop strings (2026-09-06): the scanner over the visible text
+    // (chat: the content; legacy: the text), the stop enqueued once, the
+    // token count at the match (the usage's completion_tokens).
+    StopScanner stop;
+    bool stopped = false;
+    int stop_tokens = 0;
+    // usage.completion_tokens_details.reasoning_tokens (2026-09-06): the
+    // ids the parser routed to reasoning (</think> included) while the
+    // prompt's <think> was open.
+    bool reasoning_open = false;
+    int reasoning_tokens = 0;
     // The prefix cache (M7): when the request arrived at the door, whether
     // it attached to an entry and at what position (the TTFT split).
     std::chrono::steady_clock::time_point arrived;
@@ -311,6 +360,7 @@ class GenerationService : public HttpHandler,
     // Legacy completions: the suffix-diff text path.
     std::string text;          // decoded so far (the suffix-diff base)
     std::string delta;         // unflushed text delta (the ring)
+    std::string out_text;      // the visible text: the stop cut applied
     // Chat: the parser splits the ids into reasoning / content / calls.
     std::unique_ptr<dgpp::glm::ToolCallParser> parser;
     std::vector<ParserEvent> pending;  // streams: events not yet flushed
@@ -336,6 +386,14 @@ class GenerationService : public HttpHandler,
   bool parse_sampling(const dgpp::minijson::Value& body,
                       HttpResponseWriter& w, glm_sample::Params* sampling,
                       uint64_t* seed);
+  // n, stop and logit_bias (2026-09-06): validated per the schema, 400
+  // naming the field otherwise; logit_bias also needs an engine that can
+  // bias the pick and the vocabulary bound.
+  bool parse_n(const dgpp::minijson::Value& body, HttpResponseWriter& w, int* n);
+  bool parse_stop(const dgpp::minijson::Value& body, HttpResponseWriter& w,
+                  std::vector<std::string>* stops);
+  bool parse_logit_bias(const dgpp::minijson::Value& body, HttpResponseWriter& w,
+                        std::vector<dgpp::glm::LogitBias>* bias);
 
   // The chat request's conversation and tool fields (M6 6f): validates
   // the messages (roles, content forms, assistant tool_calls, tool
@@ -362,6 +420,14 @@ class GenerationService : public HttpHandler,
   // and enqueues the submit (the engine thread applies it).
   void enqueue_admission(std::shared_ptr<StreamRecord> record,
                          dgpp::glm::SchedulerRequest request);
+  // A request's n choices at once (2026-09-06): admitted or shed together.
+  void enqueue_group(std::vector<std::shared_ptr<StreamRecord>> records,
+                     std::vector<dgpp::glm::SchedulerRequest> requests);
+  // The visible content (chat) past the stop scanner: accumulated for the
+  // one-shot, queued for the stream. `request_stop` enqueues the record's
+  // stop once (under the lock, on the engine thread).
+  void push_content(StreamRecord& r, std::string text);
+  void request_stop(StreamRecord& r);
 
   // Shared by both streaming and one-shot records: appends one token
   // (the observer, engine thread) and decodes the text suffix.
@@ -420,6 +486,7 @@ class GenerationService : public HttpHandler,
   };
   std::vector<PendingAdmission> pending_admissions_;
   std::vector<PendingCancel> pending_cancels_;
+  std::vector<std::string> pending_stops_;  // scheduler ids whose stop matched
   std::vector<std::shared_ptr<StreamRecord>> records_;
   dgpp::glm::Scheduler::Meters meters_;  // engine-published, mutex-guarded
   bool shutdown_ = false;

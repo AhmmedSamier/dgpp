@@ -673,7 +673,7 @@ inline SamplingFold bus_sampling_fold(
     const glm_sample::Params& params,
     const std::vector<int32_t>& context_ids, int candidate_k,
     uint16_t* scratch, int timeout_ms,
-    const glm::TokenMask* mask = nullptr) {
+    const glm::TokenMask* mask = nullptr, const float* bias = nullptr) {
   if (world < 1 || world > kPickMaxWorld || rank < 0 || rank >= world)
     throw std::invalid_argument("sampling prefix: rank/world");
   if (!(params.temperature > 0.0f) || !std::isfinite(params.temperature))
@@ -704,6 +704,7 @@ inline SamplingFold bus_sampling_fold(
   glm_sample::apply_penalties(adjusted.data(), vocab_count, vocab_begin,
                               params,
                               glm_sample::count_context(context_ids));
+  glm_sample::apply_bias(adjusted.data(), vocab_count, vocab_begin, bias);
   const bool constrained = mask != nullptr && mask->constrained();
   if (constrained)
     glm_sample::apply_mask(adjusted.data(), vocab_count, vocab_begin,
@@ -818,7 +819,7 @@ inline glm_sample::Result bus_sample_row(
     const std::vector<int32_t>& context_ids, int candidate_k,
     uint16_t* prefix_scratch, uint16_t* gather_scratch, int timeout_ms,
     std::vector<float>* gather_buffer,
-    const glm::TokenMask* mask = nullptr) {
+    const glm::TokenMask* mask = nullptr, const float* bias = nullptr) {
   if (params.temperature <= 0.0f) {
     // The greedy decision with logprobs, penalties or a mask: the fold at
     // temperature 1 (penalties and the mask applied), the canonical first
@@ -828,7 +829,7 @@ inline glm_sample::Result bus_sample_row(
     raw.temperature = 1.0f;
     const SamplingFold fold = bus_sampling_fold(
         bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, raw,
-        context_ids, candidate_k, prefix_scratch, timeout_ms, mask);
+        context_ids, candidate_k, prefix_scratch, timeout_ms, mask, bias);
     const glm_sample::Result r = glm_sample::greedy_from_prefix(
         fold.prefix, fold.normalizer, params.logprobs);
     bus_check_decision_digest(bus, rank, true, r, fold.normalizer,
@@ -837,7 +838,7 @@ inline glm_sample::Result bus_sample_row(
   }
   const SamplingFold fold = bus_sampling_fold(
       bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, params,
-      context_ids, candidate_k, prefix_scratch, timeout_ms, mask);
+      context_ids, candidate_k, prefix_scratch, timeout_ms, mask, bias);
   const glm_sample::PrefixDecision d = glm_sample::sample_from_prefix(
       fold.prefix, fold.vocab, fold.normalizer, params, rng);
   if (d.resolved) {
@@ -1020,6 +1021,9 @@ class GlmDevicePicker {
     // glm_sample_mask_words(vocab_size) words per row (null: none).
     const uint32_t* masks = nullptr;
     int mask_stride = 0;
+    // The logit bias (2026-09-06): [requests][vocab_size] floats, read for
+    // the rows whose spec says `biased` (null: no request biases).
+    const float* bias = nullptr;
   };
   bool sampling() const { return candidates_ > 0; }
   int sampling_candidates() const { return candidates_; }
@@ -1214,8 +1218,8 @@ class GlmDevicePicker {
     glm_sample_local(const_cast<float*>(in.logits), in.rows, in.vocab_count,
                      in.vocab_begin, in.vocab_size, rank_, world_,
                      candidates_, in.specs, rows_per_request(in), in.fed,
-                     in.positions, position_stride(in), in.counts, in.masks,
-                     in.mask_stride, carry_, table_,
+                     in.positions, position_stride(in), in.counts, in.bias,
+                     in.masks, in.mask_stride, carry_, table_,
                      locals_ + in.slot * kPickMaxRows, sample_scratch_,
                      stream);
   }

@@ -15,7 +15,7 @@ a judgment where it does not.
 |---|---|---|---|---|
 | 1 | Chunked prefill interleaved with decode | p99 decode latency under mixed load: today a 2,048-token prompt stalls every other live request for 1.7 s, a 32K one for 34 s | 6–10 d | the largest serving-quality defect left; everything needed exists (pool-aligned chunks, the graph era's mixed mode) |
 | 2 | Operability: structured request logs, Prometheus metrics, systemd units | unattended operation; every incident so far was diagnosed from ad-hoc log greps | 2–3 d (first slice built 2026-09-06: the periodic throughput line, the per-tick lines at DEBUG) | cheap, and the failure semantics and drift check are only useful if someone is paged |
-| 3 | `stop` strings and the remaining request fields (`n`, `logit_bias`, `suffix`) | client compatibility: `stop` is the most common refused field | 2–4 d (`stop` 1–2 d) | low cost; `stop` needs a decode-side scan with token-boundary care, `n` a fan-out at admission |
+| 3 | The remaining request fields | client compatibility. **Built 2026-09-06:** `stop`, `n`, `logit_bias`, `usage.prompt_tokens_details.cached_tokens`, `usage.completion_tokens_details.reasoning_tokens`. Left: accept-and-ignore for `user`, `store`, `metadata`, `service_tier`; the `developer` role mapped to system; `n` on the legacy completions route | 0.5–1 d for what is left | the accept-and-ignore fields are what stock clients still trip on |
 | 4 | NVFP4 weights for the decode path | the T=1 step is weight-bandwidth-bound (24.6 of 31.5 ms is weight reads); halving expert bytes is worth up to ~25 % per token | 15–25 d | the biggest decode lever left, with a quality-validation bill (the checkpoint is FP8; a 4-bit conversion needs its own parity gates) |
 | 5 | MTP batch of 8 requests (16 rows) | aggregate throughput at high occupancy: 60 tok/s at 4 MTP requests against 76 at 8 T=1 requests | 4–6 d | the fixed batch, the pick table and the latency slot are sized for 8 rows; a shape change across kernels and the bus |
 | 6 | Faster silent-death detection | a powered-off node is seen by the bus watchdog after 60–120 s; a journal heartbeat would make it 1–2 s | 1 d | cheap; the drills covered process death, not node loss |
@@ -60,14 +60,17 @@ unit per rank that restarts on a nonzero exit turn the failure semantics
 into an unattended service. This is the cheapest item with a benefit an
 operator feels every day.
 
-**3. `stop` strings.** The refusal ladder answers 400 for `stop`, `n`,
-`logit_bias`, `suffix` and `best_of`, naming the field. Clients send
-`stop` routinely. Implementing it is a decode-side check over the
-detokenized tail (a stop string can straddle tokens), applied identically
-on every rank (a scheduler decision, journaled like a cancel), with the
-usual gates. `n` is a fan-out at admission with shared prefill (the prefix
-cache makes the second candidate an attach); `logit_bias` is a mask the
-sampler already supports for grammars.
+**3. The request fields.** `stop`, `n` and `logit_bias` and the usage
+details were built on 2026-09-06 the way this paragraph first sketched
+them: the stop match is a scanner over the content on rank 0 (a tail that
+could begin a stop string is held back) and the retire rides the journal
+like a cancel; `n` is one scheduler request per choice with the prefix
+cache sharing the prompt; `logit_bias` is a per-slot dense row the device
+pick adds after the penalties, the host sampler adding the same float in
+the same place. What remains is smaller than the row's original estimate:
+accepting and ignoring `user`, `store`, `metadata` and `service_tier`
+(pure metadata for a self-hosted server; today they 400), mapping the
+`developer` role to system, and `n` on the deprecated legacy route.
 
 **4. NVFP4.** The decode step's floor is the weight read: 24.6 ms of a
 31.45 ms T=1 step at four ranks. A 4-bit expert format halves the bytes

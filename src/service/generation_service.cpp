@@ -1,5 +1,7 @@
 #include "service/generation_service.hpp"
 
+#include <unordered_set>
+
 #include <cstring>
 
 #include <algorithm>
@@ -34,19 +36,29 @@ const char* finish_reason(Scheduler::Result::Reason r, bool tool_calls) {
     // which OpenAI's vocabulary calls "length"; the metrics and the log
     // carry the cause.
     case Scheduler::Result::Reason::kPoolExhausted: return "length";
+    // The client's stop string matched (2026-09-06): a natural end.
+    case Scheduler::Result::Reason::kStop: return "stop";
     default: return "stop";
   }
 }
 
-void append_usage(std::string* out, int prompt_tokens,
-                  int completion_tokens) {
+// The usage object, with the details OpenAI reports (2026-09-06):
+// prompt_tokens_details.cached_tokens — the prompt tokens the prefix cache
+// served (the attach position) — and completion_tokens_details.
+// reasoning_tokens — the generated ids that went to reasoning.
+void append_usage(std::string* out, int prompt_tokens, int completion_tokens,
+                  int cached_tokens, int reasoning_tokens) {
   out->append("\"usage\":{\"prompt_tokens\":");
   append_json_int(out, prompt_tokens);
   out->append(",\"completion_tokens\":");
   append_json_int(out, completion_tokens);
   out->append(",\"total_tokens\":");
   append_json_int(out, prompt_tokens + completion_tokens);
-  out->push_back('}');
+  out->append(",\"prompt_tokens_details\":{\"cached_tokens\":");
+  append_json_int(out, cached_tokens);
+  out->append("},\"completion_tokens_details\":{\"reasoning_tokens\":");
+  append_json_int(out, reasoning_tokens);
+  out->append("}}");
 }
 
 // The chat.completion.chunk preamble: id/object/created/model.
@@ -62,11 +74,13 @@ void append_chunk_preamble(std::string* out, const std::string& id,
 }
 
 std::string chat_chunk_first(const std::string& id, int64_t created,
-                             const std::string& model) {
+                             const std::string& model, int index = 0) {
   std::string out;
   append_chunk_preamble(&out, id, created, model);
+  out.append("{\"index\":");
+  append_json_int(&out, index);
   out.append(
-      "{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},"
+      ",\"delta\":{\"role\":\"assistant\",\"content\":\"\"},"
       "\"logprobs\":null,\"finish_reason\":null}]}");
   return out;
 }
@@ -75,10 +89,13 @@ std::string chat_chunk_first(const std::string& id, int64_t created,
 std::string chat_chunk_delta(const std::string& id, int64_t created,
                              const std::string& model,
                              const std::string& delta_json,
-                             const std::string& logprobs_json = "") {
+                             const std::string& logprobs_json = "",
+                             int index = 0) {
   std::string out;
   append_chunk_preamble(&out, id, created, model);
-  out.append("{\"index\":0,\"delta\":");
+  out.append("{\"index\":");
+  append_json_int(&out, index);
+  out.append(",\"delta\":");
   out.append(delta_json);
   out.append(",\"logprobs\":");
   out.append(logprobs_json.empty() ? "null" : logprobs_json);
@@ -136,10 +153,13 @@ std::string delta_tool_call_arguments(int index, const std::string& args) {
 
 std::string chat_chunk_final(const std::string& id, int64_t created,
                              const std::string& model, const char* finish,
-                             const std::string& logprobs_json = "") {
+                             const std::string& logprobs_json = "",
+                             int index = 0) {
   std::string out;
   append_chunk_preamble(&out, id, created, model);
-  out.append("{\"index\":0,\"delta\":{},\"logprobs\":");
+  out.append("{\"index\":");
+  append_json_int(&out, index);
+  out.append(",\"delta\":{},\"logprobs\":");
   out.append(logprobs_json.empty() ? "null" : logprobs_json);
   out.append(",\"finish_reason\":");
   append_json_string(&out, finish);
@@ -149,7 +169,8 @@ std::string chat_chunk_final(const std::string& id, int64_t created,
 
 std::string chat_chunk_usage(const std::string& id, int64_t created,
                              const std::string& model, int prompt_tokens,
-                             int completion_tokens) {
+                             int completion_tokens, int cached_tokens,
+                             int reasoning_tokens) {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, id);
@@ -158,18 +179,35 @@ std::string chat_chunk_usage(const std::string& id, int64_t created,
   out.append(",\"model\":");
   append_json_string(&out, model);
   out.append(",\"system_fingerprint\":null,\"choices\":[],");
-  append_usage(&out, prompt_tokens, completion_tokens);
+  append_usage(&out, prompt_tokens, completion_tokens, cached_tokens,
+               reasoning_tokens);
   out.push_back('}');
   return out;
 }
 
-// The one-shot chat.completion object around a complete message object.
+// One choice of the one-shot chat.completion object (n choices join by
+// index, 2026-09-06).
+std::string chat_choice_json(int index, const std::string& message_json,
+                             const char* finish,
+                             const std::string& logprobs_json = "") {
+  std::string out = "{\"index\":";
+  append_json_int(&out, index);
+  out.append(",\"message\":");
+  out.append(message_json);
+  out.append(",\"logprobs\":");
+  out.append(logprobs_json.empty() ? "null" : logprobs_json);
+  out.append(",\"finish_reason\":");
+  append_json_string(&out, finish);
+  out.push_back('}');
+  return out;
+}
+
+// The one-shot chat.completion object around its joined choices.
 std::string chat_completion_body(const std::string& id, int64_t created,
                                  const std::string& model,
-                                 const std::string& message_json,
-                                 const char* finish, int prompt_tokens,
-                                 int completion_tokens,
-                                 const std::string& logprobs_json = "") {
+                                 const std::string& choices_json,
+                                 int prompt_tokens, int completion_tokens,
+                                 int cached_tokens, int reasoning_tokens) {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, id);
@@ -177,15 +215,11 @@ std::string chat_completion_body(const std::string& id, int64_t created,
   append_json_int(&out, created);
   out.append(",\"model\":");
   append_json_string(&out, model);
-  out.append(",\"system_fingerprint\":null,\"choices\":[{\"index\":0,"
-              "\"message\":");
-  out.append(message_json);
-  out.append(",\"logprobs\":");
-  out.append(logprobs_json.empty() ? "null" : logprobs_json);
-  out.append(",\"finish_reason\":");
-  append_json_string(&out, finish);
-  out.append("}],");
-  append_usage(&out, prompt_tokens, completion_tokens);
+  out.append(",\"system_fingerprint\":null,\"choices\":[");
+  out.append(choices_json);
+  out.append("],");
+  append_usage(&out, prompt_tokens, completion_tokens, cached_tokens,
+               reasoning_tokens);
   out.push_back('}');
   return out;
 }
@@ -237,11 +271,26 @@ std::string text_chunk_final(const std::string& id, int64_t created,
   return out;
 }
 
+std::string text_choice_json(int index, const std::string& text,
+                             const char* finish,
+                             const std::string& logprobs_json = "") {
+  std::string out = "{\"index\":";
+  append_json_int(&out, index);
+  out.append(",\"text\":");
+  append_json_string(&out, text);
+  out.append(",\"logprobs\":");
+  out.append(logprobs_json.empty() ? "null" : logprobs_json);
+  out.append(",\"finish_reason\":");
+  append_json_string(&out, finish);
+  out.push_back('}');
+  return out;
+}
+
 std::string text_completion_body(const std::string& id, int64_t created,
                                  const std::string& model,
-                                 const std::string& text, const char* finish,
+                                 const std::string& choices_json,
                                  int prompt_tokens, int completion_tokens,
-                                 const std::string& logprobs_json = "") {
+                                 int cached_tokens) {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, id);
@@ -249,15 +298,10 @@ std::string text_completion_body(const std::string& id, int64_t created,
   append_json_int(&out, created);
   out.append(",\"model\":");
   append_json_string(&out, model);
-  out.append(",\"system_fingerprint\":null,\"choices\":[{\"index\":0,"
-              "\"text\":");
-  append_json_string(&out, text);
-  out.append(",\"logprobs\":");
-  out.append(logprobs_json.empty() ? "null" : logprobs_json);
-  out.append(",\"finish_reason\":");
-  append_json_string(&out, finish);
-  out.append("}],");
-  append_usage(&out, prompt_tokens, completion_tokens);
+  out.append(",\"system_fingerprint\":null,\"choices\":[");
+  out.append(choices_json);
+  out.append("],");
+  append_usage(&out, prompt_tokens, completion_tokens, cached_tokens, 0);
   out.push_back('}');
   return out;
 }
@@ -390,6 +434,173 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
 // ---------------------------------------------------------------------------
 // The sampling spec (both completion routes)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The stop-string scanner (2026-09-06)
+// ---------------------------------------------------------------------------
+
+std::string StopScanner::feed(std::string text) {
+  if (hit) return {};
+  std::string buf = std::move(hold);
+  buf += text;
+  hold.clear();
+  // The earliest match of any stop string decides; the match and what
+  // follows are never shown.
+  size_t best = std::string::npos;
+  for (const std::string& s : stops) {
+    const size_t at = buf.find(s);
+    if (at < best) best = at;
+  }
+  if (best != std::string::npos) {
+    hit = true;
+    buf.resize(best);
+    return buf;
+  }
+  // The longest suffix of the buffer that is a proper prefix of some stop
+  // string is held: the next piece decides it.
+  size_t keep = 0;
+  for (const std::string& s : stops) {
+    const size_t most = std::min(buf.size(), s.size() - 1);
+    for (size_t k = most; k > keep; --k) {
+      if (buf.compare(buf.size() - k, k, s, 0, k) == 0) {
+        keep = k;
+        break;
+      }
+    }
+  }
+  hold.assign(buf, buf.size() - keep, keep);
+  buf.resize(buf.size() - keep);
+  return buf;
+}
+
+std::string StopScanner::finish() {
+  std::string rest;
+  rest.swap(hold);
+  return hit ? std::string() : rest;
+}
+
+namespace {
+constexpr int kMaxChoices = 8;           // n's bound
+constexpr size_t kMaxLogitBias = 1024;   // logit_bias entries
+}  // namespace
+
+bool GenerationService::parse_n(const dgpp::minijson::Value& body,
+                                HttpResponseWriter& w, int* n) {
+  *n = 1;
+  const dgpp::minijson::Value* v = body.find("n");
+  if (v == nullptr || v->is_null()) return true;
+  const bool integral =
+      v->is_number() && v->as_double(0.0) == static_cast<double>(v->as_int(0));
+  if (!integral || v->as_int(0) < 1 || v->as_int(0) > kMaxChoices) {
+    respond_error(w, 400,
+                  "n must be an integer in [1, " + std::to_string(kMaxChoices) +
+                      "]",
+                  "invalid_request_error", "n");
+    return false;
+  }
+  *n = static_cast<int>(v->as_int(0));
+  return true;
+}
+
+bool GenerationService::parse_stop(const dgpp::minijson::Value& body,
+                                   HttpResponseWriter& w,
+                                   std::vector<std::string>* stops) {
+  stops->clear();
+  const dgpp::minijson::Value* v = body.find("stop");
+  if (v == nullptr || v->is_null()) return true;
+  const auto bad = [&] {
+    respond_error(w, 400,
+                  "stop must be a non-empty string or an array of one to "
+                  "four non-empty strings",
+                  "invalid_request_error", "stop");
+    return false;
+  };
+  const auto take = [&](const dgpp::minijson::Value& s) {
+    if (!s.is_string() || s.as_string().empty()) return bad();
+    stops->emplace_back(s.as_string());
+    return true;
+  };
+  if (v->is_string()) return take(*v);
+  if (!v->is_array() || v->items().empty() || v->items().size() > 4)
+    return bad();
+  for (const dgpp::minijson::Value& s : v->items())
+    if (!take(s)) return false;
+  return true;
+}
+
+bool GenerationService::parse_logit_bias(
+    const dgpp::minijson::Value& body, HttpResponseWriter& w,
+    std::vector<dgpp::glm::LogitBias>* bias) {
+  bias->clear();
+  const dgpp::minijson::Value* v = body.find("logit_bias");
+  if (v == nullptr || v->is_null()) return true;
+  if (!v->is_object()) {
+    respond_error(w, 400,
+                  "logit_bias must be an object mapping token ids to biases "
+                  "in [-100, 100]",
+                  "invalid_request_error", "logit_bias");
+    return false;
+  }
+  if (v->members().empty()) return true;
+  if (!engine_->supports_logit_bias() || cfg_.vocab_size <= 0) {
+    respond_error(w, 400,
+                  "logit_bias is not available on this engine",
+                  "invalid_request_error", "logit_bias",
+                  "logit_bias_unsupported");
+    return false;
+  }
+  if (v->members().size() > kMaxLogitBias) {
+    respond_error(w, 400,
+                  "logit_bias has more than " + std::to_string(kMaxLogitBias) +
+                      " entries",
+                  "invalid_request_error", "logit_bias");
+    return false;
+  }
+  std::unordered_set<int64_t> seen;
+  for (const dgpp::minijson::Member& m : v->members()) {
+    int64_t id = 0;
+    bool digits = !m.key.empty() && m.key.size() <= 12;
+    for (const char c : m.key) {
+      if (c < '0' || c > '9') {
+        digits = false;
+        break;
+      }
+      id = id * 10 + (c - '0');
+    }
+    if (!digits) {
+      respond_error(w, 400,
+                    "logit_bias keys must be token ids (decimal strings); "
+                    "got '" + m.key + "'",
+                    "invalid_request_error", "logit_bias");
+      return false;
+    }
+    if (id >= cfg_.vocab_size) {
+      respond_error(w, 400,
+                    "logit_bias token " + m.key + " is outside the vocabulary "
+                    "(" + std::to_string(cfg_.vocab_size) + " ids)",
+                    "invalid_request_error", "logit_bias");
+      return false;
+    }
+    if (!m.value.is_number() || !(m.value.as_double(0.0) >= -100.0) ||
+        !(m.value.as_double(0.0) <= 100.0)) {
+      respond_error(w, 400,
+                    "logit_bias values must be numbers in [-100, 100]; token " +
+                        m.key + " is not",
+                    "invalid_request_error", "logit_bias");
+      return false;
+    }
+    if (!seen.insert(id).second) {
+      respond_error(w, 400, "logit_bias lists token " + m.key + " twice",
+                    "invalid_request_error", "logit_bias");
+      return false;
+    }
+    dgpp::glm::LogitBias b;
+    b.token = static_cast<int32_t>(id);
+    b.bias = static_cast<float>(m.value.as_double(0.0));
+    bias->push_back(b);
+  }
+  return true;
+}
 
 bool GenerationService::parse_sampling(const dgpp::minijson::Value& body,
                                        HttpResponseWriter& w,
@@ -1156,10 +1367,9 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
 
   // The loud-refusal ladder for everything not implemented in v1.
   const char* unsupported[] = {
-      "stop",       "n",           "logit_bias", "user",
-      "store",      "metadata",    "service_tier", "prediction",
-      "audio",      "modalities",  "web_search_options", "functions",
-      "function_call",
+      "user",       "store",       "metadata",   "service_tier",
+      "prediction", "audio",       "modalities", "web_search_options",
+      "functions",  "function_call",
   };
   for (const char* param : unsupported) {
     if (body.find(param) != nullptr) {
@@ -1173,6 +1383,14 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
       return;
     }
   }
+
+  // n, stop and logit_bias (2026-09-06).
+  int n = 1;
+  std::vector<std::string> stops;
+  std::vector<dgpp::glm::LogitBias> logit_bias;
+  if (!parse_n(body, w, &n) || !parse_stop(body, w, &stops) ||
+      !parse_logit_bias(body, w, &logit_bias))
+    return;
 
   // The conversation, the tools and the template knobs (M6 6f).
   ChatPlan plan;
@@ -1217,43 +1435,69 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     return;
   }
 
-  auto record = std::make_shared<StreamRecord>();
-  record->tag = next_tag_.fetch_add(1, std::memory_order_relaxed);
+  // The request's n choices (2026-09-06): one record and one scheduler
+  // request per choice, the same prompt (the prefix cache makes every
+  // choice past the first an attach), per-choice seeds, one group for the
+  // answer; admitted or shed together.
+  const uint64_t tag = next_tag_.fetch_add(1, std::memory_order_relaxed);
+  std::string rid;
   {
     char suffix[17];
     std::snprintf(suffix, sizeof(suffix), "%016llx",
-                  static_cast<unsigned long long>(record->tag));
-    record->id = "chatcmpl-" + std::string(suffix);
+                  static_cast<unsigned long long>(tag));
+    rid = "chatcmpl-" + std::string(suffix);
   }
-  record->model = cfg_.model_id;
-  record->created_unix = std::time(nullptr);
-  record->chat = true;
-  record->stream = stream;
-  record->include_usage = include_usage;
-  record->prompt_tokens = static_cast<int>(prompt.size());
-  record->parser = std::make_unique<ToolCallParser>(
-      markers_,
-      [this](const std::vector<int64_t>& ids) {
-        return frontend_->decode_ids(ids);
-      },
-      std::move(plan.schemas), std::move(popts));
-  record->writer = &w;
-  w.set_stream_tag(record->tag);
-  if (stream) w.begin_stream();
+  const int64_t created = std::time(nullptr);
+  auto group = std::make_shared<ChoiceGroup>();
+  group->n = n;
+  group->choices.resize(static_cast<size_t>(n));
+  const std::vector<int64_t> boundaries = prompt_boundaries(prompt);
+  const auto arrived = std::chrono::steady_clock::now();
+  std::vector<std::shared_ptr<StreamRecord>> records;
+  std::vector<SchedulerRequest> requests;
+  for (int choice = 0; choice < n; ++choice) {
+    auto record = std::make_shared<StreamRecord>();
+    record->tag = tag;
+    record->id = rid;
+    record->sched_id = choice == 0 ? rid : rid + "-" + std::to_string(choice);
+    record->choice = choice;
+    record->group = group;
+    record->call_seed = tag ^ (static_cast<uint64_t>(choice) << 48);
+    record->model = cfg_.model_id;
+    record->created_unix = created;
+    record->chat = true;
+    record->stream = stream;
+    record->include_usage = include_usage;
+    record->prompt_tokens = static_cast<int>(prompt.size());
+    record->parser = std::make_unique<ToolCallParser>(
+        markers_,
+        [this](const std::vector<int64_t>& ids) {
+          return frontend_->decode_ids(ids);
+        },
+        plan.schemas, popts);
+    record->stop.stops = stops;
+    record->reasoning_open = opens_thinking;
+    record->writer = &w;
+    record->logprobs = logprobs;
+    record->arrived = arrived;
 
-  SchedulerRequest sr;
-  sr.id = record->id;
-  sr.boundaries = prompt_boundaries(prompt);
-  sr.no_cache = !prefix_cache;
-  sr.prompt = std::move(prompt);
-  sr.max_steps = steps;
-  sr.sampling = sampling;
-  sr.seed = seed;
-  sr.logprobs = logprobs;
-  sr.grammar = std::move(plan.grammar);
-  record->logprobs = logprobs;
-  record->arrived = std::chrono::steady_clock::now();
-  enqueue_admission(std::move(record), std::move(sr));
+    SchedulerRequest sr;
+    sr.id = record->sched_id;
+    sr.boundaries = boundaries;
+    sr.no_cache = !prefix_cache;
+    sr.prompt = prompt;
+    sr.max_steps = steps;
+    sr.sampling = sampling;
+    sr.seed = seed + static_cast<uint64_t>(choice);
+    sr.logprobs = logprobs;
+    sr.grammar = plan.grammar;
+    sr.logit_bias = logit_bias;
+    records.push_back(std::move(record));
+    requests.push_back(std::move(sr));
+  }
+  w.set_stream_tag(tag);
+  if (stream) w.begin_stream();
+  enqueue_group(std::move(records), std::move(requests));
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,9 +1593,8 @@ void GenerationService::route_completions(const HttpRequest& req,
     sampling.logprobs = logprobs;
   }
 
-  const char* unsupported[] = {"echo",        "suffix",        "top_logprobs",
-                              "n",           "best_of",       "stop",
-                              "logit_bias",  "user"};
+  const char* unsupported[] = {"echo", "suffix", "top_logprobs",
+                              "n",    "best_of", "user"};
   for (const char* param : unsupported) {
     if (body.find(param) != nullptr) {
       respond_error(w, 400,
@@ -1361,6 +1604,12 @@ void GenerationService::route_completions(const HttpRequest& req,
       return;
     }
   }
+
+  // stop and logit_bias (2026-09-06).
+  std::vector<std::string> stops;
+  std::vector<dgpp::glm::LogitBias> logit_bias;
+  if (!parse_stop(body, w, &stops) || !parse_logit_bias(body, w, &logit_bias))
+    return;
 
   std::vector<int64_t> ids = frontend_->encode_text(prompt->as_string());
   if (ids.empty()) {
@@ -1386,6 +1635,11 @@ void GenerationService::route_completions(const HttpRequest& req,
                   static_cast<unsigned long long>(record->tag));
     record->id = "cmpl-" + std::string(suffix);
   }
+  record->sched_id = record->id;
+  record->group = std::make_shared<ChoiceGroup>();
+  record->group->choices.resize(1);
+  record->call_seed = record->tag;
+  record->stop.stops = stops;
   record->model = cfg_.model_id;
   record->created_unix = std::time(nullptr);
   record->chat = false;
@@ -1404,6 +1658,7 @@ void GenerationService::route_completions(const HttpRequest& req,
   sr.sampling = sampling;
   sr.seed = seed;
   sr.logprobs = logprobs;
+  sr.logit_bias = logit_bias;
   record->logprobs = logprobs;
   record->arrived = std::chrono::steady_clock::now();
   enqueue_admission(std::move(record), std::move(sr));
@@ -1577,30 +1832,43 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
 
 void GenerationService::enqueue_admission(std::shared_ptr<StreamRecord> record,
                                            SchedulerRequest request) {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stats_.requests_total++;
-    // EVERY record enters the lifecycle list at enqueue — the observer,
-    // the disconnect hook, and the pump must see a request that is
-    // still waiting for the engine thread (a disconnect can race the
-    // engine pass, and the cancel has to land either way).
-    records_.push_back(record);
-    if (shutdown_ ||
-        pending_admissions_.size() >=
-            static_cast<size_t>(cfg_.queue_limit)) {
-      record->reject_overloaded = true;
-      record->shutting_down = shutdown_;
-      record->engine_failed = failed_;
-      stats_.requests_shed++;
-      return;
+  std::vector<std::shared_ptr<StreamRecord>> records;
+  records.push_back(std::move(record));
+  std::vector<SchedulerRequest> requests;
+  requests.push_back(std::move(request));
+  enqueue_group(std::move(records), std::move(requests));
+}
+
+void GenerationService::enqueue_group(
+    std::vector<std::shared_ptr<StreamRecord>> records,
+    std::vector<SchedulerRequest> requests) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  stats_.requests_total += records.size();
+  // EVERY record enters the lifecycle list at enqueue — the observer,
+  // the disconnect hook, and the pump must see a request that is
+  // still waiting for the engine thread (a disconnect can race the
+  // engine pass, and the cancel has to land either way).
+  for (auto& r : records) records_.push_back(r);
+  // A request's choices are admitted or shed TOGETHER (n, 2026-09-06): a
+  // half-shed group would answer with fewer choices than asked.
+  if (shutdown_ || pending_admissions_.size() + records.size() >
+                       static_cast<size_t>(cfg_.queue_limit)) {
+    for (auto& r : records) {
+      r->reject_overloaded = true;
+      r->shutting_down = shutdown_;
+      r->engine_failed = failed_;
     }
-    pending_admissions_.push_back(
-        PendingAdmission{std::move(record), std::move(request)});
+    stats_.requests_shed += records.size();
+    return;
   }
+  for (size_t i = 0; i < records.size(); ++i)
+    pending_admissions_.push_back(
+        PendingAdmission{records[i], std::move(requests[i])});
 }
 
 void GenerationService::on_disconnect(uint64_t tag) {
   std::lock_guard<std::mutex> lock(mutex_);
+  // Every record on the connection (a request's n choices share the tag).
   for (auto& r : records_) {
     if (r->tag != tag) continue;
     r->writer_dead = true;
@@ -1609,21 +1877,42 @@ void GenerationService::on_disconnect(uint64_t tag) {
       // Stage 4's contract: a client disconnect maps onto the same
       // deterministic retire path as scripted cancellation.
       r->cancel_armed = true;
-      pending_cancels_.push_back(PendingCancel{r->id});
+      pending_cancels_.push_back(PendingCancel{r->sched_id});
       stats_.requests_cancelled++;
       DGPP_LOG_INFO("serve: request {} cancelled by client disconnect",
-                    r->id);
+                    r->sched_id);
     }
-    return;
   }
-  // Unknown tag: a long-finished record's connection finally closed.
+  // An unknown tag: a long-finished record's connection finally closed.
 }
 
 // ---------------------------------------------------------------------------
 // The observer (engine thread — the scheduler's inline callbacks)
 // ---------------------------------------------------------------------------
 
+void GenerationService::push_content(StreamRecord& r, std::string text) {
+  if (text.empty()) return;
+  r.content += text;
+  if (r.stream) {
+    ParserEvent ev;
+    ev.kind = ParserEvent::Kind::kContent;
+    ev.text = std::move(text);
+    r.pending.push_back(std::move(ev));
+  }
+}
+
+void GenerationService::request_stop(StreamRecord& r) {
+  if (r.stopped) return;
+  r.stopped = true;
+  r.stop_tokens = static_cast<int>(r.ids.size());
+  pending_stops_.push_back(r.sched_id);
+}
+
 void GenerationService::absorb(StreamRecord& r, ParserEvent ev) {
+  // usage's reasoning_tokens: the ids up to and including </think>.
+  if (ev.kind == ParserEvent::Kind::kReasoningClosed) r.reasoning_open = false;
+  // Past a stop match nothing more is shown (the request is retiring).
+  if (r.stop.hit) return;
   // The fold knob: reasoning rides as content text, the model's own
   // "</think>" included where it produced it — exactly the decode a
   // client of a server without a reasoning parser would see.
@@ -1641,6 +1930,15 @@ void GenerationService::absorb(StreamRecord& r, ParserEvent ev) {
       break;
     case ParserEvent::Kind::kContent:
       if (ev.text.empty()) return;
+      if (r.stop.active()) {
+        // The stop strings (2026-09-06) match the content: the scanner
+        // shows what precedes a match and holds a tail that could still
+        // begin one.
+        std::string shown = r.stop.feed(ev.text);
+        if (r.stop.hit) request_stop(r);
+        if (shown.empty()) return;
+        ev.text = std::move(shown);
+      }
       r.content += ev.text;
       break;
     case ParserEvent::Kind::kToolCall:
@@ -1658,7 +1956,7 @@ void GenerationService::on_token(const std::string& id, int64_t token,
   {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& r : records_) {
-      if (r->id != id || r->done) continue;
+      if (r->sched_id != id || r->done) continue;
       if (steps_done == 1) {
         // The first token: the time to first token, split by whether the
         // prefix cache served the prompt's head (M7).
@@ -1675,6 +1973,7 @@ void GenerationService::on_token(const std::string& id, int64_t token,
       }
       r->ids.push_back(token);
       if (r->chat) {
+        if (r->reasoning_open) ++r->reasoning_tokens;
         // The parser routes the id by state (reasoning / content / a tool
         // call block) and yields the exact text deltas of each run.
         std::vector<ParserEvent> events;
@@ -1684,11 +1983,21 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         // Exact incremental text: the suffix diff of successive full
         // decodes — UTF-8 splits and special tokens come out right by
         // construction (the tokenizer's own decode gates, pinned by its
-        // differential goldens).
+        // differential goldens). The stop scanner (2026-09-06) decides
+        // what of it is shown.
         const std::string full = frontend_->decode_ids(r->ids);
+        std::string suffix;
         if (full.size() > r->text.size())
-          r->delta.append(full, r->text.size(), std::string::npos);
+          suffix.assign(full, r->text.size(), std::string::npos);
         r->text = full;
+        if (r->stop.hit) {
+          suffix.clear();
+        } else if (r->stop.active()) {
+          suffix = r->stop.feed(suffix);
+          if (r->stop.hit) request_stop(*r);
+        }
+        r->delta += suffix;
+        r->out_text += suffix;
       }
       stats_.tokens_out++;
       break;
@@ -1705,7 +2014,7 @@ void GenerationService::on_prefix(const std::string& id, const char* op,
   if (std::strcmp(op, "attach") == 0) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& r : records_) {
-      if (r->id != id) continue;
+      if (r->sched_id != id) continue;
       r->prefix_hit = true;
       r->prefix_position = position;
       break;
@@ -1730,7 +2039,7 @@ void GenerationService::on_token_logprobs(const std::string& id,
   (void)steps_done;
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto& r : records_) {
-    if (r->id != id || r->done) continue;
+    if (r->sched_id != id || r->done) continue;
     if (r->logprobs >= 0) r->lps.push_back(logprobs);
     break;
   }
@@ -1828,16 +2137,35 @@ void GenerationService::on_retire(const std::string& id,
   {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& r : records_) {
-      if (r->id != id) continue;
+      if (r->sched_id != id) continue;
       if (r->chat && r->parser && !r->done) {
         // An open block at the end flushes as content.
         std::vector<ParserEvent> events;
         r->parser->finish(&events);
         for (ParserEvent& ev : events) absorb(*r, std::move(ev));
       }
+      if (!r->done) {
+        // The stop scanner's held tail is real text when nothing matched.
+        if (r->chat) {
+          push_content(*r, r->stop.finish());
+        } else {
+          const std::string rest = r->stop.finish();
+          r->delta += rest;
+          r->out_text += rest;
+        }
+      }
       r->done = true;
       r->reason = result.reason;
-      r->completion_tokens = result.steps_done;
+      // A stopped request's tokens past the match were generated but never
+      // shown: the usage counts up to the token that completed the match.
+      r->completion_tokens = r->stopped ? r->stop_tokens : result.steps_done;
+      if (r->group) {
+        r->group->completion_tokens += r->completion_tokens;
+        r->group->reasoning_tokens += r->reasoning_tokens;
+        if (r->choice == 0)
+          r->group->cached_tokens =
+              r->prefix_hit ? static_cast<int>(r->prefix_position) : 0;
+      }
       if (result.reason == Scheduler::Result::Reason::kPoolExhausted)
         stats_.requests_shed_pool++;
       break;
@@ -1943,7 +2271,8 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
   }
   if (!r.first_chunk_sent) {
     r.first_chunk_sent = true;
-    r.writer->write_event(chat_chunk_first(r.id, r.created_unix, r.model));
+    r.writer->write_event(
+        chat_chunk_first(r.id, r.created_unix, r.model, r.choice));
   }
   for (const ParserEvent& ev : events) {
     std::string delta;
@@ -1964,10 +2293,11 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
       }
       case ParserEvent::Kind::kToolCall: {
         const int index = r.calls_announced++;
-        const std::string call_id = tool_call_id(r.tag, index);
+        const std::string call_id = tool_call_id(r.call_seed, index);
         r.writer->write_event(chat_chunk_delta(
             r.id, r.created_unix, r.model,
-            delta_tool_call_start(index, call_id, ev.call.name), lp_json));
+            delta_tool_call_start(index, call_id, ev.call.name), lp_json,
+            r.choice));
         lp_json.clear();
         std::string args = ev.call.arguments;
         sanitize_utf8(&args);  // a whole call's arguments: complete by construction
@@ -1977,8 +2307,8 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
       case ParserEvent::Kind::kReasoningClosed:
         continue;
     }
-    r.writer->write_event(
-        chat_chunk_delta(r.id, r.created_unix, r.model, delta, lp_json));
+    r.writer->write_event(chat_chunk_delta(r.id, r.created_unix, r.model,
+                                           delta, lp_json, r.choice));
     lp_json.clear();
   }
 }
@@ -1992,7 +2322,8 @@ void GenerationService::flush_stream_carries(StreamRecord& r) {
       const std::string rest = finish_utf8(carry);
       if (rest.empty()) continue;
       r.writer->write_event(chat_chunk_delta(r.id, r.created_unix, r.model,
-                                             delta_text(field, rest), ""));
+                                             delta_text(field, rest), "",
+                                             r.choice));
     }
     return;
   }
@@ -2048,6 +2379,7 @@ void GenerationService::pump_records() {
 
   for (auto& r : finished) {
     if (r->writer != nullptr && !r->writer_dead) {
+      ChoiceGroup& g = *r->group;
       if (r->reject_overloaded || r->shutting_down || r->engine_failed) {
         // A shed request, or one the stop interrupted (M6 6c): the
         // one-shot gets the 503 object; a stream that already began gets
@@ -2055,7 +2387,10 @@ void GenerationService::pump_records() {
         // see) — after the tokens it did produce, which were real. An
         // engine failure (the v1 failure semantics) takes the same two
         // shapes under the engine_failure code: the tokens a stream got
-        // were committed on every rank before the failure.
+        // were committed on every rank before the failure. A request's n
+        // choices share one answer: the first choice through here writes
+        // it (every choice's committed tokens first), the others find it
+        // ended.
         const bool failed = r->engine_failed;
         const bool shutdown = r->shutting_down || failed;
         std::string failure;
@@ -2079,13 +2414,20 @@ void GenerationService::pump_records() {
         const char* code = failed     ? "engine_failure"
                            : shutdown ? "server_shutdown"
                                       : "overloaded";
-        if (r->stream) {
+        if (g.ended) {
+          // A sibling choice already answered for the request.
+        } else if (r->stream) {
           if (shutdown && !r->reject_overloaded) {
-            if (r->chat)
-              flush_chat_stream(*r);
-            else
-              flush_legacy_stream(*r);
-            flush_stream_carries(*r);
+            for (auto& sib : finished) {
+              if (sib->group != r->group || sib->writer == nullptr ||
+                  sib->writer_dead)
+                continue;
+              if (sib->chat)
+                flush_chat_stream(*sib);
+              else
+                flush_legacy_stream(*sib);
+              flush_stream_carries(*sib);
+            }
           }
           // Headers were already sent in handle(); an SSE client can
           // only see an error event + [DONE] (OpenAI's stream-error
@@ -2099,13 +2441,17 @@ void GenerationService::pump_records() {
           r->writer->write_event("[DONE]");
           r->writer->end_stream();
           r->first_chunk_sent = true;
+          g.ended = true;
         } else {
           respond_error(*r->writer, 503, msg, "server_error", "", code);
+          g.ended = true;
         }
       } else if (r->stream) {
-        // Flush any straggler events, then the terminal sequence. The
-        // final chunk carries the logprobs entries no content chunk took
-        // (the EOS pick decodes to nothing, so its entry lands here).
+        // Flush any straggler events, then this choice's terminal chunk.
+        // The final chunk carries the logprobs entries no content chunk
+        // took (the EOS pick decodes to nothing, so its entry lands here).
+        // The stream ends — the usage chunk, [DONE] — once every choice
+        // of the request is done.
         if (r->chat)
           flush_chat_stream(*r);
         else
@@ -2122,23 +2468,27 @@ void GenerationService::pump_records() {
         const char* finish = finish_reason(r->reason, !r->calls.empty());
         r->writer->write_event(
             r->chat ? chat_chunk_final(r->id, r->created_unix, r->model,
-                                       finish, lp_json)
+                                       finish, lp_json, r->choice)
                     : text_chunk_final(r->id, r->created_unix, r->model,
                                        finish, lp_json));
-        if (r->include_usage) {
-          r->writer->write_event(chat_chunk_usage(r->id, r->created_unix,
-                                                  r->model, r->prompt_tokens,
-                                                  r->completion_tokens));
+        if (++g.finished == g.n && !g.ended) {
+          if (r->include_usage) {
+            r->writer->write_event(chat_chunk_usage(
+                r->id, r->created_unix, r->model, r->prompt_tokens,
+                g.completion_tokens, g.cached_tokens, g.reasoning_tokens));
+          }
+          r->writer->write_event("[DONE]");
+          r->writer->end_stream();
+          g.ended = true;
         }
-        r->writer->write_event("[DONE]");
-        r->writer->end_stream();
       } else {
-        // The one-shot completion object. Its texts are complete by
-        // construction except for a last character a cap cut in half:
-        // that one becomes U+FFFD (JSON text must be UTF-8).
+        // The one-shot completion object: this choice's JSON now, the
+        // answer once every choice of the request is in. Its texts are
+        // complete by construction except for a last character a cap cut
+        // in half: that one becomes U+FFFD (JSON text must be UTF-8).
         sanitize_utf8(&r->content);
         sanitize_utf8(&r->reasoning);
-        sanitize_utf8(&r->text);
+        sanitize_utf8(&r->out_text);
         for (ToolCall& call : r->calls) sanitize_utf8(&call.arguments);
         std::string lp_json;
         if (r->logprobs >= 0) {
@@ -2164,7 +2514,8 @@ void GenerationService::pump_records() {
             for (size_t i = 0; i < r->calls.size(); ++i) {
               if (i) msg.push_back(',');
               msg.append("{\"id\":");
-              append_json_string(&msg, tool_call_id(r->tag, static_cast<int>(i)));
+              append_json_string(
+                  &msg, tool_call_id(r->call_seed, static_cast<int>(i)));
               msg.append(",\"type\":\"function\",\"function\":{\"name\":");
               append_json_string(&msg, r->calls[i].name);
               msg.append(",\"arguments\":");
@@ -2174,17 +2525,30 @@ void GenerationService::pump_records() {
             msg.push_back(']');
           }
           msg.push_back('}');
-          r->writer->respond(
-              200, "application/json",
-              chat_completion_body(r->id, r->created_unix, r->model, msg,
-                                   finish, r->prompt_tokens,
-                                   r->completion_tokens, lp_json));
+          g.choices[static_cast<size_t>(r->choice)] =
+              chat_choice_json(r->choice, msg, finish, lp_json);
         } else {
+          g.choices[static_cast<size_t>(r->choice)] =
+              text_choice_json(r->choice, r->out_text, finish, lp_json);
+        }
+        if (++g.finished == g.n && !g.ended) {
+          std::string joined;
+          for (size_t i = 0; i < g.choices.size(); ++i) {
+            if (i) joined.push_back(',');
+            joined += g.choices[i];
+          }
           r->writer->respond(
               200, "application/json",
-              text_completion_body(r->id, r->created_unix, r->model, r->text,
-                                   finish, r->prompt_tokens,
-                                   r->completion_tokens, lp_json));
+              r->chat ? chat_completion_body(r->id, r->created_unix, r->model,
+                                             joined, r->prompt_tokens,
+                                             g.completion_tokens,
+                                             g.cached_tokens,
+                                             g.reasoning_tokens)
+                      : text_completion_body(r->id, r->created_unix, r->model,
+                                             joined, r->prompt_tokens,
+                                             g.completion_tokens,
+                                             g.cached_tokens));
+          g.ended = true;
         }
       }
     }
@@ -2207,10 +2571,12 @@ void GenerationService::pump_records() {
 bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
   std::vector<PendingAdmission> admissions;
   std::vector<PendingCancel> cancels;
+  std::vector<std::string> stops;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     admissions.swap(pending_admissions_);
     cancels.swap(pending_cancels_);
+    stops.swap(pending_stops_);
   }
   PassEvents events;
   for (auto& a : admissions) {
@@ -2249,6 +2615,12 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
     // cheaper than noise.
     if (sched_.cancel(c.scheduler_id) && pre_tick)
       events.cancels.push_back(c.scheduler_id);
+  }
+  // The stop-string retires (2026-09-06): like cancels — only the ones
+  // that hit ride the journal, every rank retires the request at this
+  // quantum with Reason::kStop.
+  for (const std::string& id : stops) {
+    if (sched_.stop(id) && pre_tick) events.stops.push_back(id);
   }
 
   // The fixed journal position: this record and the tick below are one

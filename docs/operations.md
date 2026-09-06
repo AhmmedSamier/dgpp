@@ -159,8 +159,10 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   LEN...` (the steady-state prefill at each length with the four-way ids
   md5), `scripts/fabric_mtp_classes.sh OUT CLASS...` (MTP acceptance per
   prompt class), `scripts/serve_prefix_curve_sweep.sh OUT "GIB..." "C..."`
-  (the prefix cache's capacity curve, one boot per point), and
-  `scripts/serve_failure_drill.sh VICTIM` (the kill −9 drill).
+  (the prefix cache's capacity curve, one boot per point),
+  `scripts/serve_failure_drill.sh VICTIM` (the kill −9 drill), and
+  `scripts/serve_api_check.py HOST PORT` (the request fields — `stop`,
+  `n`, `logit_bias`, the usage details — against a running world).
 
 ## Ports and processes
 

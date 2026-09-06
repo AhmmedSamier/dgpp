@@ -89,6 +89,14 @@
 
 namespace dgpp::glm {
 
+// One logit_bias entry (OpenAI's logit_bias, 2026-09-06): the token's id
+// and the bias added to its logit before the pick, on every rank
+// identically (it rides the journal with the request).
+struct LogitBias {
+  int32_t token = 0;
+  float bias = 0.0f;
+};
+
 // The engine seam the scheduler drives. The real binding (glm_gen_check)
 // closes over GlmDiagnosticModel + the pick; the host gate binds a
 // recording fake. The pick rides inside each op (at TP>1 it is a
@@ -187,6 +195,18 @@ class SchedulerEngine {
     if (grammar.active())
       throw std::logic_error(
           "SchedulerEngine: this engine cannot constrain the pick");
+  }
+  // The logit bias (2026-09-06): an engine that can add a per-request
+  // bias to the logits before the pick advertises it; the scheduler hands
+  // every admitted request's entries to its slot right after the grammar
+  // (an empty list clears the slot's bias). The default engine has none.
+  virtual bool supports_logit_bias() const { return false; }
+  virtual void configure_logit_bias(int req,
+                                    const std::vector<LogitBias>& bias) {
+    (void)req;
+    if (!bias.empty())
+      throw std::logic_error(
+          "SchedulerEngine: this engine cannot bias the pick (logit_bias)");
   }
 
   // ---- prefix cache (M7 stage B, DESIGN §8) ----------------------------------
@@ -296,6 +316,9 @@ struct SchedulerRequest {
   // the request out: no attach, no snapshot. Both ride the journal.
   std::vector<int64_t> boundaries;
   bool no_cache = false;
+  // The logit bias (2026-09-06): the request's entries, applied by the
+  // engine on every rank; rides the journal.
+  std::vector<LogitBias> logit_bias;
 };
 
 // The bounded admission queue at capacity (submit() only). A load-shed
@@ -339,7 +362,9 @@ class Scheduler {
  public:
   struct Result {
     enum class Status : int { kQueued, kActive, kDone, kCancelled };
-    enum class Reason : int { kNone, kEos, kSteps, kCancelled, kPoolExhausted };
+    // kStop (2026-09-06): the service's stop string matched — a natural end
+    // for the client (finish_reason "stop"), journaled like a cancel.
+    enum class Reason : int { kNone, kEos, kSteps, kCancelled, kPoolExhausted, kStop };
     Status status = Status::kQueued;
     Reason reason = Reason::kNone;
     int slot = -1;          // engine slot used; -1 while queued
@@ -425,6 +450,12 @@ class Scheduler {
   // client disconnect). Returns false when the id is unknown or already
   // terminal — a late cancel is a no-op, never an error.
   bool cancel(const std::string& id);
+  // The service's stop (2026-09-06): the client's stop string matched on
+  // rank 0 — journaled like a cancel, applied at the next tick's sweep on
+  // every rank, retiring the request as Done with Reason::kStop (the
+  // service cuts the text at the match; the tokens after it are dropped).
+  // A cancel that arrives with it wins.
+  bool stop(const std::string& id);
 
   // One policy quantum: the cancel sweep, at most one admission, then one
   // engine pass over up to decode_batch_capacity() active requests. Returns
@@ -464,6 +495,7 @@ class Scheduler {
     std::vector<int64_t> generated;
     bool cancel_requested = false;  // external cancel, applied at the
                                     // next tick's sweep
+    bool stop_requested = false;    // the stop-string retire (Reason::kStop)
     int64_t reserved_tokens = 0;    // the slot's current reservation
     // The prefix cache (M7): the prompt's cuts and their prefix hashes
     // (computed once at submit), the entry the request attached to (its

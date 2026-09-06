@@ -195,6 +195,7 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
   scfg.fixed_seed = k.fixed_seed;
   scfg.reasoning_in_content = k.reasoning_in_content;
   scfg.admission = k.admission;
+  scfg.vocab_size = cfg.vocab_size;  // logit_bias's id bound (2026-09-06)
   {
     // The prefix cache's key (M7): what the entries are bound to.
     char key[96];

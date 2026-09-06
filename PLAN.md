@@ -669,9 +669,11 @@ Deliverables as written, with their state:
    `POST /v1/completions` (string prompt), `GET /v1/models`, `GET /health`,
    `GET /v1/metrics`; single-threaded epoll server with the limit ladder
    (431/413/503/501/411/400); the refusal ladder for unimplemented fields
-   (stop, n, logit_bias, … — logprobs, penalties and seed left it with
-   6b, tools and reasoning_effort with 6f, response_format with 6h) as
-   OpenAI error objects naming the param. Gates: `http_server_test`,
+   (user, store, metadata, … — logprobs, penalties and seed left it with
+   6b, tools and reasoning_effort with 6f, response_format with 6h, and
+   stop, n and logit_bias with the request-field slice of 2026-09-06,
+   DESIGN §10, which also added the usage's cached_tokens and
+   reasoning_tokens) as OpenAI error objects naming the param. Gates: `http_server_test`,
    `glm_serve_test`, `glm_fabric_serve_test`.
 5. Resident serving mode. BUILT (M5, then rounds 9–10): one-pass sources,
    eager construction, sources released after the last layer, the per-rank
@@ -998,7 +1000,8 @@ rather than advertise a mode it cannot run. `glm_serve --temperature
 --top-p --top-k --min-p --repetition-penalty --seed` override the file;
 `glm_gen_check` keeps its exact greedy loop by default (its transcripts are
 the regression instrument) and samples under `--sample` or any override,
-eager engines only. `logprobs`/`logit_bias` stay refused.
+eager engines only. `logprobs` followed the same day; `logit_bias` on
+2026-09-06 (a per-slot dense row on the device and the host).
 
 The DEVICE path landed for the plain (T=1) graphs the same day (DESIGN
 §10 "the device path"): `common/det_math.hpp` makes exp/log bitwise

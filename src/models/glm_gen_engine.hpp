@@ -47,11 +47,13 @@ namespace dgpp {
 class GenEngineAdapter : public glm::SchedulerEngine {
  public:
   using Pick = std::function<int32_t(const GlmDiagnosticModel::Outputs&)>;
-  // `mask` is null when the position is unconstrained.
+  // `mask` is null when the position is unconstrained; `bias` (2026-09-06)
+  // is the request's dense logit_bias row over [0, this rank's slice end),
+  // null when the request has none.
   using Sample = std::function<glm_sample::Result(
       const GlmDiagnosticModel::Outputs&, const glm_sample::Params&,
       glm_sample::Rng&, const std::vector<int32_t>& context,
-      const glm::TokenMask* mask)>;
+      const glm::TokenMask* mask, const float* bias)>;
 
   // `prefix_slots` (M7): snapshot slots of the prefix cache's arena this
   // engine holds (0: no cache; the scheduler then never calls the prefix
@@ -202,6 +204,30 @@ class GenEngineAdapter : public glm::SchedulerEngine {
     pending = next;
     return {next};
   }
+  // The logit bias (OpenAI's logit_bias, 2026-09-06): a dense row per slot
+  // over [0, this rank's slice end) — the sampler closure adds it after the
+  // penalties; a biased slot decides through the closure whatever its
+  // temperature (the biased argmax at 0). An id past this rank's slice is
+  // another rank's to apply.
+  bool supports_logit_bias() const override { return sample_ != nullptr; }
+  void configure_logit_bias(int req,
+                            const std::vector<glm::LogitBias>& bias) override {
+    SlotState& s = state_.at(static_cast<size_t>(req));
+    s.bias.clear();
+    if (bias.empty()) return;
+    if (!sample_)
+      throw std::logic_error(
+          "gen engine: no sampler — this engine cannot bias the pick");
+    const size_t cover = static_cast<size_t>(model_->lm_vocab_begin()) +
+                         static_cast<size_t>(model_->lm_vocab_count());
+    s.bias.assign(cover, 0.0f);
+    for (const glm::LogitBias& b : bias) {
+      if (b.token < 0)
+        throw std::invalid_argument("gen engine: logit_bias token below 0");
+      if (static_cast<size_t>(b.token) < cover)
+        s.bias[static_cast<size_t>(b.token)] = b.bias;
+    }
+  }
   void close(int req) override {
     pending_.at(static_cast<size_t>(req)) = -1;
     // A reopened slot is greedy until the scheduler arms it again.
@@ -224,6 +250,7 @@ class GenEngineAdapter : public glm::SchedulerEngine {
     bool report_logprobs = false;
     std::unique_ptr<glm::GrammarState> grammar;  // constrained decoding
     glm::TokenMask mask;                          // the next position's
+    std::vector<float> bias;  // the logit_bias row (empty: none)
   };
 
   // The prefill's slot-side work around the model call that produces the
@@ -263,13 +290,14 @@ class GenEngineAdapter : public glm::SchedulerEngine {
       s.grammar->mask(&s.mask);
       if (s.mask.constrained()) mask = &s.mask;
     }
+    const float* bias = s.bias.empty() ? nullptr : s.bias.data();
     int32_t token = -1;
     if (s.params.temperature <= 0.0f && !s.report_logprobs && !penalized &&
-        mask == nullptr) {
+        mask == nullptr && bias == nullptr) {
       token = pick_(out);
     } else {
       const glm_sample::Result r =
-          sample_(out, s.params, s.rng, s.context, mask);
+          sample_(out, s.params, s.rng, s.context, mask, bias);
       if (s.report_logprobs) s.logprobs.push_back(r);
       token = r.token;
     }
@@ -311,7 +339,8 @@ inline GenEngineAdapter::Sample make_w1_sample(int64_t vocab) {
   return [vocab, layout](const GlmDiagnosticModel::Outputs& out,
                          const glm_sample::Params& p, glm_sample::Rng& rng,
                          const std::vector<int32_t>& context,
-                         const glm::TokenMask* mask) -> glm_sample::Result {
+                         const glm::TokenMask* mask,
+                         const float* bias) -> glm_sample::Result {
     if (out.lm_vocab_begin != 0 || out.lm_vocab_count != vocab)
       throw std::runtime_error("w1 sample: the head is not the full vocab");
     const uint32_t* words =
@@ -322,6 +351,7 @@ inline GenEngineAdapter::Sample make_w1_sample(int64_t vocab) {
       std::vector<float> v(out.logits.begin(), out.logits.begin() + vocab);
       glm_sample::apply_penalties(v.data(), static_cast<int>(vocab), 0, p,
                                   glm_sample::count_context(context));
+      glm_sample::apply_bias(v.data(), static_cast<int>(vocab), 0, bias);
       glm_sample::apply_mask(v.data(), static_cast<int>(vocab), 0, words,
                              static_cast<int>(vocab));
       const double lse =
@@ -333,7 +363,7 @@ inline GenEngineAdapter::Sample make_w1_sample(int64_t vocab) {
     }
     glm_sample::Result r = glm_sample::sample_full_logits(
         out.logits.data(), static_cast<int>(vocab), layout, p, rng, context,
-        words);
+        words, bias);
     if (r.token < 0 || r.token >= vocab)
       throw std::runtime_error("w1 sample out of range: " +
                                std::to_string(r.token));
