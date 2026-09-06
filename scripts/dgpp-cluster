@@ -29,6 +29,7 @@ waits up to 240 s (a stop that lands mid-prefill is honored at the pass
 boundary), sweeps stragglers, fetches every rank's op stream and log into
 the log dir and prints the op streams' md5s — the four must be identical.
 Files in the log dir: r0.pid, serve_r<rank>.log, serve_rank<rank>.ops.
+Every line the launcher prints is timestamped in the ranks' log format.
 
 `install` takes the tarball scripts/release.sh packs: on every node it is
 copied to paths.release_dir, unpacked to <release_dir>/dgpp-<version>/ and
@@ -40,6 +41,8 @@ the previous version. Without a release the development binary
 build-ci/dgpp-serve is staged as before. `--bin` overrides both.
 """
 import argparse
+import datetime
+import shlex
 import hashlib
 import json
 import os
@@ -51,6 +54,14 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+
+
+def say(msg=""):
+    """Every line the launcher prints carries the server's timestamp format
+    (UTC, millisecond resolution), so a launcher line and a rank's log line
+    read side by side (2026-09-06)."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    print(f"{now.strftime('%Y-%m-%d %H:%M:%S')}.{now.microsecond // 1000:03d} {msg}", flush=True)
 
 
 def expand(p):
@@ -151,13 +162,13 @@ class Cluster:
             try:
                 with open(path, errors="replace") as f:
                     if needle in f.read():
-                        print(f"{label}: ok ({waited}s)")
+                        say(f"{label}: ok ({waited}s)")
                         return True
             except OSError:
                 pass
             time.sleep(2)
             waited += 2
-        print(f"TIMEOUT waiting for {label} ({timeout_s}s)")
+        say(f"TIMEOUT waiting for {label} ({timeout_s}s)")
         return False
 
     def tail(self, path, n):
@@ -179,26 +190,26 @@ class Cluster:
     # ---- up ----------------------------------------------------------------
     def stage(self):
         what = "the config" if self.installed else "dgpp-serve and the config"
-        print(f"=== staging {what} to the peers" + (f" (release {self.release}: {self.bin})" if self.installed else ""))
+        say(f"=== staging {what} to the peers" + (f" (release {self.release}: {self.bin})" if self.installed else ""))
         for rank, host in self.peers:
             # The stage dir may live in /tmp (a reboot empties it); a previous
             # run's op stream must never be hashed as this run's evidence.
             if not self.ssh(host, f"mkdir -p {self.stage_dir} && rm -f {self.stage_dir}/serve_rank*.ops"):
-                print(f"STAGE FAILED to {host} (ssh)")
+                say(f"STAGE FAILED to {host} (ssh)")
                 return False
             if not self.installed and not self.scp_to(host, self.bin, f"{self.stage_dir}/dgpp-serve"):
-                print(f"STAGE FAILED to {host}")
+                say(f"STAGE FAILED to {host}")
                 return False
             if self.installed and not self.ssh(host, f"test -x {self.peer_bin}"):
-                print(f"STAGE FAILED: {host} has no {self.peer_bin} (run `dgpp-cluster install` there)")
+                say(f"STAGE FAILED: {host} has no {self.peer_bin} (run `dgpp-cluster install` there)")
                 return False
             if not self.scp_to(host, self.config_path, f"{self.stage_dir}/cluster.json"):
-                print(f"STAGE FAILED to {host}")
+                say(f"STAGE FAILED to {host}")
                 return False
         return True
 
     def boot_head(self):
-        print(f"=== rank 0 on {self.nodes[0]} (HTTP :{self.http}, fabric :{self.fabric}, journal :{self.journal})")
+        say(f"=== rank 0 on {self.nodes[0]} (HTTP :{self.http}, fabric :{self.fabric}, journal :{self.journal})")
         ops = os.path.join(self.log_dir, "serve_rank0.ops")
         if os.path.exists(ops):
             os.remove(ops)  # rank 0 writes its op stream to its cwd at exit; never hash a stale one
@@ -210,12 +221,20 @@ class Cluster:
                                 stdin=subprocess.DEVNULL, start_new_session=True)
         with open(self.pid_file, "w") as f:
             f.write(str(proc.pid))
-        print(f"head pid {proc.pid}")
+        say(f"head pid {proc.pid}")
         return proc
 
     def spawn_peer(self, rank, host):
         knobs = " ".join(self.knobs)
-        cmd = (f"cd {self.stage_dir} && DGPP_LOG_LEVEL=${{DGPP_LOG_LEVEL:-info}} nohup {self.peer_bin} "
+        # The head's log level travels with the command (a remote-side
+        # ${DGPP_LOG_LEVEL} expanded on the peer's own environment, which
+        # never has it; 2026-09-06).
+        level = shlex.quote(os.environ.get("DGPP_LOG_LEVEL", "info"))
+        # Every DGPP_* knob in the head's environment reaches the peers
+        # (the engine knobs — prefetch, bus timeline, mlock — are per rank).
+        extra = "".join(f" {k}={shlex.quote(v)}" for k, v in sorted(os.environ.items())
+                        if k.startswith("DGPP_") and k not in ("DGPP_LOG_LEVEL", "DGPP_CLUSTER_CONFIG"))
+        cmd = (f"cd {self.stage_dir} && DGPP_LOG_LEVEL={level}{extra} nohup {self.peer_bin} "
                f"--config {self.stage_dir}/cluster.json --rank {rank} {knobs} > serve_r{rank}.log 2>&1 &")
         subprocess.run(["timeout", "25", "ssh", *SSH_OPTS, self.target(host), cmd], capture_output=True)
 
@@ -234,7 +253,7 @@ class Cluster:
             self.sweep_peers()
             return 1
         if self.peers:
-            print("=== peers " + " ".join(h for _, h in self.peers))
+            say("=== peers " + " ".join(h for _, h in self.peers))
             threads = [threading.Thread(target=self.spawn_peer, args=(rank, host)) for rank, host in self.peers]
             for t in threads:
                 t.start()
@@ -242,7 +261,7 @@ class Cluster:
                 t.join()
             for rank, host in self.peers:
                 if not self.ssh(host, "pgrep -x dgpp-serve"):
-                    print(f"WARN: peer rank {rank} not observed on {host}")
+                    say(f"WARN: peer rank {rank} not observed on {host}")
         if not self.wait_log(r0, f"listening on :{self.http}", 600, "rank 0 serving"):
             self.tail(r0, 10)
             self.sweep_peers()
@@ -250,39 +269,39 @@ class Cluster:
             if self.alive(pid):
                 os.kill(pid, signal.SIGKILL)
             return 1
-        print(f"READY — curl http://{self.nodes[0]}:{self.http}/v1/models  (stop: dgpp-cluster down)")
+        say(f"READY — curl http://{self.nodes[0]}:{self.http}/v1/models  (stop: dgpp-cluster down)")
         return 0
 
     # ---- down --------------------------------------------------------------
     def down(self):
         pid = self.head_pid()
         if self.alive(pid):
-            print(f"=== SIGINT rank 0 ({pid}) — the stop record releases the peers")
+            say(f"=== SIGINT rank 0 ({pid}) — the stop record releases the peers")
             os.kill(pid, signal.SIGINT)
             for _ in range(240):
                 if not self.alive(pid):
                     break
                 time.sleep(1)
             if self.alive(pid):
-                print("rank 0 wedged; SIGKILL")
+                say("rank 0 wedged; SIGKILL")
                 os.kill(pid, signal.SIGKILL)
         if self.peers:
-            print("=== waiting for the peers to drain")
+            say("=== waiting for the peers to drain")
             for _ in range(30):
                 if self.peers_gone():
                     break
                 time.sleep(2)
             if not self.peers_gone():
-                print("sweeping wedged peers")
+                say("sweeping wedged peers")
                 self.sweep_peers()
         # The §11 evidence: every rank's op stream, and its log for the record.
         for rank, host in self.peers:
             if not self.scp_from(host, f"{self.stage_dir}/serve_rank{rank}.ops",
                                  os.path.join(self.log_dir, f"serve_rank{rank}.ops")):
-                print(f"WARN: no serve_rank{rank}.ops on {host}")
+                say(f"WARN: no serve_rank{rank}.ops on {host}")
             self.scp_from(host, f"{self.stage_dir}/serve_r{rank}.log",
                           os.path.join(self.log_dir, f"serve_r{rank}.log"))
-        print("=== op-stream identity (every rank)")
+        say("=== op-stream identity (every rank)")
         digests = {}
         for rank in range(len(self.nodes)):
             path = os.path.join(self.log_dir, f"serve_rank{rank}.ops")
@@ -290,15 +309,15 @@ class Cluster:
                 with open(path, "rb") as f:
                     d = hashlib.md5(f.read()).hexdigest()
             except OSError:
-                print(f"WARN: no {path}")
+                say(f"WARN: no {path}")
                 continue
             digests[rank] = d
-            print(f"{d}  {path}")
+            say(f"{d}  {path}")
         if len(digests) == len(self.nodes) and len(set(digests.values())) == 1:
-            print(f"op streams: identical across {len(digests)} ranks")
+            say(f"op streams: identical across {len(digests)} ranks")
         elif digests:
-            print("op streams: DIFFER or missing — the §11 ritual FAILED")
-        print(f"=== logs in {self.log_dir}")
+            say("op streams: DIFFER or missing — the §11 ritual FAILED")
+        say(f"=== logs in {self.log_dir}")
         return 0
 
     # ---- install / releases ---------------------------------------------------
@@ -306,7 +325,7 @@ class Cluster:
         tarball = os.path.abspath(tarball)
         name = os.path.basename(tarball)
         if not name.startswith("dgpp-") or not name.endswith(".tar.zst"):
-            print(f"not a release tarball: {name}")
+            say(f"not a release tarball: {name}")
             return 2
         release = name[: -len(".tar.zst")]
         rd = self.release_dir
@@ -323,29 +342,29 @@ class Cluster:
                 r = subprocess.run(["bash", "-c", steps.replace(rd, expand(rd))], capture_output=True, text=True)
             else:
                 if not self.scp_to(host, tarball, f"{rd}/{name}") and not (self.ssh(host, f"mkdir -p {rd}") and self.scp_to(host, tarball, f"{rd}/{name}")):
-                    print(f"rank {rank} ({host}): copy FAILED")
+                    say(f"rank {rank} ({host}): copy FAILED")
                     rc = 1
                     continue
                 r = subprocess.run(["timeout", "120", "ssh", *SSH_OPTS, self.target(host), steps],
                                    capture_output=True, text=True)
             ok = r.returncode == 0 and "installed" in r.stdout
-            print(f"rank {rank} ({host}): " + (r.stdout.strip() if ok else f"FAILED: {(r.stderr or r.stdout).strip()[:200]}"))
+            say(f"rank {rank} ({host}): " + (r.stdout.strip() if ok else f"FAILED: {(r.stderr or r.stdout).strip()[:200]}"))
             rc = rc or (0 if ok else 1)
         if rc == 0:
-            print(f'to run it: set "release": "{release[len("dgpp-"):]}" in the config, or `up --release {release[len("dgpp-"):]}`')
+            say(f'to run it: set "release": "{release[len("dgpp-"):]}" in the config, or `up --release {release[len("dgpp-"):]}`')
         return rc
 
     def releases(self):
         rd = self.release_dir
         cmd = f"cd {rd} 2>/dev/null && ls -d dgpp-* 2>/dev/null | tr '\\n' ' '"
-        print(f"configured release: {self.release or '(none: the development binary)'}")
+        say(f"configured release: {self.release or '(none: the development binary)'}")
         for rank, host in enumerate(self.nodes):
             if rank == 0:
                 r = subprocess.run(["bash", "-c", cmd.replace(rd, expand(rd))], capture_output=True, text=True)
                 out = r.stdout
             else:
                 out = self.ssh_out(host, cmd)
-            print(f"rank {rank} ({host}): installed=[{out.strip()}]")
+            say(f"rank {rank} ({host}): installed=[{out.strip()}]")
         return 0
 
     # ---- status ------------------------------------------------------------
@@ -355,11 +374,11 @@ class Cluster:
             ver = subprocess.run([self.bin, "--version"], capture_output=True, text=True, timeout=20).stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             ver = "?"
-        print(f"binary: {self.bin} — {ver}")
-        print(f"rank 0 ({self.nodes[0]}): " + (f"alive ({pid})" if self.alive(pid) else "DOWN"))
+        say(f"binary: {self.bin} — {ver}")
+        say(f"rank 0 ({self.nodes[0]}): " + (f"alive ({pid})" if self.alive(pid) else "DOWN"))
         self.tail(os.path.join(self.log_dir, "serve_r0.log"), 2)
         for rank, host in self.peers:
-            print(f"rank {rank} ({host}): {self.ssh_out(host, 'pgrep -x dgpp-serve | wc -l') or '?'} process(es)")
+            say(f"rank {rank} ({host}): {self.ssh_out(host, 'pgrep -x dgpp-serve | wc -l') or '?'} process(es)")
         return 0
 
 

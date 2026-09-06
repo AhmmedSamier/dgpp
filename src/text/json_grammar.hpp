@@ -99,8 +99,15 @@ struct JsonSchema {
 
 // Compiles OpenAI's structured-output subset. Throws std::invalid_argument
 // whose message starts with the offending keyword path (e.g.
-// "schema.properties.city.pattern") followed by the reason.
-JsonSchema compile_json_schema(const minijson::Value& schema);
+// "schema.properties.city.pattern") followed by the reason. With
+// `unenforced` given (a tool argument's schema, 2026-09-06), the keywords
+// that only NARROW a typed value — minimum/maximum, minLength/maxLength,
+// pattern, format, multipleOf, ... — compile instead of refusing: the value
+// keeps its type, the narrowing is not applied, and each such keyword's
+// path is appended to `unenforced`. Keywords that change a value's shape
+// ($ref, oneOf, allOf, patternProperties, ...) refuse either way.
+JsonSchema compile_json_schema(const minijson::Value& schema,
+                               std::vector<std::string>* unenforced = nullptr);
 // JSON mode: a root object holding anything.
 JsonSchema json_object_schema();
 // The JSON text of a minijson value in json.dumps form (the enum targets).

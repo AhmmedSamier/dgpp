@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -12,10 +13,6 @@
 namespace dgpp {
 
 namespace {
-
-// Fixed fused-select grid (grid-invariant selection; partial_ws is sized
-// for exactly this many blocks).
-constexpr int kSelectGridBlocks = 16;
 
 // Dot-GEMM n granularity, in pools: plans are keyed per multiple of 256
 // pools instead of per exact pool count, bounding the plan cache over
@@ -133,10 +130,8 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
   L.off_dot = alloc(size_t(tile_cap) * size_t(heads) * size_t(max_pools) * 4);
   L.off_gather_k = alloc(size_t(max_pools) * size_t(dim));
   L.off_gather_scale = alloc(size_t(max_pools) * 4);
-  L.off_partial =
-      alloc(size_t(kSelectGridBlocks) * size_t(max_decode_rows) *
-            size_t(g.select_k) * 8);
-  L.off_counter = alloc(4);
+  L.off_select_ws = alloc(dsa_select_workspace_bytes(max_decode_rows, max_pools));
+  L.off_counter = alloc(8);  // int32 [2]: the select ticket and rows-done
   L.total = align256(off);
   L.max_pools = max_pools;
   L.tile_cap = tile_cap;
@@ -160,6 +155,10 @@ DsaLayer::DsaLayer(IGemm& gemm, const DsaLayerWeights& w, const DsaConfig& cfg,
       max_cache_tokens_(max_cache_tokens),
       max_decode_rows_(max_decode_rows),
       decode_n_split_(decode_n_split),
+      decode_mma_([] {
+        const char* e = std::getenv("DGPP_DSA_DECODE_MMA");
+        return !(e != nullptr && std::string(e) == "off");
+      }()),
       gemm_ws_(gemm_workspace),
       gemm_ws_bytes_(gemm_ws_bytes) {
   const ScratchLayout L =
@@ -230,7 +229,8 @@ DsaLayer::DsaLayer(IGemm& gemm, const DsaLayerWeights& w, const DsaConfig& cfg,
   dot_ = reinterpret_cast<float*>(at(L.off_dot));
   gather_k_ = at(L.off_gather_k);
   gather_scale_ = reinterpret_cast<float*>(at(L.off_gather_scale));
-  partial_ws_ = reinterpret_cast<uint64_t*>(at(L.off_partial));
+  select_ws_ = at(L.off_select_ws);
+  select_ws_pools_ = L.max_pools;
   counter_ws_ = reinterpret_cast<int32_t*>(at(L.off_counter));
 }
 
@@ -345,7 +345,7 @@ void DsaLayer::attend_tile(DsaStatePool& state, int layer,
                      counts_ + a0, arows, n_split, geo_.local_heads,
                      cfg_.kv_lora_rank, cfg_.block_tokens, state.block_tables(),
                      int(state.total_blocks()), attn_scale_, m_ws_, l_ws_,
-                     c_ws_, stream);
+                     c_ws_, stream, cfg_.latent_format, state.latent_scale(layer));
     dsa_attn_combine(m_ws_, l_ws_, c_ws_, arows, n_split, geo_.local_heads,
                      cfg_.kv_lora_rank, c_, stream);
     dsa_vout_gemm(c_, w_.kv_b, attn_out_ + a0 * geo_.local_v_rows, arows,
@@ -356,7 +356,7 @@ void DsaLayer::attend_tile(DsaStatePool& state, int layer,
 
 void DsaLayer::attend_dense(DsaStatePool& state, int layer,
                             const int32_t* req_ids, int64_t row0, int rows,
-                            bool listed, cudaStream_t stream) {
+                            bool listed, cudaStream_t stream, int n_split) {
   for (int64_t a0 = row0; a0 < row0 + rows; a0 += kDensePrefillRows) {
     const int arows =
         int(std::min<int64_t>(kDensePrefillRows, row0 + rows - a0));
@@ -366,24 +366,26 @@ void DsaLayer::attend_dense(DsaStatePool& state, int layer,
     const bool launched =
         listed ? dsa_attn_listed(q_tilde_, state.latent(layer), req_ids + a0,
                                  topk_ + a0 * geo_.max_selected, geo_.max_selected,
-                                 counts_ + a0, arows, kDensePrefillSplit,
+                                 counts_ + a0, arows, n_split,
                                  geo_.local_heads, cfg_.kv_lora_rank,
                                  cfg_.block_tokens, state.block_tables(),
                                  int(state.total_blocks()), attn_scale_, m_ws_,
-                                 l_ws_, c_ws_, stream)
+                                 l_ws_, c_ws_, stream, cfg_.latent_format,
+                                 state.latent_scale(layer))
                : dsa_attn_dense(q_tilde_, state.latent(layer), req_ids + a0,
-                                pos_dev_ + a0, arows, kDensePrefillSplit,
+                                pos_dev_ + a0, arows, n_split,
                                 geo_.local_heads, cfg_.kv_lora_rank,
                                 cfg_.block_tokens, state.block_tables(),
                                 int(state.total_blocks()), attn_scale_, m_ws_,
-                                l_ws_, c_ws_, stream);
+                                l_ws_, c_ws_, stream, cfg_.latent_format,
+                                state.latent_scale(layer));
     if (!launched) {
       // Geometry outside the dense kernel's: the split kernel over the
       // selection (dense by construction here).
       attend_tile(state, layer, req_ids, a0, arows, 8, stream);
       continue;
     }
-    dsa_attn_combine(m_ws_, l_ws_, c_ws_, arows, kDensePrefillSplit,
+    dsa_attn_combine(m_ws_, l_ws_, c_ws_, arows, n_split,
                      geo_.local_heads, cfg_.kv_lora_rank, c_, stream);
     dsa_vout_gemm(c_, w_.kv_b, attn_out_ + a0 * geo_.local_v_rows, arows,
                   geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
@@ -439,10 +441,11 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
                                req_ids_host_.size() * sizeof(int32_t),
                                cudaMemcpyHostToDevice, stream));
 
-  // Latent cache append.
+  // Latent cache append (quantized on the way in for an fp8/fp4 cache).
   dsa_latent_append(kv_c_, req_ids_dev_, pos_dev_, tokens, state.block_tables(),
                     blocks_per_req, cfg_.block_tokens, state.latent(layer),
-                    cfg_.kv_lora_rank, stream);
+                    cfg_.kv_lora_rank, stream, cfg_.latent_format,
+                    state.latent_scale(layer));
 
   // Complete pools fully inside this chunk -> compressed index cache.
   const int64_t pool_lo = token_start / kpool;
@@ -566,7 +569,8 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   // batch's attention — causal self-include, reference semantics).
   dsa_latent_append(kv_c_, req_ids, pos, tokens, state.block_tables(),
                     int(state.total_blocks()), cfg_.block_tokens,
-                    state.latent(layer), cfg_.kv_lora_rank, stream);
+                    state.latent(layer), cfg_.kv_lora_rank, stream,
+                    cfg_.latent_format, state.latent_scale(layer));
   // Ring update + pool compression for any pool completed by this batch.
   dsa_kpool_decode_update(
       k_rows_, dim, gate_rows_, dim, w_.ape, req_ids, pos, req_spans,
@@ -578,10 +582,16 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                     state.block_tables(), int(state.total_blocks()),
                     state.index_k(layer), state.index_scale(layer),
                     geo_.pools_per_block, heads, dim, geo_.select_k, kpool,
-                    geo_.max_selected, topk_, counts_, partial_ws_,
-                    counter_ws_, kSelectGridBlocks, stream);
-  // Absorbed attention + v-absorb + output projection.
-  attend_tile(state, layer, req_ids, 0, tokens, decode_n_split_, stream);
+                    geo_.max_selected, topk_, counts_, select_ws_,
+                    select_ws_pools_, counter_ws_, /*grid_blocks=*/0, stream);
+  // Absorbed attention + v-absorb + output projection: the tensor-core
+  // listed kernel when the geometry is its (16-head slabs), else the
+  // register split kernel.
+  if (decode_mma_ && geo_.local_heads >= 16 && geo_.local_heads % 16 == 0)
+    attend_dense(state, layer, req_ids, 0, tokens, /*listed=*/true, stream,
+                 std::min(decode_mma_split_, std::max(decode_n_split_, 8)));
+  else
+    attend_tile(state, layer, req_ids, 0, tokens, decode_n_split_, stream);
   gemm_.matmul(attn_out_, w_.o_proj, out, tokens, cfg_.hidden,
                geo_.local_v_rows, DType::BF16, GemmOut::BF16,
                size_t(geo_.local_v_rows), gemm_ws_, gemm_ws_bytes_, stream);
@@ -612,7 +622,8 @@ void DsaLayer::validate_pool(const DsaStatePool& state, int layer) const {
                     c.index_kpool == cfg_.index_kpool &&
                     c.block_tokens == cfg_.block_tokens &&
                     c.tp_size == cfg_.tp_size &&
-                    c.num_dsa_layers == cfg_.num_dsa_layers;
+                    c.num_dsa_layers == cfg_.num_dsa_layers &&
+                    c.latent_format == cfg_.latent_format;
   if (!same)
     throw std::invalid_argument(
         "dsa layer: state pool was built for a different configuration");

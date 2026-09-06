@@ -459,9 +459,26 @@ DGPP_TEST(tool_grammar_typedValuesFollowTheSchema) {
   k.advance(kValueOpen);
   k.advance('x');
   require(!k.active(), "a non-integer byte kills the grammar");
-  // A JSON-typed argument's schema outside the subset refuses at construction.
+  // A JSON-typed argument's schema tolerates a keyword that only narrows
+  // the value (2026-09-06: the value stays typed — a letter still kills the
+  // grammar) and refuses one outside the subset in shape at construction.
+  GrammarSpec lax = spec;
+  lax.tools[0].args[1].schema = "{\"type\":\"integer\",\"minimum\":0}";
+  {
+    GrammarState l(&v, lax, false);
+    l.advance(kToolOpen);
+    for (const char c : std::string("get_weather")) l.advance(static_cast<unsigned char>(c));
+    l.advance(kKeyOpen);
+    for (const char c : std::string("days")) l.advance(static_cast<unsigned char>(c));
+    l.advance(kKeyClose);
+    l.advance(kValueOpen);
+    require(l.allows('7') && !l.allows('x'),
+            "a tolerated minimum: the value is still an integer");
+    l.advance('x');
+    require(!l.active(), "a non-integer byte kills the grammar under a tolerated keyword");
+  }
   GrammarSpec bad = spec;
-  bad.tools[0].args[1].schema = "{\"type\":\"integer\",\"minimum\":0}";
+  bad.tools[0].args[1].schema = "{\"type\":\"integer\",\"$ref\":\"#/x\"}";
   bool threw = false;
   try {
     GrammarState b(&v, bad, false);

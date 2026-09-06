@@ -507,14 +507,15 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
               "opts": {"type": "object", "properties": {"a": {"type": "boolean"}}},
               "n": {"type": ["integer", "null"]}},
             "required": ["city"], "additionalProperties": false}})");
-    std::vector<std::string> warnings;
-    const dgpp::text::GrammarTool t = dgpp::text::grammar_tool_from_function(fn.root, &warnings);
+    std::vector<std::string> warnings, notes;
+    const dgpp::text::GrammarTool t =
+        dgpp::text::grammar_tool_from_function(fn.root, &warnings, &notes);
     using Kind = dgpp::text::GrammarArg::Kind;
     require(t.constrain_keys && t.keys.size() == 7 && t.args.size() == 7, "keys and args");
     require(t.args[0].kind == Kind::kFree, "a plain string is free");
-    require(t.args[1].kind == Kind::kFree && warnings.size() == 1 &&
-                warnings[0].find("minimum") != std::string::npos,
-            "an integer with an unsupported keyword stays free, with a warning");
+    require(t.args[1].kind == Kind::kJson && warnings.empty() && notes.size() == 1 &&
+                notes[0].find("'days' of 'f': minimum is not enforced") != std::string::npos,
+            "an integer with a narrowing keyword stays typed, with a note");
     require(t.args[2].kind == Kind::kText &&
                 t.args[2].texts == std::vector<std::string>{"celsius", "fahrenheit"},
             "an enum string is its texts");

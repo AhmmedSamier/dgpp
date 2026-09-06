@@ -376,11 +376,26 @@ struct CollectiveBus::Impl {
     std::atomic<uint64_t> window_count{0};
     std::atomic<uint64_t> window_first{0};
     std::atomic<int> window_variant{-1};
+    // The armed windows (2026-09-06, the pipelined replay): window number
+    // w (1-based, window_count after its arm) at ring index (w - 1) %
+    // kBusWindowRing, written under coll_mu before window_count's release
+    // store and read by the engine after its acquire load. Arm waits for
+    // the window kBusMaxLiveWindows back to be walked, so an entry is
+    // never rewritten while the engine may still read it.
+    struct Window {
+      int variant = -1;
+      uint64_t first = 0;
+      uint64_t gens = 0;
+      uint64_t armed_gt = 0;  // arm's host time, on the gt base
+    };
+    std::array<Window, kBusWindowRing> windows{};
     // coll_mu-guarded (arm/finish and every eager gate run under it):
-    // true from a successful arm to the successful finish of that
-    // window — the era's eager gate. A plain bool: no writer can race
-    // the lock.
-    bool window_live = false;
+    // the windows armed and not yet finished — the era's eager gate is
+    // live_windows > 0 — the finish count (windows finish in arm order)
+    // and the variants whose window is live (their cells are in flight).
+    int live_windows = 0;
+    uint64_t finished_count = 0;
+    std::array<bool, kBusMaxGraphVariants> variant_live{};
     // Engine: the next un-walked generation (monotonic, graph gens only
     // — eager gens between windows are the eager machine's business).
     // Arm c+1 waits for this to pass the armed window's last
@@ -1049,7 +1064,7 @@ struct CollectiveBus::Impl {
       return "a graph session is recording (graph_record_end reopens)";
     if (graph.failed.load(std::memory_order_relaxed))
       return "the graph era failed (this bus must be restarted)";
-    if (graph.window_live)
+    if (graph.live_windows > 0)
       return "a graph replay window is armed (graph_replay_finish reopens)";
     return nullptr;
   }
@@ -1078,26 +1093,36 @@ struct CollectiveBus::Impl {
     const uint64_t count =
         graph.window_count.load(std::memory_order_relaxed);
     if (count == 0) return;
-    const int variant = graph.window_variant.load(std::memory_order_relaxed);
-    if (variant < 0 || variant >= kBusMaxGraphVariants) return;
-    const uint64_t gens =
-        static_cast<uint64_t>(graph.variants[variant].gens);
-    if (gens == 0) return;
-    BusAllReduceCtl* const cells = graph_variant_cells(variant);
-    // The armed window's reserved range. Forward thread, engine joined —
-    // the load is race-free by protocol (and window_first is ours).
-    const uint64_t first =
-        graph.window_first.load(std::memory_order_relaxed);
-    const uint64_t last = first + gens - 1;
-    if (graph.walk_seq > last) return;  // window already walked
-    for (uint64_t s = std::max(graph.walk_seq, first); s <= last; ++s) {
-      // Window-relative node index: gen s is node (s - first) — the
-      // v1 (gen-1)%gens arithmetic held only when every window started
-      // at gen 1, which prefill-before-era collectives broke.
-      BusAllReduceCtl* cell = &cells[(s - first) % gens];
-      __atomic_store_n(&cell->done_seq, s, __ATOMIC_RELEASE);
+    // Every armed window from the adopted one on: the adopted window's
+    // un-walked remainder, then the windows armed behind it (their ring
+    // entries are ours — forward thread, engine joined). Window-relative
+    // node index: gen s of a window starting at `first` is node
+    // (s - first) — the v1 (gen-1)%gens arithmetic held only when every
+    // window started at gen 1, which prefill-before-era collectives
+    // broke.
+    bool poisoned = false;
+    const uint64_t from_window = std::max<uint64_t>(graph.adopted_count, 1);
+    for (uint64_t w = from_window; w <= count; ++w) {
+      const GraphState::Window& win = graph.windows[(w - 1) % kBusWindowRing];
+      const int variant = win.variant;
+      if (variant < 0 || variant >= kBusMaxGraphVariants) continue;
+      const uint64_t gens = win.gens;
+      if (gens == 0) continue;
+      BusAllReduceCtl* const cells = graph_variant_cells(variant);
+      const uint64_t first = win.first;
+      const uint64_t last = first + gens - 1;
+      uint64_t s0 = first;
+      if (w == graph.adopted_count) {
+        if (graph.walk_seq > last) continue;  // window already walked
+        s0 = std::max(graph.walk_seq, first);
+      }
+      for (uint64_t s = s0; s <= last; ++s) {
+        BusAllReduceCtl* cell = &cells[(s - first) % gens];
+        __atomic_store_n(&cell->done_seq, s, __ATOMIC_RELEASE);
+      }
+      poisoned = true;
     }
-    graph_fail("bus stopped with a graph window in flight");
+    if (poisoned) graph_fail("bus stopped with a graph window in flight");
   }
 
   // The generation's kernel timeline, from its cell's %globaltimer stamps:
@@ -1153,13 +1178,22 @@ struct CollectiveBus::Impl {
     if (t.n == 0) return;
     // The per-window lines are DEBUG since the throughput line
     // (2026-09-06; fabric_xrank.py and serve_pace.py --waves read them
-    // under DGPP_LOG_LEVEL=debug).
-    if (dgpp::current_log_level() > dgpp::LogLevel::Debug) {
+    // under DGPP_LOG_LEVEL=debug). DGPP_BUS_TIMELINE=1 writes them at INFO
+    // without the rest of the debug output: the per-tick lines perturb
+    // the very skew the timeline measures (a debug-level run showed 0.5
+    // ms stalls at two fixed positions per step that an info-level trace
+    // does not have).
+    static const bool forced = [] {
+      const char* e = std::getenv("DGPP_BUS_TIMELINE");
+      return e != nullptr && e[0] == '1';
+    }();
+    if (!forced && dgpp::current_log_level() > dgpp::LogLevel::Debug) {
       t = GraphState::Timeline{};
       return;
     }
+    const dgpp::LogLevel lvl = forced ? dgpp::LogLevel::Info : dgpp::LogLevel::Debug;
     const double n = static_cast<double>(t.n);
-    DGPP_LOG_DEBUG(
+    ::dgpp::logf(lvl,
         "graph window timeline: rank {} variant {} gens {} avg us: total {:.1f} = copy "
         "{:.1f} + handshake {:.1f} + skew {:.1f} + fold {:.1f}; engine post "
         "{:.1f}; max handshake {:.1f} skew {:.1f} total {:.1f} "
@@ -1175,7 +1209,7 @@ struct CollectiveBus::Impl {
             : 0.0,
         static_cast<double>(t.passes) / n,
         t.n > 1 ? t.compute_us / static_cast<double>(t.n - 1) : 0.0);
-    DGPP_LOG_DEBUG(
+    ::dgpp::logf(lvl,
         "graph window wait: rank {} hist(<20 <50 <100 <200 <500 >=500 us) {} "
         "{} {} {} {} {}; even gens {} avg {:.1f} us, odd gens {} avg {:.1f} us",
         opt.my_rank, t.wait_hist[0], t.wait_hist[1], t.wait_hist[2],
@@ -1187,7 +1221,7 @@ struct CollectiveBus::Impl {
       peers_txt += " rank" + std::to_string(peer_ranks[p]) + " lag " +
                    std::to_string(static_cast<int>(t.peer_lag_us[p] / n)) +
                    "us last " + std::to_string(t.peer_last[p]) + "x;";
-    DGPP_LOG_DEBUG("graph window peers: rank {} (staging written -> peer "
+    ::dgpp::logf(lvl, "graph window peers: rank {} (staging written -> peer "
                   "payload gated, avg; times arrived last):{}",
                   opt.my_rank, peers_txt);
     t = GraphState::Timeline{};
@@ -1197,33 +1231,35 @@ struct CollectiveBus::Impl {
     const uint64_t count = graph.window_count.load(std::memory_order_acquire);
     if (count == 0) return false;  // recorded but never armed
     bool worked = false;
-    const int variant = count != graph.adopted_count
-                            ? graph.window_variant.load(
-                                  std::memory_order_relaxed)
-                            : graph.adopted_variant;
-    if (variant < 0 || variant >= kBusMaxGraphVariants ||
-        !graph.variants[variant].recorded ||
-        graph.variants[variant].gens <= 0) {
-      graph_fail("graph window selected an invalid variant");
-      return true;
-    }
-    GraphState::Variant& shape = graph.variants[variant];
-    const uint64_t gens = static_cast<uint64_t>(shape.gens);
-    BusAllReduceCtl* const cells = graph_variant_cells(variant);
-
-    if (count != graph.adopted_count) {
+    // Windows are walked in arm order: the adopted one to its end, then
+    // the next armed one (its ring entry was published under coll_mu
+    // before the window_count release the acquire above pairs with).
+    const bool adopted_done =
+        graph.adopted_count == 0 || graph.walk_seq > graph.adopted_last;
+    if (adopted_done && graph.adopted_count == count)
+      return false;  // every armed window walked; awaiting the next arm
+    if (adopted_done) {
+      const GraphState::Window& w =
+          graph.windows[graph.adopted_count % kBusWindowRing];
+      const int variant = w.variant;
+      if (variant < 0 || variant >= kBusMaxGraphVariants ||
+          !graph.variants[variant].recorded ||
+          graph.variants[variant].gens <= 0 ||
+          w.gens != static_cast<uint64_t>(graph.variants[variant].gens)) {
+        graph_fail("graph window selected an invalid variant");
+        return true;
+      }
+      const uint64_t gens = w.gens;
+      const uint64_t first = w.first;
       // A fresh window. Its first generation was reserved from the shared
-      // collective counter at arm (visible through the window_count
-      // acquire above). Nothing will walk it if the era already failed —
-      // and drained() keeps the engine alive for un-adopted windows, so
-      // publish the walk past it instead of wedging the stop path (a
-      // failure landing between arm and adoption would otherwise hang
-      // quiesce's join forever: the cells were never consumed; poison
-      // handles any launched kernels).
+      // collective counter at arm. Nothing will walk it if the era already
+      // failed — and drained() keeps the engine alive for un-adopted
+      // windows, so publish the walk past it instead of wedging the stop
+      // path (a failure landing between arm and adoption would otherwise
+      // hang quiesce's join forever: the cells were never consumed;
+      // poison handles any launched kernels).
       if (graph.failed.load(std::memory_order_relaxed)) {
-        const uint64_t first =
-            graph.window_first.load(std::memory_order_relaxed);
-        graph.adopted_count = count;
+        graph.adopted_count += 1;
         graph.adopted_variant = variant;
         graph.adopted_first = first;
         graph.adopted_last = first + gens - 1;
@@ -1231,8 +1267,6 @@ struct CollectiveBus::Impl {
         graph.walk_pub.store(graph.walk_seq, std::memory_order_release);
         return true;
       }
-      const uint64_t first =
-          graph.window_first.load(std::memory_order_relaxed);
       // Continuity: the walk state points at the next generation to
       // walk, and the unified counter is monotonic with execution, so a
       // window's first can only be AT or BEYOND it (eager collectives
@@ -1243,10 +1277,11 @@ struct CollectiveBus::Impl {
         graph_fail("graph window armed out of walk order (protocol)");
         return true;
       }
-      graph.adopted_count = count;
+      graph.adopted_count += 1;
       graph.adopted_variant = variant;
       graph.adopted_first = first;
       graph.adopted_last = first + gens - 1;
+      graph.armed_gt = w.armed_gt;
       graph.walk_seq = first;
       graph.flight = {};
       graph.stall_dumps = 0;  // microscope rate control, per window
@@ -1295,9 +1330,11 @@ struct CollectiveBus::Impl {
       carrier->stripe_hashes.assign(peer_ranks.size(), 0);
       graph.carrier = std::move(carrier);
       worked = true;
-    } else if (graph.walk_seq > graph.adopted_last) {
-      return false;  // window walked; awaiting the next arm
     }
+    const int variant = graph.adopted_variant;
+    GraphState::Variant& shape = graph.variants[variant];
+    const uint64_t gens = static_cast<uint64_t>(shape.gens);
+    BusAllReduceCtl* const cells = graph_variant_cells(variant);
 
     if (graph.failed.load(std::memory_order_relaxed)) {
       // Drain-fail: poison every un-walked generation so the replay's
@@ -3435,12 +3472,18 @@ bool CollectiveBus::graph_replay_arm(std::string* error, int variant) {
                " is not recorded";
       return false;
     }
-    if (impl.graph.window_live) {
-      *error = "a graph replay window is already armed";
+    if (impl.graph.live_windows >= kBusMaxLiveWindows) {
+      *error = std::to_string(kBusMaxLiveWindows) +
+               " graph replay windows are already armed";
+      return false;
+    }
+    if (impl.graph.variant_live[static_cast<size_t>(variant)]) {
+      *error = "graph variant " + std::to_string(variant) +
+               " has a live replay window (its cells are in flight)";
       return false;
     }
     const int gens = shape.gens;
-    impl.graph.armed_gt = static_cast<uint64_t>(
+    const uint64_t armed_gt = static_cast<uint64_t>(
         static_cast<int64_t>(monotonic_ns()) + impl.gt_offset_ns);
     if (impl.stage_held_ptr != nullptr) {
       // The handout's row was picked for "the next collective" — a window
@@ -3451,24 +3494,23 @@ bool CollectiveBus::graph_replay_arm(std::string* error, int variant) {
       return false;
     }
 
-    // Wait for the engine to walk any previous window: its reserved last
-    // generation plus one (window_first still names the previous window
-    // until the reservation below overwrites it). First arm skips.
+    // Wait for the engine to walk the window kBusMaxLiveWindows back (its
+    // reserved last generation plus one): this arm reuses its ring entry,
+    // and the walk order bounds how far the engine can lag. The first
+    // arms skip.
     const uint64_t prev =
         impl.graph.window_count.load(std::memory_order_relaxed);
     uint64_t need = 0;
-    if (prev != 0) {
-      const int previous_variant =
-          impl.graph.window_variant.load(std::memory_order_relaxed);
-      if (previous_variant < 0 ||
-          previous_variant >= kBusMaxGraphVariants ||
-          !impl.graph.variants[previous_variant].recorded) {
-        *error = "previous graph window has an invalid variant";
+    if (prev >= static_cast<uint64_t>(kBusMaxLiveWindows)) {
+      const uint64_t back = prev + 1 - kBusMaxLiveWindows;  // window number
+      const Impl::GraphState::Window& w =
+          impl.graph.windows[(back - 1) % kBusWindowRing];
+      if (w.variant < 0 || w.variant >= kBusMaxGraphVariants ||
+          !impl.graph.variants[w.variant].recorded) {
+        *error = "an armed graph window has an invalid variant";
         return false;
       }
-      need = impl.graph.window_first.load(std::memory_order_relaxed) +
-             static_cast<uint64_t>(
-                 impl.graph.variants[previous_variant].gens);
+      need = w.first + w.gens;
     }
     const auto deadline =
         Clock::now() + std::chrono::milliseconds(std::max(
@@ -3533,10 +3575,18 @@ bool CollectiveBus::graph_replay_arm(std::string* error, int variant) {
       __atomic_store_n(&cell->dbg_gate_spins, 0, __ATOMIC_RELAXED);
       __atomic_store_n(&cell->gen_seq, first + g, __ATOMIC_RELEASE);
     }
-    // Close the era's eager gate (arm .. finish), then publish. window_first
-    // and variant first (relaxed — the window_count release below makes them
-    // visible to the engine's acquire), window_count LAST.
-    impl.graph.window_live = true;
+    // Close the era's eager gate (arm .. finish), then publish: the ring
+    // entry, window_first and the variant first (relaxed — the
+    // window_count release below makes them visible to the engine's
+    // acquire), window_count LAST.
+    ++impl.graph.live_windows;
+    impl.graph.variant_live[static_cast<size_t>(variant)] = true;
+    Impl::GraphState::Window& w =
+        impl.graph.windows[prev % kBusWindowRing];  // window number prev + 1
+    w.variant = variant;
+    w.first = first;
+    w.gens = static_cast<uint64_t>(gens);
+    w.armed_gt = armed_gt;
     impl.graph.window_variant.store(variant, std::memory_order_relaxed);
     impl.graph.window_first.store(first, std::memory_order_relaxed);
     impl.graph.window_count.fetch_add(1, std::memory_order_release);
@@ -3561,24 +3611,28 @@ bool CollectiveBus::graph_replay_finish(int timeout_ms, std::string* error) {
       return false;
     }
   }
-  const uint64_t count = impl.graph.window_count.load(std::memory_order_acquire);
-  if (count == 0) {
-    *error = "no armed window (arm before finish)";
-    return false;
+  // The oldest armed window (windows finish in arm order): its ring
+  // entry, published under coll_mu at its arm.
+  uint64_t need = 0;
+  int variant = -1;
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    const uint64_t count =
+        impl.graph.window_count.load(std::memory_order_acquire);
+    if (impl.graph.finished_count >= count) {
+      *error = "no armed window (arm before finish)";
+      return false;
+    }
+    const Impl::GraphState::Window& w =
+        impl.graph.windows[impl.graph.finished_count % kBusWindowRing];
+    variant = w.variant;
+    if (variant < 0 || variant >= kBusMaxGraphVariants ||
+        !impl.graph.variants[variant].recorded) {
+      *error = "armed graph window has an invalid variant";
+      return false;
+    }
+    need = w.first + w.gens;
   }
-  const int variant =
-      impl.graph.window_variant.load(std::memory_order_relaxed);
-  if (variant < 0 || variant >= kBusMaxGraphVariants ||
-      !impl.graph.variants[variant].recorded) {
-    *error = "armed graph window has an invalid variant";
-    return false;
-  }
-  const int gens = impl.graph.variants[variant].gens;
-  // The armed window's reserved bound: first + gens. The window_count
-  // acquire above orders the window_first load (arm published it first).
-  const uint64_t need =
-      impl.graph.window_first.load(std::memory_order_relaxed) +
-      static_cast<uint64_t>(gens);
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
   while (impl.graph.walk_pub.load(std::memory_order_acquire) < need) {
     if (impl.graph.failed.load(std::memory_order_relaxed)) {
@@ -3597,11 +3651,14 @@ bool CollectiveBus::graph_replay_finish(int timeout_ms, std::string* error) {
     }
     cpu_relax();
   }
-  // The window is walked: reopen the era's eager gate (coll_mu-serialized
-  // with the eager submissions that check it).
+  // The window is walked: retire it (the era's eager gate reopens with
+  // the last live window; coll_mu-serialized with the eager submissions
+  // that check it).
   {
     std::lock_guard<std::mutex> lock(impl.coll_mu);
-    impl.graph.window_live = false;
+    ++impl.graph.finished_count;
+    --impl.graph.live_windows;
+    impl.graph.variant_live[static_cast<size_t>(variant)] = false;
   }
   return true;
 }
@@ -3647,7 +3704,7 @@ bool CollectiveBus::graph_record_begin(std::string* error, int variant) {
       *error = "a graph recording session is already open";
       return false;
     }
-    if (impl.graph.window_live) {
+    if (impl.graph.live_windows > 0) {
       *error = "cannot record a graph variant while a replay is armed";
       return false;
     }
@@ -3779,8 +3836,12 @@ bool CollectiveBus::graph_record_end(std::string* error) {
 
 void CollectiveBus::dump_graph_cells(const char* why) {
   Impl& impl = *impl_;
-  const int variant =
-      impl.graph.window_variant.load(std::memory_order_relaxed);
+  // The adopted window's variant (the one being walked), else the latest
+  // armed one.
+  const int variant = impl.graph.adopted_count > 0
+                          ? impl.graph.adopted_variant
+                          : impl.graph.window_variant.load(
+                                std::memory_order_relaxed);
   if (variant < 0 || variant >= kBusMaxGraphVariants ||
       !impl.graph.variants[variant].recorded ||
       impl.graph_cells == nullptr)
@@ -3797,11 +3858,21 @@ void CollectiveBus::dump_graph_cells(const char* why) {
              std::to_string(acquire_u64(&c.done_seq)) + ",s=" +
              std::to_string(acquire_u32(&c.status));
   }
-  DGPP_LOG_INFO("graph cells ({}, variant {}): walk={} window={} adopted={}{}",
+  std::string ring;
+  const uint64_t count = impl.graph.window_count.load(std::memory_order_relaxed);
+  for (uint64_t w = count > kBusWindowRing ? count - kBusWindowRing + 1 : 1; w <= count; ++w) {
+    const Impl::GraphState::Window& win = impl.graph.windows[(w - 1) % kBusWindowRing];
+    ring += " w" + std::to_string(w) + "(v" + std::to_string(win.variant) + " first " +
+            std::to_string(win.first) + " gens " + std::to_string(win.gens) + ")";
+  }
+  DGPP_LOG_INFO("graph cells ({}, variant {}): walk={} window={} adopted={} finished={} live={} "
+                "adopted_first={} adopted_last={} flight_gen={}{};{}",
                 why, variant,
-                impl.graph.walk_pub.load(std::memory_order_relaxed),
-                impl.graph.window_count.load(std::memory_order_relaxed),
-                impl.graph.adopted_count, cells);
+                impl.graph.walk_pub.load(std::memory_order_relaxed), count,
+                impl.graph.adopted_count, impl.graph.finished_count,
+                impl.graph.live_windows, impl.graph.adopted_first,
+                impl.graph.adopted_last,
+                impl.graph.flight.active ? impl.graph.flight.gen : 0, ring, cells);
 }
 
 void CollectiveBus::quiesce() {

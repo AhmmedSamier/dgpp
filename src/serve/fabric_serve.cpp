@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "common/log.hpp"
+#include "kernels/latent_format.hpp"
 #include "loaders/minijson.hpp"
 #include "serve/json_out.hpp"
 
@@ -297,15 +298,17 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.checkpoint);
   out += std::format(
       ",\"world\":{},\"fabric\":{},\"conc\":{},\"kv\":{},\"maxtok\":{},\"queue\":{},"
-      "\"eos\":{},\"graph\":{},\"mtp\":{},\"batchmin\":{},\"cand\":{},\"pcgib\":{:.17g},"
+      "\"eos\":{},\"graph\":{},\"mtp\":{},\"mtpd\":{},\"batchmin\":{},\"cand\":{},\"pcgib\":{:.17g},"
       "\"adm\":",
       s.world, s.fabric_port, s.max_concurrency, s.kv_capacity, s.default_max_tokens,
       s.queue_limit, s.no_eos ? 1 : 0, s.decode_graph ? 1 : 0, s.mtp ? 1 : 0,
-      s.graph_batch_min_live, s.sampling_candidates, s.prefix_cache_gib);
+      s.mtp_depth, s.graph_batch_min_live, s.sampling_candidates, s.prefix_cache_gib);
   append_json_string(&out, s.admission);
-  out += std::format(",\"win\":{},\"pace\":{:.17g},\"inflight\":{},\"rdv\":{},\"stats\":{:.17g},\"ric\":{}}}",
+  out += std::format(",\"win\":{},\"pace\":{:.17g},\"inflight\":{},\"rdv\":{},\"stats\":{:.17g},\"ric\":{},\"kvdt\":",
       s.admission_window, s.bulk_pace_gbps, s.bulk_inflight, s.rendezvous_timeout_ms,
       s.stats_interval_s, s.reasoning_in_content ? 1 : 0);
+  append_json_string(&out, s.kv_dtype);
+  out.push_back('}');
   return out;
 }
 
@@ -423,6 +426,7 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.no_eos = flag("eos");
     s.decode_graph = flag("graph");
     s.mtp = flag("mtp");
+    s.mtp_depth = static_cast<int>(num("mtpd").as_int());
     s.graph_batch_min_live = static_cast<int>(num("batchmin").as_int());
     s.sampling_candidates = static_cast<int>(num("cand").as_int());
     s.prefix_cache_gib = num("pcgib").as_double();
@@ -433,7 +437,10 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.rendezvous_timeout_ms = static_cast<int>(num("rdv").as_int());
     s.stats_interval_s = num("stats").as_double();
     s.reasoning_in_content = flag("ric");
-    if (s.world < 2 || s.max_concurrency < 1 || s.kv_capacity < 1 || (s.admission != "full" && s.admission != "grow"))
+    s.kv_dtype = std::string(field(v, "kvdt", "settings").as_string());
+    if (s.world < 2 || s.max_concurrency < 1 || s.kv_capacity < 1 ||
+        (s.admission != "full" && s.admission != "grow") ||
+        !latent_format_from_string(s.kv_dtype))
       throw std::runtime_error("journal: settings record with impossible values");
     return rec;
   }

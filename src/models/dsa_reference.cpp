@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "common/dtypes.hpp"
+#include "kernels/latent_format.hpp"
 #include "models/dsa_reference.hpp"
 
 namespace dgpp::dsa_ref {
@@ -400,9 +401,25 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
                       cfg.kv_lora_rank, cfg.rms_norm_eps);
   }
 
-  // Latent cache append.
-  std::memcpy(&state.latent[size_t(token_start) * cfg.kv_lora_rank],
-              latent_rows.data(), size_t(tokens) * cfg.kv_lora_rank * 2);
+  // Latent cache append. A quantized cache (cfg.latent_format, 2026-09-06)
+  // stores each row through the format's codec and reads back the bf16 the
+  // attention kernels see: the reference keeps the DEQUANTIZED row, so its
+  // attention consumes exactly the values the device's tile loads produce.
+  if (cfg.latent_format == LatentFormat::kBf16) {
+    std::memcpy(&state.latent[size_t(token_start) * cfg.kv_lora_rank],
+                latent_rows.data(), size_t(tokens) * cfg.kv_lora_rank * 2);
+  } else {
+    std::vector<uint8_t> coded(latent_row_bytes(cfg.latent_format, cfg.kv_lora_rank));
+    for (int t = 0; t < tokens; ++t) {
+      float row_scale = 0.0f;
+      latent_quantize_row_host(cfg.latent_format,
+                               &latent_rows[size_t(t) * cfg.kv_lora_rank],
+                               cfg.kv_lora_rank, coded.data(), &row_scale);
+      latent_dequantize_row_host(
+          cfg.latent_format, coded.data(), row_scale, cfg.kv_lora_rank,
+          &state.latent[size_t(token_start + t) * cfg.kv_lora_rank]);
+    }
+  }
   state.num_tokens = std::max(state.num_tokens, token_start + tokens);
 
   // q (MLA) from the normed q-lora.

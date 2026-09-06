@@ -1,5 +1,6 @@
 #include "serve/generation_service.hpp"
 
+#include <mutex>
 #include <unordered_set>
 
 #include <cstring>
@@ -16,6 +17,31 @@
 namespace dgpp::serve {
 
 namespace {
+
+// A tool definition's schema notes are per DEFINITION, and an agent client
+// sends the same definitions with every request: each distinct line is
+// logged once — WARN for an argument left free, INFO for a bound merely not
+// enforced — and at DEBUG after that (2026-09-06: the live log carried the
+// same three WARN lines before every request).
+void log_tool_schema_note(bool warn, size_t index, const std::string& text) {
+  static std::mutex mu;
+  static std::unordered_set<std::string> seen;
+  constexpr size_t kMaxDistinct = 4096;
+  bool first = false;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    if (seen.size() < kMaxDistinct) first = seen.insert(text).second;
+  }
+  if (!first) {
+    DGPP_LOG_DEBUG("serve: tools[{}] {}", index, text);
+  } else if (warn) {
+    DGPP_LOG_WARN("serve: tools[{}] {} (logged once; at debug from now on)",
+                  index, text);
+  } else {
+    DGPP_LOG_INFO("serve: tools[{}] {} (logged once; at debug from now on)",
+                  index, text);
+  }
+}
 
 using dgpp::sched::Scheduler;
 using dgpp::sched::SchedulerRequest;
@@ -840,9 +866,10 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
         // The closed key set and the typed arguments (M6 6g / 6i); a
         // strict function outside the enforceable subset is a 400 naming
         // the keyword path, a non-strict one leaves that value free.
-        std::vector<std::string> warnings;
+        std::vector<std::string> warnings, notes;
         try {
-          g.tools.push_back(dgpp::text::grammar_tool_from_function(def, &warnings));
+          g.tools.push_back(
+              dgpp::text::grammar_tool_from_function(def, &warnings, &notes));
         } catch (const std::invalid_argument& e) {
           const std::string prefix =
               "tools[" + std::to_string(i) + "]" + (fn != nullptr ? ".function." : ".");
@@ -852,8 +879,8 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
                         prefix + (colon == std::string::npos ? what : what.substr(0, colon)),
                         "unsupported_schema");
         }
-        for (const std::string& w : warnings)
-          DGPP_LOG_WARN("serve: tools[{}] {}", i, w);
+        for (const std::string& w : warnings) log_tool_schema_note(true, i, w);
+        for (const std::string& n : notes) log_tool_schema_note(false, i, n);
       }
     }
   }

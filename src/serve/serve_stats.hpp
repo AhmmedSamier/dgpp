@@ -8,7 +8,9 @@
 // second, ms per step and tokens per request-step (MTP's acceptance in
 // service clothing), the live and queued counts, the pool's occupancy and
 // the prefix cache's hits — and on rank 0 the requests admitted, shed and
-// cancelled. An idle world writes one closing line (zeros) and then
+// cancelled. Since 2026-09-06 the line leads with decode — tokens per
+// second, ms per token, ms per step, MTP's yield — the numbers an operator
+// watches, in `|`-separated groups. An idle world writes one closing line (zeros) and then
 // nothing until work returns, so a quiet log stays quiet.
 //
 // The per-tick lines (a line per generated token, the bus's per-window
@@ -37,8 +39,9 @@ class ThroughputLog {
   using Clock = std::chrono::steady_clock;
   using Meters = dgpp::sched::Scheduler::Meters;
 
-  // `interval_s` <= 0 disables the line entirely.
-  ThroughputLog(double interval_s, int rank);
+  // `interval_s` <= 0 disables the line entirely; `mtp` adds the MTP
+  // group (tokens per request-step and the share of drafts accepted).
+  ThroughputLog(double interval_s, int rank, bool mtp = false);
 
   bool enabled() const { return interval_s_ > 0.0; }
 
@@ -51,11 +54,12 @@ class ThroughputLog {
   // The line for one interval, from two snapshots `seconds` apart.
   static std::string format(int rank, double seconds, const Meters& prev,
                             const Meters& cur, const ServiceCounts* prev_svc,
-                            const ServiceCounts* cur_svc);
+                            const ServiceCounts* cur_svc, bool mtp = false);
 
  private:
   double interval_s_ = 0.0;
   int rank_ = 0;
+  bool mtp_ = false;
   bool primed_ = false;
   bool was_busy_ = false;  // the previous interval had work or live requests
   Clock::time_point last_{};

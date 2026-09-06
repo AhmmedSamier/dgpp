@@ -2,7 +2,10 @@
 // Per-rank blocked DSA cache pool (M3 layer phase, DESIGN §7.2/§8).
 //
 // Layout (all device memory, one allocation per region):
-//   latent      [num_dsa_layers][max_token_slots][kv_lora_rank]     BF16
+//   latent      [num_dsa_layers][max_token_slots] rows in the cache's format
+//               (BF16 [kv_lora_rank], or fp8/fp4 codes — latent_format.hpp)
+//   latent_scale [num_dsa_layers][max_token_slots]                  FP32
+//               (fp8/fp4 only: one row scale per token)
 //   index_k     [num_dsa_layers][max_pool_slots][index_head_dim]    FP8
 //   index_scale [num_dsa_layers][max_pool_slots]                    FP32
 //   tail        [num_dsa_layers][max_requests][2][kpool][dim]       BF16
@@ -51,15 +54,18 @@ class DsaStatePool {
   const DsaGeometry& geometry() const { return geo_; }
 
   // Per-layer cache views (device pointers; kernels index them physically).
-  //   latent(layer):      BF16 [max_token_slots, kv_lora_rank]
+  //   latent(layer):      [max_token_slots] rows of latent_bytes_per_token
+  //   latent_scale(layer): FP32 [max_token_slots] (nullptr for bf16)
   //   index_k(layer):     FP8  [max_pool_slots, index_head_dim]
   //   index_scale(layer): FP32 [max_pool_slots]
   //   tail(layer):        BF16 [max_requests, 2, kpool, index_head_dim]
   void* latent(int layer);
+  float* latent_scale(int layer);
   void* index_k(int layer);
   float* index_scale(int layer);
   void* tail(int layer);
   const void* latent(int layer) const;
+  const float* latent_scale(int layer) const;
   const void* index_k(int layer) const;
   const float* index_scale(int layer) const;
   const void* tail(int layer) const;
@@ -152,6 +158,7 @@ class DsaStatePool {
   bool initialized_ = false;
 
   uint8_t* latent_base_ = nullptr;
+  float* latent_scale_base_ = nullptr;  // fp8/fp4 rows' scales; null for bf16
   uint8_t* index_k_base_ = nullptr;
   float* index_scale_base_ = nullptr;
   uint8_t* tail_base_ = nullptr;

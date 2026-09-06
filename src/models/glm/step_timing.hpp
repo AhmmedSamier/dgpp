@@ -16,8 +16,10 @@
 // (e.g. after prefill, so the report is decode-steps only).
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
+#include <format>
+
+#include "common/log.hpp"
 
 namespace dgpp::step_timing {
 
@@ -94,11 +96,13 @@ inline void reset() {
 // reads off (moe_launch = moe - moe_sync; the step residual is whatever
 // the named seams do not cover — attention/DSA/KDA kernel time and the
 // host loop between launches).
+// Every line goes through the logger (timestamped like every other line
+// the server prints; 2026-09-06).
 inline void report(const char* who) {
-  std::printf("[step-timing] %s\n", who);
+  DGPP_LOG_INFO("[step-timing] {}", who);
   const uint64_t steps = acc(kStep).n;
   if (steps == 0) {
-    std::printf("[step-timing] (no steps recorded)\n");
+    DGPP_LOG_INFO("[step-timing] (no steps recorded)");
     return;
   }
   const double step = acc(kStep).us;
@@ -110,24 +114,23 @@ inline void report(const char* who) {
   const double final_sync = acc(kFinalSync).us;
   const double per = 1.0 / static_cast<double>(steps);
   const auto pct = [&](double v) { return step > 0 ? 100.0 * v / step : 0.0; };
-  std::printf(
-      "[step-timing] steps=%llu  step=%.0fus/token\n"
-      "[step-timing]   moe        %8.0fus/token (%4.0f%%)  enq n=%llu\n"
-      "[step-timing]   moe_sync   %8.0fus/token (%4.0f%%)  sync n=%llu\n"
-      "[step-timing]   moe_launch %8.0fus/token (%4.0f%%)\n"
-      "[step-timing]   folds      %8.0fus/token (%4.0f%%)  n=%llu (drain "
-      "%.0fus + coll %.0fus)\n"
-      "[step-timing]   pick       %8.0fus/token (%4.0f%%)\n"
-      "[step-timing]   final_sync %8.0fus/token (%4.0f%%)\n"
-      "[step-timing]   residual   %8.0fus/token (kernels + host loop)\n",
-      static_cast<unsigned long long>(steps), step * per, moe * per, pct(moe),
-      static_cast<unsigned long long>(acc(kMoe).n), moe_sync * per,
-      pct(moe_sync), static_cast<unsigned long long>(acc(kMoeSync).n),
-      (moe - moe_sync) * per, pct(moe - moe_sync), (drain + fold) * per,
-      pct(drain + fold), static_cast<unsigned long long>(acc(kFold).n),
-      drain * per, fold * per, pick * per, pct(pick), final_sync * per,
-      pct(final_sync),
-      (step - moe - drain - fold - pick - final_sync) * per);
+  DGPP_LOG_INFO("[step-timing] steps={}  step={:.0f}us/token", steps, step * per);
+  DGPP_LOG_INFO("[step-timing]   moe        {:8.0f}us/token ({:4.0f}%)  enq n={}",
+                moe * per, pct(moe), acc(kMoe).n);
+  DGPP_LOG_INFO("[step-timing]   moe_sync   {:8.0f}us/token ({:4.0f}%)  sync n={}",
+                moe_sync * per, pct(moe_sync), acc(kMoeSync).n);
+  DGPP_LOG_INFO("[step-timing]   moe_launch {:8.0f}us/token ({:4.0f}%)",
+                (moe - moe_sync) * per, pct(moe - moe_sync));
+  DGPP_LOG_INFO(
+      "[step-timing]   folds      {:8.0f}us/token ({:4.0f}%)  n={} (drain {:.0f}us + "
+      "coll {:.0f}us)",
+      (drain + fold) * per, pct(drain + fold), acc(kFold).n, drain * per, fold * per);
+  DGPP_LOG_INFO("[step-timing]   pick       {:8.0f}us/token ({:4.0f}%)", pick * per,
+                pct(pick));
+  DGPP_LOG_INFO("[step-timing]   final_sync {:8.0f}us/token ({:4.0f}%)",
+                final_sync * per, pct(final_sync));
+  DGPP_LOG_INFO("[step-timing]   residual   {:8.0f}us/token (kernels + host loop)",
+                (step - moe - drain - fold - pick - final_sync) * per);
 }
 
 }  // namespace dgpp::step_timing

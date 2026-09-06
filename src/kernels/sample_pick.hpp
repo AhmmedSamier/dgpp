@@ -68,6 +68,10 @@ struct SampleSpec {
 
 constexpr int kSampleMaxTopLogprobs = 20;
 
+// The verify rows a sampled verdict decides over: the fed token's row plus
+// up to kSampleVerdictRows - 1 drafts (GlmDiagnosticModel::kSpecRows).
+constexpr int kSampleVerdictRows = 4;
+
 // The sampling verdict's outcome per request, beside the PickVerdict the
 // device consumers (commit, token feeds) keep reading.
 struct SampleOutcome {
@@ -76,19 +80,20 @@ struct SampleOutcome {
   uint64_t counter = 0;   // the spec's counter after this pick (the draws
                           // the device consumed; a fallback row's draw is
                           // reserved for the host)
-  double normalizer = 0.0;    // row 0's fold log-sum-exp
-  double covered_mass = 0.0;  // row 0's prefix mass under it
-  float logprob = 0.0f;       // row 0's outcome log-probability
-  float logprob1 = 0.0f;      // row 1's (T=2, the draft stood)
-  int32_t fallback_row = -1;  // which row fell back (0 or 1), -1 none
-  int32_t accepted_draft = 0; // T=2: the draft stood (provisional 0 on a
-                              // row-0 fallback)
-  double normalizer1 = 0.0;   // row 1's fold log-sum-exp (T=2)
+  int32_t fallback_row = -1;  // which row fell back (0..rows-1), -1 none
+  int32_t accepted_draft = 0; // T>=2: the first draft stood (provisional 0
+                              // on a row-0 fallback)
+  // Per verify row t (2026-09-06, T = 1 + drafts): the fold log-sum-exp,
+  // the prefix mass under it (rows the device decided over) and the
+  // outcome's log-probability. Rows the chain never reached stay zero.
+  double normalizer[kSampleVerdictRows] = {};
+  double covered_mass[kSampleVerdictRows] = {};
+  float logprob[kSampleVerdictRows] = {};
   // The reported top logprobs per row (spec.logprobs >= 0, rows the device
   // decided): min(N, the final set) entries, as the host's Result.
-  int32_t top_count[2] = {0, 0};
-  int32_t top_ids[2][kSampleMaxTopLogprobs] = {};
-  float top_logprobs[2][kSampleMaxTopLogprobs] = {};
+  int32_t top_count[kSampleVerdictRows] = {};
+  int32_t top_ids[kSampleVerdictRows][kSampleMaxTopLogprobs] = {};
+  float top_logprobs[kSampleVerdictRows][kSampleMaxTopLogprobs] = {};
 };
 
 // The token mask of constrained decoding (M6 6g), per ROW: word 0 is the

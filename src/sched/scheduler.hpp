@@ -78,6 +78,7 @@
 // funnels every mutation — submit, cancel — through its engine-loop
 // queue; results(), meters(), and the observer all run on the ticking
 // thread.
+#include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -144,6 +145,20 @@ class SchedulerEngine {
   // decode; T for a speculative engine whose verify writes T rows). The
   // grow-on-demand policy sizes each reservation's headroom by it.
   virtual int max_tokens_per_step() const { return 1; }
+  // Speculative acceptance by draft position (2026-09-06): attempts[p] is
+  // the steps that verified draft p (0-based; depth of them), accepts[p]
+  // the steps that accepted it. Engine-wide since construction, or per
+  // slot since it opened (reset at close). A plain engine reports depth 0.
+  struct MtpAcceptance {
+    int depth = 0;
+    uint64_t attempts[8] = {};
+    uint64_t accepts[8] = {};
+  };
+  virtual MtpAcceptance mtp_acceptance() const { return {}; }
+  virtual MtpAcceptance mtp_acceptance(int req) const {
+    (void)req;
+    return {};
+  }
 
   // ---- sampling (M6 6b) ---------------------------------------------------
   // An engine that can draw stochastically advertises it; the scheduler
@@ -393,6 +408,8 @@ class Scheduler {
     int64_t decode_rows = 0;
     double prefill_ms = 0.0;
     double step_ms = 0.0;
+    // Draft acceptance by position (2026-09-06), engine-wide cumulative.
+    SchedulerEngine::MtpAcceptance mtp;
     // The prefix cache (M7): its slots and live entries, the attach and
     // miss counts, the prompt tokens attaches skipped, the entries taken
     // (at prefill cuts / from rolling snapshots at close), rolling
@@ -509,6 +526,15 @@ class Scheduler {
     int64_t rolling_position = -1;
     int64_t hop_armed = -1;    // the aligned position armed for the next step
     bool cache_off = false;    // the pool cannot hold the cache's blocks for it
+    // The retire line's numbers (2026-09-06): the admission clock, the
+    // prefill's wall and the prompt tokens an attach skipped, and the
+    // decode passes this request rode (each shared with every other live
+    // request in the pass).
+    bool admitted = false;
+    std::chrono::steady_clock::time_point admitted_at{};
+    double prefill_ms = 0.0;
+    int64_t attached_tokens = 0;
+    int decode_passes = 0;
   };
   // The admission plan the cache proposes for a queued request: the entry
   // to attach (or -1) and the position, and the cut a new entry would be

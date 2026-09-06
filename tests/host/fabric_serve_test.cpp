@@ -250,6 +250,7 @@ void test_settings_handshake() {
   sent.queue_limit = 8;
   sent.decode_graph = true;
   sent.mtp = true;
+  sent.mtp_depth = 2;
   sent.sampling_candidates = 128;
   sent.prefix_cache_gib = 1.5;
   sent.admission = "full";
@@ -431,10 +432,23 @@ void test_journal_codec() {
     ws.rendezvous_timeout_ms = 120000;
     ws.stats_interval_s = 0.1;
     ws.reasoning_in_content = true;
+    ws.kv_dtype = "fp8";
     const dgpp::serve::JournalRecord sr = dgpp::serve::decode_journal_line(
         dgpp::serve::encode_journal_settings(ws));
     require(sr.settings && !sr.warm && !sr.stop && sr.world_settings == ws,
             "codec: the settings record round-trips");
+    {
+      // The KV dtype rides by name (2026-09-06); an unknown one is refused.
+      dgpp::serve::WorldSettings bad = ws;
+      bad.kv_dtype = "int4";
+      bool refused_dtype = false;
+      try {
+        (void)dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(bad));
+      } catch (const std::runtime_error&) {
+        refused_dtype = true;
+      }
+      require(refused_dtype, "codec: a settings record with an unknown kv dtype is refused");
+    }
     bool refused = false;
     try {
       dgpp::serve::WorldSettings one = ws;

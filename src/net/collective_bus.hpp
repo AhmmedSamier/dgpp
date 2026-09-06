@@ -244,12 +244,21 @@ class CollectiveBus {
   //                              window's generations from the shared
   //                              collective counter (the kernels read
   //                              them at start), publish the window.
-  //                              Waits (bounded) for the engine to have
-  //                              walked any previous window. Call BEFORE
-  //                              cudaGraphLaunch. Rejects a held staging
-  //                              handout (its row would be rewritten by
-  //                              the window's kernels).
-  //   graph_replay_finish()   — after the replay's work completed (the
+  //                              Call BEFORE cudaGraphLaunch. Rejects a
+  //                              held staging handout (its row would be
+  //                              rewritten by the window's kernels). Up
+  //                              to kBusMaxLiveWindows windows may be
+  //                              armed at once (2026-09-06, the
+  //                              pipelined replay: the next replay's
+  //                              window while the previous replay still
+  //                              runs), each on a variant whose window is
+  //                              not live — its cells are in flight until
+  //                              finish; arm waits (bounded) for the
+  //                              engine to have walked the window
+  //                              kBusMaxLiveWindows back. Windows are
+  //                              walked and finished in arm order.
+  //   graph_replay_finish()   — finishes the OLDEST armed window, after
+  //                              its replay's work completed (the
   //                              caller's stream sync is not enough: the
   //                              engine must observe every generation's
   //                              done). Waits (bounded) for the walk,

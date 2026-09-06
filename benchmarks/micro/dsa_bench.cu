@@ -331,7 +331,7 @@ void bench_prefill(int warmup, int iters, const DsaConfig& cfg, int tokens,
 }  // namespace
 
 int main(int argc, char** argv) {
-  int iters = 50, warmup = 5;
+  int iters = 50, warmup = 5, tp = 1;
   int64_t ctx = 65536;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--iters") == 0 && i + 1 < argc)
@@ -340,6 +340,8 @@ int main(int argc, char** argv) {
       warmup = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--ctx") == 0 && i + 1 < argc)
       ctx = std::atoll(argv[++i]);
+    else if (std::strcmp(argv[i], "--tp") == 0 && i + 1 < argc)
+      tp = std::atoi(argv[++i]);
   }
   int devices = 0;
   if (cudaGetDeviceCount(&devices) != cudaSuccess || devices < 1) {
@@ -355,12 +357,13 @@ int main(int argc, char** argv) {
       "GB/s\n\n",
       iters, warmup, (long long)ctx);
 
-  const DsaConfig cfg{};  // real GLM-5.3-Flash geometry, TP=1
+  DsaConfig cfg{};  // real GLM-5.3-Flash geometry; --tp N for a rank's slice
+  cfg.tp_size = tp;
   const bool decode_only =
       std::any_of(argv + 1, argv + argc, [](const char* a) {
         return std::strcmp(a, "--decode-only") == 0;
       });
-  std::printf("== full DSA layer decode, real geometry, TP=1 ==\n");
+  std::printf("== full DSA layer decode, real geometry, TP=%d ==\n", tp);
   bench_decode(warmup, iters, cfg, ctx, false, "decode eager");
   if (!decode_only) {
     bench_decode(warmup, iters, cfg, ctx, true, "decode graph replay");

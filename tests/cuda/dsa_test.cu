@@ -42,6 +42,7 @@ using namespace dgpp;
 using dgpp::bf16_bits_to_float;
 using dgpp::DsaConfig;
 using dgpp::DsaGeometry;
+using dgpp::LatentFormat;
 using dgpp::dsa_ref::HostState;
 using dgpp::dsa_ref::HostWeights;
 using dgpp::float_to_bf16_bits;
@@ -643,7 +644,7 @@ DGPP_TEST(dsa_select_decode_fused_bitwise) {
 
   DevBuf dq8(q8.size()), dks_cache(ks.size() * 4), dw(w.size() * 4),
       dki(k8.size()), dpos(8), dri(4), dbt(4), dtopk(size_t(max_selected) * 4),
-      dcnt(4), dpart(size_t(48) * 1 * select_k * 8), dctr(4);
+      dcnt(4), dws(dsa_select_workspace_bytes(1, n_pools)), dctr(8);
   dq8.upload(q8.data(), q8.size());
   dw.upload(w.data(), w.size() * 4);
   dki.upload(k8.data(), k8.size());
@@ -663,8 +664,7 @@ DGPP_TEST(dsa_select_decode_fused_bitwise) {
                     static_cast<const float*>(dks_cache.p), n_pools, heads,
                     dim, select_k, kpool, max_selected,
                     static_cast<int32_t*>(dtopk.p),
-                    static_cast<int32_t*>(dcnt.p),
-                    static_cast<uint64_t*>(dpart.p),
+                    static_cast<int32_t*>(dcnt.p), dws.p, n_pools,
                     static_cast<int32_t*>(dctr.p), 48, 0);
 
   // Host mirror: identical inline dot arithmetic.
@@ -730,8 +730,7 @@ DGPP_TEST(dsa_select_decode_fused_bitwise) {
                     static_cast<const float*>(dks_cache.p), n_pools, heads,
                     dim, select_k, kpool, max_selected,
                     static_cast<int32_t*>(dtopk.p),
-                    static_cast<int32_t*>(dcnt.p),
-                    static_cast<uint64_t*>(dpart.p),
+                    static_cast<int32_t*>(dcnt.p), dws.p, n_pools,
                     static_cast<int32_t*>(dctr.p), 48, 0);
   dtopk.download(got2.data(), got2.size() * 4);
   require_bitwise("decode select repeat", got2.data(), got.data(),
@@ -1192,13 +1191,12 @@ struct DecodeSelScenario {
   // Runs the fused decode select on the default stream (or a captured
   // graph) and returns topk rows + counts.
   void run(int grid_blocks, std::vector<int32_t>& topk,
-           std::vector<int32_t>& counts, cudaStream_t stream = 0,
-           uint64_t* partial_ws = nullptr, int32_t* counter_ws = nullptr) {
+           std::vector<int32_t>& counts, cudaStream_t stream = 0) {
     const int max_selected = g.max_selected;
     DevBuf dq8(q8.size()), dw(w.size() * 4), dki(k8.size()),
         dks_c(ks.size() * 4), dpos(pos.size() * 8), dri(req_ids.size() * 4),
         dbt(4), dtopk(size_t(max_selected) * rows * 4), dcnt(rows * 4),
-        dpart(size_t(grid_blocks) * rows * g.select_k * 8), dctr(4);
+        dws(dsa_select_workspace_bytes(rows, n_pools)), dctr(8);
     dq8.upload(q8.data(), q8.size());
     dw.upload(w.data(), w.size() * 4);
     dki.upload(k8.data(), k8.size());
@@ -1215,8 +1213,7 @@ struct DecodeSelScenario {
                       static_cast<const float*>(dks_c.p), int(n_pools), heads,
                       dim, g.select_k, 4, max_selected,
                       static_cast<int32_t*>(dtopk.p),
-                      static_cast<int32_t*>(dcnt.p),
-                      static_cast<uint64_t*>(dpart.p),
+                      static_cast<int32_t*>(dcnt.p), dws.p, n_pools,
                       static_cast<int32_t*>(dctr.p), grid_blocks, stream);
     topk.assign(size_t(max_selected) * rows, -12345);
     counts.assign(rows, -1);
@@ -1876,7 +1873,7 @@ DGPP_TEST(dsa_select_decode_graph_replay) {
   DevBuf dq8(sc.q8.size()), dw(sc.w.size() * 4), dki(sc.k8.size()),
       dks_c(sc.ks.size() * 4), dpos(8), dri(4), dbt(4),
       dtopk(size_t(max_selected) * 4), dcnt(4),
-      dpart(size_t(grid) * sc.g.select_k * 8), dctr(4);
+      dws(dsa_select_workspace_bytes(1, sc.n_pools)), dctr(8);
   dq8.upload(sc.q8.data(), sc.q8.size());
   dw.upload(sc.w.data(), sc.w.size() * 4);
   dki.upload(sc.k8.data(), sc.k8.size());
@@ -1899,8 +1896,7 @@ DGPP_TEST(dsa_select_decode_graph_replay) {
                     static_cast<const float*>(dks_c.p), int(sc.n_pools), 32,
                     128, sc.g.select_k, 4, max_selected,
                     static_cast<int32_t*>(dtopk.p),
-                    static_cast<int32_t*>(dcnt.p),
-                    static_cast<uint64_t*>(dpart.p),
+                    static_cast<int32_t*>(dcnt.p), dws.p, sc.n_pools,
                     static_cast<int32_t*>(dctr.p), grid, stream);
   DGPP_CUDA_OK(cudaStreamSynchronize(stream));
 
@@ -1912,8 +1908,7 @@ DGPP_TEST(dsa_select_decode_graph_replay) {
                     static_cast<const float*>(dks_c.p), int(sc.n_pools), 32,
                     128, sc.g.select_k, 4, max_selected,
                     static_cast<int32_t*>(dtopk.p),
-                    static_cast<int32_t*>(dcnt.p),
-                    static_cast<uint64_t*>(dpart.p),
+                    static_cast<int32_t*>(dcnt.p), dws.p, sc.n_pools,
                     static_cast<int32_t*>(dctr.p), grid, stream);
   cudaGraph_t graph;
   DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
@@ -2250,22 +2245,48 @@ void require_cache_matches(const DsaStatePool& pool, int layer, int req,
                              std::to_string(pools) + " pools");
 
   // Latent cache: bf16 tolerance. Reorder device rows to logical order
-  // through the block table, then compare with the reference.
-  std::vector<uint16_t> got_lat(size_t(ref.num_tokens) * cfg.kv_lora_rank);
-  DGPP_CUDA_OK(cudaMemcpyAsync(got_lat.data(), pool.latent(layer),
-                               got_lat.size() * 2, cudaMemcpyDeviceToHost, s));
+  // through the block table, then compare with the reference. A quantized
+  // cache (2026-09-06) is read back as codes + row scales and dequantized
+  // on the host — the reference holds the dequantized rows — with a wider
+  // budget: the rows the two sides quantized differ by GEMM ulps, so an
+  // element near a quantization boundary legitimately lands one code apart
+  // (one e4m3 quantum is 2^-4..2^-3 of the value, one e2m1 quantum up to
+  // half of it).
+  const size_t row_bytes = g.latent_bytes_per_token;
+  const size_t phys_rows = size_t(pool.max_token_slots());
+  std::vector<uint8_t> got_raw(phys_rows * row_bytes);
+  DGPP_CUDA_OK(cudaMemcpyAsync(got_raw.data(), pool.latent(layer), got_raw.size(),
+                               cudaMemcpyDeviceToHost, s));
+  std::vector<float> got_row_scale(phys_rows, 1.0f);
+  if (pool.latent_scale(layer) != nullptr)
+    DGPP_CUDA_OK(cudaMemcpyAsync(got_row_scale.data(), pool.latent_scale(layer),
+                                 got_row_scale.size() * 4, cudaMemcpyDeviceToHost, s));
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
-  std::vector<uint16_t> dev_logical(got_lat.size());
+  std::vector<uint16_t> dev_logical(size_t(ref.num_tokens) * cfg.kv_lora_rank);
   for (int64_t t = 0; t < ref.num_tokens; ++t) {
     const int64_t phys = int64_t(bt[size_t(t / cfg.block_tokens)]) *
                              cfg.block_tokens +
                          (t % cfg.block_tokens);
-    std::memcpy(&dev_logical[size_t(t) * cfg.kv_lora_rank],
-                &got_lat[size_t(phys) * cfg.kv_lora_rank],
-                cfg.kv_lora_rank * 2);
+    dgpp::latent_dequantize_row_host(cfg.latent_format, &got_raw[size_t(phys) * row_bytes],
+                                     got_row_scale[size_t(phys)], cfg.kv_lora_rank,
+                                     &dev_logical[size_t(t) * cfg.kv_lora_rank]);
   }
-  const auto lat_stats = kda_test::compare_bf16(dev_logical, ref.latent, 8);
-  require_bf16("layer cache latent", lat_stats, 5e-3, 1e-3);
+  const std::vector<uint16_t> ref_latent(
+      ref.latent.begin(), ref.latent.begin() + int64_t(dev_logical.size()));
+  switch (cfg.latent_format) {
+    case LatentFormat::kBf16:
+      require_bf16("layer cache latent",
+                   kda_test::compare_bf16(dev_logical, ref_latent, 8), 5e-3, 1e-3);
+      break;
+    case LatentFormat::kFp8:
+      require_bf16("layer cache latent (fp8)",
+                   kda_test::compare_bf16(dev_logical, ref_latent, 24), 0.05, 0.05);
+      break;
+    case LatentFormat::kFp4:
+      require_bf16("layer cache latent (fp4)",
+                   kda_test::compare_bf16(dev_logical, ref_latent, 96), 0.15, 0.05);
+      break;
+  }
 
   // Tail ring: bf16 tolerance (raw k + gate rows).
   std::vector<uint16_t> got_tail(2ull * cfg.index_kpool * dim);
@@ -2418,7 +2439,8 @@ void require_output_matches(const DsaConfig& cfg, const DsaGeometry& g,
                             const std::vector<int32_t>& got_topk,
                             const std::vector<int32_t>& want_topk,
                             const std::string& what,
-                            const RowAuditor& audit = nullptr) {
+                            const RowAuditor& audit = nullptr,
+                            double kept_budget = 0.01) {
   const int64_t rows = int64_t(got.size()) / cfg.hidden;
   const int ms = g.max_selected;
   int64_t flipped = 0, sparse = 0, certified = 0;
@@ -2481,9 +2503,10 @@ void require_output_matches(const DsaConfig& cfg, const DsaGeometry& g,
                                "(dev-only:" + dg + " ref-only:" + dw + ")");
     }
   }
-  if (worst_kept > 0.01)
+  if (worst_kept > kept_budget)
     throw std::runtime_error(what + ": kept-row drift " +
-                             std::to_string(worst_kept));
+                             std::to_string(worst_kept) + " (budget " +
+                             std::to_string(kept_budget) + ")");
   if (flipped > sparse / 4 + 1)
     throw std::runtime_error(what + ": " + std::to_string(flipped) + "/" +
                              std::to_string(sparse) +
@@ -2645,7 +2668,8 @@ DGPP_TEST(dsa_layer_prefill_matches_reference) {
 // smallest select_k the bitonic networks support and the boundary flips are
 // densest there — exactly where the audit must prove itself).
 static void chunked_prefill_decode_case(const DsaConfig& cfg,
-                                        const char* what) {
+                                        const char* what,
+                                        double kept_budget = 0.01) {
   cudaStream_t s = dgpp::kda_test::test_stream();
   const DsaGeometry g = DsaGeometry::from_config(cfg);
   const int chunk = 96;
@@ -2773,7 +2797,7 @@ static void chunked_prefill_decode_case(const DsaConfig& cfg,
   const RowAuditor audit = make_near_tie_auditor(cfg, g, pool, 0, s, phases,
                                                  ref, &audit_stats);
   require_output_matches(cfg, g, got_out, want_all, got_topk, ref_topk, what,
-                         audit);
+                         audit, kept_budget);
   print_near_tie_audit(what, audit_stats);
   require_cache_matches(pool, 0, 0, ref, s);
 }
@@ -3164,6 +3188,219 @@ DGPP_TEST(dsa_layer_real_geometry_chunked_prefill_decode_smoke) {
   ddout.download(again.data(), again.size() * 2);
   require_bitwise("real-geometry decode repeat", eager.data(), again.data(),
                   eager.size() * 2);
+}
+
+
+// ---------------------------------------------------------------------------
+// The latent cache's formats (2026-09-06, the KV dtype knob): the device
+// append quantizes a row bitwise as the host codec does; the attention
+// kernels over a quantized cache equal the bf16 kernel over the dequantized
+// rows (the host oracle's input) within the bf16 kernel's own tolerance;
+// and a whole layer on a quantized cache tracks the bf16 layer within the
+// format's precision.
+// ---------------------------------------------------------------------------
+
+// Rows with a few zeros and one outlier per row: the block-scale cases.
+std::vector<uint16_t> latent_rows_with_outliers(uint64_t seed, int64_t rows, int kv_lora) {
+  std::vector<uint16_t> v = random_bf16_bits(seed, rows * kv_lora, -2, 1);
+  for (int64_t r = 0; r < rows; ++r) {
+    const int64_t at = int64_t(hash32(seed + uint64_t(r)) % uint32_t(kv_lora));
+    v[size_t(r * kv_lora + at)] =
+        float_to_bf16_bits(bf16_bits_to_float(v[size_t(r * kv_lora + at)]) * 12.0f);
+    if (r % 7 == 3) v[size_t(r * kv_lora + (at + 1) % kv_lora)] = 0;
+    if (r % 11 == 5)  // an all-zero row now and then
+      std::fill(v.begin() + r * kv_lora, v.begin() + (r + 1) * kv_lora, uint16_t{0});
+  }
+  return v;
+}
+
+void latent_append_quantized_case(LatentFormat fmt, int kv_lora, uint64_t seed) {
+  const int block_tokens = 32;
+  const int n_blocks = 3, total_tokens = n_blocks * block_tokens;
+  const std::vector<uint16_t> latent = latent_rows_with_outliers(seed, total_tokens, kv_lora);
+  const size_t row_bytes = dgpp::latent_row_bytes(fmt, kv_lora);
+  std::vector<int32_t> bt = {2, 0, 1};
+  std::vector<int32_t> req_ids(static_cast<size_t>(total_tokens), 0);
+  std::vector<int64_t> positions(static_cast<size_t>(total_tokens));
+  for (int t = 0; t < total_tokens; ++t) positions[size_t(t)] = t;
+
+  DevBuf dsrc(latent.size() * 2), dcache(size_t(total_tokens) * row_bytes),
+      dscale(size_t(total_tokens) * 4), dbt(bt.size() * 4), dri(req_ids.size() * 4),
+      dpos(positions.size() * 8);
+  dsrc.upload(latent.data(), latent.size() * 2);
+  dcache.upload(std::vector<uint8_t>(size_t(total_tokens) * row_bytes, 0xAA).data(),
+                size_t(total_tokens) * row_bytes);
+  dscale.upload(std::vector<float>(size_t(total_tokens), -1.0f).data(), size_t(total_tokens) * 4);
+  dbt.upload(bt.data(), bt.size() * 4);
+  dri.upload(req_ids.data(), req_ids.size() * 4);
+  dpos.upload(positions.data(), positions.size() * 8);
+  dsa_latent_append(dsrc.p, static_cast<const int32_t*>(dri.p),
+                    static_cast<const int64_t*>(dpos.p), total_tokens,
+                    static_cast<const int32_t*>(dbt.p), n_blocks, block_tokens, dcache.p,
+                    kv_lora, 0, fmt, static_cast<float*>(dscale.p));
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<uint8_t> got(size_t(total_tokens) * row_bytes);
+  std::vector<float> got_scale(static_cast<size_t>(total_tokens));
+  dcache.download(got.data(), got.size());
+  dscale.download(got_scale.data(), got_scale.size() * 4);
+  std::vector<uint8_t> want(row_bytes);
+  for (int64_t tok = 0; tok < total_tokens; ++tok) {
+    const int64_t phys = int64_t(bt[size_t(tok / block_tokens)]) * block_tokens +
+                         (tok % block_tokens);
+    float want_scale = 0.0f;
+    dgpp::latent_quantize_row_host(fmt, &latent[size_t(tok) * kv_lora], kv_lora, want.data(),
+                                   &want_scale);
+    const std::string what = std::string("latent append ") + dgpp::latent_format_name(fmt) +
+                             " kv_lora " + std::to_string(kv_lora) + " token " +
+                             std::to_string(tok);
+    require_bitwise(what + " codes", &got[static_cast<size_t>(phys) * row_bytes], want.data(), row_bytes);
+    if (fmt != LatentFormat::kBf16)  // bf16 rows carry no scale
+      require_bitwise(what + " scale", &got_scale[static_cast<size_t>(phys)], &want_scale, 4);
+  }
+}
+
+DGPP_TEST(dsa_latent_append_quantized_matches_host_codec) {
+  latent_append_quantized_case(LatentFormat::kFp8, 512, 5001);
+  latent_append_quantized_case(LatentFormat::kFp4, 512, 5002);
+  latent_append_quantized_case(LatentFormat::kFp8, 32, 5003);   // the CI layer geometry
+  latent_append_quantized_case(LatentFormat::kFp4, 32, 5004);   // a padded fp4 row
+  latent_append_quantized_case(LatentFormat::kFp8, 256, 5005);
+  latent_append_quantized_case(LatentFormat::kFp4, 256, 5006);
+  latent_append_quantized_case(LatentFormat::kBf16, 512, 5007);
+}
+
+// The three attention kernels over a quantized cache, at the real geometry
+// (64 heads x 512), against the host oracle fed the dequantized rows.
+void attention_quantized_case(LatentFormat fmt, uint64_t seed) {
+  const DsaConfig cfg{};
+  const DsaGeometry g = DsaGeometry::from_config(cfg);
+  const int rows = 3, local_heads = g.local_heads, nope = cfg.qk_nope_head_dim;
+  const int v = cfg.v_head_dim, kv_lora = cfg.kv_lora_rank;
+  const int block_tokens = cfg.block_tokens;
+  const int max_selected = g.max_selected;
+  const int n_blocks = 2, total_tokens = n_blocks * block_tokens;
+  const size_t row_bytes = dgpp::latent_row_bytes(fmt, kv_lora);
+  const std::string what = std::string("attention over a ") + dgpp::latent_format_name(fmt) + " cache";
+
+  auto q = random_bf16_bits(seed, int64_t(rows) * local_heads * nope, -2, 1);
+  auto kv_b = random_bf16_bits(seed + 1, int64_t(local_heads) * (nope + v) * kv_lora, -2, 1);
+  const std::vector<uint16_t> latent = latent_rows_with_outliers(seed + 2, total_tokens, kv_lora);
+  // The cache as the append would leave it (physical rows through the
+  // table) and the bf16 the kernels see for it.
+  std::vector<int32_t> bt = {1, 0};
+  std::vector<uint8_t> cache(size_t(total_tokens) * row_bytes);
+  std::vector<float> scales(static_cast<size_t>(total_tokens));
+  std::vector<uint16_t> phys_deq(size_t(total_tokens) * kv_lora);
+  for (int64_t tok = 0; tok < total_tokens; ++tok) {
+    const int64_t phys = int64_t(bt[size_t(tok / block_tokens)]) * block_tokens + (tok % block_tokens);
+    dgpp::latent_quantize_row_host(fmt, &latent[size_t(tok) * kv_lora], kv_lora,
+                                   &cache[size_t(phys) * row_bytes], &scales[size_t(phys)]);
+    dgpp::latent_dequantize_row_host(fmt, &cache[size_t(phys) * row_bytes], scales[size_t(phys)],
+                                     kv_lora, &phys_deq[size_t(tok) * kv_lora]);
+  }
+  // The listed selection (the split kernel's and the listed flash kernel's
+  // input) and the causal positions (the dense flash kernel's).
+  const int cnt = 37;
+  std::vector<int32_t> tokens(size_t(rows) * max_selected, -1);
+  std::vector<int32_t> counts(rows, cnt);
+  std::vector<int32_t> req_ids(rows, 0);
+  for (int r = 0; r < rows; ++r)
+    for (int i = 0; i < cnt; ++i)
+      tokens[size_t(r) * max_selected + i] = int32_t((r * 131 + i * 17) % 200);
+  const std::vector<int64_t> pos = {37, 100, 255};
+  std::vector<int32_t> causal(size_t(rows) * max_selected, -1);
+  std::vector<int32_t> causal_counts(rows);
+  for (int r = 0; r < rows; ++r)
+    causal_counts[size_t(r)] = dsa_ref::causal_all_tokens(pos[size_t(r)], max_selected,
+                                                          &causal[size_t(r) * max_selected]);
+
+  const int n_split = 4;
+  DevBuf dq(q.size() * 2), dkb(kv_b.size() * 2), dcache(cache.size()), dscale(scales.size() * 4),
+      dtopk(tokens.size() * 4), dcnt(rows * 4), dri(rows * 4), dbt(8), dpos(rows * 8),
+      dqt(size_t(rows) * local_heads * kv_lora * 2),
+      dm(size_t(rows) * n_split * local_heads * 4), dl(size_t(rows) * n_split * local_heads * 4),
+      dc(size_t(rows) * n_split * local_heads * kv_lora * 4),
+      dc_out(size_t(rows) * local_heads * kv_lora * 4), dout(size_t(rows) * local_heads * v * 2);
+  dq.upload(q.data(), q.size() * 2);
+  dkb.upload(kv_b.data(), kv_b.size() * 2);
+  dcache.upload(cache.data(), cache.size());
+  dscale.upload(scales.data(), scales.size() * 4);
+  dtopk.upload(tokens.data(), tokens.size() * 4);
+  dcnt.upload(counts.data(), counts.size() * 4);
+  dri.upload(req_ids.data(), req_ids.size() * 4);
+  dbt.upload(bt.data(), bt.size() * 4);
+  dpos.upload(pos.data(), pos.size() * 8);
+  const float scale = 1.0f / std::sqrt(float(nope));
+  dsa_absorb_q(dq.p, dkb.p, dqt.p, rows, local_heads, nope, v, kv_lora, 0);
+
+  const auto finish = [&](const std::vector<int32_t>& sel, const std::vector<int32_t>& sel_counts,
+                          const std::string& kernel) {
+    dsa_attn_combine(static_cast<const float*>(dm.p), static_cast<const float*>(dl.p),
+                     static_cast<const float*>(dc.p), rows, n_split, local_heads, kv_lora,
+                     static_cast<float*>(dc_out.p), 0);
+    dsa_vout_gemm(dc_out.p, dkb.p, dout.p, rows, local_heads, nope, v, kv_lora, 0);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> want(size_t(rows) * local_heads * v);
+    for (int r = 0; r < rows; ++r)
+      dsa_ref::absorbed_attn<float>(&q[size_t(r) * local_heads * nope], phys_deq.data(), kv_lora,
+                                    &sel[size_t(r) * max_selected], sel_counts[size_t(r)],
+                                    kv_b.data(), local_heads, nope, v, kv_lora, scale,
+                                    &want[size_t(r) * local_heads * v]);
+    std::vector<uint16_t> got(size_t(rows) * local_heads * v);
+    dout.download(got.data(), got.size() * 2);
+    require_bf16(what + " (" + kernel + ") vs the oracle over the dequantized rows",
+                 compare_bf16(got, want, 8), 0.01, 0.006);
+  };
+  // 1) the split kernel over the listed selection.
+  dsa_attn_partial(dqt.p, dcache.p, static_cast<const int32_t*>(dri.p),
+                   static_cast<const int32_t*>(dtopk.p), max_selected,
+                   static_cast<const int32_t*>(dcnt.p), rows, n_split, local_heads, kv_lora,
+                   block_tokens, static_cast<const int32_t*>(dbt.p), n_blocks, scale,
+                   static_cast<float*>(dm.p), static_cast<float*>(dl.p),
+                   static_cast<float*>(dc.p), 0, fmt, static_cast<const float*>(dscale.p));
+  finish(tokens, counts, "split");
+  // 2) the listed flash kernel over the same selection.
+  if (!dsa_attn_listed(dqt.p, dcache.p, static_cast<const int32_t*>(dri.p),
+                       static_cast<const int32_t*>(dtopk.p), max_selected,
+                       static_cast<const int32_t*>(dcnt.p), rows, n_split, local_heads, kv_lora,
+                       block_tokens, static_cast<const int32_t*>(dbt.p), n_blocks, scale,
+                       static_cast<float*>(dm.p), static_cast<float*>(dl.p),
+                       static_cast<float*>(dc.p), 0, fmt, static_cast<const float*>(dscale.p)))
+    throw std::runtime_error(what + ": the listed flash kernel declined the real geometry");
+  finish(tokens, counts, "listed flash");
+  // 3) the dense causal flash kernel over the positions.
+  if (!dsa_attn_dense(dqt.p, dcache.p, static_cast<const int32_t*>(dri.p),
+                      static_cast<const int64_t*>(dpos.p), rows, n_split, local_heads, kv_lora,
+                      block_tokens, static_cast<const int32_t*>(dbt.p), n_blocks, scale,
+                      static_cast<float*>(dm.p), static_cast<float*>(dl.p),
+                      static_cast<float*>(dc.p), 0, fmt, static_cast<const float*>(dscale.p)))
+    throw std::runtime_error(what + ": the dense flash kernel declined the real geometry");
+  finish(causal, causal_counts, "dense flash");
+}
+
+DGPP_TEST(dsa_attention_quantized_cache_matches_dequantized_oracle) {
+  attention_quantized_case(LatentFormat::kFp8, 6001);
+  attention_quantized_case(LatentFormat::kFp4, 6002);
+  attention_quantized_case(LatentFormat::kBf16, 6003);  // the path the others must equal
+}
+
+// A whole layer (chunked prefill across a partial pool + a decode batch) on
+// a quantized cache against the host reference, whose append quantizes the
+// same rows through the same codec and keeps the dequantized values: the
+// selection is identical (the index cache is fp8 in every format) and the
+// residual is the bf16 gate's — GEMM ulps, plus the elements those ulps
+// push across a quantization boundary (one code apart on the two sides).
+// Measured on this case (2026-09-06): kept-row max l2 4.3e-3 in fp8 and
+// 4.1e-3 in fp4 — the bf16 gate's own residual — so the budget is twice the
+// bf16 gate's; a wiring bug (a wrong stride, an unscaled row) diverges by
+// O(1) on every row.
+DGPP_TEST(dsa_layer_quantized_cache_matches_reference) {
+  DsaConfig fp8 = small_cfg();  // kv_lora 32: an fp4 row of two blocks
+  fp8.latent_format = LatentFormat::kFp8;
+  chunked_prefill_decode_case(fp8, "layer chunked+decode on an fp8 cache", 0.02);
+  DsaConfig fp4 = small_cfg();
+  fp4.latent_format = LatentFormat::kFp4;
+  chunked_prefill_decode_case(fp4, "layer chunked+decode on an fp4 cache", 0.02);
 }
 
 }  // namespace layer

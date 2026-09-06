@@ -2418,7 +2418,7 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
           in.rows = rows;
           in.vocab_count = shard.lm_vocab_count();
           in.vocab_begin = shard.lm_vocab_begin();
-          in.fed = shard.device_tokens();
+          in.fed = shard.device_feed(0, 2);
           return in;
         };
         // The draft's pick, eager on the device; checked against the host.
@@ -2631,7 +2631,7 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
           in.rows = rows;
           in.vocab_count = shard.lm_vocab_count();
           in.vocab_begin = shard.lm_vocab_begin();
-          in.fed = shard.device_tokens();
+          in.fed = shard.device_feed(0, 2);
           in.slot = slot;
           in.row_select = select;
           return in;
@@ -2845,12 +2845,13 @@ DGPP_TEST(glm_tp_serving_graph_adapter_matches_plain_and_reuses_slot) {
             int steps = 0;
             while (sched.tick()) {
               ++steps;
+              engine.drain();
               (void)spec.step();
               int64_t fed[2] = {-1, -1};
               // The model's stream, never the legacy stream: the peer
               // rank's thread may be mid-capture (the note on
               // session_graph_seed_tokens).
-              DGPP_CUDA_OK(cudaMemcpyAsync(fed, graph.device_tokens(),
+              DGPP_CUDA_OK(cudaMemcpyAsync(fed, graph.device_feed(0, 2),
                                            sizeof(fed),
                                            cudaMemcpyDeviceToHost,
                                            graph.stream()));
@@ -3083,6 +3084,7 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
           // between windows), in the same order on every rank.
           bool more = true;
           while (more) {
+            graph_engine.drain();
             const bool e = eager_sched.tick();
             const bool g = graph_sched.tick();
             if (e != g)
@@ -3137,6 +3139,7 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
           }
           bool more = true;
           while (more) {
+            graph_engine.drain();
             const bool e = eager_sched.tick();
             const bool gt = graph_sched.tick();
             if (e != gt)
@@ -3440,6 +3443,7 @@ DGPP_TEST(glm_tp_serving_graph_constrained_matches_eager_engine_and_grammar) {
           }
           bool more = true;
           while (more) {
+            graph_engine.drain();
             const bool e = eager_sched.tick();
             const bool g = graph_sched.tick();
             if (e != g)
@@ -3800,6 +3804,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
               }
             for (size_t i = 0; i < n; ++i) {
               if (!live[i] || finished[i]) continue;
+              engine.drain();
               const std::vector<int32_t> committed = specs[i]->step();
               streams[i].insert(streams[i].end(), committed.begin(),
                                 committed.end());
@@ -3824,7 +3829,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
                 continue;
               }
               int64_t fed[2] = {-1, -1};
-              DGPP_CUDA_OK(cudaMemcpyAsync(fed, graph.device_tokens() + 2 * res->slot,
+              DGPP_CUDA_OK(cudaMemcpyAsync(fed, graph.device_feed(res->slot, 2),
                                            sizeof(fed), cudaMemcpyDeviceToHost,
                                            graph.stream()));
               DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
@@ -3877,6 +3882,366 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
                 "== the eager sampled speculator's on every rank",
                 replays[0], fallbacks[0]);
 }
+
+// ---------------------------------------------------------------------------
+// The draft depth (2026-09-06): the serving graph at depth 2 and 3 — the
+// verify runs 1 + depth rows and the block's chained rows propose the
+// drafts after the first — decides the plain greedy transcript bitwise, and
+// after every replay the graph's device token feed [next, draft_1 ..
+// draft_depth] equals the eager GreedySpeculator's at the same depth (the
+// device chain is the eager chain, row for row).
+// ---------------------------------------------------------------------------
+static void run_mtp_depth_gate(int depth, int port) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kTokens = 10;
+  constexpr int kWorld = 2;
+  const int max_tokens = static_cast<int>(prompt.size()) + kTokens + 8;
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, port);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> seqs(kWorld);
+  std::vector<int> replays(kWorld, 0);
+  std::vector<int> stood(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel plain(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded);
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/1, /*mtp=*/true);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/1, /*mtp=*/true);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        arrive_once();
+
+        const auto pick_rows = [&](const std::vector<Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
+                                            test_wait_timeout_ms());
+        };
+        const auto host_pick = [&](const GlmDiagnosticModel::Outputs& out) {
+          return pick_rows(dgpp::local_row_maxes(out, 1))[0];
+        };
+        std::vector<int64_t> want;
+        GlmDiagnosticModel::Outputs out = plain.session_prefill(prompt);
+        int32_t token = host_pick(out);
+        for (int i = 0; i < kTokens; ++i) {
+          want.push_back(token);
+          if (i + 1 < kTokens) {
+            out = plain.session_step(token);
+            token = host_pick(out);
+          }
+        }
+        plain.session_close(0);
+
+        {
+          dgpp::GlmGraphEngineAdapter engine(
+              &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+              test_wait_timeout_ms(), /*batch_min_live=*/1, nullptr, nullptr,
+              dgpp::kSamplingCandidates, nullptr, /*prefix_slots=*/0, depth);
+          if (engine.max_tokens_per_step() != 1 + depth)
+            throw std::runtime_error("the engine's rows per request are not "
+                                     "1 + depth");
+          dgpp::sched::Scheduler sched(&engine, /*eos_token_ids=*/{});
+          dgpp::GreedySpeculator spec(eager, 0, pick_rows, depth);
+          spec.start(host_pick(eager.session_prefill(prompt)));
+          dgpp::sched::SchedulerRequest req;
+          req.id = "depth";
+          req.prompt = prompt;
+          req.max_steps = kTokens;
+          sched.submit(std::move(req));
+          while (sched.tick()) {
+            ++replays[static_cast<size_t>(r)];
+            engine.drain();
+            const std::vector<int32_t> committed = spec.step();
+            stood[static_cast<size_t>(r)] +=
+                static_cast<int>(committed.size()) - 1;
+            int64_t fed[GlmDiagnosticModel::kSpecRows] = {-1, -1, -1, -1};
+            DGPP_CUDA_OK(cudaMemcpyAsync(
+                fed, graph.device_feed(0, 1 + depth),
+                sizeof(int64_t) * static_cast<size_t>(1 + depth),
+                cudaMemcpyDeviceToHost, graph.stream()));
+            DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
+            std::string got = std::to_string(fed[0]);
+            std::string have = std::to_string(spec.next());
+            bool same = fed[0] == spec.next();
+            for (int c = 0; c < depth; ++c) {
+              got += ", " + std::to_string(fed[1 + c]);
+              have += ", " + std::to_string(spec.drafts()[static_cast<size_t>(c)]);
+              same = same && fed[1 + c] == spec.drafts()[static_cast<size_t>(c)];
+            }
+            if (!same)
+              throw std::runtime_error(
+                  "depth " + std::to_string(depth) + " replay " +
+                  std::to_string(replays[static_cast<size_t>(r)]) +
+                  ": the graph feeds [" + got +
+                  "] but the eager speculator has [" + have + "]");
+          }
+          eager.session_close(0);
+          seqs[static_cast<size_t>(r)] = sched.results()[0].generated;
+          if (seqs[static_cast<size_t>(r)] != want)
+            throw std::runtime_error(
+                "serving graph transcript at depth " + std::to_string(depth) +
+                " differs from plain decode");
+        }
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("MTP depth {} gate rank {} failed: {}", depth, r,
+                       e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  require(seqs[1] == seqs[0] && replays[1] == replays[0] && stood[1] == stood[0],
+          "the depth gate's ranks disagree");
+  DGPP_LOG_INFO("MTP depth {} gate w2: {} replays for {} tokens, {} draft "
+                "rows stood; transcript == plain, feed == the eager chain",
+                depth, replays[0], kTokens, stood[0]);
+}
+
+DGPP_TEST(glm_tp_serving_mtp_depth2_graph_matches_plain_and_eager_feed) {
+  run_mtp_depth_gate(2, 29933);
+}
+
+DGPP_TEST(glm_tp_serving_mtp_depth3_graph_matches_plain_and_eager_feed) {
+  run_mtp_depth_gate(3, 29934);
+}
+
+static void run_mtp_depth_sampling_gate(int depth, int port) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kWorld = 2;
+  constexpr int kSlots = 2;
+  constexpr int kCap = 24;
+  const int max_tokens = static_cast<int>(prompt.size()) + 16;
+  dgpp::sample::Params params;
+  params.temperature = 1.0f;
+  params.top_p = 0.95f;
+  params.frequency_penalty = 0.2f;
+  params.presence_penalty = 0.1f;
+  struct Spec {
+    const char* id;
+    int max_steps;
+    uint64_t seed;
+  };
+  const std::vector<std::vector<Spec>> phases{{{"solo", 7, 7}},
+                                              {{"a", 7, 11}, {"b", 6, 13}}};
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, port);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<std::vector<int64_t>>> graph_seqs(kWorld);
+  std::vector<uint64_t> fallbacks(kWorld, 0);
+  std::vector<int> replays(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      uint16_t* prefix_scratch = nullptr;
+      uint16_t* gather_scratch = nullptr;
+      const auto release = [&] {
+        if (scratch) cudaFreeHost(scratch);
+        if (prefix_scratch) cudaFreeHost(prefix_scratch);
+        if (gather_scratch) cudaFreeHost(gather_scratch);
+        scratch = prefix_scratch = gather_scratch = nullptr;
+      };
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        // Two slots with the draft layer's cache: the pool the batched MTP
+        // gate uses.
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 256, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded, kSlots,
+                                 /*mtp=*/true);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 256, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded, kSlots,
+                                 /*mtp=*/true);
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                                   sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+                                   cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+            cudaHostAllocDefault));
+        arrive_once();
+
+        const auto pick_rows = [&](const std::vector<Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
+                                            test_wait_timeout_ms());
+        };
+        const dgpp::GenEngineAdapter::Sample row1 = dgpp::make_fabric_sample(
+            &bus, r, kWorld, prefix_scratch, gather_scratch, cfg.vocab_size,
+            test_wait_timeout_ms());
+        const dgpp::SampledSpeculator::Row0 row0 = dgpp::make_fabric_spec_row0(
+            &bus, r, kWorld, prefix_scratch, gather_scratch, cfg.vocab_size,
+            test_wait_timeout_ms());
+        dgpp::GlmGraphEngineAdapter engine(
+            &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+            test_wait_timeout_ms(), /*batch_min_live=*/kSlots, prefix_scratch,
+            gather_scratch, kCap, nullptr, /*prefix_slots=*/0, depth);
+        if (!engine.supports_sampling() || engine.sampling_candidates() != kCap)
+          throw std::runtime_error("the MTP graph engine did not arm the "
+                                   "device sampler at the capped width");
+        dgpp::sched::Scheduler sched(&engine, /*eos=*/{});
+
+        size_t result_index = 0;
+        for (const std::vector<Spec>& phase : phases) {
+          const size_t n = phase.size();
+          std::vector<std::unique_ptr<dgpp::SampledSpeculator>> specs;
+          std::vector<std::vector<int32_t>> streams(n);  // committed so far
+          // The speculators prefill BEFORE the scheduler admits (the same
+          // collectives the graph engine's prefill issues at admission ride
+          // the bus in the same order on every rank either way).
+          for (size_t i = 0; i < n; ++i) {
+            dgpp::sample::Rng rng{phase[i].seed, 0};
+            const GlmDiagnosticModel::Outputs pre =
+                eager.session_prefill(static_cast<int>(i), prompt);
+            const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
+            const int32_t first =
+            row1(pre, params, rng, prompt_context, nullptr, nullptr).token;
+            specs.push_back(std::make_unique<dgpp::SampledSpeculator>(
+                eager, static_cast<int>(i), pick_rows, row0, row1, params, rng,
+                prompt, depth));
+            specs.back()->start(first);
+          }
+          for (size_t i = 0; i < n; ++i) {
+            dgpp::sched::SchedulerRequest req;
+            req.id = phase[i].id;
+            req.prompt = prompt;
+            req.max_steps = phase[i].max_steps;
+            req.sampling = params;
+            req.seed = phase[i].seed;
+            sched.submit(std::move(req));
+          }
+          // Lockstep: one scheduler tick (at most one admission, one replay
+          // for every live slot), then one eager step per request that was
+          // live in that replay, then the transcript and feed checks.
+          std::vector<bool> live(n, false);
+          std::vector<bool> finished(n, false);
+          while (sched.tick()) {
+            ++replays[static_cast<size_t>(r)];
+            for (size_t i = 0; i < n; ++i)
+              if (!live[i]) {
+                live[i] = true;  // the tick's one admission, in order
+                break;
+              }
+            for (size_t i = 0; i < n; ++i) {
+              if (!live[i] || finished[i]) continue;
+              engine.drain();
+              const std::vector<int32_t> committed = specs[i]->step();
+              streams[i].insert(streams[i].end(), committed.begin(),
+                                committed.end());
+              const dgpp::sched::Scheduler::Result* res = sched.find(phase[i].id);
+              if (res == nullptr) throw std::runtime_error("result lookup");
+              // The graph's tokens so far vs the speculator's committed
+              // stream plus its pending next, over the same length.
+              std::vector<int64_t> want(streams[i].begin(), streams[i].end());
+              want.push_back(specs[i]->next());
+              if (res->generated.size() > want.size())
+                throw std::runtime_error("the graph engine ran ahead of the "
+                                         "speculator");
+              if (!std::equal(res->generated.begin(), res->generated.end(),
+                              want.begin()))
+                throw std::runtime_error(
+                    std::string("request '") + phase[i].id +
+                    "' graph transcript differs from the eager sampled "
+                    "speculator's after replay " +
+                    std::to_string(replays[static_cast<size_t>(r)]));
+              if (res->status != dgpp::sched::Scheduler::Result::Status::kActive) {
+                finished[i] = true;
+                continue;
+              }
+              (void)kSlots;
+            }
+          }
+          for (size_t i = 0; i < n; ++i) {
+            const auto& got = sched.results()[result_index++].generated;
+            if (got.size() != static_cast<size_t>(phase[i].max_steps))
+              throw std::runtime_error(std::string("transcript length for ") +
+                                       phase[i].id);
+            graph_seqs[static_cast<size_t>(r)].push_back(got);
+            eager.session_close(static_cast<int>(i));
+          }
+        }
+        fallbacks[static_cast<size_t>(r)] = engine.fallbacks();
+        release();
+      } catch (const std::exception& e) {
+        release();
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("MTP graph sampling rank {} failed: {}", r, e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  for (int r = 1; r < kWorld; ++r) {
+    require(graph_seqs[static_cast<size_t>(r)] == graph_seqs[0],
+            "MTP graph sampling transcripts differ across ranks");
+    require(fallbacks[static_cast<size_t>(r)] == fallbacks[0],
+            "fallback counts differ across ranks");
+  }
+  require(fallbacks[0] > 0, "the capped width must force some fallbacks");
+  DGPP_LOG_INFO("MTP graph sampling at depth {} w2: {} replays, {} fallbacks; "
+                "transcripts == the eager sampled speculator's on every rank",
+                depth, replays[0], fallbacks[0]);
+}
+
+// The sampled verdict's chain at depth 2 (2026-09-06): the T=3 verify's
+// accept tests, the plain last row, and the host fallback's continuation
+// (a provisionally rejected draft that stands re-runs the next row eagerly
+// and tests the next draft there) decide, draw for draw, what the eager
+// SampledSpeculator at depth 2 decides.
+DGPP_TEST(glm_tp_serving_mtp_depth2_graph_sampling_matches_eager_speculator) {
+  run_mtp_depth_sampling_gate(2, 29935);
+}
+
 
 // The full Phase-2 MTP shape: four slots x two speculative rows make one
 // eight-row replay. Only noncontiguous slots 0 and 3 are live; the middle
@@ -3955,6 +4320,8 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
         // must leave no residue in any slot's state or token feed.
         engine.warm_captures(make_tokens(4, cfg.vocab_size));
 
+        engine.drain();
+
         const int32_t eager_first_a = first_pick(eager, 0, prompt_a);
         dgpp::GreedySpeculator spec_a(eager, 0, pick_rows);
         spec_a.start(eager_first_a);
@@ -3963,6 +4330,7 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
         engine.reserve(0, static_cast<int64_t>(prompt_a.size()) + 10);
 
         // Deliberately occupy slot 3 so slots 1 and 2 are all-padding spans.
+        engine.drain();
         const int32_t eager_first_b = first_pick(eager, 3, prompt_b);
         dgpp::GreedySpeculator spec_b(eager, 3, pick_rows);
         spec_b.start(eager_first_b);
@@ -3971,6 +4339,7 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
         engine.reserve(3, static_cast<int64_t>(prompt_b.size()) + 10);
 
         for (int round = 0; round < kRounds; ++round) {
+          engine.drain();
           const std::vector<int32_t> want_a = newly_decided(spec_a);
           const std::vector<int32_t> want_b = newly_decided(spec_b);
           const std::vector<int> order = round & 1 ? std::vector<int>{3, 0}
@@ -3984,7 +4353,7 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
                         std::to_string(order[i]));
           }
           int64_t feed[8] = {};
-          DGPP_CUDA_OK(cudaMemcpyAsync(feed, graph.device_tokens(), sizeof(feed),
+          DGPP_CUDA_OK(cudaMemcpyAsync(feed, graph.device_feed(0, 2), sizeof(feed),
                                        cudaMemcpyDeviceToHost, graph.stream()));
           DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
           require(feed[0] == spec_a.next() && feed[1] == spec_a.draft() &&
@@ -4002,12 +4371,13 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
         // are allowed to stay stale until the next transition seeds them.
         engine.close(3);
         eager.session_close(3);
+        engine.drain();
         const std::vector<int32_t> want_a = newly_decided(spec_a);
         const auto one = engine.step_batch({0});
         require(one.size() == 1 && one[0] == want_a,
                 "live slot changed while its peer was padding");
         int64_t padded_feed[8] = {};
-        DGPP_CUDA_OK(cudaMemcpyAsync(padded_feed, graph.device_tokens(),
+        DGPP_CUDA_OK(cudaMemcpyAsync(padded_feed, graph.device_feed(0, 2),
                                      sizeof(padded_feed), cudaMemcpyDeviceToHost,
                                      graph.stream()));
         DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
@@ -4015,12 +4385,15 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
                     padded_feed[1] == spec_a.draft(),
                 "slot 0 scalar graph did not leave its compact feed");
 
+        engine.drain();
+
         const int32_t eager_first_c = first_pick(eager, 3, prompt_c);
         dgpp::GreedySpeculator spec_c(eager, 3, pick_rows);
         spec_c.start(eager_first_c);
         const int32_t graph_first_c = engine.prefill(3, prompt_c);
         require(graph_first_c == eager_first_c, "reused slot prefill differs");
         engine.reserve(3, static_cast<int64_t>(prompt_c.size()) + 10);
+        engine.drain();
         const std::vector<int32_t> want_a2 = newly_decided(spec_a);
         const std::vector<int32_t> want_c = newly_decided(spec_c);
         const auto reused = engine.step_batch({3, 0});
@@ -4033,6 +4406,7 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
         // -> scalar transition does not accidentally bind slot 0's state.
         engine.close(0);
         eager.session_close(0);
+        engine.drain();
         const std::vector<int32_t> want_c2 = newly_decided(spec_c);
         const auto scalar_three = engine.step_batch({3});
         require(scalar_three.size() == 1 && scalar_three[0] == want_c2,
@@ -4817,7 +5191,7 @@ DGPP_TEST(glm_tp_one_graph_step_forced_rejections_at_pool_boundaries_match_plain
           in.rows = rows;
           in.vocab_count = shard.lm_vocab_count();
           in.vocab_begin = shard.lm_vocab_begin();
-          in.fed = shard.device_tokens();
+          in.fed = shard.device_feed(0, 2);
           in.slot = slot;
           in.row_select = select;
           return in;

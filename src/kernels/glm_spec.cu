@@ -101,10 +101,41 @@ __global__ void spec_draft_rows_kernel(const PickVerdict* __restrict__ verdict,
 }
 
 __global__ void spec_next_tokens_kernel(const int64_t* __restrict__ next,
-                                        const PickVerdict* __restrict__ draft,
+                                        GlmSpecDrafts drafts,
                                         int64_t* __restrict__ tokens) {
   tokens[0] = *next;
-  tokens[1] = draft->next;
+  for (int c = 0; c < drafts.count; ++c) {
+    const int32_t id = drafts.v[c]->next;
+    tokens[1 + c] = id >= 0 ? id : 0;  // any valid id; a bad draft never stands
+  }
+}
+
+__global__ void spec_chain_row_kernel(
+    const PickVerdict* __restrict__ verify, int src_row,
+    const PickVerdict* __restrict__ draft, const uint16_t* __restrict__ block_x,
+    int hidden, uint16_t* __restrict__ hidden_cache,
+    const int64_t* __restrict__ block_pos, int chain_index, int64_t max_context,
+    int64_t* __restrict__ step_pos, int64_t* __restrict__ tokens,
+    int32_t* __restrict__ req_spans) {
+  const int row = verify != nullptr ? max(verify->accepted - 1, 0) : src_row;
+  const int64_t pos = *block_pos + chain_index;
+  const bool fits = pos >= 0 && pos < max_context;
+  if (fits) {
+    // The hidden row into the position cache, 16 bytes per thread-step.
+    const uint4* src = reinterpret_cast<const uint4*>(
+        block_x + static_cast<size_t>(row) * hidden);
+    uint4* dst = reinterpret_cast<uint4*>(
+        hidden_cache + static_cast<size_t>(pos) * hidden);
+    const int units = hidden / 8;
+    for (int i = threadIdx.x; i < units; i += blockDim.x) dst[i] = src[i];
+  }
+  if (threadIdx.x == 0) {
+    step_pos[0] = fits ? pos : -1;
+    const int32_t id = draft->next;
+    tokens[0] = id >= 0 ? id : 0;
+    req_spans[0] = 0;
+    req_spans[1] = 1;
+  }
 }
 
 __global__ void spec_draft_rows_batched_kernel(
@@ -157,7 +188,81 @@ bool aligned16(const void* p) {
   return (reinterpret_cast<uintptr_t>(p) & 15) == 0;
 }
 
+__device__ __forceinline__ uint64_t ld_acquire_sys_u64(const uint64_t* p) {
+  uint64_t v;
+  asm volatile("ld.acquire.sys.global.u64 %0, [%1];" : "=l"(v) : "l"(p) : "memory");
+  return v;
+}
+
+__global__ void stage_wait_kernel(const uint64_t* __restrict__ pinned_seq,
+                                  uint64_t* __restrict__ device_seq,
+                                  uint32_t* __restrict__ pinned_late,
+                                  int64_t timeout_ns) {
+  if (threadIdx.x != 0) return;
+  const uint64_t need = *device_seq + 1;
+  *device_seq = need;
+  uint64_t t0 = 0;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
+  while (ld_acquire_sys_u64(pinned_seq) < need) {
+    uint64_t now = 0;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(now));
+    if (static_cast<int64_t>(now - t0) > timeout_ns) {
+      *pinned_late = 1u;
+      __threadfence_system();
+      break;
+    }
+    __nanosleep(2000);
+  }
+}
+
+__global__ void publish_seq_kernel(uint64_t* __restrict__ device_seq,
+                                   uint64_t* __restrict__ pinned_out) {
+  if (threadIdx.x != 0) return;
+  const uint64_t v = *device_seq + 1;
+  *device_seq = v;
+  asm volatile("st.release.sys.global.u64 [%0], %1;" ::"l"(pinned_out), "l"(v) : "memory");
+}
+
+__global__ void upload_words_kernel(const uint32_t* __restrict__ src,
+                                    uint32_t* __restrict__ dst, size_t count) {
+  for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < count; i += static_cast<size_t>(gridDim.x) * blockDim.x) {
+    uint32_t v;
+    asm volatile("ld.relaxed.sys.global.u32 %0, [%1];" : "=r"(v) : "l"(src + i) : "memory");
+    dst[i] = v;
+  }
+}
+
 }  // namespace
+
+void glm_stage_wait(const uint64_t* pinned_stage_seq, uint64_t* device_seq,
+                    uint32_t* pinned_late, int64_t timeout_ns,
+                    cudaStream_t stream) {
+  if (pinned_stage_seq == nullptr || device_seq == nullptr ||
+      pinned_late == nullptr || timeout_ns < 1)
+    throw std::invalid_argument("glm_stage_wait: null argument/timeout");
+  stage_wait_kernel<<<1, 32, 0, stream>>>(pinned_stage_seq, device_seq,
+                                          pinned_late, timeout_ns);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_publish_seq(uint64_t* device_seq, uint64_t* pinned_out,
+                     cudaStream_t stream) {
+  if (device_seq == nullptr || pinned_out == nullptr)
+    throw std::invalid_argument("glm_publish_seq: null argument");
+  publish_seq_kernel<<<1, 32, 0, stream>>>(device_seq, pinned_out);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_upload_words(const uint32_t* pinned_src, uint32_t* dst, size_t count,
+                      cudaStream_t stream) {
+  if (pinned_src == nullptr || dst == nullptr || count == 0)
+    throw std::invalid_argument("glm_upload_words: null argument/count");
+  const unsigned blocks = static_cast<unsigned>(
+      std::min<size_t>((count + 255) / 256, 256));
+  upload_words_kernel<<<blocks, 256, 0, stream>>>(pinned_src, dst, count);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
 
 void glm_spec_commit(const PickVerdict* verdict, int rows,
                      const GlmSpecSegments& segments, int64_t* session_pos,
@@ -275,12 +380,40 @@ void glm_spec_draft_rows_batched(
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void glm_spec_next_tokens(const int64_t* next,
-                          const PickVerdict* draft_verdict, int64_t* tokens,
-                          cudaStream_t stream) {
-  if (next == nullptr || draft_verdict == nullptr || tokens == nullptr)
+void glm_spec_next_tokens(const int64_t* next, const GlmSpecDrafts& drafts,
+                          int64_t* tokens, cudaStream_t stream) {
+  if (next == nullptr || tokens == nullptr)
     throw std::invalid_argument("glm_spec_next_tokens: null argument");
-  spec_next_tokens_kernel<<<1, 1, 0, stream>>>(next, draft_verdict, tokens);
+  if (drafts.count < 1 || drafts.count > kSpecMaxDrafts)
+    throw std::invalid_argument("glm_spec_next_tokens: draft count");
+  for (int c = 0; c < drafts.count; ++c)
+    if (drafts.v[c] == nullptr)
+      throw std::invalid_argument("glm_spec_next_tokens: null draft verdict");
+  spec_next_tokens_kernel<<<1, 1, 0, stream>>>(next, drafts, tokens);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_spec_chain_row(const PickVerdict* verify_verdict, int src_row,
+                        const PickVerdict* draft_verdict,
+                        const uint16_t* block_x, int hidden,
+                        uint16_t* hidden_cache, const int64_t* block_pos,
+                        int chain_index, int64_t max_context,
+                        int64_t* step_pos, int64_t* tokens, int32_t* req_spans,
+                        cudaStream_t stream) {
+  if (draft_verdict == nullptr || block_x == nullptr ||
+      hidden_cache == nullptr || block_pos == nullptr || step_pos == nullptr ||
+      tokens == nullptr || req_spans == nullptr)
+    throw std::invalid_argument("glm_spec_chain_row: null argument");
+  if (hidden < 8 || hidden % 8 != 0 || !aligned16(block_x) ||
+      !aligned16(hidden_cache))
+    throw std::invalid_argument("glm_spec_chain_row: hidden alignment");
+  if (verify_verdict == nullptr && (src_row < 0 || src_row >= kPickMaxRows))
+    throw std::invalid_argument("glm_spec_chain_row: source row");
+  if (chain_index < 0 || chain_index >= kSpecMaxDrafts || max_context < 1)
+    throw std::invalid_argument("glm_spec_chain_row: chain index/context");
+  spec_chain_row_kernel<<<1, 256, 0, stream>>>(
+      verify_verdict, src_row, draft_verdict, block_x, hidden, hidden_cache,
+      block_pos, chain_index, max_context, step_pos, tokens, req_spans);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

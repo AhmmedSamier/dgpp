@@ -353,6 +353,7 @@ add_executable(unit_tests
   tests/unit/arena_test.cpp
   tests/unit/safetensors_test.cpp
   tests/unit/fp8_test.cpp
+  tests/unit/latent_format_test.cpp
   tests/unit/shardspec_test.cpp
   tests/unit/hf_cache_test.cpp
   tests/unit/kda_geometry_test.cpp
@@ -636,6 +637,16 @@ dgpp_set_common(micro_gemm_peak)
 add_executable(kda_bench benchmarks/micro/kda_bench.cu src/common/log.cpp)
 target_link_libraries(kda_bench PRIVATE dgpp_models_kda CUDA::cudart CUDA::cublasLt)
 dgpp_set_common(kda_bench)
+
+add_executable(moe_slot_bench benchmarks/micro/moe_slot_bench.cu src/common/log.cpp)
+target_include_directories(moe_slot_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(moe_slot_bench PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart CUDA::cublasLt)
+dgpp_set_common(moe_slot_bench)
+
+add_executable(dsa_select_bench benchmarks/micro/dsa_select_bench.cu)
+target_include_directories(dsa_select_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dsa_select_bench PRIVATE dgpp_models_dsa CUDA::cudart)
+dgpp_set_common(dsa_select_bench)
 
 add_executable(dsa_bench benchmarks/micro/dsa_bench.cu src/common/log.cpp)
 target_link_libraries(dsa_bench PRIVATE dgpp_models_dsa CUDA::cudart CUDA::cublasLt)

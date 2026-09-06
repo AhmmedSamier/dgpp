@@ -79,8 +79,14 @@ class GlmDiagnosticModel {
     std::vector<std::vector<float>> route_biased;
   };
 
-  // `max_tokens` bounds a forward's token count; `max_cache_tokens` bounds
-  // the DSA cache (rounded up to a block). Both also size scratch.
+  // `max_tokens` bounds a forward's ROW count (a prefill chunk, a decode
+  // batch, a diagnostic re-forward of a whole prompt) and sizes every
+  // per-forward activation and scratch buffer; `max_cache_tokens` bounds
+  // the CONTEXT — the DSA cache (rounded up to a block), the positions a
+  // session may reach and the per-position draft hidden cache
+  // (max_context()). A serving process keeps `max_tokens` at the prefill
+  // chunk and lets the context grow independently (2026-09-06: the two
+  // were one number, and a 262k-token context sized 200 GB of activations).
   //
   // TP (M5): `tp_world` > 1 slices every layer's head/expert/inter shards
   // to this rank (`tp_rank`), runs the forward on the local geometry, and
@@ -111,6 +117,10 @@ class GlmDiagnosticModel {
   // is the ADMISSION BUDGET across all concurrent requests, not a
   // per-request bound: the scheduler admits a request only when its full
   // reservation (prompt + max_steps, block-rounded) fits the free pool.
+  //
+  // KV FORMAT (2026-09-06): `kv_format` is the DSA latent cache's storage
+  // format (kernels/latent_format.hpp) — bf16 (default, every parity
+  // gate's format), fp8 or fp4; the index cache stays fp8 regardless.
   GlmDiagnosticModel(const GlmTextConfig& cfg,
                      const std::string& checkpoint_dir, int max_tokens,
                      int64_t max_cache_tokens,
@@ -118,7 +128,49 @@ class GlmDiagnosticModel {
                      int tp_world = 1,
                      GlmResidency residency = GlmResidency::Streaming,
                      GlmHeadSharding head = GlmHeadSharding::Full,
-                     int max_requests = 1, bool mtp = false);
+                     int max_requests = 1, bool mtp = false,
+                     LatentFormat kv_format = LatentFormat::kBf16);
+
+  // ---- the memory plan (2026-09-06) ----------------------------------------
+  // Every byte the constructor (and its layer objects) will allocate for a
+  // shape, itemized, computed from the same formulas BEFORE anything is
+  // allocated — so a serving process can refuse a configuration that does
+  // not fit instead of driving the node into its memory watermark (the
+  // 262k-context freeze of 2026-09-06). `device` counts cudaMalloc and the
+  // arena; `pinned` counts cudaHostAlloc (on the GB10's unified pool both
+  // come out of the same memory). The GEMM workspace is its floor (cuBLASLt
+  // may ask for more for the head at a large row count) and the CUDA
+  // context, the bus and the prefix arena are the caller's to add.
+  struct MemoryPlan {
+    struct Item {
+      std::string name;
+      size_t device = 0;
+      size_t pinned = 0;
+    };
+    std::vector<Item> items;
+    int64_t context_tokens = 0;  // the pool's token capacity (max_context())
+    void add(std::string name, size_t device, size_t pinned = 0) {
+      items.push_back(Item{std::move(name), device, pinned});
+    }
+    size_t device_bytes() const {
+      size_t t = 0;
+      for (const Item& i : items) t += i.device;
+      return t;
+    }
+    size_t pinned_bytes() const {
+      size_t t = 0;
+      for (const Item& i : items) t += i.pinned;
+      return t;
+    }
+    size_t total_bytes() const { return device_bytes() + pinned_bytes(); }
+  };
+  static MemoryPlan plan_memory(const GlmTextConfig& cfg, int max_tokens,
+                                int64_t max_cache_tokens, int tp_rank = 0,
+                                int tp_world = 1,
+                                GlmResidency residency = GlmResidency::Streaming,
+                                GlmHeadSharding head = GlmHeadSharding::Full,
+                                int max_requests = 1, bool mtp = false,
+                                LatentFormat kv_format = LatentFormat::kBf16);
   ~GlmDiagnosticModel();
   GlmDiagnosticModel(const GlmDiagnosticModel&) = delete;
   GlmDiagnosticModel& operator=(const GlmDiagnosticModel&) = delete;
@@ -182,6 +234,9 @@ class GlmDiagnosticModel {
   };
   // Device bytes a snapshot needs (the caller owns the arena).
   size_t session_snapshot_bytes() const;
+  // The same number for a shape that is not built yet (the memory plan).
+  static size_t session_snapshot_bytes(const GlmTextConfig& cfg, int tp_world,
+                                       bool mtp);
   int session_kpool() const;  // the alignment every snapshot position obeys
   // Chunking (M7's contract): a prefill is cut at every kPrefillChunkTokens
   // multiple and at the pool-aligned image of every `boundaries` entry
@@ -272,11 +327,30 @@ class GlmDiagnosticModel {
   // scalar step, the slot's first row of a fixed batch). The slot must sit
   // at P+1 with its draft block at P+1 (the rows ran) or at P-1 (they have
   // not — the live ring is then the pre-draft ring).
-  SessionSnapshotMeta session_snapshot_post_row0(int req, void* dst, int spec_row);
+  // `rows_after`: the rows the step committed past the position (1 for
+  // the two-row step; a deeper verify's accepted - 1).
+  SessionSnapshotMeta session_snapshot_post_row0(int req, void* dst, int spec_row,
+                                                 int rows_after = 1);
   // The draft block's tail ring into its rollback snapshot (what the graph
   // records before its draft rows); the eager path's counterpart, so a hop
   // snapshot can follow an eager two-row verify.
   void session_draft_ring_snapshot(int req);
+
+  // The chained draft (depth >= 2, 2026-09-06): after session_draft (or a
+  // previous chain row) the block runs ONE row at the position after its
+  // counter (`index` rows past it), fed `token` — the previous draft's
+  // pick — and its own previous output row as the hidden: the single
+  // block's recursion, which approximates the main stack's hidden at that
+  // position by the block's. The counter does not move; everything the row
+  // writes is provisional and positional, and the next step's real rows
+  // overwrite it. `first` snapshots the block's tail ring before the row
+  // (a chain row past the first can clobber a stash a later real pool
+  // completion still needs), `last` restores it after the row. Returns the
+  // row's head logits (the draft pick's input). A row whose position would
+  // leave the context is skipped by the caller (session_draft_chain_fits).
+  bool session_draft_chain_fits(int req, int index) const;
+  Outputs session_draft_chain(int req, int64_t token, int index, bool first,
+                              bool last);
 
   // The MTP draft block (constructed with mtp = true). The block's row at
   // main-stack position q takes [enorm(embed(tok_{q+1})) | hnorm(h_q)] and
@@ -363,6 +437,19 @@ class GlmDiagnosticModel {
   // rows are its fed tokens in order; a draft's head lands in row 0.
   const float* device_logits() const { return logits_; }
   const int64_t* device_tokens() const { return d_tokens_; }
+  // The persistent token feed of slot `req` (2026-09-06, the pipelined
+  // replay): rows [req * rows, req * rows + rows) of the device tokens —
+  // the scalar variant of the slot and the fixed batch alike read their
+  // fed tokens there and write the next replay's, so a slot's feed
+  // survives the other slots' replays and a mode switch. Eager decode
+  // work (the eager draft, verify and chain) uses rows [0, kDecodeRows)
+  // as scratch, so the feeds start past them; a prefill writes its chunk
+  // over everything and the engine reseeds every live slot's feed after
+  // it.
+  const int64_t* device_feed(int req, int rows) const {
+    return d_tokens_ + kDecodeRows +
+           static_cast<size_t>(req) * static_cast<size_t>(rows);
+  }
   const int64_t* device_positions() const { return d_step_pos_; }
   int lm_vocab_begin() const { return lm_vocab_begin_; }
   int lm_vocab_count() const { return lm_vocab_count_; }
@@ -455,11 +542,26 @@ class GlmDiagnosticModel {
                                    const PickVerdict* verify_verdict);
   void session_graph_capture_next_tokens(int req,
                                          const PickVerdict* draft_verdict);
+  // The in-graph chain row (depth >= 2): the row's token off
+  // `draft_verdict` (the previous draft pick's device verdict), its hidden
+  // off the block's last accepted row (`verify_verdict`, index 0) or its
+  // previous chain row (index > 0); recorded behind the caller's recorded
+  // draft pick. The feed then takes every draft: d_tokens_ = [next,
+  // draft_1 .. draft_n].
+  void session_graph_capture_draft_chain(int req,
+                                         const PickVerdict* verify_verdict,
+                                         const PickVerdict* draft_verdict,
+                                         int index, bool first, bool last);
+  void session_graph_capture_next_tokens(
+      int req, const std::vector<const PickVerdict*>& draft_verdicts);
   void session_graph_seed_tokens(int req, const std::vector<int64_t>& ids);
   // Seeds the shared row-zero feed used by a slot-specific scalar graph.
   // Adaptive serving owns one such graph per physical request slot; its
   // state pointers are slot-specific, while its token rows stay compact.
   void session_graph_seed_scalar_tokens(const std::vector<int64_t>& ids);
+  // Seeds slot `req`'s persistent feed rows (device_feed) — the scalar
+  // variant's and the batch's alike.
+  void session_graph_seed_feed(int req, const std::vector<int64_t>& ids);
   void session_graph_settle(int req, int accepted);
   void set_decode_tail_mirrors(bool on) { decode_tail_mirrors_ = on; }
   // Materializes the replay's Outputs WITHOUT moving the position (the
@@ -550,7 +652,13 @@ class GlmDiagnosticModel {
       std::vector<std::vector<uint16_t>>* boundary_capture = nullptr);
 
   const GlmTextConfig& config() const { return cfg_; }
+  // The row bound of one forward (activations are sized to it).
   int max_tokens() const { return max_tokens_; }
+  // The context bound: the highest token count a session may reach — the
+  // DSA pool's slots (a prompt plus its answer must fit), or the larger of
+  // the two constructor bounds without DSA layers.
+  int64_t max_context() const { return max_context_; }
+  LatentFormat kv_format() const { return dsa_cfg_.latent_format; }
   // The last replayed decode step's first-node %globaltimer (see
   // launch_globaltimer_stamp); 0 before any decode step.
   uint64_t graph_start_globaltimer() const { return *h_graph_start_gt_; }
@@ -651,6 +759,10 @@ class GlmDiagnosticModel {
   // Records the draft ring snapshot node for slot `req` (the in-graph
   // draft's rollback point).
   void snapshot_draft_ring(int req);
+  // The chain's ring guard: the block's tail ring into (restore = false) or
+  // back from (restore = true) the chain snapshot — kernel copies, in the
+  // graph or eager.
+  void chain_ring_copy(int req, bool restore);
   void mtp_run_rows(int req, int64_t first_pos, int T, bool decode_row,
                     bool capture_mode, int head_rows = 1,
                     int batch_requests = 0);
@@ -701,6 +813,7 @@ class GlmDiagnosticModel {
   GlmMoeConfig moe_cfg_;
   KdaGeometry kda_geo_;
   int max_tokens_ = 0;
+  int64_t max_context_ = 0;
   GlmReplicatedDigest boot_digest_{};
   double boot_digest_ms_ = 0;
   double boot_globals_ms_ = 0;
@@ -750,6 +863,11 @@ class GlmDiagnosticModel {
 
   // Per-forward activations (managed; sized to max_tokens).
   int64_t* d_tokens_ = nullptr;
+  // The token rows the step being built reads and writes: d_tokens_ (the
+  // eager scratch, the fixed batch's per-slot rows) or, for a slot's
+  // scalar capture, that slot's feed rows (device_feed) — set at the
+  // capture's start, reset to d_tokens_ by every eager entry.
+  int64_t* step_tokens_ = nullptr;
   // Decode-session state: per-slot positions (tokens processed; 0 = slot
   // closed) and the DSA decode-path metadata (enqueue_decode's
   // caller-owned device buffers — allocation happens at construction,
@@ -816,10 +934,14 @@ class GlmDiagnosticModel {
                                   // counter for the in-graph draft
   int64_t* h_mtp_pos_ = nullptr;  // pinned upload mirror
   int draft_rows_ = 1;
-  uint16_t* mtp_hidden_ = nullptr;  // [max_requests, max_tokens, H]
+  uint16_t* mtp_hidden_ = nullptr;  // [max_requests, max_context, H]
   uint16_t* mtp_ring_snapshot_ = nullptr;  // [max_requests][ring] bf16: the
                                            // draft's tail ring before its
                                            // in-graph rows
+  uint16_t* mtp_chain_ring_ = nullptr;     // [max_requests][ring] bf16: the
+                                           // ring before the chain rows
+  int mtp_draft_last_row_ = 0;  // the last eager block run's last row (the
+                                // eager chain's hidden source)
   uint16_t* mtp_cat_ = nullptr;     // [T, 2H] the eh_proj input
   uint16_t* mtp_x_ = nullptr;       // [T, H] the block's residual
   // Decode-path route traces (2026-09-01): per-MoE-layer pinned staging

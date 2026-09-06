@@ -4,6 +4,7 @@
 #include <sys/resource.h>
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -56,6 +57,16 @@ bool lock_process_memory(std::string* error, size_t* locked_bytes) {
     }
   }
   return true;
+}
+
+size_t host_memory_available_bytes() {
+  std::ifstream in("/proc/meminfo");
+  std::string key;
+  uint64_t kib = 0;
+  std::string unit;
+  while (in >> key >> kib >> unit)
+    if (key == "MemAvailable:") return static_cast<size_t>(kib) * 1024;
+  return 0;
 }
 
 }  // namespace dgpp

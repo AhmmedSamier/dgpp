@@ -266,7 +266,9 @@ __global__ void mhc_dots_kernel(const uint16_t* __restrict__ streams,
   float ssq = 0.f;
   if constexpr (kVec) {
     const uint4* xv = reinterpret_cast<const uint4*>(x);
-#pragma unroll 4
+    // Unrolled 8 (2026-09-06): the decode site's 16 K-vectors per thread
+    // are two latency rounds of eight loads instead of four of four.
+#pragma unroll 8
     for (int v = threadIdx.x; v < K / 8; v += kThreads) {
       float f[8];
       unpack8(xv[v], f);
@@ -286,7 +288,7 @@ __global__ void mhc_dots_kernel(const uint16_t* __restrict__ streams,
   if constexpr (kVec) {
     const uint4* xv = reinterpret_cast<const uint4*>(x);
     const uint4* wv = reinterpret_cast<const uint4*>(fn_row);
-#pragma unroll 4
+#pragma unroll 8
     for (int v = threadIdx.x; v < K / 8; v += kThreads) {
       float f[8], g[8];
       unpack8(xv[v], f);

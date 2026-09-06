@@ -1503,7 +1503,8 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
           "JSON Schema's default is open: keys unconstrained");
   // A strict function whose schema leaves the enforceable subset is a 400
   // naming the keyword path; the same schema without strict is served
-  // with that value free.
+  // with that value typed and the bound unenforced (2026-09-06), and a
+  // keyword that changes the value's shape leaves it free.
   const std::string strict_tools =
       ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"strict\":STRICT,"
       "\"parameters\":{\"type\":\"object\",\"properties\":{\"days\":{\"type\":"
@@ -1522,8 +1523,17 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
     (void)post_until_usage(rig, chat_body("abcd", 64, body));
     const std::vector<dgpp::text::GrammarSpec> g3 = rig.engine.grammars();
     require(g3.size() == 8 && g3[7].tools[0].args.size() == 1 &&
-                g3[7].tools[0].args[0].kind == Kind::kFree,
-            "non-strict: the value stays free");
+                g3[7].tools[0].args[0].kind == Kind::kJson &&
+                g3[7].tools[0].args[0].schema.find("minimum") != std::string::npos,
+            "non-strict: a narrowing keyword keeps the value typed");
+    std::string shaped = strict_tools;
+    shaped.replace(shaped.find("STRICT"), 6, "false");
+    shaped.replace(shaped.find("\"minimum\":0"), 11, "\"$ref\":\"#/x\"");
+    (void)post_until_usage(rig, chat_body("abcd", 64, shaped));
+    const std::vector<dgpp::text::GrammarSpec> g4 = rig.engine.grammars();
+    require(g4.size() == 9 && g4[8].tools[0].args.size() == 1 &&
+                g4[8].tools[0].args[0].kind == Kind::kFree,
+            "non-strict: a shape keyword outside the subset leaves the value free");
   }
 }
 
@@ -2342,25 +2352,44 @@ DGPP_TEST(serve_throughputLog_oneLinePerIntervalWithTheDeltas_thenQuiet) {
 
   // At the interval: ONE line with the deltas as rates over the elapsed time.
   const std::string line = log.observe(m, &sc, at(10));
-  require(line.find("stats: rank 0 over 10.0 s: prefill 1 prompt / 100 tok "
-                    "(10 tok/s; 500 ms avg, 5.00 ms/tok; 5 % of wall), cache "
-                    "saved 20 tok (1/1 hit)") != npos,
-          "the prefill half: " + line);
-  require(line.find("; decode 200 steps / 700 tok (70 tok/s; 40.0 ms/step, "
-                    "1.75 tok/step/req; 80 % of wall)") != npos,
-          "the decode half: " + line);
-  require(line.find("; running 2, queued 1; pool 25/100 blocks (25 %); prefix "
-                    "cache 3/4 entries; requests +3 (shed 1, cancelled 0)") !=
+  // Decode leads (2026-09-06): the interval's tok/s, the pace while
+  // decoding (8000 ms over 700 tokens), the step, the counts and share.
+  require(line.find("stats: rank 0 | 10.0 s | decode 70.0 tok/s, 11.4 ms/tok, "
+                    "40.0 ms/step (200 steps / 700 tok, 80 % of wall)") != npos,
+          "the decode group: " + line);
+  require(line.find("| mtp ") == npos, "no MTP group unless asked: " + line);
+  require(line.find("| prefill 1 prompt / 100 tok, 10 tok/s, 5.00 ms/tok, "
+                    "500 ms avg (5 % of wall), 20 tok cached (1/1 hit)") != npos,
+          "the prefill group: " + line);
+  require(line.find("| live 2, queued 1 | pool 25/100 blocks (25 %) | prefix "
+                    "cache 3/4 entries | requests +3 (shed 1, cancelled 0)") !=
               npos,
           "the state tail: " + line);
+  // With MTP the yield group follows decode: 700 tokens over 400 request
+  // rows is 1.75 per row, and the engine's per-position counts give the
+  // measured acceptance of each draft (here depth 2: 150/200 and 90/200).
+  {
+    ThroughputLog mlog(10.0, /*rank=*/0, /*mtp=*/true);
+    dgpp::sched::Scheduler::Meters zero;
+    require(mlog.observe(zero, &sc, at(0)).empty(), "priming is silent (mtp)");
+    m.mtp.depth = 2;
+    m.mtp.attempts[0] = 200;
+    m.mtp.accepts[0] = 150;
+    m.mtp.attempts[1] = 200;
+    m.mtp.accepts[1] = 90;
+    const std::string ml = mlog.observe(m, &sc, at(10));
+    require(ml.find("| mtp 1.75 tok/step/req, accept p1 75 % p2 45 % | prefill") != npos,
+            "the MTP group: " + ml);
+    m.mtp = {};
+  }
 
   // The interval after the work ends writes one closing line of zeros ...
   m.active = 0;
   m.queued = 0;
   const std::string closing = log.observe(m, &sc, at(20));
-  require(closing.find("prefill 0 prompts / 0 tok") != npos &&
-              closing.find("decode 0 steps / 0 tok") != npos &&
-              closing.find("running 0, queued 0") != npos,
+  require(closing.find("| prefill 0 prompts / 0 tok") != npos &&
+              closing.find("(0 steps / 0 tok, 0 % of wall)") != npos &&
+              closing.find("| live 0, queued 0 |") != npos,
           "the closing line: " + closing);
   // ... and an idle world then stays quiet.
   require(log.observe(m, &sc, at(30)).empty() &&
@@ -2371,8 +2400,9 @@ DGPP_TEST(serve_throughputLog_oneLinePerIntervalWithTheDeltas_thenQuiet) {
   m.decode_rows = 401;
   m.tokens_generated = 702;
   const std::string back = log.observe(m, &sc, at(52));
-  require(back.find("over 12.0 s: prefill 0 prompts") != npos &&
-              back.find("decode 1 step / 2 tok") != npos,
+  require(back.find("| 12.0 s | decode") != npos &&
+              back.find("(1 step / 2 tok, ") != npos &&
+              back.find("| prefill 0 prompts") != npos,
           "the line returns with work: " + back);
 
   // A peer's line (no service counts) names its rank and carries none.
@@ -2380,7 +2410,7 @@ DGPP_TEST(serve_throughputLog_oneLinePerIntervalWithTheDeltas_thenQuiet) {
   require(peer.observe(m, nullptr, at(0)).empty(), "peer priming is silent");
   m.decode_steps = 202;
   const std::string pl = peer.observe(m, nullptr, at(10));
-  require(pl.find("stats: rank 2 over 10.0 s") != npos &&
+  require(pl.find("stats: rank 2 | 10.0 s |") != npos &&
               pl.find("requests +") == npos,
           "a peer's line: " + pl);
 

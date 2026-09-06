@@ -56,7 +56,9 @@ void log_line(LogLevel lvl, std::string_view msg) {
   std::time_t tt = system_clock::to_time_t(now);
   const auto ms = duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
   std::tm tm{};
-  localtime_r(&tt, &tm);
+  gmtime_r(&tt, &tm);  // UTC on every rank: the peers' logs read side by
+                       // side with rank 0's (2026-09-06; a peer used to
+                       // stamp its own zone)
 
   std::lock_guard<std::mutex> lock(g_mu);
   std::fprintf(stderr, "%04d-%02d-%02d %02d:%02d:%02d.%03d %s %.*s\n",

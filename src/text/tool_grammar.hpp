@@ -100,11 +100,15 @@ struct GrammarTool {
 // declared property gets its GrammarArg. Under `strict: true` every
 // property's schema must lie inside the constrained subset, else
 // std::invalid_argument whose message starts with the offending path
-// ("parameters.properties.city.pattern: ..."); otherwise a JSON-typed
-// property outside the subset stays free and `warnings` (when given)
-// receives one line saying so.
+// ("parameters.properties.city.pattern: ..."). Otherwise (2026-09-06) a
+// JSON-typed property keeps its type under the keywords that merely narrow
+// a value (minimum, maxLength, pattern, format, ...) — each is a line in
+// `notes`, "not enforced" — and only a schema outside the subset in shape
+// ($ref, oneOf, ...) leaves the value free, with a line in `warnings`.
+// Either vector may be null.
 GrammarTool grammar_tool_from_function(const minijson::Value& def,
-                                       std::vector<std::string>* warnings);
+                                       std::vector<std::string>* warnings,
+                                       std::vector<std::string>* notes = nullptr);
 
 // The request's constraint — what rides the journal (fabric_serve.cpp) and
 // reaches every rank's engine through SchedulerEngine::configure_constraint.

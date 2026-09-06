@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "kernels/latent_format.hpp"
 #include "loaders/minijson.hpp"
 
 namespace dgpp::serve {
@@ -115,12 +116,18 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         const Value& x = p.value;
         if (p.key == "max_concurrency") e.max_concurrency = static_cast<int>(integer(x, ek, what, 1, 1 << 20));
         else if (p.key == "kv_capacity") e.kv_capacity = integer(x, ek, what, 1, 1ll << 40);
+        else if (p.key == "kv_dtype") {
+          e.kv_dtype = text(x, ek, what);
+          if (!latent_format_from_string(e.kv_dtype))
+            fail(what, "'" + ek + "' must be \"bf16\", \"fp8\" or \"fp4\"");
+        }
         else if (p.key == "default_max_tokens") e.default_max_tokens = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
         else if (p.key == "queue_limit") e.queue_limit = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
         else if (p.key == "max_connections") e.max_connections = static_cast<int>(integer(x, ek, what, 1, 1 << 20));
         else if (p.key == "no_eos") e.no_eos = boolean(x, ek, what);
         else if (p.key == "decode_graph") e.decode_graph = boolean(x, ek, what);
         else if (p.key == "mtp") e.mtp = boolean(x, ek, what);
+        else if (p.key == "mtp_depth") e.mtp_depth = static_cast<int>(integer(x, ek, what, 1, 3));  // kSpecRows - 1
         else if (p.key == "graph_batch_min_live") e.graph_batch_min_live = static_cast<int>(integer(x, ek, what, 0, 1 << 20));
         else if (p.key == "sampling_candidates") e.sampling_candidates = static_cast<int>(integer(x, ek, what, 1, 256));
         else if (p.key == "prefix_cache_gib") {

@@ -199,7 +199,7 @@ class DsaLayer {
     size_t off_counts = 0, off_pos = 0, off_req_ids = 0, off_attn_out = 0;
     size_t off_q_tilde = 0, off_c = 0, off_m = 0, off_l = 0, off_cws = 0;
     size_t off_dot = 0, off_gather_k = 0, off_gather_scale = 0;
-    size_t off_partial = 0, off_counter = 0;
+    size_t off_select_ws = 0, off_counter = 0;
     int64_t max_pools = 0;   // gather buffer capacity, in pools
     int tile_cap = 0;        // max prefill query-tile rows
   };
@@ -225,7 +225,8 @@ class DsaLayer {
   // kDensePrefillRows rows; falls back to attend_tile when the geometry
   // is outside the dense kernel's (kv_lora not 512/256).
   void attend_dense(DsaStatePool& state, int layer, const int32_t* req_ids,
-                    int64_t row0, int rows, bool listed, cudaStream_t stream);
+                    int64_t row0, int rows, bool listed, cudaStream_t stream,
+                    int n_split = kDensePrefillSplit);
   void attend_tile(DsaStatePool& state, int layer, const int32_t* req_ids,
                    int64_t row0, int rows, int n_split, cudaStream_t stream);
 
@@ -238,7 +239,13 @@ class DsaLayer {
   int max_tokens_ = 0;
   int64_t max_cache_tokens_ = 0;
   int max_decode_rows_ = 8;
-  int decode_n_split_ = 32;  // split-KV parallelism: rows x n_split x 4 head-groups ~ 128 blocks/row
+  int decode_n_split_ = 32;
+  // The decode attention on the tensor-core listed kernel (2026-09-06):
+  // two rows x 16 local heads is one M-block of the dense kernel, its two
+  // slabs each a row's own selection. DGPP_DSA_DECODE_MMA=off keeps the
+  // register split kernel; tolerance-equal, not bitwise (the mma order).
+  bool decode_mma_ = true;
+  int decode_mma_split_ = 32;  // split-KV parallelism (TRIED 2026-09-06 and kept at 32: 48 and 64 splits measured the same step on the fabric once the partial kernel held its window in registers, and change the combine order)
   int attn_rows_ = 8;         // attention tile rows = max(max_decode_rows_, 8)
   // The dense prefill path (2026-09-05): rows whose context is below
   // index_topk tokens attend densely on the tensor-core kernel
@@ -283,7 +290,8 @@ class DsaLayer {
   float* dot_ = nullptr;         // [tile_rows*index_heads, padded_n]
   uint8_t* gather_k_ = nullptr;  // [max_pools, 128] fp8
   float* gather_scale_ = nullptr;  // [max_pools]
-  uint64_t* partial_ws_ = nullptr;  // [grid, max_decode_rows, select_k]
+  void* select_ws_ = nullptr;       // dsa_select_workspace_bytes(rows, pools)
+  int64_t select_ws_pools_ = 0;     // the pool capacity it was sized for
   int32_t* counter_ws_ = nullptr;   // [1]
   int64_t dot_stride_last_ = 0;     // padded pool count of the last dot tile
 

@@ -11,7 +11,11 @@
 //     `index_scale` is FP32 [total_slots], one slot per pool. Rows are
 //     128-byte aligned, so the decode streaming path reads perfectly aligned
 //     lines.
-//   * latent cache: BF16 [total_token_slots, kv_lora_rank] rows.
+//   * latent cache: [total_token_slots] rows of kv_lora_rank elements in the
+//     cache's format (kernels/latent_format.hpp): BF16, or fp8/fp4 codes
+//     beside a FP32 [total_token_slots] row-scale array. The attention
+//     kernels dequantize a tile into bf16 shared memory as they gather it,
+//     so the math past the load is the bf16 kernel's.
 //   * tail cache: BF16 [max_requests, 2, kpool, 128] — half 0 is raw K,
 //     half 1 the gate score; a per-request ring indexed by pos % kpool.
 //   * one shared block table per request maps logical to physical slots:
@@ -35,6 +39,8 @@
 #include <cstdint>
 
 #include <cuda_runtime.h>
+
+#include "kernels/latent_format.hpp"
 
 namespace dgpp {
 
@@ -129,11 +135,16 @@ void dsa_zero_padding_rows(void* out, const int64_t* pos, int tokens,
 // Append normed latent rows to the blocked latent cache. One block per row.
 //   latent_rows: bf16 [tokens, kv_lora]; block_tables: int32
 //   [max_requests, blocks_per_request].
+// A quantized cache (fp8/fp4) quantizes each row on the way in — the
+// codes and the row scale (`latent_scale`, FP32 per physical slot) are
+// bitwise the host reference's latent_quantize_row_host.
 void dsa_latent_append(const void* latent_rows, const int32_t* req_ids,
                        const int64_t* pos, int64_t tokens,
                        const int32_t* block_tables, int blocks_per_request,
                        int block_tokens, void* latent_cache, int kv_lora,
-                       cudaStream_t stream);
+                       cudaStream_t stream,
+                       LatentFormat format = LatentFormat::kBf16,
+                       float* latent_scale = nullptr);
 
 // Gather a request's pools [0, n_pools) into a contiguous buffer for the
 // prefill logits GEMM.
@@ -164,26 +175,37 @@ void dsa_prepare_kernel_smem();
 // Fused decode select: streams pools [0, visible(pos[r])) per row straight
 // from the blocked index cache, computes pool logits inline (warp per pool,
 // lane per head), and keeps a running top-select_k composite-key selection.
-// Fixed grid, grid-stride over pools; the last block merges partials,
-// extracts ids ascending, expands pools to tokens, and appends each row's
-// incomplete tail. Workspace must be zeroed once at allocation
-// (counter_ws self-resets after each call).
+// Fixed grid, grid-stride over pools; the last block finishes the
+// selection, extracts ids ascending, expands pools to tokens, and appends
+// each row's incomplete tail. The workspace (dsa_select_workspace_bytes,
+// sized for the caller's largest row count and pool count) and counter_ws
+// must be zeroed once at allocation; both self-reset after each call.
 //   q_fp8: [rows, heads, dim] fp8; w_folded: [rows, heads] fp32;
 //   block_tables: int32 [max_requests, blocks_per_request]; req_ids: [rows];
 //   pos: [rows]; topk_out: int32 [rows, max_selected] (-1 padded);
 //   out_counts: int32 [rows];
-//   partial_ws: uint64 [grid_blocks * rows * select_k];
-//   counter_ws: int32 [1].
-// rows <= 8 (decode/MTP batch bound).
+//   select_ws: dsa_select_workspace_bytes(max_rows, ws_max_pools) bytes,
+//     256-byte aligned; ws_max_pools is the pool capacity it was sized for
+//     (every row's visible count must fit);
+//   counter_ws: int32 [2] (the scoring ticket and the rows-done count).
+// rows <= 8 (decode/MTP batch bound); grid_blocks <= 0 picks the default
+// (at least `rows` blocks either way: the last `rows` to finish scoring
+// each select one row).
+size_t dsa_select_workspace_bytes(int max_rows, int64_t max_pools);
+// The last call's phase stamps (globaltimer ns, the last block's view):
+// [0] entry, [1] scoring done, [2] selection start, [3] selection total
+// over rows, [4] expansion total over rows, [5] exit. A diagnostic for
+// dsa_select_bench; synchronizes the device.
+void dsa_select_debug_phases(uint64_t out[8]);
 void dsa_select_decode(const void* q_fp8, const float* w_folded,
                        const int32_t* req_ids, const int64_t* pos, int rows,
                        const int32_t* block_tables, int blocks_per_request,
                        const void* index_k, const float* index_scale,
                        int pools_per_block, int heads, int dim, int select_k,
                        int kpool, int max_selected, int32_t* topk_out,
-                       int32_t* out_counts, uint64_t* partial_ws,
-                       int32_t* counter_ws, int grid_blocks,
-                       cudaStream_t stream);
+                       int32_t* out_counts, void* select_ws,
+                       int64_t ws_max_pools, int32_t* counter_ws,
+                       int grid_blocks, cudaStream_t stream);
 
 // Prefill select: one block per row over the materialized dot buffer.
 //   dot: fp32 [rows * heads, dot_stride] (row r head h at
@@ -214,6 +236,7 @@ void dsa_absorb_q(const void* q, const void* kv_b, void* q_tilde,
 //   topk: int32 [rows, topk_stride]; counts: int32 [rows];
 //   m_ws/l_ws: fp32 [rows, n_split, local_heads];
 //   c_ws: fp32 [rows, n_split, local_heads, kv_lora].
+//   format/latent_scale: the cache's format and its row scales (fp8/fp4).
 void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
                       const int32_t* req_ids, const int32_t* topk,
                       int topk_stride, const int32_t* counts, int rows,
@@ -221,7 +244,9 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
                       int block_tokens, const int32_t* block_tables,
                       int blocks_per_request, float scale,
                       float* m_ws, float* l_ws, float* c_ws,
-                      cudaStream_t stream);
+                      cudaStream_t stream,
+                      LatentFormat format = LatentFormat::kBf16,
+                      const float* latent_scale = nullptr);
 
 // Dense causal attention on tensor cores (2026-09-05): the prefill path
 // below index_topk tokens of context, where the selection is provably
@@ -238,7 +263,9 @@ bool dsa_attn_dense(const void* q_tilde, const void* latent_cache,
                     int n_split, int local_heads, int kv_lora, int block_tokens,
                     const int32_t* block_tables, int blocks_per_request,
                     float scale, float* m_ws, float* l_ws, float* c_ws,
-                    cudaStream_t stream);
+                    cudaStream_t stream,
+                    LatentFormat format = LatentFormat::kBf16,
+                    const float* latent_scale = nullptr);
 
 // The same kernel over each row's SELECTED tokens (2026-09-05, the sparse
 // regime past index_topk tokens of context): topk/counts as
@@ -250,7 +277,9 @@ bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
                      const int32_t* counts, int rows, int n_split, int local_heads,
                      int kv_lora, int block_tokens, const int32_t* block_tables,
                      int blocks_per_request, float scale, float* m_ws, float* l_ws,
-                     float* c_ws, cudaStream_t stream);
+                     float* c_ws, cudaStream_t stream,
+                     LatentFormat format = LatentFormat::kBf16,
+                     const float* latent_scale = nullptr);
 
 // Merge the split partials into normalized c rows: c_out[r,h,:] =
 // (sum_s p_s * c_s) / (sum_s p_s * l_s), p_s = exp(m_s - max m).

@@ -47,6 +47,33 @@ void glm_spec_commit(const PickVerdict* verdict, int rows,
                      const GlmSpecSegments& segments, int64_t* session_pos,
                      cudaStream_t stream);
 
+// The pipelined replay's stage handshake (2026-09-06): the graph of a
+// slot is launched BEFORE the host has decided what its pick needs (the
+// masks of the rows, staged from the previous replay's outcome), so the
+// node ahead of the pick waits for the host: it bumps the slot's device
+// replay counter and spins until the host's PINNED stage counter reaches
+// it (the host stages, then publishes with a release store), sleeping
+// between polls. A wait past `timeout_ns` sets *late (pinned) and lets
+// the replay proceed — loud on the host, never a hung stream.
+void glm_stage_wait(const uint64_t* pinned_stage_seq, uint64_t* device_seq,
+                    uint32_t* pinned_late, int64_t timeout_ns,
+                    cudaStream_t stream);
+
+// The verdict's publication (2026-09-06, the pipelined replay): a kernel
+// node right after the verify's pick bumps the slot's device replay
+// counter and stores it to PINNED memory with a system-scope release, so
+// the host — polling it — learns the verdict is readable while the
+// replay's tail runs on. (An event record node in the graph stalled every
+// fifth relaunch of the exec; a kernel node does not.)
+void glm_publish_seq(uint64_t* device_seq, uint64_t* pinned_out,
+                     cudaStream_t stream);
+
+// Uploads `count` uint32 words from PINNED, device-mapped host memory with
+// a kernel (system-scope loads: the host wrote them before the handshake
+// above released) — the masks of a slot's rows, behind the stage wait.
+void glm_upload_words(const uint32_t* pinned_src, uint32_t* dst, size_t count,
+                      cudaStream_t stream);
+
 // Uploads `count` (<= 64) int32 words from a PINNED, device-mapped host
 // buffer into device memory with a kernel — the decode path's replacement
 // for a cudaMemcpyAsync H2D of its row tables. A memcpy node in the
@@ -104,12 +131,44 @@ void glm_spec_draft_rows_batched(
 void glm_device_copy(void* dst, const void* src, size_t bytes,
                      cudaStream_t stream);
 
+// The chained draft row (depth >= 2, 2026-09-06): the single draft block's
+// recursion. After the block's rows off the verdict (glm_spec_draft_rows)
+// the block runs ONE more row at position *block_pos + chain_index, fed the
+// previous draft pick (`draft_verdict->next`) as its token and the block's
+// own previous output row as its hidden: row `verify_verdict->accepted - 1`
+// of `block_x` for the first chain row (the last accepted row), row
+// `src_row` (0) after that. The hidden row is copied into the position
+// cache at that position (the block reads its hidden there; the next
+// step's real row overwrites it), the row's position and token are staged
+// and the request span is set to one row. A position at or past
+// `max_context` stages padding (-1) and copies nothing. The counter does
+// not move: everything the row writes is provisional and positional.
+void glm_spec_chain_row(const PickVerdict* verify_verdict, int src_row,
+                        const PickVerdict* draft_verdict,
+                        const uint16_t* block_x, int hidden,
+                        uint16_t* hidden_cache, const int64_t* block_pos,
+                        int chain_index, int64_t max_context,
+                        int64_t* step_pos, int64_t* tokens, int32_t* req_spans,
+                        cudaStream_t stream);
+
 // The next replay's fed tokens, written at the end of this one (phase D):
-// tokens[0] = *next (the verify's), tokens[1] = draft_verdict->next (the
-// block's guess for the token after it).
-void glm_spec_next_tokens(const int64_t* next,
-                          const PickVerdict* draft_verdict, int64_t* tokens,
-                          cudaStream_t stream);
+// tokens[0] = *next (the verify's), tokens[1 + c] = drafts.v[c]->next (the
+// block's guesses for the tokens after it, one per draft position).
+constexpr int kSpecMaxDrafts = 3;  // GlmDiagnosticModel::kSpecRows - 1
+struct GlmSpecDrafts {
+  const PickVerdict* v[kSpecMaxDrafts] = {nullptr, nullptr, nullptr};
+  int count = 0;
+};
+void glm_spec_next_tokens(const int64_t* next, const GlmSpecDrafts& drafts,
+                          int64_t* tokens, cudaStream_t stream);
+inline void glm_spec_next_tokens(const int64_t* next,
+                                 const PickVerdict* draft_verdict,
+                                 int64_t* tokens, cudaStream_t stream) {
+  GlmSpecDrafts d;
+  d.v[0] = draft_verdict;
+  d.count = 1;
+  glm_spec_next_tokens(next, d, tokens, stream);
+}
 
 // End-of-replay token feeds for the fixed batch. The plain T=1 graph takes
 // each verify verdict's next token. The MTP T=2 graph takes the parked

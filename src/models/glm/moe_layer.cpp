@@ -10,12 +10,56 @@
 #include <string>
 
 #include "common/cuda_check.hpp"
+#include "common/log.hpp"
 #include "common/dtypes.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "models/glm/step_timing.hpp"
 
 namespace dgpp {
+
+size_t GlmMoeLayer::scratch_bytes(const GlmMoeConfig& cfg, int max_tokens,
+                                  int decode_slots, int graph_table_slots,
+                                  size_t* pinned_bytes) {
+  const size_t M = static_cast<size_t>(std::max(max_tokens, 0));
+  const size_t H = static_cast<size_t>(cfg.hidden);
+  const size_t I = static_cast<size_t>(cfg.inter);
+  const size_t K = static_cast<size_t>(cfg.top_k);
+  const size_t E = static_cast<size_t>(cfg.n_experts);
+  const size_t rows_total = M * (K + 1);
+  const size_t tk_max = M * K;
+  const size_t segs_max = E + 1;
+  size_t dev = 0, pin = 0;
+  dev += M * K * 4 * 2;              // d_ids_, d_weights_
+  dev += M * E * 4 * 2;              // d_biased_, d_scores_
+  dev += rows_total * 4;             // d_rows_
+  dev += tk_max * 4 * 2;             // d_row_w_, d_slot_row_
+  dev += segs_max * sizeof(MoeSegment);
+  dev += segs_max * 3 * sizeof(MoeExpertView);
+  pin += tk_max * 4 * 2;             // h_ids_pinned_, h_weights_pinned_
+  pin += M * E * 4;                  // h_biased_pinned_
+  pin += rows_total * 4;             // h_seg_rows_
+  pin += tk_max * 4;                 // h_slot_row_
+  pin += segs_max * sizeof(MoeSegment);
+  pin += static_cast<size_t>(kViewRing) * segs_max * 3 * sizeof(MoeExpertView);
+  dev += rows_total * H * 2;         // d_gather_
+  dev += rows_total * I * 2 * 3;     // d_gate_, d_up_, d_act_
+  dev += rows_total * H * 4;         // d_down_
+  dev += M * H * 4;                  // d_acc_
+  if (decode_slots > 0) {
+    const size_t rows = static_cast<size_t>(decode_slots) * (K + 1);
+    dev += rows * I * 2 + rows * H * 4 + rows * 4;
+    dev += static_cast<size_t>(decode_slots) * sizeof(int);
+    dev += sizeof(MoeExpertView) * E * 3;
+    if (graph_table_slots > 0) {
+      const size_t table = sizeof(MoeExpertView) * E * 3 * static_cast<size_t>(graph_table_slots);
+      pin += table;
+      dev += table;
+    }
+  }
+  if (pinned_bytes) *pinned_bytes = pin;
+  return dev;
+}
 
 GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
                           int max_tokens, int decode_slots,
@@ -428,13 +472,13 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
       if (sg.rows > 0)
         segtxt += " (" + std::to_string(sg.row0) + "," + std::to_string(sg.rows) + ",e" +
                   std::to_string(sg.expert) + ")";
-    std::fprintf(stderr,
-                 "[chain %s] rows_total=%zu I_r=%d I_s=%d segs:%s | gather %.6g gate %.6g "
-                 "up %.6g act %.6g down %.6g\n",
-                 mma ? "mma" : "gemv", rows_total, I_r, I_s, segtxt.c_str(),
-                 sum_bf16(d_gather_, rows_total * H), sum_bf16(d_gate_, rows_total * I_max),
-                 sum_bf16(d_up_, rows_total * I_max), sum_bf16(d_act_, rows_total * I_max),
-                 sum_f32(d_down_, rows_total * H));
+    DGPP_LOG_INFO(
+        "[chain {}] rows_total={} I_r={} I_s={} segs:{} | gather {:.6g} gate {:.6g} "
+        "up {:.6g} act {:.6g} down {:.6g}",
+        mma ? "mma" : "gemv", rows_total, I_r, I_s, segtxt,
+        sum_bf16(d_gather_, rows_total * H), sum_bf16(d_gate_, rows_total * I_max),
+        sum_bf16(d_up_, rows_total * I_max), sum_bf16(d_act_, rows_total * I_max),
+        sum_f32(d_down_, rows_total * H));
   }
 }
 

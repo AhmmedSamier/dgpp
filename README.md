@@ -28,7 +28,9 @@ run.
 - **Fail-fast failure semantics**, drilled: any rank's death fails the
   service within seconds and a restart reproduces the committed tokens.
 - **Operable**: one cluster config, versioned releases installed once per
-  node, a throughput line every 10 s in each rank's log, `/v1/metrics`.
+  node, a throughput line every 10 s in each rank's log, `/v1/metrics`;
+  every boot checks its memory plan against the node before allocating,
+  and the KV cache's dtype (bf16, fp8, fp4) is a config key.
 
 ## Performance
 
@@ -163,7 +165,9 @@ whose ranks disagree.
 | `ports.fabric` | no | the bus rendezvous port rank 0 listens on and the peers connect to | 29970 |
 | `ports.journal` | no | the admission journal's port (must differ from `ports.fabric`) | 29971 |
 | `engine.max_concurrency` | no | request slots per rank (the decode rows; with `decode_graph`, slots × rows per request ≤ 8) | 8 |
-| `engine.kv_capacity` | no | the KV pool in tokens per rank (a prompt plus its answer must fit) | 8192 |
+| `engine.kv_capacity` | no | the KV pool in tokens per rank (a prompt plus its answer must fit). Before anything is allocated every rank checks its memory plan for this context against the node's free memory and refuses to boot, with the plan itemized and the largest context that would fit named, when it does not fit (`dgpp-serve --config … --rank R --memory-plan` runs the check alone) | 8192 |
+| `engine.kv_dtype` | no | the latent cache's storage format: `bf16` (the parity gates' format), `fp8` (e4m3 with a per-row scale, half the bytes) or `fp4` (e2m1 in blocks of 16 with e4m3 block scales, ~0.28 of the bytes); the index cache stays fp8; smaller formats trade attention precision for context (`docs/operations.md`) | `bf16` |
+| `engine.mtp_depth` | no | draft tokens per decode step with `mtp` (1–3): the verify runs 1 + depth rows, the draft block's chained rows propose the drafts after the first; depth 1 is the two-row step; depth 2 costs ~12 ms more per step (the third verify row's experts plus the chained block row) and pays only where the second draft lands often (measured 2026-09-06: code and JSON +4 %, prose −4 %), and past depth 1 every step is a scalar replay (the row batch is not built for it) — `docs/operations.md` | 1 |
 | `engine.default_max_tokens` | no | `max_tokens` for requests that omit it | 256 |
 | `engine.queue_limit` | no | the admission queue's bound; beyond it the door answers 503 `overloaded` | 64 |
 | `engine.max_connections` | no | rank 0's open-connection cap | 64 |

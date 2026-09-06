@@ -19,6 +19,9 @@ and serving operations.
 | `micro_ibv_smoke bw --peer IP:PORT --dev DEV` | signaled RC SEND bandwidth; repeat peer/device for both lanes |
 | `micro_ibv_smoke verify --peer IP:PORT --dev DEV` | ordered NIC DMA payload/doorbell → GPU hash validation |
 | `kda_bench` | KDA decode state-traffic and layer timing profile (M2) |
+| `dsa_bench [--tp N]` | the DSA layer's decode kernels at a chosen context and TP width |
+| `dsa_select_bench --ctx a,b,c [--rows R --grid G]` | the decode index selection alone, with its phase breakdown (the 2026-09-06 select rewrite's microbench) |
+| `moe_slot_bench --rows R --inter I` | the MoE decode slot's expert GEMV at a chosen row count (the down kernel's row batching) |
 | `gpt_doll --selftest` | synthetic eager/graph parity testbed |
 | `glm_bind_check --config CONFIG --checkpoint-dir DIR` | validate a real GLM-5.3 checkpoint against the expected-tensor table (config parse, names, dtypes, shapes, FP8 scale pairing; headers only) |
 | `glm_stream_check --config CONFIG --checkpoint-dir DIR` | stream real layers through the resident loader; bytes vs formula reconciled per layer |
@@ -44,6 +47,10 @@ and serving operations.
 | `scripts/roce_counters.sh snapshot\|diff` | the fabric's RoCE hardware counters (sequence errors, adaptive retransmissions, CNPs, NIC ingress discards) per node and device, and the deltas between two snapshots — the wire-side view of a collective run |
 | `scripts/serve_bench.py HOST PORT MAX_TOKENS LABEL [PROMPT]`, `scripts/serve_pace.py RANK_LOG [--waves]` | the service's pace: client-side SSE stamps; server-side per-request pace (from the per-token lines: run the service with `DGPP_LOG_LEVEL=debug`); and, with `--waves`, the steady peak-occupancy replay latency, tokens/replay, and aggregate tok/s used by the Phase-2 gate |
 | `scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`, `scripts/fabric_sampling_profile.py`, `scripts/fabric_xrank.py` | the judges (first divergence by bf16-ulp margin; teacher-forced perplexity delta; sampling-width evidence) and the cross-rank step/stall reader — `docs/numerics.md` |
+| `scripts/step_probe.py [--max-tokens N] short|short+tools|long|ctx:N ...` | the decode-step probe against a running service: ttft, client ms/token, the engine's ms/step and tokens per step, the admission count, per mode |
+| `scripts/mtp_depth_check.py --out DIR` | the greedy transcript of three prompts (prose, code, JSON) from a running service into DIR, for `diff -r` across launches (plain / MTP depth 1 / depth 2 / pipelined must be byte-identical) |
+| `scripts/bus_window_skew.py LOG...` | the per-rank collective budget (copy / handshake / skew / fold) from the bus's window timeline lines (`DGPP_BUS_TIMELINE=1`) |
+| `scripts/maximize-cluster-memory.sh [--restore]` | reclaim unified memory on every DGX Spark node before a large-context launch: stops and runtime-masks the listed services and drops the caches, recording what it did under /run so `--restore` undoes exactly that (a reboot also does) |
 
 The GDR probe exits successfully when the probe itself completes, including
 the expected “unsupported” result on GB10. It does not prescribe a bounce

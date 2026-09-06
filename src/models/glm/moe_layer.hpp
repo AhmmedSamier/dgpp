@@ -137,6 +137,14 @@ class GlmMoeLayer {
   const GlmMoeConfig& config() const { return cfg_; }
   int max_tokens() const { return max_tokens_; }
 
+  // The bytes the constructor allocates for this shape (2026-09-06, the
+  // memory plan): device scratch, and the pinned host staging in
+  // `*pinned_bytes` (optional). The formula mirrors the constructor line
+  // for line so a plan can be checked before anything is allocated.
+  static size_t scratch_bytes(const GlmMoeConfig& cfg, int max_tokens,
+                              int decode_slots = 0, int graph_table_slots = 0,
+                              size_t* pinned_bytes = nullptr);
+
   // Streaming-weight seam (M4 diagnostic forward): swap the device weight
   // views (router gate/bias, expert and shared matrices). Device scratch
   // and segmentation buffers are shape-keyed and unaffected.

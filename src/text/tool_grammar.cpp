@@ -120,7 +120,8 @@ bool string_possible(const minijson::Value& prop) {
 }  // namespace
 
 GrammarTool grammar_tool_from_function(const minijson::Value& def,
-                                       std::vector<std::string>* warnings) {
+                                       std::vector<std::string>* warnings,
+                                       std::vector<std::string>* notes) {
   GrammarTool tool;
   if (const minijson::Value* name = def.find("name"))
     tool.name = std::string(name->as_string());
@@ -192,11 +193,20 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
       tool.args.push_back(std::move(arg));
       continue;
     }
-    // A JSON-typed property: the machine under its own schema.
+    // A JSON-typed property: the machine under its own schema. A keyword
+    // that only narrows the value (minimum, pattern, ...) is tolerated —
+    // the value stays typed, the bound is not applied — and noted.
     try {
-      compile_json_schema(prop);
+      std::vector<std::string> unenforced;
+      compile_json_schema(prop, &unenforced);
       arg.kind = GrammarArg::Kind::kJson;
       arg.schema = json_text_of(prop);
+      if (notes != nullptr)
+        for (const std::string& u : unenforced)
+          notes->push_back("argument '" + pm.key + "' of '" + tool.name + "': " +
+                           (u.rfind("schema.", 0) == 0 ? u.substr(7) : u) +
+                           " is not enforced (the value keeps its type; the "
+                           "bound is not applied)");
     } catch (const std::invalid_argument& e) {
       if (warnings != nullptr)
         warnings->push_back("argument '" + pm.key + "' of '" + tool.name +
@@ -271,8 +281,12 @@ GrammarState::GrammarState(const GrammarVocab* vocab, GrammarSpec spec,
                                     arg.key + "' of '" + tool.name +
                                     "' does not parse: " + e.what());
       }
-      arg_schemas_[t][a] =
-          std::make_shared<const JsonSchema>(compile_json_schema(parsed.root));
+      // A tool argument's text tolerates the narrowing keywords a
+      // non-strict definition carries (a strict one passed the strict
+      // compile at its definition; the value's type is what the mask uses).
+      std::vector<std::string> unenforced;
+      arg_schemas_[t][a] = std::make_shared<const JsonSchema>(
+          compile_json_schema(parsed.root, &unenforced));
     }
   }
   state_ = prompt_opens_thinking && vocab_->markers().think_close.available()

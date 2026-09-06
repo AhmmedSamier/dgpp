@@ -1131,8 +1131,8 @@ DGPP_TEST(sample_pick_matches_host_oracle_bitwise_over_simulated_world) {
           const PickVerdict& v = run.verdicts[k][q];
           const dgpp::SampleOutcome& o = run.outcomes[k][q];
           require(o.sampled == 1, "sampled request must report a decision");
-          require(bits_equal(o.normalizer, Z), "normalizer differs from merge_logsumexp");
-          require(bits_equal(o.covered_mass, want.covered_mass), "covered mass differs");
+          require(bits_equal(o.normalizer[0], Z), "normalizer differs from merge_logsumexp");
+          require(bits_equal(o.covered_mass[0], want.covered_mass), "covered mass differs");
           require(o.counter == host_rng.counter && run.specs_after[k][q].counter == host_rng.counter,
                   "counter differs from the host oracle (request " + std::to_string(q) + ")");
           if (want.resolved) {
@@ -1141,7 +1141,7 @@ DGPP_TEST(sample_pick_matches_host_oracle_bitwise_over_simulated_world) {
                     "device token " + std::to_string(v.next) + " != host " +
                         std::to_string(want.result.token) + " (request " +
                         std::to_string(q) + ")");
-            require(bits_equal(o.logprob, want.result.logprob), "logprob bits differ");
+            require(bits_equal(o.logprob[0], want.result.logprob), "logprob bits differ");
           } else {
             require(o.fallback == 1, "fallback on the host, resolved on the device");
             require(v.next == merged[0].id, "fallback carries the provisional argmax");
@@ -1381,7 +1381,7 @@ DGPP_TEST(sample_pick_masked_rows_match_host_oracle_bitwise) {
         const PickVerdict& v = run.verdicts[k][q];
         const dgpp::SampleOutcome& o = run.outcomes[k][q];
         require(o.sampled == 1, "sampled row reports a decision");
-        require(bits_equal(o.normalizer, Z), "masked normalizer differs (request " +
+        require(bits_equal(o.normalizer[0], Z), "masked normalizer differs (request " +
                                                  std::to_string(q) + ")");
         require(o.counter == host_rng.counter, "masked counter differs");
         if (want.resolved) {
@@ -1389,7 +1389,7 @@ DGPP_TEST(sample_pick_masked_rows_match_host_oracle_bitwise) {
                   "masked decision differs: device " + std::to_string(v.next) +
                       " host " + std::to_string(want.result.token) + " (request " +
                       std::to_string(q) + ")");
-          require(bits_equal(o.logprob, want.result.logprob), "masked logprob differs");
+          require(bits_equal(o.logprob[0], want.result.logprob), "masked logprob differs");
           if (constrained)
             require(((mask[1 + (v.next >> 5)] >> (v.next & 31)) & 1u) != 0u,
                     "the decided token is inside the mask");
@@ -1634,7 +1634,7 @@ DGPP_TEST(sample_local_topk_tie_paths_match_local_topk) {
         require((run.outcomes[k][q].fallback == 1) == !want_resolved,
                 "fallback flag differs from the oracle");
         if (specs[q].temperature > 0.0f)
-          require(bits_equal(run.outcomes[k][q].normalizer, Z), "normalizer differs");
+          require(bits_equal(run.outcomes[k][q].normalizer[0], Z), "normalizer differs");
       }
     }
   }
@@ -1827,9 +1827,9 @@ DGPP_TEST(sample_pick_t2_matches_spec_oracle_over_simulated_world) {
                     o.accepted_draft == (want_accepted == 2 ? 1 : 0),
                 "T=2 outcome flags");
         require(o.counter == host.counter, "T=2 counter differs from the oracle");
-        require(bits_equal(o.normalizer, Z0), "row-0 normalizer");
-        if (want_accepted == 2) require(bits_equal(o.normalizer1, Z1), "row-1 normalizer");
-        if (d0.resolved) require(bits_equal(o.logprob, d0.result.logprob), "row-0 logprob");
+        require(bits_equal(o.normalizer[0], Z0), "row-0 normalizer");
+        if (want_accepted == 2) require(bits_equal(o.normalizer[1], Z1), "row-1 normalizer");
+        if (d0.resolved) require(bits_equal(o.logprob[0], d0.result.logprob), "row-0 logprob");
         require(run.counts_after[k] .size() == counts.size(), "counts shape");
         for (int vtok = 0; vtok < vocab; ++vtok)
           require(run.counts_after[k][static_cast<size_t>(q) * vocab + vtok] ==
@@ -1844,6 +1844,223 @@ DGPP_TEST(sample_pick_t2_matches_spec_oracle_over_simulated_world) {
               std::to_string(accepts) + ", rejects " + std::to_string(rejects) +
               ", row-0 fallbacks " + std::to_string(fallback0) +
               ", row-1 fallbacks " + std::to_string(fallback1) + ")");
+}
+
+
+// The T=3 verify's sampled verdict (2026-09-06, depth 2): row 0 tests the
+// first draft, row 1 the second, row 2 samples plainly — each row's
+// decision the host oracle's (sample::spec_accept_from_prefix, then
+// sample_from_prefix), draw for draw; a fallback at any row leaves the
+// rows before it committed; the count table takes every draft that stood.
+DGPP_TEST(sample_pick_t3_matches_spec_oracle_over_simulated_world) {
+  Rng rng(0x51d3);
+  constexpr int kWorld = 4;
+  constexpr int count = 96;
+  constexpr int vocab = kWorld * count;
+  constexpr int candidates = 32;
+  constexpr int requests = 2;  // 2 x 3 rows inside the pick's row bound
+  constexpr int rpr = 3;
+  int accepts3 = 0, rejects0 = 0, rejects1 = 0;
+  int fallback0 = 0, fallback1 = 0, fallback2 = 0;
+  for (int trial = 0; trial < 24; ++trial) {
+    std::vector<float> full(static_cast<size_t>(requests * rpr) * vocab);
+    // Request q takes pattern (trial + q) % 4 this trial, so every pattern
+    // runs in both slots: 0 greedy; 1 sampled with row 2 flat on odd trials
+    // (the row-2 fallback after both drafts stood); 2 sampled with row 0
+    // flat (the row-0 fallback); 3 sampled in three sub-cases by trial / 4:
+    // row 1 flat (the row-1 fallback), the second draft random (the row-1
+    // reject), the first draft random (the row-0 reject).
+    const auto pattern_of = [&](int q) { return (trial + q) % 4; };
+    const int sub = (trial / 4) % 3;
+    const auto fill = [&](int row, bool flat) {
+      float* v = full.data() + static_cast<size_t>(row) * vocab;
+      for (int i = 0; i < vocab; ++i) {
+        const uint64_t r = rng.next();
+        v[i] = flat ? static_cast<float>(r % 3) * 0.01f
+                    : static_cast<float>((r >> 8) % 41) * 0.25f - 5.0f;
+      }
+      if (!flat) {
+        v[static_cast<size_t>(rng.next() % vocab)] = 12.0f;
+        v[static_cast<size_t>(rng.next() % vocab)] = 9.0f;
+      }
+    };
+    for (int q = 0; q < requests; ++q) {
+      const int pat = pattern_of(q);
+      fill(rpr * q, pat == 2);
+      fill(rpr * q + 1, pat == 3 && sub == 0);
+      fill(rpr * q + 2, pat == 1 && trial % 2 == 1);
+    }
+    std::vector<dgpp::SampleSpec> specs(requests);
+    for (int q = 0; q < requests; ++q) {
+      if (pattern_of(q) == 0) {
+        specs[q].temperature = 0.0f;
+        continue;
+      }
+      specs[q].temperature = 1.0f;
+      specs[q].top_p = 0.95f;
+      specs[q].presence_penalty = 0.1f;
+      specs[q].seed = 0x3000 + q + 37 * trial;
+      specs[q].counter = 6;
+    }
+    std::vector<int32_t> counts(static_cast<size_t>(requests) * vocab, 0);
+    std::vector<int64_t> fed(requests * rpr), positions(requests);
+    for (int q = 0; q < requests; ++q) {
+      positions[q] = 5 + q;
+      fed[rpr * q] = static_cast<int64_t>(rng.next() % vocab);
+      const Candidate argmax0 = dgpp::sample::local_max(
+          full.data() + static_cast<size_t>(rpr * q) * vocab, vocab, 0);
+      const Candidate argmax1 = dgpp::sample::local_max(
+          full.data() + static_cast<size_t>(rpr * q + 1) * vocab, vocab, 0);
+      const int pat = pattern_of(q);
+      const bool likely1 = !(pat == 0 && trial % 2 == 1) && !(pat == 3 && sub == 2);
+      const bool likely2 = !(pat == 3 && sub == 1);
+      fed[rpr * q + 1] = likely1 ? argmax0.id : static_cast<int64_t>(rng.next() % vocab);
+      fed[rpr * q + 2] = likely2 ? argmax1.id : static_cast<int64_t>(rng.next() % vocab);
+      for (int j = 0; j < 3; ++j)
+        counts[static_cast<size_t>(q) * vocab + rng.next() % vocab] += 1;
+    }
+    const uint64_t carry = 0x5a5a5a5a5a5aull;
+    const SampleWorldRun run = run_sample_world(
+        full, requests, kWorld, count, specs, counts, fed, positions,
+        candidates, carry, rpr);
+
+    for (int q = 0; q < requests; ++q) {
+      const float* row[rpr];
+      for (int t = 0; t < rpr; ++t)
+        row[t] = full.data() + static_cast<size_t>(rpr * q + t) * vocab;
+      const int32_t draft1 = static_cast<int32_t>(fed[rpr * q + 1]);
+      const int32_t draft2 = static_cast<int32_t>(fed[rpr * q + 2]);
+      if (specs[q].temperature <= 0.0f) {
+        int32_t w[rpr];
+        for (int t = 0; t < rpr; ++t) w[t] = dgpp::sample::local_max(row[t], vocab, 0).id;
+        int accepted = 1;
+        while (accepted < rpr && w[accepted - 1] == fed[rpr * q + accepted]) ++accepted;
+        for (int k = 0; k < kWorld; ++k) {
+          const PickVerdict& v = run.verdicts[k][q];
+          require(v.rows == rpr && v.accepted == accepted && v.winners[0] == w[0] &&
+                      v.winners[1] == w[1] && v.winners[2] == w[2] &&
+                      v.next == w[accepted - 1],
+                  "greedy T=3 request: the greedy judge");
+        }
+        continue;
+      }
+      const dgpp::sample::Params p = params_of(specs[q]);
+      std::vector<int32_t> ctx[rpr];
+      ctx[0].assign(counts.begin() + static_cast<long>(q) * vocab,
+                    counts.begin() + static_cast<long>(q + 1) * vocab);
+      ctx[0][static_cast<size_t>(fed[rpr * q])] += 1;
+      ctx[1] = ctx[0];
+      ctx[1][static_cast<size_t>(draft1)] += 1;
+      ctx[2] = ctx[1];
+      ctx[2][static_cast<size_t>(draft2)] += 1;
+      const auto as_map = [&](const std::vector<int32_t>& c) {
+        std::unordered_map<int32_t, int32_t> m;
+        for (int v = 0; v < vocab; ++v)
+          if (c[static_cast<size_t>(v)]) m[v] = c[static_cast<size_t>(v)];
+        return m;
+      };
+      std::vector<Candidate> merged[rpr];
+      double Z[rpr] = {0.0, 0.0, 0.0};
+      for (int t = 0; t < rpr; ++t) {
+        std::vector<float> adj(row[t], row[t] + vocab);
+        dgpp::sample::apply_penalties(adj.data(), vocab, 0, p, as_map(ctx[t]));
+        std::vector<std::vector<Candidate>> shards;
+        std::vector<double> lses;
+        for (int k = 0; k < kWorld; ++k) {
+          shards.push_back(dgpp::sample::local_topk(adj.data() + k * count, count,
+                                                        k * count, candidates));
+          lses.push_back(dgpp::sample::slice_logsumexp(adj.data() + k * count,
+                                                            count, p.temperature));
+        }
+        Z[t] = dgpp::sample::merge_logsumexp(lses);
+        merged[t] = dgpp::sample::merge_topk(shards, candidates);
+      }
+      dgpp::sample::Rng host{specs[q].seed, specs[q].counter};
+      // The oracle's chain.
+      int want_accepted = 1, want_fallback_row = -1, reached = 1;
+      int32_t want_w[rpr] = {-1, -1, -1};
+      std::vector<int32_t> want_counts = ctx[0];
+      const dgpp::sample::SpecPrefixDecision d0 =
+          dgpp::sample::spec_accept_from_prefix(merged[0], vocab, Z[0], draft1, p, host);
+      if (!d0.resolved) {
+        ++fallback0;
+        want_fallback_row = 0;
+        want_w[0] = merged[0][0].id;
+      } else if (!d0.accepted) {
+        ++rejects0;
+        want_w[0] = d0.result.token;
+      } else {
+        want_accepted = 2;
+        want_w[0] = draft1;
+        want_counts = ctx[1];
+        reached = 2;
+        const dgpp::sample::SpecPrefixDecision d1 =
+            dgpp::sample::spec_accept_from_prefix(merged[1], vocab, Z[1], draft2, p, host);
+        if (!d1.resolved) {
+          ++fallback1;
+          want_fallback_row = 1;
+          want_w[1] = merged[1][0].id;
+        } else if (!d1.accepted) {
+          ++rejects1;
+          want_w[1] = d1.result.token;
+        } else {
+          want_accepted = 3;
+          want_w[1] = draft2;
+          want_counts = ctx[2];
+          reached = 3;
+          const dgpp::sample::PrefixDecision d2 =
+              dgpp::sample::sample_from_prefix(merged[2], vocab, Z[2], p, host);
+          if (d2.resolved) {
+            ++accepts3;
+            want_w[2] = d2.result.token;
+          } else {
+            ++fallback2;
+            want_fallback_row = 2;
+            want_w[2] = merged[2][0].id;
+          }
+        }
+      }
+      const int32_t want_next = want_w[want_accepted - 1];
+      for (int k = 0; k < kWorld; ++k) {
+        const PickVerdict& v = run.verdicts[k][q];
+        const dgpp::SampleOutcome& o = run.outcomes[k][q];
+        std::string got = std::to_string(v.accepted) + " [";
+        std::string want = std::to_string(want_accepted) + " [";
+        bool same = v.rows == rpr && v.accepted == want_accepted && v.next == want_next;
+        for (int t = 0; t < want_accepted; ++t) {
+          got += (t ? "," : "") + std::to_string(v.winners[t]);
+          want += (t ? "," : "") + std::to_string(want_w[t]);
+          same = same && v.winners[t] == want_w[t];
+        }
+        require(same, "T=3 verdict differs from the speculative oracle (trial " +
+                          std::to_string(trial) + " request " + std::to_string(q) +
+                          ": got " + got + "] next " + std::to_string(v.next) +
+                          ", want " + want + "] next " + std::to_string(want_next) + ")");
+        require(o.sampled == 1 && o.fallback_row == want_fallback_row &&
+                    o.fallback == (want_fallback_row >= 0 ? 1 : 0) &&
+                    o.accepted_draft == (want_accepted >= 2 ? 1 : 0),
+                "T=3 outcome flags (trial " + std::to_string(trial) + " request " +
+                    std::to_string(q) + ")");
+        require(o.counter == host.counter, "T=3 counter differs from the oracle");
+        for (int t = 0; t < reached; ++t)
+          require(bits_equal(o.normalizer[t], Z[t]),
+                  "row-" + std::to_string(t) + " normalizer");
+        if (d0.resolved) require(bits_equal(o.logprob[0], d0.result.logprob), "row-0 logprob");
+        for (int vtok = 0; vtok < vocab; ++vtok)
+          require(run.counts_after[k][static_cast<size_t>(q) * vocab + vtok] ==
+                      want_counts[static_cast<size_t>(vtok)],
+                  "count table after the T=3 verdict differs");
+        require(v.digest_mismatch == 0 && run.carry_out[k] == v.digest, "digest chain");
+      }
+    }
+  }
+  require(accepts3 > 0 && rejects0 > 0 && rejects1 > 0 && fallback0 > 0 &&
+              fallback1 > 0 && fallback2 > 0,
+          "the sweep must exercise every outcome (accept-all " +
+              std::to_string(accepts3) + ", row-0 rejects " + std::to_string(rejects0) +
+              ", row-1 rejects " + std::to_string(rejects1) + ", fallbacks " +
+              std::to_string(fallback0) + "/" + std::to_string(fallback1) + "/" +
+              std::to_string(fallback2) + ")");
 }
 
 
@@ -1933,7 +2150,7 @@ DGPP_TEST(sample_pick_reports_logprobs_bitwise) {
         }
         require(v.next == want.token, "reported token differs (request " +
                                           std::to_string(q) + ")");
-        require(bits_equal(o.logprob, want.logprob),
+        require(bits_equal(o.logprob[0], want.logprob),
                 "the token's logprob differs (request " + std::to_string(q) + ")");
         require(o.top_count[0] == static_cast<int>(want.top_logprobs.size()),
                 "top-N count differs (request " + std::to_string(q) + "): " +

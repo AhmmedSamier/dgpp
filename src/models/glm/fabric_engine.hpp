@@ -7,6 +7,10 @@
 // CUDA-app-only header: it drags the bus (verbs) headers. Host gates
 // fake the engine instead; nothing in dgpp_service includes this.
 #include <algorithm>
+#include <array>
+#include <deque>
+#include <thread>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -233,6 +237,18 @@ inline SampledSpeculator::Row0 make_fabric_spec_row0(
 // when a provisionally rejected draft turns out to stand), re-drafts
 // eagerly on the true rows and reseeds the [next, draft] feed.
 class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
+ private:
+  // A replay in flight (2026-09-06, the pipelined replay): launched, its
+  // end not yet settled.
+  struct Replay {
+    int req = -1;             // the scalar slot, or -1 for the batch
+    bool batched = false;
+    int parity = 0;
+    std::vector<int> reqs;    // the live slots the replay decided for
+    bool redrafted = false;   // the host re-drafted: skip its draft verdicts
+    uint64_t verdict_seq = 0; // the pinned sequence its verdict node publishes
+  };
+
  public:
   // `grammar_vocab` (optional, M6 6g): the tokenizer's token table; with
   // it and the device sampler the adapter constrains the pick per slot
@@ -246,7 +262,7 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
                         uint16_t* sample_gather_scratch = nullptr,
                         int sampling_candidates_cap = kSamplingCandidates,
                         const text::GrammarVocab* grammar_vocab = nullptr,
-                        int prefix_slots = 0)
+                        int prefix_slots = 0, int mtp_depth = 1)
       : model_(model),
         bus_(bus),
         rank_(rank),
@@ -260,12 +276,24 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     if (model_ == nullptr || bus_ == nullptr || pick_scratch == nullptr)
       throw std::invalid_argument("graph engine: null model/bus/pick scratch");
     slots_ = model_->max_session_requests();
-    rows_per_request_ = model_->mtp_enabled() ? 2 : 1;
-    if (slots_ < 1 || slots_ * rows_per_request_ >
-                          GlmDiagnosticModel::kDecodeRows)
-      throw std::invalid_argument(
-          "graph engine: request slots * speculative rows exceed the fixed "
-          "decode-row ceiling");
+    // The verify's rows: the pending token plus `mtp_depth` drafts
+    // (2026-09-06; depth 1 is the two-row step as built).
+    if (mtp_depth < 1 || 1 + mtp_depth > GlmDiagnosticModel::kSpecRows)
+      throw std::invalid_argument("graph engine: mtp depth must be in [1, " +
+                                  std::to_string(GlmDiagnosticModel::kSpecRows - 1) + "]");
+    rows_per_request_ = model_->mtp_enabled() ? 1 + mtp_depth : 1;
+    depth_ = rows_per_request_ - 1;
+    if (slots_ < 1)
+      throw std::invalid_argument("graph engine: no request slots");
+    // The row batch needs every slot's rows in the fixed decode-row bound;
+    // past it the engine serves scalar replays only (below, at the
+    // threshold).
+    // The batched chain is not built: past depth 1 every step is scalar.
+    batch_unavailable_ =
+        slots_ * rows_per_request_ > GlmDiagnosticModel::kDecodeRows ||
+        depth_ > 1;
+    slot_mtp_attempts_.assign(static_cast<size_t>(slots_), {});
+    slot_mtp_accepts_.assign(static_cast<size_t>(slots_), {});
     prefill_pick_ = make_fabric_pick(bus_, rank_, world, pick_scratch, vocab_,
                                      pick_timeout_ms_);
     if (sample_prefix_scratch_ != nullptr && sample_gather_scratch_ != nullptr) {
@@ -299,9 +327,9 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
         DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_bias_row_),
                                     sizeof(float) * vocab_));
         DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_prompt_ids_),
-                                sizeof(int64_t) * model_->max_tokens()));
+                                sizeof(int64_t) * model_->max_context()));
         DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_prompt_ids_),
-                                    sizeof(int64_t) * model_->max_tokens()));
+                                    sizeof(int64_t) * model_->max_context()));
         DGPP_CUDA_OK(cudaMallocHost(
             reinterpret_cast<void**>(&h_fallback_row_),
             sizeof(float) * model_->lm_vocab_count()));
@@ -350,23 +378,71 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     rng_.assign(static_cast<size_t>(slots_), sample::Rng{});
     grammar_.resize(static_cast<size_t>(slots_));
     bias_.resize(static_cast<size_t>(slots_));
-    masks_.assign(static_cast<size_t>(slots_) * 2, text::TokenMask{});
+    masks_.assign(static_cast<size_t>(slots_) * rows_per_request_,
+                  text::TokenMask{});
     context_.assign(static_cast<size_t>(slots_), {});
     report_.assign(static_cast<size_t>(slots_), false);
     pending_logprobs_.assign(static_cast<size_t>(slots_), {});
     slot_sampled_.assign(static_cast<size_t>(slots_), 0);
     slot_fallbacks_.assign(static_cast<size_t>(slots_), 0);
     pending_.assign(static_cast<size_t>(slots_), -1);
-    draft_.assign(static_cast<size_t>(slots_), -1);
+    drafts_.assign(static_cast<size_t>(slots_),
+                   std::vector<int32_t>(static_cast<size_t>(depth_), -1));
     hop_slot_.assign(static_cast<size_t>(slots_), -1);
     hop_position_.assign(static_cast<size_t>(slots_), 0);
     live_.assign(static_cast<size_t>(slots_), false);
     reserved_.assign(static_cast<size_t>(slots_), false);
-    scalar_execs_.assign(static_cast<size_t>(slots_), nullptr);
+    scalar_execs_.assign(static_cast<size_t>(slots_), {{nullptr, nullptr}});
+    scalar_parity_.assign(static_cast<size_t>(slots_), 0);
+    end_events_.assign(static_cast<size_t>(slots_), {{nullptr, nullptr}});
+    for (int req = 0; req < slots_; ++req)
+      for (int p = 0; p < 2; ++p)
+        DGPP_CUDA_OK(cudaEventCreateWithFlags(
+            &end_events_[static_cast<size_t>(req)][static_cast<size_t>(p)],
+            cudaEventDisableTiming));
+    for (int p = 0; p < 2; ++p)
+      DGPP_CUDA_OK(cudaEventCreateWithFlags(
+          &batch_end_events_[static_cast<size_t>(p)], cudaEventDisableTiming));
+    {
+      const size_t n = static_cast<size_t>(slots_) + 1;
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_verdict_seq_),
+                                 sizeof(uint64_t) * n, cudaHostAllocMapped));
+      for (size_t i = 0; i < n; ++i) h_verdict_seq_[i] = 0;
+      DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_verdict_seq_),
+                              sizeof(uint64_t) * n));
+      DGPP_CUDA_OK(cudaMemset(d_verdict_seq_, 0, sizeof(uint64_t) * n));
+      verdict_seq_.assign(n, 0);
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_stage_seq_),
+                                 sizeof(uint64_t) * n, cudaHostAllocMapped));
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_stage_late_),
+                                 sizeof(uint32_t) * n, cudaHostAllocMapped));
+      for (size_t i = 0; i < n; ++i) {
+        h_stage_seq_[i] = 0;
+        h_stage_late_[i] = 0;
+      }
+      DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_stage_seq_),
+                              sizeof(uint64_t) * n));
+      DGPP_CUDA_OK(cudaMemset(d_stage_seq_, 0, sizeof(uint64_t) * n));
+      stage_seq_.assign(n, 0);
+    }
     batch_min_live_ = slots_ == 1
                           ? 1
                           : std::clamp(batch_min_live, 1, slots_);
-    if (batch_min_live_ != batch_min_live)
+    if (batch_unavailable_) {
+      // Never reached by the live count: every step replays a scalar graph.
+      batch_min_live_ = slots_ + 1;
+      if (depth_ > 1)
+        DGPP_LOG_INFO(
+            "rank {}: graph row batch unavailable at mtp depth {} (the "
+            "batched chain is not built); every step replays a scalar graph",
+            rank_, depth_);
+      else
+        DGPP_LOG_INFO(
+            "rank {}: graph row batch unavailable — {} slot{} x {} rows "
+            "exceed the {}-row decode bound; every step replays a scalar graph",
+            rank_, slots_, slots_ == 1 ? "" : "s", rows_per_request_,
+            GlmDiagnosticModel::kDecodeRows);
+    } else if (batch_min_live_ != batch_min_live)
       DGPP_LOG_INFO(
           "rank {}: graph batch crossover {} clamped to {} — the fixed batch "
           "has {} slot{}, so the batch is selected only at full occupancy",
@@ -385,9 +461,27 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
                                static_cast<double>(sampled_steps_)
                          : 0.0,
           candidates_);
-    for (cudaGraphExec_t exec : scalar_execs_)
+    try {
+      drain();
+    } catch (const std::exception& e) {
+      DGPP_LOG_WARN("rank {}: graph engine drain at teardown: {}", rank_,
+                    e.what());
+    }
+    for (std::array<cudaGraphExec_t, 2>& execs : scalar_execs_)
+      for (cudaGraphExec_t exec : execs)
+        if (exec != nullptr) cudaGraphExecDestroy(exec);
+    for (cudaGraphExec_t exec : batch_execs_)
       if (exec != nullptr) cudaGraphExecDestroy(exec);
-    if (batch_exec_ != nullptr) cudaGraphExecDestroy(batch_exec_);
+    for (std::array<cudaEvent_t, 2>& events : end_events_)
+      for (cudaEvent_t ev : events)
+        if (ev != nullptr) cudaEventDestroy(ev);
+    for (cudaEvent_t ev : batch_end_events_)
+      if (ev != nullptr) cudaEventDestroy(ev);
+    if (h_verdict_seq_) cudaFreeHost(h_verdict_seq_);
+    if (d_verdict_seq_) cudaFree(d_verdict_seq_);
+    if (h_stage_seq_) cudaFreeHost(h_stage_seq_);
+    if (h_stage_late_) cudaFreeHost(h_stage_late_);
+    if (d_stage_seq_) cudaFree(d_stage_seq_);
     if (d_specs_) cudaFree(d_specs_);
     if (h_specs_) cudaFreeHost(h_specs_);
     if (d_counts_) cudaFree(d_counts_);
@@ -407,6 +501,25 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   int decode_batch_capacity() const override { return slots_; }
   // The MTP verify writes two rows per step (next and the draft).
   int max_tokens_per_step() const override { return rows_per_request_; }
+  MtpAcceptance mtp_acceptance() const override {
+    MtpAcceptance a;
+    a.depth = rows_per_request_ - 1;
+    for (int p = 0; p < a.depth; ++p) {
+      a.attempts[p] = mtp_attempts_[static_cast<size_t>(p)];
+      a.accepts[p] = mtp_accepts_[static_cast<size_t>(p)];
+    }
+    return a;
+  }
+  MtpAcceptance mtp_acceptance(int req) const override {
+    MtpAcceptance a;
+    if (req < 0 || req >= slots_) return a;
+    a.depth = rows_per_request_ - 1;
+    for (int p = 0; p < a.depth; ++p) {
+      a.attempts[p] = slot_mtp_attempts_[static_cast<size_t>(req)][static_cast<size_t>(p)];
+      a.accepts[p] = slot_mtp_accepts_[static_cast<size_t>(req)][static_cast<size_t>(p)];
+    }
+    return a;
+  }
   int batch_min_live() const { return batch_min_live_; }
   int sampling_candidates() const { return candidates_; }
 
@@ -550,14 +663,13 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
       (void)prefill(req, warm_prompt);
       try {
         ensure_scalar_graph(req);
-        if (req == 0 && slots_ > 1) ensure_batch_graph();
+        if (req == 0 && slots_ > 1 && !batch_unavailable_) ensure_batch_graph();
       } catch (...) {
         close(req);
         throw;
       }
       close(req);
     }
-    batch_feeds_dirty_ = true;
     DGPP_LOG_INFO(
         "rank {}: warm capture complete — {} scalar variant{}{} recorded "
         "before the first request",
@@ -649,6 +761,10 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   // the slot again (a failed admission must not leak its blocks).
   template <typename Run>
   int32_t open_slot(int req, const std::vector<int64_t>& prompt, Run&& run) {
+    // Eager work ahead (the prefill's folds, the draft's picks): every
+    // replay in flight settles first — the bus's eager gate opens only
+    // once their windows are finished.
+    drain();
     check_req(req);
     if (live_[static_cast<size_t>(req)])
       throw std::logic_error("graph engine: prefill on a live request");
@@ -672,9 +788,10 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
           std::vector<int32_t> context(prompt.begin(), prompt.end());
           const text::TokenMask* mask = nullptr;
           if (grammar && grammar->active()) {
-            grammar->mask(&masks_[static_cast<size_t>(req) * 2]);
-            if (masks_[static_cast<size_t>(req) * 2].constrained())
-              mask = &masks_[static_cast<size_t>(req) * 2];
+            text::TokenMask& m0 =
+                masks_[static_cast<size_t>(req) * rows_per_request_];
+            grammar->mask(&m0);
+            if (m0.constrained()) mask = &m0;
           }
           const sample::Result r =
               prefill_sample_(out, params_[static_cast<size_t>(req)],
@@ -697,8 +814,8 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
         context.assign(prompt.begin(), prompt.end());
         context.push_back(first);
         const int n = static_cast<int>(prompt.size());
-        if (n > model_->max_tokens())
-          throw std::invalid_argument("graph engine: prompt exceeds max_tokens");
+        if (n > model_->max_context())
+          throw std::invalid_argument("graph engine: prompt exceeds the context bound");
         std::copy(prompt.begin(), prompt.end(), h_prompt_ids_);
         DGPP_CUDA_OK(cudaMemcpyAsync(d_prompt_ids_, h_prompt_ids_,
                                      sizeof(int64_t) * n,
@@ -716,23 +833,24 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
         // proposal directly from device logits (decode mirrors may already be
         // disabled after this graph's first capture).
         (void)model_->session_draft(req, {first});
-        draft_[static_cast<size_t>(req)] =
-            picker_->run(model_->stream(), scalar_pick_inputs(1)).next;
+        std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
+        drafts.assign(static_cast<size_t>(depth_), -1);
+        drafts[0] = picker_->run(model_->stream(), scalar_pick_inputs(1)).next;
+        chain_drafts_eagerly(req);
       }
       reserved_[static_cast<size_t>(req)] = false;
       live_[static_cast<size_t>(req)] = true;
-      // Prefill and the eager initial draft use d_tokens_ as scratch. Once
-      // the fixed batch exists, restore every live slot's persistent feed,
-      // not just the newly admitted one. Scalar variants stage/seed their
-      // compact row-zero feed immediately before each replay.
-      if (batch_exec_ != nullptr) seed_all_live_batch();
+      // The prefill wrote its chunks over the device token rows, the feeds
+      // included: restore every live slot's persistent feed (the scalar
+      // variants and the batch read the same rows).
+      reseed_live_feeds();
       return first;
     } catch (...) {
       // session_prefill opens the slot before any later pick/draft can fail.
       // Make a failed admission recoverable rather than leaking its blocks.
       model_->session_close(req);
       pending_[static_cast<size_t>(req)] = -1;
-      draft_[static_cast<size_t>(req)] = -1;
+      drafts_[static_cast<size_t>(req)].assign(static_cast<size_t>(depth_), -1);
       live_[static_cast<size_t>(req)] = false;
       reserved_[static_cast<size_t>(req)] = false;
       throw;
@@ -742,7 +860,10 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
  public:
   void reserve(int req, int64_t tokens) override {
     check_live(req, "reserve");
-    model_->session_reserve_blocks(req, tokens);
+    // The chained drafts write depth - 1 rows past the verify's last row.
+    model_->session_reserve_blocks(
+        req, std::min<int64_t>(tokens + std::max(0, depth_ - 1),
+                               model_->max_context()));
     reserved_[static_cast<size_t>(req)] = true;
   }
 
@@ -761,27 +882,37 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
       std::vector<std::vector<int32_t>> batches;
       batches.reserve(reqs.size());
       for (const int req : reqs) batches.push_back(step_scalar(req));
-      if (batch_exec_ != nullptr) batch_feeds_dirty_ = true;
       return batches;
     }
 
     ensure_batch_graph();
     model_->session_graph_use_batch_contract(rows_per_request_);
-    if (batch_feeds_dirty_) seed_all_live_batch();
     model_->session_graph_stage_batch();
+    // Launch first (the window armed behind whatever runs), settle the
+    // older replay while this one runs, stage the pick's masks for it,
+    // then wait for its verdict.
+    Replay r;
+    r.batched = true;
+    r.parity = batch_parity_;
+    batch_parity_ ^= 1;
+    r.reqs = reqs;
+    launch(std::move(r));
+    settle_older();
     for (const int req : reqs) stage_masks(req);
-    replay(batch_exec_, batch_variant());
+    publish_stage(slots_);
+    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
+    wait_verdict(inflight_.back());
 
     std::vector<std::vector<int32_t>> batches;
     batches.reserve(reqs.size());
     for (const int req : reqs)
       batches.push_back(
           collect_verdict(req, /*verdict_request=*/req, /*batched=*/true));
-    batch_feeds_dirty_ = false;
     return batches;
   }
 
   void close(int req) override {
+    drain();
     check_live(req, "close");
     // The slot's sampling tally, for the width sweep and the record: how
     // many of its stochastic steps the exact gather fallback served.
@@ -792,11 +923,13 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
           slot_fallbacks_[static_cast<size_t>(req)]);
     slot_sampled_[static_cast<size_t>(req)] = 0;
     slot_fallbacks_[static_cast<size_t>(req)] = 0;
+    slot_mtp_attempts_[static_cast<size_t>(req)] = {};
+    slot_mtp_accepts_[static_cast<size_t>(req)] = {};
     model_->session_close(req);
     live_[static_cast<size_t>(req)] = false;
     reserved_[static_cast<size_t>(req)] = false;
     pending_[static_cast<size_t>(req)] = -1;
-    draft_[static_cast<size_t>(req)] = -1;
+    drafts_[static_cast<size_t>(req)].assign(static_cast<size_t>(depth_), -1);
     hop_slot_[static_cast<size_t>(req)] = -1;
     // A reopened slot is greedy until the scheduler arms it again — on the
     // device too, so a padded replay of this slot never draws.
@@ -855,6 +988,7 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   DevicePicker::Inputs scalar_sampling_inputs(int req, int rows = 1) const {
     DevicePicker::Inputs in = scalar_pick_inputs(/*slot=*/0);
     in.rows = rows;
+    in.fed = model_->device_feed(req, rows_per_request_);
     if (sampling_) {
       in.specs = d_specs_ + req;
       in.counts = d_counts_ + static_cast<size_t>(req) * vocab_;
@@ -872,6 +1006,7 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     in.rows = slots_ * rows_per_request_;
     in.requests = slots_;
     in.rows_per_request = rows_per_request_;
+    in.fed = model_->device_feed(0, rows_per_request_);
     in.positions = model_->device_positions();
     in.position_stride = rows_per_request_;
     if (sampling_) {
@@ -919,21 +1054,14 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     }
   }
 
-  int batch_variant() const { return slots_; }
 
-  void seed_all_live_batch() {
-    model_->session_graph_use_batch_contract(rows_per_request_);
+  // Every live slot's persistent feed rows from the host's pending token
+  // and drafts (after eager work wrote over the device token rows).
+  void reseed_live_feeds() {
     for (int req = 0; req < slots_; ++req) {
       if (!live_[static_cast<size_t>(req)]) continue;
-      if (model_->mtp_enabled())
-        model_->session_graph_seed_tokens(
-            req, {pending_[static_cast<size_t>(req)],
-                  draft_[static_cast<size_t>(req)]});
-      else
-        model_->session_graph_seed_tokens(
-            req, {pending_[static_cast<size_t>(req)]});
+      model_->session_graph_seed_feed(req, feed_of(req));
     }
-    batch_feeds_dirty_ = false;
   }
 
   void ensure_capture_resources() {
@@ -947,6 +1075,7 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
 
   template <typename Build>
   cudaGraphExec_t capture_variant(int variant, Build&& build) {
+    drain();  // recording needs a quiet bus: no window live
     ensure_capture_resources();
     GlmBoundaryReducer* eager = model_->set_boundary(recorder_.get());
     bool record_open = false;
@@ -995,19 +1124,51 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     }
   }
 
+  int scalar_variant(int req, int parity) const { return 2 * req + parity; }
+  int batch_variant(int parity) const { return 2 * slots_ + parity; }
+  bool batch_captured() const { return batch_execs_[0] != nullptr; }
+
+  // The stage handshake and the masks' upload, recorded ahead of the
+  // pick: the wait node bumps the replay counter of `index` (a slot, or
+  // slots_ for the batch) and spins until the host published that many
+  // stages; the upload copies the pinned mask rows [row0, row0 + rows) to
+  // the device table. Only a sampling engine has masks.
+  void record_stage_gate(int index, int row0, int rows) {
+    if (!sampling_) return;
+    glm_stage_wait(h_stage_seq_ + index, d_stage_seq_ + index,
+                   h_stage_late_ + index, /*timeout_ns=*/30'000'000'000ll,
+                   model_->stream());
+    const size_t words = static_cast<size_t>(rows) * mask_stride_;
+    const size_t off = static_cast<size_t>(row0) * mask_stride_;
+    glm_upload_words(h_masks_ + off, d_masks_ + off, words, model_->stream());
+  }
+  void publish_stage(int index) {
+    if (!sampling_) return;
+    const size_t i = static_cast<size_t>(index);
+    ++stage_seq_[i];
+    __atomic_store_n(h_stage_seq_ + i, stage_seq_[i], __ATOMIC_RELEASE);
+  }
+
   void ensure_scalar_graph(int req) {
-    cudaGraphExec_t& exec = scalar_execs_[static_cast<size_t>(req)];
-    if (exec != nullptr) return;
+    std::array<cudaGraphExec_t, 2>& execs = scalar_execs_[static_cast<size_t>(req)];
+    if (execs[0] != nullptr) return;
     const bool mtp = model_->mtp_enabled();
-    exec = capture_variant(req, [&] {
+    const auto build = [&](int parity) {
       if (mtp) {
-        model_->session_graph_capture_step(
-            req,
-            std::vector<int64_t>{pending_[static_cast<size_t>(req)],
-                                 draft_[static_cast<size_t>(req)]},
-            /*device_positions=*/true, /*device_tokens=*/true);
-        picker_->record(model_->stream(), scalar_sampling_inputs(req, /*rows=*/2));
-        snapshot_verify_rows(req, /*rows=*/2, /*first_row=*/0);
+        // The T-row verify (the pending token and its drafts), the verdict,
+        // the commit, the draft block off the verdict with its pick at the
+        // last accepted row, then — depth >= 2 — the chained rows, one
+        // pick each, and the feed of every draft.
+        model_->session_graph_capture_step(req, feed_of(req),
+                                           /*device_positions=*/true,
+                                           /*device_tokens=*/true);
+        record_stage_gate(req, req * rows_per_request_, rows_per_request_);
+        picker_->record(model_->stream(),
+                        scalar_sampling_inputs(req, rows_per_request_));
+        (void)parity;
+        glm_publish_seq(d_verdict_seq_ + req, h_verdict_seq_ + req,
+                        model_->stream());
+        snapshot_verify_rows(req, rows_per_request_, /*first_row=*/0);
         model_->session_graph_capture_commit(
             req, picker_->device_verdict(0));
         model_->session_graph_capture_draft(
@@ -1015,31 +1176,50 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
         DevicePicker::Inputs draft = scalar_pick_inputs(/*slot=*/1);
         draft.row_select = picker_->device_verdict(0);
         picker_->record(model_->stream(), draft);
-        model_->session_graph_capture_next_tokens(
-            req, picker_->device_verdict(1));
+        std::vector<const PickVerdict*> drafts{picker_->device_verdict(1)};
+        for (int c = 1; c < depth_; ++c) {
+          model_->session_graph_capture_draft_chain(
+              req, picker_->device_verdict(0), picker_->device_verdict(c),
+              /*index=*/c - 1, /*first=*/c == 1, /*last=*/c == depth_ - 1);
+          picker_->record(model_->stream(), scalar_pick_inputs(1 + c));
+          drafts.push_back(picker_->device_verdict(1 + c));
+        }
+        model_->session_graph_capture_next_tokens(req, drafts);
       } else {
         model_->session_graph_capture_step(
             req, std::vector<int64_t>{pending_[static_cast<size_t>(req)]},
             /*device_positions=*/true, /*device_tokens=*/false);
+        record_stage_gate(req, req * rows_per_request_, rows_per_request_);
         picker_->record(model_->stream(), scalar_sampling_inputs(req));
+        (void)parity;
+        glm_publish_seq(d_verdict_seq_ + req, h_verdict_seq_ + req,
+                        model_->stream());
         model_->session_graph_capture_commit(
             req, picker_->device_verdict(0));
       }
-    });
-    if (batch_exec_ != nullptr)
+    };
+    for (int parity = 0; parity < 2; ++parity)
+      execs[static_cast<size_t>(parity)] =
+          capture_variant(scalar_variant(req, parity), [&] { build(parity); });
+    if (batch_captured())
       model_->session_graph_use_batch_contract(rows_per_request_);
     DGPP_LOG_INFO(
-        "rank {}: serving scalar graph variant {} captured for request slot "
-        "{} ({} rows{})",
-        rank_, req, req, rows_per_request_, mtp ? ", MTP" : "");
+        "rank {}: serving scalar graph variants {}/{} captured for request "
+        "slot {} ({} rows{})",
+        rank_, scalar_variant(req, 0), scalar_variant(req, 1), req,
+        rows_per_request_, mtp ? ", MTP" : "");
   }
 
   void ensure_batch_graph() {
-    if (batch_exec_ != nullptr) return;
+    if (batch_captured()) return;
     const bool mtp = model_->mtp_enabled();
-    batch_exec_ = capture_variant(batch_variant(), [&] {
+    const auto build = [&](int parity) {
       model_->session_graph_capture_batch(rows_per_request_);
+      record_stage_gate(slots_, 0, slots_ * rows_per_request_);
       picker_->record(model_->stream(), verify_pick_inputs());
+      (void)parity;
+      glm_publish_seq(d_verdict_seq_ + slots_, h_verdict_seq_ + slots_,
+                      model_->stream());
       if (mtp)
         snapshot_verify_rows(/*req=*/0, slots_ * rows_per_request_,
                              /*first_row=*/0);
@@ -1055,24 +1235,151 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
         model_->session_graph_capture_verify_next_tokens_batch(
             picker_->device_verdict(0));
       }
-    });
+    };
+    for (int parity = 0; parity < 2; ++parity)
+      batch_execs_[static_cast<size_t>(parity)] =
+          capture_variant(batch_variant(parity), [&] { build(parity); });
     model_->session_graph_use_batch_contract(rows_per_request_);
-    seed_all_live_batch();
     DGPP_LOG_INFO(
-        "rank {}: serving row-batched graph variant {} captured ({} slots x "
-        "{} rows = {} fixed rows{}, selected at {}+ live requests)",
-        rank_, batch_variant(), slots_, rows_per_request_,
+        "rank {}: serving row-batched graph variants {}/{} captured ({} slots "
+        "x {} rows = {} fixed rows{}, selected at {}+ live requests)",
+        rank_, batch_variant(0), batch_variant(1), slots_, rows_per_request_,
         slots_ * rows_per_request_, mtp ? ", MTP" : "", batch_min_live_);
   }
 
-  void replay(cudaGraphExec_t exec, int variant) {
+  // Polls the slot's pinned verdict sequence until the replay's verdict
+  // node published it (the verify's pick is done; the tail runs on).
+  void wait_verdict(const Replay& r) const {
+    const size_t index = static_cast<size_t>(r.batched ? slots_ : r.req);
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(pick_timeout_ms_);
+    uint64_t spins = 0;
+    while (__atomic_load_n(h_verdict_seq_ + index, __ATOMIC_ACQUIRE) <
+           r.verdict_seq) {
+      if ((++spins & 255) == 0) {
+        if (std::chrono::steady_clock::now() > deadline)
+          throw std::runtime_error(
+              "graph engine: the replay's verdict did not publish within the "
+              "pick timeout");
+        std::this_thread::yield();
+      }
+    }
+  }
+  cudaEvent_t end_event(const Replay& r) const {
+    return r.batched ? batch_end_events_[static_cast<size_t>(r.parity)]
+                     : end_events_[static_cast<size_t>(r.req)]
+                                  [static_cast<size_t>(r.parity)];
+  }
+
+  // Arms the replay's bus window and enqueues its graph behind whatever
+  // runs on the model stream; its end event follows. At most one older
+  // replay stays in flight (the bus holds two windows).
+  void launch(Replay r) {
+    while (inflight_.size() >= 2) settle_front();
+    const int variant = r.batched ? batch_variant(r.parity)
+                                  : scalar_variant(r.req, r.parity);
+    cudaGraphExec_t exec =
+        r.batched ? batch_execs_[static_cast<size_t>(r.parity)]
+                  : scalar_execs_[static_cast<size_t>(r.req)]
+                                 [static_cast<size_t>(r.parity)];
+    r.verdict_seq = ++verdict_seq_[static_cast<size_t>(r.batched ? slots_ : r.req)];
     std::string err;
     if (!bus_->graph_replay_arm(&err, variant))
       throw std::runtime_error("graph engine replay arm: " + err);
+    if (trace_)
+      DGPP_LOG_INFO("rank {}: pipeline launch slot {} parity {} variant {} "
+                    "(inflight {})",
+                    rank_, r.req, r.parity, variant, inflight_.size());
     DGPP_CUDA_OK(cudaGraphLaunch(exec, model_->stream()));
-    DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
-    if (!bus_->graph_replay_finish(pick_timeout_ms_, &err))
+    DGPP_CUDA_OK(cudaEventRecord(end_event(r), model_->stream()));
+    if (trace_)
+      DGPP_LOG_INFO("rank {}: pipeline launched slot {} parity {}", rank_,
+                    r.req, r.parity);
+    inflight_.push_back(std::move(r));
+  }
+  // The oldest replay in flight: its end, its bus window (finished in arm
+  // order), the stage handshake's verdict, and its draft verdicts (the
+  // block's picks at its tail) into the slots' drafts.
+  void settle_front() {
+    Replay r = std::move(inflight_.front());
+    inflight_.pop_front();
+    if (trace_)
+      DGPP_LOG_INFO("rank {}: pipeline settle slot {} parity {}: waiting end",
+                    rank_, r.req, r.parity);
+    DGPP_CUDA_OK(cudaEventSynchronize(end_event(r)));
+    if (trace_)
+      DGPP_LOG_INFO("rank {}: pipeline settle slot {} parity {}: ended", rank_,
+                    r.req, r.parity);
+    std::string err;
+    if (!bus_->graph_replay_finish(pick_timeout_ms_, &err)) {
+      bus_->dump_graph_cells("engine finish");
       throw std::runtime_error("graph engine replay finish: " + err);
+    }
+    if (sampling_) {
+      const size_t index = static_cast<size_t>(r.batched ? slots_ : r.req);
+      if (__atomic_load_n(h_stage_late_ + index, __ATOMIC_ACQUIRE) != 0u)
+        throw std::runtime_error(
+            "graph engine: the stage handshake timed out — the replay's "
+            "pick ran before the host staged its masks");
+    }
+    if (model_->mtp_enabled() && !r.redrafted) {
+      for (const int req : r.reqs) {
+        std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
+        for (int c = 0; c < depth_; ++c) {
+          const PickVerdict draft =
+              picker_->verdict(1 + c, r.batched ? req : 0);
+          if (draft.rows != 1 || draft.accepted != 1 || draft.next < 0 ||
+              draft.next >= vocab_)
+            throw std::runtime_error(
+                "graph engine: invalid draft verdict " + std::to_string(c + 1) +
+                " for slot " + std::to_string(req));
+          drafts[static_cast<size_t>(c)] = draft.next;
+        }
+      }
+    }
+  }
+  void settle_older() {
+    while (inflight_.size() > 1) settle_front();
+  }
+
+ public:
+  // Settles every replay in flight: the bus's eager gate is open after
+  // this, and every slot's drafts are the block's latest. Any eager use
+  // of the bus (a prefill, an eager verify or draft, the host's fallback
+  // gathers) must follow a drain; the gates' eager oracles call it.
+  void drain() {
+    while (!inflight_.empty()) settle_front();
+  }
+
+ private:
+
+  // The step's fed rows for slot `req`: the pending token and its drafts.
+  std::vector<int64_t> feed_of(int req) const {
+    std::vector<int64_t> feed{pending_[static_cast<size_t>(req)]};
+    for (const int32_t d : drafts_[static_cast<size_t>(req)]) feed.push_back(d);
+    return feed;
+  }
+
+  // Drafts 2..depth eagerly off the block's recursion (the open, and the
+  // sampled fallback's re-draft), each a greedy pick of the chain row's
+  // head. A chain row past the context is skipped: its draft repeats the
+  // previous one (any valid id; it cannot stand).
+  void chain_drafts_eagerly(int req) {
+    std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
+    int runs = 0;
+    for (int c = 1; c < depth_; ++c)
+      if (model_->session_draft_chain_fits(req, c - 1)) runs = c;
+    for (int c = 1; c < depth_; ++c) {
+      if (c > runs) {
+        drafts[static_cast<size_t>(c)] = drafts[static_cast<size_t>(c - 1)];
+        continue;
+      }
+      (void)model_->session_draft_chain(req, drafts[static_cast<size_t>(c - 1)],
+                                        /*index=*/c - 1, /*first=*/c == 1,
+                                        /*last=*/c == runs);
+      drafts[static_cast<size_t>(c)] =
+          picker_->run(model_->stream(), scalar_pick_inputs(1)).next;
+    }
   }
 
   std::vector<int32_t> collect_verdict(int req, int verdict_request,
@@ -1085,24 +1392,26 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
           " (rows " + std::to_string(verify.rows) + ", accepted " +
           std::to_string(verify.accepted) + ")");
     model_->session_graph_settle(req, verify.accepted);
-    // The prefix cache's hop snapshot (M7 under the two-row step): armed by
-    // the scheduler for the aligned position row 1 sat on; taken from the
-    // state after row 0 when both rows stood — here, before another slot's
-    // scalar step can reuse the spec snapshot rows. A one-row verdict landed
-    // ON the position; the scheduler's rolling snapshot follows.
+    // The prefix cache's hop snapshot (M7 under the multi-row step): armed
+    // by the scheduler for the aligned position row 1 sat on; taken from
+    // the state after row 0 when row 1 stood — here, before another slot's
+    // scalar step can reuse the spec snapshot rows. A one-row verdict
+    // landed ON the position; the scheduler's rolling snapshot follows.
     if (hop_slot_[static_cast<size_t>(req)] >= 0) {
       const int slot = hop_slot_[static_cast<size_t>(req)];
       const int64_t hop = hop_position_[static_cast<size_t>(req)];
       hop_slot_[static_cast<size_t>(req)] = -1;
-      if (verify.accepted == 2) {
-        if (model_->session_position(req) != hop + 1)
+      if (verify.accepted >= 2) {
+        const int rows_after = verify.accepted - 1;
+        if (model_->session_position(req) != hop + rows_after)
           throw std::runtime_error(
               "graph engine: slot " + std::to_string(req) + " sits at " +
-              std::to_string(model_->session_position(req)) +
-              " after a two-row step, the armed hop expects " +
-              std::to_string(hop + 1));
+              std::to_string(model_->session_position(req)) + " after a " +
+              std::to_string(verify.accepted) + "-row step, the armed hop expects " +
+              std::to_string(hop + rows_after));
         arena_.snapshot_post_row0(req, slot, hop,
-                                  batched ? req * rows_per_request_ : 0);
+                                  batched ? req * rows_per_request_ : 0,
+                                  rows_after);
       }
     }
 
@@ -1117,6 +1426,20 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
       decided.push_back(token);
     }
     int32_t next = verify.next;
+    // Per-position acceptance (2026-09-06): draft p (1-based) stood when
+    // the verdict accepted more than p rows.
+    for (int p = 0; p + 1 < rows_per_request_; ++p) {
+      const size_t pi = static_cast<size_t>(p);
+      ++mtp_attempts_[pi];
+      ++slot_mtp_attempts_[static_cast<size_t>(req)][pi];
+      if (verify.accepted > p + 1) {
+        ++mtp_accepts_[pi];
+        ++slot_mtp_accepts_[static_cast<size_t>(req)][pi];
+      }
+    }
+    // The drafts this step fed (the verify's rows after the first); the
+    // slot's drafts are replaced below by the block's new ones.
+    const std::vector<int32_t> fed_drafts = drafts_[static_cast<size_t>(req)];
     const bool stochastic = sampled_slot(req);
     const bool full_path = full_path_slot(req);
     if (stochastic) {
@@ -1131,44 +1454,57 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
       // context mirror and the report follow.
       const SampleOutcome& o = picker_->outcome(0, verdict_request);
       std::vector<int32_t>& context = context_[static_cast<size_t>(req)];
-      if (model_->mtp_enabled() && verify.accepted == 2)
-        context.push_back(static_cast<int32_t>(draft_[static_cast<size_t>(req)]));
+      for (int t = 1; t < verify.accepted; ++t)
+        context.push_back(fed_drafts[static_cast<size_t>(t - 1)]);
       context.push_back(next);
       if (report_[static_cast<size_t>(req)])
         for (int row = 0; row < verify.accepted; ++row)
           report.push_back(device_result(o, row, verify.winners[row]));
     }
     if (stochastic && model_->mtp_enabled()) {
-      // The T=2 verify's sampled verdict. The context mirror follows the
-      // device count table: the draft joins it only when it stands.
+      // The T-row verify's sampled verdict. The context mirror follows the
+      // device count table: a draft joins it only when it stands.
       const SampleOutcome& o = picker_->outcome(0, verdict_request);
       sample::Rng& rng = rng_[static_cast<size_t>(req)];
       std::vector<int32_t>& context = context_[static_cast<size_t>(req)];
-      const int32_t fed_draft =
-          static_cast<int32_t>(draft_[static_cast<size_t>(req)]);
       if (!o.sampled)
         throw std::runtime_error(
             "graph engine: the device made no stochastic decision for a "
             "sampled MTP slot " + std::to_string(req));
       DGPP_LOG_DEBUG(
           "rank {}: slot {} device MTP sampling outcome: fallback_row {} "
-          "accepted_draft {} counter {} winners {}/{} accepted {}",
+          "accepted_draft {} counter {} winners {}/{} accepted {} of {}",
           rank_, req, o.fallback_row, o.accepted_draft, o.counter,
-          verify.winners[0], verify.winners[1], verify.accepted);
+          verify.winners[0], verify.winners[1], verify.accepted,
+          rows_per_request_);
       if (o.fallback_row < 0) {
-        if (o.counter != rng.counter + 2)
+        // The device's draws: one per draft that stood, two for the reject
+        // that ended the chain (the test and the residual), one for the
+        // last row's plain sample when every draft stood.
+        const uint64_t draws = verify.accepted < rows_per_request_
+                                   ? static_cast<uint64_t>(verify.accepted) + 1
+                                   : static_cast<uint64_t>(rows_per_request_);
+        if (o.counter != rng.counter + draws)
           throw std::runtime_error(
               "graph engine: the device consumed " +
-              std::to_string(o.counter - rng.counter) +
-              " draws for one T=2 step");
+              std::to_string(o.counter - rng.counter) + " draws for a " +
+              std::to_string(rows_per_request_) + "-row step that committed " +
+              std::to_string(verify.accepted) + " (expected " +
+              std::to_string(draws) + ")");
         rng.counter = o.counter;
-        if (verify.accepted == 2) context.push_back(fed_draft);
+        for (int t = 1; t < verify.accepted; ++t)
+          context.push_back(fed_drafts[static_cast<size_t>(t - 1)]);
         context.push_back(next);
         if (report_[static_cast<size_t>(req)])
           for (int row = 0; row < verify.accepted; ++row)
             report.push_back(device_result(o, row, verify.winners[row]));
       } else {
-        next = serve_mtp_fallback(req, verdict_request, o, verify, fed_draft,
+        // The host decides between windows: the replay in flight (this
+        // one) ends first — its window finished, its provisional draft
+        // picks skipped (the host re-drafts below).
+        if (!inflight_.empty()) inflight_.back().redrafted = true;
+        drain();
+        next = serve_mtp_fallback(req, verdict_request, o, verify, fed_drafts,
                                   &decided, batched, &report);
       }
     } else if (stochastic) {
@@ -1181,21 +1517,21 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
       DGPP_LOG_DEBUG(
           "rank {}: slot {} device sampling outcome: fallback {} counter {} "
           "normalizer {:.6f} covered {:.6f} next {} logprob {:.4f}",
-          rank_, req, o.fallback, o.counter, o.normalizer, o.covered_mass,
-          verify.next, o.logprob);
+          rank_, req, o.fallback, o.counter, o.normalizer[0], o.covered_mass[0],
+          verify.next, o.logprob[0]);
       if (o.fallback) {
         if (o.counter != rng.counter)
           throw std::runtime_error(
               "graph engine: the device's counter drifted from the host's "
               "on a fallback");
+        drain();
         const sample::Result r = serve_fallback(req, verdict_request, o);
         next = r.token;
         decided.back() = next;
         if (report_[static_cast<size_t>(req)]) report.push_back(r);
         // The graph fed itself the provisional token; the true one replaces
-        // it before the next replay (the scalar variant stages pending_,
-        // the batch keeps its persistent feed on the device).
-        if (batched) model_->session_graph_seed_tokens(req, {next});
+        // it in the slot's persistent feed before the next replay.
+        model_->session_graph_seed_feed(req, {next});
       } else {
         if (o.counter != rng.counter + 1)
           throw std::runtime_error(
@@ -1221,32 +1557,29 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
             "left its mask (state {})",
             rank_, req, grammar->state_name());
     }
-    if (model_->mtp_enabled() && !mtp_redrafted_) {
-      const PickVerdict draft = picker_->verdict(1, verdict_request);
-      if (draft.rows != 1 || draft.accepted != 1 || draft.next < 0 ||
-          draft.next >= vocab_)
-        throw std::runtime_error(
-            "graph engine: invalid draft verdict for slot " +
-            std::to_string(req));
-      draft_[static_cast<size_t>(req)] = draft.next;
-    }
+    // The block's new drafts land when the replay's tail settles
+    // (settle_front), unless the host re-drafted.
     mtp_redrafted_ = false;
     return decided;
   }
 
-  // The sampled MTP step's fallback (DESIGN §9/§10): the in-graph draft ran
-  // on provisional rows, so it rolls back to its ring snapshot first. Row 0
-  // undecided (the device rejected provisionally, the commit kept the
-  // post-row-0 state): the host gathers row 0 and decides; a reject is the
-  // residual token; an accept means the draft stood after all, so the
-  // verify's second row re-runs eagerly and its token is sampled on the
-  // host. Row 1 undecided (the draft stood on the device): the host gathers
-  // row 1 and samples it. Either way the true rows re-draft eagerly, the
-  // [next, draft] feed is reseeded, the counter is pushed. Returns the new
-  // next token and rewrites `decided`.
+  // The sampled MTP step's fallback (DESIGN §9/§10) at row t = the outcome's
+  // fallback_row: the device committed rows [0, t] (the consumed token and
+  // the drafts before row t, which stood), and the in-graph draft ran on
+  // those provisional rows, so the block rolls back to its ring snapshot
+  // first. The host gathers row t from the verify snapshot and decides it
+  // under the device's normalizer: a row before the last tests its draft —
+  // a reject is the residual token; a stand means the draft joins the
+  // count table and the context, and the verify's next row re-runs eagerly
+  // and is decided the same way (the chain continues on the host exactly
+  // as the device would have, draw for draw); the last row is sampled
+  // plainly. Then the true rows re-draft eagerly (the chain included), the
+  // feed is reseeded, the counter is pushed. Returns the new next token
+  // and rewrites `decided`.
   int32_t serve_mtp_fallback(int req, int verdict_request,
                              const SampleOutcome& o,
-                             const PickVerdict& verify, int32_t fed_draft,
+                             const PickVerdict& verify,
+                             const std::vector<int32_t>& fed_drafts,
                              std::vector<int32_t>* decided, bool batched,
                              std::vector<sample::Result>* report) {
     const bool reporting = report_[static_cast<size_t>(req)];
@@ -1255,9 +1588,30 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     const sample::Params& p = params_[static_cast<size_t>(req)];
     const int count = model_->lm_vocab_count();
     const int begin = model_->lm_vocab_begin();
+    const int T = rows_per_request_;
+    const int t0 = o.fallback_row;
     (void)verdict_request;
+    // The device's draws: one per draft that stood before row t0 (the
+    // fallback row's own draw is the host's).
+    if (t0 < 0 || t0 >= T || verify.accepted != t0 + 1 ||
+        o.counter != rng.counter + static_cast<uint64_t>(t0))
+      throw std::runtime_error(
+          "graph engine: a row-" + std::to_string(t0) +
+          " fallback must commit the rows before it (" +
+          std::to_string(verify.accepted) + " committed) with their draws "
+          "consumed (" + std::to_string(o.counter - rng.counter) + ")");
+    rng.counter = o.counter;
     // The draft block ran on the provisional rows: back to its snapshot.
     model_->session_draft_rollback(req, verify.accepted);
+    // The drafts the device accepted before row t0 joined its count table;
+    // the mirror and the report follow.
+    std::vector<int32_t> rows;  // the rows' tokens: the block's next inputs
+    for (int t = 0; t < t0; ++t) {
+      const int32_t d = fed_drafts[static_cast<size_t>(t)];
+      context.push_back(d);
+      rows.push_back(d);
+      if (reporting) report->push_back(device_result(o, t, d));
+    }
     // The verify rows from the snapshot the graph took before its draft
     // (the logits buffer itself holds the draft head's rows now); the
     // snapshot is indexed [slot][row], the scalar and the batch alike.
@@ -1271,80 +1625,95 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
                         static_cast<int>(vocab_), sample_gather_scratch_,
                         pick_timeout_ms_, &fallback_full_);
     };
-    std::vector<int64_t> rows;
+    gather_row(static_cast<size_t>(t0));
+    check_gathered_row(o.covered_mass[t0], o.normalizer[t0], p,
+                       t0 == 0 ? "row 0" : "row");
     int32_t next = -1;
-    if (o.fallback_row == 0) {
-      if (o.counter != rng.counter || verify.accepted != 1)
-        throw std::runtime_error(
-            "graph engine: a row-0 fallback must leave the counter and "
-            "commit one row");
-      gather_row(0);
-      check_gathered_row(o.covered_mass, o.normalizer, p, "row 0");
-      const sample::SpecPrefixDecision d0 =
-          sample::spec_accept_complete(fallback_full_.data(),
-                                           static_cast<int>(vocab_),
-                                           o.normalizer, fed_draft, p, rng);
-      bus_check_decision_digest(*bus_, rank_, d0.accepted, d0.result,
-                                o.normalizer, sample_prefix_scratch_,
-                                pick_timeout_ms_, "graph MTP fallback row 0");
-      if (reporting) report->push_back(d0.result);
-      if (!d0.accepted) {
-        next = d0.result.token;
-        *decided = {next};
-        rows = {next};
-      } else {
+    int t = t0;
+    bool gathered = true;  // row t is the gathered snapshot row
+    GlmDiagnosticModel::Outputs eager;  // else the eagerly re-run row t
+    for (;;) {
+      const text::TokenMask& m =
+          masks_[static_cast<size_t>(req) * rows_per_request_ + t];
+      const text::TokenMask* mask = m.constrained() ? &m : nullptr;
+      if (t + 1 < T) {
+        const int32_t draft = fed_drafts[static_cast<size_t>(t)];
+        sample::SpecPrefixDecision d;
+        if (gathered) {
+          d = sample::spec_accept_complete(fallback_full_.data(),
+                                               static_cast<int>(vocab_),
+                                               o.normalizer[t], draft, p, rng);
+          bus_check_decision_digest(*bus_, rank_, d.accepted, d.result,
+                                    o.normalizer[t], sample_prefix_scratch_,
+                                    pick_timeout_ms_, "graph MTP fallback row");
+        } else {
+          // Row t under the mask staged for it (the grammar advanced by
+          // the drafts), the bias, and the context as it stands.
+          step_timing::Scope tick(step_timing::kPick);
+          d = bus_spec_accept(*bus_, rank_, world_, eager.logits.data(),
+                              static_cast<int>(eager.lm_vocab_count),
+                              eager.lm_vocab_begin, static_cast<int>(vocab_),
+                              draft, p, rng, context, kSamplingCandidates,
+                              sample_prefix_scratch_, sample_gather_scratch_,
+                              pick_timeout_ms_, &fallback_full_, mask,
+                              bias_row(req));
+          if (!d.resolved)
+            throw std::runtime_error(
+                "graph engine: the eager fallback row did not resolve");
+        }
+        if (reporting) report->push_back(d.result);
+        if (!d.accepted) {
+          next = d.result.token;
+          rows.push_back(next);
+          break;
+        }
         // The draft stood after all: it joins the device count table (the
-        // verdict committed only the consumed token on its provisional
-        // reject), then the verify's second row runs eagerly and is sampled.
+        // verdict committed only the rows before it), the context and the
+        // rows, then the verify's next row runs eagerly.
         device_sample_adjust_count(d_counts_ + static_cast<size_t>(req) * vocab_,
-                                fed_draft, +1, static_cast<int>(vocab_),
+                                draft, +1, static_cast<int>(vocab_),
                                 model_->stream());
         DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
-        context.push_back(fed_draft);
-        const GlmDiagnosticModel::Outputs row1 =
-            model_->session_verify(req, std::vector<int64_t>{fed_draft});
-        // Row 1 under the mask staged for it (the grammar advanced by the
-        // draft), as the device would have applied it.
-        const text::TokenMask& m1 = masks_[static_cast<size_t>(req) * 2 + 1];
-        const sample::Result r1 = prefill_sample_(
-            row1, p, rng, context, m1.constrained() ? &m1 : nullptr,
-            bias_row(req));
-        if (reporting) report->push_back(r1);
-        next = r1.token;
-        *decided = {fed_draft, next};
-        rows = {fed_draft, next};
+        context.push_back(draft);
+        rows.push_back(draft);
+        eager = model_->session_verify(req, std::vector<int64_t>{draft});
+        gathered = false;
+        ++t;
+      } else {
+        sample::Result r;
+        if (gathered) {
+          r = sample::sample_complete_logits(fallback_full_.data(),
+                                             static_cast<int>(vocab_),
+                                             o.normalizer[t], p, rng);
+          bus_check_decision_digest(*bus_, rank_, true, r, o.normalizer[t],
+                                    sample_prefix_scratch_, pick_timeout_ms_,
+                                    "graph MTP fallback last row");
+        } else {
+          r = prefill_sample_(eager, p, rng, context, mask, bias_row(req));
+        }
+        if (reporting) report->push_back(r);
+        next = r.token;
+        rows.push_back(next);
+        break;
       }
-    } else {
-      if (o.counter != rng.counter + 1 || verify.accepted != 2)
-        throw std::runtime_error(
-            "graph engine: a row-1 fallback must consume the accept draw "
-            "and commit two rows");
-      rng.counter = o.counter;
-      context.push_back(fed_draft);
-      gather_row(1);
-      const sample::Result r1 = sample::sample_complete_logits(
-          fallback_full_.data(), static_cast<int>(vocab_), o.normalizer1, p,
-          rng);
-      bus_check_decision_digest(*bus_, rank_, true, r1, o.normalizer1,
-                                sample_prefix_scratch_, pick_timeout_ms_,
-                                "graph MTP fallback row 1");
-      if (reporting) {
-        // Row 0 stood on the device; its report is the device's.
-        report->push_back(device_result(o, 0, fed_draft));
-        report->push_back(r1);
-      }
-      next = r1.token;
-      *decided = {fed_draft, next};
-      rows = {fed_draft, next};
     }
     if (next < 0 || next >= vocab_)
       throw std::runtime_error("graph engine MTP fallback token out of range");
     context.push_back(next);
-    // The true rows through the draft block, eagerly; the greedy draft pick.
-    const int32_t draft_new = prefill_pick_(model_->session_draft(req, rows));
-    draft_[static_cast<size_t>(req)] = draft_new;
+    *decided = rows;
+    // The true rows through the draft block, eagerly; the greedy draft
+    // picks, the chain included.
+    std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
+    drafts[0] = prefill_pick_(model_->session_draft(
+        req, std::vector<int64_t>(rows.begin(), rows.end())));
+    chain_drafts_eagerly(req);
     mtp_redrafted_ = true;
-    if (batched) model_->session_graph_seed_tokens(req, {next, draft_new});
+    {
+      std::vector<int64_t> feed{next};
+      for (const int32_t d : drafts) feed.push_back(d);
+      model_->session_graph_seed_feed(req, feed);
+    }
+    (void)batched;
     push_counter(req);
     ++fallbacks_;
     ++slot_fallbacks_[static_cast<size_t>(req)];
@@ -1353,18 +1722,28 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
 
   std::vector<int32_t> step_scalar(int req) {
     ensure_scalar_graph(req);
-    if (model_->mtp_enabled()) {
-      const std::vector<int64_t> feed = {
-          pending_[static_cast<size_t>(req)],
-          draft_[static_cast<size_t>(req)]};
-      model_->session_graph_stage(req, feed);
-      model_->session_graph_seed_scalar_tokens(feed);
-    } else {
-      model_->session_graph_stage(req,
-                                  pending_[static_cast<size_t>(req)]);
-    }
+    // The pinned row metadata (the MTP feed itself is device-resident; a
+    // plain T=1 graph uploads the staged token at its start).
+    if (model_->mtp_enabled())
+      model_->session_graph_stage(req, feed_of(req));
+    else
+      model_->session_graph_stage(req, pending_[static_cast<size_t>(req)]);
+    // Launch first: the window armed and the graph enqueued behind the
+    // previous replay's tail. Then settle that tail (its drafts are this
+    // replay's fed rows, already on the device; the masks need them),
+    // stage the masks for this replay's pick and publish, and wait for
+    // the verdict — the draft block's tail runs on while the host works.
+    Replay r;
+    r.req = req;
+    r.parity = scalar_parity_[static_cast<size_t>(req)];
+    scalar_parity_[static_cast<size_t>(req)] ^= 1;
+    r.reqs = {req};
+    launch(std::move(r));
+    settle_older();
     stage_masks(req);
-    replay(scalar_execs_[static_cast<size_t>(req)], req);
+    publish_stage(req);
+    if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
+    wait_verdict(inflight_.back());
     return collect_verdict(req, /*verdict_request=*/0, /*batched=*/false);
   }
 
@@ -1379,28 +1758,28 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     if (!sampling_) return;
     std::unique_ptr<text::GrammarState>& grammar = grammar_[static_cast<size_t>(req)];
     if (!grammar) return;  // the headers are zero (configure/close)
-    text::TokenMask& m0 = masks_[static_cast<size_t>(req) * 2];
-    text::TokenMask& m1 = masks_[static_cast<size_t>(req) * 2 + 1];
-    grammar->mask(&m0);
-    if (rows_per_request_ == 2) {
+    text::TokenMask* m = &masks_[static_cast<size_t>(req) * rows_per_request_];
+    grammar->mask(&m[0]);
+    if (rows_per_request_ > 1) {
+      // Row t under the state advanced by the drafts before it (a draft
+      // outside its mask kills the copy: the rows after stay unconstrained
+      // and are discarded with it).
       text::GrammarState after = *grammar;
-      after.advance(draft_[static_cast<size_t>(req)]);
-      after.mask(&m1);
-    } else {
-      m1.allowed = 0;
+      const std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
+      for (int t = 1; t < rows_per_request_; ++t) {
+        after.advance(drafts[static_cast<size_t>(t - 1)]);
+        after.mask(&m[t]);
+      }
     }
     uint32_t* h = h_masks_ + static_cast<size_t>(req) * rows_per_request_ * mask_stride_;
     for (int t = 0; t < rows_per_request_; ++t) {
-      const text::TokenMask& m = t == 0 ? m0 : m1;
       uint32_t* row = h + static_cast<size_t>(t) * mask_stride_;
-      row[0] = m.constrained() ? static_cast<uint32_t>(m.allowed) : 0u;
-      if (m.constrained())
-        std::copy(m.words.begin(), m.words.end(), row + 1);
+      row[0] = m[t].constrained() ? static_cast<uint32_t>(m[t].allowed) : 0u;
+      if (m[t].constrained())
+        std::copy(m[t].words.begin(), m[t].words.end(), row + 1);
     }
-    const size_t words = static_cast<size_t>(rows_per_request_) * mask_stride_;
-    DGPP_CUDA_OK(cudaMemcpyAsync(
-        d_masks_ + static_cast<size_t>(req) * rows_per_request_ * mask_stride_,
-        h, sizeof(uint32_t) * words, cudaMemcpyHostToDevice, model_->stream()));
+    // The device table takes the rows through the replay's upload node,
+    // behind the stage handshake (record_stage_gate).
   }
   // The gathered row is the row the device decided over iff its prefix's
   // covered mass under the device's normalizer is the device's, bit for
@@ -1458,7 +1837,7 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
                                           int32_t token) {
     sample::Result r;
     r.token = token;
-    r.logprob = row == 0 ? o.logprob : o.logprob1;
+    r.logprob = o.logprob[row];
     for (int i = 0; i < o.top_count[row]; ++i)
       r.top_logprobs.emplace_back(o.top_ids[row][i], o.top_logprobs[row][i]);
     return r;
@@ -1509,13 +1888,13 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
                       static_cast<int>(vocab_), sample_gather_scratch_,
                       pick_timeout_ms_, &fallback_full_);
     sample::Rng& rng = rng_[static_cast<size_t>(req)];
-    check_gathered_row(o.covered_mass, o.normalizer,
+    check_gathered_row(o.covered_mass[0], o.normalizer[0],
                        params_[static_cast<size_t>(req)], "row");
     const sample::Result r = sample::sample_complete_logits(
-        fallback_full_.data(), static_cast<int>(vocab_), o.normalizer,
+        fallback_full_.data(), static_cast<int>(vocab_), o.normalizer[0],
         params_[static_cast<size_t>(req)], rng);
     bus_check_decision_digest(*bus_, rank_, /*resolved=*/true, r,
-                              o.normalizer, sample_prefix_scratch_,
+                              o.normalizer[0], sample_prefix_scratch_,
                               pick_timeout_ms_, "graph sample fallback");
     if (r.token < 0 || r.token >= vocab_)
       throw std::runtime_error("graph engine fallback token out of range: " +
@@ -1556,8 +1935,8 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   SampleSpec* d_specs_ = nullptr;   // device [slots]
   SampleSpec* h_specs_ = nullptr;   // pinned mirror
   int32_t* d_counts_ = nullptr;        // device [slots][vocab]
-  int64_t* d_prompt_ids_ = nullptr;    // device [max_tokens]
-  int64_t* h_prompt_ids_ = nullptr;    // pinned [max_tokens]
+  int64_t* d_prompt_ids_ = nullptr;    // device [max_context]
+  int64_t* h_prompt_ids_ = nullptr;    // pinned [max_context]
   float* h_fallback_row_ = nullptr;    // pinned [lm_vocab_count]
   std::vector<float> fallback_full_;
   // Constrained decoding (M6 6g): the grammar per slot, the two staged
@@ -1588,19 +1967,58 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   bool mtp_redrafted_ = false;  // this collect re-drafted on the host
   int slots_ = 0;
   int rows_per_request_ = 1;
+  bool batch_unavailable_ = false;  // slots * rows past kDecodeRows: scalar only
+  // Per-position draft acceptance (2026-09-06): engine-wide and per slot.
+  std::array<uint64_t, 8> mtp_attempts_{}, mtp_accepts_{};
+  std::vector<std::array<uint64_t, 8>> slot_mtp_attempts_, slot_mtp_accepts_;
   std::vector<int> hop_slot_;          // per slot: the armed hop's arena slot, -1 none
   std::vector<int64_t> hop_position_;  // per slot: the armed hop's position
   int batch_min_live_ = 1;
   int last_mode_ = -1;  // 0 scalar variants, 1 fixed row batch
-  bool batch_feeds_dirty_ = true;
   GenEngineAdapter::Pick prefill_pick_;
   std::unique_ptr<DevicePicker> picker_;
   // Recorder storage is referenced by graph nodes and must outlive the exec.
   std::unique_ptr<GlmGraphRecordReducer> recorder_;
-  std::vector<cudaGraphExec_t> scalar_execs_;
-  cudaGraphExec_t batch_exec_ = nullptr;
+  // The pipelined replay (2026-09-06): two graph variants per slot and two
+  // for the batch, alternating per replay, so the next replay's bus window
+  // is armed on a variant whose cells are not in flight while the previous
+  // replay of the same shape still runs. A replay is launched, its verdict
+  // awaited on an event recorded in the graph right after the verify's
+  // pick, and its END (the draft block's tail) settled after the NEXT
+  // replay was launched — that is where the host's seam hides.
+  std::vector<std::array<cudaGraphExec_t, 2>> scalar_execs_;
+  std::array<cudaGraphExec_t, 2> batch_execs_{{nullptr, nullptr}};
+  std::vector<int> scalar_parity_;
+  int batch_parity_ = 0;
+  std::vector<std::array<cudaEvent_t, 2>> end_events_;
+  std::array<cudaEvent_t, 2> batch_end_events_{{nullptr, nullptr}};
+  // The verdict's publication: per slot (and the batch, at index slots_)
+  // the device replay counter the verdict node bumps, its pinned mirror
+  // the host polls, and the host's expected count.
+  uint64_t* h_verdict_seq_ = nullptr;
+  uint64_t* d_verdict_seq_ = nullptr;
+  std::vector<uint64_t> verdict_seq_;
+  std::deque<Replay> inflight_;  // launched, end not yet settled (<= 2)
+  // DGPP_PIPELINE=0 settles every replay right after its launch (no
+  // overlap): the bisecting knob and the operational escape hatch.
+  bool pipeline_ = [] {
+    const char* v = std::getenv("DGPP_PIPELINE");
+    return v == nullptr || std::string(v) != "0";
+  }();
+  bool trace_ = std::getenv("DGPP_PIPELINE_TRACE") != nullptr;
+
+  // The stage handshake: per slot (and the batch, at index slots_) the
+  // host's published stage sequence (pinned), the device's replay counter,
+  // and the late flag the wait node sets on a timeout.
+  uint64_t* h_stage_seq_ = nullptr;
+  uint64_t* d_stage_seq_ = nullptr;
+  uint32_t* h_stage_late_ = nullptr;
+  std::vector<uint64_t> stage_seq_;
   std::vector<int64_t> pending_;
-  std::vector<int64_t> draft_;
+  // Per slot: the drafts fed with the pending token, one per position
+  // (depth_ of them; depth 1 is the two-row step as built).
+  std::vector<std::vector<int32_t>> drafts_;
+  int depth_ = 0;
   std::vector<bool> live_;
   std::vector<bool> reserved_;
   PrefixArena arena_;  // the prefix cache's snapshot slots (M7)

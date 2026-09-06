@@ -870,10 +870,10 @@ inline sample::SpecPrefixDecision bus_spec_accept(
     const std::vector<int32_t>& context_ids, int candidate_k,
     uint16_t* prefix_scratch, uint16_t* gather_scratch, int timeout_ms,
     std::vector<float>* gather_buffer,
-    const text::TokenMask* mask = nullptr) {
+    const text::TokenMask* mask = nullptr, const float* bias = nullptr) {
   const SamplingFold fold = bus_sampling_fold(
       bus, rank, world, logits, vocab_count, vocab_begin, vocab_size, params,
-      context_ids, candidate_k, prefix_scratch, timeout_ms, mask);
+      context_ids, candidate_k, prefix_scratch, timeout_ms, mask, bias);
   const bool draft_excluded =
       mask != nullptr && mask->constrained() && !mask->allows(draft);
   sample::SpecPrefixDecision d = sample::spec_accept_from_prefix(
@@ -918,7 +918,9 @@ inline sample::SpecPrefixDecision bus_spec_accept(
 // ---------------------------------------------------------------------------
 class DevicePicker {
  public:
-  static constexpr int kSlots = 2;
+  // The verify's pick and one per draft position (kSpecRows - 1 chained
+  // drafts at most, 2026-09-06).
+  static constexpr int kSlots = 4;
 
   // `sampling_candidates` > 0 arms the SAMPLING pick (kernels/
   // glm_sample_pick.hpp): a wider table (k candidates + the slice lse per
@@ -1203,11 +1205,11 @@ class DevicePicker {
     if (in.counts == nullptr || in.vocab_size < 1)
       throw std::invalid_argument(
           "device pick: sampling needs the count table and the vocabulary");
-    if ((rows_per_request(in) != 1 && rows_per_request(in) != 2) ||
-        in.row_select != nullptr)
+    if (rows_per_request(in) < 1 ||
+        rows_per_request(in) > kSampleVerdictRows || in.row_select != nullptr)
       throw std::invalid_argument(
-          "device pick: the sampling verdict decides T=1 rows or the MTP "
-          "T=2 verify");
+          "device pick: the sampling verdict decides T=1 rows or an MTP "
+          "verify of up to " + std::to_string(kSampleVerdictRows) + " rows");
     if (device_sample_table_elems(in.rows, world_, candidates_) * 2 >
         bus_.slot_bytes(net::BusMessageClass::kLatency))
       throw std::invalid_argument(

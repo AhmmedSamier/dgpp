@@ -142,6 +142,63 @@ DGPP_TEST(dsa_geometry_rejects_invalid_configs) {
   bad(c, "q_lora alignment");
 }
 
+DGPP_TEST(dsa_geometry_latent_formats_size_the_cache) {
+  // The KV dtype knob (2026-09-06): bf16 is the DESIGN §7.2 table; fp8
+  // halves the row and adds a 4-byte row scale; fp4 packs two e2m1 codes
+  // per byte plus one e4m3 scale per 16 elements (288 B at 512 wide).
+  const auto at = [](dgpp::LatentFormat f) {
+    DsaConfig c;
+    c.latent_format = f;
+    return DsaGeometry::from_config(c);
+  };
+  const DsaGeometry bf16 = at(dgpp::LatentFormat::kBf16);
+  const DsaGeometry fp8 = at(dgpp::LatentFormat::kFp8);
+  const DsaGeometry fp4 = at(dgpp::LatentFormat::kFp4);
+  if (bf16.latent_bytes_per_token != 1024 || bf16.latent_scale_bytes_per_token != 0)
+    throw std::runtime_error("bf16 row");
+  if (fp8.latent_bytes_per_token != 512 || fp8.latent_scale_bytes_per_token != 4)
+    throw std::runtime_error("fp8 row");
+  if (fp4.latent_bytes_per_token != 288 || fp4.latent_scale_bytes_per_token != 4)
+    throw std::runtime_error("fp4 row");
+  if (bf16.latent_bytes_per_token_all != 11ull * 1024 ||
+      fp8.latent_bytes_per_token_all != 11ull * (512 + 4) ||
+      fp4.latent_bytes_per_token_all != 11ull * (288 + 4))
+    throw std::runtime_error("per-token totals include the scales");
+  if (fp8.latent_block_bytes != 128ull * 512 || fp4.latent_block_bytes != 128ull * 288)
+    throw std::runtime_error("block bytes follow the row");
+  if (bf16.index_bytes_per_token != fp8.index_bytes_per_token ||
+      fp8.index_bytes_per_token != fp4.index_bytes_per_token)
+    throw std::runtime_error("the index cache is fp8 in every format");
+  // At 262,144 tokens per rank across the 11 main layers: 2.75 GiB of
+  // latent rows in bf16, 1.38 GiB in fp8, 0.79 GiB in fp4 (plus scales).
+  const int64_t tokens = 262144;
+  if (bf16.latent_total_bytes(tokens) != 262144ll * 11 * 1024 ||
+      fp8.latent_total_bytes(tokens) != 262144ll * 11 * 516 ||
+      fp4.latent_total_bytes(tokens) != 262144ll * 11 * 292)
+    throw std::runtime_error("262k totals");
+  // The quantized rows' alignment pins.
+  auto bad = [](DsaConfig c, const char* what) {
+    try {
+      DsaGeometry::from_config(c);
+    } catch (const std::invalid_argument&) {
+      return;
+    }
+    throw std::runtime_error(std::string("expected rejection: ") + what);
+  };
+  DsaConfig c;
+  c.latent_format = dgpp::LatentFormat::kFp4;
+  c.kv_lora_rank = 520;  // not a multiple of 16
+  bad(c, "fp4 needs kv_lora % 16");
+  c = DsaConfig{};
+  c.latent_format = dgpp::LatentFormat::kFp8;
+  c.kv_lora_rank = 2048;  // beyond the append kernel's row
+  bad(c, "fp8 needs kv_lora <= 1024");
+  c = DsaConfig{};
+  c.latent_format = dgpp::LatentFormat::kFp4;
+  c.kv_lora_rank = 32;  // the CI test geometry stays legal
+  DsaGeometry::from_config(c);
+}
+
 DGPP_TEST(dsa_geometry_config_defaults_are_real_checkpoint) {
   // The defaults must be the GLM-5.3-Flash config.json values; M4's
   // config-driven assembly reads them explicitly, but every other consumer

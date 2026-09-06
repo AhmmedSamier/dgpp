@@ -116,6 +116,7 @@ void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
 
 WeightPrefetcher::WeightPrefetcher() {
   enabled_ = !env_is_off("DGPP_L2_PREFETCH");
+  merge_ = !env_is_off("DGPP_L2_PREFETCH_MERGE");
   window_bytes_ = env_window_bytes(kDefaultWindowBytes);
   boundary_rate_ = env_rate("DGPP_L2_PREFETCH_BOUNDARY", PrefetchRate::Light);
   layer_rate_ = env_rate("DGPP_L2_PREFETCH_LAYER", PrefetchRate::Light);
@@ -144,9 +145,19 @@ WeightPrefetcher::~WeightPrefetcher() {
   if (side_) cudaStreamDestroy(side_);
 }
 
+void WeightPrefetcher::flush_pending() {
+  if (pending_end_ > pending_begin_) {
+    launch_l2_prefetch(reinterpret_cast<const void*>(pending_begin_),
+                       pending_end_ - pending_begin_, rate_, side_);
+    ++launches_;
+  }
+  pending_begin_ = pending_end_ = 0;
+}
+
 void WeightPrefetcher::open_window(cudaStream_t main, size_t budget_bytes,
                                    PrefetchRate rate) {
   if (!enabled_) return;
+  flush_pending();  // the previous window's tail, at its own rate
   rate_ = rate;
   remaining_ = budget_bytes > 0 ? budget_bytes : window_bytes_;
   window_open_ = true;
@@ -160,10 +171,32 @@ void WeightPrefetcher::add(const void* ptr, size_t bytes) {
   if (!enabled_ || !window_open_ || rate_ == PrefetchRate::Off ||
       ptr == nullptr || bytes == 0)
     return;
+  if (!merge_) {
+    const size_t take = std::min(bytes, remaining_);
+    if (take == 0) return;
+    remaining_ -= take;
+    launch_l2_prefetch(ptr, take, rate_, side_);
+    ++launches_;
+    return;
+  }
+  const uintptr_t b = reinterpret_cast<uintptr_t>(ptr);
+  if (pending_end_ > pending_begin_ && b >= pending_begin_ &&
+      b <= pending_end_ + kMergeGap) {
+    // Extend the pending range; the bridged gap (a neighbouring tensor of
+    // the same layer, read soon anyway) is charged to the budget too.
+    const size_t gap = b > pending_end_ ? b - pending_end_ : 0;
+    const size_t take = std::min(bytes, remaining_ > gap ? remaining_ - gap : 0);
+    if (take == 0) return;
+    remaining_ -= gap + take;
+    pending_end_ = std::max(pending_end_, b + take);
+    return;
+  }
   const size_t take = std::min(bytes, remaining_);
   if (take == 0) return;
-  launch_l2_prefetch(ptr, take, rate_, side_);
   remaining_ -= take;
+  flush_pending();
+  pending_begin_ = b;
+  pending_end_ = b + take;
 }
 
 void WeightPrefetcher::prefetch_after(cudaStream_t main, const void* ptr,
@@ -177,6 +210,7 @@ void WeightPrefetcher::join(cudaStream_t main) {
   // Only a forked side stream may be joined: under capture, waiting on an
   // event the capture never recorded is a capture-isolation error.
   if (!enabled_ || !forked_) return;
+  flush_pending();
   DGPP_CUDA_OK(cudaEventRecord(join_, side_));
   DGPP_CUDA_OK(cudaStreamWaitEvent(main, join_, 0));
   window_open_ = false;

@@ -829,6 +829,13 @@ std::pair<int, int> lm_head_slice(const GlmTextConfig& cfg, int rank,
 }
 }  // namespace
 
+int GlmLayerStream::lm_vocab_count(const GlmTextConfig& cfg, int rank,
+                                   int world, GlmHeadSharding head) {
+  return head == GlmHeadSharding::VocabSharded
+             ? lm_head_slice(cfg, rank, world).second
+             : cfg.vocab_size;
+}
+
 size_t GlmLayerStream::globals_bytes(const GlmTextConfig& cfg, int rank,
                                        int world, GlmHeadSharding head) {
   const int head_vocab = head == GlmHeadSharding::VocabSharded

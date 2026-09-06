@@ -49,6 +49,11 @@ void DsaStatePool::init(Arena& arena, const DsaConfig& cfg, int max_requests,
                              size_t(layers) * size_t(max_token_slots_) *
                                  geo_.latent_bytes_per_token,
                              kRegionAlign));
+  if (geo_.latent_scale_bytes_per_token > 0)
+    latent_scale_base_ = static_cast<float*>(arena.alloc_persistent(
+        MemClass::DeviceHot,
+        size_t(layers) * size_t(max_token_slots_) * geo_.latent_scale_bytes_per_token,
+        kRegionAlign));
   index_k_base_ = static_cast<uint8_t*>(
       arena.alloc_persistent(MemClass::DeviceHot,
                              size_t(layers) * size_t(pools) *
@@ -98,6 +103,13 @@ void* DsaStatePool::latent(int layer) {
                             geo_.latent_bytes_per_token;
 }
 
+float* DsaStatePool::latent_scale(int layer) {
+  if (layer < 0 || layer >= cfg_.num_dsa_layers)
+    throw std::out_of_range("dsa state pool: layer " + std::to_string(layer));
+  if (latent_scale_base_ == nullptr) return nullptr;  // bf16 rows carry none
+  return latent_scale_base_ + size_t(layer) * size_t(max_token_slots_);
+}
+
 void* DsaStatePool::index_k(int layer) {
   if (layer < 0 || layer >= cfg_.num_dsa_layers)
     throw std::out_of_range("dsa state pool: layer " + std::to_string(layer));
@@ -120,6 +132,9 @@ void* DsaStatePool::tail(int layer) {
 
 const void* DsaStatePool::latent(int layer) const {
   return const_cast<DsaStatePool*>(this)->latent(layer);
+}
+const float* DsaStatePool::latent_scale(int layer) const {
+  return const_cast<DsaStatePool*>(this)->latent_scale(layer);
 }
 const void* DsaStatePool::index_k(int layer) const {
   return const_cast<DsaStatePool*>(this)->index_k(layer);
@@ -238,6 +253,13 @@ void DsaStatePool::copy_block_contents(int32_t src, int32_t dst,
     DGPP_CUDA_OK(cudaMemcpyAsync(lat + size_t(dst) * latent_blk,
                                  lat + size_t(src) * latent_blk, latent_blk,
                                  cudaMemcpyDeviceToDevice, stream));
+    if (latent_scale_base_ != nullptr) {
+      float* ls = latent_scale_base_ + size_t(layer) * size_t(max_token_slots_);
+      const size_t bt = size_t(cfg_.block_tokens);
+      DGPP_CUDA_OK(cudaMemcpyAsync(ls + size_t(dst) * bt, ls + size_t(src) * bt,
+                                   bt * sizeof(float), cudaMemcpyDeviceToDevice,
+                                   stream));
+    }
     uint8_t* k = index_k_base_ + size_t(layer) * size_t(max_pool_slots_) *
                                      geo_.index_k_bytes_per_pool;
     DGPP_CUDA_OK(cudaMemcpyAsync(k + size_t(dst) * k_blk, k + size_t(src) * k_blk,
@@ -268,6 +290,10 @@ void DsaStatePool::reset_all(cudaStream_t stream) {
   DGPP_CUDA_OK(cudaMemsetAsync(
       latent_base_, 0,
       layers * size_t(max_token_slots_) * geo_.latent_bytes_per_token, stream));
+  if (latent_scale_base_ != nullptr)
+    DGPP_CUDA_OK(cudaMemsetAsync(latent_scale_base_, 0,
+                                 layers * size_t(max_token_slots_) * sizeof(float),
+                                 stream));
   DGPP_CUDA_OK(cudaMemsetAsync(
       index_k_base_, 0,
       layers * size_t(max_pool_slots_) * geo_.index_k_bytes_per_pool, stream));
@@ -323,6 +349,9 @@ size_t DsaStatePool::cache_bytes(const DsaConfig& cfg, int max_requests,
       max_token_slots / cfg.block_tokens * g.pools_per_block;
   const size_t layers = size_t(cfg.num_dsa_layers);
   return padded(layers * size_t(max_token_slots) * g.latent_bytes_per_token) +
+         (g.latent_scale_bytes_per_token > 0
+              ? padded(layers * size_t(max_token_slots) * g.latent_scale_bytes_per_token)
+              : 0) +
          padded(layers * size_t(pools) * g.index_k_bytes_per_pool) +
          padded(layers * size_t(pools) * sizeof(float)) +
          padded(layers * size_t(max_requests) * g.tail_bytes_per_request) +

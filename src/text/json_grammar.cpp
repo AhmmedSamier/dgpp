@@ -51,6 +51,7 @@ uint32_t type_bit(std::string_view t, const std::string& path) {
 
 struct Compiler {
   JsonSchema out;
+  std::vector<std::string>* unenforced = nullptr;  // null: the strict compile
 
   int compile(const minijson::Value& v, const std::string& path) {
     if (!v.is_object())
@@ -66,10 +67,24 @@ struct Compiler {
                                        "additionalProperties", "items",
                                        "minItems", "maxItems", "enum",
                                        "const", "anyOf"};
+    // Keywords that narrow a typed value without changing its shape: a
+    // tool argument's schema tolerates them (recorded, never applied — the
+    // integer stays an integer, its range is the model's to respect); a
+    // response_format schema refuses them like any other unsupported one.
+    static const char* kNarrowing[] = {
+        "minimum",       "maximum",       "exclusiveMinimum", "exclusiveMaximum",
+        "multipleOf",    "minLength",     "maxLength",        "pattern",
+        "format",        "minProperties", "maxProperties",    "uniqueItems",
+        "minContains",   "maxContains",   "contentEncoding",  "contentMediaType"};
+    const auto narrowing = [&](const std::string& key) {
+      for (const char* k : kNarrowing)
+        if (key == k) return true;
+      return false;
+    };
     const auto ignored = [&](const std::string& key) {
       for (const char* k : kIgnored)
         if (key == k) return true;
-      return false;
+      return unenforced != nullptr && narrowing(key);
     };
     for (const minijson::Member& m : v.members()) {
       bool known = ignored(m.key);
@@ -80,6 +95,8 @@ struct Compiler {
                                     "subset is type, properties, required, "
                                     "additionalProperties, items, minItems, "
                                     "maxItems, enum, const, anyOf)");
+      if (unenforced != nullptr && narrowing(m.key))
+        unenforced->push_back(path + "." + m.key);
     }
     if (const minijson::Value* any = v.find("anyOf")) {
       if (!any->is_array() || any->items().empty())
@@ -211,8 +228,10 @@ struct Compiler {
 
 }  // namespace
 
-JsonSchema compile_json_schema(const minijson::Value& schema) {
+JsonSchema compile_json_schema(const minijson::Value& schema,
+                               std::vector<std::string>* unenforced) {
   Compiler c;
+  c.unenforced = unenforced;
   c.out.root = c.compile(schema, "schema");
   return std::move(c.out);
 }

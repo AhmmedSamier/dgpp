@@ -30,6 +30,7 @@
 // USAGE
 //   dgpp-serve --model ORG/NAME | --checkpoint-dir DIR
 //     [--port N (default 8080; rank 0 only)] [--kv-capacity TOKENS]
+//     [--kv-dtype bf16|fp8|fp4]
 //     [--max-concurrency N] [--queue-limit N] [--default-max-tokens N]
 //     [--max-connections N] [--no-eos]
 //   fabric: --world N --rank R (--peer HOST when rank > 0)
@@ -57,7 +58,9 @@
 #include <cstdint>
 #include <csignal>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
+#include <functional>
 #include <format>
 #include <memory>
 #include <optional>
@@ -69,6 +72,8 @@
 
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
+#include "common/process_memory.hpp"
+#include "kernels/latent_format.hpp"
 #include "loaders/hf_cache.hpp"
 #include "serve/cluster_config.hpp"
 #include "dgpp_version.hpp"
@@ -139,6 +144,7 @@ struct ServeKnobs {
   bool reasoning_in_content = false;
   dgpp::sched::AdmissionPolicy admission;  // M6 6d: full (default) or grow
   double stats_interval_s = 10.0;  // the throughput line's period; 0 = off
+  bool mtp = false;                // the throughput line's MTP group
 };
 
 // Pinned words for the sampler's collectives, allocated BEFORE the world
@@ -156,6 +162,90 @@ struct PinnedWords {
   PinnedWords(const PinnedWords&) = delete;
   PinnedWords& operator=(const PinnedWords&) = delete;
 };
+
+// The pre-flight memory check (2026-09-06): every byte the model, the
+// prefix arena and the engine will allocate, from the same formulas their
+// constructors use, against the node's free memory — BEFORE the first
+// allocation. A configuration that does not fit is refused here with the
+// plan itemized and the largest context that would fit named; the
+// alternative was the node driven into its memory watermark (the 262k-token
+// context that froze the fabric and needed a reboot). The measure is the
+// larger of the device's free memory and the host's MemAvailable (the
+// GB10's unified pool is the host's memory; the page cache is reclaimable),
+// as the loader's own resident-footprint check measures.
+constexpr size_t kMemoryHeadroomBytes = size_t{8} << 30;  // CUDA context, bus, cuBLAS, page cache churn
+
+std::string gib(double bytes) {
+  return std::format("{:.2f} GiB", bytes / (1024.0 * 1024.0 * 1024.0));
+}
+
+void check_memory_plan(
+    int rank, const dgpp::GlmDiagnosticModel::MemoryPlan& plan,
+    size_t prefix_arena_bytes, size_t engine_bytes, int64_t block_tokens,
+    const std::function<dgpp::GlmDiagnosticModel::MemoryPlan(int64_t)>& plan_at) {
+  size_t free_bytes = 0, total_bytes = 0;
+  DGPP_CUDA_OK(cudaMemGetInfo(&free_bytes, &total_bytes));
+  const size_t available = dgpp::host_memory_available_bytes();
+  const size_t budget = std::max(free_bytes, available);
+  const size_t need = plan.total_bytes() + prefix_arena_bytes + engine_bytes;
+  std::string items;
+  for (const auto& it : plan.items) {
+    if (it.device + it.pinned < (size_t{1} << 20)) continue;
+    items += it.name + " " + gib(static_cast<double>(it.device + it.pinned));
+    if (it.pinned) items += " (" + gib(static_cast<double>(it.pinned)) + " pinned)";
+    items += "; ";
+  }
+  DGPP_LOG_INFO("rank {}: memory plan for a {}-token context — {}prefix cache {}; engine {}",
+                rank, plan.context_tokens, items, gib(static_cast<double>(prefix_arena_bytes)),
+                gib(static_cast<double>(engine_bytes)));
+  DGPP_LOG_INFO(
+      "rank {}: memory plan total {} ({} device + {} pinned) + {} headroom against {} free "
+      "(device free {} of {}, host available {})",
+      rank, gib(static_cast<double>(need)), gib(static_cast<double>(plan.device_bytes())),
+      gib(static_cast<double>(plan.pinned_bytes() + prefix_arena_bytes + engine_bytes)),
+      gib(static_cast<double>(kMemoryHeadroomBytes)), gib(static_cast<double>(budget)),
+      gib(static_cast<double>(free_bytes)), gib(static_cast<double>(total_bytes)),
+      gib(static_cast<double>(available)));
+  if (need + kMemoryHeadroomBytes <= budget) return;
+  // The plan is affine in the context: its slope from two points names the
+  // largest context this node could hold with everything else as configured.
+  std::string hint;
+  if (plan.context_tokens > block_tokens) {
+    const dgpp::GlmDiagnosticModel::MemoryPlan below = plan_at(plan.context_tokens - block_tokens);
+    const double per_token =
+        static_cast<double>(plan.total_bytes()) - static_cast<double>(below.total_bytes());
+    if (per_token > 0) {
+      const double per = per_token / static_cast<double>(block_tokens);
+      const double fixed = static_cast<double>(plan.total_bytes()) -
+                           per * static_cast<double>(plan.context_tokens) +
+                           static_cast<double>(prefix_arena_bytes + engine_bytes +
+                                               kMemoryHeadroomBytes);
+      const double room = static_cast<double>(budget) - fixed;
+      const int64_t feasible =
+          room > 0 ? static_cast<int64_t>(room / per) / block_tokens * block_tokens : 0;
+      hint = std::format(
+          " At {:.1f} KiB per context token, the largest kv_capacity this node holds as "
+          "configured is about {} tokens.",
+          per / 1024.0, feasible);
+    }
+  }
+  std::vector<const dgpp::GlmDiagnosticModel::MemoryPlan::Item*> largest;
+  for (const auto& it : plan.items) largest.push_back(&it);
+  std::sort(largest.begin(), largest.end(), [](const auto* a, const auto* b) {
+    return a->device + a->pinned > b->device + b->pinned;
+  });
+  std::string top;
+  for (size_t i = 0; i < largest.size() && i < 3; ++i)
+    top += (i ? ", " : "") + largest[i]->name + " " +
+           gib(static_cast<double>(largest[i]->device + largest[i]->pinned));
+  throw std::runtime_error(std::format(
+      "rank {}: the configuration needs {} plus {} headroom but this node has {} free — "
+      "refusing to allocate (the largest items: {}).{} Lower engine.kv_capacity, "
+      "engine.max_concurrency or engine.prefix_cache_gib, or choose a smaller "
+      "engine.kv_dtype.",
+      rank, gib(static_cast<double>(need)), gib(static_cast<double>(kMemoryHeadroomBytes)),
+      gib(static_cast<double>(budget)), top, hint));
+}
 
 // The rank-0 serving stack, shared by both worlds: everything above
 // the engine seam (tokenizer/template, service, HTTP, the engine
@@ -256,7 +346,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine,
     };
     // The throughput line (serve_stats.hpp): fed after every pass, idle
     // passes included, so its intervals end on time.
-    dgpp::serve::ThroughputLog stats(k.stats_interval_s, /*rank=*/0);
+    dgpp::serve::ThroughputLog stats(k.stats_interval_s, /*rank=*/0, k.mtp);
     const auto observe = [&] {
       const dgpp::serve::GenerationService::Stats st = service.stats();
       const dgpp::serve::ServiceCounts sc{st.requests_total, st.requests_shed,
@@ -357,6 +447,25 @@ int main(int argc, char** argv) {
   using dgpp::GlmTextConfig;
 
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
+  // An uncaught exception or a bare std::terminate still leaves a
+  // timestamped line with the reason, not libstdc++'s bare "terminate
+  // called" (2026-09-06: every line the server prints carries a stamp).
+  std::set_terminate([] {
+    const std::exception_ptr current = std::current_exception();
+    if (current) {
+      try {
+        std::rethrow_exception(current);
+      } catch (const std::exception& e) {
+        DGPP_LOG_ERROR("serve: terminating on an uncaught exception: {}", e.what());
+      } catch (...) {
+        DGPP_LOG_ERROR("serve: terminating on an uncaught non-standard exception");
+      }
+    } else {
+      DGPP_LOG_ERROR("serve: std::terminate called");
+    }
+    std::fflush(nullptr);
+    std::abort();
+  });
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "--version") {
       std::printf("dgpp-serve %s (git %s, cuda %d.%d)\n", DGPP_VERSION, DGPP_GIT_SHA,
@@ -369,11 +478,21 @@ int main(int argc, char** argv) {
   static constexpr const char* kUsage =
       "usage: dgpp-serve --config CLUSTER.json --rank R | --model ORG/NAME | --checkpoint-dir DIR\n"
       "  [--version]: print the version and exit\n"
+      "  [--memory-plan]: log the memory plan for this rank's configured shape\n"
+      "    (the same check every boot runs before allocating) and exit 0 when\n"
+      "    it fits the node's free memory, 1 when it does not; no world forms\n"
       "  [--config PATH]: the cluster config (deploy/cluster.json): the model,\n"
       "    the world (the node list), this rank's peer, the ports and every\n"
       "    engine knob below; flags given after it override\n"
       "  [--port N (default 8080; rank 0 only)]\n"
-      "  [--kv-capacity TOKENS (default 8192)]\n"
+      "  [--kv-capacity TOKENS (default 8192)]: the KV pool per rank; a prompt\n"
+      "    plus its answer must fit. Before anything is allocated the memory\n"
+      "    plan (the model, the pool, the activations, the prefix cache) is\n"
+      "    checked against the node's free memory and refused with the plan\n"
+      "    itemized when it does not fit\n"
+      "  [--kv-dtype bf16|fp8|fp4 (default bf16)]: the latent cache's storage\n"
+      "    format — fp8 halves its bytes, fp4 quarters them, each at a cost in\n"
+      "    attention precision; bf16 is every parity gate's format\n"
       "  [--max-concurrency N (default 8, the decode-row bound)]\n"
       "  [--queue-limit N (default 64)] [--default-max-tokens N (256)]\n"
       "  [--max-connections N (default 64)] [--no-eos]\n"
@@ -383,7 +502,8 @@ int main(int argc, char** argv) {
       "    [--decode-graph [--mtp]]\n"
       "    [--graph-batch-min-live N (default min(4, max-concurrency);\n"
       "      must be in [1, max-concurrency])]\n"
-      "      (requires max-concurrency * (mtp?2:1) <= 8)\n"
+      "      (the row batch needs max-concurrency * (1 + mtp depth) <= 8)\n"
+      "    [--mtp-depth N]  draft tokens per step (1..3; the verify runs 1+N rows)\n"
       "    [--sampling-candidates N (default 128, in [1, 256]): the sampled\n"
       "      pick's per-rank candidate width; narrower falls back more]\n"
       "  prefix cache (M7): [--prefix-cache-gib X (default 1.5)]: the\n"
@@ -413,6 +533,7 @@ int main(int argc, char** argv) {
   std::string ckpt, model_id, peer;
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
   int64_t kv_capacity = 8192;
+  std::string kv_dtype = "bf16";  // the latent cache's format (2026-09-06)
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
   int graph_batch_min_live = 0;  // 0 = min(4, max_concurrency)
   // The sampled pick's candidate width per rank on the graph engines (the
@@ -428,6 +549,7 @@ int main(int argc, char** argv) {
   int max_connections = 64;
   int world = 1, rank = 0, rendezvous_timeout_ms = 120000;
   bool no_eos = false, decode_graph = false, mtp = false;
+  int mtp_depth = 1;  // draft tokens per step (needs --mtp; 1..3)
   double prefix_cache_gib = 1.5;  // M7: the snapshot arena; 0 = off
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<int> top_k;
@@ -438,6 +560,7 @@ int main(int argc, char** argv) {
   // because the flags after it override what it sets.
   std::string config_path;
   int config_rank = 0;
+  bool memory_plan_only = false;  // --memory-plan: the check alone, then exit
   for (int i = 1; i + 1 < argc; ++i) {
     if (std::string(argv[i]) == "--config") config_path = argv[i + 1];
     else if (std::string(argv[i]) == "--rank") config_rank = std::atoi(argv[i + 1]);
@@ -460,12 +583,14 @@ int main(int argc, char** argv) {
     const dgpp::serve::ClusterConfig::Engine& e = c.engine;
     max_concurrency = e.max_concurrency;
     kv_capacity = e.kv_capacity;
+    kv_dtype = e.kv_dtype;
     default_max_tokens = e.default_max_tokens;
     queue_limit = e.queue_limit;
     max_connections = e.max_connections;
     no_eos = e.no_eos;
     decode_graph = e.decode_graph;
     mtp = e.mtp;
+    mtp_depth = e.mtp_depth;
     graph_batch_min_live = e.graph_batch_min_live;
     sampling_candidates = e.sampling_candidates;
     prefix_cache_gib = e.prefix_cache_gib;
@@ -493,6 +618,8 @@ int main(int argc, char** argv) {
     else if (a == "--checkpoint-dir") ckpt = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--kv-capacity") kv_capacity = std::stoll(next());
+    else if (a == "--kv-dtype") kv_dtype = next();
+    else if (a == "--memory-plan") memory_plan_only = true;
     else if (a == "--max-concurrency") max_concurrency = std::stoi(next());
     else if (a == "--queue-limit") queue_limit = std::stoi(next());
     else if (a == "--default-max-tokens") default_max_tokens = std::stoi(next());
@@ -502,6 +629,7 @@ int main(int argc, char** argv) {
     else if (a == "--graph-batch-min-live")
       graph_batch_min_live = std::stoi(next());
     else if (a == "--mtp") mtp = true;
+    else if (a == "--mtp-depth") mtp_depth = std::stoi(next());
     else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--prefix-cache-gib") prefix_cache_gib = std::stod(next());
     else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
@@ -544,16 +672,16 @@ int main(int argc, char** argv) {
   std::optional<dgpp::serve::JournalReader> reader;
   const auto canonical = [&] {
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} maxtok={} queue={} "
-        "eos={} graph={} mtp={} batchmin={} cand={} pcgib={} adm={} win={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} maxtok={} queue={} "
+        "eos={} graph={} mtp={} mtpd={} batchmin={} cand={} pcgib={} adm={} win={} "
         "pace={} inflight={} reasoning_in_content={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
-        max_concurrency, kv_capacity, default_max_tokens, queue_limit,
-        no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, graph_batch_min_live,
+        max_concurrency, kv_capacity, kv_dtype, default_max_tokens, queue_limit,
+        no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, graph_batch_min_live,
         sampling_candidates, prefix_cache_gib, admission_mode, admission_window,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0);
   };
-  if (world > 1 || rank > 0) {
+  if ((world > 1 || rank > 0) && !memory_plan_only) {
     try {
       if (rank == 0) {
         require(world > 1, "--world must be > 1 for a fabric head");
@@ -563,6 +691,11 @@ int main(int argc, char** argv) {
         DGPP_LOG_INFO("journal: listening on :{} for {} peer(s)",
                       journal->port(), world - 1);
         journal->accept_peers(world, rendezvous_timeout_ms);
+        // The row batch's threshold resolves before the push, so the
+        // settings record and the effective config print the same value
+        // (2026-09-06: `batchmin=0` on one line, `=4` on the next).
+        if (graph_batch_min_live == 0)
+          graph_batch_min_live = std::min(4, max_concurrency);
         dgpp::serve::WorldSettings ws;
         ws.version = DGPP_VERSION;
         ws.model = model_id;
@@ -571,11 +704,13 @@ int main(int argc, char** argv) {
         ws.fabric_port = fabric_port;
         ws.max_concurrency = max_concurrency;
         ws.kv_capacity = kv_capacity;
+        ws.kv_dtype = kv_dtype;
         ws.default_max_tokens = default_max_tokens;
         ws.queue_limit = queue_limit;
         ws.no_eos = no_eos;
         ws.decode_graph = decode_graph;
         ws.mtp = mtp;
+        ws.mtp_depth = mtp_depth;
         ws.graph_batch_min_live = graph_batch_min_live;
         ws.sampling_candidates = sampling_candidates;
         ws.prefix_cache_gib = prefix_cache_gib;
@@ -606,11 +741,13 @@ int main(int argc, char** argv) {
         fabric_port = static_cast<uint16_t>(ws.fabric_port);
         max_concurrency = ws.max_concurrency;
         kv_capacity = ws.kv_capacity;
+        kv_dtype = ws.kv_dtype;
         default_max_tokens = ws.default_max_tokens;
         queue_limit = ws.queue_limit;
         no_eos = ws.no_eos;
         decode_graph = ws.decode_graph;
         mtp = ws.mtp;
+        mtp_depth = ws.mtp_depth;
         graph_batch_min_live = ws.graph_batch_min_live;
         sampling_candidates = ws.sampling_candidates;
         prefix_cache_gib = ws.prefix_cache_gib;
@@ -655,6 +792,13 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("all capacity knobs must be >= 1");
     return 1;
   }
+  const std::optional<dgpp::LatentFormat> kv_format_opt =
+      dgpp::latent_format_from_string(kv_dtype);
+  if (!kv_format_opt) {
+    DGPP_LOG_ERROR("--kv-dtype must be bf16, fp8 or fp4, got '{}'", kv_dtype);
+    return 2;
+  }
+  const dgpp::LatentFormat kv_format = *kv_format_opt;
   if (world > 1) {
     require(rank >= 0 && rank < world, "--rank outside --world");
     require(!peer.empty() || rank == 0,
@@ -705,6 +849,14 @@ int main(int argc, char** argv) {
   }
   if (!(stats_interval_s >= 0.0)) {
     DGPP_LOG_ERROR("--stats-interval-s must be >= 0, got {}", stats_interval_s);
+    return 2;
+  }
+  if (mtp_depth < 1 || mtp_depth > 3) {
+    DGPP_LOG_ERROR("--mtp-depth must be in [1, 3], got {}", mtp_depth);
+    return 2;
+  }
+  if (!mtp && mtp_depth != 1) {
+    DGPP_LOG_ERROR("--mtp-depth {} needs --mtp", mtp_depth);
     return 2;
   }
   if (graph_batch_min_live == 0) {
@@ -790,11 +942,14 @@ int main(int argc, char** argv) {
     // Pool sizing: the shared DSA pool is the admission budget (the
     // same arithmetic as the scheduler receipt), sliced per rank at
     // world>1 — every rank computes the same numbers from the same
-    // config. The context bound rides a hair above the pool — an
-    // admitted request always fits.
+    // config. The pool IS the context bound (a prompt plus its answer must
+    // fit it); the model's per-forward row bound is the prefill chunk
+    // (2026-09-06: it used to be the whole context, and every activation
+    // buffer grew with kv_capacity — 200 GB at 262k tokens).
     const dgpp::DsaConfig dsa = [&] {
       dgpp::DsaConfig d = cfg.dsa_config();
       d.tp_size = world;
+      d.latent_format = kv_format;
       return d;
     }();
     const int64_t block_tokens = dsa.block_tokens;
@@ -806,7 +961,46 @@ int main(int argc, char** argv) {
       throw std::runtime_error(
           "--kv-capacity " + std::to_string(kv_capacity) +
           " exceeds the DSA pool-id space (2^21 pools)");
-    const int context_bound = static_cast<int>(pool_tokens) + 1;
+    const int forward_rows = static_cast<int>(std::min<int64_t>(
+        pool_tokens, GlmDiagnosticModel::prefill_chunk_tokens()));
+    // The pre-flight memory check's inputs (see check_memory_plan): the
+    // prefix arena at this shape, and the engine's own buffers (the sampler
+    // tables per slot, the prompt id buffers per context token, a margin).
+    const size_t snapshot_bytes =
+        GlmDiagnosticModel::session_snapshot_bytes(cfg, world, mtp && world > 1);
+    const size_t prefix_arena_bytes =
+        snapshot_bytes == 0 || prefix_cache_gib <= 0.0
+            ? 0
+            : static_cast<size_t>(std::min(
+                  std::floor(prefix_cache_gib * 1024.0 * 1024.0 * 1024.0 /
+                             static_cast<double>(snapshot_bytes)),
+                  4096.0)) *
+                  snapshot_bytes;
+    const size_t engine_bytes =
+        static_cast<size_t>(max_concurrency) * static_cast<size_t>(cfg.vocab_size) * 8 +
+        static_cast<size_t>(pool_tokens) * 16 + (size_t{64} << 20);
+    if (memory_plan_only) {
+      // The check alone, for the shape this rank would run (world > 1: the
+      // resident, vocab-sharded fabric model; world 1: the streaming one).
+      const bool fabric = world > 1;
+      const auto plan_at = [&](int64_t context) {
+        return GlmDiagnosticModel::plan_memory(
+            cfg, static_cast<int>(std::min<int64_t>(context, forward_rows)), context,
+            fabric ? rank : 0, fabric ? world : 1,
+            fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
+            fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full,
+            max_concurrency, fabric && mtp, kv_format);
+      };
+      try {
+        check_memory_plan(rank, plan_at(pool_tokens), prefix_arena_bytes, engine_bytes,
+                          block_tokens, plan_at);
+      } catch (const std::runtime_error& e) {
+        DGPP_LOG_ERROR("{}", e.what());
+        return 1;
+      }
+      DGPP_LOG_INFO("rank {}: the memory plan fits", rank);
+      return 0;
+    }
     std::vector<int64_t> eos =
         no_eos ? std::vector<int64_t>{} : cfg.eos_token_ids;
     const std::string model_display = model_id.empty()
@@ -854,6 +1048,7 @@ int main(int argc, char** argv) {
     knobs.sampling_defaults = sampling_defaults;
     knobs.fixed_seed = fixed_seed;
     knobs.reasoning_in_content = reasoning_in_content;
+    knobs.mtp = mtp;
     knobs.stats_interval_s = stats_interval_s;
 
     // ---- world > 1: the fabric (Stage 4b) ------------------------------
@@ -888,20 +1083,31 @@ int main(int argc, char** argv) {
 
         dgpp::GlmBusBoundaryReducer reducer(*bus);
         dgpp::prepare_serving_process(rank);
+        {
+          const auto plan_at = [&](int64_t context) {
+            return GlmDiagnosticModel::plan_memory(
+                cfg, static_cast<int>(std::min<int64_t>(context, forward_rows)), context,
+                rank, world, dgpp::GlmResidency::Resident,
+                dgpp::GlmHeadSharding::VocabSharded, max_concurrency, mtp, kv_format);
+          };
+          check_memory_plan(rank, plan_at(pool_tokens), prefix_arena_bytes, engine_bytes,
+                            block_tokens, plan_at);
+        }
         const auto t_model = std::chrono::steady_clock::now();
-        GlmDiagnosticModel model(cfg, ckpt, context_bound, pool_tokens,
+        GlmDiagnosticModel model(cfg, ckpt, forward_rows, pool_tokens,
                                  &reducer, rank, world,
                                  dgpp::GlmResidency::Resident,
                                  dgpp::GlmHeadSharding::VocabSharded,
-                                 max_concurrency, mtp);
+                                 max_concurrency, mtp, kv_format);
         DGPP_LOG_INFO(
             "rank {}: model constructed in {:.1f}s (resident, {} request "
-            "slots, {}-token pool)",
+            "slots, {}-token pool in {}, {}-row forwards)",
             rank,
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           t_model)
                 .count(),
-            max_concurrency, pool_tokens);
+            max_concurrency, pool_tokens, dgpp::latent_format_name(kv_format),
+            forward_rows);
 
         // The prefix cache's arena (M7): as many snapshot slots as the
         // budget holds; every rank computes the same count from the same
@@ -925,7 +1131,7 @@ int main(int argc, char** argv) {
               &model, bus.get(), rank, world, pick_scratch, cfg.vocab_size,
               /*pick_timeout_ms=*/60000, graph_batch_min_live,
               sample_prefix.data, sample_gather.data,
-              sampling_candidates, &grammar_vocab, prefix_slots);
+              sampling_candidates, &grammar_vocab, prefix_slots, mtp_depth);
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up
           // is a run of collectives, so it starts on the journal's clock:
@@ -1012,7 +1218,7 @@ int main(int argc, char** argv) {
                                      peer_prefix_slots);
           dgpp::serve::OpStreamObserver oplog;
           sched.set_observer(&oplog);
-          dgpp::serve::ThroughputLog stats(stats_interval_s, rank);
+          dgpp::serve::ThroughputLog stats(stats_interval_s, rank, mtp);
           DGPP_LOG_INFO("rank {}: following rank 0's journal (admission {}, window {})",
                         rank, dgpp::sched::AdmissionPolicy::name(peer_policy.mode),
                         peer_policy.window_tokens);
@@ -1057,18 +1263,30 @@ int main(int argc, char** argv) {
 
     // ---- world 1: the local reference (Stage 4a) -----------------------
     dgpp::prepare_serving_process(/*rank=*/0);
+    {
+      const auto plan_at = [&](int64_t context) {
+        return GlmDiagnosticModel::plan_memory(
+            cfg, static_cast<int>(std::min<int64_t>(context, forward_rows)), context,
+            /*tp_rank=*/0, /*tp_world=*/1, dgpp::GlmResidency::Streaming,
+            dgpp::GlmHeadSharding::Full, max_concurrency, /*mtp=*/false, kv_format);
+      };
+      check_memory_plan(0, plan_at(pool_tokens), prefix_arena_bytes, engine_bytes,
+                        block_tokens, plan_at);
+    }
     const auto t_model = std::chrono::steady_clock::now();
-    GlmDiagnosticModel model(cfg, ckpt, context_bound, pool_tokens,
+    GlmDiagnosticModel model(cfg, ckpt, forward_rows, pool_tokens,
                              /*boundary=*/nullptr, /*tp_rank=*/0,
                              /*tp_world=*/1, dgpp::GlmResidency::Streaming,
-                             dgpp::GlmHeadSharding::Full, max_concurrency);
+                             dgpp::GlmHeadSharding::Full, max_concurrency,
+                             /*mtp=*/false, kv_format);
     DGPP_LOG_INFO(
         "serve: model constructed in {:.1f}s (streaming, {} request slots, "
-        "{}-token pool)",
+        "{}-token pool in {}, {}-row forwards)",
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       t_model)
             .count(),
-        max_concurrency, pool_tokens);
+        max_concurrency, pool_tokens, dgpp::latent_format_name(kv_format),
+        forward_rows);
 
     const int prefix_slots = prefix_arena_slots(model, prefix_cache_gib);
     DGPP_LOG_INFO("serve: prefix cache {} — {} snapshot slot(s) of {:.1f} MiB",

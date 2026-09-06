@@ -996,10 +996,17 @@ The M3 implementation pins the concrete layouts and the selection spec
   scales `[slots]`, one slot per pool. The reference's packed 132-byte pages
   exist for a DeepGEMM `block_kv` constraint this engine does not inherit,
   and packed rows would misalign every other 128-byte streaming read;
-- the latent cache is BF16 `[token_slots, 512]` rows; one shared block table
-  per request serves both caches (block = 128 tokens = 32 pools, so token
-  block *b* and pool block *b* are the same entry — prefix attachment shares
-  both by reference, §8);
+- the latent cache is `[token_slots, 512]` rows in the configured storage
+  format (`engine.kv_dtype`, 2026-09-06): BF16 by default, or fp8 (e4m3
+  codes with one FP32 scale per row) or fp4 (e2m1 codes, two per byte, in
+  blocks of 16 with an e4m3 scale per block over the row scale; the row
+  padded to 16 bytes). The append kernel quantizes a row as it lands and
+  the attention kernels dequantize a tile into bf16 shared memory as they
+  gather it, so the math past the load is the bf16 kernel's; the index
+  cache, the tails and the selection are the same in every format. One
+  shared block table per request serves both caches (block = 128 tokens =
+  32 pools, so token block *b* and pool block *b* are the same entry —
+  prefix attachment shares both by reference, §8);
 - the tail is a per-request ring `[2, kpool, 128]` BF16 — raw K at half 0,
   gate at half 1, ring slot `pos % kpool`. Completion reads the ring with the
   current token overriding its own slot (which still holds one stale pool's
@@ -1076,9 +1083,10 @@ The M3 implementation pins the concrete layouts and the selection spec
 
 Layer-phase pins (the orchestration above those kernels):
 
-- `DsaStatePool` owns all 11 layers' caches as five arenas — latent
-  `[layers][token_slots][kv_lora]` BF16, planar index K `[layers][pool_slots]
-  [128]` FP8, index scales `[layers][pool_slots]` F32, tails
+- `DsaStatePool` owns all 11 layers' caches as five arenas (six with a
+  quantized latent format's row scales `[layers][token_slots]` F32) — latent
+  `[layers][token_slots]` rows in the cache's format, planar index K
+  `[layers][pool_slots][128]` FP8, index scales `[layers][pool_slots]` F32, tails
   `[layers][requests][2,kpool,128]` BF16, and one shared block table
   `[requests][blocks]` INT32 — every region 256-byte aligned. Block
   management is host-side (LIFO free list; growth uploads only the new table
@@ -1684,6 +1692,36 @@ not broadcast an accepted count: every rank folds the identical
 candidate table and computes the identical verdict (`judge_verify`); the
 pick's readback check pins the equality.
 
+**The draft depth (2026-09-06).** `engine.mtp_depth` (1–3) makes the
+verify 1 + depth rows and the block propose the later drafts by recursion:
+after its rows off the verdict (the head at the last accepted row gives
+draft 1), it runs one more row per further draft at the position after
+its counter — token the previous draft's pick, hidden its own previous
+output row copied into the position cache there (the block's `h^1` in
+place of the main stack's `h^0`; vLLM's single-module chaining), position
+the counter plus the chain index, the counter unmoved. Everything a chain
+row writes is positional and provisional: the next step's real rows
+overwrite the latent, the pool and the hidden. The one non-positional
+write is the block's tail ring — a second chain row can stash over the
+slot a still-open pool's member holds — so the ring is copied before the
+chain rows and restored after (`chain_ring_copy`, two 2 KB kernel copies).
+The verdict, the commit and the rollback are unchanged over T rows; the
+sampled verdict decides the rows as a chain (row t tests the draft fed to
+row t+1, a stand moves on, a reject ends on the residual, the last row
+reached samples plainly) with the same draws the eager `SampledSpeculator`
+makes, and a host fallback at row t continues from there — the rows before
+it committed on the device, the gathered row decided under the device's
+normalizer, a draft that stands re-running the next row eagerly and
+testing the next draft on it. The picker holds one slot per draft; the
+feed is `[next, draft_1 .. draft_depth]`; the hop snapshot takes the rows
+the step committed past the position. Depth 1 is the two-row step
+byte for byte. Past depth 1 the row batch is not built: every step is a
+scalar replay. Measured (2026-09-06, one request): 31.5 ms plain, 42–43 at
+depth 1, 54–56 at depth 2 — a verify row is its own expert bytes (~10 ms),
+the chain row ~2.5 — and the second draft stands 45–65 % of the time
+(prose to code), so depth 2 is −4 % on prose and +4 % on code and JSON;
+depth 1 stays the default, the transcripts are identical at every depth.
+
 ### The on-device step (2026-09-03): one graph per step
 
 The graph era's step used to end at the head: the host scanned the logits
@@ -1786,6 +1824,60 @@ MTP requests, but regressed one-live throughput. The accepted adaptive path
 selects scalar below four live requests and reaches 76.18/60.27 tok/s at
 full T=1/MTP occupancy, with the complete curves in §11 and the measurement
 record.
+
+### The pipelined replay (2026-09-06): the seam behind the draft tail
+
+Between one replay's last kernel and the next replay's first the host used
+to spend ~1 ms of GPU idle: the verdict read and bookkeeping, every other
+step the prefix cache's rolling snapshot, and `cudaGraphLaunch` itself
+(~0.45 µs per node on this host, ~520 µs at 1,168 nodes). The MTP replay's
+last ~2 ms are the draft block's tail — the block's rows, its picks, the
+next-tokens node — which the host does not need to wait for. So the
+engine's step now returns at the VERDICT: a kernel node right after the
+verify's pick publishes the slot's replay sequence to pinned memory
+(`glm_publish_seq`, a system-scope release the host polls), the scheduler
+does its bookkeeping and enqueues the snapshot copies while the tail runs,
+and the next step LAUNCHES the next replay first — its bus window armed,
+its graph enqueued behind the tail — and only then settles the previous
+replay (its end event, its window, the block's draft verdicts into the
+slot's drafts). Everything the host decides for the next replay after the
+previous verdict rides device-resident state: the token feed is per slot
+(`device_feed`: rows past the eager scratch, written by the replay's last
+node; the scalar variant and the batch read the same rows, so a mode
+switch reseeds nothing), and the pick's masks — which need the previous
+tail's drafts — go through a pinned staging behind an in-graph handshake:
+`glm_stage_wait` bumps the slot's device replay counter and spins until
+the host's published stage sequence reaches it (a timeout sets a pinned
+flag the settle turns into an error, never a hung stream), then
+`glm_upload_words` copies the rows to the device table. The host has the
+verify's ~38 ms to stage them.
+
+The bus holds two live windows for this (a ring of arms, FIFO finish, the
+walker adopting the next window only once the current is walked, an arm
+waiting for the window two back to be walked), and a variant's cells are
+in flight until its window is finished, so every shape has two graph
+variants that alternate per replay. Eager collectives are still rejected
+while any window is live: a prefill, a host fallback (its rollbacks and
+gathers), a graph capture, and the gates' eager oracles first `drain()`
+the replays in flight. A sampled fallback marks the replay re-drafted
+(its provisional draft picks are skipped) before draining.
+
+Two pitfalls found on the way: an EXTERNAL event record node inside the
+replayed graph (`cudaEventRecordWithFlags(..., cudaEventRecordExternal)`)
+stalled about one relaunch in five — the graph never started on one rank
+while the peer spun in its first collective — hence the pinned sequence;
+and the stage must be published before the no-overlap path drains, or
+the replay's handshake waits for a host that waits for the replay.
+`DGPP_PIPELINE=0` settles each replay right after its launch (the
+bisecting knob and the escape hatch); `DGPP_PIPELINE_TRACE=1` logs every
+launch and settle. The stats line's `ms/step` is now the interval inside
+the engine's step call (verdict to verdict in steady state); tokens per
+second is the honest measure of what the seam's removal bought. Measured
+(2026-09-06, one greedy request, the same binary pipelined vs
+`DGPP_PIPELINE=0`): 41.2 vs 41.7 ms per pass short, 41.9 vs 43.0 at 8K,
+42.6 vs 43.3 at 32K — 0.5 to 1.1 ms of the ~1 ms seam — and 44.1 / 45.3 /
+43.7 vs 43.4 / 44.8 / 43.1 tok/s on prose / code / JSON; the transcripts
+are byte-identical to the unpipelined runs.
 
 ### What remains (design)
 

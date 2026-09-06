@@ -248,6 +248,11 @@ class GlmLayerStream {
   static size_t globals_bytes(const GlmTextConfig& cfg, int rank = 0,
                               int world = 1,
                               GlmHeadSharding head = GlmHeadSharding::Full);
+  // The lm-head rows this rank holds (the whole vocabulary, or its slice
+  // under VocabSharded) — what sizes the logits buffers.
+  static int lm_vocab_count(const GlmTextConfig& cfg, int rank = 0,
+                            int world = 1,
+                            GlmHeadSharding head = GlmHeadSharding::Full);
 
   // Exact device bytes a RESIDENT stream at this rank's geometry holds
   // once every layer + the globals are materialized: the sum of every

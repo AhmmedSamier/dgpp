@@ -376,6 +376,12 @@ __device__ __forceinline__ int logical_slot(const int32_t* __restrict__ order) {
 // block per column chunk. The ticket's __syncthreads + fence per block and
 // the last block's 18 dependent L2 loads on the kernel's tail cost +22 us
 // per layer against the 1.7 us launch they replaced.)
+// Rows per warp of the down projection (2026-09-06): the sliced down's k
+// is 512 bytes per row — one chunk per lane — so a warp per row had one
+// load in flight; four rows per warp keep four (moe_slot_bench: the chain
+// at two rows measured before/after).
+constexpr int kDownRowsPerWarp = 4;
+
 __global__ void moe_slot_down_kernel(
     const uint16_t* __restrict__ act, size_t act_stride,
     const int32_t* __restrict__ ids, const int32_t* __restrict__ order,
@@ -384,7 +390,7 @@ __global__ void moe_slot_down_kernel(
     const uint8_t* __restrict__ sh_payload, const float* __restrict__ sh_scales,
     float* __restrict__ out, int out_stride, int slots, int top_k) {
   extern __shared__ __align__(16) uint16_t sx[];
-  const int n0 = blockIdx.x * fp8_gemv::kWarps;
+  const int n0 = blockIdx.x * (fp8_gemv::kWarps * kDownRowsPerWarp);
   if (static_cast<int>(blockIdx.y) >= slots) return;
   const int slot = logical_slot(order);
   const SlotMatrix m =
@@ -395,9 +401,10 @@ __global__ void moe_slot_down_kernel(
   fp8_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride,
                                  act_stride, m.k, sx);
   __syncthreads();
-  fp8_gemv::block_rows<1>(m.payload, m.scales, sx, n0, m.n, m.k,
-                          out + static_cast<size_t>(slot) * out_stride,
-                          static_cast<size_t>(out_stride));
+  fp8_gemv::block_rows_multi<1, kDownRowsPerWarp>(
+      m.payload, m.scales, sx, n0, m.n, m.k,
+      out + static_cast<size_t>(slot) * out_stride,
+      static_cast<size_t>(out_stride));
 }
 
 // The gate GEMV, the up GEMV and the swiglu in ONE launch: a warp computes
@@ -1291,7 +1298,8 @@ void launch_moe_slot_down(const uint16_t* act, size_t act_stride,
     throw std::invalid_argument("moe_slot_down: out_stride below n");
   const int max_n = n_routed > n_shared ? n_routed : n_shared;
   const int max_k = k_routed > k_shared ? k_routed : k_shared;
-  const dim3 grid((max_n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps,
+  const int rows_per_block = fp8_gemv::kWarps * kDownRowsPerWarp;
+  const dim3 grid((max_n + rows_per_block - 1) / rows_per_block,
                   static_cast<unsigned>(slots));
   moe_slot_down_kernel<<<grid, fp8_gemv::kThreads,
                          fp8_gemv::smem_bytes(1, max_k), stream>>>(

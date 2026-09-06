@@ -108,6 +108,27 @@ int GlmDiagnosticModel::session_kpool() const {
   return dsa_cfg_.num_dsa_layers > 0 ? dsa_cfg_.index_kpool : 1;
 }
 
+size_t GlmDiagnosticModel::session_snapshot_bytes(const GlmTextConfig& cfg,
+                                                  int tp_world, bool mtp) {
+  size_t bytes = 0;
+  KdaConfig kda = cfg.kda_config();
+  kda.tp_size = tp_world;
+  if (kda.num_kda_layers > 0) {
+    const KdaGeometry g = KdaGeometry::from_config(kda);
+    bytes += static_cast<size_t>(kda.num_kda_layers) *
+             (g.recurrent_bytes + g.conv_committed_bytes);
+  }
+  DsaConfig dsa = cfg.dsa_config();
+  dsa.tp_size = tp_world;
+  if (dsa.num_dsa_layers > 0) {
+    const DsaGeometry g = DsaGeometry::from_config(dsa);
+    bytes += static_cast<size_t>(dsa.num_dsa_layers + (mtp ? 1 : 0)) *
+             g.tail_bytes_per_request;
+  }
+  if (mtp) bytes += static_cast<size_t>(cfg.hidden_size) * 2;
+  return bytes;
+}
+
 size_t GlmDiagnosticModel::session_snapshot_bytes() const {
   size_t bytes = 0;
   if (kda_rec_) {
@@ -157,6 +178,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill_chunks(
   size_t ci = 0;
   while (c0 < end) {
     const int64_t c1 = ci < cuts.size() ? cuts[ci++] : end;
+    if (c1 - c0 > max_tokens_)
+      throw std::invalid_argument(
+          "session_prefill: a chunk of " + std::to_string(c1 - c0) +
+          " rows exceeds max_tokens " + std::to_string(max_tokens_));
     Outputs chunk = session_run_rows(
         req, std::vector<int64_t>(ids + (c0 - start), ids + (c1 - start)), c0,
         /*decode_row=*/false);
@@ -194,8 +219,12 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
                            std::to_string(req));
   const int64_t P = static_cast<int64_t>(prompt_ids.size());
   if (P <= 0) throw std::invalid_argument("session_prefill: empty prompt");
-  if (P > max_tokens_)
-    throw std::invalid_argument("session_prefill: prompt exceeds max_tokens");
+  if (P > max_context_)
+    throw std::invalid_argument("session_prefill: prompt exceeds the context bound");
+  if (P > max_tokens_ && max_tokens_ < kPrefillChunkTokens)
+    throw std::invalid_argument(
+        "session_prefill: prompt exceeds max_tokens and the model cannot chunk it "
+        "(max_tokens is below the prefill chunk)");
   for (int64_t id : prompt_ids)
     if (id < 0 || id >= cfg_.vocab_size)
       throw std::invalid_argument("session_prefill: token id out of range");
@@ -256,8 +285,12 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill_resume(
   if (P0 % session_kpool() != 0)
     throw std::invalid_argument("session_prefill_resume: the position is not pool-aligned");
   if (n <= 0) throw std::invalid_argument("session_prefill_resume: empty suffix");
-  if (P0 + n > max_tokens_)
-    throw std::invalid_argument("session_prefill_resume: prompt exceeds max_tokens");
+  if (P0 + n > max_context_)
+    throw std::invalid_argument("session_prefill_resume: prompt exceeds the context bound");
+  if (n > max_tokens_ && max_tokens_ < kPrefillChunkTokens)
+    throw std::invalid_argument(
+        "session_prefill_resume: suffix exceeds max_tokens and the model cannot "
+        "chunk it (max_tokens is below the prefill chunk)");
   for (int64_t id : suffix_ids)
     if (id < 0 || id >= cfg_.vocab_size)
       throw std::invalid_argument("session_prefill_resume: token id out of range");
@@ -344,10 +377,12 @@ GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot(
 }
 
 GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot_post_row0(
-    int req, void* dst, int spec_row) {
+    int req, void* dst, int spec_row, int rows_after) {
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_snapshot_post_row0: request slot " + std::to_string(req));
-  const int64_t pos = session_pos_[static_cast<size_t>(req)] - 1;  // after row 0
+  if (rows_after < 1 || rows_after >= kSpecRows)
+    throw std::invalid_argument("session_snapshot_post_row0: rows after the position");
+  const int64_t pos = session_pos_[static_cast<size_t>(req)] - rows_after;  // after row 0
   if (pos <= 0) throw std::invalid_argument("session_snapshot_post_row0: no verified rows");
   if (pos % session_kpool() != 0)
     throw std::invalid_argument(
@@ -355,13 +390,13 @@ GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot_pos
   if (spec_row < 0 || spec_row >= kDecodeRows)
     throw std::out_of_range("session_snapshot_post_row0: spec row " + std::to_string(spec_row));
   if (dst == nullptr) throw std::invalid_argument("session_snapshot_post_row0: null buffer");
-  // The draft block: its rows ran (counter at P+1, the pre-draft ring is in
-  // the rollback snapshot) or have not (counter at P-1, the live ring IS
-  // the pre-draft ring).
+  // The draft block: its rows ran (counter at P+rows_after, the pre-draft
+  // ring is in the rollback snapshot) or have not (counter at P-1, the
+  // live ring IS the pre-draft ring).
   bool draft_ring_from_snapshot = false;
   if (mtp_) {
     const int64_t q = mtp_pos_[static_cast<size_t>(req)];
-    if (q == pos + 1)
+    if (q == pos + rows_after)
       draft_ring_from_snapshot = true;
     else if (q != pos - 1)
       throw std::logic_error(
@@ -450,8 +485,8 @@ void GlmDiagnosticModel::session_attach(int req, const void* src,
     throw std::logic_error("session_attach: the slot is open");
   if (meta.position <= 0 || meta.position % session_kpool() != 0)
     throw std::invalid_argument("session_attach: bad snapshot position");
-  if (meta.position > max_tokens_)
-    throw std::invalid_argument("session_attach: position exceeds max_tokens");
+  if (meta.position > max_context_)
+    throw std::invalid_argument("session_attach: position exceeds the context bound");
   if (src == nullptr) throw std::invalid_argument("session_attach: null buffer");
   const int H = cfg_.hidden_size;
   const uint8_t* d = static_cast<const uint8_t*>(src);
@@ -633,8 +668,8 @@ void GlmDiagnosticModel::session_decode_host_prep(
   for (int64_t id : ids)
     if (id < 0 || id >= cfg_.vocab_size)
       throw std::invalid_argument("session_decode: token id out of range");
-  if (pos + T > max_tokens_)
-    throw std::invalid_argument("session_decode: position exceeds max_tokens");
+  if (pos + T > max_context_)
+    throw std::invalid_argument("session_decode: position exceeds the context bound");
 
   // DSA admission: the block table must cover every row's position
   // BEFORE enqueue_decode (its pos is device state; growth is host
@@ -726,6 +761,9 @@ void GlmDiagnosticModel::session_graph_capture_step(
   graph_has_draft_ = false;
   graph_batch_requests_ = 0;
   graph_rows_per_request_ = 0;
+  // The slot's scalar variant reads and writes its own persistent feed
+  // rows (device_feed), so its feed survives the other slots' replays.
+  step_tokens_ = d_tokens_ + kDecodeRows + static_cast<size_t>(req) * ids.size();
   session_decode_host_prep(req, ids, /*upload=*/true, device_positions);
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   // The uploads and every launch record; the walk's syncs are skipped
@@ -757,6 +795,7 @@ void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request) {
   graph_has_draft_ = false;
   graph_batch_requests_ = requests;
   graph_rows_per_request_ = rows_per_request;
+  step_tokens_ = d_tokens_ + kDecodeRows;  // the fixed batch: every slot's feed rows
   decode_rows_ = rows;
   for (int q = 0; q < requests; ++q) {
     h_req_spans_[2 * q] = q * rows_per_request;
@@ -841,16 +880,16 @@ void GlmDiagnosticModel::session_graph_capture_verify_next_tokens_batch(
         "T=1 fixed graph");
   glm_spec_verify_next_tokens_batched(
       verify_verdicts, graph_batch_requests_, graph_rows_per_request_,
-      d_tokens_, stream_);
+      step_tokens_, stream_);
 }
 
 void GlmDiagnosticModel::session_reserve_blocks(int req, int64_t tokens) {
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_reserve_blocks: request slot " +
                             std::to_string(req));
-  if (tokens < 1 || tokens > max_tokens_)
+  if (tokens < 1 || tokens > max_context_)
     throw std::invalid_argument("session_reserve_blocks: tokens outside "
-                                "[1, max_tokens]");
+                                "[1, max_context]");
   if (dsa_cfg_.num_dsa_layers == 0) return;
   if (!pool_.ensure_request_blocks(req, tokens, stream_))
     throw std::runtime_error(
@@ -987,11 +1026,12 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // and a plain memcpy (never captured; its syncs amortize over chunks).
   // A device-token capture records no upload: the previous replay's last
   // node (glm_spec_next_tokens) left the fed tokens in d_tokens_.
+  if (!capture_mode) step_tokens_ = d_tokens_;  // eager rows: the scratch
   if (!(capture_mode && graph_device_tokens_)) {
     if (decode_row)
-      glm_upload_i64(h_token_, d_tokens_, T, stream_);
+      glm_upload_i64(h_token_, step_tokens_, T, stream_);
     else
-      DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, ids.data(),
+      DGPP_CUDA_OK(cudaMemcpyAsync(step_tokens_, ids.data(),
                                    static_cast<size_t>(T) * 8,
                                    cudaMemcpyHostToDevice, stream_));
   }
@@ -999,7 +1039,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // (The bus logs arm -> first collective; this splits it at the graph's
   // own start.) One 1-thread kernel; decode rows only.
   if (decode_row) launch_globaltimer_stamp(h_graph_start_gt_, stream_);
-  glm_embed_bcast_streams(globals_.embed, d_tokens_, streams_[0], T, H,
+  glm_embed_bcast_streams(globals_.embed, step_tokens_, streams_[0], T, H,
                           stream_);
 
   Outputs out;
@@ -1223,7 +1263,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     if (decode_row && batched) {
       glm_rows_scatter_bf16_batched(
           collapsed_, d_req_ids_, d_step_pos_, mtp_hidden_,
-          static_cast<int64_t>(max_tokens_) * H, T, H, stream_);
+          static_cast<int64_t>(max_context_) * H, T, H, stream_);
     } else if (decode_row) {
       glm_rows_scatter_bf16(collapsed_, d_step_pos_, mtp_hidden_cache(req), T,
                             H, stream_);

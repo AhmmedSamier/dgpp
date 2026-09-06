@@ -15,7 +15,9 @@ time on a node that is also serving.
 CTest currently runs 33 entries:
 
 - host unit cases covering logging/tracing, JSON, arenas, safetensors,
-  FP8, shard plans, the HF cache resolver, the sampler against its
+  FP8, the latent cache's fp8/fp4 codecs (the e2m1 grid and its
+  round-to-even ties, the row quantizers' error bounds, zero rows, the
+  padded fp4 row), shard plans, the HF cache resolver, the sampler against its
   centralized oracle, KDA/DSA geometry contracts (against DESIGN §7.2's
   transcribed literals), route-trace golden bytes shared with the python
   reader, the MoE route-flip certifier's rejection paths (near-tie
@@ -41,8 +43,14 @@ CTest currently runs 33 entries:
   multi-row, grid-size invariance, 100k-pool long-context stripes, graph
   capture/replay with changed position), split-KV absorbed attention against
   the host oracle at TP1/TP4 with empty-row and head-group coverage,
-  latent/gather block-table round trip, multi-request decode with padding
-  rows, kpool=2 generality, and the layer tests: state-pool block
+  latent/gather block-table round trip, the quantized latent cache (the
+  fp8/fp4 append bitwise against the host codec at 512/256/32 wide; the
+  split, listed-flash and dense-flash attention kernels over an fp8/fp4
+  cache against the oracle fed the dequantized rows, within the bf16
+  kernel's own tolerance; a whole layer on each quantized cache against
+  the bf16 layer — same selection, output drift within the format's
+  bound), multi-request decode with padding rows, kpool=2 generality, and
+  the layer tests: state-pool block
   allocation and byte accounting at deployment scale, prefill/chunked-
   prefill/decode parity against the oracle with selection-aware near-tie
   certification (at select_k=16 and select_k=8), decode graph replay
@@ -77,9 +85,14 @@ CTest currently runs 33 entries:
   greedy generation loop, the device pick, the one-graph MTP step in
   lockstep with the eager speculator, and the T=1/MTP serving graph adapters
   through the real scheduler (including slot reuse, the in-graph draft
-  checked against the eager speculator after every replay); the pick/spec
-  kernels against their
-  host oracles (`glm_pick_test`); the GEMV cores (`bf16_gemv_test`) and the
+  checked against the eager speculator after every replay, the MTP depth-2
+  and depth-3 greedy gates — plain transcript, device feed equal to the
+  eager chain's — and the sampled depth-2 gate against the eager
+  speculator through its fallbacks; every gate's eager oracle drains the
+  pipelined engine before it steps); the pick/spec kernels against their
+  host oracles, the T=2 and T=3 sampled verdict chains included
+  (`glm_pick_test`); the bus's graph era including two replay windows
+  armed at once (`bus_test`); the GEMV cores (`bf16_gemv_test`) and the
   loader's resident-image round trip (`glm_loader_test`);
 - Python checkpoint classification, exact expert-occupancy tests, and the
   route-trace traffic-model contract.

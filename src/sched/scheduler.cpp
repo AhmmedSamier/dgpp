@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <format>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -493,9 +494,14 @@ void Scheduler::admit(int arrival) {
       }
     }
   }
-  prefill_ms_ += std::chrono::duration<double, std::milli>(
-                     std::chrono::steady_clock::now() - t_prefill)
-                     .count();
+  const double prefill_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t_prefill)
+                                .count();
+  prefill_ms_ += prefill_ms;
+  r.admitted = true;
+  r.admitted_at = t_prefill;
+  r.prefill_ms = prefill_ms;
+  r.attached_tokens = attached;
   ++prompts_prefilled_;
   prompt_tokens_ += static_cast<int64_t>(r.spec.prompt.size());
   prompt_tokens_computed_ += static_cast<int64_t>(r.spec.prompt.size()) - attached;
@@ -566,6 +572,8 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
                   .count();
   ++decode_steps_;
   decode_rows_ += static_cast<int64_t>(slots.size());
+  for (const int arrival : arrivals)
+    ++requests_[static_cast<size_t>(arrival)].decode_passes;
   if (batches.size() != arrivals.size())
     throw std::runtime_error(
         "Scheduler: engine returned " + std::to_string(batches.size()) +
@@ -652,6 +660,11 @@ bool Scheduler::append_token(int arrival, int32_t token,
 void Scheduler::retire(int arrival, Result::Status status,
                        Result::Reason reason) {
   Request& r = requests_[static_cast<size_t>(arrival)];
+  // The slot's draft acceptance for the retire line, read before close
+  // resets it.
+  const SchedulerEngine::MtpAcceptance acceptance =
+      r.slot >= 0 ? engine_->mtp_acceptance(r.slot)
+                  : SchedulerEngine::MtpAcceptance{};
   // The prefix cache (M7): the request's attach reference returns first,
   // so the entry it opened from is evictable for its own close entry.
   if (r.attach_entry >= 0) {
@@ -730,8 +743,42 @@ void Scheduler::retire(int arrival, Result::Status status,
   res.generated = r.generated;
   r.slot = -1;
   if (observer_) observer_->on_retire(r.spec.id, res);
-  DGPP_LOG_INFO("sched: request '{}' retired ({}, {} tokens generated)",
-                r.spec.id, reason_name(reason), r.steps_done);
+  // The request's own numbers (2026-09-06): its prefill (the prompt, the
+  // tokens an attach skipped, the wall from admission), then its decode —
+  // the tokens after the prefill pick, the passes it rode (each shared
+  // with every other live request, so ms/pass is the pace this request
+  // saw, not the engine's step), tok/s and ms/tok, and MTP's tok/pass.
+  std::string line = std::format("sched: request '{}' retired ({}): {} tok",
+                                 r.spec.id, reason_name(reason), r.steps_done);
+  if (!r.admitted) {
+    line += " — never admitted";
+  } else {
+    const double total_s = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - r.admitted_at)
+                               .count();
+    const double decode_s = std::max(0.0, total_s - r.prefill_ms / 1000.0);
+    const int decode_tokens = std::max(0, r.steps_done - 1);
+    line += std::format(
+        " in {:.1f} s — prefill {} tok ({} cached) in {:.0f} ms; decode {} tok "
+        "/ {} pass{} in {:.1f} s",
+        total_s, r.spec.prompt.size(), r.attached_tokens, r.prefill_ms,
+        decode_tokens, r.decode_passes, r.decode_passes == 1 ? "" : "es",
+        decode_s);
+    if (decode_tokens > 0 && r.decode_passes > 0 && decode_s > 0.0)
+      line += std::format(
+          ": {:.1f} tok/s, {:.1f} ms/tok, {:.0f} ms/pass, {:.2f} tok/pass",
+          decode_tokens / decode_s, 1000.0 * decode_s / decode_tokens,
+          1000.0 * decode_s / r.decode_passes,
+          static_cast<double>(decode_tokens) / r.decode_passes);
+    std::string accept;
+    for (int p = 0; p < acceptance.depth && p < 8; ++p)
+      if (acceptance.attempts[p] > 0)
+        accept += std::format(" p{} {:.0f} %", p + 1,
+                              100.0 * static_cast<double>(acceptance.accepts[p]) /
+                                  static_cast<double>(acceptance.attempts[p]));
+    if (!accept.empty()) line += ", accept" + accept;
+  }
+  DGPP_LOG_INFO("{}", line);
 }
 
 bool Scheduler::tick() {
@@ -863,6 +910,7 @@ Scheduler::Meters Scheduler::meters() const {
   m.decode_rows = decode_rows_;
   m.prefill_ms = prefill_ms_;
   m.step_ms = step_ms_;
+  m.mtp = engine_->mtp_acceptance();
   m.prefix_slots = cache_.slots();
   m.prefix_entries = cache_.live_entries();
   m.prefix_hits = cache_.stats().hits;

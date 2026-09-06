@@ -74,14 +74,21 @@ __device__ inline bool aligned16(const void* p) {
 // load and combines through the warp (the 256-way serial loop it replaces
 // was ~5 us of thread 0's time on every claim). Every thread returns the
 // total. Call from all threads; contains one barrier.
+// `stage` (2026-09-06, the graph kernel): a shared-memory copy of the
+// payload written by the same loads the hash makes — the gate's last,
+// matching pass leaves a complete copy, and the fold then reads shared
+// memory instead of NIC-placed system memory (the fold was 9 of every
+// collective's ~50 us). Null keeps the hash-only pass.
 __device__ inline uint64_t block_fold_payload(const uint64_t* base,
                                               size_t words,
-                                              uint64_t* s_warp_hash) {
+                                              uint64_t* s_warp_hash,
+                                              uint64_t* stage = nullptr) {
   uint64_t h = 0;
   if (aligned16(base)) {
     const size_t pairs = words / 2;
     for (size_t j = threadIdx.x; j < pairs; j += kConsumerThreads) {
       const uint4 v = sys_load_u128(reinterpret_cast<const uint4*>(base) + j);
+      if (stage != nullptr) reinterpret_cast<uint4*>(stage)[j] = v;
       const uint64_t w0 = static_cast<uint64_t>(v.x) |
                           (static_cast<uint64_t>(v.y) << 32);
       const uint64_t w1 = static_cast<uint64_t>(v.z) |
@@ -92,11 +99,16 @@ __device__ inline uint64_t block_fold_payload(const uint64_t* base,
     }
     if ((words & 1) != 0 && threadIdx.x == 0) {
       const size_t i = words - 1;
-      h ^= (sys_load_u64(&base[i]) + i + 1) * kFoldMultiplier;
+      const uint64_t w = sys_load_u64(&base[i]);
+      if (stage != nullptr) stage[i] = w;
+      h ^= (w + i + 1) * kFoldMultiplier;
     }
   } else {
-    for (size_t i = threadIdx.x; i < words; i += kConsumerThreads)
-      h ^= (sys_load_u64(&base[i]) + i + 1) * kFoldMultiplier;
+    for (size_t i = threadIdx.x; i < words; i += kConsumerThreads) {
+      const uint64_t w = sys_load_u64(&base[i]);
+      if (stage != nullptr) stage[i] = w;
+      h ^= (w + i + 1) * kFoldMultiplier;
+    }
   }
 #pragma unroll
   for (int o = 16; o > 0; o >>= 1) h ^= __shfl_xor_sync(0xffffffffu, h, o);
@@ -131,7 +143,10 @@ __device__ inline void block_copy_row(const uint32_t* src, uint32_t* dst,
 // (peer-major ascending; rank r is index r below us, r-1 above); our own
 // vector is `local`. Peer bytes are NIC-placed: system-scope loads. Eight
 // elements per thread iteration through 16-byte loads when aligned; the
-// per-element arithmetic is identical either way.
+// per-element arithmetic is identical either way. (TRIED 2026-09-06 and
+// reverted: four vectors' loads per thread issued before any is consumed —
+// the graph window timeline's fold span stayed at 9.3 us, so the span is
+// not this loop's load latency.)
 __device__ inline void block_fold_vectors(const uint16_t* local,
                                           const uint16_t* const* peers,
                                           int send_peers, int my_rank,
@@ -183,6 +198,59 @@ __device__ inline void block_fold_vectors(const uint16_t* local,
       const uint16_t* vec = r == my_rank ? local : peers[r < my_rank ? r : r - 1];
       acc += r == my_rank ? bf16_to_f32(vec[i])
                           : bf16_to_f32(sys_load_u16(&vec[i]));
+    }
+    dst[i] = __float2bfloat16(acc);
+  }
+}
+
+// The canonical fold over STAGED peer payloads (shared memory, plain
+// loads): the same per-element chain as block_fold_vectors, so the
+// destinations agree with it bitwise. `staged[p]` is peer p's copy.
+__device__ inline void block_fold_vectors_staged(
+    const uint16_t* local, const uint16_t* const* staged, int send_peers,
+    int my_rank, uint32_t elems, __nv_bfloat16* dst) {
+  const int world = send_peers + 1;
+  bool vec_ok = (elems % 8) == 0 && aligned16(local) && aligned16(dst);
+  for (int p = 0; p < send_peers; ++p) vec_ok = vec_ok && aligned16(staged[p]);
+  if (vec_ok) {
+    const uint32_t vecs = elems / 8;
+    for (uint32_t vi = threadIdx.x; vi < vecs; vi += kConsumerThreads) {
+      uint4 in[kBusMaxPeers + 1];
+      for (int r = 0; r < world; ++r) {
+        const uint16_t* vec =
+            r == my_rank ? local : staged[r < my_rank ? r : r - 1];
+        in[r] = reinterpret_cast<const uint4*>(vec)[vi];
+      }
+      float acc[8];
+#pragma unroll
+      for (int e = 0; e < 8; ++e) acc[e] = 0.0f;
+      for (int r = 0; r < world; ++r) {
+        const uint32_t w[4] = {in[r].x, in[r].y, in[r].z, in[r].w};
+#pragma unroll
+        for (int e = 0; e < 8; ++e)
+          acc[e] += bf16_to_f32(static_cast<uint16_t>(
+              (e & 1) ? (w[e >> 1] >> 16) : (w[e >> 1] & 0xFFFFu)));
+      }
+      uint4 out;
+      uint32_t o[4];
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const __nv_bfloat16 lo = __float2bfloat16(acc[2 * q]);
+        const __nv_bfloat16 hi = __float2bfloat16(acc[2 * q + 1]);
+        o[q] = static_cast<uint32_t>(*reinterpret_cast<const uint16_t*>(&lo)) |
+               (static_cast<uint32_t>(*reinterpret_cast<const uint16_t*>(&hi))
+                << 16);
+      }
+      out.x = o[0]; out.y = o[1]; out.z = o[2]; out.w = o[3];
+      reinterpret_cast<uint4*>(dst)[vi] = out;
+    }
+    return;
+  }
+  for (uint32_t i = threadIdx.x; i < elems; i += kConsumerThreads) {
+    float acc = 0.0f;
+    for (int r = 0; r < world; ++r) {
+      const uint16_t* vec = r == my_rank ? local : staged[r < my_rank ? r : r - 1];
+      acc += bf16_to_f32(vec[i]);
     }
     dst[i] = __float2bfloat16(acc);
   }
@@ -523,6 +591,11 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
   }
 }
 
+// The graph kernel's staging budget: the decode collective's 2 x 4096
+// bf16 payloads from three peers (48 KB); larger vectors (the 8-row
+// batch) fold from the NIC-placed payloads as before.
+constexpr size_t kGraphStageBytes = size_t{48} << 10;
+
 // The graph twin of the kernel above (§6.2, the decode step's replayed
 // launch sequence). The protocol is identical — snapshot, claim/fold/ack,
 // exit stamp — with three deltas a shared-body refactor forced and the
@@ -542,8 +615,13 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
 __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
     BusAllReduceGraphView v, int my_rank, const __nv_bfloat16* src,
     __nv_bfloat16* dst, uint32_t elems, BusAllReduceCtl* ctl,
-    uint64_t deadline_cycles) {
+    uint64_t deadline_cycles, uint32_t stage_words) {
+  // stage_words (2026-09-06): u64 words of dynamic shared memory per peer
+  // (kBusMaxPeers slots) that a claimed payload is copied into by its
+  // gate's hash pass; 0 = no staging (the fold reads the NIC-placed rows).
   using BlockRef = cuda::atomic_ref<int, cuda::thread_scope_block>;
+  extern __shared__ __align__(16) uint64_t stage_smem[];
+  __shared__ int s_staged[kBusMaxPeers];
   using SysRef = cuda::atomic_ref<uint64_t, cuda::thread_scope_system>;
 
   cuda::atomic_ref<uint64_t, cuda::thread_scope_system> gen_ref(ctl->gen_seq);
@@ -674,8 +752,12 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
     }
     __syncthreads();
     uint64_t total_hash = 0;
+    uint64_t* stage = (stage_words != 0 && (stage_words & 1) == 0 &&
+                       s_words[peer] <= stage_words)
+                          ? stage_smem + static_cast<size_t>(peer) * stage_words
+                          : nullptr;
     for (int spin = 0;; ++spin) {
-      total_hash = block_fold_payload(base, s_words[peer], s_hash);
+      total_hash = block_fold_payload(base, s_words[peer], s_hash, stage);
       if (threadIdx.x == 0) {
         if (total_hash == s_hash_want) {
           s_gate_matched = 1;
@@ -704,6 +786,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
       ack->hash = total_hash;
       flag_store_release(&ack->seq, s_seq[peer]);
       s_payload[peer] = reinterpret_cast<const uint16_t*>(base);
+      s_staged[peer] = stage != nullptr ? 1 : 0;
       s_got[peer] = 1;
       const uint64_t now = globaltimer_ns();
       ctl->gt_claim[peer] = now;
@@ -718,8 +801,20 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
 
   // Common exit + fold (identical to eager; the canonical chain).
   if (s_failed == 0) {
-    block_fold_vectors(reinterpret_cast<const uint16_t*>(src), s_payload,
-                       v.send_peers, my_rank, elems, dst);
+    // From the staged copies when every peer's landed in shared memory.
+    bool all_staged = stage_words != 0;
+    for (int p = 0; p < v.send_peers; ++p) all_staged = all_staged && s_staged[p] != 0;
+    if (all_staged) {
+      const uint16_t* staged[kBusMaxPeers];
+      for (int p = 0; p < kBusMaxPeers; ++p)
+        staged[p] = reinterpret_cast<const uint16_t*>(
+            stage_smem + static_cast<size_t>(p) * stage_words);
+      block_fold_vectors_staged(reinterpret_cast<const uint16_t*>(src), staged,
+                                v.send_peers, my_rank, elems, dst);
+    } else {
+      block_fold_vectors(reinterpret_cast<const uint16_t*>(src), s_payload,
+                         v.send_peers, my_rank, elems, dst);
+    }
     if (threadIdx.x == 0) ctl->stamp_reduce_done = clock64();
   }
   __syncthreads();
@@ -756,8 +851,15 @@ cudaError_t launch_bus_allreduce_graph(const BusAllReduceGraphView& v,
                                        BusAllReduceCtl* cell,
                                        uint64_t deadline_cycles,
                                        cudaStream_t stream) {
-  bus_allreduce_graph_kernel<<<1, kConsumerThreads, 0, stream>>>(
-      v, my_rank, src, dst, elems, cell, deadline_cycles);
+  // Staged only when every peer's slot stays 16-byte aligned (elems a
+  // multiple of 8: the step's small all-gathers are not) and the three
+  // slots fit the budget.
+  const size_t payload = static_cast<size_t>(elems) * 2;
+  const bool stage = (elems % 8) == 0 && payload * kBusMaxPeers <= kGraphStageBytes;
+  const uint32_t stage_words = stage ? elems / 4 : 0u;
+  bus_allreduce_graph_kernel<<<1, kConsumerThreads,
+                               stage ? payload * kBusMaxPeers : 0, stream>>>(
+      v, my_rank, src, dst, elems, cell, deadline_cycles, stage_words);
   return cudaGetLastError();
 }
 
@@ -1745,6 +1847,13 @@ cudaError_t bus_preload_kernels() {
     const cudaError_t err = cudaFuncGetAttributes(&attr, k);
     if (err != cudaSuccess) return err;
   }
+  // The graph kernel's staged fold (kGraphStageBytes of dynamic smem).
+  if (const cudaError_t err = cudaFuncSetAttribute(
+          reinterpret_cast<const void*>(bus_allreduce_graph_kernel),
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          static_cast<int>(kGraphStageBytes));
+      err != cudaSuccess)
+    return err;
   return cudaSuccess;
 }
 

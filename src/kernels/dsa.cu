@@ -10,6 +10,9 @@
 // evidence.
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
+#include <stdexcept>
+#include <type_traits>
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -18,6 +21,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "kernels/dsa.hpp"
+#include "kernels/latent_format.hpp"
 #include "kernels/topk_select.cuh"
 
 namespace dgpp {
@@ -65,11 +69,105 @@ __device__ inline float dot8_bf16(uint4 a, uint4 b, float acc) {
   return acc;
 }
 
+// ---- the latent cache's formats (kernels/latent_format.hpp) ------------
+// The attention kernels gather a latent tile into bf16 shared memory; a
+// quantized cache dequantizes on the way in (the codes and the row scale
+// -> the bf16 the host oracle sees, bitwise) and the math past the load
+// is the bf16 kernel's. load8 fills 8 consecutive elements at element
+// offset `e` (a multiple of 8) of physical row `phys`; load1 one element.
+__device__ __forceinline__ uint32_t pack_bf16x2(uint16_t lo, uint16_t hi) {
+  return static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+}
+
+template <LatentFormat F>
+struct LatentTile;
+
+template <>
+struct LatentTile<LatentFormat::kBf16> {
+  static __device__ __forceinline__ uint4 load8(const uint8_t* cache,
+                                                const float*, int64_t phys,
+                                                int kv_lora, int e) {
+    return *reinterpret_cast<const uint4*>(cache + (phys * kv_lora + e) * 2);
+  }
+  static __device__ __forceinline__ uint16_t load1(const uint8_t* cache,
+                                                   const float*, int64_t phys,
+                                                   int kv_lora, int e) {
+    return reinterpret_cast<const uint16_t*>(cache)[phys * kv_lora + e];
+  }
+};
+
+template <>
+struct LatentTile<LatentFormat::kFp8> {
+  // The hardware e4m3 -> f16 conversion is exact (the select kernel's pin);
+  // one fp32 multiply by the row scale and a bf16 rounding follow, exactly
+  // latent_fp8_decode_bf16.
+  static __device__ __forceinline__ uint32_t decode2(uint16_t codes, float s) {
+    const float2 v = fp8x2_to_float2(codes);
+    return pack_bf16x2(float_to_bf16_bits(v.x * s), float_to_bf16_bits(v.y * s));
+  }
+  static __device__ __forceinline__ uint4 load8(const uint8_t* cache,
+                                                const float* scales,
+                                                int64_t phys, int kv_lora,
+                                                int e) {
+    const uint2 raw = *reinterpret_cast<const uint2*>(cache + phys * kv_lora + e);
+    const float s = scales[phys];
+    uint4 out;
+    out.x = decode2(static_cast<uint16_t>(raw.x & 0xFFFFu), s);
+    out.y = decode2(static_cast<uint16_t>(raw.x >> 16), s);
+    out.z = decode2(static_cast<uint16_t>(raw.y & 0xFFFFu), s);
+    out.w = decode2(static_cast<uint16_t>(raw.y >> 16), s);
+    return out;
+  }
+  static __device__ __forceinline__ uint16_t load1(const uint8_t* cache,
+                                                   const float* scales,
+                                                   int64_t phys, int kv_lora,
+                                                   int e) {
+    return latent_fp8_decode_bf16(cache[phys * kv_lora + e], scales[phys]);
+  }
+};
+
+template <>
+struct LatentTile<LatentFormat::kFp4> {
+  static __device__ __forceinline__ uint4 load8(const uint8_t* cache,
+                                                const float* scales,
+                                                int64_t phys, int kv_lora,
+                                                int e) {
+    const uint8_t* row =
+        cache + phys * static_cast<int64_t>(latent_row_bytes(LatentFormat::kFp4, kv_lora));
+    const uint32_t raw = *reinterpret_cast<const uint32_t*>(row + (e >> 1));
+    const float S = latent_fp4_block_scale(
+        row[latent_fp4_scale_offset(kv_lora) + (e / kLatentFp4Block)], scales[phys]);
+    uint16_t v[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+      v[j] = latent_fp4_decode_bf16(static_cast<uint8_t>((raw >> (4 * j)) & 0xFu), S);
+    uint4 out;
+    out.x = pack_bf16x2(v[0], v[1]);
+    out.y = pack_bf16x2(v[2], v[3]);
+    out.z = pack_bf16x2(v[4], v[5]);
+    out.w = pack_bf16x2(v[6], v[7]);
+    return out;
+  }
+  static __device__ __forceinline__ uint16_t load1(const uint8_t* cache,
+                                                   const float* scales,
+                                                   int64_t phys, int kv_lora,
+                                                   int e) {
+    const uint8_t* row =
+        cache + phys * static_cast<int64_t>(latent_row_bytes(LatentFormat::kFp4, kv_lora));
+    const float S = latent_fp4_block_scale(
+        row[latent_fp4_scale_offset(kv_lora) + (e / kLatentFp4Block)], scales[phys]);
+    const uint8_t byte = row[e >> 1];
+    return latent_fp4_decode_bf16(
+        static_cast<uint8_t>((e & 1) ? (byte >> 4) : (byte & 0xFu)), S);
+  }
+};
+
 constexpr int kIdxBits = 21;  // pool ids < 2^21 (validated at launch)
 constexpr uint64_t kIdxMask = (1ull << kIdxBits) - 1;
 constexpr float kFp8Max = 448.0f;
 constexpr float kAbsmaxFloor = 1e-4f;
 constexpr int kAttnTile = 32;  // latent rows per attention tile
+constexpr int kAttnMaxDslice = 64;  // a thread's dim window (registers)
 
 // Smallest power of two >= v; exact powers map to themselves (see the
 // reference header for why this replaces exp2f(ceilf(log2f(v)))).
@@ -127,45 +225,85 @@ __device__ inline void fwht128_smem(float* x) {
 // positions, append the query's incomplete tail. Writes out_row[0,
 // max_selected) (-1 padded); returns the token count. scratch: smem int32
 // [select_k]; smem_count: smem int32 [1].
+// Ascending order of the n unique ids in scratch[0, n) by RANK: each id's
+// rank — the count of smaller ids, every thread reading the list as
+// broadcast smem loads — is a permutation, so the scatter is the sort.
+// PER ids per thread (n <= PER * blockDim); n^2 / blockDim compares per
+// thread and two barriers, against the bitonic network's 45 barrier
+// phases that were most of the select kernel's floor at short contexts.
+template <int PER>
+__device__ __forceinline__ void rank_sort_ids(int32_t* scratch, int n) {
+  const int nthreads = blockDim.x;
+  int32_t v[PER];
+  int rk[PER];
+#pragma unroll
+  for (int t = 0; t < PER; ++t) {
+    const int i = threadIdx.x + t * nthreads;
+    v[t] = i < n ? scratch[i] : 0;
+    rk[t] = 0;
+  }
+#pragma unroll 8
+  for (int j = 0; j < n; ++j) {
+    const int32_t s = scratch[j];
+#pragma unroll
+    for (int t = 0; t < PER; ++t) rk[t] += (s < v[t]);
+  }
+  __syncthreads();
+#pragma unroll
+  for (int t = 0; t < PER; ++t) {
+    const int i = threadIdx.x + t * nthreads;
+    if (i < n) scratch[rk[t]] = v[t];
+  }
+  __syncthreads();
+}
+
 __device__ inline int expand_from_best(const uint32_t* best_hi,
                                        const uint32_t* best_lo, int select_k,
                                        int64_t pos, int kpool,
                                        int max_selected, int32_t* out_row,
                                        int32_t* scratch, int* smem_count) {
   const int nthreads = blockDim.x;
-  if (threadIdx.x == 0) *smem_count = 0;
-  __syncthreads();
-  for (int i = threadIdx.x; i < select_k; i += nthreads) {
-    const bool real = best_hi[i] != 0xFFFFFFFFu || best_lo[i] != 0xFFFFFFFFu;
-    if (real) {
-      const int slot = atomicAdd(smem_count, 1);
-      scratch[slot] = int32_t(
-          (uint64_t(best_hi[i]) << 32 | best_lo[i]) & kIdxMask);
-    }
+  const int nwarp = nthreads >> 5;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  // Compaction of the real entries by warp ballot (2026-09-06: one smem
+  // atomic per entry serialized 512 deep and was a third of the
+  // expansion): per round, each warp's count and each lane's offset within
+  // the warp come from one ballot; one thread scans the round x warp
+  // counts.
+  constexpr int kRounds = 4;  // select_k <= 4 * blockDim (checked at launch)
+  __shared__ int warp_cnt[kRounds * 8];
+  __shared__ int warp_off[kRounds * 8];
+  int32_t id[kRounds];
+  int within[kRounds];
+  bool real[kRounds];
+#pragma unroll
+  for (int rd = 0; rd < kRounds; ++rd) {
+    const int i = rd * nthreads + threadIdx.x;
+    real[rd] = i < select_k &&
+               (best_hi[i] != 0xFFFFFFFFu || best_lo[i] != 0xFFFFFFFFu);
+    id[rd] = real[rd] ? int32_t((uint64_t(best_hi[i]) << 32 | best_lo[i]) & kIdxMask) : 0;
+    const uint32_t mask = __ballot_sync(0xffffffffu, real[rd]);
+    within[rd] = __popc(mask & ((1u << lane) - 1u));
+    if (lane == 0) warp_cnt[rd * nwarp + warp] = __popc(mask);
   }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    int run = 0;
+    for (int k = 0; k < kRounds * nwarp; ++k) {
+      warp_off[k] = run;
+      run += warp_cnt[k];
+    }
+    *smem_count = run;
+  }
+  __syncthreads();
+#pragma unroll
+  for (int rd = 0; rd < kRounds; ++rd)
+    if (real[rd]) scratch[warp_off[rd * nwarp + warp] + within[rd]] = id[rd];
   __syncthreads();
   const int n_sel = *smem_count;
-  for (int i = n_sel + threadIdx.x; i < select_k; i += nthreads)
-    scratch[i] = INT32_MAX;
-  __syncthreads();
-  // Sort the selected pool ids ascending (single 32-bit array; positive
-  // ids, so int32 ordering == u32 ordering).
-  for (int size = 2; size <= select_k; size <<= 1) {
-    for (int stride = size >> 1; stride > 0; stride >>= 1) {
-      for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
-        const int j = i ^ stride;
-        if (j > i) {
-          const bool asc = (i & size) == 0;
-          if (asc ? scratch[i] > scratch[j] : scratch[i] < scratch[j]) {
-            const int32_t t = scratch[i];
-            scratch[i] = scratch[j];
-            scratch[j] = t;
-          }
-        }
-      }
-      __syncthreads();
-    }
-  }
+  if (n_sel <= nthreads) rank_sort_ids<1>(scratch, n_sel);
+  else if (n_sel <= 2 * nthreads) rank_sort_ids<2>(scratch, n_sel);
+  else rank_sort_ids<4>(scratch, n_sel);
   const int64_t seq_len = pos + 1;
   const int64_t tail_start = (seq_len / kpool) * kpool;
   const int tail_cnt = int(seq_len - tail_start);
@@ -490,6 +628,17 @@ __global__ void kpool_decode_update_kernel(
   }
 }
 
+__device__ __forceinline__ int64_t latent_physical_slot(
+    const int32_t* req_ids, const int64_t* pos, const int32_t* block_tables,
+    int blocks_per_request, int block_tokens, int64_t i) {
+  const int64_t p = pos[i];
+  if (p < 0) return -1;
+  const int32_t req = req_ids[i];
+  const int32_t blk =
+      block_tables[int64_t(req) * blocks_per_request + p / block_tokens];
+  return int64_t(blk) * block_tokens + (p % block_tokens);
+}
+
 __global__ void latent_append_kernel(const uint16_t* latent_rows,
                                      const int32_t* req_ids,
                                      const int64_t* pos,
@@ -497,15 +646,124 @@ __global__ void latent_append_kernel(const uint16_t* latent_rows,
                                      int blocks_per_request, int block_tokens,
                                      uint16_t* latent_cache, int kv_lora) {
   const int64_t i = blockIdx.x;
-  const int64_t p = pos[i];
-  if (p < 0) return;
-  const int32_t req = req_ids[i];
-  const int32_t blk =
-      block_tables[int64_t(req) * blocks_per_request + p / block_tokens];
-  const int64_t phys = int64_t(blk) * block_tokens + (p % block_tokens);
+  const int64_t phys = latent_physical_slot(req_ids, pos, block_tables,
+                                            blocks_per_request, block_tokens, i);
+  if (phys < 0) return;
   const uint4* s4 = reinterpret_cast<const uint4*>(latent_rows + i * kv_lora);
   uint4* d4 = reinterpret_cast<uint4*>(latent_cache + phys * kv_lora);
   for (int j = threadIdx.x; j < kv_lora / 8; j += blockDim.x) d4[j] = s4[j];
+}
+
+// The row's absmax across the block's threads (max is exact and
+// order-free, so the reduction is deterministic by construction).
+constexpr int kLatentAppendThreads = 128;
+__device__ __forceinline__ float latent_block_absmax(float mine, float* red) {
+  red[threadIdx.x] = mine;
+  __syncthreads();
+  for (int s = kLatentAppendThreads / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s) red[threadIdx.x] = fmaxf(red[threadIdx.x], red[threadIdx.x + s]);
+    __syncthreads();
+  }
+  return red[0];
+}
+
+// fp8: thread t quantizes elements [8t, 8t+8) (kv_lora <= 1024, a
+// multiple of 8 — validate_config's pin) with the row's scale.
+__global__ void latent_append_fp8_kernel(const uint16_t* latent_rows,
+                                         const int32_t* req_ids,
+                                         const int64_t* pos,
+                                         const int32_t* block_tables,
+                                         int blocks_per_request,
+                                         int block_tokens, uint8_t* latent_cache,
+                                         float* latent_scale, int kv_lora) {
+  __shared__ float red[kLatentAppendThreads];
+  const int64_t i = blockIdx.x;
+  const int64_t phys = latent_physical_slot(req_ids, pos, block_tables,
+                                            blocks_per_request, block_tokens, i);
+  if (phys < 0) return;
+  const int e0 = threadIdx.x * 8;
+  const bool active = e0 < kv_lora;
+  float v[8];
+  float amax = 0.0f;
+  if (active) {
+    const uint4 raw = *reinterpret_cast<const uint4*>(latent_rows + i * kv_lora + e0);
+    const uint32_t* w = reinterpret_cast<const uint32_t*>(&raw);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      v[2 * j] = bf16_bits_to_float(static_cast<uint16_t>(w[j] & 0xFFFFu));
+      v[2 * j + 1] = bf16_bits_to_float(static_cast<uint16_t>(w[j] >> 16));
+      amax = fmaxf(amax, fmaxf(fabsf(v[2 * j]), fabsf(v[2 * j + 1])));
+    }
+  }
+  const LatentFp8Scale s = latent_fp8_row_scale(latent_block_absmax(amax, red));
+  if (threadIdx.x == 0) latent_scale[phys] = s.scale;
+  if (!active) return;
+  uint2 packed;
+  packed.x = 0;
+  packed.y = 0;
+#pragma unroll
+  for (int j = 0; j < 4; ++j)
+    packed.x |= static_cast<uint32_t>(latent_fp8_encode(v[j], s.inv)) << (8 * j);
+#pragma unroll
+  for (int j = 0; j < 4; ++j)
+    packed.y |= static_cast<uint32_t>(latent_fp8_encode(v[4 + j], s.inv)) << (8 * j);
+  *reinterpret_cast<uint2*>(latent_cache + phys * kv_lora + e0) = packed;
+}
+
+// fp4: thread b quantizes block b (16 elements) with its own e4m3 scale in
+// units of the row scale (kv_lora <= 2048, a multiple of 16).
+__global__ void latent_append_fp4_kernel(const uint16_t* latent_rows,
+                                         const int32_t* req_ids,
+                                         const int64_t* pos,
+                                         const int32_t* block_tables,
+                                         int blocks_per_request,
+                                         int block_tokens, uint8_t* latent_cache,
+                                         float* latent_scale, int kv_lora) {
+  __shared__ float red[kLatentAppendThreads];
+  const int64_t i = blockIdx.x;
+  const int64_t phys = latent_physical_slot(req_ids, pos, block_tables,
+                                            blocks_per_request, block_tokens, i);
+  if (phys < 0) return;
+  const int b = threadIdx.x;
+  const int e0 = b * kLatentFp4Block;
+  const bool active = e0 < kv_lora;
+  float v[kLatentFp4Block];
+  float bmax = 0.0f;
+  if (active) {
+    const uint4* src = reinterpret_cast<const uint4*>(latent_rows + i * kv_lora + e0);
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const uint4 raw = src[h];
+      const uint32_t* w = reinterpret_cast<const uint32_t*>(&raw);
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        v[8 * h + 2 * j] = bf16_bits_to_float(static_cast<uint16_t>(w[j] & 0xFFFFu));
+        v[8 * h + 2 * j + 1] = bf16_bits_to_float(static_cast<uint16_t>(w[j] >> 16));
+        bmax = fmaxf(bmax, fmaxf(fabsf(v[8 * h + 2 * j]), fabsf(v[8 * h + 2 * j + 1])));
+      }
+    }
+  }
+  const LatentFp4RowScale s = latent_fp4_row_scale(latent_block_absmax(bmax, red));
+  if (threadIdx.x == 0) latent_scale[phys] = s.scale;
+  const size_t row_bytes = latent_row_bytes(LatentFormat::kFp4, kv_lora);
+  uint8_t* row = latent_cache + phys * static_cast<int64_t>(row_bytes);
+  const size_t scale_off = latent_fp4_scale_offset(kv_lora);
+  // The row's alignment padding: written once so no byte of a row the block
+  // copies is ever uninitialized (the initcheck discipline).
+  if (threadIdx.x == 0)
+    for (size_t k = scale_off + static_cast<size_t>(kv_lora / kLatentFp4Block); k < row_bytes; ++k)
+      row[k] = 0;
+  if (!active) return;
+  const uint8_t sc = latent_fp4_block_scale_code(bmax, s.inv);
+  row[scale_off + static_cast<size_t>(b)] = sc;
+  const float inv = latent_fp4_block_inv(latent_fp4_block_scale(sc, s.scale));
+  uint32_t w0 = 0, w1 = 0;
+#pragma unroll
+  for (int j = 0; j < 8; ++j) w0 |= static_cast<uint32_t>(latent_fp4_encode(v[j], inv)) << (4 * j);
+#pragma unroll
+  for (int j = 0; j < 8; ++j) w1 |= static_cast<uint32_t>(latent_fp4_encode(v[8 + j], inv)) << (4 * j);
+  *reinterpret_cast<uint32_t*>(row + (e0 >> 1)) = w0;
+  *reinterpret_cast<uint32_t*>(row + (e0 >> 1) + 4) = w1;
 }
 
 __global__ void gather_index_pools_kernel(const int32_t* block_table,
@@ -533,9 +791,8 @@ __global__ void gather_index_pools_kernel(const int32_t* block_table,
 // q stays FP8 in shared memory (4 KB/row instead of 16 KB as fp32) — the
 // dot loop converts on access and is memory-bound regardless; the saving
 // is what lets an 8-row MTP decode batch fit the 99 KB GB10 smem optin.
-struct DecodeKeyFn {
-  static constexpr bool kWarpCooperative = true;  // warp computes one pool
-  const uint8_t* q8;   // smem [heads * 128] fp8 bits (this row)
+struct DecodeKeyFn {  // warp computes one pool (lane per head)
+  const uint8_t* q8;   // smem [16 chunks][32 heads] x 8 fp8 bytes (this row)
   const float* w;      // smem [heads] (this row)
   const uint8_t* index_k;
   const float* index_scale;
@@ -543,13 +800,27 @@ struct DecodeKeyFn {
   int pools_per_block;
   int dim;
 
-  __device__ uint64_t operator()(int64_t pool) const {
-    const int lane = threadIdx.x & 31;
+  __device__ int64_t slot_of(int64_t pool) const {
     const int32_t blk = block_table[pool / pools_per_block];
-    const int64_t slot =
-        int64_t(blk) * pools_per_block + (pool % pools_per_block);
-    const uint8_t* krow = index_k + slot * dim;
-    const float ks = index_scale[slot];
+    return int64_t(blk) * pools_per_block + (pool % pools_per_block);
+  }
+  // The pool's 128-byte index row as one coalesced warp load (4 bytes per
+  // lane) — the row goes to a per-warp smem line and every lane reads it
+  // back as the same 16 uint2 it read from global before (2026-09-06: 16
+  // serial same-address global loads per pool were the scoring's latency).
+  __device__ uint32_t load_row_word(int64_t slot) const {
+    const int lane = threadIdx.x & 31;
+    return reinterpret_cast<const uint32_t*>(index_k + slot * dim)[lane];
+  }
+  // The key of `pool` whose row sits in `krow_s` (32 words, smem) with
+  // scale `ks`. (TRIED 2026-09-06 and reverted: q and k decoded to floats
+  // in smem once per row / once per pool — 40 % fewer instructions per
+  // pool, but the float4 q reads quadrupled the smem bytes per pool and
+  // the scoring got slower at every context; the fp8 reads below are the
+  // measured optimum.)
+  __device__ uint64_t key_from_row(int64_t pool, const uint32_t* krow_s,
+                                   float ks) const {
+    const int lane = threadIdx.x & 31;
     // Contraction-proof arithmetic (__fmul_rn/__fadd_rn, no FMA fusion):
     // the host oracle mirrors this exact sequence so pool-logit parity —
     // and therefore top-k position parity — is bitwise, not statistical.
@@ -557,12 +828,15 @@ struct DecodeKeyFn {
     // the fp8 decode is vectorized (native hardware, bit-exact — see the
     // conversion helpers above).
     float partial = 0.0f;
-    const uint2* q2 = reinterpret_cast<const uint2*>(q8 + lane * 128);
-    const uint2* k2 = reinterpret_cast<const uint2*>(krow);
+    // q8 is chunk-major in smem ([16 chunks][32 heads] uint2): for a chunk
+    // the lanes read consecutive words — conflict-free (head-major put
+    // every lane on one bank, a 32-way conflict on each of the 16 loads).
+    const uint2* q2 = reinterpret_cast<const uint2*>(q8);
+    const uint2* k2 = reinterpret_cast<const uint2*>(krow_s);
 #pragma unroll 8
     for (int p = 0; p < 16; ++p) {
-      const uint2 qv = q2[p];  // 8 fp8 values of this lane's head
-      const uint2 kv = k2[p];  // 8 fp8 values of the pool row
+      const uint2 qv = q2[p * 32 + lane];  // 8 fp8 values of this lane's head
+      const uint2 kv = k2[p];              // 8 fp8 values of the pool row
       const uint16_t* qq = reinterpret_cast<const uint16_t*>(&qv);
       const uint16_t* kk = reinterpret_cast<const uint16_t*>(&kv);
 #pragma unroll
@@ -602,22 +876,21 @@ struct PrefillKeyFn {
   }
 };
 
-struct MergeKeyFn {
-  static constexpr bool kWarpCooperative = false;  // one load per key
-  const uint64_t* partials;  // [grid_blocks, rows, select_k]
-  int rows;
-  int select_k;
-  int row;
-
-  __device__ uint64_t operator()(int64_t linear) const {
-    const int64_t b = linear / select_k;
-    const int p = int(linear % select_k);
-    return partials[(b * rows + row) * select_k + p];
-  }
-};
-
-// Fixed grid, grid-striped over each row's visible pools; the last block to
-// finish merges the partials and writes the expanded token rows.
+// Decode select (rewritten 2026-09-06): every block scores its stripe of
+// each row's visible pools and publishes the composite keys to a global
+// row (keys_ws) together with a coarse histogram of the keys' top radix
+// digit; the last block to finish (a ticket on counter_ws) finds the
+// select_k-th smallest key by radix refinement over that histogram — one
+// pass over the row's keys per further digit, stopping when the boundary
+// digit's bin holds at most kSelectStopCandidates keys — gathers the keys
+// below the boundary straight into best[] (the expansion sorts ids, so
+// their order is free), sorts only the boundary bin's keys, and expands.
+// The selection is a set under a total order (the key), so it is the
+// streaming top-k's set bit for bit. What it replaces: a 2048-key bitonic
+// sort per block per tile regardless of the stripe, and a serial merge of
+// grid x select_k partials in the last block — 570-830 us at 4K-32K tokens
+// on the 16-block grid, the decode step's only context-scaled kernel.
+//
 // The select counter's reset is a KERNEL, not cudaMemsetAsync. A memset
 // node in the captured decode graph executes on the copy-engine queue, an
 // in-order queue shared by every stream in the process; a queued node's
@@ -626,9 +899,72 @@ struct MergeKeyFn {
 // held this reset behind it while that peer's collective spun waiting on
 // ours — the batched-MTP graph stall (docs/batched_mtp_graph_stall.md).
 // Kernel nodes never share that queue; the graph engine rejects any
-// non-kernel node at capture.
+// non-kernel node at capture. The histogram rows reset the same way: the
+// last block zeroes them after consuming them.
 __global__ void select_counter_reset_kernel(int32_t* counter) {
-  if (threadIdx.x == 0) *counter = 0;
+  if (threadIdx.x < 2) counter[threadIdx.x] = 0;
+}
+
+constexpr int kSelectRadixBits = 10;  // 1024 bins: 4 KB of smem, two blocks per SM (2026-09-06)
+constexpr int kSelectHistBins = 1 << kSelectRadixBits;
+// The key's live bits: the 32-bit inverted sortable logit above kIdxBits
+// of pool index (DecodeKeyFn); the first radix digit sits just below.
+constexpr int kSelectKeyBits = 32 + kIdxBits;
+constexpr int kSelectTopShift = kSelectKeyBits - kSelectRadixBits;
+// The boundary bin is sorted once it is this small (a 256-key bitonic sort
+// is ~2 us; a further refinement pass costs a read of the row's keys).
+constexpr int kSelectStopCandidates = 256;
+
+// Phase stamps of the last block (globaltimer ns; thread 0; six stores per
+// call): [0] entry, [1] phase 1 done, [2] phase 2 start, then accumulated
+// over rows: [3] selection (histogram + refinement + gather + rank), [4]
+// expansion. dsa_select_debug_phases reads them — the bench's breakdown.
+__device__ unsigned long long g_select_phase[8];
+__device__ __forceinline__ unsigned long long select_now() {
+  unsigned long long t;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+  return t;
+}
+
+__device__ __forceinline__ int select_digit(uint64_t key, int shift, int bits) {
+  return int((key >> shift) & ((1u << bits) - 1u));
+}
+
+// The bin of the block-shared histogram (kSelectHistBins, smem) holding
+// the `remaining`-th smallest key, and the count below it: a chunk sum per
+// thread, a block scan, one thread walks its chunk. Uniform on return.
+__device__ inline void select_find_bin(const int32_t* hist, int remaining,
+                                       int* s_bin, int* s_below) {
+  __shared__ int warp_tot[8];
+  const int per = kSelectHistBins / int(blockDim.x);
+  const int t0 = int(threadIdx.x) * per;
+  int sum = 0;
+  for (int i = 0; i < per; ++i) sum += hist[t0 + i];
+  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+  int incl = sum;
+  for (int o = 1; o < 32; o <<= 1) {
+    const int v = __shfl_up_sync(0xffffffffu, incl, o);
+    if (lane >= o) incl += v;
+  }
+  if (lane == 31) warp_tot[warp] = incl;
+  if (threadIdx.x == 0) *s_bin = -1;
+  __syncthreads();
+  int wbase = 0;
+  for (int wi = 0; wi < warp; ++wi) wbase += warp_tot[wi];
+  const int excl = wbase + incl - sum;
+  if (excl < remaining && remaining <= excl + sum) {
+    int cum = excl;
+    for (int i = 0; i < per; ++i) {
+      const int h = hist[t0 + i];
+      if (cum < remaining && remaining <= cum + h) {
+        *s_bin = t0 + i;
+        *s_below = cum;
+        break;
+      }
+      cum += h;
+    }
+  }
+  __syncthreads();
 }
 
 __global__ void select_decode_kernel(
@@ -636,116 +972,252 @@ __global__ void select_decode_kernel(
     const int64_t* pos, int rows, const int32_t* block_tables,
     int blocks_per_request, const uint8_t* index_k, const float* index_scale,
     int pools_per_block, int heads, int select_k, int kpool, int max_selected,
-    int32_t* topk_out, int32_t* out_counts, uint64_t* partial_ws,
-    int32_t* counter_ws) {
+    int32_t* topk_out, int32_t* out_counts, uint64_t* keys_ws,
+    int64_t keys_stride, int32_t* hist_ws, int32_t* counter_ws) {
   extern __shared__ uint64_t smem_u64[];
-  // Layout (split 32-bit key arrays; see the bitonic networks above):
-  // [best_hi/best_lo: rows*select_k each][tile_hi/tile_lo: kSelectTile each]
-  // [q8: rows*heads*128 bytes][w: rows*heads][scratch: select_k + 1 (i32)].
-  uint32_t* best_hi = reinterpret_cast<uint32_t*>(smem_u64);
-  uint32_t* best_lo = best_hi + int64_t(rows) * select_k;
-  uint32_t* tile_hi = best_lo + int64_t(rows) * select_k;
-  uint32_t* tile_lo = tile_hi + kSelectTile;
-  uint8_t* q8 = reinterpret_cast<uint8_t*>(tile_lo + kSelectTile);
-  float* w = reinterpret_cast<float*>(q8 + int64_t(rows) * heads * 128);
-  int32_t* scratch = reinterpret_cast<int32_t*>(w + int64_t(rows) * heads);
+  // Layout: [q8: rows x [16 chunks][32 heads] x 8 bytes][k rows: warps x 4 x
+  //         32 u32][w: rows*heads f32][hist: kSelectHistBins i32]
+  //         [best_hi/best_lo: select_k each]
+  //         [cand_hi/cand_lo: kSelectStopCandidates each]
+  //         [scratch: select_k + 1 i32].
+  constexpr int kPoolsPerIter = 4;
+  uint8_t* q8 = reinterpret_cast<uint8_t*>(smem_u64);
+  uint32_t* krow_s = reinterpret_cast<uint32_t*>(q8 + int64_t(rows) * heads * 128);
+  float* w = reinterpret_cast<float*>(krow_s + (256 / 32) * kPoolsPerIter * 32);
+  int32_t* hist = reinterpret_cast<int32_t*>(w + int64_t(rows) * heads);
+  uint32_t* best_hi = reinterpret_cast<uint32_t*>(hist + kSelectHistBins);
+  uint32_t* best_lo = best_hi + select_k;
+  uint32_t* cand_hi = best_lo + select_k;
+  uint32_t* cand_lo = cand_hi + kSelectStopCandidates;
+  int32_t* scratch = reinterpret_cast<int32_t*>(cand_lo + kSelectStopCandidates);
+  __shared__ int s_bin, s_below, s_n_def, s_n_cand;
 
-  for (int64_t i = threadIdx.x;
-       i < int64_t(rows) * heads * 128; i += blockDim.x)
-    q8[i] = q_fp8[i];
+  const unsigned long long t_entry = select_now();
+  // q to smem chunk-major per row ([16 chunks][32 heads] of 8 bytes): the
+  // dot's per-lane reads are then conflict-free (see key_from_row).
+  for (int64_t c = threadIdx.x; c < int64_t(rows) * 32 * 16; c += blockDim.x) {
+    const int r = int(c / 512), rem = int(c % 512);
+    const int h = rem / 16, p = rem % 16;
+    const uint2 v = *reinterpret_cast<const uint2*>(
+        q_fp8 + (int64_t(r) * heads + h) * 128 + p * 8);
+    reinterpret_cast<uint2*>(q8)[int64_t(r) * 512 + p * 32 + h] = v;
+  }
   for (int64_t i = threadIdx.x; i < int64_t(rows) * heads; i += blockDim.x)
     w[i] = w_folded[i];
   __syncthreads();
 
+  // Phase 1: score the stripe, publish keys and the first radix digit's
+  // histogram. Short contexts (visible <= select_k pools) select EVERY
+  // pool and need no keys (the last block writes them directly).
+  const int warp = threadIdx.x >> 5;
+  const int nwarp = int(blockDim.x) >> 5;
   for (int r = 0; r < rows; ++r) {
     const int64_t visible = (pos[r] + 1) / kpool;
-    // Short contexts (visible <= select_k pools) select EVERY pool: the
-    // top-k of at most k candidates is all of them, and the expansion
-    // sorts ids ascending anyway — the streaming selection and the merge
-    // are no-ops here, and at 2K-token contexts they were the whole 263us
-    // of this kernel (the T=1 profile). The merge below rebuilds the same
-    // best[] directly; the result is the general path's, bit for bit.
-    // (Sentinels keep the published partials initialized — initcheck
-    // discipline; the merge never reads them for these rows.)
-    if (visible <= select_k) {
-      for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
-        best_hi[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
-        best_lo[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
-      }
-      continue;
-    }
-    const int64_t stripe =
-        (visible + gridDim.x - 1) / gridDim.x;  // >= 0; 0 when visible == 0
+    if (visible <= select_k) continue;
+    const int64_t stripe = (visible + gridDim.x - 1) / gridDim.x;
     const int64_t lo = min(visible, int64_t(blockIdx.x) * stripe);
     const int64_t hi = min(visible, lo + stripe);
-    for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
-      best_hi[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
-      best_lo[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
-    }
+    for (int i = threadIdx.x; i < kSelectHistBins; i += blockDim.x) hist[i] = 0;
     __syncthreads();
     DecodeKeyFn fn{q8 + int64_t(r) * heads * 128, w + int64_t(r) * heads,
                    index_k, index_scale,
                    block_tables + int64_t(req_ids[r]) * blocks_per_request,
                    pools_per_block, 128};
-    select_topk_stream(fn, lo, hi, best_hi + int64_t(r) * select_k,
-                       best_lo + int64_t(r) * select_k, tile_hi, tile_lo,
-                       select_k);
+    uint64_t* krow = keys_ws + int64_t(r) * keys_stride;
+    uint32_t* rows_s = krow_s + warp * (kPoolsPerIter * 32);
+    const int lane = threadIdx.x & 31;
+    // Each warp owns a contiguous sub-stripe (consecutive pools share a
+    // block-table entry), four pools per iteration with every load — the
+    // table entry, the row, the scale — in flight before the first dot
+    // (a 128-deep dependent chain per pool; the latency, not the dot, was
+    // the scoring's cost).
+    const int64_t sub = (hi - lo + nwarp - 1) / nwarp;
+    const int64_t wlo = min(hi, lo + int64_t(warp) * sub);
+    const int64_t whi = min(hi, wlo + sub);
+    for (int64_t p = wlo; p < whi; p += kPoolsPerIter) {
+      int64_t slot[kPoolsPerIter];
+      uint32_t word[kPoolsPerIter];
+      float ks[kPoolsPerIter];
+#pragma unroll
+      for (int u = 0; u < kPoolsPerIter; ++u)
+        slot[u] = p + u < whi ? fn.slot_of(p + u) : -1;
+#pragma unroll
+      for (int u = 0; u < kPoolsPerIter; ++u) {
+        word[u] = slot[u] >= 0 ? fn.load_row_word(slot[u]) : 0u;
+        ks[u] = slot[u] >= 0 ? index_scale[slot[u]] : 0.f;
+      }
+#pragma unroll
+      for (int u = 0; u < kPoolsPerIter; ++u) rows_s[u * 32 + lane] = word[u];
+      __syncwarp();
+#pragma unroll
+      for (int u = 0; u < kPoolsPerIter; ++u) {
+        if (slot[u] < 0) break;  // uniform across the warp
+        const uint64_t key = fn.key_from_row(p + u, rows_s + u * 32, ks[u]);
+        if (lane == 0) {
+          krow[p + u] = key;
+          atomicAdd(&hist[select_digit(key, kSelectTopShift, kSelectRadixBits)], 1);
+        }
+      }
+      __syncwarp();  // the rows are overwritten next iteration
+    }
+    __syncthreads();
+    int32_t* ghist = hist_ws + int64_t(r) * kSelectHistBins;
+    for (int i = threadIdx.x; i < kSelectHistBins; i += blockDim.x)
+      if (hist[i] != 0) atomicAdd(&ghist[i], hist[i]);
+    __syncthreads();
   }
-  __syncthreads();
-
-  // Publish this block's partials, then the last block merges.
-  for (int64_t i = threadIdx.x; i < int64_t(rows) * select_k; i += blockDim.x)
-    partial_ws[int64_t(blockIdx.x) * rows * select_k + i] =
-        uint64_t(best_hi[i]) << 32 | best_lo[i];
+  const unsigned long long t_p1 = select_now();
+  // Phase 2 is row-parallel: the last `rows` blocks to finish scoring each
+  // take one row (ticket grid - rows + r), waiting until every block has
+  // published (counter == grid); the others exit, so the waiters can never
+  // starve a block that has not run yet. counter_ws[1] counts the rows
+  // done; the last resets both counters for the next replay.
   __threadfence();
-  __shared__ bool is_last;
   if (threadIdx.x == 0) {
     const int ticket = atomicAdd(counter_ws, 1);
-    is_last = (ticket == int(gridDim.x) - 1);
+    s_bin = ticket - (int(gridDim.x) - rows);  // my row, or negative
   }
   __syncthreads();
-  if (!is_last) return;
+  const int my_row = s_bin;
+  if (my_row < 0) return;
+  if (threadIdx.x == 0) {
+    while (*reinterpret_cast<volatile int32_t*>(counter_ws) < int32_t(gridDim.x)) {
+    }
+  }
+  __syncthreads();
+  __threadfence();
+  unsigned long long t_sel = 0, t_exp = 0;
+  if (threadIdx.x == 0 && my_row == 0) {
+    g_select_phase[0] = t_entry;
+    g_select_phase[1] = t_p1;
+    g_select_phase[2] = select_now();
+  }
 
-  for (int r = 0; r < rows; ++r) {
+  // Phase 2 (this block's row): its select_k smallest keys.
+  for (int r = my_row; r <= my_row; ++r) {
     const int64_t visible = (pos[r] + 1) / kpool;
+    const unsigned long long t_row = select_now();
     if (visible <= select_k) {
-      // Every visible pool is selected (see above): keys carry only the
-      // pool id in their low kIdxBits — the expansion reads nothing else.
+      // Every visible pool is selected: keys carry only the pool id in
+      // their low kIdxBits — the expansion reads nothing else.
       for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
         const bool real = i < visible;
-        best_hi[int64_t(r) * select_k + i] = real ? 0u : 0xFFFFFFFFu;
-        best_lo[int64_t(r) * select_k + i] =
-            real ? uint32_t(i) : 0xFFFFFFFFu;
+        best_hi[i] = real ? 0u : 0xFFFFFFFFu;
+        best_lo[i] = real ? uint32_t(i) : 0xFFFFFFFFu;
       }
       __syncthreads();
     } else {
-      for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
-        best_hi[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
-        best_lo[int64_t(r) * select_k + i] = 0xFFFFFFFFu;
+      const uint64_t* krow = keys_ws + int64_t(r) * keys_stride;
+      int32_t* ghist = hist_ws + int64_t(r) * kSelectHistBins;
+      // The first digit's histogram, built by every block; consumed and
+      // reset for the next call.
+      for (int i = threadIdx.x; i < kSelectHistBins; i += blockDim.x) {
+        hist[i] = ghist[i];
+        ghist[i] = 0;
       }
       __syncthreads();
-      // Only blocks whose stripe was non-empty published real keys; the
-      // rest hold sentinels the merge can skip (block b's stripe starts at
-      // b*stripe, so the non-empty ones are the first ceil(visible/stripe)).
-      const int64_t stripe = (visible + gridDim.x - 1) / gridDim.x;
-      const int64_t live_blocks =
-          min(int64_t(gridDim.x), (visible + stripe - 1) / stripe);
-      MergeKeyFn fn{partial_ws, rows, select_k, r};
-      select_topk_stream(fn, 0, live_blocks * select_k,
-                         best_hi + int64_t(r) * select_k,
-                         best_lo + int64_t(r) * select_k, tile_hi, tile_lo,
-                         select_k);
+      // Refinement: prefix = the boundary key's digits so far (the keys
+      // whose bits above `shift` equal it form the boundary bin); lower =
+      // keys below that bin (all selected); remaining = how many of the
+      // bin's `cnt` keys complete the select_k. Uniform across the block.
+      uint64_t prefix = 0;
+      int shift = kSelectTopShift, bits = kSelectRadixBits;
+      int lower = 0, remaining = select_k, cnt = 0;
+      for (;;) {
+        select_find_bin(hist, remaining, &s_bin, &s_below);
+        const int bin = s_bin < 0 ? kSelectHistBins - 1 : s_bin;
+        const int below = s_bin < 0 ? 0 : s_below;
+        cnt = hist[bin];
+        lower += below;
+        remaining -= below;
+        prefix = (prefix << bits) | uint64_t(bin);
+        if (cnt <= kSelectStopCandidates || shift == 0) break;
+        const int pshift = shift;
+        shift = shift >= kSelectRadixBits ? shift - kSelectRadixBits : 0;
+        bits = pshift - shift;
+        __syncthreads();
+        for (int i = threadIdx.x; i < kSelectHistBins; i += blockDim.x) hist[i] = 0;
+        __syncthreads();
+        for (int64_t p = threadIdx.x; p < visible; p += blockDim.x) {
+          const uint64_t key = krow[p];
+          if ((key >> pshift) == prefix)
+            atomicAdd(&hist[select_digit(key, shift, bits)], 1);
+        }
+        __syncthreads();
+      }
+      // Gather: keys below the boundary bin straight into best[] (their
+      // order is free — the expansion sorts ids); the bin's keys into the
+      // candidate array, sorted so the `remaining` smallest complete best.
+      if (threadIdx.x == 0) {
+        s_n_def = 0;
+        s_n_cand = 0;
+      }
+      for (int i = threadIdx.x; i < kSelectStopCandidates; i += blockDim.x) {
+        cand_hi[i] = 0xFFFFFFFFu;
+        cand_lo[i] = 0xFFFFFFFFu;
+      }
+      __syncthreads();
+      for (int64_t p = threadIdx.x; p < visible; p += blockDim.x) {
+        const uint64_t key = krow[p];
+        const uint64_t top = key >> shift;
+        if (top < prefix) {
+          const int s = atomicAdd(&s_n_def, 1);
+          if (s < select_k) {
+            best_hi[s] = uint32_t(key >> 32);
+            best_lo[s] = uint32_t(key);
+          }
+        } else if (top == prefix) {
+          const int s = atomicAdd(&s_n_cand, 1);
+          if (s < kSelectStopCandidates) {
+            cand_hi[s] = uint32_t(key >> 32);
+            cand_lo[s] = uint32_t(key);
+          }
+        }
+      }
+      __syncthreads();
+      // The bin's `remaining` smallest keys by rank (unique keys: the
+      // rank is a permutation, so the keys ranked below `remaining` land
+      // at best[lower + rank]) — cnt^2 / blockDim compares per thread, no
+      // sorting network.
+      {
+        const int n = cnt < kSelectStopCandidates ? cnt : kSelectStopCandidates;
+        const int i = threadIdx.x;
+        const uint32_t vh = i < n ? cand_hi[i] : 0xFFFFFFFFu;
+        const uint32_t vl = i < n ? cand_lo[i] : 0xFFFFFFFFu;
+        int rank = 0;
+#pragma unroll 8
+        for (int j = 0; j < n; ++j) rank += key_less(cand_hi[j], cand_lo[j], vh, vl);
+        if (i < n && rank < remaining) {
+          best_hi[lower + rank] = vh;
+          best_lo[lower + rank] = vl;
+        }
+      }
       __syncthreads();
     }
+    const unsigned long long t_mid = select_now();
     int* smem_count = reinterpret_cast<int*>(scratch + select_k);
-    const int cnt = expand_from_best(
-        best_hi + int64_t(r) * select_k, best_lo + int64_t(r) * select_k,
-        select_k, pos[r], kpool, max_selected,
+    const int out_cnt = expand_from_best(
+        best_hi, best_lo, select_k, pos[r], kpool, max_selected,
         topk_out + int64_t(r) * max_selected, scratch, smem_count);
-    if (threadIdx.x == 0) out_counts[r] = cnt;
+    if (threadIdx.x == 0) out_counts[r] = out_cnt;
     __syncthreads();
+    t_sel += t_mid - t_row;
+    t_exp += select_now() - t_mid;
   }
-  if (threadIdx.x == 0) *counter_ws = 0;  // self-reset for graph replay
+  if (threadIdx.x == 0) {
+    if (my_row == 0) {
+      g_select_phase[3] = t_sel;
+      g_select_phase[4] = t_exp;
+      g_select_phase[5] = select_now();
+    }
+    __threadfence();
+    const int done = atomicAdd(counter_ws + 1, 1);
+    if (done == rows - 1) {  // the last row finished: reset for the replay
+      counter_ws[1] = 0;
+      __threadfence();
+      counter_ws[0] = 0;
+    }
+  }
 }
 
 __global__ void select_prefill_kernel(const float* dot, int64_t dot_stride,
@@ -862,12 +1334,14 @@ __global__ __launch_bounds__(kAbsorbThreads) void absorb_q_kernel(
 // A group's logical dims [g*dslice, g*dslice+dslice) live at padded offset
 // [g*gstride, g*gstride+dslice); the pad words between groups are never
 // read as data. All loads/stores/publish use this one mapping.
+template <LatentFormat F>
 __global__ void attn_partial_kernel(
-    const uint16_t* q_tilde, const uint16_t* latent_cache,
-    const int32_t* req_ids, const int32_t* topk, int topk_stride,
-    const int32_t* counts, int n_split, int local_heads, int kv_lora,
-    int block_tokens, const int32_t* block_tables, int blocks_per_request,
-    float scale, float* m_ws, float* l_ws, float* c_ws) {
+    const uint16_t* q_tilde, const uint8_t* latent_cache,
+    const float* latent_scale, const int32_t* req_ids, const int32_t* topk,
+    int topk_stride, const int32_t* counts, int n_split, int local_heads,
+    int kv_lora, int block_tokens, const int32_t* block_tables,
+    int blocks_per_request, float scale, float* m_ws, float* l_ws,
+    float* c_ws) {
   const int64_t r = blockIdx.x;
   const int s = blockIdx.y;
   const int hpb = local_heads / gridDim.z;  // heads per block
@@ -903,47 +1377,51 @@ __global__ void attn_partial_kernel(
     return;
   }
 
+  // The thread's q window and its c accumulator live in REGISTERS
+  // (2026-09-06): the head's c row in smem (37 KB) and the q rows (19 KB)
+  // put the block at 95 KB — one block per SM, the 64-block decode grid
+  // in two waves at ~180 us per call. With both in registers the block
+  // is ~40 KB, two per SM, one wave. Per-thread arithmetic and its order
+  // are unchanged (each thread always owned exactly this window), so the
+  // partials are bitwise the smem form's. The window is at most
+  // kAttnMaxDslice dims (the launcher sizes the head groups so).
   extern __shared__ uint16_t sm16[];
-  uint16_t* qt = sm16;  // [hpb * row_stride] padded
-  uint16_t* lat = qt + hpb * row_stride;  // [kAttnTile * row_stride] padded
-  float* c = reinterpret_cast<float*>(lat + kAttnTile * row_stride);
-  float* scores = c + hpb * row_stride;  // [hpb * (kAttnTile + 1)]
+  uint16_t* lat = sm16;  // [kAttnTile * row_stride] padded
+  float* scores = reinterpret_cast<float*>(lat + kAttnTile * row_stride);
   float* l = scores + hpb * (kAttnTile + 1);  // [hpb], single writer
   const int scores_stride = kAttnTile + 1;
   const bool vec = (dslice % 8) == 0;  // vector paths need 8-wide groups
+  const int ds8 = dslice / 8;
 
   // The running softmax max is per-lane register state: the group's
   // butterfly reduction leaves identical values in every lane, so no
   // shared m exists to order.
   float m_reg = -INFINITY;
-
-  // Load q_tilde: logical dim gg*dslice+cc -> padded gg*gstride+cc.
-  if (vec) {
-    const int ds8 = dslice / 8;
-    for (int idx = threadIdx.x; idx < hpb * groups * ds8; idx += blockDim.x) {
-      const int hh = idx / (groups * ds8);
-      const int gidx = (idx / ds8) % groups;
-      const int c8 = idx % ds8;
-      *reinterpret_cast<uint4*>(qt + hh * row_stride + gidx * gstride +
-                                c8 * 8) =
-          *reinterpret_cast<const uint4*>(
-              &q_tilde[(r * local_heads + h0 + hh) * kv_lora +
-                       gidx * dslice + c8 * 8]);
-    }
-  } else {
-    for (int idx = threadIdx.x; idx < hpb * groups * dslice;
-         idx += blockDim.x) {
-      const int hh = idx / (groups * dslice);
-      const int gidx = (idx / dslice) % groups;
-      const int cc = idx % dslice;
-      qt[hh * row_stride + gidx * gstride + cc] =
-          q_tilde[(r * local_heads + h0 + hh) * kv_lora + gidx * dslice + cc];
+  float creg[kAttnMaxDslice];
+  uint4 qreg[kAttnMaxDslice / 8];
+#pragma unroll
+  for (int i = 0; i < kAttnMaxDslice; ++i) creg[i] = 0.0f;
+  {
+    const uint16_t* qrow = q_tilde + (r * local_heads + h) * kv_lora + g * dslice;
+    if (vec) {
+#pragma unroll
+      for (int u = 0; u < kAttnMaxDslice / 8; ++u)
+        qreg[u] = u < ds8 ? *reinterpret_cast<const uint4*>(qrow + u * 8)
+                          : make_uint4(0u, 0u, 0u, 0u);
+    } else {
+#pragma unroll
+      for (int u = 0; u < kAttnMaxDslice / 8; ++u) {
+        uint32_t wds[4] = {0u, 0u, 0u, 0u};
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+          if (u * 8 + j < dslice)
+            wds[j / 2] |= uint32_t(qrow[u * 8 + j]) << (16 * (j & 1));
+        qreg[u] = make_uint4(wds[0], wds[1], wds[2], wds[3]);
+      }
     }
   }
+  const uint16_t* q16 = reinterpret_cast<const uint16_t*>(qreg);
   for (int i = threadIdx.x; i < hpb; i += blockDim.x) l[i] = 0.0f;
-  for (int64_t i = threadIdx.x; i < int64_t(hpb) * row_stride;
-       i += blockDim.x)
-    c[i] = 0.0f;
   __syncthreads();
 
   const int32_t req = req_ids[r];
@@ -952,10 +1430,12 @@ __global__ void attn_partial_kernel(
 
   for (int t0 = t_begin; t0 < t_end; t0 += kAttnTile) {
     const int n = min(kAttnTile, t_end - t0);
-    // Latent tile gather with the same padded mapping.
+    // Latent tile gather with the same padded mapping. Unrolled so the
+    // token -> block-table -> row chains of several vectors overlap.
     if (vec) {
-      const int ds8 = dslice / 8;
-      for (int idx = threadIdx.x; idx < n * groups * ds8; idx += blockDim.x) {
+      const int total = n * groups * ds8;
+#pragma unroll 4
+      for (int idx = threadIdx.x; idx < total; idx += blockDim.x) {
         const int tt = idx / (groups * ds8);
         const int gidx = (idx / ds8) % groups;
         const int c8 = idx % ds8;
@@ -965,8 +1445,8 @@ __global__ void attn_partial_kernel(
             int64_t(blk) * block_tokens + (tok % block_tokens);
         *reinterpret_cast<uint4*>(&lat[int64_t(tt) * row_stride +
                                        gidx * gstride + c8 * 8]) =
-            *reinterpret_cast<const uint4*>(
-                latent_cache + phys * kv_lora + gidx * dslice + c8 * 8);
+            LatentTile<F>::load8(latent_cache, latent_scale, phys, kv_lora,
+                                 gidx * dslice + c8 * 8);
       }
     } else {
       for (int i = threadIdx.x; i < n * groups * dslice; i += blockDim.x) {
@@ -977,8 +1457,8 @@ __global__ void attn_partial_kernel(
         const int32_t blk = bt[tok / block_tokens];
         const int64_t phys =
             int64_t(blk) * block_tokens + (tok % block_tokens);
-        lat[tt * row_stride + gidx * gstride + cc] =
-            latent_cache[phys * kv_lora + gidx * dslice + cc];
+        lat[tt * row_stride + gidx * gstride + cc] = LatentTile<F>::load1(
+            latent_cache, latent_scale, phys, kv_lora, gidx * dslice + cc);
       }
     }
     __syncthreads();
@@ -989,17 +1469,17 @@ __global__ void attn_partial_kernel(
     for (int tt = 0; tt < n; ++tt) {
       float partial = 0.0f;
       if (vec) {
-        const uint4* q4 =
-            reinterpret_cast<const uint4*>(qt + hl * row_stride + d0);
         const uint4* l4 =
             reinterpret_cast<const uint4*>(lat + tt * row_stride + d0);
-#pragma unroll 2
-        for (int u = 0; u < dslice / 8; ++u)
-          partial = dot8_bf16(q4[u], l4[u], partial);
+#pragma unroll
+        for (int u = 0; u < kAttnMaxDslice / 8; ++u)
+          if (u < ds8) partial = dot8_bf16(qreg[u], l4[u], partial);
       } else {
-        for (int dd = 0; dd < dslice; ++dd)
-          partial += bf16_bits_to_float(qt[hl * row_stride + d0 + dd]) *
-                     bf16_bits_to_float(lat[tt * row_stride + d0 + dd]);
+#pragma unroll
+        for (int dd = 0; dd < kAttnMaxDslice; ++dd)
+          if (dd < dslice)
+            partial += bf16_bits_to_float(q16[dd]) *
+                       bf16_bits_to_float(lat[tt * row_stride + d0 + dd]);
       }
 #pragma unroll
       for (int off = groups / 2; off > 0; off >>= 1)
@@ -1013,8 +1493,9 @@ __global__ void attn_partial_kernel(
     // Online softmax update; m in registers, l under its single writer.
     const float m_new = fmaxf(m_reg, tile_max);
     const float rescale = expf(m_reg - m_new);
-    for (int dd = 0; dd < dslice; ++dd)
-      c[hl * row_stride + d0 + dd] *= rescale;
+#pragma unroll
+    for (int dd = 0; dd < kAttnMaxDslice; ++dd)
+      if (dd < dslice) creg[dd] *= rescale;
     if (g == 0) {
       float ladd = 0.0f;
       for (int tt = 0; tt < n; ++tt)
@@ -1029,54 +1510,58 @@ __global__ void attn_partial_kernel(
       if (vec) {
         const uint4* l4 =
             reinterpret_cast<const uint4*>(lat + tt * row_stride + d0);
-        float* crow = c + hl * row_stride + d0;
-#pragma unroll 2
-        for (int u = 0; u < dslice / 8; ++u) {
+#pragma unroll
+        for (int u = 0; u < kAttnMaxDslice / 8; ++u) {
+          if (u >= ds8) break;  // uniform across the group
           const uint4 lv = l4[u];
           const uint32_t* l32 = reinterpret_cast<const uint32_t*>(&lv);
           const float2 w0 = bf16x2_to_float2(l32[0]);  // elems 8u+0,1
           const float2 w1 = bf16x2_to_float2(l32[1]);  // 8u+2,3
           const float2 w2 = bf16x2_to_float2(l32[2]);  // 8u+4,5
           const float2 w3 = bf16x2_to_float2(l32[3]);  // 8u+6,7
-          float4 c4 = *reinterpret_cast<const float4*>(crow + u * 8);
-          c4.x += p * w0.x;
-          c4.y += p * w0.y;
-          c4.z += p * w1.x;
-          c4.w += p * w1.y;
-          float4 c4b = *reinterpret_cast<const float4*>(crow + u * 8 + 4);
-          c4b.x += p * w2.x;
-          c4b.y += p * w2.y;
-          c4b.z += p * w3.x;
-          c4b.w += p * w3.y;
-          *reinterpret_cast<float4*>(crow + u * 8) = c4;
-          *reinterpret_cast<float4*>(crow + u * 8 + 4) = c4b;
+          creg[u * 8 + 0] += p * w0.x;
+          creg[u * 8 + 1] += p * w0.y;
+          creg[u * 8 + 2] += p * w1.x;
+          creg[u * 8 + 3] += p * w1.y;
+          creg[u * 8 + 4] += p * w2.x;
+          creg[u * 8 + 5] += p * w2.y;
+          creg[u * 8 + 6] += p * w3.x;
+          creg[u * 8 + 7] += p * w3.y;
         }
       } else {
-        for (int dd = 0; dd < dslice; ++dd)
-          c[hl * row_stride + d0 + dd] +=
-              p * bf16_bits_to_float(lat[tt * row_stride + d0 + dd]);
+#pragma unroll
+        for (int dd = 0; dd < kAttnMaxDslice; ++dd)
+          if (dd < dslice)
+            creg[dd] += p * bf16_bits_to_float(lat[tt * row_stride + d0 + dd]);
       }
     }
     m_reg = m_new;
     __syncthreads();
   }
 
-  // Publish partials: m/l by the group-0 lane, c gathered window by window
-  // back to logical column order.
+  // Publish partials: m/l by the group-0 lane, c by each thread for its
+  // own window (the same values the smem form published, by the lanes
+  // that computed them).
   const int64_t base_m = (r * n_split + s) * local_heads + h;
   if (g == 0) {
     m_ws[base_m] = m_reg;
     l_ws[base_m] = l[hl];
   }
-  // Each head's row is published by its OWN `groups` lanes (strided by
-  // groups — the head has only `groups` threads, so a blockDim.x stride
-  // would copy 8x4=32 of the row's 512 columns and leave the rest stale).
-  float* crow_ws =
-      c_ws + (r * n_split + s) * local_heads * kv_lora + int64_t(h) * kv_lora;
-  for (int idx = g; idx < groups * dslice; idx += groups) {
-    const int gg = idx / dslice;
-    const int cc = idx % dslice;
-    crow_ws[gg * dslice + cc] = c[hl * row_stride + gg * gstride + cc];
+  float* crow_ws = c_ws + (r * n_split + s) * local_heads * kv_lora +
+                   int64_t(h) * kv_lora + g * dslice;
+  if (vec) {
+#pragma unroll
+    for (int u = 0; u < kAttnMaxDslice / 8; ++u) {
+      if (u >= ds8) break;
+      *reinterpret_cast<float4*>(crow_ws + u * 8) =
+          make_float4(creg[u * 8], creg[u * 8 + 1], creg[u * 8 + 2], creg[u * 8 + 3]);
+      *reinterpret_cast<float4*>(crow_ws + u * 8 + 4) =
+          make_float4(creg[u * 8 + 4], creg[u * 8 + 5], creg[u * 8 + 6], creg[u * 8 + 7]);
+    }
+  } else {
+#pragma unroll
+    for (int dd = 0; dd < kAttnMaxDslice; ++dd)
+      if (dd < dslice) crow_ws[dd] = creg[dd];
   }
 }
 
@@ -1141,9 +1626,10 @@ __device__ __forceinline__ void mma_bf16_16816(float (&c)[4], uint32_t a0,
 // into its own 16-token latent tile; the two slabs' loops run to the longer
 // one's tile count. No union, no membership masks: the slab-is-a-row
 // property makes the per-row selection the block's natural structure.
-template <int KV, bool kListed>
+template <int KV, bool kListed, LatentFormat F>
 __global__ __launch_bounds__(dense::kThreads, 2) void attn_flash_kernel(
-    const uint16_t* __restrict__ q_tilde, const uint16_t* __restrict__ latent,
+    const uint16_t* __restrict__ q_tilde, const uint8_t* __restrict__ latent,
+    const float* __restrict__ latent_scale,
     const int32_t* __restrict__ req_ids, const int64_t* __restrict__ pos,
     const int32_t* __restrict__ topk, int topk_stride,
     const int32_t* __restrict__ counts, int rows, int n_split, int local_heads,
@@ -1192,6 +1678,9 @@ __global__ __launch_bounds__(dense::kThreads, 2) void attn_flash_kernel(
     t_begin = s * chunk;
     t_end = min(cnt, t_begin + chunk);
     list = topk + int64_t(qrow) * topk_stride;
+    // The slab's own request's block table (2026-09-06, the decode use:
+    // a block's two slabs may be rows of different requests).
+    bt = block_tables + int64_t(req_ids[qrow]) * blocks_per_request;
   } else {
     const int qrow_last = min(total_m, m0 + M) > m0
                               ? (min(total_m, m0 + M) - 1) / local_heads
@@ -1245,7 +1734,7 @@ __global__ __launch_bounds__(dense::kThreads, 2) void attn_flash_kernel(
           const int64_t tok = list[t0 + tt];
           const int32_t blk = bt[tok / block_tokens];
           const int64_t phys = int64_t(blk) * block_tokens + (tok % block_tokens);
-          val = *reinterpret_cast<const uint4*>(latent + phys * KV + c8 * 8);
+          val = LatentTile<F>::load8(latent, latent_scale, phys, KV, c8 * 8);
         }
         *reinterpret_cast<uint4*>(sL + tt * SQ + c8 * 8) = val;
       }
@@ -1257,7 +1746,7 @@ __global__ __launch_bounds__(dense::kThreads, 2) void attn_flash_kernel(
           const int64_t tok = t0 + tt;
           const int32_t blk = bt[tok / block_tokens];
           const int64_t phys = int64_t(blk) * block_tokens + (tok % block_tokens);
-          val = *reinterpret_cast<const uint4*>(latent + phys * KV + c8 * 8);
+          val = LatentTile<F>::load8(latent, latent_scale, phys, KV, c8 * 8);
         }
         *reinterpret_cast<uint4*>(sL + tt * SQ + c8 * 8) = val;
       }
@@ -1724,21 +2213,28 @@ void dsa_prepare_kernel_smem() {
     DGPP_CUDA_OK(cudaDeviceGetAttribute(
         &cap, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0));
     g_attn_smem_cap = cap - 1024;
-    DGPP_CUDA_OK(cudaFuncSetAttribute(
-        attn_partial_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        g_attn_smem_cap));
-    DGPP_CUDA_OK(cudaFuncSetAttribute(
-        attn_flash_kernel<512, false>, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        int(dense::Geo<512>::smem_bytes)));
-    DGPP_CUDA_OK(cudaFuncSetAttribute(
-        attn_flash_kernel<256, false>, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        int(dense::Geo<256>::smem_bytes)));
-    DGPP_CUDA_OK(cudaFuncSetAttribute(
-        attn_flash_kernel<512, true>, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        int(dense::Geo<512>::smem_bytes)));
-    DGPP_CUDA_OK(cudaFuncSetAttribute(
-        attn_flash_kernel<256, true>, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        int(dense::Geo<256>::smem_bytes)));
+    // Every format's instantiation: the opt-in is per kernel symbol.
+    const auto opt_in = [&](auto tag) {
+      constexpr LatentFormat F = decltype(tag)::value;
+      DGPP_CUDA_OK(cudaFuncSetAttribute(
+          attn_partial_kernel<F>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+          g_attn_smem_cap));
+      DGPP_CUDA_OK(cudaFuncSetAttribute(
+          attn_flash_kernel<512, false, F>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+          int(dense::Geo<512>::smem_bytes)));
+      DGPP_CUDA_OK(cudaFuncSetAttribute(
+          attn_flash_kernel<256, false, F>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+          int(dense::Geo<256>::smem_bytes)));
+      DGPP_CUDA_OK(cudaFuncSetAttribute(
+          attn_flash_kernel<512, true, F>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+          int(dense::Geo<512>::smem_bytes)));
+      DGPP_CUDA_OK(cudaFuncSetAttribute(
+          attn_flash_kernel<256, true, F>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+          int(dense::Geo<256>::smem_bytes)));
+    };
+    opt_in(std::integral_constant<LatentFormat, LatentFormat::kBf16>{});
+    opt_in(std::integral_constant<LatentFormat, LatentFormat::kFp8>{});
+    opt_in(std::integral_constant<LatentFormat, LatentFormat::kFp4>{});
   }
 }
 
@@ -1856,12 +2352,36 @@ void dsa_latent_append(const void* latent_rows, const int32_t* req_ids,
                        const int64_t* pos, int64_t tokens,
                        const int32_t* block_tables, int blocks_per_request,
                        int block_tokens, void* latent_cache, int kv_lora,
-                       cudaStream_t stream) {
+                       cudaStream_t stream, LatentFormat format,
+                       float* latent_scale) {
   if (tokens <= 0) return;
-  latent_append_kernel<<<unsigned(tokens), 128, 0, stream>>>(
-      static_cast<const uint16_t*>(latent_rows), req_ids, pos, block_tables,
-      blocks_per_request, block_tokens,
-      static_cast<uint16_t*>(latent_cache), kv_lora);
+  if (format != LatentFormat::kBf16 && latent_scale == nullptr)
+    throw std::invalid_argument("dsa_latent_append: a quantized cache needs its scales");
+  switch (format) {
+    case LatentFormat::kBf16:
+      latent_append_kernel<<<unsigned(tokens), kLatentAppendThreads, 0, stream>>>(
+          static_cast<const uint16_t*>(latent_rows), req_ids, pos, block_tables,
+          blocks_per_request, block_tokens,
+          static_cast<uint16_t*>(latent_cache), kv_lora);
+      break;
+    case LatentFormat::kFp8:
+      if (kv_lora % 8 != 0 || kv_lora > 8 * kLatentAppendThreads)
+        DGPP_CUDA_OK(cudaErrorInvalidValue);
+      latent_append_fp8_kernel<<<unsigned(tokens), kLatentAppendThreads, 0, stream>>>(
+          static_cast<const uint16_t*>(latent_rows), req_ids, pos, block_tables,
+          blocks_per_request, block_tokens, static_cast<uint8_t*>(latent_cache),
+          latent_scale, kv_lora);
+      break;
+    case LatentFormat::kFp4:
+      if (kv_lora % kLatentFp4Block != 0 ||
+          kv_lora > kLatentFp4Block * kLatentAppendThreads)
+        DGPP_CUDA_OK(cudaErrorInvalidValue);
+      latent_append_fp4_kernel<<<unsigned(tokens), kLatentAppendThreads, 0, stream>>>(
+          static_cast<const uint16_t*>(latent_rows), req_ids, pos, block_tables,
+          blocks_per_request, block_tokens, static_cast<uint8_t*>(latent_cache),
+          latent_scale, kv_lora);
+      break;
+  }
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -1876,33 +2396,61 @@ void dsa_gather_index_pools(const int32_t* block_table, int pools_per_block,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+namespace {
+constexpr int kSelectMaxRows = 8;
+constexpr int kSelectDefaultGrid = 96;  // measured optimum (dsa_select_bench, 2026-09-06)
+size_t select_align256(size_t b) { return (b + 255) / 256 * 256; }
+size_t select_keys_bytes(int rows, int64_t pools) {
+  return select_align256(size_t(rows) * size_t(pools) * 8);
+}
+size_t select_hist_bytes(int rows) {
+  return select_align256(size_t(rows) * kSelectHistBins * 4);
+}
+}  // namespace
+
+size_t dsa_select_workspace_bytes(int max_rows, int64_t max_pools) {
+  if (max_rows <= 0 || max_rows > kSelectMaxRows || max_pools <= 0)
+    throw std::invalid_argument("dsa_select_workspace_bytes: rows in [1, 8], pools > 0");
+  return select_keys_bytes(max_rows, max_pools) + select_hist_bytes(max_rows);
+}
+
 void dsa_select_decode(const void* q_fp8, const float* w_folded,
                        const int32_t* req_ids, const int64_t* pos, int rows,
                        const int32_t* block_tables, int blocks_per_request,
                        const void* index_k, const float* index_scale,
                        int pools_per_block, int heads, int dim, int select_k,
                        int kpool, int max_selected, int32_t* topk_out,
-                       int32_t* out_counts, uint64_t* partial_ws,
-                       int32_t* counter_ws, int grid_blocks,
-                       cudaStream_t stream) {
+                       int32_t* out_counts, void* select_ws,
+                       int64_t ws_max_pools, int32_t* counter_ws,
+                       int grid_blocks, cudaStream_t stream) {
   if (rows <= 0) return;
   if (heads != 32) DGPP_CUDA_OK(cudaErrorInvalidValue);
   if (select_k > kSelectTile / 2) DGPP_CUDA_OK(cudaErrorInvalidValue);
-  if (rows > 8) DGPP_CUDA_OK(cudaErrorInvalidValue);
-  const size_t smem = size_t(rows) * select_k * 8 + kSelectTile * 8 +
-                      size_t(rows) * heads * 128 +
-                      size_t(rows) * heads * 4 + (select_k + 1) * 4;
+  if (rows > kSelectMaxRows) DGPP_CUDA_OK(cudaErrorInvalidValue);
+  if (select_ws == nullptr || ws_max_pools <= 0) DGPP_CUDA_OK(cudaErrorInvalidValue);
+  if (reinterpret_cast<uintptr_t>(select_ws) % 256 != 0) DGPP_CUDA_OK(cudaErrorInvalidValue);
+  const size_t smem = size_t(rows) * heads * 128 + size_t(256 / 32) * 4 * 32 * 4 +
+                      size_t(rows) * heads * 4 + size_t(kSelectHistBins) * 4 +
+                      size_t(select_k) * 8 + size_t(kSelectStopCandidates) * 8 +
+                      (select_k + 1) * 4;
   dsa_prepare_kernel_smem();
   if (smem > size_t(g_select_smem_cap)) DGPP_CUDA_OK(cudaErrorInvalidValue);
-  const int blocks = grid_blocks > 0 ? grid_blocks : 48;
+  const int blocks = std::max(grid_blocks > 0 ? grid_blocks : kSelectDefaultGrid, rows);
+  uint64_t* keys_ws = static_cast<uint64_t*>(select_ws);
+  int32_t* hist_ws = reinterpret_cast<int32_t*>(
+      static_cast<char*>(select_ws) + select_keys_bytes(rows, ws_max_pools));
   select_counter_reset_kernel<<<1, 32, 0, stream>>>(counter_ws);
   select_decode_kernel<<<blocks, 256, smem, stream>>>(
       static_cast<const uint8_t*>(q_fp8), w_folded, req_ids, pos, rows,
       block_tables, blocks_per_request,
       static_cast<const uint8_t*>(index_k), index_scale, pools_per_block,
-      heads, select_k, kpool, max_selected, topk_out, out_counts, partial_ws,
-      counter_ws);
+      heads, select_k, kpool, max_selected, topk_out, out_counts, keys_ws,
+      ws_max_pools, hist_ws, counter_ws);
   DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void dsa_select_debug_phases(uint64_t out[8]) {
+  DGPP_CUDA_OK(cudaMemcpyFromSymbol(out, g_select_phase, sizeof(unsigned long long) * 8));
 }
 
 void dsa_select_prefill(const float* dot, int64_t dot_stride,
@@ -1953,41 +2501,111 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
                       int n_split, int local_heads, int kv_lora,
                       int block_tokens, const int32_t* block_tables,
                       int blocks_per_request, float scale, float* m_ws,
-                      float* l_ws, float* c_ws, cudaStream_t stream) {
+                      float* l_ws, float* c_ws, cudaStream_t stream,
+                      LatentFormat format, const float* latent_scale) {
   if (rows <= 0) return;
+  if (format != LatentFormat::kBf16 && latent_scale == nullptr)
+    throw std::invalid_argument("dsa_attn_partial: a quantized cache needs its scales");
   // hpb in {1,2,4,8,16}: local_heads must divide across head-group blocks,
   // and blockDim(128)/hpb gives the per-head dim groups (the butterfly
   // reduce handles any power-of-two group count up to blockDim). kv_lora
   // must give every group a nonempty 8-multiple slice: kv_lora >= groups
   // and kv_lora % groups must keep the vec path's 8-wide windows aligned.
-  const int hpb = local_heads < 16 ? local_heads : 16;
+  // Heads per block: 16 unless a thread's dim window would exceed the
+  // register window (kv_lora / (128 / hpb) <= kAttnMaxDslice).
+  int hpb = local_heads < 16 ? local_heads : 16;
+  while (hpb > 1 && kv_lora / (128 / hpb) > kAttnMaxDslice) hpb /= 2;
   if (local_heads % hpb != 0 || 128 % hpb != 0)
     DGPP_CUDA_OK(cudaErrorInvalidValue);
   if (kv_lora % 8 != 0) DGPP_CUDA_OK(cudaErrorInvalidValue);
   if (kv_lora < 128 / hpb) DGPP_CUDA_OK(cudaErrorInvalidValue);
+  if (kv_lora / (128 / hpb) > kAttnMaxDslice) DGPP_CUDA_OK(cudaErrorInvalidValue);
   // Padded strides (see the kernel's bank-conflict note): must mirror the
   // kernel's gstride/row_stride arithmetic exactly.
   const int groups = 128 / hpb;
   const int dslice = kv_lora / groups;
   const int gstride = dslice + 8;
   const int row_stride = groups * gstride + 8;
-  const size_t smem = (size_t(hpb) * row_stride * 2 +
-                        kAttnTile * row_stride * 2 + hpb * row_stride * 4 +
+  const size_t smem = (kAttnTile * row_stride * 2 +
                         hpb * (kAttnTile + 1) * 4 + hpb * 4 + 15) &
                       ~size_t(15);
   dsa_prepare_kernel_smem();
   if (smem > size_t(g_attn_smem_cap)) DGPP_CUDA_OK(cudaErrorInvalidValue);
   dim3 grid{unsigned(rows), unsigned(n_split),
             unsigned(local_heads / hpb)};
-  attn_partial_kernel<<<grid, 128, smem, stream>>>(
-      static_cast<const uint16_t*>(q_tilde),
-      static_cast<const uint16_t*>(latent_cache), req_ids, topk, topk_stride,
-      counts, n_split, local_heads, kv_lora, block_tokens, block_tables,
-      blocks_per_request, scale, m_ws, l_ws, c_ws);
+  const auto launch = [&](auto tag) {
+    constexpr LatentFormat F = decltype(tag)::value;
+    attn_partial_kernel<F><<<grid, 128, smem, stream>>>(
+        static_cast<const uint16_t*>(q_tilde),
+        static_cast<const uint8_t*>(latent_cache), latent_scale, req_ids, topk,
+        topk_stride, counts, n_split, local_heads, kv_lora, block_tokens,
+        block_tables, blocks_per_request, scale, m_ws, l_ws, c_ws);
+  };
+  switch (format) {
+    case LatentFormat::kBf16:
+      launch(std::integral_constant<LatentFormat, LatentFormat::kBf16>{});
+      break;
+    case LatentFormat::kFp8:
+      launch(std::integral_constant<LatentFormat, LatentFormat::kFp8>{});
+      break;
+    case LatentFormat::kFp4:
+      launch(std::integral_constant<LatentFormat, LatentFormat::kFp4>{});
+      break;
+  }
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
 namespace {
+template <int KV, bool kListed, LatentFormat F>
+void launch_attn_flash_variant(dim3 grid, const void* q_tilde,
+                               const void* latent_cache, const float* latent_scale,
+                               const int32_t* req_ids, const int64_t* pos,
+                               const int32_t* topk, int topk_stride,
+                               const int32_t* counts, int rows, int n_split,
+                               int local_heads, int block_tokens,
+                               const int32_t* block_tables, int blocks_per_request,
+                               float scale, float* m_ws, float* l_ws, float* c_ws,
+                               cudaStream_t stream) {
+  attn_flash_kernel<KV, kListed, F><<<grid, dense::kThreads, dense::Geo<KV>::smem_bytes,
+                                      stream>>>(
+      static_cast<const uint16_t*>(q_tilde),
+      static_cast<const uint8_t*>(latent_cache), latent_scale, req_ids, pos, topk,
+      topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
+      blocks_per_request, scale, m_ws, l_ws, c_ws);
+}
+
+template <int KV, bool kListed>
+void launch_attn_flash_format(LatentFormat format, dim3 grid, const void* q_tilde,
+                              const void* latent_cache, const float* latent_scale,
+                              const int32_t* req_ids, const int64_t* pos,
+                              const int32_t* topk, int topk_stride,
+                              const int32_t* counts, int rows, int n_split,
+                              int local_heads, int block_tokens,
+                              const int32_t* block_tables, int blocks_per_request,
+                              float scale, float* m_ws, float* l_ws, float* c_ws,
+                              cudaStream_t stream) {
+  switch (format) {
+    case LatentFormat::kBf16:
+      launch_attn_flash_variant<KV, kListed, LatentFormat::kBf16>(
+          grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
+          counts, rows, n_split, local_heads, block_tokens, block_tables,
+          blocks_per_request, scale, m_ws, l_ws, c_ws, stream);
+      break;
+    case LatentFormat::kFp8:
+      launch_attn_flash_variant<KV, kListed, LatentFormat::kFp8>(
+          grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
+          counts, rows, n_split, local_heads, block_tokens, block_tables,
+          blocks_per_request, scale, m_ws, l_ws, c_ws, stream);
+      break;
+    case LatentFormat::kFp4:
+      launch_attn_flash_variant<KV, kListed, LatentFormat::kFp4>(
+          grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
+          counts, rows, n_split, local_heads, block_tokens, block_tables,
+          blocks_per_request, scale, m_ws, l_ws, c_ws, stream);
+      break;
+  }
+}
+
 template <bool kListed>
 bool launch_attn_flash(const void* q_tilde, const void* latent_cache,
                        const int32_t* req_ids, const int64_t* pos,
@@ -1995,29 +2613,28 @@ bool launch_attn_flash(const void* q_tilde, const void* latent_cache,
                        int rows, int n_split, int local_heads, int kv_lora,
                        int block_tokens, const int32_t* block_tables,
                        int blocks_per_request, float scale, float* m_ws,
-                       float* l_ws, float* c_ws, cudaStream_t stream) {
+                       float* l_ws, float* c_ws, cudaStream_t stream,
+                       LatentFormat format, const float* latent_scale) {
   if (rows <= 0) return true;
   if (kv_lora != 512 && kv_lora != 256) return false;  // caller falls back
   if (kListed && (local_heads < 16 || local_heads % 16 != 0)) return false;
   if (local_heads <= 0 || n_split <= 0 || block_tokens <= 0)
     DGPP_CUDA_OK(cudaErrorInvalidValue);
+  if (format != LatentFormat::kBf16 && latent_scale == nullptr)
+    throw std::invalid_argument("dsa attention: a quantized cache needs its scales");
   dsa_prepare_kernel_smem();
   const int total_m = rows * local_heads;
   dim3 grid{unsigned((total_m + dense::kM - 1) / dense::kM), unsigned(n_split)};
   if (kv_lora == 512) {
-    attn_flash_kernel<512, kListed><<<grid, dense::kThreads, dense::Geo<512>::smem_bytes,
-                                      stream>>>(
-        static_cast<const uint16_t*>(q_tilde),
-        static_cast<const uint16_t*>(latent_cache), req_ids, pos, topk, topk_stride,
-        counts, rows, n_split, local_heads, block_tokens, block_tables,
-        blocks_per_request, scale, m_ws, l_ws, c_ws);
+    launch_attn_flash_format<512, kListed>(
+        format, grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk,
+        topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
+        blocks_per_request, scale, m_ws, l_ws, c_ws, stream);
   } else {
-    attn_flash_kernel<256, kListed><<<grid, dense::kThreads, dense::Geo<256>::smem_bytes,
-                                      stream>>>(
-        static_cast<const uint16_t*>(q_tilde),
-        static_cast<const uint16_t*>(latent_cache), req_ids, pos, topk, topk_stride,
-        counts, rows, n_split, local_heads, block_tokens, block_tables,
-        blocks_per_request, scale, m_ws, l_ws, c_ws);
+    launch_attn_flash_format<256, kListed>(
+        format, grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk,
+        topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
+        blocks_per_request, scale, m_ws, l_ws, c_ws, stream);
   }
   DGPP_CUDA_OK(cudaGetLastError());
   return true;
@@ -2029,11 +2646,13 @@ bool dsa_attn_dense(const void* q_tilde, const void* latent_cache,
                     int n_split, int local_heads, int kv_lora, int block_tokens,
                     const int32_t* block_tables, int blocks_per_request,
                     float scale, float* m_ws, float* l_ws, float* c_ws,
-                    cudaStream_t stream) {
+                    cudaStream_t stream, LatentFormat format,
+                    const float* latent_scale) {
   return launch_attn_flash<false>(q_tilde, latent_cache, req_ids, pos, nullptr, 0,
                                   nullptr, rows, n_split, local_heads, kv_lora,
                                   block_tokens, block_tables, blocks_per_request,
-                                  scale, m_ws, l_ws, c_ws, stream);
+                                  scale, m_ws, l_ws, c_ws, stream, format,
+                                  latent_scale);
 }
 
 bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
@@ -2041,11 +2660,13 @@ bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
                      const int32_t* counts, int rows, int n_split, int local_heads,
                      int kv_lora, int block_tokens, const int32_t* block_tables,
                      int blocks_per_request, float scale, float* m_ws, float* l_ws,
-                     float* c_ws, cudaStream_t stream) {
+                     float* c_ws, cudaStream_t stream, LatentFormat format,
+                     const float* latent_scale) {
   return launch_attn_flash<true>(q_tilde, latent_cache, req_ids, nullptr, topk,
                                  topk_stride, counts, rows, n_split, local_heads,
                                  kv_lora, block_tokens, block_tables,
-                                 blocks_per_request, scale, m_ws, l_ws, c_ws, stream);
+                                 blocks_per_request, scale, m_ws, l_ws, c_ws, stream,
+                                 format, latent_scale);
 }
 
 void dsa_attn_combine(const float* m_ws, const float* l_ws, const float* c_ws,

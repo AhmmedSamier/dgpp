@@ -11,6 +11,7 @@
 // Capture-safe: the side stream forks from and joins the main stream
 // through events, which under stream capture become graph edges.
 #include <cstddef>
+#include <cstdint>
 
 #include <cuda_runtime.h>
 
@@ -69,6 +70,14 @@ class WeightPrefetcher {
   void open_window(cudaStream_t main, size_t budget_bytes = 0,
                    PrefetchRate rate = PrefetchRate::Full);
   // Adds a range to the open window, clamped to its remaining budget.
+  // Adjacent (or nearly adjacent) ranges coalesce into ONE launch
+  // (2026-09-06): a window's adds are a layer's tensors in consumption
+  // order and they sit contiguously in the resident image, so what was
+  // ~620 one-tensor kernels per decode step — 40 % of the graph's nodes,
+  // and cudaGraphLaunch costs ~0.45 us per node on this host — becomes a
+  // few dozen. The pending range launches at the next non-adjacent add,
+  // at the next open_window(), or at join(). DGPP_L2_PREFETCH_MERGE=off
+  // restores one launch per add.
   void add(const void* ptr, size_t bytes);
   // open_window + add in one call — the layers' idiom.
   void prefetch_after(cudaStream_t main, const void* ptr, size_t bytes,
@@ -78,8 +87,17 @@ class WeightPrefetcher {
   // before a capture ends (a forked stream must rejoin the origin); a
   // no-op when nothing was forked.
   void join(cudaStream_t main);
+  // Launches (and cumulative bytes) issued so far — the merge's evidence.
+  size_t launches() const { return launches_; }
 
  private:
+  // The coalescing range (see add): [pending_begin_, pending_end_) not
+  // yet launched; merge_ is the knob; kMergeGap the largest hole bridged.
+  static constexpr size_t kMergeGap = size_t{2} << 20;  // bridged gaps are charged to the budget
+  void flush_pending();
+  bool merge_ = true;
+  uintptr_t pending_begin_ = 0, pending_end_ = 0;
+  size_t launches_ = 0;
   bool enabled_ = true;
   size_t window_bytes_ = kDefaultWindowBytes;
   PrefetchRate boundary_rate_ = PrefetchRate::Light;

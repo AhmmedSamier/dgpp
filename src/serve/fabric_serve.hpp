@@ -147,11 +147,13 @@ struct WorldSettings {
   int fabric_port = 0;
   int max_concurrency = 0;
   int64_t kv_capacity = 0;
+  std::string kv_dtype = "bf16";  // the latent cache's format (2026-09-06)
   int default_max_tokens = 0;
   int queue_limit = 0;
   bool no_eos = false;
   bool decode_graph = false;
   bool mtp = false;
+  int mtp_depth = 1;  // draft tokens per step (2026-09-06)
   int graph_batch_min_live = 0;
   int sampling_candidates = 0;
   double prefix_cache_gib = 0.0;

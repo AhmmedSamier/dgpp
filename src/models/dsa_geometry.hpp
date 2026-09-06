@@ -27,6 +27,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "kernels/latent_format.hpp"
+
 namespace dgpp {
 
 // Checkpoint-level DSA/MLA configuration. Defaults are the GLM-5.3-Flash
@@ -50,6 +52,10 @@ struct DsaConfig {
   int block_tokens = 128;    // shared-block granularity, in tokens
   int tp_size = 1;
   float rms_norm_eps = 1e-5f;  // q_a/kv_a layernorms (config rms_norm_eps)
+  // The latent cache's storage format (2026-09-06, the KV dtype knob):
+  // bf16 (the parity gates' format), fp8 (e4m3 + a row scale) or fp4
+  // (e2m1 in blocks of 16 + a row scale) — kernels/latent_format.hpp.
+  LatentFormat latent_format = LatentFormat::kBf16;
 
   static void validate_config(const DsaConfig& c) {
     auto fail = [](const char* what) {
@@ -83,6 +89,15 @@ struct DsaConfig {
     // input requires q_lora_rank to be a multiple of 8 BF16 elements.
     if (c.q_lora_rank % 8 != 0)
       fail("q_lora_rank must be a multiple of 8 (fused layout alignment)");
+    // The quantized rows: the append kernel quantizes a row with one
+    // block (8 elements per thread for fp8, one 16-element block per
+    // thread for fp4) and the attention tiles load 8 elements at a time.
+    if (c.latent_format == LatentFormat::kFp8 &&
+        (c.kv_lora_rank % 8 != 0 || c.kv_lora_rank > 1024))
+      fail("an fp8 latent cache needs kv_lora_rank a multiple of 8 and <= 1024");
+    if (c.latent_format == LatentFormat::kFp4 &&
+        (c.kv_lora_rank % kLatentFp4Block != 0 || c.kv_lora_rank > 2048))
+      fail("an fp4 latent cache needs kv_lora_rank a multiple of 16 and <= 2048");
   }
 };
 
@@ -97,19 +112,20 @@ struct DsaGeometry {
   int max_selected = 0;    // expanded width: topk + kpool - 1 (pools + tail)
 
   // Per-layer, per-rank cache formulas (bytes).
-  size_t latent_bytes_per_token = 0;   // kv_lora_rank BF16
+  size_t latent_bytes_per_token = 0;   // one latent row in the cache's format
+  size_t latent_scale_bytes_per_token = 0;  // the row's fp32 scale (fp8/fp4)
   size_t index_k_bytes_per_pool = 0;   // FP8 K row
   size_t index_scale_bytes_per_pool = 0;  // FP32 scale
   size_t index_bytes_per_token = 0;    // (K + scale) / kpool
   size_t tail_bytes_per_request = 0;   // [2, kpool, head_dim] BF16
 
   // Per-request totals across all DSA layers.
-  size_t latent_bytes_per_token_all = 0;
+  size_t latent_bytes_per_token_all = 0;  // rows AND their scales
   size_t index_bytes_per_token_all = 0;
   size_t tail_bytes_per_request_all = 0;
 
   // Block-level allocation sizes (the shared block table's unit).
-  size_t latent_block_bytes = 0;       // [block_tokens, kv_lora] BF16
+  size_t latent_block_bytes = 0;       // [block_tokens] latent rows
   size_t index_k_block_bytes = 0;      // [pools_per_block, head_dim] FP8
   size_t index_scale_block_bytes = 0;  // [pools_per_block] FP32
 
@@ -131,6 +147,7 @@ struct DsaGeometry {
   int tail_len(int64_t seq_len) const { return int(seq_len % kpool); }
 
   int kpool = 4;  // carried for the formula helpers
+  LatentFormat latent_format = LatentFormat::kBf16;  // carried for the kernels
 
   static DsaGeometry from_config(const DsaConfig& c) {
     DsaConfig::validate_config(c);
@@ -142,9 +159,11 @@ struct DsaGeometry {
     g.pools_per_block = c.block_tokens / c.index_kpool;
     g.max_selected = c.index_topk + c.index_kpool - 1;
     g.kpool = c.index_kpool;
+    g.latent_format = c.latent_format;
 
-    g.latent_bytes_per_token =
-        static_cast<size_t>(c.kv_lora_rank) * 2;
+    g.latent_bytes_per_token = latent_row_bytes(c.latent_format, c.kv_lora_rank);
+    g.latent_scale_bytes_per_token =
+        latent_format_has_row_scale(c.latent_format) ? sizeof(float) : 0;
     g.index_k_bytes_per_pool = static_cast<size_t>(c.index_head_dim);
     g.index_scale_bytes_per_pool = 4;
     g.index_bytes_per_token =
@@ -154,14 +173,15 @@ struct DsaGeometry {
         2 * static_cast<size_t>(c.index_kpool) * c.index_head_dim * 2;
 
     g.latent_bytes_per_token_all =
-        g.latent_bytes_per_token * c.num_dsa_layers;
+        (g.latent_bytes_per_token + g.latent_scale_bytes_per_token) *
+        c.num_dsa_layers;
     g.index_bytes_per_token_all =
         g.index_bytes_per_token * c.num_dsa_layers;
     g.tail_bytes_per_request_all =
         g.tail_bytes_per_request * c.num_dsa_layers;
 
     g.latent_block_bytes =
-        static_cast<size_t>(c.block_tokens) * c.kv_lora_rank * 2;
+        static_cast<size_t>(c.block_tokens) * g.latent_bytes_per_token;
     g.index_k_block_bytes =
         static_cast<size_t>(g.pools_per_block) * c.index_head_dim;
     g.index_scale_block_bytes =

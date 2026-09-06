@@ -37,7 +37,7 @@ inline void glm_check_decode_graph(cudaGraph_t graph, int rank,
   DGPP_CUDA_OK(cudaGraphGetNodes(graph, nodes.data(), &n));
   DGPP_CUDA_OK(cudaGraphGetEdges(graph, nullptr, nullptr, nullptr, &e));
   size_t kernels = 0, empties = 0, memcpys = 0, memsets = 0, hosts = 0,
-         others = 0, max_in = 0;
+         events = 0, others = 0, max_in = 0;
   for (cudaGraphNode_t node : nodes) {
     cudaGraphNodeType t;
     DGPP_CUDA_OK(cudaGraphNodeGetType(node, &t));
@@ -47,6 +47,13 @@ inline void glm_check_decode_graph(cudaGraph_t graph, int rank,
       case cudaGraphNodeTypeMemcpy: ++memcpys; break;
       case cudaGraphNodeTypeMemset: ++memsets; break;
       case cudaGraphNodeTypeHost: ++hosts; break;
+      // An event record node is REJECTED with the rest (2026-09-06): an
+      // external event record node in the replayed decode graph stalled
+      // about one relaunch in five — the graph never started on one rank
+      // while its peer spun in the first collective. The pipelined
+      // replay's verdict is published by a kernel node instead
+      // (glm_publish_seq).
+      case cudaGraphNodeTypeEventRecord: ++events; break;
       default: ++others; break;
     }
     size_t deps = 0;
@@ -55,14 +62,16 @@ inline void glm_check_decode_graph(cudaGraph_t graph, int rank,
   }
   DGPP_LOG_INFO(
       "rank {}: {} shape: {} nodes, {} edges: kernel {} empty {} memcpy {} "
-      "memset {} host {} other {}; max in-degree {}",
-      rank, what, n, e, kernels, empties, memcpys, memsets, hosts, others,
-      max_in);
-  if (memcpys != 0 || memsets != 0 || hosts != 0 || others != 0)
+      "memset {} host {} event {} other {}; max in-degree {}",
+      rank, what, n, e, kernels, empties, memcpys, memsets, hosts, events,
+      others, max_in);
+  if (memcpys != 0 || memsets != 0 || hosts != 0 || events != 0 ||
+      others != 0)
     throw std::runtime_error(
         what + " captured " + std::to_string(memcpys) + " memcpy, " +
         std::to_string(memsets) + " memset, " + std::to_string(hosts) +
-        " host and " + std::to_string(others) +
+        " host, " + std::to_string(events) + " event and " +
+        std::to_string(others) +
         " other node(s); the decode graph must be kernels-only — a "
         "copy-engine node can deadlock the in-process multi-rank world "
         "(docs/batched_mtp_graph_stall.md)");

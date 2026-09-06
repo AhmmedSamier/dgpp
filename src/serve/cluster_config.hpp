@@ -8,7 +8,7 @@
 //     "nodes": ["192.0.2.11", "192.0.2.12", ...],   // rank = index; [0] is the head
 //     "ssh_user": "user",                               // the launcher's ssh user
 //     "ports": {"http": 18080, "fabric": 29970, "journal": 29971},
-//     "engine": {"max_concurrency": 4, "kv_capacity": 8192, ... },
+//     "engine": {"max_concurrency": 4, "kv_capacity": 8192, "kv_dtype": "bf16", ... },
 //     "paths": {"log_dir": "~/dgpp/log", "stage_dir": "/tmp/bus4",
 //               "release_dir": "~/dgpp/releases", "resident_cache": ""}
 //   }
@@ -47,12 +47,14 @@ struct ClusterConfig {
   struct Engine {
     int max_concurrency = 8;
     int64_t kv_capacity = 8192;
+    std::string kv_dtype = "bf16";  // the latent cache's format: bf16 | fp8 | fp4
     int default_max_tokens = 256;
     int queue_limit = 64;
     int max_connections = 64;
     bool no_eos = false;
     bool decode_graph = false;
     bool mtp = false;
+    int mtp_depth = 1;             // draft tokens per step (1..3); needs mtp
     int graph_batch_min_live = 0;  // 0 = min(4, max_concurrency)
     int sampling_candidates = 128;
     double prefix_cache_gib = 1.5;

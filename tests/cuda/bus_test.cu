@@ -1463,6 +1463,90 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
             percentile(step_us, 0.5) / gens_per_step);
       }
     }
+    // ---- the pipelined replay (2026-09-06): two windows armed at once --
+    // The engine arms the NEXT replay's window while the previous replay
+    // still runs, on the other variant. Variant 1 then variant 0, both
+    // launched back to back on the stream before either is finished; a
+    // third arm is rejected (two windows live), an arm of a live variant
+    // is rejected, the eager gate stays closed, and the finishes retire
+    // the windows in arm order. Bitwise against the eager bytes every
+    // round.
+    if (exec != nullptr && alt_exec != nullptr && failures == 0) {
+      std::vector<uint16_t> got(elems, 0);
+      for (int round = 0; round < 6 && failures == 0; ++round) {
+        if (!bus.graph_replay_arm(&error, /*variant=*/1)) {
+          fail("pipelined arm (variant 1) rejected: " + error);
+          break;
+        }
+        if (cudaGraphLaunch(alt_exec, stream) != cudaSuccess) {
+          fail("pipelined launch (variant 1) failed");
+          break;
+        }
+        if (!bus.graph_replay_arm(&error, /*variant=*/0)) {
+          fail("pipelined arm (variant 0) while variant 1 is live rejected: " +
+               error);
+          break;
+        }
+        if (cudaGraphLaunch(exec, stream) != cudaSuccess) {
+          fail("pipelined launch (variant 0) failed");
+          break;
+        }
+        if (round == 0 && my_rank == 0) {
+          std::string pin_error;
+          if (bus.graph_replay_arm(&pin_error, /*variant=*/1) ||
+              pin_error.find("already armed") == std::string::npos)
+            fail("a third window was not rejected: " + pin_error);
+          if (bus.allreduce(dev_src, dev_dst, elems, &pin_error) != 0 ||
+              pin_error.find("armed") == std::string::npos)
+            fail("eager allreduce with two windows armed not rejected: " +
+                 pin_error);
+        }
+        if (cudaStreamSynchronize(stream) != cudaSuccess) {
+          fail("pipelined replay stream sync failed");
+          break;
+        }
+        if (!bus.graph_replay_finish(30000, &error)) {
+          fail("pipelined finish (variant 1's window) rejected: " + error);
+          bus.dump_graph_cells("pipelined finish 1");
+          break;
+        }
+        if (round == 0 && my_rank == 0) {
+          // One window still live: variant 0 cannot be armed again, the
+          // gate is still closed.
+          std::string pin_error;
+          if (bus.graph_replay_arm(&pin_error, /*variant=*/0) ||
+              pin_error.find("live replay window") == std::string::npos)
+            fail("arming the live variant was not rejected: " + pin_error);
+        }
+        if (!bus.graph_replay_finish(30000, &error)) {
+          fail("pipelined finish (variant 0's window) rejected: " + error);
+          bus.dump_graph_cells("pipelined finish 0");
+          break;
+        }
+        if (cudaMemcpyAsync(got.data(), dev_dst, elems * 2,
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+            cudaStreamSynchronize(stream) != cudaSuccess) {
+          fail("pipelined replay D2H failed");
+          break;
+        }
+        if (std::memcmp(got.data(), eager_bytes.data(), elems * 2) != 0) {
+          fail("pipelined round " + std::to_string(round) +
+               " diverged from the eager machine bitwise");
+          break;
+        }
+      }
+      if (failures == 0) {
+        std::string pin_error;
+        if (!bus.graph_replay_finish(30000, &pin_error) &&
+            pin_error.find("no armed window") == std::string::npos)
+          fail("a finish with no armed window reported: " + pin_error);
+        else if (pin_error.empty())
+          fail("a finish with no armed window succeeded");
+        DGPP_LOG_INFO("rank {}: 6 pipelined rounds (two windows armed at "
+                      "once) clean and bitwise",
+                      my_rank);
+      }
+    }
     if (exec != nullptr) cudaGraphExecDestroy(exec);
     if (alt_exec != nullptr) cudaGraphExecDestroy(alt_exec);
     if (alt_graph) cudaGraphDestroy(alt_graph);

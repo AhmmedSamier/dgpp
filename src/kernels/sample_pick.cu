@@ -1152,20 +1152,24 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     PickVerdict* __restrict__ verdicts,
     PickVerdict* __restrict__ device_verdicts,
     SampleOutcome* __restrict__ outcomes) {
-  // Every rank's list as split composite keys (hi = ~primary, lo = id;
-  // the empty slot is the maximal key), the merged prefix, its masses.
-  __shared__ uint32_t c_hi[2][kPickMaxWorld * kSampleMaxCandidates];
-  __shared__ uint32_t c_lo[2][kPickMaxWorld * kSampleMaxCandidates];
-  __shared__ double lses[2][kPickMaxWorld];
-  __shared__ float m_logit[2][kSampleMaxCandidates];
-  __shared__ int32_t m_id[2][kSampleMaxCandidates];
-  __shared__ double mass[2][kSampleMaxCandidates];
-  __shared__ float expsrc[2][kSampleMaxCandidates];
+  // One row's split composite keys at a time (hi = ~primary, lo = id; the
+  // empty slot is the maximal key) — the merge is per row, and T rows of
+  // keys would not fit the static shared bound — with every row's merged
+  // prefix and its masses kept for the decision (2026-09-06: the T-row
+  // chain; the arithmetic per row is the two-row kernel's).
+  constexpr int R = kSampleVerdictRows;
+  __shared__ uint32_t c_hi[kPickMaxWorld * kSampleMaxCandidates];
+  __shared__ uint32_t c_lo[kPickMaxWorld * kSampleMaxCandidates];
+  __shared__ double lses[R][kPickMaxWorld];
+  __shared__ float m_logit[R][kSampleMaxCandidates];
+  __shared__ int32_t m_id[R][kSampleMaxCandidates];
+  __shared__ double mass[R][kSampleMaxCandidates];
+  __shared__ float expsrc[R][kSampleMaxCandidates];
   __shared__ float exps[kSampleMaxCandidates];
   __shared__ double prefix[kSampleMaxCandidates];
-  __shared__ double lse_terms[2][kPickMaxWorld];
-  __shared__ int total[2];
-  __shared__ double Z[2];
+  __shared__ double lse_terms[R][kPickMaxWorld];
+  __shared__ int total[R];
+  __shared__ double Z[R];
 
   const int q = blockIdx.x;
   const int row0 = q * rows_per_request;
@@ -1187,24 +1191,35 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   }
   const SampleSpec spec = specs[q];
   const int entries = world * candidates;
-  if (tid < 2) total[tid] = 0;
+  if (tid < R) total[tid] = 0;
   __syncthreads();
   // A constrained row's vocabulary is its allowed count (the complete list
-  // is the allowed set); a masked draft is excluded from row 0 outright.
-  int row_vocab[2] = {vocab_size, vocab_size};
-  bool constrained[2] = {false, false};
-  const uint32_t* mask0 = nullptr;
+  // is the allowed set); a masked draft is excluded from its row outright.
+  int row_vocab[R];
+  bool constrained[R];
+  const uint32_t* row_mask[R];
+  for (int t = 0; t < R; ++t) {
+    row_vocab[t] = vocab_size;
+    constrained[t] = false;
+    row_mask[t] = nullptr;
+  }
   for (int t = 0; t < rows_per_request; ++t) {
     if (masks == nullptr) continue;
     const uint32_t* m = masks + static_cast<size_t>(row0 + t) * mask_stride;
     if (m[0] != 0u) {
       constrained[t] = true;
       row_vocab[t] = static_cast<int>(m[0]);
-      if (t == 0) mask0 = m + 1;
+      row_mask[t] = m + 1;
     }
   }
 
-  // 1. Decode every rank's group of every row (cooperative).
+  // 1 + 2. Per row: decode every rank's group (cooperative), then the k-way
+  //    merge in canonical order (sample::merge_topk): every rank's list is
+  //    canonical with its empties last, so a candidate's rank in the union
+  //    is its index in its own list plus the count of smaller keys in every
+  //    other list; the ids are disjoint across ranks, so the ranks are a
+  //    permutation and the first `held` land.
+  int held[R] = {0, 0, 0, 0};
   for (int t = 0; t < rows_per_request; ++t) {
     const uint16_t* row_base =
         table + static_cast<size_t>(row0 + t) * world * group;
@@ -1216,13 +1231,13 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
       const uint32_t id = static_cast<uint32_t>(
           decode_digits(slot + kPickLogitDigits, kPickIdDigits));
       if (id >= static_cast<uint32_t>(vocab_size)) {
-        c_hi[t][i] = kSplitMax;
-        c_lo[t][i] = kSplitMax;
+        c_hi[i] = kSplitMax;
+        c_lo[i] = kSplitMax;
       } else {
         const float l = __uint_as_float(
             static_cast<uint32_t>(decode_digits(slot, kPickLogitDigits)));
-        c_hi[t][i] = ~primary_key(l);
-        c_lo[t][i] = id;
+        c_hi[i] = ~primary_key(l);
+        c_lo[i] = id;
         atomicAdd(&total[t], 1);
       }
     }
@@ -1231,30 +1246,19 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
           row_base + static_cast<size_t>(r) * group +
               static_cast<size_t>(candidates) * kPickSlotsPerRank,
           kSampleLseDigits));
-  }
-  __syncthreads();
-
-  // 2. The k-way merge in canonical order (sample::merge_topk): every
-  //    rank's list is canonical with its empties last, so a candidate's
-  //    rank in the union is its index in its own list plus the count of
-  //    smaller keys in every other list; the ids are disjoint across
-  //    ranks, so the ranks are a permutation and the first `held` land.
-  int held[2] = {0, 0};
-  for (int t = 0; t < rows_per_request; ++t) {
+    __syncthreads();
     held[t] = min(candidates, total[t]);
-    const uint16_t* row_base =
-        table + static_cast<size_t>(row0 + t) * world * group;
     for (int i = tid; i < entries; i += kVerdictThreads) {
-      const uint32_t khi = c_hi[t][i];
-      const uint32_t klo = c_lo[t][i];
+      const uint32_t khi = c_hi[i];
+      const uint32_t klo = c_lo[i];
       if (khi == kSplitMax && klo == kSplitMax) continue;
       const int r = i / candidates;
       const int j = i % candidates;
       int position = j;
       for (int o = 0; o < world; ++o)
         if (o != r)
-          position += lower_bound_split(c_hi[t] + o * candidates,
-                                        c_lo[t] + o * candidates, candidates,
+          position += lower_bound_split(c_hi + o * candidates,
+                                        c_lo + o * candidates, candidates,
                                         khi, klo);
       if (position < held[t]) {
         const uint16_t* slot = row_base + static_cast<size_t>(r) * group +
@@ -1264,8 +1268,8 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
         m_id[t][position] = static_cast<int32_t>(klo);
       }
     }
+    __syncthreads();  // the next row's keys overwrite this row's
   }
-  __syncthreads();
 
   // 3. The fold normalizers (sample::merge_logsumexp: the slices'
   //    terms in parallel, summed in rank order), and for the stochastic
@@ -1311,10 +1315,13 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   const bool penalized = spec.repetition_penalty != 1.0f ||
                          spec.frequency_penalty != 0.0f ||
                          spec.presence_penalty != 0.0f;
-  const TopReport top0{spec.logprobs, o.top_ids[0], o.top_logprobs[0], &o.top_count[0]};
-  const TopReport top1{spec.logprobs, o.top_ids[1], o.top_logprobs[1], &o.top_count[1]};
-  const TopReport* rep0 = spec.logprobs >= 0 ? &top0 : nullptr;
-  const TopReport* rep1 = spec.logprobs >= 0 ? &top1 : nullptr;
+  TopReport tops[R];
+  const TopReport* reps[R];
+  for (int t = 0; t < R; ++t) {
+    tops[t] = TopReport{spec.logprobs, o.top_ids[t], o.top_logprobs[t],
+                        &o.top_count[t]};
+    reps[t] = spec.logprobs >= 0 ? &tops[t] : nullptr;
+  }
 
   v.rows = rows_per_request;
   if (!stochastic) {
@@ -1332,86 +1339,84 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     o.sampled = 0;
     o.counter = spec.counter;
     if ((spec.logprobs >= 0 || penalized) && held[0] > 0) {
-      const double Z0 = Z[0];
-      o.normalizer = Z0;
-      o.logprob = __fsub_rn(m_logit[0][0], static_cast<float>(Z0));
-      if (rep0 != nullptr)
-        report_top(m_logit[0], m_id[0], held[0], 1.0f, static_cast<float>(Z0),
-                   spec.logprobs, o.top_ids[0], o.top_logprobs[0], &o.top_count[0]);
-      if (rows_per_request == 2 && held[1] > 0) {
-        const double Z1 = Z[1];
-        o.normalizer1 = Z1;
-        o.logprob1 = __fsub_rn(m_logit[1][0], static_cast<float>(Z1));
-        if (rep1 != nullptr)
-          report_top(m_logit[1], m_id[1], held[1], 1.0f, static_cast<float>(Z1),
-                     spec.logprobs, o.top_ids[1], o.top_logprobs[1], &o.top_count[1]);
+      for (int t = 0; t < rows_per_request; ++t) {
+        if (held[t] == 0) continue;
+        const double Zt = Z[t];
+        o.normalizer[t] = Zt;
+        o.logprob[t] = __fsub_rn(m_logit[t][0], static_cast<float>(Zt));
+        if (reps[t] != nullptr)
+          report_top(m_logit[t], m_id[t], held[t], 1.0f,
+                     static_cast<float>(Zt), spec.logprobs, o.top_ids[t],
+                     o.top_logprobs[t], &o.top_count[t]);
       }
     }
   } else {
+    // The sampled chain: row t < T-1 tests the draft fed to row t+1
+    // (sample::spec_accept_from_prefix) — a stand moves to the next row, a
+    // reject ends the step on the residual token, an undecidable row falls
+    // back to the host from row t with the rows before it committed. The
+    // last row reached is sampled plainly. T = 1 is the plain sample.
     uint64_t counter = spec.counter;
     o.sampled = 1;
-    const double Z0 = Z[0];
-    o.normalizer = Z0;
-    if (rows_per_request == 1) {
-      const Decision d = decide_prefix(m_logit[0], m_id[0], mass[0], prefix,
-                                       expsrc[0], held[0], row_vocab[0], Z0,
-                                       spec, exps, &counter, rep0);
-      o.covered_mass = d.covered;
-      v.accepted = 1;
-      if (d.resolved) {
-        v.next = d.token;
-        o.logprob = d.logprob;
+    v.accepted = 1;
+    bool done = false;
+    for (int t = 0; t < rows_per_request && !done; ++t) {
+      const double Zt = Z[t];
+      o.normalizer[t] = Zt;
+      const Decision none{false, false, kNoId, 0.0f, 0.0};
+      if (t + 1 < rows_per_request) {
+        const int32_t draft = static_cast<int32_t>(fed[row0 + t + 1]);
+        const bool draft_excluded =
+            row_mask[t] != nullptr &&
+            (draft < 0 || draft >= vocab_size ||
+             !mask_allows(row_mask[t], draft));
+        const Decision d =
+            held[t] > 0 ? spec_decide_prefix(m_logit[t], m_id[t], mass[t],
+                                             prefix, expsrc[t], held[t],
+                                             row_vocab[t], Zt, draft, spec,
+                                             exps, &counter, reps[t],
+                                             draft_excluded)
+                        : none;
+        o.covered_mass[t] = d.covered;
+        if (!d.resolved) {
+          // Provisional REJECT: the commit keeps the state through row t,
+          // the host decides row t (and the rows after it if the draft
+          // stands) between windows.
+          o.fallback = 1;
+          o.fallback_row = t;
+          v.accepted = t + 1;
+          v.winners[t] = held[t] > 0 ? m_id[t][0] : kNoId;
+          v.next = v.winners[t];
+          done = true;
+        } else if (!d.accepted) {
+          v.accepted = t + 1;
+          v.winners[t] = d.token;
+          v.next = d.token;
+          o.logprob[t] = d.logprob;
+          done = true;
+        } else {
+          if (t == 0) o.accepted_draft = 1;
+          v.accepted = t + 2;
+          v.winners[t] = draft;
+          o.logprob[t] = d.logprob;
+        }
       } else {
-        o.fallback = 1;
-        o.fallback_row = 0;
-        v.next = m_id[0][0];
-      }
-      v.winners[0] = v.next;
-    } else {
-      // The T=2 verify: row 0's accept test against the fed draft.
-      const int32_t draft = static_cast<int32_t>(fed[row0 + 1]);
-      const bool draft_excluded =
-          mask0 != nullptr &&
-          (draft < 0 || draft >= vocab_size || !mask_allows(mask0, draft));
-      const Decision d0 = spec_decide_prefix(m_logit[0], m_id[0], mass[0],
-                                             prefix, expsrc[0], held[0],
-                                             row_vocab[0], Z0, draft, spec, exps,
-                                             &counter, rep0, draft_excluded);
-      o.covered_mass = d0.covered;
-      if (!d0.resolved) {
-        // Provisional REJECT: the commit keeps the post-row-0 state, the
-        // host decides row 0 (and row 1 if the draft stands) between windows.
-        o.fallback = 1;
-        o.fallback_row = 0;
-        v.accepted = 1;
-        v.winners[0] = m_id[0][0];
-        v.next = v.winners[0];
-      } else if (!d0.accepted) {
-        v.accepted = 1;
-        v.winners[0] = d0.token;
-        v.next = d0.token;
-        o.logprob = d0.logprob;
-      } else {
-        o.accepted_draft = 1;
-        v.accepted = 2;
-        v.winners[0] = draft;
-        o.logprob = d0.logprob;
-        const double Z1 = Z[1];
-        o.normalizer1 = Z1;
-        const Decision d1 =
-            held[1] > 0 ? decide_prefix(m_logit[1], m_id[1], mass[1], prefix,
-                                        expsrc[1], held[1], row_vocab[1], Z1,
-                                        spec, exps, &counter, rep1)
-                        : Decision{false, false, kNoId, 0.0f, 0.0};
-        if (d1.resolved) {
-          v.winners[1] = d1.token;
-          o.logprob1 = d1.logprob;
+        const Decision d =
+            held[t] > 0 ? decide_prefix(m_logit[t], m_id[t], mass[t], prefix,
+                                        expsrc[t], held[t], row_vocab[t], Zt,
+                                        spec, exps, &counter, reps[t])
+                        : none;
+        o.covered_mass[t] = d.covered;
+        if (d.resolved) {
+          v.winners[t] = d.token;
+          o.logprob[t] = d.logprob;
         } else {
           o.fallback = 1;
-          o.fallback_row = 1;
-          v.winners[1] = held[1] > 0 ? m_id[1][0] : kNoId;
+          o.fallback_row = t;
+          v.winners[t] = held[t] > 0 ? m_id[t][0] : kNoId;
         }
-        v.next = v.winners[1];
+        v.next = v.winners[t];
+        done = true;
       }
     }
     o.counter = counter;
@@ -1419,14 +1424,14 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   }
 
   // 5. The commit of the step's fed tokens into the request's context:
-  //    the token this step consumed always, the draft only when it stood
+  //    the token this step consumed always, a draft only when it stood
   //    (a provisional reject leaves it out; the host adds it back if its
   //    decision accepts — glm_sample_adjust_count).
   int32_t* counts_q = counts + static_cast<size_t>(q) * vocab_size;
   const int64_t consumed = fed[row0];
   if (consumed >= 0 && consumed < vocab_size) counts_q[consumed] += 1;
-  if (rows_per_request == 2 && v.accepted == 2) {
-    const int64_t draft = fed[row0 + 1];
+  for (int t = 1; t < v.accepted; ++t) {
+    const int64_t draft = fed[row0 + t];
     if (draft >= 0 && draft < vocab_size) counts_q[draft] += 1;
   }
 
@@ -1499,10 +1504,11 @@ void check_common(int rows, int world, int rank, int candidates,
   if (candidates < 1 || candidates > kSampleMaxCandidates)
     throw std::invalid_argument(std::string(what) + ": candidates must be in [1, " +
                                 std::to_string(kSampleMaxCandidates) + "]");
-  if (rows_per_request != 1 && rows_per_request != 2)
+  if (rows_per_request < 1 || rows_per_request > kSampleVerdictRows)
     throw std::invalid_argument(std::string(what) +
-                                ": the device sampler decides T=1 rows or the "
-                                "MTP T=2 verify");
+                                ": the device sampler decides T=1 rows or an "
+                                "MTP verify of up to " +
+                                std::to_string(kSampleVerdictRows) + " rows");
 }
 
 __global__ void adjust_count_kernel(int32_t* __restrict__ counts, int64_t token,

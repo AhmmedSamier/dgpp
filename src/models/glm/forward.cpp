@@ -89,7 +89,8 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
                                         int tp_rank, int tp_world,
                                         GlmResidency residency,
                                         GlmHeadSharding head,
-                                        int max_requests, bool mtp)
+                                        int max_requests, bool mtp,
+                                        LatentFormat kv_format)
     : cfg_(cfg),
       kda_cfg_(with_tp(cfg.kda_config(), tp_world)),
       dsa_cfg_(with_tp(cfg.dsa_config(), tp_world)),
@@ -111,6 +112,10 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   // the config, so both see the extra ordinal).
   main_dsa_layers_ = dsa_cfg_.num_dsa_layers;
   if (mtp_) dsa_cfg_.num_dsa_layers += 1;
+  // The latent cache's format (validated against the geometry: the
+  // quantized rows' alignment pins).
+  dsa_cfg_.latent_format = kv_format;
+  DsaConfig::validate_config(dsa_cfg_);
   if (max_cache_tokens < max_tokens_)
     max_cache_tokens = max_tokens_;
   if (max_requests <= 0)
@@ -173,6 +178,12 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
       ((max_cache_tokens + dsa_cfg_.block_tokens - 1) /
        dsa_cfg_.block_tokens) *
       dsa_cfg_.block_tokens;
+  // The context bound: the pool's slots (every position a session reaches
+  // has a latent row) — a model without DSA layers is bounded by the
+  // larger of the two numbers the caller gave.
+  max_context_ = dsa_cfg_.num_dsa_layers > 0
+                     ? dsa_slots
+                     : std::max<int64_t>(max_cache_tokens, max_tokens_);
   Arena::Config ac;
   ac.persistent_hot = KdaLayer::persistent_hot_bytes(kda_cfg_, max_tokens_);
   if (dsa_cfg_.num_dsa_layers > 0) {
@@ -215,9 +226,14 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_req_spans_),
                              sizeof(int32_t) * 2 * kDecodeRows,
                              cudaHostAllocMapped));
-  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_token_),
-                             sizeof(int64_t) * kDecodeRows,
-                             cudaHostAllocMapped));
+  // The pinned token rows: the decode rows, or every slot's feed rows
+  // (session_graph_seed_feed) when those are more.
+  DGPP_CUDA_OK(cudaHostAlloc(
+      reinterpret_cast<void**>(&h_token_),
+      sizeof(int64_t) * (static_cast<size_t>(kDecodeRows) +
+                         static_cast<size_t>(max_requests_) *
+                             static_cast<size_t>(kSpecRows)),
+      cudaHostAllocMapped));
   for (void* host : {static_cast<void*>(h_req_ids_),
                      static_cast<void*>(h_step_pos_),
                      static_cast<void*>(h_req_spans_),
@@ -272,6 +288,8 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     mtp_pos_.assign(static_cast<size_t>(max_requests_), 0);
     mtp_ring_snapshot_ = static_cast<uint16_t*>(alloc_device(
         static_cast<size_t>(max_requests_) * spec_tail_ring_elems() * 2));
+    mtp_chain_ring_ = static_cast<uint16_t*>(alloc_device(
+        static_cast<size_t>(max_requests_) * spec_tail_ring_elems() * 2));
     d_mtp_pos_ = static_cast<int64_t*>(
         alloc_device(sizeof(int64_t) * static_cast<size_t>(max_requests_)));
     DGPP_CUDA_OK(cudaMemset(d_mtp_pos_, 0,
@@ -280,7 +298,8 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
                                sizeof(int64_t) * static_cast<size_t>(max_requests_),
                                cudaHostAllocDefault));
     mtp_hidden_ = static_cast<uint16_t*>(alloc_device(
-        static_cast<size_t>(max_requests_) * max_tokens_ * H * 2));
+        static_cast<size_t>(max_requests_) *
+        static_cast<size_t>(max_context_) * H * 2));
     mtp_cat_ = static_cast<uint16_t*>(
         alloc_device(static_cast<size_t>(max_tokens_) * 2 * H * 2));
     mtp_x_ = static_cast<uint16_t*>(
@@ -369,6 +388,119 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
                 ms_between(t_layers, std::chrono::steady_clock::now()) / 1000.0);
 }
 
+GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
+    const GlmTextConfig& cfg, int max_tokens, int64_t max_cache_tokens,
+    int tp_rank, int tp_world, GlmResidency residency, GlmHeadSharding head,
+    int max_requests, bool mtp, LatentFormat kv_format) {
+  if (max_tokens <= 0)
+    throw std::invalid_argument("plan_memory: max_tokens must be positive");
+  if (max_requests <= 0)
+    throw std::invalid_argument("plan_memory: max_requests must be positive");
+  MemoryPlan plan;
+  const KdaConfig kda_cfg = with_tp(cfg.kda_config(), tp_world);
+  DsaConfig dsa_cfg = with_tp(cfg.dsa_config(), tp_world);
+  const int main_dsa_layers = dsa_cfg.num_dsa_layers;
+  if (mtp) dsa_cfg.num_dsa_layers += 1;
+  dsa_cfg.latent_format = kv_format;
+  DsaConfig::validate_config(dsa_cfg);
+  const KdaGeometry kda_geo = KdaGeometry::from_config(kda_cfg);
+  const GlmMoeConfig moe_cfg = cfg.moe_config();
+  const GlmMhcConfig mhc_cfg = cfg.mhc_config();
+  if (max_cache_tokens < max_tokens) max_cache_tokens = max_tokens;
+  const int64_t dsa_slots =
+      ((max_cache_tokens + dsa_cfg.block_tokens - 1) / dsa_cfg.block_tokens) *
+      dsa_cfg.block_tokens;
+  const int64_t max_context =
+      dsa_cfg.num_dsa_layers > 0 ? dsa_slots
+                                 : std::max<int64_t>(max_cache_tokens, max_tokens);
+  plan.context_tokens = max_context;
+  const size_t T = static_cast<size_t>(max_tokens);
+  const size_t H = static_cast<size_t>(cfg.hidden_size);
+  const size_t R = static_cast<size_t>(max_requests);
+  const size_t V = static_cast<size_t>(
+      GlmLayerStream::lm_vocab_count(cfg, tp_rank, tp_world, head));
+  int n_moe = 0;
+  for (GlmMlpKind k : cfg.mlps) n_moe += k == GlmMlpKind::Moe ? 1 : 0;
+
+  // The weights: every layer resident, or one layer's bump when streaming;
+  // the loader's pinned staging mirror is the largest of them.
+  size_t largest_layer = 0;
+  const int layers_total = cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);
+  for (int l = 0; l < layers_total; ++l)
+    largest_layer = std::max(largest_layer,
+                             GlmLayerStream::layer_bytes(cfg, l, tp_rank, tp_world));
+  const size_t globals = GlmLayerStream::globals_bytes(cfg, tp_rank, tp_world, head);
+  if (residency == GlmResidency::Resident) {
+    size_t resident = globals;
+    for (int l = 0; l < cfg.num_hidden_layers; ++l)
+      resident += GlmLayerStream::layer_bytes(cfg, l, tp_rank, tp_world);
+    if (mtp && cfg.mtp_layer() >= 0)
+      resident += GlmLayerStream::layer_bytes(cfg, cfg.mtp_layer(), tp_rank, tp_world);
+    plan.add("model weights (resident)", resident, std::max(largest_layer, globals));
+  } else {
+    plan.add("model weights (one streamed layer + globals)", largest_layer + globals,
+             std::max(largest_layer, globals));
+  }
+  if (tp_world > 1)
+    plan.add("tensor-parallel slice views",
+             GlmTpViews::slice_bytes(cfg, tp_world) +
+                 GlmTpViews::expert_pack_bytes(cfg, tp_world));
+  plan.add("gemm workspace (at least)", kGemmWsBase);
+  plan.add("kda scratch", KdaLayer::persistent_hot_bytes(kda_cfg, max_tokens));
+  if (dsa_cfg.num_dsa_layers > 0) {
+    plan.add(std::string("kv cache pool (") + latent_format_name(kv_format) + ")",
+             DsaStatePool::cache_bytes(dsa_cfg, max_requests, dsa_slots));
+    plan.add("dsa scratch", DsaLayer::scratch_bytes(dsa_cfg, max_tokens, dsa_slots));
+  }
+  if (n_moe > 0) {
+    size_t pinned = 0;
+    const size_t dev = GlmMoeLayer::scratch_bytes(moe_cfg, max_tokens, kDecodeRows,
+                                                  n_moe + (mtp ? 1 : 0), &pinned);
+    plan.add("moe scratch", dev, pinned);
+  }
+  if (kda_cfg.num_kda_layers > 0) {
+    const size_t layers = static_cast<size_t>(kda_cfg.num_kda_layers);
+    const size_t per_slot =
+        layers * (kda_geo.recurrent_bytes + kda_geo.conv_committed_bytes);
+    plan.add("kda state (request slots)", R * per_slot);
+    plan.add("kda speculative snapshots", static_cast<size_t>(kDecodeRows) * per_slot);
+  }
+  if (main_dsa_layers > 0) {
+    const size_t ring =
+        static_cast<size_t>(2) * dsa_cfg.index_kpool * dsa_cfg.index_head_dim * 2;
+    size_t bytes = static_cast<size_t>(main_dsa_layers) * kDecodeRows * ring;
+    if (mtp) bytes += R * ring;
+    plan.add("dsa tail-ring snapshots", bytes);
+  }
+  if (mtp) {
+    plan.add("draft hidden cache (per position)",
+             R * static_cast<size_t>(max_context) * H * 2);
+    plan.add("draft activations", T * 2 * H * 2 + T * H * 2);
+  }
+  {
+    size_t act = T * 8;                                   // d_tokens_
+    act += 2 * (T * 4 * H * 2);                           // streams_
+    act += T * 4 * 2 + T * static_cast<size_t>(mhc_cfg.coeff_rows()) * 4 +
+           T * 4 + T * 16 * 2;                            // post_, mhc, comb_
+    act += 3 * (T * H * 2);                               // collapsed_, normed_, sub_out_
+    if (cfg.first_k_dense_replace > 0)
+      act += 3 * (T * static_cast<size_t>(cfg.intermediate_size) * 2);
+    act += T * V * 4;                                     // logits_
+    act += R * 8 * 3 + static_cast<size_t>(kDecodeRows) * (4 + 8 + 8);
+    plan.add("activations (per-forward rows)", act,
+             static_cast<size_t>(kDecodeRows) * V * 4 +
+                 static_cast<size_t>(kDecodeRows) * H * 2);
+  }
+  if (n_moe > 0) {
+    const size_t K = static_cast<size_t>(moe_cfg.top_k);
+    const size_t E = static_cast<size_t>(moe_cfg.n_experts);
+    const size_t per_row = K * 4 * 2 + E * 4;
+    plan.add("route-trace staging", 0,
+             static_cast<size_t>(n_moe) * (static_cast<size_t>(kDecodeRows) + T) * per_row);
+  }
+  return plan;
+}
+
 GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(gemm_ws_);
   cudaFree(dsa_scratch_);
@@ -391,6 +523,7 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   cudaFree(spec_tail_);
   cudaFree(mtp_hidden_);
   cudaFree(mtp_ring_snapshot_);
+  cudaFree(mtp_chain_ring_);
   cudaFree(mtp_cat_);
   cudaFree(mtp_x_);
   cudaFree(d_tokens_);

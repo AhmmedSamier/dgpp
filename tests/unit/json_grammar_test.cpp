@@ -151,6 +151,33 @@ DGPP_TEST(json_grammar_lexerAcceptsTheCorpusAndRejectsTheRest) {
 }
 
 DGPP_TEST(json_grammar_schemaCompilesTheSubsetAndRefusesNamingTheKeyword) {
+  // A tool argument's compile tolerates the keywords that only narrow a
+  // value, naming each by path; the strict compile refuses them (2026-09-06).
+  {
+    const dgpp::minijson::ParseResult p = dgpp::minijson::parse(
+        R"({"type":"object","properties":{"n":{"type":"integer","minimum":0,"maximum":9},)"
+        R"("s":{"type":"string","pattern":"^a","format":"date"}},"required":["n"]})");
+    std::vector<std::string> unenforced;
+    const dgpp::text::JsonSchema lax = dgpp::text::compile_json_schema(p.root, &unenforced);
+    const dgpp::text::JsonSchemaNode& r = lax.nodes[static_cast<size_t>(lax.root)];
+    require(r.property_names.size() == 2 &&
+                lax.nodes[static_cast<size_t>(r.property_nodes[0])].types ==
+                    dgpp::text::JsonSchemaNode::kInteger &&
+                lax.nodes[static_cast<size_t>(r.property_nodes[1])].types ==
+                    dgpp::text::JsonSchemaNode::kString,
+            "tolerated keywords leave the types");
+    require(unenforced == std::vector<std::string>{
+                              "schema.properties.n.minimum", "schema.properties.n.maximum",
+                              "schema.properties.s.pattern", "schema.properties.s.format"},
+            "each tolerated keyword named by path");
+    bool threw = false;
+    try {
+      dgpp::text::compile_json_schema(p.root);
+    } catch (const std::invalid_argument& e) {
+      threw = std::string(e.what()).rfind("schema.properties.n.minimum", 0) == 0;
+    }
+    require(threw, "the strict compile still refuses by path");
+  }
   const auto s = compile(R"({
     "type": "object",
     "properties": {
