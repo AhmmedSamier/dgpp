@@ -29,6 +29,7 @@
 #include "models/glm/speculative.hpp"
 #include "models/glm/loader.hpp"
 #include "models/glm/step_timing.hpp"
+#include "kernels/dsa.hpp"
 #include "kernels/glm_spec.hpp"
 #include "models/glm/tp_bus.hpp"
 #include "net/collective_bus.hpp"
@@ -925,6 +926,26 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     slot_fallbacks_[static_cast<size_t>(req)] = 0;
     slot_mtp_attempts_[static_cast<size_t>(req)] = {};
     slot_mtp_accepts_[static_cast<size_t>(req)] = {};
+    {
+      // The listed attention's guarded gather (2026-09-06): an anomaly is
+      // a bug survived, logged loudly with its first values.
+      long long a[6] = {0, 0, 0, 0, 0, 0};
+      const unsigned long long n = dsa_attn_anomalies(a, /*clear=*/true, model_->stream());
+      if (n != 0)
+        DGPP_LOG_ERROR(
+            "rank {}: slot {} closed with {} listed-attention gather(s) out of "
+            "range (zero-filled); first: token {} block {} query row {} split {} "
+            "list index {} of {}",
+            rank_, req, n, a[0], a[1], a[2], a[3], a[4], a[5]);
+      long long b[6] = {0, 0, 0, 0, 0, 0};
+      const unsigned long long m = dsa_select_anomalies(b, /*clear=*/true, model_->stream());
+      if (m != 0)
+        DGPP_LOG_ERROR(
+            "rank {}: slot {} closed with {} short select fill(s); first: {} "
+            "visible pools, {} below the bin, {} found, {} remaining, bin count "
+            "{}, {} candidates found",
+            rank_, req, m, b[0], b[1], b[2], b[3], b[4], b[5]);
+    }
     model_->session_close(req);
     live_[static_cast<size_t>(req)] = false;
     reserved_[static_cast<size_t>(req)] = false;

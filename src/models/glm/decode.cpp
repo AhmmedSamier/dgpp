@@ -1003,6 +1003,20 @@ int64_t GlmDiagnosticModel::session_position(int req) const {
 // logits matrix is 100s of MB at real dims; the last row is what greedy
 // consumes, and the parity gate compares rows, not matrices).
 // ---------------------------------------------------------------------------
+// DGPP_SYNC_EAGER=1 (2026-09-06, the fault hunt): an eager row syncs after
+// each stage and names the stage whose kernels faulted — the plain sync
+// only names the first call that saw the sticky error.
+void GlmDiagnosticModel::debug_sync(const char* what, int layer, bool decode_row) {
+  static const bool on = std::getenv("DGPP_SYNC_EAGER") != nullptr;
+  if (!on) return;
+  const cudaError_t e = cudaStreamSynchronize(stream_);
+  if (e != cudaSuccess)
+    throw std::runtime_error(std::string("eager row fault after ") + what +
+                             " (layer " + std::to_string(layer) + ", " +
+                             (decode_row ? "decode" : "prefill") +
+                             "): " + cudaGetErrorString(e));
+}
+
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     int req, const std::vector<int64_t>& ids, int64_t token_start,
     bool decode_row, bool capture_mode, int batch_requests) {
@@ -1039,8 +1053,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // (The bus logs arm -> first collective; this splits it at the graph's
   // own start.) One 1-thread kernel; decode rows only.
   if (decode_row) launch_globaltimer_stamp(h_graph_start_gt_, stream_);
+  if (!capture_mode) debug_sync("uploads", -1, decode_row);
   glm_embed_bcast_streams(globals_.embed, step_tokens_, streams_[0], T, H,
                           stream_);
+  if (!capture_mode) debug_sync("embed", -1, decode_row);
 
   Outputs out;
   out.routes.reserve(static_cast<size_t>(cfg_.num_hidden_layers));
@@ -1164,6 +1180,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       // recorded node and the stream order IS the drain.
       if (!capture_mode) {
         step_timing::Scope drain(step_timing::kFoldDrain);
+        debug_sync("attention", layer, decode_row);
         DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
       }
       boundary_->reduce(attn_out, T, H);
@@ -1245,6 +1262,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       // recorded node and the stream order IS the drain.
       if (!capture_mode) {
         step_timing::Scope drain(step_timing::kFoldDrain);
+        debug_sync("ffn", layer, decode_row);
         DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
       }
       boundary_->reduce(ffn_out, T, H);

@@ -197,6 +197,18 @@ size_t dsa_select_workspace_bytes(int max_rows, int64_t max_pools);
 // over rows, [4] expansion total over rows, [5] exit. A diagnostic for
 // dsa_select_bench; synchronizes the device.
 void dsa_select_debug_phases(uint64_t out[8]);
+// The listed attention gather's anomaly record (2026-09-06): the number of
+// gathers that found a token outside the request's table row or a block
+// outside the pool (zero-filled instead of read), and the first one's
+// (token, block, query row, split, list index, live count). `clear` resets
+// the count. Stream-ordered on `stream` (synchronizes it).
+unsigned long long dsa_attn_anomalies(long long out[6], bool clear,
+                                      cudaStream_t stream);
+// The decode select's anomaly record (2026-09-06): phase-2 fills whose scan
+// disagreed with the histogram, the first one's (visible pools, lower,
+// defs found, remaining, bin count, candidates found). `clear` resets.
+unsigned long long dsa_select_anomalies(long long out[6], bool clear,
+                                        cudaStream_t stream);
 void dsa_select_decode(const void* q_fp8, const float* w_folded,
                        const int32_t* req_ids, const int64_t* pos, int rows,
                        const int32_t* block_tables, int blocks_per_request,

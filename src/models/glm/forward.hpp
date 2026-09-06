@@ -745,6 +745,7 @@ class GlmDiagnosticModel {
   // Pushes the host position mirror of slot `req` to the device (the
   // device-driven graph's positions source); async on stream_.
   void push_position(int req);
+  void debug_sync(const char* what, int layer, bool decode_row);
   // The rollback segment table for slot `req` (glm_spec_commit's input):
   // the live KDA state slices and DSA tail rings with their snapshots.
   GlmSpecSegments spec_segments(int req, int snapshot_row0 = 0);

@@ -308,8 +308,11 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   three per-window lines back at INFO on their own — the per-tick lines
   perturb the collective skew they measure; `DGPP_PIPELINE=0` turns the
   pipelined replay off — every replay settles right after its launch, the
-  pre-2026-09-06 step — and `DGPP_PIPELINE_TRACE=1` logs each launch and
-  settle) — the one-hour soak had written 307,000
+  pre-2026-09-06 step — `DGPP_PIPELINE_TRACE=1` logs each launch and
+  settle, and `DGPP_SYNC_EAGER=1` makes an eager row — a prefill chunk,
+  the sampled fallback's verify and re-draft — synchronize after every
+  stage and validate its selection list before the attention, naming the
+  stage a fault came from; the fault hunt's knob, not for serving) — the one-hour soak had written 307,000
   lines (40 MB) per rank at INFO, none of them aggregate; the same load
   now writes ~130 lines per minute, the per-request admitted / retired /
   deferred / cancelled lines and the stats line. `DGPP_LOG_LEVEL=debug`

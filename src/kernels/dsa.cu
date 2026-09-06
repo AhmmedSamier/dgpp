@@ -282,6 +282,8 @@ __device__ inline int expand_from_best(const uint32_t* best_hi,
     real[rd] = i < select_k &&
                (best_hi[i] != 0xFFFFFFFFu || best_lo[i] != 0xFFFFFFFFu);
     id[rd] = real[rd] ? int32_t((uint64_t(best_hi[i]) << 32 | best_lo[i]) & kIdxMask) : 0;
+    // A pool past the row's visible pools is no selection (2026-09-06).
+    if (real[rd] && int64_t(id[rd]) * kpool > pos) real[rd] = false;
     const uint32_t mask = __ballot_sync(0xffffffffu, real[rd]);
     within[rd] = __popc(mask & ((1u << lane) - 1u));
     if (lane == 0) warp_cnt[rd * nwarp + warp] = __popc(mask);
@@ -901,8 +903,15 @@ struct PrefillKeyFn {
 // Kernel nodes never share that queue; the graph engine rejects any
 // non-kernel node at capture. The histogram rows reset the same way: the
 // last block zeroes them after consuming them.
-__global__ void select_counter_reset_kernel(int32_t* counter) {
+__global__ void select_counter_reset_kernel(int32_t* counter, int32_t* hist_rows,
+                                            int hist_words) {
   if (threadIdx.x < 2) counter[threadIdx.x] = 0;
+  // The rows' histograms start at zero every call (2026-09-06): the
+  // workspace is not zeroed at allocation, and a row's histogram used to
+  // sit at a call-dependent offset (see dsa_select_decode).
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < hist_words;
+       i += gridDim.x * blockDim.x)
+    hist_rows[i] = 0;
 }
 
 constexpr int kSelectRadixBits = 10;  // 1024 bins: 4 KB of smem, two blocks per SM (2026-09-06)
@@ -965,6 +974,26 @@ __device__ inline void select_find_bin(const int32_t* hist, int remaining,
     }
   }
   __syncthreads();
+}
+
+// The decode select's anomaly record (2026-09-06): a phase-2 fill whose
+// scan disagreed with the histogram (defs != lower, or the boundary bin
+// short of `remaining`), the first one's accounting and a count;
+// dsa_select_anomalies() reads and clears it.
+__device__ unsigned long long g_select_anomaly_count = 0;
+__device__ long long g_select_anomaly[6] = {0, 0, 0, 0, 0, 0};
+__device__ __forceinline__ void select_anomaly_record(int64_t visible, int lower,
+                                                      int n_def, int remaining,
+                                                      int cnt, int n_cand) {
+  if (atomicAdd(&g_select_anomaly_count, 1ull) == 0ull) {
+    g_select_anomaly[0] = visible;
+    g_select_anomaly[1] = lower;
+    g_select_anomaly[2] = n_def;
+    g_select_anomaly[3] = remaining;
+    g_select_anomaly[4] = cnt;
+    g_select_anomaly[5] = n_cand;
+    __threadfence();
+  }
 }
 
 __global__ void select_decode_kernel(
@@ -1148,9 +1177,18 @@ __global__ void select_decode_kernel(
       // Gather: keys below the boundary bin straight into best[] (their
       // order is free — the expansion sorts ids); the bin's keys into the
       // candidate array, sorted so the `remaining` smallest complete best.
+      // best[] starts EMPTY (2026-09-06): an entry the fill leaves
+      // unwritten is dropped by the expansion instead of carrying shared
+      // memory's leftovers into the token list (a 62,600 in a 2,119-token
+      // context faulted the listed attention on the fabric); a short fill
+      // is recorded (dsa_select_anomalies).
       if (threadIdx.x == 0) {
         s_n_def = 0;
         s_n_cand = 0;
+      }
+      for (int i = threadIdx.x; i < select_k; i += blockDim.x) {
+        best_hi[i] = 0xFFFFFFFFu;
+        best_lo[i] = 0xFFFFFFFFu;
       }
       for (int i = threadIdx.x; i < kSelectStopCandidates; i += blockDim.x) {
         cand_hi[i] = 0xFFFFFFFFu;
@@ -1193,6 +1231,9 @@ __global__ void select_decode_kernel(
         }
       }
       __syncthreads();
+      if (threadIdx.x == 0 &&
+          (s_n_def != lower || s_n_cand < remaining || cnt != s_n_cand))
+        select_anomaly_record(visible, lower, s_n_def, remaining, cnt, s_n_cand);
     }
     const unsigned long long t_mid = select_now();
     int* smem_count = reinterpret_cast<int*>(scratch + select_k);
@@ -1626,6 +1667,24 @@ __device__ __forceinline__ void mma_bf16_16816(float (&c)[4], uint32_t a0,
 // into its own 16-token latent tile; the two slabs' loops run to the longer
 // one's tile count. No union, no membership masks: the slab-is-a-row
 // property makes the per-row selection the block's natural structure.
+// The listed gather's anomaly record: the first out-of-range token or block
+// (first writer wins) and a count; dsa_attn_anomalies() reads and clears it.
+__device__ unsigned long long g_attn_anomaly_count = 0;
+__device__ long long g_attn_anomaly[6] = {0, 0, 0, 0, 0, 0};
+__device__ __forceinline__ void attn_anomaly_record(int64_t tok, int32_t blk,
+                                                    int qrow, int split,
+                                                    int index, int live) {
+  if (atomicAdd(&g_attn_anomaly_count, 1ull) == 0ull) {
+    g_attn_anomaly[0] = tok;
+    g_attn_anomaly[1] = blk;
+    g_attn_anomaly[2] = qrow;
+    g_attn_anomaly[3] = split;
+    g_attn_anomaly[4] = index;
+    g_attn_anomaly[5] = live;
+    __threadfence();
+  }
+}
+
 template <int KV, bool kListed, LatentFormat F>
 __global__ __launch_bounds__(dense::kThreads, 2) void attn_flash_kernel(
     const uint16_t* __restrict__ q_tilde, const uint8_t* __restrict__ latent,
@@ -1731,10 +1790,20 @@ __global__ __launch_bounds__(dense::kThreads, 2) void attn_flash_kernel(
         const int tt = idx / (KV / 8), c8 = idx % (KV / 8);
         uint4 val = make_uint4(0, 0, 0, 0);
         if (tt < n) {
+          // The gather is guarded (2026-09-06): a token outside the table
+          // row or a block outside the pool zero-fills the row and records
+          // the first anomaly instead of faulting the context — the listed
+          // kernel read an unmapped page on the fabric once in ~10 eager
+          // rows of the fallback path; the record names the values.
           const int64_t tok = list[t0 + tt];
-          const int32_t blk = bt[tok / block_tokens];
-          const int64_t phys = int64_t(blk) * block_tokens + (tok % block_tokens);
-          val = LatentTile<F>::load8(latent, latent_scale, phys, KV, c8 * 8);
+          const int64_t bidx = tok >= 0 ? tok / block_tokens : -1;
+          const int32_t blk = (bidx >= 0 && bidx < blocks_per_request) ? bt[bidx] : -1;
+          if (blk >= 0 && blk < blocks_per_request) {
+            const int64_t phys = int64_t(blk) * block_tokens + (tok % block_tokens);
+            val = LatentTile<F>::load8(latent, latent_scale, phys, KV, c8 * 8);
+          } else if (c8 == 0) {
+            attn_anomaly_record(tok, blk, qrow_first, s, t0 + tt, n);
+          }
         }
         *reinterpret_cast<uint4*>(sL + tt * SQ + c8 * 8) = val;
       }
@@ -2411,7 +2480,16 @@ size_t select_hist_bytes(int rows) {
 size_t dsa_select_workspace_bytes(int max_rows, int64_t max_pools) {
   if (max_rows <= 0 || max_rows > kSelectMaxRows || max_pools <= 0)
     throw std::invalid_argument("dsa_select_workspace_bytes: rows in [1, 8], pools > 0");
-  return select_keys_bytes(max_rows, max_pools) + select_hist_bytes(max_rows);
+  // Laid out for kSelectMaxRows rows regardless of max_rows (2026-09-06):
+  // the histograms follow the keys at a FIXED offset the launcher derives
+  // the same way, whatever row count a call brings. (They used to follow
+  // the call's own rows of keys, so a one-row call — the sampled
+  // fallback's eager verify or re-draft — put its histogram inside row 1's
+  // keys, which every two-row replay writes: a garbage histogram, a
+  // partial best[] fill, stale shared-memory pool ids expanded into token
+  // ids, and the listed attention reading an unmapped page.)
+  (void)max_rows;
+  return select_keys_bytes(kSelectMaxRows, max_pools) + select_hist_bytes(kSelectMaxRows);
 }
 
 void dsa_select_decode(const void* q_fp8, const float* w_folded,
@@ -2437,9 +2515,11 @@ void dsa_select_decode(const void* q_fp8, const float* w_folded,
   if (smem > size_t(g_select_smem_cap)) DGPP_CUDA_OK(cudaErrorInvalidValue);
   const int blocks = std::max(grid_blocks > 0 ? grid_blocks : kSelectDefaultGrid, rows);
   uint64_t* keys_ws = static_cast<uint64_t*>(select_ws);
+  // The histograms at the workspace's fixed offset (dsa_select_workspace_bytes).
   int32_t* hist_ws = reinterpret_cast<int32_t*>(
-      static_cast<char*>(select_ws) + select_keys_bytes(rows, ws_max_pools));
-  select_counter_reset_kernel<<<1, 32, 0, stream>>>(counter_ws);
+      static_cast<char*>(select_ws) + select_keys_bytes(kSelectMaxRows, ws_max_pools));
+  select_counter_reset_kernel<<<4, 256, 0, stream>>>(counter_ws, hist_ws,
+                                                     rows * kSelectHistBins);
   select_decode_kernel<<<blocks, 256, smem, stream>>>(
       static_cast<const uint8_t*>(q_fp8), w_folded, req_ids, pos, rows,
       block_tables, blocks_per_request,
@@ -2451,6 +2531,47 @@ void dsa_select_decode(const void* q_fp8, const float* w_folded,
 
 void dsa_select_debug_phases(uint64_t out[8]) {
   DGPP_CUDA_OK(cudaMemcpyFromSymbol(out, g_select_phase, sizeof(unsigned long long) * 8));
+}
+
+unsigned long long dsa_attn_anomalies(long long out[6], bool clear,
+                                      cudaStream_t stream) {
+  // Stream-ordered (2026-09-06): a legacy-stream symbol copy synchronizes
+  // with every blocking stream of the device — in a loopback world that
+  // is the peer rank's stream, mid-replay and waiting on this rank.
+  unsigned long long count = 0;
+  DGPP_CUDA_OK(cudaMemcpyFromSymbolAsync(&count, g_attn_anomaly_count, sizeof(count), 0,
+                                         cudaMemcpyDeviceToHost, stream));
+  long long first[6] = {0, 0, 0, 0, 0, 0};
+  DGPP_CUDA_OK(cudaMemcpyFromSymbolAsync(first, g_attn_anomaly, sizeof(first), 0,
+                                         cudaMemcpyDeviceToHost, stream));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+  if (out != nullptr) for (int i = 0; i < 6; ++i) out[i] = first[i];
+  if (clear && count != 0) {
+    static const unsigned long long zero = 0;
+    DGPP_CUDA_OK(cudaMemcpyToSymbolAsync(g_attn_anomaly_count, &zero, sizeof(zero), 0,
+                                         cudaMemcpyHostToDevice, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+  }
+  return count;
+}
+
+unsigned long long dsa_select_anomalies(long long out[6], bool clear,
+                                        cudaStream_t stream) {
+  unsigned long long count = 0;
+  DGPP_CUDA_OK(cudaMemcpyFromSymbolAsync(&count, g_select_anomaly_count, sizeof(count), 0,
+                                         cudaMemcpyDeviceToHost, stream));
+  long long first[6] = {0, 0, 0, 0, 0, 0};
+  DGPP_CUDA_OK(cudaMemcpyFromSymbolAsync(first, g_select_anomaly, sizeof(first), 0,
+                                         cudaMemcpyDeviceToHost, stream));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+  if (out != nullptr) for (int i = 0; i < 6; ++i) out[i] = first[i];
+  if (clear && count != 0) {
+    static const unsigned long long zero = 0;
+    DGPP_CUDA_OK(cudaMemcpyToSymbolAsync(g_select_anomaly_count, &zero, sizeof(zero), 0,
+                                         cudaMemcpyHostToDevice, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+  }
+  return count;
 }
 
 void dsa_select_prefill(const float* dot, int64_t dot_stride,

@@ -6,6 +6,26 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- Fixed: the decode index selection's histogram sat at a call-dependent
+  workspace offset (the call's rows of keys), so a ONE-row call — the
+  sampled fallback's eager verify or re-draft — read its histogram out of
+  row 1's keys, which every two-row replay writes: a garbage histogram, a
+  partial best-list fill, stale shared-memory pool ids expanded into token
+  ids, and the listed attention reading an unmapped page (an engine
+  failure once in roughly ten fallbacks past 2,048 tokens of context; the
+  first report was a live service at 22:13 on 2026-09-06). The histograms
+  now sit at a fixed offset for the maximum rows and are zeroed every
+  call; the best list starts empty and the expansion drops any pool past
+  the row's visible pools; the listed gather checks the token and its
+  block and zero-fills instead of faulting; both record their first
+  anomaly, logged at the slot's close (`dsa_select_anomalies`,
+  `dsa_attn_anomalies`). `DGPP_SYNC_EAGER=1` syncs an eager row after each
+  stage and validates the selection list before the attention — the knob
+  that found it. Verified by an 11-turn long-decode sampled soak (about 150
+  fallbacks past 2K tokens of context) with no anomaly, where the
+  unfixed select logged short fills on every request, and by the DSA
+  suite.
+
 - The pipelined replay: the engine's step returns at the verify's verdict
   (a kernel node publishes the slot's replay sequence to pinned memory)
   and the next replay is launched before the previous one's draft tail

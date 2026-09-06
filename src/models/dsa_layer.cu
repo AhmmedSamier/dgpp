@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "common/cuda_check.hpp"
 #include "kernels/dsa.hpp"
@@ -354,6 +355,24 @@ void DsaLayer::attend_tile(DsaStatePool& state, int layer,
   }
 }
 
+namespace {
+// DGPP_SYNC_EAGER=1 (2026-09-06, the fault hunt): an eager decode syncs after
+// each stage and names the stage whose kernels faulted; a capturing stream
+// is never synced.
+void dsa_debug_sync(cudaStream_t stream, const char* what) {
+  static const bool on = std::getenv("DGPP_SYNC_EAGER") != nullptr;
+  if (!on) return;
+  cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+  if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess ||
+      cap != cudaStreamCaptureStatusNone)
+    return;
+  const cudaError_t e = cudaStreamSynchronize(stream);
+  if (e != cudaSuccess)
+    throw std::runtime_error(std::string("dsa decode fault after ") + what +
+                             ": " + cudaGetErrorString(e));
+}
+}  // namespace
+
 void DsaLayer::attend_dense(DsaStatePool& state, int layer,
                             const int32_t* req_ids, int64_t row0, int rows,
                             bool listed, cudaStream_t stream, int n_split) {
@@ -363,6 +382,7 @@ void DsaLayer::attend_dense(DsaStatePool& state, int layer,
     dsa_absorb_q(q_ + a0 * geo_.local_q_rows, w_.kv_b, q_tilde_, arows,
                  geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
                  cfg_.kv_lora_rank, stream);
+    dsa_debug_sync(stream, "absorb_q");
     const bool launched =
         listed ? dsa_attn_listed(q_tilde_, state.latent(layer), req_ids + a0,
                                  topk_ + a0 * geo_.max_selected, geo_.max_selected,
@@ -385,11 +405,28 @@ void DsaLayer::attend_dense(DsaStatePool& state, int layer,
       attend_tile(state, layer, req_ids, a0, arows, 8, stream);
       continue;
     }
+    dsa_debug_sync(stream, listed ? "listed flash" : "dense flash");
+    if (listed && std::getenv("DGPP_SYNC_EAGER") != nullptr) {
+      cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+      if (cudaStreamIsCapturing(stream, &cap) == cudaSuccess &&
+          cap == cudaStreamCaptureStatusNone) {
+        long long a[6] = {0, 0, 0, 0, 0, 0};
+        const unsigned long long n = dsa_attn_anomalies(a, /*clear=*/true, stream);
+        if (n != 0)
+          throw std::runtime_error(
+              "listed attention anomaly: " + std::to_string(n) + " gather(s) out of range; first: token " +
+              std::to_string(a[0]) + " block " + std::to_string(a[1]) + " query row " + std::to_string(a[2]) +
+              " split " + std::to_string(a[3]) + " list index " + std::to_string(a[4]) + " of " +
+              std::to_string(a[5]) + " (layer " + std::to_string(layer) + ", rows " + std::to_string(rows) + ")");
+      }
+    }
     dsa_attn_combine(m_ws_, l_ws_, c_ws_, arows, n_split,
                      geo_.local_heads, cfg_.kv_lora_rank, c_, stream);
+    dsa_debug_sync(stream, "combine");
     dsa_vout_gemm(c_, w_.kv_b, attn_out_ + a0 * geo_.local_v_rows, arows,
                   geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
                   cfg_.kv_lora_rank, stream);
+    dsa_debug_sync(stream, "vout");
   }
 }
 
@@ -556,6 +593,7 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   dot_stride_last_ = 0;  // decode selects consume no dot buffer (debug probe)
 
   project_common(hidden_in, tokens, stream);
+  dsa_debug_sync(stream, "project");
   // Everything from here to the output projection is latency-bound at
   // decode (~130 us of small kernels): the longest window in the step, so
   // the budget is the whole projection, capped only by L2 headroom.
@@ -571,12 +609,14 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                     int(state.total_blocks()), cfg_.block_tokens,
                     state.latent(layer), cfg_.kv_lora_rank, stream,
                     cfg_.latent_format, state.latent_scale(layer));
+  dsa_debug_sync(stream, "latent append");
   // Ring update + pool compression for any pool completed by this batch.
   dsa_kpool_decode_update(
       k_rows_, dim, gate_rows_, dim, w_.ape, req_ids, pos, req_spans,
       num_requests, state.block_tables(), int(state.total_blocks()),
       state.tail(layer), state.index_k(layer), state.index_scale(layer),
       geo_.pools_per_block, kpool, dim, stream, tail_snapshots);
+  dsa_debug_sync(stream, "kpool update");
   // Fused select straight from the blocked index cache.
   dsa_select_decode(q_fp8_, w_folded_, req_ids, pos, tokens,
                     state.block_tables(), int(state.total_blocks()),
@@ -584,6 +624,51 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                     geo_.pools_per_block, heads, dim, geo_.select_k, kpool,
                     geo_.max_selected, topk_, counts_, select_ws_,
                     select_ws_pools_, counter_ws_, /*grid_blocks=*/0, stream);
+  dsa_debug_sync(stream, "select");
+  if (std::getenv("DGPP_SYNC_EAGER") != nullptr) {
+    // The fault hunt (2026-09-06): every selected token inside the row's
+    // context, every block-table entry it reaches reserved — checked on
+    // the host before the attention gathers through them.
+    cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &cap) == cudaSuccess &&
+        cap == cudaStreamCaptureStatusNone) {
+      std::vector<int32_t> cnt(static_cast<size_t>(tokens)), list(static_cast<size_t>(tokens) * geo_.max_selected);
+      std::vector<int64_t> posh(static_cast<size_t>(tokens));
+      std::vector<int32_t> ids(static_cast<size_t>(tokens));
+      const size_t bpr = size_t(state.total_blocks());
+      std::vector<int32_t> table(size_t(state.max_requests()) * bpr);
+      DGPP_CUDA_OK(cudaMemcpyAsync(cnt.data(), counts_, sizeof(int32_t) * cnt.size(), cudaMemcpyDeviceToHost, stream));
+      DGPP_CUDA_OK(cudaMemcpyAsync(list.data(), topk_, sizeof(int32_t) * list.size(), cudaMemcpyDeviceToHost, stream));
+      DGPP_CUDA_OK(cudaMemcpyAsync(posh.data(), pos, sizeof(int64_t) * posh.size(), cudaMemcpyDeviceToHost, stream));
+      DGPP_CUDA_OK(cudaMemcpyAsync(ids.data(), req_ids, sizeof(int32_t) * ids.size(), cudaMemcpyDeviceToHost, stream));
+      DGPP_CUDA_OK(cudaMemcpyAsync(table.data(), state.block_tables(), sizeof(int32_t) * table.size(), cudaMemcpyDeviceToHost, stream));
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      for (int t = 0; t < tokens; ++t) {
+        if (posh[size_t(t)] < 0) continue;
+        const int64_t seq_len = posh[size_t(t)] + 1;
+        const int32_t* row = list.data() + size_t(t) * geo_.max_selected;
+        const int32_t* bt = table.data() + size_t(ids[size_t(t)]) * bpr;
+        if (cnt[size_t(t)] < 0 || cnt[size_t(t)] > geo_.max_selected)
+          throw std::runtime_error("select check: row " + std::to_string(t) + " count " + std::to_string(cnt[size_t(t)]));
+        for (int j = 0; j < cnt[size_t(t)]; ++j) {
+          const int32_t tok = row[j];
+          if (tok < 0 || tok >= seq_len)
+            throw std::runtime_error(
+                "select check: layer " + std::to_string(layer) + " row " + std::to_string(t) +
+                " (req " + std::to_string(ids[size_t(t)]) + ", pos " + std::to_string(posh[size_t(t)]) +
+                ", count " + std::to_string(cnt[size_t(t)]) + ") entry " + std::to_string(j) +
+                " = " + std::to_string(tok) + " outside [0, " + std::to_string(seq_len) + ")");
+          const int64_t b = tok / cfg_.block_tokens;
+          if (b >= int64_t(bpr) || bt[b] < 0 || bt[b] >= int32_t(state.total_blocks()))
+            throw std::runtime_error(
+                "select check: layer " + std::to_string(layer) + " row " + std::to_string(t) +
+                " (req " + std::to_string(ids[size_t(t)]) + ", pos " + std::to_string(posh[size_t(t)]) +
+                ") entry " + std::to_string(j) + " = " + std::to_string(tok) + " maps to block " +
+                std::to_string(b) + " -> " + std::to_string(b < int64_t(bpr) ? bt[b] : -2));
+        }
+      }
+    }
+  }
   // Absorbed attention + v-absorb + output projection: the tensor-core
   // listed kernel when the geometry is its (16-head slabs), else the
   // register split kernel.
@@ -592,9 +677,11 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                  std::min(decode_mma_split_, std::max(decode_n_split_, 8)));
   else
     attend_tile(state, layer, req_ids, 0, tokens, decode_n_split_, stream);
+  dsa_debug_sync(stream, "attention");
   gemm_.matmul(attn_out_, w_.o_proj, out, tokens, cfg_.hidden,
                geo_.local_v_rows, DType::BF16, GemmOut::BF16,
                size_t(geo_.local_v_rows), gemm_ws_, gemm_ws_bytes_, stream);
+  dsa_debug_sync(stream, "o_proj");
   // Padding rows (pos < 0: a fixed-shape batch's unoccupied rows, the
   // in-graph draft's rejected row) skipped every state write above but
   // still carry whatever the attention scratch held into the projection.

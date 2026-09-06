@@ -66,9 +66,11 @@ void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
                        decode_row ? d_step_pos_ : nullptr, first_pos, r.enorm,
                        r.hnorm, mtp_cat_, T, H, eps, stream_);
   }
+  if (!capture_mode) debug_sync("mtp input", -1, decode_row);
   gemm_.matmul(mtp_cat_, r.eh_proj, mtp_x_, T, H, 2 * H, DType::BF16,
                GemmOut::BF16, static_cast<size_t>(2 * H), gemm_ws_,
                gemm_ws_bytes_, stream_);
+  if (!capture_mode) debug_sync("mtp eh_proj", -1, decode_row);
 
   const auto fold = [&](uint16_t* partial) {
     if (!boundary_) return;
@@ -99,6 +101,7 @@ void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
     dsa_->enqueue_prefill(normed_, pool_, ordinal, req, first_pos, T,
                           attn_out, stream_);
   }
+  if (!capture_mode) debug_sync("mtp attention", -1, decode_row);
   fold(attn_out);
   glm_residual_add_bf16(mtp_x_, attn_out, static_cast<int64_t>(T) * H,
                         stream_);
@@ -113,6 +116,7 @@ void GlmDiagnosticModel::mtp_run_rows(int req, int64_t first_pos, int T,
   } else {
     moe_->enqueue(normed_, ffn_out, T, stream_);
   }
+  if (!capture_mode) debug_sync("mtp ffn", -1, decode_row);
   fold(ffn_out);
   glm_residual_add_bf16(mtp_x_, ffn_out, static_cast<int64_t>(T) * H,
                         stream_);
