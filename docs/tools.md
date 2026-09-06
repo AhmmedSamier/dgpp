@@ -1,0 +1,51 @@
+# Tools, binaries and scripts
+
+Every program and script in the tree, with what it is for. The serving
+binary is `dgpp-serve`; the launcher is `scripts/dgpp-cluster`; everything
+else is a probe, a check or an evidence ritual. `tools/` holds the Python
+checkpoint and reference tooling the tests use; `scripts/` holds the fabric
+and serving operations.
+
+| command | purpose |
+|---|---|
+| `dgppctl info` | CUDA and platform facts |
+| `micro_mem_bw -s 4096` | LPDDR5x streaming patterns |
+| `micro_gemm_peak` | best-of-cuBLASLt-heuristics FP8/BF16 shape sweep |
+| `micro_zerocopy` | pinned/device GPU bandwidth, contention proxies, flag latency |
+| `micro_gdr_probe` | informational direct-device MR probe and copy profile |
+| `micro_ibv_smoke info` | enumerate verbs devices |
+| `micro_ibv_smoke serve PORT --once --dev DEV` | one cross-node responder session |
+| `micro_ibv_smoke ping --peer IP:PORT --dev DEV` | signaled RC SEND echo latency |
+| `micro_ibv_smoke bw --peer IP:PORT --dev DEV` | signaled RC SEND bandwidth; repeat peer/device for both lanes |
+| `micro_ibv_smoke verify --peer IP:PORT --dev DEV` | ordered NIC DMA payload/doorbell → GPU hash validation |
+| `kda_bench` | KDA decode state-traffic and layer timing profile (M2) |
+| `gpt_doll --selftest` | synthetic eager/graph parity testbed |
+| `glm_bind_check --config CONFIG --checkpoint-dir DIR` | validate a real GLM-5.3 checkpoint against the expected-tensor table (config parse, names, dtypes, shapes, FP8 scale pairing; headers only) |
+| `glm_stream_check --config CONFIG --checkpoint-dir DIR` | stream real layers through the resident loader; bytes vs formula reconciled per layer |
+| `glm_forward_check --config CONFIG --checkpoint-dir DIR --suite FILE` | curated reference suite: ISOLATED per-layer parity vs torch-reference dumps, head + routing agreement (DESIGN §7.5) |
+| `glm_forward_check ... --trace-ids-file F --trace-out T` | engine-only real route-trace capture (deterministic) for the traffic model |
+| `tools/route_trace_traffic.py TRACE` | route-trace traffic model: measured busiest-rank occupancy and corrected critical path (replaces the uniform-expert assumption) |
+| `tools/checkpoint_audit.py [MODEL_DIR]` | regenerate inventory and checkpoint budget |
+| `tools/make_shardspec.py MODEL_DIR` | generate the loader shard plan |
+| `tools/kda_reference_dump.py` | KDA parity dumps: `selftest`, `gen-pure` (CI oracle), `gen-torch` (real checkpoint slices; needs torch) |
+| `tools/dsa_reference_dump.py` | DSA parity dumps: `selftest`, `gen-pure` (CI oracle), `gen-torch` (real checkpoint slices; needs torch) |
+| `tools/glm_reference_dump.py` | full-model parity dumps: `selftest`, `gen-pure` (CI oracle, mini checkpoint), `gen-torch` (real checkpoint, per-layer streams + router scores; `--layers N` for reduced budgets) |
+| `roster_check coordinator/rank/selftest` | M5 control plane on real nodes: epoch-based roster startup, rank health, eviction on death/deadline; `selftest` is the loopback in-process smoke |
+| `bus_check serve/ping/selftest` | M5 data plane on real nodes: RC/RoCE CollectiveBus — per-class slot pools, credit-grant RDMA writes, dual-lane striping, latency-under-bulk contention; `selftest` is the loopback in-process smoke; `--contend --soak-ms` is the duration-bounded soak |
+| `bus_small_repro --pick-race` | the pick-path racer: the decode step's collective shape with an exact oracle after every collective under injected skew, loopback or fabric |
+| `nic_regress mesh/pair/serve/selftest` | NIC→GPU visibility regression over every directed node pair on both lanes (rerun after driver/firmware changes) |
+| `glm_tp_check --model ID --world W --rank R --peer HEAD` | fabric TP parity: final hidden/logits/routes/digests bitwise across ranks and against the loopback verdict dumps |
+| `glm_shard_parity` | the sharded loader vs full-load + `GlmTpViews::bind`, bitwise on every bound surface |
+| `glm_gen_check --model ID --chat TEXT [--system S] --steps N [--decode-graph] [--mtp]` | generation on the fabric (or `--text`, `--prompt IDS`): resident TP, distributed greedy pick, EOS stop; `--decode-graph` replays the step as one CUDA graph, `--mtp` adds speculative decode (`docs/mtp.md`); `--requests FILE` runs a JSONL manifest through the scheduler, `--sched-plan` prints the memory receipt without a GPU, `--teacher-file F` scores a text instead of generating, `--sampling-profile` adds the exact top-k-mass sizing probe, `--sample` (or any of `--temperature --top-p --top-k --min-p --repetition-penalty`, with `--seed N`) samples exactly at the checkpoint's defaults on the eager engines (with `--mtp`: the eager exact speculative sampler) instead of the default greedy loop, and `--step-timing` prints the per-phase budget |
+| `dgpp-serve --model ID --port P [--world W --rank R --peer HEAD --journal-port J] [--max-concurrency N --kv-capacity T --queue-limit Q] [--decode-graph [--mtp] --graph-batch-min-live N] [--temperature X --top-p X --top-k N --min-p X --repetition-penalty X --seed N] [--sampling-candidates N] [--admission full|grow --admission-window N] [--reasoning-in-content]` | the OpenAI-compatible service: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/v1/metrics`; rank 0 is the HTTP ingress and journals admissions to the peers; sampling defaults come from the checkpoint's `generation_config.json` (temperature 1.0 / top_p 0.95 for GLM-5.3-Flash-FP8) with the flags overriding them per process, requests may set `temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `seed`, `top_k`, `min_p`, `repetition_penalty`, `logprobs` and `top_logprobs` (exact, the OpenAI shapes), and `/v1/models` reports the effective defaults; chat requests may carry `tools`, `tool_choice` (`auto`/`none`/`required`/a named function) and `parallel_tool_calls` — every call is well-formed by constrained decoding, a grammar mask on the pick applied identically on every rank (DESIGN §10): a declared function name, the closed keys under `additionalProperties: false`, argument values typed by their property schema (JSON-typed properties under the JSON machine, enum strings from their texts, plain strings free; `function.strict: true` refuses a property outside the enforceable subset by keyword), and required, named and single-call turns as guarantees — `response_format` (`text` / `json_object` / `json_schema` with `name`, `schema`, `strict`: the content is one JSON text conforming to the schema's `type`, `properties` / `required` / `additionalProperties`, `items` / `minItems` / `maxItems`, `enum` / `const`, `anyOf`, enforced by the same masks; a strict schema outside that subset is refused naming the keyword, a non-strict one falls back to `json_object`; not combinable with `tools`), `reasoning_effort`, `chat_template_kwargs` (`clear_thinking`, `reasoning_effort`), assistant `tool_calls` and `tool` messages, all rendered through the checkpoint's template, and the response carries `reasoning_content` (or, with `--reasoning-in-content`, the reasoning folded into `content`), `content` and `tool_calls` parsed from the token ids on rank 0 with `finish_reason: "tool_calls"` (DESIGN §11); the eager engines and the `--decode-graph` graphs, with or without `--mtp`, sample exactly (DESIGN §10, the on-device verdict with the gather fallback between windows; under MTP the exact speculative accept test, DESIGN §9); graph mode requires the fabric and `max-concurrency * (mtp ? 2 : 1) <= 8`, warm-captures every graph variant at startup (the journal's `warm` record starts it on every rank together), and batches at `--graph-batch-min-live` live requests (default min(4, max-concurrency); must be in [1, max-concurrency]) |
+| `scripts/fabric_run.sh [--stage-file F] [--fetch-logs] [--node-probe] -- APP-ARGS` | launches any app on the four-node fabric with the rendezvous discipline (head first, peers fire-and-forget, verified by pgrep, swept on head death); collects rank-invariant md5s and bus stats |
+| `scripts/serve_run.sh up/down/status` | boots/stops the serving world (`DGPP_SERVE_KNOBS` overrides the engine flags on every rank, e.g. `--max-concurrency 1 ... --decode-graph --mtp`); `down` fetches and md5s every rank's op stream |
+| `scripts/serve_api_check.py HOST PORT` (the request fields against a running world), `scripts/serve_soak_run.sh MINUTES OUT`, `scripts/serve_failure_drill.sh VICTIM`, `scripts/serve_prefix_curve_sweep.sh`, `scripts/fabric_prefill_repeat.sh`, `scripts/fabric_mtp_classes.sh` | the M9 evidence rituals: the mixed-workload soak with node probes and the four-way md5, the kill −9 drill, the prefix cache's capacity curve, the steady-state prefill per length, MTP acceptance per prompt class (`docs/operations.md`) |
+| `scripts/roce_counters.sh snapshot\|diff` | the fabric's RoCE hardware counters (sequence errors, adaptive retransmissions, CNPs, NIC ingress discards) per node and device, and the deltas between two snapshots — the wire-side view of a collective run |
+| `scripts/serve_bench.py HOST PORT MAX_TOKENS LABEL [PROMPT]`, `scripts/serve_pace.py RANK_LOG [--waves]` | the service's pace: client-side SSE stamps; server-side per-request pace (from the per-token lines: run the service with `DGPP_LOG_LEVEL=debug`); and, with `--waves`, the steady peak-occupancy replay latency, tokens/replay, and aggregate tok/s used by the Phase-2 gate |
+| `scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`, `scripts/fabric_sampling_profile.py`, `scripts/fabric_xrank.py` | the judges (first divergence by bf16-ulp margin; teacher-forced perplexity delta; sampling-width evidence) and the cross-rank step/stall reader — `docs/numerics.md` |
+
+The GDR probe exits successfully when the probe itself completes, including
+the expected “unsupported” result on GB10. It does not prescribe a bounce
+copy; CollectiveBus uses registered pinned memory consumed directly by the
+GPU.

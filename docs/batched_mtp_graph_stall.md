@@ -181,7 +181,7 @@ instrumentation to see what the instrumented prefill spends >120 s on.
 Numerics: every gate above compares transcripts against independent eager
 sessions and across ranks bitwise; all pass unchanged.
 
-Fabric (2026-09-04, TP=4, the README's 300-step Roman Republic recipe, the
+Fabric (2026-09-04, TP=4, `docs/mtp.md`'s 300-step Roman Republic recipe, the
 record entry of that date): eager 36.07 ms/step (ledger 36.4), T=1 graph
 31.67 (record 31.3), MTP graph 42.44 per step (record 42.36–42.42); plain vs
 both graphs IDENTICAL over 300 steps with one generated-ids md5 on all four

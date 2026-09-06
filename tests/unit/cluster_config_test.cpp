@@ -93,14 +93,16 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
   }
 }
 
-DGPP_TEST(cluster_config_theCommittedFileParsesAndTheDigestIsStable) {
-  const dgpp::serve::ClusterConfig lab =
-      dgpp::serve::load_cluster_config(std::string(DGPP_SOURCE_DIR) + "/deploy/cluster.json");
-  require(lab.world() == 4 && lab.nodes[0] == "192.0.2.11" &&
-              lab.model == "unsloth/GLM-5.3-Flash-FP8" && lab.http_port == 18080 &&
-              lab.engine.max_concurrency == 4 && lab.engine.kv_capacity == 8192 &&
-              lab.engine.decode_graph && lab.engine.mtp && lab.engine.queue_limit == 8,
-          "deploy/cluster.json is the production shape");
+DGPP_TEST(cluster_config_theExampleFileParsesAndTheDigestIsStable) {
+  // The template a site copies to its own deploy/cluster.json (not tracked).
+  const dgpp::serve::ClusterConfig ex = dgpp::serve::load_cluster_config(
+      std::string(DGPP_SOURCE_DIR) + "/deploy/cluster.example.json");
+  require(ex.world() == 4 && ex.model == "unsloth/GLM-5.3-Flash-FP8" &&
+              ex.http_port == 18080 && ex.engine.max_concurrency == 4 &&
+              ex.engine.kv_capacity == 8192 && ex.engine.queue_limit == 8 &&
+              ex.engine.decode_graph && ex.engine.mtp && ex.release.empty() &&
+              ex.ssh_user.empty(),
+          "deploy/cluster.example.json is the production shape with no site in it");
   require(dgpp::serve::config_digest("a") == dgpp::serve::config_digest("a") &&
               dgpp::serve::config_digest("a") != dgpp::serve::config_digest("b") &&
               dgpp::serve::config_digest("x").size() == 16,

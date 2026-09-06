@@ -42,3 +42,7 @@ glm_gen.tokens.txt
 # glm_serve writes rank 0's op stream beside the binary; serve_run.sh moves it into the run log
 /serve_rank*.ops
 dist/
+# The TP tests write this fixture into their working directory; never track a copy
+glm_tp_fixture/
+# The site cluster config is local; deploy/cluster.example.json is the template
+deploy/cluster.json

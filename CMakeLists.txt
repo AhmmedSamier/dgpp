@@ -342,7 +342,7 @@ if(DGPP_ENABLE_IBV)
             RENAME lib${_lib}.so.${CUDAToolkit_VERSION_MAJOR})
   endforeach()
   install(PROGRAMS scripts/dgpp-cluster scripts/serve_api_check.py DESTINATION scripts)
-  install(FILES deploy/cluster.json DESTINATION deploy RENAME cluster.example.json)
+  install(FILES deploy/cluster.example.json DESTINATION deploy)
   install(FILES README.md docs/operations.md DESTINATION doc)
 endif()
 

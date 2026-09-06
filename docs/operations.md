@@ -10,9 +10,10 @@ record).
 
 ## Boot, stop, status
 
-The world is described by one file, `deploy/cluster.json` (every key,
-its default and what it does: README's "Deploying: the cluster config"
-table), and driven by one launcher:
+The world is described by one file, `deploy/cluster.json` — the site's
+copy of `deploy/cluster.example.json`, not tracked (every key, its default
+and what it does: README's "Configuration" table) — and driven by one
+launcher:
 
 ```
 scripts/dgpp-cluster up       # stage the binary and the config to the peers, boot rank 0, then the peers; waits for READY
@@ -85,21 +86,73 @@ exits before its first tick rather than form a mixed world.
 ## What a node needs
 
 - The checkpoint in the Hugging Face cache (`--model ORG/NAME` resolves it
-  per node) and the resident image cache under
-  `~/.cache/dgpp/resident/<key>.img` (~82 GiB per rank; built on the first
-  boot, streamed at the drive's line rate afterwards; `README.md`
-  "Deploying a serving rank" has the knobs).
-- Nothing privileged: the process tries `mlockall(MCL_CURRENT)` as a
-  safety net and logs, rather than fails, when `RLIMIT_MEMLOCK` is finite
-  (`DGPP_MLOCK=off` skips it); GPU clocks are left to the governor.
-- The peers' staging directory (`paths.stage_dir`, `/tmp/bus4` in the
-  committed config) lives in `/tmp`: a reboot empties it, and
+  per node) and the resident image cache (~82 GiB per rank, built on the
+  first boot; the two sections below have the memory and cache details
+  and knobs).
+- Nothing privileged: no locked clocks, no memlock limit changes, no root
+  (the memory section below says why).
+- The peers' staging directory (`paths.stage_dir`, `/tmp/dgpp-stage` in
+  the example) lives in `/tmp`: a reboot empties it, and
   `dgpp-cluster up` recreates it. The log dir (`paths.log_dir`,
   `~/dgpp/log`) persists.
-- The bus rendezvous window is 120 s from rank 0's listener appearing; the
-  peers connect within ~1 s of their launch, so the order `up` encodes
-  (head first, then the peers at once) is the one that works. The
-  journal star forms after the bus world.
+- The journal star forms first: rank 0 listens on the journal at once and
+  the peers connect to it (retrying within the rendezvous window) before
+  any rank builds its model; the bus world forms after the builds, its
+  connect retrying within the same 120 s window. `up` encodes that order:
+  the head, then the peers as soon as the journal listens.
+
+### Memory on a serving node
+
+A resident rank owns its box. The model is ~82 GiB of the 121 GB, and the
+serving apps (`dgpp-serve`, `glm_gen_check`) configure themselves for that
+without any privileged setup on the node:
+
+- the constructor checks that the resident footprint (+ 8 GiB headroom)
+  fits the device's free memory and fails immediately with a clear message
+  if it does not — never three minutes into a load;
+- the loader reads each source tensor exactly once (prefetch, copy, drop),
+  so the page cache stays under ~10 GB during the load and the box never
+  reaches its memory watermark; the checkpoint's mmaps are released the
+  moment the last layer is on the device (`GlmLayerStream::release_sources`);
+- the process *tries* to lock its memory (`mlockall(MCL_CURRENT)`, before
+  the model is constructed) as a safety net against swap-in faults in the
+  decode loop. This is optional: with the one-pass loader a rank with the
+  pin off measured identically (p99 46 ms, 0 stalls, no swap traffic over
+  1000 steps). A finite `RLIMIT_MEMLOCK` is logged, not warned about;
+  `DGPP_MLOCK=off` skips the attempt.
+
+Nothing else on the node needs setting. In particular a locked GPU clock
+(`nvidia-smi -lgc`) is **not** required: the governor sits at 2400-2560 MHz
+throughout decode on its own and the measured step distribution is the same
+locked or unlocked. NTP between nodes only matters for reading logs side by
+side, and `scripts/fabric_run.sh --node-probe` records each node's clock
+offset per run so even that works without it.
+
+### The resident image cache
+
+The first start of a resident rank builds its layers from the checkpoint
+(slice, stage, dequantize, pack) and writes the finished device bytes to
+`~/.cache/dgpp/resident/<key>.img` on that node (~82 GiB per rank for GLM;
+the key covers the checkpoint's shard headers, `config.json`, world, rank,
+head sharding and the loader's format version, so a stale image can never
+load by accident). Every later start streams that image instead with
+O_DIRECT reads at the drive's line rate — 15-25 s to a ready model against
+~4.5 minutes from the checkpoint. The boot digest is cached beside it
+(`<key>.digest`). Knobs:
+
+```
+DGPP_RESIDENT_CACHE=off            disable (always build from the checkpoint)
+DGPP_RESIDENT_CACHE_DIR=/path      put the images somewhere else
+DGPP_RESIDENT_CACHE_VERIFY=1       re-fold every blob on read (a pass over 82 GiB)
+```
+
+Delete the file to force a rebuild; the loader's log line says how many
+layers were restored versus captured on each start.
+
+`scripts/fabric_run.sh --node-probe` samples each node's reclaim/swap/GPU
+counters at 1 Hz for the run; `scripts/fabric_xrank.py LOGDIR` reads the
+fetched logs and reports host gaps, stall windows, and step distributions per
+rank.
 
 ## When a rank dies
 

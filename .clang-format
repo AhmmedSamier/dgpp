@@ -1,0 +1,30 @@
+# The C++ and CUDA style: Google-derived, two-space indent, pointers and
+# references bound to the type. Format new and touched code (the `format`
+# target); the tree has not been reformatted wholesale.
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+ColumnLimit: 100
+IndentWidth: 2
+AccessModifierOffset: -1
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBraces: Attach
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<cuda'
+    Priority: 2
+  - Regex: '^<[a-z_]+>$'
+    Priority: 1
+  - Regex: '^<.*\.h>$'
+    Priority: 1
+  - Regex: '^"'
+    Priority: 3
+SortIncludes: CaseSensitive
+SpacesBeforeTrailingComments: 2

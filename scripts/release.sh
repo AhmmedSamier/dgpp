@@ -12,7 +12,7 @@
 #   bin/dgpp-serve                 the server, rpath $ORIGIN/../lib
 #   lib/libcudart.so.13, lib/libcublasLt.so.13   the CUDA runtime it was built against
 #   scripts/dgpp-cluster, scripts/serve_api_check.py
-#   deploy/cluster.example.json    the committed lab config, as a template
+#   deploy/cluster.example.json    the config template a site copies and edits
 #   doc/README.md, doc/operations.md
 #   MANIFEST                       version, git sha, CUDA, host, date
 #   MANIFEST.sha256                sha256 of every other file (sha256sum -c)

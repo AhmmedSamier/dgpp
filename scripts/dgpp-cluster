@@ -8,7 +8,8 @@
     dgpp-cluster install  TARBALL [--config F]    # every node: unpack under paths.release_dir, verify
     dgpp-cluster releases [--config F]            # every node: the installed versions
 
-The config (deploy/cluster.json by default, or $DGPP_CLUSTER_CONFIG) names
+The config (deploy/cluster.json by default, or $DGPP_CLUSTER_CONFIG; the
+site's own copy of deploy/cluster.example.json, not tracked) names
 the model, the nodes (rank = index; node 0 is the head, where this runs),
 the ports, the engine knobs and the paths. Every rank starts as
 `dgpp-serve --config <file> --rank R`; `--knobs` appends flags to every
@@ -372,6 +373,10 @@ def main():
     ap.add_argument("--log-dir", default=None, help="overrides paths.log_dir")
     ap.add_argument("--knobs", default="", help="flags appended to every rank's command line")
     args = ap.parse_args()
+    if not os.path.exists(args.config):
+        sys.exit(f"no cluster config at {args.config}: copy deploy/cluster.example.json to "
+                 f"deploy/cluster.json (it is local to this site and not tracked) and edit it, "
+                 f"or pass --config")
     c = Cluster(args)
     if args.verb == "install":
         if not args.tarball:
