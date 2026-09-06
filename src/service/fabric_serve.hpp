@@ -84,6 +84,7 @@
 #include "models/glm_scheduler.hpp"
 #include "net/tcp.hpp"
 #include "service/generation_service.hpp"
+#include "service/serve_stats.hpp"
 
 namespace dgpp::service {
 
@@ -265,10 +266,13 @@ bool wait_journal_warm(JournalReader* reader,
 // `oplog` (optional): this rank's op-stream observer, whose fold every
 // record's "od" is compared against before the record is applied (the
 // continuous drift check) — the same observer attached to the scheduler.
+// `stats` (optional): this rank's throughput line, fed the scheduler's
+// meters after every tick (serve_stats.hpp).
 void run_journal_peer(dgpp::glm::Scheduler* sched, JournalReader* reader,
                       const std::function<bool()>& should_stop,
                       const std::function<void()>& on_rank0_death = nullptr,
                       int watch_poll_ms = 100,
-                      const dgpp::glm::SchedulerObserver* oplog = nullptr);
+                      const dgpp::glm::SchedulerObserver* oplog = nullptr,
+                      ThroughputLog* stats = nullptr);
 
 }  // namespace dgpp::service

@@ -446,6 +446,37 @@ DGPP_TEST(scheduler_batchEngine_stepsRoundRobinSliceInOnePass) {
           "batched b transcript");
 }
 
+DGPP_TEST(scheduler_meters_countPromptsStepsAndRowsForTheThroughputLine) {
+  // GIVEN the slice test's two-row engine and two requests (5- and 7-token
+  // prompts, three tokens each),
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4,
+                    /*batch_capacity=*/2);
+  engine.arm(0, {10, 11, 12}, /*max_steps=*/3);  // a
+  engine.arm(1, {20, 21, 22}, /*max_steps=*/3);  // b
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 5, 3));
+  sched.submit(make_request("b", 7, 3));
+  require(sched.meters().prompts_prefilled == 0 &&
+              sched.meters().decode_steps == 0,
+          "nothing counted before the first tick");
+
+  sched.run_to_completion();
+
+  // THEN the throughput line's counters read the passes the slice test
+  // pinned: two prefills of 12 prompt tokens, all computed (no cache);
+  // three decode passes carrying four request-rows ({a}, {b,a}, {b}); six
+  // tokens; timings that are at least not negative on a fake.
+  const Scheduler::Meters m = sched.meters();
+  require(m.prompts_prefilled == 2 && m.prompt_tokens == 12 &&
+              m.prompt_tokens_computed == 12,
+          "two prompts, 12 tokens, none from a cache");
+  require(m.decode_steps == 3 && m.decode_rows == 4,
+          "three decode passes over four request-rows");
+  require(m.tokens_generated == 6, "six tokens generated");
+  require(m.prefill_ms >= 0.0 && m.step_ms >= 0.0,
+          "the engine timings are non-negative");
+}
+
 DGPP_TEST(scheduler_batchEngine_capacityBelowActive_rotatesFairly) {
   // GIVEN a three-slot engine whose physical pass carries only two rows.
   // Once three requests are active, each tick advances the next two in

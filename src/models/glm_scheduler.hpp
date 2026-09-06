@@ -357,6 +357,17 @@ class Scheduler {
     int64_t tokens_generated = 0;  // cumulative across all requests
     int64_t reservations_grown = 0;  // grow-on-demand: growth events
     int64_t requests_shed_pool = 0;  // grow-on-demand: shed at exhaustion
+    // The throughput line's counters (2026-09-06): prompts prefilled, their
+    // tokens (all, and the ones actually computed — an attach skips the
+    // prefix), decode passes and the request-rows they carried, and the
+    // wall time spent inside the engine's prefill and step calls.
+    int64_t prompts_prefilled = 0;
+    int64_t prompt_tokens = 0;
+    int64_t prompt_tokens_computed = 0;
+    int64_t decode_steps = 0;
+    int64_t decode_rows = 0;
+    double prefill_ms = 0.0;
+    double step_ms = 0.0;
     // The prefix cache (M7): its slots and live entries, the attach and
     // miss counts, the prompt tokens attaches skipped, the entries taken
     // (at prefill cuts / from rolling snapshots at close), rolling
@@ -555,6 +566,13 @@ class Scheduler {
   AdmissionPolicy policy_;
   int64_t grows_ = 0;              // growth events (meters)
   int64_t pool_sheds_ = 0;         // requests shed at exhaustion (meters)
+  int64_t prompts_prefilled_ = 0;  // the throughput line's counters (meters)
+  int64_t prompt_tokens_ = 0;
+  int64_t prompt_tokens_computed_ = 0;
+  int64_t decode_steps_ = 0;
+  int64_t decode_rows_ = 0;
+  double prefill_ms_ = 0.0;
+  double step_ms_ = 0.0;
   PrefixCache cache_;              // the prefix cache's index (M7)
   SchedulerEngine::PrefixInfo prefix_info_;
   uint64_t ticks_ = 0;             // the LRU clock

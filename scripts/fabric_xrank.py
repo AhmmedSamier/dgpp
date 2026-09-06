@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Cross-rank step correlation for fabric decode logs (r0.log .. rN.log).
 
+The per-step and per-window lines this reads are DEBUG since 2026-09-06
+(the throughput line replaced them at INFO): record the run with
+DGPP_LOG_LEVEL=debug.
+
     fabric_xrank.py LOGDIR [--summary] [--show N] [--thresh-ms 3] [--skip 100]
 
 Ranks are aligned by the bus generation counter (identical on every rank),

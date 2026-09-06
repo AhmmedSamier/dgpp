@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Per-request decode pace from a glm_serve rank log.
 
-Reads the scheduler's INFO lines
+Reads the scheduler's per-token lines (DEBUG since 2026-09-06: run the
+service with DGPP_LOG_LEVEL=debug to record them, and the bus's graph
+timeline lines with them)
   <ts> INFO  sched: request 'ID' admitted to slot ... — first token T
   <ts> INFO  sched: request 'ID' step N: token T
   <ts> INFO  sched: request 'ID' retired (...)
@@ -19,7 +21,7 @@ import re
 import sys
 from datetime import datetime
 
-LINE = re.compile(r"^(\S+ \S+) INFO  sched: request '([^']+)' (admitted to slot|step (\d+): token|retired)")
+LINE = re.compile(r"^(\S+ \S+) (?:INFO|DEBUG) +sched: request '([^']+)' (admitted to slot|step (\d+): token|retired)")
 STAMP = re.compile(r"^(\S+ \S+)")
 
 

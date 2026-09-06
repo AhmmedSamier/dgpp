@@ -39,6 +39,7 @@
 #include "models/glm_scheduler.hpp"
 #include "service/generation_service.hpp"
 #include "service/http_server.hpp"
+#include "service/serve_stats.hpp"
 
 namespace {
 
@@ -2278,6 +2279,94 @@ DGPP_TEST(serve_prefixCache_boundariesAttachOptOutAndMetrics) {
               met.find("\"ttft_hit_count\":1") != std::string::npos &&
               met.find("\"ttft_miss_count\":2") != std::string::npos,
           "metrics: " + met);
+}
+
+DGPP_TEST(serve_throughputLog_oneLinePerIntervalWithTheDeltas_thenQuiet) {
+  // GIVEN a 10-second throughput line on rank 0 with an injected clock,
+  using dgpp::service::ServiceCounts;
+  using dgpp::service::ThroughputLog;
+  using Clock = ThroughputLog::Clock;
+  const std::string::size_type npos = std::string::npos;
+  ThroughputLog log(/*interval_s=*/10.0, /*rank=*/0);
+  const Clock::time_point t0 = Clock::now();
+  const auto at = [&](double s) {
+    return t0 + std::chrono::duration_cast<Clock::duration>(
+                    std::chrono::duration<double>(s));
+  };
+  dgpp::glm::Scheduler::Meters m;
+  m.pool_blocks_total = 100;
+  m.prefix_slots = 4;
+  ServiceCounts sc;
+
+  // THEN the first call primes the baseline and says nothing, and nothing
+  // inside the interval speaks either, whatever happened.
+  require(log.observe(m, &sc, at(0)).empty(), "priming is silent");
+  m.prompts_prefilled = 1;
+  m.prompt_tokens = 120;
+  m.prompt_tokens_computed = 100;
+  m.prefill_ms = 500.0;
+  m.decode_steps = 200;
+  m.decode_rows = 400;
+  m.tokens_generated = 700;
+  m.step_ms = 8000.0;
+  m.active = 2;
+  m.queued = 1;
+  m.pool_blocks_in_use = 25;
+  m.prefix_entries = 3;
+  m.prefix_hits = 1;
+  sc.requests_total = 3;
+  sc.requests_shed = 1;
+  require(log.observe(m, &sc, at(5)).empty(), "no line inside the interval");
+
+  // At the interval: ONE line with the deltas as rates over the elapsed time.
+  const std::string line = log.observe(m, &sc, at(10));
+  require(line.find("stats: rank 0 over 10.0 s: prefill 1 prompt / 100 tok "
+                    "(10 tok/s; 500 ms avg, 5.00 ms/tok; 5 % of wall), cache "
+                    "saved 20 tok (1/1 hit)") != npos,
+          "the prefill half: " + line);
+  require(line.find("; decode 200 steps / 700 tok (70 tok/s; 40.0 ms/step, "
+                    "1.75 tok/step/req; 80 % of wall)") != npos,
+          "the decode half: " + line);
+  require(line.find("; running 2, queued 1; pool 25/100 blocks (25 %); prefix "
+                    "cache 3/4 entries; requests +3 (shed 1, cancelled 0)") !=
+              npos,
+          "the state tail: " + line);
+
+  // The interval after the work ends writes one closing line of zeros ...
+  m.active = 0;
+  m.queued = 0;
+  const std::string closing = log.observe(m, &sc, at(20));
+  require(closing.find("prefill 0 prompts / 0 tok") != npos &&
+              closing.find("decode 0 steps / 0 tok") != npos &&
+              closing.find("running 0, queued 0") != npos,
+          "the closing line: " + closing);
+  // ... and an idle world then stays quiet.
+  require(log.observe(m, &sc, at(30)).empty() &&
+              log.observe(m, &sc, at(40)).empty(),
+          "an idle world stays quiet");
+  // Work returning brings the line back, over the interval's true length.
+  m.decode_steps = 201;
+  m.decode_rows = 401;
+  m.tokens_generated = 702;
+  const std::string back = log.observe(m, &sc, at(52));
+  require(back.find("over 12.0 s: prefill 0 prompts") != npos &&
+              back.find("decode 1 step / 2 tok") != npos,
+          "the line returns with work: " + back);
+
+  // A peer's line (no service counts) names its rank and carries none.
+  ThroughputLog peer(10.0, /*rank=*/2);
+  require(peer.observe(m, nullptr, at(0)).empty(), "peer priming is silent");
+  m.decode_steps = 202;
+  const std::string pl = peer.observe(m, nullptr, at(10));
+  require(pl.find("stats: rank 2 over 10.0 s") != npos &&
+              pl.find("requests +") == npos,
+          "a peer's line: " + pl);
+
+  // Interval 0 disables the line entirely.
+  ThroughputLog off(0.0, /*rank=*/1);
+  require(!off.enabled() && off.observe(m, nullptr, at(0)).empty() &&
+              off.observe(m, nullptr, at(100)).empty(),
+          "interval 0 disables the line");
 }
 
 int main() {

@@ -277,11 +277,21 @@ Suggested order for what remains, each item's design in its section:
    tokens). The fabric never saw it — the per-layer all-reduce is a host
    wait — and every recorded measurement's ids stand; world-1 sessions
    were exposed when the host got a layer ahead.
-2. M7: the prefix cache (the snapshot arena and the radix are new; the
-   block sharing, the KDA snapshot format, and the journal it rides already
-   exist).
-3. M9 hardening: failure semantics and drills, the 24-hour serving soak,
-   HTTP fuzzing, the sign-off report.
+2. M7: the prefix cache — BUILT 2026-09-05 (stages A and B; the M7
+   section).
+3. M9 hardening — CLOSED 2026-09-05 (failure semantics and drills, the
+   one-hour soak, HTTP fuzzing under ASan, the continuous drift check, the
+   sign-off report; the M9 section). What follows is ranked in
+   `docs/next_steps.md`; its second item's first slice landed 2026-09-06:
+   every rank's log carries one aggregate throughput line per 10 s
+   (`--stats-interval-s`; prefill and decode tokens per second, ms per
+   step, tokens per request-step, live and queued counts, the pool, the
+   prefix cache) and the per-tick lines — a line per generated token, the
+   bus's three per-window lines, the prefix cache's per-decision line, the
+   adaptive engine's mode switches — sit at DEBUG (`DGPP_LOG_LEVEL=debug`;
+   `serve_pace.py` and `fabric_xrank.py` read them there). The soak hour
+   had written 307,000 lines (40 MB) per rank at INFO with no aggregate in
+   them; the M9 record's thirtieth entry has the numbers after.
 
 ## Audit remediation completed on 2026-08-27
 
@@ -1828,7 +1838,7 @@ it without restarting the fabric era. The final curve is
 30.97/31.67/41.76/76.18 tok/s at T=1 and 38.48/38.97/60.27 with MTP, with
 transcripts bitwise invariant across graph-width transitions.
 
-Hardening, not started, designed:
+Hardening, as built (each bullet says when):
 
 - *Failure semantics (v1) — BUILT AND DRILLED 2026-09-05 (the M8 closure
   pass; the record's twenty-eighth entry):* any rank failure fails the

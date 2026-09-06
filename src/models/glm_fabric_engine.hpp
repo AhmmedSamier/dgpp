@@ -1465,7 +1465,7 @@ class GlmGraphEngineAdapter final : public glm::SchedulerEngine {
     const int mode = batched ? 1 : 0;
     if (last_mode_ == mode) return;
     last_mode_ = mode;
-    DGPP_LOG_INFO(
+    DGPP_LOG_DEBUG(
         "rank {}: adaptive decode selected {} graph at {} live request{} "
         "(batch crossover {})",
         rank_, batched ? "row-batched" : "scalar", live,

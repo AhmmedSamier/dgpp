@@ -249,6 +249,9 @@ class GenerationService : public HttpHandler,
     double ttft_miss_ms = 0;
   };
   Stats stats() const;
+  // The scheduler's meters as published after the last engine pass (the
+  // throughput line reads them on the engine thread; /v1/metrics too).
+  dgpp::glm::Scheduler::Meters meters() const;
 
   // The defaults actually served (after the engine-capability collapse)
   // and whether stochastic requests are executable at all.

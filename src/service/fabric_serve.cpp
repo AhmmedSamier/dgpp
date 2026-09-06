@@ -753,7 +753,8 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
                       const std::function<bool()>& should_stop,
                       const std::function<void()>& on_rank0_death,
                       int watch_poll_ms,
-                      const dgpp::glm::SchedulerObserver* oplog) {
+                      const dgpp::glm::SchedulerObserver* oplog,
+                      ThroughputLog* stats) {
   int64_t ticks = 0;  // records applied (the drift check names the tick)
   // The in-tick watch (the death discipline, fabric_serve.hpp): only while
   // the loop is inside a tick can rank 0's death go unseen by the read
@@ -828,6 +829,7 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
       sched->tick();
     }
     ++ticks;
+    if (stats) stats->observe(sched->meters(), nullptr);
   }
 }
 

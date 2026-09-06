@@ -359,7 +359,8 @@ set_tests_properties(glm_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 add_library(dgpp_service STATIC
   src/service/http_server.cpp
   src/service/generation_service.cpp
-  src/service/fabric_serve.cpp)
+  src/service/fabric_serve.cpp
+  src/service/serve_stats.cpp)
 target_link_libraries(dgpp_service
   PUBLIC dgpp_core dgpp_models_glm dgpp_loaders dgpp_net Threads::Threads)
 dgpp_set_common(dgpp_service)

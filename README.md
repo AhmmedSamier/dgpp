@@ -90,7 +90,12 @@ is closed (2026-09-05): every journal record carries rank 0's running
 op-stream fold so a diverging rank dies within a tick, a byte-level HTTP
 fuzzer runs under AddressSanitizer (it found and closed a parser stack
 overflow and a freed-writer write), and the service ran a one-hour mixed
-soak. `docs/operations.md` is the operator's page, `docs/signoff_v1.md`
+soak. Every rank's log carries one aggregate line per 10 s (2026-09-06;
+`--stats-interval-s`): prompts and prompt tokens prefilled per second,
+decode steps and tokens per second, ms per step and tokens per
+request-step, the live and queued counts, the pool and the prefix cache;
+the per-token, per-window and per-cache-decision lines moved to DEBUG
+(`DGPP_LOG_LEVEL=debug`). `docs/operations.md` is the operator's page, `docs/signoff_v1.md`
 the measured sign-off, `docs/next_steps.md` the ranked list of what is
 worth doing next; `PLAN.md` has the status per milestone, `DESIGN.md` the
 contracts as built.
@@ -177,7 +182,7 @@ installed, CMake also exposes `format` and `format-check` targets.
 | `scripts/serve_run.sh up/down/status` | boots/stops the serving world (`DGPP_SERVE_KNOBS` overrides the engine flags on every rank, e.g. `--max-concurrency 1 ... --decode-graph --mtp`); `down` fetches and md5s every rank's op stream |
 | `scripts/serve_soak_run.sh MINUTES OUT`, `scripts/serve_failure_drill.sh VICTIM`, `scripts/serve_prefix_curve_sweep.sh`, `scripts/fabric_prefill_repeat.sh`, `scripts/fabric_mtp_classes.sh` | the M9 evidence rituals: the mixed-workload soak with node probes and the four-way md5, the kill −9 drill, the prefix cache's capacity curve, the steady-state prefill per length, MTP acceptance per prompt class (`docs/operations.md`) |
 | `scripts/roce_counters.sh snapshot\|diff` | the fabric's RoCE hardware counters (sequence errors, adaptive retransmissions, CNPs, NIC ingress discards) per node and device, and the deltas between two snapshots — the wire-side view of a collective run |
-| `scripts/serve_bench.py HOST PORT MAX_TOKENS LABEL [PROMPT]`, `scripts/serve_pace.py RANK_LOG [--waves]` | the service's pace: client-side SSE stamps; server-side per-request pace; and, with `--waves`, the steady peak-occupancy replay latency, tokens/replay, and aggregate tok/s used by the Phase-2 gate |
+| `scripts/serve_bench.py HOST PORT MAX_TOKENS LABEL [PROMPT]`, `scripts/serve_pace.py RANK_LOG [--waves]` | the service's pace: client-side SSE stamps; server-side per-request pace (from the per-token lines: run the service with `DGPP_LOG_LEVEL=debug`); and, with `--waves`, the steady peak-occupancy replay latency, tokens/replay, and aggregate tok/s used by the Phase-2 gate |
 | `scripts/fabric_xcript.py`, `scripts/fabric_logprob.py`, `scripts/fabric_sampling_profile.py`, `scripts/fabric_xrank.py` | the judges (first divergence by bf16-ulp margin; teacher-forced perplexity delta; sampling-width evidence) and the cross-rank step/stall reader — see "Judging a numerics change" |
 
 The GDR probe exits successfully when the probe itself completes, including

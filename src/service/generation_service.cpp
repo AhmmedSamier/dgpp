@@ -1442,6 +1442,11 @@ void GenerationService::route_models(const HttpRequest& req,
 // GET /v1/metrics (ours — the scheduler meters, published by the engine)
 // ---------------------------------------------------------------------------
 
+Scheduler::Meters GenerationService::meters() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return meters_;
+}
+
 void GenerationService::route_metrics(HttpResponseWriter& w) {
   Scheduler::Meters m;
   Stats st;
@@ -1462,6 +1467,24 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, m.pool_blocks_in_use);
   out.append(",\"tokens_generated\":");
   append_json_int(&out, m.tokens_generated);
+  // The throughput line's counters (2026-09-06), cumulative: a scraper
+  // differences them the way the line does.
+  out.append(",\"prompts_prefilled\":");
+  append_json_int(&out, m.prompts_prefilled);
+  out.append(",\"prompt_tokens\":");
+  append_json_int(&out, m.prompt_tokens);
+  out.append(",\"prompt_tokens_computed\":");
+  append_json_int(&out, m.prompt_tokens_computed);
+  out.append(",\"decode_steps\":");
+  append_json_int(&out, m.decode_steps);
+  out.append(",\"decode_rows\":");
+  append_json_int(&out, m.decode_rows);
+  {
+    char tbuf[96];
+    std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"step_ms\":%.1f",
+                  m.prefill_ms, m.step_ms);
+    out.append(tbuf);
+  }
   out.append("},\"service\":{\"requests_total\":");
   append_json_int(&out, static_cast<int64_t>(st.requests_total));
   out.append(",\"requests_shed\":");

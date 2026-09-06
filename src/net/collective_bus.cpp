@@ -1151,8 +1151,15 @@ struct CollectiveBus::Impl {
   void log_window_timeline() {
     GraphState::Timeline& t = graph.tl;
     if (t.n == 0) return;
+    // The per-window lines are DEBUG since the throughput line
+    // (2026-09-06; fabric_xrank.py and serve_pace.py --waves read them
+    // under DGPP_LOG_LEVEL=debug).
+    if (dgpp::current_log_level() > dgpp::LogLevel::Debug) {
+      t = GraphState::Timeline{};
+      return;
+    }
     const double n = static_cast<double>(t.n);
-    DGPP_LOG_INFO(
+    DGPP_LOG_DEBUG(
         "graph window timeline: rank {} variant {} gens {} avg us: total {:.1f} = copy "
         "{:.1f} + handshake {:.1f} + skew {:.1f} + fold {:.1f}; engine post "
         "{:.1f}; max handshake {:.1f} skew {:.1f} total {:.1f} "
@@ -1168,7 +1175,7 @@ struct CollectiveBus::Impl {
             : 0.0,
         static_cast<double>(t.passes) / n,
         t.n > 1 ? t.compute_us / static_cast<double>(t.n - 1) : 0.0);
-    DGPP_LOG_INFO(
+    DGPP_LOG_DEBUG(
         "graph window wait: rank {} hist(<20 <50 <100 <200 <500 >=500 us) {} "
         "{} {} {} {} {}; even gens {} avg {:.1f} us, odd gens {} avg {:.1f} us",
         opt.my_rank, t.wait_hist[0], t.wait_hist[1], t.wait_hist[2],
@@ -1180,7 +1187,7 @@ struct CollectiveBus::Impl {
       peers_txt += " rank" + std::to_string(peer_ranks[p]) + " lag " +
                    std::to_string(static_cast<int>(t.peer_lag_us[p] / n)) +
                    "us last " + std::to_string(t.peer_last[p]) + "x;";
-    DGPP_LOG_INFO("graph window peers: rank {} (staging written -> peer "
+    DGPP_LOG_DEBUG("graph window peers: rank {} (staging written -> peer "
                   "payload gated, avg; times arrived last):{}",
                   opt.my_rank, peers_txt);
     t = GraphState::Timeline{};
@@ -1270,7 +1277,7 @@ struct CollectiveBus::Impl {
                        "/" +
                        std::to_string(acquire_u32(&view.ack_lat[s2].seq)) +
                        ",";
-            DGPP_LOG_INFO(
+            DGPP_LOG_DEBUG(
                 "graph adopt quiescence note: peer {} lane 0 slot {} "
                 "door={} ack={} (mid-flight ok; freeze precursor if it "
                 "persists) cells {}",
@@ -1955,7 +1962,7 @@ struct CollectiveBus::Impl {
         };
         const uint64_t now_gt = static_cast<uint64_t>(
             static_cast<int64_t>(monotonic_ns()) + gt_offset_ns);
-        DGPP_LOG_INFO(
+        DGPP_LOG_DEBUG(
             "allreduce: rank {} seq {} elems {} done status={} total {:.1f}us"
             " = queue {:.1f} + claim {:.1f} + launch_call {:.1f} + "
             "launch->start {:.1f} + "

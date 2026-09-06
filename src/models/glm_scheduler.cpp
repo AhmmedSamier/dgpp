@@ -1,6 +1,7 @@
 #include "models/glm_scheduler.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -406,6 +407,8 @@ void Scheduler::admit(int arrival) {
   engine_->configure_logprobs(slot, r.spec.logprobs);
   engine_->configure_constraint(slot, r.spec.grammar);
   int32_t token = -1;
+  int64_t attached = 0;  // prompt tokens an attach skipped (meters)
+  const auto t_prefill = std::chrono::steady_clock::now();
   if (!cache_on(r)) {
     // No cache for this request: the pre-cache op, exactly.
     token = engine_->prefill(slot, r.spec.prompt);
@@ -448,6 +451,7 @@ void Scheduler::admit(int arrival) {
     if (plan.attach_entry >= 0) {
       r.attach_entry = plan.attach_entry;
       r.attach_position = plan.attach_position;
+      attached = plan.attach_position;
       emit_prefix(r.spec.id, "attach", plan.attach_position, pp.attach_slot);
     } else {
       ++cache_.stats().misses;
@@ -467,6 +471,12 @@ void Scheduler::admit(int arrival) {
       }
     }
   }
+  prefill_ms_ += std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - t_prefill)
+                     .count();
+  ++prompts_prefilled_;
+  prompt_tokens_ += static_cast<int64_t>(r.spec.prompt.size());
+  prompt_tokens_computed_ += static_cast<int64_t>(r.spec.prompt.size()) - attached;
   if (token < 0) {
     engine_->close(slot);
     throw std::runtime_error("Scheduler: engine prefill returned token " +
@@ -526,8 +536,14 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
 
   // Validate the outer shape before publishing any token. A malformed
   // engine result must not leave half a physical pass visible to clients.
+  const auto t_step = std::chrono::steady_clock::now();
   const std::vector<std::vector<int32_t>> batches =
       engine_->step_batch(slots);
+  step_ms_ += std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - t_step)
+                  .count();
+  ++decode_steps_;
+  decode_rows_ += static_cast<int64_t>(slots.size());
   if (batches.size() != arrivals.size())
     throw std::runtime_error(
         "Scheduler: engine returned " + std::to_string(batches.size()) +
@@ -596,8 +612,10 @@ bool Scheduler::append_token(int arrival, int32_t token,
     if (logprobs != nullptr)
       observer_->on_token_logprobs(r.spec.id, r.steps_done, *logprobs);
   }
-  DGPP_LOG_INFO("sched: request '{}' step {}: token {}", r.spec.id,
-                r.steps_done, token);
+  // Per token — DEBUG since the throughput line (2026-09-06); serve_pace.py
+  // reads it under DGPP_LOG_LEVEL=debug.
+  DGPP_LOG_DEBUG("sched: request '{}' step {}: token {}", r.spec.id,
+                 r.steps_done, token);
   if (is_eos(token)) {
     retire(arrival, Result::Status::kDone, Result::Reason::kEos);
   } else if (r.spec.cancel_after > 0 &&
@@ -814,6 +832,13 @@ Scheduler::Meters Scheduler::meters() const {
   m.tokens_generated = tokens_generated_;
   m.reservations_grown = grows_;
   m.requests_shed_pool = pool_sheds_;
+  m.prompts_prefilled = prompts_prefilled_;
+  m.prompt_tokens = prompt_tokens_;
+  m.prompt_tokens_computed = prompt_tokens_computed_;
+  m.decode_steps = decode_steps_;
+  m.decode_rows = decode_rows_;
+  m.prefill_ms = prefill_ms_;
+  m.step_ms = step_ms_;
   m.prefix_slots = cache_.slots();
   m.prefix_entries = cache_.live_entries();
   m.prefix_hits = cache_.stats().hits;
@@ -914,8 +939,8 @@ void Scheduler::free_arena_slot(int slot) {
 
 void Scheduler::emit_prefix(const std::string& id, const char* op,
                             int64_t position, int slot) {
-  DGPP_LOG_INFO("sched: prefix cache {} '{}' position {} slot {}", op, id,
-                position, slot);
+  DGPP_LOG_DEBUG("sched: prefix cache {} '{}' position {} slot {}", op, id,
+                 position, slot);
   if (observer_) observer_->on_prefix(id, op, position, slot);
 }
 

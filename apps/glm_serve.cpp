@@ -135,6 +135,7 @@ struct ServeKnobs {
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
   dgpp::glm::AdmissionPolicy admission;  // M6 6d: full (default) or grow
+  double stats_interval_s = 10.0;  // the throughput line's period; 0 = off
 };
 
 // Pinned words for the sampler's collectives, allocated BEFORE the world
@@ -249,9 +250,20 @@ int serve_openai(dgpp::glm::SchedulerEngine* engine,
                        })
                  : service.engine_pass();
     };
+    // The throughput line (serve_stats.hpp): fed after every pass, idle
+    // passes included, so its intervals end on time.
+    dgpp::service::ThroughputLog stats(k.stats_interval_s, /*rank=*/0);
+    const auto observe = [&] {
+      const dgpp::service::GenerationService::Stats st = service.stats();
+      const dgpp::service::ServiceCounts sc{st.requests_total, st.requests_shed,
+                                           st.requests_cancelled};
+      stats.observe(service.meters(), &sc);
+    };
     while (!g_stop_requested.load()) {
       try {
-        if (!pass()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        const bool worked = pass();
+        observe();
+        if (!worked) std::this_thread::sleep_for(std::chrono::milliseconds(5));
       } catch (const std::exception& e) {
         fail_service(e.what());
         drained.store(true);
@@ -375,7 +387,12 @@ int main(int argc, char** argv) {
       "  greedy): [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
       "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n"
       "  reasoning (M6 6f): [--reasoning-in-content] folds the ids before\n"
-      "    </think> into content instead of reasoning_content\n";
+      "    </think> into content instead of reasoning_content\n"
+      "  logging: [--stats-interval-s X (default 10; 0 = off)]: one INFO line\n"
+      "    per interval with the aggregate prefill and decode throughput,\n"
+      "    the live and queued counts, the pool and the prefix cache; the\n"
+      "    per-token, per-window and per-cache-decision lines sit at DEBUG\n"
+      "    (DGPP_LOG_LEVEL=debug)\n";
 
   std::string ckpt, model_id, peer;
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
@@ -400,6 +417,7 @@ int main(int argc, char** argv) {
   std::optional<int> top_k;
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
+  double stats_interval_s = 10.0;  // the throughput line's period
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const auto next = [&]() -> std::string {
@@ -442,6 +460,7 @@ int main(int argc, char** argv) {
     else if (a == "--repetition-penalty") repetition_penalty = std::stof(next());
     else if (a == "--seed") fixed_seed = std::stoull(next());
     else if (a == "--reasoning-in-content") reasoning_in_content = true;
+    else if (a == "--stats-interval-s") stats_interval_s = std::stod(next());
     else {
       std::fputs(kUsage, stderr);
       return a == "--help" ? 0 : 1;
@@ -512,6 +531,10 @@ int main(int argc, char** argv) {
   }
   if (prefix_cache_gib < 0.0) {
     DGPP_LOG_ERROR("--prefix-cache-gib must be >= 0, got {}", prefix_cache_gib);
+    return 2;
+  }
+  if (!(stats_interval_s >= 0.0)) {
+    DGPP_LOG_ERROR("--stats-interval-s must be >= 0, got {}", stats_interval_s);
     return 2;
   }
   if (graph_batch_min_live == 0) {
@@ -650,6 +673,7 @@ int main(int argc, char** argv) {
     knobs.sampling_defaults = sampling_defaults;
     knobs.fixed_seed = fixed_seed;
     knobs.reasoning_in_content = reasoning_in_content;
+    knobs.stats_interval_s = stats_interval_s;
 
     // ---- world > 1: the fabric (Stage 4b) ------------------------------
     if (world > 1) {
@@ -805,6 +829,7 @@ int main(int argc, char** argv) {
                                      peer_prefix_slots);
           dgpp::service::OpStreamObserver oplog;
           sched.set_observer(&oplog);
+          dgpp::service::ThroughputLog stats(stats_interval_s, rank);
           DGPP_LOG_INFO("rank {}: following rank 0's journal (admission {}, window {})",
                         rank, dgpp::glm::AdmissionPolicy::name(peer_policy.mode),
                         peer_policy.window_tokens);
@@ -824,7 +849,7 @@ int main(int argc, char** argv) {
                 std::fflush(nullptr);
                 std::_Exit(3);
               },
-              /*watch_poll_ms=*/100, &oplog);
+              /*watch_poll_ms=*/100, &oplog, &stats);
           write_ops_file("serve_rank" + std::to_string(rank) + ".ops",
                          oplog.text());
           engine.reset();
