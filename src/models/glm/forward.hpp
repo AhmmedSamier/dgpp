@@ -575,7 +575,11 @@ class GlmDiagnosticModel {
   // slot's persistent token group and push a positive device position.
   // These calls are capture-time counterparts of the scalar device-driven
   // sequence above. The verdict arrays contain one entry per request slot.
-  void session_graph_capture_batch(int rows_per_request);
+  // `requests` (2026-09-07, the occupancy-sized batches): the batch covers
+  // slots [0, requests) — 0 means every slot; the adapter records a 2- and
+  // a 3-slot batch beside the full one and replays the smallest that
+  // covers the live slots, so two live requests pay four rows, not eight.
+  void session_graph_capture_batch(int rows_per_request, int requests = 0);
   // Restores the immutable slot-major row map in the graph's pinned memcpy
   // sources. Eager prefill/draft operations reuse those staging buffers, so
   // the adapter calls this before every replay; the recorded H2D nodes then
@@ -592,7 +596,8 @@ class GlmDiagnosticModel {
   // Restores the host-side validation/staging contract after capturing a
   // scalar variant beside an already-recorded fixed batch. CUDA graph nodes
   // have their own baked arguments; these fields govern replay-side helpers.
-  void session_graph_use_batch_contract(int rows_per_request);
+  // `requests` names the batch about to replay (0: every slot).
+  void session_graph_use_batch_contract(int rows_per_request, int requests = 0);
   int graph_batch_requests() const { return graph_batch_requests_; }
   int graph_rows_per_request() const { return graph_rows_per_request_; }
 

@@ -535,7 +535,7 @@ int main(int argc, char** argv) {
   int64_t kv_capacity = 8192;
   std::string kv_dtype = "bf16";  // the latent cache's format (2026-09-06)
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
-  int graph_batch_min_live = 0;  // 0 = min(4, max_concurrency)
+  int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
   // The sampled pick's candidate width per rank on the graph engines (the
   // planned 128; narrower forces the exact gather fallback more often —
   // the width sweep's knob, scripts/serve_width_sweep.sh).
@@ -695,7 +695,7 @@ int main(int argc, char** argv) {
         // settings record and the effective config print the same value
         // (2026-09-06: `batchmin=0` on one line, `=4` on the next).
         if (graph_batch_min_live == 0)
-          graph_batch_min_live = std::min(4, max_concurrency);
+          graph_batch_min_live = std::min(2, max_concurrency);
         dgpp::serve::WorldSettings ws;
         ws.version = DGPP_VERSION;
         ws.model = model_id;
@@ -860,7 +860,10 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (graph_batch_min_live == 0) {
-    graph_batch_min_live = std::min(4, max_concurrency);
+    // The batch family (2026-09-07): the smallest batch that covers the
+    // live slots replays, so two live requests pay four rows — the
+    // crossover moves from four to two.
+    graph_batch_min_live = std::min(2, max_concurrency);
   } else if (graph_batch_min_live < 1 ||
              graph_batch_min_live > max_concurrency) {
     DGPP_LOG_ERROR(

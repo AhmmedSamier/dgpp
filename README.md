@@ -174,7 +174,7 @@ whose ranks disagree.
 | `engine.no_eos` | no | ignore the model's end-of-sequence tokens (measurement runs only) | false |
 | `engine.decode_graph` | no | the one-graph decode step (the measured serving mode; needs a world larger than one) | false |
 | `engine.mtp` | no | the speculative two-token step on the decode graph (needs `decode_graph`) | false |
-| `engine.graph_batch_min_live` | no | live requests at which the adaptive engine switches from scalar graphs to the row batch; 0 means min(4, `max_concurrency`) | 0 |
+| `engine.graph_batch_min_live` | no | live requests at which the adaptive engine switches from scalar graphs to a row batch — the smallest of the 2-slot, 3-slot and full batches that covers the live slots (2026-09-07); 0 means min(2, `max_concurrency`) | 0 |
 | `engine.sampling_candidates` | no | the sampled pick's per-rank candidate width in [1, 256]; narrower falls back to the exact gather more often | 128 |
 | `engine.prefix_cache_gib` | no | the prefix cache's snapshot arena per rank in GiB (one slot per session state, ~35 MiB each); 0 turns the cache off | 1.5 |
 | `engine.admission` | no | `full` reserves prompt plus `max_tokens` at admission; `grow` reserves prompt plus `admission_window` and grows on demand, shedding the youngest request at exhaustion | `full` |

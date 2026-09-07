@@ -6,6 +6,16 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- The row batch is a family: a 2-slot (4-row) and a 3-slot (6-row) batch
+  are recorded beside the full 8-row one, and a step replays the smallest
+  whose slots cover the live requests. Two live requests used to be either
+  two scalar replays (83 ms/step) or the 8-row batch with four padding
+  rows (96.5 ms/step, the reason the crossover sat at four); the default
+  crossover is now two. A single live request replays its scalar graph as
+  before. Gated bitwise against independent scalar sessions and
+  speculators through every occupancy and the hole cases, plain and MTP,
+  on the loopback world.
+
 - A prefix cache miss is explained on its own INFO line: the cuts probed,
   the entries held, and where the prompt parts from the entry it shares
   the most with (`PrefixCache::nearest`), so a client that edits the

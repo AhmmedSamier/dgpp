@@ -215,12 +215,23 @@ inline SampledSpeculator::Row0 make_fabric_spec_row0(
 }
 
 // M6.6a Phase 2: adaptive scalar/row-batched graphs. Each physical request
-// slot lazily gets the exact Phase-1 scalar capture; one fixed batch covers
-// every configured slot, with rows [slot, speculative-row] (T=1 plain, T=2
-// MTP). Below the measured crossover the adapter replays each live scalar
-// variant; above it, one batch replay advances them all. Closed batch slots
+// slot lazily gets the exact Phase-1 scalar capture; a fixed batch covers a
+// prefix of the slots, with rows [slot, speculative-row] (T=1 plain, T=2
+// MTP). Below the crossover the adapter replays each live scalar variant;
+// at and above it, one batch replay advances them all. Closed batch slots
 // derive position -1 and remain padding. Both paths return one independently
 // judged token vector per live slot.
+// THE BATCH FAMILY (2026-09-07). The 8-row batch at two live requests
+// stepped in 96.5 ms against 83 for two scalar replays (41.5 solo): the
+// padding rows pay the fixed graph's stateless compute, expert reads and
+// collective width, which is why the crossover sat at four. So the batch
+// is recorded per occupancy — 2 slots, 3 slots, and every slot — and the
+// smallest family whose slots cover the live ones replays. The scheduler
+// fills the lowest free slot, so two live requests usually sit in 0 and
+// 1 and pay four rows; a hole from churn (slots 0 and 2) falls to the next
+// family up. Each family has its own two parities, end events, stage and
+// verdict indices (slots_ + family) and bus variants (2 * slots_ + 2 *
+// family + parity). A single live request never touches a batch.
 // SAMPLING (M6 6b, the device path): with both sampler scratch tables the
 // plain (T=1) graphs carry the on-device sampling pick
 // (kernels/glm_sample_pick.hpp) — per-slot device specs and count tables,
@@ -244,6 +255,7 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   struct Replay {
     int req = -1;             // the scalar slot, or -1 for the batch
     bool batched = false;
+    int family = -1;          // the batch family (batched only)
     int parity = 0;
     std::vector<int> reqs;    // the live slots the replay decided for
     bool redrafted = false;   // the host re-drafted: skip its draft verdicts
@@ -293,6 +305,19 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     batch_unavailable_ =
         slots_ * rows_per_request_ > GlmDiagnosticModel::kDecodeRows ||
         depth_ > 1;
+    if (!batch_unavailable_ && slots_ > 1) {
+      for (const int k : {2, 3})
+        if (k < slots_ &&
+            k * rows_per_request_ <= GlmDiagnosticModel::kDecodeRows) {
+          BatchFamily f;
+          f.requests = k;
+          families_.push_back(f);
+        }
+      BatchFamily full;
+      full.requests = slots_;
+      families_.push_back(full);
+      family_steps_.assign(families_.size(), 0);
+    }
     slot_mtp_attempts_.assign(static_cast<size_t>(slots_), {});
     slot_mtp_accepts_.assign(static_cast<size_t>(slots_), {});
     prefill_pick_ = make_fabric_pick(bus_, rank_, world, pick_scratch, vocab_,
@@ -401,11 +426,14 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
         DGPP_CUDA_OK(cudaEventCreateWithFlags(
             &end_events_[static_cast<size_t>(req)][static_cast<size_t>(p)],
             cudaEventDisableTiming));
-    for (int p = 0; p < 2; ++p)
-      DGPP_CUDA_OK(cudaEventCreateWithFlags(
-          &batch_end_events_[static_cast<size_t>(p)], cudaEventDisableTiming));
+    for (BatchFamily& f : families_)
+      for (int p = 0; p < 2; ++p)
+        DGPP_CUDA_OK(cudaEventCreateWithFlags(
+            &f.end_events[static_cast<size_t>(p)], cudaEventDisableTiming));
     {
-      const size_t n = static_cast<size_t>(slots_) + 1;
+      // Per slot, and per batch family at slots_ + family.
+      const size_t n = static_cast<size_t>(slots_) +
+                       std::max<size_t>(families_.size(), 1);
       DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_verdict_seq_),
                                  sizeof(uint64_t) * n, cudaHostAllocMapped));
       for (size_t i = 0; i < n; ++i) h_verdict_seq_[i] = 0;
@@ -471,13 +499,15 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     for (std::array<cudaGraphExec_t, 2>& execs : scalar_execs_)
       for (cudaGraphExec_t exec : execs)
         if (exec != nullptr) cudaGraphExecDestroy(exec);
-    for (cudaGraphExec_t exec : batch_execs_)
-      if (exec != nullptr) cudaGraphExecDestroy(exec);
+    for (BatchFamily& f : families_)
+      for (cudaGraphExec_t exec : f.execs)
+        if (exec != nullptr) cudaGraphExecDestroy(exec);
     for (std::array<cudaEvent_t, 2>& events : end_events_)
       for (cudaEvent_t ev : events)
         if (ev != nullptr) cudaEventDestroy(ev);
-    for (cudaEvent_t ev : batch_end_events_)
-      if (ev != nullptr) cudaEventDestroy(ev);
+    for (BatchFamily& f : families_)
+      for (cudaEvent_t ev : f.end_events)
+        if (ev != nullptr) cudaEventDestroy(ev);
     if (h_verdict_seq_) cudaFreeHost(h_verdict_seq_);
     if (d_verdict_seq_) cudaFree(d_verdict_seq_);
     if (h_stage_seq_) cudaFreeHost(h_stage_seq_);
@@ -522,6 +552,16 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     return a;
   }
   int batch_min_live() const { return batch_min_live_; }
+  // The batch families' slot counts, ascending (empty: scalar only), and
+  // the steps each replayed — the gates' evidence that a family ran.
+  std::vector<int> batch_families() const {
+    std::vector<int> out;
+    for (const BatchFamily& f : families_) out.push_back(f.requests);
+    return out;
+  }
+  uint64_t batch_family_steps(int family) const {
+    return family_steps_.at(static_cast<size_t>(family));
+  }
   int sampling_candidates() const { return candidates_; }
 
   bool supports_sampling() const override { return sampling_; }
@@ -664,18 +704,23 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
       (void)prefill(req, warm_prompt);
       try {
         ensure_scalar_graph(req);
-        if (req == 0 && slots_ > 1 && !batch_unavailable_) ensure_batch_graph();
+        if (req == 0)
+          for (size_t f = 0; f < families_.size(); ++f)
+            ensure_batch_graph(static_cast<int>(f));
       } catch (...) {
         close(req);
         throw;
       }
       close(req);
     }
+    std::string batches;
+    for (const BatchFamily& f : families_)
+      batches += (batches.empty() ? " and the row batches for " : ", ") +
+                 std::to_string(f.requests) + " slots";
     DGPP_LOG_INFO(
         "rank {}: warm capture complete — {} scalar variant{}{} recorded "
         "before the first request",
-        rank_, slots_, slots_ == 1 ? "" : "s",
-        slots_ > 1 ? " and the row batch" : "");
+        rank_, slots_, slots_ == 1 ? "" : "s", batches);
   }
   int64_t pool_blocks_total() const override {
     return model_->dsa_blocks_total();
@@ -876,9 +921,10 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   std::vector<std::vector<int32_t>> step_batch(
       const std::vector<int>& reqs) override {
     validate_batch(reqs);
-    const bool batched = slots_ > 1 &&
+    const bool batched = !families_.empty() &&
                          reqs.size() >= static_cast<size_t>(batch_min_live_);
-    log_mode_change(batched, reqs.size());
+    const int family = batched ? family_for(reqs) : -1;
+    log_mode_change(batched, reqs.size(), family);
     if (!batched) {
       std::vector<std::vector<int32_t>> batches;
       batches.reserve(reqs.size());
@@ -886,21 +932,24 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
       return batches;
     }
 
-    ensure_batch_graph();
-    model_->session_graph_use_batch_contract(rows_per_request_);
+    ensure_batch_graph(family);
+    BatchFamily& fam = families_[static_cast<size_t>(family)];
+    ++family_steps_[static_cast<size_t>(family)];
+    model_->session_graph_use_batch_contract(rows_per_request_, fam.requests);
     model_->session_graph_stage_batch();
     // Launch first (the window armed behind whatever runs), settle the
     // older replay while this one runs, stage the pick's masks for it,
     // then wait for its verdict.
     Replay r;
     r.batched = true;
-    r.parity = batch_parity_;
-    batch_parity_ ^= 1;
+    r.family = family;
+    r.parity = fam.parity;
+    fam.parity ^= 1;
     r.reqs = reqs;
     launch(std::move(r));
     settle_older();
     for (const int req : reqs) stage_masks(req);
-    publish_stage(slots_);
+    publish_stage(batch_index(family));
     if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     wait_verdict(inflight_.back());
 
@@ -1022,10 +1071,10 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     return in;
   }
 
-  DevicePicker::Inputs verify_pick_inputs() const {
+  DevicePicker::Inputs verify_pick_inputs(int requests) const {
     DevicePicker::Inputs in = scalar_pick_inputs(/*slot=*/0);
-    in.rows = slots_ * rows_per_request_;
-    in.requests = slots_;
+    in.rows = requests * rows_per_request_;
+    in.requests = requests;
     in.rows_per_request = rows_per_request_;
     in.fed = model_->device_feed(0, rows_per_request_);
     in.positions = model_->device_positions();
@@ -1042,10 +1091,10 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   }
 
   DevicePicker::Inputs draft_pick_inputs(
-      const PickVerdict* verify_verdicts) const {
+      const PickVerdict* verify_verdicts, int requests) const {
     DevicePicker::Inputs in = scalar_pick_inputs(/*slot=*/1);
-    in.rows = slots_;
-    in.requests = slots_;
+    in.rows = requests;
+    in.requests = requests;
     in.rows_per_request = 1;
     in.positions = model_->device_positions();
     in.position_stride = rows_per_request_;
@@ -1146,8 +1195,27 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   }
 
   int scalar_variant(int req, int parity) const { return 2 * req + parity; }
-  int batch_variant(int parity) const { return 2 * slots_ + parity; }
-  bool batch_captured() const { return batch_execs_[0] != nullptr; }
+  int batch_variant(int family, int parity) const {
+    return 2 * slots_ + 2 * family + parity;
+  }
+  // The stage handshake's and the verdict's index of a family.
+  int batch_index(int family) const { return slots_ + family; }
+  bool batch_captured(int family) const {
+    return families_[static_cast<size_t>(family)].execs[0] != nullptr;
+  }
+  bool any_batch_captured() const {
+    for (size_t f = 0; f < families_.size(); ++f)
+      if (batch_captured(static_cast<int>(f))) return true;
+    return false;
+  }
+  // The smallest family whose slots [0, requests) cover every live slot.
+  int family_for(const std::vector<int>& reqs) const {
+    int top = 0;
+    for (const int req : reqs) top = std::max(top, req);
+    for (size_t f = 0; f < families_.size(); ++f)
+      if (families_[f].requests > top) return static_cast<int>(f);
+    return static_cast<int>(families_.size()) - 1;
+  }
 
   // The stage handshake and the masks' upload, recorded ahead of the
   // pick: the wait node bumps the replay counter of `index` (a slot, or
@@ -1222,8 +1290,9 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     for (int parity = 0; parity < 2; ++parity)
       execs[static_cast<size_t>(parity)] =
           capture_variant(scalar_variant(req, parity), [&] { build(parity); });
-    if (batch_captured())
-      model_->session_graph_use_batch_contract(rows_per_request_);
+    if (any_batch_captured())
+      model_->session_graph_use_batch_contract(rows_per_request_,
+                                               families_.back().requests);
     DGPP_LOG_INFO(
         "rank {}: serving scalar graph variants {}/{} captured for request "
         "slot {} ({} rows{})",
@@ -1231,25 +1300,27 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
         rows_per_request_, mtp ? ", MTP" : "");
   }
 
-  void ensure_batch_graph() {
-    if (batch_captured()) return;
+  void ensure_batch_graph(int family) {
+    BatchFamily& fam = families_.at(static_cast<size_t>(family));
+    if (fam.execs[0] != nullptr) return;
     const bool mtp = model_->mtp_enabled();
+    const int k = fam.requests;
+    const int rows = k * rows_per_request_;
+    const int index = batch_index(family);
     const auto build = [&](int parity) {
-      model_->session_graph_capture_batch(rows_per_request_);
-      record_stage_gate(slots_, 0, slots_ * rows_per_request_);
-      picker_->record(model_->stream(), verify_pick_inputs());
+      model_->session_graph_capture_batch(rows_per_request_, k);
+      record_stage_gate(index, 0, rows);
+      picker_->record(model_->stream(), verify_pick_inputs(k));
       (void)parity;
-      glm_publish_seq(d_verdict_seq_ + slots_, h_verdict_seq_ + slots_,
+      glm_publish_seq(d_verdict_seq_ + index, h_verdict_seq_ + index,
                       model_->stream());
-      if (mtp)
-        snapshot_verify_rows(/*req=*/0, slots_ * rows_per_request_,
-                             /*first_row=*/0);
+      if (mtp) snapshot_verify_rows(/*req=*/0, rows, /*first_row=*/0);
       model_->session_graph_capture_commit_batch(picker_->device_verdict(0));
       if (mtp) {
         model_->session_graph_capture_draft_batch(
             picker_->device_verdict(0));
         picker_->record(model_->stream(),
-                        draft_pick_inputs(picker_->device_verdict(0)));
+                        draft_pick_inputs(picker_->device_verdict(0), k));
         model_->session_graph_capture_next_tokens_batch(
             picker_->device_verdict(1));
       } else {
@@ -1258,20 +1329,22 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
       }
     };
     for (int parity = 0; parity < 2; ++parity)
-      batch_execs_[static_cast<size_t>(parity)] =
-          capture_variant(batch_variant(parity), [&] { build(parity); });
-    model_->session_graph_use_batch_contract(rows_per_request_);
+      fam.execs[static_cast<size_t>(parity)] = capture_variant(
+          batch_variant(family, parity), [&] { build(parity); });
+    model_->session_graph_use_batch_contract(rows_per_request_, k);
     DGPP_LOG_INFO(
-        "rank {}: serving row-batched graph variants {}/{} captured ({} slots "
-        "x {} rows = {} fixed rows{}, selected at {}+ live requests)",
-        rank_, batch_variant(0), batch_variant(1), slots_, rows_per_request_,
-        slots_ * rows_per_request_, mtp ? ", MTP" : "", batch_min_live_);
+        "rank {}: serving row-batched graph variants {}/{} captured for {} "
+        "slots x {} rows = {} fixed rows{} (a batch is selected at {}+ live "
+        "requests, the smallest that covers the live slots)",
+        rank_, batch_variant(family, 0), batch_variant(family, 1), k,
+        rows_per_request_, rows, mtp ? ", MTP" : "", batch_min_live_);
   }
 
   // Polls the slot's pinned verdict sequence until the replay's verdict
   // node published it (the verify's pick is done; the tail runs on).
   void wait_verdict(const Replay& r) const {
-    const size_t index = static_cast<size_t>(r.batched ? slots_ : r.req);
+    const size_t index =
+        static_cast<size_t>(r.batched ? batch_index(r.family) : r.req);
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(pick_timeout_ms_);
     uint64_t spins = 0;
@@ -1287,7 +1360,8 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
     }
   }
   cudaEvent_t end_event(const Replay& r) const {
-    return r.batched ? batch_end_events_[static_cast<size_t>(r.parity)]
+    return r.batched ? families_[static_cast<size_t>(r.family)]
+                           .end_events[static_cast<size_t>(r.parity)]
                      : end_events_[static_cast<size_t>(r.req)]
                                   [static_cast<size_t>(r.parity)];
   }
@@ -1297,13 +1371,15 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   // replay stays in flight (the bus holds two windows).
   void launch(Replay r) {
     while (inflight_.size() >= 2) settle_front();
-    const int variant = r.batched ? batch_variant(r.parity)
+    const int variant = r.batched ? batch_variant(r.family, r.parity)
                                   : scalar_variant(r.req, r.parity);
     cudaGraphExec_t exec =
-        r.batched ? batch_execs_[static_cast<size_t>(r.parity)]
+        r.batched ? families_[static_cast<size_t>(r.family)]
+                        .execs[static_cast<size_t>(r.parity)]
                   : scalar_execs_[static_cast<size_t>(r.req)]
                                  [static_cast<size_t>(r.parity)];
-    r.verdict_seq = ++verdict_seq_[static_cast<size_t>(r.batched ? slots_ : r.req)];
+    r.verdict_seq = ++verdict_seq_[static_cast<size_t>(
+        r.batched ? batch_index(r.family) : r.req)];
     std::string err;
     if (!bus_->graph_replay_arm(&err, variant))
       throw std::runtime_error("graph engine replay arm: " + err);
@@ -1337,7 +1413,8 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
       throw std::runtime_error("graph engine replay finish: " + err);
     }
     if (sampling_) {
-      const size_t index = static_cast<size_t>(r.batched ? slots_ : r.req);
+      const size_t index =
+          static_cast<size_t>(r.batched ? batch_index(r.family) : r.req);
       if (__atomic_load_n(h_stage_late_ + index, __ATOMIC_ACQUIRE) != 0u)
         throw std::runtime_error(
             "graph engine: the stage handshake timed out — the replay's "
@@ -1932,14 +2009,17 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
 
  private:
 
-  void log_mode_change(bool batched, size_t live) {
-    const int mode = batched ? 1 : 0;
+  void log_mode_change(bool batched, size_t live, int family) {
+    const int mode = batched ? 1 + family : 0;
     if (last_mode_ == mode) return;
     last_mode_ = mode;
+    const int rows = batched ? families_[static_cast<size_t>(family)].requests *
+                                   rows_per_request_
+                             : rows_per_request_;
     DGPP_LOG_DEBUG(
-        "rank {}: adaptive decode selected {} graph at {} live request{} "
-        "(batch crossover {})",
-        rank_, batched ? "row-batched" : "scalar", live,
+        "rank {}: adaptive decode selected {} graph ({} rows) at {} live "
+        "request{} (batch crossover {})",
+        rank_, batched ? "row-batched" : "scalar", rows, live,
         live == 1 ? "" : "s", batch_min_live_);
   }
 
@@ -1995,7 +2075,7 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   std::vector<int> hop_slot_;          // per slot: the armed hop's arena slot, -1 none
   std::vector<int64_t> hop_position_;  // per slot: the armed hop's position
   int batch_min_live_ = 1;
-  int last_mode_ = -1;  // 0 scalar variants, 1 fixed row batch
+  int last_mode_ = -1;  // 0 scalar variants, 1 + family for a row batch
   GenEngineAdapter::Pick prefill_pick_;
   std::unique_ptr<DevicePicker> picker_;
   // Recorder storage is referenced by graph nodes and must outlive the exec.
@@ -2008,12 +2088,21 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   // pick, and its END (the draft block's tail) settled after the NEXT
   // replay was launched — that is where the host's seam hides.
   std::vector<std::array<cudaGraphExec_t, 2>> scalar_execs_;
-  std::array<cudaGraphExec_t, 2> batch_execs_{{nullptr, nullptr}};
   std::vector<int> scalar_parity_;
-  int batch_parity_ = 0;
   std::vector<std::array<cudaEvent_t, 2>> end_events_;
-  std::array<cudaEvent_t, 2> batch_end_events_{{nullptr, nullptr}};
-  // The verdict's publication: per slot (and the batch, at index slots_)
+  // The batch families (2026-09-07): by slot count, ascending — 2, 3 and
+  // every slot where the rows allow — each with its two parities' execs
+  // and end events and its own parity clock; the steps each replayed.
+  struct BatchFamily {
+    int requests = 0;
+    std::array<cudaGraphExec_t, 2> execs{{nullptr, nullptr}};
+    std::array<cudaEvent_t, 2> end_events{{nullptr, nullptr}};
+    int parity = 0;
+  };
+  std::vector<BatchFamily> families_;
+  std::vector<uint64_t> family_steps_;
+  // The verdict's publication: per slot (and per batch family, at index
+  // slots_ + family)
   // the device replay counter the verdict node bumps, its pinned mirror
   // the host polls, and the host's expected count.
   uint64_t* h_verdict_seq_ = nullptr;
@@ -2028,7 +2117,7 @@ class GlmGraphEngineAdapter final : public sched::SchedulerEngine {
   }();
   bool trace_ = std::getenv("DGPP_PIPELINE_TRACE") != nullptr;
 
-  // The stage handshake: per slot (and the batch, at index slots_) the
+  // The stage handshake: per slot (and per batch family, at slots_ + f) the
   // host's published stage sequence (pinned), the device's replay counter,
   // and the late flag the wait node sets on a timeout.
   uint64_t* h_stage_seq_ = nullptr;

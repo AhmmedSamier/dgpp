@@ -783,9 +783,14 @@ Two phases:
   Admission and retirement therefore change occupancy, not graph shape;
   one scheduler tick advances every live slot in a single replay. Beside it,
   `GlmGraphEngineAdapter` lazily records the exact Phase-1 scalar graph for
-  each physical slot. It runs those variants sequentially below four live
-  requests and selects the fixed batch at four or more (configurable with
-  `--graph-batch-min-live`).
+  each physical slot. It runs those variants sequentially below the
+  crossover and selects a batch at and above it (configurable with
+  `--graph-batch-min-live`). Since 2026-09-07 the batch is a FAMILY — a
+  2-slot (4-row) and a 3-slot (6-row) batch beside the full one, the
+  smallest whose slots cover the live ones replaying — because the 8-row
+  batch at two live requests (96.5 ms/step) lost to two scalar replays (83
+  ms); DESIGN §11's adaptive-engine paragraph has the mechanism and the
+  gates, the record the measurement.
 
   The complete device path is request-indexed. KDA conv/recurrence and DSA
   consume the same slot-major row map, preserve per-request row order, skip

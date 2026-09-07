@@ -2725,13 +2725,38 @@ entries).
 
 **The adaptive graph engine** (`GlmGraphEngineAdapter`, M6.6a Phase 2): the
 adapter owns two execution shapes. It lazily captures one Phase-1 scalar graph
-for every physical request slot and one fixed request-major row batch, T=1
-without MTP and T=2 with it, subject to `requests * T <= kDecodeRows` (8).
-The scheduler advertises the configured slot count so its canonical
-round-robin slice contains every live request. Below four live requests the
-adapter replays those requests' scalar variants sequentially; at four or more
-it selects the batch and advances every live request in one replay. The
-crossover defaults to four and is exposed as `--graph-batch-min-live`.
+for every physical request slot and a family of fixed request-major row
+batches, T=1 without MTP and T=2 with it, subject to `requests * T <=
+kDecodeRows` (8). The scheduler advertises the configured slot count so its
+canonical round-robin slice contains every live request. Below the crossover
+the adapter replays the live requests' scalar variants sequentially; at and
+above it, one batch replay advances every live request. **The batch family
+(2026-09-07).** The single 8-row batch at two live requests stepped in 96.5
+ms against 83 ms for two scalar replays (41.5 solo): its padding rows pay
+the fixed graph's stateless compute, expert reads and collective width,
+which is why the crossover sat at four. So the batch is recorded per
+occupancy — a 2-slot batch over slots 0 and 1, a 3-slot batch over 0..2,
+and the full one — and a step replays the smallest family whose slots
+cover the live ones (`family_for`: the highest live slot decides). The
+scheduler fills the lowest free slot, so two live requests usually sit in
+0 and 1 and pay four rows; a hole from churn (0 and 2) falls to the 6-row
+family, and only a live slot 3 reaches the 8-row batch. Each family owns
+its two parities' executables and end events, its stage-handshake and
+verdict index (`slots_ + family`) and its bus variants (`2 * slots_ + 2 *
+family + parity`, within the bus's 32 per era); the capture is the same
+sequence over `requests` slots (`session_graph_capture_batch(rows,
+requests)`), and the pick's per-slot tables are read from slot 0 with the
+per-slot stride, which is why a family is a prefix of the slots rather
+than an arbitrary subset. A single live request never touches a batch, so
+the one-stream path is unchanged by construction. The gates:
+`glm_tp_serving_plain_batch_family_matches_independent_sessions` (three
+T=1 requests of different lengths under the scheduler take the live count
+through 1, 2, 3, 2, 1 — every transcript bitwise its independent scalar
+session, every family replayed, both ranks identical) and
+`glm_tp_serving_mtp_batch_family_matches_independent_speculators` (slots 0
+and 1, then 0..2, then the hole 0 and 2, then 3 beside them, then 3 alone
+— every round's newly decided tokens equal the independent speculators').
+The crossover is exposed as `--graph-batch-min-live`.
 
 `CollectiveBus` supports up to 16 recorded variants inside one graph era.
 Each owns a disjoint pinned generation-cell slab and immutable per-node

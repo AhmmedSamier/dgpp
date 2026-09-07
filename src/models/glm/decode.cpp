@@ -773,10 +773,12 @@ void GlmDiagnosticModel::session_graph_capture_step(
   (void)out;  // empty by contract; the caller instantiates the graph
 }
 
-void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request) {
+void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request,
+                                                     int requests_arg) {
+  const int requests = requests_arg > 0 ? requests_arg : max_requests_;
   if (rows_per_request < 1 || rows_per_request > kSpecRows ||
-      max_requests_ > kDecodeRows ||
-      max_requests_ * rows_per_request > kDecodeRows)
+      requests < 1 || requests > max_requests_ || max_requests_ > kDecodeRows ||
+      requests * rows_per_request > kDecodeRows)
     throw std::invalid_argument(
         "session_graph_capture_batch: requests * rows_per_request must fit "
         "the fixed decode-row ceiling");
@@ -785,7 +787,6 @@ void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request) {
     throw std::logic_error(
         "session_graph_capture_batch: capture needs one open request");
 
-  const int requests = max_requests_;
   const int rows = requests * rows_per_request;
   if (rows > max_tokens_)
     throw std::invalid_argument(
@@ -830,17 +831,19 @@ void GlmDiagnosticModel::session_graph_stage_batch() {
 }
 
 void GlmDiagnosticModel::session_graph_use_batch_contract(
-    int rows_per_request) {
+    int rows_per_request, int requests_arg) {
+  const int requests = requests_arg > 0 ? requests_arg : max_requests_;
   if (rows_per_request < 1 || rows_per_request > kSpecRows ||
-      max_requests_ * rows_per_request > kDecodeRows)
+      requests < 1 || requests > max_requests_ ||
+      requests * rows_per_request > kDecodeRows)
     throw std::invalid_argument(
         "session_graph_use_batch_contract: invalid fixed batch shape");
   graph_device_positions_ = true;
   graph_device_tokens_ = true;
   graph_has_draft_ = mtp_;
-  graph_batch_requests_ = max_requests_;
+  graph_batch_requests_ = requests;
   graph_rows_per_request_ = rows_per_request;
-  decode_rows_ = max_requests_ * rows_per_request;
+  decode_rows_ = requests * rows_per_request;
   if (mtp_) draft_rows_ = decode_rows_;
 }
 

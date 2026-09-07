@@ -4431,6 +4431,294 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
           "batched MTP token feeds differ across ranks");
 }
 
+// The batch family (2026-09-07): a 2-slot (4-row) and a 3-slot (6-row)
+// batch beside the full one, the smallest that covers the live slots
+// replaying. Three T=1 requests of different lengths under the scheduler
+// take the live count through 1 (scalar), 2 (the 4-row family), 3 (the
+// 6-row), back to 2 and 1 as they retire; every transcript must equal an
+// independently decoded scalar session, every family must have replayed,
+// and both ranks must publish the same transcripts.
+DGPP_TEST(glm_tp_serving_plain_batch_family_matches_independent_sessions) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt_a = make_tokens(9, cfg.vocab_size);
+  const std::vector<int64_t> prompt_b = make_tokens(7, cfg.vocab_size);
+  const std::vector<int64_t> prompt_c = make_tokens(8, cfg.vocab_size);
+  constexpr int kTokensA = 7;
+  constexpr int kTokensB = 5;
+  constexpr int kTokensC = 3;
+  constexpr int kWorld = 2;
+  // A context wide enough for three live requests' blocks at once (the
+  // two-block pool of the two-slot gate defers the third request).
+  const int max_tokens = 128;
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29938);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> rank_seqs(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel plain(cfg, dir, max_tokens, 1024, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 1024, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/4, /*mtp=*/false);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        arrive_once();
+        const auto pick = [&](const GlmDiagnosticModel::Outputs& out) {
+          return dgpp::bus_greedy_pick_rows(
+              bus, r, kWorld, dgpp::local_row_maxes(out, 1), scratch,
+              test_wait_timeout_ms())[0];
+        };
+        const auto scalar_generate = [&](const std::vector<int64_t>& prompt,
+                                         int count) {
+          std::vector<int64_t> got;
+          GlmDiagnosticModel::Outputs out = plain.session_prefill(prompt);
+          int32_t token = pick(out);
+          for (int i = 0; i < count; ++i) {
+            got.push_back(token);
+            if (i + 1 < count) {
+              out = plain.session_step(token);
+              token = pick(out);
+            }
+          }
+          plain.session_close(0);
+          return got;
+        };
+        const std::vector<int64_t> want_a = scalar_generate(prompt_a, kTokensA);
+        const std::vector<int64_t> want_b = scalar_generate(prompt_b, kTokensB);
+        const std::vector<int64_t> want_c = scalar_generate(prompt_c, kTokensC);
+
+        {
+          dgpp::GlmGraphEngineAdapter engine(
+              &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+              /*pick_timeout_ms=*/test_wait_timeout_ms(), /*batch_min_live=*/2);
+          require(engine.decode_batch_capacity() == 4,
+                  "the adapter did not advertise its four slots");
+          require(engine.batch_families() == std::vector<int>{2, 3, 4},
+                  "the T=1 four-slot engine should hold the 2-, 3- and 4-slot batches");
+          engine.warm_captures(make_tokens(4, cfg.vocab_size));
+          dgpp::sched::Scheduler sched(&engine, /*eos_token_ids=*/{});
+          const auto submit = [&](const char* id, const std::vector<int64_t>& prompt,
+                                  int steps) {
+            dgpp::sched::SchedulerRequest q;
+            q.id = id;
+            q.prompt = prompt;
+            q.max_steps = steps;
+            sched.submit(std::move(q));
+          };
+          submit("family-a", prompt_a, kTokensA);
+          submit("family-b", prompt_b, kTokensB);
+          submit("family-c", prompt_c, kTokensC);
+          sched.run_to_completion();
+          if (sched.results()[0].generated != want_a ||
+              sched.results()[1].generated != want_b ||
+              sched.results()[2].generated != want_c)
+            throw std::runtime_error(
+                "batch-family transcript differs from independent scalar decode");
+          // Every family replayed: three live (6 rows) while c ran, two
+          // (4 rows) before it admitted and after it retired; the full
+          // batch never, with no hole above slot 2.
+          if (engine.batch_family_steps(0) == 0 || engine.batch_family_steps(1) == 0)
+            throw std::runtime_error(
+                "the 2-slot or the 3-slot family never replayed (steps " +
+                std::to_string(engine.batch_family_steps(0)) + " / " +
+                std::to_string(engine.batch_family_steps(1)) + ")");
+          if (engine.batch_family_steps(2) != 0)
+            throw std::runtime_error("the full batch replayed for three live slots");
+          std::vector<int64_t>& seq = rank_seqs[static_cast<size_t>(r)];
+          for (size_t i = 0; i < 3; ++i) {
+            const std::vector<int64_t>& g = sched.results()[i].generated;
+            seq.insert(seq.end(), g.begin(), g.end());
+            seq.push_back(-1);
+          }
+        }
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(),
+            errors[static_cast<size_t>(r)]);
+  require(rank_seqs[0] == rank_seqs[1],
+          "batch-family transcripts differ across ranks");
+}
+
+// The batch family under MTP (2026-09-07): slots 0 and 1 live (the 4-row
+// family), then 0..2 (the 6-row), then a hole at 1 — slots 0 and 2, still
+// the 6-row family — then slot 3 opened beside them (the full 8-row batch
+// is the only one that covers it), then slot 3 alone on its scalar graph;
+// every round's newly decided tokens equal the independent speculators',
+// and the transitions leave no residue in any slot.
+DGPP_TEST(glm_tp_serving_mtp_batch_family_matches_independent_speculators) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt_a = make_tokens(9, cfg.vocab_size);
+  const std::vector<int64_t> prompt_b = make_tokens(7, cfg.vocab_size);
+  const std::vector<int64_t> prompt_c = make_tokens(8, cfg.vocab_size);
+  constexpr int kWorld = 2;
+  constexpr int kRounds = 2;
+  const int max_tokens = 128;  // three live requests' prefills and reserves at once
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29939);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<int64_t>> rank_evidence(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 1024, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/4, /*mtp=*/true);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 1024, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/4, /*mtp=*/true);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        arrive_once();
+
+        const auto pick_rows = [&](const std::vector<Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
+                                            test_wait_timeout_ms());
+        };
+        const auto first_pick = [&](GlmDiagnosticModel& model, int req,
+                                    const std::vector<int64_t>& prompt) {
+          return pick_rows(dgpp::local_row_maxes(
+              model.session_prefill(req, prompt), 1))[0];
+        };
+        const auto newly_decided = [](dgpp::GreedySpeculator& spec) {
+          const int32_t old_draft = spec.draft();
+          const std::vector<int32_t> consumed = spec.step();
+          std::vector<int32_t> out;
+          if (consumed.size() == 2) out.push_back(old_draft);
+          out.push_back(spec.next());
+          return out;
+        };
+
+        dgpp::GlmGraphEngineAdapter engine(
+            &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+            /*pick_timeout_ms=*/test_wait_timeout_ms(), /*batch_min_live=*/2);
+        require(engine.batch_families() == std::vector<int>{2, 3, 4},
+                "the MTP four-slot engine should hold the 2-, 3- and 4-slot batches");
+        engine.warm_captures(make_tokens(4, cfg.vocab_size));
+        engine.drain();
+
+        std::vector<std::unique_ptr<dgpp::GreedySpeculator>> specs(4);
+        const auto open = [&](int slot, const std::vector<int64_t>& prompt) {
+          engine.drain();
+          const int32_t eager_first = first_pick(eager, slot, prompt);
+          specs[static_cast<size_t>(slot)] =
+              std::make_unique<dgpp::GreedySpeculator>(eager, slot, pick_rows);
+          specs[static_cast<size_t>(slot)]->start(eager_first);
+          const int32_t graph_first = engine.prefill(slot, prompt);
+          require(graph_first == eager_first,
+                  "slot " + std::to_string(slot) + " prefill pick differs");
+          engine.reserve(slot, static_cast<int64_t>(prompt.size()) + 12);
+        };
+        const auto shut = [&](int slot) {
+          engine.close(slot);
+          eager.session_close(slot);
+          specs[static_cast<size_t>(slot)].reset();
+        };
+        const auto rounds = [&](const std::vector<int>& order, const char* what) {
+          for (int round = 0; round < kRounds; ++round) {
+            engine.drain();
+            std::vector<std::vector<int32_t>> want;
+            for (const int slot : order)
+              want.push_back(newly_decided(*specs[static_cast<size_t>(slot)]));
+            const auto got = engine.step_batch(order);
+            for (size_t i = 0; i < order.size(); ++i) {
+              if (got[i] != want[i])
+                throw std::runtime_error(
+                    std::string(what) + ": newly decided tokens differ at round " +
+                    std::to_string(round) + " slot " + std::to_string(order[i]));
+              rank_evidence[static_cast<size_t>(r)].insert(
+                  rank_evidence[static_cast<size_t>(r)].end(), got[i].begin(),
+                  got[i].end());
+            }
+          }
+        };
+        open(0, prompt_a);
+        open(1, prompt_b);
+        rounds({0, 1}, "two live in slots 0 and 1 (the 4-row family)");
+        open(2, prompt_c);
+        rounds({1, 2, 0}, "three live in slots 0..2 (the 6-row family)");
+        shut(1);
+        rounds({2, 0}, "a hole at 1: slots 0 and 2 (still the 6-row family)");
+        open(3, prompt_b);
+        rounds({3, 2, 0}, "slots 0, 2 and 3 (the full batch)");
+        shut(0);
+        shut(2);
+        rounds({3}, "slot 3 alone (its scalar graph)");
+        shut(3);
+        if (engine.batch_family_steps(0) != kRounds ||
+            engine.batch_family_steps(1) != 2 * kRounds ||
+            engine.batch_family_steps(2) != kRounds)
+          throw std::runtime_error(
+              "family steps: " + std::to_string(engine.batch_family_steps(0)) + " / " +
+              std::to_string(engine.batch_family_steps(1)) + " / " +
+              std::to_string(engine.batch_family_steps(2)) + ", expected " +
+              std::to_string(kRounds) + " / " + std::to_string(2 * kRounds) + " / " +
+              std::to_string(kRounds));
+        cudaFreeHost(scratch);
+        scratch = nullptr;
+      } catch (const std::exception& e) {
+        if (scratch != nullptr) cudaFreeHost(scratch);
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(),
+            errors[static_cast<size_t>(r)]);
+  require(rank_evidence[0] == rank_evidence[1],
+          "MTP batch-family tokens differ across ranks");
+}
+
 // Phase 2's T=1 form: two request slots occupy two fixed graph rows. Strict
 // admission brings the second request in one tick after the first, then every
 // tick advances both with one replay. Different prompt lengths make a state

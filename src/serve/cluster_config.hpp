@@ -55,7 +55,7 @@ struct ClusterConfig {
     bool decode_graph = false;
     bool mtp = false;
     int mtp_depth = 1;             // draft tokens per step (1..3); needs mtp
-    int graph_batch_min_live = 0;  // 0 = min(4, max_concurrency)
+    int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
     int sampling_candidates = 128;
     double prefix_cache_gib = 1.5;
     std::string admission = "full";

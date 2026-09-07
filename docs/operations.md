@@ -285,8 +285,11 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   saw it — ~41 ms for one request under 2K tokens of context, 42–43 ms
   from 8K to 32K after the 2026-09-06 work (the select kernel's rewrite:
   it was 52–56 at 8K–32K; the tensor-core attention; the pipelined
-  replay, which also makes this the verdict-to-verdict interval), ~120 ms
-  for the 8-row MTP graph at four live requests; the
+  replay, which also makes this the verdict-to-verdict interval); under
+  the batch family (2026-09-07) 60 ms for the 4-row batch at two live
+  requests, 90 ms for the 6-row at three and 107 ms for the 8-row at four
+  — against 83 and ~124 ms for two and three scalar replays in sequence,
+  which is what `graph_batch_min_live` above two would give back; the
   `mtp` group is MTP's yield — tokens per request-step (1.0 to 1 + depth)
   — and the measured acceptance of each draft position over the interval
   (`accept p1 74 % p2 61 %`: the share of steps in which the first draft
