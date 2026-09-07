@@ -11,16 +11,21 @@
 //   JsonSchema  — OpenAI's structured-output subset compiled into nodes:
 //                 type (and type lists), object properties / required /
 //                 additionalProperties, array items / minItems / maxItems,
-//                 enum and const, anyOf. Anything else refuses at compile
-//                 time NAMING THE KEYWORD (the loud-refusal discipline).
+//                 enum and const, anyOf, and an integer's minimum / maximum
+//                 (exclusive forms included). Anything else refuses at
+//                 compile time NAMING THE KEYWORD (the loud-refusal
+//                 discipline).
 //   JsonMachine — the lexer plus schema cursors: at a value position the
 //                 expected node filters the value class (an anyOf splits the
 //                 cursor per alternative, the frontier shrinks as bytes
 //                 disambiguate), object keys match the declared properties
 //                 byte by byte (closed objects) or run free (open ones),
 //                 enum/const values match their JSON texts, commas and
-//                 closers obey required keys and item bounds. Free JSON mode
-//                 is the schema {root: object, anything inside}.
+//                 closers obey required keys and item bounds, a bounded
+//                 integer's digits are admitted only while some completion
+//                 can still land inside the range (IntegerPrefix, the
+//                 arithmetic on the digits so far). Free JSON mode is the
+//                 schema {root: object, anything inside}.
 //
 // THE MASK. Per position the machine yields the set of token ids that may
 // come next: a token is allowed iff feeding its bytes never rejects. Doing
@@ -60,6 +65,37 @@ struct TokenMask;
 // The schema
 // ---------------------------------------------------------------------------
 
+// An integer's range, inclusive after normalization (a fractional or
+// exclusive bound is rounded inward at compile time). Applied only where the
+// node's numeric type is integer alone (2026-09-07): a number with a
+// fraction or an exponent has no prefix arithmetic worth trusting, so its
+// bound stays the model's to respect and the note says so.
+struct IntegerBounds {
+  bool has_min = false;
+  bool has_max = false;
+  int64_t min = 0;
+  int64_t max = 0;
+  bool active() const { return has_min || has_max; }
+};
+
+// The digits of an integer being spelled — a JSON integer is '-'? then '0'
+// or a run of digits without a leading zero — and the two questions a
+// bound asks of them: can some further digits (possibly none) reach the
+// range, and does the value as spelled lie in it. The magnitude saturates
+// at twenty digits: past 10^19 the value is beyond any 64-bit bound in
+// its direction, which is all the questions need. Pure arithmetic — the
+// machine asks per byte, the mask per numeric token — so the two agree by
+// construction.
+struct IntegerPrefix {
+  bool negative = false;
+  bool huge = false;      // twenty or more digits
+  uint64_t magnitude = 0; // the digits so far (valid while !huge)
+  int digits = 0;
+  void push(uint8_t b);   // '-' or a digit; anything else is ignored
+  bool can_reach(const IntegerBounds& b) const;
+  bool within(const IntegerBounds& b) const;
+};
+
 struct JsonSchemaNode {
   // Value classes, as the lexer sees them at a value's first byte.
   enum Class : uint32_t {
@@ -88,6 +124,9 @@ struct JsonSchemaNode {
   // string target is quoted and escaped, a number is its shortest form).
   bool has_enum = false;
   std::vector<std::string> enum_texts;
+  // integer: the range (never set beside an enum — the enum's texts are
+  // filtered by the range at compile time instead).
+  IntegerBounds bounds;
   // anyOf: the alternatives (a node with alternatives has no other content).
   std::vector<int> any_of;
 };
@@ -99,13 +138,16 @@ struct JsonSchema {
 
 // Compiles OpenAI's structured-output subset. Throws std::invalid_argument
 // whose message starts with the offending keyword path (e.g.
-// "schema.properties.city.pattern") followed by the reason. With
-// `unenforced` given (a tool argument's schema, 2026-09-06), the keywords
-// that only NARROW a typed value — minimum/maximum, minLength/maxLength,
-// pattern, format, multipleOf, ... — compile instead of refusing: the value
-// keeps its type, the narrowing is not applied, and each such keyword's
-// path is appended to `unenforced`. Keywords that change a value's shape
-// ($ref, oneOf, allOf, patternProperties, ...) refuse either way.
+// "schema.properties.city.pattern") followed by the reason. An integer's
+// minimum / maximum / exclusiveMinimum / exclusiveMaximum compile into the
+// node's bounds and are enforced (2026-09-07). With `unenforced` given (a
+// tool argument's schema, 2026-09-06), the keywords that only NARROW a
+// typed value without an automaton behind them — a bound on a number that
+// admits a fraction, minLength/maxLength, pattern, format, multipleOf, ...
+// — compile instead of refusing: the value keeps its type, the narrowing
+// is not applied, and "<keyword path>: <reason>" is appended to
+// `unenforced`. Keywords that change a value's shape ($ref, oneOf, allOf,
+// patternProperties, ...) refuse either way.
 JsonSchema compile_json_schema(const minijson::Value& schema,
                                std::vector<std::string>* unenforced = nullptr);
 // JSON mode: a root object holding anything.
@@ -242,6 +284,7 @@ class JsonTables {
                                // leading whitespace (-1: none — pure content)
     bool structural_only = false;  // no quote, bytes all structure/ws
     int32_t lead_ws = 0;           // leading whitespace bytes (the run cap)
+    bool numeric = false;          // after the leading ws: '-'? digits* (non-empty)
   };
   const Shape& shape(int id) const { return shapes_[static_cast<size_t>(id)]; }
   const std::vector<std::string>& prefixes() const { return prefixes_; }
@@ -251,6 +294,10 @@ class JsonTables {
   const std::vector<int32_t>& multi_quote_ids() const { return multi_; }
   const std::vector<int32_t>& structural_ids() const { return structural_; }
   const std::vector<int32_t>& scalar_tail_ids() const { return scalar_tail_ids_; }
+  // The tokens that stay inside a number: leading whitespace, an optional
+  // '-', digits, nothing after. Their static answer is lexical only; a
+  // bounded integer re-judges them by the digits (JsonMachine::mask).
+  const std::vector<int32_t>& numeric_ids() const { return numeric_; }
   // Ids whose leading whitespace run is exactly `n` bytes (n in
   // 1..kMaxWsRun-1) or at least kMaxWsRun (n == kMaxWsRun).
   const std::vector<int32_t>& lead_ws_ids(int n) const {
@@ -266,7 +313,7 @@ class JsonTables {
   std::vector<uint32_t> ws_;
   std::vector<Shape> shapes_;
   std::vector<std::string> prefixes_, tails_, scalar_tails_;
-  std::vector<int32_t> single_, multi_, structural_, scalar_tail_ids_;
+  std::vector<int32_t> single_, multi_, structural_, scalar_tail_ids_, numeric_;
   std::vector<std::vector<int32_t>> lead_ws_ids_;  // [kMaxWsRun + 1]
 };
 
@@ -314,10 +361,15 @@ class JsonMachine {
     int target_node = -1;
     size_t target_pos = 0;
     bool integer_only = false;  // the current number admits no fraction
+    // The bounded integer being spelled: its node and its digits so far.
+    int bound_node = -1;
+    IntegerPrefix number;
     bool dead = false;
   };
   int expected_node(const Cursor& c) const;
   void leaves(int node, std::vector<int>* out) const;
+  // None of the cursor's live enum targets carries a fraction or exponent.
+  bool targets_integral(const Cursor& c) const;
   bool apply(const JsonLexer::Step& s, uint8_t b);
   bool on_value_start(uint32_t cls, uint8_t b);
   bool on_value_byte(uint8_t b);
@@ -337,6 +389,13 @@ class JsonMachine {
   bool schema_constrains_here() const;
   uint32_t allowed_classes_here() const;
   bool simulate(const std::string& text) const;
+  // A bounded integer is being spelled (or may start here): the numeric
+  // tokens need the digit arithmetic beyond the tables' lexical answer.
+  bool bounds_live_here(bool value_start) const;
+  // Whether a numeric token (JsonTables::numeric_ids) survives every
+  // cursor's bounds — the prefix arithmetic where the cursors are plain,
+  // a simulation where an enum target shares the position.
+  bool numeric_token_ok(const std::string& text, bool value_start) const;
 
   std::shared_ptr<const JsonSchema> schema_;
   const JsonTables* tables_ = nullptr;

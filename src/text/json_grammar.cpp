@@ -1,6 +1,7 @@
 #include "text/json_grammar.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <stdexcept>
@@ -66,13 +67,15 @@ struct Compiler {
     static const char* kSupported[] = {"type", "properties", "required",
                                        "additionalProperties", "items",
                                        "minItems", "maxItems", "enum",
-                                       "const", "anyOf"};
-    // Keywords that narrow a typed value without changing its shape: a
-    // tool argument's schema tolerates them (recorded, never applied — the
-    // integer stays an integer, its range is the model's to respect); a
-    // response_format schema refuses them like any other unsupported one.
+                                       "const", "anyOf", "minimum",
+                                       "maximum", "exclusiveMinimum",
+                                       "exclusiveMaximum"};
+    // Keywords that narrow a typed value without an automaton behind
+    // them: a tool argument's schema tolerates them (recorded, never
+    // applied — the value keeps its type); a response_format schema
+    // refuses them like any other unsupported one. The integer bounds
+    // left this list on 2026-09-07 (compile_bounds decides them).
     static const char* kNarrowing[] = {
-        "minimum",       "maximum",       "exclusiveMinimum", "exclusiveMaximum",
         "multipleOf",    "minLength",     "maxLength",        "pattern",
         "format",        "minProperties", "maxProperties",    "uniqueItems",
         "minContains",   "maxContains",   "contentEncoding",  "contentMediaType"};
@@ -94,17 +97,26 @@ struct Compiler {
                                     ": unsupported keyword (the constrained "
                                     "subset is type, properties, required, "
                                     "additionalProperties, items, minItems, "
-                                    "maxItems, enum, const, anyOf)");
+                                    "maxItems, enum, const, anyOf, and an "
+                                    "integer's minimum, maximum, "
+                                    "exclusiveMinimum, exclusiveMaximum)");
       if (unenforced != nullptr && narrowing(m.key))
-        unenforced->push_back(path + "." + m.key);
+        unenforced->push_back(path + "." + m.key +
+                              ": narrows the value; only its type is applied");
     }
     if (const minijson::Value* any = v.find("anyOf")) {
       if (!any->is_array() || any->items().empty())
         throw std::invalid_argument(path + ".anyOf: must be a non-empty array");
-      for (const minijson::Member& m : v.members())
-        if (m.key != "anyOf" && !ignored(m.key))
-          throw std::invalid_argument(path + "." + m.key +
-                                      ": cannot be combined with anyOf here");
+      for (const minijson::Member& m : v.members()) {
+        if (m.key == "anyOf" || ignored(m.key)) continue;
+        if (unenforced != nullptr && is_bound_keyword(m.key)) {
+          unenforced->push_back(path + "." + m.key +
+                                ": beside anyOf; only the alternatives apply");
+          continue;
+        }
+        throw std::invalid_argument(path + "." + m.key +
+                                    ": cannot be combined with anyOf here");
+      }
       for (size_t i = 0; i < any->items().size(); ++i)
         n.any_of.push_back(
             compile(any->items()[i], path + ".anyOf[" + std::to_string(i) + "]"));
@@ -221,8 +233,139 @@ struct Compiler {
         n.types = classes;
       }
     }
+    compile_bounds(v, path, &n);
     out.nodes[static_cast<size_t>(index)] = std::move(n);
     return index;
+  }
+
+  static bool is_bound_keyword(const std::string& key) {
+    return key == "minimum" || key == "maximum" || key == "exclusiveMinimum" ||
+           key == "exclusiveMaximum";
+  }
+
+  // The integer bounds (2026-09-07; the Hermes agent's tool definitions
+  // carry `minimum` / `maximum` on every integer argument, and a bound the
+  // server does not apply is one the client has to guard against). Where
+  // the node's numeric type is integer alone the four keywords compile to
+  // one inclusive int64 range — a fractional bound rounded inward, an
+  // exclusive one stepped by one — and the machine enforces it digit by
+  // digit. Anything else (a number that admits a fraction, an untyped
+  // value, the draft-4 boolean form, a bound beyond int64, an empty range,
+  // an enum no member of which fits) is refused by the strict compile
+  // naming the keyword, and recorded with the reason by a tool argument's
+  // compile, which then leaves the value typed and unbounded as before.
+  void compile_bounds(const minijson::Value& v, const std::string& path,
+                      JsonSchemaNode* n) {
+    static const char* kKeys[] = {"minimum", "exclusiveMinimum", "maximum",
+                                  "exclusiveMaximum"};
+    const minijson::Value* vals[4] = {nullptr, nullptr, nullptr, nullptr};
+    int first = -1;
+    for (int i = 0; i < 4; ++i) {
+      vals[i] = v.find(kKeys[i]);
+      if (vals[i] != nullptr && first < 0) first = i;
+    }
+    if (first < 0) return;
+    // Strict: refuse at the offending keyword. Lax: every bound present is
+    // recorded with the reason, none applied.
+    const auto give_up = [&](int offender, const std::string& reason) {
+      if (unenforced == nullptr)
+        throw std::invalid_argument(path + "." + kKeys[offender] + ": " + reason);
+      for (int i = 0; i < 4; ++i)
+        if (vals[i] != nullptr)
+          unenforced->push_back(path + "." + kKeys[i] + ": " + reason);
+    };
+    for (int i = 0; i < 4; ++i) {
+      if (vals[i] == nullptr) continue;
+      if (vals[i]->is_bool())
+        return give_up(i, std::string("the draft-4 boolean form of ") + kKeys[i] +
+                              " is not supported; no bound applied");
+      if (!vals[i]->is_number())
+        return give_up(i, std::string(kKeys[i]) + " must be a number; no bound applied");
+    }
+    // Integer alone by type; under an enum, every numeric member integral
+    // (the texts are the constraint, whatever the declared type).
+    bool integer_typed = (n->types & JsonSchemaNode::kInteger) != 0 &&
+                         (n->types & JsonSchemaNode::kNumber) == 0;
+    if (n->has_enum) {
+      integer_typed = true;
+      for (const std::string& t : n->enum_texts) {
+        const uint32_t c = class_of_text(t);
+        if ((c & JsonSchemaNode::kNumber) != 0 && (c & JsonSchemaNode::kInteger) == 0)
+          integer_typed = false;
+      }
+    }
+    if (!integer_typed)
+      return give_up(first,
+                     "a bound is enforced on integers only; this value admits a "
+                     "fraction or is untyped, and keeps its type");
+    // Each bound as an int64, rounded inward; a double beyond int64 (or
+    // not a number at all) has no integer form worth applying.
+    constexpr double kLimit = 9223372036854775808.0;  // 2^63
+    const auto to_int = [&](const minijson::Value& b, bool lower, bool exclusive,
+                            int64_t* out) {
+      if (b.kind() == minijson::Value::Kind::Int) {
+        const int64_t x = b.as_int();
+        if (!exclusive) {
+          *out = x;
+          return true;
+        }
+        if (lower ? x == INT64_MAX : x == INT64_MIN) return false;
+        *out = lower ? x + 1 : x - 1;
+        return true;
+      }
+      const double d = b.as_double();
+      if (!(d > -kLimit && d < kLimit)) return false;  // NaN included
+      // minimum: ceil; exclusiveMinimum: floor + 1; maximum: floor;
+      // exclusiveMaximum: ceil - 1.
+      const double r = lower ? (exclusive ? std::floor(d) : std::ceil(d))
+                             : (exclusive ? std::ceil(d) : std::floor(d));
+      if (!(r > -kLimit && r < kLimit)) return false;
+      *out = static_cast<int64_t>(r) + (exclusive ? (lower ? 1 : -1) : 0);
+      return true;
+    };
+    IntegerBounds b;
+    for (int i = 0; i < 4; ++i) {
+      if (vals[i] == nullptr) continue;
+      const bool lower = i < 2;
+      const bool exclusive = i == 1 || i == 3;
+      int64_t x = 0;
+      if (!to_int(*vals[i], lower, exclusive, &x))
+        return give_up(i, std::string(kKeys[i]) +
+                              " is beyond the 64-bit integer range; no bound applied");
+      if (lower) {
+        b.min = b.has_min ? std::max(b.min, x) : x;
+        b.has_min = true;
+      } else {
+        b.max = b.has_max ? std::min(b.max, x) : x;
+        b.has_max = true;
+      }
+    }
+    if (b.has_min && b.has_max && b.min > b.max)
+      return give_up(vals[2] != nullptr ? 2 : 3,
+                     "below the minimum: no integer satisfies the range; no "
+                     "bound applied");
+    if (n->has_enum) {
+      // The enum's texts are the constraint: keep the members inside the
+      // range (a non-numeric member is untouched) and carry no bound.
+      std::vector<std::string> kept;
+      uint32_t classes = 0;
+      for (const std::string& t : n->enum_texts) {
+        const uint32_t c = class_of_text(t);
+        if ((c & JsonSchemaNode::kInteger) != 0) {
+          IntegerPrefix p;
+          for (const char ch : t) p.push(static_cast<uint8_t>(ch));
+          if (!p.within(b)) continue;
+        }
+        kept.push_back(t);
+        classes |= c;
+      }
+      if (kept.empty())
+        return give_up(first, "no enum member lies inside the range; no bound applied");
+      n->enum_texts = std::move(kept);
+      n->types &= classes;
+      return;
+    }
+    n->bounds = b;
   }
 };
 
@@ -244,6 +387,93 @@ JsonSchema json_object_schema() {
   s.nodes.push_back(std::move(root));
   s.root = 0;
   return s;
+}
+
+// ---------------------------------------------------------------------------
+// The integer prefix
+// ---------------------------------------------------------------------------
+
+void IntegerPrefix::push(uint8_t b) {
+  if (b == '-') {
+    if (digits == 0) negative = true;
+    return;
+  }
+  if (b < '0' || b > '9') return;
+  ++digits;
+  if (huge) return;
+  if (digits >= 20) {  // no leading zeros in JSON: twenty digits is >= 10^19
+    huge = true;
+    return;
+  }
+  magnitude = magnitude * 10 + static_cast<uint64_t>(b - '0');
+}
+
+namespace {
+
+// |x| as an unsigned magnitude, INT64_MIN included.
+uint64_t abs_u64(int64_t x) {
+  if (x >= 0) return static_cast<uint64_t>(x);
+  return static_cast<uint64_t>(-(x + 1)) + 1u;
+}
+
+}  // namespace
+
+bool IntegerPrefix::within(const IntegerBounds& b) const {
+  if (digits == 0) return false;
+  if (huge) return negative ? !b.has_min : !b.has_max;
+  if (!negative) {
+    // v = magnitude >= 0.
+    if (b.has_min && b.min > 0 && magnitude < static_cast<uint64_t>(b.min)) return false;
+    if (b.has_max && (b.max < 0 || magnitude > static_cast<uint64_t>(b.max))) return false;
+    return true;
+  }
+  // v = -magnitude <= 0.
+  if (b.has_min && (b.min > 0 || magnitude > abs_u64(b.min))) return false;
+  if (b.has_max && b.max < 0 && magnitude < abs_u64(b.max)) return false;
+  return true;
+}
+
+bool IntegerPrefix::can_reach(const IntegerBounds& b) const {
+  if (digits == 0) {
+    // A bare '-': any value at or below zero may follow ("-0" included).
+    if (!negative) return true;
+    return !b.has_min || b.min <= 0;
+  }
+  if (huge) return negative ? !b.has_min : !b.has_max;
+  if (magnitude == 0) return within(b);  // "0" / "-0" admit no more digits
+  // Unbounded in the direction the digits grow: some completion passes
+  // the other bound.
+  if (negative ? !b.has_min : !b.has_max) return true;
+  // The completions of M are [M*10^k, (M+1)*10^k - 1] for k >= 0 (their
+  // mirror for a negative); walk k up until the interval passes the bound
+  // that caps it. Magnitudes: `low` is refused before it can overflow (it
+  // is already past any int64 bound), `high` saturates.
+  constexpr uint64_t kMax = ~0ull;
+  uint64_t low = magnitude, high = magnitude;
+  if (!negative) {
+    if (b.max < 0) return false;  // every completion is positive
+    const uint64_t cap = static_cast<uint64_t>(b.max);
+    const bool floor_free = !b.has_min || b.min <= 0;
+    const uint64_t floor = floor_free ? 0u : static_cast<uint64_t>(b.min);
+    for (;;) {
+      if (low > cap) return false;
+      if (floor_free || high >= floor) return true;
+      if (low > kMax / 10u) return false;
+      low *= 10u;
+      high = high > (kMax - 9u) / 10u ? kMax : high * 10u + 9u;
+    }
+  }
+  if (b.min > 0) return false;  // every completion is negative
+  const uint64_t cap = abs_u64(b.min);
+  const bool floor_free = !b.has_max || b.max >= 0;
+  const uint64_t floor = floor_free ? 0u : abs_u64(b.max);
+  for (;;) {
+    if (low > cap) return false;          // -low < min
+    if (floor_free || high >= floor) return true;  // -high <= max
+    if (low > kMax / 10u) return false;
+    low *= 10u;
+    high = high > (kMax - 9u) / 10u ? kMax : high * 10u + 9u;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +856,14 @@ JsonTables::JsonTables(const GrammarVocab& vocab)
     if (i > 0)
       lead_ws_ids_[static_cast<size_t>(std::min<size_t>(i, JsonLexer::kMaxWsRun))]
           .push_back(id);
+    if (i < text.size()) {
+      // '-'? digits*: a token that stays inside a number.
+      size_t j = text[i] == '-' ? i + 1 : i;
+      bool numeric = true;
+      for (; j < text.size(); ++j) numeric = numeric && is_digit(static_cast<uint8_t>(text[j]));
+      sh.numeric = numeric;
+      if (numeric) numeric_.push_back(id);
+    }
     if (i == text.size()) {
       set_bit(ws_, id);
     } else {
@@ -804,6 +1042,14 @@ void JsonMachine::leaves(int node, std::vector<int>* out) const {
   for (const int alt : n.any_of) leaves(alt, out);
 }
 
+bool JsonMachine::targets_integral(const Cursor& c) const {
+  const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
+  for (const int t : c.targets)
+    if (n.enum_texts[static_cast<size_t>(t)].find_first_of(".eE") != std::string::npos)
+      return false;
+  return true;
+}
+
 namespace {
 
 // A container frame imposes nothing further on its contents (its type and
@@ -827,16 +1073,23 @@ bool JsonMachine::sweep() {
 bool JsonMachine::done() const {
   if (!alive_ || !lexer_.done()) return false;
   if (lexer_.state() == JsonLexer::State::kDone) return true;
-  // A top-level number: complete only where every cursor's target is.
+  // A top-level number: complete where some cursor accepts the digits as
+  // they stand — an enum target spelled out, a bounded value inside its
+  // range (the cursors are an anyOf's alternatives: union semantics).
   for (const Cursor& c : cursors_) {
-    if (c.target_node < 0) continue;
-    const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
-    bool complete = false;
-    for (const int t : c.targets)
-      complete = complete || n.enum_texts[static_cast<size_t>(t)].size() == c.target_pos;
-    if (!complete) return false;
+    if (c.bound_node >= 0 &&
+        !c.number.within(schema_->nodes[static_cast<size_t>(c.bound_node)].bounds))
+      continue;
+    if (c.target_node >= 0) {
+      const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
+      bool complete = false;
+      for (const int t : c.targets)
+        complete = complete || n.enum_texts[static_cast<size_t>(t)].size() == c.target_pos;
+      if (!complete) continue;
+    }
+    return true;
   }
-  return true;
+  return false;
 }
 
 bool JsonMachine::on_value_start(uint32_t cls, uint8_t b) {
@@ -856,6 +1109,8 @@ bool JsonMachine::on_value_start(uint32_t cls, uint8_t b) {
       nc.target_node = -1;
       nc.target_pos = 0;
       nc.integer_only = false;
+      nc.bound_node = -1;
+      nc.number = IntegerPrefix{};
       if (leaf == JsonSchemaNode::kAny) {
         if (cls == JsonSchemaNode::kObject || cls == JsonSchemaNode::kArray) {
           Frame f;
@@ -888,6 +1143,14 @@ bool JsonMachine::on_value_start(uint32_t cls, uint8_t b) {
         nc.stack.push_back(std::move(f));
       } else if (cls == JsonSchemaNode::kNumber) {
         nc.integer_only = (n.types & JsonSchemaNode::kNumber) == 0;
+        // An enum's number targets decide the bytes themselves; the flag
+        // is the tables' integer answer, so it follows the live targets
+        // (2026-09-07: beside a bounded integer alternative the mask used
+        // to admit a '.' every cursor then refused).
+        if (nc.target_node >= 0) nc.integer_only = targets_integral(nc);
+        // The kValueByte of this same byte pushes the first digit (or the
+        // sign) and asks whether the range is still reachable.
+        if (n.bounds.active()) nc.bound_node = leaf;
       }
       next.push_back(std::move(nc));
     }
@@ -902,6 +1165,13 @@ bool JsonMachine::on_value_byte(uint8_t b) {
       c.dead = true;
       continue;
     }
+    if (c.bound_node >= 0) {
+      c.number.push(b);
+      if (!c.number.can_reach(schema_->nodes[static_cast<size_t>(c.bound_node)].bounds)) {
+        c.dead = true;
+        continue;
+      }
+    }
     if (c.target_node < 0) continue;
     const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
     size_t w = 0;
@@ -914,6 +1184,8 @@ bool JsonMachine::on_value_byte(uint8_t b) {
     c.targets.resize(w);
     ++c.target_pos;
     if (w == 0) c.dead = true;
+    else if (!c.integer_only && (n.types & JsonSchemaNode::kNumber) != 0)
+      c.integer_only = targets_integral(c);
   }
   return sweep();
 }
@@ -921,6 +1193,14 @@ bool JsonMachine::on_value_byte(uint8_t b) {
 bool JsonMachine::on_value_end() {
   ++epoch_;
   for (Cursor& c : cursors_) {
+    if (c.bound_node >= 0) {
+      if (!c.number.within(schema_->nodes[static_cast<size_t>(c.bound_node)].bounds)) {
+        c.dead = true;
+        continue;
+      }
+      c.bound_node = -1;
+      c.number = IntegerPrefix{};
+    }
     if (c.target_node >= 0) {
       const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
       bool complete = false;
@@ -1131,7 +1411,67 @@ bool JsonMachine::schema_constrains_here() const {
       if (f.node == JsonSchemaNode::kAny) continue;
       if (!frame_trivial(schema_->nodes[static_cast<size_t>(f.node)])) return true;
     }
-    if (c.target_node >= 0 || c.integer_only) return true;
+    if (c.target_node >= 0 || c.integer_only || c.bound_node >= 0) return true;
+  }
+  return false;
+}
+
+bool JsonMachine::bounds_live_here(bool value_start) const {
+  for (const Cursor& c : cursors_) {
+    if (!value_start) {
+      if (c.bound_node >= 0) return true;
+      continue;
+    }
+    if (!c.stack.empty() && c.stack.back().kind == '[' &&
+        c.stack.back().node != JsonSchemaNode::kAny) {
+      const JsonSchemaNode& arr = schema_->nodes[static_cast<size_t>(c.stack.back().node)];
+      if (arr.max_items >= 0 && c.stack.back().count >= arr.max_items) continue;
+    }
+    std::vector<int> options;
+    leaves(expected_node(c), &options);
+    for (const int leaf : options)
+      if (leaf != JsonSchemaNode::kAny &&
+          schema_->nodes[static_cast<size_t>(leaf)].bounds.active())
+        return true;
+  }
+  return false;
+}
+
+bool JsonMachine::numeric_token_ok(const std::string& text, bool value_start) const {
+  size_t i = 0;
+  while (i < text.size() && JsonLexer::is_ws(static_cast<uint8_t>(text[i]))) ++i;
+  if (!value_start) {
+    // Inside the number (a leading whitespace would have ended it, and the
+    // static table refused such a token already). An enum target beside a
+    // bound is the one shape the arithmetic does not cover: simulate.
+    for (const Cursor& c : cursors_)
+      if (c.target_node >= 0) return simulate(text);
+    for (const Cursor& c : cursors_) {
+      if (c.bound_node < 0) return true;
+      IntegerPrefix p = c.number;
+      for (size_t j = i; j < text.size(); ++j) p.push(static_cast<uint8_t>(text[j]));
+      if (p.can_reach(schema_->nodes[static_cast<size_t>(c.bound_node)].bounds)) return true;
+    }
+    return false;
+  }
+  for (const Cursor& c : cursors_) {
+    if (!c.stack.empty() && c.stack.back().kind == '[' &&
+        c.stack.back().node != JsonSchemaNode::kAny) {
+      const JsonSchemaNode& arr = schema_->nodes[static_cast<size_t>(c.stack.back().node)];
+      if (arr.max_items >= 0 && c.stack.back().count >= arr.max_items) continue;
+    }
+    std::vector<int> options;
+    leaves(expected_node(c), &options);
+    for (const int leaf : options) {
+      if (leaf == JsonSchemaNode::kAny) return true;
+      const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(leaf)];
+      if ((n.types & (JsonSchemaNode::kNumber | JsonSchemaNode::kInteger)) == 0) continue;
+      if (n.has_enum) return simulate(text);
+      if (!n.bounds.active()) return true;
+      IntegerPrefix p;
+      for (size_t j = i; j < text.size(); ++j) p.push(static_cast<uint8_t>(text[j]));
+      if (p.can_reach(n.bounds)) return true;
+    }
   }
   return false;
 }
@@ -1349,6 +1689,14 @@ void JsonMachine::mask(const GrammarVocab& vocab, TokenMask* out) const {
         enum_ahead = enum_ahead || (leaf != JsonSchemaNode::kAny &&
                                     schema_->nodes[static_cast<size_t>(leaf)].has_enum);
     }
+  // 2b. A bounded integer being spelled, or expected here (2026-09-07):
+  //     the numeric tokens' static answer is lexical, so each is judged by
+  //     its digits against every cursor's range (the enum-ahead pass below
+  //     simulates them all anyway).
+  if (!in_string && !enum_ahead && bounds_live_here(value_start))
+    for (const int32_t id : tables_->numeric_ids())
+      if (get_bit(out->words, id) && !numeric_token_ok(vocab.text(id), value_start))
+        clear_bit(out->words, id);
   if (enum_ahead) {
     // Simulate every admitted non-structural token (the class filter
     // already narrowed them to value starts).

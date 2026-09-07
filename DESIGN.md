@@ -2332,7 +2332,15 @@ emit next. `tool_choice: auto` arms it too (6i): calls at will, or one
 under `parallel_tool_calls: false`, every call well-formed; the
 derivation from a function definition is `grammar_tool_from_function`,
 and `function.strict: true` refuses a property outside the enforceable
-subset by keyword path. The mask's meaning to the sampler is one rule
+subset by keyword path; a non-strict property under a keyword that only
+narrows its value without an automaton behind it (a number's bound,
+`pattern`, `format`, `minLength`, ...) keeps its type, the narrowing not
+applied, with one INFO line naming the keyword and the reason. An
+integer's `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum`
+are inside the subset since 2026-09-07 — enforced digit by digit by the
+JSON machine below — so the bounds an agent client puts on its `timeout`,
+`limit` or `offset` arguments hold on the wire, not by the tool's
+fallback. The mask's meaning to the sampler is one rule
 everywhere: a masked id is an ABSENT candidate — `-inf` in place, never
 listed by the local top-k, zero mass in every normalizer (a slice with
 every id masked folds as `-inf`, skipped), and the decision's vocabulary
@@ -2395,15 +2403,29 @@ rejects, and a top-level number counts as complete while it may still
 grow. `compile_json_schema` turns OpenAI's structured-output subset into
 nodes — `type` (and lists), `properties` / `required` /
 `additionalProperties`, `items` / `minItems` / `maxItems`, `enum` /
-`const` over scalars, `anyOf` — and refuses anything else at compile time
-NAMING THE KEYWORD PATH; `json_object` is the schema "a root object
+`const` over scalars, `anyOf`, and an integer's `minimum` / `maximum` /
+`exclusiveMinimum` / `exclusiveMaximum` (2026-09-07: one inclusive int64
+range per node, a fractional bound rounded inward, an exclusive one
+stepped by one; enforced only where the numeric type is integer alone,
+since a number with a fraction or an exponent has no digit arithmetic
+worth trusting — a number's bound refuses under strict and is noted
+under a tool argument; an enum beside a bound is filtered to the members
+inside it and carries no bound) — and refuses anything else at compile
+time NAMING THE KEYWORD PATH; `json_object` is the schema "a root object
 holding anything". `JsonMachine` is the lexer plus schema cursors: at a
 value position the expected node filters the value class (an `anyOf`
 splits the cursor per alternative; the frontier shrinks as bytes
 disambiguate, union semantics), a closed object's keys are spelled from
 the declared names byte by byte and an enum's value from its JSON texts,
 `,` and the closers obey `required` and the item bounds, integer-typed
-numbers admit no fraction or exponent. The mask is the set of ids whose
+numbers admit no fraction or exponent, and a bounded integer's cursor
+carries its digits (`IntegerPrefix`: sign, magnitude saturating past
+nineteen digits) and dies at the first digit after which no completion
+can land inside the range — the completions of a prefix M are the
+intervals [M·10^k, (M+1)·10^k − 1], walked up until one passes the bound
+— and at the value's end (or, at the top level, EOS) unless the value
+itself lies inside it; `done()` holds where SOME cursor accepts the text
+(an `anyOf`'s alternatives are cursors: union semantics). The mask is the set of ids whose
 text the machine accepts byte by byte; computing it by simulating 155k
 tokens per position would cost milliseconds, so `JsonTables` precomputes,
 once per vocabulary (0.06 s, in parallel), the static lexical answer for
@@ -2417,13 +2439,19 @@ distinct prefix or tail, the pure-structure tokens and the few
 multi-quote tokens individually, group members only where the content
 itself is constrained (a closed object's key, an enum, a literal's
 spelling, an escape); inside a string the answer is cached until the next
-structural event or a cursor's death. Measured over the real tokenizer:
-36 µs per position on average, 198 µs at the worst structural position
-under a closed schema. EXACTNESS is a gate, not an argument:
-`json_grammar_test` proves `mask()` equal to the brute-force answer
-(every token simulated) at every position of mask-driven random walks
-over the free machine and schemas exercising every node kind, and every
-finished walk parses and conforms. In the grammar layer
+structural event or a cursor's death; where a bounded integer is being
+spelled or may start, the pure-numeric tokens (leading whitespace, an
+optional sign, digits, nothing after — the tables' answer for them is
+lexical only) are re-judged by the same prefix arithmetic against every
+cursor's range, and simulated where an enum target shares the position.
+Measured over the real tokenizer: 36 µs per position on average, 198 µs
+at the worst structural position under a closed schema. EXACTNESS is a
+gate, not an argument: `json_grammar_test` proves `mask()` equal to the
+brute-force answer (every token simulated) at every position of
+mask-driven random walks over the free machine and schemas exercising
+every node kind (bounded integers in every position the arithmetic
+reaches included), and every finished walk parses and conforms. In the
+grammar layer
 (`GrammarSpec::Mode::kJson`, the schema text riding the journal as
 `gr.js`, `""` = json_object) thinking stays free but EOS is withheld
 until the text is complete, `</think>` opens the body, the markers are

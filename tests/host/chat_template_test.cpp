@@ -493,9 +493,10 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
   require(turns >= 6, "expected at least 6 tool-call turns, got " +
                           std::to_string(turns));
   // The typing derived from a function definition: a plain string is
-  // free, an integer is a JSON value, an enum string is its texts, a type
-  // list with string is free, an untyped enum renders its members as the
-  // template would, strict refuses an unsupported keyword by path.
+  // free, an integer is a JSON value (its bounds enforced, 2026-09-07), an
+  // enum string is its texts, a type list with string is free, an untyped
+  // enum renders its members as the template would, a number's bound is
+  // noted with the reason, strict refuses an unsupported keyword by path.
   {
     const dgpp::minijson::ParseResult fn = dgpp::minijson::parse(
         R"({"name": "f", "parameters": {"type": "object", "properties": {
@@ -505,17 +506,20 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
               "note": {"type": ["string", "null"]},
               "mode": {"enum": ["fast", 3, true]},
               "opts": {"type": "object", "properties": {"a": {"type": "boolean"}}},
-              "n": {"type": ["integer", "null"]}},
+              "n": {"type": ["integer", "null"]},
+              "ratio": {"type": "number", "minimum": 0}},
             "required": ["city"], "additionalProperties": false}})");
     std::vector<std::string> warnings, notes;
     const dgpp::text::GrammarTool t =
         dgpp::text::grammar_tool_from_function(fn.root, &warnings, &notes);
     using Kind = dgpp::text::GrammarArg::Kind;
-    require(t.constrain_keys && t.keys.size() == 7 && t.args.size() == 7, "keys and args");
+    require(t.constrain_keys && t.keys.size() == 8 && t.args.size() == 8, "keys and args");
     require(t.args[0].kind == Kind::kFree, "a plain string is free");
     require(t.args[1].kind == Kind::kJson && warnings.empty() && notes.size() == 1 &&
-                notes[0].find("'days' of 'f': minimum is not enforced") != std::string::npos,
-            "an integer with a narrowing keyword stays typed, with a note");
+                notes[0].find("'ratio' of 'f': minimum is not enforced (") != std::string::npos &&
+                notes[0].find("integers only") != std::string::npos,
+            "an integer's bound is enforced without a note; a number's is noted with the reason");
+    require(t.args[7].kind == Kind::kJson, "the number stays a JSON value");
     require(t.args[2].kind == Kind::kText &&
                 t.args[2].texts == std::vector<std::string>{"celsius", "fahrenheit"},
             "an enum string is its texts");
@@ -529,14 +533,54 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
             "integer|null is a JSON value");
     const dgpp::minijson::ParseResult strict = dgpp::minijson::parse(
         R"({"name": "f", "strict": true, "parameters": {"type": "object", "properties": {
-              "days": {"type": "integer", "minimum": 0}}}})");
+              "days": {"type": "integer", "minimum": 0},
+              "ratio": {"type": "number", "minimum": 0}}}})");
     bool threw = false;
     try {
       dgpp::text::grammar_tool_from_function(strict.root, nullptr);
     } catch (const std::invalid_argument& e) {
-      threw = std::string(e.what()).rfind("parameters.properties.days.minimum", 0) == 0;
+      threw = std::string(e.what()).rfind("parameters.properties.ratio.minimum", 0) == 0;
     }
-    require(threw, "strict refuses the keyword by path");
+    require(threw, "strict refuses the keyword by path (the integer's bound passes)");
+  }
+  // A bounded integer argument end to end over the real tokenizer
+  // (2026-09-07; the Hermes agent's `timeout`, `limit`, `offset` carry
+  // bounds): the digits are admitted only while the range stays
+  // reachable, and the value's closer only once the digits lie inside it.
+  {
+    const dgpp::minijson::ParseResult fn = dgpp::minijson::parse(
+        R"({"name": "process", "parameters": {"type": "object", "properties": {
+              "timeout": {"type": "integer", "minimum": 10, "maximum": 2000}},
+            "required": ["timeout"], "additionalProperties": false}})");
+    dgpp::text::GrammarSpec spec;
+    spec.mode = dgpp::text::GrammarSpec::Mode::kRequired;
+    spec.parallel = false;
+    spec.tools.push_back(dgpp::text::grammar_tool_from_function(fn.root, nullptr));
+    const dgpp::text::ChatMarkers& mk = vocab.markers();
+    // The id the grammar refuses first, or -1 when the whole turn passes.
+    const auto refused_at = [&](const std::string& value) {
+      const std::string turn = mk.tool_call_open.text + "process" + mk.arg_key_open.text +
+                               "timeout" + mk.arg_key_close.text + mk.arg_value_open.text +
+                               value + mk.arg_value_close.text + mk.tool_call_close.text;
+      std::vector<int64_t> ids = tok.encode(turn);
+      ids.push_back(vocab.call_turn_eos());
+      dgpp::text::GrammarState g(&vocab, spec, false);
+      for (const int64_t id : ids) {
+        if (!g.allows(id)) return id;
+        g.advance(id);
+      }
+      return int64_t{-1};
+    };
+    require(refused_at("10") < 0 && refused_at("30") < 0 && refused_at("2000") < 0 &&
+                refused_at("1999") < 0,
+            "values inside [10, 2000] pass whole");
+    require(refused_at("5") == mk.arg_value_close.id,
+            "5 under minimum 10: the closer is withheld (50 is still reachable)");
+    for (const char* bad : {"0", "-5", "2001", "20000"}) {
+      const int64_t at = refused_at(bad);
+      require(at >= 0 && at != mk.arg_value_close.id && at != vocab.call_turn_eos(),
+              std::string(bad) + ": refused at a digit token, got id " + std::to_string(at));
+    }
   }
   DGPP_LOG_INFO("glm_chat_template_test: the grammar accepts {} golden tool-call "
                 "turns over the real tokenizer and refuses the forbidden shapes",
@@ -582,7 +626,21 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
       "\"fahrenheit\"]},\"tags\":{\"type\":\"array\",\"items\":{\"type\":"
       "\"string\"},\"maxItems\":3},\"note\":{\"type\":[\"string\",\"null\"]}},"
       "\"required\":[\"city\",\"unit\"],\"additionalProperties\":false}";
+  // The bounds of a Hermes-style tool schema (2026-09-07).
+  const char* kBounded =
+      "{\"type\":\"object\",\"properties\":{\"timeout\":{\"type\":\"integer\","
+      "\"minimum\":1},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2000},"
+      "\"offset\":{\"type\":\"integer\",\"minimum\":-100,\"maximum\":100}},"
+      "\"required\":[\"timeout\"],\"additionalProperties\":false}";
   const Doc docs[] = {
+      {kBounded, "{\"timeout\": 180, \"limit\": 2000, \"offset\": -100}", true},
+      {kBounded, "{\"timeout\": 1, \"limit\": 1, \"offset\": 0}", true},
+      {kBounded, "{\"timeout\": 0}", false},                     // 0 cannot reach 1
+      {kBounded, "{\"timeout\": -5}", false},                    // the sign
+      {kBounded, "{\"timeout\": 30, \"limit\": 2001}", false},    // past the maximum
+      {kBounded, "{\"timeout\": 30, \"limit\": 0}", false},
+      {kBounded, "{\"timeout\": 30, \"offset\": -101}", false},
+      {kBounded, "{\"timeout\": 30, \"offset\": 101}", false},
       {"", "{\"answer\": \"Paris is the capital of France.\", \"confidence\": 0.98,"
            " \"sources\": [\"wiki\", \"atlas\"], \"nested\": {\"ok\": true, \"n\": null,"
            " \"neg\": -12.5e3, \"esc\": \"quote \\\" backslash \\\\ newline \\n tab \\t"
@@ -601,8 +659,8 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
       {kSchema, "{\"city\": \"Paris\", \"unit\": \"celsius\", \"tags\": [\"a\", \"b\","
                 " \"c\", \"d\"]}", false},
   };
-  size_t positions = 0;
-  double total_us = 0.0, max_us = 0.0;
+  size_t positions = 0, number_positions = 0;
+  double total_us = 0.0, max_us = 0.0, number_us = 0.0, number_max_us = 0.0;
   const char* max_where = "";
   size_t accepted = 0, refused = 0;
   for (const Doc& d : docs) {
@@ -625,6 +683,11 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
       if (us > max_us) {
         max_us = us;
         max_where = g.state_name();
+      }
+      if (std::string(g.state_name()) == "json-number") {
+        ++number_positions;
+        number_us += us;
+        number_max_us = std::max(number_max_us, us);
       }
       require(m.allows(ids[j]) == g.allows(ids[j]),
               std::string("mask and allows agree at ") + g.state_name());
@@ -661,9 +724,11 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
   DGPP_LOG_INFO(
       "glm_chat_template_test: JSON tables built in {:.2f} s; {} documents "
       "accepted, {} refused; {} positions, mask {:.1f} us avg, {:.0f} us max "
-      "(at {})",
+      "(at {}); {} positions inside a number, {:.1f} us avg, {:.0f} us max",
       build_s, accepted, refused, positions, total_us / static_cast<double>(positions),
-      max_us, max_where);
+      max_us, max_where, number_positions,
+      number_positions > 0 ? number_us / static_cast<double>(number_positions) : 0.0,
+      number_max_us);
 }
 
 }  // namespace

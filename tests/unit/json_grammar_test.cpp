@@ -48,6 +48,9 @@ const char* kWords[] = {
     "\"a\"", " ", ":", "\": ", "\": [", "\": {", "\"c", "ity\"", "\"unit\":",
     "celsius", "fahrenheit", "cel", "sius\"", "\"celsius\"", "true,",
     "false}", "null]", "e", "E+", "-", "9", ".", "0", "\"\\", "x\"",
+    // Numeric pieces for the bounded-integer gates (2026-09-07): whole
+    // numbers, a signed one, a whitespace-led one, digit runs.
+    "100", "2000", "-5", " 12", "50", "99", "7", "000",
 };
 constexpr int kWordBase = 256;
 constexpr int kWordCount = static_cast<int>(sizeof(kWords) / sizeof(kWords[0]));
@@ -152,31 +155,101 @@ DGPP_TEST(json_grammar_lexerAcceptsTheCorpusAndRejectsTheRest) {
 
 DGPP_TEST(json_grammar_schemaCompilesTheSubsetAndRefusesNamingTheKeyword) {
   // A tool argument's compile tolerates the keywords that only narrow a
-  // value, naming each by path; the strict compile refuses them (2026-09-06).
+  // value without an automaton behind them, naming each by path with the
+  // reason; the strict compile refuses them (2026-09-06). An integer's
+  // bounds are neither: they compile and are enforced (2026-09-07).
   {
     const dgpp::minijson::ParseResult p = dgpp::minijson::parse(
         R"({"type":"object","properties":{"n":{"type":"integer","minimum":0,"maximum":9},)"
+        R"("r":{"type":"number","minimum":0},)"
         R"("s":{"type":"string","pattern":"^a","format":"date"}},"required":["n"]})");
     std::vector<std::string> unenforced;
     const dgpp::text::JsonSchema lax = dgpp::text::compile_json_schema(p.root, &unenforced);
     const dgpp::text::JsonSchemaNode& r = lax.nodes[static_cast<size_t>(lax.root)];
-    require(r.property_names.size() == 2 &&
-                lax.nodes[static_cast<size_t>(r.property_nodes[0])].types ==
-                    dgpp::text::JsonSchemaNode::kInteger &&
-                lax.nodes[static_cast<size_t>(r.property_nodes[1])].types ==
+    require(r.property_names.size() == 3, "three properties");
+    const dgpp::text::JsonSchemaNode& n = lax.nodes[static_cast<size_t>(r.property_nodes[0])];
+    require(n.types == dgpp::text::JsonSchemaNode::kInteger && n.bounds.has_min &&
+                n.bounds.has_max && n.bounds.min == 0 && n.bounds.max == 9,
+            "an integer's bounds compile");
+    require(!lax.nodes[static_cast<size_t>(r.property_nodes[1])].bounds.active() &&
+                lax.nodes[static_cast<size_t>(r.property_nodes[2])].types ==
                     dgpp::text::JsonSchemaNode::kString,
             "tolerated keywords leave the types");
-    require(unenforced == std::vector<std::string>{
-                              "schema.properties.n.minimum", "schema.properties.n.maximum",
-                              "schema.properties.s.pattern", "schema.properties.s.format"},
-            "each tolerated keyword named by path");
+    require(unenforced.size() == 3 &&
+                unenforced[0].rfind("schema.properties.r.minimum: ", 0) == 0 &&
+                unenforced[0].find("integers only") != std::string::npos &&
+                unenforced[1].rfind("schema.properties.s.pattern: ", 0) == 0 &&
+                unenforced[2].rfind("schema.properties.s.format: ", 0) == 0,
+            "each tolerated keyword named by path, with the reason");
     bool threw = false;
     try {
       dgpp::text::compile_json_schema(p.root);
     } catch (const std::invalid_argument& e) {
-      threw = std::string(e.what()).rfind("schema.properties.n.minimum", 0) == 0;
+      threw = std::string(e.what()).rfind("schema.properties.r.minimum", 0) == 0;
     }
     require(threw, "the strict compile still refuses by path");
+  }
+  // The bounds' normalization: inclusive int64 after rounding inward and
+  // stepping the exclusive forms; an enum is filtered instead of bounded.
+  {
+    const auto b = [](const std::string& text) {
+      return compile(text)->nodes[0].bounds;
+    };
+    dgpp::text::IntegerBounds x = b(R"({"type":"integer","minimum":0.5,"exclusiveMaximum":10})");
+    require(x.has_min && x.min == 1 && x.has_max && x.max == 9, "ceil(0.5) = 1, 10 exclusive = 9");
+    x = b(R"({"type":"integer","exclusiveMinimum":0,"maximum":2.5})");
+    require(x.has_min && x.min == 1 && x.has_max && x.max == 2, "0 exclusive = 1, floor(2.5) = 2");
+    x = b(R"({"type":"integer","exclusiveMinimum":-1.5,"exclusiveMaximum":0.5})");
+    require(x.min == -1 && x.max == 0, "the exclusive forms round inward: floor(-1.5)+1, ceil(0.5)-1");
+    x = b(R"({"type":["integer","null"],"minimum":-5})");
+    require(x.has_min && x.min == -5 && !x.has_max, "integer|null keeps the integer's bound");
+    x = b(R"({"type":"integer","minimum":1,"exclusiveMinimum":3,"maximum":9,"exclusiveMaximum":9})");
+    require(x.min == 4 && x.max == 8, "both forms: the tighter wins");
+    x = b(R"({"type":"integer","maximum":9223372036854775807,"minimum":-9223372036854775808})");
+    require(x.min == INT64_MIN && x.max == INT64_MAX, "the int64 ends are exact");
+    const auto e = compile(R"({"type":"integer","enum":[1,5,50],"maximum":10})");
+    require(e->nodes[0].has_enum && e->nodes[0].enum_texts == std::vector<std::string>{"1", "5"} &&
+                !e->nodes[0].bounds.active(),
+            "an enum is filtered by the range and carries no bound");
+    const auto u = compile(R"({"enum":[1,"a",50],"maximum":10})");
+    require(u->nodes[0].enum_texts == std::vector<std::string>{"1", "\"a\""} &&
+                u->nodes[0].types == (dgpp::text::JsonSchemaNode::kNumber |
+                                      dgpp::text::JsonSchemaNode::kInteger |
+                                      dgpp::text::JsonSchemaNode::kString),
+            "an untyped enum: the integral members filtered, the string kept");
+    // Lax: the shapes the arithmetic does not cover are recorded, with the
+    // reason, and nothing is applied.
+    const auto lax_of = [](const std::string& text, std::vector<std::string>* out) {
+      const dgpp::minijson::ParseResult p = dgpp::minijson::parse(text);
+      return dgpp::text::compile_json_schema(p.root, out);
+    };
+    std::vector<std::string> notes;
+    dgpp::text::JsonSchema l = lax_of(R"({"type":"integer","exclusiveMinimum":true,"minimum":0})", &notes);
+    require(!l.nodes[0].bounds.active() && notes.size() == 2 &&
+                notes[0].rfind("schema.minimum: ", 0) == 0 &&
+                notes[1].rfind("schema.exclusiveMinimum: ", 0) == 0 &&
+                notes[1].find("draft-4") != std::string::npos,
+            "the draft-4 boolean form: both bounds recorded, none applied");
+    notes.clear();
+    l = lax_of(R"({"type":"integer","minimum":5,"maximum":3})", &notes);
+    require(!l.nodes[0].bounds.active() && notes.size() == 2 &&
+                notes[1].find("below the minimum") != std::string::npos,
+            "an empty range: recorded, none applied");
+    notes.clear();
+    l = lax_of(R"({"anyOf":[{"type":"integer"}],"minimum":0})", &notes);
+    require(l.nodes[0].any_of.size() == 1 && notes.size() == 1 &&
+                notes[0].find("beside anyOf") != std::string::npos,
+            "a bound beside anyOf: recorded");
+    notes.clear();
+    l = lax_of(R"({"type":"integer","enum":[1,2],"minimum":3})", &notes);
+    require(l.nodes[0].enum_texts.size() == 2 && notes.size() == 1 &&
+                notes[0].find("no enum member") != std::string::npos,
+            "an enum no member of which fits: kept whole, recorded");
+    notes.clear();
+    l = lax_of(R"({"type":"integer","minimum":1e30})", &notes);
+    require(!l.nodes[0].bounds.active() && notes.size() == 1 &&
+                notes[0].find("64-bit") != std::string::npos,
+            "a bound beyond int64: recorded");
   }
   const auto s = compile(R"({
     "type": "object",
@@ -232,6 +305,17 @@ DGPP_TEST(json_grammar_schemaCompilesTheSubsetAndRefusesNamingTheKeyword) {
       {R"({"type":"string","enum":[1]})", "schema.enum"},
       {R"({"const":1,"enum":[1]})", "schema.const"},
       {R"({"type":"array","minItems":3,"maxItems":2})", "schema.maxItems"},
+      // The bounds the arithmetic does not cover refuse under strict.
+      {R"({"type":"number","minimum":0})", "schema.minimum"},
+      {R"({"minimum":0})", "schema.minimum"},
+      {R"({"type":"integer","minimum":0,"exclusiveMinimum":true})", "schema.exclusiveMinimum"},
+      {R"({"type":"integer","minimum":5,"maximum":3})", "schema.maximum"},
+      {R"({"type":"integer","minimum":5,"exclusiveMaximum":5})", "schema.exclusiveMaximum"},
+      {R"({"type":"integer","enum":[1,2],"minimum":3})", "schema.minimum"},
+      {R"({"type":"integer","minimum":1e30})", "schema.minimum"},
+      {R"({"type":"integer","maximum":"9"})", "schema.maximum"},
+      {R"({"anyOf":[{"type":"integer"}],"minimum":0})", "schema.minimum"},
+      {R"({"enum":[1.5, 2],"minimum":0})", "schema.minimum"},
   };
   for (const Refusal& r : refusals) {
     bool threw = false;
@@ -298,6 +382,36 @@ void check_conforms(const std::string& which, const std::string& text) {
   if (which == "scalar") {
     if (v.is_number()) require(v.as_double() == 3 || v.as_double() == 10, "scalar: number enum: " + text);
     else require(v.is_bool() && v.as_bool(), "scalar: not 3/10/true: " + text);
+  }
+  const auto integral = [&](const dgpp::minijson::Value& x, const char* key) {
+    require(x.is_number() && x.as_double() == x.as_int(), std::string(which) + ": " + key + " not integral: " + text);
+    return x.as_int();
+  };
+  if (which == "bounded") {
+    require(v.is_object() && v.find("n") != nullptr, "bounded: root/n: " + text);
+    for (const dgpp::minijson::Member& m : v.members()) {
+      const std::string& k = m.key;
+      const dgpp::minijson::Value& x = m.value;
+      if (k == "n") { const int64_t i = integral(x, "n"); require(i >= 1 && i <= 2000, "bounded: n: " + text); }
+      else if (k == "neg") { const int64_t i = integral(x, "neg"); require(i >= -12 && i <= -3, "bounded: neg: " + text); }
+      else if (k == "lo") { require(integral(x, "lo") >= 100, "bounded: lo: " + text); }
+      else if (k == "hi") { require(integral(x, "hi") <= 5, "bounded: hi: " + text); }
+      else if (k == "one") { require(integral(x, "one") == 7, "bounded: one: " + text); }
+      else if (k == "opt") { if (!x.is_null()) { const int64_t i = integral(x, "opt"); require(i >= 0 && i <= 10, "bounded: opt: " + text); } }
+      else if (k == "either") { if (!x.is_string()) require(integral(x, "either") >= 50, "bounded: either: " + text); }
+      else if (k == "mixed") { const int64_t i = integral(x, "mixed"); require(i >= 100 || i <= 10, "bounded: mixed: " + text); }
+      else if (k == "pick") { const int64_t i = integral(x, "pick"); require(i == 5 || i == 500 || i <= 20, "bounded: pick: " + text); }
+      else if (k == "list") {
+        require(x.is_array() && x.items().size() <= 3, "bounded: list size: " + text);
+        for (const dgpp::minijson::Value& e : x.items()) { const int64_t i = integral(e, "list"); require(i >= 0 && i <= 99, "bounded: list item: " + text); }
+      } else {
+        throw std::runtime_error("bounded: foreign key '" + k + "' in " + text);
+      }
+    }
+  }
+  if (which == "range") {
+    const int64_t i = integral(v, "range");
+    require(i >= -50 && i <= 150, "range: " + text);
   }
 }
 
@@ -399,6 +513,213 @@ DGPP_TEST(json_grammar_maskEqualsBruteForceOnRandomWalks) {
   const auto scalar = compile(R"({"anyOf": [{"enum": [3, 10]}, {"const": true}]})");
   oracle_walks("scalar", scalar, 40, 3u, &finished);
   require(finished > 20, "scalar walks rarely finish");
+  // Bounded integers in every position the arithmetic reaches (2026-09-07):
+  // two-sided, negative, one-sided each way, a single value, beside null,
+  // as an anyOf alternative beside a string, two bounded alternatives, an
+  // enum beside a bound, and array items.
+  const auto bounded = compile(R"({
+    "type": "object",
+    "properties": {
+      "n": {"type": "integer", "minimum": 1, "maximum": 2000},
+      "neg": {"type": "integer", "minimum": -12, "maximum": -3},
+      "lo": {"type": "integer", "minimum": 100},
+      "hi": {"type": "integer", "maximum": 5},
+      "one": {"type": "integer", "minimum": 7, "maximum": 7},
+      "opt": {"type": ["integer", "null"], "minimum": 0, "maximum": 10},
+      "either": {"anyOf": [{"type": "integer", "minimum": 50}, {"type": "string"}]},
+      "mixed": {"anyOf": [{"type": "integer", "minimum": 100}, {"type": "integer", "maximum": 10}]},
+      "pick": {"anyOf": [{"enum": [5, 500]}, {"type": "integer", "maximum": 20}]},
+      "list": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 99}, "maxItems": 3}
+    },
+    "required": ["n"],
+    "additionalProperties": false
+  })");
+  oracle_walks("bounded", bounded, 200, 20260907u, &finished);
+  require(finished > 40, "bounded walks rarely finish");
+  const auto range = compile(R"({"type": "integer", "minimum": -50, "maximum": 150})");
+  oracle_walks("range", range, 60, 11u, &finished);
+  require(finished > 30, "range walks rarely finish");
+}
+
+DGPP_TEST(json_grammar_integerBoundsAreEnforcedDigitByDigit) {
+  // The arithmetic alone, exhaustively over small ranges: can_reach(p)
+  // holds iff some integer in the range has p as its JSON prefix, and
+  // within(p) iff p is such an integer itself.
+  {
+    std::vector<dgpp::text::IntegerBounds> ranges;
+    for (int lo = -12; lo <= 12; ++lo)
+      for (int hi = lo; hi <= 12; ++hi) {
+        dgpp::text::IntegerBounds b;
+        b.has_min = b.has_max = true;
+        b.min = lo;
+        b.max = hi;
+        ranges.push_back(b);
+      }
+    for (int one = -12; one <= 12; ++one) {
+      dgpp::text::IntegerBounds b;
+      b.has_min = true;
+      b.min = one;
+      ranges.push_back(b);
+      b = dgpp::text::IntegerBounds{};
+      b.has_max = true;
+      b.max = one;
+      ranges.push_back(b);
+    }
+    long checked = 0;
+    for (const dgpp::text::IntegerBounds& b : ranges) {
+      // Every JSON integer text within three digits, and every prefix of it.
+      for (int v = -999; v <= 999; ++v) {
+        const std::string text = std::to_string(v);
+        for (size_t len = 1; len <= text.size(); ++len) {
+          const std::string p = text.substr(0, len);
+          dgpp::text::IntegerPrefix ip;
+          for (const char ch : p) ip.push(static_cast<uint8_t>(ch));
+          bool reach = false, exact = false;
+          for (int w = -999; w <= 999; ++w) {
+            const bool in = (!b.has_min || w >= b.min) && (!b.has_max || w <= b.max);
+            if (!in) continue;
+            const std::string wt = std::to_string(w);
+            if (wt == p || (p == "-" && w <= 0)) exact = exact || wt == p;
+            if (wt.compare(0, p.size(), p) == 0 || (p == "-" && w <= 0)) reach = true;
+          }
+          // "-0" is the value 0 (a prefix nothing extends).
+          if (p == "-0") { reach = exact = (!b.has_min || b.min <= 0) && (!b.has_max || b.max >= 0); }
+          require(ip.can_reach(b) == reach,
+                  "can_reach('" + p + "') under [" + (b.has_min ? std::to_string(b.min) : "-inf") +
+                      ", " + (b.has_max ? std::to_string(b.max) : "+inf") + "] should be " +
+                      (reach ? "true" : "false"));
+          require(ip.within(b) == exact,
+                  "within('" + p + "') under [" + (b.has_min ? std::to_string(b.min) : "-inf") +
+                      ", " + (b.has_max ? std::to_string(b.max) : "+inf") + "] should be " +
+                      (exact ? "true" : "false"));
+          ++checked;
+        }
+      }
+    }
+    require(checked > 100000, "the exhaustive check ran");
+    // The int64 ends, and past them.
+    dgpp::text::IntegerBounds top;
+    top.has_max = true;
+    top.max = INT64_MAX;
+    dgpp::text::IntegerPrefix ip;
+    for (const char ch : std::string("922337203685477580")) ip.push(static_cast<uint8_t>(ch));
+    require(ip.can_reach(top), "…580 can still reach INT64_MAX");
+    dgpp::text::IntegerPrefix ip7 = ip, ip8 = ip;
+    ip7.push('7');
+    ip8.push('8');
+    require(ip7.within(top) && ip7.can_reach(top) && !ip8.can_reach(top), "INT64_MAX in, +1 out");
+    dgpp::text::IntegerPrefix twenty;
+    for (int i = 0; i < 20; ++i) twenty.push(i == 0 ? '1' : '0');
+    require(twenty.huge && !twenty.can_reach(top) && twenty.within(dgpp::text::IntegerBounds{}),
+            "twenty digits: past every int64 maximum, inside no bound");
+    dgpp::text::IntegerBounds bottom;
+    bottom.has_min = true;
+    bottom.min = INT64_MIN;
+    dgpp::text::IntegerPrefix neg;
+    for (const char ch : std::string("-9223372036854775808")) neg.push(static_cast<uint8_t>(ch));
+    require(neg.within(bottom) && neg.can_reach(bottom), "INT64_MIN in");
+    dgpp::text::IntegerPrefix neg9 = neg;
+    neg9 = dgpp::text::IntegerPrefix{};
+    for (const char ch : std::string("-9223372036854775809")) neg9.push(static_cast<uint8_t>(ch));
+    require(!neg9.can_reach(bottom), "INT64_MIN - 1 out");
+  }
+  // The machine, digit by digit: a two-sided range inside an object.
+  const auto two = compile(R"({"type":"object","properties":{"n":{"type":"integer","minimum":1,"maximum":2000}},"required":["n"],"additionalProperties":false})");
+  JsonMachine m(two, &tables());
+  TokenMask mask;
+  for (const char ch : std::string("{\"n\":")) require(m.feed(static_cast<uint8_t>(ch)), "open n");
+  m.mask(vocab(), &mask);
+  require(mask.allows('1') && mask.allows('9') && !mask.allows('0') && !mask.allows('-'),
+          "1..9 start a value in [1, 2000]; 0 and a sign cannot");
+  require(mask.allows(kWordBase + 29) /* 10 */ && mask.allows(kWordBase + 21) /* 12 */ &&
+              mask.allows(kWordBase + 84) /* 100 */ && mask.allows(kWordBase + 85) /* 2000 */ &&
+              mask.allows(kWordBase + 87) /* " 12" */,
+          "whole numeric tokens inside the range");
+  require(!mask.allows(kWordBase + 24) /* -1 */ && !mask.allows(kWordBase + 86) /* -5 */ &&
+              !mask.allows(kWordBase + 78) /* - */ && !mask.allows(kWordBase + 81) /* 0 */ &&
+              !mask.allows(kWordBase + 91) /* 000 */,
+          "numeric tokens outside it");
+  require(m.feed('2'), "2");
+  m.mask(vocab(), &mask);
+  require(mask.allows('0') && mask.allows('9') && mask.allows('}') && mask.allows(kWordBase + 81) &&
+              mask.allows(kWordBase + 91) /* 000 -> 2000 */ && !mask.allows(kWordBase + 84) /* 2100 */,
+          "after 2: any digit, the close, 000 but not 100");
+  require(m.feed('0') && m.feed('0'), "200");
+  m.mask(vocab(), &mask);
+  require(mask.allows('0') && !mask.allows('1') && !mask.allows('9') && mask.allows('}') &&
+              !mask.allows(kWordBase + 21) /* 12 */ && !mask.allows(kWordBase + 27) /* 2} = 2002 */,
+          "after 200: only 0 can follow, or the close");
+  require(m.feed('0'), "2000");
+  m.mask(vocab(), &mask);
+  require(!mask.allows('0') && !mask.allows('9') && mask.allows('}') && mask.allows(' '),
+          "at the maximum: no digit; the close (a comma would owe a key the closed object lacks)");
+  {
+    JsonMachine over = m;
+    require(!over.feed('1'), "20001 refused at its digit");
+  }
+  require(m.feed('}') && m.done(), "closed");
+  // A lower bound refuses the close until the digits reach it; a value
+  // that cannot grow (0) dies at once.
+  const auto ten = compile(R"({"type":"integer","minimum":10})");
+  JsonMachine t(ten, &tables());
+  require(!JsonMachine(ten, &tables()).feed('0'), "0 under minimum 10 dies at its byte");
+  require(!JsonMachine(ten, &tables()).feed('-'), "a sign under minimum 10 dies at its byte");
+  require(t.feed('5') && !t.done(), "5: alive (50 is reachable), not done");
+  t.mask(vocab(), &mask);
+  require(mask.allows('0') && mask.allows('9') && mask.allowed > 0, "digits follow");
+  require(t.feed('0') && t.done(), "50: done");
+  // A negative range: the sign is the only start; the digits then aim
+  // inside [-10, -5].
+  const auto neg = compile(R"({"type":"integer","minimum":-10,"maximum":-5})");
+  JsonMachine g(neg, &tables());
+  g.mask(vocab(), &mask);
+  require(mask.allows('-') && !mask.allows('1') && !mask.allows('0') &&
+              mask.allows(kWordBase + 24) /* -1 */ && mask.allows(kWordBase + 86) /* -5 */ &&
+              mask.allows(kWordBase + 78) /* - */ && !mask.allows(kWordBase + 79) /* 9 */,
+          "only a signed start");
+  require(g.feed('-'), "-");
+  g.mask(vocab(), &mask);
+  require(mask.allows('1') && mask.allows('5') && mask.allows('9') && !mask.allows('0') &&
+              !mask.allows('2') && !mask.allows('4') && mask.allows(kWordBase + 29) /* 10 */ &&
+              !mask.allows(kWordBase + 21) /* 12 */,
+          "-1 (toward -10) and -5..-9; not -0, -2, -4; -10 as one token, not -12");
+  require(g.feed('1') && !g.done(), "-1: alive, not done");
+  g.mask(vocab(), &mask);
+  require(mask.allows('0') && !mask.allows('1') && !mask.allows('9'), "-10 only");
+  require(g.feed('0') && g.done(), "-10: done");
+  // Union semantics at the top: done where some alternative accepts.
+  const auto mixed = compile(R"({"anyOf":[{"type":"integer","minimum":100},{"type":"integer","maximum":10}]})");
+  JsonMachine u(mixed, &tables());
+  require(u.feed('5') && u.done(), "5 fits the second alternative");
+  u.mask(vocab(), &mask);
+  require(mask.allows('0') && mask.allows('9'), "the first alternative keeps the digits open");
+  require(u.feed('0') && !u.done(), "50 fits neither");
+  require(u.feed('0') && u.done(), "500 fits the first");
+  // Array items under a range; integer|null under a range.
+  const auto arr = compile(R"({"type":"array","items":{"type":"integer","minimum":0,"maximum":3}})");
+  JsonMachine a(arr, &tables());
+  require(a.feed('['), "[");
+  a.mask(vocab(), &mask);
+  require(mask.allows('0') && mask.allows('3') && !mask.allows('4') && mask.allows(']') &&
+              mask.allows('-') /* "-0" is 0 */ && !mask.allows(kWordBase + 24) /* -1 */,
+          "items in [0, 3]");
+  require(a.feed('3') && a.feed(',') && !a.feed('4'), "4 refused as an item");
+  const auto opt = compile(R"({"type":["integer","null"],"minimum":1})");
+  JsonMachine o(opt, &tables());
+  o.mask(vocab(), &mask);
+  require(mask.allows('n') && mask.allows('1') && !mask.allows('0') && !mask.allows('-'),
+          "null or a positive integer");
+  // Huge digits: no upper bound, still alive and done.
+  const auto pos = compile(R"({"type":"integer","minimum":0})");
+  JsonMachine h(pos, &tables());
+  for (int i = 0; i < 25; ++i) require(h.feed(i == 0 ? '1' : '0'), "a 25-digit integer");
+  require(h.done(), "done at 25 digits");
+  // A number that admits a fraction keeps its bound unenforced (lax).
+  std::vector<std::string> notes;
+  const dgpp::minijson::ParseResult np = dgpp::minijson::parse(R"({"type":"number","minimum":5})");
+  const auto num = std::make_shared<const JsonSchema>(dgpp::text::compile_json_schema(np.root, &notes));
+  JsonMachine f(num, &tables());
+  require(notes.size() == 1 && f.feed('1') && f.done(), "a number's bound is the model's");
 }
 
 DGPP_TEST(json_grammar_machineFactsAtTheEdges) {

@@ -1502,13 +1502,14 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
   require(g2.size() == 7 && !g2[6].tools[0].constrain_keys,
           "JSON Schema's default is open: keys unconstrained");
   // A strict function whose schema leaves the enforceable subset is a 400
-  // naming the keyword path; the same schema without strict is served
+  // naming the keyword path (a number's bound here — an integer's is
+  // enforced since 2026-09-07); the same schema without strict is served
   // with that value typed and the bound unenforced (2026-09-06), and a
   // keyword that changes the value's shape leaves it free.
   const std::string strict_tools =
       ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"strict\":STRICT,"
       "\"parameters\":{\"type\":\"object\",\"properties\":{\"days\":{\"type\":"
-      "\"integer\",\"minimum\":0}}}}}]";
+      "\"number\",\"minimum\":0}}}}}]";
   {
     std::string body = strict_tools;
     body.replace(body.find("STRICT"), 6, "true");

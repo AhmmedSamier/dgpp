@@ -1332,7 +1332,9 @@ rejects; a top-level number counts as complete while it may still grow),
 `compile_json_schema` (OpenAI's structured-output subset into nodes:
 `type` and type lists, `properties` / `required` / `additionalProperties`,
 `items` / `minItems` / `maxItems`, `enum` / `const` over scalar values,
-`anyOf`; anything else refuses at compile time NAMING THE KEYWORD PATH,
+`anyOf`, and since 2026-09-07 an integer's `minimum` / `maximum` /
+`exclusiveMinimum` / `exclusiveMaximum`, enforced digit by digit;
+anything else refuses at compile time NAMING THE KEYWORD PATH,
 `schema.properties.city.pattern`), `JsonMachine` (the lexer plus schema
 cursors — an `anyOf` splits the cursor per alternative and the frontier
 shrinks as bytes disambiguate; a closed object's keys are spelled from
@@ -1414,7 +1416,10 @@ what the service and the golden gate both use; under `function.strict:
 true` every property must compile inside the constrained subset, else a
 400 naming `tools[i].function.parameters.properties.<key>.<keyword>`
 (`unsupported_schema`), while a non-strict JSON-typed property outside
-the subset stays free with a WARN. `GrammarState` binds the argument when
+the subset stays free with a WARN, and one under a keyword that only
+narrows its value (a number's bound, `pattern`, ...) stays typed with the
+narrowing unapplied and an INFO line naming the keyword and the reason
+(2026-09-06/07). `GrammarState` binds the argument when
 the key closes (`key_` → `arg_`), runs a per-value `JsonMachine` or the
 text automaton in `kValue`, and dies on a disallowed byte as everywhere.
 The auto mode: `tool_choice: auto` (the default with tools) now arms

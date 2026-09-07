@@ -193,20 +193,29 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
       tool.args.push_back(std::move(arg));
       continue;
     }
-    // A JSON-typed property: the machine under its own schema. A keyword
-    // that only narrows the value (minimum, pattern, ...) is tolerated —
-    // the value stays typed, the bound is not applied — and noted.
+    // A JSON-typed property: the machine under its own schema. An
+    // integer's minimum / maximum are enforced (2026-09-07); a keyword
+    // that only narrows the value without an automaton behind it (a
+    // number's bound, pattern, ...) is tolerated — the value stays typed,
+    // the narrowing is not applied — and noted with the reason.
     try {
       std::vector<std::string> unenforced;
       compile_json_schema(prop, &unenforced);
       arg.kind = GrammarArg::Kind::kJson;
       arg.schema = json_text_of(prop);
       if (notes != nullptr)
-        for (const std::string& u : unenforced)
+        for (const std::string& u : unenforced) {
+          // "schema.<path>.<keyword>: <reason>"
+          const std::string entry = u.rfind("schema.", 0) == 0 ? u.substr(7) : u;
+          const size_t colon = entry.find(": ");
+          const std::string where = entry.substr(0, colon);
+          const std::string reason =
+              colon == std::string::npos
+                  ? "the value keeps its type; the bound is not applied"
+                  : entry.substr(colon + 2);
           notes->push_back("argument '" + pm.key + "' of '" + tool.name + "': " +
-                           (u.rfind("schema.", 0) == 0 ? u.substr(7) : u) +
-                           " is not enforced (the value keeps its type; the "
-                           "bound is not applied)");
+                           where + " is not enforced (" + reason + ")");
+        }
     } catch (const std::invalid_argument& e) {
       if (warnings != nullptr)
         warnings->push_back("argument '" + pm.key + "' of '" + tool.name +

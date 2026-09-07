@@ -6,6 +6,29 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- An integer's `minimum` / `maximum` / `exclusiveMinimum` /
+  `exclusiveMaximum` are enforced by constrained decoding, for a tool
+  argument and for a `response_format` schema alike: the bounds compile
+  to one inclusive 64-bit range (a fractional bound rounded inward, an
+  exclusive one stepped by one), the JSON machine admits a digit only
+  while some completion can still land inside the range and the value's
+  closer only once the digits do, and the mask re-judges the pure-numeric
+  tokens by the same arithmetic, proven equal to brute force by the walk
+  gate. A `timeout` with `minimum: 1` can no longer come out as `0` or
+  `-5`, a `limit` with `maximum: 2000` cannot exceed it, and the tool
+  behind them never sees a value its schema excluded (the Hermes agent's
+  definitions carry such bounds on every integer argument; before this
+  the server logged one INFO line per bound saying it was not applied).
+  A number that admits a fraction keeps its bound unenforced — refused
+  under `strict`, noted with the reason for a non-strict tool — as does
+  the draft-4 boolean form, a bound beyond int64, an empty range, and an
+  enum no member of which fits; an enum beside a bound is filtered to the
+  members inside it. The INFO line for the keywords that stay unenforced
+  now carries the reason. Also fixed on the way: beside a bounded (or
+  plain) integer alternative, an enum of integers let the mask admit a
+  `.` every cursor then refused; and a top-level number under an `anyOf`
+  is complete where some alternative accepts it, not only where all do.
+
 - Fixed: the decode index selection's histogram sat at a call-dependent
   workspace offset (the call's rows of keys), so a ONE-row call — the
   sampled fallback's eager verify or re-draft — read its histogram out of
