@@ -1597,7 +1597,17 @@ device slots of one session's state (`--prefix-cache-gib`, 1.5 GiB → 42
 at real dims), stream-ordered snapshots and attaches, event-timed;
 entries pin their DSA blocks in the pool, and an admission short of
 blocks or a snapshot slot evicts the LRU unattached entry (never one a
-live request opened from). Metrics: hits, misses, tokens saved, entries
+live request opened from). A miss is explained at INFO (2026-09-07,
+`PrefixCache::nearest`: the live entry sharing the longest prefix with
+the prompt and that length, and `ghost_at`: a ring of the last 256
+evicted entries' prefix hashes and positions, consulted first so an
+eviction of the conversation's own entry is named as such — a linear pass
+taken on a miss only, never a decision), after an agent session's
+64,803-token turn arrived a third of
+a second behind its predecessor and prefilled cold for 200 s with the
+predecessor's entries present: the client had changed the prompt's first
+62K tokens, which the op stream's replay showed and the log could not.
+Metrics: hits, misses, tokens saved, entries
 taken and evicted, blocks pinned, the arena's copy times, the TTFT split.
 The two-token step's parity (closed 2026-09-05): the MTP graph's
 two-token steps fix the committed count's parity while the draft is

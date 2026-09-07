@@ -300,7 +300,25 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   ms; decode 326 tok / 183 passes in 30.0 s: 10.9 tok/s, 92.1 ms/tok, 164
   ms/pass, 1.78 tok/pass` — where a pass is shared with every other live
   request, so `ms/pass` is the pace that request saw (the clock starts at
-  admission; the queue wait is the service's `ttft` in `/v1/metrics`).
+  admission; the queue wait is the service's `ttft` in `/v1/metrics`). A
+  prefix cache miss is explained on its own INFO line at admission
+  (2026-09-07): `prefix cache miss — 41 cut(s) probed against 42 entries;
+  the nearest entry (position 62432) shares the first 812 of the prompt's
+  64803 tokens (the prompt changed there)` — a divergence inside the
+  system prompt (an agent client injecting a saved memory, a compacted
+  history) reads differently from one at the previous answer; "the cache
+  is empty", "a different prompt from its first token" and "a prefix of
+  that entry: no entry at this prompt's own cuts" name the other cases,
+  and when the conversation's own entry was pushed out the line says so
+  instead — `an entry at this prompt's cut 2896 was evicted (5
+  eviction(s) ago, last used at tick 1180, now tick 1412; the arena holds
+  7 slots)` — from a ring of the last 256 evicted entries' prefix hashes,
+  which is what separates an arena too small for the streams and their
+  side requests from a client that changed its prompt. The decisions
+  themselves (attach, snapshot, close,
+  evict, rolling, hop) ride the op stream `down` fetches, one `X <op> <id>
+  <position> <slot>` line each, so the arena's contents at any request can
+  be replayed after the fact.
   The per-tick lines
   (a line per generated token, the bus's three per-window lines, the
   prefix cache's per-decision line, the adaptive engine's mode switches)

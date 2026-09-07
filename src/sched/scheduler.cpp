@@ -478,6 +478,7 @@ void Scheduler::admit(int arrival) {
       emit_prefix(r.spec.id, "attach", plan.attach_position, pp.attach_slot);
     } else {
       ++cache_.stats().misses;
+      log_prefix_miss(r);
     }
     if (snap_slot >= 0) {
       if (!pp.snap_taken) {
@@ -1007,6 +1008,51 @@ int Scheduler::acquire_arena_slot(const std::string& id) {
 void Scheduler::free_arena_slot(int slot) {
   engine_->prefix_release(slot);
   cache_.give_back_slot(slot);
+}
+
+// A miss, explained at INFO (2026-09-07): the live log of an agent session
+// showed a 64,803-token turn arriving a third of a second after its
+// predecessor retired and prefilling cold for 200 s, with the
+// predecessor's entries present and unattached in the arena — the prompt's
+// first 62K tokens had changed on the client. The line names how many cuts
+// the lookup probed, how many entries the cache held, and where the prompt
+// parts from the entry it shares the most with: a divergence inside the
+// system prompt reads differently from one at the previous answer.
+void Scheduler::log_prefix_miss(const Request& r) const {
+  const int entries = cache_.live_entries();
+  if (entries == 0) {
+    DGPP_LOG_INFO("sched: request '{}' prefix cache miss — {} cut(s), the cache is empty",
+                  r.spec.id, r.cuts.size());
+    return;
+  }
+  const PrefixCache::Ghost ghost = cache_.ghost_at(r.cuts, r.cut_hashes);
+  if (ghost.position > 0) {
+    DGPP_LOG_INFO(
+        "sched: request '{}' prefix cache miss — {} cut(s) probed against {} "
+        "entries; an entry at this prompt's cut {} was evicted ({} eviction(s) "
+        "ago, last used at tick {}, now tick {}; the arena holds {} slots)",
+        r.spec.id, r.cuts.size(), entries, ghost.position,
+        cache_.stats().evictions - ghost.eviction + 1, ghost.last_use, ticks_,
+        cache_.slots());
+    return;
+  }
+  const PrefixCache::Nearest near = cache_.nearest(r.spec.prompt);
+  if (near.entry < 0) return;
+  const PrefixCache::Entry& e = cache_.entry(near.entry);
+  const int64_t n = static_cast<int64_t>(r.spec.prompt.size());
+  const char* reading =
+      near.common == 0 ? "nothing in common: a different prompt from its first token"
+      : near.common >= e.position
+          ? "the whole entry, which sits at no cut of this prompt"
+      : near.common >= n
+          ? "the whole prompt, a prefix of that entry: no entry at this "
+            "prompt's own cuts (evicted, or never taken)"
+          : "the prompt differs from it from that token on";
+  DGPP_LOG_INFO(
+      "sched: request '{}' prefix cache miss — {} cut(s) probed against {} "
+      "entries; the nearest entry (position {}) shares the first {} of the "
+      "prompt's {} tokens ({})",
+      r.spec.id, r.cuts.size(), entries, e.position, near.common, n, reading);
 }
 
 void Scheduler::emit_prefix(const std::string& id, const char* op,

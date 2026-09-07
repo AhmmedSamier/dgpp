@@ -572,6 +572,9 @@ class Scheduler {
   void free_arena_slot(int slot);
   void emit_prefix(const std::string& id, const char* op, int64_t position,
                    int slot);
+  // A miss explained at INFO: the cuts probed, the entries held, and where
+  // the prompt parts from the entry it shares the most with (2026-09-07).
+  void log_prefix_miss(const Request& r) const;
 
   bool is_eos(int32_t token) const;
   // The reservation an admission pins: the lifetime under full-reserve,

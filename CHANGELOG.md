@@ -6,6 +6,21 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- A prefix cache miss is explained on its own INFO line: the cuts probed,
+  the entries held, and where the prompt parts from the entry it shares
+  the most with (`PrefixCache::nearest`), so a client that edits the
+  system prompt or compacts its history between turns is named on the
+  spot; when the conversation's own entry was pushed out of the arena the
+  line says that instead, from a ring of the last 256 evicted entries
+  (`PrefixCache::ghost_at`). `scripts/serve_agentic_streams.py` reproduces an agent client's
+  pattern — several concurrent multi-turn tool loops with the reasoning
+  stripped from the history, side requests between turns, an optional
+  system-prompt edit — and reads the cache's answer per turn from
+  `usage.prompt_tokens_details.cached_tokens`; the scheduler suite pins
+  two interleaved conversations hitting on every turn under a six-slot
+  arena, one returning its reasoning (attaching at the close entry) and
+  one stripping it (attaching at the previous prompt's header cut).
+
 - An integer's `minimum` / `maximum` / `exclusiveMinimum` /
   `exclusiveMaximum` are enforced by constrained decoding, for a tool
   argument and for a `response_format` schema alike: the bounds compile

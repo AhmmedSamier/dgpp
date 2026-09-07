@@ -103,6 +103,32 @@ class PrefixCache {
              const std::vector<uint64_t>& cut_hashes) const;
   // Whether a live entry with exactly these ids exists (the dedupe check).
   int find_exact(const int64_t* ids, int64_t n, uint64_t hash) const;
+  // The miss diagnostic (2026-09-07): the live entry sharing the longest
+  // prefix with the prompt, and that length — where a prompt that should
+  // have attached first differs from what the cache holds (an agent
+  // client's edited system prompt, a compacted history). A linear pass
+  // over the entries, taken on a miss only; never a decision.
+  struct Nearest {
+    int entry = -1;
+    int64_t common = 0;  // ids shared with the entry, from the start
+  };
+  Nearest nearest(const std::vector<int64_t>& prompt) const;
+  // The ghosts (2026-09-07): the last kGhosts evicted entries by (hash,
+  // position, last use, eviction ordinal), so a miss can say "an entry at
+  // this prompt's cut was evicted" — the case the nearest entry cannot
+  // tell from a changed prompt once the conversation's own entries are
+  // gone (the 7-slot pressure run: three streams' entries pushed out by a
+  // round of side requests). Never a decision, not in the digest.
+  struct Ghost {
+    uint64_t hash = 0;
+    int64_t position = 0;
+    uint64_t last_use = 0;
+    int64_t eviction = 0;  // its ordinal among the cache's evictions, from 1
+  };
+  static constexpr size_t kGhosts = 256;
+  // The deepest cut of the prompt an evicted entry sat at, or position 0.
+  Ghost ghost_at(const std::vector<int64_t>& cuts,
+                 const std::vector<uint64_t>& cut_hashes) const;
 
   // ---- the slot ledger ----------------------------------------------------
   // The smallest free slot, or -1.
@@ -136,6 +162,8 @@ class PrefixCache {
  private:
   Config cfg_;
   std::vector<Entry> entries_;
+  std::vector<Ghost> ghosts_;  // a ring of kGhosts
+  size_t ghost_next_ = 0;
   std::unordered_multimap<uint64_t, int> by_hash_;  // hash -> entry index
   std::vector<int> free_;  // sorted ascending
   Stats stats_;

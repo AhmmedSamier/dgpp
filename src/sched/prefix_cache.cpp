@@ -61,6 +61,36 @@ int PrefixCache::find_exact(const int64_t* ids, int64_t n, uint64_t hash) const 
   return best;
 }
 
+PrefixCache::Ghost PrefixCache::ghost_at(const std::vector<int64_t>& cuts,
+                                         const std::vector<uint64_t>& cut_hashes) const {
+  Ghost none;
+  if (cuts.size() != cut_hashes.size()) return none;
+  for (size_t i = cuts.size(); i-- > 0;)
+    for (const Ghost& g : ghosts_)
+      if (g.position == cuts[i] && g.hash == cut_hashes[i]) return g;
+  return none;
+}
+
+PrefixCache::Nearest PrefixCache::nearest(const std::vector<int64_t>& prompt) const {
+  Nearest best;
+  for (size_t i = 0; i < entries_.size(); ++i) {
+    const Entry& e = entries_[i];
+    if (!e.live) continue;
+    const size_t n = std::min(e.ids.size(), prompt.size());
+    size_t k = 0;
+    while (k < n && e.ids[k] == prompt[k]) ++k;
+    // The longest shared prefix; among equals the deeper entry, then the
+    // older (a stable answer for the log).
+    if (best.entry < 0 || static_cast<int64_t>(k) > best.common ||
+        (static_cast<int64_t>(k) == best.common &&
+         e.position > entries_[static_cast<size_t>(best.entry)].position)) {
+      best.entry = static_cast<int>(i);
+      best.common = static_cast<int64_t>(k);
+    }
+  }
+  return best;
+}
+
 int PrefixCache::lookup(const std::vector<int64_t>& prompt,
                         const std::vector<int64_t>& cuts,
                         const std::vector<uint64_t>& cut_hashes) const {
@@ -108,6 +138,17 @@ int PrefixCache::evict_lru() {
   e.ids.clear();
   e.ids.shrink_to_fit();
   ++stats_.evictions;
+  Ghost g;
+  g.hash = e.hash;
+  g.position = e.position;
+  g.last_use = e.last_use;
+  g.eviction = stats_.evictions;
+  if (ghosts_.size() < kGhosts) {
+    ghosts_.push_back(g);
+  } else {
+    ghosts_[ghost_next_] = g;
+    ghost_next_ = (ghost_next_ + 1) % kGhosts;
+  }
   note(3, static_cast<uint64_t>(e.position), static_cast<uint64_t>(slot));
   return slot;
 }

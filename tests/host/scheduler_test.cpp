@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <map>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -1369,6 +1370,142 @@ DGPP_TEST(scheduler_prefixCache_secondIdenticalPromptAttachesAtTheDeepestCut) {
               m.prefix_blocks_pinned == 3,
           "prefix meters: one miss, one hit of 12 tokens, one entry pinning 3 blocks");
   require(ids_joined(sched.results()[1].generated) == "1,2,3", "b's ids");
+}
+
+DGPP_TEST(prefixCache_nearestNamesWhereAMissedPromptDiverges) {
+  // The miss diagnostic (2026-09-07): among the live entries, the one
+  // sharing the longest prefix with a prompt, and that length.
+  using dgpp::sched::PrefixCache;
+  PrefixCache::Config cfg;
+  cfg.slots = 4;
+  cfg.align = 4;
+  PrefixCache cache(cfg);
+  require(cache.nearest(counted_prompt(8)).entry < 0, "an empty cache names nothing");
+  const std::vector<int64_t> a = counted_prompt(40);
+  const int e0 = cache.insert(a.data(), 12, cache.take_free_slot(), 1);
+  const int e1 = cache.insert(a.data(), 36, cache.take_free_slot(), 2);
+  require(e0 >= 0 && e1 >= 0, "two entries over the same sequence");
+  std::vector<int64_t> edited = a;
+  for (size_t i = 20; i < edited.size(); ++i) edited[i] += 1000;
+  PrefixCache::Nearest n = cache.nearest(edited);
+  require(n.entry == e1 && n.common == 20, "the deeper entry shares 20 tokens: the edit is at 20");
+  std::vector<int64_t> first = a;
+  first[0] += 1000;
+  n = cache.nearest(first);
+  require(n.common == 0 && n.entry == e1, "nothing shared: the deeper entry named, common 0");
+  std::vector<int64_t> longer = a;
+  longer.push_back(900);
+  n = cache.nearest(longer);
+  require(n.entry == e1 && n.common == 36, "a prompt extending the entry shares all of it");
+  std::vector<int64_t> shorter(a.begin(), a.begin() + 10);
+  n = cache.nearest(shorter);
+  require(n.common == 10 && n.entry == e1, "a shorter prompt shares its own length; the deeper among equals");
+  // The ghosts: an evicted entry is still named at the prompt's cut.
+  const std::vector<int64_t> cuts = {12, 36};
+  const std::vector<uint64_t> hashes = {PrefixCache::hash_prefix(a.data(), 12),
+                                        PrefixCache::hash_prefix(a.data(), 36)};
+  require(cache.ghost_at(cuts, hashes).position == 0, "nothing evicted yet");
+  require(cache.evict_lru() >= 0, "the LRU entry (e0, used at 1) goes");
+  PrefixCache::Ghost g = cache.ghost_at(cuts, hashes);
+  require(g.position == 12 && g.eviction == 1 && g.last_use == 1, "the ghost at cut 12");
+  require(cache.evict_lru() >= 0, "then e1");
+  g = cache.ghost_at(cuts, hashes);
+  require(g.position == 36 && g.eviction == 2, "the deepest cut's ghost is named first");
+  require(cache.ghost_at({12}, {PrefixCache::hash_prefix(edited.data(), 12)}).position == 12 &&
+              cache.ghost_at({20}, {PrefixCache::hash_prefix(edited.data(), 20)}).position == 0,
+          "a ghost answers by prefix hash and position, not by the prompt's tail");
+}
+
+DGPP_TEST(scheduler_prefixCache_twoInterleavedConversationsKeepHittingUnderATightArena) {
+  // Two multi-turn conversations advancing in lockstep on a two-slot engine
+  // with a six-slot arena (2026-09-07: the agent session's pattern —
+  // several streams, each turn extending its predecessor's prompt). A
+  // echoes its answers verbatim into the next prompt (a client returning
+  // the reasoning: the turn attaches at the CLOSE entry and prefills only
+  // the new message); B rewrites the answer's tokens (a client stripping
+  // the reasoning: the turn attaches at the previous prompt's deepest cut,
+  // its assistant header, and re-prefills the rewritten answer too). Every
+  // turn after the first must hit even as the arena turns over: four
+  // entries per round against six slots, two of them the live rolling
+  // snapshots.
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/400, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/6, /*align=*/4);
+  Scheduler sched(&engine, {kEos});
+  constexpr int kHeader = 7;  // the assistant header: a boundary at the prompt's end
+  struct Conv {
+    std::string name;
+    bool echo;
+    std::vector<int64_t> prompt;
+    std::vector<int64_t> boundaries;
+    int64_t base;
+  };
+  const auto opening = [&](Conv* c, int64_t base) {
+    c->base = base;
+    c->prompt = counted_prompt(21, base);     // system + user
+    c->boundaries = {5, 13};
+    c->prompt.push_back(kHeader);             // <|assistant|>
+    c->boundaries.push_back(static_cast<int64_t>(c->prompt.size()) - 1);
+  };
+  Conv A{"A", true, {}, {}, 0}, B{"B", false, {}, {}, 0};
+  opening(&A, 100);
+  opening(&B, 5000);
+  const auto align = [](int64_t x) { return (x / 4) * 4; };
+  std::vector<int64_t> expect_attach;  // per turn, the positions both must attach at
+  int64_t gen_serial = 1000;
+  for (int turn = 0; turn < 4; ++turn) {
+    // The scripts: five answer tokens then EOS, distinct per turn.
+    std::vector<int> script;
+    for (int i = 0; i < 5; ++i) script.push_back(static_cast<int>(gen_serial) + i);
+    gen_serial += 10;
+    script.push_back(static_cast<int>(kEos));
+    engine.arm(0, script, 8);
+    engine.arm(1, script, 8);
+    const std::string ia = A.name + std::to_string(turn), ib = B.name + std::to_string(turn);
+    sched.submit(make_cached_request(ia, A.prompt, A.boundaries, 8));
+    sched.submit(make_cached_request(ib, B.prompt, B.boundaries, 8));
+    sched.run_to_completion();
+    // The next prompts: the answer (echoed, or rewritten for B), the EOS
+    // as the next message's marker, four new tokens, the header.
+    for (Conv* c : {&A, &B}) {
+      const int64_t prev_len = static_cast<int64_t>(c->prompt.size());
+      const int64_t eos_at = prev_len + 5;
+      // The expectation for the turn to come: A at the close entry
+      // (aligned image of the EOS position), B at the previous prompt's
+      // header cut.
+      expect_attach.push_back(c->echo ? align(eos_at) : align(prev_len - 1));
+      for (int i = 0; i < 5; ++i)
+        c->prompt.push_back(c->echo ? script[static_cast<size_t>(i)]
+                                    : script[static_cast<size_t>(i)] + 777);
+      c->prompt.push_back(kEos);
+      c->boundaries.push_back(eos_at);
+      for (int i = 0; i < 4; ++i) c->prompt.push_back(c->base + 300 + turn * 4 + i);
+      c->prompt.push_back(kHeader);
+      c->boundaries.push_back(static_cast<int64_t>(c->prompt.size()) - 1);
+    }
+  }
+  // Every turn after the first attached, at the expected position.
+  const Scheduler::Meters m = sched.meters();
+  require(m.prefix_misses == 2 && m.prefix_hits == 6,
+          "two cold openings, six hits: misses " + std::to_string(m.prefix_misses) +
+              " hits " + std::to_string(m.prefix_hits));
+  std::vector<int64_t> attached;
+  {
+    std::istringstream ops(engine.op_stream());
+    std::string op;
+    while (ops >> op)
+      if (op.rfind("X:", 0) == 0) {
+        const size_t colon = op.find(':', 2);
+        attached.push_back(std::stoll(op.substr(colon + 1, op.find('@') - colon - 1)));
+      }
+  }
+  std::vector<int64_t> want(expect_attach.begin(), expect_attach.end() - 2);  // the last round's expectation is for a turn never sent
+  std::sort(attached.begin(), attached.end());
+  std::sort(want.begin(), want.end());
+  std::string got_s, want_s;
+  for (const int64_t x : attached) got_s += std::to_string(x) + " ";
+  for (const int64_t x : want) want_s += std::to_string(x) + " ";
+  require(attached == want, "attach positions: got " + got_s + "; expected " + want_s);
+  require(m.prefix_evictions > 0, "the arena turned over: " + std::to_string(m.prefix_evictions));
 }
 
 DGPP_TEST(scheduler_prefixCache_rollingSnapshotBecomesTheCloseEntryTheNextTurnAttachesTo) {
