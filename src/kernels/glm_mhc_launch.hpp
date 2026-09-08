@@ -37,14 +37,27 @@ void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
 // finish_counters (int32 [tokens] device scratch, zero at rest; the caller
 // zeroes it once at allocation) fuses the finish phase into the dots
 // launch: the last dots block of a token runs it. Null keeps the two-
-// launch form.
-void launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
+// launch form. Returns true when comb was DEFERRED (defer_comb with the
+// fused per-coefficient form): the caller must then launch_mhc_comb
+// before anything reads comb; the tiled prefill form never defers.
+bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
                                const GlmMhcConfig& cfg, uint16_t* collapsed,
                                uint16_t* post, uint16_t* comb,
                                float* logits_scratch, const uint16_t* ln,
                                uint16_t* normed, float ln_eps, int tokens,
                                cudaStream_t stream,
-                               int* finish_counters = nullptr);
+                               int* finish_counters = nullptr,
+                               bool defer_comb = false);
+
+// The deferred comb (2026-09-08; fused finish only): with defer_comb the
+// finish above writes collapsed/post/normed and leaves comb to this
+// launch, which reads the dots' logits_scratch (one warp per token, the
+// in-block arithmetic exactly — bitwise). Only the stream update reads
+// comb, so decode runs it on a side stream forked after the finish and
+// joined before the update, off the sublayer's critical path.
+void launch_mhc_comb(const float* logits_scratch, const GlmMhcWeights& w,
+                     const GlmMhcConfig& cfg, uint16_t* comb, int tokens,
+                     cudaStream_t stream);
 
 // Stream update after the sublayer: for every token,
 //   streams_out[i] = bf16(bf16(post[i] * sublayer_out)

@@ -67,17 +67,114 @@ __device__ __forceinline__ void unpack8(uint4 q, float (&f)[8]) {
 // reference normalizes every element before the linear; x[d]*r in fp32 is
 // its per-element multiply). Vector path when the launcher verified
 // 16-byte alignment and K % 8 == 0; scalar fallback otherwise.
+// comb's seed: softmax over ROW `row` of comb_logits * scale[2] + base,
+// + eps, into comb_seed[row * kN ..]. The softmax max is taken AFTER the
+// affine transform: scale[2] may be negative, in which case it is not a
+// plain shift and the raw-logit max would not stabilize the exponentials.
+__device__ __forceinline__ void mhc_comb_seed_row(const float* __restrict__ lg,
+                                                  const float* __restrict__ base,
+                                                  const float* __restrict__ scale,
+                                                  float hc_eps, int row,
+                                                  float* comb_seed) {
+  float m = -INFINITY;
+#pragma unroll
+  for (int col = 0; col < kN; ++col) {
+    const float v = lg[2 * kN + row * kN + col] * scale[2] +
+                    base[2 * kN + row * kN + col];
+    m = fmaxf(m, v);
+  }
+  float c[kN];
+  float denom = 0.f;
+#pragma unroll
+  for (int col = 0; col < kN; ++col) {
+    const float v = lg[2 * kN + row * kN + col] * scale[2] +
+                    base[2 * kN + row * kN + col];
+    c[col] = expf(v - m);
+    denom += c[col];
+  }
+  const float inv = 1.0f / denom;
+  // Two statements, as the serial version had them (a fused
+  // multiply-add here would move the bits).
+#pragma unroll
+  for (int col = 0; col < kN; ++col) c[col] = c[col] * inv;
+#pragma unroll
+  for (int col = 0; col < kN; ++col)
+    comb_seed[row * kN + col] = c[col] + hc_eps;
+}
+
+// Sinkhorn on lanes 0..15 of one warp: lane = row * kN + col. One column
+// pass, then (iters-1) row+column passes. column sum = sum over the
+// FIRST index (torch dim=-2). The 4-way sums are xor butterflies (two
+// dependent shuffles instead of four; a row's lanes are contiguous,
+// a column's are 4 apart) — the 39 dependent passes are ~4.5 us on this
+// device, and the butterfly order is rounding-level. Writes comb_out[t].
+__device__ __forceinline__ void mhc_sinkhorn_warp(const float* comb_seed,
+                                                  float hc_eps,
+                                                  int sinkhorn_iters,
+                                                  uint16_t* __restrict__ comb_out,
+                                                  size_t t, int lane) {
+  const bool live = lane < kN * kN;
+  static_assert(kN == 4, "the butterflies below are 4-wide");
+  float c = live ? comb_seed[lane] : 0.f;
+  const auto col_sum = [&](float v) {
+    v += __shfl_xor_sync(0xFFFFFFFFu, v, 4);
+    v += __shfl_xor_sync(0xFFFFFFFFu, v, 8);
+    return v;
+  };
+  const auto row_sum = [&](float v) {
+    v += __shfl_xor_sync(0xFFFFFFFFu, v, 1);
+    v += __shfl_xor_sync(0xFFFFFFFFu, v, 2);
+    return v;
+  };
+  c = c / (col_sum(c) + hc_eps);
+  for (int it = 1; it < sinkhorn_iters; ++it) {
+    c = c / (row_sum(c) + hc_eps);
+    c = c / (col_sum(c) + hc_eps);
+  }
+  if (live) comb_out[t * kN * kN + lane] = float_to_bf16_bits(c);
+}
+
+// comb alone, one warp per token — the deferred form (2026-09-08): the
+// decode site's fused finish ran the Sinkhorn on the critical path to the
+// sublayer, though only the stream UPDATE at the site's end reads comb;
+// launched on a side stream forked after the finish and joined before the
+// update, its ~4.5 us hide under the sublayer. Same arithmetic, same
+// lanes as the in-block form: bitwise (glm_mhc_test pins it).
+__global__ void mhc_comb_kernel(const float* __restrict__ logits_in,
+                                const float* __restrict__ base,
+                                const float* __restrict__ scale,
+                                uint16_t* __restrict__ comb_out, int tokens,
+                                float hc_eps, int sinkhorn_iters) {
+  __shared__ float comb_seed[kN * kN];
+  const int token = blockIdx.x;
+  if (token >= tokens) return;
+  const size_t t = static_cast<size_t>(token);
+  const float* lg = logits_in + t * kCoeffs;
+  const int lane = threadIdx.x;
+  if (lane < kN) mhc_comb_seed_row(lg, base, scale, hc_eps, lane, comb_seed);
+  __syncwarp();
+  mhc_sinkhorn_warp(comb_seed, hc_eps, sinkhorn_iters, comb_out, t, lane);
+}
+
 // The finish phase as a block-level device function: run by the finish
 // kernel (one block per token) or, fused, by the LAST dots block of a
 // token (see mhc_dots_kernel). Everything below the token index is shared.
-template <int kPerThread>
+// defer_comb leaves comb to mhc_comb_kernel (the caller launches it).
+// xq (2026-09-08, the fused decode form): the calling dots block's
+// register copy of the flattened streams — vector V = threadIdx.x + I *
+// kThreads, I < kRegVecs — which at hidden % 2048 == 0 holds exactly the
+// collapse's runs (stream j, run i is I = j * kRuns + i), so phase C reads
+// no memory; the ln vectors are issued at the top, under the coefficient
+// math and the barrier. Same bf16 bits, same arithmetic: bitwise.
+template <int kPerThread, int kRegVecs = 0>
 __device__ __forceinline__ void mhc_finish_block(
     int token, const uint16_t* __restrict__ streams,
     const float* __restrict__ logits_in, const float* __restrict__ base,
     const float* __restrict__ scale, uint16_t* __restrict__ collapsed,
     uint16_t* __restrict__ post_out, uint16_t* __restrict__ comb_out,
     const uint16_t* __restrict__ ln, uint16_t* __restrict__ normed,
-    int hidden, float hc_eps, int sinkhorn_iters, float ln_eps) {
+    int hidden, float hc_eps, int sinkhorn_iters, float ln_eps,
+    bool defer_comb = false, const uint4* xq = nullptr) {
   __shared__ float pre[kN];
   __shared__ float comb_seed[kN * kN];  // softmax rows + eps, row-major
   __shared__ float fscratch[kThreads / 32];
@@ -86,6 +183,20 @@ __device__ __forceinline__ void mhc_finish_block(
   const uint16_t* x = streams + static_cast<size_t>(token) * K;
   const size_t t = static_cast<size_t>(token);
   const float* lg = logits_in + t * kCoeffs;
+  constexpr int kRuns = kPerThread / 8;
+  static_assert(kPerThread % 8 == 0, "runs of 8");
+  static_assert(kRegVecs == 0 || kRegVecs == kN * kRuns,
+                "the dots' register vectors must be the collapse's runs");
+  const int vecs = hidden / 8;
+  const bool regs = kRegVecs > 0 && xq != nullptr && (vecs % kThreads) == 0;
+  uint4 lq[kRuns];
+  if (ln != nullptr) {
+#pragma unroll
+    for (int i = 0; i < kRuns; ++i) {
+      const int v = threadIdx.x + i * kThreads;
+      lq[i] = v < vecs ? reinterpret_cast<const uint4*>(ln)[v] : make_uint4(0u, 0u, 0u, 0u);
+    }
+  }
 
   if (threadIdx.x < kN) {
     // pre = sigmoid(pre_w * scale[0] + pre_b) + eps
@@ -97,66 +208,15 @@ __device__ __forceinline__ void mhc_finish_block(
     post_out[t * kN + i] = float_to_bf16_bits(
         2.f * sigmoidf_acc(lg[kN + i] * scale[1] + base[kN + i]));
   } else if (threadIdx.x < 3 * kN) {
-    // comb = softmax over each ROW of comb_logits * scale[2] + base, + eps.
-    // The softmax max is taken AFTER the affine transform: scale[2] may be
-    // negative, in which case it is not a plain shift and the raw-logit max
-    // would not stabilize the exponentials.
-    const int row = threadIdx.x - 2 * kN;
-    float m = -INFINITY;
-#pragma unroll
-    for (int col = 0; col < kN; ++col) {
-      const float v = lg[2 * kN + row * kN + col] * scale[2] +
-                      base[2 * kN + row * kN + col];
-      m = fmaxf(m, v);
-    }
-    float c[kN];
-    float denom = 0.f;
-#pragma unroll
-    for (int col = 0; col < kN; ++col) {
-      const float v = lg[2 * kN + row * kN + col] * scale[2] +
-                      base[2 * kN + row * kN + col];
-      c[col] = expf(v - m);
-      denom += c[col];
-    }
-    const float inv = 1.0f / denom;
-    // Two statements, as the serial version had them (a fused
-    // multiply-add here would move the bits).
-#pragma unroll
-    for (int col = 0; col < kN; ++col) c[col] = c[col] * inv;
-#pragma unroll
-    for (int col = 0; col < kN; ++col)
-      comb_seed[row * kN + col] = c[col] + hc_eps;
+    if (!defer_comb)
+      mhc_comb_seed_row(lg, base, scale, hc_eps, threadIdx.x - 2 * kN, comb_seed);
   }
   __syncthreads();  // pre[] and comb_seed[] published
 
-  // Sinkhorn on lanes 0..15 of warp 0: lane = row * kN + col. One column
-  // pass, then (iters-1) row+column passes. column sum = sum over the
-  // FIRST index (torch dim=-2). The 4-way sums are xor butterflies (two
-  // dependent shuffles instead of four; a row's lanes are contiguous,
-  // a column's are 4 apart) — the 39 dependent passes are this kernel's
-  // critical path, and the butterfly order is rounding-level.
-  if (threadIdx.x < 32) {
-    const int lane = threadIdx.x;
-    const bool live = lane < kN * kN;
-    static_assert(kN == 4, "the butterflies below are 4-wide");
-    float c = live ? comb_seed[lane] : 0.f;
-    const auto col_sum = [&](float v) {
-      v += __shfl_xor_sync(0xFFFFFFFFu, v, 4);
-      v += __shfl_xor_sync(0xFFFFFFFFu, v, 8);
-      return v;
-    };
-    const auto row_sum = [&](float v) {
-      v += __shfl_xor_sync(0xFFFFFFFFu, v, 1);
-      v += __shfl_xor_sync(0xFFFFFFFFu, v, 2);
-      return v;
-    };
-    c = c / (col_sum(c) + hc_eps);
-    for (int it = 1; it < sinkhorn_iters; ++it) {
-      c = c / (row_sum(c) + hc_eps);
-      c = c / (col_sum(c) + hc_eps);
-    }
-    if (live) comb_out[t * kN * kN + lane] = float_to_bf16_bits(c);
-  }
+  // The Sinkhorn on warp 0 runs beside the other warps' collapse below;
+  // the block_sum of the norm is where the rest waits for it.
+  if (!defer_comb && threadIdx.x < 32)
+    mhc_sinkhorn_warp(comb_seed, hc_eps, sinkhorn_iters, comb_out, t, threadIdx.x);
 
   // Phase C: collapsed[d] = bf16(sum_j pre[j] * streams[j][d]), fp32. Each
   // thread owns kPerThread/8 runs of 8 consecutive d (16-byte loads of
@@ -165,22 +225,28 @@ __device__ __forceinline__ void mhc_finish_block(
   // reduction (the double chain cost FP64 issue slots for nothing a bf16
   // output could see).
   const float p0 = pre[0], p1 = pre[1], p2 = pre[2], p3 = pre[3];
-  constexpr int kRuns = kPerThread / 8;
-  static_assert(kPerThread % 8 == 0, "runs of 8");
   float kept[kPerThread];
   float ssq = 0.f;
-  const int vecs = hidden / 8;
 #pragma unroll
   for (int i = 0; i < kRuns; ++i) {
     const int v = threadIdx.x + i * kThreads;  // vector index within a row
 #pragma unroll
     for (int j = 0; j < 8; ++j) kept[8 * i + j] = 0.f;
     if (v >= vecs) continue;
+    uint4 q[kN];
+    if (regs) {
+#pragma unroll
+      for (int j = 0; j < kN; ++j) q[j] = xq[(kRegVecs > 0 ? j * kRuns : 0) + i];
+    } else {
+#pragma unroll
+      for (int j = 0; j < kN; ++j)
+        q[j] = reinterpret_cast<const uint4*>(x + static_cast<size_t>(j) * hidden)[v];
+    }
     float s0[8], s1[8], s2[8], s3[8];
-    unpack8(reinterpret_cast<const uint4*>(x)[v], s0);
-    unpack8(reinterpret_cast<const uint4*>(x + hidden)[v], s1);
-    unpack8(reinterpret_cast<const uint4*>(x + 2 * hidden)[v], s2);
-    unpack8(reinterpret_cast<const uint4*>(x + 3 * hidden)[v], s3);
+    unpack8(q[0], s0);
+    unpack8(q[1], s1);
+    unpack8(q[2], s2);
+    unpack8(q[3], s3);
     uint32_t packed[4];
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -205,7 +271,7 @@ __device__ __forceinline__ void mhc_finish_block(
     const int v = threadIdx.x + i * kThreads;
     if (v >= vecs) continue;
     float lw[8];
-    unpack8(reinterpret_cast<const uint4*>(ln)[v], lw);
+    unpack8(lq[i], lw);
     uint32_t packed[4];
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -239,6 +305,7 @@ struct MhcFinishArgs {
   float hc_eps;
   int sinkhorn_iters;
   float ln_eps;
+  int defer_comb;  // 1: comb left to mhc_comb_kernel (decode's side stream)
 };
 
 // dots kernel: grid (kCoeffs, tokens). Phase A: sum of squares of the
@@ -263,40 +330,80 @@ __global__ void mhc_dots_kernel(const uint16_t* __restrict__ streams,
   const uint16_t* x = streams + static_cast<size_t>(token) * K;
   const uint16_t* fn_row = fn + static_cast<size_t>(coeff) * K;
 
+  // The vector path holds the thread's stream AND coefficient vectors in
+  // registers, all issued at the top (2026-09-08: counters had the site
+  // at 24 cycles per issue on long_scoreboard — ptxas had kept two to
+  // four loads in flight through the two unrolled loops, so a 32 KB row
+  // took several latency rounds; one round now, the coefficient loads
+  // riding under the sum of squares' barrier). The chains are unchanged:
+  // vector v = t, t + 256, ... in order, eight elements each in storage
+  // order, the same block_sum trees — bitwise the loop form, and the
+  // tiled prefill form stays pinned to it. kRegVecs covers K/8 <=
+  // kRegVecs x kThreads (the decode geometry; K = 4 x hidden); larger K
+  // takes the loop form.
+  constexpr int kRegVecs = kPerThread > 0 ? kPerThread / 2 : 8;
   float ssq = 0.f;
+  float dot = 0.f;
+  uint4 xq[kRegVecs];  // the register path's stream vectors (the finish reuses them)
+  bool regs = false;
   if constexpr (kVec) {
     const uint4* xv = reinterpret_cast<const uint4*>(x);
-    // Unrolled 8 (2026-09-06): the decode site's 16 K-vectors per thread
-    // are two latency rounds of eight loads instead of four of four.
-#pragma unroll 8
-    for (int v = threadIdx.x; v < K / 8; v += kThreads) {
-      float f[8];
-      unpack8(xv[v], f);
+    const uint4* wv = reinterpret_cast<const uint4*>(fn_row);
+    const int vecs = K / 8;
+    if (vecs <= kRegVecs * kThreads) {
+      regs = true;
+      uint4 wq[kRegVecs];
 #pragma unroll
-      for (int j = 0; j < 8; ++j) ssq = __fmaf_rn(f[j], f[j], ssq);
+      for (int i = 0; i < kRegVecs; ++i) {
+        const int v = threadIdx.x + i * kThreads;
+        xq[i] = v < vecs ? xv[v] : make_uint4(0u, 0u, 0u, 0u);
+        wq[i] = v < vecs ? wv[v] : make_uint4(0u, 0u, 0u, 0u);
+      }
+#pragma unroll
+      for (int i = 0; i < kRegVecs; ++i) {
+        if (threadIdx.x + i * kThreads >= vecs) break;
+        float f[8];
+        unpack8(xq[i], f);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) ssq = __fmaf_rn(f[j], f[j], ssq);
+      }
+      const float r =
+          rsqrtf(block_sum(ssq, scratch) / static_cast<float>(K) + norm_eps);
+#pragma unroll
+      for (int i = 0; i < kRegVecs; ++i) {
+        if (threadIdx.x + i * kThreads >= vecs) break;
+        float f[8], g[8];
+        unpack8(xq[i], f);
+        unpack8(wq[i], g);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) dot = __fmaf_rn(f[j] * r, g[j], dot);
+      }
+    } else {
+#pragma unroll 8
+      for (int v = threadIdx.x; v < vecs; v += kThreads) {
+        float f[8];
+        unpack8(xv[v], f);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) ssq = __fmaf_rn(f[j], f[j], ssq);
+      }
+      const float r =
+          rsqrtf(block_sum(ssq, scratch) / static_cast<float>(K) + norm_eps);
+#pragma unroll 8
+      for (int v = threadIdx.x; v < vecs; v += kThreads) {
+        float f[8], g[8];
+        unpack8(xv[v], f);
+        unpack8(wv[v], g);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) dot = __fmaf_rn(f[j] * r, g[j], dot);
+      }
     }
   } else {
     for (int d = threadIdx.x; d < K; d += kThreads) {
       const float v = bf16_bits_to_float(x[d]);
       ssq = __fmaf_rn(v, v, ssq);
     }
-  }
-  const float r =
-      rsqrtf(block_sum(ssq, scratch) / static_cast<float>(K) + norm_eps);
-
-  float dot = 0.f;
-  if constexpr (kVec) {
-    const uint4* xv = reinterpret_cast<const uint4*>(x);
-    const uint4* wv = reinterpret_cast<const uint4*>(fn_row);
-#pragma unroll 8
-    for (int v = threadIdx.x; v < K / 8; v += kThreads) {
-      float f[8], g[8];
-      unpack8(xv[v], f);
-      unpack8(wv[v], g);
-#pragma unroll
-      for (int j = 0; j < 8; ++j) dot = __fmaf_rn(f[j] * r, g[j], dot);
-    }
-  } else {
+    const float r =
+        rsqrtf(block_sum(ssq, scratch) / static_cast<float>(K) + norm_eps);
     for (int d = threadIdx.x; d < K; d += kThreads) {
       const float v = bf16_bits_to_float(x[d]) * r;
       dot = __fmaf_rn(v, bf16_bits_to_float(fn_row[d]), dot);
@@ -315,10 +422,11 @@ __global__ void mhc_dots_kernel(const uint16_t* __restrict__ streams,
     __syncthreads();
     if (!s_last) return;
     __threadfence();
-    mhc_finish_block<kPerThread>(token, streams, logits, fin.base, fin.scale,
-                                 fin.collapsed, fin.post_out, fin.comb_out,
-                                 fin.ln, fin.normed, hidden, fin.hc_eps,
-                                 fin.sinkhorn_iters, fin.ln_eps);
+    mhc_finish_block<kPerThread, kVec ? kRegVecs : 0>(
+        token, streams, logits, fin.base, fin.scale, fin.collapsed,
+        fin.post_out, fin.comb_out, fin.ln, fin.normed, hidden, fin.hc_eps,
+        fin.sinkhorn_iters, fin.ln_eps, fin.defer_comb != 0,
+        regs ? xq : nullptr);
   }
 }
 
@@ -606,14 +714,15 @@ void launch_dots_by_width(const uint16_t* streams, const GlmMhcWeights& w,
 
 }  // namespace
 
-void launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
+bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
                                const GlmMhcConfig& cfg, uint16_t* collapsed,
                                uint16_t* post, uint16_t* comb,
                                float* logits_scratch, const uint16_t* ln,
                                uint16_t* normed, float ln_eps, int tokens,
-                               cudaStream_t stream, int* finish_counters) {
+                               cudaStream_t stream, int* finish_counters,
+                               bool defer_comb) {
   GlmMhcConfig::validate_config(cfg);
-  if (tokens <= 0) return;
+  if (tokens <= 0) return false;
   if (!streams || !w.fn || !w.base || !w.scale || !collapsed || !post ||
       !comb || !logits_scratch)
     throw std::invalid_argument("mhc_compute: null pointer");
@@ -633,17 +742,24 @@ void launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
     throw std::invalid_argument(
         "mhc_compute: hidden must be a multiple of 8 with 16-byte-aligned "
         "streams/collapsed/ln/normed");
-  MhcFinishArgs fin{w.base, w.scale, collapsed, post, comb, ln, normed,
-                    finish_counters, cfg.hc_eps, cfg.sinkhorn_iters, ln_eps};
   const bool fused = finish_counters != nullptr;
+  if (defer_comb && !fused)
+    throw std::invalid_argument("mhc_compute: defer_comb needs the fused finish");
+  MhcFinishArgs fin{w.base, w.scale, collapsed, post, comb, ln, normed,
+                    finish_counters, cfg.hc_eps, cfg.sinkhorn_iters, ln_eps,
+                    defer_comb ? 1 : 0};
+  // The tiled prefill form runs the finish in-block with comb included,
+  // whatever defer_comb says: only the fused per-coefficient form defers.
+  const bool tiled = vec && tokens >= kTileMinTokens && g_mhc_tiled_enabled;
+  if (tiled) fin.defer_comb = 0;
   if (vec)
     launch_dots_by_width<true>(streams, w, cfg, logits_scratch, fin, fused,
                                tokens, stream);
   else
     launch_dots_by_width<false>(streams, w, cfg, logits_scratch, fin, fused,
                                 tokens, stream);
-  if (fused) return;
-  if (vec && tokens >= kTileMinTokens && g_mhc_tiled_enabled) return;  // finished in-block
+  if (fused) return fin.defer_comb != 0;
+  if (tiled) return false;  // finished in-block
   // The per-thread register slice must cover hidden / kThreads elements.
   const int per_thread = (cfg.hidden + kThreads - 1) / kThreads;
   if (per_thread <= 8)
@@ -657,9 +773,22 @@ void launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
                       ln, normed, ln_eps, tokens, stream);
   else
     throw std::invalid_argument("mhc_compute: hidden too large (> 8192)");
+  return false;
 }
 
 void mhc_set_tiled_form(bool on) { g_mhc_tiled_enabled = on; }
+
+void launch_mhc_comb(const float* logits_scratch, const GlmMhcWeights& w,
+                     const GlmMhcConfig& cfg, uint16_t* comb, int tokens,
+                     cudaStream_t stream) {
+  GlmMhcConfig::validate_config(cfg);
+  if (tokens <= 0) return;
+  if (!logits_scratch || !w.base || !w.scale || !comb)
+    throw std::invalid_argument("mhc_comb: null pointer");
+  mhc_comb_kernel<<<tokens, 32, 0, stream>>>(logits_scratch, w.base, w.scale, comb,
+                                             tokens, cfg.hc_eps, cfg.sinkhorn_iters);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
 
 void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
                         const GlmMhcConfig& cfg, uint16_t* collapsed,

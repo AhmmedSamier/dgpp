@@ -38,6 +38,17 @@ void prefetch_quant(WeightPrefetcher& pf, const GlmQuantMatrix& m) {
 // in L2 when their kernels arrive. Only the weights that exist regardless
 // of routing are prefetchable — the routed experts wait for the router.
 // ---------------------------------------------------------------------------
+// The comb fork (see forward.hpp): the side stream waits for the finish
+// (its logits), runs launch_mhc_comb, and records the join the stream
+// update waits on. Under capture the record/wait pairs become the graph's
+// fork and join edges, as the prefetcher's do.
+void GlmDiagnosticModel::mhc_comb_fork(const GlmMhcWeights& w, int tokens) {
+  DGPP_CUDA_OK(cudaEventRecord(mhc_fork_, stream_));
+  DGPP_CUDA_OK(cudaStreamWaitEvent(mhc_side_, mhc_fork_, 0));
+  launch_mhc_comb(mhc_logits_, w, mhc_cfg_, comb_, tokens, mhc_side_);
+  DGPP_CUDA_OK(cudaEventRecord(mhc_join_, mhc_side_));
+}
+
 void GlmDiagnosticModel::prefetch_ffn_side(const GlmLayerBound& b,
                                            bool dense_mlp) {
   if (!prefetch_.enabled()) return;
@@ -1082,9 +1093,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     hw.fn = b.mhc->attn_fn;
     hw.base = b.mhc->attn_base;
     hw.scale = b.mhc->attn_scale;
-    launch_mhc_compute_normed(cur, hw, mhc_cfg_, collapsed_, post_, comb_,
-                              mhc_logits_, b.ln1, normed_, eps, T, stream_,
-                              mhc_counters_);
+    const bool attn_comb_deferred = launch_mhc_compute_normed(
+        cur, hw, mhc_cfg_, collapsed_, post_, comb_, mhc_logits_, b.ln1,
+        normed_, eps, T, stream_, mhc_counters_, mhc_comb_side_);
+    if (attn_comb_deferred) mhc_comb_fork(hw, T);
     uint16_t* attn_out = sub_out_;
     if (boundary_) {
       if (uint16_t* staged = boundary_->stage(T, H)) attn_out = staged;
@@ -1188,6 +1200,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       }
       boundary_->reduce(attn_out, T, H);
     }
+    if (attn_comb_deferred) DGPP_CUDA_OK(cudaStreamWaitEvent(stream_, mhc_join_, 0));
     launch_mhc_stream_update(post_, comb_, attn_out, cur, nxt, mhc_cfg_, T,
                              stream_);
     std::swap(cur, nxt);
@@ -1197,9 +1210,10 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     fw.fn = b.mhc->ffn_fn;
     fw.base = b.mhc->ffn_base;
     fw.scale = b.mhc->ffn_scale;
-    launch_mhc_compute_normed(cur, fw, mhc_cfg_, collapsed_, post_, comb_,
-                              mhc_logits_, b.ln2, normed_, eps, T, stream_,
-                              mhc_counters_);
+    const bool ffn_comb_deferred = launch_mhc_compute_normed(
+        cur, fw, mhc_cfg_, collapsed_, post_, comb_, mhc_logits_, b.ln2,
+        normed_, eps, T, stream_, mhc_counters_, mhc_comb_side_);
+    if (ffn_comb_deferred) mhc_comb_fork(fw, T);
     uint16_t* ffn_out = sub_out_;
     if (boundary_) {
       if (uint16_t* staged = boundary_->stage(T, H)) ffn_out = staged;
@@ -1270,6 +1284,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
       }
       boundary_->reduce(ffn_out, T, H);
     }
+    if (ffn_comb_deferred) DGPP_CUDA_OK(cudaStreamWaitEvent(stream_, mhc_join_, 0));
     launch_mhc_stream_update(post_, comb_, ffn_out, cur, nxt, mhc_cfg_, T,
                              stream_);
     std::swap(cur, nxt);

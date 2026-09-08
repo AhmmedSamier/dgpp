@@ -356,6 +356,68 @@ DGPP_TEST(mhc_tiled_prefill_form_is_bitwise_the_per_coefficient_form) {
   c.free_all();
 }
 
+// The deferred comb (decode's side-stream form) against the in-block fused
+// finish on the same inputs at decode row counts: collapsed, post, normed
+// and comb bitwise — the same arithmetic on the same lanes, so an
+// equality, not a budget.
+DGPP_TEST(mhc_deferred_comb_is_bitwise_the_fused_finish) {
+  for (int T : {1, 2, 8}) {
+    Case c = make_case(real_config(), T, 0x5EED + T);
+    c.alloc();
+    const int n = c.cfg.hc_mult, D = c.cfg.hidden;
+    std::vector<uint16_t> ln(D);
+    for (int i = 0; i < D; ++i) ln[i] = float_to_bf16_bits(0.5f + 0.001f * float(i % 97));
+    uint16_t* d_ln = nullptr;
+    uint16_t* d_normed = nullptr;
+    int* d_counters = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_ln, D * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_normed, size_t(T) * D * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_counters, size_t(T) * sizeof(int)));
+    std::memcpy(d_ln, ln.data(), D * 2);
+    std::memset(d_counters, 0, size_t(T) * sizeof(int));
+    std::vector<uint16_t> col_a(size_t(T) * D), post_a(size_t(T) * n), comb_a(size_t(T) * n * n),
+        normed_a(size_t(T) * D);
+    const auto require = [](bool ok, const char* what) {
+      if (!ok) throw std::runtime_error(what);
+    };
+    for (int deferred = 0; deferred < 2; ++deferred) {
+      DGPP_CUDA_OK(cudaMemset(c.d_collapsed, 0xA5, size_t(T) * D * 2));
+      DGPP_CUDA_OK(cudaMemset(c.d_post, 0xA5, size_t(T) * n * 2));
+      DGPP_CUDA_OK(cudaMemset(c.d_comb, 0xA5, size_t(T) * n * n * 2));
+      DGPP_CUDA_OK(cudaMemset(d_normed, 0xA5, size_t(T) * D * 2));
+      dgpp::launch_mhc_compute_normed(c.d_streams, c.dev_w, c.cfg, c.d_collapsed, c.d_post,
+                                      c.d_comb, c.d_logits, d_ln, d_normed, 1e-5f, T, nullptr,
+                                      d_counters, deferred == 1);
+      if (deferred) {
+        // comb untouched by the finish; the standalone launch writes it.
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        for (size_t i = 0; i < size_t(T) * n * n; ++i)
+          require(c.d_comb[i] == 0xA5A5, "deferred finish must not write comb");
+        dgpp::launch_mhc_comb(c.d_logits, c.dev_w, c.cfg, c.d_comb, T, nullptr);
+      }
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      if (!deferred) {
+        std::memcpy(col_a.data(), c.d_collapsed, col_a.size() * 2);
+        std::memcpy(post_a.data(), c.d_post, post_a.size() * 2);
+        std::memcpy(comb_a.data(), c.d_comb, comb_a.size() * 2);
+        std::memcpy(normed_a.data(), d_normed, normed_a.size() * 2);
+      } else {
+        require(std::memcmp(col_a.data(), c.d_collapsed, col_a.size() * 2) == 0,
+                "deferred-comb collapsed bitwise the fused finish");
+        require(std::memcmp(post_a.data(), c.d_post, post_a.size() * 2) == 0,
+                "deferred-comb post bitwise the fused finish");
+        require(std::memcmp(comb_a.data(), c.d_comb, comb_a.size() * 2) == 0,
+                "deferred comb bitwise the in-block Sinkhorn");
+        require(std::memcmp(normed_a.data(), d_normed, normed_a.size() * 2) == 0,
+                "deferred-comb normed bitwise the fused finish");
+      }
+    }
+    std::printf("[ OK ] mhc deferred comb: %d tokens bitwise the fused finish\n", T);
+    cudaFree(d_ln); cudaFree(d_normed); cudaFree(d_counters);
+    c.free_all();
+  }
+}
+
 DGPP_TEST(mhc_end_to_end_pipeline_is_deterministic) {
   // Real pipeline wiring: kernel's own post/comb feed its own update; two
   // full invocations must be bitwise identical (graph-capture premise).

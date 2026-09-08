@@ -844,6 +844,16 @@ class GlmDiagnosticModel {
   // the block boundaries and by the attention layers; joined before the
   // step's tail so a capture closes cleanly.
   WeightPrefetcher prefetch_;
+  // The mHC comb's side stream (2026-09-08): each decode site's fused
+  // finish leaves comb (the 20-iteration Sinkhorn, ~6 us on one warp) to
+  // launch_mhc_comb here, forked after the finish and joined before the
+  // stream update — the only reader — so it runs under the sublayer
+  // instead of ahead of it. DGPP_MHC_COMB_SIDE=0 keeps comb in the finish.
+  cudaStream_t mhc_side_ = nullptr;
+  cudaEvent_t mhc_fork_ = nullptr;
+  cudaEvent_t mhc_join_ = nullptr;
+  bool mhc_comb_side_ = true;
+  void mhc_comb_fork(const GlmMhcWeights& w, int tokens);
 
   // TP state: null at world=1 (the M4 path).
   GlmBoundaryReducer* boundary_ = nullptr;

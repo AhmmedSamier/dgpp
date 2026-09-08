@@ -6,6 +6,19 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- The mHC site off the critical path: the fused finish leaves comb (the
+  20-iteration Sinkhorn, 4.6 of its 8.6 us) to `launch_mhc_comb` on a
+  low-priority side stream forked after the finish and joined before the
+  stream update — the only reader — and reuses the dots block's register
+  copy of the streams for the collapse; bitwise (glm_mhc_test pins the
+  deferred form at 1/2/8 rows). The fused kernel 13.0 -> 6.5 us per site
+  in the MTP graph; the hybrid's decode MTP 34.21 -> 33.89 ms/step (19.96
+  -> 19.77 ms/token), T=1 26.46 -> 26.22. `mhc_site_bench` (new) times a
+  site with the finish, Sinkhorn and norm separable. The router's register
+  select and the collective's local phases were measured and parked
+  (`docs/nvfp4_plan.md` §6a). DGPP_MHC_COMB_SIDE=0 keeps comb in the
+  finish.
+
 - The fp4 GEMV core decodes with GB10's own e2m1x2 -> f16x2 conversion and
   one exact f16 multiply by the group scale (bitwise the register decode;
   the build moves to the architecture-specific target `121a`), the

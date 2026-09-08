@@ -597,6 +597,51 @@ floor only fewer bytes or more tokens per step move the number.
   in the graph, untested), ~0.3 ms of local copy+fold in the collectives;
   the KDA bf16 GEMVs (10.4 ms at the DRAM ceiling) remain the one large
   lever and it is a quantization decision.
+- The crumbs, pursued (2026-09-08 evening, "shaving another ~1 ms seems
+  meaningful"): the mHC site, the router select, the collective's local
+  phases.
+  mHC: `mhc_site_bench` (new) split the site — at one row the dots alone
+  are 2.7 us, the fused finish tail 8.6, of which the 20-iteration
+  Sinkhorn is 4.6 (39 dependent butterfly passes on one warp) and the
+  collapse/norm loads the rest; the finish sat on the critical path to the
+  sublayer though only the stream UPDATE at the site's end reads comb.
+  Landed, bitwise (glm_mhc_test pins the deferred form against the
+  in-block one at 1/2/8 rows, the tiled prefill form still pinned): the
+  finish leaves comb to `launch_mhc_comb` (one warp per token, the same
+  lanes and arithmetic) on a low-priority side stream forked after the
+  finish and joined before the update — under the sublayer, as the
+  prefetcher's windows are; and the fused finish reuses the dots block's
+  register copy of the streams for the collapse (the flattened vectors are
+  exactly the collapse's runs at hidden % 2048 == 0) and issues the norm
+  weights at its top. The fused kernel 10.7 -> 4.7 us in the bench, 13.0
+  -> 6.5 us in the MTP graph (nsys node trace), the comb 7.5 us on the
+  side and never waited on (update start - comb end: median 317 us, min
+  185). Per-step main-chain mHC kernel time 1.48 -> 0.89 ms; graph replay
+  period under nsys 34.71 -> 34.31 ms; the app's own readings
+  (`mhc_final_2041` vs `fp4core_1853`): MTP 34.21 -> 33.89 ms/step
+  (19.96 -> 19.77 ms/token), T=1 26.46 -> 26.22 by the 300-step totals
+  (the per-step log is integer-ms); transcripts identical.
+  Router select in registers (each lane's nine biased scores, the winner
+  lane retiring its entry, no smem and no __syncwarp in the loop; bitwise
+  by the argmax's exactness, the oracle/tie tests green): stream-launched
+  bench -1.4 us at one row and -1.1 at two, but in the MTP graph the
+  launch read 10.7 vs 9.8 us (0.46 vs 0.42 ms/step) — a first form with
+  the activation loads outside the batch had read +3.6 us at two rows.
+  Reverted: no gain in the production configuration. The dot loop's
+  batching (2/4/8/16 vectors in flight) and 2 vs 8 warps per block made
+  no difference either way; the router is its serial fused select (~5 us)
+  on top of an 11.9 us dot at 200 GB/s.
+  The collective's local phases (copy 3.2 + fold 3.5 us of the 33): the
+  snapshot copy, the claim's hash+stage pass and the fold are already
+  16-byte vectors on one block; the remaining time is host-memory store
+  latency, system fences and the last peer's staging pass — nothing
+  cheap; the handshake is host-posted RDMA, a transport redesign. Parked.
+  Programmatic dependent launch across the graph's seams: measured above
+  (nothing). The decode budget's remaining shape at MTP (nsys, per step):
+  GEMVs 14.6 ms (KDA bf16 at the ceiling + the FP8 projections), MoE slot
+  kernels 10.9, collectives 4.6, mHC 0.9 (+0.7 on the side), small kernels
+  ~2.3, in a 34.3 ms period — ~1 ms of gaps and host. What is left
+  without quantization is inside the noise of a fabric reading.
 
 ## 7. Order of work and estimates
 

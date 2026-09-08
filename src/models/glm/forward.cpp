@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -150,6 +151,17 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
     DGPP_CUDA_OK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
     DGPP_CUDA_OK(cudaStreamCreateWithPriority(&stream_, cudaStreamDefault,
                                               greatest));
+    // The comb side stream at the LOWEST priority: its one-warp kernel
+    // takes a block slot only where the sublayer's kernels leave one (at
+    // the highest it stole a slot from the KDA GEMV it ran beside: +0.2 ms
+    // of GEMV time per step in the 2026-09-08 trace), and the update that
+    // joins it is hundreds of microseconds away.
+    DGPP_CUDA_OK(cudaStreamCreateWithPriority(&mhc_side_, cudaStreamNonBlocking,
+                                              least));
+    DGPP_CUDA_OK(cudaEventCreateWithFlags(&mhc_fork_, cudaEventDisableTiming));
+    DGPP_CUDA_OK(cudaEventCreateWithFlags(&mhc_join_, cudaEventDisableTiming));
+    if (const char* e = std::getenv("DGPP_MHC_COMB_SIDE"))
+      mhc_comb_side_ = !(e[0] == '0');
   }
   // The model's kernels are the resident layers' readers: load boundaries
   // synchronize exactly this stream (+ the loader's dequant stream), not
@@ -549,6 +561,9 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   if (moe_prefill_trace_ids_) cudaFreeHost(moe_prefill_trace_ids_);
   if (moe_prefill_trace_weights_) cudaFreeHost(moe_prefill_trace_weights_);
   if (moe_prefill_trace_biased_) cudaFreeHost(moe_prefill_trace_biased_);
+  if (mhc_join_) cudaEventDestroy(mhc_join_);
+  if (mhc_fork_) cudaEventDestroy(mhc_fork_);
+  if (mhc_side_) cudaStreamDestroy(mhc_side_);
   if (stream_) cudaStreamDestroy(stream_);
 }
 
