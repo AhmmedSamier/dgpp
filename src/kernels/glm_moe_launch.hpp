@@ -101,10 +101,12 @@ void launch_moe_grouped_mma_f32(const uint16_t* act, size_t act_stride,
 // scale GEMM's tile kernel; the scale GEMM routes m > 128 here.
 void launch_dense_mma_bf16(const uint16_t* act, size_t act_stride,
                            const uint8_t* payload, const float* scales,
-                           uint16_t* out, int m, int n, int k, cudaStream_t stream);
+                           uint16_t* out, int m, int n, int k, cudaStream_t stream,
+                           size_t out_stride = 0);
 void launch_dense_mma_f32(const uint16_t* act, size_t act_stride,
                           const uint8_t* payload, const float* scales, float* out,
-                          int m, int n, int k, cudaStream_t stream);
+                          int m, int n, int k, cudaStream_t stream,
+                          size_t out_stride = 0);
 // Device-side segmentation (2026-09-04, the prefill's last host sync): from
 // the router's ids [tokens * top_k] — the same segmentation the host path
 // computes, on the device: rows[] = every routed (token, slot) in

@@ -47,6 +47,7 @@
 #include "kernels/gemm.hpp"
 #include "kernels/l2_prefetch.hpp"
 #include "models/dsa_geometry.hpp"
+#include "models/quant_matrix.hpp"
 
 namespace dgpp {
 
@@ -62,13 +63,24 @@ struct DsaLayerWeights {
   const void* k_norm_b = nullptr;  // bf16 [index_head_dim]
   const float* ape = nullptr;      // fp32 [kpool, index_head_dim]
 
-  // MLA core (local TP views).
+  // MLA core (local TP views). The four quantized projections come EITHER
+  // as the bf16 bridge pointers (qkv_a fused, q_b, o_proj — the M3 seam:
+  // dequantized at load) OR as the checkpoint's FP8 pairs consumed by the
+  // scale-aware GEMM directly (2026-09-08: q_a_q/kv_a_q/q_b_q/o_proj_q set,
+  // the bf16 pointers null — half the bytes per token; the loader takes
+  // this form whenever this rank's q_b row slice and o_proj column slice
+  // start 128-aligned, the bridge otherwise).
   const void* qkv_a = nullptr;   // bf16 [q_lora+kv_lora, hidden] fused
   const void* q_aln = nullptr;   // bf16 [q_lora_rank]
   const void* kv_aln = nullptr;  // bf16 [kv_lora_rank]
   const void* q_b = nullptr;     // bf16 [local_heads*nope, q_lora_rank]
   const void* kv_b = nullptr;    // bf16 [local_heads*(nope+v), kv_lora_rank]
   const void* o_proj = nullptr;  // bf16 [hidden, local_heads*v]
+  GlmQuantMatrix q_a_q{};     // fp8 [q_lora_rank, hidden]
+  GlmQuantMatrix kv_a_q{};    // fp8 [kv_lora_rank, hidden]
+  GlmQuantMatrix q_b_q{};     // fp8 [local_heads*nope, q_lora_rank]
+  GlmQuantMatrix o_proj_q{};  // fp8 [hidden, local_heads*v] (packed columns)
+  bool quantized() const { return q_a_q.payload != nullptr; }
 };
 
 class DsaLayer {
@@ -142,8 +154,12 @@ class DsaLayer {
                       WeightPrefetcher* prefetch = nullptr,
                       void* tail_snapshots = nullptr);
 
-  // Bytes of the bf16 output projection [hidden, local_v_rows].
+  // Bytes of the output projection [hidden, local_v_rows] as resident:
+  // bf16, or the fp8 payload plus its scale grid.
   size_t o_proj_bytes() const {
+    if (w_.quantized())
+      return static_cast<size_t>(w_.o_proj_q.rows) * w_.o_proj_q.cols +
+             w_.o_proj_q.scale_bytes();
     return static_cast<size_t>(cfg_.hidden) * geo_.local_v_rows * 2;
   }
   // Bytes of the bf16 kv_b [local_heads * (nope + v), kv_lora] (W_uk | W_uv).
@@ -151,8 +167,14 @@ class DsaLayer {
     return static_cast<size_t>(geo_.local_heads) *
            (cfg_.qk_nope_head_dim + cfg_.v_head_dim) * cfg_.kv_lora_rank * 2;
   }
-  // Bytes of the fused bf16 [q_a | kv_a] projection, the layer's first read.
+  // Bytes of the [q_a | kv_a] projection, the layer's first read: the fused
+  // bf16 buffer, or the two fp8 pairs.
   size_t qkv_a_bytes() const {
+    if (w_.quantized())
+      return static_cast<size_t>(w_.q_a_q.rows) * w_.q_a_q.cols +
+             w_.q_a_q.scale_bytes() +
+             static_cast<size_t>(w_.kv_a_q.rows) * w_.kv_a_q.cols +
+             w_.kv_a_q.scale_bytes();
     return static_cast<size_t>(cfg_.q_lora_rank + cfg_.kv_lora_rank) *
            cfg_.hidden * 2;
   }
@@ -213,6 +235,7 @@ class DsaLayer {
   // weights, Hadamard quant, weight fold. Fills q_, q_fp8_, w_folded_,
   // kv_c_, k_rows_, gate_. Latent append and cache writes are path-specific.
   void project_common(const void* hidden_in, int tokens, cudaStream_t stream);
+  void project_out(void* out, int tokens, cudaStream_t stream);
 
   // absorb + split-KV attention + v-absorb for `rows` query rows starting
   // at chunk-relative row `row0`, in attention tiles of attn_rows_ rows;

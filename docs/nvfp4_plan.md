@@ -465,6 +465,34 @@ floor only fewer bytes or more tokens per step move the number.
   at long context. Depth 1 stays the default in `cluster.nvfp4.json`;
   the lever remains per-request adaptive depth (both scalar variants
   captured per slot, switched on the observed p2), not a global setting.
+- Item 2 of 2026-09-08's decision list, the DSA projections consumed as
+  FP8 directly (commit follows): the loader keeps q_a / kv_a / q_b /
+  o_proj as the checkpoint's pairs at aligned worlds, the layer runs them
+  through the scale-aware GEMM (with an output row stride for the fused
+  [q_a | kv_a]), the views slice the pairs or dequantize them for the
+  bridge form at misaligned worlds; gates: the DSA layer in both forms
+  against the reference, the loader's pairs byte-exact, shard parity at
+  worlds 2 and 4, the full TP suite, ctest 35/35. Fabric
+  (`dsa_direct_1658`): FP8 31.0 -> 30.0 ms/step at T=1 and 41.4 -> 40.6
+  under MTP; the hybrid 27.0 -> 26.0 and 35.4 -> 34.4 ms/step (20.5 ->
+  20.0 ms/token). FP8's transcript parts from the morning's on a near-tie
+  flip (<= 1 ulp) and its quick-text perplexity is unchanged within the
+  kernel floor (mean -0.004 +- 0.005 nat, mean |delta| 0.053 vs the 0.044
+  floor, 0 big moves); the hybrid's transcript is identical. The first
+  boot after the image format bump rebuilds every rank's image; a serve
+  boot then can fail on the collective deadline (docs/operations.md).
+- Item 1, the prefill pipeline, measured and parked: a three-stage
+  cp.async ring (the reference's tile, the activation tile and the raw fp4
+  codes two stages ahead, decoded off the ring into a double-buffered bf16
+  tile) is bitwise the reference and, on a quiet GPU, 3.69 vs 3.73 ms on
+  the gate shape at 2,048 tokens, 9.04 vs 9.97 at 8,192 (9 %), and slower
+  on the down shape (4.65 vs 4.12; the 64 x 128 x 32 kernel's 3.81 stays).
+  Its 73 KB of shared memory allows one block per SM, and one block's own
+  decode -> barrier -> multiply -> wait sequence idles the tensor pipe
+  where the reference's three resident blocks interleave. Kept as the
+  bench's variant 12, not dispatched. The next attempt is a 32-deep
+  three-stage ring at two blocks per SM, or decoding the weights at
+  fragment-load time (each warp decodes only its n-slice).
 
 ## 7. Order of work and estimates
 

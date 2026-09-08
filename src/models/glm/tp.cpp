@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "common/cuda_check.hpp"
+#include "kernels/fp8_dequant.hpp"
 
 namespace dgpp {
 
@@ -52,6 +53,7 @@ GlmTpViews::GlmTpViews(const GlmTextConfig& cfg, int rank, int world,
 GlmTpViews::~GlmTpViews() {
   if (slab_) cudaFree(slab_);
   if (expert_pack_) cudaFree(expert_pack_);
+  if (dsa_bridge_) cudaFree(dsa_bridge_);
 }
 
 GlmTpViews::SlabLayout GlmTpViews::layout(const GlmTextConfig& cfg,
@@ -234,21 +236,78 @@ GlmLayerBound GlmTpViews::bind(const GlmLayerResident& r, bool dense_mlp) {
     // full views; q_b/kv_b are contiguous head blocks; o_proj packs.
     dsa_ = r.dsa;  // replicated defaults, overwritten below
     const int lh = dsa_geo_.local_heads;
-    dsa_.q_b = static_cast<const uint16_t*>(r.dsa.q_b) +
-               size_t(rank_ * dsa_geo_.local_q_rows) * cfg_.q_lora_rank;
     const int kv_rows =
         dsa_cfg_.qk_nope_head_dim + dsa_cfg_.v_head_dim;  // per-head rows
     dsa_.kv_b = static_cast<const uint16_t*>(r.dsa.kv_b) +
                 size_t(rank_ * lh) * kv_rows * dsa_cfg_.kv_lora_rank;
-    uint16_t* op_s =
-        reinterpret_cast<uint16_t*>(slab + lay.off_dsa_o_proj);
-    // Full o_proj columns at world=1 = local_v_rows * world_.
-    pack2d_bf16(static_cast<const uint16_t*>(r.dsa.o_proj) +
-                    rank_ * dsa_geo_.local_v_rows,
-                size_t(dsa_geo_.local_v_rows) * world_ * 2, op_s,
-                size_t(dsa_geo_.local_v_rows) * 2,
-                size_t(dsa_geo_.local_v_rows) * 2, H);
-    dsa_.o_proj = op_s;
+    // The same rule the loader applies at this world (is_dsa_bridge): the
+    // FP8 pairs directly when the slices start on the 128-wide scale grid.
+    const bool aligned = (dsa_geo_.local_q_rows % 128) == 0 &&
+                         (dsa_geo_.local_v_rows % 128) == 0;
+    if (r.dsa.quantized() && aligned) {
+      // The FP8 form (2026-09-08): q_b this rank's 128-aligned row range of
+      // the full pair, o_proj its packed column slice — payload then scale
+      // grid in the slab region the bf16 pack used (the fp8 pack is
+      // smaller than the bf16 one).
+      dsa_.q_b_q = quant_rows_view(r.dsa.q_b_q,
+                                   int64_t(rank_) * dsa_geo_.local_q_rows,
+                                   dsa_geo_.local_q_rows);
+      uint8_t* op_payload = slab + lay.off_dsa_o_proj;
+      float* op_scales = reinterpret_cast<float*>(
+          op_payload + size_t(H) * dsa_geo_.local_v_rows);
+      dsa_.o_proj_q = pack_quant_cols(r.dsa.o_proj_q,
+                                      int64_t(rank_) * dsa_geo_.local_v_rows,
+                                      dsa_geo_.local_v_rows, op_payload, op_scales);
+    } else {
+      const uint16_t* q_b_full = static_cast<const uint16_t*>(r.dsa.q_b);
+      const uint16_t* o_full = static_cast<const uint16_t*>(r.dsa.o_proj);
+      if (r.dsa.quantized()) {
+        // The resident holds the pairs but this world's slices are
+        // misaligned: dequantize the full pairs (the bridge's kernel and
+        // rounding) and slice the bf16 exactly as the sharded loader's
+        // bridge does at this world.
+        const size_t ql = static_cast<size_t>(cfg_.q_lora_rank);
+        const size_t kvl = static_cast<size_t>(cfg_.kv_lora_rank);
+        const size_t qkv_bytes = (ql + kvl) * H * 2;
+        const size_t qb_bytes = static_cast<size_t>(r.dsa.q_b_q.rows) * ql * 2;
+        const size_t o_bytes = static_cast<size_t>(H) * r.dsa.o_proj_q.cols * 2;
+        const size_t want = qkv_bytes + qb_bytes + o_bytes;
+        if (dsa_bridge_bytes_ < want) {
+          if (dsa_bridge_) cudaFree(dsa_bridge_);
+          DGPP_CUDA_OK(cudaMalloc(&dsa_bridge_, want));
+          dsa_bridge_bytes_ = want;
+        }
+        uint16_t* qkv = reinterpret_cast<uint16_t*>(dsa_bridge_);
+        uint16_t* qb = reinterpret_cast<uint16_t*>(dsa_bridge_ + qkv_bytes);
+        uint16_t* ob = reinterpret_cast<uint16_t*>(dsa_bridge_ + qkv_bytes + qb_bytes);
+        launch_fp8_dequant_blocks(r.dsa.q_a_q.payload, r.dsa.q_a_q.scales, qkv,
+                                  r.dsa.q_a_q.rows, r.dsa.q_a_q.cols, nullptr);
+        launch_fp8_dequant_blocks(r.dsa.kv_a_q.payload, r.dsa.kv_a_q.scales,
+                                  qkv + ql * H, r.dsa.kv_a_q.rows, r.dsa.kv_a_q.cols,
+                                  nullptr);
+        launch_fp8_dequant_blocks(r.dsa.q_b_q.payload, r.dsa.q_b_q.scales, qb,
+                                  r.dsa.q_b_q.rows, r.dsa.q_b_q.cols, nullptr);
+        launch_fp8_dequant_blocks(r.dsa.o_proj_q.payload, r.dsa.o_proj_q.scales, ob,
+                                  r.dsa.o_proj_q.rows, r.dsa.o_proj_q.cols, nullptr);
+        DGPP_CUDA_OK(cudaStreamSynchronize(nullptr));
+        dsa_.qkv_a = qkv;
+        dsa_.q_a_q = GlmQuantMatrix{};
+        dsa_.kv_a_q = GlmQuantMatrix{};
+        dsa_.q_b_q = GlmQuantMatrix{};
+        dsa_.o_proj_q = GlmQuantMatrix{};
+        q_b_full = qb;
+        o_full = ob;
+      }
+      dsa_.q_b = q_b_full + size_t(rank_ * dsa_geo_.local_q_rows) * cfg_.q_lora_rank;
+      uint16_t* op_s =
+          reinterpret_cast<uint16_t*>(slab + lay.off_dsa_o_proj);
+      // Full o_proj columns at world=1 = local_v_rows * world_.
+      pack2d_bf16(o_full + rank_ * dsa_geo_.local_v_rows,
+                  size_t(dsa_geo_.local_v_rows) * world_ * 2, op_s,
+                  size_t(dsa_geo_.local_v_rows) * 2,
+                  size_t(dsa_geo_.local_v_rows) * 2, H);
+      dsa_.o_proj = op_s;
+    }
     bound_.dsa = &dsa_;
   }
 

@@ -211,6 +211,18 @@ int main(int argc, char** argv) {
   report("  decomposition: no MMA", time_ms(stream, iters, [&] {
     launch_moe_grouped_mma_fp4_ref_bf16(d_hidden, H, d_segs, E, max_rows, 0, d_v4, 0, d_gate2, I, I, H, stream, nullptr, 11);
   }), gb_gu4);
+  report("fp4 three-stage cp.async kernel", time_ms(stream, iters, [&] {
+    launch_moe_grouped_mma_fp4_ref_bf16(d_hidden, H, d_segs, E, max_rows, 0, d_v4, 0, d_gate2, I, I, H, stream, nullptr, 12);
+  }), gb_gu4);
+  {
+    std::vector<uint16_t> a(rows_total * I), b(rows_total * I);
+    DGPP_CUDA_OK(cudaMemcpy(b.data(), d_gate2, b.size() * 2, cudaMemcpyDeviceToHost));
+    launch_moe_grouped_mma_fp4_ref_bf16(d_hidden, H, d_segs, E, max_rows, 0, d_v4, 0, d_gate, I, I, H, stream, nullptr, 0);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    DGPP_CUDA_OK(cudaMemcpy(a.data(), d_gate, a.size() * 2, cudaMemcpyDeviceToHost));
+    std::printf("  gate: three-stage %s the reference\n",
+                std::memcmp(a.data(), b.data(), a.size() * 2) == 0 ? "BITWISE" : "DIFFERS FROM");
+  }
   report("fp4 pipelined kernel", time_ms(stream, iters, [&] {
     launch_moe_grouped_mma_fp4_bf16(d_hidden, H, d_segs, E, max_rows, 0, d_v4, 0, d_gate2, I, I, H, stream);
   }), gb_gu4);
@@ -252,6 +264,18 @@ int main(int argc, char** argv) {
   report("  decomposition: no MMA", time_ms(stream, iters, [&] {
     launch_moe_grouped_mma_fp4_ref_f32(d_act, I, d_segs, E, max_rows, 0, d_v4, 2, d_down2, H, H, I, stream, nullptr, 11);
   }), gb_dn4);
+  report("fp4 three-stage cp.async kernel", time_ms(stream, iters, [&] {
+    launch_moe_grouped_mma_fp4_ref_f32(d_act, I, d_segs, E, max_rows, 0, d_v4, 2, d_down2, H, H, I, stream, nullptr, 12);
+  }), gb_dn4);
+  {
+    std::vector<float> a(rows_total * H), b(rows_total * H);
+    DGPP_CUDA_OK(cudaMemcpy(b.data(), d_down2, b.size() * 4, cudaMemcpyDeviceToHost));
+    launch_moe_grouped_mma_fp4_ref_f32(d_act, I, d_segs, E, max_rows, 0, d_v4, 2, d_down, H, H, I, stream, nullptr, 0);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    DGPP_CUDA_OK(cudaMemcpy(a.data(), d_down, a.size() * 4, cudaMemcpyDeviceToHost));
+    std::printf("  down: three-stage %s the reference\n",
+                std::memcmp(a.data(), b.data(), a.size() * 4) == 0 ? "BITWISE" : "DIFFERS FROM");
+  }
   report("fp4 reference, BN 128, BK 64, 2/SM", time_ms(stream, iters, [&] {
     launch_moe_grouped_mma_fp4_ref_f32(d_act, I, d_segs, E, max_rows, 0, d_v4, 2, d_down2, H, H, I, stream, nullptr, 6);
   }), gb_dn4);

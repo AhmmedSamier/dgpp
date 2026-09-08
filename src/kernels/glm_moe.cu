@@ -983,18 +983,22 @@ inline size_t out_stride_of(int n) { return static_cast<size_t>(n); }
 template <typename OutT>
 void launch_dense_mma(const uint16_t* act, size_t act_stride,
                       const uint8_t* payload, const float* scales, OutT* out,
-                      int m, int n, int k, cudaStream_t stream) {
+                      int m, int n, int k, cudaStream_t stream,
+                      size_t out_stride = 0) {
   using namespace mma_tile;
   if (m <= 0 || n <= 0) return;
   if (!act || !payload || !scales || !out)
     throw std::invalid_argument("dense mma: null pointer");
   if (k <= 0 || (k % 16) != 0)
     throw std::invalid_argument("dense mma: k must be a positive multiple of 16");
+  if (out_stride == 0) out_stride = out_stride_of(n);
+  if (out_stride < static_cast<size_t>(n))
+    throw std::invalid_argument("dense mma: output row stride narrower than n");
   const int act_vec =
       (reinterpret_cast<uintptr_t>(act) % 16 == 0 && (act_stride % 8) == 0) ? 1 : 0;
   const dim3 grid((n + BN - 1) / BN, 1u, static_cast<unsigned>((m + BM - 1) / BM));
   moe_grouped_mma_kernel<OutT><<<grid, kThreads, 0, stream>>>(
-      act, act_stride, act_vec, nullptr, nullptr, nullptr, 0, out, out_stride_of(n),
+      act, act_stride, act_vec, nullptr, nullptr, nullptr, 0, out, out_stride,
       n, k, BM, MoeSegment{0, m, 0}, MoeExpertView{payload, scales});
   DGPP_CUDA_OK(cudaGetLastError());
 }
@@ -1158,14 +1162,18 @@ void launch_moe_grouped_mma_f32(const uint16_t* act, size_t act_stride,
 
 void launch_dense_mma_bf16(const uint16_t* act, size_t act_stride,
                            const uint8_t* payload, const float* scales,
-                           uint16_t* out, int m, int n, int k, cudaStream_t stream) {
-  launch_dense_mma<uint16_t>(act, act_stride, payload, scales, out, m, n, k, stream);
+                           uint16_t* out, int m, int n, int k, cudaStream_t stream,
+                           size_t out_stride) {
+  launch_dense_mma<uint16_t>(act, act_stride, payload, scales, out, m, n, k, stream,
+                             out_stride);
 }
 
 void launch_dense_mma_f32(const uint16_t* act, size_t act_stride,
                           const uint8_t* payload, const float* scales, float* out,
-                          int m, int n, int k, cudaStream_t stream) {
-  launch_dense_mma<float>(act, act_stride, payload, scales, out, m, n, k, stream);
+                          int m, int n, int k, cudaStream_t stream,
+                          size_t out_stride) {
+  launch_dense_mma<float>(act, act_stride, payload, scales, out, m, n, k, stream,
+                          out_stride);
 }
 
 void launch_moe_grouped_gemv_bf16(const uint16_t* act, size_t act_stride,
@@ -1966,6 +1974,250 @@ __global__ __launch_bounds__(fp4_tile::kThreads) void moe_grouped_mma_fp4_kernel
   }
 }
 
+void check_fp4_mma_shape(int k, const char* who);
+
+// ---- the three-stage fp4 tile kernel (phase 5, 2026-09-08) ----------------
+// The reference's shape (128 x 64 x 64, eight warps x m16, the padding
+// warps skipping their MMAs) with the operand loads two stages ahead of
+// the multiply: a three-slot ring in shared memory holds, per stage, the
+// activation tile (cp.async, 16 bytes per copy) and the raw fp4 codes and
+// scales of the weight tile (cp.async, 8 and 4 bytes); the codes are
+// decoded out of the ring into a double-buffered bf16 tile just before
+// their stage multiplies. The decomposition that motivated it: the
+// synchronous kernel's launch was 58 % MMA + decode + barriers and the
+// rest un-overlapped loads. Same decode, same ascending-k16 mma chain: the
+// outputs are bitwise the reference's. Dynamic shared memory (~73 KB, one
+// block per SM), opted in by the launcher.
+namespace fp4_pipe3 {
+constexpr int BM = 128, BN = 64, BK = 64, BK_PAD = BK + 8;
+constexpr int kThreads = 256, kStages = 3;
+constexpr int kGroupsPerRow = BK / 16;               // 4 scale groups per row per stage
+constexpr int kGroups = BN * kGroupsPerRow;          // 256: one per thread
+constexpr size_t kABytes = size_t(BM) * BK_PAD * 2;  // 18,432
+constexpr size_t kCodeBytes = size_t(BN) * BK / 2;   // 2,048
+constexpr size_t kScaleBytes = size_t(BN) * kGroupsPerRow;  // 256
+constexpr size_t kRawBytes = kCodeBytes + kScaleBytes;
+constexpr size_t kBBytes = size_t(BN) * BK_PAD * 2;  // 9,216 (decoded)
+constexpr size_t kSmem = kStages * (kABytes + kRawBytes) + 2 * kBBytes;
+static_assert(kGroups == kThreads, "one 16-code group per thread per stage");
+static_assert(BM * (BK / 8) == 4 * kThreads, "four activation chunks per thread");
+
+__device__ __forceinline__ void cp_async(void* smem, const void* gmem, int bytes, int src_bytes) {
+  const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(smem));
+  if (bytes == 16)
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(gmem), "r"(src_bytes));
+  else if (bytes == 8)
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8, %2;\n" ::"r"(d), "l"(gmem), "r"(src_bytes));
+  else
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n" ::"r"(d), "l"(gmem), "r"(src_bytes));
+}
+__device__ __forceinline__ void commit() { asm volatile("cp.async.commit_group;\n" ::); }
+template <int N>
+__device__ __forceinline__ void wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+}  // namespace fp4_pipe3
+
+template <typename OutT>
+__global__ __launch_bounds__(fp4_pipe3::kThreads, 1) void moe_grouped_mma_fp4_pipe3_kernel(
+    const uint16_t* __restrict__ act, size_t act_stride, int act_vec,
+    const int32_t* __restrict__ act_rows,
+    const MoeSegment* __restrict__ segs, const MoeExpertView* __restrict__ views,
+    int which, OutT* __restrict__ out, size_t out_stride, int n, int k,
+    int rows_per_block) {
+  using namespace fp4_pipe3;
+  extern __shared__ __align__(16) uint8_t smem[];
+  uint16_t* sA = reinterpret_cast<uint16_t*>(smem);                       // [kStages][BM][BK_PAD]
+  uint8_t* sRaw = smem + kStages * kABytes;                                // [kStages][codes | scales]
+  uint16_t* sB = reinterpret_cast<uint16_t*>(sRaw + kStages * kRawBytes);  // [2][BN][BK_PAD]
+  const MoeSegment seg = segs[blockIdx.y];
+  const int z0 = static_cast<int>(blockIdx.z) * rows_per_block;
+  if (z0 >= seg.rows) return;
+  const int z1 = min(seg.rows, z0 + rows_per_block);
+  const MoeExpertView v = views[seg.expert * 3 + which];
+  const float g = *v.fp4_global;
+  const int n0 = static_cast<int>(blockIdx.x) * BN;
+  const size_t payload_stride = static_cast<size_t>(k) / 2;
+  const size_t scale_stride = static_cast<size_t>(k) / kFp4Group;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int warp = tid / 32, lane = tid % 32;
+  const int r = lane / 4, cc = (lane % 4) * 2;
+  // Weight tile: thread t -> n-row t/4, group t%4 (16 codes = 8 bytes, 1 scale byte;
+  // the scales of a row's four groups are one 4-byte copy by the t%4 == 0 thread).
+  const int b_row = tid / kGroupsPerRow, b_g = tid % kGroupsPerRow;
+  const int gn = n0 + b_row;
+  const bool b_ok = gn < n;
+  const uint8_t* b_codes = v.payload + static_cast<size_t>(b_ok ? gn : 0) * payload_stride;
+  const uint8_t* b_scales = v.fp4_scales + static_cast<size_t>(b_ok ? gn : 0) * scale_stride;
+  const int stages = (k + BK - 1) / BK;
+
+  for (int m0 = z0; m0 < z1; m0 += BM) {
+    const int m_rows = min(BM, z1 - m0);
+    const bool warp_live = warp * 16 < m_rows;
+    float acc[8][4];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.f;
+
+    // Stage s into ring slot `slot`: the activation chunks (16 bytes each,
+    // four per thread: rows tid/8 + 32i, 8-element chunk tid%8) and the
+    // weight tile's raw codes and scales. Absent rows and k past the end
+    // arrive as zeros (src-size 0). A misaligned activation base takes a
+    // plain copy (the rows would not be 16-byte aligned for cp.async).
+    auto issue = [&](int s, int slot) {
+      const int k0 = s * BK;
+      uint16_t* a = sA + static_cast<size_t>(slot) * BM * BK_PAD;
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const int mm = tid / 8 + 32 * i, kq = (tid % 8) * 8;
+        const int gk = k0 + kq;
+        const bool in = mm < m_rows && gk < k;
+        uint16_t* dst = a + static_cast<size_t>(mm) * BK_PAD + kq;
+        const uint16_t* src = act;
+        if (in) {
+          const int srow = seg.row0 + m0 + mm;
+          src = act + static_cast<size_t>(act_rows != nullptr ? act_rows[srow] : srow) * act_stride + gk;
+        }
+        if (act_vec != 0) {
+          cp_async(dst, src, 16, in ? 16 : 0);
+        } else {
+          uint16_t e[8];
+#pragma unroll
+          for (int h = 0; h < 8; ++h) e[h] = in ? src[h] : static_cast<uint16_t>(0);
+          *reinterpret_cast<uint4*>(dst) = make_uint4(e[0] | (e[1] << 16), e[2] | (e[3] << 16),
+                                                      e[4] | (e[5] << 16), e[6] | (e[7] << 16));
+        }
+      }
+      uint8_t* raw = sRaw + static_cast<size_t>(slot) * kRawBytes;
+      const int gk = k0 + b_g * 16;
+      const bool in = b_ok && gk < k;  // k % 16 == 0: a group is in or out whole
+      cp_async(raw + static_cast<size_t>(b_row) * (BK / 2) + b_g * 8,
+               in ? b_codes + gk / 2 : v.payload, 8, in ? 8 : 0);
+      if (b_g == 0) {
+        // The row's four scale bytes: whole when all four groups are in, else
+        // byte by byte is not possible with cp.async — the tail stage of a k
+        // that is not a multiple of 64 copies the in-range prefix (4 bytes
+        // when k0 + 64 <= k, else the copy is 4 bytes with src-size limited).
+        const int in_groups = b_ok ? max(0, min(kGroupsPerRow, (k - k0) / 16)) : 0;
+        cp_async(raw + kCodeBytes + static_cast<size_t>(b_row) * kGroupsPerRow,
+                 in_groups > 0 ? b_scales + k0 / 16 : v.fp4_scales, 4, in_groups);
+      }
+    };
+    // Decode ring slot `slot`'s raw tile into the bf16 tile `buf`.
+    auto decode = [&](int slot, int buf) {
+      const uint8_t* raw = sRaw + static_cast<size_t>(slot) * kRawBytes;
+      const uint2 codes = *reinterpret_cast<const uint2*>(
+          raw + static_cast<size_t>(b_row) * (BK / 2) + b_g * 8);
+      const uint8_t sc = raw[kCodeBytes + static_cast<size_t>(b_row) * kGroupsPerRow + b_g];
+      const float sx = e4m3_x16384(sc);
+      const uint32_t words[2] = {codes.x, codes.y};
+      uint32_t packed[8];
+#pragma unroll
+      for (int q = 0; q < 2; ++q) {
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+          const uint32_t byte = (words[q] >> (8 * j)) & 0xFFu;
+          const uint16_t lo = float_to_bf16_bits(fp4_gemv::e2m1_scaled(byte & 0xFu) * sx);
+          const uint16_t hi = float_to_bf16_bits(fp4_gemv::e2m1_scaled(byte >> 4) * sx);
+          packed[q * 4 + j] = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+        }
+      }
+      uint4* dst = reinterpret_cast<uint4*>(sB + static_cast<size_t>(buf) * BN * BK_PAD +
+                                            static_cast<size_t>(b_row) * BK_PAD + b_g * 16);
+      dst[0] = make_uint4(packed[0], packed[1], packed[2], packed[3]);
+      dst[1] = make_uint4(packed[4], packed[5], packed[6], packed[7]);
+    };
+
+    // Prologue: stages 0 .. kStages-2 in flight.
+#pragma unroll
+    for (int s = 0; s < kStages - 1; ++s) {
+      if (s < stages) issue(s, s);
+      commit();
+    }
+    for (int s = 0; s < stages; ++s) {
+      const int slot = s % kStages, buf = s % 2;
+      // Stage s has landed (kStages-2 younger groups may still be in flight).
+      wait<kStages - 2>();
+      __syncthreads();
+      // Everyone is past stage s-1's multiply: its slot takes stage s+kStages-1.
+      if (s + kStages - 1 < stages) issue(s + kStages - 1, (s + kStages - 1) % kStages);
+      commit();
+      decode(slot, buf);
+      __syncthreads();
+      const uint16_t* a = sA + static_cast<size_t>(slot) * BM * BK_PAD;
+      const uint16_t* b = sB + static_cast<size_t>(buf) * BN * BK_PAD;
+#pragma unroll
+      for (int kk = 0; kk < BK; kk += 16) {
+        if (!warp_live) break;
+        const int ar = warp * 16 + r;
+        const uint32_t a0 = *reinterpret_cast<const uint32_t*>(a + static_cast<size_t>(ar) * BK_PAD + kk + cc);
+        const uint32_t a1 = *reinterpret_cast<const uint32_t*>(a + static_cast<size_t>(ar + 8) * BK_PAD + kk + cc);
+        const uint32_t a2 = *reinterpret_cast<const uint32_t*>(a + static_cast<size_t>(ar) * BK_PAD + kk + cc + 8);
+        const uint32_t a3 = *reinterpret_cast<const uint32_t*>(a + static_cast<size_t>(ar + 8) * BK_PAD + kk + cc + 8);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+          const int bn = j * 8 + r;
+          const uint32_t b0 = *reinterpret_cast<const uint32_t*>(b + static_cast<size_t>(bn) * BK_PAD + kk + cc);
+          const uint32_t b1 = *reinterpret_cast<const uint32_t*>(b + static_cast<size_t>(bn) * BK_PAD + kk + cc + 8);
+          asm volatile(
+              "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+              "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+              : "+f"(acc[j][0]), "+f"(acc[j][1]), "+f"(acc[j][2]), "+f"(acc[j][3])
+              : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+        }
+      }
+    }
+    wait<0>();
+    __syncthreads();  // the ring is free for the next m-tile's prologue
+
+    const int row_lo = warp * 16 + r;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      const int gcol = n0 + j * 8 + cc;
+      auto st = [&](int row_off, int col_off, float val) {
+        const int mm = row_lo + row_off;
+        if (mm < m_rows && gcol + col_off < n)
+          fp8_gemv::store_dot(out + static_cast<size_t>(seg.row0 + m0 + mm) * out_stride + gcol + col_off,
+                              __fdiv_rn(val, g));
+      };
+      st(0, 0, acc[j][0]);
+      st(0, 1, acc[j][1]);
+      st(8, 0, acc[j][2]);
+      st(8, 1, acc[j][3]);
+    }
+  }
+}
+
+template <typename OutT>
+void launch_moe_grouped_mma_fp4_pipe3(const uint16_t* act, size_t act_stride,
+                                      const int32_t* act_rows, const MoeSegment* segs,
+                                      int n_segs, int max_rows, int rows_per_block,
+                                      const MoeExpertView* views, int which, OutT* out,
+                                      size_t out_stride, int n, int k, cudaStream_t stream) {
+  using namespace fp4_pipe3;
+  if (n_segs <= 0 || n <= 0) return;
+  if (!act || !segs || !views || !out)
+    throw std::invalid_argument("moe grouped mma fp4 pipe3: null pointer");
+  check_fp4_mma_shape(k, "moe grouped mma fp4 pipe3");
+  if (rows_per_block > 0 && (rows_per_block % BM) != 0)
+    throw std::invalid_argument("moe grouped mma fp4 pipe3: rows_per_block % 128");
+  const unsigned z_ext = rows_per_block > 0
+                             ? static_cast<unsigned>((max_rows + rows_per_block - 1) / rows_per_block)
+                             : 1u;
+  if (rows_per_block <= 0) rows_per_block = INT_MAX;
+  const int act_vec =
+      (reinterpret_cast<uintptr_t>(act) % 16 == 0 && (act_stride % 8) == 0) ? 1 : 0;
+  static bool opted_in = false;  // the dynamic smem opt-in, once per OutT
+  if (!opted_in) {
+    DGPP_CUDA_OK(cudaFuncSetAttribute(moe_grouped_mma_fp4_pipe3_kernel<OutT>,
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                      static_cast<int>(kSmem)));
+    opted_in = true;
+  }
+  const dim3 grid((n + BN - 1) / BN, static_cast<unsigned>(n_segs), z_ext);
+  moe_grouped_mma_fp4_pipe3_kernel<OutT><<<grid, kThreads, kSmem, stream>>>(
+      act, act_stride, act_vec, act_rows, segs, views, which, out, out_stride, n, k,
+      rows_per_block);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 void check_fp4_mma_shape(int k, const char* who) {
   if (k <= 0 || (k % kFp4Group) != 0)
     throw std::invalid_argument(std::string(who) +
@@ -2064,6 +2316,11 @@ void launch_moe_grouped_mma_fp4_ref(const uint16_t* act, size_t act_stride,
     case 9: DGPP_FP4_REF_LAUNCH(128, 64, 64, 3, 2); break;  // no activation loads
     case 10: DGPP_FP4_REF_LAUNCH(128, 64, 64, 3, 3); break; // neither: decode + barriers + MMA
     case 11: DGPP_FP4_REF_LAUNCH(128, 64, 64, 3, 4); break; // loads + decode + barriers, no MMA
+    case 12:  // the three-stage cp.async kernel (bitwise the reference)
+      launch_moe_grouped_mma_fp4_pipe3<OutT>(act, act_stride, act_rows, segs, n_segs, max_rows,
+                                             rows_per_block == INT_MAX ? 0 : rows_per_block, views,
+                                             which, out, out_stride, n, k, stream);
+      break;
     default: DGPP_FP4_REF_LAUNCH(128, 64, 64, 3);         // the reference
   }
 #undef DGPP_FP4_REF_LAUNCH

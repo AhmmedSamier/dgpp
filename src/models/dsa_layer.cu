@@ -9,6 +9,7 @@
 
 #include "common/cuda_check.hpp"
 #include "kernels/dsa.hpp"
+#include "kernels/scale_gemm.hpp"
 #include "models/dsa_state.hpp"
 
 namespace dgpp {
@@ -185,12 +186,29 @@ DsaLayer::DsaLayer(IGemm& gemm, const DsaLayerWeights& w, const DsaConfig& cfg,
   require(w_.k_norm_w, "k_norm_w");
   require(w_.k_norm_b, "k_norm_b");
   require(w_.ape, "ape");
-  require(w_.qkv_a, "qkv_a");
+  // The quantized projections: the bf16 bridge or the fp8 pairs, one form.
+  if (w_.quantized()) {
+    require(w_.q_a_q.payload, "q_a_q.payload");
+    require(w_.q_a_q.scales, "q_a_q.scales");
+    require(w_.kv_a_q.payload, "kv_a_q.payload");
+    require(w_.kv_a_q.scales, "kv_a_q.scales");
+    require(w_.q_b_q.payload, "q_b_q.payload");
+    require(w_.q_b_q.scales, "q_b_q.scales");
+    require(w_.o_proj_q.payload, "o_proj_q.payload");
+    require(w_.o_proj_q.scales, "o_proj_q.scales");
+    if (w_.q_a_q.rows != cfg.q_lora_rank || w_.q_a_q.cols != cfg.hidden ||
+        w_.kv_a_q.rows != cfg.kv_lora_rank || w_.kv_a_q.cols != cfg.hidden ||
+        w_.q_b_q.rows != geo_.local_q_rows || w_.q_b_q.cols != cfg.q_lora_rank ||
+        w_.o_proj_q.rows != cfg.hidden || w_.o_proj_q.cols != geo_.local_v_rows)
+      throw std::invalid_argument("DsaLayer: fp8 projection geometry");
+  } else {
+    require(w_.qkv_a, "qkv_a");
+    require(w_.q_b, "q_b");
+    require(w_.o_proj, "o_proj");
+  }
   require(w_.q_aln, "q_aln");
   require(w_.kv_aln, "kv_aln");
-  require(w_.q_b, "q_b");
   require(w_.kv_b, "kv_b");
-  require(w_.o_proj, "o_proj");
 
   attn_rows_ = std::max(max_decode_rows, 8);
   tile_cap_ = L.tile_cap;
@@ -289,6 +307,22 @@ bool DsaLayer::prepare_prefill(int tile_rows, int64_t visible_pools) {
 // Shared projection chain
 // ---------------------------------------------------------------------
 
+// The output projection [tokens, local_v] x o_proj^T -> [tokens, hidden]:
+// the bf16 bridge through the GEMM seam, or the fp8 pair through the
+// scale-aware GEMM (the same dequantized values; the two kernels' fp32
+// summation orders differ).
+void DsaLayer::project_out(void* out, int tokens, cudaStream_t stream) {
+  if (w_.quantized())
+    launch_scale_gemm_bf16(static_cast<const uint16_t*>(attn_out_),
+                           size_t(geo_.local_v_rows), w_.o_proj_q.payload,
+                           w_.o_proj_q.scales, static_cast<uint16_t*>(out), tokens,
+                           cfg_.hidden, geo_.local_v_rows, stream);
+  else
+    gemm_.matmul(attn_out_, w_.o_proj, out, tokens, cfg_.hidden,
+                 geo_.local_v_rows, DType::BF16, GemmOut::BF16,
+                 size_t(geo_.local_v_rows), gemm_ws_, gemm_ws_bytes_, stream);
+}
+
 void DsaLayer::project_common(const void* hidden_in, int tokens,
                               cudaStream_t stream) {
   const int hid = cfg_.hidden;
@@ -297,15 +331,34 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
   const int qkv_cols = cfg_.q_lora_rank + cfg_.kv_lora_rank;
 
   // 1) fused [q_a | kv_a] projection, then RMSNorms on the split halves.
-  gemm_.matmul(hidden_in, w_.qkv_a, qkv_, tokens, qkv_cols, hid, DType::BF16,
-               GemmOut::BF16, size_t(hid), gemm_ws_, gemm_ws_bytes_, stream);
+  // The fp8 form: two scale-aware GEMMs into the two column ranges of the
+  // same [tokens, q_lora + kv_lora] buffer (the output row stride).
+  if (w_.quantized()) {
+    const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
+    uint16_t* qkv = static_cast<uint16_t*>(qkv_);
+    launch_scale_gemm_bf16(h, size_t(hid), w_.q_a_q.payload, w_.q_a_q.scales,
+                           qkv, tokens, cfg_.q_lora_rank, hid, stream,
+                           size_t(qkv_cols));
+    launch_scale_gemm_bf16(h, size_t(hid), w_.kv_a_q.payload, w_.kv_a_q.scales,
+                           qkv + cfg_.q_lora_rank, tokens, cfg_.kv_lora_rank, hid,
+                           stream, size_t(qkv_cols));
+  } else {
+    gemm_.matmul(hidden_in, w_.qkv_a, qkv_, tokens, qkv_cols, hid, DType::BF16,
+                 GemmOut::BF16, size_t(hid), gemm_ws_, gemm_ws_bytes_, stream);
+  }
   dsa_fused_qkv_rmsnorm(qkv_, q_c_, kv_c_, cfg_.q_lora_rank,
                         cfg_.kv_lora_rank, tokens, w_.q_aln, w_.kv_aln,
                         cfg_.rms_norm_eps, stream);
   // 2) MLA q and indexer q, both from the normed q-lora rows.
-  gemm_.matmul(q_c_, w_.q_b, q_, tokens, geo_.local_q_rows, cfg_.q_lora_rank,
-               DType::BF16, GemmOut::BF16, size_t(cfg_.q_lora_rank), gemm_ws_,
-               gemm_ws_bytes_, stream);
+  if (w_.quantized())
+    launch_scale_gemm_bf16(static_cast<const uint16_t*>(q_c_), size_t(cfg_.q_lora_rank),
+                           w_.q_b_q.payload, w_.q_b_q.scales,
+                           static_cast<uint16_t*>(q_), tokens, geo_.local_q_rows,
+                           cfg_.q_lora_rank, stream);
+  else
+    gemm_.matmul(q_c_, w_.q_b, q_, tokens, geo_.local_q_rows, cfg_.q_lora_rank,
+                 DType::BF16, GemmOut::BF16, size_t(cfg_.q_lora_rank), gemm_ws_,
+                 gemm_ws_bytes_, stream);
   gemm_.matmul(q_c_, w_.wq_b, q_idx_, tokens, heads * dim, cfg_.q_lora_rank,
                DType::BF16, GemmOut::BF16, size_t(cfg_.q_lora_rank), gemm_ws_,
                gemm_ws_bytes_, stream);
@@ -563,9 +616,7 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
                  /*listed=*/true, stream);
 
   // Output projection.
-  gemm_.matmul(attn_out_, w_.o_proj, out, tokens, cfg_.hidden,
-               geo_.local_v_rows, DType::BF16, GemmOut::BF16,
-               size_t(geo_.local_v_rows), gemm_ws_, gemm_ws_bytes_, stream);
+  project_out(out, tokens, stream);
 }
 
 // ---------------------------------------------------------------------
@@ -600,7 +651,9 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   if (prefetch) {
     prefetch->open_window(stream, size_t{16} << 20, prefetch->layer_rate());
     prefetch->add(w_.kv_b, kv_b_bytes());  // absorb_q and vout read it first
-    prefetch->add(w_.o_proj, o_proj_bytes());
+    prefetch->add(w_.quantized() ? static_cast<const void*>(w_.o_proj_q.payload)
+                                 : w_.o_proj,
+                  o_proj_bytes());
   }
 
   // Latent rows first (this batch's own tokens are readable by this
@@ -678,9 +731,7 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   else
     attend_tile(state, layer, req_ids, 0, tokens, decode_n_split_, stream);
   dsa_debug_sync(stream, "attention");
-  gemm_.matmul(attn_out_, w_.o_proj, out, tokens, cfg_.hidden,
-               geo_.local_v_rows, DType::BF16, GemmOut::BF16,
-               size_t(geo_.local_v_rows), gemm_ws_, gemm_ws_bytes_, stream);
+  project_out(out, tokens, stream);
   dsa_debug_sync(stream, "o_proj");
   // Padding rows (pos < 0: a fixed-shape batch's unoccupied rows, the
   // in-graph draft's rejected row) skipped every state write above but

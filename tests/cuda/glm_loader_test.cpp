@@ -421,8 +421,29 @@ DGPP_TEST(glm_loader_streams_dsa_moe_layer_with_dequant_bridge) {
   const std::string p = "model.language_model.layers.2.self_attn.";
   const int64_t hidden = 512, q_lora = 256, kv_lora = 128;
 
+  // The form the loader took (2026-09-08): at world 1 every slice is
+  // whole, so the resident carries the FP8 pairs as they are — payload and
+  // scale grid byte-exact from the fixture — and no bf16 bridge exists.
+  // (The bridge, checked below, is the misaligned worlds' form.)
+  if (r.dsa.quantized()) {
+    const auto pair = [&](const char* tensor, const dgpp::GlmQuantMatrix& q,
+                          int64_t rows, int64_t cols, const char* what) {
+      require(q.rows == rows && q.cols == cols, what);
+      require_bytes_eq(q.payload, fx.at(p + tensor + ".weight"),
+                       static_cast<size_t>(rows) * cols, what);
+      require_bytes_eq(q.scales, fx.at(p + tensor + ".weight_scale_inv"),
+                       static_cast<size_t>((rows + 127) / 128) * ((cols + 127) / 128),
+                       what);
+    };
+    pair("q_a_proj", r.dsa.q_a_q, q_lora, hidden, "q_a pair");
+    pair("kv_a_proj_with_mqa", r.dsa.kv_a_q, kv_lora, hidden, "kv_a pair");
+    pair("q_b_proj", r.dsa.q_b_q, 8 * 96, q_lora, "q_b pair");
+    pair("o_proj", r.dsa.o_proj_q, hidden, 8 * 96, "o_proj pair");
+    require(r.dsa.qkv_a == nullptr && r.dsa.q_b == nullptr && r.dsa.o_proj == nullptr,
+            "no bf16 bridge beside the pairs");
+  }
   // Fused qkv_a: q_a rows dequantized, then kv_a rows dequantized.
-  {
+  if (!r.dsa.quantized()) {
     const uint16_t* qkv = static_cast<const uint16_t*>(r.dsa.qkv_a);
     const std::vector<uint16_t> qa = dequant_oracle(
         fx.at(p + "q_a_proj.weight"), fx.at(p + "q_a_proj.weight_scale_inv"),
@@ -441,7 +462,7 @@ DGPP_TEST(glm_loader_streams_dsa_moe_layer_with_dequant_bridge) {
                      kva.size(), "qkv_a kv_a rows");
   }
   // q_b / o_proj: standalone dequants, bitwise vs oracle.
-  {
+  if (!r.dsa.quantized()) {
     const std::vector<uint16_t> qb = dequant_oracle(
         fx.at(p + "q_b_proj.weight"), fx.at(p + "q_b_proj.weight_scale_inv"),
         8 * 96, q_lora);

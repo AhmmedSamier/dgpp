@@ -29,11 +29,14 @@ namespace dgpp {
 // act: bf16 row-major [M, act_row_stride_elems] (K-column slices allowed,
 // matching the IGemm seam's fused-buffer views); w_payload: E4M3 row-major
 // [N, K] contiguous; w_scales: F32 [ceil(N/128), ceil(K/128)] row-major;
-// out: bf16 row-major [M, N].
+// out: bf16 row-major [M, N], or [M, out_row_stride_elems] with the product
+// in its first N columns when the stride is given (0: N) — a projection
+// written into a column range of a wider buffer (the DSA layer's fused
+// [q_a | kv_a] output from two fp8 pairs, 2026-09-08).
 void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
                             uint16_t* out, int m, int n, int k,
-                            cudaStream_t stream);
+                            cudaStream_t stream, size_t out_row_stride_elems = 0);
 
 // The same product with the fp32 accumulators stored UNROUNDED: out is f32
 // row-major [M, N]. bf16(out_f32[i]) == out_bf16[i] bit for bit — the two
@@ -43,7 +46,7 @@ void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
 void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            const uint8_t* w_payload, const float* w_scales,
                            float* out, int m, int n, int k,
-                           cudaStream_t stream);
+                           cudaStream_t stream, size_t out_row_stride_elems = 0);
 
 // The tile kernel regardless of m (the bf16 mma.sync m16n8k16 path the
 // large-m route takes): the reference the grouped tensor-core MoE kernel is

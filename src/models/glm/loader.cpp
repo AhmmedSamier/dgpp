@@ -121,8 +121,13 @@ bool is_replicated(const GlmExpectedTensor& e) {
 // them. The scale-aware GEMM seam (M4 deliverable 3's successor) will turn
 // these into true quant slices — and will then carry the same 128-alignment
 // contract on their dims.
-bool is_dsa_bridge(const GlmExpectedTensor& e) {
-  if (e.cls != GlmWeightClass::Dsa) return false;
+// `bridge_active` (2026-09-08): whether this build takes the bf16 bridge at
+// all — the scale-aware GEMM consumes the FP8 pairs directly whenever this
+// rank's q_b row slice and o_proj column slice start 128-aligned (every
+// power-of-two world of the production geometry), and then these two are
+// ordinary sharded reads: true row / column slices, partitioned bytes.
+bool is_dsa_bridge(const GlmExpectedTensor& e, bool bridge_active) {
+  if (!bridge_active || e.cls != GlmWeightClass::Dsa) return false;
   std::string_view s = layer_suffix(e.name);
   if (s.size() > 10 && s.substr(s.size() - 10) == "_scale_inv")
     s.remove_suffix(10);
@@ -133,8 +138,8 @@ bool is_dsa_bridge(const GlmExpectedTensor& e) {
 // tensors, the DSA bridges, and the NVFP4 experts' per-tensor global scales
 // (4 bytes each, read whole by every rank — the sliced payload and scale
 // rows partition across ranks, the scalar cannot).
-bool is_full_read(const GlmExpectedTensor& e) {
-  return is_replicated(e) || is_dsa_bridge(e) ||
+bool is_full_read(const GlmExpectedTensor& e, bool bridge_active) {
+  return is_replicated(e) || is_dsa_bridge(e, bridge_active) ||
          e.role == GlmTensorRole::Fp4Global;
 }
 
@@ -252,6 +257,7 @@ struct BuildCtx {
   // Local geometry at tp_size=world (world=1: the full geometry).
   KdaGeometry kgeo{};
   DsaGeometry dgeo{};
+  bool dsa_bridge = true;  // set by init_geometry
   int64_t dense_inter = 0;    // intermediate_size/world
   int64_t shared_inter = 0;   // moe_intermediate_size/world (routed too)
   int64_t dsa_kv_rows_head = 0;  // qk_nope + v per head
@@ -272,6 +278,10 @@ struct BuildCtx {
     dense_inter = cfg.intermediate_size / world;
     shared_inter = cfg.moe_config().inter / world;
     dsa_kv_rows_head = cfg.qk_nope_head_dim + cfg.v_head_dim;
+    // The DSA projections' form (see is_dsa_bridge): the FP8 pairs directly
+    // when this rank's q_b rows and o_proj columns start on the 128-wide
+    // scale grid, the bf16 bridge otherwise (the test fixtures at world 4).
+    dsa_bridge = (dgeo.local_q_rows % 128) != 0 || (dgeo.local_v_rows % 128) != 0;
   }
 
   const GlmExpectedTensor& expected(const std::string& name) const {
@@ -305,13 +315,13 @@ struct BuildCtx {
   void note_read(const GlmExpectedTensor& e, size_t bytes) {
     if (!copy) return;
     source_bytes += bytes;
-    if (is_full_read(e)) verbatim_bytes += bytes;
+    if (is_full_read(e, dsa_bridge)) verbatim_bytes += bytes;
   }
 
   // ---- verbatim loads (replicated at every world; world=1: everything) --
   const void* load_raw(const std::string& name) {
     const GlmExpectedTensor& e = expected(name);
-    if (sharded() && !is_replicated(e) && !is_dsa_bridge(e))
+    if (sharded() && !is_replicated(e) && !is_dsa_bridge(e, dsa_bridge))
       throw std::runtime_error(
           "glm loader: TP read-class drift — '" + name +
           "' is sharded but was loaded verbatim (the slicing build and "
@@ -726,60 +736,87 @@ struct BuildCtx {
     const int64_t lh = dgeo.local_heads;
     const int64_t local_v_rows = dgeo.local_v_rows;
 
-    // Fused qkv_a [q_lora + kv_lora, hidden]: replicated latents — q_a rows
-    // then kv_a rows, both dequantized (their scale grids differ — two
-    // jobs, one buffer). Full at every world.
-    const GlmExpectedTensor& qa = expected(p + "q_a_proj.weight");
-    const GlmExpectedTensor& kva = expected(p + "kv_a_proj_with_mqa.weight");
-    uint16_t* qkv_a = static_cast<uint16_t*>(
-        bump.alloc(static_cast<size_t>(qa.shape[0] + kva.shape[0]) *
-                   static_cast<size_t>(hidden) * 2));
-    const GlmQuantMatrix qa_q = load_quant(p + "q_a_proj.weight");
-    jobs.push_back(DequantJob{qa_q.payload, qa_q.scales, qkv_a, qa_q.rows,
-                              qa_q.cols});
-    const GlmQuantMatrix kva_q =
-        load_quant(p + "kv_a_proj_with_mqa.weight");
-    jobs.push_back(DequantJob{
-        kva_q.payload, kva_q.scales,
-        qkv_a + static_cast<size_t>(q_lora) * static_cast<size_t>(hidden),
-        kva_q.rows, kva_q.cols});
-
-    out.dsa.qkv_a = qkv_a;
+    if (!dsa_bridge) {
+      // The FP8 pairs as resident (2026-09-08): q_a / kv_a replicated in
+      // full, q_b this rank's 128-aligned row slice, o_proj (below) this
+      // rank's packed column slice — the scale-aware GEMM reads them as
+      // they are, half the bytes of the bf16 bridge per token.
+      out.dsa.q_a_q = load_quant(p + "q_a_proj.weight");
+      out.dsa.kv_a_q = load_quant(p + "kv_a_proj_with_mqa.weight");
+      out.dsa.qkv_a = nullptr;
+    } else {
+      // Fused qkv_a [q_lora + kv_lora, hidden]: replicated latents — q_a rows
+      // then kv_a rows, both dequantized (their scale grids differ — two
+      // jobs, one buffer). Full at every world.
+      const GlmExpectedTensor& qa = expected(p + "q_a_proj.weight");
+      const GlmExpectedTensor& kva = expected(p + "kv_a_proj_with_mqa.weight");
+      uint16_t* qkv_a = static_cast<uint16_t*>(
+          bump.alloc(static_cast<size_t>(qa.shape[0] + kva.shape[0]) *
+                     static_cast<size_t>(hidden) * 2));
+      const GlmQuantMatrix qa_q = load_quant(p + "q_a_proj.weight");
+      jobs.push_back(DequantJob{qa_q.payload, qa_q.scales, qkv_a, qa_q.rows,
+                                qa_q.cols});
+      const GlmQuantMatrix kva_q =
+          load_quant(p + "kv_a_proj_with_mqa.weight");
+      jobs.push_back(DequantJob{
+          kva_q.payload, kva_q.scales,
+          qkv_a + static_cast<size_t>(q_lora) * static_cast<size_t>(hidden),
+          kva_q.rows, kva_q.cols});
+      out.dsa.qkv_a = qkv_a;
+    }
     out.dsa.q_aln = load_bf16(p + "q_a_layernorm.weight");
     out.dsa.kv_aln = load_bf16(p + "kv_a_layernorm.weight");
-    // q_b: the bridge dequantizes the FULL source (a head-row slice of the
-    // quantized matrix starts mid-block at some worlds — unrepresentable);
-    // the resident keeps this rank's rows of the bf16 bridge, exactly the
-    // view bind slices from the same buffer.
-    uint16_t* q_b = load_dequant_bf16(p + "q_b_proj.weight");
-    out.dsa.q_b = sharded()
-                      ? q_b + static_cast<size_t>(rank) *
-                                  static_cast<size_t>(dgeo.local_q_rows) *
-                                  q_lora
-                      : q_b;
+    if (!dsa_bridge) {
+      out.dsa.q_b_q =
+          sharded() ? load_quant_rows(p + "q_b_proj.weight",
+                                      static_cast<int64_t>(rank) * dgeo.local_q_rows,
+                                      dgeo.local_q_rows)
+                    : load_quant(p + "q_b_proj.weight");
+      out.dsa.q_b = nullptr;
+    } else {
+      // q_b: the bridge dequantizes the FULL source (a head-row slice of the
+      // quantized matrix starts mid-block at this world — unrepresentable
+      // on the scale grid); the resident keeps this rank's rows of the bf16
+      // bridge, exactly the view bind slices from the same buffer.
+      uint16_t* q_b = load_dequant_bf16(p + "q_b_proj.weight");
+      out.dsa.q_b = sharded()
+                        ? q_b + static_cast<size_t>(rank) *
+                                    static_cast<size_t>(dgeo.local_q_rows) *
+                                    q_lora
+                        : q_b;
+    }
     // kv_b: BF16 in the checkpoint — this rank's head block is contiguous
     // source rows; a real slice read.
     out.dsa.kv_b = load_bf16_rows(
         p + "kv_b_proj.weight",
         static_cast<int64_t>(rank) * lh * dsa_kv_rows_head,
         lh * dsa_kv_rows_head);
-    // o_proj: bridge dequant of the full source, then the packed column
-    // slice [hidden, local_v_rows] in the post-dequant phase. world=1
-    // keeps the bridge buffer itself (the M4 resident).
-    uint16_t* o_bridge = load_dequant_bf16(p + "o_proj.weight");
-    if (sharded()) {
-      uint16_t* packed = static_cast<uint16_t*>(
-          bump.alloc(static_cast<size_t>(hidden) * local_v_rows * 2));
-      if (copy)
-        packs.push_back(PackJob{o_bridge + rank * local_v_rows, packed,
-                                static_cast<size_t>(local_v_rows) * world * 2,
-                                static_cast<size_t>(local_v_rows) * 2,
-                                static_cast<size_t>(local_v_rows) * 2,
-                                static_cast<size_t>(hidden),
-                                /*src_on_device=*/true});
-      out.dsa.o_proj = packed;
+    if (!dsa_bridge) {
+      out.dsa.o_proj_q =
+          sharded() ? load_quant_cols(p + "o_proj.weight",
+                                      static_cast<int64_t>(rank) * local_v_rows,
+                                      local_v_rows)
+                    : load_quant(p + "o_proj.weight");
+      out.dsa.o_proj = nullptr;
     } else {
-      out.dsa.o_proj = o_bridge;
+      // o_proj: bridge dequant of the full source, then the packed column
+      // slice [hidden, local_v_rows] in the post-dequant phase. world=1
+      // keeps the bridge buffer itself (the M4 resident).
+      uint16_t* o_bridge = load_dequant_bf16(p + "o_proj.weight");
+      if (sharded()) {
+        uint16_t* packed = static_cast<uint16_t*>(
+            bump.alloc(static_cast<size_t>(hidden) * local_v_rows * 2));
+        if (copy)
+          packs.push_back(PackJob{o_bridge + rank * local_v_rows, packed,
+                                  static_cast<size_t>(local_v_rows) * world * 2,
+                                  static_cast<size_t>(local_v_rows) * 2,
+                                  static_cast<size_t>(local_v_rows) * 2,
+                                  static_cast<size_t>(hidden),
+                                  /*src_on_device=*/true});
+        out.dsa.o_proj = packed;
+      } else {
+        out.dsa.o_proj = o_bridge;
+      }
     }
     const std::string ip = p + "indexer.";
     out.dsa.wq_b = load_bf16(ip + "wq_b.weight");

@@ -126,14 +126,32 @@ struct BoundCmp {
       const int64_t lh = dgeo.local_heads;
       const int64_t kv_rows = lh * (cfg.qk_nope_head_dim + cfg.v_head_dim);
       const int64_t idx_proj = cfg.index_n_heads * cfg.index_head_dim;
-      bytes(tag("dsa.qkv_a"), a.dsa->qkv_a, b.dsa->qkv_a, (ql + kvl) * H * 2);
+      if (a.dsa->quantized() != b.dsa->quantized())
+        throw std::runtime_error(tag("dsa.form") +
+                                 ": one side carries the fp8 pairs, the other the bf16 bridge");
+      if (a.dsa->quantized()) {
+        auto quant = [&](const std::string& name, const GlmQuantMatrix& x,
+                         const GlmQuantMatrix& y) {
+          if (x.rows != y.rows || x.cols != y.cols)
+            throw std::runtime_error(tag(name.c_str()) + ": fp8 geometry differs");
+          bytes(tag((name + ".payload").c_str()), x.payload, y.payload,
+                static_cast<size_t>(x.rows) * x.cols);
+          bytes(tag((name + ".scales").c_str()), x.scales, y.scales, x.scale_bytes());
+        };
+        quant("dsa.q_a_q", a.dsa->q_a_q, b.dsa->q_a_q);
+        quant("dsa.kv_a_q", a.dsa->kv_a_q, b.dsa->kv_a_q);
+        quant("dsa.q_b_q", a.dsa->q_b_q, b.dsa->q_b_q);
+        quant("dsa.o_proj_q", a.dsa->o_proj_q, b.dsa->o_proj_q);
+      } else {
+        bytes(tag("dsa.qkv_a"), a.dsa->qkv_a, b.dsa->qkv_a, (ql + kvl) * H * 2);
+        bytes(tag("dsa.q_b"), a.dsa->q_b, b.dsa->q_b,
+              static_cast<size_t>(dgeo.local_q_rows) * ql * 2);
+        bytes(tag("dsa.o_proj"), a.dsa->o_proj, b.dsa->o_proj,
+              H * static_cast<size_t>(dgeo.local_v_rows) * 2);
+      }
       bytes(tag("dsa.q_aln"), a.dsa->q_aln, b.dsa->q_aln, ql * 2);
       bytes(tag("dsa.kv_aln"), a.dsa->kv_aln, b.dsa->kv_aln, kvl * 2);
-      bytes(tag("dsa.q_b"), a.dsa->q_b, b.dsa->q_b,
-            static_cast<size_t>(dgeo.local_q_rows) * ql * 2);
       bytes(tag("dsa.kv_b"), a.dsa->kv_b, b.dsa->kv_b, kv_rows * kvl * 2);
-      bytes(tag("dsa.o_proj"), a.dsa->o_proj, b.dsa->o_proj,
-            H * static_cast<size_t>(dgeo.local_v_rows) * 2);
       bytes(tag("dsa.wq_b"), a.dsa->wq_b, b.dsa->wq_b, idx_proj * ql * 2);
       bytes(tag("dsa.wk"), a.dsa->wk, b.dsa->wk,
             static_cast<size_t>(cfg.index_head_dim) * H * 2);

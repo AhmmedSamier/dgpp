@@ -46,7 +46,7 @@ namespace dgpp {
 
 class GlmResidentImage {
  public:
-  static constexpr uint32_t kFormatVersion = 1;
+  static constexpr uint32_t kFormatVersion = 2;  // 2: the DSA projections resident as FP8 pairs where aligned (2026-09-08)
 
   // Opens `dir/<key hex>.img`, creating the directory and the file when
   // absent; a file whose header disagrees (version, key, layer count) is

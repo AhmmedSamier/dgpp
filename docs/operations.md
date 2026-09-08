@@ -229,6 +229,17 @@ O_DIRECT reads at the drive's line rate — 15-25 s to a ready model against
 ~4.5 minutes from the checkpoint. The boot digest is cached beside it
 (`<key>.digest`). Knobs:
 
+The first boot after a change that invalidates the images (a loader
+format version bump — `GlmResidentImage::kFormatVersion`, 2 since
+2026-09-08 — or a new checkpoint) rebuilds every rank's image from the
+checkpoint, and the ranks finish at different times (rank 0 in ~100 s,
+the peers in ~155 s on the hybrid). `dgpp-serve`'s first collective has a
+~57 s deadline, so that boot can fail with `boundary reduce ... collective
+consumer exited on deadline` while the peers are still building — their
+images are still written. Boot again (the images restore in ~15 s), or
+run `glm_gen_check` once on the fabric first, whose rendezvous waits.
+
+
 ```
 DGPP_RESIDENT_CACHE=off            disable (always build from the checkpoint)
 DGPP_RESIDENT_CACHE_DIR=/path      put the images somewhere else

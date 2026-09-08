@@ -31,7 +31,7 @@ __global__ void scale_gemm_kernel(const uint16_t* __restrict__ act,
                                   const uint8_t* __restrict__ w,
                                   const float* __restrict__ scales,
                                   OutT* __restrict__ out, int m, int n,
-                                  int k) {
+                                  int k, size_t out_stride) {
   const int n0 = blockIdx.x * BN;
   const int m0 = blockIdx.y * BM;
   const int scale_cols = (k + 127) / 128;
@@ -110,7 +110,7 @@ __global__ void scale_gemm_kernel(const uint16_t* __restrict__ act,
     const int gm = m0 + row_off;
     const int gn = out_col + col_off;
     if (gm < m && gn < n)
-      fp8_gemv::store_dot(out + (size_t)gm * n + gn, v);
+      fp8_gemv::store_dot(out + (size_t)gm * out_stride + gn, v);
   };
   store(r, 0, c0);
   store(r, 1, c1);
@@ -127,45 +127,47 @@ __global__ void scale_gemv_kernel(const uint16_t* __restrict__ act,
                                   size_t act_stride,
                                   const uint8_t* __restrict__ w,
                                   const float* __restrict__ scales,
-                                  OutT* __restrict__ out, int n, int k) {
+                                  OutT* __restrict__ out, int n, int k,
+                                  size_t out_stride) {
   extern __shared__ __align__(16) uint16_t sx[];
   fp8_gemv::stage_activations<kRows>(act, act_stride, k, sx);
   __syncthreads();
   fp8_gemv::block_rows<kRows>(w, scales, sx, blockIdx.x * fp8_gemv::kWarps, n,
-                              k, out, static_cast<size_t>(n));
+                              k, out, out_stride);
 }
 
 template <int kRows, typename OutT>
 void launch_scale_gemv(const uint16_t* act, size_t act_stride,
                        const uint8_t* w, const float* scales, OutT* out, int n,
-                       int k, cudaStream_t stream) {
+                       int k, size_t out_stride, cudaStream_t stream) {
   const dim3 grid((n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps);
   scale_gemv_kernel<kRows, OutT>
       <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(kRows, k), stream>>>(
-          act, act_stride, w, scales, out, n, k);
+          act, act_stride, w, scales, out, n, k, out_stride);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
 template <typename OutT>
 void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
                             const uint8_t* w, const float* scales, OutT* out,
-                            int rows, int n, int k, cudaStream_t stream) {
+                            int rows, int n, int k, size_t out_stride,
+                            cudaStream_t stream) {
   switch (rows) {
     case 1:
       launch_scale_gemv<1, OutT>(act, act_stride, w, scales, out, n, k,
-                                 stream);
+                                 out_stride, stream);
       return;
     case 2:
       launch_scale_gemv<2, OutT>(act, act_stride, w, scales, out, n, k,
-                                 stream);
+                                 out_stride, stream);
       return;
     case 3:
       launch_scale_gemv<3, OutT>(act, act_stride, w, scales, out, n, k,
-                                 stream);
+                                 out_stride, stream);
       return;
     case 4:
       launch_scale_gemv<4, OutT>(act, act_stride, w, scales, out, n, k,
-                                 stream);
+                                 out_stride, stream);
       return;
     default:
       throw std::invalid_argument("scale_gemv: rows outside [1,4]");
@@ -179,27 +181,34 @@ void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
 inline void launch_dense_mma(const uint16_t* act, size_t act_stride,
                              const uint8_t* payload, const float* scales,
                              uint16_t* out, int m, int n, int k,
-                             cudaStream_t stream) {
-  launch_dense_mma_bf16(act, act_stride, payload, scales, out, m, n, k, stream);
+                             size_t out_stride, cudaStream_t stream) {
+  launch_dense_mma_bf16(act, act_stride, payload, scales, out, m, n, k, stream,
+                        out_stride);
 }
 inline void launch_dense_mma(const uint16_t* act, size_t act_stride,
                              const uint8_t* payload, const float* scales,
                              float* out, int m, int n, int k,
-                             cudaStream_t stream) {
-  launch_dense_mma_f32(act, act_stride, payload, scales, out, m, n, k, stream);
+                             size_t out_stride, cudaStream_t stream) {
+  launch_dense_mma_f32(act, act_stride, payload, scales, out, m, n, k, stream,
+                       out_stride);
 }
 
 template <typename OutT>
 void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
                        const uint8_t* w_payload, const float* w_scales,
-                       OutT* out, int m, int n, int k, cudaStream_t stream) {
+                       OutT* out, int m, int n, int k, cudaStream_t stream,
+                       size_t out_stride) {
   if (m <= 0 || n <= 0) return;  // empty output by definition
   if (!act || !w_payload || !w_scales || !out)
     throw std::invalid_argument("scale_gemm: null pointer");
+  if (out_stride == 0) out_stride = static_cast<size_t>(n);
+  if (out_stride < static_cast<size_t>(n))
+    throw std::invalid_argument("scale_gemm: output row stride narrower than n");
   if (k <= 0) {
     // Degenerate contraction: zero outputs (matches the fp64 oracle).
-    DGPP_CUDA_OK(cudaMemsetAsync(
-        out, 0, static_cast<size_t>(m) * n * sizeof(OutT), stream));
+    DGPP_CUDA_OK(cudaMemset2DAsync(out, out_stride * sizeof(OutT), 0,
+                                   static_cast<size_t>(n) * sizeof(OutT),
+                                   static_cast<size_t>(m), stream));
     return;
   }
   // Small-M calls take the row-independent bandwidth GEMV (the tile below
@@ -220,7 +229,8 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
       launch_scale_gemv_rows(
           act + static_cast<size_t>(row0) * act_row_stride_elems,
           act_row_stride_elems, w_payload, w_scales,
-          out + static_cast<size_t>(row0) * n, rows, n, k, stream);
+          out + static_cast<size_t>(row0) * out_stride, rows, n, k, out_stride,
+          stream);
       row0 += rows;
     }
     return;
@@ -233,12 +243,12 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
   // stays on the tile kernel.
   if (k % 16 == 0) {
     launch_dense_mma(act, act_row_stride_elems, w_payload, w_scales, out, m, n,
-                     k, stream);
+                     k, out_stride, stream);
     return;
   }
   const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
   scale_gemm_kernel<OutT><<<grid, kBlockThreads, 0, stream>>>(
-      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k);
+      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_stride);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -247,17 +257,17 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
 void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
                             uint16_t* out, int m, int n, int k,
-                            cudaStream_t stream) {
+                            cudaStream_t stream, size_t out_row_stride_elems) {
   launch_scale_gemm<uint16_t>(act, act_row_stride_elems, w_payload, w_scales,
-                              out, m, n, k, stream);
+                              out, m, n, k, stream, out_row_stride_elems);
 }
 
 void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            const uint8_t* w_payload, const float* w_scales,
                            float* out, int m, int n, int k,
-                           cudaStream_t stream) {
+                           cudaStream_t stream, size_t out_row_stride_elems) {
   launch_scale_gemm<float>(act, act_row_stride_elems, w_payload, w_scales,
-                           out, m, n, k, stream);
+                           out, m, n, k, stream, out_row_stride_elems);
 }
 
 namespace {
@@ -270,7 +280,7 @@ void launch_scale_gemm_tile(const uint16_t* act, size_t act_row_stride_elems,
     throw std::invalid_argument("scale_gemm_tile: null pointer or k <= 0");
   const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
   scale_gemm_kernel<OutT><<<grid, kBlockThreads, 0, stream>>>(
-      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k);
+      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, static_cast<size_t>(n));
   DGPP_CUDA_OK(cudaGetLastError());
 }
 }  // namespace

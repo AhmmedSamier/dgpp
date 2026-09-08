@@ -14,6 +14,10 @@ struct GlmQuantMatrix {
   const float* scales = nullptr;     // F32 [ceil(rows/128), ceil(cols/128)]
   int64_t rows = 0;
   int64_t cols = 0;
+  size_t scale_bytes() const {
+    return static_cast<size_t>((rows + 127) / 128) *
+           static_cast<size_t>((cols + 127) / 128) * sizeof(float);
+  }
 };
 
 // Row-range view: payload rows are contiguous, so this is a pure pointer

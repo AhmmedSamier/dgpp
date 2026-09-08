@@ -2046,12 +2046,22 @@ struct TestWeights {
   std::vector<std::vector<uint16_t>> storage;  // keeps host bits alive
   std::vector<float> ape;
 
-  TestWeights(const DsaConfig& cfg, uint64_t seed) {
+  // fp8_projections (2026-09-08): q_a / kv_a / q_b / o_proj as e4m3 payloads
+  // with 128x128 block scales — the oracle (and `bridge_views`, the bf16
+  // form of the same layer) get bf16(e4m3 x s), the bridge's rule;
+  // `layer_views` carries the pairs for the scale-aware GEMM path.
+  DsaLayerWeights bridge_views;
+  std::vector<std::vector<uint8_t>> q_storage;
+  std::vector<std::vector<float>> s_storage;
+
+  TestWeights(const DsaConfig& cfg, uint64_t seed, bool fp8_projections = false) {
     const DsaGeometry g = DsaGeometry::from_config(cfg);
     const int heads = cfg.index_n_heads;
     const int dim = cfg.index_head_dim;
-    dev.reserve(15);
-    storage.reserve(14);
+    dev.reserve(40);
+    storage.reserve(20);
+    q_storage.reserve(4);
+    s_storage.reserve(4);
     // Host bits live in `storage` (a reused local would dangle the views).
     // Returns BOTH pointers: `host` for the reference oracle (CPU), `dev`
     // for the layer (GPU) — mixing them up segfaults spectacularly.
@@ -2088,28 +2098,90 @@ struct TestWeights {
     p = up_bf16(wbits(seed ^ 0xF6, dim));
     host.k_norm_b = p.host;
     layer_views.k_norm_b = p.dev;
-    p = up_bf16(wbits(seed ^ 0x179,
-                      int64_t(cfg.q_lora_rank + cfg.kv_lora_rank) * cfg.hidden));
-    host.qkv_a = p.host;
-    layer_views.qkv_a = p.dev;
+    // A quantized [rows, cols] matrix: random e4m3 (NaN codes remapped),
+    // random block scales; returns its dequantized bf16 bits and uploads
+    // the pair; the GlmQuantMatrix view points at the device pair.
+    const auto make_quant = [&](uint64_t sd, int64_t rows, int64_t cols,
+                                GlmQuantMatrix* view) -> std::vector<uint16_t> {
+      std::vector<uint8_t> payload(size_t(rows) * cols);
+      for (size_t i = 0; i < payload.size(); ++i) {
+        uint8_t b = static_cast<uint8_t>(random_f32(sd, int64_t(i)) * 256.f) & 0x7F;
+        if ((b & 0x7F) > 0x5F) b &= 0x5F;                    // |w| <= 2^7, no NaN
+        if (random_f32(sd ^ 0x55, int64_t(i)) > 0.5f) b |= 0x80;
+        payload[i] = b;
+      }
+      const int64_t sr = (rows + 127) / 128, sc = (cols + 127) / 128;
+      std::vector<float> scales(size_t(sr) * sc);
+      for (size_t i = 0; i < scales.size(); ++i)
+        scales[i] = 0.004f + 0.012f * random_f32(sd ^ 0x99, int64_t(i));
+      std::vector<uint16_t> deq(size_t(rows) * cols);
+      for (int64_t r = 0; r < rows; ++r)
+        for (int64_t c = 0; c < cols; ++c)
+          deq[size_t(r) * cols + c] = float_to_bf16_bits(
+              fp8_e4m3_bits_to_float(payload[size_t(r) * cols + c]) *
+              scales[size_t(r / 128) * sc + c / 128]);
+      q_storage.push_back(std::move(payload));
+      s_storage.push_back(std::move(scales));
+      dev.emplace_back(q_storage.back().size());
+      dev.back().upload(q_storage.back().data(), q_storage.back().size());
+      view->payload = static_cast<const uint8_t*>(dev.back().p);
+      dev.emplace_back(s_storage.back().size() * 4);
+      dev.back().upload(s_storage.back().data(), s_storage.back().size() * 4);
+      view->scales = static_cast<const float*>(dev.back().p);
+      view->rows = rows;
+      view->cols = cols;
+      return deq;
+    };
+    if (fp8_projections) {
+      std::vector<uint16_t> qa = make_quant(seed ^ 0x179, cfg.q_lora_rank, cfg.hidden,
+                                            &layer_views.q_a_q);
+      std::vector<uint16_t> kva = make_quant(seed ^ 0x17A, cfg.kv_lora_rank, cfg.hidden,
+                                             &layer_views.kv_a_q);
+      qa.insert(qa.end(), kva.begin(), kva.end());  // the fused bf16 [q_a | kv_a]
+      p = up_bf16(std::move(qa));
+      host.qkv_a = p.host;
+      bridge_views.qkv_a = p.dev;
+      layer_views.qkv_a = nullptr;
+    } else {
+      p = up_bf16(wbits(seed ^ 0x179,
+                        int64_t(cfg.q_lora_rank + cfg.kv_lora_rank) * cfg.hidden));
+      host.qkv_a = p.host;
+      layer_views.qkv_a = p.dev;
+    }
     p = up_bf16(wbits(seed ^ 0x28A, cfg.q_lora_rank));
     host.q_aln = p.host;
     layer_views.q_aln = p.dev;
     p = up_bf16(wbits(seed ^ 0x39B, cfg.kv_lora_rank));
     host.kv_aln = p.host;
     layer_views.kv_aln = p.dev;
-    p = up_bf16(wbits(seed ^ 0x4AC, int64_t(g.local_q_rows) * cfg.q_lora_rank));
-    host.q_b = p.host;
-    layer_views.q_b = p.dev;
+    if (fp8_projections) {
+      p = up_bf16(make_quant(seed ^ 0x4AC, g.local_q_rows, cfg.q_lora_rank,
+                             &layer_views.q_b_q));
+      host.q_b = p.host;
+      bridge_views.q_b = p.dev;
+      layer_views.q_b = nullptr;
+    } else {
+      p = up_bf16(wbits(seed ^ 0x4AC, int64_t(g.local_q_rows) * cfg.q_lora_rank));
+      host.q_b = p.host;
+      layer_views.q_b = p.dev;
+    }
     p = up_bf16(wbits(seed ^ 0x5BD,
                       int64_t(g.local_heads) *
                           (cfg.qk_nope_head_dim + cfg.v_head_dim) *
                           cfg.kv_lora_rank));
     host.kv_b = p.host;
     layer_views.kv_b = p.dev;
-    p = up_bf16(wbits(seed ^ 0x6CE, int64_t(cfg.hidden) * g.local_v_rows));
-    host.o_proj = p.host;
-    layer_views.o_proj = p.dev;
+    if (fp8_projections) {
+      p = up_bf16(make_quant(seed ^ 0x6CE, cfg.hidden, g.local_v_rows,
+                             &layer_views.o_proj_q));
+      host.o_proj = p.host;
+      bridge_views.o_proj = p.dev;
+      layer_views.o_proj = nullptr;
+    } else {
+      p = up_bf16(wbits(seed ^ 0x6CE, int64_t(cfg.hidden) * g.local_v_rows));
+      host.o_proj = p.host;
+      layer_views.o_proj = p.dev;
+    }
     ape.resize(size_t(cfg.index_kpool) * dim);
     for (size_t i = 0; i < ape.size(); ++i)
       ape[i] = random_f32(seed, int64_t(i)) * 0.2f - 0.1f;
@@ -2117,6 +2189,19 @@ struct TestWeights {
     dev.back().upload(ape.data(), ape.size() * 4);
     host.ape = ape.data();
     layer_views.ape = static_cast<const float*>(dev.back().p);
+    if (fp8_projections) {
+      // The bridge form: every other view shared, the three bf16 buffers
+      // holding the same dequantized values the pairs decode to.
+      DsaLayerWeights b = layer_views;
+      b.q_a_q = GlmQuantMatrix{};
+      b.kv_a_q = GlmQuantMatrix{};
+      b.q_b_q = GlmQuantMatrix{};
+      b.o_proj_q = GlmQuantMatrix{};
+      b.qkv_a = bridge_views.qkv_a;
+      b.q_b = bridge_views.q_b;
+      b.o_proj = bridge_views.o_proj;
+      bridge_views = b;
+    }
   }
 };
 
@@ -2608,6 +2693,61 @@ DGPP_TEST(dsa_state_pool_block_allocation_and_accounting) {
     throw std::runtime_error("deployment accounting off by " +
                              std::to_string(frac * 100.0) + "%");
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
+}
+
+// The FP8 projections (2026-09-08): the layer fed the checkpoint's pairs
+// through the scale-aware GEMM, against the host reference over the same
+// dequantized values — the gate the bf16 bridge form passes, run on both
+// forms of the same weights.
+DGPP_TEST(dsa_layer_prefill_fp8_projections_match_reference) {
+  cudaStream_t s = dgpp::kda_test::test_stream();
+  const DsaConfig cfg = small_cfg();
+  const DsaGeometry g = DsaGeometry::from_config(cfg);
+  const int T = 96;
+  TestWeights tw(cfg, 4200, /*fp8_projections=*/true);
+  if (!tw.layer_views.quantized() || tw.bridge_views.quantized())
+    throw std::runtime_error("fp8 test weights must carry both forms");
+  const std::vector<uint16_t> hidden =
+      random_bf16_bits(4201, int64_t(T) * cfg.hidden, -2, 1);
+  dsa_ref::HostState ref;
+  ref.reset(cfg, T);
+  std::vector<uint16_t> ref_out(size_t(T) * cfg.hidden);
+  std::vector<int32_t> ref_topk(size_t(T) * g.max_selected);
+  dsa_ref::layer_forward<float>(tw.host, cfg, hidden.data(), ref, 0, T,
+                                ref_out.data(), ref_topk.data());
+  for (const DsaLayerWeights* w : {&tw.layer_views, &tw.bridge_views}) {
+    const char* label = w->quantized() ? "layer prefill (fp8 projections)"
+                                       : "layer prefill (bridge form)";
+    LayerEnv env(cfg, T, T, 2, 4 * cfg.block_tokens, s);
+    DsaStatePool pool;
+    pool.init(env.arena, cfg, 2, 4 * cfg.block_tokens);
+    DsaLayer layer(env.gemm, *w, cfg, T, T,
+                   env.arena.alloc_persistent(MemClass::DeviceHot,
+                                              DsaLayer::scratch_bytes(cfg, T, T),
+                                              256),
+                   DsaLayer::scratch_bytes(cfg, T, T), env.ws.p, env.ws.bytes);
+    if (!layer.prepare(T)) throw std::runtime_error("gemm plans unavailable");
+    DevBuf din(hidden.size() * 2), dout(size_t(T) * cfg.hidden * 2);
+    din.upload(hidden.data(), hidden.size() * 2);
+    layer.enqueue_prefill(din.p, pool, 0, 0, 0, T, dout.p, s);
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    PhaseInputs phase;
+    capture_phase_inputs(layer, tw.host, cfg, hidden.data(), 0, T, phase, s);
+    std::vector<uint16_t> got_out(size_t(T) * cfg.hidden);
+    dout.download(got_out.data(), got_out.size() * 2);
+    std::vector<int32_t> got_topk(size_t(T) * g.max_selected);
+    DGPP_CUDA_OK(cudaMemcpyAsync(got_topk.data(), layer.debug_topk(),
+                                 got_topk.size() * 4, cudaMemcpyDeviceToHost, s));
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    const std::vector<PhaseInputs> phases{std::move(phase)};
+    dsa_test::NearTieAudit audit_stats{};
+    const RowAuditor audit = make_near_tie_auditor(cfg, g, pool, 0, s, phases,
+                                                   ref, &audit_stats);
+    require_output_matches(cfg, g, got_out, ref_out, got_topk, ref_topk, label,
+                           audit);
+    print_near_tie_audit(label, audit_stats);
+    require_cache_matches(pool, 0, 0, ref, s);
+  }
 }
 
 DGPP_TEST(dsa_layer_prefill_matches_reference) {

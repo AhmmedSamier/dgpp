@@ -88,6 +88,27 @@ The history by milestone. The dated engineering record in
   128-row m-tile is more than half padding at ~57 rows per expert; the
   restructure is `docs/nvfp4_plan.md` §6a (phase 5).
 
+- The DSA attention projections consumed as FP8 directly (the "bridge"
+  item of `docs/nvfp4_plan.md`): q_a, kv_a, q_b and o_proj — FP8 pairs in
+  every checkpoint — were dequantized to BF16 at load (the M3 seam) and
+  read at twice their bytes on every step. The loader now keeps them as
+  the checkpoint's pairs whenever this rank's q_b row slice and o_proj
+  column slice start on the 128-wide scale grid (every power-of-two world
+  of the production geometry; the bf16 bridge remains for misaligned
+  slices — the test fixtures at world 4), `DsaLayerWeights` carries either
+  form, and the layer's three projections run through the scale-aware
+  GEMM (which gained an output row stride so the fused [q_a | kv_a]
+  output takes two pairs into one buffer). `GlmTpViews` slices the pairs
+  at aligned worlds and dequantizes the full pairs itself (the loader's
+  kernel and rounding) for the bridge form at misaligned ones, so the
+  shard-parity gate pins both forms bitwise against the sharded loader.
+  The resident image format version is 2 (bridge-layout images are not
+  restored). Gates: `dsa_test`'s new prefill case runs the same weights
+  in both forms against the host reference; `glm_loader_test` checks the
+  pairs byte-exact; shard parity at worlds 2 (direct) and 4 (bridge).
+  Applies to the FP8 model and the hybrid alike: 0.35 GB per token per
+  rank fewer over the 11 DSA layers.
+
 - MTP depth 2 re-measured on the NVFP4 hybrid through the serve path: 4-6 %
   faster per token on 300-token prose, code and JSON answers at short
   context (2.5 tokens per step, the second draft standing 59-61 %), 6.6 %

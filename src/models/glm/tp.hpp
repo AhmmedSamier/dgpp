@@ -136,6 +136,13 @@ class GlmTpViews {
   uint8_t* slab_ = nullptr;
   size_t slab_bytes_ = 0;
   uint8_t* expert_pack_ = nullptr;  // lazily allocated (bind() only)
+  // The DSA bridge form out of a full-load resident that holds the FP8
+  // pairs (2026-09-08): at a world whose q_b / o_proj slices start
+  // mid-block, the sharded loader takes the bf16 bridge, so the views
+  // dequantize the full pairs here (the loader's kernel, the same
+  // rounding) and slice the bf16 — [qkv_a fused | q_b full | o_proj full].
+  uint8_t* dsa_bridge_ = nullptr;
+  size_t dsa_bridge_bytes_ = 0;
 
   // Last-bound views (owned; rebind overwrites them).
   GlmLayerBound bound_{};
