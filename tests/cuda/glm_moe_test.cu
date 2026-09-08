@@ -1473,6 +1473,41 @@ DGPP_TEST(moe_grouped_mma_fp4_is_bitwise_the_dense_form_per_segment) {
       cudaFree(d_map_ref);
       cudaFree(d_rows);
     }
+    // The unaligned activation path (rows not 16-byte aligned: the
+    // pipelined kernel's plain-copy fallback beside its cp.async path):
+    // the same rows from a base offset by 4 elements, bitwise the dense
+    // reference over the same offset rows.
+    {
+      uint16_t *d_un = nullptr, *d_un_ref = nullptr;
+      DGPP_CUDA_OK(cudaMallocManaged(&d_un, gate_bytes));
+      DGPP_CUDA_OK(cudaMallocManaged(&d_un_ref, gate_bytes));
+      DGPP_CUDA_OK(cudaMemset(d_un, 0xA5, gate_bytes));
+      DGPP_CUDA_OK(cudaMemset(d_un_ref, 0x5A, gate_bytes));
+      // A padded copy of the rows at an 8-byte offset (not 16-byte aligned;
+      // the offset alone would run the last row past the buffer's end).
+      uint16_t* d_pad = nullptr;
+      const size_t hidden_elems = static_cast<size_t>(kRows) * H;
+      DGPP_CUDA_OK(cudaMallocManaged(&d_pad, (hidden_elems + 16) * 2));
+      std::memcpy(d_pad + 4, c.d_hidden, hidden_elems * 2);
+      const uint16_t* base = d_pad + 4;
+      dgpp::launch_moe_grouped_mma_fp4_bf16(base, H, d_segs, static_cast<int>(segs.size()),
+                                            245, 0, d_views, 0, d_un, I, I, H, nullptr);
+      for (const dgpp::MoeSegment& sg : segs)
+        dgpp::launch_dense_mma_fp4_bf16(base + static_cast<size_t>(sg.row0) * H, H,
+                                        c.expert_mats_fp4[sg.expert * 3 + 0],
+                                        d_un_ref + static_cast<size_t>(sg.row0) * I, sg.rows,
+                                        I, H, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      require(std::memcmp(d_un, d_un_ref, gate_bytes) == 0,
+              "fp4 grouped mma over unaligned activation rows bitwise the dense form");
+      // And the same values as the aligned launch: the fallback path is
+      // the cp.async path's twin.
+      require(std::memcmp(d_un, d_grouped, gate_bytes) == 0,
+              "fp4 grouped mma: unaligned rows bitwise the aligned launch");
+      cudaFree(d_pad);
+      cudaFree(d_un);
+      cudaFree(d_un_ref);
+    }
     // down: fp32 out, k = I (208: a ragged last stage; 320: five whole).
     const size_t down_bytes = static_cast<size_t>(kRows) * H * 4;
     float *d_gd = nullptr, *d_rd = nullptr;
@@ -1496,7 +1531,7 @@ DGPP_TEST(moe_grouped_mma_fp4_is_bitwise_the_dense_form_per_segment) {
     for (size_t i = 0; i < static_cast<size_t>(kRows) * I; ++i)
       require(std::isfinite(dgpp::bf16_bits_to_float(d_grouped[i])), "fp4 mma gate finite");
     std::printf("[ OK ] fp4 grouped mma I=%d: %zu segments (1..245 rows) bitwise the "
-                "dense form, gate bf16 + row map + down fp32\n",
+                "dense form, gate bf16 + row map + unaligned rows + down fp32\n",
                 I, segs.size());
     cudaFree(d_gd);
     cudaFree(d_rd);

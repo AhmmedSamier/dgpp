@@ -59,7 +59,7 @@ std::vector<double> oracle(const Slice& s, const std::vector<uint16_t>& act, int
 }
 
 std::vector<uint16_t> run(const Slice& s, const std::vector<uint16_t>& act, int m,
-                          bool mma = false) {
+                          int mma = 0) {
   uint8_t* payload = nullptr;
   uint8_t* scales = nullptr;
   float* global = nullptr;
@@ -75,10 +75,24 @@ std::vector<uint16_t> run(const Slice& s, const std::vector<uint16_t>& act, int 
   *global = s.global;
   std::memcpy(d_act, act.data(), act.size() * 2);
   const dgpp::GlmFp4Matrix w{payload, scales, global, s.n, s.k};
-  if (mma)
+  if (mma == 1) {
     dgpp::launch_dense_mma_fp4_bf16(d_act, s.k, w, out, m, s.n, s.k, nullptr);
-  else
+  } else if (mma == 2) {
+    // The pipelined grouped kernel over one segment (the prefill's path).
+    dgpp::MoeSegment* seg = nullptr;
+    dgpp::MoeExpertView* views = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&seg, sizeof(dgpp::MoeSegment)));
+    DGPP_CUDA_OK(cudaMallocManaged(&views, 3 * sizeof(dgpp::MoeExpertView)));
+    *seg = dgpp::MoeSegment{0, m, 0};
+    for (int i = 0; i < 3; ++i) views[i] = dgpp::MoeExpertView::of(w);
+    dgpp::launch_moe_grouped_mma_fp4_bf16(d_act, s.k, seg, 1, m, /*rows_per_block=*/0,
+                                          views, 0, out, s.n, s.n, s.k, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    cudaFree(seg);
+    cudaFree(views);
+  } else {
     dgpp::launch_fp4_gemv_bf16(d_act, s.k, w, out, m, s.n, s.k, nullptr);
+  }
   DGPP_CUDA_OK(cudaDeviceSynchronize());
   std::vector<uint16_t> got(static_cast<size_t>(m) * s.n);
   std::memcpy(got.data(), out, got.size() * 2);
@@ -154,19 +168,33 @@ int run_fp4_gemv_checkpoint_parity(const char* checkpoint_dir) {
     }
     // The prefill's tensor-core form on the same slice (phase 3): within
     // the same budget of the oracle, and a row's bits independent of m.
-    const std::vector<uint16_t> got_mma = run(s, act, m, /*mma=*/true);
+    const std::vector<uint16_t> got_mma = run(s, act, m, /*mma=*/1);
     const auto rep_mma = compare_bf16_vs_oracle(got_mma.data(), want, 2.0, 1e-3);
-    std::printf("[ OK ] real slice, tensor-core form: l2_rel=%.3g mismatches=%ld/%zu\n",
+    std::printf("[ OK ] real slice, tensor-core reference: l2_rel=%.3g mismatches=%ld/%zu\n",
                 rep_mma.l2_rel, rep_mma.mismatches, rep_mma.total);
     require_report(rep_mma, 1e-3, 0, "fp4 real slice (mma) vs oracle");
     for (int r : {0, 17, 47}) {
       std::vector<uint16_t> row(act.begin() + static_cast<long>(r) * s.k,
                                 act.begin() + static_cast<long>(r + 1) * s.k);
-      const std::vector<uint16_t> got1 = run(s, row, 1, /*mma=*/true);
+      const std::vector<uint16_t> got1 = run(s, row, 1, /*mma=*/1);
       require(std::memcmp(got1.data(), got_mma.data() + static_cast<size_t>(r) * s.n,
                           static_cast<size_t>(s.n) * 2) == 0,
               "real slice (mma): row bits independent of m");
     }
+    // The pipelined grouped kernel: bitwise the reference on the real slice,
+    // at m = 48 and at m = 1.
+    const std::vector<uint16_t> got_pipe = run(s, act, m, /*mma=*/2);
+    require(std::memcmp(got_pipe.data(), got_mma.data(), got_pipe.size() * 2) == 0,
+            "real slice: pipelined grouped kernel bitwise the tile reference");
+    for (int r : {0, 17, 47}) {
+      std::vector<uint16_t> row(act.begin() + static_cast<long>(r) * s.k,
+                                act.begin() + static_cast<long>(r + 1) * s.k);
+      const std::vector<uint16_t> got1 = run(s, row, 1, /*mma=*/2);
+      require(std::memcmp(got1.data(), got_mma.data() + static_cast<size_t>(r) * s.n,
+                          static_cast<size_t>(s.n) * 2) == 0,
+              "real slice (pipelined): row bits independent of m");
+    }
+    std::printf("[ OK ] real slice, pipelined grouped kernel bitwise the reference\n");
   }
   std::printf("[ OK ] fp4 real-checkpoint slice parity (2 tensors)\n");
   return 0;

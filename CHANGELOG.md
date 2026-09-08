@@ -88,6 +88,22 @@ The history by milestone. The dated engineering record in
   128-row m-tile is more than half padding at ~57 rows per expert; the
   restructure is `docs/nvfp4_plan.md` §6a (phase 5).
 
+- NVFP4 routed experts, phase 5, the prefill tile kernel: a warp whose 16
+  rows lie entirely past a segment's end skips its MMAs (its rows are
+  never stored, so the outputs are bitwise), and `GlmMoeLayer` dispatches
+  the fp4 tile kernels by shape — the synchronous 128 x 64 x 64 tile for
+  gate/up, a pipelined 64 x 128 x 32 kernel (cp.async double-buffered
+  activation stages, the next stage's codes decoded after the MMA) for
+  the down projection, each the faster one on its shape. `moe_tile_bench`
+  times every variant per launch at the production expert shape with
+  uniform or ragged segments and checks the pipelined kernel bitwise
+  against the reference; a decomposition with the loads stubbed out shows
+  the gate launch is 58 % padded MMA + decode + barriers and the rest
+  un-overlapped operand loads (`docs/nvfp4_plan.md` §6a records the
+  numbers and what remains). Fabric, steady-state prefill on the hybrid:
+  512 tokens 563 ms, 2,048 tokens 1,502, 8,192 tokens 6,572 (phase 3:
+  635 / 1,563 / 6,796); transcript identical, all ranks identical.
+
 - NVFP4 routed experts, phase 4 — the hybrid serves. A site keeps one
   cluster config per checkpoint and names it on the command line
   (`deploy/cluster.*.json` is git-ignored beside `deploy/cluster.json`;

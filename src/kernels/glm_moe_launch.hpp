@@ -203,8 +203,11 @@ void launch_moe_slot_accum(uint16_t* out, const float* contrib,
 // the same tiles and mma.sync chain, the weight tile decoded from the NVFP4
 // triple exactly, the global scale dividing the finished dot in the
 // epilogue. k must be a multiple of 16 (any width — the fp4 GEMV core's
-// power-of-two set does not apply). The grouped form is bitwise the dense
-// form per segment; neither is bitwise the fp4 GEMV core (summation order).
+// power-of-two set does not apply). The grouped launcher runs the pipelined
+// 64 x 128 x 32 kernel (cp.async double-buffered stages); the dense launcher
+// runs the synchronous 128 x 64 x 64 tile reference; the two are bitwise
+// (glm_moe_test pins it per segment) — neither is bitwise the fp4 GEMV core
+// (summation order). rows_per_block, when used, is a multiple of 64.
 void launch_moe_grouped_mma_fp4_bf16(const uint16_t* act, size_t act_stride,
                                      const MoeSegment* segs, int n_segs,
                                      int max_rows, int rows_per_block,
@@ -219,6 +222,23 @@ void launch_moe_grouped_mma_fp4_f32(const uint16_t* act, size_t act_stride,
                                     float* out, size_t out_stride, int n, int k,
                                     cudaStream_t stream,
                                     const int32_t* act_rows = nullptr);
+// The reference kernel's grouped form (the microbench's A/B and the gate).
+void launch_moe_grouped_mma_fp4_ref_bf16(const uint16_t* act, size_t act_stride,
+                                         const MoeSegment* segs, int n_segs,
+                                         int max_rows, int rows_per_block,
+                                         const MoeExpertView* views, int which,
+                                         uint16_t* out, size_t out_stride, int n,
+                                         int k, cudaStream_t stream,
+                                         const int32_t* act_rows = nullptr,
+                                         int variant = 0);
+void launch_moe_grouped_mma_fp4_ref_f32(const uint16_t* act, size_t act_stride,
+                                        const MoeSegment* segs, int n_segs,
+                                        int max_rows, int rows_per_block,
+                                        const MoeExpertView* views, int which,
+                                        float* out, size_t out_stride, int n, int k,
+                                        cudaStream_t stream,
+                                        const int32_t* act_rows = nullptr,
+                                        int variant = 0);
 void launch_dense_mma_fp4_bf16(const uint16_t* act, size_t act_stride,
                                const GlmFp4Matrix& w, uint16_t* out, int m, int n,
                                int k, cudaStream_t stream);

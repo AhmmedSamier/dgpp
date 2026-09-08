@@ -648,6 +648,10 @@ target_link_libraries(kda_bench PRIVATE dgpp_models_kda CUDA::cudart CUDA::cubla
 dgpp_set_common(kda_bench)
 
 add_executable(moe_slot_bench benchmarks/micro/moe_slot_bench.cu src/common/log.cpp)
+add_executable(moe_tile_bench benchmarks/micro/moe_tile_bench.cu src/common/log.cpp)
+target_include_directories(moe_tile_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(moe_tile_bench PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart CUDA::cublasLt)
+dgpp_set_common(moe_tile_bench)
 target_include_directories(moe_slot_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(moe_slot_bench PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart CUDA::cublasLt)
 dgpp_set_common(moe_slot_bench)

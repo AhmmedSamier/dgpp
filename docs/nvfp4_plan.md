@@ -413,6 +413,35 @@ floor only fewer bytes or more tokens per step move the number.
   token, 1.69 tok/step at 64 % acceptance (unchanged), 200 tokens in
   5.69 s over HTTP (the hybrid: 4.97), four identical op-stream md5s.
   Both worlds were torn down afterwards; the cluster is left down.
+- Phase 5, the prefill tile kernel (2026-09-08): `moe_tile_bench` (the
+  routed experts of one layer at the production shape, uniform or ragged
+  segments, every kernel variant timed per launch, the pipelined kernel
+  checked bitwise against the reference) and a decomposition of the
+  reference kernel with its loads stubbed out settled where the time
+  goes. Gate shape at 2,048 tokens (ragged, ~57 rows/expert): 3.95 ms per
+  launch; with no weight loads 3.16, no activation loads 3.02, neither
+  2.30 — the padded MMA, decode and barriers alone are 58 % of the launch
+  at ~74 TFLOP/s of padded work (cuBLASLt's bf16 rate here is ~95), and
+  the operand loads add ~1.65 ms because nothing overlaps them. Skipping
+  the MMAs of a warp whose 16 rows are all padding (bitwise: those rows
+  are never stored) took the floor to 1.70 and the launch to 3.81. At
+  8,192 tokens the extra cost is the weight tile re-read once per
+  128-row m-tile of a long segment (~4 ms of the 9.8). Tile width (64 vs
+  128), stage depth (32 vs 64) and occupancy (3 vs 4 blocks/SM) moved
+  nothing on the synchronous structure — except that 2 blocks/SM is a
+  cliff (6.1 ms) — so the reference's shape stays. The pipelined 64 x
+  128 x 32 cp.async kernel wins the down shape (3.76 vs 4.13) and loses
+  the gate shape (5.05 vs 3.81): `GlmMoeLayer` now dispatches by shape.
+  Fabric: prefill 563 / 1,502 / 6,572 ms at 512 / 2,048 / 8,192 (phase 3:
+  635 / 1,563 / 6,796; FP8 740 / 1,725 / 7,463); expert launches per
+  2,048-token prefill 525 ms (gate/up 4.37, down 3.76 ms per launch);
+  transcript identical. Left for this kernel, with the measured reason:
+  a multistage cp.async pipeline (3-4 stages of a 64-deep A tile plus the
+  raw fp4 codes, the decode off the ring) and a taller block tile so a
+  long segment reads its weights once — the remaining ~2 ms per launch
+  of un-overlapped loads and the 8K re-reads. Nsight Compute needs
+  `NVreg_RestrictProfilingToAdminUsers=0` on the head to read counters
+  (ERR_NVGPUCTRPERM as this user).
 
 ## 7. Order of work and estimates
 
