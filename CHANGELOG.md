@@ -88,6 +88,15 @@ The history by milestone. The dated engineering record in
   128-row m-tile is more than half padding at ~57 rows per expert; the
   restructure is `docs/nvfp4_plan.md` §6a (phase 5).
 
+- NVFP4 routed experts, phase 5, the decode core: one row step per warp in
+  the fp4 GEMV core instead of two (`fp4_gemv::kSteps`) — twice the blocks
+  per launch, four loads in flight per lane — after a sweep of the core's
+  tunables on `moe_slot_bench` in which every "more per lane" direction
+  lost; 5-6.5 % faster per layer at 1, 2 and 8 rows in an alternated A/B,
+  outputs bitwise (a row's chain does not depend on the step count).
+  Fabric, the hybrid: T=1 28.0 -> 27.0 ms/step, MTP 36.6 -> 35.4 ms/step
+  (21.2 -> 20.5 ms/token), acceptance unchanged.
+
 - NVFP4 routed experts, phase 5, the prefill tile kernel: a warp whose 16
   rows lie entirely past a segment's end skips its MMAs (its rows are
   never stored, so the outputs are bitwise), and `GlmMoeLayer` dispatches

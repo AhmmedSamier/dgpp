@@ -442,6 +442,18 @@ floor only fewer bytes or more tokens per step move the number.
   of un-overlapped loads and the 8K re-reads. Nsight Compute needs
   `NVreg_RestrictProfilingToAdminUsers=0` on the head to read counters
   (ERR_NVGPUCTRPERM as this user).
+- Phase 5, the decode core (2026-09-08): `moe_slot_bench --format fp4`
+  swept the fp4 GEMV core's two tunables. More per lane is worse in every
+  direction (4 steps: +18 %; 8 chunks per lane: +29 %; both: +91 %); the
+  gate width cannot take fewer than 4 chunks per lane (128 chunks over 32
+  lanes). One row step per warp instead of two — twice the blocks, four
+  loads in flight per lane — is 5 / 6 / 6.5 % faster at 1 / 2 / 8 rows in
+  an alternated A/B of two binaries (199-204 vs 213 us per layer at one
+  row, 320-325 vs 341-348 at two, 893-896 vs 951-957 at eight), the fp4
+  core now at 177-181 GB/s of its bytes at one row against the fp8 core's
+  203 and 221 vs 240 at two. A row's chain is unchanged, so the outputs
+  are bitwise (the fp4 gates re-run). Fabric: T=1 28.0 -> 27.0 ms/step,
+  MTP 36.6 -> 35.4 ms/step (21.2 -> 20.5 ms/token), acceptance unchanged.
 
 ## 7. Order of work and estimates
 

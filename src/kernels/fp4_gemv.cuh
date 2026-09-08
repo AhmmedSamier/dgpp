@@ -60,7 +60,12 @@ using gemv::stage_activations;
 constexpr int kCodesPerChunk = 2 * kChunkBytes;   // 32
 constexpr int kGroup = 16;                        // codes per e4m3 scale
 constexpr int kMaxChunksPerLane = 4;
-constexpr int kSteps = 2;                         // row steps per warp
+// One row step per warp (2026-09-08, moe_slot_bench): two steps put eight
+// loads in flight per lane but halved the block count, and the launch
+// ran 10 % slower at one row and 6 % at two; more chunks per lane or more
+// steps were worse still. A row's chain is the same whatever the step
+// count, so the outputs are bitwise across the setting.
+constexpr int kSteps = 1;                         // row steps per warp
 constexpr int kMaxK = 4096;
 
 __host__ __device__ constexpr bool k_supported(int k) {
