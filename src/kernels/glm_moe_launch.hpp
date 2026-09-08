@@ -205,11 +205,15 @@ void launch_moe_slot_accum(uint16_t* out, const float* contrib,
 // the same tiles and mma.sync chain, the weight tile decoded from the NVFP4
 // triple exactly, the global scale dividing the finished dot in the
 // epilogue. k must be a multiple of 16 (any width — the fp4 GEMV core's
-// power-of-two set does not apply). The grouped launcher runs the pipelined
-// 64 x 128 x 32 kernel (cp.async double-buffered stages); the dense launcher
-// runs the synchronous 128 x 64 x 64 tile reference; the two are bitwise
+// power-of-two set does not apply). The grouped launcher runs the ldmatrix
+// kernel (2026-09-08: 64 x 128 x 64 tiles, a three-slot cp.async ring of the
+// activation tile and the RAW fp4 codes, B fragments decoded at fragment
+// time, one 64-row m-tile per block with the m-tile the fastest grid index,
+// the weight rows' next L2 line prefetched ahead); the dense launcher runs
+// the synchronous 128 x 64 x 64 tile reference; the two are bitwise
 // (glm_moe_test pins it per segment) — neither is bitwise the fp4 GEMV core
-// (summation order). rows_per_block, when used, is a multiple of 64.
+// (summation order). rows_per_block is accepted for the family's signature
+// and ignored by the grouped launcher (one m-tile per block always).
 void launch_moe_grouped_mma_fp4_bf16(const uint16_t* act, size_t act_stride,
                                      const MoeSegment* segs, int n_segs,
                                      int max_rows, int rows_per_block,

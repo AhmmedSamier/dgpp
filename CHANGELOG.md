@@ -6,6 +6,17 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- The fp4 prefill kernel, second pass: the ldmatrix tile kernel (64 x 128
+  x 64, a three-slot cp.async ring of the activation tile and the raw fp4
+  codes, B fragments decoded at fragment time, each weight row's next L2
+  line prefetched ahead, the activation lines tagged evict-last, one m-tile
+  per block with the m-tile the fastest grid index) is the production
+  launcher on both expert shapes — bitwise the reference; steady-state
+  prefill of the hybrid 563 / 1,502 / 6,572 -> 460 / 1,335 / 5,954 ms at
+  512 / 2,048 / 8,192 tokens, generated ids unchanged. glm_moe_test's odd
+  geometries caught misaligned copies at k = 208 (aligned-width fallbacks
+  added). The FP8 path is untouched.
+
 - The mHC site off the critical path: the fused finish leaves comb (the
   20-iteration Sinkhorn, 4.6 of its 8.6 us) to `launch_mhc_comb` on a
   low-priority side stream forked after the finish and joined before the

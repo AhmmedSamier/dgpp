@@ -442,6 +442,52 @@ floor only fewer bytes or more tokens per step move the number.
   of un-overlapped loads and the 8K re-reads. Nsight Compute needs
   `NVreg_RestrictProfilingToAdminUsers=0` on the head to read counters
   (ERR_NVGPUCTRPERM as this user).
+- Phase 5, the prefill kernel, second pass (2026-09-08 evening): the
+  ldmatrix fp4 tile kernel (`moe_grouped_mma_fp4_ldm_kernel`, bench
+  variant 13, now the production launcher on both shapes). Counters on the
+  three earlier forms said: the reference stalls on loads and barriers at
+  34 % issue, the 64 x 128 x 32 two-stage form on the MIO queue (20
+  LDS.32 per eight mma), the three-stage ring on its lone block's warps.
+  The new kernel: 64 x 128 x 64 tiles, eight warps as 1 (m64) x 8 (n16) so
+  every B fragment is decoded once per block and feeds four MMAs; A by
+  ldmatrix.x4; a three-slot cp.async ring (46.5 KB, two blocks per SM) of
+  the activation tile and the RAW fp4 codes and scales — no decoded bf16
+  tile: the B fragments are decoded at fragment time from one LDS.64 of a
+  row's 16-code group (cvt e2m1x2 -> f16x2, x scale in f16, -> bf16x2,
+  every step exact). Three findings made it fast, each measured:
+    * the DRAM saw 32-byte requests (a stage reads 32 bytes of each
+      weight row, rows 2 KB apart): a `prefetch.global.L2` of each row's
+      next 128-byte line, four stages ahead, took the gate from 4.84 to
+      3.33 ms (distance 1 line best; 2-3 within 3 %);
+    * a third of the activation re-reads across the four n-tile blocks
+      missed L2 while the weight stream passed through it: a
+      `prefetch.global.L2::evict_last` on each activation line before its
+      copy took the L2 read hit rate from 88 to 96 % (the cache-hinted
+      cp.async form faulted with an illegal instruction inside the kernel
+      although every form ran in a probe — not pursued);
+    * the m-tile as the FASTEST grid index, one 64-row m-tile per block:
+      a long segment's m-tiles run together and share its weight slice
+      through L2 (as blockIdx.z they ran a grid apart and the slice came
+      from DRAM per m-tile) — 8K gate 9.85 -> 5.0 ms.
+  Bench (ragged segments): gate 1.90 / 2.33 / 5.0 ms at 512 / 2,048 /
+  8,192 tokens against the reference tile's 2.76 / 3.70 / 9.9; down 2.03 /
+  3.20 / 7.89 against the two-stage kernel's 2.61 / 3.84 / 9.58. Bitwise
+  the reference on both shapes (the bench's checks, glm_moe_test's segment
+  pin — which caught a real bug: at k = 208 the 16-byte code copies and
+  4-byte scale copies were misaligned for odd rows; aligned-width
+  fallbacks now cover every k % 16 == 0). Fabric, steady-state prefill
+  (`ldm_prefill_2138`): 512 tokens 460 ms (was 563; FP8 740), 2,048
+  tokens 1,335 (1,502; FP8 1,725), 8,192 tokens 5,954 (6,572; FP8 7,463);
+  generated ids identical to every earlier phase-3/5 run at all three
+  lengths, all ranks identical; ctest 35/35. The kernel now runs at
+  ~146 GB/s of its weights on the 2K gate with L2 at half its peak and
+  DRAM at three quarters; issue active 21 % at 16 warps per SM — the
+  remaining structure cost. Next on the prefill, by size: the bus bulk
+  collectives (243 ms of the 2K prefill, paced transport), the KDA
+  recurrence (129, a sequential scan), the mHC tiled dots (105: a
+  tensor-core GEMM would take them to ~20 within the oracle budget, the
+  prefill/decode divergence at rounding level the expert path already
+  accepts), the down kernel's eight-stage blocks (prologue-exposed).
 - Phase 5, the decode core (2026-09-08): `moe_slot_bench --format fp4`
   swept the fp4 GEMV core's two tunables. More per lane is worse in every
   direction (4 steps: +18 %; 8 chunks per lane: +29 %; both: +91 %); the

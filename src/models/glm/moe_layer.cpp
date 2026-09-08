@@ -444,15 +444,15 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   // `routed` selects the routed experts' kernel family: the fp4 kernels
   // (tensor-core or GEMV) for NVFP4 tables, the fp8 ones otherwise; the
   // shared segment (FP8 under both formats) always takes the fp8 kernels.
-  // The fp4 tile kernels by shape (moe_tile_bench, 2026-09-08): the
-  // reference tile (128 x 64 x 64) is the faster on the gate/up shape (n =
-  // I_r, k = H: 3.8 vs 5.0 ms per launch at 2,048 tokens), the pipelined
-  // 64 x 128 x 32 on the down shape (n = H, k = I_r: 3.8 vs 4.1).
+  // The fp4 tile kernel is the ldmatrix kernel on both shapes (2026-09-08
+  // evening, moe_tile_bench: gate 2.37 vs the reference tile's 3.70 ms per
+  // launch at 2,048 tokens, 5.0 vs 9.9 at 8,192; down 3.21 vs the two-stage
+  // kernel's 3.84, 7.89 vs 9.58) — launch_moe_grouped_mma_fp4_{bf16,f32}.
   auto gemm_bf16 = [&](const MoeSegment* sg, int ns, int mr, int split, int which,
                        uint16_t* out, int n, bool routed) {
     if (mma && routed && fp4)
-      launch_moe_grouped_mma_fp4_ref_bf16(hidden, H, sg, ns, mr, split, d_views_prefill_,
-                                          which, out, I_max, n, H, stream, d_rows_);
+      launch_moe_grouped_mma_fp4_bf16(hidden, H, sg, ns, mr, split, d_views_prefill_,
+                                      which, out, I_max, n, H, stream, d_rows_);
     else if (mma)
       launch_moe_grouped_mma_bf16(hidden, H, sg, ns, mr, split, d_views_prefill_,
                                   which, out, I_max, n, H, stream, d_rows_);
