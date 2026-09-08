@@ -88,6 +88,12 @@ The history by milestone. The dated engineering record in
   128-row m-tile is more than half padding at ~57 rows per expert; the
   restructure is `docs/nvfp4_plan.md` §6a (phase 5).
 
+- MTP depth 2 re-measured on the NVFP4 hybrid through the serve path: 4-6 %
+  faster per token on 300-token prose, code and JSON answers at short
+  context (2.5 tokens per step, the second draft standing 59-61 %), 6.6 %
+  slower at a 7,368-token context (the second draft standing 41 %). Depth
+  1 stays the default; the numbers are in `docs/nvfp4_plan.md` §6a.
+
 - NVFP4 routed experts, phase 5, the decode core: one row step per warp in
   the fp4 GEMV core instead of two (`fp4_gemv::kSteps`) — twice the blocks
   per launch, four loads in flight per lane — after a sweep of the core's

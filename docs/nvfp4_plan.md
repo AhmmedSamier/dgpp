@@ -454,6 +454,17 @@ floor only fewer bytes or more tokens per step move the number.
   203 and 221 vs 240 at two. A row's chain is unchanged, so the outputs
   are bitwise (the fp4 gates re-run). Fabric: T=1 28.0 -> 27.0 ms/step,
   MTP 36.6 -> 35.4 ms/step (21.2 -> 20.5 ms/token), acceptance unchanged.
+- Phase 5, MTP depth 2 on the hybrid (2026-09-08, the serve path,
+  `--knobs "--mtp-depth 2"`, 300-token answers): short prompts 17.4-17.5
+  ms/token at depth 2 vs 18.5-18.6 at depth 1 (43.2-43.8 vs 35.1-35.3 ms/
+  step, 2.49-2.51 vs 1.89-1.91 tok/step, p1 87-90 %, p2 59-61 %) — prose,
+  code and JSON all 4-6 % faster; at a 7,368-token context (summarize the
+  hard text) 21.0 vs 19.7 ms/token (45.2 vs 36.1 ms/step, 2.16 vs 1.83
+  tok/step, p1 74 %, p2 41 %) — 6.6 % slower. The same shape as the FP8
+  study: the second draft pays only where it stands, and it stands less
+  at long context. Depth 1 stays the default in `cluster.nvfp4.json`;
+  the lever remains per-request adaptive depth (both scalar variants
+  captured per slot, switched on the observed p2), not a global setting.
 
 ## 7. Order of work and estimates
 
