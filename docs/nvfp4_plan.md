@@ -502,6 +502,51 @@ floor only fewer bytes or more tokens per step move the number.
   extraction 100/100 on both. Identical replies on 109/164, 94/300 and
   70/100 items: the two models write different text of equal quality,
   the same conclusion the perplexity pair reached at the token level.
+- Decode budget of the hybrid, nsys on rank 0 over 300 graph replays
+  (`decode_budget_1736`), kernel time per step at T=1: KDA bf16 GEMVs 10.4
+  ms (2.34 GB at 257 GB/s — the DRAM ceiling), fp4 expert slot kernels 6.8
+  ms (gate_up 107 us and down 55 us per layer: ~210 GB/s of their bytes),
+  the in-graph collective kernel 3.2 ms (90 x 36 us against a 23 us
+  floor), the FP8 projections 2.0 ms (faster than DRAM: the prefetcher
+  has them in L2), mHC 1.5 ms in 180 launches, small kernels ~1.8 ms
+  (router 0.4, KDA recurrence 0.3, conv 0.15, norms, attention 0.3) —
+  which sums to the 26 ms step: no launch gap or idle is left. The
+  prefetch kernels themselves burn 10 ms of GPU time per step on the side
+  stream (180 launches), competing with the KDA GEMVs for DRAM inside the
+  attention layers. Under MTP the same picture scaled by the two rows.
+- A table decode for the fp4 GEMV core (the 256 bytes -> two e2m1 values
+  in shared memory, the group scale folded once per 8 codes) was neutral
+  at 1-2 rows (194-197 vs 199-204 us per layer) and 4 % slower at 8 rows:
+  the core is not instruction-bound; reverted. The fp4-to-fp8 core gap
+  (181 vs 203 GB/s at one row) stays open pending hardware counters.
+- The collectives, `DGPP_BUS_TIMELINE=1` on the hybrid at T=1
+  (`bus_timeline_1744`): 33 us per collective, 90 per step = copy 3.2 +
+  handshake 12 (the first peer's payload after this rank staged) + skew
+  14.7 (the last peer's) + fold 3.5; engine post 2.0. Every rank's own
+  skew is 14 us and no rank is consistently slow (rank 2 arrives last 51
+  of 90 times, rank 1 31, rank 3 8): jitter plus wire latency, as the
+  2026-09-06 study found — ~1.3 ms per step that only a protocol change
+  (speculative posting, fewer collectives) would recover. Parked. The
+  prefetch layer windows: off, T=1 27.0 and MTP 35.1 against 26.0 / 34.4
+  on — they pay; the defaults stand.
+- The launch seam in the serve path (`serve_seam_1745`, one live request,
+  `DGPP_PIPELINE_TRACE=1`): launch-to-launch 27.0 ms at T=1 (the app's
+  step 26.0: ~1 ms of host work exposed with no draft tail to hide it)
+  and 34.0 under MTP (the app's 34.4: hidden entirely by the draft block's
+  tail). The adapter already launches replay N before settling N-1, so
+  with MTP — the production configuration — the ahead-launch machinery
+  of the decode ledger would buy nothing; parked as well.
+- The mHC update folded into the next site's dots kernel (each of the
+  24 blocks recomputing the updated streams into shared memory, block 0
+  writing them, the finish reading them behind the fences): bitwise the
+  pair on every output at every size, one graph node fewer per site — and
+  slower: T=1 27.0 vs 26.0 ms/step, MTP 35.4 vs 34.4. The 24-fold
+  redundant update (16K elements, five 16-byte loads per vector per block)
+  outweighs the 3 us launch it removes; a slice-per-block update would need
+  a grid-wide barrier inside the graph node. Reverted; the pair stays.
+  Net of this round of decode levers without quantization: the DSA
+  projections (1 ms) landed; the fp4 core, the collectives, the launch
+  seam and the mHC fusion are measured and parked with their reasons.
 
 ## 7. Order of work and estimates
 
