@@ -6,6 +6,19 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- The fp4 GEMV core decodes with GB10's own e2m1x2 -> f16x2 conversion and
+  one exact f16 multiply by the group scale (bitwise the register decode;
+  the build moves to the architecture-specific target `121a`), the
+  activation window read once per chunk column; the decode slot path
+  204 -> 195 us per MoE layer at one row, MTP 20.04 -> 19.96 ms/token on
+  the hybrid. Hardware counters (Nsight Compute as root) and a no-arithmetic
+  probe of the same access pattern put both fp4 slot kernels at 90-93 % of
+  their streaming floor; a persistent grid-stride form with next-tile
+  lookahead, the paired gate/up issue, more row steps, four blocks per SM,
+  the router's unroll and block width, and programmatic dependent launch
+  across the graph's seams were each measured and parked
+  (`docs/nvfp4_plan.md` §6a).
+
 - NVFP4 routed experts, phase 1 of `docs/nvfp4_plan.md` — the format is
   loadable. The composed checkpoint `dgpp/GLM-5.3-Flash-NVFP4-FP8`
   (`tools/compose_nvfp4_hybrid.py`: dabsLabs' NVFP4 experts for layers

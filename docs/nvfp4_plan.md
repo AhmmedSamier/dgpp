@@ -547,6 +547,56 @@ floor only fewer bytes or more tokens per step move the number.
   Net of this round of decode levers without quantization: the DSA
   projections (1 ms) landed; the fp4 core, the collectives, the launch
   seam and the mHC fusion are measured and parked with their reasons.
+- Hardware counters on the decode slot kernels (Nsight Compute as root:
+  `sudo -n /usr/local/cuda/bin/ncu`, the profiling module left
+  admin-only; reports under the session scratchpad `ncu/`). Both fp4
+  kernels: 576 blocks, 4 per SM by registers, exactly three waves,
+  schedulers idle 74 % of cycles, long_scoreboard the dominant stall
+  (gate/up 10.4, down 14.8 cycles per issue); the fp4 gate/up alone
+  stalls 9.5 on the shared-memory pipe (short_scoreboard 6.1 +
+  mio_throttle 3.3; the fp8 kernel 7.8) — two codes per weight byte is
+  twice the activation reads per byte. The pipelined fp4 tile kernel: 16 %
+  warps active (one block per SM), stalls tiny per issue — starved of
+  warps, not of memory. What followed (commit 9491e3e, all bitwise, the
+  checkpoint's slices and glm_moe_test's twins): the activation window
+  loaded once per chunk column and reused across row steps (the steps
+  sweep re-run with it: one step 201, two 209, four 217 us at one row —
+  one step stays); gate and up issued together (neutral: ptxas had
+  hoisted them); the decode moved to GB10's `cvt.rn.f16x2.e2m1x2` (one
+  F2FP) plus one exact f16x2 multiply by the e4m3 scale (every product
+  <= 5 significant bits in [2^-10, 2688], all f16 normals — the f32 is the
+  value the register decode produced), which needs the architecture-
+  specific target: CMAKE_CUDA_ARCHITECTURES 121 -> 121a (the generic 121
+  takes cuda_fp4.h's software path, still bitwise). The gate/up kernel
+  111 -> 107 us, the slot path 204 -> 195 us per layer at one row; fabric
+  (`fp4core_1853`): T=1 26.0 -> 26.0 (integer-ms log), MTP 34.36 -> 34.21
+  ms/step, 20.04 -> 19.96 ms/token, transcript identical.
+  Then the floors, which close the fp4 core item: a probe kernel with
+  the gate/up kernel's exact grid and loads and no arithmetic streams at
+  238 GB/s (a plain 1 GiB read: 234); the kernel reads 23.1 MB (the
+  shared expert's fp8 rows included) in 107 us = 216 GB/s, 93 % of its
+  floor; the down 11.5 MB in 54 us = 90 %. A persistent grid-stride form
+  of both kernels (a block walks (slot, row block) tiles holding the next
+  tile's loads in registers while decoding the current one, activations
+  double-buffered in smem, one barrier per tile; 128 registers at two
+  blocks per SM) is bitwise and NOT faster: gate/up 104.3 vs 104.8 us,
+  down 54.0 vs 55.8 at one row, 186 vs 184 and 91 vs 94 at two — parked,
+  patch kept in the session scratchpad. Pinning the block gate/up kernel
+  to four blocks per SM (80 -> 64 registers) spilled and ran 5 % slower.
+  The router's 17 us is its serial fused select, not its loads (the dot
+  loop's unroll 4/8/16 and 2 or 8 warps per block: all 17 us).
+  Programmatic dependent launch inside stream-captured graphs, probed on
+  a chain of three 3-wave memory-bound kernels: 259 us plain, 256 with
+  the wait at the top, 257 prefetching weights before the wait — the
+  graph's seams cost nothing measurable when DRAM is the bottleneck;
+  parked with the serve-path seam above. The L2 prefetch windows were
+  swept earlier (8/12/16/24 MB alike). What is left on the decode path
+  without a quantization decision: ~0.5 ms in the slot kernels' last 7-10
+  % (no cheap form found), ~0.2 ms in the router select, ~0.3 ms if the
+  mHC update ran once per site behind a grid barrier (cooperative launch
+  in the graph, untested), ~0.3 ms of local copy+fold in the collectives;
+  the KDA bf16 GEMVs (10.4 ms at the DRAM ceiling) remain the one large
+  lever and it is a quantization decision.
 
 ## 7. Order of work and estimates
 
