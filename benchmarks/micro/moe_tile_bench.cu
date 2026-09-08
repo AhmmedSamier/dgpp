@@ -169,12 +169,21 @@ int main(int argc, char** argv) {
                 gb / ms * 1e3, flop_gu / ms * 1e3);
   };
   std::printf("gate [%zu x %d] x [%d x %d]^T:\n", rows_total, H, I, H);
-  report("fp8 tile kernel", time_ms(stream, iters, [&] {
+  moe_set_fp8_ldm(false);
+  report("fp8 reference tile kernel", time_ms(stream, iters, [&] {
     launch_moe_grouped_mma_bf16(d_hidden, H, d_segs, E, max_rows, 0, d_v8, 0, d_gate, I, I, H, stream);
   }), gb_gu8);
-  report("fp8 tile kernel, z split 128", time_ms(stream, iters, [&] {
-    launch_moe_grouped_mma_bf16(d_hidden, H, d_segs, E, max_rows, 128, d_v8, 0, d_gate, I, I, H, stream);
+  moe_set_fp8_ldm(true);
+  report("fp8 ldmatrix kernel (production)", time_ms(stream, iters, [&] {
+    launch_moe_grouped_mma_bf16(d_hidden, H, d_segs, E, max_rows, 0, d_v8, 0, d_gate2, I, I, H, stream);
   }), gb_gu8);
+  {
+    std::vector<uint16_t> a(rows_total * I), b(rows_total * I);
+    DGPP_CUDA_OK(cudaMemcpy(a.data(), d_gate, a.size() * 2, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(b.data(), d_gate2, b.size() * 2, cudaMemcpyDeviceToHost));
+    std::printf("  gate: fp8 ldmatrix %s the fp8 reference\n",
+                std::memcmp(a.data(), b.data(), a.size() * 2) == 0 ? "BITWISE" : "DIFFERS FROM");
+  }
   report("fp4 reference tile kernel", time_ms(stream, iters, [&] {
     launch_moe_grouped_mma_fp4_ref_bf16(d_hidden, H, d_segs, E, max_rows, 0, d_v4, 0, d_gate, I, I, H, stream);
   }), gb_gu4);
@@ -247,12 +256,21 @@ int main(int argc, char** argv) {
                 std::memcmp(a.data(), b.data(), a.size() * 2) == 0 ? "BITWISE" : "DIFFERS FROM");
   }
   std::printf("down [%zu x %d] x [%d x %d]^T (f32 out):\n", rows_total, I, H, I);
-  report("fp8 tile kernel", time_ms(stream, iters, [&] {
+  moe_set_fp8_ldm(false);
+  report("fp8 reference tile kernel", time_ms(stream, iters, [&] {
     launch_moe_grouped_mma_f32(d_act, I, d_segs, E, max_rows, 0, d_v8, 2, d_down, H, H, I, stream);
   }), gb_dn8);
-  report("fp8 tile kernel, z split 128", time_ms(stream, iters, [&] {
-    launch_moe_grouped_mma_f32(d_act, I, d_segs, E, max_rows, 128, d_v8, 2, d_down, H, H, I, stream);
+  moe_set_fp8_ldm(true);
+  report("fp8 ldmatrix kernel (production)", time_ms(stream, iters, [&] {
+    launch_moe_grouped_mma_f32(d_act, I, d_segs, E, max_rows, 0, d_v8, 2, d_down2, H, H, I, stream);
   }), gb_dn8);
+  {
+    std::vector<float> a(rows_total * H), b(rows_total * H);
+    DGPP_CUDA_OK(cudaMemcpy(a.data(), d_down, a.size() * 4, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(b.data(), d_down2, b.size() * 4, cudaMemcpyDeviceToHost));
+    std::printf("  down: fp8 ldmatrix %s the fp8 reference\n",
+                std::memcmp(a.data(), b.data(), a.size() * 4) == 0 ? "BITWISE" : "DIFFERS FROM");
+  }
   report("fp4 reference tile kernel", time_ms(stream, iters, [&] {
     launch_moe_grouped_mma_fp4_ref_f32(d_act, I, d_segs, E, max_rows, 0, d_v4, 2, d_down, H, H, I, stream);
   }), gb_dn4);

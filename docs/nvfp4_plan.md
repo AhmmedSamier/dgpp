@@ -521,6 +521,29 @@ floor only fewer bytes or more tokens per step move the number.
   prompt's 2-step continuation flips at step 1 on a 0.049-logit margin —
   a certified near-tie flip (`fabric_xcript.py`: <= 1 bf16 ulp); all ranks
   identical; ctest 35/35.
+- Phase 5, the fp8 tile kernel ported to the ldmatrix form (2026-09-08
+  late): `moe_grouped_mma_fp8_ldm_kernel` — the fp4 kernel's structure for
+  FP8 block-scaled weights (the FP8 checkpoint's routed experts, both
+  checkpoints' shared experts): 32-deep stages so the doubled code bytes
+  keep two blocks per SM (four 11 KB slots), the stage's one 128 x 128
+  block scale cp.async'd into the slot with the tile, B fragments decoded
+  at fragment time as e4m3x2 -> f16x2 -> f32 x scale (RN) -> bf16 (RN),
+  the reference's roundings op for op — bitwise the reference tile kernel
+  (the bench's checks on both shapes at 512 / 2,048 / 8,192 tokens, the
+  segment pin in glm_moe_test). `launch_moe_grouped_mma_{bf16,f32}` run it
+  for k % 32 == 0 (the production 4096 and 512); other widths, the dense
+  form and the pin keep the reference (`moe_set_fp8_ldm(false)` for the
+  A/B). Bench, gate / down per launch: 512 tokens 4.23 -> 3.02 / 4.06 ->
+  3.37 ms; 2,048 tokens 5.41 -> 3.63 / 5.54 -> 4.60; 8,192 tokens 13.4 ->
+  7.1 / 13.5 -> 9.9. The down's remaining gap is its 268 MB of fp32
+  partial output per launch (the ordered accumulation's input) on top of
+  the 604 MB of weights: it runs at ~85 % of that floor. Fabric
+  (`fp8ldm_prefill_cluster_2240`, the FP8 checkpoint, the mHC GEMM form
+  included): 512 tokens 549 ms (740 this morning), 2,048 tokens 1,412
+  (1,725), 8,192 tokens 6,280 (7,463); the hybrid
+  (`fp8ldm_prefill_cluster.nvfp4_2242`, its shared experts): 425 / 1,275 /
+  5,702 (440 / 1,290 / 5,769); generated ids identical to the previous
+  runs on both; all ranks identical; ctest 35/35.
 - Phase 5, the decode core (2026-09-08): `moe_slot_bench --format fp4`
   swept the fp4 GEMV core's two tunables. More per lane is worse in every
   direction (4 steps: +18 %; 8 chunks per lane: +29 %; both: +91 %); the

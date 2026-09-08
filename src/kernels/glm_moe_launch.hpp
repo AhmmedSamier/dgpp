@@ -73,6 +73,10 @@ void launch_moe_grouped_gemv_f32(const uint16_t* act, size_t act_stride,
                                  int rows_per_block, const MoeExpertView* views,
                                  int which, float* out, size_t out_stride, int n,
                                  int k, cudaStream_t stream);
+// Bench A/B: the fp8 grouped GEMM's ldmatrix kernel (default) or the
+// reference tile kernel for every width.
+void moe_set_fp8_ldm(bool on);
+
 // The grouped tensor-core GEMM (2026-09-05): the same contract and
 // arguments, computed by bf16 mma.sync in 128-row m-tiles per block — every
 // output element bitwise the tile kernel's (scale_gemm_kernel: the same

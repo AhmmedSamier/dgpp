@@ -6,6 +6,13 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- The fp8 tile kernel ported to the ldmatrix form (32-deep stages, the
+  block scale copied with the tile, fragments decoded e4m3 -> f32 x scale
+  -> bf16 as the reference rounds them): bitwise the reference; the FP8
+  checkpoint's steady-state prefill 740 / 1,725 / 7,463 -> 549 / 1,412 /
+  6,280 ms at 512 / 2,048 / 8,192 tokens (with the mHC GEMM form), the
+  hybrid's shared experts 440 / 1,290 / 5,769 -> 425 / 1,275 / 5,702.
+
 - The prefill's mHC dots on tensor cores: a bf16 mma.sync GEMM over a
   cp.async ring with per-stage fp32 partials, the token's sum of squares
   gathered from the same tiles, then the standard finish; the sites no
