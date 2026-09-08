@@ -3,7 +3,10 @@ project(dgpp VERSION 0.1.0 LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_ARCHITECTURES 121)
+# 121a, not 121: the architecture-specific target unlocks GB10's own
+# instructions (the e2m1x2 -> f16x2 conversion the fp4 core decodes with,
+# 2026-09-08); the binaries run on CC 12.1 only, which is every node here.
+set(CMAKE_CUDA_ARCHITECTURES 121a)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(DGPP_WERROR "Treat compiler warnings as errors" OFF)

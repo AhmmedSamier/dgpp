@@ -39,6 +39,7 @@
 // 16-byte aligned. Scales are e4m3 bytes [n, K/16] row-major; NaN scale
 // codes (0x7F/0xFF) propagate as NaN.
 #include <cuda_fp16.h>
+#include <cuda_fp4.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
@@ -60,11 +61,13 @@ using gemv::stage_activations;
 constexpr int kCodesPerChunk = 2 * kChunkBytes;   // 32
 constexpr int kGroup = 16;                        // codes per e4m3 scale
 constexpr int kMaxChunksPerLane = 4;
-// One row step per warp (2026-09-08, moe_slot_bench): two steps put eight
-// loads in flight per lane but halved the block count, and the launch
-// ran 10 % slower at one row and 6 % at two; more chunks per lane or more
-// steps were worse still. A row's chain is the same whatever the step
-// count, so the outputs are bitwise across the setting.
+// One row step per warp (2026-09-08, moe_slot_bench, twice: with the
+// activation window re-read per step and with it loaded once per chunk
+// column): two steps put eight loads in flight per lane but halved the
+// block count, and the launch ran 4-10 % slower at one row; four steps
+// 8 %. The way to more loads in flight without fewer blocks is the pair
+// (warp_row_dots_pair: gate and up issued together). A row's chain is the
+// same whatever the step count, so the outputs are bitwise across it.
 constexpr int kSteps = 1;                         // row steps per warp
 constexpr int kMaxK = 4096;
 
@@ -104,8 +107,16 @@ __host__ __device__ constexpr int rows_per_block_of(int k) {
   return kWarps * rows_per_warp_of(k);
 }
 
+// The two e4m3 scales a chunk spans, {s(e0), s(e0+16)}, as f16 — exact
+// (e4m3 is a subset of f16: exponents 2^-9 .. 2^8, three mantissa bits).
+__device__ __forceinline__ __half2 scales_f16(uint16_t packed) {
+  return __half2(__nv_cvt_fp8x2_to_halfraw2(
+      static_cast<__nv_fp8x2_storage_t>(packed), __NV_E4M3));
+}
+
 // e4m3 -> f32, exact (the fp8 core's conversion), for the two scales a
-// chunk spans, pre-multiplied by 2^14 (exact) — the decode's correction.
+// chunk spans, pre-multiplied by 2^14 (exact) — the correction of the
+// register decode below, which the tile kernels' decode still uses.
 __device__ __forceinline__ float2 scales_x16384(uint16_t packed) {
   const __half2_raw h = __nv_cvt_fp8x2_to_halfraw2(
       static_cast<__nv_fp8x2_storage_t>(packed), __NV_E4M3);
@@ -125,13 +136,16 @@ __device__ __forceinline__ float e2m1_scaled(uint32_t code) {
 // times 2^14) into kRows accumulators. Element order within the chunk is
 // the storage order: byte j of word q holds elements e0+8q+2j (low nibble)
 // and e0+8q+2j+1.
+// The 32 activation elements a chunk multiplies, per staged row: four
+// uint4 out of shared memory — loaded once per chunk column and reused
+// across the warp's row steps (2026-09-08: hardware counters put the
+// fp4 core's stalls on the shared-memory pipe — two codes per weight byte
+// is twice the activation traffic per byte of the fp8 core's, and the
+// per-step re-read doubled it again).
 template <int kRows>
-__device__ __forceinline__ void consume_chunk(const uint4& wchunk, float2 s01,
-                                              const uint16_t* __restrict__ sx,
-                                              int k, int e0,
-                                              float (&acc)[kRows]) {
-  const uint32_t words[4] = {wchunk.x, wchunk.y, wchunk.z, wchunk.w};
-  uint4 xv[kRows][4];  // 32 activation elements per row: four uint4
+__device__ __forceinline__ void load_window(const uint16_t* __restrict__ sx,
+                                            int k, int e0,
+                                            uint4 (&xv)[kRows][4]) {
 #pragma unroll
   for (int r = 0; r < kRows; ++r) {
     const uint4* xp = reinterpret_cast<const uint4*>(
@@ -139,15 +153,35 @@ __device__ __forceinline__ void consume_chunk(const uint4& wchunk, float2 s01,
 #pragma unroll
     for (int q = 0; q < 4; ++q) xv[r][q] = xp[q];
   }
+}
+
+// The decode of a byte (two codes): the hardware e2m1x2 -> f16x2
+// conversion (one F2FP on sm_121a; cuda_fp4.h's software form elsewhere),
+// then one f16x2 multiply by the group's scale. The product is exact in
+// f16 — e2m1 x e4m3 carries at most five significant bits, and every
+// nonzero product lies in [2^-10, 2688], all f16 normals — so its f32 is
+// the same value the f32 decode produced: the FMA chain is bitwise the
+// one before it (2026-09-08; counters had the fp4 slot kernels' compute
+// phase, ~8 instructions a code, un-overlapped with their loads).
+template <int kRows>
+__device__ __forceinline__ void consume_chunk(const uint4& wchunk, __half2 s01,
+                                              const uint4 (&xv)[kRows][4],
+                                              float (&acc)[kRows]) {
+  const uint32_t words[4] = {wchunk.x, wchunk.y, wchunk.z, wchunk.w};
+  const __half2 s00 = __half2half2(__low2half(s01));   // codes 0-15
+  const __half2 s11 = __half2half2(__high2half(s01));  // codes 16-31
 #pragma unroll
   for (int q = 0; q < 4; ++q) {
     const uint32_t word = words[q];
-    const float s = q < 2 ? s01.x : s01.y;  // codes 0-15 | 16-31
+    const __half2 sq = q < 2 ? s00 : s11;
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const uint32_t byte = (word >> (8 * j)) & 0xFFu;
-      const float w0 = e2m1_scaled(byte & 0xFu) * s;
-      const float w1 = e2m1_scaled(byte >> 4) * s;
+      const __half2 pair(__nv_cvt_fp4x2_to_halfraw2(
+          static_cast<__nv_fp4x2_storage_t>(byte), __NV_E2M1));
+      const __half2 p = __hmul2(pair, sq);  // {code lo, code hi} x s, exact
+      const float w0 = __low2float(p);
+      const float w1 = __high2float(p);
 #pragma unroll
       for (int r = 0; r < kRows; ++r) {
         const uint32_t xw = j == 0 ? xv[r][q].x : j == 1 ? xv[r][q].y
@@ -223,19 +257,84 @@ __device__ __forceinline__ void warp_row_dots(const uint8_t* __restrict__ w,
                  : static_cast<uint16_t>(0);
     }
   }
+  // Consume chunk column by chunk column: the activation window once, every
+  // row step against it. A row's chunks still arrive in k order into its
+  // own accumulator (the chain per row is unchanged: bitwise).
 #pragma unroll
-  for (int st = 0; st < kSteps; ++st) {
-    const int row = row_base + st * G::rows_per_step + group;
-    if (row >= n) continue;  // per lane; no barrier inside
+  for (int c = 0; c < G::chunks; ++c) {
+    const int e0 = (c * G::lanes_per_row + lig) * kCodesPerChunk;
+    uint4 xv[kRows][4];
+    load_window<kRows>(sx, K, e0, xv);
 #pragma unroll
-    for (int c = 0; c < G::chunks; ++c) {
-      const int e0 = (c * G::lanes_per_row + lig) * kCodesPerChunk;
+    for (int st = 0; st < kSteps; ++st) {
+      const int row = row_base + st * G::rows_per_step + group;
+      if (row >= n) continue;  // per lane; no barrier inside
       const int i = st * G::chunks + c;
-      consume_chunk<kRows>(wv[i], scales_x16384(sv[i]), sx, K, e0, acc[st]);
+      consume_chunk<kRows>(wv[i], scales_f16(sv[i]), xv, acc[st]);
     }
   }
 #pragma unroll
   for (int st = 0; st < kSteps; ++st) group_reduce<kRows, G::lanes_per_row>(acc[st]);
+}
+
+// Two matrices over the same rows and activations (gate and up): every
+// load of both issued before either is consumed — twice the bytes in
+// flight per lane at the same block count. Each matrix's row chain is
+// warp_row_dots's exactly (bitwise).
+template <int K, int kRows>
+__device__ __forceinline__ void warp_row_dots_pair(
+    const uint8_t* __restrict__ w0, const uint8_t* __restrict__ scales0,
+    const uint8_t* __restrict__ w1, const uint8_t* __restrict__ scales1,
+    const uint16_t* __restrict__ sx, int n0, int n,
+    float (&acc0)[kSteps][kRows], float (&acc1)[kSteps][kRows]) {
+  using G = Geom<K>;
+  const int warp = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int group = lane / G::lanes_per_row;
+  const int lig = lane % G::lanes_per_row;
+  const int row_base = n0 + warp * G::rows_per_warp;
+#pragma unroll
+  for (int st = 0; st < kSteps; ++st)
+#pragma unroll
+    for (int a = 0; a < kRows; ++a) acc0[st][a] = acc1[st][a] = 0.f;
+
+  uint4 wv0[G::loads], wv1[G::loads];
+  uint16_t sv0[G::loads], sv1[G::loads];
+#pragma unroll
+  for (int st = 0; st < kSteps; ++st) {
+    const int row = row_base + st * G::rows_per_step + group;
+    const bool ok = row < n;
+#pragma unroll
+    for (int c = 0; c < G::chunks; ++c) {
+      const int boff = (c * G::lanes_per_row + lig) * kChunkBytes;
+      const int i = st * G::chunks + c;
+      const size_t wo = static_cast<size_t>(row) * G::row_bytes + boff;
+      const size_t so = static_cast<size_t>(row) * G::scale_cols + boff / 8;
+      wv0[i] = ok ? *reinterpret_cast<const uint4*>(w0 + wo) : make_uint4(0u, 0u, 0u, 0u);
+      wv1[i] = ok ? *reinterpret_cast<const uint4*>(w1 + wo) : make_uint4(0u, 0u, 0u, 0u);
+      sv0[i] = ok ? *reinterpret_cast<const uint16_t*>(scales0 + so) : static_cast<uint16_t>(0);
+      sv1[i] = ok ? *reinterpret_cast<const uint16_t*>(scales1 + so) : static_cast<uint16_t>(0);
+    }
+  }
+#pragma unroll
+  for (int c = 0; c < G::chunks; ++c) {
+    const int e0 = (c * G::lanes_per_row + lig) * kCodesPerChunk;
+    uint4 xv[kRows][4];
+    load_window<kRows>(sx, K, e0, xv);
+#pragma unroll
+    for (int st = 0; st < kSteps; ++st) {
+      const int row = row_base + st * G::rows_per_step + group;
+      if (row >= n) continue;
+      const int i = st * G::chunks + c;
+      consume_chunk<kRows>(wv0[i], scales_f16(sv0[i]), xv, acc0[st]);
+      consume_chunk<kRows>(wv1[i], scales_f16(sv1[i]), xv, acc1[st]);
+    }
+  }
+#pragma unroll
+  for (int st = 0; st < kSteps; ++st) {
+    group_reduce<kRows, G::lanes_per_row>(acc0[st]);
+    group_reduce<kRows, G::lanes_per_row>(acc1[st]);
+  }
 }
 
 // Which lane owns the reduced dot of the warp's step-st row, and that

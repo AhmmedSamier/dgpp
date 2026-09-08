@@ -1431,8 +1431,8 @@ __global__ void moe_slot_gate_up_swiglu_fp4_kernel(
   const MoeExpertView vg = views[static_cast<size_t>(e) * 3 + 0];
   const MoeExpertView vu = views[static_cast<size_t>(e) * 3 + 1];
   float acc_g[fp4_gemv::kSteps][1], acc_u[fp4_gemv::kSteps][1];
-  fp4_gemv::warp_row_dots<K, 1>(vg.payload, vg.fp4_scales, sx, n0, n, acc_g);
-  fp4_gemv::warp_row_dots<K, 1>(vu.payload, vu.fp4_scales, sx, n0, n, acc_u);
+  fp4_gemv::warp_row_dots_pair<K, 1>(vg.payload, vg.fp4_scales, vu.payload,
+                                     vu.fp4_scales, sx, n0, n, acc_g, acc_u);
   const float gg = *vg.fp4_global, gu = *vu.fp4_global;
 #pragma unroll
   for (int st = 0; st < fp4_gemv::kSteps; ++st) {
