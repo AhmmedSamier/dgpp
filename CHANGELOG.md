@@ -6,6 +6,16 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- The prefill's mHC dots on tensor cores: a bf16 mma.sync GEMM over a
+  cp.async ring with per-stage fp32 partials, the token's sum of squares
+  gathered from the same tiles, then the standard finish; the sites no
+  longer store the unread collapsed row. Within the oracle budgets (not
+  bitwise the per-coefficient decode form; the tiled kernel stays behind
+  `mhc_set_prefill_gemm(false)`): 1,196 -> 836 us per site at 2,048
+  tokens; steady-state prefill 460 / 1,335 / 5,954 -> 440 / 1,290 / 5,769
+  ms at 512 / 2,048 / 8,192; the 64-step transcript identical, one
+  near-tie flip (0.049 logits) in a 512-token continuation.
+
 - The fp4 prefill kernel, second pass: the ldmatrix tile kernel (64 x 128
   x 64, a three-slot cp.async ring of the activation tile and the raw fp4
   codes, B fragments decoded at fragment time, each weight row's next L2

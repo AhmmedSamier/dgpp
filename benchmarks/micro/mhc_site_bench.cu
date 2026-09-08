@@ -54,6 +54,7 @@ int main(int argc, char** argv) {
   bool norm = true;
   bool defer = false;
   int sublayer_us = 0;
+  int gemm = 1;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--tokens") && i + 1 < argc) tokens = std::atoi(argv[++i]);
     else if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
@@ -64,9 +65,11 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--no-norm")) norm = false;
     else if (!std::strcmp(argv[i], "--defer")) defer = true;
     else if (!std::strcmp(argv[i], "--sublayer-us") && i + 1 < argc) sublayer_us = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--gemm") && i + 1 < argc) gemm = std::atoi(argv[++i]);  // prefill dots: 1 tensor-core GEMM, 0 token-tiled
   }
   GlmMhcConfig cfg;  // the model's: n = 4, hidden = 4096, 20 Sinkhorn iterations
   cfg.sinkhorn_iters = sinkhorn;
+  mhc_set_prefill_gemm(gemm != 0);
   const int H = cfg.hidden, N = cfg.hc_mult, C = cfg.coeff_rows();
   const size_t K = static_cast<size_t>(N) * H;
   std::mt19937 rng(7);
@@ -141,9 +144,9 @@ int main(int argc, char** argv) {
   DGPP_CUDA_OK(cudaEventSynchronize(b));
   float ms = 0.f;
   DGPP_CUDA_OK(cudaEventElapsedTime(&ms, a, b));
-  std::printf("mhc_site_bench: tokens=%d hidden=%d n=%d coeffs=%d update=%d fused=%d sinkhorn=%d norm=%d defer=%d sublayer=%dus: %.2f us per site "
+  std::printf("mhc_site_bench: tokens=%d hidden=%d n=%d coeffs=%d update=%d fused=%d sinkhorn=%d norm=%d defer=%d sublayer=%dus gemm=%d: %.2f us per site "
               "(stream-launched; x90 sites = %.2f ms)\n",
               tokens, H, N, C, update ? 1 : 0, fused ? 1 : 0, sinkhorn, norm ? 1 : 0, defer ? 1 : 0,
-              sublayer_us, 1e3f * ms / iters, 90.f * ms / iters);
+              sublayer_us, gemm, 1e3f * ms / iters, 90.f * ms / iters);
   return 0;
 }

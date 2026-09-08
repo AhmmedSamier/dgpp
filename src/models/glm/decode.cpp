@@ -1093,8 +1093,9 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     hw.fn = b.mhc->attn_fn;
     hw.base = b.mhc->attn_base;
     hw.scale = b.mhc->attn_scale;
+    // The sites consume the normed row only: no collapsed store (nullptr).
     const bool attn_comb_deferred = launch_mhc_compute_normed(
-        cur, hw, mhc_cfg_, collapsed_, post_, comb_, mhc_logits_, b.ln1,
+        cur, hw, mhc_cfg_, nullptr, post_, comb_, mhc_logits_, b.ln1,
         normed_, eps, T, stream_, mhc_counters_, mhc_comb_side_);
     if (attn_comb_deferred) mhc_comb_fork(hw, T);
     uint16_t* attn_out = sub_out_;
@@ -1211,7 +1212,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     fw.base = b.mhc->ffn_base;
     fw.scale = b.mhc->ffn_scale;
     const bool ffn_comb_deferred = launch_mhc_compute_normed(
-        cur, fw, mhc_cfg_, collapsed_, post_, comb_, mhc_logits_, b.ln2,
+        cur, fw, mhc_cfg_, nullptr, post_, comb_, mhc_logits_, b.ln2,
         normed_, eps, T, stream_, mhc_counters_, mhc_comb_side_);
     if (ffn_comb_deferred) mhc_comb_fork(fw, T);
     uint16_t* ffn_out = sub_out_;

@@ -488,6 +488,39 @@ floor only fewer bytes or more tokens per step move the number.
   tensor-core GEMM would take them to ~20 within the oracle budget, the
   prefill/decode divergence at rounding level the expert path already
   accepts), the down kernel's eight-stage blocks (prologue-exposed).
+- Phase 5, the prefill's mHC dots on tensor cores (2026-09-08 evening):
+  the token-tiled kernel streamed the 786 KB coefficient matrix through
+  shared memory once per four tokens with 96 fp32 accumulators a thread —
+  1.17 ms per site at 2,048 tokens, 105 ms of the prefill. The dots are a
+  [tokens x 4D] x [24 x 4D]^T GEMM: `mhc_dots_mma_kernel` runs it with
+  bf16 mma.sync over a four-slot cp.async ring (32 tokens x 64 by 32 rows
+  x 64; two blocks per SM), gathers each token's sum of squares from the
+  same tiles and applies inv_rms in the epilogue; the standard finish
+  kernel follows (comb in-block). Two findings on the way: (a) one MMA
+  accumulator over the 16,384 terms flipped the bf16 rounding of 0.5 % of
+  the mixing coefficients against the double oracle (the tensor core's
+  accumulation truncates a small addend against a large sum) and failed
+  the end-to-end budget; per-stage partials summed in fp32 round-to-
+  nearest keep the flips at the fp32 chain's rate and pass it; (b) the
+  finish read the streams twice (a sum-of-squares pass, then the
+  collapse) — the sum now rides on the GEMM's tiles and the finish reads
+  them once. Also: the sites never read the collapsed row (only normed),
+  so the decode path passes a null collapsed and the 16 MB per site of
+  dead stores go. NOT bitwise the per-coefficient form (the prefill's
+  expert path already parts from decode's GEMV core the same way): within
+  the oracle budgets (glm_mhc_test: the gemm form at 16 / 70 / 2052
+  tokens, the end-to-end pipeline), the tiled form kept behind
+  `mhc_set_prefill_gemm(false)` for its bitwise pin. `mhc_site_bench
+  --gemm`: 1,196 -> 836 us per site at 2,048 tokens, 4,873 -> 3,380 at
+  8,192 — both halves now at the DRAM rate (the dots 64 MB of streams +
+  the matrix, the finish 64 MB read + 32 MB written); the third pass per
+  site (the update) is the mHC's structure. Fabric (`mhcgemm_prefill_2155`):
+  512 tokens 440 ms (460 before it), 2,048 tokens 1,290 (1,335), 8,192
+  tokens 5,769 (5,954); the 64-step chat transcript identical to phase 5's
+  (fabric_xcript: 64/64, three steps within a bf16 ulp); the 512-token
+  prompt's 2-step continuation flips at step 1 on a 0.049-logit margin —
+  a certified near-tie flip (`fabric_xcript.py`: <= 1 bf16 ulp); all ranks
+  identical; ctest 35/35.
 - Phase 5, the decode core (2026-09-08): `moe_slot_bench --format fp4`
   swept the fp4 GEMV core's two tunables. More per lane is worse in every
   direction (4 steps: +18 %; 8 chunks per lane: +29 %; both: +91 %); the

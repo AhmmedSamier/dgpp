@@ -300,6 +300,7 @@ DGPP_TEST(mhc_zero_streams_survive_norm_of_zero) {
 // so this is an equality, not a budget. The normed form (ln given) and the
 // two-launch form (no ln) both.
 DGPP_TEST(mhc_tiled_prefill_form_is_bitwise_the_per_coefficient_form) {
+  dgpp::mhc_set_prefill_gemm(false);  // the token-tiled kernel, not the GEMM form
   Case c = make_case(real_config(), 70, 0x71E5);
   c.alloc();
   const int n = c.cfg.hc_mult, D = c.cfg.hidden, T = c.tokens;
@@ -352,8 +353,36 @@ DGPP_TEST(mhc_tiled_prefill_form_is_bitwise_the_per_coefficient_form) {
                 form == 0 ? "normed" : "two-launch", T);
   }
   dgpp::mhc_set_tiled_form(true);
+  dgpp::mhc_set_prefill_gemm(true);
   cudaFree(d_ln); cudaFree(d_normed_a); cudaFree(d_normed_b);
   c.free_all();
+}
+
+// The tensor-core prefill form against the double oracle on real geometry
+// (the default for >= 16 tokens; the oracle test above already runs it at
+// 17 / 257 / 2052 tokens — this one names it and also pins its normed
+// output against the tiled form's within the same budgets).
+DGPP_TEST(mhc_gemm_prefill_form_within_oracle_budgets) {
+  for (int tokens : {16, 70, 2052}) {
+    Case c = make_case(real_config(), tokens, 0x6E44 + tokens);
+    c.alloc();
+    dgpp::mhc_set_prefill_gemm(true);
+    run_case(c, ("gemm prefill form tokens=" + std::to_string(tokens)).c_str());
+    // Against the tiled form on the same inputs: collapsed within 2 ulps
+    // (bf16), post/comb likewise — the two differ by fp32 rounding only.
+    std::vector<uint16_t> col_g = read_back(c.d_collapsed, static_cast<size_t>(tokens) * c.cfg.hidden);
+    std::vector<uint16_t> post_g = read_back(c.d_post, static_cast<size_t>(tokens) * c.cfg.hc_mult);
+    dgpp::mhc_set_prefill_gemm(false);
+    dgpp::launch_mhc_compute(c.d_streams, c.dev_w, c.cfg, c.d_collapsed, c.d_post, c.d_comb,
+                             c.d_logits, tokens, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    dgpp::mhc_set_prefill_gemm(true);
+    require_ulp(compare(col_g, read_back(c.d_collapsed, col_g.size()), 2, 4), 0.005, 0,
+                "gemm vs tiled collapsed");
+    require_ulp(compare(post_g, read_back(c.d_post, post_g.size()), 2, 4), 0.005, 0,
+                "gemm vs tiled post");
+    c.free_all();
+  }
 }
 
 // The deferred comb (decode's side-stream form) against the in-block fused

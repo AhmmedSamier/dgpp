@@ -23,6 +23,11 @@ namespace dgpp {
 // the token-tiled form (default; bitwise the per-coefficient form) and the
 // per-coefficient form.
 void mhc_set_tiled_form(bool on);
+// Tests: switch the prefill-sized dots between the tensor-core GEMM form
+// (default; fp32 mma.sync accumulation, inv_rms applied to the finished
+// logits — within the oracle budgets, not bitwise the per-coefficient form)
+// and the token-tiled kernel (bitwise the per-coefficient form).
+void mhc_set_prefill_gemm(bool on);
 
 void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
                         const GlmMhcConfig& cfg, uint16_t* collapsed,
@@ -33,7 +38,9 @@ void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
 // (glm_norm.hpp's semantics) in the finish kernel's tail:
 //   normed bf16 [tokens, D] out = rmsnorm(collapsed, ln, ln_eps)
 // One launch fewer per site than launch_mhc_compute + glm_rmsnorm_bf16;
-// ln and normed are both null (plain compute) or both set.
+// ln and normed are both null (plain compute) or both set. With normed
+// requested, collapsed may be null: the row is then not stored (the sites
+// consume normed alone).
 // finish_counters (int32 [tokens] device scratch, zero at rest; the caller
 // zeroes it once at allocation) fuses the finish phase into the dots
 // launch: the last dots block of a token runs it. Null keeps the two-

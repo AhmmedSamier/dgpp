@@ -258,8 +258,9 @@ __device__ __forceinline__ void mhc_finish_block(
       if (j % 2 == 0) packed[j / 2] = cb;
       else packed[j / 2] |= static_cast<uint32_t>(cb) << 16;
     }
-    reinterpret_cast<uint4*>(collapsed + t * hidden)[v] =
-        make_uint4(packed[0], packed[1], packed[2], packed[3]);
+    if (collapsed != nullptr)
+      reinterpret_cast<uint4*>(collapsed + t * hidden)[v] =
+          make_uint4(packed[0], packed[1], packed[2], packed[3]);
   }
   if (ln == nullptr) return;
 
@@ -633,6 +634,167 @@ __global__ void mhc_final_mean_kernel(const uint16_t* __restrict__ streams,
 
 namespace {
 
+// ---- the prefill dots on tensor cores (2026-09-08 evening) -----------------
+// The token-tiled form above streams the 786 KB coefficient matrix through
+// shared memory once per four tokens and holds 96 fp32 accumulators per
+// thread: 1.17 ms per site at 2,048 tokens, 105 ms of the prefill. The
+// dots are a [tokens x 4D] x [24 x 4D]^T GEMM: this kernel runs it with
+// bf16 mma.sync (fp32 accumulation) over a four-slot cp.async ring of
+// 32-token x 64 and 24(32)-row x 64 tiles, each token's sum of squares
+// gathered from the same tiles, inv_rms applied to the finished dots in
+// the epilogue; the standard finish kernel follows. The reassociation — r x sum(x w) instead of
+// sum((x r) w) — and the MMA's k16 summation move the logits at fp32
+// rounding level: NOT bitwise the per-coefficient form (the prefill's
+// expert path already parts from decode's GEMV core the same way), inside
+// the oracle budgets glm_mhc_test measures. Tests switch back with
+// mhc_set_prefill_gemm(false).
+namespace mhc_mma {
+constexpr int BM = 32, BN = 32, BK = 64, PAD = BK + 8;
+constexpr int kThreads = 256, kStages = 4;
+constexpr size_t kABytes = size_t(BM) * PAD * 2;   // 4,608
+constexpr size_t kBBytes = size_t(BN) * PAD * 2;   // 4,608
+constexpr size_t kSlotBytes = kABytes + kBBytes;   // 9,216
+constexpr size_t kSmem = kStages * kSlotBytes;     // 36,864: two blocks per SM
+static_assert(BM * (BK / 8) == kThreads && BN * (BK / 8) == kThreads,
+              "one 16-byte chunk of A and of B per thread per stage");
+static_assert(BN >= kCoeffs, "the coefficient rows fit one n-tile");
+
+__device__ __forceinline__ void cp_async_16(void* smem, const void* gmem, int src_bytes) {
+  const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(smem));
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(gmem), "r"(src_bytes));
+}
+__device__ __forceinline__ void commit() { asm volatile("cp.async.commit_group;\n" ::); }
+template <int N>
+__device__ __forceinline__ void wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+__device__ __forceinline__ void ldmatrix_x4(uint32_t (&r)[4], const void* smem) {
+  const unsigned a = static_cast<unsigned>(__cvta_generic_to_shared(smem));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
+__device__ __forceinline__ void ldmatrix_x2(uint32_t (&r)[2], const void* smem) {
+  const unsigned a = static_cast<unsigned>(__cvta_generic_to_shared(smem));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+               : "=r"(r[0]), "=r"(r[1]) : "r"(a));
+}
+}  // namespace mhc_mma
+
+// logits[t][c] = sum_k streams[t][k] * fn[c][k] (fp32), t < tokens, c < 24.
+// K = 4 * hidden, a multiple of 64; streams rows and fn 16-byte aligned.
+__global__ __launch_bounds__(mhc_mma::kThreads, 2) void mhc_dots_mma_kernel(
+    const uint16_t* __restrict__ streams, const uint16_t* __restrict__ fn,
+    float* __restrict__ logits, int tokens, int K, float norm_eps) {
+  using namespace mhc_mma;
+  extern __shared__ __align__(16) uint8_t smem[];
+  __shared__ float s_ssq[BM];
+  const int m0 = static_cast<int>(blockIdx.x) * BM;
+  if (m0 >= tokens) return;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int warp = tid / 32, lane = tid % 32;
+  const int wm = warp % 2, wn = warp / 2;  // m16 half, n8 tile
+  const int r = lane / 4, cc = (lane % 4) * 2;
+  // Copies: thread t -> row t/8 of both tiles, 8-element chunk t%8.
+  const int c_row = tid / 8, c_kq = (tid % 8) * 8;
+  const bool a_ok = m0 + c_row < tokens;
+  const bool b_ok = c_row < kCoeffs;
+  const uint16_t* a_src = streams + static_cast<size_t>(a_ok ? m0 + c_row : 0) * K + c_kq;
+  const uint16_t* b_src = fn + static_cast<size_t>(b_ok ? c_row : 0) * K + c_kq;
+  const int stages = K / BK;
+  auto slotA = [&](int slot) { return reinterpret_cast<uint16_t*>(smem + static_cast<size_t>(slot) * kSlotBytes); };
+  auto slotB = [&](int slot) { return reinterpret_cast<uint16_t*>(smem + static_cast<size_t>(slot) * kSlotBytes + kABytes); };
+  auto issue = [&](int s, int slot) {
+    cp_async_16(slotA(slot) + static_cast<size_t>(c_row) * PAD + c_kq, a_src + s * BK, a_ok ? 16 : 0);
+    cp_async_16(slotB(slot) + static_cast<size_t>(c_row) * PAD + c_kq, b_src + s * BK, b_ok ? 16 : 0);
+  };
+  // The MMA accumulates a stage's 64 products from zero and the stage
+  // partials add up in fp32 (round-to-nearest) in k order: the tensor
+  // core's own accumulation truncates when a small addend meets a large
+  // sum, and one accumulator over 16,384 terms flipped the bf16 rounding
+  // of 0.5 % of the mixing coefficients against the oracle; per-stage
+  // partials keep the flips at the fp32 chain's rate.
+  float sum[4] = {0.f, 0.f, 0.f, 0.f};
+  // The token's sum of squares rides along: each thread squares the eight
+  // elements it copied (read back from the tile), the eight chunk threads
+  // of a row combine at the end — one pass over the streams for the dots
+  // and the norm together; the finish then reads them once, for the collapse.
+  float ssq = 0.f;
+#pragma unroll
+  for (int s = 0; s < kStages - 1; ++s) {
+    if (s < stages) issue(s, s);
+    commit();
+  }
+  for (int s = 0; s < stages; ++s) {
+    const int slot = s % kStages;
+    wait<kStages - 2>();
+    __syncthreads();
+    if (s + kStages - 1 < stages) issue(s + kStages - 1, (s + kStages - 1) % kStages);
+    commit();
+    const uint16_t* a = slotA(slot);
+    const uint16_t* b = slotB(slot);
+    {
+      float f[8];
+      unpack8(*reinterpret_cast<const uint4*>(a + static_cast<size_t>(c_row) * PAD + c_kq), f);
+#pragma unroll
+      for (int j = 0; j < 8; ++j) ssq = __fmaf_rn(f[j], f[j], ssq);
+    }
+    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+    for (int kk = 0; kk < BK; kk += 16) {
+      uint32_t af[4], bf[2];
+      ldmatrix_x4(af, a + static_cast<size_t>(wm * 16 + (lane % 16)) * PAD + kk + (lane / 16) * 8);
+      ldmatrix_x2(bf, b + static_cast<size_t>(wn * 8 + (lane % 8)) * PAD + kk + ((lane / 8) % 2) * 8);
+      asm volatile(
+          "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+          : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
+          : "r"(af[0]), "r"(af[1]), "r"(af[2]), "r"(af[3]), "r"(bf[0]), "r"(bf[1]));
+    }
+#pragma unroll
+    for (int i = 0; i < 4; ++i) sum[i] = __fadd_rn(sum[i], acc[i]);
+  }
+  wait<0>();
+  // The row's eight chunk threads are lanes 8q .. 8q+7 of one warp.
+#pragma unroll
+  for (int off = 4; off > 0; off >>= 1) ssq += __shfl_xor_sync(0xFFFFFFFFu, ssq, off);
+  if ((tid % 8) == 0) s_ssq[c_row] = ssq;
+  __syncthreads();
+  const int t0 = m0 + wm * 16 + r;
+  const int c0 = wn * 8 + cc;
+  const float r_lo = rsqrtf(s_ssq[wm * 16 + r] / static_cast<float>(K) + norm_eps);
+  const float r_hi = rsqrtf(s_ssq[wm * 16 + r + 8] / static_cast<float>(K) + norm_eps);
+  auto st = [&](int t, int c, float v) {
+    if (t < tokens && c < kCoeffs) logits[static_cast<size_t>(t) * kCoeffs + c] = v;
+  };
+  st(t0, c0, sum[0] * r_lo);
+  st(t0, c0 + 1, sum[1] * r_lo);
+  st(t0 + 8, c0, sum[2] * r_hi);
+  st(t0 + 8, c0 + 1, sum[3] * r_hi);
+}
+
+bool g_mhc_prefill_gemm = true;
+
+template <int kPerThread>
+void launch_dots_gemm(const uint16_t* streams, const GlmMhcWeights& w,
+                      const GlmMhcConfig& cfg, float* logits_scratch,
+                      const MhcFinishArgs& fin, int tokens, cudaStream_t stream) {
+  static bool opted_in = false;
+  if (!opted_in) {
+    DGPP_CUDA_OK(cudaFuncSetAttribute(mhc_dots_mma_kernel,
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                      static_cast<int>(mhc_mma::kSmem)));
+    opted_in = true;
+  }
+  const int K = kN * cfg.hidden;
+  const unsigned blocks = static_cast<unsigned>((tokens + mhc_mma::BM - 1) / mhc_mma::BM);
+  mhc_dots_mma_kernel<<<blocks, mhc_mma::kThreads, mhc_mma::kSmem, stream>>>(
+      streams, w.fn, logits_scratch, tokens, K, cfg.norm_eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+  // The logits carry inv_rms already: the standard finish (comb in-block).
+  mhc_finish_kernel<kPerThread><<<tokens, kThreads, 0, stream>>>(
+      streams, logits_scratch, w.base, w.scale, fin.collapsed, fin.post_out, fin.comb_out,
+      fin.ln, fin.normed, tokens, cfg.hidden, fin.hc_eps, fin.sinkhorn_iters, fin.ln_eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 template <int kPerThread>
 void launch_finish(const uint16_t* streams, const GlmMhcWeights& w,
                    const GlmMhcConfig& cfg, uint16_t* collapsed, uint16_t* post,
@@ -688,8 +850,20 @@ void launch_dots_by_width(const uint16_t* streams, const GlmMhcWeights& w,
                           cudaStream_t stream) {
   const int per_thread = (cfg.hidden + kThreads - 1) / kThreads;
   if (kVec && tokens >= kTileMinTokens && g_mhc_tiled_enabled) {
-    // The tiled prefill form runs the finish in-block whatever `fused`
-    // says (the two-launch form's finish kernel is then skipped).
+    // The prefill forms run the finish themselves whatever `fused` says
+    // (the two-launch form's finish kernel is then skipped): the tensor-
+    // core dots (K % 64 == 0) or the token-tiled kernel.
+    if (g_mhc_prefill_gemm && ((kN * cfg.hidden) % mhc_mma::BK) == 0) {
+      if (per_thread <= 8)
+        launch_dots_gemm<8>(streams, w, cfg, logits_scratch, fin, tokens, stream);
+      else if (per_thread <= 16)
+        launch_dots_gemm<16>(streams, w, cfg, logits_scratch, fin, tokens, stream);
+      else if (per_thread <= 32)
+        launch_dots_gemm<32>(streams, w, cfg, logits_scratch, fin, tokens, stream);
+      else
+        throw std::invalid_argument("mhc_compute: hidden too large (> 8192)");
+      return;
+    }
     if (per_thread <= 8)
       launch_dots_tiled<8>(streams, w, cfg, logits_scratch, fin, tokens, stream);
     else if (per_thread <= 16)
@@ -723,11 +897,15 @@ bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
                                bool defer_comb) {
   GlmMhcConfig::validate_config(cfg);
   if (tokens <= 0) return false;
-  if (!streams || !w.fn || !w.base || !w.scale || !collapsed || !post ||
-      !comb || !logits_scratch)
+  if (!streams || !w.fn || !w.base || !w.scale || !post || !comb || !logits_scratch)
     throw std::invalid_argument("mhc_compute: null pointer");
   if ((ln == nullptr) != (normed == nullptr))
     throw std::invalid_argument("mhc_compute: ln and normed go together");
+  // collapsed may be null only when the normed row is produced: the sites
+  // read normed alone (2026-09-08: the collapsed store was 16 MB per site
+  // of dead output at 2,048 tokens).
+  if (collapsed == nullptr && normed == nullptr)
+    throw std::invalid_argument("mhc_compute: collapsed or normed must be requested");
   if (tokens > 65535)
     throw std::invalid_argument("mhc_compute: grid dimension overflow");
   const int K = kN * cfg.hidden;
@@ -737,7 +915,7 @@ bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
   const bool vec = (K % 8 == 0) && a16(streams) && a16(w.fn);
   // The finish phase's 16-byte runs: rows of 8 and aligned buffers (every
   // cudaMalloc'd row at hidden % 8 == 0 qualifies).
-  if (cfg.hidden % 8 != 0 || !a16(streams) || !a16(collapsed) ||
+  if (cfg.hidden % 8 != 0 || !a16(streams) || (collapsed != nullptr && !a16(collapsed)) ||
       (ln != nullptr && (!a16(ln) || !a16(normed))))
     throw std::invalid_argument(
         "mhc_compute: hidden must be a multiple of 8 with 16-byte-aligned "
@@ -777,6 +955,7 @@ bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
 }
 
 void mhc_set_tiled_form(bool on) { g_mhc_tiled_enabled = on; }
+void mhc_set_prefill_gemm(bool on) { g_mhc_prefill_gemm = on; }
 
 void launch_mhc_comb(const float* logits_scratch, const GlmMhcWeights& w,
                      const GlmMhcConfig& cfg, uint16_t* comb, int tokens,
