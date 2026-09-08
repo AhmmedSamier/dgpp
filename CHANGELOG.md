@@ -88,6 +88,13 @@ The history by milestone. The dated engineering record in
   128-row m-tile is more than half padding at ~57 rows per expert; the
   restructure is `docs/nvfp4_plan.md` §6a (phase 5).
 
+- `scripts/serve_eval.py`, the task-level eval through the served endpoint
+  (HumanEval, GSM8K, schema extraction; greedy), run on both configs: the
+  NVFP4 hybrid 157/164, 293/300, 100/100 against FP8's 155/164, 293/300,
+  100/100 — the same items pass on both to within two HumanEval problems
+  and three GSM8K flips each way, while the replies are word-identical on
+  only two thirds of the items. `docs/nvfp4_plan.md` §6a.
+
 - The DSA attention projections consumed as FP8 directly (the "bridge"
   item of `docs/nvfp4_plan.md`): q_a, kv_a, q_b and o_proj — FP8 pairs in
   every checkpoint — were dequantized to BF16 at load (the M3 seam) and

@@ -493,6 +493,15 @@ floor only fewer bytes or more tokens per step move the number.
   bench's variant 12, not dispatched. The next attempt is a 32-deep
   three-stage ring at two blocks per SM, or decoding the weights at
   fragment-load time (each warp decodes only its n-slice).
+- Item 4, the task-level eval (`scripts/serve_eval.py`, greedy,
+  reasoning_effort low, both configs on the identical items,
+  `build-ci/fabric-runs/eval_0908_1625`): HumanEval FP8 155/164 (94.5 %) vs
+  hybrid 157/164 (95.7 %) — 155 pass on both, 7 fail on both, 2 pass only
+  on the hybrid; GSM8K (first 300 of the test split) 293/300 (97.7 %) on
+  both — 290 pass on both, 4 fail on both, 3 flip each way; schema
+  extraction 100/100 on both. Identical replies on 109/164, 94/300 and
+  70/100 items: the two models write different text of equal quality,
+  the same conclusion the perplexity pair reached at the token level.
 
 ## 7. Order of work and estimates
 
