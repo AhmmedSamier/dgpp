@@ -20,9 +20,9 @@ using TensorList = std::vector<GlmExpectedTensor>;
 
 void add(TensorList& out, std::string name, DType dtype,
          std::vector<int64_t> shape, GlmWeightClass cls, int layer,
-         int expert = -1) {
+         int expert = -1, GlmTensorRole role = GlmTensorRole::Plain) {
   out.push_back(GlmExpectedTensor{std::move(name), dtype, std::move(shape),
-                                  cls, layer, expert});
+                                  cls, layer, expert, role});
 }
 
 std::vector<int64_t> rows_cols(int64_t rows, int64_t cols) {
@@ -33,9 +33,23 @@ std::vector<int64_t> rows_cols(int64_t rows, int64_t cols) {
 void add_quantized(TensorList& out, const std::string& name, int64_t rows,
                    int64_t cols, GlmWeightClass cls, int layer,
                    int expert = -1) {
-  add(out, name, DType::F8_E4M3, rows_cols(rows, cols), cls, layer, expert);
+  add(out, name, DType::F8_E4M3, rows_cols(rows, cols), cls, layer, expert,
+      GlmTensorRole::Fp8Payload);
   add(out, name + "_scale_inv", DType::F32,
-      glm_scale_shape(rows_cols(rows, cols)), cls, layer, expert);
+      glm_scale_shape(rows_cols(rows, cols)), cls, layer, expert,
+      GlmTensorRole::Fp8Scale);
+}
+
+// The NVFP4 triple for a logical [rows, cols] matrix named `name`
+// ("...proj.weight"), as one call so the three cannot drift.
+void add_nvfp4(TensorList& out, const std::string& name, int64_t rows,
+               int64_t cols, GlmWeightClass cls, int layer, int expert) {
+  add(out, name + "_packed", DType::U8, glm_fp4_packed_shape(rows, cols), cls,
+      layer, expert, GlmTensorRole::Fp4Packed);
+  add(out, name + "_scale", DType::F8_E4M3, glm_fp4_scale_shape(rows, cols),
+      cls, layer, expert, GlmTensorRole::Fp4Scale);
+  add(out, name + "_global_scale", DType::F32, {1}, cls, layer, expert,
+      GlmTensorRole::Fp4Global);
 }
 
 void expect_mhc(TensorList& out, const std::string& p,
@@ -150,6 +164,10 @@ void expect_moe(TensorList& out, const std::string& p,
                 const GlmTextConfig& cfg, int layer) {
   const int64_t hidden = cfg.hidden_size;
   const int64_t inter = cfg.moe_intermediate_size;
+  // The routed experts' format for THIS layer (the MTP layer's stay FP8
+  // under the hybrid — cfg.expert_format encodes that rule).
+  const bool nvfp4 =
+      cfg.expert_format(layer) == GlmExpertFormat::Nvfp4Group16;
   add(out, p + "mlp.gate.weight", DType::BF16,
       rows_cols(cfg.n_routed_experts, hidden), GlmWeightClass::Router, layer);
   add(out, p + "mlp.gate.e_score_correction_bias", DType::F32,
@@ -166,6 +184,15 @@ void expect_moe(TensorList& out, const std::string& p,
                 GlmWeightClass::SharedExpert, layer);
   for (int e = 0; e < cfg.n_routed_experts; ++e) {
     const std::string ep = p + "mlp.experts." + std::to_string(e) + ".";
+    if (nvfp4) {
+      add_nvfp4(out, ep + "gate_proj.weight", inter, hidden,
+                GlmWeightClass::RoutedExpert, layer, e);
+      add_nvfp4(out, ep + "up_proj.weight", inter, hidden,
+                GlmWeightClass::RoutedExpert, layer, e);
+      add_nvfp4(out, ep + "down_proj.weight", hidden, inter,
+                GlmWeightClass::RoutedExpert, layer, e);
+      continue;
+    }
     add_quantized(out, ep + "gate_proj.weight", inter, hidden,
                   GlmWeightClass::RoutedExpert, layer, e);
     add_quantized(out, ep + "up_proj.weight", inter, hidden,
@@ -292,6 +319,39 @@ GlmBindReport glm_validate_text_binding(
     }
     ++rep.matched;
 
+    if (e.nvfp4()) {
+      // The packed payload's two partners: `<base>_scale` (F8_E4M3
+      // [N, K/16]) and `<base>_global_scale` (F32 [1]), both of which are
+      // expected tensors in their own right and also checked here so the
+      // triple is bound as a unit.
+      ++rep.fp4_matrices;
+      const std::string base = e.name.substr(0, e.name.size() - 7);  // "_packed"
+      const int64_t rows = e.shape[0], cols = e.shape[1] * 2;
+      struct Partner { std::string name; DType dtype; std::vector<int64_t> shape; };
+      const Partner partners[2] = {
+          {base + "_scale", DType::F8_E4M3, glm_fp4_scale_shape(rows, cols)},
+          {base + "_global_scale", DType::F32, {1}}};
+      bool bound = true;
+      for (const Partner& p : partners) {
+        auto pit = present.find(p.name);
+        if (pit == present.end()) {
+          push_error(std::format("NVFP4 '{}' has no partner '{}'", e.name, p.name));
+          bound = false;
+          continue;
+        }
+        consumed.emplace(p.name, 1);
+        if (pit->second.dtype != p.dtype || pit->second.shape != p.shape) {
+          push_error(std::format("'{}' must be {} {} for NVFP4 payload {} (got {} {})",
+                                 p.name, dtype_name(p.dtype), shape_str(p.shape),
+                                 shape_str(e.shape), dtype_name(pit->second.dtype),
+                                 shape_str(pit->second.shape)));
+          bound = false;
+        }
+      }
+      if (bound) ++rep.fp4_bound;
+      else ++rep.scales_bad;
+      continue;
+    }
     if (!e.quantized()) continue;
     ++rep.quantized_matrices;
     const std::string scale_name = e.name + "_scale_inv";
@@ -358,6 +418,20 @@ GlmBindReport glm_validate_text_binding(
                            shape_str(desc.shape)));
   }
   return rep;
+}
+
+std::vector<int64_t> glm_fp4_packed_shape(int64_t rows, int64_t cols) {
+  if (rows <= 0 || cols <= 0 || cols % 16 != 0)
+    throw std::invalid_argument(
+        "glm_fp4_packed_shape: NVFP4 needs K % 16 == 0 (one e4m3 scale per "
+        "16 elements) and positive dims");
+  return {rows, cols / 2};
+}
+
+std::vector<int64_t> glm_fp4_scale_shape(int64_t rows, int64_t cols) {
+  if (rows <= 0 || cols <= 0 || cols % 16 != 0)
+    throw std::invalid_argument("glm_fp4_scale_shape: NVFP4 needs K % 16 == 0");
+  return {rows, cols / 16};
 }
 
 std::vector<int64_t> glm_scale_shape(const std::vector<int64_t>& payload) {

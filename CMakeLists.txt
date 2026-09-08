@@ -112,6 +112,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/kda.cu
   src/kernels/dsa.cu
   src/kernels/fp8_dequant.cu
+  src/kernels/fp4_gemv.cu
   src/kernels/scale_gemm.cu
   src/kernels/bf16_gemv.cu
   src/kernels/l2_prefetch.cu
@@ -353,6 +354,7 @@ add_executable(unit_tests
   tests/unit/arena_test.cpp
   tests/unit/safetensors_test.cpp
   tests/unit/fp8_test.cpp
+  tests/unit/fp4_test.cpp
   tests/unit/latent_format_test.cpp
   tests/unit/shardspec_test.cpp
   tests/unit/hf_cache_test.cpp
@@ -495,6 +497,13 @@ target_link_libraries(bf16_gemv_test PRIVATE dgpp_kernels CUDA::cudart)
 dgpp_set_common(bf16_gemv_test)
 add_test(NAME bf16_gemv_test COMMAND bf16_gemv_test)
 set_tests_properties(bf16_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
+
+add_executable(fp4_gemv_test tests/cuda/fp4_gemv_test.cu tests/cuda/fp4_gemv_checkpoint.cpp)
+target_include_directories(fp4_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(fp4_gemv_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cudart)
+dgpp_set_common(fp4_gemv_test)
+add_test(NAME fp4_gemv_test COMMAND fp4_gemv_test)
+set_tests_properties(fp4_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
 
 add_executable(scale_gemm_test
   tests/cuda/scale_gemm_test.cu

@@ -44,5 +44,8 @@ glm_gen.tokens.txt
 dist/
 # The TP tests write this fixture into their working directory; never track a copy
 glm_tp_fixture/
-# The site cluster config is local; deploy/cluster.example.json is the template
+# The site cluster configs are local (one per checkpoint the site serves, e.g.
+# deploy/cluster.nvfp4.json); deploy/cluster.example.json is the template
 deploy/cluster.json
+deploy/cluster.*.json
+!deploy/cluster.example.json

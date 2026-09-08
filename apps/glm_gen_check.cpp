@@ -976,14 +976,22 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   // The picker outlives the graph it records into (its buffers are the
   // recorded nodes' baked addresses). Slot 0: the verify; slot 1: the draft.
   dgpp::DevicePicker picker(bus, rank, world, 60000);
+  // `graph_feed`: the recorded verify compares row 0's winner with the
+  // token the graph FED to row 1 — the slot's persistent feed rows
+  // (device_feed, rows kDecodeRows onward since 2026-09-06), which the
+  // recorded token feed rewrites every replay. The eager verify uploads
+  // its rows at device_tokens() instead. Handing the graph the eager rows
+  // compared against a token nothing rewrites: every draft rejected, the
+  // transcript still exact (2026-09-08).
   const auto pick_inputs = [&](int rows, int slot,
-                               const dgpp::PickVerdict* row_select) {
+                               const dgpp::PickVerdict* row_select,
+                               bool graph_feed = false) {
     dgpp::DevicePicker::Inputs in;
     in.logits = model.device_logits();
     in.rows = rows;
     in.vocab_count = model.lm_vocab_count();
     in.vocab_begin = model.lm_vocab_begin();
-    in.fed = model.device_tokens();
+    in.fed = graph_feed ? model.device_feed(0, rows) : model.device_tokens();
     in.slot = slot;
     in.row_select = row_select;
     return in;
@@ -1103,7 +1111,8 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
     model.session_graph_capture_step(0, std::vector<int64_t>{next, draft},
                                      /*device_positions=*/true,
                                      /*device_tokens=*/true);
-    picker.record(model.stream(), pick_inputs(2, 0, nullptr));
+    picker.record(model.stream(),
+                  pick_inputs(2, 0, nullptr, /*graph_feed=*/true));
     model.session_graph_capture_commit(0, picker.device_verdict(0));
     model.session_graph_capture_draft(0, picker.device_verdict(0));
     picker.record(model.stream(), pick_inputs(1, 1, picker.device_verdict(0)));

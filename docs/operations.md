@@ -29,6 +29,20 @@ which is how the evidence scripts run their sweeps. `scripts/serve_run.sh
 up|down|status` remains as a shim: `DGPP_SERVE_KNOBS` becomes `--knobs`
 and `DGPP_SERVE_LOG` becomes `--log-dir`.
 
+A site that serves more than one checkpoint keeps one config per
+checkpoint and names it on the command line — the model is never taken
+from the environment. `deploy/cluster.nvfp4.json` (2026-09-08) is
+`deploy/cluster.json` with `model` set to the composed
+`dgpp/GLM-5.3-Flash-NVFP4-FP8` (`docs/nvfp4_plan.md`), `kv_capacity`
+raised to 786,432 and `prefix_cache_gib` to 8 — the 31 GiB per rank the
+NVFP4 experts free, spent on context and cache (`--memory-plan` fits with
+12 GiB to spare) — and every launcher and evidence script takes it:
+`scripts/dgpp-cluster up --config deploy/cluster.nvfp4.json`,
+`scripts/fabric_mtp_classes.sh --config deploy/cluster.nvfp4.json ...`,
+`scripts/fabric_prefill_repeat.sh --config deploy/cluster.nvfp4.json ...`.
+Both files are site-local (`deploy/cluster.*.json` is git-ignored beside
+`deploy/cluster.json`).
+
 Every rank starts as `dgpp-serve --config <file> --rank R`: rank 0 takes
 the model, the world (the node list's length), the ports and every engine
 knob from the file; a peer takes its bootstrap (rank 0's address, the

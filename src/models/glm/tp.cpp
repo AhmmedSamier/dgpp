@@ -108,6 +108,33 @@ void GlmTpViews::ensure_expert_pack() {
   DGPP_CUDA_OK(cudaMalloc(&expert_pack_, bytes));
   experts_.assign(static_cast<size_t>(moe_cfg_.n_experts) * 3,
                   GlmQuantMatrix{});
+  experts_fp4_.assign(static_cast<size_t>(moe_cfg_.n_experts) * 3,
+                      GlmFp4Matrix{});
+}
+
+// The NVFP4 column pack: nibble pairs and per-row block scales, both plain
+// strided copies (a 16-block boundary is 8 packed bytes and 1 scale byte).
+GlmFp4Matrix GlmTpViews::pack_fp4_cols(const GlmFp4Matrix& m, int64_t col_start,
+                                       int64_t cols, uint8_t* payload,
+                                       uint8_t* scales) {
+  if (col_start < 0 || cols <= 0 || cols > m.cols || col_start > m.cols - cols)
+    throw std::invalid_argument("GlmTpViews: NVFP4 column slice out of bounds");
+  if (col_start % kFp4Group != 0 || cols % kFp4Group != 0)
+    throw std::invalid_argument(
+        "GlmTpViews: NVFP4 column slice must start and end on 16-element "
+        "block boundaries");
+  copy2d(m.payload + col_start / 2, size_t(m.payload_cols()), payload,
+         size_t(cols / 2), size_t(cols / 2), size_t(m.rows), stream_);
+  copy2d(m.scales + col_start / kFp4Group, size_t(m.scale_cols()), scales,
+         size_t(cols / kFp4Group), size_t(cols / kFp4Group), size_t(m.rows),
+         stream_);
+  GlmFp4Matrix v;
+  v.payload = payload;
+  v.scales = scales;
+  v.global_scale = m.global_scale;
+  v.rows = m.rows;
+  v.cols = cols;
+  return v;
 }
 
 // Column slice -> PACKED payload + packed scale columns, on the model
@@ -249,9 +276,11 @@ GlmLayerBound GlmTpViews::bind(const GlmLayerResident& r, bool dense_mlp) {
     for (int i = 0; i < 3; ++i) moe_.shared[i] = shared_[i];
     // Every routed expert, sliced like the shared one: gate/up row views
     // into the full resident, down column-packed into the (lazily
-    // allocated) expert pack region.
+    // allocated) expert pack region. The per-expert slot is the FP8 size
+    // under both formats (an NVFP4 pack is smaller and fits the same slot).
     const int E = moe_cfg_.n_experts;
-    if (m.experts.size() != static_cast<size_t>(E) * 3)
+    const size_t want = static_cast<size_t>(E) * 3;
+    if ((m.nvfp4() ? m.experts_fp4.size() : m.experts.size()) != want)
       throw std::invalid_argument(
           "GlmTpViews::bind: full resident layer does not carry every "
           "expert");
@@ -261,6 +290,21 @@ GlmLayerBound GlmTpViews::bind(const GlmLayerResident& r, bool dense_mlp) {
     const size_t scale_bytes = align256(
         ((H + 127) / 128) * ((static_cast<size_t>(M) + 127) / 128) * 4);
     uint8_t* cursor = expert_pack_;
+    if (m.nvfp4()) {
+      const size_t fp4_payload = align256(H * static_cast<size_t>(M) / 2);
+      for (int e = 0; e < E; ++e) {
+        const size_t at = static_cast<size_t>(e) * 3;
+        experts_fp4_[at + 0] = fp4_rows_view(m.experts_fp4[at + 0], rank_ * M, M);
+        experts_fp4_[at + 1] = fp4_rows_view(m.experts_fp4[at + 1], rank_ * M, M);
+        experts_fp4_[at + 2] = pack_fp4_cols(m.experts_fp4[at + 2], rank_ * M, M,
+                                             cursor, cursor + fp4_payload);
+        cursor += payload_bytes + scale_bytes;
+      }
+      moe_.experts = nullptr;
+      moe_.experts_fp4 = experts_fp4_.data();
+      bound_.moe = &moe_;
+      return bound_;
+    }
     for (int e = 0; e < E; ++e) {
       const size_t at = static_cast<size_t>(e) * 3;
       experts_[at + 0] = quant_rows_view(m.experts[at + 0], rank_ * M, M);
@@ -272,6 +316,7 @@ GlmLayerBound GlmTpViews::bind(const GlmLayerResident& r, bool dense_mlp) {
       cursor += payload_bytes + scale_bytes;
     }
     moe_.experts = experts_.data();
+    moe_.experts_fp4 = nullptr;
     bound_.moe = &moe_;
   }
   return bound_;
@@ -301,16 +346,20 @@ GlmLayerBound GlmTpViews::bind_sharded(const GlmLayerResident& r,
     // A full-resident layer here would silently execute every expert
     // UNSLICED as this rank's "partial" — the one footgun worth a guard at
     // the seam. The slice width is the geometry's signature.
-    if (r.moe.experts.size() != static_cast<size_t>(moe_cfg_.n_experts) * 3 ||
-        r.moe.experts[0].rows != moe_inter_ ||
-        r.moe.shared[0].rows != moe_inter_)
+    const size_t want = static_cast<size_t>(moe_cfg_.n_experts) * 3;
+    const bool fp4 = r.moe.nvfp4();
+    const int64_t slice = fp4 ? (r.moe.experts_fp4.empty() ? -1 : r.moe.experts_fp4[0].rows)
+                              : (r.moe.experts.empty() ? -1 : r.moe.experts[0].rows);
+    if ((fp4 ? r.moe.experts_fp4.size() : r.moe.experts.size()) != want ||
+        slice != moe_inter_ || r.moe.shared[0].rows != moe_inter_)
       throw std::invalid_argument(
           "GlmTpViews::bind_sharded: resident MoE layer is not this world's "
           "slice geometry — was it loaded by a world=1 stream?");
     moe_.router_gate = r.moe.router_gate;
     moe_.router_bias = r.moe.router_bias;
     for (int i = 0; i < 3; ++i) moe_.shared[i] = r.moe.shared[i];
-    moe_.experts = r.moe.experts.data();
+    moe_.experts = fp4 ? nullptr : r.moe.experts.data();
+    moe_.experts_fp4 = fp4 ? r.moe.experts_fp4.data() : nullptr;
     bound_.moe = &moe_;
   }
   return bound_;

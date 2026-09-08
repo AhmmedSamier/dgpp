@@ -254,7 +254,71 @@ GlmGenerationDefaults GlmGenerationDefaults::from_checkpoint_dir(
   return out;
 }
 
-GlmTextConfig GlmTextConfig::parse(const minijson::Value& tc) {
+namespace {
+[[noreturn]] void reject_quant(std::string_view field, std::string_view why) {
+  throw std::runtime_error(
+      std::format("GLM quantization_config.{}: {}", field, why));
+}
+}  // namespace
+
+GlmExpertFormat GlmTextConfig::parse_expert_format(
+    const minijson::Value* qc, const GlmTextConfig& text) {
+  if (!qc) return GlmExpertFormat::Fp8Block128;
+  if (!qc->is_object()) reject_quant("", "not an object");
+  const minijson::Value* method = qc->find("quant_method");
+  if (!method) reject_quant("quant_method", "missing");
+  if (!method->is_string()) reject_quant("quant_method", "not a string");
+  const std::string m(method->as_string());
+  if (m == "fp8") return GlmExpertFormat::Fp8Block128;
+  if (m != "dgpp_mixed")
+    reject_quant("quant_method",
+                 "unsupported '" + m +
+                     "' (the engine loads the FP8 release, quant_method "
+                     "\"fp8\", and the composed NVFP4 hybrid, \"dgpp_mixed\")");
+  const minijson::Value* re = qc->find("routed_experts");
+  if (!re || !re->is_object()) reject_quant("routed_experts", "missing object");
+  const std::string fmt = require_string(*re, "format");
+  if (fmt != "nvfp4-pack-quantized")
+    reject_quant("routed_experts.format",
+                 "only nvfp4-pack-quantized is implemented, got " + fmt);
+  if (require_int(*re, "group_size") != 16)
+    reject_quant("routed_experts.group_size", "must be 16 (NVFP4)");
+  if (const minijson::Value* nb = re->find("num_bits");
+      nb && (!nb->is_number() || static_cast<int>(nb->as_int()) != 4))
+    reject_quant("routed_experts.num_bits", "must be 4");
+  // The layer list, when given, must be exactly the main stack's MoE
+  // layers: a hybrid whose experts are NVFP4 elsewhere is not this format.
+  if (const minijson::Value* layers = re->find("layers")) {
+    if (!layers->is_array()) reject_quant("routed_experts.layers", "not an array");
+    std::vector<int> want;
+    for (int i = 0; i < text.num_hidden_layers; ++i)
+      if (text.mlps[static_cast<size_t>(i)] == GlmMlpKind::Moe) want.push_back(i);
+    std::vector<int> got;
+    for (const auto& item : layers->items()) {
+      if (!item.is_number()) reject_quant("routed_experts.layers", "non-numeric element");
+      got.push_back(static_cast<int>(item.as_int()));
+    }
+    if (got != want)
+      reject_quant("routed_experts.layers",
+                   "must list exactly the main stack's MoE layers");
+  }
+  // The other classes must be the FP8 release's bytes: no BF16 expert or
+  // attention path exists in the engine.
+  for (const char* section : {"mtp_layer", "dsa_attention"}) {
+    const minijson::Value* sec = qc->find(section);
+    if (!sec) continue;
+    if (!sec->is_object()) reject_quant(section, "not an object");
+    if (const minijson::Value* src = sec->find("source");
+        src && (!src->is_string() || src->as_string() != "base"))
+      reject_quant(std::string(section) + ".source",
+                   "must be \"base\" (the FP8 release); the BF16-repo variant "
+                   "is not loadable");
+  }
+  return GlmExpertFormat::Nvfp4Group16;
+}
+
+GlmTextConfig GlmTextConfig::parse(const minijson::Value& tc,
+                                   const minijson::Value* quantization_config) {
   if (!tc.is_object()) reject("text_config", "not an object");
 
   GlmTextConfig c;
@@ -446,6 +510,7 @@ GlmTextConfig GlmTextConfig::parse(const minijson::Value& tc) {
   (void)c.dsa_config();
   (void)c.mhc_config();
   (void)c.moe_config();
+  c.routed_expert_format = parse_expert_format(quantization_config, c);
   return c;
 }
 
@@ -456,7 +521,7 @@ GlmTextConfig GlmTextConfig::from_json_file(const std::string& path) {
   if (!tc)
     throw std::runtime_error(
         "config " + path + ": missing text_config object");
-  return parse(*tc);
+  return parse(*tc, parsed.root.find("quantization_config"));
 }
 
 int GlmTextConfig::num_kda_layers() const {

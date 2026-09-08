@@ -51,6 +51,14 @@ struct BoundCmp {
                                " vs " + std::to_string(b) + ")");
     ++checked;
   }
+  void fp4(const std::string& what, const dgpp::GlmFp4Matrix& a,
+           const dgpp::GlmFp4Matrix& b) {
+    ints(what + ".rows", a.rows, b.rows);
+    ints(what + ".cols", a.cols, b.cols);
+    bytes(what, a.payload, b.payload, a.payload_bytes());
+    bytes(what + ".scales", a.scales, b.scales, a.scale_bytes());
+    bytes(what + ".global_scale", a.global_scale, b.global_scale, 4);
+  }
   void quant(const std::string& what, const dgpp::GlmQuantMatrix& a,
              const dgpp::GlmQuantMatrix& b) {
     ints(what + ".rows", a.rows, b.rows);
@@ -157,14 +165,27 @@ struct BoundCmp {
       // Every expert, sliced: the full+bind path views/packs the rank's
       // inter slice out of the full expert; the sharded path loaded exactly
       // that slice. Same width on both sides, by construction — assert it
-      // once so a whole-expert resident cannot pass as "equal".
-      require(a.moe->experts[0].rows == M && b.moe->experts[0].rows == M,
-              tag("expert slice width is not inter/world"));
-      for (int64_t e = 0; e < E; ++e)
-        for (int i = 0; i < 3; ++i)
-          quant(tag("moe.expert"),
-                a.moe->experts[static_cast<size_t>(e) * 3 + i],
-                b.moe->experts[static_cast<size_t>(e) * 3 + i]);
+      // once so a whole-expert resident cannot pass as "equal". Both sides
+      // must agree on the format, too.
+      require(a.moe->nvfp4() == b.moe->nvfp4(),
+              tag("expert format differs between the bind paths"));
+      if (a.moe->nvfp4()) {
+        require(a.moe->experts_fp4[0].rows == M && b.moe->experts_fp4[0].rows == M,
+                tag("expert slice width is not inter/world"));
+        for (int64_t e = 0; e < E; ++e)
+          for (int i = 0; i < 3; ++i)
+            fp4(tag("moe.expert(nvfp4)"),
+                a.moe->experts_fp4[static_cast<size_t>(e) * 3 + i],
+                b.moe->experts_fp4[static_cast<size_t>(e) * 3 + i]);
+      } else {
+        require(a.moe->experts[0].rows == M && b.moe->experts[0].rows == M,
+                tag("expert slice width is not inter/world"));
+        for (int64_t e = 0; e < E; ++e)
+          for (int i = 0; i < 3; ++i)
+            quant(tag("moe.expert"),
+                  a.moe->experts[static_cast<size_t>(e) * 3 + i],
+                  b.moe->experts[static_cast<size_t>(e) * 3 + i]);
+      }
     }
   }
 };
@@ -194,6 +215,11 @@ std::vector<const void*> view_fingerprint(const GlmLayerResident& r) {
   if (!r.moe.experts.empty()) {
     f.push_back(r.moe.experts[0].payload);
     f.push_back(r.moe.experts[0].scales);
+  }
+  if (!r.moe.experts_fp4.empty()) {
+    f.push_back(r.moe.experts_fp4[0].payload);
+    f.push_back(r.moe.experts_fp4[0].scales);
+    f.push_back(r.moe.expert_global_scales);
   }
   f.push_back(reinterpret_cast<const void*>(r.bytes));
   return f;

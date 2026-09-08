@@ -73,6 +73,8 @@
 // Fixture side (g++ TU): config + on-disk checkpoint generation.
 dgpp::GlmTextConfig glm_tp_test_config();
 void glm_tp_write_fixture(const std::string& dir);
+dgpp::GlmTextConfig glm_tp_test_config_fp4();
+void glm_tp_write_fixture_fp4(const std::string& dir);
 
 using dgpp::GlmBusBoundaryReducer;
 using dgpp::GlmDiagnosticModel;
@@ -5952,6 +5954,38 @@ DGPP_TEST(glm_tp_shard_parity) {
         "{} cache hits across {} ranks with 0 storage reads — residency "
         "contract holds",
         world, rrep.surfaces_checked, rrep.cache_hits, world);
+  }
+}
+
+// The same gate on the NVFP4 profile (docs/nvfp4_plan.md §5, gate 7): the
+// sharded loader's fp4 row slices and nibble-granular column packs against
+// GlmTpViews::bind's views/packs of the full layer, every expert triple
+// (payload, per-row scales, global) bitwise, in streaming and resident
+// modes, with the byte reconcile holding across the global scales' full
+// reads. The shared expert, dense MLPs and the MTP layer stay FP8 on both
+// sides, as in the composed checkpoint.
+DGPP_TEST(glm_tp_shard_parity_nvfp4) {
+  const GlmTextConfig cfg = glm_tp_test_config_fp4();
+  require(cfg.routed_expert_format == dgpp::GlmExpertFormat::Nvfp4Group16,
+          "nvfp4 fixture config carries the profile");
+  const std::string dir = "glm_tp_fixture_fp4";
+  glm_tp_write_fixture_fp4(dir);
+  for (int world : {2, 4}) {
+    const GlmShardParityReport rep = glm_shard_parity_check(cfg, dir, world);
+    require(rep.layers_checked ==
+                cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0),
+            "nvfp4 shard parity: layer count mismatch");
+    const GlmShardParityReport rrep =
+        glm_shard_parity_check(cfg, dir, world, nullptr, /*resident=*/true);
+    require(rrep.surfaces_checked == rep.surfaces_checked &&
+                rrep.cache_hits == rep.layers_checked * world &&
+                rrep.shard_source_bytes == rep.shard_source_bytes,
+            "nvfp4 shard parity: resident mode disagrees with streaming");
+    DGPP_LOG_INFO(
+        "nvfp4 shard parity world={}: {} layers x {} ranks, {} surfaces "
+        "bitwise-equal (streaming and resident); rank reads {}/{} source bytes",
+        world, rep.layers_checked, world, rep.surfaces_checked,
+        rep.shard_source_bytes, rep.full_source_bytes);
   }
 }
 

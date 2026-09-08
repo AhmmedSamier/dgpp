@@ -23,9 +23,28 @@ PROMPT = (sys.argv[5] if len(sys.argv) > 5 else
           "than launching the same kernels eagerly, and what it costs.")
 
 
+def served_model(host, port):
+    """The id the service serves (GET /v1/models): the clients address the
+    checkpoint the world booted with, whichever config named it — never a
+    name of their own (2026-09-08: a hard-coded FP8 id 404'd against the
+    NVFP4 world)."""
+    conn = http.client.HTTPConnection(host, port, timeout=30)
+    conn.request("GET", "/v1/models")
+    resp = conn.getresponse()
+    data = json.loads(resp.read().decode())
+    conn.close()
+    ids = [m["id"] for m in data.get("data", [])]
+    if not ids:
+        raise SystemExit(f"no model served at {host}:{port}: {data}")
+    return ids[0]
+
+
+MODEL = sys.argv[6] if len(sys.argv) > 6 else served_model(HOST, PORT)
+
+
 def one(prompt, max_tokens, label):
     body = json.dumps({
-        "model": "unsloth/GLM-5.3-Flash-FP8",
+        "model": MODEL,
         "messages": [
             {"role": "system", "content": "You are a concise assistant."},
             {"role": "user", "content": prompt},

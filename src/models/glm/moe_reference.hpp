@@ -17,9 +17,17 @@ struct GlmMoeHostWeights {
   std::vector<uint16_t> router_gate;  // [E, H]
   std::vector<float> router_bias;     // [E]
   // Compressed expert/shared weights, byte-identical to what the engine
-  // consumes (payload + block scales).
+  // consumes (payload + block scales). FP8: 3 mats per expert then the
+  // shared triple: gate, up, down. NVFP4 (`nvfp4` set): the routed experts
+  // live in the fp4 vectors below (expert e matrix m at index e*3+m —
+  // packed nibbles [rows, cols/2], e4m3 scales [rows, cols/16], one global
+  // per matrix) and `payloads`/`scales` hold ONLY the shared triple.
   std::vector<uint8_t> payloads;   // 3 mats per expert then shared: gate,up,down
   std::vector<float> scales;       // matching scale grids
+  bool nvfp4 = false;
+  std::vector<uint8_t> fp4_payloads;
+  std::vector<uint8_t> fp4_scales;
+  std::vector<float> fp4_globals;  // [E * 3]
 };
 
 // Expert payload layout inside GlmMoeHostWeights: expert e's matrix m at
@@ -28,6 +36,13 @@ struct GlmMoeHostWeights {
 struct GlmQuantMatrixHost {
   const uint8_t* payload = nullptr;
   const float* scales = nullptr;
+  int64_t rows = 0;
+  int64_t cols = 0;
+};
+struct GlmFp4MatrixHost {
+  const uint8_t* payload = nullptr;  // [rows, cols/2]
+  const uint8_t* scales = nullptr;   // [rows, cols/16]
+  float global_scale = 1.0f;
   int64_t rows = 0;
   int64_t cols = 0;
 };
@@ -57,5 +72,8 @@ GlmQuantMatrixHost glm_moe_host_view(const GlmMoeHostWeights& w,
                                      const GlmMoeConfig& cfg, int index);
 GlmQuantMatrixHost glm_moe_host_shared(const GlmMoeHostWeights& w,
                                        const GlmMoeConfig& cfg, int m);
+// The NVFP4 routed expert view (index in [0, E*3)); requires w.nvfp4.
+GlmFp4MatrixHost glm_moe_host_view_fp4(const GlmMoeHostWeights& w,
+                                       const GlmMoeConfig& cfg, int index);
 
 }  // namespace dgpp

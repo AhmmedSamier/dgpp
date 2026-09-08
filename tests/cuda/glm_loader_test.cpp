@@ -32,6 +32,7 @@
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
 #include "kernels/fp8_dequant.hpp"
+#include "kernels/latent_format.hpp"
 #include "loaders/minijson.hpp"
 #include "models/glm/binding.hpp"
 #include "models/glm/config.hpp"
@@ -83,6 +84,18 @@ GlmTextConfig tiny_config() {
   return GlmTextConfig::parse(parsed.root);
 }
 
+// The same config with a TP-legal dense width (1024: 512 at world 2), for
+// the sharded NVFP4 gate; the 1000-wide original is world-1 only by design
+// (the ragged-edge coverage above).
+std::string tiny_tp_json() {
+  std::string j = kTinyJson;
+  const std::string from = "\"intermediate_size\": 1000";
+  const size_t at = j.find(from);
+  if (at == std::string::npos) throw std::runtime_error("tiny json drifted");
+  j.replace(at, from.size(), "\"intermediate_size\": 1024");
+  return j;
+}
+
 // ---- deterministic fixture values ------------------------------------
 // xorshift64 seeded per tensor name; every tensor is reproducible and
 // independent of load order.
@@ -110,7 +123,42 @@ struct Rng {
   }
 };
 
+// NVFP4 triples (the hybrid's routed experts): per matrix a global scale g
+// in [0.5, 4) seeded by the base name, e4m3 block scales in (0.01..0.07) x g,
+// and e2m1 codes two per byte, low nibble first.
+float fp4_global_for(const std::string& base) {
+  Rng g(seed_for(base) ^ 0x5bd1e995u);
+  return 0.5f + 1.75f * (g.unit() + 1.0f);
+}
+bool fp4_tensor_bytes(const GlmExpectedTensor& e, std::vector<uint8_t>& out) {
+  using dgpp::GlmTensorRole;
+  const char* suffix = e.role == GlmTensorRole::Fp4Packed   ? "_packed"
+                       : e.role == GlmTensorRole::Fp4Scale  ? "_scale"
+                       : e.role == GlmTensorRole::Fp4Global ? "_global_scale"
+                                                             : nullptr;
+  if (!suffix) return false;
+  const std::string base = e.name.substr(0, e.name.size() - std::strlen(suffix));
+  const float g = fp4_global_for(base);
+  Rng rng(seed_for(e.name));
+  out.assign(e.nbytes(), 0);
+  if (e.role == GlmTensorRole::Fp4Global) {
+    std::memcpy(out.data(), &g, 4);
+  } else if (e.role == GlmTensorRole::Fp4Scale) {
+    for (auto& b : out)
+      b = dgpp::float_to_fp8_e4m3_bits((0.01f + 0.03f * (rng.unit() + 1.0f)) * g);
+  } else {
+    for (auto& b : out) {
+      const uint8_t lo = dgpp::float_to_fp4_e2m1_bits(3.0f * rng.unit());
+      const uint8_t hi = dgpp::float_to_fp4_e2m1_bits(3.0f * rng.unit());
+      b = static_cast<uint8_t>(lo | (hi << 4));
+    }
+  }
+  return true;
+}
+
 std::vector<uint8_t> tensor_bytes(const GlmExpectedTensor& e) {
+  std::vector<uint8_t> fp4;
+  if (fp4_tensor_bytes(e, fp4)) return fp4;
   Rng rng(seed_for(e.name));
   std::vector<uint8_t> out(e.nbytes());
   const size_t n = e.numel();
@@ -165,20 +213,41 @@ struct Fixture {
   }
 };
 
-Fixture write_fixture() {
+// The composed hybrid's quantization_config spelling, for the NVFP4 fixture.
+const char* kNvfp4QuantJson = R"json({"quant_method":"dgpp_mixed",
+  "routed_experts":{"format":"nvfp4-pack-quantized","num_bits":4,"group_size":16},
+  "fp8":{"quant_method":"fp8","fmt":"e4m3","weight_block_size":[128,128]},
+  "mtp_layer":{"source":"base"},"dsa_attention":{"source":"base"}})json";
+
+Fixture write_fixture(bool nvfp4 = false, bool tp_legal = false) {
   Fixture fx;
-  fx.dir = fs::temp_directory_path() / "dgpp_glm_loader_test";
+  fx.dir = fs::temp_directory_path() /
+           (std::string(nvfp4 ? "dgpp_glm_loader_test_fp4" : "dgpp_glm_loader_test") +
+            (tp_legal ? "_tp" : ""));
   fs::remove_all(fx.dir);
   fs::create_directories(fx.dir);
-  fx.cfg = tiny_config();
+  const std::string text_json = tp_legal ? tiny_tp_json() : std::string(kTinyJson);
+  if (!nvfp4 && !tp_legal) {
+    fx.cfg = tiny_config();
+  } else {
+    const auto text = dgpp::minijson::parse(text_json);
+    if (nvfp4) {
+      const auto q = dgpp::minijson::parse(kNvfp4QuantJson);
+      fx.cfg = GlmTextConfig::parse(text.root, &q.root);
+    } else {
+      fx.cfg = GlmTextConfig::parse(text.root);
+    }
+  }
 
-  // config.json: root object with text_config (the loader's parse shape).
+  // config.json: root object with text_config (the loader's parse shape),
+  // plus the quantization_config under the NVFP4 profile.
   {
     fs::path p = fx.dir / "config.json";
     std::FILE* f = std::fopen(p.c_str(), "wb");
     if (!f) throw std::runtime_error("cannot write config.json");
-    const std::string json =
-        std::string("{\"text_config\":") + kTinyJson + "}";
+    std::string json = std::string("{\"text_config\":") + text_json;
+    if (nvfp4) json += std::string(",\"quantization_config\":") + kNvfp4QuantJson;
+    json += "}";
     std::fwrite(json.data(), 1, json.size(), f);
     std::fclose(f);
   }
@@ -769,4 +838,137 @@ int main() {
   const cudaError_t err = cudaGetDeviceCount(&devices);
   if (err != cudaSuccess || devices < 1) return 2;  // ctest: skip, no GPU
   return dgpp::test::run_all();
+}
+
+// ---- the NVFP4 profile (docs/nvfp4_plan.md §5, gate 5) ---------------------
+
+DGPP_TEST(glm_loader_streams_nvfp4_moe_layer_byte_exact) {
+  const Fixture fx = write_fixture(/*nvfp4=*/true);
+  require(fx.cfg.routed_expert_format == dgpp::GlmExpertFormat::Nvfp4Group16,
+          "fixture config carries the NVFP4 profile");
+  dgpp::GlmLayerStream stream(fx.cfg, fx.dir.string());
+  const auto& r = stream.load_layer(2);  // DSA + MoE
+  require(r.bytes == dgpp::GlmLayerStream::layer_bytes(fx.cfg, 2),
+          "nvfp4 layer byte formula");
+  require(r.moe.nvfp4() && r.moe.experts.empty() && r.moe.experts_fp4.size() == 12,
+          "routed experts resident as NVFP4 triples");
+  require(r.moe.expert_global_scales != nullptr, "global scales gathered");
+  static const char* kProj[3] = {"gate_proj", "up_proj", "down_proj"};
+  const std::string ep = "model.language_model.layers.2.mlp.experts.2.";
+  for (int i = 0; i < 3; ++i) {
+    const dgpp::GlmFp4Matrix& m = r.moe.expert_fp4(2, i);
+    const std::string base = ep + kProj[i] + ".weight";
+    const int64_t want_rows = i == 2 ? 512 : 256, want_cols = i == 2 ? 256 : 512;
+    require(m.rows == want_rows && m.cols == want_cols, "nvfp4 expert dims");
+    require(m.payload_bytes() == fx.at(base + "_packed").size() &&
+                m.scale_bytes() == fx.at(base + "_scale").size(),
+            "nvfp4 expert byte counts");
+    require_bytes_eq(m.payload, fx.at(base + "_packed"), m.payload_bytes(),
+                     "nvfp4 expert packed payload");
+    require_bytes_eq(m.scales, fx.at(base + "_scale"), m.scale_bytes(),
+                     "nvfp4 expert block scales");
+    require(m.global_scale == r.moe.expert_global_scales + 2 * 3 + i,
+            "global scale points into the layer's gathered array");
+    require_bytes_eq(m.global_scale, fx.at(base + "_global_scale"), 1,
+                     "nvfp4 expert global scale");
+  }
+  // The shared expert and the dense MLPs stay FP8 (the release's bytes).
+  const std::string sp = "model.language_model.layers.2.mlp.shared_experts.gate_proj.weight";
+  require_bytes_eq(r.moe.shared[0].payload, fx.at(sp), 256 * 512, "shared payload still fp8");
+  // The MTP layer's experts stay FP8 under the profile.
+  const auto& mtp = stream.load_layer(6);
+  require(!mtp.moe.nvfp4() && mtp.moe.experts.size() == 12 && mtp.moe.experts_fp4.empty(),
+          "MTP experts stay FP8");
+  require(mtp.bytes == dgpp::GlmLayerStream::layer_bytes(fx.cfg, 6), "mtp byte formula");
+}
+
+DGPP_TEST(glm_loader_shards_nvfp4_experts_on_the_inter_slice) {
+  // World 2, rank 1: gate/up keep rows [128, 256) of the packed payload and
+  // the per-row scales; down keeps columns [128, 256) — packed bytes
+  // [64, 128) and scale bytes [8, 16) of every row. Oracle slices are cut
+  // from the fixture bytes on the host.
+  const Fixture fx = write_fixture(/*nvfp4=*/true, /*tp_legal=*/true);
+  dgpp::GlmLayerStream stream(fx.cfg, fx.dir.string(), /*rank=*/1, /*world=*/2);
+  const auto& r = stream.load_layer(3);  // KDA + MoE
+  require(r.moe.nvfp4() && r.moe.experts_fp4.size() == 12, "sharded nvfp4 experts");
+  const std::string ep = "model.language_model.layers.3.mlp.experts.1.";
+  const int64_t M = 128;  // inter 256 / world 2
+  // gate: [256, 512] -> rows [128, 256): packed row = 256 B, scale row = 32 B.
+  {
+    const dgpp::GlmFp4Matrix& g = r.moe.expert_fp4(1, 0);
+    require(g.rows == M && g.cols == 512, "gate slice dims");
+    const auto& pk = fx.at(ep + "gate_proj.weight_packed");
+    const auto& sc = fx.at(ep + "gate_proj.weight_scale");
+    std::vector<uint8_t> want_pk(pk.begin() + 128 * 256, pk.begin() + 256 * 256);
+    std::vector<uint8_t> want_sc(sc.begin() + 128 * 32, sc.begin() + 256 * 32);
+    require_bytes_eq(g.payload, want_pk, want_pk.size(), "gate row-slice payload");
+    require_bytes_eq(g.scales, want_sc, want_sc.size(), "gate row-slice scales");
+  }
+  // down: [512, 256] -> cols [128, 256): per row packed bytes [64, 128) of
+  // 128, scale bytes [8, 16) of 16.
+  {
+    const dgpp::GlmFp4Matrix& d = r.moe.expert_fp4(1, 2);
+    require(d.rows == 512 && d.cols == M, "down slice dims");
+    const auto& pk = fx.at(ep + "down_proj.weight_packed");
+    const auto& sc = fx.at(ep + "down_proj.weight_scale");
+    std::vector<uint8_t> want_pk, want_sc;
+    for (int64_t row = 0; row < 512; ++row) {
+      want_pk.insert(want_pk.end(), pk.begin() + row * 128 + 64, pk.begin() + row * 128 + 128);
+      want_sc.insert(want_sc.end(), sc.begin() + row * 16 + 8, sc.begin() + row * 16 + 16);
+    }
+    require_bytes_eq(d.payload, want_pk, want_pk.size(), "down column-pack payload");
+    require_bytes_eq(d.scales, want_sc, want_sc.size(), "down column-pack scales");
+    require_bytes_eq(d.global_scale, fx.at(ep + "down_proj.weight_global_scale"), 1,
+                     "down global scale");
+  }
+  require(r.bytes == dgpp::GlmLayerStream::layer_bytes(fx.cfg, 3, 1, 2),
+          "sharded nvfp4 layer byte formula");
+  // The rank's bytes are less than a full load's and the global scales are
+  // in the verbatim (full-read) set — the reconcile's arithmetic.
+  dgpp::GlmLayerStream full(fx.cfg, fx.dir.string());
+  full.load_layer(3);
+  require(stream.source_bytes_read() < full.source_bytes_read(),
+          "a rank reads less than the full layer");
+  require(stream.verbatim_source_bytes() >= 12 * 4, "global scales counted as full reads");
+}
+
+DGPP_TEST(glm_loader_nvfp4_resident_image_round_trip_is_bitwise) {
+  const Fixture fx = write_fixture(/*nvfp4=*/true);
+  const fs::path cache = fs::temp_directory_path() / "dgpp_glm_loader_test_fp4_image";
+  fs::remove_all(cache);
+  const std::string saved = dgpp::GlmLayerStream::resident_image_dir();
+  dgpp::GlmLayerStream::set_resident_image_dir(cache.string());
+  const int max_layer = fx.cfg.num_hidden_layers + 1;
+  std::vector<std::vector<uint8_t>> built(static_cast<size_t>(max_layer));
+  {
+    dgpp::GlmLayerStream first(fx.cfg, fx.dir.string(), 0, 1,
+                               dgpp::GlmResidency::Resident);
+    for (int l = 0; l < max_layer; ++l) {
+      first.load_layer(l);
+      const auto [base, bytes] = first.resident_layer_span(l);
+      require(base != nullptr && bytes == dgpp::GlmLayerStream::layer_bytes(fx.cfg, l),
+              "resident span");
+      built[static_cast<size_t>(l)] = fetch(base, bytes);
+    }
+    require(first.image_layers_captured() == max_layer, "every layer captured");
+  }
+  {
+    dgpp::GlmLayerStream second(fx.cfg, fx.dir.string(), 0, 1,
+                                dgpp::GlmResidency::Resident);
+    const uint64_t before = second.source_bytes_read();
+    for (int l = 0; l < max_layer; ++l) {
+      const auto& r = second.load_layer(l);
+      const auto [base, bytes] = second.resident_layer_span(l);
+      require(fetch(base, bytes) == built[static_cast<size_t>(l)],
+              "restored nvfp4 layer bitwise the built one");
+      if (l >= 2 && l < 6)
+        require(r.moe.nvfp4() && r.moe.expert_fp4(0, 0).payload != nullptr,
+                "restored layer's views are NVFP4");
+    }
+    require(second.image_layers_restored() == max_layer &&
+                second.source_bytes_read() == before,
+            "every layer restored from the image, no source reads");
+  }
+  dgpp::GlmLayerStream::set_resident_image_dir(saved);
+  fs::remove_all(cache);
 }

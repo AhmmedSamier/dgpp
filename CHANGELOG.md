@@ -6,6 +6,116 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- NVFP4 routed experts, phase 1 of `docs/nvfp4_plan.md` — the format is
+  loadable. The composed checkpoint `dgpp/GLM-5.3-Flash-NVFP4-FP8`
+  (`tools/compose_nvfp4_hybrid.py`: dabsLabs' NVFP4 experts for layers
+  3–44 beside the FP8 release's bytes for every other tensor, the MTP
+  layer included; 195.1 GB, built and verified byte-for-byte on all four
+  nodes, identical shard hashes) declares `quantization_config.quant_method
+  = "dgpp_mixed"`, which `GlmTextConfig` parses into a routed-expert format
+  (`GlmExpertFormat`: FP8 block-128 as before, or NVFP4 group-16). Under the
+  NVFP4 profile the expected-tensor table emits the triple `weight_packed`
+  (U8 [N, K/2]), `weight_scale` (e4m3 [N, K/16]) and `weight_global_scale`
+  (F32 [1]) for every main-stack routed expert and the validator binds it
+  as a unit (every tensor now carries a `GlmTensorRole`, so an e4m3 block
+  scale is never mistaken for an FP8 payload); the loader keeps the bytes
+  untouched in `GlmFp4Matrix` views — this rank's inter slice as
+  contiguous gate/up rows and nibble-granular down column packs, every
+  matrix's global scale gathered into one per-layer array — with the same
+  counting-mode byte formula, resident image and byte reconcile;
+  `GlmTpViews` carves the same views from a full layer so the shard-parity
+  gate pins the two paths bitwise on an NVFP4 fixture at worlds 2 and 4,
+  streaming and resident. The MTP layer's experts, the shared experts, the
+  dense MLPs and the attention keep the FP8 paths untouched under both
+  profiles; the FP8 checkpoint's table and bytes are unchanged (the
+  existing gates pin that). `glm_bind_check` on the hybrid: 112,049
+  expected, 112,049 matched, 36,288 NVFP4 triples and 1,050 FP8 pairs
+  bound; the resident formula at world 4 is 50.7 GiB per rank against
+  ~82 GiB for the FP8 checkpoint.
+
+- NVFP4 routed experts, phase 2 — the decode path runs on the packed
+  bytes. `src/kernels/fp4_gemv.cuh` is the in-register e2m1 core: a lane
+  loads 16 bytes (32 codes, two group-16 scales), places each code's bits
+  into an fp16 field (`((code & 7) << 9) | ((code & 8) << 12)`, which reads
+  as value x 2^-14 for every code) and multiplies by the scale x 2^14, all
+  exact — an e2m1 times an e4m3 has at most six significant bits, so the
+  weight enters the fp32 dot unrounded and the only inexact operation is
+  the one division by the tensor's global scale in the epilogue
+  (`tests/unit/fp4_test.cpp` pins the lemma over every code x scale pair
+  and the bit-placement against the codec table). The core is templated
+  on K so every index is compile-time (the first draft's lane-dependent
+  accumulator index spilled to local memory and ran at 14 GB/s); it
+  backs the single-matrix launcher (`launch_fp4_gemv_bf16/f32`), the fp4
+  decode slot kernels (gate_up+swiglu and down, the shared expert running
+  the fp8 core inside the same launch as before) and the fp4 grouped
+  GEMV that `GlmMoeLayer` dispatches under the NVFP4 format; the host
+  oracle dequantizes the triple exactly and applies the same divisor
+  epilogue. Gates: `fp4_gemv_test` (the oracle across every supported
+  geometry at l2_rel 0, row-count invariance, the f32 epilogue, NaN
+  scales, the geometry contract, and two real slices of the hybrid at 0
+  mismatches), `glm_moe_test`'s fp4 twins bitwise — the decode slot path,
+  the host grouped path and the sliced-rank fold agree bit for bit as the
+  FP8 ones do. `moe_slot_bench --format fp4` per layer on one rank's
+  slice: rows=1 209 us against fp8's 273, rows=2 334 against 469, rows=8
+  929 against 1,420. Prefill under NVFP4 uses the grouped GEMV chain
+  (the tensor-core kernel is phase 3). The FP8 paths are untouched.
+
+- NVFP4 routed experts, phase 3 — the prefill runs on tensor cores.
+  `moe_grouped_mma_fp4_kernel` is the fp8 tile kernel's structure (128 x
+  64 x 64 stages, the same activation tile and ascending-k16 bf16
+  `mma.sync` chain) with the weight tile decoded from the NVFP4 triple:
+  a thread's 16 consecutive k come from one 8-byte load of codes and one
+  scale byte, decoded as e2m1 x scale, exact in bf16, so unlike the fp8
+  tile nothing is rounded before the MMA; the global scale divides the
+  finished dot once in the epilogue. Any k that is a multiple of 16 (the
+  GEMV core's power-of-two set does not apply). The grouped form
+  (segments through the row map) is bitwise the dense form per segment;
+  `GlmMoeLayer` dispatches it for NVFP4 routed segments under the
+  tensor-core kernel while the FP8 shared expert keeps the fp8 tile
+  kernel; the fp8 kernel's source is untouched. Gates: grouped bitwise
+  the dense form at I = 208 (a ragged n-tile and a ragged last k-stage)
+  and 320, under the z split and through a permuted row map, gate bf16
+  and down fp32; the whole layer within budget of the double oracle on
+  four geometries beside the GEMV chain; both real checkpoint slices at 0
+  mismatches with a row's bits independent of m. Fabric, steady-state
+  prefill on the hybrid: 512 tokens 1,152 -> 635 ms (FP8 740), 2,048
+  tokens 4,396 -> 1,563 (FP8 1,725), 8,192 tokens 18,246 -> 6,796 (FP8
+  7,463); the 64-step transcript identical to the GEMV-chain build's, all
+  ranks identical; the FP8 build's 2,048-token prefill unchanged (1,717
+  ms). nsys says the tile kernels — fp8 and fp4 alike — sit at a third of
+  the read floor (a 340 MB fp4 launch takes 4.6 ms): the activation tile
+  is re-read once per 64-wide n-tile, the stages do not overlap, and a
+  128-row m-tile is more than half padding at ~57 rows per expert; the
+  restructure is `docs/nvfp4_plan.md` §6a (phase 5).
+
+- NVFP4 routed experts, phase 4 — the hybrid serves. A site keeps one
+  cluster config per checkpoint and names it on the command line
+  (`deploy/cluster.*.json` is git-ignored beside `deploy/cluster.json`;
+  `docs/operations.md`): `deploy/cluster.nvfp4.json` selects
+  `dgpp/GLM-5.3-Flash-NVFP4-FP8` with `kv_capacity` 786,432 and
+  `prefix_cache_gib` 8, the 31 GiB per rank the experts free spent on
+  context and cache (`--memory-plan`: 96.2 GiB + 8 headroom of 116.5).
+  `scripts/dgpp-cluster up --config deploy/cluster.nvfp4.json` boots from
+  the resident images in 18 s; `serve_api_check.py` passes every case;
+  the world tears down with four identical op-stream md5s and no stall.
+  The L2 prefetch defaults stand on the hybrid: the window is flat from 8
+  to 24 MB at T=1 (28.0 ms/step) and under 1 % apart under MTP; the
+  prefetcher itself is worth 2.0-2.3 ms/step, the full boundary rate
+  costs 2 ms, as on FP8. `scripts/serve_bench.py` and `serve_soak.py`
+  address the model the service reports (`GET /v1/models`) instead of a
+  hard-coded FP8 id, with an optional argument to override.
+
+- `glm_gen_check --mtp --decode-graph` accepted no draft since 2026-09-06
+  (every class 0.0 %, the transcript still exact): the decode-step commit
+  moved the scalar graph's fed tokens to the slot's persistent feed rows
+  (`device_feed`, rows 8 onward) and the serving adapter followed, but the
+  evidence app's recorded verify kept comparing row 0's winner with the
+  eager rows at `device_tokens()`, which nothing rewrites during a replay.
+  The app's recorded verify now reads the feed rows; the eager speculator
+  (77 % accepted) and the serving path were never affected. Found by the
+  NVFP4 evidence chain; bisected with the app built at f41c506 and
+  069a063 (both 0 %) against the eager path (77 %).
+
 - The row batch is a family: a 2-slot (4-row) and a 3-slot (6-row) batch
   are recorded beside the full 8-row one, and a step replays the smallest
   whose slots cover the live requests. Two live requests used to be either

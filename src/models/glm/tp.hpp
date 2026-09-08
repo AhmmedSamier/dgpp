@@ -116,6 +116,10 @@ class GlmTpViews {
   GlmQuantMatrix pack_quant_cols(const GlmQuantMatrix& m, int64_t col_start,
                                  int64_t cols, uint8_t* payload,
                                  float* scales);
+  // The NVFP4 twin: packed nibbles [rows, cols/2] and per-row scales
+  // [rows, cols/16] out of the full matrix; col_start on a 16-block.
+  GlmFp4Matrix pack_fp4_cols(const GlmFp4Matrix& m, int64_t col_start,
+                             int64_t cols, uint8_t* payload, uint8_t* scales);
   void ensure_expert_pack();
 
   GlmTextConfig cfg_;
@@ -140,7 +144,8 @@ class GlmTpViews {
   GlmMoeWeights moe_{};
   GlmQuantMatrix dense_[3]{};
   GlmQuantMatrix shared_[3]{};
-  std::vector<GlmQuantMatrix> experts_;  // [n_experts * 3] sliced views
+  std::vector<GlmQuantMatrix> experts_;  // [n_experts * 3] sliced views (FP8)
+  std::vector<GlmFp4Matrix> experts_fp4_;  // the same, NVFP4 layers
 };
 
 }  // namespace dgpp

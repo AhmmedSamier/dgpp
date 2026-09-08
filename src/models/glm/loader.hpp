@@ -97,10 +97,21 @@ struct GlmLayerBump;
 struct GlmMoeResident {
   const uint16_t* router_gate = nullptr;  // BF16 [n_routed_experts, hidden]
   const float* router_bias = nullptr;     // F32 [n_routed_experts]
-  GlmQuantMatrix shared[3];               // gate, up, down
+  GlmQuantMatrix shared[3];               // gate, up, down (FP8 under both formats)
+  // The routed experts in the layer's format (GlmTextConfig::expert_format):
+  // FP8 triples in `experts`, or NVFP4 triples in `experts_fp4` with every
+  // matrix's F32 global scale gathered into one [n_experts, 3] array
+  // (`expert_global_scales`, device) that the views point into. Exactly one
+  // of the two vectors is populated.
   std::vector<GlmQuantMatrix> experts;    // gate, up, down per expert (sliced)
+  std::vector<GlmFp4Matrix> experts_fp4;  // gate, up, down per expert (sliced)
+  const float* expert_global_scales = nullptr;
+  bool nvfp4() const { return !experts_fp4.empty(); }
   const GlmQuantMatrix& expert(int e, int i) const {
     return experts[static_cast<size_t>(e) * 3 + i];
+  }
+  const GlmFp4Matrix& expert_fp4(int e, int i) const {
+    return experts_fp4[static_cast<size_t>(e) * 3 + i];
   }
 };
 

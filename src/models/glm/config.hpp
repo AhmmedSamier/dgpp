@@ -27,6 +27,22 @@ namespace dgpp {
 enum class GlmLayerKind : int { Kda, Dsa };
 enum class GlmMlpKind : int { Dense, Moe };
 
+// The routed experts' resident weight format (docs/nvfp4_plan.md §2, §4):
+// what config.json's quantization_config declares for the main-stack MoE
+// layers. Fp8Block128 is the FP8 release (e4m3 payload + F32 128x128
+// block scales, `weight` + `weight_scale_inv`) and the default when the
+// file says quant_method "fp8" or nothing. Nvfp4Group16 is the composed
+// hybrid (quant_method "dgpp_mixed"): e2m1 pairs + e4m3 scales per 16 +
+// one F32 global scale (`weight_packed` + `weight_scale` +
+// `weight_global_scale`). Every OTHER tensor class — shared experts, dense
+// MLPs, attention, the MTP layer — keeps the FP8 release's formats under
+// both, which is why this is one enum and not a per-class table.
+enum class GlmExpertFormat : int { Fp8Block128 = 0, Nvfp4Group16 = 1 };
+
+constexpr const char* glm_expert_format_name(GlmExpertFormat f) {
+  return f == GlmExpertFormat::Nvfp4Group16 ? "nvfp4-group16" : "fp8-block128";
+}
+
 // Sampling defaults shipped beside config.json in generation_config.json.
 // Keep presence separate from the effective value: a missing sampling field
 // is a configuration gap which callers must be able to name in their logs,
@@ -141,9 +157,28 @@ struct GlmTextConfig {
   // --- MTP -----------------------------------------------------------------
   int num_nextn_predict_layers = 1;
 
+  // --- weight formats -------------------------------------------------------
+  // The main-stack routed experts' format (from quantization_config; see
+  // GlmExpertFormat). The MTP layer's experts are FP8 under both.
+  GlmExpertFormat routed_expert_format = GlmExpertFormat::Fp8Block128;
+  GlmExpertFormat expert_format(int layer) const {
+    return layer == mtp_layer() ? GlmExpertFormat::Fp8Block128
+                                : routed_expert_format;
+  }
+
   // Parses the text_config object of a GLM-5 checkpoint file. Throws
   // std::runtime_error naming the offending field on anything unsupported.
-  static GlmTextConfig parse(const minijson::Value& text_config);
+  // `quantization_config` (the root object's, nullable) selects the routed
+  // experts' format; absent means the FP8 release.
+  static GlmTextConfig parse(const minijson::Value& text_config,
+                             const minijson::Value* quantization_config = nullptr);
+
+  // The quantization_config -> GlmExpertFormat rule on its own (null =
+  // FP8). Rejects unknown quant_method values and dgpp_mixed files whose
+  // routed-expert group is not NVFP4 group 16 or whose MTP/DSA sources are
+  // not the FP8 release (the engine has no BF16 expert path).
+  static GlmExpertFormat parse_expert_format(
+      const minijson::Value* quantization_config, const GlmTextConfig& text);
 
   // Reads config.json from disk and dispatches to parse().
   static GlmTextConfig from_json_file(const std::string& path);

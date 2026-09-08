@@ -58,3 +58,15 @@ dgpp::GlmTextConfig glm_tp_test_config() {
 void glm_tp_write_fixture(const std::string& dir) {
   glmfx::write_fixture(glm_tp_test_config(), kTpJson, dir);
 }
+
+// The same geometry with NVFP4 routed experts on the main-stack MoE layers
+// (the composed hybrid's profile): the shard-parity gate runs on both.
+dgpp::GlmTextConfig glm_tp_test_config_fp4() {
+  const auto parsed = dgpp::minijson::parse(kTpJson);
+  const auto quant = dgpp::minijson::parse(glmfx::fp4_fixture_quantization_config());
+  return dgpp::GlmTextConfig::parse(parsed.root, &quant.root);
+}
+
+void glm_tp_write_fixture_fp4(const std::string& dir) {
+  glmfx::write_fixture(glm_tp_test_config_fp4(), kTpJson, dir);
+}

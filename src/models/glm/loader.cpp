@@ -129,6 +129,15 @@ bool is_dsa_bridge(const GlmExpectedTensor& e) {
   return s == "self_attn.q_b_proj.weight" || s == "self_attn.o_proj.weight";
 }
 
+// The rank-invariant re-read set for the byte reconcile (§5.2): replicated
+// tensors, the DSA bridges, and the NVFP4 experts' per-tensor global scales
+// (4 bytes each, read whole by every rank — the sliced payload and scale
+// rows partition across ranks, the scalar cannot).
+bool is_full_read(const GlmExpectedTensor& e) {
+  return is_replicated(e) || is_dsa_bridge(e) ||
+         e.role == GlmTensorRole::Fp4Global;
+}
+
 }  // namespace
 
 // Weight bump for streamed/resident layer weights (defined here, pimpl'd in
@@ -296,7 +305,7 @@ struct BuildCtx {
   void note_read(const GlmExpectedTensor& e, size_t bytes) {
     if (!copy) return;
     source_bytes += bytes;
-    if (is_replicated(e) || is_dsa_bridge(e)) verbatim_bytes += bytes;
+    if (is_full_read(e)) verbatim_bytes += bytes;
   }
 
   // ---- verbatim loads (replicated at every world; world=1: everything) --
@@ -449,6 +458,110 @@ struct BuildCtx {
       consumed(ts);
     }
     return q;
+  }
+
+  // ---- NVFP4 slices (e2m1 pairs + e4m3 scales per 16 + F32 global) ----
+  // `base` names the logical [N, K] matrix ("...gate_proj.weight"); the
+  // triple is base_packed [N, K/2] U8, base_scale [N, K/16] F8_E4M3 and
+  // base_global_scale [1] F32. Row slices need no alignment (every row
+  // carries its own scales); column slices start and span whole 16-blocks
+  // (a block is also a whole number of packed bytes). The resident bytes
+  // are the checkpoint's, untouched.
+  GlmFp4Matrix load_fp4_rows(const std::string& base, int64_t row_start,
+                             int64_t rows, const float* global) {
+    const GlmExpectedTensor& ep = expected(base + "_packed");
+    const GlmExpectedTensor& es = expected(base + "_scale");
+    const int64_t N = ep.shape[0];
+    const int64_t cols = ep.shape[1] * 2;
+    fp4_check_cols(cols, "glm loader");
+    check_range(base, row_start, rows, N);
+    if (es.shape[0] != N || es.shape[1] != cols / kFp4Group)
+      throw std::runtime_error("glm loader: NVFP4 scale geometry mismatch on " + base);
+    const size_t pc = static_cast<size_t>(cols / 2);
+    const size_t sc = static_cast<size_t>(cols / kFp4Group);
+    GlmFp4Matrix q;
+    q.rows = rows;
+    q.cols = cols;
+    q.global_scale = global;
+    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(rows) * pc));
+    q.scales = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(rows) * sc));
+    if (copy) {
+      const TensorInfo& tp = source(ep.name);
+      const TensorInfo& ts = source(es.name);
+      std::memcpy(bump.host(const_cast<uint8_t*>(q.payload)),
+                  static_cast<const uint8_t*>(tp.data) + static_cast<size_t>(row_start) * pc,
+                  static_cast<size_t>(rows) * pc);
+      std::memcpy(bump.host(const_cast<uint8_t*>(q.scales)),
+                  static_cast<const uint8_t*>(ts.data) + static_cast<size_t>(row_start) * sc,
+                  static_cast<size_t>(rows) * sc);
+      note_read(ep, static_cast<size_t>(rows) * pc);
+      note_read(es, static_cast<size_t>(rows) * sc);
+      consumed(tp);
+      consumed(ts);
+    }
+    return q;
+  }
+
+  GlmFp4Matrix load_fp4_cols(const std::string& base, int64_t col_start,
+                             int64_t cols, const float* global) {
+    const GlmExpectedTensor& ep = expected(base + "_packed");
+    const GlmExpectedTensor& es = expected(base + "_scale");
+    const int64_t N = ep.shape[0];
+    const int64_t full_cols = ep.shape[1] * 2;
+    fp4_check_cols(full_cols, "glm loader");
+    fp4_check_cols(cols, "glm loader");
+    if (col_start % kFp4Group != 0)
+      throw std::invalid_argument(
+          "glm loader: NVFP4 column slice of '" + base +
+          "' must start on a 16-element block boundary");
+    check_range(base, col_start, cols, full_cols);
+    if (es.shape[0] != N || es.shape[1] != full_cols / kFp4Group)
+      throw std::runtime_error("glm loader: NVFP4 scale geometry mismatch on " + base);
+    const size_t pc = static_cast<size_t>(cols / 2), pc_full = static_cast<size_t>(full_cols / 2);
+    const size_t sc = static_cast<size_t>(cols / kFp4Group), sc_full = static_cast<size_t>(full_cols / kFp4Group);
+    GlmFp4Matrix q;
+    q.rows = N;
+    q.cols = cols;
+    q.global_scale = global;
+    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(N) * pc));
+    q.scales = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(N) * sc));
+    if (copy) {
+      const TensorInfo& tp = source(ep.name);
+      const TensorInfo& ts = source(es.name);
+      const uint8_t* sp = static_cast<const uint8_t*>(tp.data);
+      const uint8_t* ss = static_cast<const uint8_t*>(ts.data);
+      uint8_t* hp = bump.host(const_cast<uint8_t*>(q.payload));
+      uint8_t* hs = bump.host(const_cast<uint8_t*>(q.scales));
+      if (cols == full_cols) {
+        std::memcpy(hp, sp, static_cast<size_t>(N) * pc);
+        std::memcpy(hs, ss, static_cast<size_t>(N) * sc);
+      } else {
+        for (int64_t r = 0; r < N; ++r) {
+          std::memcpy(hp + r * pc, sp + r * pc_full + col_start / 2, pc);
+          std::memcpy(hs + r * sc, ss + r * sc_full + col_start / kFp4Group, sc);
+        }
+      }
+      note_read(ep, static_cast<size_t>(N) * pc);
+      note_read(es, static_cast<size_t>(N) * sc);
+      consumed(tp);
+      consumed(ts);
+    }
+    return q;
+  }
+
+  // One matrix's F32 global scale into its slot of the layer's gathered
+  // array (a device address inside the bump). Read whole by every rank;
+  // note_read files it under the full-read set (is_full_read).
+  void load_fp4_global(const std::string& base, float* slot) {
+    const GlmExpectedTensor& eg = expected(base + "_global_scale");
+    if (eg.role != GlmTensorRole::Fp4Global || eg.numel() != 1)
+      throw std::runtime_error("glm loader: '" + eg.name + "' is not a global scale");
+    if (copy) {
+      const TensorInfo& t = source(eg.name);
+      std::memcpy(bump.host(slot), t.data, 4);
+      note_read(eg, 4);
+      consumed(t);
+    }
   }
 
   void check_range(const std::string& name, int64_t start, int64_t count,
@@ -724,6 +837,33 @@ struct BuildCtx {
     // — no busiest rank at the FFN boundary (2026-09-02). The column pack
     // runs on the CPU straight from the mmap (strided rows of M bytes).
     const int64_t E = cfg.moe_config().n_experts;
+    if (cfg.expert_format(layer) == GlmExpertFormat::Nvfp4Group16) {
+      // NVFP4 routed experts (docs/nvfp4_plan.md §4): the same inter
+      // slice — this rank's M gate/up rows, its M down columns — on the
+      // packed payload and the per-row scales; every matrix's global scale
+      // gathered into one [E, 3] array so a view carries one pointer.
+      float* globals = static_cast<float*>(
+          bump.alloc(static_cast<size_t>(E) * 3 * sizeof(float)));
+      out.moe.expert_global_scales = globals;
+      out.moe.experts.clear();
+      out.moe.experts_fp4.resize(static_cast<size_t>(E) * 3);
+      static const char* kProj[3] = {"gate_proj.weight", "up_proj.weight",
+                                     "down_proj.weight"};
+      for (int64_t e = 0; e < E; ++e) {
+        const std::string ep = p + "mlp.experts." + std::to_string(e) + ".";
+        for (int i = 0; i < 3; ++i) {
+          const std::string base = ep + kProj[i];
+          float* g = globals + e * 3 + i;
+          load_fp4_global(base, g);
+          out.moe.experts_fp4[static_cast<size_t>(e) * 3 + i] =
+              i < 2 ? load_fp4_rows(base, rank * M, M, g)
+                    : load_fp4_cols(base, rank * M, M, g);
+        }
+      }
+      return;
+    }
+    out.moe.experts_fp4.clear();
+    out.moe.expert_global_scales = nullptr;
     out.moe.experts.resize(static_cast<size_t>(E) * 3);
     for (int64_t e = 0; e < E; ++e) {
       const std::string ep = p + "mlp.experts." + std::to_string(e) + ".";

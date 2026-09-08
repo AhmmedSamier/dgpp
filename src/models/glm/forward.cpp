@@ -571,7 +571,8 @@ GlmMoeWeights GlmDiagnosticModel::moe_weights(const GlmMoeResident& r) {
   GlmMoeWeights w;
   w.router_gate = r.router_gate;
   w.router_bias = r.router_bias;
-  w.experts = r.experts.data();
+  w.experts = r.experts.empty() ? nullptr : r.experts.data();
+  w.experts_fp4 = r.experts_fp4.empty() ? nullptr : r.experts_fp4.data();
   for (int i = 0; i < 3; ++i) w.shared[i] = r.shared[i];
   return w;
 }

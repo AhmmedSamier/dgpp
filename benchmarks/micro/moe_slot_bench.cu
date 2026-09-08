@@ -7,7 +7,10 @@
 // pays 42 of them (2026-09-06: gate_up 255 us + down 168 us per layer on
 // rank 0's trace, the down at 224 GB/s against gate_up's 295).
 //
-// Usage: moe_slot_bench [--rows N] [--iters N] [--warmup N] [--inter N]
+// Usage: moe_slot_bench [--rows N] [--iters N] [--warmup N] [--inter N] [--format fp8|fp4]
+//   --format fp4: the routed experts as NVFP4 triples (e2m1 pairs, e4m3
+//   scales per 16, one global per matrix — docs/nvfp4_plan.md), the shared
+//   expert FP8 as in the composed checkpoint; bytes accounted per format.
 #include <cuda_runtime.h>
 
 #include <cstdint>
@@ -39,11 +42,13 @@ struct DevBuf {
 
 int main(int argc, char** argv) {
   int rows = 2, iters = 100, warmup = 10, inter = 512;
+  bool fp4 = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--rows") && i + 1 < argc) rows = std::atoi(argv[++i]);
     else if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
     else if (!std::strcmp(argv[i], "--warmup") && i + 1 < argc) warmup = std::atoi(argv[++i]);
     else if (!std::strcmp(argv[i], "--inter") && i + 1 < argc) inter = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--format") && i + 1 < argc) fp4 = !std::strcmp(argv[++i], "fp4");
   }
   dgpp::GlmMoeConfig cfg;
   cfg.inter = inter;  // the per-rank slice
@@ -51,11 +56,38 @@ int main(int argc, char** argv) {
   // (E+1)*3 matrices: gate/up [I,H] + down [H,I] per expert, then shared.
   const int mats = (E + 1) * 3;
   std::vector<dgpp::GlmQuantMatrix> qm(static_cast<size_t>(mats));
+  std::vector<dgpp::GlmFp4Matrix> fm(static_cast<size_t>(E) * 3);
   std::vector<DevBuf*> keep;
   size_t total_bytes = 0;
+  DevBuf* dglob = nullptr;
+  if (fp4) {
+    dglob = new DevBuf(size_t(E) * 3 * 4);
+    keep.push_back(dglob);
+    std::vector<float> g(size_t(E) * 3);
+    for (size_t i = 0; i < g.size(); ++i) g[i] = 0.5f + float(hash32(11 + i) & 0xFFFF) / 65536.f * 1.5f;
+    DGPP_CUDA_OK(cudaMemcpy(dglob->p, g.data(), g.size() * 4, cudaMemcpyHostToDevice));
+  }
   for (int m = 0; m < mats; ++m) {
     const bool down = m % 3 == 2;
     const int64_t r = down ? H : I, c = down ? I : H;
+    if (fp4 && m < E * 3) {
+      const size_t pn = size_t(r) * c / 2, sn = size_t(r) * c / 16;
+      std::vector<uint8_t> payload(pn), scales(sn);
+      for (size_t i = 0; i < pn; ++i) payload[i] = uint8_t(hash32(uint64_t(m) * 2654435761ull + i) & 0xFF);
+      for (size_t i = 0; i < sn; ++i) {
+        // e4m3 in a sane range, never the NaN codes.
+        uint8_t v = uint8_t(0x20 + (hash32(99 + uint64_t(m) * 7919 + i) & 0x1F));
+        scales[i] = v;
+      }
+      DevBuf* dp = new DevBuf(pn);
+      DevBuf* ds = new DevBuf(sn);
+      DGPP_CUDA_OK(cudaMemcpy(dp->p, payload.data(), pn, cudaMemcpyHostToDevice));
+      DGPP_CUDA_OK(cudaMemcpy(ds->p, scales.data(), sn, cudaMemcpyHostToDevice));
+      keep.push_back(dp); keep.push_back(ds);
+      fm[size_t(m)] = dgpp::GlmFp4Matrix{dp->as<uint8_t>(), ds->as<uint8_t>(), dglob->as<float>() + m, r, c};
+      total_bytes += pn + sn + 4;
+      continue;
+    }
     const size_t pn = size_t(r) * c, sn = size_t((r + 127) / 128) * ((c + 127) / 128);
     std::vector<uint8_t> payload(static_cast<size_t>(pn));
     for (size_t i = 0; i < pn; ++i) {
@@ -83,7 +115,8 @@ int main(int argc, char** argv) {
   dgpp::GlmMoeWeights w;
   w.router_gate = dgate.as<uint16_t>();
   w.router_bias = dbias.as<float>();
-  w.experts = qm.data();
+  w.experts = fp4 ? nullptr : qm.data();
+  w.experts_fp4 = fp4 ? fm.data() : nullptr;
   for (int m = 0; m < 3; ++m) w.shared[m] = qm[size_t(E) * 3 + m];
 
   dgpp::GlmMoeLayer layer(w, cfg, rows, /*decode_slots=*/rows);
@@ -112,10 +145,12 @@ int main(int argc, char** argv) {
   }
   // Bytes the chain must move for `rows` rows: top_k routed + 1 shared
   // expert per row (no sharing assumed), 3 matrices each.
-  const double per_expert = 3.0 * double(H) * I + 3.0 * 4 * ((I + 127) / 128) * ((H + 127) / 128);
-  const double bytes = double(rows) * (cfg.top_k + 1) * per_expert;
-  std::printf("moe_slot_bench: rows=%d E=%d H=%d I(per rank)=%d top_k=%d weights %.1f GiB resident\n",
-              rows, E, H, I, cfg.top_k, total_bytes / (1024.0 * 1024 * 1024));
+  const double per_expert_fp8 = 3.0 * double(H) * I + 3.0 * 4 * ((I + 127) / 128) * ((H + 127) / 128);
+  const double per_expert_fp4 = 3.0 * double(H) * I / 2 + 3.0 * double(H) * I / 16 + 12;
+  const double bytes = double(rows) * (cfg.top_k * (fp4 ? per_expert_fp4 : per_expert_fp8) + per_expert_fp8);
+  std::printf("moe_slot_bench [%s]: rows=%d E=%d H=%d I(per rank)=%d top_k=%d weights %.1f GiB resident\n",
+              fp4 ? "nvfp4 routed + fp8 shared" : "fp8", rows, E, H, I, cfg.top_k,
+              total_bytes / (1024.0 * 1024 * 1024));
   std::printf("enqueue_decode: mean %.1f us, min %.1f us; %.1f GB/s at %.0f MB per call (no expert sharing); x42 layers = %.2f ms\n",
               total / iters * 1e3f, best * 1e3f, bytes / (best * 1e-3) / 1e9, bytes / 1e6,
               total / iters * 42);

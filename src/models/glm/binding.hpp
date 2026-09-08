@@ -45,6 +45,18 @@ enum class GlmWeightClass : int {
   Mtp,
 };
 
+// What a tensor IS in a quantized pair/triple, so the validator and the
+// loader never infer it from the dtype (an NVFP4 block scale is itself
+// F8_E4M3). Plain covers every BF16/F32 tensor.
+enum class GlmTensorRole : uint8_t {
+  Plain,
+  Fp8Payload,  // e4m3 [N, K], partner `_scale_inv`
+  Fp8Scale,    // F32 [ceil(N/128), ceil(K/128)]
+  Fp4Packed,   // U8 [N, K/2]: e2m1 pairs, low nibble = even element
+  Fp4Scale,    // F8_E4M3 [N, K/16]: one block scale per 16 along K
+  Fp4Global,   // F32 [1]: the tensor's global scale (dequant divides by it)
+};
+
 struct GlmExpectedTensor {
   std::string name;
   DType dtype{};
@@ -52,8 +64,12 @@ struct GlmExpectedTensor {
   GlmWeightClass cls = GlmWeightClass::LayerNorm;
   int layer = -1;   // layer index; -1 for global tensors
   int expert = -1;  // routed-expert id within the layer; -1 otherwise
+  GlmTensorRole role = GlmTensorRole::Plain;
 
-  bool quantized() const { return dtype == DType::F8_E4M3; }
+  // The FP8 payload of a `weight` + `weight_scale_inv` pair.
+  bool quantized() const { return role == GlmTensorRole::Fp8Payload; }
+  // The packed payload of an NVFP4 triple.
+  bool nvfp4() const { return role == GlmTensorRole::Fp4Packed; }
 
   size_t numel() const {
     size_t n = 1;
@@ -67,6 +83,14 @@ struct GlmExpectedTensor {
 // F32 [ceil(N/128), ceil(K/128)] — DESIGN §4's 128x128 dequant blocks.
 // Single source for the table generator, the validator, and the loader.
 std::vector<int64_t> glm_scale_shape(const std::vector<int64_t>& payload);
+
+// The NVFP4 triple's shapes for a logical [N, K] matrix (K % 16 == 0,
+// enforced): packed payload [N, K/2], block scales [N, K/16], global [1].
+// The names are the compressed-tensors spelling the checkpoint carries:
+// `<base>_packed`, `<base>_scale`, `<base>_global_scale` for `<base>` =
+// "...proj.weight".
+std::vector<int64_t> glm_fp4_packed_shape(int64_t rows, int64_t cols);
+std::vector<int64_t> glm_fp4_scale_shape(int64_t rows, int64_t cols);
 
 // Full text-model table (main layers + MTP layer + globals). Ordered by
 // layer then class; expert tensors are grouped per layer.
@@ -99,13 +123,15 @@ struct GlmBindReport {
                                 // validate, let alone load, those layers)
   size_t quantized_matrices = 0;  // matched F8 payloads
   size_t scales_bound = 0;        // ... whose scale partner validated
-  size_t scales_bad = 0;          // missing/mistyped/misshapen scales
+  size_t scales_bad = 0;          // missing/mistyped/misshapen scales (fp8 or fp4)
+  size_t fp4_matrices = 0;        // matched NVFP4 packed payloads
+  size_t fp4_bound = 0;           // ... whose scale AND global partners validated
   std::vector<std::string> errors;  // capped at max_errors
 
   bool ok() const {
     return missing == 0 && dtype_mismatch == 0 && shape_mismatch == 0 &&
            unexpected == 0 && scales_bad == 0 &&
-           quantized_matrices == scales_bound;
+           quantized_matrices == scales_bound && fp4_matrices == fp4_bound;
   }
 };
 

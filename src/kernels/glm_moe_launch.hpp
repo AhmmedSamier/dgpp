@@ -190,4 +190,66 @@ void launch_moe_slot_accum(uint16_t* out, const float* contrib,
                            const float* weights, int tokens, int hidden,
                            int top_k, cudaStream_t stream);
 
+// ---- the NVFP4 routed experts (2026-09-08, docs/nvfp4_plan.md §3) ---------
+// The same contracts as the FP8 launchers above, over expert-view tables
+// whose routed entries are NVFP4 (payload = e2m1 pairs [n, k/2], fp4_scales
+// = e4m3 [n, k/16], fp4_global = the matrix's F32 global scale). The shared
+// expert stays FP8 and, in the slot kernels, runs the fp8 core inside the
+// same launch (a block's slot decides, uniformly). Routed k must satisfy
+// fp4_gemv::shape_ok (a multiple of 32, k | 1024 or 1024 | k). Every
+// routed row's arithmetic is the fp4 core's, bitwise across the grouped
+// (host) and slot (decode) launchers.
+// The fp4 twin of the grouped tensor-core kernel (docs/nvfp4_plan.md §3.4):
+// the same tiles and mma.sync chain, the weight tile decoded from the NVFP4
+// triple exactly, the global scale dividing the finished dot in the
+// epilogue. k must be a multiple of 16 (any width — the fp4 GEMV core's
+// power-of-two set does not apply). The grouped form is bitwise the dense
+// form per segment; neither is bitwise the fp4 GEMV core (summation order).
+void launch_moe_grouped_mma_fp4_bf16(const uint16_t* act, size_t act_stride,
+                                     const MoeSegment* segs, int n_segs,
+                                     int max_rows, int rows_per_block,
+                                     const MoeExpertView* views, int which,
+                                     uint16_t* out, size_t out_stride, int n,
+                                     int k, cudaStream_t stream,
+                                     const int32_t* act_rows = nullptr);
+void launch_moe_grouped_mma_fp4_f32(const uint16_t* act, size_t act_stride,
+                                    const MoeSegment* segs, int n_segs,
+                                    int max_rows, int rows_per_block,
+                                    const MoeExpertView* views, int which,
+                                    float* out, size_t out_stride, int n, int k,
+                                    cudaStream_t stream,
+                                    const int32_t* act_rows = nullptr);
+void launch_dense_mma_fp4_bf16(const uint16_t* act, size_t act_stride,
+                               const GlmFp4Matrix& w, uint16_t* out, int m, int n,
+                               int k, cudaStream_t stream);
+void launch_dense_mma_fp4_f32(const uint16_t* act, size_t act_stride,
+                              const GlmFp4Matrix& w, float* out, int m, int n,
+                              int k, cudaStream_t stream);
+void launch_moe_grouped_gemv_fp4_bf16(const uint16_t* act, size_t act_stride,
+                                      const MoeSegment* segs, int n_segs,
+                                      int max_rows, int rows_per_block,
+                                      const MoeExpertView* views, int which,
+                                      uint16_t* out, size_t out_stride, int n,
+                                      int k, cudaStream_t stream);
+void launch_moe_grouped_gemv_fp4_f32(const uint16_t* act, size_t act_stride,
+                                     const MoeSegment* segs, int n_segs,
+                                     int max_rows, int rows_per_block,
+                                     const MoeExpertView* views, int which,
+                                     float* out, size_t out_stride, int n,
+                                     int k, cudaStream_t stream);
+void launch_moe_slot_gate_up_swiglu_fp4(
+    const uint16_t* x, size_t x_stride, const int32_t* ids,
+    const int32_t* order, const MoeExpertView* views, int n_routed,
+    int k_routed, int n_shared, int k_shared, const uint8_t* sh_gate_payload,
+    const float* sh_gate_scales, const uint8_t* sh_up_payload,
+    const float* sh_up_scales, uint16_t* act, int act_stride, int slots,
+    int top_k, float limit, cudaStream_t stream);
+void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,
+                              const int32_t* ids, const int32_t* order,
+                              const MoeExpertView* views, int n_routed,
+                              int k_routed, int n_shared, int k_shared,
+                              const uint8_t* sh_payload, const float* sh_scales,
+                              float* out, int out_stride, int slots, int top_k,
+                              cudaStream_t stream);
+
 }  // namespace dgpp

@@ -50,6 +50,12 @@ struct GlmMoeConfig {
     const int64_t sc = 4 * ((inter + 127) / 128) * ((hidden + 127) / 128);
     return 3LL * inter * hidden + 3 * sc;  // gate, up: [I,H]; down: [H,I]
   }
+  // The same expert in NVFP4: half a byte per element, an e4m3 scale per
+  // 16, one F32 global per matrix.
+  int64_t expert_bytes_fp4() const {
+    const int64_t elems = 3LL * inter * hidden;
+    return elems / 2 + elems / 16 + 3 * 4;
+  }
 
   static void validate_config(const GlmMoeConfig& c) {
     auto fail = [](const char* what) {
@@ -83,8 +89,13 @@ struct GlmMoeConfig {
 struct GlmMoeWeights {
   const uint16_t* router_gate = nullptr;  // bf16 [n_experts, hidden]
   const float* router_bias = nullptr;     // f32 [n_experts]
-  GlmQuantMatrix shared[3];               // gate, up, down (compressed)
-  const GlmQuantMatrix* experts = nullptr;  // [n_experts * 3] gate,up,down
+  GlmQuantMatrix shared[3];               // gate, up, down (compressed, FP8)
+  // The routed experts in EXACTLY ONE of the two formats (the layer's
+  // GlmExpertFormat): FP8 block-128 triples or NVFP4 triples, [n_experts *
+  // 3] gate,up,down either way. The shared expert is FP8 under both.
+  const GlmQuantMatrix* experts = nullptr;
+  const GlmFp4Matrix* experts_fp4 = nullptr;
+  bool nvfp4() const { return experts_fp4 != nullptr; }
 };
 
 // The decode path's device-side expert table entry (2026-09-01): the
@@ -94,8 +105,16 @@ struct GlmMoeWeights {
 // Layout-compatible with nothing — one type, one producer (the layer's
 // per-binding upload), the slot kernels its consumers.
 struct MoeExpertView {
-  const uint8_t* payload = nullptr;  // E4M3 fp8 payload (GlmQuantMatrix)
-  const float* scales = nullptr;     // F32 block scales
+  const uint8_t* payload = nullptr;  // fp8: e4m3 [n, k]; nvfp4: e2m1 pairs [n, k/2]
+  const float* scales = nullptr;     // fp8: F32 128x128 block scales (nvfp4: null)
+  const uint8_t* fp4_scales = nullptr;  // nvfp4: e4m3 [n, k/16] (fp8: null)
+  const float* fp4_global = nullptr;    // nvfp4: the matrix's F32 global scale
+  static MoeExpertView of(const GlmQuantMatrix& m) {
+    return MoeExpertView{m.payload, m.scales, nullptr, nullptr};
+  }
+  static MoeExpertView of(const GlmFp4Matrix& m) {
+    return MoeExpertView{m.payload, nullptr, m.scales, m.global_scale};
+  }
 };
 
 }  // namespace dgpp

@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "common/dtypes.hpp"
+#include "kernels/latent_format.hpp"
 
 namespace dgpp {
 
@@ -28,9 +29,11 @@ struct StrictQuantRow {
 // D[rows_out, cols_out] = act[rows_out, cols_in] @ W^T with W [n, k]:
 // strict GEMM — bf16-rounded weights, double accumulation, bf16-rounded
 // output (the engine's output dtype).
+// `divisor` is the NVFP4 matrix's global scale, applied once to the
+// finished dot as the engine's epilogue does (1 for FP8).
 void strict_gemm(const std::vector<uint16_t>& act, int64_t act_stride,
                  const std::vector<double>& weights_bf16, int m, int n,
-                 int k, std::vector<uint16_t>& out) {
+                 int k, std::vector<uint16_t>& out, double divisor = 1.0) {
   out.assign(static_cast<size_t>(m) * n, 0);
   for (int nn = 0; nn < n; ++nn) {
     const double* wrow = weights_bf16.data() + static_cast<size_t>(nn) * k;
@@ -40,7 +43,7 @@ void strict_gemm(const std::vector<uint16_t>& act, int64_t act_stride,
           act.data() + static_cast<size_t>(mm) * act_stride;
       for (int kk = 0; kk < k; ++kk)
         acc += bf16_to_d(arow[kk]) * wrow[kk];
-      out[static_cast<size_t>(mm) * n + nn] = d_to_bf16(acc);
+      out[static_cast<size_t>(mm) * n + nn] = d_to_bf16(acc / divisor);
     }
   }
 }
@@ -50,7 +53,7 @@ void strict_gemm(const std::vector<uint16_t>& act, int64_t act_stride,
 // chain owns the single rounding.
 void strict_gemm_raw(const std::vector<uint16_t>& act, int64_t act_stride,
                      const std::vector<double>& weights_bf16, int m, int n,
-                     int k, std::vector<double>& out) {
+                     int k, std::vector<double>& out, double divisor = 1.0) {
   out.assign(static_cast<size_t>(m) * n, 0.0);
   for (int nn = 0; nn < n; ++nn) {
     const double* wrow = weights_bf16.data() + static_cast<size_t>(nn) * k;
@@ -60,9 +63,27 @@ void strict_gemm_raw(const std::vector<uint16_t>& act, int64_t act_stride,
           act.data() + static_cast<size_t>(mm) * act_stride;
       for (int kk = 0; kk < k; ++kk)
         acc += bf16_to_d(arow[kk]) * wrow[kk];
-      out[static_cast<size_t>(mm) * n + nn] = acc;
+      out[static_cast<size_t>(mm) * n + nn] = acc / divisor;
     }
   }
+}
+
+// NVFP4 weights: e2m1(code) x e4m3(scale), EXACT (<= 6 significant bits;
+// the engine keeps it in fp32 unrounded) — the global scale divides the
+// finished dot, not the weight (docs/nvfp4_plan.md §3.1).
+std::vector<double> dequant_fp4_weights(const GlmFp4MatrixHost& mat) {
+  const int64_t pc = mat.cols / 2, sc = mat.cols / 16;
+  std::vector<double> w(static_cast<size_t>(mat.rows) * mat.cols);
+  for (int64_t r = 0; r < mat.rows; ++r)
+    for (int64_t c = 0; c < mat.cols; ++c) {
+      const uint8_t byte = mat.payload[static_cast<size_t>(r) * pc + c / 2];
+      const uint8_t code = (c & 1) ? static_cast<uint8_t>(byte >> 4)
+                                   : static_cast<uint8_t>(byte & 0xFu);
+      const float s = fp8_e4m3_bits_to_float(mat.scales[static_cast<size_t>(r) * sc + c / 16]);
+      w[static_cast<size_t>(r) * mat.cols + c] =
+          static_cast<double>(fp4_e2m1_bits_to_float(code)) * static_cast<double>(s);
+    }
+  return w;
 }
 
 // Decode payload x scales, rounded to bf16 (the engine's weight policy).
@@ -122,7 +143,30 @@ GlmQuantMatrixHost glm_moe_host_view(const GlmMoeHostWeights& w,
 
 GlmQuantMatrixHost glm_moe_host_shared(const GlmMoeHostWeights& w,
                                        const GlmMoeConfig& cfg, int m) {
-  return glm_moe_host_view(w, cfg, cfg.n_experts * 3 + m);
+  // Under NVFP4 the fp8 vectors hold only the shared triple.
+  return glm_moe_host_view(w, cfg, w.nvfp4 ? m : cfg.n_experts * 3 + m);
+}
+
+GlmFp4MatrixHost glm_moe_host_view_fp4(const GlmMoeHostWeights& w,
+                                       const GlmMoeConfig& cfg, int index) {
+  if (!w.nvfp4 || index < 0 || index >= cfg.n_experts * 3)
+    throw std::invalid_argument("glm_moe_host_view_fp4: not an NVFP4 routed index");
+  const int64_t I = cfg.inter, H = cfg.hidden;
+  GlmFp4MatrixHost m;
+  const bool down = index % 3 == 2;
+  m.rows = down ? H : I;
+  m.cols = down ? I : H;
+  // Every routed matrix has the same byte counts (gate/up [I,H], down [H,I]).
+  const int64_t pbytes = m.rows * m.cols / 2, sbytes = m.rows * m.cols / 16;
+  const size_t p_off = static_cast<size_t>(index) * pbytes;
+  const size_t s_off = static_cast<size_t>(index) * sbytes;
+  if (p_off + pbytes > w.fp4_payloads.size() || s_off + sbytes > w.fp4_scales.size() ||
+      static_cast<size_t>(index) >= w.fp4_globals.size())
+    throw std::invalid_argument("glm_moe_host_view_fp4: index out of range");
+  m.payload = w.fp4_payloads.data() + p_off;
+  m.scales = w.fp4_scales.data() + s_off;
+  m.global_scale = w.fp4_globals[static_cast<size_t>(index)];
+  return m;
 }
 
 void glm_moe_ref_router(const uint16_t* hidden, const uint16_t* gate,
@@ -198,10 +242,21 @@ void glm_moe_ref_forward(const uint16_t* hidden, const GlmMoeHostWeights& w,
 
   out.assign(static_cast<size_t>(tokens) * H, 0);
 
-  // Pre-dequantize every expert's three matrices (bf16-rounded weights) —
-  // small geometries only; the real-checkpoint path is the torch backend.
-  auto weights_for = [&](int index) {
-    return dequant_bf16_weights(glm_moe_host_view(w, cfg, index));
+  // Pre-dequantize every expert's three matrices (bf16-rounded weights
+  // for FP8; exact fp4 x scale for NVFP4, with the global scale returned
+  // as the dot's divisor) — small geometries only; the real-checkpoint
+  // path is the torch backend.
+  struct Mat {
+    std::vector<double> w;
+    double divisor;
+  };
+  auto weights_for = [&](int index) -> Mat {
+    if (w.nvfp4 && index < E * 3) {
+      const GlmFp4MatrixHost v = glm_moe_host_view_fp4(w, cfg, index);
+      return Mat{dequant_fp4_weights(v), static_cast<double>(v.global_scale)};
+    }
+    const int fp8_index = w.nvfp4 ? index - E * 3 : index;
+    return Mat{dequant_bf16_weights(glm_moe_host_view(w, cfg, fp8_index)), 1.0};
   };
 
   // Per token: the fp32-chain semantics in double — the down projection's
@@ -220,24 +275,24 @@ void glm_moe_ref_forward(const uint16_t* hidden, const GlmMoeHostWeights& w,
       const int e = route.ids[static_cast<size_t>(t) * K + i];
       const double we =
           static_cast<double>(route.weights[static_cast<size_t>(t) * K + i]);
-      const auto wg = weights_for(e * 3 + 0);
-      const auto wu = weights_for(e * 3 + 1);
-      const auto wd = weights_for(e * 3 + 2);
-      strict_gemm(xrow, H, wg, 1, I, H, gate_out);
-      strict_gemm(xrow, H, wu, 1, I, H, up_out);
+      const Mat wg = weights_for(e * 3 + 0);
+      const Mat wu = weights_for(e * 3 + 1);
+      const Mat wd = weights_for(e * 3 + 2);
+      strict_gemm(xrow, H, wg.w, 1, I, H, gate_out, wg.divisor);
+      strict_gemm(xrow, H, wu.w, 1, I, H, up_out, wu.divisor);
       swiglu_oracle(gate_out, up_out, I, cfg.swiglu_limit, act);
-      strict_gemm_raw(act, I, wd, 1, H, I, down_out);
+      strict_gemm_raw(act, I, wd.w, 1, H, I, down_out, wd.divisor);
       for (int d = 0; d < H; ++d) acc[d] += we * down_out[d];
     }
     // Shared expert, weight 1, added last.
     {
-      const auto wg = weights_for(E * 3 + 0);
-      const auto wu = weights_for(E * 3 + 1);
-      const auto wd = weights_for(E * 3 + 2);
-      strict_gemm(xrow, H, wg, 1, I, H, gate_out);
-      strict_gemm(xrow, H, wu, 1, I, H, up_out);
+      const Mat wg = weights_for(E * 3 + 0);
+      const Mat wu = weights_for(E * 3 + 1);
+      const Mat wd = weights_for(E * 3 + 2);
+      strict_gemm(xrow, H, wg.w, 1, I, H, gate_out, wg.divisor);
+      strict_gemm(xrow, H, wu.w, 1, I, H, up_out, wu.divisor);
       swiglu_oracle(gate_out, up_out, I, cfg.swiglu_limit, act);
-      strict_gemm_raw(act, I, wd, 1, H, I, down_out);
+      strict_gemm_raw(act, I, wd.w, 1, H, I, down_out, wd.divisor);
       for (int d = 0; d < H; ++d) acc[d] += down_out[d];
     }
     for (int d = 0; d < H; ++d)

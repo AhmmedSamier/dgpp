@@ -100,8 +100,8 @@ int run(int argc, char** argv) {
               "shape %zu) | vision %zu | unexpected %zu\n",
               rep.expected, rep.matched, rep.missing, rep.dtype_mismatch,
               rep.shape_mismatch, rep.vision, rep.unexpected);
-  std::printf("quantized matrices: %zu | scales bound: %zu | scales bad: %zu\n",
-               rep.quantized_matrices, rep.scales_bound, rep.scales_bad);
+  std::printf("quantized matrices: %zu | scales bound: %zu | scales bad: %zu | nvfp4 matrices: %zu | nvfp4 bound: %zu\n",
+               rep.quantized_matrices, rep.scales_bound, rep.scales_bad, rep.fp4_matrices, rep.fp4_bound);
   for (const auto& err : rep.errors)
       std::printf("  error: %s\n", err.c_str());
   if (rep.errors.size() >= max_errors)

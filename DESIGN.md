@@ -270,6 +270,31 @@ fused conversion/GEMM path. M4 parity tests cover block edges, saturation,
 NaN/Inf policy, and real checkpoint slices. An optimization that changes the
 resident byte count must update the generated checkpoint budget.
 
+NVFP4 routed experts (2026-09-08, `docs/nvfp4_plan.md`): the composed
+checkpoint `dgpp/GLM-5.3-Flash-NVFP4-FP8` carries the main-stack routed
+experts as the compressed-tensors triple `weight_packed` (U8 [N, K/2], two
+e2m1 codes per byte, low nibble = even element), `weight_scale` (e4m3
+[N, K/16], one per 16 elements along K) and `weight_global_scale` (F32 [1]),
+with every other tensor — shared experts, dense MLPs, attention, the MTP
+layer — the FP8 release's bytes under this same contract. The resident
+representation is again the checkpoint's bytes untouched (`GlmFp4Matrix`:
+payload, scales, and a pointer into the layer's gathered global scales);
+the dequantized value is `e2m1(code) × (float(scale) / global)`, and
+`e2m1(code) × float(scale)` is exact in bf16 (2 + 4 significant bits), so
+a kernel's only inexact step is the one division by the global scale,
+applied to a finished dot. The TP slice contract is 16 columns (one scale
+block, eight packed bytes); row slices need no alignment. The format is
+selected by `quantization_config.quant_method = "dgpp_mixed"`
+(`GlmExpertFormat`); an FP8 checkpoint's table, bytes and paths are
+unchanged. The kernels keep the bytes packed: the decode GEMV core
+(`fp4_gemv.cuh`) and the prefill's grouped tensor-core kernel
+(`moe_grouped_mma_fp4_kernel`) both decode e2m1 x scale in registers —
+exact — and divide by the global scale once per finished dot, so the
+routed experts' formula is applied with one rounding fewer than the FP8
+path's; the decode slot path, the host grouped path and the sliced fold
+are bitwise twins as under FP8, and the tile kernel's grouped form is
+bitwise its dense form per segment.
+
 ## 5. Process, memory, and execution layout
 
 There is one process and one CUDA context per node. Rank 0 additionally owns
