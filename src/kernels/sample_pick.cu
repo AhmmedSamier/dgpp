@@ -1255,12 +1255,14 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   __shared__ double lse_terms[R][kPickMaxWorld];
   __shared__ int total[R];
   __shared__ double Z[R];
-  // Row 0's proposal, gathered onto the merged candidate list before the
-  // scalar decision (2026-09-10). Only the first draft carries one: the
-  // chained drafts of depth >= 2 keep the plain rule, which is exact.
-  __shared__ float qmass_s[kSampleMaxCandidates];
-  __shared__ double q_draft_s;
-  __shared__ int q_live_s;
+  // The draft rows' proposals, gathered onto each row's merged candidate
+  // list before the scalar decision (2026-09-10): row t tests the draft fed
+  // to row t + 1 against proposal slot t (the chained drafts of depth >= 2
+  // carry theirs since the evening).
+  constexpr int kQ = kSampleProposalSlots;
+  __shared__ float qmass_s[kQ][kSampleMaxCandidates];
+  __shared__ double q_draft_s[kQ];
+  __shared__ int q_live_s[kQ];
 
   const int q = blockIdx.x;
   const int row0 = q * rows_per_request;
@@ -1400,38 +1402,39 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
       }
     }
   }
-  if (tid == 0) {
-    q_live_s = 0;
-    q_draft_s = 0.0;
+  if (tid < kQ) {
+    q_live_s[tid] = 0;
+    q_draft_s[tid] = 0.0;
   }
   __syncthreads();
-  // The row-0 draft's proposal, when this pick was fed the draft it drew.
-  if (proposals_in != nullptr && rows_per_request > 1 && stochastic &&
-      held[0] > 0) {
-    const DraftProposal* prop =
-        proposals_in + static_cast<size_t>(q) * kSampleProposalSlots;
-    const int32_t draft0 = static_cast<int32_t>(fed[row0 + 1]);
-    if (prop->n > 0 && prop->token == draft0) {
-      for (int i = tid; i < held[0]; i += kVerdictThreads) {
-        const int32_t want = m_id[0][i];
+  // Each draft row's proposal, when this pick was fed the draft it drew.
+  if (proposals_in != nullptr && rows_per_request > 1 && stochastic) {
+    for (int t = 0; t + 1 < rows_per_request && t < kQ; ++t) {
+      if (held[t] == 0) continue;
+      const DraftProposal* prop =
+          proposals_in + static_cast<size_t>(q) * kSampleProposalSlots + t;
+      const int32_t draft_t = static_cast<int32_t>(fed[row0 + t + 1]);
+      if (prop->n <= 0 || prop->token != draft_t) continue;
+      for (int i = tid; i < held[t]; i += kVerdictThreads) {
+        const int32_t want = m_id[t][i];
         float m = 0.0f;
         for (int e = 0; e < prop->n; ++e)
           if (prop->ids[e] == want) {
             m = prop->mass[e];
             break;
           }
-        qmass_s[i] = m;
+        qmass_s[t][i] = m;
       }
       if (tid == 0) {
         double qd = 0.0;
         for (int e = 0; e < prop->n; ++e)
-          if (prop->ids[e] == draft0) {
+          if (prop->ids[e] == draft_t) {
             qd = static_cast<double>(prop->mass[e]);
             break;
           }
         if (qd > 0.0) {
-          q_draft_s = qd;
-          q_live_s = 1;
+          q_draft_s[t] = qd;
+          q_live_s[t] = 1;
         }
       }
     }
@@ -1491,7 +1494,11 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     // advanced by the verify.
     const bool draft_mode = proposals_out != nullptr && rows_per_request == 1;
     SampleSpec use = spec;
-    if (draft_mode) use.seed = spec.seed ^ kSampleDraftSeedMix;
+    // The draft stream, keyed by the draft's index too: the chained drafts
+    // of one step share the request's counter and must not share a draw.
+    if (draft_mode)
+      use.seed = spec.seed ^ kSampleDraftSeedMix ^
+                 (static_cast<uint64_t>(draft_index + 1) * 0xD1B54A32D192ED03ull);
     uint64_t counter = spec.counter;
     o.sampled = 1;
     v.accepted = 1;
@@ -1506,15 +1513,15 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
             row_mask[t] != nullptr &&
             (draft < 0 || draft >= vocab_size ||
              !mask_allows(row_mask[t], draft));
-        const bool ratio = t == 0 && q_live_s != 0;
+        const bool ratio = t < kQ && q_live_s[t] != 0;
         const Decision d =
             held[t] > 0 ? spec_decide_prefix(m_logit[t], m_id[t], mass[t],
                                              prefix, expsrc[t], held[t],
                                              row_vocab[t], Zt, draft, use,
                                              exps, &counter, reps[t],
                                              draft_excluded,
-                                             ratio ? qmass_s : nullptr,
-                                             ratio ? q_draft_s : 0.0)
+                                             ratio ? qmass_s[t] : nullptr,
+                                             ratio ? q_draft_s[t] : 0.0)
                         : none;
         o.covered_mass[t] = d.covered;
         if (!d.resolved) {

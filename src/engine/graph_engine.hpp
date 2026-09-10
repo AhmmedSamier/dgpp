@@ -1319,7 +1319,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           model_->session_graph_capture_draft_chain(
               req, picker_->device_verdict(0), picker_->device_verdict(c),
               /*index=*/c - 1, /*first=*/c == 1, /*last=*/c == depth_ - 1);
-          picker_->record(model_->stream(), scalar_pick_inputs(1 + c));
+          DevicePicker::Inputs chain = scalar_pick_inputs(1 + c);
+          arm_draft_sampling(chain, req, /*draft_index=*/c);
+          picker_->record(model_->stream(), chain);
           drafts.push_back(picker_->device_verdict(1 + c));
         }
         model_->session_graph_capture_next_tokens(req, drafts);
@@ -1380,7 +1382,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             model_->session_graph_capture_draft_chain_batch(
                 picker_->device_verdict(0), picker_->device_verdict(c),
                 /*index=*/c - 1, /*first=*/c == 1, /*last=*/c == depth_ - 1);
-            picker_->record(model_->stream(), chain_pick_inputs(k, 1 + c));
+            DevicePicker::Inputs chain_b = chain_pick_inputs(k, 1 + c);
+            arm_draft_sampling_batch(chain_b, /*draft_index=*/c);
+            picker_->record(model_->stream(), chain_b);
             drafts.push_back(picker_->device_verdict(1 + c));
           }
           model_->session_graph_capture_next_tokens_batch(drafts);
@@ -1540,14 +1544,17 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // sampled fallback's re-draft), each a greedy pick of the chain row's
   // head. A chain row past the context is skipped: its draft repeats the
   // previous one (any valid id; it cannot stand).
-  // Row 0's proposal for slot `req` says "none" from here on (n = 0).
+  // Every draft row's proposal for slot `req` says "none" from here on
+  // (n = 0): the host re-drafts the whole chain.
   void invalidate_proposal(int req) {
     if (d_proposals_ == nullptr) return;
-    DraftProposal* d = d_proposals_ + static_cast<size_t>(req) * kSampleProposalSlots;
-    DGPP_CUDA_OK(cudaMemsetAsync(&d->n, 0, sizeof(int32_t), model_->stream()));
+    for (int t = 0; t < kSampleProposalSlots; ++t) {
+      DraftProposal* d = d_proposals_ + static_cast<size_t>(req) * kSampleProposalSlots + t;
+      DGPP_CUDA_OK(cudaMemsetAsync(&d->n, 0, sizeof(int32_t), model_->stream()));
+      if (h_proposals_ != nullptr)
+        h_proposals_[static_cast<size_t>(req) * kSampleProposalSlots + t].n = 0;
+    }
     DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
-    if (h_proposals_ != nullptr)
-      h_proposals_[static_cast<size_t>(req) * kSampleProposalSlots].n = 0;
   }
 
   void chain_drafts_eagerly(int req) {
@@ -1566,6 +1573,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       drafts[static_cast<size_t>(c)] =
           picker_->run(model_->stream(), scalar_pick_inputs(1)).next;
     }
+    // These chain rows are argmax drafts: no proposal describes them.
+    if (depth_ > 1) invalidate_chain_proposals(req);
+  }
+
+  void invalidate_chain_proposals(int req) {
+    if (d_proposals_ == nullptr) return;
+    for (int t = 1; t < kSampleProposalSlots; ++t) {
+      DraftProposal* d = d_proposals_ + static_cast<size_t>(req) * kSampleProposalSlots + t;
+      DGPP_CUDA_OK(cudaMemsetAsync(&d->n, 0, sizeof(int32_t), model_->stream()));
+      if (h_proposals_ != nullptr)
+        h_proposals_[static_cast<size_t>(req) * kSampleProposalSlots + t].n = 0;
+    }
+    DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
   }
 
   std::vector<int32_t> collect_verdict(int req, int verdict_request,

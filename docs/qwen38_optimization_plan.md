@@ -451,21 +451,37 @@ two 400-token requests each: 0.7 → 57 %, 60 %; 0.85 → 64 %, 68 %;
 noise, worse when sharpened. The knob stays at 1; the head's overlap with
 the target is what it is.
 
-### 5.2 MTP depth 2 is not the lever yet
+### 5.2 MEASURED: MTP depth 2 is break-even at both worlds
 
-Arithmetic from today's profile: a second verify row costs ~3 ms (the expert
-slot kernels scale 1.5–1.65× per row, the GR site's GEMVs and the
-elementwise scale with rows) and the second draft costs its own head pass
-and draft layer (~1.8 ms), so a depth-2 pass is ~30.5 ms. At p1 = 0.55 and a
-plausible p2 ≈ 0.5·p1 the pass carries ~1.85 tokens: 16.5 ms/token against
-today's 17.2 — inside the noise, for a large piece of engine work. The
-marginal row is simply too expensive relative to what a second draft is
-accepted at.
+Wired on 2026-09-10 (`kDraftChain`, `kBatchedDraftChain`; the chain rows'
+QSA ring copied aside and back in a buffer of its own; `qwen_engine_test`
+holds the depth-2 greedy transcripts to the plain engine's on the loopback
+fixture) and measured at the sampled default, 400 tokens, two requests each:
 
-Revisit after §5.1: at p1 = 0.75 the same arithmetic gives ~2.2 tokens for
-~30.5 ms = 13.9 ms/token, which would be worth building. `kDraftChain` is
-already wired for GLM-4.7 and is the template; Qwen's
-`QwenModel::kDraftChain` is false today.
+| | world 4, depth 1 | world 4, depth 2 | world 2, depth 1 | world 2, depth 2 |
+|---|---:|---:|---:|---:|
+| ms per pass | 25.9 | 30.8 | 40.4–41.0 | 49.4–49.5 |
+| tokens per pass | 1.63–1.64 | 1.93–1.99 | 1.63–1.73 | 1.81–2.08 |
+| acceptance p1 / p2 | 63–64 % / — | 63–65 % / 30–34 % | 63–72 % / — | 58–69 % / 24–39 % |
+| ms per token | 15.8–15.9 | **15.5–15.9** | 23.7–24.8 | **23.8–27.3** |
+
+The second row costs +5 ms at world 4 and +9 at world 2 (the experts'
+third row, the second draft's head and layer), tokens per pass rise 20 %,
+and the two cancel. Depth 1 stays the default (`--mtp-depth 2` runs it).
+
+**The chained draft's own proposal, the follow-on, also measured.** The
+chain picks are sampling picks too (their own draft-stream key per draft
+index, a proposal per draft row, the verify's row-t test on slot t; the
+host's re-drafts clear every slot). p2 rises 30–34 → 36–37 % at world 4
+and 24–39 → 31–36 % at world 2; tokens per pass 1.97–2.03 at world 4 for
+30.8–30.9 ms = **15.2–15.6 ms/token against depth 1's 15.5**; world 2
+1.95–1.97 for 49.5–49.7 ms = 25.2–25.4 against 23.9–25.0. Still
+break-even: the second draft's overlap with the target is lower than the
+first's, as a draft one step further from real hidden state must be. The
+machinery stays (exact, gated, no cost at depth 1); depth 1 stays the
+default. That closes the MTP list: every pass-cost item is at the
+bandwidth wall, and every tokens-per-pass item is at the draft head's
+overlap.
 
 ## 6. Measured, and not worth doing
 
