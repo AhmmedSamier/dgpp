@@ -6,6 +6,88 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Qwen3.8-Flash-Next on a single Spark, and its dense stack in block FP8**
+  (2026-09-10, docs/qwen38_single_spark.md): the NVFP4 checkpoint's experts
+  through the shared fp4 core, the 47.7 GiB n-gram table left on the NVMe
+  behind a memory mapping (`engine.ngram_table`, default resident) with each
+  walk's rows gathered by a host node forked inside the walk, and the resident
+  graph engine at world 1 over a world-of-one bus — 47 ms/token plain,
+  31–38 ms/token with MTP (59 ms per pass), prefill 1.0–1.5 ms/token. Then the
+  dense projections encoded as they load with the FP8 releases' own recipe
+  (`engine.dense_weights = "fp8"`, default `"checkpoint"`; amax / 448 per
+  128 x 128 block, round-to-nearest-even e4m3), read by the fp8 GEMV core at
+  decode rows and dequantized into a BF16 bridge for the GEMM seam: T=1
+  47 -> 31 ms per pass, MTP 59 -> 40 ms per pass (21–26 ms/token, 38–48 t/s),
+  four in flight 122 -> 71 ms per step. Then the fused decode forms and a
+  multi-problem fp8 GEMV — the GR site's norm-staged down GEMV with the inject
+  rows riding it, the act-staged up GEMV, the batched down + inject, the shared
+  expert's two-launch tail, and the GDN qkv + z / QSA q, k, v, indexer
+  projections as one launch — each the BF16 fused kernel templated on the rows'
+  form and bitwise the unfused fp8 chain: T=1 30.2–30.9 ms per pass, MTP
+  39–40 ms per pass. Eval on the FP8 world: GSM8K 59/60, HumanEval 38–39/40,
+  schema extraction 30/30 (the fabric's numbers); MTP transcripts identical to
+  T=1. The world-1 profile prices every class against its byte budget (the
+  experts and the multi-problem GEMVs at line rate, the draft head's second
+  lm_head 2.5 ms a pass, the GR down GEMV at 55 %, ~2 ms of gaps), and the L2
+  prefetcher stays on at world 1 (off costs 2 ms a T=1 pass). MTP depth 2 in
+  this world: 48 ms a pass at 1.77–2.74 tokens, code/math/JSON 10–15 % faster
+  per token, prose 5 % slower — depth 1 stays the default.
+
+- **The MTP draft is drawn from the draft head and verified with the ratio
+  rule, at any depth** (2026-09-10): the draft pick is a sampling pick on its
+  own stream (`seed ^ kSampleDraftSeedMix`, the request's counter — the
+  request's own draw accounting untouched), its final set travels as
+  `DraftProposal` to the next step's verify, whose row 0 accepts with
+  min(1, P/Q) and resamples the (P - Q)+ residual, so the emitted marginal is
+  exactly P as before (`sampler_test`: marginal == P, acceptance ==
+  1 - TV(P, Q); `glm_pick_test`: the device decision, token and draw count
+  bitwise the host oracle's). A re-drafted row, an over-wide set or an
+  unmatched token falls back to the plain rule, exact for any draft;
+  `DGPP_SPEC_PROPOSAL=off` restores the argmax draft. Fabric world 4 at the
+  sampled default: acceptance 41–51 % -> 60–68 %, 1.41–1.51 -> 1.60–1.69
+  tokens per pass, 17.0–18.3 -> 15.3–16.1 ms/token at the same 25.8 ms/pass;
+  greedy transcripts and the concurrency curve unchanged. The depth >= 2 chain
+  picks are proposals too (each draft index its own key, so one step's drafts
+  never share a draw; verify tests row t against proposal slot t; the host's
+  re-drafts clear every slot): p2 30–34 -> 36–37 % at world 4 and 24–39 ->
+  31–36 % at world 2.
+
+- **Qwen3.8-Flash-Next takes the draft chain** (2026-09-10): `kDraftChain` and
+  `kBatchedDraftChain` for the family the depth-2 entry below had excluded —
+  the chain rows run the draft block forward past the first draft, and its QSA
+  ring is copied aside before the first chain row and restored after the last,
+  into a buffer of its own so the draft snapshot the fallback's rollback
+  restores keeps the pre-draft ring. `qwen_engine_test` gates depth 2 on the
+  loopback fixture: the greedy transcripts are the plain engine's, scalar and
+  batched, on both ranks. Measured break-even on the fabric, so depth 1 stays
+  the default — world 4 30.8 ms/pass at 1.93–2.03 tokens = 15.2–15.9 ms/token
+  against depth 1's 25.9 ms/pass at 1.63–1.64 = 15.8–15.9; world 2 49.4 ms/pass
+  at 1.81–2.08 against 40.4–41.0 at 1.63–1.73. The engine test's fixture
+  directory joins the ignore list.
+
+- **The GR inject dots leave the decode chain, and four levers measured and
+  left behind knobs** (2026-09-10, docs/qwen38_optimization_plan.md): the
+  gates depend on Rn alone, so at one row the hc inject rows ride the mix's
+  down GEMV as the row space's last rows over the staged Rn (the same
+  lane-strided chain as `combine_dots_kernel`, bitwise; `qwen_gr_test` pins the
+  folded gates against the standalone kernel), and at more rows the same kernel
+  runs on a low-priority side stream forked at the mix and joined before the
+  apply — what was a 21 us one-block kernel between the boundary collective and
+  the apply, 96 sites per step. Fabric world 4: T=1 22.12 -> 21.4–21.5 ms/step,
+  MTP 26.5 -> 25.7 ms/pass, four live requests 114.6 -> 120.0 tok/s; world 2
+  after both decode changes: T=1 31.38 ms/step, MTP 40.4 ms/pass at 23.7–25.2
+  ms/token. Kept and off by default, each with its reading: the draft's
+  temperature as a scale of the request's (`DGPP_SPEC_PROPOSAL_TEMP` — exact at
+  any value, acceptance flat from 0.7 to 1.2, stays at 1); the small-k form of
+  the fp8 expert tile kernel for the down projection (`DGPP_MOE_FP8_SMALLK`);
+  the grouped fp8 expert kernel's m-sweep (`DGPP_MOE_FP8_SWEEP` — 5.87 vs
+  6.87 ms per gate launch at 228 rows per expert, but 3.6 % on an 8K prefill
+  against the byte model's 14 %: at four m-tiles it is issue-bound at 47
+  TFLOP/s, so the chunk stays 2,048); and the prefetch-instruction form of the
+  L2 prefetcher (`DGPP_L2_PREFETCH_FORM=prefetch` — 22.4–23.7 ms per T=1 step
+  against the load form's 21.5, whose fold is what bounds the bytes in flight
+  to what the collectives tolerate).
+
 - **GLM-4.7 (`nvidia/GLM-4.7-NVFP4`) served** (2026-09-10, docs/glm47_plan.md):
   the Glm4MoeForCausalLM family — 92 pre-norm layers of biased GQA
   attention (96/8 heads, per-head q/k norms, half-split partial RoPE),
@@ -73,8 +155,9 @@ The history by milestone. The dated engineering record in
   own output row as its hidden, landed in the slot's window
   (`glm_spec_chain_row_window`); `session_draft_chain`,
   `session_graph_capture_draft_chain`, the multi-draft feed; a family opts
-  in with `kDraftChain` (GLM-4.7 yes, Qwen3.8-Flash-Next not yet — its
-  draft ring would need the chain snapshot). `deploy/cluster_glm47_d2.json`.
+  in with `kDraftChain` (GLM-4.7 immediately; Qwen3.8-Flash-Next followed
+  the same day, once its draft ring learned the chain snapshot — above).
+  `deploy/cluster_glm47_d2.json`.
   GLM-4.7 at depth 2: 72 ms/pass at 2.3–2.6 tokens/pass (p2 48–65 %), 4–13 %
   more tokens/s single-stream than depth 1, +5 % at a 6.5K context;
   transcripts identical. Gate: `glm4_engine_test`'s depth-2 world (port

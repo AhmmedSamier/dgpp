@@ -49,13 +49,22 @@ Measured on the four-node fabric at TP=4 (the method and every number:
 
 ## Status
 
-Version 0.1.0 (2026-09-06). Milestones M0–M9 of `PLAN.md` are closed:
-the platform probes, the runtime and loader, the KDA and DSA operators,
-the assembled forward, four-rank tensor parallelism over the collective
-bus, generation and the API, the prefix cache, transactional MTP, and the
-optimization and hardening pass with its one-hour soak. The engine serves
-one model on one fabric; `docs/next_steps.md` ranks what remains by cost
-and benefit.
+Version 0.1.0 (2026-09-06) closed milestones M0–M9 of `PLAN.md`: the
+platform probes, the runtime and loader, the KDA and DSA operators, the
+assembled forward, four-rank tensor parallelism over the collective bus,
+generation and the API, the prefix cache, transactional MTP, and the
+optimization and hardening pass with its one-hour soak. That sign-off, in
+`docs/signoff_v1.md`, is still the released measurement.
+
+Since then (unreleased, through 2026-09-10) the engine has stopped being a
+one-model, one-shape system. Two more families run on the same loader,
+session core, scheduler and service: `Qwen/Qwen3.8-Flash-Next-FP8` and
+`nvidia/GLM-4.7-NVFP4`. The world is a config key rather than an
+assumption — one, two or four ranks, with a single DGX Spark serving
+Qwen3.8-Flash-Next on its own. The quantized paths grew to NVFP4 weights
+and a block-FP8 dense stack encoded at load. `CHANGELOG.md` has every
+entry with its measurement; `docs/next_steps.md` ranks what remains by
+cost and benefit.
 
 ## Requirements
 

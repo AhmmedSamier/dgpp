@@ -55,7 +55,6 @@ and serving operations.
 | `scripts/step_probe.py [--max-tokens N] short|short+tools|long|ctx:N ...` | the decode-step probe against a running service: ttft, client ms/token, the engine's ms/step and tokens per step, the admission count, per mode |
 | `scripts/mtp_depth_check.py --out DIR` | the greedy transcript of three prompts (prose, code, JSON) from a running service into DIR, for `diff -r` across launches (plain / MTP depth 1 / depth 2 / pipelined must be byte-identical) |
 | `scripts/bus_window_skew.py LOG...` | the per-rank collective budget (copy / handshake / skew / fold) from the bus's window timeline lines (`DGPP_BUS_TIMELINE=1`) |
-| `scripts/maximize-cluster-memory.sh [--restore]` | reclaim unified memory on every DGX Spark node before a large-context launch: stops and runtime-masks the listed services and drops the caches, recording what it did under /run so `--restore` undoes exactly that (a reboot also does) |
 
 The GDR probe exits successfully when the probe itself completes, including
 the expected “unsupported” result on GB10. It does not prescribe a bounce
