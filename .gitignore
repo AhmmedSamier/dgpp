@@ -56,3 +56,9 @@ deploy/cluster.json
 deploy/cluster.*.json
 deploy/cluster_*.json
 !deploy/*.example.json
+
+# Site operations that never belong in the tree: the node memory-reclaim
+# script stops and runtime-masks services and needs root on every node. It is
+# kept outside the repository; this entry is here so a copy dropped back into
+# scripts/ is not committed by accident.
+scripts/maximize-cluster-memory.sh
