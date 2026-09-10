@@ -42,7 +42,8 @@ struct QwenMoeWeights {
   const uint16_t* shared_up_proj = nullptr;    // bf16 [S, hidden]
   const uint16_t* shared_down_proj = nullptr;  // bf16 [hidden, S]
   int64_t shared_inter = 0;                    // S: this rank's shared slice
-  const GlmQuantMatrix* experts = nullptr;     // [n_experts * 3] gate, up, down
+  const GlmQuantMatrix* experts = nullptr;     // [n_experts * 3] gate, up, down (FP8 block form)
+  const GlmFp4Matrix* experts_fp4 = nullptr;   // the NVFP4 form instead (one of the two is set)
 };
 
 class QwenMoeLayer {

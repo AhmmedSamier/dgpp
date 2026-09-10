@@ -145,6 +145,10 @@ class QwenModel : public SessionModel<QwenModel> {
   // fallback's rollback restores must keep the pre-draft ring.
   static constexpr bool kDraftChain = true;
   static constexpr bool kBatchedDraftChain = true;
+  // The mmap'ed n-gram table's walk carries one host node (the staging
+  // gather forked inside the walk; layers.hpp) — a captured step's verify
+  // walk; the draft block has no PLE.
+  size_t session_graph_host_nodes() const { return has_ple_ && table_.mmap ? 1 : 0; }
   const uint16_t* draft_hidden_rows() const { return mtp_r_; }
   void snapshot_chain_state(int req);
   void restore_chain_state(int req);

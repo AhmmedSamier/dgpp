@@ -17,6 +17,7 @@
 //   QwenPleLayer the hashed n-gram embedding injected into the hyper state
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -228,6 +229,23 @@ class QwenPleLayer {
   QwenPleLayer(const QwenPleLayer&) = delete;
   QwenPleLayer& operator=(const QwenPleLayer&) = delete;
   void rebind(const QwenPleResident& w, const QwenNgramTableResident& table);
+  // The mmap'ed table (2026-09-10, table.mmap set): the table never
+  // reaches the device. stage() at the walk's start runs the hash kernel
+  // into PINNED ids and forks a host node off `stream` that gathers the
+  // rows from the mapping into pinned staging while the walk runs its
+  // first layer; embed() at the layer's turn joins and converts them
+  // (bf16(e4m3 x scale), bitwise the device gather's). Works eagerly and
+  // under capture alike (the fork/join are graph edges, the gather a host
+  // node) — every path stages from the device's own tokens and context,
+  // so nothing mirrors them on the host.
+  bool staged() const { return table_.mmap != nullptr; }
+  void stage(const int64_t* tokens, int rows, const int32_t* req_ids, const int64_t* pos,
+             const int32_t* req_spans, int num_requests, const int32_t* ctx, cudaStream_t stream);
+  // A staging that failed on the host (an id outside the table) surfaces
+  // here — the next stage() throws it too.
+  void check_staged() const;
+  // The pinned bytes of the mmap'ed mode: the ids and the staged rows.
+  static size_t staging_bytes(const QwenTextConfig& cfg, int hash_heads, int max_tokens);
 
   // The row form (the model's one walk): rows of one or more requests in
   // span order (kernels/qwen_ple.hpp), each request's n-gram context at
@@ -265,6 +283,15 @@ class QwenPleLayer {
   int hc_, hidden_, heads_, heads_per_ngram_, head_dim_, width_, dilation_, state_len_, max_tokens_;
   int32_t eos_;
   float eps_;
+  struct StageArgs;
+  static void stage_callback(void* user);
+  int32_t* h_ids_ = nullptr;      // mmap: the pinned ids (ids_ their device alias)
+  uint8_t* staged_ = nullptr;     // mmap: pinned [M, hash_heads, head_dim]
+  cudaStream_t side_ = nullptr;   // mmap: the host node's branch
+  cudaEvent_t fork_ = nullptr, join_ = nullptr;
+  std::vector<std::unique_ptr<StageArgs>> stage_args_;  // one per capture, two eager
+  size_t eager_slot_ = 0;
+  int staged_rows_ = 0;           // the rows the pending stage covers
   int64_t* d_mult_ = nullptr;     // [ngram_size]
   int64_t* d_vocab_ = nullptr;    // [heads]
   int64_t* d_offset_ = nullptr;   // [heads]

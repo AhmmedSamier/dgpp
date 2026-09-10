@@ -797,6 +797,7 @@ int main(int argc, char** argv) {
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
   int64_t kv_capacity = 8192;
   std::string kv_dtype = "bf16";  // the latent cache's format (2026-09-06)
+  std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap (2026-09-10)
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
   int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
   // The sampled pick's candidate width per rank on the graph engines (the
@@ -847,6 +848,7 @@ int main(int argc, char** argv) {
     max_concurrency = e.max_concurrency;
     kv_capacity = e.kv_capacity;
     kv_dtype = e.kv_dtype;
+    ngram_table = e.ngram_table;
     default_max_tokens = e.default_max_tokens;
     queue_limit = e.queue_limit;
     max_connections = e.max_connections;
@@ -882,6 +884,7 @@ int main(int argc, char** argv) {
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--kv-capacity") kv_capacity = std::stoll(next());
     else if (a == "--kv-dtype") kv_dtype = next();
+    else if (a == "--ngram-table") ngram_table = next();
     else if (a == "--memory-plan") memory_plan_only = true;
     else if (a == "--max-concurrency") max_concurrency = std::stoi(next());
     else if (a == "--queue-limit") queue_limit = std::stoi(next());
@@ -935,11 +938,11 @@ int main(int argc, char** argv) {
   std::optional<dgpp::serve::JournalReader> reader;
   const auto canonical = [&] {
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} maxtok={} queue={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} maxtok={} queue={} "
         "eos={} graph={} mtp={} mtpd={} batchmin={} cand={} pcgib={} adm={} win={} "
         "pace={} inflight={} reasoning_in_content={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
-        max_concurrency, kv_capacity, kv_dtype, default_max_tokens, queue_limit,
+        max_concurrency, kv_capacity, kv_dtype, ngram_table, default_max_tokens, queue_limit,
         no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, graph_batch_min_live,
         sampling_candidates, prefix_cache_gib, admission_mode, admission_window,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0);
@@ -968,6 +971,7 @@ int main(int argc, char** argv) {
         ws.max_concurrency = max_concurrency;
         ws.kv_capacity = kv_capacity;
         ws.kv_dtype = kv_dtype;
+        ws.ngram_table = ngram_table;
         ws.default_max_tokens = default_max_tokens;
         ws.queue_limit = queue_limit;
         ws.no_eos = no_eos;
@@ -1005,6 +1009,7 @@ int main(int argc, char** argv) {
         max_concurrency = ws.max_concurrency;
         kv_capacity = ws.kv_capacity;
         kv_dtype = ws.kv_dtype;
+        ngram_table = ws.ngram_table;
         default_max_tokens = ws.default_max_tokens;
         queue_limit = ws.queue_limit;
         no_eos = ws.no_eos;
@@ -1062,6 +1067,13 @@ int main(int argc, char** argv) {
     return 2;
   }
   const dgpp::LatentFormat kv_format = *kv_format_opt;
+  if (ngram_table != "resident" && ngram_table != "mmap") {
+    DGPP_LOG_ERROR("--ngram-table must be resident or mmap, got '{}'", ngram_table);
+    return 2;
+  }
+  // The Qwen n-gram table's residency: set before the plan and the load
+  // (both read it; the table's bytes leave the plan under mmap).
+  dgpp::QwenLayerStream::set_ngram_table_mmap(ngram_table == "mmap");
   if (world > 1) {
     require(rank >= 0 && rank < world, "--rank outside --world");
     require(!peer.empty() || rank == 0,
@@ -1073,11 +1085,11 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("--mtp currently requires --decode-graph");
     return 1;
   }
-  if (decode_graph && world == 1) {
-    DGPP_LOG_ERROR(
-        "--decode-graph currently requires the fabric (--world > 1)");
-    return 1;
-  }
+  // The graph world (2026-09-10): the fabric, or a world of one with the
+  // decode graph — the resident model, the graph engine and MTP on a single
+  // Spark over a bus whose collectives are the identity. Without the graph
+  // a world of one streams the layers through the eager engine (below).
+  const bool graph_world = world > 1 || decode_graph;
   if (max_concurrency > dgpp::kPickMaxRequests) {
     DGPP_LOG_ERROR("--max-concurrency must be at most {} request slots (got {})",
                    dgpp::kPickMaxRequests, max_concurrency);
@@ -1188,6 +1200,9 @@ int main(int argc, char** argv) {
     if (std::string(family->name()) != "glm5" && kv_dtype != "bf16")
       DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent cache only; the {} caches stay bf16",
                     kv_dtype, family->name());
+    if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
+      DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",
+                    ngram_table, family->name());
     const dgpp::GlmGenerationDefaults generation_defaults =
         dgpp::GlmGenerationDefaults::from_checkpoint_dir(ckpt, family->vocab_size());
     // generation_config.json is the generation authority. Retain the
@@ -1264,7 +1279,7 @@ int main(int argc, char** argv) {
     if (memory_plan_only) {
       // The check alone, for the shape this rank would run (world > 1: the
       // resident, vocab-sharded fabric model; world 1: the streaming one).
-      const bool fabric = world > 1;
+      const bool fabric = graph_world;
       const auto plan_at = [&](int64_t context) {
         return family->plan(static_cast<int>(std::min<int64_t>(context, forward_rows)), context, rank,
                             world, fabric, max_concurrency, mtp, decode_rows);
@@ -1330,7 +1345,7 @@ int main(int argc, char** argv) {
     knobs.stats_interval_s = stats_interval_s;
 
     // ---- world > 1: the fabric (Stage 4b) ------------------------------
-    if (world > 1) {
+    if (graph_world) {
       // ALLOCATION DISCIPLINE (the burst-wedge lesson): the pick
       // scratch pins BEFORE the bus world forms; nothing allocates
       // between collectives.
@@ -1360,6 +1375,10 @@ int main(int argc, char** argv) {
         // refused there, with the reason in the log.
 
         dgpp::BusBoundaryReducer reducer(*bus);
+        // A world of one folds nothing: the model runs without a boundary
+        // reducer (the graph engine's recorder still binds for captures,
+        // where its record hooks are the identity).
+        dgpp::BoundaryReducer* const model_reducer = world > 1 ? &reducer : nullptr;
         dgpp::prepare_serving_process(rank);
         {
           const auto plan_at = [&](int64_t context) {
@@ -1370,7 +1389,7 @@ int main(int argc, char** argv) {
                             block_tokens, plan_at);
         }
         const auto t_model = std::chrono::steady_clock::now();
-        family->build_model(&reducer, rank, world, /*fabric=*/true, forward_rows, pool_tokens,
+        family->build_model(model_reducer, rank, world, /*fabric=*/true, forward_rows, pool_tokens,
                             max_concurrency, mtp, decode_rows);
         DGPP_LOG_INFO(
             "rank {}: model constructed in {:.1f}s (resident, {} request "
@@ -1422,8 +1441,9 @@ int main(int argc, char** argv) {
           // construction is done; a peer holds at that record rather than
           // spinning its first collective in stall diagnostics.
           if (rank == 0) {
-            journal->broadcast(dgpp::serve::encode_journal_warm(
-                knobs.admission, prefix_slots, config_digest));
+            if (journal)
+              journal->broadcast(dgpp::serve::encode_journal_warm(
+                  knobs.admission, prefix_slots, config_digest));
           } else if (!dgpp::serve::wait_journal_warm(
                          &*reader, [rank] { return peer_should_stop(rank); },
                          &peer_policy, &peer_prefix_slots, &rank0_config)) {
@@ -1453,8 +1473,9 @@ int main(int argc, char** argv) {
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
           if (rank == 0) {
-            journal->broadcast(dgpp::serve::encode_journal_warm(
-                knobs.admission, prefix_slots, config_digest));
+            if (journal)
+              journal->broadcast(dgpp::serve::encode_journal_warm(
+                  knobs.admission, prefix_slots, config_digest));
           } else if (!dgpp::serve::wait_journal_warm(
                          &*reader, [rank] { return peer_should_stop(rank); },
                          &peer_policy, &peer_prefix_slots, &rank0_config)) {
@@ -1531,7 +1552,7 @@ int main(int argc, char** argv) {
         }
         dgpp::serve::OpStreamObserver oplog;  // rank 0's audit leg
         const int rc = serve_openai(engine_ptr(), family->vocab_size(), family->eos_token_ids(), ckpt,
-                                    model_display, knobs, no_eos, boot_s(), &*journal, &oplog);
+                                    model_display, knobs, no_eos, boot_s(), journal ? &*journal : nullptr, &oplog);
         engine_release();
         cudaFreeHost(pick_scratch);
         bus->stop();

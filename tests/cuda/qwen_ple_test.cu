@@ -329,3 +329,39 @@ DGPP_TEST(qwen_ple_layer_end_to_end_at_decode_shape) { end_to_end(3, 40); }
 DGPP_TEST(qwen_ple_layer_end_to_end_at_prefill_shape) { end_to_end(37, 50); }
 
 int main() { return dgpp::test::run_all(); }
+
+// The staged gather (2026-09-10, the mmap'ed table): rows the host gathered
+// into a pinned buffer, converted on the device, are bitwise the device
+// gather's own from the same table and ids.
+DGPP_TEST(qwen_ple_staged_gather_is_bitwise_the_table_gather) {
+  constexpr int rows = 4096, head_dim = 160, heads = 16, n = 37;
+  std::vector<uint8_t> table(static_cast<size_t>(rows) * head_dim);
+  uint64_t x = 0x9E3779B97F4A7C15ull;
+  for (auto& b : table) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; b = static_cast<uint8_t>(x & 0x7F); }
+  std::vector<int32_t> ids(static_cast<size_t>(n) * heads);
+  for (auto& id : ids) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; id = static_cast<int32_t>(x % rows); }
+  const float scale = 0.0378f;
+  // The host gather: row (t, hl) = table[ids[t, hl]].
+  uint8_t* staged = nullptr;
+  DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&staged), static_cast<size_t>(n) * heads * head_dim, cudaHostAllocDefault));
+  for (int t = 0; t < n; ++t)
+    for (int h = 0; h < heads; ++h)
+      std::memcpy(staged + (static_cast<size_t>(t) * heads + h) * head_dim,
+                  table.data() + static_cast<size_t>(ids[static_cast<size_t>(t) * heads + h]) * head_dim, head_dim);
+  uint8_t* d_table = nullptr; int32_t* d_ids = nullptr; uint16_t* d_out = nullptr; uint16_t* d_out2 = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&d_table, table.size()));
+  DGPP_CUDA_OK(cudaMalloc(&d_ids, ids.size() * 4));
+  DGPP_CUDA_OK(cudaMalloc(&d_out, static_cast<size_t>(n) * heads * head_dim * 2));
+  DGPP_CUDA_OK(cudaMalloc(&d_out2, static_cast<size_t>(n) * heads * head_dim * 2));
+  DGPP_CUDA_OK(cudaMemcpy(d_table, table.data(), table.size(), cudaMemcpyHostToDevice));
+  DGPP_CUDA_OK(cudaMemcpy(d_ids, ids.data(), ids.size() * 4, cudaMemcpyHostToDevice));
+  dgpp::qwen_ple_gather_bf16(d_table, 0, rows, scale, d_ids, n, heads, 0, heads, head_dim, d_out, nullptr);
+  dgpp::qwen_ple_gather_staged_bf16(staged, scale, n, heads, head_dim, d_out2, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<uint16_t> a(static_cast<size_t>(n) * heads * head_dim), b(a.size());
+  DGPP_CUDA_OK(cudaMemcpy(a.data(), d_out, a.size() * 2, cudaMemcpyDeviceToHost));
+  DGPP_CUDA_OK(cudaMemcpy(b.data(), d_out2, b.size() * 2, cudaMemcpyDeviceToHost));
+  require(std::memcmp(a.data(), b.data(), a.size() * 2) == 0, "the staged gather differs from the table gather");
+  cudaFree(d_table); cudaFree(d_ids); cudaFree(d_out); cudaFree(d_out2); cudaFreeHost(staged);
+  std::printf("[ OK ] the staged gather is bitwise the table gather over %d rows x %d heads\n", n, heads);
+}

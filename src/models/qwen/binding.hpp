@@ -49,6 +49,10 @@ enum class QwenTensorRole : uint8_t {
   Fp8Scale,    // BF16 [ceil(N/128), ceil(K/128)]
   NgramShard,  // e4m3 [rows, head_dim], one of split_ngram_parts row shards
   NgramScale,  // BF16 [1], the table's per-tensor scale
+  Fp4Payload,  // U8 [N, K/2] e2m1 pairs (the NVFP4 release's routed experts)
+  Fp4Scale,    // F8_E4M3 [N, K/16]
+  Fp4Global,   // F32 [], the matrix's weight_scale_2
+  InputScale,  // F32 [], the recipe's activation scale (unused: W4A16)
 };
 
 struct QwenExpectedTensor {
@@ -60,7 +64,7 @@ struct QwenExpectedTensor {
   int expert = -1;  // routed-expert id; the shard index for NgramShard
   QwenTensorRole role = QwenTensorRole::Plain;
 
-  bool quantized() const { return role == QwenTensorRole::Fp8Payload; }
+  bool quantized() const { return role == QwenTensorRole::Fp8Payload || role == QwenTensorRole::Fp4Payload; }
   size_t numel() const {
     size_t n = 1;
     for (auto d : shape) n *= static_cast<size_t>(d);
@@ -102,6 +106,7 @@ struct QwenBindReport {
   size_t dtype_mismatch = 0;
   size_t shape_mismatch = 0;
   size_t unexpected = 0;  // present, not in the table, not vision
+  size_t out_of_scope = 0;  // layers past a truncated config (the check apps' --layers)
   size_t vision = 0;      // model.visual.* (counted, not validated)
   size_t quantized_matrices = 0;
   size_t ngram_shards = 0;

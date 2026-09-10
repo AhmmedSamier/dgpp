@@ -92,7 +92,10 @@ struct QwenMoeResident {
   const uint16_t* router = nullptr;       // BF16 [E, hidden]
   const uint16_t* shared_gate = nullptr;  // BF16 [1, hidden]
   const uint16_t* shared[3] = {};         // BF16 gate/up [S/W, hidden], down [hidden, S/W]
-  std::vector<GlmQuantMatrix> experts;    // gate, up, down per expert (inter-sliced)
+  std::vector<GlmQuantMatrix> experts;    // gate, up, down per expert (inter-sliced), the FP8 form
+  std::vector<GlmFp4Matrix> experts_fp4;  // the same, the NVFP4 release's backbone experts
+  float* expert_globals = nullptr;        // [E * 3] F32 on the device: 1 / weight_scale_2 per matrix
+  bool nvfp4() const { return !experts_fp4.empty(); }
   int64_t local_inter = 0;                // I/W
   int64_t local_shared_inter = 0;         // S/W
   int scale_block = 128;                  // gcd(128, I/W): the experts' sliced-axis scale grid
@@ -145,8 +148,53 @@ struct QwenGlobalsResident {
 
 // This rank's slice of the n-gram table: rows [row_begin, row_begin+rows)
 // of the padded table, e4m3, one device allocation of its own.
+// The n-gram table kept on the NVMe (2026-09-10, `engine.ngram_table =
+// "mmap"`): the checkpoint shard(s) holding the table's split_ngram_parts
+// row shards mapped read-only with random-access advice, never copied to
+// the device. The host gathers the rows a step needs (16 per token, 160 B
+// each) into pinned staging that the staged gather kernel converts; the
+// page cache keeps what fits beside the model, the NVMe serves the rest
+// (~90 us a page at queue depth 1, ~110 K IOPS deep, measured).
+class QwenNgramTableMmap {
+ public:
+  struct Part {
+    std::string path;      // the shard file
+    uint64_t data_begin;   // the part's first byte in that file
+    int64_t rows;          // rows in this part
+  };
+  // `parts` in shard order (part s holds rows [s * capacity, +rows)).
+  QwenNgramTableMmap(std::vector<Part> parts, int64_t capacity, int head_dim);
+  ~QwenNgramTableMmap();
+  QwenNgramTableMmap(const QwenNgramTableMmap&) = delete;
+  QwenNgramTableMmap& operator=(const QwenNgramTableMmap&) = delete;
+  // The mapped bytes of global row `row`.
+  const uint8_t* row(int64_t row) const;
+  // dst[(t * heads_local + hl) * head_dim ..] = the row of ids[t * heads +
+  // head_begin + hl], for t < n: the staging the device converts. Faults
+  // the pages in parallel (a thread per 64 rows past the first 64).
+  void gather(const int32_t* ids, int n, int heads, int head_begin, int heads_local,
+              uint8_t* dst) const;
+  int64_t capacity() const { return capacity_; }
+  int head_dim() const { return head_dim_; }
+  size_t mapped_bytes() const { return mapped_bytes_; }
+
+ private:
+  struct Mapping {
+    int fd = -1;
+    uint8_t* base = nullptr;
+    size_t len = 0;
+  };
+  std::vector<Part> parts_;
+  std::vector<const uint8_t*> part_base_;  // parts_[s]'s first row
+  std::vector<Mapping> maps_;
+  int64_t capacity_ = 0;
+  int head_dim_ = 0;
+  size_t mapped_bytes_ = 0;
+};
+
 struct QwenNgramTableResident {
-  const uint8_t* rows_e4m3 = nullptr;  // [rows, head_dim]
+  const uint8_t* rows_e4m3 = nullptr;  // [rows, head_dim] (null under the mmap'ed table)
+  const QwenNgramTableMmap* mmap = nullptr;  // the mmap'ed table (2026-09-10), else null
   int64_t row_begin = 0;
   int64_t rows = 0;
   int head_dim = 0;
@@ -214,6 +262,13 @@ class QwenLayerStream : public ResidentLayerStream<QwenLoaderFamily> {
   // The rank's n-gram table slice, loaded once and kept (both residencies).
   const QwenNgramTableResident& load_ngram_table();
   static size_t ngram_table_bytes(const QwenTextConfig& cfg, int rank = 0, int world = 1);
+  // The process-wide table mode (2026-09-10): true = the table stays on the
+  // NVMe behind load_ngram_table()'s mapping (ngram_mmap()), rows_e4m3 null,
+  // the memory plan's table bytes zero. Set before the stream is built; the
+  // deployment config's engine.ngram_table ("resident" | "mmap") drives it.
+  static void set_ngram_table_mmap(bool on);
+  static bool ngram_table_mmap();
+  const QwenNgramTableMmap* ngram_mmap() const { return mmap_table_.get(); }
 
   static void set_resident_image_dir(const std::string& dir);
   static const std::string& resident_image_dir();
@@ -223,6 +278,7 @@ class QwenLayerStream : public ResidentLayerStream<QwenLoaderFamily> {
 
  private:
   QwenNgramTableResident table_;
+  std::unique_ptr<QwenNgramTableMmap> mmap_table_;
   void* table_device_ = nullptr;
 };
 

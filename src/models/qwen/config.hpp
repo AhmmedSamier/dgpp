@@ -97,6 +97,10 @@ struct QwenTextConfig {
   // the n-gram table e4m3 with one BF16 per-tensor scale; everything else
   // BF16. The engine has no other format for this family yet.
   bool experts_fp8 = true;
+  // The NVIDIA NVFP4 release (2026-09-10): the backbone's routed experts as
+  // e2m1 codes x e4m3 scales per 16 x an F32 per-tensor scale; the MTP
+  // layer's experts stay FP8 block-128, the n-gram table FP8 as before.
+  bool experts_nvfp4 = false;
   bool ngram_table_fp8 = true;
 
   static QwenTextConfig parse(const minijson::Value& text_config,

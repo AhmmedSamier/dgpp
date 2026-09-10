@@ -308,6 +308,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
       s.admission_window, s.bulk_pace_gbps, s.bulk_inflight, s.rendezvous_timeout_ms,
       s.stats_interval_s, s.reasoning_in_content ? 1 : 0);
   append_json_string(&out, s.kv_dtype);
+  out += ",\"ngt\":";
+  append_json_string(&out, s.ngram_table);
   out.push_back('}');
   return out;
 }
@@ -438,9 +440,12 @@ JournalRecord decode_journal_line(std::string_view line) {
     s.stats_interval_s = num("stats").as_double();
     s.reasoning_in_content = flag("ric");
     s.kv_dtype = std::string(field(v, "kvdt", "settings").as_string());
+    // Records before 2026-09-10 carry no table residency: resident.
+    if (const dgpp::minijson::Value* ngt = v.find("ngt")) s.ngram_table = std::string(ngt->as_string());
     if (s.world < 2 || s.max_concurrency < 1 || s.kv_capacity < 1 ||
         (s.admission != "full" && s.admission != "grow") ||
-        !latent_format_from_string(s.kv_dtype))
+        !latent_format_from_string(s.kv_dtype) ||
+        (s.ngram_table != "resident" && s.ngram_table != "mmap"))
       throw std::runtime_error("journal: settings record with impossible values");
     return rec;
   }

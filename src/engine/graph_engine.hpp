@@ -1220,7 +1220,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       model_->set_boundary(eager);
       eager = nullptr;
       check_decode_graph(graph, rank_,
-                             "graph variant " + std::to_string(variant));
+                             "graph variant " + std::to_string(variant), model_->session_graph_host_nodes());
       DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
       cudaGraphDestroy(graph);
       return exec;

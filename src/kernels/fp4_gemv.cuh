@@ -441,20 +441,26 @@ __device__ __forceinline__ void block_rows(const uint8_t* __restrict__ w,
 // The power-of-two set (GLM-5.3-Flash's 4096 / 512 and the fixtures) and
 // GLM-4.7's widths: 5120 (hidden: gate/up, dense gate/up), 384 / 768 /
 // 1536 (the expert down at worlds 4 / 2 / 1), 3072 / 6144 / 12288 (the
-// dense down at worlds 4 / 2 / 1).
+// dense down at worlds 4 / 2 / 1). Qwen3.8-Flash-Next's NVFP4 experts
+// (2026-09-10): 2560 (hidden: gate/up), 640 / 320 / 160 (the expert down
+// at worlds 1 / 2 / 4).
 template <typename F>
 __host__ inline void dispatch_k(int k, F&& f) {
   switch (k) {
     case 32: f(std::integral_constant<int, 32>{}); return;
     case 64: f(std::integral_constant<int, 64>{}); return;
     case 128: f(std::integral_constant<int, 128>{}); return;
+    case 160: f(std::integral_constant<int, 160>{}); return;
     case 256: f(std::integral_constant<int, 256>{}); return;
+    case 320: f(std::integral_constant<int, 320>{}); return;
     case 384: f(std::integral_constant<int, 384>{}); return;
     case 512: f(std::integral_constant<int, 512>{}); return;
+    case 640: f(std::integral_constant<int, 640>{}); return;
     case 768: f(std::integral_constant<int, 768>{}); return;
     case 1024: f(std::integral_constant<int, 1024>{}); return;
     case 1536: f(std::integral_constant<int, 1536>{}); return;
     case 2048: f(std::integral_constant<int, 2048>{}); return;
+    case 2560: f(std::integral_constant<int, 2560>{}); return;
     case 3072: f(std::integral_constant<int, 3072>{}); return;
     case 4096: f(std::integral_constant<int, 4096>{}); return;
     case 5120: f(std::integral_constant<int, 5120>{}); return;
@@ -463,14 +469,14 @@ __host__ inline void dispatch_k(int k, F&& f) {
     default:
       throw std::invalid_argument(
           "fp4_gemv: K is not in the compiled set (32..4096 powers of two, "
-          "384, 768, 1536, 3072, 5120, 6144, 12288)");
+          "160, 320, 384, 640, 768, 1536, 2560, 3072, 5120, 6144, 12288)");
   }
 }
 // True when dispatch_k compiles a kernel for k.
 __host__ __device__ constexpr bool k_compiled(int k) {
-  return k == 32 || k == 64 || k == 128 || k == 256 || k == 384 || k == 512 || k == 768 ||
-         k == 1024 || k == 1536 || k == 2048 || k == 3072 || k == 4096 || k == 5120 ||
-         k == 6144 || k == 12288;
+  return k == 32 || k == 64 || k == 128 || k == 160 || k == 256 || k == 320 || k == 384 ||
+         k == 512 || k == 640 || k == 768 || k == 1024 || k == 1536 || k == 2048 || k == 2560 ||
+         k == 3072 || k == 4096 || k == 5120 || k == 6144 || k == 12288;
 }
 
 }  // namespace fp4_gemv

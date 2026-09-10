@@ -33,6 +33,7 @@
 #include "engine/tp_bus.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/forward.hpp"
+#include "models/qwen/loader.hpp"
 #include "net/collective_bus.hpp"
 #include "qwen_fixture.hpp"
 #include "engine/eager_engine.hpp"
@@ -354,6 +355,45 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_graph_matches_plain_decode) {
   // A random-weight fixture drafts by chance only (the acceptance rate is
   // the real checkpoint's measurement, scripts/fabric_mtp_classes.sh).
   DGPP_LOG_INFO("world 2 MTP graph: A took {} steps for {} tokens", o.mtp_steps_a, kSteps);
+}
+
+// The mmap'ed n-gram table (2026-09-10): the same world, the same MTP
+// graph engine (scalar and batched replays, the eager prefills and the
+// fallbacks' rows) with the table left in the checkpoint's shard and each
+// walk's rows gathered by a host node forked inside the walk — the
+// transcripts bitwise the resident table's, on every rank.
+DGPP_TEST(qwen_engines_loopback_world_2_mtp_graph_over_the_mmap_table_matches_resident) {
+  const QwenTextConfig cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_fixture";
+  qwenfx::write_fixture(cfg, dir);
+  const std::vector<int64_t> A = smoke_tokens(cfg, 23, 0x9E3779B97F4A7C15ull);
+  const std::vector<int64_t> B = smoke_tokens(cfg, 17, 0xD1B54A32D192ED03ull);
+  const std::vector<int64_t> C = smoke_tokens(cfg, 11, 0x2545F4914F6CDD1Dull);
+  std::vector<RankOutcome> resident(kWorld), mapped(kWorld);
+  for (int pass = 0; pass < 2; ++pass) {
+    dgpp::QwenLayerStream::set_ngram_table_mmap(pass == 1);
+    std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, kPort + 6 + 2 * pass);
+    require(!buses.empty(), "the loopback bus world failed to start");
+    std::vector<RankOutcome>& outs = pass == 0 ? resident : mapped;
+    ConstructBarrier barrier(kWorld);
+    std::vector<std::thread> workers;
+    for (int r = 0; r < kWorld; ++r)
+      workers.emplace_back(rank_work_mtp, r, std::cref(cfg), std::cref(dir), std::cref(A), std::cref(B),
+                           std::cref(C), buses[static_cast<size_t>(r)].get(), &barrier,
+                           &outs[static_cast<size_t>(r)], /*depth=*/1);
+    for (auto& t : workers) t.join();
+    dgpp::QwenLayerStream::set_ngram_table_mmap(false);
+    for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
+  }
+  for (int r = 0; r < kWorld; ++r) {
+    const RankOutcome& a = resident[static_cast<size_t>(r)];
+    const RankOutcome& b = mapped[static_cast<size_t>(r)];
+    require(b.ea == a.ea && b.eb == a.eb && b.ec == a.ec, "the eager transcripts differ over the mmap'ed table");
+    require(b.ma == a.ma && b.mb == a.mb && b.mc == a.mc, "the MTP graph transcripts differ over the mmap'ed table");
+    require(b.mtp_steps_a == a.mtp_steps_a, "the MTP step count differs over the mmap'ed table");
+  }
+  DGPP_LOG_INFO("world 2 MTP graph over the mmap'ed table: A {} ({} steps) | B {} | C {} — the resident table's",
+                ids_text(mapped[0].ma), mapped[0].mtp_steps_a, ids_text(mapped[0].mb), ids_text(mapped[0].mc));
 }
 
 // Depth 2 (2026-09-10, kDraftChain): the chained draft rows through the

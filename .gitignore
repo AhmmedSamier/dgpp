@@ -46,6 +46,7 @@ dist/
 glm_tp_fixture/
 glm_tp_fixture_fp4/
 qwen_engine_fixture/
+qwen_loader_fixture/
 # The site cluster configs are local: one per checkpoint and shape the site
 # serves (deploy/cluster.json, cluster.nvfp4.json, cluster_glm47_d2.json ...),
 # each carrying that site's node addresses and ssh login. The committed

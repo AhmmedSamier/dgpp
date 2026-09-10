@@ -284,6 +284,55 @@ DGPP_TEST(qwen_loader_globals_and_ngram_table_slices) {
   }
 }
 
+// The mmap'ed table (2026-09-10): the stream maps the shard(s) instead of
+// copying the rows; every row read through the mapping is the shard's,
+// the gather lays a rank's heads out as the device gather would, the
+// plan's table bytes are zero, and the mode is off unless asked for.
+DGPP_TEST(qwen_loader_mmap_ngram_table_reads_the_shards_rows) {
+  const Fixture fx = write_fixture();
+  const dgpp::QwenNgramGeometry ng = fx.cfg.ngram_geometry();
+  std::vector<uint8_t> table;
+  const std::string tp = dgpp::qwen_layer_prefix(fx.cfg, fx.cfg.ple_layer()) + "ple.ple_embedding.ngram_embedding.";
+  for (int sh = 0; sh < fx.cfg.split_ngram_parts; ++sh) {
+    const auto b = fx.bytes(tp + "shard_" + std::to_string(sh) + ".weight");
+    table.insert(table.end(), b.begin(), b.end());
+  }
+  require(!QwenLayerStream::ngram_table_mmap(), "the mmap mode is off by default");
+  QwenLayerStream::set_ngram_table_mmap(true);
+  struct Reset { ~Reset() { QwenLayerStream::set_ngram_table_mmap(false); } } reset;
+  const size_t hd = static_cast<size_t>(ng.head_dim);
+  for (const int world : {1, 2}) {
+    for (int rank = 0; rank < world; ++rank) {
+      QwenLayerStream s(fx.cfg, fx.dir, rank, world, dgpp::QwenResidency::Streaming,
+                        world > 1 ? dgpp::QwenHeadSharding::VocabSharded : dgpp::QwenHeadSharding::Full);
+      require(QwenLayerStream::ngram_table_bytes(fx.cfg, rank, world) == 0, "no table bytes under mmap");
+      const auto& t = s.load_ngram_table();
+      require(t.rows_e4m3 == nullptr && t.mmap != nullptr && t.bytes == 0, "the mmap'ed view");
+      require(t.mmap->capacity() == dgpp::qwen_ngram_shard_capacity(fx.cfg) && t.mmap->head_dim() == ng.head_dim, "geometry");
+      for (int64_t r : {int64_t{0}, int64_t{1}, ng.total_rows / 2, ng.total_rows - 1})
+        require(std::memcmp(t.mmap->row(r), table.data() + static_cast<size_t>(r) * hd, hd) == 0, "row " + std::to_string(r));
+      // A gather of the rank's heads: ids [n, heads] → dst [n, heads_local, hd].
+      const int hb = s.geometry().hash_head_begin, hn = s.geometry().hash_heads;
+      const int n = 5;
+      std::vector<int32_t> ids(static_cast<size_t>(n) * ng.heads);
+      uint64_t x = 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(rank * 7 + world);
+      for (int tkn = 0; tkn < n; ++tkn)
+        for (int h = 0; h < ng.heads; ++h) {
+          x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+          ids[static_cast<size_t>(tkn) * ng.heads + h] = static_cast<int32_t>(ng.head_offset[h] + static_cast<int64_t>(x % static_cast<uint64_t>(ng.head_vocab[h])));
+        }
+      std::vector<uint8_t> dst(static_cast<size_t>(n) * hn * hd);
+      t.mmap->gather(ids.data(), n, ng.heads, hb, hn, dst.data());
+      for (int tkn = 0; tkn < n; ++tkn)
+        for (int hl = 0; hl < hn; ++hl) {
+          const int32_t id = ids[static_cast<size_t>(tkn) * ng.heads + hb + hl];
+          require(std::memcmp(dst.data() + (static_cast<size_t>(tkn) * hn + hl) * hd, table.data() + static_cast<size_t>(id) * hd, hd) == 0,
+                  "gathered row");
+        }
+    }
+  }
+}
+
 DGPP_TEST(qwen_loader_resident_mode_and_image_round_trip) {
   const Fixture fx = write_fixture();
   const fs::path cache = fs::current_path() / "qwen_loader_image_cache";

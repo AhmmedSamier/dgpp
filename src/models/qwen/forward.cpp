@@ -210,7 +210,8 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
   // The weights: every layer resident (the n-gram table always is), or
   // one streamed layer beside the globals and the table.
   if (residency == QwenResidency::Resident) {
-    plan.add("model weights (resident, n-gram table included)",
+    plan.add(QwenLayerStream::ngram_table_mmap() ? "model weights (resident; the n-gram table mmap'ed from the checkpoint)"
+                                                 : "model weights (resident, n-gram table included)",
              QwenLayerStream::resident_bytes(cfg, tp_rank, tp_world, head, mtp));
   } else {
     size_t largest = 0;
@@ -222,6 +223,13 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
                  QwenLayerStream::ngram_table_bytes(cfg, tp_rank, tp_world));
   }
   plan.add("gemm workspace (at least)", size_t{64} << 20);
+  if (has_ple && QwenLayerStream::ngram_table_mmap()) {
+    // The table stays on the NVMe behind the page cache (nothing
+    // reserved); the walk's ids and staged rows are pinned.
+    const int hash_heads = (cfg.ngram_size - 1) * cfg.heads_per_ngram / std::max(tp_world, 1);
+    plan.add("n-gram table staging (pinned; the table mmap'ed from the checkpoint)", 0,
+             QwenPleLayer::staging_bytes(cfg, hash_heads, max_tokens));
+  }
 
   // Per-slot state and the spec snapshot rows.
   const size_t rec_elems = static_cast<size_t>(geo.local_value_heads) * cfg.gdn_value_head_dim * cfg.gdn_key_head_dim;
@@ -310,7 +318,8 @@ QwenMoeWeights QwenModel::moe_view(const QwenMoeResident& m) {
   w.shared_up_proj = m.shared[1];
   w.shared_down_proj = m.shared[2];
   w.shared_inter = m.local_shared_inter;
-  w.experts = m.experts.data();
+  w.experts = m.experts.empty() ? nullptr : m.experts.data();
+  w.experts_fp4 = m.experts_fp4.empty() ? nullptr : m.experts_fp4.data();
   return w;
 }
 
@@ -524,6 +533,12 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   const int64_t* d_pos = in.pos;
   const int32_t* d_req = in.req_ids;
   const int32_t* d_spans = in.spans;
+  // The mmap'ed n-gram table (2026-09-10): the walk's hash ids and the
+  // host's gather forked off here, joined at the PLE layer's turn.
+  if (has_ple_ && table_.mmap) {
+    if (!ple_) build_layer_objects(loader_.load_layer(cfg_.ple_layer()));
+    ple_->stage(tokens, T, d_req, d_pos, d_spans, num_requests, d_ctx_, stream_);
+  }
   glm_embed_bcast_streams(globals_.embed, tokens, r_, T, H, stream_);
 
   // The state families' per-row snapshots (the rollback's source).
@@ -671,6 +686,9 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // The tail mirrors, the sync and the host copies are the core's; the
   // route traces of the device-segmented prefill materialize after it.
   out = finish_run(run, std::move(out));
+  // An eager walk has synced: a staging that failed on the host surfaces
+  // here rather than as a silent embedding.
+  if (has_ple_ && table_.mmap && !run.capture) ple_->check_staged();
   if (!run.capture && traces && !run.decode && !moe_prefill_host_path_) {
     const size_t K = static_cast<size_t>(cfg_.num_experts_per_tok);
     for (size_t l = 0; l < out.route_ids.size(); ++l) {

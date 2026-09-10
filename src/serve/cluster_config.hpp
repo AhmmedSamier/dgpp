@@ -48,6 +48,11 @@ struct ClusterConfig {
     int max_concurrency = 8;
     int64_t kv_capacity = 8192;
     std::string kv_dtype = "bf16";  // the latent cache's format: bf16 | fp8 | fp4
+    // The Qwen n-gram table's residency (2026-09-10): "resident" copies it
+    // to the device (the default; 47.7 GiB at world 1), "mmap" leaves it
+    // on the NVMe behind the page cache and gathers each step's rows on
+    // the host — the single-Spark deployment.
+    std::string ngram_table = "resident";
     int default_max_tokens = 256;
     int queue_limit = 64;
     int max_connections = 64;

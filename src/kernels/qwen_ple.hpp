@@ -71,6 +71,14 @@ void qwen_ple_gather_bf16(const uint8_t* table, int64_t row_begin, int64_t rows,
 //   g0 = bf16(bf16(sum_d bf16(key_n[t, i, d] x query_n[t, i, d])) / sqrt(H)),
 // the reference's bf16 ops one by one (fp32 sum of the rounded products).
 // key_n / query_n / gated: bf16 [n, hc * H]; value: bf16 [n, H].
+// The staged form (2026-09-10, the mmap'ed table): the rows already
+// gathered by the host into `staged` — e4m3 [n, heads_local, head_dim],
+// row (t, hl) the table row of ids[t, head_begin + hl] — converted with the
+// same per-element arithmetic as qwen_ple_gather_bf16 (bf16(e4m3 x scale)),
+// so out is bitwise the device gather's. `staged` may be pinned host memory.
+void qwen_ple_gather_staged_bf16(const uint8_t* staged, float scale, int n, int heads_local,
+                                 int head_dim, uint16_t* out, cudaStream_t stream);
+
 void qwen_ple_gate_bf16(const uint16_t* key_n, const uint16_t* query_n,
                         const uint16_t* value, uint16_t* gated, int n, int hc,
                         int hidden, cudaStream_t stream);

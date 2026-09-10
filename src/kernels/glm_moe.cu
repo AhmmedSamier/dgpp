@@ -1814,7 +1814,11 @@ void check_fp4_slot_args(const void* x, const int32_t* ids,
                          int shared_view_base, const char* who) {
   if (!x || !ids || !views || !out)
     throw std::invalid_argument(std::string(who) + ": null pointer");
-  if (n_routed <= 0 || k_routed <= 0 || n_shared <= 0 || k_shared <= 0)
+  // n_shared == 0 (2026-09-10, the Qwen NVFP4 decode): no shared slot —
+  // the kernels' shared-slot blocks find n == 0 and return; the shared
+  // checks below are skipped then (as the fp8 launchers skip theirs).
+  if (n_routed <= 0 || k_routed <= 0 || n_shared < 0 || k_shared < 0 ||
+      (n_shared > 0) != (k_shared > 0))
     throw std::invalid_argument(std::string(who) + ": degenerate dims");
   // The fp4 core's contract on the routed k (the table's payloads ride the
   // loader's 256-byte grants, so only the K set is checked here).
@@ -1822,6 +1826,7 @@ void check_fp4_slot_args(const void* x, const int32_t* ids,
       !gemv::smem_fits(1, k_routed))
     throw std::invalid_argument(
         std::string(who) + ": routed k must be a multiple of 32 in the fp4 core's compiled set");
+  if (n_shared == 0) return;
   if (shared_view_base >= 0) {
     // The NVFP4 shared expert rides the routed K (the kernel's template).
     if (k_shared != k_routed)
@@ -3734,7 +3739,7 @@ void launch_moe_slot_gate_up_swiglu_fp4(
   check_fp4_slot_args(x, ids, views, act, n_routed, k_routed, n_shared, k_shared,
                       shared_view_base, "moe_slot_gate_up_fp4");
   const bool shared_fp4 = shared_view_base >= 0;
-  if (!shared_fp4 &&
+  if (n_shared > 0 && !shared_fp4 &&
       (!sh_gate_payload || !sh_gate_scales || !sh_up_payload || !sh_up_scales ||
        !fp8_gemv::shape_ok(sh_gate_payload, 1, k_shared) ||
        !fp8_gemv::shape_ok(sh_up_payload, 1, k_shared)))
@@ -3775,7 +3780,7 @@ void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,
   check_fp4_slot_args(act, ids, views, out, n_routed, k_routed, n_shared, k_shared,
                       shared_view_base, "moe_slot_down_fp4");
   const bool shared_fp4 = shared_view_base >= 0;
-  if (!shared_fp4 && (!sh_payload || !sh_scales || !fp8_gemv::shape_ok(sh_payload, 1, k_shared)))
+  if (n_shared > 0 && !shared_fp4 && (!sh_payload || !sh_scales || !fp8_gemv::shape_ok(sh_payload, 1, k_shared)))
     throw std::invalid_argument(
         "moe_slot_down_fp4: shared payload must be 16B-aligned with k % 16 == 0");
   if (out_stride < n_routed || out_stride < n_shared)

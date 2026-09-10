@@ -33,7 +33,7 @@ GlmMoeWeights QwenMoeLayer::routed_view(const QwenMoeWeights& w) {
   g.router_gate = w.router;
   g.router_bias = nullptr;
   g.experts = w.experts;
-  g.experts_fp4 = nullptr;
+  g.experts_fp4 = w.experts_fp4;
   return g;
 }
 
@@ -82,8 +82,10 @@ QwenMoeLayer::~QwenMoeLayer() {
 
 void QwenMoeLayer::check_weights() const {
   if (!w_.router || !w_.shared_gate || !w_.shared_gate_proj || !w_.shared_up_proj ||
-      !w_.shared_down_proj || !w_.experts)
+      !w_.shared_down_proj || (!w_.experts && !w_.experts_fp4))
     throw std::invalid_argument("QwenMoeLayer: null weight pointer");
+  if (w_.experts && w_.experts_fp4)
+    throw std::invalid_argument("QwenMoeLayer: both fp8 and nvfp4 experts bound");
   if (w_.shared_inter <= 0 || w_.shared_inter % 8 != 0)
     throw std::invalid_argument("QwenMoeLayer: shared_inter must be a positive multiple of 8");
   if (cfg_.hidden % 8 != 0)

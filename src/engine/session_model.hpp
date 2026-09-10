@@ -158,6 +158,9 @@ class SessionModel {
   int64_t max_context() const { return max_context_; }
   cudaStream_t stream() const { return stream_; }
   bool mtp_enabled() const { return mtp_; }
+  // Host nodes a captured walk may carry (engine/graph_check.hpp): none by
+  // default; a family that stages from the host inside the walk shadows it.
+  size_t session_graph_host_nodes() const { return 0; }
   int lm_vocab_begin() const { return lm_vocab_begin_; }
   int lm_vocab_count() const { return lm_vocab_count_; }
   BoundaryReducer* set_boundary(BoundaryReducer* b) {

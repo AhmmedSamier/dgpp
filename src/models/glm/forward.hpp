@@ -262,6 +262,8 @@ class GlmDiagnosticModel {
   // per-position hidden cache, scalar): past depth 1 the graph engine
   // serves scalar replays.
   static constexpr bool kBatchedDraftChain = false;
+  // No host nodes in a captured walk (engine/graph_check.hpp).
+  size_t session_graph_host_nodes() const { return 0; }
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
   void session_rollback(int req, int accepted);
   // The draft block's rollback (M6 6b, the sampled one-graph step): the

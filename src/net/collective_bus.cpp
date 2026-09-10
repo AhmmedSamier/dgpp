@@ -22,6 +22,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "common/log.hpp"
 #include "net/bus_types.hpp"
@@ -229,6 +230,18 @@ struct CollectiveBus::Impl {
   std::atomic<bool> coll_active{false};
   std::atomic<bool> coll_mode{false};  // send() and intake() gate on it
   bool coll_poisoned = false;  // any collective failure poisons the mode
+  // A world of one (2026-09-10, the single-Spark serve): no lanes, no
+  // rendezvous, no engine thread — every collective is the identity (a
+  // copy when src and dst differ), every graph hook succeeds, the staging
+  // handout is one pinned slot. The engines above run unchanged.
+  bool world1 = false;
+  std::mutex w1_mu;
+  uint64_t w1_next_id = 1;
+  std::unordered_set<uint64_t> w1_pending;
+  void* w1_stage = nullptr;
+  bool w1_stage_held = false;
+  bool w1_recording = false;
+  int w1_armed = 0;
   cudaStream_t collective_stream = nullptr;
   BusAllReduceCtl* ar_ctl = nullptr;
   BusBulkScratch* bulk_scratch = nullptr;  // the bulk grid's shared records
@@ -2741,8 +2754,22 @@ bool CollectiveBus::start(std::string* error) {
   Impl& impl = *impl_;
   const BusOptions& opt = options_;
 
+  if (opt.world_size == 1) {
+    if (opt.my_rank != 0) {
+      *error = "a world of one has rank 0 only";
+      return false;
+    }
+    if (opt.lat_slot_bytes == 0 ||
+        cudaHostAlloc(&impl.w1_stage, opt.lat_slot_bytes, cudaHostAllocMapped) != cudaSuccess) {
+      *error = "a world of one: the staging slot allocation failed";
+      return false;
+    }
+    impl.world1 = true;
+    DGPP_LOG_INFO("bus: a world of one — no lanes, every collective the identity");
+    return true;
+  }
   if (opt.world_size < 2 || opt.world_size > 4) {
-    *error = "world_size must be 2..4";
+    *error = "world_size must be 1..4 (1: a world of one, no fabric)";
     return false;
   }
   if (opt.my_rank < 0 || opt.my_rank >= opt.world_size) {
@@ -3049,6 +3076,10 @@ bool CollectiveBus::start(std::string* error) {
 
 uint64_t CollectiveBus::send(int peer_rank, const void* data, size_t bytes,
                               BusMessageClass cls, std::string* error) {
+  if (impl_->world1) {
+    *error = "a world of one has no peers";
+    return 0;
+  }
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
@@ -3098,6 +3129,11 @@ uint64_t CollectiveBus::send(int peer_rank, const void* data, size_t bytes,
 }
 
 BusSendResult CollectiveBus::wait(uint64_t send_id, int timeout_ms) {
+  if (impl_->world1) {
+    BusSendResult r;
+    r.error = "a world of one has no peers";
+    return r;
+  }
   BusSendResult result;
   Impl& impl = *impl_;
   std::shared_ptr<BusRequest> req;
@@ -3134,6 +3170,15 @@ BusSendResult CollectiveBus::wait(uint64_t send_id, int timeout_ms) {
 }
 
 void* CollectiveBus::stage_next(std::string* error) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    if (w.stopping.load(std::memory_order_relaxed)) { *error = "bus is stopped"; return nullptr; }
+    if (w.w1_stage_held) { *error = "one pre-stage handout at a time (consume it with allreduce_staged())"; return nullptr; }
+    if (w.w1_recording || w.w1_armed > 0) { *error = "stage_next() is closed while a graph records or a window is armed"; return nullptr; }
+    w.w1_stage_held = true;
+    return w.w1_stage;
+  }
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
@@ -3176,6 +3221,20 @@ void* CollectiveBus::stage_next(std::string* error) {
 
 uint64_t CollectiveBus::allreduce_staged(size_t bf16_elems,
                                           std::string* error) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    if (w.stopping.load(std::memory_order_relaxed)) { *error = "bus is stopped"; return 0; }
+    if (!w.w1_stage_held) { *error = "allreduce_staged() without a handout"; return 0; }
+    if (bf16_elems == 0 || bf16_elems * 2 > options_.lat_slot_bytes) {
+      *error = "allreduce element count must be positive and fit a latency slot";
+      return 0;
+    }
+    w.w1_stage_held = false;
+    const uint64_t id = w.w1_next_id++;
+    w.w1_pending.insert(id);
+    return id;
+  }
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
@@ -3246,6 +3305,21 @@ uint64_t CollectiveBus::allreduce_staged(size_t bf16_elems,
 
 uint64_t CollectiveBus::allreduce(const void* device_src, void* device_dst,
                                   size_t bf16_elems, std::string* error) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    if (w.stopping.load(std::memory_order_relaxed)) { *error = "bus is stopped"; return 0; }
+    if (bf16_elems == 0) { *error = "allreduce element count must be positive"; return 0; }
+    if (w.w1_stage_held) { *error = "a pre-stage handout is held"; return 0; }
+    if (device_dst != device_src &&
+        cudaMemcpy(device_dst, device_src, bf16_elems * 2, cudaMemcpyDeviceToDevice) != cudaSuccess) {
+      *error = "a world of one: the identity copy failed";
+      return 0;
+    }
+    const uint64_t id = w.w1_next_id++;
+    w.w1_pending.insert(id);
+    return id;
+  }
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
@@ -3312,6 +3386,21 @@ uint64_t CollectiveBus::allreduce(const void* device_src, void* device_dst,
 
 uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
                                       size_t bf16_elems, std::string* error) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    if (w.stopping.load(std::memory_order_relaxed)) { *error = "bus is stopped"; return 0; }
+    if (bf16_elems == 0) { *error = "allreduce element count must be positive"; return 0; }
+    if (w.w1_stage_held) { *error = "a pre-stage handout is held"; return 0; }
+    if (device_dst != device_src &&
+        cudaMemcpy(device_dst, device_src, bf16_elems * 2, cudaMemcpyDeviceToDevice) != cudaSuccess) {
+      *error = "a world of one: the identity copy failed";
+      return 0;
+    }
+    const uint64_t id = w.w1_next_id++;
+    w.w1_pending.insert(id);
+    return id;
+  }
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
@@ -3393,6 +3482,14 @@ uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
 
 BusAllReduceResult CollectiveBus::wait_allreduce(uint64_t id,
                                                   int timeout_ms) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    BusAllReduceResult r;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    if (w.w1_pending.erase(id) == 0) { r.error = "unknown or already-waited collective id"; return r; }
+    r.ok = true;
+    return r;
+  }
   BusAllReduceResult result;
   Impl& impl = *impl_;
   std::shared_ptr<BusRequest> req;
@@ -3443,6 +3540,16 @@ int64_t CollectiveBus::globaltimer_offset_ns() const {
 }
 
 bool CollectiveBus::graph_replay_arm(std::string* error, int variant) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    (void)variant;
+    if (w.stopping.load(std::memory_order_relaxed)) { *error = "bus is stopped"; return false; }
+    if (w.w1_stage_held) { *error = "graph_replay_arm: a staging handout is held"; return false; }
+    if (w.w1_recording) { *error = "graph_replay_arm: a session is recording"; return false; }
+    ++w.w1_armed;
+    return true;
+  }
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
@@ -3595,6 +3702,14 @@ bool CollectiveBus::graph_replay_arm(std::string* error, int variant) {
 }
 
 bool CollectiveBus::graph_replay_finish(int timeout_ms, std::string* error) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    (void)timeout_ms;
+    if (w.w1_armed == 0) { *error = "graph_replay_finish: no armed window"; return false; }
+    --w.w1_armed;
+    return true;
+  }
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
@@ -3664,6 +3779,17 @@ bool CollectiveBus::graph_replay_finish(int timeout_ms, std::string* error) {
 }
 
 bool CollectiveBus::graph_record_begin(std::string* error, int variant) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    (void)variant;
+    if (w.stopping.load(std::memory_order_relaxed)) { *error = "bus is stopped"; return false; }
+    if (w.w1_stage_held) { *error = "graph_record_begin: a staging handout is held"; return false; }
+    if (w.w1_recording) { *error = "graph_record_begin: a session is already recording"; return false; }
+    if (w.w1_armed > 0) { *error = "graph_record_begin: a replay window is armed"; return false; }
+    w.w1_recording = true;
+    return true;
+  }
   Impl& impl = *impl_;
   if (impl.stopping.load(std::memory_order_relaxed)) {
     *error = "bus is stopped";
@@ -3739,6 +3865,20 @@ bool CollectiveBus::graph_record_begin(std::string* error, int variant) {
 bool CollectiveBus::allreduce_record(cudaStream_t capture_stream,
                                      const void* device_src, void* device_dst,
                                      size_t bf16_elems, std::string* error) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    if (!w.w1_recording) { *error = "allreduce_record outside a recording session"; return false; }
+    if (bf16_elems == 0) { *error = "allreduce element count must be positive"; return false; }
+    // In place there is nothing to record; a copy would be a memcpy node
+    // (the kernels-only census rejects it — no reducer records one).
+    if (device_dst != device_src &&
+        cudaMemcpyAsync(device_dst, device_src, bf16_elems * 2, cudaMemcpyDeviceToDevice, capture_stream) != cudaSuccess) {
+      *error = "a world of one: the identity copy node failed";
+      return false;
+    }
+    return true;
+  }
   Impl& impl = *impl_;
   if (bf16_elems == 0 || bf16_elems % 2 != 0 ||
       bf16_elems * 2 > options_.lat_slot_bytes) {
@@ -3800,6 +3940,13 @@ bool CollectiveBus::allreduce_record(cudaStream_t capture_stream,
 }
 
 bool CollectiveBus::graph_record_end(std::string* error) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    if (!w.w1_recording) { *error = "graph_record_end without a session"; return false; }
+    w.w1_recording = false;
+    return true;
+  }
   Impl& impl = *impl_;
   std::lock_guard<std::mutex> lock(impl.coll_mu);
   if (!impl.graph.recording) {
@@ -3835,6 +3982,10 @@ bool CollectiveBus::graph_record_end(std::string* error) {
 }
 
 void CollectiveBus::dump_graph_cells(const char* why) {
+  if (impl_->world1) {
+    DGPP_LOG_INFO("bus graph cells ({}): a world of one has none", why);
+    return;
+  }
   Impl& impl = *impl_;
   // The adopted window's variant (the one being walked), else the latest
   // armed one.
@@ -3880,6 +4031,10 @@ void CollectiveBus::quiesce() {
   std::lock_guard<std::mutex> lock(impl.stop_mu);
   if (impl.quiesced || impl.stopped) return;
   impl.quiesced = true;
+  if (impl.world1) {
+    impl.stopping.store(true, std::memory_order_relaxed);
+    return;
+  }
 
   impl.stopping.store(true, std::memory_order_relaxed);
   if (impl.engine.joinable()) impl.engine.join();
@@ -3918,6 +4073,15 @@ void CollectiveBus::stop() {
   std::lock_guard<std::mutex> lock(impl.stop_mu);
   if (impl.stopped) return;
   impl.stopped = true;
+  if (impl.world1) {
+    impl.quiesced = true;
+    impl.stopping.store(true, std::memory_order_relaxed);
+    if (impl.w1_stage) {
+      cudaFreeHost(impl.w1_stage);
+      impl.w1_stage = nullptr;
+    }
+    return;
+  }
 
   // Inline quiesce (we already hold stop_mu).
   if (!impl.quiesced) {

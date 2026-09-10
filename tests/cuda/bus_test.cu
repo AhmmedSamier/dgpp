@@ -1726,6 +1726,79 @@ void scenario_stop_releases_waiters() {
 
 }  // namespace
 
+// A world of one (2026-09-10, the single-Spark serve): the bus starts
+// without lanes or a rendezvous, every collective is the identity (a copy
+// when the destination differs), the staging handout is one pinned slot,
+// the graph hooks succeed in session order, and the peer surface refuses.
+void scenario_world_of_one() {
+  DGPP_LOG_INFO("scenario: a world of one");
+  BusOptions o = base_options(0, 29899);
+  o.world_size = 1;
+  CollectiveBus bus(o);
+  std::string err;
+  if (!bus.start(&err)) {
+    CHECK(false, "world-of-one start: " + err);
+    return;
+  }
+  // No peers.
+  CHECK(bus.send(0, nullptr, 8, BusMessageClass::kLatency, &err) == 0, "send must refuse");
+  // The identity, in place and as a copy.
+  constexpr size_t elems = 1024;
+  std::vector<uint16_t> h(elems);
+  for (size_t i = 0; i < elems; ++i) h[i] = static_cast<uint16_t>(0x3C00 + (i % 97));
+  uint16_t* src = nullptr;
+  uint16_t* dst = nullptr;
+  CHECK(cudaMalloc(&src, elems * 2) == cudaSuccess && cudaMalloc(&dst, elems * 2) == cudaSuccess, "alloc");
+  CHECK(cudaMemcpy(src, h.data(), elems * 2, cudaMemcpyHostToDevice) == cudaSuccess, "upload");
+  CHECK(cudaMemset(dst, 0, elems * 2) == cudaSuccess, "zero");
+  uint64_t id = bus.allreduce(src, src, elems, &err);
+  CHECK(id != 0 && bus.wait_allreduce(id, 1000).ok, "in-place allreduce: " + err);
+  id = bus.allreduce(src, dst, elems, &err);
+  CHECK(id != 0 && bus.wait_allreduce(id, 1000).ok, "copy allreduce: " + err);
+  std::vector<uint16_t> back(elems);
+  CHECK(cudaMemcpy(back.data(), dst, elems * 2, cudaMemcpyDeviceToHost) == cudaSuccess, "download");
+  CHECK(back == h, "the copy allreduce must be the identity");
+  CHECK(!bus.wait_allreduce(id, 1000).ok, "a waited id is gone");
+  id = bus.allreduce_bulk(src, dst, elems, &err);
+  CHECK(id != 0 && bus.wait_allreduce(id, 1000).ok, "bulk allreduce: " + err);
+  // The staging handout: one at a time, consumed by the staged submit.
+  void* slot = bus.stage_next(&err);
+  CHECK(slot != nullptr, "stage_next: " + err);
+  CHECK(bus.stage_next(&err) == nullptr, "a second handout must refuse");
+  CHECK(bus.allreduce(src, src, elems, &err) == 0, "an eager collective under a held handout must refuse");
+  std::memset(slot, 0x5A, o.lat_slot_bytes);
+  id = bus.allreduce_staged(elems, &err);
+  CHECK(id != 0 && bus.wait_allreduce(id, 1000).ok, "staged allreduce: " + err);
+  CHECK(static_cast<const uint8_t*>(slot)[0] == 0x5A, "the staged fold is in place");
+  // The graph session: record, arm, finish, in order.
+  CHECK(bus.graph_record_begin(&err, 0), "record begin: " + err);
+  CHECK(!bus.graph_replay_arm(&err, 0), "arm while recording must refuse");
+  cudaStream_t stream = nullptr;
+  CHECK(cudaStreamCreate(&stream) == cudaSuccess, "stream");
+  CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) == cudaSuccess, "capture begin");
+  CHECK(bus.allreduce_record(stream, src, src, elems, &err), "allreduce_record: " + err);
+  cudaGraph_t graph = nullptr;
+  CHECK(cudaStreamEndCapture(stream, &graph) == cudaSuccess, "capture end");
+  size_t nodes = 0;
+  CHECK(cudaGraphGetNodes(graph, nullptr, &nodes) == cudaSuccess && nodes == 0, "an in-place record adds no node");
+  cudaGraphDestroy(graph);
+  cudaStreamDestroy(stream);
+  CHECK(bus.graph_record_end(&err), "record end: " + err);
+  CHECK(!bus.graph_replay_finish(1000, &err), "finish without an armed window must refuse");
+  CHECK(bus.graph_replay_arm(&err, 0), "arm: " + err);
+  CHECK(bus.graph_replay_arm(&err, 0), "a second arm (the pipelined replay): " + err);
+  CHECK(bus.stage_next(&err) == nullptr, "no handout while a window is armed");
+  CHECK(bus.graph_replay_finish(1000, &err), "finish 1: " + err);
+  CHECK(bus.graph_replay_finish(1000, &err), "finish 2: " + err);
+  CHECK(bus.graph_record_begin(&err, 1), "a second variant records between windows: " + err);
+  CHECK(bus.graph_record_end(&err), "record end 2: " + err);
+  bus.stop();
+  CHECK(bus.allreduce(src, src, elems, &err) == 0, "a stopped bus refuses");
+  cudaFree(src);
+  cudaFree(dst);
+  DGPP_LOG_INFO("scenario: a world of one OK");
+}
+
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   // One process, several ranks, each with kernels that spin on a peer's
@@ -1743,6 +1816,11 @@ int main() {
     return 2;
   }
 
+  scenario_world_of_one();
+  // DGPP_TEST_FILTER=world_of_one: the world-of-one gate alone (no lanes,
+  // no loopback fabric needed).
+  if (const char* f = std::getenv("DGPP_TEST_FILTER"); f && std::string(f) == "world_of_one")
+    return g_failures == 0 ? 0 : 1;
   scenario_latency_ping();
   scenario_credit_recycle();
   scenario_bulk_dual_lane();

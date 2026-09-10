@@ -1,5 +1,6 @@
 #include "models/qwen/binding.hpp"
 
+#include <cstdlib>
 #include <format>
 #include <stdexcept>
 
@@ -22,7 +23,18 @@ void add_bf16(TensorList& out, const std::string& name, std::vector<int64_t> sha
 
 // The e4m3 payload + its BF16 block-scale partner, as one call.
 void add_quantized(TensorList& out, const std::string& name, int64_t rows, int64_t cols,
-                   QwenWeightClass cls, int layer, int expert) {
+                   QwenWeightClass cls, int layer, int expert, bool nvfp4 = false) {
+  if (nvfp4) {
+    // The modelopt NVFP4 triple (plus its unused activation scale): `name`
+    // is "...proj.weight".
+    const std::string base = name.substr(0, name.size() - std::string(".weight").size());
+    add(out, name, DType::U8, {rows, cols / 2}, cls, layer, expert, QwenTensorRole::Fp4Payload);
+    add(out, base + ".weight_scale", DType::F8_E4M3, {rows, cols / 16}, cls, layer, expert,
+        QwenTensorRole::Fp4Scale);
+    add(out, base + ".weight_scale_2", DType::F32, {}, cls, layer, expert, QwenTensorRole::Fp4Global);
+    add(out, base + ".input_scale", DType::F32, {}, cls, layer, expert, QwenTensorRole::InputScale);
+    return;
+  }
   add(out, name, DType::F8_E4M3, {rows, cols}, cls, layer, expert, QwenTensorRole::Fp8Payload);
   add(out, name + "_scale_inv", DType::BF16, qwen_scale_shape({rows, cols}), cls, layer, expert,
       QwenTensorRole::Fp8Scale);
@@ -84,11 +96,14 @@ void expect_moe(TensorList& out, const std::string& p, const QwenTextConfig& cfg
   add_bf16(out, p + "shared_expert.up_proj.weight", {S, H}, QwenWeightClass::SharedExpert, layer);
   add_bf16(out, p + "shared_expert.down_proj.weight", {H, S}, QwenWeightClass::SharedExpert, layer);
   const int64_t I = cfg.moe_intermediate_size;
+  // The NVFP4 release quantizes the backbone's routed experts only; the MTP
+  // layer's keep the FP8 block form.
+  const bool nvfp4 = cfg.experts_nvfp4 && layer != cfg.mtp_layer();
   for (int e = 0; e < cfg.num_experts; ++e) {
     const std::string ep = p + "experts." + std::to_string(e) + ".";
-    add_quantized(out, ep + "gate_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e);
-    add_quantized(out, ep + "up_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e);
-    add_quantized(out, ep + "down_proj.weight", H, I, QwenWeightClass::RoutedExpert, layer, e);
+    add_quantized(out, ep + "gate_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, nvfp4);
+    add_quantized(out, ep + "up_proj.weight", I, H, QwenWeightClass::RoutedExpert, layer, e, nvfp4);
+    add_quantized(out, ep + "down_proj.weight", H, I, QwenWeightClass::RoutedExpert, layer, e, nvfp4);
   }
 }
 
@@ -242,6 +257,19 @@ QwenBindReport qwen_validate_text_binding(
     if (name.rfind("model.visual.", 0) == 0) {
       ++rep.vision;
       continue;
+    }
+    // A truncated config (the check apps' --layers N): the layers past it
+    // are out of scope, not unexpected.
+    {
+      static const std::string kLayers = "model.language_model.layers.";
+      if (name.rfind(kLayers, 0) == 0) {
+        const size_t dot = name.find('.', kLayers.size());
+        const int64_t idx = dot == std::string::npos ? -1 : std::atoll(name.substr(kLayers.size(), dot - kLayers.size()).c_str());
+        if (idx >= cfg.num_hidden_layers) {
+          ++rep.out_of_scope;
+          continue;
+        }
+      }
     }
     ++rep.unexpected;
     push_error(std::format("unexpected tensor '{}'", name));

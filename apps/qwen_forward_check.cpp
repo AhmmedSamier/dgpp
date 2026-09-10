@@ -40,7 +40,7 @@
 #include "models/qwen/forward.hpp"
 
 int main(int argc, char** argv) {
-  std::string model_id, ckpt, ids_text, dump_states, peer, image_dir;
+  std::string model_id, ckpt, ids_text, dump_states, peer, image_dir, ngram_table;
   int topk = 5, layers = -1, world = 1, rank = 0, port = 29950;
   bool resident = false;
   size_t lat_slot_bytes = 0;
@@ -63,6 +63,7 @@ int main(int argc, char** argv) {
       else if (a == "--port") port = std::stoi(next(i));
       else if (a == "--resident") resident = true;
       else if (a == "--image-dir") image_dir = next(i);
+      else if (a == "--ngram-table") ngram_table = next(i);
       else if (a == "--lat-slot-bytes") lat_slot_bytes = std::stoull(next(i));
       else throw std::runtime_error("unknown argument " + a);
     }
@@ -90,6 +91,7 @@ int main(int argc, char** argv) {
     const int T = static_cast<int>(ids.size());
     const int H = cfg.hidden_size, W = cfg.hc_count * H;
     if (!image_dir.empty()) dgpp::QwenLayerStream::set_resident_image_dir(image_dir == "off" ? "" : image_dir);
+    if (!ngram_table.empty()) dgpp::QwenLayerStream::set_ngram_table_mmap(ngram_table == "mmap");
     const dgpp::QwenResidency residency = resident ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming;
     DGPP_LOG_INFO("qwen_forward_check: {} — {} tokens, {} layers, {} world {} rank {}", ckpt, T,
                   cfg.num_hidden_layers, resident ? "resident" : "streaming", world, rank);

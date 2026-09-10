@@ -1,5 +1,7 @@
 # Qwen3.8-Flash-Next-FP8 on dgpp — architecture study and implementation plan (2026-09-09)
 
+> Single-Spark deployment (2026-09-10): the NVFP4 checkpoint with the n-gram table mmap'ed from the NVMe and the graph engine at world 1 — `docs/qwen38_single_spark.md`.
+
 Status: plan. Nothing in this document is built. The checkpoint
 `Qwen/Qwen3.8-Flash-Next-FP8` was mid-download on this node when it was
 written (119 of 173 GiB); the tensor census in §1.11 was taken from every

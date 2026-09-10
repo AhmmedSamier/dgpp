@@ -121,6 +121,11 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (!latent_format_from_string(e.kv_dtype))
             fail(what, "'" + ek + "' must be \"bf16\", \"fp8\" or \"fp4\"");
         }
+        else if (p.key == "ngram_table") {
+          e.ngram_table = text(x, ek, what);
+          if (e.ngram_table != "resident" && e.ngram_table != "mmap")
+            fail(what, "'" + ek + "' must be \"resident\" or \"mmap\"");
+        }
         else if (p.key == "default_max_tokens") e.default_max_tokens = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
         else if (p.key == "queue_limit") e.queue_limit = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
         else if (p.key == "max_connections") e.max_connections = static_cast<int>(integer(x, ek, what, 1, 1 << 20));

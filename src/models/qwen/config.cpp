@@ -321,6 +321,24 @@ QwenTextConfig QwenTextConfig::parse(const minijson::Value& tc,
   {
     const minijson::Value& q = *quantization_config;
     const std::string method = optional_string(q, "quant_method", "");
+    // The NVIDIA NVFP4 release carries a modelopt/compressed-tensors block
+    // instead of quant_method: config_groups.group_0.weights = 4-bit float
+    // per 16, targets = the backbone's expert modules.
+    if (const minijson::Value* groups = q.find("config_groups"); groups != nullptr && groups->is_object()) {
+      const minijson::Value* g0 = groups->find("group_0");
+      const minijson::Value* w = g0 != nullptr ? g0->find("weights") : nullptr;
+      if (w == nullptr || !w->is_object())
+        throw std::runtime_error("Qwen quantization_config.config_groups: group_0.weights missing");
+      const int64_t bits = require_int(*w, "num_bits");
+      const std::string type = optional_string(*w, "type", "");
+      const int64_t group = require_int(*w, "group_size");
+      if (bits != 4 || type != "float" || group != 16)
+        throw std::runtime_error("Qwen quantization_config.config_groups: only NVFP4 (4-bit float, group 16) is implemented");
+      c.experts_fp8 = false;
+      c.experts_nvfp4 = true;
+      c.ngram_table_fp8 = false;
+      return c;
+    }
     if (method != "fp8")
       throw std::runtime_error("Qwen quantization_config.quant_method: only fp8 is implemented, got '" + method + "'");
     const std::vector<int64_t> bs = require_int_array(q, "weight_block_size");

@@ -9,11 +9,13 @@
 //   qwen_load_check --model ORG/NAME | --checkpoint-dir DIR
 //                   [--world W] [--rank R] [--streaming] [--mtp]
 //                   [--layers N] [--image-dir DIR|off]
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "common/log.hpp"
 #include "loaders/architecture.hpp"
@@ -22,7 +24,7 @@
 #include "models/qwen/loader.hpp"
 
 int main(int argc, char** argv) {
-  std::string model_id, ckpt, image_dir;
+  std::string model_id, ckpt, image_dir, ngram_table;
   int world = 1, rank = 0, layers = -1;
   bool streaming = false, mtp = false;
   auto next = [&](int& i) -> std::string {
@@ -40,6 +42,7 @@ int main(int argc, char** argv) {
       else if (a == "--mtp") mtp = true;
       else if (a == "--layers") layers = std::stoi(next(i));
       else if (a == "--image-dir") image_dir = next(i);
+      else if (a == "--ngram-table") ngram_table = next(i);
       else throw std::runtime_error("unknown argument " + a);
     }
     if (ckpt.empty()) {
@@ -53,6 +56,7 @@ int main(int argc, char** argv) {
       throw std::runtime_error("not a Qwen4Exp checkpoint: " + ckpt);
     const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file(cfg_path);
     if (!image_dir.empty()) dgpp::QwenLayerStream::set_resident_image_dir(image_dir == "off" ? "" : image_dir);
+    if (!ngram_table.empty()) dgpp::QwenLayerStream::set_ngram_table_mmap(ngram_table == "mmap");
     const dgpp::QwenResidency residency = streaming ? dgpp::QwenResidency::Streaming : dgpp::QwenResidency::Resident;
     const dgpp::QwenHeadSharding head = world > 1 ? dgpp::QwenHeadSharding::VocabSharded : dgpp::QwenHeadSharding::Full;
     const double kGiB = 1024.0 * 1024.0 * 1024.0;
@@ -73,6 +77,45 @@ int main(int argc, char** argv) {
     const auto t2 = std::chrono::steady_clock::now();
     const auto& tbl = stream.load_ngram_table();
     DGPP_LOG_INFO("qwen_load_check: n-gram table rows [{}, +{}) {:.2f} GiB in {:.1f} s", tbl.row_begin, tbl.rows, tbl.bytes / kGiB, std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count());
+    if (tbl.mmap) {
+      // The mmap'ed table's gather cost (2026-09-10): a decode pass's rows
+      // (2 tokens x 16 heads, uniformly random rows — no locality, the
+      // worst case) and a prefill chunk's (2048 x 16), timed on the host
+      // as the walk's host node runs them.
+      const dgpp::QwenNgramGeometry ng = cfg.ngram_geometry();
+      const int heads = ng.heads;
+      std::vector<int32_t> ids;
+      std::vector<uint8_t> dst;
+      uint64_t x = 0x9E3779B97F4A7C15ull;
+      const auto fill = [&](int rows) {
+        ids.resize(static_cast<size_t>(rows) * heads);
+        dst.resize(static_cast<size_t>(rows) * heads * ng.head_dim);
+        for (int t = 0; t < rows; ++t)
+          for (int h = 0; h < heads; ++h) {
+            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            ids[static_cast<size_t>(t) * heads + h] = static_cast<int32_t>(ng.head_offset[h] + static_cast<int64_t>(x % static_cast<uint64_t>(ng.head_vocab[h])));
+          }
+      };
+      std::vector<double> us;
+      for (int i = 0; i < 200; ++i) {
+        fill(2);
+        const auto a = std::chrono::steady_clock::now();
+        tbl.mmap->gather(ids.data(), 2, heads, 0, heads, dst.data());
+        us.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
+      }
+      std::sort(us.begin(), us.end());
+      DGPP_LOG_INFO("qwen_load_check: mmap gather of a 2-row decode pass (32 random rows): p50 {:.0f} us, p90 {:.0f}, p99 {:.0f}, max {:.0f}",
+                    us[100], us[180], us[198], us.back());
+      us.clear();
+      for (int i = 0; i < 4; ++i) {
+        fill(2048);
+        const auto a = std::chrono::steady_clock::now();
+        tbl.mmap->gather(ids.data(), 2048, heads, 0, heads, dst.data());
+        us.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count());
+      }
+      DGPP_LOG_INFO("qwen_load_check: mmap gather of a 2048-row prefill chunk (32768 random rows): {:.0f} / {:.0f} / {:.0f} / {:.0f} ms",
+                    us[0], us[1], us[2], us[3]);
+    }
     const int n = layers < 0 ? cfg.num_hidden_layers + (mtp && cfg.mtp_layer() >= 0 ? 1 : 0) : layers;
     size_t total = 0;
     for (int l = 0; l < n; ++l) {

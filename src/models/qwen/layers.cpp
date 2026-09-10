@@ -1,12 +1,14 @@
 #include "models/qwen/layers.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
 
 #include "common/cuda_check.hpp"
+#include "common/log.hpp"
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/dsa.hpp"
 #include "kernels/kda.hpp"
@@ -468,7 +470,25 @@ QwenPleLayer::QwenPleLayer(const QwenPleResident& w, const QwenNgramTableResiden
   DGPP_CUDA_OK(cudaMemcpy(d_vocab_, ng.head_vocab.data(), ng.head_vocab.size() * 8, cudaMemcpyHostToDevice));
   DGPP_CUDA_OK(cudaMemcpy(d_offset_, ng.head_offset.data(), ng.head_offset.size() * 8, cudaMemcpyHostToDevice));
   const size_t M = static_cast<size_t>(max_tokens_), W = static_cast<size_t>(hc_) * hidden_;
-  ids_ = dev_alloc<int32_t>(M * static_cast<size_t>(heads_));
+  if (table_.mmap) {
+    // The ids where the host node reads them, the staging where the
+    // device converts them; two eager argument blocks (a walk's callback
+    // has run by the time the walk returns — the walk syncs) and a pair
+    // of events for the fork and the join (captures turn them into
+    // edges, so one pair serves every capture and the eager walks).
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_ids_), M * static_cast<size_t>(heads_) * 4,
+                               cudaHostAllocMapped));
+    DGPP_CUDA_OK(cudaHostGetDevicePointer(reinterpret_cast<void**>(&ids_), h_ids_, 0));
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&staged_), M * static_cast<size_t>(w_.hash_heads) * head_dim_,
+                               cudaHostAllocMapped));
+    DGPP_CUDA_OK(cudaStreamCreateWithFlags(&side_, cudaStreamNonBlocking));
+    DGPP_CUDA_OK(cudaEventCreateWithFlags(&fork_, cudaEventDisableTiming));
+    DGPP_CUDA_OK(cudaEventCreateWithFlags(&join_, cudaEventDisableTiming));
+    stage_args_.push_back(std::make_unique<StageArgs>());
+    stage_args_.push_back(std::make_unique<StageArgs>());
+  } else {
+    ids_ = dev_alloc<int32_t>(M * static_cast<size_t>(heads_));
+  }
   e_ = dev_alloc<uint16_t>(M * static_cast<size_t>(w_.hash_heads) * head_dim_);
   key_ = dev_alloc<uint16_t>(M * W);
   kn_ = dev_alloc<uint16_t>(M * W);
@@ -482,7 +502,16 @@ QwenPleLayer::~QwenPleLayer() {
   cudaFree(d_mult_);
   cudaFree(d_vocab_);
   cudaFree(d_offset_);
-  cudaFree(ids_);
+  if (h_ids_) {
+    if (side_) cudaStreamSynchronize(side_);
+    cudaFreeHost(h_ids_);
+    cudaFreeHost(staged_);
+    if (fork_) cudaEventDestroy(fork_);
+    if (join_) cudaEventDestroy(join_);
+    if (side_) cudaStreamDestroy(side_);
+  } else {
+    cudaFree(ids_);
+  }
   cudaFree(e_);
   cudaFree(key_);
   cudaFree(kn_);
@@ -506,11 +535,87 @@ size_t QwenPleLayer::scratch_bytes(const QwenTextConfig& cfg, int hash_heads, in
   return M * heads * 4 + M * static_cast<size_t>(hash_heads) * hd * 2 + M * W * 2 * 5 + M * H * 2;
 }
 
+// The host node's arguments: one block per captured walk (its pointer is
+// the node's), two alternating for the eager walks.
+struct QwenPleLayer::StageArgs {
+  const QwenNgramTableMmap* table = nullptr;
+  const int32_t* ids = nullptr;
+  uint8_t* dst = nullptr;
+  int n = 0, heads = 0, head_begin = 0, heads_local = 0;
+  std::atomic<int> error{0};
+  std::string what;
+};
+
+void QwenPleLayer::stage_callback(void* user) {
+  StageArgs* a = static_cast<StageArgs*>(user);
+  try {
+    a->table->gather(a->ids, a->n, a->heads, a->head_begin, a->heads_local, a->dst);
+  } catch (const std::exception& e) {
+    a->what = e.what();
+    a->error.store(1, std::memory_order_release);
+    DGPP_LOG_ERROR("QwenPleLayer: the n-gram staging failed: {}", e.what());
+  }
+}
+
+void QwenPleLayer::check_staged() const {
+  for (const auto& a : stage_args_)
+    if (a->error.load(std::memory_order_acquire))
+      throw std::runtime_error("QwenPleLayer: an n-gram staging failed on the host: " + a->what);
+}
+
+size_t QwenPleLayer::staging_bytes(const QwenTextConfig& cfg, int hash_heads, int max_tokens) {
+  const size_t M = static_cast<size_t>(std::max(max_tokens, 0));
+  const size_t heads = static_cast<size_t>((cfg.ngram_size - 1) * cfg.heads_per_ngram);
+  const size_t hd = static_cast<size_t>(cfg.ple_embed_dim) / std::max<size_t>(heads, 1);
+  return M * heads * 4 + M * static_cast<size_t>(hash_heads) * hd;
+}
+
+void QwenPleLayer::stage(const int64_t* tokens, int rows, const int32_t* req_ids, const int64_t* pos,
+                         const int32_t* req_spans, int num_requests, const int32_t* ctx,
+                         cudaStream_t stream) {
+  if (!staged()) throw std::logic_error("QwenPleLayer: stage() without the mmap'ed table");
+  if (rows <= 0) return;
+  if (rows > max_tokens_) throw std::invalid_argument("QwenPleLayer: rows exceed max_tokens");
+  if (staged_rows_ != 0) throw std::logic_error("QwenPleLayer: stage() twice without embed()");
+  check_staged();
+  qwen_ple_hash_ids_rows(tokens, rows, req_ids, pos, req_spans, num_requests, ctx, eos_, d_mult_,
+                         d_vocab_, d_offset_, heads_, heads_per_ngram_, ids_, stream);
+  cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
+  DGPP_CUDA_OK(cudaStreamIsCapturing(stream, &cs));
+  StageArgs* a = nullptr;
+  if (cs != cudaStreamCaptureStatusNone) {
+    stage_args_.push_back(std::make_unique<StageArgs>());
+    a = stage_args_.back().get();
+  } else {
+    a = stage_args_[eager_slot_].get();
+    eager_slot_ ^= 1;
+  }
+  a->table = table_.mmap;
+  a->ids = h_ids_;
+  a->dst = staged_;
+  a->n = rows;
+  a->heads = heads_;
+  a->head_begin = w_.hash_head_begin;
+  a->heads_local = w_.hash_heads;
+  DGPP_CUDA_OK(cudaEventRecord(fork_, stream));
+  DGPP_CUDA_OK(cudaStreamWaitEvent(side_, fork_, 0));
+  DGPP_CUDA_OK(cudaLaunchHostFunc(side_, &QwenPleLayer::stage_callback, a));
+  DGPP_CUDA_OK(cudaEventRecord(join_, side_));
+  staged_rows_ = rows;
+}
+
 void QwenPleLayer::embed(const int64_t* tokens, int rows, const int32_t* req_ids, const int64_t* pos,
                          const int32_t* req_spans, int num_requests, const int32_t* ctx,
                          cudaStream_t stream) {
   if (rows <= 0) return;
   if (rows > max_tokens_) throw std::invalid_argument("QwenPleLayer: rows exceed max_tokens");
+  if (staged()) {
+    if (staged_rows_ != rows) throw std::logic_error("QwenPleLayer: embed() without a matching stage()");
+    DGPP_CUDA_OK(cudaStreamWaitEvent(stream, join_, 0));
+    qwen_ple_gather_staged_bf16(staged_, table_.scale, rows, w_.hash_heads, head_dim_, e_, stream);
+    staged_rows_ = 0;
+    return;
+  }
   if (!table_.rows_e4m3) throw std::invalid_argument("QwenPleLayer: null table");
   qwen_ple_hash_ids_rows(tokens, rows, req_ids, pos, req_spans, num_requests, ctx, eos_, d_mult_,
                          d_vocab_, d_offset_, heads_, heads_per_ngram_, ids_, stream);

@@ -378,6 +378,48 @@ void qwen_ple_gather_bf16(const uint8_t* table, int64_t row_begin, int64_t rows,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+// The staged rows' conversion: one warp per (token, local head) row of the
+// staged buffer, the chunk arithmetic gather_kernel's.
+__global__ void gather_staged_kernel(const uint8_t* __restrict__ staged, float scale, int n,
+                                     int heads_local, int head_dim, uint16_t* __restrict__ out) {
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int64_t pair = static_cast<int64_t>(blockIdx.x) * (blockDim.x / 32) + warp;
+  if (pair >= static_cast<int64_t>(n) * heads_local) return;
+  const uint8_t* src = staged + pair * head_dim;
+  uint16_t* dst = out + pair * head_dim;
+  const int chunks = head_dim / 8;
+  for (int c = lane; c < chunks; c += 32) {
+    const uint2 codes = reinterpret_cast<const uint2*>(src)[c];
+    const uint32_t cw[2] = {codes.x, codes.y};
+    uint32_t packed[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      const uint32_t w = cw[j / 2] >> (16 * (j % 2));
+      const uint16_t lo =
+          float_to_bf16_bits(fp8_e4m3_bits_to_float(static_cast<uint8_t>(w & 0xFFu)) * scale);
+      const uint16_t hi = float_to_bf16_bits(
+          fp8_e4m3_bits_to_float(static_cast<uint8_t>((w >> 8) & 0xFFu)) * scale);
+      packed[j] = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+    }
+    reinterpret_cast<uint4*>(dst)[c] = make_uint4(packed[0], packed[1], packed[2], packed[3]);
+  }
+}
+
+void qwen_ple_gather_staged_bf16(const uint8_t* staged, float scale, int n, int heads_local,
+                                 int head_dim, uint16_t* out, cudaStream_t stream) {
+  if (n <= 0) return;
+  if (!staged || !out) throw std::invalid_argument("qwen_ple_gather_staged: null pointer");
+  if (head_dim <= 0 || head_dim % 8 != 0 || heads_local <= 0)
+    throw std::invalid_argument("qwen_ple_gather_staged: bad geometry (head_dim % 8, heads)");
+  if ((reinterpret_cast<uintptr_t>(staged) & 7u) || (reinterpret_cast<uintptr_t>(out) & 15u))
+    throw std::invalid_argument("qwen_ple_gather_staged: staged 8-byte and out 16-byte aligned required");
+  const int64_t pairs = static_cast<int64_t>(n) * heads_local;
+  constexpr int kWarps = 8;
+  const int blocks = static_cast<int>((pairs + kWarps - 1) / kWarps);
+  gather_staged_kernel<<<blocks, kWarps * 32, 0, stream>>>(staged, scale, n, heads_local, head_dim, out);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 void qwen_ple_gate_bf16(const uint16_t* key_n, const uint16_t* query_n, const uint16_t* value,
                         uint16_t* gated, int n, int hc, int hidden, cudaStream_t stream) {
   if (n <= 0) return;

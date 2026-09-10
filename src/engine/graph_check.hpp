@@ -28,9 +28,14 @@
 namespace dgpp {
 
 // Logs the node-type histogram (info) and throws std::runtime_error when
-// the graph holds any memcpy, memset, host or other non-kernel node.
+// the graph holds any memcpy, memset, host or other non-kernel node — a
+// family that declares host nodes (Model::session_graph_host_nodes(): the
+// Qwen walk's n-gram staging over the mmap'ed table, 2026-09-10) may
+// carry up to `host_nodes` of them: a host node runs on a runtime thread
+// and waits on nothing but its own stream, so it sits outside the copy
+// engine's shared in-order queue that the cycle below needs.
 inline void check_decode_graph(cudaGraph_t graph, int rank,
-                                   const std::string& what) {
+                                   const std::string& what, size_t host_nodes = 0) {
   size_t n = 0, e = 0;
   DGPP_CUDA_OK(cudaGraphGetNodes(graph, nullptr, &n));
   std::vector<cudaGraphNode_t> nodes(n);
@@ -65,14 +70,15 @@ inline void check_decode_graph(cudaGraph_t graph, int rank,
       "memset {} host {} event {} other {}; max in-degree {}",
       rank, what, n, e, kernels, empties, memcpys, memsets, hosts, events,
       others, max_in);
-  if (memcpys != 0 || memsets != 0 || hosts != 0 || events != 0 ||
+  if (memcpys != 0 || memsets != 0 || hosts > host_nodes || events != 0 ||
       others != 0)
     throw std::runtime_error(
         what + " captured " + std::to_string(memcpys) + " memcpy, " +
         std::to_string(memsets) + " memset, " + std::to_string(hosts) +
         " host, " + std::to_string(events) + " event and " +
         std::to_string(others) +
-        " other node(s); the decode graph must be kernels-only — a "
+        " other node(s); the decode graph must be kernels-only (" +
+        std::to_string(host_nodes) + " host node(s) declared) — a "
         "copy-engine node can deadlock the in-process multi-rank world "
         "(docs/batched_mtp_graph_stall.md)");
 }

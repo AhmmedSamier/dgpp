@@ -1,7 +1,14 @@
 #include "models/qwen/loader.hpp"
 
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <thread>
+#include <unordered_map>
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -64,6 +71,9 @@ std::string& resident_image_dir_storage() {
   return dir;
 }
 
+// The n-gram table's residency (2026-09-10): process-wide, set before
+// any stream is built (the memory plan reads it too).
+bool g_ngram_table_mmap = false;
 }  // namespace
 
 // The per-class builders (loaders/weight_build.hpp's primitives).
@@ -187,6 +197,21 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     m.shared[1] = load_bf16_rows(sp + "up_proj.weight", r * S, S);
     m.shared[2] = load_bf16_cols(sp + "down_proj.weight", r * S, S);
     const int E = cfg.num_experts;
+    // The NVFP4 release's backbone experts (the MTP layer's stay FP8): the
+    // modelopt triple per matrix, sliced on the intermediate axis like the
+    // FP8 form — rows for gate/up, whole 16-blocks of columns for down.
+    if (cfg.experts_nvfp4 && p.rfind("mtp.", 0) != 0) {
+      m.experts_fp4.resize(static_cast<size_t>(E) * 3);
+      m.expert_globals = static_cast<float*>(bump.alloc(static_cast<size_t>(E) * 3 * sizeof(float)));
+      for (int e = 0; e < E; ++e) {
+        const std::string ep = p + "experts." + std::to_string(e) + ".";
+        float* g = m.expert_globals + static_cast<size_t>(e) * 3;
+        m.experts_fp4[static_cast<size_t>(e) * 3 + 0] = load_fp4_rows_mo(ep + "gate_proj", r * I, I, g + 0);
+        m.experts_fp4[static_cast<size_t>(e) * 3 + 1] = load_fp4_rows_mo(ep + "up_proj", r * I, I, g + 1);
+        m.experts_fp4[static_cast<size_t>(e) * 3 + 2] = load_fp4_cols_mo(ep + "down_proj", r * I, I, g + 2);
+      }
+      return;
+    }
     m.experts.resize(static_cast<size_t>(E) * 3);
     for (int e = 0; e < E; ++e) {
       const std::string ep = p + "experts." + std::to_string(e) + ".";
@@ -197,6 +222,101 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
       m.experts[static_cast<size_t>(e) * 3 + 2] =
           load_quant_cols(ep + "down_proj.weight", r * I, I, geo.scale_block);
     }
+  }
+
+  // ---- NVFP4 slices in the modelopt layout (as models/glm4/loader.cpp) ------
+  // `base` names the matrix ("...gate_proj"): base.weight U8 [N, K/2],
+  // base.weight_scale e4m3 [N, K/16], base.weight_scale_2 F32 [] — stored
+  // in `global` as its reciprocal (the kernels divide by it once), and the
+  // unused base.input_scale consumed so the checkpoint reconciles.
+  void load_global_reciprocal_into(const std::string& base, float* slot) {
+    const QwenExpectedTensor& eg = expected(base + ".weight_scale_2");
+    if (copy) {
+      const TensorInfo& t = source(eg.name);
+      float ws2;
+      std::memcpy(&ws2, t.data, 4);
+      if (!(ws2 > 0.0f) || !std::isfinite(ws2))
+        fail("'" + eg.name + "' is not a positive finite scale");
+      const float inv = 1.0f / ws2;
+      std::memcpy(bump.host(slot), &inv, 4);
+      consumed(t);
+    }
+    note_read(eg, 4);
+    (void)load_raw(base + ".input_scale");
+  }
+  GlmFp4Matrix load_fp4_rows_mo(const std::string& base, int64_t row_start, int64_t rows, float* global) {
+    const QwenExpectedTensor& ep = expected(base + ".weight");
+    const QwenExpectedTensor& es = expected(base + ".weight_scale");
+    const int64_t N = ep.shape[0];
+    const int64_t cols = ep.shape[1] * 2;
+    fp4_check_cols(cols, who.c_str());
+    check_range(base, row_start, rows, N);
+    if (es.shape[0] != N || es.shape[1] != cols / kFp4Group) fail("NVFP4 scale geometry mismatch on " + base);
+    const size_t pc = static_cast<size_t>(cols / 2), sc = static_cast<size_t>(cols / kFp4Group);
+    GlmFp4Matrix q;
+    q.rows = rows;
+    q.cols = cols;
+    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(rows) * pc));
+    q.scales = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(rows) * sc));
+    if (copy) {
+      const TensorInfo& tp = source(ep.name);
+      const TensorInfo& ts = source(es.name);
+      std::memcpy(bump.host(const_cast<uint8_t*>(q.payload)),
+                  static_cast<const uint8_t*>(tp.data) + static_cast<size_t>(row_start) * pc,
+                  static_cast<size_t>(rows) * pc);
+      std::memcpy(bump.host(const_cast<uint8_t*>(q.scales)),
+                  static_cast<const uint8_t*>(ts.data) + static_cast<size_t>(row_start) * sc,
+                  static_cast<size_t>(rows) * sc);
+      consumed(tp);
+      consumed(ts);
+    }
+    note_read(ep, static_cast<size_t>(rows) * pc);
+    note_read(es, static_cast<size_t>(rows) * sc);
+    load_global_reciprocal_into(base, global);
+    q.global_scale = global;
+    return q;
+  }
+  GlmFp4Matrix load_fp4_cols_mo(const std::string& base, int64_t col_start, int64_t cols, float* global) {
+    const QwenExpectedTensor& ep = expected(base + ".weight");
+    const QwenExpectedTensor& es = expected(base + ".weight_scale");
+    const int64_t N = ep.shape[0];
+    const int64_t full = ep.shape[1] * 2;
+    fp4_check_cols(full, who.c_str());
+    fp4_check_cols(cols, who.c_str());
+    if (col_start % kFp4Group != 0) fail("NVFP4 column slice of " + base + " is not 16-aligned");
+    check_range(base, col_start, cols, full);
+    if (es.shape[0] != N || es.shape[1] != full / kFp4Group) fail("NVFP4 scale geometry mismatch on " + base);
+    const size_t pc_full = static_cast<size_t>(full / 2), sc_full = static_cast<size_t>(full / kFp4Group);
+    const size_t pc = static_cast<size_t>(cols / 2), sc = static_cast<size_t>(cols / kFp4Group);
+    GlmFp4Matrix q;
+    q.rows = N;
+    q.cols = cols;
+    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(N) * pc));
+    q.scales = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(N) * sc));
+    if (copy) {
+      const TensorInfo& tp = source(ep.name);
+      const TensorInfo& ts = source(es.name);
+      const uint8_t* sp = static_cast<const uint8_t*>(tp.data);
+      const uint8_t* ss = static_cast<const uint8_t*>(ts.data);
+      uint8_t* hp = bump.host(const_cast<uint8_t*>(q.payload));
+      uint8_t* hs = bump.host(const_cast<uint8_t*>(q.scales));
+      if (cols == full) {
+        std::memcpy(hp, sp, static_cast<size_t>(N) * pc);
+        std::memcpy(hs, ss, static_cast<size_t>(N) * sc);
+      } else {
+        for (int64_t row = 0; row < N; ++row) {
+          std::memcpy(hp + row * pc, sp + row * pc_full + col_start / 2, pc);
+          std::memcpy(hs + row * sc, ss + row * sc_full + col_start / kFp4Group, sc);
+        }
+      }
+      consumed(tp);
+      consumed(ts);
+    }
+    note_read(ep, static_cast<size_t>(N) * pc);
+    note_read(es, static_cast<size_t>(N) * sc);
+    load_global_reciprocal_into(base, global);
+    q.global_scale = global;
+    return q;
   }
 
   void build_ple(const std::string& p) {
@@ -446,6 +566,7 @@ QwenLayerStream::~QwenLayerStream() {
 }
 
 size_t QwenLayerStream::ngram_table_bytes(const QwenTextConfig& cfg, int rank, int world) {
+  if (g_ngram_table_mmap) return 0;
   if (cfg.ple_layer_ids.empty()) return 0;
   const QwenLocalGeometry g = QwenLocalGeometry::from_config(cfg, rank, world, QwenHeadSharding::Full);
   return static_cast<size_t>(g.table_rows) * static_cast<size_t>(cfg.ngram_geometry().head_dim);
@@ -458,13 +579,136 @@ const std::string& QwenLayerStream::resident_image_dir() { return resident_image
 
 // ---- the n-gram table ----------------------------------------------------------
 
+void QwenLayerStream::set_ngram_table_mmap(bool on) { g_ngram_table_mmap = on; }
+bool QwenLayerStream::ngram_table_mmap() { return g_ngram_table_mmap; }
+
+// ---- QwenNgramTableMmap ---------------------------------------------------------
+
+QwenNgramTableMmap::QwenNgramTableMmap(std::vector<Part> parts, int64_t capacity, int head_dim)
+    : parts_(std::move(parts)), capacity_(capacity), head_dim_(head_dim) {
+  if (capacity_ <= 0 || head_dim_ <= 0 || parts_.empty())
+    throw std::invalid_argument("QwenNgramTableMmap: empty geometry");
+  std::unordered_map<std::string, size_t> by_path;
+  part_base_.resize(parts_.size(), nullptr);
+  for (size_t s = 0; s < parts_.size(); ++s) {
+    const Part& part = parts_[s];
+    auto it = by_path.find(part.path);
+    if (it == by_path.end()) {
+      Mapping m;
+      m.fd = ::open(part.path.c_str(), O_RDONLY | O_CLOEXEC);
+      if (m.fd < 0) throw std::runtime_error("QwenNgramTableMmap: cannot open " + part.path);
+      struct stat st {};
+      if (fstat(m.fd, &st) != 0) { ::close(m.fd); throw std::runtime_error("QwenNgramTableMmap: fstat " + part.path); }
+      m.len = static_cast<size_t>(st.st_size);
+      void* map = mmap(nullptr, m.len, PROT_READ, MAP_SHARED, m.fd, 0);
+      if (map == MAP_FAILED) { ::close(m.fd); throw std::runtime_error("QwenNgramTableMmap: mmap " + part.path); }
+      m.base = static_cast<uint8_t*>(map);
+      // Rows are read one 160-byte record at a time from anywhere in 48 GB:
+      // no readahead, or every fault pulls 128 KB for 160 bytes.
+      madvise(m.base, m.len, MADV_RANDOM);
+      mapped_bytes_ += m.len;
+      maps_.push_back(m);
+      it = by_path.emplace(part.path, maps_.size() - 1).first;
+    }
+    const Mapping& m = maps_[it->second];
+    if (part.data_begin + static_cast<uint64_t>(part.rows) * head_dim_ > m.len)
+      throw std::runtime_error("QwenNgramTableMmap: part " + std::to_string(s) + " past the end of " + part.path);
+    part_base_[s] = m.base + part.data_begin;
+  }
+}
+
+QwenNgramTableMmap::~QwenNgramTableMmap() {
+  for (Mapping& m : maps_) {
+    if (m.base) munmap(m.base, m.len);
+    if (m.fd >= 0) ::close(m.fd);
+  }
+}
+
+const uint8_t* QwenNgramTableMmap::row(int64_t row) const {
+  const int64_t s = row / capacity_, r = row - s * capacity_;
+  if (row < 0 || s >= static_cast<int64_t>(parts_.size()) || r >= parts_[static_cast<size_t>(s)].rows)
+    throw std::out_of_range("QwenNgramTableMmap: row " + std::to_string(row) + " outside the table");
+  return part_base_[static_cast<size_t>(s)] + static_cast<size_t>(r) * head_dim_;
+}
+
+void QwenNgramTableMmap::gather(const int32_t* ids, int n, int heads, int head_begin, int heads_local,
+                                uint8_t* dst) const {
+  if (n <= 0) return;
+  const int64_t total = static_cast<int64_t>(n) * heads_local;
+  // Every row's page asked for up front (the kernel issues the reads in
+  // parallel), then the copies: a decode step's 32 rows in one thread, a
+  // prefill chunk's tens of thousands across a few.
+  auto copy_range = [&](int64_t lo, int64_t hi) {
+    for (int64_t pair = lo; pair < hi; ++pair) {
+      const int64_t t = pair / heads_local, hl = pair - t * heads_local;
+      const int32_t id = ids[t * heads + head_begin + hl];
+      std::memcpy(dst + static_cast<size_t>(pair) * head_dim_, row(id), static_cast<size_t>(head_dim_));
+    }
+  };
+  for (int64_t pair = 0; pair < total; ++pair) {
+    const int64_t t = pair / heads_local, hl = pair - t * heads_local;
+    const uint8_t* p = row(ids[t * heads + head_begin + hl]);
+    const uintptr_t page = reinterpret_cast<uintptr_t>(p) & ~uintptr_t{4095};
+    madvise(reinterpret_cast<void*>(page), 4096 + static_cast<size_t>(head_dim_), MADV_WILLNEED);
+  }
+  constexpr int64_t kPerThread = 256;
+  if (total <= kPerThread) {
+    copy_range(0, total);
+    return;
+  }
+  const int threads = static_cast<int>(std::min<int64_t>(16, (total + kPerThread - 1) / kPerThread));
+  const int64_t span = (total + threads - 1) / threads;
+  std::vector<std::thread> pool;
+  for (int w = 0; w < threads; ++w) {
+    const int64_t lo = w * span, hi = std::min(total, lo + span);
+    if (lo < hi) pool.emplace_back(copy_range, lo, hi);
+  }
+  for (auto& th : pool) th.join();
+}
+
 const QwenNgramTableResident& QwenLayerStream::load_ngram_table() {
-  if (table_.rows_e4m3 || cfg_.ple_layer_ids.empty()) return table_;
+  if (table_.rows_e4m3 || mmap_table_ || cfg_.ple_layer_ids.empty()) return table_;
   if (sources_released_)
     throw std::runtime_error("qwen loader: load_ngram_table after the checkpoint sources were released");
   const QwenNgramGeometry g = cfg_.ngram_geometry();
   const int64_t hd = g.head_dim;
   const int64_t row_begin = geo_.table_row_begin, rows = geo_.table_rows;
+  if (g_ngram_table_mmap) {
+    // The table stays in its shard(s): the parts' file offsets, mapped by
+    // the table object; the resident view keeps the geometry and the scale
+    // (the staged gather's), rows_e4m3 null.
+    const std::string p = qwen_layer_prefix(cfg_, cfg_.ple_layer()) + "ple.ple_embedding.";
+    std::vector<QwenNgramTableMmap::Part> parts;
+    for (int s = 0; s < cfg_.split_ngram_parts; ++s) {
+      const std::string name = p + "ngram_embedding.shard_" + std::to_string(s) + ".weight";
+      auto it = tensors_.find(name);
+      if (it == tensors_.end() || !it->second || !it->second->owner)
+        throw std::runtime_error("qwen loader: tensor not in checkpoint: " + name);
+      const TensorInfo& t = *it->second;
+      parts.push_back(QwenNgramTableMmap::Part{t.owner->path(), t.data_begin, t.shape[0]});
+    }
+    mmap_table_ = std::make_unique<QwenNgramTableMmap>(std::move(parts), qwen_ngram_shard_capacity(cfg_),
+                                                       static_cast<int>(hd));
+    {
+      const std::string name = p + "ngram_embedding.weight_scale";
+      auto it = tensors_.find(name);
+      if (it == tensors_.end() || !it->second) throw std::runtime_error("qwen loader: tensor not in checkpoint: " + name);
+      uint16_t bits;
+      std::memcpy(&bits, it->second->data, 2);
+      table_.scale = bf16_bits_to_float(bits);
+    }
+    table_.rows_e4m3 = nullptr;
+    table_.mmap = mmap_table_.get();
+    table_.row_begin = row_begin;
+    table_.rows = rows;
+    table_.head_dim = static_cast<int>(hd);
+    table_.bytes = 0;
+    DGPP_LOG_INFO("qwen loader: rank {} n-gram table rows [{}, {}) mmap'ed from the checkpoint ({:.2f} GiB mapped, "
+                  "scale {})",
+                  rank_, row_begin, row_begin + rows, mmap_table_->mapped_bytes() / (1024.0 * 1024.0 * 1024.0),
+                  table_.scale);
+    return table_;
+  }
   const size_t bytes = static_cast<size_t>(rows) * static_cast<size_t>(hd);
   DGPP_CUDA_OK(cudaMalloc(&table_device_, bytes));
   const std::string p = qwen_layer_prefix(cfg_, cfg_.ple_layer()) + "ple.ple_embedding.";
