@@ -11,12 +11,13 @@
 #        ... run ...
 #        scripts/roce_counters.sh snapshot > after.txt
 #        scripts/roce_counters.sh diff before.txt after.txt
-# Nodes default to the fabric's four (DGPP_FABRIC_NODES overrides, space-
-# separated); devices with no traffic at all are skipped.
+# Nodes default to the site's cluster config (DGPP_FABRIC_NODES overrides,
+# space-separated); devices with no traffic at all are skipped.
 set -u
-# The peers' ssh login: DGPP_FABRIC_USER, else the caller's own.
-SSH_USER="${DGPP_FABRIC_USER:-$(id -un)}"
-NODES=${DGPP_FABRIC_NODES:-"192.0.2.11 192.0.2.12 192.0.2.13 192.0.2.14"}
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cluster_env.sh"
+# The peers' ssh login: DGPP_FABRIC_USER, else the config's, else the caller's.
+SSH_USER="${DGPP_FABRIC_USER:-$(dgpp_ssh_user)}"
+NODES=${DGPP_FABRIC_NODES:-$(dgpp_nodes)}
 mode=${1:-snapshot}
 case "$mode" in
   snapshot)

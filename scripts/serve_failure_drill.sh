@@ -21,15 +21,16 @@
 # fresh answers, and summary.txt.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/cluster_env.sh"
 SR=$ROOT/scripts/serve_run.sh
 LOG="${DGPP_SERVE_LOG:-$HOME/dgpp/log}"
-PEERS=(192.0.2.12 192.0.2.13 192.0.2.14)
-RANK0=192.0.2.11
+PEERS=($(dgpp_peers))
+RANK0=$(dgpp_head)
 HTTP="http://$RANK0:18080"
 PEER_DIR=/tmp/bus4
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5)
-# The peers' ssh login: DGPP_FABRIC_USER, else the caller's own.
-SSH_USER="${DGPP_FABRIC_USER:-$(id -un)}"
+# The peers' ssh login: DGPP_FABRIC_USER, else the config's, else the caller's.
+SSH_USER="${DGPP_FABRIC_USER:-$(dgpp_ssh_user)}"
 VICTIM=${1:?usage: $0 <victim rank 0..3> [clients]}
 CLIENTS=${2:-3}
 STAMP=$(date +%Y-%m-%d_%H%M%S)

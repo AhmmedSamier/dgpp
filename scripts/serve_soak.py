@@ -31,7 +31,22 @@ import sys
 import threading
 import time
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "192.0.2.11"
+
+def default_host():
+    """Rank 0's address from the site's cluster config (DGPP_CLUSTER_CONFIG,
+    else deploy/cluster.json beside this script), falling back to localhost —
+    no site address is ever written into a script."""
+    cfg = os.environ.get("DGPP_CLUSTER_CONFIG") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "deploy", "cluster.json")
+    try:
+        with open(cfg) as f:
+            return json.load(f)["nodes"][0]
+    except Exception:
+        return "127.0.0.1"
+
+
+HOST = sys.argv[1] if len(sys.argv) > 1 else default_host()
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 18080
 MINUTES = float(sys.argv[3]) if len(sys.argv) > 3 else 60.0
 OUT = sys.argv[4] if len(sys.argv) > 4 else "soak_out"

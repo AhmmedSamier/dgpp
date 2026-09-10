@@ -11,8 +11,9 @@
 # Usage: scripts/serve_admission_check.sh [OUT_DIR]
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+. "$ROOT/scripts/cluster_env.sh"
 OUT=${1:-$ROOT/build-ci/fabric-runs/admission_gate_$(date +%Y-%m-%d_%H%M%S)}
-HOST=${DGPP_SERVE_HOST:-192.0.2.11}
+HOST=${DGPP_SERVE_HOST:-$(dgpp_head)}
 URL=http://$HOST:18080/v1/chat/completions
 M=unsloth/GLM-5.3-Flash-FP8
 BASE="--max-concurrency 4 --kv-capacity 1536 --default-max-tokens 1024 --queue-limit 8 --decode-graph --seed 20260904"

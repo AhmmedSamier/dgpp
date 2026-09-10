@@ -13,10 +13,11 @@
 #   WIDTHS defaults to "128 64 32 16 4", MODES to "plain mtp".
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+. "$ROOT/scripts/cluster_env.sh"
 OUT=${1:-$ROOT/build-ci/fabric-runs/width_sweep_$(date +%Y-%m-%d_%H%M%S)}
 WIDTHS=${2:-"128 64 32 16 4"}
 MODES=${3:-"plain mtp"}
-HOST=${DGPP_SERVE_HOST:-192.0.2.11}
+HOST=${DGPP_SERVE_HOST:-$(dgpp_head)}
 URL=http://$HOST:18080/v1/chat/completions
 M=unsloth/GLM-5.3-Flash-FP8
 mkdir -p "$OUT"

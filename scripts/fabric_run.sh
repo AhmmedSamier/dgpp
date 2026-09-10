@@ -78,19 +78,21 @@
 #       --model unsloth/GLM-5.3-Flash-FP8 --requests build-ci/sched_smoke.jsonl \
 #       --max-concurrency 2 --kv-capacity 256
 #
-# Fabric layout via env (defaults are the lab fabric):
-#   DGPP_FABRIC_HEAD   head's fabric IP as peers --peer it (192.0.2.11)
-#   DGPP_FABRIC_PEERS  space-separated peer IPs (192.0.2.12..14)
-#   DGPP_FABRIC_USER   ssh user (default: the caller's own login)
+# Fabric layout via env; the defaults come from the site's cluster config
+# (deploy/cluster.json — scripts/cluster_env.sh), never from this file:
+#   DGPP_FABRIC_HEAD   head's fabric IP as peers --peer it (config node 0)
+#   DGPP_FABRIC_PEERS  space-separated peer IPs (config nodes 1..)
+#   DGPP_FABRIC_USER   ssh user (config ssh_user, else the caller's login)
 #   DGPP_PEER_DIR      staging dir on peers (/tmp/bus4)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/cluster_env.sh"
 BUILD="${DGPP_BUILD_DIR:-$ROOT/build-ci}"
 APP="$BUILD/glm_gen_check"
-FABRIC_HEAD="${DGPP_FABRIC_HEAD:-192.0.2.11}"
-FABRIC_PEERS=(${DGPP_FABRIC_PEERS:-192.0.2.12 192.0.2.13 192.0.2.14})
-FABRIC_USER="${DGPP_FABRIC_USER:-$(id -un)}"
+FABRIC_HEAD="${DGPP_FABRIC_HEAD:-$(dgpp_head)}"
+FABRIC_PEERS=(${DGPP_FABRIC_PEERS:-$(dgpp_peers)})
+FABRIC_USER="${DGPP_FABRIC_USER:-$(dgpp_ssh_user)}"
 PEER_DIR="${DGPP_PEER_DIR:-/tmp/bus4}"
 SSH_OPTS=(-n -o BatchMode=yes -o ConnectTimeout=8)
 MONITOR_TIMEOUT=1800

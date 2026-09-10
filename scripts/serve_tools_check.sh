@@ -18,10 +18,11 @@
 #   responses land there as <name>.json / stream.sse beside the serve logs.
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+. "$ROOT/scripts/cluster_env.sh"
 OUT=${1:-$ROOT/build-ci/fabric-runs/tools_gate_$(date +%Y-%m-%d_%H%M%S)}
 export DGPP_SERVE_LOG=$OUT/serve
 export DGPP_SERVE_KNOBS="${DGPP_SERVE_KNOBS:---max-concurrency 2 --kv-capacity 4096 --default-max-tokens 512 --queue-limit 8 --decode-graph --mtp --seed 20260904}"
-HOST=${DGPP_SERVE_HOST:-192.0.2.11}
+HOST=${DGPP_SERVE_HOST:-$(dgpp_head)}
 mkdir -p "$DGPP_SERVE_LOG"
 cd "$ROOT" || exit 1
 scripts/serve_run.sh up || exit 1

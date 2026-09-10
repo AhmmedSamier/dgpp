@@ -4,12 +4,13 @@
 # node probes on every node, run serve_soak.py for MINUTES, stop, collect.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/cluster_env.sh"
 MIN=${1:-60}
 OUT=${2:-$ROOT/build-ci/fabric-runs/soak_2026-09-05}
-PEERS=(192.0.2.12 192.0.2.13 192.0.2.14)
+PEERS=($(dgpp_peers))
 SSH=(-o BatchMode=yes -o ConnectTimeout=5)
-# The peers' ssh login: DGPP_FABRIC_USER, else the caller's own.
-SSH_USER="${DGPP_FABRIC_USER:-$(id -un)}"
+# The peers' ssh login: DGPP_FABRIC_USER, else the config's, else the caller's.
+SSH_USER="${DGPP_FABRIC_USER:-$(dgpp_ssh_user)}"
 mkdir -p "$OUT"
 export DGPP_SERVE_KNOBS="--max-concurrency 4 --kv-capacity 8192 --default-max-tokens 256 --queue-limit 8 --decode-graph --mtp"
 export DGPP_SERVE_LOG="$OUT/serve"
@@ -26,7 +27,7 @@ for i in 1 2 3; do
   timeout 20 ssh "${SSH[@]}" "$SSH_USER@$h" "cd /tmp/bus4 && chmod +x node_probe.sh && setsid nohup ./node_probe.sh soak_probe > probe_r$i.log 2>&1 < /dev/null &" || echo "WARN: probe on $h"
 done
 echo "=== soak: $MIN min from $(date +%T)"
-python3 "$ROOT/scripts/serve_soak.py" 192.0.2.11 18080 "$MIN" "$OUT/client" 2>&1 | tee "$OUT/soak_client.log"
+python3 "$ROOT/scripts/serve_soak.py" "$(dgpp_head)" 18080 "$MIN" "$OUT/client" 2>&1 | tee "$OUT/soak_client.log"
 echo "=== soak client done at $(date +%T); stopping the world"
 kill "$(cat "$OUT/probe_r0.pid")" 2>/dev/null
 for i in 1 2 3; do
