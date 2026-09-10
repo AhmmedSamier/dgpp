@@ -1,5 +1,7 @@
 #include "models/qwen/loader.hpp"
 
+#include "loaders/fp8_quant.hpp"
+
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -7,6 +9,7 @@
 #include <thread>
 #include <unordered_map>
 #include <algorithm>
+#include <vector>
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
@@ -74,6 +77,8 @@ std::string& resident_image_dir_storage() {
 // The n-gram table's residency (2026-09-10): process-wide, set before
 // any stream is built (the memory plan reads it too).
 bool g_ngram_table_mmap = false;
+// The dense stack's form (engine.dense_weights = "fp8", 2026-09-10).
+bool g_dense_weights_fp8 = false;
 }  // namespace
 
 // The per-class builders (loaders/weight_build.hpp's primitives).
@@ -116,8 +121,13 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
 
   void build_gr(const std::string& p, QwenGrResident& g, bool combine) {
     g.hc_norm = load_bf16(p + "hc_norm.weight");
-    g.down = load_bf16(p + "input_mix_weight_down.weight");
-    g.up = load_bf16(p + "input_mix_weight_up.weight");
+    if (g_dense_weights_fp8) {
+      g.down_fp8 = load_bf16_fp8(p + "input_mix_weight_down.weight");
+      g.up_fp8 = load_bf16_fp8(p + "input_mix_weight_up.weight");
+    } else {
+      g.down = load_bf16(p + "input_mix_weight_down.weight");
+      g.up = load_bf16(p + "input_mix_weight_up.weight");
+    }
     g.inject = combine ? load_bf16(p + "block_inject_weight.weight") : nullptr;
   }
 
@@ -134,14 +144,33 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     // heads' q and k rows, its value heads' v rows. world=1: the whole
     // matrix, byte for byte.
     const int64_t local_rows = 2 * lk * dk + lv * dv;
-    uint16_t* qkv = static_cast<uint16_t*>(
-        bump.alloc(static_cast<size_t>(local_rows) * static_cast<size_t>(H) * 2));
     const std::string qkv_name = p + "in_proj_qkv.weight";
-    copy_rows_into(qkv_name, r * lk * dk, lk * dk, qkv, 0);
-    copy_rows_into(qkv_name, K + r * lk * dk, lk * dk, qkv, lk * dk);
-    copy_rows_into(qkv_name, 2 * K + r * lv * dv, lv * dv, qkv, 2 * lk * dk);
-    if (copy) consumed(source(qkv_name));
-    g.in_proj_qkv = qkv;
+    if (g_dense_weights_fp8) {
+      // The three segments assembled on the host, encoded into the bump.
+      std::vector<uint16_t> merged;
+      if (copy) {
+        merged.resize(static_cast<size_t>(local_rows) * static_cast<size_t>(H));
+        const uint16_t* src = static_cast<const uint16_t*>(source(qkv_name).data);
+        const auto seg = [&](int64_t src_row, int64_t rows, int64_t dst_row) {
+          std::memcpy(merged.data() + static_cast<size_t>(dst_row) * H, src + static_cast<size_t>(src_row) * H,
+                      static_cast<size_t>(rows) * H * 2);
+        };
+        seg(r * lk * dk, lk * dk, 0);
+        seg(K + r * lk * dk, lk * dk, lk * dk);
+        seg(2 * K + r * lv * dv, lv * dv, 2 * lk * dk);
+      }
+      note_read(expected(qkv_name), static_cast<size_t>(local_rows) * H * 2);
+      g.in_proj_qkv_fp8 = encode_fp8(merged.data(), static_cast<size_t>(H), local_rows, H);
+      if (copy) consumed(source(qkv_name));
+    } else {
+      uint16_t* qkv = static_cast<uint16_t*>(
+          bump.alloc(static_cast<size_t>(local_rows) * static_cast<size_t>(H) * 2));
+      copy_rows_into(qkv_name, r * lk * dk, lk * dk, qkv, 0);
+      copy_rows_into(qkv_name, K + r * lk * dk, lk * dk, qkv, lk * dk);
+      copy_rows_into(qkv_name, 2 * K + r * lv * dv, lv * dv, qkv, 2 * lk * dk);
+      if (copy) consumed(source(qkv_name));
+      g.in_proj_qkv = qkv;
+    }
     // The conv channels follow the same three segments ([C, 1, w] rows).
     const int64_t w = cfg.gdn_conv_width;
     uint16_t* conv = static_cast<uint16_t*>(
@@ -152,13 +181,19 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     copy_rows_into(conv_name, 2 * K + r * lv * dv, lv * dv, conv, 2 * lk * dk);
     if (copy) consumed(source(conv_name));
     g.conv = conv;
-    g.in_proj_z = load_bf16_rows(p + "in_proj_z.weight", r * lv * dv, lv * dv);
+    if (g_dense_weights_fp8)
+      g.in_proj_z_fp8 = load_bf16_rows_fp8(p + "in_proj_z.weight", r * lv * dv, lv * dv);
+    else
+      g.in_proj_z = load_bf16_rows(p + "in_proj_z.weight", r * lv * dv, lv * dv);
     g.in_proj_a = load_bf16_rows(p + "in_proj_a.weight", r * lv, lv);
     g.in_proj_b = load_bf16_rows(p + "in_proj_b.weight", r * lv, lv);
     g.a_log = load_bf16_as_f32(p + "A_log", r * lv, lv);
     g.dt_bias = load_bf16_as_f32(p + "dt_bias", r * lv, lv);
     g.norm = load_bf16(p + "norm.weight");
-    g.out_proj = load_bf16_cols(p + "out_proj.weight", r * lv * dv, lv * dv);
+    if (g_dense_weights_fp8)
+      g.out_proj_fp8 = load_bf16_cols_fp8(p + "out_proj.weight", r * lv * dv, lv * dv);
+    else
+      g.out_proj = load_bf16_cols(p + "out_proj.weight", r * lv * dv, lv * dv);
   }
 
   void build_qsa(const std::string& p) {
@@ -168,17 +203,26 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     a.head_begin = geo.head_begin;
     a.local_kv_heads = geo.local_kv_heads;
     a.kv_head_begin = geo.kv_head_begin;
-    a.q_proj = load_bf16_rows(p + "q_proj.weight", static_cast<int64_t>(geo.head_begin) * 2 * d,
-                              static_cast<int64_t>(geo.local_heads) * 2 * d);
-    a.k_proj = load_bf16_rows(p + "k_proj.weight", static_cast<int64_t>(geo.kv_head_begin) * d,
-                              static_cast<int64_t>(geo.local_kv_heads) * d);
-    a.v_proj = load_bf16_rows(p + "v_proj.weight", static_cast<int64_t>(geo.kv_head_begin) * d,
-                              static_cast<int64_t>(geo.local_kv_heads) * d);
-    a.o_proj = load_bf16_cols(p + "o_proj.weight", static_cast<int64_t>(geo.head_begin) * d,
-                              static_cast<int64_t>(geo.local_heads) * d);
+    const int64_t q0 = static_cast<int64_t>(geo.head_begin) * 2 * d, qn = static_cast<int64_t>(geo.local_heads) * 2 * d;
+    const int64_t kv0 = static_cast<int64_t>(geo.kv_head_begin) * d, kvn = static_cast<int64_t>(geo.local_kv_heads) * d;
+    const int64_t o0 = static_cast<int64_t>(geo.head_begin) * d, on = static_cast<int64_t>(geo.local_heads) * d;
+    if (g_dense_weights_fp8) {
+      a.q_proj_fp8 = load_bf16_rows_fp8(p + "q_proj.weight", q0, qn);
+      a.k_proj_fp8 = load_bf16_rows_fp8(p + "k_proj.weight", kv0, kvn);
+      a.v_proj_fp8 = load_bf16_rows_fp8(p + "v_proj.weight", kv0, kvn);
+      a.o_proj_fp8 = load_bf16_cols_fp8(p + "o_proj.weight", o0, on);
+    } else {
+      a.q_proj = load_bf16_rows(p + "q_proj.weight", q0, qn);
+      a.k_proj = load_bf16_rows(p + "k_proj.weight", kv0, kvn);
+      a.v_proj = load_bf16_rows(p + "v_proj.weight", kv0, kvn);
+      a.o_proj = load_bf16_cols(p + "o_proj.weight", o0, on);
+    }
     a.q_norm = load_bf16(p + "q_norm.weight");
     a.k_norm = load_bf16(p + "k_norm.weight");
-    a.index_qk_proj = load_bf16(p + "indexer.index_qk_proj.weight");
+    if (g_dense_weights_fp8)
+      a.index_qk_proj_fp8 = load_bf16_fp8(p + "indexer.index_qk_proj.weight");
+    else
+      a.index_qk_proj = load_bf16(p + "indexer.index_qk_proj.weight");
     a.index_q_norm = load_bf16(p + "indexer.q_layernorm.weight");
     a.index_k_norm = load_bf16(p + "indexer.k_layernorm.weight");
   }
@@ -193,9 +237,15 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     m.local_shared_inter = S;
     m.scale_block = geo.scale_block;
     const std::string sp = p + "shared_expert.";
-    m.shared[0] = load_bf16_rows(sp + "gate_proj.weight", r * S, S);
-    m.shared[1] = load_bf16_rows(sp + "up_proj.weight", r * S, S);
-    m.shared[2] = load_bf16_cols(sp + "down_proj.weight", r * S, S);
+    if (g_dense_weights_fp8) {
+      m.shared_fp8[0] = load_bf16_rows_fp8(sp + "gate_proj.weight", r * S, S);
+      m.shared_fp8[1] = load_bf16_rows_fp8(sp + "up_proj.weight", r * S, S);
+      m.shared_fp8[2] = load_bf16_cols_fp8(sp + "down_proj.weight", r * S, S);
+    } else {
+      m.shared[0] = load_bf16_rows(sp + "gate_proj.weight", r * S, S);
+      m.shared[1] = load_bf16_rows(sp + "up_proj.weight", r * S, S);
+      m.shared[2] = load_bf16_cols(sp + "down_proj.weight", r * S, S);
+    }
     const int E = cfg.num_experts;
     // The NVFP4 release's backbone experts (the MTP layer's stay FP8): the
     // modelopt triple per matrix, sliced on the intermediate axis like the
@@ -329,8 +379,13 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
     l.rows = geo.table_rows;
     const int64_t c0 = static_cast<int64_t>(geo.hash_head_begin) * hd;
     const int64_t cn = static_cast<int64_t>(geo.hash_heads) * hd;
-    l.key_proj = load_bf16_cols(p + "key_proj.weight", c0, cn);
-    l.value_proj = load_bf16_cols(p + "value_proj.weight", c0, cn);
+    if (g_dense_weights_fp8) {
+      l.key_proj_fp8 = load_bf16_cols_fp8(p + "key_proj.weight", c0, cn);
+      l.value_proj_fp8 = load_bf16_cols_fp8(p + "value_proj.weight", c0, cn);
+    } else {
+      l.key_proj = load_bf16_cols(p + "key_proj.weight", c0, cn);
+      l.value_proj = load_bf16_cols(p + "value_proj.weight", c0, cn);
+    }
     l.norm_key = load_bf16(p + "norm_key.weight");
     l.norm_query = load_bf16(p + "norm_query.weight");
     l.norm_conv = load_bf16(p + "norm_conv.weight");
@@ -473,14 +528,22 @@ size_t QwenLoaderFamily::globals_bytes(const QwenTextConfig& cfg, int rank, int 
   const size_t H = static_cast<size_t>(cfg.hidden_size);
   const size_t W = static_cast<size_t>(cfg.hyper_width());
   const size_t r = static_cast<size_t>(cfg.hc_lowrank);
+  // A dense [n, k] matrix's resident bytes: BF16, or block FP8 (codes + the
+  // fp32 scale grid) under engine.dense_weights = "fp8".
+  const auto dense = [](size_t n, size_t k) -> size_t {
+    if (!g_dense_weights_fp8) return align_up_256(n * k * 2);
+    return align_up_256(n * k) +
+           align_up_256(static_cast<size_t>(fp8_quant::scale_rows(static_cast<int64_t>(n))) *
+                        static_cast<size_t>(fp8_quant::scale_cols(static_cast<int64_t>(k))) * 4);
+  };
   size_t b = 0;
   b += align_up_256(static_cast<size_t>(cfg.vocab_size) * H * 2);                  // embed
-  b += align_up_256(static_cast<size_t>(QwenLocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count) * H * 2);
-  b += align_up_256(W * 2) + align_up_256(r * W * 2) + align_up_256(W * r * 2);   // mixer
+  b += dense(static_cast<size_t>(QwenLocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count), H);
+  b += align_up_256(W * 2) + dense(r, W) + dense(W, r);                             // mixer
   if (cfg.mtp_layer() >= 0) {
     b += 2 * align_up_256(H * H * 2);                          // fc_embedding, fc_hidden
     b += align_up_256(H * 2) + align_up_256(W * 2);            // pre_fc norms
-    b += align_up_256(W * 2) + align_up_256(r * W * 2) + align_up_256(W * r * 2);  // mtp mixer
+    b += align_up_256(W * 2) + dense(r, W) + dense(W, r);                        // mtp mixer
   }
   return b;
 }
@@ -518,10 +581,32 @@ void QwenLoaderFamily::build_globals(const QwenTextConfig& cfg_, const QwenLocal
     verbatim_bytes_ += t.nbytes();
     return dst;
   };
+  // A BF16 global encoded to block FP8 into the globals bump (dense_weights fp8).
+  auto encode_global_fp8 = [&](const std::string& name) -> GlmQuantMatrix {
+    const TensorInfo& t = lookup(name);
+    if (t.shape.size() != 2) throw std::runtime_error("qwen loader: '" + name + "' is not a matrix");
+    const int64_t rows = t.shape[0], cols = t.shape[1];
+    GlmQuantMatrix q;
+    q.rows = rows;
+    q.cols = cols;
+    q.payload = static_cast<const uint8_t*>(globals_bump_->alloc(static_cast<size_t>(rows) * cols));
+    q.scales = static_cast<const float*>(globals_bump_->alloc(
+        static_cast<size_t>(fp8_quant::scale_rows(rows)) * fp8_quant::scale_cols(cols) * 4));
+    fp8_quant::encode_block128(static_cast<const uint16_t*>(t.data), static_cast<size_t>(cols), rows, cols,
+                               globals_bump_->host(const_cast<uint8_t*>(q.payload)),
+                               globals_bump_->host(const_cast<float*>(q.scales)));
+    source_bytes_ += t.nbytes();
+    return q;
+  };
   auto copy_gr = [&](const std::string& p, QwenGrResident& g) {
     g.hc_norm = copy_global(p + "hc_norm.weight");
-    g.down = copy_global(p + "input_mix_weight_down.weight");
-    g.up = copy_global(p + "input_mix_weight_up.weight");
+    if (g_dense_weights_fp8) {
+      g.down_fp8 = encode_global_fp8(p + "input_mix_weight_down.weight");
+      g.up_fp8 = encode_global_fp8(p + "input_mix_weight_up.weight");
+    } else {
+      g.down = copy_global(p + "input_mix_weight_down.weight");
+      g.up = copy_global(p + "input_mix_weight_up.weight");
+    }
     g.inject = nullptr;
   };
   globals_.embed = copy_global("model.language_model.embed_tokens.weight");
@@ -529,13 +614,28 @@ void QwenLoaderFamily::build_globals(const QwenTextConfig& cfg_, const QwenLocal
     const TensorInfo& t = lookup("lm_head.weight");
     const size_t row_bytes = static_cast<size_t>(cfg_.hidden_size) * 2;
     const int begin = geo_.lm_vocab_begin, count = geo_.lm_vocab_count;
-    uint16_t* dst = static_cast<uint16_t*>(globals_bump_->alloc(static_cast<size_t>(count) * row_bytes));
-    std::memcpy(globals_bump_->host(dst),
-                static_cast<const uint8_t*>(t.data) + static_cast<size_t>(begin) * row_bytes,
-                static_cast<size_t>(count) * row_bytes);
+    if (g_dense_weights_fp8) {
+      const int64_t H = cfg_.hidden_size;
+      GlmQuantMatrix q;
+      q.rows = count;
+      q.cols = H;
+      q.payload = static_cast<const uint8_t*>(globals_bump_->alloc(static_cast<size_t>(count) * H));
+      q.scales = static_cast<const float*>(globals_bump_->alloc(
+          static_cast<size_t>(fp8_quant::scale_rows(count)) * fp8_quant::scale_cols(H) * 4));
+      fp8_quant::encode_block128(static_cast<const uint16_t*>(t.data) + static_cast<size_t>(begin) * H,
+                                 static_cast<size_t>(H), count, H,
+                                 globals_bump_->host(const_cast<uint8_t*>(q.payload)),
+                                 globals_bump_->host(const_cast<float*>(q.scales)));
+      globals_.lm_head_fp8 = q;
+    } else {
+      uint16_t* dst = static_cast<uint16_t*>(globals_bump_->alloc(static_cast<size_t>(count) * row_bytes));
+      std::memcpy(globals_bump_->host(dst),
+                  static_cast<const uint8_t*>(t.data) + static_cast<size_t>(begin) * row_bytes,
+                  static_cast<size_t>(count) * row_bytes);
+      if (head_ == LoaderHeadSharding::Full) verbatim_bytes_ += static_cast<size_t>(count) * row_bytes;
+      globals_.lm_head = dst;
+    }
     source_bytes_ += static_cast<size_t>(count) * row_bytes;
-    if (head_ == LoaderHeadSharding::Full) verbatim_bytes_ += static_cast<size_t>(count) * row_bytes;
-    globals_.lm_head = dst;
     globals_.lm_vocab_begin = begin;
     globals_.lm_vocab_count = count;
   }
@@ -581,6 +681,12 @@ const std::string& QwenLayerStream::resident_image_dir() { return resident_image
 
 void QwenLayerStream::set_ngram_table_mmap(bool on) { g_ngram_table_mmap = on; }
 bool QwenLayerStream::ngram_table_mmap() { return g_ngram_table_mmap; }
+
+// ---- the dense stack's form (engine.dense_weights) ------------------------------
+
+void QwenLayerStream::set_dense_weights_fp8(bool on) { g_dense_weights_fp8 = on; }
+bool QwenLayerStream::dense_weights_fp8() { return g_dense_weights_fp8; }
+uint64_t QwenLoaderFamily::loader_format() { return g_dense_weights_fp8 ? 2 : 1; }
 
 // ---- QwenNgramTableMmap ---------------------------------------------------------
 

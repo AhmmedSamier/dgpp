@@ -56,6 +56,9 @@ struct QwenGrResident {
   const uint16_t* down = nullptr;     // BF16 [r, W]
   const uint16_t* up = nullptr;       // BF16 [W, r]
   const uint16_t* inject = nullptr;   // BF16 [n, W]
+  // engine.dense_weights = "fp8" (2026-09-10): the same two in block FP8,
+  // the BF16 pointers null (loaders/fp8_quant.hpp).
+  GlmQuantMatrix down_fp8, up_fp8;
 };
 
 struct QwenGdnResident {
@@ -64,6 +67,7 @@ struct QwenGdnResident {
   const uint16_t* in_proj_z = nullptr;    // BF16 [lv*dv, hidden]
   const uint16_t* in_proj_a = nullptr;    // BF16 [lv, hidden]
   const uint16_t* in_proj_b = nullptr;    // BF16 [lv, hidden]
+  GlmQuantMatrix in_proj_qkv_fp8, in_proj_z_fp8, out_proj_fp8;  // dense_weights fp8 (a, b stay BF16)
   const float* a_log = nullptr;           // F32 [lv]
   const float* dt_bias = nullptr;         // F32 [lv]
   const uint16_t* norm = nullptr;         // BF16 [dv]
@@ -80,6 +84,7 @@ struct QwenQsaResident {
   const uint16_t* q_norm = nullptr;         // BF16 [d]
   const uint16_t* k_norm = nullptr;         // BF16 [d]
   const uint16_t* index_qk_proj = nullptr;  // BF16 [(nH + 1) * di, hidden]
+  GlmQuantMatrix q_proj_fp8, k_proj_fp8, v_proj_fp8, o_proj_fp8, index_qk_proj_fp8;  // dense_weights fp8
   const uint16_t* index_q_norm = nullptr;   // BF16 [di]
   const uint16_t* index_k_norm = nullptr;   // BF16 [di]
   int local_heads = 0;      // query heads on this rank
@@ -92,6 +97,7 @@ struct QwenMoeResident {
   const uint16_t* router = nullptr;       // BF16 [E, hidden]
   const uint16_t* shared_gate = nullptr;  // BF16 [1, hidden]
   const uint16_t* shared[3] = {};         // BF16 gate/up [S/W, hidden], down [hidden, S/W]
+  GlmQuantMatrix shared_fp8[3];           // dense_weights fp8: the same three
   std::vector<GlmQuantMatrix> experts;    // gate, up, down per expert (inter-sliced), the FP8 form
   std::vector<GlmFp4Matrix> experts_fp4;  // the same, the NVFP4 release's backbone experts
   float* expert_globals = nullptr;        // [E * 3] F32 on the device: 1 / weight_scale_2 per matrix
@@ -107,6 +113,7 @@ struct QwenMoeResident {
 struct QwenPleResident {
   const uint16_t* key_proj = nullptr;    // BF16 [W, E/world] (packed columns)
   const uint16_t* value_proj = nullptr;  // BF16 [hidden, E/world] (packed columns)
+  GlmQuantMatrix key_proj_fp8, value_proj_fp8;  // dense_weights fp8
   const uint16_t* norm_key = nullptr;    // BF16 [W]
   const uint16_t* norm_query = nullptr;  // BF16 [W]
   const uint16_t* norm_conv = nullptr;   // BF16 [W]
@@ -134,6 +141,7 @@ struct QwenLayerResident {
 struct QwenGlobalsResident {
   const uint16_t* embed = nullptr;    // BF16 [vocab, hidden]
   const uint16_t* lm_head = nullptr;  // BF16 [lm_vocab_count, hidden]
+  GlmQuantMatrix lm_head_fp8;         // dense_weights fp8
   int lm_vocab_begin = 0;
   int lm_vocab_count = 0;
   QwenGrResident mixer;               // the final read (no inject)
@@ -229,7 +237,9 @@ struct QwenLoaderFamily {
   using PresentMap = std::unordered_map<std::string, QwenTensorDesc>;
   struct Builder;  // models/qwen/loader.cpp
   static const char* who() { return "qwen loader"; }
-  static uint64_t loader_format() { return 1; }
+  // The resident layout's version; the dense stack's form is part of it
+  // (a BF16 image can never be restored into an FP8 world).
+  static uint64_t loader_format();
   static int max_layer(const Config& c) { return c.num_hidden_layers + (c.mtp_layer() >= 0 ? 1 : 0); }
   static int main_layers(const Config& c) { return c.num_hidden_layers; }
   static std::vector<Expected> layer_table(const Config& c, int layer) {
@@ -268,6 +278,13 @@ class QwenLayerStream : public ResidentLayerStream<QwenLoaderFamily> {
   // deployment config's engine.ngram_table ("resident" | "mmap") drives it.
   static void set_ngram_table_mmap(bool on);
   static bool ngram_table_mmap();
+  // The dense stack's form (2026-09-10, engine.dense_weights): false = the
+  // checkpoint's BF16 (the default); true = every dense projection (GDN
+  // qkv/z/out, QSA q/k/v/o/indexer, the GR sites, the shared experts, the
+  // PLE key/value, lm_head) encoded to block FP8 at load. Set before the
+  // stream is built; the memory plan and the resident image key follow it.
+  static void set_dense_weights_fp8(bool on);
+  static bool dense_weights_fp8();
   const QwenNgramTableMmap* ngram_mmap() const { return mmap_table_.get(); }
 
   static void set_resident_image_dir(const std::string& dir);

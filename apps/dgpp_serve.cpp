@@ -798,6 +798,7 @@ int main(int argc, char** argv) {
   int64_t kv_capacity = 8192;
   std::string kv_dtype = "bf16";  // the latent cache's format (2026-09-06)
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap (2026-09-10)
+  std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8 (2026-09-10)
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
   int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
   // The sampled pick's candidate width per rank on the graph engines (the
@@ -849,6 +850,7 @@ int main(int argc, char** argv) {
     kv_capacity = e.kv_capacity;
     kv_dtype = e.kv_dtype;
     ngram_table = e.ngram_table;
+    dense_weights = e.dense_weights;
     default_max_tokens = e.default_max_tokens;
     queue_limit = e.queue_limit;
     max_connections = e.max_connections;
@@ -885,6 +887,7 @@ int main(int argc, char** argv) {
     else if (a == "--kv-capacity") kv_capacity = std::stoll(next());
     else if (a == "--kv-dtype") kv_dtype = next();
     else if (a == "--ngram-table") ngram_table = next();
+    else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--memory-plan") memory_plan_only = true;
     else if (a == "--max-concurrency") max_concurrency = std::stoi(next());
     else if (a == "--queue-limit") queue_limit = std::stoi(next());
@@ -938,11 +941,11 @@ int main(int argc, char** argv) {
   std::optional<dgpp::serve::JournalReader> reader;
   const auto canonical = [&] {
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} maxtok={} queue={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} maxtok={} queue={} "
         "eos={} graph={} mtp={} mtpd={} batchmin={} cand={} pcgib={} adm={} win={} "
         "pace={} inflight={} reasoning_in_content={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
-        max_concurrency, kv_capacity, kv_dtype, ngram_table, default_max_tokens, queue_limit,
+        max_concurrency, kv_capacity, kv_dtype, ngram_table, dense_weights, default_max_tokens, queue_limit,
         no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, graph_batch_min_live,
         sampling_candidates, prefix_cache_gib, admission_mode, admission_window,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0);
@@ -972,6 +975,7 @@ int main(int argc, char** argv) {
         ws.kv_capacity = kv_capacity;
         ws.kv_dtype = kv_dtype;
         ws.ngram_table = ngram_table;
+        ws.dense_weights = dense_weights;
         ws.default_max_tokens = default_max_tokens;
         ws.queue_limit = queue_limit;
         ws.no_eos = no_eos;
@@ -1010,6 +1014,7 @@ int main(int argc, char** argv) {
         kv_capacity = ws.kv_capacity;
         kv_dtype = ws.kv_dtype;
         ngram_table = ws.ngram_table;
+        dense_weights = ws.dense_weights;
         default_max_tokens = ws.default_max_tokens;
         queue_limit = ws.queue_limit;
         no_eos = ws.no_eos;
@@ -1074,6 +1079,11 @@ int main(int argc, char** argv) {
   // The Qwen n-gram table's residency: set before the plan and the load
   // (both read it; the table's bytes leave the plan under mmap).
   dgpp::QwenLayerStream::set_ngram_table_mmap(ngram_table == "mmap");
+  if (dense_weights != "checkpoint" && dense_weights != "fp8") {
+    DGPP_LOG_ERROR("--dense-weights must be checkpoint or fp8, got '{}'", dense_weights);
+    return 2;
+  }
+  dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
   if (world > 1) {
     require(rank >= 0 && rank < world, "--rank outside --world");
     require(!peer.empty() || rank == 0,
@@ -1203,6 +1213,9 @@ int main(int argc, char** argv) {
     if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
       DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",
                     ngram_table, family->name());
+    if (std::string(family->name()) != "qwen4_exp" && dense_weights != "checkpoint")
+      DGPP_LOG_WARN("serve: --dense-weights {} applies to the Qwen dense stack only; the {} family loads as shipped",
+                    dense_weights, family->name());
     const dgpp::GlmGenerationDefaults generation_defaults =
         dgpp::GlmGenerationDefaults::from_checkpoint_dir(ckpt, family->vocab_size());
     // generation_config.json is the generation authority. Retain the

@@ -34,6 +34,14 @@ struct QwenGemmWorkspace {
   IGemm* gemm = nullptr;
   void* ws = nullptr;
   size_t ws_bytes = 0;
+  // The FP8 dense stack's prefill bridge (engine.dense_weights = "fp8",
+  // 2026-09-10): a BF16 scratch the size of the largest dense matrix; a
+  // prefill-shaped product dequantizes the matrix into it (the GEMV core's
+  // own values, bf16(e4m3 x scale)) and runs the BF16 GEMM seam — the fp8
+  // tile kernel is a quarter slower than cuBLASLt at these shapes (2.6 s
+  // against 2.0 s for a 2K prompt, measured).
+  uint16_t* dequant = nullptr;
+  size_t dequant_bytes = 0;
 };
 
 // ---- the gated residual --------------------------------------------------------

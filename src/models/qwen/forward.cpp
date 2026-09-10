@@ -1,5 +1,7 @@
 #include "models/qwen/forward.hpp"
 
+#include "kernels/scale_gemm.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -86,6 +88,13 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
   gemm_ws_bytes_ = std::max<size_t>(64u << 20, gemm_.query_workspace_bytes(max_tokens_, lm_vocab_count_, H, DType::BF16));
   gemm_ws_ = dev_alloc<char>(gemm_ws_bytes_);
   gw_ = QwenGemmWorkspace{&gemm_, gemm_ws_, gemm_ws_bytes_};
+  if (QwenLayerStream::dense_weights_fp8()) {
+    // The FP8 dense stack's prefill bridge: the largest dense matrix of
+    // this rank's slice, in BF16.
+    dense_bridge_bytes_ = dense_bridge_bytes(cfg_, loader_.geometry());
+    gw_.dequant = dev_alloc<uint16_t>(dense_bridge_bytes_ / 2);
+    gw_.dequant_bytes = dense_bridge_bytes_;
+  }
   // Every decode shape up to the fixed batch's rows through the row-
   // independent GEMV core (the numerical seam of the batched graphs).
   gemm_.set_decode_rows(max_decode_rows_);
@@ -223,6 +232,9 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
                  QwenLayerStream::ngram_table_bytes(cfg, tp_rank, tp_world));
   }
   plan.add("gemm workspace (at least)", size_t{64} << 20);
+  if (QwenLayerStream::dense_weights_fp8())
+    plan.add("dense fp8 prefill bridge (the largest dense matrix in BF16)",
+             dense_bridge_bytes(cfg, QwenLocalGeometry::from_config(cfg, tp_rank, tp_world, head)));
   if (has_ple && QwenLayerStream::ngram_table_mmap()) {
     // The table stays on the NVMe behind the page cache (nothing
     // reserved); the walk's ids and staged rows are pinned.
@@ -299,6 +311,7 @@ QwenModel::~QwenModel() {
   cudaFreeHost(h_route_ids_);
   cudaFreeHost(h_route_weights_);
   cudaFree(gemm_ws_);
+  if (gw_.dequant) cudaFree(gw_.dequant);
   cudaFree(mtp_ring_snapshot_);
   cudaFree(mtp_chain_ring_);
   cudaFree(mtp_hin_);
@@ -317,10 +330,44 @@ QwenMoeWeights QwenModel::moe_view(const QwenMoeResident& m) {
   w.shared_gate_proj = m.shared[0];
   w.shared_up_proj = m.shared[1];
   w.shared_down_proj = m.shared[2];
+  w.shared_fp8 = m.shared_fp8[0].payload ? m.shared_fp8 : nullptr;
   w.shared_inter = m.local_shared_inter;
   w.experts = m.experts.empty() ? nullptr : m.experts.data();
   w.experts_fp4 = m.experts_fp4.empty() ? nullptr : m.experts_fp4.data();
   return w;
+}
+
+// The largest dense matrix of the rank's slice in BF16 (the FP8 prefill bridge).
+size_t QwenModel::dense_bridge_bytes(const QwenTextConfig& cfg, const QwenLocalGeometry& geo) {
+  const size_t H = static_cast<size_t>(cfg.hidden_size), W = static_cast<size_t>(cfg.hyper_width());
+  const size_t r = static_cast<size_t>(cfg.hc_lowrank);
+  size_t elems = 0;
+  const auto take = [&](size_t n, size_t k) { elems = std::max(elems, n * k); };
+  take(static_cast<size_t>(geo.local_heads) * 2 * cfg.head_dim, H);                      // q_proj
+  take(static_cast<size_t>(geo.local_kv_heads) * cfg.head_dim, H);                       // k / v
+  take(H, static_cast<size_t>(geo.local_heads) * cfg.head_dim);                          // o_proj
+  take(static_cast<size_t>((cfg.indexer_n_heads + 1) * cfg.indexer_head_dim), H);        // indexer
+  take(static_cast<size_t>(2 * geo.local_key_heads * cfg.gdn_key_head_dim + geo.local_value_heads * cfg.gdn_value_head_dim), H);
+  take(static_cast<size_t>(geo.local_value_heads) * cfg.gdn_value_head_dim, H);          // z
+  take(H, static_cast<size_t>(geo.local_value_heads) * cfg.gdn_value_head_dim);          // out_proj
+  take(r, W);                                                                            // GR down
+  take(W, r);                                                                            // GR up
+  take(W, static_cast<size_t>(cfg.ple_embed_dim / std::max(geo.world, 1)));              // PLE key
+  take(H, static_cast<size_t>(cfg.ple_embed_dim / std::max(geo.world, 1)));              // PLE value
+  return elems * 2;
+}
+
+// The lm_head product into logits_ (f32): the checkpoint's BF16 through the
+// GEMM seam, or the block-FP8 form (engine.dense_weights) through the scale
+// GEMM — 2026-09-10.
+void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream) {
+  const int H = cfg_.hidden_size;
+  if (globals_.lm_head_fp8.payload)
+    launch_scale_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_fp8.payload, globals_.lm_head_fp8.scales,
+                          logits_, rows, lm_vocab_count_, H, stream, static_cast<size_t>(lm_vocab_count_));
+  else
+    gemm_.matmul(hidden, globals_.lm_head, logits_, rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
+                 static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
 }
 
 float* QwenModel::gdn_rec(int req, int ordinal) const {
@@ -435,6 +482,13 @@ void QwenModel::prefetch_add(const char* what, const void* p, size_t bytes) {
   prefetch_.add(p, bytes);
 }
 
+// The FP8 form's payload and scale grid (adjacent grants of one image).
+void QwenModel::prefetch_fp8(const char* what, const GlmQuantMatrix& q) {
+  if (!q.payload) return;
+  prefetch_add(what, q.payload, static_cast<size_t>(q.rows) * static_cast<size_t>(q.cols));
+  prefetch_add(what, q.scales, static_cast<size_t>(q.scale_rows()) * static_cast<size_t>(q.scale_cols()) * 4);
+}
+
 void QwenModel::prefetch_gr(const QwenGrResident& g, bool inject) {
   const size_t W = static_cast<size_t>(cfg_.hyper_width());
   const size_t r = static_cast<size_t>(cfg_.hc_lowrank);
@@ -442,7 +496,9 @@ void QwenModel::prefetch_gr(const QwenGrResident& g, bool inject) {
   if (inject && g.inject) prefetch_add("g.inject", g.inject, hc * W * 2);
   if (g.hc_norm) prefetch_add("g.hc_norm", g.hc_norm, W * 2);
   if (g.down) prefetch_add("g.down", g.down, r * W * 2);
+  else prefetch_fp8("g.down_fp8", g.down_fp8);
   if (g.up) prefetch_add("g.up", g.up, W * r * 2);
+  else prefetch_fp8("g.up_fp8", g.up_fp8);
 }
 
 // Before the attention fold: the MLP-side GR mix WITH its inject (since
@@ -457,8 +513,10 @@ void QwenModel::prefetch_ffn_side(const QwenLayerResident& r) {
   if (r.moe.router) prefetch_add("r.moe.router", r.moe.router, static_cast<size_t>(cfg_.num_experts) * H * 2);
   if (r.moe.shared_gate) prefetch_add("r.moe.shared_gate", r.moe.shared_gate, H * 2);
   const size_t S = static_cast<size_t>(cfg_.shared_expert_intermediate_size / world_);
-  for (int i = 0; i < 3; ++i)
+  for (int i = 0; i < 3; ++i) {
     if (r.moe.shared[i]) prefetch_add("r.moe.shared[i]", r.moe.shared[i], S * H * 2);
+    else prefetch_fp8("r.moe.shared_fp8[i]", r.moe.shared_fp8[i]);
+  }
 }
 
 // Before the MoE fold: the next layer's attention-side GR mix and its
@@ -480,9 +538,13 @@ void QwenModel::prefetch_attention_side(int layer) {
     const size_t rows = static_cast<size_t>(r.gdn.local_key_heads) * cfg_.gdn_key_head_dim * 2 +
                         static_cast<size_t>(r.gdn.local_value_heads) * cfg_.gdn_value_head_dim;
     prefetch_add("r.gdn.in_proj_qkv", r.gdn.in_proj_qkv, rows * H * 2);
+  } else if (r.kind == QwenLayerKind::Gdn && r.gdn.in_proj_qkv_fp8.payload) {
+    prefetch_fp8("r.gdn.in_proj_qkv_fp8", r.gdn.in_proj_qkv_fp8);
   } else if (r.qsa.q_proj) {
     const size_t rows = static_cast<size_t>(r.qsa.local_heads) * 2 * cfg_.head_dim;
     prefetch_add("r.qsa.q_proj", r.qsa.q_proj, rows * H * 2);
+  } else if (r.qsa.q_proj_fp8.payload) {
+    prefetch_fp8("r.qsa.q_proj_fp8", r.qsa.q_proj_fp8);
   }
 }
 
@@ -499,6 +561,7 @@ void QwenModel::prefetch_head(const QwenGrResident& mixer) {
   prefetch_gr(mixer, /*inject=*/false);
   // Far larger than the window: add() clamps, the GEMV's leading rows hit.
   if (globals_.lm_head) prefetch_add("globals_.lm_head", globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2);
+  else prefetch_fp8("globals_.lm_head_fp8", globals_.lm_head_fp8);
 }
 
 // The PLE layer's two folds (its K-sliced key and value partials).
@@ -510,6 +573,7 @@ void QwenModel::prefetch_ple_key_side(const QwenLayerResident& r) {
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   if (r.ple.norm_key) prefetch_add("r.ple.norm_key", r.ple.norm_key, W * 2);
   if (r.ple.value_proj) prefetch_add("r.ple.value_proj", r.ple.value_proj, H * cols * 2);
+  else prefetch_fp8("r.ple.value_proj_fp8", r.ple.value_proj_fp8);
 }
 
 void QwenModel::prefetch_ple_value_side(const QwenLayerResident& r) {
@@ -670,8 +734,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // same m=T GEMM the diagnostic forward runs (the prefill == forward
   // bitwise gate), not an m=1 GEMV.
   mixer_->mix(r_, h_, T, stream_);
-  gemm_.matmul(h_, globals_.lm_head, logits_, T, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
-               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+  lm_head_logits(h_, T, stream_);
   // The draft block's input: the last rows' hyper states into the slots'
   // windows by position (the last window rows of a prefill chunk, every
   // decode row — distinct slots within one launch).
@@ -959,8 +1022,7 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   // ---- head: the draft distribution over the last head_rows rows --------
   const uint16_t* head_in = mtp_r_ + static_cast<size_t>(T - head_rows) * W;
   mtp_mixer_->mix(head_in, h_, head_rows, stream_);
-  gemm_.matmul(h_, globals_.lm_head, logits_, head_rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
-               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+  lm_head_logits(h_, head_rows, stream_);
   if (decode_row) prefetch_.join(stream_);  // every forked prefetch back on the main stream
   if (decode_row && (!capture || decode_tail_mirrors_) && head_rows <= max_decode_rows_)
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_,

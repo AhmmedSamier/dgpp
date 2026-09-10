@@ -158,6 +158,9 @@ class QwenModel : public SessionModel<QwenModel> {
   static constexpr int kPrefillChunkTokens = 2048;
 
   void build_layer_objects(const QwenLayerResident& r);
+  void lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream);
+  static size_t dense_bridge_bytes(const QwenTextConfig& cfg, const QwenLocalGeometry& geo);
+  size_t dense_bridge_bytes_ = 0;
   static QwenMoeWeights moe_view(const QwenMoeResident& m);
   float* gdn_rec(int req, int ordinal) const;
   uint16_t* gdn_conv(int req, int ordinal) const;
@@ -226,6 +229,7 @@ class QwenModel : public SessionModel<QwenModel> {
   void prefetch_attention_side(int layer);
   void prefetch_head(const QwenGrResident& mixer);
   void prefetch_add(const char* what, const void* p, size_t bytes);
+  void prefetch_fp8(const char* what, const GlmQuantMatrix& q);
   void prefetch_ple_key_side(const QwenLayerResident& r);
   void prefetch_ple_value_side(const QwenLayerResident& r);
 

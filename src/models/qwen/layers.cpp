@@ -14,6 +14,8 @@
 #include "kernels/kda.hpp"
 #include "kernels/qsa.hpp"
 #include "kernels/qwen_gr.hpp"
+#include "kernels/fp8_dequant.hpp"
+#include "kernels/scale_gemm.hpp"
 #include "kernels/qwen_norm.hpp"
 #include "kernels/qwen_ple.hpp"
 
@@ -32,6 +34,36 @@ void gemm_bf16(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_stri
                cudaStream_t stream) {
   g.gemm->matmul(act, w, out, m, n, k, DType::BF16, out_type, static_cast<size_t>(act_stride),
                  g.ws, g.ws_bytes, stream);
+}
+
+// A dense projection in the checkpoint's BF16 (the GEMM seam) or, under
+// engine.dense_weights = "fp8", the block-FP8 form through the scale GEMM
+// (its chunked fp8 GEMV at decode rows, the tile kernel above them —
+// 2026-09-10). One of w / w8.payload is set.
+void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_stride,
+                const uint16_t* w, const GlmQuantMatrix& w8, void* out, GemmOut out_type, int m,
+                int n, int k, cudaStream_t stream) {
+  if (w8.payload) {
+    if (w8.rows != n || w8.cols != k)
+      throw std::invalid_argument("qwen dense fp8: the matrix's shape disagrees with the product");
+    // Prefill-shaped (above the scale GEMM's GEMV lowering): through the
+    // BF16 seam on the dequantized matrix when the bridge holds it.
+    const size_t bf16_bytes = static_cast<size_t>(n) * static_cast<size_t>(k) * 2;
+    if (m > 128 && g.dequant && bf16_bytes <= g.dequant_bytes) {
+      launch_fp8_dequant_blocks(w8.payload, w8.scales, g.dequant, n, k, stream);
+      gemm_bf16(g, act, act_stride, g.dequant, out, out_type, m, n, k, stream);
+      return;
+    }
+    if (out_type == GemmOut::F32)
+      launch_scale_gemm_f32(act, static_cast<size_t>(act_stride), w8.payload, w8.scales,
+                            static_cast<float*>(out), m, n, k, stream, static_cast<size_t>(n));
+    else
+      launch_scale_gemm_bf16(act, static_cast<size_t>(act_stride), w8.payload, w8.scales,
+                             static_cast<uint16_t*>(out), m, n, k, stream, static_cast<size_t>(n));
+    return;
+  }
+  if (!w) throw std::invalid_argument("qwen dense: null weight");
+  gemm_bf16(g, act, act_stride, w, out, out_type, m, n, k, stream);
 }
 
 }  // namespace
@@ -97,9 +129,15 @@ QwenGrSite::~QwenGrSite() {
 void QwenGrSite::mix(const uint16_t* r, uint16_t* x, int tokens, cudaStream_t stream) {
   if (tokens <= 0) return;
   if (tokens > max_tokens_) throw std::invalid_argument("QwenGrSite: tokens exceed max_tokens");
-  if (!w_.hc_norm || !w_.down || !w_.up) throw std::invalid_argument("QwenGrSite: null weights");
+  // Either form of the two projections (the checkpoint's BF16, or block FP8).
+  if (!w_.hc_norm || !(w_.down || w_.down_fp8.payload) || !(w_.up || w_.up_fp8.payload))
+    throw std::invalid_argument("QwenGrSite: null weights");
   const int W = hc_ * hidden_;
-  if (tokens <= fused_rows_max_ && fused_mix_) {
+  // The fused decode forms read the BF16 down / up in their own kernels;
+  // the FP8 form takes the norm -> scale-GEMM -> act -> scale-GEMM chain
+  // (an fp8 fused form is a follow-up).
+  const bool dense_fp8 = w_.down_fp8.payload != nullptr;
+  if (tokens <= fused_rows_max_ && fused_mix_ && !dense_fp8) {
     // The scalar decode row: the norm and the activation folded into the
     // two GEMVs' staging (kernels/qwen_gr, bitwise the four-launch chain).
     // One row only: every down block recomputes the row's group norms in
@@ -115,7 +153,7 @@ void QwenGrSite::mix(const uint16_t* r, uint16_t* x, int tokens, cudaStream_t st
     qwen_gr_act_up_bf16(t_, lowrank_, hc_, w_.up, logits_, hidden_, tokens, stream);
   } else {
     qwen_group_rmsnorm_bf16(r, w_.hc_norm, rn_, tokens, hc_, hidden_, eps_, stream);
-    if (tokens <= 8 && inject_fused() && fused_mix_ && !gate_side_only_) {
+    if (tokens <= 8 && inject_fused() && fused_mix_ && !gate_side_only_ && !dense_fp8) {
       // The batched decode rows (MTP, the row batches): the down GEMV with
       // the inject rows appended — no side stream (kernels/qwen_gr).
       qwen_gr_down_inject_bf16(rn_, w_.down, t_, lowrank_, w_.inject, gates_, hc_, hidden_,
@@ -123,10 +161,10 @@ void QwenGrSite::mix(const uint16_t* r, uint16_t* x, int tokens, cudaStream_t st
       gates_ready_ = true;
     } else {
       fork_gate_dots(stream, tokens);
-      gemm_bf16(g_, rn_, W, w_.down, t_, GemmOut::BF16, tokens, lowrank_, W, stream);
+      gemm_dense(g_, rn_, W, w_.down, w_.down_fp8, t_, GemmOut::BF16, tokens, lowrank_, W, stream);
     }
     qwen_gr_gate_act_bf16(t_, tokens, lowrank_, hc_, stream);
-    gemm_bf16(g_, t_, lowrank_, w_.up, logits_, GemmOut::BF16, tokens, W, lowrank_, stream);
+    gemm_dense(g_, t_, lowrank_, w_.up, w_.up_fp8, logits_, GemmOut::BF16, tokens, W, lowrank_, stream);
   }
   qwen_gr_mix_finish_bf16(logits_, rn_, x, tokens, hc_, hidden_, stream);
 }
@@ -216,6 +254,22 @@ void QwenGdnLayer::in_projections(const uint16_t* x, int tokens, cudaStream_t st
   const int H = hidden_;
   const int C = static_cast<int>(conv_channels_);
   const int LV = lv_ * v_dim_;
+  if (w_.in_proj_qkv_fp8.payload) {
+    // The FP8 form: qkv and z through the scale GEMM, a and b (BF16, [lv,
+    // H]) as one dual GEMV at decode rows.
+    gemm_dense(g_, x, H, nullptr, w_.in_proj_qkv_fp8, qkv_, GemmOut::BF16, tokens, C, H, stream);
+    gemm_dense(g_, x, H, nullptr, w_.in_proj_z_fp8, z_, GemmOut::BF16, tokens, LV, H, stream);
+    if (tokens <= 4 && bf16_gemv_accepts(w_.in_proj_a, tokens, H) && bf16_gemv_accepts(w_.in_proj_b, tokens, H)) {
+      Bf16GemvProblem p[2];
+      p[0].act = x; p[0].act_row_stride = static_cast<size_t>(H); p[0].weight = w_.in_proj_a; p[0].out = a_; p[0].n = lv_;
+      p[1].act = x; p[1].act_row_stride = static_cast<size_t>(H); p[1].weight = w_.in_proj_b; p[1].out = b_; p[1].n = lv_;
+      launch_bf16_gemv_multi(p, 2, /*out_f32=*/false, tokens, H, stream);
+    } else {
+      gemm_bf16(g_, x, H, w_.in_proj_a, a_, GemmOut::BF16, tokens, lv_, H, stream);
+      gemm_bf16(g_, x, H, w_.in_proj_b, b_, GemmOut::BF16, tokens, lv_, H, stream);
+    }
+    return;
+  }
   if (tokens <= 4 && bf16_gemv_accepts(w_.in_proj_qkv, tokens, H) &&
       bf16_gemv_accepts(w_.in_proj_z, tokens, H) && bf16_gemv_accepts(w_.in_proj_a, tokens, H) &&
       bf16_gemv_accepts(w_.in_proj_b, tokens, H)) {
@@ -238,8 +292,9 @@ void QwenGdnLayer::enqueue(const uint16_t* x, float* recurrent_state, uint16_t* 
                            const KdaStateSnapshots& rec_snap, const KdaConvSnapshots& conv_snap) {
   if (tokens <= 0) return;
   if (tokens > max_tokens_) throw std::invalid_argument("QwenGdnLayer: tokens exceed max_tokens");
-  if (!w_.in_proj_qkv || !w_.conv || !w_.in_proj_z || !w_.in_proj_a || !w_.in_proj_b || !w_.a_log ||
-      !w_.dt_bias || !w_.norm || !w_.out_proj)
+  if (!(w_.in_proj_qkv || w_.in_proj_qkv_fp8.payload) || !w_.conv || !(w_.in_proj_z || w_.in_proj_z_fp8.payload) ||
+      !w_.in_proj_a || !w_.in_proj_b || !w_.a_log || !w_.dt_bias || !w_.norm ||
+      !(w_.out_proj || w_.out_proj_fp8.payload))
     throw std::invalid_argument("QwenGdnLayer: null weights");
   const int H = hidden_;
   const int C = static_cast<int>(conv_channels_);
@@ -251,7 +306,7 @@ void QwenGdnLayer::enqueue(const uint16_t* x, float* recurrent_state, uint16_t* 
                     lv_, lv_ / lk_, k_dim_, v_dim_, scale_, stream, rec_snap);
   gdn_gated_rmsnorm_bf16(core_, z_, w_.norm, normed_, static_cast<int64_t>(tokens) * lv_, v_dim_,
                          eps_, stream);
-  gemm_bf16(g_, normed_, LV, w_.out_proj, out, GemmOut::BF16, tokens, H, LV, stream);
+  gemm_dense(g_, normed_, LV, w_.out_proj, w_.out_proj_fp8, out, GemmOut::BF16, tokens, H, LV, stream);
 }
 
 void QwenGdnLayer::enqueue_rows(const uint16_t* x, float* rec_states, int64_t rec_stride,
@@ -263,8 +318,9 @@ void QwenGdnLayer::enqueue_rows(const uint16_t* x, float* rec_states, int64_t re
   if (rows > max_tokens_) throw std::invalid_argument("QwenGdnLayer: rows exceed max_tokens");
   if (!requests.request_ids || !requests.positions || !requests.spans || requests.num_requests <= 0)
     throw std::invalid_argument("QwenGdnLayer: incomplete row map");
-  if (!w_.in_proj_qkv || !w_.conv || !w_.in_proj_z || !w_.in_proj_a || !w_.in_proj_b || !w_.a_log ||
-      !w_.dt_bias || !w_.norm || !w_.out_proj)
+  if (!(w_.in_proj_qkv || w_.in_proj_qkv_fp8.payload) || !w_.conv || !(w_.in_proj_z || w_.in_proj_z_fp8.payload) ||
+      !w_.in_proj_a || !w_.in_proj_b || !w_.a_log || !w_.dt_bias || !w_.norm ||
+      !(w_.out_proj || w_.out_proj_fp8.payload))
     throw std::invalid_argument("QwenGdnLayer: null weights");
   const int H = hidden_;
   const int C = static_cast<int>(conv_channels_);
@@ -277,7 +333,7 @@ void QwenGdnLayer::enqueue_rows(const uint16_t* x, float* rec_states, int64_t re
                             rec_snap);
   gdn_gated_rmsnorm_bf16(core_, z_, w_.norm, normed_, static_cast<int64_t>(rows) * lv_, v_dim_,
                          eps_, stream);
-  gemm_bf16(g_, normed_, LV, w_.out_proj, out, GemmOut::BF16, rows, H, LV, stream);
+  gemm_dense(g_, normed_, LV, w_.out_proj, w_.out_proj_fp8, out, GemmOut::BF16, rows, H, LV, stream);
 }
 
 size_t QwenGdnLayer::scratch_bytes(const QwenTextConfig& cfg, int local_key_heads, int local_value_heads,
@@ -375,8 +431,9 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
     if ((rows.pos0 + tokens + kpool_ - 1) / kpool_ > max_pools_)
       throw std::invalid_argument("QwenQsaLayer: visible pools exceed the scoring workspace");
   }
-  if (!w_.q_proj || !w_.k_proj || !w_.v_proj || !w_.o_proj || !w_.q_norm || !w_.k_norm ||
-      !w_.index_qk_proj || !w_.index_q_norm || !w_.index_k_norm)
+  if (!(w_.q_proj || w_.q_proj_fp8.payload) || !(w_.k_proj || w_.k_proj_fp8.payload) ||
+      !(w_.v_proj || w_.v_proj_fp8.payload) || !(w_.o_proj || w_.o_proj_fp8.payload) || !w_.q_norm || !w_.k_norm ||
+      !(w_.index_qk_proj || w_.index_qk_proj_fp8.payload) || !w_.index_q_norm || !w_.index_k_norm)
     throw std::invalid_argument("QwenQsaLayer: null weights");
   const int H = hidden_, D = dim_, Di = idx_dim_, T = tokens;
   const int QW = lh_ * 2 * D, KW = lkv_ * D, IW = (idx_heads_ + 1) * Di;
@@ -384,10 +441,10 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
   const int64_t* d_pos = rows.pos;
 
   // Projections.
-  gemm_bf16(g_, x, H, w_.q_proj, q_, GemmOut::BF16, T, QW, H, stream);
-  gemm_bf16(g_, x, H, w_.k_proj, k_, GemmOut::BF16, T, KW, H, stream);
-  gemm_bf16(g_, x, H, w_.v_proj, v_, GemmOut::BF16, T, KW, H, stream);
-  gemm_bf16(g_, x, H, w_.index_qk_proj, idx_, GemmOut::BF16, T, IW, H, stream);
+  gemm_dense(g_, x, H, w_.q_proj, w_.q_proj_fp8, q_, GemmOut::BF16, T, QW, H, stream);
+  gemm_dense(g_, x, H, w_.k_proj, w_.k_proj_fp8, k_, GemmOut::BF16, T, KW, H, stream);
+  gemm_dense(g_, x, H, w_.v_proj, w_.v_proj_fp8, v_, GemmOut::BF16, T, KW, H, stream);
+  gemm_dense(g_, x, H, w_.index_qk_proj, w_.index_qk_proj_fp8, idx_, GemmOut::BF16, T, IW, H, stream);
   // Norm + RoPE: q (the [q | gate] interleave), k, the indexer q.
   qsa_norm_rope_bf16(q_, QW, 2 * D, w_.q_norm, d_pos, d_inv_freq_, qn_, static_cast<int64_t>(lh_) * D,
                      T, lh_, D, rotary_, eps_, stream);
@@ -424,8 +481,8 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
                    cache.block_tables, cache.blocks_per_request, scale_, m_ws_, l_ws_, c_ws_, stream);
   dsa_attn_combine(m_ws_, l_ws_, c_ws_, T, n_split_, lh_, D, c_out_, stream);
   qsa_gate_out(c_out_, q_ + D, QW, 2 * D, o_, T, lh_, D, stream);
-  gemm_bf16(g_, o_, static_cast<int64_t>(lh_) * D, w_.o_proj, out, GemmOut::BF16, T, H, lh_ * D,
-            stream);
+  gemm_dense(g_, o_, static_cast<int64_t>(lh_) * D, w_.o_proj, w_.o_proj_fp8, out, GemmOut::BF16, T, H,
+             lh_ * D, stream);
 }
 
 size_t QwenQsaLayer::scratch_bytes(const QwenTextConfig& cfg, int local_heads, int local_kv_heads,
@@ -625,9 +682,9 @@ void QwenPleLayer::embed(const int64_t* tokens, int rows, const int32_t* req_ids
 
 void QwenPleLayer::project_key(uint16_t* key_dst, int rows, cudaStream_t stream) {
   if (rows <= 0) return;
-  if (!w_.key_proj) throw std::invalid_argument("QwenPleLayer: null weights");
+  if (!w_.key_proj && !w_.key_proj_fp8.payload) throw std::invalid_argument("QwenPleLayer: null weights");
   const int E = w_.hash_heads * head_dim_, W = hc_ * hidden_;
-  gemm_bf16(g_, e_, E, w_.key_proj, key_dst ? key_dst : key_, GemmOut::BF16, rows, W, E, stream);
+  gemm_dense(g_, e_, E, w_.key_proj, w_.key_proj_fp8, key_dst ? key_dst : key_, GemmOut::BF16, rows, W, E, stream);
 }
 
 void QwenPleLayer::norm_key(const uint16_t* key, int rows, cudaStream_t stream) {
@@ -638,9 +695,9 @@ void QwenPleLayer::norm_key(const uint16_t* key, int rows, cudaStream_t stream) 
 
 void QwenPleLayer::project_value(uint16_t* val_dst, int rows, cudaStream_t stream) {
   if (rows <= 0) return;
-  if (!w_.value_proj) throw std::invalid_argument("QwenPleLayer: null weights");
+  if (!w_.value_proj && !w_.value_proj_fp8.payload) throw std::invalid_argument("QwenPleLayer: null weights");
   const int E = w_.hash_heads * head_dim_;
-  gemm_bf16(g_, e_, E, w_.value_proj, val_dst ? val_dst : val_, GemmOut::BF16, rows, hidden_, E, stream);
+  gemm_dense(g_, e_, E, w_.value_proj, w_.value_proj_fp8, val_dst ? val_dst : val_, GemmOut::BF16, rows, hidden_, E, stream);
 }
 
 void QwenPleLayer::finish(uint16_t* r, const uint16_t* value, uint16_t* states, int64_t state_stride,

@@ -41,6 +41,7 @@ struct QwenMoeWeights {
   const uint16_t* shared_gate_proj = nullptr;  // bf16 [S, hidden]
   const uint16_t* shared_up_proj = nullptr;    // bf16 [S, hidden]
   const uint16_t* shared_down_proj = nullptr;  // bf16 [hidden, S]
+  const GlmQuantMatrix* shared_fp8 = nullptr;  // dense_weights fp8: gate, up, down (the bf16 three null)
   int64_t shared_inter = 0;                    // S: this rank's shared slice
   const GlmQuantMatrix* experts = nullptr;     // [n_experts * 3] gate, up, down (FP8 block form)
   const GlmFp4Matrix* experts_fp4 = nullptr;   // the NVFP4 form instead (one of the two is set)
@@ -125,6 +126,7 @@ class QwenMoeLayer {
   float* d_sw_ = nullptr;       // [M] sigma(x . g), a bf16 value
   int32_t* d_rows_ = nullptr;   // [M] identity (the accumulation's row map)
   void* gemm_ws_ = nullptr;
+  uint16_t* d_shared_bridge_ = nullptr;  // dense_weights fp8: a shared matrix dequantized for prefill
   size_t gemm_ws_bytes_ = 0;
 };
 

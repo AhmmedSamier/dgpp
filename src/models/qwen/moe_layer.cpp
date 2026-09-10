@@ -1,5 +1,8 @@
 #include "models/qwen/moe_layer.hpp"
 
+#include "kernels/fp8_dequant.hpp"
+#include "kernels/scale_gemm.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -67,9 +70,11 @@ QwenMoeLayer::QwenMoeLayer(const QwenMoeWeights& weights, const GlmMoeConfig& cf
                              gemm_.query_workspace_bytes(max_tokens_, Hn, Sn, DType::BF16),
                              static_cast<size_t>(1) << 20});
   DGPP_CUDA_OK(cudaMalloc(&gemm_ws_, gemm_ws_bytes_));
+  if (w_.shared_fp8) DGPP_CUDA_OK(cudaMalloc(&d_shared_bridge_, S * H * 2));
 }
 
 QwenMoeLayer::~QwenMoeLayer() {
+  if (d_shared_bridge_) cudaFree(d_shared_bridge_);
   cudaFree(d_acc_);
   cudaFree(d_sgate_);
   cudaFree(d_sup_);
@@ -81,8 +86,9 @@ QwenMoeLayer::~QwenMoeLayer() {
 }
 
 void QwenMoeLayer::check_weights() const {
-  if (!w_.router || !w_.shared_gate || !w_.shared_gate_proj || !w_.shared_up_proj ||
-      !w_.shared_down_proj || (!w_.experts && !w_.experts_fp4))
+  const bool shared_ok = w_.shared_fp8 ? (w_.shared_fp8[0].payload && w_.shared_fp8[1].payload && w_.shared_fp8[2].payload)
+                                       : (w_.shared_gate_proj && w_.shared_up_proj && w_.shared_down_proj);
+  if (!w_.router || !w_.shared_gate || !shared_ok || (!w_.experts && !w_.experts_fp4))
     throw std::invalid_argument("QwenMoeLayer: null weight pointer");
   if (w_.experts && w_.experts_fp4)
     throw std::invalid_argument("QwenMoeLayer: both fp8 and nvfp4 experts bound");
@@ -118,6 +124,12 @@ void QwenMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out, int tok
   if (tokens <= 0) return;
   if (!hidden || !out) throw std::invalid_argument("QwenMoeLayer: null pointer");
   routed_.enqueue_decode_f32(hidden, d_acc_, tokens, nullptr, stream, table_slot);
+  // The FP8 shared expert (engine.dense_weights) takes the chain through
+  // the scale GEMM (an fp8 fused tail is a follow-up).
+  if (w_.shared_fp8) {
+    shared_tail(hidden, out, tokens, stream);
+    return;
+  }
   // The fused two-launch tail (bitwise the chain; qwen_moe_test pins it).
   const int H = cfg_.hidden;
   const int S = static_cast<int>(w_.shared_inter);
@@ -147,15 +159,41 @@ void QwenMoeLayer::shared_tail(const uint16_t* hidden, uint16_t* out, int tokens
   const int S = static_cast<int>(w_.shared_inter);
   // 2. The BF16 shared expert: gate/up (bf16 out), silu * up with the
   //    chain's two roundings and no clamps, the down projection unrounded.
-  gemm_.matmul(hidden, w_.shared_gate_proj, d_sgate_, tokens, S, H, DType::BF16,
-               GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
-  gemm_.matmul(hidden, w_.shared_up_proj, d_sup_, tokens, S, H, DType::BF16,
-               GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
+  if (w_.shared_fp8 && tokens > 128) {
+    // Prefill-shaped: each FP8 matrix dequantized into the bridge (the
+    // GEMV core's values) and run through the BF16 seam.
+    launch_fp8_dequant_blocks(w_.shared_fp8[0].payload, w_.shared_fp8[0].scales, d_shared_bridge_, S, H, stream);
+    gemm_.matmul(hidden, d_shared_bridge_, d_sgate_, tokens, S, H, DType::BF16,
+                 GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
+    launch_fp8_dequant_blocks(w_.shared_fp8[1].payload, w_.shared_fp8[1].scales, d_shared_bridge_, S, H, stream);
+    gemm_.matmul(hidden, d_shared_bridge_, d_sup_, tokens, S, H, DType::BF16,
+                 GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
+  } else if (w_.shared_fp8) {
+    // The FP8 form (engine.dense_weights): the scale GEMM's chunked GEMV at
+    // decode rows; the same roundings.
+    launch_scale_gemm_bf16(hidden, static_cast<size_t>(H), w_.shared_fp8[0].payload, w_.shared_fp8[0].scales,
+                           d_sgate_, tokens, S, H, stream, static_cast<size_t>(S));
+    launch_scale_gemm_bf16(hidden, static_cast<size_t>(H), w_.shared_fp8[1].payload, w_.shared_fp8[1].scales,
+                           d_sup_, tokens, S, H, stream, static_cast<size_t>(S));
+  } else {
+    gemm_.matmul(hidden, w_.shared_gate_proj, d_sgate_, tokens, S, H, DType::BF16,
+                 GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
+    gemm_.matmul(hidden, w_.shared_up_proj, d_sup_, tokens, S, H, DType::BF16,
+                 GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);
+  }
   launch_moe_swiglu_clamp(d_sgate_, d_sup_, d_sact_,
                           static_cast<int64_t>(tokens) * S,
                           std::numeric_limits<float>::infinity(), stream);
-  gemm_.matmul(d_sact_, w_.shared_down_proj, d_sdown_, tokens, H, S, DType::BF16,
-               GemmOut::F32, static_cast<size_t>(S), gemm_ws_, gemm_ws_bytes_, stream);
+  if (w_.shared_fp8 && tokens > 128) {
+    launch_fp8_dequant_blocks(w_.shared_fp8[2].payload, w_.shared_fp8[2].scales, d_shared_bridge_, H, S, stream);
+    gemm_.matmul(d_sact_, d_shared_bridge_, d_sdown_, tokens, H, S, DType::BF16,
+                 GemmOut::F32, static_cast<size_t>(S), gemm_ws_, gemm_ws_bytes_, stream);
+  } else if (w_.shared_fp8)
+    launch_scale_gemm_f32(d_sact_, static_cast<size_t>(S), w_.shared_fp8[2].payload, w_.shared_fp8[2].scales,
+                          d_sdown_, tokens, H, S, stream, static_cast<size_t>(H));
+  else
+    gemm_.matmul(d_sact_, w_.shared_down_proj, d_sdown_, tokens, H, S, DType::BF16,
+                 GemmOut::F32, static_cast<size_t>(S), gemm_ws_, gemm_ws_bytes_, stream);
 
   // 3. Its weight, sigma(x . g) — bf16 as the reference's — then the
   //    chain's last fma and its one rounding.

@@ -8,6 +8,7 @@
 // and the image round trip; and a tampered hash buffer is refused.
 #include <cstdint>
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <numeric>
@@ -288,6 +289,98 @@ DGPP_TEST(qwen_loader_globals_and_ngram_table_slices) {
 // copying the rows; every row read through the mapping is the shard's,
 // the gather lays a rank's heads out as the device gather would, the
 // plan's table bytes are zero, and the mode is off unless asked for.
+// The dense stack encoded to block FP8 at load (2026-09-10,
+// engine.dense_weights = "fp8"): off by default; on, a rows slice, a
+// columns slice and the merged GDN qkv carry the recipe's codes — scale
+// amax / 448 per 128 x 128 block, round-to-nearest-even e4m3 of w / scale
+// — bit for bit against a scalar reference, dequantize back within the
+// format's precision, and the layer's resident bytes shrink.
+namespace {
+void reference_fp8(const std::vector<uint16_t>& w, int64_t rows, int64_t cols, std::vector<uint8_t>* codes,
+                   std::vector<float>* scales) {
+  const int64_t sr = (rows + 127) / 128, sc = (cols + 127) / 128;
+  codes->assign(static_cast<size_t>(rows) * cols, 0);
+  scales->assign(static_cast<size_t>(sr) * sc, 0.f);
+  for (int64_t br = 0; br < sr; ++br)
+    for (int64_t bc = 0; bc < sc; ++bc) {
+      float amax = 0.f;
+      for (int64_t r = br * 128; r < std::min(rows, br * 128 + 128); ++r)
+        for (int64_t c = bc * 128; c < std::min(cols, bc * 128 + 128); ++c)
+          amax = std::max(amax, std::fabs(dgpp::bf16_bits_to_float(w[static_cast<size_t>(r) * cols + c])));
+      const float s = amax > 0.f ? amax / 448.f : 1.f;
+      (*scales)[static_cast<size_t>(br) * sc + bc] = s;
+      for (int64_t r = br * 128; r < std::min(rows, br * 128 + 128); ++r)
+        for (int64_t c = bc * 128; c < std::min(cols, bc * 128 + 128); ++c)
+          (*codes)[static_cast<size_t>(r) * cols + c] =
+              dgpp::float_to_fp8_e4m3_bits(dgpp::bf16_bits_to_float(w[static_cast<size_t>(r) * cols + c]) / s);
+    }
+}
+void expect_fp8_matches(const dgpp::GlmQuantMatrix& q, const std::vector<uint16_t>& w, const std::string& what) {
+  std::vector<uint8_t> codes;
+  std::vector<float> scales;
+  reference_fp8(w, q.rows, q.cols, &codes, &scales);
+  const std::vector<uint8_t> got = device_bytes(q.payload, codes.size());
+  require(got == codes, what + ": the codes differ from the reference recipe");
+  const std::vector<uint8_t> sb = device_bytes(q.scales, scales.size() * 4);
+  std::vector<float> got_s(scales.size());
+  std::memcpy(got_s.data(), sb.data(), sb.size());
+  require(got_s == scales, what + ": the scales differ from the reference recipe");
+  // Dequantized back: within the e4m3 grid's half ulp (2^-4 relative;
+  // the subnormal zone's absolute 2^-10 of the scale).
+  const int64_t sc = (q.cols + 127) / 128;
+  for (int64_t r = 0; r < q.rows; ++r)
+    for (int64_t c = 0; c < q.cols; ++c) {
+      const float s = scales[static_cast<size_t>(r / 128) * sc + c / 128];
+      const float x = dgpp::bf16_bits_to_float(w[static_cast<size_t>(r) * q.cols + c]);
+      const float dq = dgpp::fp8_e4m3_bits_to_float(got[static_cast<size_t>(r) * q.cols + c]) * s;
+      const float tol = std::fabs(x) / 16.f + s / 1024.f + 1e-30f;
+      require(std::fabs(dq - x) <= tol, what + ": dequantized value outside the format's precision at (" +
+                                             std::to_string(r) + ", " + std::to_string(c) + ")");
+    }
+}
+}  // namespace
+
+DGPP_TEST(qwen_loader_dense_fp8_at_load_is_the_reference_recipe) {
+  const Fixture fx = write_fixture();
+  require(!QwenLayerStream::dense_weights_fp8(), "the dense stack is the checkpoint's by default");
+  const std::string p = dgpp::qwen_layer_prefix(fx.cfg, 0);
+  const size_t bf16_bytes = QwenLayerStream::layer_bytes(fx.cfg, 0, 0, 1);
+  QwenLayerStream::set_dense_weights_fp8(true);
+  struct Reset { ~Reset() { QwenLayerStream::set_dense_weights_fp8(false); } } reset;
+  require(QwenLayerStream::layer_bytes(fx.cfg, 0, 0, 1) < bf16_bytes, "the FP8 layer is smaller in the plan");
+  QwenLayerStream s(fx.cfg, fx.dir, 0, 1, dgpp::QwenResidency::Streaming, dgpp::QwenHeadSharding::Full);
+  const auto& l = s.load_layer(0);
+  require(l.kind == dgpp::QwenLayerKind::Gdn, "layer 0 of the fixture is a GDN layer");
+  require(l.gdn.in_proj_z == nullptr && l.gdn.in_proj_z_fp8.payload != nullptr, "z is FP8 only");
+  require(l.gdn.in_proj_a != nullptr, "a stays BF16");
+  // A rows slice (the whole matrix at world 1).
+  {
+    const auto w = fx.bytes(p + "linear_attn.in_proj_z.weight");
+    std::vector<uint16_t> h(w.size() / 2);
+    std::memcpy(h.data(), w.data(), w.size());
+    expect_fp8_matches(l.gdn.in_proj_z_fp8, h, "in_proj_z");
+  }
+  // A columns slice (the whole matrix at world 1) and the merged qkv.
+  {
+    const auto w = fx.bytes(p + "linear_attn.out_proj.weight");
+    std::vector<uint16_t> h(w.size() / 2);
+    std::memcpy(h.data(), w.data(), w.size());
+    expect_fp8_matches(l.gdn.out_proj_fp8, h, "out_proj");
+  }
+  {
+    const auto w = fx.bytes(p + "linear_attn.in_proj_qkv.weight");
+    std::vector<uint16_t> h(w.size() / 2);
+    std::memcpy(h.data(), w.data(), w.size());
+    expect_fp8_matches(l.gdn.in_proj_qkv_fp8, h, "in_proj_qkv");
+  }
+  require(l.attn_gr.down == nullptr && l.attn_gr.down_fp8.payload != nullptr, "the GR site is FP8");
+  require(l.moe.shared[0] == nullptr && l.moe.shared_fp8[0].payload != nullptr, "the shared expert is FP8");
+  const auto& g = s.load_globals();
+  require(g.lm_head == nullptr && g.lm_head_fp8.payload != nullptr && g.lm_head_fp8.rows == g.lm_vocab_count,
+          "lm_head is FP8");
+  require(g.bytes == QwenLayerStream::globals_bytes(fx.cfg, 0, 1, dgpp::QwenHeadSharding::Full), "globals formula (fp8)");
+}
+
 DGPP_TEST(qwen_loader_mmap_ngram_table_reads_the_shards_rows) {
   const Fixture fx = write_fixture();
   const dgpp::QwenNgramGeometry ng = fx.cfg.ngram_geometry();

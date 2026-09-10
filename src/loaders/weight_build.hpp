@@ -30,6 +30,7 @@
 
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
+#include "loaders/fp8_quant.hpp"
 #include "loaders/safetensors.hpp"
 #include "models/quant_matrix.hpp"
 
@@ -352,6 +353,56 @@ struct WeightBuilder {
     }
     note_read(e, static_cast<size_t>(rows) * static_cast<size_t>(cols) * 2);
     return dst;
+  }
+
+  // ---- BF16 matrices encoded to block FP8 at load (2026-09-10) -----------
+  // The checkpoint's BF16 rows / columns slice, encoded on the host into the
+  // resident form the fp8 GEMV core and the scale-GEMM tile read
+  // (loaders/fp8_quant.hpp). The scale grid is anchored at the slice's
+  // origin: a slice that starts on a 128 multiple carries the whole
+  // matrix's blocks.
+  GlmQuantMatrix encode_fp8(const uint16_t* host_src, size_t src_stride, int64_t rows, int64_t cols) {
+    const int64_t sr = fp8_quant::scale_rows(rows), sc = fp8_quant::scale_cols(cols);
+    GlmQuantMatrix q;
+    q.rows = rows;
+    q.cols = cols;
+    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(rows) * static_cast<size_t>(cols)));
+    q.scales = static_cast<const float*>(bump.alloc(static_cast<size_t>(sr) * static_cast<size_t>(sc) * 4));
+    if (copy)
+      fp8_quant::encode_block128(host_src, src_stride, rows, cols, bump.host(const_cast<uint8_t*>(q.payload)),
+                                 bump.host(const_cast<float*>(q.scales)));
+    return q;
+  }
+  GlmQuantMatrix load_bf16_rows_fp8(const std::string& name, int64_t row_start, int64_t rows) {
+    const Expected& e = expected(name);
+    check_range(name, row_start, rows, e.shape[0]);
+    const int64_t width = static_cast<int64_t>(e.numel()) / e.shape[0];
+    const uint16_t* src = nullptr;
+    if (copy) {
+      const TensorInfo& t = source(name);
+      src = static_cast<const uint16_t*>(t.data) + static_cast<size_t>(row_start) * width;
+    }
+    GlmQuantMatrix q = encode_fp8(src, static_cast<size_t>(width), rows, width);
+    if (copy) consumed(source(name));
+    note_read(e, static_cast<size_t>(rows) * width * 2);
+    return q;
+  }
+  GlmQuantMatrix load_bf16_cols_fp8(const std::string& name, int64_t col_start, int64_t cols) {
+    const Expected& e = expected(name);
+    if (e.shape.size() != 2) fail("'" + name + "' is not a matrix");
+    const int64_t rows = e.shape[0], full = e.shape[1];
+    check_range(name, col_start, cols, full);
+    const uint16_t* src = nullptr;
+    if (copy) src = static_cast<const uint16_t*>(source(name).data) + col_start;
+    GlmQuantMatrix q = encode_fp8(src, static_cast<size_t>(full), rows, cols);
+    if (copy) consumed(source(name));
+    note_read(e, static_cast<size_t>(rows) * static_cast<size_t>(cols) * 2);
+    return q;
+  }
+  GlmQuantMatrix load_bf16_fp8(const std::string& name) {
+    const Expected& e = expected(name);
+    if (e.shape.size() != 2) fail("'" + name + "' is not a matrix");
+    return load_bf16_rows_fp8(name, 0, e.shape[0]);
   }
 
   float* load_f32_range(const std::string& name, int64_t start, int64_t count) {

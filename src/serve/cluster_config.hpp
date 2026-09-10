@@ -53,6 +53,11 @@ struct ClusterConfig {
     // on the NVMe behind the page cache and gathers each step's rows on
     // the host — the single-Spark deployment.
     std::string ngram_table = "resident";
+    // The Qwen dense stack's form (2026-09-10): "checkpoint" (the default:
+    // the BF16 the checkpoint ships) or "fp8" (every dense projection
+    // encoded to block FP8 at load — the same recipe as the FP8 releases;
+    // docs/qwen38_single_spark.md).
+    std::string dense_weights = "checkpoint";
     int default_max_tokens = 256;
     int queue_limit = 64;
     int max_connections = 64;

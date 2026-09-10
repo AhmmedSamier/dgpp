@@ -153,3 +153,100 @@ So on one Spark: 47 ms/token plain, 31–38 ms/token with MTP (59 ms per
 pass at 1.56–1.88 tokens), against the 4-Spark fabric's 21.4 / 25.7 ms
 (`docs/qwen38_optimization_plan.md`), the same eval, and a 2K prefill in
 2.0 s.
+
+## The dense stack in FP8 at load (`engine.dense_weights`, 2026-09-10)
+
+Where the bytes go per decode token on this checkpoint (world 1, T=1):
+
+| class | form | GiB per token | share |
+|---|---|---|---|
+| routed experts (10 of 512 per layer) | NVFP4 | 1.24 | 13 % |
+| GDN layers (36) | BF16 | 3.89 | 42 % |
+| QSA layers (12) | BF16 | 1.25 | 13 % |
+| GR sites | BF16 | 1.23 | 13 % |
+| lm_head | BF16 | 1.18 | 13 % |
+| shared experts, routers | BF16 | 0.57 | 6 % |
+| total | | 9.36 | 43.0 ms floor at 233.6 GB/s (47 measured) |
+
+NVIDIA's checkpoint quantizes the experts only; 8.1 of the 9.4 GiB a
+token reads are the BF16 dense stack. The Strix Halo recipe in the
+thread the comparison came from (unsloth UD-IQ4_XS + a Q8_0 MTP sidecar,
+llama.cpp on gfx1151: ~21 t/s plain, 38 t/s with MTP at 85–100 %
+acceptance) compresses that stack too, at well under half of that
+machine's bandwidth; our plain 21.4 t/s equals its plain number with 2.5x
+the bytes at 91 % of line rate. Closing the MTP gap (its 26 ms/token
+against our 31–38) is a bytes-per-token problem.
+
+`engine.dense_weights`: `"checkpoint"` (the default; the BF16 the
+checkpoint ships) or `"fp8"`. Under fp8 the loader encodes every dense
+projection — GDN qkv/z/out, QSA q/k/v/o and the indexer projection, the GR
+sites (the layers' and the mixers'), the shared experts, the PLE key/value
+projections, lm_head — to block FP8 as it loads (`loaders/fp8_quant.hpp`):
+
+    scale_b = amax(block) / 448            per 128 x 128 block
+    code    = e4m3( w / scale_b )          round to nearest even, saturating
+
+the fp8 GEMV core's and the scale-GEMM tile's own format (E4M3 codes,
+fp32 scales), which is also the FP8 releases' recipe (GLM-5.3-Flash's,
+this model's MTP experts). Block FP8 has no free parameter — the block's
+maximum fixes its scale, nothing is clipped, nothing is calibrated — so
+the same values encoded offline give the same codes; the loader gate
+(`qwen_loader_dense_fp8_at_load_is_the_reference_recipe`) pins the loader's
+bytes to a scalar reference of the recipe and the dequantized values to
+the format's precision (at most one part in sixteen per element). What
+stays as shipped: embeddings, norms, conv kernels, the GDN a/b
+projections, the routers, the MTP fc matrices, the n-gram table.
+Activations stay BF16 (the cores dequantize in registers), so the only
+error is the weights' rounding. Where offline quantization genuinely
+matters is 4 bits — a calibrated NVFP4 of the dense stack would be a quant
+box job and a checkpoint, not a load-time switch.
+
+The dense matrices ride the scale GEMM in both paths (the chunked fp8 GEMV
+at decode rows, the mma tile above them); the GDN's four-projection GEMV
+fusion becomes qkv + z through the scale GEMM and a two-problem BF16 GEMV
+for a/b. The resident image key carries the form (`loader_format`), so a
+BF16 image is never restored into an FP8 world; the encode runs once, on
+the first boot (16 threads over the block rows), and the memory plan
+follows the counting build. Configs: `deploy/cluster_qwen_spark1_fp8{,_t1}.example.json`.
+
+### Measured with the dense stack in FP8 (2026-09-10)
+
+`deploy/cluster_qwen_spark1_fp8.json` (the MTP world above with
+`dense_weights: "fp8"`), the same gates. Boot 24 s from the resident image
+(the first boot encodes the stack and captures the image); plan 79.7 GiB
+(BF16 dense 83.7).
+
+| | BF16 dense | FP8 dense |
+|---|---|---|
+| T=1, ms per pass | 47 | 31 (floor 25.5) |
+| MTP, ms per pass | 59 | 40–41 |
+| MTP greedy, ms/token (prose / code / math / JSON) | 37.7 / 31.4 / 31.9 / 31.4 | 26.4 / 22.8 / 21.2 / 21.0 |
+| MTP greedy, tok/pass (accept p1) | 1.56–1.88 (56–88 %) | 1.54–1.93 (54–94 %) |
+| MTP sampled (serve_bench), ms/token | 36.6 | 24.6–26.0 |
+| prefill, ms/token at 512 / 2K / 8K | 1.50 / 1.03 / 1.08 | 1.85 / 1.15 / 1.17 |
+| 4 in flight (GSM8K), ms/step, tok/s | 119–124, 49–55 | 70.7, 62.9 |
+| eval GSM8K / HumanEval / extract | 59/60, 39/40, 30/30 | 59/60, 38/40, 30/30 |
+| MTP == T=1 greedy transcripts | 4 of 4 | 4 of 4 |
+
+HumanEval sat at 39/40 in the first FP8 run (the fp8 tile kernel for
+prefill) and 38/40 in the final one (the dequantized-bridge prefill); the
+fabric's own runs moved between 38 and 39 on a near tie (the plan doc), so
+this is that tie, not a trend. The greedy transcripts diverge from the
+BF16 stack's after 170–316 characters, in the reasoning — weight rounding
+at the level the 8-layer forward check showed (12 of 15 argmax positions,
+the residual rms within 0.3 %).
+
+Against the Strix Halo thread (~21 t/s plain, 38 t/s with MTP): plain
+32.3 t/s; with MTP 38–48 t/s greedy, 39–41 t/s sampled on prose.
+
+What is left on the table with FP8 dense: T=1 at 31 ms against a 25.5 ms
+floor (82 % of line rate, from 91 % before) — the fused BF16 decode paths
+(the GR site's norm-staged down GEMV, the shared expert's two-launch tail,
+the GDN four-projection GEMV) run as their unfused chains under fp8, and
+the scale GEMM's GEMV core was shaped for the experts' slabs; fp8 fused
+forms and a multi-problem fp8 GEMV would recover a few milliseconds.
+Prefill pays the bridge's per-chunk dequantization (a faster dequant
+kernel, or the dequantized matrix cached across a prompt's chunks, would
+return it to the BF16 stack's 1.03 ms/token at 2K). The next rung, a
+calibrated NVFP4 of the dense stack (~16 ms floor), is a quant-box
+checkpoint, not a load-time switch.

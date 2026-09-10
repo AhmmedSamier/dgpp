@@ -149,6 +149,7 @@ struct WorldSettings {
   int64_t kv_capacity = 0;
   std::string kv_dtype = "bf16";  // the latent cache's format (2026-09-06)
   std::string ngram_table = "resident";  // the Qwen n-gram table's residency (2026-09-10)
+  std::string dense_weights = "checkpoint";  // the Qwen dense stack's form (2026-09-10)
   int default_max_tokens = 0;
   int queue_limit = 0;
   bool no_eos = false;
