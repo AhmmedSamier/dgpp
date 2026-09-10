@@ -149,8 +149,8 @@ GlmQuantMatrixHost glm_moe_host_shared(const GlmMoeHostWeights& w,
 
 GlmFp4MatrixHost glm_moe_host_view_fp4(const GlmMoeHostWeights& w,
                                        const GlmMoeConfig& cfg, int index) {
-  if (!w.nvfp4 || index < 0 || index >= cfg.n_experts * 3)
-    throw std::invalid_argument("glm_moe_host_view_fp4: not an NVFP4 routed index");
+  if (!w.nvfp4 || index < 0 || index >= w.fp4_matrices(cfg.n_experts))
+    throw std::invalid_argument("glm_moe_host_view_fp4: not an NVFP4 index");
   const int64_t I = cfg.inter, H = cfg.hidden;
   GlmFp4MatrixHost m;
   const bool down = index % 3 == 2;
@@ -178,6 +178,9 @@ void glm_moe_ref_router(const uint16_t* hidden, const uint16_t* gate,
   out.weights.assign(static_cast<size_t>(tokens) * K, 0.f);
   out.biased.assign(static_cast<size_t>(tokens) * E, 0.0);
 
+  const bool softmax = cfg.router_mode == MoeRouterMode::SoftmaxTopk;
+  if (!softmax && bias == nullptr)
+    throw std::invalid_argument("glm_moe_ref_router: the sigmoid mode needs a bias");
   for (int t = 0; t < tokens; ++t) {
     const uint16_t* x = hidden + static_cast<size_t>(t) * H;
     std::vector<double> scores(E), biased(E);
@@ -185,9 +188,25 @@ void glm_moe_ref_router(const uint16_t* hidden, const uint16_t* gate,
       double dot = 0.0;
       const uint16_t* w = gate + static_cast<size_t>(e) * H;
       for (int k = 0; k < H; ++k) dot += bf16_to_d(x[k]) * bf16_to_d(w[k]);
-      scores[e] = sigmoid_d(dot);
-      biased[e] = scores[e] + bias[e];
+      if (softmax) {
+        // The reference's bf16 Linear output: the logit rounded once. It
+        // is the selection key and the exported row; the probability is
+        // the picked weight (below).
+        scores[e] = bf16_to_d(d_to_bf16(dot));
+        biased[e] = scores[e];
+      } else {
+        scores[e] = sigmoid_d(dot);
+        biased[e] = scores[e] + bias[e];
+      }
       out.biased[static_cast<size_t>(t) * E + e] = biased[e];
+    }
+    if (softmax) {
+      // softmax over the logits in double; the weight of expert e is p_e.
+      double m = -INFINITY;
+      for (int e = 0; e < E; ++e) m = std::max(m, scores[e]);
+      double sum = 0.0;
+      for (int e = 0; e < E; ++e) sum += std::exp(scores[e] - m);
+      for (int e = 0; e < E; ++e) scores[e] = std::exp(scores[e] - m) / sum;
     }
     std::vector<int> sel;
     std::vector<double> wsel;
@@ -222,9 +241,11 @@ void glm_moe_ref_router(const uint16_t* hidden, const uint16_t* gate,
     denom += 1e-20;
     for (int i = 0; i < K; ++i) {
       out.ids[static_cast<size_t>(t) * K + i] = sel[i];
-      const double w =
+      double w =
           cfg.norm_topk_prob ? (wsel[i] / denom) * cfg.routed_scaling_factor
                              : wsel[i] * cfg.routed_scaling_factor;
+      // The softmax mode's weights are cast to bf16 by the reference.
+      if (softmax) w = bf16_to_d(d_to_bf16(w));
       out.weights[static_cast<size_t>(t) * K + i] = static_cast<float>(w);
     }
   }
@@ -251,7 +272,7 @@ void glm_moe_ref_forward(const uint16_t* hidden, const GlmMoeHostWeights& w,
     double divisor;
   };
   auto weights_for = [&](int index) -> Mat {
-    if (w.nvfp4 && index < E * 3) {
+    if (w.nvfp4 && (index < E * 3 || w.shared_nvfp4)) {
       const GlmFp4MatrixHost v = glm_moe_host_view_fp4(w, cfg, index);
       return Mat{dequant_fp4_weights(v), static_cast<double>(v.global_scale)};
     }

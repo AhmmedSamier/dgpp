@@ -12,7 +12,7 @@ cmake --build build-ci -j -- -k && ctest --test-dir build-ci --output-on-failure
 loopback worlds each own a port in 29910–29941, so run one CUDA suite at a
 time on a node that is also serving.
 
-CTest currently runs 33 entries:
+CTest currently runs 62 entries:
 
 - host unit cases covering logging/tracing, JSON, arenas, safetensors,
   FP8, the latent cache's fp8/fp4 codecs (the e2m1 grid and its
@@ -25,13 +25,27 @@ CTest currently runs 33 entries:
   divergences rejected), and the TCP/roster control plane (seal, epoch
   bumps, eviction by death and by deadline, rejection reasons, coordinator
   loss);
-- the M6 host suites: the tokenizer (55 byte-exact goldens, hash-keyed),
-  the chat template (26 goldens + 8 refusal negatives), the scheduler
+- the M6 host suites: the tokenizer (55 byte-exact goldens per family,
+  hash-keyed — GLM-5.3, Qwen3.8-Flash-Next and GLM-4.7 corpora), the chat
+  template (26 / 20 / 26 goldens + 8 refusal negatives, the tool-call
+  round trips and grammars over each real tokenizer), the scheduler
   (isolation, determinism, cancellation, bounded queue, tick ≡
   run_to_completion), the HTTP server's limit ladder, the OpenAI shapes
   over real HTTP with a fake engine, and the admission journal with two
   real peer loops over localhost;
 - synthetic CUDA graph/eager parity;
+- the second and third families on the shared cores (2026-09-09/10): the
+  Qwen3.8-Flash-Next chain (config/binding units, the loader, GDN/QSA/GR/
+  PLE/MoE kernel oracles, the fixture forward against the pure-python
+  reference, decode sessions, loopback TP worlds 2 and 4, the graph engines
+  at world 2) and the GLM-4.7 chain (`glm4_config`/`glm4_binding` units,
+  `glm4_loader_test` with the draft's NVFP4 requant, `glm4_attn_test`
+  bitwise against the tile-aware host reference, `glm4_forward_test` vs
+  `tools/glm4_reference_dump.py`, `glm4_decode_test` — prefill == forward
+  bitwise, interleaved slots, chunked prefill, snapshots at any position,
+  the speculator through the draft — `glm4_tp_test` worlds 2 and 4
+  (ports 29946/29947), `glm4_engine_test` (29948/29949)); the fp4 GEMV
+  core at every compiled K and the MoE layer's NVFP4 shared expert;
 - the KDA operator suite: conv/recurrent kernel parity against host
   fp32/fp64 references, chunked-vs-unchunked bitwise equivalence, decode
   graph replay, snapshot round-trip, head-slice TP readiness, and

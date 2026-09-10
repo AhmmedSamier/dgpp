@@ -36,6 +36,7 @@ struct PlanKey {
 }  // namespace
 
 struct CublasLtGemm::Impl {
+  int decode_rows = kGemmDecodeRowsDefault;  // the decode lowering bound (set_decode_rows)
   cublasLtHandle_t lt{};
   float* dev_unit_scale{};  // fp8 tensor-wise scale == 1.0f
 
@@ -144,6 +145,15 @@ struct CublasLtGemm::Impl {
 CublasLtGemm::CublasLtGemm() : impl_(new Impl()) {}
 CublasLtGemm::~CublasLtGemm() { delete impl_; }
 
+void CublasLtGemm::set_decode_rows(int rows) {
+  if (rows < 1 || rows > kGemmDecodeLoweringRows)
+    throw std::invalid_argument("CublasLtGemm::set_decode_rows: rows outside [1, " +
+                                std::to_string(kGemmDecodeLoweringRows) + "]");
+  impl_->decode_rows = rows;
+}
+
+int CublasLtGemm::decode_rows() const { return impl_->decode_rows; }
+
 void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                           int m, int n, int k, DType io_dtype, GemmOut out_dtype,
                           size_t act_row_stride, void* workspace,
@@ -151,13 +161,15 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
   // Decode-shaped bf16 calls take the bandwidth GEMV (bf16_gemv.hpp):
   // cuBLASLt's m=1 kernel sits at ~128 GB/s on this part. Each GEMV row has
   // the scalar reduction order regardless of the rows sharing its launch.
-  // The serving ceiling is eight rows, while one launch is capped by both
-  // register pressure and the 48-KiB default dynamic-smem limit. Split a
-  // wider decode into the largest legal chunks instead of falling through
-  // to an Lt algorithm with shape-dependent reduction order. This is the
-  // numerical seam that lets a live request move between scalar and batched
-  // graph variants without changing its transcript.
-  if (io_dtype == DType::BF16 && m >= 1 && m <= 8 &&
+  // The serving ceiling is the model's decode rows (set_decode_rows: its
+  // fixed batch, 8 unless it says otherwise), while one launch is capped by
+  // both register pressure and the 48-KiB default dynamic-smem limit. Split a wider decode into the
+  // largest legal chunks instead of falling through to an Lt algorithm
+  // with shape-dependent reduction order. This is the numerical seam that
+  // lets a live request move between scalar and batched graph variants
+  // without changing its transcript (each chunk past the first re-reads
+  // the weights: the batch's byte cost).
+  if (io_dtype == DType::BF16 && m >= 1 && m <= impl_->decode_rows &&
       bf16_gemv_accepts(weight, /*m=*/1, k)) {
     const auto* x = static_cast<const uint16_t*>(act);
     const auto* w = static_cast<const uint16_t*>(weight);

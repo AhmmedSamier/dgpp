@@ -151,6 +151,42 @@ void glm_spec_chain_row(const PickVerdict* verify_verdict, int src_row,
                         int64_t* step_pos, int64_t* tokens, int32_t* req_spans,
                         cudaStream_t stream);
 
+// The same row for the families whose draft hidden lives in a per-slot
+// window of `window_rows` rows by position (the block's output row lands at
+// window[pos % window_rows]; engine/session_model.hpp's chain).
+void glm_spec_chain_row_window(const PickVerdict* verify_verdict, int src_row,
+                               const PickVerdict* draft_verdict,
+                               const uint16_t* block_x, int hidden,
+                               uint16_t* window, int window_rows,
+                               const int64_t* block_pos, int chain_index,
+                               int64_t max_context, int64_t* step_pos,
+                               int64_t* tokens, int32_t* req_spans,
+                               cudaStream_t stream);
+
+// The chain rows of the FIXED BATCH (2026-09-10, the batched depth >= 2
+// chain on the window families): one row per request slot q, at rows
+// [0, requests) — position block_pos[q] + chain_index, the token
+// draft_verdicts[q].next, the hidden the block's own output row: for the
+// first chain row the batched draft run's row q * rows_per_request +
+// (verify_verdicts[q].accepted - 1) (its last accepted row), after it row
+// q of the previous chain run — landed in slot q's window (window + q *
+// window_stride_elems, row pos % window_rows). The request ids and the
+// spans are rewritten to the compact one-row-per-request layout (the next
+// replay's staging restores the verify's). A closed slot
+// (verify_verdicts[q].accepted == 0) or a position at or past
+// `max_context` stages padding (-1) and copies nothing. The counters do
+// not move.
+void glm_spec_chain_rows_batched(const PickVerdict* verify_verdicts,
+                                 const PickVerdict* draft_verdicts,
+                                 int requests, int rows_per_request,
+                                 const uint16_t* block_x, int hidden,
+                                 uint16_t* window, int window_rows,
+                                 size_t window_stride_elems,
+                                 const int64_t* block_pos, int chain_index,
+                                 int64_t max_context, int64_t* step_pos,
+                                 int64_t* tokens, int32_t* req_ids,
+                                 int32_t* req_spans, cudaStream_t stream);
+
 // The next replay's fed tokens, written at the end of this one (phase D):
 // tokens[0] = *next (the verify's), tokens[1 + c] = drafts.v[c]->next (the
 // block's guesses for the tokens after it, one per draft position).
@@ -171,16 +207,29 @@ inline void glm_spec_next_tokens(const int64_t* next,
 }
 
 // End-of-replay token feeds for the fixed batch. The plain T=1 graph takes
-// each verify verdict's next token. The MTP T=2 graph takes the parked
-// verify next plus one draft verdict per request. Inactive groups are zeroed
-// so a later padded replay always embeds a valid token id.
+// each verify verdict's next token. The MTP graph takes the parked verify
+// next plus one draft verdict per request and draft position (drafts.v[c]
+// is a [requests] array; rows_per_request == 1 + drafts.count). Inactive
+// groups are zeroed so a later padded replay always embeds a valid token
+// id.
 void glm_spec_verify_next_tokens_batched(const PickVerdict* verify_verdicts,
                                          int requests, int rows_per_request,
                                          int64_t* tokens,
                                          cudaStream_t stream);
 void glm_spec_next_tokens_batched(const int64_t* next,
-                                  const PickVerdict* draft_verdicts,
-                                  int requests, int rows_per_request,
-                                  int64_t* tokens, cudaStream_t stream);
+                                  const GlmSpecDrafts& drafts, int requests,
+                                  int rows_per_request, int64_t* tokens,
+                                  cudaStream_t stream);
+inline void glm_spec_next_tokens_batched(const int64_t* next,
+                                         const PickVerdict* draft_verdicts,
+                                         int requests, int rows_per_request,
+                                         int64_t* tokens,
+                                         cudaStream_t stream) {
+  GlmSpecDrafts d;
+  d.v[0] = draft_verdicts;
+  d.count = 1;
+  glm_spec_next_tokens_batched(next, d, requests, rows_per_request, tokens,
+                               stream);
+}
 
 }  // namespace dgpp

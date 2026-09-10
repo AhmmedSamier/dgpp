@@ -49,4 +49,13 @@ struct Bf16GemvProblem {
 void launch_bf16_gemv_dual(const Bf16GemvProblem& p0, const Bf16GemvProblem& p1,
                            bool out_f32, int m, int k, cudaStream_t stream);
 
+// Up to four GEMVs of the same m, k and output type in ONE launch
+// (2026-09-09, the GDN's qkv / z / a / b projections at decode): blocks
+// [B_i, B_{i+1}) run problem i, each warp's work exactly the single
+// launch's — every output bitwise its own launch. n == 1 is the single
+// launch; n == 2 the dual.
+constexpr int kBf16GemvMaxProblems = 4;
+void launch_bf16_gemv_multi(const Bf16GemvProblem* problems, int n_problems,
+                            bool out_f32, int m, int k, cudaStream_t stream);
+
 }  // namespace dgpp

@@ -6,6 +6,121 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **GLM-4.7 (`nvidia/GLM-4.7-NVFP4`) served** (2026-09-10, docs/glm47_plan.md):
+  the Glm4MoeForCausalLM family — 92 pre-norm layers of biased GQA
+  attention (96/8 heads, per-head q/k norms, half-split partial RoPE),
+  three dense NVFP4 MLP layers then 160-expert sigmoid-routed MoE layers
+  with an NVFP4 shared expert, an MTP draft layer whose BF16 experts are
+  requantized to NVFP4 at load — on the same session core, engines,
+  scheduler and service as GLM-5.3 and Qwen3.8-Flash-Next. New: the
+  modelopt NVFP4 binding and loader (`src/models/glm4/`), the fp4 GEMV
+  core generalized to any K multiple of 32 (power-of-two shapes bitwise
+  unchanged), the NVFP4 shared expert as view-table entry E of the routed
+  launches, paged split-KV GQA attention kernels with the fused bias /
+  norm / RoPE / K-V append (`src/kernels/glm4_attn.cu`, bitwise a
+  tile-aware host reference), `Glm4Model` with the paged K/V pool (no
+  recurrent state: rollback positional, snapshots at any position, the
+  draft's hidden window), the GLM-4.7 tokenizer (a Sequence[ByteLevel]
+  post-processor), the template's `rstrip`/`lstrip` with a character
+  argument, `deploy/cluster_glm47.json`, `scripts/fabric_glm4_serve.sh`;
+  The partial RoPE is transformers' half-split rotate_half (pairs i, i+32
+  over the first 64 dims), not the interleaved form of the older glm/glm4
+  architectures: the interleaved reading passed every fixture gate (the
+  python reference shared it) and left the real model coherent for ~30
+  tokens before looping; found against transformers' own layer code on
+  the real weights (`tools/glm4_torch_reference.py`, layer-0 relative l2
+  0.036 -> 0.0025 after the fix). The bus recorder's collective-node budget per graph 128 -> 256
+  (`kBusMaxGraphGens`: GLM-4.7's decode step records 186 — its first
+  fabric boot refused the second graph variant at 128). The draft block
+  takes the model's POST-final-norm hidden (vLLM's `glm4_moe_mtp`
+  convention; the pre-norm residual gave 11–46 % draft acceptance on the
+  fabric, the post-norm hidden 79–92 %).
+
+- **The decode rows are the recipe's shape, and the batched depth-2 chain**
+  (2026-09-10): the fixed decode batch's row ceiling is derived at boot —
+  `max_concurrency x (1 + mtp_depth)`, floored at 8 so every existing recipe
+  keeps its exact shape — and carried at runtime by the session core
+  (`SessionParams::decode_rows`: the per-row scratch, the token feeds, the
+  draft windows, the memory plan), the picker's tables, the bus's latency
+  slot and the graph engine's batch families; the build-time bound is
+  `kDecodeRowsMax` = 32 (the pick kernels' fixed arrays). GLM-4.7 takes the
+  derived shape (`serve: decode rows 12 (4 slots x 3 rows ...)` in the boot
+  log); GLM-5.3-Flash keeps its fixed 8, Qwen3.8-Flash-Next stays capped at
+  8 until its kernels are gated past it. On the runtime rows the row batch
+  carries depth >= 2: `session_graph_capture_draft_chain_batch` +
+  `glm_spec_chain_rows_batched` run every slot's chain row in one draft-
+  block run (the batched next-token feed carries every draft per request);
+  a family opts in with `kBatchedDraftChain` (GLM-4.7). The GEMM seam
+  lowers bf16 decode calls up to the model's decode rows to the row-
+  independent GEMV core (`CublasLtGemm::set_decode_rows`; the first 9-row
+  batch fell to an Lt algorithm with its own reduction order and flipped a
+  near tie), so a batched request's rows keep the scalar order at any
+  width — the depth-2 engine gate runs A scalar and B, C batched on a 9-row
+  ceiling, bitwise the eager engine's. Also fixed: one slot's sampled MTP
+  fallback dropped every slot's draft picks of a batched replay (the mirror
+  went stale for the others). Measured on the fabric (`fabric_glm4_load.sh`):
+  batched depth 2 loses to depth 1 at 2 and 4 live requests (37 vs 44.5,
+  43 vs 47.5 tok/s) — every 4-row GEMV chunk past the first re-reads the
+  6.3 GB of BF16 attention projections per rank (+45–60 ms per chunk: 4
+  rows 79 ms, 6 rows 123, 8 rows 140, 12 rows 200); depth 2 remains a
+  single-stream gain (+4–13 %). The lever for concurrency at either depth is
+  the attention projections' bytes per pass: wider GEMV chunks or a row-
+  independent tensor-core kernel, docs/measurements.md.
+
+- **MTP depth 2 on the hidden-window families** (2026-09-10): the session
+  core carries the GLM-5.3-Flash chain — one draft-block row per further
+  draft at counter + index, fed the previous draft's pick and the block's
+  own output row as its hidden, landed in the slot's window
+  (`glm_spec_chain_row_window`); `session_draft_chain`,
+  `session_graph_capture_draft_chain`, the multi-draft feed; a family opts
+  in with `kDraftChain` (GLM-4.7 yes, Qwen3.8-Flash-Next not yet — its
+  draft ring would need the chain snapshot). `deploy/cluster_glm47_d2.json`.
+  GLM-4.7 at depth 2: 72 ms/pass at 2.3–2.6 tokens/pass (p2 48–65 %), 4–13 %
+  more tokens/s single-stream than depth 1, +5 % at a 6.5K context;
+  transcripts identical. Gate: `glm4_engine_test`'s depth-2 world (port
+  29951); the row batch past depth 1 followed the same day (above).
+
+- **`chat_template_kwargs.enable_thinking` is a knob of the templates that
+  read it** (2026-09-10): the service asks the loaded template
+  (`ChatTemplate::reads`, `ModelFrontend::template_reads`) and passes the
+  boolean through for Qwen3.8-Flash-Next and GLM-4.7 (false closes the
+  think block in the generation prompt — GLM-4.7's non-thinking mode; it
+  ignores reasoning_effort and otherwise thinks to the token cap); GLM-5.3-
+  Flash's template never reads it and the refusal stands. `serve_eval.py
+  --no-think`; `serve_api_check.py` builds its stop material with thinking
+  off where the template allows it.
+
+- **Scheduler: a step cut short takes no retire-time prefix snapshot**
+  (2026-09-10). When a multi-token MTP pass's earlier token completes the
+  answer (the cap or EOS), the pass's remaining tokens are dropped and the
+  model's state sits past the committed position; the retire path asked
+  the arena for a live snapshot at the committed position and the arena
+  refused (an engine failure on GLM-4.7's first fabric request — every
+  position is snapshot-eligible at its align of 1; the aligned families
+  hit it only when the cut lands on an aligned position). `Request::
+  step_tail` records the dropped tail; the rolling entry stands as the
+  close entry. `scheduler_prefixCache_aStepCutShortByTheCapTakesNoRetireSnapshot`.
+  Gates: the python double reference (`tools/glm4_reference_dump.py`,
+  final hidden l2 0.0035, top-1 and routing exact, the draft's rows),
+  transformers' own layer code on the real weights (layer-0 relative l2
+  0.0025), decode/sessions/speculator (60 steps across the pool's block
+  boundary, per-step rolling snapshots), TP worlds 2 and 4, the graph
+  engines at world 2 (scalar, batched and MTP across the boundary),
+  tokenizer and chat-template goldens (HF tokenizers 0.23.1, jinja2
+  3.1.2). Fabric (four nodes): boot 18–20 s from the resident image, T=1
+  49.0 ms/step, MTP 60–61 ms/pass at 1.86–1.99 tokens/pass (31–33
+  ms/token), MTP == T=1 transcripts, eval with thinking off gsm8k 60/60,
+  HumanEval 39/40, extraction 30/30 (docs/measurements.md).
+
+- **Shared cores extracted for the second and third families** (2026-09-09):
+  `loaders/resident_stream.hpp` (the resident/streaming layer stream —
+  bumps, staging, the image, byte reconciles, the digest — under a
+  family's builders; Qwen and GLM-4.7 on it), `engine/paged_blocks.hpp`
+  (the paged block table with its sharing and pinning protocol under both
+  K/V pools), `engine/session_model.hpp` (the session core: positions,
+  feeds, chunking, snapshots, the graph era, the draft plumbing, under
+  `QwenModel` and `Glm4Model`). Every existing gate unchanged.
+
 - The fp8 tile kernel ported to the ldmatrix form (32-deep stages, the
   block scale copied with the tile, fragments decoded e4m3 -> f32 x scale
   -> bf16 as the reference rounds them): bitwise the reference; the FP8

@@ -52,13 +52,16 @@ void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
 // large-m route takes): the reference the grouped tensor-core MoE kernel is
 // pinned bitwise against (glm_moe_test) — the routed launcher above would
 // send small m to the GEMV core instead.
+// rs / cs (2026-09-09): the scale grid as log2 block sizes — 7 the
+// checkpoint's 128 x 128, a TP slice's re-blocked axis 6 or 5 (plan D2);
+// every row reads its own scale row, a 32-deep stage its one column.
 void launch_scale_gemm_tile_bf16(const uint16_t* act, size_t act_row_stride_elems,
                                  const uint8_t* w_payload, const float* w_scales,
                                  uint16_t* out, int m, int n, int k,
-                                 cudaStream_t stream);
+                                 cudaStream_t stream, int rs = 7, int cs = 7);
 void launch_scale_gemm_tile_f32(const uint16_t* act, size_t act_row_stride_elems,
                                 const uint8_t* w_payload, const float* w_scales,
                                 float* out, int m, int n, int k,
-                                cudaStream_t stream);
+                                cudaStream_t stream, int rs = 7, int cs = 7);
 
 }  // namespace dgpp

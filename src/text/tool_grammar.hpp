@@ -257,6 +257,16 @@ class GrammarState {
     kEnd,         // the turn must end: EOS
     kDone,        // EOS emitted: nothing more (the scheduler retires)
     kJsonBody,    // kJson: the JSON text (JsonMachine), then EOS
+    // The Qwen3.8 XML format (2026-09-09): the block's structure is TEXT
+    // between the <tool_call> ids, so every structural piece is a target
+    // of the text automaton with the surrounding literals folded in
+    // ("\n<function=NAME>\n", "<parameter=KEY>\n", "\n</parameter>\n",
+    // "</function>\n") — any tokenization of the literals is accepted.
+    kQName,        // "\n<function=" NAME ">\n"
+    kQKeyOrClose,  // "<parameter=" (KEY ">\n" when the keys are closed) | "</function>\n"
+    kQFreeKey,     // an open key set: free text through ">\n"
+    kQValue,       // the typed value, then "\n</parameter>\n"
+    kQClose,       // </tool_call>
   };
   // The automaton over token texts: the targets still consistent with the
   // bytes emitted so far, and those bytes.
@@ -286,6 +296,12 @@ class GrammarState {
   // EOS while the obligation is open; `extra_allowed` reopens one marker.
   void free_mask(TokenMask* out, int64_t extra_allowed,
                  bool forbid_markers = true) const;
+  // Inside a Qwen call: everything but the markers, the think markers and
+  // every EOS id (a call never ends the turn mid-block).
+  void free_mask_in_call(TokenMask* out) const;
+  bool qwen() const;
+  // The ids that continue `target` from `emitted`.
+  std::vector<int64_t> literal_ids(const std::string& target, const std::string& emitted) const;
   void list_mask(TokenMask* out, const std::vector<int64_t>& ids) const;
   // A JSON machine's position: its mask without the markers, plus the
   // closer once the text is complete (`closer` -1: the EOS ids).
@@ -304,6 +320,7 @@ class GrammarState {
   int tool_ = -1;          // the open call's tool (index into spec_.tools)
   TextMatch match_;        // kName / kKey / a kText value
   std::string key_;        // the open argument's key (kAfterKey / kValue)
+  std::string term_;       // kQValue (JSON): the terminator emitted so far
   std::vector<std::string> used_keys_;  // the open call's keys so far
   int arg_ = -1;           // the open argument (index into the tool's args)
   JsonMachine json_;       // kJson: the body's machine (inactive otherwise)

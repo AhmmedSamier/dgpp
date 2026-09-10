@@ -571,13 +571,13 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
 // A no-DSA model reports an unbounded pool: admission then keys on the
 // engine slot count alone. INT64_MAX (not "huge") so the scheduler's
 // subtraction arithmetic cannot overflow a real capacity.
-int64_t GlmDiagnosticModel::dsa_blocks_total() const {
+int64_t GlmDiagnosticModel::kv_blocks_total() const {
   return dsa_cfg_.num_dsa_layers > 0 ? pool_.total_blocks() : INT64_MAX;
 }
-int64_t GlmDiagnosticModel::dsa_blocks_in_use() const {
+int64_t GlmDiagnosticModel::kv_blocks_in_use() const {
   return dsa_cfg_.num_dsa_layers > 0 ? pool_.blocks_in_use() : int64_t(0);
 }
-int64_t GlmDiagnosticModel::dsa_blocks_for_tokens(int64_t tokens) const {
+int64_t GlmDiagnosticModel::kv_blocks_for_tokens(int64_t tokens) const {
   return dsa_cfg_.num_dsa_layers > 0 ? pool_.block_count_for_tokens(tokens)
                                     : int64_t(0);
 }

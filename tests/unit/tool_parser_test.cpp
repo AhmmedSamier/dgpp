@@ -133,6 +133,115 @@ Run drive(const std::vector<int64_t>& ids, ToolCallParser::Options opts = {},
   return run;
 }
 
+// ---- the Qwen3.8 format (2026-09-09): only the outer markers are ids; the
+// block's "<function=...><parameter=...>" structure is text, parsed when
+// the block closes.
+ChatMarkers qwen_markers() {
+  ChatMarkers m;
+  m.think_open = ChatMarker{kThinkOpen, "<think>"};
+  m.think_close = ChatMarker{kThinkClose, "</think>"};
+  m.tool_call_open = ChatMarker{kToolOpen, "<tool_call>"};
+  m.tool_call_close = ChatMarker{kToolClose, "</tool_call>"};
+  return m;
+}
+std::vector<int64_t> qwen_ids_of(const std::string& text) {
+  static const std::vector<std::pair<std::string, int64_t>> table = {
+      {"</tool_call>", kToolClose}, {"<tool_call>", kToolOpen},
+      {"</think>", kThinkClose},   {"<think>", kThinkOpen},
+  };
+  std::vector<int64_t> out;
+  for (size_t i = 0; i < text.size();) {
+    bool matched = false;
+    for (const auto& [s, id] : table) {
+      if (text.compare(i, s.size(), s) == 0) {
+        out.push_back(id);
+        i += s.size();
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) out.push_back(static_cast<unsigned char>(text[i++]));
+  }
+  return out;
+}
+Run drive_qwen(const std::string& text, ToolCallParser::Options opts = {}) {
+  ToolCallParser parser(qwen_markers(), fake_decode, weather_schemas(), opts);
+  std::vector<Event> events;
+  for (const int64_t id : qwen_ids_of(text)) parser.feed(id, &events);
+  parser.finish(&events);
+  Run run;
+  for (const Event& ev : events) {
+    run.order.push_back(ev.kind);
+    switch (ev.kind) {
+      case Kind::kReasoning: run.reasoning += ev.text; break;
+      case Kind::kReasoningClosed: ++run.reasoning_closed; break;
+      case Kind::kContent: run.content += ev.text; break;
+      case Kind::kToolCall: run.calls.push_back(ev.call); break;
+    }
+  }
+  require(static_cast<int>(run.calls.size()) == parser.calls(), "calls() counts the emitted calls");
+  return run;
+}
+
+DGPP_TEST(tool_parser_qwen_format_markers_and_one_call) {
+  require(qwen_markers().tool_format() == dgpp::text::ToolFormat::kQwenXml, "the two-marker set is the Qwen format");
+  require(fake_markers().tool_format() == dgpp::text::ToolFormat::kGlmMarkers, "the six-marker set is the GLM format");
+  require(qwen_markers().tool_calls_available(), "Qwen tool calls are available");
+  // The template's exact shape: typed by the schema (city string, days integer).
+  const Run run = drive_qwen(
+      "reasoning\n</think>\n\n<tool_call>\n<function=get_weather>\n"
+      "<parameter=city>\nParis\n</parameter>\n<parameter=days>\n3\n</parameter>\n"
+      "</function>\n</tool_call>");
+  require(run.reasoning == "reasoning\n", "reasoning: " + run.reasoning);
+  require(run.content == "\n\n", "content before the call: '" + run.content + "'");
+  require(run.calls.size() == 1 && run.calls[0].name == "get_weather", "one call to get_weather");
+  require(run.calls[0].arguments == "{\"city\": \"Paris\", \"days\": 3}", "arguments: " + run.calls[0].arguments);
+}
+
+DGPP_TEST(tool_parser_qwen_format_multiline_nested_and_two_calls) {
+  ToolCallParser::Options plain;
+  plain.start_in_reasoning = false;
+  const Run run = drive_qwen(
+      "Let me check both.\n\n<tool_call>\n<function=get_weather>\n"
+      "<parameter=code>\nprint(1)\nprint(2)\n\n</parameter>\n"
+      "<parameter=opts>\n{\"a\": 1, \"b\": [1, 2]}\n</parameter>\n"
+      "<parameter=note>\n\n</parameter>\n"
+      "</function>\n</tool_call>\n<tool_call>\n<function=flat_tool>\n"
+      "<parameter=x>\n0.5\n</parameter>\n</function>\n</tool_call>", plain);
+  require(run.content == "Let me check both.\n\n\n", "content: '" + run.content + "'");
+  require(run.calls.size() == 2, "two calls");
+  require(run.calls[0].arguments ==
+              "{\"code\": \"print(1)\\nprint(2)\\n\", \"opts\": {\"a\": 1, \"b\": [1, 2]}, \"note\": \"\"}",
+          "first arguments: " + run.calls[0].arguments);
+  require(run.calls[1].name == "flat_tool" && run.calls[1].arguments == "{\"x\": 0.5}",
+          "second call: " + run.calls[1].arguments);
+}
+
+DGPP_TEST(tool_parser_qwen_format_malformed_blocks_fall_back_to_content) {
+  ToolCallParser::Options plain;
+  plain.start_in_reasoning = false;
+  // No </function>, text after </function>, a missing name, an unterminated
+  // parameter, the stream ending inside the block: literal content, no call.
+  for (const char* bad : {
+           "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</tool_call>",
+           "<tool_call>\n<function=get_weather>\n</function>\nextra</tool_call>",
+           "<tool_call>\n<function=>\n</function>\n</tool_call>",
+           "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis</function>\n</tool_call>",
+           "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n",
+       }) {
+    const Run run = drive_qwen(bad, plain);
+    require(run.calls.empty(), std::string("malformed block parsed as a call: ") + bad);
+    require(run.content == bad, std::string("literal fallback differs: ") + run.content);
+  }
+  // A nested opener restarts the block: the first block's text is content,
+  // the second parses.
+  const Run run = drive_qwen(
+      "<tool_call>\n<function=get_weather>\n<tool_call>\n<function=get_weather>\n"
+      "<parameter=city>\nOslo\n</parameter>\n</function>\n</tool_call>", plain);
+  require(run.content == "<tool_call>\n<function=get_weather>\n", "the aborted block is content: " + run.content);
+  require(run.calls.size() == 1 && run.calls[0].arguments == "{\"city\": \"Oslo\"}", "the restarted block parses");
+}
+
 DGPP_TEST(tool_parser_splitsReasoningFromContentExactly) {
   // The prompt opened <think>; the ids before </think> are reasoning, the
   // rest content, both streamed as exact deltas; a repeated <think> in the
@@ -306,6 +415,22 @@ DGPP_TEST(tool_parser_forcedPrefixSeedsTheBlock) {
                 run.content == "<tool_call>get_weather<arg_key>days",
             "forced + unterminated: " + run.content);
   }
+}
+
+// The opened-thinking test over a rendered prompt: GLM's turn ends in
+// <think>, Qwen's in <think> + the bare newline (2026-09-09).
+DGPP_TEST(tool_parser_promptOpensThinkingSeesTheQwenNewline) {
+  ChatMarkers m = qwen_markers();
+  constexpr int64_t kNewline = 198;
+  require(m.prompt_opens_thinking({7, kThinkOpen}), "a bare <think> tail opens");
+  require(!m.prompt_opens_thinking({7, kThinkOpen, kNewline}),
+          "without the newline marker the Qwen tail is not recognized");
+  m.newline = ChatMarker{kNewline, "\n"};
+  require(m.prompt_opens_thinking({7, kThinkOpen, kNewline}), "<think> + newline opens");
+  require(m.prompt_opens_thinking({7, kThinkOpen}), "a bare <think> tail still opens");
+  require(!m.prompt_opens_thinking({7, kNewline}), "a newline alone does not open");
+  require(!m.prompt_opens_thinking({kThinkOpen, kNewline, 7}), "text after the tail closes nothing");
+  require(!m.prompt_opens_thinking({}), "an empty prompt");
 }
 
 DGPP_TEST(tool_parser_schemasReadBothToolForms) {

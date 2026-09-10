@@ -509,6 +509,11 @@ class Scheduler {
     State state = State::kQueued;
     int slot = -1;
     int steps_done = 0;
+    // Tokens of the current step's batch still unapplied when a token is
+    // applied: a retire with step_tail > 0 dropped the rest of a multi-
+    // token step, so the model's state sits step_tail rows past the
+    // committed position (no retire-time snapshot there, 2026-09-10).
+    int step_tail = 0;
     std::vector<int64_t> generated;
     bool cancel_requested = false;  // external cancel, applied at the
                                     // next tick's sweep

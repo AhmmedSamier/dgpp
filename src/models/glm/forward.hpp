@@ -24,6 +24,9 @@
 #include <cuda_runtime.h>
 
 #include "core/arena.hpp"
+#include "engine/boundary_reducer.hpp"
+#include "engine/memory_plan.hpp"
+#include "engine/decode_outputs.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_spec.hpp"
 #include "kernels/l2_prefetch.hpp"
@@ -37,40 +40,14 @@
 
 namespace dgpp {
 
-// M5 tensor-parallel block-boundary seam (DESIGN §5.1): folds a partial
-// hidden activation [rows, hidden] bf16 into its replicated value, in
-// place. Called after the attention output projection and after the
-// FFN/MoE — the two row-parallel sites whose local sums are partial —
-// always with the producing kernels already quiesced on the model stream.
-// world=1 constructs the model without a reducer and the seam is skipped.
-struct GlmBoundaryReducer {
-  virtual ~GlmBoundaryReducer() = default;
-
-  // Optional staging seam (the §6.3 evolution): hands the producing GEMM
-  // a pinned, device-writable destination for the boundary partial so the
-  // collective sends it straight from there (no device→slot staging copy).
-  // Returns nullptr when the shape does not fit (rows*hidden above the
-  // latency slot — prefill-sized boundaries stay on the device path) or
-  // when the transport has no pre-stage support. The returned pointer is
-  // consumed by the following reduce() call.
-  virtual uint16_t* stage(int /*rows*/, int /*hidden*/) { return nullptr; }
-
-  virtual void reduce(uint16_t* partial, int rows, int hidden) = 0;
-};
+// The TP block-boundary seam lives with the engine (engine/boundary_reducer.hpp).
+using GlmBoundaryReducer = BoundaryReducer;
 
 class GlmDiagnosticModel {
  public:
-  struct Outputs {
-    std::vector<uint16_t> final_hidden_bits;  // bf16 [tokens, hidden]
-    // fp32 [tokens, lm_vocab_count] — the rank's logits COLUMNS of the
-    // full [tokens, vocab] matrix (Full head: the whole thing). The head
-    // GEMV's fp32 accumulators, unrounded (2026-09-03): the bf16 rounding
-    // the reference applies here was the dominant noise on every pick and
-    // every log-prob comparison — half a bf16 ulp at |logit| ~16 is 0.06
-    // nat — and it bought nothing; the sampler consumes floats anyway.
-    std::vector<float> logits;
-    int lm_vocab_begin = 0;  // first vocab column of logits
-    int lm_vocab_count = 0;
+  // The engine-facing rows (engine/decode_outputs.hpp: hidden, logits,
+  // the rank's vocab slice) plus GLM's route traces.
+  struct Outputs : DecodeOutputs {
     // One entry per MoE layer, in layer order (ids ascending per token).
     std::vector<GlmRouteTraceLayer> routes;
     // Aligned with routes (same order): each MoE layer's full biased router
@@ -141,29 +118,7 @@ class GlmDiagnosticModel {
   // come out of the same memory). The GEMM workspace is its floor (cuBLASLt
   // may ask for more for the head at a large row count) and the CUDA
   // context, the bus and the prefix arena are the caller's to add.
-  struct MemoryPlan {
-    struct Item {
-      std::string name;
-      size_t device = 0;
-      size_t pinned = 0;
-    };
-    std::vector<Item> items;
-    int64_t context_tokens = 0;  // the pool's token capacity (max_context())
-    void add(std::string name, size_t device, size_t pinned = 0) {
-      items.push_back(Item{std::move(name), device, pinned});
-    }
-    size_t device_bytes() const {
-      size_t t = 0;
-      for (const Item& i : items) t += i.device;
-      return t;
-    }
-    size_t pinned_bytes() const {
-      size_t t = 0;
-      for (const Item& i : items) t += i.pinned;
-      return t;
-    }
-    size_t total_bytes() const { return device_bytes() + pinned_bytes(); }
-  };
+  using MemoryPlan = dgpp::MemoryPlan;  // engine/memory_plan.hpp (shared with the Qwen model)
   static MemoryPlan plan_memory(const GlmTextConfig& cfg, int max_tokens,
                                 int64_t max_cache_tokens, int tp_rank = 0,
                                 int tp_world = 1,
@@ -237,7 +192,7 @@ class GlmDiagnosticModel {
   // The same number for a shape that is not built yet (the memory plan).
   static size_t session_snapshot_bytes(const GlmTextConfig& cfg, int tp_world,
                                        bool mtp);
-  int session_kpool() const;  // the alignment every snapshot position obeys
+  int session_snapshot_align() const;  // the alignment every snapshot position obeys
   // Chunking (M7's contract): a prefill is cut at every kPrefillChunkTokens
   // multiple and at the pool-aligned image of every `boundaries` entry
   // (floor(b / kpool) * kpool) — structural positions the caller derives
@@ -295,10 +250,18 @@ class GlmDiagnosticModel {
   // bf16 GEMV's row bound (gemv::kMaxRows): at T <= 4 every projection
   // takes the row-independent GEMV, so the rows' bits are the T=1 bits;
   // T >= 5 would fall to cuBLASLt and break the equality above.
-  static constexpr int kSpecRows = 4;
+  static constexpr int kSpecRows = dgpp::kSpecRows;
   // Phase-2 physical decode ceiling. A captured batch is request-slot major
-  // and must satisfy requests * spec_rows <= this bound.
-  static constexpr int kDecodeRows = 8;
+  // and must satisfy requests * spec_rows <= this bound. This model keeps
+  // the build-time 8 (the session-core families derive theirs at runtime,
+  // engine/decode_outputs.hpp); the engines read it through
+  // max_decode_rows().
+  static constexpr int kDecodeRows = dgpp::kDecodeRows;
+  int max_decode_rows() const { return kDecodeRows; }
+  // No batched depth >= 2 chain on this family (its chain rows run on the
+  // per-position hidden cache, scalar): past depth 1 the graph engine
+  // serves scalar replays.
+  static constexpr bool kBatchedDraftChain = false;
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
   void session_rollback(int req, int accepted);
   // The draft block's rollback (M6 6b, the sampled one-graph step): the
@@ -608,6 +571,10 @@ class GlmDiagnosticModel {
   // pay. Default on; the serving apps turn them off. Takes effect at the
   // next capture / eager step.
   void set_decode_route_traces(bool on) { decode_route_traces_ = on; }
+  // Q0 measurement knob (2026-09-09): after the attention-site fold of the
+  // first N layers of every decode row, issue boundary_->probe(T, 10240) —
+  // the sliced-GR collective's shape. 0 = off, the production value.
+  void set_gr_probe_layers(int n) { gr_probe_layers_ = n; }
   bool decode_route_traces() const { return decode_route_traces_; }
 
   // v1 single-request shims (slot 0) — the Stage 2 parity gates' shape.
@@ -621,16 +588,16 @@ class GlmDiagnosticModel {
   // A model with no DSA layers has no pool; its meters report an
   // unbounded budget so admission keys on the slot count alone.
   int max_session_requests() const { return max_requests_; }
-  int64_t dsa_blocks_total() const;
-  int64_t dsa_blocks_in_use() const;
+  int64_t kv_blocks_total() const;
+  int64_t kv_blocks_in_use() const;
   // Block count covering `tokens` tokens — the reserve arithmetic for
   // prompt + max_steps admissions.
-  int64_t dsa_blocks_for_tokens(int64_t tokens) const;
+  int64_t kv_blocks_for_tokens(int64_t tokens) const;
   // The DSA block in tokens (0 without DSA layers) and the prefill's chunk
   // length — the prefix cache's geometry (M7): an entry pins the full
   // blocks below its position and one partial; the cold prefill cuts at
   // chunk multiples.
-  int64_t dsa_block_tokens() const;
+  int64_t kv_block_tokens() const;
   static constexpr int prefill_chunk_tokens() { return kPrefillChunkTokens; }
 
   // Isolated parity runner (the curated suite's real-checkpoint mode):
@@ -860,6 +827,7 @@ class GlmDiagnosticModel {
   std::unique_ptr<GlmTpViews> tp_;
 
   bool decode_route_traces_ = true;
+  int gr_probe_layers_ = 0;
 
   // World=1 bind scratch (owned so the returned views outlive the call).
   GlmLayerBound full_{};

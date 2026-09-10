@@ -42,8 +42,21 @@ Regenerating: /tmp/opencode/tokref/bin/python
 """
 import glob
 import json
+import os
 import pathlib
 import sys
+
+
+def hf_hub_dir():
+    """The local HF hub cache: HUGGINGFACE_HUB_CACHE, else HF_HOME/hub, else
+    ~/.cache/huggingface/hub — never a hard-coded home."""
+    cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if cache:
+        return cache
+    home = os.environ.get("HF_HOME")
+    return os.path.join(home, "hub") if home else os.path.expanduser(
+        "~/.cache/huggingface/hub")
+
 
 MODEL = "unsloth/GLM-5.3-Flash-FP8"
 
@@ -75,6 +88,10 @@ def env():
         return json.dumps(x, ensure_ascii=ensure_ascii, indent=indent,
                           separators=separators, sort_keys=sort_keys)
     e.filters["tojson"] = tojson
+    # transformers' raise_exception global (a TemplateError).
+    def raise_exception(message):
+        raise jinja2.exceptions.TemplateError(message)
+    e.globals["raise_exception"] = raise_exception
     return e
 
 
@@ -336,37 +353,260 @@ CASES = [
 ]
 
 
+# The Qwen3.8-Flash-Next template (2026-09-09): the reasoning-effort system
+# preamble, the tools block, <think> reasoning kept only after the last
+# user query (preserve_thinking), the <function=...><parameter=...> tool
+# calls, tool responses grouped into one user turn, enable_thinking false
+# emitting an empty think block.
+def qwen_call(cid, name, arguments):
+    return {"id": cid, "type": "function",
+            "function": {"name": name, "arguments": arguments}}
+
+
+QWEN_CASES = [
+    ("simple_user_gen", {
+        "messages": [{"role": "user", "content": "The capital of France is"}],
+        "add_generation_prompt": True,
+    }),
+    ("system_user_gen", {
+        "messages": [
+            {"role": "system", "content": "You are a concise geography assistant."},
+            {"role": "user", "content": "What is the capital of France?"},
+        ],
+        "add_generation_prompt": True,
+    }),
+    ("chinese_user_gen", {
+        "messages": [{"role": "user", "content": "写一首关于秋天的诗。"}],
+        "add_generation_prompt": True,
+    }),
+    ("code_user_gen", {
+        "messages": [{"role": "user", "content": "def add(a, b):\n    return a + b\nExplain this code."}],
+        "add_generation_prompt": True,
+    }),
+    ("effort_low", {
+        "messages": [{"role": "user", "content": "Hi"}],
+        "add_generation_prompt": True, "reasoning_effort": "low",
+    }),
+    ("effort_medium_system", {
+        "messages": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}],
+        "add_generation_prompt": True, "reasoning_effort": "medium",
+    }),
+    ("thinking_disabled", {
+        "messages": [{"role": "user", "content": "Hi"}],
+        "add_generation_prompt": True, "enable_thinking": False,
+    }),
+    ("thinking_disabled_with_system", {
+        "messages": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}],
+        "add_generation_prompt": True, "enable_thinking": False,
+    }),
+    ("multi_turn_reasoning_kept_after_last_query", {
+        "messages": [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1", "reasoning_content": "thinking about Q1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "thinking about Q2"},
+        ],
+        "add_generation_prompt": False,
+    }),
+    ("multi_turn_preserve_thinking_false", {
+        "messages": [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1", "reasoning_content": "thinking about Q1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2", "reasoning_content": "thinking about Q2"},
+            {"role": "user", "content": "Q3"},
+        ],
+        "add_generation_prompt": True, "preserve_thinking": False,
+    }),
+    ("assistant_without_reasoning", {
+        "messages": [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+        ],
+        "add_generation_prompt": True,
+    }),
+    ("content_parts_text", {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "part one "}, {"type": "text", "text": "part two"}]}],
+        "add_generation_prompt": True,
+    }),
+    ("empty_user_content_gen", {
+        "messages": [{"role": "user", "content": ""}],
+        "add_generation_prompt": True,
+    }),
+    ("tools_no_system", {
+        "messages": [{"role": "user", "content": "What's the weather in Paris?"}],
+        "tools": [weather_tool()], "add_generation_prompt": True,
+    }),
+    ("tools_with_system", {
+        "messages": [{"role": "system", "content": "You are helpful."},
+                     {"role": "user", "content": "What's the weather in Paris?"}],
+        "tools": [weather_tool()], "add_generation_prompt": True, "reasoning_effort": "low",
+    }),
+    ("tool_call_and_response", {
+        "messages": [
+            {"role": "user", "content": "What's the weather in Paris for 3 days?"},
+            {"role": "assistant", "content": "", "reasoning_content": "I should call the tool.",
+             "tool_calls": [qwen_call("c1", "get_weather", {"city": "Paris", "days": 3})]},
+            {"role": "tool", "content": "{\"temp\": 21, \"unit\": \"C\"}"},
+        ],
+        "tools": [weather_tool()], "add_generation_prompt": True,
+    }),
+    ("tool_call_with_content_and_two_calls", {
+        "messages": [
+            {"role": "user", "content": "Weather in Paris and Rome?"},
+            {"role": "assistant", "content": "Let me check both.",
+             "tool_calls": [qwen_call("c1", "get_weather", {"city": "Paris"}),
+                            qwen_call("c2", "get_weather", {"city": "Rome", "days": 2})]},
+            {"role": "tool", "content": "Paris: 21C"},
+            {"role": "tool", "content": "Rome: 25C"},
+            {"role": "assistant", "content": "Paris 21C, Rome 25C."},
+            {"role": "user", "content": "Thanks!"},
+        ],
+        "tools": [weather_tool()], "add_generation_prompt": True,
+    }),
+    ("tool_call_multiline_and_nested_args", {
+        "messages": [
+            {"role": "user", "content": "Run it."},
+            {"role": "assistant", "content": "",
+             "tool_calls": [qwen_call("c1", "run", {"code": "print(1)\nprint(2)\n", "opts": {"a": 1, "b": [1, 2]}, "flag": True})]},
+            {"role": "tool", "content": "1\n2"},
+        ],
+        "tools": [{"name": "run", "description": "Run code", "parameters": {"type": "object", "properties": {"code": {"type": "string"}}}}],
+        "add_generation_prompt": True,
+    }),
+    ("tool_response_then_generation", {
+        "messages": [
+            {"role": "user", "content": "Weather?"},
+            {"role": "assistant", "content": "", "tool_calls": [qwen_call("c1", "get_weather", {"city": "Oslo"})]},
+            {"role": "tool", "content": "cold"},
+        ],
+        "tools": [weather_tool()], "add_generation_prompt": True, "enable_thinking": False,
+    }),
+    ("no_generation_prompt", {
+        "messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}],
+        "add_generation_prompt": False,
+    }),
+]
+
+
+# The GLM-4.7 template (2026-09-10): the GLM-5.3 one without the reasoning
+# effort preamble, the deferred tools, the tool references and the media
+# reminders; the reasoning split uses rstrip('\n') / lstrip('\n') and
+# enable_thinking=false closes the think block in the generation prompt.
+# The GLM-5.3 cases that render on it, plus the thinking switch.
+GLM4_SKIP = {"effort_low", "effort_high", "multimodal_parts_gen", "tools_deferred",
+             "tool_call_outputs_and_references", "tool_reference_direct"}
+GLM4_CASES = [c for c in CASES if c[0] not in GLM4_SKIP] + [
+    ("thinking_disabled", {
+        "messages": [{"role": "user", "content": "Hi"}],
+        "add_generation_prompt": True, "enable_thinking": False,
+    }),
+    ("thinking_disabled_with_system", {
+        "messages": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}],
+        "add_generation_prompt": True, "enable_thinking": False,
+    }),
+    ("trailing_assistant_think_markers_newlines", {
+        "messages": [
+            {"role": "user", "content": "Solve 2+2."},
+            {"role": "assistant",
+             "content": THINK_OPEN + "\n\nTwo plus two is four.\n\n" + THINK_CLOSE +
+                        "\n\nThe answer is 4.\n"},
+        ],
+        "add_generation_prompt": True,
+    }),
+    ("mid_turn_think_markers_stripped", {
+        "messages": [
+            {"role": "user", "content": "Solve 2+2."},
+            {"role": "assistant",
+             "content": THINK_OPEN + "\nreasoning\n" + THINK_CLOSE + "\n4"},
+            {"role": "user", "content": "And 3+3?"},
+        ],
+        "add_generation_prompt": True,
+    }),
+    ("tool_call_two_turns", {
+        "messages": [
+            {"role": "user", "content": "Weather in Paris, then Tokyo."},
+            {"role": "assistant", "tool_calls": [
+                call("call_1", "get_weather", {"city": "Paris"})]},
+            {"role": "tool", "content": "18C, partly cloudy",
+             "tool_call_id": "call_1"},
+            {"role": "assistant", "tool_calls": [
+                call("call_2", "get_weather", {"city": "Tokyo", "days": 2})]},
+            {"role": "tool", "content": "22C, clear",
+             "tool_call_id": "call_2"},
+            {"role": "user", "content": "Thanks!"},
+        ],
+        "tools": [weather_tool()],
+        "add_generation_prompt": True,
+    }),
+    ("tool_call_outputs_list", {
+        "messages": [
+            {"role": "user", "content": "Weather in Paris and Tokyo?"},
+            {"role": "assistant", "tool_calls": [
+                call("call_1", "get_weather", {"city": "Paris"}),
+                call("call_2", "get_weather", {"city": "Tokyo"})]},
+            {"role": "tool", "content": [
+                {"tool_call_id": "call_1", "output": "18C, partly cloudy"},
+                {"tool_call_id": "call_2", "output": "22C, clear"},
+            ]},
+            {"role": "user", "content": "Thanks!"},
+        ],
+        "tools": [weather_tool()],
+        "add_generation_prompt": True,
+    }),
+]
+
+
 def main():
-    out_path = (sys.argv[1] if len(sys.argv) > 1 else
-                "tests/data/glm_chat_template_goldens.jsonl")
-    snap = glob.glob(f"/home/user/.cache/huggingface/hub/"
-                     f"models--{MODEL.replace('/', '--')}/snapshots/*/")
-    if not snap:
-        sys.exit(f"model snapshot for {MODEL} not found in the HF cache")
-    tpl_raw = (pathlib.Path(snap[0]) / "chat_template.jinja").read_bytes()
-    tok_raw = (pathlib.Path(snap[0]) / "tokenizer.json").read_bytes()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("out", nargs="?", default=None)
+    ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--template", default=None)
+    ap.add_argument("--tokenizer-json", default=None)
+    ap.add_argument("--out", dest="out_opt", default=None)
+    args = ap.parse_args()
+    model = args.model
+    is_qwen = "Qwen" in model
+    is_glm4 = "GLM-4" in model
+    cases = QWEN_CASES if is_qwen else GLM4_CASES if is_glm4 else CASES
+    out_path = args.out_opt or args.out or (
+        "tests/data/qwen_chat_template_goldens.jsonl" if is_qwen else
+        "tests/data/glm4_chat_template_goldens.jsonl" if is_glm4 else "tests/data/glm_chat_template_goldens.jsonl")
+    if args.template and args.tokenizer_json:
+        tpl_path, tok_path = args.template, args.tokenizer_json
+    else:
+        snap = glob.glob(f"{hf_hub_dir()}/"
+                         f"models--{model.replace('/', '--')}/snapshots/*/")
+        if not snap:
+            sys.exit(f"model snapshot for {model} not found in the HF cache")
+        tpl_path = snap[0] + "chat_template.jinja"
+        tok_path = snap[0] + "tokenizer.json"
+    tpl_raw = pathlib.Path(tpl_path).read_bytes()
+    tok_raw = pathlib.Path(tok_path).read_bytes()
     template_hash = f"{fnv1a64(tpl_raw):016x}"
     tok_hash = f"{fnv1a64(tok_raw):016x}"
-    if tok_hash != "700b4469fc43f23b":
+    if not is_qwen and not is_glm4 and tok_hash != "700b4469fc43f23b":
         sys.exit(f"unexpected tokenizer revision {tok_hash} — the tokenizer "
                  "goldens are keyed to 700b4469fc43f23b")
 
     jinja_env = env()
     template = jinja_env.from_string(tpl_raw.decode("utf-8"))
     import tokenizers
-    tok = tokenizers.Tokenizer.from_file(snap[0] + "tokenizer.json")
+    tok = tokenizers.Tokenizer.from_file(tok_path)
 
     with open(out_path, "w", encoding="utf-8") as f:
         header = {
-            "model": MODEL,
+            "model": model,
             "jinja2": jinja_env.jinja2.__version__ if hasattr(
                 jinja_env, "jinja2") else "3.1.2",
             "template_hash": template_hash,
             "tokenizer_revision": tok_hash,
-            "cases": len(CASES),
+            "cases": len(cases),
         }
         f.write(json.dumps(header, ensure_ascii=False) + "\n")
-        for name, kwargs in CASES:
+        for name, kwargs in cases:
             rendered = template.render(**kwargs)
             if not rendered:
                 sys.exit(f"case {name} rendered empty — generator bug")
@@ -375,7 +615,7 @@ def main():
                                 "render": rendered, "ids": ids},
                                ensure_ascii=False) + "\n")
             print(f"{name:42s} {len(rendered):5d} chars  {len(ids):4d} ids")
-    print(f"wrote {out_path}: {len(CASES)} cases, template {template_hash}")
+    print(f"wrote {out_path}: {len(cases)} cases, template {template_hash}")
 
 
 if __name__ == "__main__":

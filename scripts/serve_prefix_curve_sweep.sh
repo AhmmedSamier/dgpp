@@ -4,7 +4,7 @@
 # and conversation count C, a fresh service boot and serve_prefix_curve.py.
 # Usage: prefix_curve_sweep.sh OUT_DIR "GIB..." "C..."
 set -u
-ROOT=/home/user/workspace/dgpp
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT=${1:?OUT_DIR}; GIBS=${2:-"0.25 1.5"}; CS=${3:-"8 32 64"}
 case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac
 mkdir -p "$OUT"; cd "$ROOT" || exit 1

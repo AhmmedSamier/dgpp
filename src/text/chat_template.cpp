@@ -5,6 +5,7 @@
 // tree-walking renderer. Everything outside the subset refuses by name.
 #include "text/chat_template.hpp"
 
+#include <cctype>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -45,6 +46,7 @@ struct Expr {
     Not,       // not kids[0]
     Test,      // kids[0] is [not] name
     In,        // kids[0] [not] in kids[1]
+    Slice,     // kids[0][kids[1]:kids[2]:kids[3]] (absent parts are null)
   };
   Tag tag;
   Value value;       // Const
@@ -57,6 +59,7 @@ struct Expr {
 struct MacroDef {
   std::string name;
   std::vector<std::string> params;
+  std::vector<ExprPtr> defaults;  // aligned with params; null = required
   std::vector<StmtPtr> body;  // owned here so the in-scope Value shares it
 };
 
@@ -430,8 +433,8 @@ class ExprParser {
     if (accept_kw("is")) {
       const bool inv = accept_kw("not");
       if (peek().t != ETok::T::Ident) fail(line_, "'is' needs a test name");
-      static const char* kTests[] = {"defined", "none", "string", "mapping",
-                                     "iterable"};
+      static const char* kTests[] = {"defined", "undefined", "none", "string",
+                                     "mapping", "iterable", "true", "false"};
       ExprPtr e = make(Expr::Tag::Test);
       e->name = peek().s;
       e->inverted = inv;
@@ -499,7 +502,9 @@ class ExprParser {
       if (accept_sym("(")) parse_call_args(&e->kwargs, &e->kids);
       e->kids.insert(e->kids.begin(), std::move(a));  // kids[0] = filtered value
       if (e->name != "capitalize" && e->name != "tojson" &&
-          e->name != "replace" && e->name != "length")
+          e->name != "replace" && e->name != "length" && e->name != "trim" &&
+          e->name != "default" && e->name != "string" && e->name != "safe" &&
+          e->name != "items")
         fail(line_, "unsupported filter '" + e->name + "'");
       a = std::move(e);
     }
@@ -535,12 +540,33 @@ class ExprParser {
         e->kids.push_back(std::move(a));
         a = std::move(e);
       } else if (accept_sym("[")) {
-        ExprPtr idx = ternary();
+        // A subscript, or a slice [start:stop:step] with any part absent
+        // (the template's messages[::-1]).
+        ExprPtr start, stop, step;
+        bool slice = false;
+        if (!(peek().t == ETok::T::Sym && peek().s == ":")) start = ternary();
+        if (accept_sym(":")) {
+          slice = true;
+          if (!(peek().t == ETok::T::Sym && (peek().s == ":" || peek().s == "]")))
+            stop = ternary();
+          if (accept_sym(":")) {
+            if (!(peek().t == ETok::T::Sym && peek().s == "]")) step = ternary();
+          }
+        }
         expect_sym("]", "subscript");
-        ExprPtr e = make(Expr::Tag::Getitem);
-        e->kids.push_back(std::move(a));
-        e->kids.push_back(std::move(idx));
-        a = std::move(e);
+        if (slice) {
+          ExprPtr e = make(Expr::Tag::Slice);
+          e->kids.push_back(std::move(a));
+          e->kids.push_back(std::move(start));
+          e->kids.push_back(std::move(stop));
+          e->kids.push_back(std::move(step));
+          a = std::move(e);
+        } else {
+          ExprPtr e = make(Expr::Tag::Getitem);
+          e->kids.push_back(std::move(a));
+          e->kids.push_back(std::move(start));
+          a = std::move(e);
+        }
       } else if (accept_sym("(")) {
         ExprPtr e = make(Expr::Tag::Call);
         parse_call_args(&e->kwargs, &e->kids);
@@ -601,7 +627,19 @@ class ExprParser {
       return e;
     }
     if (accept_sym("(")) {
+      // A parenthesized expression, or a tuple literal ('(a, b)' — the
+      // template's `not in ('xhigh', 'medium', 'low')`).
       ExprPtr e = ternary();
+      if (accept_sym(",")) {
+        ExprPtr t = make(Expr::Tag::ListLit);
+        t->kids.push_back(std::move(e));
+        while (!(peek().t == ETok::T::Sym && peek().s == ")")) {
+          t->kids.push_back(ternary());
+          if (!accept_sym(",")) break;
+        }
+        expect_sym(")", "tuple literal");
+        return t;
+      }
       expect_sym(")", "parenthesized expression");
       return e;
     }
@@ -846,10 +884,18 @@ class StmtParser {
       const size_t pb = p.find_first_not_of(" \t");
       const size_t pe = p.find_last_not_of(" \t");
       if (pb == std::string::npos) break;
-      const std::string name = p.substr(pb, pe - pb + 1);
-      if (name.find('=') != std::string::npos)
-        fail(line, "macro: default parameter values are not supported");
-      s->macro->params.push_back(name);
+      const std::string decl = p.substr(pb, pe - pb + 1);
+      // name, or name=default (the default parsed as an expression and
+      // evaluated at call time when the argument is absent).
+      const size_t eq = decl.find('=');
+      if (eq == std::string::npos) {
+        s->macro->params.push_back(decl);
+        s->macro->defaults.push_back(nullptr);
+      } else {
+        const size_t ne = decl.find_last_not_of(" \t", eq - 1);
+        s->macro->params.push_back(decl.substr(0, ne + 1));
+        s->macro->defaults.push_back(parse_expr_str(decl.substr(eq + 1), line));
+      }
       if (comma == std::string::npos) break;
       start = comma + 1;
     }
@@ -1087,10 +1133,12 @@ Value Value::get_attr(std::string_view name) const {
         if (m.first == name) return m.second;
       return Value();
     case Kind::String:
-      if (name == "split" || name == "strip") {
+      if (name == "split" || name == "strip" || name == "startswith" ||
+          name == "endswith" || name == "rstrip" || name == "lstrip") {
         Value v;
         v.kind_ = Kind::Method;
-        v.method_ = name == "split" ? 2 : 3;
+        v.method_ = name == "split" ? 2 : name == "strip" ? 3 : name == "startswith" ? 4
+                    : name == "endswith" ? 5 : name == "rstrip" ? 6 : 7;
         return v;
       }
       return Value();
@@ -1206,12 +1254,19 @@ struct Renderer {
   // just the parameter frame: macros close over the root frame only
   // (this template's macros reference nothing else across scopes).
   Value call_macro(const MacroDef& def, const std::vector<Value>& args) {
-    if (args.size() != def.params.size())
-      fail(ctx_.line, "macro '" + def.name + "': expected " +
+    if (args.size() > def.params.size())
+      fail(ctx_.line, "macro '" + def.name + "': expected at most " +
                      std::to_string(def.params.size()) +
                      " argument(s), got " + std::to_string(args.size()));
     Frame params;
     for (size_t k = 0; k < args.size(); ++k) params[def.params[k]] = args[k];
+    // Absent trailing arguments take their defaults (evaluated now, in
+    // the caller's context); a parameter without one is required.
+    for (size_t k = args.size(); k < def.params.size(); ++k) {
+      if (!def.defaults[k])
+        fail(ctx_.line, "macro '" + def.name + "': missing argument '" + def.params[k] + "'");
+      params[def.params[k]] = eval(*def.defaults[k]);
+    }
     std::vector<Frame> saved = std::move(ctx_.stack);
     ctx_.stack.clear();
     ctx_.stack.push_back(std::move(params));
@@ -1257,21 +1312,40 @@ struct Renderer {
       out.push_back(Value::string_value(s.substr(start)));
       return Value::list_value(std::move(out));
     }
-    // strip() — Python's no-argument strip over ' \t\n\r\x0b\x0c'.
+    if (method == 4 || method == 5) {  // startswith / endswith
+      if (recv.kind() != Value::Kind::String)
+        fail(ctx_.line, "'startswith'/'endswith' called on a non-string");
+      if (args.size() != 1 || args[0].kind() != Value::Kind::String)
+        fail(ctx_.line, "startswith()/endswith() take one string");
+      const std::string& s = recv.as_string();
+      const std::string& p = args[0].as_string();
+      if (p.size() > s.size()) return Value::boolean(false);
+      return Value::boolean(method == 4 ? s.compare(0, p.size(), p) == 0
+                                        : s.compare(s.size() - p.size(), p.size(), p) == 0);
+    }
+    // strip() / rstrip() / lstrip() — Python's, over ' \t\n\r\x0b\x0c'
+    // without an argument, over the argument's characters with one (the
+    // GLM-4.7 template's rstrip('\n') / lstrip('\n'), 2026-09-10).
+    const char* what = method == 6 ? "rstrip" : method == 7 ? "lstrip" : "strip";
     if (recv.kind() != Value::Kind::String) {
       std::string dbg = "kind=";
       dbg += std::to_string(static_cast<int>(recv.kind()));
       if (recv.kind() == Value::Kind::Undefined) dbg += " (undefined)";
-      fail(ctx_.line,
-           "'strip' called on a non-string (" + dbg + ")");
+      fail(ctx_.line, std::string("'") + what + "' called on a non-string (" + dbg + ")");
     }
-    if (!args.empty()) fail(ctx_.line, "strip() takes no arguments");
+    if (args.size() > 1 || (args.size() == 1 && args[0].kind() != Value::Kind::String))
+      fail(ctx_.line, std::string(what) + "() takes at most one string argument");
     static const char* kWs = " \t\n\r\x0b\x0c";
+    const std::string chars = args.empty() ? std::string(kWs) : args[0].as_string();
     const std::string& s = recv.as_string();
-    const size_t b = s.find_first_not_of(kWs);
-    if (b == std::string::npos) return Value::string_value(std::string());
-    const size_t e = s.find_last_not_of(kWs);
-    return Value::string_value(s.substr(b, e - b + 1));
+    size_t b = 0, e = s.size();
+    if (method != 6) b = std::min(s.find_first_not_of(chars), s.size());
+    if (method != 7) {
+      const size_t last = s.find_last_not_of(chars);
+      e = last == std::string::npos ? 0 : last + 1;
+    }
+    if (b >= e) return Value::string_value(std::string());
+    return Value::string_value(s.substr(b, e - b));
   }
 
   Value apply_filter(const Expr& e, const Value& v,
@@ -1329,6 +1403,36 @@ struct Renderer {
         return Value::integer(static_cast<int64_t>(utf8_length(v.as_string())));
       fail(ctx_.line, "length: not a list/map/string");
     }
+    if (name == "trim") {  // Python str.strip(), the whitespace set
+      if (v.kind() != Value::Kind::String) fail(ctx_.line, "trim: not a string");
+      const std::string& x = v.as_string();
+      const char* ws = " \t\n\r\x0b\x0c";
+      const size_t b = x.find_first_not_of(ws);
+      if (b == std::string::npos) return Value::string_value("");
+      const size_t e = x.find_last_not_of(ws);
+      return Value::string_value(x.substr(b, e - b + 1));
+    }
+    if (name == "default") {  // undefined -> the default (boolean=false form)
+      if (args.size() != 1) fail(ctx_.line, "default: takes one argument");
+      return v.is_defined() ? v : args[0];
+    }
+    if (name == "string") {  // str(x); strings stay themselves
+      if (v.kind() == Value::Kind::String) return v;
+      return Value::string_value(v.to_output_string());
+    }
+    if (name == "safe") return v;  // no autoescape: the identity
+    if (name == "items") {
+      if (v.kind() != Value::Kind::Map) fail(ctx_.line, "items: not a map");
+      std::vector<Value> out;
+      out.reserve(v.as_members()->size());
+      for (const auto& m : *v.as_members()) {
+        std::vector<Value> pair;
+        pair.push_back(Value::string_value(m.first));
+        pair.push_back(m.second);
+        out.push_back(Value::list_value(std::move(pair)));
+      }
+      return Value::list_value(std::move(out));
+    }
     fail(ctx_.line, "unsupported filter '" + name + "'");
   }
 
@@ -1352,8 +1456,54 @@ struct Renderer {
         const Value base = eval(*e.kids[0]);
         return base.get_item(eval(*e.kids[1]));
       }
+      case Expr::Tag::Slice: {
+        const Value base = eval(*e.kids[0]);
+        int64_t step = e.kids[3] ? eval(*e.kids[3]).as_int(1) : 1;
+        if (step == 0) fail(ctx_.line, "slice step cannot be zero");
+        const bool is_list = base.kind() == Value::Kind::List;
+        if (!is_list && base.kind() != Value::Kind::String)
+          fail(ctx_.line, "slice of a non-list/string");
+        std::vector<Value> items;
+        if (is_list) items = base.as_list();
+        else {  // codepoints
+          const std::string& x = base.as_string();
+          for (size_t i = 0; i < x.size();) {
+            const unsigned char c = static_cast<unsigned char>(x[i]);
+            const size_t n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+            items.push_back(Value::string_value(x.substr(i, n)));
+            i += n;
+          }
+        }
+        const int64_t len = static_cast<int64_t>(items.size());
+        // Python's slice index normalization.
+        auto norm = [&](const ExprPtr& k, int64_t dflt_pos, int64_t dflt_neg) {
+          if (!k) return step > 0 ? dflt_pos : dflt_neg;
+          int64_t i = eval(*k).as_int(0);
+          if (i < 0) i += len;
+          if (step > 0) return std::max<int64_t>(0, std::min<int64_t>(i, len));
+          return std::max<int64_t>(-1, std::min<int64_t>(i, len - 1));
+        };
+        const int64_t start = norm(e.kids[1], 0, len - 1);
+        const int64_t stop = norm(e.kids[2], len, -1);
+        std::vector<Value> out;
+        if (step > 0)
+          for (int64_t i = start; i < stop; i += step) out.push_back(items[static_cast<size_t>(i)]);
+        else
+          for (int64_t i = start; i > stop; i += step) out.push_back(items[static_cast<size_t>(i)]);
+        if (is_list) return Value::list_value(std::move(out));
+        std::string joined;
+        for (const Value& c : out) joined += c.as_string();
+        return Value::string_value(std::move(joined));
+      }
       case Expr::Tag::Call: {
         const Expr& callee = *e.kids[0];
+        if (callee.tag == Expr::Tag::Name && callee.name == "raise_exception") {
+          // transformers' raise_exception global: the template's own
+          // validation errors (bad roles, unsupported content) surface as
+          // render errors with the message.
+          if (e.kids.size() != 2) fail(ctx_.line, "raise_exception(message) only");
+          throw std::runtime_error("chat-template: " + eval(*e.kids[1]).to_output_string());
+        }
         if (callee.tag == Expr::Tag::Name && callee.name == "range") {
           // range(a, b) — the only form this template uses.
           if (e.kids.size() != 3) fail(ctx_.line, "range(a, b) only");
@@ -1489,6 +1639,12 @@ struct Renderer {
         bool r;
         if (e.name == "defined")
           r = v.is_defined();
+        else if (e.name == "undefined")
+          r = !v.is_defined();
+        else if (e.name == "true")
+          r = v.kind() == Value::Kind::Bool && v.truthy();
+        else if (e.name == "false")
+          r = v.kind() == Value::Kind::Bool && !v.truthy();
         else if (e.name == "none")
           r = v.kind() == Value::Kind::Null;
         else if (e.name == "string")
@@ -1600,6 +1756,11 @@ struct Renderer {
             lm.emplace_back("length",
                             Value::integer(
                                 static_cast<int64_t>(iter.as_list().size())));
+            // previtem / nextitem: undefined at the ends.
+            lm.emplace_back("previtem", idx > 0 ? iter.as_list()[idx - 1] : Value());
+            lm.emplace_back("nextitem", idx + 1 < iter.as_list().size()
+                                            ? iter.as_list()[idx + 1]
+                                            : Value());
             frame["loop"] = Value::namespace_value(std::move(lm));
             const Flow f = exec(s->body, out);
             ctx_.stack.pop_back();
@@ -1682,5 +1843,18 @@ std::string ChatTemplate::render(const Value& globals) const {
 }
 
 uint64_t ChatTemplate::source_hash() const { return impl_->hash; }
+
+bool ChatTemplate::reads(std::string_view name) const {
+  const std::string& src = impl_->source;
+  const auto ident = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+  };
+  for (size_t at = src.find(name); at != std::string::npos; at = src.find(name, at + 1)) {
+    const bool left_ok = at == 0 || !ident(src[at - 1]);
+    const bool right_ok = at + name.size() >= src.size() || !ident(src[at + name.size()]);
+    if (left_ok && right_ok) return true;
+  }
+  return false;
+}
 
 }  // namespace dgpp::text

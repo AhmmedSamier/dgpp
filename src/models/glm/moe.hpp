@@ -34,15 +34,26 @@
 
 namespace dgpp {
 
+// The router's scoring rule (2026-09-09). SigmoidBias: GLM's — sigmoid
+// scores, a per-expert bias on the selection key, the picked SCORES
+// normalized. SoftmaxTopk: Qwen3.8-Flash-Next's — fp32 softmax over the
+// bf16 logits, top_k on the logits, the picked probabilities normalized
+// and rounded to bf16; no bias (the router bias pointer may be null).
+enum class MoeRouterMode { SigmoidBias, SoftmaxTopk };
+
 struct GlmMoeConfig {
   int hidden = 4096;
   int inter = 2048;          // moe_intermediate_size (per expert)
   int n_experts = 288;
   int top_k = 8;
-  int n_shared_experts = 1;  // parser pins 1 (un-indexed tensor names)
+  // 1: the FP8 shared expert rides the routed chain (GLM). 0: the chain
+  // is the routed experts alone — the Qwen MoE adds its BF16 shared
+  // expert outside (models/qwen/moe_layer.hpp).
+  int n_shared_experts = 1;
   float routed_scaling_factor = 2.5f;
   bool norm_topk_prob = true;
-  float swiglu_limit = 10.0f;
+  float swiglu_limit = 10.0f;  // +inf: no clamps (the Qwen experts)
+  MoeRouterMode router_mode = MoeRouterMode::SigmoidBias;
 
   // Weight bytes of one routed expert (payload + block scales): the number
   // the traffic model charges per selected expert.
@@ -68,8 +79,8 @@ struct GlmMoeConfig {
     if (c.top_k > c.n_experts) fail("top_k must not exceed n_experts");
     if (c.n_experts > 4096)
       fail("n_experts must be <= 4096 (router smem: 2*n_experts floats)");
-    if (c.n_shared_experts != 1)
-      fail("only the single shared expert is implemented");
+    if (c.n_shared_experts != 0 && c.n_shared_experts != 1)
+      fail("n_shared_experts must be 0 or 1");
     if (!(c.swiglu_limit > 0)) fail("swiglu_limit must be positive");
   }
 };
@@ -88,11 +99,18 @@ struct GlmMoeConfig {
 // which is what removes the busiest-rank wait at the FFN boundary.
 struct GlmMoeWeights {
   const uint16_t* router_gate = nullptr;  // bf16 [n_experts, hidden]
-  const float* router_bias = nullptr;     // f32 [n_experts]
-  GlmQuantMatrix shared[3];               // gate, up, down (compressed, FP8)
+  const float* router_bias = nullptr;     // f32 [n_experts] (null: SoftmaxTopk)
+  GlmQuantMatrix shared[3];               // gate, up, down (FP8; unset when n_shared_experts == 0)
+  // The shared expert in NVFP4 (2026-09-09, GLM-4.7, docs/glm47_plan.md
+  // D3): the routed experts' shapes exactly (one expert wide), so the
+  // slot and grouped launches read it as view-table entry n_experts
+  // through the fp4 core. payload null = the FP8 shared triple above.
+  GlmFp4Matrix shared_fp4[3];
+  bool shared_nvfp4() const { return shared_fp4[0].payload != nullptr; }
   // The routed experts in EXACTLY ONE of the two formats (the layer's
   // GlmExpertFormat): FP8 block-128 triples or NVFP4 triples, [n_experts *
-  // 3] gate,up,down either way. The shared expert is FP8 under both.
+  // 3] gate,up,down either way. The shared expert is FP8 under both for
+  // GLM-5.3 (the composed hybrid); NVFP4 for GLM-4.7.
   const GlmQuantMatrix* experts = nullptr;
   const GlmFp4Matrix* experts_fp4 = nullptr;
   bool nvfp4() const { return experts_fp4 != nullptr; }
@@ -106,14 +124,26 @@ struct GlmMoeWeights {
 // per-binding upload), the slot kernels its consumers.
 struct MoeExpertView {
   const uint8_t* payload = nullptr;  // fp8: e4m3 [n, k]; nvfp4: e2m1 pairs [n, k/2]
-  const float* scales = nullptr;     // fp8: F32 128x128 block scales (nvfp4: null)
+  const float* scales = nullptr;     // fp8: F32 block scales (nvfp4: null)
   const uint8_t* fp4_scales = nullptr;  // nvfp4: e4m3 [n, k/16] (fp8: null)
   const float* fp4_global = nullptr;    // nvfp4: the matrix's F32 global scale
+  // The fp8 scale grid as log2 block sizes (7 = 128 on both axes, the
+  // checkpoint's grid; a TP slice re-blocked at gcd(128, slice) on its
+  // sliced axis — docs/qwen38_flash_next_plan.md D2). The GEMV core reads
+  // them; the tensor-core kernels take only 128 (the layer refuses).
+  int scale_shift_rows = 7;
+  int scale_shift_cols = 7;
+  static int shift_of(int block) {
+    int s = 0;
+    while ((1 << s) < block) ++s;
+    return s;
+  }
   static MoeExpertView of(const GlmQuantMatrix& m) {
-    return MoeExpertView{m.payload, m.scales, nullptr, nullptr};
+    return MoeExpertView{m.payload, m.scales, nullptr, nullptr,
+                         shift_of(m.scale_block_rows), shift_of(m.scale_block_cols)};
   }
   static MoeExpertView of(const GlmFp4Matrix& m) {
-    return MoeExpertView{m.payload, nullptr, m.scales, m.global_scale};
+    return MoeExpertView{m.payload, nullptr, m.scales, m.global_scale, 7, 7};
   }
 };
 

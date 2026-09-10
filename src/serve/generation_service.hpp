@@ -110,6 +110,10 @@ class ModelFrontend {
   // (the default) serves plain chat: tool requests refuse, nothing is
   // split.
   virtual dgpp::text::ChatMarkers markers() const { return {}; }
+  // Whether the checkpoint's template reads the global `name` (the knob
+  // gate for chat_template_kwargs: enable_thinking is a knob of the
+  // Qwen3.8-Flash-Next and GLM-4.7 templates, not of GLM-5.3-Flash's).
+  virtual bool template_reads(std::string_view) const { return false; }
   // The prefix cache's boundary tokens (M7): the ids whose positions in a
   // prompt are its structural boundaries — the template's role markers
   // (<|system|>, <|user|>, <|assistant|>, <|observation|>), so consecutive

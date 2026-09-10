@@ -65,27 +65,57 @@ struct ChatMarker {
   bool available() const { return id >= 0; }
 };
 
+// The tool-call block's inner format (2026-09-09): GLM keys every part on
+// an added token (<arg_key>/<arg_value> pairs); Qwen3.8 writes
+// "<function=NAME>\n<parameter=K>\nV\n</parameter>\n...</function>\n" as
+// TEXT between the <tool_call> tokens — only the outer markers are single
+// ids, so the block is parsed from its decoded text when it closes.
+enum class ToolFormat { kNone, kGlmMarkers, kQwenXml };
+
 struct ChatMarkers {
   ChatMarker think_open;        // "<think>"
   ChatMarker think_close;       // "</think>"
   ChatMarker tool_call_open;    // "<tool_call>"
   ChatMarker tool_call_close;   // "</tool_call>"
-  ChatMarker arg_key_open;      // "<arg_key>"
-  ChatMarker arg_key_close;     // "</arg_key>"
-  ChatMarker arg_value_open;    // "<arg_value>"
-  ChatMarker arg_value_close;   // "</arg_value>"
+  ChatMarker arg_key_open;      // "<arg_key>"      (GLM)
+  ChatMarker arg_key_close;     // "</arg_key>"     (GLM)
+  ChatMarker arg_value_open;    // "<arg_value>"    (GLM)
+  ChatMarker arg_value_close;   // "</arg_value>"   (GLM)
   // The template's role markers (<|system|>, <|user|>, <|assistant|>,
-  // <|observation|>), the ones the tokenizer has: their positions in a
-  // prompt are the prefix cache's structural boundaries (M7).
+  // <|observation|>; <|im_start|>, <|im_end|>), the ones the tokenizer
+  // has: their positions in a prompt are the prefix cache's structural
+  // boundaries (M7).
   std::vector<ChatMarker> role_markers;
+  // The tokenizer's bare newline token, when "\n" encodes to one id: the
+  // Qwen template's generation prompt ends in "<think>\n", the GLM one
+  // in "<think>" — both open the reply inside the reasoning.
+  ChatMarker newline;
 
-  // The reasoning split needs </think>; tool calls need all six markers.
-  bool reasoning_available() const { return think_close.available(); }
-  bool tool_calls_available() const {
-    return tool_call_open.available() && tool_call_close.available() &&
-           arg_key_open.available() && arg_key_close.available() &&
-           arg_value_open.available() && arg_value_close.available();
+  // Whether a rendered prompt leaves the reply inside an opened <think>
+  // (its last token is think_open, or think_open followed by the bare
+  // newline) — the parser then starts in the reasoning and the usage
+  // counts reasoning tokens (2026-09-09: the Qwen turn's trailing newline
+  // hid the opened block; the reasoning leaked into content).
+  bool prompt_opens_thinking(const std::vector<int64_t>& prompt) const {
+    if (!think_open.available() || prompt.empty()) return false;
+    if (prompt.back() == think_open.id) return true;
+    return newline.available() && prompt.size() >= 2 && prompt.back() == newline.id &&
+           prompt[prompt.size() - 2] == think_open.id;
   }
+
+  // The reasoning split needs </think>; tool calls need the six GLM
+  // markers or the two Qwen ones.
+  bool reasoning_available() const { return think_close.available(); }
+  ToolFormat tool_format() const {
+    if (tool_call_open.available() && tool_call_close.available() &&
+        arg_key_open.available() && arg_key_close.available() &&
+        arg_value_open.available() && arg_value_close.available())
+      return ToolFormat::kGlmMarkers;
+    if (tool_call_open.available() && tool_call_close.available())
+      return ToolFormat::kQwenXml;
+    return ToolFormat::kNone;
+  }
+  bool tool_calls_available() const { return tool_format() != ToolFormat::kNone; }
 
   // Looks every marker up by its text among the tokenizer's added tokens
   // (a revision without one leaves it unavailable — never guessed).
@@ -177,6 +207,9 @@ class ToolCallParser {
   void enter_tool_call(int64_t opening_id);
   void abort_block(std::vector<Event>* out);
   void complete_block(std::vector<Event>* out);
+  // The Qwen format: the closed block's text into name_/args_ (false when
+  // malformed — the caller aborts the block as content).
+  bool parse_qwen_block(const std::string& text);
   std::string typed_value(const std::string& function, const std::string& key,
                           const std::string& text) const;
 

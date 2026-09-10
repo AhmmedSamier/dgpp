@@ -5,8 +5,8 @@
 //
 //   {
 //     "model": "unsloth/GLM-5.3-Flash-FP8",
-//     "nodes": ["192.0.2.11", "192.0.2.12", ...],   // rank = index; [0] is the head
-//     "ssh_user": "user",                               // the launcher's ssh user
+//     "nodes": ["192.0.2.11", "192.0.2.12", ...],         // rank = index; [0] is the head
+//     "ssh_user": "<login>",                               // the launcher's ssh user
 //     "ports": {"http": 18080, "fabric": 29970, "journal": 29971},
 //     "engine": {"max_concurrency": 4, "kv_capacity": 8192, "kv_dtype": "bf16", ... },
 //     "paths": {"log_dir": "~/dgpp/log", "stage_dir": "/tmp/bus4",

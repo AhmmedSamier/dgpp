@@ -1,5 +1,7 @@
 #include "models/glm/loader.hpp"
 
+#include "loaders/weight_build.hpp"
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -17,52 +19,6 @@ namespace dgpp {
 
 namespace {
 
-constexpr size_t kAllocAlign = 256;
-
-size_t align_up_256(size_t b) {
-  return (b + kAllocAlign - 1) & ~(kAllocAlign - 1);
-}
-
-// One dequant job gathered during the copy phase, launched after all CPU
-// writes complete (host access to managed memory during kernel execution is
-// the gray zone this two-phase build exists to avoid).
-struct DequantJob {
-  const uint8_t* payload;
-  const float* scales;
-  uint16_t* out;
-  int64_t rows;
-  int64_t cols;
-};
-
-// One strided pack copy. Two classes now that the bump is device memory:
-// a HOST-source pack (the KDA o_proj column slice out of the mmap) runs in
-// phase one as a host memcpy into the staging mirror; a DEVICE-source pack
-// (the DSA o_proj slice out of a bridge buffer the dequant kernels write)
-// runs after the dequants as a strided device copy on the loader's stream.
-struct PackJob {
-  const uint16_t* src;
-  uint16_t* dst;      // DEVICE address (the grant)
-  size_t src_pitch;   // bytes
-  size_t dst_pitch;
-  size_t width;       // <= both pitches
-  size_t rows;
-  bool src_on_device;
-};
-
-// FNV-1a (the replicated digest's per-tensor hash; checksum class, not
-// adversarial — see GlmReplicatedDigest).
-uint64_t fnv1a(const void* data, size_t n, uint64_t h) {
-  const uint8_t* p = static_cast<const uint8_t*>(data);
-  for (size_t i = 0; i < n; ++i) {
-    h ^= p[i];
-    h *= 1099511628211ull;
-  }
-  return h;
-}
-
-// The name after "model.language_model.layers.{N}." — the suffix the
-// replicated/bridge classifiers match. Globals never reach here (their
-// classes are unambiguous).
 std::string_view layer_suffix(const std::string& name) {
   size_t dots = 0, i = 0;
   for (; i < name.size() && dots < 4; ++i)
@@ -145,82 +101,6 @@ bool is_full_read(const GlmExpectedTensor& e, bool bridge_active) {
 
 }  // namespace
 
-// Weight bump for streamed/resident layer weights (defined here, pimpl'd in
-// the header). Counting mode walks the same grant sequence without touching
-// memory — layer_bytes() and load_layer() run the SAME build code, so the
-// sizing formula cannot drift.
-//
-// PLACEMENT (2026-09-01, M6 Stage 2 round 3): DEVICE memory (cudaMalloc),
-// built through a pinned HOST staging mirror of the same layout. On the
-// GB10 the GPU streams cudaMallocManaged memory at ~160 GB/s whatever the
-// advice/prefetch, pinned host memory at ~228 falling to ~180 once tens of
-// GB are pinned (4 KB translations), and cudaMalloc at ~248 cold across 70
-// GiB (micro_mem_bw -m/-a/-f/-p, micro_gemv_bw -c) — the weights are the
-// decode step's bytes, and every weight-streaming kernel in the profile sat
-// at the managed plateau. The build code keeps writing with host memcpys;
-// it addresses the mirror through host(), and one H2D copy per layer lands
-// the bytes. The pointers handed out (alloc) are the DEVICE addresses the
-// kernels consume; nothing on the host may dereference them.
-struct GlmLayerBump {
-  void* base = nullptr;   // device memory: the addresses alloc() hands out
-  void* stage = nullptr;  // pinned host mirror for the build (same offsets)
-  size_t capacity = 0;
-  size_t cursor = 0;
-  bool counting = false;
-
-  ~GlmLayerBump() {
-    if (base) cudaFree(base);
-  }
-  GlmLayerBump() = default;
-  GlmLayerBump(const GlmLayerBump&) = delete;
-  GlmLayerBump& operator=(const GlmLayerBump&) = delete;
-
-  void init(size_t cap) {
-    DGPP_CUDA_OK(cudaMalloc(&base, cap));
-    capacity = cap;
-    cursor = 0;
-  }
-
-  // The host-side address of a device grant: where the build writes.
-  template <typename T>
-  T* host(T* dev) const {
-    if (!stage) throw std::logic_error("glm loader: bump has no staging");
-    return reinterpret_cast<T*>(static_cast<char*>(stage) +
-                                (reinterpret_cast<const char*>(dev) -
-                                 static_cast<const char*>(base)));
-  }
-
-  // Every grant is 256-aligned, so a layer's total is exactly the sum of
-  // per-tensor aligned sizes — no inter-allocation padding surprises.
-  void* alloc(size_t bytes) {
-    const size_t grant = align_up_256(bytes);
-    if (cursor + grant > capacity)
-      throw std::runtime_error("glm loader: layer bump OOM");
-    void* p = counting ? nullptr : static_cast<char*>(base) + cursor;
-    cursor += grant;
-    return p;
-  }
-
-  void reset() { cursor = 0; }
-};
-
-void run_host_pack(const PackJob& j, const GlmLayerBump& bump) {
-  uint16_t* dst = bump.host(j.dst);
-  if (j.width == j.dst_pitch && j.width == j.src_pitch) {
-    std::memcpy(dst, j.src, j.width * j.rows);  // degenerate: contiguous
-    return;
-  }
-  for (size_t r = 0; r < j.rows; ++r)
-    std::memcpy(dst + r * (j.dst_pitch / 2), j.src + r * (j.src_pitch / 2),
-                j.width);
-}
-
-void run_device_pack(const PackJob& j, cudaStream_t stream) {
-  DGPP_CUDA_OK(cudaMemcpy2DAsync(j.dst, j.dst_pitch, j.src, j.src_pitch,
-                                 j.width, j.rows, cudaMemcpyDeviceToDevice,
-                                 stream));
-}
-
 
 namespace {
 
@@ -234,25 +114,9 @@ namespace {
 // covers the full extent, every grant sequence and byte is the M4 build's,
 // so the world=1 path cannot drift. The local arithmetic mirrors
 // GlmTpViews::bind exactly; glm_tp_test pins the two paths bitwise.
-struct BuildCtx {
+struct BuildCtx : WeightBuilder<GlmExpectedTensor> {
   const GlmTextConfig& cfg;
-  const std::vector<GlmExpectedTensor>& table;
-  const std::unordered_map<std::string, const GlmExpectedTensor*>& by_name;
-  GlmLayerBump& bump;
   GlmLayerResident& out;  // pointer stores are harmless in counting mode
-  const std::unordered_map<std::string, const TensorInfo*>& tensors;
-  std::vector<DequantJob>& jobs;
-  std::vector<PackJob>& packs;
-  bool copy;
-  int rank = 0;
-  int world = 1;
-  // Resident builds read each source tensor exactly once: stream it in
-  // ahead of the copy and drop it from the mapping + page cache after
-  // (SafetensorsFile::prefetch/discard). Streaming builds re-read layers
-  // every forward and want the cache kept.
-  bool one_pass_sources = false;
-  uint64_t source_bytes = 0;   // checkpoint bytes touched (copy mode)
-  uint64_t verbatim_bytes = 0;  // the rank-invariant re-read subset
 
   // Local geometry at tp_size=world (world=1: the full geometry).
   KdaGeometry kgeo{};
@@ -262,12 +126,31 @@ struct BuildCtx {
   int64_t shared_inter = 0;   // moe_intermediate_size/world (routed too)
   int64_t dsa_kv_rows_head = 0;  // qk_nope + v per head
 
-  bool sharded() const { return world > 1; }
+  BuildCtx(const GlmTextConfig& cfg_,
+           const std::vector<GlmExpectedTensor>& table_,
+           const std::unordered_map<std::string, const GlmExpectedTensor*>& by_name_,
+           GlmLayerBump& bump_, GlmLayerResident& out_,
+           const std::unordered_map<std::string, const TensorInfo*>& tensors_,
+           std::vector<DequantJob>& jobs_, std::vector<PackJob>& packs_,
+           bool copy_, int rank_, int world_)
+      : WeightBuilder<GlmExpectedTensor>(table_, by_name_, bump_, tensors_, jobs_,
+                                         packs_, copy_, rank_, world_, "glm loader"),
+        cfg(cfg_), out(out_) {}
 
-  // Derives the local geometry from (cfg, rank, world). Called at the top
-  // of build_layer — the single entry every build goes through. The
-  // geometry validators run inside from_config, so a bad world fails
-  // before any allocation.
+  // The family's classification for the shared primitives: replicated
+  // (rank-invariant reads), the DSA bridge (read whole, sliced after
+  // dequant), the NVFP4 global scale.
+  bool replicated(const GlmExpectedTensor& e) const override { return is_replicated(e); }
+  bool verbatim_ok(const GlmExpectedTensor& e) const override {
+    return is_replicated(e) || is_dsa_bridge(e, dsa_bridge);
+  }
+  bool full_read(const GlmExpectedTensor& e) const override {
+    return is_full_read(e, dsa_bridge);
+  }
+  bool fp4_global(const GlmExpectedTensor& e) const override {
+    return e.role == GlmTensorRole::Fp4Global;
+  }
+
   void init_geometry() {
     KdaConfig kc = cfg.kda_config();
     kc.tp_size = world;
@@ -282,326 +165,6 @@ struct BuildCtx {
     // when this rank's q_b rows and o_proj columns start on the 128-wide
     // scale grid, the bf16 bridge otherwise (the test fixtures at world 4).
     dsa_bridge = (dgeo.local_q_rows % 128) != 0 || (dgeo.local_v_rows % 128) != 0;
-  }
-
-  const GlmExpectedTensor& expected(const std::string& name) const {
-    auto it = by_name.find(name);
-    if (it == by_name.end())
-      throw std::runtime_error("glm loader: '" + name +
-                               "' missing from expected table (builder bug)");
-    return *it->second;
-  }
-
-  const TensorInfo& source(const std::string& name) const {
-    auto it = tensors.find(name);
-    if (it == tensors.end() || !it->second)
-      throw std::runtime_error("glm loader: tensor not in checkpoint: " + name);
-    const TensorInfo& t = *it->second;
-    if (one_pass_sources && t.owner) t.owner->prefetch(t);
-    return t;
-  }
-  // The read is complete: every byte this rank wants from `t` sits in the
-  // staging mirror. A sliced read still consumed the whole tensor's pages
-  // (column slices touch every row), so the whole tensor goes.
-  void consumed(const TensorInfo& t) const {
-    if (one_pass_sources && t.owner) t.owner->discard(t);
-  }
-
-  // Byte accounting chokepoint: every checkpoint byte this build touches
-  // flows through here, with its tensor. Replicated and DSA-bridge reads
-  // form the rank-invariant re-read set (re-read by every rank at world>1
-  // — the reconcile's constant term). Sharded-class tensors arrive as
-  // slices; the drift guard that matters is in load_raw.
-  void note_read(const GlmExpectedTensor& e, size_t bytes) {
-    if (!copy) return;
-    source_bytes += bytes;
-    if (is_full_read(e, dsa_bridge)) verbatim_bytes += bytes;
-  }
-
-  // ---- verbatim loads (replicated at every world; world=1: everything) --
-  const void* load_raw(const std::string& name) {
-    const GlmExpectedTensor& e = expected(name);
-    if (sharded() && !is_replicated(e) && !is_dsa_bridge(e, dsa_bridge))
-      throw std::runtime_error(
-          "glm loader: TP read-class drift — '" + name +
-          "' is sharded but was loaded verbatim (the slicing build and "
-          "the replicated classifier disagree; fix one of them)");
-    void* dst = bump.alloc(e.nbytes());
-    if (copy) {
-      const TensorInfo& t = source(name);
-      std::memcpy(bump.host(dst), t.data, e.nbytes());
-      note_read(e, e.nbytes());
-      consumed(t);
-    }
-    return dst;
-  }
-  uint16_t* load_bf16(const std::string& name) {
-    return static_cast<uint16_t*>(const_cast<void*>(load_raw(name)));
-  }
-  float* load_f32(const std::string& name) {
-    return static_cast<float*>(const_cast<void*>(load_raw(name)));
-  }
-
-  // ---- contiguous row/element slices (bf16/f32 — no scale grid) --------
-  uint16_t* load_bf16_rows(const std::string& name, int64_t row_start,
-                          int64_t rows) {
-    const GlmExpectedTensor& e = expected(name);
-    check_range(name, row_start, rows, e.shape[0]);
-    const int64_t width = e.numel() / e.shape[0];  // row width, elements
-    uint16_t* dst = static_cast<uint16_t*>(
-        bump.alloc(static_cast<size_t>(rows) * static_cast<size_t>(width) *
-                   2));
-    if (copy) {
-      const TensorInfo& t = source(name);
-      const uint8_t* src = static_cast<const uint8_t*>(t.data);
-      std::memcpy(bump.host(dst), src + static_cast<size_t>(row_start) * width * 2,
-                  static_cast<size_t>(rows) * width * 2);
-      note_read(e, static_cast<size_t>(rows) * width * 2);
-      consumed(t);
-    }
-    return dst;
-  }
-
-  float* load_f32_range(const std::string& name, int64_t start, int64_t count) {
-    const GlmExpectedTensor& e = expected(name);
-    check_range(name, start, count, e.shape[0]);
-    float* dst = static_cast<float*>(bump.alloc(static_cast<size_t>(count) * 4));
-    if (copy) {
-      const TensorInfo& t = source(name);
-      const uint8_t* src = static_cast<const uint8_t*>(t.data);
-      std::memcpy(bump.host(dst), src + static_cast<size_t>(start) * 4,
-                  static_cast<size_t>(count) * 4);
-      note_read(e, static_cast<size_t>(count) * 4);
-      consumed(t);
-    }
-    return dst;
-  }
-
-  // ---- quantized slices (E4M3 + 128x128 block scales) -----------------
-  // Row slice: payload rows are contiguous and the scale grid re-anchors
-  // exactly at the 128-ALIGNED start (the §5.2 contract). Degenerate
-  // (0, full): the M4 load_quant, grant-for-grant.
-  GlmQuantMatrix load_quant_rows(const std::string& name, int64_t row_start,
-                                 int64_t rows) {
-    const GlmExpectedTensor& e = expected(name);
-    if (row_start % 128 != 0)
-      throw std::invalid_argument(
-          "glm loader: quantized row slice of '" + name +
-          "' must start 128-aligned (scale-grid slice contract)");
-    check_range(name, row_start, rows, e.shape[0]);
-    const GlmExpectedTensor& es = expected(name + "_scale_inv");
-    const int64_t cols = e.shape[1];
-    const int64_t sb = (cols + 127) / 128;       // scale blocks per row
-    const int64_t scale_rows = (rows + 127) / 128;
-    GlmQuantMatrix q;
-    q.rows = rows;
-    q.cols = cols;
-    q.payload = static_cast<const uint8_t*>(
-        bump.alloc(static_cast<size_t>(rows) * static_cast<size_t>(cols)));
-    q.scales = static_cast<const float*>(
-        bump.alloc(static_cast<size_t>(scale_rows) * sb * 4));
-    if (copy) {
-      const TensorInfo& tp = source(name);
-      const TensorInfo& ts = source(es.name);
-      std::memcpy(bump.host(const_cast<uint8_t*>(q.payload)),
-                  static_cast<const uint8_t*>(tp.data) +
-                      static_cast<size_t>(row_start) * cols,
-                  static_cast<size_t>(rows) * cols);
-      std::memcpy(bump.host(const_cast<float*>(q.scales)),
-                  static_cast<const float*>(ts.data) + (row_start / 128) * sb,
-                  static_cast<size_t>(scale_rows) * sb * 4);
-      note_read(e,
-               static_cast<size_t>(rows) * cols +
-                   static_cast<size_t>(scale_rows) * sb * 4);
-      consumed(tp);
-      consumed(ts);
-    }
-    return q;
-  }
-
-  // Column slice -> PACKED payload + packed scale columns. Column starts
-  // carry the same 128-alignment contract (the local scale grid re-anchors
-  // at the pack origin). Degenerate (0, full_cols): the M4 load_quant,
-  // grant-for-grant (the strided row loop collapses to one memcpy).
-  GlmQuantMatrix load_quant_cols(const std::string& name, int64_t col_start,
-                                 int64_t cols) {
-    const GlmExpectedTensor& e = expected(name);
-    if (col_start % 128 != 0)
-      throw std::invalid_argument(
-          "glm loader: quantized column slice of '" + name +
-          "' must start 128-aligned (scale-grid slice contract)");
-    check_range(name, col_start, cols, e.shape[1]);
-    const GlmExpectedTensor& es = expected(name + "_scale_inv");
-    const int64_t rows = e.shape[0];
-    const int64_t full_cols = e.shape[1];
-    const int64_t sb_full = (full_cols + 127) / 128;
-    const int64_t sb_s = (cols + 127) / 128;
-    const int64_t scale_rows = (rows + 127) / 128;
-    GlmQuantMatrix q;
-    q.rows = rows;
-    q.cols = cols;
-    q.payload = static_cast<const uint8_t*>(
-        bump.alloc(static_cast<size_t>(rows) * static_cast<size_t>(cols)));
-    q.scales = static_cast<const float*>(
-        bump.alloc(static_cast<size_t>(scale_rows) * sb_s * 4));
-    if (copy) {
-      const TensorInfo& tp = source(name);
-      const TensorInfo& ts = source(es.name);
-      const uint8_t* sp = static_cast<const uint8_t*>(tp.data);
-      const float* ss = static_cast<const float*>(ts.data);
-      uint8_t* hp = bump.host(const_cast<uint8_t*>(q.payload));
-      float* hs = bump.host(const_cast<float*>(q.scales));
-      if (cols == full_cols && col_start == 0) {
-        std::memcpy(hp, sp, static_cast<size_t>(rows) * cols);
-        std::memcpy(hs, ss, static_cast<size_t>(scale_rows) * sb_s * 4);
-      } else {
-        for (int64_t r = 0; r < rows; ++r)
-          std::memcpy(hp + r * cols, sp + r * full_cols + col_start, cols);
-        for (int64_t r = 0; r < scale_rows; ++r)
-          std::memcpy(hs + r * sb_s, ss + r * sb_full + col_start / 128,
-                      sb_s * 4);
-      }
-      note_read(e,
-               static_cast<size_t>(rows) * cols +
-                   static_cast<size_t>(scale_rows) * sb_s * 4);
-      consumed(tp);
-      consumed(ts);
-    }
-    return q;
-  }
-
-  // ---- NVFP4 slices (e2m1 pairs + e4m3 scales per 16 + F32 global) ----
-  // `base` names the logical [N, K] matrix ("...gate_proj.weight"); the
-  // triple is base_packed [N, K/2] U8, base_scale [N, K/16] F8_E4M3 and
-  // base_global_scale [1] F32. Row slices need no alignment (every row
-  // carries its own scales); column slices start and span whole 16-blocks
-  // (a block is also a whole number of packed bytes). The resident bytes
-  // are the checkpoint's, untouched.
-  GlmFp4Matrix load_fp4_rows(const std::string& base, int64_t row_start,
-                             int64_t rows, const float* global) {
-    const GlmExpectedTensor& ep = expected(base + "_packed");
-    const GlmExpectedTensor& es = expected(base + "_scale");
-    const int64_t N = ep.shape[0];
-    const int64_t cols = ep.shape[1] * 2;
-    fp4_check_cols(cols, "glm loader");
-    check_range(base, row_start, rows, N);
-    if (es.shape[0] != N || es.shape[1] != cols / kFp4Group)
-      throw std::runtime_error("glm loader: NVFP4 scale geometry mismatch on " + base);
-    const size_t pc = static_cast<size_t>(cols / 2);
-    const size_t sc = static_cast<size_t>(cols / kFp4Group);
-    GlmFp4Matrix q;
-    q.rows = rows;
-    q.cols = cols;
-    q.global_scale = global;
-    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(rows) * pc));
-    q.scales = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(rows) * sc));
-    if (copy) {
-      const TensorInfo& tp = source(ep.name);
-      const TensorInfo& ts = source(es.name);
-      std::memcpy(bump.host(const_cast<uint8_t*>(q.payload)),
-                  static_cast<const uint8_t*>(tp.data) + static_cast<size_t>(row_start) * pc,
-                  static_cast<size_t>(rows) * pc);
-      std::memcpy(bump.host(const_cast<uint8_t*>(q.scales)),
-                  static_cast<const uint8_t*>(ts.data) + static_cast<size_t>(row_start) * sc,
-                  static_cast<size_t>(rows) * sc);
-      note_read(ep, static_cast<size_t>(rows) * pc);
-      note_read(es, static_cast<size_t>(rows) * sc);
-      consumed(tp);
-      consumed(ts);
-    }
-    return q;
-  }
-
-  GlmFp4Matrix load_fp4_cols(const std::string& base, int64_t col_start,
-                             int64_t cols, const float* global) {
-    const GlmExpectedTensor& ep = expected(base + "_packed");
-    const GlmExpectedTensor& es = expected(base + "_scale");
-    const int64_t N = ep.shape[0];
-    const int64_t full_cols = ep.shape[1] * 2;
-    fp4_check_cols(full_cols, "glm loader");
-    fp4_check_cols(cols, "glm loader");
-    if (col_start % kFp4Group != 0)
-      throw std::invalid_argument(
-          "glm loader: NVFP4 column slice of '" + base +
-          "' must start on a 16-element block boundary");
-    check_range(base, col_start, cols, full_cols);
-    if (es.shape[0] != N || es.shape[1] != full_cols / kFp4Group)
-      throw std::runtime_error("glm loader: NVFP4 scale geometry mismatch on " + base);
-    const size_t pc = static_cast<size_t>(cols / 2), pc_full = static_cast<size_t>(full_cols / 2);
-    const size_t sc = static_cast<size_t>(cols / kFp4Group), sc_full = static_cast<size_t>(full_cols / kFp4Group);
-    GlmFp4Matrix q;
-    q.rows = N;
-    q.cols = cols;
-    q.global_scale = global;
-    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(N) * pc));
-    q.scales = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(N) * sc));
-    if (copy) {
-      const TensorInfo& tp = source(ep.name);
-      const TensorInfo& ts = source(es.name);
-      const uint8_t* sp = static_cast<const uint8_t*>(tp.data);
-      const uint8_t* ss = static_cast<const uint8_t*>(ts.data);
-      uint8_t* hp = bump.host(const_cast<uint8_t*>(q.payload));
-      uint8_t* hs = bump.host(const_cast<uint8_t*>(q.scales));
-      if (cols == full_cols) {
-        std::memcpy(hp, sp, static_cast<size_t>(N) * pc);
-        std::memcpy(hs, ss, static_cast<size_t>(N) * sc);
-      } else {
-        for (int64_t r = 0; r < N; ++r) {
-          std::memcpy(hp + r * pc, sp + r * pc_full + col_start / 2, pc);
-          std::memcpy(hs + r * sc, ss + r * sc_full + col_start / kFp4Group, sc);
-        }
-      }
-      note_read(ep, static_cast<size_t>(N) * pc);
-      note_read(es, static_cast<size_t>(N) * sc);
-      consumed(tp);
-      consumed(ts);
-    }
-    return q;
-  }
-
-  // One matrix's F32 global scale into its slot of the layer's gathered
-  // array (a device address inside the bump). Read whole by every rank;
-  // note_read files it under the full-read set (is_full_read).
-  void load_fp4_global(const std::string& base, float* slot) {
-    const GlmExpectedTensor& eg = expected(base + "_global_scale");
-    if (eg.role != GlmTensorRole::Fp4Global || eg.numel() != 1)
-      throw std::runtime_error("glm loader: '" + eg.name + "' is not a global scale");
-    if (copy) {
-      const TensorInfo& t = source(eg.name);
-      std::memcpy(bump.host(slot), t.data, 4);
-      note_read(eg, 4);
-      consumed(t);
-    }
-  }
-
-  void check_range(const std::string& name, int64_t start, int64_t count,
-                   int64_t dim) const {
-    if (start < 0 || count < 0 || count > dim || start > dim - count)
-      throw std::runtime_error("glm loader: slice of '" + name +
-                               "' out of bounds");
-  }
-
-  // Compressed residency: payload + scales, byte-for-byte.
-  GlmQuantMatrix load_quant(const std::string& payload_name) {
-    const GlmExpectedTensor& e = expected(payload_name);
-    GlmQuantMatrix q;
-    q.rows = e.shape[0];
-    q.cols = e.shape[1];
-    q.payload = static_cast<const uint8_t*>(load_raw(payload_name));
-    q.scales = static_cast<const float*>(load_raw(payload_name + "_scale_inv"));
-    return q;
-  }
-
-  // Transient bridge for the M3 bf16 seam: compressed copies land in the
-  // bump, a dequant job writes the BF16 form alongside. The bridge reads
-  // the FULL quantized source at every world (see is_dsa_bridge).
-  uint16_t* load_dequant_bf16(const std::string& payload_name) {
-    const GlmQuantMatrix q = load_quant(payload_name);
-    uint16_t* out = static_cast<uint16_t*>(
-        bump.alloc(static_cast<size_t>(q.rows) * static_cast<size_t>(q.cols) *
-                   2));
-    jobs.push_back(DequantJob{q.payload, q.scales, out, q.rows, q.cols});
-    return out;
   }
 
   void build_mhc(int layer) {
@@ -951,21 +514,6 @@ struct BuildCtx {
   }
 };
 
-// Load-boundary synchronization: waits for every outstanding READER of the
-// bump. With a registered reader stream that is exactly two streams (the
-// model's compute stream + the loader's dequant stream, idle since the
-// previous load's exit sync). Without one, the conservative M4 default:
-// the whole device — standalone callers load with unknown readers, and no
-// in-process peer exists to spin against.
-void sync_load_boundary(cudaStream_t reader, cudaStream_t dequant) {
-  if (reader) {
-    DGPP_CUDA_OK(cudaStreamSynchronize(reader));
-    DGPP_CUDA_OK(cudaStreamSynchronize(dequant));
-  } else {
-    DGPP_CUDA_OK(cudaDeviceSynchronize());
-  }
-}
-
 // Runs one layer's build in counting mode; returns the exact byte total at
 // the given rank's geometry.
 size_t count_layer_bytes(const GlmTextConfig& cfg, int layer, int rank,
@@ -981,8 +529,8 @@ size_t count_layer_bytes(const GlmTextConfig& cfg, int layer, int rank,
   std::vector<DequantJob> jobs;
   std::vector<PackJob> packs;
   std::unordered_map<std::string, const TensorInfo*> no_tensors;
-  BuildCtx ctx{cfg,    table, by_name, bump,  scratch,
-                no_tensors, jobs,  packs,   false, rank, world};
+  BuildCtx ctx(cfg,    table, by_name, bump,  scratch,
+                no_tensors, jobs,  packs,   false, rank, world);
   ctx.build_layer(layer);
   return bump.cursor;
 }
@@ -1123,24 +671,6 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
   if (residency_ == GlmResidency::Resident) open_resident_image();
 }
 
-namespace {
-// /proc/meminfo MemAvailable in bytes (0 when unreadable): what the kernel
-// will hand out once it reclaims the page cache — which cudaMemGetInfo's
-// "free" on the GB10's unified pool does NOT count. After one resident
-// load the checkpoint's ~30 GiB of file pages sit in that cache, and the
-// next process's footprint check would refuse memory that is available
-// (2026-09-03: rank 2 reported 88 GiB free of 120 with 117 available).
-size_t host_mem_available_bytes() {
-  std::ifstream in("/proc/meminfo");
-  std::string key;
-  uint64_t kib = 0;
-  std::string unit;
-  while (in >> key >> kib >> unit)
-    if (key == "MemAvailable:") return static_cast<size_t>(kib) * 1024;
-  return 0;
-}
-}  // namespace
-
 // Fail in the constructor, not three minutes into the load: the resident
 // footprint is known from the byte formula before a single byte moves.
 // The measure is the larger of the device's free memory and the host's
@@ -1179,13 +709,6 @@ namespace {
 std::string& resident_image_dir_storage() {
   static std::string dir;
   return dir;
-}
-uint64_t fnv_mix(uint64_t h, uint64_t v) {
-  for (int i = 0; i < 8; ++i) {
-    h = (h ^ (v & 0xFF)) * 1099511628211ull;
-    v >>= 8;
-  }
-  return h;
 }
 }  // namespace
 
@@ -1263,8 +786,8 @@ void GlmLayerStream::restore_layer_from_image(int layer, GlmLayerBump& bump,
   std::vector<DequantJob> jobs;
   std::vector<PackJob> packs;
   std::unordered_map<std::string, const TensorInfo*> no_tensors;
-  BuildCtx ctx{cfg_,       table, by_name, bump,  out,
-               no_tensors, jobs,  packs,   false, rank_, world_};
+  BuildCtx ctx(cfg_,       table, by_name, bump,  out,
+               no_tensors, jobs,  packs,   false, rank_, world_);
   ctx.build_layer(layer);
   const size_t bytes = bump.cursor;
   if (bytes != layer_bytes(cfg_, layer, rank_, world_))
@@ -1344,8 +867,8 @@ void GlmLayerStream::build_layer_into(int layer, GlmLayerBump& bump,
 
   std::vector<DequantJob> jobs;
   std::vector<PackJob> packs;
-  BuildCtx ctx{cfg_,    table, by_name, bump,          out,
-               tensors_, jobs,  packs,   true,         rank_,   world_};
+  BuildCtx ctx(cfg_,    table, by_name, bump,          out,
+               tensors_, jobs,  packs,   true,         rank_,   world_);
   ctx.one_pass_sources = residency_ == GlmResidency::Resident;
   ctx.build_layer(layer);
 

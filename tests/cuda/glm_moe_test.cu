@@ -205,9 +205,10 @@ struct SmallCase {
       // Routed experts as NVFP4 triples (payload, per-row scales, and one
       // gathered global-scale array, the loader's layout); the shared
       // triple FP8 from the fp8 vectors' first three entries.
-      DGPP_CUDA_OK(cudaMallocManaged(&d_fp4_globals, static_cast<size_t>(E) * 3 * 4));
-      expert_mats_fp4.resize(static_cast<size_t>(E) * 3);
-      for (int m = 0; m < E * 3; ++m) {
+      const int fp4_mats = host_w.fp4_matrices(E);
+      DGPP_CUDA_OK(cudaMallocManaged(&d_fp4_globals, static_cast<size_t>(fp4_mats) * 4));
+      expert_mats_fp4.resize(static_cast<size_t>(fp4_mats));
+      for (int m = 0; m < fp4_mats; ++m) {
         const dgpp::GlmFp4MatrixHost v = dgpp::glm_moe_host_view_fp4(host_w, cfg, m);
         uint8_t* pk = nullptr;
         uint8_t* sc = nullptr;
@@ -222,6 +223,15 @@ struct SmallCase {
         d_fp4_bytes.push_back(sc);
         expert_mats_fp4[static_cast<size_t>(m)] =
             dgpp::GlmFp4Matrix{pk, sc, d_fp4_globals + m, v.rows, v.cols};
+      }
+      if (host_w.shared_nvfp4) {
+        dev_w.router_gate = d_gate_w;
+        dev_w.router_bias = d_bias;
+        dev_w.experts = nullptr;
+        dev_w.experts_fp4 = expert_mats_fp4.data();
+        for (int m = 0; m < 3; ++m) dev_w.shared_fp4[m] = expert_mats_fp4[static_cast<size_t>(E) * 3 + m];
+        DGPP_CUDA_OK(cudaMallocManaged(&d_out, static_cast<size_t>(tokens) * cfg.hidden * 2));
+        return;
       }
       expert_mats.resize(3);
       for (int m = 0; m < 3; ++m) {
@@ -281,7 +291,7 @@ struct SmallCase {
 };
 
 SmallCase make_small_case(int E, int H, int I, int K, int tokens,
-                          uint64_t seed, bool nvfp4 = false) {
+                          uint64_t seed, bool nvfp4 = false, bool shared_nvfp4 = false) {
   SmallCase c;
   c.cfg.hidden = H;
   c.cfg.inter = I;
@@ -306,10 +316,11 @@ SmallCase make_small_case(int E, int H, int I, int K, int tokens,
   // Under NVFP4 the routed E*3 are e2m1 pairs + e4m3 scales per 16 + one
   // global scale each, and only the shared triple is FP8.
   c.host_w.nvfp4 = nvfp4;
+  c.host_w.shared_nvfp4 = nvfp4 && shared_nvfp4;
   for (int m = 0; m < (E + 1) * 3; ++m) {
     const bool down = m % 3 == 2;
     const int64_t rows = down ? H : I, cols = down ? I : H;
-    if (nvfp4 && m < E * 3) {
+    if (nvfp4 && (m < E * 3 || c.host_w.shared_nvfp4)) {
       std::vector<uint8_t> packed(static_cast<size_t>(rows) * cols / 2);
       for (auto& b : packed) b = static_cast<uint8_t>(rng.next() & 0xFF);
       std::vector<uint8_t> sc(static_cast<size_t>(rows) * cols / 16);
@@ -1317,6 +1328,62 @@ DGPP_TEST(moe_sliced_ranks_fold_matches_unsliced_oracle) {
         ("sliced fold E=" + std::to_string(cs.E) + " I=" +
          std::to_string(cs.I) + " world=" + std::to_string(cs.world))
             .c_str());
+    c.free_all();
+  }
+}
+
+// ---- the NVFP4 shared expert (2026-09-09, GLM-4.7, docs/glm47_plan.md D3) --
+// GLM-4.7's shape in miniature: hidden 512, a 384-wide expert slice (the
+// world-4 down projection's K, a non-power-of-two width of the fp4 core),
+// the shared expert one expert wide in NVFP4 (view-table entry E). The
+// host chain within budget of the oracle on both kernels; the decode slot
+// path (eager table and the prepared graph table) and the prefill path
+// bitwise the host chain.
+DGPP_TEST(moe_nvfp4_shared_expert_matches_oracle_and_every_path_is_bitwise) {
+  struct Case { int E, H, I, K, M; };
+  const Case cases[] = {{8, 512, 384, 2, 1}, {8, 512, 384, 2, 3}, {8, 512, 384, 4, 40}};
+  for (const Case& cs : cases) {
+    SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M, 0x5A4D + cs.M, /*nvfp4=*/true,
+                                  /*shared_nvfp4=*/true);
+    c.alloc();
+    require(c.dev_w.shared_nvfp4(), "the case binds an NVFP4 shared expert");
+    run_small_case(c, ("nvfp4 shared expert path (gemv) M=" + std::to_string(cs.M)).c_str(),
+                   dgpp::MoeExpertKernel::kGemv);
+    run_small_case(c, ("nvfp4 shared expert path (mma) M=" + std::to_string(cs.M)).c_str(),
+                   dgpp::MoeExpertKernel::kMma);
+    const size_t bytes = static_cast<size_t>(cs.M) * c.cfg.hidden * 2;
+    std::vector<uint16_t> host(bytes / 2), got(bytes / 2);
+    if (cs.M <= 8) {
+      GlmMoeLayer layer(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/cs.M, /*graph_table_slots=*/1);
+      layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr, dgpp::MoeExpertKernel::kGemv);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(host.data(), c.d_out, bytes);
+      DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, bytes));
+      layer.enqueue_decode(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(got.data(), c.d_out, bytes);
+      require(host == got, "nvfp4 shared: decode slot path bitwise the host chain");
+      layer.prepare_graph_table(0, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, bytes));
+      layer.enqueue_decode(c.d_hidden, c.d_out, cs.M, nullptr, nullptr, /*table_slot=*/0);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(got.data(), c.d_out, bytes);
+      require(host == got, "nvfp4 shared: decode slot path on the graph table bitwise the host chain");
+    }
+    {
+      GlmMoeLayer layer(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/0);
+      layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr, dgpp::MoeExpertKernel::kMma);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(host.data(), c.d_out, bytes);
+      DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, bytes));
+      layer.enqueue_prefill(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(got.data(), c.d_out, bytes);
+      require(host == got, "nvfp4 shared: prefill path bitwise the host chain (mma)");
+    }
+    std::printf("[ OK ] nvfp4 shared expert E=%d H=%d I=%d K=%d M=%d: oracle + bitwise paths\n",
+                cs.E, cs.H, cs.I, cs.K, cs.M);
     c.free_all();
   }
 }

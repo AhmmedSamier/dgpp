@@ -406,6 +406,11 @@ int64_t g_bulk_slot_bytes_override = 0;
 // lazily built layer objects, their scratch, the GEMM plans), the later
 // ones are the steady state the service sees after its warm-up.
 int g_prefill_repeat = 1;
+// --gr-probe N (Q0, 2026-09-09): one extra collective after the attention
+// fold of the first N layers of every decode row — the sliced-GR cost probe
+// (GlmBoundaryReducer::probe). Bounded by the graph's node budget:
+// kBusMaxGraphGens = 128 less the step's own ~92 nodes.
+int g_gr_probe_layers = 0;
 
 // The memory receipt: EXACTLY what the model pre-allocates for this knob
 // combination, by region, plus the per-request reserve math. Runs with or
@@ -1248,6 +1253,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
     dgpp::prepare_serving_process(rank);
     const auto t_construct = std::chrono::steady_clock::now();
     GlmDiagnosticModel model(cfg, ckpt, max_tokens, cache);
+    if (g_gr_probe_layers > 0) model.set_gr_probe_layers(g_gr_probe_layers);
     const double construct_s = std::chrono::duration<double>(
                                    std::chrono::steady_clock::now() -
                                    t_construct)
@@ -1452,6 +1458,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
         resident ? dgpp::GlmResidency::Resident
                  : dgpp::GlmResidency::Streaming,
         dgpp::GlmHeadSharding::VocabSharded, /*max_requests=*/1, mtp);
+    if (g_gr_probe_layers > 0) model.set_gr_probe_layers(g_gr_probe_layers);
     const double construct_s = std::chrono::duration<double>(
                                    std::chrono::steady_clock::now() -
                                    t_construct)
@@ -1835,6 +1842,7 @@ int main(int argc, char** argv) {
     else if (a == "--steps") steps = std::stoi(next());
     else if (a == "--streaming") resident = false;
     else if (a == "--step-timing") step_timing = true;
+    else if (a == "--gr-probe") g_gr_probe_layers = std::stoi(next());
     else if (a == "--decode-graph") decode_graph = true;
     else if (a == "--mtp") mtp = true;
     else if (a == "--engine") {

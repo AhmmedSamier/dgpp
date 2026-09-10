@@ -196,10 +196,13 @@ cudaError_t launch_bus_allreduce(const BusAllReduceView& v, int my_rank,
 // collective — goes through the same cursor in generation order; harness
 // sends alone are closed for the era). done_seq == gen ends the
 // generation; window completion gates the next arm.
-// 128 covers the decode step with headroom: 45 layers x 2 boundary folds
-// = 90 collective nodes, plus margin for nodes a future era might record
-// beside them.
-constexpr int kBusMaxGraphGens = 128;       // recorded nodes per graph
+// 256 covers every family's decode step with headroom: GLM-5.3-Flash's 45
+// layers x 2 boundary folds = 90 collective nodes, Qwen3.8-Flash-Next's 99,
+// GLM-4.7's 92 layers x 2 + the draft layer's 2 = 186 (2026-09-10; the
+// 128 budget refused its second graph variant), plus margin for nodes a
+// future era might record beside them. Sizes the pinned generation cells
+// (kBusMaxGraphVariants slabs of this many) only.
+constexpr int kBusMaxGraphGens = 256;       // recorded nodes per graph
 // A serving era can register several mutually exclusive graph shapes and
 // select one per replay (for example one scalar graph per request slot plus
 // the full row batch). Each variant owns a disjoint generation-cell set;

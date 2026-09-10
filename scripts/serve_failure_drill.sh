@@ -20,7 +20,7 @@
 # failure_drill_<stamp>/): the SSE captures, the logs, the ops files, the
 # fresh answers, and summary.txt.
 set -u
-ROOT=/home/user/workspace/dgpp
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SR=$ROOT/scripts/serve_run.sh
 LOG="${DGPP_SERVE_LOG:-$HOME/dgpp/log}"
 PEERS=(192.0.2.12 192.0.2.13 192.0.2.14)
@@ -28,6 +28,8 @@ RANK0=192.0.2.11
 HTTP="http://$RANK0:18080"
 PEER_DIR=/tmp/bus4
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5)
+# The peers' ssh login: DGPP_FABRIC_USER, else the caller's own.
+SSH_USER="${DGPP_FABRIC_USER:-$(id -un)}"
 VICTIM=${1:?usage: $0 <victim rank 0..3> [clients]}
 CLIENTS=${2:-3}
 STAMP=$(date +%Y-%m-%d_%H%M%S)
@@ -44,7 +46,7 @@ PROMPTS=(
 )
 MAX_TOKENS=1500  # long enough that the live streams outlast the kill
 
-peer_ssh() { timeout 20 ssh "${SSH_OPTS[@]}" "user@$1" "${2:-true}"; }
+peer_ssh() { timeout 20 ssh "${SSH_OPTS[@]}" "$SSH_USER@$1" "${2:-true}"; }
 
 body_for() {  # body_for INDEX STREAM(true|false)
   local i=$1 stream=$2
@@ -189,10 +191,10 @@ cp "$LOG/serve_r0.log" "$DRILL/serve_r0.log" 2>/dev/null
 grep -h "ENGINE FAILURE\|exiting with status\|rank 0's journal closed\|stream ended\|exited cleanly" "$DRILL/serve_r0.log" | tail -3 | sed 's/^/  rank 0: /' | tee -a "$SUMMARY"
 for ((r = 1; r <= 3; ++r)); do
   h=${PEERS[$((r - 1))]}
-  timeout 20 scp -q "${SSH_OPTS[@]}" "user@$h:$PEER_DIR/serve_r$r.log" "$DRILL/serve_r$r.log" 2>/dev/null
+  timeout 20 scp -q "${SSH_OPTS[@]}" "$SSH_USER@$h:$PEER_DIR/serve_r$r.log" "$DRILL/serve_r$r.log" 2>/dev/null
   grep -h "exiting with status\|rank 0's journal closed\|stream ended\|exited cleanly\|serve: " "$DRILL/serve_r$r.log" 2>/dev/null | tail -2 | sed "s/^/  rank $r: /" | tee -a "$SUMMARY"
   if [ "$r" -eq "$VICTIM" ]; then say "  rank $r: the victim — no op stream this run"; continue; fi
-  timeout 20 scp -q "${SSH_OPTS[@]}" "user@$h:$PEER_DIR/serve_rank$r.ops" "$DRILL/serve_rank$r.ops" 2>/dev/null || say "  rank $r: no ops file (died before writing)"
+  timeout 20 scp -q "${SSH_OPTS[@]}" "$SSH_USER@$h:$PEER_DIR/serve_rank$r.ops" "$DRILL/serve_rank$r.ops" 2>/dev/null || say "  rank $r: no ops file (died before writing)"
 done
 cp "$ROOT/serve_rank0.ops" "$DRILL/serve_rank0.ops" 2>/dev/null || say "  rank 0: no ops file"
 say "=== ops files (a survivor's stream is rank 0's up to the failure):"

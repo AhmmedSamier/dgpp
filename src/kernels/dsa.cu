@@ -162,8 +162,6 @@ struct LatentTile<LatentFormat::kFp4> {
   }
 };
 
-constexpr int kIdxBits = 21;  // pool ids < 2^21 (validated at launch)
-constexpr uint64_t kIdxMask = (1ull << kIdxBits) - 1;
 constexpr float kFp8Max = 448.0f;
 constexpr float kAbsmaxFloor = 1e-4f;
 constexpr int kAttnTile = 32;  // latent rows per attention tile
@@ -176,12 +174,6 @@ __device__ inline float next_pow2_dev(float v) {
   int e = int((b >> 23) & 0xFFu) - 127;
   bool exact = (b & 0x7FFFFFu) == 0;
   return exp2f(float(exact ? e : e + 1));
-}
-
-__device__ inline float warp_sum(float v) {
-#pragma unroll
-  for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(~0u, v, off);
-  return v;
 }
 
 // Block-wide max over one value per thread (blockDim <= 1024).
@@ -221,107 +213,6 @@ __device__ inline void fwht128_smem(float* x) {
   __syncthreads();
 }
 
-// Extract pool ids from sorted best keys, sort ascending, expand to token
-// positions, append the query's incomplete tail. Writes out_row[0,
-// max_selected) (-1 padded); returns the token count. scratch: smem int32
-// [select_k]; smem_count: smem int32 [1].
-// Ascending order of the n unique ids in scratch[0, n) by RANK: each id's
-// rank — the count of smaller ids, every thread reading the list as
-// broadcast smem loads — is a permutation, so the scatter is the sort.
-// PER ids per thread (n <= PER * blockDim); n^2 / blockDim compares per
-// thread and two barriers, against the bitonic network's 45 barrier
-// phases that were most of the select kernel's floor at short contexts.
-template <int PER>
-__device__ __forceinline__ void rank_sort_ids(int32_t* scratch, int n) {
-  const int nthreads = blockDim.x;
-  int32_t v[PER];
-  int rk[PER];
-#pragma unroll
-  for (int t = 0; t < PER; ++t) {
-    const int i = threadIdx.x + t * nthreads;
-    v[t] = i < n ? scratch[i] : 0;
-    rk[t] = 0;
-  }
-#pragma unroll 8
-  for (int j = 0; j < n; ++j) {
-    const int32_t s = scratch[j];
-#pragma unroll
-    for (int t = 0; t < PER; ++t) rk[t] += (s < v[t]);
-  }
-  __syncthreads();
-#pragma unroll
-  for (int t = 0; t < PER; ++t) {
-    const int i = threadIdx.x + t * nthreads;
-    if (i < n) scratch[rk[t]] = v[t];
-  }
-  __syncthreads();
-}
-
-__device__ inline int expand_from_best(const uint32_t* best_hi,
-                                       const uint32_t* best_lo, int select_k,
-                                       int64_t pos, int kpool,
-                                       int max_selected, int32_t* out_row,
-                                       int32_t* scratch, int* smem_count) {
-  const int nthreads = blockDim.x;
-  const int nwarp = nthreads >> 5;
-  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  // Compaction of the real entries by warp ballot (2026-09-06: one smem
-  // atomic per entry serialized 512 deep and was a third of the
-  // expansion): per round, each warp's count and each lane's offset within
-  // the warp come from one ballot; one thread scans the round x warp
-  // counts.
-  constexpr int kRounds = 4;  // select_k <= 4 * blockDim (checked at launch)
-  __shared__ int warp_cnt[kRounds * 8];
-  __shared__ int warp_off[kRounds * 8];
-  int32_t id[kRounds];
-  int within[kRounds];
-  bool real[kRounds];
-#pragma unroll
-  for (int rd = 0; rd < kRounds; ++rd) {
-    const int i = rd * nthreads + threadIdx.x;
-    real[rd] = i < select_k &&
-               (best_hi[i] != 0xFFFFFFFFu || best_lo[i] != 0xFFFFFFFFu);
-    id[rd] = real[rd] ? int32_t((uint64_t(best_hi[i]) << 32 | best_lo[i]) & kIdxMask) : 0;
-    // A pool past the row's visible pools is no selection (2026-09-06).
-    if (real[rd] && int64_t(id[rd]) * kpool > pos) real[rd] = false;
-    const uint32_t mask = __ballot_sync(0xffffffffu, real[rd]);
-    within[rd] = __popc(mask & ((1u << lane) - 1u));
-    if (lane == 0) warp_cnt[rd * nwarp + warp] = __popc(mask);
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    int run = 0;
-    for (int k = 0; k < kRounds * nwarp; ++k) {
-      warp_off[k] = run;
-      run += warp_cnt[k];
-    }
-    *smem_count = run;
-  }
-  __syncthreads();
-#pragma unroll
-  for (int rd = 0; rd < kRounds; ++rd)
-    if (real[rd]) scratch[warp_off[rd * nwarp + warp] + within[rd]] = id[rd];
-  __syncthreads();
-  const int n_sel = *smem_count;
-  if (n_sel <= nthreads) rank_sort_ids<1>(scratch, n_sel);
-  else if (n_sel <= 2 * nthreads) rank_sort_ids<2>(scratch, n_sel);
-  else rank_sort_ids<4>(scratch, n_sel);
-  const int64_t seq_len = pos + 1;
-  const int64_t tail_start = (seq_len / kpool) * kpool;
-  const int tail_cnt = int(seq_len - tail_start);
-  const int hist = n_sel * kpool;
-  for (int col = threadIdx.x; col < max_selected; col += nthreads) {
-    int32_t tok;
-    if (col < hist)
-      tok = scratch[col / kpool] * kpool + (col % kpool);
-    else if (col - hist < tail_cnt)
-      tok = int32_t(tail_start + (col - hist));
-    else
-      tok = -1;
-    out_row[col] = tok;
-  }
-  return hist + tail_cnt;
-}
 
 // ---------------------------------------------------------------------
 // Elementwise paths

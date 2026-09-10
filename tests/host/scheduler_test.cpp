@@ -1580,6 +1580,45 @@ DGPP_TEST(scheduler_prefixCache_retireAtAnAlignedPositionSnapshotsTheLiveState) 
               "\n  expected: " + expected_b);
 }
 
+DGPP_TEST(scheduler_prefixCache_aStepCutShortByTheCapTakesNoRetireSnapshot) {
+  // A two-token step whose FIRST token completes the answer (the cap at
+  // four tokens: 31, [32,33], [34,35] — 35 dropped) leaves the engine's
+  // state one row past the committed position; the retire-time snapshot
+  // cannot be taken from the live slot there (the fake, like the real
+  // arena, refuses a position that is not its own). With an align of 1
+  // (GLM-4.7: every position is snapshot-eligible) the rolling entry at 23
+  // stands as the close entry and no snapshot is attempted at 24.
+  {
+    FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+    engine.set_prefix_arena(/*slots=*/4, /*align=*/1);
+    engine.set_step_tokens_max(2);
+    engine.arm_batches(0, 31, {{32, 33}, {34, 35}}, 4);
+    Scheduler sched(&engine, {kEos});
+    sched.submit(make_cached_request("a", counted_prompt(21), {5, 13}, 4));
+    sched.run_to_completion();
+    const std::string ops = engine.op_stream();
+    require(ops.find("RS:0:23@") != std::string::npos, "align 1: the rolling snapshot at 23 was taken: " + ops);
+    require(ops.find("RS:0:24@") == std::string::npos, "align 1: no retire-time snapshot at 24: " + ops);
+    require(ops.size() >= 3 && ops.compare(ops.size() - 3, 3, "C:0") == 0, "align 1: the slot closed: " + ops);
+    require(sched.meters().prefix_close_entries == 1, "align 1: the rolling entry at 23 is the close entry");
+  }
+  // With an align of 4 the cut lands exactly on the aligned 24 (21 + 4 - 1):
+  // the old retire path asked for the live snapshot there and the arena
+  // refused (the fabric's first GLM-4.7 request, 2026-09-10).
+  {
+    FakeEngine engine(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
+    engine.set_prefix_arena(/*slots=*/4, /*align=*/4);
+    engine.set_step_tokens_max(2);
+    engine.arm_batches(0, 31, {{32, 33}, {34, 35}}, 4);
+    Scheduler sched(&engine, {kEos});
+    sched.submit(make_cached_request("a", counted_prompt(21), {5, 13}, 4));
+    sched.run_to_completion();
+    const std::string ops = engine.op_stream();
+    require(ops.find("RS:0:24@") == std::string::npos, "align 4: no retire-time snapshot at 24: " + ops);
+    require(ops.size() >= 3 && ops.compare(ops.size() - 3, 3, "C:0") == 0, "align 4: the slot closed: " + ops);
+  }
+}
+
 DGPP_TEST(scheduler_prefixCache_twoTokenStepsHopOverAnAlignedPositionAndSnapshotIt) {
   // The MTP graph's two-token steps (M7's measured limit, closed
   // 2026-09-05): a 21-token prompt's committed count runs 21, 23, 25 —

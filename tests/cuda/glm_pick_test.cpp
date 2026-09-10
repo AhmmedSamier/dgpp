@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -1164,7 +1165,8 @@ DGPP_TEST(sample_pick_matches_host_oracle_bitwise_over_simulated_world) {
         };
         digest = sm(static_cast<uint64_t>(requests));
         for (int q = 0; q < requests; ++q) {
-          int32_t w[dgpp::kPickMaxRows] = {-1, -1, -1, -1, -1, -1, -1, -1};
+          int32_t w[dgpp::kPickMaxRows];
+          std::fill(std::begin(w), std::end(w), -1);
           w[0] = want_winners[q];
           const uint64_t one = dgpp::device_pick_digest(want_rows[q], want_rows[q], w);
           digest = sm(digest ^ one);

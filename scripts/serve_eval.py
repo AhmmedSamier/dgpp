@@ -47,6 +47,9 @@ ap.add_argument("--limit", type=int, default=300)
 ap.add_argument("--concurrency", type=int, default=4)
 ap.add_argument("--max-tokens", type=int, default=2048)
 ap.add_argument("--reasoning-effort", default="low")
+ap.add_argument("--no-think", action="store_true",
+                help="chat_template_kwargs.enable_thinking=false (the templates that read it: "
+                     "Qwen3.8-Flash-Next, GLM-4.7 — GLM-4.7 ignores reasoning_effort and thinks to the cap otherwise)")
 ap.add_argument("--data", default=os.path.join(os.path.dirname(__file__), "..", "build-ci", "eval_data"))
 ap.add_argument("--seed", type=int, default=20260908)
 ap.add_argument("--model", default=None, help="defaults to the served id")
@@ -77,6 +80,7 @@ def chat(messages, max_tokens=None, response_format=None):
         "model": MODEL, "messages": messages, "temperature": 0,
         "max_tokens": max_tokens or args.max_tokens,
         "reasoning_effort": args.reasoning_effort,
+        **({"chat_template_kwargs": {"enable_thinking": False}} if args.no_think else {}),
     }
     if response_format is not None:
         body["response_format"] = response_format
@@ -224,7 +228,7 @@ TASKS = {
     "extract": (extract_items, extract_run),
 }
 
-summary = {"model": MODEL, "settings": dict(max_tokens=args.max_tokens, reasoning_effort=args.reasoning_effort,
+summary = {"model": MODEL, "settings": dict(max_tokens=args.max_tokens, reasoning_effort=args.reasoning_effort, no_think=args.no_think,
                                             limit=args.limit, seed=args.seed), "tasks": {}}
 for task in args.tasks.split(","):
     items_fn, run_fn = TASKS[task]

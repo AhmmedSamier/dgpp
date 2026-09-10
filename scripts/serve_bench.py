@@ -82,6 +82,11 @@ def one(prompt, max_tokens, label):
                     usage = obj["usage"]
                 for ch in obj.get("choices", []):
                     delta = ch.get("delta", {})
+                    # Reasoning deltas count as tokens too (the Qwen turn
+                    # opens inside <think>: its first 200 tokens are all
+                    # reasoning, 2026-09-09).
+                    if delta.get("reasoning_content"):
+                        delta = dict(delta, content=delta["reasoning_content"])
                     if delta.get("content"):
                         stamps.append(now)
                         text.append(delta["content"])

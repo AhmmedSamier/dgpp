@@ -186,6 +186,10 @@ class ChatTemplate {
 
   // FNV-1a-64 over the raw source bytes — the golden corpus's key.
   uint64_t source_hash() const;
+  // Whether the template's source names the global `name` as a whole
+  // identifier (the service's knob gate: a template that never reads
+  // enable_thinking must not accept it as if it did).
+  bool reads(std::string_view name) const;
 
  private:
   struct Impl;

@@ -2,7 +2,7 @@
 """dgpp-cluster: the serving world's launcher over the cluster config
 (2026-09-06, the productionizing pass).
 
-    dgpp-cluster up       [--config F] [--release V | --bin PATH] [--log-dir DIR] [--knobs "FLAGS"]
+    dgpp-cluster up       [--config F] [--release V | --bin PATH] [--log-dir DIR] [--knobs "FLAGS"] [--head-wrap "CMD"]
     dgpp-cluster down     [--config F] [--log-dir DIR]
     dgpp-cluster status   [--config F] [--log-dir DIR]
     dgpp-cluster install  TARBALL [--config F]    # every node: unpack under paths.release_dir, verify
@@ -98,6 +98,12 @@ class Cluster:
             self.bin, self.installed = os.path.join(ROOT, "build-ci", "dgpp-serve"), False
         self.peer_bin = f"{self.release_dir}/dgpp-{self.release}/bin/dgpp-serve" if self.installed else "./dgpp-serve"
         self.knobs = (getattr(args, "knobs", "") or "").split()
+        # The profiling hook (2026-09-09, the Qwen decode session): rank 0's
+        # command line prefixed with CMD (word-split) — e.g. `nsys profile
+        # --trace=cuda -o /tmp/r0` — while the peers run bare. The head pid
+        # is then the wrapper's; `down` still SIGINTs it, nsys forwards the
+        # signal and writes its report as the server stops.
+        self.head_wrap = shlex.split(getattr(args, "head_wrap", "") or "")
         ports = self.cfg.get("ports", {})
         self.http = int(ports.get("http", 18080))
         self.fabric = int(ports.get("fabric", 29970))
@@ -216,7 +222,7 @@ class Cluster:
         env = dict(os.environ)
         env.setdefault("DGPP_LOG_LEVEL", "info")
         log = open(os.path.join(self.log_dir, "serve_r0.log"), "wb")
-        proc = subprocess.Popen([self.bin, "--config", self.config_path, "--rank", "0", *self.knobs],
+        proc = subprocess.Popen([*self.head_wrap, self.bin, "--config", self.config_path, "--rank", "0", *self.knobs],
                                 cwd=self.log_dir, env=env, stdout=log, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, start_new_session=True)
         with open(self.pid_file, "w") as f:
@@ -391,6 +397,7 @@ def main():
     ap.add_argument("--release", default=None, help="the installed release version to run (overrides the config's \"release\")")
     ap.add_argument("--log-dir", default=None, help="overrides paths.log_dir")
     ap.add_argument("--knobs", default="", help="flags appended to every rank's command line")
+    ap.add_argument("--head-wrap", default="", help="prefix rank 0's command line with this (word-split): the profiling hook")
     args = ap.parse_args()
     if not os.path.exists(args.config):
         sys.exit(f"no cluster config at {args.config}: copy deploy/cluster.example.json to "

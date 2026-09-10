@@ -40,8 +40,20 @@ NVFP4 experts free, spent on context and cache (`--memory-plan` fits with
 `scripts/dgpp-cluster up --config deploy/cluster.nvfp4.json`,
 `scripts/fabric_mtp_classes.sh --config deploy/cluster.nvfp4.json ...`,
 `scripts/fabric_prefill_repeat.sh --config deploy/cluster.nvfp4.json ...`.
-Both files are site-local (`deploy/cluster.*.json` is git-ignored beside
-`deploy/cluster.json`).
+EVERY cluster config is site-local — it names that site's node
+addresses and ssh login, so `deploy/cluster.json`, `deploy/cluster.*.json`
+and `deploy/cluster_*.json` are all git-ignored. What the repository
+carries is one `*.example.json` template per shape, with the node list on
+the documentation addresses (192.0.2.x) and an empty `ssh_user`: copy the
+one you want to the same name without `.example` and fill in those two
+keys. The templates are `deploy/cluster.example.json` (GLM-5.3-Flash),
+`cluster_qwen{,_t1,_w2,_w2_t1}.example.json` (Qwen3.8-Flash-Next: MTP,
+plain T=1, and the pair for a world of two) and
+`cluster_glm47{,_t1,_d2}.example.json` (GLM-4.7 NVFP4: the MTP recipe,
+plain T=1, and MTP depth 2). `kv_dtype` applies to the GLM-5.3-Flash
+latent cache only — the paged K/V pools of the other two stay bf16.
+The serving rituals are `scripts/fabric_qwen_serve.sh` and
+`scripts/fabric_glm4_serve.sh CONFIG OUT_DIR [--compare REF.json] [--eval]`.
 
 Every rank starts as `dgpp-serve --config <file> --rank R`: rank 0 takes
 the model, the world (the node list's length), the ports and every engine
@@ -188,9 +200,13 @@ per step against 1.80 / 1.81 / 1.88 at depth 1. So depth 2 is 41.7 vs
 code (+4 %), and −4 % on an 8K-context summary; it pays when p1·p2
 exceeds ~0.28·(1 + p1), about p2 > 0.63 at p1 0.8. Depth 1 stays the
 default; the stats line's per-position acceptance says what a workload
-would get. Past depth 1 every step is a scalar replay (the row-batched
-graph is built for the two-row step only), so `max_concurrency` above
-one serves requests round-robin per step.
+would get. On GLM-5.3-Flash and Qwen3.8-Flash-Next every step past depth
+1 is a scalar replay (their row batches carry the two-row step only), so
+`max_concurrency` above one serves requests round-robin per step; GLM-4.7
+batches depth 2 (the decode rows are the recipe's shape, `serve: decode
+rows 12 (4 slot(s) x 3 row(s) ...)` in the boot log) but loses to depth 1
+under concurrency there — each 4-row GEMV chunk re-reads its BF16 attention
+projections (docs/measurements.md) — so its recipe keeps depth 1.
 Changing the depth changes the config digest; the transcript does not
 change (a greedy request decodes the plain transcript at any depth, a
 sampled one the same distribution — the loopback gates pin both).

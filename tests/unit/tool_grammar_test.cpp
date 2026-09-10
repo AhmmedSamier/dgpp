@@ -6,6 +6,7 @@
 // forbid, parallel or not), the EOS discipline while a call is owed, a
 // disallowed id killing the grammar, and a complete valid turn being
 // accepted position by position.
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <stdexcept>
@@ -120,6 +121,138 @@ void feed(GrammarState& g, const std::vector<int64_t>& ids) {
                               g.state_name());
     g.advance(id);
   }
+}
+
+// ---- the Qwen3.8 XML format (2026-09-09) --------------------------------------
+GrammarVocab qwen_vocab() {
+  std::vector<std::string> texts(static_cast<size_t>(kVocab));
+  for (int b = 0; b < 256; ++b) texts[static_cast<size_t>(b)] = std::string(1, static_cast<char>(b));
+  texts[kGet] = "get";
+  texts[kWeather] = "_weather";
+  texts[kGetWeather] = "get_weather";
+  texts[kUnderscore] = "_";
+  texts[kWea] = "wea";
+  texts[kTher] = "ther";
+  texts[kCity] = "city";
+  texts[kGetT] = "get_t";
+  texts[kIme] = "ime";
+  texts[kThinkOpen] = "<think>";
+  texts[kThinkClose] = "</think>";
+  texts[kToolOpen] = "<tool_call>";
+  texts[kToolClose] = "</tool_call>";
+  ChatMarkers m;
+  m.think_open = ChatMarker{kThinkOpen, "<think>"};
+  m.think_close = ChatMarker{kThinkClose, "</think>"};
+  m.tool_call_open = ChatMarker{kToolOpen, "<tool_call>"};
+  m.tool_call_close = ChatMarker{kToolClose, "</tool_call>"};
+  return GrammarVocab(std::move(texts), m, {kEosText, kEosUser}, kVocab, kEosUser);
+}
+std::vector<int64_t> bytes_of(const std::string& s) {
+  std::vector<int64_t> out;
+  for (const char c : s) out.push_back(static_cast<unsigned char>(c));
+  return out;
+}
+
+DGPP_TEST(tool_grammar_qwen_required_call_walks_the_xml_shape) {
+  const GrammarVocab vocab = qwen_vocab();
+  require(vocab.usable() && vocab.markers().tool_format() == dgpp::text::ToolFormat::kQwenXml,
+          "the two-marker vocabulary is the Qwen format");
+  GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kRequired), /*prompt_opens_thinking=*/false);
+  // A call is owed: only <tool_call> opens the turn.
+  // Text may precede the call (the Qwen format's optional reasoning); the
+  // turn may not end while the call is owed.
+  require(g.allows('H') && g.allows(kToolOpen) && !g.allows(kEosUser) && !g.allows(kEosText) &&
+              !g.allows(kToolClose),
+          "top: free text or <tool_call>, never EOS while owed");
+  g.advance('H');
+  g.advance(kToolOpen);
+  // "\n<function=": any tokenization of the literal, nothing else.
+  require(g.allows('\n') && !g.allows('x') && !g.allows(kToolClose) && !g.allows(kEosUser),
+          "q-name starts with the literal's newline");
+  feed(g, bytes_of("\n<function="));
+  // The name: get_weather / get_time / ping over token texts.
+  require(g.allows(kGet) && g.allows(kGetWeather) && g.allows('p') && g.allows(kGetT) && !g.allows('x'),
+          "names over token texts");
+  feed(g, {kGet, kWeather});
+  require(g.allows('>') && !g.allows('\n'), "the name closes with '>\\n'");
+  feed(g, bytes_of(">\n"));
+  require(std::string(g.state_name()) == "q-key-or-close", std::string("after the name: ") + g.state_name());
+  // Closed keys city/days, or the close: everything starts with '<'.
+  require(same(allowed_ids(g), {'<'}), "key-or-close: '<' only: " + show(allowed_ids(g)));
+  feed(g, bytes_of("<parameter="));
+  require(g.allows('c') && g.allows('d') && !g.allows('x'), "closed keys city/days");
+  feed(g, bytes_of("city>\n"));
+  require(std::string(g.state_name()) == "q-value", "a free value follows the key");
+  // The free value: anything but the markers, the think markers and EOS.
+  const std::vector<int64_t> v = allowed_ids(g);
+  require(!v.empty() && std::find(v.begin(), v.end(), kToolClose) == v.end() &&
+              std::find(v.begin(), v.end(), kEosUser) == v.end() &&
+              std::find(v.begin(), v.end(), kThinkOpen) == v.end() &&
+              std::find(v.begin(), v.end(), 'P') != v.end(),
+          "free value: text only");
+  feed(g, bytes_of("Paris\n</parameter>\n"));
+  require(std::string(g.state_name()) == "q-key-or-close", "the terminator closes the value");
+  // city is used: after "<parameter=" only days remains.
+  feed(g, bytes_of("<parameter="));
+  require(g.allows('d') && !g.allows('c'), "a closed key is offered once");
+  feed(g, bytes_of("days>\n3\n</parameter>\n"));
+  // Every key used: only the close remains.
+  require(g.allows('<') && !g.allows('\n'), "only </function> remains");
+  feed(g, bytes_of("</function>"));
+  require(!g.allows('p'), "after </function> the newline");
+  feed(g, bytes_of("\n"));
+  require(same(allowed_ids(g), {kToolClose}), "q-close: </tool_call> only: " + show(allowed_ids(g)));
+  g.advance(kToolClose);
+  // Required (parallel): free text, another call, or the turn's end.
+  require(g.allows(kToolOpen) && g.allows(kEosUser) && g.allows('x') && !g.allows(kToolClose),
+          "after the call: text, another call or EOS");
+  g.advance(kEosUser);
+  require(std::string(g.state_name()) == "done", "done after EOS");
+}
+
+DGPP_TEST(tool_grammar_qwen_free_keys_typed_values_and_named_single) {
+  const GrammarVocab vocab = qwen_vocab();
+  // get_time: an open key set — free text through ">\n".
+  GrammarState g(&vocab, spec_of(GrammarSpec::Mode::kNamed, false, "get_time"), false);
+  g.advance(kToolOpen);
+  feed(g, bytes_of("\n<function="));
+  require(!g.allows(kGetWeather) && g.allows(kGetT), "named: only get_time");
+  feed(g, {kGetT, kIme});
+  feed(g, bytes_of(">\n<parameter="));
+  require(std::string(g.state_name()) == "q-free-key", "an open key set is free text");
+  require(g.allows('t') && !g.allows(kToolClose) && !g.allows(kEosUser), "free key text");
+  feed(g, bytes_of("tz>\nUTC\n</parameter>\n</function>\n"));
+  g.advance(kToolClose);
+  // Named: exactly one call, then the turn ends.
+  require(same(allowed_ids(g), {kEosUser}), "named single: EOS only: " + show(allowed_ids(g)));
+  // Typed values: a JSON integer and an enum string.
+  GrammarSpec spec = spec_of(GrammarSpec::Mode::kRequired);
+  GrammarArg days;
+  days.key = "days";
+  days.kind = GrammarArg::Kind::kJson;
+  days.schema = R"({"type": "integer"})";
+  GrammarArg unit;
+  unit.key = "unit";
+  unit.kind = GrammarArg::Kind::kText;
+  unit.texts = {"celsius", "fahrenheit"};
+  spec.tools[0].keys = {"days", "unit"};
+  spec.tools[0].args = {days, unit};
+  GrammarState t(&vocab, spec, false);
+  t.advance(kToolOpen);
+  feed(t, bytes_of("\n<function=get_weather>\n<parameter=days>\n"));
+  // A JSON text may open with whitespace; a letter never.
+  require(t.allows('3') && !t.allows('x') && !t.allows('<'), "a JSON integer: digits first");
+  feed(t, bytes_of("3"));
+  require(t.allows('4') && t.allows('\n'), "more digits, or the terminator once complete");
+  feed(t, bytes_of("\n"));
+  require(t.allows('<') && !t.allows('4') && !t.allows('\n'), "inside the terminator only its bytes");
+  feed(t, bytes_of("</parameter>\n<parameter=unit>\n"));
+  require(t.allows('c') && t.allows('f') && !t.allows('k'), "an enum value: its texts");
+  feed(t, bytes_of("celsius"));
+  require(t.allows('\n') && !t.allows('c'), "the enum text then its terminator");
+  feed(t, bytes_of("\n</parameter>\n</function>\n"));
+  t.advance(kToolClose);
+  require(t.active() && std::string(t.state_name()) == "top", "the call closed cleanly");
 }
 
 DGPP_TEST(tool_grammar_requiredOwesACallAndForcesItsShape) {

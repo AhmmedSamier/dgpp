@@ -1,4 +1,4 @@
-#include "models/glm/resident_image.hpp"
+#include "loaders/resident_image.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -68,7 +68,7 @@ bool page_aligned(const void* p) {
 
 }  // namespace
 
-uint64_t GlmResidentImage::fold(const void* data, size_t bytes) {
+uint64_t ResidentImage::fold(const void* data, size_t bytes) {
   const uint8_t* p = static_cast<const uint8_t*>(data);
   uint64_t h = 0x9E3779B97F4A7C15ULL ^ bytes;
   size_t i = 0;
@@ -85,7 +85,7 @@ uint64_t GlmResidentImage::fold(const void* data, size_t bytes) {
   return h;
 }
 
-GlmResidentImage::GlmResidentImage(const std::string& dir, uint64_t key,
+ResidentImage::ResidentImage(const std::string& dir, uint64_t key,
                                    int layers) {
   if (layers <= 0) throw std::invalid_argument("resident image: no layers");
   std::error_code ec;
@@ -131,12 +131,12 @@ GlmResidentImage::GlmResidentImage(const std::string& dir, uint64_t key,
   }
 }
 
-GlmResidentImage::~GlmResidentImage() {
+ResidentImage::~ResidentImage() {
   if (direct_fd_ >= 0) ::close(direct_fd_);
   if (fd_ >= 0) ::close(fd_);
 }
 
-void GlmResidentImage::write_fresh(uint64_t key) {
+void ResidentImage::write_fresh(uint64_t key) {
   if (ftruncate(fd_, 0) != 0) fail("truncate failed", path_);
   Header h{};
   std::memcpy(h.magic, kMagic, sizeof(kMagic));
@@ -150,26 +150,26 @@ void GlmResidentImage::write_fresh(uint64_t key) {
   if (fdatasync(fd_) != 0) fail("fdatasync failed", path_);
 }
 
-int GlmResidentImage::present() const {
+int ResidentImage::present() const {
   int n = 0;
   for (const Entry& e : entries_) n += e.bytes != 0;
   return n;
 }
 
-bool GlmResidentImage::has_layer(int layer) const {
+bool ResidentImage::has_layer(int layer) const {
   return layer >= 0 && layer < layers() &&
          entries_[static_cast<size_t>(layer)].bytes != 0;
 }
 
-size_t GlmResidentImage::layer_bytes(int layer) const {
+size_t ResidentImage::layer_bytes(int layer) const {
   return has_layer(layer) ? entries_[static_cast<size_t>(layer)].bytes : 0;
 }
 
-uint64_t GlmResidentImage::table_offset(int layer) const {
+uint64_t ResidentImage::table_offset(int layer) const {
   return sizeof(Header) + sizeof(Entry) * static_cast<uint64_t>(layer);
 }
 
-void GlmResidentImage::write_entry(int layer) const {
+void ResidentImage::write_entry(int layer) const {
   pwrite_all(fd_, &entries_[static_cast<size_t>(layer)], sizeof(Entry),
              table_offset(layer), path_);
 }
@@ -178,7 +178,7 @@ void GlmResidentImage::write_entry(int layer) const {
 // the descriptor allow it; the sub-page tail (and everything, when they
 // don't) goes buffered. Blob offsets are 4 KiB-aligned by construction, so
 // only the buffer's alignment and the byte count decide the split.
-void GlmResidentImage::read_blob(void* dst, size_t bytes,
+void ResidentImage::read_blob(void* dst, size_t bytes,
                                  uint64_t offset) const {
   size_t direct = 0;
   if (direct_fd_ >= 0 && page_aligned(dst))
@@ -189,7 +189,7 @@ void GlmResidentImage::read_blob(void* dst, size_t bytes,
               offset + direct, path_);
 }
 
-void GlmResidentImage::write_blob(const void* src, size_t bytes,
+void ResidentImage::write_blob(const void* src, size_t bytes,
                                   uint64_t offset) const {
   size_t direct = 0;
   if (direct_fd_ >= 0 && page_aligned(src))
@@ -200,7 +200,7 @@ void GlmResidentImage::write_blob(const void* src, size_t bytes,
                bytes - direct, offset + direct, path_);
 }
 
-void GlmResidentImage::read_layer(int layer, void* dst, size_t bytes,
+void ResidentImage::read_layer(int layer, void* dst, size_t bytes,
                                   bool verify) const {
   if (!has_layer(layer))
     throw std::runtime_error("resident image " + path_ + ": layer " +
@@ -218,7 +218,7 @@ void GlmResidentImage::read_layer(int layer, void* dst, size_t bytes,
                              " failed verification (corrupt blob)");
 }
 
-void GlmResidentImage::write_layer(int layer, const void* src, size_t bytes) {
+void ResidentImage::write_layer(int layer, const void* src, size_t bytes) {
   if (layer < 0 || layer >= layers() || bytes == 0)
     throw std::invalid_argument("resident image: bad layer/bytes");
   struct stat st{};
@@ -236,11 +236,11 @@ void GlmResidentImage::write_layer(int layer, const void* src, size_t bytes) {
   write_entry(layer);
 }
 
-std::string GlmResidentImage::note_path(const std::string& name) const {
+std::string ResidentImage::note_path(const std::string& name) const {
   return stem_ + "." + name;
 }
 
-bool GlmResidentImage::read_note(const std::string& name, void* dst,
+bool ResidentImage::read_note(const std::string& name, void* dst,
                                  size_t bytes) const {
   const std::string path = note_path(name);
   const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -258,7 +258,7 @@ bool GlmResidentImage::read_note(const std::string& name, void* dst,
   return ok;
 }
 
-void GlmResidentImage::write_note(const std::string& name, const void* src,
+void ResidentImage::write_note(const std::string& name, const void* src,
                                   size_t bytes) const {
   const std::string path = note_path(name);
   const std::string tmp = path + ".tmp";

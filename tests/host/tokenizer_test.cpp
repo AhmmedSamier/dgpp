@@ -23,6 +23,7 @@ char** g_argv = nullptr;
 #include "common/test.hpp"
 #include "loaders/hf_cache.hpp"
 #include "text/tokenizer.hpp"
+#include "text/unicode_normalize.hpp"
 
 namespace {
 
@@ -36,6 +37,17 @@ void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
 }
 
+// The corpus header's "model" (the Qwen corpus names its checkpoint);
+// empty when absent.
+std::string golden_model(const std::string& path) {
+  std::ifstream f(path);
+  std::string first;
+  if (!f || !std::getline(f, first)) return "";
+  const size_t m = first.find("\"model\": \"");
+  if (m == std::string::npos) return "";
+  const size_t e = first.find('"', m + 10);
+  return e == std::string::npos ? "" : first.substr(m + 10, e - (m + 10));
+}
 std::string read_text_file(const std::string& path) {
   std::ifstream f(path);
   if (!f) throw std::runtime_error("cannot open " + path);
@@ -48,9 +60,12 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
   // Resolve tokenizer.json via the HF cache (the deployment location;
   // the same snapshot id every node carries). Missing cache = skip (rc 2).
+  // The model: DGPP_TP_REAL_MODEL, else the corpus header's, else GLM.
   const char* env_model = std::getenv("DGPP_TP_REAL_MODEL");
-  const std::string model_id =
-      env_model && *env_model ? env_model : "unsloth/GLM-5.3-Flash-FP8";
+  std::string model_id = golden_model(kGoldenPath);
+  if (env_model && *env_model) model_id = env_model;
+  if (model_id.empty()) model_id = "unsloth/GLM-5.3-Flash-FP8";
+  const bool qwen = model_id.find("Qwen") != std::string::npos;
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
   if (snap.empty()) {
@@ -64,7 +79,7 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
   const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(tok_path);
 
   // Hand-carried anchors: the fabric-run prompt and first generations.
-  {
+  if (!qwen) {
     const std::vector<int64_t> got =
         tok.encode("The capital of France is");
     const std::vector<int64_t> want{785, 6722, 315, 9621, 374};
@@ -78,6 +93,15 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
     require(tok.encode(" Paris") ==
                      std::vector<int64_t>{12089},
                  "anchor ' Paris' != id 12089");
+  } else {
+    // The Q4 forward-check prompt (ids from HF tokenizers on the 5090 box)
+    // and the model's answer.
+    require(tok.encode("The capital of France is") ==
+                std::vector<int64_t>{760, 6511, 314, 9338, 369},
+            "qwen anchor prompt does not encode to the recorded ids");
+    require(tok.encode(" Paris") == std::vector<int64_t>{11751}, "qwen anchor ' Paris' != id 11751");
+    require(tok.decode(std::vector<int64_t>{11751}, false) == " Paris",
+            "qwen anchor does not decode to ' Paris'");
   }
 
   // The corpus: header (revision key) + one line per case.
@@ -181,7 +205,8 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
                      text + "): got " + std::to_string(got.size()) +
                      " ids, want " + std::to_string(want.size()));
     const std::string rt = tok.decode(got, /*skip_special_tokens=*/false);
-    require(rt == text,
+    // An NFC tokenizer round-trips to the NFC form of the input.
+    require(rt == text || (qwen && rt == dgpp::text::unicode::nfc(text)),
                  "verbatim round-trip mismatch on case " +
                      std::to_string(i) + ": got " + rt);
     ++checked;

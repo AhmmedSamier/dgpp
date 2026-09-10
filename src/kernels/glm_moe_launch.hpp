@@ -134,6 +134,14 @@ void launch_moe_accum_ordered(uint16_t* out, const float* down,
                               const int32_t* slot_ids, const float* slot_w,
                               int shared_row0, int tokens, int top_k,
                               int hidden, cudaStream_t stream);
+// The same chain left UNROUNDED in fp32 (out [tokens, hidden] f32) for a
+// caller that continues it; shared_row0 < 0 ends the chain after the
+// routed slots (no shared row) on both launchers.
+void launch_moe_accum_ordered_f32(float* out, const float* down,
+                                  size_t down_stride, const int32_t* slot_row,
+                                  const int32_t* slot_ids, const float* slot_w,
+                                  int shared_row0, int tokens, int top_k,
+                                  int hidden, cudaStream_t stream);
 
 // out[i] = bf16(acc[i]) — the chain's single rounding, as the sum leaves for
 // the FFN all-reduce (bf16 on the wire).
@@ -195,6 +203,14 @@ void launch_moe_slot_down(const uint16_t* act, size_t act_stride,
 void launch_moe_slot_accum(uint16_t* out, const float* contrib,
                            const float* weights, int tokens, int hidden,
                            int top_k, cudaStream_t stream);
+// The routed slots' chain alone, UNROUNDED fp32 (out [tokens, hidden]) —
+// the slot layout keeps its (unused) shared slot; the Qwen decode
+// continues the chain with its BF16 shared expert. The slot kernels above
+// take n_shared == 0 for that layout: their shared-slot blocks return.
+void launch_moe_slot_accum_routed_f32(float* out, const float* contrib,
+                                      const float* weights, int tokens,
+                                      int hidden, int top_k,
+                                      cudaStream_t stream);
 
 // ---- the NVFP4 routed experts (2026-09-08, docs/nvfp4_plan.md §3) ---------
 // The same contracts as the FP8 launchers above, over expert-view tables
@@ -267,19 +283,24 @@ void launch_moe_grouped_gemv_fp4_f32(const uint16_t* act, size_t act_stride,
                                      const MoeExpertView* views, int which,
                                      float* out, size_t out_stride, int n,
                                      int k, cudaStream_t stream);
+// `shared_view_base` (2026-09-09, GLM-4.7): -1 = the FP8 shared expert
+// from the sh_* arguments; >= 0 = the NVFP4 shared expert at view-table
+// entries [shared_view_base, +3) (n_experts * 3: the loader's (E+1)-entry
+// table), read through the fp4 core at the routed k (k_shared must equal
+// k_routed); the sh_* arguments are then ignored.
 void launch_moe_slot_gate_up_swiglu_fp4(
     const uint16_t* x, size_t x_stride, const int32_t* ids,
     const int32_t* order, const MoeExpertView* views, int n_routed,
     int k_routed, int n_shared, int k_shared, const uint8_t* sh_gate_payload,
     const float* sh_gate_scales, const uint8_t* sh_up_payload,
     const float* sh_up_scales, uint16_t* act, int act_stride, int slots,
-    int top_k, float limit, cudaStream_t stream);
+    int top_k, float limit, cudaStream_t stream, int shared_view_base = -1);
 void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,
                               const int32_t* ids, const int32_t* order,
                               const MoeExpertView* views, int n_routed,
                               int k_routed, int n_shared, int k_shared,
                               const uint8_t* sh_payload, const float* sh_scales,
                               float* out, int out_stride, int slots, int top_k,
-                              cudaStream_t stream);
+                              cudaStream_t stream, int shared_view_base = -1);
 
 }  // namespace dgpp

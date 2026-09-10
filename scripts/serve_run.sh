@@ -5,7 +5,7 @@
 # every rank, overriding the config), DGPP_SERVE_LOG becomes --log-dir.
 #   serve_run.sh up | down | status
 set -u
-ROOT=/home/user/workspace/dgpp
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 args=("${1:-}")
 [ -n "${DGPP_SERVE_KNOBS:-}" ] && args+=(--knobs "$DGPP_SERVE_KNOBS")
 [ -n "${DGPP_SERVE_LOG:-}" ] && args+=(--log-dir "$DGPP_SERVE_LOG")

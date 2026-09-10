@@ -1002,10 +1002,16 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
                         where);
         effort = std::string(m.value.as_string());
       } else if (m.key == "enable_thinking") {
-        return refuse(
-            "this template has no enable_thinking knob — thinking is always "
-            "on (the generation prompt opens <think>); use reasoning_effort",
-            where, "unsupported_parameter");
+        // A knob of the templates that read it (Qwen3.8-Flash-Next,
+        // GLM-4.7: false closes the think block in the generation prompt);
+        // GLM-5.3-Flash's never does — thinking is always on there.
+        if (!frontend_->template_reads("enable_thinking"))
+          return refuse(
+              "this template has no enable_thinking knob — thinking is always "
+              "on (the generation prompt opens <think>); use reasoning_effort",
+              where, "unsupported_parameter");
+        if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
+        extra.push_back(m);
       } else {
         return refuse(where + " is not a knob of this template (it reads "
                       "clear_thinking and reasoning_effort)",
@@ -1443,8 +1449,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
                   "invalid_request_error", "messages");
     return;
   }
-  const bool opens_thinking = markers_.think_open.available() &&
-                              prompt.back() == markers_.think_open.id;
+  const bool opens_thinking = markers_.prompt_opens_thinking(prompt);
   ToolCallParser::Options popts;
   popts.start_in_reasoning = opens_thinking;
 

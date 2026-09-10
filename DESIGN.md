@@ -1353,7 +1353,9 @@ last row's logits; `session_step(req, token)` runs one token at the slot's
 next position (the same recurrence implementation as prefill — what keeps
 cross-path noise at GEMM ulps); `session_close(req)` releases the slot's
 blocks immediately (a meter that lags a retire is an admission deadlock).
-Slots: `max_requests` (≤ `kDecodeRows` = 8, the DSA select bound) with
+Slots: `max_requests` (≤ `kDecodeRows` = 8, this model's fixed batch and the
+DSA select bound; the session-core families derive their decode rows at
+runtime, engine/decode_outputs.hpp) with
 slot-major KDA state so one open is one memset pair; the DSA pool's
 per-request tail rings are zeroed at open and the latent/index caches are
 deliberately not scrubbed (a new owner rewrites every row it reads — the
@@ -2751,8 +2753,12 @@ entries).
 **The adaptive graph engine** (`GlmGraphEngineAdapter`, M6.6a Phase 2): the
 adapter owns two execution shapes. It lazily captures one Phase-1 scalar graph
 for every physical request slot and a family of fixed request-major row
-batches, T=1 without MTP and T=2 with it, subject to `requests * T <=
-kDecodeRows` (8). The scheduler advertises the configured slot count so its
+batches, T=1 without MTP and T=1+depth with it, subject to `requests * T <=`
+the model's decode rows (GLM-5.3-Flash's fixed 8; the session-core families'
+runtime shape `max_concurrency x (1 + mtp_depth)`, floored at 8, up to
+`kDecodeRowsMax` = 32 — 2026-09-10, when the batch also learned the depth-2
+chain on the families that carry `kBatchedDraftChain`). The scheduler
+advertises the configured slot count so its
 canonical round-robin slice contains every live request. Below the crossover
 the adapter replays the live requests' scalar variants sequentially; at and
 above it, one batch replay advances every live request. **The batch family
@@ -2807,8 +2813,12 @@ The first adaptive version restored throughput but failed transcript
 isolation: scalar decode used the row-independent GEMV cores at m≤4 while an
 eight-row graph selected cuBLASLt or the FP8 tile GEMM, so a request that
 changed shape could flip a later near-tie token. The accepted implementation
-lowers every decode shape up to eight rows through scalar-order GEMV chunks of
-at most four rows (fewer when K reaches the 48-KiB shared-memory ceiling).
+lowers every decode shape up to the model's decode rows (`CublasLtGemm::
+set_decode_rows`; 8 by default, the batch's rows on the session-core
+families — the first 9-row batch fell to an Lt algorithm and flipped a near
+tie, 2026-09-10) through scalar-order GEMV chunks of at most four rows
+(fewer when K reaches the 48-KiB shared-memory ceiling; each chunk past the
+first re-reads the weights — the batch's byte cost, docs/measurements.md).
 Every row retains the exact M=1 FMA/reduction chain while still amortizing a
 weight read across the rows in its chunk. `bf16_gemv_test` and
 `scale_gemm_test` pin M=8 versus eight M=1 calls bitwise for BF16 and FP8
@@ -3073,17 +3083,25 @@ scripts/              fabric_run.sh (the fabric launcher), serve_run.sh
                       cross-rank reader), node_probe.sh, soak.sh, ci-local.sh
 src/common/           logging, dtypes, process memory (mlock), tests
 src/core/             arena, graph, streams, trace
+src/engine/           the model-independent decode engine (Q1, 2026-09-09):
+                      the engine's model contract and output rows
+                      (decode_outputs), the TP boundary reducer seam, the
+                      bus-side reducers and pick/sample helpers (tp_bus),
+                      the graph and eager scheduler-engine adapters as
+                      templates over the model type, the prefix arena, the
+                      speculative judge and eager speculators, graph shape
+                      check, step timing; models/glm/*.hpp of the same
+                      names bind them to GlmDiagnosticModel
 src/kernels/          GEMM wrapper and scale-aware GEMM, bf16/fp8 GEMV cores,
                       KDA and DSA ops, mHC, MoE (router, slot GEMVs,
                       accumulation), norms, L2 prefetcher, the pick and spec
                       (commit/positions/draft rows) kernels, flag protocol
 src/loaders/          JSON, safetensors, shardspec, the HF hub cache resolver
 src/models/           GLM config/binding/loader/resident image; the model
-                      (glm_forward, glm_decode sessions, glm_mtp, glm_tp views
-                      and bus reducers, glm_tp_bus picker); KDA and DSA
-                      layers/state/references/dumps; mHC and MoE layers and
-                      oracles; tokenizer, chat template, sampler, scheduler,
-                      speculative judge, engine adapters, step timing
+                      (glm_forward, glm_decode sessions, glm_mtp, glm_tp
+                      views); KDA and DSA layers/state/references/dumps; mHC
+                      and MoE layers and oracles; the GLM faces of the
+                      engine headers
 src/net/              TCP primitives, the epoch-based roster, the CollectiveBus
                       (verbs RC QPs, slot pools, credits, the engine loop, the
                       collective kernels: latency one-shot, graph, bulk RS+AG)

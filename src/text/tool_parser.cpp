@@ -1,5 +1,7 @@
 #include "text/tool_parser.hpp"
 
+#include <cstring>
+
 #include <utility>
 
 #include "text/chat_template.hpp"
@@ -31,9 +33,14 @@ ChatMarkers ChatMarkers::from_tokenizer(const Tokenizer& tok) {
   m.arg_key_close = lookup("</arg_key>");
   m.arg_value_open = lookup("<arg_value>");
   m.arg_value_close = lookup("</arg_value>");
-  for (const char* role : {"<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"}) {
+  for (const char* role : {"<|system|>", "<|user|>", "<|assistant|>", "<|observation|>",
+                           "<|im_start|>", "<|im_end|>"}) {
     const ChatMarker r = lookup(role);
     if (r.available()) m.role_markers.push_back(r);
+  }
+  {
+    const std::vector<int64_t> nl = tok.encode("\n");
+    if (nl.size() == 1) m.newline = ChatMarker{nl[0], "\n"};
   }
   return m;
 }
@@ -175,6 +182,55 @@ std::string ToolCallParser::typed_value(const std::string& function,
   return Value::string_value(text).to_json(/*ensure_ascii=*/false);
 }
 
+// "<function=NAME>\n(<parameter=K>\nV\n</parameter>\n)*</function>\n" —
+// lenient about the newlines around the tags (a model may drop or double
+// one), strict about the tags themselves; a value keeps its inner text
+// verbatim (the template writes strings raw and other values as JSON,
+// which typed_value() sorts out).
+bool ToolCallParser::parse_qwen_block(const std::string& text) {
+  size_t i = 0;
+  const auto skip_ws = [&] {
+    while (i < text.size() && (text[i] == '\n' || text[i] == ' ' || text[i] == '\r' || text[i] == '\t')) ++i;
+  };
+  const auto accept = [&](const char* lit) {
+    const size_t n = std::strlen(lit);
+    if (text.compare(i, n, lit) != 0) return false;
+    i += n;
+    return true;
+  };
+  skip_ws();
+  if (!accept("<function=")) return false;
+  const size_t name_end = text.find('>', i);
+  if (name_end == std::string::npos || name_end == i) return false;
+  name_ = text.substr(i, name_end - i);
+  if (name_.find('\n') != std::string::npos || name_.find('<') != std::string::npos) return false;
+  i = name_end + 1;
+  if (i < text.size() && text[i] == '\n') ++i;
+  args_.clear();
+  for (;;) {
+    if (accept("<parameter=")) {
+      const size_t key_end = text.find('>', i);
+      if (key_end == std::string::npos || key_end == i) return false;
+      const std::string key = text.substr(i, key_end - i);
+      if (key.find('\n') != std::string::npos || key.find('<') != std::string::npos) return false;
+      i = key_end + 1;
+      if (i < text.size() && text[i] == '\n') ++i;
+      const size_t close = text.find("</parameter>", i);
+      if (close == std::string::npos) return false;
+      std::string value = text.substr(i, close - i);
+      if (!value.empty() && value.back() == '\n') value.pop_back();
+      args_.emplace_back(key, std::move(value));
+      i = close + std::strlen("</parameter>");
+      if (i < text.size() && text[i] == '\n') ++i;
+      continue;
+    }
+    break;
+  }
+  if (!accept("</function>")) return false;
+  skip_ws();
+  return i == text.size();
+}
+
 void ToolCallParser::complete_block(std::vector<Event>* out) {
   Event ev;
   ev.kind = Event::Kind::kToolCall;
@@ -230,6 +286,23 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
   raw_.push_back(id);
   const bool open = is_marker(id, markers_.tool_call_open);
   const bool close = is_marker(id, markers_.tool_call_close);
+  if (markers_.tool_format() == ToolFormat::kQwenXml) {
+    // The Qwen format: the block's ids buffer until it closes; the text
+    // between the markers is parsed then (a nested opener restarts).
+    if (open) {
+      raw_.pop_back();
+      abort_block(out);
+      enter_tool_call(id);
+      return;
+    }
+    if (!close) return;
+    std::vector<int64_t> inner(raw_.begin() + (raw_has_prefix_ ? 1 : 0), raw_.end() - 1);
+    std::string text = raw_has_prefix_ ? "" : options_.forced_prefix_text;
+    text += decode_(inner);
+    if (parse_qwen_block(text)) complete_block(out);
+    else abort_block(out);
+    return;
+  }
   const bool key_open = is_marker(id, markers_.arg_key_open);
   const bool key_close = is_marker(id, markers_.arg_key_close);
   const bool value_open = is_marker(id, markers_.arg_value_open);

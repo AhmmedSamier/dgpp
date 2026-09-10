@@ -25,17 +25,20 @@ constexpr int BK = 32;
 constexpr int BK_PAD = BK + 8;  // u16 pad breaks the worst bank conflicts
 constexpr int kBlockThreads = (BN / 8) * 32;  // 8 warps, one n8 group each
 
+// rs / cs: the scale grid as log2 block sizes (7 = the checkpoint's 128;
+// a TP slice's re-blocked axis 6 or 5 — docs/qwen38_flash_next_plan.md
+// D2). Rows read their own scale row (n >> rs); a 32-deep stage lies in
+// one scale column for cs >= 5.
 template <typename OutT>
 __global__ void scale_gemm_kernel(const uint16_t* __restrict__ act,
                                   size_t act_stride,
                                   const uint8_t* __restrict__ w,
                                   const float* __restrict__ scales,
                                   OutT* __restrict__ out, int m, int n,
-                                  int k, size_t out_stride) {
+                                  int k, size_t out_stride, int rs, int cs) {
   const int n0 = blockIdx.x * BN;
   const int m0 = blockIdx.y * BM;
-  const int scale_cols = (k + 127) / 128;
-  const int scale_row = n0 / 128;  // whole n-tile in one scale row (BN | 128)
+  const int scale_cols = (k + (1 << cs) - 1) >> cs;
 
   __shared__ uint16_t sA[BM][BK_PAD];
   __shared__ uint16_t sB[BN][BK_PAD];
@@ -52,14 +55,14 @@ __global__ void scale_gemm_kernel(const uint16_t* __restrict__ act,
   float c0 = 0.f, c1 = 0.f, c2 = 0.f, c3 = 0.f;
 
   for (int k0 = 0; k0 < k; k0 += BK) {
-    // Single scalar scale per stage (see geometry note above).
-    const float s = scales[(size_t)scale_row * scale_cols + (k0 / 128)];
+    const int scale_col = k0 >> cs;  // one scale column per stage (BK | 2^cs)
 
     // Weight tile: decode + scale + one BF16 round — the exact operation
     // of the dequant bridge, so weight-tile bits cannot diverge from it.
     for (int idx = threadIdx.x; idx < BN * BK; idx += kBlockThreads) {
       const int nn = idx / BK, kk = idx % BK;
       const int gn = n0 + nn, gk = k0 + kk;
+      const float s = scales[(size_t)(gn >> rs) * scale_cols + scale_col];
       sB[nn][kk] =
           (gn < n && gk < k)
               ? float_to_bf16_bits(
@@ -248,7 +251,7 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
   }
   const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
   scale_gemm_kernel<OutT><<<grid, kBlockThreads, 0, stream>>>(
-      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_stride);
+      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_stride, 7, 7);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -274,13 +277,16 @@ namespace {
 template <typename OutT>
 void launch_scale_gemm_tile(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
-                            OutT* out, int m, int n, int k, cudaStream_t stream) {
+                            OutT* out, int m, int n, int k, cudaStream_t stream,
+                            int rs, int cs) {
   if (m <= 0 || n <= 0) return;
   if (!act || !w_payload || !w_scales || !out || k <= 0)
     throw std::invalid_argument("scale_gemm_tile: null pointer or k <= 0");
+  if (rs < 5 || rs > 7 || cs < 5 || cs > 7)
+    throw std::invalid_argument("scale_gemm_tile: the scale grid must be 32, 64 or 128 on each axis");
   const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
   scale_gemm_kernel<OutT><<<grid, kBlockThreads, 0, stream>>>(
-      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, static_cast<size_t>(n));
+      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, static_cast<size_t>(n), rs, cs);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 }  // namespace
@@ -288,17 +294,17 @@ void launch_scale_gemm_tile(const uint16_t* act, size_t act_row_stride_elems,
 void launch_scale_gemm_tile_bf16(const uint16_t* act, size_t act_row_stride_elems,
                                  const uint8_t* w_payload, const float* w_scales,
                                  uint16_t* out, int m, int n, int k,
-                                 cudaStream_t stream) {
+                                 cudaStream_t stream, int rs, int cs) {
   launch_scale_gemm_tile<uint16_t>(act, act_row_stride_elems, w_payload, w_scales,
-                                   out, m, n, k, stream);
+                                   out, m, n, k, stream, rs, cs);
 }
 
 void launch_scale_gemm_tile_f32(const uint16_t* act, size_t act_row_stride_elems,
                                 const uint8_t* w_payload, const float* w_scales,
                                 float* out, int m, int n, int k,
-                                cudaStream_t stream) {
+                                cudaStream_t stream, int rs, int cs) {
   launch_scale_gemm_tile<float>(act, act_row_stride_elems, w_payload, w_scales,
-                                out, m, n, k, stream);
+                                out, m, n, k, stream, rs, cs);
 }
 
 }  // namespace dgpp

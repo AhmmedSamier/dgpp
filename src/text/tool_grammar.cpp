@@ -1,6 +1,7 @@
 #include "text/tool_grammar.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -54,10 +55,13 @@ GrammarVocab GrammarVocab::from_tokenizer(const Tokenizer& tok,
   // The turn-ending id after the last call: <|observation|> when it is an
   // EOS id of this checkpoint, else the first EOS id.
   int64_t call_eos = -1;
-  for (const auto& added : tok.added_tokens())
-    if (added.content == "<|observation|>")
-      for (const int64_t e : eos_ids)
-        if (e == added.id) call_eos = e;
+  for (const char* turn_end : {"<|observation|>", "<|im_end|>"}) {
+    if (call_eos >= 0) break;
+    for (const auto& added : tok.added_tokens())
+      if (added.content == turn_end)
+        for (const int64_t e : eos_ids)
+          if (e == added.id) call_eos = e;
+  }
   return GrammarVocab(std::move(texts), ChatMarkers::from_tokenizer(tok),
                       eos_ids, vocab_size, call_eos);
 }
@@ -323,8 +327,54 @@ const char* GrammarState::state_name() const {
     case State::kEnd: return "end";
     case State::kDone: return "done";
     case State::kJsonBody: return json_.state_name();
+    case State::kQName: return "q-name";
+    case State::kQKeyOrClose: return "q-key-or-close";
+    case State::kQFreeKey: return "q-free-key";
+    case State::kQValue: return "q-value";
+    case State::kQClose: return "q-close";
   }
   return "?";
+}
+
+namespace {
+constexpr const char* kQFn = "\n<function=";
+constexpr const char* kQGt = ">\n";
+constexpr const char* kQParam = "<parameter=";
+constexpr const char* kQEndParam = "\n</parameter>\n";
+constexpr const char* kQEndFn = "</function>\n";
+bool ends_with(const std::string& s, const char* suffix) {
+  const size_t n = std::strlen(suffix);
+  return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
+}
+}  // namespace
+
+bool GrammarState::qwen() const {
+  return vocab_ != nullptr && vocab_->markers().tool_format() == ToolFormat::kQwenXml;
+}
+
+std::vector<int64_t> GrammarState::literal_ids(const std::string& target,
+                                               const std::string& emitted) const {
+  TextMatch m;
+  m.targets.push_back(target);
+  m.emitted = emitted;
+  return match_ids(m, -1);
+}
+
+void GrammarState::free_mask_in_call(TokenMask* out) const {
+  free_mask(out, -1, /*forbid_markers=*/true);
+  const int vocab = vocab_->vocab_size();
+  const auto clear = [&](int64_t id) {
+    if (id < 0 || id >= vocab) return;
+    uint32_t& w = out->words[static_cast<size_t>(id >> 5)];
+    const uint32_t bit = 1u << (id & 31);
+    if (w & bit) {
+      w &= ~bit;
+      --out->allowed;
+    }
+  };
+  for (const int64_t e : vocab_->eos_ids()) clear(e);
+  clear(vocab_->markers().think_open.id);
+  clear(vocab_->markers().think_close.id);
 }
 
 bool GrammarState::obligation_open() const {
@@ -383,6 +433,44 @@ bool GrammarState::call_closable_for(const std::string& name) const {
 void GrammarState::enter(State s) {
   state_ = s;
   match_ = TextMatch{};
+  term_.clear();
+  if (s == State::kQName) {
+    if (spec_.mode == GrammarSpec::Mode::kNamed) {
+      match_.targets.push_back(std::string(kQFn) + spec_.named + kQGt);
+    } else {
+      for (const GrammarTool& t : spec_.tools)
+        match_.targets.push_back(std::string(kQFn) + t.name + kQGt);
+    }
+    tool_ = -1;
+    return;
+  }
+  if (s == State::kQKeyOrClose) {
+    const GrammarTool* t = current_tool();
+    if (t != nullptr && t->constrain_keys) {
+      for (const std::string& k : t->keys)
+        if (!key_used(k)) match_.targets.push_back(std::string(kQParam) + k + kQGt);
+    } else {
+      match_.targets.push_back(kQParam);
+    }
+    if (call_closable()) match_.targets.push_back(kQEndFn);
+    return;
+  }
+  if (s == State::kQValue) {
+    arg_ = -1;
+    const GrammarTool* t = current_tool();
+    if (t != nullptr)
+      for (size_t i = 0; i < t->args.size(); ++i)
+        if (t->args[i].key == key_) arg_ = static_cast<int>(i);
+    const GrammarArg* a = current_arg();
+    if (a != nullptr && a->kind == GrammarArg::Kind::kText) {
+      for (const std::string& text : a->texts) match_.targets.push_back(text + kQEndParam);
+    } else if (a != nullptr && a->kind == GrammarArg::Kind::kJson) {
+      value_json_ = JsonMachine(
+          arg_schemas_[static_cast<size_t>(tool_)][static_cast<size_t>(arg_)],
+          &vocab_->json_tables());
+    }
+    return;
+  }
   if (s == State::kName) {
     if (spec_.mode == GrammarSpec::Mode::kNamed) {
       match_.targets.push_back(spec_.named);
@@ -494,7 +582,10 @@ void GrammarState::mask(TokenMask* out) const {
       free_mask(out, /*extra_allowed=*/-1, /*forbid_markers=*/false);
       return;
     case State::kTop: {
-      const bool free_top = spec_.mode == GrammarSpec::Mode::kAuto ||
+      // The Qwen format lets natural-language text precede a call ("You
+      // may provide optional reasoning ... BEFORE the function call"), so
+      // its top is free under every mode; the obligation still forbids EOS.
+      const bool free_top = qwen() || spec_.mode == GrammarSpec::Mode::kAuto ||
                             spec_.mode == GrammarSpec::Mode::kForbidCalls;
       if (free_top) {
         free_mask(out, calls_remaining() ? m.tool_call_open.id : -1);
@@ -554,6 +645,42 @@ void GrammarState::mask(TokenMask* out) const {
     case State::kJsonBody:
       json_mask(json_, /*closer=*/-1, out);
       return;
+    case State::kQName:
+    case State::kQKeyOrClose:
+      list_mask(out, match_ids(match_, -1));
+      return;
+    case State::kQFreeKey:
+      free_mask_in_call(out);
+      return;
+    case State::kQValue: {
+      const GrammarArg* a = current_arg();
+      if (a == nullptr || a->kind == GrammarArg::Kind::kFree) {
+        free_mask_in_call(out);
+      } else if (a->kind == GrammarArg::Kind::kText) {
+        list_mask(out, match_ids(match_, -1));
+      } else if (!term_.empty()) {
+        list_mask(out, literal_ids(kQEndParam, term_));
+      } else {
+        // The JSON text; once complete, also the terminator's first ids.
+        json_mask(value_json_, /*closer=*/-2, out);
+        if (value_json_.done()) {
+          const int vocab = vocab_->vocab_size();
+          for (const int64_t id : literal_ids(kQEndParam, "")) {
+            if (id < 0 || id >= vocab) continue;
+            uint32_t& w = out->words[static_cast<size_t>(id >> 5)];
+            const uint32_t bit = 1u << (id & 31);
+            if (!(w & bit)) {
+              w |= bit;
+              ++out->allowed;
+            }
+          }
+        }
+      }
+      return;
+    }
+    case State::kQClose:
+      list_mask(out, {m.tool_call_close.id});
+      return;
   }
 }
 
@@ -580,12 +707,13 @@ void GrammarState::json_mask(const JsonMachine& machine, int64_t closer,
   set(vocab_->markers().think_open.id, false);
   set(vocab_->markers().think_close.id, false);
   if (machine.done()) {
-    if (closer < 0)
+    if (closer == -1)
       for (const int64_t e : vocab_->eos_ids()) set(e, true);
-    else
+    else if (closer >= 0)
       set(closer, true);
+    // closer -2: the caller adds its own text terminator.
   }
-  if (out->allowed == 0)
+  if (out->allowed == 0 && closer != -2)
     throw std::logic_error("GrammarState: a JSON position with no allowed id");
 }
 
@@ -613,6 +741,25 @@ bool GrammarState::allows(int64_t id) const {
     const GrammarArg* a = current_arg();
     if (a != nullptr && a->kind == GrammarArg::Kind::kJson)
       return json_allows(value_json_, vocab_->markers().arg_value_close.id, id);
+  }
+  if (state_ == State::kQValue) {
+    const GrammarArg* a = current_arg();
+    if (a != nullptr && a->kind == GrammarArg::Kind::kJson) {
+      if (!term_.empty()) {
+        for (const int64_t t : literal_ids(kQEndParam, term_))
+          if (t == id) return true;
+        return false;
+      }
+      if (value_json_.done())
+        for (const int64_t t : literal_ids(kQEndParam, ""))
+          if (t == id) return true;
+      if (vocab_->is_eos(id)) return false;
+      for (const int64_t mk : vocab_->marker_ids())
+        if (mk == id) return false;
+      if (id == vocab_->markers().think_open.id || id == vocab_->markers().think_close.id)
+        return false;
+      return value_json_.allows(*vocab_, id);
+    }
   }
   TokenMask m;
   mask(&m);
@@ -652,10 +799,81 @@ void GrammarState::advance(int64_t id) {
       return;
     case State::kTop:
       if (id == m.tool_call_open.id) {
-        enter(State::kName);
+        enter(qwen() ? State::kQName : State::kName);
       } else if (vocab_->is_eos(id)) {
         state_ = State::kDone;
       }
+      return;
+    case State::kQName:
+      match_.emitted += vocab_->text(id);
+      if (match_.complete()) {
+        // "\n<function=" NAME ">\n": bind the tool; the key ledger opens.
+        const std::string name = match_.emitted.substr(
+            std::strlen(kQFn), match_.emitted.size() - std::strlen(kQFn) - std::strlen(kQGt));
+        tool_ = -1;
+        used_keys_.clear();
+        for (size_t i = 0; i < spec_.tools.size(); ++i)
+          if (spec_.tools[i].name == name) tool_ = static_cast<int>(i);
+        enter(State::kQKeyOrClose);
+      }
+      return;
+    case State::kQKeyOrClose:
+      match_.emitted += vocab_->text(id);
+      if (!match_.complete()) return;
+      if (match_.emitted == kQEndFn) {
+        enter(State::kQClose);
+      } else if (match_.emitted == kQParam) {
+        enter(State::kQFreeKey);
+      } else {
+        key_ = match_.emitted.substr(
+            std::strlen(kQParam), match_.emitted.size() - std::strlen(kQParam) - std::strlen(kQGt));
+        used_keys_.push_back(key_);
+        enter(State::kQValue);
+      }
+      return;
+    case State::kQFreeKey:
+      match_.emitted += vocab_->text(id);
+      if (ends_with(match_.emitted, kQGt)) {
+        key_ = match_.emitted.substr(0, match_.emitted.size() - std::strlen(kQGt));
+        if (key_.empty() || key_.find_first_of("\n<>") != std::string::npos) {
+          dead_ = true;
+          return;
+        }
+        used_keys_.push_back(key_);
+        enter(State::kQValue);
+      }
+      return;
+    case State::kQValue: {
+      const GrammarArg* a = current_arg();
+      const std::string& text = vocab_->text(id);
+      if (a != nullptr && a->kind == GrammarArg::Kind::kText) {
+        match_.emitted += text;
+        if (match_.complete()) enter(State::kQKeyOrClose);
+        return;
+      }
+      if (a != nullptr && a->kind == GrammarArg::Kind::kJson) {
+        bool terminator = !term_.empty();
+        if (!terminator && value_json_.done())
+          for (const int64_t t : literal_ids(kQEndParam, ""))
+            if (t == id) terminator = true;
+        if (terminator) {
+          term_ += text;
+          if (term_ == kQEndParam) enter(State::kQKeyOrClose);
+          return;
+        }
+        for (const char c : text)
+          if (!value_json_.feed(static_cast<uint8_t>(c))) {
+            dead_ = true;
+            return;
+          }
+        return;
+      }
+      match_.emitted += text;
+      if (ends_with(match_.emitted, kQEndParam)) enter(State::kQKeyOrClose);
+      return;
+    }
+    case State::kQClose:
+      after_call();
       return;
     case State::kName:
       if (id == m.arg_key_open.id || id == m.tool_call_close.id) {

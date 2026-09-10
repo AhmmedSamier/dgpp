@@ -51,8 +51,8 @@ void launch(const uint16_t* act, size_t act_stride, const GlmFp4Matrix& w,
     throw std::invalid_argument("fp4_gemv: matrix geometry does not match n, k");
   if (!fp4_gemv::shape_ok(w.payload, k))
     throw std::invalid_argument(
-        "fp4_gemv: K must be a power of two in [32, 4096] and the payload "
-        "16-byte aligned");
+        "fp4_gemv: K must be a multiple of 32 in the compiled set and the "
+        "payload 16-byte aligned");
   for (int row0 = 0; row0 < m;) {
     int rows = std::min(fp4_gemv::kMaxRows, m - row0);
     while (!gemv::smem_fits(rows, k)) --rows;

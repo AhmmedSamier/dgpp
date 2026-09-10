@@ -115,13 +115,18 @@ __device__ __forceinline__ void consume_chunk(const uint4& wchunk, float s,
 // One warp, one weight row, kRows activation rows: acc[r] = dot(w_row, sx[r]).
 // Every lane returns the full reduced dot for each row.
 //   w_row     fp8 row (k bytes, 16B aligned)
-//   scale_row this row's scale block row ([ceil(k/128)] f32)
+//   scale_row this row's scale block row ([ceil(k / 2^cs)] f32)
 //   sx        staged activations [kRows][k] bf16
+//   cs        log2 of the scale block's column width (7 = the checkpoint's
+//             128; a TP slice re-blocked at gcd(128, slice) passes 6, 5 or
+//             4 — docs/qwen38_flash_next_plan.md D2). A 16-byte chunk must
+//             lie inside one block: cs >= 4.
 template <int kRows>
 __device__ __forceinline__ void row_dots(const uint8_t* __restrict__ w_row,
                                          const float* __restrict__ scale_row,
                                          const uint16_t* __restrict__ sx, int k,
-                                         int lane, float (&acc)[kRows]) {
+                                         int lane, float (&acc)[kRows],
+                                         int cs = 7) {
 #pragma unroll
   for (int r = 0; r < kRows; ++r) acc[r] = 0.f;
 
@@ -140,10 +145,53 @@ __device__ __forceinline__ void row_dots(const uint8_t* __restrict__ w_row,
     for (int b = 0; b < kBatch; ++b) {
       const int c0 = base + b * kWarpSpan + lane_off;
       if (c0 >= k) break;  // per lane: each lane only consumes its own chunks
-      consume_chunk<kRows>(w[b], scale_row[c0 >> 7], sx, k, c0, acc);
+      consume_chunk<kRows>(w[b], scale_row[c0 >> cs], sx, k, c0, acc);
     }
   }
   gemv::warp_reduce<kRows>(acc);
+}
+
+// Two rows' dots against the same staged activations with BOTH rows'
+// chunk batches issued before either is consumed (2026-09-09: the slot
+// gate/up kernel ran row_dots twice in sequence — two latency rounds per
+// warp, 82 % of DRAM rate). Each row's chunks are consumed in k order into
+// its own accumulator through consume_chunk, so acc_a and acc_b are
+// bitwise row_dots' for the two rows.
+template <int kRows>
+__device__ __forceinline__ void row_dots_pair(
+    const uint8_t* __restrict__ w_a, const float* __restrict__ scale_a,
+    const uint8_t* __restrict__ w_b, const float* __restrict__ scale_b,
+    const uint16_t* __restrict__ sx, int k, int lane, float (&acc_a)[kRows],
+    float (&acc_b)[kRows], int cs = 7) {
+#pragma unroll
+  for (int r = 0; r < kRows; ++r) {
+    acc_a[r] = 0.f;
+    acc_b[r] = 0.f;
+  }
+  const int lane_off = lane * kChunkBytes;
+  for (int base = 0; base < k; base += kWarpSpan * kBatch) {
+    uint4 wa[kBatch], wb[kBatch];
+#pragma unroll
+    for (int b = 0; b < kBatch; ++b) {
+      const int c0 = base + b * kWarpSpan + lane_off;
+      wa[b] = (c0 < k) ? *reinterpret_cast<const uint4*>(w_a + c0) : make_uint4(0u, 0u, 0u, 0u);
+      wb[b] = (c0 < k) ? *reinterpret_cast<const uint4*>(w_b + c0) : make_uint4(0u, 0u, 0u, 0u);
+    }
+#pragma unroll
+    for (int b = 0; b < kBatch; ++b) {
+      const int c0 = base + b * kWarpSpan + lane_off;
+      if (c0 >= k) break;
+      consume_chunk<kRows>(wa[b], scale_a[c0 >> cs], sx, k, c0, acc_a);
+    }
+#pragma unroll
+    for (int b = 0; b < kBatch; ++b) {
+      const int c0 = base + b * kWarpSpan + lane_off;
+      if (c0 >= k) break;
+      consume_chunk<kRows>(wb[b], scale_b[c0 >> cs], sx, k, c0, acc_b);
+    }
+  }
+  gemv::warp_reduce<kRows>(acc_a);
+  gemv::warp_reduce<kRows>(acc_b);
 }
 
 // The output policy of one dot: bf16 (the activation dtype — one rounding
@@ -163,15 +211,16 @@ __device__ __forceinline__ void block_rows(const uint8_t* __restrict__ w,
                                            const uint16_t* __restrict__ sx,
                                            int n0, int n, int k,
                                            OutT* __restrict__ out,
-                                           size_t out_stride) {
+                                           size_t out_stride, int rs = 7,
+                                           int cs = 7) {
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   const int row = n0 + warp;
   if (row >= n) return;
-  const int scale_cols = (k + 127) / 128;
-  const float* scale_row = scales + static_cast<size_t>(row / 128) * scale_cols;
+  const int scale_cols = (k + (1 << cs) - 1) >> cs;
+  const float* scale_row = scales + static_cast<size_t>(row >> rs) * scale_cols;
   float acc[kRows];
-  row_dots<kRows>(w + static_cast<size_t>(row) * k, scale_row, sx, k, lane, acc);
+  row_dots<kRows>(w + static_cast<size_t>(row) * k, scale_row, sx, k, lane, acc, cs);
   if (lane == 0) {
 #pragma unroll
     for (int r = 0; r < kRows; ++r)
@@ -191,12 +240,12 @@ template <int kRows, int R, typename OutT>
 __device__ __forceinline__ void block_rows_multi(
     const uint8_t* __restrict__ w, const float* __restrict__ scales,
     const uint16_t* __restrict__ sx, int n0, int n, int k,
-    OutT* __restrict__ out, size_t out_stride) {
+    OutT* __restrict__ out, size_t out_stride, int rs = 7, int cs = 7) {
   const int warp = threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   const int row0 = n0 + warp * R;
   if (row0 >= n) return;
-  const int scale_cols = (k + 127) / 128;
+  const int scale_cols = (k + (1 << cs) - 1) >> cs;
   const int lane_off = lane * kChunkBytes;
   const int chunks = (k + kWarpSpan - 1) / kWarpSpan;  // per row per lane
   float acc[R][kRows];
@@ -224,7 +273,7 @@ __device__ __forceinline__ void block_rows_multi(
       const int c0 = c * kWarpSpan + lane_off;
       if (idx >= total || row0 + r >= n || c0 >= k) continue;
       const float s =
-          scales[static_cast<size_t>((row0 + r) / 128) * scale_cols + (c0 >> 7)];
+          scales[static_cast<size_t>((row0 + r) >> rs) * scale_cols + (c0 >> cs)];
       consume_chunk<kRows>(wv[b], s, sx, k, c0, acc[r]);
     }
   }
@@ -237,6 +286,64 @@ __device__ __forceinline__ void block_rows_multi(
       for (int a = 0; a < kRows; ++a)
         store_dot(out + static_cast<size_t>(a) * out_stride + row0 + r, acc[r][a]);
     }
+  }
+}
+
+// The block body for NARROW rows (2026-09-09): k <= 256 bytes is at most
+// sixteen 16-byte chunks, so a warp load with one lane per chunk left
+// 32 - c lanes idle and the Qwen TP=4 down projection (k = 160, ten
+// chunks) ran at 55 % of DRAM rate on the per-row reduction. Here a warp
+// load covers g = 32 / c rows at once (lane l: row l / c, chunk l % c),
+// G such groups per warp issued together, and each row's warp_reduce is
+// replaced by the SAME tree it computed: the 32-lane xor butterfly over
+// c live lanes and 32 - c zeros collapses — every lane j >= c a subtree
+// reads still holds 0 at that stage — to the four-stage butterfly over
+// the group's own lanes with a 0.0f wherever the partner is beyond c.
+// Every per-lane chunk chain is consume_chunk's, so each row's result is
+// bitwise block_rows'. Requires c <= 16 (k <= 256) and kRows == 1.
+template <int G, typename OutT>
+__device__ __forceinline__ void block_rows_narrow(
+    const uint8_t* __restrict__ w, const float* __restrict__ scales,
+    const uint16_t* __restrict__ sx, int n0, int n, int k,
+    OutT* __restrict__ out, int rs = 7, int cs = 7) {
+  const int warp = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int c = (k + kChunkBytes - 1) / kChunkBytes;  // chunks per row, <= 16
+  const int g = 32 / c;                                // rows per warp load
+  const int row0 = n0 + warp * (G * g);
+  if (row0 >= n) return;
+  const int scale_cols = (k + (1 << cs) - 1) >> cs;
+  const int live = lane < g * c;
+  const int i = live ? lane % c : 0;           // the lane's chunk
+  const int rr = live ? lane / c : 0;          // the lane's row within a group
+  const int c0 = i * kChunkBytes;
+  uint4 wv[G];
+#pragma unroll
+  for (int q = 0; q < G; ++q) {
+    const int row = row0 + q * g + rr;
+    const bool ok = live && row < n && c0 < k;
+    wv[q] = ok ? *reinterpret_cast<const uint4*>(w + static_cast<size_t>(row) * k + c0)
+               : make_uint4(0u, 0u, 0u, 0u);
+  }
+#pragma unroll
+  for (int q = 0; q < G; ++q) {
+    const int row = row0 + q * g + rr;
+    float acc[1] = {0.f};
+    if (live && row < n && c0 < k) {
+      const float s = scales[static_cast<size_t>(row >> rs) * scale_cols + (c0 >> cs)];
+      consume_chunk<1>(wv[q], s, sx, k, c0, acc);
+    }
+    // The collapsed butterfly (stage 16 is a no-op for c <= 16): partner
+    // i ^ off within the group, 0.0f beyond c — the zero lane it stood for.
+    float v = acc[0];
+    const int base = lane - i;  // the group's first lane
+#pragma unroll
+    for (int off = 8; off > 0; off >>= 1) {
+      const int partner = i ^ off;
+      const float other = __shfl_sync(0xffffffffu, v, partner < c ? base + partner : lane);
+      v += (partner < c) ? other : 0.0f;
+    }
+    if (live && i == 0 && row < n) store_dot(out + row, v);
   }
 }
 

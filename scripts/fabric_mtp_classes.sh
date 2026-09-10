@@ -4,7 +4,7 @@
 # --decode-graph --mtp on the four nodes, greedy, 300 steps per class.
 #   fabric_mtp_classes.sh [--config CLUSTER.json] OUT_DIR CLASS...
 set -u
-ROOT=/home/user/workspace/dgpp
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The checkpoint and the fabric come from a cluster config (dgpp-cluster's
 # file: deploy/cluster.json by default, or --config F as the first argument)
 # — its `model`, `nodes` (node 0 is the head, where this runs) and `ssh_user`
@@ -17,7 +17,7 @@ MODEL=$(jq -r '.model' "$CONFIG")
 NODES=($(jq -r '.nodes[]' "$CONFIG"))
 export DGPP_FABRIC_HEAD="${NODES[0]}"
 export DGPP_FABRIC_PEERS="${NODES[*]:1}"
-export DGPP_FABRIC_USER="$(jq -r '.ssh_user // "user"' "$CONFIG")"
+export DGPP_FABRIC_USER="$(jq -r '.ssh_user // env.USER' "$CONFIG")"
 OUT=${1:?OUT_DIR}; shift
 case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac
 mkdir -p "$OUT"; cd "$ROOT" || exit 1

@@ -151,7 +151,7 @@ __host__ __device__ inline uint64_t verdict_digest(int rows, int accepted,
   return h & ((1ull << kPickDigestBits) - 1);
 }
 
-// One thread: the table is at most 9 x 8 x 9 slots.
+// One thread: the table is at most (kPickMaxRows + 1) x 8 x 9 slots.
 __global__ void pick_verdict_kernel(const uint16_t* __restrict__ table,
                                     int rows, int world, int rank,
                                     const int64_t* __restrict__ fed,

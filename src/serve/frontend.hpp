@@ -46,6 +46,8 @@ class TextFrontend : public ModelFrontend {
     return tok_->decode(ids, /*skip_special_tokens=*/true);
   }
 
+  bool template_reads(std::string_view name) const override { return tpl_->reads(name); }
+
   std::string render_chat(const minijson::Value& globals) const override {
     dgpp::text::Value::Members members;
     for (const minijson::Member& m : globals.members())

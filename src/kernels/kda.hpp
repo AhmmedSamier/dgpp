@@ -122,4 +122,32 @@ void kda_recurrent_fwd_batched(
     const KdaRequestRows& requests, cudaStream_t stream,
     const KdaStateSnapshots& snap = {});
 
+// The Gated DeltaNet recurrence (Q3, 2026-09-09; docs/qwen38_flash_next_plan.md
+// §1.3): the KDA kernel's scalar-gate mode. Per head h and token t the state
+// decays by exp(-exp(A_log[h]) * softplus(a_raw[t,h] + dt_bias[h])); value
+// head h reads key head h / kv_ratio's q and k (the reference's
+// repeat_interleave); everything else — l2norm, K^-1/2, sigmoid(beta), the
+// delta update, the post-update read, snapshots, batching — is the KDA
+// recurrence above.
+//   qkv:      bf16 [tokens, Hk*K + Hk*K + H*V] (post-conv q|k|v), Hk = H/kv_ratio
+//   a_raw:    bf16 [tokens, H], row stride a_row_stride elems (in_proj_a)
+//   beta_raw: bf16 [tokens, H], row stride beta_row_stride elems (in_proj_b)
+//   a_log:    fp32 [H]; dt_bias: fp32 [H]
+//   state:    fp32 [H, v_dim, k_dim] in/out, k contiguous
+//   out:      bf16 [tokens, H, v_dim]
+void gdn_recurrent_fwd(const void* qkv, const void* a_raw, int64_t a_row_stride,
+                       const void* beta_raw, int64_t beta_row_stride,
+                       const float* a_log, const float* dt_bias, float* state,
+                       void* out, int tokens, int heads, int kv_ratio,
+                       int k_dim, int v_dim, float scale, cudaStream_t stream,
+                       const KdaStateSnapshots& snap = {});
+
+void gdn_recurrent_fwd_batched(
+    const void* qkv, const void* a_raw, int64_t a_row_stride,
+    const void* beta_raw, int64_t beta_row_stride, const float* a_log,
+    const float* dt_bias, float* states, int64_t request_state_stride,
+    void* out, int rows, int heads, int kv_ratio, int k_dim, int v_dim,
+    float scale, const KdaRequestRows& requests, cudaStream_t stream,
+    const KdaStateSnapshots& snap = {});
+
 }  // namespace dgpp

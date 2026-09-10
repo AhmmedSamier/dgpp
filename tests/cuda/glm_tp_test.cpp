@@ -3751,7 +3751,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
         const dgpp::GenEngineAdapter::Sample row1 = dgpp::make_fabric_sample(
             &bus, r, kWorld, prefix_scratch, gather_scratch, cfg.vocab_size,
             test_wait_timeout_ms());
-        const dgpp::SampledSpeculator::Row0 row0 = dgpp::make_fabric_spec_row0(
+        const dgpp::SpecRow0 row0 = dgpp::make_fabric_spec_row0(
             &bus, r, kWorld, prefix_scratch, gather_scratch, cfg.vocab_size,
             test_wait_timeout_ms());
         dgpp::GlmGraphEngineAdapter engine(
@@ -3766,7 +3766,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
         size_t result_index = 0;
         for (const std::vector<Spec>& phase : phases) {
           const size_t n = phase.size();
-          std::vector<std::unique_ptr<dgpp::SampledSpeculator>> specs;
+          std::vector<std::unique_ptr<dgpp::GlmSampledSpeculator>> specs;
           std::vector<std::vector<int32_t>> streams(n);  // committed so far
           // The speculators prefill BEFORE the scheduler admits (the same
           // collectives the graph engine's prefill issues at admission ride
@@ -3778,7 +3778,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
             const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
             const int32_t first =
             row1(pre, params, rng, prompt_context, nullptr, nullptr).token;
-            specs.push_back(std::make_unique<dgpp::SampledSpeculator>(
+            specs.push_back(std::make_unique<dgpp::GlmSampledSpeculator>(
                 eager, static_cast<int>(i), pick_rows, row0, row1, params, rng,
                 prompt));
             specs.back()->start(first);
@@ -4118,7 +4118,7 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
         const dgpp::GenEngineAdapter::Sample row1 = dgpp::make_fabric_sample(
             &bus, r, kWorld, prefix_scratch, gather_scratch, cfg.vocab_size,
             test_wait_timeout_ms());
-        const dgpp::SampledSpeculator::Row0 row0 = dgpp::make_fabric_spec_row0(
+        const dgpp::SpecRow0 row0 = dgpp::make_fabric_spec_row0(
             &bus, r, kWorld, prefix_scratch, gather_scratch, cfg.vocab_size,
             test_wait_timeout_ms());
         dgpp::GlmGraphEngineAdapter engine(
@@ -4133,7 +4133,7 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
         size_t result_index = 0;
         for (const std::vector<Spec>& phase : phases) {
           const size_t n = phase.size();
-          std::vector<std::unique_ptr<dgpp::SampledSpeculator>> specs;
+          std::vector<std::unique_ptr<dgpp::GlmSampledSpeculator>> specs;
           std::vector<std::vector<int32_t>> streams(n);  // committed so far
           // The speculators prefill BEFORE the scheduler admits (the same
           // collectives the graph engine's prefill issues at admission ride
@@ -4145,7 +4145,7 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
             const std::vector<int32_t> prompt_context(prompt.begin(), prompt.end());
             const int32_t first =
             row1(pre, params, rng, prompt_context, nullptr, nullptr).token;
-            specs.push_back(std::make_unique<dgpp::SampledSpeculator>(
+            specs.push_back(std::make_unique<dgpp::GlmSampledSpeculator>(
                 eager, static_cast<int>(i), pick_rows, row0, row1, params, rng,
                 prompt, depth));
             specs.back()->start(first);
@@ -4304,7 +4304,7 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
           return pick_rows(dgpp::local_row_maxes(
               model.session_prefill(req, prompt), 1))[0];
         };
-        const auto newly_decided = [](dgpp::GreedySpeculator& spec) {
+        const auto newly_decided = [](dgpp::GlmGreedySpeculator& spec) {
           const int32_t old_draft = spec.draft();
           const std::vector<int32_t> consumed = spec.step();
           std::vector<int32_t> out;
@@ -4629,7 +4629,7 @@ DGPP_TEST(glm_tp_serving_mtp_batch_family_matches_independent_speculators) {
           return pick_rows(dgpp::local_row_maxes(
               model.session_prefill(req, prompt), 1))[0];
         };
-        const auto newly_decided = [](dgpp::GreedySpeculator& spec) {
+        const auto newly_decided = [](dgpp::GlmGreedySpeculator& spec) {
           const int32_t old_draft = spec.draft();
           const std::vector<int32_t> consumed = spec.step();
           std::vector<int32_t> out;
@@ -4646,12 +4646,12 @@ DGPP_TEST(glm_tp_serving_mtp_batch_family_matches_independent_speculators) {
         engine.warm_captures(make_tokens(4, cfg.vocab_size));
         engine.drain();
 
-        std::vector<std::unique_ptr<dgpp::GreedySpeculator>> specs(4);
+        std::vector<std::unique_ptr<dgpp::GlmGreedySpeculator>> specs(4);
         const auto open = [&](int slot, const std::vector<int64_t>& prompt) {
           engine.drain();
           const int32_t eager_first = first_pick(eager, slot, prompt);
           specs[static_cast<size_t>(slot)] =
-              std::make_unique<dgpp::GreedySpeculator>(eager, slot, pick_rows);
+              std::make_unique<dgpp::GlmGreedySpeculator>(eager, slot, pick_rows);
           specs[static_cast<size_t>(slot)]->start(eager_first);
           const int32_t graph_first = engine.prefill(slot, prompt);
           require(graph_first == eager_first,
@@ -4933,8 +4933,8 @@ DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
   GlmDiagnosticModel m(cfg, dir, /*max_tokens=*/320, /*max_cache_tokens=*/2048,
                        nullptr, 0, 1, GlmResidency::Resident, GlmHeadSharding::Full,
                        /*max_requests=*/4, /*mtp=*/true);
-  require(m.session_kpool() == 4, "fixture kpool");
-  const int64_t blocks0 = m.dsa_blocks_in_use();
+  require(m.session_snapshot_align() == 4, "fixture kpool");
+  const int64_t blocks0 = m.kv_blocks_in_use();
   const auto greedy = [&](const GlmDiagnosticModel::Outputs& o) {
     return static_cast<int64_t>(
         local_max(o.logits.data(), o.lm_vocab_count, o.lm_vocab_begin).id);
@@ -5029,7 +5029,7 @@ DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
     m.session_release_snapshot(sm);
     DGPP_CUDA_OK(cudaFree(sb));
   }
-  require(m.dsa_blocks_in_use() == blocks0, "short-chunk cases: all blocks returned");
+  require(m.kv_blocks_in_use() == blocks0, "short-chunk cases: all blocks returned");
   const GlmDiagnosticModel::Outputs flat = m.session_prefill(0, prompt);
   const GlmDiagnosticModel::Outputs cold = m.session_prefill(1, prompt, {B});
   {
@@ -5061,7 +5061,7 @@ DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
   require(static_cast<int64_t>(meta.full_blocks.size()) == A / 128, "one full block shared");
   require(meta.partial_block >= 0, "the partial block was copied");
   require(same(snapped.logits, cold.logits), "snapshotting is invisible to the run");
-  require(m.dsa_blocks_in_use() == blocks0 + 3 + 3 + 1,
+  require(m.kv_blocks_in_use() == blocks0 + 3 + 3 + 1,
           "meters: two open 300-token slots (the snapshot's full block is slot 2's own, "
           "shared) and the snapshot's private partial block");
   m.session_close(2);
@@ -5113,10 +5113,10 @@ DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
   m.session_close(1);
   m.session_close(2);
   m.session_close(3);
-  require(m.dsa_blocks_in_use() == blocks0 + 1 + static_cast<int64_t>(meta.full_blocks.size()),
+  require(m.kv_blocks_in_use() == blocks0 + 1 + static_cast<int64_t>(meta.full_blocks.size()),
           "the snapshot still pins its blocks after every slot closed");
   m.session_release_snapshot(meta);
-  require(m.dsa_blocks_in_use() == blocks0, "all blocks returned");
+  require(m.kv_blocks_in_use() == blocks0, "all blocks returned");
   DGPP_CUDA_OK(cudaFree(snap_buf));
 }
 
@@ -5191,7 +5191,7 @@ DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
     GlmDiagnosticModel m(cfg, dir, /*max_tokens=*/96, /*max_cache_tokens=*/2048,
                          nullptr, 0, 1, GlmResidency::Resident, GlmHeadSharding::Full,
                          /*max_requests=*/2, /*mtp=*/false);
-    const int64_t blocks0 = m.dsa_blocks_in_use();
+    const int64_t blocks0 = m.kv_blocks_in_use();
     Ops ops;
     uint64_t digest = 0;
     std::vector<int64_t> a, b, c, d;
@@ -5218,7 +5218,7 @@ DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
       sched.run_to_completion();
       d = sched.results()[3].generated;
       digest = sched.prefix_digest();
-      require(m.dsa_blocks_in_use() > blocks0, "the entries pin blocks while the arena lives");
+      require(m.kv_blocks_in_use() > blocks0, "the entries pin blocks while the arena lives");
       const std::string expected =
           "snapshot@20 rolling@28 close@28 attach@20 rolling@28 drop@28 attach@28 "
           "rolling@36 close@36";
@@ -5232,7 +5232,7 @@ DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
       require(s2.results()[0].generated == d,
               "D through the close entry must equal D cold");
     }
-    require(m.dsa_blocks_in_use() == blocks0, "every block returned once the arenas were destroyed");
+    require(m.kv_blocks_in_use() == blocks0, "every block returned once the arenas were destroyed");
     require(a.size() == 6 && b == a && c == a, "A, B (hot) and C (opted out) agree");
     if (run == 0) {
       gen_a = a;
@@ -5324,7 +5324,7 @@ DGPP_TEST(glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks) {
             sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
             cudaHostAllocDefault));
         arrive_once();
-        const int64_t blocks0 = graph.dsa_blocks_in_use();
+        const int64_t blocks0 = graph.kv_blocks_in_use();
         Ops ops;
         {
           dgpp::GlmGraphEngineAdapter engine(
@@ -5370,7 +5370,7 @@ DGPP_TEST(glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks) {
             throw std::runtime_error(
                 "expected snapshots at 28 and 36 and the close entry at 28, got: " + dec);
         }
-        if (graph.dsa_blocks_in_use() != blocks0)
+        if (graph.kv_blocks_in_use() != blocks0)
           throw std::runtime_error("blocks leaked past the arena");
         cudaFreeHost(scratch);
         scratch = nullptr;
@@ -5516,7 +5516,7 @@ DGPP_TEST(glm_tp_one_graph_step_forced_rejections_at_pool_boundaries_match_plain
         cudaGraphDestroy(graph);
         shard.session_graph_seed_tokens(0, {next, draft});
 
-        const int kpool = shard.session_kpool();
+        const int kpool = shard.session_snapshot_align();
         std::vector<int32_t>& got = rank_seqs[static_cast<size_t>(r)];
         std::vector<int> forced_residues(static_cast<size_t>(kpool), 0);
         int steps = 0, forced = 0, natural_accepts = 0;
@@ -5744,8 +5744,8 @@ DGPP_TEST(glm_tp_prefix_hop_snapshot_is_bitwise_the_one_row_snapshot) {
                            /*boundary=*/nullptr, /*tp_rank=*/0, /*tp_world=*/1,
                            GlmResidency::Streaming, GlmHeadSharding::Full,
                            /*max_requests=*/4, /*mtp=*/true);
-  require(model.session_kpool() == 4, "the fixture's kpool is 4");
-  const int64_t blocks0 = model.dsa_blocks_in_use();
+  require(model.session_snapshot_align() == 4, "the fixture's kpool is 4");
+  const int64_t blocks0 = model.kv_blocks_in_use();
   const size_t bytes = model.session_snapshot_bytes();
   void* buf_a = nullptr;
   void* buf_b = nullptr;
@@ -5825,7 +5825,7 @@ DGPP_TEST(glm_tp_prefix_hop_snapshot_is_bitwise_the_one_row_snapshot) {
   for (int s = 0; s < 4; ++s) model.session_close(s);
   model.session_release_snapshot(meta_a);
   model.session_release_snapshot(meta_b);
-  require(model.dsa_blocks_in_use() == blocks0, "every block back");
+  require(model.kv_blocks_in_use() == blocks0, "every block back");
   DGPP_CUDA_OK(cudaFree(buf_a));
   DGPP_CUDA_OK(cudaFree(buf_b));
   DGPP_LOG_INFO("hop snapshot w1: {} bytes bitwise the one-row snapshot at 12; "

@@ -25,9 +25,14 @@ struct GlmMoeHostWeights {
   std::vector<uint8_t> payloads;   // 3 mats per expert then shared: gate,up,down
   std::vector<float> scales;       // matching scale grids
   bool nvfp4 = false;
+  // The shared expert in NVFP4 too (GLM-4.7): the fp4 vectors then hold
+  // (E + 1) * 3 matrices, the shared triple last, and the fp8 vectors
+  // are empty.
+  bool shared_nvfp4 = false;
   std::vector<uint8_t> fp4_payloads;
   std::vector<uint8_t> fp4_scales;
-  std::vector<float> fp4_globals;  // [E * 3]
+  std::vector<float> fp4_globals;  // [E * 3] (or [(E + 1) * 3] with shared_nvfp4)
+  int fp4_matrices(int n_experts) const { return (n_experts + (shared_nvfp4 ? 1 : 0)) * 3; }
 };
 
 // Expert payload layout inside GlmMoeHostWeights: expert e's matrix m at
@@ -72,7 +77,8 @@ GlmQuantMatrixHost glm_moe_host_view(const GlmMoeHostWeights& w,
                                      const GlmMoeConfig& cfg, int index);
 GlmQuantMatrixHost glm_moe_host_shared(const GlmMoeHostWeights& w,
                                        const GlmMoeConfig& cfg, int m);
-// The NVFP4 routed expert view (index in [0, E*3)); requires w.nvfp4.
+// The NVFP4 expert view (index in [0, E*3), or [0, (E+1)*3) with
+// shared_nvfp4); requires w.nvfp4.
 GlmFp4MatrixHost glm_moe_host_view_fp4(const GlmMoeHostWeights& w,
                                        const GlmMoeConfig& cfg, int index);
 

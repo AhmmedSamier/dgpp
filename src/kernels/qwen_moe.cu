@@ -1,0 +1,198 @@
+#include "kernels/qwen_moe.hpp"
+
+#include <stdexcept>
+
+#include "common/cuda_check.hpp"
+#include "common/dtypes.hpp"
+#include "kernels/bf16_gemv.cuh"
+#include "kernels/gemv_common.cuh"
+
+namespace dgpp {
+namespace {
+
+__device__ __forceinline__ float round_bf16(float v) {
+  return bf16_bits_to_float(float_to_bf16_bits(v));
+}
+
+constexpr int kGateWarps = 4;
+
+// One warp's shared gate for token t: the lanes' strided fp32 partials over
+// 16-byte vectors, the xor tree, bf16(logit), bf16(sigmoid) — the body of
+// shared_gate_kernel below, shared with the fused tail's gate block.
+__device__ __forceinline__ float shared_gate_warp(const uint16_t* __restrict__ xrow,
+                                                  const uint16_t* __restrict__ g, int hidden,
+                                                  int lane) {
+  const uint4* xv = reinterpret_cast<const uint4*>(xrow);
+  const uint4* gv = reinterpret_cast<const uint4*>(g);
+  const int vecs = hidden / 8;
+  float dot = 0.f;
+  for (int v = lane; v < vecs; v += 32) {
+    const uint4 xq = xv[v];
+    const uint4 gq = gv[v];
+    const uint32_t xw[4] = {xq.x, xq.y, xq.z, xq.w};
+    const uint32_t gw[4] = {gq.x, gq.y, gq.z, gq.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      dot = __fmaf_rn(bf16_bits_to_float(static_cast<uint16_t>(xw[i] & 0xFFFFu)),
+                      bf16_bits_to_float(static_cast<uint16_t>(gw[i] & 0xFFFFu)), dot);
+      dot = __fmaf_rn(bf16_bits_to_float(static_cast<uint16_t>(xw[i] >> 16)),
+                      bf16_bits_to_float(static_cast<uint16_t>(gw[i] >> 16)), dot);
+    }
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xFFFFFFFFu, dot, off);
+  const float logit = round_bf16(dot);
+  return round_bf16(1.0f / (1.0f + expf(-logit)));
+}
+
+// ---- the fused decode tail (2026-09-09) --------------------------------------
+// The shared expert at decode was seven launches per layer (two GEMVs, the
+// swiglu, a GEMV, the gate, the accumulate, the round: 24 us and seven graph
+// nodes per layer, 1.15 ms per step). Two kernels now, each bitwise the
+// chain it replaces: every dot is bf16_gemv::row_dots on the same staged
+// activations (the GEMV seam's own chain at m <= 4), the swiglu is
+// moe_swiglu_clamp_kernel's ops on the bf16-rounded dots, the gate is
+// shared_gate_warp's, the accumulate is moe_accum_kernel's fma and
+// moe_round_bf16_kernel's rounding, applied in the down GEMV's epilogue.
+
+// Blocks [0, row_blocks): warp w's row s = 8b + w of gate_proj and up_proj
+// dotted against every staged activation row; act[r][s] = swiglu. The last
+// block: warp t's shared gate sw[t].
+template <int kRows>
+__global__ void shared_gate_up_swiglu_kernel(const uint16_t* __restrict__ x, size_t x_stride,
+                                             const uint16_t* __restrict__ gate_w,
+                                             const uint16_t* __restrict__ up_w,
+                                             const uint16_t* __restrict__ g,
+                                             uint16_t* __restrict__ act, float* __restrict__ sw,
+                                             int tokens, int S, int H, int row_blocks) {
+  extern __shared__ __align__(16) uint16_t sx[];
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  if (static_cast<int>(blockIdx.x) == row_blocks) {
+    if (warp < tokens) {
+      const float w = shared_gate_warp(x + static_cast<size_t>(warp) * x_stride, g, H, lane);
+      if (lane == 0) sw[warp] = w;
+    }
+    return;
+  }
+  gemv::stage_activations<kRows>(x, x_stride, H, sx);
+  __syncthreads();
+  const int row = static_cast<int>(blockIdx.x) * gemv::kWarps + warp;
+  if (row >= S) return;
+  float ga[kRows], ua[kRows];
+  bf16_gemv::row_dots<kRows>(gate_w + static_cast<size_t>(row) * H, sx, H, lane, ga);
+  bf16_gemv::row_dots<kRows>(up_w + static_cast<size_t>(row) * H, sx, H, lane, ua);
+  if (lane != 0) return;
+  const float limit = INFINITY;  // the chain's swiglu ran with no clamps
+#pragma unroll
+  for (int r = 0; r < kRows; ++r) {
+    float gv = round_bf16(ga[r]);  // the gate GEMV's bf16 output
+    float uv = round_bf16(ua[r]);  // the up GEMV's
+    if (gv > limit) gv = limit;
+    uv = fminf(fmaxf(uv, -limit), limit);
+    const uint16_t t = float_to_bf16_bits(gv * (1.0f / (1.0f + expf(-gv))));  // rounding 1
+    act[static_cast<size_t>(r) * S + row] =
+        float_to_bf16_bits(bf16_bits_to_float(t) * uv);  // rounding 2
+  }
+}
+
+// Warp w's row h = 8b + w of down_proj [H, S] against the staged act rows;
+// out[r][h] = bf16(fma(sw[r], dot, acc[r][h])).
+template <int kRows>
+__global__ void shared_down_accum_round_kernel(const uint16_t* __restrict__ act,
+                                               size_t act_stride,
+                                               const uint16_t* __restrict__ down_w,
+                                               const float* __restrict__ sw,
+                                               const float* __restrict__ acc,
+                                               uint16_t* __restrict__ out, int H, int S) {
+  extern __shared__ __align__(16) uint16_t sx[];
+  gemv::stage_activations<kRows>(act, act_stride, S, sx);
+  __syncthreads();
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int row = static_cast<int>(blockIdx.x) * gemv::kWarps + warp;
+  if (row >= H) return;
+  float d[kRows];
+  bf16_gemv::row_dots<kRows>(down_w + static_cast<size_t>(row) * S, sx, S, lane, d);
+  if (lane != 0) return;
+#pragma unroll
+  for (int r = 0; r < kRows; ++r) {
+    const size_t at = static_cast<size_t>(r) * H + row;
+    out[at] = float_to_bf16_bits(__fmaf_rn(sw[r], d[r], acc[at]));
+  }
+}
+
+template <int kRows>
+void launch_tail_rows(const uint16_t* x, size_t x_stride, const uint16_t* gate_w,
+                      const uint16_t* up_w, const uint16_t* down_w, const uint16_t* g,
+                      uint16_t* act, float* sw, const float* acc, uint16_t* out, int tokens,
+                      int H, int S, cudaStream_t stream) {
+  const int row_blocks = (S + gemv::kWarps - 1) / gemv::kWarps;
+  shared_gate_up_swiglu_kernel<kRows>
+      <<<static_cast<unsigned>(row_blocks + 1), gemv::kThreads, gemv::smem_bytes(kRows, H),
+         stream>>>(x, x_stride, gate_w, up_w, g, act, sw, tokens, S, H, row_blocks);
+  DGPP_CUDA_OK(cudaGetLastError());
+  const int down_blocks = (H + gemv::kWarps - 1) / gemv::kWarps;
+  shared_down_accum_round_kernel<kRows>
+      <<<static_cast<unsigned>(down_blocks), gemv::kThreads, gemv::smem_bytes(kRows, S),
+         stream>>>(act, static_cast<size_t>(S), down_w, sw, acc, out, H, S);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+__global__ void shared_gate_kernel(const uint16_t* __restrict__ x,
+                                   const uint16_t* __restrict__ g,
+                                   float* __restrict__ w, int tokens, int hidden) {
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int t = blockIdx.x * kGateWarps + warp;
+  if (t >= tokens) return;
+  const float v = shared_gate_warp(x + static_cast<size_t>(t) * hidden, g, hidden, lane);
+  if (lane == 0) w[t] = v;
+}
+
+}  // namespace
+
+void qwen_moe_shared_gate_bf16(const uint16_t* x, const uint16_t* g, float* w,
+                               int tokens, int hidden, cudaStream_t stream) {
+  if (tokens <= 0) return;
+  if (!x || !g || !w) throw std::invalid_argument("qwen_moe_shared_gate: null pointer");
+  if (hidden <= 0 || hidden % 8 != 0 || (reinterpret_cast<uintptr_t>(x) & 15u) ||
+      (reinterpret_cast<uintptr_t>(g) & 15u))
+    throw std::invalid_argument(
+        "qwen_moe_shared_gate: hidden % 8 == 0 and 16-byte aligned x, g required");
+  const int blocks = (tokens + kGateWarps - 1) / kGateWarps;
+  shared_gate_kernel<<<blocks, kGateWarps * 32, 0, stream>>>(x, g, w, tokens, hidden);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void qwen_moe_shared_tail_decode(const uint16_t* x, size_t x_stride, const uint16_t* gate_w,
+                                 const uint16_t* up_w, const uint16_t* down_w,
+                                 const uint16_t* g, uint16_t* act, float* sw, const float* acc,
+                                 uint16_t* out, int tokens, int H, int S, cudaStream_t stream) {
+  if (tokens <= 0) return;
+  if (!x || !gate_w || !up_w || !down_w || !g || !act || !sw || !acc || !out)
+    throw std::invalid_argument("qwen_moe_shared_tail_decode: null pointer");
+  if (tokens > 2 * gemv::kMaxRows)
+    throw std::invalid_argument("qwen_moe_shared_tail_decode: tokens beyond the decode rows");
+  if (H <= 0 || H % 8 != 0 || S <= 0 || S % 8 != 0 || x_stride < static_cast<size_t>(H) ||
+      !gemv::aligned16(x) || !gemv::aligned16(g) || !gemv::aligned16(gate_w) ||
+      !gemv::aligned16(up_w) || !gemv::aligned16(down_w) || !gemv::aligned16(act) ||
+      (x_stride * 2) % 16 != 0 || !gemv::smem_fits(gemv::kMaxRows, H))
+    throw std::invalid_argument(
+        "qwen_moe_shared_tail_decode: H and S multiples of 8, 16-byte aligned operands");
+  // Rows in chunks of kMaxRows, as the GEMM seam chunks them: a row's
+  // chain never depends on how many rows share its launch.
+  for (int row0 = 0; row0 < tokens; row0 += gemv::kMaxRows) {
+    const int rows = tokens - row0 < gemv::kMaxRows ? tokens - row0 : gemv::kMaxRows;
+    const uint16_t* xr = x + static_cast<size_t>(row0) * x_stride;
+    uint16_t* actr = act + static_cast<size_t>(row0) * S;
+    float* swr = sw + row0;
+    const float* accr = acc + static_cast<size_t>(row0) * H;
+    uint16_t* outr = out + static_cast<size_t>(row0) * H;
+    switch (rows) {
+      case 1: launch_tail_rows<1>(xr, x_stride, gate_w, up_w, down_w, g, actr, swr, accr, outr, rows, H, S, stream); break;
+      case 2: launch_tail_rows<2>(xr, x_stride, gate_w, up_w, down_w, g, actr, swr, accr, outr, rows, H, S, stream); break;
+      case 3: launch_tail_rows<3>(xr, x_stride, gate_w, up_w, down_w, g, actr, swr, accr, outr, rows, H, S, stream); break;
+      default: launch_tail_rows<4>(xr, x_stride, gate_w, up_w, down_w, g, actr, swr, accr, outr, rows, H, S, stream); break;
+    }
+  }
+}
+
+}  // namespace dgpp

@@ -6,6 +6,7 @@
 
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
+#include "kernels/dsa.hpp"
 #include "kernels/glm_mhc_launch.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/kernels.hpp"
@@ -15,6 +16,10 @@
 #include "models/glm/step_timing.hpp"
 
 namespace dgpp {
+
+// Q0 (2026-09-09): the sliced-GR gate logits' width — the probe collective's
+// shape (see GlmBoundaryReducer::probe).
+constexpr int kGrProbeCols = 10240;
 namespace {
 
 
@@ -111,11 +116,11 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
   return session_prefill(req, prompt_ids, {}, nullptr);
 }
 
-int64_t GlmDiagnosticModel::dsa_block_tokens() const {
+int64_t GlmDiagnosticModel::kv_block_tokens() const {
   return dsa_cfg_.num_dsa_layers > 0 ? dsa_cfg_.block_tokens : 0;
 }
 
-int GlmDiagnosticModel::session_kpool() const {
+int GlmDiagnosticModel::session_snapshot_align() const {
   return dsa_cfg_.num_dsa_layers > 0 ? dsa_cfg_.index_kpool : 1;
 }
 
@@ -155,7 +160,7 @@ size_t GlmDiagnosticModel::session_snapshot_bytes() const {
 
 std::vector<int64_t> GlmDiagnosticModel::prefill_cuts(
     int64_t start, int64_t end, const std::vector<int64_t>& boundaries) const {
-  const int64_t kpool = session_kpool();
+  const int64_t kpool = session_snapshot_align();
   std::vector<int64_t> cuts;
   for (int64_t m = (start / kPrefillChunkTokens + 1) * kPrefillChunkTokens; m < end;
        m += kPrefillChunkTokens)
@@ -293,7 +298,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill_resume(
   const int64_t n = static_cast<int64_t>(suffix_ids.size());
   if (P0 <= 0)
     throw std::invalid_argument("session_prefill_resume: the slot is not attached");
-  if (P0 % session_kpool() != 0)
+  if (P0 % session_snapshot_align() != 0)
     throw std::invalid_argument("session_prefill_resume: the position is not pool-aligned");
   if (n <= 0) throw std::invalid_argument("session_prefill_resume: empty suffix");
   if (P0 + n > max_context_)
@@ -330,7 +335,7 @@ GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot(
     throw std::out_of_range("session_snapshot: request slot " + std::to_string(req));
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   if (pos <= 0) throw std::invalid_argument("session_snapshot: the slot is closed");
-  if (pos % session_kpool() != 0)
+  if (pos % session_snapshot_align() != 0)
     throw std::invalid_argument("session_snapshot: the position is not pool-aligned");
   if (dst == nullptr) throw std::invalid_argument("session_snapshot: null buffer");
   if (mtp_) {
@@ -395,7 +400,7 @@ GlmDiagnosticModel::SessionSnapshotMeta GlmDiagnosticModel::session_snapshot_pos
     throw std::invalid_argument("session_snapshot_post_row0: rows after the position");
   const int64_t pos = session_pos_[static_cast<size_t>(req)] - rows_after;  // after row 0
   if (pos <= 0) throw std::invalid_argument("session_snapshot_post_row0: no verified rows");
-  if (pos % session_kpool() != 0)
+  if (pos % session_snapshot_align() != 0)
     throw std::invalid_argument(
         "session_snapshot_post_row0: the position after row 0 is not pool-aligned");
   if (spec_row < 0 || spec_row >= kDecodeRows)
@@ -494,7 +499,7 @@ void GlmDiagnosticModel::session_attach(int req, const void* src,
     throw std::out_of_range("session_attach: request slot " + std::to_string(req));
   if (session_pos_[static_cast<size_t>(req)] != 0)
     throw std::logic_error("session_attach: the slot is open");
-  if (meta.position <= 0 || meta.position % session_kpool() != 0)
+  if (meta.position <= 0 || meta.position % session_snapshot_align() != 0)
     throw std::invalid_argument("session_attach: bad snapshot position");
   if (meta.position > max_context_)
     throw std::invalid_argument("session_attach: position exceeds the context bound");
@@ -992,6 +997,28 @@ void GlmDiagnosticModel::session_close(int req) {
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_close: request slot " +
                             std::to_string(req));
+  if (dsa_cfg_.num_dsa_layers > 0) {
+    // The listed attention's guarded gather (2026-09-06): an anomaly is a
+    // bug survived, logged loudly with its first values. Reported here so
+    // the engines need no DSA knowledge (Q1, 2026-09-09); the readback
+    // sits where the graph engine used to make it, before the release.
+    long long a[6] = {0, 0, 0, 0, 0, 0};
+    const unsigned long long n = dsa_attn_anomalies(a, /*clear=*/true, stream_);
+    if (n != 0)
+      DGPP_LOG_ERROR(
+          "slot {} closed with {} listed-attention gather(s) out of "
+          "range (zero-filled); first: token {} block {} query row {} split {} "
+          "list index {} of {}",
+          req, n, a[0], a[1], a[2], a[3], a[4], a[5]);
+    long long b[6] = {0, 0, 0, 0, 0, 0};
+    const unsigned long long m = dsa_select_anomalies(b, /*clear=*/true, stream_);
+    if (m != 0)
+      DGPP_LOG_ERROR(
+          "slot {} closed with {} short select fill(s); first: {} "
+          "visible pools, {} below the bin, {} found, {} remaining, bin count "
+          "{}, {} candidates found",
+          req, m, b[0], b[1], b[2], b[3], b[4], b[5]);
+  }
   if (dsa_cfg_.num_dsa_layers > 0)
     pool_.release_request_blocks(req, stream_);
   session_pos_[static_cast<size_t>(req)] = 0;
@@ -1200,6 +1227,8 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
       }
       boundary_->reduce(attn_out, T, H);
+      if (decode_row && layer < gr_probe_layers_)
+        boundary_->probe(T, kGrProbeCols);
     }
     if (attn_comb_deferred) DGPP_CUDA_OK(cudaStreamWaitEvent(stream_, mhc_join_, 0));
     launch_mhc_stream_update(post_, comb_, attn_out, cur, nxt, mhc_cfg_, T,

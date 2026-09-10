@@ -44,8 +44,12 @@ glm_gen.tokens.txt
 dist/
 # The TP tests write this fixture into their working directory; never track a copy
 glm_tp_fixture/
-# The site cluster configs are local (one per checkpoint the site serves, e.g.
-# deploy/cluster.nvfp4.json); deploy/cluster.example.json is the template
+# The site cluster configs are local: one per checkpoint and shape the site
+# serves (deploy/cluster.json, cluster.nvfp4.json, cluster_glm47_d2.json ...),
+# each carrying that site's node addresses and ssh login. The committed
+# artifacts are the *.example.json templates beside them — copy one, fill in
+# `nodes` and `ssh_user`, and it stays out of the history.
 deploy/cluster.json
 deploy/cluster.*.json
-!deploy/cluster.example.json
+deploy/cluster_*.json
+!deploy/*.example.json

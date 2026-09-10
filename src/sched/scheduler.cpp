@@ -622,6 +622,7 @@ void Scheduler::step_batch(const std::vector<int>& arrivals) {
       // rest of this request's batch; its extra device state is never seen.
       // Other requests in the same physical pass remain independent and are
       // still published below.
+      requests_[static_cast<size_t>(arrival)].step_tail = static_cast<int>(tokens.size() - 1 - t);
       if (append_token(arrival, tokens[t], lps.empty() ? nullptr : &lps[t]))
         break;
     }
@@ -678,7 +679,10 @@ void Scheduler::retire(int arrival, Result::Status status,
   // the rolling slot lags (the MTP graph's two-token steps can hop over
   // every aligned position once the committed count is odd, so the
   // rolling slot alone may sit a pool or more behind).
-  if (r.slot >= 0 && cache_on(r) &&
+  // A step cut short (the request completed on an earlier token of a
+  // multi-token pass) leaves the model's state past the committed position
+  // — the live snapshot cannot be taken there; the rolling entry stands.
+  if (r.slot >= 0 && cache_on(r) && r.step_tail == 0 &&
       (reason == Result::Reason::kEos || reason == Result::Reason::kSteps)) {
     const int64_t align = std::max<int64_t>(1, prefix_info_.align);
     const int64_t committed =

@@ -54,6 +54,7 @@
 #include "common/dtypes.hpp"
 #include "models/quant_matrix.hpp"
 #include "loaders/safetensors.hpp"
+#include "loaders/weight_build.hpp"
 #include "models/glm/resident_image.hpp"
 #include "models/dsa_layer.hpp"
 #include "models/glm/binding.hpp"
@@ -85,10 +86,10 @@ enum class GlmHeadSharding {
   VocabSharded,
 };
 
-// Managed-memory bump (defined in glm_loader.cu): aligned grants, reset per
+// The weight bump (loaders/weight_build.hpp): aligned grants, reset per
 // layer; counting mode walks the same grant sequence without allocating,
 // which is how the byte formula and the allocator share one code path.
-struct GlmLayerBump;
+using GlmLayerBump = LayerBump;
 
 // One layer's routed experts in compressed form. At world>1 (M5 d4, resliced
 // 2026-09-02) `experts` holds EVERY expert's slice of the intermediate dim —

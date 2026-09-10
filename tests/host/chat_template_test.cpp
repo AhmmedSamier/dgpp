@@ -25,6 +25,7 @@ int g_argc = 0;
 char** g_argv = nullptr;
 #include "common/test.hpp"
 #include "loaders/hf_cache.hpp"
+#include "loaders/minijson.hpp"
 #include "text/chat_template.hpp"
 #include "text/tokenizer.hpp"
 #include "text/tool_parser.hpp"
@@ -42,6 +43,27 @@ void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
 }
 
+// The corpus header's "model" (the Qwen corpus names its checkpoint);
+// DGPP_TP_REAL_MODEL overrides; GLM is the default.
+std::string corpus_model(const std::string& golden_path) {
+  std::string model_id;
+  std::ifstream f(golden_path);
+  std::string first;
+  if (f && std::getline(f, first)) {
+    const size_t m = first.find("\"model\": \"");
+    if (m != std::string::npos) {
+      const size_t e = first.find('"', m + 10);
+      if (e != std::string::npos) model_id = first.substr(m + 10, e - (m + 10));
+    }
+  }
+  const char* env_model = std::getenv("DGPP_TP_REAL_MODEL");
+  if (env_model && *env_model) model_id = env_model;
+  if (model_id.empty()) model_id = "unsloth/GLM-5.3-Flash-FP8";
+  return model_id;
+}
+bool corpus_is_qwen(const std::string& golden_path) {
+  return corpus_model(golden_path).find("Qwen") != std::string::npos;
+}
 std::string read_text_file(const std::string& path) {
   std::ifstream f(path);
   if (!f) throw std::runtime_error("cannot open " + path);
@@ -50,12 +72,32 @@ std::string read_text_file(const std::string& path) {
   return ss.str();
 }
 
+// The eos ids and the vocab size of either GLM config (GLM-5.3's under
+// text_config, GLM-4.7's at the root) — what the grammar vocabulary needs.
+struct EosVocab {
+  std::vector<int64_t> eos;
+  int64_t vocab = 0;
+};
+EosVocab eos_and_vocab(const std::string& config_path) {
+  const dgpp::minijson::ParseResult parsed = dgpp::minijson::parse(read_text_file(config_path));
+  const dgpp::minijson::Value* tc = parsed.root.find("text_config");
+  const dgpp::minijson::Value& c = tc && tc->is_object() ? *tc : parsed.root;
+  EosVocab out;
+  out.vocab = c.at("vocab_size").as_int();
+  const dgpp::minijson::Value& e = c.at("eos_token_id");
+  if (e.is_array()) {
+    for (const auto& v : e.items()) out.eos.push_back(v.as_int());
+  } else {
+    out.eos.push_back(e.as_int());
+  }
+  return out;
+}
+
+
 DGPP_TEST(glm_chat_template_differential_goldens) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
   // Same env-gated model resolution as every real-checkpoint gate.
-  const char* env_model = std::getenv("DGPP_TP_REAL_MODEL");
-  const std::string model_id =
-      env_model && *env_model ? env_model : "unsloth/GLM-5.3-Flash-FP8";
+  const std::string model_id = corpus_model(kGoldenPath);
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
   if (snap.empty()) {
@@ -165,7 +207,7 @@ DGPP_TEST(glm_chat_template_differential_goldens) {
       {"{{ x is number }}", "number", false},
       {"{% if x %}{% endfor %}", "endfor", false},
       {"{% set a, b = 1, 2 %}", "tuple", false},
-      {"{% macro m(a=1) %}{% endmacro %}", "default parameter", false},
+      {"{% raw %}x{% endraw %}", "raw", false},
       {"{% for x in y %}{% endfor %}{% break %}", "break", true},
   };
   for (const BadCase& c : bad) {
@@ -240,9 +282,11 @@ bool json_equal(const dgpp::minijson::Value& a, const dgpp::minijson::Value& b) 
 // each call's name and arguments exactly.
 DGPP_TEST(glm_tool_call_render_encode_parse_roundTrip) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
-  const char* env_model = std::getenv("DGPP_TP_REAL_MODEL");
-  const std::string model_id =
-      env_model && *env_model ? env_model : "unsloth/GLM-5.3-Flash-FP8";
+  if (corpus_is_qwen(kGoldenPath)) {
+    DGPP_LOG_INFO("glm_tool_call_render_encode_parse_roundTrip: GLM format only; the Qwen corpus has its own gate");
+    return;
+  }
+  const std::string model_id = corpus_model(kGoldenPath);
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
   if (snap.empty()) {
@@ -362,6 +406,246 @@ DGPP_TEST(glm_tool_call_render_encode_parse_roundTrip) {
 }
 
 
+// The Qwen3.8 round trip (2026-09-09): render(assistant turn) -> encode ->
+// parse recovers the reasoning, the content and every call's name and
+// arguments through the <function=...><parameter=...> text format.
+DGPP_TEST(qwen_tool_call_render_encode_parse_roundTrip) {
+  const std::string kGoldenPath = golden_path(g_argc, g_argv);
+  if (!corpus_is_qwen(kGoldenPath)) return;
+  const std::string model_id = corpus_model(kGoldenPath);
+  std::string err;
+  const std::string snap = dgpp::hf::model_dir(model_id, &err);
+  if (snap.empty()) {
+    DGPP_LOG_WARN("qwen_chat_template_test: model {} unavailable ({}); skipping", model_id, err);
+    std::exit(2);
+  }
+  const dgpp::text::ChatTemplate tpl = dgpp::text::ChatTemplate::load(
+      (std::filesystem::path(snap) / "chat_template.jinja").string());
+  const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
+      (std::filesystem::path(snap) / "tokenizer.json").string());
+  const dgpp::text::ChatMarkers markers = dgpp::text::ChatMarkers::from_tokenizer(tok);
+  require(markers.tool_format() == dgpp::text::ToolFormat::kQwenXml, "the Qwen tokenizer carries the two markers");
+  const std::vector<int64_t> im_end = tok.encode("<|im_end|>");
+  require(im_end.size() == 1, "<|im_end|> is one added token");
+  std::vector<std::string> lines;
+  {
+    std::istringstream f(read_text_file(kGoldenPath));
+    std::string line;
+    while (std::getline(f, line))
+      if (!line.empty()) lines.push_back(line);
+  }
+  const auto trim = [](std::string x) {
+    const char* ws = " \t\n\r";
+    const size_t b = x.find_first_not_of(ws);
+    if (b == std::string::npos) return std::string();
+    const size_t e = x.find_last_not_of(ws);
+    return x.substr(b, e - b + 1);
+  };
+  size_t turns = 0, calls = 0;
+  for (size_t i = 1; i < lines.size(); ++i) {
+    const dgpp::minijson::ParseResult parsed = dgpp::minijson::parse(lines[i]);
+    const dgpp::minijson::Value& rec = parsed.root;
+    const std::string name(rec.at("name").as_string());
+    const dgpp::minijson::Value& kwargs = rec.at("kwargs");
+    const dgpp::minijson::Value& messages = kwargs.at("messages");
+    const dgpp::minijson::Value* tools = kwargs.find("tools");
+    for (size_t k = 0; k < messages.items().size(); ++k) {
+      const dgpp::minijson::Value& msg = messages.items()[k];
+      const dgpp::minijson::Value* tcs = msg.find("tool_calls");
+      if (msg.at("role").as_string() != "assistant" || tcs == nullptr) continue;
+      const auto render_through = [&](size_t count) {
+        std::vector<dgpp::text::Value> ms;
+        for (size_t j = 0; j < count; ++j)
+          ms.push_back(dgpp::text::Value::from_minijson(messages.items()[j]));
+        dgpp::text::Value::Members g;
+        g.emplace_back("messages", dgpp::text::Value::list_value(std::move(ms)));
+        if (tools) g.emplace_back("tools", dgpp::text::Value::from_minijson(*tools));
+        g.emplace_back("add_generation_prompt", dgpp::text::Value::boolean(false));
+        return tpl.render(dgpp::text::Value::map_value(std::move(g)));
+      };
+      const std::string before = render_through(k);
+      const std::string through = render_through(k + 1);
+      require(through.compare(0, before.size(), before) == 0, name + ": the render grows by the assistant turn");
+      std::string turn = through.substr(before.size());
+      const std::string kAssistant = "<|im_start|>assistant\n";
+      require(turn.compare(0, kAssistant.size(), kAssistant) == 0, name + ": the turn opens with the assistant header: " + turn);
+      turn.erase(0, kAssistant.size());
+      // The template closes the turn with <|im_end|>\n; the model's turn ends at <|im_end|>.
+      const std::string kEnd = "<|im_end|>\n";
+      require(turn.size() >= kEnd.size() && turn.compare(turn.size() - kEnd.size(), kEnd.size(), kEnd) == 0,
+              name + ": the turn ends with <|im_end|>");
+      turn.erase(turn.size() - kEnd.size());
+      const bool thinks = turn.compare(0, 8, "<think>\n") == 0;
+      std::vector<int64_t> ids = tok.encode(turn);
+      ids.push_back(im_end[0]);
+      dgpp::text::ToolCallParser::Options opts;
+      opts.start_in_reasoning = thinks;
+      dgpp::text::ToolCallParser parser(
+          markers, [&](const std::vector<int64_t>& v) { return tok.decode(v, true); },
+          tools ? dgpp::text::ToolSchemas(*tools) : dgpp::text::ToolSchemas(), opts);
+      std::vector<dgpp::text::ToolCallParser::Event> events;
+      for (const int64_t id : ids) parser.feed(id, &events);
+      parser.finish(&events);
+      std::string reasoning, content;
+      std::vector<dgpp::text::ToolCallParser::Call> got;
+      for (const auto& ev : events) {
+        using Kind = dgpp::text::ToolCallParser::Event::Kind;
+        if (ev.kind == Kind::kReasoning) reasoning += ev.text;
+        if (ev.kind == Kind::kContent) content += ev.text;
+        if (ev.kind == Kind::kToolCall) got.push_back(ev.call);
+      }
+      const dgpp::minijson::Value* rc = msg.find("reasoning_content");
+      const std::string want_reasoning = rc && rc->is_string() ? std::string(rc->as_string()) : "";
+      const dgpp::minijson::Value* mc = msg.find("content");
+      const std::string want_content = mc && mc->is_string() ? std::string(mc->as_string()) : "";
+      require(trim(reasoning) == trim(want_reasoning), name + ": reasoning '" + reasoning + "' != '" + want_reasoning + "'");
+      require(trim(content) == trim(want_content), name + ": content '" + content + "' != '" + want_content + "'");
+      require(got.size() == tcs->items().size(),
+              name + ": " + std::to_string(got.size()) + " calls parsed, " + std::to_string(tcs->items().size()) + " expected");
+      for (size_t c = 0; c < got.size(); ++c) {
+        const dgpp::minijson::Value& tc = tcs->items()[c];
+        const dgpp::minijson::Value* fn = tc.find("function");
+        const dgpp::minijson::Value& def = fn ? *fn : tc;
+        require(got[c].name == def.at("name").as_string(), name + ": call " + std::to_string(c) + " name '" + got[c].name + "'");
+        const dgpp::minijson::ParseResult args = dgpp::minijson::parse(got[c].arguments);
+        require(json_equal(args.root, def.at("arguments")),
+                name + ": call " + std::to_string(c) + " arguments " + got[c].arguments + " differ from the case's");
+        ++calls;
+      }
+      ++turns;
+    }
+  }
+  require(turns >= 4 && calls >= 5, "expected at least 4 tool-call turns / 5 calls in the Qwen corpus, got " +
+                                       std::to_string(turns) + " / " + std::to_string(calls));
+  DGPP_LOG_INFO("qwen_chat_template_test: {} tool-call turns ({} calls) round-trip render -> encode -> parse", turns, calls);
+}
+
+// The Qwen3.8 grammar over the REAL tokenizer (2026-09-09): every golden
+// tool-call turn accepted position by position under a required-call spec
+// (the literals and names over BPE token texts, the typed values); the
+// single-call spec refuses a second call; EOS refused while a call is
+// owed; a name outside the tools refused at its first token.
+DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
+  const std::string kGoldenPath = golden_path(g_argc, g_argv);
+  if (!corpus_is_qwen(kGoldenPath)) return;
+  const std::string model_id = corpus_model(kGoldenPath);
+  std::string err;
+  const std::string snap = dgpp::hf::model_dir(model_id, &err);
+  if (snap.empty()) {
+    DGPP_LOG_WARN("qwen_chat_template_test: model {} unavailable ({}); skipping", model_id, err);
+    std::exit(2);
+  }
+  const dgpp::text::ChatTemplate tpl = dgpp::text::ChatTemplate::load(
+      (std::filesystem::path(snap) / "chat_template.jinja").string());
+  const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
+      (std::filesystem::path(snap) / "tokenizer.json").string());
+  // The serving EOS set (generation_config.json): <|im_end|> ends a turn,
+  // <|endoftext|> the text.
+  std::vector<int64_t> eos;
+  for (const auto& a : tok.added_tokens())
+    if (a.content == "<|im_end|>" || a.content == "<|endoftext|>") eos.push_back(a.id);
+  require(eos.size() == 2, "the Qwen EOS ids");
+  const dgpp::text::GrammarVocab vocab =
+      dgpp::text::GrammarVocab::from_tokenizer(tok, eos, static_cast<int>(tok.max_id() + 1));
+  require(vocab.usable() && vocab.markers().tool_format() == dgpp::text::ToolFormat::kQwenXml,
+          "the grammar vocabulary is the Qwen format");
+  require(vocab.call_turn_eos() == 248046, "the call-turn EOS is <|im_end|>");
+  std::vector<std::string> lines;
+  {
+    std::istringstream f(read_text_file(kGoldenPath));
+    std::string line;
+    while (std::getline(f, line))
+      if (!line.empty()) lines.push_back(line);
+  }
+  const auto spec_of = [](const dgpp::minijson::Value* tools, dgpp::text::GrammarSpec::Mode mode,
+                          bool parallel, const std::string& named) {
+    dgpp::text::GrammarSpec g;
+    g.mode = mode;
+    g.parallel = parallel;
+    g.named = named;
+    if (tools)
+      for (const dgpp::minijson::Value& t : tools->items()) {
+        const dgpp::minijson::Value* fn = t.find("function");
+        g.tools.push_back(dgpp::text::grammar_tool_from_function(fn ? *fn : t, nullptr));
+      }
+    return g;
+  };
+  size_t turns = 0;
+  for (size_t i = 1; i < lines.size(); ++i) {
+    const dgpp::minijson::ParseResult parsed = dgpp::minijson::parse(lines[i]);
+    const dgpp::minijson::Value& rec = parsed.root;
+    const std::string name(rec.at("name").as_string());
+    const dgpp::minijson::Value& kwargs = rec.at("kwargs");
+    const dgpp::minijson::Value& messages = kwargs.at("messages");
+    const dgpp::minijson::Value* tools = kwargs.find("tools");
+    for (size_t k = 0; k < messages.items().size(); ++k) {
+      const dgpp::minijson::Value& msg = messages.items()[k];
+      const dgpp::minijson::Value* tcs = msg.find("tool_calls");
+      if (msg.at("role").as_string() != "assistant" || tcs == nullptr) continue;
+      const auto render_through = [&](size_t count) {
+        std::vector<dgpp::text::Value> ms;
+        for (size_t j = 0; j < count; ++j)
+          ms.push_back(dgpp::text::Value::from_minijson(messages.items()[j]));
+        dgpp::text::Value::Members g;
+        g.emplace_back("messages", dgpp::text::Value::list_value(std::move(ms)));
+        if (tools) g.emplace_back("tools", dgpp::text::Value::from_minijson(*tools));
+        g.emplace_back("add_generation_prompt", dgpp::text::Value::boolean(false));
+        return tpl.render(dgpp::text::Value::map_value(std::move(g)));
+      };
+      std::string turn = render_through(k + 1).substr(render_through(k).size());
+      turn.erase(0, std::string("<|im_start|>assistant\n").size());
+      const std::string kEnd = "<|im_end|>\n";
+      require(turn.size() >= kEnd.size() && turn.compare(turn.size() - kEnd.size(), kEnd.size(), kEnd) == 0,
+              name + ": the turn ends with <|im_end|>");
+      turn.erase(turn.size() - kEnd.size());
+      const bool thinks = turn.compare(0, 8, "<think>\n") == 0;
+      if (thinks) turn.erase(0, 8);  // the prompt opened the block
+      std::vector<int64_t> ids = tok.encode(turn);
+      ids.push_back(vocab.call_turn_eos());
+      dgpp::text::GrammarState g(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kRequired, true, ""), thinks);
+      for (size_t j = 0; j < ids.size(); ++j) {
+        require(g.allows(ids[j]), name + ": id " + std::to_string(ids[j]) + " (" + tok.decode(ids[j], false) +
+                                      ") at position " + std::to_string(j) + " refused in state " + g.state_name());
+        g.advance(ids[j]);
+      }
+      require(g.active(), name + ": the grammar stayed live");
+      const dgpp::minijson::Value& first = tcs->items()[0];
+      const dgpp::minijson::Value* ffn = first.find("function");
+      const std::string first_name((ffn ? *ffn : first).at("name").as_string());
+      // The single-call spec: the first call is accepted through its close;
+      // then only the turn's end — the separator before a second call (the
+      // template's "\n<tool_call>") is refused at its first id.
+      dgpp::text::GrammarState single(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kRequired, false, ""), thinks);
+      bool closed_first = false;
+      for (size_t j = 0; j < ids.size(); ++j) {
+        if (closed_first) {
+          if (tcs->items().size() >= 2)
+            require(!single.allows(ids[j]), name + ": the single-call spec must refuse what follows the first call");
+          require(single.allows(vocab.call_turn_eos()), name + ": the single-call spec ends the turn");
+          break;
+        }
+        require(single.allows(ids[j]), name + ": single-call spec refused id " + std::to_string(ids[j]) + " of call 1");
+        single.advance(ids[j]);
+        if (ids[j] == vocab.markers().tool_call_close.id) closed_first = true;
+      }
+      dgpp::text::GrammarState owed(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kRequired, true, ""), true);
+      require(!owed.allows(vocab.call_turn_eos()) && !owed.allows(eos[1]), name + ": EOS refused while a call is owed");
+      dgpp::text::GrammarState wrong(&vocab, spec_of(tools, dgpp::text::GrammarSpec::Mode::kNamed, true, first_name), true);
+      wrong.advance(vocab.markers().think_close.id);
+      wrong.advance(vocab.markers().tool_call_open.id);
+      for (const int64_t id : tok.encode("\n<function=")) {
+        require(wrong.allows(id), name + ": the literal before the name is accepted");
+        wrong.advance(id);
+      }
+      const std::vector<int64_t> zebra = tok.encode("zebra_tool");
+      require(!zebra.empty() && !wrong.allows(zebra[0]), name + ": a name outside the tools is refused at its first token");
+      ++turns;
+    }
+  }
+  require(turns >= 4, "expected at least 4 tool-call turns, got " + std::to_string(turns));
+  DGPP_LOG_INFO("qwen_chat_template_test: {} tool-call turns accepted by the grammar over the real tokenizer", turns);
+}
+
 // M6 6g: the grammar over the REAL tokenizer accepts every golden tool-call
 // turn position by position — the name and key automata over BPE token
 // texts, the structural states, the values as free text — under a
@@ -370,9 +654,11 @@ DGPP_TEST(glm_tool_call_render_encode_parse_roundTrip) {
 // a call is owed, a name outside the tools).
 DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
-  const char* env_model = std::getenv("DGPP_TP_REAL_MODEL");
-  const std::string model_id =
-      env_model && *env_model ? env_model : "unsloth/GLM-5.3-Flash-FP8";
+  if (corpus_is_qwen(kGoldenPath)) {
+    DGPP_LOG_INFO("glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer: GLM format only; the Qwen corpus has its own gate");
+    return;
+  }
+  const std::string model_id = corpus_model(kGoldenPath);
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
   if (snap.empty()) {
@@ -384,12 +670,10 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       (std::filesystem::path(snap) / "chat_template.jinja").string());
   const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
       (std::filesystem::path(snap) / "tokenizer.json").string());
-  const dgpp::GlmTextConfig cfg = dgpp::GlmTextConfig::from_json_file(
-      (std::filesystem::path(snap) / "config.json").string());
-  const dgpp::text::GrammarVocab vocab = dgpp::text::GrammarVocab::from_tokenizer(
-      tok, cfg.eos_token_ids, cfg.vocab_size);
+  const EosVocab cfg = eos_and_vocab((std::filesystem::path(snap) / "config.json").string());
+  const dgpp::text::GrammarVocab vocab = dgpp::text::GrammarVocab::from_tokenizer(tok, cfg.eos, cfg.vocab);
   require(vocab.usable(), "the grammar vocabulary is usable");
-  require(vocab.call_turn_eos() == 154829, "the call-turn EOS is <|observation|>");
+  require(vocab.call_turn_eos() == tok.encode("<|observation|>").at(0), "the call-turn EOS is <|observation|>");
 
   std::vector<std::string> lines;
   {
@@ -593,9 +877,12 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
   // in json_object mode and under a schema, the schema refuses a violating
   // document at its first bad token, and the per-position mask cost is
   // reported.
-  const char* env_model = std::getenv("DGPP_TP_REAL_MODEL");
-  const std::string model_id =
-      env_model && *env_model ? env_model : "unsloth/GLM-5.3-Flash-FP8";
+  const std::string kGoldenPath = golden_path(g_argc, g_argv);
+  if (corpus_is_qwen(kGoldenPath)) {
+    DGPP_LOG_INFO("json grammar: the GLM config; the Qwen corpus has its own gate");
+    return;
+  }
+  const std::string model_id = corpus_model(kGoldenPath);
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
   if (snap.empty()) {
@@ -605,10 +892,8 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
   }
   const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
       (std::filesystem::path(snap) / "tokenizer.json").string());
-  const dgpp::GlmTextConfig cfg = dgpp::GlmTextConfig::from_json_file(
-      (std::filesystem::path(snap) / "config.json").string());
-  const dgpp::text::GrammarVocab vocab = dgpp::text::GrammarVocab::from_tokenizer(
-      tok, cfg.eos_token_ids, cfg.vocab_size);
+  const EosVocab cfg = eos_and_vocab((std::filesystem::path(snap) / "config.json").string());
+  const dgpp::text::GrammarVocab vocab = dgpp::text::GrammarVocab::from_tokenizer(tok, cfg.eos, cfg.vocab);
   const auto t0 = std::chrono::steady_clock::now();
   vocab.prepare_json();
   const double build_s =
@@ -670,7 +955,7 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
     dgpp::text::GrammarState g(&vocab, spec, /*prompt_opens_thinking=*/true);
     std::vector<int64_t> ids = {vocab.markers().think_close.id};
     for (const int64_t id : tok.encode(d.text)) ids.push_back(id);
-    ids.push_back(cfg.eos_token_ids[0]);
+    ids.push_back(cfg.eos[0]);
     bool ok = true;
     for (size_t j = 0; j < ids.size() && ok; ++j) {
       dgpp::text::TokenMask m;

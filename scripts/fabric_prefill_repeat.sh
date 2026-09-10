@@ -7,7 +7,7 @@
 # is the third), two decode steps; prints the prefill line and the 4-way
 # generated-ids verdict.
 set -u
-ROOT=/home/user/workspace/dgpp
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The checkpoint and the fabric come from a cluster config (dgpp-cluster's
 # file: deploy/cluster.json by default, or --config F as the first argument)
 # — its `model`, `nodes` (node 0 is the head, where this runs) and `ssh_user`
@@ -20,7 +20,7 @@ MODEL=$(jq -r '.model' "$CONFIG")
 NODES=($(jq -r '.nodes[]' "$CONFIG"))
 export DGPP_FABRIC_HEAD="${NODES[0]}"
 export DGPP_FABRIC_PEERS="${NODES[*]:1}"
-export DGPP_FABRIC_USER="$(jq -r '.ssh_user // "user"' "$CONFIG")"
+export DGPP_FABRIC_USER="$(jq -r '.ssh_user // env.USER' "$CONFIG")"
 IDS=$ROOT/build-ci/fabric-runs/prefill_ids/hard_ids.csv
 OUT=${1:?OUT_DIR}; shift
 case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac

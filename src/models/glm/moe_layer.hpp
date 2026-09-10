@@ -107,6 +107,28 @@ class GlmMoeLayer {
   void enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
                cudaStream_t stream,
                MoeExpertKernel kernel = MoeExpertKernel::kGemv);
+  // The host path with the fp32 chain handed back UNROUNDED (out
+  // [tokens, hidden] f32) — the Qwen MoE continues it with its BF16 shared
+  // expert and rounds once after (models/qwen/moe_layer.hpp).
+  void enqueue_f32(const uint16_t* hidden, float* out, int tokens,
+                   cudaStream_t stream,
+                   MoeExpertKernel kernel = MoeExpertKernel::kGemv);
+  // The prefill path's ROUTED chain alone (the device segmentation, the
+  // tensor-core kernel on any 32/64/128 scale grid), handed back unrounded
+  // in fp32 — the Qwen prefill (its BF16 shared expert follows).
+  void enqueue_prefill_f32(const uint16_t* hidden, float* out, int tokens,
+                           MoeTraceStaging* trace, cudaStream_t stream,
+                           MoeExpertKernel kernel = MoeExpertKernel::kMma);
+  // Whether the tensor-core expert kernel takes this layer's fp8 scale grid:
+  // the checkpoint's 128 x 128, or a re-blocked TP slice grid of 32/64 with
+  // hidden and the slice both multiples of 32 (the ldmatrix tile kernel,
+  // 2026-09-09). Otherwise the GEMV core is the expert kernel. NVFP4
+  // tables: true.
+  bool mma_takes_grid() const;
+  // Whether the FP8 shared expert rides this layer's chain
+  // (cfg.n_shared_experts == 1). Without it the prefill and decode fast
+  // paths are not wired yet (they refuse; the Qwen engine's milestone).
+  bool has_shared() const { return cfg_.n_shared_experts == 1; }
 
   // The decode fast path: same contract, no host round-trip. tokens
   // must fit decode_slots. Bitwise-equal to enqueue() at the same
@@ -118,6 +140,13 @@ class GlmMoeLayer {
   void enqueue_decode(const uint16_t* hidden, uint16_t* out, int tokens,
                       MoeTraceStaging* trace, cudaStream_t stream,
                       int table_slot = -1);
+  // The decode fast path's ROUTED chain alone, handed back unrounded in
+  // fp32 (out [tokens, hidden]) — the Qwen decode (its BF16 shared expert
+  // continues the chain, models/qwen/moe_layer.cpp). Bitwise enqueue_f32
+  // at the same routing. Works without a shared expert.
+  void enqueue_decode_f32(const uint16_t* hidden, float* out, int tokens,
+                          MoeTraceStaging* trace, cudaStream_t stream,
+                          int table_slot = -1);
 
   // Fills graph slot `table_slot`'s device expert-view table from the
   // CURRENT binding (an async H2D on `stream`; the caller syncs before
@@ -152,6 +181,14 @@ class GlmMoeLayer {
 
  private:
   void check_expert_geometry() const;
+  // enqueue()/enqueue_f32(): exactly one of out_bf16 / out_f32 is set.
+  void enqueue_host(const uint16_t* hidden, uint16_t* out_bf16, float* out_f32,
+                    int tokens, cudaStream_t stream, MoeExpertKernel kernel);
+  // enqueue_decode / enqueue_decode_f32: exactly one of out_bf16 (the
+  // full chain with the shared expert) / out_f32 (the routed chain) is set.
+  void enqueue_decode_impl(const uint16_t* hidden, uint16_t* out_bf16,
+                           float* out_f32, int tokens, MoeTraceStaging* trace,
+                           cudaStream_t stream, int table_slot);
   // The eager paths' expert-table upload: fills the ring's next pinned
   // entry with every routed expert's three views (and the shared expert's
   // three after them when with_shared) and copies it to d_dst on stream —

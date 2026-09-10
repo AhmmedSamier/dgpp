@@ -21,10 +21,32 @@ Unicode 15.0) and the C++ tables cannot flake the gate (see
 tools/gen_unicode_tables.py).
 
 Regenerating: /tmp/opencode/tokref/bin/python tools/gen_tokenizer_goldens.py
+  [--model ORG/NAME] [--tokenizer-json PATH] [--out FILE]
+
+The Qwen3.8-Flash-Next corpus (2026-09-09) adds the NFC and mark cases its
+tokenizer.json needs — decomposed and precomposed accents, singleton
+decompositions, Hangul jamo, scripts with combining marks, digit runs (one
+number per pretoken), a mark at the start of text — and its own added
+tokens; generated on the 5090 box (tokenizers 0.22.2):
+  python tools/gen_tokenizer_goldens.py --model Qwen/Qwen3.8-Flash-Next-FP8
+      --tokenizer-json /tmp/qwen38_tokenizer.json --out tests/data/qwen_tokenizer_goldens.jsonl
 """
 import glob
 import json
+import os
 import sys
+
+
+def hf_hub_dir():
+    """The local HF hub cache: HUGGINGFACE_HUB_CACHE, else HF_HOME/hub, else
+    ~/.cache/huggingface/hub — never a hard-coded home."""
+    cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if cache:
+        return cache
+    home = os.environ.get("HF_HOME")
+    return os.path.join(home, "hub") if home else os.path.expanduser(
+        "~/.cache/huggingface/hub")
+
 
 MODEL = "unsloth/GLM-5.3-Flash-FP8"
 
@@ -96,15 +118,62 @@ CASES = [
 ]
 
 
+IM_START = "<|" + "im_start|>"
+IM_END = "<|" + "im_end|>"
+TOOL_CALL = "<" + "tool_call>"
+TOOL_CALL_END = "</" + "tool_call>"
+TOOL_RESP = "<" + "tool_response>"
+
+QWEN_CASES = [c for c in CASES if USER not in c and ASSIST not in c] + [
+    # Qwen's added tokens standalone, inline, template-shaped.
+    IM_START, IM_END, TOOL_CALL, TOOL_CALL_END, TOOL_RESP,
+    IM_START + "user\nhi" + IM_END + "\n" + IM_START + "assistant\n",
+    "x" + THINK_OPEN + "\nr\n" + THINK_CLOSE + "\n\ny" + IM_END,
+    EOS + IM_START + "system\nYou are helpful." + IM_END,
+    TOOL_CALL + "\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n" + TOOL_CALL_END,
+    # NFC: decomposed vs precomposed, singletons, reordering, Hangul jamo.
+    "e\u0301", "\u00e9", "Cafe\u0301 au lait", "caf\u00e9",
+    "\u212b \u2126 \u00c5 \u03a9",
+    "\ufb01ne \ufb02ow",
+    "\u1e9b\u0323", "s\u0323\u0307", "\u0073\u0307\u0323",
+    "\u1100\u1161\u11a8", "\u1100\u1161", "\ud55c\uad6d\uc5b4",
+    "x\u0301\u0302y", "\u0301abc", " \u0301x", "1\u0301", "a\u0301 b",
+    "\u0327\u0301e", "q\u0307\u0323",
+    # Marks inside letter runs: Devanagari, Thai, Arabic with harakat, Vietnamese.
+    "\u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u0941\u0928\u093f\u092f\u093e",
+    "\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35\u0e04\u0e23\u0e31\u0e1a",
+    "\u0645\u064f\u062d\u064e\u0645\u0651\u064e\u062f",
+    "Ti\u1ebfng Vi\u1ec7t", "Tie\u0302\u0301ng Vie\u0323\u0302t",
+    # Digits: one per pretoken; mixed with marks and punctuation.
+    "12345", "3.14159", "2024-09-09", "v2.1.0", "1st 2nd 3rd", "\u00bd\u00bc",
+    "phone: +1 (555) 010-9999",
+    # Emoji with modifiers (Sk) and ZWJ (Cf): both outside the mark class.
+    "\U0001f44d\U0001f3fd", "\U0001f468\u200d\U0001f469\u200d\U0001f467",
+    # A combining enclosing mark and a spacing mark after punctuation.
+    "a\u20dd", "(\u0301)",
+]
+
+
 def main():
-    out_path = (
-        sys.argv[1] if len(sys.argv) > 1 else
-        "tests/data/glm_tokenizer_goldens.jsonl"
-    )
-    snap = glob.glob(f"/home/user/.cache/huggingface/hub/models--{MODEL.replace('/', '--')}/snapshots/*/")
-    if not snap:
-        sys.exit(f"model snapshot for {MODEL} not found in the HF cache")
-    tok_path = snap[0] + "tokenizer.json"
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("out", nargs="?", default=None)
+    ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--tokenizer-json", default=None)
+    ap.add_argument("--out", dest="out_opt", default=None)
+    args = ap.parse_args()
+    model = args.model
+    is_qwen = "Qwen" in model
+    cases = QWEN_CASES if is_qwen else CASES
+    out_path = args.out_opt or args.out or (
+        "tests/data/qwen_tokenizer_goldens.jsonl" if is_qwen else "tests/data/glm_tokenizer_goldens.jsonl")
+    if args.tokenizer_json:
+        tok_path = args.tokenizer_json
+    else:
+        snap = glob.glob(f"{hf_hub_dir()}/models--{model.replace('/', '--')}/snapshots/*/")
+        if not snap:
+            sys.exit(f"model snapshot for {model} not found in the HF cache")
+        tok_path = snap[0] + "tokenizer.json"
     with open(tok_path, "rb") as f:
         raw = f.read()
     import tokenizers
@@ -112,22 +181,25 @@ def main():
 
     with open(out_path, "w", encoding="utf-8") as f:
         header = {
-            "model": MODEL,
+            "model": model,
             "tokenizers": tokenizers.__version__,
             "revision_hash": f"{fnv1a64(raw):016x}",
-            "cases": len(CASES),
+            "cases": len(cases),
         }
         f.write(json.dumps(header) + "\n")
-        for text in CASES:
+        for text in cases:
             ids = tok.encode(text).ids
             # HF decode() defaults to skip_special_tokens=True — special
             # added tokens (the EOS here) decode to nothing. The gate's
             # round trip pins the VERBATIM semantics explicitly.
             decoded = tok.decode(ids, skip_special_tokens=False)
-            if decoded != text:
+            # An NFC tokenizer round-trips to the NFC form of the input.
+            import unicodedata
+            expect = unicodedata.normalize("NFC", text) if is_qwen else text
+            if decoded != expect:
                 sys.exit(f"HF verbatim round-trip failed for {text!r} -> {decoded!r}")
             f.write(json.dumps({"text": text, "ids": ids}) + "\n")
-    print(f"wrote {out_path}: {len(CASES)} cases, revision "
+    print(f"wrote {out_path}: {len(cases)} cases, revision "
           f"{header['revision_hash']} (tokenizers {tokenizers.__version__})")
 
 

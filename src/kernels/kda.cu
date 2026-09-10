@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <stdexcept>
+#include <string>
+#include <type_traits>
 
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
@@ -213,21 +215,32 @@ __device__ __forceinline__ void load_bf16_slice(const uint16_t* __restrict__ p,
   }
 }
 
-template <int K, bool kVec, bool kBatched>
+// kScalarGate (Q3, 2026-09-09): the Gated DeltaNet variant of the same
+// recurrence (docs/qwen38_flash_next_plan.md §1.3). The decay is one scalar
+// per head and token, exp(-exp(A_log[h]) * softplus(a_raw[t,h] +
+// dt_bias[h])), and kv_ratio value heads share one key head's q and k (the
+// reference's repeat_interleave). g_raw is then a_raw [tokens, heads] with
+// row stride g_stride, dt_bias is [heads], and lower_bound is unused. With
+// kScalarGate false and kv_ratio 1 every expression below is the KDA
+// kernel's, index for index.
+template <int K, bool kVec, bool kBatched, bool kScalarGate>
 __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
     const uint16_t* __restrict__ qkv, const uint16_t* __restrict__ g_raw,
-    const uint16_t* __restrict__ beta_raw, int64_t beta_stride,
-    const float* __restrict__ a_log, const float* __restrict__ dt_bias,
-    float* __restrict__ state, int64_t request_state_stride,
-    uint16_t* __restrict__ out, int tokens, int heads, int v_dim,
-    float lower_bound, float scale, float* __restrict__ snapshots,
-    int64_t snapshot_stride, const int32_t* __restrict__ request_ids,
+    int64_t g_stride, const uint16_t* __restrict__ beta_raw,
+    int64_t beta_stride, const float* __restrict__ a_log,
+    const float* __restrict__ dt_bias, float* __restrict__ state,
+    int64_t request_state_stride, uint16_t* __restrict__ out, int tokens,
+    int heads, int kv_ratio, int v_dim, float lower_bound, float scale,
+    float* __restrict__ snapshots, int64_t snapshot_stride,
+    const int32_t* __restrict__ request_ids,
     const int64_t* __restrict__ positions,
     const int32_t* __restrict__ request_spans) {
   constexpr int kCols = K / kRecurrentLanes;  // columns owned per lane
   static_assert(K % kRecurrentLanes == 0, "K must split across the lanes");
 
   const int h = blockIdx.y;
+  const int hk = h / kv_ratio;          // the key head this value head reads
+  const int heads_k = heads / kv_ratio;  // key heads
   const int v = blockIdx.x * kRecurrentRows + threadIdx.x / kRecurrentLanes;
   const int lane = threadIdx.x % kRecurrentLanes;
   const int c0 = lane * kCols;
@@ -266,14 +279,21 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
 #pragma unroll
     for (int i = 0; i < kCols; ++i) s[i] = 0.0f;
   }
-  // The per-head decay bias slice is token-invariant: hoist it.
+  // The per-head decay bias slice is token-invariant: hoist it (the
+  // per-dimension gate); the scalar gate's bias is one float per head.
   float bias_v[kCols];
-  load_f32_slice<kCols, kVec>(dt_bias + static_cast<int64_t>(h) * K + c0,
-                              bias_v);
+  if constexpr (!kScalarGate) {
+    load_f32_slice<kCols, kVec>(dt_bias + static_cast<int64_t>(h) * K + c0,
+                                bias_v);
+  } else {
+#pragma unroll
+    for (int i = 0; i < kCols; ++i) bias_v[i] = 0.0f;
+  }
+  const float bias_h = kScalarGate ? dt_bias[h] : 0.0f;
 
   const float a = expf(a_log[h]);
-  // Fused qkv row: [q (H*K) | k (H*K) | v (H*V)].
-  const int64_t qkv_stride = static_cast<int64_t>(2) * heads * K +
+  // Fused qkv row: [q (Hk*K) | k (Hk*K) | v (H*V)].
+  const int64_t qkv_stride = static_cast<int64_t>(2) * heads_k * K +
                              static_cast<int64_t>(heads) * v_dim;
 
   for (int t = t0; t < t1; ++t) {
@@ -285,29 +305,45 @@ __global__ __launch_bounds__(kRecurrentBlock) void kda_recurrent_kernel(
       }
     }
     const uint16_t* qrow =
-        qkv + static_cast<int64_t>(t) * qkv_stride + static_cast<int64_t>(h) * K;
-    const uint16_t* krow = qrow + static_cast<int64_t>(heads) * K;
+        qkv + static_cast<int64_t>(t) * qkv_stride + static_cast<int64_t>(hk) * K;
+    const uint16_t* krow = qrow + static_cast<int64_t>(heads_k) * K;
     const uint16_t* vrow =
         qkv + static_cast<int64_t>(t) * qkv_stride +
-        static_cast<int64_t>(2) * heads * K + static_cast<int64_t>(h) * v_dim;
-    const uint16_t* grow =
-        g_raw + (static_cast<int64_t>(t) * heads + h) * K + c0;
+        static_cast<int64_t>(2) * heads_k * K + static_cast<int64_t>(h) * v_dim;
 
     float q[kCols], k[kCols], gv[kCols], u = 0.0f;
     load_bf16_slice<kCols, kVec>(qrow + c0, q);
     load_bf16_slice<kCols, kVec>(krow + c0, k);
-    load_bf16_slice<kCols, kVec>(grow, gv);
+    float decay_h = 1.0f;
+    if constexpr (kScalarGate) {
+      // GDN: g = -exp(A_log) * softplus(a_raw + dt_bias), the decay exp(g);
+      // torch's softplus (threshold 20) in fp32.
+      const float x =
+          bf16_bits_to_float(g_raw[static_cast<int64_t>(t) * g_stride + h]) +
+          bias_h;
+      const float sp = x > 20.0f ? x : log1pf(expf(x));
+      decay_h = expf(-(a * sp));
+    } else {
+      const uint16_t* grow =
+          g_raw + static_cast<int64_t>(t) * g_stride +
+          static_cast<int64_t>(h) * K + c0;
+      load_bf16_slice<kCols, kVec>(grow, gv);
+    }
     float qs = 0.0f, ks = 0.0f;
 #pragma unroll
     for (int i = 0; i < kCols; ++i) {
       qs = fmaf(q[i], q[i], qs);
       ks = fmaf(k[i], k[i], ks);
-      // Gate: lower_bound / (1 + exp(-exp(A_log) * (g_raw + dt_bias))).
-      // Bounded to (lower_bound, 0), so exp(gate) in (exp(lb), 1] — the
-      // decay can never blow the state up. Computed fused with the decay.
-      const float g = gv[i] + bias_v[i];
-      const float gate = lower_bound / (1.0f + expf(-(a * g)));
-      s[i] *= expf(gate);
+      if constexpr (kScalarGate) {
+        s[i] *= decay_h;
+      } else {
+        // Gate: lower_bound / (1 + exp(-exp(A_log) * (g_raw + dt_bias))).
+        // Bounded to (lower_bound, 0), so exp(gate) in (exp(lb), 1] — the
+        // decay can never blow the state up. Computed fused with the decay.
+        const float g = gv[i] + bias_v[i];
+        const float gate = lower_bound / (1.0f + expf(-(a * g)));
+        s[i] *= expf(gate);
+      }
     }
 
     // l2norm(q, k) with eps inside the sqrt; butterfly across the row's
@@ -508,76 +544,120 @@ void kda_gated_rmsnorm_sigmoid_bf16(const void* x, const void* gate,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
-                       int64_t beta_row_stride, const float* a_log,
-                       const float* dt_bias, float* state, void* out,
-                       int tokens, int heads, int k_dim, int v_dim,
-                       float lower_bound, float scale, cudaStream_t stream,
-                       const KdaStateSnapshots& snap) {
-  if (tokens <= 0 || heads <= 0 || v_dim <= 0)
-    throw std::invalid_argument("kda recurrent: empty problem");
+namespace {
+
+// The one launcher behind the four public entries (KDA and GDN, plain and
+// request-batched): validates, picks the vector path, dispatches K.
+template <bool kScalarGate>
+void recurrent_launch(const char* who, const void* qkv, const void* g_raw,
+                      int64_t g_row_stride, const void* beta_raw,
+                      int64_t beta_row_stride, const float* a_log,
+                      const float* dt_bias, float* states,
+                      int64_t request_state_stride, void* out, int rows,
+                      int heads, int kv_ratio, int k_dim, int v_dim,
+                      float lower_bound, float scale,
+                      const KdaRequestRows& requests, cudaStream_t stream,
+                      const KdaStateSnapshots& snap) {
+  const bool batched = requests.num_requests > 0;
+  const std::string w = who;
+  if (rows <= 0 || heads <= 0 || v_dim <= 0)
+    throw std::invalid_argument(w + ": empty problem");
   if (k_dim % kRecurrentLanes != 0)
-    throw std::invalid_argument("kda recurrent: k_dim must be a multiple of 4");
+    throw std::invalid_argument(w + ": k_dim must be a multiple of 16");
+  if (kv_ratio <= 0 || heads % kv_ratio != 0)
+    throw std::invalid_argument(w + ": heads must divide by kv_ratio");
   if (beta_row_stride < heads)
-    throw std::invalid_argument("kda recurrent: beta stride smaller than row");
-  if (snap.states && tokens > 1 &&
-      snap.stride_elems < static_cast<int64_t>(heads) * v_dim * k_dim)
-    throw std::invalid_argument(
-        "kda recurrent: snapshot stride smaller than a state");
+    throw std::invalid_argument(w + ": beta stride smaller than row");
+  const int64_t g_row = kScalarGate ? static_cast<int64_t>(heads)
+                                    : static_cast<int64_t>(heads) * k_dim;
+  if (g_row_stride < g_row)
+    throw std::invalid_argument(w + ": gate stride smaller than row");
+  const int64_t state_elems = static_cast<int64_t>(heads) * v_dim * k_dim;
+  if (batched) {
+    if (request_state_stride < state_elems)
+      throw std::invalid_argument(w + ": request stride smaller than a state");
+    if (!requests.request_ids || !requests.positions || !requests.spans)
+      throw std::invalid_argument(w + ": incomplete request map");
+    if (snap.states && snap.stride_elems < state_elems)
+      throw std::invalid_argument(w + ": snapshot stride smaller than a state");
+  } else if (snap.states && rows > 1 && snap.stride_elems < state_elems) {
+    throw std::invalid_argument(w + ": snapshot stride smaller than a state");
+  }
 
   const dim3 grid(static_cast<unsigned>((v_dim + kRecurrentRows - 1) /
                                         kRecurrentRows),
-                  static_cast<unsigned>(heads), 1);
+                  static_cast<unsigned>(heads),
+                  static_cast<unsigned>(batched ? requests.num_requests : 1));
   const uint16_t* qkv16 = static_cast<const uint16_t*>(qkv);
   const uint16_t* g16 = static_cast<const uint16_t*>(g_raw);
   const uint16_t* b16 = static_cast<const uint16_t*>(beta_raw);
   uint16_t* o16 = static_cast<uint16_t*>(out);
 
   // Vector slices need 16-byte-aligned bases and strides: the fused qkv
-  // row (2*heads*K + heads*v_dim bf16), the per-head K offsets, and the
-  // per-lane column offsets.
+  // row (2*heads_k*K + heads*v_dim bf16), the per-head K offsets, and the
+  // per-lane column offsets. Per-lane slices are K/16 wide: float4 state
+  // slices need K >= 64 (4 columns, 16 bytes); the bf16 slices then are
+  // 8-byte uint2s. The scalar gate reads its bias per head, unvectorized.
   const auto aligned16 = [](const void* p) {
     return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
   };
-  const int64_t qkv_stride = static_cast<int64_t>(2) * heads * k_dim +
+  const int heads_k = heads / kv_ratio;
+  const int64_t qkv_stride = static_cast<int64_t>(2) * heads_k * k_dim +
                              static_cast<int64_t>(heads) * v_dim;
-  const int64_t state_stride =
-      static_cast<int64_t>(heads) * v_dim * k_dim;
-  // Per-lane slices are K/16 wide: float4 state slices need K >= 64
-  // (4 columns, 16 bytes); the bf16 slices then are 8-byte uint2s.
-  const bool vec = k_dim >= 64 && aligned16(qkv16) && aligned16(g16) &&
-                   aligned16(dt_bias) && aligned16(state) &&
-                   (qkv_stride * 2) % 16 == 0 &&
-                   (static_cast<int64_t>(v_dim) * k_dim * 4) % 16 == 0 &&
-                   (!snap.states || (aligned16(snap.states) &&
-                                     (snap.stride_elems * 4) % 16 == 0));
+  const int64_t state_stride = batched ? request_state_stride : state_elems;
+  const bool vec =
+      k_dim >= 64 && aligned16(qkv16) && aligned16(states) &&
+      (kScalarGate || (aligned16(g16) && aligned16(dt_bias) &&
+                       (g_row_stride * 2) % 16 == 0)) &&
+      (qkv_stride * 2) % 16 == 0 &&
+      (static_cast<int64_t>(v_dim) * k_dim * 4) % 16 == 0 &&
+      (!batched || (request_state_stride * 4) % 16 == 0) &&
+      (!snap.states || (aligned16(snap.states) &&
+                        (snap.stride_elems * 4) % 16 == 0));
 
-#define DGPP_KDA_RECURRENT_DISPATCH(KLIT)                                      \
-  do {                                                                         \
-    if (vec)                                                                   \
-      kda_recurrent_kernel<KLIT, true, false>                                   \
-          <<<grid, kRecurrentBlock, 0, stream>>>(                               \
-              qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state,          \
-              state_stride, o16, tokens, heads, v_dim, lower_bound, scale,      \
-              snap.states, snap.stride_elems, nullptr, nullptr, nullptr);       \
-    else                                                                       \
-      kda_recurrent_kernel<KLIT, false, false>                                  \
-          <<<grid, kRecurrentBlock, 0, stream>>>(                               \
-              qkv16, g16, b16, beta_row_stride, a_log, dt_bias, state,          \
-              state_stride, o16, tokens, heads, v_dim, lower_bound, scale,      \
-              snap.states, snap.stride_elems, nullptr, nullptr, nullptr);       \
-    DGPP_CUDA_OK(cudaGetLastError());                                          \
-  } while (0)
-
+  const auto launch = [&](auto kdim_tag, auto vec_tag, auto batch_tag) {
+    constexpr int KLIT = decltype(kdim_tag)::value;
+    constexpr bool kVec = decltype(vec_tag)::value;
+    constexpr bool kBatched = decltype(batch_tag)::value;
+    kda_recurrent_kernel<KLIT, kVec, kBatched, kScalarGate>
+        <<<grid, kRecurrentBlock, 0, stream>>>(
+            qkv16, g16, g_row_stride, b16, beta_row_stride, a_log, dt_bias,
+            states, state_stride, o16, rows, heads, kv_ratio, v_dim,
+            lower_bound, scale, snap.states, snap.stride_elems,
+            requests.request_ids, requests.positions, requests.spans);
+    DGPP_CUDA_OK(cudaGetLastError());
+  };
+  const auto dispatch_k = [&](auto kdim_tag) {
+    if (vec) {
+      if (batched) launch(kdim_tag, std::true_type{}, std::true_type{});
+      else launch(kdim_tag, std::true_type{}, std::false_type{});
+    } else {
+      if (batched) launch(kdim_tag, std::false_type{}, std::true_type{});
+      else launch(kdim_tag, std::false_type{}, std::false_type{});
+    }
+  };
   switch (k_dim) {
-    case 32: DGPP_KDA_RECURRENT_DISPATCH(32); return;
-    case 64: DGPP_KDA_RECURRENT_DISPATCH(64); return;
-    case 128: DGPP_KDA_RECURRENT_DISPATCH(128); return;
+    case 32: dispatch_k(std::integral_constant<int, 32>{}); return;
+    case 64: dispatch_k(std::integral_constant<int, 64>{}); return;
+    case 128: dispatch_k(std::integral_constant<int, 128>{}); return;
     default:
-      throw std::invalid_argument(
-          "kda recurrent: k_dim must be one of {32, 64, 128}");
+      throw std::invalid_argument(w + ": k_dim must be one of {32, 64, 128}");
   }
-#undef DGPP_KDA_RECURRENT_DISPATCH
+}
+
+}  // namespace
+
+void kda_recurrent_fwd(const void* qkv, const void* g_raw, const void* beta_raw,
+                       int64_t beta_row_stride, const float* a_log,
+                       const float* dt_bias, float* state, void* out,
+                       int tokens, int heads, int k_dim, int v_dim,
+                       float lower_bound, float scale, cudaStream_t stream,
+                       const KdaStateSnapshots& snap) {
+  recurrent_launch<false>("kda recurrent", qkv, g_raw,
+                          static_cast<int64_t>(heads) * k_dim, beta_raw,
+                          beta_row_stride, a_log, dt_bias, state, 0, out,
+                          tokens, heads, 1, k_dim, v_dim, lower_bound, scale,
+                          KdaRequestRows{}, stream, snap);
 }
 
 void kda_recurrent_fwd_batched(
@@ -587,77 +667,40 @@ void kda_recurrent_fwd_batched(
     int heads, int k_dim, int v_dim, float lower_bound, float scale,
     const KdaRequestRows& requests, cudaStream_t stream,
     const KdaStateSnapshots& snap) {
-  if (rows <= 0 || heads <= 0 || v_dim <= 0)
-    throw std::invalid_argument("kda batched recurrent: empty problem");
-  if (k_dim % kRecurrentLanes != 0)
-    throw std::invalid_argument(
-        "kda batched recurrent: k_dim must be a multiple of 16");
-  if (beta_row_stride < heads)
-    throw std::invalid_argument(
-        "kda batched recurrent: beta stride smaller than row");
-  const int64_t state_elems =
-      static_cast<int64_t>(heads) * v_dim * k_dim;
-  if (request_state_stride < state_elems)
-    throw std::invalid_argument(
-        "kda batched recurrent: request stride smaller than a state");
-  if (!requests.request_ids || !requests.positions || !requests.spans ||
-      requests.num_requests <= 0)
-    throw std::invalid_argument(
-        "kda batched recurrent: incomplete request map");
-  if (snap.states && snap.stride_elems < state_elems)
-    throw std::invalid_argument(
-        "kda batched recurrent: snapshot stride smaller than a state");
+  if (requests.num_requests <= 0)
+    throw std::invalid_argument("kda batched recurrent: incomplete request map");
+  recurrent_launch<false>("kda batched recurrent", qkv, g_raw,
+                          static_cast<int64_t>(heads) * k_dim, beta_raw,
+                          beta_row_stride, a_log, dt_bias, states,
+                          request_state_stride, out, rows, heads, 1, k_dim,
+                          v_dim, lower_bound, scale, requests, stream, snap);
+}
 
-  const dim3 grid(static_cast<unsigned>((v_dim + kRecurrentRows - 1) /
-                                        kRecurrentRows),
-                  static_cast<unsigned>(heads),
-                  static_cast<unsigned>(requests.num_requests));
-  const uint16_t* qkv16 = static_cast<const uint16_t*>(qkv);
-  const uint16_t* g16 = static_cast<const uint16_t*>(g_raw);
-  const uint16_t* b16 = static_cast<const uint16_t*>(beta_raw);
-  uint16_t* o16 = static_cast<uint16_t*>(out);
-  const auto aligned16 = [](const void* p) {
-    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
-  };
-  const int64_t qkv_stride = static_cast<int64_t>(2) * heads * k_dim +
-                             static_cast<int64_t>(heads) * v_dim;
-  const bool vec =
-      k_dim >= 64 && aligned16(qkv16) && aligned16(g16) &&
-      aligned16(dt_bias) && aligned16(states) &&
-      (qkv_stride * 2) % 16 == 0 &&
-      (static_cast<int64_t>(v_dim) * k_dim * 4) % 16 == 0 &&
-      (request_state_stride * 4) % 16 == 0 &&
-      (!snap.states || (aligned16(snap.states) &&
-                        (snap.stride_elems * 4) % 16 == 0));
+void gdn_recurrent_fwd(const void* qkv, const void* a_raw, int64_t a_row_stride,
+                       const void* beta_raw, int64_t beta_row_stride,
+                       const float* a_log, const float* dt_bias, float* state,
+                       void* out, int tokens, int heads, int kv_ratio,
+                       int k_dim, int v_dim, float scale, cudaStream_t stream,
+                       const KdaStateSnapshots& snap) {
+  recurrent_launch<true>("gdn recurrent", qkv, a_raw, a_row_stride, beta_raw,
+                         beta_row_stride, a_log, dt_bias, state, 0, out,
+                         tokens, heads, kv_ratio, k_dim, v_dim, 0.0f, scale,
+                         KdaRequestRows{}, stream, snap);
+}
 
-#define DGPP_KDA_BATCH_RECURRENT_DISPATCH(KLIT)                                \
-  do {                                                                         \
-    if (vec)                                                                   \
-      kda_recurrent_kernel<KLIT, true, true>                                    \
-          <<<grid, kRecurrentBlock, 0, stream>>>(                               \
-              qkv16, g16, b16, beta_row_stride, a_log, dt_bias, states,         \
-              request_state_stride, o16, rows, heads, v_dim, lower_bound,       \
-              scale, snap.states, snap.stride_elems, requests.request_ids,      \
-              requests.positions, requests.spans);                             \
-    else                                                                       \
-      kda_recurrent_kernel<KLIT, false, true>                                   \
-          <<<grid, kRecurrentBlock, 0, stream>>>(                               \
-              qkv16, g16, b16, beta_row_stride, a_log, dt_bias, states,         \
-              request_state_stride, o16, rows, heads, v_dim, lower_bound,       \
-              scale, snap.states, snap.stride_elems, requests.request_ids,      \
-              requests.positions, requests.spans);                             \
-    DGPP_CUDA_OK(cudaGetLastError());                                          \
-  } while (0)
-
-  switch (k_dim) {
-    case 32: DGPP_KDA_BATCH_RECURRENT_DISPATCH(32); return;
-    case 64: DGPP_KDA_BATCH_RECURRENT_DISPATCH(64); return;
-    case 128: DGPP_KDA_BATCH_RECURRENT_DISPATCH(128); return;
-    default:
-      throw std::invalid_argument(
-          "kda batched recurrent: k_dim must be one of {32, 64, 128}");
-  }
-#undef DGPP_KDA_BATCH_RECURRENT_DISPATCH
+void gdn_recurrent_fwd_batched(
+    const void* qkv, const void* a_raw, int64_t a_row_stride,
+    const void* beta_raw, int64_t beta_row_stride, const float* a_log,
+    const float* dt_bias, float* states, int64_t request_state_stride,
+    void* out, int rows, int heads, int kv_ratio, int k_dim, int v_dim,
+    float scale, const KdaRequestRows& requests, cudaStream_t stream,
+    const KdaStateSnapshots& snap) {
+  if (requests.num_requests <= 0)
+    throw std::invalid_argument("gdn batched recurrent: incomplete request map");
+  recurrent_launch<true>("gdn batched recurrent", qkv, a_raw, a_row_stride,
+                         beta_raw, beta_row_stride, a_log, dt_bias, states,
+                         request_state_stride, out, rows, heads, kv_ratio,
+                         k_dim, v_dim, 0.0f, scale, requests, stream, snap);
 }
 
 }  // namespace dgpp

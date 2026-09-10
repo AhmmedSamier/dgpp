@@ -35,9 +35,10 @@
 // per-code cost is the bit placement, one f16 -> f32 conversion and the
 // multiply — no fp16 arithmetic anywhere.
 //
-// CONTRACT: K in {32, 64, 128, 256, 512, 1024, 2048, 4096}; payload rows
-// 16-byte aligned. Scales are e4m3 bytes [n, K/16] row-major; NaN scale
-// codes (0x7F/0xFF) propagate as NaN.
+// CONTRACT: K a multiple of 32 with at most 16 chunks per lane (K <=
+// 16384; the compiled set is dispatch_k's); payload rows 16-byte aligned.
+// Scales are e4m3 bytes [n, K/16] row-major; NaN scale codes (0x7F/0xFF)
+// propagate as NaN.
 #include <cuda_fp16.h>
 #include <cuda_fp4.h>
 #include <cuda_fp8.h>
@@ -69,10 +70,38 @@ constexpr int kMaxChunksPerLane = 4;
 // (warp_row_dots_pair: gate and up issued together). A row's chain is the
 // same whatever the step count, so the outputs are bitwise across it.
 constexpr int kSteps = 1;                         // row steps per warp
-constexpr int kMaxK = 4096;
+constexpr int kMaxPasses = 4;                     // chunk passes per lane
+constexpr int kMaxK = kCodesPerChunk * 32 * kMaxChunksPerLane * kMaxPasses;  // 16384
 
+// The row geometry as a function of K = 32 x row_chunks (2026-09-09,
+// docs/glm47_plan.md D2 — GLM-4.7's 5120 / 384 / 3072 widths): the
+// power-of-two widths keep their 2026-09-08 geometry exactly (up to four
+// chunks per lane, 1..32 lanes per row); any other multiple of 32 puts the
+// largest power of two <= 32 that divides row_chunks on a row, each lane
+// owning row_chunks / lanes chunks consumed in PASSES of at most four (the
+// loads in flight per lane). A row's FMA chain — each lane's chunks in k
+// order, the fixed xor tree across the lanes — is the same whatever the
+// pass split, so every bitwise pin (slot == grouped == launcher) holds.
+__host__ __device__ constexpr int pow2_divisor_le32(int r) {
+  int l = 1;
+  while (l < 32 && r % (l * 2) == 0) l *= 2;
+  return l;
+}
+__host__ __device__ constexpr int lanes_per_row_of(int k) {
+  const int r = k / kCodesPerChunk;
+  const int c0 = r < kMaxChunksPerLane ? r : kMaxChunksPerLane;
+  if (c0 > 0 && r % c0 == 0) {
+    const int l = r / c0;
+    if (l >= 1 && l <= 32 && (l & (l - 1)) == 0) return l;
+  }
+  return pow2_divisor_le32(r);
+}
+__host__ __device__ constexpr int chunks_of(int k) {
+  return (k / kCodesPerChunk) / lanes_per_row_of(k);
+}
 __host__ __device__ constexpr bool k_supported(int k) {
-  return k >= 32 && k <= kMaxK && (k & (k - 1)) == 0;
+  return k >= kCodesPerChunk && k % kCodesPerChunk == 0 &&
+         chunks_of(k) <= kMaxChunksPerLane * kMaxPasses;
 }
 
 __host__ inline bool shape_ok(const void* payload, int k) {
@@ -82,23 +111,26 @@ __host__ inline bool shape_ok(const void* payload, int k) {
 // The compile-time row geometry.
 template <int K>
 struct Geom {
-  static_assert(k_supported(K), "fp4_gemv: K must be a power of two in [32, 4096]");
+  static_assert(k_supported(K), "fp4_gemv: K must be a multiple of 32 with at most 16 chunks per lane");
   static constexpr int row_chunks = K / kCodesPerChunk;
-  static constexpr int chunks = row_chunks < kMaxChunksPerLane ? row_chunks : kMaxChunksPerLane;
-  static constexpr int lanes_per_row = row_chunks / chunks;   // 1 .. 32
+  static constexpr int lanes_per_row = lanes_per_row_of(K);   // 1 .. 32
+  static constexpr int chunks = row_chunks / lanes_per_row;   // per lane, over every pass
+  static constexpr int passes = (chunks + kMaxChunksPerLane - 1) / kMaxChunksPerLane;
   static constexpr int rows_per_step = 32 / lanes_per_row;
   static constexpr int rows_per_warp = kSteps * rows_per_step;
   static constexpr int rows_per_block = kWarps * rows_per_warp;
   static constexpr int row_bytes = K / 2;
   static constexpr int scale_cols = K / kGroup;
-  static constexpr int loads = kSteps * chunks;                // per lane, in flight
+  // Chunks in pass p (at least 1 so a discarded instantiation stays legal).
+  static constexpr int pass_chunks(int p) {
+    const int left = chunks - p * kMaxChunksPerLane;
+    return left < 1 ? 1 : (left < kMaxChunksPerLane ? left : kMaxChunksPerLane);
+  }
 };
 
 // The runtime twins for launch arithmetic (the host dispatches on k).
 __host__ __device__ constexpr int rows_per_step_of(int k) {
-  const int rc = k / kCodesPerChunk;
-  const int ch = rc < kMaxChunksPerLane ? rc : kMaxChunksPerLane;
-  return 32 / (rc / ch);
+  return 32 / lanes_per_row_of(k);
 }
 __host__ __device__ constexpr int rows_per_warp_of(int k) {
   return kSteps * rows_per_step_of(k);
@@ -212,16 +244,15 @@ __device__ __forceinline__ void store_dot(uint16_t* out, float v) {
 }
 __device__ __forceinline__ void store_dot(float* out, float v) { *out = v; }
 
-// The dots of a warp's rows_per_warp rows (rows [n0 + warp*rows_per_warp,
-// +rows_per_warp) of an [n, K] matrix) against kRows staged activation
-// rows, UNDIVIDED by the global scale and reduced across each row's lane
-// group. acc[st][a] is this lane's row of step st (row_base + st *
-// rows_per_step + group); lane `lig == 0` of the group holds the reduced
-// value. Each row's chunks are consumed in k order into its own
-// accumulator, so a row's result is the same whatever kRows or the
-// launcher. No warp-uniform early return: callers may barrier after this.
-template <int K, int kRows>
-__device__ __forceinline__ void warp_row_dots(const uint8_t* __restrict__ w,
+// One pass of a warp's row dots: chunks [C0, C0 + NC) of each lane's row
+// (rows [n0 + warp*rows_per_warp, +rows_per_warp) of an [n, K] matrix)
+// against kRows staged activation rows, accumulated into acc. Every load
+// of the pass is issued before any is consumed; the chunks are then
+// consumed column by column (the activation window once, every row step
+// against it), each row's chunks in k order into its own accumulator.
+// No warp-uniform early return: callers may barrier after this.
+template <int K, int kRows, int C0, int NC>
+__device__ __forceinline__ void pass_row_dots(const uint8_t* __restrict__ w,
                                               const uint8_t* __restrict__ scales,
                                               const uint16_t* __restrict__ sx,
                                               int n0, int n,
@@ -232,23 +263,16 @@ __device__ __forceinline__ void warp_row_dots(const uint8_t* __restrict__ w,
   const int group = lane / G::lanes_per_row;
   const int lig = lane % G::lanes_per_row;
   const int row_base = n0 + warp * G::rows_per_warp;
-#pragma unroll
-  for (int st = 0; st < kSteps; ++st)
-#pragma unroll
-    for (int a = 0; a < kRows; ++a) acc[st][a] = 0.f;
-
-  // Issue every load of the warp's rows (kSteps x chunks per lane), then
-  // consume them in (step, chunk) order — chunk order is k order per row.
-  uint4 wv[G::loads];
-  uint16_t sv[G::loads];
+  uint4 wv[kSteps * NC];
+  uint16_t sv[kSteps * NC];
 #pragma unroll
   for (int st = 0; st < kSteps; ++st) {
     const int row = row_base + st * G::rows_per_step + group;
     const bool ok = row < n;
 #pragma unroll
-    for (int c = 0; c < G::chunks; ++c) {
-      const int boff = (c * G::lanes_per_row + lig) * kChunkBytes;
-      const int i = st * G::chunks + c;
+    for (int c = 0; c < NC; ++c) {
+      const int boff = ((C0 + c) * G::lanes_per_row + lig) * kChunkBytes;
+      const int i = st * NC + c;
       wv[i] = ok ? *reinterpret_cast<const uint4*>(
                        w + static_cast<size_t>(row) * G::row_bytes + boff)
                  : make_uint4(0u, 0u, 0u, 0u);
@@ -257,32 +281,56 @@ __device__ __forceinline__ void warp_row_dots(const uint8_t* __restrict__ w,
                  : static_cast<uint16_t>(0);
     }
   }
-  // Consume chunk column by chunk column: the activation window once, every
-  // row step against it. A row's chunks still arrive in k order into its
-  // own accumulator (the chain per row is unchanged: bitwise).
 #pragma unroll
-  for (int c = 0; c < G::chunks; ++c) {
-    const int e0 = (c * G::lanes_per_row + lig) * kCodesPerChunk;
+  for (int c = 0; c < NC; ++c) {
+    const int e0 = ((C0 + c) * G::lanes_per_row + lig) * kCodesPerChunk;
     uint4 xv[kRows][4];
     load_window<kRows>(sx, K, e0, xv);
 #pragma unroll
     for (int st = 0; st < kSteps; ++st) {
       const int row = row_base + st * G::rows_per_step + group;
       if (row >= n) continue;  // per lane; no barrier inside
-      const int i = st * G::chunks + c;
+      const int i = st * NC + c;
       consume_chunk<kRows>(wv[i], scales_f16(sv[i]), xv, acc[st]);
     }
   }
+}
+
+// The dots of a warp's rows_per_warp rows against kRows staged activation
+// rows, UNDIVIDED by the global scale and reduced across each row's lane
+// group. acc[st][a] is this lane's row of step st (row_base + st *
+// rows_per_step + group); lane `lig == 0` of the group holds the reduced
+// value. Each row's chunks are consumed in k order into its own
+// accumulator across the passes, so a row's result is the same whatever
+// kRows, the pass split or the launcher.
+template <int K, int kRows>
+__device__ __forceinline__ void warp_row_dots(const uint8_t* __restrict__ w,
+                                              const uint8_t* __restrict__ scales,
+                                              const uint16_t* __restrict__ sx,
+                                              int n0, int n,
+                                              float (&acc)[kSteps][kRows]) {
+  using G = Geom<K>;
+#pragma unroll
+  for (int st = 0; st < kSteps; ++st)
+#pragma unroll
+    for (int a = 0; a < kRows; ++a) acc[st][a] = 0.f;
+  pass_row_dots<K, kRows, 0, G::pass_chunks(0)>(w, scales, sx, n0, n, acc);
+  if constexpr (G::passes > 1)
+    pass_row_dots<K, kRows, kMaxChunksPerLane, G::pass_chunks(1)>(w, scales, sx, n0, n, acc);
+  if constexpr (G::passes > 2)
+    pass_row_dots<K, kRows, 2 * kMaxChunksPerLane, G::pass_chunks(2)>(w, scales, sx, n0, n, acc);
+  if constexpr (G::passes > 3)
+    pass_row_dots<K, kRows, 3 * kMaxChunksPerLane, G::pass_chunks(3)>(w, scales, sx, n0, n, acc);
 #pragma unroll
   for (int st = 0; st < kSteps; ++st) group_reduce<kRows, G::lanes_per_row>(acc[st]);
 }
 
-// Two matrices over the same rows and activations (gate and up): every
-// load of both issued before either is consumed — twice the bytes in
-// flight per lane at the same block count. Each matrix's row chain is
-// warp_row_dots's exactly (bitwise).
-template <int K, int kRows>
-__device__ __forceinline__ void warp_row_dots_pair(
+// One pass of two matrices over the same rows and activations (gate and
+// up): every load of both issued before either is consumed — twice the
+// bytes in flight per lane at the same block count. Each matrix's row
+// chain is pass_row_dots's exactly (bitwise).
+template <int K, int kRows, int C0, int NC>
+__device__ __forceinline__ void pass_row_dots_pair(
     const uint8_t* __restrict__ w0, const uint8_t* __restrict__ scales0,
     const uint8_t* __restrict__ w1, const uint8_t* __restrict__ scales1,
     const uint16_t* __restrict__ sx, int n0, int n,
@@ -293,21 +341,16 @@ __device__ __forceinline__ void warp_row_dots_pair(
   const int group = lane / G::lanes_per_row;
   const int lig = lane % G::lanes_per_row;
   const int row_base = n0 + warp * G::rows_per_warp;
-#pragma unroll
-  for (int st = 0; st < kSteps; ++st)
-#pragma unroll
-    for (int a = 0; a < kRows; ++a) acc0[st][a] = acc1[st][a] = 0.f;
-
-  uint4 wv0[G::loads], wv1[G::loads];
-  uint16_t sv0[G::loads], sv1[G::loads];
+  uint4 wv0[kSteps * NC], wv1[kSteps * NC];
+  uint16_t sv0[kSteps * NC], sv1[kSteps * NC];
 #pragma unroll
   for (int st = 0; st < kSteps; ++st) {
     const int row = row_base + st * G::rows_per_step + group;
     const bool ok = row < n;
 #pragma unroll
-    for (int c = 0; c < G::chunks; ++c) {
-      const int boff = (c * G::lanes_per_row + lig) * kChunkBytes;
-      const int i = st * G::chunks + c;
+    for (int c = 0; c < NC; ++c) {
+      const int boff = ((C0 + c) * G::lanes_per_row + lig) * kChunkBytes;
+      const int i = st * NC + c;
       const size_t wo = static_cast<size_t>(row) * G::row_bytes + boff;
       const size_t so = static_cast<size_t>(row) * G::scale_cols + boff / 8;
       wv0[i] = ok ? *reinterpret_cast<const uint4*>(w0 + wo) : make_uint4(0u, 0u, 0u, 0u);
@@ -317,19 +360,39 @@ __device__ __forceinline__ void warp_row_dots_pair(
     }
   }
 #pragma unroll
-  for (int c = 0; c < G::chunks; ++c) {
-    const int e0 = (c * G::lanes_per_row + lig) * kCodesPerChunk;
+  for (int c = 0; c < NC; ++c) {
+    const int e0 = ((C0 + c) * G::lanes_per_row + lig) * kCodesPerChunk;
     uint4 xv[kRows][4];
     load_window<kRows>(sx, K, e0, xv);
 #pragma unroll
     for (int st = 0; st < kSteps; ++st) {
       const int row = row_base + st * G::rows_per_step + group;
       if (row >= n) continue;
-      const int i = st * G::chunks + c;
+      const int i = st * NC + c;
       consume_chunk<kRows>(wv0[i], scales_f16(sv0[i]), xv, acc0[st]);
       consume_chunk<kRows>(wv1[i], scales_f16(sv1[i]), xv, acc1[st]);
     }
   }
+}
+
+template <int K, int kRows>
+__device__ __forceinline__ void warp_row_dots_pair(
+    const uint8_t* __restrict__ w0, const uint8_t* __restrict__ scales0,
+    const uint8_t* __restrict__ w1, const uint8_t* __restrict__ scales1,
+    const uint16_t* __restrict__ sx, int n0, int n,
+    float (&acc0)[kSteps][kRows], float (&acc1)[kSteps][kRows]) {
+  using G = Geom<K>;
+#pragma unroll
+  for (int st = 0; st < kSteps; ++st)
+#pragma unroll
+    for (int a = 0; a < kRows; ++a) acc0[st][a] = acc1[st][a] = 0.f;
+  pass_row_dots_pair<K, kRows, 0, G::pass_chunks(0)>(w0, scales0, w1, scales1, sx, n0, n, acc0, acc1);
+  if constexpr (G::passes > 1)
+    pass_row_dots_pair<K, kRows, kMaxChunksPerLane, G::pass_chunks(1)>(w0, scales0, w1, scales1, sx, n0, n, acc0, acc1);
+  if constexpr (G::passes > 2)
+    pass_row_dots_pair<K, kRows, 2 * kMaxChunksPerLane, G::pass_chunks(2)>(w0, scales0, w1, scales1, sx, n0, n, acc0, acc1);
+  if constexpr (G::passes > 3)
+    pass_row_dots_pair<K, kRows, 3 * kMaxChunksPerLane, G::pass_chunks(3)>(w0, scales0, w1, scales1, sx, n0, n, acc0, acc1);
 #pragma unroll
   for (int st = 0; st < kSteps; ++st) {
     group_reduce<kRows, G::lanes_per_row>(acc0[st]);
@@ -374,7 +437,11 @@ __device__ __forceinline__ void block_rows(const uint8_t* __restrict__ w,
   }
 }
 
-// Dispatch over the supported K: f(std::integral_constant<int, K>{}).
+// Dispatch over the compiled K set: f(std::integral_constant<int, K>{}).
+// The power-of-two set (GLM-5.3-Flash's 4096 / 512 and the fixtures) and
+// GLM-4.7's widths: 5120 (hidden: gate/up, dense gate/up), 384 / 768 /
+// 1536 (the expert down at worlds 4 / 2 / 1), 3072 / 6144 / 12288 (the
+// dense down at worlds 4 / 2 / 1).
 template <typename F>
 __host__ inline void dispatch_k(int k, F&& f) {
   switch (k) {
@@ -382,14 +449,28 @@ __host__ inline void dispatch_k(int k, F&& f) {
     case 64: f(std::integral_constant<int, 64>{}); return;
     case 128: f(std::integral_constant<int, 128>{}); return;
     case 256: f(std::integral_constant<int, 256>{}); return;
+    case 384: f(std::integral_constant<int, 384>{}); return;
     case 512: f(std::integral_constant<int, 512>{}); return;
+    case 768: f(std::integral_constant<int, 768>{}); return;
     case 1024: f(std::integral_constant<int, 1024>{}); return;
+    case 1536: f(std::integral_constant<int, 1536>{}); return;
     case 2048: f(std::integral_constant<int, 2048>{}); return;
+    case 3072: f(std::integral_constant<int, 3072>{}); return;
     case 4096: f(std::integral_constant<int, 4096>{}); return;
+    case 5120: f(std::integral_constant<int, 5120>{}); return;
+    case 6144: f(std::integral_constant<int, 6144>{}); return;
+    case 12288: f(std::integral_constant<int, 12288>{}); return;
     default:
       throw std::invalid_argument(
-          "fp4_gemv: K must be a power of two in [32, 4096]");
+          "fp4_gemv: K is not in the compiled set (32..4096 powers of two, "
+          "384, 768, 1536, 3072, 5120, 6144, 12288)");
   }
+}
+// True when dispatch_k compiles a kernel for k.
+__host__ __device__ constexpr bool k_compiled(int k) {
+  return k == 32 || k == 64 || k == 128 || k == 256 || k == 384 || k == 512 || k == 768 ||
+         k == 1024 || k == 1536 || k == 2048 || k == 3072 || k == 4096 || k == 5120 ||
+         k == 6144 || k == 12288;
 }
 
 }  // namespace fp4_gemv

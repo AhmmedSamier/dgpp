@@ -3,11 +3,13 @@
 # The M9 soak on the four nodes: boot with the production knobs, start the
 # node probes on every node, run serve_soak.py for MINUTES, stop, collect.
 set -u
-ROOT=/home/user/workspace/dgpp
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIN=${1:-60}
 OUT=${2:-$ROOT/build-ci/fabric-runs/soak_2026-09-05}
 PEERS=(192.0.2.12 192.0.2.13 192.0.2.14)
 SSH=(-o BatchMode=yes -o ConnectTimeout=5)
+# The peers' ssh login: DGPP_FABRIC_USER, else the caller's own.
+SSH_USER="${DGPP_FABRIC_USER:-$(id -un)}"
 mkdir -p "$OUT"
 export DGPP_SERVE_KNOBS="--max-concurrency 4 --kv-capacity 8192 --default-max-tokens 256 --queue-limit 8 --decode-graph --mtp"
 export DGPP_SERVE_LOG="$OUT/serve"
@@ -20,8 +22,8 @@ setsid nohup "$ROOT/scripts/node_probe.sh" soak_probe > "$OUT/probe_r0.log" 2>&1
 echo $! > "$OUT/probe_r0.pid"
 for i in 1 2 3; do
   h=${PEERS[$((i - 1))]}
-  timeout 20 scp -q "${SSH[@]}" "$ROOT/scripts/node_probe.sh" "user@$h:/tmp/bus4/node_probe.sh"
-  timeout 20 ssh "${SSH[@]}" "user@$h" "cd /tmp/bus4 && chmod +x node_probe.sh && setsid nohup ./node_probe.sh soak_probe > probe_r$i.log 2>&1 < /dev/null &" || echo "WARN: probe on $h"
+  timeout 20 scp -q "${SSH[@]}" "$ROOT/scripts/node_probe.sh" "$SSH_USER@$h:/tmp/bus4/node_probe.sh"
+  timeout 20 ssh "${SSH[@]}" "$SSH_USER@$h" "cd /tmp/bus4 && chmod +x node_probe.sh && setsid nohup ./node_probe.sh soak_probe > probe_r$i.log 2>&1 < /dev/null &" || echo "WARN: probe on $h"
 done
 echo "=== soak: $MIN min from $(date +%T)"
 python3 "$ROOT/scripts/serve_soak.py" 192.0.2.11 18080 "$MIN" "$OUT/client" 2>&1 | tee "$OUT/soak_client.log"
@@ -29,14 +31,14 @@ echo "=== soak client done at $(date +%T); stopping the world"
 kill "$(cat "$OUT/probe_r0.pid")" 2>/dev/null
 for i in 1 2 3; do
   h=${PEERS[$((i - 1))]}
-  timeout 20 ssh "${SSH[@]}" "user@$h" "pkill -f 'node_probe.sh soak_probe'" >/dev/null 2>&1
-  timeout 20 scp -q "${SSH[@]}" "user@$h:/tmp/bus4/probe_r$i.log" "$OUT/probe_r$i.log" 2>/dev/null
+  timeout 20 ssh "${SSH[@]}" "$SSH_USER@$h" "pkill -f 'node_probe.sh soak_probe'" >/dev/null 2>&1
+  timeout 20 scp -q "${SSH[@]}" "$SSH_USER@$h:/tmp/bus4/probe_r$i.log" "$OUT/probe_r$i.log" 2>/dev/null
 done
 "$ROOT/scripts/serve_run.sh" down > "$OUT/down.log" 2>&1
 echo "=== op-stream md5s:"; grep -h "serve_rank" "$OUT/down.log"
 echo "=== STALLED lines per rank log:"
 for f in "$OUT/serve/serve_r0.log" "$OUT/serve/serve_r1.log" "$OUT/serve/serve_r2.log" "$OUT/serve/serve_r3.log"; do
-  [ -f "$f" ] || { for i in 1 2 3; do h=${PEERS[$((i - 1))]}; timeout 20 scp -q "${SSH[@]}" "user@$h:/tmp/bus4/serve_r$i.log" "$OUT/serve/serve_r$i.log" 2>/dev/null; done; }
+  [ -f "$f" ] || { for i in 1 2 3; do h=${PEERS[$((i - 1))]}; timeout 20 scp -q "${SSH[@]}" "$SSH_USER@$h:/tmp/bus4/serve_r$i.log" "$OUT/serve/serve_r$i.log" 2>/dev/null; done; }
 done
 for f in "$OUT"/serve/serve_r[0-3].log; do echo "  $(basename $f): $(grep -c STALLED "$f" 2>/dev/null) stalled, $(grep -c 'ENGINE FAILURE\|divergence' "$f" 2>/dev/null) failures"; done
 echo "=== node probes: allocstall / pgmajfault / pswpin+out sums per node, max throttle mask"

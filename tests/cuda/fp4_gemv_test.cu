@@ -166,9 +166,16 @@ DGPP_TEST(fp4_gemv_matches_oracle_across_row_geometries) {
   struct Shape {
     int m, n, k;
   };
+  // The non-power-of-two widths (2026-09-09, GLM-4.7): 5120 (32 lanes,
+  // five chunks per lane in two passes), 384 (4 lanes x 3 chunks), 768 (8 x
+  // 3), 1536 (16 x 3), 3072 (32 x 3), 12288 (32 lanes x 12 chunks in three
+  // passes).
   const Shape shapes[] = {{1, 520, 4096}, {3, 264, 1024}, {2, 100, 512},
                           {4, 40, 256},   {1, 33, 128},   {2, 17, 64},
-                          {1, 9, 32},     {4, 512, 4096}, {2, 300, 2048}};
+                          {1, 9, 32},     {4, 512, 4096}, {2, 300, 2048},
+                          {1, 390, 5120}, {3, 130, 5120}, {2, 520, 384},
+                          {1, 77, 768},   {4, 70, 1536},  {2, 41, 3072},
+                          {1, 20, 12288}};
   int i = 0;
   for (const Shape& s : shapes) {
     const Problem p = make_problem(s.m, s.n, s.k, 0xF40 + i++);
@@ -182,7 +189,7 @@ DGPP_TEST(fp4_gemv_rows_are_independent_of_row_count) {
   // Each row's chain is the same sequence of FMAs whatever m: m=3 against
   // three m=1 runs, and the m=8 chunked launch against eight singles, for
   // both epilogues and for a short-row geometry too.
-  for (int k : {4096, 512}) {
+  for (int k : {4096, 512, 5120, 384}) {
     const Problem p3 = make_problem(3, 296, k, 0xE3 + k);
     const std::vector<uint16_t> got3 = run_bf16(p3);
     for (int r = 0; r < 3; ++r) {
@@ -244,11 +251,12 @@ DGPP_TEST(fp4_gemv_rejects_geometry_outside_the_contract) {
     }
     return false;
   };
-  require(rejects(48), "k=48 rejected (not a power of two)");
-  require(rejects(96), "k=96 rejected");
-  require(rejects(1536), "k=1536 rejected");
-  require(rejects(8192), "k=8192 rejected (above 4096)");
+  require(rejects(48), "k=48 rejected (not a multiple of 32)");
+  require(rejects(96), "k=96 rejected (not in the compiled set)");
+  require(!rejects(1536), "k=1536 accepted (16 lanes x 3 chunks)");
+  require(rejects(8192), "k=8192 rejected (not in the compiled set)");
   require(!rejects(2048), "k=2048 accepted");
+  require(!rejects(5120), "k=5120 accepted");
   std::printf("[ OK ] fp4 gemv geometry contract enforced\n");
 }
 

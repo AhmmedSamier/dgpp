@@ -14,12 +14,14 @@
 # Nodes default to the fabric's four (DGPP_FABRIC_NODES overrides, space-
 # separated); devices with no traffic at all are skipped.
 set -u
+# The peers' ssh login: DGPP_FABRIC_USER, else the caller's own.
+SSH_USER="${DGPP_FABRIC_USER:-$(id -un)}"
 NODES=${DGPP_FABRIC_NODES:-"192.0.2.11 192.0.2.12 192.0.2.13 192.0.2.14"}
 mode=${1:-snapshot}
 case "$mode" in
   snapshot)
     for h in $NODES; do
-      ssh -o ConnectTimeout=5 -o BatchMode=yes user@"$h" bash -s 2>/dev/null <<'REMOTE' | sed "s/^/$h /"
+      ssh -o ConnectTimeout=5 -o BatchMode=yes "$SSH_USER@$h" bash -s 2>/dev/null <<'REMOTE' | sed "s/^/$h /"
 for d in /sys/class/infiniband/*/ports/1; do
   dev=$(basename "$(dirname "$(dirname "$d")")")
   data=$(cat "$d/counters/port_xmit_data" 2>/dev/null || echo 0)

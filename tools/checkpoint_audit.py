@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Inventory a GLM-5 safetensors checkpoint and model decode traffic.
+"""Inventory a GLM-5 or Qwen3.8-Flash-Next safetensors checkpoint and model decode traffic.
 
 Only safetensors JSON headers are read. The report separates vision, MTP, and
 base text weights and includes a placement-aware TP critical-rank estimate.
 
+The architecture is read from config.json's `architectures`: the GLM path
+writes docs/checkpoint_budget.md (unchanged since M0); the Qwen4Exp path
+(2026-09-09, the Qwen plan's Q0) writes docs/qwen38_checkpoint_budget.md with
+the placement formulas of docs/qwen38_flash_next_plan.md §2.1 evaluated at
+TP=2 and TP=4.
+
 Usage:
-  python3 tools/checkpoint_audit.py [model_dir]
+  python3 tools/checkpoint_audit.py [model_dir] [--world N]
 """
 
 from __future__ import annotations
@@ -191,6 +197,9 @@ def audit(root: Path, world: int, bandwidth_gbps: float) -> tuple[dict, str]:
         raise ValueError("world and bandwidth must be positive")
     snapshot = resolve_snapshot(root)
     config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
+    arch = (config.get("architectures") or [""])[0]
+    if arch.startswith("Qwen4Exp"):
+        return audit_qwen(root, snapshot, config, world, bandwidth_gbps)
     text_config = config["text_config"]
     layer_types = text_config["layer_types"]
     if len(layer_types) != int(text_config["num_hidden_layers"]):
@@ -424,6 +433,449 @@ def audit(root: Path, world: int, bandwidth_gbps: float) -> tuple[dict, str]:
     return summary, "\n".join(lines) + "\n"
 
 
+
+# ---------------------------------------------------------------------------
+# Qwen3.8-Flash-Next (Qwen4ExpForConditionalGeneration), 2026-09-09.
+# ---------------------------------------------------------------------------
+
+QWEN_LAYER_RE = re.compile(r"^model\.language_model\.layers\.(\d+)\.(.+)$")
+QWEN_MTP_RE = re.compile(r"^mtp\.(.+)$")
+QWEN_HC_RE = re.compile(r"(^|\.)(attn_hyper_connection|mlp_hyper_connection|hyper_connection_mixer)\.")
+
+
+def classify_qwen(name: str) -> str:
+    """Mutually exclusive storage/traffic class for a Qwen4Exp tensor.
+
+    The MTP head keeps its own class so the base decode step and the MTP
+    replay are budgeted separately; inside it the same module names apply.
+    """
+    if name.startswith("model.visual."):
+        return "vision"
+    if name == "lm_head.weight":
+        return "lm_head"
+    if name.startswith("model.language_model.embed_tokens."):
+        return "embed"
+    if name.startswith("model.language_model.hyper_connection_mixer."):
+        return "gr"
+    if QWEN_MTP_RE.match(name):
+        return "mtp"
+    match = QWEN_LAYER_RE.match(name)
+    if not match:
+        return "other"
+    tail = match.group(2)
+    if ".experts." in tail:
+        return "routed_expert"
+    if tail.startswith("mlp.shared_expert."):
+        return "shared_expert"
+    if tail.startswith("mlp.gate.") or tail.startswith("mlp.shared_expert_gate."):
+        return "router"
+    if QWEN_HC_RE.search(tail):
+        return "gr"
+    if tail.startswith("ple.ple_embedding.ngram_embedding."):
+        return "ple_table"
+    if tail.startswith("ple."):
+        return "ple"
+    if tail.startswith("self_attn.indexer."):
+        return "qsa_indexer"
+    if tail.startswith("self_attn.q_proj.") or tail.startswith("self_attn.o_proj."):
+        return "qsa_qo"
+    if tail.startswith("self_attn.k_proj.") or tail.startswith("self_attn.v_proj."):
+        return "qsa_kv"
+    if tail.startswith("self_attn."):
+        return "norm"
+    if tail.startswith("linear_attn.norm."):
+        return "norm"
+    if tail.startswith("linear_attn."):
+        return "gdn"
+    return "other"
+
+
+def _is_prime(value: int) -> bool:
+    if value < 2:
+        return False
+    if value % 2 == 0:
+        return value == 2
+    for divisor in range(3, math.isqrt(value) + 1, 2):
+        if value % divisor == 0:
+            return False
+    return True
+
+
+def qwen_ngram_geometry(text_config: dict) -> dict:
+    """The n-gram table's head sizes from config alone (the reference's
+    `_find_nth_prime_after`): the h-th head's vocabulary is the (h+1)-th prime
+    after ngram_vocab_size_base - 1; the total is padded to the divisor."""
+    heads = (int(text_config["ngram_size"]) - 1) * int(text_config["heads_per_ngram"])
+    base = int(text_config["ngram_vocab_size_base"])
+    divisor = int(text_config["make_ngram_vocab_size_divisible_by"])
+    sizes: list[int] = []
+    prime = base - 1
+    for _head in range(heads):
+        prime += 1
+        while not _is_prime(prime):
+            prime += 1
+        sizes.append(prime)
+    total = sum(sizes)
+    padded = math.ceil(total / divisor) * divisor
+    return {"heads": heads, "sizes": sizes, "total": total, "padded": padded}
+
+
+def qwen_rank_bytes(class_bytes: dict[str, int], per_token: dict[str, float],
+                    world: int, gr_sliced: bool) -> dict[str, float]:
+    """Per-rank decode bytes per token at world `world`, the §2.1 placement:
+    sharded classes /W, one kv head per rank (k/v halves for W >= 2), the
+    replicated set (router, indexer, GR unless sliced, PLE norms/conv)."""
+    kv_div = 2 if world >= 2 else 1
+    out = {
+        "routed_expert": per_token["routed_expert"] / world,
+        "gdn": per_token["gdn"] / world,
+        "gr": per_token["gr"] / (world if gr_sliced else 1),
+        "lm_head": per_token["lm_head"] / world,
+        "qsa_qo": per_token["qsa_qo"] / world,
+        "qsa_kv": per_token["qsa_kv"] / kv_div,
+        "qsa_indexer": per_token["qsa_indexer"],
+        "shared_expert": per_token["shared_expert"] / world,
+        "router": per_token["router"],
+        "ple": per_token["ple"] / world,
+        "ple_table_rows": per_token["ple_table_rows"] / world,
+    }
+    out["total"] = sum(out.values())
+    return out
+
+
+def audit_qwen(root: Path, snapshot: Path, config: dict, world: int,
+               bandwidth_gbps: float) -> tuple[dict, str]:
+    text_config = config["text_config"]
+    layer_types = text_config["layer_types"]
+    num_layers = int(text_config["num_hidden_layers"])
+    if len(layer_types) != num_layers:
+        raise ValueError("layer_types does not match num_hidden_layers")
+    experts = int(text_config["num_experts"])
+    topk = int(text_config["num_experts_per_tok"])
+    hidden = int(text_config["hidden_size"])
+    hc_count = int(text_config["hc_count"])
+    ngram = qwen_ngram_geometry(text_config)
+    ple_embed_dim = int(text_config.get("ple_embed_dim") or hidden)
+    head_dim_per_ngram = ple_embed_dim // ngram["heads"]
+
+    index = json.loads(
+        (snapshot / "model.safetensors.index.json").read_text(encoding="utf-8")
+    )
+    weight_map = index["weight_map"]
+    files = sorted(set(weight_map.values()))
+    tensors: dict[str, tuple[str, str, tuple[int, ...]]] = {}
+    for filename in files:
+        for name, meta in read_header(snapshot / filename).items():
+            if name == "__metadata__":
+                continue
+            if name in tensors:
+                raise ValueError(f"duplicate tensor in safetensors headers: {name}")
+            if weight_map.get(name) != filename:
+                raise ValueError(
+                    f"index maps {name} to {weight_map.get(name)!r}, not {filename!r}"
+                )
+            tensors[name] = (
+                filename,
+                meta["dtype"],
+                tuple(int(value) for value in meta.get("shape", [])),
+            )
+    if set(tensors) != set(weight_map):
+        missing = set(weight_map) - set(tensors)
+        extra = set(tensors) - set(weight_map)
+        raise ValueError(
+            f"index/header mismatch: missing={len(missing)} extra={len(extra)}"
+        )
+
+    dt_bytes = dict(DT_BYTES)
+    dt_bytes["I64"] = 8
+    class_bytes: dict[str, int] = defaultdict(int)
+    class_count: dict[str, int] = defaultdict(int)
+    dtype_bytes: dict[str, int] = defaultdict(int)
+    unmatched: list[tuple[str, str, tuple[int, ...]]] = []
+    inventory: dict[str, dict] = {}
+    total = 0
+    for name, (filename, dtype, shape) in sorted(tensors.items()):
+        if dtype not in dt_bytes:
+            raise ValueError(f"unsupported dtype {dtype} for {name}")
+        size = numel(shape) * dt_bytes[dtype]
+        tensor_class = classify_qwen(name)
+        class_bytes[tensor_class] += size
+        class_count[tensor_class] += 1
+        dtype_bytes[dtype] += size
+        total += size
+        inventory[name] = {
+            "file": filename,
+            "dtype": dtype,
+            "shape": list(shape),
+            "class": tensor_class,
+            "nbytes": size,
+        }
+        if tensor_class == "other":
+            unmatched.append((name, dtype, shape))
+
+    # FP8 contract: every E4M3 expert matrix carries a BF16 weight_scale_inv on
+    # the ceil(dim/128) grid (the release's block 128x128); the n-gram shards
+    # share one BF16 per-tensor weight_scale and are the only other E4M3.
+    fp8_weights = [
+        (name, shape)
+        for name, (_filename, dtype, shape) in tensors.items()
+        if dtype == "F8_E4M3" and name.endswith(".weight")
+    ]
+    invalid_scales: list[str] = []
+    table_shards: list[tuple[str, tuple[int, ...]]] = []
+    for name, shape in fp8_weights:
+        if ".ngram_embedding.shard_" in name:
+            table_shards.append((name, shape))
+            continue
+        scale = tensors.get(f"{name}_scale_inv")
+        if len(shape) != 2 or scale is None:
+            invalid_scales.append(name)
+            continue
+        _scale_file, scale_dtype, scale_shape = scale
+        expected_shape = tuple(math.ceil(dimension / 128) for dimension in shape)
+        if scale_dtype != "BF16" or scale_shape != expected_shape:
+            invalid_scales.append(name)
+    if invalid_scales:
+        raise ValueError(
+            f"{len(invalid_scales)} FP8 weights have missing/invalid 128x128 BF16 "
+            f"scales; first={invalid_scales[0]}"
+        )
+    table_rows = sum(shape[0] for _name, shape in table_shards)
+    table_widths = {shape[1] for _name, shape in table_shards}
+    if table_widths != {head_dim_per_ngram}:
+        raise ValueError(f"n-gram shard width {table_widths} != {head_dim_per_ngram}")
+    if table_rows != ngram["padded"]:
+        raise ValueError(
+            f"n-gram shards hold {table_rows} rows; config derives {ngram['padded']}"
+        )
+    split_parts = int(text_config.get("split_ngram_parts", 512))
+    if len(table_shards) != split_parts:
+        raise ValueError(f"{len(table_shards)} n-gram shards; config says {split_parts}")
+    table_scale_names = [
+        name for name in tensors
+        if name.endswith(".ngram_embedding.weight_scale")
+    ]
+    if len(table_scale_names) != 1 or tensors[table_scale_names[0]][1] != "BF16":
+        raise ValueError("n-gram table: expected exactly one BF16 weight_scale")
+
+    routed_layers = validate_expert_geometry(inventory, experts)
+    if routed_layers != num_layers:
+        raise ValueError(f"{routed_layers} routed layers; config has {num_layers}")
+
+    # Per-token bytes of the full model (batch 1), before placement.
+    per_token = {
+        "routed_expert": class_bytes["routed_expert"] * topk / experts,
+        "gdn": float(class_bytes["gdn"]),
+        "gr": float(class_bytes["gr"]),
+        "lm_head": float(class_bytes["lm_head"]),
+        "qsa_qo": float(class_bytes["qsa_qo"]),
+        "qsa_kv": float(class_bytes["qsa_kv"]),
+        "qsa_indexer": float(class_bytes["qsa_indexer"]),
+        "shared_expert": float(class_bytes["shared_expert"]),
+        "router": float(class_bytes["router"]),
+        "ple": float(class_bytes["ple"]),
+        "ple_table_rows": float(ngram["heads"] * head_dim_per_ngram),
+    }
+    per_token["total"] = sum(per_token.values())
+    worlds = sorted({2, 4, world})
+    ranks = {w: qwen_rank_bytes(class_bytes, per_token, w, False) for w in worlds}
+    ranks_sliced = {w: qwen_rank_bytes(class_bytes, per_token, w, True) for w in worlds}
+
+    # MTP: the replay adds the head's own layer (its experts at top-k, its
+    # attention, GR sites, fc projections) on top of the verify rows.
+    mtp_bytes: dict[str, int] = defaultdict(int)
+    for name, meta in inventory.items():
+        if meta["class"] != "mtp":
+            continue
+        tail = QWEN_MTP_RE.match(name).group(1)
+        if ".experts." in tail:
+            mtp_bytes["routed_expert"] += meta["nbytes"]
+        elif "hyper_connection" in tail:
+            mtp_bytes["gr"] += meta["nbytes"]
+        elif ".indexer." in tail:
+            mtp_bytes["qsa_indexer"] += meta["nbytes"]
+        elif ".k_proj." in tail or ".v_proj." in tail:
+            mtp_bytes["qsa_kv"] += meta["nbytes"]
+        elif ".q_proj." in tail or ".o_proj." in tail:
+            mtp_bytes["qsa_qo"] += meta["nbytes"]
+        elif tail.startswith("fc_"):
+            mtp_bytes["fc"] += meta["nbytes"]
+        elif "shared_expert." in tail:
+            mtp_bytes["shared_expert"] += meta["nbytes"]
+        elif "mlp.gate." in tail or "shared_expert_gate" in tail:
+            mtp_bytes["router"] += meta["nbytes"]
+        else:
+            mtp_bytes["norm"] += meta["nbytes"]
+
+    def mtp_rank(w: int) -> float:
+        return (
+            mtp_bytes["routed_expert"] * topk / experts / w
+            + mtp_bytes["qsa_qo"] / w + mtp_bytes["qsa_kv"] / 2
+            + mtp_bytes["qsa_indexer"] + mtp_bytes["gr"] + mtp_bytes["fc"]
+            + mtp_bytes["shared_expert"] / w + mtp_bytes["router"]
+        )
+
+    # Resident bytes per rank: the sharded classes /W, the replicated set
+    # once, the n-gram table /W (head-sharded), embeddings vocab-sharded,
+    # the MTP head by the same rules, vision excluded.
+    def resident_rank(w: int) -> dict[str, float]:
+        out = {
+            "routed_expert": class_bytes["routed_expert"] / w,
+            "gdn": class_bytes["gdn"] / w,
+            "qsa": (class_bytes["qsa_qo"]) / w + class_bytes["qsa_kv"] / 2
+                   + class_bytes["qsa_indexer"],
+            "shared_expert": class_bytes["shared_expert"] / w,
+            "router": float(class_bytes["router"]),
+            "gr": float(class_bytes["gr"]),
+            "ple": float(class_bytes["ple"]),
+            "ple_table": class_bytes["ple_table"] / w,
+            "embed": class_bytes["embed"] / w,
+            "lm_head": class_bytes["lm_head"] / w,
+            "norm": float(class_bytes["norm"]),
+            "mtp": (mtp_bytes["routed_expert"] + mtp_bytes["qsa_qo"]
+                    + mtp_bytes["shared_expert"]) / w
+                   + mtp_bytes["qsa_kv"] / 2 + mtp_bytes["qsa_indexer"]
+                   + mtp_bytes["gr"] + mtp_bytes["fc"] + mtp_bytes["router"]
+                   + mtp_bytes["norm"],
+        }
+        out["total"] = sum(out.values())
+        return out
+
+    resident = {w: resident_rank(w) for w in worlds}
+
+    summary = {
+        "arch": "qwen4_exp",
+        "model": model_label(root, snapshot),
+        "files": len(files),
+        "tensors": len(tensors),
+        "total_bytes": total,
+        "class_bytes": dict(class_bytes),
+        "class_count": dict(class_count),
+        "dtype_bytes": dict(dtype_bytes),
+        "per_token_bytes": per_token,
+        "rank_bytes": {str(w): ranks[w] for w in worlds},
+        "rank_bytes_gr_sliced": {str(w): ranks_sliced[w] for w in worlds},
+        "resident_rank_bytes": {str(w): resident[w] for w in worlds},
+        "mtp_rank_bytes": {str(w): mtp_rank(w) for w in worlds},
+        "ngram": ngram,
+        "world": world,
+        "bandwidth_gbps": bandwidth_gbps,
+        "unmatched": len(unmatched),
+        "fp8_scaled_weights": len(fp8_weights) - len(table_shards),
+        "inventory": inventory,
+    }
+
+    def ms(nbytes: float) -> float:
+        return nbytes / (bandwidth_gbps * 1e9) * 1000
+
+    lines = [
+        "# Qwen3.8-Flash-Next Checkpoint Budget Report",
+        "",
+        f"- Model revision: `{summary['model']}`",
+        f"- Files: {len(files)} shards; tensors: {len(tensors):,}",
+        f"- Total weights: **{total / 1e9:.2f} GB ({total / 2**30:.2f} GiB)**",
+        "- Generated by `tools/checkpoint_audit.py`; no tensor payloads were read.",
+        f"- Layers: {num_layers} ({layer_types.count('linear_attention')} GDN, "
+        f"{num_layers - layer_types.count('linear_attention')} QSA); experts {experts} "
+        f"top-{topk}; hidden {hidden}; {hc_count} residual branches.",
+        "",
+        "## Storage inventory",
+        "",
+        "| class | tensors | GB | share |",
+        "|---|---:|---:|---:|",
+    ]
+    for name, size in sorted(class_bytes.items(), key=lambda item: -item[1]):
+        lines.append(
+            f"| {name} | {class_count[name]:,} | {size / 1e9:.3f} | "
+            f"{100 * size / total:.2f}% |"
+        )
+    lines.extend(["", "## Storage by dtype", "", "| dtype | GB |", "|---|---:|"])
+    for dtype, size in sorted(dtype_bytes.items(), key=lambda item: -item[1]):
+        lines.append(f"| {dtype} | {size / 1e9:.3f} |")
+
+    lines.extend([
+        "",
+        "## N-gram table geometry (derived from config, checked against the headers)",
+        "",
+        f"- {ngram['heads']} hash heads, per-head vocabularies the primes after "
+        f"{int(text_config['ngram_vocab_size_base']) - 1}: {ngram['sizes'][0]} … {ngram['sizes'][-1]}.",
+        f"- Total rows {ngram['total']:,}, padded to {ngram['padded']:,}; the "
+        f"{len(table_shards)} shards hold exactly that many rows of {head_dim_per_ngram} "
+        f"E4M3 with one BF16 `weight_scale`.",
+        "",
+        "## Decode traffic model (batch size 1)",
+        "",
+        "Vision, the input embedding rows and the MTP head are excluded from the base "
+        "step. Placement follows docs/qwen38_flash_next_plan.md §2.1: sharded classes "
+        "divide by W, one kv head per rank, the router / indexer / GR / PLE norms "
+        "replicated. `gr sliced` is the `gr_placement = sliced` variant of D3.",
+        "",
+        "| class | full model MB/token | " + " | ".join(f"TP={w} MB/rank" for w in worlds) + " |",
+        "|---|---:|" + "---:|" * len(worlds),
+    ])
+    for key in ("routed_expert", "gdn", "gr", "lm_head", "qsa_qo", "qsa_kv",
+                "qsa_indexer", "shared_expert", "router", "ple", "ple_table_rows"):
+        lines.append(
+            f"| {key} | {per_token[key] / 1e6:,.1f} | "
+            + " | ".join(f"{ranks[w][key] / 1e6:,.1f}" for w in worlds) + " |"
+        )
+    lines.append(
+        f"| **total** | **{per_token['total'] / 1e6:,.1f}** | "
+        + " | ".join(f"**{ranks[w]['total'] / 1e6:,.1f}**" for w in worlds) + " |"
+    )
+    lines.append(
+        f"| floor at {bandwidth_gbps:.0f} GB/s | | "
+        + " | ".join(f"**{ms(ranks[w]['total']):.1f} ms**" for w in worlds) + " |"
+    )
+    lines.append(
+        "| gr sliced: total / floor | | "
+        + " | ".join(f"{ranks_sliced[w]['total'] / 1e6:,.1f} / {ms(ranks_sliced[w]['total']):.1f} ms" for w in worlds) + " |"
+    )
+    lines.append(
+        "| replicated share (gr replicated) | | "
+        + " | ".join(
+            f"{100 * (ranks[w]['gr'] + ranks[w]['router'] + ranks[w]['qsa_indexer']) / ranks[w]['total']:.0f}%"
+            for w in worlds) + " |"
+    )
+    lines.append(
+        "| MTP head per replay | | "
+        + " | ".join(f"{mtp_rank(w) / 1e6:,.1f} MB, +{ms(mtp_rank(w)):.2f} ms" for w in worlds) + " |"
+    )
+    lines.extend([
+        "",
+        "This is a weight-bandwidth floor: collectives (96 boundary folds per token, "
+        "plus 97 more when GR is sliced), the QSA index scan at long context, state "
+        "traffic and kernels add to it.",
+        "",
+        "## Resident bytes per rank",
+        "",
+        "| class | " + " | ".join(f"TP={w} GiB" for w in worlds) + " |",
+        "|---|" + "---:|" * len(worlds),
+    ])
+    for key in ("routed_expert", "ple_table", "gdn", "qsa", "gr", "embed", "lm_head",
+                "mtp", "shared_expert", "router", "ple", "norm"):
+        lines.append(f"| {key} | " + " | ".join(f"{resident[w][key] / 2**30:.2f}" for w in worlds) + " |")
+    lines.append("| **total** | " + " | ".join(f"**{resident[w]['total'] / 2**30:.1f}**" for w in worlds) + " |")
+    lines.extend([
+        "",
+        "The vision tower "
+        f"({class_bytes['vision'] / 2**30:.2f} GiB) is not loaded. The CUDA context "
+        "(~14 GiB), the KV pool (~13 KB per token per rank), the prefix cache and the "
+        "bus staging come on top; the memory plan is the authority.",
+        "",
+        "## Reconciliation and exclusions",
+        "",
+        f"- Unmatched tensors: **{len(unmatched)}**.",
+        f"- FP8 scale contract: **{summary['fp8_scaled_weights']:,}** E4M3 matrices carry a "
+        "BF16 `weight_scale_inv` on the exact 128×128 grid; the n-gram shards carry the "
+        "per-tensor scale.",
+        f"- Routed layers with all {experts} equal-size experts: {routed_layers}.",
+    ])
+    if unmatched:
+        lines.extend(["", f"## First {min(80, len(unmatched))} unmatched names", ""])
+        lines.extend(f"- `{name}` [{dtype}] {shape}" for name, dtype, shape in unmatched[:80])
+    return summary, "\n".join(lines) + "\n"
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
@@ -437,11 +889,12 @@ def main(argv: list[str] | None = None) -> int:
         docs_dir = REPO_ROOT / "docs"
         artifacts_dir.mkdir(exist_ok=True)
         docs_dir.mkdir(exist_ok=True)
-        (artifacts_dir / "checkpoint_inventory.json").write_text(
+        stem = "qwen38_checkpoint" if summary.get("arch") == "qwen4_exp" else "checkpoint"
+        (artifacts_dir / f"{stem}_inventory.json").write_text(
             json.dumps(summary["inventory"], separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
-        (docs_dir / "checkpoint_budget.md").write_text(report, encoding="utf-8")
+        (docs_dir / f"{stem}_budget.md").write_text(report, encoding="utf-8")
     print(report, end="")
     return 0
 

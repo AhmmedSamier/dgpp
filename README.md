@@ -1,7 +1,8 @@
 # DGPP
 
 DGPP is a from-scratch C++/CUDA inference engine that serves
-`unsloth/GLM-5.3-Flash-FP8` across four NVIDIA DGX Spark (GB10) systems over a
+`unsloth/GLM-5.3-Flash-FP8` (and, on the same engine, `Qwen/Qwen3.8-Flash-Next-FP8`
+and `nvidia/GLM-4.7-NVFP4`) across four NVIDIA DGX Spark (GB10) systems over a
 RoCE fabric, behind an OpenAI-compatible HTTP API. Nothing sits underneath
 it: the CUDA kernels, the RDMA collective bus, the tokenizer, the Jinja
 chat-template interpreter, the scheduler, the prefix cache and the service
@@ -237,6 +238,8 @@ config.
 | `docs/measurements.md` | the curated platform measurements from the first milestones |
 | `docs/checkpoint_budget.md` | the checkpoint's generated inventory and budget |
 | `docs/batched_mtp_graph_stall.md` | a worked stall investigation, from symptom to root cause |
+| `docs/qwen38_flash_next_plan.md` | the second family: Qwen3.8-Flash-Next's architecture, placement, decisions and progress |
+| `docs/glm47_plan.md` | the third family: GLM-4.7 (NVFP4) — architecture, the modelopt format contract, decisions, gates and status |
 | `DESIGN.md` | the architecture and every contract, kept as built |
 | `PLAN.md` | the milestones, their exit gates and status |
 | `benchmarks/README.md`, `benchmarks/results/` | the probes, and the dated engineering record of every measurement and fix |

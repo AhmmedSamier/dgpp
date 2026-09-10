@@ -8,17 +8,23 @@
 
 #include "common/log.hpp"
 #include "loaders/minijson.hpp"
+#include "text/unicode_normalize.hpp"
 #include "text/unicode_tables.hpp"
 
 namespace dgpp::text {
 namespace {
 
-// The pinned Split pattern (tokenizer.json pre_tokenizer[0]). The scanner
-// below hardcodes exactly this regex; any other pattern is refused at
+// The pinned Split patterns (tokenizer.json pre_tokenizer[0]). The scanner
+// below hardcodes exactly these regexes; any other pattern is refused at
 // load.
 constexpr const char* kSplitPattern =
     "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}"
     "| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+// The Qwen3.8-Flash-Next pattern: letter runs admit marks, numbers split
+// one per pretoken, marks stay out of the punctuation class.
+constexpr const char* kSplitPatternQwen =
+    "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}"
+    "| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 
 [[noreturn]] void reject(const std::string& what) {
   throw std::runtime_error("glm_tokenizer: " + what);
@@ -113,10 +119,12 @@ void build_byte_level_maps(uint32_t* byte_to_cp, int32_t* cp_to_byte) {
 //                                    prefix); the full run at end of text
 //   A7 \s+                           the remaining whitespace run
 // ---------------------------------------------------------------------------
+// `qwen` selects the Qwen3.8 pattern's three differences (A2 admits marks
+// in the run, A3 is one number, A4's class excludes marks).
 class SplitScanner {
  public:
-  SplitScanner(std::string_view text, std::vector<std::string_view>* out)
-      : text_(text), out_(out) {
+  SplitScanner(std::string_view text, std::vector<std::string_view>* out, bool qwen)
+      : text_(text), out_(out), qwen_(qwen) {
     // Decode codepoint boundaries once. Strict UTF-8: a chat prompt
     // arrives as valid UTF-8; anything else is a caller bug, not a
     // tokenization ambiguity.
@@ -175,9 +183,12 @@ class SplitScanner {
     return (cp >= 'A' && cp <= 'Z') ? cp + 32 : cp;
   }
   bool letter(size_t i) const { return unicode::is_letter(cps_[i]); }
+  bool mark(size_t i) const { return qwen_ && unicode::is_mark(cps_[i]); }
+  // The letter-run class: \p{L} (GLM) or [\p{L}\p{M}] (Qwen).
+  bool run_char(size_t i) const { return letter(i) || mark(i); }
   bool number(size_t i) const { return unicode::is_number(cps_[i]); }
   bool ws(size_t i) const { return unicode::is_white_space(cps_[i]); }
-  bool punct(size_t i) const { return !ws(i) && !letter(i) && !number(i); }
+  bool punct(size_t i) const { return !ws(i) && !letter(i) && !number(i) && !mark(i); }
   bool eos(size_t i) const { return i >= cps_.size(); }
   uint32_t cp(size_t i) const { return eos(i) ? 0 : cps_[i]; }
 
@@ -232,23 +243,24 @@ class SplitScanner {
     size_t end = 0;
     if (match_contraction(i, &end)) return end;
 
-    // A2: optional prefix + letter run.
-    if (!eos(i) && letter(i)) {
+    // A2: optional prefix + letter run (Qwen: a letter-or-mark run).
+    if (!eos(i) && run_char(i)) {
       size_t j = i + 1;
-      while (!eos(j) && letter(j)) ++j;
+      while (!eos(j) && run_char(j)) ++j;
       return j;
     }
     if (!eos(i) && !letter(i) && !number(i) && cp(i) != '\r' && cp(i) != '\n' &&
-        !eos(i + 1) && letter(i + 1)) {
+        !eos(i + 1) && run_char(i + 1)) {
       size_t j = i + 2;
-      while (!eos(j) && letter(j)) ++j;
+      while (!eos(j) && run_char(j)) ++j;
       return j;
     }
 
-    // A3: 1..3 numbers.
+    // A3: 1..3 numbers (Qwen: exactly one).
     if (!eos(i) && number(i)) {
       size_t j = i + 1;
-      while (j < i + 3 && !eos(j) && number(j)) ++j;
+      if (!qwen_)
+        while (j < i + 3 && !eos(j) && number(j)) ++j;
       return j;
     }
 
@@ -273,6 +285,7 @@ class SplitScanner {
 
   std::string_view text_;
   std::vector<std::string_view>* out_;
+  bool qwen_ = false;
   std::vector<uint32_t> cps_;
   std::vector<size_t> starts_;  // size = cps+1 (end sentinel)
 };
@@ -295,9 +308,15 @@ Tokenizer Tokenizer::load(const std::string& path) {
   t.doc_ = minijson::parse(t.json_buf_);
   const minijson::Value& root = t.doc_.root;
 
-  // --- normalizer: none -----------------------------------------------
-  if (const minijson::Value* n = root.find("normalizer"))
-    if (!n->is_null()) reject("normalizer is not null (none implemented)");
+  // --- normalizer: none, or NFC ----------------------------------------
+  if (const minijson::Value* n = root.find("normalizer")) {
+    if (!n->is_null()) {
+      const minijson::Value* ty = n->find("type");
+      if (!ty || !ty->is_string() || ty->as_string() != "NFC")
+        reject("normalizer is neither null nor NFC (the two implemented)");
+      t.nfc_ = true;
+    }
+  }
 
   // --- pre_tokenizer: the pinned Sequence ------------------------------
   const minijson::Value* pre = root.find("pre_tokenizer");
@@ -310,9 +329,12 @@ Tokenizer Tokenizer::load(const std::string& path) {
       want_string(pres[1], "type", "pre_tokenizer[1]") != "ByteLevel")
     reject("pre_tokenizer is not [Split, ByteLevel]");
   const minijson::Value& pattern = field(pres[0], "pattern", "Split");
-  if (want_string(pattern, "Regex", "Split.pattern") != kSplitPattern)
-    reject("Split pattern differs from the pinned regex (the scanner "
-           "hardcodes it — update the scanner or the checkpoint)");
+  const std::string_view regex = want_string(pattern, "Regex", "Split.pattern");
+  if (regex == kSplitPattern) t.pattern_ = 0;
+  else if (regex == kSplitPatternQwen) t.pattern_ = 1;
+  else
+    reject("Split pattern differs from both pinned regexes (the scanner "
+           "hardcodes them — update the scanner or the checkpoint)");
   if (want_string(pres[0], "behavior", "Split") != "Isolated")
     reject("Split behavior is not Isolated");
   if (want_bool(pres[1], "use_regex", "ByteLevel"))
@@ -327,12 +349,24 @@ Tokenizer Tokenizer::load(const std::string& path) {
     reject("decoder is not ByteLevel");
 
   // --- post_processor: offsets-only shapes -----------------------------
+  // ByteLevel (GLM-5.3, Qwen) or a Sequence of ByteLevel processors
+  // (GLM-4.7): both touch offsets only, never the ids.
   if (const minijson::Value* pp = root.find("post_processor")) {
     if (!pp->is_null()) {
       const minijson::Value* ty = pp->find("type");
-      if (!ty || ty->as_string() != "ByteLevel")
-        reject("post_processor is neither null nor ByteLevel "
-               "(offsets-only) — special-token injection is not "
+      bool offsets_only = ty && ty->as_string() == "ByteLevel";
+      if (ty && ty->as_string() == "Sequence") {
+        const minijson::Value* procs = pp->find("processors");
+        offsets_only = procs && procs->is_array();
+        if (offsets_only)
+          for (const auto& proc : procs->items()) {
+            const minijson::Value* pt = proc.find("type");
+            if (!pt || pt->as_string() != "ByteLevel") offsets_only = false;
+          }
+      }
+      if (!offsets_only)
+        reject("post_processor is neither null, ByteLevel nor a Sequence of "
+               "ByteLevel (offsets-only) — special-token injection is not "
                "implemented at encode");
     }
   }
@@ -341,15 +375,16 @@ Tokenizer Tokenizer::load(const std::string& path) {
   const minijson::Value* model = root.find("model");
   if (!model || want_string(*model, "type", "model") != "BPE")
     reject("model.type is not BPE");
-  if (!want_bool(*model, "ignore_merges", "model"))
-    reject("model.ignore_merges must be true (the whole-word vocab check "
-           "is part of the pinned semantics)");
+  t.ignore_merges_ = want_bool(*model, "ignore_merges", "model");
   if (want_bool(*model, "byte_fallback", "model"))
     reject("model.byte_fallback must be false");
-  for (const char* f : {"unk_token", "continuing_subword_prefix",
-                        "end_of_word_suffix"}) {
+  if (const minijson::Value* v = model->find("unk_token"); v && !v->is_null())
+    reject("model.unk_token must be null");
+  // The affixes: null (GLM) or the empty string (Qwen) — both "none".
+  for (const char* f : {"continuing_subword_prefix", "end_of_word_suffix"}) {
     const minijson::Value* v = model->find(f);
-    if (v && !v->is_null()) reject(std::string("model.") + f + " must be null");
+    if (v && !v->is_null() && !(v->is_string() && v->as_string().empty()))
+      reject(std::string("model.") + f + " must be null or empty");
   }
 
   // --- vocab (dense id coverage validated below) -----------------------
@@ -368,13 +403,25 @@ Tokenizer Tokenizer::load(const std::string& path) {
   const auto& merges = field(*model, "merges", "model").items();
   t.merge_rank_.reserve(merges.size());
   for (size_t r = 0; r < merges.size(); ++r) {
-    const auto& pair = merges[r].items();
-    if (pair.size() != 2 || !pair[0].is_string() || !pair[1].is_string())
-      reject("malformed merge entry at rank " + std::to_string(r));
-    if (!t.merge_rank_.emplace(MergeKey{pair[0].as_string(),
-                                       pair[1].as_string()},
-                               static_cast<uint32_t>(r))
-             .second)
+    // Two formats: ["first", "second"] (GLM's file) or "first second"
+    // (Qwen's — one space; ByteLevel symbols never contain a space).
+    std::string_view first, second;
+    if (merges[r].is_string()) {
+      const std::string_view m = merges[r].as_string();
+      const size_t sp = m.find(' ');
+      if (sp == std::string_view::npos || sp == 0 || sp + 1 >= m.size() ||
+          m.find(' ', sp + 1) != std::string_view::npos)
+        reject("malformed merge string at rank " + std::to_string(r));
+      first = m.substr(0, sp);
+      second = m.substr(sp + 1);
+    } else {
+      const auto& pair = merges[r].items();
+      if (pair.size() != 2 || !pair[0].is_string() || !pair[1].is_string())
+        reject("malformed merge entry at rank " + std::to_string(r));
+      first = pair[0].as_string();
+      second = pair[1].as_string();
+    }
+    if (!t.merge_rank_.emplace(MergeKey{first, second}, static_cast<uint32_t>(r)).second)
       reject("duplicate merge pair at rank " + std::to_string(r));
   }
 
@@ -434,10 +481,11 @@ Tokenizer Tokenizer::load(const std::string& path) {
              " — decode-by-id needs the dense base range)");
 
   DGPP_LOG_INFO(
-      "glm_tokenizer: loaded vocab {} merges {} added {} (revision "
-      "0x{:016x})",
+      "tokenizer: loaded vocab {} merges {} added {} (revision 0x{:016x}; "
+      "{} pattern, {}, ignore_merges {})",
       t.vocab_.size(), t.merge_rank_.size(), t.added_tokens_.size(),
-      t.revision_hash_);
+      t.revision_hash_, t.pattern_ == 1 ? "qwen" : "glm", t.nfc_ ? "NFC" : "no normalizer",
+      t.ignore_merges_);
   return t;
 }
 
@@ -479,8 +527,16 @@ std::vector<int64_t> Tokenizer::encode(std::string_view text) const {
 
 void Tokenizer::encode_segment(std::string_view segment,
                                   std::vector<int64_t>* out) const {
+  // The normalizer runs on each added-token-free segment (HF applies it
+  // to the splits the added vocabulary leaves, the tokens themselves
+  // being non-normalized).
+  std::string normalized;
+  if (nfc_ && !unicode::nfc_quick_yes(segment)) {
+    normalized = unicode::nfc(segment);
+    segment = normalized;
+  }
   std::vector<std::string_view> pretokens;
-  SplitScanner scanner(segment, &pretokens);
+  SplitScanner scanner(segment, &pretokens, pattern_ == 1);
   scanner.run();
   for (const std::string_view p : pretokens) {
     // ByteLevel map: each BYTE -> its alphabet codepoint (UTF-8; every
@@ -506,10 +562,13 @@ void Tokenizer::encode_segment(std::string_view segment,
 
 void Tokenizer::encode_word(std::string_view mapped,
                                std::vector<int64_t>* out) const {
-  // ignore_merges: a whole-word vocab hit skips the merge loop entirely.
-  if (const auto it = vocab_.find(mapped); it != vocab_.end()) {
-    out->push_back(it->second);
-    return;
+  // ignore_merges: a whole-word vocab hit skips the merge loop entirely
+  // (GLM); with it off the merges always run (Qwen).
+  if (ignore_merges_) {
+    if (const auto it = vocab_.find(mapped); it != vocab_.end()) {
+      out->push_back(it->second);
+      return;
+    }
   }
   // Initial symbols: one per mapped codepoint (1-3 UTF-8 bytes each).
   // `owned` holds every merged string for the WHOLE call — reserved once

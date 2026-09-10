@@ -140,6 +140,78 @@ DGPP_TEST(bf16_gemv_real_shapes_match_oracle) {
   }
 }
 
+// The Qwen3.8-Flash-Next decode shapes through the seam at every decode row
+// count (2026-09-09, the real-checkpoint localizer: the T=5 walk — the
+// GEMV family — disagreed with the T=9 walk — cuBLASLt — by 16 % at row 4
+// where the python reference had certified the Lt family): every row of
+// every shape against the fp64 oracle at m = 1..8, bf16 and f32 outputs.
+DGPP_TEST(bf16_gemv_qwen_shapes_every_row_count_matches_oracle) {
+  dgpp::CublasLtGemm gemm;
+  struct Shape { int n, k; const char* what; };
+  const Shape shapes[] = {
+      {320, 10240, "GR down (k=W)"},      {10240, 320, "GR up (k=lowrank)"},
+      {10240, 2560, "GDN qkv / PLE key"},  {6144, 2560, "GDN z / QSA o-width"},
+      {48, 2560, "GDN a/b (n=lv)"},        {2560, 6144, "GDN out / QSA o_proj"},
+      {12288, 2560, "QSA q (24 x 512)"},   {512, 2560, "QSA k/v (2 x 256)"},
+      {640, 2560, "indexer (5 x 128) / shared gate"}, {2560, 640, "shared down"},
+      {2560, 2560, "PLE value / MTP fc"},  {4096, 2560, "lm head slice"},
+  };
+  uint64_t seed = 0x51ull;
+  for (const Shape& sh : shapes) {
+    for (int m = 1; m <= 8; ++m) {
+      Problem p = make_problem(m, sh.n, sh.k, static_cast<size_t>(sh.k), seed++);
+      Device d(p);
+      const auto got = run_bf16(gemm, p, d);
+      const auto want = oracle(p);
+      const auto rep = compare_bf16_vs_oracle(got.data(), want, 2.0, 1e-2);
+      if (rep.mismatches != 0)
+        throw std::runtime_error(std::string(sh.what) + " m=" + std::to_string(m) +
+                                 ": bf16 out off the oracle (" + std::to_string(rep.mismatches) +
+                                 " of " + std::to_string(rep.total) + ", l2 " +
+                                 std::to_string(rep.l2_rel) + ")");
+      if (m == 1 || m == 5 || m == 8)
+        std::printf("[ OK ] %s n=%d k=%d m=%d: l2_rel=%.3g\n", sh.what, sh.n, sh.k, m, rep.l2_rel);
+    }
+    // The f32 output (the head, the shared down) at m = 3.
+    Problem p = make_problem(3, sh.n, sh.k, static_cast<size_t>(sh.k), seed++);
+    Device d(p);
+    check_f32(p, run_f32(gemm, p, d), sh.what);
+  }
+}
+
+// The other side of the seam at the same shapes: cuBLASLt (m > 8) against
+// the fp64 oracle. The real-checkpoint profile (2026-09-09) showed the
+// T=5 and T=9 walks bitwise within their families and 0.3-0.8 % apart at
+// layer 0 — one family is off; the GEMV passed above.
+DGPP_TEST(cublaslt_qwen_shapes_at_prefill_rows_match_oracle) {
+  dgpp::CublasLtGemm gemm;
+  struct Shape { int n, k; const char* what; };
+  const Shape shapes[] = {
+      {320, 10240, "GR down (k=W)"},      {10240, 320, "GR up (k=lowrank)"},
+      {10240, 2560, "GDN qkv / PLE key"},  {6144, 2560, "GDN z"},
+      {48, 2560, "GDN a/b (n=lv)"},        {2560, 6144, "GDN out / QSA o_proj"},
+      {12288, 2560, "QSA q"},              {512, 2560, "QSA k/v"},
+      {640, 2560, "indexer / shared gate"}, {2560, 640, "shared down"},
+      {2560, 2560, "PLE value / MTP fc"},  {4096, 2560, "lm head slice"},
+  };
+  uint64_t seed = 0x77ull;
+  bool ok = true;
+  for (const Shape& sh : shapes) {
+    for (const int m : {9, 12, 16, 72}) {
+      Problem p = make_problem(m, sh.n, sh.k, static_cast<size_t>(sh.k), seed++);
+      Device d(p);
+      const auto got = run_bf16(gemm, p, d);
+      const auto want = oracle(p);
+      const auto rep = compare_bf16_vs_oracle(got.data(), want, 2.0, 1e-2);
+      std::printf("[ %s ] cuBLASLt %s n=%d k=%d m=%d: l2_rel=%.3g mismatches=%ld/%ld\n",
+                  rep.mismatches == 0 ? "OK" : "!!", sh.what, sh.n, sh.k, m, rep.l2_rel, rep.mismatches,
+                  rep.total);
+      if (rep.mismatches != 0) ok = false;
+    }
+  }
+  if (!ok) throw std::runtime_error("cuBLASLt is off the fp64 oracle at a Qwen prefill shape");
+}
+
 DGPP_TEST(bf16_gemv_f32_output_and_strided_activation_view) {
   dgpp::CublasLtGemm gemm;
   // GIVEN the DSA indexer-weights shape (F32 out, n = 32 heads) ...
@@ -225,6 +297,34 @@ DGPP_TEST(bf16_gemv_ragged_n_short_k_and_multi_row) {
 // The dual launch (the KDA layer's f_b/g_b pair) must be BITWISE the two
 // single launches on both outputs, for every row count and both output
 // types, including the strided-activation view and a ragged second n.
+DGPP_TEST(bf16_gemv_multi_matches_four_single_launches_bitwise) {
+  // The GDN's decode shape: four projections off one activation — a wide
+  // one, a medium one and two 12-row ones — in one launch, m = 1..4.
+  dgpp::CublasLtGemm gemm;
+  for (int m = 1; m <= 4; ++m) {
+    const Problem a = make_problem(m, 2560, 2560, 2560, 0x0e00 + m);
+    const Problem b = make_problem(m, 1536, 2560, 2560, 0x0e10 + m);
+    const Problem c = make_problem(m, 12, 2560, 2560, 0x0e20 + m);
+    const Problem d = make_problem(m, 12, 2560, 2560, 0x0e30 + m);
+    Device da(a), db(b), dc(c), dd(d);
+    const std::vector<uint16_t> wa = run_bf16(gemm, a, da), wb = run_bf16(gemm, b, db),
+                                wc = run_bf16(gemm, c, dc), wd = run_bf16(gemm, d, dd);
+    dgpp::Bf16GemvProblem p[4];
+    const Problem* probs[4] = {&a, &b, &c, &d};
+    Device* devs[4] = {&da, &db, &dc, &dd};
+    for (int i = 0; i < 4; ++i) {
+      p[i].act = devs[i]->act; p[i].act_row_stride = probs[i]->act_stride;
+      p[i].weight = devs[i]->w; p[i].out = devs[i]->out; p[i].n = probs[i]->n;
+    }
+    dgpp::launch_bf16_gemv_multi(p, 4, /*out_f32=*/false, m, a.k, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    if (std::memcmp(da.out, wa.data(), wa.size() * 2) != 0 || std::memcmp(db.out, wb.data(), wb.size() * 2) != 0 ||
+        std::memcmp(dc.out, wc.data(), wc.size() * 2) != 0 || std::memcmp(dd.out, wd.data(), wd.size() * 2) != 0)
+      throw std::runtime_error("multi bf16 GEMV differs from four launches (m=" + std::to_string(m) + ")");
+  }
+  std::printf("[ OK ] multi GEMV: four problems bitwise their single launches at m = 1..4\n");
+}
+
 DGPP_TEST(bf16_gemv_dual_matches_two_single_launches_bitwise) {
   dgpp::CublasLtGemm gemm;
   for (int m = 1; m <= 4; ++m) {

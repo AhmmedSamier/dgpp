@@ -1,0 +1,229 @@
+#pragma once
+// Resident weight loader for the Qwen3.8-Flash-Next text model (Q2,
+// 2026-09-09, docs/qwen38_flash_next_plan.md §2.1, D2, D4), on the shared
+// resident layer stream (loaders/resident_stream.hpp, extracted from this
+// loader 2026-09-09): the family supplies its expected-tensor table, its
+// TP geometry, the per-class builders and the globals; the stream owns
+// the bumps, the staging mirror, the resident image, the byte reconciles
+// and the digest. Every layer is built DIRECTLY at this rank's geometry.
+//
+// Placement (every slice a formula in the world size W):
+//   GDN: 16/W key heads and 48/W value heads per rank — in_proj_qkv rows
+//        per segment, the conv channels alike, in_proj_z rows, in_proj_a/b
+//        rows, A_log/dt_bias (widened to F32), out_proj packed columns;
+//        the head norm replicated.
+//   QSA: 24/W query heads (q_proj keeps each head's [q | gate] rows
+//        together), one kv head per rank (its k/v rows; a head shared by
+//        W/2 ranks at W > 2), o_proj packed columns; the q/k norms and the
+//        whole indexer replicated.
+//   MoE: router and shared gate replicated; the shared expert BF16 gate/up
+//        rows and packed down columns at S/W; every routed expert's e4m3
+//        gate/up rows and down columns at I/W on a gcd(128, I/W)-row scale
+//        grid (the parent 128-block's scale replicated: exact).
+//   GR:  every site replicated (measured, D3).
+//   PLE: key/value projections K-sliced to this rank's 16/W hash heads'
+//        columns (packed); norms, conv, buffers and scale replicated. The
+//        n-gram table is NOT a layer: load_ngram_table() puts this rank's
+//        contiguous row range (its heads) into its own device allocation,
+//        straight from the shards through the staging mirror.
+//   Globals: embed replicated (a row gather), lm_head vocab-sharded, the
+//        final mixer and the draft head's own tensors replicated.
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include <cuda_runtime.h>
+
+#include "common/dtypes.hpp"
+#include "loaders/resident_stream.hpp"
+#include "loaders/safetensors.hpp"
+#include "loaders/weight_build.hpp"
+#include "models/qwen/binding.hpp"
+#include "models/qwen/config.hpp"
+#include "models/quant_matrix.hpp"
+
+namespace dgpp {
+
+using QwenResidency = LoaderResidency;
+using QwenHeadSharding = LoaderHeadSharding;
+using QwenReplicatedDigest = ReplicatedDigest;
+
+struct QwenGrResident {
+  const uint16_t* hc_norm = nullptr;  // BF16 [W]
+  const uint16_t* down = nullptr;     // BF16 [r, W]
+  const uint16_t* up = nullptr;       // BF16 [W, r]
+  const uint16_t* inject = nullptr;   // BF16 [n, W]
+};
+
+struct QwenGdnResident {
+  const uint16_t* in_proj_qkv = nullptr;  // BF16 [lk*dk | lk*dk | lv*dv, hidden]
+  const uint16_t* conv = nullptr;         // BF16 [lk*dk + lk*dk + lv*dv, width]
+  const uint16_t* in_proj_z = nullptr;    // BF16 [lv*dv, hidden]
+  const uint16_t* in_proj_a = nullptr;    // BF16 [lv, hidden]
+  const uint16_t* in_proj_b = nullptr;    // BF16 [lv, hidden]
+  const float* a_log = nullptr;           // F32 [lv]
+  const float* dt_bias = nullptr;         // F32 [lv]
+  const uint16_t* norm = nullptr;         // BF16 [dv]
+  const uint16_t* out_proj = nullptr;     // BF16 [hidden, lv*dv] (packed columns)
+  int local_key_heads = 0;
+  int local_value_heads = 0;
+};
+
+struct QwenQsaResident {
+  const uint16_t* q_proj = nullptr;         // BF16 [lh * 2 * d, hidden]
+  const uint16_t* k_proj = nullptr;         // BF16 [lkv * d, hidden]
+  const uint16_t* v_proj = nullptr;         // BF16 [lkv * d, hidden]
+  const uint16_t* o_proj = nullptr;         // BF16 [hidden, lh * d] (packed columns)
+  const uint16_t* q_norm = nullptr;         // BF16 [d]
+  const uint16_t* k_norm = nullptr;         // BF16 [d]
+  const uint16_t* index_qk_proj = nullptr;  // BF16 [(nH + 1) * di, hidden]
+  const uint16_t* index_q_norm = nullptr;   // BF16 [di]
+  const uint16_t* index_k_norm = nullptr;   // BF16 [di]
+  int local_heads = 0;      // query heads on this rank
+  int head_begin = 0;       // first global query head
+  int local_kv_heads = 0;   // kv heads on this rank (1 at W >= kv heads)
+  int kv_head_begin = 0;    // first global kv head
+};
+
+struct QwenMoeResident {
+  const uint16_t* router = nullptr;       // BF16 [E, hidden]
+  const uint16_t* shared_gate = nullptr;  // BF16 [1, hidden]
+  const uint16_t* shared[3] = {};         // BF16 gate/up [S/W, hidden], down [hidden, S/W]
+  std::vector<GlmQuantMatrix> experts;    // gate, up, down per expert (inter-sliced)
+  int64_t local_inter = 0;                // I/W
+  int64_t local_shared_inter = 0;         // S/W
+  int scale_block = 128;                  // gcd(128, I/W): the experts' sliced-axis scale grid
+  const GlmQuantMatrix& expert(int e, int i) const {
+    return experts[static_cast<size_t>(e) * 3 + i];
+  }
+};
+
+struct QwenPleResident {
+  const uint16_t* key_proj = nullptr;    // BF16 [W, E/world] (packed columns)
+  const uint16_t* value_proj = nullptr;  // BF16 [hidden, E/world] (packed columns)
+  const uint16_t* norm_key = nullptr;    // BF16 [W]
+  const uint16_t* norm_query = nullptr;  // BF16 [W]
+  const uint16_t* norm_conv = nullptr;   // BF16 [W]
+  const uint16_t* conv = nullptr;        // BF16 [W, k]
+  float table_scale = 0.f;               // the table's per-tensor scale (host copy)
+  int hash_head_begin = 0;               // this rank's first hash head
+  int hash_heads = 0;                    // 16/W
+  int64_t row_begin = 0;                 // the rank's global row range in the table
+  int64_t rows = 0;
+};
+
+struct QwenLayerResident {
+  int layer = -1;
+  QwenLayerKind kind = QwenLayerKind::Gdn;
+  bool has_ple = false;
+  QwenGrResident attn_gr;
+  QwenGrResident mlp_gr;
+  QwenGdnResident gdn;  // GDN layers
+  QwenQsaResident qsa;  // QSA layers (the draft layer too)
+  QwenMoeResident moe;
+  QwenPleResident ple;  // the PLE layer only
+  size_t bytes = 0;
+};
+
+struct QwenGlobalsResident {
+  const uint16_t* embed = nullptr;    // BF16 [vocab, hidden]
+  const uint16_t* lm_head = nullptr;  // BF16 [lm_vocab_count, hidden]
+  int lm_vocab_begin = 0;
+  int lm_vocab_count = 0;
+  QwenGrResident mixer;               // the final read (no inject)
+  // The draft head (when the draft layer exists).
+  const uint16_t* mtp_fc_embedding = nullptr;         // BF16 [hidden, hidden]
+  const uint16_t* mtp_fc_hidden = nullptr;            // BF16 [hidden, hidden]
+  const uint16_t* mtp_pre_fc_norm_embedding = nullptr;  // BF16 [hidden]
+  const uint16_t* mtp_pre_fc_norm_hidden = nullptr;     // BF16 [W]
+  QwenGrResident mtp_mixer;
+  size_t bytes = 0;
+};
+
+// This rank's slice of the n-gram table: rows [row_begin, row_begin+rows)
+// of the padded table, e4m3, one device allocation of its own.
+struct QwenNgramTableResident {
+  const uint8_t* rows_e4m3 = nullptr;  // [rows, head_dim]
+  int64_t row_begin = 0;
+  int64_t rows = 0;
+  int head_dim = 0;
+  float scale = 0.f;
+  size_t bytes = 0;
+};
+
+
+// The local TP geometry at (rank, world): every slice bound the builders
+// and the views use, in one place.
+struct QwenLocalGeometry {
+  int world = 1, rank = 0;
+  int local_key_heads = 0, local_value_heads = 0;   // GDN
+  int local_heads = 0, head_begin = 0;              // QSA query heads
+  int local_kv_heads = 0, kv_head_begin = 0;        // QSA kv heads
+  int64_t local_inter = 0, local_shared_inter = 0;  // MoE
+  int scale_block = 128;                            // gcd(128, local_inter)
+  int hash_heads = 0, hash_head_begin = 0;          // PLE
+  int64_t table_row_begin = 0, table_rows = 0;      // the n-gram table slice
+  int lm_vocab_begin = 0, lm_vocab_count = 0;       // the lm head slice
+  static QwenLocalGeometry from_config(const QwenTextConfig& cfg, int rank, int world,
+                                       QwenHeadSharding head);
+};
+
+// The family behind the shared stream (loaders/resident_stream.hpp).
+struct QwenLoaderFamily {
+  using Config = QwenTextConfig;
+  using Expected = QwenExpectedTensor;
+  using LayerResident = QwenLayerResident;
+  using GlobalsResident = QwenGlobalsResident;
+  using Geometry = QwenLocalGeometry;
+  using PresentMap = std::unordered_map<std::string, QwenTensorDesc>;
+  struct Builder;  // models/qwen/loader.cpp
+  static const char* who() { return "qwen loader"; }
+  static uint64_t loader_format() { return 1; }
+  static int max_layer(const Config& c) { return c.num_hidden_layers + (c.mtp_layer() >= 0 ? 1 : 0); }
+  static int main_layers(const Config& c) { return c.num_hidden_layers; }
+  static std::vector<Expected> layer_table(const Config& c, int layer) {
+    return qwen_expected_layer_tensors(c, layer);
+  }
+  static std::vector<Expected> global_table(const Config& c) { return qwen_expected_global_tensors(c); }
+  static void validate_binding(const Config& c, const PresentMap& present);
+  static void check_sources(const Config& c, const LoaderTensorMap& tensors);
+  static bool digest_included(const Expected& e);
+  static bool discard_after_pack(const Expected& e);
+  static void build_globals(const Config& c, const Geometry& geo, const LoaderTensorMap& tensors,
+                            LayerBump& bump, GlobalsResident& out, uint64_t& source_bytes,
+                            uint64_t& verbatim_bytes, LoaderHeadSharding head);
+  static size_t globals_bytes(const Config& c, int rank, int world, LoaderHeadSharding head);
+  static size_t extra_resident_bytes(const Config& c, int rank, int world);
+  static size_t min_staging_bytes() { return size_t{256} << 20; }  // the table's chunked copy
+  static void after_restore(const Config& c, int layer, const LoaderTensorMap& tensors,
+                            LayerResident& out);
+};
+
+extern template class ResidentLayerStream<QwenLoaderFamily>;
+
+class QwenLayerStream : public ResidentLayerStream<QwenLoaderFamily> {
+ public:
+  QwenLayerStream(const QwenTextConfig& cfg, const std::string& checkpoint_dir, int rank = 0,
+                  int world = 1, QwenResidency residency = QwenResidency::Streaming,
+                  QwenHeadSharding head = QwenHeadSharding::Full, bool resident_mtp = false);
+  ~QwenLayerStream() override;
+
+  // The rank's n-gram table slice, loaded once and kept (both residencies).
+  const QwenNgramTableResident& load_ngram_table();
+  static size_t ngram_table_bytes(const QwenTextConfig& cfg, int rank = 0, int world = 1);
+
+  static void set_resident_image_dir(const std::string& dir);
+  static const std::string& resident_image_dir();
+
+ protected:
+  const std::string& image_dir() const override { return resident_image_dir(); }
+
+ private:
+  QwenNgramTableResident table_;
+  void* table_device_ = nullptr;
+};
+
+}  // namespace dgpp

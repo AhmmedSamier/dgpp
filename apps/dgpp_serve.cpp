@@ -78,9 +78,17 @@
 #include "serve/cluster_config.hpp"
 #include "dgpp_version.hpp"
 #include "text/chat_template.hpp"
+#include "engine/eager_engine.hpp"
+#include "engine/graph_engine.hpp"
+#include "engine/memory_plan.hpp"
+#include "loaders/architecture.hpp"
 #include "models/glm/fabric_engine.hpp"
 #include "models/glm/forward.hpp"
 #include "models/glm/gen_engine.hpp"
+#include "models/qwen/config.hpp"
+#include "models/qwen/forward.hpp"
+#include "models/glm4/config.hpp"
+#include "models/glm4/forward.hpp"
 #include "sched/scheduler.hpp"
 #include "text/tokenizer.hpp"
 #include "text/tool_grammar.hpp"
@@ -179,10 +187,270 @@ std::string gib(double bytes) {
   return std::format("{:.2f} GiB", bytes / (1024.0 * 1024.0 * 1024.0));
 }
 
+// ---- the family seam (Q6, 2026-09-09) ------------------------------------
+// What the boot needs from a model family — its config facts, its memory
+// plan, its model and its engines — so one server boots GLM-5.3-Flash and
+// Qwen3.8-Flash-Next from config.json's architecture. The engine adapters
+// are templates over the model (engine/*.hpp); the family owns the model
+// and hands out the adapters behind the scheduler's engine interface.
+struct ServeGraphEngine {
+  virtual ~ServeGraphEngine() = default;
+  virtual dgpp::sched::SchedulerEngine* engine() = 0;
+  virtual void warm_captures(const std::vector<int64_t>& prompt) = 0;
+};
+
+template <class Model>
+struct ServeGraphEngineOf final : ServeGraphEngine {
+  dgpp::GraphEngineAdapter<Model> eng;
+  template <class... A>
+  explicit ServeGraphEngineOf(A&&... a) : eng(std::forward<A>(a)...) {}
+  dgpp::sched::SchedulerEngine* engine() override { return &eng; }
+  void warm_captures(const std::vector<int64_t>& p) override { eng.warm_captures(p); }
+};
+
+struct ServeFamily {
+  virtual ~ServeFamily() = default;
+  virtual const char* name() const = 0;
+  virtual int64_t vocab_size() const = 0;
+  virtual std::vector<int64_t>& eos_token_ids() = 0;
+  virtual int64_t block_tokens() const = 0;
+  virtual int prefill_chunk_tokens() const = 0;
+  // Empty when a pool of `pool_tokens` fits the family's id spaces.
+  virtual std::string pool_check(int64_t pool_tokens) const = 0;
+  virtual const char* kv_format_name() const = 0;
+  // The decode rows the family serves in one fixed batch at most (2026-09-10,
+  // engine/decode_outputs.hpp): the session-core families take the derived
+  // shape up to kDecodeRowsMax; GLM-5.3-Flash keeps its build-time 8, and
+  // Qwen3.8-Flash-Next stays at 8 until its kernels are gated past it.
+  virtual int decode_rows_cap() const = 0;
+  // The bus's latency slot: the family's widest recorded decode fold
+  // (`decode_rows` bf16 rows of its boundary width).
+  virtual size_t lat_slot_bytes(int decode_rows) const = 0;
+  virtual dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world, bool fabric,
+                                int slots, bool mtp, int decode_rows) const = 0;
+  virtual size_t snapshot_bytes(int world, bool mtp) const = 0;
+  virtual void build_model(dgpp::BoundaryReducer* reducer, int rank, int world, bool fabric,
+                           int forward_rows, int64_t pool_tokens, int slots, bool mtp, int decode_rows) = 0;
+  virtual void destroy_model() = 0;
+  virtual size_t model_snapshot_bytes() const = 0;
+  virtual std::unique_ptr<ServeGraphEngine> make_graph_engine(
+      dgpp::net::CollectiveBus* bus, int rank, int world, uint16_t* pick_scratch,
+      int batch_min_live, uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
+      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) = 0;
+  virtual std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample,
+      const dgpp::text::GrammarVocab* grammar, int prefix_slots) = 0;
+};
+
+// GLM-5.3-Flash: the DSA pool's block and pool-id geometry, the latent
+// cache format, the resident vocab-sharded fabric model / the streaming
+// world-1 one.
+struct GlmFamily final : ServeFamily {
+  dgpp::GlmTextConfig cfg;
+  std::string ckpt;
+  int world = 1;
+  dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
+  std::unique_ptr<dgpp::GlmDiagnosticModel> model;
+  GlmFamily(const std::string& checkpoint, int world_, dgpp::LatentFormat fmt)
+      : cfg(dgpp::GlmTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint), world(world_), kv_format(fmt) {}
+  dgpp::DsaConfig dsa() const {
+    dgpp::DsaConfig d = cfg.dsa_config();
+    d.tp_size = world;
+    d.latent_format = kv_format;
+    return d;
+  }
+  const char* name() const override { return "glm5"; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  int64_t block_tokens() const override { return dsa().block_tokens; }
+  int prefill_chunk_tokens() const override { return dgpp::GlmDiagnosticModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t pool_tokens) const override {
+    const dgpp::DsaConfig d = dsa();
+    const int64_t pools = (pool_tokens / d.block_tokens) * dgpp::DsaGeometry::from_config(d).pools_per_block;
+    if (pools >= (int64_t(1) << 21)) return "exceeds the DSA pool-id space (2^21 pools)";
+    return "";
+  }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
+  int decode_rows_cap() const override { return dgpp::GlmDiagnosticModel::kDecodeRows; }
+  size_t lat_slot_bytes(int) const override {
+    return static_cast<size_t>(dgpp::GlmDiagnosticModel::kDecodeRows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
+                        bool mtp, int) const override {
+    return dgpp::GlmDiagnosticModel::plan_memory(
+        cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+        fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
+        fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full, slots, fabric && mtp,
+        kv_format);
+  }
+  size_t snapshot_bytes(int world_, bool mtp) const override {
+    return dgpp::GlmDiagnosticModel::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
+                   int64_t pool_tokens, int slots, bool mtp, int) override {
+    model = std::make_unique<dgpp::GlmDiagnosticModel>(
+        cfg, ckpt, forward_rows, pool_tokens, reducer, fabric ? rank : 0, fabric ? world_ : 1,
+        fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
+        fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full, slots, fabric && mtp,
+        kv_format);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(
+      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
+      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
+      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::GlmDiagnosticModel>>(
+        model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::GlmDiagnosticModel>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
+// Qwen3.8-Flash-Next: the paged K/V + compressed-key pool (64-token
+// blocks, pool ids in 21 bits), bf16 caches, the resident fabric model /
+// the streaming world-1 one (172 GiB does not fit one rank resident).
+struct QwenFamily final : ServeFamily {
+  dgpp::QwenTextConfig cfg;
+  std::string ckpt;
+  std::unique_ptr<dgpp::QwenModel> model;
+  explicit QwenFamily(const std::string& checkpoint)
+      : cfg(dgpp::QwenTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint) {}
+  const char* name() const override { return "qwen4_exp"; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  int64_t block_tokens() const override { return dgpp::QwenModel::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::QwenModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t pool_tokens) const override {
+    if (pool_tokens / cfg.indexer_compress_ratio >= (int64_t(1) << 21))
+      return "exceeds the QSA pool-id space (2^21 pools)";
+    return "";
+  }
+  const char* kv_format_name() const override { return "bf16"; }
+  // The decode kernels are gated at 8 rows (the 2026-09-09 rounds); a wider
+  // batch waits for its own gates.
+  int decode_rows_cap() const override { return dgpp::kDecodeRows; }
+  // The PLE layer's key partial is hc x hidden wide (plan D4) — the widest
+  // fold the decode graph records.
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hyper_width()) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
+                        bool mtp, int decode_rows) const override {
+    return dgpp::QwenModel::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+                                        fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming,
+                                        slots, fabric && mtp, decode_rows);
+  }
+  size_t snapshot_bytes(int world_, bool mtp) const override {
+    return dgpp::QwenModel::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
+    // The resident image cache: the same directory the process configured
+    // for the GLM loader (prepare_serving_process).
+    dgpp::QwenLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    model = std::make_unique<dgpp::QwenModel>(
+        cfg, ckpt, forward_rows, pool_tokens,
+        fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming, reducer, fabric ? rank : 0,
+        fabric ? world_ : 1, slots, fabric && mtp, decode_rows);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(
+      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
+      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
+      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::QwenModel>>(
+        model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::QwenModel>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
+// GLM-4.7 (Glm4MoeForCausalLM, NVFP4): the paged K/V pool (64-token
+// blocks, bf16), no recurrent state (snapshots at any position), the
+// resident fabric model / the streaming world-1 one.
+struct Glm4Family final : ServeFamily {
+  dgpp::Glm4TextConfig cfg;
+  std::string ckpt;
+  std::unique_ptr<dgpp::Glm4Model> model;
+  explicit Glm4Family(const std::string& checkpoint)
+      : cfg(dgpp::Glm4TextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint) {}
+  const char* name() const override { return "glm4_moe"; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  int64_t block_tokens() const override { return dgpp::Glm4Model::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::Glm4Model::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t) const override { return ""; }
+  const char* kv_format_name() const override { return "bf16"; }
+  // The row walk, the attention's split scratch, the MoE slot path and the
+  // draft window all take the runtime ceiling (the batched depth >= 2
+  // chain, 2026-09-10).
+  int decode_rows_cap() const override { return dgpp::kDecodeRowsMax; }
+  // The widest fold the decode graph records: a block output [rows, hidden].
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
+                        bool mtp, int decode_rows) const override {
+    return dgpp::Glm4Model::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+                                        fabric ? dgpp::Glm4Residency::Resident : dgpp::Glm4Residency::Streaming,
+                                        slots, fabric && mtp, decode_rows);
+  }
+  size_t snapshot_bytes(int world_, bool mtp) const override {
+    return dgpp::Glm4Model::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
+    dgpp::Glm4LayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    model = std::make_unique<dgpp::Glm4Model>(
+        cfg, ckpt, forward_rows, pool_tokens,
+        fabric ? dgpp::Glm4Residency::Resident : dgpp::Glm4Residency::Streaming, reducer, fabric ? rank : 0,
+        fabric ? world_ : 1, slots, fabric && mtp, decode_rows);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(
+      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
+      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
+      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::Glm4Model>>(
+        model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::Glm4Model>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
+std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world, dgpp::LatentFormat kv_format) {
+  const dgpp::ModelArchitecture arch =
+      dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string());
+  if (arch == dgpp::ModelArchitecture::Qwen4Exp) return std::make_unique<QwenFamily>(ckpt);
+  if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
+  return std::make_unique<GlmFamily>(ckpt, world, kv_format);
+}
+
 void check_memory_plan(
-    int rank, const dgpp::GlmDiagnosticModel::MemoryPlan& plan,
+    int rank, const dgpp::MemoryPlan& plan,
     size_t prefix_arena_bytes, size_t engine_bytes, int64_t block_tokens,
-    const std::function<dgpp::GlmDiagnosticModel::MemoryPlan(int64_t)>& plan_at) {
+    const std::function<dgpp::MemoryPlan(int64_t)>& plan_at) {
   size_t free_bytes = 0, total_bytes = 0;
   DGPP_CUDA_OK(cudaMemGetInfo(&free_bytes, &total_bytes));
   const size_t available = dgpp::host_memory_available_bytes();
@@ -211,7 +479,7 @@ void check_memory_plan(
   // largest context this node could hold with everything else as configured.
   std::string hint;
   if (plan.context_tokens > block_tokens) {
-    const dgpp::GlmDiagnosticModel::MemoryPlan below = plan_at(plan.context_tokens - block_tokens);
+    const dgpp::MemoryPlan below = plan_at(plan.context_tokens - block_tokens);
     const double per_token =
         static_cast<double>(plan.total_bytes()) - static_cast<double>(below.total_bytes());
     if (per_token > 0) {
@@ -229,7 +497,7 @@ void check_memory_plan(
           per / 1024.0, feasible);
     }
   }
-  std::vector<const dgpp::GlmDiagnosticModel::MemoryPlan::Item*> largest;
+  std::vector<const dgpp::MemoryPlan::Item*> largest;
   for (const auto& it : plan.items) largest.push_back(&it);
   std::sort(largest.begin(), largest.end(), [](const auto* a, const auto* b) {
     return a->device + a->pinned > b->device + b->pinned;
@@ -256,18 +524,16 @@ void check_memory_plan(
 // and stops the bus after this loop has joined.
 // The prefix cache's arena (M7): the snapshot slots a per-rank budget of
 // `gib` GiB holds at this model's session state size; 0 = off.
-int prefix_arena_slots(const dgpp::GlmDiagnosticModel& model, double gib) {
+int prefix_arena_slots(size_t bytes, double gib) {
   if (gib <= 0.0) return 0;
-  const size_t bytes = model.session_snapshot_bytes();
   if (bytes == 0) return 0;
   const double budget = gib * 1024.0 * 1024.0 * 1024.0;
   const double slots = std::floor(budget / static_cast<double>(bytes));
   return static_cast<int>(std::min(slots, 4096.0));
 }
 
-int serve_openai(dgpp::sched::SchedulerEngine* engine,
-                 const dgpp::GlmTextConfig& cfg,
-                 const std::string& ckpt,
+int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
+                 const std::vector<int64_t>& eos_ids, const std::string& ckpt,
                  const std::string& model_display, const ServeKnobs& k,
                  bool no_eos, double boot_s,
                  dgpp::serve::JournalWriter* journal,
@@ -288,7 +554,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine,
   scfg.fixed_seed = k.fixed_seed;
   scfg.reasoning_in_content = k.reasoning_in_content;
   scfg.admission = k.admission;
-  scfg.vocab_size = cfg.vocab_size;  // logit_bias's id bound (2026-09-06)
+  scfg.vocab_size = vocab_size;  // logit_bias's id bound (2026-09-06)
   {
     // The prefix cache's key (M7): what the entries are bound to.
     char key[96];
@@ -298,7 +564,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine,
     scfg.prefix_key = std::string(key) + " ckpt:" + fs::path(ckpt).filename().string();
   }
   std::vector<int64_t> eos =
-      no_eos ? std::vector<int64_t>{} : cfg.eos_token_ids;
+      no_eos ? std::vector<int64_t>{} : eos_ids;
 
   dgpp::serve::GenerationService service(scfg, engine, &frontend,
                                            std::move(eos));
@@ -443,9 +709,6 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine,
 }  // namespace
 
 int main(int argc, char** argv) {
-  using dgpp::GlmDiagnosticModel;
-  using dgpp::GlmTextConfig;
-
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   // An uncaught exception or a bare std::terminate still leaves a
   // timestamped line with the reason, not libstdc++'s bare "terminate
@@ -815,15 +1078,9 @@ int main(int argc, char** argv) {
         "--decode-graph currently requires the fabric (--world > 1)");
     return 1;
   }
-  const int graph_rows_per_request = mtp ? 2 : 1;
-  if (decode_graph &&
-      max_concurrency >
-          GlmDiagnosticModel::kDecodeRows / graph_rows_per_request) {
-    DGPP_LOG_ERROR(
-        "--decode-graph needs --max-concurrency * speculative rows <= {} "
-        "(got {} * {})",
-        GlmDiagnosticModel::kDecodeRows, max_concurrency,
-        graph_rows_per_request);
+  if (max_concurrency > dgpp::kPickMaxRequests) {
+    DGPP_LOG_ERROR("--max-concurrency must be at most {} request slots (got {})",
+                   dgpp::kPickMaxRequests, max_concurrency);
     return 1;
   }
   // The crossover is a fraction of the configured slots: the default is
@@ -895,15 +1152,48 @@ int main(int argc, char** argv) {
     }
 
     const auto t_boot = std::chrono::steady_clock::now();
-    GlmTextConfig cfg =
-        GlmTextConfig::from_json_file((fs::path(ckpt) / "config.json").string());
+    // The family from config.json's architecture (loaders/architecture.hpp):
+    // everything below the engine seam comes from it.
+    std::unique_ptr<ServeFamily> family = make_family(ckpt, world, kv_format);
+    DGPP_LOG_INFO("serve: model family {} ({})", family->name(), ckpt);
+    // The decode rows (2026-09-10, engine/decode_outputs.hpp): the fixed
+    // batch holds every slot's verify rows — max_concurrency x (1 + the
+    // MTP depth) — floored at kDecodeRows so every existing recipe keeps
+    // its exact shape (4 slots x 2 rows = 8). The family's cap bounds it:
+    // GLM-4.7 takes the derived shape (its batched depth >= 2 chain);
+    // GLM-5.3-Flash and Qwen3.8-Flash-Next stay at 8 — past depth 1 their
+    // steps are scalar, and a depth-1 batch over the cap is refused as
+    // before.
+    const int graph_rows_per_request = mtp ? 1 + mtp_depth : 1;
+    int decode_rows = std::max(dgpp::kDecodeRows, max_concurrency * graph_rows_per_request);
+    if (decode_graph && decode_rows > family->decode_rows_cap()) {
+      if (mtp_depth > 1 && max_concurrency * 2 <= family->decode_rows_cap()) {
+        DGPP_LOG_INFO(
+            "serve: {} slots x {} rows exceed the {} family's {}-row decode ceiling; "
+            "the depth-{} steps replay scalar graphs (no batched chain on this family)",
+            max_concurrency, graph_rows_per_request, family->name(), family->decode_rows_cap(),
+            mtp_depth);
+        decode_rows = family->decode_rows_cap();
+      } else {
+        DGPP_LOG_ERROR(
+            "--decode-graph needs --max-concurrency * (1 + mtp depth) <= {} on the {} "
+            "family (got {} * {})",
+            family->decode_rows_cap(), family->name(), max_concurrency, graph_rows_per_request);
+        return 1;
+      }
+    }
+    DGPP_LOG_INFO("serve: decode rows {} ({} slot(s) x {} row(s) per request, floor {}, the {} family's cap {})",
+                  decode_rows, max_concurrency, graph_rows_per_request, dgpp::kDecodeRows, family->name(),
+                  family->decode_rows_cap());
+    if (std::string(family->name()) != "glm5" && kv_dtype != "bf16")
+      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent cache only; the {} caches stay bf16",
+                    kv_dtype, family->name());
     const dgpp::GlmGenerationDefaults generation_defaults =
-        dgpp::GlmGenerationDefaults::from_checkpoint_dir(ckpt,
-                                                         cfg.vocab_size);
+        dgpp::GlmGenerationDefaults::from_checkpoint_dir(ckpt, family->vocab_size());
     // generation_config.json is the generation authority. Retain the
     // config.json value only for old checkpoints/fixtures that omit it.
     if (generation_defaults.eos_token_ids.has_value())
-      cfg.eos_token_ids = *generation_defaults.eos_token_ids;
+      family->eos_token_ids() = *generation_defaults.eos_token_ids;
 
     // The served sampling defaults: the file's values, then the process
     // overrides (DESIGN §10 — defaults from the model, overrides from the
@@ -949,28 +1239,17 @@ int main(int argc, char** argv) {
     // fit it); the model's per-forward row bound is the prefill chunk
     // (2026-09-06: it used to be the whole context, and every activation
     // buffer grew with kv_capacity — 200 GB at 262k tokens).
-    const dgpp::DsaConfig dsa = [&] {
-      dgpp::DsaConfig d = cfg.dsa_config();
-      d.tp_size = world;
-      d.latent_format = kv_format;
-      return d;
-    }();
-    const int64_t block_tokens = dsa.block_tokens;
+    const int64_t block_tokens = family->block_tokens();
     const int64_t pool_tokens = ((kv_capacity + block_tokens - 1) /
                                  block_tokens) * block_tokens;
-    const int64_t pools = (pool_tokens / block_tokens) *
-                          dgpp::DsaGeometry::from_config(dsa).pools_per_block;
-    if (pools >= (int64_t(1) << 21))
-      throw std::runtime_error(
-          "--kv-capacity " + std::to_string(kv_capacity) +
-          " exceeds the DSA pool-id space (2^21 pools)");
+    if (const std::string why = family->pool_check(pool_tokens); !why.empty())
+      throw std::runtime_error("--kv-capacity " + std::to_string(kv_capacity) + " " + why);
     const int forward_rows = static_cast<int>(std::min<int64_t>(
-        pool_tokens, GlmDiagnosticModel::prefill_chunk_tokens()));
+        pool_tokens, family->prefill_chunk_tokens()));
     // The pre-flight memory check's inputs (see check_memory_plan): the
     // prefix arena at this shape, and the engine's own buffers (the sampler
     // tables per slot, the prompt id buffers per context token, a margin).
-    const size_t snapshot_bytes =
-        GlmDiagnosticModel::session_snapshot_bytes(cfg, world, mtp && world > 1);
+    const size_t snapshot_bytes = family->snapshot_bytes(world, mtp && world > 1);
     const size_t prefix_arena_bytes =
         snapshot_bytes == 0 || prefix_cache_gib <= 0.0
             ? 0
@@ -980,19 +1259,15 @@ int main(int argc, char** argv) {
                   4096.0)) *
                   snapshot_bytes;
     const size_t engine_bytes =
-        static_cast<size_t>(max_concurrency) * static_cast<size_t>(cfg.vocab_size) * 8 +
+        static_cast<size_t>(max_concurrency) * static_cast<size_t>(family->vocab_size()) * 8 +
         static_cast<size_t>(pool_tokens) * 16 + (size_t{64} << 20);
     if (memory_plan_only) {
       // The check alone, for the shape this rank would run (world > 1: the
       // resident, vocab-sharded fabric model; world 1: the streaming one).
       const bool fabric = world > 1;
       const auto plan_at = [&](int64_t context) {
-        return GlmDiagnosticModel::plan_memory(
-            cfg, static_cast<int>(std::min<int64_t>(context, forward_rows)), context,
-            fabric ? rank : 0, fabric ? world : 1,
-            fabric ? dgpp::GlmResidency::Resident : dgpp::GlmResidency::Streaming,
-            fabric ? dgpp::GlmHeadSharding::VocabSharded : dgpp::GlmHeadSharding::Full,
-            max_concurrency, fabric && mtp, kv_format);
+        return family->plan(static_cast<int>(std::min<int64_t>(context, forward_rows)), context, rank,
+                            world, fabric, max_concurrency, mtp, decode_rows);
       };
       try {
         check_memory_plan(rank, plan_at(pool_tokens), prefix_arena_bytes, engine_bytes,
@@ -1005,7 +1280,7 @@ int main(int argc, char** argv) {
       return 0;
     }
     std::vector<int64_t> eos =
-        no_eos ? std::vector<int64_t>{} : cfg.eos_token_ids;
+        no_eos ? std::vector<int64_t>{} : family->eos_token_ids();
     const std::string model_display = model_id.empty()
                                           ? fs::path(ckpt).filename().string()
                                           : model_id;
@@ -1018,11 +1293,11 @@ int main(int argc, char** argv) {
       const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
           (fs::path(ckpt) / "tokenizer.json").string());
       dgpp::text::GrammarVocab v = dgpp::text::GrammarVocab::from_tokenizer(
-          tok, cfg.eos_token_ids, static_cast<int>(cfg.vocab_size));
+          tok, family->eos_token_ids(), static_cast<int>(family->vocab_size()));
       DGPP_LOG_INFO(
           "serve: grammar vocabulary built ({} ids, tool markers {}, "
           "call-turn EOS {})",
-          cfg.vocab_size,
+          family->vocab_size(),
           v.markers().tool_calls_available() ? "present" : "absent",
           v.call_turn_eos());
       // The JSON grammar's tables (M6 6h): built now, on every rank, so
@@ -1066,11 +1341,11 @@ int main(int argc, char** argv) {
       // The sampler's two tables (the candidate/LSE fold and the fallback
       // gather), pinned before the world forms like the pick scratch.
       PinnedWords sample_prefix(dgpp::fabric_sampling_prefix_scratch_elems(world));
-      PinnedWords sample_gather(dgpp::sampling_gather_scratch_elems(cfg.vocab_size));
+      PinnedWords sample_gather(dgpp::sampling_gather_scratch_elems(family->vocab_size()));
       std::unique_ptr<dgpp::net::CollectiveBus> bus;
       try {
         dgpp::net::BusOptions bus_options = dgpp::fabric_bus_options(
-            rank, world, fabric_port, peer, rendezvous_timeout_ms);
+            rank, world, fabric_port, peer, rendezvous_timeout_ms, family->lat_slot_bytes(decode_rows));
         if (bulk_pace_gbps >= 0) bus_options.bulk_pace_gbps = bulk_pace_gbps;
         if (bulk_inflight >= 0) bus_options.bulk_inflight_per_lane = bulk_inflight;
         bus = std::make_unique<dgpp::net::CollectiveBus>(bus_options);
@@ -1084,24 +1359,19 @@ int main(int argc, char** argv) {
         // record, so every rank here runs the same shape. A short world was
         // refused there, with the reason in the log.
 
-        dgpp::GlmBusBoundaryReducer reducer(*bus);
+        dgpp::BusBoundaryReducer reducer(*bus);
         dgpp::prepare_serving_process(rank);
         {
           const auto plan_at = [&](int64_t context) {
-            return GlmDiagnosticModel::plan_memory(
-                cfg, static_cast<int>(std::min<int64_t>(context, forward_rows)), context,
-                rank, world, dgpp::GlmResidency::Resident,
-                dgpp::GlmHeadSharding::VocabSharded, max_concurrency, mtp, kv_format);
+            return family->plan(static_cast<int>(std::min<int64_t>(context, forward_rows)), context,
+                                rank, world, /*fabric=*/true, max_concurrency, mtp, decode_rows);
           };
           check_memory_plan(rank, plan_at(pool_tokens), prefix_arena_bytes, engine_bytes,
                             block_tokens, plan_at);
         }
         const auto t_model = std::chrono::steady_clock::now();
-        GlmDiagnosticModel model(cfg, ckpt, forward_rows, pool_tokens,
-                                 &reducer, rank, world,
-                                 dgpp::GlmResidency::Resident,
-                                 dgpp::GlmHeadSharding::VocabSharded,
-                                 max_concurrency, mtp, kv_format);
+        family->build_model(&reducer, rank, world, /*fabric=*/true, forward_rows, pool_tokens,
+                            max_concurrency, mtp, decode_rows);
         DGPP_LOG_INFO(
             "rank {}: model constructed in {:.1f}s (resident, {} request "
             "slots, {}-token pool in {}, {}-row forwards)",
@@ -1109,32 +1379,42 @@ int main(int argc, char** argv) {
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           t_model)
                 .count(),
-            max_concurrency, pool_tokens, dgpp::latent_format_name(kv_format),
+            max_concurrency, pool_tokens, family->kv_format_name(),
             forward_rows);
 
         // The prefix cache's arena (M7): as many snapshot slots as the
         // budget holds; every rank computes the same count from the same
         // geometry, and the warm record carries rank 0's for the peers to
         // check against.
-        const int prefix_slots = prefix_arena_slots(model, prefix_cache_gib);
+        const int prefix_slots = prefix_arena_slots(family->model_snapshot_bytes(), prefix_cache_gib);
         DGPP_LOG_INFO(
             "rank {}: prefix cache {} — {} snapshot slot(s) of {:.1f} MiB "
             "({:.2f} GiB asked)",
             rank, prefix_slots > 0 ? "on" : "off", prefix_slots,
-            static_cast<double>(model.session_snapshot_bytes()) / (1024.0 * 1024.0),
+            static_cast<double>(family->model_snapshot_bytes()) / (1024.0 * 1024.0),
             prefix_cache_gib);
         // The admission policy every rank runs (M6 6d): rank 0's, carried
         // by the warm record; a peer's own flags yield to it.
         dgpp::sched::AdmissionPolicy peer_policy = knobs.admission;
         int peer_prefix_slots = prefix_slots;
         std::string rank0_config;  // the warm record's config digest
+        // The engine behind the scheduler's interface: the graph engine's
+        // holder (its warm-up needs the adapter) or the eager adapter. Both
+        // die before the model (family->destroy_model at every exit).
+        std::unique_ptr<ServeGraphEngine> graph_holder;
         std::unique_ptr<dgpp::sched::SchedulerEngine> engine;
+        const auto engine_ptr = [&]() -> dgpp::sched::SchedulerEngine* {
+          return graph_holder ? graph_holder->engine() : engine.get();
+        };
+        const auto engine_release = [&] {
+          graph_holder.reset();
+          engine.reset();
+          family->destroy_model();
+        };
         if (decode_graph) {
-          auto graph_engine = std::make_unique<dgpp::GlmGraphEngineAdapter>(
-              &model, bus.get(), rank, world, pick_scratch, cfg.vocab_size,
-              /*pick_timeout_ms=*/60000, graph_batch_min_live,
-              sample_prefix.data, sample_gather.data,
-              sampling_candidates, &grammar_vocab, prefix_slots, mtp_depth);
+          std::unique_ptr<ServeGraphEngine> graph_engine = family->make_graph_engine(
+              bus.get(), rank, world, pick_scratch, graph_batch_min_live, sample_prefix.data,
+              sample_gather.data, sampling_candidates, &grammar_vocab, prefix_slots, mtp_depth);
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up
           // is a run of collectives, so it starts on the journal's clock:
@@ -1148,6 +1428,7 @@ int main(int argc, char** argv) {
                          &*reader, [rank] { return peer_should_stop(rank); },
                          &peer_policy, &peer_prefix_slots, &rank0_config)) {
             graph_engine.reset();
+            family->destroy_model();
             cudaFreeHost(pick_scratch);
             bus->stop();
             DGPP_LOG_INFO("rank {}: exited cleanly", rank);
@@ -1161,15 +1442,13 @@ int main(int argc, char** argv) {
               std::chrono::duration<double>(
                   std::chrono::steady_clock::now() - t_warm)
                   .count());
-          engine = std::move(graph_engine);
+          graph_holder = std::move(graph_engine);
         } else {
-          engine = std::make_unique<dgpp::GenEngineAdapter>(
-              &model, max_concurrency,
-              dgpp::make_fabric_pick(bus.get(), rank, world, pick_scratch,
-                                     cfg.vocab_size),
-              dgpp::make_fabric_sample(bus.get(), rank, world,
-                                       sample_prefix.data, sample_gather.data,
-                                       cfg.vocab_size),
+          engine = family->make_eager_engine(
+              max_concurrency,
+              dgpp::make_fabric_pick(bus.get(), rank, world, pick_scratch, family->vocab_size()),
+              dgpp::make_fabric_sample(bus.get(), rank, world, sample_prefix.data, sample_gather.data,
+                                       family->vocab_size()),
               &grammar_vocab, prefix_slots);
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
@@ -1179,7 +1458,7 @@ int main(int argc, char** argv) {
           } else if (!dgpp::serve::wait_journal_warm(
                          &*reader, [rank] { return peer_should_stop(rank); },
                          &peer_policy, &peer_prefix_slots, &rank0_config)) {
-            engine.reset();
+            engine_release();
             cudaFreeHost(pick_scratch);
             bus->stop();
             return 0;
@@ -1217,7 +1496,7 @@ int main(int argc, char** argv) {
                 "rank {}: prefix cache slots from rank 0's warm record ({}) "
                 "override this rank's {} (the arena must hold them)",
                 rank, peer_prefix_slots, prefix_slots);
-          dgpp::sched::Scheduler sched(engine.get(), eos, queue_limit, peer_policy,
+          dgpp::sched::Scheduler sched(engine_ptr(), eos, queue_limit, peer_policy,
                                      peer_prefix_slots);
           dgpp::serve::OpStreamObserver oplog;
           sched.set_observer(&oplog);
@@ -1244,17 +1523,16 @@ int main(int argc, char** argv) {
               /*watch_poll_ms=*/100, &oplog, &stats);
           write_ops_file("serve_rank" + std::to_string(rank) + ".ops",
                          oplog.text());
-          engine.reset();
+          engine_release();
           cudaFreeHost(pick_scratch);
           bus->stop();
           DGPP_LOG_INFO("rank {}: exited cleanly", rank);
           return 0;
         }
         dgpp::serve::OpStreamObserver oplog;  // rank 0's audit leg
-        const int rc = serve_openai(engine.get(), cfg, ckpt, model_display,
-                                    knobs, no_eos, boot_s(), &*journal,
-                                    &oplog);
-        engine.reset();
+        const int rc = serve_openai(engine_ptr(), family->vocab_size(), family->eos_token_ids(), ckpt,
+                                    model_display, knobs, no_eos, boot_s(), &*journal, &oplog);
+        engine_release();
         cudaFreeHost(pick_scratch);
         bus->stop();
         return rc;
@@ -1268,39 +1546,38 @@ int main(int argc, char** argv) {
     dgpp::prepare_serving_process(/*rank=*/0);
     {
       const auto plan_at = [&](int64_t context) {
-        return GlmDiagnosticModel::plan_memory(
-            cfg, static_cast<int>(std::min<int64_t>(context, forward_rows)), context,
-            /*tp_rank=*/0, /*tp_world=*/1, dgpp::GlmResidency::Streaming,
-            dgpp::GlmHeadSharding::Full, max_concurrency, /*mtp=*/false, kv_format);
+        return family->plan(static_cast<int>(std::min<int64_t>(context, forward_rows)), context,
+                            /*rank=*/0, /*world=*/1, /*fabric=*/false, max_concurrency, /*mtp=*/false,
+                            decode_rows);
       };
       check_memory_plan(0, plan_at(pool_tokens), prefix_arena_bytes, engine_bytes,
                         block_tokens, plan_at);
     }
     const auto t_model = std::chrono::steady_clock::now();
-    GlmDiagnosticModel model(cfg, ckpt, forward_rows, pool_tokens,
-                             /*boundary=*/nullptr, /*tp_rank=*/0,
-                             /*tp_world=*/1, dgpp::GlmResidency::Streaming,
-                             dgpp::GlmHeadSharding::Full, max_concurrency,
-                             /*mtp=*/false, kv_format);
+    family->build_model(/*reducer=*/nullptr, /*rank=*/0, /*world=*/1, /*fabric=*/false, forward_rows,
+                        pool_tokens, max_concurrency, /*mtp=*/false, decode_rows);
     DGPP_LOG_INFO(
         "serve: model constructed in {:.1f}s (streaming, {} request slots, "
         "{}-token pool in {}, {}-row forwards)",
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       t_model)
             .count(),
-        max_concurrency, pool_tokens, dgpp::latent_format_name(kv_format),
+        max_concurrency, pool_tokens, family->kv_format_name(),
         forward_rows);
 
-    const int prefix_slots = prefix_arena_slots(model, prefix_cache_gib);
+    const int prefix_slots = prefix_arena_slots(family->model_snapshot_bytes(), prefix_cache_gib);
     DGPP_LOG_INFO("serve: prefix cache {} — {} snapshot slot(s) of {:.1f} MiB",
                   prefix_slots > 0 ? "on" : "off", prefix_slots,
-                  static_cast<double>(model.session_snapshot_bytes()) / (1024.0 * 1024.0));
-    dgpp::GenEngineAdapter engine(&model, max_concurrency,
-                                  dgpp::make_w1_pick(cfg.vocab_size),
-                                  dgpp::make_w1_sample(cfg.vocab_size),
-                                  &grammar_vocab, prefix_slots);
-    return serve_openai(&engine, cfg, ckpt, model_display, knobs, no_eos,
-                         boot_s(), /*journal=*/nullptr, /*oplog=*/nullptr);
+                  static_cast<double>(family->model_snapshot_bytes()) / (1024.0 * 1024.0));
+    std::unique_ptr<dgpp::sched::SchedulerEngine> engine = family->make_eager_engine(
+        max_concurrency, dgpp::make_w1_pick(family->vocab_size()), dgpp::make_w1_sample(family->vocab_size()),
+        &grammar_vocab, prefix_slots);
+    const int rc = serve_openai(engine.get(), family->vocab_size(), family->eos_token_ids(), ckpt,
+                                model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
+                                /*oplog=*/nullptr);
+    engine.reset();
+    family->destroy_model();
+    return rc;
   } catch (const std::exception& e) {
     DGPP_LOG_ERROR("serve: {}", e.what());
     return 1;

@@ -358,6 +358,13 @@ class FakeFrontend : public ModelFrontend {
  public:
   explicit FakeFrontend(bool with_markers = false)
       : with_markers_(with_markers) {}
+  // The template knob gate: a template that reads enable_thinking (Qwen3.8-
+  // Flash-Next, GLM-4.7) accepts it in chat_template_kwargs; the default
+  // fake, like GLM-5.3-Flash's template, does not.
+  bool reads_enable_thinking = false;
+  bool template_reads(std::string_view name) const override {
+    return name == "enable_thinking" && reads_enable_thinking;
+  }
 
   std::vector<int64_t> encode_text(std::string_view text) const override {
     std::vector<int64_t> ids;
@@ -1309,6 +1316,24 @@ DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
   refused("{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"tool\","
           "\"content\":7}]}",
           "\"param\":\"messages[0].content\"");
+}
+
+DGPP_TEST(serve_enableThinkingIsAcceptedOnlyWhenTheTemplateReadsIt) {
+  // GLM-4.7's and Qwen3.8-Flash-Next's templates read enable_thinking (false
+  // closes the think block in the generation prompt): the service passes
+  // it through to the render as a boolean global. A template that never
+  // reads it (GLM-5.3-Flash's) refuses it as before (the case above).
+  ServiceRig rig;
+  rig.frontend.reads_enable_thinking = true;
+  const std::string ok = post_until_usage(
+      rig, chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"enable_thinking\":false}"));
+  require(ok.find("\"object\":\"chat.completion\"") != std::string::npos,
+          "enable_thinking accepted by a template that reads it: " + ok.substr(0, 300));
+  const std::string g = rig.frontend.last_globals();
+  require(g.find("\"enable_thinking\":false") != std::string::npos,
+          "enable_thinking reaches the render globals: " + g);
+  const std::string bad = post_chat(rig, chat_body("abcd", 2, ",\"chat_template_kwargs\":{\"enable_thinking\":\"no\"}"));
+  require(bad.find("must be a boolean") != std::string::npos, "a non-boolean enable_thinking is refused: " + bad);
 }
 
 DGPP_TEST(serve_toolCalls_oneShotMessageShapeAndFinishReason) {

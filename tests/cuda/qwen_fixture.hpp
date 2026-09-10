@@ -1,0 +1,182 @@
+#pragma once
+// Synthetic mini-checkpoint writer for the Qwen3.8-Flash-Next tests (Q2,
+// 2026-09-09): enumerates the binding table for a small config and writes
+// config.json + one safetensors shard, so fixture and table cannot
+// disagree. Values are deterministic per tensor NAME (glm_rng's scheme), in
+// magnitudes that keep the forward's nonlinearities informative; the
+// n-gram hash buffers are the config's derivation (the loader refuses
+// anything else) and the table shards follow the checkpoint's row split.
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "common/dtypes.hpp"
+#include "glm_rng.hpp"
+#include "loaders/minijson.hpp"
+#include "models/qwen/binding.hpp"
+#include "models/qwen/config.hpp"
+
+namespace qwenfx {
+
+namespace fs = std::filesystem;
+using dgpp::float_to_bf16_bits;
+using dgpp::float_to_fp8_e4m3_bits;
+using dgpp::QwenExpectedTensor;
+using dgpp::QwenTensorRole;
+using dgpp::QwenTextConfig;
+using dgpp::QwenWeightClass;
+using glmrng::Rng;
+using glmrng::seed_for;
+
+// The tiny release: every pinned dimension (128-wide GDN and indexer heads,
+// 256-wide attention heads) at the smallest legal head counts, worlds 1, 2
+// and 4 all legal (the kv heads pair up at 4), one PLE layer at index 1, a
+// draft layer, 8 experts of 64 (a 16-wide slice at world 4).
+inline const char* tiny_text_json() {
+  return R"json({
+  "model_type": "qwen4_exp_text", "attention_bias": false,
+  "bos_token_id": 1, "eos_token_id": 1,
+  "hc_count": 4, "hc_lowrank": 32, "head_dim": 256, "heads_per_ngram": 8,
+  "hidden_act": "silu", "hidden_size": 256,
+  "indexer_budget": 64, "indexer_compress_ratio": 4, "indexer_head_dim": 128,
+  "indexer_kv_heads": 1, "indexer_n_heads": 2,
+  "layer_types": ["linear_attention", "linear_attention", "full_attention", "linear_attention"],
+  "linear_conv_kernel_dim": 4, "linear_key_head_dim": 128, "linear_num_key_heads": 4,
+  "linear_num_value_heads": 12, "linear_value_head_dim": 128,
+  "make_ngram_vocab_size_divisible_by": 128, "mamba_ssm_dtype": "float32",
+  "max_position_embeddings": 4096, "moe_intermediate_size": 64,
+  "mtp": {"hybrid": true, "layer_types": ["full_attention"], "num_hidden_layers": 1},
+  "mtp_num_hidden_layers": 1, "mtp_use_dedicated_embeddings": false,
+  "ngram_size": 3, "ngram_vocab_size_base": 64, "num_attention_heads": 4,
+  "num_experts": 8, "num_experts_per_tok": 2, "num_hidden_layers": 4,
+  "num_key_value_heads": 2, "output_gate_type": "sigmoid",
+  "ple_conv_kernel_size": 4, "ple_embed_dim": 256, "ple_layer_ids": [2],
+  "rms_norm_eps": 1e-06,
+  "rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10],
+                      "partial_rotary_factor": 0.25, "rope_theta": 10000000, "rope_type": "default"},
+  "shared_expert_intermediate_size": 64, "split_ngram_parts": 4,
+  "tie_word_embeddings": false, "vocab_size": 512
+})json";
+}
+
+inline const char* tiny_quant_json() {
+  return R"json({"quant_method": "fp8", "activation_scheme": "dynamic",
+  "weight_block_size": [128, 128], "modules_to_not_convert": ["lm_head"],
+  "modules_to_convert": ["ple.ple_embedding.ngram_embedding"]})json";
+}
+
+inline QwenTextConfig tiny_config() {
+  const auto t = dgpp::minijson::parse(tiny_text_json());
+  const auto q = dgpp::minijson::parse(tiny_quant_json());
+  return QwenTextConfig::parse(t.root, &q.root);
+}
+
+inline bool has(const std::string& name, const char* needle) {
+  return name.find(needle) != std::string::npos;
+}
+
+inline std::vector<uint8_t> tensor_bytes(const QwenTextConfig& cfg, const QwenExpectedTensor& e) {
+  std::vector<uint8_t> out(e.nbytes());
+  const std::string& name = e.name;
+  if (e.dtype == dgpp::DType::I64) {
+    // The hash buffers: the config's derivation, verbatim.
+    const dgpp::QwenNgramGeometry g = cfg.ngram_geometry();
+    const std::vector<int64_t>* src = nullptr;
+    if (has(name, "layer_multipliers")) src = &g.multipliers;
+    else if (has(name, "ngram_heads_offsets")) src = &g.head_offset;
+    else if (has(name, "ngram_heads_vocab_sizes")) src = &g.head_vocab;
+    else throw std::runtime_error("fixture: unknown I64 tensor " + name);
+    if (src->size() != e.numel()) throw std::runtime_error("fixture: I64 length " + name);
+    std::memcpy(out.data(), src->data(), out.size());
+    return out;
+  }
+  Rng rng(seed_for(name));
+  const size_t n = e.numel();
+  const bool is_norm = has(name, "norm") && e.shape.size() == 1;  // the (1+w) norms: w near 0
+  const bool is_gdn_norm = has(name, "linear_attn.norm.weight");   // plain w near 1
+  const bool is_scale_inv = has(name, "_scale_inv");
+  const bool is_table_scale = has(name, "ngram_embedding.weight_scale");
+  const bool is_a_log = has(name, "A_log");
+  const bool is_dt_bias = has(name, "dt_bias");
+  const bool is_conv = has(name, "conv1d");
+  const bool is_inject = has(name, "block_inject_weight");
+  for (size_t i = 0; i < n; ++i) {
+    float v;
+    if (e.role == QwenTensorRole::Fp8Payload || e.role == QwenTensorRole::NgramShard)
+      v = rng.normal3();                                   // e4m3 codes (scaled at dequant)
+    else if (is_scale_inv) v = 0.01f + 0.06f * (0.5f * (rng.unit() + 1.0f));
+    else if (is_table_scale) v = 0.02f;
+    else if (is_gdn_norm) v = 0.8f + 0.4f * (0.5f * (rng.unit() + 1.0f));
+    else if (is_norm) v = 0.2f * rng.normal3();
+    else if (is_a_log) v = 0.3f * rng.normal3();
+    else if (is_dt_bias) v = 0.3f * rng.normal3();
+    else if (is_conv) v = 0.15f * rng.normal3();
+    else if (is_inject) v = 0.05f * rng.normal3();
+    else if (e.cls == QwenWeightClass::Embed || e.cls == QwenWeightClass::LmHead) v = 0.3f * rng.normal3();
+    else v = 0.05f * rng.normal3();                        // projections, routers, gates
+    if (e.dtype == dgpp::DType::BF16) {
+      const uint16_t bits = float_to_bf16_bits(v);
+      std::memcpy(&out[i * 2], &bits, 2);
+    } else if (e.dtype == dgpp::DType::F8_E4M3) {
+      out[i] = float_to_fp8_e4m3_bits(v);
+    } else {
+      throw std::runtime_error("fixture dtype not handled: " + name);
+    }
+  }
+  return out;
+}
+
+// Writes `dir` (config.json + one safetensors shard) for `cfg`.
+inline void write_fixture(const QwenTextConfig& cfg, const std::string& dir,
+                          const char* text_json = tiny_text_json(),
+                          const char* quant_json = tiny_quant_json()) {
+  fs::path root(dir);
+  fs::remove_all(root);
+  fs::create_directories(root);
+  {
+    const fs::path p = root / "config.json";
+    std::FILE* f = std::fopen(p.c_str(), "wb");
+    if (!f) throw std::runtime_error("cannot write config.json");
+    const std::string json = std::string("{\"architectures\":[\"Qwen4ExpForConditionalGeneration\"],"
+                                         "\"model_type\":\"qwen4_exp\",\"text_config\":") +
+                             text_json + ",\"quantization_config\":" + quant_json + "}";
+    std::fwrite(json.data(), 1, json.size(), f);
+    std::fclose(f);
+  }
+  const auto table = dgpp::qwen_expected_text_tensors(cfg);
+  std::string header = "{";
+  std::vector<uint8_t> data;
+  size_t off = 0;
+  for (const auto& e : table) {
+    const auto b = tensor_bytes(cfg, e);
+    std::string shape = "[";
+    for (size_t i = 0; i < e.shape.size(); ++i) {
+      if (i) shape += ",";
+      shape += std::to_string(e.shape[i]);
+    }
+    shape += "]";
+    if (off) header += ",";
+    header += "\"" + e.name + "\":{\"dtype\":\"" + std::string(dgpp::dtype_name(e.dtype)) +
+              "\",\"shape\":" + shape + ",\"data_offsets\":[" + std::to_string(off) + "," +
+              std::to_string(off + b.size()) + "]}";
+    data.insert(data.end(), b.begin(), b.end());
+    off += b.size();
+  }
+  header += "}";
+  const fs::path shard = root / "model.safetensors";
+  std::FILE* f = std::fopen(shard.c_str(), "wb");
+  if (!f) throw std::runtime_error("cannot write shard");
+  const uint64_t hlen = header.size();
+  std::fwrite(&hlen, 8, 1, f);
+  std::fwrite(header.data(), 1, hlen, f);
+  std::fwrite(data.data(), 1, data.size(), f);
+  std::fclose(f);
+  std::printf("qwen fixture written: %zu tensors, %.2f MB payload\n", table.size(),
+              static_cast<double>(data.size()) / 1048576.0);
+}
+
+}  // namespace qwenfx

@@ -240,6 +240,28 @@ the occupancy (+0.3%): the router input distribution is stable across
 depths. Sampling other prompt classes is future work; the traffic tool
 consumes their traces unchanged.
 
+## Cost of one recorded collective node (2026-09-09, four nodes)
+
+The Qwen plan's Q0 question (docs/qwen38_flash_next_plan.md D3): what does
+one more all-reduce per residual site cost the decode step? Measured by
+`glm_gen_check --gr-probe N` (one extra `[T x 10240]` bf16 all-reduce over a
+scratch buffer after the attention fold of the first N layers, N = 32 within
+the graph's 128-node budget) on `unsloth/GLM-5.3-Flash-FP8`, 300 steps,
+transcripts identical with and without the probe
+(`scripts/fabric_gr_probe.sh`, runs in `build-ci/fabric-runs/gr_probe_2026-09-09/`):
+
+| step | base ms/step | +32 nodes | per node |
+|---|---:|---:|---:|
+| T=1 graph replay, TP=4 | 29.98 | 31.49 | **47 µs** |
+| MTP graph replay (T=2 verify rows), TP=4 | 40.40 | 42.32 | **60 µs** |
+
+The bus alone (`bus_check allreduce`, eager, 8 KiB, `scripts/fabric_bus_probe.sh`):
+p50 **30 µs at world 2**, **39 µs at world 4** (min 21 / 33 µs). The graph
+node's cost is the eager latency plus the replay's skew and fold; scaling
+the in-graph number by the eager ratio puts the two-node cost near 36 µs
+(T=1) and 46 µs (MTP). None of this is hidden behind weight streaming: the
+probe nodes sit where a boundary does, and the step grew by the full amount.
+
 ## cuBLASLt best-of-heuristics results
 
 `micro_gemm_peak` now warms all SMs before measurement, times every valid
@@ -266,6 +288,124 @@ this platform, consistent with NVIDIA's [DGX Spark CUDA porting guide](https://d
 The binary now treats the expected unsupported result as a completed probe and
 states the correct fallback: registered host memory consumed directly by the
 GPU, not a pinned bounce copy.
+
+## GLM-4.7 (nvidia/GLM-4.7-NVFP4) serving on four nodes (2026-09-10)
+
+`scripts/fabric_glm4_serve.sh deploy/cluster_glm47.json` (MTP) and
+`deploy/cluster_glm47_t1.json` (T=1), the resident image warm on every rank,
+the 202,752-token pool (77.4 GiB per rank: weights 52.8, K/V 23.3).
+
+| reading | value |
+|---|---|
+| boot from the resident image | 18–20 s (the first boot captures it: ~3 min); 14 graph variants warm-captured in 13 s |
+| T=1 decode, one request | 49.0 ms/step (the bytes floor ~40 ms: 9.7 GB per rank per step, 6.3 GB of it the BF16 attention projections modelopt left unquantized; 186 collectives ~8 ms) |
+| MTP decode, one request | 60–61 ms/pass at 1.86–1.99 tokens/pass (draft acceptance 79–98 %), 31–33 ms/token |
+| four live requests (the eval) | 110–145 ms/step batched, ~8–12 tokens/s per request |
+| prefill, short prompts (31–150 tokens) | 400–1000 ms per prompt, 5–13 ms/token (v1 warp-per-row attention; the tensor-core form is open) |
+| MTP == T=1 transcripts | identical, 4 of 4 prompts; op streams identical across the four ranks |
+| eval (thinking off, `serve_eval.py --no-think`) | gsm8k 60/60, HumanEval 39/40, schema extraction 30/30; no answer truncated |
+| API check | every case (stop, n, logit_bias, usage, reasoning tokens) |
+
+Two findings on the way: the partial RoPE is transformers' half-split
+rotate_half (the interleaved reading passed every self-written gate and
+looped the model after ~30 tokens; caught by `tools/glm4_torch_reference.py`
+against transformers' own layer code on the real weights — layer-0 relative
+l2 0.036 -> 0.0025), and the draft block takes the post-final-norm hidden
+(11–46 % acceptance with the pre-norm residual, 79–98 % after).
+
+### MTP depth 2 on GLM-4.7 (2026-09-10)
+
+The depth-2 chain (the session core's `session_draft_chain` /
+`session_graph_capture_draft_chain` on the hidden-window families,
+`glm_spec_chain_row_window`) measured with `deploy/cluster_glm47_d2.json`
+against depth 1, one greedy request at a time, transcripts identical to
+depth 1 on every short prompt (4/4):
+
+| prompt (256 tokens) | depth 1: ms/pass, tok/pass, ms/token | depth 2: ms/pass, tok/pass, ms/token, p1 / p2 | tokens/s |
+|---|---|---|---|---|
+| chat | 61, 1.86, 32.5 | 72, 2.32, 31.2, 85 % / 48 % | +4 % |
+| code | 61, 1.93, 33.0 | 72, 2.52, 28.7, 92 % / 60 % | +13 % |
+| math | 62, 1.95, 31.3 | 72, 2.55, 28.4, 94 % / 62 % | +10 % |
+| json | 61, 1.99, 31.1 | 73, 2.60, 28.0, 96 % / 65 % | +11 % |
+| 6,525-token prompt, 300 tokens | 66, 1.86, 35.4 | 79, 2.35, 33.7, 85 % / 52 % | +5 % |
+
+The chain row costs ~11 ms per pass (the second draft row's expert bytes
+and its own draft-block run) and the second draft stands 48–65 % of the
+time, so single-stream throughput gains 4–13 %. (At this reading the
+engine built no row-batched graph past depth 1: two live requests ran
+their scalar graphs back to back at 143–147 ms per pass each; the batched
+chain followed the same day — the next section.) Prefill of the
+6,525-token prompt: 11.5 s (1.77 ms/token) at both depths.
+The other families after the chain landed (the session core is shared):
+Qwen3.8-Flash-Next MTP 26.3–26.4 ms/step, transcripts identical to round 5;
+GLM-5.3-Flash `fabric_glm_regression.sh` MTP 40.39 / T=1 29.94 ms/step,
+prefill 548 / 1,412 / 6,284 ms, the same rank-consistency hashes as the
+2026-09-09 baseline (`build-ci/fabric-runs/*_post_d2_2026-09-10`).
+
+### Batched MTP depth 2 on GLM-4.7, on the runtime decode rows (2026-09-10)
+
+The fixed decode batch's row ceiling is the recipe's shape since this
+afternoon — `max_concurrency x (1 + mtp_depth)`, floored at 8 — so the
+depth-2 recipe (`deploy/cluster_glm47_d2.json`, 4 slots) boots a 12-row
+world (`serve: decode rows 12`; the bus's latency slot 120 KiB, 128
+sampling candidates still fit) with the 2-, 3- and 4-slot batch families
+at 6, 9 and 12 rows, each carrying every slot's chain row in one draft-
+block run (`session_graph_capture_draft_chain_batch`). The GEMM seam
+lowers every bf16 decode call up to those rows to the row-independent
+GEMV core (`CublasLtGemm::set_decode_rows`), so a batched request's rows
+keep the scalar reduction order — the first 9-row batch had fallen to a
+cuBLASLt algorithm with its own order and flipped a near tie in the
+engine gate. The reading, `scripts/fabric_glm4_load.sh` (distinct
+long-answer prompts, thinking off, greedy, 320 tokens each; the client's
+aggregate tokens/s over the phase's decode span, rank 0's stats lines
+inside the phase):
+
+| live requests | depth 1: ms/pass, tok/step/req, tok/s (per request) | depth 2 batched: ms/pass, tok/step/req, tok/s (per request) | tokens/s |
+|---|---|---|---|
+| 1 | 60, 1.89, 31.0 | 72, 2.31, 32.2 | +4 % |
+| 2 | 79, 1.85–1.88, 44.5 (22.3) | 123–125, 2.3–2.6, 37.0 (18.5) | −17 % |
+| 4 | 139–143, 1.74–1.93, 47.5 (11.9) | 198–204, 2.2–2.4, 42.8 (10.7) | −10 % |
+
+The second draft stands 41–66 % of the time in the batch as it does
+alone, but the pass grows faster than the tokens: by fixed rows the pass
+is 72 ms at 3, 79 at 4 (one GEMV chunk), 123 at 6 and 140 at 8 (two
+chunks), 200 at 12 (three) — each 4-row chunk past the first re-reads
+the 6.3 GB of BF16 attention projections per rank (+45–60 ms), a row
+within a chunk costs 7–8 ms (its K/V reads and its distinct experts). So
+batched depth 2 is correct, isolated and slower than depth 1 under
+concurrency on this family; depth 2 stays a single-stream setting
+(`cluster_glm47.json` keeps depth 1). The lever for concurrency at
+either depth is the attention projections' bytes per pass: wider GEMV
+chunks (a 6-row chunk at K = 5120 is 61 KB of dynamic shared memory, an
+8-row one 80 KB — one block per SM, to be measured), or a row-independent
+tensor-core kernel for the bf16 projections that reads the weights once
+for up to 16 rows; quantizing the projections halves the bytes but not
+the passes (the fp8 / fp4 GEMV cores chunk the same way). Transcript
+isolation: the engine gate pins the batched depth-2 rows bitwise to the
+eager engine's, and on the fabric a prompt's greedy answer alone (the
+scalar graph) is its answer beside three others (the 12-row batch) —
+`serve_load.py --isolation`; the op streams are identical across the
+four ranks in both worlds.
+
+### The existing families after the GLM-4.7 work (2026-09-10)
+
+`scripts/fabric_glm_regression.sh` on `unsloth/GLM-5.3-Flash-FP8` against
+the 2026-09-09 baseline (`build-ci/fabric-runs/glm_baseline_2026-09-09`):
+every reading's rank-consistency hash identical to the baseline's (the
+transcripts bitwise unchanged); MTP chat 40.49 ms/step at 72.0 % acceptance
+(baseline 40.35–40.50), T=1 29.97 ms/step mean, p50 30.0, p99 31.0 (29.81–
+29.96 / 30.0 / 31.0), steady-state prefill 549 / 1417 / 6286 ms at 512 /
+2048 / 8192 tokens (549 / 1405–1412 / 6258; a second sample 551 / 1428 /
+6303 — the spread of the reading). `moe_slot_bench` at the GLM-5.3-Flash
+per-rank shape: fp4 201 / 320 / 883 us at 1 / 2 / 8 rows (recorded 209 /
+334 / 929), fp8 281–286 / 491 / 1489 (273 / 469 / 1420, the same decode
+kernels — run-to-run spread on this box, the fabric step above is the
+arbiter). `scripts/fabric_qwen_serve.sh` on `Qwen/Qwen3.8-Flash-Next-FP8`
+against the round-5 transcripts of 2026-09-09: MTP world (`deploy/
+cluster_qwen.json`) 26–27 ms/pass at 1.5–2.0 tokens/pass, T=1 world
+21.8–21.9 ms/step (recorded 22.0), transcripts identical 4 of 4 in both,
+API checks clean, op streams identical across the ranks. The full ctest
+after every change: 62 of 62.
 
 ## Build and test validation
 
