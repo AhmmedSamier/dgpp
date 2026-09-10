@@ -3,7 +3,7 @@
 Scope: make one request's decode and prefill faster at world 4 (the served
 geometry, `deploy/cluster_qwen.json`), without regressing concurrent
 sessions and **without quantizing any weight**. Everything below was
-measured today on the committed tree (5727bae) unless it says otherwise;
+measured today on the committed tree (a8a2664) unless it says otherwise;
 the runs are under `build-ci/fabric-runs/*_2026-09-10/`.
 
 The companion documents are `docs/qwen38_flash_next_plan.md` (the port, the

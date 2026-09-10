@@ -424,8 +424,8 @@ The history by milestone. The dated engineering record in
   eager rows at `device_tokens()`, which nothing rewrites during a replay.
   The app's recorded verify now reads the feed rows; the eager speculator
   (77 % accepted) and the serving path were never affected. Found by the
-  NVFP4 evidence chain; bisected with the app built at 1bf49db and
-  2caaaf1 (both 0 %) against the eager path (77 %).
+  NVFP4 evidence chain; bisected with the app built at 2b7a6c6 and
+  f8b2d34 (both 0 %) against the eager path (77 %).
 
 - The row batch is a family: a 2-slot (4-row) and a 3-slot (6-row) batch
   are recorded beside the full 8-row one, and a step replays the smallest
