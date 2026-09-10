@@ -268,38 +268,43 @@ FP8 bytes. Pushing the prefetcher harder is a measured loss (§5).
 
 ## 4. The plan — prefill
 
-### 4.1 The expert tile must sweep the rows before a bigger chunk pays
+### 4.1 MEASURED: the bigger chunk is worth 3.6 %, not 14 % (the sweep kernel stays)
 
-Every prefill chunk touches all 512 experts of all 48 layers (2 048 tokens ×
-top-10 = 20 480 draws), so a chunk reads ~30 GB of expert weights per rank —
-130 ms at line rate, ~230 ms as the kernel runs it. An 8 K prompt is four
-2 048-token chunks and pays that four times, which looked like the largest
-prefill lever on the page.
+Every prefill chunk touches all 512 experts of all 48 layers, so the byte
+model said an 8 K prompt in four 2 048-token chunks reads the expert
+weights four times over, and that one 8 192-token chunk — once the grouped
+kernel stopped re-reading its weight tile per m-tile — would take the
+expert share from ~920 ms toward ~250. Both halves were built and
+measured on 2026-09-10:
 
-**Measured, and it is not — yet.** Rebuilt with
-`kPrefillChunkTokens = 4096` (memory plan 45.0 → 56.1 GiB per rank, still
-inside the budget) and re-run: the 8 K prefill goes 4 324 → 4 242 ms,
-4 354 → 4 272, 4 408 → 4 324 — **−1.9 %**, not the −15 % the byte model
-predicts. Halving the chunk count removed only ~41 ms per chunk.
+* **The m-sweep kernel** (`moe_grouped_mma_fp8_ldm_sweep_kernel`,
+  `DGPP_MOE_FP8_SWEEP=on` to run it): one block per (segment, n-tile,
+  group of four m-tiles), each k-stage's weight tile copied once and every
+  live m-tile run under it; three 27 KB stages, one block per SM, 193–202
+  registers, no spills; dispatched only when some expert holds more than
+  64 rows, so the 2 K-chunk path is untouched. Bitwise the reference tile
+  kernel in `moe_tile_bench` (uniform and ragged), `glm_moe_test` and
+  `qwen_moe_test` green. On the bench at 228 rows per expert one gate
+  launch goes 6.87 → 5.87 ms (87 → 103 GB/s of weights) — only −15 %,
+  because at four m-tiles the kernel is issue-bound, not weight-bound: 47
+  TFLOP/s against a ~236 dense peak.
+* **The 8 192-token chunk** (memory plan 45 → 62 GiB per rank), the 8 K
+  prefill probe, medians: 4 324 ms with four 2 048 chunks → **4 169 ms**
+  with one 8 192 chunk and the sweep (−3.6 %), 4 249 ms without it
+  (−1.7 %). The 2 K prefill is unchanged either way (1 136–1 152 ms).
 
-The reason is in the kernel's grid:
-`launch_moe_grouped_mma_fp8_ldm` launches
-`(n_tiles × m_tiles, n_segs)` blocks with `BM = 64`, so **each m-tile re-reads
-the expert's whole weight tile**. At 2 048 tokens an expert holds ~40 rows =
-one m-tile and the weights are read once; at 4 096 it holds ~80 rows = two
-m-tiles and they are read twice. The chunk doubled and the per-chunk expert
-traffic doubled with it. Exactly cancelled.
-
-So the order is: **first give the grouped kernel an m-loop** — one block
-stages a weight tile and sweeps every row of that expert's segment (or a
-persistent-CTA schedule over m) — **then** raise the chunk. Together an 8 K
-prompt reads the expert weights once instead of four times: ~920 ms of
-expert MMA today, ~250 ms after, i.e. −14 to −16 % of the whole prefill.
-Either half alone is worth ~2 %.
-
-The chunk size also has to stay a policy, not a new constant: a full-length
-chunk blocks decode for seconds, so grow it only when nothing else is live
-(and it needs §4.2 to stay inside the memory plan).
+So the chunk buys 3.6 % of an 8 K prefill for 17 GiB per rank and a
+four-second non-preemptible unit; the constant goes back to 2 048 and no
+chunk policy is built. The sweep kernel stays in the tree with its bench
+gate and tests but **off by default** (`DGPP_MOE_FP8_SWEEP=on`): at the
+production chunk ragged routing hands it launches where one hot expert has
+two tiles and the rest have one, and its single block per SM hides less
+latency there than the one-tile kernel's two — GLM's 512-token prefill
+read 569 vs 544 ms with it on, the 8 K one 6 330 vs 6 260. The lesson
+for prefill's "line rate": the expert kernel's binding limit at prefill
+widths is the tensor-core issue rate, not DRAM — ~20 % of dense peak with
+one block per SM on `mma.sync` — and that, plus the fold/compute
+wavefront (§4.6), is where the prefill headroom actually is.
 
 ### 4.2 The head on the rows that need it (frees ~0.5 GB per 2 K chunk)
 
@@ -487,8 +492,9 @@ already wired for GLM-4.7 and is the template; Qwen's
 
 1. LANDED §5.1 sampled draft + ratio verify: 17.0–18.3 → 15.3–15.8
    ms/token on sampled requests.
-2. §4.1 the grouped kernel's m-loop, then the chunk policy with §4.2 —
-   measured to be worthless in either order alone, and −14 % together.
+2. MEASURED §4.1: the sweep kernel landed, the 8 192 chunk is worth 3.6 %
+   and is not taken. The expert kernel's MMA efficiency (~20 % of dense
+   peak at prefill widths) is the real item, beside §4.6.
 3. §3.4 node fusion, then §3.3 the speculative launch.
 4. §4.3–4.4 the prefill kernel fusions (§4.5 re-estimated at ~1 %).
 5. §3.5 the skew diagnostic (cheap, but its outcome may be "the fabric is

@@ -2987,6 +2987,219 @@ __global__ __launch_bounds__(fp8_ldm::kThreads, 2) void moe_grouped_mma_fp8_ldm_
   }
 }
 
+// DGPP_MOE_FP8_SWEEP=on runs the m-sweep form below wherever an expert
+// holds more than one m-tile; off by default (2026-09-10). Its domain is
+// the large prefill chunk — 4x the rows per expert cost 1.9x on the
+// one-tile kernel, 1.64x on the sweep — but that chunk measured only 3.6 %
+// on an 8 K prefill and is not taken, and at the production 2,048-token
+// chunk the sweep is a small loss: ragged routing hands it launches where
+// one hot expert has two tiles and every other has one, and one block per
+// SM hides less latency there than the one-tile kernel's two (GLM's
+// 512-token prefill read 569 vs 544 ms with it on).
+bool moe_fp8_sweep_enabled() {
+  static const bool on = [] {
+    const char* v = std::getenv("DGPP_MOE_FP8_SWEEP");
+    return v != nullptr && std::string(v) == "on";
+  }();
+  return on;
+}
+
+// The m-sweep form (2026-09-10): one block per (segment, n-tile, group of
+// kMT m-tiles) that copies each k-stage's weight tile ONCE and runs every
+// live m-tile of its group under it — where the one-tile kernel above runs
+// one block per m-tile and so re-reads the expert's weights once per 64
+// rows. At a 2,048-token prefill an expert holds ~40–60 rows (one tile) and
+// the two forms are the same traffic; at 4,096 and 8,192 the one-tile form
+// re-reads its weights two to four times over (the tile bench: 4x the rows
+// cost 1.9x the time at the same weights). Each output element's k chain —
+// the stages, the fragments, the MMA sequence — is the one-tile kernel's,
+// so the outputs are bitwise. Three 27 KB stages (four A tiles, the codes,
+// the scales) and kMT accumulator sets: one block per SM.
+namespace fp8_ldm_sweep {
+constexpr int kMT = 4;
+constexpr int kStages = 3;
+constexpr size_t kSlotBytes = size_t(kMT) * fp8_ldm::kABytes + fp8_ldm::kCodeBytes + fp8_ldm::kScaleBytes;
+constexpr size_t kSmem = kStages * kSlotBytes;  // 81,408
+static_assert(kSlotBytes % 16 == 0, "16-byte aligned slots");
+}  // namespace fp8_ldm_sweep
+
+template <typename OutT>
+__global__ __launch_bounds__(fp8_ldm::kThreads, 1) void moe_grouped_mma_fp8_ldm_sweep_kernel(
+    const uint16_t* __restrict__ act, size_t act_stride, int act_vec,
+    const int32_t* __restrict__ act_rows,
+    const MoeSegment* __restrict__ segs, const MoeExpertView* __restrict__ views,
+    int which, OutT* __restrict__ out, size_t out_stride, int n, int k,
+    int m_groups) {
+  using namespace fp8_ldm;
+  using fp8_ldm_sweep::kMT;
+  using fp4_pipe3::cp_async;
+  using fp4_pipe3::commit;
+  using fp4_pipe3::wait;
+  using fp4_ldm::ldmatrix_x4;
+  constexpr int kSweepStages = fp8_ldm_sweep::kStages;
+  constexpr size_t kSweepSlot = fp8_ldm_sweep::kSlotBytes;
+  extern __shared__ __align__(16) uint8_t smem[];
+  const MoeSegment seg = segs[blockIdx.y];
+  const int m_group = static_cast<int>(blockIdx.x) % m_groups;
+  const int n_tile = static_cast<int>(blockIdx.x) / m_groups;
+  const int z0 = m_group * kMT * BM;
+  if (z0 >= seg.rows) return;  // beyond this segment's rows (no barrier yet)
+  const int live_tiles = min(kMT, (seg.rows - z0 + BM - 1) / BM);
+  const MoeExpertView v = views[seg.expert * 3 + which];
+  const int n0 = n_tile * BN;
+  const int rs = v.scale_shift_rows, cs = v.scale_shift_cols;
+  const int scale_cols = (k + (1 << cs) - 1) >> cs;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int warp = tid / 32, lane = tid % 32;
+  const int wn = warp;  // 1 (m64) x 8 (n16)
+  const int r = lane / 4, cc = (lane % 4) * 2;
+  const int a_row = tid / 4, a_kq = (tid % 4) * 8;
+  const int b_row = tid / 2, b_half = tid % 2;
+  const int gn = n0 + b_row;
+  const bool b_ok = gn < n;
+  const uint8_t* b_codes = v.payload + static_cast<size_t>(b_ok ? gn : 0) * k;
+  const float* b_scales = v.scales + (static_cast<size_t>(b_ok ? gn : 0) >> rs) * scale_cols;
+  // Per m-tile: this thread's activation row (or none) and the tile's rows.
+  int m_rows[kMT];
+  const uint16_t* a_src[kMT];
+  bool a_ok[kMT];
+#pragma unroll
+  for (int mt = 0; mt < kMT; ++mt) {
+    const int zt = z0 + mt * BM;
+    m_rows[mt] = mt < live_tiles ? min(BM, seg.rows - zt) : 0;
+    a_ok[mt] = a_row < m_rows[mt];
+    a_src[mt] = act;
+    if (a_ok[mt]) {
+      const int srow = seg.row0 + zt + a_row;
+      a_src[mt] = act + static_cast<size_t>(act_rows != nullptr ? act_rows[srow] : srow) * act_stride;
+    }
+  }
+  const int stages = k / BK;  // k % 32 == 0 (the launcher's contract)
+
+  auto slotA = [&](int slot, int mt) {
+    return reinterpret_cast<uint16_t*>(smem + static_cast<size_t>(slot) * kSweepSlot +
+                                       static_cast<size_t>(mt) * kABytes);
+  };
+  auto slotCodes = [&](int slot) {
+    return smem + static_cast<size_t>(slot) * kSweepSlot + static_cast<size_t>(kMT) * kABytes;
+  };
+  auto slotScale = [&](int slot) {
+    return reinterpret_cast<float*>(smem + static_cast<size_t>(slot) * kSweepSlot +
+                                    static_cast<size_t>(kMT) * kABytes + kCodeBytes);
+  };
+  auto issue = [&](int s, int slot) {
+    const int k0 = s * BK;
+#pragma unroll
+    for (int mt = 0; mt < kMT; ++mt) {
+      if (mt >= live_tiles) break;
+      uint16_t* dst = slotA(slot, mt) + static_cast<size_t>(a_row) * A_PAD + a_kq;
+      const uint16_t* src = a_ok[mt] ? a_src[mt] + k0 + a_kq : act;
+      if (act_vec != 0) {
+        if (a_ok[mt] && (tid % 4) == 0)
+          asm volatile("prefetch.global.L2::evict_last [%0];" ::"l"(src));
+        cp_async(dst, src, 16, a_ok[mt] ? 16 : 0);
+      } else {
+        uint16_t e[8];
+#pragma unroll
+        for (int h = 0; h < 8; ++h) e[h] = a_ok[mt] ? src[h] : static_cast<uint16_t>(0);
+        *reinterpret_cast<uint4*>(dst) = make_uint4(e[0] | (e[1] << 16), e[2] | (e[3] << 16),
+                                                    e[4] | (e[5] << 16), e[6] | (e[7] << 16));
+      }
+    }
+    {
+      cp_async(slotCodes(slot) + static_cast<size_t>(b_row) * kRawStride + b_half * 16,
+               b_ok ? b_codes + k0 + b_half * 16 : v.payload, 16, b_ok ? 16 : 0);
+      if (b_half == 0 && b_ok && (s % 4) == 0) {
+        const int nk = k0 + 4 * BK;
+        if (nk < k) asm volatile("prefetch.global.L2 [%0];" ::"l"(b_codes + nk));
+      }
+    }
+    if (b_half == 0) cp_async(slotScale(slot) + b_row, b_scales + (k0 >> cs), 4, 4);
+  };
+
+  float acc[kMT][4][2][4];
+#pragma unroll
+  for (int mt = 0; mt < kMT; ++mt)
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+#pragma unroll
+      for (int j = 0; j < 2; ++j)
+        acc[mt][i][j][0] = acc[mt][i][j][1] = acc[mt][i][j][2] = acc[mt][i][j][3] = 0.f;
+
+#pragma unroll
+  for (int s = 0; s < kSweepStages - 1; ++s) {
+    if (s < stages) issue(s, s);
+    commit();
+  }
+  for (int s = 0; s < stages; ++s) {
+    const int slot = s % kSweepStages;
+    wait<kSweepStages - 2>();
+    __syncthreads();
+    if (s + kSweepStages - 1 < stages) issue(s + kSweepStages - 1, (s + kSweepStages - 1) % kSweepStages);
+    commit();
+    const uint8_t* codes = slotCodes(slot);
+    const float* sc = slotScale(slot);
+#pragma unroll
+    for (int kk = 0; kk < BK; kk += 16) {
+      uint32_t bfrag[2][2];
+#pragma unroll
+      for (int j = 0; j < 2; ++j) {
+        const int brow = wn * 16 + j * 8 + r;
+        const uint8_t* row = codes + static_cast<size_t>(brow) * kRawStride + kk;
+        const float s_row = sc[brow];
+        const uint32_t lo = *reinterpret_cast<const uint16_t*>(row + cc);
+        const uint32_t hi = *reinterpret_cast<const uint16_t*>(row + cc + 8);
+        bfrag[j][0] = decode_pair_bf16(lo, s_row);
+        bfrag[j][1] = decode_pair_bf16(hi, s_row);
+      }
+#pragma unroll
+      for (int mt = 0; mt < kMT; ++mt) {
+        if (mt >= live_tiles) break;
+        const uint16_t* a = slotA(slot, mt);
+        const int live_slabs = (m_rows[mt] + 15) / 16;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          if (i >= live_slabs) break;
+          uint32_t af[4];
+          ldmatrix_x4(af, a + static_cast<size_t>(i * 16 + (lane % 16)) * A_PAD + kk + (lane / 16) * 8);
+#pragma unroll
+          for (int j = 0; j < 2; ++j) {
+            asm volatile(
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+                "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                : "+f"(acc[mt][i][j][0]), "+f"(acc[mt][i][j][1]), "+f"(acc[mt][i][j][2]), "+f"(acc[mt][i][j][3])
+                : "r"(af[0]), "r"(af[1]), "r"(af[2]), "r"(af[3]), "r"(bfrag[j][0]), "r"(bfrag[j][1]));
+          }
+        }
+      }
+    }
+  }
+  wait<0>();
+
+#pragma unroll
+  for (int mt = 0; mt < kMT; ++mt) {
+    if (mt >= live_tiles) break;
+    const int zt = z0 + mt * BM;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const int row_lo = i * 16 + r;
+#pragma unroll
+      for (int j = 0; j < 2; ++j) {
+        const int gcol = n0 + wn * 16 + j * 8 + cc;
+        auto st = [&](int row_off, int col_off, float val) {
+          const int mm = row_lo + row_off;
+          if (mm < m_rows[mt] && gcol + col_off < n)
+            fp8_gemv::store_dot(out + static_cast<size_t>(seg.row0 + zt + mm) * out_stride + gcol + col_off, val);
+        };
+        st(0, 0, acc[mt][i][j][0]);
+        st(0, 1, acc[mt][i][j][1]);
+        st(8, 0, acc[mt][i][j][2]);
+        st(8, 1, acc[mt][i][j][3]);
+      }
+    }
+  }
+}
+
 template <typename OutT>
 void launch_moe_grouped_mma_fp8_ldm(const uint16_t* act, size_t act_stride,
                                     const int32_t* act_rows, const MoeSegment* segs,
@@ -3005,6 +3218,27 @@ void launch_moe_grouped_mma_fp8_ldm(const uint16_t* act, size_t act_stride,
     opted_in = true;
   }
   const unsigned n_tiles = static_cast<unsigned>((n + BN - 1) / BN);
+  if (m_tiles > 1 && moe_fp8_sweep_enabled()) {
+    // More than one m-tile somewhere: the sweep form reads each weight tile
+    // once per kMT m-tiles instead of once per m-tile (bitwise the one-tile
+    // kernel; the tile bench and glm/qwen_moe_test hold both to the
+    // reference).
+    using fp8_ldm_sweep::kMT;
+    static bool sweep_opted = false;
+    if (!sweep_opted) {
+      DGPP_CUDA_OK(cudaFuncSetAttribute(moe_grouped_mma_fp8_ldm_sweep_kernel<OutT>,
+                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        static_cast<int>(fp8_ldm_sweep::kSmem)));
+      sweep_opted = true;
+    }
+    const int m_groups = (max_rows + kMT * BM - 1) / (kMT * BM);
+    const dim3 grid(n_tiles * static_cast<unsigned>(m_groups), static_cast<unsigned>(n_segs), 1u);
+    moe_grouped_mma_fp8_ldm_sweep_kernel<OutT><<<grid, kThreads, fp8_ldm_sweep::kSmem, stream>>>(
+        act, act_stride, act_vec, act_rows, segs, views, which, out, out_stride, n, k,
+        m_groups);
+    DGPP_CUDA_OK(cudaGetLastError());
+    return;
+  }
   const dim3 grid(n_tiles * static_cast<unsigned>(m_tiles), static_cast<unsigned>(n_segs), 1u);
   moe_grouped_mma_fp8_ldm_kernel<OutT><<<grid, kThreads, kSmem, stream>>>(
       act, act_stride, act_vec, act_rows, segs, views, which, out, out_stride, n, k, m_tiles);
