@@ -289,3 +289,40 @@ same holds for every row width under 512 bytes. The next step is the
 per-kernel profile at world 1 (`scripts/fabric_qwen_profile.sh` on the
 T=1 FP8 config) and a narrow-row variant of the fp8 core for those
 shapes.
+
+### The world-1 profile of the FP8 MTP world (2026-09-10, nsys)
+
+`scripts/fabric_qwen_profile.sh deploy/cluster_qwen_spark1_fp8.json`: 255
+two-row passes, 40.8 ms wall per pass, 1,567 kernels per pass; the GPU
+"busy" 49.8 ms per pass because the L2 prefetcher's kernels (11.2 ms of
+GPU time, 201 per pass) run on their side stream under the main chain.
+The main chain's classes against their byte budgets at 233.6 GB/s:
+
+| kernel class | ms/pass | per pass | bytes/pass | at line rate | note |
+|---|---|---|---|---|---|
+| routed experts fp4 (gate/up + down) | 10.3 | 48 + 48 | ~2.7 GB (two rows route to ~2x the experts) | ~10.3 | at line rate |
+| multi-problem fp8 GEMV (GDN qkv+z, QSA q/k/v/idx) | 8.0 | 49 | 1.94 GB | 8.3 | at line rate (L2-warm rows) |
+| single fp8 GEMVs (out_proj, o_proj, GR up, PLE) | 5.5 | 153 | 1.15 GB | 4.9 | ~90 % |
+| lm_head fp8, f32 out | 5.0 | 2 (!) | 1.27 GB | 5.4 | the verify's and the draft head's |
+| GR down + inject (fused fp8) | 2.6 | 98 | 0.33 GB | 1.4 | 55 %: 320 rows = 41 blocks, overhead-bound |
+| shared expert tail (fused fp8) | 1.5 | 49 + 49 | 0.24 GB | 1.0 | ~70 %, small kernels |
+| GDN recurrence, conv, norms, router, sampling, commit | ~3.5 | | | | |
+| gaps between kernels | ~2.2 | | | | |
+
+Two findings. The second lm_head per MTP pass is the draft head's full-
+vocabulary product (its pick needs the whole distribution): 636 MB at FP8,
+2.5 ms of every pass, 5 ms with the verify's — an NVFP4 lm_head would
+take 1.4 ms off T=1 and 2.7 ms off an MTP pass, a quality decision. And
+the GR down GEMV is the one dense kernel far from line rate: 320 rows
+over a 10,240-wide k is 41 blocks on 48 SMs with each block staging two
+20 KB activation rows for 3.3 MB of weights — a split-k form (the rows'
+k in slices across more blocks, a small reduce) would return ~1 ms a
+pass. The L2 prefetcher's 11 ms of side-stream kernels earn nothing
+obvious at world 1 (no collective gaps to fill); the A/B is below.
+
+**The prefetcher A/B at world 1** (`DGPP_L2_PREFETCH=off`, the same FP8
+worlds, transcripts identical): MTP 39–40 → 40–41 ms per pass, T=1
+30.2–30.9 → 32–33. The prefetcher earns 2 ms a pass at T=1 even without
+collective gaps to hide in — the side-stream reads still land the next
+kernel's leading rows in L2 ahead of it — so it stays on; its 11 ms of
+side-stream GPU time is not a cost the main chain pays.
