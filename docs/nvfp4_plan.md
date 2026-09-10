@@ -659,7 +659,7 @@ floor only fewer bytes or more tokens per step move the number.
   mio_throttle 3.3; the fp8 kernel 7.8) — two codes per weight byte is
   twice the activation reads per byte. The pipelined fp4 tile kernel: 16 %
   warps active (one block per SM), stalls tiny per issue — starved of
-  warps, not of memory. What followed (commit 6b611db, all bitwise, the
+  warps, not of memory. What followed (commit 6e7af31, all bitwise, the
   checkpoint's slices and glm_moe_test's twins): the activation window
   loaded once per chunk column and reused across row steps (the steps
   sweep re-run with it: one step 201, two 209, four 217 us at one row —

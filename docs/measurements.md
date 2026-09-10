@@ -8,7 +8,7 @@ generated checkpoint report is `docs/checkpoint_budget.md`.
 
 ## Scope and environment
 
-- source base: `e9a76c8` plus the audit-remediation working tree;
+- source base: `e2db401` plus the audit-remediation working tree;
 - two DGX Spark GB10 nodes, AArch64 Linux `6.17.0-1026-nvidia`;
 - CUDA 13.0 compiler, SM 12.1, 48 SMs, 24 MiB L2;
 - ConnectX-7 firmware `28.45.4028`, RoCEv2, GID index 3;
