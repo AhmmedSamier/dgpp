@@ -214,7 +214,7 @@ The first kernel remains resident waiting for the peer's doorbell until the
 five-second bus watchdog fails the graph era.
 
 The sampling-profile implementation did not cause this. The exact failure
-reproduces from detached, unmodified commit `13c314a`, before any profiling
+reproduces from detached, unmodified commit `8c181e4`, before any profiling
 changes, while running only the MTP graph test.
 
 The leading diagnosis is an in-process CUDA scheduling deadlock. The test puts
@@ -280,7 +280,7 @@ failure is summarized below.
 
 ### The profiling code is not causal
 
-An independent worktree at commit `13c314a` was configured and built from
+An independent worktree at commit `8c181e4` was configured and built from
 scratch. This commit predates all sampling-profile changes. The filtered MTP
 test passed twice and then failed on invocation 3 at generation 195 with the
 same watchdog message.
@@ -334,7 +334,7 @@ only to the first node of a lazily uploaded graph.
 
 ### Prefetch controls
 
-All controls below used the untouched `13c314a` build except where noted:
+All controls below used the untouched `8c181e4` build except where noted:
 
 | Configuration | Result |
 |---|---:|
