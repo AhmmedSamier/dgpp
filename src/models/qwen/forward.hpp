@@ -138,14 +138,16 @@ class QwenModel : public SessionModel<QwenModel> {
                     bool capture, int head_rows, int batch_requests);
   void snapshot_draft_state(int req);
   void restore_draft_state(int req);
-  // Depth >= 2 is not wired for this family (the chain rows would need the
-  // draft's ring snapshotted around them, as GLM-5.3-Flash's chain_ring_copy):
-  // the core reports no chain row fits and refuses the calls.
-  static constexpr bool kDraftChain = false;
-  static constexpr bool kBatchedDraftChain = false;
+  // Depth >= 2 (2026-09-10): the chain rows run the draft block forward
+  // past the first draft, advancing its QSA ring; the ring is copied aside
+  // before the first chain row and restored after the last (GLM-5.3-Flash's
+  // chain_ring_copy), into a buffer of its own — the draft snapshot the
+  // fallback's rollback restores must keep the pre-draft ring.
+  static constexpr bool kDraftChain = true;
+  static constexpr bool kBatchedDraftChain = true;
   const uint16_t* draft_hidden_rows() const { return mtp_r_; }
-  void snapshot_chain_state(int) {}
-  void restore_chain_state(int) {}
+  void snapshot_chain_state(int req);
+  void restore_chain_state(int req);
 
  private:
   static constexpr int kBlockTokens = 64;
@@ -226,6 +228,7 @@ class QwenModel : public SessionModel<QwenModel> {
   // The draft block (mtp_): its ring snapshot and fusion scratch (the
   // window, the counters and the feeds are the core's).
   uint16_t* mtp_ring_snapshot_ = nullptr;  // [R][kpool*Di]: the draft ring before its rows
+  uint16_t* mtp_chain_ring_ = nullptr;     // [R][kpool*Di]: the ring around the chain rows (depth >= 2)
   uint16_t* mtp_hin_ = nullptr;         // [M, W] the gathered hyper states
   uint16_t* mtp_hn_ = nullptr;          // [M, W] their full-vector norm
   uint16_t* mtp_e_ = nullptr;           // [M, H] the embedding rows

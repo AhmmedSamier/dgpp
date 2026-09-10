@@ -167,6 +167,7 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
         !globals_.mtp_pre_fc_norm_hidden || !globals_.mtp_mixer.hc_norm)
       throw std::runtime_error("QwenModel: the draft head's globals are unbound");
     mtp_ring_snapshot_ = dev_alloc<uint16_t>(R * ring_elems());
+    mtp_chain_ring_ = dev_alloc<uint16_t>(R * ring_elems());
     mtp_hin_ = dev_alloc<uint16_t>(M * W);
     mtp_hn_ = dev_alloc<uint16_t>(M * W);
     mtp_enc_ = dev_alloc<uint16_t>(M * W);
@@ -291,6 +292,7 @@ QwenModel::~QwenModel() {
   cudaFreeHost(h_route_weights_);
   cudaFree(gemm_ws_);
   cudaFree(mtp_ring_snapshot_);
+  cudaFree(mtp_chain_ring_);
   cudaFree(mtp_hin_);
   cudaFree(mtp_hn_);
   cudaFree(mtp_enc_);
@@ -990,6 +992,19 @@ void QwenModel::snapshot_draft_state(int req) {
 
 void QwenModel::restore_draft_state(int req) {
   glm_device_copy(pool_.ring(num_qsa_, req), mtp_ring_snapshot_ + static_cast<size_t>(req) * ring_elems(),
+                  ring_elems() * 2, stream_);
+}
+
+// The chain rows' ring copy (depth >= 2): aside before the first chain row,
+// back after the last — its own buffer, so the draft snapshot above (the
+// fallback's rollback point) stays the pre-draft ring.
+void QwenModel::snapshot_chain_state(int req) {
+  glm_device_copy(mtp_chain_ring_ + static_cast<size_t>(req) * ring_elems(), pool_.ring(num_qsa_, req),
+                  ring_elems() * 2, stream_);
+}
+
+void QwenModel::restore_chain_state(int req) {
+  glm_device_copy(pool_.ring(num_qsa_, req), mtp_chain_ring_ + static_cast<size_t>(req) * ring_elems(),
                   ring_elems() * 2, stream_);
 }
 

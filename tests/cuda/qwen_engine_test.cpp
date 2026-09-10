@@ -263,7 +263,7 @@ void rank_work(int r, const QwenTextConfig& cfg, const std::string& dir, const s
 // batched families for B and C — against the plain eager engine.
 void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, const std::vector<int64_t>& A,
                    const std::vector<int64_t>& B, const std::vector<int64_t>& C, CollectiveBus* bus,
-                   ConstructBarrier* barrier, RankOutcome* out) {
+                   ConstructBarrier* barrier, RankOutcome* out, int depth) {
   bool arrived = false;
   const auto arrive_once = [&] {
     if (arrived) return;
@@ -285,21 +285,23 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
     out->ec = solo(eager_engine, 2, C, kSteps);
     {
       GraphEngineAdapter<QwenModel> mtp_engine(&mtp, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(),
-                                               /*batch_min_live=*/2);
+                                               /*batch_min_live=*/2, /*prefix_scratch=*/nullptr,
+                                               /*gather_scratch=*/nullptr, /*candidates=*/0, /*grammar=*/nullptr,
+                                               /*prefix_slots=*/0, /*mtp_depth=*/depth);
       out->ma.push_back(mtp_engine.prefill(0, A));
-      mtp_engine.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 2);
+      mtp_engine.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 2 + depth);
       while (out->ma.size() < static_cast<size_t>(kSteps) + 1) {
         const std::vector<int32_t> t = mtp_engine.step(0);
-        require(!t.empty() && t.size() <= 2, "mtp step shape");
+        require(!t.empty() && t.size() <= static_cast<size_t>(1 + depth), "mtp step shape");
         out->ma.insert(out->ma.end(), t.begin(), t.end());
         ++out->mtp_steps_a;
       }
       out->ma.resize(static_cast<size_t>(kSteps) + 1);
       mtp_engine.close(0);
       out->mb.push_back(mtp_engine.prefill(1, B));
-      mtp_engine.reserve(1, static_cast<int64_t>(B.size()) + kSteps + 2);
+      mtp_engine.reserve(1, static_cast<int64_t>(B.size()) + kSteps + 2 + depth);
       out->mc.push_back(mtp_engine.prefill(2, C));
-      mtp_engine.reserve(2, static_cast<int64_t>(C.size()) + kSteps + 2);
+      mtp_engine.reserve(2, static_cast<int64_t>(C.size()) + kSteps + 2 + depth);
       while (out->mb.size() < static_cast<size_t>(kSteps) + 1 || out->mc.size() < static_cast<size_t>(kSteps) + 1) {
         const auto t = mtp_engine.step_batch({1, 2});
         require(t.size() == 2, "mtp batch step shape");
@@ -337,7 +339,7 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_graph_matches_plain_decode) {
   for (int r = 0; r < kWorld; ++r)
     workers.emplace_back(rank_work_mtp, r, std::cref(cfg), std::cref(dir), std::cref(A), std::cref(B),
                          std::cref(C), buses[static_cast<size_t>(r)].get(), &barrier,
-                         &outs[static_cast<size_t>(r)]);
+                         &outs[static_cast<size_t>(r)], /*depth=*/1);
   for (auto& t : workers) t.join();
   for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
   for (int r = 1; r < kWorld; ++r)
@@ -352,6 +354,37 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_graph_matches_plain_decode) {
   // A random-weight fixture drafts by chance only (the acceptance rate is
   // the real checkpoint's measurement, scripts/fabric_mtp_classes.sh).
   DGPP_LOG_INFO("world 2 MTP graph: A took {} steps for {} tokens", o.mtp_steps_a, kSteps);
+}
+
+// Depth 2 (2026-09-10, kDraftChain): the chained draft rows through the
+// block, the ring copied around them — the greedy transcripts still the
+// plain engine's, scalar and batched, on every rank.
+DGPP_TEST(qwen_engines_loopback_world_2_mtp_depth2_graph_matches_plain_decode) {
+  const QwenTextConfig cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_fixture";
+  qwenfx::write_fixture(cfg, dir);
+  const std::vector<int64_t> A = smoke_tokens(cfg, 23, 0x9E3779B97F4A7C15ull);
+  const std::vector<int64_t> B = smoke_tokens(cfg, 17, 0xD1B54A32D192ED03ull);
+  const std::vector<int64_t> C = smoke_tokens(cfg, 11, 0x2545F4914F6CDD1Dull);
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, kPort + 2);
+  require(!buses.empty(), "the loopback bus world failed to start");
+  std::vector<RankOutcome> outs(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r)
+    workers.emplace_back(rank_work_mtp, r, std::cref(cfg), std::cref(dir), std::cref(A), std::cref(B),
+                         std::cref(C), buses[static_cast<size_t>(r)].get(), &barrier,
+                         &outs[static_cast<size_t>(r)], /*depth=*/2);
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
+  for (int r = 1; r < kWorld; ++r)
+    require(outs[static_cast<size_t>(r)].ma == outs[0].ma && outs[static_cast<size_t>(r)].mb == outs[0].mb,
+            "the ranks' depth-2 MTP transcripts differ");
+  const RankOutcome& o = outs[0];
+  require(o.ma == o.ea, "the depth-2 MTP scalar transcript differs from the plain eager engine's");
+  require(o.mb == o.eb, "the depth-2 MTP batched transcript of B differs from the plain eager engine's");
+  require(o.mc == o.ec, "the depth-2 MTP batched transcript of C differs from the plain eager engine's");
+  DGPP_LOG_INFO("world 2 MTP depth 2: A took {} steps for {} tokens", o.mtp_steps_a, kSteps);
 }
 
 DGPP_TEST(qwen_engines_loopback_world_2_graph_matches_eager) {
