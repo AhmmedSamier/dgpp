@@ -349,14 +349,45 @@ sigmoid folded in — two launches and one 21 MB fp32 pass per layer, ~1 % of
 the prefill. Below the run-to-run noise; do it when touching the tail
 anyway, not as its own item.
 
-### 4.6 Overlap the folds with compute (−10 to −13 %, large)
+**§4.3 scoped (2026-09-10 evening) — no clean bitwise route.** The two
+fusions that would matter each need a cross-tile reduction: `mix_finish`
+into the up GEMM's epilogue wants columns j, H+j, 2H+j, 3H+j of one row,
+which sit in four different n-tiles; the inject dots into the norm pass
+want the whole normalized row, which the per-(row, group) norm blocks never
+hold. Either is a custom tensor-core GEMM with a two-stage epilogue for
+~1.5 % of the prefill. Not taken.
 
-Collectives are 17.9 % of prefill and the bulk path is near wire rate, so
-the lever is overlap, not speed: cut the chunk into row blocks and let block
-i's fold run beside block i+1's layer compute (causal attention and the
-recurrence never need later rows). This is a software pipeline over
-(layer, row-block) and it is the largest single prefill item — schedule it
-after §4.1–4.5, which are cheaper per point of speedup.
+**The collective's in-kernel copy (§3.5's compute-side item) — scoped.**
+The 2.9 us copy of the source into the generation's staging row could be
+the producing GEMV's epilogue, but the ring row is `(gen − 1) % ring` for a
+`gen` the collective kernel reads from its control cell at launch; the
+producer would have to read the same cell one node earlier, and both
+decode paths are at the bandwidth wall where 0.3 ms of chain does not show.
+Not taken.
+
+### 4.6 Overlap the folds with compute (−10 to −13 %, large) — scoped
+
+Collectives are 17.9 % of prefill (`bus_bulk_collective_kernel` 13.7 %,
+about five launches of 260 us per fold, plus the latency-class kernel).
+The bulk path is near its wire rate, so the lever is overlap, not speed.
+
+The dependency structure allows it (worked through 2026-09-10 evening): a
+chunk's rows split into blocks; within a layer, row block i+1's attention
+needs block i's K/V of the same layer (causal), which block i writes before
+its fold; the GDN recurrence is sequential across blocks and runs in order;
+the MoE and the GR sites are row-local. So block i's fold can run beside
+block i+1's layer compute — a pipeline diagonal over (layer, row block) on
+two streams, the fold's wait placed before block i's combine.
+
+Two things must be measured before building it: how much of the bulk
+kernel's 1.3 ms per fold is spin on the network against copy and fold
+work (the prefill log carries no per-fold split; the graph windows'
+timeline does not cover the bulk path — instrument it first), since only
+the spin overlaps for free; and how much of a cooperative-grid collective
+actually co-schedules beside the expert MMA at one or two blocks per SM.
+If the spin is most of it, the −10 to −13 % stands; if not, the item
+shrinks toward the network's own share. Largest remaining prefill item
+either way; a multi-day restructuring of `run_rows`.
 
 ### 4.7 Tensor-core forms for attention and the recurrence (−5 % each, large)
 
@@ -491,6 +522,15 @@ overlap.
   controller, so every extra byte in flight lands on the collectives'
   latency; the default is the optimum of that curve and DRAM runs at
   ~172 GB/s (74 % of line rate) because of it, not because of the kernels.
+* **A prefetch-instruction form of the prefetcher** (evening,
+  `DGPP_L2_PREFETCH_FORM=prefetch`: one `prefetch.global.L2` per 128-byte
+  line, no destination register, so a warp keeps issuing lines instead of
+  folding loads). T=1 at 16 / 8 / 4 light blocks: 23.7 / 22.9 / 22.4
+  ms/step against the load form's 21.5 — worse at every count, and worse
+  the more lines it keeps in flight. The load form's fold is what bounds
+  the bytes in flight to what the collectives tolerate; removing the bound
+  lifts their latency, exactly as the light-rate sweep said. Off, behind
+  the knob.
 * **Slicing the GR gates across ranks.** Saves 9.8 MB per site of the
   replicated 13.1 MB, worth ~42 us, and costs at least one collective round
   trip at 34 us (three, in the sharded-hyper-state form) — break-even at

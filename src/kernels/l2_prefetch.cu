@@ -58,6 +58,29 @@ __global__ __launch_bounds__(kThreads) void l2_prefetch_kernel(
   if (fold == g_prefetch_sink[0] + 0x9E3779B9u) g_prefetch_sink[1] = fold;
 }
 
+// The prefetch-instruction form (2026-09-10, DGPP_L2_PREFETCH_FORM=prefetch):
+// one `prefetch.global.L2` per 128-byte line per thread, grid-strided —
+// no destination register, no scoreboard wait, so a warp keeps issuing
+// lines instead of folding what the loads above brought back. The bytes
+// in flight are then the memory system's to bound, not the fold's; the
+// sweep says whether that lifts the sustainable rate beside the
+// collectives or just their latency (the load form's light rate was
+// tuned to exactly that trade).
+__global__ __launch_bounds__(kThreads) void l2_prefetch_lines_kernel(
+    const uint8_t* __restrict__ p, size_t lines) {
+  const size_t stride = static_cast<size_t>(gridDim.x) * kThreads;
+  for (size_t i = static_cast<size_t>(blockIdx.x) * kThreads + threadIdx.x; i < lines; i += stride)
+    asm volatile("prefetch.global.L2 [%0];" ::"l"(p + i * 128));
+}
+
+bool env_prefetch_form_lines() {
+  static const bool lines = [] {
+    const char* v = std::getenv("DGPP_L2_PREFETCH_FORM");
+    return v != nullptr && std::string(v) == "prefetch";
+  }();
+  return lines;
+}
+
 bool env_is_off(const char* name) {
   const char* v = std::getenv(name);
   return v != nullptr && std::string(v) == "off";
@@ -107,10 +130,15 @@ void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
       (reinterpret_cast<uintptr_t>(ptr) + bytes + 15) & ~uintptr_t{15};
   const uint4* p = reinterpret_cast<const uint4*>(begin);
   const size_t vecs = (end - begin) / 16;
-  if (rate == PrefetchRate::Full)
+  if (rate == PrefetchRate::Full) {
     l2_prefetch_kernel<kFullUnroll><<<kFullBlocks, kThreads, 0, stream>>>(p, vecs);
-  else
+  } else if (env_prefetch_form_lines()) {
+    const size_t lines = (end - begin + 127) / 128;
+    l2_prefetch_lines_kernel<<<light_blocks(), kThreads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(begin), lines);
+  } else {
     l2_prefetch_kernel<kLightUnroll><<<light_blocks(), kThreads, 0, stream>>>(p, vecs);
+  }
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
