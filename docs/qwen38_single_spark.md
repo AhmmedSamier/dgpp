@@ -326,3 +326,11 @@ worlds, transcripts identical): MTP 39–40 → 40–41 ms per pass, T=1
 collective gaps to hide in — the side-stream reads still land the next
 kernel's leading rows in L2 ahead of it — so it stays on; its 11 ms of
 side-stream GPU time is not a cost the main chain pays.
+
+**MTP depth 2 on the single Spark** (`mtp_depth: 2` on the FP8 world,
+transcripts identical to depth 1's, 4 of 4): 48 ms per pass against 40,
+1.77–2.74 tokens per pass. Per token, greedy: prose 25.8 → 27.1 ms (+5 %),
+code 22.3 → 20.1 (−10 %), math 20.7 → 18.5 (−11 %), JSON 20.5 → 17.4
+(−15 %); sampled prose 24.7 → 25.9 (+5 %). The GLM-4.7 pattern: the second
+draft pays on code, math and JSON (p2 60–84 %) and loses on prose (p2
+26–32 %). Depth 1 stays the default; a code-heavy deployment sets 2.
