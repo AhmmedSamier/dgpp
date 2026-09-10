@@ -4,7 +4,8 @@ Every program and script in the tree, with what it is for. The serving
 binary is `dgpp-serve`; the launcher is `scripts/dgpp-cluster`; everything
 else is a probe, a check or an evidence ritual. `tools/` holds the Python
 checkpoint and reference tooling the tests use; `scripts/` holds the fabric
-and serving operations.
+and serving operations. `docs/benchmarks.md` says which of these produced
+each published number, and how to run them in the right order.
 
 | command | purpose |
 |---|---|

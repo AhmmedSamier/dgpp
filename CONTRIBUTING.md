@@ -48,7 +48,9 @@ that were learned the hard way:
    relevant ritual (`docs/operations.md` lists them; `scripts/serve_api_check.py`
    for the request contract), stop it (`down`) and keep the four op-stream
    md5s identical. A numerics change is judged as `docs/numerics.md`
-   describes, not by eye.
+   describes, not by eye. A change that moves a published throughput number
+   re-runs that number's ritual from `docs/benchmarks.md` §9 and updates the
+   row there, with its date.
 3. **The record.** Every change that measures or fixes something gets an
    entry in the engineering record, `benchmarks/results/2026-08-29-bus-m5.md`
    (a dated `##` heading, what was built, how it was gated, what the fabric

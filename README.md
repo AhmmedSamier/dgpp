@@ -35,8 +35,10 @@ run.
 
 ## Performance
 
-Measured on the four-node fabric at TP=4 (the method and every number:
-`docs/signoff_v1.md`).
+Measured on the four-node fabric at TP=4. This is one deployment of six;
+`docs/benchmarks.md` has every model, world and concurrency with the command
+behind each number, and `docs/signoff_v1.md` is the v1 sign-off these figures
+come from.
 
 | measure | result |
 |---|---|
@@ -238,6 +240,7 @@ config.
 | page | what |
 |---|---|
 | `docs/operations.md` | booting, stopping and watching the serving world; memory and the image cache on a node; failure semantics |
+| `docs/benchmarks.md` | every measured serving number: per model, world, concurrency and prompt class, with the method to reproduce each |
 | `docs/signoff_v1.md` | the v1 performance and hardening sign-off, with every measurement |
 | `docs/next_steps.md` | what is worth doing next, ranked by cost and benefit |
 | `docs/tools.md` | every binary and script |
