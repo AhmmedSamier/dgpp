@@ -50,12 +50,37 @@ QwenGrSite::QwenGrSite(const QwenGrResident& w, const QwenGemmWorkspace& gemm, i
   // The fused decode GEMVs need 16-byte-aligned weights (the resident
   // image's) and the smem budget; DGPP_QWEN_GR_FUSED=off keeps the chain.
   const char* knob = std::getenv("DGPP_QWEN_GR_FUSED");
+  const std::string fused_knob = knob ? knob : "";
   fused_mix_ = qwen_gr_fused_mix_accepts(hc_, hidden_, lowrank_) &&
                (reinterpret_cast<uintptr_t>(w_.down) % 16 == 0) &&
-               (reinterpret_cast<uintptr_t>(w_.up) % 16 == 0) && !(knob && std::string(knob) == "off");
+               (reinterpret_cast<uintptr_t>(w_.up) % 16 == 0) && fused_knob != "off";
+  // The scalar row only. The fused kernel stages kRows normalized rows in
+  // shared memory (20 KB each), so at two rows and beyond it runs one block
+  // per SM and loses to the norm + GEMV chain: measured 2026-09-10 with the
+  // group norms of a row issued together (bitwise, and still a loss — MTP
+  // 26.4 vs 25.6 ms/step, four live requests 101.9 vs 119.7 tok/s), which
+  // closes the "make the fused mix multi-row" idea. DGPP_QWEN_GR_FUSED=all
+  // re-enables it for another look.
+  fused_rows_max_ = fused_knob == "all" ? 8 : 1;
+  // The inject dots' side stream: lowest priority, so the chain's kernels
+  // keep first claim on the SMs (the dots are one block per row and have a
+  // whole branch plus a collective to hide under). Capture-safe: the fork
+  // and the join are events recorded on the streams the capture owns.
+  const char* side = std::getenv("DGPP_QWEN_GR_GATE_SIDE");
+  gate_early_ = !(side && std::string(side) == "off");
+  if (gate_early_) {
+    int least = 0, greatest = 0;
+    DGPP_CUDA_OK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
+    DGPP_CUDA_OK(cudaStreamCreateWithPriority(&gate_side_, cudaStreamNonBlocking, least));
+    DGPP_CUDA_OK(cudaEventCreateWithFlags(&gate_fork_, cudaEventDisableTiming));
+    DGPP_CUDA_OK(cudaEventCreateWithFlags(&gate_join_, cudaEventDisableTiming));
+  }
 }
 
 QwenGrSite::~QwenGrSite() {
+  if (gate_join_) cudaEventDestroy(gate_join_);
+  if (gate_fork_) cudaEventDestroy(gate_fork_);
+  if (gate_side_) cudaStreamDestroy(gate_side_);
   cudaFree(rn_);
   cudaFree(t_);
   cudaFree(logits_);
@@ -67,17 +92,23 @@ void QwenGrSite::mix(const uint16_t* r, uint16_t* x, int tokens, cudaStream_t st
   if (tokens > max_tokens_) throw std::invalid_argument("QwenGrSite: tokens exceed max_tokens");
   if (!w_.hc_norm || !w_.down || !w_.up) throw std::invalid_argument("QwenGrSite: null weights");
   const int W = hc_ * hidden_;
-  if (tokens == 1 && fused_mix_) {
+  if (tokens <= fused_rows_max_ && fused_mix_) {
     // The scalar decode row: the norm and the activation folded into the
     // two GEMVs' staging (kernels/qwen_gr, bitwise the four-launch chain).
     // One row only: every down block recomputes the row's group norms in
     // sequence, which at two rows cost 1.5 ms per MTP pass against a 0.3
     // ms gain at one (the fabric A/B of 2026-09-09).
+    // The inject dots ride the down GEMV's launch when this site combines:
+    // its blocks already hold the normalized row (kernels/qwen_gr).
     qwen_gr_norm_down_bf16(r, static_cast<size_t>(W), w_.hc_norm, hc_, hidden_, eps_, rn_, w_.down,
-                           t_, lowrank_, tokens, stream);
+                           t_, lowrank_, tokens, stream,
+                           inject_fused() ? w_.inject : nullptr,
+                           inject_fused() ? gates_ : nullptr);
+    if (inject_fused()) gates_ready_ = true;
     qwen_gr_act_up_bf16(t_, lowrank_, hc_, w_.up, logits_, hidden_, tokens, stream);
   } else {
     qwen_group_rmsnorm_bf16(r, w_.hc_norm, rn_, tokens, hc_, hidden_, eps_, stream);
+    fork_gate_dots(stream, tokens);
     gemm_bf16(g_, rn_, W, w_.down, t_, GemmOut::BF16, tokens, lowrank_, W, stream);
     qwen_gr_gate_act_bf16(t_, tokens, lowrank_, hc_, stream);
     gemm_bf16(g_, t_, lowrank_, w_.up, logits_, GemmOut::BF16, tokens, W, lowrank_, stream);
@@ -85,9 +116,32 @@ void QwenGrSite::mix(const uint16_t* r, uint16_t* x, int tokens, cudaStream_t st
   qwen_gr_mix_finish_bf16(logits_, rn_, x, tokens, hc_, hidden_, stream);
 }
 
+// The dots on the side stream, from the Rn the mix has just written. Only
+// a site that will combine (one with inject weights) forks: the model-level
+// mixer mixes and never combines, so a fork there would never be joined.
+void QwenGrSite::fork_gate_dots(cudaStream_t main, int tokens) {
+  if (!gate_side_ || !w_.inject) return;
+  DGPP_CUDA_OK(cudaEventRecord(gate_fork_, main));
+  DGPP_CUDA_OK(cudaStreamWaitEvent(gate_side_, gate_fork_, 0));
+  qwen_gr_combine_dots_bf16(rn_, w_.inject, gates_, tokens, hc_, hidden_, gate_side_);
+  gate_forked_ = true;
+}
+
 void QwenGrSite::combine(uint16_t* r, const uint16_t* y, int tokens, cudaStream_t stream) {
   if (tokens <= 0) return;
   if (!w_.inject) throw std::invalid_argument("QwenGrSite: combine on a site without inject weights");
+  if (gates_ready_) {  // the mix's down GEMV wrote them
+    gates_ready_ = false;
+    qwen_gr_combine_apply_bf16(r, gates_, y, tokens, hc_, hidden_, stream);
+    return;
+  }
+  if (gate_forked_) {
+    DGPP_CUDA_OK(cudaEventRecord(gate_join_, gate_side_));
+    DGPP_CUDA_OK(cudaStreamWaitEvent(stream, gate_join_, 0));
+    gate_forked_ = false;
+    qwen_gr_combine_apply_bf16(r, gates_, y, tokens, hc_, hidden_, stream);
+    return;
+  }
   qwen_gr_combine_bf16(r, rn_, w_.inject, y, gates_, tokens, hc_, hidden_, stream);
 }
 

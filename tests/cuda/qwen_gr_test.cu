@@ -100,9 +100,16 @@ DGPP_TEST(qwen_gr_stages_match_the_reference_on_the_device_inputs) {
   // GEMV and the activation into the up GEMV — bitwise the chain above.
   {
     DevBuf drn2(s.r.size() * 2), dt2(static_cast<size_t>(s.rows) * s.rank * 2), dlog2(s.r.size() * 2);
+    // The inject dots folded into the same launch (2026-09-10) against the
+    // standalone dots kernel on the same Rn: bitwise, or the gate that
+    // decides every combine has moved.
+    DevBuf dg_fold(static_cast<size_t>(s.rows) * s.hc * 4), dg_ref(static_cast<size_t>(s.rows) * s.hc * 4);
     if (!dgpp::qwen_gr_fused_mix_accepts(s.hc, s.hidden, s.rank)) throw std::runtime_error("fused mix refuses the fixture");
     dgpp::qwen_gr_norm_down_bf16(dr.p, static_cast<size_t>(W), dnorm.p, s.hc, s.hidden, 1e-6f, drn2.p,
-                                 ddown.p, dt2.p, s.rank, s.rows, st);
+                                 ddown.p, dt2.p, s.rank, s.rows, st, dinj.p,
+                                 static_cast<float*>(dg_fold.p));
+    dgpp::qwen_gr_combine_dots_bf16(drn.p, dinj.p, static_cast<float*>(dg_ref.p), s.rows, s.hc,
+                                    s.hidden, st);
     dgpp::qwen_gr_act_up_bf16(dt2.p, s.rank, s.hc, dup.p, dlog2.p, s.hidden, s.rows, st);
     DGPP_CUDA_OK(cudaStreamSynchronize(st));
     const std::vector<uint16_t> rn2 = download(drn2, s.r.size());
@@ -111,7 +118,12 @@ DGPP_TEST(qwen_gr_stages_match_the_reference_on_the_device_inputs) {
     require_bitwise("fused norm_down: Rn", rn2.data(), rn.data(), rn2.size() * 2);
     require_bitwise("fused norm_down: t", t2.data(), t_dev.data(), t2.size() * 2);
     require_bitwise("fused act_up: logits", logits2.data(), logits.data(), logits2.size() * 2);
-    std::printf("[ OK ] the fused decode GEMVs are bitwise the norm/GEMV/act/GEMV chain at %d rows\n", s.rows);
+    std::vector<float> g_fold(static_cast<size_t>(s.rows) * s.hc), g_ref(g_fold.size());
+    DGPP_CUDA_OK(cudaMemcpy(g_fold.data(), dg_fold.p, g_fold.size() * 4, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(g_ref.data(), dg_ref.p, g_ref.size() * 4, cudaMemcpyDeviceToHost));
+    require_bitwise("fused norm_down: inject gates", g_fold.data(), g_ref.data(), g_fold.size() * 4);
+    std::printf("[ OK ] the fused decode GEMVs are bitwise the norm/GEMV/act/GEMV chain at %d rows, "
+                "and the folded inject gates the dots kernel's\n", s.rows);
   }
   // 5. the finish (bitwise on the device's logits and Rn)
   dgpp::qwen_gr_mix_finish_bf16(dlog.p, drn.p, dx.p, s.rows, s.hc, s.hidden, st);

@@ -434,16 +434,15 @@ void QwenModel::prefetch_gr(const QwenGrResident& g, bool inject) {
   if (g.up) prefetch_add("g.up", g.up, W * r * 2);
 }
 
-// Before the attention fold: this layer's attention-side inject (the
-// combine right after the fold), the MLP-side GR mix, the router and the
-// shared expert (the routed experts wait for the router) — one image.
+// Before the attention fold: the MLP-side GR mix WITH its inject (since
+// 2026-09-10 the inject dots ride the mix's down GEMV, so the 82 KB is
+// read at the mix, not at the combine), the router and the shared expert
+// (the routed experts wait for the router) — one image.
 void QwenModel::prefetch_ffn_side(const QwenLayerResident& r) {
   if (!prefetch_.enabled()) return;
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
-  if (r.attn_gr.inject)
-    prefetch_add("r.attn_gr.inject", r.attn_gr.inject, static_cast<size_t>(cfg_.hc_count) * cfg_.hyper_width() * 2);
-  prefetch_gr(r.mlp_gr, /*inject=*/false);
+  prefetch_gr(r.mlp_gr, /*inject=*/true);
   if (r.moe.router) prefetch_add("r.moe.router", r.moe.router, static_cast<size_t>(cfg_.num_experts) * H * 2);
   if (r.moe.shared_gate) prefetch_add("r.moe.shared_gate", r.moe.shared_gate, H * 2);
   const size_t S = static_cast<size_t>(cfg_.shared_expert_intermediate_size / world_);
@@ -465,7 +464,7 @@ void QwenModel::prefetch_attention_side(int layer) {
   const QwenLayerResident& r = loader_.load_layer(layer);
   const size_t H = static_cast<size_t>(cfg_.hidden_size);
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
-  prefetch_gr(r.attn_gr, /*inject=*/false);
+  prefetch_gr(r.attn_gr, /*inject=*/true);
   if (r.kind == QwenLayerKind::Gdn && r.gdn.in_proj_qkv) {
     const size_t rows = static_cast<size_t>(r.gdn.local_key_heads) * cfg_.gdn_key_head_dim * 2 +
                         static_cast<size_t>(r.gdn.local_value_heads) * cfg_.gdn_value_head_dim;
@@ -508,7 +507,7 @@ void QwenModel::prefetch_ple_value_side(const QwenLayerResident& r) {
   prefetch_.open_window(stream_, prefetch_window_bytes_, prefetch_.boundary_rate());
   if (r.ple.norm_conv) prefetch_add("r.ple.norm_conv", r.ple.norm_conv, W * 2);
   if (r.ple.conv) prefetch_add("r.ple.conv", r.ple.conv, W * static_cast<size_t>(cfg_.ple_conv_kernel_size) * 2);
-  prefetch_gr(r.attn_gr, /*inject=*/false);
+  prefetch_gr(r.attn_gr, /*inject=*/true);
 }
 
 QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {

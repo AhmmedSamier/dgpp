@@ -14,6 +14,7 @@ namespace {
 __device__ __forceinline__ float round_bf16(float v) {
   return bf16_bits_to_float(float_to_bf16_bits(v));
 }
+
 __device__ __forceinline__ float sigmoid_f(float v) { return 1.0f / (1.0f + expf(-v)); }
 
 __global__ void gate_act_kernel(uint16_t* __restrict__ t, int64_t n, float inv_hc) {
@@ -41,24 +42,25 @@ __global__ void mix_finish_kernel(const uint16_t* __restrict__ logits,
   x[row * hidden + j] = float_to_bf16_bits(acc * inv_hc);
 }
 
-// The inject dots (2026-09-09, the decode profile: the one-block form ran
-// 29 us per site at T=1 — a 320-deep chain of dependent 2-byte loads on
-// one SM, 96 sites per step): one block per row, warp i (i < hc) reduces
-// the i-th dot over the hc*H-wide Rn row in the SAME fixed order (per-lane
-// strided chain, xor tree), the loads issued 32 deep ahead of the chain so
-// the warp is FMA-bound; gates[row*hc + i] = 2 * bf16(sigmoid(bf16(dot) / hc)).
+// The inject dots: one block per row, warp i (i < hc) reduces the i-th dot
+// over the hc*H-wide Rn row (inject_dot_strided below); the fused mix
+// (gr_norm_down_kernel) runs the same chain over its staged Rn as the row
+// space's last hc rows, so its gates are bitwise this kernel's.
+// gates[row*hc + i] = 2 * bf16(sigmoid(bf16(dot) / hc)).
 constexpr int kCombineBlock = 256;
-constexpr int kDotBatch = 32;
 
-__global__ void combine_dots_kernel(const uint16_t* __restrict__ rn,
-                                    const uint16_t* __restrict__ w_inject,
-                                    float* __restrict__ gates, int hc, int width,
-                                    float inv_hc) {
-  const int64_t row = blockIdx.x;
-  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
-  if (warp >= hc) return;
-  const uint16_t* rn_row = rn + row * width;
-  const uint16_t* w = w_inject + static_cast<int64_t>(warp) * width;
+// One (row, branch) inject dot in the lane-strided order: lane l walks
+// k = l, l + 32, ... with kDotBatch loads ahead of the chain, then the xor
+// tree. `rn_row` may be global (this kernel) or the fused mix's staged copy
+// (gr_norm_down_kernel) — the same values, the same FMA sequence, so the
+// gate is bitwise either way. Kept in this order deliberately: on
+// 2026-09-10 the 16-byte-chunk order (bf16_gemv::row_dots) was tried for
+// these rows and flipped 2 of 4 greedy transcripts at near ties for no
+// step time (T=1 is bandwidth-bound), so the decode's numerics stay put.
+constexpr int kDotBatch = 32;
+__device__ __forceinline__ float inject_dot_strided(const uint16_t* __restrict__ rn_row,
+                                                    const uint16_t* __restrict__ w,
+                                                    int width, int lane) {
   float acc = 0.0f;
   int k = lane;
   for (; k + (kDotBatch - 1) * 32 < width; k += 32 * kDotBatch) {
@@ -76,6 +78,19 @@ __global__ void combine_dots_kernel(const uint16_t* __restrict__ rn,
     acc = fmaf(bf16_bits_to_float(w[k]), bf16_bits_to_float(rn_row[k]), acc);
 #pragma unroll
   for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, off);
+  return acc;
+}
+
+__global__ void combine_dots_kernel(const uint16_t* __restrict__ rn,
+                                    const uint16_t* __restrict__ w_inject,
+                                    float* __restrict__ gates, int hc, int width,
+                                    float inv_hc) {
+  const int64_t row = blockIdx.x;
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  if (warp >= hc) return;
+  const float acc = inject_dot_strided(rn + row * width,
+                                       w_inject + static_cast<size_t>(warp) * width,
+                                       width, lane);
   if (lane == 0) {
     const float dot = round_bf16(acc);          // the linear's bf16 output
     gates[row * hc + warp] = 2.0f * round_bf16(sigmoid_f(dot * inv_hc));
@@ -116,7 +131,9 @@ __global__ void __launch_bounds__(kGrGemvThreads)
     gr_norm_down_kernel(const uint16_t* __restrict__ r, size_t r_stride,
                         const uint16_t* __restrict__ norm_w, int hc, int hidden, float eps,
                         uint16_t* __restrict__ rn, const uint16_t* __restrict__ down_w,
-                        uint16_t* __restrict__ t, int lowrank) {
+                        uint16_t* __restrict__ t, int lowrank,
+                        const uint16_t* __restrict__ w_inject, float* __restrict__ gates,
+                        float inv_hc) {
   extern __shared__ __align__(16) uint16_t smem_u16[];
   const int W = hc * hidden;
   uint16_t* sx = smem_u16;  // [kRows, W] the normalized rows
@@ -141,8 +158,30 @@ __global__ void __launch_bounds__(kGrGemvThreads)
     }
   }
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  // The combine's inject dots ride the mix (2026-09-10): a gate reads only
+  // the normalized row, which every block has just staged, so the hc inject
+  // rows become the row space's last rows — the same warp-per-row chain
+  // (bf16_gemv::row_dots) as the down matrix's, over the staged Rn — and
+  // what was a 21 us one-block kernel on the chain between the boundary
+  // collective and the apply leaves the step.
   const int n_row = static_cast<int>(blockIdx.x) * gemv::kWarps + warp;
-  if (n_row >= lowrank) return;
+  const int rows_total = lowrank + (gates != nullptr ? hc : 0);
+  if (n_row >= rows_total) return;
+  if (n_row >= lowrank) {
+    // An inject row: combine_dots_kernel's chain over the staged Rn.
+    const int i = n_row - lowrank;
+    const uint16_t* wi = w_inject + static_cast<size_t>(i) * W;
+#pragma unroll 1
+    for (int row = 0; row < kRows; ++row) {
+      const float acc = inject_dot_strided(sx + static_cast<size_t>(row) * W, wi, W, lane);
+      if (lane == 0) {
+        const float dot = round_bf16(acc);  // the linear's bf16 output
+        gates[static_cast<size_t>(row) * hc + i] =
+            2.0f * round_bf16(sigmoid_f(dot * inv_hc));
+      }
+    }
+    return;
+  }
   float acc[kRows];
   bf16_gemv::row_dots<kRows>(down_w + static_cast<size_t>(n_row) * W, sx, W, lane, acc);
   if (lane != 0) return;
@@ -176,7 +215,8 @@ __global__ void __launch_bounds__(kGrGemvThreads)
 template <int kRows>
 void launch_norm_down_rows(const uint16_t* r, size_t r_stride, const uint16_t* norm_w, int hc,
                            int hidden, float eps, uint16_t* rn, const uint16_t* down_w,
-                           uint16_t* t, int lowrank, cudaStream_t stream) {
+                           uint16_t* t, int lowrank, const uint16_t* w_inject, float* gates,
+                           cudaStream_t stream) {
   const int W = hc * hidden;
   const size_t smem = gemv::smem_bytes(kRows, W) + static_cast<size_t>(hidden) * sizeof(float);
   // Beyond the 48 KB default (four 20 KB rows plus a group of floats at
@@ -188,9 +228,13 @@ void launch_norm_down_rows(const uint16_t* r, size_t r_stride, const uint16_t* n
                                       static_cast<int>(smem)));
     opted = smem;
   }
-  const dim3 grid(static_cast<unsigned>((lowrank + gemv::kWarps - 1) / gemv::kWarps));
+  const bool inject = w_inject != nullptr && gates != nullptr;
+  const int rows_total = lowrank + (inject ? hc : 0);
+  const dim3 grid(static_cast<unsigned>((rows_total + gemv::kWarps - 1) / gemv::kWarps));
   gr_norm_down_kernel<kRows><<<grid, kGrGemvThreads, smem, stream>>>(
-      r, r_stride, norm_w, hc, hidden, eps, rn, down_w, t, lowrank);
+      r, r_stride, norm_w, hc, hidden, eps, rn, down_w, t, lowrank,
+      inject ? w_inject : nullptr, inject ? gates : nullptr,
+      1.0f / static_cast<float>(hc));
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -217,7 +261,8 @@ bool qwen_gr_fused_mix_accepts(int hc, int hidden, int lowrank) {
 
 void qwen_gr_norm_down_bf16(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden,
                             float eps, void* rn, const void* down_w, void* t, int lowrank,
-                            int64_t rows, cudaStream_t stream) {
+                            int64_t rows, cudaStream_t stream, const void* w_inject,
+                            float* gates) {
   if (rows <= 0) return;
   if (!r || !norm_w || !down_w || !t) throw std::invalid_argument("qwen gr norm_down: null pointer");
   if (rows > 8 || !qwen_gr_fused_mix_accepts(hc, hidden, lowrank) || r_stride < static_cast<size_t>(hc) * hidden ||
@@ -232,11 +277,13 @@ void qwen_gr_norm_down_bf16(const void* r, size_t r_stride, const void* norm_w, 
     uint16_t* tr = static_cast<uint16_t*>(t) + static_cast<size_t>(row0) * lowrank;
     const uint16_t* nw = static_cast<const uint16_t*>(norm_w);
     const uint16_t* dw = static_cast<const uint16_t*>(down_w);
+    const uint16_t* wi = static_cast<const uint16_t*>(w_inject);
+    float* gr = gates ? gates + static_cast<size_t>(row0) * hc : nullptr;
     switch (n) {
-      case 1: launch_norm_down_rows<1>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, stream); break;
-      case 2: launch_norm_down_rows<2>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, stream); break;
-      case 3: launch_norm_down_rows<3>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, stream); break;
-      default: launch_norm_down_rows<4>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, stream); break;
+      case 1: launch_norm_down_rows<1>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, wi, gr, stream); break;
+      case 2: launch_norm_down_rows<2>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, wi, gr, stream); break;
+      case 3: launch_norm_down_rows<3>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, wi, gr, stream); break;
+      default: launch_norm_down_rows<4>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, wi, gr, stream); break;
     }
   }
 }
@@ -285,9 +332,8 @@ void qwen_gr_mix_finish_bf16(const void* logits, const void* rn, void* x, int64_
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-void qwen_gr_combine_bf16(void* r_state, const void* rn, const void* w_inject,
-                          const void* y, float* gates, int64_t rows, int hc, int hidden,
-                          cudaStream_t stream) {
+void qwen_gr_combine_dots_bf16(const void* rn, const void* w_inject, float* gates,
+                               int64_t rows, int hc, int hidden, cudaStream_t stream) {
   if (rows <= 0 || hc <= 0 || hc > 8 || hidden <= 0)
     throw std::invalid_argument("qwen gr combine: empty problem or hc > 8");
   if (!gates) throw std::invalid_argument("qwen gr combine: gates scratch required");
@@ -297,12 +343,28 @@ void qwen_gr_combine_bf16(void* r_state, const void* rn, const void* w_inject,
       static_cast<const uint16_t*>(rn), static_cast<const uint16_t*>(w_inject), gates, hc,
       width, 1.0f / hc);
   DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void qwen_gr_combine_apply_bf16(void* r_state, const float* gates, const void* y,
+                                int64_t rows, int hc, int hidden, cudaStream_t stream) {
+  if (rows <= 0 || hc <= 0 || hc > 8 || hidden <= 0)
+    throw std::invalid_argument("qwen gr combine: empty problem or hc > 8");
+  if (!gates) throw std::invalid_argument("qwen gr combine: gates scratch required");
+  const int width = hc * hidden;
+  cudaGetLastError();
   const dim3 grid(static_cast<unsigned>((width + kCombineBlock - 1) / kCombineBlock),
                   static_cast<unsigned>(rows), 1);
   combine_apply_kernel<<<grid, kCombineBlock, 0, stream>>>(
       static_cast<uint16_t*>(r_state), gates, static_cast<const uint16_t*>(y), hc, hidden,
       width);
   DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void qwen_gr_combine_bf16(void* r_state, const void* rn, const void* w_inject,
+                          const void* y, float* gates, int64_t rows, int hc, int hidden,
+                          cudaStream_t stream) {
+  qwen_gr_combine_dots_bf16(rn, w_inject, gates, rows, hc, hidden, stream);
+  qwen_gr_combine_apply_bf16(r_state, gates, y, rows, hc, hidden, stream);
 }
 
 }  // namespace dgpp

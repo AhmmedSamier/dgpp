@@ -32,6 +32,19 @@ void qwen_gr_combine_bf16(void* r_state, const void* rn, const void* w_inject,
                           const void* y, float* gates, int64_t rows, int hc, int hidden,
                           cudaStream_t stream);
 
+// The combine's two halves as their own launches, so the dots — which read
+// only Rn, and are therefore ready as soon as the mix has normalized the
+// row — can be issued on a side stream at mix time and joined before the
+// apply (2026-09-10, the decode profile: one block per row walking the
+// hc*H-wide chain cost 21 us per site at T=1 and 23 at two rows, 96 sites
+// per step, all of it on the chain between the boundary collective and the
+// next mix). Same kernels, same order, same values: bitwise
+// qwen_gr_combine_bf16 either way.
+void qwen_gr_combine_dots_bf16(const void* rn, const void* w_inject, float* gates,
+                               int64_t rows, int hc, int hidden, cudaStream_t stream);
+void qwen_gr_combine_apply_bf16(void* r_state, const float* gates, const void* y,
+                                int64_t rows, int hc, int hidden, cudaStream_t stream);
+
 // The mix's two GEMVs with their producers folded into the staging
 // (2026-09-09), each bitwise the two-launch chain it replaces, for the
 // decode rows (rows <= 8, chunked by four): norm_down = the group norm
@@ -41,9 +54,15 @@ void qwen_gr_combine_bf16(void* r_state, const void* rn, const void* w_inject,
 // . up_w^T). R bf16 [rows, hc*hidden] (row stride r_stride), norm_w
 // [hc*hidden], down_w [lowrank, hc*hidden], up_w [hc*hidden, lowrank].
 bool qwen_gr_fused_mix_accepts(int hc, int hidden, int lowrank);
+// `w_inject` and `gates` (both or neither) add the combine's inject dots to
+// the same launch — one extra block reads the normalized row out of the
+// staged copy every block already holds, in combine_dots_kernel's order, so
+// the gates are bitwise that kernel's and the chain loses a 21 us launch
+// (2026-09-10).
 void qwen_gr_norm_down_bf16(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden,
                             float eps, void* rn, const void* down_w, void* t, int lowrank,
-                            int64_t rows, cudaStream_t stream);
+                            int64_t rows, cudaStream_t stream, const void* w_inject = nullptr,
+                            float* gates = nullptr);
 void qwen_gr_act_up_bf16(const void* t, int lowrank, int hc, const void* up_w, void* logits, int hidden,
                          int64_t rows, cudaStream_t stream);
 

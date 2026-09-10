@@ -57,6 +57,26 @@ class QwenGrSite {
   QwenGemmWorkspace g_;
   int hc_, hidden_, lowrank_, max_tokens_;
   float eps_;
+  // The inject dots' side stream (2026-09-10): the gates read only Rn, so
+  // the dots are issued here as soon as mix() has normalized the row and
+  // joined in combine() — off the chain that runs the branch, the boundary
+  // collective and the apply. Same kernel on either stream, so the values
+  // are bitwise the in-chain combine's. DGPP_QWEN_GR_GATE_SIDE=off keeps
+  // the dots in the chain.
+  cudaStream_t gate_side_ = nullptr;
+  cudaEvent_t gate_fork_ = nullptr, gate_join_ = nullptr;
+  int fused_rows_max_ = 8;    // DGPP_QWEN_GR_FUSED=one keeps the scalar row alone
+  bool gate_early_ = true;    // DGPP_QWEN_GR_GATE_SIDE=off puts both back in the chain
+  bool gate_forked_ = false;
+  bool gates_ready_ = false;  // the mix's down GEMV computed them in its own launch
+  void fork_gate_dots(cudaStream_t main, int tokens);
+  // The inject rows ride the fused mix's down GEMV: they run the same
+  // 16-byte-chunked row chain, so the weight must be aligned like the
+  // down matrix.
+  bool inject_fused() const {
+    return gate_early_ && w_.inject != nullptr &&
+           (reinterpret_cast<uintptr_t>(w_.inject) % 16) == 0;
+  }
   uint16_t* rn_ = nullptr;      // [M, hc*H]
   uint16_t* t_ = nullptr;       // [M, lowrank]
   uint16_t* logits_ = nullptr;  // [M, hc*H]
