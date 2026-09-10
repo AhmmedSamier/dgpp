@@ -85,9 +85,11 @@ QwenGrSite::QwenGrSite(const QwenGrResident& w, const QwenGemmWorkspace& gemm, i
   // image's) and the smem budget; DGPP_QWEN_GR_FUSED=off keeps the chain.
   const char* knob = std::getenv("DGPP_QWEN_GR_FUSED");
   const std::string fused_knob = knob ? knob : "";
+  const void* down_ptr = w_.down ? static_cast<const void*>(w_.down) : static_cast<const void*>(w_.down_fp8.payload);
+  const void* up_ptr = w_.up ? static_cast<const void*>(w_.up) : static_cast<const void*>(w_.up_fp8.payload);
   fused_mix_ = qwen_gr_fused_mix_accepts(hc_, hidden_, lowrank_) &&
-               (reinterpret_cast<uintptr_t>(w_.down) % 16 == 0) &&
-               (reinterpret_cast<uintptr_t>(w_.up) % 16 == 0) && fused_knob != "off";
+               (reinterpret_cast<uintptr_t>(down_ptr) % 16 == 0) &&
+               (reinterpret_cast<uintptr_t>(up_ptr) % 16 == 0) && fused_knob != "off";
   // The scalar row only. The fused kernel stages kRows normalized rows in
   // shared memory (20 KB each), so at two rows and beyond it runs one block
   // per SM and loses to the norm + GEMV chain: measured 2026-09-10 with the
@@ -133,11 +135,10 @@ void QwenGrSite::mix(const uint16_t* r, uint16_t* x, int tokens, cudaStream_t st
   if (!w_.hc_norm || !(w_.down || w_.down_fp8.payload) || !(w_.up || w_.up_fp8.payload))
     throw std::invalid_argument("QwenGrSite: null weights");
   const int W = hc_ * hidden_;
-  // The fused decode forms read the BF16 down / up in their own kernels;
-  // the FP8 form takes the norm -> scale-GEMM -> act -> scale-GEMM chain
-  // (an fp8 fused form is a follow-up).
+  // The fused decode forms in the weights' form: BF16, or block FP8 (the
+  // fp8 twins, 2026-09-10 — bitwise the unfused fp8 chain).
   const bool dense_fp8 = w_.down_fp8.payload != nullptr;
-  if (tokens <= fused_rows_max_ && fused_mix_ && !dense_fp8) {
+  if (tokens <= fused_rows_max_ && fused_mix_) {
     // The scalar decode row: the norm and the activation folded into the
     // two GEMVs' staging (kernels/qwen_gr, bitwise the four-launch chain).
     // One row only: every down block recomputes the row's group norms in
@@ -145,19 +146,31 @@ void QwenGrSite::mix(const uint16_t* r, uint16_t* x, int tokens, cudaStream_t st
     // ms gain at one (the fabric A/B of 2026-09-09).
     // The inject dots ride the down GEMV's launch when this site combines:
     // its blocks already hold the normalized row (kernels/qwen_gr).
-    qwen_gr_norm_down_bf16(r, static_cast<size_t>(W), w_.hc_norm, hc_, hidden_, eps_, rn_, w_.down,
-                           t_, lowrank_, tokens, stream,
-                           inject_fused() ? w_.inject : nullptr,
-                           inject_fused() ? gates_ : nullptr);
+    if (dense_fp8)
+      qwen_gr_norm_down_fp8(r, static_cast<size_t>(W), w_.hc_norm, hc_, hidden_, eps_, rn_,
+                            w_.down_fp8.payload, w_.down_fp8.scales, t_, lowrank_, tokens, stream,
+                            inject_fused() ? w_.inject : nullptr, inject_fused() ? gates_ : nullptr);
+    else
+      qwen_gr_norm_down_bf16(r, static_cast<size_t>(W), w_.hc_norm, hc_, hidden_, eps_, rn_, w_.down,
+                             t_, lowrank_, tokens, stream,
+                             inject_fused() ? w_.inject : nullptr,
+                             inject_fused() ? gates_ : nullptr);
     if (inject_fused()) gates_ready_ = true;
-    qwen_gr_act_up_bf16(t_, lowrank_, hc_, w_.up, logits_, hidden_, tokens, stream);
+    if (dense_fp8)
+      qwen_gr_act_up_fp8(t_, lowrank_, hc_, w_.up_fp8.payload, w_.up_fp8.scales, logits_, hidden_, tokens, stream);
+    else
+      qwen_gr_act_up_bf16(t_, lowrank_, hc_, w_.up, logits_, hidden_, tokens, stream);
   } else {
     qwen_group_rmsnorm_bf16(r, w_.hc_norm, rn_, tokens, hc_, hidden_, eps_, stream);
-    if (tokens <= 8 && inject_fused() && fused_mix_ && !gate_side_only_ && !dense_fp8) {
+    if (tokens <= 8 && inject_fused() && fused_mix_ && !gate_side_only_) {
       // The batched decode rows (MTP, the row batches): the down GEMV with
       // the inject rows appended — no side stream (kernels/qwen_gr).
-      qwen_gr_down_inject_bf16(rn_, w_.down, t_, lowrank_, w_.inject, gates_, hc_, hidden_,
-                               tokens, stream);
+      if (dense_fp8)
+        qwen_gr_down_inject_fp8(rn_, w_.down_fp8.payload, w_.down_fp8.scales, t_, lowrank_, w_.inject, gates_,
+                                hc_, hidden_, tokens, stream);
+      else
+        qwen_gr_down_inject_bf16(rn_, w_.down, t_, lowrank_, w_.inject, gates_, hc_, hidden_,
+                                 tokens, stream);
       gates_ready_ = true;
     } else {
       fork_gate_dots(stream, tokens);
@@ -255,10 +268,18 @@ void QwenGdnLayer::in_projections(const uint16_t* x, int tokens, cudaStream_t st
   const int C = static_cast<int>(conv_channels_);
   const int LV = lv_ * v_dim_;
   if (w_.in_proj_qkv_fp8.payload) {
-    // The FP8 form: qkv and z through the scale GEMM, a and b (BF16, [lv,
-    // H]) as one dual GEMV at decode rows.
-    gemm_dense(g_, x, H, nullptr, w_.in_proj_qkv_fp8, qkv_, GemmOut::BF16, tokens, C, H, stream);
-    gemm_dense(g_, x, H, nullptr, w_.in_proj_z_fp8, z_, GemmOut::BF16, tokens, LV, H, stream);
+    // The FP8 form: qkv and z as ONE multi-problem fp8 GEMV at decode rows
+    // (2026-09-10), the scale GEMM above them; a and b (BF16, [lv, H]) as
+    // one dual GEMV.
+    if (tokens <= 8) {
+      Fp8GemvProblem p[2];
+      p[0].payload = w_.in_proj_qkv_fp8.payload; p[0].scales = w_.in_proj_qkv_fp8.scales; p[0].out = qkv_; p[0].n = C;
+      p[1].payload = w_.in_proj_z_fp8.payload; p[1].scales = w_.in_proj_z_fp8.scales; p[1].out = z_; p[1].n = LV;
+      launch_scale_gemv_multi_bf16(p, 2, x, static_cast<size_t>(H), tokens, H, stream);
+    } else {
+      gemm_dense(g_, x, H, nullptr, w_.in_proj_qkv_fp8, qkv_, GemmOut::BF16, tokens, C, H, stream);
+      gemm_dense(g_, x, H, nullptr, w_.in_proj_z_fp8, z_, GemmOut::BF16, tokens, LV, H, stream);
+    }
     if (tokens <= 4 && bf16_gemv_accepts(w_.in_proj_a, tokens, H) && bf16_gemv_accepts(w_.in_proj_b, tokens, H)) {
       Bf16GemvProblem p[2];
       p[0].act = x; p[0].act_row_stride = static_cast<size_t>(H); p[0].weight = w_.in_proj_a; p[0].out = a_; p[0].n = lv_;
@@ -441,10 +462,21 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
   const int64_t* d_pos = rows.pos;
 
   // Projections.
-  gemm_dense(g_, x, H, w_.q_proj, w_.q_proj_fp8, q_, GemmOut::BF16, T, QW, H, stream);
-  gemm_dense(g_, x, H, w_.k_proj, w_.k_proj_fp8, k_, GemmOut::BF16, T, KW, H, stream);
-  gemm_dense(g_, x, H, w_.v_proj, w_.v_proj_fp8, v_, GemmOut::BF16, T, KW, H, stream);
-  gemm_dense(g_, x, H, w_.index_qk_proj, w_.index_qk_proj_fp8, idx_, GemmOut::BF16, T, IW, H, stream);
+  if (w_.q_proj_fp8.payload && T <= 8) {
+    // The FP8 form at decode rows: the four projections as one
+    // multi-problem fp8 GEMV (2026-09-10).
+    Fp8GemvProblem p[4];
+    p[0].payload = w_.q_proj_fp8.payload; p[0].scales = w_.q_proj_fp8.scales; p[0].out = q_; p[0].n = QW;
+    p[1].payload = w_.k_proj_fp8.payload; p[1].scales = w_.k_proj_fp8.scales; p[1].out = k_; p[1].n = KW;
+    p[2].payload = w_.v_proj_fp8.payload; p[2].scales = w_.v_proj_fp8.scales; p[2].out = v_; p[2].n = KW;
+    p[3].payload = w_.index_qk_proj_fp8.payload; p[3].scales = w_.index_qk_proj_fp8.scales; p[3].out = idx_; p[3].n = IW;
+    launch_scale_gemv_multi_bf16(p, 4, x, static_cast<size_t>(H), T, H, stream);
+  } else {
+    gemm_dense(g_, x, H, w_.q_proj, w_.q_proj_fp8, q_, GemmOut::BF16, T, QW, H, stream);
+    gemm_dense(g_, x, H, w_.k_proj, w_.k_proj_fp8, k_, GemmOut::BF16, T, KW, H, stream);
+    gemm_dense(g_, x, H, w_.v_proj, w_.v_proj_fp8, v_, GemmOut::BF16, T, KW, H, stream);
+    gemm_dense(g_, x, H, w_.index_qk_proj, w_.index_qk_proj_fp8, idx_, GemmOut::BF16, T, IW, H, stream);
+  }
   // Norm + RoPE: q (the [q | gate] interleave), k, the indexer q.
   qsa_norm_rope_bf16(q_, QW, 2 * D, w_.q_norm, d_pos, d_inv_freq_, qn_, static_cast<int64_t>(lh_) * D,
                      T, lh_, D, rotary_, eps_, stream);

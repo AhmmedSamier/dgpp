@@ -250,3 +250,42 @@ kernel, or the dequantized matrix cached across a prompt's chunks, would
 return it to the BF16 stack's 1.03 ms/token at 2K). The next rung, a
 calibrated NVFP4 of the dense stack (~16 ms floor), is a quant-box
 checkpoint, not a load-time switch.
+
+### The FP8 fused decode forms and the multi-problem fp8 GEMV (2026-09-10, later)
+
+The first FP8 cut ran the BF16 fused decode paths as their unfused chains.
+The kernels now take either form: `gr_norm_down_kernel`,
+`gr_down_inject_kernel`, `gr_act_up_kernel` (the GR site) and the shared
+expert's two tail kernels carry a `kFp8` template parameter — the BF16
+instantiations are the kernels as they were, the FP8 ones dot their rows
+with `fp8_gemv::row_dots` / `row_dots_pair` on the same staged activations
+(the scale GEMM's own chain), so every FP8 output is bitwise the unfused
+fp8 chain's (`qwen_gr_test`, `qwen_moe_test`); the inject rows stay BF16.
+`launch_scale_gemv_multi_bf16` runs up to four fp8 matrices against the
+same rows in one launch (bitwise the single launches, `scale_gemm_test`);
+the GDN's qkv + z and the QSA's q / k / v / indexer projections take it at
+decode rows.
+
+The captured graphs return to the BF16 stack's shape: the MTP scalar
+variant 1,976 → 1,558 nodes (BF16: 1,561), the T=1 variant 1,860 → 1,258
+(BF16: 1,258). Measured on the same worlds, the transcripts identical to
+the unfused FP8 worlds' (4 of 4, both worlds):
+
+| | unfused FP8 | fused FP8 |
+|---|---|---|
+| T=1, ms per pass | 30.8–31.4 | 30.2–30.9 (client 30.9) |
+| MTP, ms per pass | 40–41 | 39–40 |
+| MTP greedy, ms/token (prose / code / math / JSON) | 26.4 / 22.8 / 21.2 / 21.0 | 25.8 / 22.3 / 20.7 / 20.5 |
+| MTP sampled (serve_bench) | 24.6 | 24.7 |
+| prefill, ms/token at 512 / 2K | 1.85 / 1.15 | 1.83 / 1.14 |
+
+So the ~400 launches were worth about 0.6 ms a pass, not the 2–3 ms
+estimated: at T=1 the FP8 stack sits at 30.3 ms against a 25.5 ms floor
+(84 % of line rate) with the graph the BF16 stack's shape, which points at
+the fp8 GEMV core's bandwidth on the dense shapes rather than at launch
+count — the GR up matrix's k = 320 is twenty 16-byte chunks per row, so a
+warp leaves twelve lanes idle and a lane one chunk in flight, and the
+same holds for every row width under 512 bytes. The next step is the
+per-kernel profile at world 1 (`scripts/fabric_qwen_profile.sh` on the
+T=1 FP8 config) and a narrow-row variant of the fp8 core for those
+shapes.

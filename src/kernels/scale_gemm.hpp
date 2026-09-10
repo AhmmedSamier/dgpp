@@ -55,6 +55,24 @@ void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
 // rs / cs (2026-09-09): the scale grid as log2 block sizes — 7 the
 // checkpoint's 128 x 128, a TP slice's re-blocked axis 6 or 5 (plan D2);
 // every row reads its own scale row, a 32-deep stage its one column.
+// Several [n_i, k] fp8 matrices against the SAME activation rows in one
+// launch (2026-09-10, the Qwen dense stack in FP8: a GDN layer's qkv + z,
+// a QSA layer's q / k / v / indexer projections — one graph node in place
+// of two or four). rows <= 8 (chunks of four); every out_i is bitwise
+// launch_scale_gemm_bf16's for its problem (the same staged rows, the
+// same row chain). out_stride 0: n.
+struct Fp8GemvProblem {
+  const uint8_t* payload = nullptr;
+  const float* scales = nullptr;
+  uint16_t* out = nullptr;
+  int n = 0;
+  size_t out_stride = 0;
+};
+constexpr int kFp8GemvMaxProblems = 4;
+void launch_scale_gemv_multi_bf16(const Fp8GemvProblem* problems, int n_problems,
+                                  const uint16_t* act, size_t act_row_stride_elems, int rows,
+                                  int k, cudaStream_t stream);
+
 void launch_scale_gemm_tile_bf16(const uint16_t* act, size_t act_row_stride_elems,
                                  const uint8_t* w_payload, const float* w_scales,
                                  uint16_t* out, int m, int n, int k,

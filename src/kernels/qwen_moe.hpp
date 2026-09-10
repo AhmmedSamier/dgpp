@@ -30,5 +30,16 @@ void qwen_moe_shared_tail_decode(const uint16_t* x, size_t x_stride, const uint1
                                  const uint16_t* up_w, const uint16_t* down_w,
                                  const uint16_t* g, uint16_t* act, float* sw, const float* acc,
                                  uint16_t* out, int tokens, int H, int S, cudaStream_t stream);
+// The same tail with the three matrices in block FP8 (2026-09-10,
+// engine.dense_weights = "fp8"): E4M3 payloads (gate/up [S, H], down [H,
+// S]) with fp32 128 x 128 scales, the dots the scale GEMM's fp8 GEMV chain
+// — bitwise the unfused fp8 chain (launch_scale_gemm_bf16 x2, the swiglu,
+// launch_scale_gemm_f32, the gate, the accumulate, the round). H and S
+// multiples of 16.
+void qwen_moe_shared_tail_decode_fp8(const uint16_t* x, size_t x_stride, const uint8_t* gate_p,
+                                     const float* gate_s, const uint8_t* up_p, const float* up_s,
+                                     const uint8_t* down_p, const float* down_s, const uint16_t* g,
+                                     uint16_t* act, float* sw, const float* acc, uint16_t* out,
+                                     int tokens, int H, int S, cudaStream_t stream);
 
 }  // namespace dgpp

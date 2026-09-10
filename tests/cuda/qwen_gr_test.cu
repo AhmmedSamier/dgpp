@@ -3,6 +3,7 @@
 // bitwise; the GEMV within an ulp of the sequential chain), and the whole
 // site — mix then combine — within two bf16 ulps of the reference.
 #include <cstdint>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -16,6 +17,8 @@
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/qwen_gr.hpp"
 #include "kernels/qwen_norm.hpp"
+#include "kernels/scale_gemm.hpp"
+#include "loaders/fp8_quant.hpp"
 #include "models/qwen/gr_reference.hpp"
 #include "models/qwen/norm_reference.hpp"
 
@@ -46,6 +49,78 @@ std::vector<uint16_t> download(const DevBuf& b, size_t n) {
 }
 
 }  // namespace
+
+// The FP8 twins (2026-09-10, engine.dense_weights = "fp8"): the down / up
+// matrices encoded to block FP8 (the loader's recipe), the fused forms —
+// the norm-staged down GEMV with the inject rows, the act-staged up GEMV,
+// the batched down + inject — against the unfused fp8 chain (the norm
+// kernel, launch_scale_gemm_bf16, gate_act, launch_scale_gemm_bf16, the
+// dots kernel): bitwise, at one row (the scalar path), three, and six
+// (two chunks).
+DGPP_TEST(qwen_gr_fp8_fused_forms_are_bitwise_the_fp8_chain) {
+  cudaStream_t st = test_stream();
+  for (const int rows : {1, 3, 6}) {
+    Site s = Site::make(20 + rows);
+    s.rows = rows;
+    s.r = random_bf16_normal(21 + rows, static_cast<int64_t>(rows) * s.width(), 1.0f);
+    const int W = s.width();
+    // The FP8 forms of down [rank, W] and up [W, rank].
+    std::vector<uint8_t> down_p(static_cast<size_t>(s.rank) * W), up_p(static_cast<size_t>(W) * s.rank);
+    std::vector<float> down_s(static_cast<size_t>(dgpp::fp8_quant::scale_rows(s.rank)) * dgpp::fp8_quant::scale_cols(W));
+    std::vector<float> up_s(static_cast<size_t>(dgpp::fp8_quant::scale_rows(W)) * dgpp::fp8_quant::scale_cols(s.rank));
+    dgpp::fp8_quant::encode_block128(s.w_down.data(), W, s.rank, W, down_p.data(), down_s.data(), 1);
+    dgpp::fp8_quant::encode_block128(s.w_up.data(), s.rank, W, s.rank, up_p.data(), up_s.data(), 1);
+    DevBuf dr(s.r.size() * 2), dnorm(s.w_norm.size() * 2), dinj(s.w_inj.size() * 2);
+    DevBuf ddp(down_p.size()), dds(down_s.size() * 4), dup(up_p.size()), dus(up_s.size() * 4);
+    dr.upload(s.r.data(), s.r.size() * 2);
+    dnorm.upload(s.w_norm.data(), s.w_norm.size() * 2);
+    dinj.upload(s.w_inj.data(), s.w_inj.size() * 2);
+    ddp.upload(down_p.data(), down_p.size());
+    dds.upload(down_s.data(), down_s.size() * 4);
+    dup.upload(up_p.data(), up_p.size());
+    dus.upload(up_s.data(), up_s.size() * 4);
+    const size_t tn = static_cast<size_t>(rows) * s.rank, gn = static_cast<size_t>(rows) * s.hc;
+    // The chain.
+    DevBuf drn(s.r.size() * 2), dt(tn * 2), dlog(s.r.size() * 2), dg(gn * 4);
+    dgpp::qwen_group_rmsnorm_bf16(dr.p, dnorm.p, drn.p, rows, s.hc, s.hidden, 1e-6f, st);
+    dgpp::launch_scale_gemm_bf16(drn.as<uint16_t>(), static_cast<size_t>(W), ddp.as<uint8_t>(), static_cast<const float*>(dds.p),
+                                 dt.as<uint16_t>(), rows, s.rank, W, st, static_cast<size_t>(s.rank));
+    dgpp::qwen_gr_combine_dots_bf16(drn.p, dinj.p, static_cast<float*>(dg.p), rows, s.hc, s.hidden, st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<uint16_t> rn = download(drn, s.r.size());
+    const std::vector<uint16_t> t_chain = download(dt, tn);
+    dgpp::qwen_gr_gate_act_bf16(dt.p, rows, s.rank, s.hc, st);
+    dgpp::launch_scale_gemm_bf16(dt.as<uint16_t>(), static_cast<size_t>(s.rank), dup.as<uint8_t>(), static_cast<const float*>(dus.p),
+                                 dlog.as<uint16_t>(), rows, W, s.rank, st, static_cast<size_t>(W));
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<uint16_t> logits = download(dlog, s.r.size());
+    std::vector<float> g_ref(gn);
+    DGPP_CUDA_OK(cudaMemcpy(g_ref.data(), dg.p, gn * 4, cudaMemcpyDeviceToHost));
+    // The fused forms.
+    DevBuf drn2(s.r.size() * 2), dt2(tn * 2), dlog2(s.r.size() * 2), dg2(gn * 4), dt3(tn * 2), dg3(gn * 4);
+    dgpp::qwen_gr_norm_down_fp8(dr.p, static_cast<size_t>(W), dnorm.p, s.hc, s.hidden, 1e-6f, drn2.p, ddp.as<uint8_t>(),
+                                static_cast<const float*>(dds.p), dt2.p, s.rank, rows, st, dinj.p, static_cast<float*>(dg2.p));
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<uint16_t> t2 = download(dt2, tn);
+    dgpp::qwen_gr_act_up_fp8(dt2.p, s.rank, s.hc, dup.as<uint8_t>(), static_cast<const float*>(dus.p), dlog2.p, s.hidden, rows, st);
+    dgpp::qwen_gr_down_inject_fp8(drn.p, ddp.as<uint8_t>(), static_cast<const float*>(dds.p), dt3.p, s.rank, dinj.p,
+                                  static_cast<float*>(dg3.p), s.hc, s.hidden, rows, st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<uint16_t> rn2 = download(drn2, s.r.size());
+    const std::vector<uint16_t> logits2 = download(dlog2, s.r.size());
+    const std::vector<uint16_t> t3 = download(dt3, tn);
+    std::vector<float> g2(gn), g3(gn);
+    DGPP_CUDA_OK(cudaMemcpy(g2.data(), dg2.p, gn * 4, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(g3.data(), dg3.p, gn * 4, cudaMemcpyDeviceToHost));
+    require_bitwise("fp8 norm_down: Rn", rn2.data(), rn.data(), rn2.size() * 2);
+    require_bitwise("fp8 norm_down: t", t2.data(), t_chain.data(), t2.size() * 2);
+    require_bitwise("fp8 norm_down: inject gates", g2.data(), g_ref.data(), gn * 4);
+    require_bitwise("fp8 act_up: logits", logits2.data(), logits.data(), logits2.size() * 2);
+    require_bitwise("fp8 down_inject: t", t3.data(), t_chain.data(), t3.size() * 2);
+    require_bitwise("fp8 down_inject: gates", g3.data(), g_ref.data(), gn * 4);
+    std::printf("[ OK ] the fp8 fused GR forms are bitwise the fp8 chain at %d rows\n", rows);
+  }
+}
 
 DGPP_TEST(qwen_gr_stages_match_the_reference_on_the_device_inputs) {
   const Site s = Site::make(10);

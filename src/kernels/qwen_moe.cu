@@ -5,6 +5,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "kernels/bf16_gemv.cuh"
+#include "kernels/fp8_gemv.cuh"
 #include "kernels/gemv_common.cuh"
 
 namespace dgpp {
@@ -58,10 +59,16 @@ __device__ __forceinline__ float shared_gate_warp(const uint16_t* __restrict__ x
 // Blocks [0, row_blocks): warp w's row s = 8b + w of gate_proj and up_proj
 // dotted against every staged activation row; act[r][s] = swiglu. The last
 // block: warp t's shared gate sw[t].
-template <int kRows>
+// The weights' form (2026-09-10, engine.dense_weights = "fp8"): BF16 rows,
+// or block-FP8 rows (E4M3 payload + fp32 128 x 128 scales, the scale
+// GEMM's own chain through fp8_gemv::row_dots / row_dots_pair) — the FP8
+// tail is bitwise the unfused fp8 chain as the BF16 one is the bf16 chain.
+template <int kRows, bool kFp8>
 __global__ void shared_gate_up_swiglu_kernel(const uint16_t* __restrict__ x, size_t x_stride,
-                                             const uint16_t* __restrict__ gate_w,
-                                             const uint16_t* __restrict__ up_w,
+                                             const void* __restrict__ gate_w,
+                                             const float* __restrict__ gate_s,
+                                             const void* __restrict__ up_w,
+                                             const float* __restrict__ up_s,
                                              const uint16_t* __restrict__ g,
                                              uint16_t* __restrict__ act, float* __restrict__ sw,
                                              int tokens, int S, int H, int row_blocks) {
@@ -79,8 +86,17 @@ __global__ void shared_gate_up_swiglu_kernel(const uint16_t* __restrict__ x, siz
   const int row = static_cast<int>(blockIdx.x) * gemv::kWarps + warp;
   if (row >= S) return;
   float ga[kRows], ua[kRows];
-  bf16_gemv::row_dots<kRows>(gate_w + static_cast<size_t>(row) * H, sx, H, lane, ga);
-  bf16_gemv::row_dots<kRows>(up_w + static_cast<size_t>(row) * H, sx, H, lane, ua);
+  if constexpr (kFp8) {
+    const int scale_cols = (H + 127) >> 7;
+    const size_t srow = static_cast<size_t>(row >> 7) * scale_cols;
+    fp8_gemv::row_dots_pair<kRows>(static_cast<const uint8_t*>(gate_w) + static_cast<size_t>(row) * H,
+                                   gate_s + srow,
+                                   static_cast<const uint8_t*>(up_w) + static_cast<size_t>(row) * H,
+                                   up_s + srow, sx, H, lane, ga, ua);
+  } else {
+    bf16_gemv::row_dots<kRows>(static_cast<const uint16_t*>(gate_w) + static_cast<size_t>(row) * H, sx, H, lane, ga);
+    bf16_gemv::row_dots<kRows>(static_cast<const uint16_t*>(up_w) + static_cast<size_t>(row) * H, sx, H, lane, ua);
+  }
   if (lane != 0) return;
   const float limit = INFINITY;  // the chain's swiglu ran with no clamps
 #pragma unroll
@@ -97,10 +113,11 @@ __global__ void shared_gate_up_swiglu_kernel(const uint16_t* __restrict__ x, siz
 
 // Warp w's row h = 8b + w of down_proj [H, S] against the staged act rows;
 // out[r][h] = bf16(fma(sw[r], dot, acc[r][h])).
-template <int kRows>
+template <int kRows, bool kFp8>
 __global__ void shared_down_accum_round_kernel(const uint16_t* __restrict__ act,
                                                size_t act_stride,
-                                               const uint16_t* __restrict__ down_w,
+                                               const void* __restrict__ down_w,
+                                               const float* __restrict__ down_s,
                                                const float* __restrict__ sw,
                                                const float* __restrict__ acc,
                                                uint16_t* __restrict__ out, int H, int S) {
@@ -111,7 +128,13 @@ __global__ void shared_down_accum_round_kernel(const uint16_t* __restrict__ act,
   const int row = static_cast<int>(blockIdx.x) * gemv::kWarps + warp;
   if (row >= H) return;
   float d[kRows];
-  bf16_gemv::row_dots<kRows>(down_w + static_cast<size_t>(row) * S, sx, S, lane, d);
+  if constexpr (kFp8) {
+    const int scale_cols = (S + 127) >> 7;
+    fp8_gemv::row_dots<kRows>(static_cast<const uint8_t*>(down_w) + static_cast<size_t>(row) * S,
+                              down_s + static_cast<size_t>(row >> 7) * scale_cols, sx, S, lane, d);
+  } else {
+    bf16_gemv::row_dots<kRows>(static_cast<const uint16_t*>(down_w) + static_cast<size_t>(row) * S, sx, S, lane, d);
+  }
   if (lane != 0) return;
 #pragma unroll
   for (int r = 0; r < kRows; ++r) {
@@ -120,21 +143,44 @@ __global__ void shared_down_accum_round_kernel(const uint16_t* __restrict__ act,
   }
 }
 
-template <int kRows>
-void launch_tail_rows(const uint16_t* x, size_t x_stride, const uint16_t* gate_w,
-                      const uint16_t* up_w, const uint16_t* down_w, const uint16_t* g,
-                      uint16_t* act, float* sw, const float* acc, uint16_t* out, int tokens,
-                      int H, int S, cudaStream_t stream) {
+template <int kRows, bool kFp8>
+void launch_tail_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const float* gate_s,
+                      const void* up_w, const float* up_s, const void* down_w, const float* down_s,
+                      const uint16_t* g, uint16_t* act, float* sw, const float* acc, uint16_t* out,
+                      int tokens, int H, int S, cudaStream_t stream) {
   const int row_blocks = (S + gemv::kWarps - 1) / gemv::kWarps;
-  shared_gate_up_swiglu_kernel<kRows>
+  shared_gate_up_swiglu_kernel<kRows, kFp8>
       <<<static_cast<unsigned>(row_blocks + 1), gemv::kThreads, gemv::smem_bytes(kRows, H),
-         stream>>>(x, x_stride, gate_w, up_w, g, act, sw, tokens, S, H, row_blocks);
+         stream>>>(x, x_stride, gate_w, gate_s, up_w, up_s, g, act, sw, tokens, S, H, row_blocks);
   DGPP_CUDA_OK(cudaGetLastError());
   const int down_blocks = (H + gemv::kWarps - 1) / gemv::kWarps;
-  shared_down_accum_round_kernel<kRows>
+  shared_down_accum_round_kernel<kRows, kFp8>
       <<<static_cast<unsigned>(down_blocks), gemv::kThreads, gemv::smem_bytes(kRows, S),
-         stream>>>(act, static_cast<size_t>(S), down_w, sw, acc, out, H, S);
+         stream>>>(act, static_cast<size_t>(S), down_w, down_s, sw, acc, out, H, S);
   DGPP_CUDA_OK(cudaGetLastError());
+}
+
+// Rows in chunks of kMaxRows, as the GEMM seam chunks them: a row's chain
+// never depends on how many rows share its launch.
+template <bool kFp8>
+void tail_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const float* gate_s,
+               const void* up_w, const float* up_s, const void* down_w, const float* down_s,
+               const uint16_t* g, uint16_t* act, float* sw, const float* acc, uint16_t* out,
+               int tokens, int H, int S, cudaStream_t stream) {
+  for (int row0 = 0; row0 < tokens; row0 += gemv::kMaxRows) {
+    const int rows = tokens - row0 < gemv::kMaxRows ? tokens - row0 : gemv::kMaxRows;
+    const uint16_t* xr = x + static_cast<size_t>(row0) * x_stride;
+    uint16_t* actr = act + static_cast<size_t>(row0) * S;
+    float* swr = sw + row0;
+    const float* accr = acc + static_cast<size_t>(row0) * H;
+    uint16_t* outr = out + static_cast<size_t>(row0) * H;
+    switch (rows) {
+      case 1: launch_tail_rows<1, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream); break;
+      case 2: launch_tail_rows<2, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream); break;
+      case 3: launch_tail_rows<3, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream); break;
+      default: launch_tail_rows<4, kFp8>(xr, x_stride, gate_w, gate_s, up_w, up_s, down_w, down_s, g, actr, swr, accr, outr, rows, H, S, stream); break;
+    }
+  }
 }
 
 __global__ void shared_gate_kernel(const uint16_t* __restrict__ x,
@@ -177,22 +223,26 @@ void qwen_moe_shared_tail_decode(const uint16_t* x, size_t x_stride, const uint1
       (x_stride * 2) % 16 != 0 || !gemv::smem_fits(gemv::kMaxRows, H))
     throw std::invalid_argument(
         "qwen_moe_shared_tail_decode: H and S multiples of 8, 16-byte aligned operands");
-  // Rows in chunks of kMaxRows, as the GEMM seam chunks them: a row's
-  // chain never depends on how many rows share its launch.
-  for (int row0 = 0; row0 < tokens; row0 += gemv::kMaxRows) {
-    const int rows = tokens - row0 < gemv::kMaxRows ? tokens - row0 : gemv::kMaxRows;
-    const uint16_t* xr = x + static_cast<size_t>(row0) * x_stride;
-    uint16_t* actr = act + static_cast<size_t>(row0) * S;
-    float* swr = sw + row0;
-    const float* accr = acc + static_cast<size_t>(row0) * H;
-    uint16_t* outr = out + static_cast<size_t>(row0) * H;
-    switch (rows) {
-      case 1: launch_tail_rows<1>(xr, x_stride, gate_w, up_w, down_w, g, actr, swr, accr, outr, rows, H, S, stream); break;
-      case 2: launch_tail_rows<2>(xr, x_stride, gate_w, up_w, down_w, g, actr, swr, accr, outr, rows, H, S, stream); break;
-      case 3: launch_tail_rows<3>(xr, x_stride, gate_w, up_w, down_w, g, actr, swr, accr, outr, rows, H, S, stream); break;
-      default: launch_tail_rows<4>(xr, x_stride, gate_w, up_w, down_w, g, actr, swr, accr, outr, rows, H, S, stream); break;
-    }
-  }
+  tail_rows<false>(x, x_stride, gate_w, nullptr, up_w, nullptr, down_w, nullptr, g, act, sw, acc, out, tokens, H, S, stream);
+}
+
+void qwen_moe_shared_tail_decode_fp8(const uint16_t* x, size_t x_stride, const uint8_t* gate_p,
+                                     const float* gate_s, const uint8_t* up_p, const float* up_s,
+                                     const uint8_t* down_p, const float* down_s, const uint16_t* g,
+                                     uint16_t* act, float* sw, const float* acc, uint16_t* out,
+                                     int tokens, int H, int S, cudaStream_t stream) {
+  if (tokens <= 0) return;
+  if (!x || !gate_p || !gate_s || !up_p || !up_s || !down_p || !down_s || !g || !act || !sw || !acc || !out)
+    throw std::invalid_argument("qwen_moe_shared_tail_decode_fp8: null pointer");
+  if (tokens > 2 * gemv::kMaxRows)
+    throw std::invalid_argument("qwen_moe_shared_tail_decode_fp8: tokens beyond the decode rows");
+  if (H <= 0 || H % 16 != 0 || S <= 0 || S % 16 != 0 || x_stride < static_cast<size_t>(H) ||
+      !gemv::aligned16(x) || !gemv::aligned16(g) || !gemv::aligned16(gate_p) ||
+      !gemv::aligned16(up_p) || !gemv::aligned16(down_p) || !gemv::aligned16(act) ||
+      (x_stride * 2) % 16 != 0 || !gemv::smem_fits(gemv::kMaxRows, H))
+    throw std::invalid_argument(
+        "qwen_moe_shared_tail_decode_fp8: H and S multiples of 16, 16-byte aligned operands");
+  tail_rows<true>(x, x_stride, gate_p, gate_s, up_p, up_s, down_p, down_s, g, act, sw, acc, out, tokens, H, S, stream);
 }
 
 }  // namespace dgpp

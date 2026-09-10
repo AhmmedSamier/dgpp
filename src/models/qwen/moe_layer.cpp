@@ -124,15 +124,17 @@ void QwenMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out, int tok
   if (tokens <= 0) return;
   if (!hidden || !out) throw std::invalid_argument("QwenMoeLayer: null pointer");
   routed_.enqueue_decode_f32(hidden, d_acc_, tokens, nullptr, stream, table_slot);
-  // The FP8 shared expert (engine.dense_weights) takes the chain through
-  // the scale GEMM (an fp8 fused tail is a follow-up).
-  if (w_.shared_fp8) {
-    shared_tail(hidden, out, tokens, stream);
-    return;
-  }
-  // The fused two-launch tail (bitwise the chain; qwen_moe_test pins it).
+  // The fused two-launch tail (bitwise the chain; qwen_moe_test pins it),
+  // in the weights' form: BF16, or block FP8 (2026-09-10).
   const int H = cfg_.hidden;
   const int S = static_cast<int>(w_.shared_inter);
+  if (w_.shared_fp8) {
+    qwen_moe_shared_tail_decode_fp8(hidden, static_cast<size_t>(H), w_.shared_fp8[0].payload, w_.shared_fp8[0].scales,
+                                    w_.shared_fp8[1].payload, w_.shared_fp8[1].scales, w_.shared_fp8[2].payload,
+                                    w_.shared_fp8[2].scales, w_.shared_gate, d_sact_, d_sw_, d_acc_, out, tokens, H,
+                                    S, stream);
+    return;
+  }
   qwen_moe_shared_tail_decode(hidden, static_cast<size_t>(H), w_.shared_gate_proj,
                               w_.shared_up_proj, w_.shared_down_proj, w_.shared_gate, d_sact_,
                               d_sw_, d_acc_, out, tokens, H, S, stream);

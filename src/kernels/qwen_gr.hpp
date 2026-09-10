@@ -73,5 +73,21 @@ void qwen_gr_act_up_bf16(const void* t, int lowrank, int hc, const void* up_w, v
 void qwen_gr_down_inject_bf16(const void* rn, const void* down_w, void* t, int lowrank,
                               const void* w_inject, float* gates, int hc, int hidden,
                               int64_t rows, cudaStream_t stream);
+// The same three with the down / up matrices in block FP8 (2026-09-10,
+// engine.dense_weights = "fp8"): E4M3 payload [rows, k] + fp32 128 x 128
+// scales, the rows through fp8_gemv::row_dots — the scale GEMM's GEMV
+// chain — so t / logits are bitwise the unfused fp8 chain's (the norm
+// kernel + launch_scale_gemm_bf16, gate_act + launch_scale_gemm_bf16);
+// the inject rows stay BF16 and their gates combine_dots_kernel's. k
+// (hc * hidden for down, lowrank for up) a multiple of 16.
+void qwen_gr_norm_down_fp8(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden,
+                           float eps, void* rn, const uint8_t* down_p, const float* down_s, void* t,
+                           int lowrank, int64_t rows, cudaStream_t stream,
+                           const void* w_inject = nullptr, float* gates = nullptr);
+void qwen_gr_act_up_fp8(const void* t, int lowrank, int hc, const uint8_t* up_p, const float* up_s,
+                        void* logits, int hidden, int64_t rows, cudaStream_t stream);
+void qwen_gr_down_inject_fp8(const void* rn, const uint8_t* down_p, const float* down_s, void* t,
+                             int lowrank, const void* w_inject, float* gates, int hc, int hidden,
+                             int64_t rows, cudaStream_t stream);
 
 }  // namespace dgpp

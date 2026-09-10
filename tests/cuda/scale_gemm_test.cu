@@ -318,6 +318,51 @@ DGPP_TEST(fp8_gemv_hardware_conversion_matches_bridge_on_every_code) {
   std::printf("[ OK ] e4m3 hardware conversion == bridge on all 256 codes\n");
 }
 
+// The multi-problem GEMV (2026-09-10): several [n_i, k] matrices against
+// the same rows in one launch — every problem's output bitwise its own
+// launch_scale_gemm_bf16, at one to four rows (one chunk) and six (two).
+DGPP_TEST(scale_gemm_gemv_multi_is_bitwise_the_single_launches) {
+  const int k = 1008;
+  const int ns[3] = {100, 24, 8};
+  for (const int rows : {1, 2, 4, 6}) {
+    Problem ps[3];
+    for (int i = 0; i < 3; ++i) ps[i] = make_problem(rows, ns[i], k, 0xF0 + i + rows);
+    // The problems share the activations: problem 0's rows for every one.
+    for (int i = 1; i < 3; ++i) ps[i].act = ps[0].act;
+    std::vector<uint16_t> single[3];
+    for (int i = 0; i < 3; ++i) single[i] = run_kernel(ps[i]);
+    uint16_t* act = nullptr;
+    uint8_t* w[3] = {};
+    float* sc[3] = {};
+    uint16_t* out[3] = {};
+    DGPP_CUDA_OK(cudaMallocManaged(&act, ps[0].act.size() * 2));
+    std::memcpy(act, ps[0].act.data(), ps[0].act.size() * 2);
+    dgpp::Fp8GemvProblem probs[3];
+    for (int i = 0; i < 3; ++i) {
+      DGPP_CUDA_OK(cudaMallocManaged(&w[i], ps[i].payload.size()));
+      DGPP_CUDA_OK(cudaMallocManaged(&sc[i], ps[i].scales.size() * 4));
+      DGPP_CUDA_OK(cudaMallocManaged(&out[i], static_cast<size_t>(rows) * ns[i] * 2));
+      std::memcpy(w[i], ps[i].payload.data(), ps[i].payload.size());
+      std::memcpy(sc[i], ps[i].scales.data(), ps[i].scales.size() * 4);
+      probs[i].payload = w[i];
+      probs[i].scales = sc[i];
+      probs[i].out = out[i];
+      probs[i].n = ns[i];
+    }
+    dgpp::launch_scale_gemv_multi_bf16(probs, 3, act, static_cast<size_t>(k), rows, k, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    for (int i = 0; i < 3; ++i) {
+      require(std::memcmp(out[i], single[i].data(), single[i].size() * 2) == 0,
+              "multi GEMV output differs from the single launch");
+      DGPP_CUDA_OK(cudaFree(w[i]));
+      DGPP_CUDA_OK(cudaFree(sc[i]));
+      DGPP_CUDA_OK(cudaFree(out[i]));
+    }
+    DGPP_CUDA_OK(cudaFree(act));
+    std::printf("[ OK ] the multi-problem fp8 GEMV is bitwise the single launches at %d rows\n", rows);
+  }
+}
+
 DGPP_TEST(scale_gemm_gemv_path_ragged_n_and_k_match_both_oracles) {
   // GIVEN m=1 with k a multiple of 16 but NOT of 128 (the last chunk sits
   // in a partial scale block) and n not a multiple of the 8-row block:

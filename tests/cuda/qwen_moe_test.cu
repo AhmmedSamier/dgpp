@@ -25,7 +25,9 @@
 #include "kda_test_helpers.hpp"
 #include "kernels/gemm.hpp"
 #include "kernels/glm_moe_launch.hpp"
+#include "kernels/qwen_moe.hpp"
 #include "kernels/scale_gemm.hpp"
+#include "loaders/fp8_quant.hpp"
 #include "models/glm/moe.hpp"
 #include "models/glm/moe_reference.hpp"
 #include "models/qwen/moe_layer.hpp"
@@ -525,6 +527,80 @@ void decode_path_case(int tokens, int H, int I, int scale_block, uint64_t seed) 
   require(mism == 0, label + ": the decode path differs from the host path in " +
                          std::to_string(mism) + " of " + std::to_string(got.size()) + " elements");
   std::printf("[ OK ] %s: the slot chain + fused shared tail bitwise the host path\n", label.c_str());
+}
+
+// The FP8 fused decode tail (2026-09-10, engine.dense_weights = "fp8"):
+// the three shared matrices encoded to block FP8, the two-launch tail
+// against the unfused fp8 chain (launch_scale_gemm_bf16 x2, the swiglu,
+// launch_scale_gemm_f32, the gate, the accumulate, the round): bitwise at
+// one, three and six rows.
+DGPP_TEST(qwen_moe_fp8_fused_tail_is_bitwise_the_fp8_chain) {
+  cudaStream_t st = test_stream();
+  const int H = 256, S = 64;
+  for (const int tokens : {1, 3, 6}) {
+    const std::vector<uint16_t> x = random_bf16_normal(401 + tokens, static_cast<int64_t>(tokens) * H, 1.0f);
+    const std::vector<uint16_t> gate = random_bf16_normal(402, static_cast<int64_t>(S) * H, 0.05f);
+    const std::vector<uint16_t> up = random_bf16_normal(403, static_cast<int64_t>(S) * H, 0.05f);
+    const std::vector<uint16_t> down = random_bf16_normal(404, static_cast<int64_t>(H) * S, 0.05f);
+    const std::vector<uint16_t> g = random_bf16_normal(405, H, 0.1f);
+    std::vector<float> acc(static_cast<size_t>(tokens) * H);
+    for (size_t i = 0; i < acc.size(); ++i) acc[i] = 0.01f * static_cast<float>((i * 7919) % 1000) - 5.0f;
+    std::vector<uint8_t> gp(gate.size()), upp(up.size()), dp(down.size());
+    std::vector<float> gs(static_cast<size_t>(dgpp::fp8_quant::scale_rows(S)) * dgpp::fp8_quant::scale_cols(H)), us(gs.size());
+    std::vector<float> ds(static_cast<size_t>(dgpp::fp8_quant::scale_rows(H)) * dgpp::fp8_quant::scale_cols(S));
+    dgpp::fp8_quant::encode_block128(gate.data(), H, S, H, gp.data(), gs.data(), 1);
+    dgpp::fp8_quant::encode_block128(up.data(), H, S, H, upp.data(), us.data(), 1);
+    dgpp::fp8_quant::encode_block128(down.data(), S, H, S, dp.data(), ds.data(), 1);
+    DevBuf dx(x.size() * 2), dg(g.size() * 2), dgp(gp.size()), dgs(gs.size() * 4), dupp(upp.size()), dus(us.size() * 4),
+        ddp(dp.size()), dds(ds.size() * 4), dacc(acc.size() * 4), dacc2(acc.size() * 4);
+    dx.upload(x.data(), x.size() * 2);
+    dg.upload(g.data(), g.size() * 2);
+    dgp.upload(gp.data(), gp.size());
+    dgs.upload(gs.data(), gs.size() * 4);
+    dupp.upload(upp.data(), upp.size());
+    dus.upload(us.data(), us.size() * 4);
+    ddp.upload(dp.data(), dp.size());
+    dds.upload(ds.data(), ds.size() * 4);
+    dacc.upload(acc.data(), acc.size() * 4);
+    dacc2.upload(acc.data(), acc.size() * 4);
+    const size_t an = static_cast<size_t>(tokens) * S, on = static_cast<size_t>(tokens) * H;
+    // The chain.
+    DevBuf dsg(an * 2), dsu(an * 2), dsact(an * 2), dsdown(on * 4), dsw(static_cast<size_t>(tokens) * 4), dout(on * 2);
+    std::vector<int32_t> ident(static_cast<size_t>(tokens));
+    for (int i = 0; i < tokens; ++i) ident[static_cast<size_t>(i)] = i;
+    DevBuf drows(ident.size() * 4);
+    drows.upload(ident.data(), ident.size() * 4);
+    dgpp::launch_scale_gemm_bf16(dx.as<uint16_t>(), static_cast<size_t>(H), dgp.as<uint8_t>(), static_cast<const float*>(dgs.p),
+                                 dsg.as<uint16_t>(), tokens, S, H, st, static_cast<size_t>(S));
+    dgpp::launch_scale_gemm_bf16(dx.as<uint16_t>(), static_cast<size_t>(H), dupp.as<uint8_t>(), static_cast<const float*>(dus.p),
+                                 dsu.as<uint16_t>(), tokens, S, H, st, static_cast<size_t>(S));
+    dgpp::launch_moe_swiglu_clamp(dsg.as<uint16_t>(), dsu.as<uint16_t>(), dsact.as<uint16_t>(), static_cast<int64_t>(an),
+                                  std::numeric_limits<float>::infinity(), st);
+    dgpp::launch_scale_gemm_f32(dsact.as<uint16_t>(), static_cast<size_t>(S), ddp.as<uint8_t>(), static_cast<const float*>(dds.p),
+                                static_cast<float*>(dsdown.p), tokens, H, S, st, static_cast<size_t>(H));
+    dgpp::qwen_moe_shared_gate_bf16(dx.as<uint16_t>(), dg.as<uint16_t>(), static_cast<float*>(dsw.p), tokens, H, st);
+    dgpp::launch_moe_accum(static_cast<float*>(dacc.p), static_cast<const float*>(dsdown.p), static_cast<const int32_t*>(drows.p),
+                           static_cast<const float*>(dsw.p), tokens, H, st);
+    dgpp::launch_moe_round_bf16(dout.as<uint16_t>(), static_cast<const float*>(dacc.p), static_cast<int64_t>(on), st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    std::vector<uint16_t> out_chain(on), act_chain(an);
+    dout.download(out_chain.data(), on * 2);
+    dsact.download(act_chain.data(), an * 2);
+    // The fused fp8 tail.
+    DevBuf dact2(an * 2), dsw2(static_cast<size_t>(tokens) * 4), dout2(on * 2);
+    dgpp::qwen_moe_shared_tail_decode_fp8(dx.as<uint16_t>(), static_cast<size_t>(H), dgp.as<uint8_t>(), static_cast<const float*>(dgs.p),
+                                          dupp.as<uint8_t>(), static_cast<const float*>(dus.p), ddp.as<uint8_t>(),
+                                          static_cast<const float*>(dds.p), dg.as<uint16_t>(), dact2.as<uint16_t>(),
+                                          static_cast<float*>(dsw2.p), static_cast<const float*>(dacc2.p), dout2.as<uint16_t>(),
+                                          tokens, H, S, st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    std::vector<uint16_t> out2(on), act2(an);
+    dout2.download(out2.data(), on * 2);
+    dact2.download(act2.data(), an * 2);
+    require(std::memcmp(act2.data(), act_chain.data(), an * 2) == 0, "fp8 fused tail: act differs from the chain");
+    require(std::memcmp(out2.data(), out_chain.data(), on * 2) == 0, "fp8 fused tail: out differs from the chain");
+    std::printf("[ OK ] the fp8 fused shared tail is bitwise the fp8 chain at %d rows\n", tokens);
+  }
 }
 
 DGPP_TEST(qwen_moe_decode_path_is_bitwise_the_host_path) {

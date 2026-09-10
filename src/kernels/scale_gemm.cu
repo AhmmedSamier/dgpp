@@ -257,6 +257,86 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
 
 }  // namespace
 
+namespace {
+// The multi-problem GEMV (2026-09-10): the problems in the parameter space
+// with their block prefixes; a block finds its problem by the prefix table
+// (field-wise selects, as bf16_gemv_multi_kernel) and runs the dense
+// launcher's block body over its rows.
+struct Fp8GemvMulti {
+  Fp8GemvProblem p[kFp8GemvMaxProblems];
+  int block_end[kFp8GemvMaxProblems];  // exclusive prefix of blocks per problem
+  int n;
+};
+
+template <int kRows>
+__global__ void scale_gemv_multi_kernel(Fp8GemvMulti mp, const uint16_t* __restrict__ act,
+                                        size_t act_stride, int k) {
+  extern __shared__ __align__(16) uint16_t sx[];
+  const int bid = static_cast<int>(blockIdx.x);
+  int which = 0;
+#pragma unroll
+  for (int i = 0; i < kFp8GemvMaxProblems - 1; ++i) which += (i + 1 < mp.n && bid >= mp.block_end[i]) ? 1 : 0;
+  const uint8_t* w = which == 0 ? mp.p[0].payload : which == 1 ? mp.p[1].payload : which == 2 ? mp.p[2].payload : mp.p[3].payload;
+  const float* scales = which == 0 ? mp.p[0].scales : which == 1 ? mp.p[1].scales : which == 2 ? mp.p[2].scales : mp.p[3].scales;
+  uint16_t* out = which == 0 ? mp.p[0].out : which == 1 ? mp.p[1].out : which == 2 ? mp.p[2].out : mp.p[3].out;
+  const int n = which == 0 ? mp.p[0].n : which == 1 ? mp.p[1].n : which == 2 ? mp.p[2].n : mp.p[3].n;
+  const size_t out_stride = which == 0 ? mp.p[0].out_stride : which == 1 ? mp.p[1].out_stride : which == 2 ? mp.p[2].out_stride : mp.p[3].out_stride;
+  const int block0 = which == 0 ? 0 : which == 1 ? mp.block_end[0] : which == 2 ? mp.block_end[1] : mp.block_end[2];
+  fp8_gemv::stage_activations<kRows>(act, act_stride, k, sx);
+  __syncthreads();
+  fp8_gemv::block_rows<kRows>(w, scales, sx, (bid - block0) * fp8_gemv::kWarps, n, k, out, out_stride);
+}
+
+template <int kRows>
+void launch_multi_rows(const Fp8GemvMulti& mp, const uint16_t* act, size_t act_stride, int k,
+                       cudaStream_t stream) {
+  const dim3 grid(static_cast<unsigned>(mp.block_end[mp.n - 1]));
+  scale_gemv_multi_kernel<kRows>
+      <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(kRows, k), stream>>>(mp, act, act_stride, k);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+}  // namespace
+
+void launch_scale_gemv_multi_bf16(const Fp8GemvProblem* problems, int n_problems,
+                                  const uint16_t* act, size_t act_row_stride_elems, int rows,
+                                  int k, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (n_problems <= 0 || n_problems > kFp8GemvMaxProblems || problems == nullptr || act == nullptr)
+    throw std::invalid_argument("scale_gemv_multi: 1..4 problems and an activation");
+  if (rows > 2 * fp8_gemv::kMaxRows)
+    throw std::invalid_argument("scale_gemv_multi: rows beyond the decode rows");
+  if (k <= 0 || k % 16 != 0 || act_row_stride_elems < static_cast<size_t>(k) ||
+      !gemv::smem_fits(fp8_gemv::kMaxRows, k))
+    throw std::invalid_argument("scale_gemv_multi: k a multiple of 16 that fits the staging");
+  Fp8GemvMulti base{};
+  base.n = n_problems;
+  int blocks = 0;
+  for (int i = 0; i < n_problems; ++i) {
+    Fp8GemvProblem p = problems[i];
+    if (!p.payload || !p.scales || !p.out || p.n <= 0 || !gemv::aligned16(p.payload))
+      throw std::invalid_argument("scale_gemv_multi: empty, null or unaligned problem");
+    if (p.out_stride == 0) p.out_stride = static_cast<size_t>(p.n);
+    if (p.out_stride < static_cast<size_t>(p.n))
+      throw std::invalid_argument("scale_gemv_multi: output row stride narrower than n");
+    base.p[i] = p;
+    blocks += (p.n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps;
+    base.block_end[i] = blocks;
+  }
+  for (int i = n_problems; i < kFp8GemvMaxProblems; ++i) base.block_end[i] = blocks;
+  for (int row0 = 0; row0 < rows; row0 += fp8_gemv::kMaxRows) {
+    const int n = std::min(fp8_gemv::kMaxRows, rows - row0);
+    Fp8GemvMulti mp = base;
+    for (int i = 0; i < n_problems; ++i) mp.p[i].out += static_cast<size_t>(row0) * mp.p[i].out_stride;
+    const uint16_t* a = act + static_cast<size_t>(row0) * act_row_stride_elems;
+    switch (n) {
+      case 1: launch_multi_rows<1>(mp, a, act_row_stride_elems, k, stream); break;
+      case 2: launch_multi_rows<2>(mp, a, act_row_stride_elems, k, stream); break;
+      case 3: launch_multi_rows<3>(mp, a, act_row_stride_elems, k, stream); break;
+      default: launch_multi_rows<4>(mp, a, act_row_stride_elems, k, stream); break;
+    }
+  }
+}
+
 void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
                             uint16_t* out, int m, int n, int k,

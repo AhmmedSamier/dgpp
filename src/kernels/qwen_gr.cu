@@ -5,6 +5,7 @@
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "kernels/bf16_gemv.cuh"
+#include "kernels/fp8_gemv.cuh"
 #include "kernels/gemv_common.cuh"
 #include "kernels/qwen_norm.cuh"
 
@@ -126,11 +127,33 @@ __global__ void combine_apply_kernel(uint16_t* __restrict__ r_state,
 // the norm + GEMV and gate_act + GEMV chains.
 constexpr int kGrGemvThreads = gemv::kThreads;  // 256: the norm kernel's block too
 
-template <int kRows>
+// The weight rows' form (2026-09-10, engine.dense_weights = "fp8"): BF16
+// rows through bf16_gemv::row_dots, or block-FP8 rows (E4M3 payload, fp32
+// 128 x 128 scales) through fp8_gemv::row_dots — the scale GEMM's own GEMV
+// chain, so the FP8 outputs are bitwise the unfused fp8 chain's, as the
+// BF16 ones are the bf16 chain's. `w` is the row space's base (bf16 or
+// e4m3), `scales` the fp8 grid (null for bf16), k the row width.
+template <int kRows, bool kFp8>
+__device__ __forceinline__ void weight_row_dots(const void* __restrict__ w,
+                                                const float* __restrict__ scales, int row,
+                                                int k, const uint16_t* __restrict__ sx, int lane,
+                                                float (&acc)[kRows]) {
+  if constexpr (kFp8) {
+    const int scale_cols = (k + 127) >> 7;
+    fp8_gemv::row_dots<kRows>(static_cast<const uint8_t*>(w) + static_cast<size_t>(row) * k,
+                              scales + static_cast<size_t>(row >> 7) * scale_cols, sx, k, lane, acc);
+  } else {
+    bf16_gemv::row_dots<kRows>(static_cast<const uint16_t*>(w) + static_cast<size_t>(row) * k, sx, k,
+                               lane, acc);
+  }
+}
+
+template <int kRows, bool kFp8>
 __global__ void __launch_bounds__(kGrGemvThreads)
     gr_norm_down_kernel(const uint16_t* __restrict__ r, size_t r_stride,
                         const uint16_t* __restrict__ norm_w, int hc, int hidden, float eps,
-                        uint16_t* __restrict__ rn, const uint16_t* __restrict__ down_w,
+                        uint16_t* __restrict__ rn, const void* __restrict__ down_w,
+                        const float* __restrict__ down_s,
                         uint16_t* __restrict__ t, int lowrank,
                         const uint16_t* __restrict__ w_inject, float* __restrict__ gates,
                         float inv_hc) {
@@ -183,7 +206,7 @@ __global__ void __launch_bounds__(kGrGemvThreads)
     return;
   }
   float acc[kRows];
-  bf16_gemv::row_dots<kRows>(down_w + static_cast<size_t>(n_row) * W, sx, W, lane, acc);
+  weight_row_dots<kRows, kFp8>(down_w, down_s, n_row, W, sx, lane, acc);
   if (lane != 0) return;
 #pragma unroll
   for (int row = 0; row < kRows; ++row)
@@ -200,10 +223,11 @@ __global__ void __launch_bounds__(kGrGemvThreads)
 // as the row space's last rows, each the lane-strided chain over the
 // staged Rn (combine_dots_kernel's order, so the gates are bitwise the
 // standalone kernel's). No norm prologue: Rn is the norm kernel's output.
-template <int kRows>
+template <int kRows, bool kFp8>
 __global__ void __launch_bounds__(kGrGemvThreads)
     gr_down_inject_kernel(const uint16_t* __restrict__ rn, int W,
-                          const uint16_t* __restrict__ down_w, uint16_t* __restrict__ t,
+                          const void* __restrict__ down_w, const float* __restrict__ down_s,
+                          uint16_t* __restrict__ t,
                           int lowrank, const uint16_t* __restrict__ w_inject,
                           float* __restrict__ gates, int hc, float inv_hc) {
   extern __shared__ __align__(16) uint16_t sx_di[];
@@ -227,35 +251,36 @@ __global__ void __launch_bounds__(kGrGemvThreads)
     return;
   }
   float acc[kRows];
-  bf16_gemv::row_dots<kRows>(down_w + static_cast<size_t>(n_row) * W, sx_di, W, lane, acc);
+  weight_row_dots<kRows, kFp8>(down_w, down_s, n_row, W, sx_di, lane, acc);
   if (lane != 0) return;
 #pragma unroll
   for (int row = 0; row < kRows; ++row)
     t[static_cast<size_t>(row) * lowrank + n_row] = float_to_bf16_bits(acc[row]);
 }
 
-template <int kRows>
-void launch_down_inject_rows(const uint16_t* rn, int W, const uint16_t* down_w, uint16_t* t,
-                             int lowrank, const uint16_t* w_inject, float* gates, int hc,
-                             cudaStream_t stream) {
+template <int kRows, bool kFp8>
+void launch_down_inject_rows(const uint16_t* rn, int W, const void* down_w, const float* down_s,
+                             uint16_t* t, int lowrank, const uint16_t* w_inject, float* gates,
+                             int hc, cudaStream_t stream) {
   const size_t smem = gemv::smem_bytes(kRows, W);
   static size_t opted = 0;
   if (smem > opted && smem > gemv::kMaxSmemBytes) {
-    DGPP_CUDA_OK(cudaFuncSetAttribute(gr_down_inject_kernel<kRows>,
+    DGPP_CUDA_OK(cudaFuncSetAttribute(gr_down_inject_kernel<kRows, kFp8>,
                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
                                       static_cast<int>(smem)));
     opted = smem;
   }
   const dim3 grid(static_cast<unsigned>((lowrank + hc + gemv::kWarps - 1) / gemv::kWarps));
-  gr_down_inject_kernel<kRows><<<grid, kGrGemvThreads, smem, stream>>>(
-      rn, W, down_w, t, lowrank, w_inject, gates, hc, 1.0f / static_cast<float>(hc));
+  gr_down_inject_kernel<kRows, kFp8><<<grid, kGrGemvThreads, smem, stream>>>(
+      rn, W, down_w, down_s, t, lowrank, w_inject, gates, hc, 1.0f / static_cast<float>(hc));
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-template <int kRows>
+template <int kRows, bool kFp8>
 __global__ void __launch_bounds__(kGrGemvThreads)
     gr_act_up_kernel(const uint16_t* __restrict__ t, int lowrank, float inv_hc,
-                     const uint16_t* __restrict__ up_w, uint16_t* __restrict__ logits, int W) {
+                     const void* __restrict__ up_w, const float* __restrict__ up_s,
+                     uint16_t* __restrict__ logits, int W) {
   extern __shared__ __align__(16) uint16_t sx[];
   for (int i = threadIdx.x; i < kRows * lowrank; i += blockDim.x) {
     // gate_act_kernel, op for op: t / hc is exact in bf16, silu in fp32.
@@ -267,25 +292,25 @@ __global__ void __launch_bounds__(kGrGemvThreads)
   const int n_row = static_cast<int>(blockIdx.x) * gemv::kWarps + warp;
   if (n_row >= W) return;
   float acc[kRows];
-  bf16_gemv::row_dots<kRows>(up_w + static_cast<size_t>(n_row) * lowrank, sx, lowrank, lane, acc);
+  weight_row_dots<kRows, kFp8>(up_w, up_s, n_row, lowrank, sx, lane, acc);
   if (lane != 0) return;
 #pragma unroll
   for (int row = 0; row < kRows; ++row)
     logits[static_cast<size_t>(row) * W + n_row] = float_to_bf16_bits(acc[row]);
 }
 
-template <int kRows>
+template <int kRows, bool kFp8>
 void launch_norm_down_rows(const uint16_t* r, size_t r_stride, const uint16_t* norm_w, int hc,
-                           int hidden, float eps, uint16_t* rn, const uint16_t* down_w,
-                           uint16_t* t, int lowrank, const uint16_t* w_inject, float* gates,
-                           cudaStream_t stream) {
+                           int hidden, float eps, uint16_t* rn, const void* down_w,
+                           const float* down_s, uint16_t* t, int lowrank,
+                           const uint16_t* w_inject, float* gates, cudaStream_t stream) {
   const int W = hc * hidden;
   const size_t smem = gemv::smem_bytes(kRows, W) + static_cast<size_t>(hidden) * sizeof(float);
   // Beyond the 48 KB default (four 20 KB rows plus a group of floats at
   // the real shape): the opt-in tracks the largest launch per kRows.
   static size_t opted = 0;
   if (smem > opted && smem > gemv::kMaxSmemBytes) {
-    DGPP_CUDA_OK(cudaFuncSetAttribute(gr_norm_down_kernel<kRows>,
+    DGPP_CUDA_OK(cudaFuncSetAttribute(gr_norm_down_kernel<kRows, kFp8>,
                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
                                       static_cast<int>(smem)));
     opted = smem;
@@ -293,20 +318,85 @@ void launch_norm_down_rows(const uint16_t* r, size_t r_stride, const uint16_t* n
   const bool inject = w_inject != nullptr && gates != nullptr;
   const int rows_total = lowrank + (inject ? hc : 0);
   const dim3 grid(static_cast<unsigned>((rows_total + gemv::kWarps - 1) / gemv::kWarps));
-  gr_norm_down_kernel<kRows><<<grid, kGrGemvThreads, smem, stream>>>(
-      r, r_stride, norm_w, hc, hidden, eps, rn, down_w, t, lowrank,
+  gr_norm_down_kernel<kRows, kFp8><<<grid, kGrGemvThreads, smem, stream>>>(
+      r, r_stride, norm_w, hc, hidden, eps, rn, down_w, down_s, t, lowrank,
       inject ? w_inject : nullptr, inject ? gates : nullptr,
       1.0f / static_cast<float>(hc));
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-template <int kRows>
-void launch_act_up_rows(const uint16_t* t, int lowrank, int hc, const uint16_t* up_w,
+template <int kRows, bool kFp8>
+void launch_act_up_rows(const uint16_t* t, int lowrank, int hc, const void* up_w, const float* up_s,
                         uint16_t* logits, int W, cudaStream_t stream) {
   const dim3 grid(static_cast<unsigned>((W + gemv::kWarps - 1) / gemv::kWarps));
-  gr_act_up_kernel<kRows><<<grid, kGrGemvThreads, gemv::smem_bytes(kRows, lowrank), stream>>>(
-      t, lowrank, 1.0f / hc, up_w, logits, W);
+  gr_act_up_kernel<kRows, kFp8><<<grid, kGrGemvThreads, gemv::smem_bytes(kRows, lowrank), stream>>>(
+      t, lowrank, 1.0f / hc, up_w, up_s, logits, W);
   DGPP_CUDA_OK(cudaGetLastError());
+}
+
+// The three public forms share their row loops: rows in chunks of
+// gemv::kMaxRows (a row's chain never depends on how many rows share its
+// launch), the kernel picked by the chunk's rows and the weights' form.
+template <bool kFp8>
+void norm_down_rows(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden, float eps,
+                    void* rn, const void* down_w, const float* down_s, void* t, int lowrank,
+                    int64_t rows, cudaStream_t stream, const void* w_inject, float* gates) {
+  const int W = hc * hidden;
+  cudaGetLastError();
+  for (int64_t row0 = 0; row0 < rows; row0 += gemv::kMaxRows) {
+    const int n = static_cast<int>(rows - row0 < gemv::kMaxRows ? rows - row0 : gemv::kMaxRows);
+    const uint16_t* rr = static_cast<const uint16_t*>(r) + static_cast<size_t>(row0) * r_stride;
+    uint16_t* rnr = rn ? static_cast<uint16_t*>(rn) + static_cast<size_t>(row0) * W : nullptr;
+    uint16_t* tr = static_cast<uint16_t*>(t) + static_cast<size_t>(row0) * lowrank;
+    const uint16_t* nw = static_cast<const uint16_t*>(norm_w);
+    const uint16_t* wi = static_cast<const uint16_t*>(w_inject);
+    float* gr = gates ? gates + static_cast<size_t>(row0) * hc : nullptr;
+    switch (n) {
+      case 1: launch_norm_down_rows<1, kFp8>(rr, r_stride, nw, hc, hidden, eps, rnr, down_w, down_s, tr, lowrank, wi, gr, stream); break;
+      case 2: launch_norm_down_rows<2, kFp8>(rr, r_stride, nw, hc, hidden, eps, rnr, down_w, down_s, tr, lowrank, wi, gr, stream); break;
+      case 3: launch_norm_down_rows<3, kFp8>(rr, r_stride, nw, hc, hidden, eps, rnr, down_w, down_s, tr, lowrank, wi, gr, stream); break;
+      default: launch_norm_down_rows<4, kFp8>(rr, r_stride, nw, hc, hidden, eps, rnr, down_w, down_s, tr, lowrank, wi, gr, stream); break;
+    }
+  }
+}
+
+template <bool kFp8>
+void down_inject_rows(const void* rn, const void* down_w, const float* down_s, void* t, int lowrank,
+                      const void* w_inject, float* gates, int hc, int hidden, int64_t rows,
+                      cudaStream_t stream) {
+  const int W = hc * hidden;
+  cudaGetLastError();
+  for (int64_t row0 = 0; row0 < rows; row0 += gemv::kMaxRows) {
+    const int n = static_cast<int>(rows - row0 < gemv::kMaxRows ? rows - row0 : gemv::kMaxRows);
+    const uint16_t* rr = static_cast<const uint16_t*>(rn) + static_cast<size_t>(row0) * W;
+    uint16_t* tr = static_cast<uint16_t*>(t) + static_cast<size_t>(row0) * lowrank;
+    float* gr = gates + static_cast<size_t>(row0) * hc;
+    const uint16_t* wi = static_cast<const uint16_t*>(w_inject);
+    switch (n) {
+      case 1: launch_down_inject_rows<1, kFp8>(rr, W, down_w, down_s, tr, lowrank, wi, gr, hc, stream); break;
+      case 2: launch_down_inject_rows<2, kFp8>(rr, W, down_w, down_s, tr, lowrank, wi, gr, hc, stream); break;
+      case 3: launch_down_inject_rows<3, kFp8>(rr, W, down_w, down_s, tr, lowrank, wi, gr, hc, stream); break;
+      default: launch_down_inject_rows<4, kFp8>(rr, W, down_w, down_s, tr, lowrank, wi, gr, hc, stream); break;
+    }
+  }
+}
+
+template <bool kFp8>
+void act_up_rows(const void* t, int lowrank, int hc, const void* up_w, const float* up_s, void* logits,
+                 int hidden, int64_t rows, cudaStream_t stream) {
+  const int W = hc * hidden;
+  cudaGetLastError();
+  for (int64_t row0 = 0; row0 < rows; row0 += gemv::kMaxRows) {
+    const int n = static_cast<int>(rows - row0 < gemv::kMaxRows ? rows - row0 : gemv::kMaxRows);
+    const uint16_t* tr = static_cast<const uint16_t*>(t) + static_cast<size_t>(row0) * lowrank;
+    uint16_t* lr = static_cast<uint16_t*>(logits) + static_cast<size_t>(row0) * W;
+    switch (n) {
+      case 1: launch_act_up_rows<1, kFp8>(tr, lowrank, hc, up_w, up_s, lr, W, stream); break;
+      case 2: launch_act_up_rows<2, kFp8>(tr, lowrank, hc, up_w, up_s, lr, W, stream); break;
+      case 3: launch_act_up_rows<3, kFp8>(tr, lowrank, hc, up_w, up_s, lr, W, stream); break;
+      default: launch_act_up_rows<4, kFp8>(tr, lowrank, hc, up_w, up_s, lr, W, stream); break;
+    }
+  }
 }
 
 }  // namespace
@@ -330,24 +420,21 @@ void qwen_gr_norm_down_bf16(const void* r, size_t r_stride, const void* norm_w, 
   if (rows > 8 || !qwen_gr_fused_mix_accepts(hc, hidden, lowrank) || r_stride < static_cast<size_t>(hc) * hidden ||
       !gemv::aligned16(r) || !gemv::aligned16(down_w) || (r_stride * 2) % 16 != 0)
     throw std::invalid_argument("qwen gr norm_down: shape outside the fused contract");
-  const int W = hc * hidden;
-  cudaGetLastError();
-  for (int64_t row0 = 0; row0 < rows; row0 += gemv::kMaxRows) {
-    const int n = static_cast<int>(rows - row0 < gemv::kMaxRows ? rows - row0 : gemv::kMaxRows);
-    const uint16_t* rr = static_cast<const uint16_t*>(r) + static_cast<size_t>(row0) * r_stride;
-    uint16_t* rnr = rn ? static_cast<uint16_t*>(rn) + static_cast<size_t>(row0) * W : nullptr;
-    uint16_t* tr = static_cast<uint16_t*>(t) + static_cast<size_t>(row0) * lowrank;
-    const uint16_t* nw = static_cast<const uint16_t*>(norm_w);
-    const uint16_t* dw = static_cast<const uint16_t*>(down_w);
-    const uint16_t* wi = static_cast<const uint16_t*>(w_inject);
-    float* gr = gates ? gates + static_cast<size_t>(row0) * hc : nullptr;
-    switch (n) {
-      case 1: launch_norm_down_rows<1>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, wi, gr, stream); break;
-      case 2: launch_norm_down_rows<2>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, wi, gr, stream); break;
-      case 3: launch_norm_down_rows<3>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, wi, gr, stream); break;
-      default: launch_norm_down_rows<4>(rr, r_stride, nw, hc, hidden, eps, rnr, dw, tr, lowrank, wi, gr, stream); break;
-    }
-  }
+  norm_down_rows<false>(r, r_stride, norm_w, hc, hidden, eps, rn, down_w, nullptr, t, lowrank, rows, stream,
+                        w_inject, gates);
+}
+
+void qwen_gr_norm_down_fp8(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden,
+                           float eps, void* rn, const uint8_t* down_p, const float* down_s, void* t,
+                           int lowrank, int64_t rows, cudaStream_t stream, const void* w_inject,
+                           float* gates) {
+  if (rows <= 0) return;
+  if (!r || !norm_w || !down_p || !down_s || !t) throw std::invalid_argument("qwen gr norm_down fp8: null pointer");
+  if (rows > 8 || !qwen_gr_fused_mix_accepts(hc, hidden, lowrank) || r_stride < static_cast<size_t>(hc) * hidden ||
+      !gemv::aligned16(r) || !gemv::aligned16(down_p) || (r_stride * 2) % 16 != 0 || (hc * hidden) % 16 != 0)
+    throw std::invalid_argument("qwen gr norm_down fp8: shape outside the fused contract");
+  norm_down_rows<true>(r, r_stride, norm_w, hc, hidden, eps, rn, down_p, down_s, t, lowrank, rows, stream,
+                       w_inject, gates);
 }
 
 void qwen_gr_down_inject_bf16(const void* rn, const void* down_w, void* t, int lowrank,
@@ -361,21 +448,20 @@ void qwen_gr_down_inject_bf16(const void* rn, const void* down_w, void* t, int l
       !gemv::aligned16(down_w) || !gemv::aligned16(w_inject) || (static_cast<size_t>(W) * 2) % 16 != 0 ||
       !gemv::smem_fits(1, W))
     throw std::invalid_argument("qwen gr down_inject: shape outside the contract");
-  cudaGetLastError();
-  for (int64_t row0 = 0; row0 < rows; row0 += gemv::kMaxRows) {
-    const int n = static_cast<int>(rows - row0 < gemv::kMaxRows ? rows - row0 : gemv::kMaxRows);
-    const uint16_t* rr = static_cast<const uint16_t*>(rn) + static_cast<size_t>(row0) * W;
-    uint16_t* tr = static_cast<uint16_t*>(t) + static_cast<size_t>(row0) * lowrank;
-    float* gr = gates + static_cast<size_t>(row0) * hc;
-    const uint16_t* dw = static_cast<const uint16_t*>(down_w);
-    const uint16_t* wi = static_cast<const uint16_t*>(w_inject);
-    switch (n) {
-      case 1: launch_down_inject_rows<1>(rr, W, dw, tr, lowrank, wi, gr, hc, stream); break;
-      case 2: launch_down_inject_rows<2>(rr, W, dw, tr, lowrank, wi, gr, hc, stream); break;
-      case 3: launch_down_inject_rows<3>(rr, W, dw, tr, lowrank, wi, gr, hc, stream); break;
-      default: launch_down_inject_rows<4>(rr, W, dw, tr, lowrank, wi, gr, hc, stream); break;
-    }
-  }
+  down_inject_rows<false>(rn, down_w, nullptr, t, lowrank, w_inject, gates, hc, hidden, rows, stream);
+}
+
+void qwen_gr_down_inject_fp8(const void* rn, const uint8_t* down_p, const float* down_s, void* t,
+                             int lowrank, const void* w_inject, float* gates, int hc, int hidden,
+                             int64_t rows, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!rn || !down_p || !down_s || !t || !w_inject || !gates)
+    throw std::invalid_argument("qwen gr down_inject fp8: null pointer");
+  const int W = hc * hidden;
+  if (rows > 8 || hc < 1 || hc > 8 || W % 16 != 0 || lowrank <= 0 || !gemv::aligned16(rn) ||
+      !gemv::aligned16(down_p) || !gemv::aligned16(w_inject) || !gemv::smem_fits(1, W))
+    throw std::invalid_argument("qwen gr down_inject fp8: shape outside the contract");
+  down_inject_rows<true>(rn, down_p, down_s, t, lowrank, w_inject, gates, hc, hidden, rows, stream);
 }
 
 void qwen_gr_act_up_bf16(const void* t, int lowrank, int hc, const void* up_w, void* logits, int hidden,
@@ -384,20 +470,17 @@ void qwen_gr_act_up_bf16(const void* t, int lowrank, int hc, const void* up_w, v
   if (!t || !up_w || !logits) throw std::invalid_argument("qwen gr act_up: null pointer");
   if (rows > 8 || !qwen_gr_fused_mix_accepts(hc, hidden, lowrank) || !gemv::aligned16(t) || !gemv::aligned16(up_w))
     throw std::invalid_argument("qwen gr act_up: shape outside the fused contract");
-  const int W = hc * hidden;
-  cudaGetLastError();
-  for (int64_t row0 = 0; row0 < rows; row0 += gemv::kMaxRows) {
-    const int n = static_cast<int>(rows - row0 < gemv::kMaxRows ? rows - row0 : gemv::kMaxRows);
-    const uint16_t* tr = static_cast<const uint16_t*>(t) + static_cast<size_t>(row0) * lowrank;
-    uint16_t* lr = static_cast<uint16_t*>(logits) + static_cast<size_t>(row0) * W;
-    const uint16_t* uw = static_cast<const uint16_t*>(up_w);
-    switch (n) {
-      case 1: launch_act_up_rows<1>(tr, lowrank, hc, uw, lr, W, stream); break;
-      case 2: launch_act_up_rows<2>(tr, lowrank, hc, uw, lr, W, stream); break;
-      case 3: launch_act_up_rows<3>(tr, lowrank, hc, uw, lr, W, stream); break;
-      default: launch_act_up_rows<4>(tr, lowrank, hc, uw, lr, W, stream); break;
-    }
-  }
+  act_up_rows<false>(t, lowrank, hc, up_w, nullptr, logits, hidden, rows, stream);
+}
+
+void qwen_gr_act_up_fp8(const void* t, int lowrank, int hc, const uint8_t* up_p, const float* up_s,
+                        void* logits, int hidden, int64_t rows, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (!t || !up_p || !up_s || !logits) throw std::invalid_argument("qwen gr act_up fp8: null pointer");
+  if (rows > 8 || !qwen_gr_fused_mix_accepts(hc, hidden, lowrank) || !gemv::aligned16(t) ||
+      !gemv::aligned16(up_p) || lowrank % 16 != 0)
+    throw std::invalid_argument("qwen gr act_up fp8: shape outside the fused contract");
+  act_up_rows<true>(t, lowrank, hc, up_p, up_s, logits, hidden, rows, stream);
 }
 
 void qwen_gr_gate_act_bf16(void* t, int64_t rows, int r, int hc, cudaStream_t stream) {
