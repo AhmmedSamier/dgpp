@@ -66,6 +66,15 @@ struct SampleSpec {
   uint64_t counter = 0;
 };
 
+// The DRAFT's own stream (2026-09-10): a sampled draft draws from
+// (seed ^ kSampleDraftSeedMix, counter) — the request's counter, which the
+// verify advances every step, under a different key. So the draft's draw is
+// independent of the accept test's u1/u2 (what the proposal rule needs),
+// it never advances the request's counter (the host's draw accounting is
+// untouched), and it carries no state of its own to keep in step across a
+// fallback's push.
+constexpr uint64_t kSampleDraftSeedMix = 0x9E3779B97F4A7C15ull;
+
 constexpr int kSampleMaxTopLogprobs = 20;
 
 // The verify rows a sampled verdict decides over: the fed token's row plus
@@ -94,6 +103,25 @@ struct SampleOutcome {
   int32_t top_count[kSampleVerdictRows] = {};
   int32_t top_ids[kSampleVerdictRows][kSampleMaxTopLogprobs] = {};
   float top_logprobs[kSampleVerdictRows][kSampleMaxTopLogprobs] = {};
+};
+
+// The draft's proposal (2026-09-10): the distribution the draft was DRAWN
+// from — the draft head's own final set after the request's temperature,
+// top-k, top-p and min-p — carried from the draft pick to the next step's
+// verify, where the row-0 test becomes min(1, P/Q) with the (P - Q)+
+// residual (sample::Proposal, sample::spec_select_from_sorted). n == 0 says
+// the draft was deterministic (or its final set did not fit) and the verify
+// uses the plain P(draft) rule, which is exact for any draft whatsoever —
+// only the acceptance rate differs. `token` guards the pairing: a proposal
+// whose token is not the draft the verify was fed is ignored (the host
+// re-drafted between windows).
+constexpr int kSampleProposalMax = 64;
+constexpr int kSampleProposalSlots = kSampleVerdictRows - 1;  // drafts per request
+struct DraftProposal {
+  int32_t n = 0;
+  int32_t token = -1;
+  int32_t ids[kSampleProposalMax] = {};
+  float mass[kSampleProposalMax] = {};
 };
 
 // The token mask of constrained decoding (M6 6g), per ROW: word 0 is the
@@ -165,6 +193,12 @@ constexpr int device_sample_candidates_that_fit(int rows, int world,
 // `bias` (optional, 2026-09-06): the requests' logit_bias rows,
 // [requests][vocab_size] floats, added in place for rows whose spec says
 // `biased`.
+// `row_select` (optional, 2026-09-10): one candidate row per request, as
+// the greedy local's — request q reads logits row
+// q * source_row_stride + (row_select[q].accepted - 1). The draft pick's
+// shape: its head ran on the verify layout and the pick samples the row the
+// verdict accepted. `counts` may be null, and then no row is penalized (the
+// draft's proposal needs no penalty: any Q is exact, see DraftProposal).
 void device_sample_local(float* logits, int rows, int vocab_count,
                       int vocab_begin, int vocab_size, int rank, int world,
                       int candidates, const SampleSpec* specs,
@@ -174,7 +208,8 @@ void device_sample_local(float* logits, int rows, int vocab_count,
                       const uint32_t* masks,
                       int mask_stride, const uint64_t* carry_digest,
                       uint16_t* table, PickLocal* locals, double* scratch,
-                      cudaStream_t stream);
+                      cudaStream_t stream, const PickVerdict* row_select = nullptr,
+                      int source_row_stride = 0);
 
 // Kernel 2 (after the fold), one block per request plus the digest pass:
 // decodes every rank's group, merges the k-way prefix in canonical order
@@ -188,6 +223,13 @@ void device_sample_local(float* logits, int rows, int vocab_count,
 // consumed token; the draft when accepted == 2).
 // `masks`/`mask_stride` as glm_sample_local's: a constrained row decides
 // over its allowed count and a masked draft is rejected outright.
+// `proposals_in` (optional): the drafts' proposals, [requests][slots] with
+// slot t the draft fed to row t+1 — row t's accept test takes the ratio
+// rule when its proposal carries that draft. `proposals_out` (optional, the
+// DRAFT pick: rows_per_request == 1) receives the final set this pick drew
+// from, at [q][draft_index], on the device and, when given, in a pinned
+// mirror for the host's fallback. `counts` may be null (the draft pick
+// commits no context).
 void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         int candidates, int vocab_size, SampleSpec* specs,
                         int requests, int rows_per_request, const int64_t* fed,
@@ -196,7 +238,11 @@ void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         PickVerdict* verdicts,
                         PickVerdict* device_verdicts,
                         SampleOutcome* outcomes, uint64_t* carry_digest,
-                        cudaStream_t stream);
+                        cudaStream_t stream,
+                        const DraftProposal* proposals_in = nullptr,
+                        DraftProposal* proposals_out = nullptr,
+                        DraftProposal* proposals_out_host = nullptr,
+                        int draft_index = 0);
 
 // counts[token] += delta (the host's correction of a request's context after
 // a fallback it decided: a provisionally rejected draft joins the table

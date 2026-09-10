@@ -859,6 +859,15 @@ checkpoint as `tools/compose_nvfp4_hybrid.py` did), depth-2 MTP with
 IndexShare. Gate: the golden metric (single-stream decode) per lever,
 recorded in the ledger.
 
+### Q9 — the single-stream round (2026-09-10)
+
+The next round of decode and prefill work, its measurements and its ranked
+backlog live in `docs/qwen38_optimization_plan.md`: the line rate and the
+two floors, today's per-kernel profiles at T=1 / MTP / prefill, the
+collective's anatomy at world 4, what landed (the GR inject dots off the
+chain), what was tried and reverted (the fused mix beyond one row, a
+4 096-token prefill chunk), and what is left in order.
+
 ### Q8 status — the decode profile (2026-09-09, world 4, T=1)
 
 `scripts/fabric_qwen_profile.sh deploy/cluster_qwen_t1.json OUT` (rank 0

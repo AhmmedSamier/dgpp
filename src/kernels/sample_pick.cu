@@ -238,6 +238,19 @@ __device__ inline int32_t context_count(const int32_t* counts_q, int32_t v,
 // place (sample::apply_penalties) and the chunk's max of the
 // temperature-scaled slice.
 // ---------------------------------------------------------------------------
+// The logits row a (request, row) reads (2026-09-10). Without `row_select`
+// it is the row itself; with it — the draft pick — request q reads the row
+// its verify verdict accepted, inside a wider source group.
+__device__ __forceinline__ size_t source_row(int row, int q, int rows_per_request,
+                                             const PickVerdict* __restrict__ row_select,
+                                             int source_row_stride) {
+  if (row_select == nullptr) return static_cast<size_t>(row);
+  const int acc = row_select[q].accepted;
+  const int pick = acc > 0 ? acc - 1 : 0;
+  return static_cast<size_t>(q) * static_cast<size_t>(source_row_stride) +
+         static_cast<size_t>(pick);
+}
+
 __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
     float* __restrict__ logits, int vocab_count, int vocab_begin,
     int vocab_size, const SampleSpec* __restrict__ specs,
@@ -245,7 +258,8 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
     const int64_t* __restrict__ positions, int position_stride,
     const int32_t* __restrict__ counts, const float* __restrict__ bias,
     const uint32_t* __restrict__ masks, int mask_stride,
-    double* __restrict__ maxes) {
+    double* __restrict__ maxes, const PickVerdict* __restrict__ row_select,
+    int source_row_stride) {
   __shared__ float fred[32];
   const int c = blockIdx.x;
   const int row = blockIdx.y;
@@ -255,12 +269,13 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
       row_spec(specs, q, positions, position_stride, masks, mask_stride, row);
   if (!rs.sampled) return;
   const int nchunks = gridDim.x;
-  float* slice = logits + static_cast<size_t>(row) * vocab_count;
+  float* slice = logits + source_row(row, q, rows_per_request, row_select,
+                                     source_row_stride) * vocab_count;
   const int i = c * kChunkThreads + threadIdx.x;
   float scaled = -INFINITY;
   if (i < vocab_count) {
     float l = slice[i];
-    if (rs.penalized) {
+    if (rs.penalized && counts != nullptr) {
       const int32_t cnt =
           context_count(counts + static_cast<size_t>(q) * vocab_size,
                         vocab_begin + i, fed, q * rows_per_request, t);
@@ -299,7 +314,8 @@ __global__ void __launch_bounds__(kChunkThreads) sample_partials_kernel(
     const SampleSpec* __restrict__ specs, int rows_per_request,
     const int64_t* __restrict__ positions, int position_stride,
     const uint32_t* __restrict__ masks, int mask_stride,
-    const double* __restrict__ maxes, double* __restrict__ partials) {
+    const double* __restrict__ maxes, double* __restrict__ partials,
+    const PickVerdict* __restrict__ row_select, int source_row_stride) {
   __shared__ double terms[kChunkThreads];
   __shared__ float fred[32];
   const int c = blockIdx.x;
@@ -313,7 +329,8 @@ __global__ void __launch_bounds__(kChunkThreads) sample_partials_kernel(
   for (int j = threadIdx.x; j < nchunks; j += kChunkThreads)
     m = fmaxf(m, static_cast<float>(maxes[static_cast<size_t>(row) * nchunks + j]));
   const float top = block_max_f(m, fred);  // exact: any order
-  const float* slice = logits + static_cast<size_t>(row) * vocab_count;
+  const float* slice = logits + source_row(row, q, rows_per_request, row_select,
+                                           source_row_stride) * vocab_count;
   const int c0 = c * kChunkThreads;
   const int i = c0 + threadIdx.x;
   // A slice with every id masked has no mass (top is -inf): zero terms, so
@@ -477,7 +494,8 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
     const uint32_t* __restrict__ masks, int mask_stride,
     const double* __restrict__ maxes, const double* __restrict__ partials,
     int nchunks, const uint64_t* __restrict__ carry_digest,
-    uint16_t* __restrict__ table, PickLocal* __restrict__ locals) {
+    uint16_t* __restrict__ table, PickLocal* __restrict__ locals,
+    const PickVerdict* __restrict__ row_select, int source_row_stride) {
   __shared__ uint32_t hist[kRadixBins];
   __shared__ int found[3];
   __shared__ int sel_count;
@@ -501,7 +519,8 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
       row_spec(specs, q, positions, position_stride, masks, mask_stride, row);
   uint16_t* row_base = table + static_cast<size_t>(row) * row_slots;
   uint16_t* mine = row_base + static_cast<size_t>(rank) * group;
-  const float* slice = logits + static_cast<size_t>(row) * vocab_count;
+  const float* slice = logits + source_row(row, q, rows_per_request, row_select,
+                                           source_row_stride) * vocab_count;
 
   // Zero this row's candidate region (every rank's group: the fold needs
   // zeros in the foreign slots); block 0 also owns the digest group and
@@ -850,7 +869,8 @@ __device__ inline void selector(const float* logit, const int32_t* id,
                                 int top_k, float min_p, float top_p,
                                 float* exps, uint64_t seed, uint64_t* counter,
                                 int32_t* token, float* logprob,
-                                const TopReport* top = nullptr) {
+                                const TopReport* top = nullptr,
+                                DraftProposal* proposal = nullptr) {
   int final_count = 0;
   float final_den = 0.0f, lse = 0.0f;
   selector_state(logit, expsrc, n, temperature, top_k, min_p, top_p, exps,
@@ -858,6 +878,21 @@ __device__ inline void selector(const float* logit, const int32_t* id,
   if (top != nullptr)
     report_top(logit, id, final_count, temperature, lse, top->N, top->ids,
                top->lps, top->count);
+  // The draw's own distribution, kept for the next step's verify: the
+  // masses in the SAME fp32 quotient the walk below uses. A set wider than
+  // the buffer is not carried (n = 0) — the verify then uses the plain
+  // rule, which stays exact.
+  if (proposal != nullptr) {
+    if (final_count <= kSampleProposalMax) {
+      proposal->n = final_count;
+      for (int i = 0; i < final_count; ++i) {
+        proposal->ids[i] = id[i];
+        proposal->mass[i] = __fdiv_rn(exps[i], final_den);
+      }
+    } else {
+      proposal->n = 0;
+    }
+  }
   const double r = uniform01(seed, *counter);
   *counter += 1;
   double cum = 0.0;
@@ -884,7 +919,9 @@ __device__ inline bool spec_select(const float* logit, const int32_t* id,
                                    float top_p, int32_t draft, float* exps,
                                    uint64_t seed, uint64_t* counter,
                                    int32_t* token, float* logprob,
-                                   const TopReport* top = nullptr) {
+                                   const TopReport* top = nullptr,
+                                   const float* qmass = nullptr,
+                                   double q_draft = 0.0) {
   int final_count = 0;
   float final_den = 0.0f, lse = 0.0f;
   selector_state(logit, expsrc, n, temperature, top_k, min_p, top_p, exps,
@@ -899,15 +936,47 @@ __device__ inline bool spec_select(const float* logit, const int32_t* id,
       break;
     }
   const float p_draft = j < final_count ? __fdiv_rn(exps[j], final_den) : 0.0f;
+  const bool ratio = qmass != nullptr && q_draft > 0.0;
   const double u1 = uniform01(seed, *counter);
   *counter += 1;
-  if (static_cast<double>(p_draft) > u1) {
+  if (ratio ? (static_cast<double>(p_draft) > u1 * q_draft)
+            : (static_cast<double>(p_draft) > u1)) {
     *token = draft;
     *logprob = __fsub_rn(__fdiv_rn(logit[j], temperature), lse);
     return true;
   }
   const double u2 = uniform01(seed, *counter);
   *counter += 1;
+  if (ratio) {
+    // The residual (P - Q)+ over the final set, the host's arithmetic:
+    // fp64 masses from the fp32 exps and the fp32 denominator.
+    double res_den = 0.0;
+    for (int i = 0; i < final_count; ++i) {
+      const double pi = static_cast<double>(exps[i]) / static_cast<double>(final_den);
+      const double qi = static_cast<double>(qmass[i]);
+      if (pi > qi) res_den += pi - qi;
+    }
+    double cum_r = 0.0;
+    int chosen_r = final_count, last_r = final_count;
+    if (res_den > 0.0) {
+      for (int i = 0; i < final_count; ++i) {
+        const double pi = static_cast<double>(exps[i]) / static_cast<double>(final_den);
+        const double qi = static_cast<double>(qmass[i]);
+        const double ri = pi > qi ? pi - qi : 0.0;
+        if (ri > 0.0 || last_r == final_count) last_r = i;
+        cum_r += ri / res_den;
+        if (cum_r > u2) {
+          chosen_r = i;
+          break;
+        }
+      }
+    }
+    if (chosen_r == final_count) chosen_r = last_r;
+    if (chosen_r == final_count) chosen_r = 0;
+    *token = id[chosen_r];
+    *logprob = __fsub_rn(__fdiv_rn(logit[chosen_r], temperature), lse);
+    return false;
+  }
   const float res_den =
       j < final_count ? __fsub_rn(final_den, exps[j]) : final_den;
   double cum = 0.0;
@@ -1012,7 +1081,8 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
                                          int vocab_size, double Z,
                                          const SampleSpec& s, float* exps,
                                          uint64_t* counter,
-                                         const TopReport* top = nullptr) {
+                                         const TopReport* top = nullptr,
+                                         DraftProposal* proposal = nullptr) {
   Decision d{false, false, kNoId, 0.0f, 0.0};
   const Support sup =
       resolve_support(logit, mass, prefix, held, vocab_size, s);
@@ -1021,7 +1091,7 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
   const float T = s.temperature;
   if (sup.kind == 1) {
     selector(logit, id, expsrc, sup.n, T, sup.top_k, sup.min_p, sup.top_p,
-             exps, s.seed, counter, &d.token, &d.logprob, top);
+             exps, s.seed, counter, &d.token, &d.logprob, top, proposal);
     d.resolved = true;
     return d;
   }
@@ -1055,11 +1125,16 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
 // sample::spec_accept_from_prefix.
 // `draft_excluded`: the draft is a masked id — probability 0 without the
 // prefix having to show it (sample::spec_accept_from_prefix).
+// `qmass` (2026-09-10): the proposal's mass at each merged candidate, or
+// null when the draft was deterministic. With it the accept test is
+// min(1, P/Q) and the residual is the normalized (P - Q)+ — the marginal is
+// P either way (sample::spec_select_from_sorted, the host oracle).
 __device__ inline Decision spec_decide_prefix(
     const float* logit, const int32_t* id, const double* mass, double* prefix,
     const float* expsrc, int held, int vocab_size, double Z, int32_t draft,
     const SampleSpec& s, float* exps, uint64_t* counter,
-    const TopReport* top = nullptr, bool draft_excluded = false) {
+    const TopReport* top = nullptr, bool draft_excluded = false,
+    const float* qmass = nullptr, double q_draft = 0.0) {
   Decision d{false, false, kNoId, 0.0f, 0.0};
   const Support sup =
       resolve_support(logit, mass, prefix, held, vocab_size, s);
@@ -1069,7 +1144,8 @@ __device__ inline Decision spec_decide_prefix(
   if (sup.kind == 1) {
     d.accepted = spec_select(logit, id, expsrc, sup.n, T, sup.top_k,
                              sup.min_p, sup.top_p, draft, exps, s.seed,
-                             counter, &d.token, &d.logprob, top);
+                             counter, &d.token, &d.logprob, top, qmass,
+                             q_draft);
     d.resolved = true;
     return d;
   }
@@ -1151,7 +1227,10 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     const uint32_t* __restrict__ masks, int mask_stride,
     PickVerdict* __restrict__ verdicts,
     PickVerdict* __restrict__ device_verdicts,
-    SampleOutcome* __restrict__ outcomes) {
+    SampleOutcome* __restrict__ outcomes,
+    const DraftProposal* __restrict__ proposals_in,
+    DraftProposal* __restrict__ proposals_out,
+    DraftProposal* __restrict__ proposals_out_host, int draft_index) {
   // One row's split composite keys at a time (hi = ~primary, lo = id; the
   // empty slot is the maximal key) — the merge is per row, and T rows of
   // keys would not fit the static shared bound — with every row's merged
@@ -1170,6 +1249,12 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   __shared__ double lse_terms[R][kPickMaxWorld];
   __shared__ int total[R];
   __shared__ double Z[R];
+  // Row 0's proposal, gathered onto the merged candidate list before the
+  // scalar decision (2026-09-10). Only the first draft carries one: the
+  // chained drafts of depth >= 2 keep the plain rule, which is exact.
+  __shared__ float qmass_s[kSampleMaxCandidates];
+  __shared__ double q_draft_s;
+  __shared__ int q_live_s;
 
   const int q = blockIdx.x;
   const int row0 = q * rows_per_request;
@@ -1306,6 +1391,42 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
       }
     }
   }
+  if (tid == 0) {
+    q_live_s = 0;
+    q_draft_s = 0.0;
+  }
+  __syncthreads();
+  // The row-0 draft's proposal, when this pick was fed the draft it drew.
+  if (proposals_in != nullptr && rows_per_request > 1 && stochastic &&
+      held[0] > 0) {
+    const DraftProposal* prop =
+        proposals_in + static_cast<size_t>(q) * kSampleProposalSlots;
+    const int32_t draft0 = static_cast<int32_t>(fed[row0 + 1]);
+    if (prop->n > 0 && prop->token == draft0) {
+      for (int i = tid; i < held[0]; i += kVerdictThreads) {
+        const int32_t want = m_id[0][i];
+        float m = 0.0f;
+        for (int e = 0; e < prop->n; ++e)
+          if (prop->ids[e] == want) {
+            m = prop->mass[e];
+            break;
+          }
+        qmass_s[i] = m;
+      }
+      if (tid == 0) {
+        double qd = 0.0;
+        for (int e = 0; e < prop->n; ++e)
+          if (prop->ids[e] == draft0) {
+            qd = static_cast<double>(prop->mass[e]);
+            break;
+          }
+        if (qd > 0.0) {
+          q_draft_s = qd;
+          q_live_s = 1;
+        }
+      }
+    }
+  }
   __syncthreads();
   if (tid != 0) return;
 
@@ -1356,6 +1477,12 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     // reject ends the step on the residual token, an undecidable row falls
     // back to the host from row t with the rows before it committed. The
     // last row reached is sampled plainly. T = 1 is the plain sample.
+    // The draft pick draws from the draft stream (kSampleDraftSeedMix), so
+    // the request's own counter — the host's draw accounting — is only ever
+    // advanced by the verify.
+    const bool draft_mode = proposals_out != nullptr && rows_per_request == 1;
+    SampleSpec use = spec;
+    if (draft_mode) use.seed = spec.seed ^ kSampleDraftSeedMix;
     uint64_t counter = spec.counter;
     o.sampled = 1;
     v.accepted = 1;
@@ -1370,12 +1497,15 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
             row_mask[t] != nullptr &&
             (draft < 0 || draft >= vocab_size ||
              !mask_allows(row_mask[t], draft));
+        const bool ratio = t == 0 && q_live_s != 0;
         const Decision d =
             held[t] > 0 ? spec_decide_prefix(m_logit[t], m_id[t], mass[t],
                                              prefix, expsrc[t], held[t],
-                                             row_vocab[t], Zt, draft, spec,
+                                             row_vocab[t], Zt, draft, use,
                                              exps, &counter, reps[t],
-                                             draft_excluded)
+                                             draft_excluded,
+                                             ratio ? qmass_s : nullptr,
+                                             ratio ? q_draft_s : 0.0)
                         : none;
         o.covered_mass[t] = d.covered;
         if (!d.resolved) {
@@ -1401,11 +1531,33 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
           o.logprob[t] = d.logprob;
         }
       } else {
+        // The draft pick (one row per request) keeps the set it drew from.
+        DraftProposal* out =
+            (proposals_out != nullptr && rows_per_request == 1)
+                ? proposals_out + static_cast<size_t>(q) * kSampleProposalSlots +
+                      draft_index
+                : nullptr;
+        if (out != nullptr) out->n = 0;
         const Decision d =
             held[t] > 0 ? decide_prefix(m_logit[t], m_id[t], mass[t], prefix,
                                         expsrc[t], held[t], row_vocab[t], Zt,
-                                        spec, exps, &counter, reps[t])
+                                        use, exps, &counter, reps[t], out)
                         : none;
+        if (out != nullptr) {
+          out->token = d.resolved ? d.token : kNoId;
+          if (!d.resolved) out->n = 0;
+          if (proposals_out_host != nullptr) {
+            DraftProposal* mirror = proposals_out_host +
+                                    static_cast<size_t>(q) * kSampleProposalSlots +
+                                    draft_index;
+            mirror->n = out->n;
+            mirror->token = out->token;
+            for (int e = 0; e < out->n; ++e) {
+              mirror->ids[e] = out->ids[e];
+              mirror->mass[e] = out->mass[e];
+            }
+          }
+        }
         o.covered_mass[t] = d.covered;
         if (d.resolved) {
           v.winners[t] = d.token;
@@ -1420,19 +1572,21 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
       }
     }
     o.counter = counter;
-    specs[q].counter = counter;
+    if (!draft_mode) specs[q].counter = counter;
   }
 
   // 5. The commit of the step's fed tokens into the request's context:
   //    the token this step consumed always, a draft only when it stood
   //    (a provisional reject leaves it out; the host adds it back if its
   //    decision accepts — glm_sample_adjust_count).
-  int32_t* counts_q = counts + static_cast<size_t>(q) * vocab_size;
-  const int64_t consumed = fed[row0];
-  if (consumed >= 0 && consumed < vocab_size) counts_q[consumed] += 1;
-  for (int t = 1; t < v.accepted; ++t) {
-    const int64_t draft = fed[row0 + t];
-    if (draft >= 0 && draft < vocab_size) counts_q[draft] += 1;
+  if (counts != nullptr) {
+    int32_t* counts_q = counts + static_cast<size_t>(q) * vocab_size;
+    const int64_t consumed = fed[row0];
+    if (consumed >= 0 && consumed < vocab_size) counts_q[consumed] += 1;
+    for (int t = 1; t < v.accepted; ++t) {
+      const int64_t draft = fed[row0 + t];
+      if (draft >= 0 && draft < vocab_size) counts_q[draft] += 1;
+    }
   }
 
   verdicts[q] = v;
@@ -1528,13 +1682,19 @@ void device_sample_local(float* logits, int rows, int vocab_count,
                       const uint32_t* masks,
                       int mask_stride, const uint64_t* carry_digest,
                       uint16_t* table, PickLocal* locals, double* scratch,
-                      cudaStream_t stream) {
+                      cudaStream_t stream, const PickVerdict* row_select,
+                      int source_row_stride) {
   check_common(rows, world, rank, candidates, rows_per_request,
                "glm_sample_local");
+  if (row_select != nullptr &&
+      (rows_per_request != 1 || source_row_stride < 1))
+    throw std::invalid_argument(
+        "glm_sample_local: a selected row needs one row per request and a "
+        "source stride");
   if (masks != nullptr && mask_stride < device_sample_mask_words(vocab_size))
     throw std::invalid_argument("glm_sample_local: mask stride");
   if (logits == nullptr || specs == nullptr || fed == nullptr ||
-      counts == nullptr || carry_digest == nullptr || table == nullptr ||
+      carry_digest == nullptr || table == nullptr ||
       locals == nullptr || scratch == nullptr)
     throw std::invalid_argument("glm_sample_local: null argument");
   if (vocab_count < 1 || vocab_begin < 0 || vocab_size < 1 ||
@@ -1556,16 +1716,19 @@ void device_sample_local(float* logits, int rows, int vocab_count,
   const dim3 chunk_grid(static_cast<unsigned>(nchunks), static_cast<unsigned>(rows));
   sample_prepare_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
       logits, vocab_count, vocab_begin, vocab_size, specs, rows_per_request,
-      fed, positions, position_stride, counts, bias, masks, mask_stride, maxes);
+      fed, positions, position_stride, counts, bias, masks, mask_stride, maxes,
+      row_select, source_row_stride);
   DGPP_CUDA_OK(cudaGetLastError());
   sample_partials_kernel<<<chunk_grid, kChunkThreads, 0, stream>>>(
       logits, vocab_count, specs, rows_per_request, positions,
-      position_stride, masks, mask_stride, maxes, partials);
+      position_stride, masks, mask_stride, maxes, partials, row_select,
+      source_row_stride);
   DGPP_CUDA_OK(cudaGetLastError());
   sample_local_kernel<<<rows, kLocalThreads, 0, stream>>>(
       logits, rows, vocab_count, vocab_begin, rank, world, candidates, specs,
       rows_per_request, positions, position_stride, masks, mask_stride, maxes,
-      partials, nchunks, carry_digest, table, locals);
+      partials, nchunks, carry_digest, table, locals, row_select,
+      source_row_stride);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -1577,24 +1740,31 @@ void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         PickVerdict* verdicts,
                         PickVerdict* device_verdicts,
                         SampleOutcome* outcomes, uint64_t* carry_digest,
-                        cudaStream_t stream) {
+                        cudaStream_t stream, const DraftProposal* proposals_in,
+                        DraftProposal* proposals_out,
+                        DraftProposal* proposals_out_host, int draft_index) {
   check_common(rows, world, rank, candidates, rows_per_request,
                "glm_sample_verdict");
+  if (proposals_out != nullptr &&
+      (rows_per_request != 1 || draft_index < 0 ||
+       draft_index >= kSampleProposalSlots))
+    throw std::invalid_argument(
+        "glm_sample_verdict: a proposal is written by a one-row draft pick");
   if (masks != nullptr && mask_stride < device_sample_mask_words(vocab_size))
     throw std::invalid_argument("glm_sample_verdict: mask stride");
   if (requests < 1 || requests > kPickMaxRequests ||
       requests * rows_per_request != rows)
     throw std::invalid_argument("glm_sample_verdict: request shape");
   if (table == nullptr || specs == nullptr || verdicts == nullptr ||
-      outcomes == nullptr || carry_digest == nullptr || fed == nullptr ||
-      counts == nullptr)
+      outcomes == nullptr || carry_digest == nullptr || fed == nullptr)
     throw std::invalid_argument("glm_sample_verdict: null argument");
   if (positions != nullptr && position_stride < rows_per_request)
     throw std::invalid_argument("glm_sample_verdict: position stride");
   sample_verdict_kernel<<<requests, kVerdictThreads, 0, stream>>>(
       table, rows, world, candidates, vocab_size, specs, rows_per_request,
       fed, positions, position_stride, counts, masks, mask_stride, verdicts,
-      device_verdicts, outcomes);
+      device_verdicts, outcomes, proposals_in, proposals_out,
+      proposals_out_host, draft_index);
   DGPP_CUDA_OK(cudaGetLastError());
   const uint16_t* digests =
       table + static_cast<size_t>(rows) * world *

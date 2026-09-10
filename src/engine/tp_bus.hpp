@@ -1075,6 +1075,16 @@ class DevicePicker {
     // The logit bias (2026-09-06): [requests][vocab_size] floats, read for
     // the rows whose spec says `biased` (null: no request biases).
     const float* bias = nullptr;
+    // The drafts' proposals (2026-09-10, kernels/sample_pick.hpp): what the
+    // verify reads for its row-0 accept test (`proposals_in`) and what a
+    // DRAFT pick writes for the next step (`proposals_out`, one row per
+    // request, at [request][draft_index]); `proposals_out_host` is the
+    // pinned mirror the host's fallback reads. A sampling draft pick also
+    // sets `row_select`, which the verify never does.
+    const DraftProposal* proposals_in = nullptr;
+    DraftProposal* proposals_out = nullptr;
+    DraftProposal* proposals_out_host = nullptr;
+    int draft_index = 0;
   };
   bool sampling() const { return candidates_ > 0; }
   int sampling_candidates() const { return candidates_; }
@@ -1252,14 +1262,20 @@ class DevicePicker {
       throw std::logic_error(
           "device pick: sampling inputs on a picker built without "
           "sampling candidates");
-    if (in.counts == nullptr || in.vocab_size < 1)
+    if (in.vocab_size < 1 ||
+        (in.counts == nullptr && in.proposals_out == nullptr))
       throw std::invalid_argument(
-          "device pick: sampling needs the count table and the vocabulary");
-    if (rows_per_request(in) < 1 ||
-        rows_per_request(in) > kSampleVerdictRows || in.row_select != nullptr)
+          "device pick: sampling needs the count table and the vocabulary "
+          "(only a draft pick, which commits no context, may omit the "
+          "counts)");
+    if (rows_per_request(in) < 1 || rows_per_request(in) > kSampleVerdictRows)
       throw std::invalid_argument(
           "device pick: the sampling verdict decides T=1 rows or an MTP "
           "verify of up to " + std::to_string(kSampleVerdictRows) + " rows");
+    if (in.row_select != nullptr &&
+        (rows_per_request(in) != 1 || in.source_row_stride < 1))
+      throw std::invalid_argument(
+          "device pick: a selected sampling row is a one-row draft pick");
     if (device_sample_table_elems(in.rows, world_, candidates_) * 2 >
         bus_.slot_bytes(net::BusMessageClass::kLatency))
       throw std::invalid_argument(
@@ -1273,7 +1289,8 @@ class DevicePicker {
                      in.positions, position_stride(in), in.counts, in.bias,
                      in.masks, in.mask_stride, carry_, table_,
                      locals_ + in.slot * kPickMaxRows, sample_scratch_,
-                     stream);
+                     stream, in.row_select,
+                     in.row_select != nullptr ? source_stride(in) : 0);
   }
   void sample_verdict(cudaStream_t stream, const Inputs& in) {
     device_sample_verdict(table_, in.rows, world_, rank_, candidates_,
@@ -1283,7 +1300,8 @@ class DevicePicker {
                        in.mask_stride, verdict_slot(in.slot),
                        device_verdict_slot(in.slot),
                        outcomes_ + in.slot * kPickMaxRequests, carry_,
-                       stream);
+                       stream, in.proposals_in, in.proposals_out,
+                       in.proposals_out_host, in.draft_index);
   }
 
   net::CollectiveBus& bus_;

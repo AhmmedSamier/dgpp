@@ -1090,3 +1090,101 @@ DGPP_TEST(greedy_from_prefix_reports_the_raw_distribution) {
           "the token's logprob under the raw distribution");
   require(rng.counter == 0, "no draw");
 }
+
+// The proposal-aware speculative rule (2026-09-10): a draft DRAWN from Q,
+// accepted with min(1, P/Q) and otherwise replaced by the (P - Q)+
+// residual, still emits exactly P — and accepts at 1 - TV(P, Q), which is
+// what a deterministic draft cannot reach (its ceiling is P(mode)).
+DGPP_TEST(spec_accept_with_a_proposal_keeps_the_marginal_and_lifts_acceptance) {
+  using dgpp::sample::Proposal;
+  using dgpp::sample::spec_select_from_sorted;
+  const std::vector<float> logits{2.0f, 1.5f, 1.0f, 0.2f, -0.4f, -3.0f};
+  const int n = static_cast<int>(logits.size());
+  Params p;
+  p.temperature = 1.0f;
+  p.top_p = 1.0f;
+  const std::vector<Candidate> sorted = sort_slice(logits.data(), n, 0);
+  // P, as the selector sees it.
+  const std::vector<VocabSlice> layout{{0, n}};
+  const double lse = sharded_scaled_logsumexp(logits.data(), layout, 1.0f);
+  std::vector<double> target(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i)
+    target[static_cast<size_t>(i)] = std::exp(logits[static_cast<size_t>(i)] - lse);
+  // Q: a draft head that agrees on the shape but not the detail.
+  const std::vector<float> draft_logits{1.6f, 1.7f, 0.9f, 0.1f, -0.2f, -2.0f};
+  double qz = 0.0;
+  for (int i = 0; i < n; ++i) qz += std::exp(draft_logits[static_cast<size_t>(i)]);
+  Proposal q;
+  std::vector<double> qmass(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    qmass[static_cast<size_t>(i)] = std::exp(draft_logits[static_cast<size_t>(i)]) / qz;
+    q.mass.emplace_back(i, static_cast<float>(qmass[static_cast<size_t>(i)]));
+  }
+  double overlap = 0.0;  // 1 - TV(P, Q) = the acceptance the rule reaches
+  double mode_mass = 0.0;
+  for (int i = 0; i < n; ++i) {
+    overlap += std::min(target[static_cast<size_t>(i)], qmass[static_cast<size_t>(i)]);
+    mode_mass = std::max(mode_mass, target[static_cast<size_t>(i)]);
+  }
+  constexpr int kTrials = 60000;
+  std::vector<int> counts(static_cast<size_t>(n), 0);
+  int accepted = 0;
+  for (uint64_t t = 0; t < kTrials; ++t) {
+    // The draft, drawn from Q with its own stream.
+    Rng qrng{t * 6364136223846793005ull + 1442695040888963407ull, 0};
+    const double u = dgpp::sample::uniform01(qrng);
+    double cum = 0.0;
+    int32_t draft = n - 1;
+    for (int i = 0; i < n; ++i) {
+      cum += qmass[static_cast<size_t>(i)];
+      if (cum > u) { draft = i; break; }
+    }
+    Rng rng{t * 7919 + 13, 0};
+    const auto out = spec_select_from_sorted(sorted, p, draft, rng, &q);
+    counts[static_cast<size_t>(out.result.token)] += 1;
+    accepted += out.accepted ? 1 : 0;
+    require(!out.accepted || out.result.token == draft, "an accept emits the draft");
+  }
+  for (int i = 0; i < n; ++i) {
+    const double freq = static_cast<double>(counts[static_cast<size_t>(i)]) / kTrials;
+    require(std::abs(freq - target[static_cast<size_t>(i)]) < 0.012,
+            "token " + std::to_string(i) + " frequency " + std::to_string(freq) +
+                " vs target " + std::to_string(target[static_cast<size_t>(i)]));
+  }
+  const double rate = static_cast<double>(accepted) / kTrials;
+  require(std::abs(rate - overlap) < 0.012,
+          "the accept rate " + std::to_string(rate) + " is the overlap " +
+              std::to_string(overlap));
+  require(overlap > mode_mass + 0.05,
+          "the proposal must beat a deterministic draft's ceiling (overlap " +
+              std::to_string(overlap) + " vs mode " + std::to_string(mode_mass) + ")");
+}
+
+// A proposal that is absent, or that never proposed this draft, leaves the
+// rule exactly where it was: the same decision, the same draws.
+DGPP_TEST(spec_accept_without_a_proposal_is_the_deterministic_rule) {
+  using dgpp::sample::Proposal;
+  using dgpp::sample::spec_select_from_sorted;
+  FixtureRng fx;
+  const int n = 240;
+  const std::vector<float> logits = make_logits(n, fx, 3.0f);
+  const std::vector<Candidate> sorted = sort_slice(logits.data(), n, 0);
+  Params p;
+  p.temperature = 0.8f;
+  p.top_p = 0.95f;
+  Proposal other;  // a proposal that does not carry the draft
+  other.mass.emplace_back(sorted[static_cast<size_t>(n - 1)].id, 1.0f);
+  for (uint64_t seed = 0; seed < 64; ++seed) {
+    const int32_t draft = sorted[static_cast<size_t>(seed % 5)].id;
+    Rng a{seed + 1, 3}, b{seed + 1, 3}, c{seed + 1, 3};
+    const auto want = spec_select_from_sorted(sorted, p, draft, a);
+    const auto null_q = spec_select_from_sorted(sorted, p, draft, b, nullptr);
+    const auto absent = spec_select_from_sorted(sorted, p, draft, c, &other);
+    require(want.accepted == null_q.accepted && want.accepted == absent.accepted,
+            "the same accept decision");
+    require(want.result.token == null_q.result.token &&
+                want.result.token == absent.result.token,
+            "the same token");
+    require(a.counter == b.counter && a.counter == c.counter, "the same draws");
+  }
+}

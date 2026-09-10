@@ -777,7 +777,8 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
                                 const std::vector<int64_t>& positions,
                                 int candidates, uint64_t carry,
                                 int rows_per_request = 1,
-                                const std::vector<uint32_t>& masks = {}) {
+                                const std::vector<uint32_t>& masks = {},
+                                const std::vector<dgpp::DraftProposal>& proposals = {}) {
   const int vocab = world * count;
   const int rows = requests * rows_per_request;
   const int mask_stride = dgpp::device_sample_mask_words(vocab);
@@ -898,14 +899,25 @@ SampleWorldRun run_sample_world(const std::vector<float>& full, int requests,
       DGPP_CUDA_OK(cudaMemcpy(d_masks, masks.data(), masks.size() * 4,
                               cudaMemcpyHostToDevice));
     }
+    dgpp::DraftProposal* d_props = nullptr;
+    if (!proposals.empty()) {
+      require(proposals.size() ==
+                  static_cast<size_t>(requests) * dgpp::kSampleProposalSlots,
+              "proposal table shape");
+      d_props = device_alloc<dgpp::DraftProposal>(proposals.size());
+      DGPP_CUDA_OK(cudaMemcpy(d_props, proposals.data(),
+                              proposals.size() * sizeof(dgpp::DraftProposal),
+                              cudaMemcpyHostToDevice));
+    }
     dgpp::device_sample_verdict(d_table, rows, world, k, candidates, vocab,
                              d_specs, requests, rows_per_request, d_fed, d_pos,
                              /*position_stride=*/rows_per_request, d_counts,
                              d_masks, d_masks ? mask_stride : 0, d_verdicts,
                              /*device_verdicts=*/nullptr, d_out, d_carry,
-                             nullptr);
+                             nullptr, d_props);
     DGPP_CUDA_OK(cudaDeviceSynchronize());
     if (d_masks) cudaFree(d_masks);
+    if (d_props) cudaFree(d_props);
     std::vector<int32_t> counts_after(counts_in.size());
     DGPP_CUDA_OK(cudaMemcpy(counts_after.data(), d_counts,
                             counts_in.size() * 4, cudaMemcpyDeviceToHost));
@@ -2173,4 +2185,135 @@ DGPP_TEST(sample_pick_reports_logprobs_bitwise) {
       }
     }
   }
+}
+
+// The sampled draft's proposal (2026-09-10): when the verify is handed the
+// distribution its draft was drawn from, the device's row-0 decision is the
+// host oracle's min(1, P/Q) accept and (P - Q)+ residual, bit for bit — and
+// a proposal whose token is not the fed draft is ignored (the deterministic
+// rule), as a re-drafted row needs.
+DGPP_TEST(sample_pick_t2_with_a_proposal_matches_the_ratio_oracle) {
+  Rng rng(0x51de);
+  constexpr int kWorld = 4;
+  constexpr int count = 96;
+  constexpr int vocab = kWorld * count;
+  constexpr int candidates = 32;
+  constexpr int requests = 3;
+  constexpr int rpr = 2;
+  int accepts = 0, rejects = 0, ignored = 0;
+  for (int trial = 0; trial < 12; ++trial) {
+    std::vector<float> full(static_cast<size_t>(requests * rpr) * vocab);
+    for (int row = 0; row < requests * rpr; ++row) {
+      float* v = full.data() + static_cast<size_t>(row) * vocab;
+      for (int i = 0; i < vocab; ++i)
+        v[i] = static_cast<float>((rng.next() >> 8) % 41) * 0.25f - 5.0f;
+      v[static_cast<size_t>(rng.next() % vocab)] = 12.0f;
+      v[static_cast<size_t>(rng.next() % vocab)] = 9.0f;
+    }
+    std::vector<dgpp::SampleSpec> specs(requests);
+    for (int q = 0; q < requests; ++q) {
+      specs[q].temperature = 1.0f;
+      specs[q].top_p = 0.95f;
+      specs[q].seed = 0x5100 + q + 41 * trial;
+      specs[q].counter = 3;
+    }
+    std::vector<int32_t> counts(static_cast<size_t>(requests) * vocab, 0);
+    std::vector<int64_t> fed(requests * rpr), positions(requests);
+    // Every request's draft is a token near the top of row 0 (so accepts
+    // and rejects both occur); request 2's proposal names a DIFFERENT token
+    // and must therefore be ignored.
+    std::vector<dgpp::DraftProposal> props(
+        static_cast<size_t>(requests) * dgpp::kSampleProposalSlots);
+    std::vector<dgpp::sample::Proposal> host_props(requests);
+    for (int q = 0; q < requests; ++q) {
+      positions[q] = 9 + q;
+      fed[2 * q] = static_cast<int64_t>(rng.next() % vocab);
+      const float* row0 = full.data() + static_cast<size_t>(2 * q) * vocab;
+      const std::vector<Candidate> top =
+          dgpp::sample::local_topk(row0, vocab, 0, 8);
+      const int pick = static_cast<int>(rng.next() % 4);
+      fed[2 * q + 1] = top[static_cast<size_t>(pick)].id;
+      // A proposal over the row's own top-8, softmaxed at temperature 1 —
+      // any distribution is legal, and this one resembles P.
+      dgpp::DraftProposal& dp = props[static_cast<size_t>(q) * dgpp::kSampleProposalSlots];
+      double z = 0.0;
+      for (const Candidate& c : top) z += std::exp(static_cast<double>(c.logit) - top[0].logit);
+      dp.n = static_cast<int32_t>(top.size());
+      for (size_t i = 0; i < top.size(); ++i) {
+        dp.ids[i] = top[i].id;
+        dp.mass[i] = static_cast<float>(
+            std::exp(static_cast<double>(top[i].logit) - top[0].logit) / z);
+      }
+      dp.token = q == 2 ? static_cast<int32_t>((fed[2 * q + 1] + 1) % vocab)
+                        : static_cast<int32_t>(fed[2 * q + 1]);
+      if (q != 2) {
+        for (int i = 0; i < dp.n; ++i)
+          host_props[static_cast<size_t>(q)].mass.emplace_back(dp.ids[i], dp.mass[i]);
+      }
+    }
+    const uint64_t carry = 0x515151515151ull;
+    const SampleWorldRun run =
+        run_sample_world(full, requests, kWorld, count, specs, counts, fed,
+                         positions, candidates, carry, rpr, {}, props);
+    for (int q = 0; q < requests; ++q) {
+      const float* row0 = full.data() + static_cast<size_t>(2 * q) * vocab;
+      const int32_t draft = static_cast<int32_t>(fed[2 * q + 1]);
+      const dgpp::sample::Params p = params_of(specs[q]);
+      std::vector<std::vector<Candidate>> shards;
+      std::vector<double> lses;
+      for (int k = 0; k < kWorld; ++k) {
+        shards.push_back(dgpp::sample::local_topk(row0 + k * count, count,
+                                                  k * count, candidates));
+        lses.push_back(dgpp::sample::slice_logsumexp(row0 + k * count, count,
+                                                     p.temperature));
+      }
+      const double Z0 = dgpp::sample::merge_logsumexp(lses);
+      const std::vector<Candidate> m0 =
+          dgpp::sample::merge_topk(shards, candidates);
+      dgpp::sample::Rng host{specs[q].seed, specs[q].counter};
+      const bool live = q != 2;
+      const dgpp::sample::SpecPrefixDecision d0 =
+          dgpp::sample::spec_accept_from_prefix(
+              m0, vocab, Z0, draft, p, host, /*draft_excluded=*/false,
+              live ? &host_props[static_cast<size_t>(q)] : nullptr);
+      require(d0.resolved, "the peaked row resolves inside the prefix");
+      if (!live) ++ignored;
+      else if (d0.accepted) ++accepts;
+      else ++rejects;
+      if (d0.accepted) {
+        // The stood draft moves the step to row 1, sampled plainly — the
+        // draw the device makes next.
+        const float* row1 = full.data() + static_cast<size_t>(2 * q + 1) * vocab;
+        std::vector<std::vector<Candidate>> sh1;
+        std::vector<double> ls1;
+        for (int k = 0; k < kWorld; ++k) {
+          sh1.push_back(dgpp::sample::local_topk(row1 + k * count, count,
+                                                 k * count, candidates));
+          ls1.push_back(dgpp::sample::slice_logsumexp(row1 + k * count, count,
+                                                      p.temperature));
+        }
+        const double Z1 = dgpp::sample::merge_logsumexp(ls1);
+        const std::vector<Candidate> m1 =
+            dgpp::sample::merge_topk(sh1, candidates);
+        const dgpp::sample::PrefixDecision d1 =
+            dgpp::sample::sample_from_prefix(m1, vocab, Z1, p, host);
+        require(d1.resolved, "row 1 resolves");
+      }
+      for (int k = 0; k < kWorld; ++k) {
+        const PickVerdict& v = run.verdicts[k][q];
+        const int want_accepted = d0.accepted ? 2 : 1;
+        require(v.accepted == want_accepted,
+                "rank " + std::to_string(k) + " request " + std::to_string(q) +
+                    ": the ratio rule's accept");
+        require(v.winners[0] == (d0.accepted ? draft : d0.result.token),
+                "row 0's token is the oracle's");
+        require(run.specs_after[k][q].counter == host.counter,
+                "the draws the device consumed are the oracle's");
+      }
+    }
+  }
+  require(accepts > 0 && rejects > 0 && ignored > 0,
+          "the sweep must accept, reject and ignore a mismatched proposal "
+          "(accepts " + std::to_string(accepts) + ", rejects " +
+          std::to_string(rejects) + ", ignored " + std::to_string(ignored) + ")");
 }

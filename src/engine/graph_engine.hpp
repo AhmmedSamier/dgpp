@@ -334,6 +334,20 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         DGPP_CUDA_OK(cudaMallocHost(
             reinterpret_cast<void**>(&h_fallback_row_),
             sizeof(float) * model_->lm_vocab_count()));
+        // The drafts' proposals (2026-09-10): what distribution each draft
+        // was drawn from, written by the draft pick and read by the next
+        // step's verify (kernels/sample_pick.hpp). The pinned mirror is the
+        // host fallback's copy.
+        if (model_->mtp_enabled()) {
+          const size_t n = static_cast<size_t>(slots_) * kSampleProposalSlots;
+          DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_proposals_),
+                                  sizeof(DraftProposal) * n));
+          DGPP_CUDA_OK(cudaMemset(d_proposals_, 0, sizeof(DraftProposal) * n));
+          DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_proposals_),
+                                      sizeof(DraftProposal) * n));
+          for (size_t i = 0; i < n; ++i) h_proposals_[i] = DraftProposal{};
+          draft_sampled_ = proposal_drafts_enabled();
+        }
         // The verify rows as the pick left them (penalized, masked), kept
         // for the host's MTP fallback: the in-graph draft's head reuses the
         // logits buffer, so after a replay the buffer holds the DRAFT's
@@ -490,6 +504,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (h_stage_seq_) cudaFreeHost(h_stage_seq_);
     if (h_stage_late_) cudaFreeHost(h_stage_late_);
     if (d_stage_seq_) cudaFree(d_stage_seq_);
+    if (d_proposals_) cudaFree(d_proposals_);
+    if (h_proposals_) cudaFreeHost(h_proposals_);
     if (d_specs_) cudaFree(d_specs_);
     if (h_specs_) cudaFreeHost(h_specs_);
     if (d_counts_) cudaFree(d_counts_);
@@ -857,7 +873,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         (void)model_->session_draft(req, {first});
         std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
         drafts.assign(static_cast<size_t>(depth_), -1);
-        drafts[0] = picker_->run(model_->stream(), scalar_pick_inputs(1)).next;
+        DevicePicker::Inputs first_draft = scalar_pick_inputs(1);
+        arm_draft_sampling(first_draft, req, /*draft_index=*/0);
+        drafts[0] = picker_->run(model_->stream(), first_draft).next;
         chain_drafts_eagerly(req);
       }
       reserved_[static_cast<size_t>(req)] = false;
@@ -1025,6 +1043,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
                                 mask_stride_;
       in.mask_stride = mask_stride_;
       in.bias = d_bias_ + static_cast<size_t>(req) * vocab_;
+      in.proposals_in =
+          d_proposals_ ? d_proposals_ + static_cast<size_t>(req) * kSampleProposalSlots
+                       : nullptr;
     }
     return in;
   }
@@ -1044,8 +1065,49 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       in.masks = d_masks_;
       in.mask_stride = mask_stride_;
       in.bias = d_bias_;
+      in.proposals_in = d_proposals_;
     }
     return in;
+  }
+
+  // A draft pick draws from the draft head's own distribution instead of
+  // taking its argmax (2026-09-10), and keeps the final set it drew from
+  // for the next step's verify: with a proposal in hand the accept test is
+  // min(1, P/Q), whose rate is 1 - TV(P, Q) rather than the deterministic
+  // rule's ceiling of P(mode). No count table — a draft commits no context,
+  // and no mask or bias: any proposal is exact, so the cheapest one that
+  // resembles P is the right one. A greedy request (temperature 0) takes
+  // the same path and writes no proposal, so its rule is unchanged.
+  bool draft_sampled_ = false;  // the draft pick draws (and proposes)
+  static bool proposal_drafts_enabled() {
+    static const bool on = [] {
+      const char* v = std::getenv("DGPP_SPEC_PROPOSAL");
+      return !(v != nullptr && std::string(v) == "off");
+    }();
+    return on;
+  }
+  void arm_draft_sampling(DevicePicker::Inputs& in, int req,
+                          int draft_index) const {
+    if (!sampling_ || d_proposals_ == nullptr || !proposal_drafts_enabled())
+      return;
+    in.specs = d_specs_ + req;
+    in.counts = nullptr;
+    in.vocab_size = static_cast<int>(vocab_);
+    in.proposals_out =
+        d_proposals_ + static_cast<size_t>(req) * kSampleProposalSlots;
+    in.proposals_out_host =
+        h_proposals_ + static_cast<size_t>(req) * kSampleProposalSlots;
+    in.draft_index = draft_index;
+  }
+  void arm_draft_sampling_batch(DevicePicker::Inputs& in, int draft_index) const {
+    if (!sampling_ || d_proposals_ == nullptr || !proposal_drafts_enabled())
+      return;
+    in.specs = d_specs_;
+    in.counts = nullptr;
+    in.vocab_size = static_cast<int>(vocab_);
+    in.proposals_out = d_proposals_;
+    in.proposals_out_host = h_proposals_;
+    in.draft_index = draft_index;
   }
 
   DevicePicker::Inputs draft_pick_inputs(
@@ -1236,6 +1298,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             req, picker_->device_verdict(0));
         DevicePicker::Inputs draft = scalar_pick_inputs(/*slot=*/1);
         draft.row_select = picker_->device_verdict(0);
+        draft.source_row_stride = rows_per_request_;
+        arm_draft_sampling(draft, req, /*draft_index=*/0);
         picker_->record(model_->stream(), draft);
         std::vector<const PickVerdict*> drafts{picker_->device_verdict(1)};
         for (int c = 1; c < depth_; ++c) {
@@ -1291,8 +1355,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       if (mtp) {
         model_->session_graph_capture_draft_batch(
             picker_->device_verdict(0));
-        picker_->record(model_->stream(),
-                        draft_pick_inputs(picker_->device_verdict(0), k));
+        DevicePicker::Inputs draft_b =
+            draft_pick_inputs(picker_->device_verdict(0), k);
+        arm_draft_sampling_batch(draft_b, /*draft_index=*/0);
+        picker_->record(model_->stream(), draft_b);
         if constexpr (Model::kBatchedDraftChain) {
           // Depth >= 2: every slot's chain rows, one pick each, and the
           // feed of every draft per request.
@@ -1461,6 +1527,16 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // sampled fallback's re-draft), each a greedy pick of the chain row's
   // head. A chain row past the context is skipped: its draft repeats the
   // previous one (any valid id; it cannot stand).
+  // Row 0's proposal for slot `req` says "none" from here on (n = 0).
+  void invalidate_proposal(int req) {
+    if (d_proposals_ == nullptr) return;
+    DraftProposal* d = d_proposals_ + static_cast<size_t>(req) * kSampleProposalSlots;
+    DGPP_CUDA_OK(cudaMemsetAsync(&d->n, 0, sizeof(int32_t), model_->stream()));
+    DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+    if (h_proposals_ != nullptr)
+      h_proposals_[static_cast<size_t>(req) * kSampleProposalSlots].n = 0;
+  }
+
   void chain_drafts_eagerly(int req) {
     std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
     int runs = 0;
@@ -1588,7 +1664,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
               std::to_string(rows_per_request_) + "-row step that committed " +
               std::to_string(verify.accepted) + " (expected " +
               std::to_string(draws) + ")");
-        rng.counter = o.counter;
+        rng.counter = o.counter;  // the draft pick draws on its own stream
         for (int t = 1; t < verify.accepted; ++t)
           context.push_back(fed_drafts[static_cast<size_t>(t - 1)]);
         context.push_back(next);
@@ -1803,6 +1879,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
     drafts[0] = prefill_pick_(model_->session_draft(
         req, std::vector<int64_t>(rows.begin(), rows.end())));
+    // This draft is the host's argmax, not a draw from the draft head's
+    // distribution, so the proposal the graph's draft pick left behind no
+    // longer describes it: clear it and let the next verify use the plain
+    // rule (2026-09-10; the ratio rule is only exact for a draft actually
+    // drawn from the proposal it is tested against).
+    invalidate_proposal(req);
     chain_drafts_eagerly(req);
     mtp_redrafted_ = true;
     {
@@ -2032,6 +2114,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   uint16_t* sample_gather_scratch_ = nullptr;
   bool sampling_ = false;
   int candidates_ = 0;
+  DraftProposal* d_proposals_ = nullptr;  // device [slots][proposal slots]
+  DraftProposal* h_proposals_ = nullptr;  // pinned mirror, the fallback's
   SampleSpec* d_specs_ = nullptr;   // device [slots]
   SampleSpec* h_specs_ = nullptr;   // pinned mirror
   int32_t* d_counts_ = nullptr;        // device [slots][vocab]

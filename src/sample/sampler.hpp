@@ -417,9 +417,29 @@ struct SpecOutcome {
   Result result;  // the draft when accepted, else the residual sample
 };
 
+// The proposal the draft was drawn from (2026-09-10): Q as (id, mass) over
+// the draft head's own final set, mass summing to 1. A DETERMINISTIC draft
+// (the head's argmax) carries no proposal — the rule above, whose accept
+// rate is P(draft) and so, at temperature, is capped by the target's own
+// mode. Given a proposal the rule becomes the standard one: accept with
+// min(1, P(x)/Q(x)) and, on rejection, draw the normalized residual
+// (P - Q)+; the marginal over the emitted token is still exactly P (the
+// same rejection-sampling identity), while the accept rate rises to
+// 1 - TV(P, Q). Both halves must use the SAME Q, which is why the draft's
+// final set travels with the draft.
+struct Proposal {
+  std::vector<std::pair<int32_t, float>> mass;  // id -> Q(id)
+  bool empty() const { return mass.empty(); }
+  double at(int32_t id) const {
+    for (const auto& e : mass)
+      if (e.first == id) return static_cast<double>(e.second);
+    return 0.0;
+  }
+};
+
 inline SpecOutcome spec_select_from_sorted(const std::vector<Candidate>& sorted,
                                            const Params& p, int32_t draft,
-                                           Rng& rng) {
+                                           Rng& rng, const Proposal* q = nullptr) {
   if (sorted.empty()) throw std::runtime_error("glm_sample: empty candidate list");
   if (!(p.temperature > 0.0f))
     throw std::invalid_argument("glm_sample: speculative sampling needs T > 0");
@@ -431,16 +451,53 @@ inline SpecOutcome spec_select_from_sorted(const std::vector<Candidate>& sorted,
       break;
     }
   const float p_draft = j < s.final_count ? s.exps[j] / s.final_den : 0.0f;
+  // The proposal's mass at the draft: 0 when the draft is outside Q (it
+  // cannot be, having been drawn from Q — but a re-drafted row can arrive
+  // that way, and then the deterministic rule is the right one).
+  const double q_draft = (q != nullptr && !q->empty()) ? q->at(draft) : 0.0;
+  const bool ratio = q_draft > 0.0;
   const double u1 = uniform01(rng);
   ++rng.counter;
   SpecOutcome out;
-  if (static_cast<double>(p_draft) > u1) {
+  // accept iff u1 < min(1, P/Q) — as u1 < 1, P >= Q always stands.
+  if (ratio ? (static_cast<double>(p_draft) > u1 * q_draft)
+            : (static_cast<double>(p_draft) > u1)) {
     out.accepted = true;
     out.result = s.result_for(sorted, j, p.logprobs);
     return out;
   }
   const double u2 = uniform01(rng);
   ++rng.counter;
+  if (ratio) {
+    // The residual (P - Q)+ over the final set, in the listed order and the
+    // same fp64 accumulation the plain walk uses.
+    double res_den = 0.0;
+    for (size_t i = 0; i < s.final_count; ++i) {
+      const double pi = static_cast<double>(s.exps[i]) / s.final_den;
+      const double qi = q->at(sorted[i].id);
+      if (pi > qi) res_den += pi - qi;
+    }
+    double cum = 0.0;
+    size_t chosen = s.final_count, last = s.final_count;
+    if (res_den > 0.0) {
+      for (size_t i = 0; i < s.final_count; ++i) {
+        const double pi = static_cast<double>(s.exps[i]) / s.final_den;
+        const double qi = q->at(sorted[i].id);
+        const double ri = pi > qi ? pi - qi : 0.0;
+        if (ri > 0.0 || last == s.final_count) last = i;
+        cum += ri / res_den;
+        if (cum > u2) {
+          chosen = i;
+          break;
+        }
+      }
+    }
+    if (chosen == s.final_count) chosen = last;
+    if (chosen == s.final_count)
+      throw std::logic_error("glm_sample: the residual has no candidate");
+    out.result = s.result_for(sorted, chosen, p.logprobs);
+    return out;
+  }
   const float res_den = j < s.final_count ? s.final_den - s.exps[j] : s.final_den;
   double cum = 0.0;
   size_t chosen = s.final_count;
@@ -889,10 +946,13 @@ struct SpecPrefixDecision {
 // `draft_excluded`: the caller knows the draft is outside the row's
 // support (a masked id): its probability is 0 without the list having to
 // show it, so an incomplete prefix still decides (M6 6g).
+// `proposal` (2026-09-10): the distribution the draft was drawn from. It
+// steers only the MATERIALIZED regime — the pure temperature walk keeps the
+// deterministic rule, and the device mirrors that split exactly.
 inline SpecPrefixDecision spec_accept_from_prefix(
     const std::vector<Candidate>& sorted_prefix, int vocab_size,
     double global_scaled_logsumexp, int32_t draft, const Params& p,
-    Rng& rng, bool draft_excluded = false) {
+    Rng& rng, bool draft_excluded = false, const Proposal* proposal = nullptr) {
   const PrefixSupport support =
       resolve_support(sorted_prefix, vocab_size, global_scaled_logsumexp, p);
   SpecPrefixDecision decision;
@@ -903,7 +963,7 @@ inline SpecPrefixDecision spec_accept_from_prefix(
     const std::vector<Candidate> materialized(
         sorted_prefix.begin(), sorted_prefix.begin() + support.n);
     const SpecOutcome o =
-        spec_select_from_sorted(materialized, support.exact, draft, rng);
+        spec_select_from_sorted(materialized, support.exact, draft, rng, proposal);
     decision.resolved = true;
     decision.accepted = o.accepted;
     decision.result = o.result;
