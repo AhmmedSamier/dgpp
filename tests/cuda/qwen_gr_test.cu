@@ -146,6 +146,22 @@ DGPP_TEST(qwen_gr_stages_match_the_reference_on_the_device_inputs) {
     dgpp::qwen_ref::gr_combine(want.data(), rn.data(), s.w_inj.data(), s.y.data(), s.rows, s.hc, s.hidden);
     require_bf16("combine", compare_bf16(r2, want, 1), 1e-3, 0.01);
   }
+  // 6b. the batched rows' down GEMV with the inject rows appended
+  // (2026-09-10): t bitwise the chain's GEMV, the gates bitwise the dots
+  // kernel's, at the fixture's rows.
+  {
+    DevBuf dt3(static_cast<size_t>(s.rows) * s.rank * 2), dg3(static_cast<size_t>(s.rows) * s.hc * 4);
+    dgpp::qwen_gr_down_inject_bf16(drn.p, ddown.p, dt3.p, s.rank, dinj.p,
+                                   static_cast<float*>(dg3.p), s.hc, s.hidden, s.rows, st);
+    DGPP_CUDA_OK(cudaStreamSynchronize(st));
+    const std::vector<uint16_t> t3 = download(dt3, t_dev.size());
+    require_bitwise("down_inject: t", t3.data(), t_dev.data(), t3.size() * 2);
+    std::vector<float> g3(static_cast<size_t>(s.rows) * s.hc), g_ref(g3.size());
+    DGPP_CUDA_OK(cudaMemcpy(g3.data(), dg3.p, g3.size() * 4, cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(g_ref.data(), dgates.p, g_ref.size() * 4, cudaMemcpyDeviceToHost));
+    require_bitwise("down_inject: gates", g3.data(), g_ref.data(), g3.size() * 4);
+    std::printf("[ OK ] the batched down GEMV with the inject rows is bitwise the chain at %d rows\n", s.rows);
+  }
   // 7. end to end: the device's x against the host's whole read from R.
   {
     std::vector<uint16_t> rn_ref(s.r.size()), x_ref(x.size());

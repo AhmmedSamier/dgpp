@@ -66,7 +66,8 @@ class QwenGrSite {
   cudaStream_t gate_side_ = nullptr;
   cudaEvent_t gate_fork_ = nullptr, gate_join_ = nullptr;
   int fused_rows_max_ = 8;    // DGPP_QWEN_GR_FUSED=one keeps the scalar row alone
-  bool gate_early_ = true;    // DGPP_QWEN_GR_GATE_SIDE=off puts both back in the chain
+  bool gate_early_ = true;
+  bool gate_side_only_ = false;  // DGPP_QWEN_GR_GATE_SIDE=side: the batched rows' side stream    // DGPP_QWEN_GR_GATE_SIDE=off puts both back in the chain
   bool gate_forked_ = false;
   bool gates_ready_ = false;  // the mix's down GEMV computed them in its own launch
   void fork_gate_dots(cudaStream_t main, int tokens);

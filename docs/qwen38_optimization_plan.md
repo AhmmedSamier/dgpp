@@ -442,6 +442,15 @@ The same shape as world 4: the pass costs what it cost, the gain is all
 tokens per pass — and worth more here in absolute terms, since every pass
 streams 6.2 GB per rank instead of 3.8.
 
+**Calibrating the proposal's temperature — measured, flat.** The draft's
+sampling temperature as a multiple of the request's
+(`DGPP_SPEC_PROPOSAL_TEMP`, `SampleSpec::draft_temperature`; exact at any
+value, only the overlap with P moves). Acceptance p1 on the MTP world,
+two 400-token requests each: 0.7 → 57 %, 60 %; 0.85 → 64 %, 68 %;
+1.0 → 63 %, 65 %; 1.2 → 65 %. Flat from 0.85 up within the ±3-point run
+noise, worse when sharpened. The knob stays at 1; the head's overlap with
+the target is what it is.
+
 ### 5.2 MTP depth 2 is not the lever yet
 
 Arithmetic from today's profile: a second verify row costs ~3 ms (the expert
@@ -477,6 +486,20 @@ already wired for GLM-4.7 and is the template; Qwen's
   row; still the form the multi-row sites use.
 * **The fused mix beyond one row.** §3.2 — bitwise, and slower, for a
   shared-memory reason that will not go away.
+* **The batched rows' inject dots folded into a down GEMV** (evening,
+  `qwen_gr_down_inject_bf16`, bitwise the chain's GEMV and the dots kernel
+  at three rows): MTP 25.8–25.9 ms/pass against the side-stream form's
+  25.8–25.9 — neutral. Kept as the default because it is the simpler graph
+  (no fork/join per site); `DGPP_QWEN_GR_GATE_SIDE=side` restores the
+  side stream. The MTP pass does not move for chain work either: it is at
+  25.8 ms whatever the chain does, which puts its ~4 ms of "slack" in the
+  same place as T=1's.
+* **A small-k form of the expert kernel for the down projection**
+  (`moe_grouped_mma_fp8_ldm_smallk_kernel`, k ≤ 256: the 64 × k activation
+  tile resident, four n-tiles through a codes-only ring, two blocks per SM
+  at k = 160, bitwise on the TP=4 grid; `DGPP_MOE_FP8_SMALLK=on`): the
+  prefill probe reads 1 141 / 4 315 ms with it against 1 144 / 4 375
+  without — 0.3 % and 1.4 %, inside the noise at 2 K. Off by default.
 * **The inject dots on the 16-byte-chunk GEMV core.** Tried 2026-09-10:
   no step time at T=1 (bandwidth-bound, see §1) and the changed FMA order
   flipped 2 of 4 greedy transcripts at near ties. Reverted to the

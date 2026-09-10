@@ -191,10 +191,13 @@ __device__ inline RowSpec row_spec(const SampleSpec* specs, int q,
                                    const int64_t* positions,
                                    int position_stride,
                                    const uint32_t* masks, int mask_stride,
-                                   int row) {
+                                   int row, bool draft = false) {
   RowSpec rs;
   rs.active = positions == nullptr || positions[q * position_stride] >= 0;
   rs.spec = specs[q];
+  // The draft pick samples at the draft temperature (SampleSpec).
+  if (draft && rs.spec.draft_temperature > 0.0f && rs.spec.temperature > 0.0f)
+    rs.spec.temperature = rs.spec.draft_temperature;
   rs.penalized = rs.spec.repetition_penalty != 1.0f ||
                  rs.spec.frequency_penalty != 0.0f ||
                  rs.spec.presence_penalty != 0.0f;
@@ -266,7 +269,8 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
   const int q = row / rows_per_request;
   const int t = row % rows_per_request;
   const RowSpec rs =
-      row_spec(specs, q, positions, position_stride, masks, mask_stride, row);
+      row_spec(specs, q, positions, position_stride, masks, mask_stride, row,
+               row_select != nullptr);
   if (!rs.sampled) return;
   const int nchunks = gridDim.x;
   float* slice = logits + source_row(row, q, rows_per_request, row_select,
@@ -322,7 +326,8 @@ __global__ void __launch_bounds__(kChunkThreads) sample_partials_kernel(
   const int row = blockIdx.y;
   const int q = row / rows_per_request;
   const RowSpec rs =
-      row_spec(specs, q, positions, position_stride, masks, mask_stride, row);
+      row_spec(specs, q, positions, position_stride, masks, mask_stride, row,
+               row_select != nullptr);
   if (!rs.sampled) return;
   const int nchunks = gridDim.x;
   float m = -INFINITY;
@@ -516,7 +521,8 @@ __global__ void __launch_bounds__(kLocalThreads) sample_local_kernel(
   const size_t group = device_sample_rank_group_slots(candidates);
   const size_t row_slots = static_cast<size_t>(world) * group;
   const RowSpec rs =
-      row_spec(specs, q, positions, position_stride, masks, mask_stride, row);
+      row_spec(specs, q, positions, position_stride, masks, mask_stride, row,
+               row_select != nullptr);
   uint16_t* row_base = table + static_cast<size_t>(row) * row_slots;
   uint16_t* mine = row_base + static_cast<size_t>(rank) * group;
   const float* slice = logits + source_row(row, q, rows_per_request, row_select,
@@ -1274,7 +1280,10 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     }
     return;
   }
-  const SampleSpec spec = specs[q];
+  SampleSpec spec = specs[q];
+  if (proposals_out != nullptr && rows_per_request == 1 &&
+      spec.draft_temperature > 0.0f && spec.temperature > 0.0f)
+    spec.temperature = spec.draft_temperature;  // the draft pick's temperature
   const int entries = world * candidates;
   if (tid < R) total[tid] = 0;
   __syncthreads();

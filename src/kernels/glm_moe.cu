@@ -2987,6 +2987,206 @@ __global__ __launch_bounds__(fp8_ldm::kThreads, 2) void moe_grouped_mma_fp8_ldm_
   }
 }
 
+// DGPP_MOE_FP8_SMALLK=on runs the small-k form below for k <= 256 (the
+// prefill's down projection at k = 160); off by default until measured.
+bool moe_fp8_smallk_enabled() {
+  static const bool on = [] {
+    const char* v = std::getenv("DGPP_MOE_FP8_SMALLK");
+    return v != nullptr && std::string(v) == "on";
+  }();
+  return on;
+}
+
+// The small-k form (2026-09-10): the down projection's k is 160 bytes at
+// TP=4 — five 32-deep stages, so in the one-tile kernel a block's
+// prologue, epilogue and per-stage barriers are most of its life (the
+// prefill profile: 669 us per down launch against 370 for a gate/up
+// launch of the same FLOPs). Here one block stages its 64 x k activation
+// tile ONCE, resident, and walks kNT n-tiles through a codes-only ring as
+// one flat sequence of (n-tile, stage) copies, storing each n-tile's
+// accumulators when its last stage lands — the same stages, fragments and
+// MMA sequence per output element as the one-tile kernel, so bitwise.
+// A tile 21.5 KB + a four-slot codes ring 26.6 KB: under the 48 KB default,
+// two blocks per SM.
+namespace fp8_ldm_smallk {
+constexpr int kNT = 4;
+constexpr int kMaxK = 256;
+constexpr int kStages = 4;
+constexpr size_t kSlotBytes = fp8_ldm::kCodeBytes + fp8_ldm::kScaleBytes;  // 6,656
+// The resident activation tile's pitch is k + 8 elements (a 336-byte row at
+// k = 160: not a multiple of 128, so ldmatrix stays conflict-free) and its
+// bytes are the launch's: 21.5 KB at k = 160 plus the 26.6 KB ring = 48.1
+// KB, two blocks per SM; at the k = 256 ceiling 33.8 KB and one block.
+__host__ __device__ constexpr int a_pitch(int k) { return k + 8; }
+__host__ __device__ constexpr size_t a_bytes(int k) {
+  return static_cast<size_t>(fp8_ldm::BM) * static_cast<size_t>(a_pitch(k)) * 2;
+}
+__host__ __device__ constexpr size_t smem_bytes(int k) { return a_bytes(k) + kStages * kSlotBytes; }
+static_assert(kSlotBytes % 16 == 0, "16-byte aligned");
+}  // namespace fp8_ldm_smallk
+
+template <typename OutT>
+__global__ __launch_bounds__(fp8_ldm::kThreads, 2) void moe_grouped_mma_fp8_ldm_smallk_kernel(
+    const uint16_t* __restrict__ act, size_t act_stride, int act_vec,
+    const int32_t* __restrict__ act_rows,
+    const MoeSegment* __restrict__ segs, const MoeExpertView* __restrict__ views,
+    int which, OutT* __restrict__ out, size_t out_stride, int n, int k,
+    int m_tiles, int n_groups) {
+  using namespace fp8_ldm;
+  using fp8_ldm_smallk::kNT;
+  using fp4_pipe3::cp_async;
+  using fp4_pipe3::commit;
+  using fp4_pipe3::wait;
+  using fp4_ldm::ldmatrix_x4;
+  constexpr int kRing = fp8_ldm_smallk::kStages;
+  const int kPitch = fp8_ldm_smallk::a_pitch(k);
+  const size_t a_bytes = fp8_ldm_smallk::a_bytes(k);
+  extern __shared__ __align__(16) uint8_t smem[];
+  const MoeSegment seg = segs[blockIdx.y];
+  const int m_tile = static_cast<int>(blockIdx.x) % m_tiles;
+  const int n_group = static_cast<int>(blockIdx.x) / m_tiles;
+  const int z0 = m_tile * BM;
+  if (z0 >= seg.rows) return;  // beyond this segment's rows (no barrier yet)
+  const int m_rows = min(BM, seg.rows - z0);
+  const MoeExpertView v = views[seg.expert * 3 + which];
+  const int rs = v.scale_shift_rows, cs = v.scale_shift_cols;
+  const int scale_cols = (k + (1 << cs) - 1) >> cs;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int warp = tid / 32, lane = tid % 32;
+  const int wn = warp;  // 1 (m64) x 8 (n16)
+  const int r = lane / 4, cc = (lane % 4) * 2;
+  const int b_row = tid / 2, b_half = tid % 2;
+  const int stages = k / BK;
+  const int n_tiles_total = (n + BN - 1) / BN;
+  const int nt0 = n_group * kNT;
+  const int live_nt = min(kNT, n_tiles_total - nt0);
+  const int live_slabs = (m_rows + 15) / 16;
+
+  uint16_t* a_tile = reinterpret_cast<uint16_t*>(smem);
+  auto slotCodes = [&](int slot) {
+    return smem + a_bytes + static_cast<size_t>(slot) * fp8_ldm_smallk::kSlotBytes;
+  };
+  auto slotScale = [&](int slot) {
+    return reinterpret_cast<float*>(smem + a_bytes +
+                                    static_cast<size_t>(slot) * fp8_ldm_smallk::kSlotBytes + kCodeBytes);
+  };
+
+  // The activation tile, resident: 64 rows x k, 16-byte chunks, one per
+  // thread per pass (256 chunks = 64 rows x 4 chunks of 8 elements).
+  {
+    const int chunks_per_row = k / 8;
+    const int total = BM * chunks_per_row;
+    for (int c = tid; c < total; c += kThreads) {
+      const int row = c / chunks_per_row, kq = (c % chunks_per_row) * 8;
+      const bool ok = row < m_rows;
+      uint16_t* dst = a_tile + static_cast<size_t>(row) * kPitch + kq;
+      const uint16_t* src = act;
+      if (ok) {
+        const int srow = seg.row0 + z0 + row;
+        src = act + static_cast<size_t>(act_rows != nullptr ? act_rows[srow] : srow) * act_stride + kq;
+      }
+      if (act_vec != 0) {
+        cp_async(dst, src, 16, ok ? 16 : 0);
+      } else {
+        uint16_t e[8];
+#pragma unroll
+        for (int h = 0; h < 8; ++h) e[h] = ok ? src[h] : static_cast<uint16_t>(0);
+        *reinterpret_cast<uint4*>(dst) = make_uint4(e[0] | (e[1] << 16), e[2] | (e[3] << 16),
+                                                    e[4] | (e[5] << 16), e[6] | (e[7] << 16));
+      }
+    }
+    commit();
+  }
+
+  // One n-tile's codes for one stage into a ring slot.
+  auto issue = [&](int flat, int slot) {
+    const int nt = flat / stages, s = flat % stages;
+    const int k0 = s * BK;
+    const int gn = (nt0 + nt) * BN + b_row;
+    const bool b_ok = gn < n;
+    const uint8_t* b_codes = v.payload + static_cast<size_t>(b_ok ? gn : 0) * k;
+    const float* b_scales = v.scales + (static_cast<size_t>(b_ok ? gn : 0) >> rs) * scale_cols;
+    cp_async(slotCodes(slot) + static_cast<size_t>(b_row) * kRawStride + b_half * 16,
+             b_ok ? b_codes + k0 + b_half * 16 : v.payload, 16, b_ok ? 16 : 0);
+    if (b_half == 0) cp_async(slotScale(slot) + b_row, b_scales + (k0 >> cs), 4, 4);
+  };
+
+  const int flat_total = live_nt * stages;
+  float acc[4][2][4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+#pragma unroll
+    for (int j = 0; j < 2; ++j) acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.f;
+
+#pragma unroll
+  for (int f = 0; f < kRing - 1; ++f) {
+    if (f < flat_total) issue(f, f);
+    commit();
+  }
+  for (int f = 0; f < flat_total; ++f) {
+    const int slot = f % kRing;
+    wait<kRing - 2>();  // this flat stage's copies (and the A tile, committed first) have landed
+    __syncthreads();
+    if (f + kRing - 1 < flat_total) issue(f + kRing - 1, (f + kRing - 1) % kRing);
+    commit();
+    const int nt = f / stages, s = f % stages;
+    const int k0 = s * BK;
+    const uint8_t* codes = slotCodes(slot);
+    const float* sc = slotScale(slot);
+#pragma unroll
+    for (int kk = 0; kk < BK; kk += 16) {
+      uint32_t bfrag[2][2];
+#pragma unroll
+      for (int j = 0; j < 2; ++j) {
+        const int brow = wn * 16 + j * 8 + r;
+        const uint8_t* row = codes + static_cast<size_t>(brow) * kRawStride + kk;
+        const float s_row = sc[brow];
+        const uint32_t lo = *reinterpret_cast<const uint16_t*>(row + cc);
+        const uint32_t hi = *reinterpret_cast<const uint16_t*>(row + cc + 8);
+        bfrag[j][0] = decode_pair_bf16(lo, s_row);
+        bfrag[j][1] = decode_pair_bf16(hi, s_row);
+      }
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        if (i >= live_slabs) break;
+        uint32_t af[4];
+        ldmatrix_x4(af, a_tile + static_cast<size_t>(i * 16 + (lane % 16)) * kPitch + k0 + kk + (lane / 16) * 8);
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+          asm volatile(
+              "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+              "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+              : "+f"(acc[i][j][0]), "+f"(acc[i][j][1]), "+f"(acc[i][j][2]), "+f"(acc[i][j][3])
+              : "r"(af[0]), "r"(af[1]), "r"(af[2]), "r"(af[3]), "r"(bfrag[j][0]), "r"(bfrag[j][1]));
+        }
+      }
+    }
+    if (s == stages - 1) {
+      // This n-tile is complete: its epilogue, then a fresh accumulator.
+      const int n0 = (nt0 + nt) * BN;
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const int row_lo = i * 16 + r;
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+          const int gcol = n0 + wn * 16 + j * 8 + cc;
+          auto st = [&](int row_off, int col_off, float val) {
+            const int mm = row_lo + row_off;
+            if (mm < m_rows && gcol + col_off < n)
+              fp8_gemv::store_dot(out + static_cast<size_t>(seg.row0 + z0 + mm) * out_stride + gcol + col_off, val);
+          };
+          st(0, 0, acc[i][j][0]);
+          st(0, 1, acc[i][j][1]);
+          st(8, 0, acc[i][j][2]);
+          st(8, 1, acc[i][j][3]);
+          acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.f;
+        }
+      }
+    }
+  }
+  wait<0>();
+}
+
 // DGPP_MOE_FP8_SWEEP=on runs the m-sweep form below wherever an expert
 // holds more than one m-tile; off by default (2026-09-10). Its domain is
 // the large prefill chunk — 4x the rows per expert cost 1.9x on the
@@ -3218,6 +3418,27 @@ void launch_moe_grouped_mma_fp8_ldm(const uint16_t* act, size_t act_stride,
     opted_in = true;
   }
   const unsigned n_tiles = static_cast<unsigned>((n + BN - 1) / BN);
+  if (k <= fp8_ldm_smallk::kMaxK && moe_fp8_smallk_enabled()) {
+    // The small-k form: the activation tile resident, kNT n-tiles through
+    // a codes-only ring (bitwise the one-tile kernel).
+    using fp8_ldm_smallk::kNT;
+    const size_t smallk_smem = fp8_ldm_smallk::smem_bytes(k);
+    static size_t smallk_opted = 0;
+    if (smallk_smem > smallk_opted) {
+      DGPP_CUDA_OK(cudaFuncSetAttribute(moe_grouped_mma_fp8_ldm_smallk_kernel<OutT>,
+                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        static_cast<int>(fp8_ldm_smallk::smem_bytes(fp8_ldm_smallk::kMaxK))));
+      smallk_opted = fp8_ldm_smallk::smem_bytes(fp8_ldm_smallk::kMaxK);
+    }
+    const int n_groups = (static_cast<int>(n_tiles) + kNT - 1) / kNT;
+    const dim3 grid(static_cast<unsigned>(n_groups) * static_cast<unsigned>(m_tiles),
+                    static_cast<unsigned>(n_segs), 1u);
+    moe_grouped_mma_fp8_ldm_smallk_kernel<OutT><<<grid, kThreads, smallk_smem, stream>>>(
+        act, act_stride, act_vec, act_rows, segs, views, which, out, out_stride, n, k,
+        m_tiles, n_groups);
+    DGPP_CUDA_OK(cudaGetLastError());
+    return;
+  }
   if (m_tiles > 1 && moe_fp8_sweep_enabled()) {
     // More than one m-tile somewhere: the sweep form reads each weight tile
     // once per kMT m-tiles instead of once per m-tile (bitwise the one-tile

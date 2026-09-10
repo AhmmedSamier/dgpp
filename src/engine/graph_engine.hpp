@@ -584,6 +584,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     spec.logprobs = -1;
     spec.seed = seed;
     spec.counter = 0;
+    spec.draft_temperature = sampling.temperature * proposal_temperature_scale();
     push_spec(req, spec);
     // A fresh context: the prompt's counts arrive with the prefill.
     DGPP_CUDA_OK(cudaMemsetAsync(d_counts_ + static_cast<size_t>(req) * vocab_,
@@ -1079,6 +1080,18 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // resembles P is the right one. A greedy request (temperature 0) takes
   // the same path and writes no proposal, so its rule is unchanged.
   bool draft_sampled_ = false;  // the draft pick draws (and proposes)
+  // DGPP_SPEC_PROPOSAL_TEMP: the draft's temperature as a multiple of the
+  // request's (default 1). Exact at any value; a calibration knob for the
+  // draft head's overlap with the target.
+  static float proposal_temperature_scale() {
+    static const float scale = [] {
+      const char* v = std::getenv("DGPP_SPEC_PROPOSAL_TEMP");
+      if (v == nullptr) return 1.0f;
+      const float f = std::strtof(v, nullptr);
+      return (f > 0.0f && f < 10.0f) ? f : 1.0f;
+    }();
+    return scale;
+  }
   static bool proposal_drafts_enabled() {
     static const bool on = [] {
       const char* v = std::getenv("DGPP_SPEC_PROPOSAL");

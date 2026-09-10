@@ -66,8 +66,13 @@ QwenGrSite::QwenGrSite(const QwenGrResident& w, const QwenGemmWorkspace& gemm, i
   // keep first claim on the SMs (the dots are one block per row and have a
   // whole branch plus a collective to hide under). Capture-safe: the fork
   // and the join are events recorded on the streams the capture owns.
+  // DGPP_QWEN_GR_GATE_SIDE: off = the dots in the chain after the fold
+  // (the 2026-09-09 form); side = the batched rows keep the side-stream
+  // kernel (the 2026-09-10 morning form); default = the dots ride the down
+  // GEMV at every decode row count.
   const char* side = std::getenv("DGPP_QWEN_GR_GATE_SIDE");
   gate_early_ = !(side && std::string(side) == "off");
+  gate_side_only_ = side && std::string(side) == "side";
   if (gate_early_) {
     int least = 0, greatest = 0;
     DGPP_CUDA_OK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
@@ -108,8 +113,16 @@ void QwenGrSite::mix(const uint16_t* r, uint16_t* x, int tokens, cudaStream_t st
     qwen_gr_act_up_bf16(t_, lowrank_, hc_, w_.up, logits_, hidden_, tokens, stream);
   } else {
     qwen_group_rmsnorm_bf16(r, w_.hc_norm, rn_, tokens, hc_, hidden_, eps_, stream);
-    fork_gate_dots(stream, tokens);
-    gemm_bf16(g_, rn_, W, w_.down, t_, GemmOut::BF16, tokens, lowrank_, W, stream);
+    if (tokens <= 8 && inject_fused() && fused_mix_ && !gate_side_only_) {
+      // The batched decode rows (MTP, the row batches): the down GEMV with
+      // the inject rows appended — no side stream (kernels/qwen_gr).
+      qwen_gr_down_inject_bf16(rn_, w_.down, t_, lowrank_, w_.inject, gates_, hc_, hidden_,
+                               tokens, stream);
+      gates_ready_ = true;
+    } else {
+      fork_gate_dots(stream, tokens);
+      gemm_bf16(g_, rn_, W, w_.down, t_, GemmOut::BF16, tokens, lowrank_, W, stream);
+    }
     qwen_gr_gate_act_bf16(t_, tokens, lowrank_, hc_, stream);
     gemm_bf16(g_, t_, lowrank_, w_.up, logits_, GemmOut::BF16, tokens, W, lowrank_, stream);
   }

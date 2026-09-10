@@ -66,4 +66,12 @@ void qwen_gr_norm_down_bf16(const void* r, size_t r_stride, const void* norm_w, 
 void qwen_gr_act_up_bf16(const void* t, int lowrank, int hc, const void* up_w, void* logits, int hidden,
                          int64_t rows, cudaStream_t stream);
 
+// The batched rows' (1..8) down GEMV over an already-normalized Rn with the
+// inject rows appended (2026-09-10): t = bf16(Rn . down_w^T) bitwise the
+// bf16 GEMV's, gates as qwen_gr_combine_dots_bf16's — one launch per four
+// rows in place of the chain's down GEMV plus a side-stream dots kernel.
+void qwen_gr_down_inject_bf16(const void* rn, const void* down_w, void* t, int lowrank,
+                              const void* w_inject, float* gates, int hc, int hidden,
+                              int64_t rows, cudaStream_t stream);
+
 }  // namespace dgpp

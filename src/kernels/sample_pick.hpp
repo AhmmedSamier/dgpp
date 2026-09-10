@@ -64,6 +64,11 @@ struct SampleSpec {
                           // a biased greedy row takes the full path)
   uint64_t seed = 0;
   uint64_t counter = 0;
+  // The DRAFT's temperature (2026-09-10): the proposal is the draft head's
+  // final set at THIS temperature, the request's own scaled by
+  // DGPP_SPEC_PROPOSAL_TEMP (0 = the request's). Any proposal is exact;
+  // the scale only moves the overlap with P, i.e. the acceptance rate.
+  float draft_temperature = 0.0f;
 };
 
 // The DRAFT's own stream (2026-09-10): a sampled draft draws from
