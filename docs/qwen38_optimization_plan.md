@@ -420,6 +420,23 @@ T=1 30.02 vs 29.99 ms/step, MTP 40.45 vs 40.48 at 72.0 %, prefill
 547 / 1 400 / 6 253 vs 544 / 1 410 / 6 260 ms, every generated-ids line
 identical in all three phases.
 
+**World 2 (nodes .11/.12, `deploy/cluster_qwen_w2*.json`, measured after
+the commit):** T=1 31.38 ms/step (32.5 on 2026-09-09 — the same ~1 ms the
+inject hoist bought at world 4, against a step that is even more
+byte-bound per rank). The MTP world at the sampled default, two 400-token
+requests each way:
+
+| world 2 | proposal off | proposal on |
+|---|---:|---:|
+| acceptance p1 | 43 %, 44 % | **60 %, 70 %** |
+| tokens per pass | 1.43, 1.44 | **1.61, 1.70** |
+| ms per pass | 40.3 | 40.4 |
+| ms per token | 27.9, 28.2 | **23.7, 25.2** |
+
+The same shape as world 4: the pass costs what it cost, the gain is all
+tokens per pass — and worth more here in absolute terms, since every pass
+streams 6.2 GB per rank instead of 3.8.
+
 ### 5.2 MTP depth 2 is not the lever yet
 
 Arithmetic from today's profile: a second verify row costs ~3 ms (the expert
