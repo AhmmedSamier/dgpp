@@ -38,7 +38,7 @@ to a recorded rank. `up --replace` explicitly stops the selected deployment.
 Choose a fresh output directory to avoid overwriting previous results. The
 HumanEval task in `serve_eval.py` executes generated Python locally with a
 timeout, not a security sandbox; run it in an isolated evaluation environment
-and pass `--allow-code-execution`. See [Getting started](../README.md#getting-started)
+and pass `--allow-code-execution`. See [Getting started](../docs/getting-started.md)
 and [test/data preparation](../docs/testing.md).
 
 For exact arguments, read the usage header or use `--help` where supported.

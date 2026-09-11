@@ -37,7 +37,7 @@ templates. All JSON contents are unchanged by the rename.
 | `cluster_qwen_spark1_fp8_d2.json` | [cluster_qwen-3.8-flash-next_nvfp4_w1_mtp2_dense-fp8.json](cluster_qwen-3.8-flash-next_nvfp4_w1_mtp2_dense-fp8.example.json) |
 
 Pass the chosen filename explicitly with `--config`. The setup instructions
-are in the [top-level README](../README.md#getting-started).
+are in the [top-level README](../README.md).
 
 ## Existing deployments and logs
 

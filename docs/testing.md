@@ -25,7 +25,7 @@ code in the tokenizer suites. Do not count skipped tests as model validation.
 Native tests do not read `.env`. To pass the head node's cache/NIC overrides,
 run `python3 scripts/site_env.py run-rank --rank 0 -- ctest --test-dir build-ci ...`.
 Reference generators need the optional dependencies listed in
-[setup instructions](../README.md#optional-development-and-evaluation-tools). CPU fixture generators do not require PyTorch;
+[setup instructions](getting-started.md#optional-development-and-evaluation-tools). CPU fixture generators do not require PyTorch;
 torch-backed reference modes do.
 
 ## Evaluation data and prefill fixtures

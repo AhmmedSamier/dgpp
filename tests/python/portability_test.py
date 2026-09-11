@@ -175,12 +175,18 @@ class PortabilityTest(unittest.TestCase):
         for path in (ROOT / "scripts").iterdir():
             if path.is_file():
                 self.assertIn(f"[{path.name}]({path.name})", index)
-        for name in ("README.md", "deploy/README.md", "scripts/README.md", "docs/getting-started.md", "docs/dependencies.md", "docs/networking.md"):
+        for name in ("README.md", "deploy/README.md", "scripts/README.md", "docs/getting-started.md", "docs/dependencies.md", "docs/networking.md", "docs/testing.md", "docs/operations.md"):
             source = ROOT / name
             for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", source.read_text()):
                 if target.startswith(("http:", "https:", "#")):
                     continue
-                self.assertTrue((source.parent / target.split("#")[0]).exists(), f"broken link in {name}: {target}")
+                filename, _, anchor = target.partition("#")
+                destination = source.parent / filename
+                self.assertTrue(destination.exists(), f"broken link in {name}: {target}")
+                if anchor and destination.suffix == ".md":
+                    headings = re.findall(r"^#{1,6} (.+)$", destination.read_text(), re.MULTILINE)
+                    anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
+                    self.assertIn(anchor, anchors, f"broken heading link in {name}: {target}")
 
     def test_deployment_filenames_describe_their_settings(self):
         models = {

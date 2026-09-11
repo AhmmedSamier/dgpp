@@ -1,4 +1,5 @@
 # Dependencies
 
-The setup instructions and dependencies are now in the top-level
-[README's Getting started section](../README.md#1-install-the-dependencies).
+Start with the [README](../README.md) for the setup commands and dependency
+guidance. Source builds link to the detailed getting-started guide; packaged
+releases list their runtime dependencies in their own README.

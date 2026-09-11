@@ -8,7 +8,7 @@ engine settings. See [README](../README.md) for the configuration schema.
 
 ## Configure and start
 
-For a new machine, follow [Getting started](../README.md#getting-started),
+For a new machine, follow [Getting started](getting-started.md),
 including dependency installation. HTTP defaults to localhost; deployment
 `http.bind_host` and `http.port` override `.env` defaults. The service has no
 TLS or authentication; see [networking](networking.md) before exposing it.
