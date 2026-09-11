@@ -89,13 +89,14 @@ def main():
     fetch.add_argument("--out", type=Path)
     tokenize = commands.add_parser("tokens")
     tokenize.add_argument("--model")
+    tokenize.add_argument("--config", help="deployment JSON selecting the tokenizer's model")
     tokenize.add_argument("--text", type=Path, required=True)
     tokenize.add_argument("--out", type=Path)
     args = parser.parse_args()
     if args.command == "download":
         download(args.tasks, args.out or data_dir())
     else:
-        tokens(args.model or deployment(config_path())["model"], args.text, args.out or data_dir() / "hard_ids.csv")
+        tokens(args.model or deployment(args.config or config_path())["model"], args.text, args.out or data_dir() / "hard_ids.csv")
 
 
 if __name__ == "__main__":

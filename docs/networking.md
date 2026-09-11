@@ -10,7 +10,21 @@ authentication and must not be exposed to an untrusted network.
 ## RoCE lanes
 
 For multi-node runs, set `DGPP_ROCE_DEVICES` to a space-separated ordered
-list of local verbs devices, for example `"mlx5_0 mlx5_1"`. If omitted,
+list of local verbs devices. Discover the actual names on your machines:
+
+```bash
+python3 scripts/discover_roce.py --config deploy/cluster.json
+```
+
+Run this on rank 0 after setting node addresses and SSH access. Without
+`--config`, it inspects only the local machine. It prints the verbs-to-Linux
+interface mapping, addresses, MTUs, usable GID indices, and candidate `.env`
+settings without changing files or networking. On Spark, names can look like
+`"rocep1s0f0 roceP2p1s0f0"`; use the discovered values for your hardware.
+Match corresponding lanes by subnet before copying the suggestions. If
+several GIDs or more than two devices are usable, choose the intended fabric.
+
+If `DGPP_ROCE_DEVICES` is omitted,
 DGPP discovers active Ethernet RDMA devices and sorts their names. Explicit
 selection is preferable on hosts with several fabrics. The native transport
 uses port 1 of each selected device; multi-port HCA selection is not supported.
@@ -23,7 +37,8 @@ assignment, routing and consistent MTU on the selected network interfaces.
 Discovery does not prove that corresponding lanes can exchange RDMA traffic.
 
 Read-only starting points are `rdma link`, `ip -br address`, `ip link`, and
-`dgpp-cluster doctor`. Only run the fabric probes on an idle test allocation;
+`scripts/dgpp-cluster doctor --config deploy/cluster.json`.
+Only run the fabric probes on an idle test allocation;
 they open QPs, use GPU memory and generate traffic.
 
 ## Per-node differences
@@ -31,10 +46,10 @@ they open QPs, use GPU memory and generate traffic.
 Shared defaults and overrides live in `.env`, not each deployment JSON:
 
 ```dotenv
-DGPP_ROCE_DEVICES="mlx5_0 mlx5_1"
+DGPP_ROCE_DEVICES="rocep1s0f0 roceP2p1s0f0"
 HF_HUB_CACHE="~/models/hub"
 DGPP_RESIDENT_CACHE_DIR="~/dgpp/resident-cache"
-DGPP_NODE_OVERRIDES='{"192.0.2.12":{"DGPP_ROCE_DEVICES":"mlx5_2 mlx5_3","HF_HUB_CACHE":"/srv/models/hub"}}'
+DGPP_NODE_OVERRIDES='{"192.0.2.12":{"DGPP_ROCE_DEVICES":"rocep1s0f0 roceP2p1s0f0","HF_HUB_CACHE":"/srv/models/hub"}}'
 ```
 
 Override keys must match a host in `DGPP_NODES` exactly. Only RoCE devices,

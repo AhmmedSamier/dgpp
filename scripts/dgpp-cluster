@@ -10,8 +10,8 @@ recorded stragglers and collects logs and operation streams for comparison.
 Deployment JSON selects model, world size, engine settings and optional HTTP
 bind/port. .env supplies node addresses, SSH user, fabric ports, cache/NIC
 settings and base paths. Exported settings take precedence over .env.
-DGPP_ENV_FILE selects another site file. --config overrides
-DGPP_CLUSTER_CONFIG; the fallback is deploy/cluster.json.
+DGPP_ENV_FILE selects another site file. Select the deployment explicitly
+with --config FILE, using the same file for start, status and stop.
 
 Log and staging paths are namespaced by deployment-file path. Process identity
 records limit cleanup to this deployment; up --replace explicitly replaces a
@@ -328,7 +328,9 @@ class Cluster:
             raise RuntimeError("rank 0 did not become ready")
         bind = self.cfg["http"]["bind_host"]
         client_host = self.nodes[0] if bind == "0.0.0.0" else bind
-        say(f"READY — curl http://{client_host}:{self.http}/v1/models  (stop: dgpp-cluster down)")
+        stop = shlex.join(["python3", str(Path(__file__).resolve()), "down",
+                          "--config", self.deployment_path, "--log-dir", self.log_dir])
+        say(f"READY — curl http://{client_host}:{self.http}/v1/models  (stop: {stop})")
         return 0
 
     # ---- down --------------------------------------------------------------

@@ -25,7 +25,7 @@ code in the tokenizer suites. Do not count skipped tests as model validation.
 Native tests do not read `.env`. To pass the head node's cache/NIC overrides,
 run `python3 scripts/site_env.py run-rank --rank 0 -- ctest --test-dir build-ci ...`.
 Reference generators need the optional dependencies listed in
-[dependencies](dependencies.md). CPU fixture generators do not require PyTorch;
+[setup instructions](../README.md#optional-development-and-evaluation-tools). CPU fixture generators do not require PyTorch;
 torch-backed reference modes do.
 
 ## Evaluation data and prefill fixtures
@@ -34,7 +34,7 @@ Datasets are not bundled and benchmarks never download them implicitly:
 
 ```bash
 python3 scripts/prepare_data.py download --tasks gsm8k humaneval
-python3 scripts/prepare_data.py tokens --text /path/to/long-prompt.txt
+python3 scripts/prepare_data.py tokens --config deploy/cluster.json --text /path/to/long-prompt.txt
 ```
 
 Downloads use pinned upstream revisions from OpenAI's

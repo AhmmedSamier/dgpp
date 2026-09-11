@@ -8,8 +8,8 @@ engine settings. See [README](../README.md) for the configuration schema.
 
 ## Configure and start
 
-For a new machine, start with [Getting started](getting-started.md) and
-[dependencies](dependencies.md). HTTP defaults to localhost; deployment
+For a new machine, follow [Getting started](../README.md#getting-started),
+including dependency installation. HTTP defaults to localhost; deployment
 `http.bind_host` and `http.port` override `.env` defaults. The service has no
 TLS or authentication; see [networking](networking.md) before exposing it.
 
@@ -38,9 +38,9 @@ control table residency and optional FP8 encoding of dense projections;
 see [the single-node guide](qwen38_single_spark.md).
 
 ```bash
-scripts/dgpp-cluster up       # stage configuration, start ranks, wait for HTTP readiness
-scripts/dgpp-cluster status   # inspect the configured processes
-scripts/dgpp-cluster down     # stop, collect logs and compare operation streams
+scripts/dgpp-cluster up --config deploy/cluster.json
+scripts/dgpp-cluster status --config deploy/cluster.json
+scripts/dgpp-cluster down --config deploy/cluster.json
 ```
 
 `doctor` performs read-only preflight checks locally and over SSH; `up` runs
@@ -50,8 +50,7 @@ ownership checks. `up` refuses a running deployment unless `--replace` is
 explicitly requested. Stop jobs from older launchers with their original
 launcher before upgrading: an unrecorded process is never adopted or killed.
 
-The default config is `deploy/cluster.json`, or
-`DGPP_CLUSTER_CONFIG` when set. Use `--config FILE` to select another
+Pass the same `--config FILE` to each lifecycle command to select the
 deployment. `scripts/dgpp-cluster resolve --config FILE` prints the merged
 runtime configuration without launching or contacting any node. At startup,
 the launcher saves it as `<log_dir>/cluster.resolved.json` and stages the same
@@ -116,7 +115,7 @@ and effective `config:` lines with the run artifacts.
 
 `scripts/release.sh` builds the release preset and packs
 `dist/dgpp-<version>.tar.zst` (README's "Release and install" has the
-layout); `scripts/dgpp-cluster install <tarball>` copies it to every node
+layout); `scripts/dgpp-cluster install TARBALL --config deploy/cluster.json` copies it to every node
 in the config, unpacks it under `paths.release_dir` and verifies every
 file against `MANIFEST.sha256`. Which release runs is named — the
 config's `release` key or `up --release <version>` — and `up` then runs
@@ -310,9 +309,11 @@ drilled 2026-09-05).
   committed tokens as a prefix of its answer (the drill checks exactly
   this).
 
-Restart with `scripts/dgpp-cluster up` (it sweeps any stray process
-first). There are no boot-time units by decision: the servers start when
-an operator, or whatever the operator runs, says `up`.
+Stop the deployment with `scripts/dgpp-cluster down --config deploy/cluster.json`,
+then restart with `scripts/dgpp-cluster up --config deploy/cluster.json`.
+Cleanup only targets recorded processes belonging to that deployment; it
+does not sweep arbitrary server processes. No boot-time service units are
+installed, so an operator or external supervisor must start the service.
 
 The drill: `scripts/serve_failure_drill.sh <victim rank> [clients]` boots
 the world, streams from three clients, kills the victim with `kill -9` at

@@ -455,7 +455,8 @@ if(DGPP_ENABLE_IBV)
   endforeach()
   install(PROGRAMS scripts/dgpp-cluster scripts/serve_api_check.py DESTINATION scripts)
   install(FILES scripts/site_env.py scripts/cluster_process.py scripts/cluster_doctor.py
-    scripts/serve_client.py scripts/download_model.py scripts/data_paths.py DESTINATION scripts)
+    scripts/serve_client.py scripts/download_model.py scripts/cache_sync.py
+    scripts/discover_roce.py scripts/data_paths.py DESTINATION scripts)
   install(FILES .env.example DESTINATION .)
   file(GLOB DGPP_DEPLOYMENT_TEMPLATES CONFIGURE_DEPENDS "deploy/*.example.json")
   install(FILES ${DGPP_DEPLOYMENT_TEMPLATES} DESTINATION deploy)
@@ -602,6 +603,8 @@ add_test(NAME script_reports_test
           ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/script_reports_test.py)
 add_test(NAME portability_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/portability_test.py)
+add_test(NAME setup_tools_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/setup_tools_test.py)
 
 # KDA operator tests (CUDA); skip without a device as above. The dump-parity
 # runner is a host-only TU (minijson + nvcc don't mix).
@@ -969,7 +972,7 @@ endforeach()
 set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test
   PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
-  site_env_test script_reports_test portability_test PROPERTIES LABELS "host;python")
+  site_env_test script_reports_test portability_test setup_tools_test PROPERTIES LABELS "host;python")
 set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test
   chat_template_test qwen_chat_template_test glm4_chat_template_test
   PROPERTIES LABELS "host;checkpoint")

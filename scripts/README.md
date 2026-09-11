@@ -21,8 +21,8 @@ Shared node addresses, SSH user, ports, and staging/log/release paths belong in
 the repository's `.env`; [`.env.example`](../.env.example) lists the settings.
 Exported settings take precedence, and `DGPP_ENV_FILE` selects a different site
 file. Deployment JSONs select the model, world size, and engine settings.
-`DGPP_CLUSTER_CONFIG` selects the default deployment; a launcher's `--config`
-option or positional `CONFIG` argument overrides it. The world uses the first
+Select the deployment explicitly with `--config FILE`, or the positional
+`CONFIG` argument for wrappers that use one. The world uses the first
 N configured nodes. `.env` is parsed as data, not sourced as Bash, and unrelated
 entries such as access tokens are not loaded by the site helper.
 
@@ -38,7 +38,7 @@ to a recorded rank. `up --replace` explicitly stops the selected deployment.
 Choose a fresh output directory to avoid overwriting previous results. The
 HumanEval task in `serve_eval.py` executes generated Python locally with a
 timeout, not a security sandbox; run it in an isolated evaluation environment
-and pass `--allow-code-execution`. See [Getting started](../docs/getting-started.md)
+and pass `--allow-code-execution`. See [Getting started](../README.md#getting-started)
 and [test/data preparation](../docs/testing.md).
 
 For exact arguments, read the usage header or use `--help` where supported.
@@ -57,7 +57,9 @@ Some older scripts start work immediately and do not implement `--help`.
 | [site_env.py](site_env.py) | Parses allowlisted `.env` settings, applies exported overrides, and resolves deployment configuration. Exposes both Python functions and a CLI. | Reuse site parsing in Python or inspect the selected nodes and resolved configuration. |
 | [cluster_doctor.py](cluster_doctor.py) | Read-only local/SSH probes for platform, GPU, cache completeness, libraries, ports, paths and RoCE selection. | Run through `dgpp-cluster doctor`, automatically invoked before `up`; `--local-only` omits SSH. |
 | [cluster_process.py](cluster_process.py) | Starts isolated process sessions and records PID, owner, start time and boot identity. | Internal helper for launch/status/signals; prevents stale PID records from authorizing unrelated cleanup. |
-| [download_model.py](download_model.py) | Downloads a full HF checkpoint or structurally verifies the active local snapshot. | Prepare each node's cache; `--verify-only` does not download, and `--activate` explicitly selects a revision. |
+| [download_model.py](download_model.py) | Downloads a complete checkpoint once on rank 0 into the HF cache, then syncs the selected snapshot and blobs to peers sequentially. | Run with `--config FILE`; `--sync-only` reuses an existing download, `--verify-only` checks every node without writes, and `--local-only` skips peers. `--model ORG/NAME` downloads locally without deployment settings. |
+| [cache_sync.py](cache_sync.py) | Builds a snapshot/blob file list, transfers it with rsync content checksums, and validates the peer copy before updating `refs/main`. | Internal downloader helper; does not copy credentials or unrelated cached revisions. Peers need Python, SSH and rsync, not the HF Python package. |
+| [discover_roce.py](discover_roce.py) | Lists verbs devices, Linux interfaces, IP addresses, MTUs and usable RoCE-v2 GID indices; prints candidate `.env` settings. | Run locally, or use `--config FILE` on rank 0 to inspect all participating nodes over SSH before configuring the fabric. Read-only; lane order still needs checking across nodes. |
 | [prepare_data.py](prepare_data.py) | Fetches pinned GSM8K/HumanEval data with provenance manifests or tokenizes a supplied text into CSV. | Prepare benchmark inputs explicitly before running evaluation or prefill checks. |
 | [data_paths.py](data_paths.py) | Resolves `DGPP_DATA_DIR` and reports missing datasets with preparation instructions. | Shared by data-dependent clients and preparation tools. |
 | [serve_client.py](serve_client.py) | Resolves the selected HTTP endpoint/log path and discovers the served model ID. | Shared by clients; its CLI prints `url`, `log`, or `model` for shell callers. |

@@ -68,14 +68,17 @@ The recorded serving configuration is world size 4: four DGX Spark (GB10)
 nodes, one rank per node, using tensor parallelism over RoCE. Other world
 sizes have not been validated for this checkpoint.
 
-Download it into the Hugging Face cache on each node:
+In the DGPP repository, configure node addresses and SSH access in `.env`,
+then download once on rank 0 and sync the checkpoint to peers:
 
 ```bash
-hf download HawkBearPig/GLM-5.3-Flash-NVFP4-FP8
+python scripts/download_model.py --config deploy/cluster.nvfp4.example.json
 ```
 
-In DGPP, use `deploy/cluster.nvfp4.example.json` as the deployment template
-and set its `model` field to `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8`.
+The template already selects `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8`.
+If it is already downloaded on rank 0, add `--sync-only`. Peers receive the
+selected snapshot and blobs in their HF caches, without downloading from
+the Hub themselves. Follow DGPP's top-level README for dependencies and setup.
 The original local composition used the cache name
 `dgpp/GLM-5.3-Flash-NVFP4-FP8`; that name remains in the provenance manifest.
 

@@ -5,6 +5,7 @@ the remote Python interpreter's stdin, without installing files or sourcing
 .env. Only the resolved, allowlisted node settings are sent to a peer.
 """
 import argparse
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,15 @@ import socket
 import struct
 import subprocess
 import sys
+
+
+def require_head(host):
+    """Reject a coordinator command run on a machine other than rank 0."""
+    try:
+        with socket.socket() as connection:
+            connection.bind((socket.gethostbyname(host), 0))
+    except OSError as error:
+        raise ValueError("run this command on rank 0 (the first address in DGPP_NODES)") from error
 
 
 def cache_root(env=None):
@@ -127,6 +137,40 @@ def roce_gids(port):
             # Drivers expose unused GID table slots whose reads return EINVAL.
             continue
     return result
+
+
+def roce_inventory(root=Path("/sys/class/infiniband")):
+    """Map verbs ports and GIDs to Linux interfaces without opening any QPs."""
+    addresses = {}
+    try:
+        result = command(["ip", "-j", "address"])
+        if result.returncode == 0:
+            addresses = {item["ifname"]: item for item in json.loads(result.stdout)}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    rows = []
+    for device in sorted(root.glob("*")):
+        for port in sorted((device / "ports").glob("*")):
+            gids = []
+            for index, value in roce_gids(port):
+                try:
+                    address = ipaddress.IPv6Address(value)
+                except ValueError:
+                    continue
+                if address.is_link_local or address.is_unspecified:
+                    continue
+                try:
+                    interface = (port / "gid_attrs/ndevs" / index).read_text().strip()
+                except OSError:
+                    interface = ""
+                network = addresses.get(interface, {})
+                gids.append({"index": int(index), "address": str(address.ipv4_mapped or address),
+                             "interface": interface, "mtu": network.get("mtu"),
+                             "ips": [f"{a['local']}/{a['prefixlen']}" for a in network.get("addr_info", [])]})
+            rows.append({"device": device.name, "port": port.name,
+                         "active": active_roce_port(port), "gids": gids,
+                         "usable": port.name == "1" and active_roce_port(port) and bool(gids)})
+    return rows
 
 
 def probe(spec):
@@ -276,7 +320,20 @@ def check_cluster(cfg, binary, log_dir, stage_dir, user, peer_binary=None, *, lo
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("probe",))
+    parser.add_argument("action", choices=("probe", "cache", "roce"))
     parser.add_argument("--spec", required=True)
     args = parser.parse_args()
-    print(json.dumps(probe(json.loads(args.spec))))
+    spec = json.loads(args.spec)
+    if args.action == "roce":
+        print(json.dumps(roce_inventory()))
+    elif args.action == "cache":
+        root = cache_root({**os.environ, **spec["env"]}).absolute()
+        result = {"root": str(root), "repository": str(root / ("models--" + spec["model"].replace("/", "--")))}
+        if spec.get("verify"):
+            snapshot = cached_snapshot(spec["model"], root)
+            result.update(snapshot=str(snapshot), size=checkpoint_size(snapshot))
+            if spec.get("revision") and snapshot.name != spec["revision"]:
+                parser.exit(2, "active peer revision differs from the head; run download_model.py --config FILE --sync-only\n")
+        print(json.dumps(result))
+    else:
+        print(json.dumps(probe(spec)))

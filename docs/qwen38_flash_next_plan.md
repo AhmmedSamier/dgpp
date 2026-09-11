@@ -526,12 +526,12 @@ conv channel layout. Snapshot/rollback (`KdaStateSnapshots`,
 and `resident_image` are typed on `Glm*` but their behavior — graph capture
 with the collective recorder, request slots and row spans, the MTP
 commit/snapshot transaction, the prefix arena, the memory plan, the scheduler
-adapter — is model-independent. With Qwen3.8-27B and full GLM-5.3 also on
-GOALS.md, copying 8 000 lines per model is the wrong shape. Q1 extracts
+adapter — is model-independent. To support further models without duplicating
+the engine, Q1 extracts
 those mechanics behind a model "layer walk" interface with the GLM engine as
 the first client, gated by identical transcripts and unchanged step times on
 the fabric. Kernels, binding tables, loaders and the walk itself stay
-per-model, as GOALS.md wants.
+per-model.
 
 **D8 — Text only.** The vision tower (1.1 GiB) is not loaded; image inputs
 are refused at the API, as for GLM.
