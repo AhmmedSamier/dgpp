@@ -751,8 +751,8 @@ fixture); `dgpp-serve` dispatches on the architecture through a family
 interface (the GLM and Qwen models, memory plans and engines behind one
 interface; the bus's latency slot is the family's widest recorded fold —
 GLM's 8 x 4096 rows, Qwen's 8 x 10240 for the PLE key partial);
-`deploy/cluster_qwen.json` (MTP + the decode graph) and
-`deploy/cluster_qwen_t1.json` (plain T=1) name the fabric worlds, and
+`deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json` (MTP + the decode graph) and
+`deploy/cluster_qwen-3.8-flash-next_fp8_w4_plain.json` (plain T=1) name the fabric worlds, and
 `scripts/fabric_qwen_serve.sh CONFIG OUT [--compare REF] [--eval]` runs a
 world's gates (`scripts/serve_greedy_transcript.py` for the MTP-vs-plain
 transcript identity at temperature 0, `serve_bench.py` for the pace,
@@ -772,7 +772,7 @@ card's band (GLM-5.3-Flash's FP8 baseline on the same items: 97.7 / 94.5
 / 100). Under 4 concurrent requests: 45–64 ms per batched step at 2.0
 tokens per step per request (acceptance 98–99 % on the eval's
 arithmetic and code), 8–11 ms per token; the four ranks' op streams
-identical. The plain T=1 world (`deploy/cluster_qwen_t1.json`,
+identical. The plain T=1 world (`deploy/cluster_qwen-3.8-flash-next_fp8_w4_plain.json`,
 `build-ci/fabric-runs/qwen_serve_t1_2026-09-09/`): 28.9 ms per step
 single-stream (the TP=4 floor is 16.0 ms — Q8's distance), 29 ms per
 token at the client; its four greedy transcripts are IDENTICAL to the MTP
@@ -790,7 +790,7 @@ the four greedy transcripts are token-identical to the first boot's, and
 the boot from the resident image takes 30.5 s (11.2 s model, 17.9 s
 captures — the first boot's 70 s captured the image beside them).
 
-World 2 (two nodes, 87.3 GiB resident per rank, `deploy/cluster_qwen_w2*.json`,
+World 2 (two nodes, 87.3 GiB resident per rank, `deploy/cluster_qwen-3.8-flash-next_fp8_w2_*.json`,
 `qwen_serve_w2_mtp_2026-09-09/`): first boot 220 s (23 s model with the
 image capture, 196 s captures); MTP 46–54 ms per pass at 1.6–1.9 tokens
 per pass (acceptance 59–86 %), 25–34 ms per token single-stream; at 4
@@ -873,7 +873,7 @@ chain), what was tried and reverted (the fused mix beyond one row, a
 
 ### Q8 status — the decode profile (2026-09-09, world 4, T=1)
 
-`scripts/fabric_qwen_profile.sh deploy/cluster_qwen_t1.json OUT` (rank 0
+`scripts/fabric_qwen_profile.sh deploy/cluster_qwen-3.8-flash-next_fp8_w4_plain.json OUT` (rank 0
 under nsys through `dgpp-cluster up --head-wrap`, a 400-token request,
 `scripts/nsys_step_breakdown.py` between `spec_commit_kernel` markers;
 `build-ci/fabric-runs/qwen_profile_t1_2026-09-09/`): 29.66 ms per step
@@ -1098,7 +1098,7 @@ Levers, in order (bit-identical unless noted):
 
 ### Q7 status — the prefill profile (2026-09-09, world 4, 2 048 tokens)
 
-`scripts/fabric_qwen_profile.sh deploy/cluster_qwen.json OUT --prefill 2048`
+`scripts/fabric_qwen_profile.sh deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json OUT --prefill 2048`
 (`qwen_profile_prefill_2026-09-09/`, the last burst = the calibration
 prompt and two 2 048-token prompts, 2.80 s of GPU time in 2.95 s of wall;
 the probe read 1 235 ms per 1 978 tokens):

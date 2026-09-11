@@ -732,7 +732,7 @@ int main(int argc, char** argv) {
       "  [--memory-plan]: log the memory plan for this rank's configured shape\n"
       "    (the same check every boot runs before allocating) and exit 0 when\n"
       "    it fits the node's free memory, 1 when it does not; no world forms\n"
-      "  [--config PATH]: the cluster config (deploy/cluster.json): the model,\n"
+      "  [--config PATH]: resolved cluster JSON containing the model,\n"
       "    the world (the node list), this rank's peer, the ports and every\n"
       "    engine knob below; flags given after it override\n"
       "  [--port N (default 18080; rank 0 only)]\n"

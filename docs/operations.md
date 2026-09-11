@@ -27,10 +27,10 @@ switching models does not require copying addresses between JSONs.
 
 | template | deployment |
 |---|---|
-| `cluster{,.nvfp4}.example.json` | GLM-5.3-Flash NVFP4/FP8 hybrid, four nodes |
-| `cluster_qwen{,_t1,_w2,_w2_t1}.example.json` | Qwen FP8 with MTP or plain decode, four or two nodes |
-| `cluster_qwen_spark1{,_t1}.example.json` | Qwen NVFP4 on one Spark, with a mapped n-gram table |
-| `cluster_glm47{,_t1,_d2}.example.json` | GLM-4.7 NVFP4, MTP depth 1, plain decode or depth 2 |
+| `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1{,_large-cache}.example.json` | GLM-5.3-Flash NVFP4/FP8 hybrid, four nodes |
+| `cluster_qwen-3.8-flash-next_fp8_w{2,4}_{mtp1,plain}.example.json` | Qwen FP8 with MTP or plain decode, four or two nodes |
+| `cluster_qwen-3.8-flash-next_nvfp4_w1_{mtp1,plain}.example.json` | Qwen NVFP4 on one Spark, with a mapped n-gram table |
+| `cluster_glm-4.7_nvfp4_w4_{mtp1,plain,mtp2}.example.json` | GLM-4.7 NVFP4, MTP depth 1, plain decode or depth 2 |
 
 `kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
 caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
@@ -38,9 +38,9 @@ control table residency and optional FP8 encoding of dense projections;
 see [the single-node guide](qwen38_single_spark.md).
 
 ```bash
-scripts/dgpp-cluster up --config deploy/cluster.json
-scripts/dgpp-cluster status --config deploy/cluster.json
-scripts/dgpp-cluster down --config deploy/cluster.json
+scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json
+scripts/dgpp-cluster status --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json
+scripts/dgpp-cluster down --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json
 ```
 
 `doctor` performs read-only preflight checks locally and over SSH; `up` runs
@@ -79,7 +79,7 @@ HTTP readiness. Warm GLM-FP8 resident images took 15–25 s to reach it in
 the recorded deployment; the first checkpoint load took about 4.5 minutes.
 
 Use a separate config for each checkpoint. For example, a site-local
-`deploy/cluster.nvfp4.json` can select the composed
+`deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json` can select the composed
 `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` checkpoint. Size its context and prefix
 arena with `--memory-plan`; the smaller weight footprint does not imply
 one fixed cache capacity for every deployment.
@@ -115,7 +115,7 @@ and effective `config:` lines with the run artifacts.
 
 `scripts/release.sh` builds the release preset and packs
 `dist/dgpp-<version>.tar.zst` (README's "Release and install" has the
-layout); `scripts/dgpp-cluster install TARBALL --config deploy/cluster.json` copies it to every node
+layout); `scripts/dgpp-cluster install TARBALL --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json` copies it to every node
 in the config, unpacks it under `paths.release_dir` and verifies every
 file against `MANIFEST.sha256`. Which release runs is named — the
 config's `release` key or `up --release <version>` — and `up` then runs
@@ -309,8 +309,8 @@ drilled 2026-09-05).
   committed tokens as a prefix of its answer (the drill checks exactly
   this).
 
-Stop the deployment with `scripts/dgpp-cluster down --config deploy/cluster.json`,
-then restart with `scripts/dgpp-cluster up --config deploy/cluster.json`.
+Stop the deployment with `scripts/dgpp-cluster down --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json`,
+then restart with `scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json`.
 Cleanup only targets recorded processes belonging to that deployment; it
 does not sweep arbitrary server processes. No boot-time service units are
 installed, so an operator or external supervisor must start the service.

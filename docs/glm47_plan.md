@@ -221,7 +221,7 @@ argument), no vision.
 | `tools/glm4_reference_dump.py` | the pure-python full-model reference on the synthetic fixture |
 | `tests/unit/glm4_{config,binding}_test.cpp`, `tests/cuda/glm4_*` | the gates |
 | `apps/glm4_load_check.cpp`, `apps/glm4_forward_check.cpp`, `dgpp_serve.cpp` (`Glm4Family`) | the apps |
-| `deploy/cluster_glm47.json`, `scripts/fabric_glm4_*.sh` | the fabric procedures |
+| `deploy/cluster_glm-4.7_nvfp4_w4_mtp1.json`, `scripts/fabric_glm4_*.sh` | the fabric procedures |
 
 ## 5. Implementation stages and validation
 
@@ -263,8 +263,8 @@ and the regression procedures follow in the record below.
 | G4 | `glm4_forward_test` vs `tools/glm4_reference_dump.py`: per-layer l2 ≤ 0.004, final hidden l2 0.0035, top-1 and routing exact, the draft's rows exact; `tools/glm4_torch_reference.py` (transformers' own layer code, real weights, first 4 layers): relative l2 0.0025 / 0.0026 / 0.0002 on layers 0–2; `glm4_decode_test` (prefill == forward bitwise, interleaved slots bitwise, chunked prefill, snapshots hot == cold, 60 steps across the block boundary vs the re-forward, per-step rolling snapshots bitwise, the speculator's transcript); `glm4_tp_test` worlds 2 and 4 (rank-identical; world 2 one near-tie flip on one row, world 4 none); `glm4_engine_test` (scalar, batched and MTP graphs == the eager engine over 60 steps; world 2 == world 1 on three prompts) |
 | G5 | `dgpp-serve` family `glm4_moe`; `glm4_tokenizer_test` (55 cases), `glm4_chat_template_test` (26 cases exact, the tool round-trips and grammars); the memory plan at the fabric shape 77.4 GiB per rank for a 202,752-token context (weights 52.8, K/V 23.3) |
 
-Fabric (2026-09-10, `scripts/fabric_glm4_serve.sh deploy/cluster_glm47.json`
-and `cluster_glm47_t1.json`): boot 18–20 s from the resident image (the first
+Fabric (2026-09-10, `scripts/fabric_glm4_serve.sh deploy/cluster_glm-4.7_nvfp4_w4_mtp1.json`
+and `cluster_glm-4.7_nvfp4_w4_plain.json`): boot 18–20 s from the resident image (the first
 boot captures it in ~3 min), 14 graph variants warm-captured in 13 s; T=1
 49.0 ms/step; MTP 60–61 ms/pass at 1.86–1.99 tokens/pass (draft acceptance
 79–98 % with the post-norm hidden; 11–46 % with the pre-norm residual —
@@ -278,7 +278,7 @@ the bus recorder's collective-node budget (128 -> 256; the step records
 186) and the scheduler's retire-time prefix snapshot after a cut-short
 multi-token step (see CHANGELOG). Full numbers: docs/measurements.md.
 
-MTP depth 2 (2026-09-10, `deploy/cluster_glm47_d2.json`): 72 ms/pass at
+MTP depth 2 (2026-09-10, `deploy/cluster_glm-4.7_nvfp4_w4_mtp2.json`): 72 ms/pass at
 2.32–2.60 tokens/pass (p1 85–96 %, p2 48–65 %) — 28.0–31.2 ms/token, 4–13 %
 more tokens/s than depth 1 single-stream, +5 % at a 6,525-token context;
 transcripts identical to depth 1. The row batch carries depth 2 since the

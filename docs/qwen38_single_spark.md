@@ -73,8 +73,8 @@ The bus test `scenario_world_of_one` covers this behavior.
 
 Without `decode_graph`, a single-node run uses the eager streaming path.
 
-`deploy/cluster_qwen_spark1.example.json` (MTP) and
-`deploy/cluster_qwen_spark1_t1.example.json` (T=1) are the single-node
+`deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1.example.json` (MTP) and
+`deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_plain.example.json` (T=1) are the single-node
 configs: one node, `ngram_table: "mmap"`, `decode_graph`, 4 slots,
 kv_capacity 65536.
 
@@ -100,7 +100,7 @@ kv_capacity 65536.
 
 ## The single-Spark serve (2026-09-10)
 
-`deploy/cluster_qwen_spark1.json` (one node, `ngram_table: "mmap"`,
+`deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1.json` (one node, `ngram_table: "mmap"`,
 `decode_graph`, `mtp` depth 1, 4 slots, kv 65536), the launcher's `up`, the
 serve gates (`scripts/serve_greedy_transcript.py`, `serve_bench.py`,
 `serve_api_check.py`, `serve_prefill_probe.py`, `serve_eval.py`), the
@@ -138,7 +138,7 @@ extraction 30/30 — the BF16 fabric's numbers exactly
 The API check passes; the greedy transcripts are the reference for the
 T=1 comparison below.
 
-**T=1** (`deploy/cluster_qwen_spark1_t1.json`, the same world without MTP):
+**T=1** (`deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_plain.json`, the same world without MTP):
 47 ms per pass on every prompt (46.7–47.2 ms/token; the estimate was
 47–50 against a 42.5 ms bandwidth floor at 9.9 GB per token), 21.4 tok/s;
 client pace 47.2 ms/token, TTFT 506 ms. The four greedy transcripts are
@@ -203,11 +203,11 @@ fusion becomes qkv + z through the scale GEMM and a two-problem BF16 GEMV
 for a/b. The resident image key carries the form (`loader_format`), so a
 BF16 image is never restored into an FP8 world; the encode runs once, on
 the first boot (16 threads over the block rows), and the memory plan
-follows the counting build. Configs: `deploy/cluster_qwen_spark1_fp8{,_t1}.example.json`.
+follows the counting build. Configs: `deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_{mtp1,plain}_dense-fp8.example.json`.
 
 ### Measured with the dense stack in FP8 (2026-09-10)
 
-`deploy/cluster_qwen_spark1_fp8.json` (the MTP world above with
+`deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.json` (the MTP world above with
 `dense_weights: "fp8"`), the same gates. Boot 24 s from the resident image
 (the first boot encodes the stack and captures the image); plan 79.7 GiB
 (BF16 dense 83.7).
@@ -288,7 +288,7 @@ shapes.
 
 ### The world-1 profile of the FP8 MTP world (2026-09-10, nsys)
 
-`scripts/fabric_qwen_profile.sh deploy/cluster_qwen_spark1_fp8.json`: 255
+`scripts/fabric_qwen_profile.sh deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.json`: 255
 two-row passes, 40.8 ms wall per pass, 1,567 kernels per pass; the GPU
 "busy" 49.8 ms per pass because the L2 prefetcher's kernels (11.2 ms of
 GPU time, 201 per pass) run on their side stream under the main chain.

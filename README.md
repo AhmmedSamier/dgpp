@@ -21,11 +21,11 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 
 | Model | Quant / Hugging Face model card | World sizes | Example configuration |
 |---|---|---|---|
-| GLM-5.3-Flash | [unsloth/GLM-5.3-Flash-FP8](https://huggingface.co/unsloth/GLM-5.3-Flash-FP8) | 4 | [Four nodes](deploy/cluster.example.json), with `model` set to the linked FP8 repository |
-| GLM-5.3-Flash (hybrid) | [HawkBearPig/GLM-5.3-Flash-NVFP4-FP8](https://huggingface.co/HawkBearPig/GLM-5.3-Flash-NVFP4-FP8) | 4 | [Four nodes](deploy/cluster.nvfp4.example.json) |
-| Qwen3.8-Flash-Next | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8) | 2, 4 | [Two nodes](deploy/cluster_qwen_w2.example.json), [four nodes](deploy/cluster_qwen.example.json) |
-| Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1 | [One node, BF16 dense](deploy/cluster_qwen_spark1.example.json), [one node, FP8 dense](deploy/cluster_qwen_spark1_fp8.example.json) |
-| GLM-4.7 | [nvidia/GLM-4.7-NVFP4](https://huggingface.co/nvidia/GLM-4.7-NVFP4) | 4 | [Four nodes](deploy/cluster_glm47.example.json) |
+| GLM-5.3-Flash | [unsloth/GLM-5.3-Flash-FP8](https://huggingface.co/unsloth/GLM-5.3-Flash-FP8) | 4 | Copy the [base template](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.example.json) to `cluster_glm-5.3-flash_fp8_w4_mtp1.json` and set `model` to the linked FP8 repository |
+| GLM-5.3-Flash (hybrid) | [HawkBearPig/GLM-5.3-Flash-NVFP4-FP8](https://huggingface.co/HawkBearPig/GLM-5.3-Flash-NVFP4-FP8) | 4 | [Four nodes](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.example.json) |
+| Qwen3.8-Flash-Next | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8) | 2, 4 | [Two nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w2_mtp1.example.json), [four nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.example.json) |
+| Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1 | [One node, BF16 dense](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1.example.json), [one node, FP8 dense](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.example.json) |
+| GLM-4.7 | [nvidia/GLM-4.7-NVFP4](https://huggingface.co/nvidia/GLM-4.7-NVFP4) | 4 | [Four nodes](deploy/cluster_glm-4.7_nvfp4_w4_mtp1.example.json) |
 
 The single-Spark Qwen configurations require `engine.ngram_table: "mmap"`
 to read the n-gram table from NVMe and `engine.decode_graph: true` for
@@ -38,7 +38,7 @@ The GLM-5.3 hybrid takes the main-stack routed experts from
 [dabsLabs](https://huggingface.co/dabsLabs/GLM-5.3-Flash-NVFP4) and the
 remaining tensors, including MTP, from
 [Unsloth](https://huggingface.co/unsloth/GLM-5.3-Flash-FP8).
-The default and NVFP4 cluster templates both use
+The base and large-cache GLM-5.3 templates both use
 `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8`. The setup command below downloads it
 once on rank 0 and syncs the selected snapshot to peers. To use the FP8 release
 instead, set
@@ -144,25 +144,35 @@ Multi-node production uses it for RoCE communication. Turning
 
 ### 2. Copy a deployment template
 
-1. Choose **one** command matching your hardware. These create
-   `deploy/cluster.json` without replacing an existing file:
+1. Run **one** assignment matching your hardware. `CONFIG` is just a shell
+   variable for the filename; each command below still passes `--config` explicitly.
 
    ```bash
    # One Spark: Qwen NVFP4 with FP8 dense projections.
-   cp -n deploy/cluster_qwen_spark1_fp8.example.json deploy/cluster.json
+   CONFIG=deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.json
 
    # Two Sparks: Qwen FP8.
-   cp -n deploy/cluster_qwen_w2.example.json deploy/cluster.json
+   CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2_mtp1.json
 
    # Four Sparks: GLM-5.3-Flash hybrid NVFP4/FP8.
-   cp -n deploy/cluster.nvfp4.example.json deploy/cluster.json
+   CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
    ```
 
-2. Open `deploy/cluster.json`. Confirm `model` and `world_size` match your
-   choice. Leave the engine settings unchanged for the first run.
-3. If you use a different filename, substitute it in each `--config` argument
-   below. Always pass the deployment file explicitly; no deployment environment
-   variable is needed.
+2. Copy the matching template without replacing an existing local file:
+
+   ```bash
+   cp -n "${CONFIG%.json}.example.json" "$CONFIG"
+   ```
+
+3. Open the file named by `CONFIG`. Confirm `model` and `world_size` match your
+   choice. Leave the engine settings unchanged for the first run. In a new
+   terminal, set `CONFIG` again or pass the full filename to `--config`.
+
+Names include the full model, checkpoint quant, world size and decode mode.
+`plain` disables MTP; `mtp1`/`mtp2` specify the draft depth. `dense-fp8` means
+load-time dense conversion, not a different checkpoint; `large-cache` selects
+the larger KV/prefix budgets. See [deployment filenames](deploy/README.md) for
+the complete list and old-to-new names.
 
 ### 3. Set your node addresses and SSH user
 
@@ -190,7 +200,7 @@ The first `world_size` entries in `DGPP_NODES` participate in the deployment.
 1. Run:
 
    ```bash
-   python3 scripts/discover_roce.py --config deploy/cluster.json
+   python3 scripts/discover_roce.py --config "$CONFIG"
    ```
 
 2. Read the device-to-interface mapping, IP addresses, MTUs and GID indices for
@@ -234,7 +244,7 @@ in `.env` only if you built into a different directory.
 3. Run **one** command on rank 0:
 
    ```bash
-   python scripts/download_model.py --config deploy/cluster.json
+   python scripts/download_model.py --config "$CONFIG"
    ```
 
 The script downloads the complete checkpoint to rank 0, then syncs its selected
@@ -252,13 +262,13 @@ transfer files—not just its tensor-parallel share of the download.
 If the checkpoint is already downloaded on rank 0, skip the Hub entirely:
 
 ```bash
-python scripts/download_model.py --config deploy/cluster.json --sync-only
+python scripts/download_model.py --config "$CONFIG" --sync-only
 ```
 
 Check the active snapshot on every node without modifying files:
 
 ```bash
-python scripts/download_model.py --config deploy/cluster.json --verify-only
+python scripts/download_model.py --config "$CONFIG" --verify-only
 ```
 
 Use `--local-only` to verify or download on rank 0 without contacting peers.
@@ -270,8 +280,8 @@ checks metadata and shard lengths; rsync checks file contents during sync.
 ### 7. Check the deployment and start it
 
 ```bash
-python3 scripts/dgpp-cluster doctor --config deploy/cluster.json
-python3 scripts/dgpp-cluster up --config deploy/cluster.json
+python3 scripts/dgpp-cluster doctor --config "$CONFIG"
+python3 scripts/dgpp-cluster up --config "$CONFIG"
 ```
 
 Fix any failed preflight checks before starting. `doctor` checks GPU/platform,
@@ -300,8 +310,8 @@ Keep localhost for now: the server has no TLS or authentication.
 2. Inspect or stop the deployment with the same config:
 
    ```bash
-   python3 scripts/dgpp-cluster status --config deploy/cluster.json
-   python3 scripts/dgpp-cluster down --config deploy/cluster.json
+   python3 scripts/dgpp-cluster status --config "$CONFIG"
+   python3 scripts/dgpp-cluster down --config "$CONFIG"
    ```
 
 Use the URL printed at startup if you changed the HTTP port or bind address.
@@ -310,7 +320,7 @@ For access from another machine, run
 use its localhost endpoint. Shared access needs an authenticated TLS proxy;
 see [networking](docs/networking.md).
 
-To find logs, run `python3 scripts/dgpp-cluster paths --config deploy/cluster.json`.
+To find logs, run `python3 scripts/dgpp-cluster paths --config "$CONFIG"`.
 Use the same config path and any `--log-dir` override for start, status and stop.
 `up` refuses an already running deployment; `up --replace` explicitly stops it
 first. Stop processes created by an older launcher with that launcher before
@@ -324,7 +334,7 @@ These are not needed to serve a model:
 |---|---|
 | Host/Python tests | Build the test targets, then select the `host`/`python` CTest labels; see [testing](docs/testing.md). `ci-local.sh` also runs GPU/RDMA suites, so use idle test hardware. |
 | Tokenizer/template goldens and token-ID preparation | Install `requirements-tools.txt` in a venv. PyTorch reference modes need a compatible PyTorch installation separately. |
-| Evaluation datasets | Run `python3 scripts/prepare_data.py download`. Token fixtures: `python3 scripts/prepare_data.py tokens --config deploy/cluster.json --text /path/to/long-prompt.txt`. |
+| Evaluation datasets | Run `python3 scripts/prepare_data.py download`. Token fixtures: `python3 scripts/prepare_data.py tokens --config "$CONFIG" --text /path/to/long-prompt.txt`. |
 | HumanEval | Use an isolated evaluation environment and explicitly pass `--allow-code-execution`. Generated Python runs without a security sandbox. |
 | Profiling | Install Nsight Systems (`nsys`). |
 | Formatting | Install clang-format to enable the CMake formatting targets. |
@@ -337,9 +347,9 @@ installed release stages the configuration and uses the installed binary.
 
 ```bash
 scripts/release.sh                                 # build the release preset, stage, verify, pack
-scripts/dgpp-cluster install dist/dgpp-VERSION.tar.zst --config deploy/cluster.json
-scripts/dgpp-cluster up --release VERSION --config deploy/cluster.json
-scripts/dgpp-cluster releases --config deploy/cluster.json
+scripts/dgpp-cluster install dist/dgpp-VERSION.tar.zst --config "$CONFIG"
+scripts/dgpp-cluster up --release VERSION --config "$CONFIG"
+scripts/dgpp-cluster releases --config "$CONFIG"
 ```
 
 Select a release with the config's `release` key or `--release`.
@@ -413,7 +423,7 @@ and peers read that resolved config; the original JSON and `.env` are not
 sent to peers. To inspect or use the runtime config with the native binary:
 
 ```bash
-scripts/dgpp-cluster resolve --config deploy/cluster.nvfp4.json
+scripts/dgpp-cluster resolve --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
 # Save that JSON to a file before passing it to dgpp-serve --config.
 ```
 

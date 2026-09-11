@@ -175,12 +175,42 @@ class PortabilityTest(unittest.TestCase):
         for path in (ROOT / "scripts").iterdir():
             if path.is_file():
                 self.assertIn(f"[{path.name}]({path.name})", index)
-        for name in ("README.md", "scripts/README.md", "docs/getting-started.md", "docs/dependencies.md", "docs/networking.md"):
+        for name in ("README.md", "deploy/README.md", "scripts/README.md", "docs/getting-started.md", "docs/dependencies.md", "docs/networking.md"):
             source = ROOT / name
             for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", source.read_text()):
                 if target.startswith(("http:", "https:", "#")):
                     continue
                 self.assertTrue((source.parent / target.split("#")[0]).exists(), f"broken link in {name}: {target}")
+
+    def test_deployment_filenames_describe_their_settings(self):
+        models = {
+            "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8": "glm-5.3-flash_nvfp4-fp8",
+            "nvidia/GLM-4.7-NVFP4": "glm-4.7_nvfp4",
+            "Qwen/Qwen3.8-Flash-Next-FP8": "qwen-3.8-flash-next_fp8",
+            "nvidia/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4",
+        }
+        values = {**site_env.DEFAULTS, "DGPP_NODES": "head peer1 peer2 peer3", "DGPP_SSH_USER": "ops"}
+        templates = list((ROOT / "deploy").glob("*.example.json"))
+        self.assertTrue(templates)
+        index = (ROOT / "deploy/README.md").read_text()
+        for path in templates:
+            with self.subTest(path=path.name):
+                cfg = json.loads(path.read_text())
+                engine = cfg["engine"]
+                mode = f"mtp{engine.get('mtp_depth', 1)}" if engine["mtp"] else "plain"
+                stem = f"cluster_{models[cfg['model']]}_w{cfg['world_size']}_{mode}"
+                if engine.get("dense_weights") == "fp8":
+                    stem += "_dense-fp8"
+                if path.name.endswith("_large-cache.example.json"):
+                    base = json.loads((path.parent / (stem + ".example.json")).read_text())
+                    self.assertGreater(engine["kv_capacity"], base["engine"]["kv_capacity"])
+                    self.assertGreater(engine["prefix_cache_gib"], base["engine"]["prefix_cache_gib"])
+                    stem += "_large-cache"
+                self.assertEqual(path.name, stem + ".example.json")
+                self.assertIn(f"]({path.name})", index)
+                resolved = site_env.resolve_config(path, values)
+                self.assertEqual(len(resolved["nodes"]), cfg["world_size"])
+                self.assertEqual(resolved["engine"], engine)
 
     def cluster(self):
         module = runpy.run_path(str(ROOT / "scripts/dgpp-cluster"))

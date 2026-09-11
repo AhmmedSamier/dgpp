@@ -6,6 +6,10 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- Deployment filenames now identify the full model, quant, world size and
+  decode mode. Settings are unchanged; see `deploy/README.md` for the rename
+  table. Older entries below retain the filenames used at the time.
+
 - **Qwen3.8-Flash-Next on a single Spark, and its dense stack in block FP8**
   (2026-09-10, docs/qwen38_single_spark.md): the NVFP4 checkpoint's experts
   through the shared fp4 core, the 47.7 GiB n-gram table left on the NVMe

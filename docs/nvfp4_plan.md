@@ -80,7 +80,7 @@ swapped nibbles 1.41):
 | `models/glm/moe_reference.{hpp,cpp}` | the double oracle dequantizes fp4 experts with the formula above; `GlmMoeHostWeights` holds the triple |
 | `tools/checkpoint_audit.py` | classify the triple, regenerate `docs/checkpoint_budget.md` for the hybrid |
 | `tools/glm_reference_dump.py` | the nvfp4 dequant for the transformers-parity dumps |
-| `scripts/*` (18 places), `deploy/cluster.example.json` | the hardcoded `unsloth/GLM-5.3-Flash-FP8` becomes a variable with the hybrid as an alternative value |
+| `scripts/*` (18 places), `deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.example.json` | the hardcoded `unsloth/GLM-5.3-Flash-FP8` becomes a variable with the hybrid as an alternative value |
 | `DESIGN.md` §3/§4, `docs/operations.md`, `README.md`, `CHANGELOG.md` | the hybrid checkpoint, the NVFP4 contract, the model id |
 
 ### 2.3 NVFP4 components
@@ -353,7 +353,7 @@ floor only fewer bytes or more tokens per step move the number.
   map, gate bf16 + down fp32); whole layer within the oracle budget on
   four geometries (max 0 ulps over soft); real slices 0 mismatches, row
   bits independent of m; `glm_moe_test` 20/20. Fabric, steady-state
-  prefill (`fabric_prefill_repeat.sh --config deploy/cluster.nvfp4.json`,
+  prefill (`fabric_prefill_repeat.sh --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json`,
   `build-ci/fabric-runs/nvfp4_phase3_0750`): 512 tokens 635 ms (phase 2:
   1,152; FP8 740), 2,048 tokens 1,563 (4,396; FP8 1,725), 8,192 tokens
   6,796 (18,246; FP8 7,463). The 64-step chat transcript is identical to
@@ -381,7 +381,7 @@ floor only fewer bytes or more tokens per step move the number.
   cp.async double-buffered stages, and a 64-row m-tile variant for short
   segments — §7 phase 5's "prefill tiling for short segments", now with
   the measured reason. Expected: the 572 ms toward ~250.
-- Phase 4 (integration): 2026-09-08 — `deploy/cluster.nvfp4.json` is
+- Phase 4 (integration): 2026-09-08 — `deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json` is
   the switch (site-local like `cluster.json`; `kv_capacity` 786,432 and
   `prefix_cache_gib` 8 spend the freed 31 GiB/rank: `--memory-plan` total
   96.2 GiB + 8 headroom against 116.5 free). L2 prefetch sweep on the
@@ -392,7 +392,7 @@ floor only fewer bytes or more tokens per step move the number.
   (12 MB, light/light) stay: the window is flat at T=1 and under 1 % at
   MTP, inside run-to-run drift; the prefetcher itself is worth 2.0-2.3
   ms/step on the hybrid as on FP8. Serve path (`scripts/dgpp-cluster up
-  --config deploy/cluster.nvfp4.json`): boot 17.8 s from the images, the
+  --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json`): boot 17.8 s from the images, the
   API check all green (stop, n, logit_bias, cached_tokens, reasoning
   tokens), the server's stats at 36.7 ms/step, 1.63 tok/step, 22.4 ms/
   token; teardown with four identical op-stream md5s, 0 STALLED, 0
@@ -406,7 +406,7 @@ floor only fewer bytes or more tokens per step move the number.
   short-request TTFT p50/p95 581/1,711 ms, pace p50 58 ms/token under
   load; prefix cache 387 hits / 121 misses; four identical op-stream
   md5s, 0 STALLED, 0 failures on every rank. Gate 9 on the same binary,
-  `deploy/cluster.json`: boot, API check green, 42.2 ms/step, 24.0 ms/
+  `deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json`: boot, API check green, 42.2 ms/step, 24.0 ms/
   token, 1.69 tok/step at 64 % acceptance (unchanged), 200 tokens in
   5.69 s over HTTP (the hybrid: 4.97), four identical op-stream md5s.
   Both worlds were torn down afterwards; the cluster is left down.
@@ -561,7 +561,7 @@ floor only fewer bytes or more tokens per step move the number.
   hard text) 21.0 vs 19.7 ms/token (45.2 vs 36.1 ms/step, 2.16 vs 1.83
   tok/step, p1 74 %, p2 41 %) — 6.6 % slower. The same shape as the FP8
   study: the second draft pays only where it stands, and it stands less
-  at long context. Depth 1 stays the default in `cluster.nvfp4.json`;
+  at long context. Depth 1 stays the default in `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json`;
   the lever remains per-request adaptive depth (both scalar variants
   captured per slot, switched on the observed p2), not a global setting.
 - Item 2 of 2026-09-08's decision list, the DSA projections consumed as

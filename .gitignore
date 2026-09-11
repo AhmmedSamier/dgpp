@@ -50,6 +50,7 @@ qwen_engine_fixture/
 qwen_loader_fixture/
 # Local deployment copies hold model choices and engine tuning. Shared node
 # addresses, SSH login, ports and site paths live in .env, not these JSONs.
+# Keep legacy filenames ignored as well while existing sites migrate.
 deploy/cluster.json
 deploy/cluster.*.json
 deploy/cluster_*.json

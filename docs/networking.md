@@ -13,7 +13,7 @@ For multi-node runs, set `DGPP_ROCE_DEVICES` to a space-separated ordered
 list of local verbs devices. Discover the actual names on your machines:
 
 ```bash
-python3 scripts/discover_roce.py --config deploy/cluster.json
+python3 scripts/discover_roce.py --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json
 ```
 
 Run this on rank 0 after setting node addresses and SSH access. Without
@@ -37,7 +37,7 @@ assignment, routing and consistent MTU on the selected network interfaces.
 Discovery does not prove that corresponding lanes can exchange RDMA traffic.
 
 Read-only starting points are `rdma link`, `ip -br address`, `ip link`, and
-`scripts/dgpp-cluster doctor --config deploy/cluster.json`.
+`scripts/dgpp-cluster doctor --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json`.
 Only run the fabric probes on an idle test allocation;
 they open QPs, use GPU memory and generate traffic.
 

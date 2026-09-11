@@ -292,8 +292,8 @@ GPU, not a pinned bounce copy.
 
 ## GLM-4.7 (nvidia/GLM-4.7-NVFP4) serving on four nodes (2026-09-10)
 
-`scripts/fabric_glm4_serve.sh deploy/cluster_glm47.json` (MTP) and
-`deploy/cluster_glm47_t1.json` (T=1), the resident image warm on every rank,
+`scripts/fabric_glm4_serve.sh deploy/cluster_glm-4.7_nvfp4_w4_mtp1.json` (MTP) and
+`deploy/cluster_glm-4.7_nvfp4_w4_plain.json` (T=1), the resident image warm on every rank,
 the 202,752-token pool (77.4 GiB per rank: weights 52.8, K/V 23.3).
 
 | reading | value |
@@ -318,7 +318,7 @@ l2 0.036 -> 0.0025), and the draft block takes the post-final-norm hidden
 
 The depth-2 chain (the session core's `session_draft_chain` /
 `session_graph_capture_draft_chain` on the hidden-window families,
-`glm_spec_chain_row_window`) measured with `deploy/cluster_glm47_d2.json`
+`glm_spec_chain_row_window`) measured with `deploy/cluster_glm-4.7_nvfp4_w4_mtp2.json`
 against depth 1, one greedy request at a time, transcripts identical to
 depth 1 on every short prompt (4/4):
 
@@ -347,7 +347,7 @@ prefill 548 / 1,412 / 6,284 ms, the same rank-consistency hashes as the
 
 The fixed decode batch's row ceiling is the recipe's shape since this
 afternoon — `max_concurrency x (1 + mtp_depth)`, floored at 8 — so the
-depth-2 recipe (`deploy/cluster_glm47_d2.json`, 4 slots) boots a 12-row
+depth-2 recipe (`deploy/cluster_glm-4.7_nvfp4_w4_mtp2.json`, 4 slots) boots a 12-row
 world (`serve: decode rows 12`; the bus's latency slot 120 KiB, 128
 sampling candidates still fit) with the 2-, 3- and 4-slot batch families
 at 6, 9 and 12 rows, each carrying every slot's chain row in one draft-
@@ -375,7 +375,7 @@ the 6.3 GB of BF16 attention projections per rank (+45–60 ms), a row
 within a chunk costs 7–8 ms (its K/V reads and its distinct experts). So
 batched depth 2 is correct, isolated and slower than depth 1 under
 concurrency on this family; depth 2 stays a single-stream setting
-(`cluster_glm47.json` keeps depth 1). The lever for concurrency at
+(`cluster_glm-4.7_nvfp4_w4_mtp1.json` keeps depth 1). The lever for concurrency at
 either depth is the attention projections' bytes per pass: wider GEMV
 chunks (a 6-row chunk at K = 5120 is 61 KB of dynamic shared memory, an
 8-row one 80 KB — one block per SM, to be measured), or a row-independent
@@ -403,7 +403,7 @@ per-rank shape: fp4 201 / 320 / 883 us at 1 / 2 / 8 rows (recorded 209 /
 kernels — run-to-run spread on this box, the fabric step above is the
 arbiter). `scripts/fabric_qwen_serve.sh` on `Qwen/Qwen3.8-Flash-Next-FP8`
 against the round-5 transcripts of 2026-09-09: MTP world (`deploy/
-cluster_qwen.json`) 26–27 ms/pass at 1.5–2.0 tokens/pass, T=1 world
+cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json`) 26–27 ms/pass at 1.5–2.0 tokens/pass, T=1 world
 21.8–21.9 ms/step (recorded 22.0), transcripts identical 4 of 4 in both,
 API checks clean, op streams identical across the ranks. The full ctest
 after every change: 62 of 62.

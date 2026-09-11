@@ -67,7 +67,7 @@ Some older scripts start work immediately and do not implement `--help`.
 For a configuration-only check from the repository root:
 
 ```bash
-python3 scripts/dgpp-cluster resolve --config deploy/cluster.example.json
+python3 scripts/dgpp-cluster resolve --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.example.json
 ```
 
 ## Fabric runs and model checks

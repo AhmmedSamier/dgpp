@@ -2,8 +2,7 @@
 """Task-level eval of a running dgpp-serve world (2026-09-08): the pass rates
 that perplexity cannot give — code that runs, arithmetic that is right,
 structured extraction that is exact — for the checkpoint the world serves,
-so two configs (deploy/cluster.json and deploy/cluster.nvfp4.json) can be
-compared on the same items with the same settings.
+so deployments can be compared on the same items with the same settings.
 
     serve_eval.py HOST PORT --out DIR [--tasks humaneval,gsm8k,extract]
         [--limit N] [--concurrency C] [--max-tokens N]

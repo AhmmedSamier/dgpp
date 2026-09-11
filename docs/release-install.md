@@ -27,17 +27,21 @@ is Ubuntu 24.04; older distributions may not provide compatible glibc/libstdc++.
 ### 2. Verify the package and choose a deployment
 
 1. Run `sha256sum -c MANIFEST.sha256`. Direct CMake installs have no manifest.
-2. Copy **one** matching template to `deploy/cluster.json`. For example:
+2. Choose a model-specific filename and copy its matching template. For example:
 
    ```bash
    # Four Sparks, GLM-5.3-Flash hybrid NVFP4/FP8:
-   cp -n deploy/cluster.nvfp4.example.json deploy/cluster.json
+   CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
+   cp -n "${CONFIG%.json}.example.json" "$CONFIG"
    ```
 
-   Other choices include `cluster_qwen_w2.example.json` for two Sparks and
-   `cluster_qwen_spark1_fp8.example.json` for one.
+   For two Sparks, set `CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2_mtp1.json`
+   before copying; for one, use
+   `CONFIG=deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.json`.
+   See [deployment filenames](deploy/README.md) for all variants.
 3. Check the JSON's `model` and `world_size`. Leave its engine settings
    unchanged for the first run. Pass this file explicitly with `--config`.
+   `CONFIG` is a shell variable for brevity; set it again in a new terminal.
 
 ### 3. Configure the nodes and fabric
 
@@ -49,7 +53,7 @@ is Ubuntu 24.04; older distributions may not provide compatible glibc/libstdc++.
 4. For multiple nodes, run:
 
    ```bash
-   python3 scripts/discover_roce.py --config deploy/cluster.json
+   python3 scripts/discover_roce.py --config "$CONFIG"
    ```
 
 5. Copy the appropriate device names and GID indices into `.env`. Match
@@ -67,7 +71,7 @@ On rank 0:
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements-download.txt
-python scripts/download_model.py --config deploy/cluster.json
+python scripts/download_model.py --config "$CONFIG"
 ```
 
 Use `hf auth login` first if authentication is required. Only rank 0 downloads
@@ -84,17 +88,17 @@ writes. Add `--local-only` to download or verify without contacting peers.
 For a **single node**, use the extracted binary:
 
 ```bash
-python3 scripts/dgpp-cluster doctor --config deploy/cluster.json --bin bin/dgpp-serve
-python3 scripts/dgpp-cluster up --config deploy/cluster.json --bin bin/dgpp-serve
+python3 scripts/dgpp-cluster doctor --config "$CONFIG" --bin bin/dgpp-serve
+python3 scripts/dgpp-cluster up --config "$CONFIG" --bin bin/dgpp-serve
 ```
 
 For **multiple nodes**, install the same tarball on each node using the
 launcher. Replace `VERSION` with the value in `MANIFEST`:
 
 ```bash
-python3 scripts/dgpp-cluster install /path/to/dgpp-VERSION.tar.zst --config deploy/cluster.json
-python3 scripts/dgpp-cluster doctor --config deploy/cluster.json --release VERSION
-python3 scripts/dgpp-cluster up --config deploy/cluster.json --release VERSION
+python3 scripts/dgpp-cluster install /path/to/dgpp-VERSION.tar.zst --config "$CONFIG"
+python3 scripts/dgpp-cluster doctor --config "$CONFIG" --release VERSION
+python3 scripts/dgpp-cluster up --config "$CONFIG" --release VERSION
 ```
 
 Fix failed doctor checks before starting. Installation uses `DGPP_RELEASE_DIR`
@@ -107,8 +111,8 @@ so peers need compatible runtime libraries separately.
 ```bash
 curl --fail http://127.0.0.1:18080/v1/models
 python3 scripts/serve_api_check.py 127.0.0.1 18080
-python3 scripts/dgpp-cluster status --config deploy/cluster.json
-python3 scripts/dgpp-cluster down --config deploy/cluster.json
+python3 scripts/dgpp-cluster status --config "$CONFIG"
+python3 scripts/dgpp-cluster down --config "$CONFIG"
 ```
 
 HTTP defaults to localhost; deployment `http.bind_host` and `http.port` select
@@ -116,7 +120,7 @@ another address or port. Use the same config and any `--log-dir` override for
 start, status and stop. Use an SSH tunnel or authenticated TLS proxy for remote
 clients; DGPP has no authentication or TLS.
 
-Run `python3 scripts/dgpp-cluster paths --config deploy/cluster.json` to locate
+Run `python3 scripts/dgpp-cluster paths --config "$CONFIG"` to locate
 logs. A running deployment must be stopped before another `up`, or explicitly
 replaced with `up --replace`. Stop jobs from older launchers with their
 original launcher; unrecorded processes are not adopted or killed.

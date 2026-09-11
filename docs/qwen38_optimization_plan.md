@@ -1,7 +1,7 @@
 # Qwen3.8-Flash-Next — the single-stream optimization plan (2026-09-10)
 
 Scope: make one request's decode and prefill faster at world 4 (the served
-geometry, `deploy/cluster_qwen.json`), without regressing concurrent
+geometry, `deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json`), without regressing concurrent
 sessions or quantizing weights. The baseline measurements use revision
 `a8a2664` on 2026-09-10; subsequent experiments are identified in their
 entries. Runs are stored under `build-ci/fabric-runs/*_2026-09-10/`.
@@ -98,7 +98,7 @@ parallel and replicated-attention questions (§5).
 
 ### 2.1 T=1 decode, world 4
 
-`scripts/fabric_qwen_profile.sh deploy/cluster_qwen_t1.json OUT`
+`scripts/fabric_qwen_profile.sh deploy/cluster_qwen-3.8-flash-next_fp8_w4_plain.json OUT`
 (`qwen_profile_t1_2026-09-10/`): 22.27 ms/step wall, 1 403 kernels/step.
 
 | kernel | ms/step | n/step | us each | what it is |
@@ -456,7 +456,7 @@ T=1 30.02 vs 29.99 ms/step, MTP 40.45 vs 40.48 at 72.0 %, prefill
 547 / 1 400 / 6 253 vs 544 / 1 410 / 6 260 ms, every generated-ids line
 identical in all three phases.
 
-**World 2 (nodes .11/.12, `deploy/cluster_qwen_w2*.json`, measured after
+**World 2 (nodes .11/.12, `deploy/cluster_qwen-3.8-flash-next_fp8_w2_*.json`, measured after
 the commit):** T=1 31.38 ms/step (32.5 on 2026-09-09 — the same ~1 ms the
 inject hoist bought at world 4, against a step that is even more
 byte-bound per rank). The MTP world at the sampled default, two 400-token

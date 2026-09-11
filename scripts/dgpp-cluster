@@ -465,9 +465,9 @@ def main():
     args = ap.parse_args()
     args.config = args.config or config_path(settings())
     if not os.path.exists(args.config):
-        sys.exit(f"no cluster config at {args.config}: copy deploy/cluster.example.json to "
-                 f"deploy/cluster.json (it is local to this site and not tracked) and edit it, "
-                 f"or pass --config")
+        sys.exit(f"no cluster config at {args.config}: choose a deployment template "
+                 f"from deploy/ (see deploy/README.md), copy it without .example in "
+                 f"the filename, then pass its path with --config")
     if args.verb == "resolve":
         print(json.dumps(resolve_config(args.config), indent=2))
         return 0
