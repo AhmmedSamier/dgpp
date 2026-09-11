@@ -1,4 +1,4 @@
-// The Qwen norm kernels (Q3, 2026-09-09) against the host oracles: the
+// The Qwen norm kernels against the host oracles: the
 // (1 + w) norm, its grouped form over the 4-branch hyper state, and the
 // GDN gated norm with the reference's three roundings. The device sum of
 // squares is a tree, the host's a chain: rstd may differ by an fp32 ulp,

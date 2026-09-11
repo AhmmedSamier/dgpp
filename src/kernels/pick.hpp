@@ -3,12 +3,12 @@
 // step): the per-rank local argmax, the wire encoding the bus's SUM
 // all-reduce turns into a gather, and the verdict every rank decodes from
 // the folded table. No bus dependency — the collective between the two
-// kernels is the caller's (DevicePicker in models/glm_tp_bus.hpp records
+// kernels is the caller's (DevicePicker in engine/tp_bus.hpp records
 // it as a graph node or runs it eagerly).
 //
 // Wire table: [rows + 1][world][kPickSlotsPerRank] bf16 slots holding 6-bit
 // digits (bf16 carries small integers exactly, and every slot has exactly
-// ONE nonzero contributor, so the fp32-accumulated fold is exact). Group r
+// one nonzero contributor, so the fp32-accumulated fold is exact). Group r
 // < rows is row r's candidates — rank k's fp32 logit bits (6 digits) and
 // vocab id (3 digits) in slots [r*world + k]; group `rows` is each rank's
 // DIGEST of its previous verdict (9 digits, 54 bits). The digest is the

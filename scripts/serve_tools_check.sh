@@ -1,7 +1,7 @@
 #!/bin/bash
 # M6 6f on the fabric: tool calls and reasoning through the four-node
 # service — the M6 exit criterion "streamed multi-turn chat and tool calls
-# work on TP=4", as a reproducible ritual. Boots the world through
+# work on TP=4", as a reproducible procedure. Boots the world through
 # scripts/serve_run.sh (the recommended serving mode unless
 # DGPP_SERVE_KNOBS says otherwise), sends twelve requests — plain chat, a
 # two-tool question, tool_choice none / required / named, a follow-up

@@ -5,7 +5,7 @@
 // pre_fc_norm_hidden = GemmaRMSNorm(hc*H) over the whole hyper state,
 // fc_embedding / fc_hidden [H, H], R_mtp[t, i, :] = bf16(fc_e(norm(e)) +
 // fc_h(norm(R)[i])) per branch i). The norms are kernels/qwen_norm.hpp's,
-// the projections the GEMM seam's; these are the gathers and the add.
+// the projections the GEMM interface's; these are the gathers and the add.
 #include <cstdint>
 
 #include <cuda_runtime.h>

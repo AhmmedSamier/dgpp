@@ -1,23 +1,36 @@
-*This file shall not be checked into the repository; it is a local-only manifesto written by the primary project author/maintainer*
+*The maintainer intends this document for local use only.*
 
-# Project Goal
+# Project goal
 
-To be the single fasted inference engine specifically optimized for the Nvidia DGX Spark, especially clustered deployments.
+Make DGPP the fastest inference engine for the models it supports on
+NVIDIA DGX Spark, with particular attention to clustered deployments.
 
-# Golden Metric
-* Single-stream decode throughput per supported model (regressions must be verified before any medium-to-large-scope body of work is committed)
+## Primary metric
 
-# How we get there
-* Measure what the hardware can actually do under synthetic workloads to establish "line-rate" (we already have this)
-* Optimized CUDA kernels specifically targetting the GB10 platform
-* Testing, profiling, benchmarking, and rapid iteration.
-* Ensuring that the hardware is fully saturated during decode and prefill
-* Custom implementations per-model / per-model-architecture. General purpose is only fine when general purpose is the optimal solution.
+Single-stream decode throughput per supported model. Verify regressions
+before committing work of medium or large scope.
 
-# Remaining goals (in no particular order):
-* Add logged progress of weights loading during server startup
-* cluster.json provided as a launch arg; longer-term there will be multiple models supported, so we want to allow users to maintain a local library of working configs.
-* Optimize prefill throughput further
-* Support for Qwen3.8 Flash Next FP8: https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8
-* Support for GLM 5.3 (full, not flash. FP8 won't fit on TP=4 spark, so need to research viable quants)
-* Support for Qwen3.8-27b FP8
+## Approach
+
+- Use measured hardware bandwidth and compute limits to guide optimization.
+- Write CUDA kernels suited to GB10 and each model's architecture.
+- Test, profile and benchmark changes against representative workloads.
+- Improve hardware utilization during decode and prefill.
+- Share implementations where they suit the workload; specialize where
+  the architecture or measurements justify it.
+
+## Implemented support
+
+Cluster configuration is selected at launch, so a site can keep separate
+configs for each model. Qwen3.8-Flash-Next-FP8 is supported alongside
+GLM-5.3-Flash and GLM-4.7; Qwen's NVFP4 variant also runs on one Spark.
+
+## Further goals
+
+- Improve weight-loading progress reports at startup.
+- Increase prefill throughput, including latency under concurrent decode.
+- Investigate viable quantized checkpoints for full GLM-5.3 on four Sparks.
+- Add Qwen3.8-27B-FP8 support.
+
+See [PLAN.md](PLAN.md) and [next steps](docs/next_steps.md) for the
+implementation status and current work list.

@@ -1,83 +1,25 @@
 #pragma once
-// The Stage 2b scheduler (DESIGN §11): admission, ordering, and
-// cancellation for concurrent requests over the session engine.
+// Deterministic admission, decoding and cancellation over a session engine.
+// Every rank applies the same policy to journaled requests and cancellations.
+// Decisions must not depend on clocks, thread arrival order or unordered
+// container iteration: engine operations include collectives whose order
+// must match across ranks.
 //
-// THE INVARIANT THAT MAKES THIS WORK AT TP>1: every rank runs the SAME
-// deterministic policy over the SAME request set, so every rank issues
-// the same engine ops in the same order on the same slots. The engine's
-// ops embed boundary folds and the distributed pick — collectives — so
-// this identical-rank-order property (§11: "preserves identical rank
-// order") is what keeps the fabric aligned. Concretely: no clocks, no
-// thread arrival order, no unordered-container iteration may influence a
-// decision — run_to_completion() is a pure function of (requests,
-// engine meters, scripted cancellations).
+// Each tick admits at most one fitting queued request, completes its prefill,
+// then runs one decode step. Admission chooses the oldest request that fits,
+// so a smaller request can pass a larger one; sustained small requests can
+// starve a large request. Prefill blocks decode for the duration of that
+// admission, even though the model processes the prompt in chunks.
 //
-// THE ISOLATION PROPERTY (what the gates pin and the fabric smoke
-// proves): slots are independent and every op touches exactly one
-// request's state, so a request's generated ids are invariant to
-// whatever else is interleaved — including the cancellation of other
-// requests. Concurrent execution is per-request identical to solo
-// execution.
+// Full admission reserves prompt plus maximum completion. Grow admission
+// reserves a window and extends it before decode, ending the youngest
+// request if capacity runs out. Decode visits active requests in canonical
+// order, using the number of slots the engine can advance in one pass.
+// Cancellation and retirement release request resources between operations.
 //
-// POLICY (v1, deliberately small and fully deterministic):
-//   * strict alternation — each tick admits AT MOST one queued request
-//     and executes EXACTLY one decode step, so mid-answer requests
-//     never wait behind a burst of prompt read-ins (the user's call);
-//   * FCFS admission without head-of-line blocking — the OLDEST queued
-//     request that FITS admits; a large stuck request does not block a
-//     small one behind it (documented trade: an unbounded stream of
-//     small requests can starve a large one — bounded queues, Stage 4);
-//   * full-reserve admission — a request is admitted only when its
-//     lifetime reservation (blocks_for(prompt + max_steps)) fits the
-//     free pool AND a slot is open. No request can exhaust the pool
-//     mid-generation; the cost is reserved-but-unused blocks when a
-//     request EOSes early (the grow-on-demand + shed evolution is
-//     documented in the Stage 2b record);
-//   * round-robin decode over active requests, by arrival order; engines
-//     advertise how many requests one physical pass can carry (one for the
-//     eager engine, all occupied rows for the row-batched graph);
-//   * cancellation is deterministic (cancel_after N tokens) — Stage 4's
-//     client disconnects map onto the same retire path;
-//   * retirement frees the slot and blocks immediately; a queued
-//     request admits on a later tick (live on the fabric smoke);
-//   * no admissible request, no active requests, queue nonempty →
-//     LOUD admission deadlock (the pool is sized below the smallest
-//     reservation — an operator error, never papered over).
-//
-// BATCH GRANULARITY: the policy is independent of the engine's physical
-// step width. Scalar engines advertise one and preserve the original
-// time-multiplexed op stream. A row-batched engine advertises a larger
-// bound; one tick then hands it the next round-robin slice in one call and
-// applies the returned token batches in that same canonical order.
-//
-// STAGE 4 EVOLUTION (the service surface; additive — the manifest path
-// is untouched by construction, and every gate below still pins it):
-//   * tick() — one policy quantum: the run_to_completion() body
-//     extracted verbatim (cancel sweep, at most one admission, exactly
-//     one decode step). Dynamic arrival = submit between ticks;
-//     run_to_completion() is now a tick loop, so manifest runs are the
-//     degenerate "submit everything, then tick to quiet" case.
-//   * SchedulerObserver — per-token and retire events fired INLINE on
-//     the ticking thread (the SSE tap). Observers must not throw and
-//     must not call back into the Scheduler.
-//   * try_submit()/queue_limit — a bounded admission queue. A full
-//     queue is a normal load-shed event (the service answers 503 and
-//     the client retries); manifest errors still throw identically on
-//     every rank.
-//   * cancel(id) — an external retire (a client disconnect maps onto
-//     the same path as scripted cancellation). Applied by a
-//     fixed-position sweep at the TOP of the next tick, BEFORE any
-//     admission or step: a cancelled request never pays one more engine
-//     op, and the fabric journal (Stage 4b) can stamp the effect-tick
-//     so every rank retires the same request at the same quantum.
-//   * meters() — the /v1/metrics snapshot (queue depth, active slots,
-//     pool use, cumulative tokens).
-//
-// THREADING: single-threaded by contract (§11 determinism leaves no
-// room for lock-mediated interleavings on decision paths). The service
-// funnels every mutation — submit, cancel — through its engine-loop
-// queue; results(), meters(), and the observer all run on the ticking
-// thread.
+// Request slots isolate model state. Tests compare concurrent requests with
+// independent runs, including cancellation, batching and slot reuse.
+// See DESIGN §11 and docs/operations.md for the journal and resource policy.
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
@@ -98,7 +40,7 @@ struct LogitBias {
   float bias = 0.0f;
 };
 
-// The engine seam the scheduler drives. The real binding (glm_gen_check)
+// The engine interface the scheduler drives. The real binding (glm_gen_check)
 // closes over GlmDiagnosticModel + the pick; the host gate binds a
 // recording fake. The pick rides inside each op (at TP>1 it is a
 // distributed collective), which is what keeps the scheduler pure host
@@ -145,7 +87,7 @@ class SchedulerEngine {
   // decode; T for a speculative engine whose verify writes T rows). The
   // grow-on-demand policy sizes each reservation's headroom by it.
   virtual int max_tokens_per_step() const { return 1; }
-  // Speculative acceptance by draft position (2026-09-06): attempts[p] is
+  // Speculative acceptance by draft position: attempts[p] is
   // the steps that verified draft p (0-based; depth of them), accepts[p]
   // the steps that accepted it. Engine-wide since construction, or per
   // slot since it opened (reset at close). A plain engine reports depth 0.
@@ -211,7 +153,7 @@ class SchedulerEngine {
       throw std::logic_error(
           "SchedulerEngine: this engine cannot constrain the pick");
   }
-  // The logit bias (2026-09-06): an engine that can add a per-request
+  // The logit bias: an engine that can add a per-request
   // bias to the logits before the pick advertises it; the scheduler hands
   // every admitted request's entries to its slot right after the grammar
   // (an empty list clears the slot's bias). The default engine has none.
@@ -331,7 +273,7 @@ struct SchedulerRequest {
   // the request out: no attach, no snapshot. Both ride the journal.
   std::vector<int64_t> boundaries;
   bool no_cache = false;
-  // The logit bias (2026-09-06): the request's entries, applied by the
+  // The logit bias: the request's entries, applied by the
   // engine on every rank; rides the journal.
   std::vector<LogitBias> logit_bias;
 };
@@ -377,7 +319,7 @@ class Scheduler {
  public:
   struct Result {
     enum class Status : int { kQueued, kActive, kDone, kCancelled };
-    // kStop (2026-09-06): the service's stop string matched — a natural end
+    // kStop: the service's stop string matched — a natural end
     // for the client (finish_reason "stop"), journaled like a cancel.
     enum class Reason : int { kNone, kEos, kSteps, kCancelled, kPoolExhausted, kStop };
     Status status = Status::kQueued;
@@ -397,7 +339,7 @@ class Scheduler {
     int64_t tokens_generated = 0;  // cumulative across all requests
     int64_t reservations_grown = 0;  // grow-on-demand: growth events
     int64_t requests_shed_pool = 0;  // grow-on-demand: shed at exhaustion
-    // The throughput line's counters (2026-09-06): prompts prefilled, their
+    // The throughput line's counters: prompts prefilled, their
     // tokens (all, and the ones actually computed — an attach skips the
     // prefix), decode passes and the request-rows they carried, and the
     // wall time spent inside the engine's prefill and step calls.
@@ -408,7 +350,7 @@ class Scheduler {
     int64_t decode_rows = 0;
     double prefill_ms = 0.0;
     double step_ms = 0.0;
-    // Draft acceptance by position (2026-09-06), engine-wide cumulative.
+    // Draft acceptance by position, engine-wide cumulative.
     SchedulerEngine::MtpAcceptance mtp;
     // The prefix cache (M7): its slots and live entries, the attach and
     // miss counts, the prompt tokens attaches skipped, the entries taken
@@ -458,7 +400,7 @@ class Scheduler {
   // is full.
   void submit(SchedulerRequest request);
 
-  // The service form: false ONLY on a full bounded queue (a normal,
+  // The service form: false only on a full bounded queue (a normal,
   // load-shedding event). Validation failures still throw — they are
   // client bugs, not load.
   bool try_submit(SchedulerRequest request);
@@ -467,7 +409,7 @@ class Scheduler {
   // client disconnect). Returns false when the id is unknown or already
   // terminal — a late cancel is a no-op, never an error.
   bool cancel(const std::string& id);
-  // The service's stop (2026-09-06): the client's stop string matched on
+  // The service's stop: the client's stop string matched on
   // rank 0 — journaled like a cancel, applied at the next tick's sweep on
   // every rank, retiring the request as Done with Reason::kStop (the
   // service cuts the text at the match; the tokens after it are dropped).
@@ -531,7 +473,7 @@ class Scheduler {
     int64_t rolling_position = -1;
     int64_t hop_armed = -1;    // the aligned position armed for the next step
     bool cache_off = false;    // the pool cannot hold the cache's blocks for it
-    // The retire line's numbers (2026-09-06): the admission clock, the
+    // The retire line's numbers: the admission clock, the
     // prefill's wall and the prompt tokens an attach skipped, and the
     // decode passes this request rode (each shared with every other live
     // request in the pass).
@@ -578,7 +520,7 @@ class Scheduler {
   void emit_prefix(const std::string& id, const char* op, int64_t position,
                    int slot);
   // A miss explained at INFO: the cuts probed, the entries held, and where
-  // the prompt parts from the entry it shares the most with (2026-09-07).
+  // the prompt parts from the entry it shares the most with.
   void log_prefix_miss(const Request& r) const;
 
   bool is_eos(int32_t token) const;

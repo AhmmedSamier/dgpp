@@ -1,11 +1,11 @@
 #pragma once
-// The fabric engine closure for serving (Stage 4b) and glm_gen_check's
-// scheduler path — ONE seam, two apps, no drift. Real-mesh BusOptions
-// (the budgets the first fabric gate run found, 2026-08-30) + the
-// distributed greedy pick over the vocab-sharded head.
+// Graph-based scheduler adapter shared by serving and diagnostic tools.
+// It coordinates model capture/replay, distributed picks, speculative
+// state, sampling fallbacks and prefix snapshots. All ranks must select
+// the same graph variant and execute collectives in the same order.
 //
-// CUDA-app-only header: it drags the bus (verbs) headers. Host gates
-// fake the engine instead; nothing in dgpp_service includes this.
+// This header depends on CUDA and bus/verbs types. Host-only service tests
+// use a fake engine instead.
 #include <algorithm>
 #include <array>
 #include <deque>
@@ -42,7 +42,7 @@ namespace dgpp {
 // (2026-09-02: a ~10 ms swap-in fault per shared token, in lockstep across
 // ranks). The one-pass loader removed that pressure, and a 1000-step run
 // with the pin OFF was indistinguishable (p99 46, 0 stalls, no swap
-// traffic) — so this is a belt-and-braces safety net, NOT a requirement:
+// traffic) — so this is a belt-and-braces safety net, not a requirement:
 // a box whose RLIMIT_MEMLOCK refuses it serves exactly as well, and the
 // refusal is informational. Before construction on purpose: the loader's
 // checkpoint mmaps do not exist yet, so MCL_CURRENT cannot try to pin
@@ -100,7 +100,7 @@ inline net::BusOptions fabric_bus_options(int rank, int world, uint16_t port,
 // The fabric pick: this rank's vocab-slice argmax, then the winner
 // through bus_greedy_pick — the collective every rank joins in the
 // same tick, with the readback invariant that makes a corrupt
-// broadcast LOUD on the exact rank. The float row is hoisted inside
+// broadcast loud on the exact rank. The float row is hoisted inside
 // the returned closure (no per-token device-adjacent allocation; the
 // pick scratch is caller-pinned BEFORE the world forms).
 inline DecodePick make_fabric_pick(net::CollectiveBus* bus,
@@ -126,7 +126,7 @@ inline DecodePick make_fabric_pick(net::CollectiveBus* bus,
 // slice through the exact candidate/LSE fold (bus_sampling_prefix at
 // kSamplingCandidates per rank); when the prefix cannot decide, the exact
 // fallback — the penalized slices gathered as one bulk collective and the
-// SAME decision over the complete list under the transported normalizer,
+// same decision over the complete list under the transported normalizer,
 // with the same draw — and rank 0's digest echoed either way. Both scratch
 // buffers are caller-pinned BEFORE the world forms:
 // fabric_sampling_prefix_scratch_elems(world) and
@@ -192,7 +192,7 @@ inline SpecRow0 make_fabric_spec_row0(
 // at and above it, one batch replay advances them all. Closed batch slots
 // derive position -1 and remain padding. Both paths return one independently
 // judged token vector per live slot.
-// THE BATCH FAMILY (2026-09-07). The 8-row batch at two live requests
+// THE BATCH FAMILY. The 8-row batch at two live requests
 // stepped in 96.5 ms against 83 for two scalar replays (41.5 solo): the
 // padding rows pay the fixed graph's stateless compute, expert reads and
 // collective width, which is why the crossover sat at four. So the batch
@@ -321,7 +321,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_counts_),
                                 sizeof(int32_t) * slots_ * vocab_));
         DGPP_CUDA_OK(cudaMemset(d_counts_, 0, sizeof(int32_t) * slots_ * vocab_));
-        // The logit bias table (2026-09-06): one dense row per slot.
+        // The logit bias table: one dense row per slot.
         DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_bias_),
                                 sizeof(float) * slots_ * vocab_));
         DGPP_CUDA_OK(cudaMemset(d_bias_, 0, sizeof(float) * slots_ * vocab_));
@@ -334,7 +334,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         DGPP_CUDA_OK(cudaMallocHost(
             reinterpret_cast<void**>(&h_fallback_row_),
             sizeof(float) * model_->lm_vocab_count()));
-        // The drafts' proposals (2026-09-10): what distribution each draft
+        // The drafts' proposals: what distribution each draft
         // was drawn from, written by the draft pick and read by the next
         // step's verify (kernels/sample_pick.hpp). The pinned mirror is the
         // host fallback's copy.
@@ -678,7 +678,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // Startup warm-up: records every scalar variant and, above one slot, the
   // row batch BEFORE the first client request, so no capture (record +
   // instantiate, ~10 ms each, up to slots+1 of them) lands on a live
-  // stream. Opens ONE throwaway session at a time — slot by slot, with
+  // stream. Opens one throwaway session at a time — slot by slot, with
   // `warm_prompt` (eager prefill: collectives on the bus, so every rank must
   // call this at the same point) — captures that slot's scalar variant (and
   // the row batch while the first slot is open; a capture bakes addresses,
@@ -1072,7 +1072,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   }
 
   // A draft pick draws from the draft head's own distribution instead of
-  // taking its argmax (2026-09-10), and keeps the final set it drew from
+  // taking its argmax, and keeps the final set it drew from
   // for the next step's verify: with a proposal in hand the accept test is
   // min(1, P/Q), whose rate is 1 - TV(P, Q) rather than the deterministic
   // rule's ceiling of P(mode). No count table — a draft commits no context,
@@ -1632,7 +1632,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       decided.push_back(token);
     }
     int32_t next = verify.next;
-    // Per-position acceptance (2026-09-06): draft p (1-based) stood when
+    // Per-position acceptance: draft p (1-based) stood when
     // the verdict accepted more than p rows.
     for (int p = 0; p + 1 < rows_per_request_; ++p) {
       const size_t pi = static_cast<size_t>(p);
@@ -2164,7 +2164,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   uint32_t* d_masks_ = nullptr;
   uint32_t* h_masks_ = nullptr;
   int mask_stride_ = 0;
-  // The logit bias (2026-09-06): the device table [slots][vocab] the pick
+  // The logit bias: the device table [slots][vocab] the pick
   // reads for the rows whose spec says biased, a pinned row for uploads,
   // and the host copy per slot for the host-side decisions.
   float* d_bias_ = nullptr;
@@ -2186,7 +2186,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   int rows_per_request_ = 1;
   int max_rows_ = kDecodeRows;      // the model's decode-row ceiling
   bool batch_unavailable_ = false;  // slots * rows past it (or no batched chain): scalar only
-  // Per-position draft acceptance (2026-09-06): engine-wide and per slot.
+  // Per-position draft acceptance: engine-wide and per slot.
   std::array<uint64_t, 8> mtp_attempts_{}, mtp_accepts_{};
   std::vector<std::array<uint64_t, 8>> slot_mtp_attempts_, slot_mtp_accepts_;
   std::vector<int> hop_slot_;          // per slot: the armed hop's arena slot, -1 none
@@ -2197,17 +2197,17 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   std::unique_ptr<DevicePicker> picker_;
   // Recorder storage is referenced by graph nodes and must outlive the exec.
   std::unique_ptr<GraphRecordReducer> recorder_;
-  // The pipelined replay (2026-09-06): two graph variants per slot and two
+  // The pipelined replay: two graph variants per slot and two
   // for the batch, alternating per replay, so the next replay's bus window
   // is armed on a variant whose cells are not in flight while the previous
   // replay of the same shape still runs. A replay is launched, its verdict
   // awaited on an event recorded in the graph right after the verify's
   // pick, and its END (the draft block's tail) settled after the NEXT
-  // replay was launched — that is where the host's seam hides.
+  // replay was launched — that is where the host's interface hides.
   std::vector<std::array<cudaGraphExec_t, 2>> scalar_execs_;
   std::vector<int> scalar_parity_;
   std::vector<std::array<cudaEvent_t, 2>> end_events_;
-  // The batch families (2026-09-07): by slot count, ascending — 2, 3 and
+  // The batch families: by slot count, ascending — 2, 3 and
   // every slot where the rows allow — each with its two parities' execs
   // and end events and its own parity clock; the steps each replayed.
   struct BatchFamily {

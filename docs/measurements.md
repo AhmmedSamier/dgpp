@@ -1,12 +1,13 @@
 # Validated platform measurements
 
-Last updated: 2026-08-27. This document is curated; it is not auto-generated.
+Measurements recorded from 2026-08-27 through 2026-09-10. Each section
+identifies its workload and environment; this report is maintained manually.
 Raw commands and the audit-remediation run record are in
 `benchmarks/results/2026-08-27-dgx-spark.md`; the M2 KDA correctness and
 state-traffic record is `benchmarks/results/2026-08-27-kda-m2.md`. The
 generated checkpoint report is `docs/checkpoint_budget.md`.
 
-## Scope and environment
+## Platform baseline environment (2026-08-27)
 
 - source base: `e2db401` plus the audit-remediation working tree;
 - two DGX Spark GB10 nodes, AArch64 Linux `6.17.0-1026-nvidia`;
@@ -19,7 +20,7 @@ DGX Spark has one coherent 128 GB LPDDR5x pool, not discrete GPU VRAM plus
 host RAM. `cudaMalloc` and `cudaHostAlloc` draw from that pool. The words
 “device” and “host-pinned” below identify mappings/access paths.
 
-## Network topology — closed
+## Network topology
 
 One ConnectX-7 NIC connects to the SoC through two independent PCIe Gen5 x4
 links. The one cabled physical QSFP port exposes two active RoCE lanes:
@@ -73,7 +74,7 @@ run shows drops, retries, unstable throughput, or latency spikes, collect
 before/after pause, discard, retry, and out-of-buffer counters and inspect the
 switch configuration. No switch policy is inferred here.
 
-## Project RC protocol tool — repaired and validated
+## Project RC protocol measurements
 
 The audit found unsignaled sends mislabeled as signaled and CQ polls writing
 multiple completions into one `ibv_wc`. `micro_ibv_smoke` now:
@@ -100,7 +101,7 @@ An earlier run before the final error-path hardening measured 3.29/3.47 µs
 minimum/mean and 185.0 Gb/s dual-lane; both runs are retained in the dated
 record rather than selecting only the faster result.
 
-## NIC DMA → GPU payload visibility — closed for this stack
+## NIC DMA → GPU payload visibility
 
 The new `micro_ibv_smoke verify` mode registers a `cudaHostAlloc` receive slab
 with ibverbs and launches a GPU consumer. For each iteration, the peer sends a
@@ -350,7 +351,7 @@ depth-2 recipe (`deploy/cluster_glm47_d2.json`, 4 slots) boots a 12-row
 world (`serve: decode rows 12`; the bus's latency slot 120 KiB, 128
 sampling candidates still fit) with the 2-, 3- and 4-slot batch families
 at 6, 9 and 12 rows, each carrying every slot's chain row in one draft-
-block run (`session_graph_capture_draft_chain_batch`). The GEMM seam
+block run (`session_graph_capture_draft_chain_batch`). The GEMM interface
 lowers every bf16 decode call up to those rows to the row-independent
 GEMV core (`CublasLtGemm::set_decode_rows`), so a batched request's rows
 keep the scalar reduction order — the first 9-row batch had fallen to a
@@ -441,12 +442,12 @@ replay, and a ten-minute allocation-stability soak. Those observations apply
 to the synthetic model only. They are not evidence for full GLM correctness or
 performance and are not carried into a model throughput target.
 
-## Future measurement scope
+## Further measurements
 
-The measurements in this report close the questions covered by the completed
-M0/M1 exit criteria. Later milestones still require their specified
-workload-specific correctness, stability, and performance measurements,
-including four-node CollectiveBus and full-model validation. Within those
-runs, switch policy and counter deltas are diagnostics if congestion symptoms
-appear. Comparisons with other inference engines are optional and are not an
+These results cover the workloads and revisions named in each section.
+The serving tables in [benchmarks](benchmarks.md) identify gaps in model,
+world-size and concurrency coverage. Collect node and switch counters
+when a fabric run shows congestion symptoms.
+
+Comparisons with other inference engines are optional and are not an
 implementation or performance gate.

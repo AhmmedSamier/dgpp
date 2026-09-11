@@ -36,7 +36,7 @@ void gemm_bf16(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_stri
                  g.ws, g.ws_bytes, stream);
 }
 
-// A dense projection in the checkpoint's BF16 (the GEMM seam) or, under
+// A dense projection in the checkpoint's BF16 (the GEMM interface) or, under
 // engine.dense_weights = "fp8", the block-FP8 form through the scale GEMM
 // (its chunked fp8 GEMV at decode rows, the tile kernel above them —
 // 2026-09-10). One of w / w8.payload is set.
@@ -47,7 +47,7 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
     if (w8.rows != n || w8.cols != k)
       throw std::invalid_argument("qwen dense fp8: the matrix's shape disagrees with the product");
     // Prefill-shaped (above the scale GEMM's GEMV lowering): through the
-    // BF16 seam on the dequantized matrix when the bridge holds it.
+    // BF16 interface on the dequantized matrix when the bridge holds it.
     const size_t bf16_bytes = static_cast<size_t>(n) * static_cast<size_t>(k) * 2;
     if (m > 128 && g.dequant && bf16_bytes <= g.dequant_bytes) {
       launch_fp8_dequant_blocks(w8.payload, w8.scales, g.dequant, n, k, stream);
@@ -259,17 +259,17 @@ void QwenGdnLayer::rebind(const QwenGdnResident& w) {
 }
 
 // The four input projections off the same rows: qkv [C, H], z [LV, H], a
-// and b [lv, H]. The decode rows (<= 4, the GEMV's row cap) go as ONE
+// and b [lv, H]. The decode rows (<= 4, the GEMV's row cap) go as one
 // multi-problem GEMV launch (2026-09-09: four launches and their gaps per
 // GDN layer, the two 12-row projections 3.6 us each); every output is
-// bitwise its own launch (bf16_gemv_test). More rows take the seam.
+// bitwise its own launch (bf16_gemv_test). More rows take the interface.
 void QwenGdnLayer::in_projections(const uint16_t* x, int tokens, cudaStream_t stream) {
   const int H = hidden_;
   const int C = static_cast<int>(conv_channels_);
   const int LV = lv_ * v_dim_;
   if (w_.in_proj_qkv_fp8.payload) {
-    // The FP8 form: qkv and z as ONE multi-problem fp8 GEMV at decode rows
-    // (2026-09-10), the scale GEMM above them; a and b (BF16, [lv, H]) as
+    // The FP8 form: qkv and z as one multi-problem fp8 GEMV at decode rows
+    //, the scale GEMM above them; a and b (BF16, [lv, H]) as
     // one dual GEMV.
     if (tokens <= 8) {
       Fp8GemvProblem p[2];
@@ -464,7 +464,7 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
   // Projections.
   if (w_.q_proj_fp8.payload && T <= 8) {
     // The FP8 form at decode rows: the four projections as one
-    // multi-problem fp8 GEMV (2026-09-10).
+    // multi-problem fp8 GEMV.
     Fp8GemvProblem p[4];
     p[0].payload = w_.q_proj_fp8.payload; p[0].scales = w_.q_proj_fp8.scales; p[0].out = q_; p[0].n = QW;
     p[1].payload = w_.k_proj_fp8.payload; p[1].scales = w_.k_proj_fp8.scales; p[1].out = k_; p[1].n = KW;

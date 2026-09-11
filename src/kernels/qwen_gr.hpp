@@ -2,7 +2,7 @@
 // The gated residual's elementwise kernels (Q3, 2026-09-09;
 // docs/qwen38_flash_next_plan.md §1.5, transformers Qwen4ExpTextGatedResidual).
 // The two gate matmuls (down [r, hc*H] and up [hc*H, r]) and the inject
-// dots go through the GEMM/GEMV seam; these kernels are what sits between
+// dots go through the GEMM/GEMV interface; these kernels are what sits between
 // them, each pinned to the reference's bf16 rounding points:
 //   mix:     Rn = group_rmsnorm(R)                    (qwen_norm.hpp)
 //            t  = bf16(silu(bf16(bf16(W_down Rn) / hc)))     gate_act
@@ -46,7 +46,7 @@ void qwen_gr_combine_apply_bf16(void* r_state, const float* gates, const void* y
                                 int64_t rows, int hc, int hidden, cudaStream_t stream);
 
 // The mix's two GEMVs with their producers folded into the staging
-// (2026-09-09), each bitwise the two-launch chain it replaces, for the
+//, each bitwise the two-launch chain it replaces, for the
 // decode rows (rows <= 8, chunked by four): norm_down = the group norm
 // (block_sum_squares' order per group; `rn` gets the normalized rows when
 // given) staged into the down GEMV, t = bf16(Rn . down_w^T); act_up = the
@@ -58,7 +58,7 @@ bool qwen_gr_fused_mix_accepts(int hc, int hidden, int lowrank);
 // the same launch — one extra block reads the normalized row out of the
 // staged copy every block already holds, in combine_dots_kernel's order, so
 // the gates are bitwise that kernel's and the chain loses a 21 us launch
-// (2026-09-10).
+//.
 void qwen_gr_norm_down_bf16(const void* r, size_t r_stride, const void* norm_w, int hc, int hidden,
                             float eps, void* rn, const void* down_w, void* t, int lowrank,
                             int64_t rows, cudaStream_t stream, const void* w_inject = nullptr,
@@ -67,7 +67,7 @@ void qwen_gr_act_up_bf16(const void* t, int lowrank, int hc, const void* up_w, v
                          int64_t rows, cudaStream_t stream);
 
 // The batched rows' (1..8) down GEMV over an already-normalized Rn with the
-// inject rows appended (2026-09-10): t = bf16(Rn . down_w^T) bitwise the
+// inject rows appended: t = bf16(Rn . down_w^T) bitwise the
 // bf16 GEMV's, gates as qwen_gr_combine_dots_bf16's — one launch per four
 // rows in place of the chain's down GEMV plus a side-stream dots kernel.
 void qwen_gr_down_inject_bf16(const void* rn, const void* down_w, void* t, int lowrank,

@@ -1,5 +1,5 @@
 // Parity tests for the bf16 decode GEMV (M6 Stage 2 round 3): the GEMM
-// seam's m<=8 decode path (chunked above four rows), against an fp64 oracle
+// interface's m<=8 decode path (chunked above four rows), against an fp64 oracle
 // over the same bf16
 // operands. Exercises both outputs (bf16, f32), strided activation views
 // (the KDA f_a/g_a K-column slices), ragged n, short and long k, and the
@@ -140,7 +140,7 @@ DGPP_TEST(bf16_gemv_real_shapes_match_oracle) {
   }
 }
 
-// The Qwen3.8-Flash-Next decode shapes through the seam at every decode row
+// The Qwen3.8-Flash-Next decode shapes through the interface at every decode row
 // count (2026-09-09, the real-checkpoint localizer: the T=5 walk — the
 // GEMV family — disagreed with the T=9 walk — cuBLASLt — by 16 % at row 4
 // where the python reference had certified the Lt family): every row of
@@ -179,7 +179,7 @@ DGPP_TEST(bf16_gemv_qwen_shapes_every_row_count_matches_oracle) {
   }
 }
 
-// The other side of the seam at the same shapes: cuBLASLt (m > 8) against
+// The other side of the interface at the same shapes: cuBLASLt (m > 8) against
 // the fp64 oracle. The real-checkpoint profile (2026-09-09) showed the
 // T=5 and T=9 walks bitwise within their families and 0.3-0.8 % apart at
 // layer 0 — one family is off; the GEMV passed above.
@@ -294,7 +294,7 @@ DGPP_TEST(bf16_gemv_ragged_n_short_k_and_multi_row) {
   }
 }
 
-// The dual launch (the KDA layer's f_b/g_b pair) must be BITWISE the two
+// The dual launch (the KDA layer's f_b/g_b pair) must be bitwise the two
 // single launches on both outputs, for every row count and both output
 // types, including the strided-activation view and a ragged second n.
 DGPP_TEST(bf16_gemv_multi_matches_four_single_launches_bitwise) {
@@ -331,7 +331,7 @@ DGPP_TEST(bf16_gemv_dual_matches_two_single_launches_bitwise) {
     const Problem a = make_problem(m, 1024, 128, 4352, 0x0d0a + m);
     const Problem b = make_problem(m, 1000, 128, 4352, 0x0d0b + m);  // ragged n
     Device da(a), db(b);
-    // GIVEN the two single-launch results (through the seam, bf16 and f32)
+    // GIVEN the two single-launch results (through the interface, bf16 and f32)
     const std::vector<uint16_t> want_a = run_bf16(gemm, a, da);
     const std::vector<uint16_t> want_b = run_bf16(gemm, b, db);
     const std::vector<float> want_a32 = run_f32(gemm, a, da);
@@ -359,7 +359,7 @@ DGPP_TEST(bf16_gemv_dual_matches_two_single_launches_bitwise) {
 }
 
 DGPP_TEST(bf16_gemv_contract_rejects_odd_k_and_falls_back) {
-  // GIVEN k % 8 != 0: the seam must NOT take the GEMV (bf16_gemv_accepts
+  // GIVEN k % 8 != 0: the interface must not take the GEMV (bf16_gemv_accepts
   // says so) — and the launcher refuses it outright.
   require(!dgpp::bf16_gemv_accepts(reinterpret_cast<void*>(16), 1, 12),
           "k=12 outside the contract");

@@ -1,4 +1,4 @@
-// The GLM-4.7 attention kernels (2026-09-09) against the host reference on
+// The GLM-4.7 attention kernels against the host reference on
 // small geometry: the qkv finish (bias, the two-rounding head norm, the
 // interleaved RoPE, the paged K/V append) within two bf16 ulps of the
 // reference and bitwise across a second run; the split-KV paged GQA

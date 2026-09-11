@@ -3,13 +3,13 @@
 // with mtp = true.
 //
 // Per step the main stack verifies [next, draft] — the token it was going
-// to consume anyway plus the MTP block's guess for the one after — in ONE
+// to consume anyway plus the MTP block's guess for the one after — in one
 // T=2 call. Row 0's argmax is what a plain step would have produced for
 // `next`; if it equals the draft, row 1 was a legitimate step too and its
 // argmax is the next `next`: two tokens for one weight sweep. Otherwise
 // row 1 is retracted (session_rollback) and row 0's argmax is the next
 // `next`, exactly a plain step. Either way the block then drafts over the
-// accepted rows. The transcript is BITWISE the plain greedy transcript:
+// accepted rows. The transcript is bitwise the plain greedy transcript:
 // verify rows are the T=1 rows (GlmDiagnosticModel::session_verify), and
 // the pick is the same canonical argmax — MTP changes the cost, never the
 // output.
@@ -114,7 +114,7 @@ class GreedySpeculator {
     next_ = first;
     drafts_ = draft_after({first});
   }
-  // Test seam: the block still drafts its first row (its counter must
+  // Test interface: the block still drafts its first row (its counter must
   // move), but the proposal fed to the first verify is `forced_draft` —
   // feeding the true next token makes the first step an accept-all.
   void start(int32_t first, int32_t forced_draft) {

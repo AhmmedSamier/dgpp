@@ -353,7 +353,7 @@ CASES = [
 ]
 
 
-# The Qwen3.8-Flash-Next template (2026-09-09): the reasoning-effort system
+# The Qwen3.8-Flash-Next template: the reasoning-effort system
 # preamble, the tools block, <think> reasoning kept only after the last
 # user query (preserve_thinking), the <function=...><parameter=...> tool
 # calls, tool responses grouped into one user turn, enable_thinking false
@@ -490,7 +490,7 @@ QWEN_CASES = [
 ]
 
 
-# The GLM-4.7 template (2026-09-10): the GLM-5.3 one without the reasoning
+# The GLM-4.7 template: the GLM-5.3 one without the reasoning
 # effort preamble, the deferred tools, the tool references and the media
 # reminders; the reasoning split uses rstrip('\n') / lstrip('\n') and
 # enable_thinking=false closes the think block in the generation prompt.

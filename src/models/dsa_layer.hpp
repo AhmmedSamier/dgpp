@@ -64,7 +64,7 @@ struct DsaLayerWeights {
   const float* ape = nullptr;      // fp32 [kpool, index_head_dim]
 
   // MLA core (local TP views). The four quantized projections come EITHER
-  // as the bf16 bridge pointers (qkv_a fused, q_b, o_proj — the M3 seam:
+  // as the bf16 bridge pointers (qkv_a fused, q_b, o_proj — the M3 interface:
   // dequantized at load) OR as the checkpoint's FP8 pairs consumed by the
   // scale-aware GEMM directly (2026-09-08: q_a_q/kv_a_q/q_b_q/o_proj_q set,
   // the bf16 pointers null — half the bytes per token; the loader takes
@@ -111,7 +111,7 @@ class DsaLayer {
   // query mid-chunk.
   bool prepare_prefill(int tile_rows, int64_t visible_pools);
 
-  // Streaming-weight seam (M4 diagnostic forward): swap the device weight
+  // Streaming-weight interface (M4 diagnostic forward): swap the device weight
   // view this layer enqueues against (shared scratch is unaffected — the
   // scratch is shape-keyed, not weight-keyed).
   void rebind(const DsaLayerWeights& w) { w_ = w; }
@@ -263,14 +263,14 @@ class DsaLayer {
   int64_t max_cache_tokens_ = 0;
   int max_decode_rows_ = 8;
   int decode_n_split_ = 32;
-  // The decode attention on the tensor-core listed kernel (2026-09-06):
+  // The decode attention on the tensor-core listed kernel:
   // two rows x 16 local heads is one M-block of the dense kernel, its two
   // slabs each a row's own selection. DGPP_DSA_DECODE_MMA=off keeps the
   // register split kernel; tolerance-equal, not bitwise (the mma order).
   bool decode_mma_ = true;
   int decode_mma_split_ = 32;  // split-KV parallelism (TRIED 2026-09-06 and kept at 32: 48 and 64 splits measured the same step on the fabric once the partial kernel held its window in registers, and change the combine order)
   int attn_rows_ = 8;         // attention tile rows = max(max_decode_rows_, 8)
-  // The dense prefill path (2026-09-05): rows whose context is below
+  // The dense prefill path: rows whose context is below
   // index_topk tokens attend densely on the tensor-core kernel
   // (dsa_attn_dense) in tiles of kDensePrefillRows query rows split
   // kDensePrefillSplit ways; the rest keep the per-row split kernel.

@@ -122,7 +122,7 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out += "]";
       }
       if (r.no_cache) out += ",\"nc\":1";
-      // The logit bias (2026-09-06): [id, float bits] pairs.
+      // The logit bias: [id, float bits] pairs.
       if (!r.logit_bias.empty()) {
         out += ",\"lb\":[";
         for (size_t i = 0; i < r.logit_bias.size(); ++i) {
@@ -279,7 +279,7 @@ std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
                     std::to_string(static_cast<int>(policy.mode)) +
                     ",\"win\":" + std::to_string(policy.window_tokens) +
                     (prefix_slots > 0 ? ",\"pc\":" + std::to_string(prefix_slots) : "");
-  // The effective configuration's digest (2026-09-06): every peer compares
+  // The effective configuration's digest: every peer compares
   // its own before serving; a config-less rank 0 writes none.
   if (!config_digest.empty()) {
     out += ",\"cfg\":";
@@ -989,7 +989,7 @@ void run_journal_peer(Scheduler* sched, JournalReader* reader,
       // Rank 0 admitted this against a queue state identical to ours
       // (same records, same order — §11); a refusal here means the
       // schedulers DIVERGED, which is the one bug this design exists
-      // to make impossible. Loud death beats serving on a lie.
+      // to make impossible. Loud death beats continuing with inconsistent state.
       if (!sched->try_submit(std::move(r)))
         throw std::runtime_error(
             "journal: could not admit '" + id + "' that rank 0 admitted — "

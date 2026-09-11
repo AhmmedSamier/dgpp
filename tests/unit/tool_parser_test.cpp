@@ -133,7 +133,7 @@ Run drive(const std::vector<int64_t>& ids, ToolCallParser::Options opts = {},
   return run;
 }
 
-// ---- the Qwen3.8 format (2026-09-09): only the outer markers are ids; the
+// ---- the Qwen3.8 format: only the outer markers are ids; the
 // block's "<function=...><parameter=...>" structure is text, parsed when
 // the block closes.
 ChatMarkers qwen_markers() {
@@ -418,7 +418,7 @@ DGPP_TEST(tool_parser_forcedPrefixSeedsTheBlock) {
 }
 
 // The opened-thinking test over a rendered prompt: GLM's turn ends in
-// <think>, Qwen's in <think> + the bare newline (2026-09-09).
+// <think>, Qwen's in <think> + the bare newline.
 DGPP_TEST(tool_parser_promptOpensThinkingSeesTheQwenNewline) {
   ChatMarkers m = qwen_markers();
   constexpr int64_t kNewline = 198;

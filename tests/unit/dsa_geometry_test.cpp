@@ -143,7 +143,7 @@ DGPP_TEST(dsa_geometry_rejects_invalid_configs) {
 }
 
 DGPP_TEST(dsa_geometry_latent_formats_size_the_cache) {
-  // The KV dtype knob (2026-09-06): bf16 is the DESIGN §7.2 table; fp8
+  // The KV dtype knob: bf16 is the DESIGN §7.2 table; fp8
   // halves the row and adds a 4-byte row scale; fp4 packs two e2m1 codes
   // per byte plus one e4m3 scale per 16 elements (288 B at 512 wide).
   const auto at = [](dgpp::LatentFormat f) {

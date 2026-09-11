@@ -419,8 +419,8 @@ void fill_rank_bf16(std::vector<uint16_t>* out, size_t elems, int rank) {
 }
 
 // Device twin of fill_rank_bf16 — the producing-kernel half of the
-// pre-stage seam: a GPU kernel writing the NIC-registered pinned buffer
-// directly (what the boundary GEMM does in the model seam). Single thread
+// pre-stage interface: a GPU kernel writing the NIC-registered pinned buffer
+// directly (what the boundary GEMM does in the model interface). Single thread
 // so the sequential LCG chain matches the host pattern element-for-element.
 __global__ void staged_fill_kernel(uint16_t* dst, size_t elems, int rank) {
   if (threadIdx.x != 0 || blockIdx.x != 0) return;
@@ -648,7 +648,7 @@ void scenario_allreduce() {
 }
 
 // One rank's share of a pre-staged run: stage_next(), a GPU kernel writes
-// the pinned buffer (the seam's producing half), allreduce_staged(), wait,
+// the pinned buffer (the interface's producing half), allreduce_staged(), wait,
 // and an in-place bitwise check against the canonical-chain oracle. The
 // result never leaves the pinned buffer — exactly the model's shape.
 int allreduce_staged_rank_work(CollectiveBus& bus, int world, int my_rank,
@@ -694,7 +694,7 @@ int allreduce_staged_rank_work(CollectiveBus& bus, int world, int my_rank,
     }
     // The producing kernel writes the send source directly; a stream sync
     // (not a device sync — see the loopback note above) orders it before
-    // the submit, which is the seam's contract.
+    // the submit, which is the interface's contract.
     staged_fill_kernel<<<1, 1, 0, fill_stream>>>(staged, elems, my_rank);
     if (cudaStreamSynchronize(fill_stream) != cudaSuccess) {
       DGPP_LOG_ERROR("rank {}: staged fill kernel failed", my_rank);
@@ -739,7 +739,7 @@ int allreduce_staged_rank_work(CollectiveBus& bus, int world, int my_rank,
 }
 
 void scenario_allreduce_done_before_posted() {
-  // DONE DOES NOT IMPLY POSTED, the one-shot form (2026-09-05): rank 0's
+  // DONE DOES not IMPLY POSTED, the one-shot form: rank 0's
   // engine sleeps 300 us between reading the control cell's done stamp
   // and its ready bits, so its kernel — whose peers post at once, unpaced
   // — stages, claims, folds and stamps done inside that gap on every
@@ -788,7 +788,7 @@ void scenario_allreduce_done_before_posted() {
 }
 
 void scenario_allreduce_staged() {
-  // Pre-stage seam (§6.3 evolution): the producing kernel writes the
+  // Pre-stage interface (§6.3 evolution): the producing kernel writes the
   // transport's pinned send source directly and the collective runs with
   // zero staging copies (world 2) or only the pinned fan-out (world 4).
   // Bitwise against the canonical-chain oracle, across ring generations.
@@ -841,7 +841,7 @@ void scenario_allreduce_staged() {
 // One rank's share of a bulk-collective run: the machine over N iterations
 // of one size — (1) allreduce_bulk verified bitwise against the canonical
 // chain, (2) the latency-chunked path over the same buffer, verified
-// bitwise against BOTH the oracle and the bulk run's bytes (the two paths
+// bitwise against both the oracle and the bulk run's bytes (the two paths
 // compute the identical per-element chain; any divergence is a protocol
 // bug, not noise). Returns failures home.
 int allreduce_bulk_rank_work(CollectiveBus& bus, int world, int my_rank,
@@ -941,7 +941,7 @@ int allreduce_bulk_rank_work(CollectiveBus& bus, int world, int my_rank,
 
     // ---- the latency-chunked path over the same buffer ------------------
     // Same chain per element, chunked into latency slots; the result must
-    // be BITWISE identical to the bulk machine's.
+    // be bitwise identical to the bulk machine's.
     cudaMemsetAsync(dev_dst, 0, elems * 2, stream);
     cudaStreamSynchronize(stream);
     bool chunk_failed = false;
@@ -1061,7 +1061,7 @@ void scenario_allreduce_bulk() {
 // the canonical-chain oracle AND the eager machine's bytes (the recorded
 // fold is the same chain; the doorbell/claim machinery is what differs).
 // The replay loop is also the MIXED-ERA gate: eager collectives (the pick
-// class, the staged seam, the prefill bulk class) run BETWEEN windows —
+// class, the staged interface, the prefill bulk class) run BETWEEN windows —
 // consuming generations from the shared counter — and every later window
 // must adopt around them and stay bitwise.
 // Returns failures home (CHECK is main-thread-only).
@@ -1408,7 +1408,7 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
                 fail("mixed-era eager allreduce failed: " + r.error);
             }
           }
-          // (b) the prefill seam: a staged handout, folded in place.
+          // (b) the prefill interface: a staged handout, folded in place.
           {
             void* handout = bus.stage_next(&eager_error);
             if (handout == nullptr) {
@@ -1463,7 +1463,7 @@ int allreduce_graph_rank_work(CollectiveBus& bus, int world, int my_rank,
             percentile(step_us, 0.5) / gens_per_step);
       }
     }
-    // ---- the pipelined replay (2026-09-06): two windows armed at once --
+    // ---- the pipelined replay: two windows armed at once --
     // The engine arms the NEXT replay's window while the previous replay
     // still runs, on the other variant. Variant 1 then variant 0, both
     // launched back to back on the stream before either is finished; a
@@ -1623,7 +1623,7 @@ void scenario_allreduce_graph() {
 }
 
 void scenario_idle_gap_collective() {
-  // The real-mesh shape, found by the M5 exit-gate fabric run (2026-08-30):
+  // The real-mesh shape, found by the M5 exit-gate fabric run:
   // buses sit IDLE for seconds while a host loads weights (a cold peer's
   // first inter-collective gap — cold NVMe reads of replicated globals
   // before its first boundary), then the first collective posts against a

@@ -1,5 +1,5 @@
 // qwen_forward_check: the Qwen3.8-Flash-Next world-1 diagnostic forward
-// over a real checkpoint (Q4, 2026-09-09) — one prompt of token ids
+// over a real checkpoint — one prompt of token ids
 // through the streaming resident loader, the per-layer hyper-state
 // magnitudes and every position's top-k next-token logits. No tokenizer
 // yet (Q5): ids come in on the command line.

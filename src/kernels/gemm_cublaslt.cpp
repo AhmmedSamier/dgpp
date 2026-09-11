@@ -165,7 +165,7 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
   // fixed batch, 8 unless it says otherwise), while one launch is capped by
   // both register pressure and the 48-KiB default dynamic-smem limit. Split a wider decode into the
   // largest legal chunks instead of falling through to an Lt algorithm
-  // with shape-dependent reduction order. This is the numerical seam that
+  // with shape-dependent reduction order. This is the numerical interface that
   // lets a live request move between scalar and batched graph variants
   // without changing its transcript (each chunk past the first re-reads
   // the weights: the batch's byte cost).

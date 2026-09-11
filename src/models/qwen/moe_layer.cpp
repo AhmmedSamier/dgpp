@@ -64,7 +64,7 @@ QwenMoeLayer::QwenMoeLayer(const QwenMoeWeights& weights, const GlmMoeConfig& cf
   for (size_t i = 0; i < M; ++i) identity[i] = static_cast<int32_t>(i);
   DGPP_CUDA_OK(cudaMemcpy(d_rows_, identity.data(), M * sizeof(int32_t),
                           cudaMemcpyHostToDevice));
-  // The GEMM seam's workspace for the three shared-expert shapes.
+  // The GEMM interface's workspace for the three shared-expert shapes.
   const int Hn = cfg_.hidden, Sn = static_cast<int>(w_.shared_inter);
   gemm_ws_bytes_ = std::max({gemm_.query_workspace_bytes(max_tokens_, Sn, Hn, DType::BF16),
                              gemm_.query_workspace_bytes(max_tokens_, Hn, Sn, DType::BF16),
@@ -125,7 +125,7 @@ void QwenMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out, int tok
   if (!hidden || !out) throw std::invalid_argument("QwenMoeLayer: null pointer");
   routed_.enqueue_decode_f32(hidden, d_acc_, tokens, nullptr, stream, table_slot);
   // The fused two-launch tail (bitwise the chain; qwen_moe_test pins it),
-  // in the weights' form: BF16, or block FP8 (2026-09-10).
+  // in the weights' form: BF16, or block FP8.
   const int H = cfg_.hidden;
   const int S = static_cast<int>(w_.shared_inter);
   if (w_.shared_fp8) {
@@ -163,7 +163,7 @@ void QwenMoeLayer::shared_tail(const uint16_t* hidden, uint16_t* out, int tokens
   //    chain's two roundings and no clamps, the down projection unrounded.
   if (w_.shared_fp8 && tokens > 128) {
     // Prefill-shaped: each FP8 matrix dequantized into the bridge (the
-    // GEMV core's values) and run through the BF16 seam.
+    // GEMV core's values) and run through the BF16 interface.
     launch_fp8_dequant_blocks(w_.shared_fp8[0].payload, w_.shared_fp8[0].scales, d_shared_bridge_, S, H, stream);
     gemm_.matmul(hidden, d_shared_bridge_, d_sgate_, tokens, S, H, DType::BF16,
                  GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);

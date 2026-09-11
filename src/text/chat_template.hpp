@@ -1,8 +1,7 @@
 #pragma once
-// The GLM chat-template compiler (M6 Stage 3b, DESIGN §10): the model's
-// chat_template.jinja parsed once at load ("compiled") and rendered per
-// request by a tree-walking interpreter implementing EXACTLY the
-// constructs this template family uses. The rendering semantics are the
+// Jinja chat-template interpreter for the supported model families.
+// Parse chat_template.jinja once at model load and render its syntax
+// tree per request. The rendering semantics follow the
 // transformers chat-template environment's (trim_blocks, lstrip_blocks,
 // jinja2.ext.loopcontrols, and the tojson override — plain
 // json.dumps(ensure_ascii=False); see tools/gen_chat_template_goldens.py,
@@ -25,13 +24,12 @@
 // int literals, and a if b else c. The globals namespace() and range(a,b)
 // are the only functions.
 //
-// Anything outside this surface REFUSES at compile time with the
-// construct named (the same loud-refusal discipline as Tokenizer's
-// pinned shapes). Rendering errors (undefined names, bad call targets,
+// Unsupported constructs are rejected during parsing with the construct
+// named in the error. Rendering errors (undefined names, bad call targets,
 // non-serializable tojson input) throw std::runtime_error with the
 // template line number.
 //
-// EXACTNESS DISCIPLINE: parity is pinned by differential goldens
+// Validation uses differential golden tests
 // (tests/data/glm_chat_template_goldens.jsonl) — byte-exact renders AND
 // the glm_tokenizer ids of those renders — keyed by this file's
 // FNV-1a-64 hash (header "template_hash"); a gate run against a
@@ -51,7 +49,7 @@
 
 namespace dgpp::text {
 
-struct MacroDef;  // internal; defined in glm_chat_template.cpp
+struct MacroDef;  // internal; defined in chat_template.cpp
 
 // The value model for chat-template data and evaluation. Undefined is a
 // distinct kind from Null because `x is defined` (and the template's

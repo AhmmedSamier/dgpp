@@ -250,7 +250,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
         "session_prefill: the chunk size broke the kpool-alignment contract");
 
   // Open THIS slot only — other slots' sessions are untouched (the Stage
-  // 2b concurrency contract). Slot 0's zeroed state is the SAME starting
+  // 2b concurrency contract). Slot 0's zeroed state is the same starting
   // state run_stack builds, so a single-chunk prefill there still runs
   // the exact reference op sequence (the bitwise tier of the parity gate).
   if (kda_rec_) {
@@ -698,7 +698,7 @@ void GlmDiagnosticModel::session_decode_host_prep(
     throw std::runtime_error("session_decode: DSA pool exhausted (admission "
                             "budget) — grow the pool or shed requests");
 
-  // Decode-batch metadata: T consecutive rows of ONE request (time-
+  // Decode-batch metadata: T consecutive rows of one request (time-
   // multiplexed requests). The PINNED members are the upload sources —
   // eager issues the H2Ds, capture records them as memcpy nodes, the
   // replay stage only writes the members (its graph re-uploads). With
@@ -998,10 +998,10 @@ void GlmDiagnosticModel::session_close(int req) {
     throw std::out_of_range("session_close: request slot " +
                             std::to_string(req));
   if (dsa_cfg_.num_dsa_layers > 0) {
-    // The listed attention's guarded gather (2026-09-06): an anomaly is a
+    // The listed attention's guarded gather: an anomaly is a
     // bug survived, logged loudly with its first values. Reported here so
-    // the engines need no DSA knowledge (Q1, 2026-09-09); the readback
-    // sits where the graph engine used to make it, before the release.
+    // the engines need no DSA knowledge; the readback
+    // completes before the session resources are released.
     long long a[6] = {0, 0, 0, 0, 0, 0};
     const unsigned long long n = dsa_attn_anomalies(a, /*clear=*/true, stream_);
     if (n != 0)
@@ -1038,15 +1038,15 @@ int64_t GlmDiagnosticModel::session_position(int req) const {
 
 // ---------------------------------------------------------------------------
 // The session's row runner. Modeled on run_stack with three deltas: the
-// state is NEVER reset here (prefill owns the one reset, at open), the DSA
+// state is never reset here (prefill owns the one reset, at open), the DSA
 // path is chosen by `decode_row` (prefill chunks vs decode positions), and
 // only the LAST row's logits/final_hidden are copied out (a prompt-sized
 // logits matrix is 100s of MB at real dims; the last row is what greedy
 // consumes, and the parity gate compares rows, not matrices).
 // ---------------------------------------------------------------------------
-// DGPP_SYNC_EAGER=1 (2026-09-06, the fault hunt): an eager row syncs after
-// each stage and names the stage whose kernels faulted — the plain sync
-// only names the first call that saw the sticky error.
+// Setting DGPP_SYNC_EAGER synchronizes after each eager stage so errors
+// identify the stage that launched the failing kernels. Without it, a
+// later CUDA call may report the earlier asynchronous failure.
 void GlmDiagnosticModel::debug_sync(const char* what, int layer, bool decode_row) {
   static const bool on = std::getenv("DGPP_SYNC_EAGER") != nullptr;
   if (!on) return;
@@ -1069,7 +1069,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   // The head runs on every row of a prefill chunk although greedy reads
   // only the last: a last-row head would come off the m=1 GEMV while the
   // re-forward reference's comes off the m=T GEMM, and the prefill ==
-  // re-forward BITWISE gate (glm_tp_test) is worth more than the ~6 ms
+  // re-forward bitwise gate (glm_tp_test) is worth more than the ~6 ms
   // and 300 MB a 2048-row head costs per chunk.
   if (!gemm_.ensure_plan(T, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
                          H))
@@ -1153,7 +1153,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
           kda_conv_ +
           (state_req * kda_cfg_.num_kda_layers +
            static_cast<size_t>(kda_ordinal)) * conv_elems;
-      // In-place state update: prefill chunks and steps share ONE
+      // In-place state update: prefill chunks and steps share one
       // recurrence implementation, so the state this enqueue leaves is
       // exactly the state the next row needs (DESIGN §7.1). Speculative
       // rows (decode, T > 1) also leave post-row snapshots for
@@ -1258,7 +1258,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         moe_->rebind(*b.moe);
       }
       if (decode_row) {
-        // The decode fast path (2026-09-01): the MoE runs from the
+        // The decode fast path: the MoE runs from the
         // DEVICE-side route — no router round-trip, no host
         // segmentation, no per-segment H2D. Traces ride async copies
         // into this layer's pinned staging slot; the placeholder route
@@ -1284,7 +1284,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         out.route_biased.emplace_back();
         ++moe_decode_calls;
       } else {
-        // Prefill (2026-09-04): the device-segmented grouped path — no
+        // Prefill: the device-segmented grouped path — no
         // host sync per layer; the routing traces land in this layer's
         // pinned staging and are materialized after the final sync.
         MoeTraceStaging trace;

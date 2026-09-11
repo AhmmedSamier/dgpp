@@ -47,7 +47,7 @@ void glm_spec_commit(const PickVerdict* verdict, int rows,
                      const GlmSpecSegments& segments, int64_t* session_pos,
                      cudaStream_t stream);
 
-// The pipelined replay's stage handshake (2026-09-06): the graph of a
+// The pipelined replay's stage handshake: the graph of a
 // slot is launched BEFORE the host has decided what its pick needs (the
 // masks of the rows, staged from the previous replay's outcome), so the
 // node ahead of the pick waits for the host: it bumps the slot's device
@@ -133,7 +133,7 @@ void glm_device_copy(void* dst, const void* src, size_t bytes,
 
 // The chained draft row (depth >= 2, 2026-09-06): the single draft block's
 // recursion. After the block's rows off the verdict (glm_spec_draft_rows)
-// the block runs ONE more row at position *block_pos + chain_index, fed the
+// the block runs one more row at position *block_pos + chain_index, fed the
 // previous draft pick (`draft_verdict->next`) as its token and the block's
 // own previous output row as its hidden: row `verify_verdict->accepted - 1`
 // of `block_x` for the first chain row (the last accepted row), row

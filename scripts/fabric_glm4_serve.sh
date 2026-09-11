@@ -1,5 +1,5 @@
 #!/bin/bash
-# The GLM-4.7 serving gates on the fabric (2026-09-10):
+# The GLM-4.7 serving gates on the fabric:
 # boot the world from a cluster config (deploy/cluster_glm47.json: MTP +
 # the decode graph; deploy/cluster_glm47_t1.json: plain T=1), then the
 # API check, the greedy transcripts (compared against a reference file

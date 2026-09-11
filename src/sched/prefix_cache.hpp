@@ -1,38 +1,18 @@
 #pragma once
-// The prefix cache's host half (M7 stage B, DESIGN §8): the index of
-// snapshot entries the scheduler consults at admission, the slot ledger of
-// the engine's snapshot arena, and the decision digest every rank compares.
+// Host index and slot ownership for prefix-cache snapshots (DESIGN §8).
+// An entry associates the first P token IDs with a model snapshot at a
+// valid prefill cut. A request may attach only when its token prefix and
+// cold-prefill cut match, so suffix prefill preserves the cold run's
+// chunk sequence and arithmetic.
 //
-// WHAT AN ENTRY IS: a session's state at a pool-aligned position P of a
-// token sequence — the KDA slots, the DSA tail rings, the draft block's
-// last hidden row, the DSA blocks below P (the full ones pinned by
-// reference, the partial one copied) — held in one arena slot on the
-// engine, keyed by the sequence's first P ids. A request whose prompt
-// begins with those P ids and whose COLD prefill would cut at P attaches
-// to it and prefills only the suffix, bitwise the cold run (stage A's
-// guarantee: the hot path replays the cold path's chunk sequence).
+// The engine's PrefixArena owns the state. This index tracks references,
+// LRU eviction and a decision digest. Entries attached to live requests
+// are protected from eviction. Each rank derives the same decisions from
+// journaled inputs and compares the digest on the next tick.
 //
-// WHERE ENTRIES COME FROM: (a) a cold prefill takes one at the deepest cut
-// of its prompt (the aligned image of the last structural boundary, in a
-// chat the assistant header — exactly where the NEXT turn's cold prefill
-// cuts, since the boundaries are positions of role-marker tokens in the
-// shared prefix); (b) a live request keeps a ROLLING snapshot at its
-// latest aligned committed position (one arena slot per live request,
-// overwritten every kpool tokens) which becomes an entry when the request
-// retires — at floor((end - 1) / kpool) * kpool, the aligned image of its
-// EOS token's position, where the next turn's `<|user|>` marker cuts.
-//
-// DETERMINISM: every method is a pure function of its arguments and the
-// cache's own history — the entries are a vector in insertion order, the
-// free slots a sorted list, the LRU a scan by (last_use, index) — so the
-// ranks of a fabric, fed the same journaled requests, make the same
-// decisions; digest() folds every one of them into a value the journal
-// carries for the peers to compare.
-//
-// LOOKUP is exact: a 64-bit prefix hash narrows the candidates and the ids
-// are compared in full (a hash collision can never attach the wrong
-// state). The candidates are the prompt's own cut positions, so a match
-// is by construction a position the cold prefill would also cut at.
+// Prefill and request retirement can create reusable entries; rolling
+// snapshots preserve aligned positions reached during decode, including
+// positions crossed by an MTP step. Entries are local to the process.
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -103,7 +83,7 @@ class PrefixCache {
              const std::vector<uint64_t>& cut_hashes) const;
   // Whether a live entry with exactly these ids exists (the dedupe check).
   int find_exact(const int64_t* ids, int64_t n, uint64_t hash) const;
-  // The miss diagnostic (2026-09-07): the live entry sharing the longest
+  // The miss diagnostic: the live entry sharing the longest
   // prefix with the prompt, and that length — where a prompt that should
   // have attached first differs from what the cache holds (an agent
   // client's edited system prompt, a compacted history). A linear pass
@@ -113,7 +93,7 @@ class PrefixCache {
     int64_t common = 0;  // ids shared with the entry, from the start
   };
   Nearest nearest(const std::vector<int64_t>& prompt) const;
-  // The ghosts (2026-09-07): the last kGhosts evicted entries by (hash,
+  // The ghosts: the last kGhosts evicted entries by (hash,
   // position, last use, eviction ordinal), so a miss can say "an entry at
   // this prompt's cut was evicted" — the case the nearest entry cannot
   // tell from a changed prompt once the conversation's own entries are

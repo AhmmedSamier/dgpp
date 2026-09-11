@@ -198,7 +198,7 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
       continue;
     }
     // A JSON-typed property: the machine under its own schema. An
-    // integer's minimum / maximum are enforced (2026-09-07); a keyword
+    // integer's minimum / maximum are enforced; a keyword
     // that only narrows the value without an automaton behind it (a
     // number's bound, pattern, ...) is tolerated — the value stays typed,
     // the narrowing is not applied — and noted with the reason.

@@ -2,7 +2,7 @@
 // Double-precision oracle for the MoE module (DESIGN §7.4): fp32 router
 // math, the bf16 expert chain up to the activations, then the engine's
 // fp32 accumulation semantics in double — unrounded down dots, one fma per
-// expert (ascending), shared last, ONE bf16 rounding of the sum (see
+// expert (ascending), shared last, one bf16 rounding of the sum (see
 // glm_moe_layer.hpp). The strict path reproduces every bf16 rounding point
 // the engine has, isolating the fp32-vs-double and mma-order gaps into the
 // parity budgets.
@@ -21,7 +21,7 @@ struct GlmMoeHostWeights {
   // shared triple: gate, up, down. NVFP4 (`nvfp4` set): the routed experts
   // live in the fp4 vectors below (expert e matrix m at index e*3+m —
   // packed nibbles [rows, cols/2], e4m3 scales [rows, cols/16], one global
-  // per matrix) and `payloads`/`scales` hold ONLY the shared triple.
+  // per matrix) and `payloads`/`scales` hold only the shared triple.
   std::vector<uint8_t> payloads;   // 3 mats per expert then shared: gate,up,down
   std::vector<float> scales;       // matching scale grids
   bool nvfp4 = false;

@@ -14,7 +14,7 @@
 //     with (and cancelled around) other requests;
 //   * determinism — the same scenario produces the identical op stream.
 //
-// The fake also enforces the engine seam: scripts are consumed in order,
+// The fake also enforces the engine interface: scripts are consumed in order,
 // each slot owns its pending transcript, and close() must find a live
 // reservation to release.
 #include <cstdio>
@@ -52,7 +52,7 @@ class FakeEngine : public SchedulerEngine {
         batch_capacity_(batch_capacity),
         can_sample_(can_sample) {}
 
-  // The sampling seam (M6 6b): a sampling-capable fake records the arming
+  // The sampling interface (M6 6b): a sampling-capable fake records the arming
   // in the op stream ("A:slot:seed"), so its position relative to the
   // prefill is pinned; a greedy fake inherits the base refusal.
   bool supports_sampling() const override { return can_sample_; }
@@ -96,7 +96,7 @@ class FakeEngine : public SchedulerEngine {
                      std::to_string(static_cast<int>(g.mode)) + ":" +
                      std::to_string(g.tools.size()));
   }
-  // The logit bias (2026-09-06): a sampling-capable fake can bias and
+  // The logit bias: a sampling-capable fake can bias and
   // records the arming ("B:slot:entries") after the grammar's.
   bool supports_logit_bias() const override { return can_sample_; }
   void configure_logit_bias(int req,
@@ -121,7 +121,7 @@ class FakeEngine : public SchedulerEngine {
     episodes_[slot].push_back(std::move(e));
   }
 
-  // Arms the new speculative seam directly: prefill returns `first`, and
+  // Arms the new speculative interface directly: prefill returns `first`, and
   // each subsequent engine step returns one scripted batch.
   void arm_batches(int slot, int32_t first,
                    std::vector<std::vector<int32_t>> steps, int max_steps) {
@@ -141,7 +141,7 @@ class FakeEngine : public SchedulerEngine {
     return s;
   }
 
-  // The prefix cache seam (M7): an arena of `slots` snapshot slots with
+  // The prefix cache interface (M7): an arena of `slots` snapshot slots with
   // pool alignment `align`. The fake records every op — "X:slot:pos@arena"
   // an attach, "N:slot:pos@arena" a snapshot taken at a prefill cut,
   // "RS:slot:pos@arena" a rolling snapshot, "F:arena" a release — and pins
@@ -557,7 +557,7 @@ DGPP_TEST(scheduler_capacityBelowSmallestReservation_throwsDeadlock) {
   Scheduler sched(&engine, {kEos});
   sched.submit(make_request("a", 5, 3));
 
-  // WHEN run, THEN the scheduler refuses loudly (an operator sizing
+  // WHEN run, THEN the scheduler rejects the input with an error (an operator sizing
   // error — never a hang, never a silent partial run).
   bool threw = false;
   try {
@@ -573,7 +573,7 @@ DGPP_TEST(scheduler_capacityBelowSmallestReservation_throwsDeadlock) {
 }
 
 DGPP_TEST(scheduler_eosOnPrefillPick_retiresImmediatelyThenPeerAdmits) {
-  // GIVEN a whose FIRST picked token is EOS (the model answered in one
+  // GIVEN a whose first picked token is EOS (the model answered in one
   // token) and b behind it:
   FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
   engine.arm(0, {kEos}, /*max_steps=*/5);    // a: EOS on the prefill pick
@@ -645,7 +645,7 @@ DGPP_TEST(scheduler_sameScenarioTwice_identicalOpStreams) {
   // GIVEN a scenario with deferral, cancellation, and EOS mixed,
   const auto run = [&]() {
     FakeEngine engine(/*slots=*/2, /*total_blocks=*/3, /*block_tokens=*/4);
-    // Pool fits ONE reservation at a time; x EOSes on its 3rd token
+    // Pool fits one reservation at a time; x EOSes on its 3rd token
     // (before its cap), freeing space for y early.
     engine.arm(0, {1, 2, kEos}, /*max_steps=*/4);  // x -> slot 0
     engine.arm(0, {7, 8}, /*max_steps=*/2);        // y -> reuses slot 0
@@ -882,7 +882,7 @@ DGPP_TEST(scheduler_dynamicArrival_transcriptsMatchSolo) {
   }
 
   // THEN the op stream shows b admitted at the next tick's alternation
-  // slot, and BOTH transcripts equal their solo runs — dynamic arrival
+  // slot, and both transcripts equal their solo runs — dynamic arrival
   // preserves the isolation property.
   const std::string expected =
       "P:0:5 S:0:1 S:0:2 P:1:5 S:1:5 C:1 S:0:3 C:0";
@@ -1373,7 +1373,7 @@ DGPP_TEST(scheduler_prefixCache_secondIdenticalPromptAttachesAtTheDeepestCut) {
 }
 
 DGPP_TEST(prefixCache_nearestNamesWhereAMissedPromptDiverges) {
-  // The miss diagnostic (2026-09-07): among the live entries, the one
+  // The miss diagnostic: among the live entries, the one
   // sharing the longest prefix with a prompt, and that length.
   using dgpp::sched::PrefixCache;
   PrefixCache::Config cfg;
@@ -1581,7 +1581,7 @@ DGPP_TEST(scheduler_prefixCache_retireAtAnAlignedPositionSnapshotsTheLiveState) 
 }
 
 DGPP_TEST(scheduler_prefixCache_aStepCutShortByTheCapTakesNoRetireSnapshot) {
-  // A two-token step whose FIRST token completes the answer (the cap at
+  // A two-token step whose first token completes the answer (the cap at
   // four tokens: 31, [32,33], [34,35] — 35 dropped) leaves the engine's
   // state one row past the committed position; the retire-time snapshot
   // cannot be taken from the live slot there (the fake, like the real
@@ -1655,7 +1655,7 @@ DGPP_TEST(scheduler_prefixCache_twoTokenStepsHopOverAnAlignedPositionAndSnapshot
           "the next turn attaches at the hop's entry:\n  got:      " + engine.op_stream() +
               "\n  expected: " + expected_b);
   // A one-token engine never arms (the plain stream), and a two-token step
-  // that commits ONE token lands on the position: the regular rolling
+  // that commits one token lands on the position: the regular rolling
   // snapshot takes it at the next tick.
   FakeEngine one(/*slots=*/1, /*total_blocks=*/100, /*block_tokens=*/4);
   one.set_prefix_arena(/*slots=*/4, /*align=*/4);

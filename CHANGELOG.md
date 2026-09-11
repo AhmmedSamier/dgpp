@@ -16,7 +16,7 @@ The history by milestone. The dated engineering record in
   dense projections encoded as they load with the FP8 releases' own recipe
   (`engine.dense_weights = "fp8"`, default `"checkpoint"`; amax / 448 per
   128 x 128 block, round-to-nearest-even e4m3), read by the fp8 GEMV core at
-  decode rows and dequantized into a BF16 bridge for the GEMM seam: T=1
+  decode rows and dequantized into a BF16 bridge for the GEMM interface: T=1
   47 -> 31 ms per pass, MTP 59 -> 40 ms per pass (21–26 ms/token, 38–48 t/s),
   four in flight 122 -> 71 ms per step. Then the fused decode forms and a
   multi-problem fp8 GEMV — the GR site's norm-staged down GEMV with the inject
@@ -132,7 +132,7 @@ The history by milestone. The dated engineering record in
   carries depth >= 2: `session_graph_capture_draft_chain_batch` +
   `glm_spec_chain_rows_batched` run every slot's chain row in one draft-
   block run (the batched next-token feed carries every draft per request);
-  a family opts in with `kBatchedDraftChain` (GLM-4.7). The GEMM seam
+  a family opts in with `kBatchedDraftChain` (GLM-4.7). The GEMM interface
   lowers bf16 decode calls up to the model's decode rows to the row-
   independent GEMV core (`CublasLtGemm::set_decode_rows`; the first 9-row
   batch fell to an Lt algorithm with its own reduction order and flipped a
@@ -255,7 +255,7 @@ The history by milestone. The dated engineering record in
   their streaming floor; a persistent grid-stride form with next-tile
   lookahead, the paired gate/up issue, more row steps, four blocks per SM,
   the router's unroll and block width, and programmatic dependent launch
-  across the graph's seams were each measured and parked
+  across the graph's interfaces were each measured and parked
   (`docs/nvfp4_plan.md` §6a).
 
 - NVFP4 routed experts, phase 1 of `docs/nvfp4_plan.md` — the format is
@@ -349,7 +349,7 @@ The history by milestone. The dated engineering record in
 
 - The DSA attention projections consumed as FP8 directly (the "bridge"
   item of `docs/nvfp4_plan.md`): q_a, kv_a, q_b and o_proj — FP8 pairs in
-  every checkpoint — were dequantized to BF16 at load (the M3 seam) and
+  every checkpoint — were dequantized to BF16 at load (the M3 interface) and
   read at twice their bytes on every step. The loader now keeps them as
   the checkpoint's pairs whenever this rank's q_b row slice and o_proj
   column slice start on the 128-wide scale grid (every power-of-two world
@@ -601,7 +601,7 @@ The history by milestone. The dated engineering record in
   (`DGPP_L2_PREFETCH_MERGE=off` restores one per tensor): the decode
   graph goes from 1,595 to 1,168 kernel nodes and `cudaGraphLaunch` from
   730 to 520 us per step (the host enqueues ~0.45 us per node and the GPU
-  idles through it — the seam the design record called hidden). The
+  idles through it — the interface the design record called hidden). The
   merged kernels stream through more of each collective's handshake
   (+3 us per collective on the timeline), so the step itself is within
   noise of the per-tensor form; kept for the node count.
@@ -653,7 +653,7 @@ The request contract gained `stop`, `n`, `logit_bias`, and the usage's
 `cached_tokens` and `reasoning_tokens`. Every rank's log carries one
 aggregate throughput line per 10 s; the per-tick lines moved to DEBUG.
 
-## 2026-09-05 — M9 closed; M7 built; M6 and M8 buttoned up
+## 2026-09-05 — M9 sign-off, prefix caching and service hardening
 
 - M9: the continuous op-stream drift check on every journal record; a
   malformed-HTTP fuzzer under AddressSanitizer (three defects found and
@@ -669,7 +669,7 @@ aggregate throughput line per 10 s; the per-tick lines moved to DEBUG.
   senders, the MoE experts on grouped tensor-core kernels, the attention
   prefill as a flash kernel; 256 tokens 0.58 s, 2,048 tokens 1.7 s.
 
-## 2026-09-04 — the contract fills in
+## 2026-09-04 — sampling, constrained output and shutdown handling
 
 Tool calls and reasoning on the wire; constrained decoding as a guarantee
 for `tool_choice` and `parallel_tool_calls`; `response_format` with JSON

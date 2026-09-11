@@ -4,7 +4,7 @@
 // TOKEN IDS that yields, at every position, the set of ids the model may
 // emit next — the mask the sampler applies before the pick on every rank.
 // This is how `tool_choice: required`, a named function, `none` and
-// `parallel_tool_calls: false` become GUARANTEES rather than hints: a
+// `parallel_tool_calls: false` become guarantees rather than hints: a
 // sampled token is always inside the mask, so the turn is a valid call to
 // an allowed function (or none, or exactly one), whatever the model would
 // have liked to write.
@@ -100,7 +100,7 @@ struct GrammarTool {
 // declared property gets its GrammarArg. Under `strict: true` every
 // property's schema must lie inside the constrained subset, else
 // std::invalid_argument whose message starts with the offending path
-// ("parameters.properties.city.pattern: ..."). Otherwise (2026-09-06) a
+// ("parameters.properties.city.pattern: ..."). Otherwise a
 // JSON-typed property keeps its type under the keywords that merely narrow
 // a value (minimum, maxLength, pattern, format, ...) — each is a line in
 // `notes`, "not enforced" — and only a schema outside the subset in shape
@@ -257,7 +257,7 @@ class GrammarState {
     kEnd,         // the turn must end: EOS
     kDone,        // EOS emitted: nothing more (the scheduler retires)
     kJsonBody,    // kJson: the JSON text (JsonMachine), then EOS
-    // The Qwen3.8 XML format (2026-09-09): the block's structure is TEXT
+    // The Qwen3.8 XML format: the block's structure is TEXT
     // between the <tool_call> ids, so every structural piece is a target
     // of the text automaton with the surrounding literals folded in
     // ("\n<function=NAME>\n", "<parameter=KEY>\n", "\n</parameter>\n",

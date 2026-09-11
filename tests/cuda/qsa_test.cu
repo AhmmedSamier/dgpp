@@ -1,4 +1,4 @@
-// The QSA kernels (Q3, 2026-09-09) against the host reference on small
+// The QSA kernels against the host reference on small
 // geometry: per-head norm+RoPE within two bf16 ulps; the index compression
 // through the prefill kernel, the decode ring and a prefill-then-decode
 // split all bitwise one another (and the ring snapshots the ring's own

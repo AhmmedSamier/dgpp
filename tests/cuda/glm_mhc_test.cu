@@ -219,7 +219,7 @@ void run_case(const Case& c, const char* label) {
                       ref.collapsed, 2, 4),
               0.005, 0, std::string(label) + " collapsed");
 
-  // Isolated update: both sides consume the SAME (oracle) bf16 post/comb.
+  // Isolated update: both sides consume the same (oracle) bf16 post/comb.
   std::vector<uint16_t> streams_ref(c.streams.size());
   dgpp::glm_mhc_ref_stream_update(post_ref.data(), comb_ref.data(),
                                   c.sublayer_out.data(), c.streams.data(),

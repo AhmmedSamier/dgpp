@@ -2,8 +2,8 @@
 
 DGPP is developed against real hardware: a DGX Spark (GB10) node builds and
 runs the single-node suites, and the four-node RoCE fabric runs the
-multi-node gates and the serving evidence. This page is what a change needs
-to land.
+multi-node checks and serving benchmarks. This page describes how to
+prepare and validate a change.
 
 ## Environment
 
@@ -16,7 +16,7 @@ to land.
   nothing.
 - The fabric for anything under `src/net/`, the graph engine, or the
   service's multi-rank paths: the loopback gates cover the protocol on one
-  node, the four-node rituals cover the wire.
+  node; four-node checks exercise the network.
 
 ## Build
 
@@ -25,40 +25,40 @@ cmake --preset ci && cmake --build build-ci -j -- -k    # warnings as errors; -k
 ctest --test-dir build-ci --output-on-failure
 ```
 
-`scripts/ci-local.sh` does exactly that. The other presets are `release`
-(what `scripts/release.sh` packs), `debug`, `asan` and `ubsan`. Two rules
-that were learned the hard way:
+`scripts/ci-local.sh` configures the CI preset, builds and runs CTest.
+The other presets are `release` (used by `scripts/release.sh`), `debug`,
+`asan` and `ubsan`.
 
 - **Run a full build before `ctest`.** The suite runs whatever binaries
-  exist; a target you did not build by name is a stale binary that passes.
+  exist; an old binary can pass without testing your changes.
 - **One CUDA suite at a time on a node that is also serving.** The loopback
   worlds share the GPU with the service and each owns a port in
-  29910–29941. `DGPP_TEST_FILTER=<substring>` runs a subset of a binary.
+  the 299xx range. `DGPP_TEST_FILTER=<substring>` runs a subset of a binary.
 
 ## What a change needs
 
-1. **A gate.** New behavior gets a test that would fail without it, in the
+1. **Tests.** New behavior gets a test that would fail without it, in the
    suite whose subject it is (`tests/unit` for pure logic, `tests/host` for
    the scheduler, the service and the journal with their fakes,
-   `tests/cuda` for kernels and the loopback worlds). Refusals are gated by
-   name: a request or a config the code rejects must be rejected with the
-   offending field in the message, and a test says so.
+   `tests/cuda` for kernels and loopback worlds). Test invalid requests
+   and configuration values as well, including whether the error names
+   the offending field.
 2. **Evidence on the fabric** when the change touches the path the ranks
    execute together: boot the world (`scripts/dgpp-cluster up`), run the
-   relevant ritual (`docs/operations.md` lists them; `scripts/serve_api_check.py`
+   relevant check (`docs/operations.md` lists them; `scripts/serve_api_check.py`
    for the request contract), stop it (`down`) and keep the four op-stream
    md5s identical. A numerics change is judged as `docs/numerics.md`
    describes, not by eye. A change that moves a published throughput number
-   re-runs that number's ritual from `docs/benchmarks.md` §9 and updates the
+   re-runs that number's procedure from `docs/benchmarks.md` §9 and updates the
    row there, with its date.
-3. **The record.** Every change that measures or fixes something gets an
+3. **Engineering records.** Changes with new measurements or debugging
+   findings get an
    entry in the engineering record, `benchmarks/results/2026-08-29-bus-m5.md`
-   (a dated `##` heading, what was built, how it was gated, what the fabric
-   showed, what the docs say now). The record is the memory of the project;
-   the earlier entries keep the names of their day.
-4. **The docs as built.** `DESIGN.md` describes contracts as they are, not
-   as planned; `PLAN.md` the status; `docs/operations.md` and `README.md`
-   whatever an operator or a new developer would now read differently.
+   (a dated `##` heading, the change, its validation and the results).
+   Preserve the context and names used in historical entries.
+4. **Documentation.** Keep `DESIGN.md` aligned with the implementation and
+   `PLAN.md` with its status. Update `docs/operations.md` and `README.md`
+   when a change affects setup, usage or supported behavior.
 
 ## Style
 
@@ -66,14 +66,17 @@ that were learned the hard way:
   format new and touched code with the `format` target (the tree has not
   been reformatted wholesale, so `format-check` over everything is not
   yet clean).
-- Comments say why, and they name the day and the record entry when a
-  line exists because of something that happened. Loud failure beats a
-  silent fallback: the refusal ladder, the journal's protocol checks and
-  the configuration handshake all follow that rule.
-- Determinism across ranks is a contract, not a goal: anything a rank
+- Write documentation in direct, connected prose. Explain current behavior
+  and its constraints before the details. Comments should explain intent,
+  invariants or a non-obvious tradeoff. Put investigation chronology in a
+  dated engineering record and link to it when the evidence helps explain
+  a constraint; avoid dates and milestone labels in routine comments.
+- Reject invalid configuration and protocol state with a useful error.
+- Preserve determinism across ranks: anything a rank
   decides that another rank must agree with is a pure function of the
   journaled stream, and the op-stream fold checks it every tick.
-- Python scripts use the standard library only.
+- Operations scripts use the Python standard library. Reference generators
+  may use optional dependencies and should document them.
 
 ## Commits
 

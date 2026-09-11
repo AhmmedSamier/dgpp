@@ -62,13 +62,13 @@ const char* finish_reason(Scheduler::Result::Reason r, bool tool_calls) {
     // which OpenAI's vocabulary calls "length"; the metrics and the log
     // carry the cause.
     case Scheduler::Result::Reason::kPoolExhausted: return "length";
-    // The client's stop string matched (2026-09-06): a natural end.
+    // The client's stop string matched: a natural end.
     case Scheduler::Result::Reason::kStop: return "stop";
     default: return "stop";
   }
 }
 
-// The usage object, with the details OpenAI reports (2026-09-06):
+// The usage object, with the details OpenAI reports:
 // prompt_tokens_details.cached_tokens — the prompt tokens the prefix cache
 // served (the attach position) — and completion_tokens_details.
 // reasoning_tokens — the generated ids that went to reasoning.
@@ -462,7 +462,7 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// The stop-string scanner (2026-09-06)
+// The stop-string scanner
 // ---------------------------------------------------------------------------
 
 std::string StopScanner::feed(std::string text) {
@@ -1398,7 +1398,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     }
   }
 
-  // The loud-refusal ladder for everything not implemented in v1.
+  // The unsupported-field checks for everything not implemented in v1.
   const char* unsupported[] = {
       "user",       "store",       "metadata",   "service_tier",
       "prediction", "audio",       "modalities", "web_search_options",
@@ -1417,7 +1417,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     }
   }
 
-  // n, stop and logit_bias (2026-09-06).
+  // n, stop and logit_bias.
   int n = 1;
   std::vector<std::string> stops;
   std::vector<dgpp::sched::LogitBias> logit_bias;
@@ -1637,7 +1637,7 @@ void GenerationService::route_completions(const HttpRequest& req,
     }
   }
 
-  // stop and logit_bias (2026-09-06).
+  // stop and logit_bias.
   std::vector<std::string> stops;
   std::vector<dgpp::sched::LogitBias> logit_bias;
   if (!parse_stop(body, w, &stops) || !parse_logit_bias(body, w, &logit_bias))
@@ -1754,7 +1754,7 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, m.pool_blocks_in_use);
   out.append(",\"tokens_generated\":");
   append_json_int(&out, m.tokens_generated);
-  // The throughput line's counters (2026-09-06), cumulative: a scraper
+  // The throughput line's counters, cumulative: a scraper
   // differences them the way the line does.
   out.append(",\"prompts_prefilled\":");
   append_json_int(&out, m.prompts_prefilled);
@@ -1859,7 +1859,7 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
 }
 
 // ---------------------------------------------------------------------------
-// The admission seam
+// The admission interface
 // ---------------------------------------------------------------------------
 
 void GenerationService::enqueue_admission(std::shared_ptr<StreamRecord> record,
@@ -1963,7 +1963,7 @@ void GenerationService::absorb(StreamRecord& r, ParserEvent ev) {
     case ParserEvent::Kind::kContent:
       if (ev.text.empty()) return;
       if (r.stop.active()) {
-        // The stop strings (2026-09-06) match the content: the scanner
+        // The stop strings match the content: the scanner
         // shows what precedes a match and holds a tail that could still
         // begin one.
         std::string shown = r.stop.feed(ev.text);
@@ -2015,7 +2015,7 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         // Exact incremental text: the suffix diff of successive full
         // decodes — UTF-8 splits and special tokens come out right by
         // construction (the tokenizer's own decode gates, pinned by its
-        // differential goldens). The stop scanner (2026-09-06) decides
+        // differential goldens). The stop scanner decides
         // what of it is shown.
         const std::string full = frontend_->decode_ids(r->ids);
         std::string suffix;
@@ -2648,7 +2648,7 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
     if (sched_.cancel(c.scheduler_id) && pre_tick)
       events.cancels.push_back(c.scheduler_id);
   }
-  // The stop-string retires (2026-09-06): like cancels — only the ones
+  // The stop-string retires: like cancels — only the ones
   // that hit ride the journal, every rank retires the request at this
   // quantum with Reason::kStop.
   for (const std::string& id : stops) {

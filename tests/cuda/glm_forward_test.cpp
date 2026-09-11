@@ -18,7 +18,7 @@
 // The ctest chain is: glm_forward_fixture (this binary, --write-fixture)
 // -> glm_forward_generate (tools/glm_reference_dump.py gen-pure) ->
 // glm_forward_test (this binary, --checkpoint-dir/--dump-file). The python
-// side reads the SAME checkpoint this test writes, so the tensor table has
+// side reads the same checkpoint this test writes, so the tensor table has
 // exactly one source (the C++ binding table).
 #include <algorithm>
 #include <cmath>

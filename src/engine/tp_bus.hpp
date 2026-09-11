@@ -1,5 +1,5 @@
 #pragma once
-// Composition seam (M5 deliverable 3): adapts BoundaryReducer to the
+// Composition interface (M5 deliverable 3): adapts BoundaryReducer to the
 // CollectiveBus one-shot all-reduce. Header-only so the ungated models
 // library never links ibverbs — only consumers that already link the bus
 // (the loopback test, the fabric app) include it.
@@ -11,7 +11,7 @@
 // chunking preserves the canonical per-element fold order, so every
 // rank's destination stays bitwise identical across ranks.
 //
-// Pre-stage seam (§6.3 evolution): boundaries that fit one slot are handed
+// Pre-stage interface (§6.3 evolution): boundaries that fit one slot are handed
 // the pinned staging buffer at stage() time — the producing GEMM writes
 // the transport's send source directly and the collective runs with zero
 // staging copies (the kernel only publishes ready). Boundaries above the
@@ -169,12 +169,12 @@ struct BusBoundaryReducer final : BoundaryReducer {
 // stream), then restore the eager reducer; the replay path never calls
 // a reducer (the graph's collective nodes do the folds).
 //
-// stage() hands out ONE stable DEVICE buffer — the decode shape is
+// stage() hands out one stable DEVICE buffer — the decode shape is
 // strictly one-boundary-at-a-time, and within a recorded graph the
 // producing kernel of boundary N+1 is stream-ordered behind boundary
 // N's fold, so a single buffer is the whole lifetime contract. The
 // baked src/dst addresses must outlive the graph. Device memory on
-// purpose (2026-09-02): only GPU kernels ever touch this buffer — the
+// purpose: only GPU kernels ever touch this buffer — the
 // producing GEMV writes it, the recorded collective kernel snapshots it
 // into the pinned staging rows and folds into it — and a GEMV whose 4096
 // lane-0 stores land in cudaMallocHost memory pays ~20 us per launch for
@@ -613,7 +613,7 @@ inline void bus_check_decision_digest(net::CollectiveBus& bus, int rank,
 
 // ---------------------------------------------------------------------------
 // The full-logit gather (DESIGN §10, the fallback): every rank's PENALIZED
-// fp32 vocab slice to every rank, as ONE bulk-class collective between
+// fp32 vocab slice to every rank, as one bulk-class collective between
 // windows. The wire carries each fp32 as four 8-bit digits in bf16 words:
 // bf16 holds every integer in [0, 256] exactly, exactly one rank writes any
 // slot (the others contribute +0), and the fold's fp32 accumulation of
@@ -674,17 +674,15 @@ inline void bus_gather_logits(net::CollectiveBus& bus, int rank, int world,
   }
 }
 
-// M6.6b correctness seam: gather an exact global candidate prefix plus every
-// slice normalizer through one latency-class fold, make the exact
-// resolved-vs-fallback decision on every rank, then carry rank 0's decision
-// digest back through a second latency collective that every rank must
-// decode identically. This is deliberately HOST code for now; the final hot
-// path lowers the same contract into glm_pick_local/verdict (where the
-// pinned verdict's digest group plays the digest collective's role). It is
-// nevertheless a real bus path, and the loopback gate below it catches
-// encoding, rank ordering, penalties, RNG, fallback-counter and readback
-// mistakes before CUDA is involved.
+// Host implementation of distributed sampling. Gather a global candidate
+// prefix and each slice's normalizer, decide whether the prefix is
+// sufficient, then compare rank 0's decision digest through another
+// collective. The in-graph picker implements the corresponding device
+// path with glm_pick_local/verdict and a digest in its verdict table.
+// Tests exercise encoding, rank order, penalties, RNG counters and
+// fallback behavior through the real bus.
 //
+
 // `scratch` is caller-owned pinned memory of at least
 // sampling_prefix_scratch_elems(world, candidate_k) bf16 words. On fallback
 // the RNG counter is unchanged so the later full-logit gather can consume the
@@ -934,7 +932,7 @@ inline sample::SpecPrefixDecision bus_spec_accept(
 
 // ---------------------------------------------------------------------------
 // The pick ON THE DEVICE (DESIGN §9, the on-device step): the same exact
-// argmax as bus_greedy_pick_rows, as two kernels around ONE collective —
+// argmax as bus_greedy_pick_rows, as two kernels around one collective —
 // glm_pick_local encodes this rank's per-row argmax into the wire table,
 // the bus SUM-folds the table (a gather over disjoint slots), and
 // glm_pick_verdict decodes every rank's identical table into the verdict
@@ -1072,7 +1070,7 @@ class DevicePicker {
     // device_sample_mask_words(vocab_size) words per row (null: none).
     const uint32_t* masks = nullptr;
     int mask_stride = 0;
-    // The logit bias (2026-09-06): [requests][vocab_size] floats, read for
+    // The logit bias: [requests][vocab_size] floats, read for
     // the rows whose spec says `biased` (null: no request biases).
     const float* bias = nullptr;
     // The drafts' proposals (2026-09-10, kernels/sample_pick.hpp): what the
@@ -1172,7 +1170,7 @@ class DevicePicker {
 
   // Slot `slot`'s last verdict (pinned; valid once its stream work
   // completed). Throws when the digest group disagreed: some rank
-  // computed a different verdict at the PREVIOUS pick — its table was not
+  // computed a different verdict at the previous pick — its table was not
   // the others' table.
   const PickVerdict& verdict(int slot = 0, int request = 0) const {
     check_slot(slot);

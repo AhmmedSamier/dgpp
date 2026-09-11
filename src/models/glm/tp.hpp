@@ -11,10 +11,9 @@
 //     into the layer's fused layout), f_b/g_b/a_log/dt_bias contiguous
 //     row ranges, o_proj column packs; DSA q_b/kv_b contiguous head
 //     blocks, o_proj column pack; dense, shared-expert AND every routed
-//     expert's gate/up row views with the down projection column-packed
-//     (the routed experts were whole-per-rank until 2026-09-02; slicing
-//     them equalizes the ranks' per-token expert bytes — the router still
-//     scores all experts on every rank).
+//     expert's gate/up row views with the down projection column-packed.
+//     Every rank scores all experts and reads equally sized slices of
+//     the selected experts.
 //
 // Quantized (E4M3 + 128x128 block scale) row/column slices must start
 // 128-ALIGNED in the sliced dimension: the local-frame consumer re-anchors
@@ -23,8 +22,8 @@
 // in bind check the same contract). Non-multiple TAILS at world=1 remain
 // the kernel's own masked-tile case — correct and separately covered.
 //
-// The slice scratch is one slab of FIXED region slots reused per layer
-// (exactly one layer is resident at a time — the loader's contract), so
+// Slice scratch uses fixed regions that can be reused when rebinding a
+// layer in the full-load reference path, so
 // bind's arithmetic and slice_bytes' sizing share one layout. Pack copies
 // enqueue on the model's stream: a bound view is valid once the stream
 // drains, and the layer's enqueues follow on the same stream behind them.
@@ -75,16 +74,16 @@ class GlmTpViews {
   GlmLayerBound bind(const GlmLayerResident& r, bool dense_mlp);
 
   // Binds a SHARDED resident layer (M5 d4): a GlmLayerStream constructed
-  // with the SAME rank/world already built the local geometry and did the
+  // with the same rank/world already built the local geometry and did the
   // packs at load time, so this is wholesale pointer wiring plus the
   // expert-partition stamps the loader recorded. No slab copies. The
-  // shard-parity test pins this path BITWISE against bind() of a full
+  // shard-parity test pins this path bitwise against bind() of a full
   // resident — the two are alternative implementations of one slicing
   // spec (§5.2), and the test is what keeps them from drifting.
   GlmLayerBound bind_sharded(const GlmLayerResident& r, bool dense_mlp);
 
   // Exact device bytes of the slice slab (same layout bind carves). The
-  // routed experts' down packs are NOT in it: bind() allocates that region
+  // routed experts' down packs are not in it: bind() allocates that region
   // on first use (see expert_pack_bytes) — it is the parity reference's
   // cost, and production ranks (bind_sharded) never bind a full layer.
   static size_t slice_bytes(const GlmTextConfig& cfg, int world);
@@ -137,7 +136,7 @@ class GlmTpViews {
   size_t slab_bytes_ = 0;
   uint8_t* expert_pack_ = nullptr;  // lazily allocated (bind() only)
   // The DSA bridge form out of a full-load resident that holds the FP8
-  // pairs (2026-09-08): at a world whose q_b / o_proj slices start
+  // pairs: at a world whose q_b / o_proj slices start
   // mid-block, the sharded loader takes the bf16 bridge, so the views
   // dequantize the full pairs here (the loader's kernel, the same
   // rounding) and slice the bf16 — [qkv_a fused | q_b full | o_proj full].

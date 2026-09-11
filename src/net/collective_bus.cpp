@@ -48,7 +48,7 @@ constexpr int kEngineSpinIterations = 2000;
 constexpr int kEngineIdleSleepUs = 50;
 constexpr size_t kMaxLatencySamples = 100000;
 // Spin before entering the scheduler on a request wait. LONG on purpose
-// (2026-09-02): the decode step's eager pick (two ~150us collectives
+//: the decode step's eager pick (two ~150us collectives
 // between graph windows) fell out of a 500us spin into the futex in ~2% of
 // steps, and the wake back came 7-10ms later — the woken main thread
 // landed behind a hot spinner and waited out a CFS slice (PREEMPT_NONE,
@@ -108,7 +108,7 @@ struct BusRequest {
   void* dev_dst = nullptr;
   size_t elems = 0;
   uint32_t ctl_seq = 0;
-  // Staging-ring generation (the §6.3 staging seam): >= 0 marks a
+  // Staging-ring generation (the §6.3 staging interface): >= 0 marks a
   // pre-staged collective (the producing GEMM wrote the peer-0 buffer
   // through stage_next()); the engine uses this exact generation for every
   // peer. -1 = device-source mode; the engine picks a generation.
@@ -138,7 +138,7 @@ struct BusRequest {
   std::string error;
 };
 
-// Cheap spin hint (NOT the sched_yield syscall — that surrenders the
+// Cheap spin hint (not the sched_yield syscall — that surrenders the
 // timeslice; the engine measured 2.2ms poll latency doing it).
 inline void cpu_relax() {
 #if defined(__aarch64__)
@@ -219,7 +219,7 @@ struct CollectiveBus::Impl {
   // ---- collective state (§6.3) --------------------------------------------
   // The ctl cell is one pinned cache line the kernel and the engine share;
   // the stream serializes per-collective kernels. coll_q/coll_active make
-  // single-outstanding airtight across the submit/engine seam; coll_mode
+  // single-outstanding airtight across the submit/engine interface; coll_mode
   // rejects harness sends once the bus is in collective mode (their
   // messages would be claimed — and folded — by a peer's collective
   // kernel: a silent-corruption class we refuse to ship). Atomic: the
@@ -263,7 +263,7 @@ struct CollectiveBus::Impl {
     int stage_gen = -1;              // staging ring generation in flight
   } coll;                            // engine thread only
 
-  // ---- collective staging block (§6.3 seam, M5 d3) -----------------------
+  // ---- collective staging block (§6.3 interface, M5 d3) -----------------------
   // Fixed pinned buffers, kStageRing-deep per peer PLUS one dedicated
   // "self" row: collective payloads are sent from the peer rows (a SEND's
   // local address is any MR-registered memory; only the doorbell's remote
@@ -849,7 +849,7 @@ struct CollectiveBus::Impl {
       // The segment plan: sub-range table = each rank's owned stripes of
       // this segment (RS stages peers' ranges out; AG broadcasts mine;
       // RS folds mine; AG lands peers'). Shards are split PER SEGMENT
-      // (2026-09-04): a contiguous ceil split of this segment's stripes
+      //: a contiguous ceil split of this segment's stripes
       // across the ranks, so every rank folds and broadcasts in every
       // segment. The earlier global-contiguous split put each rank's whole
       // shard inside one segment of a multi-segment buffer, and the world
@@ -1009,7 +1009,7 @@ struct CollectiveBus::Impl {
 
     // Completion: the kernel's stamp ends this segment; advance the
     // machine. Clear-before-complete on every terminal path. Two drains
-    // gate the advance, both because DONE DOES NOT IMPLY POSTED:
+    // gate the advance, both because DONE DOES not IMPLY POSTED:
     //   * this segment's posting must be fully out — a zero-arrival
     //     kernel (empty receive window) stamps done instantly while its
     //     own stripes are still being posted, and the next launch RESETS
@@ -1140,7 +1140,7 @@ struct CollectiveBus::Impl {
 
   // The generation's kernel timeline, from its cell's %globaltimer stamps:
   //   copy       entry -> staging rows written (phase 1)
-  //   handshake  staging written -> FIRST peer payload gated: engine notice
+  //   handshake  staging written -> first peer payload gated: engine notice
   //              + post + wire + the peer's own readiness (the fastest
   //              peer's arrival)
   //   skew       first -> last peer gated: the slowest peer's lag
@@ -1304,7 +1304,7 @@ struct CollectiveBus::Impl {
       // consumed (door.seq == ack.seq). An unconsumed doorbell here is the
       // precursor of the ring-recycle freeze — the receive queue drains
       // over the next wrap and the wrap's last sender RNR-retries forever
-      // (a once-in-~30k-gen stall, unreproduced but not forgiven). NOT an
+      // (a once-in-~30k-gen stall, unreproduced but not forgiven). not an
       // era failure: the peer's engine may already be posting this window
       // (its adopt precedes its posts too, but its doorbell can land
       // between this pass's door and ack reads — door=ack+1 mid-flight is
@@ -1366,7 +1366,7 @@ struct CollectiveBus::Impl {
     }
 
     // The current generation: node (gen - adopted_first) — window-
-    // relative, NOT (gen-1)%gens (that held only for first==1 windows;
+    // relative, not (gen-1)%gens (that held only for first==1 windows;
     // prefill before the era moves first). At most one kernel is
     // un-done at a time (the graph serializes them), so the walk's view
     // of the cell is exclusive.
@@ -1381,7 +1381,7 @@ struct CollectiveBus::Impl {
     // The flight activates BEFORE the done check: a fast peer can stamp
     // this kernel's done within one engine pass of its ready (the fold
     // waits on the PEER's doorbell, not this side's own post — done does
-    // NOT imply posted), and the advance below requires the posting mask
+    // not imply posted), and the advance below requires the posting mask
     // complete. A generation whose pair is still ring-deferred parks
     // here until the drain; advancing first would strand the peer's
     // kernel on a doorbell that never comes (measured: posts 131/132
@@ -1849,7 +1849,7 @@ struct CollectiveBus::Impl {
       worked = true;
     }
 
-    // DONE DOES NOT IMPLY POSTED — the one-shot form (2026-09-05). The
+    // DONE DOES not IMPLY POSTED — the one-shot form. The
     // kernel stages, releases the ready bits, claims, folds and stamps
     // done; when every peer had already posted, all of that takes ~20 us
     // and can fit between this thread's two reads of the control cell.
@@ -1997,14 +1997,14 @@ struct CollectiveBus::Impl {
       // timing under hunt. One line per pick phase is the compromise: a
       // recurrence now carries its discriminating evidence (stale len vs
       // misaligned cell vs fresh-door/stale-payload) at production timing.
-      // The eager collective's timeline (2026-09-02): host side (queue
+      // The eager collective's timeline: host side (queue
       // wait, the launch call) and GPU side (%globaltimer stamps: copy,
-      // handshake, skew, fold) plus the two seams between them — launch
+      // handshake, skew, fold) plus the two interfaces between them — launch
       // call -> kernel start and kernel done -> engine noticed — read
       // against CLOCK_REALTIME, which %globaltimer tracks on this driver.
       // Always for the pick class (elems <= 64: two lines per decode
       // step), and for ANY eager collective slower than 2 ms — the
-      // decode step's p99 lived in exactly one of these seams.
+      // decode step's p99 lived in exactly one of these interfaces.
       const double total_us = elapsed_us(req.submitted);
       if (req.elems <= 64 || total_us > 2000.0) {
         auto us = [](uint64_t a, uint64_t b) {
@@ -2401,7 +2401,7 @@ struct CollectiveBus::Impl {
       } else if (++idle > kEngineSpinIterations && !graph_window_live() &&
                  !graph.recorded.load(std::memory_order_relaxed)) {
         // The nap is for the pre-serving idle only. Once a decode graph
-        // exists this thread never sleeps (2026-09-02): a 50 us nap between
+        // exists this thread never sleeps: a 50 us nap between
         // windows made its core look idle, the scheduler parked another
         // runnable thread there (the main thread's sync spin, a driver
         // thread), and the wake-up waited out that thread's CFS slice —
@@ -3148,7 +3148,7 @@ BusSendResult CollectiveBus::wait(uint64_t send_id, int timeout_ms) {
   }
   const bool done = impl.spin_then_wait(req.get(), timeout_ms);
   if (!done) {
-    // Backstop only. The request is NOT removed: it may still be in flight
+    // Backstop only. The request is not removed: it may still be in flight
     // (SendSlot::owner points at it) and the engine watchdog owns its
     // lifecycle from here.
     result.error = "wait backstop timeout (engine watchdog should have "

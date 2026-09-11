@@ -1267,7 +1267,7 @@ DGPP_TEST(sample_pick_masked_rows_match_host_oracle_bitwise) {
     //    flat-ish row: fallbacks happen; the gather path is the host's);
     // 2: greedy under the allow-list (the masked argmax);
     // 3: unconstrained sampled (the mask table's header is 0);
-    // 4: sampled, allow-list of ONE id (the degenerate distribution).
+    // 4: sampled, allow-list of one id (the degenerate distribution).
     std::vector<dgpp::SampleSpec> specs(requests);
     specs[0].temperature = 1.0f; specs[0].top_p = 0.95f;
     specs[1].temperature = 1.3f; specs[1].top_p = 1.0f;
@@ -2187,7 +2187,7 @@ DGPP_TEST(sample_pick_reports_logprobs_bitwise) {
   }
 }
 
-// The sampled draft's proposal (2026-09-10): when the verify is handed the
+// The sampled draft's proposal: when the verify is handed the
 // distribution its draft was drawn from, the device's row-0 decision is the
 // host oracle's min(1, P/Q) accept and (P - Q)+ residual, bit for bit — and
 // a proposal whose token is not the fed draft is ignored (the deterministic

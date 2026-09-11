@@ -1,7 +1,7 @@
 // M6 Stage 4b gate: the admission journal (the metronome), both loops,
 // and the §11 identity — over REAL localhost TCP and REAL HTTP, with
 // only the engine faked. What the 4a gate did for the OpenAI contract,
-// this does for the fabric seam:
+// this does for the fabric interface:
 //   * rank-0 side: HttpServer + GenerationService (both real) over a
 //     deterministic FakeEngine, the engine loop driving engine_pass
 //     with the journal hook — exactly the app's loop;
@@ -58,7 +58,7 @@ constexpr int32_t kFakeEos = 999;  // the fake's end-of-sequence id
 
 // The 4a gate's deterministic fake model: token i of a request whose
 // rendered prompt is P bytes is ((len*31 + i*7) % 250) + 1 — never 0,
-// never EOS; prompt len % 4 == 3 answers EOS as its SECOND token,
+// never EOS; prompt len % 4 == 3 answers EOS as its second token,
 // len % 4 == 2 answers EOS on the PREFILL pick.
 int32_t fake_token(size_t prompt_len, int index) {
   return static_cast<int32_t>((prompt_len * 31 +
@@ -438,7 +438,7 @@ void test_journal_codec() {
     require(sr.settings && !sr.warm && !sr.stop && sr.world_settings == ws,
             "codec: the settings record round-trips");
     {
-      // The KV dtype rides by name (2026-09-06); an unknown one is refused.
+      // The KV dtype rides by name; an unknown one is refused.
       dgpp::serve::WorldSettings bad = ws;
       bad.kv_dtype = "int4";
       bool refused_dtype = false;
@@ -460,7 +460,7 @@ void test_journal_codec() {
     require(refused, "codec: a settings record with a world of one is refused");
   }
   {
-    // The logit bias and the stops (2026-09-06): "lb" pairs round-trip bit
+    // The logit bias and the stops: "lb" pairs round-trip bit
     // for bit; "sp" rides beside the cancels; a request without them is
     // unchanged on the wire.
     GenerationService::PassEvents ev;
@@ -577,7 +577,7 @@ void test_journal_codec() {
 
   // The sampling spec (M6 6b): a greedy submit's record carries no spec
   // (byte-identical to the pre-sampling format); a stochastic submit's
-  // spec and seed round-trip BITWISE; a corrupt spec is refused.
+  // spec and seed round-trip bitwise; a corrupt spec is refused.
   {
     const std::string greedy_line =
         dgpp::serve::encode_journal_tick(events);
@@ -923,7 +923,7 @@ std::string wait_metrics(FabricRig& rig, const std::string& needle) {
 
 void test_non_stream_and_identity(FabricRig& rig) {
   // "Hello world, tests!" — 19 characters exactly (13 + 5 + 1; counted
-  // twice, trust it): 19 % 4 == 3 → EOS on the SECOND token (finish
+  // twice, trust it): 19 % 4 == 3 → EOS on the second token (finish
   // "stop", completion_tokens 2), and the first token is
   // fake_token(19,0) = 90 = 'Z' — printable, JSON-escape-free, so the
   // raw-body substring assert below is byte-exact.
@@ -1228,9 +1228,9 @@ void test_rank0_death_releases_a_peer_mid_tick(FabricRig& rig) {
 
 void test_op_stream_divergence_kills_the_peer(FabricRig& rig) {
   // M9's counter-drift check: every tick record carries rank 0's op-stream
-  // fold after the previous tick, and a peer whose fold differs dies loudly
+  // fold after the previous tick, and a peer whose fold differs exits with an error
   // with the tick number — one tick late at most — instead of serving on
-  // and being caught by the shutdown ritual's md5. Peer 1's engine is made
+  // and being caught by the shutdown procedure's md5. Peer 1's engine is made
   // to produce different tokens; its loop must throw at the record after
   // the first diverging tick, naming the tick; its death then fails rank 0
   // (the watch) and releases the other peer.

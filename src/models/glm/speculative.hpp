@@ -1,5 +1,5 @@
 #pragma once
-// GLM's eager speculators (Q1, 2026-09-09): engine/speculative.hpp's
+// GLM's eager speculators: engine/speculative.hpp's
 // templates; CTAD binds them from the model argument, and the explicit
 // specializations below name them where a type is required.
 #include "engine/speculative.hpp"

@@ -1,7 +1,7 @@
 #pragma once
-// Deterministic exp/log, BITWISE identical on the host and the device.
+// Deterministic exp/log, bitwise identical on the host and the device.
 //
-// The sampler's semantics (models/glm_sampler.hpp) are defined by their
+// The sampler's semantics (sample/sampler.hpp) are defined by their
 // arithmetic, and the device verdict kernel must reproduce the host oracle
 // bit for bit — including libm's share of it. glibc's exp/log and CUDA's
 // are different implementations with different last bits (and glibc's

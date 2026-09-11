@@ -1,7 +1,7 @@
 // Parity tests for the scale-aware GEMM (M4 deliverable 3: "block edges,
 // saturation, NaN/Inf policy, and real checkpoint slices" — the real-slice
 // half runs via --checkpoint-dir, mirroring the dump-parity runner
-// pattern). Every synthetic case is checked against BOTH oracles: strict
+// pattern). Every synthetic case is checked against both oracles: strict
 // (bf16-rounded weights, fp64 accumulation — isolates the kernel) and
 // semantic (true dequant — pins the DESIGN §4 scale contract).
 #include <cmath>
@@ -318,7 +318,7 @@ DGPP_TEST(fp8_gemv_hardware_conversion_matches_bridge_on_every_code) {
   std::printf("[ OK ] e4m3 hardware conversion == bridge on all 256 codes\n");
 }
 
-// The multi-problem GEMV (2026-09-10): several [n_i, k] matrices against
+// The multi-problem GEMV: several [n_i, k] matrices against
 // the same rows in one launch — every problem's output bitwise its own
 // launch_scale_gemm_bf16, at one to four rows (one chunk) and six (two).
 DGPP_TEST(scale_gemm_gemv_multi_is_bitwise_the_single_launches) {
@@ -364,7 +364,7 @@ DGPP_TEST(scale_gemm_gemv_multi_is_bitwise_the_single_launches) {
 }
 
 DGPP_TEST(scale_gemm_gemv_path_ragged_n_and_k_match_both_oracles) {
-  // GIVEN m=1 with k a multiple of 16 but NOT of 128 (the last chunk sits
+  // GIVEN m=1 with k a multiple of 16 but not of 128 (the last chunk sits
   // in a partial scale block) and n not a multiple of the 8-row block:
   const Problem p = make_problem(1, 1003, 1008, 0xE1);
   const std::vector<uint16_t> got = run_kernel(p);

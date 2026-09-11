@@ -1,6 +1,6 @@
 #pragma once
 // Launchers for the MoE kernels (DESIGN §7.4; semantics in
-// models/glm_moe.hpp). All deterministic (fixed reduction/selection order)
+// models/glm/moe.hpp). All deterministic (fixed reduction/selection order)
 // and CUDA-graph capturable: no scratch, no host reads.
 #include <cuda_runtime.h>
 
@@ -11,7 +11,7 @@ namespace dgpp {
 // Router: hidden bf16 [tokens, hidden] -> ids int32 [tokens, top_k] in
 // ASCENDING expert order (the accumulation order the reference's index_add
 // produces), weights f32 [tokens, top_k] normalized and scaled. Per-(expert,
-// token) dots, then per-token selection — two kernels, or ONE when
+// token) dots, then per-token selection — two kernels, or one when
 // `counters` (an int per token, zeroed once; the kernel leaves them zero)
 // is given: the last dots block of a token runs the selection, bitwise the
 // two-kernel form. `scores` and `biased` are f32 [tokens, n_experts] device
@@ -45,7 +45,7 @@ void launch_moe_accum(float* acc, const float* y, const int32_t* rows,
                       const float* row_weights, int n_rows, int hidden,
                       cudaStream_t stream);
 
-// ---- the prefill's grouped expert path (2026-09-04) ----------------------
+// ---- the prefill's grouped expert path ----------------------
 // One launch per matrix per layer over EVERY non-empty expert segment: block
 // (x, y) is the y-th segment against weight rows [x*kWarps, +kWarps) of its
 // expert's [n, k] matrix (views[segment.expert * 3 + which]), its rows
@@ -77,10 +77,10 @@ void launch_moe_grouped_gemv_f32(const uint16_t* act, size_t act_stride,
 // reference tile kernel for every width.
 void moe_set_fp8_ldm(bool on);
 
-// The grouped tensor-core GEMM (2026-09-05): the same contract and
+// The grouped tensor-core GEMM: the same contract and
 // arguments, computed by bf16 mma.sync in 128-row m-tiles per block — every
 // output element bitwise the tile kernel's (scale_gemm_kernel: the same
-// dequantized weights and the same ascending-k16 accumulation), NOT the
+// dequantized weights and the same ascending-k16 accumulation), not the
 // GEMV core's. The prefill path uses it (a segment up to 128 rows reads
 // its expert's weights once instead of once per four rows); the decode
 // path keeps the GEMV core. rows_per_block, when set, must be a multiple
@@ -100,7 +100,7 @@ void launch_moe_grouped_mma_f32(const uint16_t* act, size_t act_stride,
                                 int which, float* out, size_t out_stride, int n,
                                 int k, cudaStream_t stream,
                                 const int32_t* act_rows = nullptr);
-// The dense form of the same kernel (2026-09-05): out[m, n] = act[m, k] x
+// The dense form of the same kernel: out[m, n] = act[m, k] x
 // W[n, k]^T (fp8 payload + block scales, out row stride n) — bitwise the
 // scale GEMM's tile kernel; the scale GEMM routes m > 128 here.
 void launch_dense_mma_bf16(const uint16_t* act, size_t act_stride,

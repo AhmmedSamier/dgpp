@@ -22,10 +22,12 @@
 //   act  = bf16(bf16(silu_f32(gate)) * up)             — two roundings
 //   y    = act @ Wd^T                                  — bf16 out
 //
-// Accumulation (per token, ASCENDING expert id — the reference's index_add
+// Reference accumulation (per token, ascending expert id — the reference's index_add
 // over experts arrives in ascending order):
 //   out = 0; for e ascending: out = bf16(out + bf16(w_e * y_e));
 //   out = bf16(out + shared(x))    — shared expert added last, weight 1.
+// The production TP path keeps partial down dots and the weighted chain
+// in FP32, then rounds once before the FFN all-reduce; see moe_layer.hpp.
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -34,7 +36,7 @@
 
 namespace dgpp {
 
-// The router's scoring rule (2026-09-09). SigmoidBias: GLM's — sigmoid
+// The router's scoring rule. SigmoidBias: GLM's — sigmoid
 // scores, a per-expert bias on the selection key, the picked SCORES
 // normalized. SoftmaxTopk: Qwen3.8-Flash-Next's — fp32 softmax over the
 // bf16 logits, top_k on the logits, the picked probabilities normalized
@@ -87,7 +89,7 @@ struct GlmMoeConfig {
 
 // Device-pointer weight view (GlmLayerStream's GlmMoeResident wires this).
 //
-// TP partition (2026-09-02, expert slicing): the router is REPLICATED and
+// TP partition (2026-09-02, expert slicing): the router is replicated and
 // scores all cfg.n_experts on every rank (selection must be rank-identical);
 // EVERY rank holds EVERY expert, sliced on the intermediate dimension —
 // gate/up rows and down columns [rank*I/world, (rank+1)*I/world), exactly as
@@ -107,7 +109,7 @@ struct GlmMoeWeights {
   // through the fp4 core. payload null = the FP8 shared triple above.
   GlmFp4Matrix shared_fp4[3];
   bool shared_nvfp4() const { return shared_fp4[0].payload != nullptr; }
-  // The routed experts in EXACTLY ONE of the two formats (the layer's
+  // The routed experts in exactly one of the two formats (the layer's
   // GlmExpertFormat): FP8 block-128 triples or NVFP4 triples, [n_experts *
   // 3] gate,up,down either way. The shared expert is FP8 under both for
   // GLM-5.3 (the composed hybrid); NVFP4 for GLM-4.7.
@@ -116,7 +118,7 @@ struct GlmMoeWeights {
   bool nvfp4() const { return experts_fp4 != nullptr; }
 };
 
-// The decode path's device-side expert table entry (2026-09-01): the
+// The decode path's device-side expert table entry: the
 // slot kernels read the ROUTE from device memory, so the weight views
 // they indirect through must live there too. Dims stay kernel args (all
 // routed experts share them; only the shared expert's inter differs).

@@ -32,7 +32,7 @@ __device__ __forceinline__ float warp_max(float v) {
 // ---- qkv finish ---------------------------------------------------------------
 // One warp per (row, head); lane l owns dims [4l, 4l + 4). The partial
 // RoPE pairs dim i with dim i + rotary_dim/2 (transformers' rotate_half:
-// x1 = the first half, x2 = the second — NOT the interleaved form of the
+// x1 = the first half, x2 = the second — not the interleaved form of the
 // older glm / glm4 architectures, 2026-09-10), so a pair spans two lanes
 // rotary_dim/8 apart and the partner's values come through a shuffle.
 // blockDim 256 = 8 (row, head) items.

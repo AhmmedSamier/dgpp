@@ -1,5 +1,5 @@
 #pragma once
-// engine/prefix_arena.hpp's template, for GLM (Q1, 2026-09-09).
+// engine/prefix_arena.hpp's template, for GLM.
 #include "engine/prefix_arena.hpp"
 #include "models/glm/forward.hpp"
 

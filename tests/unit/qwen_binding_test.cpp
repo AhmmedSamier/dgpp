@@ -1,4 +1,4 @@
-// The Qwen3.8-Flash-Next expected-tensor table (Q2, 2026-09-09): its size
+// The Qwen3.8-Flash-Next expected-tensor table: its size
 // and the n-gram shard geometry on the release's config, the TP geometry
 // acceptance at the deployment worlds, and — when the checkpoint is in the
 // hub cache — the full binding against every shard's header (152 089

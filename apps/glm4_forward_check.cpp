@@ -1,5 +1,5 @@
 // glm4_forward_check: the GLM-4.7 world-1 diagnostic forward
-// over a real checkpoint (2026-09-09) — one prompt of token ids
+// over a real checkpoint — one prompt of token ids
 // through the streaming resident loader, the per-layer residual
 // magnitudes and every position's top-k next-token logits; ids come in on
 // the command line.

@@ -594,7 +594,7 @@ void require_within_fold_budget(
   require(l2 < 4e-3, "sliced fold: l2 budget");
 }
 
-// ---- the grouped prefill path (2026-09-04) --------------------------------
+// ---- the grouped prefill path --------------------------------
 
 DGPP_TEST(moe_grouped_gemv_is_bitwise_the_chunked_scale_gemm_per_segment) {
   // GIVEN segments of every shape the prefill produces — one row, a partial
@@ -1072,7 +1072,7 @@ DGPP_TEST(moe_router_ties_break_to_lower_expert_id) {
 }
 
 DGPP_TEST(moe_swiglu_clamp_edge_semantics) {
-  // gate clamps ONLY the max; up clamps both; exactly-at-limit values pass.
+  // gate clamps only the max; up clamps both; exactly-at-limit values pass.
   const float limit = 10.0f;
   const std::pair<float, float> cases[] = {
       {12.0f, 3.0f},    // gate above limit
@@ -1195,7 +1195,7 @@ DGPP_TEST(moe_accumulation_order_is_ascending_expert) {
   c.free_all();
 }
 
-// The decode fast path's pin (2026-09-01): the slot kernels must
+// The decode fast path's pin: the slot kernels must
 // reproduce the host-orchestrated path's EXACT bits at the same
 // routing — same tile arithmetic (slot GEMV vs scale_gemm at m=1), same
 // swiglu, same ascending fp32 accumulation, same shared-last fma, same
@@ -1277,7 +1277,7 @@ DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path) {
   }
 }
 
-// The TP expert slicing (2026-09-02): every rank holds every expert's
+// The TP expert slicing: every rank holds every expert's
 // slice of the intermediate dim, computes its fp32 partial chain, rounds
 // once, and the FFN all-reduce folds the ranks. GIVEN a small MoE sliced
 // across `world` ranks the way the loader slices it, WHEN each rank runs

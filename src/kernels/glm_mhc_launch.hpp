@@ -1,6 +1,6 @@
 #pragma once
 // Launchers for the mHC module kernels (DESIGN §7.3; semantics documented in
-// models/glm_mhc.hpp). All kernels are deterministic (fixed reduction order)
+// models/glm/mhc.hpp). All kernels are deterministic (fixed reduction order)
 // and CUDA-graph capturable: caller-owned scratch only, no host reads, no
 // dynamic smem.
 #include <cuda_runtime.h>

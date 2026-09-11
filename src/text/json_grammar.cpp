@@ -1689,7 +1689,7 @@ void JsonMachine::mask(const GrammarVocab& vocab, TokenMask* out) const {
         enum_ahead = enum_ahead || (leaf != JsonSchemaNode::kAny &&
                                     schema_->nodes[static_cast<size_t>(leaf)].has_enum);
     }
-  // 2b. A bounded integer being spelled, or expected here (2026-09-07):
+  // 2b. A bounded integer being spelled, or expected here:
   //     the numeric tokens' static answer is lexical, so each is judged by
   //     its digits against every cursor's range (the enum-ahead pass below
   //     simulates them all anyway).

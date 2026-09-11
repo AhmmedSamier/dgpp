@@ -1,10 +1,10 @@
-// The PLE layer's kernels (Q3, 2026-09-09) against the host reference:
+// The PLE layer's kernels against the host reference:
 // the hash ids bitwise (and inside their heads' ranges, EOS resets
 // included), the table gather bitwise at world 1 and on a TP=2 rank's
 // head slice, the gate within two bf16 ulps (the dot's reduction order),
 // the dilated conv bitwise with its state — one call against two chunks
 // with the state carried — and the whole layer end to end at world 1
-// through the GEMM seam, at a GEMV-shaped and a GEMM-shaped token count.
+// through the GEMM interface, at a GEMV-shaped and a GEMM-shaped token count.
 #include <cstdint>
 #include <cstdio>
 #include <string>

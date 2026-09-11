@@ -1,5 +1,5 @@
 #pragma once
-// Moved to engine/graph_check.hpp (Q1, 2026-09-09); the GLM-era name stays.
+// Moved to engine/graph_check.hpp; the GLM-era name stays.
 #include <string>
 
 #include "engine/graph_check.hpp"

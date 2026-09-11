@@ -1,33 +1,16 @@
-// The cluster config (2026-09-06, the productionizing pass): ONE JSON file
-// that every rank and the launcher read, replacing the launcher's
-// hard-coded addresses, ports and model and the knob string each rank was
-// handed on its command line.
+// Cluster configuration shared by the launcher and server.
 //
-//   {
-//     "model": "unsloth/GLM-5.3-Flash-FP8",
-//     "nodes": ["192.0.2.11", "192.0.2.12", ...],         // rank = index; [0] is the head
-//     "ssh_user": "<login>",                               // the launcher's ssh user
-//     "ports": {"http": 18080, "fabric": 29970, "journal": 29971},
-//     "engine": {"max_concurrency": 4, "kv_capacity": 8192, "kv_dtype": "bf16", ... },
-//     "paths": {"log_dir": "~/dgpp/log", "stage_dir": "/tmp/bus4",
-//               "release_dir": "~/dgpp/releases", "resident_cache": ""}
-//   }
+// The JSON file defines the model, nodes in rank order, ports, engine
+// options and local paths. nodes[0] is rank 0, which serves HTTP and sends
+// effective model/engine settings to peers through the admission journal.
+// Peers read bootstrap addresses and local paths from their own files.
 //
-// `dgpp-serve --config PATH --rank R` takes the model, the world (the node
-// count), this rank's peer (node 0), the ports and every engine knob from
-// the file; flags given after it override (the evidence scripts' knob
-// strings still win). Every key is checked by name: an unknown key or a
-// wrong type is an error, never a silent default — a misspelt knob must
-// not deploy. The engine defaults here are the binary's own flag defaults,
-// so there is exactly one set of defaults; the committed deploy/cluster.json
-// states the production values explicitly.
-//
-// The EFFECTIVE configuration (what the rank actually runs, after flags) is
-// canonicalized and digested by the app; rank 0 puts the digest on the
-// journal's warm record and every peer compares its own before serving —
-// a world whose ranks disagree on the model, the world size, the fabric
-// ports or an engine knob refuses to form (the drift a shared knob string
-// prevented by convention is now checked).
+// Flags after --config override the file. Unknown keys and invalid types
+// are errors. Engine defaults match the binary's defaults; deployment
+// templates set serving values explicitly. Each rank hashes its effective
+// shared configuration, and the warm record checks those hashes before
+// serving. See README.md for the schema and deploy/*.example.json for
+// templates; site configurations are not tracked.
 #pragma once
 
 #include <cstdint>
@@ -48,12 +31,12 @@ struct ClusterConfig {
     int max_concurrency = 8;
     int64_t kv_capacity = 8192;
     std::string kv_dtype = "bf16";  // the latent cache's format: bf16 | fp8 | fp4
-    // The Qwen n-gram table's residency (2026-09-10): "resident" copies it
+    // The Qwen n-gram table's residency: "resident" copies it
     // to the device (the default; 47.7 GiB at world 1), "mmap" leaves it
     // on the NVMe behind the page cache and gathers each step's rows on
     // the host — the single-Spark deployment.
     std::string ngram_table = "resident";
-    // The Qwen dense stack's form (2026-09-10): "checkpoint" (the default:
+    // The Qwen dense stack's form: "checkpoint" (the default:
     // the BF16 the checkpoint ships) or "fp8" (every dense projection
     // encoded to block FP8 at load — the same recipe as the FP8 releases;
     // docs/qwen38_single_spark.md).

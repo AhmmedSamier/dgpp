@@ -245,7 +245,7 @@ GlmLayerBound GlmTpViews::bind(const GlmLayerResident& r, bool dense_mlp) {
     const bool aligned = (dsa_geo_.local_q_rows % 128) == 0 &&
                          (dsa_geo_.local_v_rows % 128) == 0;
     if (r.dsa.quantized() && aligned) {
-      // The FP8 form (2026-09-08): q_b this rank's 128-aligned row range of
+      // The FP8 form: q_b this rank's 128-aligned row range of
       // the full pair, o_proj its packed column slice — payload then scale
       // grid in the slab region the bf16 pack used (the fp8 pack is
       // smaller than the bf16 one).
@@ -404,7 +404,7 @@ GlmLayerBound GlmTpViews::bind_sharded(const GlmLayerResident& r,
   } else {
     // A full-resident layer here would silently execute every expert
     // UNSLICED as this rank's "partial" — the one footgun worth a guard at
-    // the seam. The slice width is the geometry's signature.
+    // the interface. The slice width is the geometry's signature.
     const size_t want = static_cast<size_t>(moe_cfg_.n_experts) * 3;
     const bool fp4 = r.moe.nvfp4();
     const int64_t slice = fp4 ? (r.moe.experts_fp4.empty() ? -1 : r.moe.experts_fp4[0].rows)

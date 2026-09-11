@@ -1,7 +1,7 @@
 # v1 sign-off report (2026-09-05)
 
-The performance and hardening sign-off PLAN's M9 asked for, with the
-measurement behind each number and the gaps stated as gaps. Every figure
+This report records the performance and reliability validation for M9
+and the gaps remaining at sign-off on 2026-09-05. Every figure
 here was produced on the four-node GB10 fabric (192.0.2.11–14, one
 200 Gb/s RoCE port per node) with `unsloth/GLM-5.3-Flash-FP8` at TP=4,
 resident, unless a line says otherwise; the raw logs live under
@@ -15,7 +15,7 @@ the 300-step "Roman Republic" chat prompt, records of 2026-09-02/03):
 
 | mode | ms per token | tokens/s |
 |---|---|---|
-| eager T=1 (the default engine seam) | 36.4 | 27.5 |
+| eager T=1 (the default engine interface) | 36.4 | 27.5 |
 | one-graph T=1 | 31.45 | 31.8 |
 | one-graph MTP, greedy | 22.45 | 44.5 |
 | one-graph MTP, sampled at the card's defaults (T=1.0, top-p 0.95) | 25.0–27.6 | 36–40 |

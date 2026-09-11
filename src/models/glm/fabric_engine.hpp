@@ -1,5 +1,5 @@
 #pragma once
-// GLM's face of the engine (Q1, 2026-09-09): the engine adapters live in
+// GLM's face of the engine: the engine adapters live in
 // engine/graph_engine.hpp as templates over the model type; this header
 // binds them to GlmDiagnosticModel under the names the apps and gates use,
 // and keeps the GLM-specific process preparation (the resident image cache

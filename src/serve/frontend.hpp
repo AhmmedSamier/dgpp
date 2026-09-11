@@ -1,6 +1,6 @@
 #pragma once
 // The real ModelFrontend: the Stage 3/3b exact tokenizer and chat
-// template behind the service's seam (M6 Stage 4). The service never
+// template behind the service's interface (M6 Stage 4). The service never
 // links CUDA; this adapter is likewise host-only.
 //
 // Chat rendering: the service's template globals (minijson DOM: the

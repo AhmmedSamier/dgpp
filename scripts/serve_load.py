@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-"""Fixed-concurrency decode load against one dgpp-serve endpoint (2026-09-10,
-the batched depth-2 study): for each concurrency c, c streaming chat
-requests at once — distinct long-answer prompts, greedy, the template's
-thinking off, max_tokens N — and the reading per phase:
-  * per request: content tokens, time to first token, the decode pace
-    between the first and the last content chunk (ms/token, client side);
-  * the phase: wall, aggregate decode tokens/s (every request's tokens over
-    the phase's decode span), and the phase's start/end stamps so the
-    server's stats lines (rank 0's log: ms/step, tok/step/req, acceptance)
-    can be laid beside it.
+"""Measure decode throughput at fixed concurrency against dgpp-serve.
 
-With --classes, the same sweep runs once per prompt class (prose, code, json,
-math, chat), each phase drawing its c prompts from that class alone, so the
-aggregate is attributable to the class; the per-class table under load is what
-a single mixed set cannot give. With --temperature T the requests are sampled
-rather than greedy, which is the pace a caller sees at the card's defaults.
+Each phase sends concurrent streaming requests with distinct long-answer
+prompts. Requests are greedy with thinking disabled unless overridden.
+The report includes per-request tokens, time to first token and decode
+pace, plus aggregate throughput and timestamps for comparison with the
+server's stats log.
+
+Use --classes to run separate sweeps for prose, code, JSON, math and chat.
+Use --temperature to measure sampled requests.
 
     serve_load.py HOST PORT [--concurrency 1,2,4] [--max-tokens 320] [--think]
                             [--classes prose,code,json,math,chat] [--temperature T]
 """
+
+
 import argparse
 import http.client
 import json
@@ -55,7 +51,7 @@ PROMPTS = [
     "between training and serving. Use section headings and full paragraphs.",
 ]
 
-# The per-class corpus. Prompt 0 of every class is the SAME TEXT as that class in
+# The per-class corpus. Prompt 0 of every class is the same TEXT as that class in
 # scripts/fabric_mtp_classes.sh, which has been the project's class corpus since
 # 2026-09-05 and produced every published per-class table — so a concurrency-1
 # phase here is comparable to those numbers rather than to a fresh set of words.

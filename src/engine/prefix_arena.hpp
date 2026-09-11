@@ -1,17 +1,13 @@
 #pragma once
-// The prefix cache's snapshot arena (M7 stage B, DESIGN §8): device slots
-// of session_snapshot_bytes() each, one per cache entry, over the model's
-// stage-A primitives — session_snapshot / session_attach /
-// session_release_snapshot. Both engine adapters own one and serve the
-// scheduler's prefix ops through it; the scheduler's PrefixCache is the
-// ledger of which slot holds what, this is the state itself.
+// Device storage for prefix-cache session snapshots. Each slot holds
+// Model::session_snapshot_bytes() bytes; the model supplies snapshot,
+// attach and release operations. The scheduler's PrefixCache tracks which
+// prefix owns each slot, while this arena owns the snapshot storage.
 //
-// A slot's contents: the KDA recurrent + conv state of every KDA layer,
-// every DSA layer's tail ring, the draft block's h_q, and (in the pool,
-// not the arena) the entry's block references — the full blocks pinned by
-// reference and its private copy of the partial block. Snapshots and
-// attaches are stream-ordered on the model stream; their device time is
-// measured with events, harvested lazily (no sync on the decode path).
+// Snapshot contents are model-specific. Paged cache blocks are held through
+// the snapshot metadata: complete blocks by reference and partial blocks
+// by private copy. Snapshots and attaches follow the model stream's order.
+// Timing events are collected lazily without synchronizing the decode path.
 #include <cuda_runtime.h>
 
 #include <cstdint>
@@ -91,7 +87,7 @@ class PrefixArena {
   }
 
   // The hop snapshot (M7 under the two-row step): the state after the last
-  // step's FIRST row — the aligned position `expected_position` the step
+  // step's first row — the aligned position `expected_position` the step
   // committed past — into `slot`, from the model's spec snapshot rows
   // (`spec_row` the slot's first row of that step).
   // `rows_after`: the rows the step committed past the position (1 under

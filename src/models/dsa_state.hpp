@@ -18,7 +18,7 @@
 // blocks by reference; M3 only provides the allocator.
 //
 // Block management is host-side (a LIFO free list + mirrored table); table
-// updates are small stream-ordered uploads. Acquired blocks are NOT scrubbed
+// updates are small stream-ordered uploads. Acquired blocks are not scrubbed
 // on release: a new owner fully rewrites the rows it will read (prefill
 // writes latent rows and pool rows before any select or attention touches
 // them), so release never lands on the memory hot path.
@@ -132,7 +132,7 @@ class DsaStatePool {
 
   // Per-request open (M6 Stage 2b): zero req's tail rings and return any
   // blocks it still holds to the free list. The latent/index caches are
-  // deliberately NOT scrubbed — a new owner rewrites every row it reads
+  // deliberately not scrubbed — a new owner rewrites every row it reads
   // before any kernel reads it (the release contract in the file header),
   // so opening a request never lands on the memory hot path. Pairs with
   // the engine's per-request KDA state zeroing at session_prefill(req, ..).

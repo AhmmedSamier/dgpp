@@ -1,5 +1,5 @@
 #pragma once
-// The latent cache's storage formats (2026-09-06): the KV cache's dtype.
+// The latent cache's storage formats: the KV cache's dtype.
 //
 // The DSA latent cache holds one kv_lora-wide row per token per DSA layer
 // (DESIGN §7.2). It is written once (the latent append after the kv_a
@@ -9,7 +9,7 @@
 //
 //   bf16  kv_lora x 2 bytes per row; the rows as the projection left them
 //         (every parity gate's format, bitwise the historical cache).
-//   fp8   kv_lora e4m3 codes per row plus ONE fp32 row scale
+//   fp8   kv_lora e4m3 codes per row plus one fp32 row scale
 //         (scale = absmax / 448; code = e4m3(x * 448 / absmax)). Half the
 //         bytes; ~2^-4 relative error per element.
 //   fp4   e2m1 codes, two per byte, in blocks of 16 elements with one e4m3
@@ -20,7 +20,7 @@
 //         element — a quality trade an operator makes deliberately.
 //
 // The codecs below are host/device functions with no libm beyond what
-// dtypes.hpp already relies on: the device quantizes a row with the SAME
+// dtypes.hpp already relies on: the device quantizes a row with the same
 // arithmetic the host reference runs (the tests pin the codes bitwise),
 // and the attention kernels dequantize a row with the same arithmetic the
 // host oracle applies, so a quantized-cache attention equals the bf16

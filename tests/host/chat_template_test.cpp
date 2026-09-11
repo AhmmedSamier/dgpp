@@ -4,7 +4,7 @@
 // tools/gen_chat_template_goldens.py under the transformers-equivalent
 // environment). The corpus header carries chat_template.jinja's FNV-1a-64
 // hash (and cross-references the tokenizer revision); a mismatched
-// template refuses the run. Each case checks BOTH the byte-exact render
+// template refuses the run. Each case checks both the byte-exact render
 // AND the glm_tokenizer ids of that render — the template->tokenizer
 // integration the service path uses.
 //
@@ -406,7 +406,7 @@ DGPP_TEST(glm_tool_call_render_encode_parse_roundTrip) {
 }
 
 
-// The Qwen3.8 round trip (2026-09-09): render(assistant turn) -> encode ->
+// The Qwen3.8 round trip: render(assistant turn) -> encode ->
 // parse recovers the reasoning, the content and every call's name and
 // arguments through the <function=...><parameter=...> text format.
 DGPP_TEST(qwen_tool_call_render_encode_parse_roundTrip) {
@@ -520,7 +520,7 @@ DGPP_TEST(qwen_tool_call_render_encode_parse_roundTrip) {
   DGPP_LOG_INFO("qwen_chat_template_test: {} tool-call turns ({} calls) round-trip render -> encode -> parse", turns, calls);
 }
 
-// The Qwen3.8 grammar over the REAL tokenizer (2026-09-09): every golden
+// The Qwen3.8 grammar over the REAL tokenizer: every golden
 // tool-call turn accepted position by position under a required-call spec
 // (the literals and names over BPE token texts, the typed values); the
 // single-call spec refuses a second call; EOS refused while a call is
@@ -911,7 +911,7 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
       "\"fahrenheit\"]},\"tags\":{\"type\":\"array\",\"items\":{\"type\":"
       "\"string\"},\"maxItems\":3},\"note\":{\"type\":[\"string\",\"null\"]}},"
       "\"required\":[\"city\",\"unit\"],\"additionalProperties\":false}";
-  // The bounds of a Hermes-style tool schema (2026-09-07).
+  // The bounds of a Hermes-style tool schema.
   const char* kBounded =
       "{\"type\":\"object\",\"properties\":{\"timeout\":{\"type\":\"integer\","
       "\"minimum\":1},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":2000},"

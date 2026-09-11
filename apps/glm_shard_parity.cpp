@@ -3,7 +3,7 @@
 // same code glm_tp_test pins at the fixture) against a real checkpoint
 // resolved from the canonical HF hub cache: per layer, per rank, the
 // sharded GlmLayerStream's bind_sharded output vs full-load + bind,
-// BITWISE, plus the replicated-digest agreement and the byte reconcile.
+// bitwise, plus the replicated-digest agreement and the byte reconcile.
 //
 // A mismatch prints the layer and surface that differ and exits 1 — this
 // is the instrument that answers "is the loader the slicer, at the real
@@ -12,9 +12,9 @@
 // --resident materializes the sharded streams' layers once each (the
 // production residency contract, DESIGN §3) and proves it in the same
 // run: bitwise resident-vs-streaming parity PLUS a cache-hit pass that
-// must re-serve every layer from the SAME addresses with ZERO storage
+// must re-serve every layer from the same addresses with ZERO storage
 // reads. At real dims keep a --layers subset here: every rank's resident
-// set lives in ONE process (world x subset bytes), which only the
+// set lives in one process (world x subset bytes), which only the
 // subset knob keeps inside 128 GB at world 4.
 //
 // No bus, no fabric: one node, models library only.

@@ -16,7 +16,7 @@
 // on the shared GPU — waiting for doorbells that need THIS thread's next
 // submission — the alloc deadlocks host against device; each rank's
 // lane watchdog (completion_timeout_ms) then poisons one spinning
-// kernel per period, which is EXACTLY the observed 8-second march of
+// kernel per period, which is exactly the observed 8-second march of
 // "releases" (the march rescaled when --timeout-ms changed — the timer
 // was ours, not the transport's). Pre-allocating the scratch before the
 // world forms makes every previously-stalling shape pass.
@@ -193,7 +193,7 @@ std::string pick_race_iter(const Config& c, int rank, int world,
         100000);
   }
   std::memset(scratch, 0, elems * 2);
-  // Each rank contributes ONLY its own quadruple; the fold's sum
+  // Each rank contributes only its own quadruple; the fold's sum
   // assembles the table (the bus_greedy_pick gather discipline — a
   // sum over disjoint per-rank slots IS a gather). The first cut wrote
   // the whole table into every rank's scratch; the oracle correctly
@@ -356,7 +356,7 @@ int run(const Config& c) {
   // The pick-race scratch: BEFORE the world forms (the discipline at the
   // top of this file — a managed alloc between spinning collective
   // kernels deadlocks host against device in loopback). One buffer PER
-  // RANK: the loopback world is four threads in ONE process, and a
+  // RANK: the loopback world is four threads in one process, and a
   // shared scratch had every "rank" memsetting and writing the same 32
   // bytes (the first racer run folded four copies of whichever thread
   // won the write race — the bus was fine, the harness was not).

@@ -46,12 +46,12 @@ __device__ __forceinline__ float shared_gate_warp(const uint16_t* __restrict__ x
   return round_bf16(1.0f / (1.0f + expf(-logit)));
 }
 
-// ---- the fused decode tail (2026-09-09) --------------------------------------
+// ---- the fused decode tail --------------------------------------
 // The shared expert at decode was seven launches per layer (two GEMVs, the
 // swiglu, a GEMV, the gate, the accumulate, the round: 24 us and seven graph
 // nodes per layer, 1.15 ms per step). Two kernels now, each bitwise the
 // chain it replaces: every dot is bf16_gemv::row_dots on the same staged
-// activations (the GEMV seam's own chain at m <= 4), the swiglu is
+// activations (the GEMV interface's own chain at m <= 4), the swiglu is
 // moe_swiglu_clamp_kernel's ops on the bf16-rounded dots, the gate is
 // shared_gate_warp's, the accumulate is moe_accum_kernel's fma and
 // moe_round_bf16_kernel's rounding, applied in the down GEMV's epilogue.
@@ -160,7 +160,7 @@ void launch_tail_rows(const uint16_t* x, size_t x_stride, const void* gate_w, co
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-// Rows in chunks of kMaxRows, as the GEMM seam chunks them: a row's chain
+// Rows in chunks of kMaxRows, as the GEMM interface chunks them: a row's chain
 // never depends on how many rows share its launch.
 template <bool kFp8>
 void tail_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const float* gate_s,

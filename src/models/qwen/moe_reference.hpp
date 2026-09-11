@@ -1,10 +1,10 @@
 #pragma once
-// Double-precision oracle for the Qwen3.8-Flash-Next MoE (Q3, 2026-09-09):
+// Double-precision oracle for the Qwen3.8-Flash-Next MoE:
 // the SoftmaxTopk router (glm_moe_ref_router in that mode), the FP8 routed
 // experts with the strict bf16 rounding points, the BF16 shared expert
 // weighed by its sigmoid gate, and the engine's fp32-chain semantics in
 // double — unrounded down dots, one fma per expert ascending, the shared
-// expert last, ONE bf16 rounding (models/qwen/moe_layer.hpp).
+// expert last, one bf16 rounding (models/qwen/moe_layer.hpp).
 #include <cstdint>
 #include <vector>
 

@@ -7,7 +7,7 @@
 //
 //   1. Recompute the spec selection FROM THE DEVICE'S OWN CACHE + Q inputs
 //      (both downloaded bit-exact) using the pinned oracle arithmetic. The
-//      device's selection must match it BITWISE — this certifies the whole
+//      device's selection must match it bitwise — this certifies the whole
 //      select pipeline (logit arithmetic, composite key, merge, expansion)
 //      is spec-exact for the inputs it actually consumed. A wrong scale,
 //      fold order, or misindexed dot buffer fails here, loudly.
@@ -73,7 +73,7 @@ inline float pool_logit_mirror(const uint8_t* q8_row, const float* w_row,
 }
 
 // Complete audit of one flipped row. Throws with a precise diagnosis when
-// the divergence is NOT a certified near tie.
+// the divergence is not a certified near tie.
 //
 //   select_k:            pools per query (g.select_k)
 //   dev_topk/ref_topk:   the row's expanded token lists (any stride; read
@@ -106,7 +106,7 @@ inline void audit_flipped_row(int select_k, const int32_t* dev_topk,
                               int64_t topk_width = -1) {
   // Token sets -> SCORED pool sets. The expanded row is [selected pool
   // tokens (ascending)][incomplete tail tokens][-1 pad]; tail tokens start
-  // at visible*kpool and are ALWAYS appended by both sides (never scored),
+  // at visible*kpool and are always appended by both sides (never scored),
   // so they must not enter the pool sets — the tail's pool would otherwise
   // inflate every row's set by one and break the spec-size check.
   const int64_t tail_start = n_pools * kpool;  // n_pools == visible pools

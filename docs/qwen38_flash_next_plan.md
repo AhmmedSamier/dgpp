@@ -2,15 +2,19 @@
 
 > Single-Spark deployment (2026-09-10): the NVFP4 checkpoint with the n-gram table mmap'ed from the NVMe and the graph engine at world 1 — `docs/qwen38_single_spark.md`.
 
-Status: plan. Nothing in this document is built. The checkpoint
-`Qwen/Qwen3.8-Flash-Next-FP8` was mid-download on this node when it was
-written (119 of 173 GiB); the tensor census in §1.11 was taken from every
-shard's safetensors header (local shards plus HTTP range reads of the rest),
-so it is complete. Everything else comes from the model card, `config.json`,
-the transformers 5.8 reference (`modular_qwen4_exp.py`, which the checkpoint's
-`architectures: Qwen4ExpForConditionalGeneration` selects), the SGLang day-0
-port (`models/qwen4_exp.py`, `layers/attention/qsa/*`, `layers/hyperconnection.py`,
-`models/qwen4_exp_mtp.py`) and the technical report (arXiv 2608.30320).
+Status: the text path is implemented, including tensor-parallel loading,
+GDN/QSA/GR/PLE operators, decode sessions, prefix caching, graph serving
+and MTP. FP8 serving is measured at TP=2 and TP=4; the companion
+[single-Spark guide](qwen38_single_spark.md) covers NVFP4 at world 1.
+
+This document combines the architecture study with the dated port and
+optimization record. Its cost model describes the FP8 checkpoint with
+BF16 dense projections unless stated otherwise. Proposed work and
+measurements in the record retain their original dates.
+
+The tensor census comes from the checkpoint's safetensors headers.
+Architecture references include its configuration, transformers 5.8
+(`modular_qwen4_exp.py`), the SGLang port and the technical report.
 
 References: <https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8>,
 <https://arxiv.org/abs/2608.30320>,
@@ -34,7 +38,7 @@ simpler cousin of KDA (scalar per-head decay, q/k heads shared across three v
 heads), QSA is a DSA-style indexer-plus-top-k over 4-token key blocks feeding
 a GQA attention with 256-wide heads, GR is a 4-stream hyper-connection like
 mHC with different read/write operators and no stream-mixing matrix, and the
-MoE, MTP, embeddings and head follow the GLM shapes. The genuinely new pieces
+MoE, MTP, embeddings and head follow the GLM shapes. the additional components
 are the n-gram embedding layer and the QSA block compression.
 
 The deployment worlds are TP=2 and TP=4 (TP=1 is 172 GiB and does not fit
@@ -49,12 +53,9 @@ variable (D3); and the 640-wide expert intermediate does not split into
 128-aligned slices at either world, so the FP8 expert slice runs on a finer
 scale grid (64 rows at TP=2, 32 at TP=4; D2).
 
-Order of work: extract the engine mechanics GLM built so the second model
-reuses them (Q1), then loader and binding (Q2), then the kernels with their
-host oracles (Q3), the single-node then four-node forward parity (Q4), the
-tokenizer/template/tool format (Q5), the graph decode engine with MTP and the
-prefix cache (Q6), the prefill path (Q7), and the optimization rounds to the
-floor and beyond it (Q8).
+The implementation uses the shared engine and loader interfaces, with
+family-specific operators and state. Sections 1–4 describe the model and
+placement decisions; section 5 records the port and subsequent experiments.
 
 ## 1. The model
 
@@ -412,7 +413,7 @@ critical path; the chunked (WY) tensor-core form is a later prefill lever.
 | module | status | note |
 |---|---|---|
 | CollectiveBus, roster, graph adapter mechanics, arena, streams, trace, hf_cache, safetensors, minijson | reuse | generic today |
-| scheduler, prefix cache, HTTP/SSE service, sampler, json/tool grammars | reuse | the service seam takes `GlmTextConfig&` and must be widened (Q1) |
+| scheduler, prefix cache, HTTP/SSE service, sampler, json/tool grammars | reuse | the service interface takes `GlmTextConfig&` and must be widened (Q1) |
 | FP8 block-128 GEMV/GEMM (`fp8_gemv.cuh`, `scale_gemm`, `quant_matrix`), grouped MoE prefill, MoE decode slot kernels | adapt | 32-row scale grid for 160-wide slices (D2); router variant; no clamps |
 | bf16 GEMV, L2 prefetch, top-k select, pick/sample kernels, norm kernels | reuse / small variants | `(1+w)` norms, group norm 2560 |
 | KDA conv + recurrence + gated norm (`kda.cu`) | fork → GDN | scalar decay, 3:1 head sharing, unequal conv segments |
@@ -546,7 +547,7 @@ schema extraction; the GLM FP8 baseline is 94.5 / 97.7 / 100 %) and by
 perplexity/logprob agreement across builds, per DESIGN §1's rounding-level
 rule. MTP must stay identical to plain decode by construction.
 
-## 5. Work plan
+## 5. Implementation and validation record
 
 Each milestone lists its deliverables and its gate. Nothing merges without
 its gate; GLM's transcripts and step times are a standing regression gate
@@ -584,7 +585,7 @@ moved into its `session_close`. 35/35 CTest; fabric transcripts identical to
 the pre-refactor runs (md5 068a6dff…), 29.99 / 40.33 ms per step against
 29.98 / 40.40. `loaders/architecture` detects the family from `architectures`.
 The `dgpp-serve` boot split (a per-family boot returning the engine, a
-serving-config seam replacing `GlmTextConfig&` in `serve_openai`) lands with
+serving-config interface replacing `GlmTextConfig&` in `serve_openai`) lands with
 Q2's config.
 
 **Q2 — Qwen config, binding, loader, resident image.** *Done 2026-09-09; the
@@ -647,7 +648,7 @@ Status (2026-09-09): world 1 done — `models/qwen/layers` + `forward`
 the ctest chain (per-layer hyper states within l2 2.1e-3, top-1 exact bar a
 near-tie); `qwen_forward_check` on the real checkpoint predicts " Paris" and
 " fibonacci" for the two probe prompts. TP=2 and TP=4 (`qwen_tp_test`, loopback on the fixture): the rank/world
-seam with the three folds per layer (attention, MoE, the PLE layer's
+interface with the three folds per layer (attention, MoE, the PLE layer's
 key/value partials), the lm head vocab-sharded, the fp8 GEMV core on the
 re-blocked scale grid — bitwise across ranks, within l2 3.6e-3 of world 1,
 routing and top-1 identical. The real checkpoint across the fabric
@@ -729,7 +730,7 @@ greedy transcript disagreed with the re-forward of prompt + transcript on
 one row (relative l2 0.18, a hard top-1 miss at a 2.3 % gap) where the
 fixture agrees at 2.5e-3. Localized: the prefill is BITWISE the forward
 at the same row count; two forwards of one prompt at T=5 and T=6 (both
-the seam's GEMV family, m <= 8) are bitwise identical at every layer and
+the interface's GEMV family, m <= 8) are bitwise identical at every layer and
 row, as are T=9 and T=12 (both cuBLASLt); across the families the hyper
 state differs by 0.3-0.8 % on every row already after layer 0, then
 amplifies through MoE routing flips (10 of 50 by layer 5, 5-20 per layer
@@ -747,7 +748,7 @@ gate is the task eval through the server (the eval runner's band) and the
 transcript's sanity. Stage C (the MTP draft block, §1.8) is built on the
 same walk (the eager speculator and the one-graph draft gated on the
 fixture); `dgpp-serve` dispatches on the architecture through a family
-seam (the GLM and Qwen models, memory plans and engines behind one
+interface (the GLM and Qwen models, memory plans and engines behind one
 interface; the bus's latency slot is the family's widest recorded fold —
 GLM's 8 x 4096 rows, Qwen's 8 x 10240 for the PLE key partial);
 `deploy/cluster_qwen.json` (MTP + the decode graph) and
@@ -853,7 +854,7 @@ MTP 8.4 ms/token at 4 concurrent, prefill 2.7 ms/token on short prompts
 (the fixed per-prompt cost: 60–70 tokens).
 
 **Q8 — Optimization to the floor and past it.** The GLM playbook in order:
-prefetcher coverage of every GEMV, graph seams, kernel fusion at the GR
+prefetcher coverage of every GEMV, graph interfaces, kernel fusion at the GR
 sites, the QSA scorer at long context, then the quantization levers with
 perplexity and eval gates: FP8 GR gates (−0.64 GB per token), FP8 GDN
 projections (−0.52), FP8 `lm_head`, fp8 K/V, NVFP4 experts (a composed
@@ -987,7 +988,7 @@ Levers, in order (bit-identical unless noted):
    c = 8 and c = 10). GLM's tables have a shared slot and keep the old
    kernel untouched.
 5. Round 4 (2026-09-09 late, "the last levers without quantization"):
-   (a) the launch seam — the T=1 profile puts 1.62 ms of inter-kernel gaps
+   (a) the launch interface — the T=1 profile puts 1.62 ms of inter-kernel gaps
    in a step, 0.78 of it the one gap after the commit kernel (the host's
    verdict read, bookkeeping and the next cudaGraphLaunch's ~0.45 us per
    node), the rest ~1 700 sub-microsecond node gaps; the engine already
@@ -998,7 +999,7 @@ Levers, in order (bit-identical unless noted):
    `qwen_pace_ab_2026-09-09/t1_upload_*`) and GLM slipped (T=1 29.9 →
    30.4, MTP 40.4 → 41.5 ms per step, `glm_regress4_2026-09-09/`): the
    upload contends with the running replay instead of hiding behind it.
-   The seam that remains needs the speculative launch of N+1 before N's
+   The interface that remains needs the speculative launch of N+1 before N's
    verdict (a device-resident feed exists; a bogus step past a stop must
    be rolled back — the KV blocks, the GDN/PLE/context state, the close
    snapshot — and the bus windows armed ahead): the protocol project the
@@ -1050,7 +1051,7 @@ Levers, in order (bit-identical unless noted):
    Where the T=1 step's 22 ms go now (against the 16.0 ms bf16 floor):
    the weight stream at ~220 GB/s with the prefetch windows hiding part
    of it behind the collectives, ~2.8 ms of collective kernels, ~0.8 ms
-   of launch seam, the experts' slot kernels, and the small kernels. What
+   of launch interface, the experts' slot kernels, and the small kernels. What
    is left without quantization is the speculative launch of replay N+1
    (the protocol project above) and a multi-block exact select for the
    sampled row; the rest of the distance to the floor is bytes.
@@ -1140,10 +1141,10 @@ kernel per site (−8 %), the accumulate fused into the down epilogue
 - **Top-k tie order** cannot match torch exactly; the oracle and the engine
   share one rule, and parity tests tolerate selection differences only when
   scores tie.
-- **MTP `pre_fc_norm_hidden`** full-vector vs grouped — two candidate
-  formulas, decided by the acceptance rate on the first MTP run.
-- **NFC in the tokenizer** is new machinery (composition tables); the
-  goldens must include non-NFC input.
+- **MTP hidden-state normalization** uses the implemented convention in
+  `src/kernels/qwen_mtp.cu`; the port record documents its validation.
+- **NFC normalization** is implemented with composition tables. Keep
+  non-NFC inputs in the tokenizer goldens when updating those tables.
 - **QSA determinism across ranks**: the replicated indexer must produce
   identical selections on every rank or the boundary reduces diverge; a
   per-tick digest of the selection (as the op-stream md5 does) is the check.
@@ -1154,10 +1155,13 @@ kernel per site (−8 %), the accumulate fused into the down epilogue
   accept a longer element count at that one boundary.
 - **The vision-token path** (`<|vision_start|>` etc.) is refused, not
   ignored: a request containing images gets an error.
-- **Checkpoint download** is in flight; §1.11 is from headers, so no byte
-  has been verified yet — Q0's audit runs on the landed files.
+- **Checkpoint revisions** must pass the binding and loader checks before
+  serving; the recorded audit applies to the revision tested.
 
-## 7. To verify when the download completes
+## 7. Checkpoint validation checklist
+
+Repeat these checks when changing checkpoint revisions. The original
+port results are recorded in section 5.
 
 1. The stored `layer_multipliers`, `ngram_heads_vocab_sizes`,
    `ngram_heads_offsets` equal §1.7's derivation; `weight_scale`'s value.

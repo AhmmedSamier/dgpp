@@ -1,5 +1,5 @@
 #pragma once
-// Host reference of the Qwen norms (Q3, 2026-09-09): the (1 + w) RMSNorm
+// Host reference of the Qwen norms: the (1 + w) RMSNorm
 // with one rounding (Qwen3_5RMSNorm) and its grouped form over the hyper
 // state (group_size = hidden). The GDN gated norm's oracle is in
 // gdn_reference.hpp. fp32 interior; the sum of squares is a sequential

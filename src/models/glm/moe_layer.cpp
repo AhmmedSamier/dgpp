@@ -89,7 +89,7 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
   const int M = max_tokens_;
   const size_t H = static_cast<size_t>(cfg_.hidden);
   const size_t I = static_cast<size_t>(cfg_.inter);
-  // Plain device memory, not managed (2026-09-02): nothing on the host
+  // Plain device memory, not managed: nothing on the host
   // ever dereferences these (the traces and the diagnostic path leave via
   // cudaMemcpyAsync), and on the GB10 managed pages are the slow
   // translation path for every kernel that touches them — the decode
@@ -350,7 +350,7 @@ void GlmMoeLayer::enqueue_host(const uint16_t* hidden, uint16_t* out_bf16,
   //    straight into the pinned staging: the routed rows in segment order,
   //    then every token once more for the shared expert; per (token, slot)
   //    its gathered row; the segment table; the expert views (the shared
-  //    triple last). ONE upload of each per layer.
+  //    triple last). one upload of each per layer.
   std::fill(h_counts_.begin(), h_counts_.end(), 0);
   for (size_t i = 0; i < tk; ++i) ++h_counts_[h_ids_[i]];
   std::vector<int> seg_begin(E, 0);
@@ -562,7 +562,7 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   // slice (a sub-128 grid on the sliced axis) takes the GEMV core.
   // A re-blocked grid (a TP slice at gcd(128, I/W), plan D2) runs on the
   // ldmatrix fp8 tile kernel, which reads per-row scales and one scale
-  // column per 32-deep stage (2026-09-09) — every k a multiple of 32; the
+  // column per 32-deep stage — every k a multiple of 32; the
   // older tile kernel (other widths) knows the 128 grid only.
   if (mma && !mma_takes_grid())
     throw std::invalid_argument(

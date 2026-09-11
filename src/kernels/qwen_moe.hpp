@@ -18,8 +18,8 @@ namespace dgpp {
 void qwen_moe_shared_gate_bf16(const uint16_t* x, const uint16_t* g, float* w,
                                int tokens, int hidden, cudaStream_t stream);
 
-// The shared expert's decode tail in two launches (2026-09-09), bitwise
-// the seven-launch chain (the GEMM seam's bf16 GEMVs at m <= 4, the
+// The shared expert's decode tail in two launches, bitwise
+// the seven-launch chain (the GEMM interface's bf16 GEMVs at m <= 4, the
 // swiglu with no clamps, the shared gate, the accumulate's fma, the
 // round): act = swiglu(x . gate_w, x . up_w) [tokens, S] and sw[t] =
 // sigmoid(x[t] . g), then out = bf16(fma(sw, act . down_w, acc)). x bf16

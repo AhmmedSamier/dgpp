@@ -1,7 +1,6 @@
 #pragma once
-// The M6 Stage 4 HTTP/SSE server (PLAN M6 deliverable 4): a minimal,
-// owned-stack HTTP/1.1 server over epoll — no external dependency, the
-// same discipline as the rest of the control plane.
+// HTTP/1.1 and SSE server using a single epoll loop. Socket ownership
+// stays on the HTTP thread; handlers queue model work through the service.
 //
 // SHAPE (one thread owns every socket):
 //   * A single epoll loop accepts, parses, routes, and writes. Route
@@ -48,9 +47,9 @@ struct HttpRequest {
 // Internal per-connection state (defined in http_server.cpp).
 struct Conn;
 
-// The response seam handed to route handlers. Epoll-thread only (the
+// The response interface handed to route handlers. Epoll-thread only (the
 // generation service's engine thread reaches streams through idle(),
-// never through this class). Each connection owns ONE writer for its
+// never through this class). Each connection owns one writer for its
 // lifetime; a handler may keep the pointer beyond handle() for stream
 // writes from idle(), but MUST drop it when on_disconnect fires (the
 // connection — and its writer — is freed at the loop pass's sweep).

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Kept in scripts/ since 2026-09-06 (the closure pass ran it from a scratch directory).
-# The steady-state prefill ritual:
+# The steady-state prefill procedure:
 #   fabric_prefill_repeat.sh [--config CLUSTER.json] OUT_DIR LEN...
 # For each LEN: the first LEN of the hard-prose ids (tiled x4 above 2100),
 # glm_gen_check on the four nodes with --prefill-repeat 3 (the timed prefill

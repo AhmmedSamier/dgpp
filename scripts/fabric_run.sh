@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fabric_run: launch glm_gen_check across the fabric (this node as rank 0
-# head + the peer ranks via ssh) as ONE atomic job.
+# head + the peer ranks via ssh) as one atomic job.
 #
 # WHY THIS EXISTS: the bus rendezvous is a 120s window that opens when rank 0
 # starts listening, and peers reach bus-start ~1s after launch. Manual

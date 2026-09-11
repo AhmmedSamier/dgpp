@@ -1,6 +1,6 @@
 #pragma once
 // Exact sampling over the (possibly vocab-sharded) lm head — M6 d3,
-// DESIGN §10. Three execution paths, ONE selection semantics:
+// DESIGN §10. Three execution paths, one selection semantics:
 //
 //   greedy  : reduce the per-rank (value, token_id) maxima
 //   top_k   : merge each rank's exact local top-k, filter/sample at rank 0
@@ -12,7 +12,7 @@
 //             independence contract and sample_reference_sharded() for
 //             the reference it is measured against
 //
-// The distributed paths are BITWISE-EQUAL to the centralized oracle by
+// The distributed paths are bitwise-EQUAL to the centralized oracle by
 // construction, not by tolerance: every path funnels into
 // select_from_sorted() over a candidate list in the canonical order
 // (logit descending, then token id ascending — a total order), and the
@@ -123,7 +123,7 @@ struct Result {
 // Result of the bounded candidate-table path used by the distributed
 // sampler. A fallback is not an approximation: it says that the prefix does
 // not contain enough of the distribution to make the exact decision, so the
-// caller must gather the full logits and run the SAME decision over the
+// caller must gather the full logits and run the same decision over the
 // complete list (sample_reference_sharded()). The RNG is deliberately left
 // untouched on fallback, so that slow path consumes the very same
 // (seed, counter) draw and the request's outcome does not depend on the
@@ -270,7 +270,7 @@ inline std::vector<Candidate> sort_slice(const float* logits, int n,
 // the top-k/min-p/top-p survivors, the final distribution's fp32 exps and
 // denominator, and its log-sum-exp. select_from_sorted draws over it; the
 // speculative accept/residual (spec_select_from_sorted) evaluates one
-// candidate's probability and walks the rest over the SAME state.
+// candidate's probability and walks the rest over the same state.
 struct SelectorState {
   std::vector<float> scaled;  // logit / temperature, every candidate
   std::vector<float> exps;    // the survivors' exp(scaled - scaled[0])
@@ -352,7 +352,7 @@ inline SelectorState selector_state(const std::vector<Candidate>& sorted,
 }
 
 // `sorted` is the (already canonical-order) candidate list covering the
-// global top-k-or-more set with penalties applied and is NOT modified.
+// global top-k-or-more set with penalties applied and is not modified.
 // Selects per the documented pipeline; returns the chosen token with
 // its logprob (and the top-N survivors' logprobs when requested).
 // Throws on an empty list.
@@ -417,7 +417,7 @@ struct SpecOutcome {
   Result result;  // the draft when accepted, else the residual sample
 };
 
-// The proposal the draft was drawn from (2026-09-10): Q as (id, mass) over
+// The proposal the draft was drawn from: Q as (id, mass) over
 // the draft head's own final set, mass summing to 1. A DETERMINISTIC draft
 // (the head's argmax) carries no proposal — the rule above, whose accept
 // rate is P(draft) and so, at temperature, is capped by the target's own
@@ -425,7 +425,7 @@ struct SpecOutcome {
 // min(1, P(x)/Q(x)) and, on rejection, draw the normalized residual
 // (P - Q)+; the marginal over the emitted token is still exactly P (the
 // same rejection-sampling identity), while the accept rate rises to
-// 1 - TV(P, Q). Both halves must use the SAME Q, which is why the draft's
+// 1 - TV(P, Q). Both halves must use the same Q, which is why the draft's
 // final set travels with the draft.
 struct Proposal {
   std::vector<std::pair<int32_t, float>> mass;  // id -> Q(id)
@@ -946,7 +946,7 @@ struct SpecPrefixDecision {
 // `draft_excluded`: the caller knows the draft is outside the row's
 // support (a masked id): its probability is 0 without the list having to
 // show it, so an incomplete prefix still decides (M6 6g).
-// `proposal` (2026-09-10): the distribution the draft was drawn from. It
+// `proposal`: the distribution the draft was drawn from. It
 // steers only the MATERIALIZED regime — the pure temperature walk keeps the
 // deterministic rule, and the device mirrors that split exactly.
 inline SpecPrefixDecision spec_accept_from_prefix(
@@ -1276,7 +1276,7 @@ inline SpecStepReference spec_reference_sharded(
 }
 
 // Probability mass covered by each requested prefix of an already
-// canonical global candidate list, under the FULL vocabulary normalizer.
+// canonical global candidate list, under the full vocabulary normalizer.
 // This is the sizing instrument for the device pick table: at top_p=0.95 a
 // prefix whose mass is below 0.95 cannot resolve nucleus sampling locally
 // and must take the exact full-logit fallback.

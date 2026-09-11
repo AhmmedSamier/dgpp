@@ -147,7 +147,7 @@ inline std::vector<uint8_t> tensor_bytes(const GlmExpectedTensor& e) {
   const bool is_conv = name.find("conv1d") != std::string::npos;
   const bool is_scale_inv = name.find("_scale_inv") != std::string::npos;
   // Class-based sampling above is too coarse for the DSA/KDA members that
-  // are NOT norms: kv_b/o_norm landed near-1 (or tiny) and produced a
+  // are not norms: kv_b/o_norm landed near-1 (or tiny) and produced a
   // 45-magnitude attention path — legal, but a badly-conditioned fixture.
   const bool is_kv_b = name.find("kv_b_proj.weight") != std::string::npos;
   const bool is_o_norm = name.find("o_norm.weight") != std::string::npos;
@@ -182,7 +182,7 @@ inline std::vector<uint8_t> tensor_bytes(const GlmExpectedTensor& e) {
 }
 
 // Writes `dir` (config.json + one safetensors shard) for `cfg`. `json_text`
-// is the raw text_config object (NOT wrapped) — it is written to disk
+// is the raw text_config object (not wrapped) — it is written to disk
 // wrapped in {"text_config": ...} and must parse to `cfg`.
 inline void write_fixture(const GlmTextConfig& cfg, const char* json_text,
                           const std::string& dir) {

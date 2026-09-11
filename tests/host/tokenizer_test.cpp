@@ -231,7 +231,7 @@ DGPP_TEST(glm_tokenizer_boundary_contracts) {
   // A minimal malformed tokenizer.json (wrong pattern) must refuse with
   // the pinned-pattern message.
   // In the working directory (the build tree under ctest): a fixed /tmp
-  // subdirectory came and went with other tools (2026-09-05).
+  // subdirectory came and went with other tools.
   const std::string tmp = "glm_tokenizer_test_bad_tokenizer.json";
   {
     std::ofstream f(tmp);

@@ -1,35 +1,22 @@
-// M6 Stage 4 (PLAN M6 deliverables 4+5): dgpp-serve — the OpenAI-
-// compatible chat/completions service. The exact tokenizer + chat
-// template (Stage 3/3b), the deterministic scheduler (Stage 2b), the
-// incremental session engine (Stage 2), and the transport race fix
-// (f695f39) under one roof.
+// OpenAI-compatible text service for GLM-5.3, Qwen3.8 and GLM-4.7.
+// Rank 0 owns HTTP ingress, tokenization and template rendering. Its
+// engine thread drains admissions and cancellations, journals them to
+// peers, then runs one scheduler tick. Peers apply the record and tick
+// without an HTTP frontend.
 //
-// STAGE 4a (world 1): the full HTTP/SSE contract over the local
-// reference engine — streaming residency (the diagnostic loader;
-// resident is the TP shape, DESIGN §3's memory arithmetic), full-vocab
-// greedy pick.
+// Multi-rank execution uses resident weights and distributed picks.
+// Single-node graph mode also uses resident weights, with identity bus
+// collectives. Single-node mode without graph decode streams layers
+// through the eager engine. The memory plan validates the chosen shape.
 //
-// STAGE 4b (world > 1): the fabric — resident TP by default, the
-// vocab-sharded head, the distributed greedy pick over the bus, and
-// THE ADMISSION JOURNAL (service/fabric_serve.hpp): rank 0 is the
-// sole HTTP ingress; every engine pass's scheduler-state changes ride
-// one journal record broadcast to the peers, and every rank applies
-// + ticks in lockstep (§11 — identical schedulers by construction,
-// the smoke's md5 discipline made structural).
+// Threads: HTTP parses requests and writes responses; the engine owns
+// model execution; journal peers follow rank 0's scheduler operations.
+// See DESIGN §11 and docs/operations.md.
 //
-// THREADS (DESIGN §6.1's roles + the ingress):
-//   * HTTP/ingress — HttpServer::serve(): accept, parse, route,
-//     tokenize/render, SSE formatting (rank 0 only; never the fabric
-//     critical path);
-//   * engine — engine_pass() in a loop: drain admissions, one
-//     scheduler quantum per iteration (the model's stream; at world>1
-//     each pass's record goes out between drain and tick);
-//   * peers — run_journal_peer(): apply the record, tick, repeat. No
-//     HTTP, no tokenizer (records carry prompt ids).
-//
+
 // USAGE
 //   dgpp-serve --model ORG/NAME | --checkpoint-dir DIR
-//     [--port N (default 8080; rank 0 only)] [--kv-capacity TOKENS]
+//     [--port N (default 18080; rank 0 only)] [--kv-capacity TOKENS]
 //     [--kv-dtype bf16|fp8|fp4]
 //     [--max-concurrency N] [--queue-limit N] [--default-max-tokens N]
 //     [--max-connections N] [--no-eos]
@@ -171,7 +158,7 @@ struct PinnedWords {
   PinnedWords& operator=(const PinnedWords&) = delete;
 };
 
-// The pre-flight memory check (2026-09-06): every byte the model, the
+// The pre-flight memory check: every byte the model, the
 // prefix arena and the engine will allocate, from the same formulas their
 // constructors use, against the node's free memory — BEFORE the first
 // allocation. A configuration that does not fit is refused here with the
@@ -187,7 +174,7 @@ std::string gib(double bytes) {
   return std::format("{:.2f} GiB", bytes / (1024.0 * 1024.0 * 1024.0));
 }
 
-// ---- the family seam (Q6, 2026-09-09) ------------------------------------
+// ---- the family interface ------------------------------------
 // What the boot needs from a model family — its config facts, its memory
 // plan, its model and its engines — so one server boots GLM-5.3-Flash and
 // Qwen3.8-Flash-Next from config.json's architecture. The engine adapters
@@ -516,7 +503,7 @@ void check_memory_plan(
 }
 
 // The rank-0 serving stack, shared by both worlds: everything above
-// the engine seam (tokenizer/template, service, HTTP, the engine
+// the engine interface (tokenizer/template, service, HTTP, the engine
 // loop). The fabric passes the journal — its hook rides engine_pass,
 // one record per pass between the drain and the tick — plus the oplog
 // audit tap (the 4-way consistency evidence). w1 passes null for both and
@@ -554,7 +541,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   scfg.fixed_seed = k.fixed_seed;
   scfg.reasoning_in_content = k.reasoning_in_content;
   scfg.admission = k.admission;
-  scfg.vocab_size = vocab_size;  // logit_bias's id bound (2026-09-06)
+  scfg.vocab_size = vocab_size;  // logit_bias's id bound
   {
     // The prefix cache's key (M7): what the entries are bound to.
     char key[96];
@@ -641,7 +628,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
     // Drain-on-stop (M6 6c). This is a pass boundary: no collective is in
     // flight on any rank (a stop that lands mid-prefill waited the pass
     // out above). Close the door, shed the queue, flag every live request,
-    // then ONE more pass: the cancels ride the journal and every rank's
+    // then one more pass: the cancels ride the journal and every rank's
     // cancel sweep retires them at this same quantum with no engine op;
     // only then the stop record, which releases the peers' read loops.
     const auto t0 = std::chrono::steady_clock::now();
@@ -796,9 +783,9 @@ int main(int argc, char** argv) {
   std::string ckpt, model_id, peer;
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
   int64_t kv_capacity = 8192;
-  std::string kv_dtype = "bf16";  // the latent cache's format (2026-09-06)
-  std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap (2026-09-10)
-  std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8 (2026-09-10)
+  std::string kv_dtype = "bf16";  // the latent cache's format
+  std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
+  std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
   int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
   // The sampled pick's candidate width per rank on the graph engines (the
@@ -821,7 +808,7 @@ int main(int argc, char** argv) {
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
   double stats_interval_s = 10.0;  // the throughput line's period
-  // The cluster config (2026-09-06): found first, whatever its position,
+  // The cluster config: found first, whatever its position,
   // because the flags after it override what it sets.
   std::string config_path;
   int config_rank = 0;
@@ -929,7 +916,7 @@ int main(int argc, char** argv) {
       return a == "--help" ? 0 : 1;
     }
   }
-  // ---- the fabric's first handshake (2026-09-06): the head pushes the
+  // ---- the fabric's first handshake: the head pushes the
   // world's shape. Rank 0 opens the journal and accepts the full world
   // before building anything; the peers connect (retrying within the
   // rendezvous window) and take the model, the world size, the fabric port
@@ -1095,7 +1082,7 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("--mtp currently requires --decode-graph");
     return 1;
   }
-  // The graph world (2026-09-10): the fabric, or a world of one with the
+  // The graph world: the fabric, or a world of one with the
   // decode graph — the resident model, the graph engine and MTP on a single
   // Spark over a bus whose collectives are the identity. Without the graph
   // a world of one streams the layers through the eager engine (below).
@@ -1105,10 +1092,8 @@ int main(int argc, char** argv) {
                    dgpp::kPickMaxRequests, max_concurrency);
     return 1;
   }
-  // The crossover is a fraction of the configured slots: the default is
-  // four (the measured crossover of the eight-row graph) or full occupancy
-  // when fewer slots exist; an explicit value outside [1, slots] is an
-  // operator error, never silently clamped.
+  // Validate sampling and admission options before constructing the model.
+  // The graph batch threshold is resolved below from the configured slots.
   if (sampling_candidates < 1 || sampling_candidates > dgpp::kSampleMaxCandidates) {
     DGPP_LOG_ERROR("--sampling-candidates must be in [1, {}], got {}",
                    dgpp::kSampleMaxCandidates, sampling_candidates);
@@ -1139,7 +1124,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (graph_batch_min_live == 0) {
-    // The batch family (2026-09-07): the smallest batch that covers the
+    // The batch family: the smallest batch that covers the
     // live slots replays, so two live requests pay four rows — the
     // crossover moves from four to two.
     graph_batch_min_live = std::min(2, max_concurrency);
@@ -1152,7 +1137,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // The effective configuration (2026-09-06): what this rank runs after the
+  // The effective configuration: what this rank runs after the
   // config, the flags and (on a peer) rank 0's settings — canonicalized and
   // digested; rank 0 puts the digest on the warm record and every peer
   // compares its own before it serves. With the settings pushed by the head
@@ -1175,17 +1160,16 @@ int main(int argc, char** argv) {
 
     const auto t_boot = std::chrono::steady_clock::now();
     // The family from config.json's architecture (loaders/architecture.hpp):
-    // everything below the engine seam comes from it.
+    // everything below the engine interface comes from it.
     std::unique_ptr<ServeFamily> family = make_family(ckpt, world, kv_format);
     DGPP_LOG_INFO("serve: model family {} ({})", family->name(), ckpt);
     // The decode rows (2026-09-10, engine/decode_outputs.hpp): the fixed
     // batch holds every slot's verify rows — max_concurrency x (1 + the
     // MTP depth) — floored at kDecodeRows so every existing recipe keeps
     // its exact shape (4 slots x 2 rows = 8). The family's cap bounds it:
-    // GLM-4.7 takes the derived shape (its batched depth >= 2 chain);
-    // GLM-5.3-Flash and Qwen3.8-Flash-Next stay at 8 — past depth 1 their
-    // steps are scalar, and a depth-1 batch over the cap is refused as
-    // before.
+    // GLM-4.7 supports the derived shape up to 32 rows. GLM-5.3 and
+    // Qwen are capped at 8 and use scalar graphs beyond MTP depth 1.
+    // Reject configurations whose depth-1 batch already exceeds the cap.
     const int graph_rows_per_request = mtp ? 1 + mtp_depth : 1;
     int decode_rows = std::max(dgpp::kDecodeRows, max_concurrency * graph_rows_per_request);
     if (decode_graph && decode_rows > family->decode_rows_cap()) {
@@ -1382,7 +1366,7 @@ int main(int argc, char** argv) {
           throw std::runtime_error("rank " + std::to_string(rank) +
                                    " bus start: " + err);
 
-        // The journal star formed FIRST (above, before either side built a
+        // The journal star formed first (above, before either side built a
         // model): rank 0 accepted the full world and pushed the settings
         // record, so every rank here runs the same shape. A short world was
         // refused there, with the reason in the log.
@@ -1500,7 +1484,7 @@ int main(int argc, char** argv) {
         }
 
         if (rank != 0 && !rank0_config.empty() && rank0_config != config_digest) {
-          // The configuration check (2026-09-06): this rank would run a
+          // The configuration check: this rank would run a
           // different world than rank 0 — a different model, world size,
           // fabric port or engine knob. The op streams could never agree;
           // refuse before the first tick, naming what this rank runs (rank

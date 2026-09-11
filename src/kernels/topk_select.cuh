@@ -114,7 +114,7 @@ __device__ inline void select_topk_stream(KeyFn key_fn, int64_t lo, int64_t hi,
     // select_k entries (the merge below reads the first select_k; the
     // kKeyMax padding beyond n sorts to the end either way) — a short
     // context's 75 keys were sorting all 2 048 padded slots, 66 barrier
-    // passes for a 49 us decode select (2026-09-09). The selected set is
+    // passes for a 49 us decode select. The selected set is
     // the same: a total order on composite keys, one result.
     int sort_n = 1;
     while (sort_n < select_k || sort_n < n) sort_n <<= 1;
@@ -143,7 +143,7 @@ __device__ inline void select_topk_stream(KeyFn key_fn, int64_t lo, int64_t hi,
 }
 
 
-// ---- shared by the DSA and QSA selections (2026-09-09) --------------------
+// ---- shared by the DSA and QSA selections --------------------
 constexpr int kIdxBits = 21;  // pool ids < 2^21 (validated at launch)
 constexpr uint64_t kIdxMask = (1ull << kIdxBits) - 1;
 
@@ -214,7 +214,7 @@ __device__ inline int expand_from_best(const uint32_t* best_hi,
     real[rd] = i < select_k &&
                (best_hi[i] != 0xFFFFFFFFu || best_lo[i] != 0xFFFFFFFFu);
     id[rd] = real[rd] ? int32_t((uint64_t(best_hi[i]) << 32 | best_lo[i]) & kIdxMask) : 0;
-    // A pool past the row's visible pools is no selection (2026-09-06).
+    // A pool past the row's visible pools is no selection.
     if (real[rd] && int64_t(id[rd]) * kpool > pos) real[rd] = false;
     const uint32_t mask = __ballot_sync(0xffffffffu, real[rd]);
     within[rd] = __popc(mask & ((1u << lane) - 1u));

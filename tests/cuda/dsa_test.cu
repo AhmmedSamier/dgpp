@@ -8,7 +8,7 @@
 //   * the top-k selection is exact by construction: the host oracle mirrors
 //     the kernel's contraction-proof logit arithmetic (separate mul/add in
 //     the documented order plus the warp butterfly reduction), so pool
-//     positions and expanded token rows are compared BITWISE over the fuzz
+//     positions and expanded token rows are compared bitwise over the fuzz
 //     corpus — the M3 exit criterion.
 #include <cuda_runtime.h>
 
@@ -1647,7 +1647,7 @@ DGPP_TEST(dsa_decode_update_multi_request_and_padding) {
   std::vector<int32_t> req_ids = {1, 1, 1, 1, 1, 1, 3, 3, 3, -1, -1};
   std::vector<int64_t> pos = {50, 51, -1, 52, 53, 54, 30, 31, 32, -1, -1};
   // NOTE: pos 51 completes pool 12 (48..51) — but its earlier members
-  // (48..50) are NOT in this batch: they live in the seeded ring.
+  // (48..50) are not in this batch: they live in the seeded ring.
   auto k = random_bf16_bits(111, int64_t(tokens) * dim, -2, 1);
   auto gate = std::vector<uint16_t>(size_t(tokens) * dim);
   for (int t = 0; t < tokens; ++t) {
@@ -2046,7 +2046,7 @@ struct TestWeights {
   std::vector<std::vector<uint16_t>> storage;  // keeps host bits alive
   std::vector<float> ape;
 
-  // fp8_projections (2026-09-08): q_a / kv_a / q_b / o_proj as e4m3 payloads
+  // fp8_projections: q_a / kv_a / q_b / o_proj as e4m3 payloads
   // with 128x128 block scales — the oracle (and `bridge_views`, the bf16
   // form of the same layer) get bf16(e4m3 x s), the bridge's rule;
   // `layer_views` carries the pairs for the scale-aware GEMM path.
@@ -2063,7 +2063,7 @@ struct TestWeights {
     q_storage.reserve(4);
     s_storage.reserve(4);
     // Host bits live in `storage` (a reused local would dangle the views).
-    // Returns BOTH pointers: `host` for the reference oracle (CPU), `dev`
+    // Returns both pointers: `host` for the reference oracle (CPU), `dev`
     // for the layer (GPU) — mixing them up segfaults spectacularly.
     struct Ptrs {
       const uint16_t* host;
@@ -2331,7 +2331,7 @@ void require_cache_matches(const DsaStatePool& pool, int layer, int req,
 
   // Latent cache: bf16 tolerance. Reorder device rows to logical order
   // through the block table, then compare with the reference. A quantized
-  // cache (2026-09-06) is read back as codes + row scales and dequantized
+  // cache is read back as codes + row scales and dequantized
   // on the host — the reference holds the dequantized rows — with a wider
   // budget: the rows the two sides quantized differ by GEMM ulps, so an
   // element near a quantization boundary legitimately lands one code apart
@@ -2390,13 +2390,13 @@ void require_cache_matches(const DsaStatePool& pool, int layer, int req,
 // Device GEMMs (cublasLt) and the host oracle sum in different orders, so
 // q_idx/w_folded differ by ulps; after fp8 quant that perturbs pool logits
 // enough to flip the select_k/select_k+1 boundary on a few rows. That is
-// the documented device-vs-host tolerance class (DESIGN 12), NOT a wiring
+// the documented device-vs-host tolerance class (DESIGN 12), not a wiring
 // bug — so: rows with identical selections get a tight per-row budget;
 // flipped rows must be few, must be a single boundary swap (one pool in,
 // one pool out), and must stay sane in magnitude. Wiring bugs (wrong
 // buffers/strides) produce massive multi-row divergence and fail loudly.
 // Optional per-flipped-row auditor: certifies each divergence as a measured
-// boundary near tie using BOTH sides' actual inputs (see
+// boundary near tie using both sides' actual inputs (see
 // dsa_near_tie_audit.hpp). Returns false when this row cannot be audited
 // (inputs unavailable); the caller then falls back to the strict swap shape.
 using RowAuditor = std::function<bool(int64_t row, const int32_t* dev_toks,
@@ -2466,7 +2466,7 @@ RowAuditor make_near_tie_auditor(
   const int heads = cfg.index_n_heads;
   const int dim = cfg.index_head_dim;
   const std::vector<int32_t> bt = fetch_block_row(pool, req, s);
-  // Copy ONLY the slots the request actually wrote (via the block table,
+  // Copy only the slots the request actually wrote (via the block table,
   // one small copy per logical pool). Downloading the whole cache would
   // read never-written physical slots — the engine never touches those
   // (kernels only read pools < visible, which are always written), and
@@ -2695,7 +2695,7 @@ DGPP_TEST(dsa_state_pool_block_allocation_and_accounting) {
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
 }
 
-// The FP8 projections (2026-09-08): the layer fed the checkpoint's pairs
+// The FP8 projections: the layer fed the checkpoint's pairs
 // through the scale-aware GEMM, against the host reference over the same
 // dequantized values — the gate the bf16 bridge form passes, run on both
 // forms of the same weights.

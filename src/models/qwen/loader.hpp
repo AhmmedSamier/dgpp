@@ -1,11 +1,10 @@
 #pragma once
-// Resident weight loader for the Qwen3.8-Flash-Next text model (Q2,
-// 2026-09-09, docs/qwen38_flash_next_plan.md §2.1, D2, D4), on the shared
-// resident layer stream (loaders/resident_stream.hpp, extracted from this
-// loader 2026-09-09): the family supplies its expected-tensor table, its
-// TP geometry, the per-class builders and the globals; the stream owns
-// the bumps, the staging mirror, the resident image, the byte reconciles
-// and the digest. Every layer is built DIRECTLY at this rank's geometry.
+// Qwen3.8-Flash-Next weight loader. The family defines tensor bindings,
+// TP geometry, builders and globals; ResidentLayerStream owns allocations,
+// staging, resident images, byte accounting and digests. Layers are built
+// directly at the rank's geometry. Dense projections use checkpoint BF16
+// or load-time FP8; routed experts use the checkpoint's FP8 or NVFP4 format.
+// The n-gram table can be resident or gathered from a read-only mapping.
 //
 // Placement (every slice a formula in the world size W):
 //   GDN: 16/W key heads and 48/W value heads per rank — in_proj_qkv rows
@@ -23,7 +22,7 @@
 //   GR:  every site replicated (measured, D3).
 //   PLE: key/value projections K-sliced to this rank's 16/W hash heads'
 //        columns (packed); norms, conv, buffers and scale replicated. The
-//        n-gram table is NOT a layer: load_ngram_table() puts this rank's
+//        n-gram table is not a layer: load_ngram_table() puts this rank's
 //        contiguous row range (its heads) into its own device allocation,
 //        straight from the shards through the staging mirror.
 //   Globals: embed replicated (a row gather), lm_head vocab-sharded, the
@@ -56,7 +55,7 @@ struct QwenGrResident {
   const uint16_t* down = nullptr;     // BF16 [r, W]
   const uint16_t* up = nullptr;       // BF16 [W, r]
   const uint16_t* inject = nullptr;   // BF16 [n, W]
-  // engine.dense_weights = "fp8" (2026-09-10): the same two in block FP8,
+  // engine.dense_weights = "fp8": the same two in block FP8,
   // the BF16 pointers null (loaders/fp8_quant.hpp).
   GlmQuantMatrix down_fp8, up_fp8;
 };
@@ -202,7 +201,7 @@ class QwenNgramTableMmap {
 
 struct QwenNgramTableResident {
   const uint8_t* rows_e4m3 = nullptr;  // [rows, head_dim] (null under the mmap'ed table)
-  const QwenNgramTableMmap* mmap = nullptr;  // the mmap'ed table (2026-09-10), else null
+  const QwenNgramTableMmap* mmap = nullptr;  // the mmap'ed table, else null
   int64_t row_begin = 0;
   int64_t rows = 0;
   int head_dim = 0;
@@ -272,7 +271,7 @@ class QwenLayerStream : public ResidentLayerStream<QwenLoaderFamily> {
   // The rank's n-gram table slice, loaded once and kept (both residencies).
   const QwenNgramTableResident& load_ngram_table();
   static size_t ngram_table_bytes(const QwenTextConfig& cfg, int rank = 0, int world = 1);
-  // The process-wide table mode (2026-09-10): true = the table stays on the
+  // The process-wide table mode: true = the table stays on the
   // NVMe behind load_ngram_table()'s mapping (ngram_mmap()), rows_e4m3 null,
   // the memory plan's table bytes zero. Set before the stream is built; the
   // deployment config's engine.ngram_table ("resident" | "mmap") drives it.

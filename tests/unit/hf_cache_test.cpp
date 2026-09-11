@@ -134,7 +134,7 @@ DGPP_TEST(hf_cache_refuses_snapshot_without_config) {
   std::string error;
   const std::string dir = resolve(root, "org/name", &error);
 
-  // THEN the failure is at the cache seam, in the cache's vocabulary:
+  // THEN the failure is at the cache interface, in the cache's vocabulary:
   require(dir.empty(), "config-less snapshot must not resolve");
   require(error.find("config.json") != std::string::npos,
           "error should mention config.json, got: " + error);

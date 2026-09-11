@@ -1,8 +1,8 @@
-// The periodic throughput line (2026-09-06): what an operator watching a
+// The periodic throughput line: what an operator watching a
 // rank's log sees of the world's aggregate behavior without a line per
 // tick. Every pass on rank 0 and every tick on a peer hands the loop's
 // scheduler meters to a ThroughputLog; at most once per interval (default
-// 10 s, glm_serve --stats-interval-s) it writes ONE INFO line with the
+// 10 s, glm_serve --stats-interval-s) it writes one INFO line with the
 // interval's deltas: prompts prefilled and prompt tokens per second, the
 // prefill's share of the wall clock, decode steps and generated tokens per
 // second, ms per step and tokens per request-step (MTP's acceptance in

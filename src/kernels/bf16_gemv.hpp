@@ -1,7 +1,7 @@
 #pragma once
 // The bf16 decode GEMV (M6 Stage 2 round 3): D[m,N] = Act[m,K] x W[N,K]^T
 // for m <= gemv::kMaxRows, bf16 weights and activations, fp32 accumulate,
-// bf16 or f32 output. The GEMM seam (CublasLtGemm::matmul) dispatches
+// bf16 or f32 output. The GEMM interface (CublasLtGemm::matmul) dispatches
 // decode-shaped bf16 calls here — cuBLASLt's m=1 kernel (gemvx) ran the
 // KDA/DSA projections at ~128 GB/s on a 233 GB/s part (the T=1 profile:
 // 22 ms of a 190 ms step for 2.87 GB of weights).
@@ -34,7 +34,7 @@ void launch_bf16_gemv(const uint16_t* act, size_t act_row_stride,
                       const uint16_t* weight, void* out, bool out_f32, int m,
                       int n, int k, cudaStream_t stream);
 
-// Two GEMVs of the same m, k and output type in ONE launch: blocks
+// Two GEMVs of the same m, k and output type in one launch: blocks
 // [0, blocks(n0)) run problem 0, the rest problem 1. Each warp's work is
 // exactly what the single launch would do, so both outputs are bitwise the
 // two-launch outputs; what is saved is a launch and a graph gap per pair
@@ -49,7 +49,7 @@ struct Bf16GemvProblem {
 void launch_bf16_gemv_dual(const Bf16GemvProblem& p0, const Bf16GemvProblem& p1,
                            bool out_f32, int m, int k, cudaStream_t stream);
 
-// Up to four GEMVs of the same m, k and output type in ONE launch
+// Up to four GEMVs of the same m, k and output type in one launch
 // (2026-09-09, the GDN's qkv / z / a / b projections at decode): blocks
 // [B_i, B_{i+1}) run problem i, each warp's work exactly the single
 // launch's — every output bitwise its own launch. n == 1 is the single

@@ -2,19 +2,24 @@
 
 Investigated and resolved 2026-09-03.
 
-Status: RESOLVED, and kept because the contract it produced is still enforced.
-The root cause was found with an nsys node-level trace and confirmed with a
-synthetic reproducer; the fix (a kernels-only decode graph) is in the tree; the
-CTest prefetch-off mitigation is removed; the stress gates below pass with
-prefetch enabled at `CUDA_DEVICE_MAX_CONNECTIONS=32` and at `1`.
+The stall was traced to copy-engine nodes in a captured decode graph.
+An nsys node trace and a synthetic reproducer confirmed the dependency
+cycle. Replacing the copies and resets with kernels resolved it; the
+stress tests passed with prefetch enabled at
+`CUDA_DEVICE_MAX_CONNECTIONS=32` and `1`.
 
-Why this page is still here: `glm_check_decode_graph`
-(`src/engine/graph_check.hpp`) refuses any decode-graph capture carrying a
-memcpy, memset or host node, and a dozen source comments across the kernels,
-the decode path and the engines point at this page for the reason. It has held
-since; read this before relaxing that gate or adding a node to a captured
-decode graph. It is a hazard of the in-process multi-rank worlds (the loopback
-gates), where every rank shares one copy-engine queue.
+The investigation below records the graph and behavior tested on
+2026-09-03. The current `check_decode_graph` in
+`src/engine/graph_check.hpp` rejects memcpy, memset, event-record and
+other unsupported node types. Kernel and empty nodes are allowed. A model
+may also declare a bounded number of host nodes: Qwen uses this for
+gathering rows from its mapped n-gram table. Those callbacks run on runtime
+threads and must not introduce a dependency on another rank. This exception
+does not permit copy-engine nodes.
+
+The original failure occurred in an in-process multi-rank test, where the
+ranks shared a copy-engine queue. Read the dependency analysis before
+changing the graph-node checks or adding captured work.
 
 ## Resolution
 
@@ -195,7 +200,7 @@ record entry of that date): eager 36.07 ms/step (ledger 36.4), T=1 graph
 both graphs IDENTICAL over 300 steps with one generated-ids md5 on all four
 ranks. The kernels-only graph costs nothing measurable per step.
 
-### What the handoff got right and wrong
+### Assessment of the initial hypotheses
 
 The diagnosis "a required GPU node fails to run while its peer's node
 remains resident waiting for it, through a dependency CUDA cannot see" was
@@ -207,11 +212,5 @@ would have queued behind the peer's dependency wait exactly as before, and
 the conditional node's own downstream wait would have joined the cycle. No
 change to the collective kernel was needed.
 
----
-
-The original investigation handoff — the reproduction recipe, the profiling
-controls, the hypotheses tested and rejected, and the fix directions weighed
-before the copy-engine queue was identified — was kept below this line until
-the contract had held for a while. It is superseded by the resolution above
-and now lives only in this file's git history. The dated engineering record
-of the hunt is in `benchmarks/results/2026-08-29-bus-m5.md`.
+The earlier handoff is preserved in this file's git history. The full
+dated investigation record is in `benchmarks/results/2026-08-29-bus-m5.md`.

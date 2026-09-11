@@ -13,7 +13,7 @@
 //     i32 ids[tokens * top_k]      (ascending expert id per token)
 //     f32 weights[tokens * top_k]
 //
-// The format is pinned by golden bytes in BOTH the C++ unit test and the
+// The format is pinned by golden bytes in both the C++ unit test and the
 // python tool test, so the two writers/readers cannot drift apart.
 #include <cstdint>
 #include <string>

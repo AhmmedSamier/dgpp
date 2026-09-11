@@ -1,8 +1,7 @@
 #pragma once
-// QwenModel: the Qwen3.8-Flash-Next model over the resident (or streaming)
-// loader — the diagnostic forward of Q4 and the stateful decode sessions of
-// Q6 (2026-09-09; docs/qwen38_flash_next_plan.md §1.2, §5). The wiring,
-// pinned to the transformers Qwen4ExpTextDecoderLayer:
+// Qwen3.8-Flash-Next model with resident or streaming weights. The shared
+// SessionModel core manages request state and execution around run_rows(),
+// which follows transformers' Qwen4ExpTextDecoderLayer:
 //
 //   R = embed(x) on every branch
 //   per layer: [R += PLE(R, ids) at the PLE layer]
@@ -10,16 +9,17 @@
 //              x, Rn = GR_mix(R);  y = MoE(x);           R += s(Rn) (x) y
 //   h = mixer_mix(R)  ->  lm_head
 //
-// ONE row walk (run_rows) serves every entry point: the cold diagnostic
+// one row walk (run_rows) serves every entry point: the cold diagnostic
 // forward (all rows' logits, the per-layer hyper states for the parity
 // gate), the prefill chunks of a session (the last row's logits; the state
 // left in the slot IS the state the next rows need — the GDN recurrence,
 // the conv states, the PLE conv state and n-gram context, the K/V and
 // compressed-key caches are updated in place, DESIGN §7.1), the eager
 // decode rows (T <= kSpecRows rows of one request at its next positions)
-// and the CAPTURED decode graphs (the same kernels recorded: the scalar
+// and the captured decode graphs (the same kernels recorded: the scalar
 // device-driven step of one slot and the fixed slot-major row batch —
-// engine/graph_engine.hpp's contract, kernels-only, no host syncs).
+// engine/graph_engine.hpp's contract). Mapped n-gram storage adds a
+// declared host gather node; see session_graph_host_nodes().
 //
 // Request slots (max_requests): every slot owns its GDN recurrent and conv
 // state per GDN layer, its PLE conv state and n-gram context (device int32
@@ -32,7 +32,7 @@
 // the spec snapshot rows (GDN recurrent/conv, PLE conv, context, rings);
 // session_rollback (eager) or the recorded commit (glm_spec_commit behind
 // the graph's pick) copies row accepted-1 back over the live state when
-// rows are rejected. The MTP draft block is stage C (refused until then).
+// rows are rejected. The MTP draft block uses the same session protocol.
 //
 // TP (plan D1): `tp_world` > 1 loads this rank's slices (GDN / QSA heads,
 // expert and shared-expert intermediates on the re-blocked scale grid, hash
@@ -138,7 +138,7 @@ class QwenModel : public SessionModel<QwenModel> {
                     bool capture, int head_rows, int batch_requests);
   void snapshot_draft_state(int req);
   void restore_draft_state(int req);
-  // Depth >= 2 (2026-09-10): the chain rows run the draft block forward
+  // Depth >= 2: the chain rows run the draft block forward
   // past the first draft, advancing its QSA ring; the ring is copied aside
   // before the first chain row and restored after the last (GLM-5.3-Flash's
   // chain_ring_copy), into a buffer of its own — the draft snapshot the

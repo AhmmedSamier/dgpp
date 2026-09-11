@@ -73,7 +73,7 @@ class KdaLayer {
   // capture; returns false when a heuristic is unavailable.
   bool prepare(int tokens);
 
-  // Streaming-weight seam (M4 diagnostic forward): swap the device weight
+  // Streaming-weight interface (M4 diagnostic forward): swap the device weight
   // view this layer enqueues against. Scratch and GEMM plans are
   // shape-keyed, so a same-geometry rebind costs a struct copy. The new
   // view must outlive the next enqueue.

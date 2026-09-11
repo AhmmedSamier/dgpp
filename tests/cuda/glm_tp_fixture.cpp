@@ -11,7 +11,7 @@ namespace {
 // inter dims are 128-multiples at every tested world (512: 256 at world 2,
 // 128 at world 4) — the quantized scale-grid slice CONTRACT: a rank's
 // slice of a block-scaled matrix must start 128-aligned in the sliced
-// dimension, and misaligned starts throw at the view seam. The previous
+// dimension, and misaligned starts throw at the view interface. The previous
 // fixture (dense inter 200) exercised a geometry the local-frame scale
 // consumer cannot represent — rank 1's slice started mid-block and read
 // the wrong scale rows (the M5 record has the hunt); non-multiple tails

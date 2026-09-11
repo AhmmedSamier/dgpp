@@ -1,9 +1,9 @@
-// The Qwen3.8-Flash-Next TP forwards (Q4, 2026-09-09): loopback worlds of
+// The Qwen3.8-Flash-Next TP forwards: loopback worlds of
 // 2 and 4 ranks in one process (real verbs QPs over 127.0.0.1, the bus the
 // fabric uses) over the tiny fixture, against the world-1 model as the
 // oracle. Asserted:
 //   * cross-rank: every layer's hyper state, the final read, the routing
-//     decisions and the lm-head slices' top-1 are BITWISE identical on
+//     decisions and the lm-head slices' top-1 are bitwise identical on
 //     every rank (the canonical rank-order fold; a divergence is the
 //     silent-corruption class);
 //   * vs world 1: per-layer hyper states within the numerics budget (the

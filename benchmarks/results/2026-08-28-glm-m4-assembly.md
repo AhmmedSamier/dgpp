@@ -89,7 +89,7 @@ device memory in the exact layouts the M2/M3 kernels consume:
   (converted from checkpoint BF16);
 - MLP/MoE matrices stay COMPRESSED (E4M3 payload + F32 block scales,
   byte-identical); the four DSA attention matrices' BF16 form is a
-  documented transient per-layer bridge for the M3 IGemm seam until the
+  documented transient per-layer bridge for the M3 IGemm interface until the
   scale-aware GEMM (next chunk) consumes blocks natively.
 
 Two structural guarantees, both tested:

@@ -2,7 +2,7 @@
 // GLM-5.3-Flash text-model configuration, parsed from the checkpoint's
 // config.json (text_config object). This is the M4 config-driven assembly's
 // single source of trained values: KdaConfig/DsaConfig defaults in their
-// geometry headers must NOT be trusted when a checkpoint is loaded — the
+// geometry headers must not be trusted when a checkpoint is loaded — the
 // parser below fills them from the file and rejects anything the M4 assembly
 // does not implement, at load time rather than silently at runtime.
 //

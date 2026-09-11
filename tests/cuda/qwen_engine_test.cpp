@@ -7,7 +7,7 @@
 // device positions, the recorded commit, the pinned token upload) and its
 // ROW-BATCHED replays (the fixed slot-major batch off the persistent
 // feeds, closed slots padding at -1, the 2-slot and full families) produce
-// the eager engine's transcripts at the same world EXACTLY (the recorded
+// the eager engine's transcripts at the same world exactly (the recorded
 // kernels are the eager kernels); the world-2 eager transcripts follow the
 // world-1 ones (reported; the folds reassociate, so a near tie may flip a
 // late token — the first tokens must agree).
@@ -357,7 +357,7 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_graph_matches_plain_decode) {
   DGPP_LOG_INFO("world 2 MTP graph: A took {} steps for {} tokens", o.mtp_steps_a, kSteps);
 }
 
-// The mmap'ed n-gram table (2026-09-10): the same world, the same MTP
+// The mmap'ed n-gram table: the same world, the same MTP
 // graph engine (scalar and batched replays, the eager prefills and the
 // fallbacks' rows) with the table left in the checkpoint's shard and each
 // walk's rows gathered by a host node forked inside the walk — the

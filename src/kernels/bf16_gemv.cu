@@ -71,7 +71,7 @@ __global__ void bf16_gemv_dual_kernel(Bf16GemvProblem p0, Bf16GemvProblem p1,
   }
 }
 
-// The multi-problem kernel (2026-09-09): the problems in the parameter
+// The multi-problem kernel: the problems in the parameter
 // space with their block prefixes; a block finds its problem by the
 // prefix table (field-wise selects, as the dual kernel: no runtime
 // reference into the parameter struct).

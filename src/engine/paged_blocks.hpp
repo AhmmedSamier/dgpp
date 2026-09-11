@@ -1,6 +1,6 @@
 #pragma once
 // The paged cache's block management (2026-09-09, extracted from the Qwen
-// pool for the second paged family, GLM-4.7): ONE block table int32
+// pool for the second paged family, GLM-4.7): one block table int32
 // [max_requests, total_blocks] shared by every cache plane of a model —
 // block b of request r holds the request's tokens [b*block_tokens,
 // (b+1)*block_tokens) in every plane through one physical block id
@@ -8,7 +8,7 @@
 // pool). Host-side: a LIFO free list, a mirrored table, and REFCOUNTS (a
 // request row holds one reference per block, a prefix-cache entry pins its
 // blocks with one more; a block returns to the free list at zero).
-// Acquired blocks are NOT scrubbed on release: a new owner writes every
+// Acquired blocks are not scrubbed on release: a new owner writes every
 // row it reads (the prefill appends before any attention touches them), so
 // release never lands on the memory hot path. The planes themselves (K/V
 // rows, index keys, rings) are the family pool's; this owns the table.

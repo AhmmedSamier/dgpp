@@ -308,7 +308,7 @@ bool DsaLayer::prepare_prefill(int tile_rows, int64_t visible_pools) {
 // ---------------------------------------------------------------------
 
 // The output projection [tokens, local_v] x o_proj^T -> [tokens, hidden]:
-// the bf16 bridge through the GEMM seam, or the fp8 pair through the
+// the bf16 bridge through the GEMM interface, or the fp8 pair through the
 // scale-aware GEMM (the same dequantized values; the two kernels' fp32
 // summation orders differ).
 void DsaLayer::project_out(void* out, int tokens, cudaStream_t stream) {
@@ -597,7 +597,7 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
   // Attention. Rows whose context is below index_topk tokens select
   // densely — visible pools (pos + 1) / kpool <= select_k means every
   // visible pool plus the tail, i.e. tokens [0, pos] — and run on the
-  // tensor-core kernel in wide tiles (2026-09-05); the rest keep the
+  // tensor-core kernel in wide tiles; the rest keep the
   // per-row split kernel over their selection, in 8-row tiles split by a
   // fixed 8 (<= the scratch capacity computed at construction).
   const int64_t dense_last_pos = int64_t(kpool) * (geo_.select_k + 1) - 2;
@@ -679,7 +679,7 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                     select_ws_pools_, counter_ws_, /*grid_blocks=*/0, stream);
   dsa_debug_sync(stream, "select");
   if (std::getenv("DGPP_SYNC_EAGER") != nullptr) {
-    // The fault hunt (2026-09-06): every selected token inside the row's
+    // The fault hunt: every selected token inside the row's
     // context, every block-table entry it reaches reserved — checked on
     // the host before the attention gathers through them.
     cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;

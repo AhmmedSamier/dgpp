@@ -3,7 +3,7 @@
 # four-node service once per (candidate width, graph mode), sends the same
 # request set every time — half at the card's defaults (temperature 1.0 /
 # top_p 0.95), half at a hot setting (temperature 1.2 / top_p 1.0) that
-# flattens the distribution — with fixed seeds, so the SAME tokens come
+# flattens the distribution — with fixed seeds, so the same tokens come
 # back at every width (the pick is width-independent by construction) and
 # only the step time and the fallback count change. Prints, per boot, the
 # per-request fallback counts and pace, and appends one TSV row per request

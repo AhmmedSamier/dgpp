@@ -64,14 +64,14 @@ struct SampleSpec {
                           // a biased greedy row takes the full path)
   uint64_t seed = 0;
   uint64_t counter = 0;
-  // The DRAFT's temperature (2026-09-10): the proposal is the draft head's
+  // The DRAFT's temperature: the proposal is the draft head's
   // final set at THIS temperature, the request's own scaled by
   // DGPP_SPEC_PROPOSAL_TEMP (0 = the request's). Any proposal is exact;
   // the scale only moves the overlap with P, i.e. the acceptance rate.
   float draft_temperature = 0.0f;
 };
 
-// The DRAFT's own stream (2026-09-10): a sampled draft draws from
+// The DRAFT's own stream: a sampled draft draws from
 // (seed ^ kSampleDraftSeedMix, counter) — the request's counter, which the
 // verify advances every step, under a different key. So the draft's draw is
 // independent of the accept test's u1/u2 (what the proposal rule needs),
@@ -110,7 +110,7 @@ struct SampleOutcome {
   float top_logprobs[kSampleVerdictRows][kSampleMaxTopLogprobs] = {};
 };
 
-// The draft's proposal (2026-09-10): the distribution the draft was DRAWN
+// The draft's proposal: the distribution the draft was DRAWN
 // from — the draft head's own final set after the request's temperature,
 // top-k, top-p and min-p — carried from the draft pick to the next step's
 // verify, where the row-0 test becomes min(1, P/Q) with the (P - Q)+

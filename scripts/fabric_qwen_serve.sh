@@ -1,5 +1,5 @@
 #!/bin/bash
-# The Qwen3.8-Flash-Next serving gates on the fabric (Q6, 2026-09-09):
+# The Qwen3.8-Flash-Next serving gates on the fabric:
 # boot the world from a cluster config (deploy/cluster_qwen.json: MTP +
 # the decode graph; deploy/cluster_qwen_t1.json: plain T=1), then the
 # API check, the greedy transcripts (compared against a reference file

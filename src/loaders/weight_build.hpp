@@ -1,10 +1,8 @@
 #pragma once
-// The model-independent core of a resident weight loader (Q2, 2026-09-09,
-// docs/qwen38_flash_next_plan.md D7): extracted from the GLM loader so a
-// second family builds its resident layers with the same bump, the same
-// slice primitives and the same byte accounting. A family supplies its
-// expected-tensor table, its replicated/verbatim classification and the
-// per-class builders; everything below is what they build with.
+// Shared allocation, slicing and byte accounting for resident weights.
+// Each model family supplies its tensor table, replicated-tensor
+// classification and builders. Counting and copying use the same allocation
+// sequence so the memory plan matches the constructed layout.
 //
 // Weight bump: DEVICE memory (cudaMalloc), built through a pinned HOST
 // staging mirror of the same layout. On the GB10 the GPU streams
@@ -16,7 +14,7 @@
 // mirror (host()), one H2D copy per layer lands the bytes, and the
 // pointers handed out (alloc) are the DEVICE addresses the kernels consume.
 // Counting mode walks the same grant sequence without touching memory —
-// a family's byte formula and its allocator are the SAME build code, so
+// a family's byte formula and its allocator are the same build code, so
 // the two cannot drift.
 #include <cstdint>
 #include <cstring>
@@ -149,7 +147,7 @@ inline void run_device_pack(const PackJob& j, cudaStream_t stream) {
 // previous load's exit sync). Without one, the conservative default: the
 // whole device — standalone callers load with unknown readers, and no
 // in-process peer exists to spin against. (A device-wide wait in a
-// ONE-PROCESS multi-rank world deadlocks by construction: a peer's spinning
+// one-PROCESS multi-rank world deadlocks by construction: a peer's spinning
 // collective kernel never completes.)
 inline void sync_load_boundary(cudaStream_t reader, cudaStream_t dequant) {
   if (reader) {
@@ -162,7 +160,7 @@ inline void sync_load_boundary(cudaStream_t reader, cudaStream_t dequant) {
 
 // /proc/meminfo MemAvailable in bytes (0 when unreadable): what the kernel
 // will hand out once it reclaims the page cache — which cudaMemGetInfo's
-// "free" on the GB10's unified pool does NOT count.
+// "free" on the GB10's unified pool does not count.
 inline size_t host_mem_available_bytes() {
   std::ifstream in("/proc/meminfo");
   std::string key;
@@ -251,7 +249,7 @@ struct WeightBuilder {
   }
 
   // Byte accounting chokepoint: every checkpoint byte this build touches
-  // flows through here, with its tensor. Counted in BOTH modes: a counting
+  // flows through here, with its tensor. Counted in both modes: a counting
   // build therefore PLANS the rank's source bytes, which a loader's
   // reconcile compares with what the copy build read.
   void note_read(const Expected& e, size_t bytes) {
@@ -355,7 +353,7 @@ struct WeightBuilder {
     return dst;
   }
 
-  // ---- BF16 matrices encoded to block FP8 at load (2026-09-10) -----------
+  // ---- BF16 matrices encoded to block FP8 at load -----------
   // The checkpoint's BF16 rows / columns slice, encoded on the host into the
   // resident form the fp8 GEMV core and the scale-GEMM tile read
   // (loaders/fp8_quant.hpp). The scale grid is anchored at the slice's
@@ -531,8 +529,8 @@ struct WeightBuilder {
     return q;
   }
 
-  // Transient bridge for a bf16 seam: compressed copies land in the bump,
-  // a dequant job writes the BF16 form alongside. Reads the FULL source.
+  // Transient bridge for a bf16 interface: compressed copies land in the bump,
+  // a dequant job writes the BF16 form alongside. Reads the full source.
   uint16_t* load_dequant_bf16(const std::string& payload_name) {
     const GlmQuantMatrix q = load_quant(payload_name);
     uint16_t* out = static_cast<uint16_t*>(

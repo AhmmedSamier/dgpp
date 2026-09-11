@@ -1,5 +1,5 @@
 #pragma once
-// Synthetic mini-checkpoint writer for the GLM-4.7 tests (2026-09-09):
+// Synthetic mini-checkpoint writer for the GLM-4.7 tests:
 // enumerates the binding table for a small config and writes config.json
 // + one safetensors shard, so fixture and table cannot disagree. Values
 // are deterministic per tensor NAME (glm_rng's scheme), in magnitudes that

@@ -56,6 +56,7 @@ deploy/cluster.json
 deploy/cluster.*.json
 deploy/cluster_*.json
 !deploy/*.example.json
+.env
 
 # Site operations that never belong in the tree: the node memory-reclaim
 # script stops and runtime-masks services and needs root on every node. It is

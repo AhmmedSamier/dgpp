@@ -48,7 +48,7 @@ const char* kWords[] = {
     "\"a\"", " ", ":", "\": ", "\": [", "\": {", "\"c", "ity\"", "\"unit\":",
     "celsius", "fahrenheit", "cel", "sius\"", "\"celsius\"", "true,",
     "false}", "null]", "e", "E+", "-", "9", ".", "0", "\"\\", "x\"",
-    // Numeric pieces for the bounded-integer gates (2026-09-07): whole
+    // Numeric pieces for the bounded-integer gates: whole
     // numbers, a signed one, a whitespace-led one, digit runs.
     "100", "2000", "-5", " 12", "50", "99", "7", "000",
 };
@@ -156,8 +156,8 @@ DGPP_TEST(json_grammar_lexerAcceptsTheCorpusAndRejectsTheRest) {
 DGPP_TEST(json_grammar_schemaCompilesTheSubsetAndRefusesNamingTheKeyword) {
   // A tool argument's compile tolerates the keywords that only narrow a
   // value without an automaton behind them, naming each by path with the
-  // reason; the strict compile refuses them (2026-09-06). An integer's
-  // bounds are neither: they compile and are enforced (2026-09-07).
+  // reason; the strict compile refuses them. An integer's
+  // bounds are neither: they compile and are enforced.
   {
     const dgpp::minijson::ParseResult p = dgpp::minijson::parse(
         R"({"type":"object","properties":{"n":{"type":"integer","minimum":0,"maximum":9},)"
@@ -513,7 +513,7 @@ DGPP_TEST(json_grammar_maskEqualsBruteForceOnRandomWalks) {
   const auto scalar = compile(R"({"anyOf": [{"enum": [3, 10]}, {"const": true}]})");
   oracle_walks("scalar", scalar, 40, 3u, &finished);
   require(finished > 20, "scalar walks rarely finish");
-  // Bounded integers in every position the arithmetic reaches (2026-09-07):
+  // Bounded integers in every position the arithmetic reaches:
   // two-sided, negative, one-sided each way, a single value, beside null,
   // as an anyOf alternative beside a string, two bounded alternatives, an
   // enum beside a bound, and array items.

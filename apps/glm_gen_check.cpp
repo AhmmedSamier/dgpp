@@ -45,7 +45,7 @@
 // (fresh KDA/DSA state per call — GlmDiagnosticModel's contract). The
 // incremental decode engine is Stage 2; do not read this app's per-step
 // time as serving latency. EOS-stop is likewise Stage 2 policy (the
-// sampler/service seam); this loop runs exactly --steps steps.
+// sampler/service interface); this loop runs exactly --steps steps.
 //
 // ALLOCATION DISCIPLINE (the burst-wedge lesson, now a rule): every
 // device allocation — the pick scratch included — happens BEFORE the
@@ -171,7 +171,7 @@ class ThreadProbe {
   int fd_;
 };
 
-// Real-mesh bus budgets + the fabric pick now live in the shared seam
+// Real-mesh bus budgets + the fabric pick now live in the shared interface
 // (models/glm_fabric_engine.hpp) — dgpp-serve and this app ride the
 // same closure, so the pick path cannot drift between the smoke
 // instrument and the serving deployment.
@@ -238,9 +238,9 @@ uint64_t fnv1a64(const std::string& bytes) {
 }
 
 // Parses the manifest from its bytes (read once — the FNV hash logged
-// across ranks must cover EXACTLY the bytes that were parsed). One JSON
+// across ranks must cover exactly the bytes that were parsed). One JSON
 // object per line ('#' comments and blanks skipped); throws with the
-// line number on any malformed entry. The SAME bytes must reach every
+// line number on any malformed entry. The same bytes must reach every
 // rank (fabric_run.sh --stage-file stages it).
 std::vector<dgpp::sched::SchedulerRequest> parse_manifest(
     const std::string& manifest, const std::string& display_path,
@@ -412,7 +412,7 @@ int g_prefill_repeat = 1;
 // kBusMaxGraphGens = 128 less the step's own ~92 nodes.
 int g_gr_probe_layers = 0;
 
-// The memory receipt: EXACTLY what the model pre-allocates for this knob
+// The memory receipt: exactly what the model pre-allocates for this knob
 // combination, by region, plus the per-request reserve math. Runs with or
 // without a GPU (--sched-plan uses it before any device work).
 void print_memory_receipt(const GlmTextConfig& cfg, int world,
@@ -520,7 +520,7 @@ void print_memory_receipt(const GlmTextConfig& cfg, int world,
 // picks. Both worlds keep their local pick closures below.
 
 // The process's sampling mode (M6 6b). Absent params: the exact greedy
-// loop every gate pins — this diagnostic does NOT apply the checkpoint's
+// loop every gate pins — this diagnostic does not apply the checkpoint's
 // stochastic defaults on its own (dgpp-serve does); --sample or any
 // override opts in, at the model's defaults with the overrides applied.
 // `seed` is the fixed seed (request i of a manifest draws from seed + i).
@@ -530,8 +530,8 @@ struct SamplingRun {
   bool on() const { return params.has_value(); }
 };
 
-// The host pick — ONE driver for every loop that picks on the host (PLAN
-// M8's FabricPicker seam, 2026-09-05): world 1's full-head argmax or exact
+// The host pick — one driver for every loop that picks on the host (PLAN
+// M8's FabricPicker interface, 2026-09-05): world 1's full-head argmax or exact
 // sampler and the fabric's bus merge or bus sampler behind the same
 // greedy / sampling branch, the same RNG, the same log lines (the ones
 // scripts/fabric_xrank.py and fabric_xcript.py read). The plain loops use
@@ -914,7 +914,7 @@ local_sampling_topk_masses(const GlmDiagnosticModel::Outputs& out,
 
 // ---------------------------------------------------------------------------
 // --mtp: greedy speculative decode on the fabric (DESIGN §9), the on-device
-// step. With --decode-graph EVERY step is ONE graph replay: the T=2 verify
+// step. With --decode-graph EVERY step is one graph replay: the T=2 verify
 // of [next, draft], the recorded pick behind the head (DevicePicker: the
 // local argmax, the candidate gather as a collective node, the verdict),
 // the commit (the rejected row's rollback and the position advance, on the
@@ -987,7 +987,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   // recorded token feed rewrites every replay. The eager verify uploads
   // its rows at device_tokens() instead. Handing the graph the eager rows
   // compared against a token nothing rewrites: every draft rejected, the
-  // transcript still exact (2026-09-08).
+  // transcript still exact.
   const auto pick_inputs = [&](int rows, int slot,
                                const dgpp::PickVerdict* row_select,
                                bool graph_feed = false) {
@@ -1015,7 +1015,7 @@ void run_speculative(GlmDiagnosticModel& model, CollectiveBus& bus, int rank,
   *forward_ms_total = prefill_ms;
   dgpp::step_timing::reset();
   // The host picks of this loop (the prefill's, the eager rows'): HostPick,
-  // greedy — the sampled speculator below draws through its own seam.
+  // greedy — the sampled speculator below draws through its own interface.
   HostPick host(world, rank, &bus, pick_scratch, GenEngineAdapter::Sample{},
                 SamplingRun{}, cfg.vocab_size);
 
@@ -1604,8 +1604,8 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                 .count());
       }
 
-      // The inter-step seam (t_pick of step k -> t0s of step k+1) is the
-      // ONLY host region no phase below times, and it is where the peers
+      // The inter-step interface (t_pick of step k -> t0s of step k+1) is the
+      // only host region no phase below times, and it is where the peers
       // lost ~10 ms in lockstep (2026-09-02, seen only as rank 0's gen-0
       // handshake). It holds two log lines and a token decode — so the
       // probe brackets it and the next step's phases line reports it.

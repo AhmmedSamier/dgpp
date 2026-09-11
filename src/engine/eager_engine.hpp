@@ -1,25 +1,17 @@
 #pragma once
-// The scheduler-engine closure over a model + the pick (M6
-// Stage 1d's shape, extracted for Stage 4's serving app — ONE seam, two
-// apps). The scheduler stays pure host code; at TP>1 the pick is the
-// distributed greedy pick — a collective — so the adapter's call order
-// IS the collective order (§11's identical-rank-order contract).
+// Scheduler adapter for eager model execution and token selection.
+// The caller supplies pick callbacks for its world: a full-vocabulary pick
+// at world 1 or a distributed pick over rank-local logits. Distributed
+// picks are collectives, so every rank must call them in the same order.
 //
-// The pick is a std::function closed over the caller's world: w1 uses
-// the full-vocab argmax (make_w1_pick); the fabric uses bus_greedy_pick
-// over the vocab-sharded head (glm_gen_check's fabric path).
+// An optional Sample callback enables stochastic sampling. Each request
+// slot retains its parameters, counter RNG and token context for penalties.
+// configure_sampling() initializes that state before the prefill pick.
+// Nonpositive temperature uses the greedy callback; an adapter without a
+// Sample callback reports that it supports greedy decoding only.
 //
-// SAMPLING (M6 6b): a second closure, `Sample`, is the stochastic pick —
-// the request's spec, its counter RNG (advanced by the draw) and its
-// context ids (prompt + generated, the penalties' count table). Per slot
-// the adapter keeps exactly that state, armed by configure_sampling()
-// before the prefill pick. temperature <= 0 is the greedy closure, at zero
-// cost and with the exact op stream every gate pins; an adapter built
-// without a Sample closure is greedy-only and says so.
-//
-// ALLOCATION DISCIPLINE (the burst-wedge lesson): hoist the pick's float
-// row OUT of the closure — no per-token device-adjacent allocation on
-// the decode path.
+// Allocate pick buffers before decoding. Allocating device-related memory
+// inside a pick can synchronize with another rank's spinning collective.
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -48,7 +40,7 @@ template <class Model>
 class EagerEngineAdapter : public sched::SchedulerEngine {
  public:
   using Pick = DecodePick;
-  // `mask` is null when the position is unconstrained; `bias` (2026-09-06)
+  // `mask` is null when the position is unconstrained; `bias`
   // is the request's dense logit_bias row over [0, this rank's slice end),
   // null when the request has none.
   using Sample = DecodeSample;

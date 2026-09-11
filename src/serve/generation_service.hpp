@@ -1,14 +1,11 @@
 #pragma once
-// The M6 Stage 4 generation service (PLAN M6 deliverable 4): the
-// OpenAI-compatible chat/completions API over the deterministic
-// scheduler. This header is the contract; the shapes live below.
+// OpenAI-compatible text-generation service over the scheduler.
+// Supported fields are validated before admission. Unsupported fields
+// return 400 with an error object naming the parameter. Sampling defaults
+// come from the model configuration, and constrained output requires
+// an engine that supports token masks.
 //
-// COMPATIBILITY CONTRACT (the loud-refusal discipline): every field the
-// service ACCEPTS behaves exactly as the OpenAI API does; every field
-// it does not implement yet answers 400 with the OpenAI error object
-// naming the offending parameter. Silently ignoring a sampling knob
-// would be the one dishonest behavior on the menu.
-//
+
 //   POST /v1/chat/completions   messages[] (system/user/assistant/tool;
 //                               string or content-part content, assistant
 //                               tool_calls and reasoning_content, tool
@@ -42,7 +39,7 @@
 //                               finish_reason "tool_calls" when a call
 //                               parsed. tool_choice required / named /
 //                               none and parallel_tool_calls false are
-//                               GUARANTEES through constrained decoding
+//                               guarantees through constrained decoding
 //                               (M6 6g, DESIGN §10): the request carries
 //                               the tool-call grammar and every rank's
 //                               pick obeys its mask — the model reasons
@@ -55,15 +52,15 @@
 //   GET  /health               liveness (the fabric harnesses' probe).
 //   GET  /v1/metrics           scheduler + service counters (ours).
 //
-// THREADING (two threads, one lock, tiny critical sections):
+// Thread ownership (HTTP and engine threads, one shared mutex):
 //   * HTTP thread — HttpServer::serve() calls handle()/idle()/
 //     on_disconnect(). Parses, validates, tokenizes, renders the chat
 //     template (rank 0 only — never on the fabric critical path),
 //     creates request records, and formats SSE chunks from the rings.
 //   * Engine thread — the app calls engine_pass() in a loop: it drains
-//     the admission/cancel queue into the scheduler and runs ONE
+//     the admission/cancel queue into the scheduler and runs one
 //     scheduler quantum (sched.tick()). The scheduler observer (which
-//     IS this service) appends token/retire events to the request
+//     is this service) appends token/retire events to the request
 //     records under the lock; the chat records' tool-call parser runs
 //     there too (pure host work, rank 0 only — the fabric never sees it).
 //   * The single mutex covers the event queue and the record list;
@@ -86,7 +83,7 @@
 
 namespace dgpp::serve {
 
-// The tokenizer + chat-template seam. The real binding (TextFrontend)
+// The tokenizer + chat-template interface. The real binding (TextFrontend)
 // wraps the Stage 3/3b exact tokenizer and template; tests bind a fake
 // so the whole HTTP/SSE/lifecycle stack runs without a model cache.
 class ModelFrontend {
@@ -147,7 +144,7 @@ struct ServiceConfig {
   // revision, the template hash and the checkpoint the entries were taken
   // under (the cache is per process; the key names what it is bound to).
   std::string prefix_key;
-  // The vocabulary bound for logit_bias ids (2026-09-06): the model's
+  // The vocabulary bound for logit_bias ids: the model's
   // vocab_size; 0 refuses logit_bias (the bound is unknown).
   int64_t vocab_size = 0;
 };
@@ -191,7 +188,7 @@ class GenerationService : public HttpHandler,
   struct PassEvents {
     std::vector<dgpp::sched::SchedulerRequest> submits;
     std::vector<std::string> cancels;
-    std::vector<std::string> stops;  // the stop-string retires (2026-09-06)
+    std::vector<std::string> stops;  // the stop-string retires
     // The prefix cache's decision digest after the previous tick (M7): the
     // record carries it so every peer compares before applying this one.
     bool has_prefix_digest = false;
@@ -209,7 +206,7 @@ class GenerationService : public HttpHandler,
   // without a record, so tick counts are identical by construction.
   using PreTickHook = std::function<void(const PassEvents&)>;
 
-  // Applies every queued admission/cancel, then runs ONE scheduler
+  // Applies every queued admission/cancel, then runs one scheduler
   // quantum. Returns whether work remains pending (the app may idle-
   // sleep when false; the pending-admission queue is drained first, so
   // arrivals always make the next pass productive).
@@ -217,7 +214,7 @@ class GenerationService : public HttpHandler,
 
   // Optional audit tap on the engine event stream (tokens + retires,
   // engine thread). The fabric verification hashes the per-rank streams
-  // against each other — the smoke's md5 ritual, serving edition. w1
+  // against each other — the smoke's md5 procedure, serving edition. w1
   // leaves it unset.
   void set_audit_observer(dgpp::sched::SchedulerObserver* audit) {
     audit_ = audit;
@@ -227,7 +224,7 @@ class GenerationService : public HttpHandler,
   // Drain-on-stop (M6 6c). begin_shutdown() — engine thread, at a pass
   // boundary — marks the service closed (new requests answer 503
   // server_shutdown), sheds the not-yet-admitted queue the same way, and
-  // flags every live request for cancellation; the caller then runs ONE
+  // flags every live request for cancellation; the caller then runs one
   // more engine_pass(): the cancels ride the journal and the tick's cancel
   // sweep retires them on every rank at the same quantum, with no engine
   // op (so the bus never comes down under a collective). The interrupted
@@ -336,13 +333,13 @@ class GenerationService : public HttpHandler,
         dgpp::sched::Scheduler::Result::Reason::kNone;
     int prompt_tokens = 0;
     int completion_tokens = 0;
-    // The stop strings (2026-09-06): the scanner over the visible text
+    // The stop strings: the scanner over the visible text
     // (chat: the content; legacy: the text), the stop enqueued once, the
     // token count at the match (the usage's completion_tokens).
     StopScanner stop;
     bool stopped = false;
     int stop_tokens = 0;
-    // usage.completion_tokens_details.reasoning_tokens (2026-09-06): the
+    // usage.completion_tokens_details.reasoning_tokens: the
     // ids the parser routed to reasoning (</think> included) while the
     // prompt's <think> was open.
     bool reasoning_open = false;
@@ -390,7 +387,7 @@ class GenerationService : public HttpHandler,
   bool parse_sampling(const dgpp::minijson::Value& body,
                       HttpResponseWriter& w, sample::Params* sampling,
                       uint64_t* seed);
-  // n, stop and logit_bias (2026-09-06): validated per the schema, 400
+  // n, stop and logit_bias: validated per the schema, 400
   // naming the field otherwise; logit_bias also needs an engine that can
   // bias the pick and the vocabulary bound.
   bool parse_n(const dgpp::minijson::Value& body, HttpResponseWriter& w, int* n);
@@ -424,7 +421,7 @@ class GenerationService : public HttpHandler,
   // and enqueues the submit (the engine thread applies it).
   void enqueue_admission(std::shared_ptr<StreamRecord> record,
                          dgpp::sched::SchedulerRequest request);
-  // A request's n choices at once (2026-09-06): admitted or shed together.
+  // A request's n choices at once: admitted or shed together.
   void enqueue_group(std::vector<std::shared_ptr<StreamRecord>> records,
                      std::vector<dgpp::sched::SchedulerRequest> requests);
   // The visible content (chat) past the stop scanner: accumulated for the

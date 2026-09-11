@@ -67,7 +67,7 @@ struct TokenMask;
 
 // An integer's range, inclusive after normalization (a fractional or
 // exclusive bound is rounded inward at compile time). Applied only where the
-// node's numeric type is integer alone (2026-09-07): a number with a
+// node's numeric type is integer alone: a number with a
 // fraction or an exponent has no prefix arithmetic worth trusting, so its
 // bound stays the model's to respect and the note says so.
 struct IntegerBounds {
@@ -140,7 +140,7 @@ struct JsonSchema {
 // whose message starts with the offending keyword path (e.g.
 // "schema.properties.city.pattern") followed by the reason. An integer's
 // minimum / maximum / exclusiveMinimum / exclusiveMaximum compile into the
-// node's bounds and are enforced (2026-09-07). With `unenforced` given (a
+// node's bounds and are enforced. With `unenforced` given (a
 // tool argument's schema, 2026-09-06), the keywords that only NARROW a
 // typed value without an automaton behind them — a bound on a number that
 // admits a fraction, minLength/maxLength, pattern, format, multipleOf, ...

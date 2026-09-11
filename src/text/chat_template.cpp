@@ -1,4 +1,4 @@
-// The GLM chat-template interpreter (M6 Stage 3b). See the header for the
+// Chat-template interpreter. See the header for the
 // design contract. This file: lexer (transformers' trim_blocks /
 // lstrip_blocks semantics), recursive-descent parsers for the supported
 // statement/expression subset, the Value model's operations, and the
@@ -82,7 +82,7 @@ struct Stmt {
 
 namespace {
 
-// The house FNV-1a-64 (glm_loader.cpp / glm_tokenizer.cpp) — NOT the FNV
+// The house FNV-1a-64 (glm_loader.cpp / glm_tokenizer.cpp) — not the FNV
 // standard basis; the golden corpus keys are defined by it.
 uint64_t fnv1a64(const char* data, size_t n) {
   uint64_t h = 1469598103934665603ull;

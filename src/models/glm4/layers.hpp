@@ -1,10 +1,8 @@
 #pragma once
-// The GLM-4.7 layer objects (2026-09-09, docs/glm47_plan.md §1.2, D4):
-// each one wires the kernels and the GEMM seam into one site of the
-// layer, owns shape-keyed scratch, and is REBOUND to each layer's resident
-// weight views (the streaming diagnostic forward keeps one layer resident
-// at a time). Host-orchestrated and graph-capturable alike (fixed grids,
-// no host reads on the decode rows).
+// GLM-4.7 layers composed from CUDA kernels and GEMM interfaces, with
+// shape-specific scratch and rebindable weight views. Decode uses fixed
+// grids without host readbacks, allowing graph capture; streaming mode
+// rebinds the layers as weights are loaded.
 //
 //   Glm4AttentionLayer  q/k/v projections (fp32 out), the fused bias +
 //                       head norm + half-split RoPE + paged K/V append,
@@ -26,7 +24,7 @@
 
 namespace dgpp {
 
-// The GEMM seam's workspace, shared by every layer object of a model.
+// The GEMM interface's workspace, shared by every layer object of a model.
 struct Glm4GemmWorkspace {
   IGemm* gemm = nullptr;
   void* ws = nullptr;

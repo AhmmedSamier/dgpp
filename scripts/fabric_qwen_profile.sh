@@ -1,5 +1,5 @@
 #!/bin/bash
-# The decode profile ritual (docs/qwen38_flash_next_plan.md Q8, 2026-09-09):
+# The decode profile procedure (docs/qwen38_flash_next_plan.md Q8, 2026-09-09):
 # the world up with rank 0 under nsys (dgpp-cluster's --head-wrap), one
 # warm request, then a 400-token single-stream request (the profiled
 # steps), the world down (nsys writes the report on rank 0's SIGINT), the

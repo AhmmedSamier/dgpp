@@ -69,19 +69,13 @@ bool is_replicated(const GlmExpectedTensor& e) {
   }
 }
 
-// DSA dequant-bridge tensors (the M3 bf16 seam): read in FULL by every rank
-// (the quantized row/column slice contract forbids mid-block starts at this
-// seam), then sliced/packed at the bf16 level — exactly what GlmTpViews
-// does to the same bridge buffers. Full-read for the byte reconcile, but
-// NOT replicated (their resident outputs are sharded), so the digest skips
-// them. The scale-aware GEMM seam (M4 deliverable 3's successor) will turn
-// these into true quant slices — and will then carry the same 128-alignment
-// contract on their dims.
-// `bridge_active` (2026-09-08): whether this build takes the bf16 bridge at
-// all — the scale-aware GEMM consumes the FP8 pairs directly whenever this
-// rank's q_b row slice and o_proj column slice start 128-aligned (every
-// power-of-two world of the production geometry), and then these two are
-// ordinary sharded reads: true row / column slices, partitioned bytes.
+// Identify DSA tensors that need the BF16 bridge because a TP slice
+// starts inside a quantization block. Each rank reads the full source,
+// dequantizes it and slices the BF16 result, matching GlmTpViews.
+// These reads count toward full-source byte accounting but are excluded
+// from replicated-output digests because the resident results are sharded.
+// When bridge_active is false, aligned FP8 pairs are sliced directly.
+
 bool is_dsa_bridge(const GlmExpectedTensor& e, bool bridge_active) {
   if (!bridge_active || e.cls != GlmWeightClass::Dsa) return false;
   std::string_view s = layer_suffix(e.name);
@@ -300,7 +294,7 @@ struct BuildCtx : WeightBuilder<GlmExpectedTensor> {
     const int64_t local_v_rows = dgeo.local_v_rows;
 
     if (!dsa_bridge) {
-      // The FP8 pairs as resident (2026-09-08): q_a / kv_a replicated in
+      // The FP8 pairs as resident: q_a / kv_a replicated in
       // full, q_b this rank's 128-aligned row slice, o_proj (below) this
       // rank's packed column slice — the scale-aware GEMM reads them as
       // they are, half the bytes of the bf16 bridge per token.
@@ -337,7 +331,7 @@ struct BuildCtx : WeightBuilder<GlmExpectedTensor> {
                     : load_quant(p + "q_b_proj.weight");
       out.dsa.q_b = nullptr;
     } else {
-      // q_b: the bridge dequantizes the FULL source (a head-row slice of the
+      // q_b: the bridge dequantizes the full source (a head-row slice of the
       // quantized matrix starts mid-block at this world — unrepresentable
       // on the scale grid); the resident keeps this rank's rows of the bf16
       // bridge, exactly the view bind slices from the same buffer.
@@ -434,7 +428,7 @@ struct BuildCtx : WeightBuilder<GlmExpectedTensor> {
     // Every expert, sliced on the intermediate dim exactly like the shared
     // expert: this rank's M gate/up rows and M down columns. Each rank's
     // per-token expert bytes are then top_k * 3 slices whatever the routing
-    // — no busiest rank at the FFN boundary (2026-09-02). The column pack
+    // — no busiest rank at the FFN boundary. The column pack
     // runs on the CPU straight from the mmap (strided rows of M bytes).
     const int64_t E = cfg.moe_config().n_experts;
     if (cfg.expert_format(layer) == GlmExpertFormat::Nvfp4Group16) {
@@ -662,7 +656,7 @@ GlmLayerStream::GlmLayerStream(const GlmTextConfig& cfg,
   }
   const size_t globals_cap = globals_bytes(cfg_, rank_, world_, head_);
   globals_bump_->init(globals_cap);
-  // ONE pinned staging mirror serves every bump (layers and globals build
+  // one pinned staging mirror serves every bump (layers and globals build
   // one at a time and exit synced): sized for the largest of them.
   staging_bytes_ = std::max(capacity, globals_cap);
   DGPP_CUDA_OK(cudaHostAlloc(&staging_, staging_bytes_, cudaHostAllocDefault));
@@ -873,7 +867,7 @@ void GlmLayerStream::build_layer_into(int layer, GlmLayerBump& bump,
   ctx.build_layer(layer);
 
   // Phase one, continued: host-source packs land in the staging mirror
-  // alongside the builder's memcpys; then ONE H2D copy of the whole layer.
+  // alongside the builder's memcpys; then one H2D copy of the whole layer.
   for (const PackJob& j : packs)
     if (!j.src_on_device) run_host_pack(j, bump);
   DGPP_CUDA_OK(cudaMemcpyAsync(bump.base, bump.stage, bump.cursor,
@@ -942,11 +936,11 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
   if (resident_.layer == layer) return resident_;
 
   // Phase one below writes weight bytes into the bump from the CPU — the
-  // SAME region the previously loaded layer's kernels may still be
+  // same region the previously loaded layer's kernels may still be
   // reading (this loader was first exercised mid-forward by the M4
   // diagnostic model; before that, callers always loaded with the device
   // idle). The boundary sync waits for exactly those readers — see
-  // sync_load_boundary for why it must NOT be device-wide in a
+  // sync_load_boundary for why it must not be device-wide in a
   // one-process multi-rank world.
   sync_load_boundary(reader_, stream_);
 
@@ -1095,7 +1089,7 @@ const GlmGlobalsResident& GlmLayerStream::load_globals() {
   };
   globals_.embed = copy_global("model.language_model.embed_tokens.weight");
   if (head_ == GlmHeadSharding::VocabSharded) {
-    // This rank's contiguous vocab slice only — the slice bytes are NOT
+    // This rank's contiguous vocab slice only — the slice bytes are not
     // verbatim: with a sharded head the lm_head partition across ranks
     // (the §5.2 byte reconcile treats them like the sharded classes).
     auto it = tensors_.find("lm_head.weight");

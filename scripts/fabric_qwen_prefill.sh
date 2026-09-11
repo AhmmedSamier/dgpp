@@ -1,5 +1,5 @@
 #!/bin/bash
-# The Qwen prefill ritual (docs/qwen38_flash_next_plan.md Q7, 2026-09-09):
+# The Qwen prefill procedure (docs/qwen38_flash_next_plan.md Q7, 2026-09-09):
 # the world up from a cluster config, serve_prefill_probe.py at the prompt
 # lengths (512 / 2048 / 8192 by default), rank 0's per-request prefill
 # lines, the world down. Every DGPP_* knob in this environment reaches all

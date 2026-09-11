@@ -29,7 +29,7 @@ bool lock_process_memory(std::string* error, size_t* locked_bytes = nullptr);
 
 // /proc/meminfo's MemAvailable in bytes (0 when unreadable): what the kernel
 // will hand out once it reclaims the page cache — which cudaMemGetInfo's
-// "free" on the GB10's unified pool does NOT count (after one resident load
+// "free" on the GB10's unified pool does not count (after one resident load
 // the checkpoint's file pages sit in that cache, reclaimable).
 size_t host_memory_available_bytes();
 

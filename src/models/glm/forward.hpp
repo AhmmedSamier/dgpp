@@ -1,21 +1,18 @@
 #pragma once
-// GlmDiagnosticModel: the M4 deliverable-1 assembly (DESIGN §7.5) — the
-// full text-model forward over the streaming resident loader. One layer is
-// resident at a time; the KDA/DSA/MoE layer objects are constructed once
-// (shape-keyed scratch and GEMM plans) and REBOUND to each layer's resident
-// weight views. Semantics per site, pinned to the transformers
-// Glm5NextTextDecoderLayer:
+// GLM-5.3 text model for diagnostic forward passes and serving sessions.
+// Streaming mode rebinds layer objects to one loaded layer at a time;
+// resident mode retains weights for eager and captured decode execution.
+// Layer objects reuse shape-specific scratch and GEMM plans.
 //
-//   streams (all 4 = embedding) -> mHC compute -> collapsed
-//   ln1 = two-rounding RMSNorm(collapsed)
-//   attn = KDA or DSA layer (their own parity-tested contracts)
-//   streams' = mHC stream update (post, comb, attn_out, streams)
-//   ... same with ffn_hc / ln2 / dense-MLP-or-MoE ...
-//   final = two-rounding RMSNorm(mean over streams) -> lm head (bf16 GEMM)
+// Per attention/FFN site, following Glm5NextTextDecoderLayer:
+//   streams -> mHC collapse -> two-rounding RMSNorm -> attention or MLP
+//   streams' = mHC update(post, comb, output, streams)
+// All four initial streams contain the embedding. The final head consumes
+// the normalized stream mean and exposes FP32 logits.
 //
-// This is the diagnostic mode: correctness first, one full device sync per
-// layer load (the loader's contract) and one per MoE enqueue (router
-// round-trip). CUDA graphs and device-side expert grouping are M5+.
+// The model owns request state, speculative snapshots, prefix-cache
+// operations and graph staging. TP reducers restore replicated hidden
+// state at attention and FFN boundaries. See DESIGN §§5, 7–9.
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -40,7 +37,7 @@
 
 namespace dgpp {
 
-// The TP block-boundary seam lives with the engine (engine/boundary_reducer.hpp).
+// The TP block-boundary interface lives with the engine (engine/boundary_reducer.hpp).
 using GlmBoundaryReducer = BoundaryReducer;
 
 class GlmDiagnosticModel {
@@ -95,7 +92,7 @@ class GlmDiagnosticModel {
   // per-request bound: the scheduler admits a request only when its full
   // reservation (prompt + max_steps, block-rounded) fits the free pool.
   //
-  // KV FORMAT (2026-09-06): `kv_format` is the DSA latent cache's storage
+  // KV FORMAT: `kv_format` is the DSA latent cache's storage
   // format (kernels/latent_format.hpp) — bf16 (default, every parity
   // gate's format), fp8 or fp4; the index cache stays fp8 regardless.
   GlmDiagnosticModel(const GlmTextConfig& cfg,
@@ -108,7 +105,7 @@ class GlmDiagnosticModel {
                      int max_requests = 1, bool mtp = false,
                      LatentFormat kv_format = LatentFormat::kBf16);
 
-  // ---- the memory plan (2026-09-06) ----------------------------------------
+  // ---- the memory plan ----------------------------------------
   // Every byte the constructor (and its layer objects) will allocate for a
   // shape, itemized, computed from the same formulas BEFORE anything is
   // allocated — so a serving process can refuse a configuration that does
@@ -140,7 +137,7 @@ class GlmDiagnosticModel {
   // `req` (zeroed KDA recurrent/conv state for that slot, released DSA
   // blocks, cold tail rings — the same starting state run_stack builds)
   // and processes the prompt in pool-aligned chunks (2048), keeping state
-  // across chunks. session_step then processes exactly ONE token at the
+  // across chunks. session_step then processes exactly one token at the
   // slot's next position, updating the persistent state in place, and
   // returns that token's outputs. No cross-token scratch is re-derived:
   // the layer pipeline is elementwise in time (all temporal recurrence
@@ -167,7 +164,7 @@ class GlmDiagnosticModel {
   // what keeps the collectives aligned.
   //
   // HAZARD: forward()/forward_isolated() and the sessions share the
-  // KDA/DSA state pools. A plain forward on the SAME model instance while
+  // KDA/DSA state pools. A plain forward on the same model instance while
   // any session is open throws (it would clobber session state) — a
   // parity harness runs engine and reference on SEPARATE instances.
   Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids);
@@ -178,7 +175,7 @@ class GlmDiagnosticModel {
   // attached to another slot. The snapshot is the KDA recurrent+conv slot
   // (every KDA layer), the DSA tail rings (every DSA layer, the draft
   // block's included), the draft block's last hidden row h_q, and the
-  // request's block ids: the FULL blocks below the position by reference
+  // request's block ids: the full blocks below the position by reference
   // (the cache pins them in the pool) plus a private copy of the partial
   // last block, because an attached request keeps writing into it.
   struct SessionSnapshotMeta {
@@ -232,7 +229,7 @@ class GlmDiagnosticModel {
 
   // ---- speculative decode (DESIGN §9) -----------------------------------
   // session_verify runs T (1..kSpecRows) tokens at the slot's next T
-  // positions in ONE decode call and returns EVERY row's logits
+  // positions in one decode call and returns EVERY row's logits
   // ([T, lm_vocab_count]) and final hidden ([T, hidden]). Row r's bits
   // equal what session_step would have produced for that token after
   // rows < r (the head GEMV's rows are independent, the KDA recurrence is
@@ -245,7 +242,7 @@ class GlmDiagnosticModel {
   //   recurrent/conv state and the DSA tail rings to what they were after
   //   row a-1 and rewinds the position by T-a. Latent rows and index pools
   //   at the retracted positions are simply overwritten by the next call.
-  // a == T is a no-op. The snapshot scratch serves ONE in-flight verify:
+  // a == T is a no-op. The snapshot scratch serves one in-flight verify:
   // roll a request back before verifying another. kSpecRows = 4 is the
   // bf16 GEMV's row bound (gemv::kMaxRows): at T <= 4 every projection
   // takes the row-independent GEMV, so the rows' bits are the T=1 bits;
@@ -302,7 +299,7 @@ class GlmDiagnosticModel {
   void session_draft_ring_snapshot(int req);
 
   // The chained draft (depth >= 2, 2026-09-06): after session_draft (or a
-  // previous chain row) the block runs ONE row at the position after its
+  // previous chain row) the block runs one row at the position after its
   // counter (`index` rows past it), fed `token` — the previous draft's
   // pick — and its own previous output row as the hidden: the single
   // block's recursion, which approximates the main stack's hidden at that
@@ -360,7 +357,7 @@ class GlmDiagnosticModel {
   //                                 the previous one (the capture dance:
   //                                 install the recorder, capture,
   //                                 restore).
-  //   session_graph_capture_step() — ONE decode step enqueued in
+  //   session_graph_capture_step() — one decode step enqueued in
   //                                 CAPTURE MODE between the caller's
   //                                 cudaStreamBeginCapture/EndCapture on
   //                                 stream(): every launch records, the
@@ -385,7 +382,7 @@ class GlmDiagnosticModel {
   //   session_graph_collect()     — the REPLAY path's result half, after
   //                                 the caller's launch + stream sync +
   //                                 graph_replay_finish: materializes the
-  //                                 Outputs EXACTLY as the eager decode
+  //                                 Outputs exactly as the eager decode
   //                                 tail does (logits/final_hidden from
   //                                 the stable device buffers, route
   //                                 traces from the pinned staging the
@@ -586,7 +583,7 @@ class GlmDiagnosticModel {
   Outputs session_step(int64_t token_id) { return session_step(0, token_id); }
   int64_t session_position() const { return session_position(0); }
 
-  // ---- DSA admission meters (the scheduler's budget seam, Stage 2b) ----
+  // ---- DSA admission meters (the scheduler's budget interface, Stage 2b) ----
   // A model with no DSA layers has no pool; its meters report an
   // unbounded budget so admission keys on the slot count alone.
   int max_session_requests() const { return max_requests_; }
@@ -651,7 +648,7 @@ class GlmDiagnosticModel {
   uint64_t source_bytes_read() const { return loader_.source_bytes_read(); }
 
   // Host-side top-k over fp32 logits: value-descending, lowest-id
-  // tie-break. k <= 64. One entry per row. FULL-vocab logits only — a
+  // tie-break. k <= 64. One entry per row. full-vocab logits only — a
   // sharded-head consumer must merge its slice with glm_sample's
   // helpers instead (this helper cannot see the other ranks' slices).
   static std::vector<std::vector<std::pair<int32_t, float>>> topk(
@@ -669,7 +666,7 @@ class GlmDiagnosticModel {
   void prefetch_attention_side(int layer);
   void prefetch_head();
 
-  // The stack's ONLY layer-load path: load_layer plus the resident-mode
+  // The stack's only layer-load path: load_layer plus the resident-mode
   // hand-off — the stack walks layers in order, so the last main layer's
   // materialization means every layer this model will ever read is on the
   // device, and the loader can drop its checkpoint mappings + page cache
@@ -813,7 +810,7 @@ class GlmDiagnosticModel {
   // the block boundaries and by the attention layers; joined before the
   // step's tail so a capture closes cleanly.
   WeightPrefetcher prefetch_;
-  // The mHC comb's side stream (2026-09-08): each decode site's fused
+  // The mHC comb's side stream: each decode site's fused
   // finish leaves comb (the 20-iteration Sinkhorn, ~6 us on one warp) to
   // launch_mhc_comb here, forked after the finish and joined before the
   // stream update — the only reader — so it runs under the sublayer
@@ -842,7 +839,7 @@ class GlmDiagnosticModel {
   // Per-request, per-layer KDA state, slot-major:
   //   kda_rec_  [max_requests, num_kda_layers, local_heads, V, K]  fp32
   //   kda_conv_ [max_requests, num_kda_layers, conv_channels, conv_hist] bf16
-  // Slot-major so opening a request is ONE memset pair (all its layers
+  // Slot-major so opening a request is one memset pair (all its layers
   // contiguous); forward() (the fresh-state re-forward) uses slot 0.
   float* kda_rec_ = nullptr;
   uint16_t* kda_conv_ = nullptr;
@@ -901,7 +898,7 @@ class GlmDiagnosticModel {
   //   spec_rec_  [kDecodeRows][num_kda_layers][rec elems]  fp32
   //   spec_conv_ [kDecodeRows][num_kda_layers][conv elems] bf16
   //   spec_tail_ [num_dsa_layers][kDecodeRows][2, kpool, dim] bf16
-  // Row-major over the layers so rolling every KDA layer back is ONE
+  // Row-major over the layers so rolling every KDA layer back is one
   // memcpy from row a-1 onto the request's contiguous layer slots.
   float* spec_rec_ = nullptr;
   uint16_t* spec_conv_ = nullptr;
@@ -945,7 +942,7 @@ class GlmDiagnosticModel {
   float* moe_prefill_trace_weights_ = nullptr;
   float* moe_prefill_trace_biased_ = nullptr;   // [n_moe_layers_ * max_tokens * E]
   // The decode tail's PINNED mirrors of the last-row logits and final
-  // hidden (2026-09-02). The host used to read those rows straight out of
+  // hidden. The host used to read those rows straight out of
   // the managed logits_/normed_ after the step's sync — a CPU access to a
   // page the GPU wrote, then a GPU write to a page the CPU touched, every
   // step: UVM fault servicing, and ~2% of steps paid it as a 9-10 ms

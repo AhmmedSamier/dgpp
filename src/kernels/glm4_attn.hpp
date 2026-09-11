@@ -2,7 +2,7 @@
 // GLM-4.7 attention kernels (2026-09-09, docs/glm47_plan.md §1.2, D4; the
 // reference is transformers Glm4MoeAttention with the engine's flash-style
 // attention numerics, the QSA/DSA kernels' pin). The projections run
-// through the GEMM seam with fp32 outputs; these kernels are the rest:
+// through the GEMM interface with fp32 outputs; these kernels are the rest:
 //
 //   qkv finish   per (row, head): bf16(dot + bias) — the Linear's one
 //                rounding — then the two-rounding GLM RMSNorm of q and k

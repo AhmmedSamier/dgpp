@@ -62,7 +62,7 @@ __device__ __forceinline__ void router_select_warp(
     int n_experts, int top_k, float routed_scaling_factor, int norm_topk,
     float* s_scores, float* s_biased, int lane, bool staged = false);
 
-// With `sel_ids` set the select is FUSED (2026-09-03): the token's dots
+// With `sel_ids` set the select is FUSED: the token's dots
 // blocks take a ticket (`counters[token]`, zeroed once, reset by the last —
 // replay-safe) and the last one runs router_select_warp on warp 0, so the
 // separate select launch (5 us + a graph gap per MoE layer) disappears.
@@ -377,7 +377,7 @@ __global__ void moe_round_bf16_kernel(uint16_t* __restrict__ out,
 // from the DEVICE route, stages the slot's activation row in smem, and each
 // warp runs the fp8_gemv core on one weight row. The host-orchestrated path
 // computes each expert's contribution through launch_scale_gemm_*, which
-// dispatches m<=4 to the SAME core — glm_moe_test's bitwise gate pins the
+// dispatches m<=4 to the same core — glm_moe_test's bitwise gate pins the
 // two (any change to one side's arithmetic breaks it; that gate is the
 // twin-keeping mechanism). Every expert is local (each rank holds a slice
 // of all of them), so there is no foreign-expert case.
@@ -449,7 +449,7 @@ __device__ __forceinline__ int logical_slot(const int32_t* __restrict__ order) {
 // block per column chunk. The ticket's __syncthreads + fence per block and
 // the last block's 18 dependent L2 loads on the kernel's tail cost +22 us
 // per layer against the 1.7 us launch they replaced.)
-// Rows per warp of the down projection (2026-09-06): the sliced down's k
+// Rows per warp of the down projection: the sliced down's k
 // is 512 bytes per row — one chunk per lane — so a warp per row had one
 // load in flight; four rows per warp keep four (moe_slot_bench: the chain
 // at two rows measured before/after).
@@ -516,14 +516,14 @@ __global__ void moe_slot_down_kernel(
       static_cast<size_t>(out_stride), m.rs, m.cs);
 }
 
-// The gate GEMV, the up GEMV and the swiglu in ONE launch: a warp computes
+// The gate GEMV, the up GEMV and the swiglu in one launch: a warp computes
 // its row's gate and up dots from the same staged activation and applies
 // moe_swiglu_clamp_kernel's math to the bf16-rounded dots in registers.
 // Bit-identical to the three-launch chain (the dots are block_rows' dots,
 // rounded to bf16 exactly where the intermediate buffers rounded them);
 // what disappears is two launches and the gate/up round trip through
 // memory.
-// kPair (2026-09-09): routed-only tables (Qwen) issue both rows' chunk
+// kPair: routed-only tables (Qwen) issue both rows' chunk
 // batches before consuming either (fp8_gemv::row_dots_pair); GLM's tables
 // keep the two row_dots calls in their own instantiation — one kernel
 // carrying both paths sat at 96 registers and GLM's slot kernel lost
@@ -647,14 +647,14 @@ bool aligned16(const void* p) {
 
 namespace {
 
-// The prefill router's dots (2026-09-05): the warp-per-(token, expert) form
+// The prefill router's dots: the warp-per-(token, expert) form
 // above re-streams every gate row per token and every hidden row per
 // expert from L2 (~4.9 GB per 2048-token layer, 1.7 ms). This form tiles
 // 16 tokens x 16 experts per block and stages both operands' K-chunks in
 // shared memory, so each row is read from L2 16x less; every (token,
-// expert) dot is still ONE warp with the SAME per-lane element order (lane
+// expert) dot is still one warp with the same per-lane element order (lane
 // l takes 16-byte vectors v = l, l + 32, ... ascending; chunks are 32-vector
-// aligned) and the same shuffle tree, so scores and biased are BITWISE the
+// aligned) and the same shuffle tree, so scores and biased are bitwise the
 // warp form's (glm_moe_test pins it). Vector path only (the launcher keeps
 // the warp form for unaligned geometry and for decode's fused select).
 constexpr int kRouterTileTokens = 16;
@@ -850,7 +850,7 @@ void launch_moe_gather_rows(const uint16_t* src, const int32_t* rows,
 namespace {
 
 
-// The prefill's grouped GEMV (2026-09-04): see glm_moe_launch.hpp. Every
+// The prefill's grouped GEMV: see glm_moe_launch.hpp. Every
 // thread reaches every __syncthreads — the per-warp row bound is checked
 // around block_rows instead of inside it (block_rows' own early return
 // would strand a warp before the next group's barrier).
@@ -946,14 +946,14 @@ void launch_moe_grouped_gemv(const uint16_t* act, size_t act_stride,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
-// ---- the prefill's grouped tensor-core GEMM (2026-09-05) -----------------
+// ---- the prefill's grouped tensor-core GEMM -----------------
 // One block per (64-column n-tile, segment): the block walks its segment in
 // 128-row m-tiles (eight warps, sixteen rows each), and for every 64-deep
 // k-stage stages the activation tile (bf16, 16-byte loads) and the weight
 // tile (fp8 decoded, scaled and rounded to bf16 exactly as the dequant
 // bridge does — the tile kernel's values, bit for bit) in shared memory,
 // then runs mma.sync m16n8k16 bf16 with fp32 accumulation in ascending k16
-// order — the SAME instruction sequence per output element as
+// order — the same instruction sequence per output element as
 // scale_gemm_kernel, so the outputs are bitwise that kernel's whatever the
 // segment or tile geometry (glm_moe_test pins it). Against the grouped
 // GEMV it replaces on the prefill path: that core re-reads and re-decodes
@@ -1889,7 +1889,7 @@ __device__ __forceinline__ float e4m3_x16384(uint8_t s) {
   return __half2float(__half(h)) * 16384.f;
 }
 
-// The first fp4 tile kernel (2026-09-08), kept as the TILE REFERENCE the
+// The first fp4 tile kernel, kept as the TILE REFERENCE the
 // dense launcher runs and glm_moe_test pins the pipelined grouped kernel
 // against bitwise: mma_tile's shape, one synchronous stage at a time.
 // kSkip (the bench's decomposition, never dispatched): 1 skips the weight
@@ -2646,7 +2646,7 @@ __global__ __launch_bounds__(fp4_ldm::kThreads, 2) void moe_grouped_mma_fp4_ldm_
         // A stage reads 32 bytes of each weight row, rows 2 KB apart: the
         // DRAM sees quarter-line requests. Pull the row's NEXT 128-byte line
         // (the codes of stages s+4 .. s+7) into L2 as a whole line, two
-        // stages ahead of the ring's own copies (2026-09-08).
+        // stages ahead of the ring's own copies.
         if (b_half == 0 && b_ok && (s % 4) == 0) {
 #pragma unroll
           for (int l = (s == 0 ? 1 : kPrefetchLines); l <= kPrefetchLines; ++l) {
@@ -3002,7 +3002,7 @@ bool moe_fp8_smallk_enabled() {
   return on;
 }
 
-// The small-k form (2026-09-10): the down projection's k is 160 bytes at
+// The small-k form: the down projection's k is 160 bytes at
 // TP=4 — five 32-deep stages, so in the one-tile kernel a block's
 // prologue, epilogue and per-stage barriers are most of its life (the
 // prefill profile: 669 us per down launch against 370 for a gate/up
@@ -3193,7 +3193,7 @@ __global__ __launch_bounds__(fp8_ldm::kThreads, 2) void moe_grouped_mma_fp8_ldm_
 }
 
 // DGPP_MOE_FP8_SWEEP=on runs the m-sweep form below wherever an expert
-// holds more than one m-tile; off by default (2026-09-10). Its domain is
+// holds more than one m-tile; off by default. Its domain is
 // the large prefill chunk — 4x the rows per expert cost 1.9x on the
 // one-tile kernel, 1.64x on the sweep — but that chunk measured only 3.6 %
 // on an 8 K prefill and is not taken, and at the production 2,048-token

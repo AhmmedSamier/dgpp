@@ -13,10 +13,10 @@
 //     oracle: free-run final hidden + logits under tolerance, per-layer
 //     ISOLATED parity (synthetic stream states replayed into every rank
 //     and the oracle — the curated-suite discipline adapted: both sides
-//     compute each layer from the SAME entering state, so drift is
+//     compute each layer from the same entering state, so drift is
 //     bounded by one layer's floor), and router flips certified as
 //     measured near ties (glm_route_audit).
-//   * ISOLATED parity asserts BOTH surfaces per layer: the mHC stream
+//   * ISOLATED parity asserts both surfaces per layer: the mHC stream
 //     snapshots AND the raw block-boundary folds (attn + FFN). The
 //     stream snapshots pass through the mHC stream update, whose mixing
 //     coefficients attenuate boundary errors ~300x — the dense
@@ -24,7 +24,7 @@
 //     stream-state reading stayed at 0.001, silently under the 0.02
 //     budget. The folds are the unattenuated surface; both are asserted.
 //   * Cross-rank: final hidden, per-layer captures, route ids/weights,
-//     and logits are BITWISE identical on every rank — the canonical
+//     and logits are bitwise identical on every rank — the canonical
 //     rank-order fold's guarantee (a violation means a rank's replicated
 //     state diverged: the silent-corruption class).
 //   * Chunking: 21 tokens over hidden 256 folds two collectives per
@@ -413,7 +413,7 @@ void check_world(int world, uint16_t port, const std::string& dir,
   // boundary); its rows are excluded from the l2 and the flips are
   // certified separately below. The routes compared are the ISOLATED
   // forward's OWN (TP-isolated vs oracle-isolated) — the routing the
-  // compared layers actually executed — NOT the free-run's: the isolated
+  // compared layers actually executed — not the free-run's: the isolated
   // streams pass through each layer's attention fold first, whose
   // cross-implementation noise flips dense near-ties inside the isolated
   // forward at real dims, and the free-run filter misread those flips as
@@ -455,7 +455,7 @@ void check_world(int world, uint16_t port, const std::string& dir,
                  : find_route(ranks[0].iso_out.routes, src_layer);
       const dgpp::GlmRouteTraceLayer* ref_route =
           l == 0 ? nullptr : find_route(ref_iso.routes, src_layer);
-      // A MoE layer must carry its route on BOTH sides or neither — a
+      // A MoE layer must carry its route on both sides or neither — a
       // one-sided route is a bookkeeping bug (and used to be a null
       // deref: the short-circuit below only guards eng_route).
       require(!eng_route || ref_route,
@@ -606,7 +606,7 @@ void check_world(int world, uint16_t port, const std::string& dir,
   // ---- vs oracle: routing (the cascade discipline) ------------------
   // Both surfaces: the FREE-RUN routes (whole-trajectory view) and the
   // ISOLATED routes (the kept-row exclusions' own certification). Every
-  // token's FIRST divergence must certify; later divergences of an
+  // token's first divergence must certify; later divergences of an
   // already-flipped token are consequences (reported). The isolated
   // audit is the parity gate's routing assertion; the free-run audit is
   // the same discipline on the compounded trajectory.
@@ -640,7 +640,7 @@ void check_world(int world, uint16_t port, const std::string& dir,
 // routing the isolated layers ACTUALLY EXECUTED (TP-isolated vs
 // oracle-isolated), not the free-run's: the isolated streams enter each
 // layer from the replayed reference state but pass through that layer's
-// own attention FIRST, and the attention fold's ~1e-3-rms cross-
+// own attention first, and the attention fold's ~1e-3-rms cross-
 // implementation noise flips DENSE router near-ties inside the isolated
 // forward at real dims (288 sigmoid-scored experts, top-8). The
 // free-run-route filter misread those flips as kept rows — the 0.57
@@ -677,7 +677,7 @@ DGPP_TEST(glm_tp_forward_parity_loopback) {
   glm_tp_write_fixture(dir);
 
   // ---- decode-shaped case (T=8): every boundary takes the pre-staged
-  // seam — stage() hands the pinned send source to the producing GEMM
+  // interface — stage() hands the pinned send source to the producing GEMM
   // (8 x 256 = 2048 elems, one latency slot), world 2 exercises the
   // zero-copy path and the GEMM-writes-pinned contract.
   {
@@ -713,9 +713,9 @@ DGPP_TEST(glm_tp_forward_parity_loopback) {
 }
 
 // ---- M6 d3: the vocabulary-sharded lm head ---------------------------------
-// The serving seam: a VocabSharded model computes ONLY its slice of the
+// The serving interface: a VocabSharded model computes only its slice of the
 // logits, and that slice must equal the replicated head's columns
-// BITWISE — same weight rows enter the same K-reduction, so the
+// bitwise — same weight rows enter the same K-reduction, so the
 // sampling merge inherits exactness instead of inheriting drift. Pinned
 // at world 1 (the degenerate slice = the full vocab) and at world 4 over
 // the loopback bus (the deployment geometry, where the slice is 1/4 of
@@ -888,7 +888,7 @@ DGPP_TEST(glm_sampling_profile_mass_gather_matches_centralized_loopback) {
                 std::to_string(dgpp::kSamplingProfileTopKs[i]));
 }
 
-// M6.6b's width-independent correctness seam over the real bus, in
+// M6.6b's width-independent correctness interface over the real bus, in
 // GLM-5.3-Flash-FP8's actual default regime (temperature=1, top_p=.95, no
 // semantic top_k — the checkpoint's generation_config.json carries exactly
 // those two sampling fields). A peaked distribution resolves inside the
@@ -1588,7 +1588,7 @@ DGPP_TEST(glm_tp_sampled_speculator_loopback_rank_identical) {
 // ---- M6 d3: end-to-end greedy generation ----------------------------------
 // The d3 criterion on the fixture, stated as the invariant that actually
 // holds: the DISTRIBUTED pick (per-rank slice argmax + the bus
-// gather/broadcast) must equal the CENTRALIZED argmax over the SAME
+// gather/broadcast) must equal the CENTRALIZED argmax over the same
 // geometry's full logits, token for token, step after step — plus
 // rank-consistency of the whole loop. The world-1 single-rank loop is
 // run only as a LOGGED reference: its sequence may legitimately differ
@@ -1624,14 +1624,14 @@ DGPP_TEST(glm_tp_greedy_gen_loopback) {
   }
   require(w1_seq.size() == kSteps, "w1 reference produced wrong length");
 
-  // ---- the distributed loop: world 4, BOTH heads, bus pick ----------
+  // ---- the distributed loop: world 4, both heads, bus pick ----------
   // Full-head model = the centralized pick's source (its logits are the
   // bitwise union of the shards — pinned by glm_tp_head_shard_parity);
-  // sharded model = the serving path. Every rank forwards BOTH each
+  // sharded model = the serving path. Every rank forwards both each
   // step (same order on every rank, collectives stay aligned).
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29916);
   require(!buses.empty(), "tp bus world failed to start");
-  // Small-collective canary: 16 elems as the FIRST collective on a fresh
+  // Small-collective canary: 16 elems as the first collective on a fresh
   // bus must pass (pinned standalone). The OPEN ENGINE BUG is the
   // staged->small-plain TRANSITION (see bus_greedy_pick's note): 16 elems
   // after a run of 2048-elem staged collectives stalls. This canary guards
@@ -1751,7 +1751,7 @@ DGPP_TEST(glm_tp_greedy_gen_loopback) {
 
 // M6 Stage 2: the stateful decode session vs the stateless re-forward.
 // Tiers (the parity discipline — CERTIFY near ties, never assume them):
-//   * single-chunk prefill (prompt <= 2048): BITWISE on the last row — the
+//   * single-chunk prefill (prompt <= 2048): bitwise on the last row — the
 //     session runs run_stack's exact op sequence on fresh state;
 //   * steps and multi-chunk prefill: free-run l2 REPORTED, top-1
 //     divergence CERTIFIED (the re-forward's batched GEMMs vs the step's
@@ -1775,7 +1775,7 @@ DGPP_TEST(glm_tp_decode_session_parity) {
   const size_t V = static_cast<size_t>(cfg.vocab_size);
   const size_t H = static_cast<size_t>(cfg.hidden_size);
 
-  // The engine transcript drives BOTH sides (identical tokens in), so the
+  // The engine transcript drives both sides (identical tokens in), so the
   // reference rows and the session rows are comparable position by
   // position. Engine and reference are SEPARATE model instances: a plain
   // forward mid-session would clobber the session's state pools (and now
@@ -1814,7 +1814,7 @@ DGPP_TEST(glm_tp_decode_session_parity) {
     GlmDiagnosticModel eng(cfg, dir, max_tokens, 128);
     GlmDiagnosticModel ref(cfg, dir, max_tokens, 128);
 
-    // BITWISE tier: single-chunk prefill == the re-forward's last row.
+    // bitwise tier: single-chunk prefill == the re-forward's last row.
     const GlmDiagnosticModel::Outputs pre = eng.session_prefill(prompt);
     const GlmDiagnosticModel::Outputs ref_pre = ref.forward(prompt);
     const size_t rowV = (prompt.size() - 1) * V;
@@ -1831,7 +1831,7 @@ DGPP_TEST(glm_tp_decode_session_parity) {
             "single-chunk prefill final_hidden must be BITWISE the "
             "re-forward's last row");
 
-    // The engine transcript, then the reference over the SAME tokens.
+    // The engine transcript, then the reference over the same tokens.
     engine_transcript(eng, &w1_gen, &w1_rows);
     std::vector<int64_t> seq = prompt;
     seq.insert(seq.end(), w1_gen.begin(), w1_gen.end());
@@ -1938,7 +1938,7 @@ DGPP_TEST(glm_tp_decode_session_parity) {
         // spin_then_wait).
         arrive_once();
 
-        // BITWISE prefill tier through the bus (identical collective
+        // bitwise prefill tier through the bus (identical collective
         // sequences on both sides).
         const GlmDiagnosticModel::Outputs pre = eng.session_prefill(prompt);
         const GlmDiagnosticModel::Outputs ref_pre = ref.forward(prompt);
@@ -1998,7 +1998,7 @@ DGPP_TEST(glm_tp_decode_session_parity) {
 // clobber the session's KDA/DSA state pools — the exact corruption this
 // gate's phase-A design would otherwise have absorbed as noise).
 // Speculative verify + rollback (DESIGN §9), world 1. A T-row verify's
-// rows must be BITWISE the single-token steps over the same tokens, and a
+// rows must be bitwise the single-token steps over the same tokens, and a
 // rollback to `a` rows must leave the state bitwise where `a` steps would
 // have — pinned by stepping ON from the rolled-back state and comparing
 // the continuation's logits with the sequential transcript's. Covers:
@@ -2099,7 +2099,7 @@ DGPP_TEST(glm_tp_session_verify_rollback_matches_sequential_bitwise) {
 }
 
 // The MTP draft block (DESIGN §9), world 1: deterministic across model
-// instances; a two-row draft's last row is BITWISE the same row drafted
+// instances; a two-row draft's last row is bitwise the same row drafted
 // alone after a one-row draft (the block's rows are causal + per-token,
 // exactly as the main stack's verify rows are); the prefill filled the
 // block's cache (drafting after a prompt works at all); and the row-
@@ -2131,7 +2131,7 @@ DGPP_TEST(glm_tp_mtp_draft_batched_matches_sequential_bitwise) {
   require(da.logits.size() == V, "draft logits are one vocab row");
   require(da.logits == db.logits, "draft must be deterministic across instances");
 
-  // A verifies two rows and accepts both, then drafts the two rows in ONE
+  // A verifies two rows and accepts both, then drafts the two rows in one
   // call; B takes the same rows one at a time (verify 1, draft 1, twice).
   a.session_verify(0, {toks[0], toks[1]});
   const GlmDiagnosticModel::Outputs two = a.session_draft(0, {toks[1], toks[2]});
@@ -2167,7 +2167,7 @@ DGPP_TEST(glm_tp_mtp_draft_batched_matches_sequential_bitwise) {
 // The exit criterion at fixture scale (DESIGN §9, PLAN M8): the greedy
 // speculative loop — sharded heads, bus folds of T=2 verify rows, the
 // two-row bus pick, rollbacks, drafts — must produce the plain greedy
-// session's transcript EXACTLY, on every rank. The fixture's random
+// session's transcript exactly, on every rank. The fixture's random
 // draft layer accepts what it accepts (reported); the equality holds
 // regardless, which is the point: MTP changes the cost, never the output.
 DGPP_TEST(glm_tp_speculative_loopback_matches_plain_greedy) {
@@ -2339,7 +2339,7 @@ DGPP_TEST(glm_tp_speculative_loopback_matches_plain_greedy) {
 // off the device position, replayed over the loopback bus at world 4. The
 // host never rolls back, never stages a position, never admits blocks per
 // step. Pins, per step: the device verdict (winners, accepted, next) == the
-// host pick + judge over the SAME replayed logits; the draft's eager device
+// host pick + judge over the same replayed logits; the draft's eager device
 // pick == the host pick; the host position mirror == the device's; and the
 // whole transcript == the plain sharded session's, identical on every rank
 // (the random fixture's draft is rejected nearly every step, so the device
@@ -2533,14 +2533,14 @@ DGPP_TEST(glm_tp_device_pick_graph_loopback_matches_host_pick) {
 }
 
 // ---------------------------------------------------------------------------
-// The on-device step, whole (DESIGN §9, phases C+D): ONE graph per step —
+// The on-device step, whole (DESIGN §9, phases C+D): one graph per step —
 // the T=2 verify, the recorded pick, the commit, the draft block's fixed
 // two rows off the device verdict (the second a padding row after a
 // miss), the draft's head on both rows, the recorded draft pick on the
 // last accepted row, and the next replay's fed tokens written on the
 // device. The host launches, syncs, finishes the bus window, reads two
 // pinned verdicts and settles its mirrors. Reference: the eager
-// GreedySpeculator (host picks, eager draft) on a SECOND model over the
+// GreedySpeculator (host picks, eager draft) on a second model over the
 // same bus, stepped in lockstep — every step's (accepted, next, draft)
 // must match, so the in-graph draft with its padding row proposes exactly
 // what the eager one-row draft proposes; and the transcript must equal
@@ -2749,7 +2749,7 @@ DGPP_TEST(glm_tp_full_graph_step_loopback_matches_eager_speculator) {
 // whole on-device MTP replay. Unlike the lower-level gate above, this pins the
 // public token timing: prefill emits token 0; a replay returns the verify
 // winners after it (one on a miss, two on a hit); the scheduler truncates at
-// the request cap. It then closes and reuses slot 0 with the SAME graph.
+// the request cap. It then closes and reuses slot 0 with the same graph.
 //
 // An eager GreedySpeculator on a second MTP model is stepped in lockstep, one
 // step per scheduler tick, and after every tick the graph's device token feed
@@ -3110,7 +3110,7 @@ DGPP_TEST(glm_tp_serving_graph_sampling_matches_eager_engine) {
               sampled_steps[static_cast<size_t>(r)] += spec.max_steps;
           }
         }
-        // The logit bias (2026-09-06): a greedy request that bans the greedy
+        // The logit bias: a greedy request that bans the greedy
         // transcript's first token (the full path at temperature 1: the
         // argmax under the biased logits, with logprobs) and a sampled
         // request that forces one token with +100 and nudges another — the
@@ -3324,7 +3324,7 @@ struct GrammarSpecCase {
   uint64_t seed;
   dgpp::text::GrammarSpec grammar;
   bool think_prompt;
-  std::vector<dgpp::sched::LogitBias> bias;  // the logit bias (2026-09-06)
+  std::vector<dgpp::sched::LogitBias> bias;  // the logit bias
 };
 
 }  // namespace
@@ -3541,7 +3541,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_constrained_is_rank_identical_and_valid) {
       // draft is rejected wherever the JSON mask excludes it.
       {{"json", 12, sampled, 43, fixture_json(""), false, {}},
        {"jsonS", 11, sampled, 47, fixture_json(kGxJsonSchema), true, {}}},
-      // The logit bias (2026-09-06) under MTP: a +100 force (every verify
+      // The logit bias under MTP: a +100 force (every verify
       // row picks it; the unbiased in-graph draft is rejected until it
       // happens to propose it) and a moderate bias on a sampled request —
       // both rank-identical, the forced transcript all one token.
@@ -3886,7 +3886,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
 }
 
 // ---------------------------------------------------------------------------
-// The draft depth (2026-09-06): the serving graph at depth 2 and 3 — the
+// The draft depth: the serving graph at depth 2 and 3 — the
 // verify runs 1 + depth rows and the block's chained rows propose the
 // drafts after the first — decides the plain greedy transcript bitwise, and
 // after every replay the graph's device token feed [next, draft_1 ..
@@ -4235,7 +4235,7 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
                 depth, replays[0], fallbacks[0]);
 }
 
-// The sampled verdict's chain at depth 2 (2026-09-06): the T=3 verify's
+// The sampled verdict's chain at depth 2: the T=3 verify's
 // accept tests, the plain last row, and the host fallback's continuation
 // (a provisionally rejected draft that stands re-runs the next row eagerly
 // and tests the next draft there) decide, draw for draw, what the eager
@@ -4433,7 +4433,7 @@ DGPP_TEST(glm_tp_serving_mtp_batched_graph_matches_independent_speculators) {
           "batched MTP token feeds differ across ranks");
 }
 
-// The batch family (2026-09-07): a 2-slot (4-row) and a 3-slot (6-row)
+// The batch family: a 2-slot (4-row) and a 3-slot (6-row)
 // batch beside the full one, the smallest that covers the live slots
 // replaying. Three T=1 requests of different lengths under the scheduler
 // take the live count through 1 (scalar), 2 (the 4-row family), 3 (the
@@ -4571,7 +4571,7 @@ DGPP_TEST(glm_tp_serving_plain_batch_family_matches_independent_sessions) {
           "batch-family transcripts differ across ranks");
 }
 
-// The batch family under MTP (2026-09-07): slots 0 and 1 live (the 4-row
+// The batch family under MTP: slots 0 and 1 live (the 4-row
 // family), then 0..2 (the 6-row), then a hole at 1 — slots 0 and 2, still
 // the 6-row family — then slot 3 opened beside them (the full 8-row batch
 // is the only one that covers it), then slot 3 alone on its scalar graph;
@@ -4841,16 +4841,16 @@ DGPP_TEST(glm_tp_serving_plain_batched_graph_matches_independent_sessions) {
           "T=1 row-batched graph transcripts differ across ranks");
 }
 
-// M7 stage A (2026-09-05): the prefix cache's model primitives. A cold
+// M7 stage A: the prefix cache's model primitives. A cold
 // prefill cut at the aligned image of a boundary, a snapshot taken at that
 // cut mid-prefill, and a second slot ATTACHED from the snapshot and resumed
-// over the suffix must produce the cold slot's logits BITWISE — through
+// over the suffix must produce the cold slot's logits bitwise — through
 // four greedy steps and the draft block — because the hot path replays the
 // cold path's exact chunk sequence. Two slots may attach to one snapshot
 // with different suffixes; the shared full block is immutable and the
 // partial block is copied per slot; block references return to zero.
-// The MoE layer's expert-view upload ring (2026-09-05): a session prefill
-// enqueues every layer without a host sync, and ONE MoE layer object is
+// The MoE layer's expert-view upload ring: a session prefill
+// enqueues every layer without a host sync, and one MoE layer object is
 // rebound per layer, so its pinned view table was refilled with the next
 // layer's pointers while the previous layer's async upload could still be
 // pending — that layer's expert chain then ran on the wrong experts, and a
@@ -5066,7 +5066,7 @@ DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
           "shared) and the snapshot's private partial block");
   m.session_close(2);
 
-  // Attach slot 3 and resume the suffix: BITWISE the cold slot.
+  // Attach slot 3 and resume the suffix: bitwise the cold slot.
   m.session_attach(3, snap_buf, meta);
   require(m.session_position(3) == A, "attached position");
   const std::vector<int64_t> suffix(prompt.begin() + A, prompt.end());
@@ -5121,7 +5121,7 @@ DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
 }
 
 
-// M7 stage B (2026-09-05): the prefix cache through the SCHEDULER over the
+// M7 stage B: the prefix cache through the SCHEDULER over the
 // real model at world 1 — the eager engine adapter with a three-slot
 // arena. Token id 5 plays the role marker: its positions are the prompts'
 // boundaries (the service derives them the same way from the template's
@@ -5135,7 +5135,7 @@ DGPP_TEST(glm_tp_prefix_snapshot_hot_matches_cold_bitwise) {
 //      run of D on a cache-less adapter.
 // Every attach is bitwise the cold path by stage A's gate; this one pins
 // the scheduler's decisions (the exact op sequence), the answers through
-// the engine seam, the decision digest across two identical runs, and the
+// the engine interface, the decision digest across two identical runs, and the
 // block accounting once the arenas are gone.
 DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
   const GlmTextConfig cfg = glm_tp_test_config();
@@ -5186,7 +5186,7 @@ DGPP_TEST(glm_tp_prefix_cache_scheduler_hot_matches_cold) {
   for (int run = 0; run < 2; ++run) {
     // No draft block: the eager adapter never drives it (in production the
     // draft runs only under the graph adapter, whose rolling snapshots the
-    // fabric ritual exercises), and a snapshot of a session whose draft
+    // fabric procedure exercises), and a snapshot of a session whose draft
     // block was never advanced is refused by design.
     GlmDiagnosticModel m(cfg, dir, /*max_tokens=*/96, /*max_cache_tokens=*/2048,
                          nullptr, 0, 1, GlmResidency::Resident, GlmHeadSharding::Full,
@@ -5397,7 +5397,7 @@ DGPP_TEST(glm_tp_prefix_cache_graph_mtp_hot_matches_cold_across_ranks) {
 
 
 // ---------------------------------------------------------------------------
-// M8's exit criterion, the forced construction (2026-09-05): a rejection at
+// M8's exit criterion, the forced construction: a rejection at
 // EVERY pool-boundary shape inside the one-graph step matches normal
 // decode. The lockstep gate above crosses pool boundaries with the verdicts
 // the text happens to produce; here the draft row is POISONED with a token
@@ -5598,7 +5598,7 @@ DGPP_TEST(glm_tp_one_graph_step_forced_rejections_at_pool_boundaries_match_plain
 }
 
 // ---------------------------------------------------------------------------
-// M8's exit criterion, the cancellation half (2026-09-05): a request
+// M8's exit criterion, the cancellation half: a request
 // cancelled mid-flight under the MTP graph engine — through the scheduler,
 // as the service does it, with the row-batched variant live and the drop
 // to the scalar variant after the cancel — leaves every other request's
@@ -5721,10 +5721,10 @@ DGPP_TEST(glm_tp_serving_mtp_graph_cancel_leaves_committed_state_unchanged) {
 
 
 // ---------------------------------------------------------------------------
-// M7's hop snapshot (2026-09-05), world 1, the draft block on: the state a
+// M7's hop snapshot, world 1, the draft block on: the state a
 // two-row step hopped over, assembled from the step's post-row-0 spec
 // snapshot, the draft block's pre-draft ring and the hidden cache, is
-// BITWISE the snapshot a one-row session takes at that position — and a
+// bitwise the snapshot a one-row session takes at that position — and a
 // slot attached to either resumes bitwise the other (and the one-row
 // session itself). Slot 0 walks the tokens one row at a time to position
 // 12 and snapshots there before its draft; slot 1 walks to 11, verifies
@@ -5904,10 +5904,10 @@ DGPP_TEST(glm_tp_slice_alignment_contract) {
 }
 
 // ---------------------------------------------------------------------------
-// M5 d4: sharded load vs full-load+views, pinned BITWISE. The comparator
+// M5 d4: sharded load vs full-load+views, pinned bitwise. The comparator
 // and driver live in src/models/glm_tp_parity — shared with the
 // glm_shard_parity app so the fixture CI and the real-checkpoint gate
-// run ONE code path (the fixture is geometry the real model's 76k-tensor
+// run one code path (the fixture is geometry the real model's 76k-tensor
 // binding is the generalization of; the app is how that generalization
 // is actually tested at scale). This test pins: every bound surface of
 // every layer (all 6 fixture layers + the MTP draft layer, KDA and DSA,
@@ -5990,11 +5990,11 @@ DGPP_TEST(glm_tp_shard_parity_nvfp4) {
 }
 
 // ---------------------------------------------------------------------------
-// The 0.57 hunt (2026-08-31): the SAME forward-parity machinery against
+// The 0.57 hunt: the same forward-parity machinery against
 // the REAL checkpoint, loopback. The fabric gate's first real TP=2 run
 // failed its tolerance tier (final_hidden rel_l2 0.5677, logits 0.5159,
 // uniform on every token from token 0 — systematic, not drift) while the
-// cross-rank BITWISE surface passed; the CI fixture cannot reproduce a
+// cross-rank bitwise surface passed; the CI fixture cannot reproduce a
 // geometry-class bug its own dims never reach (fixture DSA q_lora 64 /
 // kv_lora 64 / nope 32 / v 32 / 8 heads vs real 1536 / 512 / 256 / 256 /
 // 64; KDA head_dim 64 vs 128). This test is the hunt's second instrument:
@@ -6003,7 +6003,7 @@ DGPP_TEST(glm_tp_shard_parity_nvfp4) {
 // real hidden 4096 (GlmBusBoundaryReducer routes on rows*hidden):
 //   T=21  -> 86016 elems > 2 latency slots -> the BULK RS+AG machine
 //            (exactly the fabric run's every-boundary path; the CI
-//            forward at fixture hidden 256 NEVER exercised bulk folds)
+//            forward at fixture hidden 256 never exercised bulk folds)
 //   T=2   -> 8192 elems <= 2 slots -> the CHUNKED latency path
 // T=21 failing while T=2 passes convicts the bulk path in the forward
 // context; both failing convicts the sharded compute at real local

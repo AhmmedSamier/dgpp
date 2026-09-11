@@ -1,5 +1,5 @@
 #!/bin/bash
-# soak: the M5 exit-gate mixed-class bus soak as ONE re-runnable command
+# soak: the M5 exit-gate mixed-class bus soak as one re-runnable command
 # (the procedure that passed gate 2 on 2026-08-31; see
 # benchmarks/results/2026-08-29-bus-m5.md).
 #
@@ -48,7 +48,7 @@ BIN_DIR=${3:-build-ci}
 
 PEER_HOST=${PEER##*@}
 # Rank 0's advertized address = the SOURCE address of the route to the
-# peer (NOT `hostname -I`, whose first entry may be a different fabric
+# peer (not `hostname -I`, whose first entry may be a different fabric
 # interface — the smoke run caught exactly that).
 RANK0_IP=$(ip route get "$PEER_HOST" 2>/dev/null |
     awk '{for (i = 1; i < NF; ++i) if ($i == "src") {print $(i + 1); exit}}')

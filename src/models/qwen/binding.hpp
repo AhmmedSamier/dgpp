@@ -15,7 +15,7 @@
 // X.weight carries a BF16 partner X.weight_scale_inv of shape
 // [ceil(N/128), ceil(K/128)] — 128x128 dequant blocks, MULTIPLY on dequant
 // (the loader widens the scales to F32 at load). The n-gram table is e4m3
-// in `split_ngram_parts` row shards with ONE BF16 per-tensor
+// in `split_ngram_parts` row shards with one BF16 per-tensor
 // `weight_scale`. Everything else is BF16 (the hash buffers I64).
 #include <cstdint>
 #include <string>

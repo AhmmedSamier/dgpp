@@ -3,7 +3,7 @@
 // the bus the fabric uses) over the tiny fixture, against the world-1
 // model as the oracle. Asserted:
 //   * cross-rank: every layer's residual, the final read, the routing
-//     decisions and the lm-head slices' top-1 are BITWISE identical on
+//     decisions and the lm-head slices' top-1 are bitwise identical on
 //     every rank (the canonical rank-order fold; a divergence is the
 //     silent-corruption class);
 //   * vs world 1: per-layer residuals within the numerics budget (the

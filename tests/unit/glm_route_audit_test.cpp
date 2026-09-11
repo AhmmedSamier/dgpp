@@ -127,7 +127,7 @@ DGPP_TEST(audit_route_flips_withZeroNoiseSwap_rejectsAsSpecBug) {
 }
 
 DGPP_TEST(audit_route_flips_withSelectionInconsistentWithOwnScores_rejects) {
-  // GIVEN engine ids that are NOT the top-k of the engine's own biased
+  // GIVEN engine ids that are not the top-k of the engine's own biased
   // scores (a router bug, not a boundary event):
   Row r = near_tie_row();
   r.eng_ids = {0, 3};  // engine scores still rank expert 2 over 3

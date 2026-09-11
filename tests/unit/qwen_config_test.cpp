@@ -1,4 +1,4 @@
-// The Qwen3.8-Flash-Next config parser (Q2, 2026-09-09): the real file's
+// The Qwen3.8-Flash-Next config parser: the real file's
 // values parse, the derived n-gram geometry reproduces the checkpoint's
 // stored hash buffers (verified against the landed shards on 2026-09-09),
 // and the unsupported shapes are refused by name.

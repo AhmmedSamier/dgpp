@@ -1,12 +1,13 @@
 # GLM-5.3-Flash curated reference suite (M4, DESIGN §7.5)
 
-Three parity cases (real prompts, tokenized from the checkpoint tokenizer)
-plus one engine-only trace case. Reference dumps are NOT stored in the repo
-(30-100 MB each, and they carry real weights' outputs); they are generated
-where the checkpoint lives and cached locally:
+The suite contains three reference comparisons using tokenized prompts
+and one engine-only trace case. Generate reference dumps where the
+checkpoint is available. Each dump is 30–100 MB and is cached locally:
 
 ```
-CKPT=<checkpoint snapshot dir>
+CKPT=/path/to/checkpoint/snapshot
+OUT=/path/to/reference/dumps
+mkdir -p "$OUT"
 # Full-depth dumps (~3.3 s/layer measured; 4-10 min/case at 45 layers):
 for c in smoke factual code; do
   python tools/glm_reference_dump.py gen-torch \
@@ -51,7 +52,7 @@ which is why free-run parity is reported, not asserted. Kept-row l2
 budgets: < 0.02 per layer; route near-tie flips are excluded from the l2
 and CERTIFIED individually (engine-vs-reference biased score rows, the
 noise measured per token over the unswapped experts —
-`src/models/glm_route_audit.hpp`); a 10% flip-rate net remains as a
+`src/models/glm/route_audit.hpp`); a 10% flip-rate net remains as a
 wholesale-breakage detector. The head runs on the isolated final streams
 and must agree on top-1, with disagreements certified as boundary near
 ties (reference top-2 logit margin vs measured logit noise). At reduced

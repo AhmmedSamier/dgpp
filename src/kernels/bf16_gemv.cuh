@@ -1,7 +1,7 @@
 #pragma once
 // The bf16 GEMV's row chain (2026-09-09, factored out of bf16_gemv.cu so
 // the fused decode kernels — the Qwen shared expert's gate/up/swiglu and
-// down/accumulate/round, the GR site's norm-staged GEMVs — run the SAME
+// down/accumulate/round, the GR site's norm-staged GEMVs — run the same
 // code: a row's chain is the same sequence of FMAs on the same values
 // whichever launcher issued its loads, which is what keeps every fusion
 // bitwise the plain launch).

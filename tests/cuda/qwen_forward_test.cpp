@@ -1,4 +1,4 @@
-// The Qwen3.8-Flash-Next world-1 forward (Q4, 2026-09-09).
+// The Qwen3.8-Flash-Next world-1 forward.
 //
 // Modes:
 //   --write-fixture DIR          the tiny synthetic checkpoint (tests/cuda/qwen_fixture.hpp)

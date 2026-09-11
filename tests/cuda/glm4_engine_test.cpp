@@ -1,4 +1,4 @@
-// The GLM-4.7 decode engines over the engine core (2026-09-09):
+// The GLM-4.7 decode engines over the engine core:
 // EagerEngineAdapter<Glm4Model> and GraphEngineAdapter<Glm4Model> on the
 // fixture, a loopback world of 2 (real verbs QPs over 127.0.0.1) against
 // the world-1 eager engine.
@@ -7,7 +7,7 @@
 // device positions, the recorded commit, the pinned token upload) and its
 // ROW-BATCHED replays (the fixed slot-major batch off the persistent
 // feeds, closed slots padding at -1, the 2-slot and full families) produce
-// the eager engine's transcripts at the same world EXACTLY (the recorded
+// the eager engine's transcripts at the same world exactly (the recorded
 // kernels are the eager kernels); the world-2 eager transcripts follow the
 // world-1 ones (reported; the folds reassociate, so a near tie may flip a
 // late token — the first tokens must agree).
@@ -322,7 +322,7 @@ void rank_work_mtp(int r, const Glm4TextConfig& cfg, const std::string& dir, con
 
 }  // namespace
 
-// Depth 2 (2026-09-10): the T=3 verify with two drafts, the second off the
+// Depth 2: the T=3 verify with two drafts, the second off the
 // block's chain row (its own output row as the hidden, the first draft's
 // pick as the token), in its own bus world — A on the scalar graph, then B
 // and C together on the ROW-BATCHED graph (the batched chain: every slot's

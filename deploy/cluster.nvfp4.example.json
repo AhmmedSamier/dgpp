@@ -1,5 +1,5 @@
 {
-  "model": "dgpp/GLM-5.3-Flash-NVFP4-FP8",
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
   "nodes": [
     "192.0.2.11",
     "192.0.2.12",

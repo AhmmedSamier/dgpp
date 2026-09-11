@@ -1,9 +1,9 @@
 #pragma once
-// M5 d4: sharded load vs full-load+bind, pinned BITWISE — the shared
-// driver behind BOTH the CI shard-parity test (fixture) and the
+// M5 d4: sharded load vs full-load+bind, pinned bitwise — the shared
+// driver behind both the CI shard-parity test (fixture) and the
 // glm_shard_parity app (real checkpoint). The sharded GlmLayerStream
 // builds each resident layer directly at the rank's local geometry (only
-// rank-local checkpoint bytes ever read); GlmTpViews::bind on a FULL
+// rank-local checkpoint bytes ever read); GlmTpViews::bind on a full
 // resident is the independent reference implementation of the same
 // slicing spec (§5.2). This check is what keeps the two from drifting:
 // every bound surface of every layer must match byte-for-byte, at every

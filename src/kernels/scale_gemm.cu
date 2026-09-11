@@ -12,7 +12,7 @@ namespace dgpp {
 namespace {
 
 // Tile geometry. BN and BK both divide the 128-wide scale block, which is
-// what lets every stage apply ONE scalar scale: the n-range [n0, n0+BN)
+// what lets every stage apply one scalar scale: the n-range [n0, n0+BN)
 // (n0 a multiple of BN, BN | 128) lies inside scale row n0/128, and each
 // k-slice [k0, k0+BK) (BK | 128) lies inside scale column k0/128.
 constexpr int BM = 16;
@@ -177,7 +177,7 @@ void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
   }
 }
 
-// One dispatch for both output dtypes: the epilogue store is the ONLY
+// One dispatch for both output dtypes: the epilogue store is the only
 // difference between the bf16 and fp32 products (same tiles, same GEMV
 // core, same accumulation order), so a value that rounds to bf16 in one
 // is the unrounded fp32 of the other.
@@ -238,7 +238,7 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
     }
     return;
   }
-  // Large m (2026-09-05): the 128-row tensor-core kernel (the MoE experts'
+  // Large m: the 128-row tensor-core kernel (the MoE experts'
   // dense form) — bitwise this file's tile kernel (the same dequantized
   // weights and the same ascending-k16 mma chain), with the weight tile
   // decoded once per 128 rows instead of once per 16 (the dense MLP
@@ -258,7 +258,7 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
 }  // namespace
 
 namespace {
-// The multi-problem GEMV (2026-09-10): the problems in the parameter space
+// The multi-problem GEMV: the problems in the parameter space
 // with their block prefixes; a block finds its problem by the prefix table
 // (field-wise selects, as bf16_gemv_multi_kernel) and runs the dense
 // launcher's block body over its rows.

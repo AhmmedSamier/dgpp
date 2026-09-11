@@ -1,6 +1,6 @@
 // M5 deliverable 5: the transport regression command. After a driver or
 // firmware change, rerun the DESIGN §2.3 hardware contract — NIC→GPU
-// visibility — on EVERY directed node pair over BOTH active lanes, from one
+// visibility — on EVERY directed node pair over both active lanes, from one
 // command with one verdict.
 //
 // The probe is the M0 project test, protocol-verbatim: a 64-byte payload and
@@ -12,7 +12,7 @@
 // either, or breaks system-scope visibility fails HERE, loudly.
 //
 // GID policy: probes use the bus's deployment selection (first routable
-// RoCEv2 GID, via VerbsDevice) — NOT the M0 bench default, which probes the
+// RoCEv2 GID, via VerbsDevice) — not the M0 bench default, which probes the
 // link-local fe80:: GID that the four-node mesh measured one-way silent
 // drops on. A regression must exercise the path the deployment uses.
 //
@@ -111,7 +111,7 @@ constexpr uint32_t kFrameVersion = 1;
 // ProbeHello: the sender's first frame on a step connection. Mesh steps fill
 // every field; pair-mode probes use step 0 and rank -1. The receiver checks
 // it against ITS OWN schedule, so a mesh run with diverged --nodes/--lanes/
-// --iters fails loudly instead of probing a wrong pairing.
+// --iters reports an error instead of probing a wrong pairing.
 struct ProbeHello {
   uint32_t magic;
   uint32_t version;
@@ -153,7 +153,7 @@ struct SeqResult {
 static_assert(sizeof(SeqResult) == 32, "SeqResult wire size");
 
 // Aggregation: every rank reports its per-step views to nodes[0]; a step is
-// green only when BOTH endpoint views are green. The receiver view carries
+// green only when both endpoint views are green. The receiver view carries
 // the visibility-latency tails (µs).
 struct ReportHeader {
   uint32_t magic;
@@ -1379,7 +1379,7 @@ int run_serve_mode(const std::vector<std::string>& lane_hints, uint16_t port,
   return exit_code;
 }
 
-// The selftest runs the FULL mesh machinery — schedule, obligations, held
+// The selftest runs the full mesh machinery — schedule, obligations, held
 // connections, aggregation, verdict — as a world=2 mesh whose two ranks are
 // threads on this one device. Construction happens before the threads (the
 // M5 bring-up discipline); the run phase only launches kernels and syncs its

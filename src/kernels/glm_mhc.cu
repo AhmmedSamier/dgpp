@@ -20,7 +20,7 @@ __device__ inline float sigmoidf_acc(float x) {
 
 // The mHC site in two kernels (2026-09-01, the T=1 profile; reassociated
 // 2026-09-02). The original one-block-per-token kernel streamed the 24 x
-// (4*hidden) coefficient matrix (786KB at real dims) through ONE SM —
+// (4*hidden) coefficient matrix (786KB at real dims) through one SM —
 // 212us per site, 90 sites a step. Split: the dots kernel gives each
 // COEFFICIENT its own block, the finish kernel derives pre/post/comb,
 // collapses, and (fused, 2026-09-02) applies the sublayer's RMSNorm.
@@ -104,7 +104,7 @@ __device__ __forceinline__ void mhc_comb_seed_row(const float* __restrict__ lg,
 
 // Sinkhorn on lanes 0..15 of one warp: lane = row * kN + col. One column
 // pass, then (iters-1) row+column passes. column sum = sum over the
-// FIRST index (torch dim=-2). The 4-way sums are xor butterflies (two
+// first index (torch dim=-2). The 4-way sums are xor butterflies (two
 // dependent shuffles instead of four; a row's lanes are contiguous,
 // a column's are 4 apart) — the 39 dependent passes are ~4.5 us on this
 // device, and the butterfly order is rounding-level. Writes comb_out[t].
@@ -134,7 +134,7 @@ __device__ __forceinline__ void mhc_sinkhorn_warp(const float* comb_seed,
   if (live) comb_out[t * kN * kN + lane] = float_to_bf16_bits(c);
 }
 
-// comb alone, one warp per token — the deferred form (2026-09-08): the
+// comb alone, one warp per token — the deferred form: the
 // decode site's fused finish ran the Sinkhorn on the critical path to the
 // sublayer, though only the stream UPDATE at the site's end reads comb;
 // launched on a side stream forked after the finish and joined before the
@@ -286,7 +286,7 @@ __device__ __forceinline__ void mhc_finish_block(
   }
 }
 
-// The finish fused behind the dots (2026-09-02): the finish needs all 24
+// The finish fused behind the dots: the finish needs all 24
 // logits, so the dots blocks of a token take a ticket (`counters[token]`,
 // zeroed once, reset by the block that draws the last ticket — graph
 // replays see it zero every time), and the LAST block runs the finish
@@ -431,14 +431,14 @@ __global__ void mhc_dots_kernel(const uint16_t* __restrict__ streams,
   }
 }
 
-// The prefill form of the dots (2026-09-05): one block per FOUR tokens,
+// The prefill form of the dots: one block per FOUR tokens,
 // every coefficient in the same block. The per-coefficient form above
 // re-derives a token's inv_rms in 24 blocks and re-reads its streams 48
 // times and the coefficient matrix once per token (~4.5 GB of L2 traffic
 // per 2048-token site, 1.5 ms); this one streams the four tokens' rows
 // and the coefficient matrix through shared memory in 256-vector chunks,
 // so the matrix is read once per four tokens and each row once per pass
-// (~0.46 GB). BITWISE the per-coefficient form: thread t still walks
+// (~0.46 GB). bitwise the per-coefficient form: thread t still walks
 // vectors v = t, t + 256, ... in ascending order (a chunk is exactly 256
 // vectors) with the same fma chain, the same block_sum tree, the same
 // finish — glm_mhc_test pins it. The finish runs in-block for each of the
@@ -579,7 +579,7 @@ __global__ void mhc_finish_kernel(const uint16_t* __restrict__ streams,
                                hidden, hc_eps, sinkhorn_iters, ln_eps);
 }
 
-// One thread per (token, d) computing all kN output streams (2026-09-05):
+// One thread per (token, d) computing all kN output streams:
 // the per-element form read each residual value kN times. The per-element
 // arithmetic is unchanged (bitwise).
 __global__ void mhc_stream_update_kernel(const uint16_t* __restrict__ post,
@@ -644,7 +644,7 @@ namespace {
 // gathered from the same tiles, inv_rms applied to the finished dots in
 // the epilogue; the standard finish kernel follows. The reassociation — r x sum(x w) instead of
 // sum((x r) w) — and the MMA's k16 summation move the logits at fp32
-// rounding level: NOT bitwise the per-coefficient form (the prefill's
+// rounding level: not bitwise the per-coefficient form (the prefill's
 // expert path already parts from decode's GEMV core the same way), inside
 // the oracle budgets glm_mhc_test measures. Tests switch back with
 // mhc_set_prefill_gemm(false).

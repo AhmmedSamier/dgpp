@@ -123,7 +123,7 @@ void feed(GrammarState& g, const std::vector<int64_t>& ids) {
   }
 }
 
-// ---- the Qwen3.8 XML format (2026-09-09) --------------------------------------
+// ---- the Qwen3.8 XML format --------------------------------------
 GrammarVocab qwen_vocab() {
   std::vector<std::string> texts(static_cast<size_t>(kVocab));
   for (int b = 0; b < 256; ++b) texts[static_cast<size_t>(b)] = std::string(1, static_cast<char>(b));

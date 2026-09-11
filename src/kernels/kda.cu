@@ -215,7 +215,7 @@ __device__ __forceinline__ void load_bf16_slice(const uint16_t* __restrict__ p,
   }
 }
 
-// kScalarGate (Q3, 2026-09-09): the Gated DeltaNet variant of the same
+// kScalarGate: the Gated DeltaNet variant of the same
 // recurrence (docs/qwen38_flash_next_plan.md §1.3). The decay is one scalar
 // per head and token, exp(-exp(A_log[h]) * softplus(a_raw[t,h] +
 // dt_bias[h])), and kv_ratio value heads share one key head's q and k (the

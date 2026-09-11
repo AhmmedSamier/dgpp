@@ -1,5 +1,5 @@
 // Sampler tests (host-only): the three distributed fast paths must be
-// BITWISE-EQUAL to the centralized oracle (the M6 d3 exit criterion —
+// bitwise-EQUAL to the centralized oracle (the M6 d3 exit criterion —
 // no tolerance is permitted, the design's canonical candidate order
 // makes the paths converge on identical inputs to the shared selection
 // core). These pin: the merge is the exact global top-k under ties, the
@@ -56,7 +56,7 @@ bool same_bits(float a, float b) {
   return ua == ub;
 }
 
-// A deterministic fixture RNG (NOT the sampler's): builds test vectors.
+// A deterministic fixture RNG (not the sampler's): builds test vectors.
 struct FixtureRng {
   uint64_t s = 0x1234567;
   uint64_t next() {
@@ -407,7 +407,7 @@ DGPP_TEST(apply_penalties_touches_only_its_slice) {
   const auto counts = count_context({1});  // global id 1
   Params p;
   p.presence_penalty = 1.0f;
-  // Slice [2, 4): global id 1 is NOT in it — nothing changes.
+  // Slice [2, 4): global id 1 is not in it — nothing changes.
   apply_penalties(v.data() + 2, 2, 2, p, counts);
   require(same_bits(v[2], 1.0f) && same_bits(v[3], 1.0f),
           "out-of-slice ids must be ignored");
@@ -600,7 +600,7 @@ DGPP_TEST(sampling_prefix_finite_topk_is_complete_support) {
   }
 }
 
-// The load-bearing property of the seam: a prefix that resolves is bitwise
+// The load-bearing property of the interface: a prefix that resolves is bitwise
 // the complete list's result (which is the full-logit fallback), for every
 // regime a request can ask for, at several widths, on flat and on peaked
 // distributions with penalties across shards. A fallback leaves the counter
@@ -1091,7 +1091,7 @@ DGPP_TEST(greedy_from_prefix_reports_the_raw_distribution) {
   require(rng.counter == 0, "no draw");
 }
 
-// The proposal-aware speculative rule (2026-09-10): a draft DRAWN from Q,
+// The proposal-aware speculative rule: a draft DRAWN from Q,
 // accepted with min(1, P/Q) and otherwise replaced by the (P - Q)+
 // residual, still emits exactly P — and accepts at 1 - TV(P, Q), which is
 // what a deterministic draft cannot reach (its ceiling is P(mode)).

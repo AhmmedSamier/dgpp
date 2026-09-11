@@ -44,7 +44,7 @@ struct BusOptions {
   size_t lat_slot_bytes = 8192;  // 4096 hidden x BF16, the decode unit
   int bulk_slots = 16;
   size_t bulk_slot_bytes = 262144;
-  // Bulk collective pacing (2026-09-05): at most this many stripes in
+  // Bulk collective pacing: at most this many stripes in
   // flight per (peer, lane) — the ring depth otherwise. The multi-block
   // fold made the senders burst whole rings at three peers at once, and
   // the fabric answered with sequence errors, adaptive retransmissions
@@ -66,7 +66,7 @@ struct BusOptions {
   // positive = that rate. bulk_pace_gbps() reports the resolved value.
   double bulk_pace_gbps = -1.0;
 
-  // Fault injection for the tests (2026-09-05): the one-shot collective
+  // Fault injection for the tests: the one-shot collective
   // pass sleeps this long between its two control-cell reads (the done
   // stamp, then the ready bits), widening the window in which a kernel
   // whose peers already posted can finish before its own engine has
@@ -106,7 +106,7 @@ struct BusStats {
   std::vector<BusLaneStats> lanes;
   BusClassStats latency;
   BusClassStats bulk;
-  // The bulk collective kernel's placement-proof telemetry (2026-09-05):
+  // The bulk collective kernel's placement-proof telemetry:
   // segment kernels completed, and stripes the consume pass had to
   // re-fold because the payload's DMA placement was not yet fully visible
   // when the fold first read it (any nonzero count in a passing run is
@@ -169,7 +169,7 @@ class CollectiveBus {
   uint64_t allreduce(const void* device_src, void* device_dst,
                      size_t bf16_elems, std::string* error);
 
-  // The staging seam (§6.3 evolution, M5 d3): hands out the pinned,
+  // The staging interface (§6.3 evolution, M5 d3): hands out the pinned,
   // device-writable buffer the next latency collective will fold from, so
   // the producing GEMM writes the boundary partial directly into it —
   // the kernel's device→slot staging pass becomes a pinned fan-out (the
@@ -193,7 +193,7 @@ class CollectiveBus {
   // splits EACH SEGMENT's stripes across the ranks (a contiguous ceil
   // split within the segment), so every rank folds and broadcasts in every
   // segment — a global split had one rank working per segment of a
-  // multi-segment buffer (2026-09-04). The RS fold is
+  // multi-segment buffer. The RS fold is
   // the canonical ascending-rank chain per element — bitwise identical
   // to the latency one-shot, so both paths against one oracle agree
   // exactly. src/dst are device pointers and may alias (staging reads
@@ -229,7 +229,7 @@ class CollectiveBus {
   //                              variant owns a disjoint cell set.
   //   allreduce_record()      — per collective node, between the caller's
   //                              cudaStreamBeginCapture/EndCapture on the
-  //                              SAME stream. src/dst are device pointers
+  //                              same stream. src/dst are device pointers
   //                              that must stay valid for the bus's
   //                              lifetime (baked into the graph). Same
   //                              element contract as allreduce(); results
@@ -268,7 +268,7 @@ class CollectiveBus {
   // and stage_next() are rejected only while a session RECORDS or while a
   // replay window is ARMED (arm .. finish); between windows they run as
   // before — prefill's bulk folds and the pick's latency collectives ride
-  // the same engine. The seam is the generation counter: arm reserves the
+  // the same engine. The interface is the generation counter: arm reserves the
   // window's G generations from it, eager pickups take one each, so
   // execution order equals generation order and the staging-ring reuse
   // fences hold across eras verbatim. Session discipline: one forward
@@ -299,7 +299,7 @@ class CollectiveBus {
   // (draining outstanding requests), stops the receive consumers via the
   // control cell, and destroys their stream. Frees nothing — cudaFreeHost
   // synchronizes the device implicitly, so in-process loopback pairs must
-  // quiesce BOTH sides before either stops (one bus per process never
+  // quiesce both sides before either stops (one bus per process never
   // notices; stop() alone is correct there).
   void quiesce();
 

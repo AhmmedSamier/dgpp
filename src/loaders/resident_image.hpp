@@ -32,7 +32,7 @@
 // I/O. Blobs move with O_DIRECT when the filesystem allows it: on the GB10
 // nodes a buffered stream tops out at 1.2 GB/s read / 1.8 GB/s write (the
 // page-cache copy plus the reclaim it forces at the memory watermark), a
-// direct stream at 5.6 / 5.0 GB/s — the NVMe's line rate, on ONE thread.
+// direct stream at 5.6 / 5.0 GB/s — the NVMe's line rate, on one thread.
 // The blob's 4 KiB-aligned prefix goes direct; the sub-page tail and the
 // table go through the buffered descriptor. A filesystem that refuses
 // O_DIRECT (tmpfs) silently gets the buffered path for everything.
@@ -46,7 +46,7 @@ namespace dgpp {
 
 class ResidentImage {
  public:
-  static constexpr uint32_t kFormatVersion = 2;  // 2: the DSA projections resident as FP8 pairs where aligned (2026-09-08)
+  static constexpr uint32_t kFormatVersion = 2;  // 2: the DSA projections resident as FP8 pairs where aligned
 
   // Opens `dir/<key hex>.img`, creating the directory and the file when
   // absent; a file whose header disagrees (version, key, layer count) is

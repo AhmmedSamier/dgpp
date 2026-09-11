@@ -1,5 +1,5 @@
 {
-  "model": "unsloth/GLM-5.3-Flash-FP8",
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
   "nodes": ["192.0.2.11", "192.0.2.12", "192.0.2.13", "192.0.2.14"],
   "ssh_user": "",
   "release": "",

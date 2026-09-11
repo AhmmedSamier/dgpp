@@ -396,7 +396,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
 
   // Phase 1 — snapshot the source vector into every peer's staging slot.
   // One u32 per thread iteration; 4096 bf16 = 2048 words over 256 threads.
-  // The snapshot is load-bearing for the pre-staged seam (src == dst == a
+  // The snapshot is load-bearing for the pre-staged interface (src == dst == a
   // staging buffer the producing GEMM wrote): the fold below overwrites
   // src in place, so each peer's send buffer must hold a copy taken BEFORE
   // the fold — the engine's post reads these, never the folding src.
@@ -459,7 +459,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
       const uint32_t seq =
           flag_load_acquire(const_cast<uint32_t*>(&door->seq));
       if (seq == 0) continue;
-      // Generation gate: claim ONLY this collective's doorbells. Ranks
+      // Generation gate: claim only this collective's doorbells. Ranks
       // run unbarriered between collectives, so a neighbor's NEXT
       // collective can land its pair here while this kernel scans — a
       // blind claim would fold the wrong collective's payload into ours
@@ -468,7 +468,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
       if (sys_load_u32(&door->ctl) != ctl_seq) continue;
       const FlagAck* ack = &v.recv[view_idx].ack_lat[slot];
       if (seq == ack->seq) continue;  // already consumed
-      // TEMP hunt stamp: the go-ref CAS winner records the FIRST claim's
+      // TEMP hunt stamp: the go-ref CAS winner records the first claim's
       // (cell, len, seq) — one winner per round, so the triple is never
       // mixed across cells; atomicCAS's return gates first-only.
       int expected = 0;
@@ -616,7 +616,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_graph_kernel(
     BusAllReduceGraphView v, int my_rank, const __nv_bfloat16* src,
     __nv_bfloat16* dst, uint32_t elems, BusAllReduceCtl* ctl,
     uint64_t deadline_cycles, uint32_t stage_words) {
-  // stage_words (2026-09-06): u64 words of dynamic shared memory per peer
+  // stage_words: u64 words of dynamic shared memory per peer
   // (kBusMaxPeers slots) that a claimed payload is copied into by its
   // gate's hash pass; 0 = no staging (the fold reads the NIC-placed rows).
   using BlockRef = cuda::atomic_ref<int, cuda::thread_scope_block>;
@@ -1262,7 +1262,7 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_bulk_collective_kernel(
         }
         if (seq == ack_seq) continue;  // already consumed
         // Segment window — load-bearing, not an optimization. The doorbell
-        // rings are flight- and phase-agnostic FIFOs, and senders do NOT
+        // rings are flight- and phase-agnostic FIFOs, and senders do not
         // progress in lockstep (shard geometry sees to that: a rank whose
         // shard ends in segment 0 enters AG while peers still fold RS). A
         // future segment/phase's doorbell lands in an active kernel's

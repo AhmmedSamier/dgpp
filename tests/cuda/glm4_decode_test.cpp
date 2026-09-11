@@ -9,7 +9,7 @@
 //                                the real checkpoint (streaming, world 1): a
 //                                greedy transcript and its re-forward audit
 //
-// Gates on the fixture: a one-shot prefill's last row is BITWISE the cold
+// Gates on the fixture: a one-shot prefill's last row is bitwise the cold
 // forward's (the same m=T GEMMs on the same state); T=1 steps agree with
 // the re-forward's rows at every position under the near-tie rule (their
 // m=1 GEMMs reassociate); two interleaved slots reproduce their solo runs
@@ -362,7 +362,7 @@ int run_fixture(const std::string& dir) {
     m.session_attach(1, arena[0], meta);
     require(m.session_position(1) == 12, "prefix: attached at the snapshot position");
     const Glm4Model::Outputs hot = m.session_prefill_resume(1, std::vector<int64_t>(A.begin() + 12, A.end()), bounds);
-    // Hot == cold BITWISE (the same chunks on the same state). The plain
+    // Hot == cold bitwise (the same chunks on the same state). The plain
     // one-chunk prefill is a different GEMM shape (its m), so it is only
     // near the two-chunk one — the chunking gate above covers that.
     require(bitwise(hot.logits, cold.logits), "prefix: the hot prefill's last row differs from the cold one's");
@@ -444,7 +444,7 @@ void report_row(const char* what, size_t i, const float* got, const float* want,
 }
 
 // The divergence profile of two cold forwards of one prompt at T=P and
-// T=P+extra (the seam's GEMV family vs cuBLASLt's): per layer, the hyper
+// T=P+extra (the interface's GEMV family vs cuBLASLt's): per layer, the hyper
 // state's relative l2 on the shared rows and the MoE routing flips — a
 // smooth growth with flips is amplification through the stack, a jump at
 // one layer kind is a bug in that path.
@@ -492,9 +492,9 @@ int run_layers(const std::string& dir, const std::vector<int64_t>& ids, int extr
   const int top = std::max(extra, 7);
   Glm4Model m(cfg, dir, /*max_tokens=*/P + top, /*max_cache_tokens=*/P + top + 64,
               Glm4Residency::Streaming, nullptr, 0, 1, 1);
-  // Four cold forwards: P and P+1 (both the seam's GEMV family when P+1 <= 8),
+  // Four cold forwards: P and P+1 (both the interface's GEMV family when P+1 <= 8),
   // P+extra and P+7 (cuBLASLt when P+extra > 8) — the pairs within a family
-  // isolate the seam from everything else that could depend on T.
+  // isolate the interface from everything else that could depend on T.
   const Glm4Model::Outputs a = m.forward(ids, true);
   const Glm4Model::Outputs a1 = m.forward(longer(1), true);
   const Glm4Model::Outputs b = m.forward(longer(extra), true);

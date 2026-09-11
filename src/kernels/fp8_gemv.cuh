@@ -21,7 +21,7 @@
 // slot path (kRows=1) and scale_gemm at m<=kMaxRows agree bit for bit.
 //
 // CONTRACT: k % 16 == 0 and 16-byte-aligned weight rows (a 16B chunk then
-// lies inside ONE 128-wide scale block, 128 % 16 == 0). The activation rows
+// lies inside one 128-wide scale block, 128 % 16 == 0). The activation rows
 // are staged bf16 in shared memory by the caller (kRows * k elements).
 #include <cuda_fp8.h>
 #include <cuda_fp16.h>
@@ -66,7 +66,7 @@ __device__ __forceinline__ float dequant(float w, float s) {
 }
 
 // One 16-byte weight chunk (columns [c0, c0+16) of a row, scale s) into
-// kRows accumulators — the core's arithmetic, factored (2026-09-06) so
+// kRows accumulators — the core's arithmetic, factored so
 // row_dots and block_rows_multi run the same code: a row's chain is the
 // same sequence of FMAs on the same values whichever launcher issued its
 // loads, which is what keeps the multi-row down projection bitwise.
@@ -151,7 +151,7 @@ __device__ __forceinline__ void row_dots(const uint8_t* __restrict__ w_row,
   gemv::warp_reduce<kRows>(acc);
 }
 
-// Two rows' dots against the same staged activations with BOTH rows'
+// Two rows' dots against the same staged activations with both rows'
 // chunk batches issued before either is consumed (2026-09-09: the slot
 // gate/up kernel ran row_dots twice in sequence — two latency rounds per
 // warp, 82 % of DRAM rate). Each row's chunks are consumed in k order into
@@ -228,10 +228,10 @@ __device__ __forceinline__ void block_rows(const uint8_t* __restrict__ w,
   }
 }
 
-// The block body with R weight rows per warp (2026-09-06): rows [n0, n0 +
+// The block body with R weight rows per warp: rows [n0, n0 +
 // kWarps * R), warp w owning rows n0 + w*R .. + R-1. The R rows' chunks
 // form one stream per lane issued kBatch at a time, so a short row (the
-// sliced down projection's k = 512 is ONE chunk per lane) no longer
+// sliced down projection's k = 512 is one chunk per lane) no longer
 // leaves a warp with a single load in flight — the measured cause of the
 // down kernel's 224 GB/s against gate_up's 295. Each row's chunks are
 // consumed in k order into its own accumulator through consume_chunk, so
@@ -289,13 +289,13 @@ __device__ __forceinline__ void block_rows_multi(
   }
 }
 
-// The block body for NARROW rows (2026-09-09): k <= 256 bytes is at most
+// The block body for NARROW rows: k <= 256 bytes is at most
 // sixteen 16-byte chunks, so a warp load with one lane per chunk left
 // 32 - c lanes idle and the Qwen TP=4 down projection (k = 160, ten
 // chunks) ran at 55 % of DRAM rate on the per-row reduction. Here a warp
 // load covers g = 32 / c rows at once (lane l: row l / c, chunk l % c),
 // G such groups per warp issued together, and each row's warp_reduce is
-// replaced by the SAME tree it computed: the 32-lane xor butterfly over
+// replaced by the same tree it computed: the 32-lane xor butterfly over
 // c live lanes and 32 - c zeros collapses — every lane j >= c a subtree
 // reads still holds 0 at that stage — to the four-stage butterfly over
 // the group's own lanes with a 0.0f wherever the partner is beyond c.

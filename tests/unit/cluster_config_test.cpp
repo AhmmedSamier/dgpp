@@ -1,4 +1,4 @@
-// The cluster config (2026-09-06): the schema is checked by name, the
+// The cluster config: the schema is checked by name, the
 // engine defaults are the binary's own, the committed deploy/cluster.json
 // parses, and the digest is stable and sensitive.
 #include <stdexcept>
@@ -54,7 +54,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.rendezvous_timeout_ms == 120000 && !c.engine.reasoning_in_content &&
               c.engine.kv_dtype == "bf16",
           "the engine defaults");
-  // The KV dtype (2026-09-06): named by the config, checked by name.
+  // The KV dtype: named by the config, checked by name.
   const dgpp::serve::ClusterConfig fp8 = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":"fp8"}})", "t");
   require(fp8.engine.kv_dtype == "fp8", "kv_dtype fp8");

@@ -421,7 +421,7 @@ DGPP_TEST(glm_loader_streams_dsa_moe_layer_with_dequant_bridge) {
   const std::string p = "model.language_model.layers.2.self_attn.";
   const int64_t hidden = 512, q_lora = 256, kv_lora = 128;
 
-  // The form the loader took (2026-09-08): at world 1 every slice is
+  // The form the loader took: at world 1 every slice is
   // whole, so the resident carries the FP8 pairs as they are — payload and
   // scale grid byte-exact from the fixture — and no bf16 bridge exists.
   // (The bridge, checked below, is the misaligned worlds' form.)

@@ -2,9 +2,9 @@
 
 Scope: make one request's decode and prefill faster at world 4 (the served
 geometry, `deploy/cluster_qwen.json`), without regressing concurrent
-sessions and **without quantizing any weight**. Everything below was
-measured today on the committed tree (a8a2664) unless it says otherwise;
-the runs are under `build-ci/fabric-runs/*_2026-09-10/`.
+sessions or quantizing weights. The baseline measurements use revision
+`a8a2664` on 2026-09-10; subsequent experiments are identified in their
+entries. Runs are stored under `build-ci/fabric-runs/*_2026-09-10/`.
 
 The companion documents are `docs/qwen38_flash_next_plan.md` (the port, the
 cost model, the Q8 rounds of 2026-09-09) and `docs/measurements.md`.
@@ -115,7 +115,7 @@ parallel and replicated-attention questions (§5).
 | `gr_act_up_kernel` | 1.01 | 97 | 10.4 | the GR mix's up GEMV |
 | `moe_router_dots` | 0.77 | 48 | 16.0 | 2.6 MB of router per layer |
 | everything else | ~1.5 | | | GDN recurrence, QSA select/attention, norms, sampling |
-| GPU fully idle | 1.03 | | | the launch seam |
+| GPU fully idle | 1.03 | | | the launch interface |
 
 ### 2.2 MTP decode, world 4 (the served mode)
 
@@ -168,7 +168,7 @@ for why making the chunk bigger does not, on its own, help.
 
 ## 3. The plan — decode
 
-### 3.1 LANDED: the GR inject dots off the chain (−0.69 ms T=1, −0.8 ms MTP)
+### 3.1 Implemented: overlap GR inject dots (−0.69 ms T=1, −0.8 ms MTP)
 
 The combine's gates are `2·bf16(sigmoid(bf16(W_inj · Rn)/hc))` — a function
 of `Rn` alone, which the mix computes at the *top* of the site, while the
@@ -204,7 +204,7 @@ Numbers per kernel, before and after, are in
 `build-ci/fabric-runs/qwen_profile_t1_2026-09-10/` and
 `qwen_profile_gateon_2026-09-10/`.
 
-### 3.2 TRIED, and it does not pay: the fused mix at two-plus rows
+### 3.2 Experiment: fused mix at two or more rows
 
 At `tokens > 1` the mix falls back to `group_rmsnorm` + two GEMV launches
 (3.75 ms per MTP pass against the fused path's 2.84 at one row) because the
@@ -259,7 +259,7 @@ affinity, and whether the host's per-stripe `bus_fold64` of the payload
 computes. Do not restructure the collective on speculation — measure first
 with `scripts/bus_window_skew.py`.
 
-### 3.6 What the profile says NOT to chase at T=1
+### 3.6 Low-priority work in the T=1 profile
 
 The dense GEMVs are already at or above line rate (the lm head slice moves
 318 MB in 1.31 ms = 243 GB/s; `bf16_gemv<1,0>` ~254 GB/s effective with L2
@@ -398,7 +398,7 @@ the standard answers; both are real projects with their own oracles.
 
 ## 5. Speculation — the per-token lever
 
-### 5.1 LANDED: the draft is sampled, the verify uses the ratio (17.0–18.3 → 15.3–15.8 ms/token)
+### 5.1 Implemented: sampled drafts with ratio-based acceptance (17.0–18.3 → 15.3–15.8 ms/token)
 
 The evidence that motivated it, on one build: **acceptance was 72–74 % on
 greedy requests and 41–55 % on the sampled default** (temperature 1.0,

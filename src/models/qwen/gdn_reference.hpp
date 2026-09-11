@@ -1,5 +1,5 @@
 #pragma once
-// Host reference of the Gated DeltaNet pieces (Q3, 2026-09-09): the test
+// Host reference of the Gated DeltaNet pieces: the test
 // oracle for gdn_recurrent_fwd and the GDN output norm, and the executable
 // specification of the reference numerics (transformers
 // Qwen3_5GatedDeltaNet: torch_recurrent_gated_delta_rule with

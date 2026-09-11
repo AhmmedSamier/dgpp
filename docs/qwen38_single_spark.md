@@ -2,12 +2,11 @@
 
 Date: 2026-09-10
 
-The 4-Spark fabric serves Qwen3.8-Flash-Next from the BF16 checkpoint
-(`docs/qwen38_flash_next_plan.md`, `docs/qwen38_optimization_plan.md`).
-This note records the single-Spark deployment: NVIDIA's NVFP4 checkpoint
-(`nvidia/Qwen3.8-Flash-Next-NVFP4`) with the 47.7 GiB n-gram embedding
-table left on the NVMe and read through a memory mapping, the resident
-model, the decode graph and MTP at world 1.
+The four-node Qwen deployment uses the FP8 checkpoint, whose dense
+projections are BF16 by default. This guide covers single-Spark serving
+with `nvidia/Qwen3.8-Flash-Next-NVFP4`. The model runs resident with
+graph decode and MTP, while the 47.7 GiB n-gram table stays on NVMe and
+is read through a memory mapping.
 
 ## The checkpoint
 
@@ -26,7 +25,7 @@ Resident at world 1 without the table: 75.03 GiB (48 backbone + MTP
 layers 72.6, globals 2.4). With the table it would be 122.7 GiB — the
 board holds 121.6, so the table cannot be resident on one Spark.
 
-## What was built
+## Implementation
 
 **NVFP4 experts (loader, binding, MoE views).** The config parser reads
 `quantization_config.config_groups.group_0` (4-bit float, group 16) as
@@ -64,25 +63,22 @@ fabric's mode) or `"mmap"`. Under mmap:
   own stream, outside the copy engine's shared in-order queue that the
   batched-MTP stall needed.
 
-**The graph world at world 1.** `dgpp-serve` used to refuse
-`decode_graph` below world 2 and served a single Spark through the eager
-engine over a streamed model. The collective bus now accepts
-`world_size = 1` as a world of one: no lanes, no rendezvous, no engine
-thread; every collective is the identity (a copy when the destination
-differs), the staging handout is one pinned slot, the graph hooks succeed
-in session order (`scenario_world_of_one` in `bus_test`). With it the
-serve app runs the same resident graph engine (MTP, the batch families,
-the prefix cache, the journal-less head) at world 1; the model is built
-without a boundary reducer (nothing to fold), the recorder's record hooks
-are the identity under capture. Without `decode_graph` a world of one
-still streams through the eager engine as before.
+**Single-node graph execution.** With `decode_graph` enabled,
+`dgpp-serve` uses a resident model and the graph engine at world 1,
+including MTP, batch variants and prefix caching. The collective bus has
+no network lanes, rendezvous or engine thread in this mode. Collectives
+are identity operations, copying only when source and destination differ.
+The model needs no boundary reducer, and rank 0 runs without a peer journal.
+The bus test `scenario_world_of_one` covers this behavior.
+
+Without `decode_graph`, a single-node run uses the eager streaming path.
 
 `deploy/cluster_qwen_spark1.example.json` (MTP) and
 `deploy/cluster_qwen_spark1_t1.example.json` (T=1) are the single-node
 configs: one node, `ngram_table: "mmap"`, `decode_graph`, 4 slots,
 kv_capacity 65536.
 
-## Gates
+## Validation
 
 - `qwen_ple_test`: the staged gather is bitwise the device table gather.
 - `qwen_loader_test`: the mmap'ed table's rows are the shards' bytes; a

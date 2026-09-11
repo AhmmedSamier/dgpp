@@ -15,7 +15,7 @@
 //   2. Each swapped expert pair must straddle the selection boundary
 //      within a small multiple of the token's MEASURED cross-implementation
 //      noise — where noise is the mean |engine - reference| biased
-//      difference over the experts NOT involved in the swap. A legitimate
+//      difference over the experts not involved in the swap. A legitimate
 //      input perturbation moves every expert's score by the same scale, so
 //      the uninvolved majority pins the true noise; corruption concentrated
 //      on the swapped experts cannot hide inside its own inflation. An
@@ -47,7 +47,7 @@ struct RouteFlipAudit {
   double max_noise_multiple = 0;  // worst gap / measured mean noise (both sides)
   // The structured-noise view of the worst swap: its scale divided by the
   // MAX cross-side drift over uninvolved experts (the perturbation's
-  // demonstrated ability to move ONE expert's score). At real dims the
+  // demonstrated ability to move one expert's score). At real dims the
   // cross-implementation input delta concentrates on massive-activation
   // channels, so a few aligned gate rows move ~10x the mean while the
   // mean stays tiny (measured: layer-17 expert 7, rank 23, gap 0.078 =
@@ -56,7 +56,7 @@ struct RouteFlipAudit {
 };
 
 // Complete audit of one routed layer's engine-vs-reference ids. Throws
-// with a precise diagnosis when a divergence is NOT a certified near tie.
+// with a precise diagnosis when a divergence is not a certified near tie.
 //
 //   eng_ids/ref_ids: [tokens, top_k], ascending per token (both sides'
 //                    contract with the kernel / the torch reference).
@@ -139,7 +139,7 @@ inline void audit_route_flips(const int32_t* eng_ids,
           " out (segmentation bug, not a near tie)");
 
     // Measured noise for THIS token: mean |engine - reference| biased
-    // difference over the experts NOT involved in the swap (a legitimate
+    // difference over the experts not involved in the swap (a legitimate
     // input perturbation is uniform across experts; the uninvolved
     // majority pins its scale, and corruption concentrated on the swapped
     // experts cannot inflate its own yardstick). A zero-noise row with a
@@ -288,7 +288,7 @@ inline double l2_rel(const std::vector<float>& got,
 }
 
 // Cascade-aware route-audit discipline, shared by the free-run and
-// isolated comparisons: every token's FIRST route divergence vs its
+// isolated comparisons: every token's first route divergence vs its
 // reference must certify (audit_route_flips on that token alone — near-tie
 // or attributable-to-structured-noise; a refusal is a real divergence
 // with no compounding to blame and THROWS). After a token's first

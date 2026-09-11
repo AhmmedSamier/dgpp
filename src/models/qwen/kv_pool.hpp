@@ -4,7 +4,7 @@
 // in models/dsa_state.hpp). Per attention layer: K and V bf16 rows for the
 // rank's kv heads, the compressed index keys (bf16, one per pool of kpool
 // tokens) co-located with the token blocks, and a per-request ring of the
-// pending raw keys. ONE block table int32 [max_requests, total_blocks] is
+// pending raw keys. one block table int32 [max_requests, total_blocks] is
 // shared by every layer: block b of request r holds the request's tokens
 // [b*block_tokens, (b+1)*block_tokens) in every layer's K/V cache AND pools
 // [b*pools_per_block, ...) in every layer's index cache, through one

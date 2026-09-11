@@ -58,7 +58,7 @@ inline double bf16_ulp(double x) {
   return std::ldexp(1.0, e - 8);
 }
 
-// Element fails when |diff| exceeds BOTH the ulp budget at the oracle's
+// Element fails when |diff| exceeds both the ulp budget at the oracle's
 // magnitude AND the cancellation floor (a fraction of max |oracle| — sums
 // that nearly cancel have huge relative error but tiny absolute error, and
 // the floor is what keeps the check honest about that).

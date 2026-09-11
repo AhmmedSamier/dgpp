@@ -1,4 +1,4 @@
-// The latent cache's storage formats (2026-09-06): the e2m1 codec, the
+// The latent cache's storage formats: the e2m1 codec, the
 // fp8/fp4 row quantizers and their dequantizers — the host reference the
 // device append kernel and the attention tile loaders are pinned to.
 #include <cmath>

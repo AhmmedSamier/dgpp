@@ -25,7 +25,7 @@ constexpr uint32_t kFlagStopSequence = std::numeric_limits<uint32_t>::max();
 // `hash` is the PLACEMENT gate (the 2026-09-01 small-collective hunt): the
 // sender's fold of the payload, published in the same doorbell DMA. RC
 // ordering promises the payload CQE precedes the doorbell CQE — a promise
-// that protects the CQE consumer (the engine), NOT a third-party poller:
+// that protects the CQE consumer (the engine), not a third-party poller:
 // the per-collective kernels poll the door CELLS directly, and a doorbell
 // placement can become GPU-visible before the payload's own DMA placement
 // (measured on loopback AND the fabric: a fresh, ctl-correct doorbell whose

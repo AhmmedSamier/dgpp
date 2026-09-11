@@ -1,20 +1,17 @@
 # NVFP4 routed experts for GLM-5.3-Flash — implementation plan (2026-09-08)
 
-The deployed artifact is the composed checkpoint `dgpp/GLM-5.3-Flash-NVFP4-FP8`
-(built 2026-09-08 on all four nodes by `tools/compose_nvfp4_hybrid.py`): the
-routed experts of layers 3–44 in NVFP4 from `dabsLabs/GLM-5.3-Flash-NVFP4`, and
-every other tensor — shared experts, dense MLPs, DSA projections, KDA, router,
-mHC, norms, embeddings, lm_head, vision, the whole MTP layer — byte-identical to
-the FP8 release we serve today. The engine therefore learns exactly ONE new
-weight format, NVFP4 routed experts; every other tensor class keeps its bytes and
-its code path, which is the "no regression on FP8" property stated directly:
-the FP8 kernels and loader paths are not edited, and a perplexity delta between
-the two builds is attributable to the experts alone.
+The composed checkpoint `dgpp/GLM-5.3-Flash-NVFP4-FP8` uses NVFP4
+routed experts from `dabsLabs/GLM-5.3-Flash-NVFP4` in layers 3–44.
+All other tensors, including the MTP layer, retain the FP8 release's
+bytes. `tools/compose_nvfp4_hybrid.py` creates the checkpoint and verifies
+the copied tensors against their sources.
 
-This document is the plan for the engine work: what is reused, what is
-modified, what is net-new, the numerics contract, the gates, the performance
-targets, and the order of work. The decisions it rests on and the measurements
-behind them are in §9.
+The loader, decode kernels and grouped prefill path support this format.
+This document records their design, numerical rules, validation and
+optimization experiments from 2026-09-08 onward. Section 6a contains the
+dated implementation results; estimates in the original work plan are
+planning context. Current serving measurements are in
+[benchmarks](benchmarks.md).
 
 ## 1. The checkpoint (done)
 
@@ -86,7 +83,7 @@ swapped nibbles 1.41):
 | `scripts/*` (18 places), `deploy/cluster.example.json` | the hardcoded `unsloth/GLM-5.3-Flash-FP8` becomes a variable with the hybrid as an alternative value |
 | `DESIGN.md` §3/§4, `docs/operations.md`, `README.md`, `CHANGELOG.md` | the hybrid checkpoint, the NVFP4 contract, the model id |
 
-### 2.3 Net-new
+### 2.3 NVFP4 components
 
 | item | purpose |
 |---|---|
@@ -214,7 +211,7 @@ stays and must stay green on the FP8 fixture and checkpoint.
    unexpected, every triple validated.
 7. `glm_tp_test` on the fp4 fixture: shard parity (loader vs `GlmTpViews`),
    forward parity, decode-session parity, the graph and MTP gates, hot == cold.
-8. Fabric (`scripts/fabric_run.sh`, one ritual at a time): transcripts vs the
+8. Fabric (`scripts/fabric_run.sh`, one procedure at a time): transcripts vs the
    FP8 build judged by `fabric_xcript.py` (near-tie flips only); op-stream md5
    identical on four ranks; same binary twice → delta exactly 0;
    `fabric_logprob.py` on the three teacher texts vs the FP8 build — this
@@ -258,7 +255,7 @@ floor 23), mHC and small kernels ~3.5, launch gaps and idle ~1.5.
 Without a quality decision, ~3-4 ms (to ~24 ms/step, MTP ~16.5 ms/token):
 the fp4 GEMV core to the fp8 core's rate (200 → 235-240 GB/s, ~1 ms); DSA
 projections consumed as FP8 natively instead of the BF16 bridge (~1.4 ms,
-no new rounding, the FP8 model gains too); launch/seam pipelining (0.5-0.8
+no new rounding, the FP8 model gains too); launch/interface pipelining (0.5-0.8
 ms); L2 prefetch windows retuned for the smaller expert bytes (0.3-0.5 ms);
 collective skew (up to ~2 ms, uncertain). With one quality decision: KDA
 projections BF16 → FP8 block scales, the largest byte term, ~4.5-4.9 ms
@@ -631,7 +628,7 @@ floor only fewer bytes or more tokens per step move the number.
   (speculative posting, fewer collectives) would recover. Parked. The
   prefetch layer windows: off, T=1 27.0 and MTP 35.1 against 26.0 / 34.4
   on — they pay; the defaults stand.
-- The launch seam in the serve path (`serve_seam_1745`, one live request,
+- The launch interface in the serve path (`serve_seam_1745`, one live request,
   `DGPP_PIPELINE_TRACE=1`): launch-to-launch 27.0 ms at T=1 (the app's
   step 26.0: ~1 ms of host work exposed with no draft tail to hide it)
   and 34.0 under MTP (the app's 34.4: hidden entirely by the draft block's
@@ -648,7 +645,7 @@ floor only fewer bytes or more tokens per step move the number.
   a grid-wide barrier inside the graph node. Reverted; the pair stays.
   Net of this round of decode levers without quantization: the DSA
   projections (1 ms) landed; the fp4 core, the collectives, the launch
-  seam and the mHC fusion are measured and parked with their reasons.
+  interface and the mHC fusion are measured and parked with their reasons.
 - Hardware counters on the decode slot kernels (Nsight Compute as root:
   `sudo -n /usr/local/cuda/bin/ncu`, the profiling module left
   admin-only; reports under the session scratchpad `ncu/`). Both fp4
@@ -690,8 +687,8 @@ floor only fewer bytes or more tokens per step move the number.
   Programmatic dependent launch inside stream-captured graphs, probed on
   a chain of three 3-wave memory-bound kernels: 259 us plain, 256 with
   the wait at the top, 257 prefetching weights before the wait — the
-  graph's seams cost nothing measurable when DRAM is the bottleneck;
-  parked with the serve-path seam above. The L2 prefetch windows were
+  graph's interfaces cost nothing measurable when DRAM is the bottleneck;
+  parked with the serve-path interface above. The L2 prefetch windows were
   swept earlier (8/12/16/24 MB alike). What is left on the decode path
   without a quantization decision: ~0.5 ms in the slot kernels' last 7-10
   % (no cheap form found), ~0.2 ms in the router select, ~0.3 ms if the
@@ -738,14 +735,14 @@ floor only fewer bytes or more tokens per step move the number.
   16-byte vectors on one block; the remaining time is host-memory store
   latency, system fences and the last peer's staging pass — nothing
   cheap; the handshake is host-posted RDMA, a transport redesign. Parked.
-  Programmatic dependent launch across the graph's seams: measured above
+  Programmatic dependent launch across the graph's interfaces: measured above
   (nothing). The decode budget's remaining shape at MTP (nsys, per step):
   GEMVs 14.6 ms (KDA bf16 at the ceiling + the FP8 projections), MoE slot
   kernels 10.9, collectives 4.6, mHC 0.9 (+0.7 on the side), small kernels
   ~2.3, in a 34.3 ms period — ~1 ms of gaps and host. What is left
   without quantization is inside the noise of a fabric reading.
 
-## 7. Order of work and estimates
+## 7. Original work estimates (2026-09-08)
 
 Estimates are engineering days for one person who knows the code, gates and
 fabric evidence included.

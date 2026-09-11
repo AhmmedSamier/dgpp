@@ -8,7 +8,7 @@
 // of the MLP/MoE matrices stay resident in compressed form — "load" never
 // means a persistent BF16 expansion of the model. The four DSA attention
 // matrices (q_a, kv_a, q_b, o_proj) are dequantized per layer as a
-// documented TRANSIENT bridge for the M3 IGemm seam (bf16 weights); the M4
+// documented TRANSIENT bridge for the M3 IGemm interface (bf16 weights); the M4
 // scale-aware GEMM replaces that bridge.
 //
 // Streaming model (M4 deliverable 4): exactly one layer is resident at a
@@ -70,7 +70,7 @@ enum class GlmResidency {
 };
 
 // Which globals contract a stream serves for the lm head (M6 d3, the
-// "vocabulary-sharded lm-head seam"): Full keeps the M4/M5 diagnostic
+// "vocabulary-sharded lm-head interface"): Full keeps the M4/M5 diagnostic
 // default — every rank holds every vocab row, logits are the full
 // [T, vocab], and every pinned parity gate stays byte-stable.
 // VocabSharded gives rank r the contiguous row slice [V*r/W, V*(r+1)/W)
@@ -157,7 +157,7 @@ struct GlmGlobalsResident {
   size_t bytes = 0;
 };
 
-// Boot-time digest over REPLICATED weight source bytes (DESIGN §5.2: "boot
+// Boot-time digest over replicated weight source bytes (DESIGN §5.2: "boot
 // checks hash all replicated tensors"). One order-independent sum-hash per
 // layer (MTP last) plus the globals: ranks compare element-wise, so a
 // mismatch pinpoints the layer. Each tensor folds as FNV-1a over its name
@@ -169,9 +169,9 @@ struct GlmGlobalsResident {
 // Replicated in v1: mHC, both layer norms, routers, the DSA indexer and
 // APE, the DSA latents (q_a/kv_a/their norms), KDA f_a/g_a/o_norm, the
 // MTP draft head, and the globals (embed/lm_head/final_norm load full on
-// every rank until the M6 vocabulary-sharded lm-head seam). The DSA q_b/
-// o_proj dequant bridges are NOT here — they are read in full by every
-// rank (the bf16 seam), but their resident outputs are sharded; they
+// every rank until the M6 vocabulary-sharded lm-head interface). The DSA q_b/
+// o_proj dequant bridges are not here — they are read in full by every
+// rank (the bf16 interface), but their resident outputs are sharded; they
 // count as full-read in the byte reconcile instead.
 struct GlmReplicatedDigest {
   std::vector<uint64_t> layer;  // per layer 0..max_layer-1
@@ -186,7 +186,7 @@ class GlmLayerStream {
   // validates the full text binding (glm_validate_text_binding); throws on
   // any mismatch. Allocates the layer bump at the max layer size.
   //
-  // Sharded load (M5 d4): `world` > 1 builds each resident layer DIRECTLY
+  // Sharded load (M5 d4): `world` > 1 builds each resident layer directly
   // at this rank's local geometry — head row ranges and 128-aligned
   // quantized row/column slices of every MLP matrix, routed experts
   // included (the §5.2 scale-grid contract) — so only rank-local
@@ -228,7 +228,7 @@ class GlmLayerStream {
   // resident model + the cache pinned every decode box at its memory
   // watermark — and the kernel answered by swapping the process's own
   // cold pages (tokenizer tables, heap), each faulting back in at 2-10 ms
-  // in the decode loop (2026-09-02). After this, load_layer of a
+  // in the decode loop. After this, load_layer of a
   // never-materialized layer and hash_replicated() throw: the bytes are
   // gone by design. Streaming mode ignores the call.
   void release_sources();
@@ -277,11 +277,11 @@ class GlmLayerStream {
                                 GlmHeadSharding head = GlmHeadSharding::Full);
 
   // Registers the stream whose kernels READ resident layers (the model's
-  // compute stream). When set, load boundaries synchronize ONLY that
+  // compute stream). When set, load boundaries synchronize only that
   // stream plus the loader's own dequant stream — the complete set of
   // bump readers — instead of the whole device. The device-wide wait is
   // correct for standalone callers (conservative default), but in a
-  // ONE-PROCESS multi-rank world it deadlocks by construction: rank A's
+  // one-PROCESS multi-rank world it deadlocks by construction: rank A's
   // spinning collective kernel never completes, so rank B's
   // cudaDeviceSynchronize inside a layer load never returns, so B never
   // posts the doorbell A spins on (measured: first-collective stall, CI

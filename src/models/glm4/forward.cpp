@@ -79,7 +79,7 @@ Glm4Model::Glm4Model(const Glm4TextConfig& cfg, const std::string& checkpoint_di
   gemm_ws_ = dev_alloc<char>(gemm_ws_bytes_);
   gw_ = Glm4GemmWorkspace{&gemm_, gemm_ws_, gemm_ws_bytes_};
   // Every decode shape up to the fixed batch's rows through the row-
-  // independent GEMV core (the numerical seam of the batched graphs).
+  // independent GEMV core (the numerical interface of the batched graphs).
   gemm_.set_decode_rows(max_decode_rows_);
   moe_cfg_ = cfg_.moe_config(static_cast<int>(loader_.geometry().local_inter));
   n_split_ = Glm4AttentionLayer::default_decode_splits();
@@ -312,7 +312,7 @@ void Glm4Model::prefetch_head() {
 // ---------------------------------------------------------------------------
 // The boundary folds (plan D7): the producer writes its partial into the
 // reducer's staged buffer when the shape fits (the collective sends
-// straight from there; under capture the recorder's ONE stable buffer),
+// straight from there; under capture the recorder's one stable buffer),
 // else into `fallback`. The eager producer quiesces before the collective;
 // under capture the fold is a recorded node and the stream order IS the
 // drain.

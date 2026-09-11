@@ -241,7 +241,7 @@ __device__ inline int32_t context_count(const int32_t* counts_q, int32_t v,
 // place (sample::apply_penalties) and the chunk's max of the
 // temperature-scaled slice.
 // ---------------------------------------------------------------------------
-// The logits row a (request, row) reads (2026-09-10). Without `row_select`
+// The logits row a (request, row) reads. Without `row_select`
 // it is the row itself; with it — the draft pick — request q reads the row
 // its verify verdict accepted, inside a wider source group.
 __device__ __forceinline__ size_t source_row(int row, int q, int rows_per_request,
@@ -288,7 +288,7 @@ __global__ void __launch_bounds__(kChunkThreads) sample_prepare_kernel(
         slice[i] = l;
       }
     }
-    // The logit bias (2026-09-06): the request's dense row, added after the
+    // The logit bias: the request's dense row, added after the
     // penalties and before the mask, in place — the host's gather fallback
     // and every later stage see the biased logit (sample::apply_bias).
     if (rs.spec.biased != 0 && bias != nullptr) {
@@ -885,7 +885,7 @@ __device__ inline void selector(const float* logit, const int32_t* id,
     report_top(logit, id, final_count, temperature, lse, top->N, top->ids,
                top->lps, top->count);
   // The draw's own distribution, kept for the next step's verify: the
-  // masses in the SAME fp32 quotient the walk below uses. A set wider than
+  // masses in the same fp32 quotient the walk below uses. A set wider than
   // the buffer is not carried (n = 0) — the verify then uses the plain
   // rule, which stays exact.
   if (proposal != nullptr) {
@@ -1131,7 +1131,7 @@ __device__ inline Decision decide_prefix(const float* logit, const int32_t* id,
 // sample::spec_accept_from_prefix.
 // `draft_excluded`: the draft is a masked id — probability 0 without the
 // prefix having to show it (sample::spec_accept_from_prefix).
-// `qmass` (2026-09-10): the proposal's mass at each merged candidate, or
+// `qmass`: the proposal's mass at each merged candidate, or
 // null when the draft was deterministic. With it the accept test is
 // min(1, P/Q) and the residual is the normalized (P - Q)+ — the marginal is
 // P either way (sample::spec_select_from_sorted, the host oracle).
@@ -1256,7 +1256,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   __shared__ int total[R];
   __shared__ double Z[R];
   // The draft rows' proposals, gathered onto each row's merged candidate
-  // list before the scalar decision (2026-09-10): row t tests the draft fed
+  // list before the scalar decision: row t tests the draft fed
   // to row t + 1 against proposal slot t (the chained drafts of depth >= 2
   // carry theirs since the evening).
   constexpr int kQ = kSampleProposalSlots;

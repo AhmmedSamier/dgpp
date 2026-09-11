@@ -1,5 +1,5 @@
 #pragma once
-// L2 weight prefetch (2026-09-02). The decode step is one serial chain of
+// L2 weight prefetch. The decode step is one serial chain of
 // kernels, and whenever the chain sits in a latency-bound phase — the bus
 // all-reduce, the KDA recurrence, the DSA select/absorb, the router's
 // top-k — the memory system idles. Weights, unlike routed experts, are
@@ -70,8 +70,8 @@ class WeightPrefetcher {
   void open_window(cudaStream_t main, size_t budget_bytes = 0,
                    PrefetchRate rate = PrefetchRate::Full);
   // Adds a range to the open window, clamped to its remaining budget.
-  // Adjacent (or nearly adjacent) ranges coalesce into ONE launch
-  // (2026-09-06): a window's adds are a layer's tensors in consumption
+  // Adjacent (or nearly adjacent) ranges coalesce into one launch
+  //: a window's adds are a layer's tensors in consumption
   // order and they sit contiguously in the resident image, so what was
   // ~620 one-tensor kernels per decode step — 40 % of the graph's nodes,
   // and cudaGraphLaunch costs ~0.45 us per node on this host — becomes a

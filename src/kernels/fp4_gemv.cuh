@@ -442,7 +442,7 @@ __device__ __forceinline__ void block_rows(const uint8_t* __restrict__ w,
 // GLM-4.7's widths: 5120 (hidden: gate/up, dense gate/up), 384 / 768 /
 // 1536 (the expert down at worlds 4 / 2 / 1), 3072 / 6144 / 12288 (the
 // dense down at worlds 4 / 2 / 1). Qwen3.8-Flash-Next's NVFP4 experts
-// (2026-09-10): 2560 (hidden: gate/up), 640 / 320 / 160 (the expert down
+//: 2560 (hidden: gate/up), 640 / 320 / 160 (the expert down
 // at worlds 1 / 2 / 4).
 template <typename F>
 __host__ inline void dispatch_k(int k, F&& f) {

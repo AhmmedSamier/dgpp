@@ -1,4 +1,4 @@
-// The GLM-4.7 config parser (2026-09-09): the real file's values parse,
+// The GLM-4.7 config parser: the real file's values parse,
 // the architecture registry dispatches on it, and the unsupported shapes
 // are refused by name.
 #include <filesystem>

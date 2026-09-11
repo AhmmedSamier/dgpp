@@ -1,12 +1,8 @@
 #pragma once
-// Resident weight loader for GLM-4.7 (2026-09-09, docs/glm47_plan.md §2,
-// D1), on the shared resident layer stream (loaders/resident_stream.hpp):
-// the family supplies its expected-tensor table, its TP geometry, the
-// per-class builders (loaders/weight_build.hpp's primitives plus the
-// modelopt NVFP4 slices and the draft requant) and the globals; the stream
-// owns the bumps, the staging mirror, the resident image, the byte
-// reconciles and the digest. Every layer is built DIRECTLY at this rank's
-// geometry.
+// GLM-4.7 weight loader using ResidentLayerStream. The family supplies
+// tensor bindings, TP geometry and modelopt NVFP4 builders, including
+// load-time requantization of the BF16 draft experts. The shared stream
+// owns allocations, staging, resident images, byte accounting and digests.
 //
 // Placement (every slice a formula in the world size W):
 //   attention: 96/W query heads (q_proj rows and bias), 8/W kv heads

@@ -1,6 +1,6 @@
 #pragma once
-// The decode-step budget instrument (2026-09-01): env-gated
-// (DGPP_STEP_TIMING=1) or app-flag-gated wall accumulators at the seams
+// The decode-step budget instrument: env-gated
+// (DGPP_STEP_TIMING=1) or app-flag-gated wall accumulators at the interfaces
 // the 0.36s/token diagnosis cares about. Host-only, no device work; a
 // disabled tick costs two branches, an enabled one a clock pair (~40ns)
 // against millisecond-scale budgets.
@@ -94,7 +94,7 @@ inline void reset() {
 
 // The budget: per-slot totals plus the derived splits the diagnosis
 // reads off (moe_launch = moe - moe_sync; the step residual is whatever
-// the named seams do not cover — attention/DSA/KDA kernel time and the
+// the named interfaces do not cover — attention/DSA/KDA kernel time and the
 // host loop between launches).
 // Every line goes through the logger (timestamped like every other line
 // the server prints; 2026-09-06).

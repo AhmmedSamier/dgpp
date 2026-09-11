@@ -181,7 +181,7 @@ __global__ void __launch_bounds__(kGrGemvThreads)
     }
   }
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
-  // The combine's inject dots ride the mix (2026-09-10): a gate reads only
+  // The combine's inject dots ride the mix: a gate reads only
   // the normalized row, which every block has just staged, so the hc inject
   // rows become the row space's last rows — the same warp-per-row chain
   // (bf16_gemv::row_dots) as the down matrix's, over the staged Rn — and
@@ -213,7 +213,7 @@ __global__ void __launch_bounds__(kGrGemvThreads)
     t[static_cast<size_t>(row) * lowrank + n_row] = float_to_bf16_bits(acc[row]);
 }
 
-// The batched rows' down GEMV with the inject rows appended (2026-09-10): for 2..4 rows the mix leaves the fused one-row kernel for
+// The batched rows' down GEMV with the inject rows appended: for 2..4 rows the mix leaves the fused one-row kernel for
 // the norm + GEMV chain, and the inject dots then ran as a side-stream
 // kernel that returned about a third of its time (the chain is near the
 // bandwidth wall; overlapped work competes for the same bytes). This

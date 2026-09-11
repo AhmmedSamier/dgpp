@@ -17,7 +17,7 @@
 # The GPU column group (when nvidia-smi is present): SM MHz, power W,
 # temperature C, and the clocks-event (throttle) reason bitmask — 0x4 is SW
 # power capping, the GB10's habitual one. The 2026-09-02 run after the
-# memory fix showed ONE rank at a time ~30% slower for 5-10 s stretches
+# memory fix showed one rank at a time ~30% slower for 5-10 s stretches
 # (every generation of every window, rotating between peers); this is the
 # per-node witness for "was that box's GPU throttled right then".
 #

@@ -567,7 +567,7 @@ GlmDiagnosticModel::~GlmDiagnosticModel() {
   if (stream_) cudaStreamDestroy(stream_);
 }
 
-// ---- DSA admission meters (the scheduler's budget seam, Stage 2b) ------
+// ---- DSA admission meters (the scheduler's budget interface, Stage 2b) ------
 // A no-DSA model reports an unbounded pool: admission then keys on the
 // engine slot count alone. INT64_MAX (not "huge") so the scheduler's
 // subtraction arithmetic cannot overflow a real capacity.
@@ -811,7 +811,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
     // Block boundary 1 (DESIGN §5.1): the attention output projection is
     // row-parallel over this rank's heads, so the block output is a partial
     // sum until folded. With pre-stage support the attention writes the
-    // pinned staging buffer directly (the §6.3 seam — no staging copy;
+    // pinned staging buffer directly (the §6.3 interface — no staging copy;
     // decode T qualifies, prefill-sized T falls back to the device
     // buffer). The decision precedes the enqueue so the GEMM's destination
     // is the transport's send source.
@@ -888,7 +888,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::run_stack(
                        mhc_logits_, T,
                         stream_);
     glm_rmsnorm_bf16(collapsed_, b.ln2, normed_, T, H, eps, stream_);
-    // Block boundary 2 destination: same staging-seam decision before the
+    // Block boundary 2 destination: same staging-interface decision before the
     // FFN enqueue (dense down-proj, shared expert, and this rank's routed
     // experts are all partial until the fold).
     uint16_t* ffn_out = sub_out_;

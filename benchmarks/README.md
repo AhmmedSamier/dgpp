@@ -1,12 +1,11 @@
 # DGPP Benchmarks
 
-These programs are validation probes, not production runtime components. Run
-high-bandwidth tests in an agreed maintenance window: they can consume both
-RoCE lanes and more than 25 GB/s of the shared memory fabric.
+This directory contains platform, kernel and transport probes. Run
+high-bandwidth tests in a maintenance window: they can consume both RoCE
+lanes and more than 25 GB/s of shared memory bandwidth.
 
-These are platform and kernel probes. For the engine's serving throughput —
-decode and prefill per model, world, concurrency and prompt class, with the
-method behind each number — see `docs/benchmarks.md`.
+For serving throughput by model, world size, concurrency and prompt class,
+see [the serving benchmarks](../docs/benchmarks.md).
 
 The dated result record for the audit remediation is
 `benchmarks/results/2026-08-27-dgx-spark.md`. Curated conclusions also appear

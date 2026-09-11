@@ -3,7 +3,7 @@
 // 2026-09-09; docs/qwen38_flash_next_plan.md §1.7, D4; the reference is
 // transformers Qwen4ExpTextPLELayer / Qwen4ExpTextNGramEmbedding). Four
 // kernels, each deterministic and capturable; the projections run through
-// the GEMM seam and the norms through kernels/qwen_norm.hpp.
+// the GEMM interface and the norms through kernels/qwen_norm.hpp.
 //
 //   hash   token ids -> the 16 table rows per token (int64 math, the
 //          reference's multipliers / primes / offsets, the EOS rule);

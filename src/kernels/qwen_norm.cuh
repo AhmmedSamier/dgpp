@@ -1,6 +1,6 @@
 #pragma once
 // The Qwen norms' block reduction (2026-09-09, factored out of qwen_norm.cu
-// so the GR site's norm-staged GEMV runs the SAME reduction — one order,
+// so the GR site's norm-staged GEMV runs the same reduction — one order,
 // one result, whichever kernel computes it).
 #include <cstdint>
 

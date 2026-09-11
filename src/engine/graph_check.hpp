@@ -1,19 +1,16 @@
 #pragma once
-// The captured decode graph's shape contract (2026-09-03): KERNEL nodes
-// only (empty nodes tolerated). A memset or memcpy node executes on the
-// copy-engine queue — one in-order queue shared by every stream in the
-// process, where a queued node's dependency wait blocks everything behind
-// it. In a one-process multi-rank world (the loopback gates) that formed
-// the batched-MTP graph stall: rank B's replay queued its post-collective
-// DSA counter memset (its dependency wait at the queue head), rank A's
-// pre-collective memset queued behind it, and B's collective spun waiting
-// on A's — docs/batched_mtp_graph_stall.md (nsys node trace: A's memset
-// ran 992 ns after B's post-collective memset, five seconds late). Host
-// nodes would block the same way and more. The decode path uploads with
-// kernels (glm_upload_i32) and resets counters with kernels; every capture
-// site calls this gate so a copy-engine node cannot re-enter unnoticed.
-// Fabric ranks are one process each and never share the queue — the
-// contract costs them nothing and is checked there too.
+// Validate node types in captured decode graphs.
+//
+// Memcpy and memset nodes use a shared, ordered copy-engine queue. In an
+// in-process multi-rank world, a node waiting on one rank's collective can
+// block another rank's earlier copy and form a dependency cycle. Decode
+// uploads and resets therefore use kernels. Event-record nodes are also
+// rejected; the replay verdict is published by a kernel.
+//
+// Kernel and empty nodes are allowed. A family may declare a bounded
+// number of host nodes, used by Qwen to gather mapped n-gram rows. Such
+// callbacks must avoid cross-rank waits. See docs/batched_mtp_graph_stall.md
+// for the trace, reproducer and original failure analysis.
 #include <algorithm>
 #include <cstddef>
 #include <stdexcept>
@@ -27,13 +24,9 @@
 
 namespace dgpp {
 
-// Logs the node-type histogram (info) and throws std::runtime_error when
-// the graph holds any memcpy, memset, host or other non-kernel node — a
-// family that declares host nodes (Model::session_graph_host_nodes(): the
-// Qwen walk's n-gram staging over the mmap'ed table, 2026-09-10) may
-// carry up to `host_nodes` of them: a host node runs on a runtime thread
-// and waits on nothing but its own stream, so it sits outside the copy
-// engine's shared in-order queue that the cycle below needs.
+// Log the node-type histogram and throw std::runtime_error for unsupported
+// nodes or more than host_nodes callbacks. The family supplies its host
+// node allowance through Model::session_graph_host_nodes().
 inline void check_decode_graph(cudaGraph_t graph, int rank,
                                    const std::string& what, size_t host_nodes = 0) {
   size_t n = 0, e = 0;

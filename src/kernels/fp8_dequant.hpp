@@ -1,7 +1,7 @@
 #pragma once
 // Block-scaled E4M3 -> BF16 dequantization (DESIGN §4 contract):
 //   out[n, k] = decode_e4m3(payload[n, k]) * scales[n / 128][k / 128]
-// This is the transient bridge for seams that still consume BF16 (the M3
+// This is the transient bridge for interfaces that still consume BF16 (the M3
 // DSA layer weights); native block-scaled GEMM consumption is the M4
 // scale-aware GEMM's job. Kept as a standalone kernel because parity tests
 // and the loader both need the exact same rounding (decode-multiply, then a

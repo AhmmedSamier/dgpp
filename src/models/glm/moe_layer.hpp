@@ -1,38 +1,22 @@
 #pragma once
-// Host-orchestrated MoE layer forward (M4 deliverable 1, diagnostic mode):
-// router kernel -> host segmentation by expert -> per-expert gather +
-// scale-aware GEMMs + swiglu + accumulation (ascending expert order) ->
-// shared expert. One stream sync per enqueue (the router's ids/weights come
-// back to the host for segmentation); correctness-first — the production
-// grouped-expert kernel without host round-trips is M5+ work and is
-// explicitly out of scope here.
+// MoE execution for diagnostic, decode and prefill workloads.
 //
-// THE DECODE FAST PATH (2026-09-01, enqueue_decode): the production
-// grouped-expert path for the decode shape — the router leaves its
-// decision on the DEVICE (ids ascending per row, its kernel contract),
-// the slot kernels read the route and the expert weight views from
-// device memory, and one ordered accumulation reproduces the host path's
-// exact chain (bitwise — glm_moe_test pins it). NO stream sync, NO host
-// segmentation, NO per-segment H2D round trips; route traces ride async
-// copies into caller-pinned staging (MoeTraceStaging) and materialize
-// after the step's final sync. The prefill path keeps enqueue(): its sync
-// amortizes over 2048-token chunks.
+// enqueue() runs host segmentation after reading back router IDs and
+// weights, then gathers expert inputs and applies each expert in order.
+// enqueue_decode() keeps routes and expert views on the device and uses
+// slot kernels without a host synchronization. The grouped prefill path
+// segments rows on the device and uses GEMV or tensor-core kernels.
 //
-// NUMERICS (2026-09-02, expert slicing): every rank holds a slice of every
-// expert's intermediate dim (see GlmMoeWeights), so an expert's down
-// projection is a PARTIAL sum on each rank. The per-rank chain runs in
-// fp32 — unrounded partial dots, fma per expert in ascending id order, the
-// shared expert last — and rounds to bf16 exactly once, as the sum leaves
-// for the FFN all-reduce (bf16 on the wire, folded in rank order there).
-// The reference's per-expert bf16 roundings are deliberately not
-// reproduced: fewer roundings, and a slice cannot reproduce a whole
-// expert's rounding anyway. The oracle (glm_moe_reference) carries the
-// same chain in double.
+// Every TP rank holds an intermediate slice of each expert. Partial down
+// projections remain in FP32, with one fma per expert in ascending ID order
+// and the shared expert last. The chain rounds to BF16 once before the
+// FFN all-reduce. This differs from the reference's per-expert BF16
+// roundings; glm_moe_reference implements the same accumulation rule in
+// double precision, and tests compare execution paths.
 //
-// Route-trace capture (M4 deliverable 5): the most recent routing decision
-// is retained on the host (last_ids/last_weights) so callers can record it
-// per layer into a trace file (models/glm_trace.hpp) for the corrected
-// per-rank traffic model.
+// Route traces use caller-owned pinned staging and asynchronous copies.
+// Read them after the model stream completes; see MoeTraceStaging and
+// models/glm/trace.hpp.
 #include <cstdint>
 #include <vector>
 
@@ -54,7 +38,7 @@ struct MoeTraceStaging {
   float* biased = nullptr;    // [tokens * n_experts]
 };
 
-// The grouped expert path's kernel (2026-09-05). kGemv: the fp8 GEMV core,
+// The grouped expert path's kernel. kGemv: the fp8 GEMV core,
 // four rows per pass — the decode path's kernel, bitwise the decode slot
 // path at the same routing. kMma: the bf16 tensor-core tile path
 // (launch_moe_grouped_mma_*), 128-row m-tiles, bitwise the scale GEMM's
@@ -91,12 +75,12 @@ class GlmMoeLayer {
 
   // out[tokens, hidden] = routed_sum + shared(hidden); out is zeroed
   // internally and accumulated in place. Synchronizes the stream once.
-  // The prefill path without a host sync (2026-09-04): the router's
+  // The prefill path without a host sync: the router's
   // ids stay on the device, a segmentation kernel builds the rows, the
   // slot map and the segment table there, and the grouped chain runs on
   // them — nothing waits on the host. Routing traces ride async copies
   // into `trace` (pinned; materialize after the stream's next sync;
-  // last_ids()/last_weights()/last_biased() are NOT updated). Bitwise the
+  // last_ids()/last_weights()/last_biased() are not updated). Bitwise the
   // host path's output (glm_moe_test pins it).
   // enqueue_prefill runs the grouped chain on the tensor-core kernel
   // (MoeExpertKernel::kMma); enqueue(), the host-orchestrated reference,
@@ -174,7 +158,7 @@ class GlmMoeLayer {
                               int decode_slots = 0, int graph_table_slots = 0,
                               size_t* pinned_bytes = nullptr);
 
-  // Streaming-weight seam (M4 diagnostic forward): swap the device weight
+  // Streaming-weight interface (M4 diagnostic forward): swap the device weight
   // views (router gate/bias, expert and shared matrices). Device scratch
   // and segmentation buffers are shape-keyed and unaffected.
   void rebind(const GlmMoeWeights& w) { w_ = w; }
@@ -230,7 +214,7 @@ class GlmMoeLayer {
   int32_t* d_slot_order_ = nullptr; // [slots] expert-sorted execution order
   int* d_router_counters_ = nullptr;  // [decode_slots] fused-select tickets    // [slots, hidden] fp32 partial dots
   // The device expert-view table, re-uploaded per enqueue_decode call.
-  // NO CACHE, DELIBERATELY: the streaming loader refills ONE
+  // NO CACHE, DELIBERATELY: the streaming loader refills one
   // GlmLayerResident per layer, so a binding-keyed cache collides across
   // layers (the first MoE layer's table served to every layer after it
   // — glm_tp_test's decode-parity gate caught exactly that, an
@@ -246,7 +230,7 @@ class GlmMoeLayer {
   std::vector<int32_t> h_rows_;
   std::vector<float> h_row_w_;
   std::vector<int> h_counts_;
-  // The prefill path's staging (2026-09-04): PINNED, so its copies are
+  // The prefill path's staging: PINNED, so its copies are
   // truly asynchronous — a pageable async copy is a synchronous staged
   // copy, and the per-expert form of it cost 1.4 s of a 5 s 256-token
   // prefill. The router's ids/weights/biased come down into the pinned
@@ -254,7 +238,7 @@ class GlmMoeLayer {
   // to); the segmented rows/weights go up ONCE per layer from the pinned
   // arrays, each segment addressed by offset; the shared expert's identity
   // rows and unit weights live on the device from construction.
-  // The grouped expert path (2026-09-04): the layer's rows — every routed
+  // The grouped expert path: the layer's rows — every routed
   // (token, slot) in ascending-expert segment order, then the tokens once
   // more for the shared expert — gathered at once; one grouped launch per
   // matrix over the routed segments and one over the shared segment; the
@@ -277,7 +261,7 @@ class GlmMoeLayer {
   // drains the whole step's pipeline once per MoE layer — the first fabric
   // run of the fused path paid 49ms/token for exactly that. Pinned sources
   // are true async DMA — and so a write-after-read hazard (found
-  // 2026-09-05): ONE layer object is rebound for every MoE layer, and a
+  // 2026-09-05): one layer object is rebound for every MoE layer, and a
   // host that has run ahead of the stream (the session prefill has no
   // per-layer sync, and a world of one has no collective to wait on)
   // refilled the single table with the NEXT layer's pointers before the

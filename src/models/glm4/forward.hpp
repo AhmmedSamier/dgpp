@@ -1,8 +1,6 @@
 #pragma once
-// Glm4Model: the GLM-4.7 (Glm4MoeForCausalLM) model over the resident (or
-// streaming) loader, on the shared session core (2026-09-09,
-// docs/glm47_plan.md §1.2, D1–D5). The wiring, pinned to transformers'
-// Glm4MoeDecoderLayer:
+// GLM-4.7 model with resident or streaming weights on the shared session
+// core. The layer walk follows transformers' Glm4MoeDecoderLayer:
 //
 //   h = embed(x)
 //   per layer: h += attn(input_norm(h))         (GQA, biased q/k/v, q/k head
@@ -12,7 +10,7 @@
 //                                                with its NVFP4 shared expert after)
 //   logits = lm_head(final_norm(h))
 //
-// ONE row walk (run_rows) serves every entry point — the cold diagnostic
+// one row walk (run_rows) serves every entry point — the cold diagnostic
 // forward, a session's prefill chunks, the eager decode rows and the
 // captured decode graphs (engine/graph_engine.hpp's contract) — the
 // engine/session_model.hpp core owns everything around it (positions,

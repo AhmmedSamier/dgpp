@@ -1,15 +1,9 @@
 #pragma once
-// The model-independent session core (2026-09-09, docs/glm47_plan.md and
-// the Qwen plan's D7): everything a model does around its layer walk to
-// serve the engines (engine/decode_outputs.hpp's contract) — the request
-// slots' positions on the host and the device, the token feeds and the
-// decode-row staging, the prefill's chunking and its snapshot cuts, the
-// speculative verify/rollback protocol, the prefix cache's snapshot /
-// attach with the paged pool's block pinning, the graph era's capture /
-// stage / settle / seed / fixed-batch surface, and the MTP draft block's
-// plumbing (its row counter, the in-graph draft rows, the next-token
-// feeds). Extracted from QwenModel so a family supplies its walk and its
-// state families only.
+// Shared session state and execution protocol for model implementations.
+// SessionModel manages request positions, token feeds, prefill cuts,
+// verification and rollback, prefix snapshots, graph staging and MTP state.
+// The derived family supplies the layer walk and its state operations.
+// See engine/decode_outputs.hpp for the engine-facing types.
 //
 // A family Derived : SessionModel<Derived> provides:
 //   static constexpr int prefill_chunk_tokens();
@@ -54,7 +48,7 @@
 namespace dgpp {
 
 // The fixed batches the engines carry stay within the bounds the kernels
-// mirror: the pick tables' rows, and the GEMM seam's decode lowering (every
+// mirror: the pick tables' rows, and the GEMM interface's decode lowering (every
 // row of a batch keeps the scalar reduction order).
 static_assert(kDecodeRowsMax == kPickMaxRows, "the pick kernels' row bound mirrors the decode-row maximum");
 static_assert(kDecodeRowsMax <= kGemmDecodeLoweringRows,
@@ -229,7 +223,7 @@ class SessionModel {
   // ---- the MTP draft block ----------------------------------------------------
   Outputs session_draft(int req, const std::vector<int64_t>& tokens);
   // Depth >= 2 (2026-09-10, the GLM-5.3-Flash chain on the window
-  // families): after the block's rows off the verify, ONE more row per
+  // families): after the block's rows off the verify, one more row per
   // further draft at position counter + index, fed the previous draft's
   // pick and the block's own previous output row as its hidden (the
   // block's approximation of the main stack's hidden there), landed in

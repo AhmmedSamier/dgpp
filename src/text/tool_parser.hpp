@@ -13,7 +13,7 @@
 // </tool_call> 154844, <arg_key>/</arg_key> 154847/8,
 // <arg_value>/</arg_value> 154849/50 for the pinned revision): one id
 // each, never produced by BPE for ordinary text, so keying on the ids is
-// exact where keying on decoded text would be ambiguous. They are NOT
+// exact where keying on decoded text would be ambiguous. They are not
 // "special" in the tokenizer's sense — decode() prints them literally —
 // which is why a malformed block falls back to its literal text below.
 //
@@ -65,7 +65,7 @@ struct ChatMarker {
   bool available() const { return id >= 0; }
 };
 
-// The tool-call block's inner format (2026-09-09): GLM keys every part on
+// The tool-call block's inner format: GLM keys every part on
 // an added token (<arg_key>/<arg_value> pairs); Qwen3.8 writes
 // "<function=NAME>\n<parameter=K>\nV\n</parameter>\n...</function>\n" as
 // TEXT between the <tool_call> tokens — only the outer markers are single
@@ -168,7 +168,7 @@ class ToolCallParser {
     // The prompt itself ends inside a "<tool_call>" block (a prompt-side
     // forced block): the first ids are a function name. The service no
     // longer forces blocks — tool_choice is the grammar of constrained
-    // decoding (M6 6g) — but the parser keeps the seam.
+    // decoding (M6 6g) — but the parser keeps the interface.
     bool start_in_tool_call = false;
     // The name text already in the prompt (tool_choice named a function);
     // the model may extend it.

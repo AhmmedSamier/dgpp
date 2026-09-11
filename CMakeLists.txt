@@ -3,9 +3,9 @@ project(dgpp VERSION 0.1.0 LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-# 121a, not 121: the architecture-specific target unlocks GB10's own
-# instructions (the e2m1x2 -> f16x2 conversion the fp4 core decodes with,
-# 2026-09-08); the binaries run on CC 12.1 only, which is every node here.
+# Target GB10's architecture-specific instructions, including the
+# e2m1x2 -> f16x2 conversion used by the FP4 kernels. These binaries
+# require compute capability 12.1.
 set(CMAKE_CUDA_ARCHITECTURES 121a)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -193,7 +193,7 @@ target_link_libraries(dgpp_models_glm PUBLIC dgpp_loaders dgpp_text dgpp_sched)
 dgpp_set_common(dgpp_models_glm)
 
 # Streaming resident loader (M4): managed-memory layer residency over the
-# binding table, with the block-scale dequant bridge for the M3 seams.
+# binding table, with the block-scale dequant bridge for the M3 interfaces.
 # Chunk 6 adds the full diagnostic forward (glm_forward) and the reference
 # dump reader (glm_dump) on top; they drive the parity-tested M2/M3 layer
 # modules, hence the kda/dsa library links.
@@ -224,7 +224,7 @@ target_link_libraries(dgpp_models_glm4_layers
   PUBLIC dgpp_models_glm4 dgpp_models_glm4_loader dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_glm4_layers)
 
-# Qwen3.8-Flash-Next (Q2, 2026-09-09): the host-side model description.
+# Qwen3.8-Flash-Next: the host-side model description.
 add_library(dgpp_models_qwen STATIC
   src/models/qwen/config.cpp
   src/models/qwen/binding.cpp
@@ -284,7 +284,7 @@ dgpp_set_common(qwen_decode_test)
 add_test(NAME qwen_decode_test COMMAND qwen_decode_test --fixture ${QWEN_FORWARD_FIXTURE})
 set_tests_properties(qwen_decode_test PROPERTIES DEPENDS qwen_forward_fixture)
 
-# The MoE layer both families run (2026-09-09): GLM's sigmoid+bias router
+# The MoE layer both families run: GLM's sigmoid+bias router
 # with the FP8 shared expert in the chain, Qwen's softmax router without
 # it (models/qwen/moe_layer.hpp composes the BF16 shared expert on top).
 add_library(dgpp_models_moe STATIC
@@ -425,7 +425,7 @@ if(DGPP_ENABLE_IBV)
                                              Threads::Threads)
   dgpp_set_common(dgpp_serve_app)
   set_target_properties(dgpp_serve_app PROPERTIES OUTPUT_NAME dgpp-serve)
-  # The version stamp (2026-09-06): cmake/version.cmake rewrites the header
+  # The version stamp: cmake/version.cmake rewrites the header
   # at every build only when the tree's sha or dirtiness changed.
   set(DGPP_VERSION_HEADER ${CMAKE_BINARY_DIR}/generated/dgpp_version.hpp)
   add_custom_target(dgpp_version
@@ -806,7 +806,7 @@ set_tests_properties(glm_moe_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # Full-model forward parity (M4 chunk 6): this test writes a synthetic
 # mini-checkpoint, python computes the full-stack pure reference from the
-# SAME checkpoint (one tensor-table source: the C++ binding), and the test
+# same checkpoint (one tensor-table source: the C++ binding), and the test
 # runs the diagnostic forward against the dump. The torch backend on the
 # real checkpoint is the manual deployment run (glm_forward_check).
 add_executable(glm_forward_test tests/cuda/glm_forward_test.cpp)

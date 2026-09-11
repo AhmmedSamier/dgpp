@@ -659,7 +659,7 @@ DGPP_TEST(kda_speculative_snapshots_match_sequential_steps_bitwise) {
   run_rows(0, prefix, state_a, conv_a, qkv_a, out_a, {}, {});
   run_rows(0, prefix, state_b, conv_b, qkv_b, out_b, {}, {});
 
-  // WHEN run A takes the speculative rows in ONE call with snapshots on,
+  // WHEN run A takes the speculative rows in one call with snapshots on,
   //      and run B takes them one token at a time, checkpointing the
   //      committed state after each:
   run_rows(prefix, spec, state_a, conv_a, qkv_a, out_a,
@@ -1057,7 +1057,7 @@ DGPP_TEST(kda_head_slice_matches_full_run_core_outputs) {
     sw.f_b = rows(tw.f_b, 0, lp_s, full.head_dim);
     sw.g_b = rows(tw.g_b, 0, lp_s, full.head_dim);
     // The merged conv weight is [q(all heads) | k | v]: a rank's slice is
-    // per-section, NOT a contiguous prefix. Slicing conv[0:6144] would feed
+    // per-section, not a contiguous prefix. Slicing conv[0:6144] would feed
     // heads 16-47's q-weights as this rank's k/v — exactly the class of bug
     // this test exists to catch for the M5 shard loader.
     sw.conv = rows(tw.conv, 0, lp_s, full.conv_width);

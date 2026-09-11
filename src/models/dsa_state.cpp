@@ -325,7 +325,7 @@ void DsaStatePool::reset_request(int req, cudaStream_t stream) {
     throw std::out_of_range("dsa state pool: request " + std::to_string(req));
   // The tail region is layer-major with max_requests slots per layer, so a
   // request's rings are strided across layers — one small stream-ordered
-  // memset per layer, once per request open. The ring is the ONLY cache a
+  // memset per layer, once per request open. The ring is the only cache a
   // fresh request can read before writing (the tail-seed read), so it is
   // the only one reset_request must zero.
   for (int layer = 0; layer < cfg_.num_dsa_layers; ++layer) {

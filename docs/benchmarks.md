@@ -1,13 +1,9 @@
 # Benchmarks
 
-Every serving number this project has measured, per model, per world, per
-concurrency, with the command that produced it.
-
-Two rules govern this page. **Every figure is a measurement**, dated, with the
-binary and the ritual that produced it named beside it; nothing here is a
-projection, and the modelled floors that appear are labelled as floors.
-**Every cell that has not been measured says so** rather than borrowing a
-neighbour's number, and §8 lists each gap with the command that fills it.
+This page collects serving measurements by model, world size, concurrency
+and prompt class, with commands for reproducing them. Results are dated;
+modeled bandwidth floors and unmeasured cases are identified separately.
+Section 8 lists missing measurements, and section 9 gives the procedures.
 
 - §1 how to read a number
 - §2 the environment and the deployments
@@ -183,7 +179,7 @@ bounds this family under concurrency (§5).
 Classes are five fixed prompts, greedy, 300 tokens each unless the table says
 otherwise: **chat** a technical explanation, **code** a Python module with
 tests, **prose** a long history, **json** twenty-five records, **math** a
-worked problem. §9.2 has the exact texts and the ritual.
+worked problem. §9.2 has the exact texts and the procedure.
 
 The step time is nearly flat across classes. What moves is draft acceptance,
 and therefore tokens per pass, and therefore the pace.
@@ -425,15 +421,15 @@ from one request to four buys 1.6x, where Qwen at world 4 buys 1.9x.
 **There are two prefill numbers for any world, and they differ by 1.4x to 2x.**
 Which one is right depends on the question.
 
-The **ritual** figure (`fabric_prefill_repeat.sh`) prefills the same prompt
+The **procedure** figure (`fabric_prefill_repeat.sh`) prefills the same prompt
 three times and times the third, feeding token ids straight to the engine with
 no HTTP. It is a warm best case and the right number for judging a kernel
 change. The **service** figure (`serve_prefill_probe.py`) sends a fresh prompt
 behind a unique nonce so the prefix cache can never attach, through the API,
 and reads the engine's own `prefill_ms`. It is what a caller actually waits.
-Everything published on this page before 2026-09-10 was the ritual figure.
+Everything published on this page before 2026-09-10 was the procedure figure.
 
-Both were run on the same binary on 2026-09-10, and the older ritual numbers
+Both were run on the same binary on 2026-09-10, and the older procedure numbers
 reproduce exactly, so the difference is method and not a regression.
 
 ### Ritual: steady state, ids fed directly (2026-09-10)
@@ -470,10 +466,10 @@ Per prompt token:
 | GLM-4.7-NVFP4 | 1.63 | 1.32 | 1.98 | — | — |
 
 **The hybrid inverts against FP8 above 2K, and only through the service.** On
-the ritual the NVFP4 hybrid prefills faster than the FP8 checkpoint at every
+the procedure the NVFP4 hybrid prefills faster than the FP8 checkpoint at every
 length. Through the service it is faster at 512, equal at 2K, and then loses
 badly: 11.4 s against 9.2 s at 8K, and 93.8 s against 58.6 s at 32K. The
-service-to-ritual ratio is 1.45–1.74 for FP8 and 1.73–2.00 for the hybrid, so
+service-to-procedure ratio is 1.45–1.74 for FP8 and 1.73–2.00 for the hybrid, so
 the NVFP4 expert path degrades with context in a way the FP8 tensor-core path
 does not. This is one sample per point and wants a profile before anyone acts
 on it; it is the most actionable thing tonight's run turned up.
@@ -529,11 +525,11 @@ outright, and what follows is what genuinely remains.
    `scripts/serve_load.py HOST PORT --concurrency 1,2,4 --classes all`.
 2. **The prefill method gap wants a profile, not another reading.** §6 shows
    the NVFP4 hybrid losing to FP8 above 2K through the service while winning on
-   the ritual. One sample per point. The next step is
+   the procedure. One sample per point. The next step is
    `scripts/fabric_qwen_profile.sh`-style node tracing on a service prefill at
    8K on both checkpoints, not more timings.
 3. **Service-method prefill for the Qwen families.** All three Qwen rows in §6
-   are ritual figures; only the GLM worlds have both. Until they are re-run the
+   are procedure figures; only the GLM worlds have both. Until they are re-run the
    Qwen prefill numbers are not comparable with the GLM service numbers. Fill
    with `scripts/serve_prefill_probe.py HOST PORT 512 2048 8192 --repeat 3`.
 4. **Long context beyond 8K for the Qwen families and GLM-4.7.** GLM-5.3-FP8
@@ -559,7 +555,7 @@ cp deploy/cluster_qwen.example.json deploy/cluster_qwen.json   # fill in nodes a
 scripts/dgpp-cluster up --config deploy/cluster_qwen.json
 ```
 
-Run one ritual at a time on the fabric. Two measurements at once share the
+Run one procedure at a time on the fabric. Two measurements at once share the
 memory fabric and both readings are then wrong.
 
 ### 9.1 Single-stream decode

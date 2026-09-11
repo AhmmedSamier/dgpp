@@ -1,80 +1,35 @@
 #pragma once
-// The M6 Stage 4b admission journal — the metronome that keeps every
-// fabric rank's scheduler identical while requests arrive at rank 0's
-// HTTP door (DESIGN §5: rank 0 owns admission; §11: identical rank
-// order).
+// Admission journal for synchronizing schedulers across ranks (DESIGN §11).
+// Rank 0 accepts HTTP requests and sends newline-framed JSON over a TCP star:
 //
-// THE PROTOCOL (newline-framed JSON over the TCP star; one line, one
-// record):
-//   {"op":"settings", ...the world's shape, rank 0 -> every peer first...}
+//   {"op":"settings", ...}       model, world and engine settings, sent first
 //   {"op":"warm","adm":{...},"pc":N,"cfg":"<digest>"}
 //   {"op":"tick","s":[{"id":"…","p":[ids],"m":N,"b":[...],"nc":1}],"c":["id"],"pd":D,"od":F}
 //   {"op":"stop"}
-// The continuous drift check (M9, 2026-09-05): every tick record's "od"
-// is rank 0's running fold of its op stream (OpStreamObserver::digest,
-// FNV-1a over every line it recorded) after the PREVIOUS tick; a peer
-// compares its own fold before applying the record and dies loudly with
-// the tick number when they differ — the 4-way op-stream md5 of the
-// shutdown ritual, made continuous and one tick late at most.
-// The prefix cache (M7) rides in three places: a submit's "b" (the
-// prompt's structural boundaries) and "nc" (opted out) — inputs of the
-// scheduler's cache decisions; the warm record's "pc" (rank 0's snapshot
-// slot count, which every peer's scheduler must run); and every tick's
-// "pd", rank 0's decision digest after the PREVIOUS tick — a peer whose
-// own digest differs has diverged and dies loudly, one tick late at most.
-// The "warm" record is the start signal for the graph engine's startup
-// warm capture (GlmGraphEngineAdapter::warm_captures): a run of bus
-// collectives every rank must enter together, before any tick. Rank 0
-// broadcasts it once its model is built; a peer holds at the record
-// instead of spinning its first collective in stall diagnostics for the
-// seconds rank 0's slower construction takes (seen 2026-09-03: ~8 s of
-// STALLED dumps per peer). It is the only record allowed before the
-// first tick and never valid after it.
-// Every rank-0 engine pass is exactly one "tick" record, broadcast
-// AFTER the pass's drain and BEFORE its sched.tick() — the record and
-// the tick are one atomic unit. Peers apply the record's
-// submits/cancels, then tick. Tick counts are identical by
-// construction: rank 0 never ticks without broadcasting; a peer never
-// ticks without a record. And because every engine op is a bus
-// COLLECTIVE (synchronous across ranks), a record can never interleave
-// a peer's in-flight tick — when rank 0 leaves a tick, every rank has
-// left the same tick, so the stop record (or any record) always
-// lands between ticks, never inside one.
 //
-// WHAT RIDES THE JOURNAL: only scheduler-state CHANGES rank 0 made —
-// try_submit-ACCEPTED requests (with full prompt ids; rank 0
-// tokenized them) and cancel() requests that hit. Door sheds (503)
-// and admission sheds die on rank 0 and are never journaled;
-// steps/retires/tokens are DERIVED state every rank computes
-// identically from the same records (§11). A peer's try_submit
-// refusing what rank 0 admitted is a scheduler divergence — the one
-// thing this design says cannot happen — so the peer loop makes it
-// LOUD and dies rather than serving on a lie.
+// The settings record precedes model construction. Warm supplies admission
+// settings and prefix slot count, checks the configuration digest and
+// coordinates graph warm capture before the first tick. A tick carries
+// accepted submissions and cancellations; p contains token IDs, b the
+// prompt boundaries and nc the cache opt-out flag. Rejected HTTP requests
+// stay on rank 0. Tokens, retirements and cache decisions are derived by
+// each scheduler from the same inputs.
 //
-// DEATH DISCIPLINE: a peer sees journal EOF when rank 0's process is
-// gone (clean stop, crash, kill -9 — TCP closes the sockets either
-// way) and exits; TCP is the liveness probe, no heartbeats needed. A
-// dead peer makes rank 0's broadcast fail — the fabric is broken, and
-// rank 0 aborts loudly instead of serving on without it (the bus
-// watchdogs would catch it at the next collective; the journal
-// catches it BETWEEN collectives, the gap the bus cannot see).
+// Rank 0 broadcasts each tick after draining submissions and before calling
+// sched.tick(). Peers apply the record and execute that tick. Collectives
+// keep engine operations aligned, so stop and subsequent records are
+// handled between ticks. A peer rejecting an admitted request is a fatal
+// scheduler divergence.
 //
-// THE WATCHES (the v1 failure semantics, M8's exit criterion, built
-// 2026-09-05): a rank that dies INSIDE a collective leaves every other
-// rank waiting in the bus for a completion that never comes — up to the
-// bus watchdog (a minute) before the failure surfaces. The journal
-// sockets see the death at once (a process death closes them), so each
-// side keeps a watch on them: rank 0's JournalWriter::watch_peers()
-// polls the peers' connections (a peer never writes, so readability is
-// a close or a reset) and reports the dead rank; the peer loop's
-// on_rank0_death hook fires when rank 0's connection closes while the
-// peer is inside a tick (between ticks the read loop sees the EOF
-// itself). The reaction is the same on both sides: fail the service
-// (rank 0 answers every live stream with the engine_failure error after
-// its committed tokens), write the op stream, exit nonzero — never wait
-// on the bus. Committed state is never touched: every token a client got
-// was committed on every rank before the failure, and no rank commits
-// anything after it (the step that was in flight never completes).
+// od is rank 0's FNV-1a operation-stream fold after the previous tick; pd
+// is its prefix-decision digest. Peers compare their own values before
+// applying the record and report the tick on a mismatch. Shutdown hashes
+// compare the complete streams.
+//
+// Journal watches detect socket closure even while an engine is inside a
+// collective. Rank 0 fails active streams after their completed tokens;
+// peers exit on loss of rank 0. The bus watchdog handles silent node loss.
+// There is no failover within a running world.
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -93,7 +48,7 @@ namespace dgpp::serve {
 // one on every rank (rank 0 through GenerationService::set_audit_
 // observer, peers through Scheduler::set_observer) and the
 // verification hashes the per-rank texts against each other — the
-// smoke's md5 ritual, serving edition. The format is deliberately
+// smoke's md5 procedure, serving edition. The format is deliberately
 // deterministic and rank-independent: same events in the same order
 // MUST produce the same bytes on every rank. Appends happen on the
 // engine thread; readers (the run's exit write, the tests' live polls)
@@ -147,15 +102,15 @@ struct WorldSettings {
   int fabric_port = 0;
   int max_concurrency = 0;
   int64_t kv_capacity = 0;
-  std::string kv_dtype = "bf16";  // the latent cache's format (2026-09-06)
-  std::string ngram_table = "resident";  // the Qwen n-gram table's residency (2026-09-10)
-  std::string dense_weights = "checkpoint";  // the Qwen dense stack's form (2026-09-10)
+  std::string kv_dtype = "bf16";  // the latent cache's format
+  std::string ngram_table = "resident";  // the Qwen n-gram table's residency
+  std::string dense_weights = "checkpoint";  // the Qwen dense stack's form
   int default_max_tokens = 0;
   int queue_limit = 0;
   bool no_eos = false;
   bool decode_graph = false;
   bool mtp = false;
-  int mtp_depth = 1;  // draft tokens per step (2026-09-06)
+  int mtp_depth = 1;  // draft tokens per step
   int graph_batch_min_live = 0;
   int sampling_candidates = 0;
   double prefix_cache_gib = 0.0;
@@ -185,7 +140,7 @@ struct JournalRecord {
   uint64_t op_digest = 0;
   std::vector<dgpp::sched::SchedulerRequest> submits;
   std::vector<std::string> cancels;
-  std::vector<std::string> stops;  // the stop-string retires (2026-09-06),
+  std::vector<std::string> stops;  // the stop-string retires,
                                    // applied like cancels ("sp")
 };
 // The tick record's cross-rank check (M7): rank 0's prefix-cache digest
@@ -207,7 +162,7 @@ JournalRecord decode_journal_line(std::string_view line);
 
 class JournalWriter {
  public:
-  // Binds the journal port (0 = ephemeral; see port()) but does NOT
+  // Binds the journal port (0 = ephemeral; see port()) but does not
   // wait for peers — the app binds first so peers can be launched
   // against a known port, then accepts.
   explicit JournalWriter(uint16_t listen_port);

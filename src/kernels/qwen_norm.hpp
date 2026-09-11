@@ -1,7 +1,7 @@
 #pragma once
 // Qwen3.8-Flash-Next norm kernels (Q3, 2026-09-09; docs/qwen38_flash_next_plan.md
 // §1.2, §1.3, §1.5). The family's norms are the zero-centered form: fp32
-// interior, y = bf16(x * rsqrt(mean(x^2) + eps) * (1 + w)) — ONE rounding
+// interior, y = bf16(x * rsqrt(mean(x^2) + eps) * (1 + w)) — one rounding
 // (transformers Qwen3_5RMSNorm), unlike GLM's two-rounding norm. The GDN
 // output norm keeps the reference's three roundings (Qwen3NextRMSNormGated:
 // bf16 after the normalization, after the plain-weight multiply, after the

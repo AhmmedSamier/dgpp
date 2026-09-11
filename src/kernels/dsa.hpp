@@ -32,7 +32,7 @@
 // with grid-stride loops over device-visible counts, so the whole decode
 // path is CUDA-graph capturable.
 //
-// Prefill materializes per-(row,head) fp8 dots through the IGemm seam
+// Prefill materializes per-(row,head) fp8 dots through the IGemm interface
 // (FP8 x FP8 -> F32, unit scales) into a bounded dot buffer and runs the
 // same streaming selection over it per row.
 #include <cstddef>
@@ -260,7 +260,7 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
                       LatentFormat format = LatentFormat::kBf16,
                       const float* latent_scale = nullptr);
 
-// Dense causal attention on tensor cores (2026-09-05): the prefill path
+// Dense causal attention on tensor cores: the prefill path
 // below index_topk tokens of context, where the selection is provably
 // dense (every visible pool selected, the tail appended) and a query at
 // position p attends to tokens [0, p]. Same partial layout and split

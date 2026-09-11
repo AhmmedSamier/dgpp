@@ -446,7 +446,7 @@ void Scheduler::admit(int arrival) {
     pp.boundaries = &r.spec.boundaries;
     int snap_slot = -1;
     if (plan.attach_entry >= 0) {
-      // Attach FIRST: an attached entry is never evicted, and the snapshot
+      // Attach first: an attached entry is never evicted, and the snapshot
       // slot acquired next may evict the LRU unattached entry — which, with
       // the arena full, was this very entry (the curve sweep's find of
       // 2026-09-05: "PrefixArena: slot 25 is empty" — the victim's slot came
@@ -748,7 +748,7 @@ void Scheduler::retire(int arrival, Result::Status status,
   res.generated = r.generated;
   r.slot = -1;
   if (observer_) observer_->on_retire(r.spec.id, res);
-  // The request's own numbers (2026-09-06): its prefill (the prompt, the
+  // The request's own numbers: its prefill (the prompt, the
   // tokens an attach skipped, the wall from admission), then its decode —
   // the tokens after the prefill pick, the passes it rode (each shared
   // with every other live request, so ms/pass is the pace this request
@@ -801,7 +801,7 @@ bool Scheduler::tick() {
     if (r.cancel_requested)
       retire(static_cast<int>(i), Result::Status::kCancelled,
              Result::Reason::kCancelled);
-    else if (r.stop_requested)  // the stop string's retire (2026-09-06)
+    else if (r.stop_requested)  // the stop string's retire
       retire(static_cast<int>(i), Result::Status::kDone, Result::Reason::kStop);
   }
   // Grow-on-demand's fixed position: after the sweep, before any
@@ -819,7 +819,7 @@ bool Scheduler::tick() {
 
   bool progressed = false;
 
-  // (1) Strict alternation: at most ONE admission per tick, before the
+  // (1) Strict alternation: at most one admission per tick, before the
   // step, so a queued request's first token is not delayed behind a
   // step — and mid-answer requests never wait behind more than one
   // read-in.
@@ -877,7 +877,7 @@ bool Scheduler::tick() {
     // deadlock: the queue cannot fit the pool ever (its head's
     // reservation exceeds the total capacity) or every slot is held
     // by requests that can never retire (impossible under full-reserve
-    // — they are bounded by max_steps). Either way: LOUD.
+    // — they are bounded by max_steps). Either way: loud.
     const auto head = std::find_if(
         requests_.begin(), requests_.end(),
         [](const Request& r) { return r.state == State::kQueued; });
@@ -1014,7 +1014,7 @@ void Scheduler::free_arena_slot(int slot) {
   cache_.give_back_slot(slot);
 }
 
-// A miss, explained at INFO (2026-09-07): the live log of an agent session
+// A miss, explained at INFO: the live log of an agent session
 // showed a 64,803-token turn arriving a third of a second after its
 // predecessor retired and prefilling cold for 200 s, with the
 // predecessor's entries present and unattached in the arena — the prompt's

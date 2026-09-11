@@ -1,7 +1,7 @@
 // M5 deliverable 3, forward integration: the TP fabric runner. Runs the
 // block-boundary forward across real nodes over the CollectiveBus and
 // writes this rank's observables for offline comparison:
-//   {out}.final_hidden.bf16   [T, hidden]   — must be BITWISE identical on
+//   {out}.final_hidden.bf16   [T, hidden]   — must be bitwise identical on
 //   {out}.logits.f32         [T, vocab]      every rank (the canonical
 //   {out}.routes.txt         per-MoE-layer   rank-order fold's guarantee)
 //   ids/weights fp32
@@ -12,7 +12,7 @@
 // Bus collective stats print at the end (count + submit->wait p50/p99 —
 // the fabric timing record).
 //
-// The cross-rank BITWISE check is the assertion that matters on the
+// The cross-rank bitwise check is the assertion that matters on the
 // fabric; oracle comparisons (tolerance + certified route flips) are the
 // CI test's job (glm_tp_test) — here the files exist so the run records
 // can show them.
@@ -123,7 +123,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
                                                20260829);
   const int64_t cache = 128;
 
-  // Rank 0 runs the world=1 oracle FIRST (separate model, no bus): its
+  // Rank 0 runs the world=1 oracle first (separate model, no bus): its
   // files are the comparison targets, and the forward never shares the
   // device with an in-flight collective.
   GlmDiagnosticModel::Outputs oracle_out;  // rank 0: the inline verdict's
@@ -225,7 +225,7 @@ int run(const GlmTextConfig& cfg, const std::string& ckpt, int world,
   // oracle ON THE FABRIC. The 0.57 hunt's lesson: a gate failure must
   // self-diagnose on the night it happens, not become an offline
   // forensics project. Free-run l2 is REPORTED (the designated
-  // compounding surface); top-1 near ties and every token's FIRST route
+  // compounding surface); top-1 near ties and every token's first route
   // divergence are CERTIFIED — an uncertified divergence fails the run
   // with its diagnosis in this log.
   if (rank == 0) {

@@ -1,13 +1,9 @@
 #pragma once
-// The model-independent resident layer stream (2026-09-09): what every
-// family's loader does around its builders — the streaming bump or one
-// bump per resident layer, the pinned staging mirror, the checkpoint
-// mapping and binding check, the resident image (build once, restore from
-// disk after), the byte-formula and source-byte reconciles, the globals
-// bump, the source release, and the replicated-weight digest with its
-// image note. Extracted from the Qwen loader so the third family
-// (GLM-4.7) adds builders and geometry, not plumbing; the GLM-5.3 loader
-// predates the weight builder and keeps its own copy for now.
+// Shared layer-loading lifecycle for Qwen and GLM-4.7. The stream owns
+// checkpoint mappings, binding validation, staging, resident images, byte
+// accounting and replicated-weight digests. A family provides its geometry
+// and builders. Streaming mode reuses one layer allocation; resident mode
+// retains an allocation per layer. GLM-5.3 has a separate loader.
 //
 // A family F provides:
 //   using Config, Expected, LayerResident, GlobalsResident, Geometry;
@@ -69,7 +65,7 @@ namespace dgpp {
 enum class LoaderResidency { Streaming, Resident };
 enum class LoaderHeadSharding { Full, VocabSharded };
 
-// Boot-time digest over the REPLICATED weight source bytes, per layer plus
+// Boot-time digest over the replicated weight source bytes, per layer plus
 // the globals (FNV-1a over name then bytes, summed per layer,
 // order-independent).
 struct ReplicatedDigest {

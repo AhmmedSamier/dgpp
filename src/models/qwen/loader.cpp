@@ -74,7 +74,7 @@ std::string& resident_image_dir_storage() {
   return dir;
 }
 
-// The n-gram table's residency (2026-09-10): process-wide, set before
+// The n-gram table's residency: process-wide, set before
 // any stream is built (the memory plan reads it too).
 bool g_ngram_table_mmap = false;
 // The dense stack's form (engine.dense_weights = "fp8", 2026-09-10).

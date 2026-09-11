@@ -1,4 +1,4 @@
-// The Gated DeltaNet recurrence (Q3, 2026-09-09): the KDA kernel's
+// The Gated DeltaNet recurrence: the KDA kernel's
 // scalar-gate mode against the host oracle (gdn_ref::recurrent), the
 // chunk invariance (one call vs many, bitwise: the state round-trips fp32),
 // the request-batched form against per-request plain runs (bitwise), and

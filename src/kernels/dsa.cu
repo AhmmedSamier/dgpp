@@ -509,7 +509,7 @@ __global__ void kpool_decode_update_kernel(
     }
     // Speculative rows: the ring after batch row t is the state to restore
     // if rows > t are rejected (the last row's ring stays in place). The
-    // ring is the ONE non-idempotent DSA write — latent rows and completed
+    // ring is the one non-idempotent DSA write — latent rows and completed
     // pools are positional and a rewound position simply overwrites them.
     if (tail_snapshots && t + 1 < t1) {
       __syncthreads();  // every thread's stash is visible before the copy
@@ -797,7 +797,7 @@ struct PrefillKeyFn {
 __global__ void select_counter_reset_kernel(int32_t* counter, int32_t* hist_rows,
                                             int hist_words) {
   if (threadIdx.x < 2) counter[threadIdx.x] = 0;
-  // The rows' histograms start at zero every call (2026-09-06): the
+  // The rows' histograms start at zero every call: the
   // workspace is not zeroed at allocation, and a row's histogram used to
   // sit at a call-dependent offset (see dsa_select_decode).
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < hist_words;
@@ -805,7 +805,7 @@ __global__ void select_counter_reset_kernel(int32_t* counter, int32_t* hist_rows
     hist_rows[i] = 0;
 }
 
-constexpr int kSelectRadixBits = 10;  // 1024 bins: 4 KB of smem, two blocks per SM (2026-09-06)
+constexpr int kSelectRadixBits = 10;  // 1024 bins: 4 KB of smem, two blocks per SM
 constexpr int kSelectHistBins = 1 << kSelectRadixBits;
 // The key's live bits: the 32-bit inverted sortable logit above kIdxBits
 // of pool index (DecodeKeyFn); the first radix digit sits just below.
@@ -1068,7 +1068,7 @@ __global__ void select_decode_kernel(
       // Gather: keys below the boundary bin straight into best[] (their
       // order is free — the expansion sorts ids); the bin's keys into the
       // candidate array, sorted so the `remaining` smallest complete best.
-      // best[] starts EMPTY (2026-09-06): an entry the fill leaves
+      // best[] starts EMPTY: an entry the fill leaves
       // unwritten is dropped by the expansion instead of carrying shared
       // memory's leftovers into the token list (a 62,600 in a 2,119-token
       // context faulted the listed attention on the fabric); a short fill
@@ -1310,7 +1310,7 @@ __global__ void attn_partial_kernel(
   }
 
   // The thread's q window and its c accumulator live in REGISTERS
-  // (2026-09-06): the head's c row in smem (37 KB) and the q rows (19 KB)
+  //: the head's c row in smem (37 KB) and the q rows (19 KB)
   // put the block at 95 KB — one block per SM, the 64-block decode grid
   // in two waves at ~180 us per call. With both in registers the block
   // is ~40 KB, two per SM, one wave. Per-thread arithmetic and its order
@@ -1681,7 +1681,7 @@ __global__ __launch_bounds__(dense::kThreads, 2) void attn_flash_kernel(
         const int tt = idx / (KV / 8), c8 = idx % (KV / 8);
         uint4 val = make_uint4(0, 0, 0, 0);
         if (tt < n) {
-          // The gather is guarded (2026-09-06): a token outside the table
+          // The gather is guarded: a token outside the table
           // row or a block outside the pool zero-fills the row and records
           // the first anomaly instead of faulting the context — the listed
           // kernel read an unmapped page on the fabric once in ~10 eager
@@ -1860,7 +1860,7 @@ __global__ void attn_combine_kernel(const float* m_ws, const float* l_ws,
                                     const float* c_ws, int n_split,
                                     int local_heads, int kv_lora,
                                     float* c_out) {
-  // One block per (row, head): the old (row)-block form launched ONE block
+  // One block per (row, head): the old (row)-block form launched one block
   // for single-row decode — a single SM merging 64 heads x 512 dims.
   const int64_t r = blockIdx.x;
   const int h = blockIdx.y;
@@ -2371,7 +2371,7 @@ size_t select_hist_bytes(int rows) {
 size_t dsa_select_workspace_bytes(int max_rows, int64_t max_pools) {
   if (max_rows <= 0 || max_rows > kSelectMaxRows || max_pools <= 0)
     throw std::invalid_argument("dsa_select_workspace_bytes: rows in [1, 8], pools > 0");
-  // Laid out for kSelectMaxRows rows regardless of max_rows (2026-09-06):
+  // Laid out for kSelectMaxRows rows regardless of max_rows:
   // the histograms follow the keys at a FIXED offset the launcher derives
   // the same way, whatever row count a call brings. (They used to follow
   // the call's own rows of keys, so a one-row call — the sampled
@@ -2426,7 +2426,7 @@ void dsa_select_debug_phases(uint64_t out[8]) {
 
 unsigned long long dsa_attn_anomalies(long long out[6], bool clear,
                                       cudaStream_t stream) {
-  // Stream-ordered (2026-09-06): a legacy-stream symbol copy synchronizes
+  // Stream-ordered: a legacy-stream symbol copy synchronizes
   // with every blocking stream of the device — in a loopback world that
   // is the peer rank's stream, mid-replay and waiting on this rank.
   unsigned long long count = 0;

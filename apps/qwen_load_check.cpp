@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
     const auto& tbl = stream.load_ngram_table();
     DGPP_LOG_INFO("qwen_load_check: n-gram table rows [{}, +{}) {:.2f} GiB in {:.1f} s", tbl.row_begin, tbl.rows, tbl.bytes / kGiB, std::chrono::duration<double>(std::chrono::steady_clock::now() - t2).count());
     if (tbl.mmap) {
-      // The mmap'ed table's gather cost (2026-09-10): a decode pass's rows
+      // The mmap'ed table's gather cost: a decode pass's rows
       // (2 tokens x 16 heads, uniformly random rows — no locality, the
       // worst case) and a prefill chunk's (2048 x 16), timed on the host
       // as the walk's host node runs them.

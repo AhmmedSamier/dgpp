@@ -1,4 +1,4 @@
-# The site's fabric, derived from its cluster config (2026-09-10). Sourced by
+# The site's fabric, derived from its cluster config. Sourced by
 # the evidence and serving scripts so that NO node address and NO login name
 # is ever written into a script: both live in the site-local cluster config
 # (deploy/cluster.json, git-ignored; copy deploy/cluster.example.json), and

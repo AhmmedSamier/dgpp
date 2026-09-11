@@ -1,11 +1,8 @@
 #pragma once
-// The Qwen3.8-Flash-Next layer objects (Q4, 2026-09-09;
-// docs/qwen38_flash_next_plan.md §1.2–§1.7): each one wires the Q3 kernels
-// and the GEMM seam into one site of the layer, owns shape-keyed scratch,
-// and is REBOUND to each layer's resident weight views (the streaming
-// diagnostic forward keeps one layer resident at a time). Host-orchestrated,
-// graph-free: correctness first; the engine milestone (Q6) builds the
-// captured decode variants on the same kernels.
+// Qwen3.8-Flash-Next layers composed from shared CUDA kernels and GEMM
+// interfaces. Each owns shape-specific scratch and can bind resident weight
+// views. The same operators support diagnostic forward, prefill and graph
+// decode. Streaming mode rebinds them as each layer is loaded.
 //
 //   QwenGrSite   the gated residual's read (mix) and write (combine)
 //   QwenGdnLayer the Gated DeltaNet block: projections, conv, recurrence,
@@ -29,7 +26,7 @@
 
 namespace dgpp {
 
-// The GEMM seam's workspace, shared by every layer object of a model.
+// The GEMM interface's workspace, shared by every layer object of a model.
 struct QwenGemmWorkspace {
   IGemm* gemm = nullptr;
   void* ws = nullptr;
@@ -37,7 +34,7 @@ struct QwenGemmWorkspace {
   // The FP8 dense stack's prefill bridge (engine.dense_weights = "fp8",
   // 2026-09-10): a BF16 scratch the size of the largest dense matrix; a
   // prefill-shaped product dequantizes the matrix into it (the GEMV core's
-  // own values, bf16(e4m3 x scale)) and runs the BF16 GEMM seam — the fp8
+  // own values, bf16(e4m3 x scale)) and runs the BF16 GEMM interface — the fp8
   // tile kernel is a quarter slower than cuBLASLt at these shapes (2.6 s
   // against 2.0 s for a 2K prompt, measured).
   uint16_t* dequant = nullptr;
@@ -66,7 +63,7 @@ class QwenGrSite {
   QwenGemmWorkspace g_;
   int hc_, hidden_, lowrank_, max_tokens_;
   float eps_;
-  // The inject dots' side stream (2026-09-10): the gates read only Rn, so
+  // The inject dots' side stream: the gates read only Rn, so
   // the dots are issued here as soon as mix() has normalized the row and
   // joined in combine() — off the chain that runs the branch, the boundary
   // collective and the apply. Same kernel on either stream, so the values
@@ -159,7 +156,7 @@ struct QwenQsaCache {
   int64_t pool_slots(int kpool) const { return slots() / kpool; }
 };
 
-// The rows one enqueue serves. Prefill: ONE request's contiguous chunk at
+// The rows one enqueue serves. Prefill: one request's contiguous chunk at
 // positions [pos0, pos0 + T), pos0 a multiple of kpool (the ring's contract;
 // 0 for the cold start) — the chunk's complete pools are compressed from its
 // own rows, the ring re-seeded with its last kpool raw keys. Decode: T rows

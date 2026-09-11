@@ -12,7 +12,7 @@
 //   D[M, N] = Act[M, K] x W[N, K]^T
 //
 // Tile geometry (BM=16, BN=64, BK=32) divides the 128-wide scale block
-// exactly, so every stage applies ONE scalar scale (no per-element scale
+// exactly, so every stage applies one scalar scale (no per-element scale
 // gather) and ragged N/K tails — anything not a multiple of 128 — read the
 // true last block row/col with masked tile loads. Decode shapes up to eight
 // rows use row-independent GEMV chunks, keeping each row bitwise invariant
@@ -27,7 +27,7 @@
 namespace dgpp {
 
 // act: bf16 row-major [M, act_row_stride_elems] (K-column slices allowed,
-// matching the IGemm seam's fused-buffer views); w_payload: E4M3 row-major
+// matching the IGemm interface's fused-buffer views); w_payload: E4M3 row-major
 // [N, K] contiguous; w_scales: F32 [ceil(N/128), ceil(K/128)] row-major;
 // out: bf16 row-major [M, N], or [M, out_row_stride_elems] with the product
 // in its first N columns when the stride is given (0: N) — a projection
@@ -42,7 +42,7 @@ void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
 // row-major [M, N]. bf16(out_f32[i]) == out_bf16[i] bit for bit — the two
 // launchers differ only in the epilogue store. This is the MoE down
 // projection's output (its partials feed an fp32 accumulation chain that
-// rounds to bf16 once, at the end — see models/glm_moe_layer.hpp).
+// rounds to bf16 once, at the end — see models/glm/moe_layer.hpp).
 void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            const uint8_t* w_payload, const float* w_scales,
                            float* out, int m, int n, int k,
@@ -52,10 +52,10 @@ void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
 // large-m route takes): the reference the grouped tensor-core MoE kernel is
 // pinned bitwise against (glm_moe_test) — the routed launcher above would
 // send small m to the GEMV core instead.
-// rs / cs (2026-09-09): the scale grid as log2 block sizes — 7 the
+// rs / cs: the scale grid as log2 block sizes — 7 the
 // checkpoint's 128 x 128, a TP slice's re-blocked axis 6 or 5 (plan D2);
 // every row reads its own scale row, a 32-deep stage its one column.
-// Several [n_i, k] fp8 matrices against the SAME activation rows in one
+// Several [n_i, k] fp8 matrices against the same activation rows in one
 // launch (2026-09-10, the Qwen dense stack in FP8: a GDN layer's qkv + z,
 // a QSA layer's q / k / v / indexer projections — one graph node in place
 // of two or four). rows <= 8 (chunks of four); every out_i is bitwise

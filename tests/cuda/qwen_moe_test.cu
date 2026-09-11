@@ -1,4 +1,4 @@
-// The Qwen3.8-Flash-Next MoE (Q3, 2026-09-09): the SoftmaxTopk router at
+// The Qwen3.8-Flash-Next MoE: the SoftmaxTopk router at
 // the real geometry (E=512, H=2560, K=10) against the double oracle — its
 // three device forms (tiled dots, warp dots, fused select) bitwise one
 // another, every id equal to the oracle's or certified as a near-tie on
@@ -344,7 +344,7 @@ DGPP_TEST(qwen_moe_layer_matches_the_oracle_at_decode_shape) { small_case(3, 200
 
 DGPP_TEST(qwen_moe_layer_matches_the_oracle_at_prefill_shape) { small_case(40, 300); }
 
-// ---- the TP slice grids on the tensor-core kernels (2026-09-09) -------------
+// ---- the TP slice grids on the tensor-core kernels -------------
 
 namespace {
 
@@ -506,7 +506,7 @@ void prefill_chain_on_slice_grid(int H, int I, int scale_block, int tokens, uint
 }  // namespace
 
 // The decode path — the routed slot chain plus the fused two-launch shared
-// tail (2026-09-09) — bitwise the host path at every decode row count, on
+// tail — bitwise the host path at every decode row count, on
 // the checkpoint grid and the TP=4 slice grid.
 void decode_path_case(int tokens, int H, int I, int scale_block, uint64_t seed) {
   SmallCase c = SmallCase::make(tokens, seed, H, I, scale_block);

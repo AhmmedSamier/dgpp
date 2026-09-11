@@ -2,22 +2,18 @@
 """Compose the hybrid GLM-5.3-Flash checkpoint: NVFP4 routed experts beside
 the FP8 release's bytes for everything else.
 
-WHY. The FP8 release (zai-org/GLM-5.3-Flash, mirrored as unsloth/GLM-5.3-Flash-FP8)
-is what the engine serves; its routed experts are 93 % of the bytes read per
-token. The public NVFP4 quants (dabsLabs/GLM-5.3-Flash-NVFP4 and its peers)
-quantize exactly those experts to 4 bits but carry every OTHER tensor as BF16
-copied from the BF16 repo — a tensor set that measured 88-93 % on the FP8
-release's e4m3 grid (an FP8-class history, not native precision) and would
-cost the engine a second byte per element for the shared experts, the dense
-MLPs and the attention projections. Nothing on the Hub combines NVFP4 experts
-with the FP8 release's tensors AND keeps the MTP draft layer (2026-09-08
-survey: coolbho3k/GLM-5.3-Flash-NVFP4-Optimized comes closest and drops layer
-45). Both sources sit in every node's Hub cache, so the combination is a
-byte-copy job with no arithmetic: no download, no quantization, and every
-non-expert tensor bit-identical to what runs today — a perplexity delta
-between the FP8 build and this one is attributable to the experts alone.
+The default composition keeps the FP8 checkpoint's non-expert tensors
+and MTP layer while replacing the main stack's routed experts with
+NVFP4 tensors. This reduces expert storage without expanding the other
+weight classes to BF16. Both source checkpoints must be available in the
+local Hugging Face cache.
 
-WHAT. For every tensor of the FP8 release, by name:
+Composition copies bytes without quantization or other arithmetic and
+verifies output tensors against their sources. A comparison with the FP8
+checkpoint therefore isolates the effect of the replaced tensor classes.
+See docs/nvfp4_plan.md for the checkpoint survey and quality measurements.
+
+For every tensor of the FP8 release, by name:
   * a routed expert of a main-stack MoE layer (mlp_layer_types == "sparse",
     layers 3..44 here): the release's `weight` + `weight_scale_inv` are
     replaced by the NVFP4 source's `weight_packed` (U8, e2m1 pairs, low

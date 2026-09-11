@@ -1,18 +1,18 @@
 # Tests
 
-How to run the suites and what each one proves. The rule for every
-change: a full build precedes the suite's verdict (`ctest` runs whatever
-binaries exist), so
+Run a full build before the tests so CTest uses binaries that include your
+changes:
 
 ```bash
 cmake --build build-ci -j -- -k && ctest --test-dir build-ci --output-on-failure
 ```
 
 `DGPP_TEST_FILTER=<substring>` runs a subset of a binary's cases; the
-loopback worlds each own a port in 29910–29941, so run one CUDA suite at a
-time on a node that is also serving.
+loopback tests use fixed ports in the 299xx range. Run one CUDA suite at
+a time on a node that is also serving.
 
-CTest currently runs 62 entries:
+Use `ctest --test-dir build-ci -N` to list the tests in your configured
+build. The suites cover:
 
 - host unit cases covering logging/tracing, JSON, arenas, safetensors,
   FP8, the latent cache's fp8/fp4 codecs (the e2m1 grid and its
@@ -111,17 +111,16 @@ CTest currently runs 62 entries:
 - Python checkpoint classification, exact expert-occupancy tests, and the
   route-trace traffic-model contract.
 
-`glm_tp_test` and `bus_test` run with `CUDA_DEVICE_MAX_CONNECTIONS=32`; the
-prefetcher stays enabled everywhere. The captured decode graph is
-kernels-only by contract, checked at every capture site
-(`glm_check_decode_graph`): a memset/memcpy node executes on the process-
-shared copy-engine queue, where one rank's queued dependency wait blocked
-the peer rank's node behind it while its own collective spun waiting on
-that peer — the batched-MTP loopback stall, root-caused from an nsys node
-trace and fixed on 2026-09-03 (`docs/batched_mtp_graph_stall.md`; the
-loopback gates now pass with prefetch on at 1 and 32 connections).
+`glm_tp_test` and `bus_test` run with
+`CUDA_DEVICE_MAX_CONNECTIONS=32` and prefetch enabled. Capture-time
+`check_decode_graph` rejects memcpy, memset, event-record and other
+unsupported nodes. Kernel and empty nodes are allowed, along with a
+model-declared number of host callbacks for Qwen's mapped n-gram gather.
+The copy-engine restriction prevents dependency cycles between ranks in
+one process. The [graph-stall investigation](batched_mtp_graph_stall.md)
+records the reproducer and validation at 1 and 32 connections.
 
-All CUDA suites are verified clean under `compute-sanitizer` memcheck (full
+The recorded CUDA sanitizer runs cover `compute-sanitizer` memcheck (full
 suite every milestone; racecheck and initcheck per-phase on the tests
 exercising new kernel shapes). The multi-rank loopback worlds of
 `glm_tp_test` are the exception: their budgets are liftable

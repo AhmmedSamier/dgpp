@@ -2,7 +2,7 @@
 // Qwen Sparse Attention (QSA) kernels (Q3, 2026-09-09; docs/qwen38_flash_next_plan.md
 // §1.4, D5; the reference is transformers Qwen4ExpTextAttention +
 // Qwen4ExpTextQSAIndexer over Qwen3_5Attention). The projections run
-// through the GEMM seam; these kernels are the rest:
+// through the GEMM interface; these kernels are the rest:
 //
 //   norm+RoPE   per-head (1+w) RMSNorm, then RoPE on the first rotary_dim
 //               dims with the reference's bf16 ops (cos/sin bf16 tables
@@ -55,7 +55,7 @@ void qsa_kv_append(const uint16_t* k, int64_t k_row_stride, const uint16_t* v,
                    int block_tokens, int kv_heads, int dim, uint16_t* k_cache,
                    uint16_t* v_cache, cudaStream_t stream);
 
-// Prefill compression: pools [first_pool, first_pool + n_pools) of ONE
+// Prefill compression: pools [first_pool, first_pool + n_pools) of one
 // request, pool i's kpool raw keys at chunk rows [i * kpool, +kpool) of
 // raw_k (row stride k_stride). The compressed key lands at the pool's slot
 // through the block table; its RoPE position is pool * kpool.

@@ -238,7 +238,7 @@ class SplitScanner {
     return false;
   }
 
-  // Returns the codepoint index ONE PAST the match at i (never i).
+  // Returns the codepoint index one PAST the match at i (never i).
   size_t match_at(size_t i) const {
     size_t end = 0;
     if (match_contraction(i, &end)) return end;

@@ -96,7 +96,7 @@ int run_dsa_dump_parity(const std::string& path) {
     dgpp::CublasLtGemm gemm;
     DevBuf ws(64ull << 20);
 
-    // Fund a dot budget that lets ONE prefill tile span every row: tiles
+    // Fund a dot budget that lets one prefill tile span every row: tiles
     // reuse a single dot buffer, so only the last tile's tensor-core dots
     // survive an enqueue — the near-tie audit below needs each flipped
     // row's dots bit-exact. (Pools are padded generously past the layer's
@@ -260,7 +260,7 @@ int run_dsa_dump_parity(const std::string& path) {
       // rows through the m-independent host oracle, plus the dump's
       // recorded index cache. If the recorded top-k disagrees with the
       // spec selection over these tensors by more than measured noise,
-      // the REFERENCE is broken and the audit fails loudly.
+      // the REFERENCE is broken and the audit reports an error.
       dgpp::dsa_ref::HostWeights hw;
       hw.wq_b = static_cast<const uint16_t*>(dump.tensor("wq_b").data);
       hw.wk = static_cast<const uint16_t*>(dump.tensor("wk").data);
@@ -326,7 +326,7 @@ int run_dsa_dump_parity(const std::string& path) {
         // selection re-derived from the device's own inputs (bitwise,
         // tensor-core dots included), and the swapped pair must straddle
         // the rank-select_k boundary within measured device-vs-reference
-        // noise on BOTH sides' logits.
+        // noise on both sides' logits.
         dgpp::dsa_test::NearTieAudit audit;
         dgpp::dsa_test::audit_flipped_row(
             g.select_k, gt, rt,

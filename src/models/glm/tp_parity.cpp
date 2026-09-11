@@ -213,7 +213,7 @@ struct BoundCmp {
 // Address fingerprint of one resident view — the representative pointer
 // of every site (norms, mHC, one attention matrix per kind, the MLP
 // payload/scale pair, the router and the first expert). A cache hit must
-// return the SAME addresses for every one of these; a rebuild or a bump
+// return the same addresses for every one of these; a rebuild or a bump
 // move changes them.
 std::vector<const void*> view_fingerprint(const GlmLayerResident& r) {
   std::vector<const void*> f;
@@ -300,7 +300,7 @@ GlmShardParityReport glm_shard_parity_check(
 
     int surfaces = 0;
     // Resident mode: fingerprints of each rank's first-pass views, so the
-    // post-loop proof pass can demand the SAME addresses back from cache.
+    // post-loop proof pass can demand the same addresses back from cache.
     std::vector<std::vector<std::vector<const void*>>> fingerprints(
         static_cast<size_t>(world));
     for (int l : *layers) {
@@ -351,7 +351,7 @@ GlmShardParityReport glm_shard_parity_check(
                 std::to_string(expect));
 
     // ---- resident cache-hit proof (the residency contract) -----------
-    // Every requested layer re-served from cache: SAME addresses, ZERO
+    // Every requested layer re-served from cache: same addresses, ZERO
     // storage reads. A rebuild, a bump move, or a stray re-read fails
     // here — this is the "storage is never touched again" clause, as an
     // assertion instead of a promise.

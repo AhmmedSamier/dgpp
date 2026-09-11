@@ -217,7 +217,7 @@ __global__ void spec_next_tokens_batched_kernel(
   }
 }
 
-// The fixed batch's chain rows (2026-09-10): block q stages request q's
+// The fixed batch's chain rows: block q stages request q's
 // row and copies its hidden into the slot's window (the window form of
 // spec_chain_row_window_kernel, one block per request).
 __global__ void spec_chain_rows_batched_kernel(

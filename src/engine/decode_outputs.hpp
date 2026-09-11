@@ -1,12 +1,7 @@
 #pragma once
-// The engine's model contract (Q1, 2026-09-09, docs/qwen38_flash_next_plan.md
-// D7): what the graph and eager adapters, the prefix arena and the
-// speculators need from a model, so a second architecture plugs into the
-// same engine. The adapters are templates over the model type — the
-// compiler is the contract's enforcer — and this header holds the
-// model-free part: the row bounds every engine shape is built from, the
-// output rows a pick or a sampler consumes, and the closure types the
-// engines and the bus helpers share.
+// Types and model interface used by the eager and graph engines, prefix
+// arena and speculators. The adapters are templates over a model type;
+// this header defines shared row limits, output buffers and pick callbacks.
 //
 // A model type M serves the engines when it provides (the GLM model is the
 // reference; every name below is used by engine/*.hpp):
@@ -54,12 +49,10 @@ constexpr int kSpecRows = 4;
 // One forward's rows as the engines read them.
 struct DecodeOutputs {
   std::vector<uint16_t> final_hidden_bits;  // bf16 [tokens, hidden]
-  // fp32 [tokens, lm_vocab_count] — the rank's logits COLUMNS of the
-  // full [tokens, vocab] matrix (Full head: the whole thing). The head
-  // GEMV's fp32 accumulators, unrounded (2026-09-03): the bf16 rounding
-  // the reference applies here was the dominant noise on every pick and
-  // every log-prob comparison — half a bf16 ulp at |logit| ~16 is 0.06
-  // nat — and it bought nothing; the sampler consumes floats anyway.
+  // fp32 [tokens, lm_vocab_count]: this rank's vocabulary columns, or
+  // the full vocabulary for an unsharded head. Keep the head's fp32
+  // accumulators unrounded so sampling and log-probability comparisons
+  // do not incur an extra BF16 rounding.
   std::vector<float> logits;
   int lm_vocab_begin = 0;  // first vocab column of logits
   int lm_vocab_count = 0;

@@ -1,4 +1,4 @@
-// The gated residual (Q3, 2026-09-09): every device stage against its
+// The gated residual: every device stage against its
 // exact host math on the device's own inputs (the elementwise kernels
 // bitwise; the GEMV within an ulp of the sequential chain), and the whole
 // site — mix then combine — within two bf16 ulps of the reference.
@@ -171,11 +171,11 @@ DGPP_TEST(qwen_gr_stages_match_the_reference_on_the_device_inputs) {
     dgpp::qwen_ref::gemv_bf16(t_act.data(), s.w_up.data(), want.data(), s.rows, W, s.rank);
     require_bf16("up gemv", compare_bf16(logits, want, 1), 1e-3, 0.02);
   }
-  // 4b. the fused decode GEMVs (2026-09-09): the norm staged into the down
+  // 4b. the fused decode GEMVs: the norm staged into the down
   // GEMV and the activation into the up GEMV — bitwise the chain above.
   {
     DevBuf drn2(s.r.size() * 2), dt2(static_cast<size_t>(s.rows) * s.rank * 2), dlog2(s.r.size() * 2);
-    // The inject dots folded into the same launch (2026-09-10) against the
+    // The inject dots folded into the same launch against the
     // standalone dots kernel on the same Rn: bitwise, or the gate that
     // decides every combine has moved.
     DevBuf dg_fold(static_cast<size_t>(s.rows) * s.hc * 4), dg_ref(static_cast<size_t>(s.rows) * s.hc * 4);
@@ -222,7 +222,7 @@ DGPP_TEST(qwen_gr_stages_match_the_reference_on_the_device_inputs) {
     require_bf16("combine", compare_bf16(r2, want, 1), 1e-3, 0.01);
   }
   // 6b. the batched rows' down GEMV with the inject rows appended
-  // (2026-09-10): t bitwise the chain's GEMV, the gates bitwise the dots
+  //: t bitwise the chain's GEMV, the gates bitwise the dots
   // kernel's, at the fixture's rows.
   {
     DevBuf dt3(static_cast<size_t>(s.rows) * s.rank * 2), dg3(static_cast<size_t>(s.rows) * s.hc * 4);

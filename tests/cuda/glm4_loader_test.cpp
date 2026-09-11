@@ -1,4 +1,4 @@
-// The GLM-4.7 resident loader (2026-09-09) on the synthetic fixture: every
+// The GLM-4.7 resident loader on the synthetic fixture: every
 // class lands byte-exact at worlds 1, 2 and 4 as the slice formulas of
 // docs/glm47_plan.md §2 say (attention heads and biases, the kv pairing,
 // the NVFP4 row/column slices in the modelopt layout with the reciprocal

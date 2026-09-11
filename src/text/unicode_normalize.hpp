@@ -1,5 +1,5 @@
 #pragma once
-// Unicode NFC normalization (Q5, 2026-09-09) — the Qwen3.8 tokenizer.json's
+// Unicode NFC normalization — the Qwen3.8 tokenizer.json's
 // normalizer, implemented from the committed tables (unicode_tables.hpp:
 // canonical decompositions, combining classes, primary composites, the
 // quick-check set) per UAX #15: full canonical decomposition (Hangul

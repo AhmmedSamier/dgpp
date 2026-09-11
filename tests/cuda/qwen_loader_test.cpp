@@ -1,4 +1,4 @@
-// The Qwen3.8-Flash-Next resident loader (Q2, 2026-09-09) on the synthetic
+// The Qwen3.8-Flash-Next resident loader on the synthetic
 // fixture: every class lands byte-exact at worlds 1, 2 and 4 as the slice
 // formulas of docs/qwen38_flash_next_plan.md §2.1 say (GDN segments, QSA
 // heads and the kv pairing, the experts' inter slices on the re-blocked
@@ -285,7 +285,7 @@ DGPP_TEST(qwen_loader_globals_and_ngram_table_slices) {
   }
 }
 
-// The mmap'ed table (2026-09-10): the stream maps the shard(s) instead of
+// The mmap'ed table: the stream maps the shard(s) instead of
 // copying the rows; every row read through the mapping is the shard's,
 // the gather lays a rank's heads out as the device gather would, the
 // plan's table bytes are zero, and the mode is off unless asked for.

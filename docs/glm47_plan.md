@@ -1,8 +1,11 @@
 # GLM-4.7 (nvidia/GLM-4.7-NVFP4) on dgpp — architecture facts and implementation plan (2026-09-09)
 
-Status: being built. The checkpoint `nvidia/GLM-4.7-NVFP4` (snapshot
-`47fa7dc8`) is in the HF cache on this node: 44 shards + `mtp.safetensors`,
-215 GB on disk. Every fact below comes from its `config.json`,
+Status: implemented and measured on the four-node fabric, including
+graph decode, prefix caching and MTP. Section 6 records validation and
+performance; earlier sections describe the architecture and implementation
+decisions. The checkpoint `nvidia/GLM-4.7-NVFP4` (snapshot `47fa7dc8`)
+contains 44 shards plus `mtp.safetensors`, totaling 215 GB on disk.
+The architecture study uses its `config.json`,
 `hf_quant_config.json`, the safetensors headers, and the transformers
 `modeling_glm4_moe.py` reference (4.57) plus vLLM's `glm4_moe_mtp.py` for the
 draft layer.
@@ -32,7 +35,7 @@ Relative to what the engine serves, the reuse is large: the router
 (decode slot GEMV + prefill ldmatrix tile), the two-rounding GLM norm,
 the MTP input kernel (`glm_mtp_input_bf16`), the bf16 GEMV for the
 attention projections and the head, the engine core (graph capture,
-speculative commit, prefix arena, memory plan, family seam) and the
+speculative commit, prefix arena, memory plan, family interface) and the
 GLM tokenizer/template/tool machinery. New: paged GQA attention over
 128-wide heads (decode + prefill), half-split partial RoPE with the
 per-head norm and the biases, a KV pool without index caches, an NVFP4
@@ -218,9 +221,9 @@ argument), no vision.
 | `tools/glm4_reference_dump.py` | the pure-python full-model reference on the synthetic fixture |
 | `tests/unit/glm4_{config,binding}_test.cpp`, `tests/cuda/glm4_*` | the gates |
 | `apps/glm4_load_check.cpp`, `apps/glm4_forward_check.cpp`, `dgpp_serve.cpp` (`Glm4Family`) | the apps |
-| `deploy/cluster_glm47.json`, `scripts/fabric_glm4_*.sh` | the fabric rituals |
+| `deploy/cluster_glm47.json`, `scripts/fabric_glm4_*.sh` | the fabric procedures |
 
-## 5. Work plan and gates
+## 5. Implementation stages and validation
 
 - **G1 config + binding**: parse the real config.json; the table
   reproduces the real checkpoint's tensor set exactly (names, dtypes,
@@ -250,7 +253,7 @@ Order: G1 → G2 → G3 → G4 → G5; nothing merges without its gate.
 ## 6. Status (2026-09-10)
 
 Built and gated on the fixture and the real checkpoint; the fabric run
-and the regression rituals follow in the record below.
+and the regression procedures follow in the record below.
 
 | gate | evidence |
 |---|---|

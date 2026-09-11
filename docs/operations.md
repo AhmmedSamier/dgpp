@@ -1,105 +1,83 @@
-# Operating the serving world
+# Operating DGPP
 
-The four-node GLM service as it is run today: one `dgpp-serve` process per
-node, rank 0 the only HTTP ingress, the peers following rank 0's admission
-journal. This page collects what an operator needs — boot, stop, status,
-the knobs, what happens when a rank dies, and how to check that the world
-is healthy — with pointers to the design where the reasons live
-(`DESIGN.md` §11 for the fabric protocol, `PLAN.md` M9 for the hardening
-record).
+DGPP runs one `dgpp-serve` process per node. Rank 0 serves HTTP and
+coordinates requests through the admission journal; peers follow the same
+scheduler operations. The examples below use GLM-5.3 on four Sparks.
+Other model templates use the same launcher with their own memory and
+engine settings. See [README](../README.md) for the configuration schema.
 
-## Boot, stop, status
+## Configure and start
 
-The world is described by one file, `deploy/cluster.json` — the site's
-copy of `deploy/cluster.example.json`, not tracked (every key, its default
-and what it does: README's "Configuration" table) — and driven by one
-launcher:
+Copy a template from `deploy/` to a site-local JSON file, set the node
+addresses in rank order and fill in `ssh_user` if needed. Site files
+are git-ignored. Example templates use documentation addresses and cannot
+be deployed unchanged.
 
+| template | deployment |
+|---|---|
+| `cluster.example.json` | GLM-5.3-Flash-FP8, four nodes |
+| `cluster_qwen{,_t1,_w2,_w2_t1}.example.json` | Qwen FP8 with MTP or plain decode, four or two nodes |
+| `cluster_qwen_spark1{,_t1}.example.json` | Qwen NVFP4 on one Spark, with a mapped n-gram table |
+| `cluster_glm47{,_t1,_d2}.example.json` | GLM-4.7 NVFP4, MTP depth 1, plain decode or depth 2 |
+
+`kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
+caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
+control table residency and optional FP8 encoding of dense projections;
+see [the single-node guide](qwen38_single_spark.md).
+
+```bash
+scripts/dgpp-cluster up       # stage configuration, start ranks, wait for HTTP readiness
+scripts/dgpp-cluster status   # inspect the configured processes
+scripts/dgpp-cluster down     # stop, collect logs and compare operation streams
 ```
-scripts/dgpp-cluster up       # stage the binary and the config to the peers, boot rank 0, then the peers; waits for READY
-scripts/dgpp-cluster down     # SIGINT rank 0 (drain-on-stop), wait for the peers, fetch every rank's op stream and log, md5 the streams
-scripts/dgpp-cluster status   # rank 0 alive? each peer's process count
-```
 
-Options: `--config FILE` (default `deploy/cluster.json`, or
-`$DGPP_CLUSTER_CONFIG`), `--bin PATH` (default `build-ci/dgpp-serve`),
-`--log-dir DIR` (overrides `paths.log_dir`), and `--knobs "FLAGS"`, which
-appends flags to every rank's command line — flags override the file,
-which is how the evidence scripts run their sweeps. `scripts/serve_run.sh
-up|down|status` remains as a shim: `DGPP_SERVE_KNOBS` becomes `--knobs`
-and `DGPP_SERVE_LOG` becomes `--log-dir`.
+The default config is `deploy/cluster.json`, or
+`DGPP_CLUSTER_CONFIG` when set. Use `--config FILE` to select another
+deployment. `--bin PATH` selects a development binary (default
+`build-ci/dgpp-serve`), `--log-dir DIR` overrides the log directory,
+and `--knobs "FLAGS"` appends server flags after the file settings.
+The compatibility wrapper `scripts/serve_run.sh` maps
+`DGPP_SERVE_KNOBS` and `DGPP_SERVE_LOG` to those options.
 
-A site that serves more than one checkpoint keeps one config per
-checkpoint and names it on the command line — the model is never taken
-from the environment. `deploy/cluster.nvfp4.json` (2026-09-08) is
-`deploy/cluster.json` with `model` set to the composed
-`dgpp/GLM-5.3-Flash-NVFP4-FP8` (`docs/nvfp4_plan.md`), `kv_capacity`
-raised to 786,432 and `prefix_cache_gib` to 8 — the 31 GiB per rank the
-NVFP4 experts free, spent on context and cache (`--memory-plan` fits with
-12 GiB to spare) — and every launcher and evidence script takes it:
-`scripts/dgpp-cluster up --config deploy/cluster.nvfp4.json`,
-`scripts/fabric_mtp_classes.sh --config deploy/cluster.nvfp4.json ...`,
-`scripts/fabric_prefill_repeat.sh --config deploy/cluster.nvfp4.json ...`.
-EVERY cluster config is site-local — it names that site's node
-addresses and ssh login, so `deploy/cluster.json`, `deploy/cluster.*.json`
-and `deploy/cluster_*.json` are all git-ignored. What the repository
-carries is one `*.example.json` template per shape, with the node list on
-the documentation addresses (192.0.2.x) and an empty `ssh_user`: copy the
-one you want to the same name without `.example` and fill in those two
-keys. The templates are `deploy/cluster.example.json` (GLM-5.3-Flash),
-`cluster_qwen{,_t1,_w2,_w2_t1}.example.json` (Qwen3.8-Flash-Next: MTP,
-plain T=1, and the pair for a world of two) and
-`cluster_glm47{,_t1,_d2}.example.json` (GLM-4.7 NVFP4: the MTP recipe,
-plain T=1, and MTP depth 2). `kv_dtype` applies to the GLM-5.3-Flash
-latent cache only — the paged K/V pools of the other two stay bf16.
-The serving rituals are `scripts/fabric_qwen_serve.sh` and
-`scripts/fabric_glm4_serve.sh CONFIG OUT_DIR [--compare REF.json] [--eval]`.
+Rank 0 reads the shared engine settings, applies flag overrides and sends
+the result to peers before model construction. Peers use their files for
+bootstrap addresses and local paths; they log differences from the
+settings received from rank 0. Every rank then checks the effective
+configuration digest. The journal's settings record also rejects mixed
+binary versions.
 
-Every rank starts as `dgpp-serve --config <file> --rank R`: rank 0 takes
-the model, the world (the node list's length), the ports and every engine
-knob from the file; a peer takes its bootstrap (rank 0's address, the
-journal port) and local paths from the file and everything else from
-rank 0's settings record. `up` copies `dgpp-serve` and the
-config to each peer's `paths.stage_dir` (the peers' op streams from an
-earlier run are removed first so they can never be mistaken for this
-run's evidence), boots rank 0 with its working directory in
-`paths.log_dir` (`serve_r0.log`, `r0.pid`, and its op stream
-`serve_rank0.ops` at exit), waits for its rendezvous listener, spawns the
-peers in parallel by ssh, and waits for rank 0's `serve: listening` line.
-Readiness is that line — with the resident image cache warm it takes
-15–25 s; a first boot that builds the image from the checkpoint takes
-~4.5 minutes.
+For development runs, `up` stages the binary and config to peers. For an
+installed release, it stages the config and runs each node's installed
+binary. It starts rank 0, waits for its rendezvous listener, starts peers
+through SSH and waits for `serve: listening`. That log line indicates
+HTTP readiness. Warm GLM-FP8 resident images took 15–25 s to reach it in
+the recorded deployment; the first checkpoint load took about 4.5 minutes.
 
-`down` sends rank 0 SIGINT. Rank 0 drains: the door closes (new requests
-get 503 `server_shutdown`), the in-flight requests are cancelled through
-the journal at the next tick and their streams end with the shutdown error
-event, then the stop record releases the peers. `down` waits up to 240 s
-for rank 0 (a stop that lands mid-prefill is honored at the pass
-boundary), then for the peers, then fetches `serve_rank{1,2,3}.ops` and
-`serve_r{1,2,3}.log` from the peers into the log dir and prints the op
-streams' md5s: **the four hashes must be identical** (the §11 op-stream
-ritual; the launcher says so, or says DIFFER).
+Use a separate config for each checkpoint. For example, a site-local
+`deploy/cluster.nvfp4.json` can select the composed
+`dgpp/GLM-5.3-Flash-NVFP4-FP8` checkpoint. Size its context and prefix
+arena with `--memory-plan`; the smaller weight footprint does not imply
+one fixed cache capacity for every deployment.
 
-**Every line is timestamped.** Every line a rank writes to its log
-carries the time in UTC to the millisecond (`2026-09-06 06:12:55.485 INFO
-…`), including the step-timing report and the MoE chain dump instruments
-and the line an uncaught exception leaves before the process aborts; the
-launcher's own lines carry the same stamp so the two read side by side.
-The only unstamped lines are the bus kernel's device-side stall
-diagnostics (`BKFIN …`), which come off the GPU's printf.
+## Stop and inspect
 
-**The head sends the settings.** Rank 0 opens the journal before it
-builds anything, accepts the full world, and pushes a settings record —
-the model, the world size, the fabric port and every engine knob that
-shapes the op stream. A peer's own flags or file supply only the
-bootstrap (rank 0's address, the journal port, its rank) and its local
-paths; everything else it takes from that record, and it logs a WARN
-naming both when its own values differed. So a knob given to one rank by
-hand cannot make a different world: the peer runs what the head runs.
-Each rank still logs the configuration it actually runs (`config: model=…
-world=… … (digest …)`), rank 0 puts the digest on the warm record, and a
-peer whose digest differs exits with status 1 — by construction this no
-longer fires; it stays as the assertion that the push worked.
+`down` sends SIGINT to rank 0. New requests receive 503
+`server_shutdown`; queued and active requests are cancelled at the
+next scheduler boundary. Streams receive a shutdown error, then the stop
+record releases peers. A signal during prefill waits for that pass to
+finish. The launcher waits up to 240 s for rank 0 before handling peers
+and collecting logs.
+
+Logs and operation streams are collected under `paths.log_dir`, using
+names such as `serve_r0.log` and `serve_rank0.ops`. The launcher
+prints one MD5 per rank's operation stream; all ranks must match.
+Old peer operation streams are removed before a new development run so
+they cannot be mistaken for that run's results.
+
+Host log lines include UTC timestamps to the millisecond. Device-side bus
+stall diagnostics (`BKFIN`) use GPU printf and have no timestamp.
+Correlate rank logs when investigating a failure, and retain the version
+and effective `config:` lines with the run artifacts.
 
 ## Install, upgrade, roll back
 
@@ -137,9 +115,10 @@ exits before its first tick rather than form a mixed world.
 
 ### Memory on a serving node
 
-A resident rank owns its box. The model is ~82 GiB of the 121 GB, and the
-serving apps (`dgpp-serve`, `glm_gen_check`) configure themselves for that
-without any privileged setup on the node:
+Reserve enough node memory for weights, model state and runtime buffers.
+The GLM-5.3-FP8 main stack alone uses about 82 GiB per rank at TP=4;
+other checkpoints have different footprints. The serving applications
+check their allocations before loading:
 
 - before anything is allocated, every rank computes its **memory plan** —
   the resident weights, the KV cache pool, the draft block's per-position
@@ -150,9 +129,7 @@ without any privileged setup on the node:
   node's free memory. The refusal names the largest items and the largest
   `kv_capacity` the node would hold as configured. `dgpp-serve --config
   deploy/cluster.json --rank R --memory-plan` runs the check alone and
-  exits 0 or 1. This is what a 262k-token context needed (2026-09-06: the
-  old build sized every activation to the whole context and drove all
-  four nodes into their memory watermark; a reboot was the only way out);
+  exits 0 or 1;
 - the loader's own check that the resident footprint (+ 8 GiB headroom)
   fits the device's free memory remains as the second line and fails
   immediately with a clear message — never three minutes into a load;
@@ -167,15 +144,15 @@ without any privileged setup on the node:
   1000 steps). A finite `RLIMIT_MEMLOCK` is logged, not warned about;
   `DGPP_MLOCK=off` skips the attempt.
 
-**What the context costs.** With the per-forward activations sized to the
+**GLM-5.3-FP8 context memory.** With per-forward activations sized to the
 prefill chunk (2,048 rows) rather than the context, the memory that grows
 with `kv_capacity` is the KV cache pool (12 layers including the draft
 block; 12.4 KiB per token in bf16, 6.2 KiB in fp8, 3.5 KiB in fp4, index
 cache included) and the draft block's per-position hidden cache (8 KiB per
 token per request slot: 32 KiB per token at `max_concurrency` 4), about
 44 KiB per token all told at the production shape in bf16. On a 121 GB
-node with the 81 GiB resident model that is roughly 490k tokens of
-context; the plan line at boot says exactly.
+node, available context also depends on draft weights, request slots,
+cache format and arena size. Use the startup plan for the configured limit.
 
 **The draft depth** (`engine.mtp_depth`, `--mtp-depth`, 1–3, with `mtp`)
 is the number of draft tokens verified per decode step. Depth 1 is the
@@ -246,8 +223,7 @@ O_DIRECT reads at the drive's line rate — 15-25 s to a ready model against
 (`<key>.digest`). Knobs:
 
 The first boot after a change that invalidates the images (a loader
-format version bump — `GlmResidentImage::kFormatVersion`, 2 since
-2026-09-08 — or a new checkpoint) rebuilds every rank's image from the
+format version bump or a new checkpoint) rebuilds every rank's image from the
 checkpoint, and the ranks finish at different times (rank 0 in ~100 s,
 the peers in ~155 s on the hybrid). `dgpp-serve`'s first collective has a
 ~57 s deadline, so that boot can fail with `boundary reduce ... collective
@@ -323,18 +299,12 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   Decode comes first. `tok/s` is what the interval delivered (idle time
   included); `ms/tok` is the pace while decoding (step time over the
   tokens generated); `ms/step` is the decode pass's time as the engine
-  saw it — ~41 ms for one request under 2K tokens of context, 42–43 ms
-  from 8K to 32K after the 2026-09-06 work (the select kernel's rewrite:
-  it was 52–56 at 8K–32K; the tensor-core attention; the pipelined
-  replay, which also makes this the verdict-to-verdict interval); under
-  the batch family (2026-09-07) 60 ms for the 4-row batch at two live
-  requests, 90 ms for the 6-row at three and 107 ms for the 8-row at four
-  — against 83 and ~124 ms for two and three scalar replays in sequence,
-  which is what `graph_batch_min_live` above two would give back; the
-  `mtp` group is MTP's yield — tokens per request-step (1.0 to 1 + depth)
-  — and the measured acceptance of each draft position over the interval
-  (`accept p1 74 % p2 61 %`: the share of steps in which the first draft
-  stood, and in which the second stood after it; at depth 1 only `p1`).
+  saw it. Under pipelined replay this is the interval between verdicts.
+  The `mtp` group reports tokens per request-step (1 to 1 + depth) and
+  acceptance by draft position. For example, `accept p1 74 % p2 61 %`
+  reports first-draft acceptance and second-draft acceptance after the
+  first was accepted. Depth 1 reports only `p1`.
+
   Prefill's tokens are the ones computed (an attach skips the rest,
   `cached`), and the two `% of wall` shares say where the engine thread's
   time went — together they approach 100 % when it is saturated. A peer's
@@ -386,7 +356,7 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   with the tick number (`journal: op-stream divergence at tick N`), and
   rank 0 then fails the service as for any dead peer. A quietly diverged
   rank therefore cannot serve for more than one tick.
-- **At shutdown:** `down`'s four md5s (the ritual). They are the same
+- **At shutdown:** `down`'s four md5s (the procedure). They are the same
   evidence, post-mortem.
 - **Per request:** `GET /v1/metrics` — requests, sheds, cancellations,
   failures, the admission policy, the prefix cache (entries, hits, tokens
@@ -401,7 +371,7 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   swap and throttle sums; the soak's own summary gives TTFT and decode-pace
   percentiles per 10-minute window, the status counts and the prefix
   cache's line.
-- **The other evidence rituals:** `scripts/fabric_prefill_repeat.sh OUT
+- **The other evidence procedures:** `scripts/fabric_prefill_repeat.sh OUT
   LEN...` (the steady-state prefill at each length with the four-way ids
   md5), `scripts/fabric_mtp_classes.sh OUT CLASS...` (MTP acceptance per
   prompt class), `scripts/serve_prefix_curve_sweep.sh OUT "GIB..." "C..."`

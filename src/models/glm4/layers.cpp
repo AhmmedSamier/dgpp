@@ -113,7 +113,7 @@ void Glm4AttentionLayer::enqueue(const uint16_t* x, int tokens, const Glm4AttnRo
   const int H = hidden_;
   const int Q = lh_ * dim_, KV = lkv_ * dim_;
   // The three projections, fp32 out (the bias joins before the one
-  // rounding; decode rows take the bf16 GEMV inside the seam).
+  // rounding; decode rows take the bf16 GEMV inside the interface).
   g_.gemm->matmul(x, w_.q_proj, qd_, tokens, Q, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), g_.ws,
                   g_.ws_bytes, stream);
   g_.gemm->matmul(x, w_.k_proj, kd_, tokens, KV, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), g_.ws,

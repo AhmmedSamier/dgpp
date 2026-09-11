@@ -144,7 +144,7 @@ int run(int argc, char** argv) {
   }
 
   // The residency contract's proof pass: every layer re-served from cache
-  // — the SAME view addresses, ZERO storage reads (source_bytes_read is
+  // — the same view addresses, ZERO storage reads (source_bytes_read is
   // frozen), wall time collapsed. Storage touched here means the contract
   // is broken and this says so instead of pretending.
   const uint64_t bytes_before = stream.source_bytes_read();

@@ -1,13 +1,12 @@
-// M6 Stage 4: the generation-service gate. A deterministic FakeEngine
-// (the scheduler seam) and a FakeFrontend (the tokenizer/template seam)
-// stand under the REAL HTTP server + service — the whole OpenAI
-// surface runs host-only, no GPU, no model cache:
+// Generation-service tests using the real HTTP server with a deterministic
+// FakeEngine and FakeFrontend. These run without a GPU or model cache and
+// cover response formats, request validation and lifecycle behavior:
 //   * the exact chat.completion / chat.completion.chunk shapes;
 //   * stream lifecycle: role chunk, ordered content deltas whose
 //     concatenation equals the full text, finish_reason, usage,
 //     [DONE];
 //   * EOS → "stop" vs the steps cap → "length";
-//   * the loud-refusal ladder (sampling, tools, model) with the OpenAI
+//   * the unsupported-field checks (sampling, tools, model) with the OpenAI
 //     error object naming the param;
 //   * overload: 503 at the admission door;
 //   * client disconnect mid-stream → scheduler cancellation (metrics);
@@ -58,7 +57,7 @@ constexpr int32_t kFakeEos = 999;  // the fake's end-of-sequence id
 // The deterministic fake model: token i of a request whose rendered
 // prompt is P bytes long is ((len*31 + i*7) % 250) + 1 — printable-ish,
 // never 0, never kFakeEos. A prompt with len % 4 == 3 answers EOS as
-// its SECOND token (an early-stop scenario the gate can target).
+// its second token (an early-stop scenario the gate can target).
 // Printable ASCII without the two JSON-escaped characters, so a fake's text
 // appears verbatim in a response (the service renders every text as UTF-8
 // since the 2026-09-05 soak, replacing what is not — the earlier formula's
@@ -89,8 +88,8 @@ class FakeEngine : public SchedulerEngine {
       : slots_(slots), total_blocks_(total_blocks),
         block_tokens_(block_tokens), can_sample_(can_sample) {}
 
-  // The sampling seam: a sampling-capable fake records the spec each slot
-  // was armed with (the request seam's evidence); a greedy fake inherits
+  // The sampling interface: a sampling-capable fake records the spec each slot
+  // was armed with (the request interface's evidence); a greedy fake inherits
   // the base refusal.
   struct Armed {
     dgpp::sample::Params params;
@@ -126,7 +125,7 @@ class FakeEngine : public SchedulerEngine {
     return out;
   }
   // Constrained decoding (M6 6g): the sampling-capable fake can mask and
-  // records every active grammar it is armed with (the request seam's
+  // records every active grammar it is armed with (the request interface's
   // evidence); it does not enforce it — the scripts are the outputs.
   bool supports_constraints() const override { return can_sample_; }
   void configure_constraint(int req,
@@ -143,7 +142,7 @@ class FakeEngine : public SchedulerEngine {
     std::lock_guard<std::mutex> lock(armed_mu_);
     return grammars_;
   }
-  // The logit bias (2026-09-06): the sampling-capable fake can bias and
+  // The logit bias: the sampling-capable fake can bias and
   // records every non-empty table it is armed with (slot, entries).
   bool supports_logit_bias() const override { return can_sample_; }
   void configure_logit_bias(int req,
@@ -161,7 +160,7 @@ class FakeEngine : public SchedulerEngine {
     return biases_;
   }
 
-  // The prefix cache seam (M7): an arena of `slots` snapshot slots at pool
+  // The prefix cache interface (M7): an arena of `slots` snapshot slots at pool
   // alignment `align`; the fake records the ops ("X:slot:pos" an attach,
   // "N:slot:pos" a prefill-cut snapshot, "RS:slot:pos" a rolling one,
   // "F:arena" a release) and pins the blocks an entry holds.
@@ -1529,7 +1528,7 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
   // A strict function whose schema leaves the enforceable subset is a 400
   // naming the keyword path (a number's bound here — an integer's is
   // enforced since 2026-09-07); the same schema without strict is served
-  // with that value typed and the bound unenforced (2026-09-06), and a
+  // with that value typed and the bound unenforced, and a
   // keyword that changes the value's shape leaves it free.
   const std::string strict_tools =
       ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"strict\":STRICT,"
@@ -1768,7 +1767,7 @@ DGPP_TEST(serve_shutdown_drainsInFlightWorkWithTheShutdownError) {
 DGPP_TEST(serve_engineFailure_answersLiveStreamsAfterTheirCommittedTokensOnly) {
   // The v1 failure semantics (M8's exit criterion "injected rank failure
   // leaves committed state unchanged", DESIGN §9 item 6): an engine op
-  // throws mid-generation. The stream gets EXACTLY the tokens the scheduler
+  // throws mid-generation. The stream gets exactly the tokens the scheduler
   // committed before the failure (the fake fails on its n-th step, so the
   // count is known: the prefill's token plus n-1 steps), then the
   // engine_failure error event and [DONE], no finish chunk; a later request
@@ -2145,7 +2144,7 @@ DGPP_TEST(serve_garbageAfterAPendingOneShot_waitsThenClosesCleanly) {
   // connection at the pass's sweep without telling the service, whose
   // pending record still held the writer — a use-after-free when the
   // engine's answer arrived. Two fixes: every close of a tagged connection
-  // notifies the handler (defense in depth), and a connection carries ONE
+  // notifies the handler (defense in depth), and a connection carries one
   // request at a time — the garbage waits in the buffer behind the pending
   // one-shot, is parsed after its answer, and the 400 + close then dangles
   // nothing. Nothing is cancelled; the service serves on.
@@ -2217,7 +2216,7 @@ DGPP_TEST(serve_pipelinedRequests_areAnsweredOneAtATimeInOrder) {
 }
 
 DGPP_TEST(serve_utf8_aCharacterSplitAcrossTokensIsHeldUntilComplete) {
-  // The soak's find (2026-09-05): a byte-level BPE token can end inside a
+  // The soak's find: a byte-level BPE token can end inside a
   // multi-byte character, and the delta carried its bytes as they came —
   // a JSON text that is not UTF-8, on which a strict client (Python's
   // json.loads over the payload bytes) raised; the soak's chat workers died
@@ -2376,9 +2375,9 @@ DGPP_TEST(serve_throughputLog_oneLinePerIntervalWithTheDeltas_thenQuiet) {
   sc.requests_shed = 1;
   require(log.observe(m, &sc, at(5)).empty(), "no line inside the interval");
 
-  // At the interval: ONE line with the deltas as rates over the elapsed time.
+  // At the interval: one line with the deltas as rates over the elapsed time.
   const std::string line = log.observe(m, &sc, at(10));
-  // Decode leads (2026-09-06): the interval's tok/s, the pace while
+  // Decode leads: the interval's tok/s, the pace while
   // decoding (8000 ms over 700 tokens), the step, the counts and share.
   require(line.find("stats: rank 0 | 10.0 s | decode 70.0 tok/s, 11.4 ms/tok, "
                     "40.0 ms/step (200 steps / 700 tok, 80 % of wall)") != npos,
@@ -2544,8 +2543,8 @@ DGPP_TEST(serve_n_answersEveryChoiceByIndexAndSumsTheUsage) {
               one.find("\"prompt_tokens\":4,\"completion_tokens\":6,"
                        "\"total_tokens\":10") != std::string::npos,
           "n=2 one-shot: " + one);
-  // Streamed: deltas for both indices, one finish per choice, ONE usage
-  // chunk with the sum and ONE [DONE].
+  // Streamed: deltas for both indices, one finish per choice, one usage
+  // chunk with the sum and one [DONE].
   {
     Client c(rig.port());
     const std::string body =

@@ -1,7 +1,7 @@
 #!/bin/bash
 # The prefill re-measurement (PLAN's M6 tail: "the prefill behind the time
 # to first token — first re-measure it"): glm_gen_check across the four
-# nodes with the SAME natural-text prompt cut to several lengths, two decode
+# nodes with the same natural-text prompt cut to several lengths, two decode
 # steps each, reading rank 0's "prefill: N tokens in X ms" line. Prompts are
 # token ids (--prompt), so the lengths are exact and the arguments survive
 # the ssh hop; the ids come from IDS_FILE (one line, comma-separated — a

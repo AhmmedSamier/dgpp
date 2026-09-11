@@ -1,5 +1,5 @@
 #!/bin/bash
-# The GLM-5.3-Flash no-regression ritual (2026-09-09, the Qwen sessions):
+# The GLM-5.3-Flash no-regression procedure (2026-09-09, the Qwen sessions):
 # the same three readings as build-ci/fabric-runs/glm_baseline_2026-09-09
 # — MTP on the chat class (fabric_mtp_classes.sh), T=1 on the chat prompt
 # with fabric_step_times.py, steady-state prefill at 512 / 2048 / 8192

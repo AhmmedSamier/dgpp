@@ -1,27 +1,18 @@
 #pragma once
-// The Qwen3.8-Flash-Next MoE (Q3, 2026-09-09; docs/qwen38_flash_next_plan.md
-// §1.6): 512 FP8 experts, top-10 by softmax with the picked probabilities
-// renormalized, plus ONE BF16 shared expert scaled by a sigmoid gate of the
-// input. Composition, not a new expert path: the routed experts run the
-// shared MoE layer (GlmMoeLayer — its router in SoftmaxTopk mode, no shared
-// segment, no swiglu clamps) and hand back the fp32 chain unrounded; this
-// layer runs the BF16 shared expert through the GEMM seam, weighs it by
-// the gate and continues the same fmaf chain, which rounds to bf16 exactly
-// once — the GLM chain's numerics (models/glm/moe_layer.hpp), the shared
-// expert's weight sigma(x . g) instead of 1.
+// Qwen3.8-Flash-Next MoE: softmax top-k routed experts with optional
+// renormalization, plus a shared expert weighted by sigmoid(x . g).
+// The checkpoint uses 512 routed experts and top-10 selection.
 //
-// Host-orchestrated (the diagnostic forward's path; one stream sync in the
-// routed layer). The production decode/prefill variants — the slot kernels
-// without a shared slot, the BF16 shared expert fused beside them — are
-// the engine milestone's (Q6/Q7); GlmMoeLayer refuses those paths without
-// its shared expert until then.
+// GlmMoeLayer computes the routed FP8 or NVFP4 expert contributions with
+// SoftmaxTopk routing and no SwiGLU clamps. This layer adds the shared
+// expert, stored as BF16 or optional block FP8, to the unrounded FP32 fmaf
+// chain and rounds to BF16 once. Diagnostic, device-slot decode and grouped
+// prefill paths preserve that accumulation contract.
 //
-// TP (plan D1/D2): every rank holds every expert sliced on the intermediate
-// dim (I/W rows of gate/up, columns of down, the scale grid re-blocked at
-// gcd(128, I/W)), the shared expert sliced the same way (S/W), the router
-// and the shared gate replicated; the layer's output is the rank's partial
-// for the FFN all-reduce. The kernels' sub-128 scale grid lands with the
-// TP forward (plan §5 Q4).
+// At TP world W, every rank holds each expert's I/W intermediate slice
+// and the shared expert's S/W slice. The router and shared gate are
+// replicated. FP8 expert scales use gcd(128, I/W) on the sliced axis.
+// The result is a partial hidden vector for the FFN all-reduce.
 #include <cstddef>
 #include <cstdint>
 
@@ -54,7 +45,7 @@ class QwenMoeLayer {
   static GlmMoeConfig routed_config(int hidden, int inter, int n_experts,
                                     int top_k, bool norm_topk_prob);
 
-  // gemm: the model's GEMM seam (the BF16 shared expert's three products;
+  // gemm: the model's GEMM interface (the BF16 shared expert's three products;
   // decode shapes take the in-house GEMV inside it). max_tokens bounds
   // enqueue()'s rows.
   // decode_slots / graph_table_slots: the routed layer's decode-path
@@ -85,7 +76,7 @@ class QwenMoeLayer {
   // tensor-core kernel (the slice's 32/64 scale grid included, no host
   // round-trip), then the BF16 shared expert and the one rounding.
   // The routing (ids, weights) lands async in `trace` (pinned; read after
-  // the stream's next sync) when given; last_ids()/last_weights() are NOT
+  // the stream's next sync) when given; last_ids()/last_weights() are not
   // updated by this path.
   void enqueue_prefill(const uint16_t* hidden, uint16_t* out, int tokens,
                        cudaStream_t stream, MoeTraceStaging* trace = nullptr);
@@ -96,7 +87,7 @@ class QwenMoeLayer {
   GlmMoeLayer& routed() { return routed_; }
   const GlmMoeConfig& config() const { return cfg_; }
 
-  // Streaming-weight seam: swap the views (shapes unchanged).
+  // Streaming-weight interface: swap the views (shapes unchanged).
   void rebind(const QwenMoeWeights& w);
 
   // Bytes the constructor allocates (device; pinned in *pinned_bytes),

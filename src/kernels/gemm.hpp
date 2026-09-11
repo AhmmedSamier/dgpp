@@ -1,5 +1,5 @@
 #pragma once
-// IGemm seam (DESIGN §§4 and 11): weights [N,K] fp8/bf16 against
+// IGemm interface (DESIGN §§4 and 11): weights [N,K] fp8/bf16 against
 // activations [M,K].
 // Implementations must be deterministic run-to-run at fixed shapes so CUDA
 // graph capture replays bitwise.
@@ -38,13 +38,13 @@ class IGemm {
                            GemmOut out_dtype, size_t act_row_stride) = 0;
 };
 
-// The decode shapes the seam lowers to the row-independent GEMV core: m up
+// The decode shapes the interface lowers to the row-independent GEMV core: m up
 // to the model's decode rows (set_decode_rows; kGemmDecodeRowsDefault, the
 // old fixed batch, until a model says otherwise — a wider batch's rows
 // keep the scalar reduction order whatever batch they ride in: the first
 // 9-row batch fell to an Lt algorithm with its own reduction order,
 // 2026-09-10), in chunks of at most gemv::kMaxRows. kGemmDecodeLoweringRows
-// bounds it (engine/decode_outputs.hpp's kDecodeRowsMax). The seam cannot
+// bounds it (engine/decode_outputs.hpp's kDecodeRowsMax). The interface cannot
 // tell a decode call from a short prefill chunk, so the bound is the
 // model's decode shape and nothing wider: a prefill of more rows keeps
 // its Lt algorithm (and its transcripts).

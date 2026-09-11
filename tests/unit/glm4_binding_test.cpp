@@ -1,4 +1,4 @@
-// The GLM-4.7 expected-tensor table (2026-09-09): its shape on the
+// The GLM-4.7 expected-tensor table: its shape on the
 // release's config, the TP geometry acceptance at the deployment worlds,
 // and — when the checkpoint is in the hub cache — the full binding
 // against every shard's header (the 44 shards and mtp.safetensors: every

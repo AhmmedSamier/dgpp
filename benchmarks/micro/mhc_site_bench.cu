@@ -1,4 +1,4 @@
-// mhc_site_bench (2026-09-08): one mHC site as the decode graph runs it —
+// mhc_site_bench: one mHC site as the decode graph runs it —
 // launch_mhc_compute_normed with the fused finish (dots + finish in one
 // launch) followed by launch_mhc_stream_update — timed per site at decode
 // row counts. The per-kernel split comes from nsys over this binary.

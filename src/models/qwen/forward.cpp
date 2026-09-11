@@ -96,7 +96,7 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     gw_.dequant_bytes = dense_bridge_bytes_;
   }
   // Every decode shape up to the fixed batch's rows through the row-
-  // independent GEMV core (the numerical seam of the batched graphs).
+  // independent GEMV core (the numerical interface of the batched graphs).
   gemm_.set_decode_rows(max_decode_rows_);
   has_ple_ = !cfg_.ple_layer_ids.empty();
   if (has_ple_) table_ = loader_.load_ngram_table();
@@ -358,7 +358,7 @@ size_t QwenModel::dense_bridge_bytes(const QwenTextConfig& cfg, const QwenLocalG
 }
 
 // The lm_head product into logits_ (f32): the checkpoint's BF16 through the
-// GEMM seam, or the block-FP8 form (engine.dense_weights) through the scale
+// GEMM interface, or the block-FP8 form (engine.dense_weights) through the scale
 // GEMM — 2026-09-10.
 void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream) {
   const int H = cfg_.hidden_size;
@@ -458,7 +458,7 @@ void QwenModel::reset_slot_state(int req) {
 // The row walk.
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// The boundary prefetch windows (2026-09-09). Each fold is a bus
+// The boundary prefetch windows. Each fold is a bus
 // all-reduce the chain waits on, followed by the GR combine and the next
 // site's norm before the next weight-streaming GEMV — latency the memory
 // system would idle through. A window opened just before the fold runs
@@ -548,7 +548,7 @@ void QwenModel::prefetch_attention_side(int layer) {
   }
 }
 
-// A window's adds must come from ONE allocation: the prefetcher bridges
+// A window's adds must come from one allocation: the prefetcher bridges
 // gaps up to 2 MB between adjacent adds, and two images (a layer's and
 // its neighbour's, or a layer's and the globals') can sit closer than
 // that — the fixture's do; a bridged hole is an out-of-bounds read
@@ -597,7 +597,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   const int64_t* d_pos = in.pos;
   const int32_t* d_req = in.req_ids;
   const int32_t* d_spans = in.spans;
-  // The mmap'ed n-gram table (2026-09-10): the walk's hash ids and the
+  // The mmap'ed n-gram table: the walk's hash ids and the
   // host's gather forked off here, joined at the PLE layer's turn.
   if (has_ple_ && table_.mmap) {
     if (!ple_) build_layer_objects(loader_.load_layer(cfg_.ple_layer()));
@@ -614,7 +614,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   rows.num_requests = num_requests;
   // The boundary folds (plan D1): the producer writes its partial into
   // the reducer's staged buffer when the shape fits (the collective sends
-  // straight from there; under capture the recorder's ONE stable buffer,
+  // straight from there; under capture the recorder's one stable buffer,
   // consumed before the next handout), else into `fallback`. The eager
   // producer quiesces before the collective; under capture the fold is a
   // recorded node and the stream order IS the drain.

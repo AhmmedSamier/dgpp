@@ -49,7 +49,7 @@ cudaError_t launch_bus_consumer(const BusRecvView& view,
 uint64_t bus_consumer_deadline_cycles(double seconds);
 
 // Loads every bus kernel's module up front. CUDA 12+ loads modules LAZILY
-// (CUDA_MODULE_LOADING=LAZY): a kernel's FIRST launch in the process loads
+// (CUDA_MODULE_LOADING=LAZY): a kernel's first launch in the process loads
 // it, and that load waits for the device to go idle. A collective kernel
 // spinning on a doorbell is not idle — so in a one-process multi-rank
 // world, rank B's first launch of the very kernel rank A is already
@@ -105,7 +105,7 @@ struct alignas(64) BusAllReduceCtl {
   uint64_t stamp_first_claim = 0;
   uint64_t stamp_reduce_done = 0;
   uint32_t status = 0;  // 0 = reduced, 1 = deadline/poison exit
-  // TEMP hunt instrumentation (small-collective corruption): the FIRST
+  // TEMP hunt instrumentation (small-collective corruption): the first
   // doorbell this kernel claimed — flat cell index, the doorbell's len
   // field, and its seq — to discriminate a stale-len read from a
   // receive-slot misalignment. 0/0/0 = no claim yet.
@@ -160,7 +160,7 @@ struct BusAllReduceView {
 // W vectors into dst with fp32 accumulation in canonical global-rank
 // order, so every rank's destination is bitwise identical and a host
 // oracle of the same chain matches exactly. src may be device memory or a
-// pinned pre-stage buffer the producing GEMM wrote (the §6.3 seam); when
+// pinned pre-stage buffer the producing GEMM wrote (the §6.3 interface); when
 // src aliases dst, the fold runs in place per element (one thread per
 // element, read before write) after snapshotting every peer's send copy.
 cudaError_t launch_bus_allreduce(const BusAllReduceView& v, int my_rank,
@@ -291,7 +291,7 @@ cudaError_t launch_bus_allreduce_graph(const BusAllReduceGraphView& v,
 //     meanwhile — a re-presented claim would steal the shared CAS from a
 //     fresh doorbell in the same warp, forever.
 //
-// THE KERNEL IS A COOPERATIVE GRID (2026-09-05): kBulkBlocks blocks,
+// THE KERNEL IS A COOPERATIVE GRID: kBulkBlocks blocks,
 // co-resident by the cooperative-launch contract, with grid barriers
 // between staging | claims | consume rounds | acks. Everything that scales
 // with bytes — the outbound staging, the RS fold, the AG landing — runs
