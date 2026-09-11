@@ -10,11 +10,19 @@ thinking off, max_tokens N — and the reading per phase:
     server's stats lines (rank 0's log: ms/step, tok/step/req, acceptance)
     can be laid beside it.
 
+With --classes, the same sweep runs once per prompt class (prose, code, json,
+math, chat), each phase drawing its c prompts from that class alone, so the
+aggregate is attributable to the class; the per-class table under load is what
+a single mixed set cannot give. With --temperature T the requests are sampled
+rather than greedy, which is the pace a caller sees at the card's defaults.
+
     serve_load.py HOST PORT [--concurrency 1,2,4] [--max-tokens 320] [--think]
+                            [--classes prose,code,json,math,chat] [--temperature T]
 """
 import argparse
 import http.client
 import json
+import os
 import sys
 import threading
 import time
@@ -47,6 +55,88 @@ PROMPTS = [
     "between training and serving. Use section headings and full paragraphs.",
 ]
 
+# The per-class corpus. Prompt 0 of every class is the SAME TEXT as that class in
+# scripts/fabric_mtp_classes.sh, which has been the project's class corpus since
+# 2026-09-05 and produced every published per-class table — so a concurrency-1
+# phase here is comparable to those numbers rather than to a fresh set of words.
+# Prompts 1..3 are of the same kind and exist only because a phase at
+# concurrency c needs c distinct prompts: repeating one would share a decode
+# path and attach to the prefix cache, and neither is what a class costs under
+# load. check_corpus() below re-reads the shell script and fails if prompt 0 has
+# drifted from it.
+CLASSES = {
+    "prose": [
+        "Write a long, detailed history of the Roman Republic from its founding to the rise of "
+        "Augustus, one era per paragraph.",
+        "Write a long, detailed history of the Hanseatic League from its founding to its dissolution, "
+        "one era per paragraph.",
+        "Write a long, detailed history of the silk trade in Lyon from its arrival to its decline, "
+        "one era per paragraph.",
+        "Write a long, detailed history of the Dutch water boards from their origin to the present, "
+        "one era per paragraph.",
+    ],
+    "code": [
+        "Write a Python module that parses an OpenAI-style SSE stream of chat completion chunks into "
+        "a single message object, with type hints, docstrings, and a small set of unit tests using "
+        "pytest.",
+        "Write a Python module implementing an LRU cache with a byte budget and per-entry sizes, with "
+        "type hints, docstrings, and a small set of unit tests using pytest.",
+        "Write a Python module that reads a safetensors header and reports each tensor's name, dtype "
+        "and shape, with type hints, docstrings, and a small set of unit tests using pytest.",
+        "Write a Python module implementing a token bucket rate limiter usable from several threads, "
+        "with type hints, docstrings, and a small set of unit tests using pytest.",
+    ],
+    "json": [
+        "Return a JSON array of 25 objects, each with the fields country, capital, "
+        "population_millions and currency, for 25 different countries. Output only the JSON.",
+        "Return a JSON array of 25 objects, each with the fields city, country, population_millions "
+        "and founded_year, for 25 different cities. Output only the JSON.",
+        "Return a JSON array of 25 objects, each with the fields element, symbol, atomic_number and "
+        "group, for 25 different chemical elements. Output only the JSON.",
+        "Return a JSON array of 25 objects, each with the fields river, continent, length_km and "
+        "mouth, for 25 different rivers. Output only the JSON.",
+    ],
+    "math": [
+        "A train leaves city A at 60 km/h and another leaves city B, 450 km away, at 90 km/h toward "
+        "it 30 minutes later. Work out step by step when and where they meet, then generalize the "
+        "formula and check it with two other examples.",
+        "A cistern is filled by two pipes in 12 and 18 minutes and emptied by a third in 24. Work out "
+        "step by step how long it takes to fill, then generalize the formula and check it with two "
+        "other examples.",
+        "Find the area between the curves y = x^2 and y = 2x + 3. Work it out step by step, then "
+        "generalize the method and check it with two other pairs of curves.",
+        "A bag holds 7 red and 5 blue balls and three are drawn without replacement. Work out step by "
+        "step the probability of exactly two red, then generalize the formula and check it with two "
+        "other bags.",
+    ],
+    "chat": [
+        "Explain, in a few paragraphs, why a CUDA graph replay can be faster than launching the same "
+        "kernels eagerly, and what it costs.",
+        "Explain, in a few paragraphs, why a paged key-value cache beats a contiguous one for a "
+        "serving engine, and what it costs.",
+        "Explain, in a few paragraphs, why tensor parallelism needs an all-reduce at each block "
+        "boundary, and what bounds the step.",
+        "Explain, in a few paragraphs, why 4-bit weight quantization helps a memory-bound decode "
+        "step, and where the accuracy goes.",
+    ],
+}
+
+
+def check_corpus():
+    """Prompt 0 of each class must still be fabric_mtp_classes.sh's prompt."""
+    import re as _re
+    sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fabric_mtp_classes.sh")
+    try:
+        text = open(sh).read()
+    except OSError:
+        return  # run from outside the tree: nothing to check against
+    fab = dict(_re.findall(r'^P\[(\w+)\]="(.*)"$', text, _re.M))
+    for name, prompts in CLASSES.items():
+        want = fab.get(name)
+        if want is not None and prompts[0] != want:
+            raise SystemExit(
+                f"class {name!r} prompt 0 has drifted from fabric_mtp_classes.sh; "
+                "the per-class numbers would not be comparable to the published tables")
 
 def served_model(host, port):
     conn = http.client.HTTPConnection(host, port, timeout=30)
@@ -59,12 +149,12 @@ def served_model(host, port):
     return ids[0]
 
 
-def stream_one(host, port, model, prompt, max_tokens, think, out):
+def stream_one(host, port, model, prompt, max_tokens, think, out, temperature=0):
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": 0,
+        "temperature": temperature,
         "stream": True,
         "stream_options": {"include_usage": True},
     }
@@ -125,21 +215,23 @@ def stream_one(host, port, model, prompt, max_tokens, think, out):
     out["text"] = "".join(text)
 
 
-def phase(host, port, model, c, max_tokens, think, prompt_base):
+def phase(host, port, model, c, max_tokens, think, prompt_base, prompts=None, temperature=0, label=""):
+    prompts = prompts or PROMPTS
     outs = [dict() for _ in range(c)]
     threads = []
     t_start = time.perf_counter()
     wall_start = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     for i in range(c):
-        prompt = PROMPTS[(prompt_base + i) % len(PROMPTS)]
-        th = threading.Thread(target=stream_one, args=(host, port, model, prompt, max_tokens, think, outs[i]))
+        prompt = prompts[(prompt_base + i) % len(prompts)]
+        th = threading.Thread(target=stream_one,
+                              args=(host, port, model, prompt, max_tokens, think, outs[i], temperature))
         th.start()
         threads.append(th)
     for th in threads:
         th.join()
     t_end = time.perf_counter()
     wall_end = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    print(f"== concurrency {c}: {wall_start} .. {wall_end}  wall {t_end - t_start:.1f} s")
+    print(f"== {label}concurrency {c}: {wall_start} .. {wall_end}  wall {t_end - t_start:.1f} s")
     total = 0
     span_first = min(o["first"] for o in outs if o["first"])
     span_last = max(o["last"] for o in outs if o["last"])
@@ -166,7 +258,14 @@ def main():
     ap.add_argument("--warm", type=int, default=1, help="warm requests before the phases")
     ap.add_argument("--isolation", type=int, default=0, metavar="C",
                     help="the transcript-isolation check: prompt 0 alone, then beside C-1 others; its text must match")
+    ap.add_argument("--classes", default=None, metavar="LIST",
+                    help="run the sweep once per class (prose,code,json,math,chat), each phase drawing "
+                         "its prompts from that class alone; 'all' runs every class")
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="0 (default) is greedy; a positive value samples, for the pace at the card's defaults")
     args = ap.parse_args()
+    if args.classes:
+        check_corpus()
     model = served_model(args.host, args.port)
     print(f"model {model}")
     for w in range(args.warm):
@@ -191,13 +290,35 @@ def main():
             k = 0
             while k < len(a) and k < len(b) and a[k] == b[k]: k += 1
             print(f"   first difference at char {k}: alone {a[k:k+60]!r} | batched {b[k:k+60]!r}")
+    cs = [int(x) for x in args.concurrency.split(",")]
+    draw = "greedy" if args.temperature == 0 else f"sampled T={args.temperature}"
+    if args.classes:
+        names = list(CLASSES) if args.classes == "all" else args.classes.split(",")
+        for n in names:
+            if n not in CLASSES:
+                raise SystemExit(f"unknown class {n!r}; known: {', '.join(CLASSES)}")
+        table = {}
+        for n in names:
+            base = 0
+            for c in cs:
+                rate = phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
+                             CLASSES[n], args.temperature, f"{n} ")
+                table[(n, c)] = rate
+                base += c
+        print(f"== per-class aggregate tokens/s, {draw}, max_tokens {args.max_tokens}")
+        print("| class | " + " | ".join(f"c={c}" for c in cs) + " |")
+        print("|---|" + "---|" * len(cs))
+        for n in names:
+            print(f"| {n} | " + " | ".join(f"{table[(n, c)]:.1f}" for c in cs) + " |")
+        return
     base = 0
     summary = []
-    for c in [int(x) for x in args.concurrency.split(",")]:
-        rate = phase(args.host, args.port, model, c, args.max_tokens, args.think, base)
+    for c in cs:
+        rate = phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
+                     None, args.temperature)
         summary.append((c, rate))
         base += c
-    print("== summary: " + "  ".join(f"c={c}: {r:.1f} tok/s" for c, r in summary))
+    print(f"== summary ({draw}): " + "  ".join(f"c={c}: {r:.1f} tok/s" for c, r in summary))
 
 
 if __name__ == "__main__":

@@ -39,12 +39,13 @@ concurrent request's tokens across the phase's decode span. It is not
 sees roughly c times its solo pace while the world delivers more in total.
 Per-request pace is given beside the aggregate wherever both were recorded.
 
-**Greedy and sampled differ, and the difference is acceptance.** At
-temperature 0 the draft head agrees with the main model far more often than
-under the card's sampling defaults. On Qwen3.8-Flash-Next the same build reads
-72–74 % acceptance greedy and 48–55 % sampled. Every row says which it is.
-Greedy is the right number for comparing engine work; sampled is the right
-number for what a user gets at the default settings.
+**Greedy and sampled used to differ, and no longer do.** A deterministic
+draft is capped at the main model's mode, so under temperature sampling it was
+accepted far less often: Qwen3.8-Flash-Next read 72–74 % acceptance greedy
+against 48–55 % sampled. The ratio-rule proposal draft closed that, and the
+2026-09-10 sweeps measure greedy and sampled throughput as the same number on
+every family. Rows still say which they are, and the older sign-off rows in §3
+still show the old gap, because they predate the change.
 
 **Prefill is quoted per token** (`prefill ms / prompt tokens`), because it is
 close to linear in the prompt and the per-token rate is what transfers between
@@ -101,8 +102,11 @@ rather than limitations of the engine, which takes the world from the config.
 | T=1, one graph | 31.45 | 1.0 | 31.45 | 31.8 | 2026-09-03 |
 | T=1, one graph | 29.94–29.97 | 1.0 | 29.94–29.97 | 33.4 | 2026-09-10 |
 | MTP, greedy | 41.6–42.9 | 1.77–1.97 | 21.3–23.9 | 42–47 | 2026-09-05 |
-| MTP, sampled at the card's defaults | 42 | 1.5–1.7 | 25.0–27.6 | 36–40 | 2026-09-04 |
+| MTP, sampled at the card's defaults (superseded) | 42 | 1.5–1.7 | 25.0–27.6 | 36–40 | 2026-09-04 |
 | MTP, greedy, chat prompt | 40.49 | 1.72 (72.0 % accepted) | 23.5 | 42.5 | 2026-09-10 |
+
+The sampled row predates the ratio-rule proposal draft and no longer holds:
+measured on 2026-09-10, sampling costs this world nothing against greedy (§5).
 
 The T=1 step reads p50 30.0 ms and p99 31.0 ms over the 2026-09-10 regression.
 Through the HTTP service at concurrency 1 the same world measures 32.1 ms/token
@@ -198,19 +202,20 @@ Net speedup against the plain graph's 31.45 ms/token: 1.31x on chat to 1.48x
 on code and JSON. The step is 41.6–42.9 ms whatever the class, so acceptance is
 the whole story.
 
-### GLM-5.3-Flash NVFP4/FP8 hybrid, world 4, MTP greedy (2026-09-08)
+### GLM-5.3-Flash NVFP4/FP8 hybrid, world 4, MTP greedy (2026-09-10)
 
-| class | drafts accepted | ms/token, hybrid | ms/token, FP8 |
-|---|---|---|---|
-| chat | 69.5 % | 21.7 | 24.3 |
-| code | 98.0 % | 18.7 | 21.2 |
-| prose | 88.7 % | 19.3 | 21.7 |
-| json | 96.7 % | 18.6 | 21.0 |
-| math | 88.7 % | 19.5 | 21.7 |
+| class | drafts accepted | tok/pass | ms/pass | ms/token |
+|---|---|---|---|---|
+| chat | 67.6 % | 1.676 | 33.99 | 20.28 |
+| code | 98.0 % | 1.974 | 34.31 | 17.38 |
+| prose | 87.0 % | 1.863 | 33.66 | 18.07 |
+| json | 96.7 % | 1.961 | 33.82 | 17.25 |
+| math | 88.1 % | 1.875 | 34.20 | 18.24 |
 
-Measured at a graph step of 36.4–36.9 ms. The build that ships reads 33.89 ms,
-so these per-class figures are conservative by roughly 8 % and have not been
-re-run; §8 has the command.
+All four ranks' transcripts identical on every class. This replaces a table
+taken at a graph step of 36.4–36.9 ms, which read chat 21.7, code 18.7, prose
+19.3, json 18.6 and math 19.5; the step is now 33.7–34.3 and every class gained
+about 7 %.
 
 ### Qwen3.8-Flash-Next-NVFP4, world 1, MTP greedy (2026-09-10)
 
@@ -240,20 +245,78 @@ Depth 2 gains 4–13 % single-stream here and loses under concurrency (§5), so
 the shipped config keeps depth 1 and `cluster_glm47_d2.example.json` is the
 single-stream recipe.
 
-Qwen3.8-Flash-Next at worlds 2 and 4 has no per-class table; see §8.
+### Qwen3.8-Flash-Next-FP8, MTP greedy, through the service (2026-09-10)
+
+Client-side pace of one request, ms/token, at concurrency 1:
+
+| class | world 4 | world 2 |
+|---|---|---|
+| prose | 15.03 | 22.62 |
+| code | 13.65 | 20.82 |
+| json | 12.97 | 20.23 |
+| math | 13.61 | 21.37 |
+| chat | 15.58 | 24.19 |
+
+These come from the service rather than `glm_gen_check`, which is a GLM-only
+evidence app and refuses this checkpoint. §9.2 says what that changes.
+
+### GLM-4.7-NVFP4, world 4, MTP depth 1, through the service (2026-09-10)
+
+| class | ms/token at c=1 |
+|---|---|
+| prose | 32.71 |
+| code | 32.51 |
+| json | 31.23 |
+| math | 31.66 |
+| chat | 35.11 |
+
+### GLM-5.3-Flash-FP8, world 4, cross-check (2026-09-10)
+
+The flagship's per-class pace measured through the service on the same corpus,
+beside the 2026-09-05 sign-off's `glm_gen_check` table:
+
+| class | service, ms/token | sign-off, ms/token |
+|---|---|---|
+| prose | 21.85 | 22.2 |
+| code | 21.01 | 21.7 |
+| json | 20.62 | 21.3 |
+| math | 22.02 | 22.1 |
+| chat | 23.79 | 23.9 |
+
+Two methods, five days apart, agreeing within 0.7 ms/token. The same check on
+the hybrid agrees within 0.05–0.44 ms/token against its engine-side table
+above. The service costs nothing measurable, and the per-class numbers on this
+page corroborate each other across both paths.
 
 ## 5. Decode under concurrency
 
-Concurrency is measured with a fixed set of long-answer technical essay
-prompts, greedy, thinking off, one phase per concurrency (§9.3). It is
-therefore **not** broken down by class: the per-class work in §4 is
-single-stream only. Aggregate tokens/s is the phase's client-side total.
+Every table here is **aggregate tokens/s per prompt class**, measured 2026-09-10
+on one binary with `serve_load.py --classes all` (§9.3): for each class and each
+concurrency, that many streaming requests at once drawn from that class alone.
+Prompt 0 of each class is the same text the single-stream corpus uses, so the
+c=1 column is comparable to §4; prompts 1 to 3 exist because a phase at
+concurrency c needs c distinct requests.
+
+Read down a column for how a class costs, and across a row for how the world
+scales. Aggregate tokens/s is the phase total, not per request.
 
 ### GLM-5.3-Flash-FP8, world 4
 
-The engine's batched decode under MTP, from the 2026-09-07 batch families. The
-last column is what the same load cost before those families existed, when the
-engine ran one scalar replay per live request in sequence:
+| class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
+|---|---|---|---|---|
+| prose | 45.9 | 55.8 | 62.8 | 21.85 |
+| code | 47.7 | 57.2 | 65.5 | 21.01 |
+| json | 48.7 | 55.6 | 67.5 | 20.62 |
+| math | 45.5 | 59.5 | 67.3 | 22.02 |
+| chat | 42.2 | 55.7 | 62.2 | 23.79 |
+
+Sampled at the card's defaults the same sweep reads prose 45.6 / 58.0 / 62.4,
+code 46.0 / 58.3 / 65.1, json 47.8 / 54.9 / 66.6, math 42.5 / 59.0 / 66.7 and
+chat 39.9 / 55.1 / 60.4: within the drift of the greedy run.
+
+The engine's own batched decode under MTP, from the 2026-09-07 batch families.
+The last column is what the same load cost before those families existed, when
+the engine ran one scalar replay per live request in sequence:
 
 | live requests | batch family | ms per pass | scalar replays in sequence |
 |---|---|---|---|
@@ -262,41 +325,86 @@ engine ran one scalar replay per live request in sequence:
 | 3 | 6-row | 90 | ~124 |
 | 4 | 8-row | 107 | not recorded |
 
-The v1 sign-off's aggregate curve predates those families and is kept for the
-shape rather than the values: 30.97 / 31.67 / 41.76 / 76.18 tokens/s at 1 / 2 /
-4 / 8 requests at T=1, and 38.48 / 38.97 / 60.27 at 1 / 2 / 4 under MTP
-(2026-09-05).
-
 ### GLM-5.3-Flash NVFP4/FP8 hybrid, world 4
 
-Only concurrency 4 was measured, inside the ten-minute mixed soak: 87 ms per
-batched step, 1.88–1.93 tokens per step per request, 87–91 % acceptance,
-64–69 tokens/s aggregate, 11.8 ms/token per request, over 523 requests with
-none failed.
+| class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
+|---|---|---|---|---|
+| prose | 55.6 | 74.3 | 87.1 | 18.03 |
+| code | 57.8 | 76.4 | 88.1 | 17.36 |
+| json | 58.2 | 71.7 | 86.6 | 17.24 |
+| math | 55.7 | 77.7 | 91.3 | 18.00 |
+| chat | 50.6 | 71.7 | 83.0 | 19.84 |
 
-### Qwen3.8-Flash-Next-FP8
+Sampled: prose 55.1 / 74.6 / 82.9, code 57.5 / 74.3 / 87.1, json 56.2 / 78.4 /
+89.6, math 55.1 / 79.5 / 88.1, chat 49.8 / 74.3 / 81.8. Server-side the pass is
+34–41 ms at c=1, 52–63 at c=2 and 68–84 at c=4, with acceptance 74–93 % greedy
+and 71–92 % sampled.
 
-World 4, aggregate tokens/s, greedy, the MTP world, one build (2026-09-10):
+**Sampling no longer costs acceptance on this family.** The page's §3 still
+carries the older sign-off reading of 25.0–27.6 ms/token sampled against
+21.3–23.9 greedy for the FP8 checkpoint. That gap predates the ratio-rule
+proposal draft; measured now, the sampled and greedy sweeps agree everywhere on
+both GLM-5.3 checkpoints and on Qwen.
 
-| c=1 | c=2 | c=4 |
-|---|---|---|
-| 68.2 | 102.5 | 120.0 |
+### Qwen3.8-Flash-Next-FP8, world 4
 
-This is the only clean c=1/2/4 aggregate series in the project. World 2 has
-concurrency 4 alone (2026-09-09): 95–143 ms per batched step at 1.9 tokens per
-step per request, 12–18 ms/token. Its c=1 and c=2 points are unmeasured.
+| class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
+|---|---|---|---|---|
+| prose | 66.8 | 101.7 | 123.9 | 15.03 |
+| code | 73.5 | 111.6 | 137.9 | 13.65 |
+| json | 77.3 | 117.0 | 147.1 | 12.97 |
+| math | 73.7 | 114.5 | 139.6 | 13.61 |
+| chat | 64.4 | 100.4 | 123.6 | 15.58 |
 
-### Qwen3.8-Flash-Next-NVFP4, world 1
+Sampled: prose 68.7 / 102.7 / 122.0, code 74.6 / 111.0 / 136.3, json 76.3 /
+118.2 / 145.4, math 73.7 / 114.4 / 137.8, chat 64.9 / 102.2 / 126.3. The pass is
+28–31 ms at c=1 and 46–51 at c=4, acceptance 68–99 % by class.
 
-| dense stack | c=4: ms/step | c=4: aggregate tokens/s | per-request ms/token |
-|---|---|---|---|
-| BF16 | 119–124 | 49–55 | 16.2 |
-| FP8 | 70.7 | 62.9 | — |
+This is the fastest world in the project at every concurrency.
 
-Both at 1.93–1.95 tokens per step per request and 92–94 % first-draft
-acceptance. Concurrency 2 has not been measured on this world.
+### Qwen3.8-Flash-Next-FP8, world 2
+
+| class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
+|---|---|---|---|---|
+| prose | 44.4 | 62.4 | 71.0 | 22.62 |
+| code | 48.2 | 72.3 | 80.9 | 20.82 |
+| json | 49.6 | 74.4 | 83.2 | 20.23 |
+| math | 46.9 | 73.4 | 80.4 | 21.37 |
+| chat | 41.7 | 63.8 | 69.3 | 24.19 |
+
+Sampled: prose 43.1 / 59.1 / 75.2, code 47.9 / 65.6 / 81.7, json 49.2 / 68.9 /
+86.0, math 48.1 / 68.0 / 82.5, chat 42.3 / 60.4 / 75.2. The pass is 48–58 ms at
+c=1 and about 89 at c=4. This world previously had no concurrency-1 or -2 point
+at all.
+
+### Qwen3.8-Flash-Next-NVFP4, world 1, FP8 dense
+
+| class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
+|---|---|---|---|---|
+| prose | 44.7 | 61.9 | 70.9 | 22.45 |
+| code | 48.3 | 69.6 | 80.1 | 20.76 |
+| json | 50.3 | 71.2 | 83.7 | 19.94 |
+| math | 48.0 | 69.3 | 79.3 | 20.90 |
+| chat | 42.6 | 63.0 | 69.4 | 23.66 |
+
+**One Spark matches two.** Set this table beside the world-2 one above: every
+class at every concurrency lands within a few percent. A single Spark serving
+the NVFP4 checkpoint with its dense stack encoded to FP8 delivers what two
+Sparks deliver on the FP8 checkpoint, at a quarter of the eval difference (§7).
+The earlier BF16-dense reading on this world was 119–124 ms per step and 49–55
+tokens/s at four live requests.
 
 ### GLM-4.7-NVFP4, world 4
+
+| class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
+|---|---|---|---|---|
+| prose | 30.7 | 43.6 | 49.2 | 32.71 |
+| code | 30.9 | 45.8 | 51.4 | 32.51 |
+| json | 32.1 | 46.3 | 53.5 | 31.23 |
+| math | 31.7 | 44.9 | 51.5 | 31.66 |
+| chat | 28.6 | 42.3 | 46.5 | 35.11 |
+
+The depth study, on the mixed essay set rather than per class:
 
 | live requests | depth 1: ms/pass, tok/step/req, aggregate tok/s (per request) | depth 2: same | depth 2 vs 1 |
 |---|---|---|---|
@@ -309,50 +417,71 @@ guessed: each 4-row GEMV chunk past the first re-reads the 6.3 GB per rank of
 BF16 attention projections, adding 45–60 ms, while a row inside a chunk costs
 7–8 ms. Hence 72 ms per pass at 3 rows, 79 at 4, 123 at 6, 140 at 8 and 200 at
 12. Depth 2 doubles the rows and therefore the chunks, which is why it is a
-single-stream setting here.
+single-stream setting here. The class table above shows the same ceiling: going
+from one request to four buys 1.6x, where Qwen at world 4 buys 1.9x.
 
 ## 6. Prefill and time to first token
 
-Prefill is measured in steady state, with the prefix cache prevented from
-attaching, so these are cold-prompt costs.
+**There are two prefill numbers for any world, and they differ by 1.4x to 2x.**
+Which one is right depends on the question.
 
-| model | world | 512 | 2,048 | 8,192 | 32,768 | date |
-|---|---|---|---|---|---|---|
-| GLM-5.3-Flash-FP8 | 4 | 549 ms | 1,417 ms | 6,286 ms | — | 2026-09-10 |
-| GLM-5.3-Flash-FP8 | 4 | 581 ms at 256 tokens | 1,701 ms | 7,260 ms | 33,728 ms at 32K | 2026-09-05 |
-| GLM-5.3 NVFP4 hybrid | 4 | 425 ms | 1,275 ms | 5,702 ms | — | 2026-09-08 |
-| Qwen3.8-Flash-Next-FP8 | 4 | per-token only | per-token only | per-token only | — | 2026-09-09 |
-| Qwen3.8-Flash-Next-FP8 | 2 | 612 ms | 1,508 ms | 5,817 ms | — | 2026-09-09 |
-| Qwen NVFP4, BF16 dense | 1 | 785 ms | 2,028 ms | 8,392 ms | — | 2026-09-10 |
-| Qwen NVFP4, FP8 dense | 1 | per-token only | per-token only | per-token only | — | 2026-09-10 |
+The **ritual** figure (`fabric_prefill_repeat.sh`) prefills the same prompt
+three times and times the third, feeding token ids straight to the engine with
+no HTTP. It is a warm best case and the right number for judging a kernel
+change. The **service** figure (`serve_prefill_probe.py`) sends a fresh prompt
+behind a unique nonce so the prefix cache can never attach, through the API,
+and reads the engine's own `prefill_ms`. It is what a caller actually waits.
+Everything published on this page before 2026-09-10 was the ritual figure.
 
-Per token, so the lengths compare:
+Both were run on the same binary on 2026-09-10, and the older ritual numbers
+reproduce exactly, so the difference is method and not a regression.
 
-| model | world | 512 | 2,048 | 8,192 |
+### Ritual: steady state, ids fed directly (2026-09-10)
+
+| model | 512 | 2,048 | 8,192 | 32,768 |
 |---|---|---|---|---|
-| GLM-5.3-Flash-FP8 | 4 | 1.07 | 0.69 | 0.77 |
-| GLM-5.3 NVFP4 hybrid | 4 | 0.83 | 0.62 | 0.70 |
-| Qwen3.8-Flash-Next-FP8 | 4 | 0.87 | 0.62 | 0.58 |
-| Qwen3.8-Flash-Next-FP8 | 2 | 1.16 | 0.76 | 0.75 |
-| Qwen NVFP4, BF16 dense | 1 | 1.50 | 1.03 | 1.08 |
-| Qwen NVFP4, FP8 dense | 1 | 1.83 | 1.14 | 1.17 (see note) |
+| GLM-5.3-Flash-FP8 | 553 ms | 1,423 ms | 6,320 ms | 33,728 ms (2026-09-05) |
+| GLM-5.3 NVFP4 hybrid | 425 ms | 1,269 ms | 5,696 ms | — |
+| Qwen3.8-Flash-Next-FP8, world 4 | 0.87 ms/tok | 0.62 ms/tok | 0.58 ms/tok | — |
+| Qwen3.8-Flash-Next-FP8, world 2 | 612 ms | 1,508 ms | 5,817 ms | — |
+| Qwen NVFP4, BF16 dense, world 1 | 785 ms | 2,028 ms | 8,392 ms | — |
+| Qwen NVFP4, FP8 dense, world 1 | 1.83 ms/tok | 1.14 ms/tok | 1.17 ms/tok | — |
 
-The FP8 dense stack's 512 and 2,048 figures are from the fused build; its
-8,192 figure was taken on the unfused build one step earlier, where 512 and
-2,048 read 1.85 and 1.15, so it is within a percent of the fused build's rate.
+The GLM rows are tonight's re-runs and land within 1 % of their published
+values (549 / 1,417 / 6,286 and 425 / 1,275 / 5,702). The Qwen rows are the
+2026-09-09 and 2026-09-10 campaign values, not re-run tonight.
 
-The FP8 dense stack is slower at prefill than the BF16 one because the GEMM
-seam dequantizes into a BF16 bridge per chunk. It is a decode optimization that
-costs prefill, and both are the same checkpoint.
+### Service: a fresh prompt through the API (2026-09-10)
 
-The world-2 and world-1 rows were taken at 528 / 1,981 / 7,742 real tokens; the
-world-4 Qwen row at the same lengths. Prompt lengths for the others are the
-column headings.
+Median of three, with the real token count the tokenizer produced:
 
-GLM-4.7-NVFP4 at world 4 has only short-prompt prefill measured: 400–1,000 ms
-for prompts of 31–150 tokens, which is 5–13 ms/token on the v1 warp-per-row
-attention, and 11.5 s for a 6,525-token prompt (1.77 ms/token). The tensor-core
-form of that kernel is open work.
+| model | ~520 | ~2,100 | ~8,400 | ~16,800 | ~33,800 |
+|---|---|---|---|---|---|
+| GLM-5.3-Flash-FP8 | 855 ms | 2,211 ms | 9,165 ms | 21,738 ms | 58,555 ms |
+| GLM-5.3 NVFP4 hybrid | 734 ms | 2,210 ms | 11,374 ms | — | 93,765 ms |
+| GLM-4.7-NVFP4 | 850 ms | 2,809 ms | 16,865 ms | — | — |
+
+Per prompt token:
+
+| model | ~520 | ~2,100 | ~8,400 | ~16,800 | ~33,800 |
+|---|---|---|---|---|---|
+| GLM-5.3-Flash-FP8 | 1.64 | 1.05 | 1.09 | 1.29 | 1.73 |
+| GLM-5.3 NVFP4 hybrid | 1.41 | 1.05 | 1.36 | — | 2.77 |
+| GLM-4.7-NVFP4 | 1.63 | 1.32 | 1.98 | — | — |
+
+**The hybrid inverts against FP8 above 2K, and only through the service.** On
+the ritual the NVFP4 hybrid prefills faster than the FP8 checkpoint at every
+length. Through the service it is faster at 512, equal at 2K, and then loses
+badly: 11.4 s against 9.2 s at 8K, and 93.8 s against 58.6 s at 32K. The
+service-to-ritual ratio is 1.45–1.74 for FP8 and 1.73–2.00 for the hybrid, so
+the NVFP4 expert path degrades with context in a way the FP8 tensor-core path
+does not. This is one sample per point and wants a profile before anyone acts
+on it; it is the most actionable thing tonight's run turned up.
+
+GLM-4.7's prefill was previously measured only on 31 to 150-token prompts and
+one 6,525-token prompt at 1.77 ms/token. The service figures above are its
+first readings at the standard lengths, and at 8K it is the slowest of the
+three, consistent with the v1 warp-per-row attention kernel it still uses.
 
 **Time to first token**, GLM-5.3-Flash-FP8 through the service, is prefill plus
 the pick plus the HTTP hop: a 25-token prompt 1,109 ms cold and 751 ms hot, a
@@ -390,30 +519,35 @@ shutdown. Both hold on every configuration on this page.
 
 ## 8. What is not measured yet
 
-Each gap is a real hole in the matrix, with the command that fills it. None of
-these are blocked; they are fabric time nobody has spent.
+Nine gaps stood here on 2026-09-10 morning. The evening run closed six of them
+outright, and what follows is what genuinely remains.
 
-1. **Per-class decode at concurrency 2 and 4, every model.** The whole of §4 is
-   single-stream. The concurrency harness uses one fixed essay prompt set and
-   reports aggregates, so no model has a class breakdown under load. Filling
-   this needs a per-class mode in the load script, not just a longer run.
-2. **Per-class decode for Qwen3.8-Flash-Next at worlds 2 and 4.** Only ranges
-   across the four prompts were recorded. Fill with
-   `scripts/mtp_depth_check.py` beside rank 0's retire lines, or
-   `fabric_mtp_classes.sh --config deploy/cluster_qwen.json OUT chat code prose json math`.
-3. **Concurrency 2 for the single Spark and for world 2.** Both jump from 1 to
-   4. Fill with `scripts/serve_load.py HOST PORT --concurrency 1,2,4`.
-4. **Concurrency 2 and the c=1/2/4 series for the GLM-5.3 NVFP4 hybrid.** Only
-   the soak's four-live point exists.
-5. **The GLM-5.3 hybrid's per-class table on the shipped build.** The table in
-   §4 was taken at 36.4–36.9 ms/pass; the build reads 33.89.
-6. **GLM-4.7 prefill at 512 / 2,048 / 8,192.** Only short prompts and one
-   6,525-token prompt exist. Fill with
-   `scripts/serve_prefill_probe.py HOST PORT 512 2048 8192 --repeat 3`.
-7. **Long-context prefill beyond 8K for every family except GLM-5.3-Flash-FP8**,
-   which has 32,768.
-8. **Token/s under sampling at concurrency**, for every model. The concurrency
-   harness runs greedy.
+1. **Per-class concurrency for the two worlds not swept.** Every deployment in
+   §5 has its class matrix except Qwen at world 2 under sampling beyond the
+   figures quoted, and the single Spark's BF16 dense stack, which has only its
+   older four-live point. Fill with
+   `scripts/serve_load.py HOST PORT --concurrency 1,2,4 --classes all`.
+2. **The prefill method gap wants a profile, not another reading.** §6 shows
+   the NVFP4 hybrid losing to FP8 above 2K through the service while winning on
+   the ritual. One sample per point. The next step is
+   `scripts/fabric_qwen_profile.sh`-style node tracing on a service prefill at
+   8K on both checkpoints, not more timings.
+3. **Service-method prefill for the Qwen families.** All three Qwen rows in §6
+   are ritual figures; only the GLM worlds have both. Until they are re-run the
+   Qwen prefill numbers are not comparable with the GLM service numbers. Fill
+   with `scripts/serve_prefill_probe.py HOST PORT 512 2048 8192 --repeat 3`.
+4. **Long context beyond 8K for the Qwen families and GLM-4.7.** GLM-5.3-FP8
+   now has 16K and 32K and the hybrid has 32K; the others stop at 8K.
+5. **Concurrency beyond 4.** The v1 sign-off has an 8-request point for
+   GLM-5.3-FP8 and nothing else does. The configs cap `max_concurrency` at 4,
+   so this needs a config change, not just a longer run.
+
+Closed on 2026-09-10 evening: per-class decode under concurrency for all six
+deployments; per-class tables for Qwen at both worlds and for GLM-4.7; the
+concurrency-2 point for the single Spark and world 2; the hybrid's c=1/2/4
+series and its per-class table on the shipped build; GLM-4.7 prefill at the
+standard lengths; and sampled-versus-greedy throughput everywhere, which turned
+out to be the same number.
 
 ## 9. Reproducing all of it
 
@@ -449,12 +583,29 @@ fabric directly.
 scripts/fabric_mtp_classes.sh --config deploy/cluster.json OUT_DIR chat code prose json math
 ```
 
-Five fixed prompts, greedy, 300 steps each, all four ranks, transcripts
-compared across ranks. The prompts are in the script: chat asks why a CUDA
-graph replay beats eager launching, code asks for a Python SSE parser with
-pytest tests, prose asks for a long history, json asks for twenty-five records,
-math asks for a worked problem. Through the endpoint instead, and for
-comparing transcripts across MTP depths:
+**That script holds the corpus.** Five fixed prompts, one per class, unchanged
+since 2026-09-05: chat asks why a CUDA graph replay beats eager launching, code
+asks for a Python SSE parser with pytest tests, prose asks for a long history of
+the Roman Republic, json asks for twenty-five records, math asks for a worked
+train problem. Every per-class number this project has published comes from
+those five texts, so they are the corpus and not an example of one. It runs
+greedy, 300 steps per class, on all four ranks, and compares transcripts across
+ranks.
+
+It uses `glm_gen_check`, which is a GLM-only evidence app: it refuses the Qwen
+checkpoints, whose class numbers therefore come from the service instead (§9.3).
+Where both methods have been run on one world they agree within 0.05–0.7
+ms/token, so the two are interchangeable in practice; the page says which
+produced each row.
+
+`serve_load.py --classes` reuses the same five texts as prompt 0 of each class
+and adds three more per class, because a phase at concurrency c needs c distinct
+requests and repeating one would share a decode path and attach to the prefix
+cache. A `check_corpus()` call re-reads the shell script on every run and aborts
+if prompt 0 has drifted from it, so the concurrency-1 column stays comparable to
+the single-stream tables.
+
+Through the endpoint instead, and for comparing transcripts across MTP depths:
 
 ```bash
 scripts/mtp_depth_check.py --out /tmp/depth1 --max-tokens 300
@@ -465,15 +616,20 @@ diff -r /tmp/depth1 /tmp/depth2      # must be byte-identical
 
 ```bash
 scripts/serve_load.py HOST PORT --concurrency 1,2,4 --max-tokens 320
+scripts/serve_load.py HOST PORT --concurrency 1,2,4 --classes all                  # the §5 matrices
+scripts/serve_load.py HOST PORT --concurrency 1,2,4 --classes all --temperature 1  # sampled
 ```
 
-For each concurrency it opens that many streaming requests at once with
-distinct long-answer prompts, greedy, thinking off, and reports per request the
-token count, time to first token and client-side pace, and per phase the wall
-time, the aggregate decode tokens/s and the phase's stamps so rank 0's stats
-lines can be laid beside it. Add `--isolation 4` to assert that a prompt's
-greedy answer alone is byte-identical to its answer beside three others.
-`scripts/fabric_glm4_load.sh CONFIG OUT` wraps this for the GLM-4.7 worlds.
+For each concurrency it opens that many streaming requests at once, greedy and
+with thinking off unless `--temperature` says otherwise, and reports per request
+the token count, time to first token and client-side pace, and per phase the
+wall time, the aggregate decode tokens/s and the phase's stamps so rank 0's
+stats lines can be laid beside it. Without `--classes` the prompts are a mixed
+set of long-answer technical essays; with it, each phase draws from one class
+(§9.2). Add `--isolation 4` to assert that a prompt's greedy answer alone is
+byte-identical to its answer beside three others.
+`scripts/fabric_glm4_load.sh CONFIG OUT` wraps the mixed form for the GLM-4.7
+worlds.
 
 ### 9.4 Prefill
 
@@ -515,9 +671,11 @@ recording. Every campaign above ran with these:
 
 ### 9.7 Where the raw records live
 
-`benchmarks/results/` holds the dated engineering record behind every number
-on this page. `docs/signoff_v1.md` is the v1 sign-off with its own method
-statement, `docs/measurements.md` the platform and GLM-4.7 measurements,
-`docs/qwen38_single_spark.md` the single-Spark campaign, and
+`build-ci/fabric-runs/bench_2026-09-10/` on the head node holds tonight's run:
+every phase's raw output, the server logs, and `RESULTS.md` with the tables as
+they came off the fabric. `benchmarks/results/` holds the dated engineering
+record behind the earlier numbers. `docs/signoff_v1.md` is the v1 sign-off with
+its own method statement, `docs/measurements.md` the platform and GLM-4.7
+readings, `docs/qwen38_single_spark.md` the single-Spark campaign, and
 `docs/qwen38_optimization_plan.md` and `docs/nvfp4_plan.md` the optimization
 rounds with their A/B pairs.
