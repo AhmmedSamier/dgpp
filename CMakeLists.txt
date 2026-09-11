@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.25)
 project(dgpp VERSION 0.1.0 LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -28,22 +28,25 @@ if(DGPP_SANITIZE)
   add_link_options(-fsanitize=${DGPP_SANITIZE})
 endif()
 
-option(DGPP_ENABLE_IBV "Build ibverbs-based microbenches" ON)
+option(DGPP_ENABLE_IBV "Build serving and RDMA targets (required even for the single-node server)" ON)
 
 add_library(dgpp_common INTERFACE)
 target_include_directories(dgpp_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-find_package(CUDAToolkit REQUIRED COMPONENTS cudart cublasLt)
+find_package(CUDAToolkit 13 REQUIRED COMPONENTS cudart cublasLt)
 find_package(Threads REQUIRED)
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
 if(DGPP_ENABLE_IBV)
   find_path(IBVERBS_INCLUDE_DIR NAMES infiniband/verbs.h)
   find_library(IBVERBS_LIBRARY NAMES ibverbs)
   if(NOT IBVERBS_INCLUDE_DIR OR NOT IBVERBS_LIBRARY)
-    message(WARNING "libibverbs dev missing; disabling IBV targets")
-    set(DGPP_ENABLE_IBV OFF)
+    message(FATAL_ERROR "libibverbs development files are required for dgpp-serve. Install libibverbs-dev, or use -DDGPP_ENABLE_IBV=OFF for a build WITHOUT serving/RDMA targets.")
   endif()
+endif()
+
+if(NOT DGPP_ENABLE_IBV)
+  message(STATUS "DGPP_ENABLE_IBV=OFF: dgpp-serve, releases and RDMA targets will not be built")
 endif()
 
 if(DGPP_ENABLE_IBV)
@@ -451,8 +454,15 @@ if(DGPP_ENABLE_IBV)
             RENAME lib${_lib}.so.${CUDAToolkit_VERSION_MAJOR})
   endforeach()
   install(PROGRAMS scripts/dgpp-cluster scripts/serve_api_check.py DESTINATION scripts)
-  install(FILES deploy/cluster.example.json DESTINATION deploy)
-  install(FILES README.md docs/operations.md DESTINATION doc)
+  install(FILES scripts/site_env.py scripts/cluster_process.py scripts/cluster_doctor.py
+    scripts/serve_client.py scripts/download_model.py scripts/data_paths.py DESTINATION scripts)
+  install(FILES .env.example DESTINATION .)
+  file(GLOB DGPP_DEPLOYMENT_TEMPLATES CONFIGURE_DEPENDS "deploy/*.example.json")
+  install(FILES ${DGPP_DEPLOYMENT_TEMPLATES} DESTINATION deploy)
+  install(FILES docs/release-install.md DESTINATION . RENAME README.md)
+  install(FILES requirements-download.txt LICENSE DESTINATION .)
+  install(FILES docs/dependencies.md docs/networking.md DESTINATION docs)
+  install(FILES deploy/nginx.example.conf DESTINATION deploy)
 endif()
 
 enable_testing()
@@ -491,6 +501,7 @@ target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
 target_compile_definitions(unit_tests PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 dgpp_set_common(unit_tests)
 add_test(NAME unit_tests COMMAND unit_tests)
+target_sources(unit_tests PRIVATE tests/unit/site_options_test.cpp)
 
 # M6 Stage 3: the tokenizer differential gate (host). Skips with rc 2 when
 # the model cache is absent (same discipline as the real-checkpoint gates).
@@ -583,6 +594,14 @@ add_test(NAME route_trace_test
 add_test(NAME sampling_profile_test
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/sampling_profile_test.py)
+add_test(NAME site_env_test
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/site_env_test.py)
+add_test(NAME script_reports_test
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/script_reports_test.py)
+add_test(NAME portability_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/portability_test.py)
 
 # KDA operator tests (CUDA); skip without a device as above. The dump-parity
 # runner is a host-only TU (minijson + nvcc don't mix).
@@ -940,3 +959,27 @@ if(DGPP_ENABLE_IBV)
   target_include_directories(micro_ibv_smoke PRIVATE ${IBVERBS_INCLUDE_DIR})
   dgpp_set_common(micro_ibv_smoke)
 endif()
+
+# Labels describe resources, not coverage guarantees. Some real-checkpoint
+# cases still skip internally when their optional model data is unavailable.
+get_property(DGPP_ALL_TESTS DIRECTORY PROPERTY TESTS)
+foreach(_test IN LISTS DGPP_ALL_TESTS)
+  set_tests_properties(${_test} PROPERTIES LABELS "gpu")
+endforeach()
+set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_test scheduler_test
+  PROPERTIES LABELS "host")
+set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
+  site_env_test script_reports_test portability_test PROPERTIES LABELS "host;python")
+set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test
+  chat_template_test qwen_chat_template_test glm4_chat_template_test
+  PROPERTIES LABELS "host;checkpoint")
+foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
+    glm4_forward_generate glm_forward_fixture glm_forward_generate dsa_dump_generate kda_dump_generate)
+  set_tests_properties(${_test} PROPERTIES LABELS "fixture")
+endforeach()
+if(DGPP_ENABLE_IBV)
+  set_tests_properties(bus_test bus_selftest glm_tp_test glm4_tp_test glm4_engine_test
+    qwen_tp_test qwen_engine_test PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
+  set_tests_properties(nic_regress_selftest PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
+endif()
+set_tests_properties(roster_selftest PROPERTIES LABELS "host")

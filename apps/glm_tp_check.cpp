@@ -95,7 +95,6 @@ BusOptions bus_options(int rank, int world, uint16_t port,
   BusOptions o;
   o.world_size = world;
   o.my_rank = rank;
-  o.lane_devices = {"rocep1s0f0", "roceP2p1s0f0"};
   o.rendezvous_port = port;
   o.rendezvous_host = rank == 0 ? "" : peer;
   o.rendezvous_timeout_ms = rendezvous_timeout_ms;

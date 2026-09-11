@@ -3,7 +3,7 @@
 goldens for the GLM tokenizer (M6 Stage 3).
 
 The GOLDEN SOURCE is HF tokenizers 0.23.1 (the pinned reference — the
-venv at /tmp/opencode/tokref) applied to this script's case list. The
+venv configured with requirements-tools.txt) applied to this script's case list. The
 C++ gate (tests/host/glm_tokenizer_test.cpp) loads the SAME corpus and
 asserts byte-exact encode/decode parity, refusing to run against a
 tokenizer.json whose FNV-1a-64 revision hash differs from the corpus
@@ -20,7 +20,7 @@ after 13.0 so table-version skew between this generator (Python 3.12 /
 Unicode 15.0) and the C++ tables cannot flake the gate (see
 tools/gen_unicode_tables.py).
 
-Regenerating: /tmp/opencode/tokref/bin/python tools/gen_tokenizer_goldens.py
+Regenerating: python3 tools/gen_tokenizer_goldens.py
   [--model ORG/NAME] [--tokenizer-json PATH] [--out FILE]
 
 The Qwen3.8-Flash-Next corpus (2026-09-09) adds the NFC and mark cases its
@@ -35,17 +35,11 @@ import glob
 import json
 import os
 import sys
+from pathlib import Path
 
-
-def hf_hub_dir():
-    """The local HF hub cache: HUGGINGFACE_HUB_CACHE, else HF_HOME/hub, else
-    ~/.cache/huggingface/hub — never a hard-coded home."""
-    cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
-    if cache:
-        return cache
-    home = os.environ.get("HF_HOME")
-    return os.path.join(home, "hub") if home else os.path.expanduser(
-        "~/.cache/huggingface/hub")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from cluster_doctor import cache_root, cached_snapshot
+from site_env import cache_environment
 
 
 MODEL = "unsloth/GLM-5.3-Flash-FP8"
@@ -170,10 +164,7 @@ def main():
     if args.tokenizer_json:
         tok_path = args.tokenizer_json
     else:
-        snap = glob.glob(f"{hf_hub_dir()}/models--{model.replace('/', '--')}/snapshots/*/")
-        if not snap:
-            sys.exit(f"model snapshot for {model} not found in the HF cache")
-        tok_path = snap[0] + "tokenizer.json"
+        tok_path = str(cached_snapshot(model, cache_root(cache_environment())) / "tokenizer.json")
     with open(tok_path, "rb") as f:
         raw = f.read()
     import tokenizers

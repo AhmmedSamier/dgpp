@@ -9,15 +9,16 @@
 #   fabric_gr_probe.sh [--config CLUSTER.json] OUT_DIR [PROBE_LAYERS]
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="$ROOT/deploy/cluster.json"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+CONFIG=$(dgpp_config) || exit 1
 if [[ "${1:-}" == "--config" ]]; then CONFIG="$2"; shift 2; fi
 case "$CONFIG" in /*) ;; *) CONFIG="$ROOT/$CONFIG" ;; esac
+export DGPP_CLUSTER_CONFIG="$CONFIG"
 [[ -f "$CONFIG" ]] || { echo "no cluster config at $CONFIG" >&2; exit 1; }
 MODEL=$(jq -r '.model' "$CONFIG")
-NODES=($(jq -r '.nodes[]' "$CONFIG"))
-export DGPP_FABRIC_HEAD="${NODES[0]}"
-export DGPP_FABRIC_PEERS="${NODES[*]:1}"
-export DGPP_FABRIC_USER="$(jq -r '.ssh_user // env.USER' "$CONFIG")"
+NODE_LIST=$(dgpp_nodes --config "$CONFIG") || exit 1
+read -r -a NODES <<< "$NODE_LIST"
+
 OUT=${1:?OUT_DIR}; shift
 N=${1:-32}
 case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac

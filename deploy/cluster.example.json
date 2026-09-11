@@ -1,9 +1,8 @@
 {
   "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
-  "nodes": ["192.0.2.11", "192.0.2.12", "192.0.2.13", "192.0.2.14"],
-  "ssh_user": "",
+  "world_size": 4,
   "release": "",
-  "ports": {"http": 18080, "fabric": 29970, "journal": 29971},
+  "http": {"bind_host": "127.0.0.1", "port": 18080},
   "engine": {
     "max_concurrency": 4,
     "kv_capacity": 8192,
@@ -21,9 +20,6 @@
     "stats_interval_s": 10
   },
   "paths": {
-    "log_dir": "~/dgpp/log",
-    "stage_dir": "/tmp/dgpp-stage",
-    "release_dir": "~/dgpp/releases",
     "resident_cache": ""
   }
 }

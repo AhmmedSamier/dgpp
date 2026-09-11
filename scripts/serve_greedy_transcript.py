@@ -11,6 +11,7 @@ previous --out file and reports whether every reply (reasoning + content)
 is identical.
 """
 import argparse
+from serve_client import served_model
 import http.client
 import json
 import sys
@@ -22,13 +23,6 @@ PROMPTS = {
     "math": "A train leaves city A at 60 km/h and another leaves city B, 450 km away, at 90 km/h toward it 30 minutes later. Work out step by step when and where they meet.",
     "json": "Return a JSON array of 8 objects, each with the fields country, capital and population_millions. Output only the JSON.",
 }
-
-
-def served_model(host, port):
-    conn = http.client.HTTPConnection(host, port, timeout=60)
-    conn.request("GET", "/v1/models")
-    data = json.loads(conn.getresponse().read())
-    return data["data"][0]["id"]
 
 
 def one(host, port, model, prompt, max_tokens):

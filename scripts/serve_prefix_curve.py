@@ -19,10 +19,11 @@ import http.client
 import json
 import sys
 import time
+from serve_client import served_model
 
 HOST, PORT, C = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 LABEL = sys.argv[4] if len(sys.argv) > 4 else f"C{C}"
-MODEL = "unsloth/GLM-5.3-Flash-FP8"
+MODEL = served_model(HOST, PORT)
 TOPICS = ["capital", "largest river", "currency", "highest mountain", "official language",
           "largest city", "national animal", "main export"]
 PLACES = ["Portugal", "Chile", "Kenya", "Norway", "Vietnam", "Peru", "Egypt", "Poland",

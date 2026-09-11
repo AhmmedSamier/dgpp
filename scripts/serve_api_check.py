@@ -21,18 +21,11 @@ reported compactly.
 Exits nonzero when any check fails.
 """
 import json
+from serve_client import served_model
 import sys
 import http.client
 
 HOST, PORT = sys.argv[1], int(sys.argv[2])
-def served_model(host, port):
-    """The id the service serves (GET /v1/models) — never a hard-coded one
-    (2026-09-09: the GLM id 404'd against the Qwen world)."""
-    conn = http.client.HTTPConnection(host, port, timeout=60)
-    conn.request("GET", "/v1/models")
-    return json.loads(conn.getresponse().read())["data"][0]["id"]
-
-
 MODEL = sys.argv[3] if len(sys.argv) > 3 else served_model(HOST, PORT)
 failures = []
 

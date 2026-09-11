@@ -1,4 +1,5 @@
 #include "serve/cluster_config.hpp"
+#include <arpa/inet.h>
 
 #include <cmath>
 #include <cstdlib>
@@ -78,6 +79,7 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
   const Value& root = parsed.root;
   if (!root.is_object()) fail(what, "the document must be an object");
   ClusterConfig c;
+  int http_override = 0;
   bool saw_model = false, saw_nodes = false;
   for (const Member& m : root.members()) {
     const std::string& k = m.key;
@@ -99,6 +101,31 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
       c.ssh_user = text(v, k, what);
     } else if (k == "release") {
       c.release = text(v, k, what);
+    } else if (k == "http") {
+      if (!v.is_object()) fail(what, "'http' must be an object");
+      for (const Member& p : v.members()) {
+        if (p.key == "bind_host") {
+          c.http_bind = text(p.value, "http.bind_host", what);
+          in_addr address{};
+          if (::inet_pton(AF_INET, c.http_bind.c_str(), &address) != 1)
+            fail(what, "'http.bind_host' must be an IPv4 address");
+        } else if (p.key == "port") {
+          http_override = static_cast<int>(integer(p.value, "http.port", what, 1, 65535));
+        } else fail(what, "unknown key 'http." + p.key + "'");
+      }
+    } else if (k == "node_env") {
+      if (!v.is_array()) fail(what, "'node_env' must be an array");
+      for (const Value& node : v.items()) {
+        if (!node.is_object()) fail(what, "'node_env[]' must be an object");
+        std::map<std::string, std::string> env;
+        for (const Member& setting : node.members()) {
+          if (setting.key != "DGPP_ROCE_DEVICES" && setting.key != "DGPP_ROCE_GID_INDICES" &&
+              setting.key != "HF_HUB_CACHE" && setting.key != "DGPP_RESIDENT_CACHE_DIR")
+            fail(what, "unknown node environment key '" + setting.key + "'");
+          env[setting.key] = text(setting.value, "node_env." + setting.key, what);
+        }
+        c.node_env.push_back(std::move(env));
+      }
     } else if (k == "ports") {
       if (!v.is_object()) fail(what, "'ports' must be an object");
       for (const Member& p : v.members()) {
@@ -172,7 +199,10 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
     }
   }
   if (!saw_model) fail(what, "'model' is required");
+  if (http_override) c.http_port = http_override;
   if (!saw_nodes) fail(what, "'nodes' is required");
+  if (!c.node_env.empty() && c.node_env.size() != c.nodes.size())
+    fail(what, "'node_env' must have one entry per node");
   if (c.fabric_port == c.journal_port)
     fail(what, "'ports.fabric' and 'ports.journal' must differ");
   return c;

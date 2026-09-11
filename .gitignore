@@ -22,6 +22,7 @@ artifacts/
 __pycache__/
 *.py[cod]
 .venv/
+/data/
 venv/
 
 # --- Editor / IDE / OS detritus -------------------------------------------------
@@ -47,16 +48,15 @@ glm_tp_fixture/
 glm_tp_fixture_fp4/
 qwen_engine_fixture/
 qwen_loader_fixture/
-# The site cluster configs are local: one per checkpoint and shape the site
-# serves (deploy/cluster.json, cluster.nvfp4.json, cluster_glm47_d2.json ...),
-# each carrying that site's node addresses and ssh login. The committed
-# artifacts are the *.example.json templates beside them — copy one, fill in
-# `nodes` and `ssh_user`, and it stays out of the history.
+# Local deployment copies hold model choices and engine tuning. Shared node
+# addresses, SSH login, ports and site paths live in .env, not these JSONs.
 deploy/cluster.json
 deploy/cluster.*.json
 deploy/cluster_*.json
 !deploy/*.example.json
 .env
+.env.*
+!.env.example
 
 # Site operations that never belong in the tree: the node memory-reclaim
 # script stops and runtime-masks services and needs root on every node. It is

@@ -11,17 +11,18 @@
 # Usage: scripts/serve_stop_check.sh [OUT_DIR]
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-. "$ROOT/scripts/cluster_env.sh"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+dgpp_require_world 4 || exit 1
 OUT=${1:-$ROOT/build-ci/fabric-runs/stop_gate_$(date +%Y-%m-%d_%H%M%S)}
 export DGPP_SERVE_LOG=$OUT/serve
 export DGPP_SERVE_KNOBS="${DGPP_SERVE_KNOBS:---max-concurrency 2 --kv-capacity 4096 --default-max-tokens 512 --queue-limit 8 --decode-graph --mtp --seed 20260904}"
-HOST=${DGPP_SERVE_HOST:-$(dgpp_head)}
+HOST=$(dgpp_client_host) || exit 1
 mkdir -p "$DGPP_SERVE_LOG"
 cd "$ROOT" || exit 1
 scripts/serve_run.sh up || exit 1
 sleep 2
-URL=http://$HOST:18080/v1/chat/completions
-M=unsloth/GLM-5.3-Flash-FP8
+URL=http://$HOST:$(dgpp_http_port)/v1/chat/completions
+M=$(dgpp_served_model) || exit 1
 # The long stream, in the background; a second request sits queued behind
 # the first's slot pair? No — two slots are free; it runs too. Both are
 # mid-generation when the stop lands.
@@ -35,21 +36,7 @@ scripts/serve_run.sh down
 wait $CURL1 $CURL2
 echo "--- the stream's tail"
 tail -c 700 "$OUT/stream.sse"; echo
-python3 - "$OUT/stream.sse" <<'PY'
-import json, sys
-n = 0; err = None; done = False; finish = None
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if not line.startswith('data: '): continue
-    p = line[6:]
-    if p == '[DONE]': done = True; continue
-    d = json.loads(p)
-    if 'error' in d: err = d['error']; continue
-    n += 1
-    for ch in d.get('choices', []):
-        if ch.get('finish_reason'): finish = ch['finish_reason']
-print(f"stream: {n} chunks, error={err}, done={done}, finish_reason={finish}")
-PY
+python3 "$ROOT/scripts/serve_streams.py" summary "$OUT/stream.sse"
 echo "--- the one-shot"
 head -c 400 "$OUT/oneshot.json"; echo
 echo "--- rank 0's drain line"

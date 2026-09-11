@@ -11,13 +11,14 @@
 #        ... run ...
 #        scripts/roce_counters.sh snapshot > after.txt
 #        scripts/roce_counters.sh diff before.txt after.txt
-# Nodes default to the site's cluster config (DGPP_FABRIC_NODES overrides,
-# space-separated); devices with no traffic at all are skipped.
+# Nodes come from .env, limited to the selected deployment's world_size.
+# Devices with no traffic at all are skipped.
 set -u
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cluster_env.sh"
-# The peers' ssh login: DGPP_FABRIC_USER, else the config's, else the caller's.
-SSH_USER="${DGPP_FABRIC_USER:-$(dgpp_ssh_user)}"
-NODES=${DGPP_FABRIC_NODES:-$(dgpp_nodes)}
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+# The shared SSH login comes from .env (or an exported override).
+SSH_USER=$(dgpp_ssh_user) || exit 1
+NODES=$(dgpp_nodes) || exit 1
 mode=${1:-snapshot}
 case "$mode" in
   snapshot)
@@ -46,24 +47,7 @@ done
 REMOTE
     done ;;
   diff)
-    python3 - "$2" "$3" <<'PY'
-import sys
-def load(p):
-    out = {}
-    for line in open(p):
-        parts = line.split()
-        if len(parts) < 3: continue
-        key = (parts[0], parts[1])
-        out[key] = {kv.split("=")[0]: int(kv.split("=")[1]) for kv in parts[2:]}
-    return out
-a, b = load(sys.argv[1]), load(sys.argv[2])
-for key in sorted(b):
-    if key not in a: continue
-    deltas = {c: b[key][c] - a[key].get(c, 0) for c in b[key]}
-    nonzero = {c: v for c, v in deltas.items() if v}
-    xmit = nonzero.pop("xmit_data", 0) * 4 / 1048576.0  # port_xmit_data counts 4-byte words
-    print(f"{key[0]} {key[1]}: xmit {xmit:8.1f} MiB  " + ("  ".join(f"{c}={v}" for c, v in nonzero.items()) or "no retransmits, no CNPs, no discards"))
-PY
+    python3 "$ROOT/scripts/roce_report.py" "$2" "$3"
     ;;
   *) echo "usage: $0 snapshot | diff BEFORE AFTER" >&2; exit 2 ;;
 esac

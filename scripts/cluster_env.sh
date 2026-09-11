@@ -1,43 +1,35 @@
-# The site's fabric, derived from its cluster config. Sourced by
-# the evidence and serving scripts so that NO node address and NO login name
-# is ever written into a script: both live in the site-local cluster config
-# (deploy/cluster.json, git-ignored; copy deploy/cluster.example.json), and
-# the environment still overrides per run.
-#
-#   . "$ROOT/scripts/cluster_env.sh"
-#   HOST=${DGPP_SERVE_HOST:-$(dgpp_head)}      # rank 0, else localhost
-#   PEERS=($(dgpp_peers))                      # ranks 1.., space separated
-#   NODES=$(dgpp_nodes)                        # every node, rank order
-#   USER_=$(dgpp_ssh_user)                     # the config's, else the caller's
-#
-# DGPP_CLUSTER_CONFIG names another config. A missing or unreadable file
-# leaves the head at localhost and the peer list empty — callers report that
-# rather than guessing an address.
+# Shared site configuration. Source this before reading DGPP_* settings.
+# .env is parsed as data by site_env.py, never sourced as shell code.
+# Exported settings override .env. Credentials are not loaded.
 
-dgpp_config() {
-  if [ -n "${DGPP_CLUSTER_CONFIG:-}" ]; then
-    echo "$DGPP_CLUSTER_CONFIG"
-  else
-    echo "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/deploy/cluster.json"
+_DGPP_SITE_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/site_env.py"
+
+dgpp_load_site() {
+  local site_file key value
+  site_file=$(mktemp) || return 1
+  if ! python3 "$_DGPP_SITE_HELPER" shell > "$site_file"; then
+    rm -f "$site_file"
+    return 1
   fi
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    export "$key=$value"
+  done < "$site_file"
+  rm -f "$site_file"
 }
 
-dgpp_nodes() {
-  jq -r '.nodes[]?' "$(dgpp_config)" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'
-}
-
-dgpp_head() {
-  local h
-  h=$(jq -r '.nodes[0] // empty' "$(dgpp_config)" 2>/dev/null)
-  echo "${h:-127.0.0.1}"
-}
-
-dgpp_peers() {
-  jq -r '.nodes[1:][]?' "$(dgpp_config)" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'
-}
-
-dgpp_ssh_user() {
-  local u
-  u=$(jq -r '.ssh_user // empty' "$(dgpp_config)" 2>/dev/null)
-  echo "${u:-$(id -un)}"
-}
+dgpp_load_site || return 1
+dgpp_config() { python3 "$_DGPP_SITE_HELPER" config; }
+dgpp_nodes() { python3 "$_DGPP_SITE_HELPER" nodes "$@"; }
+dgpp_head() { python3 "$_DGPP_SITE_HELPER" head; }
+dgpp_client_host() { python3 "$_DGPP_SITE_HELPER" client-host; }
+dgpp_rank_prefix() { python3 "$_DGPP_SITE_HELPER" rank-prefix --rank "$1"; }
+dgpp_run_rank() { local rank=$1; shift; python3 "$_DGPP_SITE_HELPER" run-rank --rank "$rank" -- "$@"; }
+dgpp_require_world() { python3 "$_DGPP_SITE_HELPER" require-world --world "$1"; }
+dgpp_model() { python3 "$_DGPP_SITE_HELPER" model; }
+dgpp_log_dir() { python3 "$_DGPP_SITE_HELPER" log-dir; }
+dgpp_stage_dir() { python3 "$_DGPP_SITE_HELPER" stage-dir; }
+dgpp_served_model() { python3 "$(dirname "$_DGPP_SITE_HELPER")/serve_client.py" model; }
+dgpp_peers() { python3 "$_DGPP_SITE_HELPER" peers "$@"; }
+dgpp_ssh_user() { python3 "$_DGPP_SITE_HELPER" user; }
+dgpp_http_port() { python3 "$_DGPP_SITE_HELPER" http-port; }
+dgpp_resolve_config() { python3 "$_DGPP_SITE_HELPER" resolve "$@"; }

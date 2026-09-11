@@ -69,6 +69,7 @@
 #include "net/nic_visibility.hpp"
 #include "net/tcp.hpp"
 #include "net/verbs.hpp"
+#include "net/site_options.hpp"
 
 namespace {
 
@@ -96,7 +97,7 @@ constexpr int kServeIdleS = 300;
 constexpr int kSelftestIters = 256;
 constexpr int kSelftestDeadlineS = 300;
 
-const std::vector<std::string> kDefaultLanes = {"rocep1s0f0", "roceP2p1s0f0"};
+const std::vector<std::string> kDefaultLanes = dgpp::net::configured_lane_devices();
 
 // Identity tags for the control frames (uniform little-endian cluster, the
 // roster's stance; a version field leaves migration room).
@@ -1481,7 +1482,7 @@ int main(int argc, char** argv) {
                  "[--iters N] [--deadline-s N]\n"
                  "  nic_regress serve [--port N] [--lanes D,D] [--idle-s N]\n"
                  "  nic_regress selftest [--iters N] [--lanes D,D]\n"
-                 "defaults: lanes rocep1s0f0,roceP2p1s0f0; iters 10000\n");
+                 "defaults: lanes from DGPP_ROCE_DEVICES or active RoCE devices; iters 10000\n");
     return 2;
   }
   const std::string mode = argv[1];

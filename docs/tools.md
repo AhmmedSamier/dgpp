@@ -6,6 +6,27 @@ checkpoint and reference tooling the tests use; `scripts/` holds the fabric
 and serving operations. `docs/benchmarks.md` says which of these produced
 each published number, and how to run them in the right order.
 
+The Bash scripts handle process launches, SSH, requests and log collection.
+Python parsing and reporting live in separate modules in `scripts/`, each with
+a command-line entry point. They can also be imported without running a report.
+Shared helpers include:
+
+- `site_env.py`: shared site settings from `.env` and deployment resolution;
+  Bash callers use `cluster_env.sh`.
+- `serve_streams.py`: saved SSE events, committed text, tool-call reconstruction
+  and shutdown summaries.
+- `forward_check_report.py`: the cross-rank digest and argmax checks used by both
+  the Qwen and GLM forward-check scripts.
+- `serve_pace.py`: per-request pace measurements, used directly by
+  `width_sweep_collect.py` as well as its own CLI.
+
+The remaining report modules cover admission, load phases, prefill, node probes,
+RoCE counters and failure drills. To re-read saved results without launching a
+cluster, for example, run `python3 scripts/serve_streams.py summary STREAM.sse`
+or `python3 scripts/forward_check_report.py LOG_DIR 4`. Use `--help` on the report
+modules to see their arguments. Their offline regression tests run with
+`python3 tests/python/script_reports_test.py` or CTest's `script_reports_test`.
+
 | command | purpose |
 |---|---|
 | `dgppctl info` | CUDA and platform facts |

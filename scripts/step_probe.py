@@ -10,16 +10,17 @@ prefix cache). Usage:
 The 2026-09-06 record: 43.4 ms/step at 26 tokens, 52–56 at 4K–32K before the
 select-kernel rewrite; 41.8 / 44.4 / 44.5 / 45.2 at 26 / 8K / 18K / 32K after."""
 import argparse, json, os, re, sys, time, urllib.request
+from serve_client import default_url, default_log, model_at_url
 
-_ap = argparse.ArgumentParser(add_help=False)
-_ap.add_argument("--host", default="http://127.0.0.1:18080")
-_ap.add_argument("--log", default=os.path.expanduser("~/dgpp/log/serve_r0.log"))
-_ap.add_argument("--model", default="unsloth/GLM-5.3-Flash-FP8")
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--host")
+_ap.add_argument("--log")
+_ap.add_argument("--model")
 _ap.add_argument("--max-tokens", type=int, default=160)
 _args, _modes = _ap.parse_known_args()
-HOST = _args.host
-LOG = _args.log
-MODEL = _args.model
+HOST = _args.host or default_url()
+LOG = _args.log or default_log()
+MODEL = _args.model or model_at_url(HOST)
 
 TOOLS = [
   {"type": "function", "function": {"name": "bash", "description": "Run a shell command.",

@@ -7,27 +7,31 @@
 #   fabric_qwen_load.sh [--config CLUSTER.json] OUT_DIR WORLD [extra qwen_load_check args...]
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="$ROOT/deploy/cluster.json"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+CONFIG=$(dgpp_config) || exit 1
 if [[ "${1:-}" == "--config" ]]; then CONFIG="$2"; shift 2; fi
 case "$CONFIG" in /*) ;; *) CONFIG="$ROOT/$CONFIG" ;; esac
-NODES=($(jq -r '.nodes[]' "$CONFIG"))
-USER_=$(jq -r '.ssh_user // env.USER' "$CONFIG")
-STAGE=$(jq -r '.paths.stage_dir // "/tmp/bus4"' "$CONFIG")
+export DGPP_CLUSTER_CONFIG="$CONFIG"
+USER_=$(dgpp_ssh_user) || exit 1
+STAGE="$DGPP_STAGE_DIR"
 OUT=${1:?OUT_DIR}; WORLD=${2:?WORLD}; shift 2
+NODE_LIST=$(dgpp_nodes --world "$WORLD") || exit 1
+read -r -a NODES <<< "$NODE_LIST"
 case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac
 mkdir -p "$OUT"
-BIN="$ROOT/build-ci/qwen_load_check"
-MODEL=${DGPP_QWEN_MODEL:-Qwen/Qwen3.8-Flash-Next-FP8}
+BIN="${DGPP_BUILD_DIR:-$ROOT/build-ci}/qwen_load_check"
+MODEL=${DGPP_QWEN_MODEL:-$(dgpp_model)}
 pids=()
 for ((r=0; r<WORLD; r++)); do
   ip=${NODES[$r]}
   if [[ $r -eq 0 ]]; then
-    ( "$BIN" --model "$MODEL" --world "$WORLD" --rank 0 "$@" > "$OUT/w${WORLD}_r0.log" 2>&1 ) &
+    ( dgpp_run_rank 0 "$BIN" --model "$MODEL" --world "$WORLD" --rank 0 "$@" > "$OUT/w${WORLD}_r0.log" 2>&1 ) &
     pids+=($!)
   else
-    ssh -o BatchMode=yes "$USER_@$ip" "mkdir -p $STAGE && pkill -x qwen_load_check; true" >/dev/null 2>&1
+    ssh -o BatchMode=yes "$USER_@$ip" "mkdir -p $STAGE" >/dev/null 2>&1
+    RANK_ENV=$(dgpp_rank_prefix "$r") || exit 1
     scp -q "$BIN" "$USER_@$ip:$STAGE/qwen_load_check"
-    ( ssh -o BatchMode=yes "$USER_@$ip" "$STAGE/qwen_load_check --model $MODEL --world $WORLD --rank $r $*" > "$OUT/w${WORLD}_r$r.log" 2>&1 ) &
+    ( ssh -o BatchMode=yes "$USER_@$ip" "$RANK_ENV $STAGE/qwen_load_check --model $MODEL --world $WORLD --rank $r $*" > "$OUT/w${WORLD}_r$r.log" 2>&1 ) &
     pids+=($!)
   fi
 done

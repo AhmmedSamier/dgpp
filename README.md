@@ -108,41 +108,49 @@ from NVMe; see [the single-node guide](docs/qwen38_single_spark.md).
 ## Requirements
 
 - NVIDIA DGX Spark (GB10) with CUDA 13 and an SM 12.1-capable compiler
-- CMake 3.24 or newer and a C++20 compiler
+- CMake 3.25 or newer and a C++20 compiler (GCC 13 tested)
 - CUDA Runtime and cuBLASLt development files
-- libibverbs headers and library for the RoCE bus and probes; disable with
-  `-DDGPP_ENABLE_IBV=OFF` when unavailable (the GDR and RC probes are then
-  omitted)
+- libibverbs headers and library, required by the current serving build,
+  including world 1. `DGPP_ENABLE_IBV=OFF` omits serving and RDMA targets.
 - Python 3.10 or newer for operations and test tooling. Reference-dump
   generators have optional dependencies such as PyTorch; see their help.
 
 ## Quick start
 
+For a fresh machine, follow [Getting started](docs/getting-started.md):
+dependencies, site configuration, checkpoint download, preflight, and a first
+request. [Dependencies](docs/dependencies.md) separates runtime requirements
+from optional evaluation and development tools.
+
 ### Build and test
 
 ```bash
-./scripts/ci-local.sh            # configure, build with warnings as errors, run CTest
+cmake --preset ci
+cmake --build --preset ci --target dgpp_serve_app -j 4
 ```
 
 The presets are `release`, `debug`, `asan`, `ubsan` and `ci`
 (`cmake --preset <name>`, `cmake --build --preset <name> -j`,
-`ctest --preset <name>`). Run a full build before `ctest`: the suite runs
-whatever binaries exist. With clang-format installed, `format` and
+`ctest --preset <name>`). Build test targets before running CTest and select
+the appropriate resource labels; GPU/RDMA suites need idle test hardware.
+`ci-local.sh` builds and runs the full suite. With clang-format installed, `format` and
 `format-check` targets exist. `docs/testing.md` lists the suites and what
 each proves.
 
 ### Serve
 
-1. Copy `deploy/cluster.example.json` to `deploy/cluster.json` (local to
-   your site, not tracked) and set the nodes in rank order, the model and
-   engine options. The configuration table below describes each key.
-2. `scripts/dgpp-cluster up` — stages the binary and the config, boots
+1. Add the site settings from [.env.example](.env.example) to `.env`,
+   preserving any existing credentials. Set `DGPP_NODES` in rank order
+   and `DGPP_SSH_USER` for your machines. Copy a deployment template to
+   `deploy/cluster.json` and choose its model, `world_size` and engine options.
+2. Download the complete checkpoint on every node (see the setup guide),
+   then run `scripts/dgpp-cluster doctor`. `scripts/dgpp-cluster up` stages the binary and config, boots
    rank 0, then the peers, and waits for the listening line.
 3. Send a request:
 
    ```bash
-   curl -s http://192.0.2.11:18080/v1/chat/completions -H 'Content-Type: application/json' -d '{
-     "model": "unsloth/GLM-5.3-Flash-FP8", "reasoning_effort": "low", "max_tokens": 160,
+   curl --fail http://127.0.0.1:18080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+     "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8", "reasoning_effort": "low", "max_tokens": 160,
      "messages": [{"role": "user", "content": "Name three primary colors, one per line."}]}'
    ```
 
@@ -151,6 +159,9 @@ each proves.
 
 `docs/operations.md` is the operator's page: boot and stop, what a node
 needs, what happens when a rank dies, how to tell the world is healthy.
+HTTP defaults to localhost and has no authentication or TLS. Use an SSH
+tunnel or an authenticated reverse proxy for remote access; see
+[networking](docs/networking.md).
 
 ## Release and install
 
@@ -175,9 +186,9 @@ record, so a world of mixed versions refuses to form. Inside the tarball:
 |---|---|
 | `bin/dgpp-serve` | the server, rpath `$ORIGIN/../lib` |
 | `lib/libcudart.so.13`, `lib/libcublasLt.so.13` | the CUDA runtime it was built against |
-| `scripts/dgpp-cluster`, `scripts/serve_api_check.py` | the launcher and the request-field check |
-| `deploy/cluster.example.json` | the config template a site copies and edits |
-| `doc/README.md`, `doc/operations.md` | this page and the operator's page |
+| `scripts/` | launcher, process/preflight/config helpers, checkpoint downloader and API check |
+| `deploy/*.example.json` | all supported deployment templates |
+| `README.md`, `docs/` | package-specific setup, dependency and networking guides |
 | `MANIFEST`, `MANIFEST.sha256` | version, git sha, CUDA, build host and date; every other file's checksum |
 
 Beyond the tarball a node needs the NVIDIA driver, rdma-core, libnl and
@@ -191,9 +202,57 @@ selected, `up` stages `build-ci/dgpp-serve` to the peers.
 
 ## Configuration
 
-The launcher and server read one JSON configuration file, usually
-`deploy/cluster.json`. Copy a matching template from `deploy/` and set
-your node addresses. Unknown keys and invalid types are rejected.
+Site settings live in `.env` at the repository root, shared by every model
+deployment. Scripts load it automatically through `scripts/site_env.py`
+(shell scripts use `scripts/cluster_env.sh`). `DGPP_ENV_FILE` selects another
+file; exported variables override file values. Values are literal, optionally
+quoted: no shell commands or variable expansion are evaluated. Only the keys
+below are loaded, so credentials such as `HF_ACCESS_TOKEN` stay out of the
+scripts' environment and generated server config.
+
+| `.env` key | purpose | default |
+|---|---|---|
+| `DGPP_NODES` | Space-separated addresses in rank order; the first node is the head | required |
+| `DGPP_SSH_USER` | SSH/SCP login on the peers | current login when empty or absent |
+| `DGPP_HTTP_PORT` | HTTP service port | 18080 |
+| `DGPP_HTTP_BIND` | HTTP bind IPv4 address | `127.0.0.1` |
+| `DGPP_FABRIC_PORT` | Fabric rendezvous port | 29970 |
+| `DGPP_JOURNAL_PORT` | Journal port; must differ from the fabric port | 29971 |
+| `DGPP_LOG_DIR` | Head logs, PID and collected peer logs | `~/dgpp/log` |
+| `DGPP_STAGE_DIR` | Peer binary, runtime config and logs | `/tmp/bus4` |
+| `DGPP_RELEASE_DIR` | Installed releases on each node | `~/dgpp/releases` |
+| `DGPP_CLUSTER_CONFIG` | Default model deployment JSON; relative paths use the repository root | `deploy/cluster.json` |
+| `DGPP_BUILD_DIR`, `DGPP_DATA_DIR` | Build and benchmark-data directories; relative to the repository root | `build-ci`, `data` |
+| `HF_HUB_CACHE`, `HF_HOME` | Checkpoint cache; explicit hub cache takes precedence | `~/.cache/huggingface/hub` |
+| `DGPP_RESIDENT_CACHE_DIR` | Local resident-image cache | `~/.cache/dgpp/resident` |
+| `DGPP_ROCE_DEVICES` | Ordered verbs device names | discover active Ethernet devices |
+| `DGPP_ROCE_GID_INDICES` | One GID index per explicit device | automatic RoCE-v2 selection |
+| `DGPP_NODE_OVERRIDES` | JSON map of per-node NIC/GID/cache overrides | none |
+
+Model settings live in deployment JSONs under `deploy/`. Each has a
+`world_size` of 1, 2 or 4 and uses that many nodes from the beginning of
+`DGPP_NODES`. Too few nodes is an error, not a fallback to a smaller world.
+Use `--config FILE` with `dgpp-cluster` to override the selected deployment.
+Wrappers that accept a config argument pass it through to their children.
+Stage and release directories must be absolute or start with `~/`, without
+spaces or shell syntax.
+Log and staging directories are namespaced by deployment-file path;
+`dgpp-cluster paths` prints the effective locations. An explicit `--log-dir`
+is used as-is. `up` refuses an existing deployment unless `--replace` is given;
+cleanup uses recorded process identity, never a binary-name kill.
+
+The launcher resolves the deployment and site settings into
+`<log_dir>/cluster.resolved.json` when starting the service. Both the head
+and peers read that resolved config; the original JSON and `.env` are not
+sent to peers. To inspect or use the runtime config with the native binary:
+
+```bash
+scripts/dgpp-cluster resolve --config deploy/cluster.nvfp4.json
+# Save that JSON to a file before passing it to dgpp-serve --config.
+```
+
+The native binary reads resolved JSON, not `.env` or deployment templates.
+Unknown keys and invalid types are rejected.
 
 Rank 0 reads the model, ports and engine options, with command-line flags
 after `--config` overriding the file. It sends the effective settings to
@@ -205,12 +264,10 @@ templates set their serving options explicitly.
 | key | required | what it does | default |
 |---|---|---|---|
 | `model` | yes | the Hugging Face model id every rank loads (`--model`) | — |
-| `nodes` | yes | the ranks' hosts in rank order; `nodes[0]` is the head (rank 0: the HTTP ingress and the journal); the world size is the list's length | — |
-| `ssh_user` | no | the user the launcher uses for ssh and scp to the peers | the launcher's own user |
+| `world_size` | yes | number of ranks: 1, 2 or 4; selects the first N entries of `DGPP_NODES` | — |
+| `http.bind_host` | no | HTTP listening IPv4 address; overrides the site default | `DGPP_HTTP_BIND` |
+| `http.port` | no | HTTP port; overrides the site default | `DGPP_HTTP_PORT` |
 | `release` | no | the installed release version `up` runs on every rank (`<release_dir>/dgpp-<version>/bin/dgpp-serve`); launcher-only, `--release` overrides it; rolling back is naming the previous version | empty: the development binary `build-ci/dgpp-serve`, staged to the peers |
-| `ports.http` | no | rank 0's OpenAI-compatible HTTP port | 18080 |
-| `ports.fabric` | no | the bus rendezvous port rank 0 listens on and the peers connect to | 29970 |
-| `ports.journal` | no | the admission journal's port (must differ from `ports.fabric`) | 29971 |
 | `engine.max_concurrency` | no | Request slots per rank; graph row limits depend on the model (see below) | 8 |
 | `engine.kv_capacity` | no | KV pool capacity in tokens per rank. The startup memory plan checks the configured model, slots and context before allocation | 8192 |
 | `engine.kv_dtype` | no | GLM-5.3 latent storage: `bf16`, `fp8` or `fp4`. The index cache stays FP8; Qwen and GLM-4.7 K/V caches stay BF16 | `bf16` |
@@ -233,9 +290,6 @@ templates set their serving options explicitly.
 | `engine.rendezvous_timeout_ms` | no | how long the peers may take to join the bus world after rank 0 listens | 120000 |
 | `engine.stats_interval_s` | no | the period of the throughput line in every rank's log; 0 turns it off | 10 |
 | `engine.reasoning_in_content` | no | fold the reasoning into `content` with the model's own `</think>` instead of `reasoning_content` | false |
-| `paths.log_dir` | no | where the launcher writes the head's log, pid and every rank's fetched op stream and log | `~/dgpp/log` |
-| `paths.stage_dir` | no | where the launcher puts the peers' binary and config (a `/tmp` path is emptied by a reboot and recreated at the next `up`) | `/tmp/bus4` |
-| `paths.release_dir` | no | where installed releases live on each node (the install target) | `~/dgpp/releases` |
 | `paths.resident_cache` | no | Resident image directory. Empty uses `~/.cache/dgpp/resident`; `DGPP_RESIDENT_CACHE_DIR` overrides both. Image size depends on the model and rank | `""` |
 
 The application allows up to eight request slots. GLM-5.3-Flash and Qwen

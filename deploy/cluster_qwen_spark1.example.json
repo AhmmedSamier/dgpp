@@ -1,14 +1,6 @@
 {
   "model": "nvidia/Qwen3.8-Flash-Next-NVFP4",
-  "nodes": [
-    "192.0.2.11"
-  ],
-  "ssh_user": "",
-  "ports": {
-    "http": 18080,
-    "fabric": 29970,
-    "journal": 29971
-  },
+  "world_size": 1,
   "engine": {
     "max_concurrency": 4,
     "kv_capacity": 65536,
@@ -27,9 +19,6 @@
     "stats_interval_s": 10
   },
   "paths": {
-    "log_dir": "~/dgpp/log",
-    "stage_dir": "/tmp/dgpp-stage",
-    "release_dir": "~/dgpp/releases",
     "resident_cache": ""
   }
 }

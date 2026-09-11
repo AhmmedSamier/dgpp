@@ -199,6 +199,37 @@ struct ServerHandle {
 
 const char* kGetHello = "GET /hello HTTP/1.1\r\nHost: t\r\n\r\n";
 
+DGPP_TEST(http_default_bind_does_not_accept_other_loopback_addresses) {
+  ServerHandle sh;
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  require(fd >= 0, "socket");
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(sh.port());
+  ::inet_pton(AF_INET, "127.0.0.2", &address.sin_addr);
+  const int result = ::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+  ::close(fd);
+  require(result != 0, "default listener must bind only 127.0.0.1, not INADDR_ANY");
+}
+
+DGPP_TEST(http_bind_address_is_configurable_and_validated) {
+  TestHandler handler;
+  HttpServer server(0, &handler, 64, "127.0.0.2");
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  require(fd >= 0, "socket");
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(server.port());
+  ::inet_pton(AF_INET, "127.0.0.2", &address.sin_addr);
+  const int result = ::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+  ::close(fd);
+  require(result == 0, "explicit bind address accepts connections");
+  bool refused = false;
+  try { HttpServer invalid(0, &handler, 64, "localhost"); }
+  catch (const std::exception&) { refused = true; }
+  require(refused, "non-IPv4 bind address rejected");
+}
+
 DGPP_TEST(http_oneShot_keepAliveSecondRequestSameConnection) {
   // GIVEN a running server,
   ServerHandle sh;

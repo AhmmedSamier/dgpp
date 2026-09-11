@@ -1,0 +1,7 @@
+# Optional: benchmark token IDs and tokenizer/chat-template reference generation.
+-r requirements-download.txt
+tokenizers>=0.22,<0.24
+Jinja2>=3.1.6,<4
+# PyTorch is installed separately from a CUDA/architecture-compatible source;
+# see docs/dependencies.md. The pure-Python reference backends need none of it.
+safetensors>=0.6,<1

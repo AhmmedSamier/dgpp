@@ -8,14 +8,26 @@ engine settings. See [README](../README.md) for the configuration schema.
 
 ## Configure and start
 
-Copy a template from `deploy/` to a site-local JSON file, set the node
-addresses in rank order and fill in `ssh_user` if needed. Site files
-are git-ignored. Example templates use documentation addresses and cannot
-be deployed unchanged.
+For a new machine, start with [Getting started](getting-started.md) and
+[dependencies](dependencies.md). HTTP defaults to localhost; deployment
+`http.bind_host` and `http.port` override `.env` defaults. The service has no
+TLS or authentication; see [networking](networking.md) before exposing it.
+
+Add the settings from [`.env.example`](../.env.example) to the repository's
+`.env`, preserving any credentials already there. Set `DGPP_NODES` to the
+space-separated node addresses in rank order and `DGPP_SSH_USER` to the
+SSH login. Ports and common log, staging and release paths also live there.
+Scripts read this file automatically; exported settings take precedence.
+Use `DGPP_ENV_FILE` for a different site file.
+
+Copy a model template from `deploy/` to a local deployment JSON, or pass an
+example directly with `--config`. The JSON selects the model, `world_size`
+and engine settings. Worlds 1, 2 and 4 take the first N nodes from `.env`;
+switching models does not require copying addresses between JSONs.
 
 | template | deployment |
 |---|---|
-| `cluster.example.json` | GLM-5.3-Flash-FP8, four nodes |
+| `cluster{,.nvfp4}.example.json` | GLM-5.3-Flash NVFP4/FP8 hybrid, four nodes |
 | `cluster_qwen{,_t1,_w2,_w2_t1}.example.json` | Qwen FP8 with MTP or plain decode, four or two nodes |
 | `cluster_qwen_spark1{,_t1}.example.json` | Qwen NVFP4 on one Spark, with a mapped n-gram table |
 | `cluster_glm47{,_t1,_d2}.example.json` | GLM-4.7 NVFP4, MTP depth 1, plain decode or depth 2 |
@@ -31,9 +43,23 @@ scripts/dgpp-cluster status   # inspect the configured processes
 scripts/dgpp-cluster down     # stop, collect logs and compare operation streams
 ```
 
+`doctor` performs read-only preflight checks locally and over SSH; `up` runs
+it automatically. Use `doctor --local-only` to inspect just rank 0.
+`--skip-preflight` is available for diagnosis, but does not bypass process
+ownership checks. `up` refuses a running deployment unless `--replace` is
+explicitly requested. Stop jobs from older launchers with their original
+launcher before upgrading: an unrecorded process is never adopted or killed.
+
 The default config is `deploy/cluster.json`, or
 `DGPP_CLUSTER_CONFIG` when set. Use `--config FILE` to select another
-deployment. `--bin PATH` selects a development binary (default
+deployment. `scripts/dgpp-cluster resolve --config FILE` prints the merged
+runtime configuration without launching or contacting any node. At startup,
+the launcher saves it as `<log_dir>/cluster.resolved.json` and stages the same
+content to peers as `<stage_dir>/cluster.json`. Neither `.env` nor its tokens
+are copied to peers. Direct `dgpp-serve --config` commands need this resolved
+JSON, not the deployment template.
+
+`--bin PATH` selects a development binary (default
 `build-ci/dgpp-serve`), `--log-dir DIR` overrides the log directory,
 and `--knobs "FLAGS"` appends server flags after the file settings.
 The compatibility wrapper `scripts/serve_run.sh` maps
@@ -55,7 +81,7 @@ the recorded deployment; the first checkpoint load took about 4.5 minutes.
 
 Use a separate config for each checkpoint. For example, a site-local
 `deploy/cluster.nvfp4.json` can select the composed
-`dgpp/GLM-5.3-Flash-NVFP4-FP8` checkpoint. Size its context and prefix
+`HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` checkpoint. Size its context and prefix
 arena with `--memory-plan`; the smaller weight footprint does not imply
 one fixed cache capacity for every deployment.
 
@@ -68,11 +94,18 @@ record releases peers. A signal during prefill waits for that pass to
 finish. The launcher waits up to 240 s for rank 0 before handling peers
 and collecting logs.
 
-Logs and operation streams are collected under `paths.log_dir`, using
+Logs and operation streams are collected under `DGPP_LOG_DIR/deployments/ID`, using
 names such as `serve_r0.log` and `serve_rank0.ops`. The launcher
 prints one MD5 per rank's operation stream; all ranks must match.
 Old peer operation streams are removed before a new development run so
 they cannot be mistaken for that run's results.
+The ID hashes the absolute deployment-file path, not its model name.
+Staging is similarly isolated under `DGPP_STAGE_DIR/deployments/ID`.
+`dgpp-cluster paths` prints both locations. An explicit `--log-dir` is used
+as-is; pass the same override to `up`, `down` and `status`. Process records
+include owner, boot identity and start time so PID reuse cannot authorize
+cleanup of another process. Keep the deployment path/site settings stable
+while it is running.
 
 Host log lines include UTC timestamps to the millisecond. Device-side bus
 stall diagnostics (`BKFIN`) use GPU printf and have no timestamp.
@@ -103,9 +136,9 @@ exits before its first tick rather than form a mixed world.
   and knobs).
 - Nothing privileged: no locked clocks, no memlock limit changes, no root
   (the memory section below says why).
-- The peers' staging directory (`paths.stage_dir`, `/tmp/dgpp-stage` in
-  the example) lives in `/tmp`: a reboot empties it, and
-  `dgpp-cluster up` recreates it. The log dir (`paths.log_dir`,
+- The default peers' staging directory (`/tmp/bus4/deployments/ID`)
+  lives in `/tmp`: a reboot empties it, and
+  `dgpp-cluster up` recreates it. The log dir (`DGPP_LOG_DIR`,
   `~/dgpp/log`) persists.
 - The journal star forms first: rank 0 listens on the journal at once and
   the peers connect to it (retrying within the rendezvous window) before
@@ -128,7 +161,7 @@ check their allocations before loading:
   world never forms) when the plan plus 8 GiB of headroom exceeds the
   node's free memory. The refusal names the largest items and the largest
   `kv_capacity` the node would hold as configured. `dgpp-serve --config
-  deploy/cluster.json --rank R --memory-plan` runs the check alone and
+  /path/to/cluster.resolved.json --rank R --memory-plan` runs the check alone and
   exits 0 or 1;
 - the loader's own check that the resident footprint (+ 8 GiB headroom)
   fits the device's free memory remains as the second line and fails

@@ -1,6 +1,7 @@
 // RC-QP primitives for the CollectiveBus (see verbs.hpp).
 
 #include "net/verbs.hpp"
+#include "net/site_options.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -30,7 +31,7 @@ int pick_rocev2_gid(ibv_context* ctx, int port) {
   base += ctx->device->name;
   base += "/ports/" + std::to_string(port) + "/gid_attrs/types/";
   int first_v2 = -1;
-  for (int i = 0; i < 64; ++i) {
+  for (int i = 0; i < 256; ++i) {
     FILE* f = std::fopen((base + std::to_string(i)).c_str(), "r");
     if (!f) continue;
     char type_buf[32] = {};
@@ -108,7 +109,8 @@ VerbsDevice::VerbsDevice(const std::string& name_hint, std::string* error) {
     return;
   }
 
-  gid_idx_ = pick_rocev2_gid(ctx_, port_);
+  gid_idx_ = configured_gid_index(name_);
+  if (gid_idx_ < 0) gid_idx_ = pick_rocev2_gid(ctx_, port_);
   if (ibv_query_gid(ctx_, port_, gid_idx_, &gid_) != 0) {
     *error = "query_gid failed on " + name_ + " idx=" + std::to_string(gid_idx_);
     ibv_close_device(ctx_);

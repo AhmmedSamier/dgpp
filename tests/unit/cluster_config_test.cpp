@@ -1,5 +1,5 @@
 // The cluster config: the schema is checked by name, the
-// engine defaults are the binary's own, the committed deploy/cluster.json
+// engine defaults are the binary's own, the launcher's resolved configuration
 // parses, and the digest is stable and sensitive.
 #include <stdexcept>
 #include <string>
@@ -65,6 +65,16 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   const dgpp::serve::ClusterConfig one =
       dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
   require(one.world() == 1 && one.http_port == 18080, "a one-node world");
+  require(one.http_bind == "127.0.0.1", "HTTP defaults to loopback");
+}
+
+DGPP_TEST(cluster_config_http_override_is_order_independent) {
+  const auto c = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"http":{"bind_host":"0.0.0.0","port":8080},"ports":{"http":18080},"node_env":[{"HF_HUB_CACHE":"~/cache"}]})", "t");
+  require(c.http_bind == "0.0.0.0" && c.http_port == 8080, "deployment HTTP wins over legacy ports");
+  require(c.node_env.at(0).at("HF_HUB_CACHE") == "~/cache", "node cache retained");
+  require(!refusal(R"({"model":"m","nodes":["h"],"http":{"bind_host":"localhost"}})").empty(), "bind must be IPv4");
+  require(!refusal(R"({"model":"m","nodes":["h"],"node_env":[{"HF_TOKEN":"x"}]})").empty(), "credentials disallowed");
 }
 
 DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
@@ -102,17 +112,17 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
   }
 }
 
-DGPP_TEST(cluster_config_theExampleFileParsesAndTheDigestIsStable) {
-  // The template a site copies to its own deploy/cluster.json (not tracked).
+DGPP_TEST(cluster_config_theResolvedFileParsesAndTheDigestIsStable) {
+  // site_env_test.py checks this fixture against the deployment resolver.
   const dgpp::serve::ClusterConfig ex = dgpp::serve::load_cluster_config(
-      std::string(DGPP_SOURCE_DIR) + "/deploy/cluster.example.json");
-  require(ex.world() == 4 && ex.model == "unsloth/GLM-5.3-Flash-FP8" &&
+      std::string(DGPP_SOURCE_DIR) + "/tests/fixtures/cluster.resolved.json");
+  require(ex.world() == 4 && ex.model == "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8" &&
               ex.http_port == 18080 && ex.engine.max_concurrency == 4 &&
               ex.engine.kv_capacity == 8192 && ex.engine.queue_limit == 8 &&
               ex.engine.kv_dtype == "bf16" &&
               ex.engine.decode_graph && ex.engine.mtp && ex.release.empty() &&
-              ex.ssh_user.empty(),
-          "deploy/cluster.example.json is the production shape with no site in it");
+              ex.ssh_user == "ops",
+          "the resolved deployment has the model settings and example site values");
   require(dgpp::serve::config_digest("a") == dgpp::serve::config_digest("a") &&
               dgpp::serve::config_digest("a") != dgpp::serve::config_digest("b") &&
               dgpp::serve::config_digest("x").size() == 16,

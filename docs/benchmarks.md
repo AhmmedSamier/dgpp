@@ -73,7 +73,7 @@ template, which is what "supported" means on this page:
 | model | world | template | modes measured |
 |---|---|---|---|
 | `unsloth/GLM-5.3-Flash-FP8` | 4 | `deploy/cluster.example.json` | T=1, MTP depth 1 |
-| `dgpp/GLM-5.3-Flash-NVFP4-FP8` | 4 | `cluster.nvfp4.example.json` | T=1, MTP depth 1 |
+| `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` | 4 | `cluster.nvfp4.example.json` | T=1, MTP depth 1 |
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 4 | `cluster_qwen.example.json`, `cluster_qwen_t1.example.json` | T=1, MTP depth 1, depth 2 |
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 2 | `cluster_qwen_w2.example.json`, `cluster_qwen_w2_t1.example.json` | T=1, MTP depth 1, depth 2 |
 | `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen_spark1*.example.json` (five) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
@@ -551,7 +551,7 @@ Everything below runs against a booted world. Bring one up with the launcher
 and the config for the deployment you are measuring:
 
 ```bash
-cp deploy/cluster_qwen.example.json deploy/cluster_qwen.json   # fill in nodes and ssh_user
+cp deploy/cluster_qwen.example.json deploy/cluster_qwen.json   # shared nodes and SSH login come from .env
 scripts/dgpp-cluster up --config deploy/cluster_qwen.json
 ```
 
@@ -646,13 +646,17 @@ scripts/fabric_prefill_repeat.sh --config deploy/cluster.json OUT_DIR 512 2048 8
 ### 9.5 Quality
 
 ```bash
-scripts/serve_eval.py HOST PORT --out OUT_DIR --tasks humaneval,gsm8k,extract [--limit N] [--no-think]
+scripts/serve_eval.py HOST PORT --out OUT_DIR --tasks gsm8k,extract
 ```
 
 Greedy, the served model taken from `GET /v1/models`, HumanEval completions
 executed against the problem's own tests in a subprocess. Pass `--limit` to
 run a subset, and record the denominator with the score. The data lives in
-`build-ci/eval_data`.
+`DGPP_DATA_DIR` (default `data/`); prepare it with
+`python3 scripts/prepare_data.py download`. To include HumanEval, use
+`--tasks humaneval,gsm8k,extract --allow-code-execution` only on an isolated
+evaluation machine. Generated code runs without a security sandbox.
+See [fixture preparation](testing.md).
 
 ### 9.6 The determinism checks that make a benchmark meaningful
 

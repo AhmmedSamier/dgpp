@@ -30,11 +30,12 @@ import random
 import sys
 import threading
 import time
+from serve_client import served_model
 
 ap = argparse.ArgumentParser()
 ap.add_argument("host")
 ap.add_argument("port", type=int)
-ap.add_argument("--model", default="unsloth/GLM-5.3-Flash-FP8")
+ap.add_argument("--model")
 ap.add_argument("--streams", type=int, default=3)
 ap.add_argument("--turns", type=int, default=6)
 ap.add_argument("--system-words", type=int, default=1200)
@@ -51,6 +52,7 @@ ap.add_argument("--seed", type=int, default=7)
 ap.add_argument("--prompt-mode", choices=["tools", "essay"], default="tools",
                 help="essay: no tools, each turn asks for a long answer (sustained decode)")
 args = ap.parse_args()
+args.model = args.model or served_model(args.host, args.port)
 os.makedirs(args.out, exist_ok=True)
 lock = threading.Lock()
 requests_f = open(os.path.join(args.out, "requests.jsonl"), "a", encoding="utf-8")

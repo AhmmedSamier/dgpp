@@ -21,18 +21,22 @@
 # fresh answers, and summary.txt.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$ROOT/scripts/cluster_env.sh"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+dgpp_require_world 4 || exit 1
 SR=$ROOT/scripts/serve_run.sh
-LOG="${DGPP_SERVE_LOG:-$HOME/dgpp/log}"
-PEERS=($(dgpp_peers))
-RANK0=$(dgpp_head)
-HTTP="http://$RANK0:18080"
-PEER_DIR=/tmp/bus4
+LOG=$(dgpp_log_dir) || exit 1
+LOG=${LOG/#\~/$HOME}
+PEER_LIST=$(dgpp_peers) || exit 1
+read -r -a PEERS <<< "$PEER_LIST"
+RANK0=$(dgpp_head) || exit 1
+HTTP="http://$(dgpp_client_host):$(dgpp_http_port)"
+PEER_DIR=$(dgpp_stage_dir) || exit 1
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5)
-# The peers' ssh login: DGPP_FABRIC_USER, else the config's, else the caller's.
-SSH_USER="${DGPP_FABRIC_USER:-$(dgpp_ssh_user)}"
+# The shared SSH login comes from .env (or an exported override).
+SSH_USER=$(dgpp_ssh_user) || exit 1
 VICTIM=${1:?usage: $0 <victim rank 0..3> [clients]}
 CLIENTS=${2:-3}
+[[ "$VICTIM" =~ ^[0-3]$ && "$CLIENTS" =~ ^[1-3]$ ]] || { echo "victim must be 0..3 and clients 1..3" >&2; exit 2; }
 STAMP=$(date +%Y-%m-%d_%H%M%S)
 DRILL="${DGPP_DRILL_DIR:-$ROOT/build-ci/fabric-runs/failure_drill_${STAMP}}"
 mkdir -p "$DRILL"
@@ -51,36 +55,13 @@ peer_ssh() { timeout 20 ssh "${SSH_OPTS[@]}" "$SSH_USER@$1" "${2:-true}"; }
 
 body_for() {  # body_for INDEX STREAM(true|false)
   local i=$1 stream=$2
-  python3 - "$i" "$stream" "$MAX_TOKENS" "${PROMPTS[$i]}" <<'PY'
-import json, sys
-i, stream, n, prompt = int(sys.argv[1]), sys.argv[2] == "true", int(sys.argv[3]), sys.argv[4]
-print(json.dumps({"model": "unsloth/GLM-5.3-Flash-FP8", "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": n, "temperature": 0, "stream": stream}))
-PY
+  python3 "$ROOT/scripts/failure_report.py" request-body "$stream" "$MAX_TOKENS" "${PROMPTS[$i]}" "$MODEL"
 }
 
 # Every token the client received, concatenated: the reasoning deltas and
 # the content deltas, in order (the committed text the prefix check is over).
 sse_content() {
-  python3 - "$1" <<'PY'
-import json, sys
-out = []
-for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    line = line.strip()
-    if not line.startswith("data: ") or line == "data: [DONE]":
-        continue
-    try:
-        obj = json.loads(line[6:])
-    except json.JSONDecodeError:
-        continue
-    for ch in obj.get("choices", []):
-        d = ch.get("delta", {})
-        if d.get("reasoning_content"):
-            out.append(d["reasoning_content"])
-        if d.get("content"):
-            out.append(d["content"])
-sys.stdout.write("".join(out))
-PY
+  python3 "$ROOT/scripts/serve_streams.py" text "$1"
 }
 
 say "=== failure drill: victim rank $VICTIM, $CLIENTS streaming client(s), knobs: ${DGPP_SERVE_KNOBS:-<serve_run.sh default>}"
@@ -89,6 +70,7 @@ say "=== artifacts: $DRILL"
 # 1. Boot.
 "$SR" up 2>&1 | tee "$DRILL/up1.log" | tail -3
 grep -q "READY" "$DRILL/up1.log" || { say "FAIL: the world did not come up"; exit 1; }
+MODEL=$(dgpp_served_model) || exit 1
 
 # 2. Load: the streaming clients.
 CURL_PIDS=()
@@ -111,25 +93,20 @@ done
 for ((i = 0; i < CLIENTS; ++i)); do
   say "client $i: $(deltas "$DRILL/client_$i.sse") token deltas before the kill"
 done
-sleep "$(python3 -c 'import random; print(round(random.uniform(0.2, 1.5), 2))')"  # a random moment under load
+sleep "$(python3 "$ROOT/scripts/run_helpers.py" random-delay)"  # a random moment under load
 
 # 3. The kill.
 T_KILL=$(date +%s.%N)
-if [ "$VICTIM" -eq 0 ]; then
-  pid=$(cat "$LOG/r0.pid")
-  say "=== kill -9 rank 0 (pid $pid) at $(date +%T.%N)"
-  kill -9 "$pid"
-else
-  h=${PEERS[$((VICTIM - 1))]}
-  say "=== kill -9 rank $VICTIM on $h at $(date +%T.%N)"
-  peer_ssh "$h" "pkill -9 -x dgpp-serve"
-fi
+say "=== kill -9 recorded rank $VICTIM at $(date +%T.%N)"
+signal_args=(signal --rank "$VICTIM" --signal KILL)
+[[ -n "${DGPP_SERVE_LOG:-}" ]] && signal_args+=(--log-dir "$DGPP_SERVE_LOG")
+python3 "$ROOT/scripts/dgpp-cluster" "${signal_args[@]}" || exit 1
 
 # 4. The ranks leave. Rank 0: gone within 30 s of the kill.
 r0_gone=""
 for _ in $(seq 1 300); do
-  if ! kill -0 "$(cat "$LOG/r0.pid")" 2>/dev/null; then
-    r0_gone=$(python3 -c "import time; print(round(time.time() - $T_KILL, 2))"); break
+  if ! python3 "$ROOT/scripts/cluster_process.py" status --state "$LOG/rank0.process.json" >/dev/null; then
+    r0_gone=$(python3 "$ROOT/scripts/run_helpers.py" elapsed "$T_KILL"); break
   fi
   sleep 0.1
 done
@@ -138,8 +115,8 @@ for ((r = 1; r <= 3; ++r)); do
   h=${PEERS[$((r - 1))]}
   gone=""
   for _ in $(seq 1 300); do
-    if ! peer_ssh "$h" "pgrep -x dgpp-serve" >/dev/null 2>&1; then
-      gone=$(python3 -c "import time; print(round(time.time() - $T_KILL, 2))"); break
+    if ! peer_ssh "$h" "python3 $PEER_DIR/cluster_process.py status --state $PEER_DIR/rank$r.process.json" >/dev/null 2>&1; then
+      gone=$(python3 "$ROOT/scripts/run_helpers.py" elapsed "$T_KILL"); break
     fi
     sleep 0.1
   done
@@ -172,13 +149,7 @@ for ((i = 0; i < CLIENTS; ++i)); do
       say "FAIL: client $i did not end with engine_failure + [DONE] (see $f)"
     fi
     # No token after the error event.
-    if python3 - "$f" <<'PY'
-import sys
-raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-at = raw.find('"error"')
-tail = raw[at:] if at >= 0 else ""
-sys.exit(0 if '"content":"' not in tail and '"reasoning_content":"' not in tail else 1)
-PY
+    if python3 "$ROOT/scripts/serve_streams.py" no-tokens-after-error "$f"
     then :; else say "FAIL: client $i received a token after the error event"; fi
   else
     interrupted=$((interrupted + 1))
@@ -202,21 +173,7 @@ say "=== ops files (a survivor's stream is rank 0's up to the failure):"
 (cd "$DRILL" && wc -l serve_rank*.ops 2>/dev/null | tee -a "$SUMMARY")
 # Every survivor's op stream must be a prefix-consistent view: identical
 # lines up to the shortest file.
-python3 - "$DRILL" "$VICTIM" <<'PY' | tee -a "$SUMMARY"
-import glob, os, sys
-d = sys.argv[1]
-victim = f"serve_rank{sys.argv[2]}.ops"  # killed -9: it wrote nothing this run
-files = sorted(f for f in glob.glob(os.path.join(d, "serve_rank*.ops"))
-               if os.path.getsize(f) > 0 and os.path.basename(f) != victim)
-texts = {os.path.basename(f): open(f, encoding="utf-8", errors="replace").read().splitlines() for f in files}
-if len(texts) < 2:
-    print("  (fewer than two ops files; no cross-rank comparison)")
-else:
-    n = min(len(v) for v in texts.values())
-    base = next(iter(texts.values()))[:n]
-    bad = [k for k, v in texts.items() if v[:n] != base]
-    print(f"  op streams agree over the first {n} lines" if not bad else f"  FAIL: op streams disagree within the first {n} lines: {bad}")
-PY
+python3 "$ROOT/scripts/failure_report.py" ops "$DRILL" "$VICTIM" | tee -a "$SUMMARY"
 
 # 7. Sweep whatever is left (nothing should be), then restart and replay.
 "$SR" down > "$DRILL/down1.log" 2>&1 || true
@@ -233,12 +190,7 @@ for ((i = 0; i < CLIENTS; ++i)); do
     say "client $i: no committed tokens (queued at the kill) — nothing to compare"
     continue
   fi
-  if python3 - "$DRILL/client_$i.committed.txt" "$DRILL/replay_$i.txt" <<'PY'
-import sys
-a = open(sys.argv[1], encoding="utf-8").read()
-b = open(sys.argv[2], encoding="utf-8").read()
-sys.exit(0 if a and b.startswith(a) else 1)
-PY
+  if python3 "$ROOT/scripts/failure_report.py" prefix "$DRILL/client_$i.committed.txt" "$DRILL/replay_$i.txt"
   then
     say "client $i: the $(wc -c < "$DRILL/client_$i.committed.txt")-byte committed text is a prefix of the fresh $(wc -c < "$DRILL/replay_$i.txt")-byte answer — OK"
   else

@@ -8,20 +8,28 @@
 #   fabric_qwen_serve.sh CONFIG OUT_DIR [--compare REF_TRANSCRIPTS.json] [--eval] [--knobs "FLAGS"]
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
 CONFIG=${1:?CONFIG}; OUT=${2:?OUT_DIR}; shift 2
 case "$CONFIG" in /*) ;; *) CONFIG="$ROOT/$CONFIG" ;; esac
+export DGPP_CLUSTER_CONFIG="$CONFIG"
 case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac
-COMPARE=""; EVAL=0; KNOBS=""
+COMPARE=""; EVAL=0; ALLOW_CODE=0; KNOBS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --compare) COMPARE="$2"; shift 2;;
     --eval) EVAL=1; shift;;
+    --allow-code-execution) ALLOW_CODE=1; shift;;
     --knobs) KNOBS="$2"; shift 2;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
+if [[ $EVAL -eq 1 && $ALLOW_CODE -ne 1 ]]; then
+  echo "--eval includes HumanEval: use an isolated evaluation environment and pass --allow-code-execution" >&2
+  exit 2
+fi
 mkdir -p "$OUT"
-HOST=$(jq -r '.nodes[0]' "$CONFIG"); PORT=$(jq -r '.ports.http' "$CONFIG")
+HOST=$(dgpp_client_host) || exit 1
+PORT=$(dgpp_http_port) || exit 1
 cd "$ROOT" || exit 1
 up=(python3 scripts/dgpp-cluster up --config "$CONFIG" --log-dir "$OUT/world")
 [[ -n "$KNOBS" ]] && up+=(--knobs "$KNOBS")
@@ -38,7 +46,7 @@ python3 scripts/serve_api_check.py "$HOST" "$PORT" > "$OUT/api_check.log" 2>&1 &
 if [[ $EVAL -eq 1 ]]; then
   echo "== eval (gsm8k 60, humaneval 40, extract 30)"
   python3 scripts/serve_eval.py "$HOST" "$PORT" --out "$OUT/eval" --tasks gsm8k --limit 60 --concurrency 4 2>&1 | tail -3
-  python3 scripts/serve_eval.py "$HOST" "$PORT" --out "$OUT/eval" --tasks humaneval --limit 40 --concurrency 4 2>&1 | tail -3
+  python3 scripts/serve_eval.py "$HOST" "$PORT" --out "$OUT/eval" --tasks humaneval --allow-code-execution --limit 40 --concurrency 4 2>&1 | tail -3
   python3 scripts/serve_eval.py "$HOST" "$PORT" --out "$OUT/eval" --tasks extract --limit 30 --concurrency 4 2>&1 | tail -3
 fi
 echo "== world down"

@@ -134,7 +134,7 @@ BusOptions options_for(const CommonArgs& c, int my_rank,
   o.my_rank = my_rank;
   o.lane_devices =
       c.devs.empty()
-          ? std::vector<std::string>{"rocep1s0f0", "roceP2p1s0f0"}
+          ? dgpp::net::configured_lane_devices()
           : c.devs;
   o.rendezvous_port = c.port;
   o.rendezvous_host = host;

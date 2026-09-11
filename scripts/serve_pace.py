@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """Per-request decode pace from a dgpp-serve rank log.
 
-Reads the scheduler's per-token lines (DEBUG since 2026-09-06: run the
-service with DGPP_LOG_LEVEL=debug to record them, and the bus's graph
-timeline lines with them)
-  <ts> INFO  sched: request 'ID' admitted to slot ... — first token T
-  <ts> INFO  sched: request 'ID' step N: token T
-  <ts> INFO  sched: request 'ID' retired (...)
-and reports, per request: tokens, the decode pace between the first
-decode token and the last (ms/token), the replay count (tokens whose
-stamps are within 10 ms of the previous one rode the same replay — a
-replay is >= 20 ms apart), and the resulting tokens/replay (MTP's
-acceptance in service clothing). ms timestamps, so treat the per-step
-figures as +-1 ms. With `--waves`, it also reports each contiguous request
-wave's peak-occupancy window: from the admission that reaches the peak
-through the first retirement. Graph timeline lines provide the physical
-replay clock, so serialized prefill stalls are excluded from that table.
+Run the service with DGPP_LOG_LEVEL=debug to record scheduler token steps
+and bus graph timelines. This report reads request admissions, steps and
+retirements to measure decode pace. Step 1 is the prefill pick; later steps
+are decode tokens. Gaps of at least 10 ms separate estimated replays, while
+closer token timestamps count toward the same replay. Tokens per replay
+therefore captures the extra tokens accepted through MTP. The log timestamps
+have millisecond precision, so per-step timings are approximate to +/-1 ms.
+
+With --waves, the report also measures each request wave at peak occupancy,
+from the admission that reaches the peak through the first retirement.
+This table uses graph timeline events as the replay clock and excludes
+the serialized prefill period before peak occupancy.
 """
 import re
 import sys
@@ -33,41 +30,42 @@ def print_waves(path):
     waves = []
     active = set()
     wave = None
-    for line in open(path, errors="replace"):
-        m = LINE.match(line)
-        is_replay = "graph window timeline:" in line
-        if not m and not is_replay:
-            continue
-        stamp = STAMP.match(line)
-        if not stamp:
-            continue
-        ts = parse_ts(stamp.group(1))
-        if wave is not None and is_replay:
-            wave["replays"].append(ts)
-        if not m:
-            continue
-        rid = m.group(2)
-        kind = m.group(3)
-        if kind.startswith("admitted"):
-            if not active:
-                wave = {"ids": [], "peak": 0, "peak_start": None,
-                        "peak_end": None, "replays": [], "steps": []}
-            active.add(rid)
-            wave["ids"].append(rid)
-            if len(active) > wave["peak"]:
-                wave["peak"] = len(active)
-                wave["peak_start"] = ts
-        elif kind.startswith("step"):
-            if wave is not None:
-                wave["steps"].append((ts, rid, int(m.group(4))))
-        else:
-            if wave is not None and len(active) == wave["peak"] and \
-                    wave["peak_end"] is None:
-                wave["peak_end"] = ts
-            active.discard(rid)
-            if wave is not None and not active:
-                waves.append(wave)
-                wave = None
+    with open(path, errors="replace") as source:
+        for line in source:
+            m = LINE.match(line)
+            is_replay = "graph window timeline:" in line
+            if not m and not is_replay:
+                continue
+            stamp = STAMP.match(line)
+            if not stamp:
+                continue
+            ts = parse_ts(stamp.group(1))
+            if wave is not None and is_replay:
+                wave["replays"].append(ts)
+            if not m:
+                continue
+            rid = m.group(2)
+            kind = m.group(3)
+            if kind.startswith("admitted"):
+                if not active:
+                    wave = {"ids": [], "peak": 0, "peak_start": None,
+                            "peak_end": None, "replays": [], "steps": []}
+                active.add(rid)
+                wave["ids"].append(rid)
+                if len(active) > wave["peak"]:
+                    wave["peak"] = len(active)
+                    wave["peak_start"] = ts
+            elif kind.startswith("step"):
+                if wave is not None:
+                    wave["steps"].append((ts, rid, int(m.group(4))))
+            else:
+                if wave is not None and len(active) == wave["peak"] and \
+                        wave["peak_end"] is None:
+                    wave["peak_end"] = ts
+                active.discard(rid)
+                if wave is not None and not active:
+                    waves.append(wave)
+                    wave = None
 
     print()
     print(f"{'wave':>4} {'live':>4} {'requests':>8} {'replays':>7} "
@@ -95,32 +93,39 @@ def print_waves(path):
               f"{rate:>7.2f} {p50:>6.1f} {p99:>6.1f} {gaps[-1]:>6.1f}")
 
 
-def main(path, show_waves=False):
+def request_paces(path):
+    """Return measurements in request order, before display rounding.
+
+    Rows with fewer than two token steps contain only request, tokens and
+    short=True. Other rows include replay counts, pace and replay-gap
+    percentiles; timing fields are NaN when there are too few samples.
+    """
     reqs = {}
     order = []
-    for line in open(path, errors="replace"):
-        m = LINE.match(line)
-        if not m:
-            continue
-        ts = parse_ts(m.group(1))
-        rid = m.group(2)
-        kind = m.group(3)
-        r = reqs.setdefault(rid, {"admit": None, "stamps": [], "retire": None})
-        if rid not in order:
-            order.append(rid)
-        if kind.startswith("admitted"):
-            r["admit"] = ts
-        elif kind.startswith("step"):
-            r["stamps"].append(ts)
-        else:
-            r["retire"] = ts
-    print(f"{'request':<28} {'tok':>4} {'replays':>7} {'tok/rep':>7} {'decode ms/tok':>13} {'ms/replay':>9} {'p50':>6} {'p99':>6} {'max':>6}")
+    with open(path, errors="replace") as source:
+        for line in source:
+            m = LINE.match(line)
+            if not m:
+                continue
+            ts = parse_ts(m.group(1))
+            rid = m.group(2)
+            kind = m.group(3)
+            r = reqs.setdefault(rid, {"admit": None, "stamps": [], "retire": None})
+            if rid not in order:
+                order.append(rid)
+            if kind.startswith("admitted"):
+                r["admit"] = ts
+            elif kind.startswith("step"):
+                r["stamps"].append(ts)
+            else:
+                r["retire"] = ts
+    rows = []
     for rid in order:
         r = reqs[rid]
         st = r["stamps"]
         n = len(st)
         if n < 2:
-            print(f"{rid:<28} {n:>4}  (too short)")
+            rows.append({"request": rid, "tokens": n, "short": True})
             continue
         # The prefill pick is step 1; decode stamps are steps 2..n.
         dec = st[1:]
@@ -133,7 +138,23 @@ def main(path, show_waves=False):
         p50 = rep_gaps[len(rep_gaps) // 2] if rep_gaps else float("nan")
         p99 = rep_gaps[min(len(rep_gaps) - 1, int(len(rep_gaps) * 0.99))] if rep_gaps else float("nan")
         mx = rep_gaps[-1] if rep_gaps else float("nan")
-        print(f"{rid:<28} {n:>4} {replays:>7} {len(dec) / replays:>7.2f} {pace:>13.2f} {per_replay:>9.2f} {p50:>6.1f} {p99:>6.1f} {mx:>6.1f}")
+        rows.append({"request": rid, "tokens": n, "short": False,
+                     "replays": replays, "tokens_per_replay": len(dec) / replays,
+                     "ms_per_token": pace, "ms_per_replay": per_replay,
+                     "p50": p50, "p99": p99, "max": mx})
+    return rows
+
+
+def main(path, show_waves=False):
+    print(f"{'request':<28} {'tok':>4} {'replays':>7} {'tok/rep':>7} {'decode ms/tok':>13} {'ms/replay':>9} {'p50':>6} {'p99':>6} {'max':>6}")
+    for row in request_paces(path):
+        rid, n = row["request"], row["tokens"]
+        if row["short"]:
+            print(f"{rid:<28} {n:>4}  (too short)")
+            continue
+        print(f"{rid:<28} {n:>4} {row['replays']:>7} {row['tokens_per_replay']:>7.2f} "
+              f"{row['ms_per_token']:>13.2f} {row['ms_per_replay']:>9.2f} "
+              f"{row['p50']:>6.1f} {row['p99']:>6.1f} {row['max']:>6.1f}")
     if show_waves:
         print_waves(path)
 

@@ -13,13 +13,12 @@
 #   WIDTHS defaults to "128 64 32 16 4", MODES to "plain mtp".
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-. "$ROOT/scripts/cluster_env.sh"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
 OUT=${1:-$ROOT/build-ci/fabric-runs/width_sweep_$(date +%Y-%m-%d_%H%M%S)}
 WIDTHS=${2:-"128 64 32 16 4"}
 MODES=${3:-"plain mtp"}
-HOST=${DGPP_SERVE_HOST:-$(dgpp_head)}
-URL=http://$HOST:18080/v1/chat/completions
-M=unsloth/GLM-5.3-Flash-FP8
+HOST=$(dgpp_client_host) || exit 1
+URL=http://$HOST:$(dgpp_http_port)/v1/chat/completions
 mkdir -p "$OUT"
 cd "$ROOT" || exit 1
 TSV=$OUT/sweep.tsv
@@ -35,6 +34,8 @@ declare -a PROMPTS=(
 
 run_requests() {  # run_requests WIDTH MODE RUNDIR
   local width=$1 mode=$2 dir=$3 i=0
+  local M
+  M=$(dgpp_served_model) || return 1
   for setting in default hot; do
     for p in "${PROMPTS[@]}"; do
       i=$((i + 1))
@@ -62,60 +63,7 @@ for mode in $MODES; do
     sleep 2
     run_requests "$width" "$mode" "$RUN"
     scripts/serve_run.sh down
-    python3 - "$RUN" "$width" "$mode" "$TSV" <<'PY'
-import json, re, sys, os, hashlib, glob
-run, width, mode, tsv = sys.argv[1:5]
-log = os.path.join(run, "serve", "serve_r0.log")
-# Per-request fallback counts: the engine logs "slot S closed: N sampled
-# decode steps, F fallbacks" at close; the scheduler logs "request 'id'
-# admitted to slot S" at admission. Slots are reused in order, so the k-th
-# close on a slot belongs to the k-th admission to it.
-admitted = {}   # slot -> [request ids in order]
-closed = {}     # request id -> (sampled, fallbacks)
-for line in open(log, errors="replace"):
-    m = re.search(r"request '([^']+)' admitted to slot (\d+)", line)
-    if m:
-        admitted.setdefault(int(m.group(2)), []).append(m.group(1))
-        continue
-    m = re.search(r"slot (\d+) closed: (\d+) sampled decode steps, (\d+) fallbacks", line)
-    if m:
-        slot = int(m.group(1))
-        pending = [r for r in admitted.get(slot, []) if r not in closed]
-        if pending:
-            closed[pending[0]] = (int(m.group(2)), int(m.group(3)))
-# The pace per request from serve_pace.py's table.
-import subprocess
-table = subprocess.run([sys.executable, "scripts/serve_pace.py", log], capture_output=True, text=True).stdout
-pace = {}
-for line in table.splitlines():
-    parts = line.split()
-    if len(parts) >= 9 and parts[0].startswith("chatcmpl-"):
-        try:
-            pace[parts[0]] = (int(parts[1]), int(parts[2]), float(parts[3]), float(parts[4]), float(parts[5]))
-        except ValueError:
-            pass
-rows = []
-for f in sorted(glob.glob(os.path.join(run, "req_*.json"))):
-    name = os.path.basename(f)[4:-5]
-    setting = name.split("_")[0]
-    try:
-        d = json.load(open(f))
-    except Exception as e:
-        print(f"  {name}: unreadable ({e})"); continue
-    if "error" in d:
-        print(f"  {name}: ERROR {d['error']}"); continue
-    rid = d["id"]
-    ch = d["choices"][0]
-    text = ch["message"].get("content") or ""
-    sha = hashlib.sha256(((ch["message"].get("reasoning_content") or "") + "\x00" + text).encode()).hexdigest()[:12]
-    sampled, fallbacks = closed.get(rid, (-1, -1))
-    tok, replays, tpr, mspt, mspr = pace.get(rid, (-1, -1, float("nan"), float("nan"), float("nan")))
-    rows.append((width, mode, name, setting, d["usage"]["completion_tokens"], ch["finish_reason"], sampled, fallbacks, replays, tpr, mspr, mspt, sha))
-with open(tsv, "a") as out:
-    for r in rows:
-        out.write("\t".join(str(x) for x in r) + "\n")
-        print("  " + "  ".join(str(x) for x in r))
-PY
+    python3 "$ROOT/scripts/width_sweep_collect.py" "$RUN" "$width" "$mode" "$TSV"
   done
 done
 echo "=== sweep done: $TSV"

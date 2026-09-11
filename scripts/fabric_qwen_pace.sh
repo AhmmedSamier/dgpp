@@ -7,8 +7,10 @@
 #   fabric_qwen_pace.sh CONFIG OUT_DIR [--knobs "FLAGS"] [--tokens N]
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
 CONFIG=${1:?CONFIG}; OUT=${2:?OUT_DIR}; shift 2
 case "$CONFIG" in /*) ;; *) CONFIG="$ROOT/$CONFIG" ;; esac
+export DGPP_CLUSTER_CONFIG="$CONFIG"
 case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac
 KNOBS=""; TOKENS=200
 while [[ $# -gt 0 ]]; do
@@ -19,7 +21,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 mkdir -p "$OUT"
-HOST=$(jq -r '.nodes[0]' "$CONFIG"); PORT=$(jq -r '.ports.http' "$CONFIG")
+HOST=$(dgpp_client_host) || exit 1
+PORT=$(dgpp_http_port) || exit 1
 cd "$ROOT" || exit 1
 up=(python3 scripts/dgpp-cluster up --config "$CONFIG" --log-dir "$OUT/world")
 [[ -n "$KNOBS" ]] && up+=(--knobs "$KNOBS")

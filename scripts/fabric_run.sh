@@ -1,30 +1,10 @@
 #!/usr/bin/env bash
-# fabric_run: launch glm_gen_check across the fabric (this node as rank 0
-# head + the peer ranks via ssh) as one atomic job.
-#
-# WHY THIS EXISTS: the bus rendezvous is a 120s window that opens when rank 0
-# starts listening, and peers reach bus-start ~1s after launch. Manual
-# attempts that launched peers first, or took minutes to fumble ssh, burned
-# the window and died with "rendezvous connect: Connection refused" /
-# "rendezvous: table read failed" (the 2026-09-01 Stage 3b smoke needed
-# three tries to get the ORDER right). The working order, encoded here:
-#   0. refuse if any glm_gen_check is already running on any rank
-#      (--force kills them first)
-#   1. stage the binary to the peers — scp BEFORE the window opens
-#   2. pick a free rendezvous port (probe; --port overrides) so rebinds
-#      never collide with TIME_WAIT or a stale listener
-#   3. launch rank 0, wait for "rendezvous listening" in its log
-#   4. launch ranks 1..N by ssh, fire-and-forget — ssh sessions may
-#      linger even with -n and </dev/null, so peers are verified by
-#      OBSERVING the remote process (pgrep), never by ssh's exit code
-#   5. monitor rank 0 until it exits; a --timeout watchdog kills every
-#      rank on the head's behalf if it wedges
-#   6. collect: EOS line, per-rank generated-ids md5 (the log line's
-#      rank prefix stripped — the 2026-09-01 lesson: hash the payload,
-#      not the line), rank-consensus verdict, bus stats
-#
-# The model resolves from each node's own HF cache (--model ID), so the
-# only artifact the peers need is the staged binary.
+# Launch an application across the fabric, with rank 0 local and peers over SSH.
+# Stage files before starting rank 0, then launch peers once its rendezvous
+# listener is ready. Observe their process records, monitor the head, and
+# compare generated-token digests when the run finishes. Cleanup signals only
+# processes recorded for this output directory. Use an idle test cluster.
+# Each node needs its own model cache and compatible runtime libraries.
 #
 # Usage (from the repo root, ON THE HEAD NODE — rank 0 is this box):
 #   scripts/fabric_run.sh [options] -- APP_ARGS...
@@ -35,7 +15,7 @@
 #
 # Options:
 #   --app PATH      binary to stage + run (default $BUILD/glm_gen_check)
-#   --port N        rendezvous port (default: first free of 29970..29989)
+#   --port N        rendezvous port (default: first free starting at DGPP_FABRIC_PORT)
 #   --timeout SECS  head watchdog; 0 disables (default 1800)
 #   --no-stage      skip the peer scp (peers already carry this binary)
 #   --stage-file F  ALSO scp F to the peers and rewrite the peers'
@@ -44,7 +24,7 @@
 #                  the cross-rank identity check). Stages even under
 #                  --no-stage: the manifest changes more often than the
 #                  binary and costs nothing to ship.
-#   --force         pkill -x glm_gen_check on all ranks before starting
+#   --force         stop processes recorded for this output directory
 #   --log-dir DIR   logs land here (default $BUILD/fabric-runs/<UTC ts>)
 #   --head-wrap CMD prefix rank 0's command line with CMD (word-split) —
 #                  the profiling hook: e.g. --head-wrap "nsys profile
@@ -55,18 +35,14 @@
 #   --fetch-logs    after the run, scp every peer's log into LOG_DIR as
 #                  rN.log next to r0.log — the cross-rank analysis tools
 #                  (scripts/fabric_xrank.py) read the directory as a unit.
-#                  Cross-rank correlation by wall clock is hopeless (the
-#                  boxes disagree by hours); by bus generation it is exact.
+#                  Bus-generation IDs align rank events even when clocks differ.
 #   --node-probe    run scripts/node_probe.sh on EVERY node for the run's
 #                  duration (1 Hz /proc/vmstat + meminfo deltas into the
 #                  node's $PEER_DIR/probe_rN.log; fetched with the logs).
-#                  The 2026-09-02 jitter hunt's question was "is the box
-#                  reclaiming memory under us?" — this answers it per node.
 #   --node-cmd CMD  run CMD (a shell string) on every node in the
 #                  background for the run's duration, killed at the end —
-#                  the knob hook for "what if the node did X during the
-#                  run" (e.g. a drop_caches loop). Runs as $FABRIC_USER;
-#                  passwordless sudo is available on the lab fabric.
+#                  useful for controlled background-load experiments. Runs as
+#                  DGPP_SSH_USER; the script does not arrange extra privileges.
 #
 # Examples:
 #   scripts/fabric_run.sh -- --model unsloth/GLM-5.3-Flash-FP8 \
@@ -78,22 +54,20 @@
 #       --model unsloth/GLM-5.3-Flash-FP8 --requests build-ci/sched_smoke.jsonl \
 #       --max-concurrency 2 --kv-capacity 256
 #
-# Fabric layout via env; the defaults come from the site's cluster config
-# (deploy/cluster.json — scripts/cluster_env.sh), never from this file:
-#   DGPP_FABRIC_HEAD   head's fabric IP as peers --peer it (config node 0)
-#   DGPP_FABRIC_PEERS  space-separated peer IPs (config nodes 1..)
-#   DGPP_FABRIC_USER   ssh user (config ssh_user, else the caller's login)
-#   DGPP_PEER_DIR      staging dir on peers (/tmp/bus4)
+# .env supplies DGPP_NODES, DGPP_SSH_USER and DGPP_STAGE_DIR.
+# The selected deployment's world_size determines how many nodes to use.
+# Export those same keys to override the site settings for one run.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$ROOT/scripts/cluster_env.sh"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
 BUILD="${DGPP_BUILD_DIR:-$ROOT/build-ci}"
 APP="$BUILD/glm_gen_check"
-FABRIC_HEAD="${DGPP_FABRIC_HEAD:-$(dgpp_head)}"
-FABRIC_PEERS=(${DGPP_FABRIC_PEERS:-$(dgpp_peers)})
-FABRIC_USER="${DGPP_FABRIC_USER:-$(dgpp_ssh_user)}"
-PEER_DIR="${DGPP_PEER_DIR:-/tmp/bus4}"
+FABRIC_HEAD=$(dgpp_head) || exit 1
+PEER_LIST=$(dgpp_peers) || exit 1
+read -r -a FABRIC_PEERS <<< "$PEER_LIST"
+FABRIC_USER=$(dgpp_ssh_user) || exit 1
+PEER_DIR="$DGPP_STAGE_DIR"
 SSH_OPTS=(-n -o BatchMode=yes -o ConnectTimeout=8)
 MONITOR_TIMEOUT=1800
 STAGE=1
@@ -129,55 +103,71 @@ done
 APP_ARGS=("$@")
 [[ ${#APP_ARGS[@]} -gt 0 ]] || die "no app args after -- (e.g. -- --model ID --chat TEXT)"
 [[ -x "$APP" ]] || die "app not found/executable: $APP (build it, or pass --app)"
-# The staged binary keeps its name on the peers; every pkill/pgrep below
-# matches THAT name, so --app works for any fabric app, not just the
-# default (the 2026-09-02 hunt wanted bus_check and a synthetic decode
-# loop through the same launcher).
+# Refuse to stage over an executable that another run is using.
 APP_NAME="$(basename "$APP")"
 WORLD=$((1 + ${#FABRIC_PEERS[@]}))
 LOG_DIR="${LOG_DIR:-$BUILD/fabric-runs/$(date -u +%Y%m%d-%H%M%S)}"
 mkdir -p "$LOG_DIR"
+exec {RUN_LOCK}> "$LOG_DIR/launcher.lock"
+flock -n "$RUN_LOCK" || die "another launcher owns $LOG_DIR"
+RUN_ID=$(python3 "$ROOT/scripts/run_helpers.py" path-id "$LOG_DIR") || exit 1
+PEER_DIR="$DGPP_STAGE_DIR/fabric/$RUN_ID"
+PROCESS_HELPER="$ROOT/scripts/cluster_process.py"
+STATE="$LOG_DIR/head.process.json"
 export DGPP_LOG_LEVEL="${DGPP_LOG_LEVEL:-info}"  # render/eos lines are INFO
 PROBE_SCRIPT="$ROOT/scripts/node_probe.sh"
 ALL_NODES=(127.0.0.1 "${FABRIC_PEERS[@]}")  # index == rank
 
 # ------------------------------------------------------------- cleanup
 kill_all() {
-  pkill -x "$APP_NAME" 2>/dev/null || true
-  for ip in "${FABRIC_PEERS[@]}"; do
-    timeout 15 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
-      "pkill -x $APP_NAME" 2>/dev/null || true
+  python3 "$PROCESS_HELPER" signal --state "$STATE" --signal KILL || true
+  for i in "${!FABRIC_PEERS[@]}"; do
+    ip=${FABRIC_PEERS[$i]}; rank=$((i + 1))
+    peer_ssh "$ip" "test ! -f $PEER_DIR/cluster_process.py || python3 $PEER_DIR/cluster_process.py signal --state $PEER_DIR/fabric_${RUN_ID}_rank$rank.process.json --signal KILL" || true
   done
   stop_node_helpers
 }
-# Per-node helpers (probe sampler, --node-cmd) are tagged by a marker in
-# their command line so they can be killed by pattern without touching
-# anything else; the marker carries the run's log dir name for uniqueness.
-HELPER_TAG="fabric_run_helper_$(basename "$LOG_DIR")"
+# Helpers have separate identity records; the tag labels their output.
+HELPER_TAG="fabric_run_helper_$RUN_ID"
 stop_node_helpers() {
   [[ $NODE_PROBE -eq 1 || -n "$NODE_CMD" ]] || return 0
-  # The head's helpers are killed locally: ssh to our own address is not
-  # guaranteed to work (host keys), and a dozen runs' worth of probe loops
-  # were found still running here for exactly that reason.
-  pkill -f "$HELPER_TAG" >/dev/null 2>&1 || true
+  # Local cleanup does not depend on SSH access back to the head.
+  for kind in probe nodecmd; do
+    python3 "$PROCESS_HELPER" signal --state "$LOG_DIR/$kind.process.json" --signal TERM || true
+  done
   for ip in "${FABRIC_PEERS[@]}"; do
     timeout 15 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
-      "pkill -f $HELPER_TAG" >/dev/null 2>&1 || true
+      "test ! -f $PEER_DIR/cluster_process.py || { python3 $PEER_DIR/cluster_process.py signal --state $PEER_DIR/probe.process.json --signal TERM; python3 $PEER_DIR/cluster_process.py signal --state $PEER_DIR/nodecmd.process.json --signal TERM; }" >/dev/null 2>&1 || true
   done
 }
-trap 'kill_all' INT TERM
-# (pkill -x matches the process NAME exactly — it can never kill this script)
+OWN_RUN=0
+trap 'if [[ $OWN_RUN -eq 1 ]]; then kill_all; fi' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ------------------------------------------------------- stale / staging
 if [[ $FORCE -eq 1 ]]; then
-  echo "fabric_run: --force — killing any stale $APP_NAME on all ranks"
+  echo "fabric_run: --force — stopping only processes recorded for $LOG_DIR"
   kill_all
   sleep 2
 fi
-pgrep -x "$APP_NAME" >/dev/null && die "a $APP_NAME already runs here (--force to kill)"
+python3 "$PROCESS_HELPER" status --state "$STATE" >/dev/null \
+  && die "this output directory has a running recorded process; use --force to replace it"
+for i in "${!FABRIC_PEERS[@]}"; do
+  ip=${FABRIC_PEERS[$i]}; rank=$((i + 1))
+  peer_ssh "$ip" "test -f $PEER_DIR/cluster_process.py && python3 $PEER_DIR/cluster_process.py status --state $PEER_DIR/fabric_${RUN_ID}_rank$rank.process.json" >/dev/null 2>&1 \
+    && die "this output directory has a running recorded peer on $ip; use --force to replace it"
+done
+pgrep -x "$APP_NAME" >/dev/null && die "a $APP_NAME already runs here; stop its owning run first"
 for ip in "${FABRIC_PEERS[@]}"; do
   peer_ssh "$ip" "pgrep -x $APP_NAME" >/dev/null 2>&1 \
-    && die "a $APP_NAME already runs on $ip (--force to kill)"
+    && die "a $APP_NAME already runs on $ip; stop its owning run first"
+done
+
+OWN_RUN=1
+for ip in "${FABRIC_PEERS[@]}"; do
+  peer_ssh "$ip" "mkdir -p $PEER_DIR" || die "cannot create staging directory on $ip"
+  scp -q -o BatchMode=yes -o ConnectTimeout=8 "$PROCESS_HELPER" "$FABRIC_USER@$ip:$PEER_DIR/cluster_process.py" || die "cannot stage process helper on $ip"
 done
 
 if [[ $STAGE -eq 1 ]]; then
@@ -206,24 +196,22 @@ fi
 
 # ------------------------------------------------------------ the port
 if [[ -z "${PORT:-}" ]]; then
-  for p in $(seq 29970 29989); do
+  for p in $(seq "$DGPP_FABRIC_PORT" "$((DGPP_FABRIC_PORT + 19 > 65535 ? 65535 : DGPP_FABRIC_PORT + 19))"); do
     # connect_ex == 0 means something answers: not free. Probe, don't bind —
     # rank 0 owns the listener, TIME_WAIT on peers' sides is not our problem.
-    if ! python3 -c "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('127.0.0.1',$p))==0 else 1)" "$p"; then
+    if ! python3 "$ROOT/scripts/run_helpers.py" port-open "$p"; then
       PORT="$p"; break
     fi
   done
 fi
-[[ -n "${PORT:-}" ]] || die "no free port in 29970..29989 (pass --port)"
+[[ -n "${PORT:-}" ]] || die "no free port starting at $DGPP_FABRIC_PORT (pass --port)"
 
 # ------------------------------------------------------------- rank 0
 echo "fabric_run: world $WORLD, port $PORT, logs in $LOG_DIR"
 
 # Per-node helpers start BEFORE the ranks so the probe's first sample is
 # the pre-load baseline. Rank 0's helpers write next to r0.log; peers'
-# into $PEER_DIR (fetched with --fetch-logs). The tag makes them killable.
-# The lab boxes' clocks disagree by hours (no NTP on two of them), and the
-# probes stamp with THEIR clock. Record each node's offset from the head
+# into $PEER_DIR (fetched with --fetch-logs). Record each node's offset from the head
 # (peer_now - head_now, seconds; half an ssh round trip of error, well
 # under the probes' 1 s grain) so fabric_xrank.py can line probe rows up
 # with rank 0's log.
@@ -245,24 +233,28 @@ start_node_helpers() {
   [[ $NODE_PROBE -eq 1 ]] && record_clock_offsets
   for i in "${!ALL_NODES[@]}"; do
     ip="${ALL_NODES[$i]}"
-    local dir="$PEER_DIR" runner="peer_ssh $ip"
-    [[ $i -eq 0 ]] && { dir="$LOG_DIR"; runner="bash -c"; }
+    local dir="$PEER_DIR" runner="peer_ssh $ip" helper="cluster_process.py" probe="node_probe.sh"
+    [[ $i -eq 0 ]] && {
+      dir=$(printf '%q' "$LOG_DIR"); runner="bash -c"
+      helper=$(printf '%q' "$PROCESS_HELPER"); probe=$(printf '%q' "$PROBE_SCRIPT")
+    }
     if [[ $NODE_PROBE -eq 1 ]]; then
-      local probe="$dir/node_probe.sh"; [[ $i -eq 0 ]] && probe="$PROBE_SCRIPT"
-      $runner "nohup $probe $HELPER_TAG > $dir/probe_r$i.log 2>&1 < /dev/null &" || true
+      $runner "cd $dir && python3 $helper launch --state probe.process.json --log probe_r$i.log --cwd . -- bash $probe $HELPER_TAG" || true
     fi
     if [[ -n "$NODE_CMD" ]]; then
-      # sh -c with the tag as $0: pgrep -f sees the tag, the command runs verbatim.
-      $runner "nohup sh -c $(printf '%q' "$NODE_CMD") $HELPER_TAG > $dir/nodecmd_r$i.log 2>&1 < /dev/null &" || true
+      # sh -c runs the caller's command with the run tag as its $0.
+      $runner "cd $dir && python3 $helper launch --state nodecmd.process.json --log nodecmd_r$i.log --cwd . -- sh -c $(printf '%q' "$NODE_CMD") $HELPER_TAG" || true
     fi
   done
 }
 start_node_helpers
 
-nohup "${HEAD_WRAP[@]}" "$APP" "${APP_ARGS[@]}" --world "$WORLD" --rank 0 --port "$PORT" \
-  > "$LOG_DIR/r0.log" 2>&1 < /dev/null &
+: > "$LOG_DIR/r0.log"
+
+dgpp_run_rank 0 python3 "$PROCESS_HELPER" run --state "$STATE" --log "$LOG_DIR/r0.log" --cwd "$PWD" -- \
+  "${HEAD_WRAP[@]}" "$APP" "${APP_ARGS[@]}" --world "$WORLD" --rank 0 --port "$PORT" &
 HEAD_PID=$!
-# plain nohup (no setsid): the head stays our child so `wait` reaps its code
+# The helper waits for the recorded process and preserves its exit status.
 
 for _ in $(seq 1 60); do
   grep -q "rendezvous listening" "$LOG_DIR/r0.log" 2>/dev/null && break
@@ -295,25 +287,26 @@ done
 REMOTE_ENV=""
 while IFS='=' read -r name value; do
   case "$name" in
-    DGPP_PEER_DIR|DGPP_BUILD_DIR|DGPP_FABRIC_*) continue ;;
+    DGPP_ENV_FILE|DGPP_CLUSTER_CONFIG|DGPP_NODES|DGPP_NODE_OVERRIDES|DGPP_ROCE_*|DGPP_HTTP_*|DGPP_RESIDENT_CACHE_DIR|DGPP_DATA_DIR|DGPP_SSH_USER|DGPP_JOURNAL_PORT|DGPP_LOG_DIR|DGPP_STAGE_DIR|DGPP_RELEASE_DIR|DGPP_BUILD_DIR|DGPP_FABRIC_*) continue ;;
     DGPP_*) REMOTE_ENV+="$name=$(printf '%q' "$value") " ;;
   esac
 done < <(env)
 for i in "${!FABRIC_PEERS[@]}"; do
   rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
+  RANK_ENV=$(dgpp_rank_prefix "$rank") || exit 1
   # Fire-and-forget on purpose (see header): the remote side is fully
   # detached; whether THIS ssh returns is irrelevant to the launch.
   ( timeout 25 ssh "${SSH_OPTS[@]}" "$FABRIC_USER@$ip" \
-      "cd $PEER_DIR && $REMOTE_ENV nohup ./$APP_NAME $REMOTE_ARGS \
+      "cd $PEER_DIR && $REMOTE_ENV $RANK_ENV python3 cluster_process.py launch --state fabric_${RUN_ID}_rank$rank.process.json --log fabric_r$rank.log --cwd . -- ./$APP_NAME $REMOTE_ARGS \
        --world $WORLD --rank $rank --peer $FABRIC_HEAD --port $PORT \
-       > $PEER_DIR/fabric_r$rank.log 2>&1 < /dev/null &" \
+       " \
       >/dev/null 2>&1 ) &
 done
 for i in "${!FABRIC_PEERS[@]}"; do
   rank=$((i + 1)); ip="${FABRIC_PEERS[$i]}"
   up=0
   for _ in $(seq 1 20); do
-    peer_ssh "$ip" "pgrep -x $APP_NAME" >/dev/null 2>&1 && { up=1; break; }
+    peer_ssh "$ip" "python3 $PEER_DIR/cluster_process.py status --state $PEER_DIR/fabric_${RUN_ID}_rank$rank.process.json" >/dev/null 2>&1 && { up=1; break; }
     sleep 1
   done
   if [[ $up -ne 1 ]]; then
@@ -335,11 +328,8 @@ while kill -0 "$HEAD_PID" 2>/dev/null; do
 done
 HEAD_RC=0; wait "$HEAD_PID" || HEAD_RC=$?
 
-# A failed head leaves the peers wedged in collectives forever (they
-# wait for a rank that will never post again — the 2026-09-01 hunt
-# measured 39s+ stalls and manual pkill on every box). Kill them here so
-# a failed run needs no cleanup; the peers' logs were already flushed by
-# their own nohup redirection.
+# A failed head can leave peers waiting in collectives. Stop those recorded
+# processes before collecting their logs.
 if [[ $HEAD_RC -ne 0 ]]; then
   echo "fabric_run: head failed — killing wedged peers"
   kill_all

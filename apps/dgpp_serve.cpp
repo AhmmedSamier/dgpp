@@ -131,6 +131,7 @@ void write_ops_file(const std::string& path, const std::string& text) {
 
 struct ServeKnobs {
   uint16_t http_port = 8080;
+  std::string http_bind = "127.0.0.1";
   int max_connections = 64;
   int queue_limit = 64;
   int default_max_tokens = 256;
@@ -556,7 +557,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   dgpp::serve::GenerationService service(scfg, engine, &frontend,
                                            std::move(eos));
   if (oplog) service.set_audit_observer(oplog);
-  dgpp::serve::HttpServer http(k.http_port, &service, k.max_connections);
+  dgpp::serve::HttpServer http(k.http_port, &service, k.max_connections, k.http_bind);
 
   std::atomic<bool> drained{false};  // the engine thread's drain is done
   // The v1 failure semantics (DESIGN §9 item 6, PLAN M9; built 2026-09-05):
@@ -735,6 +736,7 @@ int main(int argc, char** argv) {
       "    the world (the node list), this rank's peer, the ports and every\n"
       "    engine knob below; flags given after it override\n"
       "  [--port N (default 8080; rank 0 only)]\n"
+      "  [--bind-host IPV4 (default 127.0.0.1; rank 0 only)]\n"
       "  [--kv-capacity TOKENS (default 8192)]: the KV pool per rank; a prompt\n"
       "    plus its answer must fit. Before anything is allocated the memory\n"
       "    plan (the model, the pool, the activations, the prefix cache) is\n"
@@ -811,6 +813,7 @@ int main(int argc, char** argv) {
   // The cluster config: found first, whatever its position,
   // because the flags after it override what it sets.
   std::string config_path;
+  std::string http_bind = "127.0.0.1";
   int config_rank = 0;
   bool memory_plan_only = false;  // --memory-plan: the check alone, then exit
   for (int i = 1; i + 1 < argc; ++i) {
@@ -830,6 +833,15 @@ int main(int argc, char** argv) {
     rank = config_rank;
     if (rank > 0 && rank < world) peer = c.nodes[0];
     port = static_cast<uint16_t>(c.http_port);
+    http_bind = c.http_bind;
+    if (!c.node_env.empty()) {
+      if (rank < 0 || rank >= world) {
+        DGPP_LOG_ERROR("rank is outside configured nodes");
+        return 2;
+      }
+      for (const auto& [key, value] : c.node_env[rank])
+        setenv(key.c_str(), dgpp::serve::expand_home(value).c_str(), 1);
+    }
     fabric_port = static_cast<uint16_t>(c.fabric_port);
     journal_port = static_cast<uint16_t>(c.journal_port);
     const dgpp::serve::ClusterConfig::Engine& e = c.engine;
@@ -871,6 +883,7 @@ int main(int argc, char** argv) {
     if (a == "--model") model_id = next();
     else if (a == "--checkpoint-dir") ckpt = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
+    else if (a == "--bind-host") http_bind = next();
     else if (a == "--kv-capacity") kv_capacity = std::stoll(next());
     else if (a == "--kv-dtype") kv_dtype = next();
     else if (a == "--ngram-table") ngram_table = next();
@@ -1328,6 +1341,7 @@ int main(int argc, char** argv) {
 
     ServeKnobs knobs;
     knobs.http_port = port;
+    knobs.http_bind = http_bind;
     knobs.max_connections = max_connections;
     knobs.queue_limit = queue_limit;
     knobs.admission.mode = admission_mode == "grow"

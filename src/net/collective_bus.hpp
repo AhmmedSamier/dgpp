@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "net/bus_kernel.hpp"
+#include "net/site_options.hpp"
 
 namespace dgpp::net {
 
@@ -27,9 +28,9 @@ enum class BusMessageClass { kLatency, kBulk };
 struct BusOptions {
   int world_size = 2;  // TP group size; ranks are 0..world_size-1
   int my_rank = 0;
-  // Lane devices in lane order; both active f0 functions by default.
+  // Lane devices in lane order; configured locally or discovered from sysfs.
   // Lane counts and order must match on every rank.
-  std::vector<std::string> lane_devices = {"rocep1s0f0", "roceP2p1s0f0"};
+  std::vector<std::string> lane_devices = configured_lane_devices();
 
   // Rendezvous: rank 0 listens on `rendezvous_port`; every other rank
   // connects to `rendezvous_host:rendezvous_port` (roster precedent: the

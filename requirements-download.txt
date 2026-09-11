@@ -1,0 +1,2 @@
+# Optional: complete checkpoint downloads. Serving uses no Python packages.
+huggingface-hub>=0.34,<2

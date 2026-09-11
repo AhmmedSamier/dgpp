@@ -1,7 +1,8 @@
-// Cluster configuration shared by the launcher and server.
+// Resolved runtime configuration shared by the launcher and server.
 //
-// The JSON file defines the model, nodes in rank order, ports, engine
-// options and local paths. nodes[0] is rank 0, which serves HTTP and sends
+// The launcher combines a deployment JSON (model, world_size, engine options)
+// with site settings from .env. This loader reads the resulting JSON, with
+// explicit nodes, ports and paths. nodes[0] is rank 0, which serves HTTP and sends
 // effective model/engine settings to peers through the admission journal.
 // Peers read bootstrap addresses and local paths from their own files.
 //
@@ -10,10 +11,11 @@
 // templates set serving values explicitly. Each rank hashes its effective
 // shared configuration, and the warm record checks those hashes before
 // serving. See README.md for the schema and deploy/*.example.json for
-// templates; site configurations are not tracked.
+// templates. Deployment templates must be resolved before this loader reads them.
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,9 @@ struct ClusterConfig {
   std::string ssh_user;            // empty: the launcher's own user
   std::string release;             // the installed release the launcher runs (launcher-only; empty: the development binary)
   int http_port = 18080;
+  std::string http_bind = "127.0.0.1";
+  // Local paths and device names may differ by rank; no credentials belong here.
+  std::vector<std::map<std::string, std::string>> node_env;
   int fabric_port = 29970;
   int journal_port = 29971;
   struct Engine {

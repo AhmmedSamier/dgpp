@@ -23,6 +23,7 @@ Usage: serve_soak.py HOST PORT MINUTES OUT_DIR [MODEL]  (MODEL defaults to the s
 Artifacts: OUT_DIR/requests.jsonl, metrics.jsonl, summary.txt.
 """
 import http.client
+from serve_client import served_model
 import json
 import os
 import random
@@ -32,40 +33,13 @@ import threading
 import time
 
 
-def default_host():
-    """Rank 0's address from the site's cluster config (DGPP_CLUSTER_CONFIG,
-    else deploy/cluster.json beside this script), falling back to localhost —
-    no site address is ever written into a script."""
-    cfg = os.environ.get("DGPP_CLUSTER_CONFIG") or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "deploy", "cluster.json")
-    try:
-        with open(cfg) as f:
-            return json.load(f)["nodes"][0]
-    except Exception:
-        return "127.0.0.1"
+from site_env import default_host, http_port
 
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else default_host()
-PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 18080
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else http_port()
 MINUTES = float(sys.argv[3]) if len(sys.argv) > 3 else 60.0
 OUT = sys.argv[4] if len(sys.argv) > 4 else "soak_out"
-def served_model(host, port):
-    """The id the service serves (GET /v1/models): the clients address the
-    checkpoint the world booted with, whichever config named it — never a
-    name of their own (2026-09-08: a hard-coded FP8 id 404'd against the
-    NVFP4 world)."""
-    conn = http.client.HTTPConnection(host, port, timeout=30)
-    conn.request("GET", "/v1/models")
-    resp = conn.getresponse()
-    data = json.loads(resp.read().decode())
-    conn.close()
-    ids = [m["id"] for m in data.get("data", [])]
-    if not ids:
-        raise SystemExit(f"no model served at {host}:{port}: {data}")
-    return ids[0]
-
-
 MODEL = sys.argv[5] if len(sys.argv) > 5 else served_model(HOST, PORT)
 BURST_EVERY = 300.0
 BURST_N = 14

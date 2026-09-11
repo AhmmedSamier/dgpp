@@ -36,7 +36,7 @@ in outputs; empty conversation and empty content.
 Keyed by chat_template.jinja's FNV-1a-64 hash (header "template_hash"),
 cross-referenced with the tokenizer revision ("tokenizer_revision").
 
-Regenerating: /tmp/opencode/tokref/bin/python
+Regenerating: python3
     tools/gen_chat_template_goldens.py
 (the venv pins jinja2 3.1.2 + tokenizers 0.23.1).
 """
@@ -45,17 +45,11 @@ import json
 import os
 import pathlib
 import sys
+from pathlib import Path
 
-
-def hf_hub_dir():
-    """The local HF hub cache: HUGGINGFACE_HUB_CACHE, else HF_HOME/hub, else
-    ~/.cache/huggingface/hub — never a hard-coded home."""
-    cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
-    if cache:
-        return cache
-    home = os.environ.get("HF_HOME")
-    return os.path.join(home, "hub") if home else os.path.expanduser(
-        "~/.cache/huggingface/hub")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from cluster_doctor import cache_root, cached_snapshot
+from site_env import cache_environment
 
 
 MODEL = "unsloth/GLM-5.3-Flash-FP8"
@@ -577,12 +571,9 @@ def main():
     if args.template and args.tokenizer_json:
         tpl_path, tok_path = args.template, args.tokenizer_json
     else:
-        snap = glob.glob(f"{hf_hub_dir()}/"
-                         f"models--{model.replace('/', '--')}/snapshots/*/")
-        if not snap:
-            sys.exit(f"model snapshot for {model} not found in the HF cache")
-        tpl_path = snap[0] + "chat_template.jinja"
-        tok_path = snap[0] + "tokenizer.json"
+        snap = cached_snapshot(model, cache_root(cache_environment()))
+        tpl_path = str(snap / "chat_template.jinja")
+        tok_path = str(snap / "tokenizer.json")
     tpl_raw = pathlib.Path(tpl_path).read_bytes()
     tok_raw = pathlib.Path(tok_path).read_bytes()
     template_hash = f"{fnv1a64(tpl_raw):016x}"

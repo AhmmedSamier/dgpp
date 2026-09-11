@@ -8,29 +8,33 @@
 #   fabric_qwen_forward.sh [--config CLUSTER.json] OUT_DIR WORLD IDS [extra args...]
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="$ROOT/deploy/cluster.json"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+CONFIG=$(dgpp_config) || exit 1
 if [[ "${1:-}" == "--config" ]]; then CONFIG="$2"; shift 2; fi
 case "$CONFIG" in /*) ;; *) CONFIG="$ROOT/$CONFIG" ;; esac
-NODES=($(jq -r '.nodes[]' "$CONFIG"))
-USER_=$(jq -r '.ssh_user // env.USER' "$CONFIG")
-STAGE=$(jq -r '.paths.stage_dir // "/tmp/bus4"' "$CONFIG")
+export DGPP_CLUSTER_CONFIG="$CONFIG"
+USER_=$(dgpp_ssh_user) || exit 1
+STAGE="$DGPP_STAGE_DIR"
 OUT=${1:?OUT_DIR}; WORLD=${2:?WORLD}; IDS=${3:?IDS}; shift 3
+NODE_LIST=$(dgpp_nodes --world "$WORLD") || exit 1
+read -r -a NODES <<< "$NODE_LIST"
 case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac
 mkdir -p "$OUT"
-BIN="$ROOT/build-ci/qwen_forward_check"
-MODEL=${DGPP_QWEN_MODEL:-Qwen/Qwen3.8-Flash-Next-FP8}
-PORT=${DGPP_QWEN_PORT:-29950}
+BIN="${DGPP_BUILD_DIR:-$ROOT/build-ci}/qwen_forward_check"
+MODEL=${DGPP_QWEN_MODEL:-$(dgpp_model)}
+PORT=${DGPP_QWEN_PORT:-$DGPP_FABRIC_PORT}
 HEAD=${NODES[0]}
 pids=()
 for ((r=0; r<WORLD; r++)); do
   ip=${NODES[$r]}
   if [[ $r -eq 0 ]]; then
-    ( "$BIN" --model "$MODEL" --ids "$IDS" --world "$WORLD" --rank 0 --port "$PORT" "$@" > "$OUT/w${WORLD}_r0.log" 2>&1 ) &
+    ( dgpp_run_rank 0 "$BIN" --model "$MODEL" --ids "$IDS" --world "$WORLD" --rank 0 --port "$PORT" "$@" > "$OUT/w${WORLD}_r0.log" 2>&1 ) &
     pids+=($!)
   else
-    ssh -o BatchMode=yes "$USER_@$ip" "mkdir -p $STAGE && pkill -x qwen_forward_check; true" >/dev/null 2>&1
+    ssh -o BatchMode=yes "$USER_@$ip" "mkdir -p $STAGE" >/dev/null 2>&1
+    RANK_ENV=$(dgpp_rank_prefix "$r") || exit 1
     scp -q "$BIN" "$USER_@$ip:$STAGE/qwen_forward_check"
-    ( ssh -o BatchMode=yes "$USER_@$ip" "$STAGE/qwen_forward_check --model $MODEL --ids $IDS --world $WORLD --rank $r --peer $HEAD --port $PORT $*" > "$OUT/w${WORLD}_r$r.log" 2>&1 ) &
+    ( ssh -o BatchMode=yes "$USER_@$ip" "$RANK_ENV $STAGE/qwen_forward_check --model $MODEL --ids $IDS --world $WORLD --rank $r --peer $HEAD --port $PORT $*" > "$OUT/w${WORLD}_r$r.log" 2>&1 ) &
     pids+=($!)
   fi
 done
@@ -42,24 +46,4 @@ for ((r=0; r<WORLD; r++)); do
   grep -h 'digest\|argmax\|boot\|ERROR\|qwen_forward_check:' "$OUT/w${WORLD}_r$r.log" | sed 's/^[0-9-]* [0-9:.]* //' | cut -c1-200
 done
 # Cross-rank digests must agree; the merged argmax is the per-position max over the ranks' argmax logits.
-python3 - "$OUT" "$WORLD" <<'PY'
-import re, sys
-out, world = sys.argv[1], int(sys.argv[2])
-digests, ids, logits = [], [], []
-for r in range(world):
-    txt = open(f"{out}/w{world}_r{r}.log").read()
-    digests.append(re.findall(r"digest ([0-9a-f]{16})", txt))
-    m_ids = re.search(r"argmax ids: (.*)", txt); m_lg = re.search(r"argmax logits: (.*)", txt)
-    if not m_ids or not m_lg:
-        print("rank", r, "has no argmax lines"); sys.exit(1)
-    ids.append([int(v) for v in m_ids.group(1).split(",")])
-    logits.append([float(v) for v in m_lg.group(1).split(",")])
-same = all(d == digests[0] for d in digests) and len(digests[0]) > 0
-print("cross-rank digests identical:", same, f"({len(digests[0])} digests)")
-merged = []
-for t in range(len(ids[0])):
-    best = max(range(world), key=lambda r: (logits[r][t], -ids[r][t]))
-    merged.append(ids[best][t])
-print("merged argmax ids:", ",".join(str(v) for v in merged))
-sys.exit(0 if same else 1)
-PY
+python3 "$ROOT/scripts/forward_check_report.py" "$OUT" "$WORLD"

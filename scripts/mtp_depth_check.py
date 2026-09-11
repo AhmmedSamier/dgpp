@@ -11,14 +11,18 @@ acceptance for the run.
   diff -r /tmp/depth1 /tmp/depth2
 """
 import argparse, json, os, re, sys, time, urllib.request
+from serve_client import default_url, default_log, model_at_url
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--host", default="http://127.0.0.1:18080")
-ap.add_argument("--log", default=os.path.expanduser("~/dgpp/log/serve_r0.log"))
-ap.add_argument("--model", default="unsloth/GLM-5.3-Flash-FP8")
+ap.add_argument("--host")
+ap.add_argument("--log")
+ap.add_argument("--model")
 ap.add_argument("--max-tokens", type=int, default=300)
 ap.add_argument("--out", required=True, help="directory for the completions")
 args = ap.parse_args()
+args.host = args.host or default_url()
+args.log = args.log or default_log()
+args.model = args.model or model_at_url(args.host)
 
 PROMPTS = {
     "prose": "Explain in two paragraphs how a Roman aqueduct kept its gradient.",

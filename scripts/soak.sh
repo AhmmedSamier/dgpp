@@ -24,39 +24,32 @@
 # the across-the-hour drift check.
 #
 # Usage (from the repo root, on the RANK 0 node):
-#   scripts/soak.sh PEER_USER@PEER_HOST [PHASE_MINUTES] [BIN_DIR]
+#   scripts/soak.sh [PHASE_MINUTES] [BIN_DIR]
 #
-#   PEER_USER@PEER_HOST   the rank-1 node; expects the bus_check binary
-#                         at /tmp/bus4/bus_check there (the standard
-#                         staging location) and key-based ssh
+#   The first two DGPP_NODES in .env supply rank 0 and rank 1. SSH uses
+#   DGPP_SSH_USER; the peer must have bus_check in DGPP_STAGE_DIR.
 #   PHASE_MINUTES         per-phase soak duration (default 15)
 #   BIN_DIR               local build dir holding bus_check (default
 #                         build-ci)
 #
 # Examples:
-#   scripts/soak.sh user@192.0.2.12              # the gate run: 4x15 min
-#   scripts/soak.sh user@192.0.2.12 3             # a 4x3 min smoke
+#   scripts/soak.sh                 # the gate run: 4x15 min
+#   scripts/soak.sh 3               # a 4x3 min smoke
 set -u
-
-if [ $# -lt 1 ]; then
-  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
-  exit 2
-fi
-PEER=$1
-PHASE_MIN=${2:-15}
-BIN_DIR=${3:-build-ci}
-
-PEER_HOST=${PEER##*@}
-# Rank 0's advertized address = the SOURCE address of the route to the
-# peer (not `hostname -I`, whose first entry may be a different fabric
-# interface — the smoke run caught exactly that).
-RANK0_IP=$(ip route get "$PEER_HOST" 2>/dev/null |
-    awk '{for (i = 1; i < NF; ++i) if ($i == "src") {print $(i + 1); exit}}')
-[ -n "$RANK0_IP" ] || { echo "soak: no route to $PEER_HOST" >&2; exit 2; }
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+NODE_LIST=$(dgpp_nodes --world 2) || exit 1
+read -r -a NODES <<< "$NODE_LIST"
+SSH_USER=$(dgpp_ssh_user) || exit 1
+PEER="$SSH_USER@${NODES[1]}"
+PHASE_MIN=${1:-15}
+BIN_DIR=${2:-${DGPP_BUILD_DIR:-$ROOT/build-ci}}
+PEER_ENV=$(dgpp_rank_prefix 1) || exit 1
+RANK0_IP=${NODES[0]}
 
 BIN="$BIN_DIR/bus_check"
-LOG=/tmp/opencode/soak
-PORT_BASE=29980
+LOG=${DGPP_SOAK_LOG:-$ROOT/build-ci/fabric-runs/bus-soak_$(date -u +%Y%m%d-%H%M%S)}
+PORT_BASE=$DGPP_FABRIC_PORT
 SOAK_MS=$((PHASE_MIN * 60 * 1000))
 
 [ -x "$BIN" ] || { echo "soak: $BIN not found (build it first)" >&2; exit 2; }
@@ -67,6 +60,10 @@ SOAK_MS=$((PHASE_MIN * 60 * 1000))
 PHASES=(1048576 262144 4194304 1048576)
 
 mkdir -p "$LOG"
+stop_serve() {
+  python3 "$ROOT/scripts/cluster_process.py" signal --state "$LOG/serve.process.json" --signal TERM || true
+}
+trap stop_serve EXIT
 rm -f "$LOG"/*.log 2>/dev/null
 overall_rc=0
 phase=0
@@ -79,8 +76,8 @@ for bytes in "${PHASES[@]}"; do
   echo "== phase $phase: bulk=$bytes soak=${PHASE_MIN}m port=$port"
 
   # Fresh serve (rank 0) on this node; duration caps a wedged phase.
-  setsid nohup "$BIN" serve --port "$port" --world 2 \
-      --duration-ms $((SOAK_MS + 180000)) > "$slog" 2>&1 &
+  dgpp_run_rank 0 python3 "$ROOT/scripts/cluster_process.py" run --state "$LOG/serve.process.json" --log "$slog" --cwd "$PWD" -- "$BIN" serve --port "$port" --world 2 \
+      --duration-ms $((SOAK_MS + 180000)) &
   serve_pid=$!
 
   up=0
@@ -90,18 +87,19 @@ for bytes in "${PHASES[@]}"; do
   done
   if [ "$up" != 1 ]; then
     echo "soak: phase $phase serve never listened" | tee -a "$LOG/driver.log"
-    kill "$serve_pid" 2>/dev/null
+    stop_serve
+    wait "$serve_pid" 2>/dev/null || true
     overall_rc=1
     phase=$((phase + 1))
     continue
   fi
 
-  ssh -o BatchMode=yes "$PEER" "cd /tmp/bus4 && ./bus_check ping \
+  ssh -o BatchMode=yes "$PEER" "cd $DGPP_STAGE_DIR && $PEER_ENV ./bus_check ping \
       --peer $RANK0_IP --port $port --contend \
       --soak-ms $SOAK_MS --bytes $bytes > ping_p$phase.log 2>&1; \
       echo exit=\$? >> ping_p$phase.log"
   rc=$?
-  scp -o BatchMode=yes -q "$PEER:/tmp/bus4/ping_p$phase.log" "$plog" 2>/dev/null
+  scp -o BatchMode=yes -q "$PEER:$DGPP_STAGE_DIR/ping_p$phase.log" "$plog" 2>/dev/null
 
   if [ $rc -ne 0 ] || ! grep -q "exit=0" "$plog" 2>/dev/null; then
     echo "soak: phase $phase FAILED (rc=$rc)" | tee -a "$LOG/driver.log"
@@ -110,8 +108,8 @@ for bytes in "${PHASES[@]}"; do
   grep -E "SOAK (bulk|lat):" "$plog" 2>/dev/null | tail -2
   echo "phase $phase done (bytes=$bytes)" >> "$LOG/driver.log"
 
-  kill "$serve_pid" 2>/dev/null
-  pkill -x bus_check 2>/dev/null
+  stop_serve
+  wait "$serve_pid" 2>/dev/null || true
   sleep 3
   phase=$((phase + 1))
 done

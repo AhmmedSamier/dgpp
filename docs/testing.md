@@ -1,15 +1,62 @@
 # Tests
 
-Run a full build before the tests so CTest uses binaries that include your
-changes:
+Build the targets you intend to test. For a first checkout, host and Python
+checks do not need model weights or GPU execution:
 
 ```bash
-cmake --build build-ci -j -- -k && ctest --test-dir build-ci --output-on-failure
+cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check
+ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
+ctest --test-dir build-ci -L python --output-on-failure
 ```
 
 `DGPP_TEST_FILTER=<substring>` runs a subset of a binary's cases; the
-loopback tests use fixed ports in the 299xx range. Run one CUDA suite at
-a time on a node that is also serving.
+loopback tests use fixed ports in the 299xx range. Run GPU/RDMA tests only
+on idle test hardware, serially; do not run them alongside production serving.
+
+CTest labels are `host`, `python`, `checkpoint`, `gpu`, `rdma` and `fixture`.
+Use `ctest --test-dir build-ci -N -L LABEL` to inspect a group before running
+it. Fixture producers are added automatically when a selected test requires
+them. Build all targets before a full CTest run. The `checkpoint` label marks
+host tokenizer/template suites requiring real cached metadata. Some GPU suites
+also contain optional real-checkpoint cases: a passing process exit does not
+mean every case ran. Read skip messages; missing metadata returns CTest's skip
+code in the tokenizer suites. Do not count skipped tests as model validation.
+
+Native tests do not read `.env`. To pass the head node's cache/NIC overrides,
+run `python3 scripts/site_env.py run-rank --rank 0 -- ctest --test-dir build-ci ...`.
+Reference generators need the optional dependencies listed in
+[dependencies](dependencies.md). CPU fixture generators do not require PyTorch;
+torch-backed reference modes do.
+
+## Evaluation data and prefill fixtures
+
+Datasets are not bundled and benchmarks never download them implicitly:
+
+```bash
+python3 scripts/prepare_data.py download --tasks gsm8k humaneval
+python3 scripts/prepare_data.py tokens --text /path/to/long-prompt.txt
+```
+
+Downloads use pinned upstream revisions from OpenAI's
+[GSM8K](https://github.com/openai/grade-school-math) and
+[HumanEval](https://github.com/openai/human-eval) repositories. Each dataset has
+a `.source.json` recording its source/license URL, row count and SHA-256.
+Existing different content is never overwritten. `DGPP_DATA_DIR` defaults to
+the ignored `data/` directory; use `--out` to select another preparation path.
+Token generation needs `tokenizers` and uses the selected model's tokenizer;
+generate a sufficiently long input for the prefill lengths you want to test.
+`fabric_prefill_repeat.sh --ids-file FILE` selects an existing CSV fixture.
+
+`serve_eval.py --data DIR` overrides the dataset directory;
+`serve_prefill_probe.py --data FILE` selects the GSM8K JSONL file directly.
+Use `--tasks gsm8k,extract` for evaluation without generated-code execution.
+HumanEval requires `--allow-code-execution`, including via the serving wrappers.
+It runs model-produced Python with a timeout, **not a security sandbox**.
+Use a disposable isolated evaluation machine/container with no secrets,
+unneeded mounts or network access. The flag acknowledges the risk; it does
+not provide isolation. Never run it on a production serving node.
+
+## Suite coverage
 
 Use `ctest --test-dir build-ci -N` to list the tests in your configured
 build. The suites cover:

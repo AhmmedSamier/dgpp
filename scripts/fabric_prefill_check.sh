@@ -11,6 +11,8 @@
 #   LENGTHS defaults to "64 256 1024 2048".
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+MODEL=$(dgpp_model) || exit 1
 IDS_FILE=$1
 OUT=${2:-$ROOT/build-ci/fabric-runs/prefill_$(date +%Y-%m-%d_%H%M%S)}
 LENGTHS=${3:-"64 256 1024 2048"}
@@ -24,7 +26,7 @@ for n in $LENGTHS; do
   if [ "$n" -gt "$TOTAL" ]; then echo "skip $n: only $TOTAL ids"; continue; fi
   ids=$(echo "$ALL" | tr ',' '\n' | head -n "$n" | paste -sd, -)
   echo "=== prompt of $n tokens"
-  scripts/fabric_run.sh $STAGE --log-dir "$OUT/n$n" -- --model unsloth/GLM-5.3-Flash-FP8 \
+  scripts/fabric_run.sh $STAGE --log-dir "$OUT/n$n" -- --model "$MODEL" \
     --prompt "$ids" --steps 2 > "$OUT/n$n.out" 2>&1
   STAGE="--no-stage"
   grep -h "prefill:\|step 1:\|rank consistency" "$OUT/n$n/r0.log" "$OUT/n$n.out" 2>/dev/null | sed 's/^[0-9-]* [0-9:.]* INFO  //' | cut -c1-140 | head -4
@@ -33,15 +35,6 @@ echo "=== summary (rank 0)"
 for n in $LENGTHS; do
   f="$OUT/n$n/r0.log"
   [ -f "$f" ] || continue
-  python3 - "$f" "$n" <<'PY'
-import re, sys
-log, n = open(sys.argv[1], errors="replace").read(), int(sys.argv[2])
-m = re.search(r"prefill: (\d+) tokens in (\d+)ms", log)
-if m:
-    toks, ms = int(m.group(1)), int(m.group(2))
-    print(f"  {toks:>5} tokens: {ms:>7} ms prefill = {ms / toks:6.1f} ms/token")
-else:
-    print(f"  n{n}: no prefill line")
-PY
+  python3 "$ROOT/scripts/prefill_report.py" summary "$f" "$n"
 done
 echo "=== prefill check done: $OUT"

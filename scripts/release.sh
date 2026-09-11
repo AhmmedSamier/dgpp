@@ -1,5 +1,5 @@
 #!/bin/bash
-# The release artifact (2026-09-06, the productionizing pass): builds the
+# Build the release artifact: configure the
 # release preset, installs the layout into dist/stage/dgpp-<version>/,
 # writes the manifest with per-file checksums, and packs
 # dist/dgpp-<version>.tar.zst. The version is the tree's
@@ -11,18 +11,20 @@
 # Layout inside the tarball (dgpp-<version>/):
 #   bin/dgpp-serve                 the server, rpath $ORIGIN/../lib
 #   lib/libcudart.so.13, lib/libcublasLt.so.13   the CUDA runtime it was built against
-#   scripts/dgpp-cluster, scripts/serve_api_check.py
-#   deploy/cluster.example.json    the config template a site copies and edits
-#   doc/README.md, doc/operations.md
+#   scripts/dgpp-cluster, scripts/site_env.py, scripts/serve_api_check.py
+#   .env.example                   shared site settings (never credentials)
+#   deploy/*.example.json          all model deployment templates
+#   README.md, docs/               packaged setup and network/dependency guides
 #   MANIFEST                       version, git sha, CUDA, host, date
 #   MANIFEST.sha256                sha256 of every other file (sha256sum -c)
 # A node needs only the driver, rdma-core, libnl and libstdc++ beyond this.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BUILD=$ROOT/build-release
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+BUILD=${DGPP_BUILD_DIR:-$ROOT/build-release}
 DIST=$ROOT/dist
 if [ "${1:-}" != "--no-build" ]; then
-  cmake --preset release -S "$ROOT" >/dev/null
+  cmake --preset release -S "$ROOT" -B "$BUILD" >/dev/null
   cmake --build "$BUILD" -j --target dgpp_serve_app
 fi
 VERSION=$(sed -n 's/^#define DGPP_VERSION "\(.*\)"$/\1/p' "$BUILD/generated/dgpp_version.hpp")

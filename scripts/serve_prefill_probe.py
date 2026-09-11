@@ -2,7 +2,7 @@
 """The prefill's server-side cost at prompt lengths, through the endpoint.
 
 Against a running dgpp-serve: for each LEN, REPEAT prompts of about LEN
-tokens (natural prose from build-ci/eval_data/gsm8k_test.jsonl, calibrated
+tokens (natural prose from the prepared GSM8K dataset, calibrated
 to the served tokenizer by one warmup request, each prompt behind a unique
 nonce so the prefix cache never attaches), max_tokens 1; the cost read from
 /v1/metrics deltas (the engine's cumulative prefill_ms and
@@ -18,21 +18,22 @@ import os
 import random
 import sys
 import time
+import argparse
+from data_paths import data_dir, require_file
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-args = [a for a in sys.argv[1:]]
-HOST, PORT = args[0], int(args[1])
-lens, repeat, model = [], 3, None
-i = 2
-while i < len(args):
-    if args[i] == "--repeat":
-        repeat = int(args[i + 1]); i += 2
-    elif args[i] == "--model":
-        model = args[i + 1]; i += 2
-    else:
-        lens.append(int(args[i])); i += 1
-if not lens:
-    lens = [512, 2048, 8192]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("host")
+parser.add_argument("port", type=int)
+parser.add_argument("lengths", type=int, nargs="*", default=[512, 2048, 8192])
+parser.add_argument("--repeat", type=int, default=3)
+parser.add_argument("--model")
+parser.add_argument("--data", help="GSM8K JSONL file used as prompt text")
+args = parser.parse_args()
+if args.repeat < 1 or any(n < 1 for n in args.lengths):
+    parser.error("repeat count and prompt lengths must be positive")
+HOST, PORT, lens, repeat, model = args.host, args.port, args.lengths, args.repeat, args.model
+data_path = require_file(args.data or data_dir() / "gsm8k_test.jsonl")
 
 
 def get(path):
@@ -63,7 +64,7 @@ if model is None:
     model = get("/v1/models")["data"][0]["id"]
 
 words = []
-with open(os.path.join(ROOT, "build-ci", "eval_data", "gsm8k_test.jsonl")) as f:
+with data_path.open() as f:
     for line in f:
         words.extend(json.loads(line)["question"].split())
 random.seed(7)

@@ -104,7 +104,8 @@ class HttpHandler {
 class HttpServer {
  public:
   // `max_connections` beyond which accept answers 503 + close.
-  HttpServer(uint16_t port, HttpHandler* handler, int max_connections);
+  HttpServer(uint16_t port, HttpHandler* handler, int max_connections,
+             const std::string& bind_host = "127.0.0.1");
   ~HttpServer();
 
   HttpServer(const HttpServer&) = delete;

@@ -5,19 +5,17 @@
 #   fabric_mtp_classes.sh [--config CLUSTER.json] OUT_DIR CLASS...
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# The checkpoint and the fabric come from a cluster config (dgpp-cluster's
-# file: deploy/cluster.json by default, or --config F as the first argument)
-# — its `model`, `nodes` (node 0 is the head, where this runs) and `ssh_user`
-# — never from the environment or a hardcoded id.
-CONFIG="$ROOT/deploy/cluster.json"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
+# The JSON selects the checkpoint and world size; .env supplies the site.
+CONFIG=$(dgpp_config) || exit 1
 if [[ "${1:-}" == "--config" ]]; then CONFIG="$2"; shift 2; fi
 case "$CONFIG" in /*) ;; *) CONFIG="$ROOT/$CONFIG" ;; esac
+export DGPP_CLUSTER_CONFIG="$CONFIG"
 [[ -f "$CONFIG" ]] || { echo "no cluster config at $CONFIG" >&2; exit 1; }
 MODEL=$(jq -r '.model' "$CONFIG")
-NODES=($(jq -r '.nodes[]' "$CONFIG"))
-export DGPP_FABRIC_HEAD="${NODES[0]}"
-export DGPP_FABRIC_PEERS="${NODES[*]:1}"
-export DGPP_FABRIC_USER="$(jq -r '.ssh_user // env.USER' "$CONFIG")"
+NODE_LIST=$(dgpp_nodes --config "$CONFIG") || exit 1
+read -r -a NODES <<< "$NODE_LIST"
+
 OUT=${1:?OUT_DIR}; shift
 case "$OUT" in /*) ;; *) OUT="$ROOT/$OUT" ;; esac
 mkdir -p "$OUT"; cd "$ROOT" || exit 1

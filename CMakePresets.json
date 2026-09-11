@@ -49,6 +49,8 @@
     {"name": "ci", "configurePreset": "ci"}
   ],
   "testPresets": [
+    {"name": "release", "configurePreset": "release", "output": {"outputOnFailure": true}},
+    {"name": "debug", "configurePreset": "debug", "output": {"outputOnFailure": true}},
     {"name": "ci", "configurePreset": "ci", "output": {"outputOnFailure": true}},
     {"name": "asan", "configurePreset": "asan", "output": {"outputOnFailure": true}},
     {"name": "ubsan", "configurePreset": "ubsan", "output": {"outputOnFailure": true}}

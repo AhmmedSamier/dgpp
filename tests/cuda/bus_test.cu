@@ -52,7 +52,6 @@ BusOptions base_options(int rank, uint16_t port) {
   BusOptions o;
   o.world_size = 2;
   o.my_rank = rank;
-  o.lane_devices = {"rocep1s0f0", "roceP2p1s0f0"};
   o.rendezvous_port = port;
   o.rendezvous_host = rank == 0 ? "" : "127.0.0.1";
   o.rendezvous_timeout_ms = 20000;

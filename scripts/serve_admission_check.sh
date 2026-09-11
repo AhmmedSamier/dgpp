@@ -11,11 +11,10 @@
 # Usage: scripts/serve_admission_check.sh [OUT_DIR]
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-. "$ROOT/scripts/cluster_env.sh"
+. "$ROOT/scripts/cluster_env.sh" || exit 1
 OUT=${1:-$ROOT/build-ci/fabric-runs/admission_gate_$(date +%Y-%m-%d_%H%M%S)}
-HOST=${DGPP_SERVE_HOST:-$(dgpp_head)}
-URL=http://$HOST:18080/v1/chat/completions
-M=unsloth/GLM-5.3-Flash-FP8
+HOST=$(dgpp_client_host) || exit 1
+URL=http://$HOST:$(dgpp_http_port)/v1/chat/completions
 BASE="--max-concurrency 4 --kv-capacity 1536 --default-max-tokens 1024 --queue-limit 8 --decode-graph --seed 20260904"
 mkdir -p "$OUT"
 cd "$ROOT" || exit 1
@@ -35,6 +34,8 @@ run_policy() {  # run_policy NAME KNOBS
   export DGPP_SERVE_KNOBS="$BASE $knobs"
   echo "=== policy $name: $DGPP_SERVE_KNOBS"
   scripts/serve_run.sh up || return 1
+  local M
+  M=$(dgpp_served_model) || return 1
   sleep 2
   local t0 t1 i=0
   t0=$(date +%s.%N)
@@ -46,23 +47,9 @@ run_policy() {  # run_policy NAME KNOBS
   done
   wait
   t1=$(date +%s.%N)
-  curl -s "http://$HOST:18080/v1/metrics" > "$dir/metrics.json"
+  curl -s "http://$HOST:$(dgpp_http_port)/v1/metrics" > "$dir/metrics.json"
   scripts/serve_run.sh down
-  python3 - "$dir" "$t0" "$t1" "$name" <<'PY'
-import json, sys, glob, os
-d, t0, t1, name = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
-for f in sorted(glob.glob(os.path.join(d, "req_*.json"))):
-    r = json.load(open(f))
-    if "error" in r:
-        print(f"  {os.path.basename(f)}: ERROR {r['error']}")
-        continue
-    ch = r["choices"][0]
-    print(f"  {os.path.basename(f)}: finish {ch['finish_reason']}, completion_tokens {r['usage']['completion_tokens']}: {ch['message']['content'][:80]!r}")
-m = json.load(open(os.path.join(d, "metrics.json")))
-sv, sc = m.get("service", {}), m.get("scheduler", {})
-print(f"  metrics: admission {sv.get('admission')}, reservations_grown {sv.get('reservations_grown')}, requests_shed_pool {sv.get('requests_shed_pool')}, pool {sc.get('pool_blocks_in_use')}/{sc.get('pool_blocks_total')} blocks, tokens {sc.get('tokens_generated')}")
-print(f"  batch wall time under {name}: {t1 - t0:.1f} s")
-PY
+  python3 "$ROOT/scripts/admission_report.py" "$dir" "$t0" "$t1" "$name"
   grep -h "admitted to slot\|deferred\|reservation grown\|pool exhausted" "$dir/serve/serve_r0.log" | sed 's/^[0-9-]* [0-9:.]* INFO  //; s/^[0-9-]* [0-9:.]* WARN  //' | cut -c1-150 | head -16
   md5sum "$dir"/serve/serve_rank*.ops | awk '{print $1}' | sort | uniq -c
 }

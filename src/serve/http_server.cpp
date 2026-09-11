@@ -184,17 +184,20 @@ bool HttpResponseWriter::client_gone() const {
 // ---------------------------------------------------------------------------
 
 HttpServer::HttpServer(uint16_t port, HttpHandler* handler,
-                       int max_connections)
+                       int max_connections, const std::string& bind_host)
     : port_(port), handler_(handler), max_connections_(max_connections) {
   if (handler_ == nullptr)
     throw std::invalid_argument("HttpServer: handler must not be null");
+  in_addr bind_address{};
+  if (::inet_pton(AF_INET, bind_host.c_str(), &bind_address) != 1)
+    throw std::invalid_argument("http: bind host must be an IPv4 address");
   listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd_ < 0) throw std::runtime_error("http: socket");
   int yes = 1;
   ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_addr = bind_address;
   addr.sin_port = htons(port_);
   if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
     ::close(listen_fd_);

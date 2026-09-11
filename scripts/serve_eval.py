@@ -10,11 +10,11 @@ compared on the same items with the same settings.
         [--reasoning-effort low|medium|high] [--data DIR] [--seed N]
 
 Tasks (greedy, temperature 0, the served model from GET /v1/models):
-  humaneval  164 problems (build-ci/eval_data/HumanEval.jsonl, the original
+  humaneval  164 problems (DGPP_DATA_DIR/HumanEval.jsonl, the original
              openai/human-eval release): the model completes the function;
              the fenced code (or the whole reply) runs against the problem's
              tests in a subprocess with a 10 s timeout; pass = exit 0.
-  gsm8k      the test split (build-ci/eval_data/gsm8k_test.jsonl, first
+  gsm8k      the test split (DGPP_DATA_DIR/gsm8k_test.jsonl, first
              --limit items, default 300): step-by-step then "#### <number>";
              pass = the last number in the reply equals the gold answer.
   extract    synthetic records (name, age, city, email, order total)
@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from data_paths import data_dir, require_file
 
 ap = argparse.ArgumentParser()
 ap.add_argument("host")
@@ -50,10 +51,18 @@ ap.add_argument("--reasoning-effort", default="low")
 ap.add_argument("--no-think", action="store_true",
                 help="chat_template_kwargs.enable_thinking=false (the templates that read it: "
                      "Qwen3.8-Flash-Next, GLM-4.7 — GLM-4.7 ignores reasoning_effort and thinks to the cap otherwise)")
-ap.add_argument("--data", default=os.path.join(os.path.dirname(__file__), "..", "build-ci", "eval_data"))
+ap.add_argument("--data", default=None)
+ap.add_argument("--allow-code-execution", action="store_true", help="acknowledge that HumanEval runs generated Python without a security sandbox")
 ap.add_argument("--seed", type=int, default=20260908)
 ap.add_argument("--model", default=None, help="defaults to the served id")
 args = ap.parse_args()
+args.data = args.data or str(data_dir())
+tasks = args.tasks.split(",")
+if "humaneval" in tasks and not args.allow_code_execution:
+    ap.error("HumanEval executes generated code locally. Use an isolated environment and explicitly pass --allow-code-execution, or select --tasks gsm8k,extract.")
+for task, name in (("humaneval", "HumanEval.jsonl"), ("gsm8k", "gsm8k_test.jsonl")):
+    if task in tasks:
+        require_file(os.path.join(args.data, name))
 os.makedirs(args.out, exist_ok=True)
 
 
