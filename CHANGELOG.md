@@ -6,6 +6,14 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- Setup now covers CUDA discovery outside `PATH`, head/peer dependencies,
+  outbound connectivity, verified SSH login, offline preparation and storage
+  budgeting. Empty explicit `--config` arguments are rejected.
+- Doctor distinguishes failed probes from zero RoCE lanes and points checkpoint
+  recovery to rank 0. RoCE discovery retains partial results and displays the
+  selected lane order. Its `--json` output now contains `inventories`, `selections`
+  and `errors` objects keyed by host, replacing the bare host-to-inventory map.
+
 - Deployment filenames now identify the full model, quant, world size and
   decode mode. Settings are unchanged; see `deploy/README.md` for the rename
   table. Older entries below retain the filenames used at the time.

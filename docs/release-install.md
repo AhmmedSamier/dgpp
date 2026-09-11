@@ -3,6 +3,9 @@
 This package serves supported checkpoints on Linux/aarch64 DGX Spark (GB10).
 It includes the server and CUDA runtime libraries, but not model weights.
 Run the following commands from the extracted package root on rank 0.
+Use a head with working DNS and outbound access for package/Python/model
+downloads, or prepare them offline first. A reachable RoCE address does not
+imply internet access. Peers receive checkpoints from rank 0 over SSH.
 
 ## Getting started
 
@@ -16,7 +19,7 @@ Run the following commands from the extracted package root on rank 0.
    sudo apt-get update
    sudo apt-get install python3 python3-venv rdma-core libibverbs1 \
      ibverbs-providers libnl-3-200 libnl-route-3-200 libstdc++6 \
-     openssh-client rsync curl zstd iproute2
+     openssh-client openssh-server rsync curl jq zstd iproute2
    ```
 
 The package bundles cudart and cuBLASLt; no compiler or CUDA toolkit is needed
@@ -32,7 +35,7 @@ is Ubuntu 24.04; older distributions may not provide compatible glibc/libstdc++.
    ```bash
    # Four Sparks, GLM-5.3-Flash hybrid NVFP4/FP8:
    CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
-   cp -n "${CONFIG%.json}.example.json" "$CONFIG"
+   test -f "$CONFIG" || cp "${CONFIG%.json}.example.json" "$CONFIG"
    ```
 
    For two Sparks, set `CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2_mtp1.json`
@@ -48,8 +51,14 @@ is Ubuntu 24.04; older distributions may not provide compatible glibc/libstdc++.
 1. Run `test -f .env || cp .env.example .env`.
 2. Edit `DGPP_NODES` in `.env`: use space-separated addresses, rank 0 first,
    or `127.0.0.1` for a single node. Set `DGPP_SSH_USER` for peers.
-3. Run `ssh USER@PEER_ADDRESS hostname` for each peer, verify its host key,
-   and arrange SSH-key login without a password prompt.
+3. From **rank 0**, run `ssh USER@PEER_ADDRESS hostname` for each peer. Verify
+   its host-key fingerprint through a trusted console or administrator before
+   accepting it. Install your public key with
+   `ssh-copy-id -i /path/to/key.pub USER@PEER_ADDRESS`; do not overwrite existing
+   keys or disable host-key checking. Load a passphrase-protected key into your
+   SSH agent. Confirm `ssh -o BatchMode=yes USER@PEER_ADDRESS hostname` succeeds
+   for every peer before continuing. Incoming SSH access to rank 0 does not
+   establish outgoing access to peers.
 4. For multiple nodes, run:
 
    ```bash
@@ -59,11 +68,19 @@ is Ubuntu 24.04; older distributions may not provide compatible glibc/libstdc++.
 5. Copy the appropriate device names and GID indices into `.env`. Match
    lane order by subnet across nodes; choose one or two lanes. Merge per-node
    differences into `DGPP_NODE_OVERRIDES`. See [networking](docs/networking.md).
+   Discovery shows the deployment's selected lane order and local candidates;
+   neither proves RDMA connectivity. Failed probes retain other nodes' results.
 
 Do not source `.env`; scripts parse it as data. Leave cache paths unset
 to use the standard `~/.cache/huggingface/hub` on each node.
 
 ### 4. Download once and sync
+
+Check free disk space on every node first (`df -h` on each cache filesystem).
+The default GLM-5.3-Flash weights occupy about 181.7 GiB; allow roughly 250 GiB
+per node for that checkpoint, one four-rank resident image and transfer headroom.
+Other models and extra cache variants need their own budget. Doctor reports
+free space but does not predict the combined future disk footprint.
 
 On rank 0:
 
@@ -82,6 +99,9 @@ copied. Peers need space for the full checkpoint plus their resident cache.
 If rank 0 already has the checkpoint, use `--sync-only` instead. Use
 `--verify-only` to check active snapshots on all nodes without downloads or
 writes. Add `--local-only` to download or verify without contacting peers.
+Sync-only and verify-only do not require Hugging Face packages or internet
+access. For a disconnected head with an empty cache, see the source project's
+[offline preparation guide](https://github.com/HawkBearPig/dgpp/blob/master/docs/getting-started.md#offline-preparation).
 
 ### 5. Install and start
 

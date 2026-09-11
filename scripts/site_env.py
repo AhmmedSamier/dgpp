@@ -28,6 +28,13 @@ DEFAULTS = {
 }
 
 
+def config_argument(value):
+    """Do not let an unset shell variable select a different deployment."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("--config must not be empty; set CONFIG in this shell or pass the deployment filename")
+    return value
+
+
 def read_env(path):
     """Read allowlisted KEY=value assignments, optionally quoted.
 
@@ -282,7 +289,7 @@ def http_port(values=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("shell", "config", "nodes", "head", "client-host", "peers", "user", "http-port", "resolve", "rank-prefix", "run-rank", "require-world", "model", "log-dir", "stage-dir"))
-    parser.add_argument("--config")
+    parser.add_argument("--config", type=config_argument)
     parser.add_argument("--world", type=int)
     parser.add_argument("--rank", type=int, default=0)
     argv = sys.argv[1:]

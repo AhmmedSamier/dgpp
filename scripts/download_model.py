@@ -15,7 +15,7 @@ import sys
 
 from cache_sync import activate, peer_cache, sync_snapshot
 from cluster_doctor import cache_root, cached_snapshot, checkpoint_size, require_head
-from site_env import cache_environment, resolve_config, settings
+from site_env import cache_environment, config_argument, resolve_config, settings
 
 
 def download(model, revision, root):
@@ -29,7 +29,7 @@ def download(model, revision, root):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--config", help="deployment JSON; download locally and sync its peers")
+    source.add_argument("--config", type=config_argument, help="deployment JSON; download locally and sync its peers")
     source.add_argument("--model", help="Hugging Face repository for a local-only download")
     parser.add_argument("--cache-dir", type=Path, help="local-only override; use .env for deployment cache paths")
     parser.add_argument("--revision", default="main")

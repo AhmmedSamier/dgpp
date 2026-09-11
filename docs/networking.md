@@ -13,16 +13,25 @@ For multi-node runs, set `DGPP_ROCE_DEVICES` to a space-separated ordered
 list of local verbs devices. Discover the actual names on your machines:
 
 ```bash
-python3 scripts/discover_roce.py --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json
+python3 scripts/discover_roce.py --config "$CONFIG"
 ```
 
-Run this on rank 0 after setting node addresses and SSH access. Without
+Set `CONFIG` to your deployment filename. Run this on rank 0 after setting
+node addresses and SSH access. Without
 `--config`, it inspects only the local machine. It prints the verbs-to-Linux
-interface mapping, addresses, MTUs, usable GID indices, and candidate `.env`
+interface mapping, addresses, MTUs, locally eligible GID indices, and candidate `.env`
 settings without changing files or networking. On Spark, names can look like
 `"rocep1s0f0 roceP2p1s0f0"`; use the discovered values for your hardware.
 Match corresponding lanes by subnet before copying the suggestions. If
-several GIDs or more than two devices are usable, choose the intended fabric.
+several GIDs or more than two devices are locally eligible, choose the intended fabric.
+
+The deployment lane order shows the configured device order (including
+per-node overrides), or the automatic selection when none is configured.
+It does not identify a proven "primary" fabric: an active device with an IP
+may still be disconnected from the other ranks. Failed SSH probes leave their
+node inventory unknown; discovery prints the other results and exits nonzero.
+`--json` returns separate `inventories`, `selections` and `errors` objects keyed
+by host, rather than treating an unreachable node as a host with no devices.
 
 If `DGPP_ROCE_DEVICES` is omitted,
 DGPP discovers active Ethernet RDMA devices and sorts their names. Explicit
@@ -37,7 +46,7 @@ assignment, routing and consistent MTU on the selected network interfaces.
 Discovery does not prove that corresponding lanes can exchange RDMA traffic.
 
 Read-only starting points are `rdma link`, `ip -br address`, `ip link`, and
-`scripts/dgpp-cluster doctor --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json`.
+`scripts/dgpp-cluster doctor --config "$CONFIG"`.
 Only run the fabric probes on an idle test allocation;
 they open QPs, use GPU memory and generate traffic.
 

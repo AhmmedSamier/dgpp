@@ -1,35 +1,66 @@
 # Getting started
 
-Run these steps on the first Spark in your cluster (rank 0). Commands assume
-you are in the repository root. A supported deployment uses one GB10 per node
+Run these steps on the first Spark in your cluster (rank 0).
+A supported deployment uses one GB10 per node
 on Linux/aarch64; choose a model and node count from the
 [supported configurations](../README.md#supported-models-and-configurations).
 For the abbreviated command sequence, see the [quickstart](../README.md#quickstart).
 
 ## 1. Install the dependencies
 
-1. On **every node**, check that the NVIDIA driver and CUDA 13 toolkit are installed:
+1. Choose a rank-0 machine with working DNS and outbound access to GitHub,
+   your OS package repositories, PyPI and Hugging Face (including its download
+   hosts). Peers need cluster access; they do not fetch models from the Hub.
+   Check the chosen head before installing anything:
 
    ```bash
-   nvidia-smi
-   nvcc --version
+   ip route
+   getent hosts github.com pypi.org huggingface.co
+   curl --fail --head --location --connect-timeout 10 https://huggingface.co
    ```
 
-   Use the DGX OS driver/toolkit installation if either is missing. Keep the
-   CUDA runtime and cuBLASLt versions compatible across nodes.
+   A RoCE address does not imply internet access. Fix DNS/routing with your
+   administrator if these fail, or use the [offline preparation](#offline-preparation)
+   below. Success here does not test every download endpoint.
 
-2. On **every node**, install the build and cluster tools:
+2. On **every node**, check `nvidia-smi` works. Use the NVIDIA driver supplied
+   with your DGX OS installation. For source builds, peers need compatible CUDA
+   13 cudart and cuBLASLt runtime libraries, but do not need `nvcc` or a compiler.
+   Keep OS and runtime versions compatible across nodes.
+
+3. On **every node**, install the runtime and transfer tools:
 
    ```bash
    sudo apt-get update
-   sudo apt-get install build-essential cmake ninja-build pkg-config \
-     python3 python3-venv libibverbs-dev rdma-core libibverbs1 ibverbs-providers \
-     openssh-client rsync curl jq zstd iproute2
+   sudo apt-get install python3 rdma-core libibverbs1 ibverbs-providers \
+     libnl-3-200 libnl-route-3-200 libstdc++6 openssh-client openssh-server \
+     rsync curl jq zstd iproute2
    ```
 
-3. Check `cmake --version` is at least 3.25 and `python3 --version` is at least
+4. On **rank 0 only**, install build and downloader tools:
+
+   ```bash
+   sudo apt-get install git build-essential cmake pkg-config python3-venv libibverbs-dev
+   ```
+
+   Check the CUDA 13 compiler with `nvcc --version`. If that command is missing,
+   try `/usr/local/cuda/bin/nvcc --version`: the toolkit may already be installed
+   outside your shell's `PATH`. See [build setup](#5-build-the-server-on-rank-0)
+   for selecting it. Install the CUDA 13 toolkit through your DGX OS setup only
+   if no suitable installation exists. Ninja is not required by these commands.
+
+5. Check `cmake --version` is at least 3.25 and `python3 --version` is at least
    3.10. GCC 13, CMake 3.28.3 and CUDA 13.0.88 on Ubuntu 24.04 are the tested
    baseline.
+
+6. On rank 0, clone the repository if you have not already done so:
+
+   ```bash
+   git clone https://github.com/HawkBearPig/dgpp.git
+   cd dgpp
+   ```
+
+   Run the remaining commands from this directory in the same shell.
 
 Keep libibverbs installed even for one node: the current server links it.
 Multi-node production uses it for RoCE communication. Turning
@@ -44,10 +75,14 @@ Multi-node production uses it for RoCE communication. Turning
    ```bash
    # One Spark: Qwen NVFP4 with FP8 dense projections.
    CONFIG=deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.json
+   ```
 
+   ```bash
    # Two Sparks: Qwen FP8.
    CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2_mtp1.json
+   ```
 
+   ```bash
    # Four Sparks: GLM-5.3-Flash hybrid NVFP4/FP8.
    CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
    ```
@@ -55,7 +90,7 @@ Multi-node production uses it for RoCE communication. Turning
 2. Copy the matching template without replacing an existing local file:
 
    ```bash
-   cp -n "${CONFIG%.json}.example.json" "$CONFIG"
+   test -f "$CONFIG" || cp "${CONFIG%.json}.example.json" "$CONFIG"
    ```
 
 3. Open the file named by `CONFIG`. Confirm `model` and `world_size` match your
@@ -82,8 +117,28 @@ the complete list and old-to-new names.
    first. Every node must be able to reach the first address.
 3. Set `DGPP_SSH_USER` to the login used on the other nodes. That account needs
    write access to its cache and staging directories.
-4. For each peer, run `ssh USER@PEER_ADDRESS hostname`. Verify its host key and
-   arrange SSH-key login so subsequent commands do not prompt for a password.
+4. From **rank 0**, connect to each peer with `ssh USER@PEER_ADDRESS hostname`.
+   Replace the placeholders with your chosen account and peer address. Compare
+   the displayed host-key fingerprint against a trusted console or your
+   administrator before accepting it. On the peer's console,
+   `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` prints its Ed25519 fingerprint.
+   An SSH connection in the other direction does not establish this trust.
+5. If rank 0 has no suitable SSH key, create one with `ssh-keygen -t ed25519`.
+   Do not overwrite an existing key. For a passphrase-protected key, load it into
+   your SSH agent with `ssh-add /path/to/private_key` before running the scripts.
+   If no agent is running, start one with `eval "$(ssh-agent -s)"` first.
+   Install **only the public key** on each peer:
+
+   ```bash
+   ssh-copy-id -i /path/to/key.pub USER@PEER_ADDRESS
+   ssh -o BatchMode=yes -o ConnectTimeout=5 USER@PEER_ADDRESS hostname
+   ```
+
+   Repeat the batch-mode check for every peer. `Host key verification failed`
+   means trust is missing or changed; verify the host's identity before updating
+   known hosts. `Permission denied (publickey)` means the user/key or agent setup
+   is wrong. A timeout or refused connection means routing or the peer's SSH
+   server needs attention. Do not disable host-key checking to bypass an error.
 
 Keep any existing credentials in `.env`. Do not run `source .env`: scripts
 read the allowed settings as data, without executing shell expressions.
@@ -100,14 +155,22 @@ The first `world_size` entries in `DGPP_NODES` participate in the deployment.
 2. Read the device-to-interface mapping, IP addresses, MTUs and GID indices for
    each node. DGX Spark verbs names may look like `rocep1s0f0` and
    `roceP2p1s0f0`; copy your discovered names, not these examples.
-3. Copy the suggested `DGPP_ROCE_DEVICES` and, where provided,
-   `DGPP_ROCE_GID_INDICES` into `.env`. Choose one or two usable devices.
+3. Read the configured or automatic **deployment lane order** above the inventory.
+   This shows which devices serving would select, not which cables reach peers.
+   Copy candidate `DGPP_ROCE_DEVICES` and, where provided, `DGPP_ROCE_GID_INDICES`
+   into `.env` only after identifying the intended fabric. Choose one or two
+   locally eligible devices; an IP or active port alone does not prove connectivity.
 4. Match the **subnet order** across nodes. Lane 0 on each node must reach
    the other nodes' lane 0, and likewise for lane 1. Use the printed
    `DGPP_NODE_OVERRIDES` when device names or GID indices differ.
 
-Discovery does not change networking or test RDMA traffic. If no usable device
-appears, check cabling, interface IP assignments and the RDMA driver. If more
+Discovery does not change networking or test RDMA traffic. Failed nodes are
+reported individually; other inventories are retained and the command exits
+nonzero. Fix SSH access and rerun, or omit `--config` to inspect only the local
+host (without deployment settings). `--json` returns `inventories`, `selections`
+and `errors` objects keyed by node address; failed nodes appear in `errors`, not
+as empty inventories. If no locally eligible device appears, check cabling,
+interface IP assignments and the RDMA driver. If more
 than two appear, select the pair connected to the intended fabric. With these
 settings omitted, serving auto-selects active Ethernet RDMA devices; explicit
 selection avoids choosing an unintended network.
@@ -123,7 +186,30 @@ This creates `build-ci/dgpp-serve`. The launcher copies it to peers; their CUDA
 and verbs runtime libraries must already be installed. Set `DGPP_BUILD_DIR`
 in `.env` only if you built into a different directory.
 
+CMake searches `PATH` and the conventional `/usr/local/cuda/bin` location.
+For a different installation, or after a failed configure, select the compiler
+explicitly and clear the old configure cache:
+
+```bash
+CUDACXX=/path/to/cuda/bin/nvcc cmake --fresh --preset ci
+cmake --build --preset ci --target dgpp_serve_app -j 4
+```
+
+Replace the path with your CUDA 13 installation. `--fresh` resets CMake's
+configuration, not your source or model cache.
+
 ## 6. Download once and sync to peers
+
+Before downloading, check storage on **every node**, for example
+`df -h "$HOME/.cache"` and `ssh USER@PEER_ADDRESS 'df -h "$HOME/.cache"'`.
+If that directory does not exist, check its existing parent; if you selected
+different cache paths in `.env`, check those disks instead.
+The default GLM-5.3-Flash checkpoint has about **181.7 GiB of weights**.
+Budget roughly **250 GiB per node** for this checkpoint, one four-rank resident
+image and transfer headroom. This is a planning estimate, not an enforced quota;
+other models, revisions and resident-cache variants need their own budget.
+`doctor` reports free space and writability, but does not calculate the combined
+future download/resident-cache footprint. Existing model files still occupy disk.
 
 1. On rank 0, prepare the downloader:
 
@@ -170,6 +256,47 @@ For a pinned revision, use `--revision COMMIT --activate` with the download
 command. Sync selects the same revision on peers after verification. Stop
 deployments using the checkpoint before changing it. Structural verification
 checks metadata and shard lengths; rsync checks file contents during sync.
+
+### Offline preparation
+
+The quickstart assumes an internet-connected head. For a disconnected head,
+first provision compatible system packages, drivers and CUDA through your
+site's offline package process; a Git bundle and Python wheels do not replace
+those dependencies.
+
+1. On a connected machine, clone the source and create a transferable bundle:
+
+   ```bash
+   git clone https://github.com/HawkBearPig/dgpp.git dgpp-source
+   git -C dgpp-source bundle create dgpp.bundle --all
+   ```
+
+2. On a connected Linux/aarch64 machine with the same Python version as rank 0,
+   download Python packages without installing them:
+
+   ```bash
+   python3 -m pip download -r dgpp-source/requirements-download.txt -d dgpp-wheels
+   ```
+
+3. Transfer `dgpp-source/dgpp.bundle` and `dgpp-wheels/` to the disconnected head
+   with SCP or your site's approved transfer method. In the receiving directory:
+
+   ```bash
+   git clone dgpp.bundle dgpp
+   cd dgpp
+   python3 -m venv .venv
+   . .venv/bin/activate
+   python -m pip install --no-index --find-links ../dgpp-wheels -r requirements-download.txt
+   ```
+
+4. Follow the configuration and build steps above. If the full checkpoint is
+   already cached on the head, `python scripts/download_model.py --config "$CONFIG" --sync-only`
+   distributes it without Hub access. `--sync-only` and `--verify-only` use the
+   standard library and do not require the downloader's Python packages.
+   For an empty cache, download on a connected machine first, then transfer the
+   selected `models--ORG--NAME` cache directory to the head, preserving its
+   `snapshots/`, referenced `blobs/`, `refs/` and relative symlinks. Do not copy
+   HF credentials. Verify it with `--verify-only --local-only` before syncing.
 
 ## 7. Check the deployment and start it
 

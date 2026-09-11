@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 import cluster_doctor
-from site_env import resolve_config
+from site_env import config_argument, resolve_config
 
 
 def suggestions(inventory):
@@ -24,37 +24,64 @@ def suggestions(inventory):
     return result
 
 
+def selection(inventory, env):
+    """Show the transport's device order, not a guess about cable connectivity."""
+    explicit = env.get("DGPP_ROCE_DEVICES", "").split()
+    devices = explicit or sorted(row["device"] for row in inventory
+                                 if row["port"] == "1" and row["active"])
+    indices = env.get("DGPP_ROCE_GID_INDICES", "").split()
+    return {"mode": "configured" if explicit else "automatic", "devices": devices,
+            "gid_indices": indices or None}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", help="inspect the first world_size nodes; run on rank 0")
-    parser.add_argument("--json", action="store_true", help="print machine-readable inventory")
+    parser.add_argument("--config", type=config_argument, help="inspect the first world_size nodes; run on rank 0")
+    parser.add_argument("--json", action="store_true", help="print inventories, selections and per-node errors as JSON")
     args = parser.parse_args(argv)
     cfg = resolve_config(args.config) if args.config else None
     if cfg:
         cluster_doctor.require_head(cfg["nodes"][0])
     nodes = cfg["nodes"] if cfg else ["localhost"]
     inventories = {}
+    errors = {}
+    selections = {}
     for rank, host in enumerate(nodes):
-        if rank == 0:
-            inventories[host] = cluster_doctor.roce_inventory()
-        else:
-            result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                                     f"{cfg['ssh_user']}@{host}", "python3 - roce --spec '{}'"],
-                                    input=Path(cluster_doctor.__file__).read_text(), text=True,
-                                    capture_output=True, timeout=60)
-            if result.returncode:
-                raise RuntimeError(f"{host}: {result.stderr.strip() or 'SSH discovery failed'}")
-            inventories[host] = json.loads(result.stdout)
+        try:
+            if rank == 0:
+                inventories[host] = cluster_doctor.roce_inventory()
+            else:
+                target = f"{cfg['ssh_user']}@{host}" if cfg["ssh_user"] else host
+                result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                         target, "python3 - roce --spec '{}'"],
+                                        input=Path(cluster_doctor.__file__).read_text(), text=True,
+                                        capture_output=True, timeout=30)
+                if result.returncode:
+                    raise RuntimeError(result.stderr.strip() or "SSH discovery failed")
+                inventories[host] = json.loads(result.stdout)
+            selections[host] = selection(inventories[host], cfg["node_env"][rank] if cfg else {})
+            if cfg and len(cfg["nodes"]) == 1:
+                selections[host] = {"mode": "not needed (single node)", "devices": [], "gid_indices": None}
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            errors[host] = str(error)
     if args.json:
-        print(json.dumps(inventories, indent=2))
-        return
+        print(json.dumps({"inventories": inventories, "selections": selections, "errors": errors}, indent=2))
+        return 1 if errors else 0
     overrides = {}
-    for rank, (host, rows) in enumerate(inventories.items()):
+    for rank, host in enumerate(nodes):
+        if host in errors:
+            print(f"\nFAIL {host}: inventory unknown: {errors[host]}")
+            continue
+        rows = inventories[host]
         print(f"\n{host}: verbs device / port -> Linux interface, IPs, MTU, RoCE-v2 GID")
+        chosen = selections[host]
+        print(f"  Deployment lane order ({chosen['mode']}): " + (" -> ".join(chosen["devices"]) or "none"))
+        if chosen["devices"]:
+            print("  GID indices: " + (" ".join(chosen["gid_indices"]) if chosen["gid_indices"] else "automatic; candidates below"))
         if not rows:
             print("  No RDMA devices found. Check the driver and network setup.")
         for row in rows:
-            status = "usable" if row["usable"] else "not usable by DGPP"
+            status = "locally eligible" if row["usable"] else "not locally eligible"
             print(f"  {row['device']} / {row['port']}: {status}")
             for gid in row["gids"]:
                 print(f"    {gid['interface'] or '?'}  {', '.join(gid['ips']) or gid['address']}  MTU {gid['mtu'] or '?'}  GID index {gid['index']} ({gid['address']})")
@@ -62,6 +89,7 @@ def main(argv=None):
         if setting is None:
             print("  Select one or two active port-1 devices with routable RoCE-v2 GIDs; no settings suggested.")
         elif rank == 0:
+            print("  Candidate settings (not a connectivity recommendation):")
             for key, value in setting.items():
                 print(f'  {key}="{value}"')
         else:
@@ -71,11 +99,14 @@ def main(argv=None):
         print("DGPP_NODE_OVERRIDES='" + json.dumps(overrides, separators=(",", ":")) + "'")
     print("\nBefore copying settings: match lane order by subnet across nodes, not by device name.")
     print("Multiple GIDs require choosing the intended network. Discovery does not test RDMA connectivity.")
+    if errors:
+        print("Some nodes could not be inspected. Fix SSH access from rank 0; omit --config to inspect only this host.")
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"RoCE discovery: {error}", file=sys.stderr)
         raise SystemExit(2)

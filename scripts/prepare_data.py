@@ -16,7 +16,7 @@ import urllib.request
 
 from cluster_doctor import cache_root, cached_snapshot
 from data_paths import data_dir, require_file
-from site_env import config_path, deployment, cache_environment
+from site_env import config_argument, config_path, deployment, cache_environment
 
 
 DATASETS = {
@@ -89,7 +89,7 @@ def main():
     fetch.add_argument("--out", type=Path)
     tokenize = commands.add_parser("tokens")
     tokenize.add_argument("--model")
-    tokenize.add_argument("--config", help="deployment JSON selecting the tokenizer's model")
+    tokenize.add_argument("--config", type=config_argument, help="deployment JSON selecting the tokenizer's model")
     tokenize.add_argument("--text", type=Path, required=True)
     tokenize.add_argument("--out", type=Path)
     args = parser.parse_args()

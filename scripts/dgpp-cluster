@@ -38,7 +38,7 @@ import time
 import tempfile
 from pathlib import Path
 
-from site_env import SITE_KEYS, config_path, resolve_config, settings, run_paths, shell_prefix, release_name
+from site_env import SITE_KEYS, config_argument, config_path, resolve_config, settings, run_paths, shell_prefix, release_name
 import cluster_process
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -451,7 +451,7 @@ def main():
     ap = argparse.ArgumentParser(description="the serving world's launcher over the cluster config")
     ap.add_argument("verb", choices=["up", "down", "status", "install", "releases", "resolve", "doctor", "signal", "paths"])
     ap.add_argument("tarball", nargs="?", help="install: the release tarball from scripts/release.sh")
-    ap.add_argument("--config", default=None)
+    ap.add_argument("--config", type=config_argument, default=None)
     ap.add_argument("--bin", default=None, help="the dgpp-serve binary (default: the named release, else build-ci/dgpp-serve)")
     ap.add_argument("--release", default=None, help="the installed release version to run (overrides the config's \"release\")")
     ap.add_argument("--log-dir", default=None, help="overrides DGPP_LOG_DIR")

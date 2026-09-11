@@ -18,6 +18,7 @@ import cache_sync
 import cluster_doctor
 import discover_roce
 import download_model
+import site_env
 
 
 class SetupToolsTest(unittest.TestCase):
@@ -234,6 +235,119 @@ class SetupToolsTest(unittest.TestCase):
     def test_discovery_does_not_guess_more_than_two_lanes(self):
         self.assertIsNone(discover_roce.suggestions([]))
         self.assertIsNone(discover_roce.suggestions([{"usable": True}] * 3))
+
+    def test_empty_explicit_config_is_rejected_by_every_entry_point(self):
+        commands = [("dgpp-cluster", "resolve"), ("site_env.py", "resolve"),
+                    ("download_model.py",), ("discover_roce.py",),
+                    ("prepare_data.py", "tokens")]
+        for command in commands:
+            for value in ("", "   "):
+                with self.subTest(command=command, value=value):
+                    result = subprocess.run([sys.executable, str(ROOT / "scripts" / command[0]),
+                                             *command[1:], "--config", value], env=self.env,
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("--config must not be empty", result.stderr)
+                    self.assertEqual(result.stdout, "")
+
+    @unittest.skipUnless(shutil.which("cmake") and shutil.which("c++"), "requires CMake and a host compiler")
+    def test_missing_cuda_compiler_reports_setup_action(self):
+        result = subprocess.run(["cmake", "-S", str(ROOT), "-B", str(self.root / "cmake-missing"),
+                                 "-DCMAKE_CUDA_COMPILER=NOTFOUND"], env=self.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CUDA compiler not found", result.stderr)
+        self.assertIn("CUDACXX=", result.stderr)
+        self.assertNotIn("Failed to detect a default CUDA architecture", result.stderr)
+
+    @unittest.skipUnless(shutil.which("cmake") and shutil.which("c++"), "requires CMake and a host compiler")
+    def test_invalid_explicit_cuda_root_does_not_fall_back(self):
+        result = subprocess.run(["cmake", "-S", str(ROOT), "-B", str(self.root / "cmake-root"),
+                                 f"-DCUDAToolkit_ROOT={self.root / 'absent'}"], env=self.env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No nvcc under CUDAToolkit_ROOT=", result.stderr)
+
+    def test_discovery_selection_matches_device_order_and_overrides(self):
+        rows = [{"device": device, "port": port, "active": active}
+                for device, port, active in (("z", "1", True), ("a", "1", True),
+                                            ("b", "2", True), ("c", "1", False))]
+        self.assertEqual(discover_roce.selection(rows, {}),
+                         {"mode": "automatic", "devices": ["a", "z"], "gid_indices": None})
+        self.assertEqual(discover_roce.selection(rows, {"DGPP_ROCE_DEVICES": "z a", "DGPP_ROCE_GID_INDICES": "3 4"}),
+                         {"mode": "configured", "devices": ["z", "a"], "gid_indices": ["3", "4"]})
+
+    def test_discovery_preserves_partial_results_and_checks_later_peers(self):
+        rows = [{"device": "nic0", "port": "1", "active": True, "usable": True,
+                 "gids": [{"interface": "eth0", "ips": ["192.0.2.1/24"], "address": "192.0.2.1", "mtu": 9000, "index": 3}]}]
+        for json_mode in (False, True):
+            for error in (Mock(returncode=255, stderr="Host key verification failed"),
+                          subprocess.TimeoutExpired("ssh", 30)):
+                with self.subTest(json_mode=json_mode, error=error):
+                    output = io.StringIO()
+                    with patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(output), \
+                            patch.object(cluster_doctor, "roce_inventory", return_value=rows), \
+                            patch.object(discover_roce.subprocess, "run", side_effect=[error,
+                                         Mock(returncode=0, stdout=json.dumps(rows)),
+                                         Mock(returncode=0, stdout="[]")]) as remote:
+                        result = discover_roce.main(["--config", str(self.config), *(["--json"] if json_mode else [])])
+                    self.assertEqual(result, 1)
+                    self.assertEqual(remote.call_count, 3)
+                    if json_mode:
+                        data = json.loads(output.getvalue())
+                        self.assertEqual(set(data["inventories"]), {"127.0.0.1", "peer2", "peer3"})
+                        self.assertEqual(set(data["errors"]), {"peer1"})
+                        self.assertNotIn("peer1", data["selections"])
+                    else:
+                        self.assertIn("locally eligible", output.getvalue())
+                        self.assertIn("Deployment lane order (automatic): nic0", output.getvalue())
+                        self.assertIn("FAIL peer1: inventory unknown", output.getvalue())
+                        self.assertIn("peer2: verbs device", output.getvalue())
+
+    def test_local_discovery_success_and_single_node_selection(self):
+        with patch.object(cluster_doctor, "roce_inventory", return_value=[]), \
+                patch.object(discover_roce.subprocess, "run") as remote:
+            self.assertEqual(discover_roce.main([]), 0)
+        remote.assert_not_called()
+        self.config.write_text(json.dumps({"model": "org/model", "world_size": 1}))
+        with patch.dict(os.environ, self.env, clear=True), patch.object(cluster_doctor, "roce_inventory", return_value=[]):
+            self.assertEqual(discover_roce.main(["--config", str(self.config)]), 0)
+        self.assertIn("not needed (single node)", self.output.getvalue())
+
+    def test_doctor_does_not_invent_lane_counts_for_failed_probes(self):
+        with patch.dict(os.environ, self.env, clear=True):
+            cfg = site_env.resolve_config(self.config)
+        report = {"rank": 0, "devices": ["nic0", "nic1"], "checks": []}
+        with patch.object(cluster_doctor, "probe", return_value=report), \
+                patch.object(cluster_doctor.subprocess, "run", return_value=Mock(returncode=255, stderr="Host key verification failed")):
+            self.assertEqual(cluster_doctor.check_cluster(cfg, None, "/log", "/stage", "tester"), 1)
+        output = self.output.getvalue()
+        self.assertNotIn("lane counts differ", output)
+        self.assertIn("lane counts are unknown", output)
+        self.assertIn("Preflight: 3 failed check(s)", output)
+
+    def test_real_lane_mismatch_still_prints_summary(self):
+        with patch.dict(os.environ, self.env, clear=True):
+            cfg = site_env.resolve_config(self.config)
+        report = {"rank": 0, "devices": ["nic0", "nic1"], "checks": []}
+        peer = {"rank": 1, "devices": ["nic0"], "checks": []}
+        with patch.object(cluster_doctor, "probe", return_value=report), \
+                patch.object(cluster_doctor.subprocess, "run", return_value=Mock(returncode=0, stdout=json.dumps(peer))):
+            self.assertEqual(cluster_doctor.check_cluster(cfg, None, "/log", "/stage", "tester"), 1)
+        output = self.output.getvalue()
+        self.assertIn("lane counts differ between successfully inspected nodes", output)
+        self.assertIn("Preflight: 1 failed check(s)", output)
+
+    def test_missing_checkpoint_recovery_uses_head_download_and_sync(self):
+        spec = {"rank": 0, "nodes": ["127.0.0.1"], "model": "org/missing", "env": {"HF_HUB_CACHE": str(self.cache)},
+                "paths": {}, "http_bind": "127.0.0.1", "ports": {"http": 0}, "binary": None}
+        with patch.object(cluster_doctor, "command", return_value=Mock(returncode=0, stdout="")):
+            report = cluster_doctor.probe(spec)
+        check = next(check for check in report["checks"] if check["check"] == "checkpoint")
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("on rank 0 run python3 scripts/download_model.py --config FILE", check["detail"])
+        self.assertIn("--sync-only", check["detail"])
+        self.assertNotIn("download the complete checkpoint on this node", check["detail"])
 
 
 if __name__ == "__main__":

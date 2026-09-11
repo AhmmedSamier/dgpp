@@ -211,7 +211,9 @@ def probe(spec):
         size = checkpoint_size(snapshot)
         record("checkpoint", "ok", f"{snapshot}: {size / 2**30:.1f} GiB; all indexed shards have consistent lengths (not a content hash check)")
     except (OSError, ValueError, KeyError, TypeError) as error:
-        record("checkpoint", "fail", f"{error}; download the complete checkpoint on this node")
+        record("checkpoint", "fail", f"checkpoint missing, incomplete or ambiguous: {error}; "
+               "on rank 0 run python3 scripts/download_model.py --config FILE "
+               "with this deployment's filename; add --sync-only if rank 0 already has the complete checkpoint")
     try:
         memory = next(line for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemAvailable:"))
         record("available memory", "ok", f"{int(memory.split()[1]) / 2**20:.1f} GiB; startup enforces the exact model memory plan")
@@ -304,14 +306,17 @@ def check_cluster(cfg, binary, log_dir, stage_dir, user, peer_binary=None, *, lo
                     raise RuntimeError(result.stderr.strip() or "remote probe failed")
                 report = json.loads(result.stdout)
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
-            report = {"rank": rank, "checks": [{"check": "probe", "status": "fail", "detail": str(error)}], "devices": []}
+            report = {"rank": rank, "checks": [{"check": "probe", "status": "fail", "detail": str(error)}], "devices": None}
         reports.append(report)
         for check in report["checks"]:
             print(f"{check['status'].upper():4} rank {rank} ({host}) {check['check']}: {check['detail']}")
-    if len(reports) > 1 and len({len(r["devices"]) for r in reports}) != 1:
-        print("FAIL RoCE lane counts differ between nodes")
-        return 1
     failures = sum(check["status"] == "fail" for report in reports for check in report["checks"])
+    inspected = [report for report in reports if report["devices"] is not None]
+    if len({len(report["devices"]) for report in inspected}) > 1:
+        print("FAIL RoCE lane counts differ between successfully inspected nodes")
+        failures += 1
+    if len(inspected) != len(reports):
+        print("WARN RoCE lane counts are unknown on nodes whose probes failed; fix those probe errors first.")
     print(f"Preflight: {failures} failed check(s). No files were installed and no services were started or stopped.")
     if local_only:
         print("Remote nodes were not checked (--local-only).")

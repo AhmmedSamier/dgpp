@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(dgpp VERSION 0.1.0 LANGUAGES CXX CUDA)
+project(dgpp VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,6 +7,31 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # e2m1x2 -> f16x2 conversion used by the FP4 kernels. These binaries
 # require compute capability 12.1.
 set(CMAKE_CUDA_ARCHITECTURES 121a)
+# SSH login shells may omit CUDA from PATH. Respect explicit compiler choices,
+# including toolchains, before looking for the conventional DGX OS installation.
+if(NOT DEFINED CMAKE_CUDA_COMPILER AND "$ENV{CUDACXX}" STREQUAL "")
+  if(CUDAToolkit_ROOT OR DEFINED ENV{CUDAToolkit_ROOT})
+    set(DGPP_CUDA_ROOT "${CUDAToolkit_ROOT}")
+    if(NOT DGPP_CUDA_ROOT)
+      set(DGPP_CUDA_ROOT "$ENV{CUDAToolkit_ROOT}")
+    endif()
+    find_program(DGPP_NVCC nvcc HINTS "${DGPP_CUDA_ROOT}/bin" NO_DEFAULT_PATH NO_CACHE)
+    if(NOT DGPP_NVCC)
+      message(FATAL_ERROR "No nvcc under CUDAToolkit_ROOT=${DGPP_CUDA_ROOT}. Select the CUDA 13 toolkit root, or set CUDACXX=/path/to/cuda/bin/nvcc and retry with cmake --fresh --preset ci.")
+    endif()
+  else()
+    find_program(DGPP_NVCC nvcc HINTS "$ENV{CUDA_PATH}/bin" PATHS /usr/local/cuda/bin NO_CACHE)
+  endif()
+  if(DGPP_NVCC)
+    set(CMAKE_CUDA_COMPILER "${DGPP_NVCC}" CACHE FILEPATH "CUDA compiler")
+  endif()
+endif()
+include(CheckLanguage)
+check_language(CUDA)
+if(NOT CMAKE_CUDA_COMPILER)
+  message(FATAL_ERROR "CUDA compiler not found. Install the CUDA 13 toolkit, or select an existing installation with CUDACXX=/path/to/cuda/bin/nvcc cmake --fresh --preset ci. See docs/getting-started.md.")
+endif()
+enable_language(CUDA)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(DGPP_WERROR "Treat compiler warnings as errors" OFF)

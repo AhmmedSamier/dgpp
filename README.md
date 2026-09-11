@@ -108,7 +108,14 @@ from NVMe; see [the single-node guide](docs/qwen38_single_spark.md).
 
 ## Quickstart
 
-Run these commands from the repository root on rank 0, after installing the
+Use an internet-connected Spark as rank 0. First get the source:
+
+```bash
+git clone https://github.com/HawkBearPig/dgpp.git
+cd dgpp
+```
+
+Run the remaining commands in this same shell, after installing the
 [dependencies on each node](docs/getting-started.md#1-install-the-dependencies).
 This example serves GLM-5.3-Flash on four Sparks; choose a different
 [deployment template](deploy/README.md) for another model or node count.
@@ -117,13 +124,16 @@ See [Getting started](docs/getting-started.md) for the full walkthrough and trou
 ### 1. Configure your deployment
 
 Copy the model template and create your site file, preserving existing files.
-Edit `.env` to set `DGPP_NODES` (rank 0 first) and `DGPP_SSH_USER`, and verify SSH-key access to each peer.
+Edit `.env` to set `DGPP_NODES` (rank 0 first) and `DGPP_SSH_USER`, then
+[verify SSH-key access from rank 0 to each peer](docs/getting-started.md#3-set-your-node-addresses-and-ssh-user).
 
 ```bash
 CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
-cp -n "${CONFIG%.json}.example.json" "$CONFIG"
+test -f "$CONFIG" || cp "${CONFIG%.json}.example.json" "$CONFIG"
 test -f .env || cp .env.example .env
 ```
+
+Set `CONFIG` again if you open a new shell; it is the deployment filename, not a persistent setting.
 
 ### 2. Select the RoCE lanes (multiple nodes only)
 
@@ -137,6 +147,7 @@ python3 scripts/discover_roce.py --config "$CONFIG"
 ### 3. Build
 
 Build the server on rank 0; the launcher stages the executable on peers.
+If CUDA is not found, see [compiler setup](docs/getting-started.md#5-build-the-server-on-rank-0).
 
 ```bash
 cmake --preset ci
@@ -147,6 +158,8 @@ cmake --build --preset ci --target dgpp_serve_app -j 4
 
 Download once into rank 0's standard Hugging Face cache, then sync peers sequentially.
 Add `--sync-only` if rank 0 already has the checkpoint.
+For this example, allow roughly **250 GiB per node** for the checkpoint and
+one resident cache; check [storage and offline options](docs/getting-started.md#6-download-once-and-sync-to-peers) first.
 
 ```bash
 python3 -m venv .venv
