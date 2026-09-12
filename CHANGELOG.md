@@ -20,7 +20,10 @@ The history by milestone. The dated engineering record in
   four request slots, MTP depth 1 and an FP8 latent cache at a 163,840-token
   context; the `_large-cache` variant trades two of those slots for 262,144
   tokens, because the draft block's per-position hidden cache costs 8 KiB per
-  token per slot and is 83 % of what a context token costs. No engine change
+  token per slot and is 83 % of what a context token costs. A `_117gib` pair
+  carries those same two shapes at 212,992 and 327,680 tokens for a node with
+  about 117 GiB usable; these nodes read 115.1 to 115.6 GiB at boot and refuse
+  them, so the filename names the budget its context assumes. No engine change
   was needed: the TP slicing, the loader and the bus were already world-generic
   and the geometry divides by two. Measured (benchmarks.md §3 to §7): T=1
   45.68 ms/pass, greedy MTP 59.40 ms/pass at 1.734 tokens per pass for
