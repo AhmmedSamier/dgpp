@@ -175,7 +175,7 @@ class PortabilityTest(unittest.TestCase):
         for path in (ROOT / "scripts").iterdir():
             if path.is_file():
                 self.assertIn(f"[{path.name}]({path.name})", index)
-        for name in ("README.md", "deploy/README.md", "scripts/README.md", "docs/getting-started.md", "docs/dependencies.md", "docs/networking.md", "docs/testing.md", "docs/operations.md"):
+        for name in ("README.md", "CONTRIBUTING.md", "deploy/README.md", "scripts/README.md", "docs/getting-started.md", "docs/dependencies.md", "docs/networking.md", "docs/testing.md", "docs/operations.md"):
             source = ROOT / name
             for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", source.read_text()):
                 if target.startswith(("http:", "https:", "#")):
@@ -187,6 +187,11 @@ class PortabilityTest(unittest.TestCase):
                     headings = re.findall(r"^#{1,6} (.+)$", destination.read_text(), re.MULTILINE)
                     anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
                     self.assertIn(anchor, anchors, f"broken heading link in {name}: {target}")
+
+    def test_contributor_cmake_minimum_matches_build(self):
+        cmake = (ROOT / "CMakeLists.txt").read_text()
+        minimum = re.search(r"cmake_minimum_required\(VERSION ([0-9.]+)\)", cmake).group(1)
+        self.assertIn(f"CMake {minimum}+", (ROOT / "CONTRIBUTING.md").read_text())
 
     def test_deployment_filenames_describe_their_settings(self):
         models = {

@@ -317,13 +317,15 @@ Keep localhost for now: the server has no TLS or authentication.
 
 ## 8. Send a request, then stop
 
-1. On rank 0, check the endpoint and ask a question:
+1. On rank 0, check the endpoint and ask a question. The short example requests
+   low reasoning effort because `max_tokens` includes reasoning tokens; without
+   it, the model may reach the limit before producing answer content.
 
    ```bash
    curl --fail http://127.0.0.1:18080/v1/models
    MODEL=$(curl --fail -s http://127.0.0.1:18080/v1/models | jq -r '.data[0].id')
    jq -n --arg model "$MODEL" \
-     '{model:$model,max_tokens:160,messages:[{role:"user",content:"Name three primary colors."}]}' \
+     '{model:$model,max_tokens:160,reasoning_effort:"low",messages:[{role:"user",content:"Name three primary colors."}]}' \
      | curl --fail http://127.0.0.1:18080/v1/chat/completions \
        -H 'Content-Type: application/json' --data-binary @-
    ```

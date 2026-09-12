@@ -180,12 +180,13 @@ python3 scripts/dgpp-cluster up --config "$CONFIG"
 
 ### 6. Send a request
 
-Ask the running model a question:
+Ask the running model a question. This short example requests low reasoning
+effort because reasoning tokens also count toward `max_tokens`:
 
 ```bash
 MODEL=$(curl --fail -s http://127.0.0.1:18080/v1/models | jq -r '.data[0].id')
 jq -n --arg model "$MODEL" \
-  '{model:$model,max_tokens:160,messages:[{role:"user",content:"Name three primary colors."}]}' \
+  '{model:$model,max_tokens:160,reasoning_effort:"low",messages:[{role:"user",content:"Name three primary colors."}]}' \
   | curl --fail http://127.0.0.1:18080/v1/chat/completions \
     -H 'Content-Type: application/json' --data-binary @-
 ```

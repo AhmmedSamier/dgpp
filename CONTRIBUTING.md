@@ -8,9 +8,10 @@ prepare and validate a change.
 ## Environment
 
 - A GB10 node with CUDA 13 (the toolkit, cuBLASLt, an SM 12.1 compiler),
-  CMake 3.24+, a C++20 compiler, rdma-core with libibverbs, Python 3.10+.
-  Without libibverbs, configure with `-DDGPP_ENABLE_IBV=OFF`; the bus and
-  the fabric gates are then unavailable.
+  CMake 3.25+, a C++20 compiler, rdma-core with libibverbs, Python 3.10+.
+  Keep libibverbs installed for serving, including single-node deployments.
+  `-DDGPP_ENABLE_IBV=OFF` omits the server and RDMA targets; it is only useful
+  for development that does not need them.
 - The checkpoint in the Hugging Face cache (`~/.cache/huggingface/hub`)
   for the real-model checks; the synthetic fixtures the tests write need
   nothing.
@@ -18,22 +19,43 @@ prepare and validate a change.
   service's multi-rank paths: the loopback gates cover the protocol on one
   node; four-node checks exercise the network.
 
+Follow [Getting started](docs/getting-started.md) for head/peer dependencies,
+CUDA discovery, site settings and checkpoint preparation. Use
+`--config /path/to/deployment.json` explicitly for deployment commands.
+
 ## Build
 
+For a first checkout, configure and build the host test targets:
+
 ```bash
-cmake --preset ci && cmake --build build-ci -j -- -k    # warnings as errors; -k keeps going past the first error
-ctest --test-dir build-ci --output-on-failure
+cmake --preset ci
+cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check
+ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
 ```
 
-`scripts/ci-local.sh` configures the CI preset, builds and runs CTest.
-The other presets are `release` (used by `scripts/release.sh`), `debug`,
-`asan` and `ubsan`.
+These checks include the Python suites and do not need GPU execution or model
+weights. The native build still needs the compiler and library dependencies
+above. See [testing](docs/testing.md) for labels, fixtures and optional tools.
 
-- **Run a full build before `ctest`.** The suite runs whatever binaries
-  exist; an old binary can pass without testing your changes.
-- **One CUDA suite at a time on a node that is also serving.** The loopback
-  worlds share the GPU with the service and each owns a port in
-  the 299xx range. `DGPP_TEST_FILTER=<substring>` runs a subset of a binary.
+For a full run, reserve idle test hardware, prepare the required checkpoints
+and fixtures, then build all targets before testing:
+
+```bash
+cmake --build --preset ci -j 4
+ctest --test-dir build-ci --output-on-failure -j 1
+```
+
+`scripts/ci-local.sh` runs the full build and test sequence, including GPU/RDMA
+suites. Use it only on idle test hardware. The other presets are `release`
+(used by `scripts/release.sh`), `debug`, `asan` and `ubsan`.
+
+- **Rebuild the selected test targets before `ctest`; build everything before
+  an unfiltered run.** The suite runs whatever binaries exist; an old binary
+  can pass without testing your changes.
+- **Run GPU/RDMA suites serially on idle test hardware, never alongside production
+  serving.** Loopback worlds use GPU memory and fixed ports in the 299xx range.
+  `DGPP_TEST_FILTER=<substring>` runs a subset of a binary. Read skip messages:
+  a passing suite with skipped checkpoint cases does not validate those models.
 
 ## What a change needs
 
@@ -44,17 +66,19 @@ The other presets are `release` (used by `scripts/release.sh`), `debug`,
    and configuration values as well, including whether the error names
    the offending field.
 2. **Evidence on the fabric** when the change touches the path the ranks
-   execute together: boot the world (`scripts/dgpp-cluster up`), run the
+   execute together: boot the world (`python3 scripts/dgpp-cluster up --config "$CONFIG"`), run the
    relevant check (`docs/operations.md` lists them; `scripts/serve_api_check.py`
-   for the request contract), stop it (`down`) and keep the four op-stream
-   md5s identical. A numerics change is judged as `docs/numerics.md`
+   for the request contract), stop it with the same config
+   (`python3 scripts/dgpp-cluster down --config "$CONFIG"`) and compare the
+   op-stream md5s across all participating ranks. Set `CONFIG` to the deployment
+   filename in the current shell. A numerics change is judged as `docs/numerics.md`
    describes, not by eye. A change that moves a published throughput number
    re-runs that number's procedure from `docs/benchmarks.md` §9 and updates the
    row there, with its date.
 3. **Engineering records.** Changes with new measurements or debugging
-   findings get an
-   entry in the engineering record, `benchmarks/results/2026-08-29-bus-m5.md`
-   (a dated `##` heading, the change, its validation and the results).
+   findings get a dated record in `benchmarks/results/` describing the change,
+   validation and results. Continue an existing record only when it covers the
+   same investigation; do not append unrelated work to an old milestone report.
    Preserve the context and names used in historical entries.
 4. **Documentation.** Keep `DESIGN.md` aligned with the implementation and
    `PLAN.md` with its status. Update `docs/operations.md` and `README.md`
@@ -75,8 +99,9 @@ The other presets are `release` (used by `scripts/release.sh`), `debug`,
 - Preserve determinism across ranks: anything a rank
   decides that another rank must agree with is a pure function of the
   journaled stream, and the op-stream fold checks it every tick.
-- Operations scripts use the Python standard library. Reference generators
-  may use optional dependencies and should document them.
+- Operational configuration, launch and diagnostic scripts use the Python
+  standard library. Hub downloads need `requirements-download.txt`; reference
+  generators may need the optional dependencies described in the setup guide.
 
 ## Commits
 
