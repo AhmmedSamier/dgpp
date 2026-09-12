@@ -29,7 +29,6 @@ switching models does not require copying addresses between JSONs.
 |---|---|
 | `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1{,_large-cache}.example.json` | GLM-5.3-Flash NVFP4/FP8 hybrid, four nodes |
 | `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1{,_large-cache}.example.json` | the same hybrid on two nodes, FP8 latent cache: 160K context on four request slots, or 256K on two |
-| `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1{,_large-cache}_117gib.example.json` | those two shapes sized for a node with about 117 GiB usable: 208K and 320K |
 | `cluster_qwen-3.8-flash-next_fp8_w{2,4}_{mtp1,plain}.example.json` | Qwen FP8 with MTP or plain decode, four or two nodes |
 | `cluster_qwen-3.8-flash-next_nvfp4_w1_{mtp1,plain}.example.json` | Qwen NVFP4 on one Spark, with a mapped n-gram table |
 | `cluster_glm-4.7_nvfp4_w4_{mtp1,plain,mtp2}.example.json` | GLM-4.7 NVFP4, MTP depth 1, plain decode or depth 2 |
@@ -95,11 +94,10 @@ planned against the 115.1 to 115.6 GiB these nodes report at boot. The boot's
 ceiling tracks that reading — 177,024 tokens at 115.06 GiB free, 190,976 at
 115.57 — so the shipped capacity keeps about half a GiB of slack under the
 worst of it rather than chasing the best. A node that really had 117 GiB free
-would hold 212,992, which is what the `_117gib` pair of templates carries:
-the same two shapes, kv_capacity and nothing else changed, for a cluster whose
-boot-time reading justifies them. Check with `--memory-plan` on the node that
-will run rank 0 before choosing one, and remember that the boot reads about
-0.6 GiB less than that check does. The draft block's hidden cache is 8 KiB per token
+would hold 212,992 at four slots and 327,680 at two, but no node here does, so
+no template carries those numbers. Re-size from a `--memory-plan` run on the
+node that will be rank 0, remembering that the boot reads about 0.6 GiB less
+than that check does. The draft block's hidden cache is 8 KiB per token
 per slot, so slots are the context lever: the `_large-cache` variant drops to
 two slots and holds 262,144 tokens with a 2 GiB prefix arena, and one slot
 would reach about 534,000. Decode costs what the doubled per-rank weight read

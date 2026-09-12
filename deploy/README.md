@@ -13,10 +13,6 @@ Local copies use the same name without `.example` and remain Git-ignored.
   not change the checkpoint quant or Hugging Face repository.
 - `large-cache` selects GLM-5.3's larger KV and prefix-cache budgets. Both
   GLM-5.3 templates use the hybrid checkpoint; neither is a separate FP8 release.
-- `117gib` comes last and names the node budget the context assumes: about
-  117 GiB usable, above the 115.1 to 115.6 GiB these nodes report at boot. It
-  differs from the template beside it in `kv_capacity` and nothing else, and a
-  node with less free memory refuses it at startup with its own ceiling.
 
 ## Templates added after the rename
 
@@ -24,8 +20,6 @@ Local copies use the same name without `.example` and remain Git-ignored.
 |---|---|
 | [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json) | GLM-5.3-Flash hybrid on two nodes, MTP depth 1, FP8 KV cache, 160K context, four request slots |
 | [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json) | the same on two nodes with two request slots instead of four, which buys 256K context and a 2 GiB prefix arena |
-| [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_117gib.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_117gib.example.json) | the four-slot shape on a node with about 117 GiB usable: 208K context |
-| [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache_117gib.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache_117gib.example.json) | the two-slot shape on that node: 320K context |
 
 ## Renamed files
 

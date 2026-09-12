@@ -212,22 +212,12 @@ class PortabilityTest(unittest.TestCase):
                 stem = f"cluster_{models[cfg['model']]}_w{cfg['world_size']}_{mode}"
                 if engine.get("dense_weights") == "fp8":
                     stem += "_dense-fp8"
-                # A node-budget suffix sizes the SAME shape for a roomier node:
-                # it may differ from its sibling in kv_capacity and nothing else.
-                budget, name = "", path.name
-                if name.endswith("_117gib.example.json"):
-                    name = name.replace("_117gib.example.json", ".example.json")
-                    sibling = json.loads((path.parent / name).read_text())["engine"]
-                    self.assertGreater(engine["kv_capacity"], sibling["kv_capacity"])
-                    self.assertEqual({k: v for k, v in engine.items() if k != "kv_capacity"},
-                                     {k: v for k, v in sibling.items() if k != "kv_capacity"})
-                    budget = "_117gib"
-                if name.endswith("_large-cache.example.json"):
+                if path.name.endswith("_large-cache.example.json"):
                     base = json.loads((path.parent / (stem + ".example.json")).read_text())
                     self.assertGreater(engine["kv_capacity"], base["engine"]["kv_capacity"])
                     self.assertGreater(engine["prefix_cache_gib"], base["engine"]["prefix_cache_gib"])
                     stem += "_large-cache"
-                self.assertEqual(path.name, stem + budget + ".example.json")
+                self.assertEqual(path.name, stem + ".example.json")
                 self.assertIn(f"]({path.name})", index)
                 resolved = site_env.resolve_config(path, values)
                 self.assertEqual(len(resolved["nodes"]), cfg["world_size"])
