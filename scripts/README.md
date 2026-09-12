@@ -34,7 +34,8 @@ soak procedures require four ranks and reject other worlds before starting.
 
 Use an idle test cluster for launch-and-stop procedures. Cleanup targets
 recorded process identities; the failure drill deliberately sends `SIGKILL`
-to a recorded rank. `up --replace` explicitly stops the selected deployment.
+to a recorded rank. `up --replace` explicitly stops the selected deployment;
+`down` without `--config` stops every recorded deployment that is running.
 Choose a fresh output directory to avoid overwriting previous results. The
 HumanEval task in `serve_eval.py` executes generated Python locally with a
 timeout, not a security sandbox; run it in an isolated evaluation environment

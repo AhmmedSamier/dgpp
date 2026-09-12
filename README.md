@@ -272,6 +272,7 @@ spaces or shell syntax.
 Log and staging directories are namespaced by deployment-file path;
 `dgpp-cluster paths` prints the effective locations. An explicit `--log-dir`
 is used as-is. `up` refuses an existing deployment unless `--replace` is given;
+`down` without `--config` stops every recorded deployment that is running;
 cleanup uses recorded process identity, never a binary-name kill.
 
 The launcher resolves the deployment and site settings into

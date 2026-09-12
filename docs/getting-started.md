@@ -344,7 +344,8 @@ use its localhost endpoint. Shared access needs an authenticated TLS proxy;
 see [networking](networking.md).
 
 To find logs, run `python3 scripts/dgpp-cluster paths --config "$CONFIG"`.
-Use the same config path and any `--log-dir` override for start, status and stop.
+Use the same config path and any `--log-dir` override for start, status and stop;
+`down` and `status` without `--config` cover every recorded deployment.
 `up` refuses an already running deployment; `up --replace` explicitly stops it
 first. Stop processes created by an older launcher with that launcher before
 upgrading—the current launcher does not adopt unrecorded processes.

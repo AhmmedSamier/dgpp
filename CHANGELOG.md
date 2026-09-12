@@ -6,6 +6,17 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **A bare `dgpp-cluster down` stops what is running** (2026-09-12):
+  `down` and `status` without `--config` (or with `--all`) scan every
+  deployment recorded under `DGPP_LOG_DIR/deployments` instead of the
+  default deployment file's namespace; `status` lists the running ones
+  with their ranks and the stopped ones as one line each with how their
+  log ended, `down` stops the running ones and names them by model, world,
+  namespace and deployment file (the staged namespace now records it in
+  `deployment.path`). Before, a bare `down` looked only at the default
+  file's namespace and reported success after stopping nothing while
+  another deployment kept the ports, so the next `up` failed preflight.
+  `down --config FILE` on a deployment with no live rank now says so.
 - Setup now covers CUDA discovery outside `PATH`, head/peer dependencies,
   outbound connectivity, verified SSH login, offline preparation and storage
   budgeting. Empty explicit `--config` arguments are rejected.

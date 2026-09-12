@@ -11,7 +11,11 @@ Deployment JSON selects model, world size, engine settings and optional HTTP
 bind/port. .env supplies node addresses, SSH user, fabric ports, cache/NIC
 settings and base paths. Exported settings take precedence over .env.
 DGPP_ENV_FILE selects another site file. Select the deployment explicitly
-with --config FILE, using the same file for start, status and stop.
+with --config FILE, using the same file for start, status and stop. down and
+status without --config (or with --all) act on every deployment recorded
+under DGPP_LOG_DIR/deployments: status lists them, down stops the running
+ones. up always starts one deployment: without --config it uses
+DGPP_CLUSTER_CONFIG or the default deployment file.
 
 Log and staging paths are namespaced by deployment-file path. Process identity
 records limit cleanup to this deployment; up --replace explicitly replaces a
@@ -38,7 +42,7 @@ import time
 import tempfile
 from pathlib import Path
 
-from site_env import SITE_KEYS, config_argument, config_path, resolve_config, settings, run_paths, shell_prefix, release_name
+from site_env import SITE_KEYS, config_argument, config_path, resolve_config, settings, run_paths, shell_prefix, release_name, site_paths
 import cluster_process
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -56,14 +60,30 @@ def expand(p):
 
 
 class Cluster:
-    def __init__(self, args):
-        self.deployment_path = os.path.abspath(args.config)
-        self.cfg = resolve_config(self.deployment_path)
+    def __init__(self, args, namespace=None):
+        if namespace is None:
+            self.deployment_path = os.path.abspath(args.config)
+            self.cfg = resolve_config(self.deployment_path)
+            paths = {**self.cfg.get("paths", {}), **run_paths(self.deployment_path, log_dir=args.log_dir)}
+            self.cfg["paths"] = paths
+            self.log_dir = os.path.abspath(expand(args.log_dir or paths.get("log_dir", "~/dgpp/log")))
+        else:
+            # A recorded deployment found by its namespace (down/status
+            # without --config): the configuration the launcher staged there
+            # is the one its ranks run, and deployment.path names the
+            # deployment file it came from (absent when the namespace was
+            # staged by a launcher that did not write it).
+            self.log_dir = os.path.abspath(namespace)
+            with open(os.path.join(self.log_dir, "cluster.resolved.json")) as f:
+                self.cfg = json.load(f)
+            paths = self.cfg.get("paths", {})
+            try:
+                with open(os.path.join(self.log_dir, "deployment.path")) as f:
+                    self.deployment_path = f.read().strip() or None
+            except OSError:
+                self.deployment_path = None
         self.nodes = self.cfg["nodes"]
         self.user = self.cfg["ssh_user"]
-        paths = {**self.cfg.get("paths", {}), **run_paths(self.deployment_path, log_dir=args.log_dir)}
-        self.cfg["paths"] = paths
-        self.log_dir = os.path.abspath(expand(args.log_dir or paths.get("log_dir", "~/dgpp/log")))
         self.stage_dir = paths.get("stage_dir", "/tmp/bus4")
         self.release_dir = paths.get("release_dir", "~/dgpp/releases")
         # Which binary: --bin, else the named release (--release or the
@@ -135,6 +155,32 @@ class Cluster:
     @property
     def pid_file(self):
         return os.path.join(self.log_dir, "r0.pid")
+
+    @property
+    def label(self):
+        """How a deployment is named in the scan's output: model, world,
+        namespace, and the deployment file when the namespace records it."""
+        source = self.deployment_path or "deployment file not recorded"
+        if self.deployment_path and self.deployment_path.startswith(ROOT + os.sep):
+            source = os.path.relpath(self.deployment_path, ROOT)
+        return f"{self.cfg['model']} on {len(self.nodes)} node(s) [{os.path.basename(self.log_dir)}] ({source})"
+
+    def live_ranks(self):
+        """The ranks whose recorded process is alive, as [(rank, host, pid)],
+        and the peers that could not be asked, as [(rank, host, error)]."""
+        alive, unreachable = [], []
+        pid = self.head_pid()
+        if pid is not None:
+            alive.append((0, self.nodes[0], pid))
+        for rank, host in self.peers:
+            try:
+                record = self.remote_control("status", rank, host)
+            except RuntimeError as error:
+                unreachable.append((rank, host, str(error)))
+                continue
+            if record:
+                alive.append((rank, host, record["pid"]))
+        return alive, unreachable
 
     def head_pid(self):
         record = cluster_process.running(self.state_path)
@@ -209,6 +255,10 @@ class Cluster:
             json.dump(self.cfg, resolved, indent=2)
             resolved.write("\n")
         os.replace(resolved.name, self.config_path)
+        # The namespace is a hash of the deployment file's path; the scan
+        # (down/status without --config) names the deployment by this.
+        with open(os.path.join(self.log_dir, "deployment.path"), "w") as f:
+            f.write(self.deployment_path + "\n")
         what = "the config" if self.installed else "dgpp-serve and the config"
         say(f"=== staging {what} to the peers" + (f" (release {self.release}: {self.bin})" if self.installed else ""))
         for rank, host in self.peers:
@@ -334,7 +384,15 @@ class Cluster:
         return 0
 
     # ---- down --------------------------------------------------------------
-    def down(self):
+    def down(self, alive=None):
+        if alive is None:
+            alive, unreachable = self.live_ranks()
+            for rank, host, error in unreachable:
+                say(f"WARN: rank {rank} ({host}) could not be checked: {error}")
+        if not alive:
+            say(f"=== {self.label}: no rank recorded as running; nothing to stop")
+            if not os.path.exists(self.config_path):
+                return 0  # never staged: no logs or op streams to collect either
         pid = self.head_pid()
         if self.alive(pid):
             say(f"=== SIGINT rank 0 ({pid}) — the stop record releases the peers")
@@ -432,19 +490,85 @@ class Cluster:
         return 0
 
     # ---- status ------------------------------------------------------------
-    def status(self):
-        pid = self.head_pid()
+    def status(self, live=None):
+        """This deployment's ranks, and the last lines of rank 0's log
+        (`live`: a precomputed live_ranks(), so the scan asks each peer once)."""
+        alive, unreachable = self.live_ranks() if live is None else live
+        pids = {rank: pid for rank, _, pid in alive}
+        errors = {rank: error for rank, _, error in unreachable}
+        say(f"=== {self.label}")
         try:
             ver = subprocess.run([self.bin, "--version"], capture_output=True, text=True, timeout=20).stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             ver = "?"
         say(f"binary: {self.bin} — {ver}")
-        say(f"rank 0 ({self.nodes[0]}): " + (f"alive ({pid})" if self.alive(pid) else "DOWN"))
-        self.tail(os.path.join(self.log_dir, "serve_r0.log"), 2)
-        for rank, host in self.peers:
-            record = self.remote_control("status", rank, host)
-            say(f"rank {rank} ({host}): " + (f"alive ({record['pid']})" if record else "DOWN"))
+        for rank, host in enumerate(self.nodes):
+            if rank in pids:
+                state = f"alive ({pids[rank]})"
+            elif rank in errors:
+                state = f"UNKNOWN ({errors[rank]})"
+            else:
+                state = "DOWN"
+            say(f"rank {rank} ({host}): {state}")
+            if rank == 0:
+                self.tail(os.path.join(self.log_dir, "serve_r0.log"), 2)
         return 0
+
+    def log_ending(self):
+        """When and how rank 0's log ends: a stopped deployment's whole story
+        in the scan's one line (a clean stop, a refused memory plan, ...)."""
+        try:
+            with open(os.path.join(self.log_dir, "serve_r0.log"), errors="replace") as f:
+                lines = [line for line in f.read().splitlines() if line.strip()]
+        except OSError:
+            return "no rank 0 log"
+        if not lines:
+            return "rank 0 log empty"
+        last = lines[-1]
+        # Server lines start "YYYY-MM-DD HH:MM:SS.mmm LEVEL message".
+        return f"rank 0's log ends {last[:19]}: {last[24:124]}" if last[:4].isdigit() else f"rank 0's log ends: {last[:100]}"
+
+
+def recorded_namespaces():
+    """Every deployment the launcher staged under DGPP_LOG_DIR/deployments,
+    whatever its deployment file. A deployment started with --log-dir keeps
+    its records there instead and is addressed by that override."""
+    root = os.path.abspath(expand(site_paths(settings())["log_dir"].rstrip("/") + "/deployments"))
+    try:
+        names = sorted(os.listdir(root))
+    except FileNotFoundError:
+        return root, []
+    return root, [os.path.join(root, name) for name in names
+                  if os.path.isfile(os.path.join(root, name, "cluster.resolved.json"))]
+
+
+def every_deployment(args, verb):
+    """down/status without --config: the verb over every recorded deployment
+    (status lists them all; down stops the ones with a live rank)."""
+    root, namespaces = recorded_namespaces()
+    if not namespaces:
+        say(f"no deployment recorded under {root}")
+        return 0
+    stopped = 0
+    for namespace in namespaces:
+        c = Cluster(args, namespace=namespace)
+        alive, unreachable = c.live_ranks()
+        if not alive:
+            # Stopped (or never booted): one line, with how its log ends,
+            # so the running deployments stand out.
+            say(f"{c.label}: not running ({c.log_ending()})")
+            continue
+        if verb == "status":
+            c.status((alive, unreachable))
+            continue
+        for rank, host, error in unreachable:
+            say(f"WARN: rank {rank} ({host}) could not be checked: {error}")
+        say(f"=== stopping {c.label}: " + ", ".join(f"rank {rank} ({host}) pid {pid}" for rank, host, pid in alive))
+        c.down(alive)
+        stopped += 1
+    if verb == "down":
+        say(f"{stopped} deployment(s) stopped" if stopped else "no deployment was running; nothing stopped")
+    return 0
 
 
 def main():
@@ -458,11 +582,22 @@ def main():
     ap.add_argument("--knobs", default="", help="flags appended to every rank's command line")
     ap.add_argument("--head-wrap", default="", help="prefix rank 0's command line with this (word-split): the profiling hook")
     ap.add_argument("--replace", action="store_true", help="stop this recorded deployment before starting it again")
+    ap.add_argument("--all", action="store_true",
+                    help="down/status: every deployment recorded under DGPP_LOG_DIR/deployments (the default when --config is omitted)")
     ap.add_argument("--skip-preflight", action="store_true", help="skip environment checks, not process ownership checks")
     ap.add_argument("--local-only", action="store_true", help="doctor: inspect this node without SSH")
     ap.add_argument("--rank", type=int, default=0, help="signal: rank in this deployment")
     ap.add_argument("--signal", choices=("INT", "TERM", "KILL"), default="INT")
     args = ap.parse_args()
+    if args.verb in ("down", "status") and (args.all or args.config is None):
+        if args.config:
+            ap.error("--all takes no --config")
+        if args.log_dir:
+            ap.error("--all scans DGPP_LOG_DIR/deployments; a deployment started with --log-dir "
+                     "is stopped with its --config and the same --log-dir")
+        return every_deployment(args, args.verb)
+    if args.all:
+        ap.error("--all applies to down and status")
     args.config = args.config or config_path(settings())
     if not os.path.exists(args.config):
         sys.exit(f"no cluster config at {args.config}: choose a deployment template "

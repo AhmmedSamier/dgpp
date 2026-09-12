@@ -55,8 +55,19 @@ ownership checks. `up` refuses a running deployment unless `--replace` is
 explicitly requested. Stop jobs from older launchers with their original
 launcher before upgrading: an unrecorded process is never adopted or killed.
 
-Pass the same `--config FILE` to each lifecycle command to select the
-deployment. `scripts/dgpp-cluster resolve --config FILE` prints the merged
+`down` and `status` without `--config` (or with `--all`) act on every
+deployment recorded under `DGPP_LOG_DIR/deployments`, whatever deployment
+file each was started from: `status` lists the running ones with their
+ranks and the end of rank 0's log, and the stopped ones as one line each
+with when and how rank 0's log ended; `down` stops the ones that are
+running and names each one by model, world, namespace and deployment
+file. Use this to stop whatever is
+holding the ports before starting another deployment. `up` always starts
+one deployment: without `--config` it uses `DGPP_CLUSTER_CONFIG` or the
+default deployment file.
+
+Pass the same `--config FILE` to `up` and to a `down` or `status` aimed
+at one deployment. `scripts/dgpp-cluster resolve --config FILE` prints the merged
 runtime configuration without launching or contacting any node. At startup,
 the launcher saves it as `<log_dir>/cluster.resolved.json` and stages the same
 content to peers as `<stage_dir>/cluster.json`. Neither `.env` nor its tokens
@@ -125,7 +136,8 @@ they cannot be mistaken for that run's results.
 The ID hashes the absolute deployment-file path, not its model name.
 Staging is similarly isolated under `DGPP_STAGE_DIR/deployments/ID`.
 `dgpp-cluster paths` prints both locations. An explicit `--log-dir` is used
-as-is; pass the same override to `up`, `down` and `status`. Process records
+as-is; pass the same override to `up`, `down` and `status` (the scan that a
+bare `down` or `status` runs does not look there). Process records
 include owner, boot identity and start time so PID reuse cannot authorize
 cleanup of another process. Keep the deployment path/site settings stable
 while it is running.
