@@ -1,7 +1,7 @@
 #!/bin/bash
 # The failure drill (M8's exit criterion "injected rank failure leaves
 # committed state unchanged"; M9's "kill -9 a random rank under load";
-# built 2026-09-05): kill -9 one rank of the four-node service while
+# built 2026-09-05): kill -9 one rank of the serving world while
 # clients stream, and check the v1 failure semantics end to end:
 #   1. every client that was streaming got the tokens the service had
 #      committed, then — rank 0 alive — the engine_failure error event and
@@ -14,7 +14,8 @@
 #      0 reproduce every client's committed tokens as a PREFIX of the fresh
 #      answer — nothing uncommitted ever reached a client, nothing
 #      committed was lost.
-# Usage: serve_failure_drill.sh <victim rank 0..3> [clients (1..3, default 3)]
+# Usage: serve_failure_drill.sh <victim rank> [clients (1..3, default 3)]
+# The victim is a rank of the selected deployment's world (0..world-1).
 # Set DGPP_SERVE_KNOBS as for serve_run.sh (the same knobs on every rank).
 # Everything lands under $DGPP_DRILL_DIR (default build-ci/fabric-runs/
 # failure_drill_<stamp>/): the SSE captures, the logs, the ops files, the
@@ -22,7 +23,8 @@
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/cluster_env.sh" || exit 1
-dgpp_require_world 4 || exit 1
+dgpp_require_peers || exit 1
+WORLD=$(dgpp_world) || exit 1
 SR=$ROOT/scripts/serve_run.sh
 LOG=$(dgpp_log_dir) || exit 1
 LOG=${LOG/#\~/$HOME}
@@ -34,9 +36,10 @@ PEER_DIR=$(dgpp_stage_dir) || exit 1
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=5)
 # The shared SSH login comes from .env (or an exported override).
 SSH_USER=$(dgpp_ssh_user) || exit 1
-VICTIM=${1:?usage: $0 <victim rank 0..3> [clients]}
+VICTIM=${1:?usage: $0 <victim rank> [clients]}
 CLIENTS=${2:-3}
-[[ "$VICTIM" =~ ^[0-3]$ && "$CLIENTS" =~ ^[1-3]$ ]] || { echo "victim must be 0..3 and clients 1..3" >&2; exit 2; }
+[[ "$VICTIM" =~ ^[0-9]+$ && "$VICTIM" -lt "$WORLD" && "$CLIENTS" =~ ^[1-3]$ ]] ||
+  { echo "victim must be 0..$((WORLD - 1)) and clients 1..3" >&2; exit 2; }
 STAMP=$(date +%Y-%m-%d_%H%M%S)
 DRILL="${DGPP_DRILL_DIR:-$ROOT/build-ci/fabric-runs/failure_drill_${STAMP}}"
 mkdir -p "$DRILL"
@@ -111,7 +114,7 @@ for _ in $(seq 1 300); do
   sleep 0.1
 done
 if [ -n "$r0_gone" ]; then say "rank 0: gone ${r0_gone}s after the kill"; else say "FAIL: rank 0 still alive 30 s after the kill"; fi
-for ((r = 1; r <= 3; ++r)); do
+for ((r = 1; r < WORLD; ++r)); do
   h=${PEERS[$((r - 1))]}
   gone=""
   for _ in $(seq 1 300); do
@@ -161,7 +164,7 @@ done
 # 6. The logs and the ops files.
 cp "$LOG/serve_r0.log" "$DRILL/serve_r0.log" 2>/dev/null
 grep -h "ENGINE FAILURE\|exiting with status\|rank 0's journal closed\|stream ended\|exited cleanly" "$DRILL/serve_r0.log" | tail -3 | sed 's/^/  rank 0: /' | tee -a "$SUMMARY"
-for ((r = 1; r <= 3; ++r)); do
+for ((r = 1; r < WORLD; ++r)); do
   h=${PEERS[$((r - 1))]}
   timeout 20 scp -q "${SSH_OPTS[@]}" "$SSH_USER@$h:$PEER_DIR/serve_r$r.log" "$DRILL/serve_r$r.log" 2>/dev/null
   grep -h "exiting with status\|rank 0's journal closed\|stream ended\|exited cleanly\|serve: " "$DRILL/serve_r$r.log" 2>/dev/null | tail -2 | sed "s/^/  rank $r: /" | tee -a "$SUMMARY"

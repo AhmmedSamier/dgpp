@@ -1,18 +1,20 @@
 #!/bin/bash
-# Drain-on-stop on the fabric (M6 6c): boots the four-node world, starts a
+# Drain-on-stop on the fabric (M6 6c): boots the selected deployment's world
+# (two or four nodes), starts a
 # long streamed request, and stops the world while it is mid-generation.
 # The expected picture: the client's stream ends with the server_shutdown
 # error event and [DONE] after the tokens it got; rank 0 logs the drain
 # pass; every peer logs "stop record — exiting" and "exited cleanly"; no
 # rank logs an ERROR, a stall or transport-retry-exceeded; the op streams
-# agree on all four ranks (the interrupted request retired at the same
+# agree on every rank (the interrupted request retired at the same
 # quantum everywhere).
 #
 # Usage: scripts/serve_stop_check.sh [OUT_DIR]
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/scripts/cluster_env.sh" || exit 1
-dgpp_require_world 4 || exit 1
+dgpp_require_peers || exit 1
+WORLD=$(dgpp_world) || exit 1
 OUT=${1:-$ROOT/build-ci/fabric-runs/stop_gate_$(date +%Y-%m-%d_%H%M%S)}
 export DGPP_SERVE_LOG=$OUT/serve
 export DGPP_SERVE_KNOBS="${DGPP_SERVE_KNOBS:---max-concurrency 2 --kv-capacity 4096 --default-max-tokens 512 --queue-limit 8 --decode-graph --mtp --seed 20260904}"
@@ -42,7 +44,7 @@ head -c 400 "$OUT/oneshot.json"; echo
 echo "--- rank 0's drain line"
 grep -h "serve: stop\|drain" "$DGPP_SERVE_LOG/serve_r0.log" | tail -3
 echo "--- every rank's exit"
-for r in 0 1 2 3; do grep -h "exited cleanly\|stop record\|stopped cleanly" "$DGPP_SERVE_LOG/serve_r$r.log" 2>/dev/null | tail -2 | sed "s/^/rank $r: /"; done
+for ((r = 0; r < WORLD; ++r)); do grep -h "exited cleanly\|stop record\|stopped cleanly" "$DGPP_SERVE_LOG/serve_r$r.log" 2>/dev/null | tail -2 | sed "s/^/rank $r: /"; done
 echo "--- errors on any rank (expect none)"
 grep -h "ERROR\|STALL\|retry-exceeded\|retry exceeded" "$DGPP_SERVE_LOG"/serve_r*.log | grep -v generation_config | head -5
 md5sum "$DGPP_SERVE_LOG"/serve_rank*.ops

@@ -288,7 +288,7 @@ def http_port(values=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("shell", "config", "nodes", "head", "client-host", "peers", "user", "http-port", "resolve", "rank-prefix", "run-rank", "require-world", "model", "log-dir", "stage-dir"))
+    parser.add_argument("command", choices=("shell", "config", "nodes", "head", "client-host", "peers", "user", "http-port", "resolve", "rank-prefix", "run-rank", "require-world", "require-peers", "world", "model", "log-dir", "stage-dir"))
     parser.add_argument("--config", type=config_argument)
     parser.add_argument("--world", type=int)
     parser.add_argument("--rank", type=int, default=0)
@@ -332,6 +332,12 @@ def main():
         env = dict(os.environ)
         env.update({key: os.path.expanduser(value) for key, value in rank_environment(args.rank, values).items()})
         os.execvpe(command[0], command, env)
+    elif args.command == "require-peers":
+        actual = deployment(path)["world_size"]
+        if actual < 2:
+            raise ValueError(f"this procedure requires a world with peers; selected deployment has world_size={actual}")
+    elif args.command == "world":
+        print(deployment(path)["world_size"])
     elif args.command == "require-world":
         actual = deployment(path)["world_size"]
         if actual != args.world:

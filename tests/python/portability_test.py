@@ -163,12 +163,12 @@ class PortabilityTest(unittest.TestCase):
         self.assertIn("--allow-code-execution", result.stderr)
         self.assertFalse(out.exists())
 
-    def test_four_rank_procedures_reject_single_node_before_launch(self):
+    def test_peer_procedures_reject_single_node_before_launch(self):
         for name in ("serve_stop_check.sh", "serve_failure_drill.sh", "serve_soak_run.sh"):
             result = subprocess.run(["bash", str(ROOT / "scripts" / name)], env=self.env,
                                     capture_output=True, text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("requires world_size=4", result.stderr)
+            self.assertIn("requires a world with peers", result.stderr)
 
     def test_scripts_index_and_setup_document_links(self):
         index = (ROOT / "scripts/README.md").read_text()
