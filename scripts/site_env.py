@@ -144,8 +144,13 @@ def deployment(path):
     if not isinstance(cfg.get("model"), str) or not cfg["model"]:
         raise ValueError("deployment model must be a non-empty string")
     release_name(cfg.get("release", ""))
-    if type(cfg.get("world_size")) is not int or cfg["world_size"] not in (1, 2, 4):
-        raise ValueError("deployment world_size must be 1, 2, or 4")
+    # Any rank count the site has nodes for. What a world actually supports is
+    # not ours to assert: the engine rejects a geometry that does not divide by
+    # it, and every rank's memory plan refuses a shape that does not fit. Both
+    # failures name the model and the number; an allow-list here would only
+    # forbid worlds that would have worked.
+    if type(cfg.get("world_size")) is not int or cfg["world_size"] < 1:
+        raise ValueError("deployment world_size must be a positive integer")
     paths = cfg.get("paths", {})
     if not isinstance(paths, dict) or set(paths) - {"resident_cache"}:
         raise ValueError("deployment paths may only contain resident_cache; move site paths into .env")
@@ -161,8 +166,8 @@ def deployment(path):
 
 def selected_nodes(values, world):
     nodes = site_nodes(values)
-    if type(world) is not int or world not in (1, 2, 4):
-        raise ValueError("world size must be 1, 2, or 4")
+    if type(world) is not int or world < 1:
+        raise ValueError("world size must be a positive integer")
     if world > len(nodes):
         raise ValueError(f"deployment needs {world} nodes, but DGPP_NODES contains only {len(nodes)}")
     return nodes[:world]
@@ -288,7 +293,7 @@ def http_port(values=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("shell", "config", "nodes", "head", "client-host", "peers", "user", "http-port", "resolve", "rank-prefix", "run-rank", "require-world", "require-peers", "world", "model", "log-dir", "stage-dir"))
+    parser.add_argument("command", choices=("shell", "config", "nodes", "head", "client-host", "peers", "user", "http-port", "resolve", "rank-prefix", "run-rank", "require-peers", "world", "model", "log-dir", "stage-dir"))
     parser.add_argument("--config", type=config_argument)
     parser.add_argument("--world", type=int)
     parser.add_argument("--rank", type=int, default=0)
@@ -338,10 +343,6 @@ def main():
             raise ValueError(f"this procedure requires a world with peers; selected deployment has world_size={actual}")
     elif args.command == "world":
         print(deployment(path)["world_size"])
-    elif args.command == "require-world":
-        actual = deployment(path)["world_size"]
-        if actual != args.world:
-            raise ValueError(f"this procedure requires world_size={args.world}; selected deployment has {actual}")
     elif args.command == "user":
         print(ssh_user(values))
     elif args.command == "http-port":

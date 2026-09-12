@@ -24,7 +24,6 @@ dgpp_head() { python3 "$_DGPP_SITE_HELPER" head; }
 dgpp_client_host() { python3 "$_DGPP_SITE_HELPER" client-host; }
 dgpp_rank_prefix() { python3 "$_DGPP_SITE_HELPER" rank-prefix --rank "$1"; }
 dgpp_run_rank() { local rank=$1; shift; python3 "$_DGPP_SITE_HELPER" run-rank --rank "$rank" -- "$@"; }
-dgpp_require_world() { python3 "$_DGPP_SITE_HELPER" require-world --world "$1"; }
 # Refuses a single-node deployment: the procedures that drive peers over SSH
 # need a world with at least one peer, at any rank count.
 dgpp_require_peers() { python3 "$_DGPP_SITE_HELPER" require-peers; }

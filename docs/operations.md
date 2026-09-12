@@ -22,8 +22,12 @@ Use `DGPP_ENV_FILE` for a different site file.
 
 Copy a model template from `deploy/` to a local deployment JSON, or pass an
 example directly with `--config`. The JSON selects the model, `world_size`
-and engine settings. Worlds 1, 2 and 4 take the first N nodes from `.env`;
-switching models does not require copying addresses between JSONs.
+and engine settings. A world takes the first `world_size` nodes from `.env`;
+switching models does not require copying addresses between JSONs. Any rank
+count the node list can staff is accepted. Whether a model runs at that count
+is decided where the answer is known: the engine refuses a geometry that does
+not divide by the world, and each rank refuses a memory plan that does not fit
+its node.
 
 | template | deployment |
 |---|---|

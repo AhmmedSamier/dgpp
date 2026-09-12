@@ -163,11 +163,28 @@ class SiteEnvTest(unittest.TestCase):
 
     def test_legacy_json_and_invalid_world_sizes_fail(self):
         for extra in ({"nodes": ["old"]}, {"ssh_user": "old"}, {"ports": {}},
-                      {"world_size": True}, {"world_size": 3}, {"paths": {"stage_dir": "/old"}}):
+                      {"world_size": True}, {"world_size": 0}, {"world_size": -1},
+                      {"world_size": "2"}, {"paths": {"stage_dir": "/old"}}):
             cfg = {"model": "org/model", "world_size": 2, **extra}
             self.config.write_text(json.dumps(cfg))
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 site_env.resolve_config(self.config, self.values())
+
+    def test_any_rank_count_the_site_has_nodes_for_resolves(self):
+        # No allow-list of world sizes: a rank count the engine may or may not
+        # support still resolves here, and fails later where the reason is known
+        # (geometry that does not divide, or a memory plan that does not fit).
+        cfg = json.loads(self.config.read_text())
+        cfg["world_size"] = 3
+        self.config.write_text(json.dumps(cfg))
+        resolved = site_env.resolve_config(self.config, self.values())
+        self.assertEqual(resolved["nodes"], ["head", "peer1", "peer2"])
+        # A world the site cannot staff is still refused, by the node list.
+        cfg["world_size"] = 5
+        self.config.write_text(json.dumps(cfg))
+        with self.assertRaises(ValueError) as error:
+            site_env.resolve_config(self.config, self.values())
+        self.assertIn("only 4", str(error.exception))
 
     def test_all_deployment_examples_resolve_without_site_fields(self):
         for path in (ROOT / "deploy").glob("*.example.json"):

@@ -7,7 +7,9 @@ Local copies use the same name without `.example` and remain Git-ignored.
 - The quant names the checkpoint representation: `fp8`, `nvfp4`, or
   `nvfp4-fp8` for the custom GLM-5.3 hybrid. The JSON's `model` field gives
   the exact Hugging Face repository.
-- `w1`, `w2`, and `w4` give the participating node count.
+- `w<n>` gives the participating node count. Nothing restricts that number to
+  the counts in use today; a world is refused by the engine's geometry check or
+  a rank's memory plan, not by a list of allowed sizes.
 - `plain` disables MTP. `mtp1` and `mtp2` enable it at draft depths 1 and 2.
 - `dense-fp8` converts Qwen's dense projections to FP8 at load time. It does
   not change the checkpoint quant or Hugging Face repository.
