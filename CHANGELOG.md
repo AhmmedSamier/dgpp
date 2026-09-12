@@ -14,6 +14,27 @@ The history by milestone. The dated engineering record in
   selected lane order. Its `--json` output now contains `inventories`, `selections`
   and `errors` objects keyed by host, replacing the bare host-to-inventory map.
 
+- **GLM-5.3-Flash on two nodes** (2026-09-12): the NVFP4/FP8 hybrid fits a
+  two-rank world at 94.71 GiB of weights per rank, against 50.74 at world 4.
+  `deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json` serves it with
+  four request slots, MTP depth 1 and an FP8 latent cache at a 163,840-token
+  context; the `_large-cache` variant trades two of those slots for 262,144
+  tokens, because the draft block's per-position hidden cache costs 8 KiB per
+  token per slot and is 83 % of what a context token costs. No engine change
+  was needed: the TP slicing, the loader and the bus were already world-generic
+  and the geometry divides by two. Measured (benchmarks.md §3 to §7): T=1
+  45.68 ms/pass, greedy MTP 59.40 ms/pass at 1.734 tokens per pass for
+  34.25 ms/token, per-class acceptance matching the four-node run, aggregate
+  22.7 to 47.3 tokens/s across the class and concurrency matrix, procedure
+  prefill 664 / 1,829 / 8,280 ms at 512 / 2,048 / 8,192, and HumanEval 158/164,
+  GSM8K 291/300, schema extraction 100/100 on the four-node denominators. Decode
+  costs 1.75x the four-node pace, prefill about 1.45x, quality nothing. Both
+  ranks' op streams matched at shutdown and the MTP and T=1 runs produced the
+  same rank-consistency digest.
+- `serve_soak_run.sh`, `serve_stop_check.sh` and `serve_failure_drill.sh` take
+  their rank count from the selected deployment instead of assuming four nodes,
+  and refuse a single-node deployment by name (`dgpp_require_peers`). The
+  drill's victim argument now accepts any rank of the configured world.
 - Deployment filenames now identify the full model, quant, world size and
   decode mode. Settings are unchanged; see `deploy/README.md` for the rename
   table. Older entries below retain the filenames used at the time.

@@ -28,6 +28,7 @@ switching models does not require copying addresses between JSONs.
 | template | deployment |
 |---|---|
 | `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1{,_large-cache}.example.json` | GLM-5.3-Flash NVFP4/FP8 hybrid, four nodes |
+| `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1{,_large-cache}.example.json` | the same hybrid on two nodes, FP8 latent cache: 160K context on four request slots, or 256K on two |
 | `cluster_qwen-3.8-flash-next_fp8_w{2,4}_{mtp1,plain}.example.json` | Qwen FP8 with MTP or plain decode, four or two nodes |
 | `cluster_qwen-3.8-flash-next_nvfp4_w1_{mtp1,plain}.example.json` | Qwen NVFP4 on one Spark, with a mapped n-gram table |
 | `cluster_glm-4.7_nvfp4_w4_{mtp1,plain,mtp2}.example.json` | GLM-4.7 NVFP4, MTP depth 1, plain decode or depth 2 |
@@ -83,6 +84,22 @@ Use a separate config for each checkpoint. For example, a site-local
 `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` checkpoint. Size its context and prefix
 arena with `--memory-plan`; the smaller weight footprint does not imply
 one fixed cache capacity for every deployment.
+
+**The same hybrid on two nodes.** Each rank then holds 94.71 GiB of weights
+instead of 50.74 GiB, which leaves about 12 GiB for the context once the
+8 GiB headroom is reserved. At four request slots with MTP the draft block's
+hidden cache is what binds, so `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.json`
+takes the latent cache to FP8 and settles at 163,840 tokens: 106.57 GiB
+planned against the 115.1 to 115.6 GiB these nodes report at boot. The boot's
+ceiling tracks that reading — 177,024 tokens at 115.06 GiB free, 190,976 at
+115.57 — so the shipped capacity keeps about half a GiB of slack under the
+worst of it rather than chasing the best. A node that really had 117 GiB free
+would hold 212,992. The draft block's hidden cache is 8 KiB per token
+per slot, so slots are the context lever: the `_large-cache` variant drops to
+two slots and holds 262,144 tokens with a 2 GiB prefix arena, and one slot
+would reach about 534,000. Decode costs what the doubled per-rank weight read
+implies, near 1.75x the four-node pace; prefill costs about 1.45x
+(benchmarks.md §3 to §6).
 
 ## Stop and inspect
 
@@ -161,7 +178,10 @@ check their allocations before loading:
   node's free memory. The refusal names the largest items and the largest
   `kv_capacity` the node would hold as configured. `dgpp-serve --config
   /path/to/cluster.resolved.json --rank R --memory-plan` runs the check alone and
-  exits 0 or 1;
+  exits 0 or 1. A standalone run reads about 0.6 GiB more free memory than a
+  boot does, because a booting rank locks its pinned memory before it plans;
+  leave that much slack when sizing `kv_capacity` from one, or read the
+  ceiling out of a refusal;
 - the loader's own check that the resident footprint (+ 8 GiB headroom)
   fits the device's free memory remains as the second line and fails
   immediately with a clear message — never three minutes into a load;

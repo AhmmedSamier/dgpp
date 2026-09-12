@@ -14,6 +14,13 @@ Local copies use the same name without `.example` and remain Git-ignored.
 - `large-cache` selects GLM-5.3's larger KV and prefix-cache budgets. Both
   GLM-5.3 templates use the hybrid checkpoint; neither is a separate FP8 release.
 
+## Templates added after the rename
+
+| Template | Deployment |
+|---|---|
+| [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json) | GLM-5.3-Flash hybrid on two nodes, MTP depth 1, FP8 KV cache, 160K context, four request slots |
+| [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json) | the same on two nodes with two request slots instead of four, which buys 256K context and a 2 GiB prefix arena |
+
 ## Renamed files
 
 The table applies to both local `.json` files and tracked `.example.json`

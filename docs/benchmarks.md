@@ -74,6 +74,7 @@ template, which is what "supported" means on this page:
 |---|---|---|---|
 | `unsloth/GLM-5.3-Flash-FP8` | 4 | Copy `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.example.json` to a separate FP8 config and set `model` to the FP8 repository | T=1, MTP depth 1 |
 | `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` | 4 | `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.example.json` | T=1, MTP depth 1 |
+| `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` | 2 | `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json`, `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json` | T=1, MTP depth 1 |
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 4 | `cluster_qwen-3.8-flash-next_fp8_w4_mtp1.example.json`, `cluster_qwen-3.8-flash-next_fp8_w4_plain.example.json` | T=1, MTP depth 1, depth 2 |
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 2 | `cluster_qwen-3.8-flash-next_fp8_w2_mtp1.example.json`, `cluster_qwen-3.8-flash-next_fp8_w2_plain.example.json` | T=1, MTP depth 1, depth 2 |
 | `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen-3.8-flash-next_nvfp4_w1_*.example.json` (five) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
@@ -84,9 +85,13 @@ checkpoint's own BF16 dense projections, or the same projections encoded to
 block FP8 as they load. Both are measured below; FP8 is the faster one and the
 BF16 one is the reference the transcripts are compared against.
 
-GLM-5.3-Flash and GLM-4.7 have been measured only at world 4, and
-Qwen3.8-Flash-Next-NVFP4 only at world 1. Those are deployment decisions
-rather than limitations of the engine, which takes the world from the config.
+GLM-4.7 has been measured only at world 4, and Qwen3.8-Flash-Next-NVFP4 only
+at world 1. Those are deployment decisions rather than limitations of the
+engine, which takes the world from the config. The GLM-5.3 hybrid is measured
+at worlds 4 and 2; the two-node deployment carries the same weights on half
+the ranks, so each rank holds 94.71 GiB of them instead of 50.74 GiB, and its
+latent cache is FP8 rather than BF16 to buy back context (160K tokens at four
+request slots).
 
 ## 3. Decode, one request
 
@@ -124,6 +129,19 @@ end down from 52–56 ms.
 The routed experts are NVFP4 and everything else is the FP8 release's own
 bytes. Against the FP8 checkpoint on the same fabric this is 26.2 versus 31.4 ms
 at T=1 and 19.77 versus 22.45 ms/token under greedy MTP, at equal quality (§7).
+
+### GLM-5.3-Flash NVFP4/FP8 hybrid, world 2
+
+| mode | ms/pass | tok/pass | ms/token | date |
+|---|---|---|---|---|
+| T=1 | 45.68 | 1.0 | 45.68 | 2026-09-12 |
+| MTP, greedy | 59.40 | 1.734 | 34.25 | 2026-09-12 |
+| MTP, sampled, through the service | 60 | 1.70–1.81 | 34.1–35.3 | 2026-09-12 |
+
+The same weights on half the ranks: 1.74x the four-node pass at T=1, 1.75x under
+MTP. The T=1 step is 45.68 ms mean with p99 47, so the world is as steady as the
+four-node one. The MTP and T=1 runs produced the same rank-consistency digest,
+which is the speculative-identity gate (§9.6) passing on this world.
 
 ### Qwen3.8-Flash-Next-FP8, world 4 and world 2
 
@@ -212,6 +230,22 @@ All four ranks' transcripts identical on every class. This replaces a table
 taken at a graph step of 36.4–36.9 ms, which read chat 21.7, code 18.7, prose
 19.3, json 18.6 and math 19.5; the step is now 33.7–34.3 and every class gained
 about 7 %.
+
+### GLM-5.3-Flash NVFP4/FP8 hybrid, world 2, MTP greedy (2026-09-12)
+
+| class | drafts accepted | tok/pass | ms/pass | ms/token |
+|---|---|---|---|---|
+| chat | 73.4 % | 1.734 | 59.40 | 34.25 |
+| code | 98.0 % | 1.974 | 60.17 | 30.49 |
+| prose | 83.5 % | 1.829 | 58.71 | 32.09 |
+| json | 97.4 % | 1.974 | 59.16 | 29.98 |
+| math | 88.7 % | 1.887 | 59.96 | 31.78 |
+
+Both ranks' transcripts identical on every class. Acceptance matches the
+four-node run class for class, so the whole difference is the pass: 58.7–60.2 ms
+against 33.7–34.3, a factor of 1.75 that follows the doubled per-rank weight
+read. Per token the two-node world lands at 1.69x to 1.76x of the four-node
+figures.
 
 ### Qwen3.8-Flash-Next-NVFP4, world 1, MTP greedy (2026-09-10)
 
@@ -336,6 +370,24 @@ Sampled: prose 55.1 / 74.6 / 82.9, code 57.5 / 74.3 / 87.1, json 56.2 / 78.4 /
 34–41 ms at c=1, 52–63 at c=2 and 68–84 at c=4, with acceptance 74–93 % greedy
 and 71–92 % sampled.
 
+### GLM-5.3-Flash NVFP4/FP8 hybrid, world 2 (2026-09-12)
+
+| class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
+|---|---|---|---|---|
+| prose | 29.5 | 39.7 | 39.5 | 34.01 |
+| code | 32.6 | 42.1 | 41.9 | 30.73 |
+| json | 33.0 | 35.5 | 44.9 | 30.43 |
+| math | 29.5 | 36.8 | 47.3 | 34.06 |
+| chat | 22.7 | 40.5 | 38.9 | 44.25 |
+
+Half the ranks hold twice the weights each, and the sweep reads 53 to 57 % of
+the four-node aggregate in every class and at every concurrency. The four-node
+world also keeps scaling to c=4 in each class, while two nodes flatten between
+c=2 and c=4 on prose, code and chat: the per-rank weight read is already the
+step's floor, so a wider batch buys less. Server-side, from the retire lines,
+the pass is 60–75 ms at c=1, 82–104 at c=2 and 151–179 at c=4, with acceptance
+69–98 %.
+
 **Sampling no longer costs acceptance on this family.** The page's §3 still
 carries the older sign-off reading of 25.0–27.6 ms/token sampled against
 21.3–23.9 greedy for the FP8 checkpoint. That gap predates the ratio-rule
@@ -438,6 +490,7 @@ reproduce exactly, so the difference is method and not a regression.
 |---|---|---|---|---|
 | GLM-5.3-Flash-FP8 | 553 ms | 1,423 ms | 6,320 ms | 33,728 ms (2026-09-05) |
 | GLM-5.3 NVFP4 hybrid | 425 ms | 1,269 ms | 5,696 ms | — |
+| GLM-5.3 NVFP4 hybrid, world 2 | 664 ms | 1,829 ms | 8,280 ms | — |
 | Qwen3.8-Flash-Next-FP8, world 4 | 0.87 ms/tok | 0.62 ms/tok | 0.58 ms/tok | — |
 | Qwen3.8-Flash-Next-FP8, world 2 | 612 ms | 1,508 ms | 5,817 ms | — |
 | Qwen NVFP4, BF16 dense, world 1 | 785 ms | 2,028 ms | 8,392 ms | — |
@@ -447,6 +500,12 @@ The GLM rows are tonight's re-runs and land within 1 % of their published
 values (549 / 1,417 / 6,286 and 425 / 1,275 / 5,702). The Qwen rows are the
 2026-09-09 and 2026-09-10 campaign values, not re-run tonight.
 
+The world-2 row was measured on 2026-09-12 from ids tokenized out of the pinned
+GSM8K corpus, because the hard-prose id file the earlier rows used is not in the
+tree. Prefill cost is dominated by length rather than content, but the two rows
+do not share a text, so read the world-2 row against its own world-4 row with
+that in mind.
+
 ### Service: a fresh prompt through the API (2026-09-10)
 
 Median of three, with the real token count the tokenizer produced:
@@ -455,6 +514,7 @@ Median of three, with the real token count the tokenizer produced:
 |---|---|---|---|---|---|
 | GLM-5.3-Flash-FP8 | 855 ms | 2,211 ms | 9,165 ms | 21,738 ms | 58,555 ms |
 | GLM-5.3 NVFP4 hybrid | 734 ms | 2,210 ms | 11,374 ms | — | 93,765 ms |
+| GLM-5.3 NVFP4 hybrid, world 2 | 1,088 ms | 2,724 ms | 11,881 ms | — | — |
 | GLM-4.7-NVFP4 | 850 ms | 2,809 ms | 16,865 ms | — | — |
 
 Per prompt token:
@@ -463,6 +523,7 @@ Per prompt token:
 |---|---|---|---|---|---|
 | GLM-5.3-Flash-FP8 | 1.64 | 1.05 | 1.09 | 1.29 | 1.73 |
 | GLM-5.3 NVFP4 hybrid | 1.41 | 1.05 | 1.36 | — | 2.77 |
+| GLM-5.3 NVFP4 hybrid, world 2 | 2.04 | 1.30 | 1.42 | — | — |
 | GLM-4.7-NVFP4 | 1.63 | 1.32 | 1.98 | — | — |
 
 **The hybrid inverts against FP8 above 2K, and only through the service.** On
@@ -473,6 +534,19 @@ service-to-procedure ratio is 1.45–1.74 for FP8 and 1.73–2.00 for the hybrid
 the NVFP4 expert path degrades with context in a way the FP8 tensor-core path
 does not. This is one sample per point and wants a profile before anyone acts
 on it; it is the most actionable thing tonight's run turned up.
+
+**Prefill costs far less than decode on the smaller world** (2026-09-12). On
+the procedure, halving the ranks costs 1.56x at 512 tokens, 1.44x at 2,048 and
+1.45x at 8,192 — against decode's 1.75x. Prefill is tensor-core bound rather
+than weight-read bound, so doubling each rank's weights does not double the
+work, and two nodes exchange fewer bulk collectives.
+
+Through the service the two worlds nearly converge at 8K: 11,881 ms on two
+nodes against 11,374 on four. That is not a two-node win. It is the hybrid's
+known service-to-procedure inversion being milder here — the ratio is 1.43 at
+world 2 against 2.00 at world 4 — so the four-node service figure is the
+outlier, not the two-node one. Whatever degrades the NVFP4 expert path with
+context through the service hurts less when each rank owns a wider slice.
 
 GLM-4.7's prefill was previously measured only on 31 to 150-token prompts and
 one 6,525-token prompt at 1.77 ms/token. The service figures above are its
@@ -497,11 +571,18 @@ score is not comparable across different denominators.
 |---|---|---|---|---|
 | GLM-5.3-Flash-FP8 | 4 | 155/164 (94.5 %) | 293/300 (97.7 %) | 100/100 |
 | GLM-5.3 NVFP4 hybrid | 4 | 157/164 (95.7 %) | 293/300 (97.7 %) | 100/100 |
+| GLM-5.3 NVFP4 hybrid | 2 | 158/164 (96.3 %) | 291/300 (97.0 %) | 100/100 |
 | Qwen3.8-Flash-Next-FP8 | 4 | 39/40 | 59/60 | 30/30 |
 | Qwen3.8-Flash-Next-FP8 | 2 | 38/40 | 59/60 | 30/30 |
 | Qwen NVFP4, BF16 dense | 1 | 39/40 | 59/60 | 30/30 |
 | Qwen NVFP4, FP8 dense | 1 | 38/40 | 59/60 | 30/30 |
 | GLM-4.7-NVFP4 | 4 | 39/40 | 60/60 | 30/30 |
+
+The two-node row is the same checkpoint on the same items, with the latent
+cache in FP8 rather than BF16, and it lands inside the run-to-run movement of
+the four-node row: one more HumanEval problem, two fewer GSM8K, extraction
+exact. Halving the world and quantizing the latent cache cost nothing
+measurable at task level (2026-09-12).
 
 The two GLM-5.3 checkpoints were run on identical items: 155 HumanEval problems
 pass on both, 7 fail on both, and 2 pass only on the hybrid. The single-point
@@ -527,7 +608,10 @@ outright, and what follows is what genuinely remains.
    the NVFP4 hybrid losing to FP8 above 2K through the service while winning on
    the procedure. One sample per point. The next step is
    `scripts/fabric_qwen_profile.sh`-style node tracing on a service prefill at
-   8K on both checkpoints, not more timings.
+   8K on both checkpoints, not more timings. The 2026-09-12 two-node run adds
+   one clue: the same inversion is milder there (1.43x service-to-procedure
+   against 2.00x at world 4), so whatever degrades with context eases when each
+   rank owns a wider expert slice.
 3. **Service-method prefill for the Qwen families.** All three Qwen rows in §6
    are procedure figures; only the GLM worlds have both. Until they are re-run the
    Qwen prefill numbers are not comparable with the GLM service numbers. Fill
@@ -537,6 +621,11 @@ outright, and what follows is what genuinely remains.
 5. **Concurrency beyond 4.** The v1 sign-off has an 8-request point for
    GLM-5.3-FP8 and nothing else does. The configs cap `max_concurrency` at 4,
    so this needs a config change, not just a longer run.
+6. **The two-node GLM-5.3 world has greedy numbers only, and no endurance
+   run.** Its §5 sweep was not repeated at temperature 1, and neither
+   `serve_soak_run.sh` nor `serve_failure_drill.sh` has been run against it;
+   both now take their rank count from the deployment, so either will run
+   against the two-node config unchanged.
 
 Closed on 2026-09-10 evening: per-class decode under concurrency for all six
 deployments; per-class tables for Qwen at both worlds and for GLM-4.7; the
@@ -671,6 +760,9 @@ recording. Every campaign above ran with these:
 
 ### 9.7 Where the raw records live
 
+`build-ci/fabric-runs/glm53_w2_2026-09-12/` on the head node holds the two-node
+GLM-5.3 campaign: the class sweep, the isolation check, both prefill methods,
+the eval's per-item JSONL, the rituals' logs, and the context-ceiling readings.
 `build-ci/fabric-runs/bench_2026-09-10/` on the head node holds tonight's run:
 every phase's raw output, the server logs, and `RESULTS.md` with the tables as
 they came off the fabric. `benchmarks/results/` holds the dated engineering
