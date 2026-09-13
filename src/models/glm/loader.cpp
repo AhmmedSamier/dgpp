@@ -838,6 +838,9 @@ void GlmLayerStream::release_sources() {
     shard->close_mapping(/*drop_page_cache=*/true);
   }
   shards_.clear();
+  // The staging mirror stays until the destructor: this release runs at
+  // the last layer inside the first forward, where a cudaFreeHost would
+  // wait on the bus's persistent kernels for a watchdog period.
   DGPP_LOG_INFO(
       "glm loader: rank {} resident load complete — released {} shard "
       "mappings ({:.1f} GiB) and evicted their page cache; image: {} layers "

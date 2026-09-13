@@ -439,12 +439,13 @@ __global__ void staged_fill_kernel(uint16_t* dst, size_t elems, int rank) {
 // implicit-sync call in the workers into a hang).
 std::vector<std::unique_ptr<CollectiveBus>> start_world(
     int world, uint16_t port, bool one_lane = false,
-    int rank0_pass_delay_us = 0) {
+    int rank0_pass_delay_us = 0, size_t lat_slot_bytes = 8192) {
   std::vector<std::unique_ptr<CollectiveBus>> out;
   for (int r = 0; r < world; ++r) {
     BusOptions o = base_options(r, port);
     o.world_size = world;
     o.launch_consumers = false;
+    o.lat_slot_bytes = lat_slot_bytes;
     if (one_lane) o.lane_devices = {o.lane_devices.front()};
     // Fault injection (scenario_allreduce_done_before_posted): rank 0's
     // engine dawdles between its control-cell reads.
@@ -1621,6 +1622,62 @@ void scenario_allreduce_graph() {
   DGPP_LOG_INFO("scenario allreduce_graph: {} total failures", g_failures);
 }
 
+void scenario_allreduce_graph_rows() {
+  // The graph fold at the GLM-5.3 decode shapes (hidden 6144 x 1/2/3/8
+  // rows on a 96 KB latency slot): 36 KB staged, 72 KB staged (the budget
+  // widened 2026-09-13), 108 KB and 288 KB folded from the NIC-placed
+  // rows with the unrolled system loads. Every destination bitwise the
+  // oracle across replays, as scenario_allreduce_graph pins at 4096.
+  constexpr int world = 4;
+  const int gens_per_step = 12;
+  const int replays = 4;
+  const size_t lat_slot_bytes = 98304;
+  const size_t rows_elems[] = {6144, 12288, 18432, 49152};
+  const uint16_t ports[] = {29891, 29892, 29893, 29894};
+  int failures = 0;
+  for (size_t c = 0; c < 4; ++c) {
+    const size_t elems = rows_elems[c];
+    std::vector<std::unique_ptr<CollectiveBus>> world_buses =
+        start_world(world, ports[c], /*one_lane=*/false, /*rank0_pass_delay_us=*/0,
+                    lat_slot_bytes);
+    if (world_buses.empty()) {
+      DGPP_LOG_ERROR("graph rows world (elems {}) failed to start", elems);
+      ++failures;
+      continue;
+    }
+    std::vector<std::vector<uint16_t>> all_src(static_cast<size_t>(world));
+    for (int r = 0; r < world; ++r)
+      fill_rank_bf16(&all_src[static_cast<size_t>(r)], elems, r);
+    std::vector<uint16_t> want(elems, 0);
+    for (size_t i = 0; i < elems; ++i) {
+      float acc = 0.0f;
+      for (int r = 0; r < world; ++r)
+        acc += dgpp::net::bf16_to_f32(all_src[static_cast<size_t>(r)][i]);
+      want[i] = dgpp::net::bf16_from_f32_rne(acc);
+    }
+    std::vector<std::thread> workers;
+    std::vector<int> rank_failures(static_cast<size_t>(world), 0);
+    for (int r = 0; r < world; ++r)
+      workers.emplace_back([&, r] {
+        rank_failures[static_cast<size_t>(r)] = allreduce_graph_rank_work(
+            *world_buses[static_cast<size_t>(r)], world, r, elems,
+            gens_per_step, replays, &want);
+      });
+    for (auto& t : workers) t.join();
+    int world_failures = 0;
+    for (int r = 0; r < world; ++r) world_failures += rank_failures[static_cast<size_t>(r)];
+    CHECK(world_failures == 0,
+          "graph rows world (elems " + std::to_string(elems) + ") had " +
+              std::to_string(world_failures) + " failures");
+    for (auto& bus : world_buses) bus->quiesce();
+    for (auto& bus : world_buses) bus->stop();
+    DGPP_LOG_INFO("scenario allreduce_graph_rows: elems {} ({} KB per row) clean", elems,
+                  elems * 2 / 1024);
+  }
+  g_failures += failures;
+  DGPP_LOG_INFO("scenario allreduce_graph_rows: {} total failures", g_failures);
+}
+
 void scenario_idle_gap_collective() {
   // The real-mesh shape, found by the M5 exit-gate fabric run:
   // buses sit IDLE for seconds while a host loads weights (a cold peer's
@@ -1832,6 +1889,7 @@ int main() {
   scenario_allreduce_staged();
   scenario_allreduce_bulk();
   scenario_allreduce_graph();
+  scenario_allreduce_graph_rows();
   scenario_idle_gap_collective();
   scenario_geometry_mismatch();
   scenario_stop_releases_waiters();

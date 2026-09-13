@@ -62,8 +62,10 @@ DGPP_NODE_OVERRIDES='{"192.0.2.12":{"DGPP_ROCE_DEVICES":"rocep1s0f0 roceP2p1s0f0
 ```
 
 Override keys must match a host in `DGPP_NODES` exactly. Only RoCE devices,
-GID indices, HF hub cache and resident cache directory are accepted in each
-node override. `~/` expands on the destination host; `$VARIABLE` substitution
+GID indices, HF hub cache, resident cache directory and the engine's L2
+weight-prefetch knobs (`DGPP_L2_PREFETCH=off`, `DGPP_L2_PREFETCH_MB`,
+`DGPP_L2_PREFETCH_BOUNDARY`, `DGPP_L2_PREFETCH_LAYER`; an A/B sets them the
+same way on every rank) are accepted in each node override. `~/` expands on the destination host; `$VARIABLE` substitution
 and shell commands are not supported. `HF_HUB_CACHE` takes precedence over
 `HF_HOME/hub`. The launcher forwards only these allowlisted site values, not
 `.env` or its credentials. Direct native programs do not parse `.env`; use

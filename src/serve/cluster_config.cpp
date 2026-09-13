@@ -118,10 +118,16 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
       for (const Value& node : v.items()) {
         if (!node.is_object()) fail(what, "'node_env[]' must be an object");
         std::map<std::string, std::string> env;
+        // The launcher's NODE_KEYS (scripts/site_env.py): the fabric's per-node
+        // settings and the L2 weight-prefetch knobs (src/kernels/l2_prefetch.hpp),
+        // which an A/B sets the same way on every rank.
+        static const char* const kNodeKeys[] = {
+            "DGPP_ROCE_DEVICES", "DGPP_ROCE_GID_INDICES", "HF_HUB_CACHE", "DGPP_RESIDENT_CACHE_DIR",
+            "DGPP_L2_PREFETCH", "DGPP_L2_PREFETCH_MB", "DGPP_L2_PREFETCH_BOUNDARY", "DGPP_L2_PREFETCH_LAYER"};
         for (const Member& setting : node.members()) {
-          if (setting.key != "DGPP_ROCE_DEVICES" && setting.key != "DGPP_ROCE_GID_INDICES" &&
-              setting.key != "HF_HUB_CACHE" && setting.key != "DGPP_RESIDENT_CACHE_DIR")
-            fail(what, "unknown node environment key '" + setting.key + "'");
+          bool known = false;
+          for (const char* key : kNodeKeys) known = known || setting.key == key;
+          if (!known) fail(what, "unknown node environment key '" + setting.key + "'");
           env[setting.key] = text(setting.value, "node_env." + setting.key, what);
         }
         c.node_env.push_back(std::move(env));
@@ -147,6 +153,11 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.kv_dtype = text(x, ek, what);
           if (!latent_format_from_string(e.kv_dtype))
             fail(what, "'" + ek + "' must be \"bf16\", \"fp8\" or \"fp4\"");
+        }
+        else if (p.key == "embed_sharding") {
+          e.embed_sharding = text(x, ek, what);
+          if (e.embed_sharding != "replicated" && e.embed_sharding != "vocab")
+            fail(what, "'" + ek + "' must be \"replicated\" or \"vocab\"");
         }
         else if (p.key == "ngram_table") {
           e.ngram_table = text(x, ek, what);

@@ -14,6 +14,7 @@
 #include "common/dtypes.hpp"
 #include "kernels/fp4_gemv.cuh"
 #include "kernels/fp8_gemv.cuh"
+#include "kernels/packq_gemv.cuh"
 
 namespace dgpp {
 namespace {
@@ -1869,6 +1870,230 @@ void launch_moe_grouped_gemv_fp4(const uint16_t* act, size_t act_stride,
     DGPP_CUDA_OK(cudaGetLastError());
   });
 }
+
+// ---- packed-int routed experts (2026-09-12, docs/glm53_plan.md D2) --------
+//
+// The decode slot kernels and the host grouped kernel over expert-view
+// tables whose entries are packed-int (payload = the I32 words, packed_scales
+// = bf16 per 64, bits = the code width). A block's slot decides its format
+// uniformly: a routed slot runs the packed core (packq_gemv.cuh) at the
+// routed width RBits and the routed K; the shared slot (j == top_k) reads
+// the shared triple as view-table entry `shared_view_base` (= n_experts * 3,
+// the loader's (E+1)-entry table) through the same core at the SHARED width
+// (always 8 — the checkpoint's int8 shared expert; the draft's requant
+// follows it) and the routed K (the shared expert's inter equals the
+// routed experts'). The two widths have their own row geometries, so each
+// block derives its row base from its own; the launcher's grid covers the
+// finer one. Every row's arithmetic is the packed core's, bitwise across
+// the grouped (host) and slot (decode) launchers.
+namespace {
+
+constexpr int kPackqSharedBits = 8;
+
+// A warp's rows of gate and up dots from the staged activation row, then
+// the swiglu op for op on the bf16-rounded dots (the fp8 kernel's math).
+template <int Bits, int K>
+__device__ __forceinline__ void packq_slot_gate_up_rows(const MoeExpertView& vg,
+                                                        const MoeExpertView& vu,
+                                                        const uint16_t* __restrict__ sx,
+                                                        int n0, int n,
+                                                        uint16_t* __restrict__ act_row,
+                                                        float limit) {
+  float acc_g[packq_gemv::kSteps][1], acc_u[packq_gemv::kSteps][1];
+  packq_gemv::warp_row_dots_pair<Bits, K, 1>(
+      vg.payload, vg.packed_scales, vu.payload, vu.packed_scales, sx, n0, n, acc_g, acc_u);
+#pragma unroll
+  for (int st = 0; st < packq_gemv::kSteps; ++st) {
+    bool mine = false;
+    const int row = packq_gemv::owned_row<Bits, K>(n0, st, mine);
+    if (!mine || row >= n) continue;
+    float g = bf16_bits_to_float(float_to_bf16_bits(acc_g[st][0]));
+    float u = bf16_bits_to_float(float_to_bf16_bits(acc_u[st][0]));
+    if (g > limit) g = limit;
+    u = fminf(fmaxf(u, -limit), limit);
+    const uint16_t tt = float_to_bf16_bits(g * sigmoidf_acc(g));
+    act_row[row] = float_to_bf16_bits(bf16_bits_to_float(tt) * u);
+  }
+}
+
+template <int RBits, int K>
+__global__ void moe_slot_gate_up_swiglu_packq_kernel(
+    const uint16_t* __restrict__ x, size_t x_stride,
+    const int32_t* __restrict__ ids, const int32_t* __restrict__ order,
+    const MoeExpertView* __restrict__ views, int n_routed, int n_shared,
+    uint16_t* __restrict__ act, int act_stride, int slots, int top_k,
+    float limit, int shared_view_base) {
+  using GR = packq_gemv::Geom<RBits, K>;
+  using GS = packq_gemv::Geom<kPackqSharedBits, K>;
+  extern __shared__ __align__(16) uint16_t sx[];
+  if (static_cast<int>(blockIdx.y) >= slots) return;
+  const int slot = logical_slot(order);
+  const int t = slot / (top_k + 1);
+  const int j = slot - t * (top_k + 1);
+  const bool shared = j == top_k;
+  const int n = shared ? n_shared : n_routed;
+  const int n0 = blockIdx.x * (shared ? GS::rows_per_block : GR::rows_per_block);
+  if (n0 >= n) return;
+  packq_gemv::stage_activations<1>(x + static_cast<size_t>(t) * x_stride, x_stride, K, sx);
+  __syncthreads();
+  uint16_t* act_row = act + static_cast<size_t>(slot) * act_stride;
+  if (shared) {
+    packq_slot_gate_up_rows<kPackqSharedBits, K>(views[shared_view_base + 0],
+                                                 views[shared_view_base + 1], sx, n0, n,
+                                                 act_row, limit);
+    return;
+  }
+  const int base = ids[static_cast<size_t>(t) * top_k + j] * 3;
+  packq_slot_gate_up_rows<RBits, K>(views[base + 0], views[base + 1], sx, n0, n, act_row,
+                                    limit);
+}
+
+template <int RBits, int K>
+__global__ void moe_slot_down_packq_kernel(
+    const uint16_t* __restrict__ act, size_t act_stride,
+    const int32_t* __restrict__ ids, const int32_t* __restrict__ order,
+    const MoeExpertView* __restrict__ views, int n_routed, int n_shared,
+    float* __restrict__ out, int out_stride, int slots, int top_k,
+    int shared_view_base) {
+  using GR = packq_gemv::Geom<RBits, K>;
+  using GS = packq_gemv::Geom<kPackqSharedBits, K>;
+  extern __shared__ __align__(16) uint16_t sx[];
+  if (static_cast<int>(blockIdx.y) >= slots) return;
+  const int slot = logical_slot(order);
+  const int t = slot / (top_k + 1);
+  const int j = slot - t * (top_k + 1);
+  const bool shared = j == top_k;
+  const int n = shared ? n_shared : n_routed;
+  const int n0 = blockIdx.x * (shared ? GS::rows_per_block : GR::rows_per_block);
+  if (n0 >= n) return;
+  packq_gemv::stage_activations<1>(act + static_cast<size_t>(slot) * act_stride, act_stride,
+                                   K, sx);
+  __syncthreads();
+  float* out_row = out + static_cast<size_t>(slot) * out_stride;
+  if (shared) {
+    const MoeExpertView v = views[shared_view_base + 2];
+    packq_gemv::block_rows<kPackqSharedBits, K, 1>(v.payload, v.packed_scales, sx, n0, n,
+                                                   out_row, static_cast<size_t>(out_stride));
+    return;
+  }
+  const MoeExpertView v = views[ids[static_cast<size_t>(t) * top_k + j] * 3 + 2];
+  packq_gemv::block_rows<RBits, K, 1>(v.payload, v.packed_scales, sx, n0, n, out_row,
+                                      static_cast<size_t>(out_stride));
+}
+
+// The host path's grouped kernel over packed segments: rows staged four
+// at a time, every weight row through the packed core at one width per
+// launch (the routed segments' or the shared segment's).
+template <int Bits, int K, typename OutT>
+__global__ void moe_grouped_gemv_packq_kernel(const uint16_t* __restrict__ act,
+                                              size_t act_stride,
+                                              const MoeSegment* __restrict__ segs,
+                                              const MoeExpertView* __restrict__ views,
+                                              int which, OutT* __restrict__ out,
+                                              size_t out_stride, int n,
+                                              int rows_per_block) {
+  using G = packq_gemv::Geom<Bits, K>;
+  extern __shared__ __align__(16) uint16_t sx[];
+  const MoeSegment seg = segs[blockIdx.y];
+  const int z0 = static_cast<int>(blockIdx.z) * rows_per_block;
+  if (z0 >= seg.rows) return;
+  const int z1 = min(seg.rows, z0 + rows_per_block);
+  const MoeExpertView v = views[seg.expert * 3 + which];
+  const int n0 = blockIdx.x * G::rows_per_block;
+  for (int gi = z0; gi < z1; gi += gemv::kMaxRows) {
+    const int rows = min(gemv::kMaxRows, z1 - gi);
+    const uint16_t* xr = act + static_cast<size_t>(seg.row0 + gi) * act_stride;
+    OutT* o = out + static_cast<size_t>(seg.row0 + gi) * out_stride;
+    if (gi > z0) __syncthreads();
+    switch (rows) {
+      case 4:
+        packq_gemv::stage_activations<4>(xr, act_stride, K, sx);
+        __syncthreads();
+        packq_gemv::block_rows<Bits, K, 4, OutT>(v.payload, v.packed_scales, sx, n0, n, o, out_stride);
+        break;
+      case 3:
+        packq_gemv::stage_activations<3>(xr, act_stride, K, sx);
+        __syncthreads();
+        packq_gemv::block_rows<Bits, K, 3, OutT>(v.payload, v.packed_scales, sx, n0, n, o, out_stride);
+        break;
+      case 2:
+        packq_gemv::stage_activations<2>(xr, act_stride, K, sx);
+        __syncthreads();
+        packq_gemv::block_rows<Bits, K, 2, OutT>(v.payload, v.packed_scales, sx, n0, n, o, out_stride);
+        break;
+      default:
+        packq_gemv::stage_activations<1>(xr, act_stride, K, sx);
+        __syncthreads();
+        packq_gemv::block_rows<Bits, K, 1, OutT>(v.payload, v.packed_scales, sx, n0, n, o, out_stride);
+        break;
+    }
+  }
+}
+
+void check_packq_slot_args(const void* x, const int32_t* ids, const MoeExpertView* views,
+                           const void* out, int n_routed, int k_routed, int routed_bits,
+                           int n_shared, int shared_bits, int shared_view_base,
+                           const char* who) {
+  if (!x || !ids || !views || !out)
+    throw std::invalid_argument(std::string(who) + ": null pointer");
+  if (n_routed <= 0 || k_routed <= 0 || n_shared < 0)
+    throw std::invalid_argument(std::string(who) + ": degenerate dims");
+  if (routed_bits != 4 && routed_bits != 8)
+    throw std::invalid_argument(std::string(who) + ": the routed code width must be 4 or 8");
+  if (!packq_gemv::k_supported_bits(routed_bits, k_routed) || !packq_gemv::k_compiled(k_routed) ||
+      !gemv::smem_fits(1, k_routed))
+    throw std::invalid_argument(
+        std::string(who) + ": routed k must be a multiple of 64 in the packed core's compiled set");
+  if (n_shared == 0) return;
+  // The shared expert rides the routed K through the view table at the
+  // shared width (the fp8 launch-argument form is not a packed table's).
+  if (shared_view_base < 0)
+    throw std::invalid_argument(std::string(who) + ": a packed table carries its shared expert in the view table");
+  if (shared_bits != kPackqSharedBits)
+    throw std::invalid_argument(std::string(who) + ": the packed shared expert is int8");
+  if (!packq_gemv::k_supported_bits(kPackqSharedBits, k_routed))
+    throw std::invalid_argument(std::string(who) + ": the shared expert's k exceeds the int8 core's budget");
+}
+
+template <typename OutT>
+void launch_moe_grouped_gemv_packq(const uint16_t* act, size_t act_stride,
+                                   const MoeSegment* segs, int n_segs, int max_rows,
+                                   int rows_per_block, const MoeExpertView* views,
+                                   int which, OutT* out, size_t out_stride, int n,
+                                   int k, int bits, cudaStream_t stream) {
+  if (n_segs <= 0 || n <= 0) return;
+  if (!act || !segs || !views || !out)
+    throw std::invalid_argument("moe grouped gemv packq: null pointer");
+  if (!packq_gemv::k_supported_bits(bits, k) || !packq_gemv::k_compiled(k))
+    throw std::invalid_argument(
+        "moe grouped gemv packq: k must be a multiple of 64 in the packed core's compiled set");
+  if (!gemv::smem_fits(gemv::kMaxRows, k))
+    throw std::invalid_argument("moe grouped gemv packq: k exceeds the smem budget");
+  if (max_rows <= 0)
+    throw std::invalid_argument("moe grouped gemv packq: max_rows must be positive");
+  const unsigned z_ext = rows_per_block > 0
+                             ? static_cast<unsigned>((max_rows + rows_per_block - 1) / rows_per_block)
+                             : 1u;
+  if (rows_per_block <= 0) rows_per_block = INT_MAX;
+  packq_gemv::dispatch_bits(bits, [&](auto bc) {
+    constexpr int Bits = decltype(bc)::value;
+    packq_gemv::dispatch_k(k, [&](auto kc) {
+      constexpr int K = decltype(kc)::value;
+      if constexpr (packq_gemv::k_supported<Bits>(K)) {
+        constexpr int rpb = packq_gemv::Geom<Bits, K>::rows_per_block;
+        const dim3 grid((n + rpb - 1) / rpb, static_cast<unsigned>(n_segs), z_ext);
+        moe_grouped_gemv_packq_kernel<Bits, K, OutT>
+            <<<grid, fp8_gemv::kThreads, gemv::smem_bytes(gemv::kMaxRows, K), stream>>>(
+                act, act_stride, segs, views, which, out, out_stride, n, rows_per_block);
+        DGPP_CUDA_OK(cudaGetLastError());
+      } else {
+        throw std::invalid_argument("moe grouped gemv packq: K exceeds the width's chunk budget");
+      }
+    });
+  });
+}
+
+}  // namespace
 
 // ---- the fp4 grouped tensor-core kernel (docs/nvfp4_plan.md §3.4) --------
 // The fp8 tile kernel's structure — mma_tile's 128 x 64 x 64 stages, the
@@ -3802,6 +4027,93 @@ void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,
               act, act_stride, ids, order, views, n_routed, n_shared, k_shared,
               sh_payload, sh_scales, out, out_stride, slots, top_k, -1);
     DGPP_CUDA_OK(cudaGetLastError());
+  });
+}
+
+void launch_moe_grouped_gemv_packq_bf16(const uint16_t* act, size_t act_stride,
+                                        const MoeSegment* segs, int n_segs,
+                                        int max_rows, int rows_per_block,
+                                        const MoeExpertView* views, int which,
+                                        uint16_t* out, size_t out_stride, int n,
+                                        int k, int bits, cudaStream_t stream) {
+  launch_moe_grouped_gemv_packq<uint16_t>(act, act_stride, segs, n_segs, max_rows,
+                                          rows_per_block, views, which, out, out_stride,
+                                          n, k, bits, stream);
+}
+
+void launch_moe_grouped_gemv_packq_f32(const uint16_t* act, size_t act_stride,
+                                       const MoeSegment* segs, int n_segs,
+                                       int max_rows, int rows_per_block,
+                                       const MoeExpertView* views, int which,
+                                       float* out, size_t out_stride, int n,
+                                       int k, int bits, cudaStream_t stream) {
+  launch_moe_grouped_gemv_packq<float>(act, act_stride, segs, n_segs, max_rows,
+                                       rows_per_block, views, which, out, out_stride,
+                                       n, k, bits, stream);
+}
+
+void launch_moe_slot_gate_up_swiglu_packq(
+    const uint16_t* x, size_t x_stride, const int32_t* ids, const int32_t* order,
+    const MoeExpertView* views, int n_routed, int k_routed, int routed_bits,
+    int n_shared, int shared_bits, uint16_t* act, int act_stride, int slots,
+    int top_k, float limit, cudaStream_t stream, int shared_view_base) {
+  if (slots <= 0) return;
+  check_packq_slot_args(x, ids, views, act, n_routed, k_routed, routed_bits, n_shared,
+                        shared_bits, shared_view_base, "moe_slot_gate_up_packq");
+  if (act_stride < n_routed || act_stride < n_shared)
+    throw std::invalid_argument("moe_slot_gate_up_packq: act_stride below n");
+  packq_gemv::dispatch_bits(routed_bits, [&](auto bc) {
+    constexpr int RBits = decltype(bc)::value;
+    packq_gemv::dispatch_k(k_routed, [&](auto kc) {
+      constexpr int K = decltype(kc)::value;
+      if constexpr (packq_gemv::k_supported<RBits>(K) && packq_gemv::k_supported<kPackqSharedBits>(K)) {
+        constexpr int rpb_r = packq_gemv::Geom<RBits, K>::rows_per_block;
+        constexpr int rpb_s = packq_gemv::Geom<kPackqSharedBits, K>::rows_per_block;
+        const unsigned bx = static_cast<unsigned>(
+            std::max((n_routed + rpb_r - 1) / rpb_r, (n_shared + rpb_s - 1) / rpb_s));
+        const dim3 grid(bx, static_cast<unsigned>(slots));
+        moe_slot_gate_up_swiglu_packq_kernel<RBits, K>
+            <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(1, K), stream>>>(
+                x, x_stride, ids, order, views, n_routed, n_shared, act, act_stride, slots,
+                top_k, limit, shared_view_base);
+        DGPP_CUDA_OK(cudaGetLastError());
+      } else {
+        throw std::invalid_argument("moe_slot_gate_up_packq: K exceeds a width's chunk budget");
+      }
+    });
+  });
+}
+
+void launch_moe_slot_down_packq(const uint16_t* act, size_t act_stride,
+                                const int32_t* ids, const int32_t* order,
+                                const MoeExpertView* views, int n_routed, int k_routed,
+                                int routed_bits, int n_shared, int shared_bits,
+                                float* out, int out_stride, int slots, int top_k,
+                                cudaStream_t stream, int shared_view_base) {
+  if (slots <= 0) return;
+  check_packq_slot_args(act, ids, views, out, n_routed, k_routed, routed_bits, n_shared,
+                        shared_bits, shared_view_base, "moe_slot_down_packq");
+  if (out_stride < n_routed || out_stride < n_shared)
+    throw std::invalid_argument("moe_slot_down_packq: out_stride below n");
+  packq_gemv::dispatch_bits(routed_bits, [&](auto bc) {
+    constexpr int RBits = decltype(bc)::value;
+    packq_gemv::dispatch_k(k_routed, [&](auto kc) {
+      constexpr int K = decltype(kc)::value;
+      if constexpr (packq_gemv::k_supported<RBits>(K) && packq_gemv::k_supported<kPackqSharedBits>(K)) {
+        constexpr int rpb_r = packq_gemv::Geom<RBits, K>::rows_per_block;
+        constexpr int rpb_s = packq_gemv::Geom<kPackqSharedBits, K>::rows_per_block;
+        const unsigned bx = static_cast<unsigned>(
+            std::max((n_routed + rpb_r - 1) / rpb_r, (n_shared + rpb_s - 1) / rpb_s));
+        const dim3 grid(bx, static_cast<unsigned>(slots));
+        moe_slot_down_packq_kernel<RBits, K>
+            <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(1, K), stream>>>(
+                act, act_stride, ids, order, views, n_routed, n_shared, out, out_stride,
+                slots, top_k, shared_view_base);
+        DGPP_CUDA_OK(cudaGetLastError());
+      } else {
+        throw std::invalid_argument("moe_slot_down_packq: K exceeds a width's chunk budget");
+      }
+    });
   });
 }
 

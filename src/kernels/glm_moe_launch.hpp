@@ -303,4 +303,39 @@ void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,
                               float* out, int out_stride, int slots, int top_k,
                               cudaStream_t stream, int shared_view_base = -1);
 
+// ---- the packed-int routed experts (2026-09-12, docs/glm53_plan.md D2) ----
+// The same contracts as the FP8 / NVFP4 launchers above over expert-view
+// tables whose entries are packed-int (payload = the I32 words,
+// packed_scales = bf16 per 64, bits = 4 or 8): the grouped kernel takes
+// the launch's width (the routed segments' or the shared segment's); the
+// slot kernels read the routed entries at `routed_bits` and the shared
+// expert (view-table entries [shared_view_base, +3), n_experts * 3) at
+// `shared_bits`, which must be 8, at the routed k. n_shared == 0: no shared
+// slot. k must satisfy packq_gemv's contract (a multiple of 64 in the
+// compiled set). Every row's arithmetic is the packed core's, bitwise
+// across the grouped and slot launchers and the single-matrix launcher.
+void launch_moe_grouped_gemv_packq_bf16(const uint16_t* act, size_t act_stride,
+                                        const MoeSegment* segs, int n_segs,
+                                        int max_rows, int rows_per_block,
+                                        const MoeExpertView* views, int which,
+                                        uint16_t* out, size_t out_stride, int n,
+                                        int k, int bits, cudaStream_t stream);
+void launch_moe_grouped_gemv_packq_f32(const uint16_t* act, size_t act_stride,
+                                       const MoeSegment* segs, int n_segs,
+                                       int max_rows, int rows_per_block,
+                                       const MoeExpertView* views, int which,
+                                       float* out, size_t out_stride, int n,
+                                       int k, int bits, cudaStream_t stream);
+void launch_moe_slot_gate_up_swiglu_packq(
+    const uint16_t* x, size_t x_stride, const int32_t* ids, const int32_t* order,
+    const MoeExpertView* views, int n_routed, int k_routed, int routed_bits,
+    int n_shared, int shared_bits, uint16_t* act, int act_stride, int slots,
+    int top_k, float limit, cudaStream_t stream, int shared_view_base);
+void launch_moe_slot_down_packq(const uint16_t* act, size_t act_stride,
+                                const int32_t* ids, const int32_t* order,
+                                const MoeExpertView* views, int n_routed, int k_routed,
+                                int routed_bits, int n_shared, int shared_bits,
+                                float* out, int out_stride, int slots, int top_k,
+                                cudaStream_t stream, int shared_view_base);
+
 }  // namespace dgpp

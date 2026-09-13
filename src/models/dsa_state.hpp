@@ -3,13 +3,19 @@
 //
 // Layout (all device memory, one allocation per region):
 //   latent      [num_dsa_layers][max_token_slots] rows in the cache's format
-//               (BF16 [kv_lora_rank], or fp8/fp4 codes — latent_format.hpp)
+//               (BF16 [kv_lora_rank], or fp8/fp4 codes — latent_format.hpp;
+//               the bf16 rope tail after the payload where the model has one)
 //   latent_scale [num_dsa_layers][max_token_slots]                  FP32
 //               (fp8/fp4 only: one row scale per token)
-//   index_k     [num_dsa_layers][max_pool_slots][index_head_dim]    FP8
-//   index_scale [num_dsa_layers][max_pool_slots]                    FP32
-//   tail        [num_dsa_layers][max_requests][2][kpool][dim]       BF16
+//   index_k     [index_layers][max_pool_slots][index_head_dim]      FP8
+//   index_scale [index_layers][max_pool_slots]                      FP32
+//   tail        [index_layers][max_requests][2][kpool][dim]         BF16
 //   block table [max_requests][total_blocks]                        INT32
+//
+// index_layers (DsaConfig::index_layers()) is every DSA layer for
+// GLM-5.3-Flash; the full GLM-5.3 indexes a subset (plan D4: the "shared"
+// layers attend with the last "full" layer's selection), so a layer maps
+// to its index-cache ordinal through the table init() takes.
 //
 // The block table is the co-location pin (DESIGN §7.2): block b of request r
 // holds the request's tokens [b*block_tokens, (b+1)*block_tokens) in every
@@ -43,8 +49,12 @@ class DsaStatePool {
   // max_requests request slots, and the shared block table sized by
   // max_token_slots (which must be a multiple of block_tokens — the pool
   // capacity in tokens is shared by all requests).
+  //   index_ordinal (optional): per DSA layer, its index-cache ordinal in
+  //   [0, cfg.index_layers()) or -1 for a layer without one; every ordinal
+  //   used exactly once. Empty = the identity (every layer indexed), which
+  //   requires cfg.index_layers() == cfg.num_dsa_layers.
   void init(Arena& arena, const DsaConfig& cfg, int max_requests,
-            int64_t max_token_slots);
+            int64_t max_token_slots, const std::vector<int>& index_ordinal = {});
 
   int max_requests() const { return max_requests_; }
   int64_t max_token_slots() const { return max_token_slots_; }
@@ -59,6 +69,10 @@ class DsaStatePool {
   //   index_k(layer):     FP8  [max_pool_slots, index_head_dim]
   //   index_scale(layer): FP32 [max_pool_slots]
   //   tail(layer):        BF16 [max_requests, 2, kpool, index_head_dim]
+  // The index views throw for a layer without an index cache
+  // (owns_index(layer) false).
+  bool owns_index(int layer) const { return index_ordinal_of(layer) >= 0; }
+  int index_ordinal(int layer) const;  // -1 without one
   void* latent(int layer);
   float* latent_scale(int layer);
   void* index_k(int layer);
@@ -156,6 +170,11 @@ class DsaStatePool {
   int64_t max_pool_slots_ = 0;
   int64_t total_blocks_ = 0;
   bool initialized_ = false;
+  std::vector<int> index_ordinal_;  // per DSA layer (-1 = no index cache)
+  int index_ordinal_of(int layer) const {
+    return (layer < 0 || layer >= int(index_ordinal_.size())) ? -1
+                                                              : index_ordinal_[size_t(layer)];
+  }
 
   uint8_t* latent_base_ = nullptr;
   float* latent_scale_base_ = nullptr;  // fp8/fp4 rows' scales; null for bf16

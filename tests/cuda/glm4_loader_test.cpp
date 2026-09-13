@@ -279,6 +279,7 @@ DGPP_TEST(glm4_loader_resident_mode_and_image_round_trip) {
             "resident bytes formula");
     s.release_sources();
     require(s.sources_released(), "sources released");
+    require(s.staging_released(), "the pinned staging mirror goes with the sources");
   }
   {
     Glm4LayerStream s(fx.cfg, fx.dir, 1, 2, dgpp::Glm4Residency::Resident, dgpp::Glm4HeadSharding::VocabSharded,

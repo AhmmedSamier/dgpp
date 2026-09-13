@@ -27,6 +27,7 @@
 
 #include "common/cuda_check.hpp"
 #include "kernels/fp4_gemv.hpp"
+#include "kernels/packq_gemv.hpp"
 #include "kernels/glm_moe_launch.hpp"
 #include "kernels/latent_format.hpp"
 #include "kernels/scale_gemm.hpp"
@@ -179,6 +180,8 @@ struct SmallCase {
   GlmMoeWeights dev_w;
   std::vector<GlmQuantMatrix> expert_mats;  // FP8: (E+1)*3; NVFP4: the shared triple
   std::vector<dgpp::GlmFp4Matrix> expert_mats_fp4;  // NVFP4: E*3 routed
+  std::vector<dgpp::GlmPackedMatrix> expert_mats_packq;  // packed-int: (E+1)*3, the shared triple last
+  std::vector<void*> d_packq_bytes;
   GlmQuantMatrix shared_mats[3];
   // device backing
   uint16_t *d_hidden = nullptr, *d_gate_w = nullptr;
@@ -189,6 +192,7 @@ struct SmallCase {
   float* d_fp4_globals = nullptr;
   uint16_t* d_out = nullptr;
   bool nvfp4() const { return host_w.nvfp4; }
+  bool packq() const { return host_w.packq; }
 
   void alloc() {
     const int E = cfg.n_experts;
@@ -200,6 +204,37 @@ struct SmallCase {
     DGPP_CUDA_OK(cudaMallocManaged(&d_bias, host_w.router_bias.size() * 4));
     std::memcpy(d_bias, host_w.router_bias.data(),
                 host_w.router_bias.size() * 4);
+
+    if (host_w.packq) {
+      // Every matrix (the routed E*3 and the shared triple) as a packed-int
+      // triple: the I32 words and the bf16 group scales (the loader's
+      // layout), one table.
+      const int mats = host_w.packq_matrices(E);
+      require(host_w.shared_packq && mats == (E + 1) * 3, "packq case: the shared expert is packed");
+      expert_mats_packq.resize(static_cast<size_t>(mats));
+      for (int m = 0; m < mats; ++m) {
+        const dgpp::GlmPackedMatrixHost v = dgpp::glm_moe_host_view_packq(host_w, cfg, m);
+        uint32_t* pk = nullptr;
+        uint16_t* sc = nullptr;
+        const size_t wn = static_cast<size_t>(v.rows) * v.cols * v.bits / 32;
+        const size_t sn = static_cast<size_t>(v.rows) * v.cols / 64;
+        DGPP_CUDA_OK(cudaMallocManaged(&pk, wn * 4));
+        DGPP_CUDA_OK(cudaMallocManaged(&sc, sn * 2));
+        std::memcpy(pk, v.packed, wn * 4);
+        std::memcpy(sc, v.scales, sn * 2);
+        d_packq_bytes.push_back(pk);
+        d_packq_bytes.push_back(sc);
+        expert_mats_packq[static_cast<size_t>(m)] =
+            dgpp::GlmPackedMatrix{pk, sc, v.rows, v.cols, v.bits};
+      }
+      dev_w.router_gate = d_gate_w;
+      dev_w.router_bias = d_bias;
+      dev_w.experts = nullptr;
+      dev_w.experts_packed = expert_mats_packq.data();
+      for (int m = 0; m < 3; ++m) dev_w.shared_packed[m] = expert_mats_packq[static_cast<size_t>(E) * 3 + m];
+      DGPP_CUDA_OK(cudaMallocManaged(&d_out, static_cast<size_t>(tokens) * cfg.hidden * 2));
+      return;
+    }
 
     if (host_w.nvfp4) {
       // Routed experts as NVFP4 triples (payload, per-row scales, and one
@@ -286,12 +321,26 @@ struct SmallCase {
     for (auto* p : d_payloads) cudaFree(p);
     for (auto* s : d_scales) cudaFree(s);
     for (auto* b : d_fp4_bytes) cudaFree(b);
+    for (auto* b : d_packq_bytes) cudaFree(b);
     cudaFree(d_fp4_globals);
   }
 };
 
+// The checkpoint's packing (unsigned codes offset 2^(bits-1), 32/bits per
+// word, the low nibble / byte first), one matrix.
+void pack_codes_into(const std::vector<int>& codes, int bits, std::vector<uint32_t>& out) {
+  const int per = 32 / bits;
+  const size_t base = out.size();
+  out.resize(base + codes.size() / per, 0u);
+  for (size_t i = 0; i < codes.size(); ++i) {
+    const uint32_t u = static_cast<uint32_t>(codes[i] + (1 << (bits - 1)));
+    out[base + i / per] |= u << (bits * (i % per));
+  }
+}
+
 SmallCase make_small_case(int E, int H, int I, int K, int tokens,
-                          uint64_t seed, bool nvfp4 = false, bool shared_nvfp4 = false) {
+                          uint64_t seed, bool nvfp4 = false, bool shared_nvfp4 = false,
+                          int packq_bits = 0) {
   SmallCase c;
   c.cfg.hidden = H;
   c.cfg.inter = I;
@@ -317,9 +366,27 @@ SmallCase make_small_case(int E, int H, int I, int K, int tokens,
   // global scale each, and only the shared triple is FP8.
   c.host_w.nvfp4 = nvfp4;
   c.host_w.shared_nvfp4 = nvfp4 && shared_nvfp4;
+  // Packed-int (packq_bits 4 or 8): the routed experts at that width, the
+  // shared triple at int8 (the checkpoint's shape), release-like scales.
+  c.host_w.packq = packq_bits != 0;
+  c.host_w.shared_packq = packq_bits != 0;
+  c.host_w.packq_bits_routed = packq_bits != 0 ? packq_bits : 4;
+  c.host_w.packq_bits_shared = 8;
   for (int m = 0; m < (E + 1) * 3; ++m) {
     const bool down = m % 3 == 2;
     const int64_t rows = down ? H : I, cols = down ? I : H;
+    if (packq_bits != 0) {
+      const int bits = m < E * 3 ? packq_bits : 8;
+      const int lo = -(1 << (bits - 1)), hi = (1 << (bits - 1)) - 1;
+      std::vector<int> codes(static_cast<size_t>(rows) * cols);
+      for (auto& cd : codes) cd = lo + static_cast<int>(rng.next() % static_cast<uint64_t>(hi - lo + 1));
+      pack_codes_into(codes, bits, c.host_w.packq_words);
+      const size_t sn = static_cast<size_t>(rows) * cols / 64;
+      for (size_t i = 0; i < sn; ++i)
+        c.host_w.packq_scales.push_back(float_to_bf16_bits(
+            static_cast<float>(std::exp2(rng.unit() * 2.0)) * (bits == 4 ? 0.004f : 0.0003f)));
+      continue;
+    }
     if (nvfp4 && (m < E * 3 || c.host_w.shared_nvfp4)) {
       std::vector<uint8_t> packed(static_cast<size_t>(rows) * cols / 2);
       for (auto& b : packed) b = static_cast<uint8_t>(rng.next() & 0xFF);
@@ -428,9 +495,11 @@ void run_small_case(SmallCase& c, const char* label,
 struct RankSlice {
   std::vector<GlmQuantMatrix> mats;  // (E+1)*3, sliced (FP8) / the shared triple (NVFP4)
   std::vector<dgpp::GlmFp4Matrix> mats_fp4;  // E*3 sliced routed (NVFP4)
+  std::vector<dgpp::GlmPackedMatrix> mats_packq;  // (E+1)*3 sliced (packed-int)
   std::vector<uint8_t*> owned_payloads;
   std::vector<float*> owned_scales;
   std::vector<uint8_t*> owned_fp4;
+  std::vector<void*> owned_packq;
   GlmMoeWeights dev_w;
   uint16_t* d_out = nullptr;
 
@@ -438,6 +507,42 @@ struct RankSlice {
     RankSlice r;
     const int E = c.cfg.n_experts, H = c.cfg.hidden;
     const int64_t I = c.cfg.inter, M = I / world;
+    if (c.packq()) {
+      // The loader's packed slices in miniature: gate/up rows [rank*M, +M)
+      // as views, down columns packed at word and group granularity
+      // (M % 64 == 0), for every routed expert and the shared one.
+      require(M % 64 == 0, "packq slice test geometry: inter/world must be a 64-multiple");
+      const int mats = (E + 1) * 3;
+      r.mats_packq.resize(static_cast<size_t>(mats));
+      for (int m = 0; m < mats; ++m) {
+        const dgpp::GlmPackedMatrix& full = c.expert_mats_packq[static_cast<size_t>(m)];
+        if (m % 3 != 2) {
+          r.mats_packq[static_cast<size_t>(m)] = dgpp::packed_rows_view(full, rank * M, M);
+          continue;
+        }
+        const int per = 32 / full.bits;
+        uint32_t* packed = nullptr;
+        uint16_t* scales = nullptr;
+        DGPP_CUDA_OK(cudaMallocManaged(&packed, static_cast<size_t>(H) * (M / per) * 4));
+        DGPP_CUDA_OK(cudaMallocManaged(&scales, static_cast<size_t>(H) * (M / 64) * 2));
+        for (int64_t row = 0; row < H; ++row) {
+          std::memcpy(packed + row * (M / per), full.packed + row * (I / per) + rank * M / per,
+                      static_cast<size_t>(M / per) * 4);
+          std::memcpy(scales + row * (M / 64), full.scales + row * (I / 64) + rank * M / 64,
+                      static_cast<size_t>(M / 64) * 2);
+        }
+        r.owned_packq.push_back(packed);
+        r.owned_packq.push_back(scales);
+        r.mats_packq[static_cast<size_t>(m)] = dgpp::GlmPackedMatrix{packed, scales, H, M, full.bits};
+      }
+      r.dev_w.router_gate = c.dev_w.router_gate;
+      r.dev_w.router_bias = c.dev_w.router_bias;
+      r.dev_w.experts = nullptr;
+      r.dev_w.experts_packed = r.mats_packq.data();
+      for (int m = 0; m < 3; ++m) r.dev_w.shared_packed[m] = r.mats_packq[static_cast<size_t>(E) * 3 + m];
+      DGPP_CUDA_OK(cudaMallocManaged(&r.d_out, static_cast<size_t>(c.tokens) * H * 2));
+      return r;
+    }
     if (c.nvfp4()) {
       // The loader's NVFP4 slices in miniature: gate/up rows [rank*M, +M)
       // as views, down columns packed at nibble granularity (M % 16 == 0).
@@ -530,6 +635,7 @@ struct RankSlice {
     for (auto* p : owned_payloads) cudaFree(p);
     for (auto* s : owned_scales) cudaFree(s);
     for (auto* b : owned_fp4) cudaFree(b);
+    for (auto* b : owned_packq) cudaFree(b);
     cudaFree(d_out);
   }
 };
@@ -1726,4 +1832,203 @@ DGPP_TEST(moe_sliced_ranks_fold_matches_unsliced_oracle_nvfp4) {
          " world=" + std::to_string(cs.world)).c_str());
     c.free_all();
   }
+}
+
+// ---- packed-int routed experts (docs/glm53_plan.md G2) ---------------------
+
+DGPP_TEST(moe_grouped_gemv_packq_is_bitwise_the_single_matrix_launcher) {
+  // The packed twin of the grouped-vs-per-segment gate at both widths:
+  // segments of 1..30 rows (the multi-group loop), n leaving dead lane
+  // groups, gate bf16 (k = H) and down fp32 (k = I) — every row bitwise
+  // launch_packq_gemv's.
+  for (int bits : {4, 8}) {
+    SmallCase c = make_small_case(/*E=*/6, /*H=*/1024, /*I=*/256, /*K=*/2,
+                                  /*tokens=*/64, 0x6D4 + bits, /*nvfp4=*/false,
+                                  /*shared_nvfp4=*/false, /*packq_bits=*/bits);
+    c.alloc();
+    const int H = c.cfg.hidden, I = c.cfg.inter, E = c.cfg.n_experts;
+    const int lens[] = {1, 5, 4, 9, 13, 2, 30};
+    std::vector<dgpp::MoeSegment> segs;
+    int row0 = 0;
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); ++i) {
+      segs.push_back(dgpp::MoeSegment{row0, lens[i], static_cast<int>(i % E)});
+      row0 += lens[i];
+    }
+    dgpp::MoeSegment* d_segs = nullptr;
+    dgpp::MoeExpertView* d_views = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_segs, segs.size() * sizeof(dgpp::MoeSegment)));
+    std::memcpy(d_segs, segs.data(), segs.size() * sizeof(dgpp::MoeSegment));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_views, (E + 1) * 3 * sizeof(dgpp::MoeExpertView)));
+    for (int m = 0; m < (E + 1) * 3; ++m) d_views[m] = dgpp::MoeExpertView::of(c.expert_mats_packq[m]);
+    uint16_t *d_grouped = nullptr, *d_ref = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_grouped, 64 * I * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_ref, 64 * I * 2));
+    DGPP_CUDA_OK(cudaMemset(d_grouped, 0xA5, 64 * I * 2));
+    DGPP_CUDA_OK(cudaMemset(d_ref, 0x5A, 64 * I * 2));
+    dgpp::launch_moe_grouped_gemv_packq_bf16(c.d_hidden, H, d_segs, static_cast<int>(segs.size()),
+                                             30, /*rows_per_block=*/8, d_views, 0, d_grouped, I, I,
+                                             H, bits, nullptr);
+    for (const dgpp::MoeSegment& sg : segs)
+      dgpp::launch_packq_gemv_bf16(c.d_hidden + static_cast<size_t>(sg.row0) * H, H,
+                                   c.expert_mats_packq[sg.expert * 3 + 0],
+                                   d_ref + static_cast<size_t>(sg.row0) * I, sg.rows, I, H, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    require(std::memcmp(d_grouped, d_ref, 64 * I * 2) == 0,
+            "packq grouped gate output bitwise the single-matrix launcher");
+    // down: fp32 out over the gate output as the activation (k = I).
+    float *d_gd = nullptr, *d_rd = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_gd, 64 * H * 4));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_rd, 64 * H * 4));
+    DGPP_CUDA_OK(cudaMemset(d_gd, 0xA5, 64 * H * 4));
+    DGPP_CUDA_OK(cudaMemset(d_rd, 0x5A, 64 * H * 4));
+    dgpp::launch_moe_grouped_gemv_packq_f32(d_grouped, I, d_segs, static_cast<int>(segs.size()),
+                                            30, /*rows_per_block=*/0, d_views, 2, d_gd, H, H, I,
+                                            bits, nullptr);
+    for (const dgpp::MoeSegment& sg : segs)
+      dgpp::launch_packq_gemv_f32(d_grouped + static_cast<size_t>(sg.row0) * I, I,
+                                  c.expert_mats_packq[sg.expert * 3 + 2],
+                                  d_rd + static_cast<size_t>(sg.row0) * H, sg.rows, H, I, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    require(std::memcmp(d_gd, d_rd, 64 * H * 4) == 0,
+            "packq grouped down output bitwise the single-matrix launcher (fp32)");
+    // The shared segment at the shared width (int8) through the same launcher.
+    dgpp::MoeSegment* d_sh = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_sh, sizeof(dgpp::MoeSegment)));
+    *d_sh = dgpp::MoeSegment{0, 64, E};
+    DGPP_CUDA_OK(cudaMemset(d_grouped, 0xA5, 64 * I * 2));
+    DGPP_CUDA_OK(cudaMemset(d_ref, 0x5A, 64 * I * 2));
+    dgpp::launch_moe_grouped_gemv_packq_bf16(c.d_hidden, H, d_sh, 1, 64, /*rows_per_block=*/16,
+                                             d_views, 1, d_grouped, I, I, H, 8, nullptr);
+    dgpp::launch_packq_gemv_bf16(c.d_hidden, H, c.expert_mats_packq[E * 3 + 1], d_ref, 64, I, H,
+                                 nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    require(std::memcmp(d_grouped, d_ref, 64 * I * 2) == 0,
+            "packq grouped shared (int8) output bitwise the single-matrix launcher");
+    std::printf("[ OK ] packq int%d grouped gemv: %zu segments (1..30 rows) bitwise the launcher\n",
+                bits, segs.size());
+    cudaFree(d_sh);
+    cudaFree(d_gd);
+    cudaFree(d_rd);
+    cudaFree(d_grouped);
+    cudaFree(d_ref);
+    cudaFree(d_segs);
+    cudaFree(d_views);
+    c.free_all();
+  }
+}
+
+DGPP_TEST(moe_expert_path_matches_oracle_small_geometry_packq) {
+  // The whole layer (int4 or int8 routed, int8 shared) through the GEMV
+  // chain against the double oracle, within the expert-path budget and
+  // bitwise repeatable.
+  for (int bits : {4, 8})
+    for (auto [E, H, I, K, M] :
+         std::vector<std::tuple<int, int, int, int, int>>{
+             {8, 512, 256, 2, 1}, {8, 512, 256, 2, 6}, {16, 1024, 512, 4, 5}}) {
+      SmallCase c = make_small_case(E, H, I, K, M, 0x9AC0FFEE + E + M + bits, false, false, bits);
+      c.alloc();
+      run_small_case(c, ("packq int" + std::to_string(bits) + " expert path E=" + std::to_string(E) +
+                         " M=" + std::to_string(M)).c_str(),
+                     dgpp::MoeExpertKernel::kGemv);
+      c.free_all();
+    }
+}
+
+DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path_packq) {
+  struct Case {
+    int E, H, I, K, M;
+  };
+  const Case cases[] = {
+      {8, 512, 256, 2, 1},    // one decode row; gate k=512, down k=256
+      {8, 512, 256, 2, 3},    // multi-row steps
+      {16, 1024, 512, 4, 2},  // gate k=1024, down k=512, K=4
+  };
+  for (int bits : {4, 8})
+    for (const Case& cs : cases) {
+      SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M, 0x9ACADE + cs.E + cs.M + bits,
+                                    false, false, bits);
+      c.alloc();
+      GlmMoeLayer layer(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/cs.M,
+                        /*graph_table_slots=*/1);
+      std::vector<uint16_t> host(static_cast<size_t>(cs.M) * c.cfg.hidden);
+      layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(host.data(), c.d_out, host.size() * 2);
+      // The host path itself within budget of the oracle at this routing.
+      std::vector<uint16_t> oracle;
+      dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
+      require_within_expert_budget(host, oracle, "packq host path vs oracle");
+      DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+      layer.enqueue_decode(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::vector<uint16_t> fused(host.size(), 0x7F7F);
+      std::memcpy(fused.data(), c.d_out, fused.size() * 2);
+      require(std::memcmp(host.data(), fused.data(), host.size() * 2) == 0,
+              "packq decode slot path must be bitwise-identical to enqueue");
+      // The prepared graph table (the captured path's stable source).
+      layer.prepare_graph_table(0, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+      layer.enqueue_decode(c.d_hidden, c.d_out, cs.M, nullptr, nullptr, /*table_slot=*/0);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::memcpy(fused.data(), c.d_out, fused.size() * 2);
+      require(std::memcmp(host.data(), fused.data(), host.size() * 2) == 0,
+              "packq decode slot path on the graph table bitwise the host chain");
+      // The prefill entry (device segmentation; the GEMV chain until the
+      // tile kernel lands) on the same rows, bitwise too.
+      GlmMoeLayer cold(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/cs.M);
+      DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+      cold.enqueue_prefill(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::vector<uint16_t> pre(host.size(), 0x7F7F);
+      std::memcpy(pre.data(), c.d_out, pre.size() * 2);
+      require(std::memcmp(host.data(), pre.data(), host.size() * 2) == 0,
+              "packq prefill path must be bitwise-identical to enqueue");
+      c.free_all();
+      std::printf("[ OK ] packq int%d decode slot path E=%d H=%d I=%d K=%d M=%d: bitwise\n",
+                  bits, cs.E, cs.H, cs.I, cs.K, cs.M);
+    }
+}
+
+DGPP_TEST(moe_sliced_ranks_fold_matches_unsliced_oracle_packq) {
+  struct Case {
+    int E, H, I, K, M, world;
+  };
+  const Case cases[] = {
+      {8, 512, 256, 2, 3, 2},    // slice 128 (down k=128)
+      {16, 1024, 512, 4, 2, 4},  // slice 128, four ranks
+      {8, 512, 512, 2, 4, 2},    // slice 256
+  };
+  for (int bits : {4, 8})
+    for (const Case& cs : cases) {
+      SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M, 0x511F9 + cs.E + cs.world + bits,
+                                    false, false, bits);
+      c.alloc();
+      std::vector<uint16_t> oracle;
+      dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
+      std::vector<std::vector<uint16_t>> partials;
+      for (int rank = 0; rank < cs.world; ++rank) {
+        RankSlice slice = RankSlice::make(c, rank, cs.world);
+        GlmMoeLayer layer(slice.dev_w, c.cfg, cs.M, /*decode_slots=*/cs.M);
+        const size_t n = static_cast<size_t>(cs.M) * cs.H;
+        layer.enqueue(c.d_hidden, slice.d_out, cs.M, nullptr);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        std::vector<uint16_t> host(n);
+        std::memcpy(host.data(), slice.d_out, n * 2);
+        DGPP_CUDA_OK(cudaMemset(slice.d_out, 0x7F, n * 2));
+        layer.enqueue_decode(c.d_hidden, slice.d_out, cs.M, nullptr, nullptr);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        std::vector<uint16_t> slot(n);
+        std::memcpy(slot.data(), slice.d_out, n * 2);
+        require(host == slot, "packq sliced rank: decode slot path must be bitwise the host path");
+        partials.push_back(std::move(host));
+        slice.free_all();
+      }
+      const std::vector<uint16_t> folded = fold_ranks(partials);
+      require_within_fold_budget(
+          folded, partials, oracle,
+          ("packq int" + std::to_string(bits) + " sliced fold E=" + std::to_string(cs.E) +
+           " I=" + std::to_string(cs.I) + " world=" + std::to_string(cs.world)).c_str());
+      c.free_all();
+    }
 }

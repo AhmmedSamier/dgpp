@@ -222,6 +222,8 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
     plan.add(QwenLayerStream::ngram_table_mmap() ? "model weights (resident; the n-gram table mmap'ed from the checkpoint)"
                                                  : "model weights (resident, n-gram table included)",
              QwenLayerStream::resident_bytes(cfg, tp_rank, tp_world, head, mtp));
+    plan.add("loader staging (pinned host, freed when the last layer is resident)", 0,
+             QwenLayerStream::staging_plan_bytes(cfg, tp_rank, tp_world, head, mtp));
   } else {
     size_t largest = 0;
     const int layers_total = cfg.num_hidden_layers + (cfg.mtp_layer() >= 0 ? 1 : 0);

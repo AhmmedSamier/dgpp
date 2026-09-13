@@ -79,6 +79,7 @@ template, which is what "supported" means on this page:
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 2 | `cluster_qwen-3.8-flash-next_fp8_w2_mtp1.example.json`, `cluster_qwen-3.8-flash-next_fp8_w2_plain.example.json` | T=1, MTP depth 1, depth 2 |
 | `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen-3.8-flash-next_nvfp4_w1_*.example.json` (five) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
 | `nvidia/GLM-4.7-NVFP4` | 4 | `cluster_glm-4.7_nvfp4_w4_{mtp1,plain,mtp2}.example.json` | T=1, MTP depth 1, depth 2 |
+| `HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64` (the full GLM-5.3) | 4 | `cluster_glm-5.3_int4-int8_w4_{plain,mtp1,mtp2,mtp1_large-cache}.example.json` | T=1, MTP depth 1, depth 2 (two slots); bf16 (144K / 120K) or fp8 (208K) latent cache, the embedding vocab-sharded |
 
 The single-Spark world has a second axis, `engine.dense_weights`: the
 checkpoint's own BF16 dense projections, or the same projections encoded to
@@ -192,6 +193,32 @@ The T=1 floor here is about 40 ms, and 6.3 GB per rank per step of it is the
 BF16 attention projections that modelopt left unquantized. That is also what
 bounds this family under concurrency (§5).
 
+### The full GLM-5.3 (int4/int8 g64), world 4
+
+| mode | ms/pass | tok/pass | ms/token | date |
+|---|---|---|---|---|
+| T=1 | 51.1 | 1.0 | 51.1 | 2026-09-12 |
+| MTP depth 1 | 68–76 | 1.77–1.97 | 36–42 | 2026-09-12 |
+| MTP depth 2 (two slots) | 86–89 | 2.15–2.69 | 32–40 | 2026-09-13 |
+
+The 754B model at 99.3 GiB of int4/int8 weights per rank: the T=1 step
+streams about 10.2 GB per rank (the audit's floor 44.5 ms at 230 GB/s) plus
+158 collectives. MTP at depth 1 gives 1.4x per token. Transcripts: MTP == T=1
+on all four prompts; op streams identical across the four ranks at every
+shutdown (§9.6). Boot from the resident image 30 s; the first boot, which
+captures it, 405 s. The campaign ran at 48K tokens of bf16 latent cache
+because rank 2's node then had 119.67 GiB (its launch firmware's 4 GB
+display reservation; fixed by the SoC firmware update the same night); the
+templates carry 120K bf16 at four slots with MTP (110.41 GiB per rank), 144K
+plain (110.75) and 208K with the fp8 latent cache (110.35), the embedding
+vocab-sharded (−1.33 GiB, exact), the ceilings under the 4 GiB headroom that
+replaced the 8 GiB one on 2026-09-12/13 once the loader's 2.2 GiB staging
+mirror was measured, itemized and freed before the caches and a one-hour soak
+at the 120K shape stayed flat with no reclaim on any node.
+The fp8 latent cache runs at the same pace (68–69 ms/pass, 74–98 %
+acceptance by class) and its greedy transcripts diverge from the bf16
+cache's after 97–464 characters, the two-node Flash finding again.
+
 ## 4. Decode, per prompt class
 
 Classes are five fixed prompts, greedy, 300 tokens each unless the table says
@@ -299,6 +326,44 @@ evidence app and refuses this checkpoint. §9.2 says what that changes.
 | json | 31.23 |
 | math | 31.66 |
 | chat | 35.11 |
+
+### The full GLM-5.3 (int4/int8), world 4, MTP depth 1, through the service (2026-09-12)
+
+`serve_mtp_classes.py`, greedy, 300 tokens; the pass time, tokens per pass
+and acceptance are the scheduler's own retired lines:
+
+| class | ms/pass | tok/pass | accept p1 | ms/token at c=1 |
+|---|---|---|---|---|
+| prose | 76 | 1.92 | 92 % | 42.1 |
+| code | 69 | 1.97 | 97 % | 37.6 |
+| json | 68 | 1.95 | 96 % | 37.5 |
+| math | 69 | 1.93 | 93 % | 38.6 |
+| chat | 68 | 1.77 | 77 % | 41.1 |
+
+At T=1 every class runs 51 ms/step (51.5–54.4 ms/token wall).
+
+Depth 2 (`cluster_glm-5.3_int4-int8_w4_mtp2`, two request slots — the
+shape the eight-row cap allowed when it was measured; the cap is sixteen
+rows since 2026-09-13, five slots at depth 2; transcripts identical to
+depth 1's):
+
+| class | ms/pass | tok/pass | accept p1 / p2 | ms/token | vs depth 1 |
+|---|---|---|---|---|---|
+| prose | 86 | 2.56 | 92 / 63 % | 33.5 | −4 % |
+| code | 88 | 2.69 | 95 / 76 % | 32.7 | −5 % |
+| json | 87 | 2.69 | 93 / 77 % | 32.3 | −7 % |
+| math | 89 | 2.51 | 89 / 64 % | 35.2 | 0 % |
+| chat | 87 | 2.15 | 73 / 42 % | 40.4 | +5 % |
+
+Depth 3 (a site config at two slots, 2 × 4 rows): 103–106 ms/pass at
+2.37–3.22 tokens/pass (p3 18–56 %) — 32.9 / 33.0 / 35.8 / 36.8 / 43.9
+ms/token for code / json / prose / math / chat, i.e. equal to depth 2 on
+code and JSON and worse elsewhere. The pass grows by 17–19 ms per depth
+level (51 → 68 → 87 → 104: one verify row's distinct experts, ~2.7 GB per
+rank, plus one serial draft step) while tokens per pass grow sublinearly,
+so on this bandwidth-bound fabric depth 1 stays the default and depth 2 is
+a code/JSON option; the three-token guidance for these models comes from
+nodes where a verify row costs almost nothing.
 
 ### GLM-5.3-Flash-FP8, world 4, cross-check (2026-09-10)
 
@@ -468,6 +533,25 @@ BF16 attention projections, adding 45–60 ms, while a row inside a chunk costs
 single-stream setting here. The class table above shows the same ceiling: going
 from one request to four buys 1.6x, where Qwen at world 4 buys 1.9x.
 
+### The full GLM-5.3 (int4/int8), world 4 (2026-09-12)
+
+`serve_load.py --think` (the template has no thinking switch), greedy, 320
+tokens, MTP depth 1; aggregate tokens/s:
+
+| class | c=1 | c=2 | c=4 |
+|---|---|---|---|
+| prose | 25.5 | 34.5 | 39.6 |
+| code | 28.7 | 32.7 | 39.9 |
+| json | 28.5 | 33.1 | 43.2 |
+| math | 26.3 | 36.5 | 41.3 |
+| chat | 23.2 | 33.9 | 37.8 |
+
+Per-request decode pace 38–43 ms/token at one request, 52–59 at two, 95–105
+at four (the eight-row batch steps at 180–185 ms with 1.95 tok/step/req at
+92–96 % acceptance). Four requests buy 1.5–1.6x over one, GLM-4.7's shape:
+the packed attention projections and the grouped-GEMV experts re-read their
+weights per row chunk.
+
 ## 6. Prefill and time to first token
 
 **There are two prefill numbers for any world, and they differ by 1.4x to 2x.**
@@ -516,6 +600,7 @@ Median of three, with the real token count the tokenizer produced:
 | GLM-5.3 NVFP4 hybrid | 734 ms | 2,210 ms | 11,374 ms | — | 93,765 ms |
 | GLM-5.3 NVFP4 hybrid, world 2 | 1,088 ms | 2,724 ms | 11,881 ms | — | — |
 | GLM-4.7-NVFP4 | 850 ms | 2,809 ms | 16,865 ms | — | — |
+| GLM-5.3 full int4/int8 | 3,872 ms | 15,090 ms | 70,142 ms | 159,846 ms | — |
 
 Per prompt token:
 
@@ -525,6 +610,7 @@ Per prompt token:
 | GLM-5.3 NVFP4 hybrid | 1.41 | 1.05 | 1.36 | — | 2.77 |
 | GLM-5.3 NVFP4 hybrid, world 2 | 2.04 | 1.30 | 1.42 | — | — |
 | GLM-4.7-NVFP4 | 1.63 | 1.32 | 1.98 | — | — |
+| GLM-5.3 full int4/int8 | 7.26 | 7.14 | 8.37 | 9.47 | — |
 
 **The hybrid inverts against FP8 above 2K, and only through the service.** On
 the procedure the NVFP4 hybrid prefills faster than the FP8 checkpoint at every
@@ -577,6 +663,7 @@ score is not comparable across different denominators.
 | Qwen NVFP4, BF16 dense | 1 | 39/40 | 59/60 | 30/30 |
 | Qwen NVFP4, FP8 dense | 1 | 38/40 | 59/60 | 30/30 |
 | GLM-4.7-NVFP4 | 4 | 39/40 | 60/60 | 30/30 |
+| GLM-5.3 full int4/int8 | 4 | 40/40 | 59/60 | 30/30 |
 
 The two-node row is the same checkpoint on the same items, with the latent
 cache in FP8 rather than BF16, and it lands inside the run-to-run movement of
@@ -626,6 +713,15 @@ outright, and what follows is what genuinely remains.
    `serve_soak_run.sh` nor `serve_failure_drill.sh` has been run against it;
    both now take their rank count from the deployment, so either will run
    against the two-node config unchanged.
+7. **The full GLM-5.3's prefill is the deferred kernel, not a reading to
+   refine.** 7–9.5 ms per prompt token (§6) is the routed experts and the
+   packed attention projections going through the row-chunked int4/int8 GEMV
+   chain, every code decoded once per chunk on CUDA cores; GLM-4.7 reads
+   1.3–2.0 ms on the same probe. The tile kernel for the packed formats
+   (docs/glm53_plan.md D7: decode a weight tile once into shared memory,
+   tensor-core MMA over the rows) is the optimization stage's first item.
+   The full model also has its first day only: no soak, no failure drill,
+   no sampled sweep, one campaign per number.
 
 Closed on 2026-09-10 evening: per-class decode under concurrency for all six
 deployments; per-class tables for Qwen at both worlds and for GLM-4.7; the
@@ -760,6 +856,12 @@ recording. Every campaign above ran with these:
 
 ### 9.7 Where the raw records live
 
+`build-ci/fabric-runs/glm53_serve_2026-09-12/` (MTP depth 1: transcripts,
+pace, API check, the class and concurrency sweeps, the prefill probe, the
+eval's per-item JSONL), `glm53_plain_2026-09-12/` (T=1) and
+`glm53_large_2026-09-12/` (the fp8 latent cache) on the head node hold the
+full GLM-5.3's first campaign; `benchmarks/results/2026-09-12-glm53-full.md`
+is its dated record.
 `build-ci/fabric-runs/glm53_w2_2026-09-12/` on the head node holds the two-node
 GLM-5.3 campaign: the class sweep, the isolation check, both prefill methods,
 the eval's per-item JSONL, the rituals' logs, and the context-ceiling readings.

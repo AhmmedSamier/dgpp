@@ -280,7 +280,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         slots_ * rows_per_request_ > max_rows_ ||
         (depth_ > 1 && !Model::kBatchedDraftChain);
     if (!batch_unavailable_ && slots_ > 1) {
-      for (const int k : {2, 3})
+      // 2 and 3 slots, then 4 and 6 for the wider recipes (the full GLM-5.3's
+      // sixteen-row batch, 2026-09-13: eight slots at depth 1 replayed four
+      // live requests on the sixteen-row family — 26–28 tok/s aggregate
+      // against the four-slot template's 38–43 — until the 4-slot family
+      // covered them), then every slot. The bus bounds the variants:
+      // 2 x slots + 2 x families <= 32.
+      for (const int k : {2, 3, 4, 6})
         if (k < slots_ &&
             k * rows_per_request_ <= max_rows_) {
           BatchFamily f;
@@ -1220,8 +1226,18 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       eager = nullptr;
       check_decode_graph(graph, rank_,
                              "graph variant " + std::to_string(variant), model_->session_graph_host_nodes());
+      // The executable's device memory (the residual ledger, 2026-09-13):
+      // ~45 KB per node on this driver, so a 2,500-node variant costs
+      // ~110 MB and fourteen of them 1.5 GiB — the largest item the memory
+      // plan did not name.
+      size_t free_before = 0, free_after = 0, total = 0;
+      (void)cudaMemGetInfo(&free_before, &total);
       DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
       cudaGraphDestroy(graph);
+      (void)cudaMemGetInfo(&free_after, &total);
+      DGPP_LOG_INFO("rank {}: graph variant {} instantiated — {:.1f} MiB of device memory ({:.1f} GiB free)", rank_,
+                    variant, static_cast<double>(free_before - free_after) / (1024.0 * 1024.0),
+                    static_cast<double>(free_after) / (1024.0 * 1024.0 * 1024.0));
       return exec;
     } catch (...) {
       if (capture_open) {

@@ -76,15 +76,22 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
         "GlmMoeLayer: graph_table_slots must be >= 0");
   const bool bias_required = cfg_.router_mode == MoeRouterMode::SigmoidBias;
   if (!w_.router_gate || (bias_required && !w_.router_bias) ||
-      (!w_.experts && !w_.experts_fp4) ||
-      (has_shared() && !w_.shared[0].payload && !w_.shared_fp4[0].payload))
+      (!w_.experts && !w_.experts_fp4 && !w_.experts_packed) ||
+      (has_shared() && !w_.shared[0].payload && !w_.shared_fp4[0].payload &&
+       !w_.shared_packed[0].packed))
     throw std::invalid_argument("GlmMoeLayer: null weight pointer");
   if (w_.shared_nvfp4() && !w_.nvfp4())
     throw std::invalid_argument(
         "GlmMoeLayer: an NVFP4 shared expert needs NVFP4 routed experts (one table)");
-  if (w_.experts && w_.experts_fp4)
+  if (w_.shared_packq() && !w_.packq())
     throw std::invalid_argument(
-        "GlmMoeLayer: routed experts bound in both formats at once");
+        "GlmMoeLayer: a packed shared expert needs packed routed experts (one table)");
+  if (w_.packq() && has_shared() && !w_.shared_packq())
+    throw std::invalid_argument(
+        "GlmMoeLayer: packed routed experts need a packed shared expert (the slot kernels' table)");
+  if ((w_.experts != nullptr) + (w_.experts_fp4 != nullptr) + (w_.experts_packed != nullptr) != 1)
+    throw std::invalid_argument(
+        "GlmMoeLayer: routed experts must be bound in exactly one format");
 
   const int M = max_tokens_;
   const size_t H = static_cast<size_t>(cfg_.hidden);
@@ -225,10 +232,14 @@ void GlmMoeLayer::prepare_graph_table(int table_slot, cudaStream_t stream) {
   MoeExpertView* src = h_expert_views_graph_ + off;
   for (size_t i = 0; i < E3; ++i)
     src[i] = w_.nvfp4() ? MoeExpertView::of(w_.experts_fp4[i])
-                        : MoeExpertView::of(w_.experts[i]);
+             : w_.packq() ? MoeExpertView::of(w_.experts_packed[i])
+                          : MoeExpertView::of(w_.experts[i]);
   size_t n = E3;
   if (w_.shared_nvfp4()) {
     for (int m = 0; m < 3; ++m) src[E3 + static_cast<size_t>(m)] = MoeExpertView::of(w_.shared_fp4[m]);
+    n += 3;
+  } else if (w_.shared_packq()) {
+    for (int m = 0; m < 3; ++m) src[E3 + static_cast<size_t>(m)] = MoeExpertView::of(w_.shared_packed[m]);
     n += 3;
   }
   DGPP_CUDA_OK(cudaMemcpyAsync(d_expert_views_graph_ + off, src,
@@ -243,6 +254,37 @@ void GlmMoeLayer::prepare_graph_table(int table_slot, cudaStream_t stream) {
 // but the same hidden. Checked once per enqueue — the views can rebind.
 void GlmMoeLayer::check_expert_geometry() const {
   const int H = cfg_.hidden, E = cfg_.n_experts;
+  if (w_.packq()) {
+    const GlmPackedMatrix& g0 = w_.experts_packed[0];
+    if (g0.bits != 4 && g0.bits != 8)
+      throw std::runtime_error("GlmMoeLayer: the packed routed width must be 4 or 8");
+    for (int e = 0; e < E; ++e) {
+      const GlmPackedMatrix* m = w_.experts_packed + static_cast<size_t>(e) * 3;
+      if (m[0].cols != H || m[1].cols != H || m[0].rows != g0.rows ||
+          m[1].rows != g0.rows || m[2].rows != H || m[2].cols != g0.rows ||
+          m[0].bits != g0.bits || m[1].bits != g0.bits || m[2].bits != g0.bits ||
+          !m[0].packed || !m[1].packed || !m[2].packed || !m[0].scales || !m[1].scales ||
+          !m[2].scales)
+        throw std::runtime_error(
+            "GlmMoeLayer: inconsistent packed routed expert matrices (expert " +
+            std::to_string(e) + ")");
+    }
+    if (has_shared()) {
+      const GlmPackedMatrix* sh = w_.shared_packed;
+      if (sh[0].rows != sh[1].rows || sh[2].cols != sh[0].rows || sh[2].rows != H ||
+          sh[0].cols != H || sh[1].cols != H || !sh[0].packed || !sh[1].packed ||
+          !sh[2].packed || !sh[0].scales || !sh[1].scales || !sh[2].scales)
+        throw std::runtime_error("GlmMoeLayer: inconsistent packed shared matrices");
+      if (sh[0].bits != 8 || sh[1].bits != 8 || sh[2].bits != 8)
+        throw std::runtime_error("GlmMoeLayer: the packed shared expert is int8 (the slot kernels' width)");
+      // The slot kernels run the shared slot at the routed K.
+      if (sh[2].cols != g0.rows)
+        throw std::runtime_error(
+            "GlmMoeLayer: the packed shared expert's inter must equal the routed experts' (the "
+            "slot kernels' K)");
+    }
+    return;
+  }
   if (w_.nvfp4()) {
     const GlmFp4Matrix& g0 = w_.experts_fp4[0];
     for (int e = 0; e < E; ++e) {
@@ -423,12 +465,14 @@ void GlmMoeLayer::upload_expert_views(MoeExpertView* d_dst, bool with_shared,
   MoeExpertView* h = h_view_ring_ + static_cast<size_t>(slot) * view_table_entries_;
   for (size_t i = 0; i < static_cast<size_t>(E) * 3; ++i)
     h[i] = w_.nvfp4() ? MoeExpertView::of(w_.experts_fp4[i])
-                      : MoeExpertView::of(w_.experts[i]);
+           : w_.packq() ? MoeExpertView::of(w_.experts_packed[i])
+                        : MoeExpertView::of(w_.experts[i]);
   size_t n = static_cast<size_t>(E) * 3;
   if (with_shared) {
     for (int w = 0; w < 3; ++w)
       h[n + static_cast<size_t>(w)] = w_.shared_nvfp4() ? MoeExpertView::of(w_.shared_fp4[w])
-                                                        : MoeExpertView::of(w_.shared[w]);
+                                      : w_.shared_packq() ? MoeExpertView::of(w_.shared_packed[w])
+                                                          : MoeExpertView::of(w_.shared[w]);
     n += 3;
   }
   DGPP_CUDA_OK(cudaMemcpyAsync(d_dst, h, n * sizeof(MoeExpertView),
@@ -486,7 +530,10 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
   //    blocks exit at once) and the shared segment.
   const int shared_row0 = static_cast<int>(tk);
   const size_t rows_total = tk + static_cast<size_t>(tokens);
-  grouped_expert_chain(MoeExpertKernel::kMma, hidden, d_segs_, E,
+  // The tensor-core kernel where the table takes it (the packed-int
+  // tables run the GEMV chain until their tile kernel lands).
+  grouped_expert_chain(mma_takes_grid() ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv,
+                       hidden, d_segs_, E,
                        /*max_rows=*/std::max(tokens, 1), d_segs_ + E, tokens,
                        rows_total, stream);
   launch_moe_accum_ordered(out, d_down_, H, d_slot_row_, d_ids_, d_weights_,
@@ -495,6 +542,7 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
 
 bool GlmMoeLayer::mma_takes_grid() const {
   if (w_.experts_fp4) return true;
+  if (w_.experts_packed) return false;
   const int H = cfg_.hidden;
   const int I_r = static_cast<int>(w_.experts[0].rows);
   const int br = w_.experts[0].scale_block_rows, bc = w_.experts[0].scale_block_cols;
@@ -550,10 +598,18 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
                                        cudaStream_t stream) {
   const int H = static_cast<int>(cfg_.hidden);
   const bool fp4 = w_.nvfp4();
+  const bool packq = w_.packq();
   const bool shared_fp4 = w_.shared_nvfp4();
-  const int I_r = static_cast<int>(fp4 ? w_.experts_fp4[0].rows : w_.experts[0].rows);
+  const int I_r = static_cast<int>(fp4 ? w_.experts_fp4[0].rows
+                                   : packq ? w_.experts_packed[0].rows
+                                           : w_.experts[0].rows);
   // shared_seg == nullptr: the chain has no shared expert (n_shared_experts 0).
-  const int I_s = shared_seg ? static_cast<int>(shared_fp4 ? w_.shared_fp4[0].rows : w_.shared[0].rows) : 0;
+  const int I_s = shared_seg ? static_cast<int>(shared_fp4 ? w_.shared_fp4[0].rows
+                                                : packq ? w_.shared_packed[0].rows
+                                                        : w_.shared[0].rows)
+                             : 0;
+  const int routed_bits = packq ? w_.experts_packed[0].bits : 0;
+  const int shared_bits = (packq && shared_seg) ? w_.shared_packed[0].bits : 0;
   const size_t I_max = static_cast<size_t>(std::max(I_r, I_s));
   // The shared segment is every token: split across blocks along z (the
   // GEMV core in 16-row pieces, the tensor-core kernel in whole m-tiles).
@@ -588,7 +644,11 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   auto gemm_bf16 = [&](const MoeSegment* sg, int ns, int mr, int split, int which,
                        uint16_t* out, int n, bool routed_arg) {
     const bool routed = routed_arg || shared_fp4;
-    if (mma && routed && fp4)
+    if (packq)
+      launch_moe_grouped_gemv_packq_bf16(d_gather_, H, sg, ns, mr, split, d_views_prefill_,
+                                         which, out, I_max, n, H,
+                                         routed_arg ? routed_bits : shared_bits, stream);
+    else if (mma && routed && fp4)
       launch_moe_grouped_mma_fp4_bf16(hidden, H, sg, ns, mr, split, d_views_prefill_,
                                       which, out, I_max, n, H, stream, d_rows_);
     else if (mma)
@@ -604,7 +664,11 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   auto gemm_f32 = [&](const MoeSegment* sg, int ns, int mr, int split, int k,
                       bool routed_arg) {
     const bool routed = routed_arg || shared_fp4;
-    if (mma && routed && fp4)
+    if (packq)
+      launch_moe_grouped_gemv_packq_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
+                                        2, d_down_, H, H, k,
+                                        routed_arg ? routed_bits : shared_bits, stream);
+    else if (mma && routed && fp4)
       launch_moe_grouped_mma_fp4_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
                                      2, d_down_, H, H, k, stream);
     else if (mma)
@@ -749,25 +813,32 @@ void GlmMoeLayer::enqueue_decode_impl(const uint16_t* hidden, uint16_t* out_bf16
     table = d_expert_views_graph_ +
             static_cast<size_t>(table_slot) * static_cast<size_t>(E + 1) * 3;
   } else {
-    upload_expert_views(d_expert_views_, /*with_shared=*/w_.shared_nvfp4(), stream);
+    upload_expert_views(d_expert_views_, /*with_shared=*/w_.shared_nvfp4() || w_.shared_packq(),
+                        stream);
   }
 
   const int slots = tokens * (K + 1);
   const bool fp4 = w_.nvfp4();
+  const bool packq = w_.packq();
   const int I_r = static_cast<int>(fp4 ? w_.experts_fp4[0].rows
-                                       : w_.experts[0].rows);  // routed inter slice
+                                   : packq ? w_.experts_packed[0].rows
+                                           : w_.experts[0].rows);  // routed inter slice
   // The shared inter slice; 0 = no shared slot (the routed chain alone).
   // An NVFP4 shared expert (GLM-4.7) is view-table entry E, read through
   // the fp4 core; the FP8 one rides the launch arguments.
   const bool shared_fp4 = with_shared && w_.shared_nvfp4();
   const int shared_view_base = shared_fp4 ? E * 3 : -1;
-  const int I_s = with_shared ? static_cast<int>(shared_fp4 ? w_.shared_fp4[0].rows : w_.shared[0].rows) : 0;
-  const uint8_t* sh_gate_p = (with_shared && !shared_fp4) ? w_.shared[0].payload : nullptr;
-  const float* sh_gate_s = (with_shared && !shared_fp4) ? w_.shared[0].scales : nullptr;
-  const uint8_t* sh_up_p = (with_shared && !shared_fp4) ? w_.shared[1].payload : nullptr;
-  const float* sh_up_s = (with_shared && !shared_fp4) ? w_.shared[1].scales : nullptr;
-  const uint8_t* sh_down_p = (with_shared && !shared_fp4) ? w_.shared[2].payload : nullptr;
-  const float* sh_down_s = (with_shared && !shared_fp4) ? w_.shared[2].scales : nullptr;
+  const int I_s = with_shared ? static_cast<int>(shared_fp4 ? w_.shared_fp4[0].rows
+                                                 : packq ? w_.shared_packed[0].rows
+                                                         : w_.shared[0].rows)
+                              : 0;
+  const bool sh_args = with_shared && !shared_fp4 && !packq;
+  const uint8_t* sh_gate_p = sh_args ? w_.shared[0].payload : nullptr;
+  const float* sh_gate_s = sh_args ? w_.shared[0].scales : nullptr;
+  const uint8_t* sh_up_p = sh_args ? w_.shared[1].payload : nullptr;
+  const float* sh_up_s = sh_args ? w_.shared[1].scales : nullptr;
+  const uint8_t* sh_down_p = sh_args ? w_.shared[2].payload : nullptr;
+  const float* sh_down_s = sh_args ? w_.shared[2].scales : nullptr;
   // Multi-token batches (a speculative verify) run their slots in
   // expert order so an expert two rows share is read from DRAM once (see
   // launch_moe_slot_order); one token has nothing to share.
@@ -783,7 +854,18 @@ void GlmMoeLayer::enqueue_decode_impl(const uint16_t* hidden, uint16_t* out_bf16
   // find n == 0 and return).
   const int K_s = with_shared ? H : 0;
   const int N_s = with_shared ? H : 0;
-  if (fp4) {
+  if (packq) {
+    // The packed table: the shared expert (int8) is view-table entry E,
+    // read at the routed K; no launch-argument matrices.
+    const int rb = w_.experts_packed[0].bits;
+    const int sb = with_shared ? w_.shared_packed[0].bits : 0;
+    const int sbase = with_shared ? E * 3 : -1;
+    launch_moe_slot_gate_up_swiglu_packq(hidden, H, d_ids_, order, table, I_r, H, rb, I_s, sb,
+                                         d_slot_act_, I_r, slots, K, cfg_.swiglu_limit, stream,
+                                         sbase);
+    launch_moe_slot_down_packq(d_slot_act_, I_r, d_ids_, order, table, H, I_r, rb, N_s, sb,
+                               d_slot_down_, H, slots, K, stream, sbase);
+  } else if (fp4) {
     launch_moe_slot_gate_up_swiglu_fp4(
         hidden, H, d_ids_, order, table, I_r, H, I_s, K_s, sh_gate_p, sh_gate_s,
         sh_up_p, sh_up_s, d_slot_act_, I_r, slots, K, cfg_.swiglu_limit, stream,

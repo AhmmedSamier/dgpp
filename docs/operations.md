@@ -102,7 +102,7 @@ one fixed cache capacity for every deployment.
 
 **The same hybrid on two nodes.** Each rank then holds 94.71 GiB of weights
 instead of 50.74 GiB, which leaves about 12 GiB for the context once the
-8 GiB headroom is reserved. At four request slots with MTP the draft block's
+4 GiB headroom is reserved (8 until 2026-09-12, 5 for a day; the residual after the plan check measured flat at 2.4–2.8 GiB and a one-hour soak held at 4). At four request slots with MTP the draft block's
 hidden cache is what binds, so `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.json`
 takes the latent cache to FP8 and settles at 163,840 tokens: 106.57 GiB
 planned against the 115.1 to 115.6 GiB these nodes report at boot. The boot's
@@ -193,7 +193,7 @@ check their allocations before loading:
   hidden cache, every activation and scratch buffer, the prefix cache
   arena and the engine's own buffers, from the same formulas the
   constructors use — logs it itemized, and refuses to boot (exit 1, the
-  world never forms) when the plan plus 8 GiB of headroom exceeds the
+  world never forms) when the plan plus 4 GiB of headroom exceeds the
   node's free memory. The refusal names the largest items and the largest
   `kv_capacity` the node would hold as configured. `dgpp-serve --config
   /path/to/cluster.resolved.json --rank R --memory-plan` runs the check alone and
@@ -201,7 +201,7 @@ check their allocations before loading:
   boot does, because a booting rank locks its pinned memory before it plans;
   leave that much slack when sizing `kv_capacity` from one, or read the
   ceiling out of a refusal;
-- the loader's own check that the resident footprint (+ 8 GiB headroom)
+- the loader's own check that the resident footprint (+ 4 GiB headroom)
   fits the device's free memory remains as the second line and fails
   immediately with a clear message — never three minutes into a load;
 - the loader reads each source tensor exactly once (prefetch, copy, drop),

@@ -9,6 +9,7 @@
 
 #include "common/cuda_check.hpp"
 #include "kernels/dsa.hpp"
+#include "kernels/packq_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "models/dsa_state.hpp"
 
@@ -42,14 +43,18 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
         "dsa layer: the selection kernels pin index_n_heads to 32");
   // The bitonic select/expand networks are power-of-two sized: a
   // non-power-of-two select_k (index_topk/kpool) indexes past the smem
-  // windows and silently drops every selected pool. The real checkpoint's
-  // 2048/4 = 512 satisfies this; fail loudly rather than mis-select.
+  // windows and silently drops every selected pool. The real checkpoints'
+  // 2048/4 = 512 (Flash) and 2048/1 (the full model, the expansion's
+  // bound) satisfy this; fail loudly rather than mis-select.
   {
     const int select_k = cfg.index_topk / cfg.index_kpool;
     if (select_k <= 0 || (select_k & (select_k - 1)) != 0)
       throw std::invalid_argument(
           "dsa layer: select_k (= index_topk / index_kpool) must be a "
           "power of two (bitonic select networks)");
+    if (select_k > kDsaSelectMaxK)
+      throw std::invalid_argument(
+          "dsa layer: select_k exceeds the select kernels' bound (2048)");
   }
   // The attention kernel's head-group tiling (hpb = min(heads, 16) heads
   // per block, 128/hpb dim groups) is exercised for 4/8/64 heads; 1-2
@@ -63,8 +68,11 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
   if (max_tokens <= 0 || max_cache_tokens <= 0)
     throw std::invalid_argument(
         "dsa layer: max_tokens and max_cache_tokens must be positive");
-  if (max_decode_rows <= 0 || max_decode_rows > 8)
-    throw std::invalid_argument("dsa layer: max_decode_rows must be in [1, 8]");
+  // 16 since 2026-09-13 (the decode batch's cap): the fused select runs
+  // the rows in groups of eight, the attention tiles and the (row, split)
+  // workspace below scale with the count.
+  if (max_decode_rows <= 0 || max_decode_rows > 16)
+    throw std::invalid_argument("dsa layer: max_decode_rows must be in [1, 16]");
   if (max_decode_rows > max_tokens)
     throw std::invalid_argument(
         "dsa layer: max_decode_rows must not exceed max_tokens");
@@ -104,9 +112,10 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
   };
   const size_t T = size_t(max_tokens);
   const size_t Ta = std::max(T, size_t(A));
-  L.off_qkv = alloc(T * (cfg.q_lora_rank + cfg.kv_lora_rank) * 2);
+  L.off_qkv = alloc(T * size_t(cfg.q_lora_rank + cfg.kv_lora_rank + cfg.qk_rope_head_dim) * 2);
   L.off_q_c = alloc(T * size_t(cfg.q_lora_rank) * 2);
   L.off_kv_c = alloc(T * size_t(cfg.kv_lora_rank) * 2);
+  L.off_k_rot = alloc(T * size_t(cfg.qk_rope_head_dim) * 2);
   L.off_q = alloc(T * size_t(g.local_q_rows) * 2);
   L.off_q_idx = alloc(T * size_t(heads) * size_t(dim) * 2);
   L.off_k_raw = alloc(T * size_t(dim) * 2);
@@ -122,7 +131,7 @@ DsaLayer::ScratchLayout DsaLayer::scratch_layout(
   L.off_req_ids = alloc(Ta * 4);
   L.off_attn_out = alloc(T * size_t(g.local_v_rows) * 2);
   L.off_q_tilde = alloc(size_t(A) * size_t(g.local_heads) *
-                        size_t(cfg.kv_lora_rank) * 2);
+                        size_t(g.score_width) * 2);
   L.off_c = alloc(size_t(A) * size_t(g.local_heads) *
                   size_t(cfg.kv_lora_rank) * 4);
   L.off_m = alloc(ws_slots * size_t(g.local_heads) * 4);
@@ -175,40 +184,7 @@ DsaLayer::DsaLayer(IGemm& gemm, const DsaLayerWeights& w, const DsaConfig& cfg,
         "; use scratch_bytes()");
   if (!gemm_workspace || gemm_ws_bytes == 0)
     throw std::invalid_argument("dsa layer: GEMM workspace required");
-  const auto require = [](const void* p, const char* what) {
-    if (!p)
-      throw std::invalid_argument(std::string("dsa layer: missing ") + what);
-  };
-  require(w_.wq_b, "wq_b");
-  require(w_.wk, "wk");
-  require(w_.wp, "wp");
-  require(w_.gate, "gate");
-  require(w_.k_norm_w, "k_norm_w");
-  require(w_.k_norm_b, "k_norm_b");
-  require(w_.ape, "ape");
-  // The quantized projections: the bf16 bridge or the fp8 pairs, one form.
-  if (w_.quantized()) {
-    require(w_.q_a_q.payload, "q_a_q.payload");
-    require(w_.q_a_q.scales, "q_a_q.scales");
-    require(w_.kv_a_q.payload, "kv_a_q.payload");
-    require(w_.kv_a_q.scales, "kv_a_q.scales");
-    require(w_.q_b_q.payload, "q_b_q.payload");
-    require(w_.q_b_q.scales, "q_b_q.scales");
-    require(w_.o_proj_q.payload, "o_proj_q.payload");
-    require(w_.o_proj_q.scales, "o_proj_q.scales");
-    if (w_.q_a_q.rows != cfg.q_lora_rank || w_.q_a_q.cols != cfg.hidden ||
-        w_.kv_a_q.rows != cfg.kv_lora_rank || w_.kv_a_q.cols != cfg.hidden ||
-        w_.q_b_q.rows != geo_.local_q_rows || w_.q_b_q.cols != cfg.q_lora_rank ||
-        w_.o_proj_q.rows != cfg.hidden || w_.o_proj_q.cols != geo_.local_v_rows)
-      throw std::invalid_argument("DsaLayer: fp8 projection geometry");
-  } else {
-    require(w_.qkv_a, "qkv_a");
-    require(w_.q_b, "q_b");
-    require(w_.o_proj, "o_proj");
-  }
-  require(w_.q_aln, "q_aln");
-  require(w_.kv_aln, "kv_aln");
-  require(w_.kv_b, "kv_b");
+  validate_weights(w_);
 
   attn_rows_ = std::max(max_decode_rows, 8);
   tile_cap_ = L.tile_cap;
@@ -219,13 +195,16 @@ DsaLayer::DsaLayer(IGemm& gemm, const DsaLayerWeights& w, const DsaConfig& cfg,
   logit_scale_ = static_cast<float>(
       std::pow(double(cfg.index_head_dim), -0.5) *
       std::pow(double(cfg.index_n_heads), -0.5));
-  attn_scale_ = 1.0f / std::sqrt(float(cfg.qk_nope_head_dim));
+  // qk_head_dim^-0.5: nope^-0.5 for Flash (rope 0), (nope + rope)^-0.5 =
+  // 1/16 for the full model.
+  attn_scale_ = 1.0f / std::sqrt(float(cfg.qk_nope_head_dim + cfg.qk_rope_head_dim));
 
   scratch_ = static_cast<uint8_t*>(scratch);
   const auto at = [&](size_t o) { return scratch_ + o; };
   qkv_ = reinterpret_cast<uint16_t*>(at(L.off_qkv));
   q_c_ = reinterpret_cast<uint16_t*>(at(L.off_q_c));
   kv_c_ = reinterpret_cast<uint16_t*>(at(L.off_kv_c));
+  k_rot_ = reinterpret_cast<uint16_t*>(at(L.off_k_rot));
   q_ = reinterpret_cast<uint16_t*>(at(L.off_q));
   q_idx_ = reinterpret_cast<uint16_t*>(at(L.off_q_idx));
   k_raw_ = reinterpret_cast<uint16_t*>(at(L.off_k_raw));
@@ -261,6 +240,101 @@ size_t DsaLayer::scratch_bytes(const DsaConfig& cfg, int max_tokens,
       .total;
 }
 
+// The weight view's contract: the indexer complete or absent as a whole
+// (absent = the selection-reusing form), the projections in exactly one
+// of the three forms with the local geometry, the rope table when the
+// geometry has a tail.
+void DsaLayer::validate_weights(const DsaLayerWeights& w) const {
+  const auto require = [](const void* p, const char* what) {
+    if (!p)
+      throw std::invalid_argument(std::string("dsa layer: missing ") + what);
+  };
+  if (w.owns_indexer()) {
+    require(w.wk, "wk");
+    require(w.wp, "wp");
+    require(w.k_norm_w, "k_norm_w");
+    require(w.k_norm_b, "k_norm_b");
+    if (cfg_.index_kpool > 1) {
+      require(w.gate, "gate");
+      require(w.ape, "ape");
+    }
+  } else if (w.wk || w.wp || w.gate || w.k_norm_w || w.k_norm_b || w.ape) {
+    throw std::invalid_argument(
+        "dsa layer: a selection-reusing view carries no indexer tensors");
+  } else if (cfg_.index_layers() == cfg_.num_dsa_layers) {
+    throw std::invalid_argument(
+        "dsa layer: every layer of this configuration owns an indexer (wq_b missing)");
+  }
+  // The quantized projections: the bf16 bridge, the fp8 pairs or the
+  // packed-int triples — one form.
+  if (w.packed_int()) {
+    if (w.quantized())
+      throw std::invalid_argument("dsa layer: packed-int and fp8 projections together");
+    const auto check = [&](const GlmPackedMatrix& m, int64_t rows, int64_t cols,
+                           const char* what) {
+      require(m.packed, what);
+      require(m.scales, what);
+      if (m.rows != rows || m.cols != cols || (m.bits != 4 && m.bits != 8))
+        throw std::invalid_argument(std::string("dsa layer: packed geometry of ") + what);
+      if (!packq_gemv_accepts(m))
+        throw std::invalid_argument(std::string("dsa layer: the packed GEMV core rejects ") +
+                                    what + " (K outside the compiled set or misaligned)");
+    };
+    check(w.qkv_a_p, int64_t(cfg_.q_lora_rank + cfg_.kv_lora_rank + cfg_.qk_rope_head_dim),
+          cfg_.hidden, "qkv_a_p");
+    check(w.q_b_p, geo_.local_q_rows, cfg_.q_lora_rank, "q_b_p");
+    check(w.o_proj_p, cfg_.hidden, geo_.local_v_rows, "o_proj_p");
+  } else if (w.quantized()) {
+    if (cfg_.qk_rope_head_dim != 0)
+      throw std::invalid_argument("dsa layer: the fp8 pair form is the rope-free layout");
+    require(w.q_a_q.payload, "q_a_q.payload");
+    require(w.q_a_q.scales, "q_a_q.scales");
+    require(w.kv_a_q.payload, "kv_a_q.payload");
+    require(w.kv_a_q.scales, "kv_a_q.scales");
+    require(w.q_b_q.payload, "q_b_q.payload");
+    require(w.q_b_q.scales, "q_b_q.scales");
+    require(w.o_proj_q.payload, "o_proj_q.payload");
+    require(w.o_proj_q.scales, "o_proj_q.scales");
+    if (w.q_a_q.rows != cfg_.q_lora_rank || w.q_a_q.cols != cfg_.hidden ||
+        w.kv_a_q.rows != cfg_.kv_lora_rank || w.kv_a_q.cols != cfg_.hidden ||
+        w.q_b_q.rows != geo_.local_q_rows || w.q_b_q.cols != cfg_.q_lora_rank ||
+        w.o_proj_q.rows != cfg_.hidden || w.o_proj_q.cols != geo_.local_v_rows)
+      throw std::invalid_argument("DsaLayer: fp8 projection geometry");
+  } else {
+    require(w.qkv_a, "qkv_a");
+    require(w.q_b, "q_b");
+    require(w.o_proj, "o_proj");
+  }
+  require(w.q_aln, "q_aln");
+  require(w.kv_aln, "kv_aln");
+  require(w.kv_b, "kv_b");
+  if (cfg_.qk_rope_head_dim > 0) {
+    require(w.rope_table, "rope_table");
+    if (w.rope_table_positions < max_cache_tokens_)
+      throw std::invalid_argument(
+          "dsa layer: the rope table must cover max_cache_tokens positions");
+  }
+}
+
+void DsaLayer::note_selection(SelKind kind, int rows, int64_t start, int req,
+                              const int64_t* pos) {
+  sel_kind_ = kind;
+  sel_rows_ = rows;
+  sel_start_ = start;
+  sel_req_ = req;
+  sel_pos_ = pos;
+}
+
+void DsaLayer::require_selection(SelKind kind, int rows, int64_t start, int req,
+                                 const int64_t* pos) const {
+  if (sel_kind_ != kind || sel_rows_ != rows || sel_start_ != start ||
+      sel_req_ != req || sel_pos_ != pos)
+    throw std::logic_error(
+        "dsa layer: a selection-reusing enqueue must follow the indexed "
+        "layer's enqueue of the same rows, chunk and request on this scratch "
+        "(nothing may run between a full layer and its dependants)");
+}
+
 // ---------------------------------------------------------------------
 // Plan preparation
 // ---------------------------------------------------------------------
@@ -271,21 +345,25 @@ bool DsaLayer::prepare(int tokens) {
   const int hid = cfg_.hidden;
   const int heads = cfg_.index_n_heads;
   const int dim = cfg_.index_head_dim;
-  const int qkv_cols = cfg_.q_lora_rank + cfg_.kv_lora_rank;
-  const bool ok =
-      gemm_.ensure_plan(tokens, qkv_cols, hid, DType::BF16, GemmOut::BF16,
-                        size_t(hid)) &&
-      gemm_.ensure_plan(tokens, geo_.local_q_rows, cfg_.q_lora_rank,
-                        DType::BF16, GemmOut::BF16,
-                        size_t(cfg_.q_lora_rank)) &&
-      gemm_.ensure_plan(tokens, heads * dim, cfg_.q_lora_rank, DType::BF16,
-                        GemmOut::BF16, size_t(cfg_.q_lora_rank)) &&
-      gemm_.ensure_plan(tokens, dim, hid, DType::BF16, GemmOut::BF16,
-                        size_t(hid)) &&
-      gemm_.ensure_plan(tokens, heads, hid, DType::BF16, GemmOut::F32,
-                        size_t(hid)) &&
-      gemm_.ensure_plan(tokens, hid, geo_.local_v_rows, DType::BF16,
-                        GemmOut::BF16, size_t(geo_.local_v_rows));
+  const int qkv_cols = cfg_.q_lora_rank + cfg_.kv_lora_rank + cfg_.qk_rope_head_dim;
+  // The bf16 projections' plans (the fp8 and packed forms run their own
+  // kernels); the indexer's whether or not this view owns one — every
+  // view of the layer shares the scratch and the plan cache.
+  bool ok = gemm_.ensure_plan(tokens, heads * dim, cfg_.q_lora_rank, DType::BF16,
+                              GemmOut::BF16, size_t(cfg_.q_lora_rank)) &&
+            gemm_.ensure_plan(tokens, dim, hid, DType::BF16, GemmOut::BF16,
+                              size_t(hid)) &&
+            gemm_.ensure_plan(tokens, heads, hid, DType::BF16, GemmOut::F32,
+                              size_t(hid));
+  if (!w_.quantized() && !w_.packed_int())
+    ok = ok &&
+         gemm_.ensure_plan(tokens, qkv_cols, hid, DType::BF16, GemmOut::BF16,
+                           size_t(hid)) &&
+         gemm_.ensure_plan(tokens, geo_.local_q_rows, cfg_.q_lora_rank,
+                           DType::BF16, GemmOut::BF16,
+                           size_t(cfg_.q_lora_rank)) &&
+         gemm_.ensure_plan(tokens, hid, geo_.local_v_rows, DType::BF16,
+                           GemmOut::BF16, size_t(geo_.local_v_rows));
   // The kernel shared-memory opt-in is context state; do it now so the
   // first enqueue (which may be inside graph capture) never mutates it.
   dsa_prepare_kernel_smem();
@@ -312,7 +390,12 @@ bool DsaLayer::prepare_prefill(int tile_rows, int64_t visible_pools) {
 // scale-aware GEMM (the same dequantized values; the two kernels' fp32
 // summation orders differ).
 void DsaLayer::project_out(void* out, int tokens, cudaStream_t stream) {
-  if (w_.quantized())
+  if (w_.packed_int())
+    launch_packq_gemv_bf16(static_cast<const uint16_t*>(attn_out_),
+                           size_t(geo_.local_v_rows), w_.o_proj_p,
+                           static_cast<uint16_t*>(out), tokens, cfg_.hidden,
+                           geo_.local_v_rows, stream);
+  else if (w_.quantized())
     launch_scale_gemm_bf16(static_cast<const uint16_t*>(attn_out_),
                            size_t(geo_.local_v_rows), w_.o_proj_q.payload,
                            w_.o_proj_q.scales, static_cast<uint16_t*>(out), tokens,
@@ -324,16 +407,29 @@ void DsaLayer::project_out(void* out, int tokens, cudaStream_t stream) {
 }
 
 void DsaLayer::project_common(const void* hidden_in, int tokens,
-                              cudaStream_t stream) {
+                              const int64_t* pos, cudaStream_t stream) {
   const int hid = cfg_.hidden;
   const int heads = cfg_.index_n_heads;
   const int dim = cfg_.index_head_dim;
-  const int qkv_cols = cfg_.q_lora_rank + cfg_.kv_lora_rank;
+  const int rope = cfg_.qk_rope_head_dim;
+  const int nope = cfg_.qk_nope_head_dim;
+  const int qkv_cols = cfg_.q_lora_rank + cfg_.kv_lora_rank + rope;
+  const auto rotate = [&](void* x, int64_t row_stride, int64_t head_stride,
+                          int nheads, void* out, int64_t out_row_stride,
+                          int64_t out_head_stride) {
+    dsa_rope_interleave(x, row_stride, head_stride, nheads, rope, pos, w_.rope_table,
+                        w_.rope_table_positions, out, out_row_stride,
+                        out_head_stride, tokens, stream);
+  };
 
   // 1) fused [q_a | kv_a] projection, then RMSNorms on the split halves.
   // The fp8 form: two scale-aware GEMMs into the two column ranges of the
-  // same [tokens, q_lora + kv_lora] buffer (the output row stride).
-  if (w_.quantized()) {
+  // same [tokens, q_lora + kv_lora] buffer (the output row stride). The
+  // packed form: one GEMV over the fused triple.
+  if (w_.packed_int()) {
+    launch_packq_gemv_bf16(static_cast<const uint16_t*>(hidden_in), size_t(hid),
+                           w_.qkv_a_p, qkv_, tokens, qkv_cols, hid, stream);
+  } else if (w_.quantized()) {
     const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
     uint16_t* qkv = static_cast<uint16_t*>(qkv_);
     launch_scale_gemm_bf16(h, size_t(hid), w_.q_a_q.payload, w_.q_a_q.scales,
@@ -348,9 +444,18 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
   }
   dsa_fused_qkv_rmsnorm(qkv_, q_c_, kv_c_, cfg_.q_lora_rank,
                         cfg_.kv_lora_rank, tokens, w_.q_aln, w_.kv_aln,
-                        cfg_.rms_norm_eps, stream);
-  // 2) MLA q and indexer q, both from the normed q-lora rows.
-  if (w_.quantized())
+                        cfg_.rms_norm_eps, stream, qkv_cols);
+  // The rope key: the fused row's tail, rotated at the token's position
+  // (not normed — the reference's kv_a_layernorm covers the latent only).
+  if (rope > 0)
+    rotate(qkv_ + cfg_.q_lora_rank + cfg_.kv_lora_rank, qkv_cols, 0, 1, k_rot_,
+           rope, 0);
+  // 2) MLA q from the normed q-lora rows; its rope slice rotated in place.
+  if (w_.packed_int())
+    launch_packq_gemv_bf16(static_cast<const uint16_t*>(q_c_), size_t(cfg_.q_lora_rank),
+                           w_.q_b_p, q_, tokens, geo_.local_q_rows, cfg_.q_lora_rank,
+                           stream);
+  else if (w_.quantized())
     launch_scale_gemm_bf16(static_cast<const uint16_t*>(q_c_), size_t(cfg_.q_lora_rank),
                            w_.q_b_q.payload, w_.q_b_q.scales,
                            static_cast<uint16_t*>(q_), tokens, geo_.local_q_rows,
@@ -359,22 +464,33 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
     gemm_.matmul(q_c_, w_.q_b, q_, tokens, geo_.local_q_rows, cfg_.q_lora_rank,
                  DType::BF16, GemmOut::BF16, size_t(cfg_.q_lora_rank), gemm_ws_,
                  gemm_ws_bytes_, stream);
+  if (rope > 0)
+    rotate(q_ + nope, geo_.local_q_rows, nope + rope, geo_.local_heads, q_ + nope,
+           geo_.local_q_rows, nope + rope);
+  if (!w_.owns_indexer()) return;  // a selection-reusing layer: done
+  // 3) the indexer q, also from the normed q-lora rows (its rope slice is
+  // the head's first dims), then Hadamard-128 + fp8 quant.
   gemm_.matmul(q_c_, w_.wq_b, q_idx_, tokens, heads * dim, cfg_.q_lora_rank,
                DType::BF16, GemmOut::BF16, size_t(cfg_.q_lora_rank), gemm_ws_,
                gemm_ws_bytes_, stream);
-  // 3) indexer k (LayerNorm, eps 1e-6 — the indexer's own norm, not
-  // rms_norm_eps) and gate, both straight from hidden.
+  if (rope > 0)
+    rotate(q_idx_, int64_t(heads) * dim, dim, heads, q_idx_, int64_t(heads) * dim, dim);
+  // 4) indexer k (LayerNorm, eps 1e-6 — the indexer's own norm, not
+  // rms_norm_eps), rotated after the norm, and the gate (kpool > 1), both
+  // straight from hidden.
   gemm_.matmul(hidden_in, w_.wk, k_raw_, tokens, dim, hid, DType::BF16,
                GemmOut::BF16, size_t(hid), gemm_ws_, gemm_ws_bytes_, stream);
   dsa_k_layernorm(k_raw_, dim, w_.k_norm_w, w_.k_norm_b, k_rows_, tokens, dim,
                   1e-6f, stream);
-  gemm_.matmul(hidden_in, w_.gate, gate_rows_, tokens, dim, hid, DType::BF16,
-               GemmOut::BF16, size_t(hid), gemm_ws_, gemm_ws_bytes_, stream);
-  // 4) indexer weights in fp32 with no bf16 rounding (reference pins this):
+  if (rope > 0) rotate(k_rows_, dim, 0, 1, k_rows_, dim, 0);
+  if (w_.gate)
+    gemm_.matmul(hidden_in, w_.gate, gate_rows_, tokens, dim, hid, DType::BF16,
+                 GemmOut::BF16, size_t(hid), gemm_ws_, gemm_ws_bytes_, stream);
+  // 5) indexer weights in fp32 with no bf16 rounding (reference pins this):
   // bf16 inputs, fp32 accumulate, fp32 out.
   gemm_.matmul(hidden_in, w_.wp, weights_, tokens, heads, hid, DType::BF16,
                GemmOut::F32, size_t(hid), gemm_ws_, gemm_ws_bytes_, stream);
-  // 5) Hadamard-128 + fp8 quant of the indexer q, then fold the q scale and
+  // 6) Hadamard-128 + fp8 quant of the indexer q, then fold the q scale and
   // the combined logit scale into the weights.
   dsa_fwht_quant_rows(q_idx_, int64_t(tokens) * heads, q_fp8_, q_scale_,
                       stream);
@@ -393,18 +509,19 @@ void DsaLayer::attend_tile(DsaStatePool& state, int layer,
     const int arows = int(std::min<int64_t>(attn_rows_, row0 + rows - a0));
     dsa_absorb_q(q_ + a0 * geo_.local_q_rows, w_.kv_b, q_tilde_, arows,
                  geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
-                 cfg_.kv_lora_rank, stream);
+                 cfg_.kv_lora_rank, stream, geo_.rope_dim, /*tensor_cores=*/false);
     dsa_attn_partial(q_tilde_, state.latent(layer), req_ids + a0,
                      topk_ + a0 * geo_.max_selected, geo_.max_selected,
                      counts_ + a0, arows, n_split, geo_.local_heads,
                      cfg_.kv_lora_rank, cfg_.block_tokens, state.block_tables(),
                      int(state.total_blocks()), attn_scale_, m_ws_, l_ws_,
-                     c_ws_, stream, cfg_.latent_format, state.latent_scale(layer));
+                     c_ws_, stream, cfg_.latent_format, state.latent_scale(layer),
+                     geo_.rope_dim);
     dsa_attn_combine(m_ws_, l_ws_, c_ws_, arows, n_split, geo_.local_heads,
                      cfg_.kv_lora_rank, c_, stream);
     dsa_vout_gemm(c_, w_.kv_b, attn_out_ + a0 * geo_.local_v_rows, arows,
                   geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
-                  cfg_.kv_lora_rank, stream);
+                  cfg_.kv_lora_rank, stream, /*tensor_cores=*/false);
   }
 }
 
@@ -428,13 +545,14 @@ void dsa_debug_sync(cudaStream_t stream, const char* what) {
 
 void DsaLayer::attend_dense(DsaStatePool& state, int layer,
                             const int32_t* req_ids, int64_t row0, int rows,
-                            bool listed, cudaStream_t stream, int n_split) {
+                            bool listed, cudaStream_t stream, int n_split,
+                            bool decode) {
   for (int64_t a0 = row0; a0 < row0 + rows; a0 += kDensePrefillRows) {
     const int arows =
         int(std::min<int64_t>(kDensePrefillRows, row0 + rows - a0));
     dsa_absorb_q(q_ + a0 * geo_.local_q_rows, w_.kv_b, q_tilde_, arows,
                  geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
-                 cfg_.kv_lora_rank, stream);
+                 cfg_.kv_lora_rank, stream, geo_.rope_dim, /*tensor_cores=*/!decode);
     dsa_debug_sync(stream, "absorb_q");
     const bool launched =
         listed ? dsa_attn_listed(q_tilde_, state.latent(layer), req_ids + a0,
@@ -444,14 +562,14 @@ void DsaLayer::attend_dense(DsaStatePool& state, int layer,
                                  cfg_.block_tokens, state.block_tables(),
                                  int(state.total_blocks()), attn_scale_, m_ws_,
                                  l_ws_, c_ws_, stream, cfg_.latent_format,
-                                 state.latent_scale(layer))
+                                 state.latent_scale(layer), geo_.rope_dim)
                : dsa_attn_dense(q_tilde_, state.latent(layer), req_ids + a0,
                                 pos_dev_ + a0, arows, n_split,
                                 geo_.local_heads, cfg_.kv_lora_rank,
                                 cfg_.block_tokens, state.block_tables(),
                                 int(state.total_blocks()), attn_scale_, m_ws_,
                                 l_ws_, c_ws_, stream, cfg_.latent_format,
-                                state.latent_scale(layer));
+                                state.latent_scale(layer), geo_.rope_dim);
     if (!launched) {
       // Geometry outside the dense kernel's: the split kernel over the
       // selection (dense by construction here).
@@ -478,7 +596,7 @@ void DsaLayer::attend_dense(DsaStatePool& state, int layer,
     dsa_debug_sync(stream, "combine");
     dsa_vout_gemm(c_, w_.kv_b, attn_out_ + a0 * geo_.local_v_rows, arows,
                   geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
-                  cfg_.kv_lora_rank, stream);
+                  cfg_.kv_lora_rank, stream, /*tensor_cores=*/!decode);
     dsa_debug_sync(stream, "vout");
   }
 }
@@ -517,10 +635,19 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
   const int dim = cfg_.index_head_dim;
   const int kpool = cfg_.index_kpool;
   const int blocks_per_req = int(state.total_blocks());
+  const bool reuse = reuses_selection();
+  if (reuse) {
+    require_selection(SelKind::kPrefill, tokens, token_start, req, nullptr);
+    if (state.owns_index(layer))
+      throw std::invalid_argument(
+          "dsa layer: a selection-reusing view on a layer that owns an index cache");
+  } else if (!state.owns_index(layer)) {
+    throw std::invalid_argument(
+        "dsa layer: an indexed view on a layer without an index cache");
+  }
 
-  project_common(hidden_in, tokens, stream);
-
-  // Per-token metadata (host staging — prefill is never graph-captured).
+  // Per-token metadata (host staging — prefill is never graph-captured);
+  // the projections rotate at these positions.
   pos_host_.resize(size_t(tokens));
   for (int i = 0; i < tokens; ++i) pos_host_[size_t(i)] = token_start + i;
   req_ids_host_.assign(std::max(size_t(tokens), size_t(attn_rows_)), req);
@@ -531,23 +658,31 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
                                req_ids_host_.size() * sizeof(int32_t),
                                cudaMemcpyHostToDevice, stream));
 
-  // Latent cache append (quantized on the way in for an fp8/fp4 cache).
+  project_common(hidden_in, tokens, pos_dev_, stream);
+
+  // Latent cache append (quantized on the way in for an fp8/fp4 cache; the
+  // rope key bf16 after it).
   dsa_latent_append(kv_c_, req_ids_dev_, pos_dev_, tokens, state.block_tables(),
                     blocks_per_req, cfg_.block_tokens, state.latent(layer),
                     cfg_.kv_lora_rank, stream, cfg_.latent_format,
-                    state.latent_scale(layer));
+                    state.latent_scale(layer), geo_.rope_dim > 0 ? k_rot_ : nullptr,
+                    geo_.rope_dim);
 
+  if (reuse) {
+    dot_stride_last_ = 0;
+  } else {
   // Complete pools fully inside this chunk -> compressed index cache.
   const int64_t pool_lo = token_start / kpool;
   const int64_t pool_hi = (token_start + tokens) / kpool;
-  dsa_kpool_compress_write(k_rows_, dim, gate_rows_, dim, w_.ape,
+  const uint16_t* gate_rows = w_.gate ? gate_rows_ : nullptr;
+  dsa_kpool_compress_write(k_rows_, dim, gate_rows, dim, w_.ape,
                            state.block_tables() + size_t(req) * blocks_per_req,
                            geo_.pools_per_block, pool_lo, pool_hi - pool_lo,
                            state.index_k(layer), state.index_scale(layer),
                            kpool, dim, stream);
 
   // Tail ring: the last kpool tokens of the request so far.
-  dsa_kpool_tail_seed(k_rows_, dim, gate_rows_, dim, req_ids_dev_, pos_dev_,
+  dsa_kpool_tail_seed(k_rows_, dim, gate_rows, dim, req_ids_dev_, pos_dev_,
                       tokens, state.tail(layer), kpool, dim, stream);
 
   // Selection + attention over dot tiles. The gather is per-chunk (every
@@ -591,7 +726,9 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
                        pos_dev_ + row0, rows, n_gather, heads, geo_.select_k,
                        kpool, geo_.max_selected,
                        topk_ + size_t(row0) * geo_.max_selected, counts_ + row0,
-                       stream);
+                       stream, cfg_.index_relu != 0);
+  }
+  note_selection(SelKind::kPrefill, tokens, token_start, req, nullptr);
   }
 
   // Attention. Rows whose context is below index_topk tokens select
@@ -642,8 +779,18 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   const int dim = cfg_.index_head_dim;
   const int kpool = cfg_.index_kpool;
   dot_stride_last_ = 0;  // decode selects consume no dot buffer (debug probe)
+  const bool reuse = reuses_selection();
+  if (reuse) {
+    require_selection(SelKind::kDecode, tokens, -1, -1, pos);
+    if (state.owns_index(layer))
+      throw std::invalid_argument(
+          "dsa layer: a selection-reusing view on a layer that owns an index cache");
+  } else if (!state.owns_index(layer)) {
+    throw std::invalid_argument(
+        "dsa layer: an indexed view on a layer without an index cache");
+  }
 
-  project_common(hidden_in, tokens, stream);
+  project_common(hidden_in, tokens, pos, stream);
   dsa_debug_sync(stream, "project");
   // Everything from here to the output projection is latency-bound at
   // decode (~130 us of small kernels): the longest window in the step, so
@@ -651,8 +798,9 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   if (prefetch) {
     prefetch->open_window(stream, size_t{16} << 20, prefetch->layer_rate());
     prefetch->add(w_.kv_b, kv_b_bytes());  // absorb_q and vout read it first
-    prefetch->add(w_.quantized() ? static_cast<const void*>(w_.o_proj_q.payload)
-                                 : w_.o_proj,
+    prefetch->add(w_.packed_int() ? static_cast<const void*>(w_.o_proj_p.packed)
+                  : w_.quantized() ? static_cast<const void*>(w_.o_proj_q.payload)
+                                   : w_.o_proj,
                   o_proj_bytes());
   }
 
@@ -661,12 +809,14 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   dsa_latent_append(kv_c_, req_ids, pos, tokens, state.block_tables(),
                     int(state.total_blocks()), cfg_.block_tokens,
                     state.latent(layer), cfg_.kv_lora_rank, stream,
-                    cfg_.latent_format, state.latent_scale(layer));
+                    cfg_.latent_format, state.latent_scale(layer),
+                    geo_.rope_dim > 0 ? k_rot_ : nullptr, geo_.rope_dim);
   dsa_debug_sync(stream, "latent append");
+  if (!reuse) {
   // Ring update + pool compression for any pool completed by this batch.
   dsa_kpool_decode_update(
-      k_rows_, dim, gate_rows_, dim, w_.ape, req_ids, pos, req_spans,
-      num_requests, state.block_tables(), int(state.total_blocks()),
+      k_rows_, dim, w_.gate ? gate_rows_ : nullptr, dim, w_.ape, req_ids, pos,
+      req_spans, num_requests, state.block_tables(), int(state.total_blocks()),
       state.tail(layer), state.index_k(layer), state.index_scale(layer),
       geo_.pools_per_block, kpool, dim, stream, tail_snapshots);
   dsa_debug_sync(stream, "kpool update");
@@ -676,8 +826,11 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                     state.index_k(layer), state.index_scale(layer),
                     geo_.pools_per_block, heads, dim, geo_.select_k, kpool,
                     geo_.max_selected, topk_, counts_, select_ws_,
-                    select_ws_pools_, counter_ws_, /*grid_blocks=*/0, stream);
+                    select_ws_pools_, counter_ws_, /*grid_blocks=*/0, stream,
+                    cfg_.index_relu != 0);
   dsa_debug_sync(stream, "select");
+  note_selection(SelKind::kDecode, tokens, -1, -1, pos);
+  }
   if (std::getenv("DGPP_SYNC_EAGER") != nullptr) {
     // The fault hunt: every selected token inside the row's
     // context, every block-table entry it reaches reserved — checked on
@@ -727,7 +880,7 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
   // register split kernel.
   if (decode_mma_ && geo_.local_heads >= 16 && geo_.local_heads % 16 == 0)
     attend_dense(state, layer, req_ids, 0, tokens, /*listed=*/true, stream,
-                 std::min(decode_mma_split_, std::max(decode_n_split_, 8)));
+                 std::min(decode_mma_split_, std::max(decode_n_split_, 8)), /*decode=*/true);
   else
     attend_tile(state, layer, req_ids, 0, tokens, decode_n_split_, stream);
   dsa_debug_sync(stream, "attention");
@@ -758,9 +911,11 @@ void DsaLayer::validate_pool(const DsaStatePool& state, int layer) const {
                     c.index_head_dim == cfg_.index_head_dim &&
                     c.index_topk == cfg_.index_topk &&
                     c.index_kpool == cfg_.index_kpool &&
+                    c.index_relu == cfg_.index_relu &&
                     c.block_tokens == cfg_.block_tokens &&
                     c.tp_size == cfg_.tp_size &&
                     c.num_dsa_layers == cfg_.num_dsa_layers &&
+                    c.index_layers() == cfg_.index_layers() &&
                     c.latent_format == cfg_.latent_format;
   if (!same)
     throw std::invalid_argument(

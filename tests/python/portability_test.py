@@ -196,6 +196,7 @@ class PortabilityTest(unittest.TestCase):
     def test_deployment_filenames_describe_their_settings(self):
         models = {
             "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8": "glm-5.3-flash_nvfp4-fp8",
+            "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64": "glm-5.3_int4-int8",
             "nvidia/GLM-4.7-NVFP4": "glm-4.7_nvfp4",
             "Qwen/Qwen3.8-Flash-Next-FP8": "qwen-3.8-flash-next_fp8",
             "nvidia/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4",
@@ -217,6 +218,13 @@ class PortabilityTest(unittest.TestCase):
                     self.assertGreater(engine["kv_capacity"], base["engine"]["kv_capacity"])
                     self.assertGreater(engine["prefix_cache_gib"], base["engine"]["prefix_cache_gib"])
                     stem += "_large-cache"
+                # _cN: the base template at N request slots (wider decode batches).
+                slots = re.search(r"_c(\d+)\.example\.json$", path.name)
+                if slots:
+                    base = json.loads((path.parent / (stem + ".example.json")).read_text())
+                    self.assertEqual(engine["max_concurrency"], int(slots.group(1)))
+                    self.assertGreater(engine["max_concurrency"], base["engine"]["max_concurrency"])
+                    stem += f"_c{engine['max_concurrency']}"
                 self.assertEqual(path.name, stem + ".example.json")
                 self.assertIn(f"]({path.name})", index)
                 resolved = site_env.resolve_config(path, values)

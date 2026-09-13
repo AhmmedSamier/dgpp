@@ -36,6 +36,11 @@ struct ClusterConfig {
     int max_concurrency = 8;
     int64_t kv_capacity = 8192;
     std::string kv_dtype = "bf16";  // the latent cache's format: bf16 | fp8 | fp4
+    // The full GLM-5.3's embedding table: "replicated" on every rank, or
+    // "vocab" — each rank holds its lm-head slice of the rows, gathered
+    // per token and summed by one fold (bitwise the same numbers, one
+    // small collective per lookup, −1.33 GiB per rank at world 4).
+    std::string embed_sharding = "replicated";
     // The Qwen n-gram table's residency: "resident" copies it
     // to the device (the default; 47.7 GiB at world 1), "mmap" leaves it
     // on the NVMe behind the page cache and gathers each step's rows on

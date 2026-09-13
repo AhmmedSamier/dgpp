@@ -47,7 +47,13 @@ class IGemm {
 // bounds it (engine/decode_outputs.hpp's kDecodeRowsMax). The interface cannot
 // tell a decode call from a short prefill chunk, so the bound is the
 // model's decode shape and nothing wider: a prefill of more rows keeps
-// its Lt algorithm (and its transcripts).
+// its Lt algorithm (and its transcripts). So a prompt no longer than the
+// decode rows prefills through the GEMV chain, and two deployments with
+// different decode rows (the full GLM-5.3's eight-row and sixteen-row
+// shapes, 2026-09-13) prefill a 9–16-token prompt through different
+// kernels — last-bit differences, deterministic within a deployment;
+// glm_dsa_engine_test's sixteen-row gate configures both of its models
+// alike for that reason.
 constexpr int kGemmDecodeRowsDefault = 8;
 constexpr int kGemmDecodeLoweringRows = 32;
 

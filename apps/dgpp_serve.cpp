@@ -76,6 +76,8 @@
 #include "models/qwen/forward.hpp"
 #include "models/glm4/config.hpp"
 #include "models/glm4/forward.hpp"
+#include "models/glm_dsa/config.hpp"
+#include "models/glm_dsa/model.hpp"
 #include "sched/scheduler.hpp"
 #include "text/tokenizer.hpp"
 #include "text/tool_grammar.hpp"
@@ -169,7 +171,20 @@ struct PinnedWords {
 // larger of the device's free memory and the host's MemAvailable (the
 // GB10's unified pool is the host's memory; the page cache is reclaimable),
 // as the loader's own resident-footprint check measures.
-constexpr size_t kMemoryHeadroomBytes = size_t{8} << 30;  // CUDA context, bus, cuBLAS, page cache churn
+// 5 GiB since 2026-09-12: the growth after this check was measured on the
+// full GLM-5.3 at world 4 (node used memory minus the idle baseline minus
+// the plan, sampled at 2 s on all four ranks through the boot, a 32K
+// prefill and four live requests): a flat 5.5–6.0 GiB, of which ~1 GiB was
+// the process before the check (already outside the budget) and 2.2 GiB
+// the loader's pinned staging mirror, now a plan item that the resident
+// families free before their caches are allocated. The residual — cuBLAS
+// handles, the CUDA runtime's shared mappings, the service's tables — is
+// 2.4–2.8 GiB and does not move with the context or the load. 4 GiB
+// (2026-09-13, after a one-hour soak at the widest bf16 shape with the node
+// probes quiet) keeps 1.2–1.8 of margin over it; an overshoot here hangs the
+// fabric rather than erroring, so the head node must not run builds beside
+// a serving world at this margin.
+constexpr size_t kMemoryHeadroomBytes = size_t{4} << 30;
 
 std::string gib(double bytes) {
   return std::format("{:.2f} GiB", bytes / (1024.0 * 1024.0 * 1024.0));
@@ -427,11 +442,78 @@ struct Glm4Family final : ServeFamily {
   }
 };
 
+// The full GLM-5.3 (GlmMoeDsaForCausalLM, int4/int8 pack-quantized;
+// docs/glm53_plan.md G6): the DSA pool (128-token blocks: the latent rows
+// with their rope keys on every layer in the --kv-dtype format, the fp8
+// index caches on the 21 indexed layers), no recurrent state (snapshots at
+// any position), the resident fabric model / the streaming world-1 one.
+struct GlmDsaFamily final : ServeFamily {
+  dgpp::GlmDsaTextConfig cfg;
+  std::string ckpt;
+  int world = 1;
+  dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
+  std::unique_ptr<dgpp::GlmDsaModel> model;
+  GlmDsaFamily(const std::string& checkpoint, int world_, dgpp::LatentFormat fmt)
+      : cfg(dgpp::GlmDsaTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint), world(world_), kv_format(fmt) {}
+  const char* name() const override { return "glm_moe_dsa"; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  std::vector<int64_t>& eos_token_ids() override { return cfg.eos_token_ids; }
+  int64_t block_tokens() const override { return dgpp::GlmDsaModel::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::GlmDsaModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t pool_tokens) const override {
+    // Per-token selection: a pool id is a token slot, 21 bits in the select keys.
+    if (pool_tokens >= (int64_t(1) << 21)) return "exceeds the DSA pool-id space (2^21 tokens)";
+    return "";
+  }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
+  // The fused decode select serves eight rows (plan D9).
+  int decode_rows_cap() const override { return dgpp::GlmDsaModel::decode_rows_cap(); }
+  // The widest fold the decode graph records: a block output [rows, hidden].
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
+                        bool mtp, int decode_rows) const override {
+    return dgpp::GlmDsaModel::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+                                          fabric ? dgpp::GlmDsaResidency::Resident : dgpp::GlmDsaResidency::Streaming,
+                                          slots, fabric && mtp, decode_rows, kv_format);
+  }
+  size_t snapshot_bytes(int world_, bool mtp) const override {
+    return dgpp::GlmDsaModel::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
+    dgpp::GlmDsaLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    model = std::make_unique<dgpp::GlmDsaModel>(
+        cfg, ckpt, forward_rows, pool_tokens,
+        fabric ? dgpp::GlmDsaResidency::Resident : dgpp::GlmDsaResidency::Streaming, reducer, fabric ? rank : 0,
+        fabric ? world_ : 1, slots, fabric && mtp, decode_rows, kv_format);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(
+      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
+      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
+      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::GlmDsaModel>>(
+        model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::GlmDsaModel>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
 std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world, dgpp::LatentFormat kv_format) {
   const dgpp::ModelArchitecture arch =
       dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string());
   if (arch == dgpp::ModelArchitecture::Qwen4Exp) return std::make_unique<QwenFamily>(ckpt);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
+  if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
   return std::make_unique<GlmFamily>(ckpt, world, kv_format);
 }
 
@@ -667,6 +749,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
     http.stop();
   });
 
+  dgpp::log_memory_ledger("rank 0 at listening");
   DGPP_LOG_INFO(
       "serve: listening on :{} — {} (boot {:.1f}s){}; endpoints: POST "
       "/v1/chat/completions, POST /v1/completions, GET /v1/models, GET "
@@ -788,6 +871,7 @@ int main(int argc, char** argv) {
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
+  std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
   int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
   // The sampled pick's candidate width per rank on the graph engines (the
@@ -850,6 +934,7 @@ int main(int argc, char** argv) {
     kv_dtype = e.kv_dtype;
     ngram_table = e.ngram_table;
     dense_weights = e.dense_weights;
+    embed_sharding = e.embed_sharding;
     default_max_tokens = e.default_max_tokens;
     queue_limit = e.queue_limit;
     max_connections = e.max_connections;
@@ -888,6 +973,7 @@ int main(int argc, char** argv) {
     else if (a == "--kv-dtype") kv_dtype = next();
     else if (a == "--ngram-table") ngram_table = next();
     else if (a == "--dense-weights") dense_weights = next();
+    else if (a == "--embed-sharding") embed_sharding = next();
     else if (a == "--memory-plan") memory_plan_only = true;
     else if (a == "--max-concurrency") max_concurrency = std::stoi(next());
     else if (a == "--queue-limit") queue_limit = std::stoi(next());
@@ -941,11 +1027,11 @@ int main(int argc, char** argv) {
   std::optional<dgpp::serve::JournalReader> reader;
   const auto canonical = [&] {
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} maxtok={} queue={} "
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} emsh={} maxtok={} queue={} "
         "eos={} graph={} mtp={} mtpd={} batchmin={} cand={} pcgib={} adm={} win={} "
         "pace={} inflight={} reasoning_in_content={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
-        max_concurrency, kv_capacity, kv_dtype, ngram_table, dense_weights, default_max_tokens, queue_limit,
+        max_concurrency, kv_capacity, kv_dtype, ngram_table, dense_weights, embed_sharding, default_max_tokens, queue_limit,
         no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, graph_batch_min_live,
         sampling_candidates, prefix_cache_gib, admission_mode, admission_window,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0);
@@ -976,6 +1062,7 @@ int main(int argc, char** argv) {
         ws.kv_dtype = kv_dtype;
         ws.ngram_table = ngram_table;
         ws.dense_weights = dense_weights;
+        ws.embed_sharding = embed_sharding;
         ws.default_max_tokens = default_max_tokens;
         ws.queue_limit = queue_limit;
         ws.no_eos = no_eos;
@@ -1084,6 +1171,13 @@ int main(int argc, char** argv) {
     return 2;
   }
   dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
+  if (embed_sharding != "replicated" && embed_sharding != "vocab") {
+    DGPP_LOG_ERROR("--embed-sharding must be replicated or vocab, got '{}'", embed_sharding);
+    return 2;
+  }
+  // The full GLM-5.3's embedding rows: set before the plan and the load
+  // (both read it; the other families keep their tables whole).
+  dgpp::GlmDsaLayerStream::set_embed_vocab_sharded(embed_sharding == "vocab");
   if (world > 1) {
     require(rank >= 0 && rank < world, "--rank outside --world");
     require(!peer.empty() || rank == 0,
@@ -1175,13 +1269,17 @@ int main(int argc, char** argv) {
     // The family from config.json's architecture (loaders/architecture.hpp):
     // everything below the engine interface comes from it.
     std::unique_ptr<ServeFamily> family = make_family(ckpt, world, kv_format);
+    if (embed_sharding == "vocab" && std::string(family->name()) != "glm_moe_dsa")
+      DGPP_LOG_WARN("engine.embed_sharding = vocab applies to the full GLM-5.3 (glm_moe_dsa); {} keeps its "
+                    "embedding replicated", family->name());
     DGPP_LOG_INFO("serve: model family {} ({})", family->name(), ckpt);
     // The decode rows (2026-09-10, engine/decode_outputs.hpp): the fixed
     // batch holds every slot's verify rows — max_concurrency x (1 + the
     // MTP depth) — floored at kDecodeRows so every existing recipe keeps
     // its exact shape (4 slots x 2 rows = 8). The family's cap bounds it:
-    // GLM-4.7 supports the derived shape up to 32 rows. GLM-5.3 and
-    // Qwen are capped at 8 and use scalar graphs beyond MTP depth 1.
+    // GLM-4.7 supports the derived shape up to 32 rows, the full GLM-5.3
+    // up to 16 (2026-09-13); Qwen is capped at 8 and uses scalar graphs
+    // beyond MTP depth 1.
     // Reject configurations whose depth-1 batch already exceeds the cap.
     const int graph_rows_per_request = mtp ? 1 + mtp_depth : 1;
     int decode_rows = std::max(dgpp::kDecodeRows, max_concurrency * graph_rows_per_request);
@@ -1204,8 +1302,8 @@ int main(int argc, char** argv) {
     DGPP_LOG_INFO("serve: decode rows {} ({} slot(s) x {} row(s) per request, floor {}, the {} family's cap {})",
                   decode_rows, max_concurrency, graph_rows_per_request, dgpp::kDecodeRows, family->name(),
                   family->decode_rows_cap());
-    if (std::string(family->name()) != "glm5" && kv_dtype != "bf16")
-      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent cache only; the {} caches stay bf16",
+    if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" && kv_dtype != "bf16")
+      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches only; the {} caches stay bf16",
                     kv_dtype, family->name());
     if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
       DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",
@@ -1297,6 +1395,7 @@ int main(int argc, char** argv) {
       try {
         check_memory_plan(rank, plan_at(pool_tokens), prefix_arena_bytes, engine_bytes,
                           block_tokens, plan_at);
+        dgpp::log_memory_ledger(std::format("rank {} after the plan check", rank));
       } catch (const std::runtime_error& e) {
         DGPP_LOG_ERROR("{}", e.what());
         return 1;
@@ -1398,10 +1497,13 @@ int main(int argc, char** argv) {
           };
           check_memory_plan(rank, plan_at(pool_tokens), prefix_arena_bytes, engine_bytes,
                             block_tokens, plan_at);
+        dgpp::log_memory_ledger(std::format("rank {} after the plan check", rank));
         }
         const auto t_model = std::chrono::steady_clock::now();
+        dgpp::log_memory_ledger(std::format("rank {} after the bus", rank));
         family->build_model(model_reducer, rank, world, /*fabric=*/true, forward_rows, pool_tokens,
                             max_concurrency, mtp, decode_rows);
+        dgpp::log_memory_ledger(std::format("rank {} after the model", rank));
         DGPP_LOG_INFO(
             "rank {}: model constructed in {:.1f}s (resident, {} request "
             "slots, {}-token pool in {}, {}-row forwards)",
@@ -1465,8 +1567,10 @@ int main(int argc, char** argv) {
             DGPP_LOG_INFO("rank {}: exited cleanly", rank);
             return 0;
           }
+          dgpp::log_memory_ledger(std::format("rank {} after the graph engine", rank));
           const auto t_warm = std::chrono::steady_clock::now();
           graph_engine->warm_captures(std::vector<int64_t>(4, 0));
+          dgpp::log_memory_ledger(std::format("rank {} after the warm capture", rank));
           DGPP_LOG_INFO(
               "rank {}: graph variants warm-captured in {:.2f}s",
               rank,

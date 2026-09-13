@@ -63,6 +63,17 @@ void argmax_rows_f32(const float* logits, int64_t* out_idx, float* out_val,
 // Embedding row gather: out[t,h] = table[tokens[t],h], bf16.
 void embed_gather_bf16(const void* table, const int64_t* tokens, void* out,
                        int num_tokens, int hidden, cudaStream_t stream);
+// The vocab-sharded form: `table` holds rows [vocab_begin, vocab_begin +
+// vocab_count) of the embedding; a token outside the slice writes a zero
+// row, so the ranks' outputs summed by one fold are the full rows (a row
+// plus zeros is exact in bf16).
+void embed_gather_sliced_bf16(const void* table, const int64_t* tokens, void* out,
+                              int num_tokens, int hidden, int64_t vocab_begin,
+                              int64_t vocab_count, cudaStream_t stream);
+// dst[t,:] = src[t,:] for num_tokens rows of `hidden` bf16 (either side may
+// be pinned host memory — the folds' staged buffers).
+void copy_rows_bf16(void* dst, const void* src, int num_tokens, int hidden,
+                    cudaStream_t stream);
 
 // Fills `n` bf16 elements ~N(0,stddev) deterministically from seed/index
 // hashing (no external RNG dependency). Used for gpt-doll init.

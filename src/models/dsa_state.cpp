@@ -16,9 +16,35 @@ size_t padded(size_t bytes) { return (bytes + kRegionAlign - 1) / kRegionAlign *
 }  // namespace
 
 void DsaStatePool::init(Arena& arena, const DsaConfig& cfg, int max_requests,
-                        int64_t max_token_slots) {
+                        int64_t max_token_slots, const std::vector<int>& index_ordinal) {
   if (initialized_) throw std::logic_error("dsa state pool is already initialized");
   DsaConfig::validate_config(cfg);
+  // The layer -> index-cache map: the identity, or the caller's table with
+  // every ordinal used once.
+  const int index_layers = cfg.index_layers();
+  if (index_ordinal.empty()) {
+    if (index_layers != cfg.num_dsa_layers)
+      throw std::invalid_argument(
+          "dsa state pool: a config with fewer index layers than DSA layers needs "
+          "the layer -> index ordinal table");
+    index_ordinal_.resize(size_t(cfg.num_dsa_layers));
+    for (int l = 0; l < cfg.num_dsa_layers; ++l) index_ordinal_[size_t(l)] = l;
+  } else {
+    if (int(index_ordinal.size()) != cfg.num_dsa_layers)
+      throw std::invalid_argument("dsa state pool: index ordinal table size");
+    std::vector<int> seen(size_t(index_layers), 0);
+    for (int o : index_ordinal) {
+      if (o < 0) continue;
+      if (o >= index_layers || seen[size_t(o)]++)
+        throw std::invalid_argument("dsa state pool: index ordinal table must use each "
+                                    "ordinal in [0, index_layers) once");
+    }
+    for (int o = 0; o < index_layers; ++o)
+      if (!seen[size_t(o)])
+        throw std::invalid_argument("dsa state pool: index ordinal table leaves an "
+                                    "index cache unowned");
+    index_ordinal_ = index_ordinal;
+  }
   if (max_requests <= 0)
     throw std::invalid_argument("dsa state pool: max_requests must be positive");
   if (max_token_slots <= 0)
@@ -40,6 +66,7 @@ void DsaStatePool::init(Arena& arena, const DsaConfig& cfg, int max_requests,
 
   const int layers = cfg.num_dsa_layers;
   const int64_t pools = max_pool_slots_;
+  const int ilayers = index_layers;
   // One region per array (layer-major inside each): the caches have no
   // snapshot/copy requirement in M3 (prefix attachment shares by reference,
   // DESIGN §8), so contiguity across regions buys nothing and separate
@@ -56,14 +83,14 @@ void DsaStatePool::init(Arena& arena, const DsaConfig& cfg, int max_requests,
         kRegionAlign));
   index_k_base_ = static_cast<uint8_t*>(
       arena.alloc_persistent(MemClass::DeviceHot,
-                             size_t(layers) * size_t(pools) *
+                             size_t(ilayers) * size_t(pools) *
                                  geo_.index_k_bytes_per_pool,
                              kRegionAlign));
   index_scale_base_ = static_cast<float*>(arena.alloc_persistent(
-      MemClass::DeviceHot, size_t(layers) * size_t(pools) * sizeof(float),
+      MemClass::DeviceHot, size_t(ilayers) * size_t(pools) * sizeof(float),
       kRegionAlign));
   tail_base_ = static_cast<uint8_t*>(arena.alloc_persistent(
-      MemClass::DeviceHot, size_t(layers) * size_t(max_requests_) *
+      MemClass::DeviceHot, size_t(ilayers) * size_t(max_requests_) *
                                geo_.tail_bytes_per_request,
       kRegionAlign));
   block_tables_ = static_cast<int32_t*>(arena.alloc_persistent(
@@ -110,23 +137,36 @@ float* DsaStatePool::latent_scale(int layer) {
   return latent_scale_base_ + size_t(layer) * size_t(max_token_slots_);
 }
 
-void* DsaStatePool::index_k(int layer) {
+int DsaStatePool::index_ordinal(int layer) const {
   if (layer < 0 || layer >= cfg_.num_dsa_layers)
     throw std::out_of_range("dsa state pool: layer " + std::to_string(layer));
-  return index_k_base_ + size_t(layer) * size_t(max_pool_slots_) *
+  return index_ordinal_of(layer);
+}
+
+namespace {
+int require_index_ordinal(const DsaStatePool& pool, int layer) {
+  const int o = pool.index_ordinal(layer);
+  if (o < 0)
+    throw std::out_of_range("dsa state pool: layer " + std::to_string(layer) +
+                            " owns no index cache (a shared-selection layer)");
+  return o;
+}
+}  // namespace
+
+void* DsaStatePool::index_k(int layer) {
+  const int o = require_index_ordinal(*this, layer);
+  return index_k_base_ + size_t(o) * size_t(max_pool_slots_) *
                              geo_.index_k_bytes_per_pool;
 }
 
 float* DsaStatePool::index_scale(int layer) {
-  if (layer < 0 || layer >= cfg_.num_dsa_layers)
-    throw std::out_of_range("dsa state pool: layer " + std::to_string(layer));
-  return index_scale_base_ + size_t(layer) * size_t(max_pool_slots_);
+  const int o = require_index_ordinal(*this, layer);
+  return index_scale_base_ + size_t(o) * size_t(max_pool_slots_);
 }
 
 void* DsaStatePool::tail(int layer) {
-  if (layer < 0 || layer >= cfg_.num_dsa_layers)
-    throw std::out_of_range("dsa state pool: layer " + std::to_string(layer));
-  return tail_base_ + size_t(layer) * size_t(max_requests_) *
+  const int o = require_index_ordinal(*this, layer);
+  return tail_base_ + size_t(o) * size_t(max_requests_) *
                           geo_.tail_bytes_per_request;
 }
 
@@ -260,11 +300,13 @@ void DsaStatePool::copy_block_contents(int32_t src, int32_t dst,
                                    bt * sizeof(float), cudaMemcpyDeviceToDevice,
                                    stream));
     }
-    uint8_t* k = index_k_base_ + size_t(layer) * size_t(max_pool_slots_) *
+  }
+  for (int o = 0; o < geo_.index_layers; ++o) {
+    uint8_t* k = index_k_base_ + size_t(o) * size_t(max_pool_slots_) *
                                      geo_.index_k_bytes_per_pool;
     DGPP_CUDA_OK(cudaMemcpyAsync(k + size_t(dst) * k_blk, k + size_t(src) * k_blk,
                                  k_blk, cudaMemcpyDeviceToDevice, stream));
-    float* sc = index_scale_base_ + size_t(layer) * size_t(max_pool_slots_);
+    float* sc = index_scale_base_ + size_t(o) * size_t(max_pool_slots_);
     DGPP_CUDA_OK(cudaMemcpyAsync(sc + size_t(dst) * pools, sc + size_t(src) * pools,
                                  pools * sizeof(float), cudaMemcpyDeviceToDevice,
                                  stream));
@@ -287,6 +329,7 @@ void DsaStatePool::reset_all(cudaStream_t stream) {
   if (!initialized_)
     throw std::logic_error("dsa state pool: not initialized");
   const size_t layers = size_t(cfg_.num_dsa_layers);
+  const size_t ilayers = size_t(geo_.index_layers);
   DGPP_CUDA_OK(cudaMemsetAsync(
       latent_base_, 0,
       layers * size_t(max_token_slots_) * geo_.latent_bytes_per_token, stream));
@@ -296,13 +339,13 @@ void DsaStatePool::reset_all(cudaStream_t stream) {
                                  stream));
   DGPP_CUDA_OK(cudaMemsetAsync(
       index_k_base_, 0,
-      layers * size_t(max_pool_slots_) * geo_.index_k_bytes_per_pool, stream));
+      ilayers * size_t(max_pool_slots_) * geo_.index_k_bytes_per_pool, stream));
   DGPP_CUDA_OK(cudaMemsetAsync(
-      index_scale_base_, 0, layers * size_t(max_pool_slots_) * sizeof(float),
+      index_scale_base_, 0, ilayers * size_t(max_pool_slots_) * sizeof(float),
       stream));
   DGPP_CUDA_OK(cudaMemsetAsync(
       tail_base_, 0,
-      layers * size_t(max_requests_) * geo_.tail_bytes_per_request, stream));
+      ilayers * size_t(max_requests_) * geo_.tail_bytes_per_request, stream));
 
   // Return every block to the free list and zero the whole table (rows AND
   // the unheld tail of each row, so a stale device read fails against a
@@ -328,10 +371,10 @@ void DsaStatePool::reset_request(int req, cudaStream_t stream) {
   // memset per layer, once per request open. The ring is the only cache a
   // fresh request can read before writing (the tail-seed read), so it is
   // the only one reset_request must zero.
-  for (int layer = 0; layer < cfg_.num_dsa_layers; ++layer) {
+  for (int o = 0; o < geo_.index_layers; ++o) {
     uint8_t* slot =
         tail_base_ +
-        size_t(layer) * size_t(max_requests_) * geo_.tail_bytes_per_request +
+        size_t(o) * size_t(max_requests_) * geo_.tail_bytes_per_request +
         size_t(req) * geo_.tail_bytes_per_request;
     DGPP_CUDA_OK(
         cudaMemsetAsync(slot, 0, geo_.tail_bytes_per_request, stream));
@@ -348,13 +391,14 @@ size_t DsaStatePool::cache_bytes(const DsaConfig& cfg, int max_requests,
   const int64_t pools =
       max_token_slots / cfg.block_tokens * g.pools_per_block;
   const size_t layers = size_t(cfg.num_dsa_layers);
+  const size_t ilayers = size_t(g.index_layers);
   return padded(layers * size_t(max_token_slots) * g.latent_bytes_per_token) +
          (g.latent_scale_bytes_per_token > 0
               ? padded(layers * size_t(max_token_slots) * g.latent_scale_bytes_per_token)
               : 0) +
-         padded(layers * size_t(pools) * g.index_k_bytes_per_pool) +
-         padded(layers * size_t(pools) * sizeof(float)) +
-         padded(layers * size_t(max_requests) * g.tail_bytes_per_request) +
+         padded(ilayers * size_t(pools) * g.index_k_bytes_per_pool) +
+         padded(ilayers * size_t(pools) * sizeof(float)) +
+         padded(ilayers * size_t(max_requests) * g.tail_bytes_per_request) +
          padded(size_t(max_requests) *
                     size_t(max_token_slots / cfg.block_tokens) *
                     sizeof(int32_t));

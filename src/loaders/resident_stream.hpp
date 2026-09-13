@@ -113,6 +113,17 @@ class ResidentLayerStream {
   static size_t resident_bytes(const Config& cfg, int rank = 0, int world = 1,
                                LoaderHeadSharding head = LoaderHeadSharding::Full,
                                bool with_mtp = false);
+  // The pinned staging mirror the load needs (the largest layer, the
+  // globals, the family's floor): a plan item, because it lives beside the
+  // resident weights until release_sources() frees it with the shard
+  // mappings. A model that materializes its stack eagerly releases before
+  // its caches exist; a lazily loading one keeps the mirror (releasing in
+  // the middle of a forward would block on the bus's persistent kernels —
+  // cudaFreeHost waits for the device — for a watchdog period).
+  static size_t staging_plan_bytes(const Config& cfg, int rank = 0, int world = 1,
+                                   LoaderHeadSharding head = LoaderHeadSharding::Full,
+                                   bool with_mtp = false);
+  bool staging_released() const { return staging_ == nullptr; }
   static int lm_vocab_count(const Config& cfg, int rank = 0, int world = 1,
                             LoaderHeadSharding head = LoaderHeadSharding::Full) {
     return Geometry::from_config(cfg, rank, world, head).lm_vocab_count;
@@ -283,6 +294,15 @@ size_t ResidentLayerStream<F>::resident_bytes(const Config& cfg, int rank, int w
   if (with_mtp)
     for (int l = main_layers; l < F::max_layer(cfg); ++l) total += layer_bytes(cfg, l, rank, world);
   return total;
+}
+
+template <class F>
+size_t ResidentLayerStream<F>::staging_plan_bytes(const Config& cfg, int rank, int world,
+                                                  LoaderHeadSharding head, bool with_mtp) {
+  const int layers = with_mtp ? F::max_layer(cfg) : F::main_layers(cfg);
+  size_t capacity = 0;
+  for (int l = 0; l < layers; ++l) capacity = std::max(capacity, layer_bytes(cfg, l, rank, world));
+  return std::max({capacity, F::globals_bytes(cfg, rank, world, head), F::min_staging_bytes()});
 }
 
 template <class F>
@@ -524,10 +544,19 @@ void ResidentLayerStream<F>::release_sources() {
     shard->close_mapping(/*drop_page_cache=*/true);
   }
   shards_.clear();
+  const size_t staging_freed = staging_bytes_;
+  if (staging_) {
+    DGPP_CUDA_OK(cudaFreeHost(staging_));
+    staging_ = nullptr;
+    staging_bytes_ = 0;
+    globals_bump_->stage = nullptr;
+  }
   DGPP_LOG_INFO("{}: rank {} resident load complete — released {} shard mappings ({:.1f} GiB) and "
-                "evicted their page cache; image: {} layers restored, {} captured",
+                "evicted their page cache, freed the {:.2f} GiB pinned staging mirror; image: {} layers "
+                "restored, {} captured",
                 F::who(), rank_, shard_count, static_cast<double>(mapped_bytes) / (1024.0 * 1024.0 * 1024.0),
-                image_restored_, image_captured_);
+                static_cast<double>(staging_freed) / (1024.0 * 1024.0 * 1024.0), image_restored_,
+                image_captured_);
 }
 
 namespace resident_stream_detail {

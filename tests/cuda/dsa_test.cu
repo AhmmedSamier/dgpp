@@ -34,6 +34,8 @@
 
 #include "kda_test_helpers.hpp"  // DevBuf, random_bf16_bits, compare helpers
 #include "dsa_near_tie_audit.hpp"  // near-tie certification
+#include "kernels/packq_gemv.hpp"   // the packed GEMV launcher (packed projections)
+#include "loaders/packq_quant.hpp"  // the host packed-int encoder (packed projections)
 
 namespace {
 
@@ -1294,6 +1296,28 @@ DGPP_TEST(dsa_select_decode_mtp_rows_and_short_context) {
     throw std::runtime_error("pos=0 decode select");
 }
 
+// Rows past the fused kernel's eight run as the launcher's row groups
+// (8 + 4 and 8 + 8, 2026-09-13: the decode batch's cap lifted to 16) —
+// each row bitwise the host mirror, as at eight and below.
+DGPP_TEST(dsa_select_decode_row_groups) {
+  for (const int rows : {12, 16}) {
+    std::vector<int64_t> positions;
+    for (int r = 0; r < rows; ++r) positions.push_back(40001 + 977 * r);
+    DecodeSelScenario sc;
+    sc.init(85 + rows, positions);
+    std::vector<int32_t> got, counts, want, want_counts;
+    sc.run(48, got, counts);
+    sc.expect(want, want_counts);
+    for (int r = 0; r < sc.rows; ++r) {
+      if (counts[size_t(r)] != want_counts[size_t(r)])
+        throw std::runtime_error("row groups count rows=" + std::to_string(rows) + " r=" + std::to_string(r));
+      if (std::memcmp(&got[size_t(r) * sc.g.max_selected], &want[size_t(r) * sc.g.max_selected],
+                      sc.g.max_selected * 4) != 0)
+        throw std::runtime_error("row groups tokens rows=" + std::to_string(rows) + " r=" + std::to_string(r));
+    }
+  }
+}
+
 // The selection must not depend on the grid: 7 blocks vs 48 blocks produce
 // identical rows (uneven stripes at grid=7 exercise the stripe bounds).
 DGPP_TEST(dsa_select_decode_grid_invariance) {
@@ -2038,6 +2062,27 @@ DsaConfig small_cfg(int num_dsa_layers = 1, int tp_size = 1) {
   return cfg;
 }
 
+// The full GLM-5.3's shape at the CI scale (plan D3/D4/D8): the same 4
+// heads and 32 x 128 indexer with a 64-wide decoupled RoPE beside nope 64,
+// per-token selection (kpool 1, topk 16 = select_k 16: rows past 15 are
+// sparse) and the relu'd indexer.
+DsaConfig full_cfg(int num_dsa_layers = 1, int tp_size = 1) {
+  DsaConfig cfg = small_cfg(num_dsa_layers, tp_size);
+  cfg.qk_rope_head_dim = 64;
+  cfg.index_kpool = 1;
+  cfg.index_topk = 16;
+  cfg.index_relu = 1;
+  return cfg;
+}
+
+// What a TestWeights carries beyond the bf16 forms.
+struct TestWeightOpts {
+  bool fp8 = false;      // q_a / kv_a / q_b / o_proj as e4m3 pairs (Flash's form)
+  int packed_bits = 0;   // 8 (or 4): the fused qkv_a, q_b and o_proj as packed-int triples
+  bool indexer = true;   // false: a selection-reusing view (no indexer tensors)
+};
+constexpr int64_t kTestRopePositions = 4096;
+
 // Random host weights + device uploads + both view structs (layer + oracle).
 struct TestWeights {
   HostWeights host;
@@ -2045,23 +2090,33 @@ struct TestWeights {
   std::vector<DevBuf> dev;
   std::vector<std::vector<uint16_t>> storage;  // keeps host bits alive
   std::vector<float> ape;
+  std::vector<uint16_t> rope_table;  // bf16 [positions][2][rope/2] (rope > 0)
 
   // fp8_projections: q_a / kv_a / q_b / o_proj as e4m3 payloads
   // with 128x128 block scales — the oracle (and `bridge_views`, the bf16
   // form of the same layer) get bf16(e4m3 x s), the bridge's rule;
   // `layer_views` carries the pairs for the scale-aware GEMM path.
+  // packed_bits: the same two-form arrangement with the packed-int
+  // triples (bf16(code x scale) for the oracle and the bridge).
   DsaLayerWeights bridge_views;
   std::vector<std::vector<uint8_t>> q_storage;
   std::vector<std::vector<float>> s_storage;
+  std::vector<std::vector<uint32_t>> p_storage;
 
-  TestWeights(const DsaConfig& cfg, uint64_t seed, bool fp8_projections = false) {
+  TestWeights(const DsaConfig& cfg, uint64_t seed, bool fp8_projections = false)
+      : TestWeights(cfg, seed, TestWeightOpts{fp8_projections, 0, true}) {}
+
+  TestWeights(const DsaConfig& cfg, uint64_t seed, TestWeightOpts opts) {
+    const bool fp8_projections = opts.fp8;
     const DsaGeometry g = DsaGeometry::from_config(cfg);
     const int heads = cfg.index_n_heads;
     const int dim = cfg.index_head_dim;
-    dev.reserve(40);
-    storage.reserve(20);
+    const int rope = cfg.qk_rope_head_dim;
+    dev.reserve(48);
+    storage.reserve(24);
     q_storage.reserve(4);
     s_storage.reserve(4);
+    p_storage.reserve(4);
     // Host bits live in `storage` (a reused local would dangle the views).
     // Returns both pointers: `host` for the reference oracle (CPU), `dev`
     // for the layer (GPU) — mixing them up segfaults spectacularly.
@@ -2080,24 +2135,73 @@ struct TestWeights {
       return Ptrs{t.data(), static_cast<const uint16_t*>(dev.back().p)};
     };
     Ptrs p;
-    p = up_bf16(wbits(seed ^ 0xA1, int64_t(heads) * dim * cfg.q_lora_rank));
-    host.wq_b = p.host;
-    layer_views.wq_b = p.dev;
-    p = up_bf16(wbits(seed ^ 0xB2, int64_t(dim) * cfg.hidden));
-    host.wk = p.host;
-    layer_views.wk = p.dev;
-    p = up_bf16(wbits(seed ^ 0xC3, int64_t(heads) * cfg.hidden));
-    host.wp = p.host;
-    layer_views.wp = p.dev;
-    p = up_bf16(wbits(seed ^ 0xD4, int64_t(dim) * cfg.hidden));
-    host.gate = p.host;
-    layer_views.gate = p.dev;
-    p = up_bf16(wbits(seed ^ 0xE5, dim));
-    host.k_norm_w = p.host;
-    layer_views.k_norm_w = p.dev;
-    p = up_bf16(wbits(seed ^ 0xF6, dim));
-    host.k_norm_b = p.host;
-    layer_views.k_norm_b = p.dev;
+    if (opts.indexer) {
+      p = up_bf16(wbits(seed ^ 0xA1, int64_t(heads) * dim * cfg.q_lora_rank));
+      host.wq_b = p.host;
+      layer_views.wq_b = p.dev;
+      p = up_bf16(wbits(seed ^ 0xB2, int64_t(dim) * cfg.hidden));
+      host.wk = p.host;
+      layer_views.wk = p.dev;
+      p = up_bf16(wbits(seed ^ 0xC3, int64_t(heads) * cfg.hidden));
+      host.wp = p.host;
+      layer_views.wp = p.dev;
+      if (cfg.index_kpool > 1) {
+        p = up_bf16(wbits(seed ^ 0xD4, int64_t(dim) * cfg.hidden));
+        host.gate = p.host;
+        layer_views.gate = p.dev;
+      }
+      p = up_bf16(wbits(seed ^ 0xE5, dim));
+      host.k_norm_w = p.host;
+      layer_views.k_norm_w = p.dev;
+      p = up_bf16(wbits(seed ^ 0xF6, dim));
+      host.k_norm_b = p.host;
+      layer_views.k_norm_b = p.dev;
+    }
+    // A packed-int [rows, cols] matrix: random codes under power-of-two
+    // group scales (2^-7 or 2^-6: |w| <= 1 as the bf16 forms'), so that
+    // code x scale is exactly a bf16 — the bridge / oracle weights (the
+    // returned bf16) ARE the kernels' exact dequant, and the packed layer
+    // differs from the bridge layer by summation order alone. (The
+    // encoder's own recipe, bf16(amax / 127.5) scales, is pinned by its
+    // unit test and the loader gates; here it would put the oracle a bf16
+    // rounding of every weight away from the kernels.)
+    const auto make_packed = [&](uint64_t sd, int64_t rows, int64_t cols,
+                                 GlmPackedMatrix* view) -> std::vector<uint16_t> {
+      const int bits = opts.packed_bits;
+      const int per = 32 / bits;
+      const uint32_t mask = (1u << bits) - 1u;
+      const int64_t words_per_row = cols * bits / 32, scales_per_row = cols / dgpp::kPackedGroup;
+      std::vector<uint32_t> words(size_t(rows * words_per_row), 0u);
+      std::vector<uint16_t> scales(size_t(rows * scales_per_row));
+      std::vector<uint16_t> deq(size_t(rows) * cols);
+      for (int64_t r = 0; r < rows; ++r) {
+        for (int64_t gi = 0; gi < scales_per_row; ++gi)
+          scales[size_t(r * scales_per_row + gi)] =
+              float_to_bf16_bits(hash32(sd ^ 0x5CA1E + uint64_t(r * scales_per_row + gi)) & 1u
+                                     ? 1.0f / 128.0f
+                                     : 1.0f / 64.0f);
+        for (int64_t c = 0; c < cols; ++c) {
+          const uint32_t u = hash32(sd + uint64_t(r * cols + c) * 31u) & mask;
+          words[size_t(r * words_per_row + c / per)] |= u << (bits * (c % per));
+        }
+        for (int64_t c = 0; c < cols; ++c)
+          deq[size_t(r * cols + c)] = float_to_bf16_bits(
+              dgpp::packq_decode(&words[size_t(r * words_per_row)], &scales[size_t(r * scales_per_row)],
+                                 cols, bits, 0, c));
+      }
+      p_storage.push_back(std::move(words));
+      dev.emplace_back(p_storage.back().size() * 4);
+      dev.back().upload(p_storage.back().data(), p_storage.back().size() * 4);
+      view->packed = static_cast<const uint32_t*>(dev.back().p);
+      storage.push_back(std::move(scales));
+      dev.emplace_back(storage.back().size() * 2);
+      dev.back().upload(storage.back().data(), storage.back().size() * 2);
+      view->scales = static_cast<const uint16_t*>(dev.back().p);
+      view->rows = rows;
+      view->cols = cols;
+      view->bits = bits;
+      return deq;
+    };
     // A quantized [rows, cols] matrix: random e4m3 (NaN codes remapped),
     // random block scales; returns its dequantized bf16 bits and uploads
     // the pair; the GlmQuantMatrix view points at the device pair.
@@ -2132,6 +2236,7 @@ struct TestWeights {
       view->cols = cols;
       return deq;
     };
+    const int64_t qkv_rows = int64_t(cfg.q_lora_rank + cfg.kv_lora_rank + rope);
     if (fp8_projections) {
       std::vector<uint16_t> qa = make_quant(seed ^ 0x179, cfg.q_lora_rank, cfg.hidden,
                                             &layer_views.q_a_q);
@@ -2142,9 +2247,13 @@ struct TestWeights {
       host.qkv_a = p.host;
       bridge_views.qkv_a = p.dev;
       layer_views.qkv_a = nullptr;
+    } else if (opts.packed_bits) {
+      p = up_bf16(make_packed(seed ^ 0x179, qkv_rows, cfg.hidden, &layer_views.qkv_a_p));
+      host.qkv_a = p.host;
+      bridge_views.qkv_a = p.dev;
+      layer_views.qkv_a = nullptr;
     } else {
-      p = up_bf16(wbits(seed ^ 0x179,
-                        int64_t(cfg.q_lora_rank + cfg.kv_lora_rank) * cfg.hidden));
+      p = up_bf16(wbits(seed ^ 0x179, qkv_rows * cfg.hidden));
       host.qkv_a = p.host;
       layer_views.qkv_a = p.dev;
     }
@@ -2157,6 +2266,12 @@ struct TestWeights {
     if (fp8_projections) {
       p = up_bf16(make_quant(seed ^ 0x4AC, g.local_q_rows, cfg.q_lora_rank,
                              &layer_views.q_b_q));
+      host.q_b = p.host;
+      bridge_views.q_b = p.dev;
+      layer_views.q_b = nullptr;
+    } else if (opts.packed_bits) {
+      p = up_bf16(make_packed(seed ^ 0x4AC, g.local_q_rows, cfg.q_lora_rank,
+                              &layer_views.q_b_p));
       host.q_b = p.host;
       bridge_views.q_b = p.dev;
       layer_views.q_b = nullptr;
@@ -2177,26 +2292,49 @@ struct TestWeights {
       host.o_proj = p.host;
       bridge_views.o_proj = p.dev;
       layer_views.o_proj = nullptr;
+    } else if (opts.packed_bits) {
+      p = up_bf16(make_packed(seed ^ 0x6CE, cfg.hidden, g.local_v_rows,
+                              &layer_views.o_proj_p));
+      host.o_proj = p.host;
+      bridge_views.o_proj = p.dev;
+      layer_views.o_proj = nullptr;
     } else {
       p = up_bf16(wbits(seed ^ 0x6CE, int64_t(cfg.hidden) * g.local_v_rows));
       host.o_proj = p.host;
       layer_views.o_proj = p.dev;
     }
-    ape.resize(size_t(cfg.index_kpool) * dim);
-    for (size_t i = 0; i < ape.size(); ++i)
-      ape[i] = random_f32(seed, int64_t(i)) * 0.2f - 0.1f;
-    dev.emplace_back(ape.size() * 4);
-    dev.back().upload(ape.data(), ape.size() * 4);
-    host.ape = ape.data();
-    layer_views.ape = static_cast<const float*>(dev.back().p);
-    if (fp8_projections) {
+    if (opts.indexer && cfg.index_kpool > 1) {
+      ape.resize(size_t(cfg.index_kpool) * dim);
+      for (size_t i = 0; i < ape.size(); ++i)
+        ape[i] = random_f32(seed, int64_t(i)) * 0.2f - 0.1f;
+      dev.emplace_back(ape.size() * 4);
+      dev.back().upload(ape.data(), ape.size() * 4);
+      host.ape = ape.data();
+      layer_views.ape = static_cast<const float*>(dev.back().p);
+    }
+    if (rope > 0) {
+      // The model's rotary table (theta 8e6, the checkpoint's), shared by
+      // the host oracle and the layer.
+      rope_table.resize(size_t(kTestRopePositions) * 2 * size_t(rope / 2));
+      dgpp::dsa_rope_table_host(8e6, rope, kTestRopePositions, rope_table.data());
+      dev.emplace_back(rope_table.size() * 2);
+      dev.back().upload(rope_table.data(), rope_table.size() * 2);
+      host.rope_table = rope_table.data();
+      host.rope_table_positions = kTestRopePositions;
+      layer_views.rope_table = dev.back().p;
+      layer_views.rope_table_positions = kTestRopePositions;
+    }
+    if (fp8_projections || opts.packed_bits) {
       // The bridge form: every other view shared, the three bf16 buffers
-      // holding the same dequantized values the pairs decode to.
+      // holding the same dequantized values the pairs / triples decode to.
       DsaLayerWeights b = layer_views;
       b.q_a_q = GlmQuantMatrix{};
       b.kv_a_q = GlmQuantMatrix{};
       b.q_b_q = GlmQuantMatrix{};
       b.o_proj_q = GlmQuantMatrix{};
+      b.qkv_a_p = GlmPackedMatrix{};
+      b.q_b_p = GlmPackedMatrix{};
+      b.o_proj_p = GlmPackedMatrix{};
       b.qkv_a = bridge_views.qkv_a;
       b.q_b = bridge_views.q_b;
       b.o_proj = bridge_views.o_proj;
@@ -2217,6 +2355,9 @@ struct LayerEnv {
            int max_requests, int64_t pool_tokens, cudaStream_t s,
            size_t dot_budget = 16ull << 20) {
     stream = s;
+    // DSA_TEST_DECODE_ROWS=n: the GEMM interface's decode lowering (the
+    // models' setting) for the layer's GEMMs — an experiment hook.
+    if (const char* dr = std::getenv("DSA_TEST_DECODE_ROWS")) gemm.set_decode_rows(std::atoi(dr));
     dgpp::Arena::Config ac;
     ac.persistent_hot =
         DsaStatePool::cache_bytes(cfg, max_requests, pool_tokens) +
@@ -2336,9 +2477,11 @@ void require_cache_matches(const DsaStatePool& pool, int layer, int req,
   // budget: the rows the two sides quantized differ by GEMM ulps, so an
   // element near a quantization boundary legitimately lands one code apart
   // (one e4m3 quantum is 2^-4..2^-3 of the value, one e2m1 quantum up to
-  // half of it).
+  // half of it). The rope tail (bf16 after the payload) is compared as
+  // part of the same row.
   const size_t row_bytes = g.latent_bytes_per_token;
   const size_t phys_rows = size_t(pool.max_token_slots());
+  const int lw = g.score_width;
   std::vector<uint8_t> got_raw(phys_rows * row_bytes);
   DGPP_CUDA_OK(cudaMemcpyAsync(got_raw.data(), pool.latent(layer), got_raw.size(),
                                cudaMemcpyDeviceToHost, s));
@@ -2347,14 +2490,18 @@ void require_cache_matches(const DsaStatePool& pool, int layer, int req,
     DGPP_CUDA_OK(cudaMemcpyAsync(got_row_scale.data(), pool.latent_scale(layer),
                                  got_row_scale.size() * 4, cudaMemcpyDeviceToHost, s));
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
-  std::vector<uint16_t> dev_logical(size_t(ref.num_tokens) * cfg.kv_lora_rank);
+  std::vector<uint16_t> dev_logical(size_t(ref.num_tokens) * size_t(lw));
   for (int64_t t = 0; t < ref.num_tokens; ++t) {
     const int64_t phys = int64_t(bt[size_t(t / cfg.block_tokens)]) *
                              cfg.block_tokens +
                          (t % cfg.block_tokens);
     dgpp::latent_dequantize_row_host(cfg.latent_format, &got_raw[size_t(phys) * row_bytes],
                                      got_row_scale[size_t(phys)], cfg.kv_lora_rank,
-                                     &dev_logical[size_t(t) * cfg.kv_lora_rank]);
+                                     &dev_logical[size_t(t) * size_t(lw)]);
+    if (g.rope_dim > 0)
+      std::memcpy(&dev_logical[size_t(t) * size_t(lw) + size_t(cfg.kv_lora_rank)],
+                  &got_raw[size_t(phys) * row_bytes + g.latent_payload_bytes],
+                  size_t(g.rope_dim) * 2);
   }
   const std::vector<uint16_t> ref_latent(
       ref.latent.begin(), ref.latent.begin() + int64_t(dev_logical.size()));
@@ -2449,7 +2596,8 @@ void capture_phase_inputs(DsaLayer& layer, const HostWeights& host_w,
   out.ref_q8.assign(size_t(rows) * heads * dim, uint8_t(0));
   out.ref_w.assign(size_t(rows) * heads, 0.0f);
   dsa_ref::indexer_query_inputs<float>(host_w, cfg, hidden_rows, int(rows),
-                                       out.ref_q8.data(), out.ref_w.data());
+                                       out.ref_q8.data(), out.ref_w.data(),
+                                       /*token_start=*/row0);
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
 }
 
@@ -2507,7 +2655,7 @@ RowAuditor make_near_tie_auditor(
         ph->ref_w.data() + size_t(phase_row) * heads, ref.index_k.data(),
         ref.index_scale.data(), visible, heads, dim, cfg.index_kpool, stats,
         ph->dots.empty() ? nullptr : ph->dots.data(), ph->dot_stride,
-        phase_row, g.max_selected);
+        phase_row, g.max_selected, cfg.index_relu != 0);
     acc->rows_flipped += stats.rows_flipped;
     acc->swaps_certified += stats.swaps_certified;
     acc->max_boundary_gap =
@@ -2530,6 +2678,8 @@ void require_output_matches(const DsaConfig& cfg, const DsaGeometry& g,
   const int ms = g.max_selected;
   int64_t flipped = 0, sparse = 0, certified = 0;
   double worst_kept = 0, worst_flipped = 0, worst_certified = 0;
+  int64_t worst_kept_row = -1;
+  double worst_kept_ref = 0;
   for (int64_t r = 0; r < rows; ++r) {
     const int32_t* gt = got_topk.data() + r * ms;
     const int32_t* wt = want_topk.data() + r * ms;
@@ -2551,7 +2701,11 @@ void require_output_matches(const DsaConfig& cfg, const DsaGeometry& g,
     }
     const double row_l2 = std::sqrt(d2 / std::max(w2, 1e-30));
     if (gp == wp) {
-      worst_kept = std::max(worst_kept, row_l2);
+      if (row_l2 > worst_kept) {
+        worst_kept = row_l2;
+        worst_kept_row = r;
+        worst_kept_ref = std::sqrt(w2 / cfg.hidden);
+      }
       continue;
     }
     ++flipped;
@@ -2591,7 +2745,10 @@ void require_output_matches(const DsaConfig& cfg, const DsaGeometry& g,
   if (worst_kept > kept_budget)
     throw std::runtime_error(what + ": kept-row drift " +
                              std::to_string(worst_kept) + " (budget " +
-                             std::to_string(kept_budget) + ")");
+                             std::to_string(kept_budget) + ") at row " +
+                             std::to_string(worst_kept_row) + " of " +
+                             std::to_string(rows) + " (reference rms " +
+                             std::to_string(worst_kept_ref) + ")");
   if (flipped > sparse / 4 + 1)
     throw std::runtime_error(what + ": " + std::to_string(flipped) + "/" +
                              std::to_string(sparse) +
@@ -3164,13 +3321,15 @@ DGPP_TEST(dsa_layer_decode_padding_row_is_zero_and_leaves_live_rows_bitwise) {
                   three.data() + size_t(cfg.hidden), size_t(cfg.hidden) * 2);
 }
 
-DGPP_TEST(dsa_layer_tp2_head_slice_matches_tp1) {
+// 8 MLA heads: tp1 sees all 8, tp2 rank 0 owns heads [0, 4). The indexer
+// is replicated, so both ranks select identical pools; attention output
+// heads are independent given the selection. Shared by the Flash and the
+// full-model geometries (a head's q_b rows are [nope | rope], so the head
+// block slice is the same rule).
+static void tp2_head_slice_case(const DsaConfig& base, uint64_t seed, const char* what) {
   cudaStream_t s = dgpp::kda_test::test_stream();
-  // 8 MLA heads: tp1 sees all 8, tp2 rank 0 owns heads [0, 4). The indexer
-  // is replicated, so both ranks select identical pools; attention output
-  // heads are independent given the selection.
-  const DsaConfig cfg1 = [] {
-    DsaConfig c = small_cfg();
+  const DsaConfig cfg1 = [&] {
+    DsaConfig c = base;
     c.num_heads = 8;
     return c;
   }();
@@ -3180,7 +3339,7 @@ DGPP_TEST(dsa_layer_tp2_head_slice_matches_tp1) {
   const DsaGeometry g2 = DsaGeometry::from_config(cfg2);
   const int T = 96;
 
-  TestWeights full(cfg1, 4500);
+  TestWeights full(cfg1, seed);
   // Rank-0 slice: q_b/kv_b rows are head blocks (contiguous prefix);
   // o_proj columns [0, g2.local_v_rows) of every row.
   DsaLayerWeights sliced_dev;
@@ -3217,6 +3376,8 @@ DGPP_TEST(dsa_layer_tp2_head_slice_matches_tp1) {
   sliced_dev.qkv_a = full.layer_views.qkv_a;
   sliced_dev.q_aln = full.layer_views.q_aln;
   sliced_dev.kv_aln = full.layer_views.kv_aln;
+  sliced_dev.rope_table = full.layer_views.rope_table;
+  sliced_dev.rope_table_positions = full.layer_views.rope_table_positions;
   DGPP_CUDA_OK(cudaStreamSynchronize(s));
 
   const auto run = [&](const DsaConfig& cfg, const DsaLayerWeights& w,
@@ -3232,7 +3393,7 @@ DGPP_TEST(dsa_layer_tp2_head_slice_matches_tp1) {
     if (!layer.prepare(T)) throw std::runtime_error("gemm plans");
     DevBuf din(size_t(T) * cfg.hidden * 2), dout(size_t(T) * cfg.hidden * 2);
     const std::vector<uint16_t> hidden =
-        random_bf16_bits(4501, int64_t(T) * cfg.hidden, -2, 1);
+        random_bf16_bits(seed + 1, int64_t(T) * cfg.hidden, -2, 1);
     din.upload(hidden.data(), hidden.size() * 2);
     layer.enqueue_prefill(din.p, pool, 0, 0, 0, T, dout.p, s);
     DGPP_CUDA_OK(cudaStreamSynchronize(s));
@@ -3252,7 +3413,11 @@ DGPP_TEST(dsa_layer_tp2_head_slice_matches_tp1) {
     std::memcpy(&slice1[size_t(t) * g2.local_v_rows],
                 &out1[size_t(t) * g1.local_v_rows], g2.local_v_rows * 2);
   const auto stats = kda_test::compare_bf16(out2, slice1, 8);
-  require_bf16("tp2 head slice", stats, 5e-3, 2e-3);
+  require_bf16(what, stats, 5e-3, 2e-3);
+}
+
+DGPP_TEST(dsa_layer_tp2_head_slice_matches_tp1) {
+  tp2_head_slice_case(small_cfg(), 4500, "tp2 head slice");
 }
 
 DGPP_TEST(dsa_layer_real_geometry_chunked_prefill_decode_smoke) {
@@ -3541,6 +3706,606 @@ DGPP_TEST(dsa_layer_quantized_cache_matches_reference) {
   DsaConfig fp4 = small_cfg();
   fp4.latent_format = LatentFormat::kFp4;
   chunked_prefill_decode_case(fp4, "layer chunked+decode on an fp4 cache", 0.02);
+}
+
+// ---------------------------------------------------------------------------
+// The full GLM-5.3's geometry (2026-09-12, docs/glm53_plan.md G4): the
+// 64-wide decoupled RoPE beside the latent (plan D3), per-token selection
+// with the relu'd indexer (D8), the shared-selection layers (D4), the
+// packed-int projections (D2), and the select networks at select_k 2048.
+// The Flash gates above run the same code with a zero-width tail.
+// ---------------------------------------------------------------------------
+
+// The interleaved RoPE kernel against the host row rotation, bitwise: in
+// place and out of place, strided heads, padding rows carried through, a
+// position past the table clamped to its last entry.
+DGPP_TEST(dsa_rope_interleave_matches_host_table) {
+  const int rope = 64, heads = 3, dim = 128, rows = 37;
+  const int64_t positions = 300;
+  std::vector<uint16_t> table(size_t(positions) * 2 * (rope / 2));
+  dgpp::dsa_rope_table_host(8e6, rope, positions, table.data());
+  // Sanity: position 0 rotates nothing (cos 1, sin 0), the first pair's
+  // angle at position 1 is one radian (inv_freq[0] = 1).
+  if (table[0] != float_to_bf16_bits(1.0f) || table[size_t(rope / 2)] != 0)
+    throw std::runtime_error("rope table position 0");
+  if (table[size_t(2 * (rope / 2))] != float_to_bf16_bits(std::cos(1.0f)))
+    throw std::runtime_error("rope table position 1 pair 0");
+  const std::vector<uint16_t> x = random_bf16_bits(7100, int64_t(rows) * heads * dim, -2, 1);
+  std::vector<int64_t> pos(static_cast<size_t>(rows));
+  for (int r = 0; r < rows; ++r)
+    pos[size_t(r)] = (r % 9 == 4) ? -1 : (r % 11 == 7) ? positions + 5 : int64_t(hash32(7101 + r) % positions);
+  // Host: rotate each head's first rope elements in place.
+  std::vector<uint16_t> want = x;
+  for (int r = 0; r < rows; ++r)
+    for (int h = 0; h < heads; ++h)
+      dsa_ref::rope_interleave_row(&want[(size_t(r) * heads + h) * dim], rope, pos[size_t(r)],
+                                   table.data(), positions);
+  DevBuf dx(x.size() * 2), dout(x.size() * 2), dpos(pos.size() * 8), dtab(table.size() * 2);
+  dx.upload(x.data(), x.size() * 2);
+  dout.upload(x.data(), x.size() * 2);  // the untouched elements must survive
+  dpos.upload(pos.data(), pos.size() * 8);
+  dtab.upload(table.data(), table.size() * 2);
+  // Out of place.
+  dgpp::dsa_rope_interleave(dx.p, int64_t(heads) * dim, dim, heads, rope,
+                            static_cast<const int64_t*>(dpos.p), dtab.p, positions, dout.p,
+                            int64_t(heads) * dim, dim, rows, 0);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  std::vector<uint16_t> got(x.size());
+  dout.download(got.data(), got.size() * 2);
+  require_bitwise("rope interleave (out of place)", want.data(), got.data(), got.size() * 2);
+  // In place.
+  dgpp::dsa_rope_interleave(dx.p, int64_t(heads) * dim, dim, heads, rope,
+                            static_cast<const int64_t*>(dpos.p), dtab.p, positions, dx.p,
+                            int64_t(heads) * dim, dim, rows, 0);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  dx.download(got.data(), got.size() * 2);
+  require_bitwise("rope interleave (in place)", want.data(), got.data(), got.size() * 2);
+  // The rotation moved something (a table of ones would pass trivially).
+  if (std::memcmp(got.data(), x.data(), got.size() * 2) == 0)
+    throw std::runtime_error("rope interleave rotated nothing");
+}
+
+// The geometry's byte formulas and the pool's index-cache ordinals: two DSA
+// layers, one index cache (the second attends with the first's selection).
+DGPP_TEST(dsa_state_pool_index_ordinals_and_full_geometry_bytes) {
+  cudaStream_t s = dgpp::kda_test::test_stream();
+  DsaConfig cfg = full_cfg(2);
+  cfg.num_index_layers = 1;
+  const DsaGeometry g = DsaGeometry::from_config(cfg);
+  if (g.rope_dim != 64 || g.score_width != cfg.kv_lora_rank + 64 || g.index_layers != 1 ||
+      g.select_k != 16 || g.max_selected != 16 || g.pools_per_block != cfg.block_tokens)
+    throw std::runtime_error("full geometry derived fields");
+  if (g.latent_bytes_per_token != size_t(cfg.kv_lora_rank) * 2 + 128 ||
+      g.latent_bytes_per_token_all != g.latent_bytes_per_token * 2 ||
+      g.index_bytes_per_token_all != g.index_bytes_per_token ||
+      g.tail_bytes_per_request_all != g.tail_bytes_per_request ||
+      g.tail_bytes_per_request != 2 * 1 * 128 * 2)
+    throw std::runtime_error("full geometry byte formulas");
+  const int64_t slots = 4 * cfg.block_tokens;
+  dgpp::Arena arena;
+  dgpp::Arena::Config ac;
+  ac.persistent_hot = DsaStatePool::cache_bytes(cfg, 2, slots);
+  arena.init(ac);
+  DsaStatePool pool;
+  bool threw = false;
+  try {
+    pool.init(arena, cfg, 2, slots);  // no table: the identity needs every layer indexed
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  if (!threw) throw std::runtime_error("pool accepted the identity map with one index cache");
+  pool.init(arena, cfg, 2, slots, std::vector<int>{0, -1});
+  if (!pool.owns_index(0) || pool.owns_index(1) || pool.index_ordinal(1) != -1)
+    throw std::runtime_error("index ordinals");
+  threw = false;
+  try {
+    (void)pool.index_k(1);
+  } catch (const std::out_of_range&) {
+    threw = true;
+  }
+  if (!threw) throw std::runtime_error("index_k of a shared layer must throw");
+  if (pool.latent(1) == pool.latent(0)) throw std::runtime_error("latent caches per layer");
+  // Accounting: one index cache and one tail ring region, two latent regions.
+  const size_t pools = size_t(4 * g.pools_per_block);
+  const auto round_to = [](size_t b) { return (b + 255) / 256 * 256; };
+  const size_t want = round_to(2 * size_t(slots) * g.latent_bytes_per_token) +
+                      round_to(pools * g.index_k_bytes_per_pool) + round_to(pools * 4) +
+                      round_to(2 * g.tail_bytes_per_request) + round_to(2 * 4 * sizeof(int32_t));
+  if (pool.cache_bytes() != want) throw std::runtime_error("cache_bytes with one index layer");
+  pool.reset_all(s);
+  pool.reset_request(1, s);
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+}
+
+// One full-geometry layer, prefill at the CI scale against the host oracle
+// (rope on both sides, kpool 1, the relu'd indexer), with the near-tie audit
+// and the cache (the rope tail included) compared.
+DGPP_TEST(dsa_layer_full_prefill_matches_reference) {
+  cudaStream_t s = dgpp::kda_test::test_stream();
+  const DsaConfig cfg = full_cfg();
+  const DsaGeometry g = DsaGeometry::from_config(cfg);
+  const int T = 96;  // rows past 15 select 16 of their p + 1 tokens
+  TestWeights tw(cfg, 7200);
+  LayerEnv env(cfg, T, T, 2, 4 * cfg.block_tokens, s);
+  DsaStatePool pool;
+  pool.init(env.arena, cfg, 2, 4 * cfg.block_tokens);
+  DsaLayer layer(env.gemm, tw.layer_views, cfg, T, T,
+                 env.arena.alloc_persistent(MemClass::DeviceHot,
+                                            DsaLayer::scratch_bytes(cfg, T, T), 256),
+                 DsaLayer::scratch_bytes(cfg, T, T), env.ws.p, env.ws.bytes);
+  if (!layer.prepare(T)) throw std::runtime_error("gemm plans unavailable");
+  const std::vector<uint16_t> hidden = random_bf16_bits(7201, int64_t(T) * cfg.hidden, -2, 1);
+  DevBuf din(hidden.size() * 2), dout(size_t(T) * cfg.hidden * 2);
+  din.upload(hidden.data(), hidden.size() * 2);
+  dsa_ref::HostState ref;
+  ref.reset(cfg, T);
+  std::vector<uint16_t> ref_out(size_t(T) * cfg.hidden);
+  std::vector<int32_t> ref_topk(size_t(T) * g.max_selected);
+  dsa_ref::layer_forward<float>(tw.host, cfg, hidden.data(), ref, 0, T, ref_out.data(),
+                                ref_topk.data());
+  layer.enqueue_prefill(din.p, pool, 0, 0, 0, T, dout.p, s);
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  PhaseInputs phase;
+  capture_phase_inputs(layer, tw.host, cfg, hidden.data(), 0, T, phase, s);
+  std::vector<uint16_t> got_out(size_t(T) * cfg.hidden);
+  dout.download(got_out.data(), got_out.size() * 2);
+  std::vector<int32_t> got_topk(size_t(T) * g.max_selected);
+  DGPP_CUDA_OK(cudaMemcpyAsync(got_topk.data(), layer.debug_topk(), got_topk.size() * 4,
+                               cudaMemcpyDeviceToHost, s));
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  // The selection is per token: every row's list is exactly min(p + 1, 16)
+  // ascending token ids with no tail.
+  for (int t = 0; t < T; ++t) {
+    const int n = std::min(t + 1, g.select_k);
+    for (int i = 0; i < g.max_selected; ++i) {
+      const int32_t v = got_topk[size_t(t) * g.max_selected + i];
+      if (i >= n ? v != -1 : (v < 0 || v > t || (i > 0 && v <= got_topk[size_t(t) * g.max_selected + i - 1])))
+        throw std::runtime_error("per-token selection shape at row " + std::to_string(t));
+    }
+  }
+  const std::vector<PhaseInputs> phases{std::move(phase)};
+  dsa_test::NearTieAudit audit_stats{};
+  const RowAuditor audit = make_near_tie_auditor(cfg, g, pool, 0, s, phases, ref, &audit_stats);
+  require_output_matches(cfg, g, got_out, ref_out, got_topk, ref_topk, "full layer prefill", audit);
+  print_near_tie_audit("full layer prefill", audit_stats);
+  require_cache_matches(pool, 0, 0, ref, s);
+}
+
+// Chunked prefill + a decode batch at the full geometry on every cache
+// format (the rope tail beside a bf16, fp8 or fp4 latent).
+DGPP_TEST(dsa_layer_full_chunked_prefill_and_decode_match_reference) {
+  chunked_prefill_decode_case(full_cfg(), "full layer chunked+decode");
+  DsaConfig fp8 = full_cfg();
+  fp8.latent_format = LatentFormat::kFp8;
+  chunked_prefill_decode_case(fp8, "full layer chunked+decode on an fp8 cache", 0.02);
+  DsaConfig fp4 = full_cfg();
+  fp4.latent_format = LatentFormat::kFp4;
+  chunked_prefill_decode_case(fp4, "full layer chunked+decode on an fp4 cache", 0.02);
+}
+
+// The packed-int projections (plan D2): the layer fed the int8 triples
+// through the packed GEMV core, against the host reference over
+// bf16(code x scale) — the gate the bridge form passes, run on both forms.
+DGPP_TEST(dsa_layer_full_packed_projections_match_reference) {
+  cudaStream_t s = dgpp::kda_test::test_stream();
+  const DsaConfig cfg = full_cfg();
+  const DsaGeometry g = DsaGeometry::from_config(cfg);
+  const int T = 96;
+  TestWeights tw(cfg, 7300, TestWeightOpts{false, 8, true});
+  if (!tw.layer_views.packed_int() || tw.bridge_views.packed_int())
+    throw std::runtime_error("packed test weights must carry both forms");
+  const std::vector<uint16_t> hidden = random_bf16_bits(7301, int64_t(T) * cfg.hidden, -2, 1);
+  // The packed GEMV over the test's triple against the host GEMM over the
+  // bridge (bf16(code x scale)): the weights differ by a bf16 rounding of
+  // each element, so this is a tolerance pin of the triple's layout.
+  {
+    const int n = cfg.q_lora_rank + cfg.kv_lora_rank + cfg.qk_rope_head_dim;
+    DevBuf din(hidden.size() * 2), dout(size_t(T) * n * 2);
+    din.upload(hidden.data(), hidden.size() * 2);
+    dgpp::launch_packq_gemv_bf16(static_cast<const uint16_t*>(din.p), size_t(cfg.hidden),
+                                 tw.layer_views.qkv_a_p, static_cast<uint16_t*>(dout.p), T, n,
+                                 cfg.hidden, s);
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    std::vector<uint16_t> got(size_t(T) * n), want(size_t(T) * n);
+    dout.download(got.data(), got.size() * 2);
+    dsa_ref::gemm_bf16<float>(hidden.data(), cfg.hidden, tw.host.qkv_a, want.data(), T, n,
+                              cfg.hidden);
+    require_bf16("packed qkv_a GEMV vs the bridge GEMM", compare_bf16(got, want, 8), 0.02, 0.01);
+  }
+  dsa_ref::HostState ref;
+  ref.reset(cfg, T);
+  std::vector<uint16_t> ref_out(size_t(T) * cfg.hidden);
+  std::vector<int32_t> ref_topk(size_t(T) * g.max_selected);
+  dsa_ref::layer_forward<float>(tw.host, cfg, hidden.data(), ref, 0, T, ref_out.data(),
+                                ref_topk.data());
+  for (const DsaLayerWeights* w : {&tw.layer_views, &tw.bridge_views}) {
+    const char* label = w->packed_int() ? "full layer prefill (packed projections)"
+                                        : "full layer prefill (bridge form)";
+    LayerEnv env(cfg, T, T, 2, 4 * cfg.block_tokens, s);
+    DsaStatePool pool;
+    pool.init(env.arena, cfg, 2, 4 * cfg.block_tokens);
+    DsaLayer layer(env.gemm, *w, cfg, T, T,
+                   env.arena.alloc_persistent(MemClass::DeviceHot,
+                                              DsaLayer::scratch_bytes(cfg, T, T), 256),
+                   DsaLayer::scratch_bytes(cfg, T, T), env.ws.p, env.ws.bytes);
+    if (!layer.prepare(T)) throw std::runtime_error("gemm plans unavailable");
+    DevBuf din(hidden.size() * 2), dout(size_t(T) * cfg.hidden * 2);
+    din.upload(hidden.data(), hidden.size() * 2);
+    layer.enqueue_prefill(din.p, pool, 0, 0, 0, T, dout.p, s);
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    PhaseInputs phase;
+    capture_phase_inputs(layer, tw.host, cfg, hidden.data(), 0, T, phase, s);
+    std::vector<uint16_t> got_out(size_t(T) * cfg.hidden);
+    dout.download(got_out.data(), got_out.size() * 2);
+    std::vector<int32_t> got_topk(size_t(T) * g.max_selected);
+    DGPP_CUDA_OK(cudaMemcpyAsync(got_topk.data(), layer.debug_topk(), got_topk.size() * 4,
+                                 cudaMemcpyDeviceToHost, s));
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    const std::vector<PhaseInputs> phases{std::move(phase)};
+    dsa_test::NearTieAudit audit_stats{};
+    const RowAuditor audit = make_near_tie_auditor(cfg, g, pool, 0, s, phases, ref, &audit_stats);
+    require_output_matches(cfg, g, got_out, ref_out, got_topk, ref_topk, label, audit);
+    print_near_tie_audit(label, audit_stats);
+    require_cache_matches(pool, 0, 0, ref, s);
+  }
+}
+
+// Cross-layer selection sharing (plan D4): layer 0 owns the index cache
+// and selects; layer 1 (a view without indexer tensors) attends its own
+// hidden rows with layer 0's selection, in prefill and in decode, against
+// the oracle handed the same selection. The reuse contract is enforced: a
+// mismatched call shape and a shared view on an indexed layer throw.
+DGPP_TEST(dsa_layer_full_shared_selection_matches_reference) {
+  cudaStream_t s = dgpp::kda_test::test_stream();
+  DsaConfig cfg = full_cfg(2);
+  cfg.num_index_layers = 1;
+  const DsaGeometry g = DsaGeometry::from_config(cfg);
+  const int T = 96, D = 4, total = T + D;
+  TestWeights tw0(cfg, 7400);
+  TestWeights tw1(cfg, 7450, TestWeightOpts{false, 0, false});
+  if (tw1.layer_views.owns_indexer() || tw1.host.owns_indexer())
+    throw std::runtime_error("the shared view must carry no indexer");
+  LayerEnv env(cfg, T, total, 2, 8 * cfg.block_tokens, s);
+  DsaStatePool pool;
+  pool.init(env.arena, cfg, 2, 8 * cfg.block_tokens, std::vector<int>{0, -1});
+  DsaLayer layer(env.gemm, tw0.layer_views, cfg, T, total,
+                 env.arena.alloc_persistent(MemClass::DeviceHot,
+                                            DsaLayer::scratch_bytes(cfg, T, total), 256),
+                 DsaLayer::scratch_bytes(cfg, T, total), env.ws.p, env.ws.bytes);
+  if (!layer.prepare(T) || !layer.prepare(D)) throw std::runtime_error("gemm plans");
+  const std::vector<uint16_t> h0 = random_bf16_bits(7401, int64_t(total) * cfg.hidden, -2, 1);
+  const std::vector<uint16_t> h1 = random_bf16_bits(7402, int64_t(total) * cfg.hidden, -2, 1);
+  DevBuf d0(h0.size() * 2), d1(h1.size() * 2), o0(size_t(total) * cfg.hidden * 2),
+      o1(size_t(total) * cfg.hidden * 2);
+  d0.upload(h0.data(), h0.size() * 2);
+  d1.upload(h1.data(), h1.size() * 2);
+
+  // Oracle: layer 0 selects, layer 1 reuses, prefill then D single decodes.
+  dsa_ref::HostState ref0, ref1;
+  ref0.reset(cfg, total);
+  ref1.reset(cfg, total);
+  std::vector<uint16_t> want0(size_t(total) * cfg.hidden), want1(want0.size());
+  std::vector<int32_t> topk0(size_t(total) * g.max_selected), topk1(topk0.size());
+  dsa_ref::layer_forward<float>(tw0.host, cfg, h0.data(), ref0, 0, T, want0.data(), topk0.data());
+  dsa_ref::layer_forward<float>(tw1.host, cfg, h1.data(), ref1, 0, T, want1.data(), topk1.data(),
+                                topk0.data());
+  for (int t = 0; t < D; ++t) {
+    const int64_t at = T + t;
+    dsa_ref::layer_forward<float>(tw0.host, cfg, h0.data() + size_t(at) * cfg.hidden, ref0, at, 1,
+                                  want0.data() + size_t(at) * cfg.hidden,
+                                  topk0.data() + size_t(at) * g.max_selected);
+    dsa_ref::layer_forward<float>(tw1.host, cfg, h1.data() + size_t(at) * cfg.hidden, ref1, at, 1,
+                                  want1.data() + size_t(at) * cfg.hidden,
+                                  topk1.data() + size_t(at) * g.max_selected,
+                                  topk0.data() + size_t(at) * g.max_selected);
+  }
+  if (std::memcmp(topk0.data(), topk1.data(), topk0.size() * 4) != 0)
+    throw std::runtime_error("the oracle's reused selection must be the handed one");
+
+  // Device: prefill layer 0 (indexed) then layer 1 (reusing), the same rows.
+  std::vector<int32_t> got_topk(size_t(total) * g.max_selected, -1);
+  std::vector<PhaseInputs> phases;
+  layer.enqueue_prefill(d0.p, pool, 0, 0, 0, T, o0.p, s);
+  DGPP_CUDA_OK(cudaMemcpyAsync(got_topk.data(), layer.debug_topk(), size_t(T) * g.max_selected * 4,
+                               cudaMemcpyDeviceToHost, s));
+  {
+    PhaseInputs p;
+    capture_phase_inputs(layer, tw0.host, cfg, h0.data(), 0, T, p, s);
+    phases.push_back(std::move(p));
+  }
+  layer.rebind(tw1.layer_views);
+  if (!layer.reuses_selection()) throw std::runtime_error("rebind to the shared view");
+  // The contract: the shared view on the indexed layer, or another shape.
+  bool threw = false;
+  try {
+    layer.enqueue_prefill(d1.p, pool, 0, 0, 0, T, o1.p, s);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  if (!threw) throw std::runtime_error("a shared view on an indexed layer must throw");
+  threw = false;
+  try {
+    layer.enqueue_prefill(d1.p, pool, 1, 0, 0, T - 1, o1.p, s);
+  } catch (const std::logic_error&) {
+    threw = true;
+  }
+  if (!threw) throw std::runtime_error("a reuse with another row count must throw");
+  layer.enqueue_prefill(d1.p, pool, 1, 0, 0, T, o1.p, s);
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  std::vector<int32_t> reused(size_t(T) * g.max_selected);
+  DGPP_CUDA_OK(cudaMemcpyAsync(reused.data(), layer.debug_topk(), reused.size() * 4,
+                               cudaMemcpyDeviceToHost, s));
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  require_bitwise("the shared layer left the selection untouched", got_topk.data(), reused.data(),
+                  reused.size() * 4);
+
+  // Decode: one batch of D rows through layer 0 then layer 1.
+  DevBuf dreq(D * 4), dpos(D * 8), dspans(8), dec0(size_t(D) * cfg.hidden * 2),
+      dec1(size_t(D) * cfg.hidden * 2);
+  std::vector<int32_t> req_ids(D, 0);
+  std::vector<int64_t> pos(D);
+  for (int t = 0; t < D; ++t) pos[size_t(t)] = T + t;
+  const std::vector<int32_t> spans = {0, D};
+  dreq.upload(req_ids.data(), D * 4);
+  dpos.upload(pos.data(), D * 8);
+  dspans.upload(spans.data(), 8);
+  if (!pool.ensure_request_blocks(0, total, s)) throw std::runtime_error("pool exhaustion");
+  layer.rebind(tw0.layer_views);
+  layer.enqueue_decode(static_cast<const uint16_t*>(d0.p) + size_t(T) * cfg.hidden, pool, 0,
+                       static_cast<const int32_t*>(dreq.p), static_cast<const int64_t*>(dpos.p),
+                       static_cast<const int32_t*>(dspans.p), 1, D, dec0.p, s);
+  DGPP_CUDA_OK(cudaMemcpyAsync(got_topk.data() + size_t(T) * g.max_selected, layer.debug_topk(),
+                               size_t(D) * g.max_selected * 4, cudaMemcpyDeviceToHost, s));
+  {
+    PhaseInputs p;
+    capture_phase_inputs(layer, tw0.host, cfg, h0.data() + size_t(T) * cfg.hidden, T, D, p, s);
+    phases.push_back(std::move(p));
+  }
+  layer.rebind(tw1.layer_views);
+  layer.enqueue_decode(static_cast<const uint16_t*>(d1.p) + size_t(T) * cfg.hidden, pool, 1,
+                       static_cast<const int32_t*>(dreq.p), static_cast<const int64_t*>(dpos.p),
+                       static_cast<const int32_t*>(dspans.p), 1, D, dec1.p, s);
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+
+  // Both layers against their oracles, selection-aware; layer 1's flips are
+  // layer 0's, certified by layer 0's inputs against layer 0's index cache.
+  // The kept-row budget is the quantized gates' (0.02): at these random
+  // weights the full geometry's two-part score (nope and rope) makes the
+  // 16-token softmax nearly one-hot, and the plain prefill gate at this
+  // seed measures the same 1.4e-2 on one row from GEMM-order noise alone.
+  const auto gather = [&](DevBuf& pre, DevBuf& dec) {
+    std::vector<uint16_t> out(size_t(total) * cfg.hidden);
+    pre.download(out.data(), size_t(T) * cfg.hidden * 2);
+    dec.download(out.data() + size_t(T) * cfg.hidden, size_t(D) * cfg.hidden * 2);
+    return out;
+  };
+  const std::vector<uint16_t> got0 = gather(o0, dec0), got1 = gather(o1, dec1);
+  dsa_test::NearTieAudit audit_stats{};
+  const RowAuditor audit = make_near_tie_auditor(cfg, g, pool, 0, s, phases, ref0, &audit_stats);
+  require_output_matches(cfg, g, got0, want0, got_topk, topk0, "shared selection: layer 0", audit,
+                         0.02);
+  require_output_matches(cfg, g, got1, want1, got_topk, topk1, "shared selection: layer 1", audit,
+                         0.02);
+  print_near_tie_audit("shared selection", audit_stats);
+  require_cache_matches(pool, 0, 0, ref0, s);
+  // Layer 1's latent cache (its own rows and rope keys) through its own view.
+  {
+    const std::vector<int32_t> bt = fetch_block_row(pool, 0, s);
+    const size_t row_bytes = g.latent_bytes_per_token;
+    std::vector<uint8_t> raw(size_t(pool.max_token_slots()) * row_bytes);
+    DGPP_CUDA_OK(cudaMemcpyAsync(raw.data(), pool.latent(1), raw.size(), cudaMemcpyDeviceToHost, s));
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    std::vector<uint16_t> dev_rows(size_t(total) * size_t(g.score_width));
+    for (int64_t t = 0; t < total; ++t) {
+      const int64_t phys = int64_t(bt[size_t(t / cfg.block_tokens)]) * cfg.block_tokens +
+                           (t % cfg.block_tokens);
+      std::memcpy(&dev_rows[size_t(t) * size_t(g.score_width)], &raw[size_t(phys) * row_bytes],
+                  size_t(g.score_width) * 2);
+    }
+    const std::vector<uint16_t> ref_rows(ref1.latent.begin(),
+                                         ref1.latent.begin() + int64_t(dev_rows.size()));
+    require_bf16("shared selection: layer 1 latent cache", compare_bf16(dev_rows, ref_rows, 8),
+                 5e-3, 1e-3);
+  }
+}
+
+DGPP_TEST(dsa_layer_full_tp2_head_slice_matches_tp1) {
+  tp2_head_slice_case(full_cfg(), 7500, "full tp2 head slice");
+}
+
+// The select networks at the full model's width: select_k 2048 over
+// per-token entries (kpool 1) with the relu'd logits, bitwise against the
+// host spec — the prefill select (a 4096-key tile) over materialized dots
+// and the fused decode select over an fp8 cache, then the expansion's
+// eight rounds (2048 ids sorted ascending, no tail).
+DGPP_TEST(dsa_select_kpool1_select2048_bitwise) {
+  const int select_k = 2048, kpool = 1, max_selected = 2048, heads = 32, dim = 128;
+  // Prefill: positions around the dense/sparse boundary and beyond.
+  std::vector<int64_t> cases = {0, 1, 7, 2046, 2047, 2048, 2049, 2100, 4095, 4096, 6000, 9001};
+  for (int i = 0; i < 12; ++i) cases.push_back(int64_t(2048 + hash32(7600 + i) % 7000));
+  for (size_t ci = 0; ci < cases.size(); ++ci) {
+    const int64_t pos = cases[ci];
+    const int64_t visible = pos + 1;
+    std::vector<float> dots(size_t(heads) * visible), w(heads), ks(static_cast<size_t>(visible));
+    for (size_t i = 0; i < dots.size(); ++i) dots[i] = random_f32(7610 + ci, int64_t(i));
+    for (int h = 0; h < heads; ++h) w[size_t(h)] = random_f32(7620 + ci, h);
+    for (size_t i = 0; i < ks.size(); ++i) ks[i] = std::fabs(random_f32(7630 + ci, int64_t(i)));
+    const std::vector<int64_t> posv = {pos};
+    DevBuf dd(dots.size() * 4), dw(w.size() * 4), dks(ks.size() * 4), dpos(8),
+        dtopk(size_t(max_selected) * 4), dcnt(4);
+    dd.upload(dots.data(), dots.size() * 4);
+    dw.upload(w.data(), w.size() * 4);
+    dks.upload(ks.data(), ks.size() * 4);
+    dpos.upload(posv.data(), 8);
+    dsa_select_prefill(static_cast<const float*>(dd.p), visible, static_cast<const float*>(dw.p),
+                       static_cast<const float*>(dks.p), static_cast<const int64_t*>(dpos.p), 1,
+                       visible, heads, select_k, kpool, max_selected,
+                       static_cast<int32_t*>(dtopk.p), static_cast<int32_t*>(dcnt.p), 0,
+                       /*relu=*/true);
+    std::vector<float> logits(static_cast<size_t>(visible));
+    for (int64_t j = 0; j < visible; ++j) {
+      float dot_h[32];
+      for (int h = 0; h < heads; ++h) dot_h[h] = std::max(dots[size_t(h) * visible + j], 0.0f);
+      logits[size_t(j)] = prefill_logit_mirror(dot_h, w.data(), ks[size_t(j)]);
+    }
+    std::vector<int32_t> want(size_t(max_selected), -1);
+    int n_tok = 0;
+    if (visible <= select_k) {
+      n_tok = dsa_ref::causal_all_tokens(pos, max_selected, want.data());
+    } else {
+      std::vector<int32_t> ids(select_k);
+      const int n_sel = dsa_ref::select_pools(logits.data(), visible, select_k, ids.data());
+      n_tok = dsa_ref::expand_append_tail(ids.data(), n_sel, pos, kpool, max_selected, want.data());
+    }
+    std::vector<int32_t> got(size_t(max_selected), -12345);
+    int32_t got_cnt = -1;
+    dtopk.download(got.data(), got.size() * 4);
+    dcnt.download(&got_cnt, 4);
+    if (got_cnt != n_tok || std::memcmp(got.data(), want.data(), got.size() * 4) != 0)
+      throw std::runtime_error("select2048 prefill mismatch at pos " + std::to_string(pos) +
+                               " (count " + std::to_string(got_cnt) + " want " +
+                               std::to_string(n_tok) + ")");
+  }
+  // Decode over an fp8 cache: 6000 visible entries, the same mirror.
+  {
+    const int n_pools = 6000;
+    const int64_t pos = n_pools - 1;
+    std::vector<uint16_t> qb = random_bf16_bits(7640, heads * dim, -2, 1);
+    std::vector<uint8_t> q8(size_t(heads) * dim);
+    std::vector<float> q_scale(heads);
+    dsa_ref::fwht128_quant_fp8<float>(qb.data(), heads, dim, q8.data(), q_scale.data());
+    std::vector<float> w(heads);
+    const float logit_scale = float(std::pow(128.0, -0.5) * std::pow(32.0, -0.5));
+    for (int h = 0; h < heads; ++h)
+      w[size_t(h)] = (random_f32(7641, h) * 0.01f * q_scale[size_t(h)]) * logit_scale;
+    std::vector<uint8_t> k8(size_t(n_pools) * dim);
+    std::vector<float> ks(n_pools);
+    for (size_t i = 0; i < k8.size(); ++i) {
+      k8[i] = uint8_t(hash32(7642 + i) & 0xFF);
+      if ((k8[i] & 0x7Fu) == 0x7Fu) k8[i] ^= 0x01u;
+    }
+    for (int j = 0; j < n_pools; ++j) ks[size_t(j)] = std::fabs(random_f32(7643, j)) * 0.05f;
+    DevBuf dq8(q8.size()), dks(ks.size() * 4), dw(w.size() * 4), dki(k8.size()), dpos(8), dri(4),
+        dbt(4), dtopk(size_t(max_selected) * 4), dcnt(4),
+        dws(dsa_select_workspace_bytes(1, n_pools)), dctr(8);
+    dq8.upload(q8.data(), q8.size());
+    dw.upload(w.data(), w.size() * 4);
+    dki.upload(k8.data(), k8.size());
+    dks.upload(ks.data(), ks.size() * 4);
+    const std::vector<int64_t> posv = {pos};
+    const std::vector<int32_t> req0 = {0}, bt0 = {0};
+    dpos.upload(posv.data(), 8);
+    dri.upload(req0.data(), 4);
+    dbt.upload(bt0.data(), 4);
+    const int32_t zero2[2] = {0, 0};
+    dctr.upload(zero2, 8);
+    dsa_select_decode(dq8.p, static_cast<const float*>(dw.p), static_cast<const int32_t*>(dri.p),
+                      static_cast<const int64_t*>(dpos.p), 1, static_cast<const int32_t*>(dbt.p), 1,
+                      dki.p, static_cast<const float*>(dks.p), n_pools, heads, dim, select_k, kpool,
+                      max_selected, static_cast<int32_t*>(dtopk.p), static_cast<int32_t*>(dcnt.p),
+                      dws.p, n_pools, static_cast<int32_t*>(dctr.p), 48, 0, /*relu=*/true);
+    std::vector<float> logits(n_pools);
+    for (int j = 0; j < n_pools; ++j) {
+      float contrib[32];
+      for (int h = 0; h < 32; ++h) {
+        float partial = 0.0f;
+        for (int d = 0; d < 128; ++d)
+          partial = partial + fp8_e4m3_bits_to_float(q8[size_t(h) * 128 + d]) *
+                                  fp8_e4m3_bits_to_float(k8[size_t(j) * 128 + d]);
+        contrib[h] = (w[size_t(h)] * ks[size_t(j)]) * std::max(partial, 0.0f);
+      }
+      logits[size_t(j)] = butterfly_sum_32(contrib);
+    }
+    std::vector<int32_t> ids(select_k);
+    const int n_sel = dsa_ref::select_pools(logits.data(), n_pools, select_k, ids.data());
+    std::vector<int32_t> want(size_t(max_selected), -1);
+    dsa_ref::expand_append_tail(ids.data(), n_sel, pos, kpool, max_selected, want.data());
+    std::vector<int32_t> got(size_t(max_selected), -12345);
+    int32_t got_cnt = -1;
+    dtopk.download(got.data(), got.size() * 4);
+    dcnt.download(&got_cnt, 4);
+    if (got_cnt != select_k) throw std::runtime_error("select2048 decode count");
+    if (std::memcmp(got.data(), want.data(), got.size() * 4) != 0) {
+      std::string detail;
+      for (int i = 0; i < max_selected; ++i)
+        if (got[size_t(i)] != want[size_t(i)] && detail.size() < 400)
+          detail += " [" + std::to_string(i) + "] " + std::to_string(got[size_t(i)]) + " vs " +
+                    std::to_string(want[size_t(i)]);
+      throw std::runtime_error("select2048 decode mismatch:" + detail);
+    }
+  }
+}
+
+// The full checkpoint's attention geometry (64 heads, q_lora 2048, kv 512
+// + rope 64, nope 192, v 256, select_k 2048 per token) at hidden 4096, no
+// host oracle: chunked prefill across the dense/sparse boundary and a
+// decode batch run clean on the 576-wide flash kernels, the split kernel's
+// rope window and the wide select networks; the decode repeat is bitwise.
+DGPP_TEST(dsa_layer_full_real_geometry_smoke) {
+  cudaStream_t s = dgpp::kda_test::test_stream();
+  DsaConfig cfg{};
+  cfg.hidden = 4096;
+  cfg.q_lora_rank = 2048;
+  cfg.qk_nope_head_dim = 192;
+  cfg.qk_rope_head_dim = 64;
+  cfg.index_kpool = 1;
+  cfg.index_relu = 1;
+  const DsaGeometry g = DsaGeometry::from_config(cfg);
+  if (g.select_k != 2048 || g.score_width != 576) throw std::runtime_error("full real geometry");
+  const int chunk = 2048;
+  const int tail_tokens = 2054;
+  const int decode_tokens = 4;
+  const int64_t cap = (tail_tokens + 8 + cfg.block_tokens - 1) / cfg.block_tokens * cfg.block_tokens;
+  TestWeights tw(cfg, 7700);
+  const size_t dot_budget = 32ull << 20;
+  LayerEnv env(cfg, chunk, tail_tokens + 8, 1, cap, s, dot_budget);
+  DsaStatePool pool;
+  pool.init(env.arena, cfg, 1, cap);
+  const size_t sb = DsaLayer::scratch_bytes(cfg, chunk, tail_tokens + 8, 8, 4, dot_budget);
+  DsaLayer layer(env.gemm, tw.layer_views, cfg, chunk, tail_tokens + 8,
+                 env.arena.alloc_persistent(MemClass::DeviceHot, sb, 256), sb, env.ws.p,
+                 env.ws.bytes, 8, 4, dot_budget);
+  if (!layer.prepare(chunk) || !layer.prepare(decode_tokens)) throw std::runtime_error("gemm plans");
+  const std::vector<uint16_t> hidden =
+      random_bf16_bits(7701, int64_t(tail_tokens + decode_tokens) * cfg.hidden, -2, 1);
+  DevBuf din(hidden.size() * 2), dchunk(size_t(chunk) * cfg.hidden * 2),
+      drest(size_t(tail_tokens - chunk) * cfg.hidden * 2),
+      ddout(size_t(decode_tokens) * cfg.hidden * 2);
+  din.upload(hidden.data(), hidden.size() * 2);
+  layer.enqueue_prefill(din.p, pool, 0, 0, 0, chunk, dchunk.p, s);
+  layer.enqueue_prefill(static_cast<const uint16_t*>(din.p) + size_t(chunk) * cfg.hidden, pool, 0,
+                        0, chunk, tail_tokens - chunk, drest.p, s);
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  // The second chunk's rows sit past the dense regime: 2048 selected, no tail.
+  std::vector<int32_t> cnt(size_t(tail_tokens - chunk));
+  DGPP_CUDA_OK(cudaMemcpyAsync(cnt.data(), layer.debug_counts(), cnt.size() * 4,
+                               cudaMemcpyDeviceToHost, s));
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+  for (int32_t c : cnt)
+    if (c != 2048) throw std::runtime_error("sparse row count " + std::to_string(c));
+  DevBuf dreq(decode_tokens * 4), dpos(decode_tokens * 8), dspans(8);
+  std::vector<int32_t> req_ids(decode_tokens, 0);
+  std::vector<int64_t> pos(decode_tokens);
+  for (int t = 0; t < decode_tokens; ++t) pos[size_t(t)] = tail_tokens + t;
+  const std::vector<int32_t> spans = {0, decode_tokens};
+  dreq.upload(req_ids.data(), req_ids.size() * 4);
+  dpos.upload(pos.data(), pos.size() * 8);
+  dspans.upload(spans.data(), spans.size() * 4);
+  const auto decode = [&](std::vector<uint16_t>& out) {
+    layer.enqueue_decode(static_cast<const uint16_t*>(din.p) + size_t(tail_tokens) * cfg.hidden,
+                         pool, 0, static_cast<const int32_t*>(dreq.p),
+                         static_cast<const int64_t*>(dpos.p), static_cast<const int32_t*>(dspans.p),
+                         1, decode_tokens, ddout.p, s);
+    DGPP_CUDA_OK(cudaStreamSynchronize(s));
+    out.resize(size_t(decode_tokens) * cfg.hidden);
+    ddout.download(out.data(), out.size() * 2);
+  };
+  std::vector<uint16_t> eager, again;
+  decode(eager);
+  decode(again);
+  require_bitwise("full real-geometry decode repeat", eager.data(), again.data(), eager.size() * 2);
+  for (uint16_t v : eager)
+    if ((v & 0x7F80u) == 0x7F80u) throw std::runtime_error("non-finite decode output");
 }
 
 }  // namespace layer

@@ -8,9 +8,29 @@
 #include <cstdint>
 #include <string>
 #include <utility>
+
+#include <cuda_runtime.h>
+
+#include "common/log.hpp"
+#include "common/process_memory.hpp"
 #include <vector>
 
 namespace dgpp {
+
+// The residual ledger (2026-09-13): one INFO line per boot phase with the
+// process's resident split and the device's free memory, so the memory the
+// plan does not itemize can be attributed to the phase that takes it
+// (dgpp_serve and the family constructors call it; grep "memory ledger").
+inline void log_memory_ledger(const std::string& phase) {
+  const ProcessMemory m = process_memory_snapshot();
+  size_t free_bytes = 0, total_bytes = 0;
+  if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) free_bytes = 0;
+  constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+  DGPP_LOG_INFO("memory ledger: {} — rss {:.2f} GiB (anon {:.2f}, shmem {:.2f}, file {:.2f}; locked {:.2f}); "
+                "device free {:.2f} GiB, node available {:.2f} GiB",
+                phase, m.rss / kGiB, m.anon / kGiB, m.shmem / kGiB, m.file / kGiB, m.locked / kGiB,
+                free_bytes / kGiB, m.node_available / kGiB);
+}
 
 struct MemoryPlan {
   struct Item {

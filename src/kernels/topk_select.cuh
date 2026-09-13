@@ -16,6 +16,10 @@
 namespace dgpp {
 
 constexpr int kSelectTile = 2048;  // keys per selection tile (>= 2*select_k)
+// The widest selection the expansion serves (eight rounds of a 256-thread
+// block): the full GLM-5.3's per-token select_k 2048 is the bound,
+// GLM-5.3-Flash's 512 a quarter of it.
+constexpr int kSelectMaxK = 2048;
 
 __device__ inline uint32_t sortable_f32_dev(float f) {
   uint32_t u = __float_as_uint(f);
@@ -72,9 +76,10 @@ __device__ inline void bitonic_merge_asc(uint32_t* hi, uint32_t* lo, int n) {
 // Streaming top-select_k over key_fn(pool) -> composite key, restricted to
 // pools [lo, hi). best_hi/best_lo (smem, [select_k]) must be pre-initialized
 // to kKeyMax; on return they hold the smallest select_k keys seen, sorted
-// ascending. tile arrays (smem) need kSelectTile entries each;
-// kSelectTile >= 2*select_k required.
-template <typename KeyFn>
+// ascending. tile arrays (smem) need TILE entries each; TILE >= 2*select_k
+// required (kSelectTile serves select_k <= 1024; a select_k of 2048 takes
+// a 4096-key tile — the same network, twice the smem).
+template <int TILE = kSelectTile, typename KeyFn>
 __device__ inline void select_topk_stream(KeyFn key_fn, int64_t lo, int64_t hi,
                                           uint32_t* best_hi, uint32_t* best_lo,
                                           uint32_t* tile_hi, uint32_t* tile_lo,
@@ -82,9 +87,9 @@ __device__ inline void select_topk_stream(KeyFn key_fn, int64_t lo, int64_t hi,
   const int nthreads = blockDim.x;
   const int warp = threadIdx.x >> 5;
   const int nwarp = nthreads >> 5;
-  for (int64_t base = lo; base < hi; base += kSelectTile) {
-    const int n = int(min((int64_t)kSelectTile, hi - base));
-    for (int p = threadIdx.x; p < kSelectTile; p += nthreads) {
+  for (int64_t base = lo; base < hi; base += TILE) {
+    const int n = int(min((int64_t)TILE, hi - base));
+    for (int p = threadIdx.x; p < TILE; p += nthreads) {
       tile_hi[p] = 0xFFFFFFFFu;  // kKeyMax padding; [0, n) overwritten below
       tile_lo[p] = 0xFFFFFFFFu;
     }
@@ -202,7 +207,7 @@ __device__ inline int expand_from_best(const uint32_t* best_hi,
   // expansion): per round, each warp's count and each lane's offset within
   // the warp come from one ballot; one thread scans the round x warp
   // counts.
-  constexpr int kRounds = 4;  // select_k <= 4 * blockDim (checked at launch)
+  constexpr int kRounds = 8;  // select_k <= 8 * blockDim (checked at launch)
   __shared__ int warp_cnt[kRounds * 8];
   __shared__ int warp_off[kRounds * 8];
   int32_t id[kRounds];
@@ -237,7 +242,8 @@ __device__ inline int expand_from_best(const uint32_t* best_hi,
   const int n_sel = *smem_count;
   if (n_sel <= nthreads) rank_sort_ids<1>(scratch, n_sel);
   else if (n_sel <= 2 * nthreads) rank_sort_ids<2>(scratch, n_sel);
-  else rank_sort_ids<4>(scratch, n_sel);
+  else if (n_sel <= 4 * nthreads) rank_sort_ids<4>(scratch, n_sel);
+  else rank_sort_ids<8>(scratch, n_sel);
   const int64_t seq_len = pos + 1;
   const int64_t tail_start = (seq_len / kpool) * kpool;
   const int tail_cnt = int(seq_len - tail_start);

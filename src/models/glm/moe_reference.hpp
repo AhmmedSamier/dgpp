@@ -33,6 +33,19 @@ struct GlmMoeHostWeights {
   std::vector<uint8_t> fp4_scales;
   std::vector<float> fp4_globals;  // [E * 3] (or [(E + 1) * 3] with shared_nvfp4)
   int fp4_matrices(int n_experts) const { return (n_experts + (shared_nvfp4 ? 1 : 0)) * 3; }
+  // The packed-int format (`packq` set, docs/glm53_plan.md D2): the routed
+  // experts at packq_bits_routed and (with shared_packq) the shared triple
+  // at packq_bits_shared, matrices in index order (expert e matrix m at
+  // e*3+m, the shared triple last) — I32 words [rows, cols*bits/32] and
+  // bf16 scales [rows, cols/64] per matrix; the fp8 vectors then hold the
+  // shared triple only when shared_packq is false.
+  bool packq = false;
+  bool shared_packq = false;
+  int packq_bits_routed = 4;
+  int packq_bits_shared = 8;
+  std::vector<uint32_t> packq_words;
+  std::vector<uint16_t> packq_scales;
+  int packq_matrices(int n_experts) const { return (n_experts + (shared_packq ? 1 : 0)) * 3; }
 };
 
 // Expert payload layout inside GlmMoeHostWeights: expert e's matrix m at
@@ -50,6 +63,14 @@ struct GlmFp4MatrixHost {
   float global_scale = 1.0f;
   int64_t rows = 0;
   int64_t cols = 0;
+};
+
+struct GlmPackedMatrixHost {
+  const uint32_t* packed = nullptr;  // [rows, cols*bits/32]
+  const uint16_t* scales = nullptr;  // bf16 [rows, cols/64]
+  int64_t rows = 0;
+  int64_t cols = 0;
+  int bits = 0;
 };
 
 struct GlmMoeRouterRef {
@@ -81,5 +102,9 @@ GlmQuantMatrixHost glm_moe_host_shared(const GlmMoeHostWeights& w,
 // shared_nvfp4); requires w.nvfp4.
 GlmFp4MatrixHost glm_moe_host_view_fp4(const GlmMoeHostWeights& w,
                                        const GlmMoeConfig& cfg, int index);
+// The packed-int expert view (index in [0, E*3), or [0, (E+1)*3) with
+// shared_packq); requires w.packq.
+GlmPackedMatrixHost glm_moe_host_view_packq(const GlmMoeHostWeights& w,
+                                            const GlmMoeConfig& cfg, int index);
 
 }  // namespace dgpp

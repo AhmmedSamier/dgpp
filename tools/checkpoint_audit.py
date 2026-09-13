@@ -8,7 +8,11 @@ The architecture is read from config.json's `architectures`: the GLM path
 writes docs/checkpoint_budget.md (unchanged since M0); the Qwen4Exp path
 (2026-09-09, the Qwen plan's Q0) writes docs/qwen38_checkpoint_budget.md with
 the placement formulas of docs/qwen38_flash_next_plan.md §2.1 evaluated at
-TP=2 and TP=4.
+TP=2 and TP=4; the GlmMoeDsa path (2026-09-12, the full GLM-5.3 plan's G0)
+writes docs/checkpoint_budget_glm53.md: the compressed-tensors pack-quantized
+triples (`weight_packed` I32, `weight_scale` BF16, `weight_shape` I64) are
+checked against the config's quantization groups and the placement formulas
+of docs/glm53_plan.md §2.1 / §2.2 are evaluated per rank.
 
 Usage:
   python3 tools/checkpoint_audit.py [model_dir] [--world N]
@@ -200,6 +204,8 @@ def audit(root: Path, world: int, bandwidth_gbps: float) -> tuple[dict, str]:
     arch = (config.get("architectures") or [""])[0]
     if arch.startswith("Qwen4Exp"):
         return audit_qwen(root, snapshot, config, world, bandwidth_gbps)
+    if arch.startswith("GlmMoeDsa"):
+        return audit_glm53(root, snapshot, config, world, bandwidth_gbps)
     text_config = config["text_config"]
     layer_types = text_config["layer_types"]
     if len(layer_types) != int(text_config["num_hidden_layers"]):
@@ -876,6 +882,438 @@ def audit_qwen(root: Path, snapshot: Path, config: dict, world: int,
         lines.extend(f"- `{name}` [{dtype}] {shape}" for name, dtype, shape in unmatched[:80])
     return summary, "\n".join(lines) + "\n"
 
+# ---------------------------------------------------------------------------
+# Full GLM-5.3 (GlmMoeDsaForCausalLM), the int4/int8 g64 pack-quantized
+# release, 2026-09-12 (docs/glm53_plan.md G0).
+
+GLM53_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
+GLM53_ATTENTION = ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj")
+GLM53_SHARDED_ATTENTION = ("q_b_proj", "kv_b_proj", "o_proj")   # by heads; q_a / kv_a replicated
+GLM53_PACKED_SUFFIXES = (".weight_packed", ".weight_scale", ".weight_shape")
+GLM53_GROUP = 64
+
+
+def classify_glm53(name: str, num_layers: int) -> str:
+    """Mutually exclusive storage class of a GlmMoeDsa tensor (main and draft
+    layers share the `model.layers.N.` prefix; N >= num_layers is the draft)."""
+    if name == "lm_head.weight":
+        return "lm_head"
+    if name == "model.embed_tokens.weight":
+        return "embed"
+    if name == "model.norm.weight":
+        return "norm"
+    match = GLM53_LAYER_RE.match(name)
+    if not match:
+        return "other"
+    layer = int(match.group(1))
+    tail = match.group(2)
+    if layer >= num_layers:
+        return "mtp"
+    if tail.startswith("self_attn.indexer."):
+        return "dsa_indexer"
+    if "layernorm" in tail:
+        return "norm"
+    if tail.startswith("self_attn."):
+        return "dsa_attention"
+    if ".experts." in tail:
+        return "routed_expert"
+    if ".shared_experts." in tail:
+        return "shared_expert"
+    if tail.startswith("mlp.gate."):
+        return "router"
+    if tail.startswith("mlp."):
+        return "dense_mlp"
+    return "other"
+
+
+def glm53_packed_base(name: str) -> str | None:
+    for suffix in GLM53_PACKED_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return None
+
+
+def glm53_quant_groups(config: dict) -> list[tuple[re.Pattern, int]]:
+    """(target regex, num_bits) per pack-quantized group of the config."""
+    quant = config.get("quantization_config") or {}
+    if quant.get("format") != "pack-quantized":
+        raise ValueError(f"quantization_config.format is {quant.get('format')!r}, not pack-quantized")
+    groups = []
+    for key, group in sorted((quant.get("config_groups") or {}).items()):
+        weights = group.get("weights") or {}
+        bits = int(weights.get("num_bits", 0))
+        if (weights.get("strategy") != "group" or int(weights.get("group_size", 0)) != GLM53_GROUP
+                or not weights.get("symmetric", False) or weights.get("type") != "int" or bits not in (4, 8)):
+            raise ValueError(f"quantization group {key} is not symmetric int4/int8 group-{GLM53_GROUP}")
+        for target in group.get("targets") or []:
+            if not target.startswith("re:"):
+                raise ValueError(f"quantization group {key}: non-regex target {target!r}")
+            groups.append((re.compile(target[3:]), bits))
+    if not groups:
+        raise ValueError("quantization_config has no pack-quantized groups")
+    return groups
+
+
+def validate_glm53_packed(tensors: dict[str, tuple[str, str, tuple[int, ...]]],
+                          groups: list[tuple[re.Pattern, int]]) -> dict[str, dict]:
+    """Check every packed triple and return {base: {bits, n, k, words, scales}}.
+
+    The contract (compressed-tensors 0.18 pack-quantized): `weight_packed`
+    I32 [N, K*bits/32], `weight_scale` BF16 [N, K/64], `weight_shape` I64
+    [2]; the width follows from the scale's K/64 and the packed row, and it
+    must be the bits of the config group whose target regex names the
+    module. No member without its two siblings; nothing packed outside the
+    groups' targets; every module a group targets is packed.
+    """
+    triples: dict[str, dict] = {}
+    seen_bases = set()
+    for name in tensors:
+        base = glm53_packed_base(name)
+        if base is not None:
+            seen_bases.add(base)
+    for base in sorted(seen_bases):
+        members = {suffix: tensors.get(base + suffix) for suffix in GLM53_PACKED_SUFFIXES}
+        if any(member is None for member in members.values()):
+            raise ValueError(f"packed triple incomplete: {base}")
+        _file, packed_dtype, packed_shape = members[".weight_packed"]
+        _file, scale_dtype, scale_shape = members[".weight_scale"]
+        _file, shape_dtype, shape_shape = members[".weight_shape"]
+        if packed_dtype != "I32" or len(packed_shape) != 2:
+            raise ValueError(f"{base}.weight_packed is {packed_dtype} {packed_shape}, not I32 [N, words]")
+        if scale_dtype != "BF16" or len(scale_shape) != 2 or scale_shape[0] != packed_shape[0]:
+            raise ValueError(f"{base}.weight_scale is {scale_dtype} {scale_shape}, not BF16 [N, K/{GLM53_GROUP}]")
+        if shape_dtype != "I64" or tuple(shape_shape) != (2,):
+            raise ValueError(f"{base}.weight_shape is {shape_dtype} {shape_shape}, not I64 [2]")
+        n = packed_shape[0]
+        k = scale_shape[1] * GLM53_GROUP
+        if (packed_shape[1] * 32) % k:
+            raise ValueError(f"{base}: {packed_shape[1]} words do not tile K={k}")
+        bits = packed_shape[1] * 32 // k
+        matched = [group_bits for pattern, group_bits in groups if pattern.search(base)]
+        if len(matched) != 1:
+            raise ValueError(f"{base}: {len(matched)} quantization groups target it")
+        if bits != matched[0]:
+            raise ValueError(f"{base}: packed at {bits} bits, the group says {matched[0]}")
+        if (base + ".weight") in tensors:
+            raise ValueError(f"{base}: both a packed triple and a plain .weight")
+        triples[base] = {"bits": bits, "n": n, "k": k,
+                         "words": numel(packed_shape) * 4, "scales": numel(scale_shape) * 2}
+    for name in tensors:
+        if name.endswith(".weight") and any(pattern.search(name[: -len(".weight")]) for pattern, _bits in groups):
+            raise ValueError(f"{name}: a quantization group targets it but it is stored plain")
+    return triples
+
+
+def audit_glm53(root: Path, snapshot: Path, config: dict, world: int,
+                bandwidth_gbps: float) -> tuple[dict, str]:
+    text_config = config.get("text_config") or config
+    num_layers = int(text_config["num_hidden_layers"])
+    hidden = int(text_config["hidden_size"])
+    experts = int(text_config["n_routed_experts"])
+    topk = int(text_config["num_experts_per_tok"])
+    dense_layers = int(text_config.get("first_k_dense_replace", 0))
+    draft_layers = int(text_config.get("num_nextn_predict_layers", 0))
+    indexer_types = list(text_config.get("indexer_types") or [])
+    if len(indexer_types) != num_layers:
+        raise ValueError("indexer_types does not match num_hidden_layers")
+    index_layers = [i for i, kind in enumerate(indexer_types) if kind == "full"]
+    groups = glm53_quant_groups(config)
+
+    index = json.loads(
+        (snapshot / "model.safetensors.index.json").read_text(encoding="utf-8")
+    )
+    weight_map = index["weight_map"]
+    files = sorted(set(weight_map.values()))
+    tensors: dict[str, tuple[str, str, tuple[int, ...]]] = {}
+    file_bytes: dict[str, int] = defaultdict(int)
+    for filename in files:
+        for name, meta in read_header(snapshot / filename).items():
+            if name == "__metadata__":
+                continue
+            if name in tensors:
+                raise ValueError(f"duplicate tensor in safetensors headers: {name}")
+            if weight_map.get(name) != filename:
+                raise ValueError(
+                    f"index maps {name} to {weight_map.get(name)!r}, not {filename!r}"
+                )
+            tensors[name] = (
+                filename,
+                meta["dtype"],
+                tuple(int(value) for value in meta.get("shape", [])),
+            )
+    if set(tensors) != set(weight_map):
+        missing = set(weight_map) - set(tensors)
+        extra = set(tensors) - set(weight_map)
+        raise ValueError(
+            f"index/header mismatch: missing={len(missing)} extra={len(extra)}"
+        )
+
+    dt_bytes = dict(DT_BYTES)
+    dt_bytes["I64"] = 8
+    dt_bytes["I32"] = 4
+    triples = validate_glm53_packed(tensors, groups)
+    class_bytes: dict[str, int] = defaultdict(int)
+    class_count: dict[str, int] = defaultdict(int)
+    dtype_bytes: dict[str, int] = defaultdict(int)
+    unmatched: list[tuple[str, str, tuple[int, ...]]] = []
+    inventory: dict[str, dict] = {}
+    total = 0
+    for name, (filename, dtype, shape) in sorted(tensors.items()):
+        if dtype not in dt_bytes:
+            raise ValueError(f"unsupported dtype {dtype} for {name}")
+        size = numel(shape) * dt_bytes[dtype]
+        tensor_class = classify_glm53(name, num_layers)
+        class_bytes[tensor_class] += size
+        class_count[tensor_class] += 1
+        dtype_bytes[dtype] += size
+        file_bytes[filename] += size
+        total += size
+        base = glm53_packed_base(name)
+        inventory[name] = {
+            "file": filename,
+            "dtype": dtype,
+            "shape": list(shape),
+            "class": tensor_class,
+            "nbytes": size,
+            "bits": triples[base]["bits"] if base in triples else 0,
+        }
+        if tensor_class == "other":
+            unmatched.append((name, dtype, shape))
+
+    # The census the plan's §1.5 states: 3 x 256 int4 experts and 5 + 3
+    # int8 modules per packed layer, nothing packed on the dense layers, the
+    # indexers, the routers or the draft.
+    packed_layers = sorted({int(GLM53_LAYER_RE.match(base).group(1)) for base in triples})
+    bits_count: dict[int, int] = defaultdict(int)
+    packed_by_class: dict[str, int] = defaultdict(int)
+    for base, info in triples.items():
+        bits_count[info["bits"]] += 1
+        packed_by_class[classify_glm53(base + ".weight_packed", num_layers)] += 1
+    expected_packed = list(range(dense_layers, num_layers))
+    if packed_layers != expected_packed:
+        raise ValueError(f"packed layers {packed_layers[:3]}..{packed_layers[-3:]} != [{dense_layers}, {num_layers})")
+    moe_layers = num_layers - dense_layers
+    if packed_by_class.get("routed_expert", 0) != moe_layers * experts * 3:
+        raise ValueError(f"{packed_by_class.get('routed_expert', 0)} packed expert matrices; expected {moe_layers * experts * 3}")
+    if packed_by_class.get("dsa_attention", 0) != moe_layers * len(GLM53_ATTENTION):
+        raise ValueError(f"{packed_by_class.get('dsa_attention', 0)} packed attention matrices; expected {moe_layers * 5}")
+    if packed_by_class.get("shared_expert", 0) != moe_layers * 3:
+        raise ValueError(f"{packed_by_class.get('shared_expert', 0)} packed shared-expert matrices; expected {moe_layers * 3}")
+    if set(packed_by_class) - {"routed_expert", "dsa_attention", "shared_expert"}:
+        raise ValueError(f"packed tensors outside the expected classes: {sorted(packed_by_class)}")
+    expert_bits = {info["bits"] for base, info in triples.items() if ".mlp.experts." in base}
+    other_bits = {info["bits"] for base, info in triples.items() if ".mlp.experts." not in base}
+    if expert_bits != {4} or other_bits != {8}:
+        raise ValueError(f"expert widths {sorted(expert_bits)}, attention/shared widths {sorted(other_bits)}")
+
+    # ---- placement (docs/glm53_plan.md §2.1, the loader's rules) ---------
+    # Sharded by W: routed experts (intermediate slices), shared experts,
+    # q_b / kv_b / o_proj (heads), the dense MLP, the lm head (vocab).
+    # Replicated: q_a, kv_a, the indexers, routers, norms, the embedding, the
+    # draft's eh_proj. kv_b is held BF16 (the absorbed-attention bridge);
+    # the draft's BF16 experts are requantized at load to the packed
+    # layers' widths (D5: int4 g64 routed, int8 g64 shared).
+    def packed_weight_bytes(numel_: int, bits: int) -> float:
+        return numel_ * (bits / 8 + 2 / GLM53_GROUP)
+
+    def rank_terms(w: int) -> dict[str, float]:
+        out: dict[str, float] = defaultdict(float)
+        for name, meta in inventory.items():
+            cls = meta["class"]
+            size = meta["nbytes"]
+            match = GLM53_LAYER_RE.match(name)
+            tail = match.group(2) if match else ""
+            base = glm53_packed_base(name)
+            if base is not None and name.endswith(".weight_shape"):
+                continue
+            if cls == "routed_expert":
+                out["routed_expert"] += size / w
+            elif cls == "shared_expert":
+                out["shared_expert"] += size / w
+            elif cls == "dsa_attention":
+                module = tail.split(".")[1]
+                if module == "kv_b_proj":
+                    if base is not None:
+                        if name.endswith(".weight_packed"):
+                            out["attention_sharded"] += triples[base]["n"] * triples[base]["k"] * 2 / w
+                    else:
+                        out["attention_sharded"] += size / w
+                elif module in GLM53_SHARDED_ATTENTION:
+                    out["attention_sharded"] += size / w
+                else:
+                    out["attention_replicated"] += size
+            elif cls == "dense_mlp":
+                out["dense_mlp"] += size / w
+            elif cls == "lm_head":
+                out["lm_head"] += size / w
+            elif cls == "mtp":
+                if tail.startswith("mlp.experts."):
+                    out["draft"] += packed_weight_bytes(numel(meta["shape"]), 4) / w
+                elif tail.startswith("mlp.shared_experts."):
+                    out["draft"] += packed_weight_bytes(numel(meta["shape"]), 8) / w
+                elif tail.startswith("self_attn.") and "indexer" not in tail and "layernorm" not in tail \
+                        and tail.split(".")[1] in GLM53_SHARDED_ATTENTION:
+                    out["draft"] += size / w
+                else:
+                    out["draft"] += size
+            else:  # dsa_indexer, router, norm, embed, other: replicated
+                out[cls] += size
+        out["total"] = sum(out.values())
+        return dict(out)
+
+    def draft_expert_bytes(w: int) -> float:
+        return sum(packed_weight_bytes(numel(meta["shape"]), 4) / w
+                   for name, meta in inventory.items()
+                   if meta["class"] == "mtp" and GLM53_LAYER_RE.match(name).group(2).startswith("mlp.experts."))
+
+    def traffic_terms(w: int) -> dict[str, float]:
+        """Per token per rank at batch 1: the resident set minus the experts not
+        routed to (top-k of E) and minus the embedding (one row)."""
+        terms = dict(rank_terms(w))
+        terms["routed_expert"] *= topk / experts
+        terms["draft"] -= draft_expert_bytes(w) * (1 - topk / experts)
+        terms["embed"] = 0.0
+        terms["total"] = sum(v for k, v in terms.items() if k != "total")
+        return terms
+
+    worlds = sorted({2, 4, world})
+    resident = {w: rank_terms(w) for w in worlds}
+    traffic = {w: traffic_terms(w) for w in worlds}
+
+    summary = {
+        "arch": "glm_moe_dsa",
+        "model": model_label(root, snapshot),
+        "files": len(files),
+        "tensors": len(tensors),
+        "total_bytes": total,
+        "class_bytes": dict(class_bytes),
+        "class_count": dict(class_count),
+        "dtype_bytes": dict(dtype_bytes),
+        "packed_triples": {str(bits): count for bits, count in sorted(bits_count.items())},
+        "packed_layers": [dense_layers, num_layers],
+        "index_layers": index_layers,
+        "resident_rank_bytes": {str(w): resident[w] for w in worlds},
+        "traffic_rank_bytes": {str(w): traffic[w] for w in worlds},
+        "world": world,
+        "bandwidth_gbps": bandwidth_gbps,
+        "unmatched": len(unmatched),
+        "inventory": inventory,
+    }
+
+    def ms(nbytes: float) -> float:
+        return nbytes / (bandwidth_gbps * 1e9) * 1000
+
+    layer_files = sorted(size for name, size in file_bytes.items() if name.startswith("layer-"))
+    other_files = [(name, size) for name, size in sorted(file_bytes.items()) if not name.startswith("layer-")]
+    lines = [
+        "# GLM-5.3 (int4/int8 g64) Checkpoint Budget Report",
+        "",
+        f"- Model revision: `{summary['model']}`",
+        f"- Files: {len(files)} shards; tensors: {len(tensors):,}",
+        f"- Total weights: **{total / 1e9:.2f} GB ({total / 2**30:.2f} GiB)**",
+        "- Generated by `tools/checkpoint_audit.py`; no tensor payloads were read.",
+        f"- Layers: {num_layers} ({dense_layers} dense, {moe_layers} MoE) + {draft_layers} draft; "
+        f"experts {experts} top-{topk}; hidden {hidden}; {len(index_layers)} indexers "
+        f"(layers {', '.join(str(i) for i in index_layers[:4])}, …, {index_layers[-1]}).",
+        f"- Packed triples: {bits_count.get(4, 0):,} int4 (the routed experts) and {bits_count.get(8, 0):,} int8 "
+        f"(attention and shared experts) on layers [{dense_layers}, {num_layers}); every triple checked against "
+        "the config's quantization groups (I32 words, BF16 group-64 scales, I64 shapes).",
+        "",
+        "## Storage inventory",
+        "",
+        "| class | tensors | GB | share |",
+        "|---|---:|---:|---:|",
+    ]
+    for name, size in sorted(class_bytes.items(), key=lambda item: -item[1]):
+        lines.append(
+            f"| {name} | {class_count[name]:,} | {size / 1e9:.3f} | "
+            f"{100 * size / total:.2f}% |"
+        )
+    lines.extend(["", "## Storage by dtype", "", "| dtype | GB |", "|---|---:|"])
+    for dtype, size in sorted(dtype_bytes.items(), key=lambda item: -item[1]):
+        lines.append(f"| {dtype} | {size / 1e9:.3f} |")
+    lines.extend([
+        "",
+        "## Shards",
+        "",
+        f"- {len(layer_files)} per-layer shards from {layer_files[0] / 1e9:.2f} to {layer_files[-1] / 1e9:.2f} GB "
+        f"(median {layer_files[len(layer_files) // 2] / 1e9:.2f} GB)." if layer_files else "- no per-layer shards",
+    ])
+    for name, size in other_files:
+        lines.append(f"- `{name}`: {size / 1e9:.2f} GB.")
+    lines.extend([
+        "",
+        "## Resident bytes per rank",
+        "",
+        "Placement follows docs/glm53_plan.md §2.1 and the loader: the routed and "
+        "shared experts, `q_b` / `kv_b` / `o_proj`, the dense MLP and the lm head "
+        "divide by W; `q_a` / `kv_a`, the indexers, routers, norms, the embedding "
+        "and the draft's `eh_proj` are replicated; `kv_b` is held BF16 (the "
+        "absorbed-attention bridge); the draft's BF16 experts are requantized at "
+        "load to int4 g64 (routed) and int8 g64 (shared). The `weight_shape` "
+        "tensors are read and dropped.",
+        "",
+        "| class | " + " | ".join(f"TP={w} GiB" for w in worlds) + " |",
+        "|---|" + "---:|" * len(worlds),
+    ])
+    keys = ("routed_expert", "attention_sharded", "attention_replicated", "shared_expert",
+            "dense_mlp", "dsa_indexer", "router", "norm", "embed", "lm_head", "draft", "other")
+    for key in keys:
+        if any(resident[w].get(key, 0) for w in worlds):
+            lines.append(f"| {key} | " + " | ".join(f"{resident[w].get(key, 0) / 2**30:.2f}" for w in worlds) + " |")
+    lines.append("| **weights** | " + " | ".join(f"**{resident[w]['total'] / 2**30:.2f}**" for w in worlds) + " |")
+    lines.append("| without the draft | " + " | ".join(f"{(resident[w]['total'] - resident[w].get('draft', 0)) / 2**30:.2f}" for w in worlds) + " |")
+    lines.extend([
+        "",
+        "The CUDA context, the DSA pool (the memory plan measured 91.8 KiB per "
+        "context token at bf16 and 52.6 KiB at fp8 on 2026-09-12), the prefix "
+        "cache and the bus staging come on top; `dgpp-serve --memory-plan` is the "
+        "authority.",
+        "",
+        "## Decode traffic model (batch size 1)",
+        "",
+        "Per token per rank: the resident set minus the experts a token does not "
+        f"route to (top-{topk} of {experts}, in the main and the draft layer) and "
+        "minus the embedding (one row).",
+        "",
+        "| class | " + " | ".join(f"TP={w} MB/token" for w in worlds) + " |",
+        "|---|" + "---:|" * len(worlds),
+    ])
+    for key in keys:
+        if any(traffic[w].get(key, 0) for w in worlds):
+            lines.append(f"| {key} | " + " | ".join(f"{traffic[w].get(key, 0) / 1e6:,.1f}" for w in worlds) + " |")
+    lines.append("| **total** | " + " | ".join(f"**{traffic[w]['total'] / 1e6:,.1f}**" for w in worlds) + " |")
+    lines.append(
+        f"| floor at {bandwidth_gbps:.0f} GB/s | "
+        + " | ".join(f"**{ms(traffic[w]['total']):.1f} ms**" for w in worlds) + " |"
+    )
+    lines.append(
+        "| replicated share | "
+        + " | ".join(
+            f"{100 * (traffic[w].get('attention_replicated', 0) + traffic[w].get('dsa_indexer', 0) + traffic[w].get('router', 0)) / traffic[w]['total']:.0f}%"
+            for w in worlds) + " |"
+    )
+    lines.extend([
+        "",
+        "This is a weight-bandwidth floor: the collectives (two folds per layer, "
+        "the draft and the head), the DSA index scan at long context, the cache "
+        "reads and the kernels add to it.",
+        "",
+        "## Reconciliation and exclusions",
+        "",
+        f"- Unmatched tensors: **{len(unmatched)}**.",
+        f"- Packed contract: **{len(triples):,}** triples, each `weight_packed` I32 [N, K·bits/32] with a "
+        f"BF16 `weight_scale` [N, K/{GLM53_GROUP}] and an I64 `weight_shape` [2]; the width of every triple "
+        "is the width of the one quantization group that targets it; nothing a group targets is stored plain.",
+        f"- Packed layers: [{dense_layers}, {num_layers}); the dense layers, the indexers, the routers, the norms, "
+        "the embedding, the lm head and the draft layer are BF16 (the router bias F32).",
+    ])
+    if unmatched:
+        lines.extend(["", f"## First {min(80, len(unmatched))} unmatched names", ""])
+        lines.extend(f"- `{name}` [{dtype}] {shape}" for name, dtype, shape in unmatched[:80])
+    return summary, "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
@@ -889,12 +1327,18 @@ def main(argv: list[str] | None = None) -> int:
         docs_dir = REPO_ROOT / "docs"
         artifacts_dir.mkdir(exist_ok=True)
         docs_dir.mkdir(exist_ok=True)
-        stem = "qwen38_checkpoint" if summary.get("arch") == "qwen4_exp" else "checkpoint"
-        (artifacts_dir / f"{stem}_inventory.json").write_text(
+        arch = summary.get("arch")
+        if arch == "qwen4_exp":
+            inventory_name, report_name = "qwen38_checkpoint_inventory.json", "qwen38_checkpoint_budget.md"
+        elif arch == "glm_moe_dsa":
+            inventory_name, report_name = "glm53_checkpoint_inventory.json", "checkpoint_budget_glm53.md"
+        else:
+            inventory_name, report_name = "checkpoint_inventory.json", "checkpoint_budget.md"
+        (artifacts_dir / inventory_name).write_text(
             json.dumps(summary["inventory"], separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
-        (docs_dir / f"{stem}_budget.md").write_text(report, encoding="utf-8")
+        (docs_dir / report_name).write_text(report, encoding="utf-8")
     print(report, end="")
     return 0
 

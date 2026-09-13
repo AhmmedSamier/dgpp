@@ -117,8 +117,17 @@ DGPP_TEST(dsa_geometry_rejects_invalid_configs) {
   bad(c, "topk not multiple of kpool");
 
   c = DsaConfig{};
-  c.qk_rope_head_dim = 64;  // engine implements the rope-free path only
-  bad(c, "nonzero rope dim");
+  c.qk_rope_head_dim = 64;  // a rope key is per-token: kpool must be 1
+  bad(c, "rope with a pooled indexer");
+
+  c = DsaConfig{};
+  c.qk_rope_head_dim = 32;  // the kernels tile the tail at 64
+  c.index_kpool = 1;
+  bad(c, "rope dim other than 0 or 64");
+
+  c = DsaConfig{};
+  c.num_index_layers = 12;  // more index caches than DSA layers
+  bad(c, "index layers above DSA layers");
 
   c = DsaConfig{};
   c.index_head_dim = 96;  // Hadamard-128 is pinned
@@ -140,6 +149,50 @@ DGPP_TEST(dsa_geometry_rejects_invalid_configs) {
   c = DsaConfig{};
   c.q_lora_rank = 1534;  // fused [q_a|kv_a] alignment
   bad(c, "q_lora alignment");
+}
+
+// The full GLM-5.3's geometry (2026-09-12, docs/glm53_plan.md D3/D4/D8):
+// the 64-wide rope key beside each latent row in every format, per-token
+// selection at kpool 1 (select_k = index_topk, no tail), index caches on a
+// subset of the layers.
+DGPP_TEST(dsa_geometry_full_model_rope_kpool1_index_layers) {
+  DsaConfig c;
+  c.hidden = 6144;
+  c.q_lora_rank = 2048;
+  c.qk_nope_head_dim = 192;
+  c.qk_rope_head_dim = 64;
+  c.index_kpool = 1;
+  c.index_relu = 1;
+  c.num_dsa_layers = 78;
+  c.num_index_layers = 21;
+  c.tp_size = 4;
+  for (dgpp::LatentFormat f : {dgpp::LatentFormat::kBf16, dgpp::LatentFormat::kFp8, dgpp::LatentFormat::kFp4}) {
+    c.latent_format = f;
+    const DsaGeometry g = DsaGeometry::from_config(c);
+    if (g.local_heads != 16 || g.local_q_rows != 16 * 256 || g.local_v_rows != 16 * 256)
+      throw std::runtime_error("full local rows");
+    if (g.rope_dim != 64 || g.score_width != 576 || g.kpool != 1)
+      throw std::runtime_error("full rope/score width");
+    if (g.select_k != 2048 || g.max_selected != 2048 || g.pools_per_block != 128)
+      throw std::runtime_error("full per-token selection");
+    if (g.index_layers != 21) throw std::runtime_error("full index layers");
+    const size_t payload = dgpp::latent_row_bytes(f, 512);
+    if (g.latent_payload_bytes != payload || g.latent_bytes_per_token != payload + 128)
+      throw std::runtime_error("full latent row bytes");
+    if (g.latent_bytes_per_token_all !=
+        (payload + 128 + (f == dgpp::LatentFormat::kBf16 ? 0 : 4)) * 78)
+      throw std::runtime_error("full latent bytes across layers");
+    if (g.index_bytes_per_token != 132 || g.index_bytes_per_token_all != 132 * 21)
+      throw std::runtime_error("full index bytes: one 128 + 4 entry per token, 21 caches");
+    if (g.tail_bytes_per_request != 512 || g.tail_bytes_per_request_all != 512 * 21)
+      throw std::runtime_error("full tail ring: one slot");
+    if (g.visible_pools(2047) != 2048 || g.tail_len(12345) != 0)
+      throw std::runtime_error("full visibility: every token, no tail");
+  }
+  // index_layers() defaults to every layer.
+  c.num_index_layers = 0;
+  if (c.index_layers() != 78 || DsaGeometry::from_config(c).index_layers != 78)
+    throw std::runtime_error("index_layers default");
 }
 
 DGPP_TEST(dsa_geometry_latent_formats_size_the_cache) {

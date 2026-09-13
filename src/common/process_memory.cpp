@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 
@@ -57,6 +58,27 @@ bool lock_process_memory(std::string* error, size_t* locked_bytes) {
     }
   }
   return true;
+}
+
+ProcessMemory process_memory_snapshot() {
+  ProcessMemory m;
+  std::ifstream in("/proc/self/status");
+  std::string line;
+  // Line by line: the file's first fields ("Name:", "State:") are not
+  // numeric, and a token-wise read would stop there.
+  while (std::getline(in, line)) {
+    const size_t colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    const std::string key = line.substr(0, colon);
+    const uint64_t kib = std::strtoull(line.c_str() + colon + 1, nullptr, 10);
+    if (key == "VmRSS") m.rss = static_cast<size_t>(kib) * 1024;
+    else if (key == "RssAnon") m.anon = static_cast<size_t>(kib) * 1024;
+    else if (key == "RssShmem") m.shmem = static_cast<size_t>(kib) * 1024;
+    else if (key == "RssFile") m.file = static_cast<size_t>(kib) * 1024;
+    else if (key == "VmLck") m.locked = static_cast<size_t>(kib) * 1024;
+  }
+  m.node_available = host_memory_available_bytes();
+  return m;
 }
 
 size_t host_memory_available_bytes() {

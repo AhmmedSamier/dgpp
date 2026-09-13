@@ -16,8 +16,10 @@ SSH=(-o BatchMode=yes -o ConnectTimeout=5)
 # The shared SSH login comes from .env (or an exported override).
 SSH_USER=$(dgpp_ssh_user) || exit 1
 mkdir -p "$OUT"
-export DGPP_SERVE_KNOBS="--max-concurrency 4 --kv-capacity 8192 --default-max-tokens 256 --queue-limit 8 --decode-graph --mtp"
+# A preset DGPP_SERVE_KNOBS wins (a soak at a deployment's real shape, 2026-09-13); the default is the Flash soak's.
+export DGPP_SERVE_KNOBS="${DGPP_SERVE_KNOBS:---max-concurrency 4 --kv-capacity 8192 --default-max-tokens 256 --queue-limit 8 --decode-graph --mtp}"
 export DGPP_SERVE_LOG="$OUT/serve"
+RUN_START=$(date +"%Y-%m-%d %H:%M:%S")
 STAGE=$(dgpp_stage_dir) || exit 1
 cd "$ROOT" || exit 1
 "$ROOT/scripts/serve_run.sh" up > "$OUT/up.log" 2>&1
@@ -44,7 +46,9 @@ echo "=== STALLED lines per rank log:"
 for ((r = 0; r < WORLD; ++r)); do
   [ -f "$OUT/serve/serve_r$r.log" ] || { for ((i = 1; i < WORLD; ++i)); do h=${PEERS[$((i - 1))]}; timeout 20 scp -q "${SSH[@]}" "$SSH_USER@$h:$STAGE/serve_r$i.log" "$OUT/serve/serve_r$i.log" 2>/dev/null; done; }
 done
-for f in "$OUT"/serve/serve_r[0-3].log; do echo "  $(basename $f): $(grep -c STALLED "$f" 2>/dev/null) stalled, $(grep -c 'ENGINE FAILURE\|divergence' "$f" 2>/dev/null) failures"; done
+# The peers' logs accumulate across boots of one deployment: count only the
+# lines stamped after this run's start (the stamp is the line's prefix).
+for f in "$OUT"/serve/serve_r[0-3].log; do echo "  $(basename $f): $(awk -v s="$RUN_START" '$0 >= s && /STALLED/' "$f" 2>/dev/null | wc -l) stalled, $(awk -v s="$RUN_START" '$0 >= s && /ENGINE FAILURE|divergence/' "$f" 2>/dev/null | wc -l) failures"; done
 echo "=== node probes: allocstall / pgmajfault / pswpin+out sums per node, max throttle mask"
 for f in "$OUT"/probe_r[0-3].log; do
   python3 "$ROOT/scripts/node_probe_report.py" "$f"

@@ -109,4 +109,58 @@ inline GlmFp4Matrix fp4_rows_view(const GlmFp4Matrix& m, int64_t row_start,
   return v;
 }
 
+// Compressed resident view of one packed-int matrix (docs/glm53_plan.md
+// §1.5, D2): the checkpoint's bytes, untouched — compressed-tensors
+// `pack-quantized`, symmetric, group 64. Codes are 4- or 8-bit unsigned
+// with an offset of 2^(bits-1) (nibble - 8, byte - 128), packed
+// `32 / bits` per I32 word along K with the low nibble / byte the first
+// element; one bf16 scale per 64 elements along K. The dequantized value
+// of element (n, k) is
+//   (code - 2^(bits-1)) * float(scales[n][k/64])
+// exactly in fp32 (an 8-bit integer times an 8-bit-mantissa scale), and
+// the kernels keep it exact: no weight is rounded to bf16 (the exact
+// policy, packq_gemv.cuh).
+constexpr int kPackedGroup = 64;  // elements per bf16 group scale
+
+struct GlmPackedMatrix {
+  const uint32_t* packed = nullptr;       // I32 [rows, cols*bits/32]
+  const uint16_t* scales = nullptr;       // bf16 [rows, cols/64]
+  int64_t rows = 0;
+  int64_t cols = 0;                       // logical K (elements)
+  int bits = 0;                           // 4 or 8
+
+  int64_t packed_cols() const { return cols * bits / 32; }   // I32 words per row
+  int64_t scale_cols() const { return cols / kPackedGroup; }
+  size_t packed_bytes() const {
+    return static_cast<size_t>(rows) * static_cast<size_t>(cols) * static_cast<size_t>(bits) / 8;
+  }
+  size_t scale_bytes() const {
+    return static_cast<size_t>(rows) * static_cast<size_t>(scale_cols()) * 2;
+  }
+};
+
+// K must be a multiple of 64 (one scale per group, whole packed words); a
+// column slice must start on a group boundary and span whole groups. Row
+// slices are free: every row carries its own scales.
+inline void packed_check_cols(int64_t cols, int bits, const char* who) {
+  if (bits != 4 && bits != 8)
+    throw std::invalid_argument(std::string(who) + ": the packed code width must be 4 or 8");
+  if (cols <= 0 || cols % kPackedGroup != 0)
+    throw std::invalid_argument(std::string(who) +
+                                ": packed K must be a positive multiple of 64");
+}
+
+inline GlmPackedMatrix packed_rows_view(const GlmPackedMatrix& m, int64_t row_start,
+                                        int64_t rows) {
+  if (row_start < 0 || rows < 0 || rows > m.rows || row_start > m.rows - rows)
+    throw std::invalid_argument("packed_rows_view: range out of bounds");
+  GlmPackedMatrix v;
+  v.packed = m.packed + row_start * m.packed_cols();
+  v.scales = m.scales + row_start * m.scale_cols();
+  v.rows = rows;
+  v.cols = m.cols;
+  v.bits = m.bits;
+  return v;
+}
+
 }  // namespace dgpp

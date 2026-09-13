@@ -105,6 +105,7 @@ struct WorldSettings {
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table's residency
   std::string dense_weights = "checkpoint";  // the Qwen dense stack's form
+  std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   int default_max_tokens = 0;
   int queue_limit = 0;
   bool no_eos = false;

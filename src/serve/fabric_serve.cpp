@@ -312,6 +312,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.ngram_table);
   out += ",\"dw\":";
   append_json_string(&out, s.dense_weights);
+  out += ",\"emsh\":";
+  append_json_string(&out, s.embed_sharding);
   out.push_back('}');
   return out;
 }
@@ -445,11 +447,14 @@ JournalRecord decode_journal_line(std::string_view line) {
     // Records before 2026-09-10 carry no table residency: resident.
     if (const dgpp::minijson::Value* ngt = v.find("ngt")) s.ngram_table = std::string(ngt->as_string());
     if (const dgpp::minijson::Value* dw = v.find("dw")) s.dense_weights = std::string(dw->as_string());
+    // Records before 2026-09-13 carry no embedding sharding: replicated.
+    if (const dgpp::minijson::Value* es = v.find("emsh")) s.embed_sharding = std::string(es->as_string());
     if (s.world < 2 || s.max_concurrency < 1 || s.kv_capacity < 1 ||
         (s.admission != "full" && s.admission != "grow") ||
         !latent_format_from_string(s.kv_dtype) ||
         (s.ngram_table != "resident" && s.ngram_table != "mmap") ||
-        (s.dense_weights != "checkpoint" && s.dense_weights != "fp8"))
+        (s.dense_weights != "checkpoint" && s.dense_weights != "fp8") ||
+        (s.embed_sharding != "replicated" && s.embed_sharding != "vocab"))
       throw std::runtime_error("journal: settings record with impossible values");
     return rec;
   }

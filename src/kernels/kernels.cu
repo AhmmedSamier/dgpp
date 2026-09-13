@@ -144,6 +144,26 @@ __global__ void embed_gather_kernel(const uint16_t* __restrict__ table,
   for (int i = threadIdx.x; i < hidden; i += blockDim.x) dst[i] = src[i];
 }
 
+__global__ void embed_gather_sliced_kernel(const uint16_t* __restrict__ table,
+                                           const int64_t* __restrict__ tokens,
+                                           uint16_t* __restrict__ out, int hidden,
+                                           int64_t vocab_begin, int64_t vocab_count) {
+  const int t = blockIdx.x;
+  const long long tok = tokens[t] - vocab_begin;
+  uint16_t* dst = out + static_cast<size_t>(t) * hidden;
+  if (tok < 0 || tok >= vocab_count) {
+    for (int i = threadIdx.x; i < hidden; i += blockDim.x) dst[i] = 0;
+    return;
+  }
+  const uint16_t* src = table + static_cast<size_t>(tok) * hidden;
+  for (int i = threadIdx.x; i < hidden; i += blockDim.x) dst[i] = src[i];
+}
+
+__global__ void copy_rows_kernel(uint16_t* __restrict__ dst, const uint16_t* __restrict__ src, int hidden) {
+  const size_t base = static_cast<size_t>(blockIdx.x) * hidden;
+  for (int i = threadIdx.x; i < hidden; i += blockDim.x) dst[base + i] = src[base + i];
+}
+
 // Deterministic hash-based normal sampler: one value per index.
 __device__ __forceinline__ uint64_t hash_u64(uint64_t x) {
   x ^= x >> 33;
@@ -410,6 +430,22 @@ void embed_gather_bf16(const void* table, const int64_t* tokens, void* out,
   embed_gather_kernel<<<num_tokens, 128, 0, stream>>>(
       static_cast<const uint16_t*>(table), tokens,
       static_cast<uint16_t*>(out), hidden);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void embed_gather_sliced_bf16(const void* table, const int64_t* tokens, void* out,
+                              int num_tokens, int hidden, int64_t vocab_begin,
+                              int64_t vocab_count, cudaStream_t stream) {
+  embed_gather_sliced_kernel<<<num_tokens, 128, 0, stream>>>(
+      static_cast<const uint16_t*>(table), tokens, static_cast<uint16_t*>(out), hidden,
+      vocab_begin, vocab_count);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void copy_rows_bf16(void* dst, const void* src, int num_tokens, int hidden,
+                    cudaStream_t stream) {
+  copy_rows_kernel<<<num_tokens, 128, 0, stream>>>(static_cast<uint16_t*>(dst),
+                                                     static_cast<const uint16_t*>(src), hidden);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

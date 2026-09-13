@@ -84,6 +84,9 @@ class SessionModel {
     std::vector<std::vector<uint16_t>> layer_states;  // per layer, when captured
     std::vector<std::vector<int32_t>> route_ids;      // per MoE layer [T, top_k], ascending
     std::vector<std::vector<float>> route_weights;    // per MoE layer [T, top_k]
+    // Per indexed DSA layer [T, max_selected] (-1 padded), when captured
+    // (the full GLM-5.3's selections; empty for the other families).
+    std::vector<std::vector<int32_t>> dsa_selections;
   };
   struct SessionSnapshotMeta {
     int64_t position = 0;

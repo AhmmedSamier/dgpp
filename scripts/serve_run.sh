@@ -8,6 +8,16 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/cluster_env.sh" || exit 1
 args=("$@")
+# The selected deployment, explicitly: a world started under --log-dir is
+# stopped only with its --config and the same --log-dir (the launcher's
+# rule), and `down` without --config scans the default log dir instead —
+# the soak ritual's teardown was silently failing that way (2026-09-13).
+case "${1:-}" in
+  up|down|status)
+    if ! printf '%s\n' "$@" | grep -qx -- --config; then
+      cfg=$(dgpp_config 2>/dev/null) && [ -n "$cfg" ] && args+=(--config "$cfg")
+    fi;;
+esac
 [ -n "${DGPP_SERVE_KNOBS:-}" ] && args+=(--knobs "$DGPP_SERVE_KNOBS")
 [ -n "${DGPP_SERVE_LOG:-}" ] && args+=(--log-dir "$DGPP_SERVE_LOG")
 exec python3 "$ROOT/scripts/dgpp-cluster" "${args[@]}"

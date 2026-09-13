@@ -66,10 +66,45 @@ void dsa_k_layernorm(const void* k_raw, int64_t k_stride, const void* w,
 
 // Fused q_a/kv_a RMSNorm over the split halves of the fused [q_a|kv_a]
 // projection (eps 1e-5).
-//   qkv: [rows, q_dim + kv_dim] bf16; q_c/kv_c: [rows, dim] contiguous.
+//   qkv: [rows, row_stride] bf16 (row_stride 0 = q_dim + kv_dim; the full
+//   model's rows carry the 64-wide rope key after the kv half);
+//   q_c/kv_c: [rows, dim] contiguous.
 void dsa_fused_qkv_rmsnorm(const void* qkv, void* q_c, void* kv_c, int q_dim,
                            int kv_dim, int64_t rows, const void* q_w,
-                           const void* kv_w, float eps, cudaStream_t stream);
+                           const void* kv_w, float eps, cudaStream_t stream,
+                           int64_t row_stride = 0);
+
+// ---- interleaved RoPE (the full GLM-5.3, plan D3) ---------------------
+//
+// The rotary table: bf16 [positions][2][rope_dim / 2] — for position p,
+// row 0 the cosines and row 1 the sines of angle_i = fp32(p) * inv_freq[i],
+// inv_freq[i] = fp32(1 / theta^(2i / rope_dim)) (the power in double,
+// rounded to fp32 — within an fp32 ulp of transformers' powf), angle_i the
+// fp32 product (the reference's), the trig in double rounded to fp32 then
+// bf16 — the host, the device and the python reference read one table,
+// so the rotation is bitwise across them. Built on the host, uploaded
+// once per model; `positions` bounds the cache (DsaLayer's
+// max_cache_tokens).
+void dsa_rope_table_host(double theta, int rope_dim, int64_t positions,
+                         uint16_t* out);
+
+// Rotates the first rope_dim elements of every (row, head) in place or
+// into `out`: pair i = (x[2i], x[2i+1]) becomes (bf16(bf16(x0 c) -
+// bf16(x1 s)), bf16(bf16(x1 c) + bf16(x0 s))) with (c, s) the table's
+// entries for pos[row] — transformers' apply_rotary_pos_emb_interleave in
+// bf16 (three roundings), the pair kept in place. Rows with pos < 0 are
+// copied unrotated (a fixed-shape batch's padding rows); a position past
+// the table reads its last entry (the layer bounds positions at
+// admission; this keeps a stale row from faulting).
+//   x: bf16 rows at x + r * x_row_stride + h * x_head_stride;
+//   out: bf16 at out + r * out_row_stride + h * out_head_stride (out may
+//   alias x with equal strides).
+void dsa_rope_interleave(const void* x, int64_t x_row_stride,
+                         int64_t x_head_stride, int heads, int rope_dim,
+                         const int64_t* pos, const void* table,
+                         int64_t table_positions, void* out,
+                         int64_t out_row_stride, int64_t out_head_stride,
+                         int64_t rows, cudaStream_t stream);
 
 // ---- index cache + tail state machinery ------------------------------
 
@@ -77,7 +112,9 @@ void dsa_fused_qkv_rmsnorm(const void* qkv, void* q_c, void* kv_c, int q_dim,
 // first_pool + n_pools) are complete pools whose kpool tokens start at
 // chunk row (i * kpool) for i in [0, n_pools). Physical slot via the
 // request's block table.
-//   k/gate: bf16 [tokens, dim], row strides in elements;
+//   k/gate: bf16 [tokens, dim], row strides in elements; gate and ape may
+//   be null at kpool 1 (a pool is its token: the softmax over one slot is
+//   exactly 1, the entry is Hadamard(k) quantized);
 //   block_table: int32 [blocks_per_request] (single request);
 //   index_k/index_scale: planar cache, physical slot indexing.
 void dsa_kpool_compress_write(const void* k, int64_t k_stride,
@@ -89,7 +126,8 @@ void dsa_kpool_compress_write(const void* k, int64_t k_stride,
 
 // Seed the per-request tail ring with each request's last kpool tokens of
 // the batch (the reference's ahead-check rule). One block per token.
-//   tail: bf16 [max_requests, 2, kpool, dim].
+//   tail: bf16 [max_requests, 2, kpool, dim]; gate may be null (kpool 1:
+//   the gate half is zeroed).
 void dsa_kpool_tail_seed(const void* k, int64_t k_stride, const void* gate,
                          int64_t gate_stride, const int32_t* req_ids,
                          const int64_t* pos, int64_t tokens, void* tail,
@@ -111,6 +149,7 @@ void dsa_kpool_tail_seed(const void* k, int64_t k_stride, const void* gate,
 //   dim]; after every batch row t that is not its request's last, the
 //   request's ring as it stands is copied to row t. Rolling a request back
 //   to `a` accepted rows = copying row (start + a - 1) over its ring.
+//   gate and ape may be null at kpool 1 (every token completes its pool).
 void dsa_kpool_decode_update(const void* k, int64_t k_stride,
                              const void* gate, int64_t gate_stride,
                              const float* ape, const int32_t* req_ids,
@@ -138,13 +177,18 @@ void dsa_zero_padding_rows(void* out, const int64_t* pos, int tokens,
 // A quantized cache (fp8/fp4) quantizes each row on the way in — the
 // codes and the row scale (`latent_scale`, FP32 per physical slot) are
 // bitwise the host reference's latent_quantize_row_host.
+// A rope tail (rope_rows: bf16 [tokens, rope_dim], the roped k_rot) is
+// stored bf16 after the row's payload in every format — the cache row is
+// latent_row_bytes(format, kv_lora) + rope_dim * 2 bytes (DsaGeometry's
+// latent_bytes_per_token).
 void dsa_latent_append(const void* latent_rows, const int32_t* req_ids,
                        const int64_t* pos, int64_t tokens,
                        const int32_t* block_tables, int blocks_per_request,
                        int block_tokens, void* latent_cache, int kv_lora,
                        cudaStream_t stream,
                        LatentFormat format = LatentFormat::kBf16,
-                       float* latent_scale = nullptr);
+                       float* latent_scale = nullptr,
+                       const void* rope_rows = nullptr, int rope_dim = 0);
 
 // Gather a request's pools [0, n_pools) into a contiguous buffer for the
 // prefill logits GEMM.
@@ -154,6 +198,10 @@ void dsa_gather_index_pools(const int32_t* block_table, int pools_per_block,
                             int dim, cudaStream_t stream);
 
 // ---- top-k selection --------------------------------------------------
+//
+// The widest selection the kernels serve (select_k = index_topk / kpool):
+// the expansion's eight rounds of a 256-thread block.
+constexpr int kDsaSelectMaxK = 2048;
 //
 // Pinned spec: the select_k pools with the highest fp32 logits, exact ties
 // broken to the lower pool index, output ascending in pool index. The
@@ -188,9 +236,12 @@ void dsa_prepare_kernel_smem();
 //     256-byte aligned; ws_max_pools is the pool capacity it was sized for
 //     (every row's visible count must fit);
 //   counter_ws: int32 [2] (the scoring ticket and the rows-done count).
-// rows <= 8 (decode/MTP batch bound); grid_blocks <= 0 picks the default
-// (at least `rows` blocks either way: the last `rows` to finish scoring
-// each select one row).
+// rows <= 16 (the decode batch's cap), launched in groups of at most eight
+// (the fused kernel's shared-memory bound; a group is the same work at any
+// grouping); grid_blocks <= 0 picks the default (at least a group's rows
+// either way: the last `rows` to finish scoring each select one row). `relu` clamps each head's fp8 dot at zero before
+// its weight (the full GLM-5.3's indexer; GLM-5.3-Flash's sums the raw
+// dots) — the same clamp in the prefill select and the host oracle.
 size_t dsa_select_workspace_bytes(int max_rows, int64_t max_pools);
 // The last call's phase stamps (globaltimer ns, the last block's view):
 // [0] entry, [1] scoring done, [2] selection start, [3] selection total
@@ -217,7 +268,8 @@ void dsa_select_decode(const void* q_fp8, const float* w_folded,
                        int kpool, int max_selected, int32_t* topk_out,
                        int32_t* out_counts, void* select_ws,
                        int64_t ws_max_pools, int32_t* counter_ws,
-                       int grid_blocks, cudaStream_t stream);
+                       int grid_blocks, cudaStream_t stream,
+                       bool relu = false);
 
 // Prefill select: one block per row over the materialized dot buffer.
 //   dot: fp32 [rows * heads, dot_stride] (row r head h at
@@ -228,27 +280,34 @@ void dsa_select_prefill(const float* dot, int64_t dot_stride,
                         const int64_t* pos, int rows, int64_t n_pools,
                         int heads, int select_k, int kpool, int max_selected,
                         int32_t* topk_out, int32_t* out_counts,
-                        cudaStream_t stream);
+                        cudaStream_t stream, bool relu = false);
 
 // ---- MLA absorbed attention -------------------------------------------
 
 // Absorbed query: q_tilde[r,h,c] = sum_d q[r,h,d] * W_uk[h,d][c], bf16
 // output rounding (the production absorbed-MLA prep). kv_b is the
 // checkpoint's interleaved layout [local_heads*(nope+v), kv_lora]: head h
-// owns rows [h*(nope+v), h*(nope+v)+nope) for W_uk.
-//   q: bf16 [rows, local_heads * nope];
-//   q_tilde: bf16 [rows, local_heads * kv_lora].
+// owns rows [h*(nope+v), h*(nope+v)+nope) for W_uk. With a rope tail the
+// head's q row is [nope | rope] (the rope part already rotated) and the
+// absorbed row is [W_uk^T q_nope | q_rot], kv_lora + rope wide.
+//   q: bf16 [rows, local_heads * (nope + rope)];
+//   q_tilde: bf16 [rows, local_heads * (kv_lora + rope)].
+//   tensor_cores: false keeps the warp kernel whatever the row count — the
+//   decode path's contract (a batched row bitwise the row alone; the
+//   tensor-core form is tolerance-equal, not bitwise, to the warp chain).
 void dsa_absorb_q(const void* q, const void* kv_b, void* q_tilde,
                   int64_t rows, int local_heads, int nope, int v, int kv_lora,
-                  cudaStream_t stream);
+                  cudaStream_t stream, int rope = 0, bool tensor_cores = true);
 
 // Split-KV sparse attention over gathered latent rows (flash-decoding
 // shape: the decode hot path). One block per (row, split, head-group).
-//   q_tilde: bf16 [rows, local_heads * kv_lora];
+//   q_tilde: bf16 [rows, local_heads * (kv_lora + rope)];
 //   topk: int32 [rows, topk_stride]; counts: int32 [rows];
 //   m_ws/l_ws: fp32 [rows, n_split, local_heads];
 //   c_ws: fp32 [rows, n_split, local_heads, kv_lora].
-//   format/latent_scale: the cache's format and its row scales (fp8/fp4).
+//   format/latent_scale: the cache's format and its row scales (fp8/fp4);
+//   rope: the row's bf16 tail width (the score runs over kv_lora + rope,
+//   the value accumulation over kv_lora).
 void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
                       const int32_t* req_ids, const int32_t* topk,
                       int topk_stride, const int32_t* counts, int rows,
@@ -258,7 +317,7 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
                       float* m_ws, float* l_ws, float* c_ws,
                       cudaStream_t stream,
                       LatentFormat format = LatentFormat::kBf16,
-                      const float* latent_scale = nullptr);
+                      const float* latent_scale = nullptr, int rope = 0);
 
 // Dense causal attention on tensor cores: the prefill path
 // below index_topk tokens of context, where the selection is provably
@@ -266,9 +325,10 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
 // position p attends to tokens [0, p]. Same partial layout and split
 // semantics as dsa_attn_partial — combine with dsa_attn_combine. The M
 // dimension is (row, head) pairs; 32 per block. Returns false without
-// launching when kv_lora is not 512 or 256 (the caller keeps the split
-// kernel). Tolerance-equal to the split kernel (a different summation
-// order), deterministic.
+// launching when the geometry is outside the compiled set — kv_lora 512
+// or 256 with no rope tail, kv_lora 512 with a 64-wide tail (the caller
+// keeps the split kernel). Tolerance-equal to the split kernel (a
+// different summation order), deterministic.
 //   pos: int64 [rows] — the rows' token positions (causal bound per row).
 bool dsa_attn_dense(const void* q_tilde, const void* latent_cache,
                     const int32_t* req_ids, const int64_t* pos, int rows,
@@ -277,7 +337,7 @@ bool dsa_attn_dense(const void* q_tilde, const void* latent_cache,
                     float scale, float* m_ws, float* l_ws, float* c_ws,
                     cudaStream_t stream,
                     LatentFormat format = LatentFormat::kBf16,
-                    const float* latent_scale = nullptr);
+                    const float* latent_scale = nullptr, int rope = 0);
 
 // The same kernel over each row's SELECTED tokens (2026-09-05, the sparse
 // regime past index_topk tokens of context): topk/counts as
@@ -291,7 +351,7 @@ bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
                      int blocks_per_request, float scale, float* m_ws, float* l_ws,
                      float* c_ws, cudaStream_t stream,
                      LatentFormat format = LatentFormat::kBf16,
-                     const float* latent_scale = nullptr);
+                     const float* latent_scale = nullptr, int rope = 0);
 
 // Merge the split partials into normalized c rows: c_out[r,h,:] =
 // (sum_s p_s * c_s) / (sum_s p_s * l_s), p_s = exp(m_s - max m).
@@ -306,6 +366,6 @@ void dsa_attn_combine(const float* m_ws, const float* l_ws, const float* c_ws,
 //   out: bf16 [rows, local_heads * v].
 void dsa_vout_gemm(const void* c, const void* kv_b, void* out,
                    int64_t rows, int local_heads, int nope, int v,
-                   int kv_lora, cudaStream_t stream);
+                   int kv_lora, cudaStream_t stream, bool tensor_cores = true);
 
 }  // namespace dgpp

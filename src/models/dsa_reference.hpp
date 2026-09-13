@@ -40,6 +40,25 @@
 //     rounded to bf16 for the v-accumulation MMA, c_h = sum probs*latent in
 //     fp32, out_h = W_uv_h c_h (bf16 GEMM); attention scale 256^-0.5; o_proj
 //     bf16 GEMM. Zero RoPE: no positional encoding anywhere.
+//
+// The full GLM-5.3 (2026-09-12, docs/glm53_plan.md §1.2-1.3, D3/D4/D8) is
+// the same oracle with cfg.qk_rope_head_dim 64, index_kpool 1 and
+// index_relu 1:
+//   * the fused kv_a row is [kv_lora | rope]; the rope key is rotated (not
+//     normed) and stored bf16 after the latent, in every cache format;
+//   * q per head is [nope | rope], the rope slice rotated; the absorbed
+//     query is [W_uk^T q_nope | q_rot] and the score runs over both,
+//     scaled by (nope + rope)^-0.5, the value over the latent;
+//   * the indexer's q and k rotate their FIRST rope dims (after wq_b and
+//     after the LayerNorm); with kpool 1 a pool is a token (no gate, no
+//     APE: the one-slot softmax is 1) and there is never a tail;
+//   * each head's fp8 dot is clamped at zero (relu) before its weight;
+//   * RoPE: transformers' apply_rotary_pos_emb_interleave in bf16 — pair
+//     (x[2i], x[2i+1]) -> (bf16(bf16(x0 c) - bf16(x1 s)), bf16(bf16(x1 c)
+//     + bf16(x0 s))) with (c, s) from the model's bf16 table
+//     (dsa_rope_table_host), the pair kept in place;
+//   * a layer without an indexer (HostWeights.wq_b null) attends with the
+//     selection layer_forward is handed (plan D4).
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -52,22 +71,26 @@ namespace dgpp::dsa_ref {
 // float. Indexer weights are replicated (global dims); MLA core weights are
 // the local TP views (local_heads from DsaGeometry).
 struct HostWeights {
-  // Indexer (replicated across TP).
+  // Indexer (replicated across TP); all null on a selection-reusing layer.
   const uint16_t* wq_b = nullptr;    // [index_n_heads*128, q_lora_rank]
   const uint16_t* wk = nullptr;      // [index_head_dim, hidden]
   const uint16_t* wp = nullptr;      // [index_n_heads, hidden]
-  const uint16_t* gate = nullptr;    // [index_head_dim, hidden]
+  const uint16_t* gate = nullptr;    // [index_head_dim, hidden] (kpool > 1)
   const uint16_t* k_norm_w = nullptr;  // [index_head_dim]
   const uint16_t* k_norm_b = nullptr;  // [index_head_dim]
-  const float* ape = nullptr;        // [kpool, index_head_dim] fp32
+  const float* ape = nullptr;        // [kpool, index_head_dim] fp32 (kpool > 1)
 
   // MLA core (local TP views).
-  const uint16_t* qkv_a = nullptr;   // [q_lora+kv_lora, hidden] fused [q_a|kv_a]
+  const uint16_t* qkv_a = nullptr;   // [q_lora+kv_lora+rope, hidden] fused [q_a|kv_a]
   const uint16_t* q_aln = nullptr;   // [q_lora_rank]
   const uint16_t* kv_aln = nullptr;  // [kv_lora_rank]
-  const uint16_t* q_b = nullptr;     // [local_heads*nope, q_lora_rank]
+  const uint16_t* q_b = nullptr;     // [local_heads*(nope+rope), q_lora_rank]
   const uint16_t* kv_b = nullptr;    // [local_heads*(nope+v), kv_lora_rank]
   const uint16_t* o_proj = nullptr;  // [hidden, local_heads*v]
+  // RoPE (rope > 0): the model's bf16 [positions][2][rope/2] table.
+  const uint16_t* rope_table = nullptr;
+  int64_t rope_table_positions = 0;
+  bool owns_indexer() const { return wq_b != nullptr; }
 };
 
 // Per-request cache state in logical (flat) indexing. The device path's
@@ -76,22 +99,30 @@ struct HostWeights {
 struct HostState {
   std::vector<uint8_t> index_k;    // [max_pools, index_head_dim] fp8 bits
   std::vector<float> index_scale;  // [max_pools]
-  std::vector<uint16_t> latent;    // [max_tokens, kv_lora_rank]
+  std::vector<uint16_t> latent;    // [max_tokens, kv_lora_rank + rope] (the dequantized latent, the bf16 rope key)
   std::vector<uint16_t> tail;      // [2, kpool, index_head_dim]
   int64_t num_pools = 0;           // complete pools written
   int64_t num_tokens = 0;          // latent rows written
+  int64_t latent_width = 0;        // kv_lora_rank + rope
 
   void reset(const DsaConfig& cfg, int64_t max_tokens) {
     const int64_t max_pools = (max_tokens + cfg.index_kpool - 1) /
                               cfg.index_kpool;
+    latent_width = cfg.kv_lora_rank + cfg.qk_rope_head_dim;
     index_k.assign(max_pools * cfg.index_head_dim, 0);
     index_scale.assign(max_pools, 0.0f);
-    latent.assign(max_tokens * cfg.kv_lora_rank, 0);
+    latent.assign(max_tokens * latent_width, 0);
     tail.assign(2ull * cfg.index_kpool * cfg.index_head_dim, 0);
     num_pools = 0;
     num_tokens = 0;
   }
 };
+
+// Interleaved RoPE of one bf16 row's first rope_dim elements in place at
+// `pos` (the header's contract; the device kernel's twin). A position past
+// the table reads its last entry.
+void rope_interleave_row(uint16_t* x, int rope_dim, int64_t pos,
+                         const uint16_t* table, int64_t table_positions);
 
 // out[m,n] = bf16(sum_k act[m,k] * w[n,k]), accumulation in Acc.
 template <typename Acc>
@@ -114,14 +145,17 @@ void fwht128_quant_fp8(const uint16_t* q, int rows, int dim, uint8_t* q_fp8,
 // q_fp8 [tokens, heads, dim] fp8 bits and w_folded [tokens, heads] fp32.
 // Exported so parity tests can audit divergences with the reference's OWN
 // quantized rows (host GEMMs are m-independent, so a row's values do not
-// depend on the chunk it was computed in).
+// depend on the chunk it was computed in). `token_start` positions the
+// rows for RoPE (rope > 0).
 template <typename Acc>
 void indexer_query_inputs(const HostWeights& w, const DsaConfig& cfg,
                           const uint16_t* hidden_in, int tokens,
-                          uint8_t* q_fp8, float* w_folded);
+                          uint8_t* q_fp8, float* w_folded,
+                          int64_t token_start = 0);
 
 // Compress one pool of kpool tokens into the index cache.
-// k/gate: [kpool, dim] bf16 bits; ape: [kpool, dim] fp32;
+// k/gate: [kpool, dim] bf16 bits; ape: [kpool, dim] fp32 (gate and ape may
+// be null: kpool 1, the entry is the token's key);
 // writes k_out [dim] fp8 bits + scale_out (single value).
 template <typename Acc>
 void compress_pool(const uint16_t* k, const uint16_t* gate, const float* ape,
@@ -130,10 +164,11 @@ void compress_pool(const uint16_t* k, const uint16_t* gate, const float* ape,
 // One query's pool logits: logits[j] = sum_h w'[h] * k_scale[j] *
 // (sum_d q_fp8[h,d] * k_fp8[j,d]) for j in [0, num_pools). All fp32/Acc.
 // q_fp8: [heads, dim] fp8 bits; w: [heads] fp32 (already scale-folded).
+// `relu` clamps each head's dot at zero before its weight.
 template <typename Acc>
 void pool_logits(const uint8_t* q_fp8, const float* w, const uint8_t* k_fp8,
                  const float* k_scale, int64_t num_pools, int heads, int dim,
-                 float* logits);
+                 float* logits, bool relu = false);
 
 // Deterministic selection: the k = min(select_k, num_pools) highest logits,
 // exact ties -> lower pool index, output ascending. Returns the count.
@@ -151,25 +186,30 @@ int expand_append_tail(const int32_t* pool_ids, int n_sel, int64_t pos,
 int causal_all_tokens(int64_t pos, int max_selected, int32_t* out_tokens);
 
 // Absorbed MLA attention for one query over selected token positions.
-// q: [local_heads, nope] bf16 bits; latent_rows: gathers latent[token] for
-// each selected position; kv_b: [local_heads*(nope+v), kv_lora] bf16;
-// tokens: [n_sel] positions (-1 skipped); writes out [local_heads, v] bf16.
+// q: [local_heads, nope + rope] bf16 bits (the rope slice rotated);
+// latent_rows: gathers latent[token] for each selected position, rows
+// [kv_lora | rope] at latent_stride; kv_b: [local_heads*(nope+v), kv_lora]
+// bf16; tokens: [n_sel] positions (-1 skipped); writes out [local_heads,
+// v] bf16.
 template <typename Acc>
 void absorbed_attn(const uint16_t* q, const uint16_t* latent,
                    int64_t latent_stride, const int32_t* tokens, int n_sel,
                    const uint16_t* kv_b, int local_heads, int nope, int v,
-                   int kv_lora, float scale, uint16_t* out);
+                   int kv_lora, float scale, uint16_t* out, int rope = 0);
 
 // Full layer forward over one pool-aligned chunk [token_start,
 // token_start + tokens). Updates state (index cache, latent, tail) and
 // writes layer_out [tokens, hidden] bf16 and topk [tokens, max_selected]
 // int32 (-1 padded). chunk_starts_pool_aligned must hold for continuation
 // chunks (the final chunk may end mid-pool; its trailing tokens persist in
-// the tail for decode).
+// the tail for decode). A selection-reusing layer (w.owns_indexer() false)
+// takes the selection in `reuse_topk` ([tokens, max_selected], the last
+// indexed layer's topk_out for the same rows), touches no index state and
+// copies it to topk_out.
 template <typename Acc>
 void layer_forward(const HostWeights& w, const DsaConfig& cfg,
                    const uint16_t* hidden_in, HostState& state,
                    int64_t token_start, int tokens, uint16_t* layer_out,
-                   int32_t* topk_out);
+                   int32_t* topk_out, const int32_t* reuse_topk = nullptr);
 
 }  // namespace dgpp::dsa_ref

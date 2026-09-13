@@ -33,7 +33,7 @@ constexpr int kPickLogitDigits = 6;  // 36 bits carry the float's 32
 constexpr int kPickIdDigits = 3;     // 18 bits carry a vocab id (< 262144)
 constexpr int kPickSlotsPerRank = kPickLogitDigits + kPickIdDigits;
 constexpr int kPickMaxRows = 32;     // dgpp::kDecodeRowsMax (engine/decode_outputs.hpp)
-constexpr int kPickMaxRequests = 8;  // one verdict per fixed request slot
+constexpr int kPickMaxRequests = 16;  // one verdict per fixed request slot (the GLM-5.3 decode batch's cap)
 constexpr int kPickMaxWorld = 8;
 constexpr uint64_t kPickDigestBits = 6ull * kPickSlotsPerRank;  // 54
 

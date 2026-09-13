@@ -86,7 +86,31 @@ __device__ inline uint64_t block_fold_payload(const uint64_t* base,
   uint64_t h = 0;
   if (aligned16(base)) {
     const size_t pairs = words / 2;
-    for (size_t j = threadIdx.x; j < pairs; j += kConsumerThreads) {
+    // Four system loads in flight per thread (2026-09-13): the loop's
+    // one-load-per-round-trip form read a peer's 36 KB row at ~1.6 GB/s
+    // — the collective grew 23 us per decode row past the staging budget.
+    // XOR is commutative, so the per-thread order is free.
+    constexpr int kAhead = 4;
+    size_t j = threadIdx.x;
+    for (; j + (kAhead - 1) * kConsumerThreads < pairs; j += kAhead * kConsumerThreads) {
+      uint4 v[kAhead];
+#pragma unroll
+      for (int a = 0; a < kAhead; ++a)
+        v[a] = sys_load_u128(reinterpret_cast<const uint4*>(base) + j + a * kConsumerThreads);
+#pragma unroll
+      for (int a = 0; a < kAhead; ++a) {
+        const size_t jj = j + a * kConsumerThreads;
+        if (stage != nullptr) reinterpret_cast<uint4*>(stage)[jj] = v[a];
+        const uint64_t w0 = static_cast<uint64_t>(v[a].x) |
+                            (static_cast<uint64_t>(v[a].y) << 32);
+        const uint64_t w1 = static_cast<uint64_t>(v[a].z) |
+                            (static_cast<uint64_t>(v[a].w) << 32);
+        const size_t i = 2 * jj;
+        h ^= (w0 + i + 1) * kFoldMultiplier;
+        h ^= (w1 + i + 2) * kFoldMultiplier;
+      }
+    }
+    for (; j < pairs; j += kConsumerThreads) {
       const uint4 v = sys_load_u128(reinterpret_cast<const uint4*>(base) + j);
       if (stage != nullptr) reinterpret_cast<uint4*>(stage)[j] = v;
       const uint64_t w0 = static_cast<uint64_t>(v.x) |
@@ -157,7 +181,53 @@ __device__ inline void block_fold_vectors(const uint16_t* local,
   for (int p = 0; p < send_peers; ++p) vec_ok = vec_ok && aligned16(peers[p]);
   if (vec_ok) {
     const uint32_t vecs = elems / 8;
-    for (uint32_t vi = threadIdx.x; vi < vecs; vi += kConsumerThreads) {
+    // Two vectors per thread per round with every peer's system loads
+    // issued before any add (2026-09-13: the one-vector form paid a
+    // round trip per peer per vector past the staging budget). The
+    // per-element chain — the ranks in world order, fp32, one bf16
+    // rounding — is the staged fold's, so the destinations stay bitwise.
+    constexpr int kPer = 2;
+    uint32_t vi = threadIdx.x;
+    for (; vi + (kPer - 1) * kConsumerThreads < vecs; vi += kPer * kConsumerThreads) {
+      uint4 in[kPer][kBusMaxPeers + 1];
+#pragma unroll
+      for (int k = 0; k < kPer; ++k)
+        for (int r = 0; r < world; ++r) {
+          const uint32_t v = vi + k * kConsumerThreads;
+          if (r == my_rank) {
+            in[k][r] = reinterpret_cast<const uint4*>(local)[v];
+          } else {
+            const uint16_t* vec = peers[r < my_rank ? r : r - 1];
+            in[k][r] = sys_load_u128(reinterpret_cast<const uint4*>(vec) + v);
+          }
+        }
+#pragma unroll
+      for (int k = 0; k < kPer; ++k) {
+        float acc[8];
+#pragma unroll
+        for (int e = 0; e < 8; ++e) acc[e] = 0.0f;
+        for (int r = 0; r < world; ++r) {
+          const uint32_t w[4] = {in[k][r].x, in[k][r].y, in[k][r].z, in[k][r].w};
+#pragma unroll
+          for (int e = 0; e < 8; ++e)
+            acc[e] += bf16_to_f32(static_cast<uint16_t>(
+                (e & 1) ? (w[e >> 1] >> 16) : (w[e >> 1] & 0xFFFFu)));
+        }
+        uint4 out;
+        uint32_t o[4];
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          const __nv_bfloat16 lo = __float2bfloat16(acc[2 * q]);
+          const __nv_bfloat16 hi = __float2bfloat16(acc[2 * q + 1]);
+          o[q] = static_cast<uint32_t>(*reinterpret_cast<const uint16_t*>(&lo)) |
+                 (static_cast<uint32_t>(*reinterpret_cast<const uint16_t*>(&hi))
+                  << 16);
+        }
+        out.x = o[0]; out.y = o[1]; out.z = o[2]; out.w = o[3];
+        reinterpret_cast<uint4*>(dst)[vi + k * kConsumerThreads] = out;
+      }
+    }
+    for (; vi < vecs; vi += kConsumerThreads) {
       uint4 in[kBusMaxPeers + 1];
       for (int r = 0; r < world; ++r) {
         if (r == my_rank) {
@@ -594,7 +664,10 @@ __global__ __launch_bounds__(kConsumerThreads) void bus_allreduce_kernel(
 // The graph kernel's staging budget: the decode collective's 2 x 4096
 // bf16 payloads from three peers (48 KB); larger vectors (the 8-row
 // batch) fold from the NIC-placed payloads as before.
-constexpr size_t kGraphStageBytes = size_t{48} << 10;
+// 80 KB since 2026-09-13: two 6144-wide decode rows from three peers
+// (72 KB) fold from shared memory too — the GB10 block allows 99 KB and the
+// kernel's static shared memory is under 1 KB.
+constexpr size_t kGraphStageBytes = size_t{80} << 10;
 
 // The graph twin of the kernel above (§6.2, the decode step's replayed
 // launch sequence). The protocol is identical — snapshot, claim/fold/ack,

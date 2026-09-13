@@ -146,6 +146,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/dsa.cu
   src/kernels/fp8_dequant.cu
   src/kernels/fp4_gemv.cu
+  src/kernels/packq_gemv.cu
   src/kernels/scale_gemm.cu
   src/kernels/bf16_gemv.cu
   src/kernels/l2_prefetch.cu
@@ -252,6 +253,30 @@ target_link_libraries(dgpp_models_glm4_layers
   PUBLIC dgpp_models_glm4 dgpp_models_glm4_loader dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_glm4_layers)
 
+# The full GLM-5.3 model on the session core (docs/glm53_plan.md G5).
+add_library(dgpp_models_glm_dsa_layers STATIC
+  src/models/glm_dsa/model.cpp)
+target_include_directories(dgpp_models_glm_dsa_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_glm_dsa_layers
+  PUBLIC dgpp_models_glm_dsa dgpp_models_glm_dsa_loader dgpp_models_dsa dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_glm_dsa_layers)
+
+# Full GLM-5.3 (2026-09-12, docs/glm53_plan.md): the host-side model description.
+add_library(dgpp_models_glm_dsa STATIC
+  src/models/glm_dsa/config.cpp
+  src/models/glm_dsa/binding.cpp)
+target_include_directories(dgpp_models_glm_dsa PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_glm_dsa PUBLIC dgpp_loaders dgpp_common)
+dgpp_set_common(dgpp_models_glm_dsa)
+
+# The full GLM-5.3 resident loader (G3): the shared weight builder at the
+# family's TP geometry, the packed-int slices, the draft's requant.
+add_library(dgpp_models_glm_dsa_loader STATIC
+  src/models/glm_dsa/loader.cpp)
+target_include_directories(dgpp_models_glm_dsa_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_glm_dsa_loader PUBLIC dgpp_models_glm_dsa dgpp_loaders CUDA::cudart)
+dgpp_set_common(dgpp_models_glm_dsa_loader)
+
 # Qwen3.8-Flash-Next: the host-side model description.
 add_library(dgpp_models_qwen STATIC
   src/models/qwen/config.cpp
@@ -336,6 +361,10 @@ dgpp_set_common(dgpp_models_glm_loader)
 add_executable(glm_bind_check apps/glm_bind_check.cpp)
 target_link_libraries(glm_bind_check PRIVATE dgpp_models_glm dgpp_loaders)
 dgpp_set_common(glm_bind_check)
+
+add_executable(glm_dsa_bind_check apps/glm_dsa_bind_check.cpp)
+target_link_libraries(glm_dsa_bind_check PRIVATE dgpp_models_glm_dsa dgpp_loaders)
+dgpp_set_common(glm_dsa_bind_check)
 
 # M5 d4 at real scale: the shard-parity gate (loader-vs-bind bitwise +
 # replicated digest + byte reconcile) as a deployment command — the same
@@ -447,7 +476,7 @@ if(DGPP_ENABLE_IBV)
   # The server binary: target dgpp_serve_app, installed as dgpp-serve (the
   # layout split of 2026-09-06; dgpp_serve is the library it links).
   add_executable(dgpp_serve_app apps/dgpp_serve.cpp)
-  target_link_libraries(dgpp_serve_app PRIVATE dgpp_models_glm_loader dgpp_models_qwen_layers dgpp_models_glm4_layers
+  target_link_libraries(dgpp_serve_app PRIVATE dgpp_models_glm_loader dgpp_models_qwen_layers dgpp_models_glm4_layers dgpp_models_glm_dsa_layers
                                              dgpp_loaders dgpp_bus
                                              dgpp_serve CUDA::cudart
                                              Threads::Threads)
@@ -519,11 +548,14 @@ add_executable(unit_tests
   tests/unit/qwen_binding_test.cpp
   tests/unit/glm4_config_test.cpp
   tests/unit/glm4_binding_test.cpp
+  tests/unit/glm_dsa_config_test.cpp
+  tests/unit/glm_dsa_binding_test.cpp
   tests/unit/nvfp4_quant_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm dgpp_models_qwen dgpp_models_glm4
+                                        dgpp_models_glm_dsa
                                         dgpp_net dgpp_serve Threads::Threads)
 target_compile_definitions(unit_tests PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 dgpp_set_common(unit_tests)
@@ -545,6 +577,9 @@ set_tests_properties(qwen_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME glm4_tokenizer_test
   COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm4_tokenizer_goldens.jsonl)
 set_tests_properties(glm4_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
+add_test(NAME glm_dsa_tokenizer_test
+  COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_dsa_tokenizer_goldens.jsonl)
+set_tests_properties(glm_dsa_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # M6 Stage 3b: the chat-template differential gate (host). Skips with rc 2
 # when the model cache is absent, same as above.
@@ -561,6 +596,9 @@ set_tests_properties(qwen_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME glm4_chat_template_test
   COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm4_chat_template_goldens.jsonl)
 set_tests_properties(glm4_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
+add_test(NAME glm_dsa_chat_template_test
+  COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_dsa_chat_template_goldens.jsonl)
+set_tests_properties(glm_dsa_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # M6 Stage 4: the serving capstone — HTTP/SSE over epoll + the OpenAI
 # generation service (host-only; the engine adapters live in the apps,
@@ -733,6 +771,52 @@ add_test(NAME glm4_forward_test
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/glm4_pure_ref.g4dump)
 set_tests_properties(glm4_forward_test PROPERTIES DEPENDS glm4_forward_generate)
 
+# The full GLM-5.3 forward (docs/glm53_plan.md G5): fixture -> smoke; the
+# python reference -> the dump parity.
+add_executable(glm_dsa_forward_test tests/cuda/glm_dsa_forward_test.cpp)
+target_include_directories(glm_dsa_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(glm_dsa_forward_test PRIVATE dgpp_models_glm_dsa_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(glm_dsa_forward_test)
+set(GLM_DSA_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/glm_dsa_forward_fixture)
+add_test(NAME glm_dsa_forward_fixture COMMAND glm_dsa_forward_test --write-fixture ${GLM_DSA_FORWARD_FIXTURE})
+add_test(NAME glm_dsa_forward_smoke COMMAND glm_dsa_forward_test --smoke ${GLM_DSA_FORWARD_FIXTURE})
+set_tests_properties(glm_dsa_forward_smoke PROPERTIES DEPENDS glm_dsa_forward_fixture)
+add_test(NAME glm_dsa_forward_generate
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm_dsa_reference_dump.py
+          gen-pure --checkpoint-dir ${GLM_DSA_FORWARD_FIXTURE}
+          --out ${CMAKE_CURRENT_BINARY_DIR}/glm_dsa_pure_ref.gdsdump)
+set_tests_properties(glm_dsa_forward_generate PROPERTIES DEPENDS glm_dsa_forward_fixture)
+add_test(NAME glm_dsa_forward_test
+  COMMAND glm_dsa_forward_test --checkpoint-dir ${GLM_DSA_FORWARD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/glm_dsa_pure_ref.gdsdump)
+set_tests_properties(glm_dsa_forward_test PROPERTIES DEPENDS glm_dsa_forward_generate)
+
+# The full GLM-5.3 session surface (G5): decode over the fixture.
+add_executable(glm_dsa_decode_test tests/cuda/glm_dsa_decode_test.cpp)
+target_include_directories(glm_dsa_decode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(glm_dsa_decode_test PRIVATE dgpp_models_glm_dsa_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(glm_dsa_decode_test)
+add_test(NAME glm_dsa_decode_test COMMAND glm_dsa_decode_test --fixture ${GLM_DSA_FORWARD_FIXTURE})
+set_tests_properties(glm_dsa_decode_test PROPERTIES DEPENDS glm_dsa_forward_fixture)
+
+# The full GLM-5.3 TP forwards: loopback worlds 2 and 4 (ports 29952/29953).
+add_executable(glm_dsa_tp_test tests/cuda/glm_dsa_tp_test.cpp)
+target_include_directories(glm_dsa_tp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(glm_dsa_tp_test PRIVATE dgpp_models_glm_dsa_layers dgpp_bus dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(glm_dsa_tp_test)
+add_test(NAME glm_dsa_tp_test COMMAND glm_dsa_tp_test)
+
+# The full GLM-5.3 decode engines: eager and graph, world 2 (ports 29954-29956).
+add_executable(glm_dsa_engine_test tests/cuda/glm_dsa_engine_test.cpp)
+target_include_directories(glm_dsa_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(glm_dsa_engine_test PRIVATE dgpp_models_glm_dsa_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(glm_dsa_engine_test)
+add_test(NAME glm_dsa_engine_test COMMAND glm_dsa_engine_test)
+
+add_executable(glm_dsa_forward_check apps/glm_dsa_forward_check.cpp)
+target_link_libraries(glm_dsa_forward_check PRIVATE dgpp_models_glm_dsa_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(glm_dsa_forward_check)
+
 # The GLM-4.7 session surface: incremental decode vs the re-forward, the
 # prefix snapshots, the eager speculator through the draft block.
 add_executable(glm4_decode_test tests/cuda/glm4_decode_test.cpp)
@@ -760,6 +844,16 @@ add_test(NAME glm4_engine_test COMMAND glm4_engine_test)
 add_executable(glm4_load_check apps/glm4_load_check.cpp)
 target_link_libraries(glm4_load_check PRIVATE dgpp_models_glm4_loader dgpp_loaders CUDA::cudart Threads::Threads)
 dgpp_set_common(glm4_load_check)
+
+add_executable(glm_dsa_loader_test tests/cuda/glm_dsa_loader_test.cpp)
+target_include_directories(glm_dsa_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(glm_dsa_loader_test PRIVATE dgpp_models_glm_dsa_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(glm_dsa_loader_test)
+add_test(NAME glm_dsa_loader_test COMMAND glm_dsa_loader_test)
+
+add_executable(glm_dsa_load_check apps/glm_dsa_load_check.cpp)
+target_link_libraries(glm_dsa_load_check PRIVATE dgpp_models_glm_dsa_loader dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(glm_dsa_load_check)
 
 add_executable(glm4_forward_check apps/glm4_forward_check.cpp)
 target_link_libraries(glm4_forward_check PRIVATE dgpp_models_glm4_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
@@ -810,6 +904,13 @@ target_link_libraries(fp4_gemv_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cuda
 dgpp_set_common(fp4_gemv_test)
 add_test(NAME fp4_gemv_test COMMAND fp4_gemv_test)
 set_tests_properties(fp4_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
+
+add_executable(packq_gemv_test tests/cuda/packq_gemv_test.cu tests/cuda/packq_gemv_checkpoint.cpp)
+target_include_directories(packq_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(packq_gemv_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cudart)
+dgpp_set_common(packq_gemv_test)
+add_test(NAME packq_gemv_test COMMAND packq_gemv_test)
+set_tests_properties(packq_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
 
 add_executable(scale_gemm_test
   tests/cuda/scale_gemm_test.cu

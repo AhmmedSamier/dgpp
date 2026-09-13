@@ -452,6 +452,7 @@ DGPP_TEST(qwen_loader_resident_mode_and_image_round_trip) {
     require(s.source_bytes_read() == before, "cache hits read no storage");
     s.release_sources();
     require(s.sources_released(), "sources released");
+    require(s.staging_released(), "the pinned staging mirror goes with the sources");
     bool refused = false;
     try {
       (void)s.hash_replicated();

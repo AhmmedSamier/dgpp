@@ -1505,16 +1505,24 @@ struct Renderer {
           throw std::runtime_error("chat-template: " + eval(*e.kids[1]).to_output_string());
         }
         if (callee.tag == Expr::Tag::Name && callee.name == "range") {
-          // range(a, b) — the only form this template uses.
-          if (e.kids.size() != 3) fail(ctx_.line, "range(a, b) only");
-          const Value a = eval(*e.kids[1]);
-          const Value b = eval(*e.kids[2]);
-          if (a.kind() != Value::Kind::Int || b.kind() != Value::Kind::Int)
-            fail(ctx_.line, "range: bounds must be integers");
+          // range(n), range(a, b) and range(a, b, step) — python's, over
+          // integers (GLM-5.3-Flash's template uses the two-argument form,
+          // the full GLM-5.3's the one-argument form too).
+          if (e.kids.size() < 2 || e.kids.size() > 4) fail(ctx_.line, "range takes one to three arguments");
+          std::vector<Value> args;
+          for (size_t i = 1; i < e.kids.size(); ++i) {
+            args.push_back(eval(*e.kids[i]));
+            if (args.back().kind() != Value::Kind::Int) fail(ctx_.line, "range: bounds must be integers");
+          }
+          const int64_t a = args.size() == 1 ? 0 : args[0].as_int(0);
+          const int64_t b = args.size() == 1 ? args[0].as_int(0) : args[1].as_int(0);
+          const int64_t step = args.size() == 3 ? args[2].as_int(0) : 1;
+          if (step == 0) fail(ctx_.line, "range: step must not be zero");
           std::vector<Value> out;
-          if (b.as_int(0) > a.as_int(0))
-            for (int64_t k = a.as_int(0); k < b.as_int(0); ++k)
-              out.push_back(Value::integer(k));
+          if (step > 0)
+            for (int64_t k = a; k < b; k += step) out.push_back(Value::integer(k));
+          else
+            for (int64_t k = a; k > b; k += step) out.push_back(Value::integer(k));
           return Value::list_value(std::move(out));
         }
         if (callee.tag == Expr::Tag::Name && callee.name == "namespace") {

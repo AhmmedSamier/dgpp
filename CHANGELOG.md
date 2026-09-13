@@ -6,6 +6,37 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **The full GLM-5.3's decode batch: sixteen rows** (2026-09-13, plan D9):
+  the family's cap was the fused decode select's eight rows of shared
+  memory; the select now launches its rows in groups of eight (a group
+  is the same work at any grouping), the pick kernels verdict sixteen
+  request slots, the DSA layer sizes its attention tiles and (row, split)
+  workspace from the count, and the absorb/vout projections keep their
+  warp kernels for every decode shape (`kProjMmaMinRows` 16 → 32: the
+  tensor-core forms are tolerance-equal, not bitwise, and a batched row
+  must be bitwise the same row alone). Eight request slots at MTP depth 1,
+  five at depth 2, four at depth 3; every recipe up to eight rows runs
+  the launches it always did. Gates: `dsa_test`'s row groups (12 and 16
+  rows bitwise the host mirror), `glm_dsa_engine_test`'s sixteen-row
+  world (eight slots at depth 1, batched transcripts bitwise the eager
+  engine's). Found on the way: the GEMM interface lowers bf16 calls up to
+  the model's decode rows to the GEMV chain, so a sixteen-row deployment
+  prefills 9–16-token prompts through it where an eight-row one used
+  cuBLASLt (last-bit differences, deterministic within a deployment).
+  The graph engine records 4- and 6-slot batch families for recipes wider
+  than four slots (four live requests on an eight-slot world had replayed
+  the sixteen-row every-slot family at 250–270 ms a step).
+- **The bus fold at two and three decode rows** (2026-09-13): the graph
+  all-reduce stages a payload in shared memory up to 80 KB (was 48 KB), so
+  the full GLM-5.3's two-row depth-1 fold (6144 x 2 x 3 peers = 72 KB) no
+  longer reads the NIC-placed rows twice, and both passes over peer memory
+  keep several system loads in flight per thread. Bitwise the old fold;
+  depth 1 66.9 ms/pass (from 68.0), depth 2 85.1 (from 88.2), T=1
+  unchanged. The L2 weight-prefetch knobs (`DGPP_L2_PREFETCH=off`,
+  `DGPP_L2_PREFETCH_MB`, `..._BOUNDARY`, `..._LAYER`) are site settings
+  the launcher forwards to every rank, for A/Bs; the A/B on the full
+  GLM-5.3 kept the prefetch on (off costs 4 ms a step at T=1 and 5 ms a
+  pass at depth 1).
 - **A bare `dgpp-cluster down` stops what is running** (2026-09-12):
   `down` and `status` without `--config` (or with `--all`) scan every
   deployment recorded under `DGPP_LOG_DIR/deployments` instead of the
@@ -17,6 +48,78 @@ The history by milestone. The dated engineering record in
   file's namespace and reported success after stopping nothing while
   another deployment kept the ports, so the next `up` failed preflight.
   `down --config FILE` on a deployment with no live rank now says so.
+- **The full GLM-5.3** (2026-09-12, `docs/glm53_plan.md`): a fourth model
+  family, `glm_moe_dsa` (`GlmMoeDsaForCausalLM`, 78 layers, 754B), served
+  from the int4/int8 group-64 pack-quantized release
+  (`HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64`) at 99.3 GiB of weights per
+  rank on four nodes. New in the engine: a packed-int GEMV core with the
+  exact code x scale dequant behind the MoE slot and grouped paths, the
+  DSA layer's decoupled interleaved RoPE (the rope key stored bf16 beside
+  the latent in every cache format, the flash kernels at a 576-wide
+  score), per-token selection with the relu'd indexer at select_k 2048,
+  cross-layer selection sharing (21 indexers over 78 layers), a loader on
+  the shared resident stream with the draft layer's experts requantized
+  at load, the session-core model, the serving family, three deployment
+  templates and the tokenizer / chat-template goldens (the template
+  interpreter's `range` gained the one-argument form). Gates: the DSA
+  layer against its host oracle at the full geometry, the fixture forward
+  against a pure-python reference, decode / prefix / speculator, TP
+  worlds 2 and 4, the graph engine at world 2, and the real layers 0–3
+  against transformers' own layer code (per layer 0.002–0.0035 relative
+  l2, the bf16 floor; MoE routing near-ties certified by margin).
+  `tools/checkpoint_audit.py` learned the pack-quantized triple and writes
+  `docs/checkpoint_budget_glm53.md` (99.30 GiB per rank at world 4, the
+  memory plan's number). Served on the four nodes the same day
+  (`scripts/fabric_glm_dsa_serve.sh`, `serve_mtp_classes.py`): T=1 51
+  ms/step, MTP depth 1 68–76 ms/pass at 1.77–1.97 tokens/pass, gsm8k 59/60
+  and HumanEval 40/40 with thinking on, MTP == T=1 transcripts; the
+  templates carry 112K bf16 (plain) / 96K bf16 (MTP) / 160K fp8 latent
+  caches. The prefill tile kernel for the packed formats is deferred
+  (the GEMV chain serves prefill at 7–9.5 ms per prompt token).
+- **`engine.embed_sharding: vocab`** (2026-09-13): the full GLM-5.3 can hold
+  its lm-head slice of the embedding rows on each rank instead of the
+  whole table — 1.33 GiB per rank back at world 4. A token's row is gathered
+  by the rank that holds it and summed across ranks by one fold (a row plus
+  zeros is exact in bf16), on the main path and again for the draft's
+  lookup: worlds 2 and 4, eager and recorded, are bitwise the replicated
+  worlds. The key rides the rank-0 settings record and the config digest;
+  the other families keep their tables whole. Default `replicated`; the
+  three GLM-5.3 templates set `vocab`.
+- **The memory plan's headroom is 4 GiB, from 8** (2026-09-12/13): the growth
+  after the plan check was measured on the full GLM-5.3 at world 4 (all
+  four ranks sampled through a boot, a 32K prefill and four live requests)
+  at a flat 5.5–6.0 GiB, 2.2 GiB of it the loader's pinned staging mirror.
+  The shared resident stream's `release_sources()` now frees that mirror
+  with the checkpoint mappings; the GLM-5.3 model materializes its stack in
+  its constructor and releases there, before its caches exist and before
+  any collective is in flight (Qwen and GLM-4.7 load lazily and keep their
+  mirror: a release mid-forward waits on the bus's persistent kernels for a
+  watchdog period), and every resident plan names the staging as an item. The residual after the check is 2.4–2.8
+  GiB; 4 GiB keeps 1.2–1.8 of margin, held by a one-hour soak at the
+  full GLM-5.3's 120K MTP shape (2,046 requests, none failed, memory flat
+  on all four ranks, no allocation stall or direct reclaim anywhere, rank 0
+  never under 2.7 GiB available). With the vocab-sharded embedding the
+  full GLM-5.3 templates carry 144K bf16 plain / 120K bf16 MTP / 208K fp8.
+  `serve_soak_run.sh` now honors a preset `DGPP_SERVE_KNOBS` (a soak at a
+  deployment's real shape) and counts stalled collectives only inside the
+  run (the peers' logs accumulate across boots of one deployment);
+  `serve_run.sh` passes the selected deployment as `--config`, without
+  which the launcher refused to stop a `--log-dir` world and the soak's
+  teardown had been leaving its world serving.
+- **`cluster_glm-5.3_int4-int8_w4_mtp2`** (2026-09-13): MTP depth 2 for the
+  full GLM-5.3 at two request slots (the eight-row decode bound). Measured:
+  86–89 ms/pass at 2.15–2.69 tokens/pass, a few percent per token either
+  way by class (code and JSON gain, chat loses); depth 1 stays the default.
+- **The memory ledger** (2026-09-13): one INFO line per boot phase (after
+  the plan check, the bus, the loader, the globals, the resident stack, the
+  caches, the model, the graph engine, the warm capture, at listening)
+  with the process's resident split and the device's free memory, and one
+  per graph variant with its executable's device memory. What it found on
+  the full GLM-5.3: the executables are 0.39 GiB for fourteen variants
+  (7–15 KB per node), the process grows 0.7 GiB on the host, and the rest
+  of the 2.7 GiB the plan does not name — about 2 GiB — is CUDA's own
+  (cuBLASLt's kernels and the context's growth at first launches), not a
+  plan item that can shrink. The headroom stays 4 GiB.
 - Setup now covers CUDA discovery outside `PATH`, head/peer dependencies,
   outbound connectivity, verified SSH login, offline preparation and storage
   budgeting. Empty explicit `--config` arguments are rejected.

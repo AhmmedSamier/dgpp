@@ -57,9 +57,10 @@ inline float butterfly_sum_32(const float* in) {
 
 // One pool's logit from q_fp8/w_folded against a cache row, exactly as the
 // device kernels compute it (separate mul/add, fold order pinned).
+// `relu` clamps each head's dot at zero (the full GLM-5.3's indexer).
 inline float pool_logit_mirror(const uint8_t* q8_row, const float* w_row,
                                const uint8_t* k8_row, float ks, int heads,
-                               int dim) {
+                               int dim, bool relu = false) {
   float contrib[32];
   for (int h = 0; h < heads; ++h) {
     float dot = 0.0f;
@@ -67,6 +68,7 @@ inline float pool_logit_mirror(const uint8_t* q8_row, const float* w_row,
       dot += fp8_e4m3_bits_to_float(q8_row[h * dim + d]) *
              fp8_e4m3_bits_to_float(k8_row[d]);
     }
+    if (relu) dot = std::max(dot, 0.0f);
     contrib[h] = (w_row[h] * ks) * dot;
   }
   return butterfly_sum_32(contrib);
@@ -103,7 +105,7 @@ inline void audit_flipped_row(int select_k, const int32_t* dev_topk,
                               int dim, int kpool, NearTieAudit& out,
                               const float* dev_dots = nullptr,
                               int64_t dot_stride = 0, int64_t row = -1,
-                              int64_t topk_width = -1) {
+                              int64_t topk_width = -1, bool relu = false) {
   // Token sets -> SCORED pool sets. The expanded row is [selected pool
   // tokens (ascending)][incomplete tail tokens][-1 pad]; tail tokens start
   // at visible*kpool and are always appended by both sides (never scored),
@@ -141,6 +143,7 @@ inline void audit_flipped_row(int select_k, const int32_t* dev_topk,
           dot += fp8_e4m3_bits_to_float(dev_q8[h * dim + d]) *
                  fp8_e4m3_bits_to_float(dev_k[j * dim + d]);
       }
+      if (relu) dot = std::max(dot, 0.0f);
       contrib[h] = (dev_w[h] * dev_ks[j]) * dot;
     }
     return butterfly_sum_32(contrib);
@@ -178,7 +181,7 @@ inline void audit_flipped_row(int select_k, const int32_t* dev_topk,
     logits_dev[size_t(j)] = dev_logit(j);
     logits_ref[size_t(j)] =
         pool_logit_mirror(ref_q8, ref_w, ref_k + j * dim, ref_ks[j], heads,
-                          dim);
+                          dim, relu);
     noise_sum += std::abs(double(logits_dev[j]) - double(logits_ref[j]));
   }
   // Noise yardstick: mean |dev - ref| logit difference over visible pools.

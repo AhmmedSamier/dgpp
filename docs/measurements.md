@@ -314,6 +314,90 @@ against transformers' own layer code on the real weights — layer-0 relative
 l2 0.036 -> 0.0025), and the draft block takes the post-final-norm hidden
 (11–46 % acceptance with the pre-norm residual, 79–98 % after).
 
+### The full GLM-5.3 (HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64) serving on four nodes (2026-09-12)
+
+`scripts/fabric_glm_dsa_serve.sh deploy/cluster_glm-5.3_int4-int8_w4_{mtp1,plain,mtp1_large-cache}.json`,
+the 754B model at 99.30 GiB of int4/int8 g64 weights per rank (docs/glm53_plan.md G6;
+the dated record `benchmarks/results/2026-09-12-glm53-full.md`).
+
+| reading | value |
+|---|---|
+| memory plan, MTP depth 1, 48K bf16 latent cache, 4 slots | 105.24 GiB per rank + 8 GiB headroom; T=1 103.58 GiB; sized to the fabric's smallest node (rank 2: 119.67 GiB visible, a firmware reservation 2 GiB larger than the other nodes') |
+| boot | 30 s from the resident image (3.9 s model, 24 s of graph capture); the first boot, which captures the image on every rank, 405 s |
+| T=1 decode, one request | 51.1 ms/step, 19.5 tok/s (the audit's bytes floor 44.5 ms: 10.2 GB per rank per step; 158 collectives) |
+| MTP decode, one request | 68–76 ms/pass at 1.77–1.97 tokens/pass (draft acceptance 77–97 % by class), 36–42 ms/token |
+| four live requests | 180–185 ms per eight-row step, 1.95 tok/step/req at 92–96 %; aggregate 38–43 tok/s (9.5–10.8 per request) |
+| prefill through the service | 7.3 / 7.1 / 8.4 / 9.5 ms per token at ~520 / 2.1K / 8.4K / 16.8K tokens (the deferred packed tile kernel, plan D7) |
+| MTP == T=1 transcripts | identical, 4 of 4 prompts; op streams identical across the four ranks at every shutdown |
+| eval (thinking on at `reasoning_effort` low: the template has no switch) | gsm8k 59/60, HumanEval 40/40, schema extraction 30/30; no answer truncated (mean 92 / 142 / 58 completion tokens) |
+| API check | every case |
+| the draft's hidden convention | post-final-norm (plan D6), 77–97 % acceptance |
+| the fp8 latent cache (`mtp1_large-cache`) | same pace (68–69 ms/pass, 74–98 % acceptance), transcripts diverge from the bf16 cache's after 97–464 characters |
+| after node 2's SoC firmware update (same night) | the 64K bf16 template boots on the uniform fabric (106.68 GiB per rank, 34 s), transcripts identical to the 48K campaign's, the same pass times and acceptance |
+| `engine.embed_sharding: vocab` (2026-09-13) | weights 97.97 GiB per rank (−1.33), transcripts identical 4/4, 67–68 ms/pass and 38.1 ms/token unchanged; worlds 2 and 4 and the recorded graph world bitwise the replicated ones |
+| the peers headless (2026-09-13) | +0.2 GiB available on two nodes, ~0 on the ASUS: the desktop's pages were already reclaimable |
+| headroom 4 GiB (2026-09-13) | a one-hour soak at the 120K MTP shape: 2,046 requests, 0 failed, memory flat on all four ranks, no allocation stall or direct reclaim, rank 0 ≥ 2.76 GiB available; templates 144K plain / 120K MTP / 208K fp8 |
+| MTP depth 2, two slots (2026-09-13) | 86–89 ms/pass, 2.15–2.69 tok/pass (p1 73–95 %, p2 42–77 %): code/json −5–7 % per token, prose −4 %, math 0, chat +5 %; transcripts identical; depth 1 stays the default |
+| MTP depth 3, two slots (2026-09-13) | 103–106 ms/pass, 2.37–3.22 tok/pass (p3 18–56 %): equal to depth 2 on code/json (32.9 / 33.0 ms/token), worse on prose/math/chat; the pass grows 17–19 ms per depth level |
+| the residual ledger (2026-09-13) | per-phase `memory ledger` lines: the 2.7 GiB beyond the plan is 0.39 GiB of graph executables (14 variants, 7–15 KB per node), 0.7 GiB of host growth (capture bookkeeping, the service) and ~2 GiB of CUDA's own (cuBLASLt kernel selections, the context at first launches); stack frames ≤ 1.2 KB, the binary's device code 38 MiB — nothing the plan can shrink |
+
+The first boot attempt at 64K templates was refused by rank 2 ("needs 106.68
+GiB plus 8.00 GiB headroom but this node has 114.43 GiB free") and the other
+ranks' lanes to it then failed with "transport retry counter exceeded" — a
+peer exiting during the first collective looks like a fabric fault; the
+memory plan of every rank is the first thing to read.
+
+### The memory plan's headroom, measured (2026-09-12, late)
+
+`kMemoryHeadroomBytes` (apps/dgpp_serve.cpp) covered what the plan does not
+itemize; it was 8 GiB since the 262K freeze. Measured on the full GLM-5.3's
+64K MTP world with 2 s samplers on all four ranks (node used = MemTotal −
+MemAvailable, minus the idle baseline, minus the 106.68 GiB plan): +5.5–5.6
+GiB on the peers and +6.0 on rank 0 at listening, during a 33.7K-token
+prefill and under four live requests alike — a fixed cost, not a function
+of the context or the load. Of it ~1 GiB is the process before the check
+(outside the budget the check reads), 2.22 GiB the shared resident stream's
+pinned staging mirror (the largest layer or the globals, kept for the
+process's life), 2.4–2.8 GiB the rest (cuBLAS handles, the CUDA runtime's
+2.3 GiB of shared mappings, the service's tables).
+
+Changed: `release_sources()` on the shared resident stream frees the
+staging mirror with the checkpoint mappings; the GLM-5.3 model materializes
+its stack in its constructor and releases right there, before its caches
+exist and before the bus has a collective in flight, so the plan counts the
+staging only beyond what the caches replace. Qwen and GLM-4.7 still load
+lazily and keep their mirror (an automatic release at the last layer was
+tried and withdrawn: mid-forward, `cudaFreeHost` waits on the bus's
+persistent kernels for a watchdog period — the loopback worlds deadlocked
+for exactly 5 s); their plans now name the staging, which is conservative.
+The headroom is 5 GiB. Verified: the same world settles 2.3–2.4
+GiB lower, boots in 30.5 s, and the 160K fp8 template (plan 109.19 GiB)
+boots on the four nodes with 3 GiB still free. Records:
+`build-ci/fabric-runs/glm53_mem_2026-09-12/` and `glm53_mem_verify_2026-09-12/`.
+
+### The full GLM-5.3: the bus fold and the L2 prefetch (2026-09-13)
+
+Back-to-back rituals (`benchmarks/results/2026-09-12-glm53-full.md`, the
+last section). The graph all-reduce's shared-memory staging budget widened
+48 → 80 KB so the depth-1 pass's two-row fold (72 KB from three peers)
+stages like a one-row fold, plus unrolled system loads in the hash and
+fold passes: depth 1 68.0 → 66.9 ms/pass, depth 2 88.2 → 85.1, T=1
+51.3 unchanged, every transcript identical. The L2 weight prefetch off on
+all four ranks: T=1 51.3 → 55.4 ms/step, depth 1 66.9 → 72.1 ms/pass —
+it stays on.
+
+### The full GLM-5.3: sixteen decode rows (2026-09-13)
+
+The family's decode cap lifted from eight rows to sixteen (the select in
+row groups of eight, sixteen pick request slots, the DSA layer's tiles from
+the count, the decode path's projections pinned to the warp kernels). The
+four-slot templates keep their launches: T=1 51.3 ms/step, depth 1 67.1
+ms/pass, transcripts identical. Eight slots at depth 1 (a site config,
+plan 110.42 GiB; the graph engine's new 4- and 6-slot families beside the
+2-, 3- and every-slot ones): c=1 29 tok/s, c=4 41–42 (the four-slot
+template's own 40–43), c=6 46–47, c=8 48–50 aggregate, at 67 / 170 / 220
+/ 278 ms a step. Record: `benchmarks/results/2026-09-12-glm53-full.md`.
+
 ### MTP depth 2 on GLM-4.7 (2026-09-10)
 
 The depth-2 chain (the session core's `session_draft_chain` /

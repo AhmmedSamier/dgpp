@@ -116,6 +116,16 @@ struct GlmMoeWeights {
   const GlmQuantMatrix* experts = nullptr;
   const GlmFp4Matrix* experts_fp4 = nullptr;
   bool nvfp4() const { return experts_fp4 != nullptr; }
+  // The packed-int format (2026-09-12, full GLM-5.3, docs/glm53_plan.md
+  // D2): routed experts as int4 or int8 group-64 triples, the shared
+  // expert as an int8 triple of the routed experts' shapes read as
+  // view-table entry n_experts through the packed core (the slot kernels'
+  // one table: a packed routed table needs a packed shared expert, or
+  // none). Exactly one of experts / experts_fp4 / experts_packed is set.
+  GlmPackedMatrix shared_packed[3];
+  bool shared_packq() const { return shared_packed[0].packed != nullptr; }
+  const GlmPackedMatrix* experts_packed = nullptr;
+  bool packq() const { return experts_packed != nullptr; }
 };
 
 // The decode path's device-side expert table entry: the
@@ -146,6 +156,17 @@ struct MoeExpertView {
   }
   static MoeExpertView of(const GlmFp4Matrix& m) {
     return MoeExpertView{m.payload, nullptr, m.scales, m.global_scale, 7, 7};
+  }
+  // The packed-int interpretation: payload = the I32 words [n, k*bits/32]
+  // as bytes, packed_scales = bf16 [n, k/64], bits = 4 or 8 (0: not packed).
+  const uint16_t* packed_scales = nullptr;
+  int bits = 0;
+  static MoeExpertView of(const GlmPackedMatrix& m) {
+    MoeExpertView v;
+    v.payload = reinterpret_cast<const uint8_t*>(m.packed);
+    v.packed_scales = m.scales;
+    v.bits = m.bits;
+    return v;
   }
 };
 

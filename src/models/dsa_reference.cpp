@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "common/dtypes.hpp"
@@ -116,25 +117,46 @@ void fwht128_quant_fp8(const uint16_t* q, int rows, int dim, uint8_t* q_fp8,
   }
 }
 
+void rope_interleave_row(uint16_t* x, int rope_dim, int64_t pos,
+                        const uint16_t* table, int64_t table_positions) {
+  if (rope_dim <= 0 || pos < 0) return;
+  if (pos >= table_positions) pos = table_positions - 1;
+  const int half = rope_dim / 2;
+  const auto rb = [](float v) { return bf16_bits_to_float(float_to_bf16_bits(v)); };
+  for (int i = 0; i < half; ++i) {
+    const float c = bf16_bits_to_float(table[(pos * 2) * half + i]);
+    const float s = bf16_bits_to_float(table[(pos * 2 + 1) * half + i]);
+    const float x0 = bf16_bits_to_float(x[2 * i]);
+    const float x1 = bf16_bits_to_float(x[2 * i + 1]);
+    const float t1 = rb(x0 * c), t2 = rb(x1 * s);
+    const float u1 = rb(x1 * c), u2 = rb(x0 * s);
+    x[2 * i] = float_to_bf16_bits(t1 - t2);
+    x[2 * i + 1] = float_to_bf16_bits(u1 + u2);
+  }
+}
+
 template <typename Acc>
 void compress_pool(const uint16_t* k, const uint16_t* gate, const float* ape,
                    int kpool, int dim, uint8_t* k_out, float* scale_out) {
   // Per-dimension softmax over the pool's slots, fp32/Acc accumulation.
+  // No gate / no APE (kpool 1): every score is 0, the one-slot softmax 1.
+  const auto score_of = [&](int s, int d) -> Acc {
+    Acc v = 0;
+    if (gate) v += static_cast<Acc>(bf16_bits_to_float(gate[int64_t(s) * dim + d]));
+    if (ape) v += static_cast<Acc>(ape[int64_t(s) * dim + d]);
+    return v;
+  };
   std::vector<Acc> x(dim);
   for (int d = 0; d < dim; ++d) {
     Acc max_score = -std::numeric_limits<Acc>::infinity();
     for (int s = 0; s < kpool; ++s) {
-      Acc score =
-          static_cast<Acc>(bf16_bits_to_float(gate[int64_t(s) * dim + d])) +
-          static_cast<Acc>(ape[int64_t(s) * dim + d]);
+      Acc score = score_of(s, d);
       max_score = std::max(max_score, score);
     }
     Acc acc = 0;
     Acc denom = 0;
     for (int s = 0; s < kpool; ++s) {
-      Acc score =
-          static_cast<Acc>(bf16_bits_to_float(gate[int64_t(s) * dim + d])) +
-          static_cast<Acc>(ape[int64_t(s) * dim + d]);
+      Acc score = score_of(s, d);
       Acc prob = std::exp(score - max_score);
       denom += prob;
       acc += static_cast<Acc>(bf16_bits_to_float(k[int64_t(s) * dim + d])) *
@@ -159,7 +181,7 @@ void compress_pool(const uint16_t* k, const uint16_t* gate, const float* ape,
 template <typename Acc>
 void pool_logits(const uint8_t* q_fp8, const float* w, const uint8_t* k_fp8,
                  const float* k_scale, int64_t num_pools, int heads, int dim,
-                 float* logits) {
+                 float* logits, bool relu) {
   for (int64_t j = 0; j < num_pools; ++j) {
     Acc total = 0;
     for (int h = 0; h < heads; ++h) {
@@ -169,6 +191,7 @@ void pool_logits(const uint8_t* q_fp8, const float* w, const uint8_t* k_fp8,
                    q_fp8[(int64_t(h) * dim) + d])) *
                static_cast<Acc>(fp8_e4m3_bits_to_float(
                    k_fp8[j * dim + d]));
+      if (relu) dot = std::max(dot, Acc(0));
       total += static_cast<Acc>(w[h]) * static_cast<Acc>(k_scale[j]) * dot;
     }
     logits[j] = static_cast<float>(total);
@@ -220,23 +243,28 @@ template <typename Acc>
 void absorbed_attn(const uint16_t* q, const uint16_t* latent,
                    int64_t latent_stride, const int32_t* tokens, int n_sel,
                    const uint16_t* kv_b, int local_heads, int nope, int v,
-                   int kv_lora, float scale, uint16_t* out) {
+                   int kv_lora, float scale, uint16_t* out, int rope) {
   const int head_rows = nope + v;  // kv_b rows per head
+  const int q_head = nope + rope;  // q row per head: [nope | rope]
   for (int h = 0; h < local_heads; ++h) {
     const uint16_t* w_uk = kv_b + int64_t(h) * head_rows * kv_lora;
+    const uint16_t* qh = q + int64_t(h) * q_head;
 
-    // Absorbed query q~[c] = sum_d q_h[d] * W_uk[d][c], bf16 GEMM rounding.
-    std::vector<uint16_t> q_tilde(kv_lora);
+    // Absorbed query q~[c] = sum_d q_h[d] * W_uk[d][c], bf16 GEMM rounding;
+    // the rope slice rides along: q~ = [W_uk^T q_nope | q_rot].
+    std::vector<uint16_t> q_tilde(size_t(kv_lora + rope));
     for (int c = 0; c < kv_lora; ++c) {
       Acc acc = 0;
       for (int d = 0; d < nope; ++d)
-        acc += static_cast<Acc>(bf16_bits_to_float(q[int64_t(h) * nope + d])) *
+        acc += static_cast<Acc>(bf16_bits_to_float(qh[d])) *
                static_cast<Acc>(
                    bf16_bits_to_float(w_uk[int64_t(d) * kv_lora + c]));
-      q_tilde[c] = float_to_bf16_bits(static_cast<float>(acc));
+      q_tilde[size_t(c)] = float_to_bf16_bits(static_cast<float>(acc));
     }
+    for (int i = 0; i < rope; ++i) q_tilde[size_t(kv_lora + i)] = qh[nope + i];
 
-    // Scores over the selected tokens; -1 slots are skipped.
+    // Scores over the selected tokens (the latent and the rope key);
+    // -1 slots are skipped.
     std::vector<Acc> s(n_sel);
     for (int t = 0; t < n_sel; ++t) {
       if (tokens[t] < 0) {
@@ -245,8 +273,8 @@ void absorbed_attn(const uint16_t* q, const uint16_t* latent,
       }
       const uint16_t* lat = latent + int64_t(tokens[t]) * latent_stride;
       Acc acc = 0;
-      for (int c = 0; c < kv_lora; ++c)
-        acc += static_cast<Acc>(bf16_bits_to_float(q_tilde[c])) *
+      for (int c = 0; c < kv_lora + rope; ++c)
+        acc += static_cast<Acc>(bf16_bits_to_float(q_tilde[size_t(c)])) *
                static_cast<Acc>(bf16_bits_to_float(lat[c]));
       s[t] = acc * static_cast<Acc>(scale);
     }
@@ -331,11 +359,12 @@ void layernorm_bf16(const uint16_t* x, const uint16_t* w, const uint16_t* b,
 template <typename Acc>
 void indexer_query_inputs(const HostWeights& w, const DsaConfig& cfg,
                           const uint16_t* hidden_in, int tokens,
-                          uint8_t* q_fp8, float* w_folded) {
+                          uint8_t* q_fp8, float* w_folded, int64_t token_start) {
   const int hidden = cfg.hidden;
   const int heads = cfg.index_n_heads;
   const int idx_dim = cfg.index_head_dim;
-  const int qkv_cols = cfg.q_lora_rank + cfg.kv_lora_rank;
+  const int rope = cfg.qk_rope_head_dim;
+  const int qkv_cols = cfg.q_lora_rank + cfg.kv_lora_rank + rope;
   const float logit_scale =
       static_cast<float>(std::pow(double(idx_dim), -0.5) *
                          std::pow(double(heads), -0.5));
@@ -351,6 +380,12 @@ void indexer_query_inputs(const HostWeights& w, const DsaConfig& cfg,
   std::vector<uint16_t> q_idx(size_t(tokens) * heads * idx_dim);
   gemm_bf16<Acc>(q_c.data(), cfg.q_lora_rank, w.wq_b, q_idx.data(), tokens,
                  heads * idx_dim, cfg.q_lora_rank);
+  // The indexer's rope slice is each head's FIRST rope dims.
+  if (rope > 0)
+    for (int t = 0; t < tokens; ++t)
+      for (int h = 0; h < heads; ++h)
+        rope_interleave_row(&q_idx[(size_t(t) * heads + h) * idx_dim], rope,
+                            token_start + t, w.rope_table, w.rope_table_positions);
   std::vector<float> q_scale(size_t(tokens) * heads);
   fwht128_quant_fp8<Acc>(q_idx.data(), tokens * heads, idx_dim, q_fp8,
                          q_scale.data());
@@ -374,7 +409,7 @@ template <typename Acc>
 void layer_forward(const HostWeights& w, const DsaConfig& cfg,
                    const uint16_t* hidden_in, HostState& state,
                    int64_t token_start, int tokens, uint16_t* layer_out,
-                   int32_t* topk_out) {
+                   int32_t* topk_out, const int32_t* reuse_topk) {
   const DsaGeometry g = DsaGeometry::from_config(cfg);
   const int hidden = cfg.hidden;
   const int kpool = cfg.index_kpool;
@@ -382,16 +417,27 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
   const int max_selected = g.max_selected;
   const int heads = cfg.index_n_heads;
   const int idx_dim = cfg.index_head_dim;
+  const int rope = cfg.qk_rope_head_dim;
+  const int nope = cfg.qk_nope_head_dim;
+  const int64_t lw = state.latent_width;  // kv_lora + rope
+  if (lw != cfg.kv_lora_rank + rope)
+    throw std::invalid_argument("dsa_ref: state was reset for another geometry");
+  if (!w.owns_indexer() && reuse_topk == nullptr)
+    throw std::invalid_argument("dsa_ref: a selection-reusing layer needs reuse_topk");
+  const auto rotate = [&](uint16_t* row, int64_t pos) {
+    rope_interleave_row(row, rope, pos, w.rope_table, w.rope_table_positions);
+  };
   // ---- projections ----
-  // Fused [q_a | kv_a]: [tokens, 1536+512].
-  const int qkv_cols = cfg.q_lora_rank + cfg.kv_lora_rank;
+  // Fused [q_a | kv_a]: [tokens, q_lora + kv_lora (+ rope)].
+  const int qkv_cols = cfg.q_lora_rank + cfg.kv_lora_rank + rope;
   std::vector<uint16_t> qkv_a(size_t(tokens) * qkv_cols);
   gemm_bf16<Acc>(hidden_in, hidden, w.qkv_a, qkv_a.data(), tokens, qkv_cols,
                  hidden);
 
-  // RMSNorms on the split halves.
+  // RMSNorms on the split halves; the rope key rotated, not normed.
   std::vector<uint16_t> q_c(size_t(tokens) * cfg.q_lora_rank);
   std::vector<uint16_t> latent_rows(size_t(tokens) * cfg.kv_lora_rank);
+  std::vector<uint16_t> k_rot(size_t(tokens) * size_t(rope));
   for (int t = 0; t < tokens; ++t) {
     rmsnorm_bf16<Acc>(&qkv_a[size_t(t) * qkv_cols], w.q_aln,
                       &q_c[size_t(t) * cfg.q_lora_rank], cfg.q_lora_rank,
@@ -399,47 +445,68 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
     rmsnorm_bf16<Acc>(&qkv_a[size_t(t) * qkv_cols + cfg.q_lora_rank],
                       w.kv_aln, &latent_rows[size_t(t) * cfg.kv_lora_rank],
                       cfg.kv_lora_rank, cfg.rms_norm_eps);
+    if (rope > 0) {
+      std::memcpy(&k_rot[size_t(t) * rope],
+                  &qkv_a[size_t(t) * qkv_cols + cfg.q_lora_rank + cfg.kv_lora_rank],
+                  size_t(rope) * 2);
+      rotate(&k_rot[size_t(t) * rope], token_start + t);
+    }
   }
 
   // Latent cache append. A quantized cache (cfg.latent_format, 2026-09-06)
   // stores each row through the format's codec and reads back the bf16 the
   // attention kernels see: the reference keeps the DEQUANTIZED row, so its
   // attention consumes exactly the values the device's tile loads produce.
-  if (cfg.latent_format == LatentFormat::kBf16) {
-    std::memcpy(&state.latent[size_t(token_start) * cfg.kv_lora_rank],
-                latent_rows.data(), size_t(tokens) * cfg.kv_lora_rank * 2);
-  } else {
+  // The rope key follows the latent in the row, bf16 in every format.
+  {
     std::vector<uint8_t> coded(latent_row_bytes(cfg.latent_format, cfg.kv_lora_rank));
     for (int t = 0; t < tokens; ++t) {
-      float row_scale = 0.0f;
-      latent_quantize_row_host(cfg.latent_format,
-                               &latent_rows[size_t(t) * cfg.kv_lora_rank],
-                               cfg.kv_lora_rank, coded.data(), &row_scale);
-      latent_dequantize_row_host(
-          cfg.latent_format, coded.data(), row_scale, cfg.kv_lora_rank,
-          &state.latent[size_t(token_start + t) * cfg.kv_lora_rank]);
+      uint16_t* dst = &state.latent[size_t(token_start + t) * size_t(lw)];
+      if (cfg.latent_format == LatentFormat::kBf16) {
+        std::memcpy(dst, &latent_rows[size_t(t) * cfg.kv_lora_rank],
+                    size_t(cfg.kv_lora_rank) * 2);
+      } else {
+        float row_scale = 0.0f;
+        latent_quantize_row_host(cfg.latent_format,
+                                 &latent_rows[size_t(t) * cfg.kv_lora_rank],
+                                 cfg.kv_lora_rank, coded.data(), &row_scale);
+        latent_dequantize_row_host(cfg.latent_format, coded.data(), row_scale,
+                                   cfg.kv_lora_rank, dst);
+      }
+      if (rope > 0)
+        std::memcpy(dst + cfg.kv_lora_rank, &k_rot[size_t(t) * rope], size_t(rope) * 2);
     }
   }
   state.num_tokens = std::max(state.num_tokens, token_start + tokens);
 
-  // q (MLA) from the normed q-lora.
+  // q (MLA) from the normed q-lora; each head's rope slice rotated.
   std::vector<uint16_t> q(size_t(tokens) * g.local_q_rows);
   gemm_bf16<Acc>(q_c.data(), cfg.q_lora_rank, w.q_b, q.data(), tokens,
                  g.local_q_rows, cfg.q_lora_rank);
+  if (rope > 0)
+    for (int t = 0; t < tokens; ++t)
+      for (int h = 0; h < g.local_heads; ++h)
+        rotate(&q[size_t(t) * g.local_q_rows + size_t(h) * (nope + rope) + nope],
+               token_start + t);
 
-  // Indexer k (LayerNorm) and gate from hidden.
+  std::vector<uint16_t> attn_out(size_t(tokens) * g.local_v_rows);
+  if (w.owns_indexer()) {
+  // Indexer k (LayerNorm, then the rope slice rotated) and gate from hidden.
   std::vector<uint16_t> k_rows(size_t(tokens) * idx_dim);
   {
     std::vector<uint16_t> k_raw(size_t(tokens) * idx_dim);
     gemm_bf16<Acc>(hidden_in, hidden, w.wk, k_raw.data(), tokens, idx_dim,
                    hidden);
-    for (int t = 0; t < tokens; ++t)
+    for (int t = 0; t < tokens; ++t) {
       layernorm_bf16<Acc>(&k_raw[size_t(t) * idx_dim], w.k_norm_w, w.k_norm_b,
                           &k_rows[size_t(t) * idx_dim], idx_dim, 1e-6f);
+      if (rope > 0) rotate(&k_rows[size_t(t) * idx_dim], token_start + t);
+    }
   }
-  std::vector<uint16_t> gate_rows(size_t(tokens) * idx_dim);
-  gemm_bf16<Acc>(hidden_in, hidden, w.gate, gate_rows.data(), tokens, idx_dim,
-                 hidden);
+  std::vector<uint16_t> gate_rows(size_t(tokens) * idx_dim, 0);
+  if (w.gate)
+    gemm_bf16<Acc>(hidden_in, hidden, w.gate, gate_rows.data(), tokens, idx_dim,
+                   hidden);
 
   // Selection-side indexer inputs (q_fp8 + folded weights): shared with the
   // exported audit helper, so parity tests audit divergences against the
@@ -447,7 +514,7 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
   std::vector<uint8_t> q_fp8(size_t(tokens) * heads * idx_dim);
   std::vector<float> w_folded(size_t(tokens) * heads);
   indexer_query_inputs<Acc>(w, cfg, hidden_in, tokens, q_fp8.data(),
-                            w_folded.data());
+                            w_folded.data(), token_start);
 
   // ---- pool writes: complete pools covered by this batch's end ----
   // A pool's kpool members may span prior batches (decode continuation):
@@ -476,8 +543,8 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
       std::memcpy(&pool_k[size_t(s) * idx_dim], ksrc, idx_dim * 2);
       std::memcpy(&pool_g[size_t(s) * idx_dim], gsrc, idx_dim * 2);
     }
-    compress_pool<Acc>(pool_k.data(), pool_g.data(), w.ape, kpool, idx_dim,
-                       &state.index_k[size_t(j) * idx_dim],
+    compress_pool<Acc>(pool_k.data(), w.gate ? pool_g.data() : nullptr, w.ape, kpool,
+                       idx_dim, &state.index_k[size_t(j) * idx_dim],
                        &state.index_scale[j]);
   }
   state.num_pools = std::max(state.num_pools, pool_hi);
@@ -501,7 +568,6 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
   // ---- per-query selection and attention ----
   std::vector<float> logits;
   std::vector<int32_t> pool_ids(select_k);
-  std::vector<uint16_t> attn_out(size_t(tokens) * g.local_v_rows);
   for (int t = 0; t < tokens; ++t) {
     const int64_t pos = token_start + t;
     const int64_t visible = (pos + 1) / kpool;
@@ -514,21 +580,35 @@ void layer_forward(const HostWeights& w, const DsaConfig& cfg,
       pool_logits<Acc>(&q_fp8[size_t(t) * heads * idx_dim],
                        &w_folded[size_t(t) * heads], state.index_k.data(),
                        state.index_scale.data(), visible, heads, idx_dim,
-                       logits.data());
+                       logits.data(), cfg.index_relu != 0);
       const int n_sel = select_pools(logits.data(), visible, select_k,
                                      pool_ids.data());
       n_tokens = expand_append_tail(pool_ids.data(), n_sel, pos, kpool,
                                     max_selected,
                                     topk_out + size_t(t) * max_selected);
     }
-    absorbed_attn<Acc>(&q[size_t(t) * g.local_q_rows], state.latent.data(),
-                       cfg.kv_lora_rank,
+    absorbed_attn<Acc>(&q[size_t(t) * g.local_q_rows], state.latent.data(), lw,
                        topk_out + size_t(t) * max_selected, n_tokens, w.kv_b,
-                       g.local_heads, cfg.qk_nope_head_dim, cfg.v_head_dim,
-                       cfg.kv_lora_rank, g.local_heads > 0
-                           ? 1.0f / std::sqrt(float(cfg.qk_nope_head_dim))
-                           : 1.0f,
-                       &attn_out[size_t(t) * g.local_v_rows]);
+                       g.local_heads, nope, cfg.v_head_dim, cfg.kv_lora_rank,
+                       g.local_heads > 0 ? 1.0f / std::sqrt(float(nope + rope)) : 1.0f,
+                       &attn_out[size_t(t) * g.local_v_rows], rope);
+  }
+  } else {
+    // The selection-reusing layer (plan D4): the handed-in rows, verbatim.
+    for (int t = 0; t < tokens; ++t) {
+      const int32_t* src = reuse_topk + size_t(t) * max_selected;
+      int32_t* dst = topk_out + size_t(t) * max_selected;
+      int n_tokens = 0;
+      for (int i = 0; i < max_selected; ++i) {
+        dst[i] = src[i];
+        if (src[i] >= 0) ++n_tokens;
+      }
+      absorbed_attn<Acc>(&q[size_t(t) * g.local_q_rows], state.latent.data(), lw,
+                         dst, n_tokens, w.kv_b, g.local_heads, nope, cfg.v_head_dim,
+                         cfg.kv_lora_rank,
+                         g.local_heads > 0 ? 1.0f / std::sqrt(float(nope + rope)) : 1.0f,
+                         &attn_out[size_t(t) * g.local_v_rows], rope);
+    }
   }
 
   // ---- output projection ----
@@ -549,29 +629,29 @@ template void fwht128_quant_fp8<double>(const uint16_t*, int, int, uint8_t*,
                                         float*);
 template void indexer_query_inputs<float>(const HostWeights&, const DsaConfig&,
                                           const uint16_t*, int, uint8_t*,
-                                          float*);
+                                          float*, int64_t);
 template void indexer_query_inputs<double>(const HostWeights&, const DsaConfig&,
                                            const uint16_t*, int, uint8_t*,
-                                           float*);
+                                           float*, int64_t);
 template void compress_pool<float>(const uint16_t*, const uint16_t*,
                                    const float*, int, int, uint8_t*, float*);
 template void compress_pool<double>(const uint16_t*, const uint16_t*,
                                     const float*, int, int, uint8_t*, float*);
 template void pool_logits<float>(const uint8_t*, const float*, const uint8_t*,
-                                 const float*, int64_t, int, int, float*);
+                                 const float*, int64_t, int, int, float*, bool);
 template void pool_logits<double>(const uint8_t*, const float*, const uint8_t*,
-                                  const float*, int64_t, int, int, float*);
+                                  const float*, int64_t, int, int, float*, bool);
 template void absorbed_attn<float>(const uint16_t*, const uint16_t*, int64_t,
                                    const int32_t*, int, const uint16_t*, int,
-                                   int, int, int, float, uint16_t*);
+                                   int, int, int, float, uint16_t*, int);
 template void absorbed_attn<double>(const uint16_t*, const uint16_t*, int64_t,
                                     const int32_t*, int, const uint16_t*, int,
-                                    int, int, int, float, uint16_t*);
+                                    int, int, int, float, uint16_t*, int);
 template void layer_forward<float>(const HostWeights&, const DsaConfig&,
                                    const uint16_t*, HostState&, int64_t, int,
-                                   uint16_t*, int32_t*);
+                                   uint16_t*, int32_t*, const int32_t*);
 template void layer_forward<double>(const HostWeights&, const DsaConfig&,
                                     const uint16_t*, HostState&, int64_t, int,
-                                    uint16_t*, int32_t*);
+                                    uint16_t*, int32_t*, const int32_t*);
 
 }  // namespace dgpp::dsa_ref

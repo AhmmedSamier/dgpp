@@ -33,4 +33,14 @@ bool lock_process_memory(std::string* error, size_t* locked_bytes = nullptr);
 // the checkpoint's file pages sit in that cache, reclaimable).
 size_t host_memory_available_bytes();
 
+// The process's resident memory split the way the residual ledger needs
+// (2026-09-13): anonymous (heap, the allocator), shared (/dev/zero mappings
+// — pinned host memory the CUDA runtime, the bus and the engine allocate),
+// file-backed (library images, reclaimable), and the locked total; plus the
+// node's MemAvailable. Bytes; zeros when /proc is unreadable.
+struct ProcessMemory {
+  size_t rss = 0, anon = 0, shmem = 0, file = 0, locked = 0, node_available = 0;
+};
+ProcessMemory process_memory_snapshot();
+
 }  // namespace dgpp

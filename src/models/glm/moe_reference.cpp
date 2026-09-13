@@ -86,6 +86,26 @@ std::vector<double> dequant_fp4_weights(const GlmFp4MatrixHost& mat) {
   return w;
 }
 
+// Packed-int weights: (code - 2^(bits-1)) x bf16(scale), EXACT (the
+// engine's exact policy, docs/glm53_plan.md D2: no bf16 rounding of the
+// weight; the group-factored fp32 chain differs from this by summation
+// order only).
+std::vector<double> dequant_packq_weights(const GlmPackedMatrixHost& mat) {
+  const int per = 32 / mat.bits;
+  const int64_t wc = mat.cols / per, sc = mat.cols / 64;
+  const uint32_t mask = (1u << mat.bits) - 1u;
+  const int offset = 1 << (mat.bits - 1);
+  std::vector<double> w(static_cast<size_t>(mat.rows) * mat.cols);
+  for (int64_t r = 0; r < mat.rows; ++r)
+    for (int64_t c = 0; c < mat.cols; ++c) {
+      const uint32_t word = mat.packed[static_cast<size_t>(r) * wc + c / per];
+      const int code = static_cast<int>((word >> (mat.bits * (c % per))) & mask) - offset;
+      const float s = bf16_bits_to_float(mat.scales[static_cast<size_t>(r) * sc + c / 64]);
+      w[static_cast<size_t>(r) * mat.cols + c] = static_cast<double>(code) * static_cast<double>(s);
+    }
+  return w;
+}
+
 // Decode payload x scales, rounded to bf16 (the engine's weight policy).
 std::vector<double> dequant_bf16_weights(const GlmQuantMatrixHost& mat) {
   const int64_t scale_cols = (mat.cols + 127) / 128;
@@ -144,7 +164,36 @@ GlmQuantMatrixHost glm_moe_host_view(const GlmMoeHostWeights& w,
 GlmQuantMatrixHost glm_moe_host_shared(const GlmMoeHostWeights& w,
                                        const GlmMoeConfig& cfg, int m) {
   // Under NVFP4 the fp8 vectors hold only the shared triple.
-  return glm_moe_host_view(w, cfg, w.nvfp4 ? m : cfg.n_experts * 3 + m);
+  return glm_moe_host_view(w, cfg, (w.nvfp4 || w.packq) ? m : cfg.n_experts * 3 + m);
+}
+
+GlmPackedMatrixHost glm_moe_host_view_packq(const GlmMoeHostWeights& w,
+                                            const GlmMoeConfig& cfg, int index) {
+  const int E = cfg.n_experts;
+  if (!w.packq || index < 0 || index >= w.packq_matrices(E))
+    throw std::invalid_argument("glm_moe_host_view_packq: not a packed-int index");
+  const int64_t I = cfg.inter, H = cfg.hidden;
+  GlmPackedMatrixHost m;
+  const bool down = index % 3 == 2;
+  const bool shared = index >= E * 3;
+  m.rows = down ? H : I;
+  m.cols = down ? I : H;
+  m.bits = shared ? w.packq_bits_shared : w.packq_bits_routed;
+  // Every routed matrix has the same element count (gate/up [I,H], down
+  // [H,I]) and width; the shared triple the same shapes at its own width.
+  const int64_t elems = I * H;
+  const int64_t words_r = elems * w.packq_bits_routed / 32;
+  const int64_t words_s = elems * w.packq_bits_shared / 32;
+  const int64_t scales_per = elems / 64;
+  const size_t p_off = shared ? static_cast<size_t>(E) * 3 * words_r + static_cast<size_t>(index - E * 3) * words_s
+                              : static_cast<size_t>(index) * words_r;
+  const size_t s_off = static_cast<size_t>(index) * scales_per;
+  const int64_t words = shared ? words_s : words_r;
+  if (p_off + words > w.packq_words.size() || s_off + scales_per > w.packq_scales.size())
+    throw std::invalid_argument("glm_moe_host_view_packq: index out of range");
+  m.packed = w.packq_words.data() + p_off;
+  m.scales = w.packq_scales.data() + s_off;
+  return m;
 }
 
 GlmFp4MatrixHost glm_moe_host_view_fp4(const GlmMoeHostWeights& w,
@@ -276,7 +325,9 @@ void glm_moe_ref_forward(const uint16_t* hidden, const GlmMoeHostWeights& w,
       const GlmFp4MatrixHost v = glm_moe_host_view_fp4(w, cfg, index);
       return Mat{dequant_fp4_weights(v), static_cast<double>(v.global_scale)};
     }
-    const int fp8_index = w.nvfp4 ? index - E * 3 : index;
+    if (w.packq && (index < E * 3 || w.shared_packq))
+      return Mat{dequant_packq_weights(glm_moe_host_view_packq(w, cfg, index)), 1.0};
+    const int fp8_index = (w.nvfp4 || w.packq) ? index - E * 3 : index;
     return Mat{dequant_bf16_weights(glm_moe_host_view(w, cfg, fp8_index)), 1.0};
   };
 

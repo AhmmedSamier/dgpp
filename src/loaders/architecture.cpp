@@ -20,7 +20,13 @@ ModelArchitecture detect_architecture(const minijson::Value& root) {
   std::string type;
   if (const minijson::Value* t = root.find("model_type"))
     if (t->is_string()) type = std::string(t->as_string());
-  if (arch.rfind("Glm5", 0) == 0 || (arch.empty() && type == "glm_moe_dsa"))
+  // Full GLM-5.3 (2026-09-12) is `GlmMoeDsaForCausalLM` / `glm_moe_dsa`;
+  // the Flash checkpoint's class starts with `Glm5` (its model_type is
+  // `glm5_next`, an older release wrote `glm_moe_dsa` there too, which is
+  // why the class name is read first).
+  if (arch.rfind("GlmMoeDsa", 0) == 0 || (arch.empty() && type == "glm_moe_dsa"))
+    return ModelArchitecture::GlmMoeDsa;
+  if (arch.rfind("Glm5", 0) == 0 || (arch.empty() && type == "glm5_next"))
     return ModelArchitecture::Glm5;
   if (arch.rfind("Qwen4Exp", 0) == 0 || (arch.empty() && type == "qwen4_exp"))
     return ModelArchitecture::Qwen4Exp;
@@ -28,7 +34,7 @@ ModelArchitecture detect_architecture(const minijson::Value& root) {
     return ModelArchitecture::Glm4Moe;
   throw std::runtime_error(
       "config.json: unsupported architecture '" + arch + "' (model_type '" +
-      type + "'); the engine implements Glm5*, Qwen4Exp* and Glm4Moe*");
+      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe* and GlmMoeDsa*");
 }
 
 ModelArchitecture detect_architecture_file(const std::string& path) {
