@@ -16,15 +16,18 @@ The history by milestone. The dated engineering record in
   RSS; the 2026-09-07 agent session's 85 requests: 21 MiB) and 37 bytes
   per generated token, all inside the 4 GiB headroom. A retired request
   now releases everything but its tombstone (id, status, counts); the
-  service and the peers (`Scheduler::set_keep_retired(false)`) drop the
-  tombstones and results at the first tick that finds nothing pending —
-  the same quantum on every rank, since the journal carries every tick —
-  so an idle server holds no request history; `/v1/metrics` reports the
+  service and the peers (`Scheduler::set_keep_retired(false)`) compact
+  the tombstones and results away at the end of every tick — the same
+  quantum on every rank, since the journal carries every tick — so after
+  any tick, under any load, the scheduler holds exactly its live
+  requests; `/v1/metrics` reports the
   records and ids held (`scheduler.records`, `record_tokens`, `terminal`
   now cumulative); and each rank's `serve_rank<N>.ops` is written as the
   run records it, flushed at every retire, so a killed rank keeps its
-  evidence. Gates: `scheduler_test`'s release and drop tests (the drop
-  moves no op), `fabric_serve_test`'s file-mode observer.
+  evidence. Gates: `scheduler_test`'s release and compaction tests (the
+  compaction moves no op under overlapping load; the live heap flat at
+  +5 KiB from request 200 to request 40,000), `fabric_serve_test`'s
+  file-mode observer.
 - **The full GLM-5.3's decode batch: sixteen rows** (2026-09-13, plan D9):
   the family's cap was the fused decode select's eight rows of shared
   memory; the select now launches its rows in groups of eight (a group

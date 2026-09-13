@@ -17,6 +17,7 @@
 // The fake also enforces the engine interface: scripts are consumed in order,
 // each slot owns its pending transcript, and close() must find a live
 // reservation to release.
+#include <algorithm>
 #include <cstdio>
 #include <map>
 #include <stdexcept>
@@ -1084,14 +1085,17 @@ DGPP_TEST(scheduler_retire_releasesEverythingButTheTombstoneAndResult) {
   require(duplicate, "a kept tombstone still rejects its id");
 }
 
-DGPP_TEST(scheduler_keepRetiredOff_dropsTheHistoryWhenDrainedAndMovesNoOp) {
+DGPP_TEST(scheduler_keepRetiredOff_compactsEveryTickAndMovesNoOp) {
   // GIVEN two identically armed two-row engines under two schedulers, one
   // keeping retired records (the batch contract), one not (the service's
-  // and the peers' setting),
+  // and the peers' setting), and a script whose retirements interleave
+  // with live requests: a and b overlap and b outlives a; c and d wait in
+  // the queue, take slot 0 in turn, and d outlives b,
   const auto arm = [](FakeEngine& e) {
-    e.arm(0, {1, 2, 3}, /*max_steps=*/3);     // a, alone
-    e.arm(0, {10, 11, 12}, /*max_steps=*/3);  // b
-    e.arm(1, {20, 21, 22}, /*max_steps=*/3);  // c
+    e.arm(0, {1, 2, 3}, /*max_steps=*/3);             // a: slot 0
+    e.arm(1, {10, 11, 12, 13, 14}, /*max_steps=*/5);  // b: slot 1
+    e.arm(0, {20, 21}, /*max_steps=*/2);              // c: slot 0 after a
+    e.arm(0, {30, 31, 32, 33}, /*max_steps=*/4);      // d: slot 0 after c
   };
   FakeEngine keep_engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4,
                          /*batch_capacity=*/2);
@@ -1102,41 +1106,63 @@ DGPP_TEST(scheduler_keepRetiredOff_dropsTheHistoryWhenDrainedAndMovesNoOp) {
   Scheduler keep(&keep_engine, {kEos});
   Scheduler drop(&drop_engine, {kEos});
   drop.set_keep_retired(false);
-
-  // WHEN each runs a alone, drains, then b and c together,
   for (Scheduler* s : {&keep, &drop}) {
     s->submit(make_request("a", 5, 3));
-    s->run_to_completion();
-  }
-  const auto keep_idle = keep.meters();
-  const auto drop_idle = drop.meters();
-  for (Scheduler* s : {&keep, &drop}) {
-    s->submit(make_request("b", 5, 3));
-    s->submit(make_request("c", 5, 3));
-    s->run_to_completion();
+    s->submit(make_request("b", 5, 5));
+    s->submit(make_request("c", 5, 2));
+    s->submit(make_request("d", 5, 4));
   }
 
-  // THEN the batch scheduler holds a's record and result, the other holds
-  // nothing once drained — the counters cumulative either way —
-  require(keep_idle.records == 1 && keep_idle.terminal == 1 &&
-              keep_idle.record_tokens == 3 && keep.results().size() == 3,
-          "kept: a's record and its 3 ids, three results at the end");
-  require(drop_idle.records == 0 && drop_idle.record_tokens == 0 &&
-              drop_idle.terminal == 1 && drop_idle.tokens_generated == 3 &&
-              !drop.has_pending() && drop.results().empty(),
-          "dropped: no record once drained, the counters kept");
-  require(!drop.cancel("a"), "a late cancel of a dropped id is a no-op");
-  require(drop.meters().terminal == 3 && drop.meters().records == 0 &&
-              drop.meters().tokens_generated == 9,
-          "dropped again after b and c, three retirements counted");
-  // and the drop moved no op: the same admissions, the same round-robin
-  // slices and the same closes reached both engines.
+  // WHEN both tick to completion, the compacting one checked after every
+  // tick,
+  int ticks = 0;
+  bool compacted_under_load = false;
+  for (;;) {
+    const bool more_keep = keep.tick();
+    const bool more_drop = drop.tick();
+    ++ticks;
+    require(more_keep == more_drop, "the schedulers disagree on pending work");
+    const auto k = keep.meters();
+    const auto d = drop.meters();
+    // THEN after every tick the compacting scheduler holds exactly its live
+    // requests (results parallel to them, none terminal), while the other
+    // keeps every record,
+    require(d.records == d.active + d.queued,
+            "tick " + std::to_string(ticks) + ": " + std::to_string(d.records) +
+                " records held against " + std::to_string(d.active + d.queued) +
+                " live");
+    require(static_cast<int64_t>(drop.results().size()) == d.records &&
+                std::none_of(drop.results().begin(), drop.results().end(),
+                             [](const Scheduler::Result& r) {
+                               return r.status == Scheduler::Result::Status::kDone ||
+                                      r.status == Scheduler::Result::Status::kCancelled;
+                             }),
+            "tick " + std::to_string(ticks) + ": a retired result survived");
+    require(k.records == 4 && k.terminal == d.terminal,
+            "the batch scheduler keeps its four records; retirements agree");
+    if (d.active > 0 && k.terminal > 0) compacted_under_load = true;
+    if (!more_keep) break;
+  }
+  require(compacted_under_load, "the script must retire under live load");
+  // the compaction moved no op — the same admissions, the same round-robin
+  // slices and the same closes reached both engines — and the counters,
+  // the transcripts and a late cancel read the same either way.
   require(drop_engine.op_stream() == keep_engine.op_stream(),
-          "the op stream moved across the history drop:\n  kept:    " +
-              keep_engine.op_stream() + "\n  dropped: " +
+          "the op stream moved across a compaction:\n  kept:      " +
+              keep_engine.op_stream() + "\n  compacted: " +
               drop_engine.op_stream());
   require(drop_engine.batch_calls() == keep_engine.batch_calls(),
-          "the batch slices moved across the history drop");
+          "the batch slices moved across a compaction");
+  require(keep.results().size() == 4 &&
+              ids_joined(keep.results()[1].generated) == "10,11,12,13,14" &&
+              ids_joined(keep.results()[3].generated) == "30,31,32,33",
+          "the batch scheduler's transcripts");
+  require(drop.meters().records == 0 && drop.results().empty() &&
+              drop.meters().terminal == 4 && drop.meters().tokens_generated == 14 &&
+              keep.meters().tokens_generated == 14 && !drop.has_pending(),
+          "drained: nothing held, four retirements and 14 tokens counted");
+  require(!drop.cancel("a") && !keep.cancel("a"),
+          "a late cancel is a no-op, compacted or kept");
 }
 
 // Grow-on-demand (M6 6d): the observer's growth events.

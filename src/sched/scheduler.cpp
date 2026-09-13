@@ -803,21 +803,51 @@ void Scheduler::release_retired(Request& r, Result& res) {
   if (!keep_retired_) std::vector<int64_t>().swap(res.generated);
 }
 
-void Scheduler::drop_retired() {
-  if (keep_retired_ || requests_.empty()) return;
-  // Nothing queued or active: every record is a tombstone, every slot is
-  // free, and the round-robin cursor and the deferral log point into
-  // history. Back to a fresh scheduler's state, the cumulative counters
-  // kept — and the next arrivals step in the order they would have
-  // anyway (a cursor on retired history starts the slice at the oldest
-  // live request, as -1 does).
-  std::vector<Request>().swap(requests_);
-  std::vector<Result>().swap(results_);
-  cursor_ = -1;
-  deferred_logged_ = -1;
+bool Scheduler::tick() {
+  const bool more = quantum();
+  compact_retired();
+  return more;
 }
 
-bool Scheduler::tick() {
+void Scheduler::compact_retired() {
+  if (keep_retired_) return;
+  size_t live = 0;
+  for (const Request& r : requests_)
+    if (r.state != State::kTerminal) ++live;
+  if (live == requests_.size()) return;
+  // Fresh vectors sized to the live requests, so a burst's capacity goes
+  // with its records. The slice order is unchanged: the live requests keep
+  // their cyclic order, and the cursor moves to the nearest live record at
+  // or before it (none: -1), so the next slice starts at the same request.
+  std::vector<Request> kept;
+  std::vector<Result> kept_results;
+  kept.reserve(live);
+  kept_results.reserve(live);
+  std::vector<int> index(requests_.size(), -1);  // old arrival -> new
+  int cursor = -1;
+  int deferred = -1;
+  for (size_t i = 0; i < requests_.size(); ++i) {
+    if (requests_[i].state == State::kTerminal) continue;
+    index[i] = static_cast<int>(kept.size());
+    kept.push_back(std::move(requests_[i]));
+    kept_results.push_back(std::move(results_[i]));
+    if (static_cast<int>(i) <= cursor_) cursor = index[i];
+    if (static_cast<int>(i) == deferred_logged_) deferred = index[i];
+  }
+  for (int& arrival : slots_) {
+    if (arrival < 0) continue;
+    if (index[static_cast<size_t>(arrival)] < 0)
+      throw std::logic_error(
+          "Scheduler: an engine slot maps to a retired request");
+    arrival = index[static_cast<size_t>(arrival)];
+  }
+  requests_.swap(kept);
+  results_.swap(kept_results);
+  cursor_ = cursor;
+  deferred_logged_ = deferred;
+}
+
+bool Scheduler::quantum() {
   ++ticks_;
   // The external-cancel sweep — FIXED POSITION, before any admission
   // or step: a request cancelled BETWEEN ticks never pays another
@@ -846,10 +876,7 @@ bool Scheduler::tick() {
   const bool any_queued = std::any_of(
       requests_.begin(), requests_.end(),
       [](const Request& r) { return r.state == State::kQueued; });
-  if (!any_active && !any_queued) {
-    drop_retired();
-    return false;
-  }
+  if (!any_active && !any_queued) return false;
 
   bool progressed = false;
 

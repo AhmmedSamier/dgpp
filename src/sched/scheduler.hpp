@@ -437,8 +437,9 @@ class Scheduler {
   void run_to_completion();
 
   // Parallel to submit() order; entries reach their terminal Status
-  // only via run_to_completion()/tick(). Empty once a
-  // set_keep_retired(false) scheduler drains.
+  // only via run_to_completion()/tick(). A set_keep_retired(false)
+  // scheduler's holds only the live (queued, active) requests' entries
+  // after every tick, and nothing once drained.
   const std::vector<Result>& results() const { return results_; }
 
   // Result by request id (nullptr when unknown) — the service's
@@ -456,9 +457,9 @@ class Scheduler {
   // the batch contract, results() read back after run_to_completion().
   // A persistent service passes false: the result's tokens go with the
   // rest once on_retire has seen them, and every retired record is
-  // dropped at the first tick that finds nothing queued or active — the
-  // same quantum on every rank, since the journal carries every tick —
-  // so an idle server holds no request history at all. Reported
+  // compacted away at the end of the tick — the same quantum on every
+  // rank, since the journal carries every tick — so after any tick, under
+  // any load, the scheduler holds exactly its live requests. Reported
   // 2026-09-13 by a third-party tester: 8 bytes per prompt token per
   // request for the process's lifetime (21 MiB over one two-hour agent
   // session) and every tick scanning the whole history. Dropped ids
@@ -586,9 +587,14 @@ class Scheduler {
   void retire(int arrival, Result::Status status, Result::Reason reason);
   // The retire's release: everything but the tombstone (set_keep_retired).
   void release_retired(Request& r, Result& res);
-  // The drained scheduler's history drop when retired records are not
-  // kept; its fixed position is the tick's "nothing pending" return.
-  void drop_retired();
+  // tick()'s body, the quantum; tick() compacts after it.
+  bool quantum();
+  // Erases the retired records when they are not kept, at the end of every
+  // tick: the live requests keep their order, and the slot map, the
+  // round-robin cursor and the deferral log follow them to their new
+  // indices (a cursor on a retired record moves to the nearest live one
+  // before it, so the next slice starts where it would have).
+  void compact_retired();
 
   SchedulerEngine* engine_ = nullptr;
   std::vector<int64_t> eos_ids_;

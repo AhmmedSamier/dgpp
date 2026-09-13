@@ -62,12 +62,31 @@ a generated token, 43 a prefix op), and a killed rank wrote nothing.
 
 A retired request releases everything but its tombstone (id, status,
 counts) at retire; the service and the peers set `keep_retired` false, so
-the result's copy goes with it and the whole history is dropped at the
-first tick that finds nothing queued or active — the same quantum on every
-rank, since rank 0 journals every tick, idle ones included. The op stream
+the result's copy goes with it and the tombstones are compacted away at
+the end of every tick — the same quantum on every rank, since rank 0
+journals every tick, idle ones included — with the slot map, the
+round-robin cursor and the deferral log remapped to the live requests'
+new indices. (The first cut dropped the history only at a tick that found
+nothing pending; a never-idle four-slot run then held ~560 bytes a
+retirement until the first idle tick, 11 MB over 20,000 requests, and a
+saturated server might not give it one for days.) The op stream
 goes to its file as it is recorded, flushed at every retire. `/v1/metrics`
 reports `scheduler.records` and `record_tokens` (0 / 0 on an idle server)
-and `terminal` is cumulative. `scheduler_test` pins that the drop moves no
-op (the same op stream and batch slices on a scheduler that keeps its
-history and one that drops it); `fabric_serve_test` covers the file-mode
-observer.
+and `terminal` is cumulative. `scheduler_test` pins that the compaction
+moves no op: under a script whose retirements interleave with live
+requests, a scheduler that keeps its history and one that compacts hand
+identical op streams and batch slices to identically armed engines, and
+the compacting one holds exactly its live requests after every tick;
+`fabric_serve_test` covers the file-mode observer.
+
+## After the fix, at scale
+
+The same driver with a warm-up request first (so first-touch pages are out
+of the delta), live heap from `mallinfo2`:
+
+| Run | RSS | Live heap | Records held |
+|---|---:|---:|---:|
+| sequential, 16,384-token prompts, 200 → 40,000 requests | +128 KiB, flat | +5 KiB, flat | 0 |
+| sequential, 8,192 tokens + 20-tool grammar, boundaries, bias, 20,000 | +4 KiB, flat | +5 KiB, flat | 0 |
+| four slots never idle, 8,192 tokens + payload, 20,000 (first cut) | +11 MB, growing | +15.6 MB | 20,000 |
+| four slots never idle, same, per-tick compaction, 20,000 and 100,000 | +400 KiB, flat | +324 KiB, flat (the four live requests' payloads); +8 KiB drained | 4, the live ones |
