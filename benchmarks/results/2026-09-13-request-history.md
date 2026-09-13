@@ -90,3 +90,57 @@ of the delta), live heap from `mallinfo2`:
 | sequential, 8,192 tokens + 20-tool grammar, boundaries, bias, 20,000 | +4 KiB, flat | +5 KiB, flat | 0 |
 | four slots never idle, 8,192 tokens + payload, 20,000 (first cut) | +11 MB, growing | +15.6 MB | 20,000 |
 | four slots never idle, same, per-tick compaction, 20,000 and 100,000 | +400 KiB, flat | +324 KiB, flat (the four live requests' payloads); +8 KiB drained | 4, the live ones |
+
+## On the fabric (2026-09-13, the production deployment, four nodes)
+
+The full `ctest` suite first, with the fabric idle: 78 of 78 in 343 s,
+nothing skipped. Then the served path with the new binary, one ritual at a
+time, against `deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json`
+(the deployment that was serving; the launcher stages the binary to every
+node):
+
+- **The served run:** boot 16 s; `serve_api_check.py` ALL OK; between
+  requests `/v1/metrics` read `records 0, record_tokens 0` at every idle
+  sample while `terminal` climbed 12 → 19 (three 4K-token requests, then
+  four concurrent); `down` found the four op streams identical at 58,519
+  bytes (19 retire lines) — the streaming writer's first fabric run.
+- **The drain-on-stop check** (`serve_stop_check.sh`): two requests
+  mid-generation, "2 in-flight request(s) retired through the drain pass on
+  every rank, the queue shed, in 0 ms", the streamed client's 270 chunks then
+  the `server_shutdown` event, the four op streams identical (md5
+  `9b8d601d…`).
+- **The failure drill** (`serve_failure_drill.sh 2 3`, kill -9 rank 2 under
+  three streams): every client got its committed tokens then the
+  `engine_failure` event and `[DONE]`; rank 0 out with status 2 in 0.87 s,
+  the peers with status 3 within 1.9 s. Rank 0's op stream, flushed on the
+  status-2 path, is byte-identical to both survivors' (196 lines, md5
+  `a67cf366…`), and the victim's own file holds the first 4,096 bytes of the
+  same stream — one stdio buffer, which the exit-time write never produced.
+  Two defects in the tooling surfaced, neither in the engine: the drill
+  copied rank 0's stream from the repository root (the launcher runs rank 0
+  in the deployment's log dir, so it reported "no ops file"), and its reboot
+  seconds after the failure failed the launcher's preflight on the fabric
+  and journal ports — the probe bound without `SO_REUSEADDR` while both
+  servers bind with it, so a TIME_WAIT from the previous world counted as a
+  conflict (the same reason a restart within a minute of any stop failed
+  preflight). Both fixed in the same commit; the drill's rerun and the soak
+  below.
+- **The failure drill, rerun with the fixes:** 0 failure lines. Rank 0
+  out with status 2 in 0.97 s, the peers with status 3 within 2.0 s; every
+  client its committed tokens then the `engine_failure` event; rank 0's
+  flushed stream identical to both survivors' (156 lines, md5
+  `3d5f62c8…`); the reboot passed preflight seconds after the failure and
+  each client's committed text is a prefix of the fresh answer (197 / 209 /
+  197 bytes of 5,769 / 6,847 / 6,103).
+- **The soak** (`serve_soak.py` five minutes on the booted world after the
+  harness killed the background ritual at the world's load; the ritual's
+  teardown by hand): 439 requests served, 13 shed at the queue bound and 73
+  cancelled by the workload's own disconnects, 0 failed; short requests
+  TTFT p50/p95 432/1,448 ms at 52/61 ms a token. Sampled every 30 s through
+  it, the scheduler held 3–5 records — exactly its active plus queued
+  requests — while `terminal` climbed 172 → 482, and rank 0's RSS stayed at
+  3.64 GiB (3.60 at listening). Teardown: the four op streams identical
+  (md5 `6480fa97…`), 0 stalled / 0 failures / 0 errors on every rank since
+  the boot, node probes allocstall 0, swap 0 on all four nodes. The
+  production deployment was restored on the new binary afterwards.
+

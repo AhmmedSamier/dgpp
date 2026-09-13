@@ -6,6 +6,13 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **The launcher's port preflight binds as the servers do** (2026-09-13):
+  the probe now sets `SO_REUSEADDR` like `tcp.cpp` and `http_server.cpp`,
+  so a TIME_WAIT left by the previous world is not a conflict and a
+  restart within a minute of a stop passes preflight (the failure drill's
+  reboot had failed on the fabric and journal ports). The drill fetches
+  rank 0's op stream from the deployment's log dir, where the launcher
+  runs rank 0, instead of the repository root.
 - **A served request leaves no history** (2026-09-13; reported by a
   third-party tester as GitHub issue #1): the scheduler kept every
   request's prompt, grammar, cache cuts and generated ids — and a second

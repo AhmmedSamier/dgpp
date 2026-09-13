@@ -285,7 +285,7 @@ class Cluster:
         say(f"=== rank 0 on {self.nodes[0]} (HTTP :{self.http}, fabric :{self.fabric}, journal :{self.journal})")
         ops = os.path.join(self.log_dir, "serve_rank0.ops")
         if os.path.exists(ops):
-            os.remove(ops)  # rank 0 writes its op stream to its cwd at exit; never hash a stale one
+            os.remove(ops)  # rank 0 streams its op stream into its cwd; never hash a stale one
         env = dict(os.environ)
         env.setdefault("DGPP_LOG_LEVEL", "info")
         env.update({key: expand(value) for key, value in self.cfg["node_env"][0].items()})

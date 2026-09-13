@@ -171,7 +171,10 @@ for ((r = 1; r < WORLD; ++r)); do
   if [ "$r" -eq "$VICTIM" ]; then say "  rank $r: the victim — no op stream this run"; continue; fi
   timeout 20 scp -q "${SSH_OPTS[@]}" "$SSH_USER@$h:$PEER_DIR/serve_rank$r.ops" "$DRILL/serve_rank$r.ops" 2>/dev/null || say "  rank $r: no ops file (died before writing)"
 done
-cp "$ROOT/serve_rank0.ops" "$DRILL/serve_rank0.ops" 2>/dev/null || say "  rank 0: no ops file"
+# Rank 0 streams its op stream into its cwd, the deployment's log dir
+# (the launcher's namespace under DGPP_LOG_DIR, or DGPP_SERVE_LOG's).
+R0_LOG=$(dgpp_log_dir) && R0_LOG=${R0_LOG/#\~/$HOME}
+cp "$R0_LOG/serve_rank0.ops" "$DRILL/serve_rank0.ops" 2>/dev/null || say "  rank 0: no ops file ($R0_LOG)"
 say "=== ops files (a survivor's stream is rank 0's up to the failure):"
 (cd "$DRILL" && wc -l serve_rank*.ops 2>/dev/null | tee -a "$SUMMARY")
 # Every survivor's op stream must be a prefix-consistent view: identical

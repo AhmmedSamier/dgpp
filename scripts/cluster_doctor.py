@@ -227,6 +227,13 @@ def probe(spec):
     for host, port, name in ports:
         try:
             with socket.socket() as connection:
+                # The probe binds as the servers do (src/net/tcp.cpp and
+                # src/serve/http_server.cpp set SO_REUSEADDR): a listener's
+                # TIME_WAIT connections from the previous world are not a
+                # conflict, only a live listener is. Without it a restart
+                # within a minute of a stop failed here (2026-09-13, the
+                # failure drill's reboot).
+                connection.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 connection.bind((host, port))
             record(name + " port", "ok", f"{host}:{port} is available")
         except OSError as error:
