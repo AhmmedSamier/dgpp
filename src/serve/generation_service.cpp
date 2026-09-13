@@ -455,6 +455,10 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
   // The SSE tap: tokens and retires ride the scheduler's observer
   // callbacks straight into the request records.
   sched_.set_observer(this);
+  // The service takes every token through the observer above and answers
+  // from its own records: the scheduler keeps no retired request, so the
+  // process's memory tracks the live requests, not the cumulative traffic.
+  sched_.set_keep_retired(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1748,6 +1752,10 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, m.queued);
   out.append(",\"terminal\":");
   append_json_int(&out, m.terminal);
+  out.append(",\"records\":");
+  append_json_int(&out, m.records);
+  out.append(",\"record_tokens\":");
+  append_json_int(&out, m.record_tokens);
   out.append(",\"pool_blocks_total\":");
   append_json_int(&out, m.pool_blocks_total);
   out.append(",\"pool_blocks_in_use\":");

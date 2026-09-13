@@ -29,6 +29,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -1268,11 +1270,47 @@ void test_op_stream_divergence_kills_the_peer(FabricRig& rig) {
 
 }  // namespace
 
+void test_op_stream_file_mode() {
+  // GIVEN one observer holding its stream in memory and one streaming to a
+  // file,
+  const std::string path =
+      (std::filesystem::temp_directory_path() /
+       ("dgpp_opstream_" + std::to_string(::getpid()) + ".ops"))
+          .string();
+  dgpp::serve::OpStreamObserver memory;
+  dgpp::serve::OpStreamObserver file;
+  require(file.open(path), "the op stream file opens");
+
+  // WHEN both see the same events (the retire flushes),
+  dgpp::sched::Scheduler::Result result;
+  result.status = dgpp::sched::Scheduler::Result::Status::kDone;
+  result.reason = dgpp::sched::Scheduler::Result::Reason::kEos;
+  result.steps_done = 2;
+  for (dgpp::serve::OpStreamObserver* o : {&memory, &file}) {
+    o->on_token("chatcmpl-1", 5, 1);
+    o->on_prefix("chatcmpl-1", "rolling", 8, 0);
+    o->on_token("chatcmpl-1", 999, 2);
+    o->on_retire("chatcmpl-1", result);
+  }
+
+  // THEN the file holds the bytes the memory observer holds, the file
+  // observer holds nothing in memory, and the digests agree.
+  std::ifstream in(path, std::ios::binary);
+  const std::string on_disk((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+  require(on_disk == memory.text() && !on_disk.empty(),
+          "the file is the stream:\n" + on_disk);
+  require(file.text().empty(), "the file mode holds nothing in memory");
+  require(file.digest() == memory.digest(), "the digests agree");
+  std::filesystem::remove(path);
+}
+
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   try {
     test_journal_codec();
     test_settings_handshake();
+    test_op_stream_file_mode();
     {
       FabricRig rig;
       test_non_stream_and_identity(rig);

@@ -745,8 +745,9 @@ void Scheduler::retire(int arrival, Result::Status status,
   res.reason = reason;
   res.slot = r.slot;
   res.steps_done = r.steps_done;
-  res.generated = r.generated;
+  res.generated = std::move(r.generated);
   r.slot = -1;
+  ++retired_;
   if (observer_) observer_->on_retire(r.spec.id, res);
   // The request's own numbers: its prefill (the prompt, the
   // tokens an attach skipped, the wall from admission), then its decode —
@@ -784,6 +785,36 @@ void Scheduler::retire(int arrival, Result::Status status,
     if (!accept.empty()) line += ", accept" + accept;
   }
   DGPP_LOG_INFO("{}", line);
+  release_retired(r, res);
+}
+
+void Scheduler::release_retired(Request& r, Result& res) {
+  // The tombstone keeps the id (the duplicate check, a late cancel's
+  // no-op), the state and the counts; the payloads go — swapped with
+  // empties so their capacity returns to the allocator, not just their
+  // size. Every read of a retired record elsewhere is of the tombstone.
+  std::vector<int64_t>().swap(r.spec.prompt);
+  std::vector<int64_t>().swap(r.spec.boundaries);
+  std::vector<LogitBias>().swap(r.spec.logit_bias);
+  r.spec.grammar = text::GrammarSpec{};
+  std::vector<int64_t>().swap(r.cuts);
+  std::vector<uint64_t>().swap(r.cut_hashes);
+  std::vector<int64_t>().swap(r.generated);
+  if (!keep_retired_) std::vector<int64_t>().swap(res.generated);
+}
+
+void Scheduler::drop_retired() {
+  if (keep_retired_ || requests_.empty()) return;
+  // Nothing queued or active: every record is a tombstone, every slot is
+  // free, and the round-robin cursor and the deferral log point into
+  // history. Back to a fresh scheduler's state, the cumulative counters
+  // kept — and the next arrivals step in the order they would have
+  // anyway (a cursor on retired history starts the slice at the oldest
+  // live request, as -1 does).
+  std::vector<Request>().swap(requests_);
+  std::vector<Result>().swap(results_);
+  cursor_ = -1;
+  deferred_logged_ = -1;
 }
 
 bool Scheduler::tick() {
@@ -815,7 +846,10 @@ bool Scheduler::tick() {
   const bool any_queued = std::any_of(
       requests_.begin(), requests_.end(),
       [](const Request& r) { return r.state == State::kQueued; });
-  if (!any_active && !any_queued) return false;
+  if (!any_active && !any_queued) {
+    drop_retired();
+    return false;
+  }
 
   bool progressed = false;
 
@@ -901,8 +935,13 @@ Scheduler::Meters Scheduler::meters() const {
   for (const Request& r : requests_) {
     if (r.state == State::kActive) ++m.active;
     else if (r.state == State::kQueued) ++m.queued;
-    else ++m.terminal;
+    m.record_tokens +=
+        static_cast<int64_t>(r.spec.prompt.size() + r.generated.size());
   }
+  for (const Result& res : results_)
+    m.record_tokens += static_cast<int64_t>(res.generated.size());
+  m.terminal = static_cast<int>(retired_);
+  m.records = static_cast<int64_t>(requests_.size());
   m.pool_blocks_total = engine_->pool_blocks_total();
   m.pool_blocks_in_use = engine_->pool_blocks_in_use();
   m.tokens_generated = tokens_generated_;

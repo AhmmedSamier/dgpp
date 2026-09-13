@@ -6,6 +6,25 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **A served request leaves no history** (2026-09-13; reported by a
+  third-party tester as GitHub issue #1): the scheduler kept every
+  request's prompt, grammar, cache cuts and generated ids — and a second
+  copy of the tokens in `results()` — for the process's lifetime, and
+  every tick scanned the whole history; the op stream, too, sat in memory
+  until the exit-time write. Measured against the built scheduler: 8 bytes
+  per prompt token per request (1,000 requests of 16,384 tokens: 131 MB of
+  RSS; the 2026-09-07 agent session's 85 requests: 21 MiB) and 37 bytes
+  per generated token, all inside the 4 GiB headroom. A retired request
+  now releases everything but its tombstone (id, status, counts); the
+  service and the peers (`Scheduler::set_keep_retired(false)`) drop the
+  tombstones and results at the first tick that finds nothing pending —
+  the same quantum on every rank, since the journal carries every tick —
+  so an idle server holds no request history; `/v1/metrics` reports the
+  records and ids held (`scheduler.records`, `record_tokens`, `terminal`
+  now cumulative); and each rank's `serve_rank<N>.ops` is written as the
+  run records it, flushed at every retire, so a killed rank keeps its
+  evidence. Gates: `scheduler_test`'s release and drop tests (the drop
+  moves no op), `fabric_serve_test`'s file-mode observer.
 - **The full GLM-5.3's decode batch: sixteen rows** (2026-09-13, plan D9):
   the family's cap was the fused decode select's eight rows of shared
   memory; the select now launches its rows in groups of eight (a group

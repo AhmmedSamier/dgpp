@@ -120,15 +120,14 @@ bool peer_should_stop(int rank) {
   return n >= 2;
 }
 
-void write_ops_file(const std::string& path, const std::string& text) {
-  std::FILE* f = std::fopen(path.c_str(), "wb");
-  if (f == nullptr) {
-    DGPP_LOG_ERROR("serve: cannot write {}", path);
-    return;
-  }
-  const size_t n = std::fwrite(text.data(), 1, text.size(), f);
-  std::fclose(f);
-  if (n != text.size()) DGPP_LOG_ERROR("serve: short write to {}", path);
+// The op stream goes to disk as it is recorded (OpStreamObserver::open);
+// a rank that cannot open its file says so once and keeps the stream in
+// memory, as every run did before 2026-09-13.
+void open_ops_file(dgpp::serve::OpStreamObserver* oplog,
+                   const std::string& path) {
+  if (!oplog->open(path))
+    DGPP_LOG_ERROR("serve: cannot write {} — the op stream stays in memory",
+                   path);
 }
 
 struct ServeKnobs {
@@ -761,18 +760,17 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   if (engine_failed.load()) {
     // The failure exit: the answers are out (or the grace expired). The
     // engine thread may be inside a collective a dead rank will never
-    // complete, so nothing is joined or torn down — the op stream is
-    // written (the evidence of what was committed here) and the process
+    // complete, so nothing is joined or torn down — the op stream's tail
+    // is flushed (the file holds what was committed here) and the process
     // ends with status 2; the peers see the journal close and exit.
     if (journal) journal->stop_watch();
-    if (oplog) write_ops_file("serve_rank0.ops", oplog->text());
+    if (oplog) oplog->flush();
     DGPP_LOG_ERROR("serve: exiting with status 2 after the engine failure");
     std::fflush(nullptr);
     std::_Exit(2);
   }
   engine_loop.join();
-  if (oplog)
-    write_ops_file("serve_rank0.ops", oplog->text());  // the 4-way leg
+  if (oplog) oplog->flush();  // the op stream's tail — the file is the run's
   DGPP_LOG_INFO("serve: stopped cleanly");
   return 0;
 }
@@ -1634,7 +1632,9 @@ int main(int argc, char** argv) {
                 rank, peer_prefix_slots, prefix_slots);
           dgpp::sched::Scheduler sched(engine_ptr(), eos, queue_limit, peer_policy,
                                      peer_prefix_slots);
+          sched.set_keep_retired(false);  // as rank 0's service: no history
           dgpp::serve::OpStreamObserver oplog;
+          open_ops_file(&oplog, "serve_rank" + std::to_string(rank) + ".ops");
           sched.set_observer(&oplog);
           dgpp::serve::ThroughputLog stats(stats_interval_s, rank, mtp);
           DGPP_LOG_INFO("rank {}: following rank 0's journal (admission {}, window {})",
@@ -1645,20 +1645,18 @@ int main(int argc, char** argv) {
               [rank, &oplog] {
                 // Rank 0's journal closed while this rank is inside a tick
                 // — a collective rank 0 will never complete. The v1 failure
-                // semantics: write the op stream (what was committed here)
+                // semantics: flush the op stream (what was committed here)
                 // and exit nonzero at once, never wait on the bus watchdog.
                 DGPP_LOG_ERROR(
                     "rank {}: rank 0's journal closed under a collective — "
                     "the world is over; exiting with status 3",
                     rank);
-                write_ops_file("serve_rank" + std::to_string(rank) + ".ops",
-                               oplog.text());
+                oplog.flush();
                 std::fflush(nullptr);
                 std::_Exit(3);
               },
               /*watch_poll_ms=*/100, &oplog, &stats);
-          write_ops_file("serve_rank" + std::to_string(rank) + ".ops",
-                         oplog.text());
+          oplog.flush();
           engine_release();
           cudaFreeHost(pick_scratch);
           bus->stop();
@@ -1666,6 +1664,7 @@ int main(int argc, char** argv) {
           return 0;
         }
         dgpp::serve::OpStreamObserver oplog;  // rank 0's audit leg
+        open_ops_file(&oplog, "serve_rank0.ops");
         const int rc = serve_openai(engine_ptr(), family->vocab_size(), family->eos_token_ids(), ckpt,
                                     model_display, knobs, no_eos, boot_s(), journal ? &*journal : nullptr, &oplog);
         engine_release();

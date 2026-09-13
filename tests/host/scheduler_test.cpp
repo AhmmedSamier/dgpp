@@ -1048,6 +1048,97 @@ DGPP_TEST(scheduler_meters_trackQueueActiveTerminalAndTokens) {
           "post-run meters: both terminal, 5 tokens total, pool drained");
 }
 
+DGPP_TEST(scheduler_retire_releasesEverythingButTheTombstoneAndResult) {
+  // GIVEN three long-prompt requests on a batch scheduler (retired records
+  // kept: the manifest contract), run to completion,
+  FakeEngine engine(/*slots=*/1, /*total_blocks=*/1000, /*block_tokens=*/4);
+  engine.arm(0, {1, 2, 3}, /*max_steps=*/3);  // a
+  engine.arm(0, {4, 5, 6}, /*max_steps=*/3);  // b
+  engine.arm(0, {7, 8, 9}, /*max_steps=*/3);  // c
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 1000, 3));
+  sched.submit(make_request("b", 1000, 3));
+  sched.submit(make_request("c", 1000, 3));
+  const auto queued = sched.meters();
+  sched.run_to_completion();
+  const auto done = sched.meters();
+
+  // THEN the records held their prompts while queued (3,000 ids) and only
+  // the results' generated ids after (9): a retired request releases its
+  // prompt, keeps its result, and its tombstone still answers to its id.
+  require(queued.records == 3 && queued.record_tokens == 3000,
+          "queued records hold their prompts");
+  require(done.records == 3 && done.terminal == 3 && done.record_tokens == 9,
+          "retired records hold only the results' generated ids");
+  require(sched.results().size() == 3 &&
+              ids_joined(sched.results()[0].generated) == "1,2,3" &&
+              ids_joined(sched.results()[2].generated) == "7,8,9",
+          "the results are intact");
+  require(!sched.cancel("a"), "a late cancel of a kept tombstone is a no-op");
+  bool duplicate = false;
+  try {
+    sched.submit(make_request("a", 5, 3));
+  } catch (const std::invalid_argument&) {
+    duplicate = true;
+  }
+  require(duplicate, "a kept tombstone still rejects its id");
+}
+
+DGPP_TEST(scheduler_keepRetiredOff_dropsTheHistoryWhenDrainedAndMovesNoOp) {
+  // GIVEN two identically armed two-row engines under two schedulers, one
+  // keeping retired records (the batch contract), one not (the service's
+  // and the peers' setting),
+  const auto arm = [](FakeEngine& e) {
+    e.arm(0, {1, 2, 3}, /*max_steps=*/3);     // a, alone
+    e.arm(0, {10, 11, 12}, /*max_steps=*/3);  // b
+    e.arm(1, {20, 21, 22}, /*max_steps=*/3);  // c
+  };
+  FakeEngine keep_engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4,
+                         /*batch_capacity=*/2);
+  FakeEngine drop_engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4,
+                         /*batch_capacity=*/2);
+  arm(keep_engine);
+  arm(drop_engine);
+  Scheduler keep(&keep_engine, {kEos});
+  Scheduler drop(&drop_engine, {kEos});
+  drop.set_keep_retired(false);
+
+  // WHEN each runs a alone, drains, then b and c together,
+  for (Scheduler* s : {&keep, &drop}) {
+    s->submit(make_request("a", 5, 3));
+    s->run_to_completion();
+  }
+  const auto keep_idle = keep.meters();
+  const auto drop_idle = drop.meters();
+  for (Scheduler* s : {&keep, &drop}) {
+    s->submit(make_request("b", 5, 3));
+    s->submit(make_request("c", 5, 3));
+    s->run_to_completion();
+  }
+
+  // THEN the batch scheduler holds a's record and result, the other holds
+  // nothing once drained — the counters cumulative either way —
+  require(keep_idle.records == 1 && keep_idle.terminal == 1 &&
+              keep_idle.record_tokens == 3 && keep.results().size() == 3,
+          "kept: a's record and its 3 ids, three results at the end");
+  require(drop_idle.records == 0 && drop_idle.record_tokens == 0 &&
+              drop_idle.terminal == 1 && drop_idle.tokens_generated == 3 &&
+              !drop.has_pending() && drop.results().empty(),
+          "dropped: no record once drained, the counters kept");
+  require(!drop.cancel("a"), "a late cancel of a dropped id is a no-op");
+  require(drop.meters().terminal == 3 && drop.meters().records == 0 &&
+              drop.meters().tokens_generated == 9,
+          "dropped again after b and c, three retirements counted");
+  // and the drop moved no op: the same admissions, the same round-robin
+  // slices and the same closes reached both engines.
+  require(drop_engine.op_stream() == keep_engine.op_stream(),
+          "the op stream moved across the history drop:\n  kept:    " +
+              keep_engine.op_stream() + "\n  dropped: " +
+              drop_engine.op_stream());
+  require(drop_engine.batch_calls() == keep_engine.batch_calls(),
+          "the batch slices moved across the history drop");
+}
+
 // Grow-on-demand (M6 6d): the observer's growth events.
 struct GrowLog final : dgpp::sched::SchedulerObserver {
   std::vector<std::string> grows, retires;

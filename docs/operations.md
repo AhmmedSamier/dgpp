@@ -461,5 +461,5 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
 | bus rendezvous | 29970 (rank 0 listens; peers connect) |
 | admission journal | 29971 (rank 0 listens; peers connect and send `hello <rank>`) |
 | peer binary, config and logs | `<stage_dir>/dgpp-serve`, `<stage_dir>/cluster.json`, `<stage_dir>/serve_r<rank>.log`, `<stage_dir>/serve_rank<rank>.ops` (fetched into the log dir by `down`) |
-| rank 0 log, pid and op stream | `<log_dir>/serve_r0.log`, `<log_dir>/r0.pid`, `<log_dir>/serve_rank0.ops` at exit |
+| rank 0 log, pid and op stream | `<log_dir>/serve_r0.log`, `<log_dir>/r0.pid`, `<log_dir>/serve_rank0.ops`, written as the run records it (flushed at every retire) |
 | exit statuses | 0 orderly stop; 1 a startup or contract error (a configuration that differs from rank 0's included); 2 rank 0 after an engine failure; 3 a peer released by its in-tick watch |

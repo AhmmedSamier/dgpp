@@ -5,6 +5,7 @@
 #include <cstdlib>
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -22,13 +23,45 @@ using dgpp::sched::SchedulerRequest;
 
 // ---- the audit tap --------------------------------------------------------
 
-void OpStreamObserver::append(const std::string& line) {
+void OpStreamObserver::append(const std::string& line, bool flush) {
   const std::lock_guard<std::mutex> lock(mutex_);
-  text_ += line;
+  if (file_ != nullptr) {
+    if (std::fwrite(line.data(), 1, line.size(), file_) != line.size() &&
+        !write_failed_) {
+      write_failed_ = true;
+      DGPP_LOG_ERROR("serve: short write to the op stream file");
+    }
+    if (flush) std::fflush(file_);
+  } else {
+    text_ += line;
+  }
   for (const char c : line) {  // FNV-1a over the bytes, line by line
     digest_ ^= static_cast<unsigned char>(c);
     digest_ *= 0x100000001b3ull;
   }
+}
+
+bool OpStreamObserver::open(const std::string& path) {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  if (file_ != nullptr) std::fclose(file_);
+  file_ = std::fopen(path.c_str(), "wb");
+  if (file_ == nullptr) return false;
+  // Lines recorded before the open go first, so the file is the whole
+  // stream.
+  if (!text_.empty()) {
+    std::fwrite(text_.data(), 1, text_.size(), file_);
+    std::string().swap(text_);
+  }
+  return true;
+}
+
+void OpStreamObserver::flush() {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  if (file_ != nullptr) std::fflush(file_);
+}
+
+OpStreamObserver::~OpStreamObserver() {
+  if (file_ != nullptr) std::fclose(file_);
 }
 
 void OpStreamObserver::on_token(const std::string& id, int64_t token,
@@ -42,7 +75,8 @@ void OpStreamObserver::on_retire(const std::string& id,
   // The reason rides as its enum ordinal — same binary family, same
   // values, byte-comparable across ranks.
   append("R " + id + " " + std::to_string(static_cast<int>(result.reason)) +
-         " " + std::to_string(result.steps_done) + "\n");
+             " " + std::to_string(result.steps_done) + "\n",
+         /*flush=*/true);
 }
 
 void OpStreamObserver::on_grow(const std::string& id, int64_t reserved_tokens) {

@@ -333,7 +333,13 @@ class Scheduler {
   struct Meters {
     int active = 0;        // requests with an open engine slot
     int queued = 0;        // admitted-not, waiting on slots/budget
-    int terminal = 0;      // retired (any reason)
+    int terminal = 0;      // retired (any reason), cumulative since construction
+    // The request records held — every live request's, plus the retired
+    // ones a batch scheduler keeps (set_keep_retired) — and the prompt and
+    // generated ids those records hold. A drained service scheduler reads
+    // 0 / 0: its memory tracks the live requests, not the traffic.
+    int64_t records = 0;
+    int64_t record_tokens = 0;
     int64_t pool_blocks_total = 0;
     int64_t pool_blocks_in_use = 0;
     int64_t tokens_generated = 0;  // cumulative across all requests
@@ -431,7 +437,8 @@ class Scheduler {
   void run_to_completion();
 
   // Parallel to submit() order; entries reach their terminal Status
-  // only via run_to_completion()/tick().
+  // only via run_to_completion()/tick(). Empty once a
+  // set_keep_retired(false) scheduler drains.
   const std::vector<Result>& results() const { return results_; }
 
   // Result by request id (nullptr when unknown) — the service's
@@ -440,6 +447,24 @@ class Scheduler {
 
   // Lifecycle events (the SSE tap). Not owned; may be null.
   void set_observer(SchedulerObserver* observer) { observer_ = observer; }
+
+  // What a retired request leaves behind. Either way its prompt, grammar,
+  // bias, boundaries, cache cuts and generated ids are released at retire
+  // (the observer has seen every token; the result holds the copy) and
+  // only a tombstone — the id, status and counts — stays. The default
+  // keeps every tombstone and its result for the scheduler's lifetime:
+  // the batch contract, results() read back after run_to_completion().
+  // A persistent service passes false: the result's tokens go with the
+  // rest once on_retire has seen them, and every retired record is
+  // dropped at the first tick that finds nothing queued or active — the
+  // same quantum on every rank, since the journal carries every tick —
+  // so an idle server holds no request history at all. Reported
+  // 2026-09-13 by a third-party tester: 8 bytes per prompt token per
+  // request for the process's lifetime (21 MiB over one two-hour agent
+  // session) and every tick scanning the whole history. Dropped ids
+  // leave the duplicate check with them (a service's ids are its own
+  // counter); a late cancel of one is the no-op an unknown id gets.
+  void set_keep_retired(bool keep) { keep_retired_ = keep; }
 
   Meters meters() const;
 
@@ -559,6 +584,11 @@ class Scheduler {
   // had already finished naturally reports Done (client intent cannot
   // rewrite history), and a cancel_at the cap reports Cancelled.
   void retire(int arrival, Result::Status status, Result::Reason reason);
+  // The retire's release: everything but the tombstone (set_keep_retired).
+  void release_retired(Request& r, Result& res);
+  // The drained scheduler's history drop when retired records are not
+  // kept; its fixed position is the tick's "nothing pending" return.
+  void drop_retired();
 
   SchedulerEngine* engine_ = nullptr;
   std::vector<int64_t> eos_ids_;
@@ -568,6 +598,8 @@ class Scheduler {
   int cursor_ = -1;                // last-stepped arrival (round-robin)
   int deferred_logged_ = -1;       // arrival of the current deferral log
   SchedulerObserver* observer_ = nullptr;
+  bool keep_retired_ = true;       // the batch contract (set_keep_retired)
+  int64_t retired_ = 0;            // cumulative retirements (meters)
   int queue_limit_ = 0;            // 0 = unbounded
   int decode_batch_capacity_ = 1;  // fixed engine pass width
   int64_t tokens_generated_ = 0;   // cumulative on_token counter

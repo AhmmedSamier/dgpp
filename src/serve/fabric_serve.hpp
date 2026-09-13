@@ -31,6 +31,7 @@
 // peers exit on loss of rank 0. The bus watchdog handles silent node loss.
 // There is no failover within a running world.
 #include <atomic>
+#include <cstdio>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -62,16 +63,31 @@ class OpStreamObserver final : public dgpp::sched::SchedulerObserver {
   void on_grow(const std::string& id, int64_t reserved_tokens) override;
   void on_prefix(const std::string& id, const char* op, int64_t position,
                  int slot) override;
+  // The stream so far, when held in memory (the tests' live polls; ""
+  // once open() streams it to a file).
   std::string text() const;
+  // Streams every line to `path` as it is recorded (the file truncated
+  // here, flushed at every retire and by flush()) instead of holding the
+  // run's whole stream in memory until an exit-time write — the op stream
+  // on disk at every moment, a killed rank's evidence included, and a
+  // process that does not grow with its traffic (2026-09-13: 37 bytes per
+  // generated token for the process's lifetime). False when the file
+  // cannot be opened; the stream then stays in memory as before.
+  bool open(const std::string& path);
+  void flush();
+  OpStreamObserver() = default;
+  ~OpStreamObserver();
   // The running FNV-1a fold of every line recorded so far (the journal's
   // "od", the continuous drift check).
   bool has_digest() const override { return true; }
   uint64_t digest() const override;
 
  private:
-  void append(const std::string& line);  // under the lock
+  void append(const std::string& line, bool flush = false);  // under the lock
   mutable std::mutex mutex_;
   std::string text_;
+  std::FILE* file_ = nullptr;   // the sink once open()
+  bool write_failed_ = false;   // the short write logged once
   uint64_t digest_ = 0xcbf29ce484222325ull;
 };
 
