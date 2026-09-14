@@ -814,6 +814,47 @@ the old ones (the chain is unchanged there), the four-stream aggregate
 +1–9 % (the full GLM-5.3: its step is the experts), +12–15 % (Qwen, the
 Flash) and +22–29 % (GLM-4.7: its step was the BF16 attention re-reads).
 
+## DeepSeek-V4.1-Flash: the GPU-driven eager fold (plan D9, 2026-09-14 late)
+
+The six-slot config (`cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp4_c6`),
+the recipe's bench (`fabric_v41bench.sh`, prompt set v1, levels 1 and 6,
+the 2K prefill target), two boots the same evening: the host-driven eager
+fold (`DGPP_DSV41_EAGER_FOLD=1`) against the stream-ordered one (the
+default since D9). Same binary, the bus timeline on for both.
+
+| measure | host-driven | stream-ordered |
+|---|---|---|
+| C1 aggregate / per stream tok/s | 49.34 / 55.06 | 49.64 / 54.8 |
+| C1 mean TTFT | 0.303 s | 0.269 s |
+| C6 aggregate / per stream tok/s | 108.02 / 20.44 | 108.49 / 20.41 |
+| C6 mean TTFT | 0.836 s | 0.727 s |
+| prefill 2K (2,950 prompt tokens) | 1,370 tok/s, TTFT 2.153 s | 1,383 tok/s, TTFT 2.133 s |
+
+The fold itself, rank 0's sampled decompositions (every 32nd prefill-class
+fold at INFO), µs, by payload (elems = rows × 5,120): the host-driven
+kernel's phases plus the host's notice of its finish, against the stream
+kernel's phases (the engine's notice — `done → walked` — is off the model's
+critical path now: the stream continues at the kernel's exit, settle waits
+once per pass).
+
+| rows | host-driven: kernel = copy + handshake + skew + fold; done→notice | stream: kernel = copy + handshake + skew + fold |
+|---|---|---|
+| 4–5 | 111–123 = 17–21 + 28–29 + 34–48 + 18–20; 731–1,343 | 54–70 = 4 + 20–23 + 20–29 + 11–16 |
+| 30 | 431 = 100 + 105 + 125 + 93; 523 | 246 = 14 + 119 + 47 + 65 |
+| 47 | 542 = 158 + 126 + 105 + 146; 807 | 386 = 24 + 152 + 108 + 103 |
+| 65 | 749 = 215 + 232 + 96 + 199; 276 | 561 = 31 + 185 + 170 + 176 |
+| 128 | 1,397 = 437 + 331 + 226 + 395; 1,082 | 933 = 61 + 415 + 187 + 269 |
+
+What moved: the copy phase (one shared staging row instead of a row per
+peer: 158 → 24 µs at 47 rows, 437 → 61 at 128), the fold (the in-place
+kernel reads less), and the host's 0.3–1.3 ms notice per fold left the
+critical path — TTFT −11 % at one stream and −13 % at six, the 2K prefill
++1 %; the aggregates unchanged (the folds' peers' arrival spread — the
+handshake and skew phases, the ranks' compute imbalance — is the same on
+both). The group prefill's remaining cost is its own compute: the design
+note in docs/deepseek_v41_flash_plan.md (D10) puts the number on the next
+step.
+
 ## Build and test validation
 
 The warning-as-error CI build consumes `DGPP_WERROR=ON`; the earlier unused

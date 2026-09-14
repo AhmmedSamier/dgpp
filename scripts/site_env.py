@@ -26,13 +26,13 @@ SITE_KEYS = (
     # (DGPP_DSV41_DENSE_GEMV=1 for DeepSeek; DGPP_DENSE_GEMV_ROWS=n for the
     # session-core families, kernels/gemm.hpp): every rank the same, or the
     # ranks' walks differ.
-    "DGPP_BUS_TIMELINE", "DGPP_DSV41_DENSE_GEMV", "DGPP_DENSE_GEMV_ROWS",
+    "DGPP_BUS_TIMELINE", "DGPP_DSV41_DENSE_GEMV", "DGPP_DENSE_GEMV_ROWS", "DGPP_DSV41_EAGER_FOLD",
 )
 NODE_KEYS = ("DGPP_ROCE_DEVICES", "DGPP_ROCE_GID_INDICES", "HF_HUB_CACHE", "DGPP_RESIDENT_CACHE_DIR",
     # The engine's L2 weight-prefetch knobs (src/kernels/l2_prefetch.hpp): an A/B runs
     # with the same setting on every rank.
     "DGPP_L2_PREFETCH", "DGPP_L2_PREFETCH_MB", "DGPP_L2_PREFETCH_BOUNDARY", "DGPP_L2_PREFETCH_LAYER",
-    "DGPP_BUS_TIMELINE", "DGPP_DSV41_DENSE_GEMV", "DGPP_DENSE_GEMV_ROWS",
+    "DGPP_BUS_TIMELINE", "DGPP_DSV41_DENSE_GEMV", "DGPP_DENSE_GEMV_ROWS", "DGPP_DSV41_EAGER_FOLD",
 )
 DEFAULTS = {
     "DGPP_HTTP_PORT": "18080", "DGPP_FABRIC_PORT": "29970",

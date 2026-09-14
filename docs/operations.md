@@ -482,7 +482,10 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   the 4-row GEMV chunks for its dense decode projections and head instead
   of the streaming tensor-core GEMM (the A/B switch; tolerance-equal
   forms, transcripts reorder — set it on every rank, the boot reads it at
-  model construction), `DGPP_DENSE_GEMV_ROWS=n` (default 4; a site setting
+  model construction), `DGPP_DSV41_EAGER_FOLD=1` makes a DeepSeek-V4.1-Flash world fold its
+  eager walks through the host-driven reducer instead of the stream-ordered
+  one (plan D9; the A/B switch, a site setting since 2026-09-14),
+  `DGPP_DENSE_GEMV_ROWS=n` (default 4; a site setting
   since 2026-09-14, forwarded to every rank) is the other families' dense
   lowering bound — rows up to n take the GEMV chunks, bf16 rows above
   cuBLASLt's algorithm, fp8 rows above the streaming tensor-core GEMM to 256

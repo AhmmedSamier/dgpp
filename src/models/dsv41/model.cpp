@@ -161,6 +161,7 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
   // A/B switch: the two forms are tolerance-equal, not bitwise, and a
   // request's rows must meet the same form batched and alone).
   dense_mma_ = std::getenv("DGPP_DSV41_DENSE_GEMV") == nullptr;
+  if (boundary_) boundary_->bind_stream(stream_);  // the stream-ordered reducer's stream (plan D9)
   csa2_cfg_.dense_mma = dense_mma_;
   gemm_.set_decode_mma(dense_mma_);
   // The mHC dots take the tiled form at every prefill row count: a row's
@@ -753,7 +754,10 @@ uint16_t* Dsv41Model::stage(uint16_t* fallback, int T, int width, bool capture) 
 
 void Dsv41Model::fold(uint16_t* buf, int T, int width, bool capture) {
   if (!boundary_) return;
-  if (!capture) DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  // The host-driven reducer folds after the producing kernels have
+  // quiesced; the stream-ordered one (plan D9) launches the fold on this
+  // stream behind them and needs no drain.
+  if (!capture && !boundary_->stream_ordered()) DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   boundary_->reduce(buf, T, width);
 }
 
@@ -1242,6 +1246,9 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
       }
     }
   }
+  // The stream-ordered reducer's verdict for this pass's folds (a failed
+  // collective is an error here, not a wrong number read later).
+  if (!run.capture && boundary_) boundary_->settle();
   out = finish_run(run, std::move(out));
   if (!run.capture && traces) {
     for (size_t l = 0; l < out.route_ids.size(); ++l) {

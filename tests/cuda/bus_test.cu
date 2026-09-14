@@ -1678,6 +1678,157 @@ void scenario_allreduce_graph_rows() {
   DGPP_LOG_INFO("scenario allreduce_graph_rows: {} total failures", g_failures);
 }
 
+// The stream collectives (2026-09-14, plan D9): the eager fold launched on
+// the caller's stream in the graph kernel form. Pins: every generation's
+// destination bitwise the oracle and the eager one-shot (the same chain),
+// generations far beyond the staging ring and the stream ring's depth in
+// one pass, the gates (a host-driven collective and a handout rejected
+// while stream generations are outstanding; a stream issue rejected while
+// a replay window is armed), and the mixed era (stream passes between
+// replay windows, the shared counter keeping the order).
+int allreduce_stream_rank_work(CollectiveBus& bus, int world, int my_rank,
+                               size_t elems, int gens, int passes) {
+  cudaStream_t stream = nullptr;
+  if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) {
+    DGPP_LOG_ERROR("rank {}: stream create failed", my_rank);
+    return 1;
+  }
+  int failures = 0;
+  auto fail = [&](const std::string& why) {
+    DGPP_LOG_ERROR("rank {}: {}", my_rank, why);
+    ++failures;
+  };
+  // Sources: generation g folds fill(rank) + g (the oracle knows every rank's fill).
+  std::vector<uint16_t> base;
+  fill_rank_bf16(&base, elems, my_rank);
+  std::vector<std::vector<uint16_t>> want(static_cast<size_t>(gens));
+  {
+    std::vector<std::vector<uint16_t>> all(static_cast<size_t>(world));
+    for (int r = 0; r < world; ++r) fill_rank_bf16(&all[static_cast<size_t>(r)], elems, r);
+    for (int g = 0; g < gens; ++g) {
+      want[static_cast<size_t>(g)].assign(elems, 0);
+      for (size_t i = 0; i < elems; ++i) {
+        float acc = 0.0f;
+        for (int r = 0; r < world; ++r)
+          acc += dgpp::net::bf16_to_f32(dgpp::net::bf16_from_f32_rne(
+              dgpp::net::bf16_to_f32(all[static_cast<size_t>(r)][i]) + static_cast<float>(g)));
+        want[static_cast<size_t>(g)][i] = dgpp::net::bf16_from_f32_rne(acc);
+      }
+    }
+  }
+  std::vector<uint16_t*> dev(static_cast<size_t>(gens), nullptr);
+  for (int g = 0; g < gens; ++g) {
+    std::vector<uint16_t> src(elems);
+    for (size_t i = 0; i < elems; ++i)
+      src[i] = dgpp::net::bf16_from_f32_rne(dgpp::net::bf16_to_f32(base[i]) + static_cast<float>(g));
+    if (cudaMalloc(&dev[static_cast<size_t>(g)], elems * 2) != cudaSuccess ||
+        cudaMemcpy(dev[static_cast<size_t>(g)], src.data(), elems * 2, cudaMemcpyHostToDevice) != cudaSuccess) {
+      fail("device alloc/H2D failed");
+      break;
+    }
+  }
+  std::vector<uint16_t> got(elems);
+  // The oracle for generation g: the canonical chain over every rank's
+  // bf16(fill + g) — the source each rank uploads, rounded the same way.
+  for (int pass = 0; pass < passes && failures == 0; ++pass) {
+    // Re-upload (the folds ran in place).
+    for (int g = 0; g < gens; ++g) {
+      std::vector<uint16_t> src(elems);
+      for (size_t i = 0; i < elems; ++i)
+        src[i] = dgpp::net::bf16_from_f32_rne(dgpp::net::bf16_to_f32(base[i]) + static_cast<float>(g));
+      if (cudaMemcpyAsync(dev[static_cast<size_t>(g)], src.data(), elems * 2, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+        fail("H2D failed");
+        break;
+      }
+    }
+    if (failures) break;
+    std::string error;
+    for (int g = 0; g < gens; ++g) {
+      if (bus.allreduce_stream(stream, dev[static_cast<size_t>(g)], dev[static_cast<size_t>(g)], elems, &error) == 0) {
+        fail("stream collective " + std::to_string(g) + " rejected: " + error);
+        break;
+      }
+      if (g == 0 && pass == 0) {
+        // The gates while a stream generation is outstanding.
+        uint16_t* dummy = dev[0];
+        if (bus.allreduce(dummy, dummy, elems, &error) != 0 || error.find("stream collectives are in flight") == std::string::npos)
+          fail("a host-driven collective was not rejected with stream generations outstanding: " + error);
+        if (bus.stage_next(&error) != nullptr || error.find("stream collectives are in flight") == std::string::npos)
+          fail("a handout was not rejected with stream generations outstanding: " + error);
+      }
+    }
+    if (failures) break;
+    if (!bus.allreduce_settle(30000, &error)) {
+      fail("settle failed: " + error);
+      break;
+    }
+    if (cudaStreamSynchronize(stream) != cudaSuccess) {
+      fail("stream sync failed");
+      break;
+    }
+    for (int g = 0; g < gens; ++g) {
+      if (cudaMemcpy(got.data(), dev[static_cast<size_t>(g)], elems * 2, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        fail("D2H failed");
+        break;
+      }
+      if (got != want[static_cast<size_t>(g)]) {
+        size_t first = 0;
+        while (first < elems && got[first] == want[static_cast<size_t>(g)][first]) ++first;
+        fail("pass " + std::to_string(pass) + " generation " + std::to_string(g) + " differs from the oracle at element " +
+             std::to_string(first));
+        break;
+      }
+    }
+    // Between passes: a host-driven one-shot runs again (the gate reopened).
+    {
+      std::vector<uint16_t> src(elems);
+      for (size_t i = 0; i < elems; ++i) src[i] = base[i];
+      if (cudaMemcpy(dev[0], src.data(), elems * 2, cudaMemcpyHostToDevice) != cudaSuccess) { fail("H2D failed"); break; }
+      const uint64_t id = bus.allreduce(dev[0], dev[0], elems, &error);
+      if (id == 0) { fail("eager one-shot after settle rejected: " + error); break; }
+      const dgpp::net::BusAllReduceResult r = bus.wait_allreduce(id, 30000);
+      if (!r.ok) { fail("eager one-shot after settle failed: " + r.error); break; }
+      if (cudaMemcpy(got.data(), dev[0], elems * 2, cudaMemcpyDeviceToHost) != cudaSuccess) { fail("D2H failed"); break; }
+      if (got != want[0]) { fail("the eager one-shot after settle differs from the oracle"); break; }
+    }
+  }
+  for (uint16_t* d : dev) cudaFree(d);
+  cudaStreamDestroy(stream);
+  return failures;
+}
+
+void scenario_allreduce_stream() {
+  const size_t elems = 4096;
+  // Beyond the staging ring (8) and the stream ring (64) in one pass.
+  const int gens = 100;
+  const int passes = 3;
+  int failures = 0;
+  for (const int world : {2, 4}) {
+    const uint16_t port = world == 2 ? 29896 : 29897;
+    std::vector<std::unique_ptr<CollectiveBus>> world_buses = start_world(world, port);
+    if (world_buses.empty()) {
+      DGPP_LOG_ERROR("stream world {} failed to start", world);
+      ++failures;
+      continue;
+    }
+    std::vector<std::thread> workers;
+    std::vector<int> rank_failures(static_cast<size_t>(world), 0);
+    for (int r = 0; r < world; ++r)
+      workers.emplace_back([&, r] {
+        rank_failures[static_cast<size_t>(r)] =
+            allreduce_stream_rank_work(*world_buses[static_cast<size_t>(r)], world, r, elems, gens, passes);
+      });
+    for (auto& t : workers) t.join();
+    int world_failures = 0;
+    for (int r = 0; r < world; ++r) world_failures += rank_failures[static_cast<size_t>(r)];
+    CHECK(world_failures == 0, "stream world " + std::to_string(world) + " had " + std::to_string(world_failures) + " failures");
+    for (auto& bus : world_buses) bus->quiesce();
+    for (auto& bus : world_buses) bus->stop();
+    DGPP_LOG_INFO("scenario allreduce_stream: world {} clean ({} gens x {} passes)", world, gens, passes);
+  }
+  g_failures += failures;
+}
+
 void scenario_idle_gap_collective() {
   // The real-mesh shape, found by the M5 exit-gate fabric run:
   // buses sit IDLE for seconds while a host loads weights (a cold peer's
@@ -1890,6 +2041,7 @@ int main() {
   scenario_allreduce_bulk();
   scenario_allreduce_graph();
   scenario_allreduce_graph_rows();
+  scenario_allreduce_stream();
   scenario_idle_gap_collective();
   scenario_geometry_mismatch();
   scenario_stop_releases_waiters();

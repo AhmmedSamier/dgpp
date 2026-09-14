@@ -51,7 +51,9 @@
 
 namespace fs = std::filesystem;
 using dgpp::bf16_bits_to_float;
+using dgpp::BoundaryReducer;
 using dgpp::BusBoundaryReducer;
+using dgpp::BusStreamReducer;
 using dgpp::Dsv41Model;
 using dgpp::Dsv41Residency;
 using dgpp::Dsv41TextConfig;
@@ -442,7 +444,7 @@ struct GroupOutcome {
 };
 void rank_work_group(int rank, int world, const std::string& dir, const Dsv41TextConfig& cfg,
                      const std::vector<std::vector<int64_t>>& prompts, CollectiveBus* bus, ConstructBarrier* barrier,
-                     GroupOutcome* out) {
+                     GroupOutcome* out, bool stream_folds = false) {
   bool arrived = false;
   auto arrive_once = [&] {
     if (arrived) return;
@@ -450,8 +452,15 @@ void rank_work_group(int rank, int world, const std::string& dir, const Dsv41Tex
     barrier->arrive_and_wait();
   };
   try {
-    BusBoundaryReducer reducer(*bus, wait_timeout_ms());
-    Dsv41Model model(cfg, dir, 96, 512, Dsv41Residency::Streaming, &reducer, rank, world, 3);
+    // The host-driven reducer, or the stream-ordered one (plan D9: the
+    // folds launch on the model stream; the same chain, so the walk's
+    // every state is bitwise the host-driven walk's).
+    std::unique_ptr<BoundaryReducer> reducer;
+    if (stream_folds)
+      reducer = std::make_unique<BusStreamReducer>(*bus, wait_timeout_ms());
+    else
+      reducer = std::make_unique<BusBoundaryReducer>(*bus, wait_timeout_ms());
+    Dsv41Model model(cfg, dir, 96, 512, Dsv41Residency::Streaming, reducer.get(), rank, world, 3);
     arrive_once();
     setenv("DGPP_DSV41_CAPTURE_PREFILL", "1", 1);
     const Dsv41Model::Outputs a = model.session_prefill(2, prompts[2]);
@@ -496,7 +505,7 @@ DGPP_TEST(dsv41_tp_group_prefill_is_bitwise_the_prefill_alone_at_world_2) {
     std::vector<std::thread> workers;
     for (int r = 0; r < 2; ++r)
       workers.emplace_back(rank_work_group, r, 2, dir, std::cref(cfg), std::cref(prompts), buses[static_cast<size_t>(r)].get(),
-                           &barrier, &ranks[static_cast<size_t>(r)]);
+                           &barrier, &ranks[static_cast<size_t>(r)], false);
     for (auto& t : workers) t.join();
     for (int r = 0; r < 2; ++r) require(ranks[static_cast<size_t>(r)].error.empty(), ranks[static_cast<size_t>(r)].error);
     const GroupOutcome& o = ranks[0];
@@ -548,6 +557,32 @@ DGPP_TEST(dsv41_tp_group_prefill_is_bitwise_the_prefill_alone_at_world_2) {
     }
     require(o.alone_logits == o.group_logits, "the last row's logits bitwise");
     require(first_bad < 0, "C's rows differ from its prefill alone from layer " + std::to_string(first_bad));
+    // The same group through the stream-ordered reducer (plan D9): every
+    // layer's rows and the logits bitwise the host-driven walk's.
+    {
+      std::vector<std::unique_ptr<CollectiveBus>> sbuses = start_world(2, port++);
+      require(!sbuses.empty(), "tp bus world (stream folds) failed to start");
+      std::vector<GroupOutcome> sranks(2);
+      ConstructBarrier sbarrier(2);
+      std::vector<std::thread> sworkers;
+      for (int r = 0; r < 2; ++r)
+        sworkers.emplace_back(rank_work_group, r, 2, dir, std::cref(cfg), std::cref(prompts),
+                              sbuses[static_cast<size_t>(r)].get(), &sbarrier, &sranks[static_cast<size_t>(r)], true);
+      for (auto& t : sworkers) t.join();
+      for (int r = 0; r < 2; ++r) require(sranks[static_cast<size_t>(r)].error.empty(), sranks[static_cast<size_t>(r)].error);
+      const GroupOutcome& so = sranks[0];
+      require(so.group.size() == o.group.size() && so.alone.size() == o.alone.size(), "stream folds: layer captures");
+      for (size_t l = 0; l < o.group.size(); ++l) {
+        require(bits_equal(so.group[l], o.group[l]), "stream folds: the group's layer " + std::to_string(l) +
+                                                          " rows differ from the host-driven walk's");
+        require(bits_equal(so.alone[l], o.alone[l]), "stream folds: the alone walk's layer " + std::to_string(l) +
+                                                          " rows differ from the host-driven walk's");
+      }
+      require(so.group_logits == o.group_logits && so.alone_logits == o.alone_logits,
+              "stream folds: the logits differ from the host-driven walk's");
+      std::printf("[ OK ] group %d+%d+%d rows through the stream-ordered reducer: bitwise the host-driven walk\n", lens[0],
+                  lens[1], lens[2]);
+    }
   }
 }
 

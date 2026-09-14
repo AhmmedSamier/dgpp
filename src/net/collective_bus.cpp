@@ -468,6 +468,39 @@ struct CollectiveBus::Impl {
     // but never complete it — completion is the walk's business).
     std::shared_ptr<BusRequest> carrier;
   } graph;
+  // ---- the stream collectives (2026-09-14, plan D9) -----------------------
+  // The eager fold in the graph kernel form, launched on the caller's
+  // stream: the forward thread issues (a generation from the shared
+  // counter, a cell of the ring, the FIFO entry, the launch), the engine
+  // walks the FIFO in generation order with the replay walk's flight —
+  // strictly between windows (the eager gate keeps them apart) and never
+  // interleaved with host-driven collectives (both sides reject the
+  // other's presence). Thread ownership:
+  //   forward thread — issue (coll_mu for the FIFO push), settle;
+  //   engine thread  — the walk (stream_pass), cur/active, the timeline;
+  //   both           — issued (forward, release) / walked (engine,
+  //                    release), the era failure flag.
+  struct StreamState {
+    BusAllReduceCtl* cells = nullptr;  // pinned [kBusStreamRing]
+    struct Gen {
+      uint64_t gen = 0;
+      int cell = 0;
+      uint32_t elems = 0;
+    };
+    std::deque<Gen> fifo;             // coll_mu: issued, not yet adopted
+    std::atomic<uint64_t> issued{0};  // the last generation issued (0: none)
+    std::atomic<uint64_t> walked{0};  // the last generation walked (or failed)
+    bool active = false;              // engine: cur is adopted
+    Gen cur{};
+    uint64_t deadline_cycles = 0;     // the kernel deadline (computed at first issue)
+    std::shared_ptr<BusRequest> carrier;  // the posts' slot-credit carrier
+    GraphState::Timeline tl;          // the pass's generations (settle logs it)
+  } strm;
+  // Engine-side: stream generations issued and not yet walked.
+  bool stream_outstanding() const {
+    return strm.active ||
+           strm.issued.load(std::memory_order_acquire) > strm.walked.load(std::memory_order_relaxed);
+  }
   // Per-generation cells, one kBusMaxGraphGens slab per variant, pinned for
   // the bus's lifetime (baked into each recorded graph's kernel launches).
   BusAllReduceCtl* graph_cells = nullptr;
@@ -610,7 +643,8 @@ struct CollectiveBus::Impl {
     // have posted through it (and the peer's kernels waiting on this
     // side's arrivals). The era is over; the walk's drain-fail path
     // poisons the window's remaining kernels.
-    if (graph.recorded.load(std::memory_order_relaxed))
+    if (graph.recorded.load(std::memory_order_relaxed) ||
+        strm.issued.load(std::memory_order_acquire) != 0)
       graph_fail("lane failed: " + reason);
   }
 
@@ -1102,6 +1136,26 @@ struct CollectiveBus::Impl {
   // cell — the replayed kernels exit promptly when the caller syncs its
   // stream (they run there, not on the collective stream) and stamp
   // their own failure statuses. A completed window poisons nothing.
+  void poison_stream_collectives() {
+    // Engine joined: its walk state is ours. Every issued, un-walked
+    // generation's cell gets its done stamp so the stream's kernels exit.
+    bool poisoned = false;
+    if (strm.active) {
+      __atomic_store_n(&strm.cells[strm.cur.cell].done_seq, strm.cur.gen, __ATOMIC_RELEASE);
+      poisoned = true;
+    }
+    {
+      std::lock_guard<std::mutex> lock(coll_mu);
+      for (const StreamState::Gen& g : strm.fifo) {
+        __atomic_store_n(&strm.cells[g.cell].done_seq, g.gen, __ATOMIC_RELEASE);
+        poisoned = true;
+      }
+      strm.fifo.clear();
+    }
+    strm.walked.store(strm.issued.load(std::memory_order_acquire), std::memory_order_release);
+    strm.active = false;
+    if (poisoned) graph_fail("bus stopped with stream collectives in flight");
+  }
   void poison_live_graph_window() {
     if (!graph.recorded.load(std::memory_order_relaxed)) return;
     const uint64_t count =
@@ -1146,12 +1200,11 @@ struct CollectiveBus::Impl {
   //              peer's arrival)
   //   skew       first -> last peer gated: the slowest peer's lag
   //   fold       last peer gated -> fold done
-  void accumulate_timeline(const BusAllReduceCtl& c) {
+  void accumulate_timeline(GraphState::Timeline& t, const BusAllReduceCtl& c) {
     if (c.gt_start == 0 || c.gt_done < c.gt_start) return;
     auto us = [](uint64_t a, uint64_t b) {
       return b > a ? static_cast<double>(b - a) / 1000.0 : 0.0;
     };
-    GraphState::Timeline& t = graph.tl;
     ++t.n;
     if (t.n == 1) t.first_gt_start = c.gt_start;
     if (t.prev_gt_done != 0) t.compute_us += us(t.prev_gt_done, c.gt_start);
@@ -1253,6 +1306,10 @@ struct CollectiveBus::Impl {
     if (adopted_done && graph.adopted_count == count)
       return false;  // every armed window walked; awaiting the next arm
     if (adopted_done) {
+      // The stream collectives issued before this arm come first in
+      // generation order (stream_pass walks them; the gate admits no
+      // stream issue while the window is armed).
+      if (stream_outstanding()) return false;
       const GraphState::Window& w =
           graph.windows[graph.adopted_count % kBusWindowRing];
       const int variant = w.variant;
@@ -1374,8 +1431,35 @@ struct CollectiveBus::Impl {
     const uint64_t gen = graph.walk_seq;
     BusAllReduceCtl* const cell =
         &cells[(gen - graph.adopted_first) % gens];
-    const uint32_t seq = static_cast<uint32_t>(gen);
+    const uint32_t elems = shape.meta[(gen - graph.adopted_first) % gens].elems;
     ++graph.tl.passes;
+    bool completed = false;
+    const bool flew =
+        gen_flight_pass(cell, gen, elems, cells, shape.gens, graph.carrier,
+                        &graph.tl, "graph walk", &completed);
+    if (completed) {
+      ++graph.walk_seq;
+      graph.walk_pub.store(graph.walk_seq, std::memory_order_release);
+      if (graph.walk_seq > graph.adopted_last) log_window_timeline();
+      return true;
+    }
+    return worked || flew;
+  }
+  // The per-generation flight, shared by the replay walk and the stream
+  // collectives (D9): activate before the done check, post each peer's
+  // pair from the generation's staging row once the kernel's ready bits
+  // land, complete on the done stamp with the posting mask full; the
+  // stall microscope (over `cells[0..ncells)`) and the flight watchdog.
+  // `carrier` owns the posts' slots; `tl` takes the generation's timeline.
+  // Returns worked; *completed once the generation is walked (the caller
+  // advances walk_seq and publishes).
+  bool gen_flight_pass(BusAllReduceCtl* cell, uint64_t gen, uint32_t elems,
+                       const BusAllReduceCtl* cells, int ncells,
+                       const std::shared_ptr<BusRequest>& carrier,
+                       GraphState::Timeline* tl, const char* what,
+                       bool* completed) {
+    bool worked = false;
+    const uint32_t seq = static_cast<uint32_t>(gen);
     const uint64_t ready = acquire_u64(&cell->ready_bits);
     const uint64_t done = acquire_u64(&cell->done_seq);
 
@@ -1406,13 +1490,11 @@ struct CollectiveBus::Impl {
         return true;
       }
       if (graph.flight.posted_bits == all_peers_mask()) {
-        accumulate_timeline(*cell);
-        ++graph.walk_seq;
-        graph.walk_pub.store(graph.walk_seq, std::memory_order_release);
+        accumulate_timeline(*tl, *cell);
         record_latency(BusMessageClass::kLatency,
                        elapsed_us(graph.flight.started_at));
         graph.flight = {};
-        if (graph.walk_seq > graph.adopted_last) log_window_timeline();
+        *completed = true;
         return true;
       }
       // else: posting not drained — fall through, post, advance next pass.
@@ -1426,11 +1508,10 @@ struct CollectiveBus::Impl {
     if (Clock::now() - graph.flight.progressed_at >
         std::chrono::milliseconds(500 + 500 * graph.stall_dumps)) {
       ++graph.stall_dumps;
-      std::string cells;
-      for (int g = 0; g < shape.gens; ++g) {
-        const BusAllReduceCtl& c =
-            graph_variant_cells(variant)[g];
-        cells += " [" + std::to_string(g) + "]g=" +
+      std::string cells_txt;
+      for (int g = 0; g < ncells; ++g) {
+        const BusAllReduceCtl& c = cells[g];
+        cells_txt += " [" + std::to_string(g) + "]g=" +
                  std::to_string(acquire_u64(&c.gen_seq)) + ",r=" +
                  std::to_string(acquire_u64(&c.ready_bits)) + ",d=" +
                  std::to_string(acquire_u64(&c.done_seq)) + ",s=" +
@@ -1450,14 +1531,12 @@ struct CollectiveBus::Impl {
                    (peers[p][0].send[0][s].in_flight ? "!" : ".") + ",";
       }
       DGPP_LOG_INFO(
-          "graph walk STALLED gen={} posted={:#x} cell[{}]@{} window={} "
+          "{} STALLED gen={} posted={:#x} cell[{}]@{} windows={} "
           "adopted={} walk={}{}{}",
-          gen, graph.flight.posted_bits,
-          (gen - graph.adopted_first) % gens,
-          static_cast<const void*>(
-              &graph_variant_cells(variant)[
-                  (gen - graph.adopted_first) % gens]),
-          count, graph.adopted_count, graph.walk_seq, cells, lanes);
+          what, gen, graph.flight.posted_bits, static_cast<int>(cell - cells),
+          static_cast<const void*>(cell),
+          graph.window_count.load(std::memory_order_relaxed), graph.adopted_count,
+          graph.walk_seq, cells_txt, lanes);
     }
 
     // Posting: the kernel staged its peer rows (ready bits landed); post
@@ -1469,8 +1548,6 @@ struct CollectiveBus::Impl {
     // cannot make the cursor and claim diverge).
     if (graph.flight.posted_bits != all_peers_mask() && ready != 0) {
       const auto post_t0 = Clock::now();
-      const uint32_t elems =
-          shape.meta[(gen - graph.adopted_first) % gens].elems;
       // The row the kernel wrote — peer row 0 of ring slot
       // (g-1)%kStageRing, shared by every peer's post (the graph kernel
       // snapshots once; the eager machine's per-peer rows are untouched).
@@ -1500,21 +1577,21 @@ struct CollectiveBus::Impl {
         }
         ss.gen = pair_seq;
         ss.in_flight = true;
-        ss.owner = graph.carrier;
+        ss.owner = carrier;
         ss.owner_stripe = p;
         ++lane.in_flight_count;
         lane.last_progress = Clock::now();  // a post is progress (idle-gap arming)
         lane.cursor[0] = (slot + 1) % static_cast<uint32_t>(opt.lat_slots);
         ++lane.stats.posts;
         lane.stats.bytes_sent += elems * 2;
-        ++graph.carrier->outstanding;
+        ++carrier->outstanding;
         graph.flight.posted_bits |= 1ULL << p;
         graph.flight.progressed_at = Clock::now();
         worked = true;
         DGPP_LOG_DEBUG("graph stripe: gen={} peer={} lane=0 slot={} seq={}",
                        seq, peer_ranks[p], slot, pair_seq);
       }
-      graph.tl.post_us += elapsed_us(post_t0);
+      tl->post_us += elapsed_us(post_t0);
     }
 
     // The flight watchdog: graph generations carry no registry entry, so
@@ -1532,6 +1609,120 @@ struct CollectiveBus::Impl {
     return worked;
   }
 
+  // The stream collectives' walk (D9): between windows, the FIFO's
+  // generations in order through the same flight; a failed era poisons
+  // the FIFO so the caller's stream drains.
+  bool stream_pass() {
+    if (graph.adopted_count != 0 && graph.walk_seq <= graph.adopted_last)
+      return false;  // an adopted window is walking (the gate kept the stream out)
+    if (!strm.active) {
+      if (strm.issued.load(std::memory_order_acquire) <=
+          strm.walked.load(std::memory_order_relaxed))
+        return false;
+      std::lock_guard<std::mutex> lock(coll_mu);
+      if (strm.fifo.empty()) return false;  // issued, the launch still in progress
+      strm.cur = strm.fifo.front();
+      strm.fifo.pop_front();
+      strm.active = true;
+      graph.flight = {};
+      if (strm.cur.gen < graph.walk_seq)
+        graph_fail("stream collective issued out of walk order (protocol)");
+      else
+        graph.walk_seq = strm.cur.gen;
+      if (!strm.carrier) {
+        auto carrier = std::make_shared<BusRequest>();
+        carrier->cls = BusMessageClass::kLatency;
+        carrier->peer_rank = -1;
+        carrier->is_collective = true;
+        carrier->stripe_hashes.assign(peer_ranks.size(), 0);
+        strm.carrier = std::move(carrier);
+      }
+    }
+    const uint64_t gen = strm.cur.gen;
+    BusAllReduceCtl* const cell = &strm.cells[strm.cur.cell];
+    if (graph.failed.load(std::memory_order_relaxed)) {
+      // Drain-fail: poison this generation and every queued one so the
+      // stream's kernels exit; everything issued counts as walked (settle
+      // reports the era's failure).
+      __atomic_store_n(&cell->done_seq, gen, __ATOMIC_RELEASE);
+      {
+        std::lock_guard<std::mutex> lock(coll_mu);
+        for (const StreamState::Gen& g : strm.fifo)
+          __atomic_store_n(&strm.cells[g.cell].done_seq, g.gen, __ATOMIC_RELEASE);
+        strm.fifo.clear();
+      }
+      graph.walk_seq = std::max(graph.walk_seq, gen + 1);
+      graph.walk_pub.store(graph.walk_seq, std::memory_order_release);
+      strm.walked.store(strm.issued.load(std::memory_order_acquire),
+                        std::memory_order_release);
+      strm.active = false;
+      graph.flight = {};
+      return true;
+    }
+    ++strm.tl.passes;
+    bool completed = false;
+    const bool worked =
+        gen_flight_pass(cell, gen, strm.cur.elems, strm.cells, kBusStreamRing,
+                        strm.carrier, &strm.tl, "stream collective", &completed);
+    if (completed) {
+      log_stream_gen(*cell, gen, strm.cur.elems);
+      graph.walk_seq = gen + 1;
+      graph.walk_pub.store(graph.walk_seq, std::memory_order_release);
+      strm.walked.store(gen, std::memory_order_release);
+      strm.active = false;
+      return true;
+    }
+    return worked;
+  }
+  // DGPP_BUS_TIMELINE=1: every 32nd stream generation's decomposition at
+  // INFO (the eager fold's sampled line, in the stream form).
+  void log_stream_gen(const BusAllReduceCtl& c, uint64_t gen, uint32_t elems) {
+    static const bool forced = [] {
+      const char* e = std::getenv("DGPP_BUS_TIMELINE");
+      return e != nullptr && e[0] == '1';
+    }();
+    if (!forced || (gen % 32) != 0) return;
+    auto us = [](uint64_t a, uint64_t b) {
+      return b > a ? static_cast<double>(b - a) / 1000.0 : 0.0;
+    };
+    const uint64_t now_gt = static_cast<uint64_t>(
+        static_cast<int64_t>(monotonic_ns()) + gt_offset_ns);
+    DGPP_LOG_INFO(
+        "stream fold: rank {} gen {} elems {} status={} total {:.1f}us = copy "
+        "{:.1f} + handshake {:.1f} + skew {:.1f} + fold {:.1f}; done->walked "
+        "{:.1f}; gate waits {}",
+        opt.my_rank, gen, elems, acquire_u32(&c.status), us(c.gt_start, c.gt_done),
+        us(c.gt_start, c.gt_stage), us(c.gt_stage, c.gt_first),
+        us(c.gt_first, c.gt_last), us(c.gt_last, c.gt_done), us(c.gt_done, now_gt),
+        acquire_u32(&c.dbg_gate_waits));
+  }
+  // The pass's stream timeline (settle's call, forward thread: the walk's
+  // writes are ordered before its `walked` release, settle's acquire).
+  void log_stream_timeline() {
+    GraphState::Timeline& t = strm.tl;
+    if (t.n == 0) return;
+    static const bool forced = [] {
+      const char* e = std::getenv("DGPP_BUS_TIMELINE");
+      return e != nullptr && e[0] == '1';
+    }();
+    if (!forced && dgpp::current_log_level() > dgpp::LogLevel::Debug) {
+      t = GraphState::Timeline{};
+      return;
+    }
+    const dgpp::LogLevel lvl = forced ? dgpp::LogLevel::Info : dgpp::LogLevel::Debug;
+    const double n = static_cast<double>(t.n);
+    ::dgpp::logf(lvl,
+        "stream fold timeline: rank {} gens {} avg us: total {:.1f} = copy "
+        "{:.1f} + handshake {:.1f} + skew {:.1f} + fold {:.1f}; engine post "
+        "{:.1f}; max handshake {:.1f} skew {:.1f} total {:.1f} (gen {}); "
+        "passes/gen {:.0f}; compute between gens {:.1f} us",
+        opt.my_rank, t.n, t.total_us / n, t.copy_us / n, t.handshake_us / n,
+        t.skew_us / n, t.fold_us / n, t.post_us / n, t.max_handshake_us,
+        t.max_skew_us, t.max_total_us, t.max_total_gen,
+        static_cast<double>(t.passes) / n,
+        t.n > 1 ? t.compute_us / static_cast<double>(t.n - 1) : 0.0);
+    t = GraphState::Timeline{};
+  }
   uint64_t all_peers_mask() const {
     const size_t peers = peer_ranks.size();
     return peers >= 64 ? ~0ULL : ((1ULL << peers) - 1);
@@ -2334,6 +2525,7 @@ struct CollectiveBus::Impl {
     std::lock_guard<std::mutex> bq(bulk_q_mu);
     if (!bulk_q.empty()) return false;
     if (total_outstanding() != 0) return false;
+    if (stream_outstanding()) return false;  // the stream walk must drain (quiesce poisons it)
     // A live graph window keeps the engine alive: the walk must drain
     // (quiesce's poison path handles the deliberate-stop case). The
     // acquire pairs with arm's window publish, so the adopted window
@@ -2403,16 +2595,18 @@ struct CollectiveBus::Impl {
     for (;;) {
       if (stopping.load(std::memory_order_relaxed) && drained()) break;
       const bool graph_worked = graph_pass();
+      const bool stream_worked = stream_pass();
       const bool coll_worked = collective_pass();
       const bool worked = intake();
       const bool polled = poll_cqs();
       const bool recycled = recycle_pass();
       const bool credited = credits_pass();
       const bool watched = watchdog_pass();
-      if (graph_worked || coll_worked || worked || polled || recycled ||
-          credited || watched) {
+      if (graph_worked || stream_worked || coll_worked || worked || polled ||
+          recycled || credited || watched) {
         idle = 0;
       } else if (++idle > kEngineSpinIterations && !graph_window_live() &&
+                 !stream_outstanding() &&
                  !graph.recorded.load(std::memory_order_relaxed)) {
         // The nap is for the pre-serving idle only. Once a decode graph
         // exists this thread never sleeps: a 50 us nap between
@@ -3010,6 +3204,17 @@ bool CollectiveBus::start(std::string* error) {
     }
     for (int i = 0; i < kBusMaxGraphVariants * kBusMaxGraphGens; ++i)
       impl.graph_cells[i] = BusAllReduceCtl{};
+    const cudaError_t strm_err = cudaMallocHost(
+        reinterpret_cast<void**>(&impl.strm.cells), kBusStreamRing * sizeof(BusAllReduceCtl));
+    if (strm_err != cudaSuccess || impl.strm.cells == nullptr) {
+      cudaFreeHost(impl.graph_cells);
+      impl.graph_cells = nullptr;
+      cudaFreeHost(impl.ar_ctl);
+      impl.ar_ctl = nullptr;
+      *error = std::string("stream collective cells alloc failed: ") + cudaGetErrorString(strm_err);
+      return false;
+    }
+    for (int i = 0; i < kBusStreamRing; ++i) impl.strm.cells[i] = BusAllReduceCtl{};
     // The bulk grid's records live in device memory (atomics and every
     // block's reads). No memset: the kernel resets what it uses at entry,
     // and a synchronous memset here is a device-wide barrier against a
@@ -3017,6 +3222,8 @@ bool CollectiveBus::start(std::string* error) {
     const cudaError_t scratch_err = cudaMalloc(
         reinterpret_cast<void**>(&impl.bulk_scratch), sizeof(BusBulkScratch));
     if (scratch_err != cudaSuccess || impl.bulk_scratch == nullptr) {
+      cudaFreeHost(impl.strm.cells);
+      impl.strm.cells = nullptr;
       cudaFreeHost(impl.graph_cells);
       impl.graph_cells = nullptr;
       cudaFreeHost(impl.ar_ctl);
@@ -3030,6 +3237,8 @@ bool CollectiveBus::start(std::string* error) {
     if (stream_err != cudaSuccess) {
       cudaFree(impl.bulk_scratch);
       impl.bulk_scratch = nullptr;
+      cudaFreeHost(impl.strm.cells);
+      impl.strm.cells = nullptr;
       cudaFreeHost(impl.graph_cells);
       impl.graph_cells = nullptr;
       cudaFreeHost(impl.ar_ctl);
@@ -3213,6 +3422,10 @@ void* CollectiveBus::stage_next(std::string* error) {
                "allreduce_staged())";
       return nullptr;
     }
+    if (impl.stream_outstanding()) {
+      *error = "stream collectives are in flight (allreduce_settle first)";
+      return nullptr;
+    }
     if (impl.coll_active.load(std::memory_order_relaxed) ||
         !impl.coll_q.empty()) {
       *error = "no pre-stage handout while a collective is in flight (v1)";
@@ -3281,6 +3494,10 @@ uint64_t CollectiveBus::allreduce_staged(size_t bf16_elems,
     }
     if (impl.stage_held_ptr == nullptr) {
       *error = "no held pre-stage handout (call stage_next() first)";
+      return 0;
+    }
+    if (impl.stream_outstanding()) {
+      *error = "stream collectives are in flight (allreduce_settle first)";
       return 0;
     }
     if (impl.coll_active.load(std::memory_order_relaxed) ||
@@ -3370,6 +3587,10 @@ uint64_t CollectiveBus::allreduce(const void* device_src, void* device_dst,
                "allreduce_staged() first";
       return 0;
     }
+    if (impl.stream_outstanding()) {
+      *error = "stream collectives are in flight (allreduce_settle first)";
+      return 0;
+    }
     if (impl.coll_active.load(std::memory_order_relaxed) ||
         !impl.coll_q.empty()) {
       *error = "one outstanding collective at a time (v1)";
@@ -3449,6 +3670,10 @@ uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
                "allreduce_staged() first";
       return 0;
     }
+    if (impl.stream_outstanding()) {
+      *error = "stream collectives are in flight (allreduce_settle first)";
+      return 0;
+    }
     if (impl.coll_active.load(std::memory_order_relaxed) ||
         !impl.coll_q.empty()) {
       *error = "one outstanding collective at a time (v1)";
@@ -3492,6 +3717,186 @@ uint64_t CollectiveBus::allreduce_bulk(const void* device_src, void* device_dst,
   DGPP_LOG_DEBUG("allreduce_bulk: queued id={} elems={} stripes={} segs={}",
                  id, bf16_elems, C, seg_count);
   return id;
+}
+
+uint64_t CollectiveBus::allreduce_stream(cudaStream_t stream, const void* device_src,
+                                         void* device_dst, size_t bf16_elems,
+                                         std::string* error) {
+  if (impl_->world1) {
+    Impl& w = *impl_;
+    std::lock_guard<std::mutex> lock(w.w1_mu);
+    if (w.stopping.load(std::memory_order_relaxed)) { *error = "bus is stopped"; return 0; }
+    if (bf16_elems == 0) { *error = "allreduce element count must be positive"; return 0; }
+    if (w.w1_stage_held) { *error = "a pre-stage handout is held"; return 0; }
+    if (device_dst != device_src &&
+        cudaMemcpyAsync(device_dst, device_src, bf16_elems * 2, cudaMemcpyDeviceToDevice, stream) !=
+            cudaSuccess) {
+      *error = "a world of one: the identity copy failed";
+      return 0;
+    }
+    return w.w1_next_id++;
+  }
+  Impl& impl = *impl_;
+  if (impl.stopping.load(std::memory_order_relaxed)) {
+    *error = "bus is stopped";
+    return 0;
+  }
+  if (impl.consumers_launched) {
+    *error = "allreduce_stream requires launch_consumers=false (persistent harness "
+             "consumers would race the per-collective kernel for claims)";
+    return 0;
+  }
+  if (bf16_elems == 0 || bf16_elems % 2 != 0 ||
+      bf16_elems * 2 > options_.lat_slot_bytes) {
+    *error = "allreduce element count must be a positive multiple of 2 and "
+             "fit a latency slot (at most " +
+             std::to_string(options_.lat_slot_bytes / 2) + " bf16)";
+    return 0;
+  }
+  // The ring: at most kBusStreamRing generations between issue and walk
+  // (the walk frees them in order; the wait is bounded by the flight
+  // watchdog's era failure).
+  {
+    const auto deadline =
+        Clock::now() + std::chrono::milliseconds(std::max(options_.completion_timeout_ms + 5000, 30000));
+    while (impl.strm.issued.load(std::memory_order_relaxed) -
+               impl.strm.walked.load(std::memory_order_acquire) >=
+           static_cast<uint64_t>(kBusStreamRing)) {
+      if (impl.graph.failed.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(impl.coll_mu);
+        *error = "graph era failed: " + impl.graph.error;
+        return 0;
+      }
+      if (impl.stopping.load(std::memory_order_relaxed)) {
+        *error = "bus stopped while a stream collective waited for the ring";
+        return 0;
+      }
+      if (Clock::now() > deadline) {
+        *error = "stream ring backstop: the engine did not walk the ring's oldest generation";
+        return 0;
+      }
+      cpu_relax();
+    }
+  }
+  uint64_t gen = 0;
+  int cell_idx = 0;
+  BusAllReduceCtl* cell = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    if (impl.coll_poisoned) {
+      *error = "an earlier collective failed; this bus must be restarted";
+      return 0;
+    }
+    if (const char* gate = impl.eager_gate_closed()) {
+      *error = std::string(gate) + "; stream collectives are closed with it";
+      return 0;
+    }
+    if (impl.stage_held_ptr != nullptr) {
+      *error = "a pre-stage handout is held; consume it with allreduce_staged() first";
+      return 0;
+    }
+    if (impl.coll_active.load(std::memory_order_relaxed) || !impl.coll_q.empty()) {
+      *error = "a host-driven collective is queued or in flight (wait for it before "
+               "issuing stream collectives)";
+      return 0;
+    }
+    if (impl.strm.deadline_cycles == 0) {
+      impl.strm.deadline_cycles = impl.graph.deadline_cycles != 0
+                                      ? impl.graph.deadline_cycles
+                                      : bus_consumer_deadline_cycles(options_.consumer_deadline_s);
+      if (impl.strm.deadline_cycles == 0) {
+        *error = "could not read the device clock rate for the collective deadline";
+        return 0;
+      }
+    }
+    // The generation from the shared counter (execution order equals
+    // generation order: one forward thread issues on one stream); the
+    // 32-bit top fails the era as a replay arm does.
+    if (impl.ctl_seq_counter.load(std::memory_order_relaxed) == 0xFFFFFFFFu) {
+      bool expected = false;
+      if (impl.graph.failed.compare_exchange_strong(expected, true)) {
+        impl.graph.error = "collective generation space exhausted (restart the process)";
+        DGPP_LOG_ERROR("bus graph era failed: {}", impl.graph.error);
+      }
+      *error = impl.graph.error;
+      return 0;
+    }
+    gen = static_cast<uint64_t>(impl.ctl_seq_counter.fetch_add(1, std::memory_order_relaxed)) + 1;
+    cell_idx = static_cast<int>(gen % static_cast<uint64_t>(kBusStreamRing));
+    cell = &impl.strm.cells[cell_idx];
+    // The cell reset, gen_seq last with release (the kernel's acquire read
+    // orders the resets ahead of its execution).
+    __atomic_store_n(&cell->ready_bits, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&cell->done_seq, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&cell->status, 0, __ATOMIC_RELAXED);
+    cell->stamp_stage = 0;
+    cell->stamp_first_claim = 0;
+    cell->stamp_reduce_done = 0;
+    cell->gt_start = cell->gt_stage = cell->gt_first = cell->gt_last = cell->gt_done = 0;
+    for (uint64_t& g : cell->gt_claim) g = 0;
+    __atomic_store_n(&cell->dbg_gate_waits, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&cell->dbg_gate_spins, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&cell->gen_seq, gen, __ATOMIC_RELEASE);
+    // Issued before the launch: the engine adopts from the FIFO, so a
+    // launch that fails is withdrawn below before the walk can see it.
+    impl.strm.fifo.push_back(Impl::StreamState::Gen{gen, cell_idx, static_cast<uint32_t>(bf16_elems)});
+    impl.strm.issued.store(gen, std::memory_order_release);
+  }
+  BusAllReduceGraphView v{};
+  int vi = 0;
+  for (size_t p = 0; p < impl.peer_ranks.size(); ++p)
+    for (const Impl::LaneState& lane : impl.peers[p])
+      v.recv[vi++] = impl.recv_view_of(lane);
+  v.recv_views = vi;
+  v.lanes_per_peer = static_cast<int>(impl.lane_count());
+  v.stage_row_base = reinterpret_cast<uint16_t*>(impl.stage_buf(0, 0));
+  v.send_peers = static_cast<int>(impl.peer_ranks.size());
+  v.stage_ring = Impl::kStageRing;
+  v.stage_row_bytes = static_cast<uint32_t>(options_.lat_slot_bytes);
+  const cudaError_t launch = launch_bus_allreduce_graph(
+      v, options_.my_rank, static_cast<const __nv_bfloat16*>(device_src),
+      static_cast<__nv_bfloat16*>(device_dst), static_cast<uint32_t>(bf16_elems), cell,
+      impl.strm.deadline_cycles, stream);
+  if (launch != cudaSuccess) {
+    // No kernel will stamp this generation: fail the era (the walk's
+    // drain-fail poisons the queue) — the numbering cannot be given back.
+    impl.graph_fail(std::string("stream collective kernel launch failed: ") + cudaGetErrorString(launch));
+    *error = impl.graph.error;
+    return 0;
+  }
+  return gen;
+}
+
+bool CollectiveBus::allreduce_settle(int timeout_ms, std::string* error) {
+  if (impl_->world1) return true;
+  Impl& impl = *impl_;
+  const uint64_t need = impl.strm.issued.load(std::memory_order_acquire);
+  if (need == 0) return true;
+  const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (impl.strm.walked.load(std::memory_order_acquire) < need) {
+    if (impl.graph.failed.load(std::memory_order_relaxed)) {
+      std::lock_guard<std::mutex> lock(impl.coll_mu);
+      *error = "graph era failed: " + impl.graph.error;
+      return false;
+    }
+    if (impl.stopping.load(std::memory_order_relaxed)) {
+      *error = "bus stopped with stream collectives in flight";
+      return false;
+    }
+    if (Clock::now() > deadline) {
+      *error = "settle backstop: the engine did not walk the stream collectives (the "
+               "flight watchdog should have failed the era first)";
+      return false;
+    }
+    cpu_relax();
+  }
+  if (impl.graph.failed.load(std::memory_order_relaxed)) {
+    std::lock_guard<std::mutex> lock(impl.coll_mu);
+    *error = "graph era failed: " + impl.graph.error;
+    return false;
+  }
+  impl.log_stream_timeline();
+  return true;
 }
 
 BusAllReduceResult CollectiveBus::wait_allreduce(uint64_t id,
@@ -3858,6 +4263,10 @@ bool CollectiveBus::graph_record_begin(std::string* error, int variant) {
                "graph session";
       return false;
     }
+    if (impl.stream_outstanding()) {
+      *error = "stream collectives are in flight (allreduce_settle first)";
+      return false;
+    }
     if (impl.coll_active.load(std::memory_order_relaxed) ||
         !impl.coll_q.empty()) {
       *error = "no graph session while an eager collective is in flight (v1)";
@@ -4058,6 +4467,7 @@ void CollectiveBus::quiesce() {
   // poisoned the cell, or it completed normally — either way this stamp
   // is idempotent and merely hastens the exit.
   if (impl.coll.req) impl.poison_collective(*impl.coll.req);
+  impl.poison_stream_collectives();
   impl.poison_live_graph_window();
   if (impl.collective_stream) {
     cudaStreamSynchronize(impl.collective_stream);
@@ -4150,6 +4560,10 @@ void CollectiveBus::stop() {
   if (impl.graph_cells) {
     cudaFreeHost(impl.graph_cells);
     impl.graph_cells = nullptr;
+  }
+  if (impl.strm.cells) {
+    cudaFreeHost(impl.strm.cells);
+    impl.strm.cells = nullptr;
   }
   if (impl.bulk_scratch) {
     cudaFree(impl.bulk_scratch);

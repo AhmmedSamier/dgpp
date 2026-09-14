@@ -6,6 +6,21 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **The GPU-driven eager fold (plan D9)** (2026-09-14, late;
+  `CollectiveBus::allreduce_stream` / `allreduce_settle`, `BusStreamReducer`):
+  the eager walk's boundary reductions launch on the model's stream in the
+  graph kernel form — no host drain of the model stream before each fold,
+  no engine launch on the collective stream, no host notice of the finish
+  before the model continues; the generation comes from the shared
+  counter at submit, the engine posts from a FIFO through the replay
+  walk's own flight, the model settles once per pass. DeepSeek-V4.1-Flash
+  serves on it by default (`DGPP_DSV41_EAGER_FOLD=1` restores the
+  host-driven reducer; the other families keep it). The fold is bitwise
+  the host-driven one (bus_test's stream scenario against the oracle at
+  worlds 2 and 4; dsv41_tp_test's group prefill through both reducers,
+  every layer bitwise). Fabric, the six-slot config: TTFT 0.30 → 0.27 s at
+  one stream and 0.84 → 0.73 s at six, the aggregates unchanged, the fold
+  kernel 542 → 386 µs at 47 rows (docs/measurements.md).
 - **The dense lowering of the session-core families follows the rows of a
   launch** (2026-09-14, `kernels/gemm.hpp dense_gemv_rows`, the site setting
   `DGPP_DENSE_GEMV_ROWS`, default 4; 256 restores the old lowering): GLM-4.7,

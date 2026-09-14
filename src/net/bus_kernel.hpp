@@ -216,6 +216,11 @@ constexpr int kBusMaxGraphVariants = 64;  // two per slot and two per batch fami
 constexpr int kBusMaxLiveWindows = 2;
 constexpr int kBusWindowRing = 4;
 constexpr int kBusMaxGraphStageRing = 8;    // staging rows (kStageRing)
+// The stream collectives' cell ring (2026-09-14, plan D9: the eager fold
+// launched on the model's stream in the graph kernel form): generations in
+// flight between the forward thread's issue and the engine's walk — a
+// prefill pass issues ~93 folds, the ring lets the host run this far ahead.
+constexpr int kBusStreamRing = 64;
 
 // The graph twin of BusAllReduceView: the staging row is a base, not a
 // precomputed row — the kernel picks the row at runtime from its

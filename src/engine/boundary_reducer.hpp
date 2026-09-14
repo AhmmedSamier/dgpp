@@ -23,6 +23,16 @@ struct BoundaryReducer {
 
   virtual void reduce(uint16_t* partial, int rows, int hidden) = 0;
 
+  // The stream-ordered form (2026-09-14, plan D9): reduce() launches the
+  // fold on the model's stream after the producing kernels — the model
+  // skips its host drain before the call — and settle() (once per pass,
+  // before the host reads results) waits for the transport's verdict.
+  // bind_stream() gives the reducer the model's stream (the model calls
+  // it at construction). The defaults are the host-driven contract.
+  virtual bool stream_ordered() const { return false; }
+  virtual void bind_stream(void* /*cudaStream_t*/) {}
+  virtual void settle() {}
+
   // Measurement interface (2026-09-09, the Qwen plan's Q0): one extra collective
   // of `rows x cols` bf16 over a scratch buffer nobody reads, issued right
   // after a boundary fold — the shape and position of the all-reduce a

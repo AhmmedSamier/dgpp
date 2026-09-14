@@ -162,6 +162,97 @@ struct BusBoundaryReducer final : BoundaryReducer {
 };
 
 // ---------------------------------------------------------------------------
+// The stream-ordered boundary reducer (2026-09-14, plan D9): the eager walk's
+// folds as stream collectives — no host drain of the model stream before
+// the fold, no engine launch on the collective stream, no host notice of
+// the finish before the model may continue; the kernel form is the replay's
+// (bitwise the eager machine's). The model skips the drain
+// (stream_ordered) and calls settle() once per pass. Boundaries above one
+// latency slot keep the host-driven bulk path (the stream is drained for
+// them: settle, then the bulk collective, then its wait).
+// ---------------------------------------------------------------------------
+class BusStreamReducer final : public BoundaryReducer {
+ public:
+  explicit BusStreamReducer(net::CollectiveBus& bus, int timeout_ms = 60000)
+      : bus_(bus), timeout_ms_(timeout_ms), max_elems_(bus_latency_slot_elems(bus)) {}
+  ~BusStreamReducer() override {
+    if (probe_buf_) cudaFree(probe_buf_);
+  }
+  BusStreamReducer(const BusStreamReducer&) = delete;
+  BusStreamReducer& operator=(const BusStreamReducer&) = delete;
+
+  bool stream_ordered() const override { return stream_ != nullptr; }
+  void bind_stream(void* stream) override { stream_ = static_cast<cudaStream_t>(stream); }
+
+  void probe(int rows, int cols) override {
+    if (probe_buf_ == nullptr) {
+      if (cudaMalloc(reinterpret_cast<void**>(&probe_buf_), max_elems_ * 2) != cudaSuccess)
+        throw std::runtime_error("boundary probe: scratch alloc failed");
+      DGPP_CUDA_OK(cudaMemset(probe_buf_, 0, max_elems_ * 2));
+    }
+    const size_t elems = std::min(max_elems_, static_cast<size_t>(rows) * static_cast<size_t>(cols));
+    issue(probe_buf_, elems);
+  }
+
+  // No pre-stage handout: the fold runs in place on the model's buffer.
+  uint16_t* stage(int /*rows*/, int /*hidden*/) override { return nullptr; }
+
+  void reduce(uint16_t* partial, int rows, int hidden) override {
+    step_timing::Scope tick(step_timing::kFold);
+    if (hidden <= 0 || hidden % 2 != 0)
+      throw std::invalid_argument("boundary reduce: hidden must be even");
+    const size_t total = static_cast<size_t>(rows) * static_cast<size_t>(hidden);
+    if (stream_ == nullptr) {
+      // Unbound (no model stream yet): the host-driven one-shot / bulk.
+      host_driven(partial, total);
+      return;
+    }
+    if (total <= max_elems_) {
+      issue(partial, total);
+      return;
+    }
+    // Prefill-class boundary: the stream's folds settle, the stream
+    // drains, and the bulk machine takes the buffer (its wait orders the
+    // result for the host and the stream alike).
+    settle();
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+    host_driven(partial, total);
+  }
+
+  void settle() override {
+    std::string err;
+    if (!bus_.allreduce_settle(timeout_ms_, &err))
+      throw std::runtime_error("boundary settle: " + err);
+  }
+
+ private:
+  void issue(uint16_t* at, size_t elems) {
+    std::string err;
+    if (bus_.allreduce_stream(stream_, at, at, elems, &err) == 0)
+      throw std::runtime_error("boundary reduce: stream collective rejected: " + err);
+  }
+  void host_driven(uint16_t* partial, size_t total) {
+    std::string err;
+    uint64_t id = 0;
+    if (total > max_elems_) {
+      id = bus_.allreduce_bulk(partial, partial, total, &err);
+      if (id == 0) throw std::runtime_error("boundary reduce: bulk rejected: " + err);
+    } else {
+      id = bus_.allreduce(partial, partial, total, &err);
+      if (id == 0) throw std::runtime_error("boundary reduce: allreduce rejected: " + err);
+    }
+    const net::BusAllReduceResult res = bus_.wait_allreduce(id, timeout_ms_);
+    if (!res.ok) throw std::runtime_error("boundary reduce (host-driven): " + res.error);
+  }
+
+  net::CollectiveBus& bus_;
+  int timeout_ms_ = 60000;
+  size_t max_elems_ = 0;
+  cudaStream_t stream_ = nullptr;
+  uint16_t* probe_buf_ = nullptr;
+};
+
+// ---------------------------------------------------------------------------
 // DESIGN §6.2: the boundary reducer's RECORD half — the decode walk's
 // capture mode folds through the bus's graph session instead of the
 // eager machine. Install it with model.set_boundary() for the capture

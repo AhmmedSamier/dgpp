@@ -292,6 +292,38 @@ class CollectiveBus {
   int64_t globaltimer_offset_ns() const;
   bool graph_replay_finish(int timeout_ms, std::string* error);
 
+  // ---- the GPU-driven eager fold (2026-09-14, plan D9) --------------------
+  //
+  // The eager one-shot launched on the CALLER's stream in the graph kernel
+  // form: no host drain of the model stream before the fold, no engine
+  // launch on the collective stream, no host notice of the finish before
+  // the model may continue — the stream orders the result exactly as a
+  // recorded node's replay does. allreduce_stream() takes the generation
+  // from the shared counter at submit (one forward thread, one stream:
+  // execution order equals generation order, so the staging-ring reuse
+  // fences hold as they do across windows), resets a cell of the stream
+  // ring, pushes the generation to the engine's FIFO and launches the
+  // kernel on `stream`; the engine posts from the FIFO as it posts from
+  // a replay window (the same flight per generation). Returns the
+  // generation (0 = rejected): under the eager gate (a recording session,
+  // an armed window, a failed era), with a host-driven collective queued or
+  // in flight, with a pre-stage handout held, or after a launch failure
+  // (the era fails). Blocks (bounded) while kBusStreamRing generations are
+  // in flight. Same element contract as allreduce(); the fold is bitwise
+  // the eager machine's and the replay's.
+  //
+  // allreduce_settle(): waits until every stream generation issued so far
+  // is walked — once per pass, before the host reads results, submits a
+  // host-driven collective or arms a replay window (those reject while
+  // stream generations are outstanding). A generation that exits on
+  // deadline or poison fails the era (the remaining stream kernels are
+  // poisoned so the caller's stream drains); settle returns the verdict.
+  // A world of one: the identity copy on the stream; settle succeeds.
+  uint64_t allreduce_stream(cudaStream_t stream, const void* device_src,
+                            void* device_dst, size_t bf16_elems,
+                            std::string* error);
+  bool allreduce_settle(int timeout_ms, std::string* error);
+
   // TEMP bring-up microscope: the per-gen cells' gen/ready/done/status,
   // failure-only observability for the graph walk.
   void dump_graph_cells(const char* why);

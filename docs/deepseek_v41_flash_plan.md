@@ -1767,7 +1767,39 @@ session-core families route one to four rows to the chunks instead, this
 family keeps every row on the streaming form for its bitwise group
 prefill.
 
-**D9 — The GPU-driven eager fold (designed, not built).** The prefill's
+**D9 — The GPU-driven eager fold (BUILT 2026-09-14, late; the design
+below stands).** `CollectiveBus::allreduce_stream(stream, src, dst, elems)`
+and `allreduce_settle()`: the graph kernel form launched on the model's
+stream, its generation from the shared counter at submit (one forward
+thread, one stream: execution order equals generation order), its cell
+from a 64-deep stream ring, the engine posting from a FIFO through the
+replay walk's own per-generation flight (`gen_flight_pass`, shared with
+the windows), one settle per pass. The gates keep the eras apart: a
+host-driven collective, a handout or a recording session is rejected
+while stream generations are outstanding; a stream issue is rejected while
+a window is armed; a failed generation fails the era and the drain-fail
+poisons the FIFO so the stream drains. `BusStreamReducer`
+(engine/tp_bus.hpp) is the reducer: `stage()` hands out nothing (the fold
+runs in place on the model's buffer), `reduce()` issues, boundaries above
+one latency slot settle, drain and take the bulk path as before; the
+model binds its stream at construction (`BoundaryReducer::bind_stream`),
+skips the drain before a stream-ordered fold and settles at the end of
+every eager pass. Serving: DeepSeek-V4.1-Flash by default,
+`DGPP_DSV41_EAGER_FOLD=1` the host-driven reducer (the A/B switch); the
+other families keep the host-driven one. Gates: `bus_test`'s
+`scenario_allreduce_stream` (100 generations per pass, three passes, at
+worlds 2 and 4: every destination bitwise the oracle, the gates, a
+host-driven one-shot between passes) and `dsv41_tp_test`'s group-prefill
+gate run through both reducers (every layer's rows and the logits
+bitwise between them, at 12 and 51 rows — the 51-row group's wide folds
+through the bulk path). Fabric (the six-slot config, the recipe's bench,
+same evening): C1 TTFT 0.303 → 0.269 s, C6 TTFT 0.836 → 0.727 s, the
+aggregates 49.3 / 108.0 → 49.6 / 108.5 tok/s (parity), prefill 2K 1,370 →
+1,383 tok/s; the fold kernel at 47 rows 542 → 386 µs (the copy 158 → 24),
+at 128 rows 1,397 → 933, and the host's 0.3–1.3 ms notice per fold off
+the model's path. Tables: docs/measurements.md.
+
+**D9 (the original design note) — The GPU-driven eager fold.** The prefill's
 boundary reductions (93 per pass) run the host-driven eager collective:
 the model stream drains, the host submits, the engine thread launches the
 one-block consumer on the bus's own stream, which copies the payload into
@@ -1794,6 +1826,45 @@ under host run-ahead, lane-0-only posting at these payloads, the eager
 gate and world-1 branches. Also worth a one-line experiment first: the
 30–60-row folds sit just under the bulk (reduce-scatter + allgather)
 threshold and pay the one-shot's (W−1)× wire bytes.
+
+**D10 — Prefill rows inside the decode batch (designed, not built;
+2026-09-14 late).** The remaining admission cost after D9 is the prefill
+walk's serial execution: a group of six ~30-token prompts is one ~400 ms
+walk during which no decode step runs, and the six-stream TTFT is that
+walk plus the queueing behind the step in progress. The recipe hides it
+by chunking prefill into the running batch. What that needs here, and
+why it is not a short project:
+
+- *The captured segment.* The decode step is a replayed graph, so prefill
+  rows must ride a captured variant with a FIXED segment: family × depth
+  × (segment present or not) doubles the variant count (60 → 120 at six
+  slots; `kBusMaxGraphVariants` 64 → 128, +6 MB of pinned cells), and the
+  segment's rows must be device-fed (tokens, positions, request id, the
+  span's length) with the rows past the chunk's length masked inside
+  every kernel of the prefill path — the CSA2 prefill attention, its
+  selection, the kv publication, the bounded prefill's decoder-segment
+  packing all take host row counts today. The alternative, treating the
+  chunk as VERIFY rows of the prefilling slot (the decode attention and
+  publication already handle several consecutive positions of one
+  request), needs a verdict mode that accepts every row (the prompt is
+  its own "draft"), a heterogeneous batch shape (one slot with P rows,
+  the others with 1 + depth), and is bounded by the slot kernels' row cap
+  (48: six slots at depth 4 leave 18 rows — a 30-token prompt takes two
+  steps, a 500-token one 28, worse than the group walk).
+- *The eager mixed step* (decode rows plus the group's spans in one
+  eager walk) has no eager batched engine to ride: the batched step is a
+  graph end to end (verify, verdict, the DSpark draft chain), and the
+  eager path is scalar.
+- *The value.* At six streams under the load probe an admission lands
+  every ~2.7 s; a 1–2-prompt group costs ~150 ms of stalled decode against
+  a marginal ~60 ms as rows of a step — ~3 % of the six-stream aggregate
+  and ~0.2 s of the six-stream TTFT. The six-stream gap to the recipe
+  (0.81×) is the step's own composition (the experts 110 ms and the
+  collectives 33 ms of 215).
+
+The order that makes sense: the collectives at wide payloads and the
+per-slot verify depth first (the step), then the captured segment as the
+verify-row form with the row cap raised, behind a flag.
 
 The project's standing rules apply (restated because each has cost a day):
 rebuild everything before any `ctest` verdict; one fabric ritual at a time,

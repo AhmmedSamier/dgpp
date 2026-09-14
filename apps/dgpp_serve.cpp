@@ -1679,11 +1679,25 @@ int main(int argc, char** argv) {
         // record, so every rank here runs the same shape. A short world was
         // refused there, with the reason in the log.
 
-        dgpp::BusBoundaryReducer reducer(*bus);
+        // The eager walk's boundary reducer: DeepSeek-V4.1-Flash folds on
+        // its own stream (plan D9, the stream-ordered reducer; 2026-09-14),
+        // DGPP_DSV41_EAGER_FOLD=1 restores the host-driven one for an A/B;
+        // the other families keep the host-driven reducer.
+        const bool stream_folds = std::string(family->name()) == "deepseek_v41" &&
+                                  std::getenv("DGPP_DSV41_EAGER_FOLD") == nullptr;
+        std::unique_ptr<dgpp::BoundaryReducer> reducer_owner;
+        if (stream_folds)
+          reducer_owner = std::make_unique<dgpp::BusStreamReducer>(*bus);
+        else
+          reducer_owner = std::make_unique<dgpp::BusBoundaryReducer>(*bus);
+        if (world > 1)
+          DGPP_LOG_INFO("rank {}: boundary reducer {}", rank,
+                        stream_folds ? "stream-ordered (the folds launch on the model stream)"
+                                     : "host-driven");
         // A world of one folds nothing: the model runs without a boundary
         // reducer (the graph engine's recorder still binds for captures,
         // where its record hooks are the identity).
-        dgpp::BoundaryReducer* const model_reducer = world > 1 ? &reducer : nullptr;
+        dgpp::BoundaryReducer* const model_reducer = world > 1 ? reducer_owner.get() : nullptr;
         dgpp::prepare_serving_process(rank);
         {
           const auto plan_at = [&](int64_t context) {

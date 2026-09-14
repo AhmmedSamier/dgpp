@@ -56,6 +56,18 @@ Use a disposable isolated evaluation machine/container with no secrets,
 unneeded mounts or network access. The flag acknowledges the risk; it does
 not provide isolation. Never run it on a production serving node.
 
+## The stream collectives (2026-09-14, plan D9)
+
+`bus_test`'s `scenario_allreduce_stream` pins the stream-launched fold
+(`CollectiveBus::allreduce_stream`): 100 generations per pass on one
+stream, three passes, at worlds 2 and 4 — every destination bitwise the
+canonical chain, the gates (a host-driven collective and a handout
+rejected while stream generations are outstanding), a host-driven
+one-shot between passes. `dsv41_tp_test`'s group-prefill gate runs the
+walk through both reducers (`BusBoundaryReducer`, `BusStreamReducer`) and
+requires every layer's rows and the logits bitwise between them, at 12
+and 51 rows (the wide group's folds take the bulk path under both).
+
 ## The near-tie rule of the batched engine gates (2026-09-14)
 
 The session-core families lower their dense sites by the rows of a launch
