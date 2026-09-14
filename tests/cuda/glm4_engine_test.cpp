@@ -36,6 +36,7 @@
 #include "net/collective_bus.hpp"
 #include "glm4_fixture.hpp"
 #include "engine/eager_engine.hpp"
+#include "engine/verify_schedule.hpp"
 #include "engine/graph_engine.hpp"
 #include "engine/tp_bus.hpp"
 
@@ -397,6 +398,172 @@ void rank_work_mtp_depth2(int r, const Glm4TextConfig& cfg, const std::string& d
     out->error = "rank " + std::to_string(r) + ": " + e.what();
     arrive_once();
   }
+}
+
+// The scheduled verify depth on a family WITHOUT a confidence head (plan
+// D8a, engine/verify_schedule.hpp): the engine takes the draft head's own
+// probability of its pick from the device sampler's full path (the draft
+// picks report logprobs; the argmax is unchanged) and publishes it as the
+// confidence — so this world builds the engine with real sampler scratch.
+// Depth 2 gives two options {1, 2}: A alone under a forced alternation
+// (both scalar variants replay), B and C batched under forced per-slot
+// depths (the reduced-depth batch variant replays), then B alone under
+// the real policy. Every transcript the plain eager engine's, both ranks
+// identical.
+struct SchedOutcome {
+  std::string error;
+  std::vector<int32_t> ea, eb, ec;
+  std::vector<int32_t> sa, sb, sc;
+  std::vector<int> options;
+  std::vector<uint64_t> hist, batch_hist;
+  int steps_a = 0, steps_batch = 0, steps_b_alone = 0;
+};
+
+void rank_work_sched(int r, const Glm4TextConfig& cfg, const std::string& dir, const std::vector<int64_t>& A,
+                     const std::vector<int64_t>& B, const std::vector<int64_t>& C, CollectiveBus* bus,
+                     ConstructBarrier* barrier, SchedOutcome* out) {
+  bool arrived = false;
+  const auto arrive_once = [&] {
+    if (arrived) return;
+    arrived = true;
+    barrier->arrive_and_wait();
+  };
+  uint16_t* scratch = nullptr;
+  uint16_t* prefix_scratch = nullptr;
+  uint16_t* gather_scratch = nullptr;
+  try {
+    BusBoundaryReducer reducer(*bus, wait_timeout_ms());
+    Glm4Model eager(cfg, dir, kMaxTokens, kCache, Glm4Residency::Resident, &reducer, r, kWorld, kSlots);
+    Glm4Model mtp(cfg, dir, kMaxTokens, kCache, Glm4Residency::Resident, &reducer, r, kWorld, kSlots, /*mtp=*/true,
+                  /*decode_rows=*/kSlots * 3);
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                               sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&prefix_scratch),
+                               sizeof(uint16_t) * std::max<size_t>(dgpp::fabric_sampling_prefix_scratch_elems(kWorld), 2),
+                               cudaHostAllocDefault));
+    DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&gather_scratch),
+                               sizeof(uint16_t) * std::max<size_t>(dgpp::sampling_gather_scratch_elems(cfg.vocab_size), 2),
+                               cudaHostAllocDefault));
+    arrive_once();
+    EagerEngineAdapter<Glm4Model> eager_engine(
+        &eager, kSlots, dgpp::make_fabric_pick(bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms()));
+    out->ea = solo(eager_engine, 0, A, kSteps);
+    out->eb = solo(eager_engine, 1, B, kSteps);
+    out->ec = solo(eager_engine, 2, C, kSteps);
+    {
+      const int depth = 2;
+      GraphEngineAdapter<Glm4Model> eng(&mtp, bus, r, kWorld, scratch, cfg.vocab_size, wait_timeout_ms(),
+                                        /*batch_min_live=*/2, prefix_scratch, gather_scratch,
+                                        /*candidates=*/8, nullptr, 0, /*mtp_depth=*/depth);
+      require(eng.supports_sampling(), "the world has the device sampler (the draft probabilities' source)");
+      eng.configure_verify_schedule(true, /*row_ms=*/9.0f, dgpp::verify_reservation_lambda(20.0f, 9.0f), 1);
+      out->options = eng.verify_depth_options();
+      int step = 0;
+      eng.set_verify_depth_hook([&](int, int, const float*, int) { return 1 + (step++ % 2); });
+      out->sa.push_back(eng.prefill(0, A));
+      eng.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 3);
+      while (out->sa.size() < static_cast<size_t>(kSteps) + 1) {
+        const std::vector<int32_t> t = eng.step(0);
+        require(!t.empty() && t.size() <= 3, "sched step shape");
+        out->sa.insert(out->sa.end(), t.begin(), t.end());
+        ++out->steps_a;
+      }
+      out->sa.resize(static_cast<size_t>(kSteps) + 1);
+      eng.close(0);
+      // B (slot 1) and C (slot 2) in the 3-slot family under forced per-slot
+      // depths: the batch takes the deeper, so both batch variants replay.
+      int bstep = 0;
+      eng.set_verify_depth_hook([&](int req, int, const float*, int) {
+        const int k = req == 1 ? 1 + (bstep % 2) : 1 + ((bstep / 2) % 2);
+        if (req == 2) ++bstep;
+        return k;
+      });
+      out->sb.push_back(eng.prefill(1, B));
+      eng.reserve(1, static_cast<int64_t>(B.size()) + kSteps + 3);
+      out->sc.push_back(eng.prefill(2, C));
+      eng.reserve(2, static_cast<int64_t>(C.size()) + kSteps + 3);
+      const size_t half = static_cast<size_t>(kSteps) / 2 + 1;
+      while (out->sb.size() < half || out->sc.size() < half) {
+        const auto t = eng.step_batch({1, 2});
+        require(t.size() == 2, "sched batch step shape");
+        out->sb.insert(out->sb.end(), t[0].begin(), t[0].end());
+        out->sc.insert(out->sc.end(), t[1].begin(), t[1].end());
+        ++out->steps_batch;
+      }
+      out->batch_hist = eng.verify_depth_histogram_batch(1);
+      eng.close(2);
+      // B alone: the first step forced to the whole block right after the
+      // reduced batch (the settle bound regression), then the real policy.
+      bool first_alone = true;
+      eng.set_verify_depth_hook([&](int, int suggested, const float*, int) {
+        const int k = first_alone ? depth : suggested;
+        first_alone = false;
+        return k;
+      });
+      while (out->sb.size() < static_cast<size_t>(kSteps) + 1) {
+        const std::vector<int32_t> t = eng.step(1);
+        require(!t.empty() && t.size() <= 3, "sched post-batch step shape");
+        out->sb.insert(out->sb.end(), t.begin(), t.end());
+        ++out->steps_b_alone;
+      }
+      out->sb.resize(static_cast<size_t>(kSteps) + 1);
+      eng.close(1);
+      eng.drain();
+      out->hist = eng.verify_depth_histogram();
+    }
+    cudaFreeHost(scratch);
+    cudaFreeHost(prefix_scratch);
+    cudaFreeHost(gather_scratch);
+  } catch (const std::exception& e) {
+    if (scratch) cudaFreeHost(scratch);
+    if (prefix_scratch) cudaFreeHost(prefix_scratch);
+    if (gather_scratch) cudaFreeHost(gather_scratch);
+    out->error = "rank " + std::to_string(r) + ": " + e.what();
+    arrive_once();
+  }
+}
+
+DGPP_TEST(glm4_engines_loopback_world_2_scheduled_verify_depth_from_draft_probabilities_is_exact) {
+  const Glm4TextConfig cfg = glm4fx::tiny_config();
+  const std::string dir = "glm4_engine_fixture";
+  glm4fx::write_fixture(cfg, dir);
+  const std::vector<int64_t> A = smoke_tokens(cfg, 23, 0x9E3779B97F4A7C15ull);
+  const std::vector<int64_t> B = smoke_tokens(cfg, 17, 0xD1B54A32D192ED03ull);
+  const std::vector<int64_t> C = smoke_tokens(cfg, 11, 0x2545F4914F6CDD1Dull);
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29953);
+  require(!buses.empty(), "the loopback bus world failed to start");
+  std::vector<SchedOutcome> outs(kWorld);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r)
+    workers.emplace_back(rank_work_sched, r, std::cref(cfg), std::cref(dir), std::cref(A), std::cref(B), std::cref(C),
+                         buses[static_cast<size_t>(r)].get(), &barrier, &outs[static_cast<size_t>(r)]);
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r) require(outs[static_cast<size_t>(r)].error.empty(), outs[static_cast<size_t>(r)].error);
+  for (int r = 1; r < kWorld; ++r)
+    require(outs[static_cast<size_t>(r)].sa == outs[0].sa && outs[static_cast<size_t>(r)].sb == outs[0].sb &&
+                outs[static_cast<size_t>(r)].sc == outs[0].sc && outs[static_cast<size_t>(r)].hist == outs[0].hist,
+            "the ranks' scheduled transcripts or depths differ");
+  const SchedOutcome& o = outs[0];
+  std::string hist, bhist;
+  for (size_t i = 0; i < o.hist.size(); ++i)
+    hist += (i ? " " : "") + std::to_string(o.options[i]) + ":" + std::to_string(o.hist[i]);
+  for (size_t i = 0; i < o.batch_hist.size(); ++i)
+    bhist += (i ? " " : "") + std::to_string(o.options[i]) + ":" + std::to_string(o.batch_hist[i]);
+  DGPP_LOG_INFO("world 2 scheduled depth (draft probabilities): options {} | A {} ({} steps) | B {} | C {} | scalar [{}] | batched [{}]",
+                ids_text(o.options), ids_text(o.sa), o.steps_a, ids_text(o.sb), ids_text(o.sc), hist, bhist);
+  require(o.options == std::vector<int>{1, 2}, "depth 2 offers the two options");
+  require(o.sa == o.ea, "the scheduled scalar transcript of A differs from the plain eager engine's");
+  require(o.sb == o.eb, "the scheduled transcript of B differs from the plain eager engine's");
+  require(std::equal(o.sc.begin(), o.sc.end(), o.ec.begin()), "the batched transcript of C differs");
+  require(o.hist[0] > 0 && o.hist[1] > 0, "both scalar depth variants replayed");
+  require(o.batch_hist[0] > 0 && o.batch_hist[1] > 0, "both batch depth variants replayed");
+  uint64_t total = 0, btotal = 0;
+  for (const uint64_t h : o.hist) total += h;
+  for (const uint64_t h : o.batch_hist) btotal += h;
+  require(total == static_cast<uint64_t>(o.steps_a + o.steps_b_alone) && btotal == static_cast<uint64_t>(o.steps_batch),
+          "the histograms count every replay");
+  require(o.steps_b_alone > 0, "B stepped alone after the batch over the batch's published draft probabilities");
 }
 
 DGPP_TEST(glm4_engines_loopback_world_2_mtp_depth2_graph_matches_plain_decode) {

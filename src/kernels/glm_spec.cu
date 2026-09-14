@@ -293,6 +293,35 @@ __global__ void publish_seq_kernel(uint64_t* __restrict__ device_seq,
   asm volatile("st.release.sys.global.u64 [%0], %1;" ::"l"(pinned_out), "l"(v) : "memory");
 }
 
+__global__ void publish_f32_kernel(const float* __restrict__ src,
+                                   float* __restrict__ pinned_dst, int count,
+                                   uint64_t* __restrict__ device_seq,
+                                   uint64_t* __restrict__ pinned_seq) {
+  for (int i = static_cast<int>(threadIdx.x); i < count; i += static_cast<int>(blockDim.x)) {
+    const float v = src[i];
+    asm volatile("st.relaxed.sys.global.f32 [%0], %1;" ::"l"(pinned_dst + i), "f"(v) : "memory");
+  }
+  __threadfence_system();
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const uint64_t v = *device_seq + 1;
+    *device_seq = v;
+    asm volatile("st.release.sys.global.u64 [%0], %1;" ::"l"(pinned_seq), "l"(v) : "memory");
+  }
+}
+
+__global__ void gather_feed_kernel(const int64_t* __restrict__ feeds,
+                                   int requests, int feed_rows,
+                                   int rows_per_request,
+                                   int64_t* __restrict__ out) {
+  const int n = requests * rows_per_request;
+  for (int i = static_cast<int>(threadIdx.x); i < n; i += static_cast<int>(blockDim.x)) {
+    const int q = i / rows_per_request;
+    const int t = i - q * rows_per_request;
+    out[i] = feeds[q * feed_rows + t];
+  }
+}
+
 __global__ void upload_words_kernel(const uint32_t* __restrict__ src,
                                     uint32_t* __restrict__ dst, size_t count) {
   for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -321,6 +350,28 @@ void glm_publish_seq(uint64_t* device_seq, uint64_t* pinned_out,
   if (device_seq == nullptr || pinned_out == nullptr)
     throw std::invalid_argument("glm_publish_seq: null argument");
   publish_seq_kernel<<<1, 32, 0, stream>>>(device_seq, pinned_out);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_publish_f32(const float* src, float* pinned_dst, int count,
+                     uint64_t* device_seq, uint64_t* pinned_seq,
+                     cudaStream_t stream) {
+  if (src == nullptr || pinned_dst == nullptr || device_seq == nullptr ||
+      pinned_seq == nullptr || count < 1 || count > 32)
+    throw std::invalid_argument("glm_publish_f32: null argument/count");
+  publish_f32_kernel<<<1, 32, 0, stream>>>(src, pinned_dst, count, device_seq,
+                                           pinned_seq);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void glm_spec_gather_feed(const int64_t* feeds, int requests, int feed_rows,
+                          int rows_per_request, int64_t* out,
+                          cudaStream_t stream) {
+  if (feeds == nullptr || out == nullptr || requests < 1 || rows_per_request < 1 ||
+      feed_rows < rows_per_request || requests * rows_per_request > 1024)
+    throw std::invalid_argument("glm_spec_gather_feed: null argument/shape");
+  gather_feed_kernel<<<1, 256, 0, stream>>>(feeds, requests, feed_rows,
+                                            rows_per_request, out);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

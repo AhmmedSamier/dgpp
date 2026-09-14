@@ -32,7 +32,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
     "release": "0.1.0+gabc",
     "ports": {"http": 8081, "journal": 29001},
     "engine": {"max_concurrency": 2, "decode_graph": true, "prefix_cache_gib": 0.5,
-               "admission": "grow", "stats_interval_s": 0, "mtp_depth": 2},
+               "admission": "grow", "stats_interval_s": 0, "mtp_depth": 2, "prefill": "exact"},
     "paths": {"log_dir": "/var/log/dgpp"}
   })";
   const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(json, "t");
@@ -43,7 +43,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
           "the ports: given ones taken, the fabric port defaulted");
   require(c.engine.max_concurrency == 2 && c.engine.decode_graph && !c.engine.mtp &&
               c.engine.mtp_depth == 2 && c.engine.prefix_cache_gib == 0.5 &&
-              c.engine.admission == "grow" && c.engine.stats_interval_s == 0.0,
+              c.engine.admission == "grow" && c.engine.stats_interval_s == 0.0 && c.engine.prefill == "exact",
           "the given engine knobs");
   // The engine defaults are the binary's flag defaults — one set of defaults.
   require(c.engine.kv_capacity == 8192 && c.engine.default_max_tokens == 256 &&
@@ -91,12 +91,13 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
       {R"({"model":"m","nodes":["h"],"engine":{"max_concurrency":1.5}})", "'engine.max_concurrency' must be an integer"},
       {R"({"model":"m","nodes":["h"],"engine":{"max_concurrency":0}})", "'engine.max_concurrency' must be in [1,"},
       {R"({"model":"m","nodes":["h"],"engine":{"mtp":"yes"}})", "'engine.mtp' must be true or false"},
-      {R"({"model":"m","nodes":["h"],"engine":{"mtp_depth":4}})", "'engine.mtp_depth' must be in [1, 3]"},
-      {R"({"model":"m","nodes":["h"],"engine":{"mtp_depth":0}})", "'engine.mtp_depth' must be in [1, 3]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"mtp_depth":6}})", "'engine.mtp_depth' must be in [1, 5]"},
+      {R"({"model":"m","nodes":["h"],"engine":{"mtp_depth":0}})", "'engine.mtp_depth' must be in [1, 5]"},
       {R"({"model":"m","nodes":["h"],"engine":{"admission":"fast"}})", "'engine.admission' must be \"full\" or \"grow\""},
       {R"({"model":"m","nodes":["h"],"engine":{"prefix_cache_gib":-1}})", "'engine.prefix_cache_gib' must be >= 0"},
       {R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":"int8"}})", "'engine.kv_dtype' must be \"bf16\", \"fp8\" or \"fp4\""},
       {R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":8}})", "'engine.kv_dtype' must be a string"},
+      {R"({"model":"m","nodes":["h"],"engine":{"prefill":"fast"}})", "'engine.prefill' must be \"bounded\" or \"exact\""},
       {R"({"model":"m","nodes":["h"],"ports":{"http":70000}})", "'ports.http' must be in [1, 65535]"},
       {R"({"model":"m","nodes":["h"],"ports":{"fabric":5,"journal":5}})", "'ports.fabric' and 'ports.journal' must differ"},
       {R"({"model":"m","nodes":["h"],"paths":{"logs":"/x"}})", "unknown key 'paths.logs'"},

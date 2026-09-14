@@ -768,7 +768,10 @@ void GlmDiagnosticModel::session_graph_capture_step(
 
 void GlmDiagnosticModel::session_graph_capture_step(
     int req, const std::vector<int64_t>& ids, bool device_positions,
-    bool device_tokens) {
+    bool device_tokens, int feed_rows) {
+  if (feed_rows < 0 || feed_rows > kSpecRows ||
+      (feed_rows > 0 && static_cast<size_t>(feed_rows) < ids.size()))
+    throw std::invalid_argument("session_graph_capture_step: the feed must hold at least the verified rows");
   if (device_tokens && !device_positions)
     throw std::invalid_argument("session_graph_capture_step: device tokens "
                                 "need device positions");
@@ -777,9 +780,12 @@ void GlmDiagnosticModel::session_graph_capture_step(
   graph_has_draft_ = false;
   graph_batch_requests_ = 0;
   graph_rows_per_request_ = 0;
+  graph_feed_rows_ = feed_rows > 0 ? feed_rows : static_cast<int>(ids.size());
   // The slot's scalar variant reads and writes its own persistent feed
-  // rows (device_feed), so its feed survives the other slots' replays.
-  step_tokens_ = d_tokens_ + kDecodeRows + static_cast<size_t>(req) * ids.size();
+  // rows (device_feed), so its feed survives the other slots' replays; a
+  // reduced-depth variant (the scheduled verify depth) reads the first
+  // ids.size() rows of the same feed.
+  step_tokens_ = d_tokens_ + kDecodeRows + static_cast<size_t>(req) * static_cast<size_t>(graph_feed_rows_);
   session_decode_host_prep(req, ids, /*upload=*/true, device_positions);
   const int64_t pos = session_pos_[static_cast<size_t>(req)];
   // The uploads and every launch record; the walk's syncs are skipped
@@ -789,8 +795,9 @@ void GlmDiagnosticModel::session_graph_capture_step(
   (void)out;  // empty by contract; the caller instantiates the graph
 }
 
-void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request,
-                                                     int requests_arg) {
+void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request, int requests_arg, int feed_rows) {
+  if (feed_rows != 0 && feed_rows != rows_per_request)
+    throw std::invalid_argument("session_graph_capture_batch: this family has no reduced-depth feed");
   const int requests = requests_arg > 0 ? requests_arg : max_requests_;
   if (rows_per_request < 1 || rows_per_request > kSpecRows ||
       requests < 1 || requests > max_requests_ || max_requests_ > kDecodeRows ||
@@ -812,6 +819,7 @@ void GlmDiagnosticModel::session_graph_capture_batch(int rows_per_request,
   graph_has_draft_ = false;
   graph_batch_requests_ = requests;
   graph_rows_per_request_ = rows_per_request;
+  graph_feed_rows_ = 0;
   step_tokens_ = d_tokens_ + kDecodeRows;  // the fixed batch: every slot's feed rows
   decode_rows_ = rows;
   for (int q = 0; q < requests; ++q) {
@@ -859,6 +867,7 @@ void GlmDiagnosticModel::session_graph_use_batch_contract(
   graph_has_draft_ = mtp_;
   graph_batch_requests_ = requests;
   graph_rows_per_request_ = rows_per_request;
+  graph_feed_rows_ = 0;
   decode_rows_ = requests * rows_per_request;
   if (mtp_) draft_rows_ = decode_rows_;
 }
@@ -917,7 +926,8 @@ void GlmDiagnosticModel::session_reserve_blocks(int req, int64_t tokens) {
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
 }
 
-void GlmDiagnosticModel::session_graph_settle(int req, int accepted) {
+void GlmDiagnosticModel::session_graph_settle(int req, int accepted, int rows) {
+  (void)rows;  // this family verifies one row count
   if (req < 0 || req >= max_requests_)
     throw std::out_of_range("session_graph_settle: request slot " +
                             std::to_string(req));

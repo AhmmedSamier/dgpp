@@ -3559,7 +3559,7 @@ void latent_append_quantized_case(LatentFormat fmt, int kv_lora, uint64_t seed) 
                              " kv_lora " + std::to_string(kv_lora) + " token " +
                              std::to_string(tok);
     require_bitwise(what + " codes", &got[static_cast<size_t>(phys) * row_bytes], want.data(), row_bytes);
-    if (fmt != LatentFormat::kBf16)  // bf16 rows carry no scale
+    if (dgpp::latent_format_has_row_scale(fmt))  // bf16 and the block formats carry none
       require_bitwise(what + " scale", &got_scale[static_cast<size_t>(phys)], &want_scale, 4);
   }
 }
@@ -3572,6 +3572,14 @@ DGPP_TEST(dsa_latent_append_quantized_matches_host_codec) {
   latent_append_quantized_case(LatentFormat::kFp8, 256, 5005);
   latent_append_quantized_case(LatentFormat::kFp4, 256, 5006);
   latent_append_quantized_case(LatentFormat::kBf16, 512, 5007);
+  // The DeepSeek-V4.1 block formats (2026-09-13): the window rows and the
+  // compressed main KV, the release's own quantizers.
+  latent_append_quantized_case(LatentFormat::kFp8Block, 512, 5008);
+  latent_append_quantized_case(LatentFormat::kFp4Block, 512, 5009);
+  latent_append_quantized_case(LatentFormat::kFp8Block, 32, 5010);  // a padded fp8_block row
+  latent_append_quantized_case(LatentFormat::kFp4Block, 32, 5011);
+  latent_append_quantized_case(LatentFormat::kFp8Block, 256, 5012);
+  latent_append_quantized_case(LatentFormat::kFp4Block, 256, 5013);
 }
 
 // The three attention kernels over a quantized cache, at the real geometry
@@ -3686,6 +3694,8 @@ void attention_quantized_case(LatentFormat fmt, uint64_t seed) {
 DGPP_TEST(dsa_attention_quantized_cache_matches_dequantized_oracle) {
   attention_quantized_case(LatentFormat::kFp8, 6001);
   attention_quantized_case(LatentFormat::kFp4, 6002);
+  attention_quantized_case(LatentFormat::kFp8Block, 6003);
+  attention_quantized_case(LatentFormat::kFp4Block, 6004);
   attention_quantized_case(LatentFormat::kBf16, 6003);  // the path the others must equal
 }
 

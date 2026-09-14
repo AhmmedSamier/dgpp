@@ -1,4 +1,5 @@
 #include "serve/generation_service.hpp"
+#include "text/dsv41_prompt.hpp"
 
 #include <mutex>
 #include <unordered_set>
@@ -885,7 +886,26 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
         }
         for (const std::string& w : warnings) log_tool_schema_note(true, i, w);
         for (const std::string& n : notes) log_tool_schema_note(false, i, n);
+        // The DSML invoke names the tool as the schema lists it —
+        // "namespace::name" under a namespace — and the grammar's targets
+        // must spell the same (the parser strips the namespace again).
+        if (markers_.tool_format() == dgpp::text::ToolFormat::kDsml) {
+          try {
+            g.tools.back().name = dgpp::text::Dsv41Prompt::qualified_tool_name(t);
+          } catch (const std::exception& e) {
+            const std::string prefix = "tools[" + std::to_string(i) + "]";
+            return refuse(prefix + ": " + e.what(), prefix, "invalid_request_error");
+          }
+        }
       }
+      // A named choice under DSML names the function; the target is its
+      // qualified spelling.
+      if (g.mode == GrammarSpec::Mode::kNamed && markers_.tool_format() == dgpp::text::ToolFormat::kDsml)
+        for (const dgpp::text::GrammarTool& tool : g.tools)
+          if (tool.name == g.named || (tool.name.size() > g.named.size() + 2 &&
+                                       tool.name.compare(tool.name.size() - g.named.size() - 2, std::string::npos,
+                                                         "::" + g.named) == 0))
+            g.named = tool.name;
     }
   }
 
@@ -1016,9 +1036,23 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
               where, "unsupported_parameter");
         if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
         extra.push_back(m);
+      } else if (m.key == "thinking") {
+        // The vLLM DeepSeek-V4.1 template's name for the same switch
+        // (2026-09-14): an alias of enable_thinking, so a client written
+        // for that stack turns thinking off here too.
+        if (!frontend_->template_reads("enable_thinking"))
+          return refuse(
+              "this template has no thinking knob — thinking is always on "
+              "(the generation prompt opens <think>); use reasoning_effort",
+              where, "unsupported_parameter");
+        if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
+        Member alias = m;
+        alias.key = "enable_thinking";
+        extra.push_back(alias);
       } else {
         return refuse(where + " is not a knob of this template (it reads "
-                      "clear_thinking and reasoning_effort)",
+                      "enable_thinking / thinking, clear_thinking and "
+                      "reasoning_effort)",
                       where, "unsupported_parameter");
       }
     }

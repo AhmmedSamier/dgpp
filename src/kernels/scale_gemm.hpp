@@ -67,11 +67,36 @@ struct Fp8GemvProblem {
   uint16_t* out = nullptr;
   int n = 0;
   size_t out_stride = 0;
+  int rs = 7;  // the problem's scale grid, log2 (2026-09-13: 5 for a 32 x 32 grid)
+  int cs = 7;
 };
 constexpr int kFp8GemvMaxProblems = 4;
 void launch_scale_gemv_multi_bf16(const Fp8GemvProblem* problems, int n_problems,
                                   const uint16_t* act, size_t act_row_stride_elems, int rows,
                                   int k, cudaStream_t stream);
+
+// The routed launcher on a stated scale grid (2026-09-13, the DeepSeek-V4.1
+// release's fp8 matrices on 32 x 32 blocks): rs / cs as the tile launchers
+// take them; small m runs the GEMV rows (the core reads any grid), larger
+// m the tile kernel. Each output row of the GEMV path is bitwise the
+// single-row launch; the two paths are tolerance-equal.
+// decode_mma: every row count takes the streaming tensor-core GEMM
+// (mma_gemv.hpp: the weights read once per 128 rows, each row's chain the
+// same whatever m) instead of the 4-row GEMV chunks (m <= 128) or the
+// 16-row tile kernel (above). A per-call opt-in — the forms are
+// tolerance-equal, not bitwise — so a family switches every site or none
+// (its batched decode rows must stay bitwise its rows alone). Shapes the
+// mma form cannot take (k % 64, alignment) keep the older forms.
+void launch_scale_gemm_grid_bf16(const uint16_t* act, size_t act_row_stride_elems,
+                                 const uint8_t* w_payload, const float* w_scales,
+                                 uint16_t* out, int m, int n, int k, cudaStream_t stream,
+                                 size_t out_row_stride_elems, int rs, int cs,
+                                 bool decode_mma = false);
+void launch_scale_gemm_grid_f32(const uint16_t* act, size_t act_row_stride_elems,
+                                const uint8_t* w_payload, const float* w_scales, float* out,
+                                int m, int n, int k, cudaStream_t stream,
+                                size_t out_row_stride_elems, int rs, int cs,
+                                bool decode_mma = false);
 
 void launch_scale_gemm_tile_bf16(const uint16_t* act, size_t act_row_stride_elems,
                                  const uint8_t* w_payload, const float* w_scales,

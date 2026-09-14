@@ -91,7 +91,50 @@ build. The suites cover:
   `tools/glm4_reference_dump.py`, `glm4_decode_test` — prefill == forward
   bitwise, interleaved slots, chunked prefill, snapshots at any position,
   the speculator through the draft — `glm4_tp_test` worlds 2 and 4
-  (ports 29946/29947), `glm4_engine_test` (29948/29949)); the fp4 GEMV
+  (ports 29946/29947), `glm4_engine_test` (29948/29949)) and the
+  DeepSeek-V4.1-Flash chain (config/binding units, `dsv41_loader_test`,
+  the CSA2 kernel and layer oracles, `dsv41_engram_layer_test`,
+  `dsv41_model_test`, `dsv41_forward_test` vs `tools/dsv41_reference_dump.py`
+  — strict teacher-forced and relaxed end to end, the DSpark rows included,
+  the chain run twice: the exact walk and the bounded prefill (`--prefill
+  bounded` / `--bounded`, the bounded end-to-end gate's hard-ulp budget
+  measured from the exact chain's states over the same rows) —
+  `dsv41_decode_test` with its certified selection flips (its §8: the
+  bounded prefill within the window bitwise the exact mode's, the chunked
+  bounded walk with a tail vs the one-shot, bounded prefix snapshots, the
+  speculator after a bounded prefill), `dsv41_tp_test`
+  worlds 2 and 4 on ports 29958/29959 with the layer-local twin and, on
+  29966/29967, the same gates over a 24-row prompt (the decode form of the
+  dense projections: the streaming tensor-core GEMM's sharded slices —
+  the 70-row prompt prefills through the tile kernels and never meets it),
+  (`dsv41_decode_test`'s certified flips and `dsv41_model_test`'s
+  decode-vs-prefill rows also read the coded index query of both paths,
+  `IndexLogits::q_codes`: a flip whose e4m3 codes differ is the fp8 coding's
+  discontinuity — a code step is hundreds of ulps — and needs no near-tie
+  gap; a flip with identical codes must be a near tie; the relaxed
+  end-to-end parity run bounds its kept rows at l2 0.03 / 2 % hard, the
+  cascade of certified flips through the fp8/fp4 caches, while the strict
+  layer-local run keeps 0 hard; `glm_moe_test`'s
+  `moe_grouped_mma_fp4_mx_matches_the_oracle_per_segment` pins the MXFP4 form
+  of the fp4 tile kernel — the family's prefill experts — to a host oracle
+  over ragged segments and tiles),
+  `dsv41_engine_test` on 29961–29964 with the DSpark graph engine (its
+  world-2-vs-world-1 rule: the first three decisions agree or flip on a
+  world-1 top-2 margin under 0.1, recorded by the world-1 pick — the folds
+  reassociate in bf16, so a bare prefix rule passes or fails on which side
+  of a near tie a kernel's rounding falls; 29964:
+  the scheduled verify depth — a forced, varied per-step depth over the
+  reduced-row scalar variants, forced per-slot depths over the reduced-row
+  batch variants (the compacted feeds and masks), then a scalar step over
+  the batch's published confidence; every transcript the plain eager
+  engine's), `glm4_engine_test` on 29953 and `glm_tp_test` on 29940 with
+  the same schedule from the draft head's probabilities (depth-2 worlds
+  with real sampler scratch; the GLM-5.3-Flash gate runs the eager
+  speculator in lockstep at the engine's per-step depth),
+  `dsv41_tokenizer_test` and `dsv41_prompt_test` against the snapshot's own
+  tokenizer and encoder; the DSML tool grammar's walks in `unit_tests`'
+  `tool_grammar_test`; the six-row sampled verdict oracle in
+  `glm_pick_test`); the fp4 GEMV
   core at every compiled K and the MoE layer's NVFP4 shared expert;
 - the KDA operator suite: conv/recurrent kernel parity against host
   fp32/fp64 references, chunked-vs-unchunked bitwise equivalence, decode

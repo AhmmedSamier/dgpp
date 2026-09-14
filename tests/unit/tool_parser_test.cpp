@@ -35,6 +35,9 @@ constexpr int64_t kEos = 999;
 constexpr int64_t kThinkOpen = 1001, kThinkClose = 1002, kToolOpen = 1003,
                   kToolClose = 1004, kKeyOpen = 1005, kKeyClose = 1006,
                   kValueOpen = 1007, kValueClose = 1008;
+// DeepSeek-V4.1's tag token: SPECIAL in its tokenizer (the service's decode
+// skips it), so the fake decode drops it like the EOS.
+constexpr int64_t kDsml = 1010;
 
 ChatMarkers fake_markers() {
   ChatMarkers m;
@@ -58,7 +61,7 @@ std::string fake_decode(const std::vector<int64_t>& ids) {
   };
   std::string out;
   for (const int64_t id : ids) {
-    if (id == kEos) continue;
+    if (id == kEos || id == kDsml) continue;
     const auto m = markers.find(id);
     if (m != markers.end())
       out += m->second;
@@ -181,6 +184,119 @@ Run drive_qwen(const std::string& text, ToolCallParser::Options opts = {}) {
   }
   require(static_cast<int>(run.calls.size()) == parser.calls(), "calls() counts the emitted calls");
   return run;
+}
+
+// ---- the DeepSeek-V4.1 DSML format: the tag token is the only id; the
+// brackets and tag names are text, the block opens at the tag token after
+// a "<" and closes at "</｜DSML｜ calls>".
+ChatMarkers dsml_markers() {
+  ChatMarkers m;
+  m.think_open = ChatMarker{kThinkOpen, "<think>"};
+  m.think_close = ChatMarker{kThinkClose, "</think>"};
+  m.dsml = ChatMarker{kDsml, "｜DSML｜"};
+  return m;
+}
+std::vector<int64_t> dsml_ids_of(const std::string& text) {
+  static const std::vector<std::pair<std::string, int64_t>> table = {
+      {"｜DSML｜", kDsml}, {"</think>", kThinkClose}, {"<think>", kThinkOpen},
+  };
+  std::vector<int64_t> out;
+  for (size_t i = 0; i < text.size();) {
+    bool matched = false;
+    for (const auto& [s, id] : table) {
+      if (text.compare(i, s.size(), s) == 0) {
+        out.push_back(id);
+        i += s.size();
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) out.push_back(static_cast<unsigned char>(text[i++]));
+  }
+  return out;
+}
+Run drive_dsml(const std::string& text, ToolCallParser::Options opts = {}) {
+  ToolCallParser parser(dsml_markers(), fake_decode, weather_schemas(), opts);
+  std::vector<Event> events;
+  for (const int64_t id : dsml_ids_of(text)) parser.feed(id, &events);
+  parser.finish(&events);
+  Run run;
+  for (const Event& ev : events) {
+    run.order.push_back(ev.kind);
+    switch (ev.kind) {
+      case Kind::kReasoning: run.reasoning += ev.text; break;
+      case Kind::kReasoningClosed: ++run.reasoning_closed; break;
+      case Kind::kContent: run.content += ev.text; break;
+      case Kind::kToolCall: run.calls.push_back(ev.call); break;
+    }
+  }
+  require(static_cast<int>(run.calls.size()) == parser.calls(), "calls() counts the emitted calls");
+  return run;
+}
+
+DGPP_TEST(tool_parser_dsml_format_one_call_string_and_json_values) {
+  require(dsml_markers().tool_format() == dgpp::text::ToolFormat::kDsml, "the tag token alone is the DSML format");
+  require(dsml_markers().tool_calls_available(), "DSML tool calls are available");
+  ToolCallParser::Options plain;
+  plain.start_in_reasoning = false;
+  const Run run = drive_dsml(
+      "Sure, let me check.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"get_weather\">\n"
+      "<｜DSML｜ parameter name=\"city\" string=\"true\">Paris</｜DSML｜ parameter>\n"
+      "<｜DSML｜ parameter name=\"days\" string=\"false\">3</｜DSML｜ parameter>\n"
+      "</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+      plain);
+  require(run.content == "Sure, let me check.", "the content stops before the block's blank line: '" + run.content + "'");
+  require(run.calls.size() == 1, "one call");
+  require(run.calls[0].name == "get_weather", "the call's name");
+  require(run.calls[0].arguments == "{\"city\": \"Paris\", \"days\": 3}", "typed arguments: " + run.calls[0].arguments);
+}
+
+DGPP_TEST(tool_parser_dsml_format_two_calls_reasoning_and_namespace) {
+  const Run run = drive_dsml(
+      "think first</think>\n\n<｜DSML｜ calls>\n"
+      "<｜DSML｜ invoke name=\"search::lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">a \"quoted\" value</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n"
+      "<｜DSML｜ invoke name=\"get_weather\">\n<｜DSML｜ parameter name=\"city\" string=\"true\">Rome</｜DSML｜ parameter>\n"
+      "<｜DSML｜ parameter name=\"flags\" string=\"false\">{\"metric\": true, \"n\": [1, 2]}</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n"
+      "</｜DSML｜ calls>");
+  require(run.reasoning == "think first" && run.reasoning_closed == 1, "the reasoning split");
+  require(run.content.empty(), "no content before the block: '" + run.content + "'");
+  require(run.calls.size() == 2, "two calls");
+  require(run.calls[0].name == "lookup", "a namespaced call reports its bare name: " + run.calls[0].name);
+  require(run.calls[0].arguments == "{\"query\": \"a \\\"quoted\\\" value\"}", "the quoted string value: " + run.calls[0].arguments);
+  require(run.calls[1].arguments == "{\"city\": \"Rome\", \"flags\": {\"metric\": true, \"n\": [1, 2]}}",
+          "the JSON value normalized: " + run.calls[1].arguments);
+}
+
+DGPP_TEST(tool_parser_dsml_format_holds_back_only_a_block_prefix) {
+  ToolCallParser::Options plain;
+  plain.start_in_reasoning = false;
+  // A lone "<" and blank lines that never open a block are content, in full.
+  const Run a = drive_dsml("if a < b then\n\nc < d\n\n", plain);
+  require(a.content == "if a < b then\n\nc < d\n\n", "held prefixes flush as content: '" + a.content + "'");
+  // The tag token without its "<" is literal text (the decode skips the special token; the parser restores it).
+  const Run b = drive_dsml("x ｜DSML｜ y", plain);
+  require(b.content == "x ｜DSML｜ y", "a stray tag token prints verbatim: '" + b.content + "'");
+}
+
+DGPP_TEST(tool_parser_dsml_format_malformed_block_falls_back_to_content) {
+  ToolCallParser::Options plain;
+  plain.start_in_reasoning = false;
+  for (const char* bad : {
+           "ok\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"get_weather\">\n<｜DSML｜ parameter name=\"city\">Paris</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+           "ok\n\n<｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\">\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+           "ok\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"get_weather\">\n",
+       }) {
+    const Run run = drive_dsml(bad, plain);
+    require(run.calls.empty(), std::string("no call from a malformed block: ") + bad);
+    require(run.content == bad, "the malformed block is literal content: '" + run.content + "'");
+  }
+  // Text after a closed block is content (the streaming parser completes
+  // the block at its closing tag; the reference's whole-completion check
+  // would reject the turn, which a client sees as the trailing content).
+  const Run tail = drive_dsml(
+      "ok\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"get_weather\">\n</｜DSML｜ invoke>\n</｜DSML｜ calls> trailing", plain);
+  require(tail.calls.size() == 1 && tail.calls[0].arguments == "{}", "the closed block's call stands");
+  require(tail.content == "ok trailing", "the text around the block: '" + tail.content + "'");
 }
 
 DGPP_TEST(tool_parser_qwen_format_markers_and_one_call) {

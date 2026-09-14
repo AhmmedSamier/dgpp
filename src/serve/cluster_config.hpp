@@ -51,13 +51,33 @@ struct ClusterConfig {
     // encoded to block FP8 at load — the same recipe as the FP8 releases;
     // docs/qwen38_single_spark.md).
     std::string dense_weights = "checkpoint";
+    // The DeepSeek-V4.1 prefill mode (docs/deepseek_v41_flash_plan.md
+    // §1.8): "bounded" (the default: the encoder over every prompt row,
+    // the decoder over the last window rows — the model's own serving
+    // recipe, half the prefill work) or "exact" (every layer over every
+    // row, the parity mode).
+    std::string prefill = "bounded";
     int default_max_tokens = 256;
     int queue_limit = 64;
     int max_connections = 64;
     bool no_eos = false;
     bool decode_graph = false;
     bool mtp = false;
-    int mtp_depth = 1;             // draft tokens per step (1..3); needs mtp
+    int mtp_depth = 1;             // draft tokens per step (1..5); needs mtp
+    bool mtp_depth_set = false;    // the file named it (else a family may default it: DSpark's block is 5)
+    // The confidence-scheduled verify depth (engine/verify_schedule.hpp,
+    // 2026-09-14; needs mtp and a family with a confidence head — DSpark):
+    // a step verifies only the leading drafts whose prefix survival beats
+    // the value of a verify row. The cost curve and the value of time are
+    // the world's (every rank takes rank 0's): `row_ms` one verify row,
+    // `base_ms` the step's fixed cost (the draft included), `lambda` the
+    // value of decode time in tokens/ms (0: the reservation rate
+    // 1 / (base + row)); `min_depth` the fewest drafts a step verifies.
+    bool mtp_schedule = false;
+    double mtp_schedule_row_ms = 8.0;
+    double mtp_schedule_base_ms = 28.0;
+    double mtp_schedule_lambda = 0.0;
+    int mtp_schedule_min_depth = 1;
     int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
     int sampling_candidates = 128;
     double prefix_cache_gib = 1.5;

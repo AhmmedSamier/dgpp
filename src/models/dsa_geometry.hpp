@@ -128,6 +128,12 @@ struct DsaConfig {
     if (c.latent_format == LatentFormat::kFp4 &&
         (c.kv_lora_rank % kLatentFp4Block != 0 || c.kv_lora_rank > 2048))
       fail("an fp4 latent cache needs kv_lora_rank a multiple of 16 and <= 2048");
+    if (c.latent_format == LatentFormat::kFp8Block &&
+        (c.kv_lora_rank % kLatentFp8BlockGroup != 0 || c.kv_lora_rank > 1024))
+      fail("an fp8_block latent cache needs kv_lora_rank a multiple of 32 and <= 1024");
+    if (c.latent_format == LatentFormat::kFp4Block &&
+        (c.kv_lora_rank % kLatentFp4Block != 0 || c.kv_lora_rank > 2048))
+      fail("an fp4_block latent cache needs kv_lora_rank a multiple of 16 and <= 2048");
     // The rope tail's 8-wide loads sit right after the format's payload.
     if (c.qk_rope_head_dim > 0 && c.kv_lora_rank % 8 != 0)
       fail("a rope tail needs kv_lora_rank a multiple of 8");

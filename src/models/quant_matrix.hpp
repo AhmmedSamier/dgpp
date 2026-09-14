@@ -67,33 +67,46 @@ inline GlmQuantMatrix quant_rows_view(const GlmQuantMatrix& m,
 //   e2m1(code) * (float(scales[n][k/16]) / *global_scale)
 // and `e2m1(code) * float(scale)` is EXACT in bf16 (2 + 4 significant
 // bits), which is what the kernels rely on.
-constexpr int kFp4Group = 16;  // elements per e4m3 block scale
+constexpr int kFp4Group = 16;    // elements per e4m3 block scale (NVFP4)
+constexpr int kMxfp4Group = 32;  // elements per e8m0 block scale (MXFP4)
 
+// The same view carries the MXFP4 variant (2026-09-13, DeepSeek-V4.1-Flash,
+// docs/deepseek_v41_flash_plan.md D2): scale_group 32, `scales` one e8m0
+// byte per 32 elements along K, NO global scale (global_scale null). The
+// dequantized value of element (n, k) is then
+//   e2m1(code) * 2^(scales[n][k/32] - 127)
+// exact in bf16 and fp32 (a power of two times <= 2 significant bits);
+// the kernels apply it as one fp32 multiply and skip the epilogue's
+// division. The e8m0 code 255 is NaN and propagates.
 struct GlmFp4Matrix {
   const uint8_t* payload = nullptr;       // U8 [rows, cols/2]
-  const uint8_t* scales = nullptr;        // e4m3 [rows, cols/16]
-  const float* global_scale = nullptr;    // F32 [1], device
+  const uint8_t* scales = nullptr;        // e4m3 [rows, cols/16] or e8m0 [rows, cols/32]
+  const float* global_scale = nullptr;    // F32 [1], device (null under MXFP4)
   int64_t rows = 0;
   int64_t cols = 0;                       // logical K (elements)
+  int scale_group = kFp4Group;            // 16: NVFP4 (e4m3 + global); 32: MXFP4 (e8m0)
 
+  bool mxfp4() const { return scale_group == kMxfp4Group; }
   int64_t payload_cols() const { return cols / 2; }
-  int64_t scale_cols() const { return cols / kFp4Group; }
+  int64_t scale_cols() const { return cols / scale_group; }
   size_t payload_bytes() const {
     return static_cast<size_t>(rows) * static_cast<size_t>(cols / 2);
   }
   size_t scale_bytes() const {
-    return static_cast<size_t>(rows) * static_cast<size_t>(cols / kFp4Group);
+    return static_cast<size_t>(rows) * static_cast<size_t>(cols / scale_group);
   }
 };
 
-// K must be a multiple of 16 (one scale per block); a column slice must
-// start on a block boundary (16, which is also even — a packed byte) and
+// K must be a multiple of the block (one scale per block); a column slice
+// must start on a block boundary (16 or 32, both even — a packed byte) and
 // span whole blocks. Row slices are free: every row carries its own
 // scales.
-inline void fp4_check_cols(int64_t cols, const char* who) {
-  if (cols <= 0 || cols % kFp4Group != 0)
-    throw std::invalid_argument(std::string(who) +
-                                ": NVFP4 K must be a positive multiple of 16");
+inline void fp4_check_cols(int64_t cols, const char* who, int scale_group = kFp4Group) {
+  if (scale_group != kFp4Group && scale_group != kMxfp4Group)
+    throw std::invalid_argument(std::string(who) + ": the fp4 scale group must be 16 or 32");
+  if (cols <= 0 || cols % scale_group != 0)
+    throw std::invalid_argument(std::string(who) + ": fp4 K must be a positive multiple of " +
+                                std::to_string(scale_group));
 }
 
 inline GlmFp4Matrix fp4_rows_view(const GlmFp4Matrix& m, int64_t row_start,
@@ -106,6 +119,7 @@ inline GlmFp4Matrix fp4_rows_view(const GlmFp4Matrix& m, int64_t row_start,
   v.global_scale = m.global_scale;
   v.rows = rows;
   v.cols = m.cols;
+  v.scale_group = m.scale_group;
   return v;
 }
 

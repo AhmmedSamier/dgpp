@@ -3979,7 +3979,8 @@ static void run_mtp_depth_gate(int depth, int port) {
             const std::vector<int32_t> committed = spec.step();
             stood[static_cast<size_t>(r)] +=
                 static_cast<int>(committed.size()) - 1;
-            int64_t fed[GlmDiagnosticModel::kSpecRows] = {-1, -1, -1, -1};
+            int64_t fed[GlmDiagnosticModel::kSpecRows];
+            std::fill(fed, fed + GlmDiagnosticModel::kSpecRows, int64_t{-1});
             DGPP_CUDA_OK(cudaMemcpyAsync(
                 fed, graph.device_feed(0, 1 + depth),
                 sizeof(int64_t) * static_cast<size_t>(1 + depth),
@@ -4027,6 +4028,199 @@ static void run_mtp_depth_gate(int depth, int port) {
   DGPP_LOG_INFO("MTP depth {} gate w2: {} replays for {} tokens, {} draft "
                 "rows stood; transcript == plain, feed == the eager chain",
                 depth, replays[0], kTokens, stood[0]);
+}
+
+// The scheduled verify depth on GLM-5.3-Flash (plan D8a, engine/
+// verify_schedule.hpp): this family has no confidence head, so the graph
+// engine takes the draft head's own probability of each draft from the
+// device sampler (the draft picks report logprobs; the tokens are the
+// same) — the world builds the engine with real sampler scratch. The
+// eager speculator follows the engine's per-step depth (a forced
+// alternation for the first request, so both reduced variants replay;
+// the engine's own policy fed back for the second), so the lockstep feed
+// check of the depth gate holds, and both transcripts must be plain
+// decode's.
+static void run_mtp_depth_scheduled_gate(int depth, int port) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> prompt = make_tokens(9, cfg.vocab_size);
+  constexpr int kTokens = 10;
+  constexpr int kWorld = 2;
+  const int max_tokens = static_cast<int>(prompt.size()) + kTokens + 8;
+
+  std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, port);
+  require(!buses.empty(), "tp bus world failed to start");
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::vector<std::vector<int64_t>>> seqs(kWorld);
+  std::vector<std::vector<uint64_t>> hists(kWorld);
+  std::vector<int> replays(kWorld, 0);
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::thread> workers;
+  for (int r = 0; r < kWorld; ++r) {
+    workers.emplace_back([&, r] {
+      bool arrived = false;
+      const auto arrive_once = [&] {
+        if (arrived) return;
+        arrived = true;
+        barrier.arrive_and_wait();
+      };
+      uint16_t* scratch = nullptr;
+      uint16_t* prefix_scratch = nullptr;
+      uint16_t* gather_scratch = nullptr;
+      const auto release = [&] {
+        if (scratch) cudaFreeHost(scratch);
+        if (prefix_scratch) cudaFreeHost(prefix_scratch);
+        if (gather_scratch) cudaFreeHost(gather_scratch);
+        scratch = prefix_scratch = gather_scratch = nullptr;
+      };
+      try {
+        CollectiveBus& bus = *buses[static_cast<size_t>(r)];
+        GlmBusBoundaryReducer reducer(bus, test_wait_timeout_ms());
+        GlmDiagnosticModel plain(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded);
+        GlmDiagnosticModel eager(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Streaming,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/1, /*mtp=*/true);
+        GlmDiagnosticModel graph(cfg, dir, max_tokens, 128, &reducer, r,
+                                 kWorld, GlmResidency::Resident,
+                                 GlmHeadSharding::VocabSharded,
+                                 /*max_requests=*/1, /*mtp=*/true);
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&scratch),
+            sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&prefix_scratch),
+            sizeof(uint16_t) * dgpp::fabric_sampling_prefix_scratch_elems(kWorld),
+            cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(
+            reinterpret_cast<void**>(&gather_scratch),
+            sizeof(uint16_t) * dgpp::sampling_gather_scratch_elems(cfg.vocab_size),
+            cudaHostAllocDefault));
+        arrive_once();
+
+        const auto pick_rows = [&](const std::vector<Candidate>& locals) {
+          return dgpp::bus_greedy_pick_rows(bus, r, kWorld, locals, scratch,
+                                            test_wait_timeout_ms());
+        };
+        const auto host_pick = [&](const GlmDiagnosticModel::Outputs& out) {
+          return pick_rows(dgpp::local_row_maxes(out, 1))[0];
+        };
+        std::vector<int64_t> want;
+        GlmDiagnosticModel::Outputs out = plain.session_prefill(prompt);
+        int32_t token = host_pick(out);
+        for (int i = 0; i < kTokens; ++i) {
+          want.push_back(token);
+          if (i + 1 < kTokens) {
+            out = plain.session_step(token);
+            token = host_pick(out);
+          }
+        }
+        plain.session_close(0);
+
+        {
+          dgpp::GlmGraphEngineAdapter engine(
+              &graph, &bus, r, kWorld, scratch, cfg.vocab_size,
+              test_wait_timeout_ms(), /*batch_min_live=*/1, prefix_scratch,
+              gather_scratch, dgpp::kSamplingCandidates, nullptr,
+              /*prefix_slots=*/0, depth);
+          if (!engine.supports_sampling())
+            throw std::runtime_error("the world has no device sampler (the "
+                                     "draft probabilities' source)");
+          engine.configure_verify_schedule(
+              true, /*row_ms=*/12.0f,
+              dgpp::verify_reservation_lambda(20.0f, 12.0f), /*min_depth=*/1);
+          dgpp::sched::Scheduler sched(&engine, /*eos_token_ids=*/{});
+          // The engine's depth this tick, followed by the eager speculator.
+          int engine_k = depth;
+          int forced_step = 0;
+          bool forced = true;
+          engine.set_verify_depth_hook(
+              [&](int, int suggested, const float*, int) {
+                engine_k = forced ? 1 + (forced_step++ % depth) : suggested;
+                return engine_k;
+              });
+          for (int phase = 0; phase < 2; ++phase) {
+            forced = phase == 0;
+            dgpp::GreedySpeculator spec(eager, 0, pick_rows, depth);
+            spec.set_depth_policy(
+                [&](const std::vector<int32_t>&) { return engine_k; });
+            spec.start(host_pick(eager.session_prefill(prompt)));
+            dgpp::sched::SchedulerRequest req;
+            req.id = phase == 0 ? "forced" : "policy";
+            req.prompt = prompt;
+            req.max_steps = kTokens;
+            sched.submit(std::move(req));
+            while (sched.tick()) {
+              ++replays[static_cast<size_t>(r)];
+              engine.drain();
+              const std::vector<int32_t> committed = spec.step();
+              (void)committed;
+              int64_t fed[GlmDiagnosticModel::kSpecRows];
+              std::fill(fed, fed + GlmDiagnosticModel::kSpecRows, int64_t{-1});
+              DGPP_CUDA_OK(cudaMemcpyAsync(
+                  fed, graph.device_feed(0, 1 + depth),
+                  sizeof(int64_t) * static_cast<size_t>(1 + depth),
+                  cudaMemcpyDeviceToHost, graph.stream()));
+              DGPP_CUDA_OK(cudaStreamSynchronize(graph.stream()));
+              bool same = fed[0] == spec.next();
+              for (int c = 0; c < depth; ++c)
+                same = same && fed[1 + c] == spec.drafts()[static_cast<size_t>(c)];
+              if (!same)
+                throw std::runtime_error(
+                    std::string("scheduled depth (") + req.id + ") replay " +
+                    std::to_string(replays[static_cast<size_t>(r)]) +
+                    ": the graph's feed differs from the eager speculator's "
+                    "at the same per-step depth");
+            }
+            eager.session_close(0);
+            const std::vector<int64_t> got =
+                sched.results()[static_cast<size_t>(phase)].generated;
+            if (got != want)
+              throw std::runtime_error(
+                  std::string("scheduled depth (") +
+                  (phase == 0 ? "forced" : "policy") +
+                  ") transcript differs from plain decode");
+            seqs[static_cast<size_t>(r)].push_back(got);
+          }
+          hists[static_cast<size_t>(r)] = engine.verify_depth_histogram();
+        }
+        release();
+      } catch (const std::exception& e) {
+        release();
+        errors[static_cast<size_t>(r)] =
+            "rank " + std::to_string(r) + ": " + e.what();
+        DGPP_LOG_ERROR("scheduled depth {} gate rank {} failed: {}", depth, r,
+                       e.what());
+        arrive_once();
+      }
+    });
+  }
+  for (auto& t : workers) t.join();
+  for (int r = 0; r < kWorld; ++r)
+    require(errors[static_cast<size_t>(r)].empty(), errors[static_cast<size_t>(r)]);
+  require(seqs[1] == seqs[0] && replays[1] == replays[0] && hists[1] == hists[0],
+          "the scheduled depth gate's ranks disagree");
+  uint64_t total = 0;
+  for (const uint64_t h : hists[0]) total += h;
+  require(hists[0].size() == static_cast<size_t>(depth) && hists[0][0] > 0 &&
+              hists[0][static_cast<size_t>(depth - 1)] > 0 &&
+              total == static_cast<uint64_t>(replays[0]),
+          "every depth variant replayed and the histogram counts every replay");
+  std::string hist;
+  for (size_t i = 0; i < hists[0].size(); ++i)
+    hist += (i ? " " : "") + std::to_string(i + 1) + ":" + std::to_string(hists[0][i]);
+  DGPP_LOG_INFO("scheduled verify depth {} gate w2 (draft probabilities): {} "
+                "replays for 2 x {} tokens, replays per depth [{}]; transcripts "
+                "== plain, feeds == the eager chain at the same depths",
+                depth, replays[0], kTokens, hist);
+}
+
+DGPP_TEST(glm_tp_serving_mtp_depth2_scheduled_from_draft_probabilities_is_exact) {
+  run_mtp_depth_scheduled_gate(2, 29940);
 }
 
 DGPP_TEST(glm_tp_serving_mtp_depth2_graph_matches_plain_and_eager_feed) {

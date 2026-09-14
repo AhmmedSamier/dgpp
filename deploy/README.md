@@ -4,11 +4,13 @@ Templates use `cluster_<model>_<quant>_w<n>_<mode>[_variant].example.json`.
 Local copies use the same name without `.example` and remain Git-ignored.
 
 - Model names are `glm-5.3-flash`, `glm-5.3` (the full model), `glm-4.7`,
-  and `qwen-3.8-flash-next`.
+  `qwen-3.8-flash-next` and `deepseek-v4.1-flash`.
 - The quant names the checkpoint representation: `fp8`, `nvfp4`,
   `nvfp4-fp8` for the custom GLM-5.3-Flash hybrid, or `int4-int8` for the
   full GLM-5.3's pack-quantized release (int4 group-64 routed experts, int8
-  attention and shared experts). The JSON's `model` field gives the exact
+  attention and shared experts), or `mxfp4-fp8` for DeepSeek-V4.1-Flash
+  as it ships (MXFP4 experts, FP8 dense and attention, FP8 Engram tables
+  mapped from the NVMe). The JSON's `model` field gives the exact
   Hugging Face repository.
 - `w<n>` gives the participating node count. Nothing restricts that number to
   the counts in use today; a world is refused by the engine's geometry check or
@@ -35,6 +37,10 @@ Local copies use the same name without `.example` and remain Git-ignored.
 | [cluster_glm-5.3_int4-int8_w4_mtp2.example.json](cluster_glm-5.3_int4-int8_w4_mtp2.example.json) | the same with MTP depth 2 at two request slots (the shape measured under the eight-row cap; the family allows sixteen rows since 2026-09-13, so up to five slots at depth 2), 120K bf16 context |
 | [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json) | GLM-5.3-Flash hybrid on two nodes, MTP depth 1, FP8 KV cache, 160K context, four request slots |
 | [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json) | the same on two nodes with two request slots instead of four, which buys 256K context and a 2 GiB prefix arena |
+| [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp4.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp4.example.json) | DeepSeek-V4.1-Flash on four nodes at DSpark depth 4 (five rows per slot) with the scheduled verify depth — the depth the six-slot template widens; single streams keep the depth-5 template's numbers within the schedule. |
+| [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp4_c6.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp4_c6.example.json) | DeepSeek-V4.1-Flash on four nodes at six request slots with DSpark depth 4 (30 decode rows in one batched replay, the family's 32-row cap) and the scheduled verify depth — the six-stream shape the vLLM recipe reports its aggregate at; single streams keep the depth-5 template's numbers within the schedule (docs/operations.md). |
+| [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp5.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp5.example.json) | DeepSeek-V4.1-Flash as shipped on four nodes with the DSpark block draft (`mtp_depth` 5: twelve decode rows at two request slots) and the confidence-scheduled verify depth (`mtp_schedule`, λ 0.045: chat 33 → 25 ms/token, every class faster, transcripts unchanged — docs/operations.md), the bounded prefill, 128K context (the memory plan: 72.94 GiB of resident weights per rank, 76.55 GiB in all + 4 GiB headroom on a 121.6 GiB node; not yet booted — the fabric measures follow in docs/deepseek_v41_flash_plan.md §9) |
+| [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_plain.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_plain.example.json) | the same without the draft at four request slots (eight decode rows; 70.92 GiB of weights, 74.27 GiB in all) |
 
 ## Renamed files
 

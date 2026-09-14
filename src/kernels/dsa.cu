@@ -179,6 +179,85 @@ struct LatentTile<LatentFormat::kFp4> {
   }
 };
 
+// fp8_block (2026-09-13, DeepSeek-V4.1's window rows): e4m3 codes with an
+// e8m0 scale per 32 inside the row, no row scale — the decode is one
+// exact fp32 multiply by a power of two and a bf16 rounding that changes
+// nothing (latent_fp8_block_decode_bf16).
+template <>
+struct LatentTile<LatentFormat::kFp8Block> {
+  static __device__ __forceinline__ uint32_t decode2(uint16_t codes, float s) {
+    const float2 v = fp8x2_to_float2(codes);
+    return pack_bf16x2(float_to_bf16_bits(v.x * s), float_to_bf16_bits(v.y * s));
+  }
+  static __device__ __forceinline__ uint4 load8(const uint8_t* cache,
+                                                const float*, int64_t phys,
+                                                size_t row_bytes, int kv_lora, int e) {
+    const uint8_t* row = cache + phys * int64_t(row_bytes);
+    if (e >= kv_lora)
+      return *reinterpret_cast<const uint4*>(
+          row + latent_row_bytes(LatentFormat::kFp8Block, kv_lora) + (e - kv_lora) * 2);
+    const uint2 raw = *reinterpret_cast<const uint2*>(row + e);
+    const float s = e8m0_byte_to_float(
+        row[latent_fp8_block_scale_offset(kv_lora) + (e / kLatentFp8BlockGroup)]);
+    uint4 out;
+    out.x = decode2(static_cast<uint16_t>(raw.x & 0xFFFFu), s);
+    out.y = decode2(static_cast<uint16_t>(raw.x >> 16), s);
+    out.z = decode2(static_cast<uint16_t>(raw.y & 0xFFFFu), s);
+    out.w = decode2(static_cast<uint16_t>(raw.y >> 16), s);
+    return out;
+  }
+  static __device__ __forceinline__ uint16_t load1(const uint8_t* cache,
+                                                   const float*, int64_t phys,
+                                                   size_t row_bytes, int kv_lora, int e) {
+    const uint8_t* row = cache + phys * int64_t(row_bytes);
+    if (e >= kv_lora)
+      return *reinterpret_cast<const uint16_t*>(
+          row + latent_row_bytes(LatentFormat::kFp8Block, kv_lora) + (e - kv_lora) * 2);
+    const float s = e8m0_byte_to_float(
+        row[latent_fp8_block_scale_offset(kv_lora) + (e / kLatentFp8BlockGroup)]);
+    return latent_fp8_block_decode_bf16(row[e], s);
+  }
+};
+
+// fp4_block (DeepSeek-V4.1's compressed main KV): e2m1 codes with an
+// ABSOLUTE e4m3 scale per 16 (no row scale); the product of two short
+// mantissas is exact in fp32 and in bf16.
+template <>
+struct LatentTile<LatentFormat::kFp4Block> {
+  static __device__ __forceinline__ uint4 load8(const uint8_t* cache,
+                                                const float*, int64_t phys,
+                                                size_t row_bytes, int kv_lora, int e) {
+    const uint8_t* row = cache + phys * int64_t(row_bytes);
+    if (e >= kv_lora)
+      return *reinterpret_cast<const uint4*>(
+          row + latent_row_bytes(LatentFormat::kFp4Block, kv_lora) + (e - kv_lora) * 2);
+    const uint32_t raw = *reinterpret_cast<const uint32_t*>(row + (e >> 1));
+    const float S = latent_fp4_block_scale_abs(row[latent_fp4_scale_offset(kv_lora) + (e / kLatentFp4Block)]);
+    uint16_t v[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+      v[j] = latent_fp4_decode_bf16(static_cast<uint8_t>((raw >> (4 * j)) & 0xFu), S);
+    uint4 out;
+    out.x = pack_bf16x2(v[0], v[1]);
+    out.y = pack_bf16x2(v[2], v[3]);
+    out.z = pack_bf16x2(v[4], v[5]);
+    out.w = pack_bf16x2(v[6], v[7]);
+    return out;
+  }
+  static __device__ __forceinline__ uint16_t load1(const uint8_t* cache,
+                                                   const float*, int64_t phys,
+                                                   size_t row_bytes, int kv_lora, int e) {
+    const uint8_t* row = cache + phys * int64_t(row_bytes);
+    if (e >= kv_lora)
+      return *reinterpret_cast<const uint16_t*>(
+          row + latent_row_bytes(LatentFormat::kFp4Block, kv_lora) + (e - kv_lora) * 2);
+    const float S = latent_fp4_block_scale_abs(row[latent_fp4_scale_offset(kv_lora) + (e / kLatentFp4Block)]);
+    const uint8_t byte = row[e >> 1];
+    return latent_fp4_decode_bf16(
+        static_cast<uint8_t>((e & 1) ? (byte >> 4) : (byte & 0xFu)), S);
+  }
+};
+
 // The cache row's stride: the format's payload plus the bf16 rope tail.
 __host__ __device__ constexpr size_t latent_cache_row_bytes(LatentFormat f, int kv_lora,
                                                             int rope) {
@@ -704,6 +783,113 @@ __global__ void latent_append_fp4_kernel(const uint16_t* latent_rows,
   for (int j = 0; j < 8; ++j) w0 |= static_cast<uint32_t>(latent_fp4_encode(v[j], inv)) << (4 * j);
 #pragma unroll
   for (int j = 0; j < 8; ++j) w1 |= static_cast<uint32_t>(latent_fp4_encode(v[8 + j], inv)) << (4 * j);
+  *reinterpret_cast<uint32_t*>(row + (e0 >> 1)) = w0;
+  *reinterpret_cast<uint32_t*>(row + (e0 >> 1) + 4) = w1;
+}
+
+// fp8_block: thread t quantizes elements [8t, 8t+8) with the e8m0 scale of
+// its 32-element group (four consecutive lanes; kv_lora <= 1024, a
+// multiple of 32) — the reference's act_quant(block 32, ue8m0) bitwise.
+__global__ void latent_append_fp8block_kernel(const uint16_t* latent_rows,
+                                              const int32_t* req_ids,
+                                              const int64_t* pos,
+                                              const int32_t* block_tables,
+                                              int blocks_per_request,
+                                              int block_tokens, uint8_t* latent_cache,
+                                              int kv_lora, size_t cache_row_bytes,
+                                              const uint16_t* rope_rows, int rope) {
+  const int64_t i = blockIdx.x;
+  const int64_t phys = latent_physical_slot(req_ids, pos, block_tables,
+                                            blocks_per_request, block_tokens, i);
+  if (phys < 0) return;
+  const size_t row_bytes = latent_row_bytes(LatentFormat::kFp8Block, kv_lora);  // the payload
+  uint8_t* row = latent_cache + phys * static_cast<int64_t>(cache_row_bytes);
+  latent_append_tail(rope_rows, rope, i, row + row_bytes);
+  const size_t scale_off = latent_fp8_block_scale_offset(kv_lora);
+  if (threadIdx.x == 0)
+    for (size_t k = scale_off + static_cast<size_t>(kv_lora / kLatentFp8BlockGroup); k < row_bytes; ++k)
+      row[k] = 0;
+  const int e0 = threadIdx.x * 8;
+  const bool active = e0 < kv_lora;
+  float v[8];
+  float amax = 0.0f;
+  if (active) {
+    const uint4 raw = *reinterpret_cast<const uint4*>(latent_rows + i * kv_lora + e0);
+    const uint32_t* w = reinterpret_cast<const uint32_t*>(&raw);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      v[2 * j] = bf16_bits_to_float(static_cast<uint16_t>(w[j] & 0xFFFFu));
+      v[2 * j + 1] = bf16_bits_to_float(static_cast<uint16_t>(w[j] >> 16));
+      amax = fmaxf(amax, fmaxf(fabsf(v[2 * j]), fabsf(v[2 * j + 1])));
+    }
+  }
+  // The group's absmax across its four lanes (exact, order-free).
+  amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
+  amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
+  if (!active) return;
+  const uint8_t sb = latent_fp8_block_scale_byte(amax);
+  if ((threadIdx.x & 3) == 0) row[scale_off + static_cast<size_t>(e0 / kLatentFp8BlockGroup)] = sb;
+  const float s = e8m0_byte_to_float(sb);
+  uint2 packed;
+  packed.x = 0;
+  packed.y = 0;
+#pragma unroll
+  for (int j = 0; j < 4; ++j)
+    packed.x |= static_cast<uint32_t>(latent_fp8_block_encode(v[j], s)) << (8 * j);
+#pragma unroll
+  for (int j = 0; j < 4; ++j)
+    packed.y |= static_cast<uint32_t>(latent_fp8_block_encode(v[4 + j], s)) << (8 * j);
+  *reinterpret_cast<uint2*>(row + e0) = packed;
+}
+
+// fp4_block: thread b quantizes block b (16 elements) with its own
+// absolute e4m3 scale (kv_lora <= 2048, a multiple of 16) — the
+// reference's fp4_act_quant(block 16, e4m3 scales) bitwise.
+__global__ void latent_append_fp4block_kernel(const uint16_t* latent_rows,
+                                              const int32_t* req_ids,
+                                              const int64_t* pos,
+                                              const int32_t* block_tables,
+                                              int blocks_per_request,
+                                              int block_tokens, uint8_t* latent_cache,
+                                              int kv_lora, size_t cache_row_bytes,
+                                              const uint16_t* rope_rows, int rope) {
+  const int64_t i = blockIdx.x;
+  const int64_t phys = latent_physical_slot(req_ids, pos, block_tables,
+                                            blocks_per_request, block_tokens, i);
+  if (phys < 0) return;
+  const int b = threadIdx.x;
+  const int e0 = b * kLatentFp4Block;
+  const bool active = e0 < kv_lora;
+  const size_t row_bytes = latent_row_bytes(LatentFormat::kFp4Block, kv_lora);  // the payload
+  uint8_t* row = latent_cache + phys * static_cast<int64_t>(cache_row_bytes);
+  latent_append_tail(rope_rows, rope, i, row + row_bytes);
+  const size_t scale_off = latent_fp4_scale_offset(kv_lora);
+  if (threadIdx.x == 0)
+    for (size_t k = scale_off + static_cast<size_t>(kv_lora / kLatentFp4Block); k < row_bytes; ++k)
+      row[k] = 0;
+  if (!active) return;
+  float v[kLatentFp4Block];
+  float bmax = 0.0f;
+  const uint4* src = reinterpret_cast<const uint4*>(latent_rows + i * kv_lora + e0);
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    const uint4 raw = src[h];
+    const uint32_t* w = reinterpret_cast<const uint32_t*>(&raw);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      v[8 * h + 2 * j] = bf16_bits_to_float(static_cast<uint16_t>(w[j] & 0xFFFFu));
+      v[8 * h + 2 * j + 1] = bf16_bits_to_float(static_cast<uint16_t>(w[j] >> 16));
+      bmax = fmaxf(bmax, fmaxf(fabsf(v[8 * h + 2 * j]), fabsf(v[8 * h + 2 * j + 1])));
+    }
+  }
+  const uint8_t sc = latent_fp4_block_scale_code_abs(bmax);
+  row[scale_off + static_cast<size_t>(b)] = sc;
+  const float S = latent_fp4_block_scale_abs(sc);
+  uint32_t w0 = 0, w1 = 0;
+#pragma unroll
+  for (int j = 0; j < 8; ++j) w0 |= static_cast<uint32_t>(latent_fp4_block_encode_abs(v[j], S)) << (4 * j);
+#pragma unroll
+  for (int j = 0; j < 8; ++j) w1 |= static_cast<uint32_t>(latent_fp4_block_encode_abs(v[8 + j], S)) << (4 * j);
   *reinterpret_cast<uint32_t*>(row + (e0 >> 1)) = w0;
   *reinterpret_cast<uint32_t*>(row + (e0 >> 1) + 4) = w1;
 }
@@ -2335,6 +2521,8 @@ void dsa_prepare_kernel_smem() {
     opt_in(std::integral_constant<LatentFormat, LatentFormat::kBf16>{});
     opt_in(std::integral_constant<LatentFormat, LatentFormat::kFp8>{});
     opt_in(std::integral_constant<LatentFormat, LatentFormat::kFp4>{});
+    opt_in(std::integral_constant<LatentFormat, LatentFormat::kFp8Block>{});
+    opt_in(std::integral_constant<LatentFormat, LatentFormat::kFp4Block>{});
   }
 }
 
@@ -2549,7 +2737,7 @@ void dsa_latent_append(const void* latent_rows, const int32_t* req_ids,
                        cudaStream_t stream, LatentFormat format,
                        float* latent_scale, const void* rope_rows, int rope_dim) {
   if (tokens <= 0) return;
-  if (format != LatentFormat::kBf16 && latent_scale == nullptr)
+  if (latent_format_has_row_scale(format) && latent_scale == nullptr)
     throw std::invalid_argument("dsa_latent_append: a quantized cache needs its scales");
   if (rope_dim < 0 || rope_dim % 8 != 0 || (rope_dim > 0 && rope_rows == nullptr) ||
       (rope_dim > 0 && kv_lora % 8 != 0))
@@ -2581,6 +2769,23 @@ void dsa_latent_append(const void* latent_rows, const int32_t* req_ids,
           blocks_per_request, block_tokens, static_cast<uint8_t*>(latent_cache),
           latent_scale, kv_lora, row_bytes, rr, rope_dim);
       break;
+    case LatentFormat::kFp8Block:
+      if (kv_lora % kLatentFp8BlockGroup != 0 || kv_lora > 8 * kLatentAppendThreads)
+        DGPP_CUDA_OK(cudaErrorInvalidValue);
+      latent_append_fp8block_kernel<<<unsigned(tokens), kLatentAppendThreads, 0, stream>>>(
+          static_cast<const uint16_t*>(latent_rows), req_ids, pos, block_tables,
+          blocks_per_request, block_tokens, static_cast<uint8_t*>(latent_cache),
+          kv_lora, row_bytes, rr, rope_dim);
+      break;
+    case LatentFormat::kFp4Block:
+      if (kv_lora % kLatentFp4Block != 0 ||
+          kv_lora > kLatentFp4Block * kLatentAppendThreads)
+        DGPP_CUDA_OK(cudaErrorInvalidValue);
+      latent_append_fp4block_kernel<<<unsigned(tokens), kLatentAppendThreads, 0, stream>>>(
+          static_cast<const uint16_t*>(latent_rows), req_ids, pos, block_tables,
+          blocks_per_request, block_tokens, static_cast<uint8_t*>(latent_cache),
+          kv_lora, row_bytes, rr, rope_dim);
+      break;
   }
   DGPP_CUDA_OK(cudaGetLastError());
 }
@@ -2598,7 +2803,7 @@ void dsa_gather_index_pools(const int32_t* block_table, int pools_per_block,
 
 namespace {
 constexpr int kSelectMaxRows = 8;      // rows per launch: the kernel's shared-memory bound
-constexpr int kSelectLayoutRows = 16;  // rows the workspace is laid out for (the decode batch's cap)
+constexpr int kSelectLayoutRows = 32;  // rows the workspace is laid out for (the decode batch's cap; 32 since 2026-09-14 for DeepSeek-V4.1's six-slot batch)
 constexpr int kSelectDefaultGrid = 96;  // measured optimum (dsa_select_bench, 2026-09-06)
 size_t select_align256(size_t b) { return (b + 255) / 256 * 256; }
 size_t select_keys_bytes(int rows, int64_t pools) {
@@ -2611,7 +2816,7 @@ size_t select_hist_bytes(int rows) {
 
 size_t dsa_select_workspace_bytes(int max_rows, int64_t max_pools) {
   if (max_rows <= 0 || max_rows > kSelectLayoutRows || max_pools <= 0)
-    throw std::invalid_argument("dsa_select_workspace_bytes: rows in [1, 16], pools > 0");
+    throw std::invalid_argument("dsa_select_workspace_bytes: rows in [1, 32], pools > 0");
   // Laid out for kSelectLayoutRows rows regardless of max_rows:
   // the histograms follow the keys at a FIXED offset the launcher derives
   // the same way, whatever row count a call brings. (They used to follow
@@ -2796,7 +3001,7 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
                       float* l_ws, float* c_ws, cudaStream_t stream,
                       LatentFormat format, const float* latent_scale, int rope) {
   if (rows <= 0) return;
-  if (format != LatentFormat::kBf16 && latent_scale == nullptr)
+  if (latent_format_has_row_scale(format) && latent_scale == nullptr)
     throw std::invalid_argument("dsa_attn_partial: a quantized cache needs its scales");
   if (rope < 0 || rope % 8 != 0 || rope > kAttnMaxRopeSlice * 128)
     DGPP_CUDA_OK(cudaErrorInvalidValue);
@@ -2847,6 +3052,12 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
       break;
     case LatentFormat::kFp4:
       launch(std::integral_constant<LatentFormat, LatentFormat::kFp4>{});
+      break;
+    case LatentFormat::kFp8Block:
+      launch(std::integral_constant<LatentFormat, LatentFormat::kFp8Block>{});
+      break;
+    case LatentFormat::kFp4Block:
+      launch(std::integral_constant<LatentFormat, LatentFormat::kFp4Block>{});
       break;
   }
   DGPP_CUDA_OK(cudaGetLastError());
@@ -2900,6 +3111,18 @@ void launch_attn_flash_format(LatentFormat format, dim3 grid, const void* q_tild
           counts, rows, n_split, local_heads, block_tokens, block_tables,
           blocks_per_request, scale, m_ws, l_ws, c_ws, stream);
       break;
+    case LatentFormat::kFp8Block:
+      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp8Block>(
+          grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
+          counts, rows, n_split, local_heads, block_tokens, block_tables,
+          blocks_per_request, scale, m_ws, l_ws, c_ws, stream);
+      break;
+    case LatentFormat::kFp4Block:
+      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp4Block>(
+          grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
+          counts, rows, n_split, local_heads, block_tokens, block_tables,
+          blocks_per_request, scale, m_ws, l_ws, c_ws, stream);
+      break;
   }
 }
 
@@ -2919,7 +3142,7 @@ bool launch_attn_flash(const void* q_tilde, const void* latent_cache,
   if (kListed && (local_heads < 16 || local_heads % 16 != 0)) return false;
   if (local_heads <= 0 || n_split <= 0 || block_tokens <= 0)
     DGPP_CUDA_OK(cudaErrorInvalidValue);
-  if (format != LatentFormat::kBf16 && latent_scale == nullptr)
+  if (latent_format_has_row_scale(format) && latent_scale == nullptr)
     throw std::invalid_argument("dsa attention: a quantized cache needs its scales");
   dsa_prepare_kernel_smem();
   const int total_m = rows * local_heads;

@@ -183,7 +183,7 @@ void launch_moe_slot_gate_up_swiglu(
     int k_routed, int n_shared, int k_shared, const uint8_t* sh_gate_payload,
     const float* sh_gate_scales, const uint8_t* sh_up_payload,
     const float* sh_up_scales, uint16_t* act, int act_stride, int slots,
-    int top_k, float limit, cudaStream_t stream);
+    int top_k, float limit, cudaStream_t stream, int sh_rs = 7, int sh_cs = 7);
 
 // slot_down: out[slot, :] = fp32 dot(down rows, act[slot]) per slot,
 // UNROUNDED (the accumulation owns the single rounding). Routed slots read
@@ -194,7 +194,10 @@ void launch_moe_slot_down(const uint16_t* act, size_t act_stride,
                           int n_routed, int k_routed, int n_shared,
                           int k_shared, const uint8_t* sh_payload,
                           const float* sh_scales, float* out, int out_stride,
-                          int slots, int top_k, cudaStream_t stream);
+                          int slots, int top_k, cudaStream_t stream, int sh_rs = 7,
+                          int sh_cs = 7);
+// sh_rs / sh_cs: the fp8 shared expert's scale grid as log2 block sizes
+// (7 = 128 x 128; 5 = the DeepSeek-V4.1 release's 32 x 32, 2026-09-13).
 
 // slot_accum: per (token, element), the ordered fp32 chain
 //   out = bf16( fma(1, y_shared, fma(w_{K-1}, y_{K-1}, ... fma(w_0, y_0, 0))) )
@@ -234,20 +237,25 @@ void launch_moe_slot_accum_routed_f32(float* out, const float* contrib,
 // (glm_moe_test pins it per segment) — neither is bitwise the fp4 GEMV core
 // (summation order). rows_per_block is accepted for the family's signature
 // and ignored by the grouped launcher (one m-tile per block always).
+// fp4_group 32 (2026-09-14): the MXFP4 table (e8m0 scales per 32 codes, no
+// global) through the same kernel, the pair decoded in fp32 (exact); k a
+// multiple of 32 then.
 void launch_moe_grouped_mma_fp4_bf16(const uint16_t* act, size_t act_stride,
                                      const MoeSegment* segs, int n_segs,
                                      int max_rows, int rows_per_block,
                                      const MoeExpertView* views, int which,
                                      uint16_t* out, size_t out_stride, int n,
                                      int k, cudaStream_t stream,
-                                     const int32_t* act_rows = nullptr);
+                                     const int32_t* act_rows = nullptr,
+                                     int fp4_group = kFp4Group);
 void launch_moe_grouped_mma_fp4_f32(const uint16_t* act, size_t act_stride,
                                     const MoeSegment* segs, int n_segs,
                                     int max_rows, int rows_per_block,
                                     const MoeExpertView* views, int which,
                                     float* out, size_t out_stride, int n, int k,
                                     cudaStream_t stream,
-                                    const int32_t* act_rows = nullptr);
+                                    const int32_t* act_rows = nullptr,
+                                    int fp4_group = kFp4Group);
 // The reference kernel's grouped form (the microbench's A/B and the gate).
 void launch_moe_grouped_mma_fp4_ref_bf16(const uint16_t* act, size_t act_stride,
                                          const MoeSegment* segs, int n_segs,
@@ -271,18 +279,22 @@ void launch_dense_mma_fp4_bf16(const uint16_t* act, size_t act_stride,
 void launch_dense_mma_fp4_f32(const uint16_t* act, size_t act_stride,
                               const GlmFp4Matrix& w, float* out, int m, int n,
                               int k, cudaStream_t stream);
+// fp4_group (2026-09-13): 16 = NVFP4 view tables (e4m3 scales + globals),
+// 32 = MXFP4 tables (e8m0 scales, no globals — DeepSeek-V4.1-Flash,
+// docs/deepseek_v41_flash_plan.md D2); the routed k must be in the group's
+// compiled set (fp4_gemv::k_compiled_for).
 void launch_moe_grouped_gemv_fp4_bf16(const uint16_t* act, size_t act_stride,
                                       const MoeSegment* segs, int n_segs,
                                       int max_rows, int rows_per_block,
                                       const MoeExpertView* views, int which,
                                       uint16_t* out, size_t out_stride, int n,
-                                      int k, cudaStream_t stream);
+                                      int k, cudaStream_t stream, int fp4_group = 16);
 void launch_moe_grouped_gemv_fp4_f32(const uint16_t* act, size_t act_stride,
                                      const MoeSegment* segs, int n_segs,
                                      int max_rows, int rows_per_block,
                                      const MoeExpertView* views, int which,
                                      float* out, size_t out_stride, int n,
-                                     int k, cudaStream_t stream);
+                                     int k, cudaStream_t stream, int fp4_group = 16);
 // `shared_view_base` (2026-09-09, GLM-4.7): -1 = the FP8 shared expert
 // from the sh_* arguments; >= 0 = the NVFP4 shared expert at view-table
 // entries [shared_view_base, +3) (n_experts * 3: the loader's (E+1)-entry
@@ -294,14 +306,16 @@ void launch_moe_slot_gate_up_swiglu_fp4(
     int k_routed, int n_shared, int k_shared, const uint8_t* sh_gate_payload,
     const float* sh_gate_scales, const uint8_t* sh_up_payload,
     const float* sh_up_scales, uint16_t* act, int act_stride, int slots,
-    int top_k, float limit, cudaStream_t stream, int shared_view_base = -1);
+    int top_k, float limit, cudaStream_t stream, int shared_view_base = -1,
+    int fp4_group = 16, int sh_rs = 7, int sh_cs = 7);
 void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,
                               const int32_t* ids, const int32_t* order,
                               const MoeExpertView* views, int n_routed,
                               int k_routed, int n_shared, int k_shared,
                               const uint8_t* sh_payload, const float* sh_scales,
                               float* out, int out_stride, int slots, int top_k,
-                              cudaStream_t stream, int shared_view_base = -1);
+                              cudaStream_t stream, int shared_view_base = -1,
+                              int fp4_group = 16, int sh_rs = 7, int sh_cs = 7);
 
 // ---- the packed-int routed experts (2026-09-12, docs/glm53_plan.md D2) ----
 // The same contracts as the FP8 / NVFP4 launchers above over expert-view

@@ -121,6 +121,7 @@ struct WorldSettings {
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table's residency
   std::string dense_weights = "checkpoint";  // the Qwen dense stack's form
+  std::string prefill = "bounded";           // the DeepSeek-V4.1 prefill mode: bounded | exact
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   int default_max_tokens = 0;
   int queue_limit = 0;
@@ -128,6 +129,13 @@ struct WorldSettings {
   bool decode_graph = false;
   bool mtp = false;
   int mtp_depth = 1;  // draft tokens per step
+  // The scheduled verify depth and its constants (identical on every rank:
+  // the depth decision must agree across the world).
+  bool mtp_schedule = false;
+  double mtp_schedule_row_ms = 8.0;
+  double mtp_schedule_base_ms = 28.0;
+  double mtp_schedule_lambda = 0.0;
+  int mtp_schedule_min_depth = 1;
   int graph_batch_min_live = 0;
   int sampling_candidates = 0;
   double prefix_cache_gib = 0.0;

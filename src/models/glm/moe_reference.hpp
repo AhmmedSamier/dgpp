@@ -32,6 +32,10 @@ struct GlmMoeHostWeights {
   std::vector<uint8_t> fp4_payloads;
   std::vector<uint8_t> fp4_scales;
   std::vector<float> fp4_globals;  // [E * 3] (or [(E + 1) * 3] with shared_nvfp4)
+  // The fp4 scale group (2026-09-13): 16 = NVFP4 (e4m3 scales [rows,
+  // cols/16] + a global per matrix), 32 = MXFP4 (e8m0 scales [rows,
+  // cols/32], no globals — fp4_globals may be empty).
+  int fp4_group = 16;
   int fp4_matrices(int n_experts) const { return (n_experts + (shared_nvfp4 ? 1 : 0)) * 3; }
   // The packed-int format (`packq` set, docs/glm53_plan.md D2): the routed
   // experts at packq_bits_routed and (with shared_packq) the shared triple
@@ -59,10 +63,11 @@ struct GlmQuantMatrixHost {
 };
 struct GlmFp4MatrixHost {
   const uint8_t* payload = nullptr;  // [rows, cols/2]
-  const uint8_t* scales = nullptr;   // [rows, cols/16]
-  float global_scale = 1.0f;
+  const uint8_t* scales = nullptr;   // e4m3 [rows, cols/16] or e8m0 [rows, cols/32]
+  float global_scale = 1.0f;         // 1 under MXFP4 (no global)
   int64_t rows = 0;
   int64_t cols = 0;
+  int scale_group = 16;
 };
 
 struct GlmPackedMatrixHost {

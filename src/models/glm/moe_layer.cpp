@@ -287,20 +287,29 @@ void GlmMoeLayer::check_expert_geometry() const {
   }
   if (w_.nvfp4()) {
     const GlmFp4Matrix& g0 = w_.experts_fp4[0];
+    if (g0.scale_group != kFp4Group && g0.scale_group != kMxfp4Group)
+      throw std::runtime_error("GlmMoeLayer: the fp4 scale group must be 16 (NVFP4) or 32 (MXFP4)");
+    // NVFP4 matrices carry a global; MXFP4 ones (2026-09-13, DeepSeek-V4.1)
+    // carry none — one group across the table.
+    const bool needs_global = !g0.mxfp4();
     for (int e = 0; e < E; ++e) {
       const GlmFp4Matrix* m = w_.experts_fp4 + static_cast<size_t>(e) * 3;
       if (m[0].cols != H || m[1].cols != H || m[0].rows != g0.rows ||
           m[1].rows != g0.rows || m[2].rows != H || m[2].cols != g0.rows ||
-          !m[0].global_scale || !m[1].global_scale || !m[2].global_scale)
+          m[0].scale_group != g0.scale_group || m[1].scale_group != g0.scale_group ||
+          m[2].scale_group != g0.scale_group ||
+          (needs_global && (!m[0].global_scale || !m[1].global_scale || !m[2].global_scale)))
         throw std::runtime_error(
-            "GlmMoeLayer: inconsistent NVFP4 routed expert matrices (expert " +
+            "GlmMoeLayer: inconsistent fp4 routed expert matrices (expert " +
             std::to_string(e) + ")");
     }
     if (has_shared() && w_.shared_nvfp4()) {
       const GlmFp4Matrix* sh = w_.shared_fp4;
       if (sh[0].rows != sh[1].rows || sh[2].cols != sh[0].rows || sh[2].rows != H ||
-          sh[0].cols != H || sh[1].cols != H || !sh[0].global_scale || !sh[1].global_scale ||
-          !sh[2].global_scale)
+          sh[0].cols != H || sh[1].cols != H ||
+          sh[0].scale_group != g0.scale_group || sh[1].scale_group != g0.scale_group ||
+          sh[2].scale_group != g0.scale_group ||
+          (needs_global && (!sh[0].global_scale || !sh[1].global_scale || !sh[2].global_scale)))
         throw std::runtime_error("GlmMoeLayer: inconsistent NVFP4 shared matrices");
       // The slot kernels run the shared slot at the routed K (D3): the
       // shared down's K is the shared inter, which must be the routed's.
@@ -541,6 +550,7 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
 }
 
 bool GlmMoeLayer::mma_takes_grid() const {
+  // The fp4 tile kernel reads NVFP4 and (2026-09-14) MXFP4 tables.
   if (w_.experts_fp4) return true;
   if (w_.experts_packed) return false;
   const int H = cfg_.hidden;
@@ -610,6 +620,7 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
                              : 0;
   const int routed_bits = packq ? w_.experts_packed[0].bits : 0;
   const int shared_bits = (packq && shared_seg) ? w_.shared_packed[0].bits : 0;
+  const int fp4_group = fp4 ? w_.experts_fp4[0].scale_group : kFp4Group;
   const size_t I_max = static_cast<size_t>(std::max(I_r, I_s));
   // The shared segment is every token: split across blocks along z (the
   // GEMV core in 16-row pieces, the tensor-core kernel in whole m-tiles).
@@ -650,13 +661,13 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
                                          routed_arg ? routed_bits : shared_bits, stream);
     else if (mma && routed && fp4)
       launch_moe_grouped_mma_fp4_bf16(hidden, H, sg, ns, mr, split, d_views_prefill_,
-                                      which, out, I_max, n, H, stream, d_rows_);
+                                      which, out, I_max, n, H, stream, d_rows_, fp4_group);
     else if (mma)
       launch_moe_grouped_mma_bf16(hidden, H, sg, ns, mr, split, d_views_prefill_,
                                   which, out, I_max, n, H, stream, d_rows_);
     else if (routed && fp4)
       launch_moe_grouped_gemv_fp4_bf16(d_gather_, H, sg, ns, mr, split, d_views_prefill_,
-                                       which, out, I_max, n, H, stream);
+                                       which, out, I_max, n, H, stream, fp4_group);
     else
       launch_moe_grouped_gemv_bf16(d_gather_, H, sg, ns, mr, split, d_views_prefill_,
                                    which, out, I_max, n, H, stream);
@@ -670,13 +681,13 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
                                         routed_arg ? routed_bits : shared_bits, stream);
     else if (mma && routed && fp4)
       launch_moe_grouped_mma_fp4_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
-                                     2, d_down_, H, H, k, stream);
+                                     2, d_down_, H, H, k, stream, nullptr, fp4_group);
     else if (mma)
       launch_moe_grouped_mma_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
                                  2, d_down_, H, H, k, stream);
     else if (routed && fp4)
       launch_moe_grouped_gemv_fp4_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
-                                      2, d_down_, H, H, k, stream);
+                                      2, d_down_, H, H, k, stream, fp4_group);
     else
       launch_moe_grouped_gemv_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
                                   2, d_down_, H, H, k, stream);
@@ -833,6 +844,15 @@ void GlmMoeLayer::enqueue_decode_impl(const uint16_t* hidden, uint16_t* out_bf16
                                                          : w_.shared[0].rows)
                               : 0;
   const bool sh_args = with_shared && !shared_fp4 && !packq;
+  // The fp8 shared expert's own scale grid (the checkpoint's 128 x 128,
+  // or the DeepSeek-V4.1 release's 32 x 32).
+  const auto log2_of = [](int b) {
+    int s = 0;
+    while ((1 << s) < b) ++s;
+    return s;
+  };
+  const int sh_rs = sh_args ? log2_of(w_.shared[0].scale_block_rows) : 7;
+  const int sh_cs = sh_args ? log2_of(w_.shared[0].scale_block_cols) : 7;
   const uint8_t* sh_gate_p = sh_args ? w_.shared[0].payload : nullptr;
   const float* sh_gate_s = sh_args ? w_.shared[0].scales : nullptr;
   const uint8_t* sh_up_p = sh_args ? w_.shared[1].payload : nullptr;
@@ -866,20 +886,22 @@ void GlmMoeLayer::enqueue_decode_impl(const uint16_t* hidden, uint16_t* out_bf16
     launch_moe_slot_down_packq(d_slot_act_, I_r, d_ids_, order, table, H, I_r, rb, N_s, sb,
                                d_slot_down_, H, slots, K, stream, sbase);
   } else if (fp4) {
+    const int fp4_group = w_.experts_fp4[0].scale_group;
     launch_moe_slot_gate_up_swiglu_fp4(
         hidden, H, d_ids_, order, table, I_r, H, I_s, K_s, sh_gate_p, sh_gate_s,
         sh_up_p, sh_up_s, d_slot_act_, I_r, slots, K, cfg_.swiglu_limit, stream,
-        shared_view_base);
+        shared_view_base, fp4_group, sh_rs, sh_cs);
     launch_moe_slot_down_fp4(d_slot_act_, I_r, d_ids_, order, table, H, I_r, N_s,
                              I_s, sh_down_p, sh_down_s, d_slot_down_, H, slots, K,
-                             stream, shared_view_base);
+                             stream, shared_view_base, fp4_group, sh_rs, sh_cs);
   } else {
     launch_moe_slot_gate_up_swiglu(
         hidden, H, d_ids_, order, table, I_r, H, I_s, K_s, sh_gate_p, sh_gate_s,
-        sh_up_p, sh_up_s, d_slot_act_, I_r, slots, K, cfg_.swiglu_limit, stream);
+        sh_up_p, sh_up_s, d_slot_act_, I_r, slots, K, cfg_.swiglu_limit, stream, sh_rs,
+        sh_cs);
     launch_moe_slot_down(d_slot_act_, I_r, d_ids_, order, table, H, I_r, N_s,
                          I_s, sh_down_p, sh_down_s, d_slot_down_, H, slots, K,
-                         stream);
+                         stream, sh_rs, sh_cs);
   }
   if (with_shared)
     launch_moe_slot_accum(out_bf16, d_slot_down_, d_weights_, tokens, H, K, stream);

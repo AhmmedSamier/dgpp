@@ -19,6 +19,7 @@ operations to its peers. Every rank checks the operation-stream digest.
 | Qwen3.8-Flash-Next | GDN, QSA, gated residuals, PLE n-gram embeddings, FP8 and NVFP4 experts, optional FP8 dense projections, graph decode, prefix cache and MTP | FP8 deployment templates use two or four nodes. Single-node NVFP4 serving maps the n-gram table from NVMe. Batched decode has an eight-row limit; deeper MTP uses scalar graphs |
 | GLM-4.7 | Paged GQA, partial RoPE, NVFP4 dense and expert weights, draft-layer requantization, graph decode, prefix cache and MTP | Four-node serving is measured. The engine supports up to 32 batched decode rows, including deeper MTP; the supplied default recipe uses depth 1 |
 | GLM-5.3 (full) | MLA with decoupled RoPE and per-token DSA selection shared across layers, int4/int8 pack-quantized experts and attention, draft-layer requantization, graph decode, prefix cache and MTP | Four nodes at 99.3 GiB of weights per rank (48K bf16 / 96K fp8 latent cache at four slots); served 2026-09-12: T=1 51 ms/step, MTP 68–76 ms/pass at 1.8–2.0 tokens/pass, gsm8k 59/60, HumanEval 40/40. Batched decode up to sixteen rows (eight request slots at MTP depth 1, five at depth 2; the select in row groups of eight); prefill runs the packed experts and attention through the GEMV chain (7–9.5 ms/token) until the tile kernel lands |
+| DeepSeek-V4.1-Flash | CED encoder/decoder, CSA2 sliding-window + compressed-KV attention with a two-level indexer, single-pass hyper-connections, Engram n-gram tables mapped from NVMe, the DSpark block draft (five drafts per pass), the MXFP4/FP8 checkpoint as shipped, graph decode, prefix cache and a bounded (SWA-replay) prefill | Four nodes at 72.94 GiB of weights per rank (128K context at two slots); served 2026-09-14: 76 ms/pass at 2.33 tokens/pass (32.5 ms/token), bounded prefill 1.6–2.4 ms/token, gsm8k 60/60, HumanEval 40/40, extract 30/30. `engine.prefill` chooses bounded (the default) or the exact 40-layer parity mode. Prefix caching is whole-block, so prompts shorter than 128 tokens are not cached yet |
 
 World size comes from the configuration's node list. A single-node graph
 world uses resident weights and identity collectives. A single-node run
@@ -68,6 +69,10 @@ Their implementation and evaluation records are maintained separately:
   selection, sharing), placement and cost, the gates and their status.
 - [GLM-5.3 NVFP4 study](docs/nvfp4_plan.md): checkpoint composition,
   quantized kernels, numerical comparisons and optimization results.
+- [DeepSeek-V4.1-Flash architecture and port](docs/deepseek_v41_flash_plan.md):
+  the CED/CSA2/Engram/DSpark operators, the quantization decision (serve
+  as shipped), the reference and torch cross-checks, the bounded prefill,
+  the tokenizer and DSML tool grammar, and the serving record.
 
 ## Remaining work
 

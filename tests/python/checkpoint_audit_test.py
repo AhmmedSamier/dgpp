@@ -161,5 +161,86 @@ class Glm53PackedContractTest(unittest.TestCase):
             audit.glm53_quant_groups({"quantization_config": {"format": "float-quantized"}})
 
 
+class Dsv41ClassificationTest(unittest.TestCase):
+    """DeepSeek-V4.1-Flash (2026-09-13): backbone layers under `layers.N.`,
+    the DSpark draft under `mtp.S.`, the Engram tables apart from the Engram
+    projections, the vision tower its own class."""
+
+    def test_classes_are_mutually_exclusive(self):
+        cases = {
+            "head.weight": "lm_head",
+            "embed.weight": "embed",
+            "norm.weight": "norm",
+            "layers.3.attn.wq_b.weight": "attention",
+            "layers.3.attn.wo_a.scale": "attention",
+            "layers.3.attn.attn_sink": "attention",
+            "layers.3.attn.q_norm.weight": "norm",
+            "layers.2.attn.indexer.wk.weight": "indexer",
+            "layers.2.attn.compressor.wgate.weight": "compressor",
+            "layers.3.ffn.experts.383.w2.scale": "routed_expert",
+            "layers.3.ffn.shared_experts.w1.weight": "shared_expert",
+            "layers.3.ffn.gate.bias_vl": "router",
+            "layers.3.hc_ffn_fn": "mhc",
+            "layers.14.engram.embed.scale": "engram_table",
+            "layers.14.engram.wkv.weight": "engram",
+            "layers.14.engram.q_weight": "engram",
+            "mtp.0.main_proj.weight": "draft",
+            "mtp.2.markov_head.head.weight": "draft",
+            "mtp.1.ffn.experts.5.w3.weight": "draft_expert",
+            "vision.blocks.0.attn.wqkv.weight": "vision",
+            "aligner.w1.bias": "vision",
+            "image_newline": "vision",
+            "layers.40.attn.wq_a.weight": "other",
+            "unexpected.weight": "other",
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(audit.classify_dsv41(name, 40), expected)
+
+
+class Dsv41PairContractTest(unittest.TestCase):
+    """The release's quantized pairs: fp8 `.weight` F8_E4M3 [N, K] with an
+    F8_E8M0 `.scale` on the 32x32 grid, MXFP4 `.weight` I8 [N, K/2] with a
+    `.scale` [N, K/32], the Engram tables [rows, 256] with [rows, 8]."""
+
+    @staticmethod
+    def fp8(base, n, k):
+        return {base + ".weight": ("f", "F8_E4M3", (n, k)), base + ".scale": ("f", "F8_E8M0", (-(-n // 32), -(-k // 32)))}
+
+    @staticmethod
+    def fp4(base, n, k):
+        return {base + ".weight": ("f", "I8", (n, k // 2)), base + ".scale": ("f", "F8_E8M0", (n, k // 32))}
+
+    def test_valid_pairs_report_their_format(self):
+        tensors = {}
+        tensors.update(self.fp8("layers.3.attn.wq_b", 32768, 1280))
+        tensors.update(self.fp4("layers.3.ffn.experts.7.w2", 5120, 2304))
+        tensors["layers.1.engram.embed.weight"] = ("f", "F8_E4M3", (1000, 256))
+        tensors["layers.1.engram.embed.scale"] = ("f", "F8_E8M0", (1000, 8))
+        tensors["layers.3.attn_norm.weight"] = ("f", "BF16", (5120,))
+        pairs = audit.validate_dsv41_pairs(tensors)
+        self.assertEqual(pairs["layers.3.attn.wq_b"]["fmt"], "fp8")
+        self.assertEqual(pairs["layers.3.ffn.experts.7.w2"], {"fmt": "mxfp4", "n": 5120, "k": 2304,
+                                                                "payload": 5120 * 1152, "scales": 5120 * 72})
+        self.assertEqual(pairs["layers.1.engram.embed"]["fmt"], "engram")
+
+    def test_violations_are_rejected(self):
+        no_scale = {"layers.3.attn.wq_b.weight": ("f", "F8_E4M3", (32768, 1280))}
+        wrong_grid = self.fp8("layers.3.attn.wq_b", 32768, 1280)
+        wrong_grid["layers.3.attn.wq_b.scale"] = ("f", "F8_E8M0", (256, 10))
+        wrong_fp4 = self.fp4("layers.3.ffn.experts.7.w2", 5120, 2304)
+        wrong_fp4["layers.3.ffn.experts.7.w2.scale"] = ("f", "F8_E8M0", (5120, 144))
+        orphan_scale = {"layers.3.attn.wq_b.scale": ("f", "F8_E8M0", (1024, 40))}
+        stray_e8m0 = {"layers.3.something": ("f", "F8_E8M0", (4,))}
+        bf16_scale = self.fp8("layers.3.attn.wq_b", 32768, 1280)
+        bf16_scale["layers.3.attn.wq_b.scale"] = ("f", "BF16", (1024, 40))
+        for label, tensors in [("payload without scale", no_scale), ("wrong fp8 grid", wrong_grid),
+                               ("wrong fp4 scale", wrong_fp4), ("scale without payload", orphan_scale),
+                               ("e8m0 outside a pair", stray_e8m0), ("bf16 scale", bf16_scale)]:
+            with self.subTest(case=label):
+                with self.assertRaises(ValueError):
+                    audit.validate_dsv41_pairs(tensors)
+
+
 if __name__ == "__main__":
     unittest.main()

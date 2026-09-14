@@ -41,7 +41,11 @@ namespace dgpp {
 // normalized. SoftmaxTopk: Qwen3.8-Flash-Next's — fp32 softmax over the
 // bf16 logits, top_k on the logits, the picked probabilities normalized
 // and rounded to bf16; no bias (the router bias pointer may be null).
-enum class MoeRouterMode { SigmoidBias, SoftmaxTopk };
+// SqrtSoftplusBias: DeepSeek-V4.1's (2026-09-13, docs/deepseek_v41_flash_plan.md
+// D3) — scores sqrt(softplus(logit)) in fp32, otherwise SigmoidBias's rule
+// (the bias on the selection key only, the picked scores normalized with
+// + 1e-20, then routed_scaling_factor).
+enum class MoeRouterMode { SigmoidBias, SoftmaxTopk, SqrtSoftplusBias };
 
 struct GlmMoeConfig {
   int hidden = 4096;
@@ -68,6 +72,11 @@ struct GlmMoeConfig {
   int64_t expert_bytes_fp4() const {
     const int64_t elems = 3LL * inter * hidden;
     return elems / 2 + elems / 16 + 3 * 4;
+  }
+  // The same expert in MXFP4: half a byte per element, an e8m0 scale per 32.
+  int64_t expert_bytes_mxfp4() const {
+    const int64_t elems = 3LL * inter * hidden;
+    return elems / 2 + elems / 32;
   }
 
   static void validate_config(const GlmMoeConfig& c) {
@@ -155,8 +164,13 @@ struct MoeExpertView {
                          shift_of(m.scale_block_rows), shift_of(m.scale_block_cols)};
   }
   static MoeExpertView of(const GlmFp4Matrix& m) {
-    return MoeExpertView{m.payload, nullptr, m.scales, m.global_scale, 7, 7};
+    MoeExpertView v{m.payload, nullptr, m.scales, m.global_scale, 7, 7};
+    v.fp4_group = m.scale_group;
+    return v;
   }
+  // The fp4 scale group (2026-09-13): 16 = NVFP4 (e4m3 scales + the global),
+  // 32 = MXFP4 (e8m0 scales, no global — fp4_global stays null).
+  int fp4_group = 16;
   // The packed-int interpretation: payload = the I32 words [n, k*bits/32]
   // as bytes, packed_scales = bf16 [n, k/64], bits = 4 or 8 (0: not packed).
   const uint16_t* packed_scales = nullptr;

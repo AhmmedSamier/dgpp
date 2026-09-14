@@ -492,6 +492,129 @@ cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json`) 26–27 ms/pass at 1.5–2.0 toke
 API checks clean, op streams identical across the ranks. The full ctest
 after every change: 62 of 62.
 
+## DeepSeek-V4.1-Flash (deepseek-ai/DeepSeek-V4.1-Flash) serving on four nodes (2026-09-14)
+
+The MXFP4/FP8 checkpoint as shipped, world 4, the DSpark block draft
+(`mtp_depth` 5, twelve decode rows at two slots), the decode graph, the
+bounded prefill, 128K context. Memory plan 76.55 GiB + 4 GiB headroom
+per rank (72.94 GiB resident weights, read from the NVMe in 137–246 s the
+first time, 22 s from the captured images after). Numbers off the
+service, `build-ci/fabric-runs/dsv41_serve_2026-09-13/` and the dated
+`benchmarks/results/2026-09-14-dsv41-flash.md`.
+
+Single stream, greedy: 76 ms/pass, 2.33 tok/pass, 32.5 ms/token; ttft
+404 ms on a 64-token prompt. DSpark acceptance per class (p1): json 92,
+math 82, code 72, prose 67, chat 55 %; wall 20.7–38.2 ms/token. Bounded
+prefill 2.35 / 1.85 / 1.61 ms/token at 512 / 2,048 / 8,192 tokens.
+Concurrency (greedy): c=1 33.1, c=2 37.3 tok/s aggregate; sampled by
+class up to 74 tok/s at c=2 on json. Quality (thinking off): gsm8k 60/60,
+HumanEval 40/40, extract 30/30. Determinism: the plain T=1 world's greedy
+transcripts byte-identical to the DSpark world's, `serve_load
+--isolation` identical, the four ranks' op streams identical at the
+take-down.
+
+The T=1 step is 34 ms/pass (1.00 tok/pass). Against the ~16.7 ms/token
+memory floor plus ~4 ms of collectives that is a ~1.6x ratio, the
+optimization gate's starting point (§5 of the plan; the confidence-
+scheduled rows are its first item now that acceptance is measured).
+
+**The like-for-like vLLM bench (2026-09-14, later; the recipe's own
+client, prompt set v1, temperature 0, thinking off; the dated
+`benchmarks/results/2026-09-14-dsv41-flash.md` has every table).** The
+recipe (TP4, DSpark k = 5, CUDA graphs) reports C1 37.95, C2 64.30, C6
+131.86 tok/s aggregate and C1 code 73.8 per stream. dgpp's depth-5
+scheduled two-slot world: C1 47.5 / C2 64.3 aggregate, code 74.1, math
+73.1 (the recipe 47), reasoning 58.1 (38–42), prose 37.8 (23) — every
+category at or above the recipe at one and two streams. The six-slot
+world (depth 4, scheduled) after the day's three kernel changes: C1 48.6,
+C2 66.2, C6 82.7 aggregate (43.2 / 53.0 / 58.9 in the morning), TTFT 0.31
+/ 0.48 / 1.26 s (0.55 / 0.85 / 2.15), cold prefill 1,286 / 1,315 tok/s at
+2,950 / 11,592 tokens (568 / 595; the recipe 902–1,539). The changes: the
+streaming tensor-core decode GEMM (`kernels/mma_gemv`: the dense fp8
+projections, the engram wkv, the draft's main_proj and the bf16 head read
+their weights once per launch at 1–32 rows — the 30-row step 252 → 215
+ms; then 64/128-row forms and 128-row groups for the prefill's rows: C6
+71.7 → 77.9), and the MXFP4 form of the fp4 tensor-core expert kernel for
+the prefill's experts (the weights once per 64-row tile instead of once
+per 4 rows: C6 77.9 → 82.7, cold prefill 708 → 1,286 tok/s), and the
+batched replay's own depth rule (the mean survival over the live slots
+instead of the deepest slot's depth: C6 82.7 → 84.5 at λ 0.045, 86.9 at
+λ 0.08 — the fixed point grows with concurrency; a per-concurrency λ is
+the next item). The
+six-stream gap to the recipe (1.7x) is the serialized per-prompt prefill
+(six arrivals prefill one after another: TTFT and stalled decode; the
+recipe batches them) and the 30-row step's composition (the MoE at its
+union-of-experts traffic floor, 110 ms; the 30-row collectives' wire time,
+33 ms; attention 17 ms).
+
+The cross-check on the real weights (`tools/dsv41_torch_reference.py`
+against `apps/dsv41_forward_check` dumps): the release's own layer code in
+fp32 sits as far from the engine as from its own bf16 pipeline at every
+layer (the plan's G4/G5 record; layers 0–3 and 20, 35- and 2,100-token
+prompts).
+
+**Optimization, the decode window attention (2026-09-14).** The nsys decode
+profile showed the step is GPU-busy 97 % (not collective- or host-bound)
+and the fp8/fp4 weight GEMVs run at 70–88 % of peak cold — near the
+hardware limit. The largest non-GEMV cost was the window attention:
+`attn_partial` at ~140 µs a layer versus ~12 µs for the compressed
+`attn_flash`, because the window launched with `n_split=1` — a single
+latency-bound thread block at decode while the compressed source split
+across the SMs. Splitting the decode window a fixed eight ways (prefill
+unchanged and byte-identical) cut it: chat 38.3 → 34.3, code 25.3 → 21.8
+ms/token (~10–14 % on the attention-heavy classes), gsm8k 60/60 unchanged,
+cross-rank op streams identical. Because softmax attention cannot be split
+bitwise-invariantly (the online-softmax combine's per-split rescale rounds
+differently, unlike the linear GEMVs), decode's window moved by about one
+bf16 ULP and the greedy transcripts changed at near-ties with accuracy
+unchanged. The remaining non-GEMV levers are the per-layer all-reduce
+(~14 % of the step) and, for more attention speed without changing outputs,
+fusing the window and compressed sources into one split flash.
+
+**Optimization, the confidence-scheduled verify depth (2026-09-14, later;
+plan §D8a, `engine.mtp_schedule`).** DSpark's confidence head emits a
+per-position acceptance logit; a greedy step now verifies only the leading
+drafts whose prefix-survival probability beats the value of one verify row
+(`lambda × row_ms`, the Dinkelbach optimum of aggregate tokens per second),
+each depth on its own captured graph variant, while the block still drafts
+its full width — a draft not verified is decoded next step, so the
+committed transcript is the plain greedy one. Three worlds from one binary
+(`build-ci/fabric-runs/dsv41_sched_{base,on,lam045}_2026-09-14`, greedy,
+300 tokens per class): baseline chat 33.4 / code 21.9 / prose 27.4 / json
+21.9 / math 21.8 ms/token (its transcripts reproduced the window-split run's
+4 of 4 — the default path is unchanged); scheduled at the reservation-rate
+λ (0.028) 24.7 / 19.6 / 23.1 / 19.9 / 20.1; at λ 0.045 (the achieved
+throughput, the fixed point) 24.6 / 18.9 / 22.7 / 19.1 / 19.8. Transcripts
+identical 4 of 4 and the four ranks' op streams identical in every run.
+The pass got cheaper (chat 71 → 46 ms) at the same tokens per pass (2.2 →
+2.0): fewer rows, the same accepted prefix; the conditional per-position
+acceptance rose to 74–87 %, so the head is calibrated. The scheduled path
+gives up the pipelined launch-ahead (~0.5 ms/step), invisible in these
+numbers. Later the same day the batched replay schedules too (one depth per
+batch, the deepest a live slot asks for, on reduced-row batch variants over
+the compacted feeds): at two live requests prose 34.1 → 51.1 and chat 36.6 →
+54.0 tok/s aggregate, code 53.1 → 58.9, math and json flat; the batched
+answer identical to the solo answer. Sampled requests still verify the
+whole block.
+
+**The scheduled verify depth on the other MTP families (2026-09-14).**
+Without a confidence head the engine takes the draft head's own probability
+of each draft from the device sampler (identical on every rank: it comes out
+of the pick's fold). Measured at `mtp_depth` 2, exact in every run
+(transcripts identical, isolation identical, op streams identical), and
+throughput-neutral: GLM-4.7 on four nodes 28.4–32.7 ms/token either way
+(the policy cut a third of the steps to one draft; the pass 72 → 69 ms at
+2.30 → 2.18 tokens); GLM-5.3-Flash on two nodes, depth 1 the served
+default at 61–79 ms/pass and 1.7–2.0 tok/pass, depth 2 28.6–35.5 ms/token
+with or without the schedule (a quarter of the steps cut; 73 → 69 ms at
+2.06 → 1.98 tok/pass on chat). The reason is structural: scheduling saves
+rows at stake times their cost, and a depth-2 step has one row at stake
+(~3 ms on GLM-4.7, ~12 ms on GLM-5.3-Flash) against the draft it may
+forfeit, where DSpark's block has four. Depth 2 itself is worth it single-
+stream on GLM-5.3-Flash (code 32.7 → 28.6, math 33.8 → 30.3 ms/token) and
+not at two live requests, where its 4 slots × 3 rows exceed the family's
+fixed 8-row batch and the steps fall back to scalar replays.
+
 ## Build and test validation
 
 The warning-as-error CI build consumes `DGPP_WERROR=ON`; the earlier unused

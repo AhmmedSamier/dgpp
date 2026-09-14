@@ -81,6 +81,14 @@ class CublasLtGemm : public IGemm {
   // calls up to it take the GEMV core. [1, kGemmDecodeLoweringRows].
   void set_decode_rows(int rows);
   int decode_rows() const;
+  // Decode-shaped bf16 calls take the streaming tensor-core GEMM
+  // (mma_gemv.hpp) instead of the 4-row GEMV chunks: the weights read once
+  // for every row of the launch, each row's chain the same whatever m. The
+  // two forms are tolerance-equal, not bitwise, so a model opts in for all
+  // its calls through this instance. Shapes the mma form cannot take keep
+  // the GEMV chunks.
+  void set_decode_mma(bool on);
+  bool decode_mma() const;
 
  private:
   struct Impl;

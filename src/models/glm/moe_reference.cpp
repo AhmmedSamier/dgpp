@@ -71,17 +71,21 @@ void strict_gemm_raw(const std::vector<uint16_t>& act, int64_t act_stride,
 // NVFP4 weights: e2m1(code) x e4m3(scale), EXACT (<= 6 significant bits;
 // the engine keeps it in fp32 unrounded) — the global scale divides the
 // finished dot, not the weight (docs/nvfp4_plan.md §3.1).
+// MXFP4 (scale_group 32): e2m1(code) x 2^(e8m0 - 127), exact; no global.
 std::vector<double> dequant_fp4_weights(const GlmFp4MatrixHost& mat) {
-  const int64_t pc = mat.cols / 2, sc = mat.cols / 16;
+  const int g = mat.scale_group;
+  const int64_t pc = mat.cols / 2, sc = mat.cols / g;
   std::vector<double> w(static_cast<size_t>(mat.rows) * mat.cols);
   for (int64_t r = 0; r < mat.rows; ++r)
     for (int64_t c = 0; c < mat.cols; ++c) {
       const uint8_t byte = mat.payload[static_cast<size_t>(r) * pc + c / 2];
       const uint8_t code = (c & 1) ? static_cast<uint8_t>(byte >> 4)
                                    : static_cast<uint8_t>(byte & 0xFu);
-      const float s = fp8_e4m3_bits_to_float(mat.scales[static_cast<size_t>(r) * sc + c / 16]);
+      const uint8_t sb = mat.scales[static_cast<size_t>(r) * sc + c / g];
+      const double s = g == 32 ? (sb == 255 ? std::nan("") : std::ldexp(1.0, static_cast<int>(sb) - 127))
+                               : static_cast<double>(fp8_e4m3_bits_to_float(sb));
       w[static_cast<size_t>(r) * mat.cols + c] =
-          static_cast<double>(fp4_e2m1_bits_to_float(code)) * static_cast<double>(s);
+          static_cast<double>(fp4_e2m1_bits_to_float(code)) * s;
     }
   return w;
 }
@@ -206,15 +210,19 @@ GlmFp4MatrixHost glm_moe_host_view_fp4(const GlmMoeHostWeights& w,
   m.rows = down ? H : I;
   m.cols = down ? I : H;
   // Every routed matrix has the same byte counts (gate/up [I,H], down [H,I]).
-  const int64_t pbytes = m.rows * m.cols / 2, sbytes = m.rows * m.cols / 16;
+  if (w.fp4_group != 16 && w.fp4_group != 32)
+    throw std::invalid_argument("glm_moe_host_view_fp4: the fp4 scale group must be 16 or 32");
+  m.scale_group = w.fp4_group;
+  const int64_t pbytes = m.rows * m.cols / 2, sbytes = m.rows * m.cols / w.fp4_group;
   const size_t p_off = static_cast<size_t>(index) * pbytes;
   const size_t s_off = static_cast<size_t>(index) * sbytes;
+  const bool mx = w.fp4_group == 32;
   if (p_off + pbytes > w.fp4_payloads.size() || s_off + sbytes > w.fp4_scales.size() ||
-      static_cast<size_t>(index) >= w.fp4_globals.size())
+      (!mx && static_cast<size_t>(index) >= w.fp4_globals.size()))
     throw std::invalid_argument("glm_moe_host_view_fp4: index out of range");
   m.payload = w.fp4_payloads.data() + p_off;
   m.scales = w.fp4_scales.data() + s_off;
-  m.global_scale = w.fp4_globals[static_cast<size_t>(index)];
+  m.global_scale = mx ? 1.0f : w.fp4_globals[static_cast<size_t>(index)];
   return m;
 }
 
@@ -243,6 +251,10 @@ void glm_moe_ref_router(const uint16_t* hidden, const uint16_t* gate,
         // the picked weight (below).
         scores[e] = bf16_to_d(d_to_bf16(dot));
         biased[e] = scores[e];
+      } else if (cfg.router_mode == MoeRouterMode::SqrtSoftplusBias) {
+        // DeepSeek-V4.1: sqrt(softplus(dot)) with torch's threshold (20).
+        scores[e] = std::sqrt(dot > 20.0 ? dot : std::log1p(std::exp(dot)));
+        biased[e] = scores[e] + bias[e];
       } else {
         scores[e] = sigmoid_d(dot);
         biased[e] = scores[e] + bias[e];

@@ -83,8 +83,10 @@ constexpr uint64_t kSampleDraftSeedMix = 0x9E3779B97F4A7C15ull;
 constexpr int kSampleMaxTopLogprobs = 20;
 
 // The verify rows a sampled verdict decides over: the fed token's row plus
-// up to kSampleVerdictRows - 1 drafts (GlmDiagnosticModel::kSpecRows).
-constexpr int kSampleVerdictRows = 4;
+// up to kSampleVerdictRows - 1 drafts — the families' kSpecRows (6 since
+// the DeepSeek-V4.1 DSpark block of five drafts, 2026-09-14; the kernel's
+// per-row tables moved to dynamic shared memory for it).
+constexpr int kSampleVerdictRows = 6;
 
 // The sampling verdict's outcome per request, beside the PickVerdict the
 // device consumers (commit, token feeds) keep reading.
@@ -109,6 +111,19 @@ struct SampleOutcome {
   int32_t top_ids[kSampleVerdictRows][kSampleMaxTopLogprobs] = {};
   float top_logprobs[kSampleVerdictRows][kSampleMaxTopLogprobs] = {};
 };
+
+// The draft-probability confidence (2026-09-14, engine/verify_schedule.hpp)
+// for a family without a confidence head: draft position c's acceptance
+// logit is logit(p_c), p_c = exp(logprob[0]) of the draft pick at picker
+// slot 1 + c (its outcome for `request`, `slot_stride` outcomes per slot,
+// computed on the full path — the pick's spec reports logprobs — so it is
+// the raw-normalizer probability of the draft's argmax, identical on every
+// rank: it comes out of the pick's fold). Writes dst[c] for c < depth; a
+// row the pick never decided (logprob 0 = p 1 on a padding row) is
+// clamped to the same logit bound as a certain one.
+void device_sample_draft_confidence(const SampleOutcome* outcomes,
+                                    int slot_stride, int request, int depth,
+                                    float* dst, cudaStream_t stream);
 
 // The draft's proposal: the distribution the draft was DRAWN
 // from — the draft head's own final set after the request's temperature,
@@ -235,6 +250,11 @@ void device_sample_local(float* logits, int rows, int vocab_count,
 // from, at [q][draft_index], on the device and, when given, in a pinned
 // mirror for the host's fallback. `counts` may be null (the draft pick
 // commits no context).
+// Sets the verdict kernel's dynamic shared-memory attribute (idempotent).
+// device_sample_verdict calls it; a picker that captures graphs calls it
+// from its constructor so the first launch inside a capture finds it set.
+void device_sample_verdict_prepare();
+
 void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         int candidates, int vocab_size, SampleSpec* specs,
                         int requests, int rows_per_request, const int64_t* fed,

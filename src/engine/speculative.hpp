@@ -122,12 +122,33 @@ class GreedySpeculator {
     drafts_[0] = forced_draft;
   }
 
+  // Confidence-scheduled verify depth (engine/verify_schedule.hpp; DSpark). The
+  // block always drafts its full width, but only the first `policy(drafts_)`
+  // drafts are fed to the verify — the rest are recomputed next step. This
+  // changes throughput only: a draft is committed iff it equals the target's
+  // argmax at that position, and any draft not verified is decoded plainly
+  // next step, so the committed transcript is the plain greedy one at every
+  // per-step depth (the exactness the graph-engine port relies on). null
+  // (the default) verifies the whole block, unchanged. The policy returns
+  // the number of drafts to verify; it is clamped to [0, depth].
+  void set_depth_policy(std::function<int(const std::vector<int32_t>&)> p) {
+    depth_policy_ = std::move(p);
+  }
+  int last_verify_depth() const { return last_verify_depth_; }
+
   // One speculative step. Returns the tokens that became final this step
   // (1 to 1 + depth); next() is then the following token, already decided
   // but not yet consumed by the main stack.
   std::vector<int32_t> step() {
+    int k = depth_;
+    if (depth_policy_) {
+      k = depth_policy_(drafts_);
+      if (k < 0) k = 0;
+      if (k > depth_) k = depth_;
+    }
+    last_verify_depth_ = k;
     std::vector<int64_t> fed{next_};
-    for (const int32_t d : drafts_) fed.push_back(d);
+    for (int i = 0; i < k; ++i) fed.push_back(drafts_[static_cast<size_t>(i)]);
     const int T = static_cast<int>(fed.size());
     const auto out = model_.session_verify(req_, fed);
     const std::vector<int32_t> winners = pick_rows_(local_row_maxes(out, T));
@@ -163,6 +184,8 @@ class GreedySpeculator {
   int req_ = 0;
   PickRows pick_rows_;
   int depth_ = 1;
+  std::function<int(const std::vector<int32_t>&)> depth_policy_;
+  int last_verify_depth_ = 0;
   int32_t next_ = -1;
   std::vector<int32_t> drafts_;
   int steps_ = 0;

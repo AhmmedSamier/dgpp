@@ -958,8 +958,8 @@ inline sample::SpecPrefixDecision bus_spec_accept(
 class DevicePicker {
  public:
   // The verify's pick and one per draft position (kSpecRows - 1 chained
-  // drafts at most, 2026-09-06).
-  static constexpr int kSlots = 4;
+  // drafts at most, 2026-09-06; 6 since the DSpark block, 2026-09-13).
+  static constexpr int kSlots = 6;
 
   // `sampling_candidates` > 0 arms the SAMPLING pick (kernels/
   // glm_sample_pick.hpp): a wider table (k candidates + the slice lse per
@@ -996,6 +996,7 @@ class DevicePicker {
           device_sample_table_elems(max_rows_, world, candidates_) * 2);
     DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&table_), table_bytes));
     if (candidates_ > 0) {
+      device_sample_verdict_prepare();  // the verdict kernel's dynamic shared memory, before any capture
       DGPP_CUDA_OK(cudaMallocHost(
           reinterpret_cast<void**>(&outcomes_),
           sizeof(SampleOutcome) * kSlots * kPickMaxRequests));
@@ -1167,6 +1168,11 @@ class DevicePicker {
     check_request(request);
     return outcomes_[slot * kPickMaxRequests + request];
   }
+  // The outcomes table itself (pinned; slot-major, kPickMaxRequests per
+  // slot) for a kernel node that reads a pick's outcome on the device (the
+  // draft-probability confidence, device_sample_draft_confidence).
+  const SampleOutcome* outcomes_table() const { return outcomes_; }
+  static constexpr int outcomes_slot_stride() { return kPickMaxRequests; }
 
   // Slot `slot`'s last verdict (pinned; valid once its stream work
   // completed). Throws when the digest group disagreed: some rank

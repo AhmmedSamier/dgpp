@@ -17,7 +17,7 @@
 // USAGE
 //   dgpp-serve --model ORG/NAME | --checkpoint-dir DIR
 //     [--port N (default 18080; rank 0 only)] [--kv-capacity TOKENS]
-//     [--kv-dtype bf16|fp8|fp4]
+//     [--kv-dtype bf16|fp8|fp4] [--prefill bounded|exact]
 //     [--max-concurrency N] [--queue-limit N] [--default-max-tokens N]
 //     [--max-connections N] [--no-eos]
 //   fabric: --world N --rank R (--peer HOST when rank > 0)
@@ -67,6 +67,7 @@
 #include "text/chat_template.hpp"
 #include "engine/eager_engine.hpp"
 #include "engine/graph_engine.hpp"
+#include "engine/verify_schedule.hpp"
 #include "engine/memory_plan.hpp"
 #include "loaders/architecture.hpp"
 #include "models/glm/fabric_engine.hpp"
@@ -77,6 +78,10 @@
 #include "models/glm4/config.hpp"
 #include "models/glm4/forward.hpp"
 #include "models/glm_dsa/config.hpp"
+#include "models/dsv41/config.hpp"
+#include "models/dsv41/loader.hpp"
+#include "models/dsv41/model.hpp"
+#include "text/dsv41_prompt.hpp"
 #include "models/glm_dsa/model.hpp"
 #include "sched/scheduler.hpp"
 #include "text/tokenizer.hpp"
@@ -199,6 +204,9 @@ struct ServeGraphEngine {
   virtual ~ServeGraphEngine() = default;
   virtual dgpp::sched::SchedulerEngine* engine() = 0;
   virtual void warm_captures(const std::vector<int64_t>& prompt) = 0;
+  // The scheduled verify depth (engine/verify_schedule.hpp), before the
+  // warm capture; throws for a family without a confidence head.
+  virtual void configure_verify_schedule(bool on, float row_ms, float lambda, int min_depth) = 0;
 };
 
 template <class Model>
@@ -208,6 +216,9 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
   explicit ServeGraphEngineOf(A&&... a) : eng(std::forward<A>(a)...) {}
   dgpp::sched::SchedulerEngine* engine() override { return &eng; }
   void warm_captures(const std::vector<int64_t>& p) override { eng.warm_captures(p); }
+  void configure_verify_schedule(bool on, float row_ms, float lambda, int min_depth) override {
+    eng.configure_verify_schedule(on, row_ms, lambda, min_depth);
+  }
 };
 
 struct ServeFamily {
@@ -225,6 +236,9 @@ struct ServeFamily {
   // shape up to kDecodeRowsMax; GLM-5.3-Flash keeps its build-time 8, and
   // Qwen3.8-Flash-Next stays at 8 until its kernels are gated past it.
   virtual int decode_rows_cap() const = 0;
+  // The MTP depth when neither the flag nor the file names one: one draft,
+  // or the DSpark block's five (DeepSeek-V4.1).
+  virtual int default_mtp_depth() const { return 1; }
   // The bus's latency slot: the family's widest recorded decode fold
   // (`decode_rows` bf16 rows of its boundary width).
   virtual size_t lat_slot_bytes(int decode_rows) const = 0;
@@ -507,9 +521,81 @@ struct GlmDsaFamily final : ServeFamily {
   }
 };
 
+// DeepSeek-V4.1-Flash (DeepseekV41ForCausalLM, MXFP4 experts + fp8 dense
+// as shipped; docs/deepseek_v41_flash_plan.md G7): the CSA2 pool (128-token
+// blocks: the fp4-block compressed KV and the fp4 index keys of the four
+// kv sources, the fp8-block window rings on every layer, the compressor
+// tails) plus the Engram context — the prefix snapshot holds the rings,
+// the tails and the context (aligned at 128); the Engram tables stay
+// mmap'ed from the checkpoint (the sidecar `dgpp_engram_tables.json`
+// beside it, tools/dsv41_engram_tables.py); the DSpark draft is the mtp
+// block (depth = the verified block length, default 5).
+struct Dsv41Family final : ServeFamily {
+  dgpp::Dsv41TextConfig cfg;
+  std::string ckpt;
+  std::vector<int64_t> eos;
+  std::unique_ptr<dgpp::Dsv41Model> model;
+  explicit Dsv41Family(const std::string& checkpoint)
+      : cfg(dgpp::Dsv41TextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint), eos{cfg.eos_token_id} {}
+  const char* name() const override { return "deepseek_v41"; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  std::vector<int64_t>& eos_token_ids() override { return eos; }
+  int64_t block_tokens() const override { return dgpp::Dsv41Model::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::Dsv41Model::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t pool_tokens) const override {
+    // The ratio-1 kv source's entries are token slots, 21 bits in the select keys.
+    if (pool_tokens >= (int64_t(1) << 21)) return "exceeds the CSA2 entry-id space (2^21 entries)";
+    return "";
+  }
+  const char* kv_format_name() const override { return "fp4_block main + fp8_block window"; }
+  int decode_rows_cap() const override { return dgpp::Dsv41Model::decode_rows_cap(); }
+  int default_mtp_depth() const override { return cfg.dspark_block_size; }
+  // The widest fold the decode graph records: the Engram kv partial
+  // [rows, (hc + 1) x hidden] on layers 1 and 14.
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hc_mult + 1) *
+           static_cast<size_t>(cfg.hidden_size) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
+                        bool mtp, int decode_rows) const override {
+    return dgpp::Dsv41Model::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+                                         fabric ? dgpp::Dsv41Residency::Resident : dgpp::Dsv41Residency::Streaming,
+                                         slots, fabric && mtp, decode_rows);
+  }
+  size_t snapshot_bytes(int world_, bool mtp) const override {
+    return dgpp::Dsv41Model::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
+    dgpp::Dsv41LayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    model = std::make_unique<dgpp::Dsv41Model>(
+        cfg, ckpt, forward_rows, pool_tokens,
+        fabric ? dgpp::Dsv41Residency::Resident : dgpp::Dsv41Residency::Streaming, reducer, fabric ? rank : 0,
+        fabric ? world_ : 1, slots, fabric && mtp, decode_rows);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(
+      dgpp::net::CollectiveBus* bus, int rank, int world_, uint16_t* pick_scratch, int batch_min_live,
+      uint16_t* prefix_scratch, uint16_t* gather_scratch, int candidates,
+      const dgpp::text::GrammarVocab* grammar, int prefix_slots, int mtp_depth) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::Dsv41Model>>(
+        model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots, mtp_depth);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::Dsv41Model>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
 std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world, dgpp::LatentFormat kv_format) {
   const dgpp::ModelArchitecture arch =
       dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string());
+  if (arch == dgpp::ModelArchitecture::DeepseekV41) return std::make_unique<Dsv41Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp) return std::make_unique<QwenFamily>(ckpt);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
@@ -606,14 +692,25 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
                  const std::string& model_display, const ServeKnobs& k,
                  bool no_eos, double boot_s,
                  dgpp::serve::JournalWriter* journal,
-                 dgpp::serve::OpStreamObserver* oplog) {
+                 dgpp::serve::OpStreamObserver* oplog, const std::string& family_name) {
   const dgpp::text::Tokenizer tok =
       dgpp::text::Tokenizer::load((fs::path(ckpt) / "tokenizer.json").string());
-  const dgpp::text::ChatTemplate tpl = dgpp::text::ChatTemplate::load(
-      (fs::path(ckpt) / "chat_template.jinja").string());
-  DGPP_LOG_INFO("serve: tokenizer {:#x}, template {:#x} loaded",
-                tok.revision_hash(), tpl.source_hash());
-  dgpp::serve::TextFrontend frontend(&tok, &tpl);
+  // The prompt renderer: the checkpoint's chat_template.jinja, or the
+  // DeepSeek-V4.1 encoder's format (no Jinja ships with that model).
+  std::optional<dgpp::text::ChatTemplate> tpl;
+  std::unique_ptr<dgpp::serve::ModelFrontend> frontend;
+  uint64_t template_hash = 0;
+  if (family_name == "deepseek_v41") {
+    frontend = std::make_unique<dgpp::serve::Dsv41Frontend>(&tok);
+    template_hash = dgpp::text::Dsv41Prompt::source_hash();
+    DGPP_LOG_INFO("serve: tokenizer {:#x}, the DeepSeek-V4.1 prompt renderer {:#x}", tok.revision_hash(),
+                  template_hash);
+  } else {
+    tpl.emplace(dgpp::text::ChatTemplate::load((fs::path(ckpt) / "chat_template.jinja").string()));
+    template_hash = tpl->source_hash();
+    DGPP_LOG_INFO("serve: tokenizer {:#x}, template {:#x} loaded", tok.revision_hash(), template_hash);
+    frontend = std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl);
+  }
 
   dgpp::serve::ServiceConfig scfg;
   scfg.model_id = model_display;
@@ -629,13 +726,13 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
     char key[96];
     std::snprintf(key, sizeof(key), "tok:%016llx tpl:%016llx",
                   static_cast<unsigned long long>(tok.revision_hash()),
-                  static_cast<unsigned long long>(tpl.source_hash()));
+                  static_cast<unsigned long long>(template_hash));
     scfg.prefix_key = std::string(key) + " ckpt:" + fs::path(ckpt).filename().string();
   }
   std::vector<int64_t> eos =
       no_eos ? std::vector<int64_t>{} : eos_ids;
 
-  dgpp::serve::GenerationService service(scfg, engine, &frontend,
+  dgpp::serve::GenerationService service(scfg, engine, frontend.get(),
                                            std::move(eos));
   if (oplog) service.set_audit_observer(oplog);
   dgpp::serve::HttpServer http(k.http_port, &service, k.max_connections, k.http_bind);
@@ -826,6 +923,10 @@ int main(int argc, char** argv) {
       "  [--kv-dtype bf16|fp8|fp4 (default bf16)]: the latent cache's storage\n"
       "    format — fp8 halves its bytes, fp4 quarters them, each at a cost in\n"
       "    attention precision; bf16 is every parity gate's format\n"
+      "  [--prefill bounded|exact (default bounded)]: the DeepSeek-V4.1 prefill —\n"
+      "    bounded runs the decoder over the last window rows of each prompt\n"
+      "    (the model's own serving recipe, half the prefill work), exact every\n"
+      "    layer over every row (the parity mode)\n"
       "  [--max-concurrency N (default 8, the decode-row bound)]\n"
       "  [--queue-limit N (default 64)] [--default-max-tokens N (256)]\n"
       "  [--max-connections N (default 64)] [--no-eos]\n"
@@ -836,7 +937,13 @@ int main(int argc, char** argv) {
       "    [--graph-batch-min-live N (default min(2, max-concurrency);\n"
       "      must be in [1, max-concurrency])]\n"
       "      (the row batch needs max-concurrency * (1 + mtp depth) <= 8)\n"
-      "    [--mtp-depth N]  draft tokens per step (1..3; the verify runs 1+N rows)\n"
+      "    [--mtp-depth N]  draft tokens per step (1..5; the verify runs 1+N rows)\n"
+      "    [--mtp-schedule]  the confidence-scheduled verify depth (DeepSeek-V4.1's\n"
+      "      DSpark): a step verifies only the drafts whose prefix survival beats\n"
+      "      the value of a verify row; greedy slots; exact\n"
+      "      [--mtp-schedule-row-ms X (8)] [--mtp-schedule-base-ms X (28)]\n"
+      "      [--mtp-schedule-lambda X (0 = 1/(base+row) tok/ms)]\n"
+      "      [--mtp-schedule-min-depth N (1)]\n"
       "    [--sampling-candidates N (default 128, in [1, 256]): the sampled\n"
       "      pick's per-rank candidate width; narrower falls back more]\n"
       "  prefix cache (M7): [--prefix-cache-gib X (default 1.5)]: the\n"
@@ -869,6 +976,7 @@ int main(int argc, char** argv) {
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
+  std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
   int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
@@ -885,7 +993,13 @@ int main(int argc, char** argv) {
   int max_connections = 64;
   int world = 1, rank = 0, rendezvous_timeout_ms = 120000;
   bool no_eos = false, decode_graph = false, mtp = false;
-  int mtp_depth = 1;  // draft tokens per step (needs --mtp; 1..3)
+  int mtp_depth = 1;  // draft tokens per step (needs --mtp; 1..5)
+  bool mtp_depth_explicit = false;  // named by the flag or the file (else the family's default)
+  bool mtp_schedule = false;  // the confidence-scheduled verify depth (needs --mtp)
+  double mtp_schedule_row_ms = 8.0;
+  double mtp_schedule_base_ms = 28.0;
+  double mtp_schedule_lambda = 0.0;  // 0: the reservation rate 1 / (base + row)
+  int mtp_schedule_min_depth = 1;
   double prefix_cache_gib = 1.5;  // M7: the snapshot arena; 0 = off
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<int> top_k;
@@ -932,6 +1046,7 @@ int main(int argc, char** argv) {
     kv_dtype = e.kv_dtype;
     ngram_table = e.ngram_table;
     dense_weights = e.dense_weights;
+    prefill = e.prefill;
     embed_sharding = e.embed_sharding;
     default_max_tokens = e.default_max_tokens;
     queue_limit = e.queue_limit;
@@ -940,6 +1055,12 @@ int main(int argc, char** argv) {
     decode_graph = e.decode_graph;
     mtp = e.mtp;
     mtp_depth = e.mtp_depth;
+    mtp_depth_explicit = e.mtp_depth_set;
+    mtp_schedule = e.mtp_schedule;
+    mtp_schedule_row_ms = e.mtp_schedule_row_ms;
+    mtp_schedule_base_ms = e.mtp_schedule_base_ms;
+    mtp_schedule_lambda = e.mtp_schedule_lambda;
+    mtp_schedule_min_depth = e.mtp_schedule_min_depth;
     graph_batch_min_live = e.graph_batch_min_live;
     sampling_candidates = e.sampling_candidates;
     prefix_cache_gib = e.prefix_cache_gib;
@@ -971,6 +1092,7 @@ int main(int argc, char** argv) {
     else if (a == "--kv-dtype") kv_dtype = next();
     else if (a == "--ngram-table") ngram_table = next();
     else if (a == "--dense-weights") dense_weights = next();
+    else if (a == "--prefill") prefill = next();
     else if (a == "--embed-sharding") embed_sharding = next();
     else if (a == "--memory-plan") memory_plan_only = true;
     else if (a == "--max-concurrency") max_concurrency = std::stoi(next());
@@ -982,7 +1104,15 @@ int main(int argc, char** argv) {
     else if (a == "--graph-batch-min-live")
       graph_batch_min_live = std::stoi(next());
     else if (a == "--mtp") mtp = true;
-    else if (a == "--mtp-depth") mtp_depth = std::stoi(next());
+    else if (a == "--mtp-depth") {
+      mtp_depth = std::stoi(next());
+      mtp_depth_explicit = true;
+    }
+    else if (a == "--mtp-schedule") mtp_schedule = true;
+    else if (a == "--mtp-schedule-row-ms") mtp_schedule_row_ms = std::stod(next());
+    else if (a == "--mtp-schedule-base-ms") mtp_schedule_base_ms = std::stod(next());
+    else if (a == "--mtp-schedule-lambda") mtp_schedule_lambda = std::stod(next());
+    else if (a == "--mtp-schedule-min-depth") mtp_schedule_min_depth = std::stoi(next());
     else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--prefix-cache-gib") prefix_cache_gib = std::stod(next());
     else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
@@ -1013,6 +1143,35 @@ int main(int argc, char** argv) {
       return a == "--help" ? 0 : 1;
     }
   }
+  // A model id names a cached snapshot: resolved here for the head (its
+  // settings record and the family's defaults below read the checkpoint)
+  // and again after the handshake for a peer that takes the id from rank 0.
+  std::string resolved_model;
+  const auto resolve_model = [&]() -> bool {
+    if (model_id.empty() || resolved_model == model_id) return true;
+    std::string err;
+    const std::string snapshot = dgpp::hf::model_dir(model_id, &err);
+    if (snapshot.empty()) {
+      DGPP_LOG_ERROR("--model {}: {}", model_id, err);
+      return false;
+    }
+    ckpt = snapshot;
+    resolved_model = model_id;
+    DGPP_LOG_INFO("model {} -> {}", model_id, snapshot);
+    return true;
+  };
+  if (!model_id.empty() && !resolve_model()) return 1;
+  // The MTP depth a family defaults (DeepSeek-V4.1's DSpark block verifies
+  // five drafts): resolved on every rank before the settings record leaves
+  // rank 0, from the checkpoint's architecture alone.
+  if (mtp && !mtp_depth_explicit && !ckpt.empty()) {
+    const dgpp::ModelArchitecture arch =
+        dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string());
+    if (arch == dgpp::ModelArchitecture::DeepseekV41) {
+      mtp_depth = dgpp::Dsv41TextConfig::from_json_file((fs::path(ckpt) / "config.json").string()).dspark_block_size;
+      DGPP_LOG_INFO("serve: --mtp without --mtp-depth on DeepSeek-V4.1: the DSpark block's {} drafts", mtp_depth);
+    }
+  }
   // ---- the fabric's first handshake: the head pushes the
   // world's shape. Rank 0 opens the journal and accepts the full world
   // before building anything; the peers connect (retrying within the
@@ -1025,12 +1184,14 @@ int main(int argc, char** argv) {
   std::optional<dgpp::serve::JournalReader> reader;
   const auto canonical = [&] {
     return std::format(
-        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} emsh={} maxtok={} queue={} "
-        "eos={} graph={} mtp={} mtpd={} batchmin={} cand={} pcgib={} adm={} win={} "
-        "pace={} inflight={} reasoning_in_content={}",
+        "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} pf={} emsh={} maxtok={} queue={} "
+        "eos={} graph={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} batchmin={} cand={} "
+        "pcgib={} adm={} win={} pace={} inflight={} reasoning_in_content={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
-        max_concurrency, kv_capacity, kv_dtype, ngram_table, dense_weights, embed_sharding, default_max_tokens, queue_limit,
-        no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, graph_batch_min_live,
+        max_concurrency, kv_capacity, kv_dtype, ngram_table, dense_weights, prefill, embed_sharding, default_max_tokens,
+        queue_limit,
+        no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
+        mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth, graph_batch_min_live,
         sampling_candidates, prefix_cache_gib, admission_mode, admission_window,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0);
   };
@@ -1060,6 +1221,7 @@ int main(int argc, char** argv) {
         ws.kv_dtype = kv_dtype;
         ws.ngram_table = ngram_table;
         ws.dense_weights = dense_weights;
+        ws.prefill = prefill;
         ws.embed_sharding = embed_sharding;
         ws.default_max_tokens = default_max_tokens;
         ws.queue_limit = queue_limit;
@@ -1067,6 +1229,11 @@ int main(int argc, char** argv) {
         ws.decode_graph = decode_graph;
         ws.mtp = mtp;
         ws.mtp_depth = mtp_depth;
+        ws.mtp_schedule = mtp_schedule;
+        ws.mtp_schedule_row_ms = mtp_schedule_row_ms;
+        ws.mtp_schedule_base_ms = mtp_schedule_base_ms;
+        ws.mtp_schedule_lambda = mtp_schedule_lambda;
+        ws.mtp_schedule_min_depth = mtp_schedule_min_depth;
         ws.graph_batch_min_live = graph_batch_min_live;
         ws.sampling_candidates = sampling_candidates;
         ws.prefix_cache_gib = prefix_cache_gib;
@@ -1100,12 +1267,18 @@ int main(int argc, char** argv) {
         kv_dtype = ws.kv_dtype;
         ngram_table = ws.ngram_table;
         dense_weights = ws.dense_weights;
+        prefill = ws.prefill;
         default_max_tokens = ws.default_max_tokens;
         queue_limit = ws.queue_limit;
         no_eos = ws.no_eos;
         decode_graph = ws.decode_graph;
         mtp = ws.mtp;
         mtp_depth = ws.mtp_depth;
+        mtp_schedule = ws.mtp_schedule;
+        mtp_schedule_row_ms = ws.mtp_schedule_row_ms;
+        mtp_schedule_base_ms = ws.mtp_schedule_base_ms;
+        mtp_schedule_lambda = ws.mtp_schedule_lambda;
+        mtp_schedule_min_depth = ws.mtp_schedule_min_depth;
         graph_batch_min_live = ws.graph_batch_min_live;
         sampling_candidates = ws.sampling_candidates;
         prefix_cache_gib = ws.prefix_cache_gib;
@@ -1131,16 +1304,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (!model_id.empty()) {
-    std::string err;
-    const std::string snapshot = dgpp::hf::model_dir(model_id, &err);
-    if (snapshot.empty()) {
-      DGPP_LOG_ERROR("--model {}: {}", model_id, err);
-      return 1;
-    }
-    ckpt = snapshot;
-    DGPP_LOG_INFO("model {} -> {}", model_id, snapshot);
-  }
+  if (!model_id.empty() && !resolve_model()) return 1;
   if (ckpt.empty()) {
     std::fputs(kUsage, stderr);
     return 1;
@@ -1168,6 +1332,12 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("--dense-weights must be checkpoint or fp8, got '{}'", dense_weights);
     return 2;
   }
+  if (prefill != "bounded" && prefill != "exact") {
+    DGPP_LOG_ERROR("--prefill must be bounded or exact, got '{}'", prefill);
+    return 2;
+  }
+  // The DeepSeek-V4.1 prefill mode: every model built from here on takes it.
+  dgpp::Dsv41Model::set_default_prefill_bounded(prefill == "bounded");
   dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
   if (embed_sharding != "replicated" && embed_sharding != "vocab") {
     DGPP_LOG_ERROR("--embed-sharding must be replicated or vocab, got '{}'", embed_sharding);
@@ -1176,6 +1346,7 @@ int main(int argc, char** argv) {
   // The full GLM-5.3's embedding rows: set before the plan and the load
   // (both read it; the other families keep their tables whole).
   dgpp::GlmDsaLayerStream::set_embed_vocab_sharded(embed_sharding == "vocab");
+  dgpp::Dsv41LayerStream::set_embed_vocab_sharded(embed_sharding == "vocab");
   if (world > 1) {
     require(rank >= 0 && rank < world, "--rank outside --world");
     require(!peer.empty() || rank == 0,
@@ -1220,8 +1391,18 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("--stats-interval-s must be >= 0, got {}", stats_interval_s);
     return 2;
   }
-  if (mtp_depth < 1 || mtp_depth > 3) {
-    DGPP_LOG_ERROR("--mtp-depth must be in [1, 3], got {}", mtp_depth);
+  if (mtp_schedule && !(mtp && decode_graph)) {
+    DGPP_LOG_ERROR("--mtp-schedule needs --decode-graph --mtp (the scheduled verify depth is a graph-engine feature)");
+    return 2;
+  }
+  if (mtp_schedule && (!(mtp_schedule_row_ms > 0.0) || mtp_schedule_base_ms < 0.0 || mtp_schedule_lambda < 0.0 ||
+                       mtp_schedule_min_depth < 1 || mtp_schedule_min_depth > mtp_depth)) {
+    DGPP_LOG_ERROR("--mtp-schedule: row_ms > 0, base_ms >= 0, lambda >= 0 and min_depth in [1, mtp_depth] (got {}, {}, {}, {})",
+                   mtp_schedule_row_ms, mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth);
+    return 2;
+  }
+  if (mtp_depth < 1 || mtp_depth > 5) {
+    DGPP_LOG_ERROR("--mtp-depth must be in [1, 5], got {}", mtp_depth);
     return 2;
   }
   if (!mtp && mtp_depth != 1) {
@@ -1267,8 +1448,9 @@ int main(int argc, char** argv) {
     // The family from config.json's architecture (loaders/architecture.hpp):
     // everything below the engine interface comes from it.
     std::unique_ptr<ServeFamily> family = make_family(ckpt, world, kv_format);
-    if (embed_sharding == "vocab" && std::string(family->name()) != "glm_moe_dsa")
-      DGPP_LOG_WARN("engine.embed_sharding = vocab applies to the full GLM-5.3 (glm_moe_dsa); {} keeps its "
+    if (embed_sharding == "vocab" && std::string(family->name()) != "glm_moe_dsa" &&
+        std::string(family->name()) != "deepseek_v41")
+      DGPP_LOG_WARN("engine.embed_sharding = vocab applies to the full GLM-5.3 and DeepSeek-V4.1; {} keeps its "
                     "embedding replicated", family->name());
     DGPP_LOG_INFO("serve: model family {} ({})", family->name(), ckpt);
     // The decode rows (2026-09-10, engine/decode_outputs.hpp): the fixed
@@ -1309,6 +1491,12 @@ int main(int argc, char** argv) {
     if (std::string(family->name()) != "qwen4_exp" && dense_weights != "checkpoint")
       DGPP_LOG_WARN("serve: --dense-weights {} applies to the Qwen dense stack only; the {} family loads as shipped",
                     dense_weights, family->name());
+    if (std::string(family->name()) != "deepseek_v41" && prefill != "bounded")
+      DGPP_LOG_WARN("serve: --prefill {} applies to the DeepSeek-V4.1 family only; the {} family prefills every layer",
+                    prefill, family->name());
+    if (std::string(family->name()) == "deepseek_v41")
+      DGPP_LOG_INFO("serve: DeepSeek-V4.1 prefill mode {} ({})", prefill,
+                    prefill == "bounded" ? "the decoder over the last window rows of each prompt" : "every layer over every row");
     const dgpp::GlmGenerationDefaults generation_defaults =
         dgpp::GlmGenerationDefaults::from_checkpoint_dir(ckpt, family->vocab_size());
     // generation_config.json is the generation authority. Retain the
@@ -1545,6 +1733,16 @@ int main(int argc, char** argv) {
           std::unique_ptr<ServeGraphEngine> graph_engine = family->make_graph_engine(
               bus.get(), rank, world, pick_scratch, graph_batch_min_live, sample_prefix.data,
               sample_gather.data, sampling_candidates, &grammar_vocab, prefix_slots, mtp_depth);
+          if (mtp_schedule) {
+            // The value of decode time: the configured throughput, or the
+            // reservation rate of the configured curve (a plain step's).
+            const float lambda = mtp_schedule_lambda > 0.0
+                                     ? static_cast<float>(mtp_schedule_lambda)
+                                     : dgpp::verify_reservation_lambda(static_cast<float>(mtp_schedule_base_ms),
+                                                                       static_cast<float>(mtp_schedule_row_ms));
+            graph_engine->configure_verify_schedule(true, static_cast<float>(mtp_schedule_row_ms), lambda,
+                                                    mtp_schedule_min_depth);
+          }
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up
           // is a run of collectives, so it starts on the journal's clock:
@@ -1666,7 +1864,8 @@ int main(int argc, char** argv) {
         dgpp::serve::OpStreamObserver oplog;  // rank 0's audit leg
         open_ops_file(&oplog, "serve_rank0.ops");
         const int rc = serve_openai(engine_ptr(), family->vocab_size(), family->eos_token_ids(), ckpt,
-                                    model_display, knobs, no_eos, boot_s(), journal ? &*journal : nullptr, &oplog);
+                                    model_display, knobs, no_eos, boot_s(), journal ? &*journal : nullptr, &oplog,
+                                    family->name());
         engine_release();
         cudaFreeHost(pick_scratch);
         bus->stop();
@@ -1709,7 +1908,7 @@ int main(int argc, char** argv) {
         &grammar_vocab, prefix_slots);
     const int rc = serve_openai(engine.get(), family->vocab_size(), family->eos_token_ids(), ckpt,
                                 model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
-                                /*oplog=*/nullptr);
+                                /*oplog=*/nullptr, family->name());
     engine.reset();
     family->destroy_model();
     return rc;

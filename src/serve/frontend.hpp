@@ -19,6 +19,7 @@
 
 #include "loaders/minijson.hpp"
 #include "text/chat_template.hpp"
+#include "text/dsv41_prompt.hpp"
 #include "text/tokenizer.hpp"
 #include "text/tool_parser.hpp"
 #include "serve/generation_service.hpp"
@@ -67,6 +68,37 @@ class TextFrontend : public ModelFrontend {
  private:
   const dgpp::text::Tokenizer* tok_;
   const dgpp::text::ChatTemplate* tpl_;
+  dgpp::text::ChatMarkers markers_;
+};
+
+// The DeepSeek-V4.1 frontend (docs/deepseek_v41_flash_plan.md G6): the
+// checkpoint ships no chat template — text/dsv41_prompt renders its
+// encoder's format; the markers come off its tokenizer (<think>,
+// </think>, the ｜DSML｜ tag token, the <｜User｜> / <｜Assistant｜> /
+// <｜System｜> turn markers as the prefix cache's boundaries).
+class Dsv41Frontend : public ModelFrontend {
+ public:
+  explicit Dsv41Frontend(const dgpp::text::Tokenizer* tok) : tok_(tok) {
+    if (tok_ == nullptr) throw std::invalid_argument("Dsv41Frontend: the tokenizer must be loaded");
+    markers_ = dgpp::text::ChatMarkers::from_tokenizer(*tok_);
+  }
+  std::vector<int64_t> encode_text(std::string_view text) const override { return tok_->encode(text); }
+  std::string decode_ids(const std::vector<int64_t>& ids) const override {
+    return tok_->decode(ids, /*skip_special_tokens=*/true);
+  }
+  bool template_reads(std::string_view name) const override { return dgpp::text::Dsv41Prompt::reads(name); }
+  std::string render_chat(const minijson::Value& globals) const override {
+    return dgpp::text::Dsv41Prompt::render(globals);
+  }
+  dgpp::text::ChatMarkers markers() const override { return markers_; }
+  std::vector<int64_t> boundary_token_ids() const override {
+    std::vector<int64_t> ids;
+    for (const dgpp::text::ChatMarker& m : markers_.role_markers) ids.push_back(m.id);
+    return ids;
+  }
+
+ private:
+  const dgpp::text::Tokenizer* tok_;
   dgpp::text::ChatMarkers markers_;
 };
 

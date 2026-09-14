@@ -183,9 +183,7 @@ class GrammarVocab {
   // The structural ids free text may never contain: the eight markers.
   const std::vector<int64_t>& marker_ids() const { return marker_ids_; }
   bool is_eos(int64_t id) const;
-  bool usable() const {
-    return markers_.tool_calls_available() && !eos_.empty();
-  }
+  bool usable() const { return markers_.tool_calls_available() && !eos_.empty(); }
   // The JSON grammar's per-vocabulary tables (M6 6h), built once on first
   // use — or eagerly here, so a serving rank pays the second or so at
   // boot rather than on the first json request. Copies share them.
@@ -244,6 +242,9 @@ class GrammarState {
   // For the record: the state's name.
   const char* state_name() const;
 
+  // The DSML tag's stand-in byte inside a target (never a token's text).
+  static constexpr char kDsmlSentinel = '\x01';
+
  private:
   enum class State {
     kThink,       // before </think>
@@ -267,6 +268,21 @@ class GrammarState {
     kQFreeKey,     // an open key set: free text through ">\n"
     kQValue,       // the typed value, then "\n</parameter>\n"
     kQClose,       // </tool_call>
+    // The DeepSeek-V4.1 DSML format: one marker id (the ｜DSML｜ tag token)
+    // inside text tags — "<" TAG " calls>\n" opens the block, each call
+    // is "<" TAG " invoke name=\"NAME\">\n" ... "</" TAG " invoke>\n" with
+    // parameters "<" TAG " parameter name=\"K\" string=\"true|false\">" V
+    // "</" TAG " parameter>\n", and "</" TAG " calls>" closes it; the turn
+    // ends then. The tag rides the text automaton as a sentinel byte the
+    // vocabulary never spells (match_ids offers the marker id there); at
+    // the top the tag is offered right after a "<" only.
+    kDCalls,          // " calls>\n" after the opening tag
+    kDInvoke,         // "<" TAG " invoke name=\"" NAME "\">\n"
+    kDParamOrClose,   // "<" TAG " parameter name=\"" (KEY "\" string=\"" when closed) | "</" TAG " invoke>\n"
+    kDFreeKey,        // an open key set: free text through "\" string=\""
+    kDFlag,           // "true\">" | "false\">" (the value's kind decides)
+    kDValue,          // the typed value, then "</" TAG " parameter>\n"
+    kDInvokeOrClose,  // another invoke | "</" TAG " calls>"
   };
   // The automaton over token texts: the targets still consistent with the
   // bytes emitted so far, and those bytes.
@@ -300,6 +316,7 @@ class GrammarState {
   // every EOS id (a call never ends the turn mid-block).
   void free_mask_in_call(TokenMask* out) const;
   bool qwen() const;
+  bool dsml() const;
   // The ids that continue `target` from `emitted`.
   std::vector<int64_t> literal_ids(const std::string& target, const std::string& emitted) const;
   void list_mask(TokenMask* out, const std::vector<int64_t>& ids) const;
@@ -320,7 +337,9 @@ class GrammarState {
   int tool_ = -1;          // the open call's tool (index into spec_.tools)
   TextMatch match_;        // kName / kKey / a kText value
   std::string key_;        // the open argument's key (kAfterKey / kValue)
-  std::string term_;       // kQValue (JSON): the terminator emitted so far
+  std::string term_;       // kQValue / kDValue (JSON, or a free DSML value past its "</" tag): the terminator emitted so far
+  bool top_lt_ = false;    // DSML top: the last committed text ended in "<" (the tag may follow)
+  bool flag_string_ = true;  // DSML: the open parameter's string="true" (a raw value) or "false" (JSON)
   std::vector<std::string> used_keys_;  // the open call's keys so far
   int arg_ = -1;           // the open argument (index into the tool's args)
   JsonMachine json_;       // kJson: the body's machine (inactive otherwise)

@@ -207,7 +207,7 @@ constexpr int kBusMaxGraphGens = 256;       // recorded nodes per graph
 // select one per replay (for example one scalar graph per request slot plus
 // the full row batch). Each variant owns a disjoint generation-cell set;
 // windows still execute strictly one at a time.
-constexpr int kBusMaxGraphVariants = 32;  // two per slot and two batch
+constexpr int kBusMaxGraphVariants = 64;  // two per slot and two per batch family, per verify depth (64 since 2026-09-14: six slots with four families at three scheduled depths need 60)
 // Replay windows armed at once (2026-09-06, the pipelined replay): the
 // engine arms the next replay's window while the previous replay is still
 // running, on a DIFFERENT variant (a variant's cells are in flight until

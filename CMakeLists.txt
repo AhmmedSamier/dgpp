@@ -149,6 +149,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/packq_gemv.cu
   src/kernels/scale_gemm.cu
   src/kernels/bf16_gemv.cu
+  src/kernels/mma_gemv.cu
   src/kernels/l2_prefetch.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
@@ -160,6 +161,9 @@ add_library(dgpp_kernels STATIC
   src/kernels/qwen_gr.cu
   src/kernels/qwen_moe.cu
   src/kernels/qwen_ple.cu
+  src/kernels/dsv41_engram.cu
+  src/kernels/dsv41_dspark.cu
+  src/kernels/csa2.cu
   src/kernels/qwen_mtp.cu
   src/kernels/qsa.cu
   src/kernels/glm4_attn.cu)
@@ -200,6 +204,7 @@ add_library(dgpp_text STATIC
   src/text/tokenizer.cpp
   src/text/unicode_normalize.cpp
   src/text/chat_template.cpp
+  src/text/dsv41_prompt.cpp
   src/text/tool_parser.cpp
   src/text/tool_grammar.cpp
   src/text/json_grammar.cpp)
@@ -276,6 +281,42 @@ add_library(dgpp_models_glm_dsa_loader STATIC
 target_include_directories(dgpp_models_glm_dsa_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_glm_dsa_loader PUBLIC dgpp_models_glm_dsa dgpp_loaders CUDA::cudart)
 dgpp_set_common(dgpp_models_glm_dsa_loader)
+
+# DeepSeek-V4.1-Flash (2026-09-13, docs/deepseek_v41_flash_plan.md): the
+# host-side model description (config, binding).
+add_library(dgpp_models_dsv41 STATIC
+  src/models/dsv41/config.cpp
+  src/models/dsv41/binding.cpp
+  src/models/dsv41/engram_tables.cpp)
+target_include_directories(dgpp_models_dsv41 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_dsv41 PUBLIC dgpp_loaders dgpp_common)
+dgpp_set_common(dgpp_models_dsv41)
+
+# The DeepSeek-V4.1-Flash loader (docs/deepseek_v41_flash_plan.md G3): the
+# ResidentLayerStream family, the fp8 / MXFP4 slice builders, the Engram
+# table mappings.
+add_library(dgpp_models_dsv41_loader STATIC
+  src/models/dsv41/loader.cpp)
+target_include_directories(dgpp_models_dsv41_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_dsv41_loader PUBLIC dgpp_models_dsv41 dgpp_loaders CUDA::cudart)
+dgpp_set_common(dgpp_models_dsv41_loader)
+
+# The CSA2 attention layer and its caches (plan G4).
+add_library(dgpp_models_csa2 STATIC
+  src/models/dsv41/csa2_state.cpp
+  src/models/dsv41/csa2_layer.cu)
+target_include_directories(dgpp_models_csa2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_csa2 PUBLIC dgpp_kernels dgpp_common CUDA::cudart)
+dgpp_set_common(dgpp_models_csa2)
+
+# The DeepSeek-V4.1 layer objects beyond CSA2 (plan G4/G5): the Engram
+# layer over the mmap'ed tables (and, later, the model).
+add_library(dgpp_models_dsv41_layers STATIC
+  src/models/dsv41/engram_layer.cpp
+  src/models/dsv41/model.cpp)
+target_include_directories(dgpp_models_dsv41_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_dsv41_layers PUBLIC dgpp_models_dsv41_loader dgpp_models_csa2 dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_dsv41_layers)
 
 # Qwen3.8-Flash-Next: the host-side model description.
 add_library(dgpp_models_qwen STATIC
@@ -365,6 +406,9 @@ dgpp_set_common(glm_bind_check)
 add_executable(glm_dsa_bind_check apps/glm_dsa_bind_check.cpp)
 target_link_libraries(glm_dsa_bind_check PRIVATE dgpp_models_glm_dsa dgpp_loaders)
 dgpp_set_common(glm_dsa_bind_check)
+add_executable(dsv41_bind_check apps/dsv41_bind_check.cpp)
+target_link_libraries(dsv41_bind_check PRIVATE dgpp_models_dsv41 dgpp_loaders)
+dgpp_set_common(dsv41_bind_check)
 
 # M5 d4 at real scale: the shard-parity gate (loader-vs-bind bitwise +
 # replicated digest + byte reconcile) as a deployment command — the same
@@ -477,6 +521,7 @@ if(DGPP_ENABLE_IBV)
   # layout split of 2026-09-06; dgpp_serve is the library it links).
   add_executable(dgpp_serve_app apps/dgpp_serve.cpp)
   target_link_libraries(dgpp_serve_app PRIVATE dgpp_models_glm_loader dgpp_models_qwen_layers dgpp_models_glm4_layers dgpp_models_glm_dsa_layers
+                                             dgpp_models_dsv41_layers
                                              dgpp_loaders dgpp_bus
                                              dgpp_serve CUDA::cudart
                                              Threads::Threads)
@@ -550,12 +595,15 @@ add_executable(unit_tests
   tests/unit/glm4_binding_test.cpp
   tests/unit/glm_dsa_config_test.cpp
   tests/unit/glm_dsa_binding_test.cpp
+  tests/unit/dsv41_config_test.cpp
+  tests/unit/dsv41_binding_test.cpp
   tests/unit/nvfp4_quant_test.cpp
+  tests/unit/verify_schedule_test.cpp
   src/core/trace.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm dgpp_models_qwen dgpp_models_glm4
-                                        dgpp_models_glm_dsa
+                                        dgpp_models_glm_dsa dgpp_models_dsv41
                                         dgpp_net dgpp_serve Threads::Threads)
 target_compile_definitions(unit_tests PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 dgpp_set_common(unit_tests)
@@ -573,6 +621,19 @@ add_test(NAME tokenizer_test
 set_tests_properties(tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME qwen_tokenizer_test
   COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/qwen_tokenizer_goldens.jsonl)
+add_test(NAME dsv41_tokenizer_test
+  COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/dsv41_tokenizer_goldens.jsonl)
+set_tests_properties(dsv41_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# The DeepSeek-V4.1 prompt renderer's differential gate (no Jinja: the
+# checkpoint's encoding.py is the golden source).
+add_executable(dsv41_prompt_test tests/host/dsv41_prompt_test.cpp)
+target_include_directories(dsv41_prompt_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dsv41_prompt_test PRIVATE dgpp_text dgpp_models_glm Threads::Threads)
+dgpp_set_common(dsv41_prompt_test)
+add_test(NAME dsv41_prompt_test
+  COMMAND dsv41_prompt_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/dsv41_prompt_goldens.jsonl)
+set_tests_properties(dsv41_prompt_test PROPERTIES SKIP_RETURN_CODE 2)
 set_tests_properties(qwen_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME glm4_tokenizer_test
   COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm4_tokenizer_goldens.jsonl)
@@ -727,6 +788,106 @@ target_link_libraries(qwen_ple_test PRIVATE dgpp_models_qwen dgpp_kernels CUDA::
 dgpp_set_common(qwen_ple_test)
 add_test(NAME qwen_ple_test COMMAND qwen_ple_test)
 
+# DeepSeek-V4.1-Flash Engram kernels (2026-09-13, docs/deepseek_v41_flash_plan.md G2).
+add_executable(csa2_test tests/cuda/csa2_test.cu)
+target_include_directories(csa2_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(csa2_test PRIVATE dgpp_models_dsa dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(csa2_test)
+add_test(NAME csa2_test COMMAND csa2_test)
+
+add_executable(csa2_layer_test tests/cuda/csa2_layer_test.cu)
+target_include_directories(csa2_layer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(csa2_layer_test PRIVATE dgpp_models_csa2 dgpp_kernels CUDA::cudart CUDA::cublasLt Threads::Threads)
+dgpp_set_common(csa2_layer_test)
+add_test(NAME csa2_layer_test COMMAND csa2_layer_test)
+
+add_executable(dsv41_engram_layer_test tests/cuda/dsv41_engram_layer_test.cpp)
+target_include_directories(dsv41_engram_layer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dsv41_engram_layer_test PRIVATE dgpp_models_dsv41_layers CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_engram_layer_test)
+add_test(NAME dsv41_engram_layer_test COMMAND dsv41_engram_layer_test)
+
+add_executable(dsv41_model_test tests/cuda/dsv41_model_test.cpp)
+target_include_directories(dsv41_model_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dsv41_model_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_model_test)
+add_test(NAME dsv41_model_test COMMAND dsv41_model_test)
+
+# The forward against the python reference dump (numpy: the repo's .venv
+# when present, else the system python).
+add_executable(dsv41_forward_test tests/cuda/dsv41_forward_test.cpp)
+target_include_directories(dsv41_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dsv41_forward_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_forward_test)
+set(DSV41_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/dsv41_forward_fixture)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python3)
+  set(DSV41_PYTHON ${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python3)
+else()
+  set(DSV41_PYTHON ${Python3_EXECUTABLE})
+endif()
+add_test(NAME dsv41_forward_fixture COMMAND dsv41_forward_test --write-fixture ${DSV41_FORWARD_FIXTURE})
+add_test(NAME dsv41_forward_smoke COMMAND dsv41_forward_test --smoke ${DSV41_FORWARD_FIXTURE})
+set_tests_properties(dsv41_forward_smoke PROPERTIES DEPENDS dsv41_forward_fixture)
+add_test(NAME dsv41_forward_generate
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
+          --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_pure_ref.dump --tokens 40)
+set_tests_properties(dsv41_forward_generate PROPERTIES DEPENDS dsv41_forward_fixture)
+# End to end (the drift of eight layers with fp4 caches: relaxed budgets),
+# writing the engine's layer states; then the teacher-forced dump (every
+# reference layer fed the engine's input to it) under the strict budgets.
+add_test(NAME dsv41_forward_test_e2e
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DSV41_DUMP_ENGINE_STATES=${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states.bin
+          $<TARGET_FILE:dsv41_forward_test> --checkpoint-dir ${DSV41_FORWARD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_pure_ref.dump --relaxed)
+set_tests_properties(dsv41_forward_test_e2e PROPERTIES DEPENDS dsv41_forward_generate)
+add_test(NAME dsv41_forward_generate_teacher
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
+          --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_ref.dump --tokens 40
+          --teacher ${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states.bin)
+set_tests_properties(dsv41_forward_generate_teacher PROPERTIES DEPENDS dsv41_forward_test_e2e)
+add_test(NAME dsv41_forward_test
+  COMMAND dsv41_forward_test --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_ref.dump)
+set_tests_properties(dsv41_forward_test PROPERTIES DEPENDS dsv41_forward_generate_teacher)
+# The bounded prefill (plan §1.8, the production mode): the same chain
+# against the reference's --prefill bounded walk (the decoder over the
+# last window rows), end to end then teacher-forced.
+add_test(NAME dsv41_forward_generate_bounded
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
+          --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_bounded_ref.dump --tokens 40
+          --prefill bounded)
+set_tests_properties(dsv41_forward_generate_bounded PROPERTIES DEPENDS dsv41_forward_fixture)
+add_test(NAME dsv41_forward_test_bounded_e2e
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DSV41_DUMP_ENGINE_STATES=${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states_bounded.bin
+          $<TARGET_FILE:dsv41_forward_test> --checkpoint-dir ${DSV41_FORWARD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_bounded_ref.dump --relaxed --bounded
+          --exact-dump ${CMAKE_CURRENT_BINARY_DIR}/dsv41_pure_ref.dump
+          --exact-states ${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states.bin)
+set_tests_properties(dsv41_forward_test_bounded_e2e PROPERTIES DEPENDS "dsv41_forward_generate_bounded;dsv41_forward_test_e2e")
+add_test(NAME dsv41_forward_generate_teacher_bounded
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
+          --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_bounded_ref.dump --tokens 40
+          --prefill bounded --teacher ${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states_bounded.bin)
+set_tests_properties(dsv41_forward_generate_teacher_bounded PROPERTIES DEPENDS dsv41_forward_test_bounded_e2e)
+add_test(NAME dsv41_forward_test_bounded
+  COMMAND dsv41_forward_test --checkpoint-dir ${DSV41_FORWARD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_bounded_ref.dump --bounded)
+set_tests_properties(dsv41_forward_test_bounded PROPERTIES DEPENDS dsv41_forward_generate_teacher_bounded)
+
+# The DeepSeek-V4.1 session surface: decode vs the re-forward, interleaved
+# slots, the chunked prefill, the prefix snapshots, the eager DSpark speculator.
+add_executable(dsv41_decode_test tests/cuda/dsv41_decode_test.cpp)
+target_include_directories(dsv41_decode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dsv41_decode_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_decode_test)
+add_test(NAME dsv41_decode_test COMMAND dsv41_decode_test --fixture ${DSV41_FORWARD_FIXTURE})
+set_tests_properties(dsv41_decode_test PROPERTIES DEPENDS dsv41_forward_fixture)
+
+add_executable(dsv41_engram_test tests/cuda/dsv41_engram_test.cu)
+target_include_directories(dsv41_engram_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dsv41_engram_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_engram_test)
+add_test(NAME dsv41_engram_test COMMAND dsv41_engram_test)
+
 add_executable(qwen_moe_test tests/cuda/qwen_moe_test.cu)
 target_include_directories(qwen_moe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
 target_link_libraries(qwen_moe_test PRIVATE dgpp_models_qwen_layers dgpp_models_kda CUDA::cudart Threads::Threads)
@@ -855,6 +1016,38 @@ add_executable(glm_dsa_load_check apps/glm_dsa_load_check.cpp)
 target_link_libraries(glm_dsa_load_check PRIVATE dgpp_models_glm_dsa_loader dgpp_loaders CUDA::cudart Threads::Threads)
 dgpp_set_common(glm_dsa_load_check)
 
+# The DeepSeek-V4.1-Flash loader on its synthetic fixture (worlds 1/2/4
+# byte-exact, the globals, the Engram table mappings, the image round trip).
+add_executable(dsv41_loader_test tests/cuda/dsv41_loader_test.cpp)
+target_include_directories(dsv41_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dsv41_loader_test PRIVATE dgpp_models_dsv41_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_loader_test)
+add_test(NAME dsv41_loader_test COMMAND dsv41_loader_test)
+
+add_executable(dsv41_load_check apps/dsv41_load_check.cpp)
+target_link_libraries(dsv41_load_check PRIVATE dgpp_models_dsv41_loader dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_load_check)
+# The per-layer dump on the real checkpoint for the torch cross-check.
+add_executable(dsv41_forward_check apps/dsv41_forward_check.cpp)
+target_link_libraries(dsv41_forward_check PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_forward_check)
+
+# The DeepSeek-V4.1 TP forwards: loopback worlds 2 and 4 vs world 1 (ports 29958/29959).
+add_executable(dsv41_tp_test tests/cuda/dsv41_tp_test.cpp)
+target_include_directories(dsv41_tp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dsv41_tp_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_tp_test)
+add_test(NAME dsv41_tp_test COMMAND dsv41_tp_test)
+
+# The DeepSeek-V4.1 decode engines: the graph engine's scalar and row-batched
+# replays (the Engram host node inside the walk) against the eager engine
+# over a loopback world of 2 (ports 29961-29964: plain, the DSpark block, depth 2, the scheduled depth).
+add_executable(dsv41_engine_test tests/cuda/dsv41_engine_test.cpp)
+target_include_directories(dsv41_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dsv41_engine_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(dsv41_engine_test)
+add_test(NAME dsv41_engine_test COMMAND dsv41_engine_test)
+
 add_executable(glm4_forward_check apps/glm4_forward_check.cpp)
 target_link_libraries(glm4_forward_check PRIVATE dgpp_models_glm4_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(glm4_forward_check)
@@ -898,6 +1091,11 @@ dgpp_set_common(bf16_gemv_test)
 add_test(NAME bf16_gemv_test COMMAND bf16_gemv_test)
 set_tests_properties(bf16_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
 
+add_executable(mma_gemv_test tests/cuda/mma_gemv_test.cu)
+target_include_directories(mma_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mma_gemv_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(mma_gemv_test)
+add_test(NAME mma_gemv_test COMMAND mma_gemv_test)
 add_executable(fp4_gemv_test tests/cuda/fp4_gemv_test.cu tests/cuda/fp4_gemv_checkpoint.cpp)
 target_include_directories(fp4_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(fp4_gemv_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cudart)
@@ -1102,8 +1300,8 @@ set_tests_properties(unit unit_tests http_server_test serve_test fabric_serve_te
   PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
   site_env_test script_reports_test portability_test setup_tools_test launcher_test PROPERTIES LABELS "host;python")
-set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test
-  chat_template_test qwen_chat_template_test glm4_chat_template_test
+set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv41_tokenizer_test
+  chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test
   PROPERTIES LABELS "host;checkpoint")
 foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
     glm4_forward_generate glm_forward_fixture glm_forward_generate dsa_dump_generate kda_dump_generate)
@@ -1111,7 +1309,7 @@ foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
 endforeach()
 if(DGPP_ENABLE_IBV)
   set_tests_properties(bus_test bus_selftest glm_tp_test glm4_tp_test glm4_engine_test
-    qwen_tp_test qwen_engine_test PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
+    qwen_tp_test qwen_engine_test dsv41_tp_test dsv41_engine_test PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
   set_tests_properties(nic_regress_selftest PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
 endif()
 set_tests_properties(roster_selftest PROPERTIES LABELS "host")

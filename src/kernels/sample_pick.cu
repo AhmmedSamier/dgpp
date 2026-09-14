@@ -1,6 +1,7 @@
 #include "kernels/sample_pick.hpp"
 
 #include <cmath>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -1225,6 +1226,25 @@ __device__ inline int lower_bound_split(const uint32_t* hi, const uint32_t* lo,
   return l;
 }
 
+// The verdict kernel's dynamic shared layout (bytes): the rows' fold
+// masses (double), the split composite keys of one row (hi, lo), the rows'
+// merged logits, ids and selector exps, the proposals' masses.
+constexpr size_t kVerdictSmemMass = 0;
+constexpr size_t kVerdictSmemCHi =
+    kVerdictSmemMass + sizeof(double) * kSampleVerdictRows * kSampleMaxCandidates;
+constexpr size_t kVerdictSmemCLo =
+    kVerdictSmemCHi + sizeof(uint32_t) * kPickMaxWorld * kSampleMaxCandidates;
+constexpr size_t kVerdictSmemLogit =
+    kVerdictSmemCLo + sizeof(uint32_t) * kPickMaxWorld * kSampleMaxCandidates;
+constexpr size_t kVerdictSmemId =
+    kVerdictSmemLogit + sizeof(float) * kSampleVerdictRows * kSampleMaxCandidates;
+constexpr size_t kVerdictSmemExpSrc =
+    kVerdictSmemId + sizeof(int32_t) * kSampleVerdictRows * kSampleMaxCandidates;
+constexpr size_t kVerdictSmemQMass =
+    kVerdictSmemExpSrc + sizeof(float) * kSampleVerdictRows * kSampleMaxCandidates;
+constexpr size_t kVerdictDynamicSmemBytes =
+    kVerdictSmemQMass + sizeof(float) * kSampleProposalSlots * kSampleMaxCandidates;
+
 __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
     const uint16_t* __restrict__ table, int rows, int world, int candidates,
     int vocab_size, SampleSpec* __restrict__ specs, int rows_per_request,
@@ -1243,24 +1263,34 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   // prefix and its masses kept for the decision (2026-09-06: the T-row
   // chain; the arithmetic per row is the two-row kernel's).
   constexpr int R = kSampleVerdictRows;
-  __shared__ uint32_t c_hi[kPickMaxWorld * kSampleMaxCandidates];
-  __shared__ uint32_t c_lo[kPickMaxWorld * kSampleMaxCandidates];
+  constexpr int kQ = kSampleProposalSlots;
+  // The per-row tables live in dynamic shared memory (six rows of them
+  // pass the 48 KiB static bound: kVerdictDynamicSmemBytes, set on the
+  // kernel once by device_sample_verdict_prepare); the doubles first for
+  // their alignment. The small per-row scalars stay static.
+  extern __shared__ __align__(16) unsigned char verdict_smem[];
+  double (*mass)[kSampleMaxCandidates] =
+      reinterpret_cast<double (*)[kSampleMaxCandidates]>(verdict_smem + kVerdictSmemMass);
+  uint32_t* c_hi = reinterpret_cast<uint32_t*>(verdict_smem + kVerdictSmemCHi);
+  uint32_t* c_lo = reinterpret_cast<uint32_t*>(verdict_smem + kVerdictSmemCLo);
+  float (*m_logit)[kSampleMaxCandidates] =
+      reinterpret_cast<float (*)[kSampleMaxCandidates]>(verdict_smem + kVerdictSmemLogit);
+  int32_t (*m_id)[kSampleMaxCandidates] =
+      reinterpret_cast<int32_t (*)[kSampleMaxCandidates]>(verdict_smem + kVerdictSmemId);
+  float (*expsrc)[kSampleMaxCandidates] =
+      reinterpret_cast<float (*)[kSampleMaxCandidates]>(verdict_smem + kVerdictSmemExpSrc);
+  // The draft rows' proposals, gathered onto each row's merged candidate
+  // list before the scalar decision: row t tests the draft fed
+  // to row t + 1 against proposal slot t (the chained drafts of depth >= 2
+  // carry theirs since the evening).
+  float (*qmass_s)[kSampleMaxCandidates] =
+      reinterpret_cast<float (*)[kSampleMaxCandidates]>(verdict_smem + kVerdictSmemQMass);
   __shared__ double lses[R][kPickMaxWorld];
-  __shared__ float m_logit[R][kSampleMaxCandidates];
-  __shared__ int32_t m_id[R][kSampleMaxCandidates];
-  __shared__ double mass[R][kSampleMaxCandidates];
-  __shared__ float expsrc[R][kSampleMaxCandidates];
   __shared__ float exps[kSampleMaxCandidates];
   __shared__ double prefix[kSampleMaxCandidates];
   __shared__ double lse_terms[R][kPickMaxWorld];
   __shared__ int total[R];
   __shared__ double Z[R];
-  // The draft rows' proposals, gathered onto each row's merged candidate
-  // list before the scalar decision: row t tests the draft fed
-  // to row t + 1 against proposal slot t (the chained drafts of depth >= 2
-  // carry theirs since the evening).
-  constexpr int kQ = kSampleProposalSlots;
-  __shared__ float qmass_s[kQ][kSampleMaxCandidates];
   __shared__ double q_draft_s[kQ];
   __shared__ int q_live_s[kQ];
 
@@ -1315,7 +1345,7 @@ __global__ void __launch_bounds__(kVerdictThreads) sample_verdict_kernel(
   //    is its index in its own list plus the count of smaller keys in every
   //    other list; the ids are disjoint across ranks, so the ranks are a
   //    permutation and the first `held` land.
-  int held[R] = {0, 0, 0, 0};
+  int held[R] = {};
   for (int t = 0; t < rows_per_request; ++t) {
     const uint16_t* row_base =
         table + static_cast<size_t>(row0 + t) * world * group;
@@ -1748,6 +1778,18 @@ void device_sample_local(float* logits, int rows, int vocab_count,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+void device_sample_verdict_prepare() {
+  // Once per process: the kernel's dynamic shared memory above the 48 KiB
+  // default (the six-row tables). A stream capture records the launch as
+  // any other; the attribute is a function property, set here before the
+  // first launch and by the picker's constructor before any capture.
+  static std::once_flag once;
+  std::call_once(once, [] {
+    DGPP_CUDA_OK(cudaFuncSetAttribute(sample_verdict_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                      static_cast<int>(kVerdictDynamicSmemBytes)));
+  });
+}
+
 void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
                         int candidates, int vocab_size, SampleSpec* specs,
                         int requests, int rows_per_request, const int64_t* fed,
@@ -1776,7 +1818,8 @@ void device_sample_verdict(const uint16_t* table, int rows, int world, int rank,
     throw std::invalid_argument("glm_sample_verdict: null argument");
   if (positions != nullptr && position_stride < rows_per_request)
     throw std::invalid_argument("glm_sample_verdict: position stride");
-  sample_verdict_kernel<<<requests, kVerdictThreads, 0, stream>>>(
+  device_sample_verdict_prepare();
+  sample_verdict_kernel<<<requests, kVerdictThreads, kVerdictDynamicSmemBytes, stream>>>(
       table, rows, world, candidates, vocab_size, specs, rows_per_request,
       fed, positions, position_stride, counts, masks, mask_stride, verdicts,
       device_verdicts, outcomes, proposals_in, proposals_out,
@@ -1807,6 +1850,38 @@ void device_sample_count_tokens(int32_t* counts_row, const int64_t* ids, int n,
   if (n <= 0) return;
   count_tokens_kernel<<<(n + 255) / 256, 256, 0, stream>>>(counts_row, ids, n,
                                                            vocab_size);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+
+namespace {
+__global__ void draft_confidence_kernel(const SampleOutcome* __restrict__ outcomes,
+                                        int slot_stride, int request, int depth,
+                                        float* __restrict__ dst) {
+  const int c = static_cast<int>(threadIdx.x);
+  if (c >= depth) return;
+  // The outcome lives in pinned memory the verdict kernel wrote earlier on
+  // this stream: a system-scope load reads what it stored.
+  const float* lp = &outcomes[(1 + c) * slot_stride + request].logprob[0];
+  float v;
+  asm volatile("ld.relaxed.sys.global.f32 %0, [%1];" : "=f"(v) : "l"(lp) : "memory");
+  // logit(p) = lp - log(1 - exp(lp)), bounded to [-16, 16] (p in ~[1e-7, 1 - 1e-7]).
+  const float p = __expf(fminf(v, 0.0f));
+  const float one_minus = fmaxf(1.0f - p, 1e-7f);
+  float logit = fminf(v, 0.0f) - __logf(one_minus);
+  logit = fminf(fmaxf(logit, -16.0f), 16.0f);
+  dst[c] = logit;
+}
+}  // namespace
+
+void device_sample_draft_confidence(const SampleOutcome* outcomes,
+                                    int slot_stride, int request, int depth,
+                                    float* dst, cudaStream_t stream) {
+  if (outcomes == nullptr || dst == nullptr || slot_stride < 1 || request < 0 ||
+      depth < 1 || depth > 32)
+    throw std::invalid_argument("device_sample_draft_confidence: null argument/shape");
+  draft_confidence_kernel<<<1, 32, 0, stream>>>(outcomes, slot_stride, request,
+                                                depth, dst);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

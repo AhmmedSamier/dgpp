@@ -13,6 +13,7 @@
 
 #include "common/cuda_check.hpp"
 #include "kernels/bf16_gemv.hpp"
+#include "kernels/mma_gemv.hpp"
 
 namespace dgpp {
 
@@ -37,6 +38,7 @@ struct PlanKey {
 
 struct CublasLtGemm::Impl {
   int decode_rows = kGemmDecodeRowsDefault;  // the decode lowering bound (set_decode_rows)
+  bool decode_mma = false;                   // the lowering's tensor-core form (set_decode_mma)
   cublasLtHandle_t lt{};
   float* dev_unit_scale{};  // fp8 tensor-wise scale == 1.0f
 
@@ -153,6 +155,8 @@ void CublasLtGemm::set_decode_rows(int rows) {
 }
 
 int CublasLtGemm::decode_rows() const { return impl_->decode_rows; }
+void CublasLtGemm::set_decode_mma(bool on) { impl_->decode_mma = on; }
+bool CublasLtGemm::decode_mma() const { return impl_->decode_mma; }
 
 void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                           int m, int n, int k, DType io_dtype, GemmOut out_dtype,
@@ -176,6 +180,16 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
     const size_t out_elem = out_dtype == GemmOut::F32 ? sizeof(float)
                                                        : sizeof(uint16_t);
     auto* y = static_cast<uint8_t*>(out);
+    if (impl_->decode_mma && m <= kMmaGemvMaxRows &&
+        mma_gemv_shape_ok(w, x, act_row_stride, m, k)) {
+      if (out_dtype == GemmOut::F32)
+        launch_mma_gemv_bf16_f32(x, act_row_stride, w, reinterpret_cast<float*>(y), m, n, k,
+                                 static_cast<size_t>(n), stream);
+      else
+        launch_mma_gemv_bf16_bf16(x, act_row_stride, w, reinterpret_cast<uint16_t*>(y), m, n, k,
+                                  static_cast<size_t>(n), stream);
+      return;
+    }
     for (int row0 = 0; row0 < m;) {
       int rows = std::min(4, m - row0);
       while (!bf16_gemv_accepts(weight, rows, k)) --rows;

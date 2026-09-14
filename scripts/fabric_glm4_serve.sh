@@ -32,7 +32,7 @@ HOST=$(dgpp_client_host) || exit 1
 PORT=$(dgpp_http_port) || exit 1
 cd "$ROOT" || exit 1
 up=(python3 scripts/dgpp-cluster up --config "$CONFIG" --log-dir "$OUT/world")
-[[ -n "$KNOBS" ]] && up+=(--knobs "$KNOBS")
+[[ -n "$KNOBS" ]] && up+=("--knobs=$KNOBS")  # the = form: a knob that starts with -- is a value, not a flag
 "${up[@]}" > "$OUT/up.log" 2>&1 || { echo "world did not come up (see $OUT/up.log)"; tail -20 "$OUT/up.log"; exit 1; }
 echo "== world up ($CONFIG)"; grep -h 'model constructed\|graph variants\|memory plan total\|listening' "$OUT/world/serve_r0.log" | sed 's/^[0-9-]* [0-9:.]* //' | cut -c1-200
 rc=0

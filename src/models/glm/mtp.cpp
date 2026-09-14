@@ -490,7 +490,7 @@ void GlmDiagnosticModel::session_graph_capture_next_tokens(
     throw std::logic_error(
         "session_graph_capture_next_tokens: needs a device-token capture "
         "with the draft in the graph");
-  if (decode_rows_ != 2)
+  if ((graph_feed_rows_ > 0 ? graph_feed_rows_ : decode_rows_) != 2)
     throw std::logic_error(
         "session_graph_capture_next_tokens: the token feed is [next, draft] "
         "(T = 2)");
@@ -508,8 +508,10 @@ void GlmDiagnosticModel::session_graph_capture_next_tokens(
     throw std::logic_error(
         "session_graph_capture_next_tokens: needs a device-token capture "
         "with the draft in the graph");
+  // The feed carries every draft of the block whatever the verify's rows.
+  const int feed_rows = graph_feed_rows_ > 0 ? graph_feed_rows_ : decode_rows_;
   if (draft_verdicts.empty() ||
-      draft_verdicts.size() != static_cast<size_t>(decode_rows_ - 1) ||
+      draft_verdicts.size() != static_cast<size_t>(feed_rows - 1) ||
       draft_verdicts.size() > static_cast<size_t>(kSpecMaxDrafts))
     throw std::logic_error(
         "session_graph_capture_next_tokens: the token feed is [next, one "

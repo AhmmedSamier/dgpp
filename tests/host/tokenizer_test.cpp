@@ -66,6 +66,7 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
   if (env_model && *env_model) model_id = env_model;
   if (model_id.empty()) model_id = "unsloth/GLM-5.3-Flash-FP8";
   const bool qwen = model_id.find("Qwen") != std::string::npos;
+  const bool dsv41 = model_id.find("DeepSeek-V4") != std::string::npos;
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
   if (snap.empty()) {
@@ -79,7 +80,14 @@ DGPP_TEST(glm_tokenizer_differential_goldens) {
   const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(tok_path);
 
   // Hand-carried anchors: the fabric-run prompt and first generations.
-  if (!qwen) {
+  if (dsv41) {
+    // The DeepSeek-V4.1 corpus's first cases (HF tokenizers 0.23.2 on the
+    // snapshot, 2026-09-13): the three-stage pre-tokenizer's plain words.
+    require(tok.encode("The capital of France is") == std::vector<int64_t>{671, 6102, 294, 8760, 344},
+            "deepseek anchor prompt does not encode to the recorded ids");
+    require(tok.encode(" Paris") == std::vector<int64_t>{11111}, "deepseek anchor ' Paris' != id 11111");
+    require(tok.decode(std::vector<int64_t>{11111, 16}, false) == " Paris.", "deepseek anchor does not decode to ' Paris.'");
+  } else if (!qwen) {
     const std::vector<int64_t> got =
         tok.encode("The capital of France is");
     const std::vector<int64_t> want{785, 6722, 315, 9621, 374};

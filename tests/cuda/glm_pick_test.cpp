@@ -2078,6 +2078,218 @@ DGPP_TEST(sample_pick_t3_matches_spec_oracle_over_simulated_world) {
 }
 
 
+// The full verify block: kSampleVerdictRows rows per request (the DSpark
+// block of five drafts, 2026-09-14 — the kernel's per-row tables in dynamic
+// shared memory) against the host's speculative chain — every draft row's
+// accept test in turn, the last row sampled plainly — with the greedy
+// judge, every reject row, the fallbacks and the accept-all outcome
+// exercised over the sweep; bitwise on every rank.
+DGPP_TEST(sample_pick_full_block_matches_spec_oracle_over_simulated_world) {
+  Rng rng(0x51d6);
+  constexpr int kWorld = 4;
+  constexpr int count = 96;
+  constexpr int vocab = kWorld * count;
+  constexpr int candidates = 32;
+  constexpr int requests = 2;
+  constexpr int rpr = dgpp::kSampleVerdictRows;  // 6: the fed row + five drafts
+  static_assert(requests * rpr <= dgpp::kPickMaxRows, "the block fits the pick's row bound");
+  int accepts_all = 0, fallbacks = 0, greedy = 0;
+  int rejects[rpr] = {};
+  for (int trial = 0; trial < 40; ++trial) {
+    std::vector<float> full(static_cast<size_t>(requests * rpr) * vocab);
+    // Request q's pattern this trial: 0 greedy (every draft the argmax);
+    // 1 every draft likely and one flat row (the fallback there);
+    // 2 a random draft at row j = trial % (rpr - 1) (the reject at j);
+    // 3 every draft likely, no flat row (the accept-all path to the
+    // sampled last row).
+    const auto pattern_of = [&](int q) { return (trial + q) % 4; };
+    const int reject_row = trial % (rpr - 1);
+    const int flat_row = (trial / (rpr - 1)) % rpr;
+    const auto fill = [&](int row, bool flat) {
+      float* v = full.data() + static_cast<size_t>(row) * vocab;
+      for (int i = 0; i < vocab; ++i) {
+        const uint64_t r = rng.next();
+        v[i] = flat ? static_cast<float>(r % 3) * 0.01f
+                    : static_cast<float>((r >> 8) % 41) * 0.25f - 5.0f;
+      }
+      if (!flat) {
+        v[static_cast<size_t>(rng.next() % vocab)] = 12.0f;
+        v[static_cast<size_t>(rng.next() % vocab)] = 9.0f;
+      }
+    };
+    for (int q = 0; q < requests; ++q)
+      for (int t = 0; t < rpr; ++t) fill(rpr * q + t, pattern_of(q) == 1 && t == flat_row);
+    std::vector<dgpp::SampleSpec> specs(requests);
+    for (int q = 0; q < requests; ++q) {
+      if (pattern_of(q) == 0) {
+        specs[q].temperature = 0.0f;
+        continue;
+      }
+      specs[q].temperature = 1.0f;
+      specs[q].top_p = 0.95f;
+      specs[q].presence_penalty = 0.1f;
+      specs[q].seed = 0x6000 + q + 37 * trial;
+      specs[q].counter = 6;
+    }
+    std::vector<int32_t> counts(static_cast<size_t>(requests) * vocab, 0);
+    std::vector<int64_t> fed(requests * rpr), positions(requests);
+    for (int q = 0; q < requests; ++q) {
+      positions[q] = 5 + q;
+      fed[rpr * q] = static_cast<int64_t>(rng.next() % vocab);
+      for (int t = 1; t < rpr; ++t) {
+        const Candidate argmax = dgpp::sample::local_max(
+            full.data() + static_cast<size_t>(rpr * q + t - 1) * vocab, vocab, 0);
+        const bool random = pattern_of(q) == 2 && t - 1 == reject_row;
+        fed[rpr * q + t] = random ? static_cast<int64_t>(rng.next() % vocab) : argmax.id;
+      }
+      for (int j = 0; j < 3; ++j)
+        counts[static_cast<size_t>(q) * vocab + rng.next() % vocab] += 1;
+    }
+    const uint64_t carry = 0x6a6a6a6a6a6aull;
+    const SampleWorldRun run = run_sample_world(
+        full, requests, kWorld, count, specs, counts, fed, positions,
+        candidates, carry, rpr);
+
+    for (int q = 0; q < requests; ++q) {
+      const float* row[rpr];
+      for (int t = 0; t < rpr; ++t)
+        row[t] = full.data() + static_cast<size_t>(rpr * q + t) * vocab;
+      int32_t draft[rpr];  // draft[t]: the token fed to row t (t >= 1)
+      for (int t = 1; t < rpr; ++t) draft[t] = static_cast<int32_t>(fed[rpr * q + t]);
+      if (specs[q].temperature <= 0.0f) {
+        ++greedy;
+        int32_t w[rpr];
+        for (int t = 0; t < rpr; ++t) w[t] = dgpp::sample::local_max(row[t], vocab, 0).id;
+        int accepted = 1;
+        while (accepted < rpr && w[accepted - 1] == fed[rpr * q + accepted]) ++accepted;
+        for (int k = 0; k < kWorld; ++k) {
+          const PickVerdict& v = run.verdicts[k][q];
+          bool same = v.rows == rpr && v.accepted == accepted && v.next == w[accepted - 1];
+          for (int t = 0; t < rpr; ++t) same = same && v.winners[t] == w[t];
+          require(same, "greedy full-block request: the greedy judge");
+        }
+        continue;
+      }
+      const dgpp::sample::Params p = params_of(specs[q]);
+      std::vector<int32_t> ctx[rpr];
+      ctx[0].assign(counts.begin() + static_cast<long>(q) * vocab,
+                    counts.begin() + static_cast<long>(q + 1) * vocab);
+      ctx[0][static_cast<size_t>(fed[rpr * q])] += 1;
+      for (int t = 1; t < rpr; ++t) {
+        ctx[t] = ctx[t - 1];
+        ctx[t][static_cast<size_t>(draft[t])] += 1;
+      }
+      const auto as_map = [&](const std::vector<int32_t>& c) {
+        std::unordered_map<int32_t, int32_t> m;
+        for (int v = 0; v < vocab; ++v)
+          if (c[static_cast<size_t>(v)]) m[v] = c[static_cast<size_t>(v)];
+        return m;
+      };
+      std::vector<Candidate> merged[rpr];
+      double Z[rpr] = {};
+      for (int t = 0; t < rpr; ++t) {
+        std::vector<float> adj(row[t], row[t] + vocab);
+        dgpp::sample::apply_penalties(adj.data(), vocab, 0, p, as_map(ctx[t]));
+        std::vector<std::vector<Candidate>> shards;
+        std::vector<double> lses;
+        for (int k = 0; k < kWorld; ++k) {
+          shards.push_back(dgpp::sample::local_topk(adj.data() + k * count, count,
+                                                        k * count, candidates));
+          lses.push_back(dgpp::sample::slice_logsumexp(adj.data() + k * count,
+                                                            count, p.temperature));
+        }
+        Z[t] = dgpp::sample::merge_logsumexp(lses);
+        merged[t] = dgpp::sample::merge_topk(shards, candidates);
+      }
+      dgpp::sample::Rng host{specs[q].seed, specs[q].counter};
+      // The oracle's chain: row t tests draft[t + 1]; the last row samples.
+      int want_accepted = 1, want_fallback_row = -1, reached = 1;
+      int32_t want_w[rpr];
+      for (int t = 0; t < rpr; ++t) want_w[t] = -1;
+      std::vector<int32_t> want_counts = ctx[0];
+      bool row0_logprob_known = false;
+      float row0_logprob = 0.0f;
+      for (int t = 0; t < rpr; ++t) {
+        if (t + 1 < rpr) {
+          const dgpp::sample::SpecPrefixDecision d =
+              dgpp::sample::spec_accept_from_prefix(merged[t], vocab, Z[t], draft[t + 1], p, host);
+          if (t == 0 && d.resolved) {
+            row0_logprob_known = true;
+            row0_logprob = d.result.logprob;
+          }
+          if (!d.resolved) {
+            ++fallbacks;
+            want_fallback_row = t;
+            want_w[t] = merged[t][0].id;
+            break;
+          }
+          if (!d.accepted) {
+            ++rejects[t];
+            want_w[t] = d.result.token;
+            break;
+          }
+          want_accepted = t + 2;
+          want_w[t] = draft[t + 1];
+          want_counts = ctx[t + 1];
+          reached = t + 2;
+        } else {
+          const dgpp::sample::PrefixDecision d =
+              dgpp::sample::sample_from_prefix(merged[t], vocab, Z[t], p, host);
+          if (d.resolved) {
+            ++accepts_all;
+            want_w[t] = d.result.token;
+          } else {
+            ++fallbacks;
+            want_fallback_row = t;
+            want_w[t] = merged[t][0].id;
+          }
+        }
+      }
+      const int32_t want_next = want_w[want_accepted - 1];
+      for (int k = 0; k < kWorld; ++k) {
+        const PickVerdict& v = run.verdicts[k][q];
+        const dgpp::SampleOutcome& o = run.outcomes[k][q];
+        std::string got = std::to_string(v.accepted) + " [";
+        std::string want = std::to_string(want_accepted) + " [";
+        bool same = v.rows == rpr && v.accepted == want_accepted && v.next == want_next;
+        for (int t = 0; t < want_accepted; ++t) {
+          got += (t ? "," : "") + std::to_string(v.winners[t]);
+          want += (t ? "," : "") + std::to_string(want_w[t]);
+          same = same && v.winners[t] == want_w[t];
+        }
+        require(same, "full-block verdict differs from the speculative oracle (trial " +
+                          std::to_string(trial) + " request " + std::to_string(q) +
+                          ": got " + got + "] next " + std::to_string(v.next) +
+                          ", want " + want + "] next " + std::to_string(want_next) + ")");
+        require(o.sampled == 1 && o.fallback_row == want_fallback_row &&
+                    o.fallback == (want_fallback_row >= 0 ? 1 : 0) &&
+                    o.accepted_draft == (want_accepted >= 2 ? 1 : 0),
+                "full-block outcome flags (trial " + std::to_string(trial) + " request " +
+                    std::to_string(q) + ")");
+        require(o.counter == host.counter, "full-block counter differs from the oracle");
+        for (int t = 0; t < reached; ++t)
+          require(bits_equal(o.normalizer[t], Z[t]), "row-" + std::to_string(t) + " normalizer");
+        if (row0_logprob_known) require(bits_equal(o.logprob[0], row0_logprob), "row-0 logprob");
+        for (int vtok = 0; vtok < vocab; ++vtok)
+          require(run.counts_after[k][static_cast<size_t>(q) * vocab + vtok] ==
+                      want_counts[static_cast<size_t>(vtok)],
+                  "count table after the full-block verdict differs");
+        require(v.digest_mismatch == 0 && run.carry_out[k] == v.digest, "digest chain");
+      }
+    }
+  }
+  std::string reject_text;
+  bool every_reject_row = true;
+  for (int t = 0; t + 1 < rpr; ++t) {
+    reject_text += (t ? "/" : "") + std::to_string(rejects[t]);
+    if (rejects[t] == 0) every_reject_row = false;
+  }
+  require(greedy > 0 && accepts_all > 0 && fallbacks > 0 && every_reject_row,
+          "the sweep must exercise every outcome (greedy " + std::to_string(greedy) +
+              ", accept-all " + std::to_string(accepts_all) + ", rejects per row " + reject_text +
+              ", fallbacks " + std::to_string(fallbacks) + ")");
+}
+
 // Logprobs on the device: a greedy request that reports takes the full path
 // at temperature 1 (penalties applied) and reports the argmax under the raw
 // normalizer with its top-N — sample::greedy_from_prefix — and a

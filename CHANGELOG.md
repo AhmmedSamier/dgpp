@@ -6,6 +6,104 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Streaming tensor-core decode GEMM for DeepSeek-V4.1-Flash** (2026-09-14,
+  `kernels/mma_gemv.{hpp,cu}`; default on for this family, `DGPP_DSV41_DENSE_GEMV=1`
+  restores the chunks): the dense fp8 projections, the engram wkv, the
+  draft's `main_proj` and the bf16 lm head at 1–32 decode rows run one
+  launch that streams every weight once through `mma.sync` (the 4-row GEMV
+  chunks re-read the weights per chunk: 82 ms of a 252 ms six-slot step).
+  The dequantized values are exact for the e8m0 scales, so only the fp32
+  order differs from the chunks (transcripts reorder, accuracy held), and a
+  row's chain never depends on the rows sharing its launch (a batched row
+  stays bitwise the row alone). Cold, fp8 [5120 × 5120]: 132/133/136/142 µs
+  at 1/6/16/30 rows against 118/205/419/764; the prefill's rows take the
+  same kernel in 64- and 128-row forms and 128-row groups above (192 / 288
+  / 567 / 4,558 µs at 64 / 128 / 256 / 2,048 rows against the chunks' 1,507
+  / 2,978 and the tile kernel's 3,533 / 23,360). Fabric: docs/measurements.md.
+  The fixture gates that certify selection flips now read the coded index
+  query of both paths (`Dsv41Model::IndexLogits::q_codes`): a flip whose
+  e4m3 codes differ between the paths is the coding's discontinuity,
+  whatever the reference gap.
+- **The batched replay's verify depth is the batch's own Dinkelbach rule**
+  (2026-09-14, `scheduled_verify_depth_batch`): one more draft position
+  costs a verify row per live slot and yields the sum of the slots' prefix
+  survivals, so the batch verifies position i while the MEAN survival over
+  its slots beats λ·row — where the earlier rule took the deepest slot's
+  own depth, verifying rows for every slot that one confident slot alone
+  justified. Exact at any depth (each slot commits its greedy prefix);
+  the test hook still forces per slot. Measured on the six-slot world:
+  docs/measurements.md.
+- **MXFP4 form of the fp4 tensor-core expert kernel** (2026-09-14,
+  `moe_grouped_mma_fp4_ldm_kernel<OutT, kGroup>`, `fp4_group` on the grouped
+  launchers): DeepSeek-V4.1-Flash's routed experts (e2m1 + e8m0 per 32, no
+  global) prefill through the ldmatrix tile kernel instead of the 4-row
+  GEMV core (the weights re-read per 4 rows: a third of a prompt's kernel
+  time). The pair is decoded in fp32 — the e8m0 scale can leave f16's range
+  — and is exact; `glm_moe_test` pins the grouped launch to a host oracle
+  (gate within a bf16 rounding, down within 4e-5) and the z split bitwise.
+- **Confidence-scheduled verify depth for DSpark** (2026-09-14,
+  `engine.mtp_schedule`, off by default): a greedy request verifies only
+  the leading drafts whose prefix-survival probability (the product of the
+  confidence head's per-position acceptance probabilities) beats the value
+  of a verify row, each depth on its own captured graph variant; the
+  batched replay and sampled requests keep the whole block. The rule is
+  the Dinkelbach optimum of aggregate tokens per second (a per-step ratio
+  would be the wrong surrogate), its constants are the world's so every
+  rank derives the same depth, and the committed transcript is the plain
+  greedy one at every depth — proven on the eager speculator and on the
+  graph engine over a forced, varied depth sequence
+  (`tests/unit/verify_schedule_test.cpp`, `dsv41_decode_test` §7b,
+  `dsv41_engine_test` on 29964). On the fabric (four nodes, greedy, 300
+  tokens per class): chat 33.4 → 24.6, prose 27.4 → 22.7, code 21.9 → 18.9,
+  json 21.9 → 19.1, math 21.8 → 19.8 ms/token with λ at the achieved
+  throughput (0.045 tok/ms; the reservation-rate default is within 2–4 %),
+  transcripts identical, op streams identical across the ranks. No change
+  to any configuration that does not enable it: the captures and the
+  replay path are the same (the baseline run reproduced the previous
+  transcripts and timings). The DeepSeek-V4.1 deploy example enables it.
+  Extended the same day to the batched replay (one depth per batch, the
+  deepest a live slot asks for, on reduced-row batch variants over the
+  compacted feeds) and to every MTP family: without a confidence head the
+  engine takes the draft head's own probability of each draft from the
+  device sampler (the draft picks report logprobs; the tokens are
+  unchanged) — GLM-5.3-Flash, Qwen3.8-Flash-Next, GLM-4.7 and the full
+  GLM-5.3 can schedule at `mtp_depth` 2 and above (`glm4_engine_test`,
+  `glm_tp_test`). Measured: the batched DeepSeek replay at two live
+  requests prose 34 → 51 and chat 37 → 54 tok/s aggregate (exact); the
+  GLM families at depth 2 exact and throughput-neutral (one row at stake).
+  A stale settle bound after a reduced-depth batch, found by the two-request
+  probe, is fixed and gated.
+- **DeepSeek-V4.1-Flash decode window attention split** (2026-09-14): an
+  nsys profile found the decode window attention ran as a single
+  latency-bound thread block (`n_split=1`), the largest non-GEMV cost in
+  the step (~140 us a layer, the GEMVs themselves at 70-88 % of peak). The
+  decode path now splits the window a fixed eight ways to fill the SMs
+  (prefill stays unsplit and byte-identical): chat 38.3 to 34.3, code 25.3
+  to 21.8 ms/token, gsm8k 60/60 unchanged, cross-rank determinism kept.
+  Softmax attention cannot be split bitwise-invariantly, so decode's window
+  is no longer bit-identical to the forward's block (about one bf16 ULP,
+  which shifts greedy token sequences at near-ties without changing
+  accuracy); the decode-vs-forward fixture checks were re-calibrated to a
+  rounding budget plus an argmax-match assertion, the certified-flip decode
+  audit unchanged.
+- **DeepSeek-V4.1-Flash is a served family** (2026-09-14): the CED
+  encoder/decoder with CSA2 attention (a 128-token sliding window plus a
+  compressed-KV path selected by a two-level indexer), single-pass
+  hyper-connections, the two Engram n-gram tables mapped from NVMe, and
+  the DSpark block draft (five drafts verified per pass, `kSpecRows` 6)
+  ride the shared loader, paged-block and session cores. The MXFP4/FP8
+  checkpoint serves as shipped (the quantization study found nothing to
+  gain beyond it). A bounded prefill (the model's own SWA-replay: the
+  encoder over the whole prompt, the decoder over the last window) is the
+  default, `engine.prefill` selects it or the exact 40-layer parity mode.
+  The tokenizer is a three-stage pre-tokenizer; the prompt renderer
+  follows the checkpoint's own encoder; tool calls use a constrained DSML
+  grammar. Served on four nodes 2026-09-14: 76 ms/pass at 2.33 tokens/pass
+  (32.5 ms/token), bounded prefill 1.6–2.4 ms/token, gsm8k 60/60,
+  HumanEval 40/40, extract 30/30; the release's own layer code in fp32
+  sits as far from the engine as from its own bf16 pipeline at every
+  cross-checked layer. Prefix caching is whole-block, so a prompt shorter
+  than 128 tokens is not cached yet (docs/deepseek_v41_flash_plan.md §8).
 - **The launcher's port preflight binds as the servers do** (2026-09-13):
   the probe now sets `SO_REUSEADDR` like `tcp.cpp` and `http_server.cpp`,
   so a TIME_WAIT left by the previous world is not a conflict and a

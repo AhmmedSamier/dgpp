@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -32,6 +33,10 @@ using dgpp::GlmMhcConfig;
 using dgpp::GlmMhcRefResult;
 using dgpp::GlmMhcWeights;
 using dgpp::GlmMhcWeightsHost;
+
+void require(bool cond, const std::string& what) {
+  if (!cond) throw std::runtime_error(what);
+}
 
 struct Rng {
   uint64_t s;
@@ -485,6 +490,146 @@ DGPP_TEST(mhc_end_to_end_pipeline_is_deterministic) {
   require_ulp(compare(a, streams_ref, 4, 8), 0.01, flip_budget,
               "end-to-end streams");
   std::printf("[ OK ] end-to-end pipeline deterministic + within budgets\n");
+}
+
+// ---- the single-pass form (2026-09-13, DeepSeek-V4.1-Flash, plan D4) --------
+
+DGPP_TEST(mhc_single_pass_exports_pre_and_collapses_with_the_given_pre) {
+  // Site A computes its own coefficients and exports pre / post / comb in
+  // fp32; site B collapses with A's pre (the shifted coefficients) while
+  // predicting its own. Both against the oracle; B's own pre unchanged.
+  for (int tokens : {1, 3, 17, 70}) {
+    // Distinct seeds after the Rng's `| 1` (0x51A + 70 and 0x51B + 70 collide).
+    Case a = make_case(real_config(), tokens, 0xA000 + 2 * tokens);
+    Case b = make_case(real_config(), tokens, 0xB000 + 2 * tokens);
+    a.alloc();
+    b.alloc();
+    const int n = a.cfg.hc_mult;
+    float *pre_a = nullptr, *pre_b = nullptr, *post_a = nullptr, *comb_a = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&pre_a, static_cast<size_t>(tokens) * n * 4));
+    DGPP_CUDA_OK(cudaMallocManaged(&pre_b, static_cast<size_t>(tokens) * n * 4));
+    DGPP_CUDA_OK(cudaMallocManaged(&post_a, static_cast<size_t>(tokens) * n * 4));
+    DGPP_CUDA_OK(cudaMallocManaged(&comb_a, static_cast<size_t>(tokens) * n * n * 4));
+    dgpp::MhcSinglePass sp_a;
+    sp_a.pre_out = pre_a;
+    sp_a.post_f32 = post_a;
+    sp_a.comb_f32 = comb_a;
+    dgpp::launch_mhc_compute_normed(a.d_streams, a.dev_w, a.cfg, a.d_collapsed, a.d_post, a.d_comb,
+                                    a.d_logits, nullptr, nullptr, 0.f, tokens, nullptr, nullptr,
+                                    false, &sp_a);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    GlmMhcRefResult ref_a;
+    dgpp::glm_mhc_ref_compute(a.d_streams, a.host_w, a.cfg, tokens, ref_a);
+    for (size_t i = 0; i < ref_a.pre.size(); ++i) {
+      require(std::fabs(pre_a[i] - ref_a.pre[i]) <= 1e-5 * std::max(1.0, std::fabs(ref_a.pre[i])),
+              "exported pre within fp32 of the oracle");
+      require(std::fabs(post_a[i] - ref_a.post[i]) <= 1e-5 * std::max(1.0, std::fabs(ref_a.post[i])),
+              "exported post within fp32 of the oracle");
+    }
+    for (size_t i = 0; i < ref_a.comb.size(); ++i)
+      require(std::fabs(comb_a[i] - ref_a.comb[i]) <= 1e-5 * std::max(1.0, std::fabs(ref_a.comb[i])),
+              "exported comb within fp32 of the oracle");
+    // Site B with A's pre.
+    dgpp::MhcSinglePass sp_b;
+    sp_b.pre_in = pre_a;
+    sp_b.pre_out = pre_b;
+    dgpp::launch_mhc_compute_normed(b.d_streams, b.dev_w, b.cfg, b.d_collapsed, b.d_post, b.d_comb,
+                                    b.d_logits, nullptr, nullptr, 0.f, tokens, nullptr, nullptr,
+                                    false, &sp_b);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<double> pre_a_d(ref_a.pre.size());
+    for (size_t i = 0; i < pre_a_d.size(); ++i) pre_a_d[i] = pre_a[i];
+    GlmMhcRefResult ref_b;
+    dgpp::glm_mhc_ref_compute(b.d_streams, b.host_w, b.cfg, tokens, ref_b, pre_a_d.data());
+    require_ulp(compare(read_back(b.d_collapsed, ref_b.collapsed.size()), ref_b.collapsed, 2, 4),
+                0.005, 0, "single-pass collapse with the previous site's pre");
+    for (size_t i = 0; i < ref_b.pre.size(); ++i)
+      require(std::fabs(pre_b[i] - ref_b.pre[i]) <= 1e-5 * std::max(1.0, std::fabs(ref_b.pre[i])),
+              "site B's own pre exported unchanged by pre_in");
+    // The GLM form on the same site is the pre_in-less call: its collapse
+    // uses B's own pre and differs from the shifted one.
+    std::vector<uint16_t> shifted = read_back(b.d_collapsed, ref_b.collapsed.size());
+    dgpp::launch_mhc_compute(b.d_streams, b.dev_w, b.cfg, b.d_collapsed, b.d_post, b.d_comb, b.d_logits,
+                             tokens, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    require(read_back(b.d_collapsed, ref_b.collapsed.size()) != shifted,
+            "the shifted collapse differs from the site's own");
+    std::printf("[ OK ] single-pass mHC tokens=%d: pre/post/comb exported, collapse with pre_in within budget\n",
+                tokens);
+    cudaFree(pre_a); cudaFree(pre_b); cudaFree(post_a); cudaFree(comb_a);
+    a.free_all();
+    b.free_all();
+  }
+}
+
+DGPP_TEST(mhc_single_round_update_matches_oracle) {
+  // The fp32 post/comb from the oracle on both sides; one rounding, so the
+  // budget is the plain fp32-vs-double one (2 ulps, no chained flips).
+  for (int tokens : {1, 5, 33}) {
+    Case c = make_case(real_config(), tokens, 0x5F32 + tokens);
+    c.alloc();
+    const int n = c.cfg.hc_mult;
+    GlmMhcRefResult ref;
+    dgpp::glm_mhc_ref_compute(c.d_streams, c.host_w, c.cfg, tokens, ref);
+    float *post = nullptr, *comb = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&post, static_cast<size_t>(tokens) * n * 4));
+    DGPP_CUDA_OK(cudaMallocManaged(&comb, static_cast<size_t>(tokens) * n * n * 4));
+    std::vector<double> post_d(ref.post.size()), comb_d(ref.comb.size());
+    for (size_t i = 0; i < post_d.size(); ++i) post_d[i] = post[i] = static_cast<float>(ref.post[i]);
+    for (size_t i = 0; i < comb_d.size(); ++i) comb_d[i] = comb[i] = static_cast<float>(ref.comb[i]);
+    std::vector<uint16_t> want(c.streams.size());
+    dgpp::glm_mhc_ref_stream_update_f32(post_d.data(), comb_d.data(), c.sublayer_out.data(),
+                                        c.streams.data(), c.cfg, tokens, want.data());
+    dgpp::launch_mhc_stream_update_f32(post, comb, c.d_sub, c.d_streams, c.d_streams_out, c.cfg, tokens,
+                                       nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    require_ulp(compare(read_back(c.d_streams_out, want.size()), want, 2, 4), 0.005, 0,
+                "single-round stream update");
+    std::printf("[ OK ] single-round mHC update tokens=%d within budget\n", tokens);
+    cudaFree(post); cudaFree(comb);
+    c.free_all();
+  }
+}
+
+DGPP_TEST(mhc_collapse_normed_is_bitwise_the_finish_with_the_same_pre) {
+  for (int tokens : {1, 7, 40}) {
+    Case c = make_case(real_config(), tokens, 0xC011 + tokens);
+    c.alloc();
+    const int n = c.cfg.hc_mult, D = c.cfg.hidden;
+    float* pre = nullptr;
+    uint16_t *ln = nullptr, *normed_a = nullptr, *normed_b = nullptr, *collapsed_b = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&pre, static_cast<size_t>(tokens) * n * 4));
+    DGPP_CUDA_OK(cudaMallocManaged(&ln, static_cast<size_t>(D) * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&normed_a, static_cast<size_t>(tokens) * D * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&normed_b, static_cast<size_t>(tokens) * D * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&collapsed_b, static_cast<size_t>(tokens) * D * 2));
+    Rng rng(0x1A + tokens);
+    for (int i = 0; i < tokens * n; ++i) pre[i] = 0.3f + 0.5f * static_cast<float>(std::fabs(rng.unit()));
+    for (int d = 0; d < D; ++d) ln[d] = float_to_bf16_bits(1.0f + 0.1f * static_cast<float>(rng.unit()));
+    const float ln_eps = 1e-20f;
+    // The finish with pre_in (the site's own logits computed and ignored).
+    dgpp::MhcSinglePass sp;
+    sp.pre_in = pre;
+    dgpp::launch_mhc_compute_normed(c.d_streams, c.dev_w, c.cfg, nullptr, c.d_post, c.d_comb, c.d_logits,
+                                    ln, normed_a, ln_eps, tokens, nullptr, nullptr, false, &sp);
+    dgpp::launch_mhc_collapse_normed(c.d_streams, pre, ln, ln_eps, collapsed_b, normed_b, c.cfg, tokens,
+                                     nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    require(read_back(normed_a, static_cast<size_t>(tokens) * D) == read_back(normed_b, static_cast<size_t>(tokens) * D),
+            "collapse_normed bitwise the finish's normed row at the same pre");
+    std::vector<double> pre_d(static_cast<size_t>(tokens) * n);
+    for (size_t i = 0; i < pre_d.size(); ++i) pre_d[i] = pre[i];
+    std::vector<uint16_t> want_c(static_cast<size_t>(tokens) * D), want_n(static_cast<size_t>(tokens) * D);
+    dgpp::glm_mhc_ref_collapse_normed(c.streams.data(), pre_d.data(), ln, ln_eps, c.cfg, tokens,
+                                      want_c.data(), want_n.data());
+    require_ulp(compare(read_back(collapsed_b, want_c.size()), want_c, 2, 4), 0.005, 0,
+                "collapse_normed collapsed vs oracle");
+    require_ulp(compare(read_back(normed_b, want_n.size()), want_n, 4, 8), 0.01, 1,
+                "collapse_normed normed vs oracle");
+    std::printf("[ OK ] collapse_normed tokens=%d: bitwise the finish, within budget of the oracle\n", tokens);
+    cudaFree(pre); cudaFree(ln); cudaFree(normed_a); cudaFree(normed_b); cudaFree(collapsed_b);
+    c.free_all();
+  }
 }
 
 DGPP_TEST(mhc_config_validation_pins_supported_geometry) {

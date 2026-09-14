@@ -68,6 +68,27 @@ void glm_stage_wait(const uint64_t* pinned_stage_seq, uint64_t* device_seq,
 void glm_publish_seq(uint64_t* device_seq, uint64_t* pinned_out,
                      cudaStream_t stream);
 
+// The confidence publication (2026-09-14, the scheduled verify depth,
+// engine/verify_schedule.hpp): a kernel node at the tail of an MTP replay
+// copies the slot's `count` (<= 32) confidence logits from device memory
+// to PINNED memory with system-scope stores, fences, then bumps the
+// slot's device counter and stores it to `pinned_seq` with a system-scope
+// release — the host, polling the counter with an acquire load, reads the
+// logits that describe the drafts its next replay will verify.
+void glm_publish_f32(const float* src, float* pinned_dst, int count,
+                     uint64_t* device_seq, uint64_t* pinned_seq,
+                     cudaStream_t stream);
+
+// The reduced-depth fixed batch's token feed (2026-09-14, the scheduled
+// verify depth): every slot keeps its persistent feed at `feed_rows` rows
+// (the whole block), and a batch variant verifying `rows_per_request` <
+// feed_rows rows per slot reads them compacted — out[q * rows_per_request
+// + t] = feeds[q * feed_rows + t] for q < requests, t < rows_per_request —
+// so the walk's rows stay contiguous per request.
+void glm_spec_gather_feed(const int64_t* feeds, int requests, int feed_rows,
+                          int rows_per_request, int64_t* out,
+                          cudaStream_t stream);
+
 // Uploads `count` uint32 words from PINNED, device-mapped host memory with
 // a kernel (system-scope loads: the host wrote them before the handshake
 // above released) — the masks of a slot's rows, behind the stage wait.
@@ -190,9 +211,9 @@ void glm_spec_chain_rows_batched(const PickVerdict* verify_verdicts,
 // The next replay's fed tokens, written at the end of this one (phase D):
 // tokens[0] = *next (the verify's), tokens[1 + c] = drafts.v[c]->next (the
 // block's guesses for the tokens after it, one per draft position).
-constexpr int kSpecMaxDrafts = 3;  // GlmDiagnosticModel::kSpecRows - 1
+constexpr int kSpecMaxDrafts = 5;  // kSpecRows - 1 (engine/decode_outputs.hpp)
 struct GlmSpecDrafts {
-  const PickVerdict* v[kSpecMaxDrafts] = {nullptr, nullptr, nullptr};
+  const PickVerdict* v[kSpecMaxDrafts] = {};
   int count = 0;
 };
 void glm_spec_next_tokens(const int64_t* next, const GlmSpecDrafts& drafts,

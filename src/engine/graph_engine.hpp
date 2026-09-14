@@ -11,10 +11,12 @@
 #include <deque>
 #include <thread>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -30,7 +32,9 @@
 #include "engine/speculative.hpp"
 #include "engine/step_timing.hpp"
 #include "engine/tp_bus.hpp"
+#include "engine/verify_schedule.hpp"
 #include "kernels/glm_spec.hpp"
+#include "net/bus_kernel.hpp"
 #include "net/collective_bus.hpp"
 
 namespace dgpp {
@@ -231,6 +235,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     std::vector<int> reqs;    // the live slots the replay decided for
     std::vector<int> redrafted;  // slots the host re-drafted: skip their draft verdicts
     uint64_t verdict_seq = 0; // the pinned sequence its verdict node publishes
+    // The scheduled verify depth (scalar MTP replays only): the option
+    // replayed (-1: the full-depth variant, every replay before 2026-09-14)
+    // and the rows its verify decided (1 + the drafts verified).
+    int depth_option = -1;
+    int rows = 0;
   };
 
  public:
@@ -285,7 +294,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       // live requests on the sixteen-row family — 26–28 tok/s aggregate
       // against the four-slot template's 38–43 — until the 4-slot family
       // covered them), then every slot. The bus bounds the variants:
-      // 2 x slots + 2 x families <= 32.
+      // 2 x slots + 2 x families (x the scheduled depth options) <= kBusMaxGraphVariants (64).
       for (const int k : {2, 3, 4, 6})
         if (k < slots_ &&
             k * rows_per_request_ <= max_rows_) {
@@ -320,6 +329,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_specs_),
                                 sizeof(SampleSpec) * slots_));
         DGPP_CUDA_OK(cudaMemset(d_specs_, 0, sizeof(SampleSpec) * slots_));
+        DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_draft_specs_),
+                                sizeof(SampleSpec) * slots_));
+        DGPP_CUDA_OK(cudaMemset(d_draft_specs_, 0, sizeof(SampleSpec) * slots_));
         DGPP_CUDA_OK(cudaMallocHost(reinterpret_cast<void**>(&h_specs_),
                                     sizeof(SampleSpec) * slots_));
         for (int i = 0; i < slots_; ++i) h_specs_[i] = SampleSpec{};
@@ -492,9 +504,34 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       DGPP_LOG_WARN("rank {}: graph engine drain at teardown: {}", rank_,
                     e.what());
     }
+    if (schedule_) {
+      std::string hist;
+      for (size_t i = 0; i < depth_options_.size(); ++i)
+        hist += std::format("{}{}:{}", i ? " " : "", depth_options_[i],
+                            sched_hist_[i]);
+      std::string bhist;
+      for (const BatchFamily& f : families_) {
+        bhist += std::format("{}{}-slot batch [", bhist.empty() ? "; " : ", ", f.requests);
+        for (size_t i = 0; i < f.sched_hist.size(); ++i)
+          bhist += std::format("{}{}:{}", i ? " " : "", depth_options_[i], f.sched_hist[i]);
+        bhist += "]";
+      }
+      DGPP_LOG_INFO(
+          "rank {}: scheduled verify depth summary — scalar replays per depth [{}] "
+          "({} steps held at the full block: a fresh or sampled slot){}",
+          rank_, hist, sched_full_forced_, bhist);
+    }
     for (std::array<cudaGraphExec_t, 2>& execs : scalar_execs_)
       for (cudaGraphExec_t exec : execs)
         if (exec != nullptr) cudaGraphExecDestroy(exec);
+    for (std::vector<std::array<cudaGraphExec_t, 2>>& per_slot : sched_execs_)
+      for (std::array<cudaGraphExec_t, 2>& execs : per_slot)
+        for (cudaGraphExec_t exec : execs)
+          if (exec != nullptr) cudaGraphExecDestroy(exec);
+    for (BatchFamily& f : families_)
+      for (std::array<cudaGraphExec_t, 2>& execs : f.sched_execs)
+        for (cudaGraphExec_t exec : execs)
+          if (exec != nullptr) cudaGraphExecDestroy(exec);
     for (BatchFamily& f : families_)
       for (cudaGraphExec_t exec : f.execs)
         if (exec != nullptr) cudaGraphExecDestroy(exec);
@@ -522,6 +559,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (d_masks_) cudaFree(d_masks_);
     if (h_masks_) cudaFreeHost(h_masks_);
     if (d_verify_logits_) cudaFree(d_verify_logits_);
+    if (h_conf_) cudaFreeHost(h_conf_);
+    if (h_conf_seq_) cudaFreeHost(h_conf_seq_);
+    if (d_conf_seq_) cudaFree(d_conf_seq_);
+    if (d_draft_specs_) cudaFree(d_draft_specs_);
+    if (d_draft_conf_) cudaFree(d_draft_conf_);
   }
   GraphEngineAdapter(const GraphEngineAdapter&) = delete;
   GraphEngineAdapter& operator=(const GraphEngineAdapter&) = delete;
@@ -561,6 +603,154 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     return family_steps_.at(static_cast<size_t>(family));
   }
   int sampling_candidates() const { return candidates_; }
+
+  // ---- confidence-scheduled verify depth (2026-09-14) -----------------------
+  // engine/verify_schedule.hpp over the family's confidence head
+  // (Model::kVerifyConfidence): a scalar MTP replay verifies only the
+  // leading drafts whose prefix survival beats the value of a verify row,
+  // on a variant captured at that depth; the block still drafts its full
+  // width and the committed transcript is the plain greedy one at every
+  // depth (a draft not verified is decoded next step). OFF unless
+  // configured here — every existing configuration keeps its captures and
+  // its replay path unchanged — and only for greedy slots (a sampled slot
+  // verifies its whole block; its fallback machinery is untouched). Call
+  // before the first capture (warm_captures). `row_ms` is the cost of one
+  // verify row, `lambda_tok_per_ms` the value of decode time (the achieved
+  // throughput; the reservation rate verify_reservation_lambda(base, row)
+  // before it is measured) — the same constants on every rank, so every
+  // rank derives the same depth from the replicated confidence.
+  // `min_depth`: never verify fewer drafts than this (>= 1).
+  // The depth options: every depth in [min_depth, depth] when the bus's
+  // graph-variant budget (kBusMaxGraphVariants: two per slot per option
+  // plus two per batch family) holds them, else an even spread that always
+  // keeps the full block; a policy depth rounds UP to the next option
+  // (never fewer drafts than the policy asked — exact either way).
+  void configure_verify_schedule(bool on, float row_ms, float lambda_tok_per_ms,
+                                 int min_depth = 1) {
+    drain();
+    for (const std::array<cudaGraphExec_t, 2>& e : scalar_execs_)
+      if (e[0] != nullptr)
+        throw std::logic_error(
+            "graph engine: configure_verify_schedule after a capture");
+    if (!on) {
+      schedule_ = false;
+      depth_options_.clear();
+      return;
+    }
+    {
+      if (!model_->mtp_enabled() || depth_ < 1)
+        throw std::invalid_argument(
+            "graph engine: the scheduled verify depth needs MTP");
+      if (!(row_ms > 0.f) || !(lambda_tok_per_ms > 0.f))
+        throw std::invalid_argument(
+            "graph engine: the scheduled verify depth needs row_ms > 0 and "
+            "lambda > 0");
+      if (min_depth < 1 || min_depth > depth_)
+        throw std::invalid_argument(
+            "graph engine: the scheduled verify depth's min_depth must be in "
+            "[1, depth]");
+      if constexpr (Model::kVerifyConfidence) {
+        conf_rows_ = model_->confidence_rows();
+        draft_full_path_ = false;
+      } else {
+        // No confidence head: the draft head's own probability of its
+        // pick, off the sampler's full path (needs the device sampler).
+        if (!sampling_)
+          throw std::invalid_argument(
+              "graph engine: this family has no confidence head; the "
+              "scheduled verify depth takes the draft head's probabilities "
+              "from the device sampler, which this engine has not");
+        conf_rows_ = depth_;
+        draft_full_path_ = true;
+        if (d_draft_conf_ == nullptr)
+          DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_draft_conf_),
+                                  sizeof(float) * static_cast<size_t>(slots_) * conf_rows_));
+        // The draft picks' spec table: every slot's spec reporting logprobs.
+        for (int req = 0; req < slots_; ++req) push_spec(req, h_specs_[req]);
+      }
+      if (conf_rows_ < depth_ || conf_rows_ > 32)
+        throw std::invalid_argument(
+            "graph engine: the confidence covers " +
+            std::to_string(conf_rows_) + " positions, the verify depth is " +
+            std::to_string(depth_));
+      // The options that fit the bus: two variants per slot per option
+      // and, with the batch, two per family per option.
+      const int fit = net::kBusMaxGraphVariants /
+                      (2 * (slots_ + static_cast<int>(families_.size())));
+      const int span = depth_ - min_depth + 1;
+      const int options = std::min(span, fit);
+      if (options < 2)
+        throw std::invalid_argument(
+            "graph engine: the bus's " + std::to_string(net::kBusMaxGraphVariants) +
+            " graph variants leave no room for a second verify depth at " +
+            std::to_string(slots_) + " slots and " +
+            std::to_string(families_.size()) + " batch families");
+      depth_options_.clear();
+      for (int i = 0; i < options; ++i) {
+        const int d = options == 1
+                          ? depth_
+                          : min_depth + static_cast<int>(std::lround(
+                                            static_cast<double>(i) * (depth_ - min_depth) /
+                                            static_cast<double>(options - 1)));
+        if (depth_options_.empty() || depth_options_.back() != d)
+          depth_options_.push_back(d);
+      }
+      if (depth_options_.back() != depth_) depth_options_.push_back(depth_);
+      schedule_ = true;
+      sched_row_ms_ = row_ms;
+      sched_lambda_ = lambda_tok_per_ms;
+      sched_min_depth_ = min_depth;
+      if (h_conf_ == nullptr) {
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_conf_),
+                                   sizeof(float) * static_cast<size_t>(slots_) * conf_rows_,
+                                   cudaHostAllocMapped));
+        std::fill_n(h_conf_, static_cast<size_t>(slots_) * conf_rows_, 0.f);
+        DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_conf_seq_),
+                                   sizeof(uint64_t) * slots_, cudaHostAllocMapped));
+        for (int i = 0; i < slots_; ++i) h_conf_seq_[i] = 0;
+        DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&d_conf_seq_),
+                                sizeof(uint64_t) * slots_));
+        DGPP_CUDA_OK(cudaMemset(d_conf_seq_, 0, sizeof(uint64_t) * slots_));
+      }
+      conf_seq_.assign(static_cast<size_t>(slots_), 0);
+      conf_stale_.assign(static_cast<size_t>(slots_), true);
+      sched_execs_.assign(
+          static_cast<size_t>(slots_),
+          std::vector<std::array<cudaGraphExec_t, 2>>(
+              depth_options_.size() - 1, {{nullptr, nullptr}}));
+      sched_hist_.assign(depth_options_.size(), 0);
+      for (BatchFamily& f : families_) {
+        f.sched_execs.assign(depth_options_.size() - 1, {{nullptr, nullptr}});
+        f.sched_hist.assign(depth_options_.size(), 0);
+      }
+      sched_full_forced_ = 0;
+      std::string opts;
+      for (const int d : depth_options_) opts += (opts.empty() ? "" : ",") + std::to_string(d);
+      DGPP_LOG_INFO(
+          "rank {}: scheduled verify depth on — options [{}] of the {}-draft "
+          "block (threshold: prefix survival > {:.3f} = {:.4f} tok/ms x {:.2f} "
+          "ms/row), greedy slots only; the confidence is {}",
+          rank_, opts, depth_, sched_lambda_ * sched_row_ms_, sched_lambda_,
+          sched_row_ms_,
+          draft_full_path_ ? "the draft head's own probabilities"
+                           : "the model's confidence head");
+    }
+  }
+  // Per option, the batched replays of family `family` at that depth.
+  std::vector<uint64_t> verify_depth_histogram_batch(int family) const {
+    return families_.at(static_cast<size_t>(family)).sched_hist;
+  }
+  bool verify_schedule() const { return schedule_; }
+  const std::vector<int>& verify_depth_options() const { return depth_options_; }
+  // Per option, the scalar replays that verified at that depth.
+  std::vector<uint64_t> verify_depth_histogram() const { return sched_hist_; }
+  // Tests: replaces the policy's depth (req, the policy's depth, the slot's
+  // confidence logits, their count) -> the depth to verify (clamped to
+  // [min_depth, depth], then rounded up to an option).
+  void set_verify_depth_hook(
+      std::function<int(int, int, const float*, int)> hook) {
+    depth_hook_ = std::move(hook);
+  }
 
   bool supports_sampling() const override { return sampling_; }
   bool supports_logprobs() const override { return sampling_; }
@@ -703,9 +893,16 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       (void)prefill(req, warm_prompt);
       try {
         ensure_scalar_graph(req);
+        if (schedule_)
+          for (size_t di = 0; di + 1 < depth_options_.size(); ++di)
+            ensure_sched_graph(req, static_cast<int>(di));
         if (req == 0)
-          for (size_t f = 0; f < families_.size(); ++f)
+          for (size_t f = 0; f < families_.size(); ++f) {
             ensure_batch_graph(static_cast<int>(f));
+            if (schedule_ && model_->mtp_enabled())
+              for (size_t di = 0; di + 1 < depth_options_.size(); ++di)
+                ensure_sched_batch_graph(static_cast<int>(f), static_cast<int>(di));
+          }
       } catch (...) {
         close(req);
         throw;
@@ -716,6 +913,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     for (const BatchFamily& f : families_)
       batches += (batches.empty() ? " and the row batches for " : ", ") +
                  std::to_string(f.requests) + " slots";
+    if (schedule_)
+      batches += std::format(" and {} reduced-depth variant{} per slot",
+                             depth_options_.size() - 1,
+                             depth_options_.size() == 2 ? "" : "s");
     DGPP_LOG_INFO(
         "rank {}: warm capture complete — {} scalar variant{}{} recorded "
         "before the first request",
@@ -883,6 +1084,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         arm_draft_sampling(first_draft, req, /*draft_index=*/0);
         drafts[0] = picker_->run(model_->stream(), first_draft).next;
         chain_drafts_eagerly(req);
+        refresh_confidence_eagerly(req);
       }
       reserved_[static_cast<size_t>(req)] = false;
       live_[static_cast<size_t>(req)] = true;
@@ -935,7 +1137,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     ensure_batch_graph(family);
     BatchFamily& fam = families_[static_cast<size_t>(family)];
     ++family_steps_[static_cast<size_t>(family)];
-    model_->session_graph_use_batch_contract(rows_per_request_, fam.requests);
+    // The scheduled verify depth: one depth for the batch — the mean-
+    // survival rule over the live slots (verify_schedule.hpp; a slot
+    // verifying more or fewer drafts than its own policy would is exact
+    // either way); the whole block when any of them is fresh or sampled.
+    int di = -1;
+    int rows = rows_per_request_;
+    if (schedule_ && model_->mtp_enabled()) {
+      di = choose_batch_depth_option(reqs);
+      rows = 1 + depth_options_[static_cast<size_t>(di)];
+      if (di < full_depth_option()) ensure_sched_batch_graph(family, di);
+      ++fam.sched_hist[static_cast<size_t>(di)];
+    }
+    model_->session_graph_use_batch_contract(rows, fam.requests);
     model_->session_graph_stage_batch();
     // Launch first (the window armed behind whatever runs), settle the
     // older replay while this one runs, stage the pick's masks for it,
@@ -946,9 +1160,14 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     r.parity = fam.parity;
     fam.parity ^= 1;
     r.reqs = reqs;
+    r.depth_option = di;
+    r.rows = rows;
     launch(std::move(r));
     settle_older();
-    for (const int req : reqs) stage_masks(req);
+    if (rows < rows_per_request_)
+      stage_masks_compact(fam.requests, rows);
+    else
+      for (const int req : reqs) stage_masks(req);
     publish_stage(batch_index(family));
     if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     wait_verdict(inflight_.back());
@@ -957,7 +1176,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     batches.reserve(reqs.size());
     for (const int req : reqs)
       batches.push_back(
-          collect_verdict(req, /*verdict_request=*/req, /*batched=*/true));
+          collect_verdict(req, /*verdict_request=*/req, /*batched=*/true, rows));
     return batches;
   }
 
@@ -983,6 +1202,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     pending_[static_cast<size_t>(req)] = -1;
     drafts_[static_cast<size_t>(req)].assign(static_cast<size_t>(depth_), -1);
     hop_slot_[static_cast<size_t>(req)] = -1;
+    if (schedule_) conf_stale_[static_cast<size_t>(req)] = true;
     // A reopened slot is greedy until the scheduler arms it again — on the
     // device too, so a padded replay of this slot never draws.
     params_[static_cast<size_t>(req)] = sample::greedy_params();
@@ -1056,14 +1276,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     return in;
   }
 
-  DevicePicker::Inputs verify_pick_inputs(int requests) const {
+  // `rows`: the verify's rows per request (rows_per_request_, or a reduced-
+  // depth batch's; then the fed tokens are the compacted copy in the
+  // front scratch, glm_spec_gather_feed).
+  DevicePicker::Inputs verify_pick_inputs(int requests, int rows = -1) const {
+    if (rows < 0) rows = rows_per_request_;
     DevicePicker::Inputs in = scalar_pick_inputs(/*slot=*/0);
-    in.rows = requests * rows_per_request_;
+    in.rows = requests * rows;
     in.requests = requests;
-    in.rows_per_request = rows_per_request_;
-    in.fed = model_->device_feed(0, rows_per_request_);
+    in.rows_per_request = rows;
+    in.fed = rows == rows_per_request_ ? model_->device_feed(0, rows_per_request_)
+                                       : model_->device_tokens();
     in.positions = model_->device_positions();
-    in.position_stride = rows_per_request_;
+    in.position_stride = rows;
     if (sampling_) {
       in.specs = d_specs_;
       in.counts = d_counts_;
@@ -1108,7 +1333,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
                           int draft_index) const {
     if (!sampling_ || d_proposals_ == nullptr || !proposal_drafts_enabled())
       return;
-    in.specs = d_specs_ + req;
+    in.specs = (draft_full_path_ ? d_draft_specs_ : d_specs_) + req;
     in.counts = nullptr;
     in.vocab_size = static_cast<int>(vocab_);
     in.proposals_out =
@@ -1120,7 +1345,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   void arm_draft_sampling_batch(DevicePicker::Inputs& in, int draft_index) const {
     if (!sampling_ || d_proposals_ == nullptr || !proposal_drafts_enabled())
       return;
-    in.specs = d_specs_;
+    in.specs = draft_full_path_ ? d_draft_specs_ : d_specs_;
     in.counts = nullptr;
     in.vocab_size = static_cast<int>(vocab_);
     in.proposals_out = d_proposals_;
@@ -1129,15 +1354,16 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   }
 
   DevicePicker::Inputs draft_pick_inputs(
-      const PickVerdict* verify_verdicts, int requests) const {
+      const PickVerdict* verify_verdicts, int requests, int rows = -1) const {
+    if (rows < 0) rows = rows_per_request_;
     DevicePicker::Inputs in = scalar_pick_inputs(/*slot=*/1);
     in.rows = requests;
     in.requests = requests;
     in.rows_per_request = 1;
     in.positions = model_->device_positions();
-    in.position_stride = rows_per_request_;
+    in.position_stride = rows;
     in.row_select = verify_verdicts;
-    in.source_row_stride = rows_per_request_;
+    in.source_row_stride = rows;
     return in;
   }
 
@@ -1260,6 +1486,23 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   int batch_variant(int family, int parity) const {
     return 2 * slots_ + 2 * family + parity;
   }
+  // The reduced-depth scalar variants (the scheduled verify depth), after
+  // every scalar and batch variant: option `di` of slot `req` (the last
+  // option, the full block, is the slot's scalar variant itself).
+  int sched_variant(int req, int di, int parity) const {
+    const int reduced = static_cast<int>(depth_options_.size()) - 1;
+    return 2 * slots_ + 2 * static_cast<int>(families_.size()) +
+           2 * (req * reduced + di) + parity;
+  }
+  int full_depth_option() const {
+    return static_cast<int>(depth_options_.size()) - 1;
+  }
+  // The reduced-depth batch variants, after the reduced-depth scalar ones.
+  int sched_batch_variant(int family, int di, int parity) const {
+    const int reduced = static_cast<int>(depth_options_.size()) - 1;
+    return 2 * slots_ + 2 * static_cast<int>(families_.size()) +
+           2 * slots_ * reduced + 2 * (family * reduced + di) + parity;
+  }
   // The stage handshake's and the verdict's index of a family.
   int batch_index(int family) const { return slots_ + family; }
   bool batch_captured(int family) const {
@@ -1306,40 +1549,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     const bool mtp = model_->mtp_enabled();
     const auto build = [&](int parity) {
       if (mtp) {
-        // The T-row verify (the pending token and its drafts), the verdict,
-        // the commit, the draft block off the verdict with its pick at the
-        // last accepted row, then — depth >= 2 — the chained rows, one
-        // pick each, and the feed of every draft.
-        model_->session_graph_capture_step(req, feed_of(req),
-                                           /*device_positions=*/true,
-                                           /*device_tokens=*/true);
-        record_stage_gate(req, req * rows_per_request_, rows_per_request_);
-        picker_->record(model_->stream(),
-                        scalar_sampling_inputs(req, rows_per_request_));
         (void)parity;
-        glm_publish_seq(d_verdict_seq_ + req, h_verdict_seq_ + req,
-                        model_->stream());
-        snapshot_verify_rows(req, rows_per_request_, /*first_row=*/0);
-        model_->session_graph_capture_commit(
-            req, picker_->device_verdict(0));
-        model_->session_graph_capture_draft(
-            req, picker_->device_verdict(0));
-        DevicePicker::Inputs draft = scalar_pick_inputs(/*slot=*/1);
-        draft.row_select = picker_->device_verdict(0);
-        draft.source_row_stride = rows_per_request_;
-        arm_draft_sampling(draft, req, /*draft_index=*/0);
-        picker_->record(model_->stream(), draft);
-        std::vector<const PickVerdict*> drafts{picker_->device_verdict(1)};
-        for (int c = 1; c < depth_; ++c) {
-          model_->session_graph_capture_draft_chain(
-              req, picker_->device_verdict(0), picker_->device_verdict(c),
-              /*index=*/c - 1, /*first=*/c == 1, /*last=*/c == depth_ - 1);
-          DevicePicker::Inputs chain = scalar_pick_inputs(1 + c);
-          arm_draft_sampling(chain, req, /*draft_index=*/c);
-          picker_->record(model_->stream(), chain);
-          drafts.push_back(picker_->device_verdict(1 + c));
-        }
-        model_->session_graph_capture_next_tokens(req, drafts);
+        record_scalar_mtp(req, rows_per_request_);
       } else {
         model_->session_graph_capture_step(
             req, std::vector<int64_t>{pending_[static_cast<size_t>(req)]},
@@ -1366,6 +1577,244 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         rows_per_request_, mtp ? ", MTP" : "");
   }
 
+  // The scalar MTP replay of slot `req` verifying `rows` rows (the pending
+  // token and rows - 1 drafts; rows_per_request_ for the full block, fewer
+  // for a reduced-depth variant): the T-row verify, the verdict, the
+  // commit, the draft block off the verdict with its pick at the last
+  // accepted row, then — depth >= 2 — the chained rows, one pick each, the
+  // feed of every draft (the block's full width, whatever the verify's
+  // rows: the slot's persistent feed keeps rows_per_request_ rows and a
+  // reduced variant reads its prefix), and — scheduling — the block
+  // confidence published to the host for the next step's depth.
+  void record_scalar_mtp(int req, int rows) {
+    const bool reduced = rows != rows_per_request_;
+    std::vector<int64_t> feed = feed_of(req);
+    if (reduced) feed.resize(static_cast<size_t>(rows));
+    model_->session_graph_capture_step(req, feed,
+                                       /*device_positions=*/true,
+                                       /*device_tokens=*/true,
+                                       /*feed_rows=*/reduced ? rows_per_request_ : 0);
+    record_stage_gate(req, req * rows_per_request_, rows);
+    picker_->record(model_->stream(), scalar_sampling_inputs(req, rows));
+    glm_publish_seq(d_verdict_seq_ + req, h_verdict_seq_ + req,
+                    model_->stream());
+    snapshot_verify_rows(req, rows, /*first_row=*/0);
+    model_->session_graph_capture_commit(req, picker_->device_verdict(0));
+    model_->session_graph_capture_draft(req, picker_->device_verdict(0));
+    DevicePicker::Inputs draft = scalar_pick_inputs(/*slot=*/1);
+    draft.row_select = picker_->device_verdict(0);
+    draft.source_row_stride = rows;
+    arm_draft_sampling(draft, req, /*draft_index=*/0);
+    picker_->record(model_->stream(), draft);
+    std::vector<const PickVerdict*> drafts{picker_->device_verdict(1)};
+    for (int c = 1; c < depth_; ++c) {
+      model_->session_graph_capture_draft_chain(
+          req, picker_->device_verdict(0), picker_->device_verdict(c),
+          /*index=*/c - 1, /*first=*/c == 1, /*last=*/c == depth_ - 1);
+      DevicePicker::Inputs chain = scalar_pick_inputs(1 + c);
+      arm_draft_sampling(chain, req, /*draft_index=*/c);
+      picker_->record(model_->stream(), chain);
+      drafts.push_back(picker_->device_verdict(1 + c));
+    }
+    model_->session_graph_capture_next_tokens(req, drafts);
+    record_confidence_publish(req, /*request=*/0);
+  }
+
+  // The reduced-depth scalar variant `di` of slot `req` (the scheduled
+  // verify depth): the same replay as the slot's scalar variant over
+  // 1 + depth_options_[di] rows, its own bus variant and executable.
+  void ensure_sched_graph(int req, int di) {
+    std::array<cudaGraphExec_t, 2>& execs =
+        sched_execs_.at(static_cast<size_t>(req)).at(static_cast<size_t>(di));
+    if (execs[0] != nullptr) return;
+    const int rows = 1 + depth_options_.at(static_cast<size_t>(di));
+    for (int parity = 0; parity < 2; ++parity)
+      execs[static_cast<size_t>(parity)] = capture_variant(
+          sched_variant(req, di, parity), [&] { record_scalar_mtp(req, rows); });
+    if (any_batch_captured())
+      model_->session_graph_use_batch_contract(rows_per_request_,
+                                               families_.back().requests);
+    DGPP_LOG_INFO(
+        "rank {}: serving reduced-depth graph variants {}/{} captured for "
+        "request slot {} ({} rows: {} of the {} drafts)",
+        rank_, sched_variant(req, di, 0), sched_variant(req, di, 1), req,
+        rows, rows - 1, depth_);
+  }
+
+  // Scheduling: the slot's block confidence to its pinned mirror at the
+  // replay's tail (a kernel node; the decode graph is kernels-only).
+  // `request`: the picker request index the replay decided slot `req` at
+  // (0 for a scalar replay, the slot for a batch).
+  void record_confidence_publish(int req, int request) {
+    if (!schedule_) return;
+    const float* src = nullptr;
+    if constexpr (Model::kVerifyConfidence) {
+      src = model_->device_confidence() + static_cast<size_t>(req) * conf_rows_;
+    } else {
+      // The draft picks' outcomes (slots 1 .. depth) -> the logits.
+      float* dst = d_draft_conf_ + static_cast<size_t>(req) * conf_rows_;
+      device_sample_draft_confidence(picker_->outcomes_table(),
+                                     DevicePicker::outcomes_slot_stride(),
+                                     request, depth_, dst, model_->stream());
+      src = dst;
+    }
+    glm_publish_f32(src, h_conf_ + static_cast<size_t>(req) * conf_rows_, conf_rows_,
+                    d_conf_seq_ + req, h_conf_seq_ + req, model_->stream());
+  }
+  // The eager draft's confidence (a slot's open, or a host re-draft): no
+  // replay of the slot is in flight, so the mirror is simply copied.
+  void refresh_confidence_eagerly(int req) {
+    if (!schedule_) return;
+    if constexpr (Model::kVerifyConfidence) {
+      DGPP_CUDA_OK(cudaMemcpyAsync(
+          h_conf_ + static_cast<size_t>(req) * conf_rows_,
+          model_->device_confidence() + static_cast<size_t>(req) * conf_rows_,
+          sizeof(float) * static_cast<size_t>(conf_rows_), cudaMemcpyDeviceToHost,
+          model_->stream()));
+      DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
+      conf_stale_[static_cast<size_t>(req)] = false;
+    } else {
+      // The eager chain picks reuse one picker slot: no per-position
+      // outcomes to read. The next replay publishes; this step verifies
+      // the whole block.
+      conf_stale_[static_cast<size_t>(req)] = true;
+    }
+  }
+  // The depth option the next scalar replay of `req` verifies at: the
+  // full block for a slot whose drafts no publication describes (fresh
+  // after a host re-draft, or sampled), else the policy over the block
+  // confidence the slot's last replay published — waited for here, at its
+  // tail, so this step's launch follows that replay's end (the scheduled
+  // path gives up the launch-ahead of the pipelined replay: the graph to
+  // launch is not known until the confidence is).
+  // The slot's published block confidence for the coming step, or null
+  // when the slot must verify the whole block (fresh, re-drafted eagerly,
+  // or sampled: no confidence stands for its drafts). Waits for the last
+  // replay's publication (the pinned sequence).
+  const float* wait_confidence(int req) {
+    if (conf_stale_[static_cast<size_t>(req)] || sampled_slot(req)) return nullptr;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(pick_timeout_ms_);
+    uint64_t spins = 0;
+    while (__atomic_load_n(h_conf_seq_ + req, __ATOMIC_ACQUIRE) <
+           conf_seq_[static_cast<size_t>(req)]) {
+      if ((++spins & 255) == 0) {
+        if (std::chrono::steady_clock::now() > deadline)
+          throw std::runtime_error(
+              "graph engine: the replay's confidence did not publish within "
+              "the pick timeout");
+        std::this_thread::yield();
+      }
+    }
+    return h_conf_ + static_cast<size_t>(req) * conf_rows_;
+  }
+  // The option index whose depth covers k drafts (rounding up).
+  int depth_option_for(int k) const {
+    k = std::clamp(k, sched_min_depth_, depth_);
+    for (size_t di = 0; di < depth_options_.size(); ++di)
+      if (depth_options_[di] >= k) return static_cast<int>(di);
+    return full_depth_option();
+  }
+
+  int choose_depth_option(int req) {
+    const float* conf = wait_confidence(req);
+    if (conf == nullptr) {
+      ++sched_full_forced_;
+      return full_depth_option();
+    }
+    int k = scheduled_verify_depth(conf, depth_, sched_row_ms_, sched_lambda_);
+    if (depth_hook_) k = depth_hook_(req, k, conf, depth_);
+    return depth_option_for(k);
+  }
+
+  // The batch's one depth (verify_schedule.hpp, the mean-survival rule over
+  // the live slots): the whole block when any slot must verify it; a test
+  // hook forces per slot, the batch taking the deepest.
+  int choose_batch_depth_option(const std::vector<int>& reqs) {
+    std::vector<const float*> confs;
+    confs.reserve(reqs.size());
+    for (const int req : reqs) {
+      const float* conf = wait_confidence(req);
+      if (conf == nullptr) {
+        ++sched_full_forced_;
+        return full_depth_option();
+      }
+      confs.push_back(conf);
+    }
+    int k = scheduled_verify_depth_batch(confs.data(), static_cast<int>(confs.size()), depth_,
+                                         sched_row_ms_, sched_lambda_);
+    if (depth_hook_) {
+      int forced = 0;
+      for (size_t i = 0; i < reqs.size(); ++i)
+        forced = std::max(forced, depth_hook_(reqs[i], k, confs[i], depth_));
+      k = forced;
+    }
+    return depth_option_for(k);
+  }
+
+  // The MTP replay of batch family `family` verifying `rows` rows per
+  // slot (rows_per_request_ for the full block, fewer for a reduced-depth
+  // variant: the feeds compacted, the draft over those rows, the block's
+  // full width drafted and fed back, every slot's confidence published).
+  void record_batch_mtp(int family, int rows) {
+    BatchFamily& fam = families_.at(static_cast<size_t>(family));
+    const int k = fam.requests;
+    const int index = batch_index(family);
+    const bool reduced = rows != rows_per_request_;
+    const int total = k * rows;
+    model_->session_graph_capture_batch(rows, k, reduced ? rows_per_request_ : 0);
+    record_stage_gate(index, 0, total);
+    picker_->record(model_->stream(), verify_pick_inputs(k, rows));
+    glm_publish_seq(d_verdict_seq_ + index, h_verdict_seq_ + index,
+                    model_->stream());
+    snapshot_verify_rows(/*req=*/0, total, /*first_row=*/0);
+    model_->session_graph_capture_commit_batch(picker_->device_verdict(0));
+    model_->session_graph_capture_draft_batch(picker_->device_verdict(0));
+    DevicePicker::Inputs draft_b =
+        draft_pick_inputs(picker_->device_verdict(0), k, rows);
+    arm_draft_sampling_batch(draft_b, /*draft_index=*/0);
+    picker_->record(model_->stream(), draft_b);
+    if constexpr (Model::kBatchedDraftChain) {
+      // Depth >= 2: every slot's chain rows, one pick each, and the
+      // feed of every draft per request.
+      std::vector<const PickVerdict*> drafts{picker_->device_verdict(1)};
+      for (int c = 1; c < depth_; ++c) {
+        model_->session_graph_capture_draft_chain_batch(
+            picker_->device_verdict(0), picker_->device_verdict(c),
+            /*index=*/c - 1, /*first=*/c == 1, /*last=*/c == depth_ - 1);
+        DevicePicker::Inputs chain_b = chain_pick_inputs(k, 1 + c);
+        arm_draft_sampling_batch(chain_b, /*draft_index=*/c);
+        picker_->record(model_->stream(), chain_b);
+        drafts.push_back(picker_->device_verdict(1 + c));
+      }
+      model_->session_graph_capture_next_tokens_batch(drafts);
+    } else {
+      model_->session_graph_capture_next_tokens_batch(
+          picker_->device_verdict(1));
+    }
+    // Scheduling: every slot of the batch publishes its block confidence
+    // (the next replay of any of them, scalar or batched, is scheduled).
+    for (int q = 0; q < k; ++q) record_confidence_publish(q, /*request=*/q);
+  }
+
+  // The reduced-depth variant `di` of batch family `family`.
+  void ensure_sched_batch_graph(int family, int di) {
+    BatchFamily& fam = families_.at(static_cast<size_t>(family));
+    std::array<cudaGraphExec_t, 2>& execs = fam.sched_execs.at(static_cast<size_t>(di));
+    if (execs[0] != nullptr) return;
+    const int rows = 1 + depth_options_.at(static_cast<size_t>(di));
+    for (int parity = 0; parity < 2; ++parity)
+      execs[static_cast<size_t>(parity)] = capture_variant(
+          sched_batch_variant(family, di, parity),
+          [&] { record_batch_mtp(family, rows); });
+    model_->session_graph_use_batch_contract(rows_per_request_, fam.requests);
+    DGPP_LOG_INFO(
+        "rank {}: serving reduced-depth row-batched graph variants {}/{} "
+        "captured for {} slots x {} rows ({} of the {} drafts)",
+        rank_, sched_batch_variant(family, di, 0), sched_batch_variant(family, di, 1),
+        fam.requests, rows, rows - 1, depth_);
+  }
+
   void ensure_batch_graph(int family) {
     BatchFamily& fam = families_.at(static_cast<size_t>(family));
     if (fam.execs[0] != nullptr) return;
@@ -1374,43 +1823,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     const int rows = k * rows_per_request_;
     const int index = batch_index(family);
     const auto build = [&](int parity) {
+      (void)parity;
+      if (mtp) {
+        record_batch_mtp(family, rows_per_request_);
+        return;
+      }
       model_->session_graph_capture_batch(rows_per_request_, k);
       record_stage_gate(index, 0, rows);
       picker_->record(model_->stream(), verify_pick_inputs(k));
-      (void)parity;
       glm_publish_seq(d_verdict_seq_ + index, h_verdict_seq_ + index,
                       model_->stream());
-      if (mtp) snapshot_verify_rows(/*req=*/0, rows, /*first_row=*/0);
       model_->session_graph_capture_commit_batch(picker_->device_verdict(0));
-      if (mtp) {
-        model_->session_graph_capture_draft_batch(
-            picker_->device_verdict(0));
-        DevicePicker::Inputs draft_b =
-            draft_pick_inputs(picker_->device_verdict(0), k);
-        arm_draft_sampling_batch(draft_b, /*draft_index=*/0);
-        picker_->record(model_->stream(), draft_b);
-        if constexpr (Model::kBatchedDraftChain) {
-          // Depth >= 2: every slot's chain rows, one pick each, and the
-          // feed of every draft per request.
-          std::vector<const PickVerdict*> drafts{picker_->device_verdict(1)};
-          for (int c = 1; c < depth_; ++c) {
-            model_->session_graph_capture_draft_chain_batch(
-                picker_->device_verdict(0), picker_->device_verdict(c),
-                /*index=*/c - 1, /*first=*/c == 1, /*last=*/c == depth_ - 1);
-            DevicePicker::Inputs chain_b = chain_pick_inputs(k, 1 + c);
-            arm_draft_sampling_batch(chain_b, /*draft_index=*/c);
-            picker_->record(model_->stream(), chain_b);
-            drafts.push_back(picker_->device_verdict(1 + c));
-          }
-          model_->session_graph_capture_next_tokens_batch(drafts);
-        } else {
-          model_->session_graph_capture_next_tokens_batch(
-              picker_->device_verdict(1));
-        }
-      } else {
-        model_->session_graph_capture_verify_next_tokens_batch(
-            picker_->device_verdict(0));
-      }
+      model_->session_graph_capture_verify_next_tokens_batch(
+          picker_->device_verdict(0));
     };
     for (int parity = 0; parity < 2; ++parity)
       fam.execs[static_cast<size_t>(parity)] = capture_variant(
@@ -1455,15 +1880,40 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // replay stays in flight (the bus holds two windows).
   void launch(Replay r) {
     while (inflight_.size() >= 2) settle_front();
-    const int variant = r.batched ? batch_variant(r.family, r.parity)
-                                  : scalar_variant(r.req, r.parity);
+    const bool reduced =
+        r.depth_option >= 0 && r.depth_option < full_depth_option();
+    const int variant =
+        r.batched ? (reduced ? sched_batch_variant(r.family, r.depth_option, r.parity)
+                             : batch_variant(r.family, r.parity))
+        : reduced ? sched_variant(r.req, r.depth_option, r.parity)
+                  : scalar_variant(r.req, r.parity);
     cudaGraphExec_t exec =
-        r.batched ? families_[static_cast<size_t>(r.family)]
-                        .execs[static_cast<size_t>(r.parity)]
+        r.batched ? (reduced ? families_[static_cast<size_t>(r.family)]
+                                   .sched_execs[static_cast<size_t>(r.depth_option)]
+                                               [static_cast<size_t>(r.parity)]
+                             : families_[static_cast<size_t>(r.family)]
+                                   .execs[static_cast<size_t>(r.parity)])
+        : reduced ? sched_execs_[static_cast<size_t>(r.req)]
+                                [static_cast<size_t>(r.depth_option)]
+                                [static_cast<size_t>(r.parity)]
                   : scalar_execs_[static_cast<size_t>(r.req)]
                                  [static_cast<size_t>(r.parity)];
     r.verdict_seq = ++verdict_seq_[static_cast<size_t>(
         r.batched ? batch_index(r.family) : r.req)];
+    if (schedule_ && model_->mtp_enabled()) {
+      // Every MTP replay publishes the block confidence of the slots it
+      // drafts for; the next scalar step of such a slot waits for it.
+      if (r.batched) {
+        const int k = families_[static_cast<size_t>(r.family)].requests;
+        for (int q = 0; q < k; ++q) {
+          ++conf_seq_[static_cast<size_t>(q)];
+          conf_stale_[static_cast<size_t>(q)] = false;
+        }
+      } else {
+        ++conf_seq_[static_cast<size_t>(r.req)];
+        conf_stale_[static_cast<size_t>(r.req)] = false;
+      }
+    }
     std::string err;
     if (!bus_->graph_replay_arm(&err, variant))
       throw std::runtime_error("graph engine replay arm: " + err);
@@ -1603,16 +2053,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
   }
 
+  // `rows`: the verify's rows this replay decided (rows_per_request_, or a
+  // scheduled scalar replay's 1 + verified drafts).
   std::vector<int32_t> collect_verdict(int req, int verdict_request,
-                                       bool batched) {
+                                       bool batched, int rows = -1) {
+    if (rows < 0) rows = rows_per_request_;
     const PickVerdict verify = picker_->verdict(0, verdict_request);
-    if (verify.rows != rows_per_request_ || verify.accepted < 1 ||
-        verify.accepted > rows_per_request_)
+    if (verify.rows != rows || verify.accepted < 1 ||
+        verify.accepted > rows)
       throw std::runtime_error(
           "graph engine: invalid verdict for slot " + std::to_string(req) +
           " (rows " + std::to_string(verify.rows) + ", accepted " +
           std::to_string(verify.accepted) + ")");
-    model_->session_graph_settle(req, verify.accepted);
+    model_->session_graph_settle(req, verify.accepted, rows);
     // The prefix cache's hop snapshot (M7 under the multi-row step): armed
     // by the scheduler for the aligned position row 1 sat on; taken from
     // the state after row 0 when row 1 stood — here, before another slot's
@@ -1631,7 +2084,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
               std::to_string(verify.accepted) + "-row step, the armed hop expects " +
               std::to_string(hop + rows_after));
         arena_.snapshot_post_row0(req, slot, hop,
-                                  batched ? req * rows_per_request_ : 0,
+                                  batched ? req * rows : 0,
                                   rows_after);
       }
     }
@@ -1648,8 +2101,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     }
     int32_t next = verify.next;
     // Per-position acceptance: draft p (1-based) stood when
-    // the verdict accepted more than p rows.
-    for (int p = 0; p + 1 < rows_per_request_; ++p) {
+    // the verdict accepted more than p rows. A scheduled replay attempts
+    // only the positions it verified.
+    for (int p = 0; p + 1 < rows; ++p) {
       const size_t pi = static_cast<size_t>(p);
       ++mtp_attempts_[pi];
       ++slot_mtp_attempts_[static_cast<size_t>(req)][pi];
@@ -1697,19 +2151,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           "accepted_draft {} counter {} winners {}/{} accepted {} of {}",
           rank_, req, o.fallback_row, o.accepted_draft, o.counter,
           verify.winners[0], verify.winners[1], verify.accepted,
-          rows_per_request_);
+          rows);
       if (o.fallback_row < 0) {
         // The device's draws: one per draft that stood, two for the reject
         // that ended the chain (the test and the residual), one for the
         // last row's plain sample when every draft stood.
-        const uint64_t draws = verify.accepted < rows_per_request_
+        const uint64_t draws = verify.accepted < rows
                                    ? static_cast<uint64_t>(verify.accepted) + 1
-                                   : static_cast<uint64_t>(rows_per_request_);
+                                   : static_cast<uint64_t>(rows);
         if (o.counter != rng.counter + draws)
           throw std::runtime_error(
               "graph engine: the device consumed " +
               std::to_string(o.counter - rng.counter) + " draws for a " +
-              std::to_string(rows_per_request_) + "-row step that committed " +
+              std::to_string(rows) + "-row step that committed " +
               std::to_string(verify.accepted) + " (expected " +
               std::to_string(draws) + ")");
         rng.counter = o.counter;  // the draft pick draws on its own stream
@@ -1934,6 +2388,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // drawn from the proposal it is tested against).
     invalidate_proposal(req);
     chain_drafts_eagerly(req);
+    // The graph published the provisional drafts' confidence; the true
+    // drafts' is on the device only. Copy it (no replay of this slot is
+    // in flight: the fallback drained).
+    refresh_confidence_eagerly(req);
     mtp_redrafted_ = true;
     {
       std::vector<int64_t> feed{next};
@@ -1949,12 +2407,25 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
 
   std::vector<int32_t> step_scalar(int req) {
     ensure_scalar_graph(req);
+    // The scheduled verify depth: the option (and its rows) this replay
+    // verifies at; the full block when scheduling is off.
+    int di = -1;
+    int rows = rows_per_request_;
+    if (schedule_ && model_->mtp_enabled()) {
+      di = choose_depth_option(req);
+      rows = 1 + depth_options_[static_cast<size_t>(di)];
+      if (di < full_depth_option()) ensure_sched_graph(req, di);
+      ++sched_hist_[static_cast<size_t>(di)];
+    }
     // The pinned row metadata (the MTP feed itself is device-resident; a
     // plain T=1 graph uploads the staged token at its start).
-    if (model_->mtp_enabled())
-      model_->session_graph_stage(req, feed_of(req));
-    else
+    if (model_->mtp_enabled()) {
+      std::vector<int64_t> feed = feed_of(req);
+      if (rows < static_cast<int>(feed.size())) feed.resize(static_cast<size_t>(rows));
+      model_->session_graph_stage(req, feed);
+    } else {
       model_->session_graph_stage(req, pending_[static_cast<size_t>(req)]);
+    }
     // Launch first: the window armed and the graph enqueued behind the
     // previous replay's tail. Then settle that tail (its drafts are this
     // replay's fed rows, already on the device; the masks need them),
@@ -1965,13 +2436,15 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     r.parity = scalar_parity_[static_cast<size_t>(req)];
     scalar_parity_[static_cast<size_t>(req)] ^= 1;
     r.reqs = {req};
+    r.depth_option = di;
+    r.rows = rows;
     launch(std::move(r));
     settle_older();
     stage_masks(req);
     publish_stage(req);
     if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     wait_verdict(inflight_.back());
-    return collect_verdict(req, /*verdict_request=*/0, /*batched=*/false);
+    return collect_verdict(req, /*verdict_request=*/0, /*batched=*/false, rows);
   }
 
   // The slot's masks for the coming replay (M6 6g): row 0 under the
@@ -1984,29 +2457,54 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   void stage_masks(int req) {
     if (!sampling_) return;
     std::unique_ptr<text::GrammarState>& grammar = grammar_[static_cast<size_t>(req)];
-    if (!grammar) return;  // the headers are zero (configure/close)
+    uint32_t* h = h_masks_ + static_cast<size_t>(req) * rows_per_request_ * mask_stride_;
+    if (!grammar) {
+      // The headers are zero (configure/close) — unless a reduced-depth
+      // batch staged its compact layout over these rows meanwhile.
+      if (schedule_)
+        for (int t = 0; t < rows_per_request_; ++t) h[static_cast<size_t>(t) * mask_stride_] = 0u;
+      return;
+    }
+    stage_mask_rows(req, rows_per_request_, h);
+    // The device table takes the rows through the replay's upload node,
+    // behind the stage handshake (record_stage_gate).
+  }
+  // Slot `req`'s masks for `rows` rows into the pinned rows at `h`: row 0
+  // under the grammar's current state, row t under the state advanced by
+  // the drafts before it (a draft outside its mask kills the copy: the
+  // rows after stay unconstrained and are discarded with it).
+  void stage_mask_rows(int req, int rows, uint32_t* h) {
+    std::unique_ptr<text::GrammarState>& grammar = grammar_[static_cast<size_t>(req)];
     text::TokenMask* m = &masks_[static_cast<size_t>(req) * rows_per_request_];
     grammar->mask(&m[0]);
-    if (rows_per_request_ > 1) {
-      // Row t under the state advanced by the drafts before it (a draft
-      // outside its mask kills the copy: the rows after stay unconstrained
-      // and are discarded with it).
+    if (rows > 1) {
       text::GrammarState after = *grammar;
       const std::vector<int32_t>& drafts = drafts_[static_cast<size_t>(req)];
-      for (int t = 1; t < rows_per_request_; ++t) {
+      for (int t = 1; t < rows; ++t) {
         after.advance(drafts[static_cast<size_t>(t - 1)]);
         after.mask(&m[t]);
       }
     }
-    uint32_t* h = h_masks_ + static_cast<size_t>(req) * rows_per_request_ * mask_stride_;
-    for (int t = 0; t < rows_per_request_; ++t) {
+    for (int t = 0; t < rows; ++t) {
       uint32_t* row = h + static_cast<size_t>(t) * mask_stride_;
       row[0] = m[t].constrained() ? static_cast<uint32_t>(m[t].allowed) : 0u;
       if (m[t].constrained())
         std::copy(m[t].words.begin(), m[t].words.end(), row + 1);
     }
-    // The device table takes the rows through the replay's upload node,
-    // behind the stage handshake (record_stage_gate).
+  }
+  // The reduced-depth batch's masks: the k slots' rows compacted at
+  // `rows` per slot (the pick's row r is mask row r), every header
+  // written (zero for an unconstrained or closed slot).
+  void stage_masks_compact(int k, int rows) {
+    if (!sampling_) return;
+    for (int q = 0; q < k; ++q) {
+      uint32_t* h = h_masks_ + static_cast<size_t>(q) * rows * mask_stride_;
+      if (live_[static_cast<size_t>(q)] && grammar_[static_cast<size_t>(q)]) {
+        stage_mask_rows(q, rows, h);
+      } else {
+        for (int t = 0; t < rows; ++t) h[static_cast<size_t>(t) * mask_stride_] = 0u;
+      }
+    }
   }
   // The gathered row is the row the device decided over iff its prefix's
   // covered mass under the device's normalizer is the device's, bit for
@@ -2088,6 +2586,16 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     DGPP_CUDA_OK(cudaMemcpyAsync(d_specs_ + req, h_specs_ + req,
                                  sizeof(SampleSpec), cudaMemcpyHostToDevice,
                                  model_->stream()));
+    if (d_draft_specs_ != nullptr) {
+      // The draft picks' spec: the slot's, reporting logprobs when the
+      // scheduled verify depth reads the draft head's probabilities (the
+      // full path decides the same argmax under the raw normalizer).
+      SampleSpec draft = spec;
+      if (draft_full_path_) draft.logprobs = std::max(0, spec.logprobs);
+      DGPP_CUDA_OK(cudaMemcpyAsync(d_draft_specs_ + req, &draft,
+                                   sizeof(SampleSpec), cudaMemcpyHostToDevice,
+                                   model_->stream()));
+    }
     DGPP_CUDA_OK(cudaStreamSynchronize(model_->stream()));
   }
   void push_counter(int req) {
@@ -2230,6 +2738,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     std::array<cudaGraphExec_t, 2> execs{{nullptr, nullptr}};
     std::array<cudaEvent_t, 2> end_events{{nullptr, nullptr}};
     int parity = 0;
+    // The scheduled verify depth: the family's reduced-depth variants
+    // [option] (the last option is `execs`) and its replays per option.
+    std::vector<std::array<cudaGraphExec_t, 2>> sched_execs;
+    std::vector<uint64_t> sched_hist;
   };
   std::vector<BatchFamily> families_;
   std::vector<uint64_t> family_steps_;
@@ -2262,6 +2774,31 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // (depth_ of them; depth 1 is the two-row step as built).
   std::vector<std::vector<int32_t>> drafts_;
   int depth_ = 0;
+  // ---- the confidence-scheduled verify depth (configure_verify_schedule) ----
+  bool schedule_ = false;
+  float sched_row_ms_ = 0.f;
+  float sched_lambda_ = 0.f;
+  int sched_min_depth_ = 1;
+  std::vector<int> depth_options_;  // ascending; the last is depth_ (the full block)
+  int conf_rows_ = 0;               // confidence entries per slot (the block)
+  float* h_conf_ = nullptr;         // pinned, mapped [slots][conf_rows_]: the published logits
+  uint64_t* h_conf_seq_ = nullptr;  // pinned, mapped [slots]: the publication counter
+  uint64_t* d_conf_seq_ = nullptr;  // device [slots]
+  std::vector<uint64_t> conf_seq_;  // per slot: the publications the host expects
+  std::vector<bool> conf_stale_;    // per slot: no publication describes its drafts
+  // The reduced-depth scalar variants [slot][option] (the last option is
+  // the slot's scalar variant in scalar_execs_).
+  std::vector<std::vector<std::array<cudaGraphExec_t, 2>>> sched_execs_;
+  std::vector<uint64_t> sched_hist_;  // per option: the scalar replays at that depth
+  uint64_t sched_full_forced_ = 0;    // steps held at the full block (fresh/sampled slot)
+  std::function<int(int, int, const float*, int)> depth_hook_;  // tests
+  // A family without a confidence head takes the draft-probability
+  // confidence (device_sample_draft_confidence): its draft picks run the
+  // sampler's full path so their outcomes carry the draft's log-probability
+  // — the picks read a spec table whose rows report logprobs.
+  bool draft_full_path_ = false;
+  SampleSpec* d_draft_specs_ = nullptr;  // device [slots]: the draft picks' specs
+  float* d_draft_conf_ = nullptr;        // device [slots][conf_rows_]: the gathered logits
   std::vector<bool> live_;
   std::vector<bool> reserved_;
   PrefixArena<Model> arena_;  // the prefix cache's snapshot slots (M7)

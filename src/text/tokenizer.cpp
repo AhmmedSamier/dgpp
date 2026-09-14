@@ -25,6 +25,26 @@ constexpr const char* kSplitPattern =
 constexpr const char* kSplitPatternQwen =
     "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}"
     "| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+// The DeepSeek-V4.1 pre-tokenizer: THREE Split stages (each Isolated,
+// applied to the previous stage's pieces) then ByteLevel. Stage 1 cuts
+// number runs into pieces of at most three; stage 2 isolates CJK runs
+// (the three literal ranges); stage 3's alternatives, leftmost-first:
+//   B1 [ASCII punct][A-Za-z]+           one ASCII punctuation/symbol char + ASCII letters
+//   B2 [^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+   optional prefix (whitespace, format
+//                                      or control chars — numbers never
+//                                      reach this stage) + a letter/mark run
+//   B3  ?[\p{P}\p{S}]+[\r\n]*           optional SPACE + a punctuation/symbol
+//                                      run + trailing CR/LFs
+//   B4-B6 the whitespace alternatives of the GLM pattern (A5-A7)
+// Text no alternative matches (format and control characters outside a
+// letter run's prefix) stays a piece of its own: Split's Isolated
+// behaviour keeps the gaps between matches.
+constexpr const char* kSplitPatternDsv41Numbers = "\\p{N}{1,3}";
+// The three literal CJK ranges (raw codepoints in the file, decoded by the JSON reader).
+constexpr const char* kSplitPatternDsv41Cjk = "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+";
+// CR and LF stand in the file as the control characters themselves.
+constexpr const char* kSplitPatternDsv41Main =
+    "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+";
 
 [[noreturn]] void reject(const std::string& what) {
   throw std::runtime_error("glm_tokenizer: " + what);
@@ -290,6 +310,180 @@ class SplitScanner {
   std::vector<size_t> starts_;  // size = cps+1 (end sentinel)
 };
 
+// The DeepSeek-V4.1 scanner (kSplitPatternDsv41*): the three stages over
+// codepoints. Every stage's pieces bound the next stage's matches (HF's
+// Sequence runs each pre-tokenizer on the splits the previous one left,
+// so the lookahead of \s+(?!\S) sees a piece's end as the text's end).
+class Dsv41Scanner {
+ public:
+  Dsv41Scanner(std::string_view text, std::vector<std::string_view>* out) : text_(text), out_(out) {
+    size_t i = 0;
+    while (i < text_.size()) {
+      const int len = utf8_len(text_[i]);
+      if (len < 1 || i + static_cast<size_t>(len) > text_.size()) reject("input is not valid UTF-8");
+      for (int k = 1; k < len; ++k) {
+        const unsigned char cont = static_cast<unsigned char>(text_[i + k]);
+        if ((cont & 0xC0) != 0x80) reject("input is not valid UTF-8 (bad continuation byte)");
+      }
+      uint32_t raw = 0;
+      for (int k = 0; k < len; ++k) raw = (raw << 8) | static_cast<unsigned char>(text_[i + k]);
+      cps_.push_back(decode_utf8(raw, len));
+      starts_.push_back(i);
+      i += static_cast<size_t>(len);
+    }
+    starts_.push_back(text_.size());
+  }
+
+  void run() {
+    // Stage 1: number runs in pieces of at most three; the spans between
+    // go on to stage 2.
+    const size_t n = cps_.size();
+    size_t i = 0;
+    while (i < n) {
+      if (number(i)) {
+        size_t j = i;
+        while (j < n && j - i < 3 && number(j)) ++j;
+        emit(i, j);
+        i = j;
+        continue;
+      }
+      size_t e = i;
+      while (e < n && !number(e)) ++e;
+      stage2(i, e);
+      i = e;
+    }
+  }
+
+ private:
+  static int utf8_len(char c) {
+    const unsigned char b = static_cast<unsigned char>(c);
+    if (b < 0x80) return 1;
+    if ((b & 0xE0) == 0xC0) return 2;
+    if ((b & 0xF0) == 0xE0) return 3;
+    if ((b & 0xF8) == 0xF0) return 4;
+    return -1;
+  }
+  static uint32_t decode_utf8(uint32_t raw, int len) {
+    switch (len) {
+      case 1: return raw & 0x7F;
+      case 2: return ((raw >> 8) & 0x1F) << 6 | (raw & 0x3F);
+      case 3: return ((raw >> 16) & 0x0F) << 12 | ((raw >> 8) & 0x3F) << 6 | (raw & 0x3F);
+      default: return ((raw >> 24) & 0x07) << 18 | ((raw >> 16) & 0x3F) << 12 | ((raw >> 8) & 0x3F) << 6 | (raw & 0x3F);
+    }
+  }
+  void emit(size_t a, size_t b) {
+    if (b > a) out_->push_back(text_.substr(starts_[a], starts_[b] - starts_[a]));
+  }
+  bool number(size_t i) const { return unicode::is_number(cps_[i]); }
+  bool cjk(size_t i) const {
+    const uint32_t c = cps_[i];
+    return (c >= 0x4E00 && c <= 0x9FA5) || (c >= 0x3040 && c <= 0x309F) || (c >= 0x30A0 && c <= 0x30FF);
+  }
+  bool letter(size_t i) const { return unicode::is_letter(cps_[i]); }
+  bool mark(size_t i) const { return unicode::is_mark(cps_[i]); }
+  bool run_char(size_t i) const { return letter(i) || mark(i); }
+  bool ps(size_t i) const { return unicode::is_punctuation(cps_[i]) || unicode::is_symbol(cps_[i]); }
+  bool ws(size_t i) const { return unicode::is_white_space(cps_[i]); }
+  bool crlf(size_t i) const { return cps_[i] == '\r' || cps_[i] == '\n'; }
+  static bool ascii_punct(uint32_t c) {
+    return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) || (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E);
+  }
+  static bool ascii_letter(uint32_t c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+
+  // Stage 2 over [a, b): CJK runs are pieces; the spans between go on to
+  // stage 3.
+  void stage2(size_t a, size_t b) {
+    size_t k = a;
+    while (k < b) {
+      size_t j = k;
+      if (cjk(k)) {
+        while (j < b && cjk(j)) ++j;
+        emit(k, j);
+      } else {
+        while (j < b && !cjk(j)) ++j;
+        stage3(k, j);
+      }
+      k = j;
+    }
+  }
+
+  // Stage 3 over [a, b): the main pattern's matches, the gaps between
+  // them pieces of their own.
+  void stage3(size_t a, size_t b) {
+    size_t k = a;
+    size_t gap = b;  // b: no open gap
+    while (k < b) {
+      const size_t end = match3(k, b);
+      if (end == k) {
+        if (gap == b) gap = k;
+        ++k;
+        continue;
+      }
+      if (gap != b) {
+        emit(gap, k);
+        gap = b;
+      }
+      emit(k, end);
+      k = end;
+    }
+    if (gap != b) emit(gap, b);
+  }
+
+  // The end of the leftmost-first match at k within [k, b), or k when no
+  // alternative matches.
+  size_t match3(size_t k, size_t b) const {
+    // B1: one ASCII punctuation/symbol character + ASCII letters.
+    if (ascii_punct(cps_[k]) && k + 1 < b && ascii_letter(cps_[k + 1])) {
+      size_t j = k + 2;
+      while (j < b && ascii_letter(cps_[j])) ++j;
+      return j;
+    }
+    // B2: optional prefix + a letter/mark run.
+    if (run_char(k)) {
+      size_t j = k + 1;
+      while (j < b && run_char(j)) ++j;
+      return j;
+    }
+    if (!crlf(k) && !letter(k) && !ps(k) && k + 1 < b && run_char(k + 1)) {
+      size_t j = k + 2;
+      while (j < b && run_char(j)) ++j;
+      return j;
+    }
+    // B3: optional literal space + a punctuation/symbol run + CR/LFs.
+    {
+      size_t j = k;
+      if (cps_[k] == ' ' && k + 1 < b && ps(k + 1)) j = k + 1;
+      if (j < b && ps(j)) {
+        while (j < b && ps(j)) ++j;
+        while (j < b && crlf(j)) ++j;
+        return j;
+      }
+    }
+    // B4: \s*[\r\n]+ — through the whitespace run's last CR/LF.
+    {
+      size_t j = k;
+      while (j < b && ws(j)) ++j;
+      size_t last_nl = k;
+      for (size_t x = k; x < j; ++x)
+        if (crlf(x)) last_nl = x + 1;
+      if (last_nl > k) return last_nl;
+      // B5: \s+(?!\S) — the whole run at the piece's end, one short before
+      // a non-space (a run of >= 2 then); B6: \s+ — the run.
+      if (j > k) {
+        if (j == b) return j;
+        if (j - k >= 2) return j - 1;
+        return j;
+      }
+    }
+    return k;
+  }
+
+  std::string_view text_;
+  std::vector<std::string_view>* out_;
+  std::vector<uint32_t> cps_;
+  std::vector<size_t> starts_;
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -312,9 +506,16 @@ Tokenizer Tokenizer::load(const std::string& path) {
   if (const minijson::Value* n = root.find("normalizer")) {
     if (!n->is_null()) {
       const minijson::Value* ty = n->find("type");
-      if (!ty || !ty->is_string() || ty->as_string() != "NFC")
-        reject("normalizer is neither null nor NFC (the two implemented)");
-      t.nfc_ = true;
+      if (ty && ty->is_string() && ty->as_string() == "NFC") {
+        t.nfc_ = true;
+      } else if (ty && ty->is_string() && ty->as_string() == "Sequence") {
+        // DeepSeek-V4.1: an empty Sequence — no normalizer.
+        const minijson::Value* list = n->find("normalizers");
+        if (!list || !list->is_array() || !list->items().empty())
+          reject("normalizer Sequence is not empty (only null, NFC and the empty Sequence are implemented)");
+      } else {
+        reject("normalizer is neither null, NFC nor the empty Sequence (the three implemented)");
+      }
     }
   }
 
@@ -324,22 +525,36 @@ Tokenizer Tokenizer::load(const std::string& path) {
       want_string(*pre, "type", "pre_tokenizer") != "Sequence")
     reject("pre_tokenizer is not the pinned Sequence");
   const auto& pres = field(*pre, "pretokenizers", "pre_tokenizer").items();
-  if (pres.size() != 2 ||
-      want_string(pres[0], "type", "pre_tokenizer[0]") != "Split" ||
-      want_string(pres[1], "type", "pre_tokenizer[1]") != "ByteLevel")
-    reject("pre_tokenizer is not [Split, ByteLevel]");
-  const minijson::Value& pattern = field(pres[0], "pattern", "Split");
-  const std::string_view regex = want_string(pattern, "Regex", "Split.pattern");
-  if (regex == kSplitPattern) t.pattern_ = 0;
-  else if (regex == kSplitPatternQwen) t.pattern_ = 1;
-  else
-    reject("Split pattern differs from both pinned regexes (the scanner "
-           "hardcodes them — update the scanner or the checkpoint)");
-  if (want_string(pres[0], "behavior", "Split") != "Isolated")
-    reject("Split behavior is not Isolated");
-  if (want_bool(pres[1], "use_regex", "ByteLevel"))
+  const size_t splits = pres.size() >= 1 ? pres.size() - 1 : 0;
+  if ((splits != 1 && splits != 3) || want_string(pres[splits], "type", "pre_tokenizer[last]") != "ByteLevel")
+    reject("pre_tokenizer is neither [Split, ByteLevel] nor [Split x 3, ByteLevel]");
+  for (size_t k = 0; k < splits; ++k) {
+    if (want_string(pres[k], "type", "pre_tokenizer[k]") != "Split") reject("pre_tokenizer stage is not a Split");
+    if (want_string(pres[k], "behavior", "Split") != "Isolated") reject("Split behavior is not Isolated");
+    if (const minijson::Value* inv = pres[k].find("invert"); inv && inv->kind() == minijson::Value::Kind::Bool && inv->as_bool())
+      reject("Split invert must be false");
+  }
+  const auto split_regex = [&](size_t k) {
+    const minijson::Value& pattern = field(pres[k], "pattern", "Split");
+    return want_string(pattern, "Regex", "Split.pattern");
+  };
+  if (splits == 1) {
+    const std::string_view regex = split_regex(0);
+    if (regex == kSplitPattern) t.pattern_ = 0;
+    else if (regex == kSplitPatternQwen) t.pattern_ = 1;
+    else
+      reject("Split pattern differs from both pinned regexes (the scanner "
+             "hardcodes them — update the scanner or the checkpoint)");
+  } else {
+    if (split_regex(0) != kSplitPatternDsv41Numbers || split_regex(1) != kSplitPatternDsv41Cjk ||
+        split_regex(2) != kSplitPatternDsv41Main)
+      reject("the three Split patterns differ from the pinned DeepSeek-V4.1 regexes (the scanner "
+             "hardcodes them — update the scanner or the checkpoint)");
+    t.pattern_ = 2;
+  }
+  if (want_bool(pres[splits], "use_regex", "ByteLevel"))
     reject("ByteLevel use_regex must be false (map-only)");
-  if (want_bool(pres[1], "add_prefix_space", "ByteLevel"))
+  if (want_bool(pres[splits], "add_prefix_space", "ByteLevel"))
     reject("ByteLevel add_prefix_space must be false");
 
   // --- decoder: ByteLevel (the reverse map) ----------------------------
@@ -375,7 +590,11 @@ Tokenizer Tokenizer::load(const std::string& path) {
   const minijson::Value* model = root.find("model");
   if (!model || want_string(*model, "type", "model") != "BPE")
     reject("model.type is not BPE");
-  t.ignore_merges_ = want_bool(*model, "ignore_merges", "model");
+  // ignore_merges: absent (DeepSeek-V4.1) means false.
+  if (const minijson::Value* im = model->find("ignore_merges"); im && !im->is_null())
+    t.ignore_merges_ = want_bool(*model, "ignore_merges", "model");
+  else
+    t.ignore_merges_ = false;
   if (want_bool(*model, "byte_fallback", "model"))
     reject("model.byte_fallback must be false");
   if (const minijson::Value* v = model->find("unk_token"); v && !v->is_null())
@@ -484,7 +703,7 @@ Tokenizer Tokenizer::load(const std::string& path) {
       "tokenizer: loaded vocab {} merges {} added {} (revision 0x{:016x}; "
       "{} pattern, {}, ignore_merges {})",
       t.vocab_.size(), t.merge_rank_.size(), t.added_tokens_.size(),
-      t.revision_hash_, t.pattern_ == 1 ? "qwen" : "glm", t.nfc_ ? "NFC" : "no normalizer",
+      t.revision_hash_, t.pattern_ == 2 ? "deepseek-v4.1" : t.pattern_ == 1 ? "qwen" : "glm", t.nfc_ ? "NFC" : "no normalizer",
       t.ignore_merges_);
   return t;
 }
@@ -536,8 +755,13 @@ void Tokenizer::encode_segment(std::string_view segment,
     segment = normalized;
   }
   std::vector<std::string_view> pretokens;
-  SplitScanner scanner(segment, &pretokens, pattern_ == 1);
-  scanner.run();
+  if (pattern_ == 2) {
+    Dsv41Scanner scanner(segment, &pretokens);
+    scanner.run();
+  } else {
+    SplitScanner scanner(segment, &pretokens, pattern_ == 1);
+    scanner.run();
+  }
   for (const std::string_view p : pretokens) {
     // ByteLevel map: each BYTE -> its alphabet codepoint (UTF-8; every
     // mapped codepoint is < 0x200 so <= 3 bytes).

@@ -69,8 +69,14 @@ struct ChatMarker {
 // an added token (<arg_key>/<arg_value> pairs); Qwen3.8 writes
 // "<function=NAME>\n<parameter=K>\nV\n</parameter>\n...</function>\n" as
 // TEXT between the <tool_call> tokens — only the outer markers are single
-// ids, so the block is parsed from its decoded text when it closes.
-enum class ToolFormat { kNone, kGlmMarkers, kQwenXml };
+// ids, so the block is parsed from its decoded text when it closes;
+// DeepSeek-V4.1 writes DSML — "\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke
+// name=\"NAME\">\n<｜DSML｜ parameter name=\"K\" string=\"true|false\">V</｜DSML｜
+// parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>" — where only the ｜DSML｜
+// tag token is an id (a special one: the service's decode skips it) and
+// every bracket and tag name is text; the block opens at the tag token
+// after a "<" and closes at the text "</｜DSML｜ calls>", parsed then.
+enum class ToolFormat { kNone, kGlmMarkers, kQwenXml, kDsml };
 
 struct ChatMarkers {
   ChatMarker think_open;        // "<think>"
@@ -81,6 +87,7 @@ struct ChatMarkers {
   ChatMarker arg_key_close;     // "</arg_key>"     (GLM)
   ChatMarker arg_value_open;    // "<arg_value>"    (GLM)
   ChatMarker arg_value_close;   // "</arg_value>"   (GLM)
+  ChatMarker dsml;              // "｜DSML｜"        (DeepSeek-V4.1: the tool-call tag token)
   // The template's role markers (<|system|>, <|user|>, <|assistant|>,
   // <|observation|>; <|im_start|>, <|im_end|>), the ones the tokenizer
   // has: their positions in a prompt are the prefix cache's structural
@@ -104,7 +111,7 @@ struct ChatMarkers {
   }
 
   // The reasoning split needs </think>; tool calls need the six GLM
-  // markers or the two Qwen ones.
+  // markers, the two Qwen ones, or DeepSeek's tag token.
   bool reasoning_available() const { return think_close.available(); }
   ToolFormat tool_format() const {
     if (tool_call_open.available() && tool_call_close.available() &&
@@ -113,6 +120,7 @@ struct ChatMarkers {
       return ToolFormat::kGlmMarkers;
     if (tool_call_open.available() && tool_call_close.available())
       return ToolFormat::kQwenXml;
+    if (dsml.available()) return ToolFormat::kDsml;
     return ToolFormat::kNone;
   }
   bool tool_calls_available() const { return tool_format() != ToolFormat::kNone; }
@@ -210,6 +218,18 @@ class ToolCallParser {
   // The Qwen format: the closed block's text into name_/args_ (false when
   // malformed — the caller aborts the block as content).
   bool parse_qwen_block(const std::string& text);
+  // The DSML format (DeepSeek-V4.1): the content run with the block's
+  // possible prefix ("\n\n<" or "<") held back until the next id decides;
+  // the block's text (the tag token restored between the decoded runs);
+  // the closed block into dsml_calls_ (false when malformed).
+  void dsml_content_append(int64_t id, std::vector<Event>* out);
+  void dsml_flush_held(std::vector<Event>* out);
+  void enter_dsml_block();
+  std::string dsml_block_text() const;
+  bool dsml_block_closed(const std::string& text) const;
+  bool parse_dsml_block(const std::string& text);
+  void complete_dsml_block(std::vector<Event>* out);
+  void abort_dsml_block(std::vector<Event>* out);
   std::string typed_value(const std::string& function, const std::string& key,
                           const std::string& text) const;
 
@@ -229,6 +249,12 @@ class ToolCallParser {
   std::vector<int64_t> name_ids_, key_ids_, value_ids_;
   std::string name_, key_;
   std::vector<std::pair<std::string, std::string>> args_;  // key, text
+
+  // DSML: the content run's emitted length (the held prefix follows it),
+  // the held prefix carried into an open block, the block's parsed calls.
+  size_t dsml_emitted_ = 0;
+  std::string dsml_held_;
+  std::vector<Call> dsml_calls_;
 
   int calls_ = 0;
 };

@@ -7,6 +7,7 @@
 #include "common/dtypes.hpp"
 #include "kernels/fp8_gemv.cuh"
 #include "kernels/glm_moe_launch.hpp"
+#include "kernels/mma_gemv.hpp"
 
 namespace dgpp {
 namespace {
@@ -125,28 +126,32 @@ __global__ void scale_gemm_kernel(const uint16_t* __restrict__ act,
 // warp per weight row, activations staged in dynamic smem. Same dequant
 // values as the tile kernel above, a different (deterministic) fp32
 // accumulation order — see fp8_gemv.cuh.
+// rs / cs: the scale grid as log2 block sizes (7 = 128 x 128; 5 = the
+// DeepSeek-V4.1 release's 32 x 32, 2026-09-13; the GEMV core reads any
+// grid whose column block covers a 16-element chunk, i.e. cs >= 4).
 template <int kRows, typename OutT>
 __global__ void scale_gemv_kernel(const uint16_t* __restrict__ act,
                                   size_t act_stride,
                                   const uint8_t* __restrict__ w,
                                   const float* __restrict__ scales,
                                   OutT* __restrict__ out, int n, int k,
-                                  size_t out_stride) {
+                                  size_t out_stride, int rs, int cs) {
   extern __shared__ __align__(16) uint16_t sx[];
   fp8_gemv::stage_activations<kRows>(act, act_stride, k, sx);
   __syncthreads();
   fp8_gemv::block_rows<kRows>(w, scales, sx, blockIdx.x * fp8_gemv::kWarps, n,
-                              k, out, out_stride);
+                              k, out, out_stride, rs, cs);
 }
 
 template <int kRows, typename OutT>
 void launch_scale_gemv(const uint16_t* act, size_t act_stride,
                        const uint8_t* w, const float* scales, OutT* out, int n,
-                       int k, size_t out_stride, cudaStream_t stream) {
+                       int k, size_t out_stride, cudaStream_t stream, int rs = 7,
+                       int cs = 7) {
   const dim3 grid((n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps);
   scale_gemv_kernel<kRows, OutT>
       <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(kRows, k), stream>>>(
-          act, act_stride, w, scales, out, n, k, out_stride);
+          act, act_stride, w, scales, out, n, k, out_stride, rs, cs);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -154,23 +159,23 @@ template <typename OutT>
 void launch_scale_gemv_rows(const uint16_t* act, size_t act_stride,
                             const uint8_t* w, const float* scales, OutT* out,
                             int rows, int n, int k, size_t out_stride,
-                            cudaStream_t stream) {
+                            cudaStream_t stream, int rs = 7, int cs = 7) {
   switch (rows) {
     case 1:
       launch_scale_gemv<1, OutT>(act, act_stride, w, scales, out, n, k,
-                                 out_stride, stream);
+                                 out_stride, stream, rs, cs);
       return;
     case 2:
       launch_scale_gemv<2, OutT>(act, act_stride, w, scales, out, n, k,
-                                 out_stride, stream);
+                                 out_stride, stream, rs, cs);
       return;
     case 3:
       launch_scale_gemv<3, OutT>(act, act_stride, w, scales, out, n, k,
-                                 out_stride, stream);
+                                 out_stride, stream, rs, cs);
       return;
     case 4:
       launch_scale_gemv<4, OutT>(act, act_stride, w, scales, out, n, k,
-                                 out_stride, stream);
+                                 out_stride, stream, rs, cs);
       return;
     default:
       throw std::invalid_argument("scale_gemv: rows outside [1,4]");
@@ -255,7 +260,73 @@ void launch_scale_gemm(const uint16_t* act, size_t act_row_stride_elems,
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+// The routed launcher on a stated scale grid (2026-09-13, the DeepSeek-V4.1
+// release's 32 x 32 fp8 grid; rs / cs the log2 block sizes, 5..7): small
+// m through the GEMV rows (the core reads the grid), larger m through the
+// tile kernel (one scale column per 32-deep stage at cs >= 5). The 128-row
+// dense form knows the 128 grid only and is not taken here.
+template <typename OutT>
+void launch_scale_gemm_grid(const uint16_t* act, size_t act_row_stride_elems,
+                            const uint8_t* w_payload, const float* w_scales,
+                            OutT* out, int m, int n, int k, cudaStream_t stream,
+                            size_t out_stride, int rs, int cs) {
+  if (m <= 0 || n <= 0) return;
+  if (!act || !w_payload || !w_scales || !out)
+    throw std::invalid_argument("scale_gemm_grid: null pointer");
+  if (rs < 5 || rs > 7 || cs < 5 || cs > 7)
+    throw std::invalid_argument("scale_gemm_grid: rs / cs must be 5..7 (32 .. 128 blocks)");
+  if (out_stride == 0) out_stride = static_cast<size_t>(n);
+  if (out_stride < static_cast<size_t>(n))
+    throw std::invalid_argument("scale_gemm_grid: output row stride narrower than n");
+  if (k <= 0 || k % 16 != 0)
+    throw std::invalid_argument("scale_gemm_grid: k must be a positive multiple of 16");
+  if (m <= kGemvMaxM && fp8_gemv::shape_ok(w_payload, /*rows=*/1, k)) {
+    for (int row0 = 0; row0 < m;) {
+      int rows = std::min(fp8_gemv::kMaxRows, m - row0);
+      while (!fp8_gemv::shape_ok(w_payload, rows, k)) --rows;
+      launch_scale_gemv_rows(act + static_cast<size_t>(row0) * act_row_stride_elems,
+                             act_row_stride_elems, w_payload, w_scales,
+                             out + static_cast<size_t>(row0) * out_stride, rows, n, k, out_stride,
+                             stream, rs, cs);
+      row0 += rows;
+    }
+    return;
+  }
+  const dim3 grid((n + BN - 1) / BN, (m + BM - 1) / BM);
+  scale_gemm_kernel<OutT><<<grid, kBlockThreads, 0, stream>>>(
+      act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_stride, rs, cs);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 }  // namespace
+
+void launch_scale_gemm_grid_bf16(const uint16_t* act, size_t act_row_stride_elems,
+                                 const uint8_t* w_payload, const float* w_scales,
+                                 uint16_t* out, int m, int n, int k, cudaStream_t stream,
+                                 size_t out_row_stride_elems, int rs, int cs, bool decode_mma) {
+  if (decode_mma && m >= 1 && n > 0 && k > 0 && cs >= 4 &&
+      mma_gemv_shape_ok(w_payload, act, act_row_stride_elems, m, k)) {
+    launch_mma_gemv_fp8_bf16(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
+                             out_row_stride_elems, rs, cs, stream);
+    return;
+  }
+  launch_scale_gemm_grid<uint16_t>(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
+                                   stream, out_row_stride_elems, rs, cs);
+}
+
+void launch_scale_gemm_grid_f32(const uint16_t* act, size_t act_row_stride_elems,
+                                const uint8_t* w_payload, const float* w_scales, float* out,
+                                int m, int n, int k, cudaStream_t stream,
+                                size_t out_row_stride_elems, int rs, int cs, bool decode_mma) {
+  if (decode_mma && m >= 1 && n > 0 && k > 0 && cs >= 4 &&
+      mma_gemv_shape_ok(w_payload, act, act_row_stride_elems, m, k)) {
+    launch_mma_gemv_fp8_f32(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
+                            out_row_stride_elems, rs, cs, stream);
+    return;
+  }
+  launch_scale_gemm_grid<float>(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
+                                stream, out_row_stride_elems, rs, cs);
+}
 
 namespace {
 // The multi-problem GEMV: the problems in the parameter space
@@ -282,9 +353,11 @@ __global__ void scale_gemv_multi_kernel(Fp8GemvMulti mp, const uint16_t* __restr
   const int n = which == 0 ? mp.p[0].n : which == 1 ? mp.p[1].n : which == 2 ? mp.p[2].n : mp.p[3].n;
   const size_t out_stride = which == 0 ? mp.p[0].out_stride : which == 1 ? mp.p[1].out_stride : which == 2 ? mp.p[2].out_stride : mp.p[3].out_stride;
   const int block0 = which == 0 ? 0 : which == 1 ? mp.block_end[0] : which == 2 ? mp.block_end[1] : mp.block_end[2];
+  const int rs = which == 0 ? mp.p[0].rs : which == 1 ? mp.p[1].rs : which == 2 ? mp.p[2].rs : mp.p[3].rs;
+  const int cs = which == 0 ? mp.p[0].cs : which == 1 ? mp.p[1].cs : which == 2 ? mp.p[2].cs : mp.p[3].cs;
   fp8_gemv::stage_activations<kRows>(act, act_stride, k, sx);
   __syncthreads();
-  fp8_gemv::block_rows<kRows>(w, scales, sx, (bid - block0) * fp8_gemv::kWarps, n, k, out, out_stride);
+  fp8_gemv::block_rows<kRows>(w, scales, sx, (bid - block0) * fp8_gemv::kWarps, n, k, out, out_stride, rs, cs);
 }
 
 template <int kRows>
@@ -318,6 +391,8 @@ void launch_scale_gemv_multi_bf16(const Fp8GemvProblem* problems, int n_problems
     if (p.out_stride == 0) p.out_stride = static_cast<size_t>(p.n);
     if (p.out_stride < static_cast<size_t>(p.n))
       throw std::invalid_argument("scale_gemv_multi: output row stride narrower than n");
+    if (p.rs < 5 || p.rs > 7 || p.cs < 4 || p.cs > 7)
+      throw std::invalid_argument("scale_gemv_multi: a problem's scale grid must be 32..128 rows, 16..128 cols");
     base.p[i] = p;
     blocks += (p.n + fp8_gemv::kWarps - 1) / fp8_gemv::kWarps;
     base.block_end[i] = blocks;

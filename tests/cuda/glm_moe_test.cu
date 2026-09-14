@@ -248,7 +248,7 @@ struct SmallCase {
         uint8_t* pk = nullptr;
         uint8_t* sc = nullptr;
         const size_t pn = static_cast<size_t>(v.rows) * v.cols / 2;
-        const size_t sn = static_cast<size_t>(v.rows) * v.cols / 16;
+        const size_t sn = static_cast<size_t>(v.rows) * v.cols / v.scale_group;
         DGPP_CUDA_OK(cudaMallocManaged(&pk, pn));
         DGPP_CUDA_OK(cudaMallocManaged(&sc, sn));
         std::memcpy(pk, v.payload, pn);
@@ -256,8 +256,8 @@ struct SmallCase {
         d_fp4_globals[m] = v.global_scale;
         d_fp4_bytes.push_back(pk);
         d_fp4_bytes.push_back(sc);
-        expert_mats_fp4[static_cast<size_t>(m)] =
-            dgpp::GlmFp4Matrix{pk, sc, d_fp4_globals + m, v.rows, v.cols};
+        expert_mats_fp4[static_cast<size_t>(m)] = dgpp::GlmFp4Matrix{
+            pk, sc, v.scale_group == 32 ? nullptr : d_fp4_globals + m, v.rows, v.cols, v.scale_group};
       }
       if (host_w.shared_nvfp4) {
         dev_w.router_gate = d_gate_w;
@@ -340,7 +340,7 @@ void pack_codes_into(const std::vector<int>& codes, int bits, std::vector<uint32
 
 SmallCase make_small_case(int E, int H, int I, int K, int tokens,
                           uint64_t seed, bool nvfp4 = false, bool shared_nvfp4 = false,
-                          int packq_bits = 0) {
+                          int packq_bits = 0, int fp4_group = 16) {
   SmallCase c;
   c.cfg.hidden = H;
   c.cfg.inter = I;
@@ -366,6 +366,7 @@ SmallCase make_small_case(int E, int H, int I, int K, int tokens,
   // global scale each, and only the shared triple is FP8.
   c.host_w.nvfp4 = nvfp4;
   c.host_w.shared_nvfp4 = nvfp4 && shared_nvfp4;
+  c.host_w.fp4_group = fp4_group;
   // Packed-int (packq_bits 4 or 8): the routed experts at that width, the
   // shared triple at int8 (the checkpoint's shape), release-like scales.
   c.host_w.packq = packq_bits != 0;
@@ -390,13 +391,19 @@ SmallCase make_small_case(int E, int H, int I, int K, int tokens,
     if (nvfp4 && (m < E * 3 || c.host_w.shared_nvfp4)) {
       std::vector<uint8_t> packed(static_cast<size_t>(rows) * cols / 2);
       for (auto& b : packed) b = static_cast<uint8_t>(rng.next() & 0xFF);
-      std::vector<uint8_t> sc(static_cast<size_t>(rows) * cols / 16);
-      for (auto& v : sc)
-        v = dgpp::float_to_fp8_e4m3_bits(
-            static_cast<float>(std::exp2(rng.unit() * 2.0)) * 0.05f);
+      std::vector<uint8_t> sc(static_cast<size_t>(rows) * cols / fp4_group);
+      if (fp4_group == 32) {
+        // MXFP4: e8m0 exponents around the release's (weights ~1e-2: block
+        // scales 2^-9 .. 2^-5).
+        for (auto& v : sc) v = static_cast<uint8_t>(127 - 9 + static_cast<int>(rng.next() % 5));
+      } else {
+        for (auto& v : sc)
+          v = dgpp::float_to_fp8_e4m3_bits(
+              static_cast<float>(std::exp2(rng.unit() * 2.0)) * 0.05f);
+      }
       c.host_w.fp4_payloads.insert(c.host_w.fp4_payloads.end(), packed.begin(), packed.end());
       c.host_w.fp4_scales.insert(c.host_w.fp4_scales.end(), sc.begin(), sc.end());
-      c.host_w.fp4_globals.push_back(static_cast<float>(std::exp2(rng.unit())));
+      c.host_w.fp4_globals.push_back(fp4_group == 32 ? 1.0f : static_cast<float>(std::exp2(rng.unit())));
       continue;
     }
     std::vector<uint8_t> payload(static_cast<size_t>(rows) * cols);
@@ -546,7 +553,8 @@ struct RankSlice {
     if (c.nvfp4()) {
       // The loader's NVFP4 slices in miniature: gate/up rows [rank*M, +M)
       // as views, down columns packed at nibble granularity (M % 16 == 0).
-      require(M % 16 == 0, "nvfp4 slice test geometry: inter/world must be a 16-multiple");
+      const int g = c.expert_mats_fp4[0].scale_group;
+      require(M % g == 0, "fp4 slice test geometry: inter/world must be a multiple of the scale group");
       r.mats_fp4.resize(static_cast<size_t>(E) * 3);
       for (int m = 0; m < E * 3; ++m) {
         const dgpp::GlmFp4Matrix& full = c.expert_mats_fp4[static_cast<size_t>(m)];
@@ -557,15 +565,15 @@ struct RankSlice {
         uint8_t* payload = nullptr;
         uint8_t* scales = nullptr;
         DGPP_CUDA_OK(cudaMallocManaged(&payload, static_cast<size_t>(H) * M / 2));
-        DGPP_CUDA_OK(cudaMallocManaged(&scales, static_cast<size_t>(H) * M / 16));
+        DGPP_CUDA_OK(cudaMallocManaged(&scales, static_cast<size_t>(H) * M / g));
         for (int64_t row = 0; row < H; ++row) {
           std::memcpy(payload + row * (M / 2), full.payload + row * (I / 2) + rank * M / 2, M / 2);
-          std::memcpy(scales + row * (M / 16), full.scales + row * (I / 16) + rank * M / 16, M / 16);
+          std::memcpy(scales + row * (M / g), full.scales + row * (I / g) + rank * M / g, M / g);
         }
         r.owned_fp4.push_back(payload);
         r.owned_fp4.push_back(scales);
         r.mats_fp4[static_cast<size_t>(m)] =
-            dgpp::GlmFp4Matrix{payload, scales, full.global_scale, H, M};
+            dgpp::GlmFp4Matrix{payload, scales, full.global_scale, H, M, g};
       }
       r.mats.resize(3);
       for (int m = 0; m < 3; ++m) {
@@ -1126,6 +1134,15 @@ DGPP_TEST(moe_router_matches_oracle_real_geometry) {
   GlmMoeConfig no_norm = cfg;
   no_norm.norm_topk_prob = false;
   check_router(no_norm, 17, 0xB0B);
+  // The sqrtsoftplus mode (DeepSeek-V4.1-Flash, 2026-09-13) at the release's
+  // routing geometry: 384 experts, top-6, x 1.5, hidden 5120.
+  GlmMoeConfig sp = cfg;
+  sp.router_mode = dgpp::MoeRouterMode::SqrtSoftplusBias;
+  sp.n_experts = 384;
+  sp.top_k = 6;
+  sp.hidden = 5120;
+  sp.routed_scaling_factor = 1.5f;
+  for (int tokens : {1, 5, 70}) check_router(sp, tokens, 0x5A5A + tokens);
 }
 
 DGPP_TEST(moe_router_ties_break_to_lower_expert_id) {
@@ -1560,6 +1577,135 @@ DGPP_TEST(moe_grouped_gemv_fp4_is_bitwise_the_single_matrix_launcher) {
   c.free_all();
 }
 
+// The MXFP4 form of the ldmatrix kernel (2026-09-14, DeepSeek-V4.1-Flash's
+// routed experts: e8m0 scales per 32 codes, no global): the grouped launch
+// against a host oracle (the exact dequantized values, double sums) on
+// the gate (bf16 out, k = H) and the down (fp32 out, k = I) shapes over
+// ragged segments and a ragged n-tile; the z split bitwise the unsplit
+// launch. The dense reference kernel knows NVFP4 only, hence the oracle.
+DGPP_TEST(moe_grouped_mma_fp4_mx_matches_the_oracle_per_segment) {
+  constexpr int kRows = 400;
+  auto e2m1 = [](uint32_t code) {
+    static const double mag[8] = {0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0};
+    return (code & 8u) ? -mag[code & 7u] : mag[code & 7u];
+  };
+  // k a multiple of 32 (the MX contract): I = 224 leaves a ragged last
+  // k-stage on the down (224 % 64 = 32) and a ragged n-tile on the gate.
+  for (const int I : {224, 320}) {
+    SmallCase c = make_small_case(/*E=*/6, /*H=*/4096, /*I=*/I, /*K=*/2, /*tokens=*/kRows,
+                                  0x7A1 + I, /*nvfp4=*/true, /*shared_nvfp4=*/false,
+                                  /*packq_bits=*/0, /*fp4_group=*/32);
+    c.alloc();
+    const int H = c.cfg.hidden, E = c.cfg.n_experts;
+    const int lens[] = {1, 5, 4, 130, 13, 2, 245};
+    std::vector<dgpp::MoeSegment> segs;
+    int row0 = 0;
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); ++i) {
+      segs.push_back(dgpp::MoeSegment{row0, lens[i], static_cast<int>(i % E)});
+      row0 += lens[i];
+    }
+    require(row0 == kRows, "segments cover the rows");
+    dgpp::MoeSegment* d_segs = nullptr;
+    dgpp::MoeExpertView* d_views = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_segs, segs.size() * sizeof(dgpp::MoeSegment)));
+    std::memcpy(d_segs, segs.data(), segs.size() * sizeof(dgpp::MoeSegment));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_views, E * 3 * sizeof(dgpp::MoeExpertView)));
+    for (int m = 0; m < E * 3; ++m) {
+      d_views[m] = dgpp::MoeExpertView::of(c.expert_mats_fp4[m]);
+      require(d_views[m].fp4_group == 32 && d_views[m].fp4_global == nullptr, "an MXFP4 view");
+    }
+    // The host tables: matrix m's payload and scales start where the
+    // previous routed matrices end (gate/up [I, H], down [H, I]).
+    std::vector<size_t> pay_off(E * 3 + 1, 0), sc_off(E * 3 + 1, 0);
+    for (int m = 0; m < E * 3; ++m) {
+      const bool down = m % 3 == 2;
+      const size_t rows = down ? H : I, cols = down ? I : H;
+      pay_off[m + 1] = pay_off[m] + rows * cols / 2;
+      sc_off[m + 1] = sc_off[m] + rows * cols / 32;
+    }
+    auto weight = [&](int m, int64_t n, int64_t k) -> double {
+      const bool down = m % 3 == 2;
+      const size_t cols = down ? I : H;
+      const uint8_t byte = c.host_w.fp4_payloads[pay_off[m] + (static_cast<size_t>(n) * cols + k) / 2];
+      const uint32_t code = (k & 1) ? (byte >> 4) : (byte & 0xFu);
+      const uint8_t sc = c.host_w.fp4_scales[sc_off[m] + static_cast<size_t>(n) * (cols / 32) + k / 32];
+      return e2m1(code) * std::ldexp(1.0, static_cast<int>(sc) - 127);
+    };
+    // The gate: bf16 out, k = H.
+    uint16_t *d_grouped = nullptr, *d_split = nullptr;
+    const size_t gate_bytes = static_cast<size_t>(kRows) * I * 2;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_grouped, gate_bytes));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_split, gate_bytes));
+    DGPP_CUDA_OK(cudaMemset(d_grouped, 0xA5, gate_bytes));
+    DGPP_CUDA_OK(cudaMemset(d_split, 0xA5, gate_bytes));
+    dgpp::launch_moe_grouped_mma_fp4_bf16(c.d_hidden, H, d_segs, static_cast<int>(segs.size()), 245, 0,
+                                          d_views, 0, d_grouped, I, I, H, nullptr, nullptr, 32);
+    dgpp::launch_moe_grouped_mma_fp4_bf16(c.d_hidden, H, d_segs, static_cast<int>(segs.size()), 245, 128,
+                                          d_views, 0, d_split, I, I, H, nullptr, nullptr, 32);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    require(std::memcmp(d_grouped, d_split, gate_bytes) == 0, "mx gate output bitwise under the z split");
+    double worst = 0;
+    for (const dgpp::MoeSegment& sg : segs) {
+      const int m = sg.expert * 3 + 0;
+      for (int i = 0; i < sg.rows; ++i) {
+        const size_t t = static_cast<size_t>(sg.row0 + i);
+        double row_max = 0;
+        std::vector<double> ref(static_cast<size_t>(I));
+        for (int n = 0; n < I; ++n) {
+          double acc = 0;
+          for (int k = 0; k < H; ++k)
+            acc += static_cast<double>(bf16_bits_to_float(c.hidden[t * H + k])) * weight(m, n, k);
+          ref[static_cast<size_t>(n)] = acc;
+          row_max = std::max(row_max, std::fabs(acc));
+        }
+        for (int n = 0; n < I; ++n) {
+          const double got = bf16_bits_to_float(d_grouped[t * I + n]);
+          const double err = std::fabs(got - ref[static_cast<size_t>(n)]) / std::max(std::fabs(ref[static_cast<size_t>(n)]), 1e-3 * row_max);
+          worst = std::max(worst, err);
+        }
+      }
+    }
+    std::printf("[ .. ] mx fp4 ldm gate I=%d: worst relative error vs the oracle %.3e (bf16 out)\n", I, worst);
+    require(worst < 1.0 / 128, "mx gate within a bf16 rounding of the oracle");
+    // The down: fp32 out, k = I (a ragged last k-stage at 224, whole stages at 320).
+    uint16_t* d_act = nullptr;
+    float* d_down = nullptr;
+    DGPP_CUDA_OK(cudaMallocManaged(&d_act, static_cast<size_t>(kRows) * I * 2));
+    DGPP_CUDA_OK(cudaMallocManaged(&d_down, static_cast<size_t>(kRows) * H * 4));
+    Rng arng(0x51ED + I);
+    std::vector<uint16_t> h_act(static_cast<size_t>(kRows) * I);
+    for (auto& v : h_act) v = float_to_bf16_bits(static_cast<float>(arng.unit() - 0.5));
+    std::memcpy(d_act, h_act.data(), h_act.size() * 2);
+    dgpp::launch_moe_grouped_mma_fp4_f32(d_act, I, d_segs, static_cast<int>(segs.size()), 245, 0, d_views, 2,
+                                         d_down, H, H, I, nullptr, nullptr, 32);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    double worst_down = 0;
+    for (const dgpp::MoeSegment& sg : segs) {
+      const int m = sg.expert * 3 + 2;
+      for (int i = 0; i < sg.rows; i += 7) {  // every seventh row: the oracle is O(H * I) per row
+        const size_t t = static_cast<size_t>(sg.row0 + i);
+        double row_max = 0;
+        std::vector<double> ref(static_cast<size_t>(H));
+        for (int n = 0; n < H; ++n) {
+          double acc = 0;
+          for (int k = 0; k < I; ++k)
+            acc += static_cast<double>(bf16_bits_to_float(h_act[t * I + k])) * weight(m, n, k);
+          ref[static_cast<size_t>(n)] = acc;
+          row_max = std::max(row_max, std::fabs(acc));
+        }
+        for (int n = 0; n < H; ++n) {
+          const double got = d_down[t * H + n];
+          const double err = std::fabs(got - ref[static_cast<size_t>(n)]) / std::max(std::fabs(ref[static_cast<size_t>(n)]), 1e-3 * row_max);
+          worst_down = std::max(worst_down, err);
+        }
+      }
+    }
+    std::printf("[ .. ] mx fp4 ldm down I=%d: worst relative error vs the oracle %.3e (fp32 out)\n", I, worst_down);
+    require(worst_down < 1e-4, "mx down within the fp32 accumulation of the oracle");
+    cudaFree(d_act); cudaFree(d_down); cudaFree(d_grouped); cudaFree(d_split); cudaFree(d_segs); cudaFree(d_views);
+  }
+}
+
 DGPP_TEST(moe_grouped_mma_fp4_is_bitwise_the_dense_form_per_segment) {
   // The fp4 tensor-core twin of the grouped-vs-tile gate (docs/nvfp4_plan.md
   // gate 3): segments of one row, a few rows, more than one 128-row m-tile
@@ -1832,6 +1978,184 @@ DGPP_TEST(moe_sliced_ranks_fold_matches_unsliced_oracle_nvfp4) {
          " world=" + std::to_string(cs.world)).c_str());
     c.free_all();
   }
+}
+
+// ---- MXFP4 routed experts (2026-09-13, docs/deepseek_v41_flash_plan.md G2) ----
+// The NVFP4 gates' twins over e8m0-scaled tables without globals: the
+// oracle, the decode slot path bitwise the host chain, the prefill entry
+// bitwise, the sliced fold, and the grouped GEMV bitwise the single-matrix
+// launcher. The tensor-core form refuses an MXFP4 table (mma_takes_grid).
+
+DGPP_TEST(moe_expert_path_matches_oracle_small_geometry_mxfp4) {
+  SmallCase c = make_small_case(/*E=*/8, /*H=*/512, /*I=*/256, /*K=*/2,
+                                /*tokens=*/6, 0x3F4, /*nvfp4=*/true, false, 0, /*fp4_group=*/32);
+  c.alloc();
+  require(c.dev_w.nvfp4() && c.dev_w.experts_fp4[0].mxfp4(), "the case binds MXFP4 experts");
+  run_small_case(c, "mxfp4 expert path E=8 H=512 I=256 K=2");
+  // The tensor-core kernel takes MXFP4 tables since 2026-09-14 (its kGroup
+  // = 32 form): the layer's default for the table, and the oracle budget
+  // holds through it as through the GEMV core.
+  GlmMoeLayer layer(c.dev_w, c.cfg, 8, /*decode_slots=*/0);
+  require(layer.mma_takes_grid(), "the tensor-core kernel takes an MXFP4 table");
+  std::vector<uint16_t> oracle;
+  dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
+  for (const dgpp::MoeExpertKernel kernel : {dgpp::MoeExpertKernel::kMma, dgpp::MoeExpertKernel::kGemv}) {
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, static_cast<size_t>(c.tokens) * c.cfg.hidden * 2));
+    layer.enqueue(c.d_hidden, c.d_out, c.tokens, nullptr, kernel);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> got(static_cast<size_t>(c.tokens) * c.cfg.hidden);
+    std::memcpy(got.data(), c.d_out, got.size() * 2);
+    require_within_expert_budget(got, oracle, kernel == dgpp::MoeExpertKernel::kMma ? "mxfp4 tile kernel vs oracle"
+                                                                                    : "mxfp4 GEMV core vs oracle");
+  }
+  c.free_all();
+}
+
+DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path_mxfp4) {
+  struct Case {
+    int E, H, I, K, M;
+  };
+  const Case cases[] = {
+      {8, 512, 256, 2, 1},    // gate k=512, down k=256
+      {8, 512, 256, 2, 3},    // multi-row steps
+      {16, 1024, 512, 4, 2},  // gate k=1024, down k=512, K=4
+      {8, 1024, 576, 6, 2},   // the release's world-4 down width (18 chunks: 2 lanes x 9), top-6
+  };
+  for (const Case& cs : cases) {
+    SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M, 0x3F4CADE + cs.E + cs.M + cs.I,
+                                  /*nvfp4=*/true, false, 0, /*fp4_group=*/32);
+    c.alloc();
+    GlmMoeLayer layer(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/cs.M);
+    std::vector<uint16_t> host(static_cast<size_t>(cs.M) * c.cfg.hidden);
+    layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::memcpy(host.data(), c.d_out, host.size() * 2);
+    std::vector<uint16_t> oracle;
+    dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
+    require_within_expert_budget(host, oracle, "mxfp4 host path vs oracle");
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+    // The decode slot path is the GEMV core's chain: bitwise the host
+    // path through the GEMV core (MoeExpertKernel::kGemv). The layer's
+    // default and the prefill path take the tensor-core kernel's MXFP4
+    // form since 2026-09-14 — tolerance-equal to the core (the oracle
+    // budget above), not bitwise; the prefill path is bitwise the default.
+    std::vector<uint16_t> gemv_host(host.size(), 0x7F7F);
+    layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr, dgpp::MoeExpertKernel::kGemv);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::memcpy(gemv_host.data(), c.d_out, gemv_host.size() * 2);
+    require_within_expert_budget(gemv_host, oracle, "mxfp4 GEMV host path vs oracle");
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+    layer.enqueue_decode(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> fused(host.size(), 0x7F7F);
+    std::memcpy(fused.data(), c.d_out, fused.size() * 2);
+    require(std::memcmp(gemv_host.data(), fused.data(), host.size() * 2) == 0,
+            "mxfp4 decode slot path must be bitwise-identical to the GEMV host path");
+    // The prefill path takes the tile kernel's MXFP4 form: bitwise the
+    // host path through it (MoeExpertKernel::kMma), within budget of the oracle.
+    std::vector<uint16_t> mma_host(host.size(), 0x7F7F);
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+    layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr, dgpp::MoeExpertKernel::kMma);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::memcpy(mma_host.data(), c.d_out, mma_host.size() * 2);
+    require_within_expert_budget(mma_host, oracle, "mxfp4 tile host path vs oracle");
+    GlmMoeLayer cold(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/cs.M);
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+    cold.enqueue_prefill(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> pre(host.size(), 0x7F7F);
+    std::memcpy(pre.data(), c.d_out, pre.size() * 2);
+    require(std::memcmp(mma_host.data(), pre.data(), host.size() * 2) == 0,
+            "mxfp4 prefill path (the tile kernel) must be bitwise-identical to the tile host path");
+    c.free_all();
+    std::printf("[ OK ] mxfp4 decode slot path E=%d H=%d I=%d K=%d M=%d: bitwise the GEMV host path; the tile path within budget\n",
+                cs.E, cs.H, cs.I, cs.K, cs.M);
+  }
+}
+
+DGPP_TEST(moe_sliced_ranks_fold_matches_unsliced_oracle_mxfp4) {
+  struct Case {
+    int E, H, I, K, M, world;
+  };
+  const Case cases[] = {
+      {8, 512, 256, 2, 3, 2},    // slice 128
+      {16, 1024, 512, 4, 2, 4},  // slice 128, four ranks
+      {8, 1024, 2304, 6, 2, 2},  // the release width at world 2: 2304 / 2 = 1152 (36 e8m0 blocks; the test's FP8 shared expert needs a 128-multiple slice, so world 4's 576 is covered by the slot gate above)
+  };
+  for (const Case& cs : cases) {
+    SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M, 0x3511F4 + cs.E + cs.world + cs.I,
+                                  /*nvfp4=*/true, false, 0, /*fp4_group=*/32);
+    c.alloc();
+    std::vector<uint16_t> oracle;
+    dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
+    std::vector<std::vector<uint16_t>> partials;
+    for (int rank = 0; rank < cs.world; ++rank) {
+      RankSlice slice = RankSlice::make(c, rank, cs.world);
+      GlmMoeLayer layer(slice.dev_w, c.cfg, cs.M, /*decode_slots=*/cs.M);
+      const size_t n = static_cast<size_t>(cs.M) * cs.H;
+      layer.enqueue(c.d_hidden, slice.d_out, cs.M, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::vector<uint16_t> host(n);
+      std::memcpy(host.data(), slice.d_out, n * 2);
+      DGPP_CUDA_OK(cudaMemset(slice.d_out, 0x7F, n * 2));
+      layer.enqueue_decode(c.d_hidden, slice.d_out, cs.M, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::vector<uint16_t> slot(n);
+      std::memcpy(slot.data(), slice.d_out, n * 2);
+      require(host == slot, "mxfp4 sliced rank: decode slot path must be bitwise the host path");
+      partials.push_back(std::move(host));
+      slice.free_all();
+    }
+    const std::vector<uint16_t> folded = fold_ranks(partials);
+    require_within_fold_budget(
+        folded, partials, oracle,
+        ("mxfp4 sliced fold E=" + std::to_string(cs.E) + " I=" + std::to_string(cs.I) +
+         " world=" + std::to_string(cs.world)).c_str());
+    c.free_all();
+  }
+}
+
+DGPP_TEST(moe_grouped_gemv_mxfp4_is_bitwise_the_single_matrix_launcher) {
+  SmallCase c = make_small_case(/*E=*/6, /*H=*/1024, /*I=*/208, /*K=*/2,
+                                /*tokens=*/64, 0x36D4, /*nvfp4=*/true, false, 0, /*fp4_group=*/32);
+  c.alloc();
+  const int H = c.cfg.hidden, I = 208, E = c.cfg.n_experts;
+  const int lens[] = {1, 5, 4, 9, 13, 2, 30};
+  std::vector<dgpp::MoeSegment> segs;
+  int row0 = 0;
+  for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); ++i) {
+    segs.push_back(dgpp::MoeSegment{row0, lens[i], static_cast<int>(i % E)});
+    row0 += lens[i];
+  }
+  dgpp::MoeSegment* d_segs = nullptr;
+  dgpp::MoeExpertView* d_views = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&d_segs, segs.size() * sizeof(dgpp::MoeSegment)));
+  std::memcpy(d_segs, segs.data(), segs.size() * sizeof(dgpp::MoeSegment));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_views, E * 3 * sizeof(dgpp::MoeExpertView)));
+  for (int m = 0; m < E * 3; ++m) d_views[m] = dgpp::MoeExpertView::of(c.expert_mats_fp4[m]);
+  require(d_views[0].fp4_group == 32 && d_views[0].fp4_global == nullptr, "the view carries the group");
+  uint16_t *d_grouped = nullptr, *d_ref = nullptr;
+  DGPP_CUDA_OK(cudaMallocManaged(&d_grouped, 64 * I * 2));
+  DGPP_CUDA_OK(cudaMallocManaged(&d_ref, 64 * I * 2));
+  DGPP_CUDA_OK(cudaMemset(d_grouped, 0xA5, 64 * I * 2));
+  DGPP_CUDA_OK(cudaMemset(d_ref, 0x5A, 64 * I * 2));
+  dgpp::launch_moe_grouped_gemv_fp4_bf16(c.d_hidden, H, d_segs, static_cast<int>(segs.size()),
+                                         30, /*rows_per_block=*/8, d_views, 0, d_grouped, I, I, H,
+                                         nullptr, /*fp4_group=*/32);
+  for (const dgpp::MoeSegment& sg : segs)
+    dgpp::launch_fp4_gemv_bf16(c.d_hidden + static_cast<size_t>(sg.row0) * H, H,
+                               c.expert_mats_fp4[sg.expert * 3 + 0],
+                               d_ref + static_cast<size_t>(sg.row0) * I, sg.rows, I, H, nullptr);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  require(std::memcmp(d_grouped, d_ref, 64 * I * 2) == 0,
+          "mxfp4 grouped gate output bitwise the single-matrix launcher");
+  std::printf("[ OK ] mxfp4 grouped gemv: %zu segments (1..30 rows) bitwise the launcher\n",
+              segs.size());
+  cudaFree(d_grouped);
+  cudaFree(d_ref);
+  cudaFree(d_segs);
+  cudaFree(d_views);
+  c.free_all();
 }
 
 // ---- packed-int routed experts (docs/glm53_plan.md G2) ---------------------

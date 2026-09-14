@@ -1,7 +1,9 @@
 #include "models/glm/mhc_reference.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 #include "common/dtypes.hpp"
 
@@ -26,7 +28,7 @@ double sigmoid_d(double x) { return 1.0 / (1.0 + std::exp(-x)); }
 
 void glm_mhc_ref_compute(const uint16_t* streams, const GlmMhcWeightsHost& w,
                          const GlmMhcConfig& cfg, int tokens,
-                         GlmMhcRefResult& out) {
+                         GlmMhcRefResult& out, const double* pre_in) {
   GlmMhcConfig::validate_config(cfg);
   const int n = cfg.hc_mult;
   const int D = cfg.hidden;
@@ -113,13 +115,68 @@ void glm_mhc_ref_compute(const uint16_t* streams, const GlmMhcWeightsHost& w,
     for (int i = 0; i < n * n; ++i)
       out.comb[static_cast<size_t>(t) * n * n + i] = c[i];
 
-    // Collapse: sum_j pre[j] * streams[j][d], one bf16 round.
+    // Collapse: sum_j pre[j] * streams[j][d], one bf16 round — with the
+    // given pre under the single-pass form.
+    const double* pre_use = pre_in != nullptr ? pre_in + static_cast<size_t>(t) * n
+                                              : out.pre.data() + static_cast<size_t>(t) * n;
     for (int d = 0; d < D; ++d) {
       double v = 0.0;
       for (int j = 0; j < n; ++j)
-        v += out.pre[static_cast<size_t>(t) * n + j] *
-             bf16_to_d(x[static_cast<size_t>(j) * D + d]);
+        v += pre_use[j] * bf16_to_d(x[static_cast<size_t>(j) * D + d]);
       out.collapsed[static_cast<size_t>(t) * D + d] = d_to_bf16(v);
+    }
+  }
+}
+
+void glm_mhc_ref_stream_update_f32(const double* post, const double* comb,
+                                   const uint16_t* sublayer_out,
+                                   const uint16_t* streams_in,
+                                   const GlmMhcConfig& cfg, int tokens,
+                                   uint16_t* streams_out) {
+  const int n = cfg.hc_mult;
+  const int D = cfg.hidden;
+  for (int t = 0; t < tokens; ++t) {
+    const uint16_t* res = streams_in + static_cast<size_t>(t) * n * D;
+    uint16_t* dst = streams_out + static_cast<size_t>(t) * n * D;
+    const uint16_t* h = sublayer_out + static_cast<size_t>(t) * D;
+    for (int i = 0; i < n; ++i) {
+      const double pi = post[static_cast<size_t>(t) * n + i];
+      for (int d = 0; d < D; ++d) {
+        double mix = 0.0;
+        for (int j = 0; j < n; ++j)
+          mix += comb[static_cast<size_t>(t) * n * n + j * n + i] *
+                 bf16_to_d(res[static_cast<size_t>(j) * D + d]);
+        dst[static_cast<size_t>(i) * D + d] = d_to_bf16(pi * bf16_to_d(h[d]) + mix);
+      }
+    }
+  }
+}
+
+void glm_mhc_ref_collapse_normed(const uint16_t* streams, const double* pre,
+                                 const uint16_t* ln, float ln_eps,
+                                 const GlmMhcConfig& cfg, int tokens,
+                                 uint16_t* collapsed, uint16_t* normed) {
+  const int n = cfg.hc_mult;
+  const int D = cfg.hidden;
+  std::vector<uint16_t> row(static_cast<size_t>(D));
+  for (int t = 0; t < tokens; ++t) {
+    const uint16_t* x = streams + static_cast<size_t>(t) * n * D;
+    double ssq = 0.0;
+    for (int d = 0; d < D; ++d) {
+      double v = 0.0;
+      for (int j = 0; j < n; ++j)
+        v += pre[static_cast<size_t>(t) * n + j] * bf16_to_d(x[static_cast<size_t>(j) * D + d]);
+      row[static_cast<size_t>(d)] = d_to_bf16(v);
+      const double cv = bf16_to_d(row[static_cast<size_t>(d)]);
+      ssq += cv * cv;
+    }
+    if (collapsed != nullptr)
+      std::copy(row.begin(), row.end(), collapsed + static_cast<size_t>(t) * D);
+    if (normed == nullptr) continue;
+    const double rstd = 1.0 / std::sqrt(ssq / D + static_cast<double>(ln_eps));
+    for (int d = 0; d < D; ++d) {
+      const uint16_t u = d_to_bf16(bf16_to_d(row[static_cast<size_t>(d)]) * rstd);
+      normed[static_cast<size_t>(t) * D + d] = d_to_bf16(bf16_to_d(ln[d]) * bf16_to_d(u));
     }
   }
 }

@@ -259,6 +259,9 @@ class GlmDiagnosticModel {
   // per-position hidden cache, scalar): past depth 1 the graph engine
   // serves scalar replays.
   static constexpr bool kBatchedDraftChain = false;
+  // No confidence head: the graph engine never schedules this family's
+  // verify depth.
+  static constexpr bool kVerifyConfidence = false;
   // No host nodes in a captured walk (engine/graph_check.hpp).
   size_t session_graph_host_nodes() const { return 0; }
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
@@ -495,9 +498,12 @@ class GlmDiagnosticModel {
   //   session_graph_settle(req, accepted) — with the draft in the graph the
   //         block's row counter mirror advances by `accepted` too.
   void session_reserve_blocks(int req, int64_t tokens);
+  // `feed_rows` (2026-09-14): the shared session core's reduced-depth feed
+  // seam (engine/verify_schedule.hpp); this family has no confidence head,
+  // so only 0 (the feed is ids.size() rows) is accepted.
   void session_graph_capture_step(int req, const std::vector<int64_t>& ids,
                                   bool device_positions,
-                                  bool device_tokens = false);
+                                  bool device_tokens = false, int feed_rows = 0);
   void session_graph_capture_commit(int req,
                                     const PickVerdict* device_verdict);
   void session_graph_capture_draft(int req,
@@ -524,7 +530,7 @@ class GlmDiagnosticModel {
   // Seeds slot `req`'s persistent feed rows (device_feed) — the scalar
   // variant's and the batch's alike.
   void session_graph_seed_feed(int req, const std::vector<int64_t>& ids);
-  void session_graph_settle(int req, int accepted);
+  void session_graph_settle(int req, int accepted, int rows = 0);
   void set_decode_tail_mirrors(bool on) { decode_tail_mirrors_ = on; }
   // Materializes the replay's Outputs WITHOUT moving the position (the
   // device-driven flow's cross-check surface; needs the tail mirrors on).
@@ -541,7 +547,7 @@ class GlmDiagnosticModel {
   // slots [0, requests) — 0 means every slot; the adapter records a 2- and
   // a 3-slot batch beside the full one and replays the smallest that
   // covers the live slots, so two live requests pay four rows, not eight.
-  void session_graph_capture_batch(int rows_per_request, int requests = 0);
+  void session_graph_capture_batch(int rows_per_request, int requests = 0, int feed_rows = 0);
   // Restores the immutable slot-major row map in the graph's pinned memcpy
   // sources. Eager prefill/draft operations reuse those staging buffers, so
   // the adapter calls this before every replay; the recorded H2D nodes then
@@ -868,6 +874,7 @@ class GlmDiagnosticModel {
   bool graph_has_draft_ = false;         // the draft block is in the graph
   int graph_batch_requests_ = 0;         // 0 = scalar graph contract
   int graph_rows_per_request_ = 0;
+  int graph_feed_rows_ = 0;              // a scalar capture's feed rows (>= its verified rows)
   bool decode_tail_mirrors_ = true;
   int64_t* d_next_ = nullptr;  // device [max_requests]: the verify's next
                                // token, parked for the token feed

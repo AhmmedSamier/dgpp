@@ -1,0 +1,119 @@
+{"model": "deepseek-ai/DeepSeek-V4.1-Flash", "tokenizers": "0.23.2", "revision_hash": "66f860d9a567fdb0", "cases": 118}
+{"text": "The capital of France is", "ids": [671, 6102, 294, 8760, 344]}
+{"text": " Paris", "ids": [11111]}
+{"text": ".", "ids": [16]}
+{"text": " In", "ids": [660]}
+{"text": " French,", "ids": [7213, 14]}
+{"text": " is", "ids": [344]}
+{"text": " spelled", "ids": [47923]}
+{"text": "I don't think it's CAN'T 'LL 'Re we're I'm 'll 'Ve 'd 'm 'T 'S", "ids": [43, 2090, 1664, 2118, 436, 734, 36837, 67322, 905, 3699, 905, 2167, 579, 4750, 342, 4571, 905, 862, 905, 33455, 905, 70, 905, 79, 905, 54, 905, 53]}
+{"text": "can't won't shouldn't they're we've y'all", "ids": [9332, 1664, 5646, 1664, 22054, 1664, 851, 4750, 579, 5270, 383, 98513]}
+{"text": "  5", "ids": [262, 23]}
+{"text": " a", "ids": [260]}
+{"text": "   abc", "ids": [262, 71490]}
+{"text": "\tabc", "ids": [200, 32372]}
+{"text": "\n\n  x", "ids": [271, 223, 1527]}
+{"text": "!!!\n", "ids": [115432]}
+{"text": "a \n b", "ids": [67, 539, 291]}
+{"text": "abc   ", "ids": [32372, 361]}
+{"text": " \n", "ids": [539]}
+{"text": "\r\n\r\n", "ids": [204, 201, 204, 201]}
+{"text": "hello\n\nworld\n", "ids": [33310, 271, 29616, 201]}
+{"text": "x\u00a0y", "ids": [90, 2162, 91]}
+{"text": "1234567", "ids": [6895, 18009, 25]}
+{"text": "0000", "ids": [1320, 18]}
+{"text": "0.5", "ids": [18, 16, 23]}
+{"text": "1,000,000.50", "ids": [19, 14, 1320, 14, 1320, 16, 1328]}
+{"text": "123456789012345", "ids": [6895, 18009, 25744, 16993, 18014]}
+{"text": "\u00bd \u216b \u00b2 \u2153", "ids": [23951, 223, 23603, 107, 223, 1628, 223, 23603, 244]}
+{"text": "\u4f60\u597d\uff0c\u4e16\u754c", "ids": [30594, 303, 3427]}
+{"text": "\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440", "ids": [24797, 8919, 74779]}
+{"text": "\u0393\u03b5\u03b9\u03b1 \u03c3\u03bf\u03c5", "ids": [36129, 54539, 6931, 5700]}
+{"text": "\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35\u0e04\u0e23\u0e31\u0e1a", "ids": [2952, 34189, 2952, 25581, 79813]}
+{"text": "\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd", "ids": [8793, 2328, 16467, 6166, 41141]}
+{"text": "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645", "ids": [10393, 2212, 53067, 9254, 1183, 14059]}
+{"text": "na\u00efve caf\u00e9 Stra\u00dfe", "ids": [2720, 91223, 57664, 23900, 30234]}
+{"text": "emoji \ud83d\udc4d\ud83c\udffd test", "ids": [18872, 7063, 102527, 40965, 124, 1950]}
+{"text": "family \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 walk", "ids": [33811, 52780, 104, 46088, 25730, 105, 46088, 25730, 103, 46088, 25730, 102, 4961]}
+{"text": "code ```python\nprint(1)\n``` end", "ids": [8308, 35739, 36490, 201, 3098, 10, 19, 682, 9854, 1522]}
+{"text": "!!!???***", "ids": [34513, 50640, 18989]}
+{"text": "a-b_c+d=e", "ids": [67, 1761, 4941, 61963, 91343]}
+{"text": "<think>", "ids": [128821]}
+{"text": "</think>", "ids": [128822]}
+{"text": "a<think>b", "ids": [67, 128821, 68]}
+{"text": "", "ids": []}
+{"text": " ", "ids": [223]}
+{"text": "  ", "ids": [262]}
+{"text": "\n", "ids": [201]}
+{"text": "x", "ids": [90]}
+{"text": "def add(a, b):\n    return a + b  # inline comment\n\nprint(add(2, 3))\n", "ids": [3465, 1258, 6036, 14, 291, 3395, 361, 1354, 260, 940, 291, 223, 1823, 41892, 7006, 271, 3098, 106254, 10, 20, 14, 223, 21, 5203]}
+{"text": "The quick brown fox jumps over the lazy dog. 0123456789 !@#$%^&*()", "ids": [671, 4787, 13769, 46012, 54994, 1060, 270, 41638, 6397, 16, 223, 16993, 18014, 27183, 27, 4050, 34, 125463, 7, 64, 8, 12, 1393]}
+{"text": "<\uff5cbegin\u2581of\u2581sentence\uff5c>", "ids": [0]}
+{"text": "<\uff5cend\u2581of\u2581sentence\uff5c>", "ids": [1]}
+{"text": "<\uff5cUser\uff5c>", "ids": [128803]}
+{"text": "<\uff5cAssistant\uff5c>", "ids": [128804]}
+{"text": "<\uff5cSystem\uff5c>", "ids": [128799]}
+{"text": "\uff5cDSML\uff5c", "ids": [128825]}
+{"text": "<\uff5clatest_reminder\uff5c>", "ids": [128828]}
+{"text": "<\uff5ctool\u2581calls\u2581begin\uff5c>", "ids": [128806]}
+{"text": "<\uff5cplace\u2581holder\u2581no\u25817\uff5c>", "ids": [128007]}
+{"text": "<\uff5cdeepseek_image\uff5c>", "ids": [129264]}
+{"text": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>You are a helpful assistant.<\uff5cUser\uff5c>Hello<\uff5cAssistant\uff5c></think>Hi!<\uff5cend\u2581of\u2581sentence\uff5c>", "ids": [0, 128799, 3476, 477, 260, 11502, 22896, 16, 128803, 19923, 128804, 128822, 23166, 3, 1]}
+{"text": "<\uff5cbegin\u2581of\u2581sentence\uff5c><\uff5cSystem\uff5c>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nYou are a helpful assistant.<\uff5cUser\uff5c>What is 2+2?<\uff5cAssistant\uff5c><think>", "ids": [0, 128799, 77666, 288, 9504, 482, 28, 223, 2402, 343, 16801, 223, 19, 15, 1457, 14, 270, 4077, 270, 1990, 14, 270, 850, 15146, 270, 22805, 868, 3476, 477, 260, 11502, 22896, 16, 128803, 3085, 344, 223, 20, 13, 20, 33, 128804, 128821]}
+{"text": "Simple arithmetic.</think>2 + 2 = 4.<\uff5cend\u2581of\u2581sentence\uff5c>", "ids": [40593, 29568, 16, 128822, 20, 940, 223, 20, 438, 223, 22, 16, 1]}
+{"text": "\n\n<\uff5cDSML\uff5c calls>\n<\uff5cDSML\uff5c invoke name=\"get_weather\">\n<\uff5cDSML\uff5c parameter name=\"city\" string=\"true\">Paris</\uff5cDSML\uff5c parameter>\n<\uff5cDSML\uff5c parameter name=\"days\" string=\"false\">3</\uff5cDSML\uff5c parameter>\n</\uff5cDSML\uff5c invoke>\n</\uff5cDSML\uff5c calls><\uff5cend\u2581of\u2581sentence\uff5c>", "ids": [271, 30, 128825, 10699, 1018, 30, 128825, 34756, 2329, 1281, 1133, 65, 50219, 3816, 30, 128825, 10767, 2329, 1281, 37399, 4, 3418, 1281, 11476, 3320, 51119, 1718, 128825, 10767, 1018, 30, 128825, 10767, 2329, 1281, 28026, 4, 3418, 1281, 19836, 3320, 21, 1718, 128825, 10767, 1018, 1718, 128825, 34756, 1018, 1718, 128825, 10699, 32, 1]}
+{"text": "<\uff5cUser\uff5c><tool_result>{\"temp\": 21}</tool_result><\uff5cAssistant\uff5c><think>", "ids": [128803, 30, 72461, 46148, 32, 24313, 26343, 3362, 223, 1602, 24568, 72461, 46148, 32, 128804, 128821]}
+{"text": "x\uff5cDSML\uff5cy", "ids": [90, 128825, 91]}
+{"text": "before <\uff5cUser\uff5c> after", "ids": [35975, 223, 128803, 1561]}
+{"text": "\u4f60\u597d\uff0c\u4e16\u754c", "ids": [30594, 303, 3427]}
+{"text": "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8", "ids": [88768, 1576, 17383, 20367, 24552]}
+{"text": "\u4f60\u597dabc123\u4e16\u754c", "ids": [30594, 32372, 6895, 3427]}
+{"text": "\u534a\u89d2\uff76\uff85 \u2460\u2461\u2462", "ids": [3160, 2877, 5879, 117, 55241, 230, 223, 104894, 21686]}
+{"text": "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8", "ids": [5634, 17564, 9227, 61291, 238, 45652]}
+{"text": "\u4e2d\u6587 English \u6df7\u5408 text", "ids": [21134, 3947, 223, 14769, 3051]}
+{"text": "\u3053\u3093\u306b\u3061\u306f\u4e16\u754c\uff01", "ids": [4549, 7245, 2298, 12457, 2841, 3427, 1175]}
+{"text": "\u6771\u4eac\u30bf\u30ef\u30fc\u306f333\u30e1\u30fc\u30c8\u30eb", "ids": [66771, 11767, 37560, 4045, 2841, 11722, 17410, 28343, 7429]}
+{"text": "1234567", "ids": [6895, 18009, 25]}
+{"text": "x1234y", "ids": [90, 6895, 22, 91]}
+{"text": "a1b22c333d4444", "ids": [67, 19, 68, 1302, 69, 11722, 70, 18966, 22]}
+{"text": "\u0661\u0662\u0663\u0664", "ids": [63468, 76647, 127056, 152, 100]}
+{"text": "\uff11\uff12\uff13\uff14\uff15", "ids": [127167, 25081, 33095, 31953]}
+{"text": "3.14159", "ids": [21, 16, 9926, 3318]}
+{"text": "2024-09-13", "ids": [939, 22, 15, 3130, 15, 907]}
+{"text": "  5 a", "ids": [262, 23, 260]}
+{"text": "v2.1.0", "ids": [88, 20, 16, 19, 16, 18]}
+{"text": ".foo bar-baz", "ids": [4658, 6379, 4758, 1761, 1521]}
+{"text": "$abc(def)", "ids": [6, 32372, 119352, 11]}
+{"text": "I don't", "ids": [43, 2090, 1664]}
+{"text": "(x)", "ids": [4042, 11]}
+{"text": "ab.cd", "ids": [425, 4001, 70]}
+{"text": "@user #tag", "ids": [34, 5265, 1823, 24164]}
+{"text": "a+b=c", "ids": [67, 25846, 38676]}
+{"text": "x<y>z", "ids": [90, 30, 91, 32, 92]}
+{"text": "~/.bashrc", "ids": [96, 28414, 61159, 6921]}
+{"text": "C++ & C#", "ids": [37, 3312, 1051, 345, 5]}
+{"text": "\u20ac100 \u00a35 \u00a53", "ids": [19659, 1457, 11158, 23, 74117, 21]}
+{"text": "\u2192 \u2190 \u2191", "ids": [8674, 63094, 3995]}
+{"text": "a\u00b7b", "ids": [67, 1845, 68]}
+{"text": "\u00abquoted\u00bb", "ids": [12389, 403, 12284, 3807]}
+{"text": "\u2026", "ids": [1248]}
+{"text": "?!x", "ids": [42362, 90]}
+{"text": " ?!x", "ids": [4054, 3, 90]}
+{"text": "!!!\n\nx", "ids": [47868, 90]}
+{"text": "a\u200db", "ids": [67, 46088, 68]}
+{"text": "x\u0000y", "ids": [90, 191, 91]}
+{"text": "\ufeffbom", "ids": [15251, 68, 316]}
+{"text": "tab\tx", "ids": [14278, 51669]}
+{"text": "x\u00a0y", "ids": [90, 2162, 91]}
+{"text": "a\u0301 b", "ids": [67, 17793, 291]}
+{"text": "e\u0301", "ids": [71, 17793]}
+{"text": " \u0301x", "ids": [223, 17793, 90]}
+{"text": "\ud83d\udc4d\ud83c\udffd", "ids": [92526, 40965, 124]}
+{"text": "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67", "ids": [25730, 104, 46088, 25730, 105, 46088, 25730, 103]}
+{"text": "a\u200d", "ids": [67, 46088]}
+{"text": "\u00fcber na\u00efve", "ids": [45408, 112752]}
+{"text": "Stra\u00dfe", "ids": [96166, 30234]}
+{"text": "\u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac", "ids": [40435, 43595, 20975]}
+{"text": "\u041a\u0438\u0440\u0438\u043b\u043b\u0438\u0446\u0430", "ids": [7725, 393, 1558, 31700, 9667]}
+{"text": "\u05e2\u05d1\u05e8\u05d9\u05ea", "ids": [11715, 15773, 8170]}
+{"text": "\u0627\u0644\u0639\u0631\u0628\u064a\u0629", "ids": [69577, 64758]}

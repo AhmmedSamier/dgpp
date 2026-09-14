@@ -47,6 +47,21 @@ void launch_mhc_compute(const uint16_t* streams, const GlmMhcWeights& w,
 // launch form. Returns true when comb was DEFERRED (defer_comb with the
 // fused per-coefficient form): the caller must then launch_mhc_comb
 // before anything reads comb; the tiled prefill form never defers.
+// The single-pass form (2026-09-13, DeepSeek-V4.1-Flash,
+// docs/deepseek_v41_flash_plan.md D4): every sublayer collapses its input
+// with the coefficients the PREVIOUS sublayer predicted. pre_in (fp32
+// [tokens, n]) replaces this site's own pre in the collapse (null: the GLM
+// form); pre_out receives this site's own pre for the next sublayer;
+// post_f32 / comb_f32 receive the coefficients in fp32 beside the bf16
+// exports (the one-rounding update below reads them). A deferred comb
+// takes its fp32 export from launch_mhc_comb instead.
+struct MhcSinglePass {
+  const float* pre_in = nullptr;
+  float* pre_out = nullptr;
+  float* post_f32 = nullptr;
+  float* comb_f32 = nullptr;
+};
+
 bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
                                const GlmMhcConfig& cfg, uint16_t* collapsed,
                                uint16_t* post, uint16_t* comb,
@@ -54,7 +69,14 @@ bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
                                uint16_t* normed, float ln_eps, int tokens,
                                cudaStream_t stream,
                                int* finish_counters = nullptr,
-                               bool defer_comb = false);
+                               bool defer_comb = false,
+                               const MhcSinglePass* single_pass = nullptr,
+                               bool decode_rows = false);
+// decode_rows (2026-09-14): the rows are a decode batch — keep the
+// per-coefficient fused form whatever their count. The prefill-sized forms
+// (>= 16 tokens: the token-tiled kernel, or the tensor-core GEMM) are for
+// prefill; a batched decode row must be bitwise the row alone, and the
+// GEMM form is not (DeepSeek-V4.1's six-slot batch is 30 rows).
 
 // The deferred comb (2026-09-08; fused finish only): with defer_comb the
 // finish above writes collapsed/post/normed and leaves comb to this
@@ -64,7 +86,27 @@ bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
 // joined before the update, off the sublayer's critical path.
 void launch_mhc_comb(const float* logits_scratch, const GlmMhcWeights& w,
                      const GlmMhcConfig& cfg, uint16_t* comb, int tokens,
-                     cudaStream_t stream);
+                     cudaStream_t stream, float* comb_f32 = nullptr);
+
+// The one-rounding stream update of the single-pass form (the reference's
+// hc_post: fp32 products and sum, one cast): for every token,
+//   streams_out[i] = bf16(post[i] * sublayer_out + sum_j comb[j,i] * streams_in[j])
+// with post / comb the fp32 exports above.
+void launch_mhc_stream_update_f32(const float* post, const float* comb,
+                                  const uint16_t* sublayer_out, const uint16_t* streams_in,
+                                  uint16_t* streams_out, const GlmMhcConfig& cfg, int tokens,
+                                  cudaStream_t stream);
+
+// The weighted collapse with the sublayer's RMSNorm (the single-pass
+// form's head input: hc_pre(streams, pre) then the norm): collapsed
+// [tokens, D] = bf16(sum_j pre[j] * streams[j]) (may be null), normed =
+// rmsnorm(collapsed, ln, ln_eps) with the two-rounding norm (ln and normed
+// both null or both set). Bitwise launch_mhc_compute_normed's normed row
+// at the same pre_in.
+void launch_mhc_collapse_normed(const uint16_t* streams, const float* pre,
+                                const uint16_t* ln, float ln_eps, uint16_t* collapsed,
+                                uint16_t* normed, const GlmMhcConfig& cfg, int tokens,
+                                cudaStream_t stream);
 
 // Stream update after the sublayer: for every token,
 //   streams_out[i] = bf16(bf16(post[i] * sublayer_out)

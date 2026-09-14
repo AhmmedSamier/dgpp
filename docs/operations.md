@@ -238,6 +238,52 @@ rollback are the same machinery over T rows; the sampled verdict tests
 the drafts in order (a stand moves to the next row, a reject ends the
 step on the residual token, the last row reached is sampled plainly) and
 a host fallback continues the chain exactly as the device would have.
+
+**The scheduled verify depth** (`engine.mtp_schedule`, `--mtp-schedule`;
+needs `decode_graph`, `mtp` and a depth of at least 2 to matter) lets a
+greedy request verify fewer rows than the whole draft block on a step
+whose drafts are unlikely to stand. The confidence is DeepSeek-V4.1's
+DSpark confidence head where there is one; every other MTP family
+(GLM-5.3-Flash, Qwen3.8-Flash-Next, GLM-4.7, the full GLM-5.3) takes the
+draft head's own probability of each draft from the device sampler (the
+draft picks report logprobs; the draft token itself is unchanged), so it
+needs `sampling_candidates` > 0. The head emits a per-position acceptance logit; the engine
+verifies the leading drafts whose prefix-survival probability beats the
+value of one verify row, `lambda × row_ms`, and stops at the first that
+falls below (the survival is monotone, so the verified drafts are a
+prefix). A draft not verified is decoded plainly next step, so the
+committed transcript is the plain greedy one at every depth — the change
+is the step's cost only. Each depth replays its own captured variant (the
+bus's 32 graph variants bound them: two per slot per depth plus two per
+batch family; a spread of depths that always keeps the full block is used
+when the budget is short, and a policy depth rounds up to the next
+variant). The batched replay takes one depth for its slots, the deepest
+any of them asks for; a sampled request, and a batch holding one, verify
+the whole block. The constants are the world's (every rank takes rank 0's, so every
+rank derives the same depth from the replicated confidence):
+`mtp_schedule_row_ms` (`--mtp-schedule-row-ms`, one verify row, default
+8), `mtp_schedule_base_ms` (`--mtp-schedule-base-ms`, the step's fixed
+cost with the draft, default 28), `mtp_schedule_lambda`
+(`--mtp-schedule-lambda`, the value of decode time in tokens/ms; 0, the
+default, is the reservation rate `1 / (base + row)` — a verify row is
+taken only when it beats a plain step's rate), `mtp_schedule_min_depth`
+(`--mtp-schedule-min-depth`, the fewest drafts a step verifies, default
+1). The scheduled path gives up the pipelined replay's launch-ahead (the
+graph to launch is not known until the previous replay's confidence is
+published at its tail), so a stream that stays at the full block pays the
+graph launch (~0.5 ms a step) for nothing; the win is on the streams the
+policy shortens. Measured on four nodes (2026-09-14, greedy): every class
+faster — chat 33.4 → 24.6, prose 27.4 → 22.7, code 21.9 → 18.9, json 21.9 →
+19.1, math 21.8 → 19.8 ms/token at `mtp_schedule_lambda` 0.045 (the
+achieved throughput, the optimum; the reservation-rate default is 2–4 %
+behind), transcripts identical; at two live requests prose 34 → 51 and chat
+37 → 54 tok/s aggregate. On the families without a confidence head at
+`mtp_depth` 2 (GLM-4.7, GLM-5.3-Flash) it is exact and throughput-neutral:
+one row is at stake per step, so leave it off there unless a deeper draft
+is served. Set `mtp_schedule_row_ms` to the family's measured extra row
+(DeepSeek 8, GLM-5.3-Flash 12, GLM-4.7 3 ms) and `mtp_schedule_lambda` to
+its achieved tokens per millisecond. The engine logs the replays per depth
+at shutdown.
 Measured on the fabric (2026-09-06, one greedy request, 300 tokens): the
 step is 31.5 ms plain, 42–43 ms at depth 1, 54–56 ms at depth 2 — each
 verify row is its own expert bytes (~10 ms), the chained block row
@@ -273,6 +319,22 @@ head pushes it, the config digest carries it) and every rank runs the same
 one. The quantized formats are a memory trade an operator makes
 deliberately: at 262k tokens they save 1.5 GiB (fp8) or 2.2 GiB (fp4) per
 rank against a 98 GiB plan, and the model's answers change with them.
+
+**The DeepSeek-V4.1 prefill mode** (`engine.prefill`, `--prefill
+bounded|exact`, default `bounded`) applies to the `deepseek_v41` family
+only. `bounded` is the model's own serving recipe (its tech report's
+"Decoder SWA Bounded Replay"): the twenty encoder layers run over every
+prompt row, layer 20's compressor and index keys are published for every
+row (the decoder's global KV), and the twenty decoder layers run over the
+prompt's last 128 rows only, their window floored at that segment's start
+— about half the prefill work of the exact walk. Across the chunks of one
+prefill call the encoder output of the last 128 rows carries over to the
+last chunk; a prefix-cache snapshot position closes such a span so the
+saved state is complete, and a resumed prefill's segment sees the rows
+before it through the ring. `exact` runs all forty layers over every row
+(every parity gate's mode; `docs/deepseek_v41_flash_plan.md` §1.8 and the
+G5 record). The mode is part of the world's settings (the head pushes it,
+the config digest carries it); decode is the same in both.
 
 Nothing else on the node needs setting. In particular a locked GPU clock
 (`nvidia-smi -lgc`) is **not** required: the governor sits at 2400-2560 MHz
@@ -414,7 +476,11 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   perturb the collective skew they measure; `DGPP_PIPELINE=0` turns the
   pipelined replay off — every replay settles right after its launch, the
   pre-2026-09-06 step — `DGPP_PIPELINE_TRACE=1` logs each launch and
-  settle, and `DGPP_SYNC_EAGER=1` makes an eager row — a prefill chunk,
+  settle, `DGPP_DSV41_DENSE_GEMV=1` makes a DeepSeek-V4.1-Flash world take
+  the 4-row GEMV chunks for its dense decode projections and head instead
+  of the streaming tensor-core GEMM (the A/B switch; tolerance-equal
+  forms, transcripts reorder — set it on every rank, the boot reads it at
+  model construction), and `DGPP_SYNC_EAGER=1` makes an eager row — a prefill chunk,
   the sampled fallback's verify and re-draft — synchronize after every
   stage and validate its selection list before the attention, naming the
   stage a fault came from; the fault hunt's knob, not for serving) — the one-hour soak had written 307,000

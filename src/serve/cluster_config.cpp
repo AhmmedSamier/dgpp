@@ -169,14 +169,33 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (e.dense_weights != "checkpoint" && e.dense_weights != "fp8")
             fail(what, "'" + ek + "' must be \"checkpoint\" or \"fp8\"");
         }
+        else if (p.key == "prefill") {
+          e.prefill = text(x, ek, what);
+          if (e.prefill != "bounded" && e.prefill != "exact")
+            fail(what, "'" + ek + "' must be \"bounded\" or \"exact\"");
+        }
         else if (p.key == "default_max_tokens") e.default_max_tokens = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
         else if (p.key == "queue_limit") e.queue_limit = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
         else if (p.key == "max_connections") e.max_connections = static_cast<int>(integer(x, ek, what, 1, 1 << 20));
         else if (p.key == "no_eos") e.no_eos = boolean(x, ek, what);
         else if (p.key == "decode_graph") e.decode_graph = boolean(x, ek, what);
         else if (p.key == "mtp") e.mtp = boolean(x, ek, what);
-        else if (p.key == "mtp_depth") e.mtp_depth = static_cast<int>(integer(x, ek, what, 1, 3));  // kSpecRows - 1
+        else if (p.key == "mtp_depth") {
+          e.mtp_depth = static_cast<int>(integer(x, ek, what, 1, 5));  // kSpecRows - 1
+          e.mtp_depth_set = true;
+        }
         else if (p.key == "graph_batch_min_live") e.graph_batch_min_live = static_cast<int>(integer(x, ek, what, 0, 1 << 20));
+        else if (p.key == "mtp_schedule") e.mtp_schedule = boolean(x, ek, what);
+        else if (p.key == "mtp_schedule_row_ms") {
+          e.mtp_schedule_row_ms = number(x, ek, what);
+          if (!(e.mtp_schedule_row_ms > 0.0)) fail(what, "'" + ek + "' must be > 0");
+        } else if (p.key == "mtp_schedule_base_ms") {
+          e.mtp_schedule_base_ms = number(x, ek, what);
+          if (!(e.mtp_schedule_base_ms >= 0.0)) fail(what, "'" + ek + "' must be >= 0");
+        } else if (p.key == "mtp_schedule_lambda") {
+          e.mtp_schedule_lambda = number(x, ek, what);
+          if (!(e.mtp_schedule_lambda >= 0.0)) fail(what, "'" + ek + "' must be >= 0 (0: the reservation rate)");
+        } else if (p.key == "mtp_schedule_min_depth") e.mtp_schedule_min_depth = static_cast<int>(integer(x, ek, what, 1, 5));
         else if (p.key == "sampling_candidates") e.sampling_candidates = static_cast<int>(integer(x, ek, what, 1, 256));
         else if (p.key == "prefix_cache_gib") {
           e.prefix_cache_gib = number(x, ek, what);

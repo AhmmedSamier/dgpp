@@ -32,9 +32,14 @@ ModelArchitecture detect_architecture(const minijson::Value& root) {
     return ModelArchitecture::Qwen4Exp;
   if (arch.rfind("Glm4Moe", 0) == 0 || (arch.empty() && type == "glm4_moe"))
     return ModelArchitecture::Glm4Moe;
+  // DeepSeek-V4.1-Flash (2026-09-13, docs/deepseek_v41_flash_plan.md):
+  // `DeepseekV41ForCausalLM` / `deepseek_v41` (its text_config's type is
+  // `deepseek_v41_text`).
+  if (arch.rfind("DeepseekV41", 0) == 0 || (arch.empty() && type == "deepseek_v41"))
+    return ModelArchitecture::DeepseekV41;
   throw std::runtime_error(
       "config.json: unsupported architecture '" + arch + "' (model_type '" +
-      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe* and GlmMoeDsa*");
+      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa* and DeepseekV41*");
 }
 
 ModelArchitecture detect_architecture_file(const std::string& path) {

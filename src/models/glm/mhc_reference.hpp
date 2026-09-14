@@ -28,10 +28,31 @@ struct GlmMhcRefResult {
 
 // The mHC mapping: norm + 24-logit projection + pre/post/comb derivation +
 // collapse. pre is exported so tests can inspect the collapse weights.
+// pre_in (double [tokens, n], optional): the single-pass form — the
+// collapse uses these coefficients instead of the site's own (out.pre
+// still carries the site's own).
 void glm_mhc_ref_compute(const uint16_t* streams,
                          const GlmMhcWeightsHost& w,
                          const GlmMhcConfig& cfg, int tokens,
-                         GlmMhcRefResult& out);
+                         GlmMhcRefResult& out, const double* pre_in = nullptr);
+
+// The one-rounding update of the single-pass form, with post / comb as
+// doubles (the fp32 exports' values):
+//   streams_out[i] = bf16(post[i]*h + sum_j comb[j,i]*streams_in[j])
+void glm_mhc_ref_stream_update_f32(const double* post, const double* comb,
+                                   const uint16_t* sublayer_out,
+                                   const uint16_t* streams_in,
+                                   const GlmMhcConfig& cfg, int tokens,
+                                   uint16_t* streams_out);
+
+// The weighted collapse with the two-rounding RMSNorm (the single-pass
+// form's head input): collapsed = bf16(sum_j pre[j] * streams[j]),
+// normed = bf16(ln * bf16(collapsed * rstd)), rstd over the bf16 collapsed
+// values.
+void glm_mhc_ref_collapse_normed(const uint16_t* streams, const double* pre,
+                                 const uint16_t* ln, float ln_eps,
+                                 const GlmMhcConfig& cfg, int tokens,
+                                 uint16_t* collapsed, uint16_t* normed);
 
 // The stream update, taking post/comb as BF16 BITS (the choreography rounds
 // them before the products — the same inputs the kernel receives).

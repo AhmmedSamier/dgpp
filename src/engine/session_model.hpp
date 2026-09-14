@@ -22,6 +22,10 @@
 //                     bool capture, int head_rows, int batch_requests);
 //   void snapshot_draft_state(int req);  void restore_draft_state(int req);  // around an in-graph draft
 //   static constexpr bool kDraftChain;          // depth >= 2 drafting wired (the chain rows)
+//   static constexpr bool kVerifyConfidence;    // optional (default false here): the draft emits a
+//                                               // per-position acceptance logit — confidence_rows()
+//                                               // entries per slot at device_confidence() + slot * rows
+//                                               // (engine/verify_schedule.hpp, the scheduled verify depth)
 //   const uint16_t* draft_hidden_rows() const;  // the block's output rows [T, draft_width] of its last run
 //   void snapshot_chain_state(int req);  void restore_chain_state(int req);  // around the chain rows
 // and calls init_session(params) from its constructor once its loader is
@@ -80,6 +84,9 @@ struct SessionParams {
 template <class Derived>
 class SessionModel {
  public:
+  // No confidence head unless the family says otherwise (the graph engine
+  // schedules the verify depth only for a family that shadows this).
+  static constexpr bool kVerifyConfidence = false;
   struct Outputs : DecodeOutputs {
     std::vector<std::vector<uint16_t>> layer_states;  // per layer, when captured
     std::vector<std::vector<int32_t>> route_ids;      // per MoE layer [T, top_k], ascending
@@ -112,6 +119,11 @@ class SessionModel {
     bool capture = false;          // graph capture: no syncs, no copies, nothing executes
     int batch_requests = 0;        // > 0: the fixed slot-major batch (decode)
     bool snapshots = false;        // decode: leave every row's post-state in the spec rows
+    // Prefill: the call's first and last chunk (a family with a replay
+    // segment — DeepSeek-V4.1's bounded decoder — carries a tail between
+    // the chunks of one call and runs its segment on the last).
+    bool first_chunk = true;
+    bool last_chunk = true;
   };
   // The staged inputs of a walk (begin_run).
   struct RowInputs {
@@ -202,20 +214,34 @@ class SessionModel {
   void session_graph_capture_step(int req, const std::vector<int64_t>& ids) {
     session_graph_capture_step(req, ids, /*device_positions=*/false);
   }
+  // `feed_rows` (2026-09-14, the scheduled verify depth): the slot's
+  // persistent feed holds this many rows and the capture verifies the first
+  // ids.size() of them — the reduced-depth variants of one slot share the
+  // full-depth variant's feed rows. 0 (the default): the feed is ids.size()
+  // rows, as every capture before.
   void session_graph_capture_step(int req, const std::vector<int64_t>& ids, bool device_positions,
-                                  bool device_tokens = false);
+                                  bool device_tokens = false, int feed_rows = 0);
   void session_graph_capture_commit(int req, const PickVerdict* device_verdict);
   void session_graph_stage(int req, int64_t token_id) { session_graph_stage(req, std::vector<int64_t>{token_id}); }
   void session_graph_stage(int req, const std::vector<int64_t>& ids) {
     decode_host_prep(req, ids, /*upload=*/false, graph_device_positions_);
   }
-  void session_graph_settle(int req, int accepted);
+  // `rows` (2026-09-14): the replay's own verify rows, the bound on
+  // `accepted` — a reduced-depth batch leaves the batch contract at fewer
+  // rows than a following full-depth scalar replay verifies (0: the last
+  // contract's rows, as before).
+  void session_graph_settle(int req, int accepted, int rows = 0);
   Outputs session_graph_collect(int req);
   Outputs session_graph_outputs(int req);
   void session_graph_seed_tokens(int req, const std::vector<int64_t>& ids);
   void session_graph_seed_scalar_tokens(const std::vector<int64_t>& ids);
   void session_graph_seed_feed(int req, const std::vector<int64_t>& ids);
-  void session_graph_capture_batch(int rows_per_request, int requests = 0);
+  // `feed_rows` (2026-09-14, the scheduled verify depth): the slots keep
+  // their feeds at feed_rows rows; a batch verifying rows_per_request <
+  // feed_rows rows per slot reads them compacted (glm_spec_gather_feed) and
+  // writes the next step's full-width feeds back. 0: the feed is
+  // rows_per_request rows, as every capture before.
+  void session_graph_capture_batch(int rows_per_request, int requests = 0, int feed_rows = 0);
   void session_graph_stage_batch();
   void session_graph_use_batch_contract(int rows_per_request, int requests = 0);
   void session_graph_capture_commit_batch(const PickVerdict* device_verdicts);
@@ -372,6 +398,7 @@ class SessionModel {
   bool graph_has_draft_ = false;
   int graph_batch_requests_ = 0;
   int graph_rows_per_request_ = 0;
+  int graph_feed_rows_ = 0;  // a scalar capture's feed rows (>= its verified rows)
 
   // The draft block.
   bool mtp_ = false;
@@ -650,6 +677,11 @@ typename SessionModel<D>::Outputs SessionModel<D>::session_prefill_chunks(
   Outputs out;
   int64_t c0 = start;
   size_t ci = 0;
+  // A family's prefill may span chunks (the DeepSeek bounded prefill
+  // carries the encoder output's tail to the call's last chunk, where the
+  // decoder runs); a snapshot position must hold a complete state, so the
+  // chunk ending there closes such a span and the next chunk opens one.
+  bool span_start = true;
   while (c0 < end) {
     const int64_t c1 = ci < cuts.size() ? cuts[ci++] : end;
     if (c1 - c0 > max_tokens_)
@@ -662,6 +694,9 @@ typename SessionModel<D>::Outputs SessionModel<D>::session_prefill_chunks(
     run.pos0 = c0;
     run.decode = false;
     run.all_rows = false;
+    run.first_chunk = span_start;
+    run.last_chunk = c1 == end || (snap != nullptr && !snap->taken && snap->position == c1);
+    span_start = run.last_chunk;
     Outputs chunk = derived().run_rows(run);
     out.logits = std::move(chunk.logits);
     out.final_hidden_bits = std::move(chunk.final_hidden_bits);
@@ -677,6 +712,14 @@ typename SessionModel<D>::Outputs SessionModel<D>::session_prefill_chunks(
                                     chunk.route_weights[l].end());
       }
     }
+    // A capturing walk's per-row selections, chunk after chunk (the
+    // families' chunked-prefill gates compare them with the one-shot's).
+    // (A chunk may capture fewer sources than the next: the bounded
+    // prefill's decoder sources appear on the span's last chunk only.)
+    if (out.dsa_selections.size() < chunk.dsa_selections.size()) out.dsa_selections.resize(chunk.dsa_selections.size());
+    for (size_t l = 0; l < chunk.dsa_selections.size(); ++l)
+      out.dsa_selections[l].insert(out.dsa_selections[l].end(), chunk.dsa_selections[l].begin(),
+                                   chunk.dsa_selections[l].end());
     session_pos_[static_cast<size_t>(req)] = c1;
     push_position(req);
     // The draft block over this chunk's rows — row q embeds tok_{q+1}, so
@@ -996,17 +1039,22 @@ void SessionModel<D>::session_attach(int req, const void* src, const SessionSnap
 
 template <class D>
 void SessionModel<D>::session_graph_capture_step(int req, const std::vector<int64_t>& ids, bool device_positions,
-                                                 bool device_tokens) {
+                                                 bool device_tokens, int feed_rows) {
   if (device_tokens && !device_positions)
     throw std::invalid_argument("session_graph_capture_step: device tokens need device positions");
+  if (feed_rows < 0 || feed_rows > kSpecRows || (feed_rows > 0 && static_cast<size_t>(feed_rows) < ids.size()))
+    throw std::invalid_argument("session_graph_capture_step: the feed must hold at least the verified rows");
   graph_device_positions_ = device_positions;
   graph_device_tokens_ = device_tokens;
   graph_has_draft_ = false;
   graph_batch_requests_ = 0;
   graph_rows_per_request_ = 0;
+  graph_feed_rows_ = feed_rows > 0 ? feed_rows : static_cast<int>(ids.size());
   // The slot's scalar variant reads and writes its own persistent feed
-  // rows (device_feed), so its feed survives the other slots' replays.
-  step_tokens_ = d_tokens_ + static_cast<size_t>(max_decode_rows_) + static_cast<size_t>(req) * ids.size();
+  // rows (device_feed), so its feed survives the other slots' replays; a
+  // reduced-depth variant reads the first ids.size() rows of the same feed.
+  step_tokens_ = d_tokens_ + static_cast<size_t>(max_decode_rows_) +
+                 static_cast<size_t>(req) * static_cast<size_t>(graph_feed_rows_);
   decode_host_prep(req, ids, /*upload=*/true, device_positions);
   RowRun run;
   run.req = req;
@@ -1030,11 +1078,11 @@ void SessionModel<D>::session_graph_capture_commit(int req, const PickVerdict* d
 }
 
 template <class D>
-void SessionModel<D>::session_graph_settle(int req, int accepted) {
+void SessionModel<D>::session_graph_settle(int req, int accepted, int rows) {
   check_req(req, "session_graph_settle");
   if (!graph_device_positions_)
     throw std::logic_error("session_graph_settle: the graph was not captured with device positions");
-  const int bound = graph_batch_requests_ > 0 ? graph_rows_per_request_ : decode_rows_;
+  const int bound = rows > 0 ? rows : (graph_batch_requests_ > 0 ? graph_rows_per_request_ : decode_rows_);
   if (accepted < 1 || accepted > bound)
     throw std::invalid_argument("session_graph_settle: accepted rows outside [1, " + std::to_string(bound) + "]");
   if (session_pos_[static_cast<size_t>(req)] <= 0) throw std::invalid_argument("session_graph_settle: no open session");
@@ -1115,12 +1163,15 @@ void SessionModel<D>::session_graph_seed_feed(int req, const std::vector<int64_t
 }
 
 template <class D>
-void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requests_arg) {
+void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requests_arg, int feed_rows) {
   const int requests = requests_arg > 0 ? requests_arg : max_requests_;
   if (rows_per_request < 1 || rows_per_request > kSpecRows || requests < 1 || requests > max_requests_ ||
       requests * rows_per_request > max_decode_rows_)
     throw std::invalid_argument("session_graph_capture_batch: requests * rows_per_request must fit the decode-row ceiling (" +
                                 std::to_string(max_decode_rows_) + ")");
+  if (feed_rows < 0 || feed_rows > kSpecRows || (feed_rows > 0 && feed_rows < rows_per_request) ||
+      (feed_rows > 0 && requests * feed_rows > max_decode_rows_))
+    throw std::invalid_argument("session_graph_capture_batch: the feeds must hold at least the verified rows");
   if (std::none_of(session_pos_.begin(), session_pos_.end(), [](int64_t p) { return p > 0; }))
     throw std::logic_error("session_graph_capture_batch: capture needs one open request");
   const int rows = requests * rows_per_request;
@@ -1130,7 +1181,17 @@ void SessionModel<D>::session_graph_capture_batch(int rows_per_request, int requ
   graph_has_draft_ = false;
   graph_batch_requests_ = requests;
   graph_rows_per_request_ = rows_per_request;
+  graph_feed_rows_ = feed_rows > rows_per_request ? feed_rows : 0;
   step_tokens_ = d_tokens_ + static_cast<size_t>(max_decode_rows_);  // the fixed batch: every slot's feed rows
+  if (graph_feed_rows_ > 0) {
+    // The reduced-depth batch: the first rows_per_request rows of every
+    // slot's feed, compacted into the front scratch (free during a replay),
+    // so the walk's rows stay contiguous per request; the next-tokens write
+    // at the end of the replay lands in the feeds themselves.
+    glm_spec_gather_feed(d_tokens_ + static_cast<size_t>(max_decode_rows_), requests, graph_feed_rows_,
+                         rows_per_request, d_tokens_, stream_);
+    step_tokens_ = d_tokens_;
+  }
   decode_rows_ = rows;
   for (int q = 0; q < requests; ++q) {
     h_req_spans_[2 * q] = q * rows_per_request;
@@ -1307,7 +1368,9 @@ void SessionModel<D>::session_graph_capture_next_tokens(int req,
     throw std::logic_error("session_graph_capture_next_tokens: needs a device-token capture with the draft in the graph");
   if (draft_verdicts.empty() || draft_verdicts.size() > static_cast<size_t>(kSpecMaxDrafts))
     throw std::invalid_argument("session_graph_capture_next_tokens: draft count");
-  if (decode_rows_ != 1 + static_cast<int>(draft_verdicts.size()))
+  // The feed carries every draft of the block whatever the verify's rows.
+  const int feed_rows = graph_feed_rows_ > 0 ? graph_feed_rows_ : decode_rows_;
+  if (feed_rows != 1 + static_cast<int>(draft_verdicts.size()))
     throw std::logic_error("session_graph_capture_next_tokens: the token feed is [next, draft_1 .. draft_n] (T = 1 + n)");
   GlmSpecDrafts d;
   for (size_t i = 0; i < draft_verdicts.size(); ++i) {
@@ -1435,7 +1498,8 @@ void SessionModel<D>::session_graph_capture_next_tokens(int req, const PickVerdi
   check_req(req, "session_graph_capture_next_tokens");
   if (!graph_device_tokens_ || !graph_has_draft_)
     throw std::logic_error("session_graph_capture_next_tokens: needs a device-token capture with the draft in the graph");
-  if (decode_rows_ != 2) throw std::logic_error("session_graph_capture_next_tokens: the token feed is [next, draft] (T = 2)");
+  if ((graph_feed_rows_ > 0 ? graph_feed_rows_ : decode_rows_) != 2)
+    throw std::logic_error("session_graph_capture_next_tokens: the token feed is [next, draft] (T = 2)");
   if (draft_verdict == nullptr) throw std::invalid_argument("session_graph_capture_next_tokens: null verdict");
   glm_spec_next_tokens(d_next_ + req, draft_verdict, step_tokens_, stream_);
 }
@@ -1451,7 +1515,10 @@ void SessionModel<D>::session_graph_capture_next_tokens_batch(const std::vector<
     throw std::logic_error("session_graph_capture_next_tokens_batch: requires the fixed draft graph");
   if (draft_verdicts.empty() || draft_verdicts.size() > static_cast<size_t>(kSpecMaxDrafts))
     throw std::invalid_argument("session_graph_capture_next_tokens_batch: draft count");
-  if (graph_rows_per_request_ != 1 + static_cast<int>(draft_verdicts.size()))
+  // The feeds carry every draft of the block whatever the verify's rows
+  // (the reduced-depth batch verified a prefix off the compacted copy).
+  const int feed_rows = graph_feed_rows_ > 0 ? graph_feed_rows_ : graph_rows_per_request_;
+  if (feed_rows != 1 + static_cast<int>(draft_verdicts.size()))
     throw std::logic_error(
         "session_graph_capture_next_tokens_batch: the token feed is [next, draft_1 .. draft_n] per request (T = 1 + n)");
   GlmSpecDrafts d;
@@ -1461,7 +1528,8 @@ void SessionModel<D>::session_graph_capture_next_tokens_batch(const std::vector<
     d.v[i] = draft_verdicts[i];
   }
   d.count = static_cast<int>(draft_verdicts.size());
-  glm_spec_next_tokens_batched(d_next_, d, graph_batch_requests_, graph_rows_per_request_, step_tokens_, stream_);
+  int64_t* feeds = graph_feed_rows_ > 0 ? d_tokens_ + static_cast<size_t>(max_decode_rows_) : step_tokens_;
+  glm_spec_next_tokens_batched(d_next_, d, graph_batch_requests_, feed_rows, feeds, stream_);
 }
 
 template <class D>

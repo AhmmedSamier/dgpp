@@ -27,6 +27,7 @@
 // kernel over the dequantized rows within the bf16 kernel's own tolerance.
 // Every operation is a single fp32 multiply, divide or conversion (no
 // contractable add), so -ffp-contract and --fmad cannot change a bit.
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -36,13 +37,28 @@
 
 namespace dgpp {
 
-enum class LatentFormat : int { kBf16 = 0, kFp8 = 1, kFp4 = 2 };
+//
+// Two more formats (2026-09-13, DeepSeek-V4.1-Flash, plan D6/D7) carry
+// their scales INSIDE the row and no row scale — the release's own
+// activation quantizers (inference/kernel.py act_quant / fp4_act_quant),
+// reproduced bitwise so a cache row decodes to exactly the bf16 the
+// reference stores:
+//   fp8_block  e4m3 codes with one e8m0 (power-of-two) scale per 32
+//              elements: s = 2^ceil(log2(max(absmax, 1e-4) / 448)),
+//              code = e4m3(x / s). The window KV rows (528 bytes at 512).
+//   fp4_block  e2m1 codes with one e4m3 scale per 16 elements:
+//              s = e4m3(max(absmax, 6 * 2^-9) / 6), code = e2m1(x / s)
+//              (a true fp32 division, as the reference's). The compressed
+//              main KV (288 bytes at 512: the card's number).
+enum class LatentFormat : int { kBf16 = 0, kFp8 = 1, kFp4 = 2, kFp8Block = 3, kFp4Block = 4 };
 
 constexpr const char* latent_format_name(LatentFormat f) {
   switch (f) {
     case LatentFormat::kBf16: return "bf16";
     case LatentFormat::kFp8: return "fp8";
     case LatentFormat::kFp4: return "fp4";
+    case LatentFormat::kFp8Block: return "fp8_block";
+    case LatentFormat::kFp4Block: return "fp4_block";
   }
   return "?";
 }
@@ -51,10 +67,13 @@ inline std::optional<LatentFormat> latent_format_from_string(std::string_view s)
   if (s == "bf16") return LatentFormat::kBf16;
   if (s == "fp8" || s == "fp8_e4m3" || s == "e4m3") return LatentFormat::kFp8;
   if (s == "fp4" || s == "nvfp4" || s == "e2m1") return LatentFormat::kFp4;
+  if (s == "fp8_block" || s == "fp8_e8m0") return LatentFormat::kFp8Block;
+  if (s == "fp4_block" || s == "fp4_e4m3") return LatentFormat::kFp4Block;
   return std::nullopt;
 }
 
-constexpr int kLatentFp4Block = 16;  // elements per e4m3 block scale
+constexpr int kLatentFp4Block = 16;      // elements per e4m3 block scale (fp4, fp4_block)
+constexpr int kLatentFp8BlockGroup = 32; // elements per e8m0 scale (fp8_block)
 constexpr float kLatentFp8Max = 448.0f;
 constexpr float kLatentFp4Max = 6.0f;
 
@@ -63,9 +82,15 @@ constexpr size_t latent_row_bytes(LatentFormat f, int kv_lora) {
   switch (f) {
     case LatentFormat::kBf16: return static_cast<size_t>(kv_lora) * 2;
     case LatentFormat::kFp8: return static_cast<size_t>(kv_lora);
-    case LatentFormat::kFp4: {
+    case LatentFormat::kFp4:
+    case LatentFormat::kFp4Block: {
       const size_t raw = static_cast<size_t>(kv_lora) / 2 +
                          static_cast<size_t>(kv_lora) / kLatentFp4Block;
+      return (raw + 15) / 16 * 16;
+    }
+    case LatentFormat::kFp8Block: {
+      const size_t raw = static_cast<size_t>(kv_lora) +
+                         static_cast<size_t>(kv_lora) / kLatentFp8BlockGroup;
       return (raw + 15) / 16 * 16;
     }
   }
@@ -73,11 +98,33 @@ constexpr size_t latent_row_bytes(LatentFormat f, int kv_lora) {
 }
 // Whether the format keeps a per-row fp32 scale beside the rows.
 constexpr bool latent_format_has_row_scale(LatentFormat f) {
-  return f != LatentFormat::kBf16;
+  return f == LatentFormat::kFp8 || f == LatentFormat::kFp4;
 }
-// The row's block-scale bytes start here (fp4 only).
+// The row's block-scale bytes start here (fp4 and fp4_block: after the
+// nibbles; fp8_block: after the codes).
 constexpr size_t latent_fp4_scale_offset(int kv_lora) {
   return static_cast<size_t>(kv_lora) / 2;
+}
+constexpr size_t latent_fp8_block_scale_offset(int kv_lora) {
+  return static_cast<size_t>(kv_lora);
+}
+
+// ---- e8m0 -----------------------------------------------------------------
+// A power-of-two scale as its e8m0 byte (2^(b - 127); 0 is 2^-127, 255
+// NaN) and back. The reference picks the byte as ceil(log2(x)) of the
+// fp32 x by its bit fields (kernel.py fast_log2_ceil): the exponent field
+// plus one when any mantissa bit is set.
+DGPP_HD inline uint8_t e8m0_ceil_log2_byte(float x) {
+  const uint32_t u = std::bit_cast<uint32_t>(x);
+  const int exp = static_cast<int>((u >> 23) & 0xFFu);
+  const int k = exp - 127 + ((u & 0x7FFFFFu) != 0u ? 1 : 0);
+  const int b = k + 127;
+  return static_cast<uint8_t>(b < 0 ? 0 : (b > 254 ? 254 : b));
+}
+DGPP_HD inline float e8m0_byte_to_float(uint8_t b) {
+  if (b == 255u) return std::bit_cast<float>(0x7FC00000u);
+  if (b == 0u) return std::bit_cast<float>(0x00400000u);  // 2^-127, an fp32 subnormal
+  return std::bit_cast<float>(static_cast<uint32_t>(b) << 23);
 }
 
 // ---- e2m1 ---------------------------------------------------------------
@@ -173,6 +220,41 @@ DGPP_HD inline uint16_t latent_fp4_decode_bf16(uint8_t code, float block_scale) 
   return float_to_bf16_bits(fp4_e2m1_bits_to_float(code) * block_scale);
 }
 
+// ---- the fp8_block row (the release's act_quant, e8m0 scales per 32) ------
+// The block's scale byte from its absmax: floor 1e-4, then the fp32
+// product absmax * (1 / 448) rounded up to a power of two.
+DGPP_HD inline uint8_t latent_fp8_block_scale_byte(float block_absmax) {
+  const float a = block_absmax > 1e-4f ? block_absmax : 1e-4f;
+  return e8m0_ceil_log2_byte(a * (1.0f / kLatentFp8Max));
+}
+// code = e4m3(x / s): an exact division by a power of two, a saturating
+// RNE encode (the reference clamps at +/-448 first; the encode saturates
+// to the same code).
+DGPP_HD inline uint8_t latent_fp8_block_encode(float x, float s) {
+  return float_to_fp8_e4m3_bits(x / s);
+}
+DGPP_HD inline uint16_t latent_fp8_block_decode_bf16(uint8_t code, float s) {
+  return float_to_bf16_bits(fp8_e4m3_bits_to_float(code) * s);
+}
+
+// ---- the fp4_block row (the release's fp4_act_quant with e4m3 scales) ---
+// The block's scale code: floor 6 * 2^-9 on the absmax, then e4m3(absmax /
+// 6) — a true division, rounded to nearest even.
+DGPP_HD inline uint8_t latent_fp4_block_scale_code_abs(float block_absmax) {
+  const float floor_v = kLatentFp4Max * 0.001953125f;  // 6 * 2^-9
+  const float a = block_absmax > floor_v ? block_absmax : floor_v;
+  return float_to_fp8_e4m3_bits(a / kLatentFp4Max);
+}
+// The block's absolute scale from its code (an e4m3 value, no row scale).
+DGPP_HD inline float latent_fp4_block_scale_abs(uint8_t code) {
+  return fp8_e4m3_bits_to_float(code);
+}
+// code = e2m1(x / S): the reference's fp32 division then the saturating
+// RNE encode (its clamp at +/-6 lands on the same code).
+DGPP_HD inline uint8_t latent_fp4_block_encode_abs(float x, float S) {
+  return float_to_fp4_e2m1_bits(x / S);
+}
+
 // ---- host reference codecs (the tests' oracle; also any host tooling) ----
 // Quantizes one bf16 row into `out` (latent_row_bytes(f, kv_lora) bytes)
 // and `*row_scale` (unused for bf16). The device append kernel reproduces
@@ -198,6 +280,50 @@ inline void latent_quantize_row_host(LatentFormat f, const uint16_t* row,
     for (int i = 0; i < kv_lora; ++i)
       out[i] = latent_fp8_encode(bf16_bits_to_float(row[i]), s.inv);
     if (row_scale) *row_scale = s.scale;
+    return;
+  }
+  if (f == LatentFormat::kFp8Block) {
+    const size_t bytes = latent_row_bytes(f, kv_lora);
+    for (size_t i = 0; i < bytes; ++i) out[i] = 0;
+    const size_t scale_off = latent_fp8_block_scale_offset(kv_lora);
+    for (int b = 0; b < kv_lora / kLatentFp8BlockGroup; ++b) {
+      float bmax = 0.0f;
+      for (int j = 0; j < kLatentFp8BlockGroup; ++j) {
+        const float a = std::fabs(bf16_bits_to_float(row[b * kLatentFp8BlockGroup + j]));
+        bmax = a > bmax ? a : bmax;
+      }
+      const uint8_t sb = latent_fp8_block_scale_byte(bmax);
+      out[scale_off + static_cast<size_t>(b)] = sb;
+      const float s = e8m0_byte_to_float(sb);
+      for (int j = 0; j < kLatentFp8BlockGroup; ++j) {
+        const int e = b * kLatentFp8BlockGroup + j;
+        out[static_cast<size_t>(e)] = latent_fp8_block_encode(bf16_bits_to_float(row[e]), s);
+      }
+    }
+    if (row_scale) *row_scale = 1.0f;
+    return;
+  }
+  if (f == LatentFormat::kFp4Block) {
+    const size_t bytes = latent_row_bytes(f, kv_lora);
+    for (size_t i = 0; i < bytes; ++i) out[i] = 0;
+    const size_t scale_off = latent_fp4_scale_offset(kv_lora);
+    for (int b = 0; b < kv_lora / kLatentFp4Block; ++b) {
+      float bmax = 0.0f;
+      for (int j = 0; j < kLatentFp4Block; ++j) {
+        const float a = std::fabs(bf16_bits_to_float(row[b * kLatentFp4Block + j]));
+        bmax = a > bmax ? a : bmax;
+      }
+      const uint8_t sc = latent_fp4_block_scale_code_abs(bmax);
+      out[scale_off + static_cast<size_t>(b)] = sc;
+      const float S = latent_fp4_block_scale_abs(sc);
+      for (int j = 0; j < kLatentFp4Block; j += 2) {
+        const int e = b * kLatentFp4Block + j;
+        const uint8_t lo = latent_fp4_block_encode_abs(bf16_bits_to_float(row[e]), S);
+        const uint8_t hi = latent_fp4_block_encode_abs(bf16_bits_to_float(row[e + 1]), S);
+        out[static_cast<size_t>(e) / 2] = static_cast<uint8_t>(lo | (hi << 4));
+      }
+    }
+    if (row_scale) *row_scale = 1.0f;
     return;
   }
   const LatentFp4RowScale s = latent_fp4_row_scale(absmax);
@@ -236,6 +362,24 @@ inline void latent_dequantize_row_host(LatentFormat f, const uint8_t* in,
   if (f == LatentFormat::kFp8) {
     for (int i = 0; i < kv_lora; ++i)
       out[i] = latent_fp8_decode_bf16(in[i], row_scale);
+    return;
+  }
+  if (f == LatentFormat::kFp8Block) {
+    const size_t scale_off = latent_fp8_block_scale_offset(kv_lora);
+    for (int i = 0; i < kv_lora; ++i) {
+      const float s = e8m0_byte_to_float(in[scale_off + static_cast<size_t>(i / kLatentFp8BlockGroup)]);
+      out[i] = latent_fp8_block_decode_bf16(in[i], s);
+    }
+    return;
+  }
+  if (f == LatentFormat::kFp4Block) {
+    const size_t scale_off = latent_fp4_scale_offset(kv_lora);
+    for (int i = 0; i < kv_lora; ++i) {
+      const float S = latent_fp4_block_scale_abs(in[scale_off + static_cast<size_t>(i / kLatentFp4Block)]);
+      const uint8_t byte = in[static_cast<size_t>(i) / 2];
+      const uint8_t code = (i & 1) ? static_cast<uint8_t>(byte >> 4) : static_cast<uint8_t>(byte & 0xFu);
+      out[i] = latent_fp4_decode_bf16(code, S);
+    }
     return;
   }
   const size_t scale_off = latent_fp4_scale_offset(kv_lora);

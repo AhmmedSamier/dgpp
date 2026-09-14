@@ -75,6 +75,10 @@ def main():
         lambda cp: unicodedata.category(chr(cp)) in ("Mn", "Mc", "Me"))
     numbers = ranges_of(
         lambda cp: unicodedata.category(chr(cp)) in ("Nd", "Nl", "No"))
+    puncts = ranges_of(
+        lambda cp: unicodedata.category(chr(cp)) in ("Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po"))
+    symbols = ranges_of(
+        lambda cp: unicodedata.category(chr(cp)) in ("Sm", "Sc", "Sk", "So"))
     ws_set = set(WHITE_SPACE)
     spaces = ranges_of(lambda cp: cp in ws_set)
 
@@ -170,6 +174,10 @@ namespace dgpp::text::unicode {{
 
 {emit("WhiteSpace", spaces, "Unicode White_Space property (not category Zs alone)")}
 
+{emit("Punct", puncts, "General_Category P* (Pc, Pd, Ps, Pe, Pi, Pf, Po) — the DeepSeek pattern's \\p{{P}}")}
+
+{emit("Symbol", symbols, "General_Category S* (Sm, Sc, Sk, So) — the DeepSeek pattern's \\p{{S}}")}
+
 {emit("NfcQuick", quick, "NFC quick check: codepoints that are not QC=Yes (No or Maybe)")}
 
 {emit_rows("Ccc", ccc_runs, 3, "Nonzero canonical combining classes as runs {{lo, hi, ccc}}")}
@@ -201,6 +209,12 @@ inline bool is_white_space(uint32_t cp) {{
 inline bool is_mark(uint32_t cp) {{
   return in_ranges(kMarkRanges, std::size(kMarkRanges), cp);
 }}
+inline bool is_punctuation(uint32_t cp) {{
+  return in_ranges(kPunctRanges, std::size(kPunctRanges), cp);
+}}
+inline bool is_symbol(uint32_t cp) {{
+  return in_ranges(kSymbolRanges, std::size(kSymbolRanges), cp);
+}}
 inline bool nfc_quick_no_or_maybe(uint32_t cp) {{
   return in_ranges(kNfcQuickRanges, std::size(kNfcQuickRanges), cp);
 }}
@@ -210,6 +224,7 @@ inline bool nfc_quick_no_or_maybe(uint32_t cp) {{
     with open(out_path, "w") as f:
         f.write(text)
     print(f"wrote {out_path}: {len(letters)} letter, {len(marks)} mark, {len(numbers)} number, "
+          f"{len(puncts)} punctuation, {len(symbols)} symbol, "
           f"{len(spaces)} white-space, {len(quick)} nfc-quick ranges; {len(ccc_runs)} ccc runs, "
           f"{len(decomp_rows)} decompositions, {len(compose_rows)} composites (Unicode "
           f"{unicodedata.unidata_version})")

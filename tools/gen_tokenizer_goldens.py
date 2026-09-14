@@ -148,6 +148,46 @@ QWEN_CASES = [c for c in CASES if USER not in c and ASSIST not in c] + [
 ]
 
 
+# The DeepSeek-V4.1 corpus (2026-09-13): its three-stage pre-tokenizer —
+# number runs cut in threes (every \p{N} script), CJK runs isolated (the
+# three literal ranges; Korean and halfwidth kana are letters), the
+# punctuation+ASCII-letters alternative (".foo", "'t"), the \p{P}/\p{S}
+# run class (format and control characters fall between matches), and its
+# own added tokens (the DSML markers, the role tokens, the placeholders).
+DS_BOS = "<｜begin▁of▁sentence｜>"
+DS_EOS = "<｜end▁of▁sentence｜>"
+DS_USER = "<｜User｜>"
+DS_ASSIST = "<｜Assistant｜>"
+DS_SYSTEM = "<｜System｜>"
+DS_DSML = "｜DSML｜"
+DSV41_CASES = [c for c in CASES if USER not in c and ASSIST not in c and EOS not in c] + [
+    DS_BOS, DS_EOS, DS_USER, DS_ASSIST, DS_SYSTEM, DS_DSML, "<｜latest_reminder｜>", "<｜tool▁calls▁begin｜>",
+    "<｜place▁holder▁no▁7｜>", "<｜deepseek_image｜>",
+    DS_BOS + DS_SYSTEM + "You are a helpful assistant." + DS_USER + "Hello" + DS_ASSIST + THINK_CLOSE + "Hi!" + DS_EOS,
+    DS_BOS + DS_SYSTEM + "Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n"
+    + "You are a helpful assistant." + DS_USER + "What is 2+2?" + DS_ASSIST + THINK_OPEN,
+    "Simple arithmetic." + THINK_CLOSE + "2 + 2 = 4." + DS_EOS,
+    "\n\n<" + DS_DSML + " calls>\n<" + DS_DSML + ' invoke name="get_weather">\n<' + DS_DSML
+    + ' parameter name="city" string="true">Paris</' + DS_DSML + " parameter>\n<" + DS_DSML
+    + ' parameter name="days" string="false">3</' + DS_DSML + " parameter>\n</" + DS_DSML + " invoke>\n</" + DS_DSML
+    + " calls>" + DS_EOS,
+    DS_USER + "<tool_result>{\"temp\": 21}</tool_result>" + DS_ASSIST + THINK_OPEN,
+    "x" + DS_DSML + "y", "before " + DS_USER + " after",
+    # CJK isolation and the scripts around it.
+    "你好，世界", "日本語のテキスト", "你好abc123世界", "半角ｶﾅ ①②③", "한국어 텍스트", "中文 English 混合 text",
+    "こんにちは世界！", "東京タワーは333メートル",
+    # Number runs in threes, every script.
+    "1234567", "x1234y", "a1b22c333d4444", "١٢٣٤", "１２３４５", "3.14159", "2024-09-13", "  5 a", "v2.1.0",
+    # Punctuation + ASCII letters, punctuation/symbol runs, symbols.
+    ".foo bar-baz", "$abc(def)", "I don't", "(x)", "ab.cd", "@user #tag", "a+b=c", "x<y>z", "~/.bashrc", "C++ & C#",
+    "€100 £5 ¥3", "→ ← ↑", "a·b", "«quoted»", "…", "?!x", " ?!x", "!!!\n\nx",
+    # Format and control characters: gaps between matches.
+    "a\u200db", "x\u0000y", "\ufeffbom", "tab\tx", "x\u00a0y", "a\u0301 b", "e\u0301", " \u0301x",
+    "\U0001f44d\U0001f3fd", "\U0001f468\u200d\U0001f469\u200d\U0001f467", "a\u200d",
+    "über naïve", "Straße", "Ελληνικά", "Кириллица", "עברית", "العربية",
+]
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -158,8 +198,10 @@ def main():
     args = ap.parse_args()
     model = args.model
     is_qwen = "Qwen" in model
-    cases = QWEN_CASES if is_qwen else CASES
+    is_dsv41 = "DeepSeek-V4" in model
+    cases = DSV41_CASES if is_dsv41 else QWEN_CASES if is_qwen else CASES
     out_path = args.out_opt or args.out or (
+        "tests/data/dsv41_tokenizer_goldens.jsonl" if is_dsv41 else
         "tests/data/qwen_tokenizer_goldens.jsonl" if is_qwen else "tests/data/glm_tokenizer_goldens.jsonl")
     if args.tokenizer_json:
         tok_path = args.tokenizer_json

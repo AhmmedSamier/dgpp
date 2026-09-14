@@ -12,7 +12,12 @@ TP=2 and TP=4; the GlmMoeDsa path (2026-09-12, the full GLM-5.3 plan's G0)
 writes docs/checkpoint_budget_glm53.md: the compressed-tensors pack-quantized
 triples (`weight_packed` I32, `weight_scale` BF16, `weight_shape` I64) are
 checked against the config's quantization groups and the placement formulas
-of docs/glm53_plan.md §2.1 / §2.2 are evaluated per rank.
+of docs/glm53_plan.md §2.1 / §2.2 are evaluated per rank; the DeepseekV41 path
+(2026-09-13, docs/deepseek_v41_flash_plan.md G0) writes
+docs/checkpoint_budget_dsv41.md: every fp8 pair (`.weight` F8_E4M3 + `.scale`
+F8_E8M0 on the 32x32 grid), every MXFP4 pair (`.weight` I8 [N, K/2] +
+`.scale` F8_E8M0 [N, K/32]) and the two Engram tables are checked, and the
+placement of plan §2 is evaluated at world 4 (and 2, for the record).
 
 Usage:
   python3 tools/checkpoint_audit.py [model_dir] [--world N]
@@ -41,9 +46,11 @@ DT_BYTES = {
     "F32": 4,
     "F16": 2,
     "F8_E4M3": 1,
+    "F8_E8M0": 1,
     "I32": 4,
     "U32": 4,
     "U8": 1,
+    "I8": 1,
 }
 
 LAYER_RE = re.compile(r"^model\.language_model\.layers\.(\d+)\.(.+)$")
@@ -206,6 +213,8 @@ def audit(root: Path, world: int, bandwidth_gbps: float) -> tuple[dict, str]:
         return audit_qwen(root, snapshot, config, world, bandwidth_gbps)
     if arch.startswith("GlmMoeDsa"):
         return audit_glm53(root, snapshot, config, world, bandwidth_gbps)
+    if arch.startswith("DeepseekV41"):
+        return audit_dsv41(root, snapshot, config, world, bandwidth_gbps)
     text_config = config["text_config"]
     layer_types = text_config["layer_types"]
     if len(layer_types) != int(text_config["num_hidden_layers"]):
@@ -1314,6 +1323,395 @@ def audit_glm53(root: Path, snapshot: Path, config: dict, world: int,
     return summary, "\n".join(lines) + "\n"
 
 
+# ---- DeepSeek-V4.1-Flash (2026-09-13, docs/deepseek_v41_flash_plan.md G0) ----
+
+DSV41_LAYER_RE = re.compile(r"^layers\.(\d+)\.(.+)$")
+DSV41_DRAFT_RE = re.compile(r"^mtp\.(\d+)\.(.+)$")
+DSV41_BLOCK = 32          # the fp8 32x32 grid and the MXFP4 block along K
+DSV41_ENGRAM_DIM = 256
+
+
+def classify_dsv41(name: str, num_layers: int) -> str:
+    """Mutually exclusive storage class of a DeepSeek-V4.1-Flash tensor
+    (backbone layers under `layers.N.`, the DSpark draft under `mtp.S.`)."""
+    if name == "head.weight":
+        return "lm_head"
+    if name == "embed.weight":
+        return "embed"
+    if name == "norm.weight":
+        return "norm"
+    if name.startswith(("vision.", "aligner.", "image_")):
+        return "vision"
+    match = DSV41_LAYER_RE.match(name)
+    if match is None:
+        draft = DSV41_DRAFT_RE.match(name)
+        if draft is None:
+            return "other"
+        tail = draft.group(2)
+        if tail.startswith("ffn.experts."):
+            return "draft_expert"
+        return "draft"
+    layer = int(match.group(1))
+    if layer >= num_layers:
+        return "other"
+    tail = match.group(2)
+    if tail.startswith("engram.embed."):
+        return "engram_table"
+    if tail.startswith("engram."):
+        return "engram"
+    if tail.startswith("attn.indexer."):
+        return "indexer"
+    if tail.startswith("attn.compressor."):
+        return "compressor"
+    if tail in ("attn.q_norm.weight", "attn.kv_norm.weight", "attn_norm.weight", "ffn_norm.weight"):
+        return "norm"
+    if tail.startswith("attn."):
+        return "attention"
+    if tail.startswith("ffn.experts."):
+        return "routed_expert"
+    if tail.startswith("ffn.shared_experts."):
+        return "shared_expert"
+    if tail.startswith("ffn.gate."):
+        return "router"
+    if tail.startswith("hc_"):
+        return "mhc"
+    return "other"
+
+
+def validate_dsv41_pairs(tensors: dict[str, tuple[str, str, tuple[int, ...]]]) -> dict[str, dict]:
+    """Check every quantized pair and return {base: {fmt, n, k, payload, scales}}.
+
+    fp8 pairs: `.weight` F8_E4M3 [N, K] with `.scale` F8_E8M0 [ceil(N/32),
+    ceil(K/32)]; MXFP4 pairs: `.weight` I8 [N, K/2] with `.scale` F8_E8M0
+    [N, K/32]; the Engram tables: `.weight` F8_E4M3 [rows, 256] with `.scale`
+    F8_E8M0 [rows, 8]. Every `.scale` must belong to exactly one such pair;
+    every F8_E4M3 or I8 `.weight` must have its scale.
+    """
+    pairs: dict[str, dict] = {}
+    scales_seen = set()
+    for name, (_file, dtype, shape) in tensors.items():
+        if not name.endswith(".weight") or dtype not in ("F8_E4M3", "I8"):
+            continue
+        base = name[: -len(".weight")]
+        scale = tensors.get(base + ".scale")
+        if scale is None:
+            raise ValueError(f"{name}: a {dtype} payload without its .scale")
+        _sfile, sdtype, sshape = scale
+        if sdtype != "F8_E8M0" or len(sshape) != 2 or len(shape) != 2:
+            raise ValueError(f"{base}: scale is {sdtype} {sshape}, not F8_E8M0 [rows, cols]")
+        n = shape[0]
+        if dtype == "I8":
+            k = shape[1] * 2
+            if tuple(sshape) != (n, k // DSV41_BLOCK) or k % DSV41_BLOCK:
+                raise ValueError(f"{base}: MXFP4 scale {sshape} does not tile [{n}, {k}] by {DSV41_BLOCK}")
+            fmt = "mxfp4"
+        elif ".engram.embed" in base:
+            k = shape[1]
+            if k != DSV41_ENGRAM_DIM or tuple(sshape) != (n, k // DSV41_BLOCK):
+                raise ValueError(f"{base}: Engram scale {sshape} does not tile [{n}, {k}] by {DSV41_BLOCK}")
+            fmt = "engram"
+        else:
+            k = shape[1]
+            expected = (-(-n // DSV41_BLOCK), -(-k // DSV41_BLOCK))
+            if tuple(sshape) != expected:
+                raise ValueError(f"{base}: fp8 scale {sshape} is not the {DSV41_BLOCK}x{DSV41_BLOCK} grid {expected}")
+            fmt = "fp8"
+        scales_seen.add(base + ".scale")
+        pairs[base] = {"fmt": fmt, "n": n, "k": k, "payload": numel(shape), "scales": numel(sshape)}
+    for name, (_file, dtype, _shape) in tensors.items():
+        if name.endswith(".scale") and name not in scales_seen:
+            raise ValueError(f"{name}: a scale without its payload")
+        if dtype == "F8_E8M0" and not name.endswith(".scale"):
+            raise ValueError(f"{name}: an e8m0 tensor that is not a .scale")
+    return pairs
+
+
+def audit_dsv41(root: Path, snapshot: Path, config: dict, world: int,
+                bandwidth_gbps: float) -> tuple[dict, str]:
+    text = config.get("text_config") or config
+    num_layers = int(text["num_hidden_layers"])
+    drafts = int(text.get("num_nextn_predict_layers", 0))
+    hidden = int(text["hidden_size"])
+    experts = int(text["n_routed_experts"])
+    topk = int(text["num_experts_per_tok"])
+    draft_experts = int(text.get("dspark_n_routed_experts", experts))
+    draft_topk = int(text.get("dspark_num_experts_per_tok", topk))
+    o_groups = int(text["o_groups"])
+    engram_layers = [int(x) for x in text.get("engram_layer_ids", [])]
+    engram_rows = [int(x) for x in text.get("engram_num_embeddings", [])]
+    engram_heads = int(text.get("engram_n_heads", 0))
+    ngram = int(text.get("engram_max_ngram_size", 1))
+    kv_sources = [int(x) for x in text["kv_source_layer_ids"]]
+    index_sources = [int(x) for x in text["index_source_layer_ids"]]
+    ratios = [int(x) for x in text["compress_ratios"]]
+    quant = config.get("quantization_config") or {}
+    if quant.get("quant_method") != "fp8" or quant.get("expert_dtype") != "fp4" \
+            or quant.get("scale_fmt") != "ue8m0" or list(quant.get("weight_block_size", [])) != [32, 32]:
+        raise ValueError("quantization_config is not the release's fp8 [32, 32] ue8m0 + fp4 expert format")
+
+    index = json.loads((snapshot / "model.safetensors.index.json").read_text(encoding="utf-8"))
+    weight_map = index["weight_map"]
+    files = sorted(set(weight_map.values()))
+    tensors: dict[str, tuple[str, str, tuple[int, ...]]] = {}
+    file_bytes: dict[str, int] = defaultdict(int)
+    for filename in files:
+        for name, meta in read_header(snapshot / filename).items():
+            if name == "__metadata__":
+                continue
+            if name in tensors:
+                raise ValueError(f"duplicate tensor in safetensors headers: {name}")
+            if weight_map.get(name) != filename:
+                raise ValueError(f"index maps {name} to {weight_map.get(name)!r}, not {filename!r}")
+            tensors[name] = (filename, meta["dtype"], tuple(int(v) for v in meta.get("shape", [])))
+    if set(tensors) != set(weight_map):
+        missing = set(weight_map) - set(tensors)
+        extra = set(tensors) - set(weight_map)
+        raise ValueError(f"index/header mismatch: missing={len(missing)} extra={len(extra)}")
+
+    pairs = validate_dsv41_pairs(tensors)
+    class_bytes: dict[str, int] = defaultdict(int)
+    class_count: dict[str, int] = defaultdict(int)
+    dtype_bytes: dict[str, int] = defaultdict(int)
+    unmatched: list[tuple[str, str, tuple[int, ...]]] = []
+    inventory: dict[str, dict] = {}
+    total = 0
+    for name, (filename, dtype, shape) in sorted(tensors.items()):
+        if dtype not in DT_BYTES:
+            raise ValueError(f"unsupported dtype {dtype} for {name}")
+        size = numel(shape) * DT_BYTES[dtype]
+        cls = classify_dsv41(name, num_layers)
+        class_bytes[cls] += size
+        class_count[cls] += 1
+        dtype_bytes[dtype] += size
+        file_bytes[filename] += size
+        total += size
+        base = name[: -len(".weight")] if name.endswith(".weight") else (name[: -len(".scale")] if name.endswith(".scale") else None)
+        inventory[name] = {"file": filename, "dtype": dtype, "shape": list(shape), "class": cls, "nbytes": size,
+                           "fmt": pairs[base]["fmt"] if base in pairs else "plain"}
+        if cls == "other":
+            unmatched.append((name, dtype, shape))
+
+    # The census the plan's §1.10 states.
+    fmt_count: dict[str, int] = defaultdict(int)
+    for info in pairs.values():
+        fmt_count[info["fmt"]] += 1
+    if fmt_count.get("mxfp4", 0) != (num_layers * experts + drafts * draft_experts) * 3:
+        raise ValueError(f"{fmt_count.get('mxfp4', 0)} MXFP4 matrices; expected {(num_layers * experts + drafts * draft_experts) * 3}")
+    if fmt_count.get("engram", 0) != len(engram_layers):
+        raise ValueError(f"{fmt_count.get('engram', 0)} Engram tables; expected {len(engram_layers)}")
+    for layer_index, layer in enumerate(engram_layers):
+        table = tensors.get(f"layers.{layer}.engram.embed.weight")
+        if table is None or table[2][0] != engram_rows[layer_index]:
+            raise ValueError(f"layers.{layer}.engram.embed.weight rows do not match engram_num_embeddings")
+
+    # ---- placement (docs/deepseek_v41_flash_plan.md §2) ------------------
+    # Sharded by W: routed / draft experts and the shared expert (intermediate
+    # slices), wq_b / wo_a / wo_b (heads, output groups), the head (vocab),
+    # the Engram wkv (its K columns follow the hash heads). Replicated: wq_a,
+    # wkv, the indexers, compressors, routers, mHC coefficients, norms, the
+    # embedding, main_proj, the Markov embedding, the confidence head. The
+    # Engram tables are never resident (mmap'ed, sharded by hash head).
+    SHARDED_ATTENTION = ("wq_b", "wo_a", "wo_b")
+
+    def module_of(tail: str) -> str:
+        parts = tail.split(".")
+        return parts[1] if len(parts) > 1 else parts[0]
+
+    def rank_terms(w: int) -> dict[str, float]:
+        out: dict[str, float] = defaultdict(float)
+        for name, meta in inventory.items():
+            cls = meta["class"]
+            size = meta["nbytes"]
+            if cls in ("routed_expert", "draft_expert", "shared_expert"):
+                out[cls] += size / w
+            elif cls == "attention":
+                tail = DSV41_LAYER_RE.match(name).group(2)
+                if module_of(tail) in SHARDED_ATTENTION:
+                    out["attention_sharded"] += size / w
+                else:
+                    out["attention_replicated"] += size
+            elif cls == "draft":
+                tail = DSV41_DRAFT_RE.match(name).group(2)
+                if tail.startswith("attn.") and module_of(tail) in SHARDED_ATTENTION:
+                    out["draft"] += size / w
+                elif tail.startswith("ffn.shared_experts."):
+                    out["draft"] += size / w
+                elif tail.startswith("markov_head.head."):
+                    out["draft"] += size / w
+                else:
+                    out["draft"] += size
+            elif cls == "lm_head":
+                out["lm_head"] += size / w
+            elif cls == "engram":
+                tail = DSV41_LAYER_RE.match(name).group(2)
+                out["engram"] += size / w if tail.startswith("engram.wkv.") else size
+            elif cls == "engram_table":
+                out["engram_table_mmap"] += size / w   # mapped, not resident: reported apart
+            elif cls == "vision":
+                continue  # not loaded (plan D9)
+            else:  # indexer, compressor, router, mhc, norm, embed: replicated
+                out[cls] += size
+        out["total"] = sum(v for k, v in out.items() if k != "engram_table_mmap")
+        return dict(out)
+
+    def expert_slice_bytes(w: int, cls: str) -> float:
+        return sum(meta["nbytes"] / w for meta in inventory.values() if meta["class"] == cls)
+
+    def traffic_terms(w: int) -> dict[str, float]:
+        """Per token per rank at batch 1, T=1: the resident set minus the
+        experts a token does not route to and minus the embedding (one row),
+        plus the token's Engram rows; the draft pass is listed apart."""
+        terms = dict(rank_terms(w))
+        terms["routed_expert"] *= topk / experts
+        terms["draft_expert"] = expert_slice_bytes(w, "draft_expert") * draft_topk / draft_experts
+        terms["embed"] = 0.0
+        terms["engram_table_mmap"] = 0.0
+        rows_per_rank = (ngram - 1) * engram_heads * len(engram_layers) / w if engram_heads else 0
+        terms["engram_rows"] = rows_per_rank * (DSV41_ENGRAM_DIM + DSV41_ENGRAM_DIM // DSV41_BLOCK)
+        draft_pass = terms["draft"] + terms["draft_expert"]
+        terms["draft"] = 0.0
+        terms["draft_expert"] = 0.0
+        terms["total"] = sum(v for k, v in terms.items() if k not in ("total",))
+        terms["draft_pass"] = draft_pass
+        return terms
+
+    worlds = sorted({2, 4, world})
+    resident = {w: rank_terms(w) for w in worlds}
+    traffic = {w: traffic_terms(w) for w in worlds}
+
+    # The global KV cache per token (plan §1.3): per kv source a main-KV
+    # entry (512 e2m1 + 32 e4m3 block scales) and an index key (128 e2m1 +
+    # 4 e8m0 scales) per `ratio` tokens.
+    head_dim = int(text["head_dim"])
+    index_dim = int(text["index_head_dim"])
+    kv_per_token = sum((head_dim / 2 + head_dim / 16 + index_dim / 2 + index_dim / 32) / ratios[l] for l in kv_sources)
+
+    summary = {
+        "arch": "deepseek_v41",
+        "model": model_label(root, snapshot),
+        "files": len(files),
+        "tensors": len(tensors),
+        "total_bytes": total,
+        "class_bytes": dict(class_bytes),
+        "class_count": dict(class_count),
+        "dtype_bytes": dict(dtype_bytes),
+        "pairs": dict(fmt_count),
+        "kv_sources": kv_sources,
+        "index_sources": index_sources,
+        "kv_bytes_per_token": kv_per_token,
+        "resident_rank_bytes": {str(w): resident[w] for w in worlds},
+        "traffic_rank_bytes": {str(w): traffic[w] for w in worlds},
+        "world": world,
+        "bandwidth_gbps": bandwidth_gbps,
+        "unmatched": len(unmatched),
+        "inventory": inventory,
+    }
+
+    def ms(nbytes: float) -> float:
+        return nbytes / (bandwidth_gbps * 1e9) * 1000
+
+    shard_sizes = sorted(file_bytes.items())
+    lines = [
+        "# DeepSeek-V4.1-Flash Checkpoint Budget Report",
+        "",
+        f"- Model revision: `{summary['model']}`",
+        f"- Files: {len(files)} shards; tensors: {len(tensors):,}",
+        f"- Total weights: **{total / 1e9:.2f} GB ({total / 2**30:.2f} GiB)**",
+        "- Generated by `tools/checkpoint_audit.py`; no tensor payloads were read.",
+        f"- Layers: {num_layers} backbone + {drafts} DSpark draft stages; experts {experts} top-{topk} "
+        f"(draft {draft_experts} top-{draft_topk}); hidden {hidden}; {o_groups} output groups; "
+        f"kv sources {kv_sources}, index sources {index_sources}; Engram at layers {engram_layers}.",
+        f"- Quantized pairs: {fmt_count.get('mxfp4', 0):,} MXFP4 matrices (I8 codes + e8m0 per 32), "
+        f"{fmt_count.get('fp8', 0):,} fp8 matrices (e4m3 + e8m0 on the 32x32 grid), "
+        f"{fmt_count.get('engram', 0)} Engram tables (e4m3 rows + e8m0 per 32); every scale checked against its payload.",
+        "",
+        "## Storage inventory",
+        "",
+        "| class | tensors | GB | share |",
+        "|---|---:|---:|---:|",
+    ]
+    for name, size in sorted(class_bytes.items(), key=lambda item: -item[1]):
+        lines.append(f"| {name} | {class_count[name]:,} | {size / 1e9:.3f} | {100 * size / total:.2f}% |")
+    lines.extend(["", "## Storage by dtype", "", "| dtype | GB |", "|---|---:|"])
+    for dtype, size in sorted(dtype_bytes.items(), key=lambda item: -item[1]):
+        lines.append(f"| {dtype} | {size / 1e9:.3f} |")
+    lines.extend([
+        "",
+        "## Shards",
+        "",
+        f"- {len(shard_sizes)} shards from {min(s for _, s in shard_sizes) / 1e9:.2f} to "
+        f"{max(s for _, s in shard_sizes) / 1e9:.2f} GB; the two Engram tables are "
+        + ", ".join(f"`{n}` ({s / 2**30:.2f} GiB)" for n, s in shard_sizes if s > 50e9) + ".",
+        "",
+        "## Resident bytes per rank",
+        "",
+        "Placement follows docs/deepseek_v41_flash_plan.md §2: the routed, draft and "
+        "shared experts (intermediate slices), `wq_b` / `wo_a` / `wo_b` (heads and "
+        "output groups), the head and the Markov head (vocabulary) and the Engram "
+        "`wkv` (its hash heads' columns) divide by W; `wq_a`, `wkv`, the indexers, "
+        "compressors, routers, mHC coefficients, norms, the embedding, `main_proj`, "
+        "the Markov embedding and the confidence head are replicated; the Engram "
+        "tables are mmap'ed from the NVMe (sharded by hash head) and never resident; "
+        "the vision tower is not loaded.",
+        "",
+        "| class | " + " | ".join(f"TP={w} GiB" for w in worlds) + " |",
+        "|---|" + "---:|" * len(worlds),
+    ])
+    keys = ("routed_expert", "draft_expert", "attention_sharded", "attention_replicated", "shared_expert",
+            "indexer", "compressor", "router", "mhc", "engram", "norm", "embed", "lm_head", "draft", "other")
+    for key in keys:
+        if any(resident[w].get(key, 0) for w in worlds):
+            lines.append(f"| {key} | " + " | ".join(f"{resident[w].get(key, 0) / 2**30:.2f}" for w in worlds) + " |")
+    lines.append("| **weights** | " + " | ".join(f"**{resident[w]['total'] / 2**30:.2f}**" for w in worlds) + " |")
+    lines.append("| Engram tables, mmap'ed (not resident) | " + " | ".join(f"{resident[w].get('engram_table_mmap', 0) / 2**30:.2f}" for w in worlds) + " |")
+    lines.extend([
+        "",
+        f"The global KV cache costs **{kv_per_token:.0f} bytes per context token per rank** "
+        "(the four kv sources' main-KV entries and index keys at their ratios); the window "
+        "rings, the compressor tails and the Engram context are per request slot. The CUDA "
+        "context, the prefix cache and the bus staging come on top; `dgpp-serve --memory-plan` "
+        "is the authority.",
+        "",
+        "## Decode traffic model (batch size 1)",
+        "",
+        f"Per token per rank at T=1: the resident set minus the experts a token does not route "
+        f"to (top-{topk} of {experts}) and minus the embedding (one row), plus the Engram rows "
+        f"gathered from the NVMe ({(ngram - 1) * engram_heads * len(engram_layers)} rows per token, "
+        "head-sharded). The DSpark draft pass (three stages at top-"
+        f"{draft_topk} of {draft_experts}, `main_proj`, the Markov and confidence heads) is listed apart; "
+        "the shared head is read once more over the block's rows.",
+        "",
+        "| class | " + " | ".join(f"TP={w} MB/token" for w in worlds) + " |",
+        "|---|" + "---:|" * len(worlds),
+    ])
+    for key in keys + ("engram_rows",):
+        if any(traffic[w].get(key, 0) for w in worlds):
+            lines.append(f"| {key} | " + " | ".join(f"{traffic[w].get(key, 0) / 1e6:,.1f}" for w in worlds) + " |")
+    lines.append("| **total** | " + " | ".join(f"**{traffic[w]['total'] / 1e6:,.1f}**" for w in worlds) + " |")
+    lines.append(f"| floor at {bandwidth_gbps:.0f} GB/s | " + " | ".join(f"**{ms(traffic[w]['total']):.1f} ms**" for w in worlds) + " |")
+    lines.append("| replicated share | " + " | ".join(
+        f"{100 * sum(traffic[w].get(k, 0) for k in ('attention_replicated', 'indexer', 'compressor', 'router', 'mhc', 'norm')) / traffic[w]['total']:.0f}%"
+        for w in worlds) + " |")
+    lines.append("| draft pass (apart) | " + " | ".join(f"{traffic[w]['draft_pass'] / 1e6:,.1f} MB, +{ms(traffic[w]['draft_pass']):.1f} ms" for w in worlds) + " |")
+    lines.extend([
+        "",
+        "This is a weight-bandwidth floor: the collectives (two folds per layer, the "
+        "draft and the head), the Engram gather latency, the selects, the cache reads "
+        "and the kernels add to it.",
+        "",
+        "## Reconciliation and exclusions",
+        "",
+        f"- Unmatched tensors: **{len(unmatched)}**.",
+        f"- Quantized pairs: **{len(pairs):,}** — every F8_E4M3 or I8 `.weight` has its F8_E8M0 `.scale` of the "
+        "contract's shape, every `.scale` its payload, no e8m0 tensor outside a pair.",
+        f"- Vision tensors ({class_count.get('vision', 0)}, {class_bytes.get('vision', 0) / 1e9:.2f} GB) are present in the file and never loaded.",
+    ])
+    if unmatched:
+        lines.extend(["", f"## First {min(80, len(unmatched))} unmatched names", ""])
+        lines.extend(f"- `{name}` [{dtype}] {shape}" for name, dtype, shape in unmatched[:80])
+    return summary, "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
@@ -1332,6 +1730,8 @@ def main(argv: list[str] | None = None) -> int:
             inventory_name, report_name = "qwen38_checkpoint_inventory.json", "qwen38_checkpoint_budget.md"
         elif arch == "glm_moe_dsa":
             inventory_name, report_name = "glm53_checkpoint_inventory.json", "checkpoint_budget_glm53.md"
+        elif arch == "deepseek_v41":
+            inventory_name, report_name = "dsv41_checkpoint_inventory.json", "checkpoint_budget_dsv41.md"
         else:
             inventory_name, report_name = "checkpoint_inventory.json", "checkpoint_budget.md"
         (artifacts_dir / inventory_name).write_text(

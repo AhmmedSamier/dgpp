@@ -44,7 +44,7 @@ namespace dgpp {
 // it).
 constexpr int kDecodeRows = 8;
 constexpr int kDecodeRowsMax = 32;
-constexpr int kSpecRows = 4;
+constexpr int kSpecRows = 6;  // 2026-09-13: the DSpark block (5 drafts + the pending token)
 
 // One forward's rows as the engines read them.
 struct DecodeOutputs {

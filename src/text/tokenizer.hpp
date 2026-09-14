@@ -1,7 +1,11 @@
 #pragma once
-// ByteLevel-BPE tokenizer for the supported GLM and Qwen checkpoints.
-// Two tokenizer.json configurations share this implementation. Loading
-// rejects unsupported shapes and validates the following properties:
+// ByteLevel-BPE tokenizer for the supported GLM, Qwen and DeepSeek-V4.1
+// checkpoints. Three tokenizer.json configurations share this
+// implementation (DeepSeek-V4.1, 2026-09-13: no normalizer (an empty
+// Sequence), THREE Split stages — number runs of at most three, CJK runs,
+// its own main pattern over the \p{P}/\p{S} classes — then ByteLevel, BPE
+// without ignore_merges). Loading rejects unsupported shapes and
+// validates the following properties:
 //   * pre-tokenizer: Sequence[Split (one of the two pinned GPT-2-family
 //     regexes, Isolated), ByteLevel (map only, add_prefix_space=false,
 //     use_regex=false)] — the regex string is matched exactly and the
@@ -132,7 +136,7 @@ class Tokenizer {
   uint64_t revision_hash_ = 0;
   int64_t max_id_ = -1;
   // The pinned shape this file matched at load.
-  int pattern_ = 0;            // 0: the GLM regex, 1: the Qwen3.8 regex
+  int pattern_ = 0;            // 0: the GLM regex, 1: the Qwen3.8 regex, 2: the DeepSeek-V4.1 three-stage sequence
   bool nfc_ = false;           // normalizer NFC (Qwen)
   bool ignore_merges_ = true;  // model.ignore_merges
 };
