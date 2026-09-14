@@ -34,14 +34,14 @@ is Ubuntu 24.04; older distributions may not provide compatible glibc/libstdc++.
 
    ```bash
    # Four Sparks, GLM-5.3-Flash hybrid NVFP4/FP8:
-   CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
+   CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
    test -f "$CONFIG" || cp "${CONFIG%.json}.example.json" "$CONFIG"
    ```
 
-   For two Sparks, set `CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2_mtp1.json`
+   For two Sparks, set `CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2.json`
    before copying; for one, use
-   `CONFIG=deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.json`.
-   See [deployment filenames](deploy/README.md) for all variants.
+   `CONFIG=deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json`.
+   See [deployment filenames](deploy/README.md) for the templates and the knobs that vary them.
 3. Check the JSON's `model` and `world_size`. Leave its engine settings
    unchanged for the first run. Pass this file explicitly with `--config`.
    `CONFIG` is a shell variable for brevity; set it again in a new terminal.

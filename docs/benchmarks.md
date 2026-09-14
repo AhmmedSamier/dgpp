@@ -72,14 +72,15 @@ template, which is what "supported" means on this page:
 
 | model | world | template | modes measured |
 |---|---|---|---|
-| `unsloth/GLM-5.3-Flash-FP8` | 4 | Copy `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.example.json` to a separate FP8 config and set `model` to the FP8 repository | T=1, MTP depth 1 |
-| `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` | 4 | `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.example.json` | T=1, MTP depth 1 |
-| `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` | 2 | `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json`, `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json` | T=1, MTP depth 1 |
-| `Qwen/Qwen3.8-Flash-Next-FP8` | 4 | `cluster_qwen-3.8-flash-next_fp8_w4_mtp1.example.json`, `cluster_qwen-3.8-flash-next_fp8_w4_plain.example.json` | T=1, MTP depth 1, depth 2 |
-| `Qwen/Qwen3.8-Flash-Next-FP8` | 2 | `cluster_qwen-3.8-flash-next_fp8_w2_mtp1.example.json`, `cluster_qwen-3.8-flash-next_fp8_w2_plain.example.json` | T=1, MTP depth 1, depth 2 |
-| `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen-3.8-flash-next_nvfp4_w1_*.example.json` (five) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
-| `nvidia/GLM-4.7-NVFP4` | 4 | `cluster_glm-4.7_nvfp4_w4_{mtp1,plain,mtp2}.example.json` | T=1, MTP depth 1, depth 2 |
-| `HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64` (the full GLM-5.3) | 4 | `cluster_glm-5.3_int4-int8_w4_{plain,mtp1,mtp2,mtp1_large-cache}.example.json` | T=1, MTP depth 1, depth 2 (two slots); bf16 (144K / 120K) or fp8 (208K) latent cache, the embedding vocab-sharded |
+| `unsloth/GLM-5.3-Flash-FP8` | 4 | Copy `cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json` to a separate FP8 config and set `model` to the FP8 repository | T=1 (`--no-mtp`), MTP depth 1 |
+| `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` | 4 | `cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json` | T=1, MTP depth 1 |
+| `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` | 2 | `cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json` (the 256K-context two-slot shape: `--knobs "--max-concurrency 2 --kv-capacity 262144 --prefix-cache-gib 2"`) | T=1, MTP depth 1 |
+| `Qwen/Qwen3.8-Flash-Next-FP8` | 4 | `cluster_qwen-3.8-flash-next_fp8_w4.example.json` | T=1 (`--no-mtp`), MTP depth 1, depth 2 (`--mtp-depth 2`) |
+| `Qwen/Qwen3.8-Flash-Next-FP8` | 2 | `cluster_qwen-3.8-flash-next_fp8_w2.example.json` | T=1, MTP depth 1, depth 2 |
+| `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` (the FP8 dense stack; `--dense-weights checkpoint` for BF16) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
+| `nvidia/GLM-4.7-NVFP4` | 4 | `cluster_glm-4.7_nvfp4_w4.example.json` | T=1, MTP depth 1, depth 2 |
+| `HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64` (the full GLM-5.3) | 4 | `cluster_glm-5.3_int4-int8_w4.example.json` (eight slots; the fp8 latent cache at 208K: `--knobs "--kv-dtype fp8 --kv-capacity 212992 --prefix-cache-gib 1.5"`) | T=1, MTP depth 1, depth 2 (two slots); bf16 or fp8 latent cache |
+| `deepseek-ai/DeepSeek-V4.1-Flash` | 4 | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` (six slots at DSpark depth 4; the two-slot depth-5 shape: `--knobs "--max-concurrency 2 --mtp-depth 5"`) | T=1, DSpark depths 4 and 5 with the scheduled verify depth |
 
 The single-Spark world has a second axis, `engine.dense_weights`: the
 checkpoint's own BF16 dense projections, or the same projections encoded to
@@ -736,8 +737,8 @@ Everything below runs against a booted world. Bring one up with the launcher
 and the config for the deployment you are measuring:
 
 ```bash
-cp deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.example.json deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json   # shared nodes and SSH login come from .env
-scripts/dgpp-cluster up --config deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json
+cp deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json deploy/cluster_qwen-3.8-flash-next_fp8_w4.json   # shared nodes and SSH login come from .env
+scripts/dgpp-cluster up --config deploy/cluster_qwen-3.8-flash-next_fp8_w4.json
 ```
 
 Run one procedure at a time on the fabric. Two measurements at once share the
@@ -761,7 +762,7 @@ fabric directly.
 ### 9.2 Per prompt class
 
 ```bash
-scripts/fabric_mtp_classes.sh --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json OUT_DIR chat code prose json math
+scripts/fabric_mtp_classes.sh --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json OUT_DIR chat code prose json math
 ```
 
 **That script holds the corpus.** Five fixed prompts, one per class, unchanged
@@ -825,7 +826,7 @@ On the fabric directly, in steady state, where the timed prefill is the third
 repeat and the four ranks' generated ids are compared:
 
 ```bash
-scripts/fabric_prefill_repeat.sh --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json OUT_DIR 512 2048 8192
+scripts/fabric_prefill_repeat.sh --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json OUT_DIR 512 2048 8192
 ```
 
 ### 9.5 Quality

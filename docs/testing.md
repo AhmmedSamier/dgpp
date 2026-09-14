@@ -34,7 +34,7 @@ Datasets are not bundled and benchmarks never download them implicitly:
 
 ```bash
 python3 scripts/prepare_data.py download --tasks gsm8k humaneval
-python3 scripts/prepare_data.py tokens --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json --text /path/to/long-prompt.txt
+python3 scripts/prepare_data.py tokens --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json --text /path/to/long-prompt.txt
 ```
 
 Downloads use pinned upstream revisions from OpenAI's

@@ -1,7 +1,7 @@
 #!/bin/bash
 # The GLM-4.7 serving gates on the fabric:
-# boot the world from a cluster config (deploy/cluster_glm-4.7_nvfp4_w4_mtp1.json: MTP +
-# the decode graph; deploy/cluster_glm-4.7_nvfp4_w4_plain.json: plain T=1), then the
+# boot the world from a cluster config (deploy/cluster_glm-4.7_nvfp4_w4.json: MTP +
+# the decode graph; --knobs "--no-mtp" for the plain T=1 world), then the
 # API check, the greedy transcripts (compared against a reference file
 # when given), the client-side pace, and the world down with its op-stream
 # md5s. One world at a time on the fabric.

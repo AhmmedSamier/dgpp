@@ -3,7 +3,7 @@
 # This shim keeps the test scripts' interface:
 # DGPP_SERVE_KNOBS becomes --knobs (flags appended to
 # every rank, overriding the config), DGPP_SERVE_LOG becomes --log-dir.
-#   serve_run.sh up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json
+#   serve_run.sh up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/cluster_env.sh" || exit 1

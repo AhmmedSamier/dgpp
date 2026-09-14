@@ -935,7 +935,7 @@ int main(int argc, char** argv) {
       "  fabric (Stage 4b): --world N --rank R (--peer HOST when rank>0)\n"
       "    [--fabric-port N (29970)] [--journal-port N (29971)]\n"
       "    [--rendezvous-timeout-ms N (120000)]\n"
-      "    [--decode-graph [--mtp]]\n"
+      "    [--decode-graph [--mtp | --no-mtp]]\n"
       "    [--graph-batch-min-live N (default min(2, max-concurrency);\n"
       "      must be in [1, max-concurrency])]\n"
       "      (the row batch needs max-concurrency * (1 + mtp depth) <= 8)\n"
@@ -1108,6 +1108,7 @@ int main(int argc, char** argv) {
     else if (a == "--graph-batch-min-live")
       graph_batch_min_live = std::stoi(next());
     else if (a == "--mtp") mtp = true;
+    else if (a == "--no-mtp") mtp = false;  // the plain T=1 world from an MTP template (the A/B knob)
     else if (a == "--mtp-depth") {
       mtp_depth = std::stoi(next());
       mtp_depth_explicit = true;

@@ -119,7 +119,7 @@ DGPP_TEST(cluster_config_theResolvedFileParsesAndTheDigestIsStable) {
       std::string(DGPP_SOURCE_DIR) + "/tests/fixtures/cluster.resolved.json");
   require(ex.world() == 4 && ex.model == "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8" &&
               ex.http_port == 18080 && ex.engine.max_concurrency == 4 &&
-              ex.engine.kv_capacity == 8192 && ex.engine.queue_limit == 8 &&
+              ex.engine.kv_capacity == 786432 && ex.engine.queue_limit == 8 &&
               ex.engine.kv_dtype == "bf16" &&
               ex.engine.decode_graph && ex.engine.mtp && ex.release.empty() &&
               ex.ssh_user == "ops",

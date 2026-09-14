@@ -31,11 +31,20 @@ its node.
 
 | template | deployment |
 |---|---|
-| `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1{,_large-cache}.example.json` | GLM-5.3-Flash NVFP4/FP8 hybrid, four nodes |
-| `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1{,_large-cache}.example.json` | the same hybrid on two nodes, FP8 latent cache: 160K context on four request slots, or 256K on two |
-| `cluster_qwen-3.8-flash-next_fp8_w{2,4}_{mtp1,plain}.example.json` | Qwen FP8 with MTP or plain decode, four or two nodes |
-| `cluster_qwen-3.8-flash-next_nvfp4_w1_{mtp1,plain}.example.json` | Qwen NVFP4 on one Spark, with a mapped n-gram table |
-| `cluster_glm-4.7_nvfp4_w4_{mtp1,plain,mtp2}.example.json` | GLM-4.7 NVFP4, MTP depth 1, plain decode or depth 2 |
+| `cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json` | GLM-5.3-Flash NVFP4/FP8 hybrid, four nodes, MTP depth 1, bf16 latent cache, 768K context, an 8 GiB prefix arena |
+| `cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json` | the same hybrid on two nodes, FP8 latent cache, 160K context on four request slots |
+| `cluster_qwen-3.8-flash-next_fp8_w{2,4}.example.json` | Qwen FP8 with MTP depth 1, four or two nodes |
+| `cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` | Qwen NVFP4 on one Spark, MTP depth 1, the dense projections FP8 at load, a mapped n-gram table |
+| `cluster_glm-4.7_nvfp4_w4.example.json` | GLM-4.7 NVFP4, four nodes, MTP depth 1 |
+| `cluster_glm-5.3_int4-int8_w4.example.json` | the full GLM-5.3 (int4/int8 RTN), four nodes, MTP depth 1, eight request slots, 120K bf16 context, the embedding vocab-sharded |
+| `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash as shipped, four nodes, six request slots, DSpark depth 4 with the scheduled verify depth, the bounded prefill, 128K context |
+
+One template per model, quant and world (2026-09-14): the modes a template
+does not name are knobs — `--no-mtp` for the plain T=1 world, `--mtp-depth N`,
+`--max-concurrency N`, `--kv-capacity N`, `--kv-dtype fp8`,
+`--prefix-cache-gib X`, `--dense-weights checkpoint` — appended with
+`dgpp-cluster up --knobs "..."` (deploy/README.md lists the retired variants
+and the knobs that reproduce them).
 
 `kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
 caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
@@ -43,9 +52,9 @@ control table residency and optional FP8 encoding of dense projections;
 see [the single-node guide](qwen38_single_spark.md).
 
 ```bash
-scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json
-scripts/dgpp-cluster status --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json
-scripts/dgpp-cluster down --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json
+scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
+scripts/dgpp-cluster status --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
+scripts/dgpp-cluster down --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
 ```
 
 `doctor` performs read-only preflight checks locally and over SSH; `up` runs
@@ -95,7 +104,7 @@ HTTP readiness. Warm GLM-FP8 resident images took 15–25 s to reach it in
 the recorded deployment; the first checkpoint load took about 4.5 minutes.
 
 Use a separate config for each checkpoint. For example, a site-local
-`deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json` can select the composed
+`deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json` can select the composed
 `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8` checkpoint. Size its context and prefix
 arena with `--memory-plan`; the smaller weight footprint does not imply
 one fixed cache capacity for every deployment.
@@ -103,7 +112,7 @@ one fixed cache capacity for every deployment.
 **The same hybrid on two nodes.** Each rank then holds 94.71 GiB of weights
 instead of 50.74 GiB, which leaves about 12 GiB for the context once the
 4 GiB headroom is reserved (8 until 2026-09-12, 5 for a day; the residual after the plan check measured flat at 2.4–2.8 GiB and a one-hour soak held at 4). At four request slots with MTP the draft block's
-hidden cache is what binds, so `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.json`
+hidden cache is what binds, so `cluster_glm-5.3-flash_nvfp4-fp8_w2.json`
 takes the latent cache to FP8 and settles at 163,840 tokens: 106.57 GiB
 planned against the 115.1 to 115.6 GiB these nodes report at boot. The boot's
 ceiling tracks that reading — 177,024 tokens at 115.06 GiB free, 190,976 at
@@ -113,9 +122,10 @@ would hold 212,992 at four slots and 327,680 at two, but no node here does, so
 no template carries those numbers. Re-size from a `--memory-plan` run on the
 node that will be rank 0, remembering that the boot reads about 0.6 GiB less
 than that check does. The draft block's hidden cache is 8 KiB per token
-per slot, so slots are the context lever: the `_large-cache` variant drops to
-two slots and holds 262,144 tokens with a 2 GiB prefix arena, and one slot
-would reach about 534,000. Decode costs what the doubled per-rank weight read
+per slot, so slots are the context lever: the two-slot shape (`--knobs
+"--max-concurrency 2 --kv-capacity 262144 --prefix-cache-gib 2"` on the
+two-node template) holds 262,144 tokens with a 2 GiB prefix arena, and one
+slot would reach about 534,000. Decode costs what the doubled per-rank weight read
 implies, near 1.75x the four-node pace; prefill costs about 1.45x
 (benchmarks.md §3 to §6).
 
@@ -151,7 +161,7 @@ and effective `config:` lines with the run artifacts.
 
 `scripts/release.sh` builds the release preset and packs
 `dist/dgpp-<version>.tar.zst` (README's "Release and install" has the
-layout); `scripts/dgpp-cluster install TARBALL --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json` copies it to every node
+layout); `scripts/dgpp-cluster install TARBALL --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json` copies it to every node
 in the config, unpacks it under `paths.release_dir` and verifies every
 file against `MANIFEST.sha256`. Which release runs is named — the
 config's `release` key or `up --release <version>` — and `up` then runs
@@ -410,8 +420,8 @@ drilled 2026-09-05).
   committed tokens as a prefix of its answer (the drill checks exactly
   this).
 
-Stop the deployment with `scripts/dgpp-cluster down --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json`,
-then restart with `scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json`.
+Stop the deployment with `scripts/dgpp-cluster down --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json`,
+then restart with `scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json`.
 Cleanup only targets recorded processes belonging to that deployment; it
 does not sweep arbitrary server processes. No boot-time service units are
 installed, so an operator or external supervisor must start the service.

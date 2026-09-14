@@ -72,7 +72,7 @@ In the DGPP repository, configure node addresses and SSH access in `.env`,
 then download once on rank 0 and sync the checkpoint to peers:
 
 ```bash
-python scripts/download_model.py --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.example.json
+python scripts/download_model.py --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json
 ```
 
 The template already selects `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8`.

@@ -1,12 +1,13 @@
 #!/bin/bash
 # The DeepSeek-V4.1-Flash (deepseek_v41) serving gates on the fabric (docs/deepseek_v41_flash_plan.md G7):
-# boot the world from a cluster config (deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp5.json:
-# the DSpark block draft + the decode graph; ..._plain.json: T=1; --knobs "--prefill exact": the exact
-# prefill mode), then the API check, the greedy transcripts (compared against a
-# reference file when given), the client-side pace, the MTP acceptance per prompt
-# class (read from the scheduler's retired lines), the prefill cost by length
-# through the endpoint, optionally the task evals, and the world down with its
-# op-stream md5s. One world at a time on the fabric.
+# boot the world from a cluster config (deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.json:
+# the DSpark block draft at depth 4 on six slots + the decode graph; --knobs "--no-mtp" for
+# the T=1 world, "--mtp-depth 5 --max-concurrency 2" for the two-slot depth-5 shape,
+# "--prefill exact" for the exact prefill mode), then the API check, the greedy
+# transcripts (compared against a reference file when given), the client-side pace, the
+# MTP acceptance per prompt class (read from the scheduler's retired lines), the prefill
+# cost by length through the endpoint, optionally the task evals, and the world down with
+# its op-stream md5s. One world at a time on the fabric.
 #   fabric_dsv41_serve.sh CONFIG OUT_DIR [--compare REF_TRANSCRIPTS.json] [--eval]
 #                           [--allow-code-execution] [--prefill "LEN..."] [--knobs "FLAGS"]
 set -u

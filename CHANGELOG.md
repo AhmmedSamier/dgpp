@@ -6,6 +6,19 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **One deployment template per model, quant and world** (2026-09-14, late;
+  `deploy/README.md`): twenty-five templates became eight —
+  `cluster_<model>_<quant>_w<n>.example.json`, each with MTP at the depth its
+  family measured best, the decode graph, and the slot count and cache
+  budget that measured at or above the other shapes (the six-slot DeepSeek
+  shape, the eight-slot full GLM-5.3, the large-cache GLM-5.3-Flash on four
+  nodes, the FP8 dense stack on the single-Spark Qwen). The retired shapes
+  are knobs (`--no-mtp` is new; `--mtp-depth`, `--max-concurrency`,
+  `--kv-capacity`, `--kv-dtype`, `--prefix-cache-gib`, `--dense-weights`
+  were there) and the catalogue maps every retired name to its knobs. The
+  default deployment (`scripts/site_env.py`) and the resolved-config fixture
+  follow the four-node GLM-5.3-Flash template; historical changelog entries
+  and benchmark records keep the old names.
 - **The GPU-driven eager fold (plan D9)** (2026-09-14, late;
   `CollectiveBus::allreduce_stream` / `allreduce_settle`, `BusStreamReducer`):
   the eager walk's boundary reductions launch on the model's stream in the

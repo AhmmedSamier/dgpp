@@ -1,71 +1,68 @@
-# Deployment filenames
+# Deployment templates
 
-Templates use `cluster_<model>_<quant>_w<n>_<mode>[_variant].example.json`.
-Local copies use the same name without `.example` and remain Git-ignored.
+One template per model, quantization and world size:
+`cluster_<model>_<quant>_w<n>.example.json`. Local copies use the same name
+without `.example` and stay Git-ignored; the launcher fills the nodes, the SSH
+user and the ports from the site's `.env` (`scripts/site_env.py`).
 
 - Model names are `glm-5.3-flash`, `glm-5.3` (the full model), `glm-4.7`,
   `qwen-3.8-flash-next` and `deepseek-v4.1-flash`.
 - The quant names the checkpoint representation: `fp8`, `nvfp4`,
-  `nvfp4-fp8` for the custom GLM-5.3-Flash hybrid, or `int4-int8` for the
-  full GLM-5.3's pack-quantized release (int4 group-64 routed experts, int8
-  attention and shared experts), or `mxfp4-fp8` for DeepSeek-V4.1-Flash
-  as it ships (MXFP4 experts, FP8 dense and attention, FP8 Engram tables
-  mapped from the NVMe). The JSON's `model` field gives the exact
-  Hugging Face repository.
+  `nvfp4-fp8` for the custom GLM-5.3-Flash hybrid, `int4-int8` for the full
+  GLM-5.3's pack-quantized release (int4 group-64 routed experts, int8
+  attention and shared experts), `mxfp4-fp8` for DeepSeek-V4.1-Flash as it
+  ships (MXFP4 experts, FP8 dense and attention, FP8 Engram tables mapped
+  from the NVMe). The JSON's `model` field gives the exact Hugging Face
+  repository.
 - `w<n>` gives the participating node count. Nothing restricts that number to
   the counts in use today; a world is refused by the engine's geometry check or
   a rank's memory plan, not by a list of allowed sizes.
-- `plain` disables MTP. `mtp1` and `mtp2` enable it at draft depths 1 and 2.
-- `dense-fp8` converts Qwen's dense projections to FP8 at load time. It does
-  not change the checkpoint quant or Hugging Face repository.
-- `large-cache` selects GLM-5.3's larger KV and prefix-cache budgets. Both
-  GLM-5.3 templates use the hybrid checkpoint; neither is a separate FP8 release.
-- `engine.embed_sharding` (`"replicated"` by default, `"vocab"` in the full
-  GLM-5.3 templates) decides whether every rank holds the whole embedding
-  table or its lm-head slice of the rows: `vocab` frees 1.33 GiB per rank at
-  world 4 for one small fold per token lookup and changes no number (the
-  ranks' partial rows sum to the same bf16 rows); the other families ignore it.
 
-## Templates added after the rename
+Every template enables MTP (the block draft on DeepSeek) at the depth the
+family measured best, with the decode graph, at the request-slot count and
+cache budget that measured at or above every other shape tried. The shapes
+a template does not name are knobs appended at boot:
+`scripts/dgpp-cluster up --config FILE --knobs "FLAGS"`.
 
-| Template | Deployment |
+| Template | Deployment | The shapes it replaced, as knobs |
+|---|---|---|
+| [cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json) | GLM-5.3-Flash hybrid on four nodes: MTP depth 1, bf16 latent cache, 768K context, an 8 GiB prefix arena, four request slots | the 8K-context template: `--kv-capacity 8192 --prefix-cache-gib 1.5`; T=1: `--no-mtp` |
+| [cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json) | the same hybrid on two nodes: MTP depth 1, FP8 latent cache, 160K context, four request slots | the 256K-context two-slot shape: `--max-concurrency 2 --kv-capacity 262144 --prefix-cache-gib 2` |
+| [cluster_qwen-3.8-flash-next_fp8_w4.example.json](cluster_qwen-3.8-flash-next_fp8_w4.example.json) | Qwen3.8-Flash-Next FP8 on four nodes: MTP depth 1, 256K context, four request slots | T=1: `--no-mtp`; depth 2: `--mtp-depth 2` |
+| [cluster_qwen-3.8-flash-next_fp8_w2.example.json](cluster_qwen-3.8-flash-next_fp8_w2.example.json) | the same on two nodes | T=1: `--no-mtp` |
+| [cluster_qwen-3.8-flash-next_nvfp4_w1.example.json](cluster_qwen-3.8-flash-next_nvfp4_w1.example.json) | Qwen3.8-Flash-Next NVFP4 on one Spark: MTP depth 1, the dense projections FP8 at load (`dense_weights: "fp8"`: 31 ms/step T=1 and 21–26 ms/token against the BF16 stack's 38 and 31–38), the n-gram table mapped, 64K context | the BF16 dense stack: `--dense-weights checkpoint`; T=1: `--no-mtp`; depth 2: `--mtp-depth 2` |
+| [cluster_glm-4.7_nvfp4_w4.example.json](cluster_glm-4.7_nvfp4_w4.example.json) | GLM-4.7 NVFP4 on four nodes: MTP depth 1, 256K context, four request slots | T=1: `--no-mtp`; depth 2: `--mtp-depth 2` (single-stream +4–13 %, measured behind depth 1 under concurrency before the 2026-09-14 lowering) |
+| [cluster_glm-5.3_int4-int8_w4.example.json](cluster_glm-5.3_int4-int8_w4.example.json) | the full GLM-5.3 (int4/int8 RTN) on four nodes: MTP depth 1, eight request slots (sixteen decode rows; c=4 the four-slot shape's 41–42 tok/s, c=8 48–50 aggregate), 120K bf16 context, the embedding vocab-sharded (110.4 GiB per rank under the 4 GiB headroom) | T=1: `--no-mtp` (144K context: `--kv-capacity 147456`); the fp8 latent cache at 208K: `--kv-dtype fp8 --kv-capacity 212992 --prefix-cache-gib 1.5`; depth 2 at two slots: `--mtp-depth 2 --max-concurrency 2` |
+| [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) | DeepSeek-V4.1-Flash as shipped on four nodes: six request slots at DSpark depth 4 (30 decode rows in one batched replay, the family's 32-row cap) with the confidence-scheduled verify depth (λ 0.045), the bounded prefill, 128K context — the six-stream shape the vLLM recipe reports its aggregate at; single and dual streams measure the same as the two-slot shapes did | the two-slot depth-5 shape: `--max-concurrency 2 --mtp-depth 5`; the two-slot depth-4 shape: `--max-concurrency 2`; T=1 at four slots: `--no-mtp --max-concurrency 4` |
+
+`engine.embed_sharding` (`"replicated"` by default, `"vocab"` in the full
+GLM-5.3 template) decides whether every rank holds the whole embedding table
+or its lm-head slice of the rows: `vocab` frees 1.33 GiB per rank at world 4
+for one small fold per token lookup and changes no number; the other families
+ignore it. `kv_dtype` affects only the GLM-5.3 latent caches (bf16, fp8 or
+fp4); Qwen's and GLM-4.7's K/V caches stay BF16.
+
+## The consolidation (2026-09-14)
+
+Twenty-five templates became these eight: every `_plain` variant (MTP measured
+faster per token in every family), every `_mtp2` / `_mtp5` variant (a depth is
+a knob), the `_c6` / `_c8` slot variants (the wider shape measured at or above
+the narrower one at every concurrency, so it is the template), the
+`_large-cache` variants (the four-node GLM-5.3-Flash template took the large
+cache; the two-node one and the full GLM-5.3's fp8 cache are knobs) and the
+Qwen single-Spark BF16-dense variants (the FP8 dense stack measured faster).
+The retired names map to the table's third column; historical changelog
+entries and benchmark records keep the old names.
+
+| Retired template | Now |
 |---|---|
-| [cluster_glm-5.3_int4-int8_w4_plain.example.json](cluster_glm-5.3_int4-int8_w4_plain.example.json) | the full GLM-5.3 (int4/int8 RTN) on four nodes, no MTP, bf16 latent cache, 144K context, four request slots, the embedding vocab-sharded (the memory plan: 98.0 GiB of weights + 12.9 GiB of caches per rank, 110.75 GiB in all under the 4 GiB headroom) |
-| [cluster_glm-5.3_int4-int8_w4_mtp1.example.json](cluster_glm-5.3_int4-int8_w4_mtp1.example.json) | the same with MTP depth 1 (the draft layer's experts requantized at load), 120K context (110.4 GiB) |
-| [cluster_glm-5.3_int4-int8_w4_mtp1_large-cache.example.json](cluster_glm-5.3_int4-int8_w4_mtp1_large-cache.example.json) | the same with the fp8 latent cache, 208K context and a 1.5 GiB prefix arena (110.35 GiB in all: the ceiling under the engine's 4 GiB headroom on a 121.6 GiB node) |
-| [cluster_glm-5.3_int4-int8_w4_mtp1_c8.example.json](cluster_glm-5.3_int4-int8_w4_mtp1_c8.example.json) | the same at eight request slots (sixteen decode rows, the 2-/3-/4-/6-/8-slot batch families; c=4 the four-slot template's 41–42 tok/s, c=8 48–50 aggregate at ~170 ms per token per request), 120K bf16 context |
-| [cluster_glm-5.3_int4-int8_w4_mtp2.example.json](cluster_glm-5.3_int4-int8_w4_mtp2.example.json) | the same with MTP depth 2 at two request slots (the shape measured under the eight-row cap; the family allows sixteen rows since 2026-09-13, so up to five slots at depth 2), 120K bf16 context |
-| [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json) | GLM-5.3-Flash hybrid on two nodes, MTP depth 1, FP8 KV cache, 160K context, four request slots |
-| [cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json) | the same on two nodes with two request slots instead of four, which buys 256K context and a 2 GiB prefix arena |
-| [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp4.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp4.example.json) | DeepSeek-V4.1-Flash on four nodes at DSpark depth 4 (five rows per slot) with the scheduled verify depth — the depth the six-slot template widens; single streams keep the depth-5 template's numbers within the schedule. |
-| [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp4_c6.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp4_c6.example.json) | DeepSeek-V4.1-Flash on four nodes at six request slots with DSpark depth 4 (30 decode rows in one batched replay, the family's 32-row cap) and the scheduled verify depth — the six-stream shape the vLLM recipe reports its aggregate at; single streams keep the depth-5 template's numbers within the schedule (docs/operations.md). |
-| [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp5.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp5.example.json) | DeepSeek-V4.1-Flash as shipped on four nodes with the DSpark block draft (`mtp_depth` 5: twelve decode rows at two request slots) and the confidence-scheduled verify depth (`mtp_schedule`, λ 0.045: chat 33 → 25 ms/token, every class faster, transcripts unchanged — docs/operations.md), the bounded prefill, 128K context (the memory plan: 72.94 GiB of resident weights per rank, 76.55 GiB in all + 4 GiB headroom on a 121.6 GiB node; not yet booted — the fabric measures follow in docs/deepseek_v41_flash_plan.md §9) |
-| [cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_plain.example.json](cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_plain.example.json) | the same without the draft at four request slots (eight decode rows; 70.92 GiB of weights, 74.27 GiB in all) |
-
-## Renamed files
-
-The table applies to both local `.json` files and tracked `.example.json`
-templates. All JSON contents are unchanged by the rename.
-
-| Previous local filename | New local filename (link to template) |
-|---|---|
-| `cluster.json` | [cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json](cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.example.json) |
-| `cluster.nvfp4.json` | [cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json](cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.example.json) |
-| `cluster_glm47.json` | [cluster_glm-4.7_nvfp4_w4_mtp1.json](cluster_glm-4.7_nvfp4_w4_mtp1.example.json) |
-| `cluster_glm47_t1.json` | [cluster_glm-4.7_nvfp4_w4_plain.json](cluster_glm-4.7_nvfp4_w4_plain.example.json) |
-| `cluster_glm47_d2.json` | [cluster_glm-4.7_nvfp4_w4_mtp2.json](cluster_glm-4.7_nvfp4_w4_mtp2.example.json) |
-| `cluster_qwen.json` | [cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json](cluster_qwen-3.8-flash-next_fp8_w4_mtp1.example.json) |
-| `cluster_qwen_t1.json` | [cluster_qwen-3.8-flash-next_fp8_w4_plain.json](cluster_qwen-3.8-flash-next_fp8_w4_plain.example.json) |
-| `cluster_qwen_w2.json` | [cluster_qwen-3.8-flash-next_fp8_w2_mtp1.json](cluster_qwen-3.8-flash-next_fp8_w2_mtp1.example.json) |
-| `cluster_qwen_w2_t1.json` | [cluster_qwen-3.8-flash-next_fp8_w2_plain.json](cluster_qwen-3.8-flash-next_fp8_w2_plain.example.json) |
-| `cluster_qwen_spark1.json` | [cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1.json](cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1.example.json) |
-| `cluster_qwen_spark1_t1.json` | [cluster_qwen-3.8-flash-next_nvfp4_w1_plain.json](cluster_qwen-3.8-flash-next_nvfp4_w1_plain.example.json) |
-| `cluster_qwen_spark1_fp8.json` | [cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.json](cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.example.json) |
-| `cluster_qwen_spark1_t1_fp8.json` | [cluster_qwen-3.8-flash-next_nvfp4_w1_plain_dense-fp8.json](cluster_qwen-3.8-flash-next_nvfp4_w1_plain_dense-fp8.example.json) |
-| `cluster_qwen_spark1_fp8_d2.json` | [cluster_qwen-3.8-flash-next_nvfp4_w1_mtp2_dense-fp8.json](cluster_qwen-3.8-flash-next_nvfp4_w1_mtp2_dense-fp8.example.json) |
-
-Pass the chosen filename explicitly with `--config`. The setup instructions
-are in the [top-level README](../README.md).
+| `cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1` (8K context), `…_w4_mtp1_large-cache` | `cluster_glm-5.3-flash_nvfp4-fp8_w4` (the large cache) |
+| `cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1`, `…_w2_mtp1_large-cache` | `cluster_glm-5.3-flash_nvfp4-fp8_w2` (four slots, 160K) |
+| `cluster_qwen-3.8-flash-next_fp8_w4_{mtp1,plain}`, `…_w2_{mtp1,plain}` | `cluster_qwen-3.8-flash-next_fp8_w4`, `…_w2` |
+| `cluster_qwen-3.8-flash-next_nvfp4_w1_{mtp1,plain,mtp1_dense-fp8,plain_dense-fp8,mtp2_dense-fp8}` | `cluster_qwen-3.8-flash-next_nvfp4_w1` (FP8 dense) |
+| `cluster_glm-4.7_nvfp4_w4_{mtp1,plain,mtp2}` | `cluster_glm-4.7_nvfp4_w4` |
+| `cluster_glm-5.3_int4-int8_w4_{plain,mtp1,mtp1_large-cache,mtp1_c8,mtp2}` | `cluster_glm-5.3_int4-int8_w4` (eight slots) |
+| `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_{plain,mtp4,mtp4_c6,mtp5}` | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4` (six slots, depth 4) |
 
 ## Existing deployments and logs
 
@@ -75,6 +72,5 @@ the new filename gets a new namespace. Existing logs are not moved or deleted,
 and a new filename does not take ownership of a process started with the old
 one. Update saved commands and automation to use the new name.
 
-Historical changelog entries and raw benchmark records retain old filenames.
 The generic runtime files `cluster.resolved.json` and the peer's staged
 `cluster.json` are unchanged: they are generated by the launcher, not templates.

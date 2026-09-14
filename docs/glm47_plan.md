@@ -221,7 +221,7 @@ argument), no vision.
 | `tools/glm4_reference_dump.py` | the pure-python full-model reference on the synthetic fixture |
 | `tests/unit/glm4_{config,binding}_test.cpp`, `tests/cuda/glm4_*` | the gates |
 | `apps/glm4_load_check.cpp`, `apps/glm4_forward_check.cpp`, `dgpp_serve.cpp` (`Glm4Family`) | the apps |
-| `deploy/cluster_glm-4.7_nvfp4_w4_mtp1.json`, `scripts/fabric_glm4_*.sh` | the fabric procedures |
+| `deploy/cluster_glm-4.7_nvfp4_w4.json`, `scripts/fabric_glm4_*.sh` | the fabric procedures |
 
 ## 5. Implementation stages and validation
 

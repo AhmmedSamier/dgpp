@@ -935,7 +935,7 @@ the vocabulary; `<｜DSML｜>`-prefixed tags are text plus the single
 | `tools/dsv41_reference_dump.py`, `tools/dsv41_torch_reference.py`, `tools/checkpoint_audit.py` (the `deepseek_v41` branch → `docs/checkpoint_budget_dsv41.md`) | the oracles and the audit |
 | `tests/unit/dsv41_{config,binding}_test.cpp`, `tests/unit/mxfp4_test.cpp`, `tests/cuda/fp4_gemv_test.cu` (+ MXFP4 cases), `fp4_gemv_checkpoint.cpp`, `glm_moe_test.cu`, `glm_mhc_test.cu`, `tests/cuda/csa2_test.cu`, `dsv41_engram_test.cu`, `dsv41_dspark_test.cu`, `dsv41_{loader,forward,decode,tp,engine}_test.cpp`, `dsv41_fixture.hpp` | the gates (§6) |
 | `apps/dsv41_load_check.cpp`, `dsv41_forward_check.cpp`, `dsv41_gen_check.cpp`, `apps/dgpp_serve.cpp` (`Dsv41Family`) | the apps |
-| `deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4_mtp5.example.json`, `…_w4_plain.example.json` | model name `deepseek-v4.1-flash`, quant `mxfp4-fp8`, mode `mtp5` (the block draft: the deployment rule names the depth) |
+| `deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` (since 2026-09-14 one template: six slots at depth 4 with the scheduled verify depth; the plain and depth-5 shapes are knobs) | model name `deepseek-v4.1-flash`, quant `mxfp4-fp8`, mode `mtp5` (the block draft: the deployment rule names the depth) |
 | `scripts/fabric_dsv41_{load,forward,serve}.sh` | the fabric procedures |
 | `tests/data/dsv41_{tokenizer,chat_template}_goldens.jsonl` | D11 |
 | `docs/checkpoint_budget_dsv41.md`, `docs/model_cards/DeepSeek-V4.1-Flash.md` | the audit's budget, the card |
@@ -2076,6 +2076,14 @@ row is at stake. The DeepSeek deploy example enables the schedule; the
 GLM examples do not.
 
 ## 8. Risks and open questions
+
+- The API check's `usage cached_tokens` test fails on this family by
+  construction (every recorded run since 2026-09-13): the prefix cache
+  snapshots at the CSA2 block alignment (128 tokens), so a repeated
+  42-token prompt finds the retired entry at position 128 and no cut at or
+  below 42 — the log says so ("the nearest entry shares the first 42 of the
+  prompt's 42 tokens"). A hit needs a shared prefix of at least one block.
+  The other families (align 1, the DSA pool's alignment) pass the test.
 
 **Sub-block prefix-cache cuts (deferred, 2026-09-14).** The prefix cache
 snapshots at a whole 128-token block, so a prompt shorter than a block is

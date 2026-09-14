@@ -1,12 +1,12 @@
 #!/bin/bash
 # The full GLM-5.3 (glm_moe_dsa) serving gates on the fabric (docs/glm53_plan.md G6):
-# boot the world from a cluster config (deploy/cluster_glm-5.3_int4-int8_w4_mtp1.json:
-# MTP + the decode graph; ..._plain.json: T=1; ..._mtp1_large-cache.json: the fp8
-# latent cache), then the API check, the greedy transcripts (compared against a
-# reference file when given), the client-side pace, the MTP acceptance per prompt
-# class (read from the scheduler's retired lines), the prefill cost by length
-# through the endpoint, optionally the task evals, and the world down with its
-# op-stream md5s. One world at a time on the fabric.
+# boot the world from a cluster config (deploy/cluster_glm-5.3_int4-int8_w4.json: MTP
+# depth 1 + the decode graph at eight slots; --knobs "--no-mtp" for the T=1 world,
+# "--kv-dtype fp8 --kv-capacity 212992" for the fp8 latent cache), then the API check,
+# the greedy transcripts (compared against a reference file when given), the client-side
+# pace, the MTP acceptance per prompt class (read from the scheduler's retired lines),
+# the prefill cost by length through the endpoint, optionally the task evals, and the
+# world down with its op-stream md5s. One world at a time on the fabric.
 #   fabric_glm_dsa_serve.sh CONFIG OUT_DIR [--compare REF_TRANSCRIPTS.json] [--eval]
 #                           [--allow-code-execution] [--prefill "LEN..."] [--knobs "FLAGS"]
 set -u

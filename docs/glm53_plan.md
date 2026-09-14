@@ -510,7 +510,7 @@ tool-call round trips and grammars. `ToolFormat::kGlmMarkers` applies.
 | `tools/glm_dsa_torch_reference.py` | transformers' own layer code on the real weights (the GLM-4.7 rule) |
 | `tests/unit/glm_dsa_{config,binding}_test.cpp`, `tests/unit/packq_quant_test.cpp`, `tests/cuda/packq_gemv_test.cu` + `packq_gemv_checkpoint.cpp`, `tests/cuda/glm_dsa_*` | the gates (§5) |
 | `apps/glm_dsa_load_check.cpp`, `apps/glm_dsa_forward_check.cpp`, `apps/glm_dsa_gen_check.cpp`, `apps/dgpp_serve.cpp` (`GlmDsaFamily`) | the apps; the gen check carries `--teacher-file` (the numerics tool's input) |
-| `deploy/cluster_glm-5.3_int4-int8_w4_mtp1.example.json`, `…_w4_plain.example.json`, `…_w4_mtp1_large-cache.example.json` | the deployments (model name `glm-5.3`, quant `int4-int8`) |
+| `deploy/cluster_glm-5.3_int4-int8_w4.example.json` (since 2026-09-14 one template: eight slots, MTP depth 1; the plain and fp8-cache shapes are knobs) | the deployments (model name `glm-5.3`, quant `int4-int8`) |
 | `scripts/fabric_glm_dsa_serve.sh`, `scripts/fabric_glm_dsa_load.sh`, `scripts/fabric_glm_dsa_forward.sh` | the fabric procedures (the GLM-4.7 scripts' shape) |
 | `tests/data/glm_dsa_chat_template_goldens.jsonl` | D10 |
 | `docs/model_cards/GLM-5.3-Int4-Int8Mix-RTN-g64.md`, `docs/checkpoint_budget_glm53.md` | the card and the audit's budget |
@@ -680,7 +680,7 @@ app is a second client of it (the 0 %-acceptance lesson).
 2026-09-12. G0 complete: the rank-0 download (427.47 GB, 175,985 tensors,
 78 per-layer shards + passthrough), the peer copies rsynced (399 GB on each
 of the three peers, no partial blobs) and `scripts/download_model.py
---verify-only --config deploy/cluster_glm-5.3_int4-int8_w4_mtp1.example.json`
+--verify-only --config deploy/cluster_glm-5.3_int4-int8_w4.example.json`
 green on all four nodes (revision `147684fb`, 398.1 GiB of indexed weights);
 `tools/checkpoint_audit.py` learned the pack-quantized triple (every one of
 the 58,200 checked against the config's quantization groups) and wrote

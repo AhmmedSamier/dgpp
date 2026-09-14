@@ -1,7 +1,7 @@
 #!/bin/bash
 # The Qwen3.8-Flash-Next serving gates on the fabric:
-# boot the world from a cluster config (deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json: MTP +
-# the decode graph; deploy/cluster_qwen-3.8-flash-next_fp8_w4_plain.json: plain T=1), then the
+# boot the world from a cluster config (deploy/cluster_qwen-3.8-flash-next_fp8_w4.json: MTP +
+# the decode graph; --knobs "--no-mtp" for the plain T=1 world), then the
 # API check, the greedy transcripts (compared against a reference file
 # when given), the client-side pace, and the world down with its op-stream
 # md5s. One world at a time on the fabric.

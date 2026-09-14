@@ -73,8 +73,9 @@ The bus test `scenario_world_of_one` covers this behavior.
 
 Without `decode_graph`, a single-node run uses the eager streaming path.
 
-`deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1.example.json` (MTP) and
-`deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_plain.example.json` (T=1) are the single-node
+`deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` (MTP depth 1, the dense stack
+FP8 at load; `--knobs "--no-mtp"` for T=1, `--dense-weights checkpoint` for the BF16 dense
+stack — one template since 2026-09-14) is the single-node
 configs: one node, `ngram_table: "mmap"`, `decode_graph`, 4 slots,
 kv_capacity 65536.
 
@@ -203,7 +204,7 @@ fusion becomes qkv + z through the scale GEMM and a two-problem BF16 GEMV
 for a/b. The resident image key carries the form (`loader_format`), so a
 BF16 image is never restored into an FP8 world; the encode runs once, on
 the first boot (16 threads over the block rows), and the memory plan
-follows the counting build. Configs: `deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_{mtp1,plain}_dense-fp8.example.json`.
+follows the counting build. Config: `deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` (`dense_weights: "fp8"`; `--no-mtp` for the T=1 measure).
 
 ### Measured with the dense stack in FP8 (2026-09-10)
 
@@ -288,7 +289,7 @@ shapes.
 
 ### The world-1 profile of the FP8 MTP world (2026-09-10, nsys)
 
-`scripts/fabric_qwen_profile.sh deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.json`: 255
+`scripts/fabric_qwen_profile.sh deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json`: 255
 two-row passes, 40.8 ms wall per pass, 1,567 kernels per pass; the GPU
 "busy" 49.8 ms per pass because the L2 prefetcher's kernels (11.2 ms of
 GPU time, 201 per pass) run on their side stream under the main chain.

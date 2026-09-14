@@ -206,26 +206,19 @@ class PortabilityTest(unittest.TestCase):
         templates = list((ROOT / "deploy").glob("*.example.json"))
         self.assertTrue(templates)
         index = (ROOT / "deploy/README.md").read_text()
+        # One template per model, quant and world (2026-09-14): every template
+        # enables MTP with the decode graph; the shapes a template does not
+        # name are boot knobs, listed in the catalogue.
+        seen = set()
         for path in templates:
             with self.subTest(path=path.name):
                 cfg = json.loads(path.read_text())
                 engine = cfg["engine"]
-                mode = f"mtp{engine.get('mtp_depth', 1)}" if engine["mtp"] else "plain"
-                stem = f"cluster_{models[cfg['model']]}_w{cfg['world_size']}_{mode}"
-                if engine.get("dense_weights") == "fp8":
-                    stem += "_dense-fp8"
-                if path.name.endswith("_large-cache.example.json"):
-                    base = json.loads((path.parent / (stem + ".example.json")).read_text())
-                    self.assertGreater(engine["kv_capacity"], base["engine"]["kv_capacity"])
-                    self.assertGreater(engine["prefix_cache_gib"], base["engine"]["prefix_cache_gib"])
-                    stem += "_large-cache"
-                # _cN: the base template at N request slots (wider decode batches).
-                slots = re.search(r"_c(\d+)\.example\.json$", path.name)
-                if slots:
-                    base = json.loads((path.parent / (stem + ".example.json")).read_text())
-                    self.assertEqual(engine["max_concurrency"], int(slots.group(1)))
-                    self.assertGreater(engine["max_concurrency"], base["engine"]["max_concurrency"])
-                    stem += f"_c{engine['max_concurrency']}"
+                self.assertTrue(engine["mtp"], "every template enables MTP (the plain world is --no-mtp)")
+                self.assertTrue(engine["decode_graph"])
+                stem = f"cluster_{models[cfg['model']]}_w{cfg['world_size']}"
+                self.assertNotIn(stem, seen, "one template per model, quant and world")
+                seen.add(stem)
                 self.assertEqual(path.name, stem + ".example.json")
                 self.assertIn(f"]({path.name})", index)
                 resolved = site_env.resolve_config(path, values)

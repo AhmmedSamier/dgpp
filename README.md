@@ -21,11 +21,11 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 
 | Model | Quant / Hugging Face model card | World sizes | Example configuration |
 |---|---|---|---|
-| GLM-5.3-Flash | [unsloth/GLM-5.3-Flash-FP8](https://huggingface.co/unsloth/GLM-5.3-Flash-FP8) | 4 | Copy the [base template](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.example.json) to `cluster_glm-5.3-flash_fp8_w4_mtp1.json` and set `model` to the linked FP8 repository |
-| GLM-5.3-Flash (hybrid) | [HawkBearPig/GLM-5.3-Flash-NVFP4-FP8](https://huggingface.co/HawkBearPig/GLM-5.3-Flash-NVFP4-FP8) | 2, 4 | [Two nodes](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1.example.json), [two nodes, long context](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2_mtp1_large-cache.example.json), [four nodes](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.example.json) |
-| Qwen3.8-Flash-Next | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8) | 2, 4 | [Two nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w2_mtp1.example.json), [four nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.example.json) |
-| Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1 | [One node, BF16 dense](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1.example.json), [one node, FP8 dense](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.example.json) |
-| GLM-4.7 | [nvidia/GLM-4.7-NVFP4](https://huggingface.co/nvidia/GLM-4.7-NVFP4) | 4 | [Four nodes](deploy/cluster_glm-4.7_nvfp4_w4_mtp1.example.json) |
+| GLM-5.3-Flash | [unsloth/GLM-5.3-Flash-FP8](https://huggingface.co/unsloth/GLM-5.3-Flash-FP8) | 4 | Copy the [base template](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json) to `cluster_glm-5.3-flash_fp8_w4.json` and set `model` to the linked FP8 repository |
+| GLM-5.3-Flash (hybrid) | [HawkBearPig/GLM-5.3-Flash-NVFP4-FP8](https://huggingface.co/HawkBearPig/GLM-5.3-Flash-NVFP4-FP8) | 2, 4 | [Two nodes](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json), [four nodes](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json) |
+| Qwen3.8-Flash-Next | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8) | 2, 4 | [Two nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w2.example.json), [four nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json) |
+| Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1 | [One node](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json) (the dense projections FP8 at load) |
+| GLM-4.7 | [nvidia/GLM-4.7-NVFP4](https://huggingface.co/nvidia/GLM-4.7-NVFP4) | 4 | [Four nodes](deploy/cluster_glm-4.7_nvfp4_w4.example.json) |
 
 The single-Spark Qwen configurations require `engine.ngram_table: "mmap"`
 to read the n-gram table from NVMe and `engine.decode_graph: true` for
@@ -38,7 +38,7 @@ The GLM-5.3 hybrid takes the main-stack routed experts from
 [dabsLabs](https://huggingface.co/dabsLabs/GLM-5.3-Flash-NVFP4) and the
 remaining tensors, including MTP, from
 [Unsloth](https://huggingface.co/unsloth/GLM-5.3-Flash-FP8).
-The base and large-cache GLM-5.3 templates both use
+The GLM-5.3-Flash templates use
 `HawkBearPig/GLM-5.3-Flash-NVFP4-FP8`. The setup command below downloads it
 once on rank 0 and syncs the selected snapshot to peers. To use the FP8 release
 instead, set
@@ -128,7 +128,7 @@ Edit `.env` to set `DGPP_NODES` (rank 0 first) and `DGPP_SSH_USER`, then
 [verify SSH-key access from rank 0 to each peer](docs/getting-started.md#3-set-your-node-addresses-and-ssh-user).
 
 ```bash
-CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
+CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
 test -f "$CONFIG" || cp "${CONFIG%.json}.example.json" "$CONFIG"
 test -f .env || cp .env.example .env
 ```
@@ -281,7 +281,7 @@ and peers read that resolved config; the original JSON and `.env` are not
 sent to peers. To inspect or use the runtime config with the native binary:
 
 ```bash
-scripts/dgpp-cluster resolve --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
+scripts/dgpp-cluster resolve --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
 # Save that JSON to a file before passing it to dgpp-serve --config.
 ```
 

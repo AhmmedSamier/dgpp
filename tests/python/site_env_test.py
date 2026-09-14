@@ -66,7 +66,7 @@ class SiteEnvTest(unittest.TestCase):
         with patch.object(site_env, "ROOT", self.root):
             values = site_env.settings({})
             self.assertEqual(site_env.site_nodes(values), ["head", "peer1", "peer2", "peer3"])
-            self.assertEqual(site_env.config_path(values), str(self.root / "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json"))
+            self.assertEqual(site_env.config_path(values), str(self.root / "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json"))
 
     def test_relative_default_deployment_is_based_at_repo_root(self):
         with patch.object(site_env, "ROOT", self.root):
@@ -206,7 +206,7 @@ class SiteEnvTest(unittest.TestCase):
 
     def test_cpp_fixture_matches_resolved_example(self):
         values = {**site_env.DEFAULTS, **site_env.read_env(ROOT / ".env.example"), "DGPP_SSH_USER": "ops"}
-        resolved = site_env.resolve_config(ROOT / "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.example.json", values)
+        resolved = site_env.resolve_config(ROOT / "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json", values)
         self.assertEqual(resolved, json.loads((ROOT / "tests/fixtures/cluster.resolved.json").read_text()))
 
     def test_packaged_layout_finds_its_own_site_settings(self):
@@ -216,7 +216,7 @@ class SiteEnvTest(unittest.TestCase):
         for name in ("site_env.py", "cluster_process.py", "dgpp-cluster"):
             (release / "scripts" / name).write_text((ROOT / "scripts" / name).read_text())
         (release / ".env").write_text(self.env_file.read_text())
-        (release / "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json").write_text(self.config.read_text())
+        (release / "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json").write_text(self.config.read_text())
         result = subprocess.run(
             [sys.executable, str(release / "scripts/dgpp-cluster"), "resolve"],
             cwd="/", env={"PATH": self.environ["PATH"]}, text=True, capture_output=True,

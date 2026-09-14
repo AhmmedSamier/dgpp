@@ -105,7 +105,7 @@ def settings(environ=None):
 
 def config_path(values=None):
     values = settings() if values is None else values
-    path = Path(values.get("DGPP_CLUSTER_CONFIG") or "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1.json").expanduser()
+    path = Path(values.get("DGPP_CLUSTER_CONFIG") or "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json").expanduser()
     return str((path if path.is_absolute() else ROOT / path).resolve())
 
 

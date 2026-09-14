@@ -74,17 +74,17 @@ Multi-node production uses it for RoCE communication. Turning
 
    ```bash
    # One Spark: Qwen NVFP4 with FP8 dense projections.
-   CONFIG=deploy/cluster_qwen-3.8-flash-next_nvfp4_w1_mtp1_dense-fp8.json
+   CONFIG=deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.json
    ```
 
    ```bash
    # Two Sparks: Qwen FP8.
-   CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2_mtp1.json
+   CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2.json
    ```
 
    ```bash
    # Four Sparks: GLM-5.3-Flash hybrid NVFP4/FP8.
-   CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4_mtp1_large-cache.json
+   CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
    ```
 
 2. Copy the matching template without replacing an existing local file:
@@ -97,11 +97,12 @@ Multi-node production uses it for RoCE communication. Turning
    choice. Leave the engine settings unchanged for the first run. In a new
    terminal, set `CONFIG` again or pass the full filename to `--config`.
 
-Names include the full model, checkpoint quant, world size and decode mode.
-`plain` disables MTP; `mtp1`/`mtp2` specify the draft depth. `dense-fp8` means
-load-time dense conversion, not a different checkpoint; `large-cache` selects
-the larger KV/prefix budgets. See [deployment filenames](../deploy/README.md) for
-the complete list and old-to-new names.
+Names carry the model, the checkpoint quant and the world size — one template
+per combination, each with MTP on and the slot count and cache budget that
+measured best. The other shapes (plain decode with `--no-mtp`, another draft
+depth, slot count or cache budget) are boot knobs; see
+[deployment templates](../deploy/README.md) for the list and the knobs that
+reproduce every retired variant.
 
 ## 3. Set your node addresses and SSH user
 

@@ -1,7 +1,7 @@
 # Qwen3.8-Flash-Next — the single-stream optimization plan (2026-09-10)
 
 Scope: make one request's decode and prefill faster at world 4 (the served
-geometry, `deploy/cluster_qwen-3.8-flash-next_fp8_w4_mtp1.json`), without regressing concurrent
+geometry, `deploy/cluster_qwen-3.8-flash-next_fp8_w4.json`), without regressing concurrent
 sessions or quantizing weights. The baseline measurements use revision
 `a8a2664` on 2026-09-10; subsequent experiments are identified in their
 entries. Runs are stored under `build-ci/fabric-runs/*_2026-09-10/`.
