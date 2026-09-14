@@ -61,6 +61,20 @@ class SchedulerEngine {
   // Opens slot `req` (fresh state), prefills `prompt`, picks the first
   // generated token. Returns a token id in [0, vocab).
   virtual int32_t prefill(int req, const std::vector<int64_t>& prompt) = 0;
+  // Several requests' cold prompts in one forward (the scheduler admits a
+  // group per tick when the engine allows it): each prompt within
+  // prefill_group_span_limit() tokens, the group within
+  // prefill_group_total_limit(); no prefix-cache plans. Returns each
+  // request's first token, in order. The default runs them one by one.
+  virtual int64_t prefill_group_span_limit() const { return 0; }  // 0: no grouping
+  virtual int64_t prefill_group_total_limit() const { return 0; }
+  virtual std::vector<int32_t> prefill_group(const std::vector<int>& reqs,
+                                             const std::vector<const std::vector<int64_t>*>& prompts) {
+    std::vector<int32_t> out;
+    out.reserve(reqs.size());
+    for (size_t i = 0; i < reqs.size(); ++i) out.push_back(prefill(reqs[i], *prompts[i]));
+    return out;
+  }
   // Pins the slot's lifetime block reservation. The scheduler calls this
   // immediately after prefill and before the first step; `tokens` is
   // prompt.size() + max_steps. Device-driven graphs rely on this because
@@ -565,6 +579,16 @@ class Scheduler {
   // head-of-line blocking), or -1. With the prefix cache on it may EVICT
   // unattached entries (LRU) to make the blocks a request needs.
   int next_admissible();
+  // The queued requests that admit together with `first` this tick: cold
+  // prompts within the engine's group span limit, no prefix-cache plan,
+  // fitting the free slots and blocks; empty when the engine has no group
+  // prefill or `first` itself takes a cache plan.
+  std::vector<int> admissible_group(int first);
+  void admit_group(const std::vector<int>& arrivals);
+  // admit()'s slot-side halves: the slot and its configuration before the
+  // engine's prefill, the bookkeeping after it.
+  int admit_prepare(int arrival);
+  void admit_finish(int arrival, int slot, int32_t token, double prefill_ms, int64_t attached);
   // The submit() validations, shared by submit()/try_submit().
   void validate_new(const SchedulerRequest& request) const;
   int queued_count() const;

@@ -130,6 +130,10 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   // (30 rows) in one batched replay — the vLLM recipe's six-stream
   // aggregate; kDecodeRowsMax bounds it.
   static constexpr int decode_rows_cap() { return 32; }
+  // The group prefill (session_prefill_group): a span's longest prompt —
+  // under the bounded prefill one window (the whole span is then its own
+  // replay segment, no tail), else a walk's rows.
+  int64_t prefill_group_span_limit() const { return max_tokens_; }
   static size_t session_snapshot_bytes(const Dsv41TextConfig& cfg, int tp_world, bool mtp);
   using Base::session_snapshot_bytes;
   static Csa2Config csa2_config(const Dsv41TextConfig& cfg, int tp_world);
@@ -227,6 +231,14 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
     MoeTraceStaging* trace = nullptr;
     int64_t window_floor = 0;  // prefill: the earliest position the window attends
     bool publish = true;       // prefill: a kv source publishes its entries (false: published before)
+    // The group prefill's spans (host arrays; num_spans 0: one request):
+    // span s = request span_reqs[s], positions from span_pos0[s], rows
+    // [span_row0[s], span_row0[s] + span_lens[s]) of the walk.
+    const int32_t* span_reqs = nullptr;
+    const int64_t* span_pos0 = nullptr;
+    const int32_t* span_lens = nullptr;
+    const int64_t* span_floor = nullptr;  // per span: the earliest position its window attends
+    int num_spans = 0;
   };
   void build_layer_objects(const Dsv41LayerResident& r);
   Csa2LayerWeights csa2_view(const Dsv41LayerResident& r, int layer) const;
@@ -312,6 +324,13 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   // call's chunks: the encoder output of the last window rows.
   int64_t seg_pos0_ = 0;
   int seg_rows_ = 0;
+  // Per request: the last walk's draft segment (pos0, rows) — a group
+  // prefill sets every span's; mtp_run_rows clamps its prefill rows to it.
+  std::vector<std::pair<int64_t, int>> seg_by_req_;
+  std::pair<int64_t, int>& segment_of(int req) {
+    if (seg_by_req_.size() <= static_cast<size_t>(req)) seg_by_req_.resize(static_cast<size_t>(req) + 1, {0, 0});
+    return seg_by_req_[static_cast<size_t>(req)];
+  }
   uint16_t* tail_streams_ = nullptr;  // [window, 4H]
   float* tail_pre_ = nullptr;         // [window, 4]
   float* seg_pre_ = nullptr;          // [window, 4] the segment's collapse coefficients

@@ -56,6 +56,26 @@ Use a disposable isolated evaluation machine/container with no secrets,
 unneeded mounts or network access. The flag acknowledges the risk; it does
 not provide isolation. Never run it on a production serving node.
 
+## The near-tie rule of the batched engine gates (2026-09-14)
+
+The session-core families lower their dense sites by the rows of a launch
+(`kernels/gemm.hpp dense_gemv_rows`), so a batched graph step's rows and
+the eager scalar's are tolerance-equal, not bitwise, and on the
+random-weight fixtures a near tie flips and every later token follows.
+`glm4_engine_test` and `glm_dsa_engine_test` therefore hold a batched
+transcript to the eager one with `tests/cuda/engine_test_ties.hpp`: the
+first three decisions agree, or the first difference among them sits on a
+near tie (top-2 margin under 0.1) of the world-1 reference's own decision
+(recorded by `engine_ties::margin_pick`); later differences are logged with
+the position and the reference margin. The scalar transcripts (one row: the
+GEMV chain, whatever the batch) stay bitwise. `DGPP_DENSE_GEMV_ROWS=256`
+restores the old lowering and the bitwise agreement. The group-prefill
+gates (`glm4_decode_test`, `glm_dsa_decode_test`, `qwen_decode_test`, and
+`glm_tp_test`'s `glm_tp_group_prefill_matches_prefills_alone` for the Flash
+class) compare a group's rows to the prefills alone under the row compare's
+l2 and near-tie rule and audit a decode off the group's cache against the
+re-forward (the Flash gate: against the solo decode, token by token).
+
 ## Suite coverage
 
 Use `ctest --test-dir build-ci -N` to list the tests in your configured
@@ -118,6 +138,15 @@ build. The suites cover:
   `moe_grouped_mma_fp4_mx_matches_the_oracle_per_segment` pins the MXFP4 form
   of the fp4 tile kernel — the family's prefill experts — to a host oracle
   over ragged segments and tiles),
+  the group prefill's gates — `dsv41_model_test` (three prompts as one
+  walk bitwise the prefills alone, first steps included, in the exact
+  mode and in the bounded mode with spans wider than the window),
+  `dsv41_tp_test`
+  on 29968/29969 (world 2, per layer, a 12-row group inside one latency
+  slot and a 51-row group on the bulk fold path), `dsv41_engine_test`'s
+  phase 4 (the graph engine's group prefill then the three-slot batch,
+  transcripts the eager engine's), `scheduler_test` (queued short prompts
+  admit as one group; a prompt past the span limit admits alone) —
   `dsv41_engine_test` on 29961–29964 with the DSpark graph engine (its
   world-2-vs-world-1 rule: the first three decisions agree or flip on a
   world-1 top-2 margin under 0.1, recorded by the world-1 pick — the folds

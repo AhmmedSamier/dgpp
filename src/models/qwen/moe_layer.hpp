@@ -54,6 +54,9 @@ class QwenMoeLayer {
                IGemm& gemm, int max_tokens, int decode_slots = 0,
                int graph_table_slots = 0);
   ~QwenMoeLayer();
+  // The shared expert's fp8 projections: the streaming tensor-core GEMM
+  // from this row count (scale_gemm.hpp; 0: the GEMV chunks to 128 rows).
+  void set_mma_from_rows(int rows) { mma_from_rows_ = rows; }
   QwenMoeLayer(const QwenMoeLayer&) = delete;
   QwenMoeLayer& operator=(const QwenMoeLayer&) = delete;
 
@@ -106,6 +109,7 @@ class QwenMoeLayer {
   QwenMoeWeights w_;
   GlmMoeConfig cfg_;
   IGemm& gemm_;
+  int mma_from_rows_ = 0;
   int max_tokens_;
   GlmMoeLayer routed_;
 

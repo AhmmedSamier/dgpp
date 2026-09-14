@@ -56,10 +56,10 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
     }
     if (out_type == GemmOut::F32)
       launch_scale_gemm_f32(act, static_cast<size_t>(act_stride), w8.payload, w8.scales,
-                            static_cast<float*>(out), m, n, k, stream, static_cast<size_t>(n));
+                            static_cast<float*>(out), m, n, k, stream, static_cast<size_t>(n), g.mma_from_rows);
     else
       launch_scale_gemm_bf16(act, static_cast<size_t>(act_stride), w8.payload, w8.scales,
-                             static_cast<uint16_t*>(out), m, n, k, stream, static_cast<size_t>(n));
+                             static_cast<uint16_t*>(out), m, n, k, stream, static_cast<size_t>(n), g.mma_from_rows);
     return;
   }
   if (!w) throw std::invalid_argument("qwen dense: null weight");
@@ -271,7 +271,7 @@ void QwenGdnLayer::in_projections(const uint16_t* x, int tokens, cudaStream_t st
     // The FP8 form: qkv and z as one multi-problem fp8 GEMV at decode rows
     //, the scale GEMM above them; a and b (BF16, [lv, H]) as
     // one dual GEMV.
-    if (tokens <= 8) {
+    if (tokens <= std::min(8, g_.gemv_rows)) {
       Fp8GemvProblem p[2];
       p[0].payload = w_.in_proj_qkv_fp8.payload; p[0].scales = w_.in_proj_qkv_fp8.scales; p[0].out = qkv_; p[0].n = C;
       p[1].payload = w_.in_proj_z_fp8.payload; p[1].scales = w_.in_proj_z_fp8.scales; p[1].out = z_; p[1].n = LV;
@@ -280,7 +280,8 @@ void QwenGdnLayer::in_projections(const uint16_t* x, int tokens, cudaStream_t st
       gemm_dense(g_, x, H, nullptr, w_.in_proj_qkv_fp8, qkv_, GemmOut::BF16, tokens, C, H, stream);
       gemm_dense(g_, x, H, nullptr, w_.in_proj_z_fp8, z_, GemmOut::BF16, tokens, LV, H, stream);
     }
-    if (tokens <= 4 && bf16_gemv_accepts(w_.in_proj_a, tokens, H) && bf16_gemv_accepts(w_.in_proj_b, tokens, H)) {
+    if (tokens <= std::min(4, g_.gemv_rows) && bf16_gemv_accepts(w_.in_proj_a, tokens, H) &&
+        bf16_gemv_accepts(w_.in_proj_b, tokens, H)) {
       Bf16GemvProblem p[2];
       p[0].act = x; p[0].act_row_stride = static_cast<size_t>(H); p[0].weight = w_.in_proj_a; p[0].out = a_; p[0].n = lv_;
       p[1].act = x; p[1].act_row_stride = static_cast<size_t>(H); p[1].weight = w_.in_proj_b; p[1].out = b_; p[1].n = lv_;
@@ -291,7 +292,7 @@ void QwenGdnLayer::in_projections(const uint16_t* x, int tokens, cudaStream_t st
     }
     return;
   }
-  if (tokens <= 4 && bf16_gemv_accepts(w_.in_proj_qkv, tokens, H) &&
+  if (tokens <= std::min(4, g_.gemv_rows) && bf16_gemv_accepts(w_.in_proj_qkv, tokens, H) &&
       bf16_gemv_accepts(w_.in_proj_z, tokens, H) && bf16_gemv_accepts(w_.in_proj_a, tokens, H) &&
       bf16_gemv_accepts(w_.in_proj_b, tokens, H)) {
     Bf16GemvProblem p[4];
@@ -462,7 +463,7 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
   const int64_t* d_pos = rows.pos;
 
   // Projections.
-  if (w_.q_proj_fp8.payload && T <= 8) {
+  if (w_.q_proj_fp8.payload && T <= std::min(8, g_.gemv_rows)) {
     // The FP8 form at decode rows: the four projections as one
     // multi-problem fp8 GEMV.
     Fp8GemvProblem p[4];

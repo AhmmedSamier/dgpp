@@ -78,6 +78,7 @@ struct ClusterConfig {
     double mtp_schedule_base_ms = 28.0;
     double mtp_schedule_lambda = 0.0;
     int mtp_schedule_min_depth = 1;
+    bool mtp_schedule_adapt = true;  // lambda follows the modeled throughput, floored at mtp_schedule_lambda
     int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
     int sampling_candidates = 128;
     double prefix_cache_gib = 1.5;

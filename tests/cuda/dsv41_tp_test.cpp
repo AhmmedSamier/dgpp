@@ -22,6 +22,7 @@
 //     hash heads per rank, world 2 two — the kv partials fold to the
 //     world-1 projection.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -425,6 +426,131 @@ DGPP_TEST(dsv41_tp_loopback_worlds_2_and_4_match_world_1) {
 // launch) — the sharded slices' row offsets, per-rank k and scale grids
 // under that kernel against world 1's, layer-locally, with the same
 // gates. The 70-row test above prefills through the tile kernels.
+// The group prefill at world 2: three cold prompts as one walk against
+// the shortest prefilled alone — per layer, its rows' streams bitwise
+// (world 1 is bitwise by dsv41_model_test; the TP folds must keep it so
+// whichever bus path the wider boundary takes). A small group (12 rows,
+// inside one latency slot) and a wide one (51 rows, the bulk path).
+namespace {
+struct GroupOutcome {
+  std::string error;
+  std::vector<std::vector<uint16_t>> alone;   // per layer [T_c x 4H]
+  std::vector<std::vector<uint16_t>> group;   // per layer [T_total x 4H]
+  std::vector<float> alone_logits, group_logits;
+  std::vector<Dsv41Model::SiteCapture> alone_sites, group_sites;  // per layer
+  int rows_c = 0, rows_total = 0;
+};
+void rank_work_group(int rank, int world, const std::string& dir, const Dsv41TextConfig& cfg,
+                     const std::vector<std::vector<int64_t>>& prompts, CollectiveBus* bus, ConstructBarrier* barrier,
+                     GroupOutcome* out) {
+  bool arrived = false;
+  auto arrive_once = [&] {
+    if (arrived) return;
+    arrived = true;
+    barrier->arrive_and_wait();
+  };
+  try {
+    BusBoundaryReducer reducer(*bus, wait_timeout_ms());
+    Dsv41Model model(cfg, dir, 96, 512, Dsv41Residency::Streaming, &reducer, rank, world, 3);
+    arrive_once();
+    setenv("DGPP_DSV41_CAPTURE_PREFILL", "1", 1);
+    const Dsv41Model::Outputs a = model.session_prefill(2, prompts[2]);
+    out->alone = a.layer_states;
+    out->alone_logits = a.logits;
+    out->alone_sites = model.debug_sites();
+    model.session_close(2);
+    const std::vector<const std::vector<int64_t>*> pp = {&prompts[0], &prompts[1], &prompts[2]};
+    const std::vector<Dsv41Model::Outputs> g = model.session_prefill_group({0, 1, 2}, pp);
+    unsetenv("DGPP_DSV41_CAPTURE_PREFILL");
+    out->group = g[0].layer_states;
+    out->group_logits = g[2].logits;
+    out->group_sites = model.debug_sites();
+    out->rows_c = static_cast<int>(prompts[2].size());
+    out->rows_total = static_cast<int>(prompts[0].size() + prompts[1].size() + prompts[2].size());
+  } catch (const std::exception& e) {
+    out->error = "rank " + std::to_string(rank) + ": " + e.what();
+    arrive_once();
+  }
+}
+}  // namespace
+
+DGPP_TEST(dsv41_tp_group_prefill_is_bitwise_the_prefill_alone_at_world_2) {
+  const std::string dir = (fs::current_path() / "dsv41_tp_fixture_group").string();
+  const Dsv41TextConfig cfg = dsv41fx::tiny_config();
+  dsv41fx::write_fixture(cfg, dir);
+  (void)dsv41fx::fixture_sidecar(cfg, dir);
+  const int W = 4 * cfg.hidden_size;
+  uint16_t port = 29968;
+  for (const auto lens : {std::array<int, 3>{5, 4, 3}, std::array<int, 3>{23, 17, 11}}) {
+    std::vector<std::vector<int64_t>> prompts;
+    for (int i = 0; i < 3; ++i) {
+      std::vector<int64_t> p = make_tokens(cfg, 64);
+      p.resize(static_cast<size_t>(lens[static_cast<size_t>(i)]));
+      for (auto& t : p) t = (t + 17 * i) % cfg.vocab_size;
+      prompts.push_back(p);
+    }
+    std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(2, port++);
+    require(!buses.empty(), "tp bus world failed to start");
+    std::vector<GroupOutcome> ranks(2);
+    ConstructBarrier barrier(2);
+    std::vector<std::thread> workers;
+    for (int r = 0; r < 2; ++r)
+      workers.emplace_back(rank_work_group, r, 2, dir, std::cref(cfg), std::cref(prompts), buses[static_cast<size_t>(r)].get(),
+                           &barrier, &ranks[static_cast<size_t>(r)]);
+    for (auto& t : workers) t.join();
+    for (int r = 0; r < 2; ++r) require(ranks[static_cast<size_t>(r)].error.empty(), ranks[static_cast<size_t>(r)].error);
+    const GroupOutcome& o = ranks[0];
+    require(o.alone.size() == o.group.size() && !o.alone.empty(), "layer captures on both walks");
+    const int L = static_cast<int>(o.alone.size());
+    int first_bad = -1;
+    for (int l = 0; l < L; ++l) {
+      const std::vector<uint16_t>& a = o.alone[static_cast<size_t>(l)];
+      const std::vector<uint16_t>& g = o.group[static_cast<size_t>(l)];
+      require(a.size() == static_cast<size_t>(o.rows_c) * W && g.size() == static_cast<size_t>(o.rows_total) * W, "capture shapes");
+      const std::vector<uint16_t> gc(g.begin() + static_cast<std::ptrdiff_t>(o.rows_total - o.rows_c) * W, g.end());
+      const Stats s = compare(gc, a);
+      std::printf("[ .. ] group %d+%d+%d rows, layer %d: C's rows vs alone l2 %.3g max %g ulps%s\n", lens[0], lens[1], lens[2],
+                  l, s.l2, s.max_ulps, bits_equal(gc, a) ? " (bitwise)" : "");
+      if (!bits_equal(gc, a)) {
+        int shown = 0;
+        for (size_t i = 0; i < gc.size() && shown < 4; ++i)
+          if (gc[i] != a[i]) {
+            std::printf("[ .. ]     row %zu stream %zu dim %zu: group 0x%04x (%g) vs alone 0x%04x (%g)\n", i / W,
+                        (i % W) / static_cast<size_t>(cfg.hidden_size), i % static_cast<size_t>(cfg.hidden_size), gc[i],
+                        bf16_bits_to_float(gc[i]), a[i], bf16_bits_to_float(a[i]));
+            ++shown;
+          }
+        if (first_bad < 0) first_bad = l;
+        // The layer's sites for C's rows: which one first departs.
+        if (o.alone_sites.size() > static_cast<size_t>(l) && o.group_sites.size() > static_cast<size_t>(l)) {
+          const Dsv41Model::SiteCapture& sa = o.alone_sites[static_cast<size_t>(l)];
+          const Dsv41Model::SiteCapture& sg = o.group_sites[static_cast<size_t>(l)];
+          const size_t H = static_cast<size_t>(cfg.hidden_size);
+          auto site = [&](const char* name, const std::vector<uint16_t>& av, const std::vector<uint16_t>& gv, size_t width) {
+            if (av.size() != static_cast<size_t>(o.rows_c) * width || gv.size() != static_cast<size_t>(o.rows_total) * width) {
+              std::printf("[ .. ]     site %s: shapes %zu / %zu\n", name, av.size(), gv.size());
+              return;
+            }
+            const std::vector<uint16_t> gcv(gv.begin() + static_cast<std::ptrdiff_t>((o.rows_total - o.rows_c) * width), gv.end());
+            size_t nd = 0, firsti = 0;
+            for (size_t i = 0; i < av.size(); ++i)
+              if (av[i] != gcv[i]) { if (nd == 0) firsti = i; ++nd; }
+            std::printf("[ .. ]     site %s: %zu differing elements%s\n", name, nd,
+                        nd ? (" (first row " + std::to_string(firsti / width) + " col " + std::to_string(firsti % width) + ")").c_str() : "");
+          };
+          site("x_attn", sa.x_attn, sg.x_attn, H);
+          site("attn_out", sa.attn_out, sg.attn_out, H);
+          site("streams_after_attn", sa.streams_after_attn, sg.streams_after_attn, 4 * H);
+          site("x_ffn", sa.x_ffn, sg.x_ffn, H);
+          site("ffn_out", sa.ffn_out, sg.ffn_out, H);
+        }
+      }
+    }
+    require(o.alone_logits == o.group_logits, "the last row's logits bitwise");
+    require(first_bad < 0, "C's rows differ from its prefill alone from layer " + std::to_string(first_bad));
+  }
+}
+
 DGPP_TEST(dsv41_tp_loopback_worlds_2_and_4_match_world_1_at_decode_rows) {
   const std::string dir = (fs::current_path() / "dsv41_tp_fixture_rows").string();
   const Dsv41TextConfig cfg = dsv41fx::tiny_config();

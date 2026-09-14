@@ -518,8 +518,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       }
       DGPP_LOG_INFO(
           "rank {}: scheduled verify depth summary — scalar replays per depth [{}] "
-          "({} steps held at the full block: a fresh or sampled slot){}",
-          rank_, hist, sched_full_forced_, bhist);
+          "({} steps held at the full block: a fresh or sampled slot){}{}",
+          rank_, hist, sched_full_forced_, bhist,
+          sched_adapt_ ? std::format("; lambda ended at {:.4f} tok/ms after {} steps (floor {:.4f})",
+                                     lambda_now(), sched_lambda_steps_, sched_lambda_)
+                       : std::string());
     }
     for (std::array<cudaGraphExec_t, 2>& execs : scalar_execs_)
       for (cudaGraphExec_t exec : execs)
@@ -625,8 +628,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // plus two per batch family) holds them, else an even spread that always
   // keeps the full block; a policy depth rounds UP to the next option
   // (never fewer drafts than the policy asked — exact either way).
+  // base_ms + adapt: lambda follows the modeled throughput (an EWMA of
+  // committed / (base + rows.row) over the MTP steps, floored at
+  // lambda_tok_per_ms; verify_schedule.hpp) instead of standing at the
+  // configured constant — the fixed point differs per concurrency.
   void configure_verify_schedule(bool on, float row_ms, float lambda_tok_per_ms,
-                                 int min_depth = 1) {
+                                 int min_depth = 1, float base_ms = 0.f, bool adapt = false) {
     drain();
     for (const std::array<cudaGraphExec_t, 2>& e : scalar_execs_)
       if (e[0] != nullptr)
@@ -696,10 +703,16 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
           depth_options_.push_back(d);
       }
       if (depth_options_.back() != depth_) depth_options_.push_back(depth_);
+      if (adapt && !(base_ms >= 0.f))
+        throw std::invalid_argument("graph engine: the adaptive lambda needs base_ms >= 0");
       schedule_ = true;
       sched_row_ms_ = row_ms;
       sched_lambda_ = lambda_tok_per_ms;
       sched_min_depth_ = min_depth;
+      sched_base_ms_ = base_ms;
+      sched_adapt_ = adapt;
+      sched_lambda_live_ = lambda_tok_per_ms;
+      sched_lambda_steps_ = 0;
       if (h_conf_ == nullptr) {
         DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&h_conf_),
                                    sizeof(float) * static_cast<size_t>(slots_) * conf_rows_,
@@ -729,9 +742,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       DGPP_LOG_INFO(
           "rank {}: scheduled verify depth on — options [{}] of the {}-draft "
           "block (threshold: prefix survival > {:.3f} = {:.4f} tok/ms x {:.2f} "
-          "ms/row), greedy slots only; the confidence is {}",
+          "ms/row{}), greedy slots only; the confidence is {}",
           rank_, opts, depth_, sched_lambda_ * sched_row_ms_, sched_lambda_,
           sched_row_ms_,
+          sched_adapt_ ? std::format("; lambda adaptive over base {:.1f} + rows x row ms, floored there",
+                                     sched_base_ms_)
+                       : std::string(),
           draft_full_path_ ? "the draft head's own probabilities"
                            : "the model's confidence head");
     }
@@ -936,6 +952,55 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     return open_slot(req, prompt,
                      [&] { return model_->session_prefill(req, prompt); });
   }
+  // The group prefill: several cold prompts as the spans of one forward
+  // (session_prefill_group), each slot's opening work per request around
+  // it. A family without span support prefills them one by one.
+  int64_t prefill_group_span_limit() const override {
+    if constexpr (requires { model_->prefill_group_span_limit(); })
+      return model_->prefill_group_span_limit();
+    else
+      return 0;
+  }
+  int64_t prefill_group_total_limit() const override {
+    if constexpr (requires { model_->max_tokens(); })
+      return model_->max_tokens();
+    else
+      return 0;
+  }
+  std::vector<int32_t> prefill_group(const std::vector<int>& reqs,
+                                     const std::vector<const std::vector<int64_t>*>& prompts) override {
+    if constexpr (requires { model_->session_prefill_group(reqs, prompts); }) {
+      if (reqs.size() != prompts.size() || reqs.empty())
+        throw std::invalid_argument("graph engine: prefill_group takes one prompt per request");
+      if (reqs.size() == 1 || prefill_group_span_limit() <= 0)
+        return sched::SchedulerEngine::prefill_group(reqs, prompts);
+      drain();
+      for (size_t i = 0; i < reqs.size(); ++i) {
+        check_req(reqs[i]);
+        if (live_[static_cast<size_t>(reqs[i])])
+          throw std::logic_error("graph engine: prefill on a live request");
+      }
+      std::vector<int32_t> firsts(reqs.size(), -1);
+      size_t opened = 0;
+      try {
+        for (size_t i = 0; i < reqs.size(); ++i) open_slot_grammar(reqs[i], *prompts[i]);
+        const std::vector<typename Model::Outputs> outs = model_->session_prefill_group(reqs, prompts);
+        opened = reqs.size();  // every slot is open on the model from here
+        for (size_t i = 0; i < reqs.size(); ++i)
+          firsts[i] = open_slot_finish(reqs[i], *prompts[i], outs[i]);
+        reseed_live_feeds();
+        return firsts;
+      } catch (...) {
+        // A failed group admission closes every member (session_prefill_group
+        // opens every slot before the walk, so the closes are always due).
+        for (size_t i = 0; i < reqs.size(); ++i) close_failed_slot(reqs[i]);
+        (void)opened;
+        throw;
+      }
+    } else {
+      return sched::SchedulerEngine::prefill_group(reqs, prompts);
+    }
+  }
 
   // ---- prefix cache (M7) --------------------------------------------------
   sched::SchedulerEngine::PrefixInfo prefix_info() const override {
@@ -1015,20 +1080,48 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     if (live_[static_cast<size_t>(req)])
       throw std::logic_error("graph engine: prefill on a live request");
     try {
-      std::unique_ptr<text::GrammarState>& grammar =
-          grammar_[static_cast<size_t>(req)];
-      if (grammar) {
-        // The grammar's opening state: thinking iff the prompt ends in
-        // <think> (the template's generation prompt does).
-        const text::ChatMarkers& m = grammar_vocab_->markers();
-        const bool opens = m.prompt_opens_thinking(prompt);
-        grammar = std::make_unique<text::GrammarState>(grammar_vocab_,
-                                                      grammar->spec(), opens);
-      }
-      const bool sampled = full_path_slot(req);
-      int32_t first = -1;
+      open_slot_grammar(req, prompt);
+      const typename Model::Outputs out = run();
+      const int32_t first = open_slot_finish(req, prompt, out);
+      // The prefill wrote its chunks over the device token rows, the feeds
+      // included: restore every live slot's persistent feed (the scalar
+      // variants and the batch read the same rows).
+      reseed_live_feeds();
+      return first;
+    } catch (...) {
+      close_failed_slot(req);
+      throw;
+    }
+  }
+  // The grammar's opening state: thinking iff the prompt ends in <think>
+  // (the template's generation prompt does).
+  void open_slot_grammar(int req, const std::vector<int64_t>& prompt) {
+    std::unique_ptr<text::GrammarState>& grammar = grammar_[static_cast<size_t>(req)];
+    if (grammar) {
+      const text::ChatMarkers& m = grammar_vocab_->markers();
+      const bool opens = m.prompt_opens_thinking(prompt);
+      grammar = std::make_unique<text::GrammarState>(grammar_vocab_, grammar->spec(), opens);
+    }
+  }
+  // session_prefill opens the slot before any later pick/draft can fail:
+  // a failed admission is made recoverable rather than leaking its blocks.
+  void close_failed_slot(int req) {
+    model_->session_close(req);
+    pending_[static_cast<size_t>(req)] = -1;
+    drafts_[static_cast<size_t>(req)].assign(static_cast<size_t>(depth_), -1);
+    live_[static_cast<size_t>(req)] = false;
+    reserved_[static_cast<size_t>(req)] = false;
+  }
+  // The slot-side work after the model's prefill of `req` (its last-row
+  // outputs in `out`): the pick or the sampled draw, the sampled context
+  // and its device count table, the draft block's first proposal; the
+  // slot goes live. The caller reseeds the live feeds after.
+  int32_t open_slot_finish(int req, const std::vector<int64_t>& prompt, const typename Model::Outputs& out) {
+    std::unique_ptr<text::GrammarState>& grammar = grammar_[static_cast<size_t>(req)];
+    const bool sampled = full_path_slot(req);
+    int32_t first = -1;
+    {
       {
-        const typename Model::Outputs out = run();
         if (sampled) {
           std::vector<int32_t> context(prompt.begin(), prompt.end());
           const text::TokenMask* mask = nullptr;
@@ -1088,20 +1181,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       }
       reserved_[static_cast<size_t>(req)] = false;
       live_[static_cast<size_t>(req)] = true;
-      // The prefill wrote its chunks over the device token rows, the feeds
-      // included: restore every live slot's persistent feed (the scalar
-      // variants and the batch read the same rows).
-      reseed_live_feeds();
       return first;
-    } catch (...) {
-      // session_prefill opens the slot before any later pick/draft can fail.
-      // Make a failed admission recoverable rather than leaking its blocks.
-      model_->session_close(req);
-      pending_[static_cast<size_t>(req)] = -1;
-      drafts_[static_cast<size_t>(req)].assign(static_cast<size_t>(depth_), -1);
-      live_[static_cast<size_t>(req)] = false;
-      reserved_[static_cast<size_t>(req)] = false;
-      throw;
     }
   }
 
@@ -1174,9 +1254,14 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
 
     std::vector<std::vector<int32_t>> batches;
     batches.reserve(reqs.size());
-    for (const int req : reqs)
+    int committed = 0;
+    for (const int req : reqs) {
       batches.push_back(
           collect_verdict(req, /*verdict_request=*/req, /*batched=*/true, rows));
+      committed += static_cast<int>(batches.back().size());
+    }
+    if (schedule_ && model_->mtp_enabled())
+      note_step_for_lambda(committed, rows * static_cast<int>(reqs.size()));
     return batches;
   }
 
@@ -1716,13 +1801,30 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     return full_depth_option();
   }
 
+  // The lambda in force: the configured constant, or the adaptive EWMA
+  // floored at it.
+  float lambda_now() const {
+    return sched_adapt_ ? std::max(sched_lambda_, static_cast<float>(sched_lambda_live_))
+                        : sched_lambda_;
+  }
+  // After an MTP step (scalar or batched, any depth): fold its committed
+  // tokens over its modeled time into the adaptive lambda. `rows` is the
+  // step's verify rows over all its slots. Replicated inputs, one fixed
+  // arithmetic: every rank derives the same value.
+  void note_step_for_lambda(int committed, int rows) {
+    if (!sched_adapt_) return;
+    sched_lambda_live_ = verify_lambda_update(sched_lambda_live_, committed, rows, sched_base_ms_,
+                                              sched_row_ms_, kSchedLambdaAlpha);
+    ++sched_lambda_steps_;
+  }
+
   int choose_depth_option(int req) {
     const float* conf = wait_confidence(req);
     if (conf == nullptr) {
       ++sched_full_forced_;
       return full_depth_option();
     }
-    int k = scheduled_verify_depth(conf, depth_, sched_row_ms_, sched_lambda_);
+    int k = scheduled_verify_depth(conf, depth_, sched_row_ms_, lambda_now());
     if (depth_hook_) k = depth_hook_(req, k, conf, depth_);
     return depth_option_for(k);
   }
@@ -1742,7 +1844,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       confs.push_back(conf);
     }
     int k = scheduled_verify_depth_batch(confs.data(), static_cast<int>(confs.size()), depth_,
-                                         sched_row_ms_, sched_lambda_);
+                                         sched_row_ms_, lambda_now());
     if (depth_hook_) {
       int forced = 0;
       for (size_t i = 0; i < reqs.size(); ++i)
@@ -2444,7 +2546,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     publish_stage(req);
     if (!pipeline_) drain();  // after the publish: the replay's gate waits on it
     wait_verdict(inflight_.back());
-    return collect_verdict(req, /*verdict_request=*/0, /*batched=*/false, rows);
+    std::vector<int32_t> out = collect_verdict(req, /*verdict_request=*/0, /*batched=*/false, rows);
+    if (schedule_ && model_->mtp_enabled()) note_step_for_lambda(static_cast<int>(out.size()), rows);
+    return out;
   }
 
   // The slot's masks for the coming replay (M6 6g): row 0 under the
@@ -2777,7 +2881,12 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // ---- the confidence-scheduled verify depth (configure_verify_schedule) ----
   bool schedule_ = false;
   float sched_row_ms_ = 0.f;
-  float sched_lambda_ = 0.f;
+  float sched_lambda_ = 0.f;          // the configured lambda (the floor when adaptive)
+  float sched_base_ms_ = 0.f;         // the modeled step's fixed part (adaptive lambda)
+  bool sched_adapt_ = false;          // lambda follows the modeled throughput
+  double sched_lambda_live_ = 0.0;    // the EWMA (replicated arithmetic)
+  uint64_t sched_lambda_steps_ = 0;
+  static constexpr double kSchedLambdaAlpha = 1.0 / 64.0;
   int sched_min_depth_ = 1;
   std::vector<int> depth_options_;  // ascending; the last is depth_ (the full block)
   int conf_rows_ = 0;               // confidence entries per slot (the block)

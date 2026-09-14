@@ -940,8 +940,12 @@ void launch_dots(const uint16_t* streams, const GlmMhcWeights& w,
 }
 
 // Tokens at or above which the vector path takes the tiled form (prefill);
-// decode's rows keep the per-coefficient fused form (graph-captured).
-constexpr int kTileMinTokens = 16;
+// decode's rows keep the per-coefficient fused form (graph-captured). A
+// family whose prefill batches several requests' prompts as one walk sets
+// it to 1 (mhc_set_tile_min_tokens): a row's coefficients are then the
+// same chain whatever rows share the launch, so a prompt prefilled with
+// others is bitwise the prompt alone (DeepSeek-V4.1-Flash, 2026-09-14).
+int g_mhc_tile_min_tokens = 16;
 
 template <int kPerThread>
 void launch_dots_tiled(const uint16_t* streams, const GlmMhcWeights& w,
@@ -967,7 +971,7 @@ void launch_dots_by_width(const uint16_t* streams, const GlmMhcWeights& w,
                           const MhcFinishArgs& fin, bool fused, int tokens,
                           cudaStream_t stream, bool allow_tiled = true) {
   const int per_thread = (cfg.hidden + kThreads - 1) / kThreads;
-  if (kVec && allow_tiled && tokens >= kTileMinTokens && g_mhc_tiled_enabled) {
+  if (kVec && allow_tiled && tokens >= g_mhc_tile_min_tokens && g_mhc_tiled_enabled) {
     // The prefill forms run the finish themselves whatever `fused` says
     // (the two-launch form's finish kernel is then skipped): the tensor-
     // core dots (K % 64 == 0) or the token-tiled kernel.
@@ -1054,7 +1058,7 @@ bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
   }
   // The tiled prefill form runs the finish in-block with comb included,
   // whatever defer_comb says: only the fused per-coefficient form defers.
-  const bool tiled = vec && !decode_rows && tokens >= kTileMinTokens && g_mhc_tiled_enabled;
+  const bool tiled = vec && !decode_rows && tokens >= g_mhc_tile_min_tokens && g_mhc_tiled_enabled;
   if (tiled) fin.defer_comb = 0;
   if (vec)
     launch_dots_by_width<true>(streams, w, cfg, logits_scratch, fin, fused,
@@ -1078,6 +1082,8 @@ bool launch_mhc_compute_normed(const uint16_t* streams, const GlmMhcWeights& w,
 }
 
 void mhc_set_tiled_form(bool on) { g_mhc_tiled_enabled = on; }
+void mhc_set_tile_min_tokens(int tokens) { g_mhc_tile_min_tokens = tokens < 1 ? 1 : tokens; }
+int mhc_tile_min_tokens() { return g_mhc_tile_min_tokens; }
 void mhc_set_prefill_gemm(bool on) { g_mhc_prefill_gemm = on; }
 
 void launch_mhc_comb(const float* logits_scratch, const GlmMhcWeights& w,

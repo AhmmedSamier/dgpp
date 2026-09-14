@@ -95,9 +95,12 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     gw_.dequant = dev_alloc<uint16_t>(dense_bridge_bytes_ / 2);
     gw_.dequant_bytes = dense_bridge_bytes_;
   }
-  // Every decode shape up to the fixed batch's rows through the row-
-  // independent GEMV core (the numerical interface of the batched graphs).
-  gemm_.set_decode_rows(max_decode_rows_);
+  // The dense sites' lowering (kernels/gemm.hpp dense_gemv_rows): the GEMV
+  // chunks (and the fused multi-problem launches) to the bound, cuBLASLt's
+  // algorithm (bf16) or the streaming tensor-core GEMM (fp8) above it.
+  gemm_.set_decode_rows(std::min(max_decode_rows_, dense_gemv_rows()));
+  gw_.gemv_rows = dense_gemv_rows();
+  gw_.mma_from_rows = dense_gemv_rows() + 1;
   has_ple_ = !cfg_.ple_layer_ids.empty();
   if (has_ple_) table_ = loader_.load_ngram_table();
   for (int l = 0; l < cfg_.num_hidden_layers; ++l)
@@ -428,6 +431,7 @@ void QwenModel::build_layer_objects(const QwenLayerResident& r) {
         loader_.residency() == QwenResidency::Resident ? n_moe_layers_ + (mtp_ ? 1 : 0) : 0;
     moe_ = std::make_unique<QwenMoeLayer>(moe_view(r.moe), moe_cfg_, gemm_, max_tokens_, max_decode_rows_,
                                           table_slots);
+    moe_->set_mma_from_rows(gw_.mma_from_rows);
   } else {
     moe_->rebind(moe_view(r.moe));
   }
@@ -673,6 +677,16 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
         gdn_->enqueue_rows(x_, gdn_rec(0, gdn_ordinal), static_cast<int64_t>(num_gdn_) * gdn_rec_elems_,
                            gdn_conv(0, gdn_ordinal), static_cast<int64_t>(num_gdn_) * gdn_conv_elems_,
                            attn_out, T, rows, stream_, rec_snap, conv_snap);
+      } else if (run.num_spans > 0) {
+        // A group prefill (2026-09-14): each span's rows scan its own
+        // request's recurrent and conv state (the pointers step by rows).
+        int64_t row0 = 0;
+        for (int sp = 0; sp < run.num_spans; ++sp) {
+          const int len = run.span_lens[sp], sreq = run.span_reqs[sp];
+          gdn_->enqueue(x_ + static_cast<size_t>(row0) * H, gdn_rec(sreq, gdn_ordinal), gdn_conv(sreq, gdn_ordinal),
+                        attn_out + static_cast<size_t>(row0) * H, len, stream_);
+          row0 += len;
+        }
       } else {
         gdn_->enqueue(x_, gdn_rec(req, gdn_ordinal), gdn_conv(req, gdn_ordinal), attn_out, T, stream_,
                       rec_snap, conv_snap);
@@ -690,7 +704,23 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       qrows.num_requests = num_requests;
       if (snapshots)
         qrows.ring_snapshots = spec_ring_ + static_cast<size_t>(qsa_ordinal) * static_cast<size_t>(max_decode_rows_) * ring_elems();
-      qsa_->enqueue(x_, T, qrows, cache, attn_out, stream_);
+      if (!run.decode && run.num_spans > 0) {
+        // A group prefill: each span attends over its own request's cache
+        // and writes its pools and ring (the row metadata steps with the rows).
+        int64_t row0 = 0;
+        for (int sp = 0; sp < run.num_spans; ++sp) {
+          const int len = run.span_lens[sp];
+          QwenQsaRows srows = qrows;
+          srows.req_ids = d_req + row0;
+          srows.pos = d_pos + row0;
+          srows.request = run.span_reqs[sp];
+          srows.pos0 = run.span_pos0[sp];
+          qsa_->enqueue(x_ + static_cast<size_t>(row0) * H, len, srows, cache, attn_out + static_cast<size_t>(row0) * H, stream_);
+          row0 += len;
+        }
+      } else {
+        qsa_->enqueue(x_, T, qrows, cache, attn_out, stream_);
+      }
       ++qsa_ordinal;
     }
     if (run.decode) prefetch_ffn_side(r);
@@ -741,7 +771,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // windows by position (the last window rows of a prefill chunk, every
   // decode row — distinct slots within one launch).
   if (mtp_) {
-    const int n = std::min(T, max_decode_rows_);
+    const int n = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);  // a group prefill stores every row
     store_draft_hidden(r_ + static_cast<size_t>(T - n) * W, d_req + (T - n), d_pos + (T - n), n);
   }
   // The prefetch side stream rejoins here: a capture must end with every

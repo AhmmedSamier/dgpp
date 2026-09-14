@@ -846,6 +846,20 @@ The prefill tile kernel (D7) stays deferred: the grouped GEMV chain is
 the prefill; a 2,048-token chunk through four real layers takes seconds
 today, the measured number is the optimization stage's.
 
+The dense lowering by rows and the group prefill (2026-09-14, carried
+from the DeepSeek work): the DSA layer's fp8 projections take the
+streaming tensor-core GEMM from five rows to 256 (`kernels/scale_gemm.hpp
+mma_from_rows`; at sixteen rows o_proj 320 → 109 µs, q_a 155 → 59, q_b
+104 → 38, kv_a 57 → 37 on one rank of four), the bf16 dense MLP, head and
+indexer projections cuBLASLt's algorithm above four rows; the GEMV chunks
+keep rows one to four (T = 1 unchanged). The group prefill runs the DSA
+layer per span with a selection-scratch base per span
+(`DsaLayer::enqueue_prefill(row_base)`; the selection-reuse contract per
+base), so a selection-reusing layer finds every span's selection where its
+indexed layer left it. Gates: `glm_dsa_decode_test` (a group's rows within
+6.5e-3 relative l2 of the prefills alone, top-1 equal), the engine gates'
+near-tie rule (docs/testing.md). Fabric numbers: docs/measurements.md.
+
 ## 7. Risks and open questions
 
 - **Memory.** 99 GiB of weights per rank leaves 2–4 GiB for caches. If the

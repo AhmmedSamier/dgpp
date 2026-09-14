@@ -62,6 +62,11 @@ namespace dgpp {
 
 class Glm4Model : public SessionModel<Glm4Model> {
  public:
+  // Several cold prompts as the spans of one walk (session_prefill_group,
+  // 2026-09-14, the group prefill ported from DeepSeek): the attention rows
+  // carry their own request ids and positions, so a span attends to its
+  // own request's cache only; every span within max_tokens.
+  int64_t prefill_group_span_limit() const { return max_tokens_; }
   using Base = SessionModel<Glm4Model>;
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;

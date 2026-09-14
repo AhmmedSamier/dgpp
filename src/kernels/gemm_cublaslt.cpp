@@ -8,6 +8,7 @@
 #include <format>
 #include <map>
 #include <mutex>
+#include <cstdlib>
 #include <stdexcept>
 #include <tuple>
 
@@ -39,6 +40,7 @@ struct PlanKey {
 struct CublasLtGemm::Impl {
   int decode_rows = kGemmDecodeRowsDefault;  // the decode lowering bound (set_decode_rows)
   bool decode_mma = false;                   // the lowering's tensor-core form (set_decode_mma)
+  int decode_mma_max_rows = 0;               // its bound (0: every row count)
   cublasLtHandle_t lt{};
   float* dev_unit_scale{};  // fp8 tensor-wise scale == 1.0f
 
@@ -144,6 +146,19 @@ struct CublasLtGemm::Impl {
   }
 };
 
+int dense_gemv_rows() {
+  static const int rows = [] {
+    const char* v = std::getenv("DGPP_DENSE_GEMV_ROWS");
+    if (!v || !*v) return 4;
+    char* end = nullptr;
+    const long x = std::strtol(v, &end, 10);
+    if (end == v || *end != '\0' || x < 1 || x > 4096)
+      throw std::invalid_argument("DGPP_DENSE_GEMV_ROWS: an integer in [1, 4096]");
+    return static_cast<int>(x);
+  }();
+  return rows;
+}
+
 CublasLtGemm::CublasLtGemm() : impl_(new Impl()) {}
 CublasLtGemm::~CublasLtGemm() { delete impl_; }
 
@@ -155,8 +170,13 @@ void CublasLtGemm::set_decode_rows(int rows) {
 }
 
 int CublasLtGemm::decode_rows() const { return impl_->decode_rows; }
-void CublasLtGemm::set_decode_mma(bool on) { impl_->decode_mma = on; }
+void CublasLtGemm::set_decode_mma(bool on, int max_rows) {
+  if (max_rows < 0) throw std::invalid_argument("CublasLtGemm::set_decode_mma: negative bound");
+  impl_->decode_mma = on;
+  impl_->decode_mma_max_rows = max_rows;
+}
 bool CublasLtGemm::decode_mma() const { return impl_->decode_mma; }
+int CublasLtGemm::decode_mma_max_rows() const { return impl_->decode_mma_max_rows; }
 
 void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
                           int m, int n, int k, DType io_dtype, GemmOut out_dtype,
@@ -173,6 +193,26 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
   // lets a live request move between scalar and batched graph variants
   // without changing its transcript (each chunk past the first re-reads
   // the weights: the batch's byte cost).
+  // The tensor-core form takes EVERY row count of an opted-in instance
+  // (128-row groups above one launch): a row's chain then never depends on
+  // the rows sharing its launch, prefill included — the group prefill's
+  // spans are bitwise their prefills alone (an Lt algorithm's split
+  // changes with m). Long prefills pay a little on the small bf16 sites.
+  if (io_dtype == DType::BF16 && m >= 1 && impl_->decode_mma &&
+      (impl_->decode_mma_max_rows == 0 || m <= impl_->decode_mma_max_rows) &&
+      mma_gemv_shape_ok(static_cast<const uint16_t*>(weight), static_cast<const uint16_t*>(act),
+                        act_row_stride, m, k)) {
+    const auto* x = static_cast<const uint16_t*>(act);
+    const auto* w = static_cast<const uint16_t*>(weight);
+    auto* y = static_cast<uint8_t*>(out);
+    if (out_dtype == GemmOut::F32)
+      launch_mma_gemv_bf16_f32(x, act_row_stride, w, reinterpret_cast<float*>(y), m, n, k,
+                               static_cast<size_t>(n), stream);
+    else
+      launch_mma_gemv_bf16_bf16(x, act_row_stride, w, reinterpret_cast<uint16_t*>(y), m, n, k,
+                                static_cast<size_t>(n), stream);
+    return;
+  }
   if (io_dtype == DType::BF16 && m >= 1 && m <= impl_->decode_rows &&
       bf16_gemv_accepts(weight, /*m=*/1, k)) {
     const auto* x = static_cast<const uint16_t*>(act);
@@ -180,16 +220,6 @@ void CublasLtGemm::matmul(const void* act, const void* weight, void* out,
     const size_t out_elem = out_dtype == GemmOut::F32 ? sizeof(float)
                                                        : sizeof(uint16_t);
     auto* y = static_cast<uint8_t*>(out);
-    if (impl_->decode_mma && m <= kMmaGemvMaxRows &&
-        mma_gemv_shape_ok(w, x, act_row_stride, m, k)) {
-      if (out_dtype == GemmOut::F32)
-        launch_mma_gemv_bf16_f32(x, act_row_stride, w, reinterpret_cast<float*>(y), m, n, k,
-                                 static_cast<size_t>(n), stream);
-      else
-        launch_mma_gemv_bf16_bf16(x, act_row_stride, w, reinterpret_cast<uint16_t*>(y), m, n, k,
-                                  static_cast<size_t>(n), stream);
-      return;
-    }
     for (int row0 = 0; row0 < m;) {
       int rows = std::min(4, m - row0);
       while (!bf16_gemv_accepts(weight, rows, k)) --rows;

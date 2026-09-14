@@ -74,6 +74,11 @@ namespace dgpp {
 
 class GlmDsaModel : public SessionModel<GlmDsaModel> {
  public:
+  // Several cold prompts as the spans of one walk (session_prefill_group,
+  // 2026-09-14, the group prefill ported from DeepSeek): the DSA attention
+  // runs per span (its selection state and cache are per request), the
+  // dense, MoE and head sites over every row; every span within max_tokens.
+  int64_t prefill_group_span_limit() const { return max_tokens_; }
   using Base = SessionModel<GlmDsaModel>;
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
@@ -189,6 +194,14 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
     bool capture = false;
     int moe_table_slot = -1;   // >= 0: the capture's graph table
     MoeTraceStaging* trace = nullptr;
+    // A group prefill (session_prefill_group, 2026-09-14): the walk's rows
+    // are several requests' spans, span-major; the attention runs per span
+    // (its selection state and cache are per request), everything else
+    // over all rows. 0 spans: the one-request prefill above.
+    const int32_t* span_reqs = nullptr;
+    const int64_t* span_pos0 = nullptr;
+    const int32_t* span_lens = nullptr;
+    int num_spans = 0;
   };
   void enqueue_layer(const GlmDsaLayerResident& r, int pool_layer, uint16_t* resid, int T, const WalkRows& rows);
   void enqueue_dense(const GlmDsaDenseMlpResident& d, const uint16_t* x, int T, uint16_t* out);

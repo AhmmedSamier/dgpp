@@ -136,6 +136,7 @@ struct WorldSettings {
   double mtp_schedule_base_ms = 28.0;
   double mtp_schedule_lambda = 0.0;
   int mtp_schedule_min_depth = 1;
+  bool mtp_schedule_adapt = true;
   int graph_batch_min_live = 0;
   int sampling_candidates = 0;
   double prefix_cache_gib = 0.0;

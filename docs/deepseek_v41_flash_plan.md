@@ -1707,6 +1707,93 @@ full block; the test hook forces per slot with the batch at the deepest.
 The engine gates on 29964/29965 pass unchanged (they force through the
 hook). Measured next at λ 0.045 and at the six-stream world's own achieved
 rate (λ ≈ 0.08, the Dinkelbach fixed point at that concurrency).
+Measured: λ 0.045 → C6 84.5, λ 0.08 → 86.9 (C1 47.0); then the adaptive
+λ — an EWMA of each MTP step's committed tokens over its modeled time
+base + rows·row, floored at the configured λ, replicated inputs and one
+fixed arithmetic so every rank holds the same value (`verify_lambda_update`,
+`engine.mtp_schedule_adapt`, default on) — C1 48.2 / C2 66.8 / C6 87.0
+with one configuration, λ ending at 0.098 after the six-stream phase.
+*The group prefill (the same evening).* The six-stream gap's other half was
+the scheduler's strict alternation: one admission per tick, a decode step
+between, so six arrivals were six read-ins (TTFT 1.2–2.1 s at C6, 11–29 %
+of the wall not decoding). Now queued cold prompts that each fit one
+window (no prefix-cache attach or snapshot — a prompt under the 128-token
+snapshot alignment never had one) admit together (`Scheduler::
+admissible_group`, `admit_group`; the engine's `prefill_group` and
+`prefill_group_span_limit`/`prefill_group_total_limit`) and prefill as the
+spans of ONE walk (`session_prefill_group` → `run_rows` with span tables:
+the dense sites, the MoE, the norms, the Engram (already span-aware) and
+the head over every row; the CSA2 attention, the layer-20 kv publication
+and the draft segment per span — `Csa2Layer::enqueue_prefill(...,
+row_base)` keeps each span's selection state and shape record at its own
+rows). Bitwise: a prompt prefilled in a group equals the prompt alone at
+the model (world 1), per layer at world 2 on both fold paths, and through
+the engine's three-slot batch — after two forms were pinned to row-
+invariant chains: the mHC dots' tiled form at every prefill row count
+(`mhc_set_tile_min_tokens(1)`; the vector form under 16 rows gave a
+different fp32 coefficient and, at world 2, one bf16 element) and every
+bf16 row count of the opted-in cuBLASLt instance through the tensor-core
+form (an Lt algorithm's split changes with m). The MoE's tile kernel and
+the fp8 mma were row-invariant already. Other families keep one prefill
+per tick (their span limit is 0). Fabric: docs/measurements.md. The
+first fabric run (C6 87.0 → 103.6, TTFT 0.90 s; a six-prompt burst one
+~540 ms forward) still admitted the 292-token prompts one by one — the
+span limit was one window; spans of any width now: under the bounded
+prefill the decoder walks each span's last window rows packed span after
+span (its coefficients in the free rotating buffer, its window floored at
+the segment's start), the head's per-span last rows copied back to the
+rows the session core reads, the draft's rows and segment per span from
+the packed space (`dsv41_model_test`, 23 + 9 + 40 rows at window 16,
+bitwise the bounded prefills alone).
+Fabric: C1 47.9 / C2 71.6 / C6 106.4, TTFT 0.31 / 0.45 / 0.87 s (the
+recipe 37.95 / 64.30 / 131.86 and 0.44 / — / 0.50).
+
+Kernel record, 2026-09-14 (late): the decode forms' weight loads are
+asynchronous — cp.async into a per-warp ring of two to eight window
+slices (24 KB per block: two stages at eight warps so two blocks share an
+SM, eight at one warp), no register staging — and the block width follows
+n (eight warps from 4096 rows, four from 1024, two under; one warp per
+block is issue-bound). Cold: the bf16 head [32320 × 5120] at one row 1441
+µs against the GEMV's 1438 (was 1470 / 1437); fp8 [5120 × 5120] 122 / 119
+at one row, 123 / 212 at six, 145 / 780 at thirty; the narrow DSA shapes
+of the full GLM-5.3 at sixteen rows 2–4× ahead of the chunks
+(docs/measurements.md). Tried and not taken: 512-k bf16 windows at one
+block per SM (1453), 128-k windows at three blocks (1470, and fp8 133), a
+48 KB ring (no better at any width, one block per SM), the register
+double-buffer (registers). The one-row bf16 gap is closed; the narrow-n
+one-row gap (the 576-row site: 29 against the chunks' 11 µs) is the eight
+rows per warp — a split-k form would need a workspace and a reduce; the
+session-core families route one to four rows to the chunks instead, this
+family keeps every row on the streaming form for its bitwise group
+prefill.
+
+**D9 — The GPU-driven eager fold (designed, not built).** The prefill's
+boundary reductions (93 per pass) run the host-driven eager collective:
+the model stream drains, the host submits, the engine thread launches the
+one-block consumer on the bus's own stream, which copies the payload into
+each peer's pinned row (three copies), waits for the peers' doorbells,
+folds their rows out of system memory, and the host notices the finish
+0.2–0.9 ms later before the model may continue (`DGPP_BUS_TIMELINE=1`
+now prints every 32nd prefill-class fold's decomposition; the 2026-09-14
+table in the results file: a 60-row fold ~1.5 ms of wall). The captured
+decode graphs' collective node has none of the host terms and one shared
+staging row. The design (the bus analysis of 2026-09-14): a new
+`allreduce_stream(stream, dsrc, ddst, elems)` that takes a generation from
+the shared `ctl_seq_counter` (the same order on every rank: execution
+order equals generation order), resets a cell from a reserved ring and
+stores its `gen_seq` with release, pushes `(gen, cell, elems)` to an
+engine FIFO, and launches `bus_allreduce_graph_kernel` on the caller's
+stream; `graph_pass`'s flight machine posts from the FIFO as it does from
+a window; a device-buffer reducer beside `BusBoundaryReducer` (a small
+ring of stable buffers); `Dsv41Model::fold` drops its stream sync; one
+`allreduce_settle` per pass. Risks to design for: the lost per-fold
+synchronous verdict (a wedged peer becomes a stream that never finishes:
+the deadline, `graph_fail` and the poison paths must cover the FIFO),
+generation divergence when a rank aborts a pass, the stage ring's depth
+under host run-ahead, lane-0-only posting at these payloads, the eager
+gate and world-1 branches. Also worth a one-line experiment first: the
+30–60-row folds sit just under the bulk (reduce-scatter + allgather)
+threshold and pay the one-shot's (W−1)× wire bytes.
 
 The project's standing rules apply (restated because each has cost a day):
 rebuild everything before any `ctest` verdict; one fabric ritual at a time,

@@ -316,7 +316,8 @@ void Csa2Layer::publish_entries(Csa2StatePool& pool, const int32_t* req_ids, int
 void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, const uint8_t* win_cache,
                             int win_block_tokens, const int32_t* win_table, const int32_t* req_ids_main,
                             const int64_t* pos, int row0, int rows, int n_split_main, cudaStream_t stream,
-                            const int32_t* list, int list_stride, const int32_t* counts, bool split_window) {
+                            const int32_t* list, int list_stride, const int32_t* counts, bool split_window,
+                            int sel_base) {
   const int lh = cfg_.local_heads();
   if (rows > ws_win_rows_ || rows * n_split_main > ws_slots_) throw std::logic_error("csa2 layer: attention tile too wide");
   const uint16_t* q = q_ + size_t(row0) * lh * kCsa2Latent;
@@ -338,8 +339,8 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
   if (w_.ratio > 0) {
     const int ord = w_.cache_ord;
     const int epb = pool.entries_per_block(ord);
-    const int32_t* topk = topk_ + size_t(row0) * cfg_.index_topk;
-    const int32_t* counts = counts_ + row0;
+    const int32_t* topk = topk_ + size_t(sel_base + row0) * cfg_.index_topk;
+    const int32_t* counts = counts_ + sel_base + row0;
     n_main = n_split_main;
     if (!(lh >= 16 && lh % 16 == 0 &&
           dsa_attn_listed(q, pool.main(ord), req_ids_main, topk, cfg_.index_topk, counts, rows, n_main, lh, kCsa2Latent,
@@ -417,9 +418,9 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
                                       int(pool.total_blocks()), pool.index_k(ord), pool.index_scale(ord), epb,
                                       cfg_.index_heads, cfg_.candidate_block, cfg_.candidate_blocks, kCandidateParts,
                                       part_ws_, cand_, cand_counts_, stream);
-        cand_shape_ = shape;
+        cand_at(0) = shape;
       } else if (w_.uses_candidates) {
-        require_shape(cand_shape_, shape, "the candidate pool");
+        require_shape(cand_at(0), shape, "the candidate pool");
       }
       if (w_.candidate_source || w_.uses_candidates)
         csa2_select_listed_decode(q_fp8_, w_folded_, req_ids, pos_sel_, tokens, pool.block_tables(),
@@ -431,9 +432,9 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
                           pool.index_k(ord), pool.index_scale(ord), epb, cfg_.index_heads, kCsa2IndexDim,
                           cfg_.index_topk, 1, cfg_.index_topk, topk_, counts_, select_ws_, max_entries_, counter_ws_, 0,
                           stream, true);
-      sel_ = shape;
+      sel_at(0) = shape;
     } else {
-      require_shape(sel_, shape, "the selection");
+      require_shape(sel_at(0), shape, "the selection");
     }
   }
   attend_rows(pool, req_ids, pool.ring(layer_), cfg_.ring_slots, pool.ring_table(), req_ids, pos, 0, tokens,
@@ -524,9 +525,11 @@ void Csa2Layer::publish_prefill(const void* hidden_in, Csa2StatePool& pool, int 
 }
 
 void Csa2Layer::enqueue_prefill(const void* hidden_in, Csa2StatePool& pool, int req, int64_t pos0, int tokens,
-                                void* out, cudaStream_t stream, int64_t floor, bool publish) {
+                                void* out, cudaStream_t stream, int64_t floor, bool publish, int row_base) {
   validate_pool(pool);
   if (tokens <= 0 || tokens > max_tokens_) throw std::invalid_argument("csa2 layer: prefill rows out of range");
+  if (row_base < 0 || row_base + tokens > max_tokens_)
+    throw std::invalid_argument("csa2 layer: the chunk's row base and rows exceed max_tokens");
   if (req < 0 || req >= pool.shape().max_requests) throw std::invalid_argument("csa2 layer: request out of range");
   if (pos0 < 0 || (publish && pos0 % cfg_.block_tokens != 0))
     throw std::invalid_argument("csa2 layer: a prefill chunk starts on a block boundary");
@@ -584,26 +587,27 @@ void Csa2Layer::enqueue_prefill(const void* hidden_in, Csa2StatePool& pool, int 
         dbg_logits_rows_ = padded_n > 0 ? rows : 0;
         dbg_logits_stride_ = stride;
         dbg_logits_entries_ = n_gather;
+        const size_t srow = size_t(row_base + row0);  // the selection state's row
         if (w_.candidate_source)
           csa2_select_candidates_prefill(logits_, stride, pos_sel_ + row0, rows, cfg_.candidate_block, cfg_.candidate_blocks,
-                                         cand_ + size_t(row0) * cfg_.candidate_blocks, cand_counts_ + row0, stream);
+                                         cand_ + srow * cfg_.candidate_blocks, cand_counts_ + srow, stream);
         const bool restricted = w_.candidate_source || w_.uses_candidates;
         csa2_select_rows_prefill(logits_, stride, pos_sel_ + row0, rows, cfg_.index_topk,
-                                 restricted ? cand_ + size_t(row0) * cfg_.candidate_blocks : nullptr, cfg_.candidate_blocks,
-                                 restricted ? cand_counts_ + row0 : nullptr, cfg_.candidate_block,
-                                 topk_ + size_t(row0) * cfg_.index_topk, counts_ + row0, stream);
+                                 restricted ? cand_ + srow * cfg_.candidate_blocks : nullptr, cfg_.candidate_blocks,
+                                 restricted ? cand_counts_ + srow : nullptr, cfg_.candidate_block,
+                                 topk_ + srow * cfg_.index_topk, counts_ + srow, stream);
       }
-      if (w_.candidate_source) cand_shape_ = shape;
-      else if (w_.uses_candidates) require_shape(cand_shape_, shape, "the candidate pool");
-      sel_ = shape;
+      if (w_.candidate_source) cand_at(row_base) = shape;
+      else if (w_.uses_candidates) require_shape(cand_at(row_base), shape, "the candidate pool");
+      sel_at(row_base) = shape;
     } else {
-      require_shape(sel_, shape, "the selection");
+      require_shape(sel_at(row_base), shape, "the selection");
     }
   }
   for (int row0 = 0; row0 < tokens; row0 += kPrefillAttnRows) {
     const int rows = std::min(kPrefillAttnRows, tokens - row0);
     attend_rows(pool, req_zero_, wscratch_, win_rows, one_block_, req_ids_, pos_ + row0, row0, rows, kPrefillSplit,
-                stream, wlist_, cfg_.window, wcounts_);
+                stream, wlist_, cfg_.window, wcounts_, false, row_base);
   }
   csa2_window_ring_writeback(wscratch_, cfg_.window, pos0, tokens, cfg_.ring_slots, rb, ring, stream);
   project_out(tokens, out, stream);

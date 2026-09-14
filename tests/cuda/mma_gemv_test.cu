@@ -193,7 +193,7 @@ DGPP_TEST(mma_gemv_cold_timing_beside_the_gemv_cores) {
   uint16_t* out; DGPP_CUDA_OK(cudaMalloc(&out, size_t(2048) * n * 2));
   cudaEvent_t e0, e1; DGPP_CUDA_OK(cudaEventCreate(&e0)); DGPP_CUDA_OK(cudaEventCreate(&e1));
   std::printf("[ .. ] fp8 [%d x %d] cold, us per product: m  gemv-chunks  mma-stream\n", n, k);
-  for (int m : {1, 6, 16, 30}) {
+  for (int m : {1, 2, 3, 4, 6, 16, 30}) {
     float t[2];
     for (int path = 0; path < 2; ++path) {
       for (int i = 0; i < 4; ++i) { if (path == 0) dgpp::launch_scale_gemm_grid_bf16(act, k, w[i], s[i], out, m, n, k, nullptr, 0, 5, 5); else dgpp::launch_mma_gemv_fp8_bf16(act, k, w[i], s[i], out, m, n, k, 0, 5, 5, nullptr); }
@@ -207,6 +207,46 @@ DGPP_TEST(mma_gemv_cold_timing_beside_the_gemv_cores) {
   }
   // The prefill's rows: the chunk kernels to 128 rows, the tile kernel above.
   std::printf("[ .. ] fp8 [%d x %d] cold, us per product: m  chunks/tile  mma-forms\n", n, k);
+  // The full GLM-5.3 DSA fp8 shapes at one rank of four (kv_a, q_a, q_b, o_proj):
+  // the streaming form's block count is n / 64 (a small-n site fills few SMs).
+  for (auto [sn, sk] : std::vector<std::pair<int, int>>{{576, 6144}, {2048, 6144}, {4096, 2048}, {5120, 5120}, {6144, 4096}, {12288, 5120}, {32320, 5120}}) {
+    uint8_t* sw[4]; float* ss[4];
+    const int sc = ((sn + 127) / 128) * ((sk + 127) / 128);
+    for (int i = 0; i < 4; ++i) {
+      DGPP_CUDA_OK(cudaMalloc(&sw[i], static_cast<size_t>(sn) * sk)); DGPP_CUDA_OK(cudaMemset(sw[i], 0x38, static_cast<size_t>(sn) * sk));
+      DGPP_CUDA_OK(cudaMalloc(&ss[i], static_cast<size_t>(sc) * 4)); DGPP_CUDA_OK(cudaMemset(ss[i], 0, static_cast<size_t>(sc) * 4));
+    }
+    for (int m : {1, 16}) {
+      float t[6];
+      for (int path = 0; path < 6; ++path) {
+        // path 0: the chunks; 1..5: the mma at widths 8, 4, 2, 1 warps and the rule.
+        dgpp::mma_gemv_set_decode_width(path == 1 ? 8 : path == 2 ? 4 : path == 3 ? 2 : path == 4 ? 1 : 0);
+        auto run = [&](int i) { if (path == 0) dgpp::launch_scale_gemm_bf16(act, sk, sw[i], ss[i], out, m, sn, sk, nullptr, 0); else dgpp::launch_mma_gemv_fp8_bf16(act, sk, sw[i], ss[i], out, m, sn, sk, 0, 7, 7, nullptr); };
+        for (int i = 0; i < 4; ++i) run(i);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        DGPP_CUDA_OK(cudaEventRecord(e0));
+        for (int i = 0; i < 16; ++i) run(i % 4);
+        DGPP_CUDA_OK(cudaEventRecord(e1)); DGPP_CUDA_OK(cudaEventSynchronize(e1));
+        float ms = 0; DGPP_CUDA_OK(cudaEventElapsedTime(&ms, e0, e1)); t[path] = ms * 1000.f / 16;
+      }
+      dgpp::mma_gemv_set_decode_width(0);
+      std::printf("[ .. ]   fp8 [%d x %d] m=%3d  chunks %8.1f us  mma w8 %8.1f  w4 %8.1f  w2 %8.1f  w1 %8.1f  rule %8.1f\n", sn, sk, m, t[0], t[1], t[2], t[3], t[4], t[5]);
+    }
+    for (int i = 0; i < 4; ++i) { cudaFree(sw[i]); cudaFree(ss[i]); }
+  }
+  // The non-grid scale GEMM (the session-core families' dense sites): the
+  // GEMV chunk to 128 rows, the 128-row dense tensor-core kernel above.
+  for (int m : {30, 64, 128, 256, 512, 2048}) {
+    float t[2];
+    for (int path = 0; path < 2; ++path) {
+      for (int i = 0; i < 4; ++i) { if (path == 0) dgpp::launch_scale_gemm_bf16(act, k, w[i], s[i], out, m, n, k, nullptr, 0); else dgpp::launch_mma_gemv_fp8_bf16(act, k, w[i], s[i], out, m, n, k, 0, 7, 7, nullptr); }
+      DGPP_CUDA_OK(cudaEventRecord(e0)); 
+      for (int i = 0; i < 4; ++i) { if (path == 0) dgpp::launch_scale_gemm_bf16(act, k, w[i], s[i], out, m, n, k, nullptr, 0); else dgpp::launch_mma_gemv_fp8_bf16(act, k, w[i], s[i], out, m, n, k, 0, 7, 7, nullptr); }
+      DGPP_CUDA_OK(cudaEventRecord(e1)); DGPP_CUDA_OK(cudaEventSynchronize(e1));
+      DGPP_CUDA_OK(cudaEventElapsedTime(&t[path], e0, e1)); t[path] = t[path] * 1000.f / 4;
+    }
+    std::printf("[ .. ]   non-grid scale GEMM vs mma  m=%4d  %9.1f us  %9.1f us\n", m, t[0], t[1]);
+  }
   for (int m : {64, 128, 256, 2048}) {
     float t[2];
     const int reps = m > 256 ? 6 : 24;

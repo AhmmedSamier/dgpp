@@ -58,4 +58,9 @@ void launch_mma_gemv_bf16_f32(const uint16_t* act, size_t act_stride, const uint
 // The shape the kernel takes (k a multiple of 16, aligned pointers, m in range).
 bool mma_gemv_shape_ok(const void* w, const void* act, size_t act_stride, int m, int k);
 
+// The decode forms' block width override (warps of 8 weight rows: 1, 2, 4,
+// 8; 0 restores the rule by n) — the timing sweep's knob, not a serving
+// setting: the rows' chains do not depend on it.
+void mma_gemv_set_decode_width(int warps);
+
 }  // namespace dgpp

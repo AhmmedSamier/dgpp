@@ -33,10 +33,28 @@ namespace dgpp {
 // in its first N columns when the stride is given (0: N) — a projection
 // written into a column range of a wider buffer (the DSA layer's fused
 // [q_a | kv_a] output from two fp8 pairs, 2026-09-08).
+// mma_from_rows: rows from this count up to kScaleGemmMmaMaxRows take the
+// streaming tensor-core GEMM (mma_gemv.hpp) instead of the chunked GEMV (0:
+// never — the chunks to 128 rows, the 128-row dense kernel above, as
+// before 2026-09-14). The chunks read the weights once per four rows; the
+// streaming form once for every row count (m = 16 on the full GLM-5.3 DSA
+// shapes: o_proj [6144 x 4096] 320 to 109 us, q_a [2048 x 6144] 155 to 59,
+// q_b [4096 x 2048] 104 to 38; the 128-row dense kernel at m = 30, 726 to
+// 147 on [5120 x 5120]). Above the bound the dense kernel keeps the prefill
+// chunks (ahead of the streaming form's 128-row groups from 512 rows: 1060
+// against 1099 us, 3479 against 4355 at 2048). The families pass
+// dense_gemv_rows() + 1 (kernels/gemm.hpp): the GEMV chunks to four rows —
+// the one-row floor and the fused multi-problem launches — the streaming
+// form above. A row's chain is the chunk core's under the bound, the
+// streaming form's from it, the dense kernel's past 256: not bitwise each
+// other, so a site's rows reorder across the bounds (the engine gates'
+// near-tie rule).
+inline constexpr int kScaleGemmMmaMaxRows = 256;
 void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
                             const uint8_t* w_payload, const float* w_scales,
                             uint16_t* out, int m, int n, int k,
-                            cudaStream_t stream, size_t out_row_stride_elems = 0);
+                            cudaStream_t stream, size_t out_row_stride_elems = 0,
+                            int mma_from_rows = 0);
 
 // The same product with the fp32 accumulators stored UNROUNDED: out is f32
 // row-major [M, N]. bf16(out_f32[i]) == out_bf16[i] bit for bit — the two
@@ -46,7 +64,8 @@ void launch_scale_gemm_bf16(const uint16_t* act, size_t act_row_stride_elems,
 void launch_scale_gemm_f32(const uint16_t* act, size_t act_row_stride_elems,
                            const uint8_t* w_payload, const float* w_scales,
                            float* out, int m, int n, int k,
-                           cudaStream_t stream, size_t out_row_stride_elems = 0);
+                           cudaStream_t stream, size_t out_row_stride_elems = 0,
+                           int mma_from_rows = 0);
 
 // The tile kernel regardless of m (the bf16 mma.sync m16n8k16 path the
 // large-m route takes): the reference the grouped tensor-core MoE kernel is

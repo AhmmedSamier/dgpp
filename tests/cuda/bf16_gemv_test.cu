@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <random>
 #include <stdexcept>
 #include <vector>
 
@@ -379,6 +380,62 @@ DGPP_TEST(bf16_gemv_contract_rejects_odd_k_and_falls_back) {
     threw = true;
   }
   require(threw, "launcher rejects k=12");
+}
+
+// Timing only (no verdict): the bf16 interface's Lt algorithm and its GEMV
+// chunks against the streaming tensor-core form (set_decode_mma) at the
+// GLM-4.7 q_proj shape [12288 x 5120] over the row counts a served walk
+// sees (decode rows, verify rows, group prefills, prefill chunks): the
+// bound above which an opted-in instance hands rows back to Lt is read
+// from this table (2026-09-14). Cold weights: four copies rotated.
+DGPP_TEST(bf16_interface_lt_vs_mma_timing) {
+  const int m_max = 2048, copies = 4;
+  const size_t ws_bytes = 64u << 20;
+  void* ws;
+  DGPP_CUDA_OK(cudaMalloc(&ws, ws_bytes));
+  cudaEvent_t e0, e1;
+  DGPP_CUDA_OK(cudaEventCreate(&e0)); DGPP_CUDA_OK(cudaEventCreate(&e1));
+  // The GLM-4.7 attention shapes: q_proj [12288 x 5120], k/v_proj [1024 x 5120], o_proj [5120 x 12288].
+  for (auto [n, k] : std::vector<std::pair<int, int>>{{12288, 5120}, {1024, 5120}, {5120, 12288}}) {
+    const size_t wbytes = static_cast<size_t>(n) * k * 2;
+    std::vector<uint16_t> host(static_cast<size_t>(n) * k);
+    std::mt19937_64 rng(77);
+    for (auto& v : host) v = static_cast<uint16_t>(0x3C00 + (rng() % 0x0400));  // ~[1, 2) bf16-ish
+    uint16_t* w[copies];
+    for (int c = 0; c < copies; ++c) {
+      DGPP_CUDA_OK(cudaMalloc(&w[c], wbytes));
+      DGPP_CUDA_OK(cudaMemcpy(w[c], host.data(), wbytes, cudaMemcpyHostToDevice));
+    }
+    uint16_t* act; uint16_t* out;
+    DGPP_CUDA_OK(cudaMalloc(&act, static_cast<size_t>(m_max) * k * 2));
+    DGPP_CUDA_OK(cudaMemset(act, 0, static_cast<size_t>(m_max) * k * 2));
+    DGPP_CUDA_OK(cudaMalloc(&out, static_cast<size_t>(m_max) * n * 2));
+    std::printf("[ .. ] bf16 [%d x %d] cold, us per product: m  chunks(<=32)  chunks<=4|Lt  mma\n", n, k);
+    for (int m : {1, 2, 4, 6, 8, 12, 16, 24, 32, 64, 128, 256, 2048}) {
+      float t[3];
+      for (int path = 0; path < 3; ++path) {
+        dgpp::CublasLtGemm gemm;
+        gemm.set_decode_rows(path == 0 ? 32 : 4);
+        gemm.set_decode_mma(path == 2);
+        auto run = [&](int c) {
+          gemm.matmul(act, w[c], out, m, n, k, dgpp::DType::BF16, dgpp::GemmOut::BF16,
+                      static_cast<size_t>(k), ws, ws_bytes, nullptr);
+        };
+        const int reps = m > 256 ? 8 : 16;
+        for (int i = 0; i < copies; ++i) run(i);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        DGPP_CUDA_OK(cudaEventRecord(e0));
+        for (int i = 0; i < reps; ++i) run(i % copies);
+        DGPP_CUDA_OK(cudaEventRecord(e1)); DGPP_CUDA_OK(cudaEventSynchronize(e1));
+        float ms = 0; DGPP_CUDA_OK(cudaEventElapsedTime(&ms, e0, e1)); t[path] = ms * 1000.f / reps;
+      }
+      std::printf("[ .. ]   m=%5d  %10.1f us  %10.1f us  %10.1f us\n", m, t[0], t[1], t[2]);
+    }
+    for (int c = 0; c < copies; ++c) cudaFree(w[c]);
+    cudaFree(act); cudaFree(out);
+  }
+  cudaFree(ws);
+  cudaEventDestroy(e0); cudaEventDestroy(e1);
 }
 
 int main() {

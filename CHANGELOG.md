@@ -6,6 +6,41 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **The dense lowering of the session-core families follows the rows of a
+  launch** (2026-09-14, `kernels/gemm.hpp dense_gemv_rows`, the site setting
+  `DGPP_DENSE_GEMV_ROWS`, default 4; 256 restores the old lowering): GLM-4.7,
+  the full GLM-5.3, Qwen3.8-Flash-Next and GLM-5.3-Flash lower their dense
+  sites by row count — the row-independent GEMV chunks (and Qwen's fused
+  multi-problem launches) to four rows, cuBLASLt's algorithm for bf16 rows
+  above (at the weight-stream floor from six rows: the chunks re-read the
+  weights per four rows, 2–8× the bytes at 6–32 rows: `bf16_gemv_test`'s
+  table), the streaming tensor-core GEMM (`kernels/mma_gemv`, now with an
+  asynchronous per-warp weight ring and a block width chosen by n) for fp8
+  rows from five to 256 (the full GLM-5.3 DSA projections at sixteen rows:
+  o_proj 320 → 109 µs, q_a 155 → 59, q_b 104 → 38; Qwen's FP8 dense stack
+  and the shared expert; the Flash dense MLP) and the 128-row dense kernel
+  above. T = 1 keeps its chain; a batched step's rows and the eager
+  scalar's are tolerance-equal, not bitwise (the engine gates hold the
+  first decisions exactly unless the flipped decision was a near tie of the
+  world-1 reference — `tests/cuda/engine_test_ties.hpp` — and report the
+  rest). DeepSeek-V4.1-Flash keeps its every-row tensor-core lowering.
+  Fabric A/B: docs/measurements.md.
+- **Group prefill for GLM-4.7, the full GLM-5.3, Qwen3.8-Flash-Next and
+  GLM-5.3-Flash** (2026-09-14): the families expose
+  `prefill_group_span_limit()`, so the scheduler admits queued cold prompts
+  together and prefills them as the spans of one walk — GLM-4.7's attention
+  rows carry their own request ids and positions already; the full
+  GLM-5.3's DSA layer runs per span with a selection-scratch base per span
+  (`DsaLayer::enqueue_prefill(row_base)`, the selection-reuse contract per
+  base); Qwen's GDN scan and QSA attention run per span; GLM-5.3-Flash's
+  own walk (`GlmDiagnosticModel::session_prefill_group`) runs its KDA scan
+  and DSA attention per span and mirrors every span's last row (a group
+  of at most kDecodeRows spans). Gates: a group's rows against the
+  prefills alone (GLM-4.7 and Qwen bitwise on their fixtures; the DSA
+  family's rows within 6.5e-3 relative l2 with the top-1 equal; the Flash
+  fixture's within 2e-7, its decode off the group's cache bitwise the solo
+  decode) and a decode off the group's cache against the re-forward.
+
 - **Streaming tensor-core decode GEMM for DeepSeek-V4.1-Flash** (2026-09-14,
   `kernels/mma_gemv.{hpp,cu}`; default on for this family, `DGPP_DSV41_DENSE_GEMV=1`
   restores the chunks): the dense fp8 projections, the engram wkv, the
@@ -24,6 +59,27 @@ The history by milestone. The dated engineering record in
   query of both paths (`Dsv41Model::IndexLogits::q_codes`): a flip whose
   e4m3 codes differ between the paths is the coding's discontinuity,
   whatever the reference gap.
+- **Group prefill** (2026-09-14, `SchedulerEngine::prefill_group`,
+  `SessionModel::session_prefill_group`, `Scheduler::admissible_group`):
+  queued cold prompts (no prefix-cache attach or snapshot; any width up
+  to a walk's rows) admit together and prefill as the spans of ONE forward
+  — the dense sites, the MoE, the norms, the Engram and the head over
+  every row, the CSA2 attention and kv publication per span, and under the
+  bounded prefill each span's decoder segment (its last window rows)
+  packed span after span — instead of one read-in per tick with a decode
+  step between.
+  A prompt prefilled in a group is bitwise the prompt alone (gates at the
+  model, the TP world and the engine): the mHC dots take their tiled form
+  at every prefill row count for this family (`mhc_set_tile_min_tokens`),
+  and an opted-in cuBLASLt instance lowers every bf16 row count to the
+  tensor-core form. Other families keep one prefill per tick.
+- **Adaptive λ for the scheduled verify depth** (2026-09-14,
+  `engine.mtp_schedule_adapt`, on by default with the schedule): λ follows
+  an EWMA of each MTP step's committed tokens over its modeled time
+  (base + rows·row), floored at the configured λ — replicated inputs, one
+  fixed arithmetic, every rank the same value. One configuration now
+  serves every concurrency: C1 48.2 / C2 66.8 / C6 87.0 on the six-slot
+  world (docs/measurements.md).
 - **The batched replay's verify depth is the batch's own Dinkelbach rule**
   (2026-09-14, `scheduled_verify_depth_batch`): one more draft position
   costs a verify row per live slot and yields the sum of the slots' prefix

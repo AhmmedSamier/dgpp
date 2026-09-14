@@ -39,6 +39,11 @@ struct QwenGemmWorkspace {
   // against 2.0 s for a 2K prompt, measured).
   uint16_t* dequant = nullptr;
   size_t dequant_bytes = 0;
+  // The dense sites' lowering (kernels/gemm.hpp dense_gemv_rows): the GEMV
+  // chunks and the fused multi-problem launches to gemv_rows; fp8 rows from
+  // mma_from_rows take the streaming tensor-core GEMM (0: never).
+  int gemv_rows = 8;
+  int mma_from_rows = 0;
 };
 
 // ---- the gated residual --------------------------------------------------------

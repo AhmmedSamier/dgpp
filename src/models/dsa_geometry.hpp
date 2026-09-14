@@ -72,6 +72,10 @@ struct DsaConfig {
   // (e2m1 in blocks of 16 + a row scale) — kernels/latent_format.hpp. The
   // rope tail (when present) is bf16 in every format.
   LatentFormat latent_format = LatentFormat::kBf16;
+  // The fp8 projections' lowering (o_proj, q_a / kv_a, q_b in the
+  // quantized form): rows from this count take the streaming tensor-core
+  // GEMM (scale_gemm.hpp's mma_from_rows; 0: the GEMV chunks to 128 rows).
+  int gemm_mma_from_rows = 0;
 
   int index_layers() const {
     return num_index_layers > 0 ? num_index_layers : num_dsa_layers;

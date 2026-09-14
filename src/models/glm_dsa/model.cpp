@@ -61,6 +61,7 @@ DsaConfig GlmDsaModel::dsa_config(const GlmDsaTextConfig& cfg, int tp_world, boo
   d.tp_size = tp_world;
   d.rms_norm_eps = cfg.rms_norm_eps;
   d.latent_format = format;
+  d.gemm_mma_from_rows = dense_gemv_rows() + 1;
   DsaConfig::validate_config(d);
   return d;
 }
@@ -150,9 +151,10 @@ GlmDsaModel::GlmDsaModel(const GlmDsaTextConfig& cfg, const std::string& checkpo
     throw std::logic_error("GlmDsaModel: the session core widened the decode batch past the family's cap");
   gemm_ws_bytes_ = std::max<size_t>(64u << 20, gemm_.query_workspace_bytes(max_tokens_, lm_vocab_count_, H, DType::BF16));
   gemm_ws_ = dev_alloc<char>(gemm_ws_bytes_);
-  // Every decode shape up to the fixed batch's rows through the row-
-  // independent GEMV core (the numerical interface of the batched graphs).
-  gemm_.set_decode_rows(max_decode_rows_);
+  // The dense sites' lowering (kernels/gemm.hpp dense_gemv_rows): the GEMV
+  // chunks to the bound, cuBLASLt's algorithm (bf16) or the streaming
+  // tensor-core GEMM (the DSA layer's fp8 projections) above it.
+  gemm_.set_decode_rows(std::min(max_decode_rows_, dense_gemv_rows()));
   const GlmDsaLocalGeometry& geo = loader_.geometry();
   moe_cfg_ = cfg_.moe_config(static_cast<int>(geo.local_inter));
   dsa_cfg_ = dsa_config(cfg_, tp_world, mtp_, latent_format_);
@@ -522,6 +524,18 @@ void GlmDsaModel::enqueue_layer(const GlmDsaLayerResident& r, int pool_layer, ui
   if (rows.decode) {
     dsa_->enqueue_decode(x_, pool_, pool_layer, rows.req_ids, rows.pos, rows.spans, rows.num_requests, T,
                          attn_out, stream_, &prefetch_, /*tail_snapshots=*/nullptr);
+  } else if (rows.num_spans > 0) {
+    // The group's spans one by one: each span's rows attend to their own
+    // request's cache and publish to it (the DSA layer's scratch is
+    // per call; the pointers step by the span's rows).
+    int64_t row0 = 0;
+    for (int s = 0; s < rows.num_spans; ++s) {
+      const int len = rows.span_lens[s];
+      if (!dsa_->prepare(len)) throw std::runtime_error("run_rows: DSA GEMM plans unavailable");
+      dsa_->enqueue_prefill(x_ + static_cast<size_t>(row0) * H, pool_, pool_layer, rows.span_reqs[s], rows.span_pos0[s],
+                            len, attn_out + static_cast<size_t>(row0) * H, stream_, static_cast<int>(row0));
+      row0 += len;
+    }
   } else {
     dsa_->enqueue_prefill(x_, pool_, pool_layer, rows.req, rows.pos0, T, attn_out, stream_);
   }
@@ -563,6 +577,10 @@ GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
   rows.pos0 = run.pos0;
   rows.decode = run.decode;
   rows.capture = run.capture;
+  rows.span_reqs = run.span_reqs;
+  rows.span_pos0 = run.span_pos0;
+  rows.span_lens = run.span_lens;
+  rows.num_spans = run.num_spans;
   // DGPP_GLM_DSA_CAPTURE_DECODE=1: an eager decode walk keeps every layer's
   // rows too (the decode-vs-prefill localizer in glm_dsa_decode_test).
   static const bool capture_decode_env = std::getenv("DGPP_GLM_DSA_CAPTURE_DECODE") != nullptr;
@@ -607,8 +625,10 @@ GlmDsaModel::Outputs GlmDsaModel::run_rows(const RowRun& run) {
                static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
   // The draft block's input: the last rows' POST-final-norm hidden into
   // the slots' windows by position.
+  // A group prefill stores every row: each span's last window rows land
+  // in its own slot (2026-09-14).
   if (mtp_) {
-    const int nrows = std::min(T, max_decode_rows_);
+    const int nrows = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);
     store_draft_hidden(h_ + static_cast<size_t>(T - nrows) * H, in.req_ids + (T - nrows), in.pos + (T - nrows), nrows);
   }
   if (run.decode) prefetch_.join(stream_);

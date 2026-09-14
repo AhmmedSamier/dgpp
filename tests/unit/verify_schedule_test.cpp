@@ -91,6 +91,24 @@ DGPP_TEST(verify_schedule_batch_takes_the_mean_survival) {
   require(dgpp::scheduled_verify_depth_batch(confs, 0, 3, 3.0f, 0.1f) == 0, "no slots: nothing");
 }
 
+DGPP_TEST(verify_schedule_adaptive_lambda_converges_to_the_modeled_throughput) {
+  // Six slots at depth 4 (30 rows, base 28 + 30 x 8 = 268 ms) committing 19
+  // tokens a step: the EWMA converges to 19 / 268 = 0.0709 from the
+  // one-stream constant 0.045; one slot at 5 rows committing 3.3 lands at
+  // 3.3 / 68 = 0.0485. The update is a fixed sequence of doubles on
+  // replicated inputs (the ranks agree by construction).
+  double lam = 0.045;
+  for (int i = 0; i < 2000; ++i) lam = dgpp::verify_lambda_update(lam, 19, 30, 28.f, 8.f, 1.0 / 64.0);
+  require(std::fabs(lam - 19.0 / 268.0) < 1e-6, "six slots: the modeled six-stream rate");
+  double lam1 = 0.045;
+  for (int i = 0; i < 2000; ++i) lam1 = dgpp::verify_lambda_update(lam1, (i % 10 < 3) ? 4 : 3, 5, 28.f, 8.f, 1.0 / 64.0);
+  require(std::fabs(lam1 - 3.3 / 68.0) < 2e-3, "one slot: the modeled one-stream rate");
+  require(dgpp::verify_lambda_update(0.05, 3, 0, 0.f, 0.f, 0.5) == 0.05, "a degenerate time leaves lambda alone");
+  double a = 0.045, b = 0.045;
+  for (int i = 0; i < 100; ++i) { a = dgpp::verify_lambda_update(a, 7, 12, 28.f, 8.f, 1.0 / 64.0); b = dgpp::verify_lambda_update(b, 7, 12, 28.f, 8.f, 1.0 / 64.0); }
+  require(a == b, "the same inputs give the same doubles");
+}
+
 DGPP_TEST(verify_schedule_degenerate_block) {
   const float lam = dgpp::verify_reservation_lambda(20.0f, 9.0f);
   require(dgpp::scheduled_verify_depth(nullptr, 0, 9.0f, lam) == 0,

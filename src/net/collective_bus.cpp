@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <ctime>
 #include <deque>
 #include <fstream>
@@ -2006,13 +2007,22 @@ struct CollectiveBus::Impl {
       // step), and for ANY eager collective slower than 2 ms — the
       // decode step's p99 lived in exactly one of these interfaces.
       const double total_us = elapsed_us(req.submitted);
-      if (req.elems <= 64 || total_us > 2000.0) {
+      // DGPP_BUS_TIMELINE=1 (the graph windows' switch) also prints the
+      // prefill-class folds' decomposition at INFO, every 32nd of them —
+      // the eager walk's boundary reductions (2026-09-14: the eager fold
+      // kernel is the first cost of a short prompt's prefill).
+      static const bool timeline_forced = [] {
+        const char* e = std::getenv("DGPP_BUS_TIMELINE");
+        return e != nullptr && e[0] == '1';
+      }();
+      const bool sampled_prefill = timeline_forced && req.elems > 64 && (req.ctl_seq % 32) == 0;
+      if (req.elems <= 64 || total_us > 2000.0 || sampled_prefill) {
         auto us = [](uint64_t a, uint64_t b) {
           return b > a ? static_cast<double>(b - a) / 1000.0 : 0.0;
         };
         const uint64_t now_gt = static_cast<uint64_t>(
             static_cast<int64_t>(monotonic_ns()) + gt_offset_ns);
-        DGPP_LOG_DEBUG(
+        const std::string line = std::format(
             "allreduce: rank {} seq {} elems {} done status={} total {:.1f}us"
             " = queue {:.1f} + claim {:.1f} + launch_call {:.1f} + "
             "launch->start {:.1f} + "
@@ -2037,6 +2047,10 @@ struct CollectiveBus::Impl {
                             us(ar_ctl->gt_stage, ar_ctl->gt_claim[p])));
               return lags;
             }());
+        if (sampled_prefill)
+          DGPP_LOG_INFO("{}", line);
+        else
+          DGPP_LOG_DEBUG("{}", line);
       }
       // Clear the flight BEFORE completing (finish_flight): the woken
       // waiter's next submission races the cleanup against the

@@ -65,6 +65,89 @@ int argmax(const float* a, size_t n) {
 }
 }  // namespace
 
+// The group prefill (session_prefill_group): three cold prompts as the
+// spans of one walk against each prefilled alone — the last rows' logits
+// bitwise (the dense sites and the MoE tile kernel are row-invariant, the
+// attention and the publication run per span, the Engram takes the
+// spans), and the first decode step of each request bitwise the alone
+// model's (the draft state, positions and rings per request). The exact
+// prefill mode: the span limit is the walk's rows.
+DGPP_TEST(dsv41_model_group_prefill_is_bitwise_the_prefills_alone) {
+  const Fixture fx = make_fixture();
+  const int V = fx.cfg.vocab_size;
+  const std::vector<std::vector<int64_t>> prompts = {tokens_of(0xA1, 23, V), tokens_of(0xA2, 17, V), tokens_of(0xA3, 11, V)};
+  std::vector<std::vector<float>> alone_logits, alone_step;
+  {
+    dgpp::Dsv41Model m(fx.cfg, fx.dir, 96, 512, dgpp::Dsv41Residency::Streaming, nullptr, 0, 1, 3, /*mtp=*/true, 8);
+    for (int r = 0; r < 3; ++r) {
+      const auto o = m.session_prefill(r, prompts[static_cast<size_t>(r)]);
+      alone_logits.push_back(o.logits);
+      const int32_t first = argmax(o.logits.data(), size_t(V));
+      const auto st = m.session_step(r, first);
+      alone_step.push_back(st.logits);
+    }
+  }
+  {
+    dgpp::Dsv41Model m(fx.cfg, fx.dir, 96, 512, dgpp::Dsv41Residency::Streaming, nullptr, 0, 1, 3, /*mtp=*/true, 8);
+    require(m.prefill_group_span_limit() >= 23, "the exact prefill's span limit is the walk's rows");
+    const std::vector<const std::vector<int64_t>*> pp = {&prompts[0], &prompts[1], &prompts[2]};
+    const auto outs = m.session_prefill_group({2, 0, 1}, {pp[2], pp[0], pp[1]});  // a permuted slot order
+    require(outs.size() == 3, "one output per request");
+    const int order[3] = {2, 0, 1};
+    for (int i = 0; i < 3; ++i) {
+      const int r = order[i];
+      require(outs[static_cast<size_t>(i)].logits.size() == size_t(V), "a last-row logits vector per request");
+      require(outs[static_cast<size_t>(i)].logits == alone_logits[static_cast<size_t>(r)],
+              "group prefill logits bitwise the prefill alone (request " + std::to_string(r) + ")");
+    }
+    for (int i = 0; i < 3; ++i) {
+      const int r = order[i];
+      const int32_t first = argmax(alone_logits[static_cast<size_t>(r)].data(), size_t(V));
+      const auto st = m.session_step(r, first);
+      require(st.logits == alone_step[static_cast<size_t>(r)],
+              "the first step after a group prefill bitwise the alone model's (request " + std::to_string(r) + ")");
+    }
+    std::printf("[ OK ] group prefill of 23 + 17 + 11 rows: last rows and first steps bitwise the prefills alone\n");
+  }
+}
+
+// The same under the bounded prefill with spans wider than the window
+// (16 in the fixture): each span's decoder segment is its last window
+// rows, packed; the last rows' logits and the first steps bitwise the
+// bounded prefills alone.
+DGPP_TEST(dsv41_model_group_prefill_bounded_wide_spans_is_bitwise_the_prefills_alone) {
+  const Fixture fx = make_fixture();
+  const int V = fx.cfg.vocab_size;
+  require(fx.cfg.sliding_window < 23, "the fixture's window is narrower than the widest prompt");
+  const std::vector<std::vector<int64_t>> prompts = {tokens_of(0xB1, 23, V), tokens_of(0xB2, 9, V), tokens_of(0xB3, 40, V)};
+  std::vector<std::vector<float>> alone_logits, alone_step;
+  {
+    dgpp::Dsv41Model m(fx.cfg, fx.dir, 96, 512, dgpp::Dsv41Residency::Streaming, nullptr, 0, 1, 3, /*mtp=*/true, 8);
+    m.set_prefill_bounded(true);
+    for (int r = 0; r < 3; ++r) {
+      const auto o = m.session_prefill(r, prompts[static_cast<size_t>(r)]);
+      alone_logits.push_back(o.logits);
+      const int32_t first = argmax(o.logits.data(), size_t(V));
+      alone_step.push_back(m.session_step(r, first).logits);
+    }
+  }
+  {
+    dgpp::Dsv41Model m(fx.cfg, fx.dir, 96, 512, dgpp::Dsv41Residency::Streaming, nullptr, 0, 1, 3, /*mtp=*/true, 8);
+    m.set_prefill_bounded(true);
+    const std::vector<const std::vector<int64_t>*> pp = {&prompts[0], &prompts[1], &prompts[2]};
+    const auto outs = m.session_prefill_group({0, 1, 2}, pp);
+    for (int r = 0; r < 3; ++r)
+      require(outs[static_cast<size_t>(r)].logits == alone_logits[static_cast<size_t>(r)],
+              "bounded group prefill logits bitwise the prefill alone (request " + std::to_string(r) + ")");
+    for (int r = 0; r < 3; ++r) {
+      const int32_t first = argmax(alone_logits[static_cast<size_t>(r)].data(), size_t(V));
+      require(m.session_step(r, first).logits == alone_step[static_cast<size_t>(r)],
+              "the first step after a bounded group prefill bitwise the alone model's (request " + std::to_string(r) + ")");
+    }
+    std::printf("[ OK ] bounded group prefill of 23 + 9 + 40 rows (window %d): bitwise the prefills alone\n", fx.cfg.sliding_window);
+  }
+}
+
 DGPP_TEST(dsv41_model_forward_prefill_decode_and_rollback_at_world_1) {
   const Fixture fx = make_fixture();
   const int V = fx.cfg.vocab_size;

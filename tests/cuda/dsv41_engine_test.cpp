@@ -239,6 +239,7 @@ Ref world1_reference(const Dsv41TextConfig& cfg, const std::string& dir, const s
 
 struct RankOutcome {
   std::string error;
+  std::vector<int32_t> pa, pb, pc;  // the group prefill's transcripts (phase 4)
   std::vector<int32_t> ea, eb, ec;   // the eager engine, world 2
   std::vector<int32_t> ga;           // the graph engine, scalar
   std::vector<int32_t> ba, bb, bc;   // the graph engine, batched
@@ -305,6 +306,29 @@ void rank_work(int r, const Dsv41TextConfig& cfg, const std::string& dir, const 
       out->bc.push_back(t[1][0]);
     }
     graph_engine.close(0);
+    graph_engine.close(2);
+    graph_engine.drain();
+
+    // 4. The group prefill: A, B and C as the spans of one forward, then
+    //    scalar steps per slot — every transcript the eager engine's.
+    const std::vector<int32_t> firsts = graph_engine.prefill_group({0, 1, 2}, {&A, &B, &C});
+    require(firsts.size() == 3, "one first token per request");
+    graph_engine.reserve(0, static_cast<int64_t>(A.size()) + kSteps + 1);
+    graph_engine.reserve(1, static_cast<int64_t>(B.size()) + kSteps + 1);
+    graph_engine.reserve(2, static_cast<int64_t>(C.size()) + kSteps + 1);
+    out->pa = {firsts[0]};
+    out->pb = {firsts[1]};
+    out->pc = {firsts[2]};
+    // Three live slots: the physical replay is the full family's batch.
+    for (int s = 0; s < kSteps; ++s) {
+      const auto t = graph_engine.step_batch({0, 1, 2});
+      require(t.size() == 3 && t[0].size() == 1 && t[1].size() == 1 && t[2].size() == 1, "group batch step shape");
+      out->pa.push_back(t[0][0]);
+      out->pb.push_back(t[1][0]);
+      out->pc.push_back(t[2][0]);
+    }
+    graph_engine.close(0);
+    graph_engine.close(1);
     graph_engine.close(2);
     graph_engine.drain();
     cudaFreeHost(scratch);
@@ -810,6 +834,16 @@ DGPP_TEST(dsv41_engines_loopback_world_2_graph_matches_eager) {
   require(o.ba == o.ea, "the batched graph transcript of A differs from the eager engine's");
   require(std::equal(o.bb.begin(), o.bb.end(), o.eb.begin()), "the batched graph transcript of B differs");
   require(std::equal(o.bc.begin(), o.bc.end(), o.ec.begin()), "the batched graph transcript of C differs");
+  // The group prefill (one forward over A, B and C) then scalar steps:
+  // bitwise the eager engine's prefills alone.
+  DGPP_LOG_INFO("world 2 group prefill: A {} | B {} | C {}", ids_text(o.pa), ids_text(o.pb), ids_text(o.pc));
+  require(o.pa == o.ea, "the group prefill's transcript of A differs from the eager engine's");
+  require(o.pb == o.eb, "the group prefill's transcript of B differs from the eager engine's");
+  require(o.pc == o.ec, "the group prefill's transcript of C differs from the eager engine's");
+  for (int r = 1; r < kWorld; ++r)
+    require(outs[static_cast<size_t>(r)].pa == outs[0].pa && outs[static_cast<size_t>(r)].pb == outs[0].pb &&
+                outs[static_cast<size_t>(r)].pc == outs[0].pc,
+            "the ranks' group prefill transcripts differ");
   require(o.bb.size() == 10 && o.bc.size() == 8, "the batched transcripts' lengths");
 }
 

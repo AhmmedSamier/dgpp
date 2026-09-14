@@ -124,6 +124,13 @@ class SessionModel {
     // the chunks of one call and runs its segment on the last).
     bool first_chunk = true;
     bool last_chunk = true;
+    // The group prefill: several requests' cold prompts as the spans of
+    // one walk (host arrays of num_spans; 0: the scalar form above). T is
+    // the spans' total and `ids` their prompts concatenated.
+    const int32_t* span_reqs = nullptr;
+    const int64_t* span_pos0 = nullptr;
+    const int32_t* span_lens = nullptr;
+    int num_spans = 0;
   };
   // The staged inputs of a walk (begin_run).
   struct RowInputs {
@@ -143,6 +150,15 @@ class SessionModel {
   // ---- the engine contract --------------------------------------------------
   Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids,
                           const std::vector<int64_t>& boundaries = {}, SnapshotRequest* snap = nullptr);
+  // Several requests' cold prompts in one walk (the spans of one run:
+  // the dense sites, the MoE and the head over every row, the family's
+  // per-request pieces per span). Each prompt within the family's span
+  // limit (prefill_group_span_limit) and the group within max_tokens; no
+  // chunking, no snapshots. Returns each request's last-row outputs, in
+  // order. A family with no span support refuses groups of more than one.
+  std::vector<Outputs> session_prefill_group(const std::vector<int>& reqs,
+                                             const std::vector<const std::vector<int64_t>*>& prompts);
+  int64_t prefill_group_span_limit() const { return 0; }  // the family widens it
   Outputs session_prefill_resume(int req, const std::vector<int64_t>& suffix_ids,
                                  const std::vector<int64_t>& boundaries, SnapshotRequest* snap = nullptr);
   Outputs session_step(int req, int64_t token_id) { return session_verify(req, std::vector<int64_t>{token_id}); }
@@ -320,6 +336,7 @@ class SessionModel {
   // The prefill rows' metadata (positions pos0 + t, the request, one
   // span) into the device arrays (host uploads, a sync).
   void stage_prefill_meta(int req, int64_t pos0, int T);
+  void stage_prefill_group_meta(const RowRun& run);
   void decode_host_prep(int req, const std::vector<int64_t>& ids, bool upload, bool device_positions);
   // A walk's staged inputs (the decode rows' token upload included) and
   // its results (the tail mirrors, the host copies).
@@ -488,7 +505,7 @@ void SessionModel<D>::init_session(const SessionParams& p) {
   step_tokens_ = d_tokens_;
   d_prefill_pos_ = dev_alloc<int64_t>(M);
   d_prefill_req_ = dev_alloc<int32_t>(M);
-  d_prefill_spans_ = dev_alloc<int32_t>(2);
+  d_prefill_spans_ = dev_alloc<int32_t>(2 * static_cast<size_t>(std::max(1, max_requests_)));
   h_token_ = pinned_alloc<int64_t>(token_rows);
   h_req_ids_ = pinned_alloc<int32_t>(rows);
   h_step_pos_ = pinned_alloc<int64_t>(rows);
@@ -581,6 +598,33 @@ void SessionModel<D>::stage_prefill_meta(int req, int64_t pos0, int T) {
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));  // the host vectors' lifetime
 }
 
+// The group prefill's rows: span s's positions from span_pos0[s], its
+// request id, and the spans as (first row, rows).
+template <class D>
+void SessionModel<D>::stage_prefill_group_meta(const RowRun& run) {
+  if (run.num_spans > max_requests_) throw std::invalid_argument("run_rows: more group spans than request slots");
+  std::vector<int64_t> pos(static_cast<size_t>(run.T));
+  std::vector<int32_t> reqs(static_cast<size_t>(run.T));
+  std::vector<int32_t> spans(static_cast<size_t>(run.num_spans) * 2);
+  int at = 0;
+  for (int s = 0; s < run.num_spans; ++s) {
+    const int len = run.span_lens[s];
+    if (len <= 0 || at + len > run.T) throw std::invalid_argument("run_rows: the group's spans do not fit its rows");
+    spans[static_cast<size_t>(s) * 2] = at;
+    spans[static_cast<size_t>(s) * 2 + 1] = len;
+    for (int i = 0; i < len; ++i) {
+      pos[static_cast<size_t>(at + i)] = run.span_pos0[s] + i;
+      reqs[static_cast<size_t>(at + i)] = run.span_reqs[s];
+    }
+    at += len;
+  }
+  if (at != run.T) throw std::invalid_argument("run_rows: the group's spans do not cover its rows");
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_prefill_pos_, pos.data(), pos.size() * 8, cudaMemcpyHostToDevice, stream_));
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_prefill_req_, reqs.data(), reqs.size() * 4, cudaMemcpyHostToDevice, stream_));
+  DGPP_CUDA_OK(cudaMemcpyAsync(d_prefill_spans_, spans.data(), spans.size() * 4, cudaMemcpyHostToDevice, stream_));
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));  // the host vectors' lifetime
+}
+
 template <class D>
 typename SessionModel<D>::RowInputs SessionModel<D>::begin_run(const RowRun& run) {
   const int T = run.T;
@@ -588,7 +632,7 @@ typename SessionModel<D>::RowInputs SessionModel<D>::begin_run(const RowRun& run
   if (T > max_tokens_) throw std::invalid_argument("run_rows: rows exceed max_tokens");
   RowInputs in;
   in.batched = run.batch_requests > 0;
-  in.num_requests = in.batched ? run.batch_requests : 1;
+  in.num_requests = in.batched ? run.batch_requests : (run.num_spans > 0 ? run.num_spans : 1);
   if (run.decode) {
     // Staged by decode_host_prep / capture_batch: the request ids, the
     // positions and the spans are on the device; the tokens ride the
@@ -602,7 +646,10 @@ typename SessionModel<D>::RowInputs SessionModel<D>::begin_run(const RowRun& run
     in.spans = d_req_spans_;
   } else {
     DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, run.ids, static_cast<size_t>(T) * 8, cudaMemcpyHostToDevice, stream_));
-    stage_prefill_meta(run.req, run.pos0, T);
+    if (run.num_spans > 0)
+      stage_prefill_group_meta(run);
+    else
+      stage_prefill_meta(run.req, run.pos0, T);
     in.tokens = d_tokens_;
     in.pos = d_prefill_pos_;
     in.req_ids = d_prefill_req_;
@@ -619,7 +666,8 @@ typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run,
   // (they sync right below); a capture records the copies only while the
   // mirrors are on (the kernels-only decode graph turns them off).
   const bool every_row = run.all_rows || run.decode;
-  const size_t rows_out = every_row ? static_cast<size_t>(T) : 1;
+  const bool group = !run.decode && !run.all_rows && run.num_spans > 0;
+  const size_t rows_out = every_row ? static_cast<size_t>(T) : group ? static_cast<size_t>(run.num_spans) : 1;
   const size_t first = every_row ? 0 : static_cast<size_t>(T - 1);
   if (run.decode && (!run.capture || decode_tail_mirrors_)) {
     DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_, logits_, rows_out * lm_vocab_count_ * sizeof(float),
@@ -635,6 +683,17 @@ typename SessionModel<D>::Outputs SessionModel<D>::finish_run(const RowRun& run,
   if (run.decode) {
     std::copy(h_tail_logits_, h_tail_logits_ + out.logits.size(), out.logits.begin());
     std::copy(h_tail_hidden_, h_tail_hidden_ + out.final_hidden_bits.size(), out.final_hidden_bits.begin());
+  } else if (group) {
+    // Each span's last row.
+    int at = 0;
+    for (int s = 0; s < run.num_spans; ++s) {
+      const size_t last = static_cast<size_t>(at + run.span_lens[s] - 1);
+      DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data() + static_cast<size_t>(s) * H, h_ + last * H, H * 2,
+                              cudaMemcpyDeviceToHost));
+      DGPP_CUDA_OK(cudaMemcpy(out.logits.data() + static_cast<size_t>(s) * lm_vocab_count_, logits_ + last * lm_vocab_count_,
+                              static_cast<size_t>(lm_vocab_count_) * 4, cudaMemcpyDeviceToHost));
+      at += run.span_lens[s];
+    }
   } else {
     DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data(), h_ + first * H, out.final_hidden_bits.size() * 2,
                             cudaMemcpyDeviceToHost));
@@ -720,6 +779,10 @@ typename SessionModel<D>::Outputs SessionModel<D>::session_prefill_chunks(
     for (size_t l = 0; l < chunk.dsa_selections.size(); ++l)
       out.dsa_selections[l].insert(out.dsa_selections[l].end(), chunk.dsa_selections[l].begin(),
                                    chunk.dsa_selections[l].end());
+    // A capturing walk's per-layer rows likewise, chunk after chunk.
+    if (out.layer_states.size() < chunk.layer_states.size()) out.layer_states.resize(chunk.layer_states.size());
+    for (size_t l = 0; l < chunk.layer_states.size(); ++l)
+      out.layer_states[l].insert(out.layer_states[l].end(), chunk.layer_states[l].begin(), chunk.layer_states[l].end());
     session_pos_[static_cast<size_t>(req)] = c1;
     push_position(req);
     // The draft block over this chunk's rows — row q embeds tok_{q+1}, so
@@ -738,6 +801,84 @@ typename SessionModel<D>::Outputs SessionModel<D>::session_prefill_chunks(
     c0 = c1;
   }
   return out;
+}
+
+template <class D>
+std::vector<typename SessionModel<D>::Outputs> SessionModel<D>::session_prefill_group(
+    const std::vector<int>& reqs, const std::vector<const std::vector<int64_t>*>& prompts) {
+  const int n = static_cast<int>(reqs.size());
+  if (n <= 0 || prompts.size() != reqs.size()) throw std::invalid_argument("session_prefill_group: requests and prompts");
+  if (n == 1) return {session_prefill(reqs[0], *prompts[0])};
+  const int64_t limit = derived().prefill_group_span_limit();
+  if (limit <= 0) throw std::invalid_argument("session_prefill_group: this family prefills one request per walk");
+  std::vector<int64_t> ids;
+  std::vector<int32_t> span_reqs, span_lens;
+  std::vector<int64_t> span_pos0;
+  for (int s = 0; s < n; ++s) {
+    check_req(reqs[s], "session_prefill_group");
+    for (int t = 0; t < s; ++t)
+      if (reqs[t] == reqs[s]) throw std::invalid_argument("session_prefill_group: a request twice in the group");
+    const std::vector<int64_t>& p = *prompts[s];
+    const int64_t P = static_cast<int64_t>(p.size());
+    if (P <= 0) throw std::invalid_argument("session_prefill_group: empty prompt");
+    if (P > limit) throw std::invalid_argument("session_prefill_group: a prompt exceeds the group span limit");
+    for (int64_t id : p)
+      if (id < 0 || id >= vocab_size_) throw std::invalid_argument("session_prefill_group: token id out of range");
+    ids.insert(ids.end(), p.begin(), p.end());
+    span_reqs.push_back(reqs[s]);
+    span_lens.push_back(static_cast<int32_t>(P));
+    span_pos0.push_back(0);
+  }
+  if (static_cast<int64_t>(ids.size()) > max_tokens_)
+    throw std::invalid_argument("session_prefill_group: the group's prompts exceed max_tokens");
+  for (int s = 0; s < n; ++s) {
+    open_slot(reqs[s]);
+    if (derived().has_pool() && !derived().pool().ensure_request_blocks(reqs[s], span_lens[s], stream_))
+      throw std::runtime_error("session_prefill_group: the cache pool cannot cover a prompt (admission budget)");
+  }
+  RowRun run;
+  run.req = reqs[0];
+  run.ids = ids.data();
+  run.T = static_cast<int>(ids.size());
+  run.pos0 = 0;
+  run.decode = false;
+  run.all_rows = false;
+  run.first_chunk = true;
+  run.last_chunk = true;
+  run.span_reqs = span_reqs.data();
+  run.span_pos0 = span_pos0.data();
+  run.span_lens = span_lens.data();
+  run.num_spans = n;
+  Outputs all = derived().run_rows(run);
+  std::vector<Outputs> outs(static_cast<size_t>(n));
+  const size_t H = static_cast<size_t>(hidden_);
+  // A capturing walk's per-layer rows and selections (the whole group's
+  // rows, span-major) ride the first request's outputs.
+  outs[0].layer_states = std::move(all.layer_states);
+  outs[0].dsa_selections = std::move(all.dsa_selections);
+  int64_t at = 0;
+  for (int s = 0; s < n; ++s) {
+    Outputs& o = outs[static_cast<size_t>(s)];
+    o.lm_vocab_begin = all.lm_vocab_begin;
+    o.lm_vocab_count = all.lm_vocab_count;
+    o.logits.assign(all.logits.begin() + static_cast<std::ptrdiff_t>(s) * lm_vocab_count_,
+                    all.logits.begin() + static_cast<std::ptrdiff_t>(s + 1) * lm_vocab_count_);
+    o.final_hidden_bits.assign(all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(s) * static_cast<std::ptrdiff_t>(H),
+                               all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(s + 1) * static_cast<std::ptrdiff_t>(H));
+    const int req = reqs[s];
+    const int64_t P = span_lens[s];
+    session_pos_[static_cast<size_t>(req)] = P;
+    push_position(req);
+    if (mtp_) {
+      // The draft block over the span's rows (row q embeds tok_{q+1}).
+      if (P - 1 > 0) mtp_prefill_rows(req, 0, P - 1, ids.data() + at + 1);
+      mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(P - 1, 0);
+      push_mtp_position(req);
+    }
+    at += P;
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  return outs;
 }
 
 template <class D>

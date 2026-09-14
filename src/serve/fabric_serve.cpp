@@ -350,9 +350,9 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.prefill);
   out += ",\"emsh\":";
   append_json_string(&out, s.embed_sharding);
-  out += std::format(",\"mss\":{},\"msrow\":{:.17g},\"msbase\":{:.17g},\"mslam\":{:.17g},\"msmin\":{}",
+  out += std::format(",\"mss\":{},\"msrow\":{:.17g},\"msbase\":{:.17g},\"mslam\":{:.17g},\"msmin\":{},\"msad\":{}",
                      s.mtp_schedule ? 1 : 0, s.mtp_schedule_row_ms, s.mtp_schedule_base_ms,
-                     s.mtp_schedule_lambda, s.mtp_schedule_min_depth);
+                     s.mtp_schedule_lambda, s.mtp_schedule_min_depth, s.mtp_schedule_adapt ? 1 : 0);
   out.push_back('}');
   return out;
 }
@@ -497,6 +497,9 @@ JournalRecord decode_journal_line(std::string_view line) {
       s.mtp_schedule_base_ms = field(v, "msbase", "settings").as_double();
       s.mtp_schedule_lambda = field(v, "mslam", "settings").as_double();
       s.mtp_schedule_min_depth = static_cast<int>(field(v, "msmin", "settings").as_int());
+      // Records before the adaptive lambda (2026-09-14, later) carry no msad: fixed.
+      if (const dgpp::minijson::Value* msad = v.find("msad")) s.mtp_schedule_adapt = msad->as_int() != 0;
+      else s.mtp_schedule_adapt = false;
     }
     if (s.world < 2 || s.max_concurrency < 1 || s.kv_capacity < 1 ||
         (s.admission != "full" && s.admission != "grow") ||

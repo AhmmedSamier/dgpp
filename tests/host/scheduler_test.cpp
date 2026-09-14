@@ -355,7 +355,7 @@ class FakeEngine : public SchedulerEngine {
  public:
   void set_partial_pins(bool on) { partial_pins_ = on; }
 
- private:
+ protected:
   bool partial_pins_ = false;
 
   int slots_;
@@ -396,6 +396,67 @@ std::string ids_joined(const std::vector<int64_t>& ids) {
     s += std::to_string(t);
   }
   return s;
+}
+
+// A fake that takes prefill groups: cold prompts within `span` tokens
+// admit together in one call (the op "PG:n" then the members' P ops).
+class GroupFakeEngine : public FakeEngine {
+ public:
+  GroupFakeEngine(int slots, int64_t total_blocks, int64_t block_tokens, int64_t span, int64_t total)
+      : FakeEngine(slots, total_blocks, block_tokens), span_(span), total_(total) {}
+  int64_t prefill_group_span_limit() const override { return span_; }
+  int64_t prefill_group_total_limit() const override { return total_; }
+  std::vector<int32_t> prefill_group(const std::vector<int>& reqs,
+                                     const std::vector<const std::vector<int64_t>*>& prompts) override {
+    ops_.push_back("PG:" + std::to_string(reqs.size()));
+    return SchedulerEngine::prefill_group(reqs, prompts);
+  }
+ private:
+  int64_t span_, total_;
+};
+
+DGPP_TEST(scheduler_groupPrefill_admitsQueuedShortPromptsTogether) {
+  // GIVEN three 5-token requests queued at once, 3 slots, an engine that
+  // takes groups of prompts within 8 tokens: one tick admits all three in
+  // one prefill (PG:3 then each slot's P), then the steps round-robin.
+  GroupFakeEngine engine(/*slots=*/3, /*total_blocks=*/100, /*block_tokens=*/4, /*span=*/8, /*total=*/64);
+  engine.arm(0, {1, 2}, /*max_steps=*/2);
+  engine.arm(1, {4, 5}, /*max_steps=*/2);
+  engine.arm(2, {7, 8}, /*max_steps=*/2);
+  Scheduler sched(&engine, {kEos});
+  sched.submit(make_request("a", 5, 2));
+  sched.submit(make_request("b", 5, 2));
+  sched.submit(make_request("c", 5, 2));
+  try {
+    sched.run_to_completion();
+  } catch (const std::exception& e) {
+    throw std::runtime_error(std::string(e.what()) + "\n  ops so far: " + engine.op_stream());
+  }
+  const std::string got = engine.op_stream();
+  require(got.rfind("PG:3 P:0:5 P:1:5 P:2:5", 0) == 0,
+          "the three queued prompts admit as one group:\n  got: " + got);
+  require(sched.results().size() == 3, "three results");
+  require(ids_joined(sched.results()[0].generated) == "1,2", "a ids");
+  require(ids_joined(sched.results()[1].generated) == "4,5", "b ids");
+  require(ids_joined(sched.results()[2].generated) == "7,8", "c ids");
+  // A prompt past the span limit admits alone (the group stops at it).
+  GroupFakeEngine engine2(/*slots=*/3, /*total_blocks=*/100, /*block_tokens=*/4, /*span=*/8, /*total=*/64);
+  engine2.arm(0, {1}, 1);  // a
+  engine2.arm(1, {4}, 1);  // c pairs with a
+  engine2.arm(0, {7}, 1);  // b admits alone after a retires, in the lowest free slot
+  Scheduler sched2(&engine2, {kEos});
+  sched2.submit(make_request("a", 5, 1));
+  sched2.submit(make_request("b", 9, 1));  // past the span limit
+  sched2.submit(make_request("c", 5, 1));
+  try {
+    sched2.run_to_completion();
+  } catch (const std::exception& e) {
+    throw std::runtime_error(std::string(e.what()) + "\n  ops so far: " + engine2.op_stream());
+  }
+  const std::string got2 = engine2.op_stream();
+  require(got2.rfind("PG:2 P:0:5 P:1:5", 0) == 0,
+          "the long prompt stays out of the group; the short ones pair:\n  got: " + got2);
+  require(got2.find("P:0:9") != std::string::npos, "the long prompt admits alone:\n  got: " + got2);
 }
 
 DGPP_TEST(scheduler_strictAlternation_pinnedOpSequence) {

@@ -288,6 +288,105 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill(
   return out;
 }
 
+// Several cold prompts as the spans of one walk (2026-09-14, the group
+// prefill ported from DeepSeek): every span within max_tokens, the group
+// within max_tokens and the mirrors' rows; each slot opened as
+// session_prefill opens it (its KDA state and DSA pool reset), the walk's
+// KDA scan and DSA attention per span, the mHC, MoE and head sites over
+// every row, then per span the position, the draft block over its rows
+// and the draft position. Outputs per span: its last row's logits and
+// hidden; the walk's route traces ride the first request's.
+std::vector<GlmDiagnosticModel::Outputs> GlmDiagnosticModel::session_prefill_group(
+    const std::vector<int>& reqs, const std::vector<const std::vector<int64_t>*>& prompts) {
+  const int n = static_cast<int>(reqs.size());
+  if (n <= 0 || prompts.size() != reqs.size())
+    throw std::invalid_argument("session_prefill_group: requests and prompts");
+  if (n > kDecodeRows)
+    throw std::invalid_argument("session_prefill_group: more spans than the tail mirrors' rows");
+  if (dsa_cfg_.num_dsa_layers > 0 && kPrefillChunkTokens % dsa_cfg_.index_kpool != 0)
+    throw std::runtime_error("session_prefill_group: the chunk size broke the kpool-alignment contract");
+  std::vector<int64_t> ids;
+  std::vector<int32_t> span_reqs, span_lens;
+  for (int sidx = 0; sidx < n; ++sidx) {
+    const int req = reqs[static_cast<size_t>(sidx)];
+    if (req < 0 || req >= max_requests_)
+      throw std::out_of_range("session_prefill_group: request slot " + std::to_string(req));
+    for (int t = 0; t < sidx; ++t)
+      if (reqs[static_cast<size_t>(t)] == req) throw std::invalid_argument("session_prefill_group: a request twice in the group");
+    const std::vector<int64_t>& P = *prompts[static_cast<size_t>(sidx)];
+    if (P.empty()) throw std::invalid_argument("session_prefill_group: empty prompt");
+    if (static_cast<int64_t>(P.size()) > max_tokens_)
+      throw std::invalid_argument("session_prefill_group: a prompt exceeds the group span limit");
+    if (static_cast<int64_t>(P.size()) > max_context_)
+      throw std::invalid_argument("session_prefill_group: prompt exceeds the context bound");
+    for (int64_t id : P)
+      if (id < 0 || id >= cfg_.vocab_size) throw std::invalid_argument("session_prefill_group: token id out of range");
+    ids.insert(ids.end(), P.begin(), P.end());
+    span_reqs.push_back(req);
+    span_lens.push_back(static_cast<int32_t>(P.size()));
+  }
+  if (static_cast<int64_t>(ids.size()) > max_tokens_)
+    throw std::invalid_argument("session_prefill_group: the group's prompts exceed max_tokens");
+  // Open every slot as session_prefill does.
+  for (int sidx = 0; sidx < n; ++sidx) {
+    const int req = span_reqs[static_cast<size_t>(sidx)];
+    if (kda_rec_) {
+      float* slot_rec = kda_rec_ + static_cast<size_t>(req) * kda_cfg_.num_kda_layers * kda_geo_.recurrent_elems;
+      uint16_t* slot_conv =
+          kda_conv_ + static_cast<size_t>(req) * kda_cfg_.num_kda_layers * (kda_geo_.conv_committed_bytes / 2);
+      DGPP_CUDA_OK(cudaMemsetAsync(slot_rec, 0,
+                                   static_cast<size_t>(kda_cfg_.num_kda_layers) * kda_geo_.recurrent_bytes, stream_));
+      DGPP_CUDA_OK(cudaMemsetAsync(slot_conv, 0,
+                                   static_cast<size_t>(kda_cfg_.num_kda_layers) * kda_geo_.conv_committed_bytes, stream_));
+    }
+    if (dsa_cfg_.num_dsa_layers > 0) pool_.reset_request(req, stream_);
+    session_pos_[static_cast<size_t>(req)] = 0;
+    if (mtp_) mtp_pos_[static_cast<size_t>(req)] = 0;
+  }
+  group_span_reqs_ = span_reqs.data();
+  group_span_lens_ = span_lens.data();
+  group_num_spans_ = n;
+  Outputs all;
+  try {
+    all = session_run_rows(span_reqs[0], ids, /*token_start=*/0, /*decode_row=*/false);
+  } catch (...) {
+    group_span_reqs_ = nullptr;
+    group_span_lens_ = nullptr;
+    group_num_spans_ = 0;
+    throw;
+  }
+  group_span_reqs_ = nullptr;
+  group_span_lens_ = nullptr;
+  group_num_spans_ = 0;
+  std::vector<Outputs> outs(static_cast<size_t>(n));
+  const size_t H = static_cast<size_t>(cfg_.hidden_size);
+  outs[0].routes = std::move(all.routes);
+  outs[0].route_biased = std::move(all.route_biased);
+  int64_t at = 0;
+  for (int sidx = 0; sidx < n; ++sidx) {
+    Outputs& o = outs[static_cast<size_t>(sidx)];
+    const int req = span_reqs[static_cast<size_t>(sidx)];
+    const int64_t P = span_lens[static_cast<size_t>(sidx)];
+    o.lm_vocab_begin = all.lm_vocab_begin;
+    o.lm_vocab_count = all.lm_vocab_count;
+    o.logits.assign(all.logits.begin() + static_cast<std::ptrdiff_t>(sidx) * lm_vocab_count_,
+                    all.logits.begin() + static_cast<std::ptrdiff_t>(sidx + 1) * lm_vocab_count_);
+    o.final_hidden_bits.assign(all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(sidx) * static_cast<std::ptrdiff_t>(H),
+                               all.final_hidden_bits.begin() + static_cast<std::ptrdiff_t>(sidx + 1) * static_cast<std::ptrdiff_t>(H));
+    session_pos_[static_cast<size_t>(req)] = P;
+    push_position(req);
+    if (mtp_) {
+      // The draft block over the span's rows (row q embeds tok_{q+1}).
+      if (P - 1 > 0) mtp_prefill_rows(req, 0, P - 1, ids.data() + at + 1);
+      mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(P - 1, 0);
+      push_mtp_position(req);
+    }
+    at += P;
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  return outs;
+}
+
 GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill_resume(
     int req, const std::vector<int64_t>& suffix_ids,
     const std::vector<int64_t>& boundaries, SnapshotRequest* snap) {
@@ -1191,8 +1290,25 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
         batch.conv_request_stride_elems =
             static_cast<int64_t>(kda_cfg_.num_kda_layers) * conv_elems;
       }
-      kda_->enqueue(normed_, rec, conv, kda_geo_.conv_hist, attn_out, T,
-                    stream_, decode_row ? &prefetch_ : nullptr, spec, batch);
+      if (!decode_row && group_num_spans_ > 0) {
+        // A group prefill (2026-09-14): each span's rows scan its own
+        // request's recurrent and conv state (the pointers step by rows).
+        int64_t row0 = 0;
+        for (int sp = 0; sp < group_num_spans_; ++sp) {
+          const int len = group_span_lens_[sp];
+          const size_t sreq = static_cast<size_t>(group_span_reqs_[sp]);
+          float* srec = kda_rec_ + (sreq * kda_cfg_.num_kda_layers + static_cast<size_t>(kda_ordinal)) *
+                                       kda_geo_.recurrent_elems;
+          uint16_t* sconv = kda_conv_ + (sreq * kda_cfg_.num_kda_layers + static_cast<size_t>(kda_ordinal)) * conv_elems;
+          if (!kda_->prepare(len)) throw std::runtime_error("session: KDA GEMM plans unavailable");
+          kda_->enqueue(normed_ + static_cast<size_t>(row0) * H, srec, sconv, kda_geo_.conv_hist,
+                        attn_out + static_cast<size_t>(row0) * H, len, stream_);
+          row0 += len;
+        }
+      } else {
+        kda_->enqueue(normed_, rec, conv, kda_geo_.conv_hist, attn_out, T,
+                      stream_, decode_row ? &prefetch_ : nullptr, spec, batch);
+      }
       ++kda_ordinal;
     } else {
       if (!dsa_) {
@@ -1220,6 +1336,18 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
                              d_step_pos_, d_req_spans_,
                              batched ? batch_requests : 1, T, attn_out,
                              stream_, &prefetch_, tail_snaps);
+      } else if (group_num_spans_ > 0) {
+        // A group prefill: each span attends over and publishes to its own
+        // request's cache, its selection at its rows' offset in the scratch.
+        int64_t row0 = 0;
+        for (int sp = 0; sp < group_num_spans_; ++sp) {
+          const int len = group_span_lens_[sp];
+          if (!dsa_->prepare(len)) throw std::runtime_error("session: DSA GEMM plans unavailable");
+          dsa_->enqueue_prefill(normed_ + static_cast<size_t>(row0) * H, pool_, dsa_ordinal, group_span_reqs_[sp],
+                                /*token_start=*/0, len, attn_out + static_cast<size_t>(row0) * H, stream_,
+                                static_cast<int>(row0));
+          row0 += len;
+        }
       } else {
         dsa_->enqueue_prefill(normed_, pool_, dsa_ordinal, /*req=*/req,
                               token_start, T, attn_out, stream_);
@@ -1343,6 +1471,14 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     } else if (decode_row) {
       glm_rows_scatter_bf16(collapsed_, d_step_pos_, mtp_hidden_cache(req), T,
                             H, stream_);
+    } else if (group_num_spans_ > 0) {
+      int64_t row0 = 0;
+      for (int sp = 0; sp < group_num_spans_; ++sp) {
+        const int len = group_span_lens_[sp];
+        DGPP_CUDA_OK(cudaMemcpyAsync(mtp_hidden_cache(group_span_reqs_[sp]), collapsed_ + static_cast<size_t>(row0) * H,
+                                     static_cast<size_t>(len) * H * 2, cudaMemcpyDeviceToDevice, stream_));
+        row0 += len;
+      }
     } else {
       uint16_t* cache = mtp_hidden_cache(req);
       DGPP_CUDA_OK(cudaMemcpyAsync(
@@ -1373,13 +1509,28 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
     // 100s of MB; greedy needs one row).
     const size_t first = decode_row ? 0 : static_cast<size_t>(T - 1);
     const size_t rows = decode_row ? static_cast<size_t>(T) : 1;
-    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_,
-                                 logits_ + first * lm_vocab_count_,
-                                 rows * lm_vocab_count_ * sizeof(float),
-                                 cudaMemcpyDeviceToHost, stream_));
-    DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_hidden_, normed_ + first * H,
-                                 rows * H * 2, cudaMemcpyDeviceToHost,
-                                 stream_));
+    if (!decode_row && group_num_spans_ > 0) {
+      // A group prefill: every span's last row, span-major, into the
+      // mirrors' rows (the group is bounded by the mirrors' kDecodeRows).
+      int64_t row0 = 0;
+      for (int sp = 0; sp < group_num_spans_; ++sp) {
+        const size_t last = static_cast<size_t>(row0 + group_span_lens_[sp] - 1);
+        DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_ + static_cast<size_t>(sp) * lm_vocab_count_,
+                                     logits_ + last * lm_vocab_count_, lm_vocab_count_ * sizeof(float),
+                                     cudaMemcpyDeviceToHost, stream_));
+        DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_hidden_ + static_cast<size_t>(sp) * H, normed_ + last * H, H * 2,
+                                     cudaMemcpyDeviceToHost, stream_));
+        row0 += group_span_lens_[sp];
+      }
+    } else {
+      DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_logits_,
+                                   logits_ + first * lm_vocab_count_,
+                                   rows * lm_vocab_count_ * sizeof(float),
+                                   cudaMemcpyDeviceToHost, stream_));
+      DGPP_CUDA_OK(cudaMemcpyAsync(h_tail_hidden_, normed_ + first * H,
+                                   rows * H * 2, cudaMemcpyDeviceToHost,
+                                   stream_));
+    }
   }
 
   // Capture ends HERE: nothing executed, so there is nothing to sync
@@ -1418,8 +1569,9 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
 
   // Last row only (see the runner's header note) — from the pinned
   // mirrors' row 0, which the D2H above filled with row T-1.
-  out.final_hidden_bits.assign(h_tail_hidden_, h_tail_hidden_ + H);
-  out.logits.assign(h_tail_logits_, h_tail_logits_ + lm_vocab_count_);
+  const size_t tail_rows = (!decode_row && group_num_spans_ > 0) ? static_cast<size_t>(group_num_spans_) : 1;
+  out.final_hidden_bits.assign(h_tail_hidden_, h_tail_hidden_ + tail_rows * H);
+  out.logits.assign(h_tail_logits_, h_tail_logits_ + tail_rows * lm_vocab_count_);
   out.lm_vocab_begin = lm_vocab_begin_;
   out.lm_vocab_count = lm_vocab_count_;
   return out;

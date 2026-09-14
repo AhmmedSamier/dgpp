@@ -476,11 +476,18 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   perturb the collective skew they measure; `DGPP_PIPELINE=0` turns the
   pipelined replay off — every replay settles right after its launch, the
   pre-2026-09-06 step — `DGPP_PIPELINE_TRACE=1` logs each launch and
-  settle, `DGPP_DSV41_DENSE_GEMV=1` makes a DeepSeek-V4.1-Flash world take
+  settle, `--mtp-schedule-fixed-lambda` (config `mtp_schedule_adapt: false`) holds
+  the scheduled verify depth's λ at the configured constant instead of the
+  adaptive EWMA (journaled as `msad`), `DGPP_DSV41_DENSE_GEMV=1` makes a DeepSeek-V4.1-Flash world take
   the 4-row GEMV chunks for its dense decode projections and head instead
   of the streaming tensor-core GEMM (the A/B switch; tolerance-equal
   forms, transcripts reorder — set it on every rank, the boot reads it at
-  model construction), and `DGPP_SYNC_EAGER=1` makes an eager row — a prefill chunk,
+  model construction), `DGPP_DENSE_GEMV_ROWS=n` (default 4; a site setting
+  since 2026-09-14, forwarded to every rank) is the other families' dense
+  lowering bound — rows up to n take the GEMV chunks, bf16 rows above
+  cuBLASLt's algorithm, fp8 rows above the streaming tensor-core GEMM to 256
+  rows; 256 restores the pre-2026-09-14 lowering (every decode row count
+  through the chunks) for an A/B, and `DGPP_SYNC_EAGER=1` makes an eager row — a prefill chunk,
   the sampled fallback's verify and re-draft — synchronize after every
   stage and validate its selection list before the attention, naming the
   stage a fault came from; the fault hunt's knob, not for serving) — the one-hour soak had written 307,000

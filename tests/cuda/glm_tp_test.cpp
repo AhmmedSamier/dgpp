@@ -1763,6 +1763,81 @@ DGPP_TEST(glm_tp_greedy_gen_loopback) {
 // Route flips per step are REPORTED only: the router's input row is the
 // certified logits surface; routing certification is the re-forward
 // gates' tier (glm_route_audit's cascade over full forwards).
+// The group prefill (2026-09-14): two prompts as the spans of one walk
+// against the prefills alone, on the fixture at world 1 — the KDA scan
+// and the DSA attention run per span over their own state and cache, the
+// mHC, MoE and head sites over every row (their dense lowering follows
+// the rows: kernels/gemm.hpp dense_gemv_rows, so the rows are
+// tolerance-equal, not bitwise); then a decode off the group's cache
+// against the decode off the solo prefill, step by step.
+DGPP_TEST(glm_tp_group_prefill_matches_prefills_alone) {
+  const GlmTextConfig cfg = glm_tp_test_config();
+  const std::string dir = "glm_tp_fixture";
+  glm_tp_write_fixture(dir);
+  const std::vector<int64_t> A = make_tokens(9, cfg.vocab_size);
+  std::vector<int64_t> B = make_tokens(13, cfg.vocab_size);
+  std::reverse(B.begin(), B.end());
+  constexpr int kSteps = 4;
+  const int max_tokens = static_cast<int>(A.size() + B.size()) + kSteps + 1;
+  // Two requests hold a DSA block each: the cache covers both (the solo
+  // gates above open one slot at a time on a 128-token pool).
+  GlmDiagnosticModel m(cfg, dir, max_tokens, 512, nullptr, 0, 1, GlmResidency::Streaming,
+                       GlmHeadSharding::Full, /*max_requests=*/2, /*mtp=*/false);
+  const int V = m.lm_vocab_count();
+  const auto rel_l2 = [&](const std::vector<float>& a, const std::vector<float>& b) {
+    double num = 0, den = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i) {
+      const double d = static_cast<double>(a[i]) - static_cast<double>(b[i]);
+      num += d * d;
+      den += static_cast<double>(b[i]) * static_cast<double>(b[i]);
+    }
+    return den > 0 ? std::sqrt(num / den) : std::sqrt(num);
+  };
+  const auto top1 = [&](const std::vector<float>& row) { return local_max(row.data(), V, 0).id; };
+  // The prefills alone, then their decodes (the tokens the group's decode must reproduce).
+  std::vector<std::vector<float>> solo_rows_a, solo_rows_b;
+  std::vector<int64_t> solo_tokens_b;
+  {
+    const GlmDiagnosticModel::Outputs pa = m.session_prefill(0, A);
+    solo_rows_a.push_back(pa.logits);
+    m.session_close(0);
+    GlmDiagnosticModel::Outputs pb = m.session_prefill(1, B);
+    solo_rows_b.push_back(pb.logits);
+    int64_t tok = top1(pb.logits);
+    for (int s = 0; s < kSteps; ++s) {
+      solo_tokens_b.push_back(tok);
+      pb = m.session_step(1, tok);
+      solo_rows_b.push_back(pb.logits);
+      tok = top1(pb.logits);
+    }
+    m.session_close(1);
+  }
+  const std::vector<GlmDiagnosticModel::Outputs> g = m.session_prefill_group({0, 1}, {&A, &B});
+  require(g.size() == 2 && g[0].logits.size() == static_cast<size_t>(V) && g[1].logits.size() == static_cast<size_t>(V),
+          "group prefill: one row of logits per span");
+  require(m.session_position(0) == static_cast<int64_t>(A.size()) && m.session_position(1) == static_cast<int64_t>(B.size()),
+          "group prefill: positions");
+  const double la = rel_l2(g[0].logits, solo_rows_a[0]), lb = rel_l2(g[1].logits, solo_rows_b[0]);
+  DGPP_LOG_INFO("group prefill (9 + 13 rows) vs the prefills alone: relative l2 {:.3e} / {:.3e}, top-1 {} / {}", la, lb,
+                top1(g[0].logits) == top1(solo_rows_a[0]) ? "equal" : "DIFFERS",
+                top1(g[1].logits) == top1(solo_rows_b[0]) ? "equal" : "DIFFERS");
+  require(la < 1e-2 && lb < 1e-2, "group prefill: a span's row is off the prefill alone");
+  require(top1(g[0].logits) == top1(solo_rows_a[0]) && top1(g[1].logits) == top1(solo_rows_b[0]),
+          "group prefill: a span's top-1 differs from the prefill alone");
+  // The decode off the group's cache, the solo transcript's tokens in.
+  double worst = 0;
+  for (int s = 0; s < kSteps; ++s) {
+    const GlmDiagnosticModel::Outputs o = m.session_step(1, solo_tokens_b[static_cast<size_t>(s)]);
+    worst = std::max(worst, rel_l2(o.logits, solo_rows_b[static_cast<size_t>(s) + 1]));
+    require(top1(o.logits) == top1(solo_rows_b[static_cast<size_t>(s) + 1]),
+            "group prefill: a decode row off the group's cache picks a different token");
+  }
+  DGPP_LOG_INFO("decode off the group's cache: {} steps, worst relative l2 {:.3e} against the solo decode", kSteps, worst);
+  require(worst < 1e-2, "group prefill: a decode row off the group's cache is off the solo decode");
+  m.session_close(0);
+  m.session_close(1);
+}
+
 DGPP_TEST(glm_tp_decode_session_parity) {
   const GlmTextConfig cfg = glm_tp_test_config();
   const std::string dir = "glm_tp_fixture";

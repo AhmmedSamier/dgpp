@@ -78,9 +78,11 @@ Glm4Model::Glm4Model(const Glm4TextConfig& cfg, const std::string& checkpoint_di
   gemm_ws_bytes_ = std::max<size_t>(64u << 20, gemm_.query_workspace_bytes(max_tokens_, lm_vocab_count_, H, DType::BF16));
   gemm_ws_ = dev_alloc<char>(gemm_ws_bytes_);
   gw_ = Glm4GemmWorkspace{&gemm_, gemm_ws_, gemm_ws_bytes_};
-  // Every decode shape up to the fixed batch's rows through the row-
-  // independent GEMV core (the numerical interface of the batched graphs).
-  gemm_.set_decode_rows(max_decode_rows_);
+  // The attention projections' lowering (kernels/gemm.hpp dense_gemv_rows):
+  // the GEMV chunks to the bound, cuBLASLt's algorithm above it (the
+  // chunks re-read the BF16 attention weights per four rows: the batched
+  // step's bound before 2026-09-14).
+  gemm_.set_decode_rows(std::min(max_decode_rows_, dense_gemv_rows()));
   moe_cfg_ = cfg_.moe_config(static_cast<int>(loader_.geometry().local_inter));
   n_split_ = Glm4AttentionLayer::default_decode_splits();
 
@@ -420,8 +422,10 @@ Glm4Model::Outputs Glm4Model::run_rows(const RowRun& run) {
   // acceptance on the real checkpoint, 2026-09-10) into the slots'
   // windows by position (the last window rows of a prefill chunk, every
   // decode row — distinct slots within one launch).
+  // A group prefill (several requests' spans in one walk, 2026-09-14)
+  // stores every row: each span's last window rows land in its own slot.
   if (mtp_) {
-    const int n = std::min(T, max_decode_rows_);
+    const int n = run.num_spans > 0 ? T : std::min(T, max_decode_rows_);
     store_draft_hidden(h_ + static_cast<size_t>(T - n) * H, in.req_ids + (T - n), in.pos + (T - n), n);
   }
   if (run.decode) prefetch_.join(stream_);

@@ -36,6 +36,15 @@ class IGemm {
   // during capture.
   virtual bool ensure_plan(int m, int n, int k, DType io_dtype,
                            GemmOut out_dtype, size_t act_row_stride) = 0;
+
+  // Whether this instance's decode-shaped bf16 calls take the streaming
+  // tensor-core form (CublasLtGemm::set_decode_mma): the layers that own
+  // fp8 projections next to their bf16 ones read it to lower those the
+  // same way (scale_gemm.hpp's decode_mma), so one setting per model
+  // decides every dense site. The bound (0: every row count) is the widest
+  // row count the form takes; a fake instance says no.
+  virtual bool decode_mma() const { return false; }
+  virtual int decode_mma_max_rows() const { return 0; }
 };
 
 // The decode shapes the interface lowers to the row-independent GEMV core: m up
@@ -55,6 +64,21 @@ class IGemm {
 // glm_dsa_engine_test's sixteen-row gate configures both of its models
 // alike for that reason.
 constexpr int kGemmDecodeRowsDefault = 8;
+
+// The dense sites' GEMV chunk bound for the session-core families
+// (DGPP_DENSE_GEMV_ROWS, default 4; 2026-09-14): rows up to it take the
+// row-independent GEMV chunks (one weight read per four rows — the T = 1
+// floor and the fused multi-problem launches), bf16 rows above it take
+// cuBLASLt's algorithm (at the weight-stream floor from six rows:
+// bf16_gemv_test's table — the chunks re-read the weights per four rows,
+// 2-8x the bytes at 6..32 rows), fp8 rows above it the streaming
+// tensor-core GEMM to kScaleGemmMmaMaxRows (scale_gemm.hpp). A row's chain
+// then depends on the rows sharing its launch across the bound (the
+// chunks', the algorithm's and the streaming form's orders differ): the
+// batched and the scalar transcripts of one request are tolerance-equal,
+// not bitwise (the engine gates' near-tie rule). 256 restores the old
+// lowering (every decode row count through the chunks, fp8 to 128 rows).
+int dense_gemv_rows();
 constexpr int kGemmDecodeLoweringRows = 32;
 
 // cuBLASLt-backed implementation with per-shape heuristic caching. Decode-
@@ -86,9 +110,14 @@ class CublasLtGemm : public IGemm {
   // for every row of the launch, each row's chain the same whatever m. The
   // two forms are tolerance-equal, not bitwise, so a model opts in for all
   // its calls through this instance. Shapes the mma form cannot take keep
-  // the GEMV chunks.
-  void set_decode_mma(bool on);
-  bool decode_mma() const;
+  // the GEMV chunks. max_rows bounds the form: 0 takes every row count
+  // (DeepSeek: its group prefill's spans are then bitwise their prefills
+  // alone), a bound hands wider calls to the Lt algorithm (the session-core
+  // families: Lt is ahead of the streaming form's 128-row groups from a
+  // dozen bf16 rows — bf16_gemv_test's table, 2026-09-14).
+  void set_decode_mma(bool on, int max_rows = 0);
+  bool decode_mma() const override;
+  int decode_mma_max_rows() const override;
 
  private:
   struct Impl;

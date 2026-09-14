@@ -13,8 +13,7 @@
 namespace dgpp {
 namespace {
 
-constexpr int kWarps = 8;              // weight rows per block: kWarps x 8
-constexpr int kThreads = kWarps * 32;
+constexpr int kWideWarps = 8;          // the wide forms' block: 8 warps x 8 weight rows
 constexpr int kRowsPerWarp = 8;        // the mma's n
 constexpr int kBatch = 8;              // 16-byte vectors in flight per lane
 // A lane's run: kVecs consecutive 16-byte vectors of its weight row, so a
@@ -49,33 +48,100 @@ __device__ __forceinline__ int swz(int u) { return kLaneUnits == 8 ? (u ^ ((u >>
 // per 4-row chunk); a row's chain is the same in every form (the set of
 // physical k folded per slice is a function of the 64-k group, whatever
 // the window), so the forms are bitwise each other's.
-template <int kTiles> struct Win {
-  static constexpr int kBatchW = kBatch / kTiles;                     // vectors per lane per window
-  static constexpr int kK = 64 * kBatchW;                             // k per window: 512 / 256 / 128 / 64
+template <int kTiles, bool kFp8> struct Win {
+  // The one-tile form takes 256-k windows like the two-tile one: its
+  // warp-contiguous weight buffer (WarpLoads) and two A buffers then fit
+  // two blocks per SM. Tried and not taken (2026-09-14, the bf16 head at
+  // one row, GEMV 1406..1431 us): 512-k bf16 windows at one block per SM
+  // (97 KB) 1453; 128-k windows at three blocks per SM 1470 (and the fp8
+  // one-row form 133 against its 120). The format parameter stays for the
+  // window's byte geometry (WarpLoads).
+  static constexpr int kBatchW = kTiles == 1 ? kBatch / 2 : kBatch / kTiles;  // vectors per lane per window
+  static constexpr int kK = 64 * kBatchW;                             // k per window: 256 / 256 / 128 / 64
   static constexpr int kStride = kK + 8;                              // staged row stride (rows shift 16 B: no bank conflicts)
   static constexpr int kRows = kTiles * 16;
   static constexpr size_t kBufBytes = static_cast<size_t>(kRows) * kStride * 2;
   static constexpr size_t kSmemBytes = 2 * kBufBytes;                 // double-buffered
 };
-static_assert(Win<1>::kSmemBytes <= 48 * 1024 && Win<2>::kSmemBytes <= 48 * 1024 &&
-              Win<4>::kSmemBytes <= 48 * 1024 && Win<8>::kSmemBytes <= 48 * 1024, "the A windows fit the default smem");
+static_assert(Win<1, true>::kSmemBytes <= 48 * 1024 && Win<1, false>::kSmemBytes <= 48 * 1024 &&
+              Win<2, true>::kSmemBytes <= 48 * 1024 && Win<4, true>::kSmemBytes <= 48 * 1024 &&
+              Win<8, true>::kSmemBytes <= 48 * 1024, "the A windows fit the default smem");
 
-// Stage rows [0, tiles*16) x [base, base + W::kK) of act into sA (rows
-// past m and columns past k read as zero); the whole block participates,
-// the caller syncs.
-template <int kTiles, int kLaneUnits>
+// The decode forms' weight loads are warp-contiguous and asynchronous
+// (2026-09-14): a warp reads one row's whole window slice per instruction
+// — 256 or 512 contiguous bytes, the DRAM pattern of the GEMV core —
+// straight into a per-warp shared-memory ring of kStages window slices
+// (cp.async: no register staging, so the depth costs shared memory, not
+// registers), laid out in the quad order the mma wants (odd rows shifted
+// half a bank line so the quad reads are conflict-free). kStages - 1
+// windows are in flight while one is consumed: the per-window DRAM round
+// trip is then hidden inside the warp, not only by other resident blocks.
+// The ring's block budget is 24 KB (the stages from it, 2..8: two at eight
+// warps, so two blocks share an SM; eight at one warp) — a 48 KB budget
+// measured no better at any width and cost the second block (2026-09-14).
+// The wide forms keep the direct loads (their cost is the tensor work, not
+// the stream).
+template <int kTiles, bool kFp8, int kW> struct WarpLoads {
+  static constexpr int kBudgetKB = 24;
+  static constexpr bool kOn = kTiles <= 2;  // the 1..32-row forms
+  static constexpr int kRowBytes = Win<kTiles, kFp8>::kK * (kFp8 ? 1 : 2);  // one row's window slice
+  static constexpr int kRowVecs = kRowBytes / 16;                         // 16-byte vectors per row slice
+  static constexpr int kLanesPerRow = kRowVecs < 32 ? kRowVecs : 32;      // lanes a row's slice spans
+  static constexpr int kVecsPerLane = kRowVecs / kLanesPerRow;            // vectors per lane per row (1 or 2)
+  static constexpr int kRowsPerInstr = 32 / kLanesPerRow;                 // rows one warp instruction covers
+  static constexpr int kInstrs = kRowsPerWarp / kRowsPerInstr;            // instructions per window per warp
+  static constexpr int kSwz = kFp8 ? 4 : 1;                               // odd rows' 16-byte-unit XOR (a 64-byte shift)
+  static constexpr size_t kWarpBytes = static_cast<size_t>(kRowsPerWarp) * kRowBytes;  // one stage of one warp
+  static constexpr size_t kStageBytes = kWarpBytes * kW;                  // one stage of the block
+  static constexpr int kStagesRaw = static_cast<int>((static_cast<size_t>(kBudgetKB) * 1024) / kStageBytes);
+  static constexpr int kStages = !kOn ? 1 : kStagesRaw < 2 ? 2 : kStagesRaw > 8 ? 8 : kStagesRaw;
+  static constexpr size_t kBlockBytes = kStageBytes * kStages;
+  static constexpr size_t kSmemBytes = Win<kTiles, kFp8>::kSmemBytes + (kOn ? kBlockBytes : 0);
+  // The geometry's invariants (and every member referenced in every instantiation).
+  static_assert(kRowVecs * 16 == kRowBytes && kLanesPerRow * kVecsPerLane == kRowVecs &&
+                kRowsPerInstr * kLanesPerRow == 32 && kInstrs * kRowsPerInstr == kRowsPerWarp && kSwz > 0 &&
+                kBlockBytes == kStageBytes * kStages && kSmemBytes >= Win<kTiles, kFp8>::kSmemBytes &&
+                kStages >= 1 && kSmemBytes <= 99 * 1024,
+                "the warp-contiguous load geometry");
+};
+
+__device__ __forceinline__ void cp_async_16(void* smem_dst, const void* gmem_src, bool pred) {
+  const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(smem_dst));
+  const int src_size = pred ? 16 : 0;  // 0: the 16 bytes zero-filled, nothing read
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(gmem_src), "r"(src_size));
+}
+__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+template <int kPending>
+__device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(kPending)); }
+
+// Stage rows [0, min(m, tiles*16)) x [base, base + W::kK) of act into sA
+// (columns past k read as zero); the whole block participates, the caller
+// syncs. Rows past m are zeroed once by zero_rows (they never change).
+template <int kTiles, bool kFp8, int kLaneUnits, int kW>
 __device__ __forceinline__ void stage_a(const uint16_t* __restrict__ act, size_t act_stride, int m,
                                         int k, int base, uint16_t* __restrict__ sA) {
-  using W = Win<kTiles>;
+  using W = Win<kTiles, kFp8>;
   constexpr int kUnits = W::kK / 8;  // 16-byte units per row
   if (base >= k) return;
-  for (int i = threadIdx.x; i < W::kRows * kUnits; i += kThreads) {
+  const int rows = m < W::kRows ? m : W::kRows;
+  for (int i = threadIdx.x; i < rows * kUnits; i += kW * 32) {
     const int row = i / kUnits, u = i - row * kUnits;
     const int col = base + u * 8;
     uint4 x = make_uint4(0u, 0u, 0u, 0u);
-    if (row < m && col + 8 <= k)
+    if (col + 8 <= k)
       x = *reinterpret_cast<const uint4*>(act + static_cast<size_t>(row) * act_stride + col);
     *reinterpret_cast<uint4*>(sA + static_cast<size_t>(row) * W::kStride + swz<kLaneUnits>(u) * 8) = x;
+  }
+}
+template <int kTiles, bool kFp8, int kLaneUnits, int kW>
+__device__ __forceinline__ void zero_rows(int m, uint16_t* __restrict__ sA) {
+  using W = Win<kTiles, kFp8>;
+  constexpr int kUnits = W::kK / 8;
+  const int rows = m < W::kRows ? m : W::kRows;
+  for (int i = rows * kUnits + static_cast<int>(threadIdx.x); i < W::kRows * kUnits; i += kW * 32) {
+    const int row = i / kUnits, u = i - row * kUnits;
+    *reinterpret_cast<uint4*>(sA + static_cast<size_t>(row) * W::kStride + swz<kLaneUnits>(u) * 8) =
+        make_uint4(0u, 0u, 0u, 0u);
   }
 }
 
@@ -118,9 +184,13 @@ __device__ __forceinline__ void chunk_to_bf16x8(const uint4& c, float s, uint32_
 // slices) is a function of (k, the window layout) only: rows batched and
 // rows alone see the same arithmetic.
 
-// kTiles: 1 (m <= 16) or 2 (m <= 32). kFp8: the weight format.
-template <int kTiles, bool kFp8, typename OutT>
-__global__ __launch_bounds__(kThreads, 2) void mma_gemv_kernel(const uint16_t* __restrict__ act,
+// kTiles: 1 (m <= 16), 2 (m <= 32), 4 (m <= 64), 8 (m <= 128). kFp8: the
+// weight format. kW: warps per block (8 weight rows each) — the decode
+// forms narrow to 4 / 2 / 1 on a small n so the grid still fills the SMs
+// (a [576 x 6144] site is 9 wide blocks: 46 us against the GEMV's 16 at one
+// row, 2026-09-14); the rows' chains do not depend on the width.
+template <int kTiles, bool kFp8, int kW, typename OutT>
+__global__ __launch_bounds__(kW * 32, 2) void mma_gemv_kernel(const uint16_t* __restrict__ act,
                                                             size_t act_stride,
                                                             const void* __restrict__ wv,
                                                             const float* __restrict__ scales,
@@ -129,7 +199,7 @@ __global__ __launch_bounds__(kThreads, 2) void mma_gemv_kernel(const uint16_t* _
                                                             int cs) {
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int r = lane / 4, t = lane % 4;
-  const int n0 = (blockIdx.x * kWarps + warp) * kRowsPerWarp;  // this warp's first weight row
+  const int n0 = (blockIdx.x * kW + warp) * kRowsPerWarp;  // this warp's first weight row
   const int row = n0 + r;                                        // this lane's weight row
   const bool row_live = row < n;
   const int scale_cols = (k + (1 << cs) - 1) >> cs;
@@ -143,18 +213,81 @@ __global__ __launch_bounds__(kThreads, 2) void mma_gemv_kernel(const uint16_t* _
 #pragma unroll
     for (int i = 0; i < 4; ++i) c[tt][i] = 0.f;
 
-  using W = Win<kTiles>;
+  using W = Win<kTiles, kFp8>;
   using F = Fmt<kFp8>;
+  using L = WarpLoads<kTiles, kFp8, kW>;
   constexpr int kGroups = W::kK / F::kQuadSpan;  // lane runs per window
   extern __shared__ __align__(16) uint16_t sA_raw[];
   uint16_t* sA[2] = {sA_raw, sA_raw + W::kBufBytes / 2};
+  // The warp's weight ring (past the A windows): stage s at s * kWarpBytes, row b's slice at b * kRowBytes.
+  uint8_t* wring = reinterpret_cast<uint8_t*>(sA_raw) + W::kSmemBytes +
+                   static_cast<size_t>(warp) * L::kStages * L::kWarpBytes;
+  const int nwin = (k + W::kK - 1) / W::kK;
+  // Window `win` of the warp's eight rows into its ring stage, as one
+  // asynchronous group (an empty group past the last window keeps the
+  // group accounting uniform). Instruction i covers rows i*kRowsPerInstr..
+  // of the eight, lane l the bytes [l' * 16 * kVecsPerLane, ...) of its
+  // row's slice (l' = lane within the row's lanes); k % 64 == 0 keeps a
+  // row's slice whole or absent past k.
+  auto issue = [&](int win) {
+    if constexpr (L::kOn) {
+      if (win < nwin) {
+        uint8_t* dst = wring + static_cast<size_t>(win % L::kStages) * L::kWarpBytes;
+        const size_t kb = static_cast<size_t>(win) * W::kK * (kFp8 ? 1 : 2);  // the window's byte offset in a row
+#pragma unroll
+        for (int i = 0; i < L::kInstrs; ++i) {
+          const int rb = i * L::kRowsPerInstr + lane / L::kLanesPerRow;  // the row within the warp's eight
+          const int u = (lane % L::kLanesPerRow) * L::kVecsPerLane;      // the lane's first 16-byte unit in the slice
+          const int wrow = n0 + rb;
+          const bool in = wrow < n && (kb + static_cast<size_t>(u) * 16) < static_cast<size_t>(k) * (kFp8 ? 1 : 2);
+          const uint8_t* src = static_cast<const uint8_t*>(wv) +
+                               (in ? static_cast<size_t>(wrow) * k * (kFp8 ? 1 : 2) + kb + static_cast<size_t>(u) * 16 : 0);
+#pragma unroll
+          for (int v = 0; v < L::kVecsPerLane; ++v)
+            cp_async_16(dst + static_cast<size_t>(rb) * L::kRowBytes +
+                            static_cast<size_t>((u + v) ^ ((rb & 1) * L::kSwz)) * 16,
+                        src + v * 16, in);
+        }
+      }
+      cp_async_commit();
+    }
+  };
+  if constexpr (L::kOn) {
+#pragma unroll
+    for (int s0 = 0; s0 < L::kStages - 1; ++s0) issue(s0);
+  }
   // The first window's activations, then per window: issue the weight
   // loads, stage the NEXT window's activations, consume, one barrier.
-  stage_a<kTiles, F::kLaneUnits>(act, act_stride, m, k, 0, sA[0]);
+  // Rows past m never change: zeroed once in both buffers, so a window's
+  // staging touches only the live rows (a sixteenth of the stores at one row).
+  zero_rows<kTiles, kFp8, F::kLaneUnits, kW>(m, sA[0]);
+  zero_rows<kTiles, kFp8, F::kLaneUnits, kW>(m, sA[1]);
+  stage_a<kTiles, kFp8, F::kLaneUnits, kW>(act, act_stride, m, k, 0, sA[0]);
   __syncthreads();
   int buf = 0;
   for (int base = 0; base < k; base += W::kK, buf ^= 1) {
     uint4 wv4[kGroups][F::kVecs];
+    if constexpr (L::kOn) {
+      // Keep kStages - 1 windows in flight: window base + (kStages - 1)
+      // into the stage consumed last window (its reads finished before the
+      // previous window's barrier), then wait for this window's group.
+      const int win = base / W::kK;
+      issue(win + L::kStages - 1);
+      cp_async_wait<L::kStages - 1>();
+      __syncwarp();  // every lane's copies of this window visible to the warp
+      stage_a<kTiles, kFp8, F::kLaneUnits, kW>(act, act_stride, m, k, base + W::kK, sA[buf ^ 1]);
+      // The quad layout: lane (r, t) takes its run of group g (16 fp8 or 8 bf16
+      // k per vector) out of row r's slice.
+      const uint8_t* wbuf = wring + static_cast<size_t>(win % L::kStages) * L::kWarpBytes;
+#pragma unroll
+      for (int g = 0; g < kGroups; ++g) {
+        const int u0 = (g * F::kQuadSpan + t * F::kLaneK) * (kFp8 ? 1 : 2) / 16;
+#pragma unroll
+        for (int v = 0; v < F::kVecs; ++v)
+          wv4[g][v] = *reinterpret_cast<const uint4*>(wbuf + static_cast<size_t>(r) * L::kRowBytes +
+                                                      static_cast<size_t>((u0 + v) ^ ((r & 1) * L::kSwz)) * 16);
+      }
+    } else {
 #pragma unroll
     for (int g = 0; g < kGroups; ++g) {
       const int c0 = base + g * F::kQuadSpan + t * F::kLaneK;  // this lane's run (k % 64 == 0: whole or none)
@@ -164,7 +297,8 @@ __global__ __launch_bounds__(kThreads, 2) void mma_gemv_kernel(const uint16_t* _
 #pragma unroll
       for (int v = 0; v < F::kVecs; ++v) wv4[g][v] = in ? p[v] : make_uint4(0u, 0u, 0u, 0u);
     }
-    stage_a<kTiles, F::kLaneUnits>(act, act_stride, m, k, base + W::kK, sA[buf ^ 1]);
+    stage_a<kTiles, kFp8, F::kLaneUnits, kW>(act, act_stride, m, k, base + W::kK, sA[buf ^ 1]);
+    }
     const uint16_t* sAc = sA[buf];
 #pragma unroll
     for (int g = 0; g < kGroups; ++g) {
@@ -218,6 +352,47 @@ __global__ __launch_bounds__(kThreads, 2) void mma_gemv_kernel(const uint16_t* _
   }
 }
 
+// One decode form at one width: the shared-memory opt-in once per
+// instantiation (the A windows + the warp weight buffers exceed the default
+// budget at the wide widths).
+template <int kTiles, bool kFp8, int kW, typename OutT>
+void launch_decode_form(const uint16_t* a, size_t act_stride, const void* w, const float* scales, OutT* o,
+                        int rows, int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream) {
+  using L = WarpLoads<kTiles, kFp8, kW>;
+  static bool opted_in = false;
+  if (!opted_in) {
+    DGPP_CUDA_OK(cudaFuncSetAttribute(mma_gemv_kernel<kTiles, kFp8, kW, OutT>,
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                      static_cast<int>(L::kSmemBytes)));
+    opted_in = true;
+  }
+  const dim3 grid((n + kW * kRowsPerWarp - 1) / (kW * kRowsPerWarp));
+  mma_gemv_kernel<kTiles, kFp8, kW, OutT><<<grid, kW * 32, L::kSmemBytes, stream>>>(
+      a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
+}
+// The decode forms' width from n: the widest whose grid fills the resident
+// blocks (n >= 6144 rows: eight warps; [2048, 6144): four; [1024, 2048):
+// two; under 1024: one).
+// The decode forms' width from n (mma_gemv_test's sweep over the DSA and
+// attention shapes, 2026-09-14): eight warps from 4096 rows, four from
+// 1024, two under (never one: a lone warp per block is issue-bound — the
+// [576 x 6144] site at 16 rows 53 us at one warp, 37 at two, 44 at four).
+int g_mma_decode_width = 0;  // mma_gemv_set_decode_width: 0 the rule, else a fixed width (the sweep)
+template <int kTiles, bool kFp8, typename OutT>
+void launch_decode(const uint16_t* a, size_t act_stride, const void* w, const float* scales, OutT* o, int rows,
+                   int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream) {
+  const int warps = (n + kRowsPerWarp - 1) / kRowsPerWarp;
+  const int width = g_mma_decode_width > 0 ? g_mma_decode_width : warps >= 512 ? 8 : warps >= 128 ? 4 : 2;
+  if (width == 8)
+    launch_decode_form<kTiles, kFp8, 8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+  else if (width == 4)
+    launch_decode_form<kTiles, kFp8, 4, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+  else if (width == 2)
+    launch_decode_form<kTiles, kFp8, 2, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+  else
+    launch_decode_form<kTiles, kFp8, 1, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
+}
+
 template <bool kFp8, typename OutT>
 void launch(const uint16_t* act, size_t act_stride, const void* w, const float* scales, OutT* out,
             int m, int n, int k, size_t out_stride, int rs, int cs, cudaStream_t stream) {
@@ -227,24 +402,31 @@ void launch(const uint16_t* act, size_t act_stride, const void* w, const float* 
   if (out_stride == 0) out_stride = static_cast<size_t>(n);
   if (out_stride < static_cast<size_t>(n)) throw std::invalid_argument("mma_gemv: out stride");
   if (kFp8 && (scales == nullptr || cs < 4)) throw std::invalid_argument("mma_gemv: fp8 scales");
-  const dim3 grid((n + kWarps * kRowsPerWarp - 1) / (kWarps * kRowsPerWarp));
+  constexpr int kWideThreads = kWideWarps * 32;
+  const dim3 grid((n + kWideWarps * kRowsPerWarp - 1) / (kWideWarps * kRowsPerWarp));
   // Groups of at most kMmaGemvMaxRowsPerLaunch rows; the form by the group's rows.
   for (int row0 = 0; row0 < m; row0 += kMmaGemvMaxRowsPerLaunch) {
     const int rows = std::min(kMmaGemvMaxRowsPerLaunch, m - row0);
     const uint16_t* a = act + static_cast<size_t>(row0) * act_stride;
     OutT* o = out + static_cast<size_t>(row0) * out_stride;
     if (rows <= 16)
-      mma_gemv_kernel<1, kFp8, OutT><<<grid, kThreads, Win<1>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
+      launch_decode<1, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
     else if (rows <= 32)
-      mma_gemv_kernel<2, kFp8, OutT><<<grid, kThreads, Win<2>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
+      launch_decode<2, kFp8, OutT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream);
     else if (rows <= 64)
-      mma_gemv_kernel<4, kFp8, OutT><<<grid, kThreads, Win<4>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
+      mma_gemv_kernel<4, kFp8, kWideWarps, OutT><<<grid, kWideThreads, Win<4, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
     else
-      mma_gemv_kernel<8, kFp8, OutT><<<grid, kThreads, Win<8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
+      mma_gemv_kernel<8, kFp8, kWideWarps, OutT><<<grid, kWideThreads, Win<8, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs);
     DGPP_CUDA_OK(cudaGetLastError());
   }
 }
 }  // namespace
+
+void mma_gemv_set_decode_width(int warps) {
+  if (warps != 0 && warps != 1 && warps != 2 && warps != 4 && warps != 8)
+    throw std::invalid_argument("mma_gemv_set_decode_width: 0, 1, 2, 4 or 8");
+  g_mma_decode_width = warps;
+}
 
 bool mma_gemv_shape_ok(const void* w, const void* act, size_t act_stride, int m, int k) {
   return m >= 1 && k > 0 && (k % 64) == 0 &&

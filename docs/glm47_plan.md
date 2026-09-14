@@ -290,6 +290,19 @@ projections per rank. Depth 1 stays the recipe; the lever is the
 projections' bytes per pass (wider chunks or a row-independent tensor-core
 kernel). Numbers: docs/measurements.md.
 
+The lever landed 2026-09-14, from the DeepSeek work: the dense lowering
+follows the rows of a launch (`kernels/gemm.hpp dense_gemv_rows`, the site
+setting `DGPP_DENSE_GEMV_ROWS`, default 4) — the GEMV chunks to four rows,
+cuBLASLt's algorithm above (at the weight-stream floor from six rows on the
+attention shapes: q_proj 551–573 µs for 6–32 rows against the chunks'
+1067–4287). T = 1 keeps its chain; a batched step's rows are
+tolerance-equal to the scalar's (the engine gates' near-tie rule,
+docs/testing.md). The group prefill came with it
+(`Glm4Model::prefill_group_span_limit`): queued cold prompts prefill as the
+spans of one walk — the attention rows carried their own request ids and
+positions already — bitwise the prefills alone on the fixture. Fabric
+numbers: docs/measurements.md ("the session-core families").
+
 Design notes that changed while building: the attention's split-KV
 workspace is sized to `kDecodeRows x n_split` (32 splits by default,
 `DGPP_GLM4_ATTN_SPLITS`), not to the prefill rows; the python reference

@@ -584,3 +584,17 @@ Every item keeps the discipline the port was built with: an oracle or a
 bitwise gate before the fabric run, `ctest -R qwen` green, the greedy
 transcripts compared across the knob, and `scripts/fabric_glm_regression.sh`
 whenever a shared kernel moves.
+
+## 8. Carried from the DeepSeek work (2026-09-14)
+
+The dense lowering by rows (`kernels/gemm.hpp dense_gemv_rows`, the site
+setting `DGPP_DENSE_GEMV_ROWS`, default 4): the fused multi-problem GEMV
+launches and the chunks keep rows one to four (T = 1 unchanged), bf16 rows
+above take cuBLASLt's algorithm, fp8 rows (the `engine.dense_weights = fp8`
+stack and the shared expert) the streaming tensor-core GEMM to 256 rows
+(`QwenGemmWorkspace::gemv_rows / mma_from_rows`). The group prefill
+(`QwenModel::prefill_group_span_limit`): queued cold prompts prefill as the
+spans of one walk — the GDN scan and the QSA attention per span over their
+own state and cache, the PLE, GR, MoE and head over every row. Gate:
+`qwen_decode_test`'s group section. Numbers: docs/measurements.md ("the
+session-core families").

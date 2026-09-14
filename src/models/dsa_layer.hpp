@@ -45,6 +45,7 @@
 //     exhaustion (prefill is a control-path operation).
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -150,9 +151,13 @@ class DsaLayer {
   //   hidden_in: bf16 [tokens, hidden] (must not alias `out`)
   //   out:       bf16 [tokens, hidden]
   // Grows the request's block table via the pool; throws on exhaustion.
+  //   row_base: the call's rows in the selection scratch (a group prefill's
+  //             spans, 2026-09-14: span s's rows at its offset in the walk,
+  //             so a selection-reusing layer finds every span's selection
+  //             where the indexed layer left it; 0 for a one-request chunk)
   void enqueue_prefill(const void* hidden_in, DsaStatePool& state, int layer,
                        int req, int64_t token_start, int tokens, void* out,
-                       cudaStream_t stream);
+                       cudaStream_t stream, int row_base = 0);
 
   // Decodes a batch of `tokens` rows over `num_requests` requests.
   //   hidden_in: bf16 [tokens, hidden] (padding rows: any input — kernels
@@ -270,8 +275,16 @@ class DsaLayer {
   void project_out(void* out, int tokens, cudaStream_t stream);
   void validate_weights(const DsaLayerWeights& w) const;
   // The selection-reuse contract (plan D4): the last indexed enqueue's
-  // call shape, checked by a reusing enqueue.
+  // call shape at each selection-scratch base, checked by a reusing
+  // enqueue at the same base (a group prefill's spans note one each).
   enum class SelKind { kNone, kPrefill, kDecode };
+  struct SelNote {
+    SelKind kind = SelKind::kNone;
+    int rows = 0;
+    int64_t start = -1;
+    int req = -1;
+    const int64_t* pos = nullptr;
+  };
   void note_selection(SelKind kind, int rows, int64_t start, int req,
                       const int64_t* pos);
   void require_selection(SelKind kind, int rows, int64_t start, int req,
@@ -325,11 +338,8 @@ class DsaLayer {
   int64_t gather_zeroed_ = 0; // gather high-water mark already zeroed
   float logit_scale_ = 0.f;   // 128^-0.5 * heads^-0.5, reference-pinned
   float attn_scale_ = 0.f;    // (nope + rope)^-0.5
-  SelKind sel_kind_ = SelKind::kNone;
-  int sel_rows_ = 0;
-  int64_t sel_start_ = -1;
-  int sel_req_ = -1;
-  const int64_t* sel_pos_ = nullptr;
+  std::unordered_map<int, SelNote> sel_notes_;  // by selection-scratch base
+  int sel_base_ = 0;  // this call's rows in topk_/counts_ (enqueue_prefill's row_base; decode 0)
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;
 

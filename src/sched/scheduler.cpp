@@ -417,24 +417,104 @@ const Scheduler::Result* Scheduler::find(const std::string& id) const {
   return nullptr;
 }
 
-void Scheduler::admit(int arrival) {
+int Scheduler::admit_prepare(int arrival) {
   Request& r = requests_[static_cast<size_t>(arrival)];
   const int slot = free_slot();
   if (slot < 0)
     throw std::logic_error("Scheduler: admit without a free slot");
-  const int64_t reserve = reserve_blocks(r);
   // The spec lands on the slot before its first pick (the prefill's); the
   // grammar with it, so the prefill pick is the first constrained position.
   engine_->configure_sampling(slot, r.spec.sampling, r.spec.seed);
   engine_->configure_logprobs(slot, r.spec.logprobs);
   engine_->configure_constraint(slot, r.spec.grammar);
   engine_->configure_logit_bias(slot, r.spec.logit_bias);
+  // The slot is taken for the group's other members' free_slot() scans.
+  slots_[static_cast<size_t>(slot)] = arrival;
+  return slot;
+}
+
+std::vector<int> Scheduler::admissible_group(int first) {
+  std::vector<int> group;
+  const int64_t span_limit = engine_->prefill_group_span_limit();
+  const int64_t total_limit = engine_->prefill_group_total_limit();
+  if (span_limit <= 0 || total_limit <= 0) return group;
+  const auto groupable = [&](const Request& r) {
+    if (r.state != State::kQueued) return false;
+    const int64_t P = static_cast<int64_t>(r.spec.prompt.size());
+    if (P <= 0 || P > span_limit) return false;
+    if (!cache_on(r)) return true;
+    const PrefixPlan plan = plan_prefix(r);
+    return plan.attach_entry < 0 && plan.snap_position <= 0;
+  };
+  if (!groupable(requests_[static_cast<size_t>(first)])) return group;
+  group.push_back(first);
+  int64_t total = static_cast<int64_t>(requests_[static_cast<size_t>(first)].spec.prompt.size());
+  int64_t free_blocks = engine_->pool_blocks_total() - engine_->pool_blocks_in_use() -
+                        reserve_blocks(requests_[static_cast<size_t>(first)]);
+  int open_slots = static_cast<int>(std::count(slots_.begin(), slots_.end(), -1)) - 1;
+  for (size_t i = static_cast<size_t>(first) + 1; i < requests_.size() && open_slots > 0; ++i) {
+    const Request& r = requests_[i];
+    if (!groupable(r)) continue;
+    const int64_t P = static_cast<int64_t>(r.spec.prompt.size());
+    if (total + P > total_limit) continue;
+    const int64_t need = reserve_blocks(r);
+    if (need > free_blocks) continue;
+    group.push_back(static_cast<int>(i));
+    total += P;
+    free_blocks -= need;
+    --open_slots;
+  }
+  return group;
+}
+
+void Scheduler::admit_group(const std::vector<int>& arrivals) {
+  if (arrivals.size() < 2) throw std::logic_error("Scheduler: a group admission of fewer than two");
+  std::vector<int> slots;
+  std::vector<const std::vector<int64_t>*> prompts;
+  for (const int arrival : arrivals) {
+    slots.push_back(admit_prepare(arrival));
+    prompts.push_back(&requests_[static_cast<size_t>(arrival)].spec.prompt);
+  }
+  const auto t_prefill = std::chrono::steady_clock::now();
+  std::vector<int32_t> tokens;
+  try {
+    tokens = engine_->prefill_group(slots, prompts);
+  } catch (...) {
+    for (const int slot : slots) slots_[static_cast<size_t>(slot)] = -1;
+    throw;
+  }
+  const double prefill_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t_prefill)
+                                .count();
+  if (tokens.size() != arrivals.size())
+    throw std::runtime_error("Scheduler: the engine's group prefill returned " + std::to_string(tokens.size()) +
+                             " tokens for " + std::to_string(arrivals.size()) + " requests");
+  for (size_t i = 0; i < arrivals.size(); ++i) {
+    Request& r = requests_[static_cast<size_t>(arrivals[i])];
+    if (cache_on(r)) {
+      ++cache_.stats().misses;
+      log_prefix_miss(r);
+    }
+    // The group's wall on every member: each waited for the whole forward.
+    admit_finish(arrivals[i], slots[i], tokens[i], prefill_ms, 0);
+  }
+  DGPP_LOG_INFO("sched: {} requests admitted together in one prefill ({:.0f} ms)", arrivals.size(), prefill_ms);
+}
+
+void Scheduler::admit(int arrival) {
+  Request& r = requests_[static_cast<size_t>(arrival)];
+  const int slot = admit_prepare(arrival);
   int32_t token = -1;
   int64_t attached = 0;  // prompt tokens an attach skipped (meters)
   const auto t_prefill = std::chrono::steady_clock::now();
   if (!cache_on(r)) {
     // No cache for this request: the pre-cache op, exactly.
-    token = engine_->prefill(slot, r.spec.prompt);
+    try {
+      token = engine_->prefill(slot, r.spec.prompt);
+    } catch (...) {
+      slots_[static_cast<size_t>(slot)] = -1;
+      throw;
+    }
   } else {
     // The prefix cache's plan (M7): attach to the deepest matching entry at
     // one of the prompt's cuts, and take a new entry at the deepest cut
@@ -467,6 +547,7 @@ void Scheduler::admit(int arrival) {
     try {
       token = engine_->prefill_cached(slot, r.spec.prompt, &pp);
     } catch (...) {
+      slots_[static_cast<size_t>(slot)] = -1;
       if (plan.attach_entry >= 0) cache_.detach(plan.attach_entry);
       if (snap_slot >= 0) cache_.give_back_slot(snap_slot);
       throw;
@@ -498,6 +579,13 @@ void Scheduler::admit(int arrival) {
   const double prefill_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - t_prefill)
                                 .count();
+  admit_finish(arrival, slot, token, prefill_ms, attached);
+}
+
+void Scheduler::admit_finish(int arrival, int slot, int32_t token, double prefill_ms, int64_t attached) {
+  Request& r = requests_[static_cast<size_t>(arrival)];
+  const int64_t reserve = reserve_blocks(r);
+  const auto t_prefill = std::chrono::steady_clock::now();
   prefill_ms_ += prefill_ms;
   r.admitted = true;
   r.admitted_at = t_prefill;
@@ -507,6 +595,7 @@ void Scheduler::admit(int arrival) {
   prompt_tokens_ += static_cast<int64_t>(r.spec.prompt.size());
   prompt_tokens_computed_ += static_cast<int64_t>(r.spec.prompt.size()) - attached;
   if (token < 0) {
+    slots_[static_cast<size_t>(slot)] = -1;
     engine_->close(slot);
     throw std::runtime_error("Scheduler: engine prefill returned token " +
                              std::to_string(token) + " for request '" +
@@ -519,6 +608,7 @@ void Scheduler::admit(int arrival) {
   try {
     engine_->reserve(slot, reserved);
   } catch (...) {
+    slots_[static_cast<size_t>(slot)] = -1;
     engine_->close(slot);
     throw;
   }
@@ -886,7 +976,14 @@ bool Scheduler::quantum() {
   // read-in.
   const int admit_arrival = next_admissible();
   if (admit_arrival >= 0) {
-    admit(admit_arrival);
+    // Several queued cold prompts prefill as one forward when the engine
+    // takes groups (the six-stream arrival: one read-in instead of six,
+    // with a step between each).
+    const std::vector<int> group = admissible_group(admit_arrival);
+    if (group.size() >= 2)
+      admit_group(group);
+    else
+      admit(admit_arrival);
     progressed = true;
   } else if (any_queued) {
     // Deferral bookkeeping: log the head of the queue once per

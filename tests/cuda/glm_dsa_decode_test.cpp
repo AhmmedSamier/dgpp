@@ -269,6 +269,46 @@ int run_fixture(const std::string& dir) {
     require(m.session_position(0) == 0, "close: position");
     std::printf("[ OK ] prefill last row bitwise the cold forward (%zu tokens)\n", A.size());
   }
+  // 1b. A group prefill — A and B as the spans of one walk — against the
+  //     prefills alone (2026-09-14): the DSA attention runs per span over its own request's cache and selection state;
+  //     the dense sites see 40 rows instead of 23 and 17 (cuBLASLt's
+  //     algorithm at each: kernels/gemm.hpp dense_gemv_rows), so the rows
+  //     are tolerance-equal under the row compare's l2 and near-tie rule,
+  //     and a decode off the group's cache is audited against the
+  //     re-forward like any other.
+  {
+    const GlmDsaModel::Outputs pa = m.session_prefill(0, A);
+    m.session_close(0);
+    const GlmDsaModel::Outputs pb = m.session_prefill(1, B);
+    m.session_close(1);
+    const std::vector<GlmDsaModel::Outputs> g = m.session_prefill_group({0, 1}, {&A, &B});
+    require(g.size() == 2 && g[0].logits.size() == static_cast<size_t>(V) && g[1].logits.size() == static_cast<size_t>(V),
+            "group prefill: one row of logits per span");
+    require(m.session_position(0) == static_cast<int64_t>(A.size()) && m.session_position(1) == static_cast<int64_t>(B.size()),
+            "group prefill: positions");
+    const RowCompare ca = compare_row(g[0].logits.data(), pa.logits.data(), V);
+    const RowCompare cb = compare_row(g[1].logits.data(), pb.logits.data(), V);
+    std::printf("[ .. ] group prefill (23 + 17 rows) vs the prefills alone: relative l2 %.3g / %.3g, top-1 %s / %s\n", ca.l2, cb.l2,
+                ca.top1_equal ? "equal" : ca.near_tie ? "near tie" : "DIFFERS", cb.top1_equal ? "equal" : cb.near_tie ? "near tie" : "DIFFERS");
+    require((ca.top1_equal || ca.near_tie) && (cb.top1_equal || cb.near_tie), "group prefill: a top-1 mismatch beyond the near-tie margin");
+    require(ca.l2 < 1e-1 && cb.l2 < 1e-1, "group prefill: relative l2 over budget");
+    Transcript tb;
+    int64_t pending = argmax(g[1].logits.data(), V);
+    tb.tokens.push_back(pending);
+    tb.rows.push_back(g[1].logits);
+    tb.sels.emplace_back();
+    for (int s = 0; s < 8; ++s) {
+      const GlmDsaModel::Outputs o = m.session_step(1, pending);
+      pending = argmax(o.logits.data(), V);
+      tb.tokens.push_back(pending);
+      tb.rows.push_back(o.logits);
+      tb.sels.push_back(o.dsa_selections);
+    }
+    m.session_close(0);
+    m.session_close(1);
+    const int soft = audit(m, B, tb, "decode after the group prefill", 1e-1);
+    std::printf("[ OK ] group prefill: the spans' rows and an 8-step decode off the group's cache (%d near ties)\n", soft);
+  }
 
   // 2. Incremental decode vs the re-forward — 110 steps from the 23-token
   //    prompt, so the decode rows cross the pool's 128-token block

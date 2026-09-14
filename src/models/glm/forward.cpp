@@ -116,6 +116,12 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   // The latent cache's format (validated against the geometry: the
   // quantized rows' alignment pins).
   dsa_cfg_.latent_format = kv_format;
+  // The dense sites' lowering (kernels/gemm.hpp dense_gemv_rows): the GEMV
+  // chunks to the bound, cuBLASLt's algorithm (bf16) or the streaming
+  // tensor-core GEMM (fp8: the DSA projections, the dense MLP) above it.
+  dsa_cfg_.gemm_mma_from_rows = dense_gemv_rows() + 1;
+  dense_mma_from_rows_ = dense_gemv_rows() + 1;
+  gemm_.set_decode_rows(std::min(kDecodeRows, dense_gemv_rows()));
   DsaConfig::validate_config(dsa_cfg_);
   if (max_cache_tokens < max_tokens_)
     max_cache_tokens = max_tokens_;
@@ -699,16 +705,16 @@ void GlmDiagnosticModel::enqueue_dense_mlp(
   if (dense[1].rows != dense[0].rows || dense[2].cols != dense[0].rows)
     throw std::runtime_error("forward: inconsistent dense matrices");
   launch_scale_gemm_bf16(x, H, dense[0].payload, dense[0].scales, dense_g_,
-                          tokens, I, H, stream);
+                          tokens, I, H, stream, 0, dense_mma_from_rows_);
   launch_scale_gemm_bf16(x, H, dense[1].payload, dense[1].scales, dense_u_,
-                          tokens, I, H, stream);
+                          tokens, I, H, stream, 0, dense_mma_from_rows_);
   // Same asymmetric swiglu clamps as the experts (the reference MLP and
   // experts share the clamp choreography; DESIGN §7.4).
   launch_moe_swiglu_clamp(dense_g_, dense_u_, dense_act_,
                           static_cast<int64_t>(tokens) * I,
                           cfg_.swiglu_limit, stream);
   launch_scale_gemm_bf16(dense_act_, I, dense[2].payload, dense[2].scales,
-                          out, tokens, H, I, stream);
+                          out, tokens, H, I, stream, 0, dense_mma_from_rows_);
 }
 
 // Shared stack runner. `layer_inputs` (isolated mode) overrides the stream

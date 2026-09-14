@@ -318,17 +318,19 @@ void DsaLayer::validate_weights(const DsaLayerWeights& w) const {
 
 void DsaLayer::note_selection(SelKind kind, int rows, int64_t start, int req,
                               const int64_t* pos) {
-  sel_kind_ = kind;
-  sel_rows_ = rows;
-  sel_start_ = start;
-  sel_req_ = req;
-  sel_pos_ = pos;
+  SelNote& n = sel_notes_[sel_base_];
+  n.kind = kind;
+  n.rows = rows;
+  n.start = start;
+  n.req = req;
+  n.pos = pos;
 }
 
 void DsaLayer::require_selection(SelKind kind, int rows, int64_t start, int req,
                                  const int64_t* pos) const {
-  if (sel_kind_ != kind || sel_rows_ != rows || sel_start_ != start ||
-      sel_req_ != req || sel_pos_ != pos)
+  const auto it = sel_notes_.find(sel_base_);
+  if (it == sel_notes_.end() || it->second.kind != kind || it->second.rows != rows ||
+      it->second.start != start || it->second.req != req || it->second.pos != pos)
     throw std::logic_error(
         "dsa layer: a selection-reusing enqueue must follow the indexed "
         "layer's enqueue of the same rows, chunk and request on this scratch "
@@ -399,7 +401,7 @@ void DsaLayer::project_out(void* out, int tokens, cudaStream_t stream) {
     launch_scale_gemm_bf16(static_cast<const uint16_t*>(attn_out_),
                            size_t(geo_.local_v_rows), w_.o_proj_q.payload,
                            w_.o_proj_q.scales, static_cast<uint16_t*>(out), tokens,
-                           cfg_.hidden, geo_.local_v_rows, stream);
+                           cfg_.hidden, geo_.local_v_rows, stream, 0, cfg_.gemm_mma_from_rows);
   else
     gemm_.matmul(attn_out_, w_.o_proj, out, tokens, cfg_.hidden,
                  geo_.local_v_rows, DType::BF16, GemmOut::BF16,
@@ -434,10 +436,10 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
     uint16_t* qkv = static_cast<uint16_t*>(qkv_);
     launch_scale_gemm_bf16(h, size_t(hid), w_.q_a_q.payload, w_.q_a_q.scales,
                            qkv, tokens, cfg_.q_lora_rank, hid, stream,
-                           size_t(qkv_cols));
+                           size_t(qkv_cols), cfg_.gemm_mma_from_rows);
     launch_scale_gemm_bf16(h, size_t(hid), w_.kv_a_q.payload, w_.kv_a_q.scales,
                            qkv + cfg_.q_lora_rank, tokens, cfg_.kv_lora_rank, hid,
-                           stream, size_t(qkv_cols));
+                           stream, size_t(qkv_cols), cfg_.gemm_mma_from_rows);
   } else {
     gemm_.matmul(hidden_in, w_.qkv_a, qkv_, tokens, qkv_cols, hid, DType::BF16,
                  GemmOut::BF16, size_t(hid), gemm_ws_, gemm_ws_bytes_, stream);
@@ -459,7 +461,7 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
     launch_scale_gemm_bf16(static_cast<const uint16_t*>(q_c_), size_t(cfg_.q_lora_rank),
                            w_.q_b_q.payload, w_.q_b_q.scales,
                            static_cast<uint16_t*>(q_), tokens, geo_.local_q_rows,
-                           cfg_.q_lora_rank, stream);
+                           cfg_.q_lora_rank, stream, 0, cfg_.gemm_mma_from_rows);
   else
     gemm_.matmul(q_c_, w_.q_b, q_, tokens, geo_.local_q_rows, cfg_.q_lora_rank,
                  DType::BF16, GemmOut::BF16, size_t(cfg_.q_lora_rank), gemm_ws_,
@@ -511,8 +513,8 @@ void DsaLayer::attend_tile(DsaStatePool& state, int layer,
                  geo_.local_heads, cfg_.qk_nope_head_dim, cfg_.v_head_dim,
                  cfg_.kv_lora_rank, stream, geo_.rope_dim, /*tensor_cores=*/false);
     dsa_attn_partial(q_tilde_, state.latent(layer), req_ids + a0,
-                     topk_ + a0 * geo_.max_selected, geo_.max_selected,
-                     counts_ + a0, arows, n_split, geo_.local_heads,
+                     topk_ + (sel_base_ + a0) * geo_.max_selected, geo_.max_selected,
+                     counts_ + sel_base_ + a0, arows, n_split, geo_.local_heads,
                      cfg_.kv_lora_rank, cfg_.block_tokens, state.block_tables(),
                      int(state.total_blocks()), attn_scale_, m_ws_, l_ws_,
                      c_ws_, stream, cfg_.latent_format, state.latent_scale(layer),
@@ -556,8 +558,8 @@ void DsaLayer::attend_dense(DsaStatePool& state, int layer,
     dsa_debug_sync(stream, "absorb_q");
     const bool launched =
         listed ? dsa_attn_listed(q_tilde_, state.latent(layer), req_ids + a0,
-                                 topk_ + a0 * geo_.max_selected, geo_.max_selected,
-                                 counts_ + a0, arows, n_split,
+                                 topk_ + (sel_base_ + a0) * geo_.max_selected, geo_.max_selected,
+                                 counts_ + sel_base_ + a0, arows, n_split,
                                  geo_.local_heads, cfg_.kv_lora_rank,
                                  cfg_.block_tokens, state.block_tables(),
                                  int(state.total_blocks()), attn_scale_, m_ws_,
@@ -607,7 +609,7 @@ void DsaLayer::attend_dense(DsaStatePool& state, int layer,
 
 void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
                                int layer, int req, int64_t token_start,
-                               int tokens, void* out, cudaStream_t stream) {
+                               int tokens, void* out, cudaStream_t stream, int row_base) {
   validate_pool(state, layer);
   if (tokens <= 0 || tokens > max_tokens_)
     throw std::invalid_argument("dsa layer: token count out of range");
@@ -627,6 +629,9 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
   // continuations against the unchunked prefill and through decode steps.
   if (!hidden_in || !out)
     throw std::invalid_argument("dsa layer: null buffer");
+  if (row_base < 0 || row_base + tokens > max_tokens_)
+    throw std::invalid_argument("dsa layer: the selection scratch base puts the rows past max_tokens");
+  sel_base_ = row_base;
 
   if (!state.ensure_request_blocks(req, token_start + tokens, stream))
     throw std::runtime_error("dsa layer: cache pool exhausted during prefill");
@@ -725,7 +730,7 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
                        w_folded_ + size_t(row0) * heads, gather_scale_,
                        pos_dev_ + row0, rows, n_gather, heads, geo_.select_k,
                        kpool, geo_.max_selected,
-                       topk_ + size_t(row0) * geo_.max_selected, counts_ + row0,
+                       topk_ + size_t(sel_base_ + row0) * geo_.max_selected, counts_ + sel_base_ + row0,
                        stream, cfg_.index_relu != 0);
   }
   note_selection(SelKind::kPrefill, tokens, token_start, req, nullptr);
@@ -767,6 +772,7 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
                               cudaStream_t stream,
                               WeightPrefetcher* prefetch,
                               void* tail_snapshots) {
+  sel_base_ = 0;  // the decode rows at the scratch's start
   validate_pool(state, layer);
   if (tokens <= 0 || tokens > max_decode_rows_)
     throw std::invalid_argument("dsa layer: decode rows out of range");

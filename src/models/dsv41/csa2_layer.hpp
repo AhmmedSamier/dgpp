@@ -26,6 +26,7 @@
 // call, pool-aligned chunks, host staging of positions).
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -103,8 +104,12 @@ class Csa2Layer {
   // bounded decoder's replay start; 0 for the context); `publish` false: a
   // kv source's entries were published before (publish_prefill) — the
   // rows attend and select only (the replay segment).
+  // `row_base`: the chunk's first row within the walk's rows when several
+  // requests' chunks share one walk (the group prefill): the selection
+  // state the following layers reuse (topk_, counts_, the candidate pool)
+  // and its shape record live at that offset, so every span keeps its own.
   void enqueue_prefill(const void* hidden_in, Csa2StatePool& pool, int req, int64_t pos0, int tokens,
-                       void* out, cudaStream_t stream, int64_t floor = 0, bool publish = true);
+                       void* out, cudaStream_t stream, int64_t floor = 0, bool publish = true, int row_base = 0);
   // A kv source's publish alone over the chunk's rows: the compressor and
   // the index keys into the pool (the bounded prefill publishes the
   // decoder's global KV for every prompt row, then runs the segment).
@@ -218,7 +223,7 @@ class Csa2Layer {
   void attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, const uint8_t* win_cache, int win_block_tokens,
                    const int32_t* win_table, const int32_t* req_ids_main, const int64_t* pos, int row0, int rows,
                    int n_split_main, cudaStream_t stream, const int32_t* list, int list_stride,
-                   const int32_t* counts, bool split_window = false);
+                   const int32_t* counts, bool split_window = false, int sel_base = 0);
   void project_out(int tokens, void* out, cudaStream_t stream);
   void validate_pool(const Csa2StatePool& pool) const;
 
@@ -236,7 +241,11 @@ class Csa2Layer {
   int ws_slots_ = 0;
   int ws_win_rows_ = 0;
   float attn_scale_ = 0.f;
-  SelShape sel_{}, cand_shape_{};
+  // The selection and candidate-pool shape records, per row base (0: a
+  // single-request walk; a group prefill's spans at their first rows).
+  std::unordered_map<int, SelShape> sel_by_base_, cand_by_base_;
+  SelShape& sel_at(int base) { return sel_by_base_[base]; }
+  SelShape& cand_at(int base) { return cand_by_base_[base]; }
   int dbg_logits_rows_ = 0;
   int64_t dbg_logits_stride_ = 0, dbg_logits_entries_ = 0;
   void* gemm_ws_ = nullptr;

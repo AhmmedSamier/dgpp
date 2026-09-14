@@ -83,6 +83,25 @@ inline int scheduled_verify_depth(const float* conf_logit, int block, float row_
 // justifies; the mean rule stops where the batch as a whole stops paying.
 // Every slot commits its greedy prefix at any depth, so this is throughput
 // only, never output. Deterministic across ranks like the scalar rule.
+// The adaptive lambda (D8a): the Dinkelbach multiplier is the achieved
+// aggregate throughput, which grows with concurrency (0.048 tok/ms at one
+// stream, 0.087 at six on the 2026-09-14 fabric), so one configured
+// constant serves one concurrency. Tracked as an EWMA of each MTP step's
+// committed tokens over its MODELED time base + rows.row (never wall
+// clock: the ranks' clocks differ and would derive different depths) —
+// every input is replicated (the verdict's committed counts, the step's
+// rows, the configured constants) and the arithmetic is one fixed
+// sequence of doubles, so every rank holds the same lambda. The caller
+// floors it at the configured lambda (a plain step's reservation rate at
+// the least).
+inline double verify_lambda_update(double lambda, int committed, int rows, float base_ms,
+                                   float row_ms, double alpha) {
+  const double t = static_cast<double>(base_ms) + static_cast<double>(rows) * row_ms;
+  if (!(t > 0.0) || committed < 0) return lambda;
+  const double sample = static_cast<double>(committed) / t;
+  return lambda + alpha * (sample - lambda);
+}
+
 inline int scheduled_verify_depth_batch(const float* const* conf_logit, int slots, int block,
                                         float row_ms, float lambda_tok_per_ms) {
   if (block <= 0 || slots <= 0) return 0;

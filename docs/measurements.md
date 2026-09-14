@@ -539,8 +539,20 @@ the prefill's experts (the weights once per 64-row tile instead of once
 per 4 rows: C6 77.9 → 82.7, cold prefill 708 → 1,286 tok/s), and the
 batched replay's own depth rule (the mean survival over the live slots
 instead of the deepest slot's depth: C6 82.7 → 84.5 at λ 0.045, 86.9 at
-λ 0.08 — the fixed point grows with concurrency; a per-concurrency λ is
-the next item). The
+λ 0.08 — the fixed point grows with concurrency), then the adaptive λ
+(an EWMA of committed tokens over the modeled step time, floored at the
+configured λ, replicated arithmetic: C1 48.2 / C2 66.8 / C6 87.0 with one
+configuration, the default now), and the group prefill (queued cold
+prompts within one window as the spans of one forward: C2 66.8 → 71.8, C6
+87.0 → 103.6, C6 TTFT 1.23 → 0.90 s; a burst of six short prompts is one
+~540 ms forward; then spans of any width — each span's decoder segment
+packed — C6 106.4, TTFT 0.87 s). The six-slot world's day: C1 43.2 →
+47.9, C2 53.0 → 71.6, C6 58.9 → 106.4 against the recipe's 37.95 / 64.30
+/ 131.86; cold prefill 568 → 1,235 tok/s. The prefill's eager boundary
+folds are the next cost: a 60-row fold is ~1.5 ms of wall (the one-block
+staging copies and fold through pinned memory, the ranks' spread, and the
+host noticing the finished kernel 0.2–0.9 ms late), 93 per pass — the
+GPU-driven eager fold is the designed next step. The
 six-stream gap to the recipe (1.7x) is the serialized per-prompt prefill
 (six arrivals prefill one after another: TTFT and stalled decode; the
 recipe batches them) and the 30-row step's composition (the MoE at its
@@ -614,6 +626,193 @@ forfeit, where DSpark's block has four. Depth 2 itself is worth it single-
 stream on GLM-5.3-Flash (code 32.7 → 28.6, math 33.8 → 30.3 ms/token) and
 not at two live requests, where its 4 slots × 3 rows exceed the family's
 fixed 8-row batch and the steps fall back to scalar replays.
+
+## The session-core families: the dense lowering by rows and the group prefill (2026-09-14)
+
+The DeepSeek work's streaming tensor-core GEMM and group prefill, carried
+to GLM-4.7, the full GLM-5.3, Qwen3.8-Flash-Next and GLM-5.3-Flash under
+the rule that T = 1 must not regress and accuracy must hold.
+
+### The bf16 interface: the chunks, cuBLASLt's algorithm, the streaming form
+
+`bf16_gemv_test`'s timing table, cold weights (four copies rotated), µs per
+product. `chunks` is the lowering before 2026-09-14 (every decode row count
+through the 4-row GEMV chunks); `chunks≤4|Lt` the new one (`set_decode_rows`
+at the dense_gemv_rows bound); `mma` the streaming tensor-core form at every
+row count (DeepSeek's lowering).
+
+| shape (GLM-4.7 attention, one rank of four) | m | chunks | chunks≤4 / Lt | mma |
+|---|---|---|---|---|
+| q_proj [12288 × 5120] | 1 | 535 | 535 | 544 |
+| | 4 | 549 | 545 | 577 |
+| | 6 | 1067 | 551 | 621 |
+| | 8 | 1061 | 573 | 619 |
+| | 12 | 1596 | 558 | 646 |
+| | 16 | 2124 | 557 | 653 |
+| | 32 | 4287 | 573 | 658 |
+| | 128 | 600 (Lt) | 600 | 875 |
+| | 2048 | 2813 (Lt) | 2734 | 14067 |
+| k/v_proj [1024 × 5120] | 1 | 45.7 | 45.7 | 52.8 |
+| | 8 | 61.0 | 50.2 | 55.0 |
+| | 16 | 90.7 | 50.6 | 56.9 |
+| o_proj [5120 × 12288] | 1 | 561 | 547 | 545 |
+| | 4 | 1079 (two chunks: K fills the smem) | 1094 | 565 |
+| | 8 | 2184 | 552 | 643 |
+| | 16 | 4295 | 566 | 684 |
+
+cuBLASLt's algorithm sits at the weight-stream floor from six rows on every
+shape (551–573 µs for 126 MB: 220–228 GB/s); the streaming form trails it
+by 10–20 % there and the chunks by 2–8×. So bf16 rows above four take the
+algorithm, and the streaming form keeps only DeepSeek's every-row role
+(its bitwise group prefill).
+
+### The fp8 dense sites: the chunks against the streaming form
+
+`mma_gemv_test`'s sweep on the full GLM-5.3 DSA shapes (one rank of four,
+block scales 128 × 128), µs per product, the streaming form at the block
+width its rule picks (eight warps from 4096 rows, four from 1024, two
+under):
+
+| shape | m = 1 chunks / mma | m = 16 chunks / mma |
+|---|---|---|
+| kv_a [576 × 6144] | 10.9 / 28.8 | 57.1 / 36.9 |
+| q_a [2048 × 6144] | 52.4 / 53.6 | 180 / 59.8 |
+| q_b [4096 × 2048] | 27.4 / 29.5 | 96.9 / 32.8 |
+| [5120 × 5120] | 110 / 111 | 354 / 115 |
+| o_proj [6144 × 4096] | 111 / 108 | 330 / 112 |
+| [12288 × 5120] | 263 / 274 | 1110 / 284 |
+| [32320 × 5120] | 687 / 731 | 2874 / 771 |
+
+At one row the streaming form is at parity on the wide sites and behind on
+the narrow ones (the 576-row site: a warp of eight rows per block leaves
+72 warps for 48 SMs, issue-bound whatever the ring depth), so the chunks
+keep rows one to four; from five rows the streaming form reads the weights
+once (the chunks once per four rows). Above 256 rows the families' 128-row
+dense kernel is ahead of the streaming form's 128-row groups (1060 against
+1099 µs at 512 rows, 3479 against 4355 at 2048 on [5120 × 5120]) and keeps
+the prefill chunks. The kernel's asynchronous weight ring (cp.async into a
+per-warp ring of two to eight window slices, 24 KB per block) replaced the
+register staging: the bf16 head [32320 × 5120] at one row 1441 µs against
+the GEMV's 1438 (was 1470 against 1437), fp8 [5120 × 5120] 122 against 119.
+A 48 KB ring measured no better at any width and cost the second block per
+SM; 512-k bf16 windows and 128-k windows at three blocks per SM were both
+slower (docs/deepseek_v41_flash_plan.md's kernel record).
+
+### The gates
+
+- GLM-4.7: a group prefill (23 + 17 rows) is bitwise the prefills alone on
+  the fixture (cuBLASLt picked the same algorithm at 40 and at 23 / 17
+  rows); the 8-step decode off the group's cache audits at 1.2e-7 relative
+  l2 against the re-forward.
+- The full GLM-5.3: the group's rows within 6.5e-3 / 0 relative l2 of the
+  prefills alone, top-1 equal; the decode off the group's cache 5.3e-3 on
+  the kept rows with one selection-flipped row (the fixture's DSA
+  selections flip on any noise).
+- Qwen3.8-Flash-Next: the group's rows bitwise the prefills alone on the
+  fixture; the decode off the group's cache 1.1e-3 relative l2 against the
+  re-forward, top-1 equal throughout.
+- GLM-5.3-Flash: the group's rows within 1.8e-7 / 1.9e-7 relative l2 of the
+  prefills alone (9 + 13 rows), top-1 equal; the four-step decode off the
+  group's cache bitwise the solo decode.
+- The engine gates' batched transcripts under the new lowering: GLM-4.7's
+  MTP batched C differs from the eager engine at position 19 of 61
+  (world-1 margin 0.31); the full GLM-5.3's sixteen-row batch differs on 6
+  of 8 slots at positions 18–57 (margins 0.02–0.91) — the amplified
+  random-weight fixtures, the same picture as world 2 against world 1 on
+  them (agreeing prefixes 11–17). The scalar transcripts stay bitwise.
+
+### Fabric A/B
+
+Four nodes, `scripts/fabric_serve_load.sh` on each family's MTP config,
+two boots per family — `DGPP_DENSE_GEMV_ROWS=256` (the old lowering: every
+decode row count through the GEMV chunks) against the default 4 — the
+greedy transcripts, the MTP acceptance per class (300 tokens) and the
+concurrency probe (`serve_load`, greedy, 320 tokens, five classes at 1, 2
+and 4 live requests). Aggregate tokens/s per class; the MTP line is the
+per-class pass time and acceptance (identical between the boots wherever
+the table says so: the scalar chain is untouched).
+
+**GLM-4.7 NVFP4, MTP depth 1 (4 slots × 2 rows = 8 at c=4)** — the 8-row
+step 129.3 → 109.4 ms (the stats line at the c=4 phase); the MTP classes
+identical (chat 59 ms/pass 84 %, code 57 / 89 %, prose 56–57 / 89 %, json
+57 / 97 %, math 57 / 94 %).
+
+| class | c=1 old / new | c=2 old / new | c=4 old / new |
+|---|---|---|---|
+| prose | 31.7 / 31.4 | 45.3 / 45.2 | 51.4 / 62.7 |
+| code | 31.9 / 31.8 | 47.3 / 47.2 | 53.5 / 65.6 |
+| json | 33.4 / 33.3 | 48.1 / 48.0 | 55.3 / 68.7 |
+| math | 32.5 / 32.6 | 46.7 / 46.6 | 52.8 / 65.3 |
+| chat | 29.5 / 29.5 | 44.4 / 43.9 | 48.7 / 62.7 |
+
+c=1 and c=2 (one and four rows: the chunks either way) at parity within
+the run noise; c=4 +22–29 % (the eight-row step's attention projections
+read once through cuBLASLt instead of twice through the chunks).
+
+**The full GLM-5.3 (Int4-Int8Mix-RTN-g64), MTP depth 1 (8 rows at c=4)** —
+the 8-row step 162.3 → 159.0 ms; the MTP pass times identical (chat 66,
+code 62, prose 61, json 62, math 61 ms/pass); the per-class acceptance
+moved with the transcripts (chat 77 → 69 %, prose 92 → 87 %, the others
+within a point: the prompts' prefill rows take the streaming form on the
+DSA projections from five rows, so a prompt's greedy path can turn at a
+near tie — single 300-token samples, not an accuracy measure; the evals
+below are).
+
+| class | c=1 old / new | c=2 old / new | c=4 old / new |
+|---|---|---|---|
+| prose | 29.0 / 28.2 | 35.5 / 34.6 | 42.4 / 43.0 |
+| code | 29.2 / 29.2 | 36.0 / 37.1 | 42.4 / 46.2 |
+| json | 29.4 / 29.2 | 36.6 / 35.8 | 43.9 / 47.0 |
+| math | 28.9 / 28.7 | 37.7 / 38.1 | 43.2 / 45.3 |
+| chat | 26.2 / 25.4 | 34.9 / 35.2 | 41.2 / 42.3 |
+
+c=1 and c=2 at parity within the run noise; c=4 +1–9 %: this family's
+eight-row step is the int4 experts and the collectives, the DSA
+projections (the sites that changed) a small share of it.
+
+**Qwen3.8-Flash-Next FP8 at world 4, MTP depth 1 (8 rows at c=4)** — the
+8-row step 44.6 → 34.2 ms; the MTP pass times identical (chat 25, the
+others 24 ms/pass); the per-class acceptance within four points either way.
+
+| class | c=1 old / new | c=2 old / new | c=4 old / new |
+|---|---|---|---|
+| prose | 66.8 / 67.2 | 103.1 / 101.4 | 125.5 / 142.1 |
+| code | 74.2 / 75.3 | 113.3 / 114.0 | 140.2 / 158.8 |
+| json | 78.3 / 77.7 | 119.7 / 120.7 | 149.6 / 167.3 |
+| math | 74.0 / 74.2 | 116.5 / 117.4 | 142.2 / 159.9 |
+| chat | 64.2 / 63.2 | 103.4 / 103.1 | 124.9 / 144.1 |
+
+c=1 and c=2 at parity; c=4 +12–15 % (the BF16 dense stack's projections
+through cuBLASLt at eight rows; the fused multi-problem launches keep the
+one- to four-row steps).
+
+**GLM-5.3-Flash NVFP4-FP8 at world 4, MTP depth 1 (8 rows at c=4)** — the
+8-row step 79.5 → 69.8 ms; the MTP pass times identical (chat 34, the
+others 32 ms/pass); the acceptance within three points.
+
+| class | c=1 old / new | c=2 old / new | c=4 old / new |
+|---|---|---|---|
+| prose | 55.2 / 53.9 | 74.9 / 71.8 | 87.1 / 99.0 |
+| code | 57.7 / 57.9 | 77.0 / 76.3 | 88.4 / 101.7 |
+| json | 58.3 / 58.5 | 72.4 / 73.1 | 89.2 / 104.2 |
+| math | 56.0 / 55.6 | 79.2 / 79.7 | 91.6 / 103.8 |
+| chat | 50.8 / 50.3 | 72.1 / 72.9 | 83.4 / 94.5 |
+
+c=1 and c=2 at parity within the run noise (prose −2 % at c=1, json +0.3 %,
+the pass times identical); c=4 +13–15 % (the KDA and DSA bf16 projections
+and the head through cuBLASLt at eight rows, the DSA fp8 projections and
+the dense MLP through the streaming form).
+
+**Accuracy under the new lowering** (GLM-4.7, the batched lowering
+exercised at concurrency 4, thinking off): gsm8k 60/60, extraction 30/30 —
+the 2026-09-10 baselines (60/60, 30/30); the op streams identical across
+the four ranks. HumanEval was not run (it executes generated code; the
+2026-09-10 baseline was 39/40 in an isolated environment).
+
+**Across the four families:** the single-stream and two-stream numbers are
+the old ones (the chain is unchanged there), the four-stream aggregate
++1–9 % (the full GLM-5.3: its step is the experts), +12–15 % (Qwen, the
+Flash) and +22–29 % (GLM-4.7: its step was the BF16 attention re-reads).
 
 ## Build and test validation
 

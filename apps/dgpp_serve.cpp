@@ -206,7 +206,8 @@ struct ServeGraphEngine {
   virtual void warm_captures(const std::vector<int64_t>& prompt) = 0;
   // The scheduled verify depth (engine/verify_schedule.hpp), before the
   // warm capture; throws for a family without a confidence head.
-  virtual void configure_verify_schedule(bool on, float row_ms, float lambda, int min_depth) = 0;
+  virtual void configure_verify_schedule(bool on, float row_ms, float lambda, int min_depth, float base_ms,
+                                         bool adapt) = 0;
 };
 
 template <class Model>
@@ -216,8 +217,9 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
   explicit ServeGraphEngineOf(A&&... a) : eng(std::forward<A>(a)...) {}
   dgpp::sched::SchedulerEngine* engine() override { return &eng; }
   void warm_captures(const std::vector<int64_t>& p) override { eng.warm_captures(p); }
-  void configure_verify_schedule(bool on, float row_ms, float lambda, int min_depth) override {
-    eng.configure_verify_schedule(on, row_ms, lambda, min_depth);
+  void configure_verify_schedule(bool on, float row_ms, float lambda, int min_depth, float base_ms,
+                                 bool adapt) override {
+    eng.configure_verify_schedule(on, row_ms, lambda, min_depth, base_ms, adapt);
   }
 };
 
@@ -1000,6 +1002,7 @@ int main(int argc, char** argv) {
   double mtp_schedule_base_ms = 28.0;
   double mtp_schedule_lambda = 0.0;  // 0: the reservation rate 1 / (base + row)
   int mtp_schedule_min_depth = 1;
+  bool mtp_schedule_adapt = true;  // lambda follows the modeled throughput (floored at the configured lambda)
   double prefix_cache_gib = 1.5;  // M7: the snapshot arena; 0 = off
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<int> top_k;
@@ -1061,6 +1064,7 @@ int main(int argc, char** argv) {
     mtp_schedule_base_ms = e.mtp_schedule_base_ms;
     mtp_schedule_lambda = e.mtp_schedule_lambda;
     mtp_schedule_min_depth = e.mtp_schedule_min_depth;
+    mtp_schedule_adapt = e.mtp_schedule_adapt;
     graph_batch_min_live = e.graph_batch_min_live;
     sampling_candidates = e.sampling_candidates;
     prefix_cache_gib = e.prefix_cache_gib;
@@ -1113,6 +1117,8 @@ int main(int argc, char** argv) {
     else if (a == "--mtp-schedule-base-ms") mtp_schedule_base_ms = std::stod(next());
     else if (a == "--mtp-schedule-lambda") mtp_schedule_lambda = std::stod(next());
     else if (a == "--mtp-schedule-min-depth") mtp_schedule_min_depth = std::stoi(next());
+    else if (a == "--mtp-schedule-adapt") mtp_schedule_adapt = true;
+    else if (a == "--mtp-schedule-fixed-lambda") mtp_schedule_adapt = false;
     else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--prefix-cache-gib") prefix_cache_gib = std::stod(next());
     else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
@@ -1185,13 +1191,14 @@ int main(int argc, char** argv) {
   const auto canonical = [&] {
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} pf={} emsh={} maxtok={} queue={} "
-        "eos={} graph={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} batchmin={} cand={} "
+        "eos={} graph={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} msad={} batchmin={} cand={} "
         "pcgib={} adm={} win={} pace={} inflight={} reasoning_in_content={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
         max_concurrency, kv_capacity, kv_dtype, ngram_table, dense_weights, prefill, embed_sharding, default_max_tokens,
         queue_limit,
         no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
-        mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth, graph_batch_min_live,
+        mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth, mtp_schedule_adapt ? 1 : 0,
+        graph_batch_min_live,
         sampling_candidates, prefix_cache_gib, admission_mode, admission_window,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0);
   };
@@ -1234,6 +1241,7 @@ int main(int argc, char** argv) {
         ws.mtp_schedule_base_ms = mtp_schedule_base_ms;
         ws.mtp_schedule_lambda = mtp_schedule_lambda;
         ws.mtp_schedule_min_depth = mtp_schedule_min_depth;
+        ws.mtp_schedule_adapt = mtp_schedule_adapt;
         ws.graph_batch_min_live = graph_batch_min_live;
         ws.sampling_candidates = sampling_candidates;
         ws.prefix_cache_gib = prefix_cache_gib;
@@ -1279,6 +1287,7 @@ int main(int argc, char** argv) {
         mtp_schedule_base_ms = ws.mtp_schedule_base_ms;
         mtp_schedule_lambda = ws.mtp_schedule_lambda;
         mtp_schedule_min_depth = ws.mtp_schedule_min_depth;
+        mtp_schedule_adapt = ws.mtp_schedule_adapt;
         graph_batch_min_live = ws.graph_batch_min_live;
         sampling_candidates = ws.sampling_candidates;
         prefix_cache_gib = ws.prefix_cache_gib;
@@ -1741,7 +1750,8 @@ int main(int argc, char** argv) {
                                      : dgpp::verify_reservation_lambda(static_cast<float>(mtp_schedule_base_ms),
                                                                        static_cast<float>(mtp_schedule_row_ms));
             graph_engine->configure_verify_schedule(true, static_cast<float>(mtp_schedule_row_ms), lambda,
-                                                    mtp_schedule_min_depth);
+                                                    mtp_schedule_min_depth,
+                                                    static_cast<float>(mtp_schedule_base_ms), mtp_schedule_adapt);
           }
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up

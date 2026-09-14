@@ -169,6 +169,14 @@ class GlmDiagnosticModel {
   // parity harness runs engine and reference on SEPARATE instances.
   Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids);
   Outputs session_step(int req, int64_t token_id);
+  // Several cold prompts as the spans of one walk (2026-09-14): the
+  // engine's group prefill (graph_engine.hpp prefill_group) when the
+  // family exposes the span limit — every span within max_tokens, the
+  // group within max_tokens and kDecodeRows spans. Per span: its last
+  // row's logits and hidden; the walk's route traces on the first.
+  std::vector<Outputs> session_prefill_group(const std::vector<int>& reqs,
+                                             const std::vector<const std::vector<int64_t>*>& prompts);
+  int64_t prefill_group_span_limit() const { return max_tokens_; }
 
   // ---- prefix cache primitives (M7, DESIGN §8; 2026-09-05) ----------------
   // A session's state at a pool-aligned position, copied out and later
@@ -766,6 +774,12 @@ class GlmDiagnosticModel {
                             bool upload);
   Outputs mtp_decode_tail();
   uint16_t* mtp_hidden_cache(int req) const;
+  // The group prefill's spans while its walk runs (session_run_rows reads
+  // them: the KDA scan, the DSA attention, the draft hidden and the tail
+  // mirrors per span); null / 0 otherwise.
+  const int32_t* group_span_reqs_ = nullptr;
+  const int32_t* group_span_lens_ = nullptr;
+  int group_num_spans_ = 0;
   int moe_graph_slots() const { return n_moe_layers_ + (mtp_ ? 1 : 0); }
   // The decode tail shared by the eager step and the graph-era collect:
   // materializes the route traces from the pinned per-MoE-layer staging
@@ -806,6 +820,7 @@ class GlmDiagnosticModel {
   GlmLayerStream loader_;
   GlmGlobalsResident globals_;
   CublasLtGemm gemm_;
+  int dense_mma_from_rows_ = 0;  // the dense MLP's fp8 sites: the streaming form from this row count
   Arena arena_;
   DsaStatePool pool_;
   std::unique_ptr<KdaLayer> kda_;

@@ -72,6 +72,12 @@ class QwenModel : public SessionModel<QwenModel> {
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
   using SnapshotRequest = Base::SnapshotRequest;
+  // Several cold prompts as the spans of one walk (session_prefill_group,
+  // 2026-09-14, the group prefill ported from DeepSeek): the GDN scan and
+  // the QSA attention run per span (their state and cache are per
+  // request), the PLE, GR, MoE and head sites over every row; every span
+  // within max_tokens.
+  int64_t prefill_group_span_limit() const { return max_tokens_; }
   using RowRun = Base::RowRun;
 
   // max_tokens bounds a walk's rows (a prefill chunk, the diagnostic
