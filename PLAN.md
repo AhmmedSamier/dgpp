@@ -85,6 +85,13 @@ for latency under mixed prompt lengths. Prefix entries
 are process-local, and grow-on-demand admission ends the youngest request
 when the pool is exhausted; it does not preempt and recompute it.
 
+The [Qwen expert prefill investigation](benchmarks/results/2026-09-15-qwen-moe-prefill.md)
+tested smaller tiles, compact grids and persistent blocks without finding a
+production improvement. Those variants remain in a standalone benchmark;
+serving kernels are unchanged. Full GLM's packed prefill GEMM and Qwen QSA
+are the next compute targets in the
+[performance plan](docs/performance_improvement_plan.md#10-next-priorities-after-the-first-delivery).
+
 Other work includes request-level observability, additional API fields,
 silent-node-loss detection, wider batching for GLM-5.3-Flash, arbitrary
 slot subsets for oversized batches, and

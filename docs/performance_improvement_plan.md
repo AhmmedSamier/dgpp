@@ -18,6 +18,12 @@ adds a larger budget when no request is decoding. It reduces the measured
 32K idle prefill from 40.0 to 24.7 seconds versus fixed 256-token chunks,
 and the short-peer transition workload from 29.8 to 20.3 seconds. Qwen C1
 shifts fit the measured unchanged-build variation; both budgets remain opt-in.
+The [expert-kernel investigation](../benchmarks/results/2026-09-15-qwen-moe-prefill.md)
+rejects smaller tiles, compact grids and persistent blocks for Qwen's small
+prefill chunks. None established a useful service win. Recorded-route memory
+counters are close to one read of the selected weights; production kernels
+remain unchanged. Section 10 moves full GLM's missing packed prefill GEMM
+ahead of further Qwen tile sweeps.
 
 ## Recommendation
 
@@ -253,7 +259,7 @@ regression at C1/C2. Capacity increases alone do not satisfy this gate.
 | Packed int4/int8 GEMM | [packq_gemv.cu](../src/kernels/packq_gemv.cu), [glm_moe.cu](../src/kernels/glm_moe.cu), [full GLM model](../src/models/glm_dsa/model.cpp): dense and grouped expert tile kernels that unpack each weight tile once and use tensor cores across prompt rows | The documented 7–9.5 ms/token full-GLM prefill is a specific missing-kernel case. Preserve offset-code/group-scale semantics; test dequantization, accumulations, logits and task quality |
 | Broaden stream-ordered folds | [tp_bus.hpp](../src/engine/tp_bus.hpp), [dgpp_serve.cpp](../apps/dgpp_serve.cpp): A/B the existing stream reducer on Qwen/GLM families | It is currently selected only for DeepSeek. Boundaries larger than one latency slot still synchronize and use host-driven bulk, so this primarily targets short/chunked prefill |
 | Stream-ordered bulk collectives | [collective_bus.cpp](../src/net/collective_bus.cpp), [bus_kernel.cu](../src/net/bus_kernel.cu): remove host round trips at large boundaries, retain canonical reduction order and buffer lifetime | Measure network wait versus copy/fold/host time first. The current small-message reducer does not implement this |
-| Expert prefill tiles | [glm_moe.cu](../src/kernels/glm_moe.cu): tune ragged occupancy and the small-K down projection; measure FP8 and FP4 separately | The Qwen study found poor tensor-core issue efficiency. Its 8K-chunk experiment bought only 3.6% for 17 GiB/rank; do not repeat that as the main fix |
+| Expert prefill tiles | [glm_moe.cu](../src/kernels/glm_moe.cu): require evidence of avoidable traffic or instruction cost before another tile sweep; measure FP8 and FP4 separately | The [small-chunk FP8 investigation](../benchmarks/results/2026-09-15-qwen-moe-prefill.md) rejected three variants. Recorded median-route gate/down memory fills were within about 1% of one selected-weight payload. The earlier 8K-chunk experiment bought only 3.6% for 17 GiB/rank |
 | Attention/recurrence | Qwen QSA and GDN, GLM-4.7 GQA: tiled attention and a chunk-parallel recurrence only where a new profile justifies them | Larger numerical projects; validate state continuation and target decisions, not only isolated kernel time |
 
 Only after stream-ordered bulk works, test overlap of a row block's fold
@@ -477,13 +483,19 @@ budget. Grouped continuation remains unfinished.
 Matched service profiles now point to routed-expert matrix multiplies as the
 main small-chunk penalty: 1.38 seconds unbudgeted versus 4.68 seconds with a
 256-token budget for the same profiled 8,281-token prompt. QSA attention is
-also a substantial large-chunk cost. The remaining priorities below are
-proposed work, not measured wins.
+also a substantial large-chunk cost. The subsequent
+[expert-kernel investigation](../benchmarks/results/2026-09-15-qwen-moe-prefill.md)
+tested smaller tiles, compact grids and persistent blocks. All were rejected:
+the compact prototype moved service prefill by only 0.16–1.05%, while other
+routing patterns regressed. The recorded median-route memory fills were
+already close to a single read of the selected weights. Further Qwen tile
+sweeps need a more specific source of avoidable work. The remaining priorities
+below are proposed work, not measured wins.
 
 | Priority | Optimization | Concrete next step and success criterion |
 |---|---|---|
-| 1 | Efficient routed-expert prefill at small budgets | Evaluate smaller expert tiles or a low-row path for Qwen's sparse per-expert batches. Reduce the measured busy-prefill penalty at the same decode-pause budget, with numerical, quality and C1 gates |
-| 2 | Grouped continuation and other prefill kernels | Pack resumable spans where useful, optimize Qwen QSA prefill tiling/reuse, and implement packed int4/int8 tensor-core prefill for full GLM. Measure each independently on cold 2K/8K/32K service prompts |
+| 1 | Full GLM packed int4/int8 prefill GEMM | Replace the packed GEMV prefill chain with tensor-core tiles that reuse unpacked weights across prompt rows. Keep decode dispatch unchanged. Validate offset codes, scales, accumulation, logits and task quality, then require matched cold 2K/8K/32K service gains and preserved C1 |
+| 2 | Qwen QSA prefill and grouped continuation | Profile QSA tiling and reuse, then pack resumable spans where useful. Measure each independently on cold service prompts. Grouped continuation must improve expert weight reuse at the same decode-pause budget |
 | 3 | GLM-Flash concurrency | Generalize fixed recurrent/DSA/MTP state and scratch to 16 rows, then validate 32 and a batched draft chain. Reproduce useful C6/C8 gains with default C1 preserved |
 | 4 | Less repeated expert traffic and collective overhead | Measure rows per expert and per-rank communication waits. Reuse weight tiles across rows assigned to the same expert; broaden the existing stream-ordered reducer where it helps, then tackle GPU-driven bulk collectives |
 | 5 | Speculation matched to workload | Calibrate costs by batch width, context and draft depth. Improve existing DSpark/native-MTP depth selection and add a safe plain-decode choice before paying draft cost. Optimize committed tokens per wall second rather than acceptance alone |
@@ -495,8 +507,9 @@ remain open. DeepSeek needs its shared bounded-prefill scratch made safe
 across yields. Wider families such as GLM-4.7 can first receive matched
 capacity/depth sweeps using their existing runtime row support.
 
-Start with the prefill budget sweep and cold-service profiles, followed by
-the largest measured compute bottleneck and GLM-Flash row expansion.
+The budget sweep and Qwen small-chunk expert experiments are complete.
+Start with the missing full GLM packed prefill GEMM, followed by QSA and
+GLM-Flash row expansion.
 DFlash2 feature validation can begin before committing to its full port.
 Use repeated deployment A/B pairs for small C1 effects; consecutive prompt
 repeats alone cannot separate implementation cost from session drift.

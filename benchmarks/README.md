@@ -69,6 +69,30 @@ Sample clocks/power externally when recording a result. Small weights may
 remain L2-resident across iterations, so their effective GB/s is not a DRAM
 result. This is a best-of-heuristics baseline, not proof of silicon peak.
 
+## Qwen expert prefill experiments
+
+`moe_prefill_bench` compares the production FP8 expert kernel with three
+experimental variants linked only into this benchmark: `small` (16 × 64
+tiles), `compact` (64-row down-projection blocks) and `persistent` (a fixed
+number of down-projection blocks). None cleared the service performance gate;
+see the [investigation and raw results](results/2026-09-15-qwen-moe-prefill.md).
+
+```bash
+"$BUILD/moe_prefill_bench" --variant small --distribution uniform
+"$BUILD/moe_prefill_bench" --variant compact --distribution hot
+"$BUILD/moe_prefill_bench" --variant persistent \
+  --segments-file benchmarks/results/2026-09-15-qwen-moe-routes-p50.txt
+```
+
+Run on idle hardware. Defaults reproduce TP2 geometry: 256 tokens, 512
+experts, top-k 10, hidden width 2,560, intermediate width 320 and scale block
+64. Use `--inter 160 --scale-block 32` for TP4. `--distribution skewed`
+adds another synthetic case. Recorded files contain one count per expert;
+they replay routing sizes with synthetic tensors. Six trials alternate A/B
+order, time repeated launches with CUDA events and require bitwise output
+equality after each pair. `candidate_selected=no` identifies unchanged-path
+controls, including the compact and persistent gate projections.
+
 ## KDA operator benchmark
 
 ```bash
