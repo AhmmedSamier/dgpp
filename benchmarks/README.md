@@ -69,6 +69,29 @@ Sample clocks/power externally when recording a result. Small weights may
 remain L2-resident across iterations, so their effective GB/s is not a DRAM
 result. This is a best-of-heuristics baseline, not proof of silicon peak.
 
+## Packed full-GLM prefill benchmark
+
+`packq_prefill_bench` compares the packed GEMV and tensor-core paths at
+identical shapes and synthetic weights. Run on idle hardware:
+
+```bash
+# TP4 routed int4 gate (256 experts, top-k 8, BF16 output):
+"$BUILD/packq_prefill_bench" --m 2048
+# TP4 routed down (FP32 output):
+"$BUILD/packq_prefill_bench" --m 2048 --n 6144 --k 512 --out f32
+# TP4 fused int8 attention projection:
+"$BUILD/packq_prefill_bench" --m 2048 --n 2624 --k 6144 \
+  --bits 8 --experts 1 --top-k 1
+```
+
+Six CUDA-event trials alternate A/B order, with three warmups per side and
+`--iters` timed launches (default five). Uniform routing is the default;
+`--distribution hot` sends every token to the same selected experts.
+Outputs must pass an L2 comparison; independent FP64 oracles live in
+`packq_gemm_test`. The benchmark calls GEMM explicitly even for short rows;
+automatic serving dispatch retains GEMV below 128 tokens. Kernel times
+exclude routing, gathering and service overhead.
+
 ## Qwen expert prefill experiments
 
 `moe_prefill_bench` compares the production FP8 expert kernel with three

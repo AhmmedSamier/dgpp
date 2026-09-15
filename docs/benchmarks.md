@@ -615,6 +615,10 @@ that in mind.
 
 ### Service: a fresh prompt through the API (2026-09-10)
 
+The full-GLM row below predates packed tensor-core prefill; the
+[September 15 matched campaign](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
+records its replacement measurements and numerical/C1 checks.
+
 Median of three, with the real token count the tokenizer produced:
 
 | model | ~520 | ~2,100 | ~8,400 | ~16,800 | ~33,800 |
@@ -668,6 +672,32 @@ the pick plus the HTTP hop: a 25-token prompt 1,109 ms cold and 751 ms hot, a
 workload the split was 179 ms on prefix-cache hits against 1,141 ms on misses.
 On the single Spark, TTFT is 506 ms at T=1 and 532 ms under MTP for a short
 prompt.
+
+### Full GLM packed prefill, matched service runs (2026-09-15)
+
+Full GLM int4/int8 on four nodes, eight configured slots, MTP depth 1,
+BF16 KV and a 1 GiB prefix cache. Median of three distinct cold prompts per
+length, with identical prompt hashes and computed-token counts across
+builds. Actual lengths are 2,056–2,086, 8,193–8,364 and 32,969–33,029.
+
+| Prompt target | Baseline prefill | Packed GEMM prefill | Speedup | Baseline → new ms/token |
+|---|---:|---:|---:|---:|
+| 2,048 | 15.628 s | 6.111 s | 2.56× | 7.569 → 2.963 |
+| 8,192 | 80.364 s | 40.838 s | 1.97× | 9.759 → 4.959 |
+| 32,768 | 512.968 s | 350.069 s | 1.47× | 15.531 → 10.613 |
+
+The new packed tensor-core path starts at 128 rows per invocation. Short
+C1 prompts retain GEMV because an earlier switch changed MTP acceptance
+and reduced code/chat throughput. The [dated record](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
+contains numerical checks, task scores, repeated C1 deployments and
+[raw measurements](../benchmarks/results/2026-09-15-glm-packed-prefill.json).
+These matched prompts and settings differ from the historical full-GLM row
+above; compare the two columns here to assess this implementation.
+The matching concurrency-4 quality rerun preserves GSM8K 59/60 and
+extraction 30/30, including every item's correctness outcome.
+Two C1 deployment pairs give an equal-class −0.0034% change, with class
+shifts from −0.297% to +0.146%. Transcripts, usage and speculative passes
+match; the dated record quantifies the small residual timing differences.
 
 ## 7. Quality, so the throughput numbers are comparable
 
@@ -736,15 +766,13 @@ outright, and what follows is what genuinely remains.
    `serve_soak_run.sh` nor `serve_failure_drill.sh` has been run against it;
    both now take their rank count from the deployment, so either will run
    against the two-node config unchanged.
-7. **The full GLM-5.3's prefill is the deferred kernel, not a reading to
-   refine.** 7–9.5 ms per prompt token (§6) is the routed experts and the
-   packed attention projections going through the row-chunked int4/int8 GEMV
-   chain, every code decoded once per chunk on CUDA cores; GLM-4.7 reads
-   1.3–2.0 ms on the same probe. The tile kernel for the packed formats
-   (docs/glm53_plan.md D7: decode a weight tile once into shared memory,
-   tensor-core MMA over the rows) is the optimization stage's first item.
-   The full model also has its first day only: no soak, no failure drill,
-   no sampled sweep, one campaign per number.
+7. **Full GLM-5.3 long-context cost and operational coverage.** Packed
+   int4/int8 tensor-core prefill is implemented from 128 rows; see the
+   [matched campaign](../benchmarks/results/2026-09-15-glm-packed-prefill.md).
+   Profile the remaining cost on the new path before selecting another
+   kernel or collective change. The short-prompt cutoff protects measured
+   C1/MTP behavior; lowering it requires service and numerical evidence.
+   This campaign does not add a soak, failure drill or sampled sweep.
 
 Closed on 2026-09-10 evening: per-class decode under concurrency for all six
 deployments; per-class tables for Qwen at both worlds and for GLM-4.7; the

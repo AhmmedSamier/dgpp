@@ -226,16 +226,16 @@ rounding shows as hard disagreements). The quantizer's scale was
 `max|w| / 7.5` (int4) and `/ 127.5` (int8), which the loader never needs.
 `weight_shape` is read and checked, never trusted for allocation.
 
-**Dequant policy (D2):** the reference for this checkpoint is what
-compressed-tensors produces when transformers loads it — bf16 weights,
-`bf16(code × scale)`. `code × scale` is exact in fp32 (≤ 8 + 8 significant
-bits) but not in bf16, so unlike NVFP4 (exact in bf16) the format has one
-rounding before the FMA, the same shape as the engine's FP8 core
-(`fp8_gemv.cuh:63-66`, "bf16(w·s), back to f32 for the FMA"). Every consumer
-(decode GEMV, grouped GEMV, tile kernel, dequant staging, host oracle) uses
-that rounding, which keeps decode rows == prefill rows bitwise per weight
-and makes the bf16 bridge (a dequantized matrix) numerically identical to
-the packed path.
+**Dequant policy (D2, revised 2026-09-12):** packed matrix products use
+`code × bf16(scale)` exactly, without rounding individual weights to BF16.
+GEMV factors the scale outside each integer-code partial dot; GEMM feeds
+exact integer codes to BF16 tensor cores and scales each 64-element group
+in FP32. Their summation orders differ, so they are tolerance-equal.
+The independent oracle accumulates exact weights in FP64. The loader's
+BF16 `kv_b` bridge is an explicit exception: it rounds `code × scale`
+before the absorb/value-out kernels consume it. Bridge comparisons use
+power-of-two scales when they require exact weight identity. This replaces
+the original per-weight BF16-rounding proposal.
 
 ### 1.6 Tokenizer, template, generation defaults
 
@@ -439,18 +439,18 @@ reference's own weights — because the absorb and value-out kernels are bf16
 kernels; +0.26 GiB per rank and +0.28 GB per step, listed as a lever. The
 indexer, router, norms and dense layers are BF16 in the file and stay so.
 
-**D7 — Prefill: attention projections through a group-64 dequant stage
-into the bf16 GEMM, experts through a packed-int ldmatrix tile kernel.**
-For `q_a`/`q_b`/`kv_a`/`o_proj` above the GEMV lowering (m > 128) a
-`packq_dequant` twin of `fp8_dequant.cu` writes the bf16 bridge (at most
-50 MB per matrix per rank, `o_proj`) and the existing bf16 GEMM runs — the Qwen `layers.cpp:50-54`
-pattern, numerically identical to the packed core by D2. For the routed and
-shared experts (4.8 GB per layer dequantized — no bridge is possible) the
-grouped tensor-core kernel is a twin of `moe_grouped_mma_fp4_ldm_kernel`
-with fragment-time unpack and the D2 rounding, bitwise its dense form per
-segment and within the mma-order budget of the GEMV chain. Until it exists
-the grouped GEMV chain is the prefill (correct, ~3x slower — the NVFP4
-phase-2 state), which is enough for every correctness gate.
+**D7 — Packed tensor-core prefill for attention and experts.**
+`packq_gemm.cu` consumes the int4/int8 representation directly. A 32 × 64
+output tile stages two packed 64-deep groups, decodes exact integer codes
+into BF16 fragments, and applies each group's BF16 scale to its FP32
+partial. Dense attention, routed experts and the int8 shared expert share
+this arithmetic; no dequantized weight bridge is allocated. Grouped gate/up
+reads hidden rows through the device row map, with FP32 down outputs
+feeding the existing ordered accumulation. Automatic dispatch starts at
+128 prompt rows. Short prompts and every current decode/verification
+family retain GEMV arithmetic. Dense/grouped GEMM outputs are bitwise
+equal for the same inputs; GEMM/GEMV use the numerical gates in
+[numerics](numerics.md).
 
 **D8 — `kpool` = 1 is a real template instance, not a special case.**
 `index_kpool ∈ {1, 2, 4, 8}` in the geometry check and the kernel dispatch;
@@ -499,7 +499,7 @@ tool-call round trips and grammars. `ToolFormat::kGlmMarkers` applies.
 |---|---|
 | `src/models/glm_dsa/config.{hpp,cpp}` | `GlmDsaTextConfig` (the flat config, the indexer schedule from `indexer_types` cross-checked against freq/offset, `quantization_config` with the two `pack-quantized` groups: targets, `num_bits` 4/8, `group_size` 64, `symmetric`, the `ignore` list), `ModelArchitecture::GlmMoeDsa` in `loaders/architecture` |
 | `src/models/glm_dsa/binding.{hpp,cpp}` | the expected-tensor table (dense layers verbatim, MoE layers as triples, indexer-owning layers, the draft, globals), roles `IntPacked`/`IntScale`/`IntShape`, the validator, the TP geometry check |
-| `src/kernels/packq_gemv.{cuh,cu,hpp}`, `src/kernels/packq_dequant.{cu,hpp}` | D2, D7 |
+| `src/kernels/packq_gemv.{cuh,cu,hpp}`, `src/kernels/packq_gemm.{cu,hpp}` | D2, D7 |
 | `src/models/quant_matrix.hpp` | `GlmPackedMatrix` |
 | `src/kernels/glm_moe.cu`, `glm_moe_launch.hpp`, `models/glm/moe.hpp`, `moe_layer.cpp` | the packed slot/grouped/tile forms beside the fp8 and fp4 ones; the shared-expert format enumerator |
 | `src/loaders/packq_quant.hpp` | the host RTN encoder (D5) |
@@ -509,7 +509,7 @@ tool-call round trips and grammars. `ToolFormat::kGlmMarkers` applies.
 | `src/models/dsa_reference.*`, `tools/dsa_reference_dump.py`, `tools/glm_dsa_reference_dump.py` | the oracle extended for rope/kpool 1/sharing; the pure-python full-model reference on the fixture |
 | `tools/glm_dsa_torch_reference.py` | transformers' own layer code on the real weights (the GLM-4.7 rule) |
 | `tests/unit/glm_dsa_{config,binding}_test.cpp`, `tests/unit/packq_quant_test.cpp`, `tests/cuda/packq_gemv_test.cu` + `packq_gemv_checkpoint.cpp`, `tests/cuda/glm_dsa_*` | the gates (§5) |
-| `apps/glm_dsa_load_check.cpp`, `apps/glm_dsa_forward_check.cpp`, `apps/glm_dsa_gen_check.cpp`, `apps/dgpp_serve.cpp` (`GlmDsaFamily`) | the apps; the gen check carries `--teacher-file` (the numerics tool's input) |
+| `apps/glm_dsa_load_check.cpp`, `apps/glm_dsa_forward_check.cpp`, `apps/dgpp_serve.cpp` (`GlmDsaFamily`) | the apps; the forward check carries `--teacher-file` for `fabric_logprob.py --prefill` |
 | `deploy/cluster_glm-5.3_int4-int8_w4.example.json` (since 2026-09-14 one template: eight slots, MTP depth 1; the plain and fp8-cache shapes are knobs) | the deployments (model name `glm-5.3`, quant `int4-int8`) |
 | `scripts/fabric_glm_dsa_serve.sh`, `scripts/fabric_glm_dsa_load.sh`, `scripts/fabric_glm_dsa_forward.sh` | the fabric procedures (the GLM-4.7 scripts' shape) |
 | `tests/data/glm_dsa_chat_template_goldens.jsonl` | D10 |
@@ -842,9 +842,9 @@ implemented and green, G6 in progress, nothing committed yet:
   reclaim on any node); templates 144K bf16 plain / 120K bf16 MTP / 208K
   fp8. The peers run headless (worth ~0.2 GiB, not a lever).
 
-The prefill tile kernel (D7) stays deferred: the grouped GEMV chain is
-the prefill; a 2,048-token chunk through four real layers takes seconds
-today, the measured number is the optimization stage's.
+The packed prefill tile kernel (D7) is implemented for bulk prompts;
+short prompts retain the grouped GEMV chain. The dated performance record
+tracks its service, numerical and C1 promotion gates.
 
 The dense lowering by rows and the group prefill (2026-09-14, carried
 from the DeepSeek work): the DSA layer's fp8 projections take the

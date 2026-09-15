@@ -460,16 +460,30 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string fixture, smoke, checkpoint, dump;
+  std::string fixture, prefill_fixture, smoke, checkpoint, dump;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
+    else if (a == "--write-prefill-fixture" && i + 1 < argc)
+      prefill_fixture = argv[++i];
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--dump-file" && i + 1 < argc) dump = argv[++i];
     else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
   }
   try {
+    if (!prefill_fixture.empty()) {
+      // A separate fixture audits bulk packed GEMM while every attention
+      // row is dense and every expert is selected. This isolates continuous
+      // arithmetic from discrete attention/routing boundary changes; the
+      // original sparse-selection fixture retains those boundaries.
+      const std::string json = glmdsafx::tiny_config_json(5, 1, true, 256, 8);
+      const auto tree = dgpp::minijson::parse(json);
+      const auto cfg = GlmDsaTextConfig::parse(tree.root);
+      glmdsafx::write_fixture(cfg, prefill_fixture, json.c_str());
+      std::printf("[ OK ] wrote the bulk-prefill fixture to %s\n", prefill_fixture.c_str());
+      return 0;
+    }
     if (!fixture.empty()) {
       glmdsafx::write_fixture(glmdsafx::tiny_config(), fixture);
       std::printf("[ OK ] wrote the fixture to %s\n", fixture.c_str());
@@ -477,7 +491,9 @@ int main(int argc, char** argv) {
     }
     if (!smoke.empty()) return run_smoke(smoke);
     if (!checkpoint.empty() && !dump.empty()) return run_dump_parity(checkpoint, dump);
-    std::fprintf(stderr, "usage: --write-fixture DIR | --smoke DIR | --checkpoint-dir DIR --dump-file FILE\n");
+    std::fprintf(stderr,
+                 "usage: --write-fixture DIR | --write-prefill-fixture DIR | --smoke DIR | "
+                 "--checkpoint-dir DIR --dump-file FILE\n");
     return 2;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "[FAIL] %s\n", e.what());

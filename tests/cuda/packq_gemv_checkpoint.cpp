@@ -22,6 +22,7 @@
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "kernels/packq_gemm.hpp"
 #include "kernels/packq_gemv.hpp"
 #include "loaders/safetensors.hpp"
 #include "models/quant_matrix.hpp"
@@ -45,8 +46,10 @@ int code_at(const Slice& s, int nn, int kk) {
   return static_cast<int>(u) - (1 << (s.bits - 1));
 }
 
-std::vector<double> oracle(const Slice& s, const std::vector<uint16_t>& act, int m) {
+std::vector<double> oracle(const Slice& s, const std::vector<uint16_t>& act, int m,
+                           std::vector<double>* unrounded = nullptr) {
   std::vector<double> out(static_cast<size_t>(m) * s.n, 0.0);
+  if (unrounded) unrounded->resize(out.size());
   std::vector<double> wrow(s.k);
   for (int nn = 0; nn < s.n; ++nn) {
     for (int kk = 0; kk < s.k; ++kk) {
@@ -57,6 +60,7 @@ std::vector<double> oracle(const Slice& s, const std::vector<uint16_t>& act, int
       double acc = 0.0;
       const uint16_t* arow = act.data() + static_cast<size_t>(mm) * s.k;
       for (int kk = 0; kk < s.k; ++kk) acc += bf16_to_float(arow[kk]) * wrow[kk];
+      if (unrounded) (*unrounded)[static_cast<size_t>(mm) * s.n + nn] = acc;
       out[static_cast<size_t>(mm) * s.n + nn] =
           bf16_to_float(dgpp::float_to_bf16_bits(static_cast<float>(acc)));
     }
@@ -64,7 +68,8 @@ std::vector<double> oracle(const Slice& s, const std::vector<uint16_t>& act, int
   return out;
 }
 
-std::vector<uint16_t> run(const Slice& s, const std::vector<uint16_t>& act, int m) {
+std::vector<uint16_t> run(const Slice& s, const std::vector<uint16_t>& act, int m,
+                          bool mma = false) {
   uint32_t* packed = nullptr;
   uint16_t* scales = nullptr;
   uint16_t* d_act = nullptr;
@@ -77,7 +82,8 @@ std::vector<uint16_t> run(const Slice& s, const std::vector<uint16_t>& act, int 
   std::memcpy(scales, s.scales.data(), s.scales.size() * 2);
   std::memcpy(d_act, act.data(), act.size() * 2);
   const dgpp::GlmPackedMatrix w{packed, scales, s.n, s.k, s.bits};
-  dgpp::launch_packq_gemv_bf16(d_act, s.k, w, out, m, s.n, s.k, nullptr);
+  (mma ? dgpp::launch_packq_gemm_bf16 : dgpp::launch_packq_gemv_bf16)(d_act, s.k, w, out, m, s.n,
+                                                                      s.k, nullptr);
   DGPP_CUDA_OK(cudaDeviceSynchronize());
   std::vector<uint16_t> got(static_cast<size_t>(m) * s.n);
   std::memcpy(got.data(), out, got.size() * 2);
@@ -173,11 +179,34 @@ int run_packq_gemv_checkpoint_parity(const char* checkpoint_dir) {
     std::vector<uint16_t> act(static_cast<size_t>(m) * s.k);
     fill_act(rng, act);
     const std::vector<uint16_t> got = run(s, act, m);
-    const auto want = oracle(s, act, m);
+    std::vector<double> exact;
+    const auto want = oracle(s, act, m, &exact);
     const auto rep = compare_bf16_vs_oracle(got.data(), want, 2.0, 1e-3);
     std::printf("[ OK ] real slice: l2_rel=%.3g mismatches=%ld/%zu\n", rep.l2_rel,
                 rep.mismatches, rep.total);
     require_report(rep, 1e-3, 0, "packq real slice vs oracle");
+    const std::vector<uint16_t> tiled = run(s, act, m, true);
+    const auto tiled_rep = compare_bf16_vs_oracle(tiled.data(), want, 2.0, 1e-3);
+    std::printf("[ OK ] real GEMM slice: l2_rel=%.3g mismatches=%ld/%zu\n", tiled_rep.l2_rel,
+                tiled_rep.mismatches, tiled_rep.total);
+    require_report(tiled_rep, 1e-3, 0, "packq real GEMM slice vs oracle");
+    double norm2 = 0, gemv_error2 = 0, gemm_error2 = 0;
+    size_t changed = 0, closer = 0, farther = 0;
+    for (size_t i = 0; i < exact.size(); ++i) {
+      const double old_error = bf16_to_float(got[i]) - exact[i];
+      const double new_error = bf16_to_float(tiled[i]) - exact[i];
+      norm2 += exact[i] * exact[i];
+      gemv_error2 += old_error * old_error;
+      gemm_error2 += new_error * new_error;
+      changed += got[i] != tiled[i];
+      closer += std::abs(new_error) < std::abs(old_error);
+      farther += std::abs(new_error) > std::abs(old_error);
+    }
+    std::printf(
+        "  unrounded FP64: GEMV relative L2 %.12g, GEMM %.12g; "
+        "changed %zu/%zu, GEMM closer %zu farther %zu (remaining changes equidistant)\n",
+        std::sqrt(gemv_error2 / std::max(norm2, 1e-30)),
+        std::sqrt(gemm_error2 / std::max(norm2, 1e-30)), changed, exact.size(), closer, farther);
     for (int r : {0, 17, 47}) {
       std::vector<uint16_t> row(act.begin() + static_cast<long>(r) * s.k,
                                 act.begin() + static_cast<long>(r + 1) * s.k);

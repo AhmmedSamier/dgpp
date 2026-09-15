@@ -38,23 +38,30 @@ using glmrng::seed_for;
 // four MoE layers (indexers on 0, 2 and 4: freq 2, offset 1), a draft
 // layer, 8 experts of 256 (a 64-wide slice at world 4), hidden 256, vocab
 // 512; layers 1-4 packed (int8 attention and shared expert, int4 experts).
-inline const char* tiny_config_json(int layers = 5, int dense = 1, bool mtp = true) {
+inline const char* tiny_config_json(int layers = 5, int dense = 1, bool mtp = true,
+                                    int index_topk = 16, int experts_per_token = 2) {
   static std::string s;
   const std::string last = std::to_string(layers - 1);
   const std::string range = "[" + std::to_string(dense) + "-" + last + "]";
   s = std::string(R"json({
   "architectures": ["GlmMoeDsaForCausalLM"], "model_type": "glm_moe_dsa",
   "attention_bias": false, "eos_token_id": [1, 2], "pad_token_id": 1,
-  "first_k_dense_replace": )json") + std::to_string(dense) + R"json(,
+  "first_k_dense_replace": )json") +
+      std::to_string(dense) + R"json(,
   "hidden_act": "silu", "hidden_size": 256, "index_head_dim": 128, "index_n_heads": 32,
-  "index_share_for_mtp_iteration": true, "index_skip_topk_offset": )json" + std::to_string(dense) + R"json(,
-  "index_topk": 16, "index_topk_freq": 2, "indexer_rope_interleave": true,
+  "index_share_for_mtp_iteration": true, "index_skip_topk_offset": )json" +
+      std::to_string(dense) + R"json(,
+  "index_topk": )json" +
+      std::to_string(index_topk) + R"json(, "index_topk_freq": 2, "indexer_rope_interleave": true,
   "intermediate_size": 256, "kv_lora_rank": 128, "max_position_embeddings": 4096,
   "moe_intermediate_size": 256, "moe_router_dtype": "float32", "n_group": 1,
   "n_routed_experts": 8, "n_shared_experts": 1, "norm_topk_prob": true,
-  "num_attention_heads": 16, "num_experts_per_tok": 2,
-  "num_hidden_layers": )json" + std::to_string(layers) + R"json(, "num_key_value_heads": 16,
-  "num_nextn_predict_layers": )json" + (mtp ? "1" : "0") + R"json(,
+  "num_attention_heads": 16, "num_experts_per_tok": )json" +
+      std::to_string(experts_per_token) + R"json(,
+  "num_hidden_layers": )json" +
+      std::to_string(layers) + R"json(, "num_key_value_heads": 16,
+  "num_nextn_predict_layers": )json" +
+      (mtp ? "1" : "0") + R"json(,
   "q_lora_rank": 128, "qk_head_dim": 128, "qk_nope_head_dim": 64, "qk_rope_head_dim": 64,
   "rms_norm_eps": 1e-05, "rope_interleave": true,
   "rope_parameters": {"rope_theta": 8000000, "rope_type": "default"},
@@ -64,21 +71,25 @@ inline const char* tiny_config_json(int layers = 5, int dense = 1, bool mtp = tr
     "config_groups": {
       "group_0": {
         "format": "pack-quantized", "input_activations": null, "output_activations": null,
-        "targets": ["re:model\\.layers\\.)json" + range + R"json(\\.(?:self_attn\\.(?:q_a_proj|q_b_proj|kv_a_proj_with_mqa|kv_b_proj|o_proj)|mlp\\.shared_experts\\.(?:gate_proj|up_proj|down_proj))$"],
+        "targets": ["re:model\\.layers\\.)json" +
+      range +
+      R"json(\\.(?:self_attn\\.(?:q_a_proj|q_b_proj|kv_a_proj_with_mqa|kv_b_proj|o_proj)|mlp\\.shared_experts\\.(?:gate_proj|up_proj|down_proj))$"],
         "weights": {"actorder": null, "block_structure": null, "dynamic": false, "group_size": 64,
                     "num_bits": 8, "observer": "memoryless_minmax", "strategy": "group",
                     "symmetric": true, "type": "int", "zp_dtype": null}
       },
       "group_1": {
         "format": "pack-quantized", "input_activations": null, "output_activations": null,
-        "targets": ["re:model\\.layers\\.)json" + range + R"json(\\.mlp\\.experts\\.\\d+\\.(?:gate_proj|up_proj|down_proj)$"],
+        "targets": ["re:model\\.layers\\.)json" +
+      range + R"json(\\.mlp\\.experts\\.\\d+\\.(?:gate_proj|up_proj|down_proj)$"],
         "weights": {"actorder": null, "block_structure": null, "dynamic": false, "group_size": 64,
                     "num_bits": 4, "observer": "memoryless_minmax", "strategy": "group",
                     "symmetric": true, "type": "int", "zp_dtype": null}
       }
     },
     "format": "pack-quantized",
-    "ignore": ["lm_head", "re:.*embed_tokens.*", "re:model\\.layers\\.[0-)json" + std::to_string(dense - 1) + R"json(]\\..*",
+    "ignore": ["lm_head", "re:.*embed_tokens.*", "re:model\\.layers\\.[0-)json" +
+      std::to_string(dense - 1) + R"json(]\\..*",
                "re:.*self_attn\\.indexer\\..*", "re:.*norm.*", "re:.*mlp\\.gate$"],
     "kv_cache_scheme": null, "quant_method": "compressed-tensors", "quantization_status": "compressed",
     "sparsity_config": {}, "transform_config": {}, "version": "0.18.0"

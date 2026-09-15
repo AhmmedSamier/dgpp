@@ -2258,6 +2258,25 @@ DGPP_TEST(moe_expert_path_matches_oracle_small_geometry_packq) {
     }
 }
 
+DGPP_TEST(moe_packq_prefill_tile_matches_oracle_and_host_segmentation) {
+  for (int bits : {4, 8})
+    for (int tokens : {16, 17, 33, 127, 128, 129, 257}) {
+      SmallCase c =
+          make_small_case(8, 512, 256, 2, tokens, 0x61A0 + tokens + bits, false, false, bits);
+      c.alloc();
+      const auto kernel = tokens < 128 ? dgpp::MoeExpertKernel::kGemv : dgpp::MoeExpertKernel::kMma;
+      run_small_case(c, "packed expert prefill lowering", kernel);
+      std::vector<uint16_t> host(static_cast<size_t>(tokens) * c.cfg.hidden);
+      std::memcpy(host.data(), c.d_out, host.size() * 2);
+      GlmMoeLayer layer(c.dev_w, c.cfg, tokens);
+      layer.enqueue_prefill(c.d_hidden, c.d_out, tokens, nullptr, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      require(std::memcmp(host.data(), c.d_out, host.size() * 2) == 0,
+              "packed prefill device segmentation must match the selected host chain");
+      c.free_all();
+    }
+}
+
 DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path_packq) {
   struct Case {
     int E, H, I, K, M;
@@ -2298,8 +2317,7 @@ DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path_packq) {
       std::memcpy(fused.data(), c.d_out, fused.size() * 2);
       require(std::memcmp(host.data(), fused.data(), host.size() * 2) == 0,
               "packq decode slot path on the graph table bitwise the host chain");
-      // The prefill entry (device segmentation; the GEMV chain until the
-      // tile kernel lands) on the same rows, bitwise too.
+      // Short prefills retain the GEMV arithmetic used by decode.
       GlmMoeLayer cold(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/cs.M);
       DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
       cold.enqueue_prefill(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);

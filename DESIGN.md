@@ -1384,6 +1384,19 @@ The decode path performs routing, expert products and accumulation without
 host segmentation. Prefill groups rows by expert for tensor-core work.
 Both preserve the accumulation rule in §7.4.
 
+**Packed full-GLM prefill.** Int4 routed experts and int8 attention/shared
+projections use `packq_gemm` from 128 prompt rows. Each 32 × 64 output tile
+stages two buffers of packed weights and BF16 activations. Tensor cores
+multiply exact integer codes by activations; FP32 FMAs apply the BF16
+scale to each 64-element partial dot. This preserves the exact dequantized
+weight values without a BF16 weight copy or per-weight rounding. It changes
+summation order relative to GEMV, so the two paths use numerical rather
+than bitwise parity. Grouped gate/up reads original hidden rows through
+the device row map, and grouped down stores FP32 before ordered expert
+accumulation. The threshold counts rows in each invocation; grouped MoE
+prefill can cross it by combining several shorter prompts. C1 short prompts
+and all current decode/verification batches retain the packed GEMV core.
+
 **Graph constraints.** Copy and reset operations in the captured path use
 kernels to avoid copy-engine dependency cycles in in-process multi-rank
 tests. Graph validation checks node types at capture. Qwen's mapped

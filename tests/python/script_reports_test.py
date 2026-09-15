@@ -35,6 +35,7 @@ import bench_stream
 import bench_compare
 import serve_load
 import serve_prefill_probe
+import fabric_logprob
 
 
 def capture(function, *args):
@@ -75,6 +76,51 @@ def pace_log():
 
 
 class ScriptReportsTest(unittest.TestCase):
+    def test_prefill_logprob_merges_local_argmax_and_logsumexp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "r0.log").write_text(
+                "[prefill_tf] rank 0 step 0: target 9 argmax 2 lmax 1.5 lse 2e+0 target_logit nan\n"
+                "[prefill_tf_end] rank 0 world 2 positions 1\n")
+            (root / "r1.log").write_text(
+                "[prefill_tf] rank 1 step 0: target 9 argmax 9 lmax 3 lse 3.5 target_logit 3\n"
+                "[prefill_tf_end] rank 1 world 2 positions 1\n")
+            rows, ranks = fabric_logprob.load_run(directory, prefill=True)
+            self.assertEqual(ranks, [0, 1])
+            self.assertEqual(rows[0]["argmax"], 9)
+            lp = fabric_logprob.logprobs(rows, ranks)
+            self.assertAlmostEqual(lp[0][0], 3 - math.log(math.exp(2) + math.exp(3.5)))
+            self.assertTrue(lp[0][1])
+            # Equal logits choose the lower global token ID.
+            (root / "r0.log").write_text(
+                "[prefill_tf] rank 0 step 0: target 9 argmax 2 lmax 3 lse 3.5 target_logit nan\n"
+                "[prefill_tf_end] rank 0 world 2 positions 1\n")
+            self.assertEqual(fabric_logprob.load_run(directory, prefill=True)[0][0]["argmax"], 2)
+
+    def test_prefill_logprob_rejects_incomplete_or_conflicting_slices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "r0.log").write_text(
+                "[prefill_tf] rank 0 step 0: target 9 argmax 2 lmax 1 lse 2 target_logit nan\n"
+                "[prefill_tf_end] rank 0 world 2 positions 1\n")
+            for bad in ["", "[prefill_tf] rank 1 step 1: target 9 argmax 9 lmax 3 lse 4 target_logit 3\n",
+                        "[prefill_tf] rank 1 step 0: target 8 argmax 9 lmax 3 lse 4 target_logit 3\n",
+                        "[prefill_tf] rank 1 step 0: target 9 argmax 9 lmax 3 lse 4 target_logit nan\n"]:
+                (root / "r1.log").write_text(bad + "[prefill_tf_end] rank 1 world 2 positions 1\n")
+                with self.assertRaises(SystemExit):
+                    fabric_logprob.load_run(directory, prefill=True)
+
+    def test_prefill_logprob_rejects_missing_world_and_common_truncation(self):
+        row = "[prefill_tf] rank 0 step 0: target 9 argmax 9 lmax 3 lse 4 target_logit 3\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "r0.log"
+            for tail in ["", "[prefill_tf_end] rank 0 world 2 positions 1\n",
+                         "[prefill_tf_end] rank 0 world 1 positions 2\n",
+                         row + "[prefill_tf_end] rank 0 world 1 positions 1\n"]:
+                path.write_text(row + tail)
+                with self.assertRaises(SystemExit):
+                    fabric_logprob.load_run(directory, prefill=True)
+
     def test_prefill_probe_requires_cold_isolated_metric_deltas(self):
         before = {"prompts_prefilled": 2, "prompt_tokens_computed": 100, "prefill_ms": 80.0}
         after = {"prompts_prefilled": 3, "prompt_tokens_computed": 120, "prefill_ms": 90.0}

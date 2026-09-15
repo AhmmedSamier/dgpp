@@ -423,7 +423,8 @@ def layer_forward(cfg, w, h_rows, state, table, pos0, inherited):
         # minus the next (sigmoid units) — a flip inside it is noise.
         for t in range(len(x_rows)):
             b = sorted(biased[t * E:(t + 1) * E], reverse=True)
-            route_margins.append(b[K - 1] - b[K])
+            # Selecting every expert has no excluded candidate at the boundary.
+            route_margins.append(b[K - 1] - b[K] if K < E else math.inf)
     else:
         y = dense_mlp_rows(x_rows, w["dense"], H, cfg["dense_inter"], math.inf)
         routes = []

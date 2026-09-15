@@ -1,6 +1,6 @@
 # Validated platform measurements
 
-Measurements recorded from 2026-08-27 through 2026-09-10. Each section
+Measurements recorded from 2026-08-27 through 2026-09-15. Each section
 identifies its workload and environment; this report is maintained manually.
 Raw commands and the audit-remediation run record are in
 `benchmarks/results/2026-08-27-dgx-spark.md`; the M2 KDA correctness and
@@ -854,6 +854,28 @@ handshake and skew phases, the ranks' compute imbalance — is the same on
 both). The group prefill's remaining cost is its own compute: the design
 note in docs/deepseek_v41_flash_plan.md (D10) puts the number on the next
 step.
+
+## Full GLM packed int4/int8 prefill (2026-09-15)
+
+Tensor-core tiles replace the packed GEMV prefill chain from 128 rows while
+preserving exact integer-code × BF16-scale weights. The matched four-node
+service campaign uses eight slots, native MTP depth 1, BF16 KV and a 1 GiB
+prefix cache. Each point is the median of three identical-hash cold prompts
+across builds, with zero prefix-cache attachment.
+
+| Prompt target | Baseline prefill | Packed GEMM prefill | Speedup | Baseline → new ms/token |
+|---|---:|---:|---:|---:|
+| 2,048 | 15.628 s | 6.111 s | 2.56× | 7.569 → 2.963 |
+| 8,192 | 80.364 s | 40.838 s | 1.97× | 9.759 → 4.959 |
+| 32,768 | 512.968 s | 350.069 s | 1.47× | 15.531 → 10.613 |
+
+The short-prompt policy protects measured C1/MTP behavior. Numerical
+validation retains the existing tolerances and adds an independent FP64
+bulk-forward fixture plus real-model prefill likelihood scoring. See the
+[implementation record](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
+for quality, C1, sanitizer results and executable/source hashes.
+The matched concurrency-4 tasks preserve GSM8K 59/60 and extraction 30/30
+with zero truncations and identical per-item correctness outcomes.
 
 ## Build and test validation
 

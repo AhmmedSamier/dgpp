@@ -33,8 +33,8 @@ RE_GEN = re.compile(
 
 # '[tf] rank r step s: target T argmax A lmax M lse L target_logit G|nan'
 RE_TEACHER = re.compile(
-    r"\[tf\] rank (\d+) step (\d+): target (\d+) argmax (\d+) lmax ([-\d.]+) "
-    r"lse ([-\d.]+) target_logit ([-\d.]+|nan)")
+    rf"\[tf\] rank (\d+) step (\d+): target (\d+) argmax (\d+) lmax ({FLOAT}) "
+    rf"lse ({FLOAT}) target_logit ({FLOAT}|nan)")
 
 # '[sample_mass] rank r step s: k32 M k64 M k128 M k256 M'
 RE_SAMPLE_MASS = re.compile(
@@ -63,7 +63,7 @@ class TeacherLine:
     rank: int
     step: int
     target: int
-    argmax: int                    # the global pick at this step
+    argmax: int                    # global token ID; prefill logs give each slice's local winner
     lmax: float                    # this rank's slice max
     lse: float                     # this rank's slice log-sum-exp
     target_logit: Optional[float]  # None unless the target is in the slice
@@ -140,8 +140,9 @@ def load_gen(directory: str) -> Dict[int, Dict[int, GenLine]]:
     return scan(directory, RE_GEN, _gen_of)
 
 
-def load_teacher(directory: str) -> Dict[int, Dict[int, TeacherLine]]:
-    return scan(directory, RE_TEACHER, _teacher_of)
+def load_teacher(directory: str, *, prefill: bool = False) -> Dict[int, Dict[int, TeacherLine]]:
+    pattern = re.compile(RE_TEACHER.pattern.replace(r"\[tf\]", r"\[prefill_tf\]")) if prefill else RE_TEACHER
+    return scan(directory, pattern, _teacher_of)
 
 
 def load_sample_mass(directory: str) -> Dict[int, Dict[int, SampleMassLine]]:

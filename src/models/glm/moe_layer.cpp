@@ -1,18 +1,18 @@
 #include "models/glm/moe_layer.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cmath>
 #include <cstdio>
-
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 
 #include "common/cuda_check.hpp"
-#include "common/log.hpp"
 #include "common/dtypes.hpp"
+#include "common/log.hpp"
 #include "kernels/glm_moe_launch.hpp"
+#include "kernels/packq_gemm.hpp"
 #include "kernels/scale_gemm.hpp"
 #include "models/glm/step_timing.hpp"
 
@@ -539,12 +539,11 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
   //    blocks exit at once) and the shared segment.
   const int shared_row0 = static_cast<int>(tk);
   const size_t rows_total = tk + static_cast<size_t>(tokens);
-  // The tensor-core kernel where the table takes it (the packed-int
-  // tables run the GEMV chain until their tile kernel lands).
-  grouped_expert_chain(mma_takes_grid() ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv,
-                       hidden, d_segs_, E,
-                       /*max_rows=*/std::max(tokens, 1), d_segs_ + E, tokens,
-                       rows_total, stream);
+  // Packed tensor-core partials are scaled per group without rounding
+  // the weights; the smallest batches retain the GEMV launchers.
+  const bool mma = mma_takes_grid() && (!w_.packq() || tokens >= kPackqMmaFromRows);
+  grouped_expert_chain(mma ? MoeExpertKernel::kMma : MoeExpertKernel::kGemv, hidden, d_segs_, E,
+                       /*max_rows=*/std::max(tokens, 1), d_segs_ + E, tokens, rows_total, stream);
   launch_moe_accum_ordered(out, d_down_, H, d_slot_row_, d_ids_, d_weights_,
                            shared_row0, tokens, K, H, stream);
 }
@@ -552,7 +551,8 @@ void GlmMoeLayer::enqueue_prefill(const uint16_t* hidden, uint16_t* out,
 bool GlmMoeLayer::mma_takes_grid() const {
   // The fp4 tile kernel reads NVFP4 and (2026-09-14) MXFP4 tables.
   if (w_.experts_fp4) return true;
-  if (w_.experts_packed) return false;
+  if (w_.experts_packed)
+    return cfg_.hidden % kPackedGroup == 0 && w_.experts_packed[0].rows % kPackedGroup == 0;
   const int H = cfg_.hidden;
   const int I_r = static_cast<int>(w_.experts[0].rows);
   const int br = w_.experts[0].scale_block_rows, bc = w_.experts[0].scale_block_cols;
@@ -655,7 +655,11 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   auto gemm_bf16 = [&](const MoeSegment* sg, int ns, int mr, int split, int which,
                        uint16_t* out, int n, bool routed_arg) {
     const bool routed = routed_arg || shared_fp4;
-    if (packq)
+    if (packq && mma)
+      launch_moe_grouped_mma_packq_bf16(hidden, H, sg, ns, mr, d_views_prefill_, which, out, I_max,
+                                        n, H, routed_arg ? routed_bits : shared_bits, stream,
+                                        d_rows_);
+    else if (packq)
       launch_moe_grouped_gemv_packq_bf16(d_gather_, H, sg, ns, mr, split, d_views_prefill_,
                                          which, out, I_max, n, H,
                                          routed_arg ? routed_bits : shared_bits, stream);
@@ -675,7 +679,10 @@ void GlmMoeLayer::grouped_expert_chain(MoeExpertKernel kernel,
   auto gemm_f32 = [&](const MoeSegment* sg, int ns, int mr, int split, int k,
                       bool routed_arg) {
     const bool routed = routed_arg || shared_fp4;
-    if (packq)
+    if (packq && mma)
+      launch_moe_grouped_mma_packq_f32(d_act_, I_max, sg, ns, mr, d_views_prefill_, 2, d_down_, H,
+                                       H, k, routed_arg ? routed_bits : shared_bits, stream);
+    else if (packq)
       launch_moe_grouped_gemv_packq_f32(d_act_, I_max, sg, ns, mr, split, d_views_prefill_,
                                         2, d_down_, H, H, k,
                                         routed_arg ? routed_bits : shared_bits, stream);

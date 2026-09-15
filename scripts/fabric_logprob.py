@@ -33,15 +33,37 @@ the long ones.
 """
 import argparse
 import math
+import re
 import sys
 
-from fabric_logs import load_teacher, logaddexp_all
+from fabric_logs import load_teacher, logaddexp_all, rank_logs
 
 
-def load_run(directory):
+def load_run(directory, prefill=False):
     """(step -> {"target", "argmax", "lse": {rank: lse}, "target_logit"},
     sorted ranks)"""
-    per_rank = load_teacher(directory)
+    per_rank = load_teacher(directory, prefill=prefill)
+    if prefill and per_rank:
+        completed = {}
+        for rank, path in rank_logs(directory).items():
+            with open(path) as log:
+                contents = log.read()
+            ends = re.findall(r"\[prefill_tf_end\] rank (\d+) world (\d+) positions (\d+)", contents)
+            if len(ends) != 1 or int(ends[0][0]) != rank:
+                sys.exit(f"{directory}: missing or conflicting prefill completion for rank {rank}")
+            completed[rank] = tuple(map(int, ends[0][1:]))
+            if len(re.findall(r"\[prefill_tf\]", contents)) != completed[rank][1]:
+                sys.exit(f"{directory}: duplicate or missing prefill score lines for rank {rank}")
+        if len(set(completed.values())) != 1:
+            sys.exit(f"{directory}: prefill completion counts disagree across ranks")
+        world, count = next(iter(completed.values()))
+        if set(per_rank) != set(range(world)) or count <= 0:
+            sys.exit(f"{directory}: incomplete prefill world or empty scoring run")
+        if any(line.rank != rank for rank, lines in per_rank.items() for line in lines.values()):
+            sys.exit(f"{directory}: prefill rank does not match its log filename")
+        positions = [set(lines) for lines in per_rank.values()]
+        if any(p != set(range(count)) for p in positions):
+            sys.exit(f"{directory}: incomplete or noncontiguous prefill positions across ranks")
     steps = {}
     for rank, lines in per_rank.items():
         for step, t in lines.items():
@@ -53,6 +75,17 @@ def load_run(directory):
                 rec["target_logit"] = t.target_logit
     if not steps:
         sys.exit(f"{directory}: no [tf] lines (run with --teacher-file)")
+    if prefill:
+        for step, record in steps.items():
+            slices = [lines[step] for lines in per_rank.values()]
+            if any(not math.isfinite(line.lmax) or not math.isfinite(line.lse) or
+                   (line.target_logit is not None and not math.isfinite(line.target_logit)) for line in slices):
+                sys.exit(f"{directory}: nonfinite prefill score at step {step}")
+            if len({line.target for line in slices}) != 1:
+                sys.exit(f"{directory}: prefill targets disagree across ranks at step {step}")
+            if sum(line.target_logit is not None for line in slices) != 1:
+                sys.exit(f"{directory}: prefill target must have exactly one owner at step {step}")
+            record['argmax'] = max(slices, key=lambda line: (line.lmax, -line.argmax)).argmax
     return steps, sorted(per_rank)
 
 
@@ -87,6 +120,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("new_dir")
     ap.add_argument("ref_dir", nargs="?")
+    ap.add_argument("--prefill", action="store_true",
+                    help="read glm_dsa_forward_check --teacher-file prefill scores and merge local argmax values")
     ap.add_argument("--max-mean-nll-delta", type=float, default=0.02,
                     help="|mean NLL(new) - mean NLL(ref)| bound, nats (0.02)")
     ap.add_argument("--big-delta", type=float, default=1.0,
@@ -104,7 +139,7 @@ def main():
                          "0.12% on the memorized one.")
     args = ap.parse_args()
 
-    new_steps, new_ranks = load_run(args.new_dir)
+    new_steps, new_ranks = load_run(args.new_dir, args.prefill)
     new_lp = logprobs(new_steps, new_ranks)
     if not new_lp:
         sys.exit("no complete steps")
@@ -112,7 +147,9 @@ def main():
     if args.ref_dir is None:
         return 0
 
-    ref_steps, ref_ranks = load_run(args.ref_dir)
+    ref_steps, ref_ranks = load_run(args.ref_dir, args.prefill)
+    if args.prefill and (new_ranks != ref_ranks or set(new_steps) != set(ref_steps)):
+        sys.exit("prefill comparisons require identical ranks and scored positions")
     ref_lp = logprobs(ref_steps, ref_ranks)
     ref_mean = summarize(f"ref ({args.ref_dir}, {len(ref_ranks)} ranks)", ref_lp)
 
@@ -135,10 +172,13 @@ def main():
     big = sorted((sd for sd in deltas if abs(sd[1]) > args.big_delta),
                  key=lambda sd: -abs(sd[1]))
     big_rate = len(big) / n
-    flips = sum(1 for s in common if new_lp[s][1] != ref_lp[s][1])
+    argmax_changes = sum(new_steps[s]["argmax"] != ref_steps[s]["argmax"] for s in common)
+    hit_gains = sum(new_lp[s][1] and not ref_lp[s][1] for s in common)
+    hit_losses = sum(ref_lp[s][1] and not new_lp[s][1] for s in common)
     print(f"delta over {n} common tokens: mean {mean_delta:+.5f} nat "
           f"(+-{sem:.5f} s.e.; NLL {-mean_delta * n:+.3f} total), mean |delta| "
-          f"{mean_abs:.4f}; top-1 flips {flips}; big moves (>{args.big_delta} "
+          f"{mean_abs:.4f}; argmax changes {argmax_changes}; "
+          f"top-1 hits +{hit_gains}/-{hit_losses}; big moves (>{args.big_delta} "
           f"nat) {len(big)} = {100 * big_rate:.2f}%")
     for step, d in big[:5]:
         print(f"  step {step}: log p {ref_lp[step][0]:.3f} -> {new_lp[step][0]:.3f} "

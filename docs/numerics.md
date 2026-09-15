@@ -40,6 +40,33 @@ one:
   router's top-k boundary flipped an expert there. The tool bounds the
   *rate* of those, not the worst one.
 
+- `scripts/fabric_logprob.py NEW_DIR REF_DIR --prefill` — full-GLM prefill
+  reassociations. Use `glm_dsa_forward_check --teacher-file FILE` on both
+  builds; every position is scored by the full forward instead of repeated
+  decode steps. Fetch every rank's log. The reader joins vocabulary slices,
+  merges local argmax values with global token-ID tie breaking, and rejects
+  mismatched ranks, positions, targets or target ownership. Completion
+  records must account for every rank and position; missing, duplicate or
+  truncated score records fail. Reports distinguish changed argmax tokens
+  from gains and losses in correct top-1 predictions:
+
+  ```bash
+  DGPP_CLUSTER_CONFIG=deploy/cluster_glm-5.3_int4-int8_w4.json \
+  scripts/fabric_run.sh --app build-ci/glm_dsa_forward_check --fetch-logs \
+      --stage-file benchmarks/teacher_text.txt --log-dir /tmp/prefill-new -- \
+      --model HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64 --resident \
+      --image-dir /path/to/resident-cache \
+      --teacher-file benchmarks/teacher_text.txt
+  python3 scripts/fabric_logprob.py /tmp/prefill-new /tmp/prefill-ref --prefill
+  ```
+
+  The forward holds prompt-wide scratch and vocabulary logits. Size the
+  teacher text for the reserved hardware and retain identical text bytes
+  when comparing builds. Teacher scoring skips saved per-layer residuals
+  unless `--dump-states` is also requested. Use the same existing resident
+  image cache as serving when available; direct checkpoint loading may
+  take substantially longer and cause rank startup skew.
+
 - `scripts/fabric_sampling_profile.py DIR...` — the M6 sampling-width gate.
   Make one teacher-forced run per shipped text with `--sampling-profile` and
   fetched rank logs, then pass all three directories together:

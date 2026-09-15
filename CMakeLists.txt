@@ -147,6 +147,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/fp8_dequant.cu
   src/kernels/fp4_gemv.cu
   src/kernels/packq_gemv.cu
+  src/kernels/packq_gemm.cu
   src/kernels/scale_gemm.cu
   src/kernels/bf16_gemv.cu
   src/kernels/mma_gemv.cu
@@ -952,6 +953,22 @@ add_test(NAME glm_dsa_forward_test
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/glm_dsa_pure_ref.gdsdump)
 set_tests_properties(glm_dsa_forward_test PROPERTIES DEPENDS glm_dsa_forward_generate)
 
+# Bulk packed prefill versus the same independent FP64 oracle and budgets.
+# At 160 rows the packed GEMM is active. Dense attention and all-expert
+# routing isolate arithmetic from selection changes and audit every row.
+set(GLM_DSA_PREFILL_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/glm_dsa_prefill_fixture)
+add_test(NAME glm_dsa_prefill_fixture COMMAND glm_dsa_forward_test --write-prefill-fixture ${GLM_DSA_PREFILL_FIXTURE})
+set_tests_properties(glm_dsa_prefill_fixture PROPERTIES LABELS "gpu")
+add_test(NAME glm_dsa_prefill_generate
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/glm_dsa_reference_dump.py
+          gen-pure --checkpoint-dir ${GLM_DSA_PREFILL_FIXTURE} --tokens 160
+          --out ${CMAKE_CURRENT_BINARY_DIR}/glm_dsa_prefill_ref.gdsdump)
+set_tests_properties(glm_dsa_prefill_generate PROPERTIES DEPENDS glm_dsa_prefill_fixture LABELS "fixture")
+add_test(NAME glm_dsa_prefill_test
+  COMMAND glm_dsa_forward_test --checkpoint-dir ${GLM_DSA_PREFILL_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/glm_dsa_prefill_ref.gdsdump)
+set_tests_properties(glm_dsa_prefill_test PROPERTIES DEPENDS glm_dsa_prefill_generate LABELS "gpu")
+
 # The full GLM-5.3 session surface (G5): decode over the fixture.
 add_executable(glm_dsa_decode_test tests/cuda/glm_dsa_decode_test.cpp)
 target_include_directories(glm_dsa_decode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -1114,6 +1131,12 @@ target_link_libraries(packq_gemv_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cu
 dgpp_set_common(packq_gemv_test)
 add_test(NAME packq_gemv_test COMMAND packq_gemv_test)
 set_tests_properties(packq_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
+add_executable(packq_gemm_test tests/cuda/packq_gemm_test.cu)
+target_include_directories(packq_gemm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(packq_gemm_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(packq_gemm_test)
+add_test(NAME packq_gemm_test COMMAND packq_gemm_test)
+set_tests_properties(packq_gemm_test PROPERTIES SKIP_RETURN_CODE 2 LABELS "gpu")
 
 add_executable(scale_gemm_test
   tests/cuda/scale_gemm_test.cu
@@ -1270,6 +1293,10 @@ add_executable(moe_prefill_bench benchmarks/micro/moe_prefill_bench.cu benchmark
 target_include_directories(moe_prefill_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(moe_prefill_bench PRIVATE dgpp_kernels CUDA::cudart)
 dgpp_set_common(moe_prefill_bench)
+add_executable(packq_prefill_bench benchmarks/micro/packq_prefill_bench.cu)
+target_include_directories(packq_prefill_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(packq_prefill_bench PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(packq_prefill_bench)
 target_include_directories(moe_slot_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(moe_slot_bench PRIVATE dgpp_models_glm_loader dgpp_models_glm CUDA::cudart CUDA::cublasLt)
 dgpp_set_common(moe_slot_bench)

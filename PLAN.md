@@ -18,7 +18,7 @@ operations to its peers. Every rank checks the operation-stream digest.
 | GLM-5.3-Flash | KDA and DSA attention, mHC, FP8 and hybrid NVFP4 experts, resident loading, graph decode, prefix cache and MTP | The full model needs four Sparks for resident serving. Batched decode has an eight-row limit; MTP depths 2–3 use scalar graphs |
 | Qwen3.8-Flash-Next | GDN, QSA, gated residuals, PLE n-gram embeddings, FP8 and NVFP4 experts, optional FP8 dense projections, graph decode, prefix cache and MTP | FP8 deployment templates use two or four nodes. Single-node NVFP4 serving maps the n-gram table from NVMe. Batched decode supports sixteen rows, including eight slots at MTP depth 1; deeper MTP uses fitting physical slot prefixes or scalar graphs. Opt-in prefill continuation gives decode a turn between chunks |
 | GLM-4.7 | Paged GQA, partial RoPE, NVFP4 dense and expert weights, draft-layer requantization, graph decode, prefix cache and MTP | Four-node serving is measured. The engine supports up to 32 batched decode rows, including deeper MTP; the supplied default recipe uses depth 1 |
-| GLM-5.3 (full) | MLA with decoupled RoPE and per-token DSA selection shared across layers, int4/int8 pack-quantized experts and attention, draft-layer requantization, graph decode, prefix cache and MTP | Four nodes at 99.3 GiB of weights per rank (48K bf16 / 96K fp8 latent cache at four slots); served 2026-09-12: T=1 51 ms/step, MTP 68–76 ms/pass at 1.8–2.0 tokens/pass, gsm8k 59/60, HumanEval 40/40. Batched decode up to sixteen rows (eight request slots at MTP depth 1, five at depth 2; the select in row groups of eight); prefill runs the packed experts and attention through the GEMV chain (7–9.5 ms/token) until the tile kernel lands |
+| GLM-5.3 (full) | MLA with decoupled RoPE and per-token DSA selection shared across layers, int4/int8 pack-quantized experts and attention, draft-layer requantization, graph decode, prefix cache and MTP | Four nodes at 99.3 GiB of weights per rank (48K bf16 / 96K fp8 latent cache at four slots); served 2026-09-12: T=1 51 ms/step, MTP 68–76 ms/pass at 1.8–2.0 tokens/pass, gsm8k 59/60, HumanEval 40/40. Batched decode up to sixteen rows (eight request slots at MTP depth 1, five at depth 2; the select in row groups of eight); packed experts and attention use tensor-core prefill from 128 rows; shorter prompts retain GEMV to preserve measured C1/MTP behavior |
 | DeepSeek-V4.1-Flash | CED encoder/decoder, CSA2 sliding-window + compressed-KV attention with a two-level indexer, single-pass hyper-connections, Engram n-gram tables mapped from NVMe, the DSpark block draft (five drafts per pass), the MXFP4/FP8 checkpoint as shipped, graph decode, prefix cache and a bounded (SWA-replay) prefill | Four nodes at 72.94 GiB of weights per rank (128K context at two slots); served 2026-09-14: 76 ms/pass at 2.33 tokens/pass (32.5 ms/token), bounded prefill 1.6–2.4 ms/token, gsm8k 60/60, HumanEval 40/40, extract 30/30. `engine.prefill` chooses bounded (the default) or the exact 40-layer parity mode. Prefix caching is whole-block, so prompts shorter than 128 tokens are not cached yet |
 
 World size comes from the configuration's node list. A single-node graph
@@ -88,8 +88,10 @@ when the pool is exhausted; it does not preempt and recompute it.
 The [Qwen expert prefill investigation](benchmarks/results/2026-09-15-qwen-moe-prefill.md)
 tested smaller tiles, compact grids and persistent blocks without finding a
 production improvement. Those variants remain in a standalone benchmark;
-serving kernels are unchanged. Full GLM's packed prefill GEMM and Qwen QSA
-are the next compute targets in the
+serving kernels are unchanged. The
+[full-GLM packed prefill implementation](benchmarks/results/2026-09-15-glm-packed-prefill.md)
+adds int4/int8 tensor-core tiles, FP64 arithmetic checks and prefill likelihood
+scoring. Qwen QSA and GLM-Flash row expansion are the next compute targets in the
 [performance plan](docs/performance_improvement_plan.md#10-next-priorities-after-the-first-delivery).
 
 Other work includes request-level observability, additional API fields,

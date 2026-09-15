@@ -1,5 +1,3 @@
-#include "models/dsa_layer.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -9,8 +7,10 @@
 
 #include "common/cuda_check.hpp"
 #include "kernels/dsa.hpp"
+#include "kernels/packq_gemm.hpp"
 #include "kernels/packq_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
+#include "models/dsa_layer.hpp"
 #include "models/dsa_state.hpp"
 
 namespace dgpp {
@@ -393,10 +393,9 @@ bool DsaLayer::prepare_prefill(int tile_rows, int64_t visible_pools) {
 // summation orders differ).
 void DsaLayer::project_out(void* out, int tokens, cudaStream_t stream) {
   if (w_.packed_int())
-    launch_packq_gemv_bf16(static_cast<const uint16_t*>(attn_out_),
-                           size_t(geo_.local_v_rows), w_.o_proj_p,
-                           static_cast<uint16_t*>(out), tokens, cfg_.hidden,
-                           geo_.local_v_rows, stream);
+    (tokens >= kPackqMmaFromRows ? launch_packq_gemm_bf16 : launch_packq_gemv_bf16)(
+        static_cast<const uint16_t*>(attn_out_), size_t(geo_.local_v_rows), w_.o_proj_p,
+        static_cast<uint16_t*>(out), tokens, cfg_.hidden, geo_.local_v_rows, stream);
   else if (w_.quantized())
     launch_scale_gemm_bf16(static_cast<const uint16_t*>(attn_out_),
                            size_t(geo_.local_v_rows), w_.o_proj_q.payload,
@@ -427,10 +426,12 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
   // 1) fused [q_a | kv_a] projection, then RMSNorms on the split halves.
   // The fp8 form: two scale-aware GEMMs into the two column ranges of the
   // same [tokens, q_lora + kv_lora] buffer (the output row stride). The
-  // packed form: one GEMV over the fused triple.
+  // packed form: one fused triple, with tensor-core lowering for bulk
+  // prefill and unchanged GEMV arithmetic for short prompts and decode.
   if (w_.packed_int()) {
-    launch_packq_gemv_bf16(static_cast<const uint16_t*>(hidden_in), size_t(hid),
-                           w_.qkv_a_p, qkv_, tokens, qkv_cols, hid, stream);
+    (tokens >= kPackqMmaFromRows ? launch_packq_gemm_bf16 : launch_packq_gemv_bf16)(
+        static_cast<const uint16_t*>(hidden_in), size_t(hid), w_.qkv_a_p, qkv_, tokens, qkv_cols,
+        hid, stream);
   } else if (w_.quantized()) {
     const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
     uint16_t* qkv = static_cast<uint16_t*>(qkv_);
@@ -454,9 +455,9 @@ void DsaLayer::project_common(const void* hidden_in, int tokens,
            rope, 0);
   // 2) MLA q from the normed q-lora rows; its rope slice rotated in place.
   if (w_.packed_int())
-    launch_packq_gemv_bf16(static_cast<const uint16_t*>(q_c_), size_t(cfg_.q_lora_rank),
-                           w_.q_b_p, q_, tokens, geo_.local_q_rows, cfg_.q_lora_rank,
-                           stream);
+    (tokens >= kPackqMmaFromRows ? launch_packq_gemm_bf16 : launch_packq_gemv_bf16)(
+        static_cast<const uint16_t*>(q_c_), size_t(cfg_.q_lora_rank), w_.q_b_p, q_, tokens,
+        geo_.local_q_rows, cfg_.q_lora_rank, stream);
   else if (w_.quantized())
     launch_scale_gemm_bf16(static_cast<const uint16_t*>(q_c_), size_t(cfg_.q_lora_rank),
                            w_.q_b_q.payload, w_.q_b_q.scales,

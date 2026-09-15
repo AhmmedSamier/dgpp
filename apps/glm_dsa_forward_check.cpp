@@ -9,6 +9,8 @@
 //                      --ids 1,2,3,... [--topk K] [--layers N] [--dump-states FILE]
 //                      [--world W --rank R --peer HOST --port N] [--resident]
 //                      [--image-dir DIR|off] [--lat-slot-bytes N]
+//                      [--teacher-file FILE] (scores every prefill position;
+//                        scripts/fabric_logprob.py --prefill joins TP slices)
 //
 // TP (plan D7): one process per node over the fabric bus; every fold of
 // the diagnostic forward rides the latency path, so the slot is sized for
@@ -44,7 +46,7 @@
 #include "models/glm_dsa/model.hpp"
 
 int main(int argc, char** argv) {
-  std::string model_id, ckpt, ids_text, dump_states, peer, image_dir, text;
+  std::string model_id, ckpt, ids_text, dump_states, peer, image_dir, text, teacher_file;
   int decode_steps = 0;
   int topk = 5, layers = -1, world = 1, rank = 0, port = 29950;
   bool resident = false;
@@ -60,6 +62,8 @@ int main(int argc, char** argv) {
       else if (a == "--checkpoint-dir") ckpt = next(i);
       else if (a == "--ids") ids_text = next(i);
       else if (a == "--text") text = next(i);              // tokenized with the checkpoint's tokenizer
+      else if (a == "--teacher-file")
+        teacher_file = next(i);
       else if (a == "--decode-steps") decode_steps = std::stoi(next(i));  // greedy steps after the forward, audited
       else if (a == "--topk") topk = std::stoi(next(i));
       else if (a == "--layers") layers = std::stoi(next(i));
@@ -79,7 +83,16 @@ int main(int argc, char** argv) {
       ckpt = dgpp::hf::model_dir(model_id, &err);
       if (ckpt.empty()) throw std::runtime_error("cannot resolve " + model_id + ": " + err);
     }
-    if (ids_text.empty() && text.empty()) throw std::runtime_error("--ids or --text is required");
+    if (!teacher_file.empty()) {
+      if (!ids_text.empty() || !text.empty() || decode_steps != 0)
+        throw std::runtime_error(
+            "--teacher-file cannot be combined with --ids, --text or --decode-steps");
+      std::ifstream input(teacher_file, std::ios::binary);
+      if (!input) throw std::runtime_error("cannot read teacher file: " + teacher_file);
+      text.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+    if (ids_text.empty() && text.empty())
+      throw std::runtime_error("--ids, --text or a nonempty --teacher-file is required");
     std::vector<int64_t> ids;
     std::unique_ptr<dgpp::text::Tokenizer> tok;
     if (!text.empty()) {
@@ -106,6 +119,8 @@ int main(int argc, char** argv) {
       if (cfg.packed_layer_begin > cfg.packed_layer_end) cfg.packed_layer_begin = cfg.packed_layer_end;
     }
     const int T = static_cast<int>(ids.size());
+    if (!teacher_file.empty() && T < 2)
+      throw std::runtime_error("teacher file needs at least two tokens");
     const int H = cfg.hidden_size, W = H;
     if (!image_dir.empty()) dgpp::GlmDsaLayerStream::set_resident_image_dir(image_dir == "off" ? "" : image_dir);
     const dgpp::GlmDsaResidency residency = resident ? dgpp::GlmDsaResidency::Resident : dgpp::GlmDsaResidency::Streaming;
@@ -126,7 +141,8 @@ int main(int argc, char** argv) {
     const auto t0 = std::chrono::steady_clock::now();
     dgpp::GlmDsaModel model(cfg, ckpt, T + decode_steps, T + decode_steps + 64, residency, reducer.get(), rank, world);
     const auto t1 = std::chrono::steady_clock::now();
-    const dgpp::GlmDsaModel::Outputs out = model.forward(ids, true);
+    const dgpp::GlmDsaModel::Outputs out =
+        model.forward(ids, teacher_file.empty() || !dump_states.empty());
     const auto t2 = std::chrono::steady_clock::now();
     auto fnv = [](const std::vector<uint16_t>& v) {
       uint64_t h = 1469598103934665603ull;
@@ -147,6 +163,29 @@ int main(int argc, char** argv) {
     std::printf("final hidden digest %016llx\n", static_cast<unsigned long long>(fnv(out.final_hidden_bits)));
     // This rank's vocab slice: the top-k with GLOBAL ids and the logits.
     const auto top = dgpp::GlmDsaModel::topk(out.logits, T, out.lm_vocab_count, topk);
+    if (!teacher_file.empty()) {
+      // These are LOCAL argmax values. The prefill logprob reader merges
+      // them by logit across ranks before computing global top-1 accuracy.
+      // Scoring the full forward exercises the prefill kernels at every
+      // position; incremental teacher forcing would primarily test decode.
+      for (int t = 0; t + 1 < T; ++t) {
+        const float* row = out.logits.data() + static_cast<size_t>(t) * out.lm_vocab_count;
+        const auto best = std::max_element(row, row + out.lm_vocab_count);
+        const double mx = *best;
+        double sum = 0;
+        for (int v = 0; v < out.lm_vocab_count; ++v)
+          sum += std::exp(static_cast<double>(row[v]) - mx);
+        const int64_t target = ids[static_cast<size_t>(t) + 1];
+        const int64_t local = target - out.lm_vocab_begin;
+        const double logit = local >= 0 && local < out.lm_vocab_count ? row[local] : NAN;
+        std::printf(
+            "[prefill_tf] rank %d step %d: target %lld argmax %d lmax %.9g lse %.12g target_logit "
+            "%.9g\n",
+            rank, t, static_cast<long long>(target),
+            static_cast<int>(best - row) + out.lm_vocab_begin, mx, mx + std::log(sum), logit);
+      }
+      std::printf("[prefill_tf_end] rank %d world %d positions %d\n", rank, world, T - 1);
+    }
     for (int t = 0; t < T; ++t) {
       std::printf("pos %3d id %7lld ->", t, static_cast<long long>(ids[static_cast<size_t>(t)]));
       for (const auto& [id, v] : top[static_cast<size_t>(t)]) std::printf(" %d(%.3f)", id + out.lm_vocab_begin, v);

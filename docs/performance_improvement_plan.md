@@ -6,9 +6,9 @@ the dated measurements, deployment templates, and the implementation.
 The analysis below describes that baseline. Implementation now includes
 the measurement tools, Qwen's 16-row decode path, fitting batch families,
 and opt-in Qwen prefill continuation. See the [implementation report](../benchmarks/results/2026-09-15-qwen-batching-prefill.md)
-for correctness gates and fabric measurements. The C1 promotion gate has
-not cleared; the remaining sections describe follow-up work, not completed
-features.
+for correctness gates and fabric measurements. Sections 1–9 retain the
+original proposal; the follow-ups below and section 10 update delivery
+status and remaining priorities.
 The [C1 analysis](../benchmarks/results/2026-09-15-c1-analysis.md) puts the
 default Qwen shift at about -0.25%, below this campaign's between-session
 variation; the zero-threshold screen does not establish a material causal
@@ -23,7 +23,12 @@ rejects smaller tiles, compact grids and persistent blocks for Qwen's small
 prefill chunks. None established a useful service win. Recorded-route memory
 counters are close to one read of the selected weights; production kernels
 remain unchanged. Section 10 moves full GLM's missing packed prefill GEMM
-ahead of further Qwen tile sweeps.
+ahead of further Qwen tile sweeps. The subsequent
+[full-GLM implementation](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
+adds packed tensor-core prefill and independent FP64/likelihood checks.
+It retains short-prompt GEMV because an earlier switch changed MTP acceptance
+and reduced measured C1 throughput, despite passing the likelihood gates.
+Section 10 lists the remaining priorities.
 
 ## Recommendation
 
@@ -490,26 +495,30 @@ the compact prototype moved service prefill by only 0.16–1.05%, while other
 routing patterns regressed. The recorded median-route memory fills were
 already close to a single read of the selected weights. Further Qwen tile
 sweeps need a more specific source of avoidable work. The remaining priorities
-below are proposed work, not measured wins.
+below are proposed work, not measured wins. Full GLM's packed GEMM has since
+been implemented; its [dated report](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
+records cold-service, C1 and quality evidence. It reuses packed tiles across
+prompt rows without rounding the dequantized weights to BF16.
 
 | Priority | Optimization | Concrete next step and success criterion |
 |---|---|---|
-| 1 | Full GLM packed int4/int8 prefill GEMM | Replace the packed GEMV prefill chain with tensor-core tiles that reuse unpacked weights across prompt rows. Keep decode dispatch unchanged. Validate offset codes, scales, accumulation, logits and task quality, then require matched cold 2K/8K/32K service gains and preserved C1 |
-| 2 | Qwen QSA prefill and grouped continuation | Profile QSA tiling and reuse, then pack resumable spans where useful. Measure each independently on cold service prompts. Grouped continuation must improve expert weight reuse at the same decode-pause budget |
-| 3 | GLM-Flash concurrency | Generalize fixed recurrent/DSA/MTP state and scratch to 16 rows, then validate 32 and a batched draft chain. Reproduce useful C6/C8 gains with default C1 preserved |
-| 4 | Less repeated expert traffic and collective overhead | Measure rows per expert and per-rank communication waits. Reuse weight tiles across rows assigned to the same expert; broaden the existing stream-ordered reducer where it helps, then tackle GPU-driven bulk collectives |
-| 5 | Speculation matched to workload | Calibrate costs by batch width, context and draft depth. Improve existing DSpark/native-MTP depth selection and add a safe plain-decode choice before paying draft cost. Optimize committed tokens per wall second rather than acceptance alone |
-| 6 | GLM-Flash DFlash2 | Establish target-feature parity against the compatible drafter first, then implement loading, proposal, rollback and verification. K7 means seven draft tokens; it needs verifier/state capacity changes and the trained DFlash2 architecture |
-| 7 | Remaining C1 and client-latency improvements | Evaluate Qwen TP2 NVFP4 with resident n-gram tables, revisit per-class native MTP depth, profile launch/peer skew, and replace periodic HTTP output polling with a producer wakeup if measured delivery latency warrants it. Keep kernel throughput, service throughput and visible latency separate |
+| 1 | Qwen QSA prefill and grouped continuation | Profile QSA tiling and reuse, then pack resumable spans where useful. Measure each independently on cold service prompts. Grouped continuation must improve expert weight reuse at the same decode-pause budget |
+| 2 | GLM-Flash concurrency | Generalize fixed recurrent/DSA/MTP state and scratch to 16 rows, then validate 32 and a batched draft chain. Reproduce useful C6/C8 gains with default C1 preserved |
+| 3 | Less repeated expert traffic and collective overhead | Measure rows per expert and per-rank communication waits. Reuse weight tiles across rows assigned to the same expert; broaden the existing stream-ordered reducer where it helps, then tackle GPU-driven bulk collectives |
+| 4 | Speculation matched to workload | Calibrate costs by batch width, context and draft depth. Improve existing DSpark/native-MTP depth selection and add a safe plain-decode choice before paying draft cost. Optimize committed tokens per wall second rather than acceptance alone |
+| 5 | GLM-Flash DFlash2 | Establish target-feature parity against the compatible drafter first, then implement loading, proposal, rollback and verification. K7 means seven draft tokens; it needs verifier/state capacity changes and the trained DFlash2 architecture |
+| 6 | Remaining C1 and client-latency improvements | Evaluate Qwen TP2 NVFP4 with resident n-gram tables, revisit per-class native MTP depth, profile launch/peer skew, and replace periodic HTTP output polling with a producer wakeup if measured delivery latency warrants it. Keep kernel throughput, service throughput and visible latency separate |
 
 Arbitrary physical slot subsets and continuation for GLM/DeepSeek also
 remain open. DeepSeek needs its shared bounded-prefill scratch made safe
 across yields. Wider families such as GLM-4.7 can first receive matched
 capacity/depth sweeps using their existing runtime row support.
 
-The budget sweep and Qwen small-chunk expert experiments are complete.
-Start with the missing full GLM packed prefill GEMM, followed by QSA and
-GLM-Flash row expansion.
+The budget sweep, Qwen small-chunk expert investigation and full-GLM packed
+prefill implementation are complete. Continue with QSA and GLM-Flash row
+expansion. Full GLM can next use profiles of the new path to identify the
+remaining attention/collective cost; a lower packed cutoff needs measured
+short-C1 gains as well as numerical validation.
 DFlash2 feature validation can begin before committing to its full port.
 Use repeated deployment A/B pairs for small C1 effects; consecutive prompt
 repeats alone cannot separate implementation cost from session drift.
