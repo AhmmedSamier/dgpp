@@ -994,9 +994,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         auto cursor = std::make_shared<typename Model::PrefillCursor>(model_->session_prefill_begin(
             req, task->prompt, std::min<int64_t>(reserve_tokens + std::max(0, depth_ - 1), model_->max_context()),
             chunk_tokens, task->boundaries, snap, plan.attach_position));
-        task->advance = [this, req, cursor, task = task.get()] {
+        task->advance = [this, req, cursor, task = task.get()](int64_t budget) {
           const int64_t start = cursor->next;
-          const bool done = model_->session_prefill_advance(*cursor);
+          const bool done = model_->session_prefill_advance(*cursor, budget);
           if (task->snap.taken && !task->plan.snap_taken) {
             arena_.commit(task->plan.snap_slot, task->snap);
             task->plan.snap_taken = true;
@@ -1016,13 +1016,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       throw std::logic_error("graph engine: this family cannot yield prefill");
     }
   }
-  sched::SchedulerEngine::PrefillProgress advance_prefill(int req) override {
+  sched::SchedulerEngine::PrefillProgress advance_prefill(int req, int64_t budget = 0) override {
     drain();
     check_req(req);
     auto& task = prefills_[static_cast<size_t>(req)];
     if (!task) throw std::logic_error("graph engine: no pending prefill");
     try {
-      auto progress = task->advance();
+      auto progress = task->advance(budget);
       reseed_live_feeds();
       if (progress.first_token >= 0) task.reset();
       return progress;
@@ -1405,7 +1405,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     std::vector<int64_t> prompt, boundaries;
     sched::SchedulerEngine::PrefixPrefill plan;
     typename Model::SnapshotRequest snap;
-    std::function<sched::SchedulerEngine::PrefillProgress()> advance;
+    std::function<sched::SchedulerEngine::PrefillProgress(int64_t)> advance;
   };
   std::vector<std::unique_ptr<PendingPrefill>> prefills_;
 

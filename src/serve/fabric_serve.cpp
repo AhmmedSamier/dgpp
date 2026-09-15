@@ -316,6 +316,7 @@ std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
   // The effective configuration's digest: every peer compares
   // its own before serving; a config-less rank 0 writes none.
   if (policy.prefill_budget_tokens > 0) out += ",\"pfbudget\":" + std::to_string(policy.prefill_budget_tokens);
+  if (policy.prefill_idle_budget_tokens > 0) out += ",\"pfidle\":" + std::to_string(policy.prefill_idle_budget_tokens);
   if (!config_digest.empty()) {
     out += ",\"cfg\":";
     append_json_string(&out, config_digest);
@@ -340,6 +341,7 @@ std::string encode_journal_settings(const WorldSettings& s) {
       s.mtp_depth, s.graph_batch_min_live, s.sampling_candidates, s.prefix_cache_gib);
   append_json_string(&out, s.admission);
   if (s.prefill_budget_tokens > 0) out += ",\"pfbudget\":" + std::to_string(s.prefill_budget_tokens);
+  if (s.prefill_idle_budget_tokens > 0) out += ",\"pfidle\":" + std::to_string(s.prefill_idle_budget_tokens);
   out += std::format(",\"win\":{},\"pace\":{:.17g},\"inflight\":{},\"rdv\":{},\"stats\":{:.17g},\"ric\":{},\"kvdt\":",
       s.admission_window, s.bulk_pace_gbps, s.bulk_inflight, s.rendezvous_timeout_ms,
       s.stats_interval_s, s.reasoning_in_content ? 1 : 0);
@@ -484,6 +486,11 @@ JournalRecord decode_journal_line(std::string_view line) {
         throw std::runtime_error("journal: settings record with a bad prefill budget");
       s.prefill_budget_tokens = static_cast<int>(budget->as_int());
     }
+    if (const auto* budget = v.find("pfidle")) {
+      if (!budget->is_number() || budget->as_int() < 0 || budget->as_int() > (1 << 30))
+        throw std::runtime_error("journal: settings record with a bad idle prefill budget");
+      s.prefill_idle_budget_tokens = static_cast<int>(budget->as_int());
+    }
     s.bulk_pace_gbps = num("pace").as_double();
     s.bulk_inflight = static_cast<int>(num("inflight").as_int());
     s.rendezvous_timeout_ms = static_cast<int>(num("rdv").as_int());
@@ -533,6 +540,11 @@ JournalRecord decode_journal_line(std::string_view line) {
         if (!budget->is_number() || budget->as_int() < 0 || budget->as_int() > (1 << 30))
           throw std::runtime_error("journal: warm record with a bad prefill budget");
         rec.admission.prefill_budget_tokens = static_cast<int>(budget->as_int());
+      }
+      if (const auto* budget = v.find("pfidle")) {
+        if (!budget->is_number() || budget->as_int() < 0 || budget->as_int() > (1 << 30))
+          throw std::runtime_error("journal: warm record with a bad idle prefill budget");
+        rec.admission.prefill_idle_budget_tokens = static_cast<int>(budget->as_int());
       }
     }
     if (const dgpp::minijson::Value* pc = v.find("pc")) {

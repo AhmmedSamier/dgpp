@@ -90,6 +90,14 @@ Scheduler::Scheduler(SchedulerEngine* engine,
       throw std::invalid_argument("Scheduler: prefill budget needs a supported engine, aligned chunks and "
                                   "a budget no larger than the engine's prefill limit");
   }
+  if (policy_.prefill_idle_budget_tokens < 0 ||
+      (policy_.prefill_idle_budget_tokens > 0 &&
+       (policy_.prefill_budget_tokens == 0 ||
+        policy_.prefill_idle_budget_tokens < policy_.prefill_budget_tokens ||
+        policy_.prefill_idle_budget_tokens % engine_->prefill_chunk_alignment() != 0 ||
+        policy_.prefill_idle_budget_tokens > engine_->prefill_chunk_limit())))
+    throw std::invalid_argument("Scheduler: idle prefill budget needs an enabled budget and must be aligned, "
+                                "at least the busy budget and no larger than the engine's prefill limit");
   if (queue_limit_ < 0)
     throw std::invalid_argument(
         "Scheduler: queue_limit must be 0 (unbounded) or positive");
@@ -443,11 +451,11 @@ int Scheduler::admit_prepare(int arrival) {
   return slot;
 }
 
-std::vector<int> Scheduler::admissible_group(int first) {
+std::vector<int> Scheduler::admissible_group(int first, int64_t budget) {
   std::vector<int> group;
   const int64_t span_limit = engine_->prefill_group_span_limit();
-  const int64_t total_limit = policy_.prefill_budget_tokens > 0
-      ? std::min<int64_t>(engine_->prefill_group_total_limit(), policy_.prefill_budget_tokens)
+  const int64_t total_limit = budget > 0
+      ? std::min<int64_t>(engine_->prefill_group_total_limit(), budget)
       : engine_->prefill_group_total_limit();
   if (span_limit <= 0 || total_limit <= 0) return group;
   const auto groupable = [&](const Request& r) {
@@ -596,7 +604,7 @@ void Scheduler::admit(int arrival) {
   admit_finish(arrival, slot, token, prefill_ms, attached);
 }
 
-void Scheduler::begin_prefill(int arrival) {
+void Scheduler::begin_prefill(int arrival, int64_t budget) {
   Request& r = requests_[static_cast<size_t>(arrival)];
   const int slot = admit_prepare(arrival);
   SchedulerEngine::PrefixPrefill pp;
@@ -626,7 +634,7 @@ void Scheduler::begin_prefill(int arrival) {
       }
     }
     const int64_t reserved = initial_reserve_tokens(r.spec);
-    engine_->begin_prefill(slot, r.spec.prompt, reserved, policy_.prefill_budget_tokens, pp);
+    engine_->begin_prefill(slot, r.spec.prompt, reserved, budget, pp);
     r.reserved_tokens = reserved;
   } catch (...) {
     slots_[static_cast<size_t>(slot)] = -1;
@@ -650,18 +658,18 @@ void Scheduler::begin_prefill(int arrival) {
   r.state = State::kPrefilling;
   slots_[static_cast<size_t>(slot)] = arrival;
   DGPP_LOG_INFO("sched: request '{}' prefilling in slot {} ({} tokens/tick)",
-                r.spec.id, slot, policy_.prefill_budget_tokens);
+                r.spec.id, slot, budget);
 }
 
-void Scheduler::advance_prefill(int arrival) {
+void Scheduler::advance_prefill(int arrival, int64_t budget) {
   Request& r = requests_[static_cast<size_t>(arrival)];
   const auto started = std::chrono::steady_clock::now();
-  const auto progress = engine_->advance_prefill(r.slot);
+  const auto progress = engine_->advance_prefill(r.slot, budget);
   const double ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - started).count();
   prefill_ms_ += ms;
   r.prefill_ms += ms;
-  if (progress.computed_tokens <= 0 || progress.computed_tokens > policy_.prefill_budget_tokens)
+  if (progress.computed_tokens <= 0 || progress.computed_tokens > budget)
     throw std::runtime_error("Scheduler: prefill chunk made no progress or exceeded its token budget");
   r.prefill_computed += progress.computed_tokens;
   prompt_tokens_ += progress.computed_tokens;
@@ -1096,20 +1104,26 @@ bool Scheduler::quantum() {
   // step — and mid-answer requests never wait behind more than one
   // read-in.
   const int admit_arrival = prefill_arrival < 0 ? next_admissible() : -1;
+  // This choice depends only on replicated scheduler state. Reevaluate at
+  // every yield so an unfinished prompt speeds up when its decoding peer retires.
+  const auto prefill_budget = [&]() -> int64_t {
+    return !any_active && policy_.prefill_idle_budget_tokens > 0
+        ? policy_.prefill_idle_budget_tokens : policy_.prefill_budget_tokens;
+  };
   if (prefill_arrival >= 0) {
-    advance_prefill(prefill_arrival);
+    advance_prefill(prefill_arrival, prefill_budget());
     progressed = true;
   } else if (admit_arrival >= 0) {
+    const int64_t budget = prefill_budget();
     // Several queued cold prompts prefill as one forward when the engine
     // takes groups (the six-stream arrival: one read-in instead of six,
     // with a step between each).
-    const std::vector<int> group = admissible_group(admit_arrival);
+    const std::vector<int> group = admissible_group(admit_arrival, budget);
     if (group.size() >= 2)
       admit_group(group);
-    else if (policy_.prefill_budget_tokens > 0 &&
-             static_cast<int64_t>(requests_[admit_arrival].spec.prompt.size()) > policy_.prefill_budget_tokens) {
-      begin_prefill(admit_arrival);
-      advance_prefill(admit_arrival);
+    else if (budget > 0 && static_cast<int64_t>(requests_[admit_arrival].spec.prompt.size()) > budget) {
+      begin_prefill(admit_arrival, budget);
+      advance_prefill(admit_arrival, budget);
     }
     else
       admit(admit_arrival);

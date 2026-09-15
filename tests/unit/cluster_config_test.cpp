@@ -33,7 +33,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
     "ports": {"http": 8081, "journal": 29001},
     "engine": {"max_concurrency": 2, "decode_graph": true, "prefix_cache_gib": 0.5,
                "admission": "grow", "stats_interval_s": 0, "mtp_depth": 2, "prefill": "exact",
-               "prefill_budget_tokens": 256},
+               "prefill_budget_tokens": 256, "prefill_idle_budget_tokens": 2048},
     "paths": {"log_dir": "/var/log/dgpp"}
   })";
   const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(json, "t");
@@ -45,7 +45,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   require(c.engine.max_concurrency == 2 && c.engine.decode_graph && !c.engine.mtp &&
               c.engine.mtp_depth == 2 && c.engine.prefix_cache_gib == 0.5 &&
               c.engine.admission == "grow" && c.engine.stats_interval_s == 0.0 && c.engine.prefill == "exact" &&
-              c.engine.prefill_budget_tokens == 256,
+              c.engine.prefill_budget_tokens == 256 && c.engine.prefill_idle_budget_tokens == 2048,
           "the given engine knobs");
   // The engine defaults are the binary's flag defaults — one set of defaults.
   require(c.engine.kv_capacity == 8192 && c.engine.default_max_tokens == 256 &&

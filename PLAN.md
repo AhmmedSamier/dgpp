@@ -78,6 +78,8 @@ Their implementation and evaluation records are maintained separately:
 
 Qwen graph serving can interleave prefill chunks with decode using
 `engine.prefill_budget_tokens`; zero preserves monolithic admission.
+An optional `engine.prefill_idle_budget_tokens` increases chunk size when
+no request is actively decoding, including after a decoding peer retires.
 Extending this to other families and grouped continuations remains work
 for latency under mixed prompt lengths. Prefix entries
 are process-local, and grow-on-demand admission ends the youngest request

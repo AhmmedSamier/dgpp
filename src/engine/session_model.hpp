@@ -169,6 +169,7 @@ class SessionModel {
     int req = -1;
     const int64_t* ids = nullptr;
     int64_t start = 0, end = 0, next = 0;
+    int64_t budget_tokens = 0;
     std::vector<int64_t> cuts;
     size_t cut_index = 0;
     bool span_start = true;
@@ -181,7 +182,8 @@ class SessionModel {
       SnapshotRequest* snap = nullptr, int64_t attach_position = 0);
   // Completes one bounded chunk. An unfinished slot has device positions
   // -1 between calls so padded decode graphs cannot advance its state.
-  bool session_prefill_advance(PrefillCursor& cursor);
+  // A positive override changes this chunk's budget; zero uses the begin budget.
+  bool session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tokens = 0);
   Outputs session_step(int req, int64_t token_id) { return session_verify(req, std::vector<int64_t>{token_id}); }
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
   void session_rollback(int req, int accepted);
@@ -368,7 +370,7 @@ class SessionModel {
                                  const std::vector<int64_t>& boundaries, SnapshotRequest* snap);
   PrefillCursor prefill_cursor(int req, const int64_t* ids, int64_t start, int64_t count,
                                const std::vector<int64_t>& boundaries, SnapshotRequest* snap);
-  void prefill_chunk(PrefillCursor& cursor);
+  void prefill_chunk(PrefillCursor& cursor, int64_t budget = 0);
   void write_snapshot(int req, void* dst, int spec_row);
   SessionSnapshotMeta pin_blocks_at(int req, int64_t pos, const char* what);
   // The draft block's rows.
@@ -767,13 +769,18 @@ typename SessionModel<D>::PrefillCursor SessionModel<D>::prefill_cursor(
 }
 
 template <class D>
-void SessionModel<D>::prefill_chunk(PrefillCursor& cursor) {
+void SessionModel<D>::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
   const int req = cursor.req;
   const int64_t* ids = cursor.ids;
   const int64_t start = cursor.start, end = cursor.end, c0 = cursor.next;
   auto* snap = cursor.snap;
   auto& out = cursor.output;
-  const int64_t c1 = cursor.cut_index < cursor.cuts.size() ? cursor.cuts[cursor.cut_index++] : end;
+  int64_t c1 = cursor.cut_index < cursor.cuts.size() ? cursor.cuts[cursor.cut_index] : end;
+  // Keep model/snapshot cuts separate from the scheduling grid. A larger
+  // budget can coalesce future work without crossing a required snapshot.
+  // Global grid boundaries preserve the original fixed-budget chunk shapes.
+  if (budget > 0) c1 = std::min(c1, (c0 / budget + 1) * budget);
+  if (cursor.cut_index < cursor.cuts.size() && c1 == cursor.cuts[cursor.cut_index]) ++cursor.cut_index;
   if (c1 - c0 > max_tokens_)
     throw std::invalid_argument("session_prefill: a chunk of " + std::to_string(c1 - c0) +
                                 " rows exceeds max_tokens " + std::to_string(max_tokens_));
@@ -862,10 +869,13 @@ typename SessionModel<D>::PrefillCursor SessionModel<D>::session_prefill_begin(
     if (id < 0 || id >= vocab_size_)
       throw std::invalid_argument("session_prefill_begin: token id out of range");
   std::vector<int64_t> cuts = boundaries;
-  for (int64_t at = (attach_position / chunk_tokens + 1) * chunk_tokens; at < end; at += chunk_tokens)
-    cuts.push_back(at);
+  // A snapshot accepted on the initial budget grid remains a mandatory cut
+  // even if later advances increase the budget.
+  if (snap != nullptr && snap->position > attach_position && snap->position < end &&
+      snap->position % chunk_tokens == 0) cuts.push_back(snap->position);
   auto cursor = prefill_cursor(req, prompt.data() + attach_position, attach_position,
                                end - attach_position, cuts, snap);
+  cursor.budget_tokens = chunk_tokens;
   if (attach_position == 0) open_slot(req);
   else if (session_pos_[static_cast<size_t>(req)] != attach_position)
     throw std::logic_error("session_prefill_begin: slot does not match attached prefix");
@@ -881,16 +891,19 @@ typename SessionModel<D>::PrefillCursor SessionModel<D>::session_prefill_begin(
 }
 
 template <class D>
-bool SessionModel<D>::session_prefill_advance(PrefillCursor& cursor) {
+bool SessionModel<D>::session_prefill_advance(PrefillCursor& cursor, int64_t chunk_tokens) {
   check_req(cursor.req, "session_prefill_advance");
   if (cursor.next >= cursor.end || session_pos_[static_cast<size_t>(cursor.req)] != cursor.next)
     throw std::logic_error("session_prefill_advance: completed or stale cursor");
+  const int64_t budget = chunk_tokens == 0 ? cursor.budget_tokens : chunk_tokens;
+  if (budget < snapshot_align_ || budget > max_tokens_ || budget % snapshot_align_ != 0)
+    throw std::invalid_argument("session_prefill_advance: chunk budget must fit max_tokens and snapshot alignment");
   if (cursor.suspended) {
     push_position(cursor.req);
     if (mtp_) push_mtp_position(cursor.req);
     cursor.suspended = false;
   }
-  prefill_chunk(cursor);
+  prefill_chunk(cursor, budget);
   const bool done = cursor.next == cursor.end;
   if (!done) {
     // Keep the host positions and all request-owned state. Graph padding

@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import random
 from pathlib import Path
 import re
 import subprocess
@@ -33,6 +34,7 @@ import width_sweep_collect
 import bench_stream
 import bench_compare
 import serve_load
+import serve_prefill_probe
 
 
 def capture(function, *args):
@@ -73,6 +75,40 @@ def pace_log():
 
 
 class ScriptReportsTest(unittest.TestCase):
+    def test_prefill_probe_requires_cold_isolated_metric_deltas(self):
+        before = {"prompts_prefilled": 2, "prompt_tokens_computed": 100, "prefill_ms": 80.0}
+        after = {"prompts_prefilled": 3, "prompt_tokens_computed": 120, "prefill_ms": 90.0}
+        response = {"usage": {"prompt_tokens": 20}, "ttft_ms": None}
+        result = serve_prefill_probe.measured_prefill(before, after, response)
+        self.assertEqual((result["computed_tokens"], result["prefill_ms_per_token"]), (20, 0.5))
+        self.assertIsNone(result["ttft_ms"])
+        with self.assertRaisesRegex(RuntimeError, "concurrent traffic"):
+            serve_prefill_probe.measured_prefill(before, {**after, "prompts_prefilled": 4}, response)
+        with self.assertRaisesRegex(RuntimeError, "concurrent traffic"):
+            serve_prefill_probe.measured_prefill(before, {**after, "prompt_tokens_computed": 121}, response)
+        with self.assertRaisesRegex(RuntimeError, "attached"):
+            serve_prefill_probe.measured_prefill(before, {**after, "prompt_tokens_computed": 116},
+                {"usage": {"prompt_tokens": 20, "prompt_tokens_details": {"cached_tokens": 4}}})
+
+    def test_prefill_probe_waits_for_retired_metrics_but_rejects_busy_start(self):
+        old = {"active": 0, "queued": 0, "prompts_prefilled": 2}
+        busy = {"active": 1, "queued": 0, "prompts_prefilled": 2}
+        done = {"active": 0, "queued": 0, "prompts_prefilled": 3}
+        with patch.object(serve_prefill_probe, "get", side_effect=[{"scheduler": x} for x in [old, busy, done]]), \
+                patch.object(serve_prefill_probe.time, "sleep"):
+            self.assertEqual(serve_prefill_probe.idle_metrics("host", 1, timeout=5, completed_after=2), done)
+        with patch.object(serve_prefill_probe, "get", return_value={"scheduler": busy}):
+            with self.assertRaises(RuntimeError):
+                serve_prefill_probe.idle_metrics("host", 1)
+
+    def test_prefill_probe_prompts_are_reproducible_and_do_not_silently_truncate(self):
+        words = [f"word{i}" for i in range(100)]
+        prompt = serve_prefill_probe.prompt_of(words, 40, "trial", random.Random(7))
+        self.assertEqual(prompt, serve_prefill_probe.prompt_of(words, 40, "trial", random.Random(7)))
+        self.assertEqual(len(prompt.split("\n\n")[1].split()), 40)
+        with self.assertRaisesRegex(ValueError, "dataset"):
+            serve_prefill_probe.prompt_of(words, 101, "trial", random.Random(7))
+
     def test_live_stream_uses_usage_and_ignores_role_events(self):
         class Response:
             status = 200

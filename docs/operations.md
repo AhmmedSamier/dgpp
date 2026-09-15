@@ -244,10 +244,20 @@ Smaller chunks trade prefill throughput and TTFT for shorter pauses in
 other streams. Request reservations are held before the first yield, and
 cancellation releases the unfinished slot and its prefix references.
 
+`engine.prefill_idle_budget_tokens` (`--prefill-idle-budget-tokens`) optionally
+uses larger chunks when no request is actively decoding. It must be at least
+the enabled busy budget, use the same alignment and fit the prefill scratch
+limit. Zero keeps the fixed-budget behavior. The scheduler checks for active
+decode after cancellations and before each chunk, so a long prompt can speed
+up after its decoding peer retires. Required model and snapshot cuts still
+split chunks. Short cold prompts can group up to the selected budget.
+Larger idle chunks also increase the maximum wait for cancellation or a newly
+arriving request; they do not preempt a chunk already running.
+
 One long prefill progresses at a time in arrival order. Short prompts can
 still prefill together when the group fits the budget. Snapshots from an
 unfinished prefill remain private until completion. The settings and warm
-journal records carry the budget; every rank follows the same token cuts.
+journal records carry both budgets; every rank follows the same token cuts.
 `/v1/metrics` reports `prefilling`, `prefill_ms` (execution counted once),
 and `prefill_request_ms` (summed request waits, including waits between
 chunks). Logical and computed prompt-token counters advance with each chunk,

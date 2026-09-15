@@ -958,6 +958,7 @@ int main(int argc, char** argv) {
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
       "  [--prefill-budget-tokens N (default 0)]: Qwen graph prefill tokens/tick, 0 disables\n"
+      "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses the busy budget\n"
       "  bus (the prefill's bulk all-reduce): [--bulk-pace-gbps X]: sender\n"
       "    pacing per (peer, lane) queue pair (default: derived from the\n"
       "    port rate, port / ((world-1) x lanes) x 0.85; 0 = unpaced)\n"
@@ -990,6 +991,7 @@ int main(int argc, char** argv) {
   std::string admission_mode = "full";
   int admission_window = 256;
   int prefill_budget_tokens = 0;
+  int prefill_idle_budget_tokens = 0;
   // The bulk collective's sender pacing (prefill all-reduces): negative
   // derives the per-QP rate from the port at bus start.
   double bulk_pace_gbps = -1.0;
@@ -1073,6 +1075,7 @@ int main(int argc, char** argv) {
     admission_mode = e.admission;
     admission_window = e.admission_window;
     prefill_budget_tokens = e.prefill_budget_tokens;
+    prefill_idle_budget_tokens = e.prefill_idle_budget_tokens;
     bulk_pace_gbps = e.bulk_pace_gbps;
     bulk_inflight = e.bulk_inflight;
     rendezvous_timeout_ms = e.rendezvous_timeout_ms;
@@ -1129,6 +1132,7 @@ int main(int argc, char** argv) {
     else if (a == "--admission") admission_mode = next();
     else if (a == "--admission-window") admission_window = std::stoi(next());
     else if (a == "--prefill-budget-tokens") prefill_budget_tokens = std::stoi(next());
+    else if (a == "--prefill-idle-budget-tokens") prefill_idle_budget_tokens = std::stoi(next());
     else if (a == "--bulk-pace-gbps") bulk_pace_gbps = std::stod(next());
     else if (a == "--bulk-inflight") bulk_inflight = std::stoi(next());
     else if (a == "--world") world = std::stoi(next());
@@ -1197,14 +1201,14 @@ int main(int argc, char** argv) {
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} pf={} emsh={} maxtok={} queue={} "
         "eos={} graph={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} msad={} batchmin={} cand={} "
-        "pcgib={} adm={} win={} pfbudget={} pace={} inflight={} reasoning_in_content={}",
+        "pcgib={} adm={} win={} pfbudget={} pfidle={} pace={} inflight={} reasoning_in_content={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
         max_concurrency, kv_capacity, kv_dtype, ngram_table, dense_weights, prefill, embed_sharding, default_max_tokens,
         queue_limit,
         no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth, mtp_schedule_adapt ? 1 : 0,
         graph_batch_min_live,
-        sampling_candidates, prefix_cache_gib, admission_mode, admission_window, prefill_budget_tokens,
+        sampling_candidates, prefix_cache_gib, admission_mode, admission_window, prefill_budget_tokens, prefill_idle_budget_tokens,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0);
   };
   if ((world > 1 || rank > 0) && !memory_plan_only) {
@@ -1253,6 +1257,7 @@ int main(int argc, char** argv) {
         ws.admission = admission_mode;
         ws.admission_window = admission_window;
         ws.prefill_budget_tokens = prefill_budget_tokens;
+        ws.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
         ws.bulk_pace_gbps = bulk_pace_gbps;
         ws.bulk_inflight = bulk_inflight;
         ws.rendezvous_timeout_ms = rendezvous_timeout_ms;
@@ -1300,6 +1305,7 @@ int main(int argc, char** argv) {
         admission_mode = ws.admission;
         admission_window = ws.admission_window;
         prefill_budget_tokens = ws.prefill_budget_tokens;
+        prefill_idle_budget_tokens = ws.prefill_idle_budget_tokens;
         bulk_pace_gbps = ws.bulk_pace_gbps;
         bulk_inflight = ws.bulk_inflight;
         rendezvous_timeout_ms = ws.rendezvous_timeout_ms;
@@ -1440,6 +1446,13 @@ int main(int argc, char** argv) {
   }
   if (prefill_budget_tokens < 0 || prefill_budget_tokens > (1 << 30)) {
     DGPP_LOG_ERROR("--prefill-budget-tokens must be in [0, 1073741824]");
+    return 1;
+  }
+
+  if (prefill_idle_budget_tokens < 0 || prefill_idle_budget_tokens > (1 << 30) ||
+      (prefill_idle_budget_tokens > 0 &&
+       (prefill_budget_tokens == 0 || prefill_idle_budget_tokens < prefill_budget_tokens))) {
+    DGPP_LOG_ERROR("--prefill-idle-budget-tokens must be 0 or at least the enabled busy budget, at most 1073741824");
     return 1;
   }
 
@@ -1658,6 +1671,7 @@ int main(int argc, char** argv) {
                                : dgpp::sched::AdmissionPolicy::Mode::kFullReserve;
     knobs.admission.window_tokens = admission_window;
     knobs.admission.prefill_budget_tokens = prefill_budget_tokens;
+    knobs.admission.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
     knobs.default_max_tokens = default_max_tokens;
     knobs.sampling_defaults = sampling_defaults;
     knobs.fixed_seed = fixed_seed;

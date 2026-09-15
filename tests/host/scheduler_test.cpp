@@ -431,9 +431,9 @@ class ChunkFakeEngine : public FakeEngine {
     FakeEngine::reserve(req, reserved);
     pending_[req] = {static_cast<int64_t>(prompt.size()) - plan.attach_position, budget, first, copy.snap_taken};
   }
-  PrefillProgress advance_prefill(int req) override {
+  PrefillProgress advance_prefill(int req, int64_t budget = 0) override {
     auto& pending = pending_.at(req);
-    const int64_t count = std::min(pending.remaining, pending.budget);
+    const int64_t count = std::min(pending.remaining, budget > 0 ? budget : pending.budget);
     pending.remaining -= count;
     ops_.push_back("PF:" + std::to_string(req) + ":" + std::to_string(count));
     PrefillProgress out{count, pending.remaining == 0 ? pending.first : -1, pending.snap};
@@ -570,6 +570,53 @@ DGPP_TEST(scheduler_chunked_prefill_group_respects_the_total_tick_budget) {
   }
 }
 
+DGPP_TEST(scheduler_idle_prefill_budget_tracks_decode_retirement) {
+  ChunkFakeEngine engine;
+  engine.arm(0, {10, 11, 12}, 3);
+  engine.arm(1, {20, 21}, 2);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 4;
+  policy.prefill_idle_budget_tokens = 16;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_request("peer", 2, 3));
+  sched.tick();
+  sched.submit(make_request("long", 23, 2));
+  sched.tick();
+  require(sched.find("peer")->status == Scheduler::Result::Status::kDone &&
+              sched.meters().prompt_tokens_computed == 6,
+          "use the busy budget for the tick in which the decoding peer finishes");
+  sched.tick();
+  require(sched.meters().prompt_tokens_computed == 22 && sched.meters().prefilling == 1,
+          "increase the next chunk's budget after the peer retires");
+  sched.run_to_completion();
+  require(sched.find("long")->generated == std::vector<int64_t>({20, 21}) &&
+              sched.meters().prompt_tokens_computed == 25 && sched.meters().pool_blocks_in_use == 0,
+          "resizing preserves completion, accounting and reservation release");
+}
+
+DGPP_TEST(scheduler_idle_prefill_budget_applies_to_first_chunk_and_groups) {
+  for (const bool grouped : {false, true}) {
+    ChunkFakeEngine engine;
+    engine.arm(0, {10, 11}, 2);
+    engine.arm(1, {20, 21}, 2);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 4;
+    policy.prefill_idle_budget_tokens = 16;
+    Scheduler sched(&engine, {}, 0, policy);
+    sched.submit(make_request("first", grouped ? 5 : 23, 2));
+    if (grouped) sched.submit(make_request("second", 5, 2));
+    sched.tick();
+    require(sched.meters().prompt_tokens_computed == (grouped ? 10 : 16),
+            "idle admission uses the larger budget for both groups and continuations");
+    if (!grouped) {
+      require(sched.cancel("first"), "idle continuation can be cancelled at its first yield");
+      sched.tick();
+    }
+    sched.run_to_completion();
+    require(sched.meters().pool_blocks_in_use == 0, "idle admission releases reservations");
+  }
+}
+
 DGPP_TEST(scheduler_chunked_prefill_budget_rejects_unsupported_and_unaligned_configs) {
   FakeEngine old(2, 100, 2);
   ChunkFakeEngine chunked;
@@ -580,6 +627,15 @@ DGPP_TEST(scheduler_chunked_prefill_budget_rejects_unsupported_and_unaligned_con
     try { Scheduler sched(engine, {}, 0, policy); }
     catch (const std::invalid_argument&) { rejected = true; }
     require(rejected, "invalid continuation policy must fail before admission");
+  }
+  for (const auto& [busy, idle] : std::vector<std::pair<int, int>>{{0, 16}, {4, -2}, {4, 2}, {4, 7}, {4, 18}}) {
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = busy;
+    policy.prefill_idle_budget_tokens = idle;
+    bool rejected = false;
+    try { Scheduler sched(&chunked, {}, 0, policy); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "idle budget requires enabled, ordered, aligned budgets within scratch capacity");
   }
 }
 

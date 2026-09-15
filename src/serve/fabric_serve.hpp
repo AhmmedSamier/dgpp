@@ -143,6 +143,7 @@ struct WorldSettings {
   std::string admission;
   int admission_window = 0;
   int prefill_budget_tokens = 0;
+  int prefill_idle_budget_tokens = 0;
   double bulk_pace_gbps = 0.0;
   int bulk_inflight = 0;
   int rendezvous_timeout_ms = 0;

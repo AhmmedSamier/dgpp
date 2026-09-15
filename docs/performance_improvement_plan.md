@@ -13,6 +13,11 @@ The [C1 analysis](../benchmarks/results/2026-09-15-c1-analysis.md) puts the
 default Qwen shift at about -0.25%, below this campaign's between-session
 variation; the zero-threshold screen does not establish a material causal
 regression. Section 10 updates priorities using the implementation results.
+The [idle-prefill follow-up](../benchmarks/results/2026-09-15-qwen-idle-prefill.md)
+adds a larger budget when no request is decoding. It reduces the measured
+32K idle prefill from 40.0 to 24.7 seconds versus fixed 256-token chunks,
+and the short-peer transition workload from 29.8 to 20.3 seconds. Qwen C1
+shifts fit the measured unchanged-build variation; both budgets remain opt-in.
 
 ## Recommendation
 
@@ -464,14 +469,21 @@ its largest compatibility uncertainty before a full integration.
 ## 10. Next priorities after the first delivery
 
 The first delivery improves concurrency and bounds long-prompt interference.
-The 256-token budget also increases the measured long request's wall time
-from 18.9 to 33.5 seconds, so recovering prefill efficiency is the next target.
-The following are proposed experiments and implementations, not measured wins.
+The follow-up completes the 256/512/1024 budget sweep and optional larger
+idle chunks. It recovers idle prefill efficiency and accelerates a pending
+prompt after its decoding peer retires, while retaining the 256-token busy
+budget. Grouped continuation remains unfinished.
+
+Matched service profiles now point to routed-expert matrix multiplies as the
+main small-chunk penalty: 1.38 seconds unbudgeted versus 4.68 seconds with a
+256-token budget for the same profiled 8,281-token prompt. QSA attention is
+also a substantial large-chunk cost. The remaining priorities below are
+proposed work, not measured wins.
 
 | Priority | Optimization | Concrete next step and success criterion |
 |---|---|---|
-| 1 | More efficient prefill scheduling | Sweep 256/512/1024-token budgets, allow larger chunks when no other request is decoding, and add grouped continuation. Reduce long-prompt completion time at an explicit maximum decode-pause target; derive or journal identical decisions on every rank |
-| 2 | Faster prefill computation | Profile matched cold service prompts and implement packed int4/int8 tensor-core prefill for full GLM. Tune expert tiles where profiles show low reuse or occupancy. Improve 2K/8K/32K time to first token with numerical and quality gates |
+| 1 | Efficient routed-expert prefill at small budgets | Evaluate smaller expert tiles or a low-row path for Qwen's sparse per-expert batches. Reduce the measured busy-prefill penalty at the same decode-pause budget, with numerical, quality and C1 gates |
+| 2 | Grouped continuation and other prefill kernels | Pack resumable spans where useful, optimize Qwen QSA prefill tiling/reuse, and implement packed int4/int8 tensor-core prefill for full GLM. Measure each independently on cold 2K/8K/32K service prompts |
 | 3 | GLM-Flash concurrency | Generalize fixed recurrent/DSA/MTP state and scratch to 16 rows, then validate 32 and a batched draft chain. Reproduce useful C6/C8 gains with default C1 preserved |
 | 4 | Less repeated expert traffic and collective overhead | Measure rows per expert and per-rank communication waits. Reuse weight tiles across rows assigned to the same expert; broaden the existing stream-ordered reducer where it helps, then tackle GPU-driven bulk collectives |
 | 5 | Speculation matched to workload | Calibrate costs by batch width, context and draft depth. Improve existing DSpark/native-MTP depth selection and add a safe plain-decode choice before paying draft cost. Optimize committed tokens per wall second rather than acceptance alone |

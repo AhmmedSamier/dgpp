@@ -235,7 +235,9 @@ class SchedulerEngine {
                              const PrefixPrefill&) {
     throw std::logic_error("SchedulerEngine: resumable prefill is unavailable");
   }
-  virtual PrefillProgress advance_prefill(int) {
+  // A positive budget overrides the begin budget for this advance; zero
+  // retains it. Implementations must report work within the selected budget.
+  virtual PrefillProgress advance_prefill(int, int64_t = 0) {
     throw std::logic_error("SchedulerEngine: resumable prefill is unavailable");
   }
   virtual int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
@@ -337,8 +339,10 @@ struct AdmissionPolicy {
   Mode mode = Mode::kFullReserve;
   int window_tokens = 256;  // grow: the initial headroom and the growth step
   int prefill_budget_tokens = 0;  // 0: monolithic; otherwise one aligned chunk per tick
+  int prefill_idle_budget_tokens = 0;  // 0: use the same budget; otherwise larger chunks without active decode
   bool operator==(const AdmissionPolicy& o) const {
-    return mode == o.mode && window_tokens == o.window_tokens && prefill_budget_tokens == o.prefill_budget_tokens;
+    return mode == o.mode && window_tokens == o.window_tokens && prefill_budget_tokens == o.prefill_budget_tokens &&
+           prefill_idle_budget_tokens == o.prefill_idle_budget_tokens;
   }
   bool operator!=(const AdmissionPolicy& o) const { return !(*this == o); }
   static const char* name(Mode m) {
@@ -606,7 +610,7 @@ class Scheduler {
   // prompts within the engine's group span limit, no prefix-cache plan,
   // fitting the free slots and blocks; empty when the engine has no group
   // prefill or `first` itself takes a cache plan.
-  std::vector<int> admissible_group(int first);
+  std::vector<int> admissible_group(int first, int64_t budget);
   void admit_group(const std::vector<int>& arrivals);
   // admit()'s slot-side halves: the slot and its configuration before the
   // engine's prefill, the bookkeeping after it.
@@ -617,8 +621,8 @@ class Scheduler {
   void validate_new(const SchedulerRequest& request) const;
   int queued_count() const;
   void admit(int arrival);
-  void begin_prefill(int arrival);
-  void advance_prefill(int arrival);
+  void begin_prefill(int arrival, int64_t budget);
+  void advance_prefill(int arrival, int64_t budget);
   void step_batch(const std::vector<int>& arrivals);
   // Appends one token and applies terminal conditions in their canonical
   // order. Returns true when the request retired. `logprobs` (optional)

@@ -510,6 +510,62 @@ int run_fixture(const std::string& dir) {
     reference.session_close(0);
     std::printf("[ OK ] resumable prefill: target/draft logits, interleaving and cancellation\n");
   }
+  // Change the budget in both directions while preserving a snapshot that
+  // was legal only on the original budget grid. The oracle uses the actual
+  // resulting cuts, so this checks continuation state rather than GEMM drift.
+  {
+    QwenModel reference(cfg, dir, 64, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    QwenModel yielded(cfg, dir, 64, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    uint8_t *ref_arena = nullptr, *yield_arena = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&ref_arena), reference.session_snapshot_bytes()));
+    DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&yield_arena), yielded.session_snapshot_bytes()));
+    QwenModel::SessionSnapshotMeta ref_meta, yield_meta;
+    QwenModel::SnapshotRequest ref_snap, yield_snap;
+    ref_snap.position = yield_snap.position = 12;
+    ref_snap.dst = ref_arena;
+    ref_snap.meta = &ref_meta;
+    yield_snap.dst = yield_arena;
+    yield_snap.meta = &yield_meta;
+    const auto expected = reference.session_prefill(0, A, {4, 12, 16}, &ref_snap);
+    auto peer = yielded.session_prefill(1, B);
+    auto cursor = yielded.session_prefill_begin(0, A, 64, 4, {}, &yield_snap);
+    for (const auto& [budget, position] : std::vector<std::pair<int64_t, int64_t>>{{0, 4}, {16, 12}, {0, 16}, {16, 23}}) {
+      if (cursor.next == 4) {
+        bool rejected = false;
+        try { (void)yielded.session_prefill_advance(cursor, 3); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        require(rejected && cursor.next == 4 && cursor.suspended,
+                "invalid resizing must not expose or advance a suspended slot");
+      }
+      const bool done = yielded.session_prefill_advance(cursor, budget);
+      require(cursor.next == position && done == (position == 23), "resizing preserves mandatory cuts");
+      if (!done) peer = yielded.session_step(1, argmax(peer.logits.data(), V));
+    }
+    require(yield_snap.taken && yield_meta.position == 12, "coalescing retains the snapshot cut");
+    require(bitwise(cursor.output.logits, expected.logits), "resizing changes target logits");
+    const int64_t first = argmax(expected.logits.data(), V);
+    const auto expected_draft = reference.session_draft(0, {first});
+    require(bitwise(yielded.session_draft(0, {first}).logits, expected_draft.logits),
+            "resizing changes draft state");
+    yielded.session_close(0);
+    yielded.session_close(1);
+    yielded.session_attach(0, yield_arena, yield_meta);
+    auto resumed = yielded.session_prefill_begin(0, A, 64, 4, {}, nullptr, 12);
+    require(!yielded.session_prefill_advance(resumed, 4) && resumed.next == 16, "attached first cut");
+    require(yielded.session_prefill_advance(resumed, 16), "attached continuation completes");
+    require(bitwise(resumed.output.logits, expected.logits), "resizing snapshot changes resumed target");
+    require(bitwise(yielded.session_draft(0, {first}).logits, expected_draft.logits),
+            "resizing snapshot changes resumed draft");
+    yielded.session_close(0);
+    reference.session_close(0);
+    yielded.session_release_snapshot(yield_meta);
+    reference.session_release_snapshot(ref_meta);
+    DGPP_CUDA_OK(cudaFree(yield_arena));
+    DGPP_CUDA_OK(cudaFree(ref_arena));
+    require(yielded.kv_blocks_in_use() == 0 && reference.kv_blocks_in_use() == 0,
+            "resized continuation releases all blocks");
+    std::printf("[ OK ] resized prefill: target/draft logits, required snapshot and attach\n");
+  }
   std::printf("[ OK ] qwen_decode_test\n");
   return 0;
 }

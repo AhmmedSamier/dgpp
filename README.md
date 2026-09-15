@@ -324,6 +324,7 @@ Startup checks the combined memory plan before loading.
 | `engine.admission` | no | When to reserve context space. `full` reserves prompt plus the requested answer budget before admitting a request. `grow` starts with a smaller reservation and extends it during generation; if space runs out, the youngest request is shed. Use `full` for predictable reservations, `grow` to trade that guarantee for denser occupancy. | `full` |
 | `engine.admission_window` | no | Answer-token reservation increment used by `grow` admission. Larger increments reduce growth frequency but reserve more space ahead of use. Has no effect under `full`. Must be positive. | 256 tokens |
 | `engine.prefill_budget_tokens` | no | Qwen graph engine: maximum prefill tokens per scheduler tick, with a decode pass between chunks. Use an aligned budget no larger than the model's prefill chunk limit. 0 keeps full-prompt admission. | 0 (disabled) |
+| `engine.prefill_idle_budget_tokens` | no | Larger prefill budget when no request is actively decoding. Requires an enabled busy budget, must be at least that budget, aligned and within the same prefill limit. Rechecked after each chunk. 0 uses the busy budget for all chunks. | 0 (disabled) |
 
 ### Execution and performance
 

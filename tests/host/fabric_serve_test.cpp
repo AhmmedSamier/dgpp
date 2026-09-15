@@ -401,9 +401,26 @@ void test_journal_codec() {
     require(warm0.warm && warm0.prefix_slots == 0, "codec: warm record without a cache");
     dgpp::sched::AdmissionPolicy chunk_policy;
     chunk_policy.prefill_budget_tokens = 256;
+    chunk_policy.prefill_idle_budget_tokens = 2048;
     const auto chunk_warm = dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_warm(chunk_policy));
-    require(chunk_warm.admission == chunk_policy && warm0.admission.prefill_budget_tokens == 0,
+    require(chunk_warm.admission == chunk_policy && warm0.admission.prefill_budget_tokens == 0 &&
+                warm0.admission.prefill_idle_budget_tokens == 0,
             "the deterministic prefill budget round-trips; old records keep monolithic admission");
+    const auto fixed_warm = dgpp::serve::decode_journal_line(
+        R"({"op":"warm","adm":0,"win":256,"pfbudget":256})");
+    require(fixed_warm.admission.prefill_budget_tokens == 256 &&
+                fixed_warm.admission.prefill_idle_budget_tokens == 0,
+            "old budgeted records retain a fixed budget");
+    for (const std::string value : {"-1", "1073741825", "\"256\""}) {
+      bool rejected = false;
+      try {
+        (void)dgpp::serve::decode_journal_line(
+            R"({"op":"warm","adm":0,"win":256,"pfbudget":256,"pfidle":)" + value + "}");
+      } catch (const std::runtime_error& e) {
+        rejected = std::string(e.what()).find("idle prefill budget") != std::string::npos;
+      }
+      require(rejected, "invalid idle budget is rejected by name");
+    }
     // The configuration digest (2026-09-06) rides the warm record when rank 0
     // has one; a config-less rank 0's record is unchanged.
     const dgpp::serve::JournalRecord wcfg = dgpp::serve::decode_journal_line(
@@ -435,6 +452,7 @@ void test_journal_codec() {
     ws.admission = "grow";
     ws.admission_window = 512;
     ws.prefill_budget_tokens = 256;
+    ws.prefill_idle_budget_tokens = 2048;
     ws.bulk_pace_gbps = 28.333333333333332;
     ws.bulk_inflight = 4;
     ws.rendezvous_timeout_ms = 120000;

@@ -1852,12 +1852,21 @@ prefill, reservation, decode, close and cache operations without exposing
 logits. The engine includes token selection in each model operation;
 on the fabric, those picks and model reductions are collectives.
 
-Each tick admits at most one queued request, completes its prefill, then
+Each tick admits one queued request or a fitting group of cold prompts, then
 decodes the next canonical slice of active requests. Admission chooses
 the oldest request that fits the free pool and an available slot, allowing
 smaller requests to pass a blocked larger one. A sustained stream of small
-requests can therefore delay a large request. Prefill still blocks decode
-for that admission; interleaving chunks across ticks is future work.
+requests can therefore delay a large request.
+
+Qwen's opt-in prefill budget advances one aligned chunk per tick before
+decode. One unfinished prefill holds its slot, KV reservation and private
+snapshot until completion or cancellation; its device positions are hidden
+between chunks so padded decode graphs cannot mutate its state. The optional
+idle budget permits larger chunks when no request is actively decoding,
+checked after the cancellation sweep at each quantum. Both budgets ride the
+settings and warm journal records. The cursor retains mandatory model and
+snapshot cuts separately from the current budget grid, allowing later chunks
+to grow without skipping a snapshot. Zero budgets retain full-prompt admission.
 
 EOS, cancellation and token limits are applied to each returned token,
 including the prefill pick. A multi-token result can retire a request
