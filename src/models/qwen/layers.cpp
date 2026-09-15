@@ -10,6 +10,7 @@
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
 #include "kernels/bf16_gemv.hpp"
+#include "kernels/mma_gemv.hpp"
 #include "kernels/dsa.hpp"
 #include "kernels/kda.hpp"
 #include "kernels/qsa.hpp"
@@ -67,6 +68,24 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
 }
 
 }  // namespace
+
+void qwen_mtp_hidden_projection(const QwenGemmWorkspace& g, const uint16_t* act,
+    const uint16_t* weight, uint16_t* out, int tokens, int hc, int hidden,
+    bool decode, cudaStream_t stream) {
+  const int rows = tokens * hc;
+  // Real H=2560, hc=4 at 12/16 verify rows: Lt's 48/64-row algorithm
+  // records a memset node, which can deadlock collective graph replay.
+  // Only the newly widened decode takes MMA; preserve prefill and all
+  // existing <=8-row walks. This draft projection uses the same MMA row
+  // chain at every wide shape, including the diagnostic lowering mode.
+  if (decode && tokens > 8 &&
+      mma_gemv_shape_ok(weight, act, static_cast<size_t>(hidden), rows, hidden)) {
+    launch_mma_gemv_bf16_bf16(act, static_cast<size_t>(hidden), weight, out,
+                              rows, hidden, hidden, static_cast<size_t>(hidden), stream);
+  } else {
+    gemm_bf16(g, act, hidden, weight, out, GemmOut::BF16, rows, hidden, hidden, stream);
+  }
+}
 
 // ---- QwenGrSite -------------------------------------------------------------------
 

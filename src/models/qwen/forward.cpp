@@ -995,8 +995,7 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
     hin = mtp_hin_;
   }
   qwen_rmsnorm_bf16(hin, globals_.mtp_pre_fc_norm_hidden, mtp_hn_, T, W, eps, stream_);
-  gemm_.matmul(mtp_hn_, globals_.mtp_fc_hidden, mtp_enc_, T * hc, H, H, DType::BF16, GemmOut::BF16,
-               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+  qwen_mtp_hidden_projection(gw_, mtp_hn_, globals_.mtp_fc_hidden, mtp_enc_, T, hc, H, decode_row, stream_);
   qwen_mtp_embed_gather_bf16(globals_.embed, tokens, mtp_e_, T, H, stream_);
   qwen_rmsnorm_bf16(mtp_e_, globals_.mtp_pre_fc_norm_embedding, mtp_en_, T, H, eps, stream_);
   gemm_.matmul(mtp_en_, globals_.mtp_fc_embedding, mtp_ein_, T, H, H, DType::BF16, GemmOut::BF16,

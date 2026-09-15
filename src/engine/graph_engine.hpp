@@ -278,17 +278,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     depth_ = rows_per_request_ - 1;
     if (slots_ < 1)
       throw std::invalid_argument("graph engine: no request slots");
-    // The row batch needs every slot's rows in the model's decode-row
-    // ceiling — its runtime shape (engine/decode_outputs.hpp: the session-
-    // core families derive it from the configured slots and depth; GLM-5.3-
-    // Flash keeps its fixed 8); past it the engine serves scalar replays
-    // only (below, at the threshold). Past depth 1 the batch needs the
-    // family's batched chain (Model::kBatchedDraftChain, 2026-09-10).
+    prefills_.resize(static_cast<size_t>(slots_));
+    // Build the fitting slot prefixes even when the configured capacity
+    // exceeds one verify pass. Sparse live sets beyond those prefixes use
+    // scalar replays; a family must cover every live physical slot.
+    // Past depth 1 the batch needs the family's batched draft chain.
     max_rows_ = model_->max_decode_rows();
+    if (slots_ > kPickMaxRequests || rows_per_request_ > max_rows_)
+      throw std::invalid_argument("graph engine: request or verify capacity exceeds the model/picker limit");
+    const int batch_slots = std::min(slots_, max_rows_ / rows_per_request_);
     batch_unavailable_ =
-        slots_ * rows_per_request_ > max_rows_ ||
+        batch_slots < 2 ||
         (depth_ > 1 && !Model::kBatchedDraftChain);
-    if (!batch_unavailable_ && slots_ > 1) {
+    if (!batch_unavailable_) {
       // 2 and 3 slots, then 4 and 6 for the wider recipes (the full GLM-5.3's
       // sixteen-row batch, 2026-09-13: eight slots at depth 1 replayed four
       // live requests on the sixteen-row family — 26–28 tok/s aggregate
@@ -296,14 +298,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
       // covered them), then every slot. The bus bounds the variants:
       // 2 x slots + 2 x families (x the scheduled depth options) <= kBusMaxGraphVariants (64).
       for (const int k : {2, 3, 4, 6})
-        if (k < slots_ &&
-            k * rows_per_request_ <= max_rows_) {
+        if (k < batch_slots) {
           BatchFamily f;
           f.requests = k;
           families_.push_back(f);
         }
       BatchFamily full;
-      full.requests = slots_;
+      full.requests = batch_slots;
       families_.push_back(full);
       family_steps_.assign(families_.size(), 0);
     }
@@ -952,6 +953,87 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     return open_slot(req, prompt,
                      [&] { return model_->session_prefill(req, prompt); });
   }
+  int64_t prefill_chunk_alignment() const override {
+    if constexpr (requires { Model::kResumablePrefill; }) {
+      if constexpr (Model::kResumablePrefill) return model_->session_snapshot_align();
+    }
+    return 0;
+  }
+  int64_t prefill_chunk_limit() const override {
+    if constexpr (requires { Model::kResumablePrefill; }) {
+      if constexpr (Model::kResumablePrefill) return model_->max_tokens();
+    }
+    return 0;
+  }
+  void begin_prefill(int req, const std::vector<int64_t>& prompt, int64_t reserve_tokens,
+                     int64_t chunk_tokens, const sched::SchedulerEngine::PrefixPrefill& plan) override {
+    if constexpr (requires { typename Model::PrefillCursor; }) {
+      if (prefill_chunk_alignment() == 0)
+        throw std::logic_error("graph engine: this family cannot yield prefill");
+      drain();
+      check_req(req);
+      if (live_[static_cast<size_t>(req)] || prefills_[static_cast<size_t>(req)])
+        throw std::logic_error("graph engine: prefill on an open request");
+      auto task = std::make_unique<PendingPrefill>();
+      task->prompt = prompt;
+      if (plan.boundaries) task->boundaries = *plan.boundaries;
+      task->plan = plan;
+      task->plan.boundaries = &task->boundaries;
+      try {
+        open_slot_grammar(req, prompt);
+        typename Model::SnapshotRequest* snap = nullptr;
+        if (plan.snap_slot >= 0) {
+          task->snap = arena_.request(plan.snap_slot, plan.snap_position);
+          snap = &task->snap;
+        }
+        if (plan.attach_slot >= 0) {
+          if (arena_.position(plan.attach_slot) != plan.attach_position)
+            throw std::logic_error("graph engine: attached prefix differs from the plan");
+          arena_.attach(req, plan.attach_slot);
+        }
+        auto cursor = std::make_shared<typename Model::PrefillCursor>(model_->session_prefill_begin(
+            req, task->prompt, std::min<int64_t>(reserve_tokens + std::max(0, depth_ - 1), model_->max_context()),
+            chunk_tokens, task->boundaries, snap, plan.attach_position));
+        task->advance = [this, req, cursor, task = task.get()] {
+          const int64_t start = cursor->next;
+          const bool done = model_->session_prefill_advance(*cursor);
+          if (task->snap.taken && !task->plan.snap_taken) {
+            arena_.commit(task->plan.snap_slot, task->snap);
+            task->plan.snap_taken = true;
+          }
+          sched::SchedulerEngine::PrefillProgress progress;
+          progress.computed_tokens = cursor->next - start;
+          progress.snap_taken = task->plan.snap_taken;
+          if (done) progress.first_token = open_slot_finish(req, task->prompt, cursor->output);
+          return progress;
+        };
+        prefills_[static_cast<size_t>(req)] = std::move(task);
+      } catch (...) {
+        close_failed_slot(req);
+        throw;
+      }
+    } else {
+      throw std::logic_error("graph engine: this family cannot yield prefill");
+    }
+  }
+  sched::SchedulerEngine::PrefillProgress advance_prefill(int req) override {
+    drain();
+    check_req(req);
+    auto& task = prefills_[static_cast<size_t>(req)];
+    if (!task) throw std::logic_error("graph engine: no pending prefill");
+    try {
+      auto progress = task->advance();
+      reseed_live_feeds();
+      if (progress.first_token >= 0) task.reset();
+      return progress;
+    } catch (...) {
+      if (task->snap.taken && !task->plan.snap_taken) arena_.commit(task->plan.snap_slot, task->snap);
+      task.reset();
+      close_failed_slot(req);
+      reseed_live_feeds();
+      throw;
+    }
+  }
   // The group prefill: several cold prompts as the spans of one forward
   // (session_prefill_group), each slot's opening work per request around
   // it. A family without span support prefills them one by one.
@@ -1077,7 +1159,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     // once their windows are finished.
     drain();
     check_req(req);
-    if (live_[static_cast<size_t>(req)])
+    if (live_[static_cast<size_t>(req)] || prefills_[static_cast<size_t>(req)])
       throw std::logic_error("graph engine: prefill on a live request");
     try {
       open_slot_grammar(req, prompt);
@@ -1203,9 +1285,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   std::vector<std::vector<int32_t>> step_batch(
       const std::vector<int>& reqs) override {
     validate_batch(reqs);
-    const bool batched = !families_.empty() &&
-                         reqs.size() >= static_cast<size_t>(batch_min_live_);
-    const int family = batched ? family_for(reqs) : -1;
+    const int family = reqs.size() >= static_cast<size_t>(batch_min_live_)
+                           ? family_for(reqs) : -1;
+    const bool batched = family >= 0;
     log_mode_change(batched, reqs.size(), family);
     if (!batched) {
       std::vector<std::vector<int32_t>> batches;
@@ -1267,7 +1349,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
 
   void close(int req) override {
     drain();
-    check_live(req, "close");
+    check_req(req);
+    if (prefills_[static_cast<size_t>(req)]) prefills_[static_cast<size_t>(req)].reset();
+    else check_live(req, "close");
     // The slot's sampling tally, for the width sweep and the record: how
     // many of its stochastic steps the exact gather fallback served.
     if (sampling_ && slot_sampled_[static_cast<size_t>(req)] > 0)
@@ -1317,6 +1401,14 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   }
 
  private:
+  struct PendingPrefill {
+    std::vector<int64_t> prompt, boundaries;
+    sched::SchedulerEngine::PrefixPrefill plan;
+    typename Model::SnapshotRequest snap;
+    std::function<sched::SchedulerEngine::PrefillProgress()> advance;
+  };
+  std::vector<std::unique_ptr<PendingPrefill>> prefills_;
+
   void check_req(int req) const {
     if (req < 0 || req >= slots_)
       throw std::out_of_range("graph engine: request slot " +
@@ -1604,7 +1696,7 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     for (const int req : reqs) top = std::max(top, req);
     for (size_t f = 0; f < families_.size(); ++f)
       if (families_[f].requests > top) return static_cast<int>(f);
-    return static_cast<int>(families_.size()) - 1;
+    return -1;
   }
 
   // The stage handshake and the masks' upload, recorded ahead of the

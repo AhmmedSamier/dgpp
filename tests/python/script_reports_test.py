@@ -30,6 +30,9 @@ import serve_pace
 import serve_response_report
 import serve_streams
 import width_sweep_collect
+import bench_stream
+import bench_compare
+import serve_load
 
 
 def capture(function, *args):
@@ -70,6 +73,68 @@ def pace_log():
 
 
 class ScriptReportsTest(unittest.TestCase):
+    def test_live_stream_uses_usage_and_ignores_role_events(self):
+        class Response:
+            status = 200
+            def __init__(self):
+                self.parts = iter([
+                    b'data: {"choices":[{"delta":{"role":"assistant"}}]}\r\n\r',
+                    b'\ndata: {"choices":[{"delta":{"content":"two tokens"}}]}\n\n',
+                    b'data: {"choices":[{"delta":{"reasoning_content":"think","content":"answer"}}]}\n\n',
+                    b'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":7}}\n\ndata: [DONE]\n\n',
+                    b''])
+            def read1(self, _): return next(self.parts)
+        ticks = iter([1.0, 2.0, 4.0, 8.0])
+        result = bench_stream.read_completion(Response(), lambda: next(ticks))
+        self.assertEqual((result['first'], result['last'], result['tokens'], result['chunks']), (2, 4, 7, 2))
+        self.assertEqual(result['text'], 'two tokensthinkanswer')
+        self.assertEqual(result['update_gaps_ms'], [2000])
+
+    def test_live_stream_rejects_missing_usage_and_truncation(self):
+        class Response:
+            status = 200
+            def __init__(self, payload): self.parts = iter([payload, b''])
+            def read1(self, _): return next(self.parts)
+        for payload in [b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+                        b'data: {"choices":[{"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+                        b'data: {"error":{"message":"failed"}}\n\n']:
+            with self.subTest(payload=payload), self.assertRaises(RuntimeError):
+                bench_stream.read_completion(Response(payload))
+
+    def test_phase_rates_have_separate_wall_and_legacy_scopes(self):
+        results = [{'tokens': 10, 'first': 2, 'last': 4}, {'tokens': 20, 'first': 3, 'last': 6}]
+        metrics = bench_stream.phase_metrics(results, 1, 7)
+        self.assertEqual(metrics['wall_tokens_per_s'], 5)
+        self.assertEqual(metrics['legacy_output_span_tokens_per_s'], 7.5)
+        with self.assertRaises(RuntimeError):
+            bench_stream.phase_metrics([{'error': 'connection failed'}], 1, 7)
+
+    def test_high_concurrency_corpus_is_distinct_and_keeps_anchors(self):
+        serve_load.check_corpus()
+        for prompts in [serve_load.PROMPTS, *serve_load.CLASSES.values()]:
+            self.assertEqual(len(prompts), 16)
+            self.assertEqual(len(set(prompts)), 16)
+
+    def test_c1_comparison_rejects_regressions_and_unmatched_work(self):
+        report = {"schema_version": 1, "model": "fixture", "max_tokens": 320,
+                  "temperature": 0, "thinking": False, "phases": []}
+        for name in bench_compare.CLASSES:
+            for rate in (99, 100, 101):
+                report["phases"].append({"class": name, "concurrency": 1,
+                    "requests": [{"prompt_sha256": name, "tokens": 320, "finish": "length",
+                                  "text": name, "status": 200}],
+                    "metrics": {metric: rate for metric in bench_compare.METRICS}})
+        self.assertFalse(bench_compare.compare(report, report)["failures"])
+        candidate = json.loads(json.dumps(report))
+        for phase in candidate["phases"]:
+            phase["metrics"]["wall_tokens_per_s"] *= 0.9
+        self.assertEqual(len(bench_compare.compare(report, candidate)["failures"]), 5)
+        candidate["phases"][0]["requests"][0]["text"] = "different"
+        with self.assertRaisesRegex(ValueError, "unmatched"):
+            bench_compare.compare(report, candidate)
+        with self.assertRaisesRegex(ValueError, "repeats"):
+            bench_compare.compare(report, report, min_repeats=4)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="dgpp reports ")
         self.addCleanup(temporary.cleanup)

@@ -46,6 +46,12 @@ struct QwenGemmWorkspace {
   int mma_from_rows = 0;
 };
 
+// The draft's hidden projection flattens the hyper-state branches into
+// tokens * hc rows. Wider decode must remain safe for collective graphs.
+void qwen_mtp_hidden_projection(const QwenGemmWorkspace& gemm, const uint16_t* act,
+    const uint16_t* weight, uint16_t* out, int tokens, int hc, int hidden,
+    bool decode, cudaStream_t stream);
+
 // ---- the gated residual --------------------------------------------------------
 class QwenGrSite {
  public:

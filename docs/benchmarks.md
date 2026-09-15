@@ -35,6 +35,28 @@ concurrent request's tokens across the phase's decode span. It is not
 sees roughly c times its solo pace while the world delivers more in total.
 Per-request pace is given beside the aggregate wherever both were recorded.
 
+The tables predating September 15 use `serve_load.py`'s historical output
+span: earliest first visible output to latest last visible output. It omits
+initial TTFT and includes later admissions. The script now labels this
+`legacy_output_span_tokens_per_s` and reports request-wall throughput
+separately. Its per-request latency is **ms per client update**; an SSE
+update can contain several tokens. Neither rate establishes a period with
+constant server occupancy. Token rates use the server's completion usage.
+
+For a C1 regression check, capture both builds with
+`--classes all --concurrency 1 --repeat 3 --json-out RUN.json`, using the
+same model, deployment and `--max-tokens`. Then run
+`python3 scripts/bench_compare.py BASELINE.json CANDIDATE.json`. It requires
+matching greedy C1 transcripts, checks medians in both timing scopes, and
+prints the min/max spread. Its default allows no median slowdown; resolve
+small noisy differences with repeated A/B runs, rather than selecting a
+favorable sample. The corpus retains the five C1 anchors and now provides
+sixteen distinct prompts per class for wider request bursts.
+
+The [September 15 Qwen batching and continuation campaign](../benchmarks/results/2026-09-15-qwen-batching-prefill.md)
+records the matched baseline, configuration tradeoffs and regression gates
+for the new paths. Historical tables below retain their original scopes.
+
 **Greedy and sampled used to differ, and no longer do.** A deterministic
 draft is capped at the main model's mode, so under temperature sampling it was
 accepted far less often: Qwen3.8-Flash-Next read 72–74 % acceptance greedy

@@ -61,6 +61,10 @@ class SchedulerEngine {
   // Opens slot `req` (fresh state), prefills `prompt`, picks the first
   // generated token. Returns a token id in [0, vocab).
   virtual int32_t prefill(int req, const std::vector<int64_t>& prompt) = 0;
+  // Opt-in continuation support. One advance executes at most the aligned
+  // token budget passed to begin; it returns a first token only on completion.
+  virtual int64_t prefill_chunk_alignment() const { return 0; }
+  virtual int64_t prefill_chunk_limit() const { return 0; }
   // Several requests' cold prompts in one forward (the scheduler admits a
   // group per tick when the engine allows it): each prompt within
   // prefill_group_span_limit() tokens, the group within
@@ -222,6 +226,18 @@ class SchedulerEngine {
     int64_t snap_position = 0;
     bool snap_taken = false;  // out
   };
+  struct PrefillProgress {
+    int64_t computed_tokens = 0;
+    int32_t first_token = -1;  // -1: more chunks remain
+    bool snap_taken = false;
+  };
+  virtual void begin_prefill(int, const std::vector<int64_t>&, int64_t, int64_t,
+                             const PrefixPrefill&) {
+    throw std::logic_error("SchedulerEngine: resumable prefill is unavailable");
+  }
+  virtual PrefillProgress advance_prefill(int) {
+    throw std::logic_error("SchedulerEngine: resumable prefill is unavailable");
+  }
   virtual int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
                                  PrefixPrefill* plan) {
     (void)req;
@@ -320,8 +336,9 @@ struct AdmissionPolicy {
   enum class Mode : int { kFullReserve = 0, kGrowOnDemand = 1 };
   Mode mode = Mode::kFullReserve;
   int window_tokens = 256;  // grow: the initial headroom and the growth step
+  int prefill_budget_tokens = 0;  // 0: monolithic; otherwise one aligned chunk per tick
   bool operator==(const AdmissionPolicy& o) const {
-    return mode == o.mode && window_tokens == o.window_tokens;
+    return mode == o.mode && window_tokens == o.window_tokens && prefill_budget_tokens == o.prefill_budget_tokens;
   }
   bool operator!=(const AdmissionPolicy& o) const { return !(*this == o); }
   static const char* name(Mode m) {
@@ -346,6 +363,7 @@ class Scheduler {
   // The /v1/metrics snapshot.
   struct Meters {
     int active = 0;        // requests with an open engine slot
+    int prefilling = 0;    // subset of active, not yet eligible for decode
     int queued = 0;        // admitted-not, waiting on slots/budget
     int terminal = 0;      // retired (any reason), cumulative since construction
     // The request records held — every live request's, plus the retired
@@ -359,9 +377,10 @@ class Scheduler {
     int64_t tokens_generated = 0;  // cumulative across all requests
     int64_t reservations_grown = 0;  // grow-on-demand: growth events
     int64_t requests_shed_pool = 0;  // grow-on-demand: shed at exhaustion
-    // The throughput line's counters: prompts prefilled, their
-    // tokens (all, and the ones actually computed — an attach skips the
-    // prefix), decode passes and the request-rows they carried, and the
+    // The throughput line's counters: prompts completed and tokens
+    // processed (including in-progress/cancelled chunks; all, and the
+    // ones actually computed — an attach skips the prefix), decode passes
+    // and the request-rows they carried, and the
     // wall time spent inside the engine's prefill and step calls.
     int64_t prompts_prefilled = 0;
     int64_t prompt_tokens = 0;
@@ -369,6 +388,7 @@ class Scheduler {
     int64_t decode_steps = 0;
     int64_t decode_rows = 0;
     double prefill_ms = 0.0;
+    double prefill_request_ms = 0.0;  // summed per-request waits (a group credits each member)
     double step_ms = 0.0;
     // Draft acceptance by position, engine-wide cumulative.
     SchedulerEngine::MtpAcceptance mtp;
@@ -484,7 +504,7 @@ class Scheduler {
   Meters meters() const;
 
  private:
-  enum class State : int { kQueued, kActive, kTerminal };
+  enum class State : int { kQueued, kActive, kTerminal, kPrefilling };
 
   struct Request {
     SchedulerRequest spec;
@@ -520,6 +540,9 @@ class Scheduler {
     bool admitted = false;
     std::chrono::steady_clock::time_point admitted_at{};
     double prefill_ms = 0.0;
+    int prefill_snap_slot = -1;
+    int64_t prefill_snap_position = 0;
+    int64_t prefill_computed = 0;
     int64_t attached_tokens = 0;
     int decode_passes = 0;
   };
@@ -588,11 +611,14 @@ class Scheduler {
   // admit()'s slot-side halves: the slot and its configuration before the
   // engine's prefill, the bookkeeping after it.
   int admit_prepare(int arrival);
-  void admit_finish(int arrival, int slot, int32_t token, double prefill_ms, int64_t attached);
+  void admit_finish(int arrival, int slot, int32_t token, double prefill_ms, int64_t attached,
+                     bool resumed = false);
   // The submit() validations, shared by submit()/try_submit().
   void validate_new(const SchedulerRequest& request) const;
   int queued_count() const;
   void admit(int arrival);
+  void begin_prefill(int arrival);
+  void advance_prefill(int arrival);
   void step_batch(const std::vector<int>& arrivals);
   // Appends one token and applies terminal conditions in their canonical
   // order. Returns true when the request retired. `logprobs` (optional)
@@ -642,6 +668,7 @@ class Scheduler {
   int64_t decode_steps_ = 0;
   int64_t decode_rows_ = 0;
   double prefill_ms_ = 0.0;
+  double prefill_request_ms_ = 0.0;
   double step_ms_ = 0.0;
   PrefixCache cache_;              // the prefix cache's index (M7)
   SchedulerEngine::PrefixInfo prefix_info_;

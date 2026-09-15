@@ -1794,6 +1794,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, m.pool_blocks_total);
   out.append(",\"pool_blocks_in_use\":");
   append_json_int(&out, m.pool_blocks_in_use);
+  out.append(",\"prefilling\":");
+  append_json_int(&out, m.prefilling);
   out.append(",\"tokens_generated\":");
   append_json_int(&out, m.tokens_generated);
   // The throughput line's counters, cumulative: a scraper
@@ -1809,9 +1811,9 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   out.append(",\"decode_rows\":");
   append_json_int(&out, m.decode_rows);
   {
-    char tbuf[96];
-    std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"step_ms\":%.1f",
-                  m.prefill_ms, m.step_ms);
+    char tbuf[192];
+    std::snprintf(tbuf, sizeof(tbuf), ",\"prefill_ms\":%.1f,\"prefill_request_ms\":%.1f,\"step_ms\":%.1f",
+                  m.prefill_ms, m.prefill_request_ms, m.step_ms);
     out.append(tbuf);
   }
   out.append("},\"service\":{\"requests_total\":");
@@ -1831,6 +1833,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   out.append(dgpp::sched::AdmissionPolicy::name(sched_.admission_policy().mode));
   out.append("\",\"window\":");
   append_json_int(&out, sched_.admission_policy().window_tokens);
+  out.append(",\"prefill_budget_tokens\":");
+  append_json_int(&out, sched_.admission_policy().prefill_budget_tokens);
   out.append("}");
   out.append(",\"tokens_out\":");
   append_json_int(&out, static_cast<int64_t>(st.tokens_out));

@@ -1,0 +1,434 @@
+{
+  "method": "Existing runs only. Qwen default TP2, four slots, budget 0, native MTP1; five repeats per class. Median rates; equal-class geometric mean of ratios. Warm-only is supplementary, drops the first prefix miss in each class from each build. Server intervals from millisecond admission/retirement log timestamps include host/runtime work and are not GPU kernel times. One deployment per build; no confidence interval for a causal code effect is established.",
+  "sources": [
+    {
+      "path": "build-ci/performance-baseline-2026-09-15/qwen-c1-ab-baseline.json",
+      "sha256": "aa9666eae246b0c1dfb7bee9e46d05c53cec2a58c29d3964f476377ab3abf55d"
+    },
+    {
+      "path": "build-ci/performance-baseline-2026-09-15/qwen-c1-ab-candidate.json",
+      "sha256": "45b51643632381387fb9f7b7c2b936402ee015631db686c9b4d08e91e0b326ce"
+    },
+    {
+      "path": "build-ci/performance-baseline-2026-09-15/qwen.json",
+      "sha256": "bd7809df58af58c7f8b6a1a7f119b6d4b1defb27c19ab0b82c451d12ec91c87c"
+    },
+    {
+      "path": "build-ci/performance-baseline-2026-09-15/qwen-c4-prefill-c1.json",
+      "sha256": "3bccbeb59c36a2416672ece66057477ea03c7434a01cddbfd9caa6fed87e1f42"
+    },
+    {
+      "path": "build-ci/performance-baseline-2026-09-15/qwen-c8.json",
+      "sha256": "8e43718926ca4a640659840aecfcbe01f1ba865914aa7312d3e7aec3f77f8550"
+    },
+    {
+      "path": "build-ci/performance-baseline-2026-09-15/glm-c1.json",
+      "sha256": "cbc2488d4ac2baf20ec1b036e64841d58266d370aafeced6a6c63742fdddf926"
+    },
+    {
+      "path": "build-ci/performance-baseline-2026-09-15/glm-c1-restored-baseline.json",
+      "sha256": "cc7619c9e33a88644882b16fede7f77d061a705acd9adf559df1d6bb8e2bc310"
+    },
+    {
+      "path": "build-ci/performance-baseline-2026-09-15/glm-c1-candidate.json",
+      "sha256": "f39fa9533830fac8d4a5bdc3bbc0b1fb17ef4a0e0a61c62e81ddbbae35c6adc2"
+    },
+    {
+      "path": "DGPP_LOG_DIR/performance-qwen-c1-ab-baseline-2026-09-15/serve_r0.log",
+      "sha256": "40240736ea64871ee62aa250a97d9a08f8a4cecb27f2f6f1e80bf857b00f576a"
+    },
+    {
+      "path": "DGPP_LOG_DIR/performance-qwen-c1-ab-candidate-2026-09-15/serve_r0.log",
+      "sha256": "0b5c960dfd606f3a3e1abcb529051569d2e9c23e28c32061f76f4a65603a5705"
+    }
+  ],
+  "rows": [
+    {
+      "class": "prose",
+      "baseline_wall_tps": 44.676404342001725,
+      "candidate_wall_tps": 44.59967222225673,
+      "delta_tps": -0.07673211974499594,
+      "delta_percent": -0.17175088477936473,
+      "extra_ms_per_320_token_response": 12.323024002398597,
+      "amortized_extra_ms_per_output_token": 0.038509450007495616,
+      "server_admission_to_retirement": {
+        "baseline": {
+          "elapsed_ms": [
+            7053.0,
+            7052.0,
+            7063.0,
+            7069.0,
+            7052.0
+          ],
+          "decode_passes": [
+            181,
+            181,
+            181,
+            181,
+            181
+          ],
+          "logged_acceptance_percent": [
+            76,
+            76,
+            76,
+            76,
+            76
+          ]
+        },
+        "candidate": {
+          "elapsed_ms": [
+            7073.0,
+            7087.0,
+            7079.0,
+            7076.0,
+            7084.0
+          ],
+          "decode_passes": [
+            181,
+            181,
+            181,
+            181,
+            181
+          ],
+          "logged_acceptance_percent": [
+            76,
+            76,
+            76,
+            76,
+            76
+          ]
+        }
+      },
+      "server_interval_rate_change_percent": -0.36728351462070874,
+      "warm_only_wall_rate_change_percent": -0.26818997764845864,
+      "warm_wall_rate_ranges": [
+        [
+          44.66775836500998,
+          44.833557285471905
+        ],
+        [
+          44.560365375679304,
+          44.67715053327397
+        ]
+      ]
+    },
+    {
+      "class": "code",
+      "baseline_wall_tps": 48.5936091842156,
+      "candidate_wall_tps": 48.43848312476232,
+      "delta_tps": -0.15512605945328062,
+      "delta_percent": -0.31923140111944637,
+      "extra_ms_per_320_token_response": 21.08944000065094,
+      "amortized_extra_ms_per_output_token": 0.06590450000203418,
+      "server_admission_to_retirement": {
+        "baseline": {
+          "elapsed_ms": [
+            6493.0,
+            6499.0,
+            6495.0,
+            6505.0,
+            6498.0
+          ],
+          "decode_passes": [
+            166,
+            166,
+            166,
+            166,
+            166
+          ],
+          "logged_acceptance_percent": [
+            93,
+            93,
+            93,
+            93,
+            93
+          ]
+        },
+        "candidate": {
+          "elapsed_ms": [
+            6516.0,
+            6517.0,
+            6524.0,
+            6516.0,
+            6503.0
+          ],
+          "decode_passes": [
+            166,
+            166,
+            166,
+            166,
+            166
+          ],
+          "logged_acceptance_percent": [
+            93,
+            93,
+            93,
+            93,
+            93
+          ]
+        }
+      },
+      "server_interval_rate_change_percent": -0.2762430939226568,
+      "warm_only_wall_rate_change_percent": -0.3113633365065205,
+      "warm_wall_rate_ranges": [
+        [
+          48.590293596297045,
+          48.6107933866199
+        ],
+        [
+          48.43827715100344,
+          48.46789558260979
+        ]
+      ]
+    },
+    {
+      "class": "json",
+      "baseline_wall_tps": 50.15108067906647,
+      "candidate_wall_tps": 50.134788711164255,
+      "delta_tps": -0.016291967902212434,
+      "delta_percent": -0.032485776341428796,
+      "extra_ms_per_320_token_response": 2.0734999980049906,
+      "amortized_extra_ms_per_output_token": 0.006479687493765596,
+      "server_admission_to_retirement": {
+        "baseline": {
+          "elapsed_ms": [
+            6286.0,
+            6270.0,
+            6279.0,
+            6298.0,
+            6281.0
+          ],
+          "decode_passes": [
+            160,
+            160,
+            160,
+            160,
+            160
+          ],
+          "logged_acceptance_percent": [
+            99,
+            99,
+            99,
+            99,
+            99
+          ]
+        },
+        "candidate": {
+          "elapsed_ms": [
+            6293.0,
+            6286.0,
+            6298.0,
+            6290.0,
+            6289.0
+          ],
+          "decode_passes": [
+            160,
+            160,
+            160,
+            160,
+            160
+          ],
+          "logged_acceptance_percent": [
+            99,
+            99,
+            99,
+            99,
+            99
+          ]
+        }
+      },
+      "server_interval_rate_change_percent": -0.14308426073131875,
+      "warm_only_wall_rate_change_percent": 0.0332880616026765,
+      "warm_wall_rate_ranges": [
+        [
+          50.1470094999779,
+          50.33149803882281
+        ],
+        [
+          50.12785078579026,
+          50.22878385409697
+        ]
+      ]
+    },
+    {
+      "class": "math",
+      "baseline_wall_tps": 47.1578553585538,
+      "candidate_wall_tps": 47.01307075464429,
+      "delta_tps": -0.14478460390951398,
+      "delta_percent": -0.30702117984093835,
+      "extra_ms_per_320_token_response": 20.8977580005012,
+      "amortized_extra_ms_per_output_token": 0.06530549375156625,
+      "server_admission_to_retirement": {
+        "baseline": {
+          "elapsed_ms": [
+            6699.0,
+            6704.0,
+            6692.0,
+            6692.0,
+            6689.0
+          ],
+          "decode_passes": [
+            170,
+            170,
+            170,
+            170,
+            170
+          ],
+          "logged_acceptance_percent": [
+            88,
+            88,
+            88,
+            88,
+            88
+          ]
+        },
+        "candidate": {
+          "elapsed_ms": [
+            6708.0,
+            6701.0,
+            6704.0,
+            6705.0,
+            6706.0
+          ],
+          "decode_passes": [
+            170,
+            170,
+            170,
+            170,
+            170
+          ],
+          "logged_acceptance_percent": [
+            88,
+            88,
+            88,
+            88,
+            88
+          ]
+        }
+      },
+      "server_interval_rate_change_percent": -0.1938851603281111,
+      "warm_only_wall_rate_change_percent": -0.30994092976683874,
+      "warm_wall_rate_ranges": [
+        [
+          47.15581471172212,
+          47.180028008379516
+        ],
+        [
+          46.998700359049884,
+          47.20249841077021
+        ]
+      ]
+    },
+    {
+      "class": "chat",
+      "baseline_wall_tps": 41.31844670380035,
+      "candidate_wall_tps": 41.15484172849064,
+      "delta_tps": -0.16360497530970974,
+      "delta_percent": -0.39596109815682734,
+      "extra_ms_per_320_token_response": 30.788006000875612,
+      "amortized_extra_ms_per_output_token": 0.09621251875273629,
+      "server_admission_to_retirement": {
+        "baseline": {
+          "elapsed_ms": [
+            7648.0,
+            7659.0,
+            7671.0,
+            7661.0,
+            7666.0
+          ],
+          "decode_passes": [
+            195,
+            195,
+            195,
+            195,
+            195
+          ],
+          "logged_acceptance_percent": [
+            64,
+            64,
+            64,
+            64,
+            64
+          ]
+        },
+        "candidate": {
+          "elapsed_ms": [
+            7658.0,
+            7671.0,
+            7679.0,
+            7686.0,
+            7673.0
+          ],
+          "decode_passes": [
+            195,
+            195,
+            195,
+            195,
+            195
+          ],
+          "logged_acceptance_percent": [
+            64,
+            64,
+            64,
+            64,
+            64
+          ]
+        }
+      },
+      "server_interval_rate_change_percent": -0.15639254528867497,
+      "warm_only_wall_rate_change_percent": -0.34720062287785236,
+      "warm_wall_rate_ranges": [
+        [
+          41.194756830993256,
+          41.333729759625406
+        ],
+        [
+          41.139092209500255,
+          41.26899293860901
+        ]
+      ]
+    }
+  ],
+  "summary": {
+    "equal_class_geometric_mean_rate_changes_percent": {
+      "qwen_default_wall": -0.24537290489542452,
+      "qwen_default_output_span": -0.25594322600361874,
+      "qwen_default_warm_only_wall": -0.24077842542300498,
+      "qwen_default_server_interval": -0.22741303523047263,
+      "qwen_unchanged_binary_session_drift": -0.797263889770361,
+      "glm_unchanged_binary_session_drift": -0.7788875055822819,
+      "glm_candidate_vs_fresh_baseline_wall": 0.1811354310777391,
+      "glm_candidate_vs_fresh_baseline_output_span": 0.03838076134734525,
+      "qwen_c4_budget256_wall": -0.41991790881721336,
+      "qwen_c8_budget256_wall_vs_initial_c4_baseline": -1.268506616538423
+    },
+    "pooled_25_request_wall_tps": [
+      45.9737719693208,
+      45.875648577459565
+    ],
+    "pooled_wall_rate_change_percent": -0.21343341574564523,
+    "mean_time_components_ms": {
+      "baseline": {
+        "request_wall_ms": 6960.490433840023,
+        "visible_ttft_ms": 126.56932003992551,
+        "visible_output_span_ms": 6831.417215359834,
+        "after_last_output_ms": 2.1893608800746733,
+        "client_phase_overhead_ms": 0.31453756018891
+      },
+      "candidate": {
+        "request_wall_ms": 6975.378221840074,
+        "visible_ttft_ms": 122.32966355972167,
+        "visible_output_span_ms": 6845.240439560148,
+        "after_last_output_ms": 7.29953931979253,
+        "client_phase_overhead_ms": 0.5085794004116906
+      },
+      "delta": {
+        "request_wall_ms": 14.887788000050932,
+        "visible_ttft_ms": -4.239656480203848,
+        "visible_output_span_ms": 13.823224200314144,
+        "after_last_output_ms": 5.110178439717856,
+        "client_phase_overhead_ms": 0.1940418402227806
+      }
+    }
+  }
+}

@@ -161,6 +161,27 @@ class SessionModel {
   int64_t prefill_group_span_limit() const { return 0; }  // the family widens it
   Outputs session_prefill_resume(int req, const std::vector<int64_t>& suffix_ids,
                                  const std::vector<int64_t>& boundaries, SnapshotRequest* snap = nullptr);
+  // A caller-owned continuation. `ids` and `snap` must outlive the cursor.
+  // Only families advertising kResumablePrefill may interleave these
+  // chunks with other requests; some families carry shared span scratch.
+  static constexpr bool kResumablePrefill = false;
+  struct PrefillCursor {
+    int req = -1;
+    const int64_t* ids = nullptr;
+    int64_t start = 0, end = 0, next = 0;
+    std::vector<int64_t> cuts;
+    size_t cut_index = 0;
+    bool span_start = true;
+    bool suspended = false;
+    SnapshotRequest* snap = nullptr;
+    Outputs output;
+  };
+  PrefillCursor session_prefill_begin(int req, const std::vector<int64_t>& prompt,
+      int64_t reserve_tokens, int64_t chunk_tokens, const std::vector<int64_t>& boundaries = {},
+      SnapshotRequest* snap = nullptr, int64_t attach_position = 0);
+  // Completes one bounded chunk. An unfinished slot has device positions
+  // -1 between calls so padded decode graphs cannot advance its state.
+  bool session_prefill_advance(PrefillCursor& cursor);
   Outputs session_step(int req, int64_t token_id) { return session_verify(req, std::vector<int64_t>{token_id}); }
   Outputs session_verify(int req, const std::vector<int64_t>& token_ids);
   void session_rollback(int req, int accepted);
@@ -345,6 +366,9 @@ class SessionModel {
   std::vector<int64_t> prefill_cuts(int64_t start, int64_t end, const std::vector<int64_t>& boundaries) const;
   Outputs session_prefill_chunks(int req, const int64_t* ids, int64_t start, int64_t count,
                                  const std::vector<int64_t>& boundaries, SnapshotRequest* snap);
+  PrefillCursor prefill_cursor(int req, const int64_t* ids, int64_t start, int64_t count,
+                               const std::vector<int64_t>& boundaries, SnapshotRequest* snap);
+  void prefill_chunk(PrefillCursor& cursor);
   void write_snapshot(int req, void* dst, int spec_row);
   SessionSnapshotMeta pin_blocks_at(int req, int64_t pos, const char* what);
   // The draft block's rows.
@@ -722,85 +746,161 @@ std::vector<int64_t> SessionModel<D>::prefill_cuts(int64_t start, int64_t end,
 }
 
 template <class D>
-typename SessionModel<D>::Outputs SessionModel<D>::session_prefill_chunks(
+typename SessionModel<D>::PrefillCursor SessionModel<D>::prefill_cursor(
     int req, const int64_t* ids, int64_t start, int64_t count, const std::vector<int64_t>& boundaries,
     SnapshotRequest* snap) {
-  const int64_t end = start + count;
-  const std::vector<int64_t> cuts = prefill_cuts(start, end, boundaries);
+  PrefillCursor cursor;
+  cursor.req = req;
+  cursor.ids = ids;
+  cursor.start = cursor.next = start;
+  cursor.end = start + count;
+  cursor.cuts = prefill_cuts(start, cursor.end, boundaries);
+  cursor.snap = snap;
   if (snap != nullptr) {
     if (snap->dst == nullptr || snap->meta == nullptr)
       throw std::invalid_argument("session_prefill: snapshot request without a buffer");
-    const bool at_cut = std::binary_search(cuts.begin(), cuts.end(), snap->position) || snap->position == end;
+    const bool at_cut = std::binary_search(cursor.cuts.begin(), cursor.cuts.end(), snap->position) ||
+                        snap->position == cursor.end;
     if (!at_cut) throw std::invalid_argument("session_prefill: the snapshot position is not a chunk end");
   }
-  Outputs out;
-  int64_t c0 = start;
-  size_t ci = 0;
-  // A family's prefill may span chunks (the DeepSeek bounded prefill
-  // carries the encoder output's tail to the call's last chunk, where the
-  // decoder runs); a snapshot position must hold a complete state, so the
-  // chunk ending there closes such a span and the next chunk opens one.
-  bool span_start = true;
-  while (c0 < end) {
-    const int64_t c1 = ci < cuts.size() ? cuts[ci++] : end;
-    if (c1 - c0 > max_tokens_)
-      throw std::invalid_argument("session_prefill: a chunk of " + std::to_string(c1 - c0) +
-                                  " rows exceeds max_tokens " + std::to_string(max_tokens_));
-    RowRun run;
-    run.req = req;
-    run.ids = ids + (c0 - start);
-    run.T = static_cast<int>(c1 - c0);
-    run.pos0 = c0;
-    run.decode = false;
-    run.all_rows = false;
-    run.first_chunk = span_start;
-    run.last_chunk = c1 == end || (snap != nullptr && !snap->taken && snap->position == c1);
-    span_start = run.last_chunk;
-    Outputs chunk = derived().run_rows(run);
-    out.logits = std::move(chunk.logits);
-    out.final_hidden_bits = std::move(chunk.final_hidden_bits);
-    out.lm_vocab_begin = chunk.lm_vocab_begin;
-    out.lm_vocab_count = chunk.lm_vocab_count;
-    if (out.route_ids.empty()) {
-      out.route_ids = std::move(chunk.route_ids);
-      out.route_weights = std::move(chunk.route_weights);
-    } else {
-      for (size_t l = 0; l < chunk.route_ids.size() && l < out.route_ids.size(); ++l) {
-        out.route_ids[l].insert(out.route_ids[l].end(), chunk.route_ids[l].begin(), chunk.route_ids[l].end());
-        out.route_weights[l].insert(out.route_weights[l].end(), chunk.route_weights[l].begin(),
-                                    chunk.route_weights[l].end());
-      }
+  return cursor;
+}
+
+template <class D>
+void SessionModel<D>::prefill_chunk(PrefillCursor& cursor) {
+  const int req = cursor.req;
+  const int64_t* ids = cursor.ids;
+  const int64_t start = cursor.start, end = cursor.end, c0 = cursor.next;
+  auto* snap = cursor.snap;
+  auto& out = cursor.output;
+  const int64_t c1 = cursor.cut_index < cursor.cuts.size() ? cursor.cuts[cursor.cut_index++] : end;
+  if (c1 - c0 > max_tokens_)
+    throw std::invalid_argument("session_prefill: a chunk of " + std::to_string(c1 - c0) +
+                                " rows exceeds max_tokens " + std::to_string(max_tokens_));
+  RowRun run;
+  run.req = req;
+  run.ids = ids + (c0 - start);
+  run.T = static_cast<int>(c1 - c0);
+  run.pos0 = c0;
+  run.decode = false;
+  run.all_rows = false;
+  // Preserve logical span boundaries across yields. In particular, the
+  // bounded DeepSeek decoder runs only at a span's last chunk, and a
+  // snapshot must close the span before its state can be published.
+  run.first_chunk = cursor.span_start;
+  run.last_chunk = c1 == end || (snap != nullptr && !snap->taken && snap->position == c1);
+  cursor.span_start = run.last_chunk;
+  Outputs chunk = derived().run_rows(run);
+  out.logits = std::move(chunk.logits);
+  out.final_hidden_bits = std::move(chunk.final_hidden_bits);
+  out.lm_vocab_begin = chunk.lm_vocab_begin;
+  out.lm_vocab_count = chunk.lm_vocab_count;
+  if (out.route_ids.empty()) {
+    out.route_ids = std::move(chunk.route_ids);
+    out.route_weights = std::move(chunk.route_weights);
+  } else {
+    for (size_t l = 0; l < chunk.route_ids.size() && l < out.route_ids.size(); ++l) {
+      out.route_ids[l].insert(out.route_ids[l].end(), chunk.route_ids[l].begin(), chunk.route_ids[l].end());
+      out.route_weights[l].insert(out.route_weights[l].end(), chunk.route_weights[l].begin(),
+                                  chunk.route_weights[l].end());
     }
-    // A capturing walk's per-row selections, chunk after chunk (the
-    // families' chunked-prefill gates compare them with the one-shot's).
-    // (A chunk may capture fewer sources than the next: the bounded
-    // prefill's decoder sources appear on the span's last chunk only.)
-    if (out.dsa_selections.size() < chunk.dsa_selections.size()) out.dsa_selections.resize(chunk.dsa_selections.size());
-    for (size_t l = 0; l < chunk.dsa_selections.size(); ++l)
-      out.dsa_selections[l].insert(out.dsa_selections[l].end(), chunk.dsa_selections[l].begin(),
-                                   chunk.dsa_selections[l].end());
-    // A capturing walk's per-layer rows likewise, chunk after chunk.
-    if (out.layer_states.size() < chunk.layer_states.size()) out.layer_states.resize(chunk.layer_states.size());
-    for (size_t l = 0; l < chunk.layer_states.size(); ++l)
-      out.layer_states[l].insert(out.layer_states[l].end(), chunk.layer_states[l].begin(), chunk.layer_states[l].end());
-    session_pos_[static_cast<size_t>(req)] = c1;
-    push_position(req);
-    // The draft block over this chunk's rows — row q embeds tok_{q+1}, so
-    // the rows stop one short of the prompt end. Per chunk, so its state
-    // stands at every cut.
-    if (mtp_) {
-      const int64_t r1 = std::min<int64_t>(c1, end - 1);
-      if (r1 > c0) mtp_prefill_rows(req, c0, r1, ids + (c0 + 1 - start));
-      mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(mtp_pos_[static_cast<size_t>(req)], r1);
-      push_mtp_position(req);
-    }
-    if (snap != nullptr && !snap->taken && snap->position == c1) {
-      *snap->meta = session_snapshot(req, snap->dst);
-      snap->taken = true;
-    }
-    c0 = c1;
   }
-  return out;
+  // A capturing walk's per-row selections, chunk after chunk (the
+  // families' chunked-prefill gates compare them with the one-shot's).
+  // (A chunk may capture fewer sources than the next: the bounded
+  // prefill's decoder sources appear on the span's last chunk only.)
+  if (out.dsa_selections.size() < chunk.dsa_selections.size()) out.dsa_selections.resize(chunk.dsa_selections.size());
+  for (size_t l = 0; l < chunk.dsa_selections.size(); ++l)
+    out.dsa_selections[l].insert(out.dsa_selections[l].end(), chunk.dsa_selections[l].begin(),
+                                 chunk.dsa_selections[l].end());
+  // A capturing walk's per-layer rows likewise, chunk after chunk.
+  if (out.layer_states.size() < chunk.layer_states.size()) out.layer_states.resize(chunk.layer_states.size());
+  for (size_t l = 0; l < chunk.layer_states.size(); ++l)
+    out.layer_states[l].insert(out.layer_states[l].end(), chunk.layer_states[l].begin(), chunk.layer_states[l].end());
+  session_pos_[static_cast<size_t>(req)] = c1;
+  push_position(req);
+  // The draft block over this chunk's rows — row q embeds tok_{q+1}, so
+  // the rows stop one short of the prompt end. Per chunk, so its state
+  // stands at every cut.
+  if (mtp_) {
+    const int64_t r1 = std::min<int64_t>(c1, end - 1);
+    if (r1 > c0) mtp_prefill_rows(req, c0, r1, ids + (c0 + 1 - start));
+    mtp_pos_[static_cast<size_t>(req)] = std::max<int64_t>(mtp_pos_[static_cast<size_t>(req)], r1);
+    push_mtp_position(req);
+  }
+  if (snap != nullptr && !snap->taken && snap->position == c1) {
+    *snap->meta = session_snapshot(req, snap->dst);
+    snap->taken = true;
+  }
+  cursor.next = c1;
+}
+
+template <class D>
+typename SessionModel<D>::Outputs SessionModel<D>::session_prefill_chunks(
+    int req, const int64_t* ids, int64_t start, int64_t count, const std::vector<int64_t>& boundaries,
+    SnapshotRequest* snap) {
+  auto cursor = prefill_cursor(req, ids, start, count, boundaries, snap);
+  while (cursor.next < cursor.end) prefill_chunk(cursor);
+  return std::move(cursor.output);
+}
+
+template <class D>
+typename SessionModel<D>::PrefillCursor SessionModel<D>::session_prefill_begin(
+    int req, const std::vector<int64_t>& prompt, int64_t reserve_tokens, int64_t chunk_tokens,
+    const std::vector<int64_t>& boundaries, SnapshotRequest* snap, int64_t attach_position) {
+  check_req(req, "session_prefill_begin");
+  if constexpr (!D::kResumablePrefill)
+    throw std::logic_error("session_prefill_begin: family has not enabled resumable prefill");
+  const int64_t end = static_cast<int64_t>(prompt.size());
+  if (end <= 0 || end > max_context_ || reserve_tokens < end || reserve_tokens > max_context_)
+    throw std::invalid_argument("session_prefill_begin: prompt/reservation outside context bounds");
+  if (chunk_tokens < snapshot_align_ || chunk_tokens > max_tokens_ || chunk_tokens % snapshot_align_ != 0)
+    throw std::invalid_argument("session_prefill_begin: chunk budget must fit max_tokens and snapshot alignment");
+  if (attach_position < 0 || attach_position >= end || attach_position % snapshot_align_ != 0)
+    throw std::invalid_argument("session_prefill_begin: invalid attach position");
+  for (const int64_t id : prompt)
+    if (id < 0 || id >= vocab_size_)
+      throw std::invalid_argument("session_prefill_begin: token id out of range");
+  std::vector<int64_t> cuts = boundaries;
+  for (int64_t at = (attach_position / chunk_tokens + 1) * chunk_tokens; at < end; at += chunk_tokens)
+    cuts.push_back(at);
+  auto cursor = prefill_cursor(req, prompt.data() + attach_position, attach_position,
+                               end - attach_position, cuts, snap);
+  if (attach_position == 0) open_slot(req);
+  else if (session_pos_[static_cast<size_t>(req)] != attach_position)
+    throw std::logic_error("session_prefill_begin: slot does not match attached prefix");
+  session_reserve_blocks(req, reserve_tokens);
+  if (attach_position > 0 && mtp_) {
+    if (mtp_pos_[static_cast<size_t>(req)] == attach_position - 1)
+      (void)session_draft(req, {prompt[static_cast<size_t>(attach_position)]});
+    if (mtp_pos_[static_cast<size_t>(req)] != attach_position)
+      throw std::logic_error("session_prefill_begin: draft is not at the attach position");
+  }
+  // The first advance runs in the same scheduler quantum as begin.
+  return cursor;
+}
+
+template <class D>
+bool SessionModel<D>::session_prefill_advance(PrefillCursor& cursor) {
+  check_req(cursor.req, "session_prefill_advance");
+  if (cursor.next >= cursor.end || session_pos_[static_cast<size_t>(cursor.req)] != cursor.next)
+    throw std::logic_error("session_prefill_advance: completed or stale cursor");
+  if (cursor.suspended) {
+    push_position(cursor.req);
+    if (mtp_) push_mtp_position(cursor.req);
+    cursor.suspended = false;
+  }
+  prefill_chunk(cursor);
+  const bool done = cursor.next == cursor.end;
+  if (!done) {
+    // Keep the host positions and all request-owned state. Graph padding
+    // derives from these device counters, so an unfinished slot is inert.
+    DGPP_CUDA_OK(cudaMemsetAsync(d_session_pos_ + cursor.req, 0xff, sizeof(int64_t), stream_));
+    if (mtp_) DGPP_CUDA_OK(cudaMemsetAsync(d_mtp_pos_ + cursor.req, 0xff, sizeof(int64_t), stream_));
+    cursor.suspended = true;
+  }
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  return done;
 }
 
 template <class D>

@@ -1069,6 +1069,11 @@ target_include_directories(qwen_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(qwen_engine_test PRIVATE dgpp_models_qwen_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(qwen_engine_test)
 add_test(NAME qwen_engine_test COMMAND qwen_engine_test)
+add_test(NAME qwen_engine_row_independent
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 DGPP_TEST_FILTER=wide
+          $<TARGET_FILE:qwen_engine_test>)
+set_tests_properties(qwen_engine_test qwen_engine_row_independent PROPERTIES RESOURCE_LOCK qwen_engine_world)
+set_tests_properties(qwen_engine_row_independent PROPERTIES LABELS "gpu;rdma")
 
 add_executable(qwen_forward_check apps/qwen_forward_check.cpp)
 target_link_libraries(qwen_forward_check PRIVATE dgpp_models_qwen_layers dgpp_bus dgpp_loaders CUDA::cudart Threads::Threads)

@@ -6,6 +6,20 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Qwen wide batches and opt-in prefill continuation** (2026-09-15):
+  sixteen decode rows support eight native-MTP requests. Small-row fused
+  kernels and deployment defaults are preserved. Fitting physical slot
+  prefixes remain batchable when a deeper full batch exceeds the model's
+  row limit. `engine.prefill_budget_tokens` gives Qwen graph decoding a
+  turn between bounded prefill chunks; the cursor retains target/draft
+  state, reservations and snapshot ownership through cancellation and
+  cache attach. The policy is journaled across ranks. Wide draft hidden
+  projections use a tensor-core kernel to avoid cuBLASLt copy-engine nodes
+  in collective graphs. Benchmark scripts now distinguish request-wall
+  and legacy output-span rates, require server token usage, and provide
+  repeated C1 comparison and long-prompt interference checks. See the
+  [validation and measurements](benchmarks/results/2026-09-15-qwen-batching-prefill.md)
+  for configuration tradeoffs, the unresolved C1 promotion gate, and remaining work.
 - **One deployment template per model, quant and world** (2026-09-14, late;
   `deploy/README.md`): twenty-five templates became eight —
   `cluster_<model>_<quant>_w<n>.example.json`, each with MTP at the depth its

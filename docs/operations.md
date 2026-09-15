@@ -235,6 +235,30 @@ token per request slot: 32 KiB per token at `max_concurrency` 4), about
 node, available context also depends on draft weights, request slots,
 cache format and arena size. Use the startup plan for the configured limit.
 
+**Budgeted prefill** (`engine.prefill_budget_tokens`, `--prefill-budget-tokens`)
+is opt-in on the Qwen graph engine. Zero preserves full-prompt admission.
+A positive budget executes one aligned prefill chunk per tick, followed by
+a decode pass for active requests. Try 256 or 512 tokens; the budget must
+be a multiple of the snapshot alignment and fit the prefill scratch limit.
+Smaller chunks trade prefill throughput and TTFT for shorter pauses in
+other streams. Request reservations are held before the first yield, and
+cancellation releases the unfinished slot and its prefix references.
+
+One long prefill progresses at a time in arrival order. Short prompts can
+still prefill together when the group fits the budget. Snapshots from an
+unfinished prefill remain private until completion. The settings and warm
+journal records carry the budget; every rank follows the same token cuts.
+`/v1/metrics` reports `prefilling`, `prefill_ms` (execution counted once),
+and `prefill_request_ms` (summed request waits, including waits between
+chunks). Logical and computed prompt-token counters advance with each chunk,
+including cancelled partial work; their difference counts attached cache
+tokens. Other model families retain full-prompt admission.
+
+Use `scripts/serve_prefill_interference.py HOST PORT --json-out RUN.json`
+on an otherwise idle server to compare the longest client update pause
+with the budget disabled and enabled. Keep the same tag and prompt size
+in matched fresh-server runs so the long prompt has no cached prefix.
+
 **The draft depth** (`engine.mtp_depth`, `--mtp-depth`, 1–3, with `mtp`)
 is the number of draft tokens verified per decode step. Depth 1 is the
 two-row step: the pending token and one draft through the main stack, the

@@ -18,6 +18,7 @@
 // each slot owns its pending transcript, and close() must find a live
 // reservation to release.
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <map>
 #include <stdexcept>
@@ -415,6 +416,173 @@ class GroupFakeEngine : public FakeEngine {
   int64_t span_, total_;
 };
 
+class ChunkFakeEngine : public FakeEngine {
+ public:
+  explicit ChunkFakeEngine(int64_t total_blocks = 100) : FakeEngine(2, total_blocks, 2, 2) {}
+  int64_t prefill_chunk_alignment() const override { return 2; }
+  int64_t prefill_chunk_limit() const override { return 16; }
+  int64_t prefill_group_span_limit() const override { return 16; }
+  int64_t prefill_group_total_limit() const override { return 32; }
+  void begin_prefill(int req, const std::vector<int64_t>& prompt, int64_t reserved,
+                     int64_t budget, const PrefixPrefill& plan) override {
+    auto copy = plan;
+    const int32_t first = plan.attach_slot >= 0 || plan.snap_slot >= 0
+        ? FakeEngine::prefill_cached(req, prompt, &copy) : FakeEngine::prefill(req, prompt);
+    FakeEngine::reserve(req, reserved);
+    pending_[req] = {static_cast<int64_t>(prompt.size()) - plan.attach_position, budget, first, copy.snap_taken};
+  }
+  PrefillProgress advance_prefill(int req) override {
+    auto& pending = pending_.at(req);
+    const int64_t count = std::min(pending.remaining, pending.budget);
+    pending.remaining -= count;
+    ops_.push_back("PF:" + std::to_string(req) + ":" + std::to_string(count));
+    PrefillProgress out{count, pending.remaining == 0 ? pending.first : -1, pending.snap};
+    if (pending.remaining == 0) pending_.erase(req);
+    return out;
+  }
+  std::vector<int32_t> step(int req) override {
+    require(!pending_.contains(req), "an unfinished prefill must not decode");
+    return FakeEngine::step(req);
+  }
+  void close(int req) override {
+    pending_.erase(req);
+    FakeEngine::close(req);
+  }
+ private:
+  struct Pending { int64_t remaining, budget; int32_t first; bool snap; };
+  std::map<int, Pending> pending_;
+};
+
+DGPP_TEST(scheduler_chunked_prefill_bounds_work_and_keeps_decode_running) {
+  ChunkFakeEngine engine;
+  engine.arm(0, {10, 11, 12, 13, 14, 15, 16, 17}, 8);
+  engine.arm(1, {20, 21, 22}, 3);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 4;
+  Scheduler sched(&engine, {}, 0, policy);
+  SchedulerRequest decode;
+  decode.id = "decode";
+  decode.prompt = {1, 2};
+  decode.max_steps = 8;
+  sched.submit(decode);
+  sched.tick();
+  SchedulerRequest longer;
+  longer.id = "long";
+  longer.prompt.assign(11, 3);
+  longer.max_steps = 3;
+  sched.submit(longer);
+  for (int tick = 0; tick < 2; ++tick) {
+    const auto before = sched.meters().tokens_generated;
+    sched.tick();
+    require(sched.meters().tokens_generated == before + 1, "decode progresses between prefill chunks");
+    require(sched.find("long")->steps_done == 0 && sched.meters().prefilling == 1,
+            "partial chunks expose no generated tokens");
+    require(sched.meters().prefilling == 1 && sched.meters().prompt_tokens_computed == 2 + 4 * (tick + 1),
+            "in-progress prefill tokens are accounted once");
+    require(sched.meters().prompt_tokens == sched.meters().prompt_tokens_computed,
+            "logical and computed progress advance together; cold chunks are never negative cache hits");
+  }
+  sched.tick();
+  require(sched.meters().tokens_generated > 5 && sched.meters().prefilling == 0,
+          "only the final chunk publishes the first token");
+  sched.run_to_completion();
+  require(sched.find("long")->generated == std::vector<int64_t>({20, 21, 22}), "chunked transcript");
+  require(sched.meters().prompt_tokens_computed == 13 && sched.meters().pool_blocks_in_use == 0,
+          "no double counting or reservation leak");
+}
+
+DGPP_TEST(scheduler_chunked_prefill_yields_reservation_to_older_decode) {
+  ChunkFakeEngine engine(10);
+  engine.arm(0, {10, 11, 12, 13, 14, 15, 16, 17}, 8);
+  engine.arm(1, {20, 21, 22}, 3);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.mode = dgpp::sched::AdmissionPolicy::Mode::kGrowOnDemand;
+  policy.window_tokens = 2;
+  policy.prefill_budget_tokens = 4;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_request("older", 2, 8));
+  sched.tick();
+  sched.submit(make_request("younger", 11, 3));
+  sched.tick();
+  sched.tick();
+  require(sched.meters().prefilling == 1 && sched.meters().pool_blocks_in_use == 10,
+          "the unfinished younger request owns the remaining reservation");
+  sched.tick();
+  const auto* younger = sched.find("younger");
+  require(younger->reason == Scheduler::Result::Reason::kPoolExhausted && younger->generated.empty(),
+          "shed unfinished younger prefill before interrupting older decode");
+  sched.run_to_completion();
+  require(sched.find("older")->generated == std::vector<int64_t>({10, 11, 12, 13, 14, 15, 16, 17}),
+          "older transcript survives pool pressure");
+  require(sched.meters().prompt_tokens_computed == 10 && sched.meters().prompt_tokens == 10 &&
+              sched.meters().pool_blocks_in_use == 0,
+          "partial work is counted and the reservation is released");
+}
+
+DGPP_TEST(scheduler_chunked_prefill_cancel_at_each_yield_releases_cache_and_reservations) {
+  for (const int chunks : {1, 2}) {
+    ChunkFakeEngine engine;
+    engine.set_prefix_arena(4, 2, 4);
+    engine.arm(0, {10, 11}, 2);
+    engine.arm(0, {20, 21}, 2);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 4;
+    Scheduler sched(&engine, {}, 0, policy);
+    sched.set_keep_retired(false);
+    SchedulerRequest request;
+    request.id = "cancel";
+    request.prompt.assign(11, 3);
+    request.max_steps = 2;
+    request.boundaries = {4, 8};
+    sched.submit(request);
+    for (int i = 0; i < chunks; ++i) sched.tick();
+    require(sched.meters().prefix_entries == 0, "an unfinished prefill does not publish a cache entry");
+    require(sched.cancel("cancel"), "in-progress prefill is cancellable");
+    sched.tick();
+    require(!sched.has_pending() && sched.meters().pool_blocks_in_use == 0 && sched.meters().records == 0,
+            "cancellation releases snapshot, blocks and compacted request record");
+    request.id = "reuse";
+    request.prompt = {4, 5};
+    request.boundaries.clear();
+    sched.submit(request);
+    sched.run_to_completion();
+    require(sched.meters().active == 0 &&
+                sched.meters().pool_blocks_in_use == sched.meters().prefix_blocks_pinned,
+            "the reused slot releases its reservation; only completed cache entries remain");
+  }
+}
+
+DGPP_TEST(scheduler_chunked_prefill_group_respects_the_total_tick_budget) {
+  for (const int first_length : {3, 5}) {
+    ChunkFakeEngine engine;
+    engine.arm(0, {10, 11}, 2);
+    engine.arm(0, {20, 21}, 2);  // a deferred second prompt reuses the lowest free slot
+    engine.arm(1, {20, 21}, 2);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 8;
+    Scheduler sched(&engine, {}, 0, policy);
+    sched.submit(make_request("first", first_length, 2));
+    sched.submit(make_request("second", 5, 2));
+    sched.tick();
+    require(sched.meters().prompts_prefilled == (first_length == 3 ? 2 : 1),
+            "a group contains only the prompts that fit the tick's token budget");
+    sched.run_to_completion();
+  }
+}
+
+DGPP_TEST(scheduler_chunked_prefill_budget_rejects_unsupported_and_unaligned_configs) {
+  FakeEngine old(2, 100, 2);
+  ChunkFakeEngine chunked;
+  for (auto* engine : std::vector<SchedulerEngine*>{&old, &chunked}) {
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 3;
+    bool rejected = false;
+    try { Scheduler sched(engine, {}, 0, policy); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "invalid continuation policy must fail before admission");
+  }
+}
+
 DGPP_TEST(scheduler_groupPrefill_admitsQueuedShortPromptsTogether) {
   // GIVEN three 5-token requests queued at once, 3 slots, an engine that
   // takes groups of prompts within 8 tokens: one tick admits all three in
@@ -436,6 +604,9 @@ DGPP_TEST(scheduler_groupPrefill_admitsQueuedShortPromptsTogether) {
   require(got.rfind("PG:3 P:0:5 P:1:5 P:2:5", 0) == 0,
           "the three queued prompts admit as one group:\n  got: " + got);
   require(sched.results().size() == 3, "three results");
+  const auto meters = sched.meters();
+  require(std::abs(meters.prefill_request_ms - 3 * meters.prefill_ms) < 1e-6,
+          "a grouped prefill counts execution once and request wait per member");
   require(ids_joined(sched.results()[0].generated) == "1,2", "a ids");
   require(ids_joined(sched.results()[1].generated) == "4,5", "b ids");
   require(ids_joined(sched.results()[2].generated) == "7,8", "c ids");

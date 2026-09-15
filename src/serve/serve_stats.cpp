@@ -97,6 +97,9 @@ std::string ThroughputLog::format(int rank, double seconds, const Meters& prev,
     out += std::format(", {:.0f} tok/s, {:.2f} ms/tok, {:.0f} ms avg ({:.0f} % of wall)",
                        rate(computed), per(prefill_ms, computed),
                        per(prefill_ms, prompts), share(prefill_ms));
+  else if (computed > 0)
+    out += std::format(", {:.0f} tok/s, {:.2f} ms/tok ({:.0f} % of wall)",
+                       rate(computed), per(prefill_ms, computed), share(prefill_ms));
   if (cur.prefix_slots > 0)
     out += std::format(", {} tok cached ({}/{} hit{})", saved, hits,
                        hits + misses, hits + misses == 1 ? "" : "s");
@@ -108,6 +111,8 @@ std::string ThroughputLog::format(int rank, double seconds, const Meters& prev,
   if (cur.prefix_slots > 0)
     out += std::format(" | prefix cache {}/{} entries", cur.prefix_entries,
                        cur.prefix_slots);
+  if (cur.prefilling > 0)
+    out += std::format(" | {} prefilling", cur.prefilling);
   if (cur_svc && prev_svc) {
     out += std::format(
         " | requests +{} (shed {}, cancelled {})",

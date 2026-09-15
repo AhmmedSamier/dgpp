@@ -410,6 +410,106 @@ int run_fixture(const std::string& dir) {
     }
     std::printf("[ OK ] the eager speculator reproduces the greedy transcript through the draft block\n");
   }
+  // Teacher-forced target verification at twelve and sixteen rows. The
+  // production dense GEMM lowering reassociates the sums across shapes;
+  // use the existing logit/margin budget and bound the mean loss change.
+  // The separate row-independent graph lane retains exact MTP/plain parity.
+  {
+    QwenModel reference(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16);
+    QwenModel wide(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16);
+    wide.session_graph_prepare();
+    const auto nll = [V](const float* row, int64_t token) {
+      const double top = *std::max_element(row, row + V);
+      double sum = 0;
+      for (int i = 0; i < V; ++i) sum += std::exp(static_cast<double>(row[i]) - top);
+      return top + std::log(sum) - row[token];
+    };
+    double loss_delta = 0, worst_l2 = 0;
+    int rows = 0, near_ties = 0;
+    for (const int count : {6, 8}) for (int trial = 0; trial < 8; ++trial) {
+      std::vector<std::vector<float>> expected;
+      std::vector<std::vector<int64_t>> feeds;
+      std::vector<int64_t> labels;
+      for (int req = 0; req < count; ++req) {
+        const auto prompt = smoke_tokens(cfg, 11 + req, 4000 + 100 * trial + req);
+        const auto teacher = smoke_tokens(cfg, 3, 7000 + 100 * trial + req);
+        (void)reference.session_prefill(req, prompt);
+        (void)wide.session_prefill(req, prompt);
+        wide.session_reserve_blocks(req, 64);
+        for (int row = 0; row < 2; ++row) {
+          expected.push_back(reference.session_step(req, teacher[row]).logits);
+          labels.push_back(teacher[row + 1]);
+        }
+        feeds.push_back({teacher[0], teacher[1]});
+      }
+      // Prefill uses the token-feed buffer as scratch. Seed every feed
+      // after the last prefill, as GraphEngineAdapter does before replay.
+      for (int req = 0; req < count; ++req) wide.session_graph_seed_feed(req, feeds[req]);
+      // Execute the capture body eagerly so its target logits are available
+      // before any picker or draft can overwrite them.
+      wide.session_graph_capture_batch(2, count);
+      DGPP_CUDA_OK(cudaStreamSynchronize(wide.stream()));
+      std::vector<float> got(static_cast<size_t>(2 * count) * V);
+      DGPP_CUDA_OK(cudaMemcpy(got.data(), wide.device_logits(), got.size() * sizeof(float), cudaMemcpyDeviceToHost));
+      for (int row = 0; row < 2 * count; ++row) {
+        const float* actual = got.data() + static_cast<size_t>(row) * V;
+        const auto comparison = compare_row(actual, expected[row].data(), V);
+        require(comparison.l2 < 2e-2, "wide target verification exceeds the logit l2 budget: " +
+                    std::to_string(comparison.l2) + " at width " + std::to_string(2 * count) +
+                    " row " + std::to_string(row));
+        require(comparison.top1_equal || comparison.near_tie,
+                "wide target verification changes a top-1 decision beyond the near-tie margin");
+        worst_l2 = std::max(worst_l2, comparison.l2);
+        near_ties += !comparison.top1_equal;
+        loss_delta += nll(actual, labels[row]) - nll(expected[row].data(), labels[row]);
+        ++rows;
+      }
+      for (int req = 0; req < count; ++req) {
+        reference.session_close(req);
+        wide.session_close(req);
+      }
+    }
+    std::printf("[ .. ] wide teacher-forced target: %d rows, worst l2 %.5g, %d near ties, mean NLL delta %.6g\n",
+                rows, worst_l2, near_ties, loss_delta / rows);
+    require(std::abs(loss_delta / rows) < 0.02, "wide target verification exceeds the mean NLL budget");
+  }
+  // A continuation sees the same cuts as the monolithic reference, with
+  // another request decoding between every pair of chunks. Check logits
+  // and draft state, not just the generated text.
+  {
+    QwenModel reference(cfg, dir, 64, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    QwenModel yielded(cfg, dir, 64, 512, QwenResidency::Resident, nullptr, 0, 1, 2, true);
+    const std::vector<int64_t> cuts{4, 8, 12, 16, 20};
+    const auto expected = reference.session_prefill(0, A, cuts);
+    const auto peer = yielded.session_prefill(1, B);
+    int64_t next = argmax(peer.logits.data(), V);
+    auto cursor = yielded.session_prefill_begin(0, A, 64, 4);
+    int chunks = 0;
+    while (!yielded.session_prefill_advance(cursor)) {
+      require(yielded.session_position(0) == 4 * ++chunks, "continuation position after a yield");
+      const auto row = yielded.session_step(1, next);
+      next = argmax(row.logits.data(), V);
+    }
+    require(bitwise(cursor.output.logits, expected.logits), "yielding prefill changes target logits");
+    const int64_t first = argmax(expected.logits.data(), V);
+    const auto draft_ref = reference.session_draft(0, {first});
+    const auto draft_yielded = yielded.session_draft(0, {first});
+    require(bitwise(draft_ref.logits, draft_yielded.logits), "yielding prefill changes draft logits");
+    const auto step_ref = reference.session_step(0, first);
+    const auto step_yielded = yielded.session_step(0, first);
+    require(bitwise(step_ref.logits, step_yielded.logits), "yielding prefill changes continuation state");
+    yielded.session_close(0);
+    auto cancelled = yielded.session_prefill_begin(0, A, 64, 4);
+    require(!yielded.session_prefill_advance(cancelled), "long prompt yields");
+    yielded.session_close(0);
+    auto reused = yielded.session_prefill_begin(0, A, 64, 4);
+    while (!yielded.session_prefill_advance(reused)) {}
+    require(bitwise(reused.output.logits, expected.logits), "cancelled prefill leaves stale state on slot reuse");
+    yielded.session_close(0);
+    yielded.session_close(1);
+    reference.session_close(0);
+    std::printf("[ OK ] resumable prefill: target/draft logits, interleaving and cancellation\n");
+  }
   std::printf("[ OK ] qwen_decode_test\n");
   return 0;
 }

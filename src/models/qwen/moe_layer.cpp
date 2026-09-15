@@ -122,8 +122,17 @@ void QwenMoeLayer::enqueue(const uint16_t* hidden, uint16_t* out, int tokens,
 void QwenMoeLayer::enqueue_decode(const uint16_t* hidden, uint16_t* out, int tokens,
                                   cudaStream_t stream, int table_slot) {
   if (tokens <= 0) return;
+  if (tokens > max_tokens_)
+    throw std::invalid_argument("QwenMoeLayer: tokens exceed max_tokens");
   if (!hidden || !out) throw std::invalid_argument("QwenMoeLayer: null pointer");
   routed_.enqueue_decode_f32(hidden, d_acc_, tokens, nullptr, stream, table_slot);
+  // Preserve the small-row fused tail, including C1 MTP. Wider batches
+  // use the dense interface (Lt for BF16, streaming MMA for FP8) so the
+  // shared weights are not re-read by another four-row GEMV per chunk.
+  if (tokens > 8) {
+    shared_tail(hidden, out, tokens, stream);
+    return;
+  }
   // The fused two-launch tail (bitwise the chain; qwen_moe_test pins it),
   // in the weights' form: BF16, or block FP8.
   const int H = cfg_.hidden;

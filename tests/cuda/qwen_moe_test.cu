@@ -512,7 +512,7 @@ void decode_path_case(int tokens, int H, int I, int scale_block, uint64_t seed) 
   SmallCase c = SmallCase::make(tokens, seed, H, I, scale_block);
   dgpp::CublasLtGemm gemm;
   const std::vector<uint16_t> host = run_layer(c, gemm, dgpp::MoeExpertKernel::kGemv);
-  QwenMoeLayer layer(c.dev, c.cfg, gemm, c.tokens, /*decode_slots=*/8, /*graph_table_slots=*/0);
+  QwenMoeLayer layer(c.dev, c.cfg, gemm, c.tokens, /*decode_slots=*/std::max(8, tokens), /*graph_table_slots=*/0);
   DevBuf out(static_cast<size_t>(tokens) * H * 2);
   cudaStream_t st = test_stream();
   layer.enqueue_decode(static_cast<const uint16_t*>(c.dx.p), static_cast<uint16_t*>(out.p), tokens,
@@ -534,6 +534,48 @@ void decode_path_case(int tokens, int H, int I, int scale_block, uint64_t seed) 
 // against the unfused fp8 chain (launch_scale_gemm_bf16 x2, the swiglu,
 // launch_scale_gemm_f32, the gate, the accumulate, the round): bitwise at
 // one, three and six rows.
+DGPP_TEST(qwen_moe_wide_fp8_decode_matches_the_host_chain) {
+  for (const int tokens : {9, 12, 16}) {
+    SmallCase c = SmallCase::make(tokens, 1000 + tokens, 256, 160, 32);
+    std::vector<DevBuf> payloads, scales;
+    std::vector<GlmQuantMatrix> shared(3);
+    for (int m = 0; m < 3; ++m) {
+      const int rows = m == 2 ? c.cfg.hidden : c.hw.shared_inter;
+      const int cols = m == 2 ? c.hw.shared_inter : c.cfg.hidden;
+      std::vector<uint8_t> encoded(static_cast<size_t>(rows) * cols);
+      std::vector<float> factors(static_cast<size_t>(dgpp::fp8_quant::scale_rows(rows)) *
+                                  dgpp::fp8_quant::scale_cols(cols));
+      dgpp::fp8_quant::encode_block128(c.hw.shared_w[m].data(), cols, rows, cols,
+                                       encoded.data(), factors.data(), 1);
+      payloads.emplace_back(encoded.size());
+      scales.emplace_back(factors.size() * sizeof(float));
+      payloads.back().upload(encoded.data(), encoded.size());
+      scales.back().upload(factors.data(), factors.size() * sizeof(float));
+      shared[m].payload = payloads.back().as<uint8_t>();
+      shared[m].scales = scales.back().as<float>();
+      shared[m].rows = rows;
+      shared[m].cols = cols;
+    }
+    c.dev.shared_fp8 = shared.data();
+    c.dev.shared_gate_proj = c.dev.shared_up_proj = c.dev.shared_down_proj = nullptr;
+    dgpp::CublasLtGemm gemm;
+    QwenMoeLayer layer(c.dev, c.cfg, gemm, tokens, tokens);
+    DevBuf out(static_cast<size_t>(tokens) * c.cfg.hidden * 2);
+    cudaStream_t stream = test_stream();
+    for (const int threshold : {0, 9}) {
+      layer.set_mma_from_rows(threshold);
+      layer.enqueue(c.dx.as<uint16_t>(), out.as<uint16_t>(), tokens, stream);
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      std::vector<uint16_t> expected(static_cast<size_t>(tokens) * c.cfg.hidden), got(expected.size());
+      out.download(expected.data(), expected.size() * 2);
+      layer.enqueue_decode(c.dx.as<uint16_t>(), out.as<uint16_t>(), tokens, stream);
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      out.download(got.data(), got.size() * 2);
+      require(got == expected, "wide FP8 decode differs from the matching host lowering");
+    }
+  }
+}
+
 DGPP_TEST(qwen_moe_fp8_fused_tail_is_bitwise_the_fp8_chain) {
   cudaStream_t st = test_stream();
   const int H = 256, S = 64;
@@ -608,6 +650,13 @@ DGPP_TEST(qwen_moe_decode_path_is_bitwise_the_host_path) {
   decode_path_case(3, 256, 128, 128, 701);
   decode_path_case(8, 256, 160, 32, 702);
   decode_path_case(5, 256, 320, 64, 703);
+}
+
+DGPP_TEST(qwen_moe_wide_decode_matches_the_host_chain) {
+  for (int rows : {9, 12, 16}) {
+    decode_path_case(rows, 256, 160, 32, 800 + rows);
+    decode_path_case(rows, 256, 320, 64, 900 + rows);
+  }
 }
 
 DGPP_TEST(qwen_moe_grouped_mma_on_the_tp2_grid_is_bitwise_the_tile_gemm) {

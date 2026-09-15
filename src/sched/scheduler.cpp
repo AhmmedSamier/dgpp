@@ -81,6 +81,15 @@ Scheduler::Scheduler(SchedulerEngine* engine,
   if (policy_.window_tokens < 1)
     throw std::invalid_argument(
         "Scheduler: the admission window must be at least one token");
+  if (policy_.prefill_budget_tokens < 0)
+    throw std::invalid_argument("Scheduler: prefill budget must be nonnegative");
+  if (policy_.prefill_budget_tokens > 0) {
+    const int64_t align = engine_->prefill_chunk_alignment();
+    if (align < 1 || policy_.prefill_budget_tokens % align != 0 ||
+        policy_.prefill_budget_tokens > engine_->prefill_chunk_limit())
+      throw std::invalid_argument("Scheduler: prefill budget needs a supported engine, aligned chunks and "
+                                  "a budget no larger than the engine's prefill limit");
+  }
   if (queue_limit_ < 0)
     throw std::invalid_argument(
         "Scheduler: queue_limit must be 0 (unbounded) or positive");
@@ -118,7 +127,8 @@ int64_t Scheduler::reserve_blocks(const Request& r) const {
 
 int Scheduler::youngest_active_after(int arrival) const {
   for (int i = static_cast<int>(requests_.size()) - 1; i > arrival; --i)
-    if (requests_[static_cast<size_t>(i)].state == State::kActive) return i;
+    if (requests_[static_cast<size_t>(i)].state == State::kActive ||
+        requests_[static_cast<size_t>(i)].state == State::kPrefilling) return i;
   return -1;
 }
 
@@ -145,7 +155,7 @@ void Scheduler::grow_reservations() {
         target = need;  // the minimum, rather than shedding for a full window
         break;
       }
-      // Even the minimum does not fit: the youngest active request goes —
+      // Even the minimum does not fit: the youngest reserved request goes —
       // this one when nothing younger is live.
       const int victim = youngest_active_after(static_cast<int>(i));
       const int shed = victim >= 0 ? victim : static_cast<int>(i);
@@ -384,7 +394,7 @@ void Scheduler::submit(SchedulerRequest request) {
 bool Scheduler::cancel(const std::string& id) {
   for (Request& r : requests_) {
     if (r.spec.id != id) continue;
-    if (r.state == State::kQueued || r.state == State::kActive) {
+    if (r.state != State::kTerminal) {
       r.cancel_requested = true;
       return true;
     }
@@ -396,7 +406,7 @@ bool Scheduler::cancel(const std::string& id) {
 bool Scheduler::stop(const std::string& id) {
   for (Request& r : requests_) {
     if (r.spec.id != id) continue;
-    if (r.state == State::kQueued || r.state == State::kActive) {
+    if (r.state != State::kTerminal) {
       r.stop_requested = true;
       return true;
     }
@@ -407,7 +417,7 @@ bool Scheduler::stop(const std::string& id) {
 
 bool Scheduler::has_pending() const {
   for (const Request& r : requests_)
-    if (r.state == State::kQueued || r.state == State::kActive) return true;
+    if (r.state != State::kTerminal) return true;
   return false;
 }
 
@@ -436,7 +446,9 @@ int Scheduler::admit_prepare(int arrival) {
 std::vector<int> Scheduler::admissible_group(int first) {
   std::vector<int> group;
   const int64_t span_limit = engine_->prefill_group_span_limit();
-  const int64_t total_limit = engine_->prefill_group_total_limit();
+  const int64_t total_limit = policy_.prefill_budget_tokens > 0
+      ? std::min<int64_t>(engine_->prefill_group_total_limit(), policy_.prefill_budget_tokens)
+      : engine_->prefill_group_total_limit();
   if (span_limit <= 0 || total_limit <= 0) return group;
   const auto groupable = [&](const Request& r) {
     if (r.state != State::kQueued) return false;
@@ -489,6 +501,7 @@ void Scheduler::admit_group(const std::vector<int>& arrivals) {
   if (tokens.size() != arrivals.size())
     throw std::runtime_error("Scheduler: the engine's group prefill returned " + std::to_string(tokens.size()) +
                              " tokens for " + std::to_string(arrivals.size()) + " requests");
+  prefill_ms_ += prefill_ms;  // one physical group, not one execution per member
   for (size_t i = 0; i < arrivals.size(); ++i) {
     Request& r = requests_[static_cast<size_t>(arrivals[i])];
     if (cache_on(r)) {
@@ -579,21 +592,118 @@ void Scheduler::admit(int arrival) {
   const double prefill_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - t_prefill)
                                 .count();
+  prefill_ms_ += prefill_ms;
   admit_finish(arrival, slot, token, prefill_ms, attached);
 }
 
-void Scheduler::admit_finish(int arrival, int slot, int32_t token, double prefill_ms, int64_t attached) {
+void Scheduler::begin_prefill(int arrival) {
+  Request& r = requests_[static_cast<size_t>(arrival)];
+  const int slot = admit_prepare(arrival);
+  SchedulerEngine::PrefixPrefill pp;
+  pp.boundaries = &r.spec.boundaries;
+  r.admitted_at = std::chrono::steady_clock::now();
+  try {
+    if (cache_on(r)) {
+      const PrefixPlan plan = plan_prefix(r);
+      if (plan.attach_entry >= 0) {
+        cache_.attach(plan.attach_entry, ticks_);
+        r.attach_entry = plan.attach_entry;
+        r.attach_position = plan.attach_position;
+        pp.attach_slot = cache_.entry(plan.attach_entry).slot;
+        pp.attach_position = plan.attach_position;
+        emit_prefix(r.spec.id, "attach", plan.attach_position, pp.attach_slot);
+      } else {
+        ++cache_.stats().misses;
+        log_prefix_miss(r);
+      }
+      if (plan.snap_position > 0) {
+        r.prefill_snap_slot = acquire_arena_slot(r.spec.id);
+        r.prefill_snap_position = plan.snap_position;
+        if (r.prefill_snap_slot >= 0) {
+          pp.snap_slot = r.prefill_snap_slot;
+          pp.snap_position = plan.snap_position;
+        } else ++cache_.stats().skipped_no_slot;
+      }
+    }
+    const int64_t reserved = initial_reserve_tokens(r.spec);
+    engine_->begin_prefill(slot, r.spec.prompt, reserved, policy_.prefill_budget_tokens, pp);
+    r.reserved_tokens = reserved;
+  } catch (...) {
+    slots_[static_cast<size_t>(slot)] = -1;
+    if (r.attach_entry >= 0) {
+      cache_.detach(r.attach_entry);
+      r.attach_entry = -1;
+    }
+    if (r.prefill_snap_slot >= 0) {
+      free_arena_slot(r.prefill_snap_slot);
+      r.prefill_snap_slot = -1;
+    }
+    throw;
+  }
+  r.prefill_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - r.admitted_at).count();
+  prefill_ms_ += r.prefill_ms;
+  r.attached_tokens = pp.attach_position;
+  prompt_tokens_ += r.attached_tokens;
+  r.admitted = true;
+  r.slot = slot;
+  r.state = State::kPrefilling;
+  slots_[static_cast<size_t>(slot)] = arrival;
+  DGPP_LOG_INFO("sched: request '{}' prefilling in slot {} ({} tokens/tick)",
+                r.spec.id, slot, policy_.prefill_budget_tokens);
+}
+
+void Scheduler::advance_prefill(int arrival) {
+  Request& r = requests_[static_cast<size_t>(arrival)];
+  const auto started = std::chrono::steady_clock::now();
+  const auto progress = engine_->advance_prefill(r.slot);
+  const double ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  prefill_ms_ += ms;
+  r.prefill_ms += ms;
+  if (progress.computed_tokens <= 0 || progress.computed_tokens > policy_.prefill_budget_tokens)
+    throw std::runtime_error("Scheduler: prefill chunk made no progress or exceeded its token budget");
+  r.prefill_computed += progress.computed_tokens;
+  prompt_tokens_ += progress.computed_tokens;
+  prompt_tokens_computed_ += progress.computed_tokens;
+  const int64_t expected = static_cast<int64_t>(r.spec.prompt.size()) - r.attached_tokens;
+  if (r.prefill_computed > expected || progress.first_token < -1 ||
+      (r.prefill_computed == expected && progress.first_token < 0))
+    throw std::runtime_error("Scheduler: invalid prefill completion progress");
+  if (progress.first_token < 0) return;
+  if (r.prefill_computed + r.attached_tokens != static_cast<int64_t>(r.spec.prompt.size()))
+    throw std::runtime_error("Scheduler: prefill completed at the wrong prompt position");
+  if (r.prefill_snap_slot >= 0) {
+    const int slot = r.prefill_snap_slot;
+    r.prefill_snap_slot = -1;
+    if (progress.snap_taken) {
+      const int entry = cache_.insert(r.spec.prompt.data(), r.prefill_snap_position, slot, ticks_);
+      if (entry < 0) free_arena_slot(slot);
+      else {
+        ++cache_.stats().snapshots;
+        emit_prefix(r.spec.id, "snapshot", r.prefill_snap_position, slot);
+      }
+    } else cache_.give_back_slot(slot);
+  }
+  admit_finish(arrival, r.slot, progress.first_token, r.prefill_ms, r.attached_tokens, true);
+}
+
+void Scheduler::admit_finish(int arrival, int slot, int32_t token, double prefill_ms, int64_t attached,
+                              bool resumed) {
   Request& r = requests_[static_cast<size_t>(arrival)];
   const int64_t reserve = reserve_blocks(r);
   const auto t_prefill = std::chrono::steady_clock::now();
-  prefill_ms_ += prefill_ms;
+  prefill_request_ms_ += resumed
+      ? std::chrono::duration<double, std::milli>(t_prefill - r.admitted_at).count() : prefill_ms;
   r.admitted = true;
-  r.admitted_at = t_prefill;
+  if (!resumed) r.admitted_at = t_prefill;
   r.prefill_ms = prefill_ms;
   r.attached_tokens = attached;
   ++prompts_prefilled_;
-  prompt_tokens_ += static_cast<int64_t>(r.spec.prompt.size());
-  prompt_tokens_computed_ += static_cast<int64_t>(r.spec.prompt.size()) - attached;
+  if (!resumed) {
+    prompt_tokens_ += static_cast<int64_t>(r.spec.prompt.size());
+    prompt_tokens_computed_ += static_cast<int64_t>(r.spec.prompt.size()) - attached;
+  }
   if (token < 0) {
     slots_[static_cast<size_t>(slot)] = -1;
     engine_->close(slot);
@@ -752,6 +862,9 @@ bool Scheduler::append_token(int arrival, int32_t token,
 void Scheduler::retire(int arrival, Result::Status status,
                        Result::Reason reason) {
   Request& r = requests_[static_cast<size_t>(arrival)];
+  if (r.state == State::kPrefilling)
+    prefill_request_ms_ += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - r.admitted_at).count();
   // The slot's draft acceptance for the retire line, read before close
   // resets it.
   const SchedulerEngine::MtpAcceptance acceptance =
@@ -762,6 +875,10 @@ void Scheduler::retire(int arrival, Result::Status status,
   if (r.attach_entry >= 0) {
     cache_.detach(r.attach_entry);
     r.attach_entry = -1;
+  }
+  if (r.prefill_snap_slot >= 0) {
+    free_arena_slot(r.prefill_snap_slot);
+    r.prefill_snap_slot = -1;
   }
   // The prefix cache's retire-time snapshot (M7): when the answer completed
   // with its committed position aligned — the exact position the close
@@ -948,7 +1065,7 @@ bool Scheduler::quantum() {
   // that arrived during a 5-minute prefill rode out the whole tick.
   for (size_t i = 0; i < requests_.size(); ++i) {
     Request& r = requests_[i];
-    if (r.state != State::kQueued && r.state != State::kActive) continue;
+    if (r.state == State::kTerminal) continue;
     if (r.cancel_requested)
       retire(static_cast<int>(i), Result::Status::kCancelled,
              Result::Reason::kCancelled);
@@ -966,7 +1083,11 @@ bool Scheduler::quantum() {
   const bool any_queued = std::any_of(
       requests_.begin(), requests_.end(),
       [](const Request& r) { return r.state == State::kQueued; });
-  if (!any_active && !any_queued) return false;
+  const auto prefill = policy_.prefill_budget_tokens > 0
+      ? std::find_if(requests_.begin(), requests_.end(), [](const Request& r) { return r.state == State::kPrefilling; })
+      : requests_.end();
+  const int prefill_arrival = prefill == requests_.end() ? -1 : static_cast<int>(prefill - requests_.begin());
+  if (!any_active && !any_queued && prefill_arrival < 0) return false;
 
   bool progressed = false;
 
@@ -974,14 +1095,22 @@ bool Scheduler::quantum() {
   // step, so a queued request's first token is not delayed behind a
   // step — and mid-answer requests never wait behind more than one
   // read-in.
-  const int admit_arrival = next_admissible();
-  if (admit_arrival >= 0) {
+  const int admit_arrival = prefill_arrival < 0 ? next_admissible() : -1;
+  if (prefill_arrival >= 0) {
+    advance_prefill(prefill_arrival);
+    progressed = true;
+  } else if (admit_arrival >= 0) {
     // Several queued cold prompts prefill as one forward when the engine
     // takes groups (the six-stream arrival: one read-in instead of six,
     // with a step between each).
     const std::vector<int> group = admissible_group(admit_arrival);
     if (group.size() >= 2)
       admit_group(group);
+    else if (policy_.prefill_budget_tokens > 0 &&
+             static_cast<int64_t>(requests_[admit_arrival].spec.prompt.size()) > policy_.prefill_budget_tokens) {
+      begin_prefill(admit_arrival);
+      advance_prefill(admit_arrival);
+    }
     else
       admit(admit_arrival);
     progressed = true;
@@ -1058,6 +1187,7 @@ Scheduler::Meters Scheduler::meters() const {
   Meters m;
   for (const Request& r : requests_) {
     if (r.state == State::kActive) ++m.active;
+    else if (r.state == State::kPrefilling) { ++m.active; ++m.prefilling; }
     else if (r.state == State::kQueued) ++m.queued;
     m.record_tokens +=
         static_cast<int64_t>(r.spec.prompt.size() + r.generated.size());
@@ -1077,6 +1207,7 @@ Scheduler::Meters Scheduler::meters() const {
   m.decode_steps = decode_steps_;
   m.decode_rows = decode_rows_;
   m.prefill_ms = prefill_ms_;
+  m.prefill_request_ms = prefill_request_ms_;
   m.step_ms = step_ms_;
   m.mtp = engine_->mtp_acceptance();
   m.prefix_slots = cache_.slots();

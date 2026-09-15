@@ -3,9 +3,9 @@
 
 Each phase sends concurrent streaming requests with distinct long-answer
 prompts. Requests are greedy with thinking disabled unless overridden.
-The report includes per-request tokens, time to first token and decode
-pace, plus aggregate throughput and timestamps for comparison with the
-server's stats log.
+The report includes usage token counts, time to first visible output and
+client update pace, plus request-wall throughput and the explicitly named
+legacy output-span rate. SSE updates can carry several tokens.
 
 Use --classes to run separate sweeps for prose, code, JSON, math and chat.
 Use --temperature to measure sampled requests.
@@ -16,13 +16,16 @@ Use --temperature to measure sampled requests.
 
 
 import argparse
+import hashlib
 import http.client
 import json
 import os
 import sys
 import threading
 import time
+import statistics
 from datetime import datetime
+from bench_stream import read_completion, phase_metrics
 
 PROMPTS = [
     "Write a detailed technical essay of at least 800 words on how a paged key-value cache works in a "
@@ -117,6 +120,45 @@ CLASSES = {
     ],
 }
 
+# Extra independent tasks for C6..C16. The original first four prompts and
+# their rotation remain unchanged; wider phases must never repeat a prompt.
+_EXTRA_TOPICS = {
+    "prose": ["the Venetian Republic", "the development of printing", "the history of public libraries",
+              "the rise of radio", "the development of railways", "the history of navigation",
+              "the development of refrigeration", "the history of astronomy", "the development of bridges",
+              "the history of postal systems", "the development of public parks", "the history of photography"],
+    "code": ["a CSV reader with quoted fields", "a bounded thread-safe queue", "a trie with prefix search",
+             "a streaming SHA-256 file verifier", "a topological sorter with cycle detection",
+             "a retry loop with exponential backoff", "a command-line arithmetic parser",
+             "a merge of sorted iterators", "a JSON Lines validator", "a sliding-window moving average",
+             "a scheduler for periodic callbacks", "a filesystem path normalization function"],
+    "json": ["books with title, author and publication_year", "planets and moons with name, parent and radius_km",
+             "instruments with name, family and description", "languages with name, family and writing_system",
+             "mountains with name, continent and height_m", "foods with name, origin and ingredients",
+             "trees with name, habitat and leaf_type", "museums with name, city and specialty",
+             "programming languages with name, year and paradigm", "algorithms with name, purpose and complexity",
+             "sports with name, team_size and equipment", "space missions with name, year and destination"],
+    "math": ["the sum of squares of the first n integers", "compound interest with monthly deposits",
+             "the expected rolls until the first six", "a geometric series with ratio 2/3",
+             "the derivative of x^x", "the volume of a cone from integration",
+             "Bayes' rule for a test with 95 percent sensitivity", "the Euclidean algorithm for 1071 and 462",
+             "the roots of x^3 - 6x^2 + 11x - 6", "counting paths on a 6 by 8 grid",
+             "the variance of a binomial random variable", "the optimal dimensions of a fixed-volume cylinder"],
+    "chat": ["prefix-cache eviction", "CPU cache coherence", "TCP congestion control", "floating-point rounding",
+             "database write-ahead logs", "consistent hashing", "GPU shared memory", "memory mapping",
+             "sparse matrix multiplication", "distributed consensus", "B-tree indexes", "backpressure in streams"],
+}
+_EXTRA_TEMPLATES = {
+    "prose": "For {topic}, write a long detailed history, organized by era in full paragraphs.",
+    "code": "Implement {topic} in a Python module, with type hints, docstrings and pytest tests.",
+    "json": "List 25 different {topic} as a JSON array. Output only the JSON.",
+    "math": "Explain and derive {topic} step by step, then work through two numerical examples and verify them.",
+    "chat": "Explain {topic} in several detailed paragraphs, with examples, tradeoffs and practical applications.",
+}
+for _name, _topics in _EXTRA_TOPICS.items():
+    CLASSES[_name].extend(_EXTRA_TEMPLATES[_name].format(topic=topic) for topic in _topics)
+PROMPTS.extend(CLASSES["chat"][4:12])
+
 
 def check_corpus():
     """Prompt 0 of each class must still be fabric_mtp_classes.sh's prompt."""
@@ -145,7 +187,14 @@ def served_model(host, port):
     return ids[0]
 
 
-def stream_one(host, port, model, prompt, max_tokens, think, out, temperature=0):
+def stream_one(host, port, model, prompt, max_tokens, think, out, temperature=0, on_update=None):
+    try:
+        _stream_one(host, port, model, prompt, max_tokens, think, out, temperature, on_update)
+    except Exception as error:
+        out["error"] = str(error)
+
+
+def _stream_one(host, port, model, prompt, max_tokens, think, out, temperature, on_update=None):
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -158,61 +207,31 @@ def stream_one(host, port, model, prompt, max_tokens, think, out, temperature=0)
         body["chat_template_kwargs"] = {"enable_thinking": False}
     conn = http.client.HTTPConnection(host, port, timeout=900)
     t0 = time.perf_counter()
-    conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
-                 headers={"Content-Type": "application/json"})
-    resp = conn.getresponse()
-    if resp.status == 400 and not think:
-        # The template has no thinking knob: plain.
-        conn.close()
-        body.pop("chat_template_kwargs", None)
-        conn = http.client.HTTPConnection(host, port, timeout=900)
-        t0 = time.perf_counter()
+    try:
         conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
                      headers={"Content-Type": "application/json"})
         resp = conn.getresponse()
-    stamps = []
-    text = []
-    usage = None
-    finish = None
-    buf = b""
-    while True:
-        chunk = resp.read1(65536) if hasattr(resp, "read1") else resp.read(65536)
-        if not chunk:
-            break
-        now = time.perf_counter()
-        buf += chunk
-        while b"\n\n" in buf:
-            frame, buf = buf.split(b"\n\n", 1)
-            for line in frame.split(b"\n"):
-                if not line.startswith(b"data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == b"[DONE]":
-                    continue
-                obj = json.loads(payload)
-                if obj.get("usage"):
-                    usage = obj["usage"]
-                for ch in obj.get("choices", []):
-                    delta = ch.get("delta", {})
-                    if delta.get("content") or delta.get("reasoning_content"):
-                        stamps.append(now)
-                        text.append(delta.get("content") or delta.get("reasoning_content"))
-                    if ch.get("finish_reason"):
-                        finish = ch["finish_reason"]
-    conn.close()
-    out["status"] = resp.status
-    out["finish"] = finish
-    out["usage"] = usage
+        if resp.status == 400 and not think:
+            # The template has no thinking knob: plain.
+            conn.close()
+            body.pop("chat_template_kwargs", None)
+            conn = http.client.HTTPConnection(host, port, timeout=900)
+            t0 = time.perf_counter()
+            conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+        out.update(read_completion(resp, on_update=on_update))
+    finally:
+        conn.close()
     out["t0"] = t0
-    out["first"] = stamps[0] if stamps else None
-    out["last"] = stamps[-1] if stamps else None
-    out["chunks"] = len(stamps)
-    out["tokens"] = (usage or {}).get("completion_tokens", len(stamps))
-    out["text"] = "".join(text)
+    out["end"] = time.perf_counter()
+    out["prompt_sha256"] = hashlib.sha256(prompt.encode()).hexdigest()
 
 
-def phase(host, port, model, c, max_tokens, think, prompt_base, prompts=None, temperature=0, label=""):
+def phase(host, port, model, c, max_tokens, think, prompt_base, prompts=None, temperature=0, label="", reports=None):
     prompts = prompts or PROMPTS
+    if c < 1 or c > len(prompts):
+        raise ValueError(f"concurrency must be between 1 and {len(prompts)} distinct prompts")
     outs = [dict() for _ in range(c)]
     threads = []
     t_start = time.perf_counter()
@@ -228,20 +247,22 @@ def phase(host, port, model, c, max_tokens, think, prompt_base, prompts=None, te
     t_end = time.perf_counter()
     wall_end = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     print(f"== {label}concurrency {c}: {wall_start} .. {wall_end}  wall {t_end - t_start:.1f} s")
-    total = 0
-    span_first = min(o["first"] for o in outs if o["first"])
-    span_last = max(o["last"] for o in outs if o["last"])
+    metrics = phase_metrics(outs, t_start, t_end)
     for i, o in enumerate(outs):
         n = o["tokens"]
-        total += n
         pace = ((o["last"] - o["first"]) / (o["chunks"] - 1) * 1e3) if o["chunks"] > 1 else float("nan")
         ttft = (o["first"] - o["t0"]) * 1e3 if o["first"] else float("nan")
         print(f"   req {i}: status {o['status']} finish={o['finish']} tokens {n} chunks {o['chunks']} "
-              f"ttft {ttft:.0f} ms  decode pace {pace:.2f} ms/token")
-    span = span_last - span_first
-    print(f"   aggregate: {total} tokens in {span:.1f} s of decode = {total / span:.1f} tok/s "
-          f"({total / span / c:.1f} per request)")
-    return total / span
+              f"ttft {ttft:.0f} ms  client update pace {pace:.2f} ms/update")
+    legacy = metrics["legacy_output_span_tokens_per_s"]
+    print(f"   aggregate wall: {metrics['completion_tokens']} tokens in {metrics['wall_s']:.2f} s "
+          f"= {metrics['wall_tokens_per_s']:.2f} tok/s (prefill included)")
+    print(f"   legacy output-span aggregate: {legacy if legacy is not None else 'unavailable'} tok/s "
+          "(initial TTFT excluded; later admissions included)")
+    if reports is not None:
+        reports.append({"class": label.strip() or "mixed", "concurrency": c,
+                        "started_at": wall_start, "metrics": metrics, "requests": outs})
+    return metrics["wall_tokens_per_s"]
 
 
 def main():
@@ -250,6 +271,8 @@ def main():
     ap.add_argument("port", type=int)
     ap.add_argument("--concurrency", default="1,2,4")
     ap.add_argument("--max-tokens", type=int, default=320)
+    ap.add_argument("--repeat", type=int, default=1, help="repeat each phase with identical prompts; report medians")
+    ap.add_argument("--json-out", help="write raw requests and explicitly scoped rates for regression comparisons")
     ap.add_argument("--think", action="store_true", help="leave the template's thinking on")
     ap.add_argument("--warm", type=int, default=1, help="warm requests before the phases")
     ap.add_argument("--isolation", type=int, default=0, metavar="C",
@@ -260,6 +283,17 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.0,
                     help="0 (default) is greedy; a positive value samples, for the pace at the card's defaults")
     args = ap.parse_args()
+    cs = [int(x) for x in args.concurrency.split(",")]
+    if (args.repeat < 1 or args.max_tokens < 1 or args.warm < 0 or not 0 <= args.isolation <= 16
+            or any(c < 1 or c > 16 for c in cs)):
+        ap.error("repeat/max-tokens must be positive; concurrency in [1, 16]; isolation in [0, 16]; warm >= 0")
+    reports = []
+    def save():
+        if args.json_out:
+            with open(args.json_out, "w") as output:
+                json.dump({"schema_version": 1, "model": model, "max_tokens": args.max_tokens,
+                           "temperature": args.temperature, "thinking": args.think,
+                           "phases": reports}, output, indent=2, allow_nan=False)
     if args.classes:
         check_corpus()
     model = served_model(args.host, args.port)
@@ -267,10 +301,14 @@ def main():
     for w in range(args.warm):
         o = {}
         stream_one(args.host, args.port, model, PROMPTS[w % len(PROMPTS)], 64, args.think, o)
+        if o.get("error"):
+            raise RuntimeError(o["error"])
         print(f"warm {w}: status {o['status']} tokens {o['tokens']}")
     if args.isolation > 1:
         alone = {}
         stream_one(args.host, args.port, model, PROMPTS[0], args.max_tokens, args.think, alone)
+        if alone.get("error"):
+            raise RuntimeError(alone["error"])
         outs = [dict() for _ in range(args.isolation)]
         threads = [threading.Thread(target=stream_one,
                                     args=(args.host, args.port, model, PROMPTS[i % len(PROMPTS)], args.max_tokens,
@@ -278,6 +316,9 @@ def main():
                    for i in range(args.isolation)]
         for th in threads: th.start()
         for th in threads: th.join()
+        for out in outs:
+            if out.get("error"):
+                raise RuntimeError(out["error"])
         same = alone["text"] == outs[0]["text"] and alone["tokens"] == outs[0]["tokens"]
         print(f"== isolation: prompt 0 alone ({alone['tokens']} tokens) vs beside {args.isolation - 1} others "
               f"({outs[0]['tokens']} tokens): {'IDENTICAL' if same else 'DIFFERENT'}")
@@ -286,7 +327,7 @@ def main():
             k = 0
             while k < len(a) and k < len(b) and a[k] == b[k]: k += 1
             print(f"   first difference at char {k}: alone {a[k:k+60]!r} | batched {b[k:k+60]!r}")
-    cs = [int(x) for x in args.concurrency.split(",")]
+            raise SystemExit("transcript isolation failed")
     draw = "greedy" if args.temperature == 0 else f"sampled T={args.temperature}"
     if args.classes:
         names = list(CLASSES) if args.classes == "all" else args.classes.split(",")
@@ -297,11 +338,12 @@ def main():
         for n in names:
             base = 0
             for c in cs:
-                rate = phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
-                             CLASSES[n], args.temperature, f"{n} ")
-                table[(n, c)] = rate
+                rates = [phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
+                               CLASSES[n], args.temperature, f"{n} ", reports) for _ in range(args.repeat)]
+                table[(n, c)] = statistics.median(rates)
                 base += c
-        print(f"== per-class aggregate tokens/s, {draw}, max_tokens {args.max_tokens}")
+                save()
+        print(f"== per-class wall aggregate tokens/s (prefill included), {draw}, max_tokens {args.max_tokens}")
         print("| class | " + " | ".join(f"c={c}" for c in cs) + " |")
         print("|---|" + "---|" * len(cs))
         for n in names:
@@ -310,11 +352,12 @@ def main():
     base = 0
     summary = []
     for c in cs:
-        rate = phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
-                     None, args.temperature)
+        rate = statistics.median(phase(args.host, args.port, model, c, args.max_tokens, args.think, base,
+                                       None, args.temperature, reports=reports) for _ in range(args.repeat))
         summary.append((c, rate))
         base += c
-    print(f"== summary ({draw}): " + "  ".join(f"c={c}: {r:.1f} tok/s" for c, r in summary))
+        save()
+    print(f"== summary (wall, {draw}): " + "  ".join(f"c={c}: {r:.1f} tok/s" for c, r in summary))
 
 
 if __name__ == "__main__":

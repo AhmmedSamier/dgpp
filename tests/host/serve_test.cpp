@@ -1881,7 +1881,7 @@ DGPP_TEST(serve_admission_growPolicyShedsTheYoungestWithFinishLength) {
     m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
     const std::string metrics = m.read_until("\"admission\"", 2000);
     require(metrics.find("\"requests_shed_pool\":1") != std::string::npos &&
-                metrics.find("\"admission\":{\"mode\":\"grow\",\"window\":8}") !=
+                metrics.find("\"admission\":{\"mode\":\"grow\",\"window\":8,\"prefill_budget_tokens\":0}") !=
                     std::string::npos &&
                 metrics.find("\"reservations_grown\":0") == std::string::npos,
             "metrics: the shed, the policy, the growth: " + metrics.substr(0, 500));
@@ -1890,7 +1890,7 @@ DGPP_TEST(serve_admission_growPolicyShedsTheYoungestWithFinishLength) {
   Client m(plain.port());
   m.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
   require(m.read_until("\"admission\"", 2000).find(
-              "\"admission\":{\"mode\":\"full\",\"window\":256}") != std::string::npos,
+              "\"admission\":{\"mode\":\"full\",\"window\":256,\"prefill_budget_tokens\":0}") != std::string::npos,
           "the default policy is full-reserve");
 }
 
@@ -2336,6 +2336,22 @@ DGPP_TEST(serve_prefixCache_boundariesAttachOptOutAndMetrics) {
               met.find("\"ttft_hit_count\":1") != std::string::npos &&
               met.find("\"ttft_miss_count\":2") != std::string::npos,
           "metrics: " + met);
+}
+
+DGPP_TEST(serve_throughputLog_reports_unfinished_prefill_work) {
+  using dgpp::serve::ThroughputLog;
+  const auto now = ThroughputLog::Clock::now();
+  ThroughputLog log(1.0, 0);
+  dgpp::sched::Scheduler::Meters m;
+  m.prefix_slots = 4;
+  require(log.observe(m, nullptr, now).empty(), "prime the interval");
+  m.active = m.prefilling = 1;
+  m.prompt_tokens = m.prompt_tokens_computed = 256;
+  m.prefill_ms = 512;
+  const auto line = log.observe(m, nullptr, now + std::chrono::seconds(1));
+  require(line.find("prefill 0 prompts / 256 tok, 256 tok/s, 2.00 ms/tok (51 % of wall), 0 tok cached") !=
+              std::string::npos && line.find("1 prefilling") != std::string::npos,
+          "partial work has a rate without invented completed prompts or cache hits: " + line);
 }
 
 DGPP_TEST(serve_throughputLog_oneLinePerIntervalWithTheDeltas_thenQuiet) {

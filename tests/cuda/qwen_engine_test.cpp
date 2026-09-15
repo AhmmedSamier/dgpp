@@ -36,6 +36,7 @@
 #include "models/qwen/loader.hpp"
 #include "net/collective_bus.hpp"
 #include "qwen_fixture.hpp"
+#include "kda_test_helpers.hpp"
 #include "engine/eager_engine.hpp"
 #include "engine/graph_engine.hpp"
 #include "engine/tp_bus.hpp"
@@ -298,6 +299,27 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
       }
       out->ma.resize(static_cast<size_t>(kSteps) + 1);
       mtp_engine.close(0);
+      if (depth == 2) {
+        require(mtp_engine.batch_families() == std::vector<int>{2},
+                "three configured slots at depth two retain the fitting two-slot family");
+        std::vector<int32_t> low_b{mtp_engine.prefill(0, B)};
+        mtp_engine.reserve(0, static_cast<int64_t>(B.size()) + kSteps + 2 + depth);
+        std::vector<int32_t> low_c{mtp_engine.prefill(1, C)};
+        mtp_engine.reserve(1, static_cast<int64_t>(C.size()) + kSteps + 2 + depth);
+        while (low_b.size() <= kSteps || low_c.size() <= kSteps) {
+          const auto t = mtp_engine.step_batch({0, 1});
+          low_b.insert(low_b.end(), t[0].begin(), t[0].end());
+          low_c.insert(low_c.end(), t[1].begin(), t[1].end());
+        }
+        low_b.resize(kSteps + 1);
+        low_c.resize(kSteps + 1);
+        require(low_b == out->eb && low_c == out->ec,
+                "the fitting depth-two batch matches plain decode");
+        require(mtp_engine.batch_family_steps(0) > 0, "the fitting family replayed");
+        mtp_engine.close(0);
+        mtp_engine.close(1);
+      }
+      const auto fitting_steps = depth == 2 ? mtp_engine.batch_family_steps(0) : 0;
       out->mb.push_back(mtp_engine.prefill(1, B));
       mtp_engine.reserve(1, static_cast<int64_t>(B.size()) + kSteps + 2 + depth);
       out->mc.push_back(mtp_engine.prefill(2, C));
@@ -313,6 +335,9 @@ void rank_work_mtp(int r, const QwenTextConfig& cfg, const std::string& dir, con
       mtp_engine.close(1);
       mtp_engine.close(2);
       mtp_engine.drain();
+      if (depth == 2)
+        require(mtp_engine.batch_family_steps(0) == fitting_steps,
+                "a live slot outside the fitting prefix safely uses scalar graphs");
     }
     cudaFreeHost(scratch);
   } catch (const std::exception& e) {
@@ -426,6 +451,152 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_depth2_graph_matches_plain_decode) {
   DGPP_LOG_INFO("world 2 MTP depth 2: A took {} steps for {} tokens", o.mtp_steps_a, kSteps);
 }
 
+DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
+  const QwenTextConfig cfg = qwenfx::tiny_config();
+  const std::string dir = "qwen_engine_fixture";
+  qwenfx::write_fixture(cfg, dir);
+  auto buses = start_world(kWorld, kPort + 3);
+  require(!buses.empty(), "the loopback bus world failed to start");
+  ConstructBarrier barrier(kWorld);
+  std::vector<std::string> errors(kWorld);
+  std::vector<std::thread> workers;
+  for (int rank = 0; rank < kWorld; ++rank) workers.emplace_back([&, rank] {
+    uint16_t* scratch = nullptr;
+    bool arrived = false;
+    try {
+      auto* bus = buses[rank].get();
+      BusBoundaryReducer reducer(*bus, wait_timeout_ms());
+      QwenModel eager(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld, 8);
+      QwenModel model(cfg, dir, kMaxTokens, 2048, QwenResidency::Resident, &reducer, rank, kWorld, 8,
+                      /*mtp=*/true, /*decode_rows=*/16);
+      DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&scratch),
+                                 sizeof(uint16_t) * dgpp::kPickScratchElems(kWorld), cudaHostAllocDefault));
+      arrived = true;
+      barrier.arrive_and_wait();
+      EagerEngineAdapter<QwenModel> plain(&eager, 8,
+          dgpp::make_fabric_pick(bus, rank, kWorld, scratch, cfg.vocab_size, wait_timeout_ms()));
+      GraphEngineAdapter<QwenModel> graph(&model, bus, rank, kWorld, scratch, cfg.vocab_size,
+                                           wait_timeout_ms(), /*batch_min_live=*/2, nullptr, nullptr, 0, nullptr,
+                                           /*prefix_slots=*/2);
+      require(graph.batch_families() == std::vector<int>({2, 3, 4, 6, 8}), "wide batch families");
+      // Exact MTP/plain equivalence is checked in the row-independent CTest
+      // lane. The production lowering changes reduction order at m > 4;
+      // qwen_decode_test separately bounds its teacher-forced logits/loss.
+      const bool row_independent = dgpp::dense_gemv_rows() >= 16;
+      // Reuse every slot at both widths, then retire interior slots while
+      // the highest slot remains live. Each surviving stream stays isolated.
+      for (const int count : {6, 8}) {
+        std::vector<std::vector<int64_t>> prompts;
+        std::vector<std::vector<int32_t>> expected, uninterrupted;
+        for (int req = 0; req < count; ++req) {
+          prompts.push_back(smoke_tokens(cfg, 11 + req, 800 + req + count));
+          expected.push_back(solo(plain, req, prompts.back(), kSteps));
+        }
+        for (int trial = 0; trial < 2; ++trial) {
+          std::vector<std::vector<int32_t>> got;
+          std::vector<int> live;
+          for (int req = 0; req < count; ++req) {
+            got.push_back({graph.prefill(req, prompts[req])});
+            graph.reserve(req, static_cast<int64_t>(prompts[req].size()) + 2 * kSteps + 8);
+            live.push_back(req);
+          }
+          for (int step = 0; step < kSteps; ++step) {
+            const auto tokens = graph.step_batch(live);
+            for (size_t i = 0; i < live.size(); ++i) {
+              auto& out = got[live[i]];
+              out.insert(out.end(), tokens[i].begin(), tokens[i].end());
+            }
+            if (trial == 1 && step == 2) {
+              graph.close(1);
+              live.erase(std::find(live.begin(), live.end(), 1));
+            }
+          }
+          for (int req = 0; req < count; ++req) {
+            got[req].resize(std::min(got[req].size(), expected[req].size()));
+            if (row_independent)
+              require(std::equal(got[req].begin(), got[req].end(), expected[req].begin()),
+                      "wide MTP transcript differs from plain decode in slot " + std::to_string(req));
+            if (trial == 1)
+              require(std::equal(got[req].begin(), got[req].end(), uninterrupted[req].begin()),
+                      "cancellation or slot reuse changes another slot's transcript");
+          }
+          uninterrupted = got;
+          for (const int req : live) graph.close(req);
+        }
+      }
+      require(graph.batch_family_steps(3) > 0 && graph.batch_family_steps(4) > 0,
+              "both twelve- and sixteen-row graphs replayed");
+      {
+        const auto long_prompt = smoke_tokens(cfg, 63, 20260915);
+        const std::vector<int64_t> cuts{8, 16, 24, 32, 40, 48, 56};
+        dgpp::sched::SchedulerEngine::PrefixPrefill plan;
+        plan.boundaries = &cuts;
+        std::vector<int32_t> scalar{plain.prefill_cached(1, long_prompt, &plan)};
+        plain.reserve(1, 128);
+        for (int i = 0; i < kSteps; ++i) scalar.push_back(plain.step(1)[0]);
+        plain.close(1);
+        const auto short_prompt = smoke_tokens(cfg, 11, 1234);
+        for (const int req : {0, 7}) {
+          (void)graph.prefill(req, short_prompt);
+          graph.reserve(req, 256);
+        }
+        std::vector<int32_t> expected{graph.prefill_cached(1, long_prompt, &plan)};
+        graph.reserve(1, 128);
+        while (expected.size() <= kSteps) {
+          const auto tokens = graph.step_batch({0, 1, 7});
+          expected.insert(expected.end(), tokens[1].begin(), tokens[1].end());
+        }
+        expected.resize(kSteps + 1);
+        graph.close(1);
+        if (row_independent) require(expected == scalar, "wide MTP differs from plain decode");
+        // Slot 1 is inside the captured eight-slot family while unfinished.
+        // First cancel at a yield, then finish cold and attach the resulting
+        // snapshot. Every graph between chunks must treat slot 1 as padding.
+        graph.begin_prefill(1, long_prompt, 128, 8, plan);
+        require(graph.advance_prefill(1).first_token < 0, "the long prefill yields");
+        (void)graph.step_batch({0, 7});
+        graph.close(1);
+        for (int round = 0; round < 2; ++round) {
+          if (round == 0) {
+            plan.snap_slot = 0;
+            plan.snap_position = 16;
+          } else {
+            plan.snap_slot = -1;
+            plan.attach_slot = 0;
+            plan.attach_position = 16;
+          }
+          graph.begin_prefill(1, long_prompt, 128, 8, plan);
+          std::vector<int32_t> got;
+          while (got.empty()) {
+            const auto progress = graph.advance_prefill(1);
+            require(progress.computed_tokens > 0 && progress.computed_tokens <= 8, "prefill quantum size");
+            if (progress.first_token >= 0) got.push_back(progress.first_token);
+            else (void)graph.step_batch({0, 7});
+          }
+          graph.reserve(1, 128);
+          while (got.size() <= kSteps) {
+            const auto tokens = graph.step_batch({0, 1, 7});
+            got.insert(got.end(), tokens[1].begin(), tokens[1].end());
+          }
+          got.resize(kSteps + 1);
+          require(got == expected, "yielding/cached MTP prefill changes the monolithic transcript");
+          graph.close(1);
+        }
+        graph.close(0);
+        graph.close(7);
+        graph.prefix_release(0);
+      }
+      graph.drain();
+    } catch (const std::exception& e) {
+      errors[rank] = e.what();
+      if (!arrived) barrier.arrive_and_wait();
+    }
+    if (scratch) cudaFreeHost(scratch);
+  });
+  for (auto& worker : workers) worker.join();
+  for (const auto& error : errors) require(error.empty(), error);
+}
+
 DGPP_TEST(qwen_engines_loopback_world_2_graph_matches_eager) {
   const QwenTextConfig cfg = qwenfx::tiny_config();
   const std::string dir = "qwen_engine_fixture";
@@ -467,6 +638,57 @@ DGPP_TEST(qwen_engines_loopback_world_2_graph_matches_eager) {
   require(std::equal(o.bb.begin(), o.bb.end(), o.eb.begin()), "the batched graph transcript of B differs");
   require(std::equal(o.bc.begin(), o.bc.end(), o.ec.begin()), "the batched graph transcript of C differs");
   require(o.bb.size() == 10 && o.bc.size() == 8, "the batched transcripts' lengths");
+}
+
+DGPP_TEST(qwen_mtp_wide_hidden_projection_real_shape_is_kernel_only) {
+  using namespace dgpp::kda_test;
+  const auto download = [](const DevBuf& buffer, size_t n) {
+    std::vector<uint16_t> values(n);
+    buffer.download(values.data(), n * 2);
+    return values;
+  };
+  constexpr int H = 2560, hc = 4, max_rows = 16 * hc;
+  const auto act = random_bf16_normal(8101, static_cast<int64_t>(max_rows) * H, 0.3f);
+  const auto weight = random_bf16_normal(8102, static_cast<int64_t>(H) * H, 0.02f);
+  DevBuf da(act.size() * 2), dw(weight.size() * 2), dout(act.size() * 2), ws(64u << 20);
+  da.upload(act.data(), act.size() * 2);
+  dw.upload(weight.data(), weight.size() * 2);
+  dgpp::CublasLtGemm gemm;
+  gemm.set_decode_rows(4);
+  dgpp::QwenGemmWorkspace g{&gemm, ws.p, 64u << 20};
+  g.gemv_rows = 4;
+  const auto stream = test_stream();
+  for (const int tokens : {12, 16}) {
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    dgpp::qwen_mtp_hidden_projection(g, static_cast<const uint16_t*>(da.p),
+        static_cast<const uint16_t*>(dw.p), static_cast<uint16_t*>(dout.p), tokens, hc, H, true, stream);
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    dgpp::check_decode_graph(graph, 0, "Qwen wide MTP hidden projection");
+    DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, 0));
+    DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    const auto got = download(dout, static_cast<size_t>(tokens * hc) * H);
+    // Independent fp64 dots across every row and representative columns.
+    for (int row = 0; row < tokens * hc; ++row) {
+      for (const int col : {0, 1, 63, 127, 319, 640, 1280, 2559}) {
+        double expected = 0;
+        for (int k = 0; k < H; ++k)
+          expected += static_cast<double>(dgpp::bf16_bits_to_float(act[static_cast<size_t>(row) * H + k])) *
+                      dgpp::bf16_bits_to_float(weight[static_cast<size_t>(col) * H + k]);
+        const float actual = dgpp::bf16_bits_to_float(got[static_cast<size_t>(row) * H + col]);
+        if (std::abs(actual - expected) > 0.008 * std::abs(expected) + 1e-5)
+          throw std::runtime_error("wide MTP projection exceeds the BF16 oracle budget");
+      }
+    }
+    DGPP_CUDA_OK(cudaGraphLaunch(executable, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    const auto replay = download(dout, got.size());
+    require_bitwise("wide MTP projection replay", got.data(), replay.data(), got.size() * 2);
+    DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
+    DGPP_CUDA_OK(cudaGraphDestroy(graph));
+  }
 }
 
 int main() { return dgpp::test::run_all(); }

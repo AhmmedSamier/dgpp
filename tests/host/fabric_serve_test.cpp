@@ -399,6 +399,11 @@ void test_journal_codec() {
     const dgpp::serve::JournalRecord warm0 = dgpp::serve::decode_journal_line(
         dgpp::serve::encode_journal_warm(dgpp::sched::AdmissionPolicy{}, 0));
     require(warm0.warm && warm0.prefix_slots == 0, "codec: warm record without a cache");
+    dgpp::sched::AdmissionPolicy chunk_policy;
+    chunk_policy.prefill_budget_tokens = 256;
+    const auto chunk_warm = dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_warm(chunk_policy));
+    require(chunk_warm.admission == chunk_policy && warm0.admission.prefill_budget_tokens == 0,
+            "the deterministic prefill budget round-trips; old records keep monolithic admission");
     // The configuration digest (2026-09-06) rides the warm record when rank 0
     // has one; a config-less rank 0's record is unchanged.
     const dgpp::serve::JournalRecord wcfg = dgpp::serve::decode_journal_line(
@@ -429,6 +434,7 @@ void test_journal_codec() {
     ws.prefix_cache_gib = 1.25;
     ws.admission = "grow";
     ws.admission_window = 512;
+    ws.prefill_budget_tokens = 256;
     ws.bulk_pace_gbps = 28.333333333333332;
     ws.bulk_inflight = 4;
     ws.rendezvous_timeout_ms = 120000;

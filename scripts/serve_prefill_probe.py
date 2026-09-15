@@ -20,6 +20,7 @@ import sys
 import time
 import argparse
 from data_paths import data_dir, require_file
+from bench_stream import read_completion
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 parser = argparse.ArgumentParser(description=__doc__)
@@ -85,26 +86,14 @@ def ask(prompt):
     conn.request("POST", "/v1/chat/completions", body=body,
                  headers={"Content-Type": "application/json"})
     resp = conn.getresponse()
-    ttft, usage, buf = None, None, b""
-    while True:
-        chunk = resp.read(4096)
-        if not chunk:
-            break
-        buf += chunk
-        while b"\n\n" in buf:
-            event, buf = buf.split(b"\n\n", 1)
-            for line in event.split(b"\n"):
-                if not line.startswith(b"data: ") or line == b"data: [DONE]":
-                    continue
-                obj = json.loads(line[6:])
-                if obj.get("choices") and ttft is None:
-                    ttft = (time.perf_counter() - t0) * 1e3
-                if obj.get("usage"):
-                    usage = obj["usage"]
-    conn.close()
-    if resp.status != 200:
-        raise SystemExit(f"HTTP {resp.status}")
-    return ttft, usage["prompt_tokens"] if usage else 0
+    try:
+        result = read_completion(resp)
+    finally:
+        conn.close()
+    # A one-token completion can contain only an invisible special token.
+    # Report missing client TTFT rather than counting a role/finish event.
+    ttft = (result["first"] - t0) * 1e3 if result["first"] is not None else float("nan")
+    return ttft, result["usage"]["prompt_tokens"]
 
 
 # Calibration: tokens per word on the served tokenizer (also the warmup).

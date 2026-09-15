@@ -236,7 +236,7 @@ struct ServeFamily {
   // The decode rows the family serves in one fixed batch at most (2026-09-10,
   // engine/decode_outputs.hpp): the session-core families take the derived
   // shape up to kDecodeRowsMax; GLM-5.3-Flash keeps its build-time 8, and
-  // Qwen3.8-Flash-Next stays at 8 until its kernels are gated past it.
+  // Qwen3.8-Flash-Next and full GLM currently support sixteen rows.
   virtual int decode_rows_cap() const = 0;
   // The MTP depth when neither the flag nor the file names one: one draft,
   // or the DSpark block's five (DeepSeek-V4.1).
@@ -352,9 +352,9 @@ struct QwenFamily final : ServeFamily {
     return "";
   }
   const char* kv_format_name() const override { return "bf16"; }
-  // The decode kernels are gated at 8 rows (the 2026-09-09 rounds); a wider
-  // batch waits for its own gates.
-  int decode_rows_cap() const override { return dgpp::kDecodeRows; }
+  // The small-row kernels keep their dispatch; wider batches use the
+  // general shared-expert tail and runtime-sized session scratch.
+  int decode_rows_cap() const override { return dgpp::QwenModel::decode_rows_cap(); }
   // The PLE layer's key partial is hc x hidden wide (plan D4) — the widest
   // fold the decode graph records.
   size_t lat_slot_bytes(int decode_rows) const override {
@@ -957,6 +957,7 @@ int main(int argc, char** argv) {
       "    tokens, grows at tick top, and sheds the youngest request\n"
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
+      "  [--prefill-budget-tokens N (default 0)]: Qwen graph prefill tokens/tick, 0 disables\n"
       "  bus (the prefill's bulk all-reduce): [--bulk-pace-gbps X]: sender\n"
       "    pacing per (peer, lane) queue pair (default: derived from the\n"
       "    port rate, port / ((world-1) x lanes) x 0.85; 0 = unpaced)\n"
@@ -988,6 +989,7 @@ int main(int argc, char** argv) {
   int sampling_candidates = dgpp::kSamplingCandidates;
   std::string admission_mode = "full";
   int admission_window = 256;
+  int prefill_budget_tokens = 0;
   // The bulk collective's sender pacing (prefill all-reduces): negative
   // derives the per-QP rate from the port at bus start.
   double bulk_pace_gbps = -1.0;
@@ -1070,6 +1072,7 @@ int main(int argc, char** argv) {
     prefix_cache_gib = e.prefix_cache_gib;
     admission_mode = e.admission;
     admission_window = e.admission_window;
+    prefill_budget_tokens = e.prefill_budget_tokens;
     bulk_pace_gbps = e.bulk_pace_gbps;
     bulk_inflight = e.bulk_inflight;
     rendezvous_timeout_ms = e.rendezvous_timeout_ms;
@@ -1125,6 +1128,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
     else if (a == "--admission") admission_mode = next();
     else if (a == "--admission-window") admission_window = std::stoi(next());
+    else if (a == "--prefill-budget-tokens") prefill_budget_tokens = std::stoi(next());
     else if (a == "--bulk-pace-gbps") bulk_pace_gbps = std::stod(next());
     else if (a == "--bulk-inflight") bulk_inflight = std::stoi(next());
     else if (a == "--world") world = std::stoi(next());
@@ -1193,14 +1197,14 @@ int main(int argc, char** argv) {
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} ngt={} dw={} pf={} emsh={} maxtok={} queue={} "
         "eos={} graph={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} msad={} batchmin={} cand={} "
-        "pcgib={} adm={} win={} pace={} inflight={} reasoning_in_content={}",
+        "pcgib={} adm={} win={} pfbudget={} pace={} inflight={} reasoning_in_content={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port,
         max_concurrency, kv_capacity, kv_dtype, ngram_table, dense_weights, prefill, embed_sharding, default_max_tokens,
         queue_limit,
         no_eos ? 0 : 1, decode_graph ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth, mtp_schedule_adapt ? 1 : 0,
         graph_batch_min_live,
-        sampling_candidates, prefix_cache_gib, admission_mode, admission_window,
+        sampling_candidates, prefix_cache_gib, admission_mode, admission_window, prefill_budget_tokens,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0);
   };
   if ((world > 1 || rank > 0) && !memory_plan_only) {
@@ -1248,6 +1252,7 @@ int main(int argc, char** argv) {
         ws.prefix_cache_gib = prefix_cache_gib;
         ws.admission = admission_mode;
         ws.admission_window = admission_window;
+        ws.prefill_budget_tokens = prefill_budget_tokens;
         ws.bulk_pace_gbps = bulk_pace_gbps;
         ws.bulk_inflight = bulk_inflight;
         ws.rendezvous_timeout_ms = rendezvous_timeout_ms;
@@ -1294,6 +1299,7 @@ int main(int argc, char** argv) {
         prefix_cache_gib = ws.prefix_cache_gib;
         admission_mode = ws.admission;
         admission_window = ws.admission_window;
+        prefill_budget_tokens = ws.prefill_budget_tokens;
         bulk_pace_gbps = ws.bulk_pace_gbps;
         bulk_inflight = ws.bulk_inflight;
         rendezvous_timeout_ms = ws.rendezvous_timeout_ms;
@@ -1432,6 +1438,10 @@ int main(int argc, char** argv) {
         graph_batch_min_live, max_concurrency);
     return 1;
   }
+  if (prefill_budget_tokens < 0 || prefill_budget_tokens > (1 << 30)) {
+    DGPP_LOG_ERROR("--prefill-budget-tokens must be in [0, 1073741824]");
+    return 1;
+  }
 
   // The effective configuration: what this rank runs after the
   // config, the flags and (on a peer) rank 0's settings — canonicalized and
@@ -1463,13 +1473,17 @@ int main(int argc, char** argv) {
       DGPP_LOG_WARN("engine.embed_sharding = vocab applies to the full GLM-5.3 and DeepSeek-V4.1; {} keeps its "
                     "embedding replicated", family->name());
     DGPP_LOG_INFO("serve: model family {} ({})", family->name(), ckpt);
+    if (prefill_budget_tokens > 0 && (!decode_graph || std::string(family->name()) != "qwen4_exp")) {
+      DGPP_LOG_ERROR("--prefill-budget-tokens is supported on the Qwen graph engine only");
+      return 1;
+    }
     // The decode rows (2026-09-10, engine/decode_outputs.hpp): the fixed
     // batch holds every slot's verify rows — max_concurrency x (1 + the
     // MTP depth) — floored at kDecodeRows so every existing recipe keeps
     // its exact shape (4 slots x 2 rows = 8). The family's cap bounds it:
     // GLM-4.7 supports the derived shape up to 32 rows, the full GLM-5.3
-    // up to 16 (2026-09-13); Qwen is capped at 8 and uses scalar graphs
-    // beyond MTP depth 1.
+    // and Qwen up to 16. Fitting batch families remain available when
+    // a deeper configuration exceeds the full-batch ceiling.
     // Reject configurations whose depth-1 batch already exceeds the cap.
     const int graph_rows_per_request = mtp ? 1 + mtp_depth : 1;
     int decode_rows = std::max(dgpp::kDecodeRows, max_concurrency * graph_rows_per_request);
@@ -1477,7 +1491,7 @@ int main(int argc, char** argv) {
       if (mtp_depth > 1 && max_concurrency * 2 <= family->decode_rows_cap()) {
         DGPP_LOG_INFO(
             "serve: {} slots x {} rows exceed the {} family's {}-row decode ceiling; "
-            "the depth-{} steps replay scalar graphs (no batched chain on this family)",
+            "depth {} uses fitting batch families where supported, otherwise scalar graphs",
             max_concurrency, graph_rows_per_request, family->name(), family->decode_rows_cap(),
             mtp_depth);
         decode_rows = family->decode_rows_cap();
@@ -1643,6 +1657,7 @@ int main(int argc, char** argv) {
                                ? dgpp::sched::AdmissionPolicy::Mode::kGrowOnDemand
                                : dgpp::sched::AdmissionPolicy::Mode::kFullReserve;
     knobs.admission.window_tokens = admission_window;
+    knobs.admission.prefill_budget_tokens = prefill_budget_tokens;
     knobs.default_max_tokens = default_max_tokens;
     knobs.sampling_defaults = sampling_defaults;
     knobs.fixed_seed = fixed_seed;
