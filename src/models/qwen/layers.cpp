@@ -528,7 +528,10 @@ void QwenQsaLayer::enqueue(const uint16_t* x, int tokens, const QwenQsaRows& row
                   keys_ws_, max_pools_, stream);
   qsa_select_from_keys(keys_ws_, max_pools_, d_pos, T, select_k_, kpool_, max_selected_, topk_,
                        counts_, stream);
-  qsa_attn_partial(qn_, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, topk_,
+  // Small grids do not amortize the wider head group. Keep decode/verify and
+  // short prefills on their existing kernel; both paths use identical arithmetic.
+  const auto attend = !rows.decode && T >= 128 ? qsa_attn_prefill_partial : qsa_attn_partial;
+  attend(qn_, static_cast<int64_t>(lh_) * D, cache.k_cache, cache.v_cache, d_req, topk_,
                    max_selected_, counts_, T, n_split_, lh_, lkv_, D, cache.block_tokens,
                    cache.block_tables, cache.blocks_per_request, scale_, m_ws_, l_ws_, c_ws_, stream);
   dsa_attn_combine(m_ws_, l_ws_, c_ws_, T, n_split_, lh_, D, c_out_, stream);

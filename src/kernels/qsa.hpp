@@ -115,8 +115,18 @@ void qsa_select_from_keys(const uint64_t* keys_ws, int64_t ws_stride, const int6
 // / kv_heads). Probabilities round to bf16 for the V accumulation, l stays
 // unrounded (the DSA pin). m_ws / l_ws fp32 [rows, n_split, local_heads],
 // c_ws fp32 [rows, n_split, local_heads, dim]; merge with dsa_attn_combine
-// (kv_lora = dim). dim in {256, 512, 1024, 2048}.
+// (kv_lora = dim). dim in {256, 512}.
 void qsa_attn_partial(const uint16_t* q, int64_t q_row_stride, const uint16_t* k_cache,
+                      const uint16_t* v_cache, const int32_t* req_ids, const int32_t* topk,
+                      int topk_stride, const int32_t* counts, int rows, int n_split,
+                      int local_heads, int kv_heads, int dim, int block_tokens,
+                      const int32_t* block_tables, int blocks_per_request, float scale,
+                      float* m_ws, float* l_ws, float* c_ws, cudaStream_t stream);
+
+// Prefill variant with wider KV sharing and cooperative warp softmax at dim=256;
+// other dimensions use qsa_attn_partial. Identical split/tile arithmetic and
+// workspace layout. The caller retains the decode kernel for small prefill grids.
+void qsa_attn_prefill_partial(const uint16_t* q, int64_t q_row_stride, const uint16_t* k_cache,
                       const uint16_t* v_cache, const int32_t* req_ids, const int32_t* topk,
                       int topk_stride, const int32_t* counts, int rows, int n_split,
                       int local_heads, int kv_heads, int dim, int block_tokens,

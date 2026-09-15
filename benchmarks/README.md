@@ -92,6 +92,31 @@ Outputs must pass an L2 comparison; independent FP64 oracles live in
 automatic serving dispatch retains GEMV below 128 tokens. Kernel times
 exclude routing, gathering and service overhead.
 
+## Qwen QSA prefill and C1 timing
+
+`qsa_prefill_bench` compares the original listed-attention kernel with the
+prefill kernel using wider KV sharing and cooperative probability evaluation.
+It alternates six A/B trials and requires bitwise equality of every FP32
+partial. Run it on idle hardware:
+
+```bash
+"$BUILD/qsa_prefill_bench" --rows 256 --context 8192
+"$BUILD/qsa_prefill_bench" --rows 2048 --context 32768
+"$BUILD/qsa_prefill_bench" --rows 256 --context 8192 --heads 6 --graph
+```
+
+The default geometry is TP2: twelve query heads and one KV head. The
+benchmark invokes both kernels explicitly; serving retains the old kernel
+for decode, verification and prefills below 128 rows. See the
+[service results and C1 limits](results/2026-09-15-qwen-qsa-prefill.md).
+
+Against an otherwise idle server, `scripts/serve_c1_probe.py HOST PORT
+--repeat 5 --json-out c1-engine.json` brackets each request with scheduler
+counters. Its engine rate excludes the first token produced by prefill and
+includes CPU/GPU/communication time inside step calls. It is separate from
+client-visible output timing. Restart deployments and reverse A/B order
+when investigating small differences.
+
 ## Qwen expert prefill experiments
 
 `moe_prefill_bench` compares the production FP8 expert kernel with three

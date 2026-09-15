@@ -500,9 +500,16 @@ been implemented; its [dated report](../benchmarks/results/2026-09-15-glm-packed
 records cold-service, C1 and quality evidence. It reuses packed tiles across
 prompt rows without rounding the dequantized weights to BF16.
 
+The subsequent [QSA prefill change](../benchmarks/results/2026-09-15-qwen-qsa-prefill.md)
+shares each KV tile across twelve query heads and computes probabilities
+cooperatively within a warp. It retains the original partial arithmetic and
+the decode/verification kernels. Cold TP2 service prefill takes 8–14% less
+time on the measured 2K/8K/32K prompts. Grouped continuation is the remaining
+part of the first priority; evaluate it separately against this new baseline.
+
 | Priority | Optimization | Concrete next step and success criterion |
 |---|---|---|
-| 1 | Qwen QSA prefill and grouped continuation | Profile QSA tiling and reuse, then pack resumable spans where useful. Measure each independently on cold service prompts. Grouped continuation must improve expert weight reuse at the same decode-pause budget |
+| 1 | Qwen grouped continuation | Pack resumable spans from multiple requests where useful, preserving each cursor's positions, MTP state and snapshot cuts. Improve expert weight reuse at the same decode-pause budget; QSA tile reuse is now delivered |
 | 2 | GLM-Flash concurrency | Generalize fixed recurrent/DSA/MTP state and scratch to 16 rows, then validate 32 and a batched draft chain. Reproduce useful C6/C8 gains with default C1 preserved |
 | 3 | Less repeated expert traffic and collective overhead | Measure rows per expert and per-rank communication waits. Reuse weight tiles across rows assigned to the same expert; broaden the existing stream-ordered reducer where it helps, then tackle GPU-driven bulk collectives |
 | 4 | Speculation matched to workload | Calibrate costs by batch width, context and draft depth. Improve existing DSpark/native-MTP depth selection and add a safe plain-decode choice before paying draft cost. Optimize committed tokens per wall second rather than acceptance alone |
@@ -514,10 +521,11 @@ remain open. DeepSeek needs its shared bounded-prefill scratch made safe
 across yields. Wider families such as GLM-4.7 can first receive matched
 capacity/depth sweeps using their existing runtime row support.
 
-The budget sweep, Qwen small-chunk expert investigation and full-GLM packed
-prefill implementation are complete. Continue with QSA and GLM-Flash row
-expansion. Full GLM can next use profiles of the new path to identify the
-remaining attention/collective cost; a lower packed cutoff needs measured
+The budget sweep, Qwen small-chunk expert investigation, full-GLM packed
+prefill implementation and Qwen QSA tile reuse are complete. Continue with
+grouped continuation and GLM-Flash row expansion. Full GLM can next use
+profiles of the new path to identify the remaining attention/collective
+cost; a lower packed cutoff needs measured
 short-C1 gains as well as numerical validation.
 DFlash2 feature validation can begin before committing to its full port.
 Use repeated deployment A/B pairs for small C1 effects; consecutive prompt

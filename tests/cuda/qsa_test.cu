@@ -396,41 +396,107 @@ DGPP_TEST(qsa_listed_attention_and_gate_match_the_reference) {
                                  ref.data() + static_cast<size_t>(r) * g.local_heads * g.dim, g.local_heads, g.dim);
   }
   DevBuf dqg = up(qg), dqonly = up(qonly), dtopk = up(topk), dcounts = up(counts);
-  for (int n_split : {1, 3}) {
-    const size_t part = static_cast<size_t>(rows) * n_split * g.local_heads;
-    DevBuf m_ws(part * 4), l_ws(part * 4), c_ws(part * g.dim * 4), c_out(static_cast<size_t>(rows) * g.local_heads * g.dim * 4),
-        out(ref.size() * 2);
-    dgpp::qsa_attn_partial(ptr<uint16_t>(dqonly), static_cast<int64_t>(g.local_heads) * g.dim, ptr<uint16_t>(kc),
-                           ptr<uint16_t>(vc), ptr<int32_t>(sf.dreq), ptr<int32_t>(dtopk), g.max_selected(),
-                           ptr<int32_t>(dcounts), rows, n_split, g.local_heads, g.kv_heads, g.dim, g.block_tokens,
-                           ptr<int32_t>(sf.f.dtable), g.blocks_per_request, 1.0f / 16.0f, mptr<float>(m_ws),
-                           mptr<float>(l_ws), mptr<float>(c_ws), st);
-    dgpp::dsa_attn_combine(ptr<float>(m_ws), ptr<float>(l_ws), ptr<float>(c_ws), rows, n_split, g.local_heads, g.dim,
-                           mptr<float>(c_out), st);
-    dgpp::qsa_gate_out(ptr<float>(c_out), ptr<uint16_t>(dqg) + g.dim, q_row_stride, q_head_stride, mptr<uint16_t>(out),
-                       rows, g.local_heads, g.dim, st);
-    DGPP_CUDA_OK(cudaStreamSynchronize(st));
-    const std::vector<uint16_t> got = down<uint16_t>(out, ref.size());
-    // One split is the reference's chain in the reference's order: two
-    // ulps. Several splits round each probability to bf16 against its
-    // split's own max and rescale in the combine — a reassociation of
-    // the bf16 roundings (the DSA split kernel's tolerance class): eight
-    // ulps with a 2 % of RMS absolute floor for the cancelled elements.
-    // The padding row (pos -1, count 0) is zeros on both sides.
-    std::vector<float> gf(got.size()), wf(ref.size());
-    double rms = 0;
-    for (size_t i = 0; i < got.size(); ++i) {
-      gf[i] = dgpp::bf16_bits_to_float(got[i]);
-      wf[i] = dgpp::bf16_bits_to_float(ref[i]);
-      rms += static_cast<double>(wf[i]) * wf[i];
+  for (auto attend : {dgpp::qsa_attn_partial, dgpp::qsa_attn_prefill_partial}) {
+    for (int n_split : {1, 3}) {
+      const size_t part = static_cast<size_t>(rows) * n_split * g.local_heads;
+      DevBuf m_ws(part * 4), l_ws(part * 4), c_ws(part * g.dim * 4), c_out(static_cast<size_t>(rows) * g.local_heads * g.dim * 4),
+          out(ref.size() * 2);
+      attend(ptr<uint16_t>(dqonly), static_cast<int64_t>(g.local_heads) * g.dim, ptr<uint16_t>(kc),
+                             ptr<uint16_t>(vc), ptr<int32_t>(sf.dreq), ptr<int32_t>(dtopk), g.max_selected(),
+                             ptr<int32_t>(dcounts), rows, n_split, g.local_heads, g.kv_heads, g.dim, g.block_tokens,
+                             ptr<int32_t>(sf.f.dtable), g.blocks_per_request, 1.0f / 16.0f, mptr<float>(m_ws),
+                             mptr<float>(l_ws), mptr<float>(c_ws), st);
+      dgpp::dsa_attn_combine(ptr<float>(m_ws), ptr<float>(l_ws), ptr<float>(c_ws), rows, n_split, g.local_heads, g.dim,
+                             mptr<float>(c_out), st);
+      dgpp::qsa_gate_out(ptr<float>(c_out), ptr<uint16_t>(dqg) + g.dim, q_row_stride, q_head_stride, mptr<uint16_t>(out),
+                         rows, g.local_heads, g.dim, st);
+      DGPP_CUDA_OK(cudaStreamSynchronize(st));
+      const std::vector<uint16_t> got = down<uint16_t>(out, ref.size());
+      // One split is the reference's chain in the reference's order: two
+      // ulps. Several splits round each probability to bf16 against its
+      // split's own max and rescale in the combine — a reassociation of
+      // the bf16 roundings (the DSA split kernel's tolerance class): eight
+      // ulps with a 2 % of RMS absolute floor for the cancelled elements.
+      // The padding row (pos -1, count 0) is zeros on both sides.
+      std::vector<float> gf(got.size()), wf(ref.size());
+      double rms = 0;
+      for (size_t i = 0; i < got.size(); ++i) {
+        gf[i] = dgpp::bf16_bits_to_float(got[i]);
+        wf[i] = dgpp::bf16_bits_to_float(ref[i]);
+        rms += static_cast<double>(wf[i]) * wf[i];
+      }
+      rms = std::sqrt(rms / static_cast<double>(ref.size()));
+      const int ulps = n_split == 1 ? 2 : 8;
+      const Stats s = compare_abs_rel(gf.data(), wf.data(), static_cast<long>(got.size()),
+                                      ulps * std::pow(2.0, -7.0), n_split == 1 ? 1e-7 : 0.02 * rms);
+      std::printf("[ .. ] attention n_split=%d: max_abs %.3g l2_rel %.3g mismatches %ld/%ld (rms %.3g)\n", n_split,
+                  s.max_abs, s.l2_rel, s.mismatches, s.n, rms);
+      require_bf16("attention n_split=" + std::to_string(n_split), s, n_split == 1 ? 2e-3 : 4e-3, 0.01);
     }
-    rms = std::sqrt(rms / static_cast<double>(ref.size()));
-    const int ulps = n_split == 1 ? 2 : 8;
-    const Stats s = compare_abs_rel(gf.data(), wf.data(), static_cast<long>(got.size()),
-                                    ulps * std::pow(2.0, -7.0), n_split == 1 ? 1e-7 : 0.02 * rms);
-    std::printf("[ .. ] attention n_split=%d: max_abs %.3g l2_rel %.3g mismatches %ld/%ld (rms %.3g)\n", n_split,
-                s.max_abs, s.l2_rel, s.mismatches, s.n, rms);
-    require_bf16("attention n_split=" + std::to_string(n_split), s, n_split == 1 ? 2e-3 : 4e-3, 0.01);
+  }
+}
+
+DGPP_TEST(qsa_prefill_partials_preserve_arithmetic_and_graph_replay) {
+  constexpr int dim = 256, block_tokens = 256, blocks = 32, requests = 2, stride = 2051;
+  const std::vector<int32_t> counts{0, 1, 7, 31, 32, 33, 63, 64, 65, 255, 256, 257, 2047, 2048, 2051};
+  const int rows = static_cast<int>(counts.size());
+  std::vector<int32_t> req(rows), topk(rows * stride, -1), table(blocks * requests);
+  for (int i = 0; i < blocks * requests; ++i) table[i] = (i * 17 + 3) % (blocks * requests);
+  for (int r = 0; r < rows; ++r) {
+    req[r] = r % requests;
+    for (int i = 0; i < counts[r]; ++i) topk[r * stride + i] = i * 3 + r;
+  }
+  DevBuf dreq = up(req), dtopk = up(topk), dcounts = up(counts), dtable = up(table);
+  cudaStream_t stream = test_stream();
+  for (auto shape : {std::pair{24, 2}, std::pair{12, 1}, std::pair{6, 1},
+                     std::pair{6, 2}, std::pair{2, 2}, std::pair{1, 1}}) {
+    const int heads = shape.first, kv_heads = shape.second, qstride = heads * dim + 8;
+    auto q = random_bf16_normal(700 + heads, static_cast<int64_t>(rows) * qstride, 1.0f);
+    auto k = random_bf16_normal(710 + kv_heads, static_cast<int64_t>(blocks * requests * block_tokens) * kv_heads * dim, 1.0f);
+    auto v = random_bf16_normal(720 + kv_heads, static_cast<int64_t>(k.size()), 1.0f);
+    // Include a high-dynamic-range query to exercise repeated maximum rescaling.
+    for (int d = 0; d < heads * dim; ++d)
+      q[static_cast<size_t>(rows - 1) * qstride + d] = float_to_bf16_bits(bf16_bits_to_float(q[static_cast<size_t>(rows - 1) * qstride + d]) * 32);
+    DevBuf dq = up(q), dk = up(k), dv = up(v);
+    for (int splits : {1, 3, 8}) {
+      const size_t part = static_cast<size_t>(rows) * splits * heads;
+      DevBuf m0(part * 4), l0(part * 4), c0(part * dim * 4);
+      DevBuf m1(part * 4), l1(part * 4), c1(part * dim * 4);
+      auto launch = [&](bool candidate) {
+        auto fn = candidate ? dgpp::qsa_attn_prefill_partial : dgpp::qsa_attn_partial;
+        fn(ptr<uint16_t>(dq), qstride, ptr<uint16_t>(dk), ptr<uint16_t>(dv), ptr<int32_t>(dreq),
+           ptr<int32_t>(dtopk), stride, ptr<int32_t>(dcounts), rows, splits, heads, kv_heads, dim,
+           block_tokens, ptr<int32_t>(dtable), blocks, 1.0f / 16,
+           mptr<float>(candidate ? m1 : m0), mptr<float>(candidate ? l1 : l0),
+           mptr<float>(candidate ? c1 : c0), stream);
+      };
+      launch(false);
+      launch(true);
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      auto check = [&] {
+        for (auto pair : {std::pair{&m0, &m1}, std::pair{&l0, &l1}, std::pair{&c0, &c1}}) {
+          auto ref = down<uint32_t>(*pair.first, pair.first->bytes / 4);
+          auto got = down<uint32_t>(*pair.second, pair.second->bytes / 4);
+          require(got == ref, "prefill partial bits differ, heads=" + std::to_string(heads) +
+                  " kv=" + std::to_string(kv_heads) + " splits=" + std::to_string(splits));
+        }
+      };
+      check();
+      cudaGraph_t graph = nullptr;
+      cudaGraphExec_t exec = nullptr;
+      DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+      launch(true);
+      DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+      DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+      DGPP_CUDA_OK(cudaMemsetAsync(m1.p, 0xff, m1.bytes, stream));
+      DGPP_CUDA_OK(cudaMemsetAsync(l1.p, 0xff, l1.bytes, stream));
+      DGPP_CUDA_OK(cudaMemsetAsync(c1.p, 0xff, c1.bytes, stream));
+      DGPP_CUDA_OK(cudaGraphLaunch(exec, stream));
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      check();
+      cudaGraphExecDestroy(exec);
+      cudaGraphDestroy(graph);
+    }
   }
 }
 

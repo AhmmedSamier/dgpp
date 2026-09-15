@@ -91,7 +91,10 @@ production improvement. Those variants remain in a standalone benchmark;
 serving kernels are unchanged. The
 [full-GLM packed prefill implementation](benchmarks/results/2026-09-15-glm-packed-prefill.md)
 adds int4/int8 tensor-core tiles, FP64 arithmetic checks and prefill likelihood
-scoring. Qwen QSA and GLM-Flash row expansion are the next compute targets in the
+scoring. [Qwen QSA tile reuse](benchmarks/results/2026-09-15-qwen-qsa-prefill.md)
+then reduces measured cold TP2 prefill time by 8–14%, preserving the existing
+partial arithmetic and decode kernels. Grouped Qwen continuation and
+GLM-Flash row expansion are the next targets in the
 [performance plan](docs/performance_improvement_plan.md#10-next-priorities-after-the-first-delivery).
 
 Other work includes request-level observability, additional API fields,
