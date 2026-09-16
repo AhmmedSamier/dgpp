@@ -2,7 +2,7 @@
 
 This page is the current benchmark snapshot for the production paths in the
 tree. It reports the newest applicable serving measurements, through
-2026-09-15, for each model, world size, concurrency and prompt class.
+2026-09-16, for each model, world size, concurrency and prompt class.
 Superseded baselines and optimization chronology live in `benchmarks/results/`;
 they are not mixed into the headline tables here. Modeled bandwidth floors and
 unmeasured cases are identified separately. Section 8 lists missing
@@ -140,11 +140,10 @@ end down from 52–56 ms.
 | mode | ms/pass | tok/pass | ms/token | date |
 |---|---|---|---|---|
 | T=1 | 26.22 | 1.0 | 26.22 | 2026-09-08 |
-| MTP, greedy | 32–34 | 1.68–1.98 | 16.2–20.2 | 2026-09-14 |
+| MTP, greedy | 33.7–34.4 | 1.72–1.98 | 17.3–19.8 | 2026-09-16 |
 
 The routed experts are NVFP4 and everything else is the FP8 release's own
-bytes. Against the FP8 checkpoint on the same fabric this is 26.2 versus 31.4 ms
-at T=1 and 19.77 versus 22.45 ms/token under greedy MTP, at equal quality (§7).
+bytes. The current MTP range comes from the five-class service sweep in §4.
 
 ### GLM-5.3-Flash NVFP4/FP8 hybrid, world 2
 
@@ -290,18 +289,23 @@ Current service-path pace at concurrency 1:
 
 The graph pass spans 34–41 ms and commits 1.68–1.97 tokens per pass by class.
 
-### GLM-5.3-Flash NVFP4/FP8 hybrid, world 4, MTP greedy (2026-09-10)
+### GLM-5.3-Flash NVFP4/FP8 hybrid, world 4, MTP greedy (2026-09-16)
 
-| class | drafts accepted | tok/pass | ms/pass | ms/token |
-|---|---|---|---|---|
-| chat | 67.6 % | 1.676 | 33.99 | 20.28 |
-| code | 98.0 % | 1.974 | 34.31 | 17.38 |
-| prose | 87.0 % | 1.863 | 33.66 | 18.07 |
-| json | 96.7 % | 1.961 | 33.82 | 17.25 |
-| math | 88.1 % | 1.875 | 34.20 | 18.24 |
+HTTP service, 256 output tokens, MTP depth one, default thinking mode.
+Medians of three repetitions. Engine timing excludes admission/prefill and
+the first token emitted by prefill. Tokens/pass counts committed decode work.
 
-All four ranks' transcripts are identical on every class. The current graph
-step is 33.7–34.3 ms.
+| class | engine ms/pass | committed tok/pass | engine ms/token | engine tok/s |
+|---|---:|---:|---:|---:|
+| prose | 33.67 | 1.861 | 18.09 | 55.28 |
+| code | 34.41 | 1.977 | 17.41 | 57.44 |
+| json | 33.91 | 1.962 | 17.29 | 57.84 |
+| math | 34.30 | 1.917 | 17.89 | 55.90 |
+| chat | 34.06 | 1.723 | 19.77 | 50.59 |
+
+All five C1 transcripts match the baseline. The prefill optimization leaves
+decode unchanged within measurement noise. See the
+[matched campaign](../benchmarks/results/2026-09-16-glm-flash-perf/README.md).
 
 ### GLM-5.3-Flash NVFP4/FP8 hybrid, world 2, MTP greedy (2026-09-12)
 
@@ -427,19 +431,22 @@ the engine ran one scalar replay per live request in sequence:
 | 3 | 6-row | 90 | ~124 |
 | 4 | 8-row | 107 | not recorded |
 
-### GLM-5.3-Flash NVFP4/FP8 hybrid, world 4 (2026-09-14)
+### GLM-5.3-Flash NVFP4/FP8 hybrid, world 4 (2026-09-16)
 
-| class | c=1 | c=2 | c=4 | c=1 greedy, ms/token |
-|---|---|---|---|---|
-| prose | 53.9 | 71.8 | 99.0 | 18.55 |
-| code | 57.9 | 76.3 | 101.7 | 17.27 |
-| json | 58.5 | 73.1 | 104.2 | 17.09 |
-| math | 55.6 | 79.7 | 103.8 | 17.99 |
-| chat | 50.3 | 72.9 | 94.5 | 19.88 |
+Same workload as §4, with four distinct prompts per loaded phase. Medians of
+three repetitions, 256 output tokens per request. Request-wall rates include
+admission and prefill; engine rates exclude them. C2 was not rerun.
 
-The row-aware dense lowering leaves C1/C2 at parity within run noise and
-raises C4 by 13–15%. The current eight-row step is 69.8 ms. The matching
-quality gates and four-rank operation streams pass.
+| class | C1 engine tok/s | C1 request-wall tok/s | C4 engine tok/s | C4 request-wall tok/s |
+|---|---:|---:|---:|---:|
+| prose | 55.28 | 54.42 | 100.62 | 97.65 |
+| code | 57.44 | 56.56 | 103.23 | 100.63 |
+| json | 57.84 | 56.44 | 105.13 | 102.19 |
+| math | 55.90 | 54.98 | 107.03 | 103.98 |
+| chat | 50.59 | 49.90 | 100.66 | 96.38 |
+
+The current implementation uses context-aware DSA prefill query tiles inside
+the existing workspace. Decode kernels and numerical formats are unchanged.
 
 ### GLM-5.3-Flash NVFP4/FP8 hybrid, world 2 (2026-09-12)
 
@@ -614,14 +621,22 @@ records contain each actual tokenizer count.
 
 | model and current configuration | ~2K | ~8K | ~32K | date |
 |---|---:|---:|---:|---|
-| GLM-5.3-Flash-FP8, world 4 | 2.211 s | 9.165 s | 58.555 s | 2026-09-10 |
-| GLM-5.3 NVFP4 hybrid, world 4 | 2.210 s | 11.374 s | 93.765 s | 2026-09-10 |
-| GLM-5.3 NVFP4 hybrid, world 2 | 2.724 s | 11.881 s | — | 2026-09-12 |
+| GLM-5.3-Flash-FP8, world 4 | — | — | — | rerun pending |
+| GLM-5.3-Flash NVFP4 hybrid, world 4 | **1.465 s** | **6.005 s** | **27.753 s** | 2026-09-16 |
+| GLM-5.3 NVFP4 hybrid, world 2 | — | — | — | rerun pending |
 | GLM-4.7-NVFP4, world 4 | 2.809 s | 16.865 s | — | 2026-09-10 |
 | Qwen3.8-Flash-Next-FP8, world 2 | **1.299 s** | **5.108 s** | **21.168 s** | 2026-09-15 |
 | Qwen3.8-Flash-Next-NVFP4, world 2, mmap n-gram | **1.241 s** | **4.870 s** | **20.286 s** | 2026-09-16 |
-| full GLM-5.3 int4/int8, world 4 | **6.111 s** | **40.838 s** | **350.069 s** | 2026-09-15 |
+| full GLM-5.3 int4/int8, world 4 | — | — | — | rerun pending |
 | DeepSeek-V4.1-Flash MXFP4/FP8, world 4 | **1.599 s** | **5.726 s** | — | 2026-09-16 |
+
+Flash hybrid prefill uses context-aware DSA query tiles inside the existing
+scratch allocation. Its actual prompt lengths are 1,944–1,989, 7,723–7,811
+and 31,291–31,306 tokens. Median rates are 1,333, 1,301 and 1,128 prompt tok/s.
+Matched cold-prefill times fell by 21.7%, 41.5% and 66.4%, respectively, with
+no weight or KV precision change. Decode rates remain essentially flat.
+The [campaign record](../benchmarks/results/2026-09-16-glm-flash-perf/README.md)
+contains the control runs, profiles and output checks.
 
 DeepSeek's 4,096-token chunk reduced matched ~8,400-token prefill time by 3.7%
 (5.945 to 5.726 seconds), reserving 1.71 GiB more scratch per rank. The
@@ -636,11 +651,13 @@ all paired outputs and usage remained identical. See the
 [QSA record](../benchmarks/results/2026-09-15-qwen-qsa-prefill.md) for the A/B
 measurements and profiles.
 
-Full GLM's packed tensor-core path also starts at 128 rows. Its current rates
-are 2.963, 4.959 and 10.613 ms per actual prompt token at 2K, 8K and 32K.
-Short C1 prompts retain GEMV, preserving transcripts, usage and speculative
-passes. The [packed-prefill record](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
-contains the superseded baseline and numerical checks.
+Full GLM's packed tensor-core path starts at 128 rows, and short C1 prompts
+retain GEMV. Its previous prefill measurements predate context-aware DSA
+query tiling, as do the Flash FP8 and two-node hybrid measurements. Those
+configurations await a fresh service sweep. The
+[packed-prefill record](../benchmarks/results/2026-09-15-glm-packed-prefill.md)
+and [Flash investigation](../benchmarks/results/2026-09-16-glm-flash-perf/README.md)
+retain the earlier measurements and numerical checks.
 
 DeepSeek-V4.1-Flash's current six-slot path measured **1,383 prompt tok/s**
 and 2.133 s TTFT for the benchmark's 2,950-token cold prompt. That result uses
@@ -707,8 +724,10 @@ The current snapshot still has these gaps:
    matrix with
    `scripts/serve_load.py HOST PORT --concurrency 1,2,4 --classes all`.
 2. **Long-context service prefill remains incomplete.** Qwen FP8 world 2,
-   Qwen NVFP4 world 2 and both four-node GLM-5.3 variants have current 32K
-   points. Qwen world 4, Qwen NVFP4 world 1 and GLM-4.7 still stop at 8K.
+   Qwen NVFP4 world 2 and the four-node Flash hybrid have current 32K points.
+   Flash FP8, the two-node Flash hybrid and full GLM need remeasurement after
+   context-aware DSA query tiling. Qwen world 4, Qwen NVFP4 world 1 and
+   GLM-4.7 still lack current 32K service measurements.
 3. **Current per-class concurrency above four is incomplete.** DeepSeek has a
    current C6 result on the recipe corpus, Qwen's opt-in eight-slot path has a
    matched C6/C8 campaign, and full GLM ships eight slots. A common current
@@ -726,8 +745,8 @@ The current snapshot still has these gaps:
    C1/MTP behavior; lowering it requires service and numerical evidence.
    This campaign does not add a soak, failure drill or sampled sweep.
 
-The current tables include two-Spark Qwen service prefill through 32K,
-2K/8K/32K full-GLM service prefill and DeepSeek at six live requests. The
+The current tables include two-Spark Qwen and four-Spark Flash hybrid service
+prefill through 32K, and DeepSeek at six live requests. The
 dated records provide the exact workloads and reproduction commands.
 
 ## 9. Reproducing all of it
@@ -855,6 +874,10 @@ recording. Every campaign above ran with these:
 - batching isolation: `serve_load.py --isolation C`.
 
 ### 9.7 Where the raw records live
+
+`benchmarks/results/2026-09-16-glm-flash-perf/` contains the current four-node
+Flash hybrid campaign: matched decode and cold prefill, long-prompt output
+checks, profiles and the investigation record.
 
 `build-ci/fabric-runs/glm53_serve_2026-09-12/` (MTP depth 1: transcripts,
 pace, API check, the class and concurrency sweeps, the prefill probe, the

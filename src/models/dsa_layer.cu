@@ -372,12 +372,18 @@ bool DsaLayer::prepare(int tokens) {
   return ok;
 }
 
+int DsaLayer::prefill_query_tile_rows(int64_t padded_pools) const {
+  const int64_t row_pool_capacity = int64_t(tile_cap_) * max_pools_;
+  return int(std::min<int64_t>(max_tokens_, row_pool_capacity /
+                                           std::max<int64_t>(padded_pools, 1)));
+}
+
 bool DsaLayer::prepare_prefill(int tile_rows, int64_t visible_pools) {
-  if (tile_rows <= 0 || tile_rows > tile_cap_)
-    throw std::invalid_argument("dsa layer: prefill tile rows out of range");
   if (visible_pools < 0 || visible_pools > max_pools_)
     throw std::invalid_argument("dsa layer: visible pools out of range");
   const int64_t padded = round_up_to(visible_pools, kPoolPadGranularity);
+  if (tile_rows <= 0 || tile_rows > prefill_query_tile_rows(padded))
+    throw std::invalid_argument("dsa layer: prefill tile rows out of range");
   return gemm_.ensure_plan(tile_rows * cfg_.index_n_heads, int(padded),
                            cfg_.index_head_dim, DType::F8_E4M3, GemmOut::F32,
                            size_t(cfg_.index_head_dim));
@@ -715,8 +721,11 @@ void DsaLayer::enqueue_prefill(const void* hidden_in, DsaStatePool& state,
         n_gather, gather_k_, gather_scale_, dim, stream);
   }
 
-  for (int row0 = 0; row0 < tokens; row0 += tile_cap_) {
-    const int rows = std::min(tile_cap_, tokens - row0);
+  // The allocation is sized for the maximum context. At shorter contexts,
+  // use the same bytes for more query rows instead of launching tiny tiles.
+  const int tile_rows = prefill_query_tile_rows(padded_n);
+  for (int row0 = 0; row0 < tokens; row0 += tile_rows) {
+    const int rows = std::min(tile_rows, tokens - row0);
     if (padded_n > 0) {
       // Dots for this tile's (row, head) pairs against the gathered pools.
       gemm_.matmul(q_fp8_ + size_t(row0) * heads * dim, gather_k_, dot_,

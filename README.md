@@ -99,15 +99,15 @@ per-class results, measurement scopes and reproduction commands.
 
 | configuration | single-request engine decode | loaded request-wall decode | cold service prefill at ~2K / 8K / 32K |
 |---|---:|---:|---:|
-| GLM-5.3-Flash-FP8, 4 Sparks | 42.2–48.7 tok/s | 62.2–67.5 tok/s at C4 | 2.211 / 9.165 / 58.555 s |
-| GLM-5.3-Flash NVFP4/FP8, 4 Sparks | 50.3–58.5 tok/s | 94.5–104.2 tok/s at C4 | 2.210 / 11.374 / 93.765 s |
-| GLM-5.3-Flash NVFP4/FP8, 2 Sparks | 22.7–33.0 tok/s | 38.9–47.3 tok/s at C4 | 2.724 / 11.881 / — |
+| GLM-5.3-Flash-FP8, 4 Sparks | 42.2–48.7 tok/s | 62.2–67.5 tok/s at C4 | Rerun pending |
+| GLM-5.3-Flash NVFP4/FP8, 4 Sparks | 50.6–57.8 tok/s | 96.4–104.0 tok/s at C4 | **1.465 / 6.005 / 27.753 s** |
+| GLM-5.3-Flash NVFP4/FP8, 2 Sparks | 22.7–33.0 tok/s | 38.9–47.3 tok/s at C4 | Rerun pending |
 | Qwen3.8-Flash-Next-FP8, 4 Sparks | 63.2–77.7 tok/s by class | 142.1–167.3 tok/s at C4 | — |
 | Qwen3.8-Flash-Next-FP8, 2 Sparks | 41.7–49.6 tok/s by class | 69.3–83.2 tok/s at C4 | 1.299 / 5.108 / 21.168 s |
 | Qwen3.8-Flash-Next-NVFP4, 2 Sparks, mapped n-gram | **62.1–74.9 tok/s by class** | **119.0–136.9 tok/s at C4** | **1.241 / 4.870 / 20.286 s** |
 | Qwen3.8-Flash-Next-NVFP4, 1 Spark | 42.6–50.3 tok/s by class | 69.4–83.7 tok/s at C4 | — |
 | GLM-4.7-NVFP4, 4 Sparks | 29.5–33.3 tok/s by class | 62.7–68.7 tok/s at C4 | 2.809 / 16.865 / — |
-| full GLM-5.3 int4/int8, 4 Sparks | 25.4–29.2 tok/s by class | 42.3–47.0 tok/s at C4 | 6.111 / 40.838 / 350.069 s |
+| full GLM-5.3 int4/int8, 4 Sparks | 25.4–29.2 tok/s by class | 42.3–47.0 tok/s at C4 | Rerun pending |
 | DeepSeek-V4.1-Flash MXFP4/FP8, 4 Sparks | 49.64 aggregate tok/s | 108.49 aggregate tok/s at C6 | 1,383 prompt tok/s on its 2,950-token cold prompt |
 
 Except for DeepSeek, decode ranges are the five prompt classes and prefill is
@@ -119,6 +119,9 @@ on the current path. DeepSeek uses the vLLM DGX Spark recipe's client and
 prompt set, with different aggregate and per-stream timing scopes, so compare
 its row within that workload. Dates, actual prompt lengths, quality gates and
 reproduction commands are in [the benchmark tables](docs/benchmarks.md).
+DSA prefill now sizes query tiles for the current context within its existing
+workspace. The four-Spark Flash hybrid has been remeasured; other DSA
+configurations need fresh prefill measurements.
 
 ## Status
 

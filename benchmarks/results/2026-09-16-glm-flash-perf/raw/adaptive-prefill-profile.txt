@@ -1,0 +1,27 @@
+last burst: 20987 kernels over 7186.4 ms wall, GPU busy 6928.7 ms (96.4 %); 4 bursts in the report
+kernel                                                                                         ms      n  us/inst  share
+bus_bulk_collective_kernel                                                                1063.05   3312    321.0  15.3%
+moe_grouped_mma_fp4_ldm_kernel<unsigned short, int)16>                                    1014.44    840   1207.7  14.6%
+moe_grouped_mma_fp4_ldm_kernel<float, int)16>                                              692.79    420   1649.5  10.0%
+attn_flash_kernel<int)512, int)512, bool)1, LatentFormat)0>                                670.60    602   1113.9   9.7%
+kda_recurrent_kernel<int)128, bool)1, bool)0, bool)0>                                      557.64    340   1640.1   8.0%
+moe_grouped_mma_kernel<unsigned short>                                                     275.40    285    966.3   4.0%
+moe_accum_ordered_kernel<unsigned short>                                                   267.46    430    622.0   3.9%
+mhc_stream_update_kernel                                                                   244.45    900    271.6   3.5%
+moe_grouped_gemv_kernel<unsigned short>                                                    201.12     40   5027.9   2.9%
+nvjet_sm121_tst_mma_192x144x64_2_48x72x64_tmaAB_bz_TNNN                                    197.63    174   1135.8   2.9%
+select_prefill_kernel<bool)0, int)2048>                                                    187.25    408    459.0   2.7%
+kda_conv_kernel<int)4, bool)0>                                                             153.29    340    450.9   2.2%
+mhc_dots_mma_kernel                                                                        151.75    540    281.0   2.2%
+moe_grouped_gemv_kernel<float>                                                             150.68     20   7533.8   2.2%
+moe_router_dots_tiled_kernel<int)0>                                                        129.52    258    502.0   1.9%
+mhc_finish_kernel<int)16>                                                                  118.82    540    220.0   1.7%
+moe_grouped_mma_fp8_ldm_kernel<unsigned short>                                             111.49    840    132.7   1.6%
+attn_flash_kernel<int)512, int)512, bool)0, LatentFormat)0>                                 77.83    288    270.2   1.1%
+sm89_xmma_gemm_e4m3f32_e4m3f32_f32_tn_n_tilesize128x128x64_stage3_warpsize2x2x1_tensor16    74.52    360    207.0   1.1%
+moe_grouped_mma_fp8_ldm_kernel<float>                                                       58.77    420    139.9   0.8%
+vout_mma_kernel                                                                             52.27    828     63.1   0.8%
+nvjet_sm121_tst_mma_192x160x64_2_48x80x64_tmaAB_bz_TNNN                                     51.65    136    379.8   0.7%
+moe_swiglu_clamp_kernel                                                                     42.90    460     93.3   0.6%
+bus_allreduce_kernel                                                                        42.18    378    111.6   0.6%
+absorb_q_mma_kernel                                                                         38.96    828     47.0   0.6%

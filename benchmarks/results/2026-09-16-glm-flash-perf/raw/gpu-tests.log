@@ -1,0 +1,22 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-ci
+Test project /home/stephen/workspace/dgpp/build-ci
+    Start  7: glm_tp_test
+1/6 Test  #7: glm_tp_test ......................   Passed   35.23 sec
+    Start 33: dsa_test
+2/6 Test #33: dsa_test .........................   Passed   15.04 sec
+    Start 71: glm_dsa_tp_test
+3/6 Test #71: glm_dsa_tp_test ..................   Passed    3.10 sec
+    Start 72: glm_dsa_engine_test
+4/6 Test #72: glm_dsa_engine_test ..............   Passed    5.97 sec
+    Start 93: glm_moe_test
+5/6 Test #93: glm_moe_test .....................   Passed   25.50 sec
+    Start 98: dsa_dump_test
+6/6 Test #98: dsa_dump_test ....................   Passed    0.81 sec
+
+100% tests passed, 0 tests failed out of 6
+
+Label Time Summary:
+gpu     =  85.65 sec*proc (6 tests)
+rdma    =  35.23 sec*proc (1 test)
+
+Total Test time (real) =  85.65 sec

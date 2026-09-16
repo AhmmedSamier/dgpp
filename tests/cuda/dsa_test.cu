@@ -2907,6 +2907,52 @@ DGPP_TEST(dsa_layer_prefill_fp8_projections_match_reference) {
   }
 }
 
+DGPP_TEST(dsa_layer_prefill_dot_budget_preserves_selection_and_output) {
+  cudaStream_t s = dgpp::kda_test::test_stream();
+  // Both indexer forms, a partial final tile, and a cache much larger than
+  // the prompt. A one-byte budget still allocates one maximum-context row.
+  // The larger budget allows most/all queries to run in a single tile.
+  const int T = 273, cache = 4096;
+  for (const DsaConfig& cfg : {small_cfg(), full_cfg()}) {
+    const DsaGeometry g = DsaGeometry::from_config(cfg);
+    TestWeights tw(cfg, 4200);
+    const auto hidden = random_bf16_bits(4201, int64_t(T) * cfg.hidden, -2, 1);
+    std::vector<uint16_t> expected;
+    std::vector<int32_t> expected_ids, expected_counts;
+    for (size_t budget : {size_t(1), size_t(8ull << 20)}) {
+      LayerEnv env(cfg, T, cache, 1, 320, s, budget);
+      DsaStatePool pool;
+      pool.init(env.arena, cfg, 1, 320);
+      const size_t sb = DsaLayer::scratch_bytes(cfg, T, cache, 8, 32, budget);
+      DsaLayer layer(env.gemm, tw.layer_views, cfg, T, cache,
+                     env.arena.alloc_persistent(MemClass::DeviceHot, sb, 256),
+                     sb, env.ws.p, env.ws.bytes, 8, 32, budget);
+      DevBuf din(hidden.size() * 2), dout(hidden.size() * 2);
+      din.upload(hidden.data(), hidden.size() * 2);
+      layer.enqueue_prefill(din.p, pool, 0, 0, 0, T, dout.p, s);
+      DGPP_CUDA_OK(cudaStreamSynchronize(s));
+      std::vector<uint16_t> output(hidden.size());
+      std::vector<int32_t> ids(size_t(T) * g.max_selected), counts(T);
+      dout.download(output.data(), output.size() * 2);
+      DGPP_CUDA_OK(cudaMemcpy(ids.data(), layer.debug_topk(), ids.size() * 4,
+                               cudaMemcpyDeviceToHost));
+      DGPP_CUDA_OK(cudaMemcpy(counts.data(), layer.debug_counts(), counts.size() * 4,
+                               cudaMemcpyDeviceToHost));
+      if (expected.empty()) {
+        expected = std::move(output);
+        expected_ids = std::move(ids);
+        expected_counts = std::move(counts);
+      } else {
+        require_bitwise("prefill tiling output", output.data(), expected.data(), output.size() * 2);
+        require_bitwise("prefill tiling counts", counts.data(), expected_counts.data(), counts.size() * 4);
+        for (int row = 0; row < T; ++row)
+          require_bitwise("prefill tiling selection", ids.data() + size_t(row) * g.max_selected,
+                           expected_ids.data() + size_t(row) * g.max_selected, size_t(counts[row]) * 4);
+      }
+    }
+  }
+}
+
 DGPP_TEST(dsa_layer_prefill_matches_reference) {
   cudaStream_t s = dgpp::kda_test::test_stream();
   const DsaConfig cfg = small_cfg();

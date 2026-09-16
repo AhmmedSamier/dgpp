@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "tag": "glm-flash-profile",
+  "seed": 917,
+  "thinking": "server_default",
+  "interval_s": 0,
+  "data_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+  "calibration": {
+    "prompt_sha256": "99ebe2fd90efb5d6172b1a835a48adbb904c50100ecc5f5dfe1416df7a28b0cb",
+    "usage": {
+      "prompt_tokens": 523,
+      "completion_tokens": 1,
+      "total_tokens": 524,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 1
+      }
+    },
+    "finish": "length",
+    "text": "The",
+    "wall_ms": 730.4247239953838,
+    "ttft_ms": 730.3309950220864
+  },
+  "samples": [
+    {
+      "prompt_sha256": "d6207fa85ba13deb0927d6bb891f91495c3600a9fe2726b085dd81460c31db54",
+      "usage": {
+        "prompt_tokens": 8301,
+        "completion_tokens": 1,
+        "total_tokens": 8302,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 1
+        }
+      },
+      "finish": "length",
+      "text": "The",
+      "wall_ms": 11259.051708999323,
+      "ttft_ms": 11258.961101004388,
+      "prompt_tokens": 8301,
+      "cached_tokens": 0,
+      "computed_tokens": 8301,
+      "prefill_ms": 11245.7,
+      "prefill_ms_per_token": 1.3547403927237682,
+      "requested_tokens": 8192,
+      "repeat": 0
+    }
+  ]
+}

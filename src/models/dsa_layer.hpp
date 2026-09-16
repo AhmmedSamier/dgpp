@@ -109,8 +109,8 @@ class DsaLayer {
   // gather buffer); `max_decode_rows` (<= 16, the decode batch's cap; the
   // select runs them in groups of eight) and `decode_n_split` shape the
   // decode attention split. `dot_budget`
-  // bounds the prefill dot buffer; prefill query tiles shrink to fit it,
-  // trading K-cache re-reads for a bounded footprint.
+  // bounds the prefill dot buffer; query tiles use the current visible
+  // context to fill that allocation, shrinking as the context grows.
   DsaLayer(IGemm& gemm, const DsaLayerWeights& w, const DsaConfig& cfg,
            int max_tokens, int64_t max_cache_tokens, void* scratch,
            size_t scratch_capacity, void* gemm_workspace,
@@ -257,12 +257,15 @@ class DsaLayer {
     size_t off_dot = 0, off_gather_k = 0, off_gather_scale = 0;
     size_t off_select_ws = 0, off_counter = 0, off_k_rot = 0;
     int64_t max_pools = 0;   // gather buffer capacity, in pools
-    int tile_cap = 0;        // max prefill query-tile rows
+    int tile_cap = 0;        // query rows that fit at max_pools
   };
   static ScratchLayout scratch_layout(const DsaConfig& cfg, int max_tokens,
                                       int64_t max_cache_tokens,
                                       int max_decode_rows, int decode_n_split,
                                       size_t dot_budget);
+  // Reuse the allocated dot capacity across more query rows at short
+  // contexts. The caller supplies a padded pool count within max_pools_.
+  int prefill_query_tile_rows(int64_t padded_pools) const;
 
   // The projection chain shared by both paths: fused qkv GEMM, split
   // RMSNorms, RoPE (rope > 0: the q and k rope slices, the indexer's q and
@@ -333,7 +336,7 @@ class DsaLayer {
   static constexpr int kDensePrefillRows = 128;
   static constexpr int kDensePrefillSplit = 4;
   bool dense_prefill_ = true;
-  int tile_cap_ = 0;          // prefill dot-tile rows (dot-budget bound)
+  int tile_cap_ = 0;          // prefill dot-tile rows at maximum context
   int64_t max_pools_ = 0;     // gather/dot capacity, in padded pools
   int64_t gather_zeroed_ = 0; // gather high-water mark already zeroed
   float logit_scale_ = 0.f;   // 128^-0.5 * heads^-0.5, reference-pinned
