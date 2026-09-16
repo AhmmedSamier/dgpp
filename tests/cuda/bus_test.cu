@@ -1623,20 +1623,22 @@ void scenario_allreduce_graph() {
 }
 
 void scenario_allreduce_graph_rows() {
-  // The graph fold at the GLM-5.3 decode shapes (hidden 6144 x 1/2/3/8
-  // rows on a 96 KB latency slot): 36 KB staged, 72 KB staged (the budget
-  // widened 2026-09-13), 108 KB and 288 KB folded from the NIC-placed
-  // rows with the unrolled system loads. Every destination bitwise the
-  // oracle across replays, as scenario_allreduce_graph pins at 4096.
+  // Staged and unstaged folds, both sides of the wider-block thresholds,
+  // a non-vector-aligned row, and DeepSeek's 30-row hidden/Engram shapes.
+  // Every destination must match the independent rank-order oracle
+  // bitwise across replays and mixed eager/graph generations.
   constexpr int world = 4;
   const int gens_per_step = 12;
   const int replays = 4;
-  const size_t lat_slot_bytes = 98304;
-  const size_t rows_elems[] = {6144, 12288, 18432, 49152};
-  const uint16_t ports[] = {29891, 29892, 29893, 29894};
+  const size_t rows_elems[] = {6144, 12288, 16380, 16384, 16388, 18432,
+                               49152, 65532, 65536, 65540, 153600, 768000};
+  const uint16_t ports[] = {29891, 29892, 29893, 29894, 29895, 29896,
+                            29897, 29898, 29899, 29900, 29901, 29902};
   int failures = 0;
-  for (size_t c = 0; c < 4; ++c) {
+  for (size_t c = 0; c < std::size(rows_elems); ++c) {
     const size_t elems = rows_elems[c];
+    // The allocation has 64-byte geometry even for a ragged payload.
+    const size_t lat_slot_bytes = std::max<size_t>(98304, (elems * 2 + 63) / 64 * 64);
     std::vector<std::unique_ptr<CollectiveBus>> world_buses =
         start_world(world, ports[c], /*one_lane=*/false, /*rank0_pass_delay_us=*/0,
                     lat_slot_bytes);
@@ -2028,6 +2030,11 @@ int main() {
   // no loopback fabric needed).
   if (const char* f = std::getenv("DGPP_TEST_FILTER"); f && std::string(f) == "world_of_one")
     return g_failures == 0 ? 0 : 1;
+  if (const char* f = std::getenv("DGPP_TEST_FILTER");
+      f && std::string(f) == "allreduce_graph_rows") {
+    scenario_allreduce_graph_rows();
+    return g_failures == 0 ? 0 : 1;
+  }
   scenario_latency_ping();
   scenario_credit_recycle();
   scenario_bulk_dual_lane();
