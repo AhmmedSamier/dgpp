@@ -64,16 +64,16 @@ ownership checks. `up` refuses a running deployment unless `--replace` is
 explicitly requested. Stop jobs from older launchers with their original
 launcher before upgrading: an unrecorded process is never adopted or killed.
 
-`down` and `status` without `--config` (or with `--all`) act on every
+`down` and `status` without `--config` (or with `--all`) check every
 deployment recorded under `DGPP_LOG_DIR/deployments`, whatever deployment
-file each was started from: `status` lists the running ones with their
-ranks and the end of rank 0's log, and the stopped ones as one line each
-with when and how rank 0's log ended; `down` stops the ones that are
-running and names each one by model, world, namespace and deployment
-file. Use this to stop whatever is
-holding the ports before starting another deployment. `up` always starts
-one deployment: without `--config` it uses `DGPP_CLUSTER_CONFIG` or the
-default deployment file.
+file each was started from. `status` lists running deployments and any whose
+state cannot be checked, with their ranks and the end of rank 0's log. When
+all are confirmed stopped, it prints `no deployments running`. `status --all`
+also lists stopped deployments as one line each with when and how rank 0's
+log ended. `down` stops the ones that are running and names each one by model,
+world, namespace and deployment file. Use this to stop whatever is holding
+the ports before starting another deployment. `up` always starts one deployment:
+without `--config` it uses `DGPP_CLUSTER_CONFIG` or the default deployment file.
 
 Pass the same `--config FILE` to `up` and to a `down` or `status` aimed
 at one deployment. `scripts/dgpp-cluster resolve --config FILE` prints the merged
@@ -137,6 +137,20 @@ next scheduler boundary. Streams receive a shutdown error, then the stop
 record releases peers. A signal during prefill waits for that pass to
 finish. The launcher waits up to 240 s for rank 0 before handling peers
 and collecting logs.
+
+`down` checks that every recorded rank has exited, including after SIGKILL.
+If a rank remains alive or cannot be checked (SSH failure, unreadable process
+record, or a missing helper beside an existing record), shutdown exits nonzero
+and names the rank as running or `UNKNOWN`. Reachable ranks are still cleaned
+up when another peer is unreachable. `down --all` continues across deployments
+and reports confirmed stops separately from failures; `status --all` also exits
+nonzero when a deployment cannot be checked. Neither command treats an unknown
+state as proof that the cluster is down.
+
+Starting and stopping the same deployment share a launcher lock. A concurrent
+launcher is refused with a retry message, and `up --replace` does not stage or
+start a replacement if shutdown cannot be confirmed. These checks remain scoped
+to recorded process identities; they never kill arbitrary processes by name.
 
 Logs and operation streams are collected under `DGPP_LOG_DIR/deployments/ID`, using
 names such as `serve_r0.log` and `serve_rank0.ops`. The launcher

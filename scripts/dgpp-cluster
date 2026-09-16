@@ -12,10 +12,11 @@ bind/port. .env supplies node addresses, SSH user, fabric ports, cache/NIC
 settings and base paths. Exported settings take precedence over .env.
 DGPP_ENV_FILE selects another site file. Select the deployment explicitly
 with --config FILE, using the same file for start, status and stop. down and
-status without --config (or with --all) act on every deployment recorded
-under DGPP_LOG_DIR/deployments: status lists them, down stops the running
-ones. up always starts one deployment: without --config it uses
-DGPP_CLUSTER_CONFIG or the default deployment file.
+status without --config (or with --all) check every deployment recorded
+under DGPP_LOG_DIR/deployments: status lists running or uncheckable ones,
+status --all also lists stopped ones, and down stops the running ones.
+up always starts one deployment: without --config it uses DGPP_CLUSTER_CONFIG
+or the default deployment file.
 
 Log and staging paths are namespaced by deployment-file path. Process identity
 records limit cleanup to this deployment; up --replace explicitly replaces a
@@ -28,6 +29,7 @@ a release tarball; releases lists installed versions. Check scripts/README.md
 and docs/operations.md for task-specific procedures.
 """
 import argparse
+from contextlib import contextmanager
 import fcntl
 import datetime
 import shlex
@@ -165,17 +167,17 @@ class Cluster:
             source = os.path.relpath(self.deployment_path, ROOT)
         return f"{self.cfg['model']} on {len(self.nodes)} node(s) [{os.path.basename(self.log_dir)}] ({source})"
 
-    def live_ranks(self):
+    def live_ranks(self, ranks=None):
         """The ranks whose recorded process is alive, as [(rank, host, pid)],
         and the peers that could not be asked, as [(rank, host, error)]."""
         alive, unreachable = [], []
-        pid = self.head_pid()
-        if pid is not None:
-            alive.append((0, self.nodes[0], pid))
-        for rank, host in self.peers:
+        for rank, host in enumerate(self.nodes):
+            if ranks is not None and rank not in ranks:
+                continue
             try:
-                record = self.remote_control("status", rank, host)
-            except RuntimeError as error:
+                record = (cluster_process.running(self.state_path) if rank == 0
+                          else self.remote_control("status", rank, host))
+            except (ValueError, OSError, RuntimeError) as error:
                 unreachable.append((rank, host, str(error)))
                 continue
             if record:
@@ -185,9 +187,6 @@ class Cluster:
     def head_pid(self):
         record = cluster_process.running(self.state_path)
         return record["pid"] if record else None
-
-    def alive(self, pid):
-        return pid is not None and self.head_pid() == pid
 
     def wait_log(self, path, needle, timeout_s, label):
         waited = 0
@@ -213,12 +212,22 @@ class Cluster:
         except OSError:
             pass
 
-    def sweep_peers(self):
-        for rank, host in self.peers:
-            self.remote_control("signal", rank, host, ["--signal", "KILL"])
+    def wait_ranks(self, ranks, timeout_s):
+        """Wait for known live ranks; an uncheckable rank is UNKNOWN, not DOWN."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            alive, unreachable = self.live_ranks(ranks)
+            if not alive or time.monotonic() >= deadline:
+                return alive, unreachable
+            time.sleep(1)
 
-    def peers_gone(self):
-        return all(self.remote_control("status", rank, host) is None for rank, host in self.peers)
+    def shutdown_signal(self, rank, number):
+        try:
+            self.signal_rank(rank, number)
+            return True
+        except (ValueError, OSError, RuntimeError) as error:
+            say(f"WARN: rank {rank} ({self.nodes[rank]}) SIG{number} failed: {error}")
+            return False
 
     def remote_control(self, action, rank, host, extra=()):
         helper = f"{self.stage_dir}/cluster_process.py"
@@ -227,16 +236,23 @@ class Cluster:
         command = (f"python3 {helper} {action} --state {self.stage_dir}/rank{rank}.process.json "
                    + shlex.join(extra))
         if action == "status":
-            command = f"if test -f {helper}; then {command}; else printf 'null\\n'; fi"
+            command = (f"if test -f {helper}; then {command}; "
+                       f"elif test -f {self.stage_dir}/rank{rank}.process.json; then "
+                       "echo 'process record exists but control helper is missing' >&2; exit 2; "
+                       "else printf 'null\\n'; fi")
         result = subprocess.run(["timeout", "25", "ssh", *SSH_OPTS, self.target(host), command],
                                 capture_output=True, text=True)
         if result.returncode not in ((0, 1) if action == "status" else (0,)):
             raise RuntimeError(f"{host}: process {action} failed: {result.stderr.strip()}")
         if action == "status":
             try:
-                return json.loads(result.stdout)
+                record = json.loads(result.stdout)
             except json.JSONDecodeError as error:
                 raise RuntimeError(f"{host}: invalid process status response") from error
+            if record is not None and (not isinstance(record, dict)
+                                       or type(record.get("pid")) is not int or record["pid"] <= 1):
+                raise RuntimeError(f"{host}: invalid process status response")
+            return record
 
     def signal_rank(self, rank, number):
         if not 0 <= rank < len(self.nodes):
@@ -317,13 +333,18 @@ class Cluster:
         if result.returncode:
             raise RuntimeError(f"{host}: launch failed: {result.stderr.strip()}")
 
-    def up(self):
+    @contextmanager
+    def launcher_lock(self):
         os.makedirs(self.log_dir, exist_ok=True)
         with open(os.path.join(self.log_dir, "launcher.lock"), "a") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
-                raise RuntimeError("another launcher is starting this deployment") from error
+                raise RuntimeError("another launcher is starting or stopping this deployment; retry when it finishes") from error
+            yield
+
+    def up(self):
+        with self.launcher_lock():
             return self._up()
 
     def _up(self):
@@ -331,7 +352,8 @@ class Cluster:
         if existing:
             if not self.replace:
                 raise ValueError("this deployment is already running; use down first or up --replace")
-            self.down()
+            if self._down():
+                return 1
         if not self.skip_preflight:
             import cluster_doctor
             if cluster_doctor.check_cluster(self.cfg, self.bin, self.log_dir, self.stage_dir, self.user,
@@ -384,35 +406,43 @@ class Cluster:
         return 0
 
     # ---- down --------------------------------------------------------------
-    def down(self, alive=None):
-        if alive is None:
-            alive, unreachable = self.live_ranks()
-            for rank, host, error in unreachable:
-                say(f"WARN: rank {rank} ({host}) could not be checked: {error}")
-        if not alive:
+    def down(self):
+        with self.launcher_lock():
+            return self._down()
+
+    def _down(self):
+        alive, unreachable = self.live_ranks()
+        for rank, host, error in unreachable:
+            say(f"WARN: rank {rank} ({host}) UNKNOWN: {error}")
+        if not alive and not unreachable:
             say(f"=== {self.label}: no rank recorded as running; nothing to stop")
             if not os.path.exists(self.config_path):
                 return 0  # never staged: no logs or op streams to collect either
-        pid = self.head_pid()
-        if self.alive(pid):
+        pid = next((pid for rank, _, pid in alive if rank == 0), None)
+        if pid is not None:
             say(f"=== SIGINT rank 0 ({pid}) — the stop record releases the peers")
-            self.signal_rank(0, "INT")
-            for _ in range(240):
-                if not self.alive(pid):
-                    break
-                time.sleep(1)
-            if self.alive(pid):
+            if self.shutdown_signal(0, "INT"):
+                remaining, _ = self.wait_ranks({0}, 240)
+            else:
+                remaining, _ = self.live_ranks({0})
+            if remaining:
                 say("rank 0 wedged; SIGKILL")
-                self.signal_rank(0, "KILL")
+                self.shutdown_signal(0, "KILL")
         if self.peers:
             say("=== waiting for the peers to drain")
-            for _ in range(30):
-                if self.peers_gone():
-                    break
-                time.sleep(2)
-            if not self.peers_gone():
+            remaining, _ = self.wait_ranks({rank for rank, _ in self.peers}, 60)
+            if remaining:
                 say("sweeping wedged peers")
-                self.sweep_peers()
+                for rank, _, _ in remaining:
+                    self.shutdown_signal(rank, "KILL")
+        remaining, unreachable = self.wait_ranks(set(range(len(self.nodes))), 5)
+        if remaining or unreachable:
+            for rank, host, pid in remaining:
+                say(f"ERROR: rank {rank} ({host}) still running (pid {pid})")
+            for rank, host, error in unreachable:
+                say(f"ERROR: rank {rank} ({host}) UNKNOWN: {error}")
+            say(f"ERROR: shutdown incomplete for {self.label}; retry down after resolving the errors")
+            return 1
         # Collect each rank's log and operation stream for comparison.
         for rank, host in self.peers:
             if not self.scp_from(host, f"{self.stage_dir}/serve_rank{rank}.ops",
@@ -512,7 +542,7 @@ class Cluster:
             say(f"rank {rank} ({host}): {state}")
             if rank == 0:
                 self.tail(os.path.join(self.log_dir, "serve_r0.log"), 2)
-        return 0
+        return 1 if unreachable else 0
 
     def log_ending(self):
         """When and how rank 0's log ends: a stopped deployment's whole story
@@ -543,32 +573,42 @@ def recorded_namespaces():
 
 
 def every_deployment(args, verb):
-    """down/status without --config: the verb over every recorded deployment
-    (status lists them all; down stops the ones with a live rank)."""
+    """Scan every recorded deployment; status hides confirmed stops unless
+    --all is requested, while down stops the ones with a live rank."""
+    show_stopped = verb == "down" or getattr(args, "all", False)
     root, namespaces = recorded_namespaces()
     if not namespaces:
-        say(f"no deployment recorded under {root}")
+        say(f"no deployment recorded under {root}" if show_stopped else "no deployments running")
         return 0
-    stopped = 0
+    running, stopped, failed = 0, 0, 0
     for namespace in namespaces:
-        c = Cluster(args, namespace=namespace)
-        alive, unreachable = c.live_ranks()
-        if not alive:
-            # Stopped (or never booted): one line, with how its log ends,
-            # so the running deployments stand out.
-            say(f"{c.label}: not running ({c.log_ending()})")
-            continue
-        if verb == "status":
-            c.status((alive, unreachable))
-            continue
-        for rank, host, error in unreachable:
-            say(f"WARN: rank {rank} ({host}) could not be checked: {error}")
-        say(f"=== stopping {c.label}: " + ", ".join(f"rank {rank} ({host}) pid {pid}" for rank, host, pid in alive))
-        c.down(alive)
-        stopped += 1
+        try:
+            c = Cluster(args, namespace=namespace)
+            alive, unreachable = c.live_ranks()
+            if not alive and not unreachable:
+                if show_stopped:
+                    say(f"{c.label}: not running ({c.log_ending()})")
+                continue
+            if verb == "status":
+                running += bool(alive)
+                failed += bool(c.status((alive, unreachable)))
+                continue
+            say(f"=== stopping {c.label}: " + ", ".join(f"rank {rank} ({host}) pid {pid}" for rank, host, pid in alive))
+            if c.down():
+                failed += 1
+            else:
+                stopped += 1
+        except (ValueError, OSError, RuntimeError, KeyError, TypeError) as error:
+            say(f"ERROR: {namespace}: {error}")
+            failed += 1
     if verb == "down":
-        say(f"{stopped} deployment(s) stopped" if stopped else "no deployment was running; nothing stopped")
-    return 0
+        if stopped or failed:
+            say(f"{stopped} deployment(s) stopped; {failed} deployment(s) could not be confirmed stopped")
+        else:
+            say("no deployment was running; nothing stopped")
+    elif not show_stopped and not running and not failed:
+        say("no deployments running")
+    return 1 if failed else 0
 
 
 def main():
@@ -583,7 +623,7 @@ def main():
     ap.add_argument("--head-wrap", default="", help="prefix rank 0's command line with this (word-split): the profiling hook")
     ap.add_argument("--replace", action="store_true", help="stop this recorded deployment before starting it again")
     ap.add_argument("--all", action="store_true",
-                    help="down/status: every deployment recorded under DGPP_LOG_DIR/deployments (the default when --config is omitted)")
+                    help="down/status: scan every deployment under DGPP_LOG_DIR/deployments; status also includes stopped deployments")
     ap.add_argument("--skip-preflight", action="store_true", help="skip environment checks, not process ownership checks")
     ap.add_argument("--local-only", action="store_true", help="doctor: inspect this node without SSH")
     ap.add_argument("--rank", type=int, default=0, help="signal: rank in this deployment")

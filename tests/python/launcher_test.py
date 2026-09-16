@@ -3,19 +3,26 @@ without --config (or with --all) act on every deployment staged under
 DGPP_LOG_DIR/deployments, not on the default deployment file. Single-node
 namespaces only (no SSH); the "ranks" are recorded `sleep` processes."""
 import json
+import io
 import os
 from pathlib import Path
+import runpy
 import signal
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import cluster_process
 
 LAUNCHER = ROOT / "scripts" / "dgpp-cluster"
+LAUNCHER_MODULE = runpy.run_path(str(LAUNCHER))
+Cluster = LAUNCHER_MODULE["Cluster"]
 
 
 class LauncherScanTest(unittest.TestCase):
@@ -97,7 +104,7 @@ class LauncherScanTest(unittest.TestCase):
         self.assertIn("1 deployment(s) stopped", result.stdout)
         proc.wait(timeout=10)
 
-    def test_status_without_config_lists_every_recorded_deployment(self):
+    def test_status_hides_stopped_deployments_unless_all_is_requested(self):
         live = self.namespace("eeee", "org/live")
         (live / "serve_r0.log").write_text("2026-09-12 15:31:40.001 INFO  serve: listening on :18080\n")
         proc = self.launch(live)
@@ -113,6 +120,14 @@ class LauncherScanTest(unittest.TestCase):
         self.assertIn(f"=== org/live on 1 node(s) [eeee] ({self.root}/eeee.json)", out)
         self.assertIn(f"rank 0 (127.0.0.1): alive ({proc.pid})", out)
         self.assertIn("  2026-09-12 15:31:40.001 INFO  serve: listening on :18080", out)
+        self.assertNotIn("org/stopped", out)
+        self.assertNotIn("org/never-booted", out)
+        self.assertNotIn("no deployments running", out)
+        self.assertNotIn("not running", out)
+        result = self.launcher("status", "--all")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        out = result.stdout
+        self.assertIn(f"rank 0 (127.0.0.1): alive ({proc.pid})", out)
         # Stopped ones: one line each, saying how they ended; no rank listing.
         self.assertIn(f"org/stopped on 1 node(s) [ffff] ({self.root}/ffff.json): not running "
                       "(rank 0's log ends 2026-09-12 05:26:48: ERROR serve: rank 0: the configuration needs", out)
@@ -123,14 +138,30 @@ class LauncherScanTest(unittest.TestCase):
         self.assertIsNotNone(cluster_process.running(self.log_root / "deployments/eeee/rank0.process.json"))
 
     def test_nothing_recorded_is_not_an_error(self):
-        for verb in ("down", "status"):
-            result = self.launcher(verb)
+        result = self.launcher("status")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.strip().endswith("no deployments running"))
+        for argv in (("down",), ("status", "--all")):
+            result = self.launcher(*argv)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn(f"no deployment recorded under {self.log_root}/deployments", result.stdout)
         self.namespace("gggg", "org/idle")
         result = self.launcher("down")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("no deployment was running; nothing stopped", result.stdout)
+
+    def test_status_reports_no_running_deployments_with_stale_records(self):
+        stopped = self.namespace("aaaa", "org/stopped")
+        proc = self.launch(stopped)
+        self.kill(proc)
+        self.namespace("bbbb", "org/never-booted")
+        result = self.launcher("status")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertTrue(result.stdout.strip().endswith("no deployments running"))
+        # Status keeps records and logs available for explicit inspection.
+        self.assertTrue((stopped / "rank0.process.json").is_file())
+        self.assertTrue((stopped / "serve_r0.log").is_file())
 
     def test_all_rejects_a_config_a_log_dir_and_other_verbs(self):
         config = self.root / "x.json"
@@ -150,6 +181,136 @@ class LauncherScanTest(unittest.TestCase):
         self.assertIn("=== org/never on 1 node(s) [", result.stdout)
         self.assertIn("no rank recorded as running; nothing to stop", result.stdout)
         self.assertNotIn("op-stream identity", result.stdout)  # never staged: nothing to collect
+
+    def cluster(self, namespace, peers=0):
+        config_path = namespace / "cluster.resolved.json"
+        config = json.loads(config_path.read_text())
+        config["nodes"] += [f"peer{rank}" for rank in range(1, peers + 1)]
+        config_path.write_text(json.dumps(config))
+        with patch.dict(os.environ, self.environ, clear=True):
+            return Cluster(SimpleNamespace(), namespace=str(namespace))
+
+    def test_unknown_peer_is_failure_and_scan_still_stops_other_deployment(self):
+        unknown = self.namespace("aaaa", "org/unknown")
+        self.cluster(unknown, peers=1)
+        proc = self.launch(self.namespace("bbbb", "org/reachable"))
+        for verb in ("status", "down"):
+            with self.subTest(verb=verb), patch.dict(os.environ, self.environ, clear=True), \
+                    patch.object(Cluster, "remote_control", side_effect=RuntimeError("SSH refused")), \
+                    redirect_stdout(io.StringIO()) as output:
+                result = LAUNCHER_MODULE["every_deployment"](SimpleNamespace(), verb)
+            self.assertNotEqual(result, 0)
+            self.assertIn("UNKNOWN", output.getvalue())
+            self.assertIn("SSH refused", output.getvalue())
+            self.assertNotIn("no deployment was running", output.getvalue())
+        proc.wait(timeout=10)
+        self.assertIn("1 deployment(s) stopped", output.getvalue())
+        # With the reachable deployment stopped, UNKNOWN must still be visible.
+        with patch.dict(os.environ, self.environ, clear=True), \
+                patch.object(Cluster, "remote_control", side_effect=RuntimeError("SSH refused")), \
+                redirect_stdout(io.StringIO()) as output:
+            result = LAUNCHER_MODULE["every_deployment"](SimpleNamespace(), "status")
+        self.assertNotEqual(result, 0)
+        self.assertIn("UNKNOWN", output.getvalue())
+        self.assertNotIn("no deployments running", output.getvalue())
+
+    def test_corrupt_record_does_not_abort_scan_of_other_deployments(self):
+        invalid = self.namespace("aaaa", "org/invalid")
+        (invalid / "rank0.process.json").write_text("{")
+        proc = self.launch(self.namespace("bbbb", "org/reachable"))
+        result = self.launcher("down", "--all")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("UNKNOWN", result.stdout)
+        self.assertIn("1 deployment(s) stopped", result.stdout)
+        proc.wait(timeout=10)
+
+    def test_corrupt_config_does_not_abort_scan_of_other_deployments(self):
+        invalid = self.namespace("aaaa", "org/invalid")
+        (invalid / "cluster.resolved.json").write_text("{")
+        proc = self.launch(self.namespace("bbbb", "org/reachable"))
+        result = self.launcher("down", "--all")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("1 deployment(s) stopped", result.stdout)
+        proc.wait(timeout=10)
+
+    def test_unreachable_peer_does_not_prevent_reachable_peer_cleanup(self):
+        namespace = self.namespace("aaaa", "org/peers")
+        cluster = self.cluster(namespace, peers=2)
+        peer_namespace = self.namespace("peer-process", "org/test-process")
+        proc = self.launch(peer_namespace)
+        state = peer_namespace / "rank0.process.json"
+
+        def remote(action, rank, host, extra=()):
+            if rank == 1:
+                raise RuntimeError("SSH refused")
+            if action == "status":
+                return cluster_process.running(state)
+            cluster_process.send_signal(state, getattr(signal, "SIG" + extra[-1]))
+
+        wait = getattr(cluster, "wait_ranks", None)
+        with patch.object(cluster, "remote_control", side_effect=remote), \
+                patch.object(cluster, "wait_ranks", create=True,
+                             side_effect=lambda ranks, seconds: wait(ranks, min(seconds, 2))), \
+                redirect_stdout(io.StringIO()) as output:
+            result = cluster.down()
+        self.assertNotEqual(result, 0)
+        self.assertIn("UNKNOWN", output.getvalue())
+        proc.wait(timeout=10)
+
+    def test_force_kill_is_verified_before_reporting_success(self):
+        namespace = self.namespace("aaaa", "org/stuck")
+        proc = self.launch(namespace)
+        cluster = self.cluster(namespace)
+        with patch.object(cluster, "signal_rank"), \
+                patch.object(cluster, "wait_ranks", create=True,
+                             side_effect=lambda ranks, seconds: cluster.live_ranks()), \
+                patch("time.sleep"), redirect_stdout(io.StringIO()) as output:
+            result = cluster.down()
+        self.assertNotEqual(result, 0)
+        self.assertIn("still running", output.getvalue())
+        self.assertIsNone(proc.poll())
+
+    def test_up_replace_does_not_stage_after_unconfirmed_shutdown(self):
+        namespace = self.namespace("aaaa", "org/stuck")
+        self.launch(namespace)
+        cluster = self.cluster(namespace)
+        cluster.replace = True
+        with patch.object(cluster, "_down", create=True, return_value=1), \
+                patch.object(cluster, "down", return_value=1), \
+                patch.object(cluster, "stage", return_value=False) as stage:
+            cluster.skip_preflight = True
+            self.assertNotEqual(cluster.up(), 0)
+            stage.assert_not_called()
+
+    def test_down_refuses_concurrent_launcher(self):
+        import fcntl
+        namespace = self.namespace("aaaa", "org/locked")
+        proc = self.launch(namespace)
+        with (namespace / "launcher.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.launcher("down", "--all")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("another launcher", result.stdout + result.stderr)
+        self.assertIsNone(proc.poll())
+
+    def test_missing_peer_helper_and_invalid_status_are_not_reported_down(self):
+        cluster = self.cluster(self.namespace("aaaa", "org/peer"), peers=1)
+        stage = self.root / "peer-stage"
+        stage.mkdir()
+        cluster.stage_dir = str(stage)
+        run = subprocess.run
+
+        def local_remote(command, **kwargs):
+            return run(["bash", "-c", command[-1]], **kwargs)
+
+        with patch.object(subprocess, "run", side_effect=local_remote):
+            self.assertIsNone(cluster.remote_control("status", 1, "peer1"))
+            (stage / "rank1.process.json").write_text("{}")
+            with self.assertRaisesRegex(RuntimeError, "control helper is missing"):
+                cluster.remote_control("status", 1, "peer1")
+            (stage / "cluster_process.py").write_text("print('{\"unexpected\": true}')\n")
+            with self.assertRaisesRegex(RuntimeError, "invalid process status response"):
+                cluster.remote_control("status", 1, "peer1")
 
 
 if __name__ == "__main__":
