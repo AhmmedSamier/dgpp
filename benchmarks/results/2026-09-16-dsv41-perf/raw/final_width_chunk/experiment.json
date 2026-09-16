@@ -1,0 +1,26 @@
+{
+  "name": "final_width_chunk",
+  "threads": null,
+  "objective": false,
+  "global_stage": false,
+  "full_tiers": false,
+  "classes": "all",
+  "concurrency": "1,6",
+  "repeat": 3,
+  "tokens": 256,
+  "prefill": true,
+  "chunk": null,
+  "gates": true,
+  "knobs": "",
+  "bin": null,
+  "plain": false,
+  "binary": "/home/stephen/workspace/dgpp-dsv41-perf/build-ci/dgpp-serve",
+  "binary_sha256": "05d167206cfd8d6ae750594a737f7c69c6db79298a16eec4aae2c497de208fa4",
+  "git_base": "f01e94790b3a3ea9ea3bd1efd4a909cd1d6227b7",
+  "startup": [
+    "2026-09-16 19:20:13.442 INFO  rank 0: memory plan total 78.35 GiB (76.75 GiB device + 1.60 GiB pinned) + 4.00 GiB headroom against 115.70 GiB free (device free 90.08 GiB of 121.63 GiB, host available 115.70 GiB)",
+    "2026-09-16 19:20:33.504 INFO  rank 0: model constructed in 20.1s (resident, 6 request slots, 131072-token pool in fp4_block main + fp8_block window, 4096-row forwards)",
+    "2026-09-16 19:20:33.554 INFO  rank 0: scheduled verify depth on \u2014 options [1,3,4] of the 4-draft block (threshold: prefix survival > 0.360 = 0.0450 tok/ms x 8.00 ms/row; lambda adaptive over base 28.0 + rows x row ms, floored there), greedy slots only; the confidence is the model's confidence head",
+    "2026-09-16 19:20:34.678 INFO  rank 0: graph variants warm-captured in 1.12s"
+  ]
+}

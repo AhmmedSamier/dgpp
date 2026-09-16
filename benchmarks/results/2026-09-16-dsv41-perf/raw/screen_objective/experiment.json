@@ -1,0 +1,13 @@
+{
+  "name": "screen_objective",
+  "threads": 512,
+  "objective": true,
+  "classes": "code,prose",
+  "concurrency": "1,6",
+  "repeat": 2,
+  "tokens": 192,
+  "prefill": false,
+  "gates": false,
+  "knobs": "",
+  "bin": null
+}

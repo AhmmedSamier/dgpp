@@ -1,0 +1,15 @@
+{
+  "name": "chunk2048",
+  "threads": 0,
+  "objective": false,
+  "global_stage": false,
+  "classes": "code",
+  "concurrency": "1",
+  "repeat": 1,
+  "tokens": 128,
+  "prefill": true,
+  "chunk": 2048,
+  "gates": false,
+  "knobs": "",
+  "bin": null
+}

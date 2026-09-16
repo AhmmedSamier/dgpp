@@ -1,0 +1,70 @@
+[
+  {
+    "words": 1600,
+    "prompt_sha256": "6d43984f874f3106e276a8f82f2bcf2b777ea2612ea242ac79799c265c5f50f4",
+    "wall_s": 3.9075538569886703,
+    "response": {
+      "id": "chatcmpl-000000000000000d",
+      "object": "chat.completion",
+      "created": 1789584018,
+      "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "**1. Arithmetic with Eggs and Muffins**  \nJanet\u2019s ducks produce 16 eggs daily. She consumes 3 eggs for breakfast and uses 4 eggs for muffins, leaving 16 \u2212 3 \u2212 4 = 9 eggs to sell. At $2 per egg, she earns 9 \u00d7 2 = $18 per day at the farmers\u2019 market.\n\n**2. Fiber Bolts for a Robe**  \nA robe requires 2 bolts of blue fiber and half that amount of white fiber, so white fiber = 1 bolt. Total fiber = 2 + 1 = 3 bolts.\n\n"
+          },
+          "logprobs": null,
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 2048,
+        "completion_tokens": 128,
+        "total_tokens": 2176,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      }
+    }
+  },
+  {
+    "words": 5200,
+    "prompt_sha256": "9aba6210a8b47667172315985b7c80393cb7bb7fcc901afbc2bc5e1f09c188b7",
+    "wall_s": 8.137487497995608,
+    "response": {
+      "id": "chatcmpl-000000000000000e",
+      "object": "chat.completion",
+      "created": 1789584022,
+      "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "**1. Arithmetic with Money and Daily Transactions**  \nSeveral problems involve basic arithmetic operations applied to everyday situations. Janet sells duck eggs after consuming some and baking with others, requiring subtraction and multiplication to find daily income. Similarly, Billy sells DVDs to different customers with varying purchase quantities, and Tommy raises money by selling brownies and cheesecakes at fixed prices. These problems emphasize careful reading, sequential operations, and unit consistency.\n\n**2. Proportional Reasoning and Ratios**  \nMany problems rely on ratios and proportional relationships. Darrell and Allen\u2019s ages are in a 7:11 ratio summing to 162, requiring algebraic setup."
+          },
+          "logprobs": null,
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 6539,
+        "completion_tokens": 128,
+        "total_tokens": 6667,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      }
+    }
+  }
+]

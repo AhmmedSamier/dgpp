@@ -1,0 +1,37 @@
+{
+ "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+ "results": {
+  "chat": {
+   "reasoning": "We need answer. Need explain CUDA graph replay faster than eager launches, costs. Need few paragraphs. Need likely mention launch overhead, CPU-side overhead, driver, kernel launch latency, batching, dependencies, stream capture, graph instantiation, upload, memory allocation, static topology, parameters fixed, no dynamic control flow, update costs, memory pools, graph exec update, constraints. Need concise. Let's craft.\n\nNeed explain why faster: eager launches each kernel incur CPU overhead: API call, driver validation, stream synchronization? Actually async launches but CPU overhead per launch. GPU may idle if CPU can't keep up, especially small kernels. CUDA graphs capture sequence of operations and dependencies into DAG. Replay submits whole graph with one launch, reducing CPU launch overhead and driver work. GPU scheduler can execute with lower inter-kernel gaps, dependencies known, maybe better overlap. Also graph can use device-side launch? Not necessary. Graph replay can reduce CPU utilization and jitter. Costs: capture/instantiation overhead upfront; graph is static: topology, kernel params, memory addresses fixed unless update. Need update graph exec for changed params/pointers, which can be costly or limited. Memory allocations during capture need graph-safe allocator/pool; lifetime tied to graph",
+   "content": "",
+   "finish": "length",
+   "completion_tokens": 256,
+   "prompt_tokens": 58,
+   "wall_s": 6.730681490007555
+  },
+  "code": {
+   "reasoning": "We need answer user asks: \"Write a Python function that parses an ISO-8601 timestamp without external libraries, with docstring and three doctests.\"\n\nWe need provide Python function. Need parse ISO-8601 timestamp without external libraries. Need docstring and three doctests. Need likely use datetime.fromisoformat? But \"without external libraries\" means standard library okay? datetime is standard library. But maybe they want manual parsing? \"without external libraries\" likely means no dateutil. We can use datetime.fromisoformat. But ISO-8601 timestamp can include Z, offsets, fractional seconds. Python 3.11 fromisoformat handles Z. But for compatibility, maybe implement manual parser. Need decide.\n\nThe request: \"Write a Python function that parses an ISO-8601 timestamp without external libraries, with docstring and three doctests.\" Could be simple: use datetime.datetime.fromisoformat. But \"parses an ISO-8601 timestamp\" maybe expects return datetime object. Need docstring and three doctests. We can write function parse_iso8601(timestamp: str) -> datetime. Use datetime.fromisoformat after replacing trailing 'Z' with '+00:00'. That's standard library. But \"without external libraries\" satisfied",
+   "content": "",
+   "finish": "length",
+   "completion_tokens": 256,
+   "prompt_tokens": 55,
+   "wall_s": 4.749463485000888
+  },
+  "math": {
+   "reasoning": "We need answer. Need solve. Need be careful: Train A leaves city A at 60 km/h toward B. Train B leaves city B 450 km away at 90 km/h toward A 30 min later. Need when and where meet. Need step by step.\n\nLet's parse. At t=0 A departs A toward B at 60. B departs at t=0.5 h from B toward A at 90. Distance 450. Need meeting time after A departure? Let t hours after A leaves. A distance from A = 60t. B starts at t=0.5, travels for t-0.5 at 90 toward A, so distance from B toward A = 90(t-0.5). At meeting, sum distances = 450: 60t + 90(t-0.5)=450. 60t+90t-45=450 =>150t=495 => t=3.3 h = 3h18m after A leaves. B has traveled 2.8h = 2h48m. Meeting point from A: 60*3.3=198 km from A. Check B distance from B =90*2.8=252",
+   "content": "",
+   "finish": "length",
+   "completion_tokens": 256,
+   "prompt_tokens": 74,
+   "wall_s": 4.6966656369913835
+  },
+  "json": {
+   "reasoning": "We need answer only JSON array of 8 objects fields country, capital, population_millions. Need likely real countries. Need ensure valid JSON. Population millions maybe numbers. We can choose 8. Need output only JSON. No markdown. Let's craft. Need maybe population_millions numeric. Countries/capitals. Ensure accurate-ish. 8 objects. Example:\n[\n{\"country\":\"Japan\",\"capital\":\"Tokyo\",\"population_millions\":125.1},\n{\"country\":\"France\",\"capital\":\"Paris\",\"population_millions\":68.0},\n{\"country\":\"Brazil\",\"capital\":\"Bras\u00edlia\",\"population_millions\":216.4},\n{\"country\":\"Canada\",\"capital\":\"Ottawa\",\"population_millions\":40.1},\n{\"country\":\"Australia\",\"capital\":\"Canberra\",\"population_millions\":26.5},\n{\"country\":\"India\",\"capital\":\"New Delhi\",\"population_millions\":1428.6},\n{\"country\":\"Nigeria\",\"capital\":\"Abuja\",\"population_millions\":223.8},\n{\"country\":\"Germany\",\"capital\":\"Berlin\",\"population_millions\":84.5}\n]\nNeed only JSON. Check valid. Use accents? Bras\u00edlia okay. JSON supports UTF-8. Fine. Population numbers.",
+   "content": "",
+   "finish": "length",
+   "completion_tokens": 256,
+   "prompt_tokens": 57,
+   "wall_s": 4.78147003398044
+  }
+ }
+}

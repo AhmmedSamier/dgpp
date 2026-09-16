@@ -1,0 +1,60 @@
+== world up under nsys (/home/stephen/workspace/dgpp/deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.json) knobs: none
+INFO  rank 0: model constructed in 20.2s (resident, 6 request slots, 131072-token pool in fp4_block main + fp8_block window, 2048-row forwards)
+INFO  rank 0: scheduled verify depth on — options [1,3,4] of the 4-draft block (threshold: prefix survival > 0.360 = 0.0450 tok/ms x 8.00 ms/row; lambda adapt
+INFO  rank 0: graph variants warm-captured in 1.54s
+== warm + profiled requests
+[warm] text: 'We need answer. User asks explain in few paragraphs why CUDA graph replay faster than launching same kernels eagerly, and what it costs. Need concise. Need cover: CUDA graphs capture sequence of kernel launches, memory copies, dependencies into graph, then replay. Faster because reduces CPU launch overhead, driver overhead, kernel launch'
+   aggregate wall: 1536 tokens in 15.47 s = 99.30 tok/s (prefill included)
+   legacy output-span aggregate: 102.33852719810164 tok/s (initial TTFT excluded; later admissions included)
+== per-class wall aggregate tokens/s (prefill included), greedy, max_tokens 256
+== world down
+2026-09-16 18:17:12.398 op streams: identical across 4 ranks
+2026-09-16 18:17:12.398 === logs in /home/stephen/workspace/dgpp/build-ci/fabric-runs/dsv41_perf_2026-09-16/baseline_profile/world
+== step breakdown (marker publish_seq_kernel)
+window: 115 steps between markers 'publish_seq_kernel' (skipping the first 20); wall 150.501 ms/step, GPU busy 147.120 ms/step (97.8 %), 1663.7 kernels/step
+kernel                                                                                    ms/step  n/step  us/inst  share
+moe_slot_gate_up_swiglu_fp4_kernel<int)5120, bool)0, int)32>                               50.620    43.2   1172.2  34.4%
+moe_slot_down_fp4_kernel<int)576, bool)0, int)32>                                          27.434    43.2    635.3  18.6%
+bus_allreduce_graph_kernel                                                                 23.130    94.1    245.9  15.7%
+mma_gemv_kernel<int)2, bool)1, int)8, unsigned short>                                       5.469    68.4     79.9   3.7%
+attn_flash_kernel<int)512, int)512, bool)1, LatentFormat)4>                                 4.824    40.3    119.7   3.3%
+mma_gemv_kernel<int)2, bool)1, int)4, unsigned short>                                       4.361    91.1     47.9   3.0%
+attn_finish_kernel                                                                          3.197    45.6     70.1   2.2%
+attn_partial_kernel<LatentFormat)3>                                                         2.638    45.6     57.8   1.8%
+mhc_dots_kernel<bool)1, int)0>                                                              2.624    86.4     30.4   1.8%
+mma_gemv_kernel<int)2, bool)0, int)8, float>                                                2.523     1.4   1779.9   1.7%
+moe_router_dots_kernel<int)2>                                                               2.280    43.2     52.8   1.5%
+mma_gemv_kernel<int)1, bool)1, int)8, unsigned short>                                       2.013    30.5     65.9   1.4%
+mma_gemv_kernel<int)2, bool)1, int)2, unsigned short>                                       1.677    32.5     51.6   1.1%
+mma_gemv_kernel<int)1, bool)1, int)4, unsigned short>                                       1.587    40.5     39.1   1.1%
+markov_bias_kernel                                                                          1.486     4.2    350.1   1.0%
+rmsnorm_kernel                                                                              1.376   190.9      7.2   0.9%
+moe_grouped_mma_fp4_ldm_kernel<unsigned short, int)32>                                      1.273     1.4    915.3   0.9%
+mma_gemv_kernel<int)1, bool)0, int)8, float>                                                0.955     0.6   1484.1   0.6%
+mma_gemv_kernel<int)4, bool)1, int)8, unsigned short>                                       0.874    11.0     79.7   0.6%
+mhc_finish_kernel<int)32>                                                                   0.811    87.8      9.2   0.6%
+moe_grouped_mma_fp4_ldm_kernel<float, int)32>                                               0.730     0.7   1049.8   0.5%
+mma_gemv_kernel<int)1, bool)1, int)2, unsigned short>                                       0.601    14.6     41.1   0.4%
+mhc_stream_update_f32_kernel                                                                0.519    87.8      5.9   0.4%
+select_candidates_merge_kernel                                                              0.466     1.0    466.4   0.3%
+bus_bulk_collective_kernel                                                                  0.402     1.5    262.4   0.3%
+moe_slot_accum_kernel                                                                       0.317    43.2      7.3   0.2%
+select_listed_decode_kernel                                                                 0.259     5.0     51.8   0.2%
+mma_gemv_kernel<int)2, bool)0, int)2, unsigned short>                                       0.242     9.2     26.2   0.2%
+latent_append_fp8block_kernel                                                               0.213    49.0      4.3   0.1%
+select_candidates_part_kernel                                                               0.212     1.0    212.1   0.1%
+mma_gemv_kernel<int)2, bool)0, int)2, float>                                                0.189     4.2     44.7   0.1%
+rope_apply_kernel                                                                           0.184   111.6      1.6   0.1%
+moe_grouped_mma_fp8_ldm_kernel<unsigned short>                                              0.136     1.4     97.7   0.1%
+select_decode_kernel<bool)1>                                                                0.107     7.6     14.1   0.1%
+mhc_dots_mma_kernel                                                                         0.100     1.4     71.2   0.1%
+sample_verdict_kernel                                                                       0.097     5.1     19.2   0.1%
+moe_slot_order_kernel                                                                       0.089    43.2      2.1   0.1%
+select_rows_prefill_kernel                                                                  0.085     4.9     17.4   0.1%
+mma_gemv_kernel<int)1, bool)0, int)2, unsigned short>                                       0.078     4.1     18.9   0.1%
+mma_gemv_kernel<int)1, bool)0, int)2, float>                                                0.068     1.9     36.2   0.0%
+moe_router_dots_tiled_kernel<int)2>                                                         0.065     0.7     93.8   0.0%
+moe_accum_ordered_kernel<unsigned short>                                                    0.061     0.7     88.2   0.0%
+confidence_kernel                                                                           0.046     4.2     10.8   0.0%
+ring_slot_positions_kernel                                                                  0.043    46.5      0.9   0.0%
+entry_positions_kernel                                                                      0.038    40.3      1.0   0.0%

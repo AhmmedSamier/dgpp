@@ -1,0 +1,9 @@
+2026-09-16 19:09:36.130 === SIGINT rank 0 (1272713) — the stop record releases the peers
+2026-09-16 19:09:38.132 === waiting for the peers to drain
+2026-09-16 19:09:42.272 === op-stream identity (every rank)
+2026-09-16 19:09:42.275 e2d7cfbfd1640f6234482ff5820847b5  /home/stephen/workspace/dgpp-dsv41-perf/build-ci/dsv41-perf/final_baseline/world/serve_rank0.ops
+2026-09-16 19:09:42.278 e2d7cfbfd1640f6234482ff5820847b5  /home/stephen/workspace/dgpp-dsv41-perf/build-ci/dsv41-perf/final_baseline/world/serve_rank1.ops
+2026-09-16 19:09:42.280 e2d7cfbfd1640f6234482ff5820847b5  /home/stephen/workspace/dgpp-dsv41-perf/build-ci/dsv41-perf/final_baseline/world/serve_rank2.ops
+2026-09-16 19:09:42.283 e2d7cfbfd1640f6234482ff5820847b5  /home/stephen/workspace/dgpp-dsv41-perf/build-ci/dsv41-perf/final_baseline/world/serve_rank3.ops
+2026-09-16 19:09:42.283 op streams: identical across 4 ranks
+2026-09-16 19:09:42.283 === logs in /home/stephen/workspace/dgpp-dsv41-perf/build-ci/dsv41-perf/final_baseline/world

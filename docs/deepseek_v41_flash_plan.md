@@ -2143,3 +2143,13 @@ fixture's snapshots pass at the block alignment. Until then
   linears, which is the same substitution the GLM cross-checks made.
 - **Disk.** 510 GB per node leaves 310 GB; the next family will need a
   checkpoint retired. The NVFP4 re-packs are not downloaded.
+
+*Record (2026-09-16, communication width, scheduled depths and prefill chunks).*
+The [four-node inference study](../benchmarks/results/2026-09-16-dsv41-perf/README.md)
+profiles the current six-slot service and tests alternatives without changing
+weight or KV precision. The retained graph consumer uses 256/512/1,024 threads
+according to payload size, and bounded prefill uses 4,096-token chunks.
+The broader workload exposed regressions in the four-depth scheduling
+experiment, so the existing three captured depths remain. The study contains
+the final matched service rates, correctness gates,
+memory cost and rejected receive-cache and scheduling-policy experiments.

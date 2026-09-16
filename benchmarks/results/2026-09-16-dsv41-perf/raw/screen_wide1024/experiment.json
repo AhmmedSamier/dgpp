@@ -1,0 +1,13 @@
+{
+  "name": "screen_wide1024",
+  "threads": 1024,
+  "objective": false,
+  "classes": "code,prose",
+  "concurrency": "1,6",
+  "repeat": 2,
+  "tokens": 192,
+  "prefill": false,
+  "gates": false,
+  "knobs": "",
+  "bin": null
+}

@@ -105,6 +105,11 @@ model-specific performance experiments. See
 each. Failover, data-parallel routing, cross-instance prefix sharing and
 multimodal execution remain future work.
 
+The [DeepSeek inference study](benchmarks/results/2026-09-16-dsv41-perf/README.md)
+adds payload-dependent graph consumer widths and uses 4,096-token
+bounded-prefill chunks. It records matched serving measurements and rejected
+receive-cache, verification-depth and scheduling-policy experiments; weight and KV precision are unchanged.
+
 ## Validation for further changes
 
 Run a full build before the relevant test suites. Kernel and state changes

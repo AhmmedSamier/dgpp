@@ -1,0 +1,26 @@
+{
+  "name": "final_baseline",
+  "threads": null,
+  "objective": false,
+  "global_stage": false,
+  "full_tiers": false,
+  "classes": "all",
+  "concurrency": "1,6",
+  "repeat": 3,
+  "tokens": 256,
+  "prefill": true,
+  "chunk": null,
+  "gates": true,
+  "knobs": "",
+  "bin": "/home/stephen/workspace/dgpp/build-ci/dgpp-serve",
+  "plain": false,
+  "binary": "/home/stephen/workspace/dgpp/build-ci/dgpp-serve",
+  "binary_sha256": "329bf507a947d348ac629d35d7d251800435f0fa66e726314090303958482663",
+  "git_base": "f01e94790b3a3ea9ea3bd1efd4a909cd1d6227b7",
+  "startup": [
+    "2026-09-16 19:02:35.024 INFO  rank 0: memory plan total 76.64 GiB (75.05 GiB device + 1.59 GiB pinned) + 4.00 GiB headroom against 115.77 GiB free (device free 89.81 GiB of 121.63 GiB, host available 115.77 GiB)",
+    "2026-09-16 19:02:55.114 INFO  rank 0: model constructed in 20.1s (resident, 6 request slots, 131072-token pool in fp4_block main + fp8_block window, 2048-row forwards)",
+    "2026-09-16 19:02:55.165 INFO  rank 0: scheduled verify depth on \u2014 options [1,3,4] of the 4-draft block (threshold: prefix survival > 0.360 = 0.0450 tok/ms x 8.00 ms/row; lambda adaptive over base 28.0 + rows x row ms, floored there), greedy slots only; the confidence is the model's confidence head",
+    "2026-09-16 19:02:56.259 INFO  rank 0: graph variants warm-captured in 1.09s"
+  ]
+}

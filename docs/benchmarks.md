@@ -561,9 +561,33 @@ The current eight-row step is 159.0 ms. C1/C2 remain within run noise of the
 previous lowering; C4 gains 1–9%. The packed-prefill change on September 15
 starts at 128 rows and leaves these decode kernels unchanged.
 
+### DeepSeek-V4.1-Flash MXFP4/FP8, world 4 (2026-09-16)
+
+The common five-class service corpus, three repetitions at a 256-token cap,
+temperature zero, thinking disabled and six configured slots. Values are
+medians in tokens/s; wall rates include admission and prefill, while engine
+rates use the scheduler's decode time and exclude the first token.
+
+| class | C1 wall | C6 wall | C1 engine decode | C6 engine decode |
+|---|---:|---:|---:|---:|
+| prose | 38.88 | 87.55 | 39.84 | 90.89 |
+| code | 58.70 | 105.07 | 61.57 | 109.34 |
+| json | 71.01 | 120.82 | 74.96 | 126.65 |
+| math | 59.35 | 105.45 | 62.47 | 110.11 |
+| chat | 43.98 | 86.83 | 45.30 | 90.27 |
+
+The retained changes size the graph collective consumer by payload and use
+4,096-token prefill chunks. Against the original binary, the five-class
+geometric mean improved 1.3% for C6 engine decode and 1.6% for C6 client wall
+throughput; C1 was effectively flat. C6 chat's median was lower, so this is a
+workload-dependent gain. The [matched study](../benchmarks/results/2026-09-16-dsv41-perf/README.md)
+contains every baseline, sample, correctness gate and rejected experiment.
+Weight and KV precision are unchanged. Do not compare this corpus with the
+historical external-recipe table below.
+
 ### DeepSeek-V4.1-Flash MXFP4/FP8, world 4 (2026-09-14)
 
-The current six-slot deployment was measured with the vLLM DGX Spark recipe's
+The six-slot deployment at that recorded revision was measured with the vLLM DGX Spark recipe's
 prompt set and client, temperature zero and thinking disabled. These are
 aggregate decode rates after the first token:
 
@@ -597,6 +621,12 @@ records contain each actual tokenizer count.
 | Qwen3.8-Flash-Next-FP8, world 2 | **1.299 s** | **5.108 s** | **21.168 s** | 2026-09-15 |
 | Qwen3.8-Flash-Next-NVFP4, world 2, mmap n-gram | **1.241 s** | **4.870 s** | **20.286 s** | 2026-09-16 |
 | full GLM-5.3 int4/int8, world 4 | **6.111 s** | **40.838 s** | **350.069 s** | 2026-09-15 |
+| DeepSeek-V4.1-Flash MXFP4/FP8, world 4 | **1.599 s** | **5.726 s** | — | 2026-09-16 |
+
+DeepSeek's 4,096-token chunk reduced matched ~8,400-token prefill time by 3.7%
+(5.945 to 5.726 seconds), reserving 1.71 GiB more scratch per rank. The
+[study](../benchmarks/results/2026-09-16-dsv41-perf/README.md) includes the
+repeated chunk sweep and exact long-prompt output comparisons.
 
 Qwen's current QSA kernel runs at 0.637, 0.634 and 0.656 ms per actual prompt
 token at the three sizes. It starts at 128 prefill rows; decode, speculative

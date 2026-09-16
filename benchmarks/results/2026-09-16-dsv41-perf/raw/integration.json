@@ -1,0 +1,16 @@
+{
+  "implementation_commits": [
+    "8c098f0",
+    "24cf664"
+  ],
+  "head_checkout": "/home/stephen/workspace/dgpp",
+  "built_target": "dgpp_serve_app",
+  "serving_binary_sha256": "78d975a17ead222471f6c8750de48258639c0cc831991eb535892313295a11c9",
+  "preserved_baseline_sha256": "329bf507a947d348ac629d35d7d251800435f0fa66e726314090303958482663",
+  "restored_model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "restored_http_status": 200,
+  "restored_smoke_completion_tokens": 16,
+  "restored_glm_uses_original_running_binary": true,
+  "preexisting_modified_file_preserved": "dgx-spark-forum-post.md",
+  "preexisting_file_sha256": "d9c54501d319de77608fed565c7d0f57ce0df73daaded917a51ddd13f53eae6a"
+}

@@ -1,0 +1,226 @@
+[
+  {
+    "trial": 0,
+    "threads": 0,
+    "bytes": 61440,
+    "global_stage": false,
+    "ranks": [
+      {
+        "rank": 0,
+        "min_us": 62.1,
+        "p50_us": 62.7
+      },
+      {
+        "rank": 1,
+        "min_us": 62.1,
+        "p50_us": 62.7
+      },
+      {
+        "rank": 2,
+        "min_us": 62.0,
+        "p50_us": 62.7
+      },
+      {
+        "rank": 3,
+        "min_us": 62.0,
+        "p50_us": 62.7
+      }
+    ]
+  },
+  {
+    "trial": 0,
+    "threads": 0,
+    "bytes": 153600,
+    "global_stage": false,
+    "ranks": [
+      {
+        "rank": 0,
+        "min_us": 102.9,
+        "p50_us": 103.8
+      },
+      {
+        "rank": 1,
+        "min_us": 103.0,
+        "p50_us": 103.8
+      },
+      {
+        "rank": 2,
+        "min_us": 102.8,
+        "p50_us": 103.8
+      },
+      {
+        "rank": 3,
+        "min_us": 103.1,
+        "p50_us": 103.8
+      }
+    ]
+  },
+  {
+    "trial": 0,
+    "threads": 0,
+    "bytes": 307200,
+    "global_stage": false,
+    "ranks": [
+      {
+        "rank": 0,
+        "min_us": 173.5,
+        "p50_us": 174.7
+      },
+      {
+        "rank": 1,
+        "min_us": 173.3,
+        "p50_us": 174.7
+      },
+      {
+        "rank": 2,
+        "min_us": 173.7,
+        "p50_us": 174.7
+      },
+      {
+        "rank": 3,
+        "min_us": 173.6,
+        "p50_us": 174.7
+      }
+    ]
+  },
+  {
+    "trial": 0,
+    "threads": 0,
+    "bytes": 768000,
+    "global_stage": false,
+    "ranks": [
+      {
+        "rank": 0,
+        "min_us": 386.4,
+        "p50_us": 388.6
+      },
+      {
+        "rank": 1,
+        "min_us": 386.4,
+        "p50_us": 388.4
+      },
+      {
+        "rank": 2,
+        "min_us": 386.7,
+        "p50_us": 388.4
+      },
+      {
+        "rank": 3,
+        "min_us": 386.8,
+        "p50_us": 388.3
+      }
+    ]
+  },
+  {
+    "trial": 1,
+    "threads": 1024,
+    "bytes": 61440,
+    "global_stage": false,
+    "ranks": [
+      {
+        "rank": 0,
+        "min_us": 65.0,
+        "p50_us": 65.5
+      },
+      {
+        "rank": 1,
+        "min_us": 64.9,
+        "p50_us": 65.6
+      },
+      {
+        "rank": 2,
+        "min_us": 64.8,
+        "p50_us": 65.5
+      },
+      {
+        "rank": 3,
+        "min_us": 64.9,
+        "p50_us": 65.5
+      }
+    ]
+  },
+  {
+    "trial": 1,
+    "threads": 1024,
+    "bytes": 153600,
+    "global_stage": false,
+    "ranks": [
+      {
+        "rank": 0,
+        "min_us": 102.8,
+        "p50_us": 103.6
+      },
+      {
+        "rank": 1,
+        "min_us": 102.9,
+        "p50_us": 103.7
+      },
+      {
+        "rank": 2,
+        "min_us": 102.9,
+        "p50_us": 103.7
+      },
+      {
+        "rank": 3,
+        "min_us": 102.9,
+        "p50_us": 103.7
+      }
+    ]
+  },
+  {
+    "trial": 1,
+    "threads": 1024,
+    "bytes": 307200,
+    "global_stage": false,
+    "ranks": [
+      {
+        "rank": 0,
+        "min_us": 173.7,
+        "p50_us": 174.8
+      },
+      {
+        "rank": 1,
+        "min_us": 173.8,
+        "p50_us": 174.8
+      },
+      {
+        "rank": 2,
+        "min_us": 173.7,
+        "p50_us": 174.8
+      },
+      {
+        "rank": 3,
+        "min_us": 173.7,
+        "p50_us": 174.8
+      }
+    ]
+  },
+  {
+    "trial": 1,
+    "threads": 1024,
+    "bytes": 768000,
+    "global_stage": false,
+    "ranks": [
+      {
+        "rank": 0,
+        "min_us": 385.9,
+        "p50_us": 387.9
+      },
+      {
+        "rank": 1,
+        "min_us": 385.9,
+        "p50_us": 387.9
+      },
+      {
+        "rank": 2,
+        "min_us": 385.1,
+        "p50_us": 387.7
+      },
+      {
+        "rank": 3,
+        "min_us": 386.1,
+        "p50_us": 387.8
+      }
+    ]
+  }
+]

@@ -1,0 +1,25 @@
+{
+  "name": "final_plain",
+  "threads": null,
+  "objective": false,
+  "global_stage": false,
+  "full_tiers": false,
+  "classes": "code",
+  "concurrency": "1",
+  "repeat": 1,
+  "tokens": 64,
+  "prefill": false,
+  "chunk": null,
+  "gates": true,
+  "knobs": "",
+  "bin": null,
+  "plain": true,
+  "binary": "/home/stephen/workspace/dgpp-dsv41-perf/build-ci/dgpp-serve",
+  "binary_sha256": "dfa3d3f2051ce2cdeb801989be88570597f97cc5e189f0339877049da986b292",
+  "git_base": "f01e94790b3a3ea9ea3bd1efd4a909cd1d6227b7",
+  "startup": [
+    "2026-09-16 19:17:05.669 INFO  rank 0: memory plan total 75.52 GiB (73.92 GiB device + 1.60 GiB pinned) + 4.00 GiB headroom against 115.78 GiB free (device free 86.65 GiB of 121.63 GiB, host available 115.78 GiB)",
+    "2026-09-16 19:17:25.631 INFO  rank 0: model constructed in 20.0s (resident, 6 request slots, 131072-token pool in fp4_block main + fp8_block window, 4096-row forwards)",
+    "2026-09-16 19:17:26.479 INFO  rank 0: graph variants warm-captured in 0.80s"
+  ]
+}

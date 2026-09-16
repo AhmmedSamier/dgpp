@@ -1,0 +1,12 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp-dsv41-perf/build-ci
+Test project /home/stephen/workspace/dgpp-dsv41-perf/build-ci
+    Start 104: bus_test
+1/1 Test #104: bus_test .........................   Passed   35.40 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Label Time Summary:
+gpu     =  35.40 sec*proc (1 test)
+rdma    =  35.40 sec*proc (1 test)
+
+Total Test time (real) =  35.40 sec

@@ -1,0 +1,4 @@
+chat   256 tokens    8.94 s    34.9 ms/token (wall, prefill included) length | We need answer. Need explain CUDA graph replay faster than e
+code   256 tokens    8.89 s    34.7 ms/token (wall, prefill included) length | We need answer user asks: "Write a Python function that pars
+math   256 tokens    9.06 s    35.4 ms/token (wall, prefill included) length | We need answer. Need solve. Need be careful: Train A leaves 
+json   256 tokens    9.01 s    35.2 ms/token (wall, prefill included) length | We need answer only JSON array of 8 objects fields country, 

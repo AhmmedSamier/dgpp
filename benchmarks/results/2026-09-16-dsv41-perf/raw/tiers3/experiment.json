@@ -1,0 +1,16 @@
+{
+  "name": "tiers3",
+  "threads": 0,
+  "objective": false,
+  "global_stage": false,
+  "full_tiers": false,
+  "classes": "code,prose",
+  "concurrency": "1,6",
+  "repeat": 2,
+  "tokens": 256,
+  "prefill": true,
+  "chunk": 2048,
+  "gates": false,
+  "knobs": "",
+  "bin": null
+}

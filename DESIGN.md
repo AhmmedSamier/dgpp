@@ -552,13 +552,19 @@ interfaces that make replay-stable what capture bakes:
   kernels, so at most one generation is un-done at a time — a single-flight
   state machine, not a queue. Arm waits for the previous window's walk
   (bounded); finish joins the walk and returns the verdict.
-- *The era.* Up to 32 graph variants share one bus era, with disjoint cell
+- *The era.* Up to 64 graph variants share one bus era, with disjoint cell
   slabs and write-once node metadata. Harness sends close at the first
   `record_begin`. Eager collectives reject while a variant records or a
   replay window is armed, but run between windows (prefill and its first
   pick need this). Graph reservations and eager pickups share one monotonic
   generation counter, keeping ring positions execution-ordered across shape
   switches.
+- *Consumer width.* Graph all-reduce uses one block of 256 threads below
+  32 KiB, 512 below 128 KiB, and 1,024 for larger payloads. Wider blocks expose
+  more system-memory loads while keeping the placement proof and canonical
+  rank-order arithmetic unchanged. The
+  [four-node study](benchmarks/results/2026-09-16-dsv41-perf/README.md)
+  records the payload latency sweep and serving validation.
 - *Slot ownership without requests.* Graph posts carry no `BusRequest`,
   but the SendSlot/credit machinery is request-shaped — a per-window
   carrier request (unregistered, `is_collective`) gives the posts owners so
