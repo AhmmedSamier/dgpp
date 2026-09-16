@@ -211,7 +211,8 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
 
  private:
   static constexpr int kBlockTokens = 128;
-  static constexpr int kPrefillChunkTokens = 2048;
+  // Amortize prefill launches while bounding scratch growth on four GB10s.
+  static constexpr int kPrefillChunkTokens = 4096;
   static constexpr int kDecodeSplit = 32;
   static constexpr size_t kDotBudget = 64ull << 20;
   static constexpr int kRingSlots = 160;
