@@ -102,7 +102,7 @@ template, which is what "supported" means on this page:
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 4 | `cluster_qwen-3.8-flash-next_fp8_w4.example.json` | T=1 (`--no-mtp`), MTP depth 1, depth 2 (`--mtp-depth 2`) |
 | `Qwen/Qwen3.8-Flash-Next-FP8` | 2 | `cluster_qwen-3.8-flash-next_fp8_w2.example.json` | T=1, MTP depth 1, depth 2 |
 | `nvidia/Qwen3.8-Flash-Next-NVFP4` | 1 | `cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` (the FP8 dense stack; `--dense-weights checkpoint` for BF16) | T=1, MTP depth 1, depth 2; BF16 or FP8 dense stack |
-| `nvidia/Qwen3.8-Flash-Next-NVFP4` | 2 | `cluster_qwen-3.8-flash-next_nvfp4_w2.example.json` (FP8 dense stack, mmap n-gram table, 262K context) | MTP depth 1; resident and mmap n-gram placement |
+| `nvidia/Qwen3.8-Flash-Next-NVFP4` | 2 | `cluster_qwen-3.8-flash-next_nvfp4_w2.example.json` (FP8 dense stack, mmap n-gram table, 262K context) | MTP depth 1; mmap is shipped, resident is the measured placement baseline |
 | `nvidia/GLM-4.7-NVFP4` | 4 | `cluster_glm-4.7_nvfp4_w4.example.json` | T=1, MTP depth 1, depth 2 |
 | `HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64` (the full GLM-5.3) | 4 | `cluster_glm-5.3_int4-int8_w4.example.json` (eight slots; the fp8 latent cache at 208K: `--knobs "--kv-dtype fp8 --kv-capacity 212992 --prefix-cache-gib 1.5"`) | T=1, MTP depth 1, depth 2 (two slots); bf16 or fp8 latent cache |
 | `deepseek-ai/DeepSeek-V4.1-Flash` | 4 | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` (six slots at DSpark depth 4; the two-slot depth-5 shape: `--knobs "--max-concurrency 2 --mtp-depth 5"`) | T=1, DSpark depths 4 and 5 with the scheduled verify depth |
@@ -192,7 +192,7 @@ BF16 stack's after 170–316 characters at equal eval scores (§7).
 Depth 2 on the FP8 world is the only place in this project where depth 2 is
 worth setting, and only for some classes: see §4.
 
-### Qwen3.8-Flash-Next-NVFP4, world 2, FP8 dense (2026-09-16)
+### Qwen3.8-Flash-Next-NVFP4, world 2, FP8 dense, mmap n-gram (2026-09-16)
 
 | class | ms/pass | tok/pass | ms/token | tokens/s |
 |---|---:|---:|---:|---:|
@@ -202,12 +202,13 @@ worth setting, and only for some classes: see §4.
 | math | 25 | 1.83 | 13.6 | 73.8 |
 | chat | 26 | 1.59 | 16.1 | 62.1 |
 
-The shipped recipe maps the n-gram table from NVMe. Against the otherwise
-identical resident-table configuration, mmap adds about 1 ms per pass while
-preserving each class's draft acceptance and greedy transcript. It saves
-23.84 GiB per rank, reducing the planned model footprint from 60.34 to
-36.50 GiB. The [matched placement campaign](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
-contains the repeated decode, prefill, memory and quality results.
+The current recipe maps the n-gram table from NVMe. It uses 36.50 GiB of
+planned model memory per rank, 23.84 GiB less than the otherwise identical
+resident placement. The matched resident baseline has the same draft
+acceptance and greedy transcripts. Mmap changes request-wall throughput by at
+most 3.6% and prefill time by at most 2.9%. The
+[two-Spark result](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md) contains
+the repeated decode, prefill, memory and quality measurements.
 
 ### GLM-4.7-NVFP4, world 4
 
@@ -507,10 +508,9 @@ time. The separate output-span C4 range is 120.1–138.9 tok/s.
 | math | 70.9 | 107.8 | 132.7 | 13.6 |
 | chat | 61.5 | 96.6 | 119.0 | 16.1 |
 
-Compared with the resident-table baseline, mmap changes median request-wall
-throughput by −0.8 to −1.5% at C1, −0.4 to −1.6% at C2 and −0.2 to −3.6% at
-C4. All five C1 transcripts match byte for byte. That small cost buys back
-23.84 GiB per rank, so mmap is the deployment default.
+The current mmap placement is within 0.8–1.5% of the resident baseline at C1,
+0.4–1.6% at C2 and 0.2–3.6% at C4. All five C1 transcripts match byte for
+byte. Mmap saves 23.84 GiB per rank and is the deployment default.
 
 ### Qwen3.8-Flash-Next-NVFP4, world 1, FP8 dense
 
@@ -696,10 +696,9 @@ The current snapshot still has these gaps:
    C1/MTP behavior; lowering it requires service and numerical evidence.
    This campaign does not add a soak, failure drill or sampled sweep.
 
-The September 15 and 16 campaigns closed the two-Spark Qwen service-prefill
-and 32K gaps, added current 2K/8K/32K full-GLM service figures, and measured
-DeepSeek at six live requests. Their dated records retain the before/after
-history.
+The current tables include two-Spark Qwen service prefill through 32K,
+2K/8K/32K full-GLM service prefill and DeepSeek at six live requests. The
+dated records provide the exact workloads and reproduction commands.
 
 ## 9. Reproducing all of it
 

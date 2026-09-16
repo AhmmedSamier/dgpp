@@ -24,16 +24,19 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | GLM-5.3-Flash | [unsloth/GLM-5.3-Flash-FP8](https://huggingface.co/unsloth/GLM-5.3-Flash-FP8) | 4 | Copy the [base template](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json) to `cluster_glm-5.3-flash_fp8_w4.json` and set `model` to the linked FP8 repository |
 | GLM-5.3-Flash (hybrid) | [HawkBearPig/GLM-5.3-Flash-NVFP4-FP8](https://huggingface.co/HawkBearPig/GLM-5.3-Flash-NVFP4-FP8) | 2, 4 | [Two nodes](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json), [four nodes](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json) |
 | Qwen3.8-Flash-Next | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8) | 2, 4 | [Two nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w2.example.json), [four nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json) |
-| Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1, 2 | [One node](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json), [two nodes](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2.example.json) (the dense projections FP8 at load) |
+| Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1, 2 | [One node](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json), [two nodes](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2.example.json) (mapped n-gram table, dense projections FP8 at load) |
 | GLM-4.7 | [nvidia/GLM-4.7-NVFP4](https://huggingface.co/nvidia/GLM-4.7-NVFP4) | 4 | [Four nodes](deploy/cluster_glm-4.7_nvfp4_w4.example.json) |
 | GLM-5.3 | [HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64](https://huggingface.co/HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64) | 4 | [Four nodes](deploy/cluster_glm-5.3_int4-int8_w4.example.json) |
 | DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) |
 
 The Qwen NVFP4 templates use `engine.ngram_table: "mmap"` to read the
 n-gram table from NVMe, `engine.decode_graph: true` for resident graph serving,
-and `engine.dense_weights: "fp8"` to encode dense projections at load. Use
-`--dense-weights checkpoint` to retain the checkpoint's BF16 dense stack. See
-[the single-node guide](docs/qwen38_single_spark.md) for details.
+and `engine.dense_weights: "fp8"` to encode dense projections at load. On two
+Sparks, mapping saves 23.84 GiB per rank while staying within 3.6% of resident
+decode throughput and 2.9% of resident prefill time in the matched campaign.
+Use `--dense-weights checkpoint` to retain the checkpoint's BF16 dense stack.
+See the [single-node guide](docs/qwen38_single_spark.md) and
+[two-node benchmark](benchmarks/results/2026-09-16-qwen-nvfp4-w2.md).
 
 The GLM-5.3 hybrid takes the main-stack routed experts from
 [dabsLabs](https://huggingface.co/dabsLabs/GLM-5.3-Flash-NVFP4) and the
@@ -94,21 +97,23 @@ These are the latest measurements for representative shipped configurations.
 See [the benchmark tables](docs/benchmarks.md) for the complete per-model and
 per-class results, measurement scopes and reproduction commands.
 
-| configuration | single-request decode | loaded decode | cold service prefill at ~2K / 8K / 32K |
+| configuration | single-request engine decode | loaded request-wall decode | cold service prefill at ~2K / 8K / 32K |
 |---|---:|---:|---:|
 | GLM-5.3-Flash-FP8, 4 Sparks | 42.2–48.7 tok/s | 62.2–67.5 tok/s at C4 | 2.211 / 9.165 / 58.555 s |
 | GLM-5.3-Flash NVFP4/FP8, 4 Sparks | 50.3–58.5 tok/s | 94.5–104.2 tok/s at C4 | 2.210 / 11.374 / 93.765 s |
 | GLM-5.3-Flash NVFP4/FP8, 2 Sparks | 22.7–33.0 tok/s | 38.9–47.3 tok/s at C4 | 2.724 / 11.881 / — |
 | Qwen3.8-Flash-Next-FP8, 4 Sparks | 63.2–77.7 tok/s by class | 142.1–167.3 tok/s at C4 | — |
 | Qwen3.8-Flash-Next-FP8, 2 Sparks | 41.7–49.6 tok/s by class | 69.3–83.2 tok/s at C4 | 1.299 / 5.108 / 21.168 s |
-| Qwen3.8-Flash-Next-NVFP4, 2 Sparks | **62.1–74.9 tok/s by class** | **119.0–136.9 tok/s at C4** | **1.241 / 4.870 / 20.286 s** |
+| Qwen3.8-Flash-Next-NVFP4, 2 Sparks, mapped n-gram | **62.1–74.9 tok/s by class** | **119.0–136.9 tok/s at C4** | **1.241 / 4.870 / 20.286 s** |
 | Qwen3.8-Flash-Next-NVFP4, 1 Spark | 42.6–50.3 tok/s by class | 69.4–83.7 tok/s at C4 | — |
 | GLM-4.7-NVFP4, 4 Sparks | 29.5–33.3 tok/s by class | 62.7–68.7 tok/s at C4 | 2.809 / 16.865 / — |
 | full GLM-5.3 int4/int8, 4 Sparks | 25.4–29.2 tok/s by class | 42.3–47.0 tok/s at C4 | 6.111 / 40.838 / 350.069 s |
 | DeepSeek-V4.1-Flash MXFP4/FP8, 4 Sparks | 49.64 aggregate tok/s | 108.49 aggregate tok/s at C6 | 1,383 prompt tok/s on its 2,950-token cold prompt |
 
 Except for DeepSeek, decode ranges are the five prompt classes and prefill is
-the cold HTTP service path. Qwen's newest cold-service campaigns were run at two
+the cold HTTP service path. The single-request column uses the server's retired
+decode work, while the loaded column includes full request wall time. Qwen's
+newest cold-service campaigns were run at two
 Sparks; the four-Spark and single-Spark service prefills have not been re-run
 on the current path. DeepSeek uses the vLLM DGX Spark recipe's client and
 prompt set, with different aggregate and per-stream timing scopes, so compare
@@ -372,7 +377,7 @@ first; change one setting at a time and measure the effect on your workload.
 | `engine.mtp_schedule_row_ms`, `engine.mtp_schedule_base_ms` | no | Cost model for scheduled verification: milliseconds for another verify row and fixed work per pass. These values are deployment measurements; retain the DeepSeek template values unless re-profiling that world. | 8.0 / 28.0 |
 | `engine.mtp_schedule_lambda`, `engine.mtp_schedule_min_depth`, `engine.mtp_schedule_adapt` | no | Floor for the value of decode time in tokens/ms, minimum verified draft depth, and whether the value adapts from committed tokens and modeled time. Lambda 0 derives the reservation rate. | 0 / 1 / true |
 | `engine.prefill` | no | DeepSeek prefill mode: `bounded` runs every prompt row through the encoder and only the final window through the decoder; `exact` runs every layer over every row for parity work. Other families ignore it. | `bounded` |
-| `engine.ngram_table` | no | Qwen n-gram embedding-table placement. `resident` keeps it in device-accessible memory; `mmap` leaves it on local NVMe and fetches needed rows through the host page cache. Use `mmap` for the single-Spark template to fit the model. DeepSeek's Engram tables use their own mapped checkpoint sidecar. | `resident` |
+| `engine.ngram_table` | no | Qwen n-gram embedding-table placement. `resident` keeps it in device-accessible memory; `mmap` leaves it on local NVMe and fetches needed rows through the host page cache. Both shipped Qwen NVFP4 templates use `mmap`; the two-Spark campaign measured at most 3.6% lower decode throughput for 23.84 GiB less planned model memory per rank. DeepSeek's Engram tables use their own mapped checkpoint sidecar. | `resident` |
 | `engine.dense_weights` | no | Qwen dense-projection storage. `checkpoint` retains the checkpoint's BF16 form; `fp8` converts dense projections at load time to reduce their memory footprint, with quantization error. Does not select another HF repository or change the expert quant; other families ignore it. | `checkpoint` |
 | `engine.graph_batch_min_live` | no | Active-request count at which decode switches from scalar to batched graphs. A lower threshold starts batching earlier; batching may improve throughput while doing extra padded-row work. 0 chooses min(2, `max_concurrency`); explicit values must be 1 through `max_concurrency`. | 0 (automatic) |
 | `engine.sampling_candidates` | no | Number of candidate tokens gathered per rank on the sampled-token fast path, 1–256. Smaller values reduce routine work but may trigger more full-gather fallbacks. The fallback preserves sampling correctness; this is not the client's `top_k` parameter. | 128 |
@@ -445,7 +450,7 @@ config.
 | `docs/performance_improvement_plan.md` | current performance findings, completed changes and next measured targets |
 | `DESIGN.md` | architecture and implementation contracts |
 | `PLAN.md` | the milestones, their exit gates and status |
-| `benchmarks/README.md`, `benchmarks/results/` | the probes, and the dated engineering record of every measurement and fix |
+| `benchmarks/README.md`, `benchmarks/results/` | benchmark probes, dated results and reproduction commands |
 | `CHANGELOG.md` | the history by milestone |
 
 ## Contributing
