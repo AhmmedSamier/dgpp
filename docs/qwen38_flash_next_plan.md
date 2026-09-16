@@ -1,11 +1,13 @@
 # Qwen3.8-Flash-Next-FP8 on dgpp — architecture study and implementation plan (2026-09-09)
 
-> Single-Spark deployment (2026-09-10): the NVFP4 checkpoint with the n-gram table mmap'ed from the NVMe and the graph engine at world 1 — `docs/qwen38_single_spark.md`.
+> NVFP4 deployments: the [single-Spark guide](qwen38_single_spark.md) covers
+> world 1, and the [two-Spark benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
+> covers world 2. Both map the n-gram table from NVMe and use the graph engine.
 
 Status: the text path is implemented, including tensor-parallel loading,
 GDN/QSA/GR/PLE operators, decode sessions, prefix caching, graph serving
-and MTP. FP8 serving is measured at TP=2 and TP=4; the companion
-[single-Spark guide](qwen38_single_spark.md) covers NVFP4 at world 1.
+and MTP. FP8 serving is measured at TP=2 and TP=4. NVFP4 serving is measured
+at TP=1 and TP=2.
 
 This document combines the architecture study with the dated port and
 optimization record. Its cost model describes the FP8 checkpoint with

@@ -116,10 +116,12 @@ affect the results.
 | [mtp_depth_check.py](mtp_depth_check.py) | Writes separate prose, code, and JSON completions and prints acceptance information from a rank-0 log. | Collect outputs from separate MTP-depth launches for a directory diff. |
 | [serve_eval.py](serve_eval.py) | Scores HumanEval, GSM8K, and synthetic structured extraction, saving per-item results and summaries. | Compare task accuracy between deployments. HumanEval executes generated code; GSM8K and HumanEval require local datasets. |
 | [serve_prefill_probe.py](serve_prefill_probe.py) | Calibrates approximate prompt lengths, defeats prefix reuse with unique prefixes, and measures prefill metric deltas and first-token latency. | Isolate prefill cost through HTTP; requires `DGPP_DATA_DIR/gsm8k_test.jsonl`, or `--data FILE`. |
+| [serve_prefill_interference.py](serve_prefill_interference.py) | Runs a long prefill beside an active decode stream and reports the decode client's update-gap distribution. | Measure how budgeted prefill affects an overlapping request on an otherwise idle server. |
 | [serve_prefix_curve.py](serve_prefix_curve.py) | Interleaves three-turn conversations and reports cache hits, misses, evictions, saved tokens, and per-turn latency. | Measure prefix-cache capacity at a chosen conversation count. |
 | [serve_agentic_streams.py](serve_agentic_streams.py) | Runs concurrent multi-turn tool or essay conversations, optional side requests, and system-prompt mutations; records cache reuse and timing. | Check prefix reuse under agent-style traffic and detect unexpected cache misses. Tool results are synthetic. |
 | [serve_soak.py](serve_soak.py) | Runs timed mixed traffic: short conversations, long answers, disconnected streams, and admission bursts; saves requests, metrics, and latency summaries. | Test sustained serving behavior and tail-latency stability. |
 | [step_probe.py](step_probe.py) | Sends streamed requests at selected context sizes, optionally with tool schemas, and joins their timing with rank-0 decode-step counts. | Separate token pace from engine step cost on an idle service; requires access to its rank-0 log. |
+| [serve_c1_probe.py](serve_c1_probe.py) | Brackets each single-request run with scheduler counters and separates engine-call time from client-visible stream timing. | Measure repeated C1 engine throughput by prompt class on an idle server. |
 
 ## Serving lifecycle, stress, and sweep procedures
 
@@ -153,10 +155,12 @@ refresh a SQLite export, and `width_sweep_collect.py` appends to its output TSV.
 | File | What it does | When to use it |
 | --- | --- | --- |
 | [fabric_logs.py](fabric_logs.py) | Shared parsers for generation, teacher-forcing, and sampling-mass records in `rN.log`, plus a bf16 rounding helper. | Import it when adding fabric-log analysis; it is a library, not a report command. |
+| [bench_stream.py](bench_stream.py) | Parses benchmark SSE streams and computes shared request-wall and output-span metrics. | Import it from serving benchmark clients that need consistent streaming measurements. |
 | [fabric_xcript.py](fabric_xcript.py) | Compares two fabric transcripts and reports the first divergence with the global top-two logit margin. | Investigate whether changed greedy output occurs at a near-tied pick. |
 | [fabric_logprob.py](fabric_logprob.py) | Joins teacher-forced rank logs to compute negative log-likelihood, perplexity, and top-1 accuracy, with optional reference thresholds. | Evaluate numerical changes on the same teacher text and prompt. |
 | [fabric_sampling_profile.py](fabric_sampling_profile.py) | Validates cross-rank sampling-mass records and selects the smallest measured top-k width meeting a fallback-rate bound. | Size distributed sampling from complete `--sampling-profile` teacher runs. |
 | [fabric_step_times.py](fabric_step_times.py) | Reads rank-0 generation timestamps, skips warmup, and reports mean and tail step times with any MTP summary. | Compare steady-state engine timing across saved fabric runs. |
+| [bench_compare.py](bench_compare.py) | Compares matched `serve_load.py` JSON reports, checks exact C1 greedy transcripts, and reports median rate changes. | Gate a repeated baseline/candidate benchmark with an explicit slowdown tolerance. |
 | [fabric_xrank.py](fabric_xrank.py) | Aligns rank logs by collective generation and reports step timing, host gaps, stalls, and lagging ranks; can correlate node probes. | Diagnose cross-rank latency imbalance. Record the run with `DGPP_LOG_LEVEL=debug`. |
 | [bus_window_skew.py](bus_window_skew.py) | Summarizes per-rank collective copy, handshake, skew, and fold timings, wait histograms, and peer lag. | Analyze collected bus timelines; `DGPP_BUS_TIMELINE=1` records them at INFO level without full debug logging. |
 | [nsys_step_breakdown.py](nsys_step_breakdown.py) | Exports a Nsight Systems report to SQLite and groups GPU kernel time by decode step or by the final kernel burst. | Find expensive kernels in a saved profile; use `--burst` for a prefill-oriented view. |

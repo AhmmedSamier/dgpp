@@ -34,7 +34,7 @@ its node.
 | `cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json` | GLM-5.3-Flash NVFP4/FP8 hybrid, four nodes, MTP depth 1, bf16 latent cache, 768K context, an 8 GiB prefix arena |
 | `cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json` | the same hybrid on two nodes, FP8 latent cache, 160K context on four request slots |
 | `cluster_qwen-3.8-flash-next_fp8_w{2,4}.example.json` | Qwen FP8 with MTP depth 1, four or two nodes |
-| `cluster_qwen-3.8-flash-next_nvfp4_w1.example.json` | Qwen NVFP4 on one Spark, MTP depth 1, the dense projections FP8 at load, a mapped n-gram table |
+| `cluster_qwen-3.8-flash-next_nvfp4_w{1,2}.example.json` | Qwen NVFP4 on one or two Sparks, MTP depth 1, the dense projections FP8 at load, a mapped n-gram table |
 | `cluster_glm-4.7_nvfp4_w4.example.json` | GLM-4.7 NVFP4, four nodes, MTP depth 1 |
 | `cluster_glm-5.3_int4-int8_w4.example.json` | the full GLM-5.3 (int4/int8 RTN), four nodes, MTP depth 1, eight request slots, 120K bf16 context, the embedding vocab-sharded |
 | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash as shipped, four nodes, six request slots, DSpark depth 4 with the scheduled verify depth, the bounded prefill, 128K context |
@@ -48,8 +48,10 @@ and the knobs that reproduce them).
 
 `kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
 caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings
-control table residency and optional FP8 encoding of dense projections;
-see [the single-node guide](qwen38_single_spark.md).
+control table residency and optional FP8 encoding of dense projections.
+The [single-node guide](qwen38_single_spark.md) covers the one-Spark memory
+plan, and the [two-node benchmark](../benchmarks/results/2026-09-16-qwen-nvfp4-w2.md)
+records the resident-versus-mapped placement decision.
 
 ```bash
 scripts/dgpp-cluster up --config deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json

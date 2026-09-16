@@ -59,6 +59,16 @@ Fixture write_fixture() {
   return fx;
 }
 
+Fixture write_nvfp4_fixture() {
+  Fixture fx;
+  fx.cfg = qwenfx::tiny_nvfp4_config();
+  fx.dir = (fs::current_path() / "qwen_loader_nvfp4_fixture").string();
+  qwenfx::write_fixture(fx.cfg, fx.dir, qwenfx::tiny_text_json(),
+                        qwenfx::tiny_nvfp4_quant_json());
+  fx.table = dgpp::qwen_expected_text_tensors(fx.cfg);
+  return fx;
+}
+
 std::vector<uint8_t> device_bytes(const void* dev, size_t n) {
   std::vector<uint8_t> h(n);
   DGPP_CUDA_OK(cudaMemcpy(h.data(), dev, n, cudaMemcpyDeviceToHost));
@@ -423,6 +433,20 @@ DGPP_TEST(qwen_loader_mmap_ngram_table_reads_the_shards_rows) {
                   "gathered row");
         }
     }
+  }
+}
+
+DGPP_TEST(qwen_loader_nvfp4_metadata_is_replicated_at_world_two) {
+  const Fixture fx = write_nvfp4_fixture();
+  require(fx.cfg.experts_nvfp4, "the fixture selects NVFP4 experts");
+  for (int rank = 0; rank < 2; ++rank) {
+    QwenLayerStream s(fx.cfg, fx.dir, rank, 2, dgpp::QwenResidency::Streaming,
+                      dgpp::QwenHeadSharding::VocabSharded);
+    const auto& layer = s.load_layer(0);
+    require(layer.moe.nvfp4(), "the backbone experts stay NVFP4");
+    require(layer.moe.experts_fp4.size() == static_cast<size_t>(fx.cfg.num_experts) * 3,
+            "every local NVFP4 expert matrix is present");
+    require(layer.moe.expert_globals != nullptr, "the replicated weight scales are loaded");
   }
 }
 

@@ -13,7 +13,7 @@ The answer so far has been encouraging. On several models, DGPP is running faste
 ## Models currently supported
 
 - **Qwen3.8-Flash-Next FP8** on two or four Sparks
-- **Qwen3.8-Flash-Next NVFP4** on one Spark
+- **Qwen3.8-Flash-Next NVFP4** on one or two Sparks
 - **GLM-5.3-Flash FP8** on four Sparks
 - **GLM-5.3-Flash NVFP4/FP8** on two or four Sparks
 - **GLM-4.7 NVFP4** on four Sparks
@@ -40,6 +40,7 @@ These are warm decode results from the current production paths. The ranges come
 |---|---:|---:|---:|
 | Qwen3.8-Flash-Next FP8, 4 Sparks | **63.2–77.7 tok/s** | **142.1–167.3 tok/s at C4** | Not re-run on the current path |
 | Qwen3.8-Flash-Next FP8, 2 Sparks | **41.7–49.6 tok/s** | **69.3–83.2 tok/s at C4** | **1.299 / 5.108 / 21.168 s** |
+| Qwen3.8-Flash-Next NVFP4, 2 Sparks | **62.1–74.9 tok/s** | **119.0–136.9 tok/s at C4** | **1.241 / 4.870 / 20.286 s** |
 | Qwen3.8-Flash-Next NVFP4, 1 Spark | **42.6–50.3 tok/s** | **69.4–83.7 tok/s at C4** | Not re-run on the current path |
 | GLM-5.3-Flash NVFP4/FP8, 4 Sparks | **50.3–58.5 tok/s** | **94.5–104.2 tok/s at C4** | **2.210 / 11.374 / 93.765 s** |
 | GLM-5.3-Flash FP8, 4 Sparks | **42.2–48.7 tok/s** | **62.2–67.5 tok/s at C4** | **2.211 / 9.165 / 58.555 s** |
@@ -57,11 +58,11 @@ The full methodology, quality results, prompt lengths, and reproduction commands
 |---|---:|---:|---|
 | Qwen3.8-Flash-Next NVFP4, 1 Spark | **42.6–50.3 tok/s at C1** | vLLM: **32.5 tok/s median**, 21.7 tok/s prose, 43.8 tok/s peak ([source](https://forums.developer.nvidia.com/t/qwen3-8-flash-next-on-1-2-and-4-dgx-sparks-with-nvidias-official-nvfp4-quant-64-tok-s-peak-single-stream/382476)) | Same source checkpoint. DGPP encodes the dense stack to FP8 at load. Its slowest class is close to the published peak |
 | Qwen3.8-Flash-Next, 4 Sparks | FP8: **63.2–77.7 tok/s at C1**, **142.1–167.3 tok/s at C4** | vLLM NVFP4: **40.5 median**, 54.2 peak at C1, **262 tok/s at C6** in the same source above | DGPP’s full C1 range is above the published vLLM median and peak. The loaded results use different concurrency |
-| Qwen3.8-Flash-Next FP8, 2 Sparks | **41.7–49.6 tok/s at C1**, **69.3–83.2 tok/s at C4** | SGLang FP8: **36–41 tok/s at C1**, **88–98.5 tok/s at C4** ([source](https://forums.developer.nvidia.com/t/fp8-qwen3-8-flash-next-on-2x-dgx-spark-via-sglang-37-40-tok-s/382435)). vLLM NVFP4: **53.7 median at C1**, **309 tok/s at C6** in the Qwen source above | DGPP leads the same-precision SGLang result at C1. SGLang leads at C4. The newer vLLM NVFP4 speed profile leads at its reported points |
+| Qwen3.8-Flash-Next, 2 Sparks | NVFP4: **62.1–74.9 tok/s at C1**, **119.0–136.9 tok/s at C4** | SGLang FP8: **36–41 tok/s at C1**, **88–98.5 tok/s at C4** ([source](https://forums.developer.nvidia.com/t/fp8-qwen3-8-flash-next-on-2x-dgx-spark-via-sglang-37-40-tok-s/382435)). vLLM NVFP4: **53.7 median**, 63.7 peak at C1, **309 tok/s at C6** in the Qwen source above | DGPP is above the published vLLM median across all five C1 classes and above the SGLang result at both C1 and C4. vLLM reports the higher C6 result |
 | GLM-5.3-Flash, 4 Sparks | FP8: **42.2–48.7 tok/s at C1**. Hybrid: **50.3–58.5 tok/s at C1** | vLLM W4A16: **43–58 tok/s at C1** across repeated passes, with **43.0–47.3 tok/s** test means and 52.2–59.7 peaks ([source](https://forums.developer.nvidia.com/t/glm-5-3-flash-320b-total-parameters-18b-active/381350/202)) | DGPP’s hybrid sits in the upper part of the latest published vLLM band |
 | GLM-4.7 NVFP4, 4 Sparks | **29.5–33.3 tok/s at C1**, **62.7–68.7 tok/s at C4** | SGLang: **24.4 tok/s at C1**, **53.2–54.6 tok/s at C4** (forum topic 366325) | DGPP is about **21–36% higher at C1** and **15–29% higher at C4** |
 
-*I rechecked these forum results on September 16, 2026. These are separate community runs, not a controlled shootout. Prompt sets, output lengths, checkpoints, quantization, context capacity, KV format, speculative settings, concurrency, and timing scope differ. The vLLM GLM-5.3-Flash result uses a W4A16 checkpoint, a DFlash2 drafter, and a 1M context configuration. The four-Spark and two-Spark vLLM Qwen results use NVFP4, while the DGPP results in those rows use FP8. The Qwen loaded comparison also uses C4 for DGPP and C6 for vLLM. The two-Spark C4 SGLang result is included even though it is higher than DGPP.*
+*I rechecked these forum results on September 16, 2026. These are separate community runs, not a controlled shootout. Prompt sets, output lengths, checkpoints, quantization, context capacity, KV format, speculative settings, concurrency, and timing scope differ. The vLLM GLM-5.3-Flash result uses a W4A16 checkpoint, a DFlash2 drafter, and a 1M context configuration. The four-Spark vLLM Qwen result uses NVFP4 while DGPP uses FP8. The two-Spark DGPP and vLLM Qwen results both use the NVIDIA NVFP4 checkpoint, but their clients and serving settings differ. The loaded comparison uses C4 for DGPP and C6 for vLLM. The SGLang row uses the larger FP8 checkpoint.*
 
 ## Where the speed comes from
 

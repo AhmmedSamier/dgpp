@@ -78,8 +78,8 @@ Multi-node production uses it for RoCE communication. Turning
    ```
 
    ```bash
-   # Two Sparks: Qwen FP8.
-   CONFIG=deploy/cluster_qwen-3.8-flash-next_fp8_w2.json
+   # Two Sparks: Qwen NVFP4 with its n-gram table mapped from NVMe.
+   CONFIG=deploy/cluster_qwen-3.8-flash-next_nvfp4_w2.json
    ```
 
    ```bash

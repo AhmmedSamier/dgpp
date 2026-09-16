@@ -37,6 +37,11 @@ bool ends_with(const std::string& s, const char* suffix) {
 // slice: GDN/QSA projections, both expert classes, the PLE projections,
 // the n-gram shards, the lm head under VocabSharded.
 bool is_replicated(const QwenExpectedTensor& e) {
+  // ModelOpt stores one scalar weight scale and one scalar activation scale
+  // beside every NVFP4 matrix. The payload and per-group scales are sliced,
+  // but these two scalars are rank-invariant metadata read by every rank.
+  if (e.role == QwenTensorRole::Fp4Global || e.role == QwenTensorRole::InputScale)
+    return true;
   switch (e.cls) {
     case QwenWeightClass::Embed:
     case QwenWeightClass::Mixer:

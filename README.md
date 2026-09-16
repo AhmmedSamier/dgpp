@@ -24,12 +24,12 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | GLM-5.3-Flash | [unsloth/GLM-5.3-Flash-FP8](https://huggingface.co/unsloth/GLM-5.3-Flash-FP8) | 4 | Copy the [base template](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json) to `cluster_glm-5.3-flash_fp8_w4.json` and set `model` to the linked FP8 repository |
 | GLM-5.3-Flash (hybrid) | [HawkBearPig/GLM-5.3-Flash-NVFP4-FP8](https://huggingface.co/HawkBearPig/GLM-5.3-Flash-NVFP4-FP8) | 2, 4 | [Two nodes](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json), [four nodes](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json) |
 | Qwen3.8-Flash-Next | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8) | 2, 4 | [Two nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w2.example.json), [four nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json) |
-| Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1 | [One node](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json) (the dense projections FP8 at load) |
+| Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1, 2 | [One node](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json), [two nodes](deploy/cluster_qwen-3.8-flash-next_nvfp4_w2.example.json) (the dense projections FP8 at load) |
 | GLM-4.7 | [nvidia/GLM-4.7-NVFP4](https://huggingface.co/nvidia/GLM-4.7-NVFP4) | 4 | [Four nodes](deploy/cluster_glm-4.7_nvfp4_w4.example.json) |
 | GLM-5.3 | [HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64](https://huggingface.co/HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64) | 4 | [Four nodes](deploy/cluster_glm-5.3_int4-int8_w4.example.json) |
 | DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) |
 
-The single-Spark Qwen template uses `engine.ngram_table: "mmap"` to read the
+The Qwen NVFP4 templates use `engine.ngram_table: "mmap"` to read the
 n-gram table from NVMe, `engine.decode_graph: true` for resident graph serving,
 and `engine.dense_weights: "fp8"` to encode dense projections at load. Use
 `--dense-weights checkpoint` to retain the checkpoint's BF16 dense stack. See
@@ -101,13 +101,14 @@ per-class results, measurement scopes and reproduction commands.
 | GLM-5.3-Flash NVFP4/FP8, 2 Sparks | 22.7–33.0 tok/s | 38.9–47.3 tok/s at C4 | 2.724 / 11.881 / — |
 | Qwen3.8-Flash-Next-FP8, 4 Sparks | 63.2–77.7 tok/s by class | 142.1–167.3 tok/s at C4 | — |
 | Qwen3.8-Flash-Next-FP8, 2 Sparks | 41.7–49.6 tok/s by class | 69.3–83.2 tok/s at C4 | 1.299 / 5.108 / 21.168 s |
+| Qwen3.8-Flash-Next-NVFP4, 2 Sparks | **62.1–74.9 tok/s by class** | **119.0–136.9 tok/s at C4** | **1.241 / 4.870 / 20.286 s** |
 | Qwen3.8-Flash-Next-NVFP4, 1 Spark | 42.6–50.3 tok/s by class | 69.4–83.7 tok/s at C4 | — |
 | GLM-4.7-NVFP4, 4 Sparks | 29.5–33.3 tok/s by class | 62.7–68.7 tok/s at C4 | 2.809 / 16.865 / — |
 | full GLM-5.3 int4/int8, 4 Sparks | 25.4–29.2 tok/s by class | 42.3–47.0 tok/s at C4 | 6.111 / 40.838 / 350.069 s |
 | DeepSeek-V4.1-Flash MXFP4/FP8, 4 Sparks | 49.64 aggregate tok/s | 108.49 aggregate tok/s at C6 | 1,383 prompt tok/s on its 2,950-token cold prompt |
 
 Except for DeepSeek, decode ranges are the five prompt classes and prefill is
-the cold HTTP service path. Qwen's newest cold-service campaign was run at two
+the cold HTTP service path. Qwen's newest cold-service campaigns were run at two
 Sparks; the four-Spark and single-Spark service prefills have not been re-run
 on the current path. DeepSeek uses the vLLM DGX Spark recipe's client and
 prompt set, with different aggregate and per-stream timing scopes, so compare
@@ -116,13 +117,13 @@ reproduction commands are in [the benchmark tables](docs/benchmarks.md).
 
 ## Status
 
-As of 2026-09-16, the source tree has eight measured deployment templates
+As of 2026-09-16, the source tree has nine measured deployment templates
 covering five model architectures on one, two or four Sparks. The shared
 engine provides graph decode, transactional MTP, row-batched execution,
 grouped prefill, prefix caching, deterministic multi-rank scheduling and the
 OpenAI-compatible service. Current quantized paths cover FP8, NVFP4, MXFP4 and
-full GLM-5.3's packed int4/int8 format. Qwen NVFP4 fits on one Spark by mapping
-its n-gram table from NVMe and encoding the dense stack to FP8 at load.
+full GLM-5.3's packed int4/int8 format. Qwen NVFP4 runs on one or two Sparks by
+mapping its n-gram table from NVMe and encoding the dense stack to FP8 at load.
 
 The Qwen eight-slot decode graphs and prefill continuation are implemented as
 opt-in controls; the shipped Qwen templates retain four slots and monolithic

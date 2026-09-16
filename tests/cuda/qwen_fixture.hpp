@@ -69,9 +69,20 @@ inline const char* tiny_quant_json() {
   "modules_to_convert": ["ple.ple_embedding.ngram_embedding"]})json";
 }
 
+inline const char* tiny_nvfp4_quant_json() {
+  return R"json({"config_groups":{"group_0":{"weights":{
+    "num_bits":4,"type":"float","group_size":16}}}})json";
+}
+
 inline QwenTextConfig tiny_config() {
   const auto t = dgpp::minijson::parse(tiny_text_json());
   const auto q = dgpp::minijson::parse(tiny_quant_json());
+  return QwenTextConfig::parse(t.root, &q.root);
+}
+
+inline QwenTextConfig tiny_nvfp4_config() {
+  const auto t = dgpp::minijson::parse(tiny_text_json());
+  const auto q = dgpp::minijson::parse(tiny_nvfp4_quant_json());
   return QwenTextConfig::parse(t.root, &q.root);
 }
 
@@ -106,8 +117,14 @@ inline std::vector<uint8_t> tensor_bytes(const QwenTextConfig& cfg, const QwenEx
   const bool is_inject = has(name, "block_inject_weight");
   for (size_t i = 0; i < n; ++i) {
     float v;
-    if (e.role == QwenTensorRole::Fp8Payload || e.role == QwenTensorRole::NgramShard)
+    if (e.role == QwenTensorRole::Fp4Payload) {
+      out[i] = static_cast<uint8_t>(rng.next() & 0xffu);
+      continue;
+    } else if (e.role == QwenTensorRole::Fp8Payload || e.role == QwenTensorRole::NgramShard ||
+               e.role == QwenTensorRole::Fp4Scale)
       v = rng.normal3();                                   // e4m3 codes (scaled at dequant)
+    else if (e.role == QwenTensorRole::Fp4Global) v = 2.0f;
+    else if (e.role == QwenTensorRole::InputScale) v = 1.0f;
     else if (is_scale_inv) v = 0.01f + 0.06f * (0.5f * (rng.unit() + 1.0f));
     else if (is_table_scale) v = 0.02f;
     else if (is_gdn_norm) v = 0.8f + 0.4f * (0.5f * (rng.unit() + 1.0f));
@@ -123,6 +140,8 @@ inline std::vector<uint8_t> tensor_bytes(const QwenTextConfig& cfg, const QwenEx
       std::memcpy(&out[i * 2], &bits, 2);
     } else if (e.dtype == dgpp::DType::F8_E4M3) {
       out[i] = float_to_fp8_e4m3_bits(v);
+    } else if (e.dtype == dgpp::DType::F32) {
+      std::memcpy(&out[i * 4], &v, 4);
     } else {
       throw std::runtime_error("fixture dtype not handled: " + name);
     }
