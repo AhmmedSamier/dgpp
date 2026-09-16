@@ -1,10 +1,10 @@
 # DGPP
 
 DGPP is a C++/CUDA inference engine for NVIDIA DGX Spark (GB10) systems.
-It serves GLM-5.3-Flash, Qwen3.8-Flash-Next and GLM-4.7 through an
-OpenAI-compatible HTTP API, with tensor parallelism over RoCE for
-multi-node deployments. Supported configurations use one, two or four
-nodes, depending on the model and its memory requirements.
+It serves GLM-5.3-Flash, full GLM-5.3, Qwen3.8-Flash-Next, GLM-4.7 and
+DeepSeek-V4.1-Flash through an OpenAI-compatible HTTP API, with tensor
+parallelism over RoCE for multi-node deployments. Supported configurations
+use one, two or four nodes, depending on the model and its memory requirements.
 
 The repository contains the CUDA kernels, RDMA collectives, tokenizer,
 Jinja chat-template interpreter, scheduler, prefix cache and HTTP service.
@@ -26,12 +26,13 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | Qwen3.8-Flash-Next | [Qwen/Qwen3.8-Flash-Next-FP8](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8) | 2, 4 | [Two nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w2.example.json), [four nodes](deploy/cluster_qwen-3.8-flash-next_fp8_w4.example.json) |
 | Qwen3.8-Flash-Next | [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4) | 1 | [One node](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json) (the dense projections FP8 at load) |
 | GLM-4.7 | [nvidia/GLM-4.7-NVFP4](https://huggingface.co/nvidia/GLM-4.7-NVFP4) | 4 | [Four nodes](deploy/cluster_glm-4.7_nvfp4_w4.example.json) |
+| GLM-5.3 | [HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64](https://huggingface.co/HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64) | 4 | [Four nodes](deploy/cluster_glm-5.3_int4-int8_w4.example.json) |
+| DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) |
 
-The single-Spark Qwen configurations require `engine.ngram_table: "mmap"`
-to read the n-gram table from NVMe and `engine.decode_graph: true` for
-resident graph serving. Its BF16-dense and FP8-dense templates use the
-same Hugging Face quant; the latter sets `engine.dense_weights: "fp8"`
-to encode dense projections at load. See
+The single-Spark Qwen template uses `engine.ngram_table: "mmap"` to read the
+n-gram table from NVMe, `engine.decode_graph: true` for resident graph serving,
+and `engine.dense_weights: "fp8"` to encode dense projections at load. Use
+`--dense-weights checkpoint` to retain the checkpoint's BF16 dense stack. See
 [the single-node guide](docs/qwen38_single_spark.md) for details.
 
 The GLM-5.3 hybrid takes the main-stack routed experts from
@@ -47,24 +48,36 @@ To reproduce the hybrid from its sources, use
 [the composition tool](tools/compose_nvfp4_hybrid.py) and
 [the NVFP4 notes](docs/nvfp4_plan.md).
 
-The linked templates enable MTP. Plain-decode and deeper-MTP variants are
-also available in [deploy/](deploy/); [the benchmark tables](docs/benchmarks.md)
+The linked templates enable MTP at the depth measured best for that deployment.
+Plain decode, deeper MTP, alternate cache formats and slot counts are launcher
+knobs on these templates; [the deployment catalogue](deploy/README.md) maps the
+supported shapes to their flags. [The benchmark tables](docs/benchmarks.md)
 record the modes measured for each deployment.
 
 ## Highlights
 
 - **Tensor-parallel resident serving** on four nodes: each rank holds its
-  slice of the model resident on the GPU and boots from a per-rank image
-  cache in 15–25 s.
+  slice of the model resident on the GPU and typically boots from a per-rank
+  image cache in 15–30 s, depending on the model.
 - **Graph-based decode**, including collectives and MTP speculative
   decoding, with scalar or batched graphs selected for the active requests.
   Greedy MTP produces the same tokens as plain decode; sampled MTP
   preserves the target distribution.
+- **Row-aware tensor-core execution and grouped prefill**: dense kernels select
+  their lowering from the active row count, and queued cold prompts can share a
+  forward pass while retaining request-local attention and state.
+- **Model-specific prefill paths**: packed int4/int8 tensor-core prefill for
+  full GLM-5.3, tiled QSA prefill for Qwen, and bounded grouped prefill for
+  DeepSeek-V4.1-Flash. Qwen can optionally yield between prefill chunks so
+  active decodes continue making progress.
+- **Adaptive DSpark verification**: DeepSeek uses confidence-scheduled draft
+  depth, including a batch-aware rule and an adaptive value of decode time.
 - **Exact prefix caching**: matching token prefixes can reuse a stored
   session snapshot while preserving the cold-prefill result.
-- **OpenAI-compatible Chat Completions**: streaming, constrained tool
-  calls, `response_format` with supported JSON schemas,
-  `reasoning_content`, logprobs, `stop`, `n`, `logit_bias`, usage details.
+- **OpenAI-compatible text generation**: Chat Completions and legacy
+  Completions, streaming, constrained tool calls, `response_format` with
+  supported JSON schemas, `reasoning_content`, logprobs, `stop`, `n`,
+  `logit_bias` and usage details; plus model, health and metrics endpoints.
 - **Deterministic across ranks**: admissions journaled from the head, every
   tick's operation-stream digest checked on every peer, and all ranks'
   complete streams compared at shutdown.
@@ -77,30 +90,47 @@ record the modes measured for each deployment.
 
 ## Performance
 
-These GLM-5.3-Flash-FP8 results were measured at TP=4 for the v1 sign-off.
-See [the benchmark tables](docs/benchmarks.md) for other models and
-configurations, and [the sign-off report](docs/signoff_v1.md) for the
-workloads and validation behind these figures. They are historical
-measurements, not performance guarantees for every configuration.
+These are the latest measurements for representative shipped configurations.
+See [the benchmark tables](docs/benchmarks.md) for the complete per-model and
+per-class results, measurement scopes and reproduction commands.
 
-| measure | result |
-|---|---|
-| decode, one request, plain graph | 31.45 ms per token |
-| decode, one request, MTP (greedy, 77–97 % drafts accepted by class) | 21.3–23.9 ms per token |
-| aggregate, 8 live requests at T=1 | 76 tokens/s |
-| aggregate, 4 live requests under MTP | 60 tokens/s |
-| prefill, 256 / 2,048 / 32,768 tokens | 0.58 s / 1.7 s / 33.7 s |
-| boot from the resident image cache | 15–25 s |
+| configuration | single-request decode | loaded decode | cold service prefill at ~2K / 8K / 32K |
+|---|---:|---:|---:|
+| GLM-5.3-Flash-FP8, 4 Sparks | 42.2–48.7 tok/s | 62.2–67.5 tok/s at C4 | 2.211 / 9.165 / 58.555 s |
+| GLM-5.3-Flash NVFP4/FP8, 4 Sparks | 50.3–58.5 tok/s | 94.5–104.2 tok/s at C4 | 2.210 / 11.374 / 93.765 s |
+| GLM-5.3-Flash NVFP4/FP8, 2 Sparks | 22.7–33.0 tok/s | 38.9–47.3 tok/s at C4 | 2.724 / 11.881 / — |
+| Qwen3.8-Flash-Next-FP8, 4 Sparks | 63.2–77.7 tok/s by class | 142.1–167.3 tok/s at C4 | — |
+| Qwen3.8-Flash-Next-FP8, 2 Sparks | 41.7–49.6 tok/s by class | 69.3–83.2 tok/s at C4 | 1.299 / 5.108 / 21.168 s |
+| Qwen3.8-Flash-Next-NVFP4, 1 Spark | 42.6–50.3 tok/s by class | 69.4–83.7 tok/s at C4 | — |
+| GLM-4.7-NVFP4, 4 Sparks | 29.5–33.3 tok/s by class | 62.7–68.7 tok/s at C4 | 2.809 / 16.865 / — |
+| full GLM-5.3 int4/int8, 4 Sparks | 25.4–29.2 tok/s by class | 42.3–47.0 tok/s at C4 | 6.111 / 40.838 / 350.069 s |
+| DeepSeek-V4.1-Flash MXFP4/FP8, 4 Sparks | 49.64 aggregate tok/s | 108.49 aggregate tok/s at C6 | 1,383 prompt tok/s on its 2,950-token cold prompt |
+
+Except for DeepSeek, decode ranges are the five prompt classes and prefill is
+the cold HTTP service path. Qwen's newest cold-service campaign was run at two
+Sparks; the four-Spark and single-Spark service prefills have not been re-run
+on the current path. DeepSeek uses the vLLM DGX Spark recipe's client and
+prompt set, with different aggregate and per-stream timing scopes, so compare
+its row within that workload. Dates, actual prompt lengths, quality gates and
+reproduction commands are in [the benchmark tables](docs/benchmarks.md).
 
 ## Status
 
-Version 0.1.0 (2026-09-06) completed milestones M0–M9 for GLM-5.3-Flash
-serving, including prefix caching, transactional MTP and a one-hour soak.
-The working tree also supports Qwen3.8-Flash-Next and GLM-4.7 through the
-shared engine, scheduler and service. Quantized paths include NVFP4
-weights and optional load-time FP8 encoding of Qwen's dense projections.
-Qwen's NVFP4 checkpoint can run on one Spark with its n-gram table mapped
-from NVMe; see [the single-node guide](docs/qwen38_single_spark.md).
+As of 2026-09-16, the source tree has eight measured deployment templates
+covering five model architectures on one, two or four Sparks. The shared
+engine provides graph decode, transactional MTP, row-batched execution,
+grouped prefill, prefix caching, deterministic multi-rank scheduling and the
+OpenAI-compatible service. Current quantized paths cover FP8, NVFP4, MXFP4 and
+full GLM-5.3's packed int4/int8 format. Qwen NVFP4 fits on one Spark by mapping
+its n-gram table from NVMe and encoding the dense stack to FP8 at load.
+
+The Qwen eight-slot decode graphs and prefill continuation are implemented as
+opt-in controls; the shipped Qwen templates retain four slots and monolithic
+admission. DeepSeek ships at six slots with DSpark depth 4, confidence
+scheduling, bounded grouped prefill and the stream-ordered eager collective.
+Full GLM-5.3 ships at eight slots and uses packed tensor-core prefill from 128
+rows. Version 0.1.0 remains the original GLM-5.3-Flash sign-off release; the
+current source has advanced beyond that baseline.
 
 [PLAN.md](PLAN.md) summarizes implementation status,
 [CHANGELOG.md](CHANGELOG.md) records changes, and
@@ -316,7 +346,8 @@ Startup checks the combined memory plan before loading.
 |---|---|---|---|
 | `engine.max_concurrency` | no | Maximum actively executing requests, not TCP connections or queued requests. More slots can improve aggregate throughput but use more state/scratch memory and may increase per-request latency. Allowed range is 1–8, subject to model/MTP row limits below. | 8 |
 | `engine.kv_capacity` | no | Shared context-token pool on each rank, across active requests—not a separate allowance for every request. A prompt and its generated answer must fit. Increase for longer contexts or more simultaneous context; memory use increases and allocation is rounded to model block boundaries. | 8192 tokens |
-| `engine.kv_dtype` | no | GLM-5.3 latent-cache precision: `bf16`, `fp8`, or `fp4`. Lower precision reduces latent storage at a numerical-accuracy cost; it does not quantize model weights. The index cache stays FP8. Qwen and GLM-4.7 K/V caches remain BF16. | `bf16` |
+| `engine.kv_dtype` | no | GLM-5.3 latent-cache precision: `bf16`, `fp8`, or `fp4`. Lower precision reduces latent storage at a numerical-accuracy cost; it does not quantize model weights. The index cache stays FP8. Qwen, GLM-4.7 and DeepSeek K/V caches remain BF16. | `bf16` |
+| `engine.embed_sharding` | no | Full GLM-5.3 and DeepSeek embedding/head placement: `replicated` keeps the full table on every rank; `vocab` keeps each rank's vocabulary slice and folds token lookups. The full-GLM template uses `vocab` to save 1.33 GiB/rank; the DeepSeek template retains `replicated`. Other families ignore it. | `replicated` |
 | `engine.default_max_tokens` | no | Answer-token budget for requests that omit `max_tokens`. Clients may supply their own value; this is not a global hard limit. A larger default also reserves more context space under full admission. | 256 |
 | `engine.queue_limit` | no | Maximum requests waiting for an execution slot or memory budget. Additional arrivals receive HTTP 503 `overloaded`. Increase to tolerate bursts, at the cost of longer waits—not higher execution capacity. | 64 |
 | `engine.max_connections` | no | Maximum simultaneously open HTTP connections on rank 0, including idle keep-alive connections and streams. Excess connections receive 503. Size this separately from active request slots. | 64 |
@@ -335,9 +366,13 @@ first; change one setting at a time and measure the effect on your workload.
 |---|---|---|---|
 | `engine.decode_graph` | no | Use CUDA graph replay for decode to reduce CPU launch overhead. On one node, this selects resident graph serving instead of the eager streaming path. Required for MTP and the single-Spark Qwen templates; leave enabled for the documented serving configurations. | false |
 | `engine.mtp` | no | Enable multi-token prediction: draft candidate tokens, then verify them with the main model. Can reduce decode time when drafts are accepted, but adds draft state and verification work. Requires `decode_graph`; not a larger request batch. | false |
-| `engine.mtp_depth` | no | How many tokens to draft per speculative step, 1–3. Greater depth can accept more tokens per pass, but uses more verification rows and can waste work when drafts are rejected. Values above 1 require MTP; supported batching varies by model. | 1 |
-| `engine.ngram_table` | no | Qwen n-gram embedding-table placement. `resident` keeps it in device-accessible memory; `mmap` leaves it on local NVMe and fetches needed rows through the host page cache. Use `mmap` for the single-Spark templates to fit the model; its speed depends on storage/page-cache behavior. No effect on GLM models. | `resident` |
-| `engine.dense_weights` | no | Qwen dense-projection storage. `checkpoint` retains the checkpoint's BF16 form; `fp8` converts dense projections at load time to reduce their memory footprint, with quantization error. Does not select another HF repository or change the expert quant. No effect on GLM models. | `checkpoint` |
+| `engine.mtp_depth` | no | How many tokens to draft per speculative step, 1–5. Greater depth can accept more tokens per pass, but uses more verification rows and can waste work when drafts are rejected. Values above 1 require MTP; supported batching varies by model. DeepSeek's shipped template uses depth 4. | 1 |
+| `engine.mtp_schedule` | no | Enable confidence-scheduled verify depth for a model with a confidence head. Greedy DeepSeek requests verify only the leading drafts whose survival probability justifies another row; sampled requests keep the configured depth. | false |
+| `engine.mtp_schedule_row_ms`, `engine.mtp_schedule_base_ms` | no | Cost model for scheduled verification: milliseconds for another verify row and fixed work per pass. These values are deployment measurements; retain the DeepSeek template values unless re-profiling that world. | 8.0 / 28.0 |
+| `engine.mtp_schedule_lambda`, `engine.mtp_schedule_min_depth`, `engine.mtp_schedule_adapt` | no | Floor for the value of decode time in tokens/ms, minimum verified draft depth, and whether the value adapts from committed tokens and modeled time. Lambda 0 derives the reservation rate. | 0 / 1 / true |
+| `engine.prefill` | no | DeepSeek prefill mode: `bounded` runs every prompt row through the encoder and only the final window through the decoder; `exact` runs every layer over every row for parity work. Other families ignore it. | `bounded` |
+| `engine.ngram_table` | no | Qwen n-gram embedding-table placement. `resident` keeps it in device-accessible memory; `mmap` leaves it on local NVMe and fetches needed rows through the host page cache. Use `mmap` for the single-Spark template to fit the model. DeepSeek's Engram tables use their own mapped checkpoint sidecar. | `resident` |
+| `engine.dense_weights` | no | Qwen dense-projection storage. `checkpoint` retains the checkpoint's BF16 form; `fp8` converts dense projections at load time to reduce their memory footprint, with quantization error. Does not select another HF repository or change the expert quant; other families ignore it. | `checkpoint` |
 | `engine.graph_batch_min_live` | no | Active-request count at which decode switches from scalar to batched graphs. A lower threshold starts batching earlier; batching may improve throughput while doing extra padded-row work. 0 chooses min(2, `max_concurrency`); explicit values must be 1 through `max_concurrency`. | 0 (automatic) |
 | `engine.sampling_candidates` | no | Number of candidate tokens gathered per rank on the sampled-token fast path, 1–256. Smaller values reduce routine work but may trigger more full-gather fallbacks. The fallback preserves sampling correctness; this is not the client's `top_k` parameter. | 128 |
 | `engine.bulk_pace_gbps` | no | Sender pacing rate per queue pair for bulk/prefill communication, in gigabits per second. Negative derives the rate from link speed; 0 disables pacing. Override only when measuring network contention—this is not an API throughput limit. | -1 (automatic) |
@@ -347,11 +382,12 @@ first; change one setting at a time and measure the effect on your workload.
 | `engine.reasoning_in_content` | no | Put reasoning text in the response's `content`, separated by the model's `</think>` marker, instead of a separate `reasoning_content` field. Use only for clients that need that combined format; it does not disable reasoning. | false |
 | `engine.no_eos` | no | Ignore the model's end-of-sequence token so measurement runs continue to their token budget. Leave false for normal serving, where a model should be allowed to finish its answer. | false |
 
-The application allows up to eight request slots. GLM-5.3-Flash and Qwen
-use at most eight batched decode rows: eight plain requests or four
-depth-1 MTP requests. Their deeper MTP steps use scalar graphs. GLM-4.7
-supports batches of up to 32 rows, with `1 + mtp_depth` rows per request.
-The startup log reports the selected shape and rejects unsupported sizes.
+The application allows up to eight request slots. A speculative request uses
+`1 + mtp_depth` physical decode rows. GLM-5.3-Flash supports eight batched
+rows; Qwen and full GLM-5.3 support sixteen; GLM-4.7 and DeepSeek support
+thirty-two. Graph families capture the slot prefixes that fit, with scalar
+fallback for an unsupported active shape. The startup log reports the selected
+capacity and rejects a configuration that cannot fit its required rows.
 
 Sampling defaults come from the checkpoint's `generation_config.json`
 and per-request fields. Flags such as `--temperature` override them for
@@ -372,7 +408,9 @@ Model implementations share the engine, service, scheduler and text stack:
 | `src/net/` | `dgpp::net` | the RoCE collective bus, TCP, the roster |
 | `src/engine/` | `dgpp` | shared session interfaces, eager and graph engines, speculative decoding, memory plans and prefix arenas |
 | `src/models/qwen/`, `src/models/glm4/` | `dgpp` | Qwen3.8-Flash-Next and GLM-4.7 configuration, loaders, layers and sessions |
-| `src/models/glm/` | `dgpp` | GLM itself: the forward pass, the loader and resident image, the MoE and mHC layers, the eager and graph engine adapters, the MTP draft, the bus reducers |
+| `src/models/glm/` | `dgpp` | GLM-5.3-Flash: the forward pass, loader, MoE and mHC layers, session adapters and MTP draft |
+| `src/models/glm_dsa/` | `dgpp` | full GLM-5.3 configuration, packed loader, MLA/DSA model and session implementation |
+| `src/models/dsv41/` | `dgpp` | DeepSeek-V4.1-Flash configuration, MXFP4/FP8 loader, CSA2, Engram and DSpark session implementation |
 | `src/models/` | `dgpp` | the KDA and DSA layer libraries and the quantized matrix, shared by any model that uses them |
 | `src/loaders/`, `src/core/`, `src/common/` | `dgpp` | safetensors, the HF cache, JSON; arenas and tracing; logging and process memory |
 
@@ -396,11 +434,14 @@ config.
 | `docs/testing.md` | the test suites and what each proves |
 | `docs/numerics.md` | judging a numerics change; the sampling-width gate |
 | `docs/mtp.md` | speculative decode with the MTP layer |
-| `docs/measurements.md` | the curated platform measurements from the first milestones |
-| `docs/checkpoint_budget.md` | the checkpoint's generated inventory and budget |
+| `docs/measurements.md` | current validated platform, network, kernel and serving measurements, with historical observations separated |
+| `docs/checkpoint_budget.md`, `docs/qwen38_checkpoint_budget.md`, `docs/checkpoint_budget_glm53.md`, `docs/checkpoint_budget_dsv41.md` | generated checkpoint inventories, per-rank residency and decode traffic budgets |
 | `docs/batched_mtp_graph_stall.md` | a worked stall investigation, from symptom to root cause |
-| `docs/qwen38_flash_next_plan.md` | the second family: Qwen3.8-Flash-Next's architecture, placement, decisions and progress |
-| `docs/glm47_plan.md` | the third family: GLM-4.7 (NVFP4) — architecture, the modelopt format contract, decisions, gates and status |
+| `docs/qwen38_flash_next_plan.md` | Qwen3.8-Flash-Next's architecture, placement, decisions and status |
+| `docs/glm47_plan.md` | GLM-4.7 NVFP4 architecture, modelopt format contract, decisions, gates and status |
+| `docs/glm53_plan.md` | full GLM-5.3's packed checkpoint, DSA/MLA changes, placement and serving status |
+| `docs/deepseek_v41_flash_plan.md` | DeepSeek-V4.1-Flash's CED, CSA2, Engram, DSpark and serving implementation |
+| `docs/performance_improvement_plan.md` | current performance findings, completed changes and next measured targets |
 | `DESIGN.md` | architecture and implementation contracts |
 | `PLAN.md` | the milestones, their exit gates and status |
 | `benchmarks/README.md`, `benchmarks/results/` | the probes, and the dated engineering record of every measurement and fix |

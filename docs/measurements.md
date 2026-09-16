@@ -1,7 +1,9 @@
 # Validated platform measurements
 
-Measurements recorded from 2026-08-27 through 2026-09-15. Each section
-identifies its workload and environment; this report is maintained manually.
+Measurements recorded from 2026-08-27 through 2026-09-15. Compact serving
+summaries use the newest applicable production-path result; the later dated
+sections retain the A/B history. Each section identifies its workload and
+environment; this report is maintained manually.
 Raw commands and the audit-remediation run record are in
 `benchmarks/results/2026-08-27-dgx-spark.md`; the M2 KDA correctness and
 state-traffic record is `benchmarks/results/2026-08-27-kda-m2.md`. The
@@ -292,16 +294,17 @@ GPU, not a pinned bounce copy.
 
 ## GLM-4.7 (nvidia/GLM-4.7-NVFP4) serving on four nodes (2026-09-10)
 
-`scripts/fabric_glm4_serve.sh deploy/cluster_glm-4.7_nvfp4_w4_mtp1.json` (MTP) and
-`deploy/cluster_glm-4.7_nvfp4_w4_plain.json` (T=1), the resident image warm on every rank,
-the 202,752-token pool (77.4 GiB per rank: weights 52.8, K/V 23.3).
+`scripts/fabric_glm4_serve.sh` with the
+`deploy/cluster_glm-4.7_nvfp4_w4.example.json` template (MTP), and the same
+template with `--knobs "--no-mtp"` (T=1), the resident image warm on every
+rank, the 202,752-token pool (77.4 GiB per rank: weights 52.8, K/V 23.3).
 
 | reading | value |
 |---|---|
 | boot from the resident image | 18–20 s (the first boot captures it: ~3 min); 14 graph variants warm-captured in 13 s |
 | T=1 decode, one request | 49.0 ms/step (the bytes floor ~40 ms: 9.7 GB per rank per step, 6.3 GB of it the BF16 attention projections modelopt left unquantized; 186 collectives ~8 ms) |
-| MTP decode, one request | 60–61 ms/pass at 1.86–1.99 tokens/pass (draft acceptance 79–98 %), 31–33 ms/token |
-| four live requests (the eval) | 110–145 ms/step batched, ~8–12 tokens/s per request |
+| MTP decode, one request | 56–59 ms/pass at 1.84–1.97 tokens/pass, 28–32 ms/token |
+| four live requests | 109.4 ms per eight-row step; aggregate 62.7–68.7 tok/s by class |
 | prefill, short prompts (31–150 tokens) | 400–1000 ms per prompt, 5–13 ms/token (v1 warp-per-row attention; the tensor-core form is open) |
 | MTP == T=1 transcripts | identical, 4 of 4 prompts; op streams identical across the four ranks |
 | eval (thinking off, `serve_eval.py --no-think`) | gsm8k 60/60, HumanEval 39/40, schema extraction 30/30; no answer truncated |
@@ -325,9 +328,9 @@ the dated record `benchmarks/results/2026-09-12-glm53-full.md`).
 | memory plan, MTP depth 1, 48K bf16 latent cache, 4 slots | 105.24 GiB per rank + 8 GiB headroom; T=1 103.58 GiB; sized to the fabric's smallest node (rank 2: 119.67 GiB visible, a firmware reservation 2 GiB larger than the other nodes') |
 | boot | 30 s from the resident image (3.9 s model, 24 s of graph capture); the first boot, which captures the image on every rank, 405 s |
 | T=1 decode, one request | 51.1 ms/step, 19.5 tok/s (the audit's bytes floor 44.5 ms: 10.2 GB per rank per step; 158 collectives) |
-| MTP decode, one request | 68–76 ms/pass at 1.77–1.97 tokens/pass (draft acceptance 77–97 % by class), 36–42 ms/token |
-| four live requests | 180–185 ms per eight-row step, 1.95 tok/step/req at 92–96 %; aggregate 38–43 tok/s (9.5–10.8 per request) |
-| prefill through the service | 7.3 / 7.1 / 8.4 / 9.5 ms per token at ~520 / 2.1K / 8.4K / 16.8K tokens (the deferred packed tile kernel, plan D7) |
+| MTP decode, one request | 61–66 ms/pass at 1.69–1.97 tokens/pass, 31–39 ms/token |
+| four live requests | 159.0 ms per eight-row step; aggregate 42.3–47.0 tok/s by class |
+| prefill through the service | 6.111 / 40.838 / 350.069 s at ~2K / 8K / 32K (2.963 / 4.959 / 10.613 ms per actual token) |
 | MTP == T=1 transcripts | identical, 4 of 4 prompts; op streams identical across the four ranks at every shutdown |
 | eval (thinking on at `reasoning_effort` low: the template has no switch) | gsm8k 59/60, HumanEval 40/40, schema extraction 30/30; no answer truncated (mean 92 / 142 / 58 completion tokens) |
 | API check | every case |
@@ -402,12 +405,13 @@ template's own 40–43), c=6 46–47, c=8 48–50 aggregate, at 67 / 170 / 220
 
 The depth-2 chain (the session core's `session_draft_chain` /
 `session_graph_capture_draft_chain` on the hidden-window families,
-`glm_spec_chain_row_window`) measured with `deploy/cluster_glm-4.7_nvfp4_w4_mtp2.json`
-against depth 1, one greedy request at a time, transcripts identical to
-depth 1 on every short prompt (4/4):
+`glm_spec_chain_row_window`) measured with the
+`deploy/cluster_glm-4.7_nvfp4_w4.example.json` template and
+`--mtp-depth 2`, against depth 1, one greedy request at a time. Transcripts
+were identical to depth 1 on every short prompt (4/4):
 
 | prompt (256 tokens) | depth 1: ms/pass, tok/pass, ms/token | depth 2: ms/pass, tok/pass, ms/token, p1 / p2 | tokens/s |
-|---|---|---|---|---|
+|---|---|---|---|
 | chat | 61, 1.86, 32.5 | 72, 2.32, 31.2, 85 % / 48 % | +4 % |
 | code | 61, 1.93, 33.0 | 72, 2.52, 28.7, 92 % / 60 % | +13 % |
 | math | 62, 1.95, 31.3 | 72, 2.55, 28.4, 94 % / 62 % | +10 % |
@@ -431,7 +435,7 @@ prefill 548 / 1,412 / 6,284 ms, the same rank-consistency hashes as the
 
 The fixed decode batch's row ceiling is the recipe's shape since this
 afternoon — `max_concurrency x (1 + mtp_depth)`, floored at 8 — so the
-depth-2 recipe (`deploy/cluster_glm-4.7_nvfp4_w4_mtp2.json`, 4 slots) boots a 12-row
+depth-2 mode (the base template with `--mtp-depth 2`, 4 slots) boots a 12-row
 world (`serve: decode rows 12`; the bus's latency slot 120 KiB, 128
 sampling candidates still fit) with the 2-, 3- and 4-slot batch families
 at 6, 9 and 12 rows, each carrying every slot's chain row in one draft-
@@ -458,9 +462,8 @@ chunks), 200 at 12 (three) — each 4-row chunk past the first re-reads
 the 6.3 GB of BF16 attention projections per rank (+45–60 ms), a row
 within a chunk costs 7–8 ms (its K/V reads and its distinct experts). So
 batched depth 2 is correct, isolated and slower than depth 1 under
-concurrency on this family; depth 2 stays a single-stream setting
-(`cluster_glm-4.7_nvfp4_w4_mtp1.json` keeps depth 1). The lever for concurrency at
-either depth is the attention projections' bytes per pass: wider GEMV
+concurrency on this family; the shipped template keeps depth 1. The lever for
+concurrency at either depth is the attention projections' bytes per pass: wider GEMV
 chunks (a 6-row chunk at K = 5120 is 61 KB of dynamic shared memory, an
 8-row one 80 KB — one block per SM, to be measured), or a row-independent
 tensor-core kernel for the bf16 projections that reads the weights once
@@ -876,6 +879,28 @@ bulk-forward fixture plus real-model prefill likelihood scoring. See the
 for quality, C1, sanitizer results and executable/source hashes.
 The matched concurrency-4 tasks preserve GSM8K 59/60 and extraction 30/30
 with zero truncations and identical per-item correctness outcomes.
+
+## Qwen QSA prefill (2026-09-15)
+
+The current QSA prefill kernel shares each K/V tile across twelve query heads
+at TP2 and computes probabilities cooperatively within a warp. Decode,
+speculative verification and prefills below 128 rows retain their existing
+dispatch.
+
+Cold service medians on Qwen3.8-Flash-Next-FP8 at world 2, four slots and
+monolithic admission:
+
+| Prompt target | Current prefill | ms per actual token |
+|---|---:|---:|
+| 2,048 | 1.299 s | 0.637 |
+| 8,192 | 5.108 s | 0.634 |
+| 32,768 | 21.168 s | 0.656 |
+
+All paired prompts, outputs, usage and finish reasons match the prior kernel.
+The campaign preserved 59/60 GSM8K and 30/30 extraction, with identical text
+and grading on all 90 paired responses. See the
+[implementation record](../benchmarks/results/2026-09-15-qwen-qsa-prefill.md)
+for profiles, C1 controls and sanitizer results.
 
 ## Build and test validation
 
