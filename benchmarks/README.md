@@ -14,6 +14,10 @@ The original DGX Spark platform baseline is in
 [`2026-08-27-dgx-spark.md`](results/2026-08-27-dgx-spark.md). Curated platform
 conclusions also appear in [`docs/measurements.md`](../docs/measurements.md).
 
+The [tool-eval-bench baseline](results/2026-09-17-tool-eval-bench/README.md)
+records all 69 standard agent/tool scenarios against GLM-5.3-Flash, including
+full traces and the pre-fix structured-output API failures.
+
 ## Build
 
 ```bash

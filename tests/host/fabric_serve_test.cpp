@@ -568,16 +568,21 @@ void test_journal_codec() {
        {"", "{\"type\": \"object\", \"properties\": {\"city\": {\"type\": "
             "\"string\"}, \"n\": {\"enum\": [1, \"a\\\"b\", null]}}, "
             "\"required\": [\"city\"], \"additionalProperties\": false}"}) {
-    GenerationService::PassEvents ev;
-    dgpp::sched::SchedulerRequest s = submit;
-    s.grammar.mode = dgpp::text::GrammarSpec::Mode::kJson;
-    s.grammar.json_schema = schema;
-    ev.submits.push_back(s);
-    const dgpp::serve::JournalRecord got = dgpp::serve::decode_journal_line(
-        dgpp::serve::encode_journal_tick(ev));
-    require(got.submits.size() == 1 && got.submits[0].grammar == s.grammar &&
-                got.submits[0].grammar.json_schema == schema,
-            std::string("codec: JSON grammar round-trip for '") + schema + "'");
+    for (const auto mode : {dgpp::text::GrammarSpec::Mode::kJson,
+                            dgpp::text::GrammarSpec::Mode::kJsonOrTools}) {
+      GenerationService::PassEvents ev;
+      dgpp::sched::SchedulerRequest s = submit;
+      s.grammar.mode = mode;
+      s.grammar.json_schema = schema;
+      if (mode == dgpp::text::GrammarSpec::Mode::kJsonOrTools)
+        s.grammar.tools.push_back(dgpp::text::GrammarTool{"ping", true, {}, {}, {}, false});
+      ev.submits.push_back(s);
+      const dgpp::serve::JournalRecord got = dgpp::serve::decode_journal_line(
+          dgpp::serve::encode_journal_tick(ev));
+      require(got.submits.size() == 1 && got.submits[0].grammar == s.grammar &&
+                  got.submits[0].grammar.json_schema == schema,
+              std::string("codec: JSON grammar round-trip for '") + schema + "'");
+    }
   }
 
   require(dgpp::serve::decode_journal_line(

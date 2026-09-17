@@ -1815,8 +1815,12 @@ and tool-call goldens over each real tokenizer.
 `src/text/json_grammar.*` implements `response_format`:
 `json_object` requires one complete JSON object; `json_schema`
 requires a JSON value conforming to the supported schema. JSON output
-and tool calls are separate turn modes. Reasoning can precede the JSON
-body, but EOS is withheld until the body is complete.
+can be combined with tools: under `tool_choice: auto`, the first value or
+tool opener selects either a schema-conforming answer or a tool-call turn.
+`none` forces the JSON answer; `required` and a named choice still require
+tool calls. Reasoning can precede either branch, but EOS is withheld until
+the answer or required call is complete. The combined mode and schema
+travel through the admission journal to every rank.
 
 The implementation has three layers:
 
@@ -1827,7 +1831,7 @@ The implementation has three layers:
 2. `compile_json_schema` validates and compiles supported keywords:
    types and type lists, properties, required keys, additional properties,
    item schemas and counts, scalar enums and constants, `anyOf`, and
-   integer bounds. Unsupported keywords report their schema path.
+   numeric bounds. Unsupported keywords report their schema path.
 3. `JsonMachine` combines lexical state with schema cursors. It filters
    value types, constrains keys and enum values, checks required members
    and array sizes, and keeps alternatives for `anyOf` until input
@@ -1840,6 +1844,19 @@ completions lie in intervals `[M * 10^k, (M + 1) * 10^k - 1]`.
 The cursor rejects a digit when no completion can satisfy its signed
 range and checks the final value again at termination. Bounds combined
 with enums filter the enum members during compilation.
+
+General `number` bounds retain decimal significant digits and exponents.
+Before an exponent opens, a mantissa prefix describes an interval at each
+decimal scale; after it opens, the fixed mantissa determines a range of
+allowed integer exponents. A prefix is admitted only if some continuation
+can satisfy the bounds, and termination checks the complete value. Decimal
+comparison avoids rounding an out-of-range generated value onto a boundary.
+Bounds use the schema DOM's numeric values (int64 or double, serialized in
+shortest round-trip form). Inclusive and exclusive bounds apply equally to
+response schemas and tool arguments; nonnumeric alternatives are unaffected.
+Tool-call parsing preserves the original JSON when reserializing through
+the numeric DOM would round a value or exceed its range, so normalization
+cannot move a constrained argument across its boundary.
 
 `JsonTables` precomputes lexical token behavior and groups tokens with
 the same structural prefixes and tails. Mask construction can then test

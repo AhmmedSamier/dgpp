@@ -197,10 +197,10 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
       tool.args.push_back(std::move(arg));
       continue;
     }
-    // A JSON-typed property: the machine under its own schema. An
-    // integer's minimum / maximum are enforced; a keyword
-    // that only narrows the value without an automaton behind it (a
-    // number's bound, pattern, ...) is tolerated — the value stays typed,
+    // A JSON-typed property: the machine under its own schema. Numeric
+    // minimum / maximum are enforced; a keyword that only narrows the
+    // value without an automaton behind it (pattern, ...) is tolerated —
+    // the value stays typed,
     // the narrowing is not applied — and noted with the reason.
     try {
       std::vector<std::string> unenforced;
@@ -239,7 +239,7 @@ GrammarState::GrammarState(const GrammarVocab* vocab, GrammarSpec spec,
                            bool prompt_opens_thinking)
     : vocab_(vocab), spec_(std::move(spec)) {
   if (!spec_.active()) return;
-  if (spec_.mode == GrammarSpec::Mode::kJson) {
+  if (spec_.has_json()) {
     if (vocab_ == nullptr || vocab_->eos_ids().empty())
       throw std::invalid_argument(
           "GrammarState: a JSON grammar needs a vocabulary with an EOS id");
@@ -261,7 +261,7 @@ GrammarState::GrammarState(const GrammarVocab* vocab, GrammarSpec spec,
     state_ = prompt_opens_thinking && vocab_->markers().think_close.available()
                  ? State::kThink
                  : State::kJsonBody;
-    return;
+    if (spec_.mode == GrammarSpec::Mode::kJson) return;
   }
   if (vocab_ == nullptr || !vocab_->usable())
     throw std::invalid_argument(
@@ -406,6 +406,7 @@ void GrammarState::free_mask_in_call(TokenMask* out) const {
 
 bool GrammarState::obligation_open() const {
   if (spec_.mode == GrammarSpec::Mode::kJson) return !json_.done();
+  if (spec_.mode == GrammarSpec::Mode::kJsonOrTools) return calls_ == 0 && !json_.done();
   return (spec_.mode == GrammarSpec::Mode::kRequired ||
           spec_.mode == GrammarSpec::Mode::kNamed) &&
          calls_ == 0;
@@ -416,6 +417,7 @@ bool GrammarState::calls_remaining() const {
     case GrammarSpec::Mode::kNone: return true;
     case GrammarSpec::Mode::kForbidCalls: return false;
     case GrammarSpec::Mode::kAuto: return spec_.parallel || calls_ == 0;
+    case GrammarSpec::Mode::kJsonOrTools: return spec_.parallel || calls_ == 0;
     case GrammarSpec::Mode::kRequired: return spec_.parallel || calls_ == 0;
     case GrammarSpec::Mode::kNamed: return calls_ == 0;
     case GrammarSpec::Mode::kJson: return false;
@@ -676,6 +678,40 @@ void GrammarState::mask(TokenMask* out) const {
       free_mask(out, /*extra_allowed=*/-1, /*forbid_markers=*/false);
       return;
     case State::kTop: {
+      if (spec_.mode == GrammarSpec::Mode::kJsonOrTools) {
+        if (dsml() && top_lt_) {
+          list_mask(out, {m.dsml.id});
+          return;
+        }
+        if (calls_ == 0) {
+          json_mask(json_, -1, out);
+        } else {
+          list_mask(out, {vocab_->call_turn_eos()});
+        }
+        const auto add = [&](int64_t id) {
+          if (id < 0 || id >= vocab_->vocab_size()) return;
+          uint32_t& word = out->words[static_cast<size_t>(id >> 5)];
+          const uint32_t bit = 1u << (id & 31);
+          if (!(word & bit)) { word |= bit; ++out->allowed; }
+        };
+        if (!dsml()) {
+          if (calls_remaining()) add(m.tool_call_open.id);
+        }
+        // DSML opens with ordinary text ending in '<', then its tag
+        // token. Qwen permits a newline between consecutive calls.
+        if (dsml() || calls_ > 0) {
+          for (const unsigned char first : {'<', ' ', '\n', '\r', '\t'})
+            for (const int32_t id : vocab_->ids_starting_with(first)) {
+              const std::string& text = vocab_->text(id);
+              size_t i = 0;
+              while (i < text.size() && JsonLexer::is_ws(static_cast<uint8_t>(text[i]))) ++i;
+              if ((calls_ > 0 && i == text.size()) ||
+                  (dsml() && calls_remaining() && i + 1 == text.size() && text[i] == '<'))
+                add(id);
+            }
+        }
+        return;
+      }
       // The Qwen format lets natural-language text precede a call ("You
       // may provide optional reasoning ... BEFORE the function call"), so
       // its top is free under every mode; the obligation still forbids EOS.
@@ -948,6 +984,22 @@ void GrammarState::advance(int64_t id) {
         }
       return;
     case State::kTop:
+      if (spec_.mode == GrammarSpec::Mode::kJsonOrTools && calls_ == 0 &&
+          !top_lt_ && id != m.tool_call_open.id) {
+        const std::string& text = vocab_->text(id);
+        const size_t first = text.find_first_not_of(" \n\r\t");
+        if (dsml() && first != std::string::npos && first + 1 == text.size() && text[first] == '<') {
+          top_lt_ = true;
+          return;
+        }
+        bool value = false;
+        for (const char ch : text) {
+          value = value || !JsonLexer::is_ws(static_cast<uint8_t>(ch));
+          if (!json_.feed(static_cast<uint8_t>(ch))) { dead_ = true; return; }
+        }
+        if (value) enter(State::kJsonBody);
+        return;
+      }
       if (dsml()) {
         if (id == m.dsml.id) {
           top_lt_ = false;

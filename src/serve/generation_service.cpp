@@ -926,12 +926,6 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
                     "\"json_schema\"",
                     "response_format.type");
     if (kind != "text") {
-      if (have_tools)
-        return refuse(
-            "response_format json_object / json_schema cannot be combined "
-            "with tools in this server version (a turn is either JSON or "
-            "tool calls)",
-            "response_format", "unsupported_parameter");
       if (!constraints_available())
         return refuse(
             "response_format json_object / json_schema cannot be enforced "
@@ -939,8 +933,12 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
             "response_format", "constrained_decoding_unsupported");
       using dgpp::text::GrammarSpec;
       GrammarSpec& g = plan->grammar;
-      g = GrammarSpec{};
-      g.mode = GrammarSpec::Mode::kJson;
+      // A required/named choice still owes a tool call. Auto can choose
+      // either a call or the structured answer; none forces the answer.
+      if (!have_tools || choice == Choice::kNone)
+        g.mode = GrammarSpec::Mode::kJson;
+      else if (choice == Choice::kAuto)
+        g.mode = GrammarSpec::Mode::kJsonOrTools;
       if (kind == "json_schema") {
         const Value* js = rf->find("json_schema");
         if (js == nullptr || !js->is_object())
@@ -989,19 +987,19 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
           }
         }
       }
+      if (!g.has_json()) g.json_schema.clear();  // required/named: tool-call turn
     }
   }
 
   // ---- reasoning_effort / chat_template_kwargs --------------------------
   std::optional<std::string> effort;
   const auto effort_ok = [](std::string_view s) {
-    return s == "minimal" || s == "low" || s == "medium" || s == "high";
+    return s == "minimal" || s == "low" || s == "medium" || s == "high" || s == "xhigh";
   };
   if (const Value* re = body.find("reasoning_effort")) {
     if (!re->is_string() || !effort_ok(re->as_string()))
       return refuse("reasoning_effort must be one of \"minimal\", \"low\", "
-                    "\"medium\", \"high\" (this template renders low and "
-                    "high; anything else is its maximum)",
+                    "\"medium\", \"high\", \"xhigh\"",
                     "reasoning_effort");
     effort = std::string(re->as_string());
   }
@@ -1018,7 +1016,7 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
       } else if (m.key == "reasoning_effort") {
         if (!m.value.is_string() || !effort_ok(m.value.as_string()))
           return refuse(where + " must be one of \"minimal\", \"low\", "
-                        "\"medium\", \"high\"",
+                        "\"medium\", \"high\", \"xhigh\"",
                         where);
         if (effort.has_value() && *effort != m.value.as_string())
           return refuse("reasoning_effort and chat_template_kwargs."

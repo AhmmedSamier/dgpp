@@ -261,6 +261,7 @@ DGPP_TEST(tool_grammar_qwen_free_keys_typed_values_and_named_single) {
 // parameters "<" TAG " parameter name=\"K\" string=\"true|false\">" V "</" TAG
 // " parameter>\n", "</" TAG " invoke>\n", "</" TAG " calls>" then EOS.
 constexpr int64_t kDsmlTag = 308;
+constexpr int64_t kQuotedLt = 265;
 GrammarVocab dsml_vocab() {
   std::vector<std::string> texts(static_cast<size_t>(kVocab));
   for (int b = 0; b < 256; ++b) texts[static_cast<size_t>(b)] = std::string(1, static_cast<char>(b));
@@ -275,6 +276,7 @@ GrammarVocab dsml_vocab() {
   texts[kIme] = "ime";
   texts[kThinkOpen] = "<think>";
   texts[kThinkClose] = "</think>";
+  texts[kQuotedLt] = "\"x<";
   ChatMarkers m;
   m.think_open = ChatMarker{kThinkOpen, "<think>"};
   m.think_close = ChatMarker{kThinkClose, "</think>"};
@@ -687,6 +689,49 @@ DGPP_TEST(tool_grammar_jsonModeSpellsOneTextThenEos) {
   require(!(spec == typed), "specs differ by schema");
   GrammarSpec same = typed;
   require(same == typed, "equal specs");
+}
+
+DGPP_TEST(tool_grammar_jsonOrToolsCommitsToOneBranch) {
+  for (const GrammarVocab& v : {fake_vocab(), qwen_vocab(), dsml_vocab()}) {
+    const bool dsml = v.markers().tool_format() == dgpp::text::ToolFormat::kDsml;
+    const bool qwen = v.markers().tool_format() == dgpp::text::ToolFormat::kQwenXml;
+    for (const bool parallel : {false, true}) {
+      GrammarSpec spec = spec_of(GrammarSpec::Mode::kJsonOrTools, parallel);
+      spec.json_schema = R"({"type":"object","properties":{"n":{"type":"number","minimum":0,"maximum":10}},"required":["n"],"additionalProperties":false})";
+      GrammarState json(&v, spec, true);
+      require(json.allows('x') && !json.allows(kEosText), "thinking precedes JSON or tools");
+      feed(json, {kThinkClose, ' ', '\n'});
+      require(json.allows('{') && json.allows(dsml ? '<' : kToolOpen) &&
+                  !json.allows('x') && !json.allows(kEosText), "choose JSON or a call");
+      feed(json, bytes_of("{\"n\":0.5}"));
+      require(json.allows(kEosText) && !json.allows(kToolOpen) && !json.allows('<') &&
+                  !json.allows('{'), "JSON answer cannot become a call");
+      GrammarState call(&v, spec, false);
+      if (dsml) {
+        feed(call, {'<', kDsmlTag});
+        feed(call, bytes_of(" calls>\n<"));
+        feed(call, {kDsmlTag});
+        feed(call, bytes_of(" invoke name=\"ping\">\n</"));
+        feed(call, {kDsmlTag});
+        feed(call, bytes_of(" invoke>\n</"));
+        feed(call, {kDsmlTag});
+        feed(call, bytes_of(" calls>"));
+      } else {
+        feed(call, {kToolOpen});
+        feed(call, bytes_of(qwen ? "\n<function=ping>\n</function>\n" : "ping"));
+        feed(call, {kToolClose});
+      }
+      require(call.allows(v.call_turn_eos()) && !call.allows('{') && !call.allows('x'),
+              "tool turn ends without an unconstrained answer");
+      if (!dsml) require(call.allows(kToolOpen) == parallel, "parallel flag still enforced");
+    }
+  }
+  const auto v = dsml_vocab();
+  GrammarSpec scalar = spec_of(GrammarSpec::Mode::kJsonOrTools);
+  scalar.json_schema = R"({"type":"string"})";
+  GrammarState string(&v, scalar, false);
+  feed(string, {kQuotedLt, '"', kEosText});
+  require(string.active(), "a '<' inside a JSON string is not a DSML opener");
 }
 
 DGPP_TEST(tool_grammar_typedValuesFollowTheSchema) {

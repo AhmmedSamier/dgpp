@@ -406,6 +406,23 @@ DGPP_TEST(tool_parser_oneCallTypedByTheSchema) {
   require(run.content.empty() && run.reasoning.empty(), "nothing else");
 }
 
+DGPP_TEST(tool_parser_preservesNumbersAcrossSchemaBoundaries) {
+  for (const std::string value : {
+           "0.100000000000000000001", "1e-5000", "1e5000", "9223372036854775809",
+           "{\"n\":[0.100000000000000000001],\"s\":\"123\"}"}) {
+    const Run glm = drive(ids_of("</think><tool_call>flat_tool<arg_key>x</arg_key><arg_value>" +
+                                 value + "</arg_value></tool_call>"));
+    const Run qwen = drive_qwen("</think><tool_call>\n<function=flat_tool>\n<parameter=x>\n" +
+                                value + "\n</parameter>\n</function>\n</tool_call>");
+    const Run dsml = drive_dsml("</think><｜DSML｜ calls>\n<｜DSML｜ invoke name=\"flat_tool\">\n"
+                                "<｜DSML｜ parameter name=\"x\" string=\"false\">" + value +
+                                "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>");
+    for (const Run& run : {glm, qwen, dsml})
+      require(run.calls.size() == 1 && run.calls[0].arguments == "{\"x\": " + value + "}",
+              "tool output preserves the numeric value accepted by the grammar: " + value);
+  }
+}
+
 DGPP_TEST(tool_parser_nestedJsonAndNoArgsAndUnicode) {
   const Run run = drive(ids_of(
       "</think>Calling.<tool_call>get_weather"

@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "text/chat_template.hpp"
+#include "text/json_grammar.hpp"
 #include "text/tokenizer.hpp"
 
 namespace dgpp::text {
@@ -161,6 +162,57 @@ void ToolCallParser::abort_block(std::vector<Event>* out) {
   raw_.clear();
 }
 
+namespace {
+
+std::vector<DecimalNumber> numeric_values(const std::string& text) {
+  std::vector<DecimalNumber> out;
+  bool quoted = false, escaped = false;
+  for (size_t i = 0; i < text.size(); ++i) {
+    const char ch = text[i];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (ch == '\\') escaped = true;
+      else if (ch == '"') quoted = false;
+    } else if (ch == '"') {
+      quoted = true;
+    } else if (ch == '-' || (ch >= '0' && ch <= '9')) {
+      const size_t start = i;
+      while (i + 1 < text.size() && text[i + 1] != '\0' &&
+             std::strchr("0123456789.eE+-", text[i + 1]) != nullptr) ++i;
+      out.push_back(DecimalNumber::parse(std::string_view(text).substr(start, i - start + 1)));
+    }
+  }
+  return out;
+}
+
+std::string normalized_json(const std::string& text) {
+  try {
+    const auto parsed = minijson::parse(text);
+    size_t end = parsed.consumed;
+    while (end < text.size() && JsonLexer::is_ws(static_cast<uint8_t>(text[end]))) ++end;
+    if (end != text.size()) throw std::invalid_argument("trailing text");
+    const std::string normalized = Value::from_minijson(parsed.root).to_json(false);
+    const auto before = numeric_values(text), after = numeric_values(normalized);
+    bool exact = before.size() == after.size();
+    for (size_t i = 0; exact && i < before.size(); ++i)
+      exact = before[i].compare(after[i]) == 0;
+    if (exact) return normalized;
+  } catch (const std::exception&) {
+    // A valid JSON number may be outside the DOM's int64/double range.
+  }
+  // Preserve numeric spellings when normalization would move a value
+  // across a schema bound, including numbers inside arrays and objects.
+  JsonLexer lexer;
+  for (const unsigned char ch : text)
+    if (!lexer.feed(ch).ok) throw std::invalid_argument("not a JSON value");
+  if (!lexer.done()) throw std::invalid_argument("incomplete JSON value");
+  const size_t first = text.find_first_not_of(" \n\r\t");
+  const size_t last = text.find_last_not_of(" \n\r\t");
+  return text.substr(first, last - first + 1);
+}
+
+}  // namespace
+
 std::string ToolCallParser::typed_value(const std::string& function,
                                         const std::string& key,
                                         const std::string& text) const {
@@ -169,14 +221,7 @@ std::string ToolCallParser::typed_value(const std::string& function,
     // JSON when the whole text parses as one value (the template's tojson
     // of a non-string); the text itself otherwise.
     try {
-      const minijson::ParseResult parsed = minijson::parse(text);
-      size_t end = parsed.consumed;
-      while (end < text.size() &&
-             (text[end] == ' ' || text[end] == '\n' || text[end] == '\t' ||
-              text[end] == '\r'))
-        ++end;
-      if (end == text.size())
-        return Value::from_minijson(parsed.root).to_json(/*ensure_ascii=*/false);
+      return normalized_json(text);
     } catch (const std::exception&) {
       // not JSON — a string it is
     }
@@ -431,11 +476,7 @@ bool ToolCallParser::parse_dsml_block(const std::string& text) {
         json = Value::string_value(value).to_json(false);
       } else {
         try {
-          const minijson::ParseResult parsed = minijson::parse(value);
-          size_t end = parsed.consumed;
-          while (end < value.size() && (value[end] == ' ' || value[end] == '\n' || value[end] == '\t' || value[end] == '\r')) ++end;
-          if (end != value.size()) throw std::runtime_error("trailing text");
-          json = Value::from_minijson(parsed.root).to_json(false);
+          json = normalized_json(value);
         } catch (const std::exception&) {
           json = Value::string_value(value).to_json(false);
         }

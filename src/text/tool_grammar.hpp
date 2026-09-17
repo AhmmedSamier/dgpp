@@ -124,14 +124,17 @@ struct GrammarSpec {
     kJson,            // response_format (M6 6h): the content is one JSON
                       // text under `json_schema` ("" = json_object: any
                       // object), then EOS; no tool calls
+    kJsonOrTools,     // auto tools + response_format: choose a JSON answer
+                      // or a tool-call turn, committing at the first value
   };
   Mode mode = Mode::kNone;
   bool parallel = true;            // several calls per turn allowed
   std::string named;               // kNamed's function
   std::vector<GrammarTool> tools;  // the callable functions (kRequired/kAuto:
                                    // all; kNamed: the one)
-  std::string json_schema;         // kJson: the schema's JSON text ("" = free)
+  std::string json_schema;         // JSON modes: schema text ("" = json_object)
   bool active() const { return mode != Mode::kNone; }
+  bool has_json() const { return mode == Mode::kJson || mode == Mode::kJsonOrTools; }
   bool operator==(const GrammarSpec& o) const {
     if (mode != o.mode || parallel != o.parallel || named != o.named ||
         json_schema != o.json_schema || tools.size() != o.tools.size())

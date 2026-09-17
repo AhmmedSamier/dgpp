@@ -97,8 +97,8 @@ struct Compiler {
                                     ": unsupported keyword (the constrained "
                                     "subset is type, properties, required, "
                                     "additionalProperties, items, minItems, "
-                                    "maxItems, enum, const, anyOf, and an "
-                                    "integer's minimum, maximum, "
+                                    "maxItems, enum, const, anyOf, and numeric "
+                                    "minimum, maximum, "
                                     "exclusiveMinimum, exclusiveMaximum)");
       if (unenforced != nullptr && narrowing(m.key))
         unenforced->push_back(path + "." + m.key +
@@ -243,17 +243,11 @@ struct Compiler {
            key == "exclusiveMaximum";
   }
 
-  // The integer bounds (2026-09-07; the Hermes agent's tool definitions
-  // carry `minimum` / `maximum` on every integer argument, and a bound the
-  // server does not apply is one the client has to guard against). Where
-  // the node's numeric type is integer alone the four keywords compile to
-  // one inclusive int64 range — a fractional bound rounded inward, an
-  // exclusive one stepped by one — and the machine enforces it digit by
-  // digit. Anything else (a number that admits a fraction, an untyped
-  // value, the draft-4 boolean form, a bound beyond int64, an empty range,
-  // an enum no member of which fits) is refused by the strict compile
-  // naming the keyword, and recorded with the reason by a tool argument's
-  // compile, which then leaves the value typed and unbounded as before.
+  // Integer-only nodes retain the inclusive int64 range and its fast
+  // prefix arithmetic. General numeric nodes use decimal bounds, which
+  // also handle fractions and exponents. Enums are filtered at compile
+  // time. Unsupported or empty ranges refuse by keyword under strict
+  // compilation and are recorded as unenforced for non-strict tools.
   void compile_bounds(const minijson::Value& v, const std::string& path,
                       JsonSchemaNode* n) {
     static const char* kKeys[] = {"minimum", "exclusiveMinimum", "maximum",
@@ -294,10 +288,50 @@ struct Compiler {
           integer_typed = false;
       }
     }
-    if (!integer_typed)
-      return give_up(first,
-                     "a bound is enforced on integers only; this value admits a "
-                     "fraction or is untyped, and keeps its type");
+    if (!integer_typed) {
+      DecimalBounds b;
+      for (int i = 0; i < 4; ++i) {
+        if (vals[i] == nullptr) continue;
+        if (!std::isfinite(vals[i]->as_double()))
+          return give_up(i, "must be a finite number");
+        const DecimalNumber x = DecimalNumber::parse(json_text_of(*vals[i]));
+        const bool lower = i < 2, exclusive = i == 1 || i == 3;
+        bool& present = lower ? b.has_min : b.has_max;
+        bool& open = lower ? b.exclusive_min : b.exclusive_max;
+        DecimalNumber& limit = lower ? b.min : b.max;
+        const int cmp = x.compare(limit);
+        if (!present || (lower ? cmp > 0 : cmp < 0)) {
+          limit = x;
+          open = exclusive;
+        } else if (cmp == 0) {
+          open = open || exclusive;
+        }
+        present = true;
+      }
+      if (b.has_min && b.has_max &&
+          (b.min.compare(b.max) > 0 ||
+           (b.min.compare(b.max) == 0 && (b.exclusive_min || b.exclusive_max))))
+        return give_up(vals[2] != nullptr ? 2 : 3,
+                       "no number satisfies the range; no bound applied");
+      if (n->has_enum) {
+        std::vector<std::string> kept;
+        uint32_t classes = 0;
+        for (const std::string& t : n->enum_texts) {
+          const uint32_t cls = class_of_text(t);
+          if ((cls & JsonSchemaNode::kNumber) != 0 &&
+              !b.contains(DecimalNumber::parse(t))) continue;
+          kept.push_back(t);
+          classes |= cls;
+        }
+        if (kept.empty())
+          return give_up(first, "no enum member lies inside the range; no bound applied");
+        n->enum_texts = std::move(kept);
+        n->types &= classes;
+      } else {
+        n->decimal_bounds = std::move(b);
+      }
+      return;
+    }
     // Each bound as an int64, rounded inward; a double beyond int64 (or
     // not a number at all) has no integer form worth applying.
     constexpr double kLimit = 9223372036854775808.0;  // 2^63
@@ -474,6 +508,164 @@ bool IntegerPrefix::can_reach(const IntegerBounds& b) const {
     low *= 10u;
     high = high > (kMax - 9u) / 10u ? kMax : high * 10u + 9u;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Decimal bounds, including fractional and exponent prefixes.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+int compare_digits(const std::string& a, const std::string& b) {
+  for (size_t i = 0; i < std::max(a.size(), b.size()); ++i) {
+    const char x = i < a.size() ? a[i] : '0';
+    const char y = i < b.size() ? b[i] : '0';
+    if (x != y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+}  // namespace
+
+DecimalNumber DecimalNumber::parse(std::string_view text) {
+  DecimalNumber n;
+  size_t i = 0;
+  if (!text.empty() && text[0] == '-') { n.negative = true; ++i; }
+  bool fraction = false;
+  int64_t places = 0;
+  for (; i < text.size() && text[i] != 'e' && text[i] != 'E'; ++i) {
+    if (text[i] == '.') { fraction = true; continue; }
+    if (!fraction) ++places;
+    n.digits.push_back(text[i]);
+  }
+  const size_t first = n.digits.find_first_not_of('0');
+  if (first == std::string::npos) return DecimalNumber{};
+  n.exponent = places - static_cast<int64_t>(first) - 1;
+  n.digits.erase(0, first);
+  if (i < text.size()) {
+    ++i;
+    bool negative = false;
+    if (i < text.size() && (text[i] == '+' || text[i] == '-'))
+      negative = text[i++] == '-';
+    // Exponents beyond this cannot approach any representable schema
+    // bound, even after accounting for the mantissa's decimal places.
+    constexpr int64_t cap = INT64_MAX / 4;
+    int64_t exponent = 0;
+    for (; i < text.size(); ++i)
+      exponent = exponent > (cap - 9) / 10 ? cap : exponent * 10 + text[i] - '0';
+    n.exponent += negative ? -exponent : exponent;
+  }
+  return n;
+}
+
+int DecimalNumber::compare(const DecimalNumber& other) const {
+  if (negative != other.negative) return negative ? -1 : 1;
+  int cmp = 0;
+  if (digits.empty() || other.digits.empty())
+    cmp = digits.empty() ? (other.digits.empty() ? 0 : -1) : 1;
+  else if (exponent != other.exponent)
+    cmp = exponent < other.exponent ? -1 : 1;
+  else
+    cmp = compare_digits(digits, other.digits);
+  return negative ? -cmp : cmp;
+}
+
+bool DecimalBounds::contains(const DecimalNumber& value) const {
+  if (has_min) {
+    const int cmp = value.compare(min);
+    if (cmp < 0 || (cmp == 0 && exclusive_min)) return false;
+  }
+  if (has_max) {
+    const int cmp = value.compare(max);
+    if (cmp > 0 || (cmp == 0 && exclusive_max)) return false;
+  }
+  return true;
+}
+
+bool DecimalPrefix::within(const DecimalBounds& bounds) const {
+  return !text.empty() && bounds.contains(DecimalNumber::parse(text));
+}
+
+bool DecimalPrefix::can_reach(const DecimalBounds& bounds) const {
+  const size_t e = text.find_first_of("eE");
+  DecimalNumber mantissa = DecimalNumber::parse(std::string_view(text).substr(0, e));
+  // Reflect negative candidates into a nonnegative magnitude interval.
+  DecimalBounds b = bounds;
+  if (!text.empty() && text[0] == '-') {
+    std::swap(b.has_min, b.has_max);
+    std::swap(b.exclusive_min, b.exclusive_max);
+    std::swap(b.min, b.max);
+    b.min.negative = !b.min.digits.empty() && !b.min.negative;
+    b.max.negative = !b.max.digits.empty() && !b.max.negative;
+  }
+  mantissa.negative = false;
+  const DecimalNumber zero;
+  if (mantissa.digits.empty()) {
+    if (b.contains(zero)) return true;
+    // An unfinished zero mantissa can acquire significant digits and an
+    // exponent. After 'e' its value is permanently zero.
+    return e == std::string::npos &&
+           (!b.has_max || b.max.compare(zero) > 0);
+  }
+  if (b.has_max && b.max.compare(zero) <= 0) return false;
+  if (b.has_min && b.min.compare(zero) <= 0) b.has_min = false;
+  if (e == std::string::npos) {
+    // Further mantissa digits describe [prefix, successor) at any decimal
+    // scale. Only scales adjacent to the bounds need checking: all other
+    // scales lie wholly beyond a bound (or in the unbounded direction).
+    DecimalNumber successor = mantissa;
+    size_t i = successor.digits.size();
+    while (i > 0 && successor.digits[i - 1] == '9') successor.digits[--i] = '0';
+    const bool carry = i == 0;
+    if (carry) successor.digits.insert(successor.digits.begin(), '1');
+    else ++successor.digits[i - 1];
+    const int64_t scales[] = {0, b.min.exponent - 1, b.min.exponent,
+                              b.min.exponent + 1, b.max.exponent - 1,
+                              b.max.exponent, b.max.exponent + 1};
+    for (const int64_t scale : scales) {
+      mantissa.exponent = scale;
+      successor.exponent = scale + (carry ? 1 : 0);
+      if (b.has_min && successor.compare(b.min) <= 0) continue;
+      if (b.has_max) {
+        const int cmp = mantissa.compare(b.max);
+        if (cmp > 0 || (cmp == 0 && b.exclusive_max)) continue;
+      }
+      return true;
+    }
+    return false;
+  }
+  // Once the exponent opens, the mantissa is fixed. Convert its bounds
+  // to an inclusive range of integer exponents, then test the exponent
+  // prefix (which, unlike a JSON integer, permits '+' and leading zeros).
+  IntegerBounds powers;
+  if (b.has_min) {
+    const int cmp = compare_digits(mantissa.digits, b.min.digits);
+    powers.has_min = true;
+    powers.min = b.min.exponent - mantissa.exponent +
+                 ((cmp < 0 || (cmp == 0 && b.exclusive_min)) ? 1 : 0);
+  }
+  if (b.has_max) {
+    const int cmp = compare_digits(mantissa.digits, b.max.digits);
+    powers.has_max = true;
+    powers.max = b.max.exponent - mantissa.exponent -
+                 ((cmp > 0 || (cmp == 0 && b.exclusive_max)) ? 1 : 0);
+  }
+  if (powers.has_min && powers.has_max && powers.min > powers.max) return false;
+  std::string_view tail(text.data() + e + 1, text.size() - e - 1);
+  if (tail.empty()) return true;
+  IntegerPrefix prefix;
+  if (tail[0] == '-' || tail[0] == '+') {
+    prefix.negative = tail[0] == '-';
+    tail.remove_prefix(1);
+  }
+  for (const char ch : tail) {
+    if (prefix.digits == 0 && ch == '0') continue;
+    prefix.push(static_cast<uint8_t>(ch));
+  }
+  if (prefix.digits == 0)
+    return prefix.negative ? (!powers.has_min || powers.min <= 0)
+                           : (!powers.has_max || powers.max >= 0);
+  return prefix.can_reach(powers);
 }
 
 // ---------------------------------------------------------------------------
@@ -857,10 +1049,12 @@ JsonTables::JsonTables(const GrammarVocab& vocab)
       lead_ws_ids_[static_cast<size_t>(std::min<size_t>(i, JsonLexer::kMaxWsRun))]
           .push_back(id);
     if (i < text.size()) {
-      // '-'? digits*: a token that stays inside a number.
-      size_t j = text[i] == '-' ? i + 1 : i;
+      // Any numeric fragment, including fractions and exponent signs.
+      // The lexical table checks its syntax at the current position.
       bool numeric = true;
-      for (; j < text.size(); ++j) numeric = numeric && is_digit(static_cast<uint8_t>(text[j]));
+      for (size_t j = i; j < text.size(); ++j)
+        numeric = numeric && (is_digit(static_cast<uint8_t>(text[j])) ||
+                               std::strchr("-+.eE", text[j]) != nullptr) && text[j] != '\0';
       sh.numeric = numeric;
       if (numeric) numeric_.push_back(id);
     }
@@ -1077,9 +1271,11 @@ bool JsonMachine::done() const {
   // they stand — an enum target spelled out, a bounded value inside its
   // range (the cursors are an anyOf's alternatives: union semantics).
   for (const Cursor& c : cursors_) {
-    if (c.bound_node >= 0 &&
-        !c.number.within(schema_->nodes[static_cast<size_t>(c.bound_node)].bounds))
-      continue;
+    if (c.bound_node >= 0) {
+      const auto& n = schema_->nodes[static_cast<size_t>(c.bound_node)];
+      if (n.decimal_bounds.active() ? !c.decimal.within(n.decimal_bounds)
+                                    : !c.number.within(n.bounds)) continue;
+    }
     if (c.target_node >= 0) {
       const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
       bool complete = false;
@@ -1111,6 +1307,7 @@ bool JsonMachine::on_value_start(uint32_t cls, uint8_t b) {
       nc.integer_only = false;
       nc.bound_node = -1;
       nc.number = IntegerPrefix{};
+      nc.decimal = DecimalPrefix{};
       if (leaf == JsonSchemaNode::kAny) {
         if (cls == JsonSchemaNode::kObject || cls == JsonSchemaNode::kArray) {
           Frame f;
@@ -1150,7 +1347,7 @@ bool JsonMachine::on_value_start(uint32_t cls, uint8_t b) {
         if (nc.target_node >= 0) nc.integer_only = targets_integral(nc);
         // The kValueByte of this same byte pushes the first digit (or the
         // sign) and asks whether the range is still reachable.
-        if (n.bounds.active()) nc.bound_node = leaf;
+        if (n.bounds.active() || n.decimal_bounds.active()) nc.bound_node = leaf;
       }
       next.push_back(std::move(nc));
     }
@@ -1166,8 +1363,16 @@ bool JsonMachine::on_value_byte(uint8_t b) {
       continue;
     }
     if (c.bound_node >= 0) {
-      c.number.push(b);
-      if (!c.number.can_reach(schema_->nodes[static_cast<size_t>(c.bound_node)].bounds)) {
+      const auto& n = schema_->nodes[static_cast<size_t>(c.bound_node)];
+      bool reachable;
+      if (n.decimal_bounds.active()) {
+        c.decimal.push(b);
+        reachable = c.decimal.can_reach(n.decimal_bounds);
+      } else {
+        c.number.push(b);
+        reachable = c.number.can_reach(n.bounds);
+      }
+      if (!reachable) {
         c.dead = true;
         continue;
       }
@@ -1194,12 +1399,15 @@ bool JsonMachine::on_value_end() {
   ++epoch_;
   for (Cursor& c : cursors_) {
     if (c.bound_node >= 0) {
-      if (!c.number.within(schema_->nodes[static_cast<size_t>(c.bound_node)].bounds)) {
+      const auto& n = schema_->nodes[static_cast<size_t>(c.bound_node)];
+      if (n.decimal_bounds.active() ? !c.decimal.within(n.decimal_bounds)
+                                    : !c.number.within(n.bounds)) {
         c.dead = true;
         continue;
       }
       c.bound_node = -1;
       c.number = IntegerPrefix{};
+      c.decimal = DecimalPrefix{};
     }
     if (c.target_node >= 0) {
       const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
@@ -1429,10 +1637,11 @@ bool JsonMachine::bounds_live_here(bool value_start) const {
     }
     std::vector<int> options;
     leaves(expected_node(c), &options);
-    for (const int leaf : options)
-      if (leaf != JsonSchemaNode::kAny &&
-          schema_->nodes[static_cast<size_t>(leaf)].bounds.active())
-        return true;
+    for (const int leaf : options) {
+      if (leaf == JsonSchemaNode::kAny) continue;
+      const auto& n = schema_->nodes[static_cast<size_t>(leaf)];
+      if (n.bounds.active() || n.decimal_bounds.active()) return true;
+    }
   }
   return false;
 }
@@ -1445,7 +1654,9 @@ bool JsonMachine::numeric_token_ok(const std::string& text, bool value_start) co
     // static table refused such a token already). An enum target beside a
     // bound is the one shape the arithmetic does not cover: simulate.
     for (const Cursor& c : cursors_)
-      if (c.target_node >= 0) return simulate(text);
+      if (c.target_node >= 0 ||
+          (c.bound_node >= 0 && schema_->nodes[static_cast<size_t>(c.bound_node)].decimal_bounds.active()))
+        return simulate(text);
     for (const Cursor& c : cursors_) {
       if (c.bound_node < 0) return true;
       IntegerPrefix p = c.number;
@@ -1467,6 +1678,7 @@ bool JsonMachine::numeric_token_ok(const std::string& text, bool value_start) co
       const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(leaf)];
       if ((n.types & (JsonSchemaNode::kNumber | JsonSchemaNode::kInteger)) == 0) continue;
       if (n.has_enum) return simulate(text);
+      if (n.decimal_bounds.active()) return simulate(text);
       if (!n.bounds.active()) return true;
       IntegerPrefix p;
       for (size_t j = i; j < text.size(); ++j) p.push(static_cast<uint8_t>(text[j]));

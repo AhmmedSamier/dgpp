@@ -1277,6 +1277,13 @@ DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
   require(g.find("\"reasoning_effort\":\"low\"") != std::string::npos &&
               g.find("\"clear_thinking\":false") != std::string::npos,
           "reasoning_effort and chat_template_kwargs render: " + g);
+  for (const std::string& extra : {
+           std::string(",\"reasoning_effort\":\"xhigh\""),
+           std::string(",\"chat_template_kwargs\":{\"reasoning_effort\":\"xhigh\"}")}) {
+    (void)post_until_usage(rig, chat_body("abcd", 2, extra));
+    require(rig.frontend.last_globals().find("\"reasoning_effort\":\"xhigh\"") != std::string::npos,
+            "xhigh reaches the template through either API spelling");
+  }
 
   // The assistant tool_calls wire form (arguments as a JSON string) is
   // parsed into the mapping the template iterates; a null assistant
@@ -1575,20 +1582,19 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
   require(g2.size() == 7 && !g2[6].tools[0].constrain_keys,
           "JSON Schema's default is open: keys unconstrained");
   // A strict function whose schema leaves the enforceable subset is a 400
-  // naming the keyword path (a number's bound here — an integer's is
-  // enforced since 2026-09-07); the same schema without strict is served
-  // with that value typed and the bound unenforced, and a
+  // naming the keyword path; the same schema without strict is served
+  // with that value typed and the narrowing unenforced, and a
   // keyword that changes the value's shape leaves it free.
   const std::string strict_tools =
       ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"strict\":STRICT,"
       "\"parameters\":{\"type\":\"object\",\"properties\":{\"days\":{\"type\":"
-      "\"number\",\"minimum\":0}}}}}]";
+      "\"number\",\"multipleOf\":2}}}}}]";
   {
     std::string body = strict_tools;
     body.replace(body.find("STRICT"), 6, "true");
     const std::string resp = post_chat(rig, chat_body("abcd", 2, body));
     require(resp.find("400 ") != std::string::npos &&
-                resp.find("\"param\":\"tools[0].function.parameters.properties.days.minimum\"") !=
+                resp.find("\"param\":\"tools[0].function.parameters.properties.days.multipleOf\"") !=
                     std::string::npos &&
                 resp.find("\"code\":\"unsupported_schema\"") != std::string::npos,
             "strict refuses by keyword path: " + resp.substr(0, 400));
@@ -1598,16 +1604,25 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
     const std::vector<dgpp::text::GrammarSpec> g3 = rig.engine.grammars();
     require(g3.size() == 8 && g3[7].tools[0].args.size() == 1 &&
                 g3[7].tools[0].args[0].kind == Kind::kJson &&
-                g3[7].tools[0].args[0].schema.find("minimum") != std::string::npos,
+                g3[7].tools[0].args[0].schema.find("multipleOf") != std::string::npos,
             "non-strict: a narrowing keyword keeps the value typed");
     std::string shaped = strict_tools;
     shaped.replace(shaped.find("STRICT"), 6, "false");
-    shaped.replace(shaped.find("\"minimum\":0"), 11, "\"$ref\":\"#/x\"");
+    shaped.replace(shaped.find("\"multipleOf\":2"), std::string("\"multipleOf\":2").size(), "\"$ref\":\"#/x\"");
     (void)post_until_usage(rig, chat_body("abcd", 64, shaped));
     const std::vector<dgpp::text::GrammarSpec> g4 = rig.engine.grammars();
     require(g4.size() == 9 && g4[8].tools[0].args.size() == 1 &&
                 g4[8].tools[0].args[0].kind == Kind::kFree,
             "non-strict: a shape keyword outside the subset leaves the value free");
+    std::string bounded = strict_tools;
+    bounded.replace(bounded.find("STRICT"), 6, "true");
+    bounded.replace(bounded.find("\"multipleOf\":2"), std::string("\"multipleOf\":2").size(),
+                    "\"minimum\":0,\"maximum\":10");
+    (void)post_until_usage(rig, chat_body("abcd", 64, bounded));
+    const auto numeric = rig.engine.grammars().back().tools[0];
+    require(numeric.strict && numeric.args[0].kind == Kind::kJson &&
+                numeric.args[0].schema.find("minimum") != std::string::npos,
+            "strict tool functions accept and enforce number bounds");
   }
 }
 
@@ -1709,8 +1724,36 @@ DGPP_TEST(serve_responseFormat_armsTheJsonGrammar) {
   require(rig.frontend.last_globals().find("response_format") == std::string::npos,
           "the prompt does not carry the format");
 
-  // The refusals: strict + unsupported keyword names the keyword; tools
-  // and JSON together; a bad type; a missing name.
+  const std::string numeric_format =
+      R"(,"response_format":{"type":"json_schema","json_schema":{"name":"score","strict":true,"schema":{"type":"number","minimum":0,"maximum":10}}})";
+  (void)post_until_usage(rig, chat_body("abcd", 64, numeric_format));
+  require(rig.engine.grammars().back().json_schema.find("\"minimum\": 0") != std::string::npos,
+          "strict number bounds reach the engine");
+  for (const std::string& format : {std::string(R"(,"response_format":{"type":"json_object"})"), numeric_format}) {
+    for (const auto& choice : std::vector<std::pair<std::string, Mode>>{
+             {"", Mode::kJsonOrTools},
+             {R"(,"tool_choice":"none")", Mode::kJson},
+             {R"(,"tool_choice":"required")", Mode::kRequired},
+             {R"(,"tool_choice":{"type":"function","function":{"name":"get_weather"}})", Mode::kNamed}}) {
+      (void)post_until_usage(rig, chat_body("abcd", 64, kWeatherTools + format + choice.first +
+                                          R"(,"parallel_tool_calls":false)"));
+      const auto grammar = rig.engine.grammars().back();
+      require(grammar.mode == choice.second && !grammar.parallel && !grammar.tools.empty(),
+              "response format preserves tool choice, definitions and parallel flag");
+    }
+    // The final turn keeps the tools and includes an assistant call and
+    // its result, as a normal agent loop does.
+    const std::string conversation =
+        "{\"model\":\"" + kModel + "\",\"max_tokens\":64,\"messages\":["
+        R"({"role":"user","content":"abcd"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Rome\"}"}}]},{"role":"tool","tool_call_id":"c1","content":"18C"}])" +
+        kWeatherTools + format + "}";
+    const std::string response = post_until_usage(rig, conversation);
+    require(response.find("200 ") != std::string::npos &&
+                rig.engine.grammars().back().mode == Mode::kJsonOrTools,
+            "tool result followed by structured output is accepted: " + response.substr(0, 300));
+  }
+
+  // The refusals: strict + unsupported keyword, bad type, missing name.
   const auto refused = [&](const std::string& extra, const std::string& param,
                            const std::string& code) {
     const std::string resp = post_chat(rig, chat_body("abcd", 2, extra));
@@ -1723,8 +1766,6 @@ DGPP_TEST(serve_responseFormat_armsTheJsonGrammar) {
           "\"strict\":true,\"schema\":{\"type\":\"object\",\"properties\":{\"city\":"
           "{\"type\":\"string\",\"pattern\":\"^a\"}}}}}",
           "response_format.json_schema.schema.properties.city.pattern", "unsupported_schema");
-  refused(kWeatherTools + ",\"response_format\":{\"type\":\"json_object\"}",
-          "response_format", "unsupported_parameter");
   refused(",\"response_format\":{\"type\":\"yaml\"}", "response_format.type", "");
   refused(",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"schema\":{}}}",
           "response_format.json_schema.name", "");

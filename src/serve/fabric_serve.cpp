@@ -260,7 +260,7 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
           out.push_back('}');
         }
         out += "]";
-        if (gr.mode == dgpp::text::GrammarSpec::Mode::kJson) {
+        if (gr.has_json()) {
           out += ",\"js\":";
           append_json_string(&out, gr.json_schema);
         }
@@ -686,7 +686,7 @@ JournalRecord decode_journal_line(std::string_view line) {
         dgpp::text::GrammarSpec& g = r.grammar;
         const dgpp::minijson::Value& m = field(*gr, "m", "grammar");
         if (!m.is_number() || m.as_int() < 1 ||
-            m.as_int() > static_cast<int64_t>(dgpp::text::GrammarSpec::Mode::kJson))
+            m.as_int() > static_cast<int64_t>(dgpp::text::GrammarSpec::Mode::kJsonOrTools))
           throw std::runtime_error("journal: submit '" + r.id +
                                    "' has a bad grammar mode");
         g.mode = static_cast<dgpp::text::GrammarSpec::Mode>(m.as_int());
@@ -762,7 +762,7 @@ JournalRecord decode_journal_line(std::string_view line) {
                                      "' names a function outside its tools");
         }
         // The JSON grammar (M6 6h) carries its schema text ("" = json_object).
-        if (g.mode == dgpp::text::GrammarSpec::Mode::kJson) {
+        if (g.has_json()) {
           const dgpp::minijson::Value& js = field(*gr, "js", "grammar");
           if (!js.is_string())
             throw std::runtime_error("journal: submit '" + r.id +

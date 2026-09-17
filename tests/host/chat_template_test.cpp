@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -31,6 +32,7 @@ char** g_argv = nullptr;
 #include "text/tool_parser.hpp"
 #include "text/tool_grammar.hpp"
 #include "models/glm/config.hpp"
+#include "serve/frontend.hpp"
 
 namespace {
 
@@ -93,6 +95,90 @@ EosVocab eos_and_vocab(const std::string& config_path) {
   return out;
 }
 
+
+DGPP_TEST(qwen_reasoning_effort_renders_each_level) {
+  const std::string golden = golden_path(g_argc, g_argv);
+  if (!corpus_is_qwen(golden)) return;
+  std::string err;
+  const std::string snap = dgpp::hf::model_dir(corpus_model(golden), &err);
+  if (snap.empty()) {
+    DGPP_LOG_WARN("Qwen reasoning effort gate: checkpoint unavailable ({})", err);
+    std::exit(2);
+  }
+  const auto tpl = dgpp::text::ChatTemplate::load(
+      (std::filesystem::path(snap) / "chat_template.jinja").string());
+  const auto tok = dgpp::text::Tokenizer::load(
+      (std::filesystem::path(snap) / "tokenizer.json").string());
+  const dgpp::serve::TextFrontend frontend(&tok, &tpl);
+  std::map<std::string, std::string> renders;
+  for (const std::string effort : {"minimal", "low", "medium", "high", "xhigh"}) {
+    const std::string payload =
+        R"({"messages":[{"role":"user","content":"Hi"}],"reasoning_effort":")" +
+        effort + "\"}";
+    const auto globals = dgpp::minijson::parse(payload);
+    const std::string rendered = frontend.render_chat(globals.root);
+    renders[effort] = rendered;
+    if (effort == "medium") {
+      require(rendered.find("Reasoning effort is set to") == std::string::npos,
+              "Qwen medium uses the template's neutral thinking prompt");
+    } else {
+      const std::string expected = effort == "high" ? "xhigh" : effort == "minimal" ? "low" : effort;
+      require(rendered.find("Reasoning effort is set to " + expected + ".") != std::string::npos,
+              "Qwen template maps " + effort + " to " + expected);
+    }
+  }
+  require(renders["high"] == renders["xhigh"] && renders["minimal"] == renders["low"] &&
+              renders["low"] != renders["medium"] && renders["medium"] != renders["xhigh"],
+          "aliases match and the three Qwen reasoning modes differ");
+}
+
+DGPP_TEST(structured_output_with_tools_over_the_real_tokenizer) {
+  const std::string golden = golden_path(g_argc, g_argv);
+  std::string err;
+  const std::string snap = dgpp::hf::model_dir(corpus_model(golden), &err);
+  if (snap.empty()) {
+    DGPP_LOG_WARN("structured tools gate: checkpoint unavailable ({})", err);
+    std::exit(2);
+  }
+  const auto tok = dgpp::text::Tokenizer::load(
+      (std::filesystem::path(snap) / "tokenizer.json").string());
+  const auto cfg = eos_and_vocab((std::filesystem::path(snap) / "config.json").string());
+  const auto vocab = dgpp::text::GrammarVocab::from_tokenizer(tok, cfg.eos, cfg.vocab);
+  const auto& mk = vocab.markers();
+  const bool qwen = mk.tool_format() == dgpp::text::ToolFormat::kQwenXml;
+  const auto fn = dgpp::minijson::parse(
+      R"({"name":"record_score","strict":true,"parameters":{"type":"object","properties":{"score":{"type":"number","minimum":0,"maximum":10}},"required":["score"],"additionalProperties":false}})");
+  dgpp::text::GrammarSpec spec;
+  spec.mode = dgpp::text::GrammarSpec::Mode::kJsonOrTools;
+  spec.parallel = false;
+  spec.tools.push_back(dgpp::text::grammar_tool_from_function(fn.root, nullptr));
+  spec.json_schema = R"({"type":"object","properties":{"score":{"type":"number","minimum":0,"maximum":10}},"required":["score"],"additionalProperties":false})";
+  const auto call = [&](const std::string& value) {
+    return qwen ? mk.tool_call_open.text + "\n<function=record_score>\n<parameter=score>\n" +
+                      value + "\n</parameter>\n</function>\n" + mk.tool_call_close.text
+                : mk.tool_call_open.text + "record_score" + mk.arg_key_open.text + "score" +
+                      mk.arg_key_close.text + mk.arg_value_open.text + value +
+                      mk.arg_value_close.text + mk.tool_call_close.text;
+  };
+  for (const auto& doc : std::vector<std::pair<std::string, bool>>{
+           {"\n{\"score\": 0.125}", true}, {"{\"score\": 100e-1}", true},
+           {"{\"score\": 10.000000000000001}", false}, {"{\"score\": -0.01}", false},
+           {call("0.5"), true}, {call("1e1"), true}, {call("11"), false}}) {
+    dgpp::text::GrammarState state(&vocab, spec, false);
+    auto ids = tok.encode(doc.first);
+    ids.push_back(vocab.call_turn_eos());
+    bool accepted = true;
+    for (const int64_t id : ids) {
+      dgpp::text::TokenMask mask;
+      state.mask(&mask);
+      require(mask.allows(id) == state.allows(id), "real tokenizer mask and allows agree");
+      if (!mask.allows(id)) { accepted = false; break; }
+      state.advance(id);
+      require(state.active(), "accepted token preserves the combined grammar");
+    }
+    require(accepted == doc.second, "structured tools accepted/rejected: " + doc.first);
+  }
+}
 
 DGPP_TEST(glm_chat_template_differential_goldens) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
@@ -779,8 +865,8 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
   // The typing derived from a function definition: a plain string is
   // free, an integer is a JSON value (its bounds enforced, 2026-09-07), an
   // enum string is its texts, a type list with string is free, an untyped
-  // enum renders its members as the template would, a number's bound is
-  // noted with the reason, strict refuses an unsupported keyword by path.
+  // enum renders its members as the template would, numeric bounds are
+  // enforced, strict refuses an unsupported keyword by path.
   {
     const dgpp::minijson::ParseResult fn = dgpp::minijson::parse(
         R"({"name": "f", "parameters": {"type": "object", "properties": {
@@ -799,10 +885,8 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
     using Kind = dgpp::text::GrammarArg::Kind;
     require(t.constrain_keys && t.keys.size() == 8 && t.args.size() == 8, "keys and args");
     require(t.args[0].kind == Kind::kFree, "a plain string is free");
-    require(t.args[1].kind == Kind::kJson && warnings.empty() && notes.size() == 1 &&
-                notes[0].find("'ratio' of 'f': minimum is not enforced (") != std::string::npos &&
-                notes[0].find("integers only") != std::string::npos,
-            "an integer's bound is enforced without a note; a number's is noted with the reason");
+    require(t.args[1].kind == Kind::kJson && warnings.empty() && notes.empty(),
+            "integer and number bounds are enforced without a note");
     require(t.args[7].kind == Kind::kJson, "the number stays a JSON value");
     require(t.args[2].kind == Kind::kText &&
                 t.args[2].texts == std::vector<std::string>{"celsius", "fahrenheit"},
@@ -818,14 +902,14 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
     const dgpp::minijson::ParseResult strict = dgpp::minijson::parse(
         R"({"name": "f", "strict": true, "parameters": {"type": "object", "properties": {
               "days": {"type": "integer", "minimum": 0},
-              "ratio": {"type": "number", "minimum": 0}}}})");
+              "ratio": {"type": "number", "minimum": 0, "multipleOf": 0.5}}}})");
     bool threw = false;
     try {
       dgpp::text::grammar_tool_from_function(strict.root, nullptr);
     } catch (const std::invalid_argument& e) {
-      threw = std::string(e.what()).rfind("parameters.properties.ratio.minimum", 0) == 0;
+      threw = std::string(e.what()).rfind("parameters.properties.ratio.multipleOf", 0) == 0;
     }
-    require(threw, "strict refuses the keyword by path (the integer's bound passes)");
+    require(threw, "strict refuses the keyword by path (numeric bounds pass)");
   }
   // A bounded integer argument end to end over the real tokenizer
   // (2026-09-07; the Hermes agent's `timeout`, `limit`, `offset` carry

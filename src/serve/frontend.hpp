@@ -51,8 +51,19 @@ class TextFrontend : public ModelFrontend {
 
   std::string render_chat(const minijson::Value& globals) const override {
     dgpp::text::Value::Members members;
-    for (const minijson::Member& m : globals.members())
-      members.emplace_back(m.key, dgpp::text::Value::from_minijson(m.value));
+    for (const minijson::Member& m : globals.members()) {
+      // Qwen's checkpoint template accepts low/medium/xhigh and raises
+      // on OpenAI's high/minimal aliases. Keep other families' native
+      // effort names unchanged.
+      if (m.key == "reasoning_effort" && m.value.is_string() &&
+          markers_.tool_format() == dgpp::text::ToolFormat::kQwenXml) {
+        const std::string_view effort = m.value.as_string();
+        members.emplace_back(m.key, dgpp::text::Value::string_value(
+            effort == "high" ? "xhigh" : effort == "minimal" ? "low" : std::string(effort)));
+      } else {
+        members.emplace_back(m.key, dgpp::text::Value::from_minijson(m.value));
+      }
+    }
     members.emplace_back("add_generation_prompt",
                          dgpp::text::Value::boolean(true));
     return tpl_->render(dgpp::text::Value::map_value(std::move(members)));

@@ -1,0 +1,30 @@
+{
+  "benchmark_repository": "https://github.com/SeraphimSerapis/tool-eval-bench",
+  "benchmark_commit": "d84fce442aee49ffe433108901fd4216a784eefb",
+  "benchmark_tracked_files_modified": false,
+  "benchmark_dirty_reason": "Untracked baseline.json and run.log generated in the benchmark checkout",
+  "dgpp_checkout_base": "f1b05f544293778725f02c40ee107052f9162599",
+  "server_binary_sha256": "e8934e71f84c24914052d35286c205d32fe5527deb74f2cd11db003b8da5290a",
+  "server_contains_api_fixes": false,
+  "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+  "engine": "dgpp",
+  "adapter_label": "openai",
+  "world_size": 4,
+  "engine_config": {
+    "max_concurrency": 4,
+    "kv_capacity": 786432,
+    "kv_dtype": "bf16",
+    "default_max_tokens": 16384,
+    "queue_limit": 8,
+    "max_connections": 64,
+    "decode_graph": true,
+    "mtp": true,
+    "prefix_cache_gib": 8,
+    "admission": "full",
+    "admission_window": 256,
+    "sampling_candidates": 128,
+    "stats_interval_s": 10
+  },
+  "run_id": "2026-09-17T15-24-10.439984Z_85d256f2",
+  "command": "tool-eval-bench run --base-url http://127.0.0.1:18080 --backend openai --format openai --seed 42 --temperature 0 --backend-kwargs '{\"reasoning_effort\":\"low\"}' --timeout 180 --parallel 1 --label dgpp-glm-flash-before-api-fixes --json-file baseline.json"
+}

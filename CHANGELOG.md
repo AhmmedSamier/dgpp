@@ -6,6 +6,13 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Agent API compatibility** (2026-09-17): JSON Schema numeric bounds now
+  constrain `number` values, including fractions and exponents. Tools can
+  accompany `response_format`: auto chooses a tool-call turn or a structured
+  answer, including after tool results; required/named/none and parallel
+  call controls retain their guarantees. `reasoning_effort: xhigh` is accepted
+  through both API spellings and passed to the checkpoint template. Qwen
+  renders low/medium directly and high/xhigh as xhigh.
 - **Qwen wide batches and opt-in prefill continuation** (2026-09-15):
   sixteen decode rows support eight native-MTP requests. Small-row fused
   kernels and deployment defaults are preserved. Fitting physical slot

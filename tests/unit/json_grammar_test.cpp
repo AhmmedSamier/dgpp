@@ -171,21 +171,19 @@ DGPP_TEST(json_grammar_schemaCompilesTheSubsetAndRefusesNamingTheKeyword) {
     require(n.types == dgpp::text::JsonSchemaNode::kInteger && n.bounds.has_min &&
                 n.bounds.has_max && n.bounds.min == 0 && n.bounds.max == 9,
             "an integer's bounds compile");
-    require(!lax.nodes[static_cast<size_t>(r.property_nodes[1])].bounds.active() &&
+    require(lax.nodes[static_cast<size_t>(r.property_nodes[1])].decimal_bounds.active() &&
                 lax.nodes[static_cast<size_t>(r.property_nodes[2])].types ==
                     dgpp::text::JsonSchemaNode::kString,
             "tolerated keywords leave the types");
-    require(unenforced.size() == 3 &&
-                unenforced[0].rfind("schema.properties.r.minimum: ", 0) == 0 &&
-                unenforced[0].find("integers only") != std::string::npos &&
-                unenforced[1].rfind("schema.properties.s.pattern: ", 0) == 0 &&
-                unenforced[2].rfind("schema.properties.s.format: ", 0) == 0,
+    require(unenforced.size() == 2 &&
+                unenforced[0].rfind("schema.properties.s.pattern: ", 0) == 0 &&
+                unenforced[1].rfind("schema.properties.s.format: ", 0) == 0,
             "each tolerated keyword named by path, with the reason");
     bool threw = false;
     try {
       dgpp::text::compile_json_schema(p.root);
     } catch (const std::invalid_argument& e) {
-      threw = std::string(e.what()).rfind("schema.properties.r.minimum", 0) == 0;
+      threw = std::string(e.what()).rfind("schema.properties.s.pattern", 0) == 0;
     }
     require(threw, "the strict compile still refuses by path");
   }
@@ -306,8 +304,8 @@ DGPP_TEST(json_grammar_schemaCompilesTheSubsetAndRefusesNamingTheKeyword) {
       {R"({"const":1,"enum":[1]})", "schema.const"},
       {R"({"type":"array","minItems":3,"maxItems":2})", "schema.maxItems"},
       // The bounds the arithmetic does not cover refuse under strict.
-      {R"({"type":"number","minimum":0})", "schema.minimum"},
-      {R"({"minimum":0})", "schema.minimum"},
+      {R"({"type":"number","minimum":2,"maximum":1})", "schema.maximum"},
+      {R"({"type":"number","minimum":2,"exclusiveMaximum":2})", "schema.exclusiveMaximum"},
       {R"({"type":"integer","minimum":0,"exclusiveMinimum":true})", "schema.exclusiveMinimum"},
       {R"({"type":"integer","minimum":5,"maximum":3})", "schema.maximum"},
       {R"({"type":"integer","minimum":5,"exclusiveMaximum":5})", "schema.exclusiveMaximum"},
@@ -315,7 +313,7 @@ DGPP_TEST(json_grammar_schemaCompilesTheSubsetAndRefusesNamingTheKeyword) {
       {R"({"type":"integer","minimum":1e30})", "schema.minimum"},
       {R"({"type":"integer","maximum":"9"})", "schema.maximum"},
       {R"({"anyOf":[{"type":"integer"}],"minimum":0})", "schema.minimum"},
-      {R"({"enum":[1.5, 2],"minimum":0})", "schema.minimum"},
+      {R"({"enum":[1.5, 2],"minimum":3})", "schema.minimum"},
   };
   for (const Refusal& r : refusals) {
     bool threw = false;
@@ -412,6 +410,10 @@ void check_conforms(const std::string& which, const std::string& text) {
   if (which == "range") {
     const int64_t i = integral(v, "range");
     require(i >= -50 && i <= 150, "range: " + text);
+  }
+  if (which == "decimal") {
+    require(v.is_number() && v.as_double() >= 1.25 && v.as_double() < 2.5,
+            "decimal outside [1.25, 2.5): " + text);
   }
 }
 
@@ -714,12 +716,80 @@ DGPP_TEST(json_grammar_integerBoundsAreEnforcedDigitByDigit) {
   JsonMachine h(pos, &tables());
   for (int i = 0; i < 25; ++i) require(h.feed(i == 0 ? '1' : '0'), "a 25-digit integer");
   require(h.done(), "done at 25 digits");
-  // A number that admits a fraction keeps its bound unenforced (lax).
+  // A number's bound is enforced under the lax tool-argument compile too.
   std::vector<std::string> notes;
   const dgpp::minijson::ParseResult np = dgpp::minijson::parse(R"({"type":"number","minimum":5})");
   const auto num = std::make_shared<const JsonSchema>(dgpp::text::compile_json_schema(np.root, &notes));
   JsonMachine f(num, &tables());
-  require(notes.size() == 1 && f.feed('1') && f.done(), "a number's bound is the model's");
+  require(notes.empty() && f.feed('1') && !f.done() && f.feed('0') && f.done(),
+          "a number cannot finish below its minimum");
+}
+
+DGPP_TEST(json_grammar_numberBoundsAcceptDecimalsAndExponents) {
+  const auto check = [&](const std::string& schema, const std::string& text, bool expected) {
+    JsonMachine m(compile(schema), &tables());
+    bool accepted = true;
+    for (const unsigned char ch : text) {
+      TokenMask fast, slow;
+      m.mask(vocab(), &fast);
+      m.mask_brute_force(vocab(), &slow);
+      std::string diff;
+      if (fast.words != slow.words)
+        for (int id = 0; id < kVocab; ++id)
+          if (fast.allows(id) != slow.allows(id))
+            diff += " " + std::to_string(id) + "(" + vocab().text(id) + ")";
+      require(fast.words == slow.words && fast.allowed == slow.allowed,
+              "number mask differs before '" + text + "' byte " + std::to_string(ch) + diff);
+      if (!m.feed(ch)) { accepted = false; break; }
+    }
+    require((accepted && m.done()) == expected, schema + " on " + text);
+    if (accepted) {
+      TokenMask fast, slow;
+      m.mask(vocab(), &fast);
+      m.mask_brute_force(vocab(), &slow);
+      require(fast.words == slow.words, "number mask differs after " + text);
+    }
+  };
+  const std::string range = R"({"type":"number","minimum":0,"maximum":10})";
+  for (const char* text : {"0", "-0", "0.25", "9.999", "10.0", "1e1", "100e-1",
+                           "1E+0001", "1e-00000000000000000000000001", "0e999999999999999999999"})
+    check(range, text, true);
+  for (const char* text : {"-0.1", "10.000000000000000000001", "11", "1e2",
+                           "100e+1", "1e99999999999999999999999", "1.", "1e-"})
+    check(range, text, false);
+  const std::string narrow = R"({"type":"number","exclusiveMinimum":0.1,"exclusiveMaximum":0.2})";
+  for (const char* text : {"0.100000000000000000001", "0.15", "15e-2", "0.199999999999999999999"})
+    check(narrow, text, true);
+  for (const char* text : {"0.1", "0.2", "1e-1", "2e-1", "1e-999999999999999999"})
+    check(narrow, text, false);
+  const std::string negative = R"({"type":"number","minimum":-2.5,"exclusiveMaximum":-1.25})";
+  for (const char* text : {"-2.5", "-2", "-12501e-4"}) check(negative, text, true);
+  for (const char* text : {"-2.50001", "-1.25", "0", "1"}) check(negative, text, false);
+  check(R"({"type":"number","minimum":5,"maximum":5})", "50e-1", true);
+  check(R"({"type":"number","minimum":5,"maximum":5})", "6", false);
+  check(R"({"minimum":0.5})", "null", true);
+  check(R"({"type":["number","null"],"minimum":0.5})", "null", true);
+  check(R"({"type":"array","items":{"type":"number","minimum":0,"maximum":10}})", "[0.5,1e1]", true);
+  check(R"({"type":"array","items":{"type":"number","minimum":0,"maximum":10}})", "[0.5,11]", false);
+  check(R"({"anyOf":[{"type":"integer","maximum":0},{"type":"number","minimum":1.5,"maximum":2}]})", "1.75", true);
+  check(R"({"anyOf":[{"type":"integer","maximum":0},{"type":"number","minimum":1.5,"maximum":2}]})", "1.25", false);
+  check(R"({"enum":[0.5,1.5,null],"minimum":1})", "1.5", true);
+  check(R"({"enum":[0.5,1.5,null],"minimum":1})", "0.5", false);
+
+  // Exhaustive finite values against an independent arithmetic oracle.
+  const auto schema = compile(R"({"type":"number","minimum":-1.25,"exclusiveMaximum":2.5})");
+  for (int numerator = -350; numerator <= 350; ++numerator) {
+    const std::string text = std::to_string(numerator) + "e-2";
+    JsonMachine m(schema, &tables());
+    bool ok = true;
+    for (const unsigned char ch : text) if (!m.feed(ch)) { ok = false; break; }
+    require((ok && m.done()) == (numerator >= -125 && numerator < 250),
+            "arithmetic oracle disagrees on " + text);
+  }
+  int finished = 0;
+  oracle_walks("decimal", compile(R"({"type":"number","minimum":1.25,"exclusiveMaximum":2.5})"),
+               60, 8391, &finished);
+  require(finished > 0, "decimal random walks complete");
 }
 
 DGPP_TEST(json_grammar_machineFactsAtTheEdges) {

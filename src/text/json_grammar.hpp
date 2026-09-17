@@ -11,7 +11,7 @@
 //   JsonSchema  — OpenAI's structured-output subset compiled into nodes:
 //                 type (and type lists), object properties / required /
 //                 additionalProperties, array items / minItems / maxItems,
-//                 enum and const, anyOf, and an integer's minimum / maximum
+//                 enum and const, anyOf, and numeric minimum / maximum
 //                 (exclusive forms included). Anything else refuses at
 //                 compile time NAMING THE KEYWORD (the loud-refusal
 //                 discipline).
@@ -22,9 +22,9 @@
 //                 byte by byte (closed objects) or run free (open ones),
 //                 enum/const values match their JSON texts, commas and
 //                 closers obey required keys and item bounds, a bounded
-//                 integer's digits are admitted only while some completion
-//                 can still land inside the range (IntegerPrefix, the
-//                 arithmetic on the digits so far). Free JSON mode is the
+//                 number's digits are admitted only while some completion
+//                 can still land inside the range (IntegerPrefix or
+//                 DecimalPrefix). Free JSON mode is the
 //                 schema {root: object, anything inside}.
 //
 // THE MASK. Per position the machine yields the set of token ids that may
@@ -67,9 +67,7 @@ struct TokenMask;
 
 // An integer's range, inclusive after normalization (a fractional or
 // exclusive bound is rounded inward at compile time). Applied only where the
-// node's numeric type is integer alone: a number with a
-// fraction or an exponent has no prefix arithmetic worth trusting, so its
-// bound stays the model's to respect and the note says so.
+// node's numeric type is integer alone. General numbers use DecimalBounds.
 struct IntegerBounds {
   bool has_min = false;
   bool has_max = false;
@@ -94,6 +92,31 @@ struct IntegerPrefix {
   void push(uint8_t b);   // '-' or a digit; anything else is ignored
   bool can_reach(const IntegerBounds& b) const;
   bool within(const IntegerBounds& b) const;
+};
+
+// Decimal comparisons keep all generated digits; converting a candidate to
+// double would round an out-of-range value onto an inclusive boundary.
+struct DecimalNumber {
+  bool negative = false;
+  std::string digits;  // significant digits, empty for zero
+  int64_t exponent = 0;  // power of ten of the first significant digit
+  static DecimalNumber parse(std::string_view text);
+  int compare(const DecimalNumber& other) const;
+};
+
+struct DecimalBounds {
+  bool has_min = false, has_max = false;
+  bool exclusive_min = false, exclusive_max = false;
+  DecimalNumber min, max;
+  bool active() const { return has_min || has_max; }
+  bool contains(const DecimalNumber& value) const;
+};
+
+struct DecimalPrefix {
+  std::string text;
+  void push(uint8_t b) { text.push_back(static_cast<char>(b)); }
+  bool can_reach(const DecimalBounds& bounds) const;
+  bool within(const DecimalBounds& bounds) const;
 };
 
 struct JsonSchemaNode {
@@ -127,6 +150,7 @@ struct JsonSchemaNode {
   // integer: the range (never set beside an enum — the enum's texts are
   // filtered by the range at compile time instead).
   IntegerBounds bounds;
+  DecimalBounds decimal_bounds;
   // anyOf: the alternatives (a node with alternatives has no other content).
   std::vector<int> any_of;
 };
@@ -138,12 +162,12 @@ struct JsonSchema {
 
 // Compiles OpenAI's structured-output subset. Throws std::invalid_argument
 // whose message starts with the offending keyword path (e.g.
-// "schema.properties.city.pattern") followed by the reason. An integer's
+// "schema.properties.city.pattern") followed by the reason. Numeric
 // minimum / maximum / exclusiveMinimum / exclusiveMaximum compile into the
 // node's bounds and are enforced. With `unenforced` given (a
 // tool argument's schema, 2026-09-06), the keywords that only NARROW a
-// typed value without an automaton behind them — a bound on a number that
-// admits a fraction, minLength/maxLength, pattern, format, multipleOf, ...
+// typed value without an automaton behind them — minLength/maxLength,
+// pattern, format, multipleOf, ...
 // — compile instead of refusing: the value keeps its type, the narrowing
 // is not applied, and "<keyword path>: <reason>" is appended to
 // `unenforced`. Keywords that change a value's shape ($ref, oneOf, allOf,
@@ -284,7 +308,7 @@ class JsonTables {
                                // leading whitespace (-1: none — pure content)
     bool structural_only = false;  // no quote, bytes all structure/ws
     int32_t lead_ws = 0;           // leading whitespace bytes (the run cap)
-    bool numeric = false;          // after the leading ws: '-'? digits* (non-empty)
+    bool numeric = false;          // numeric fragment: digits, signs, '.', 'e'/'E'
   };
   const Shape& shape(int id) const { return shapes_[static_cast<size_t>(id)]; }
   const std::vector<std::string>& prefixes() const { return prefixes_; }
@@ -361,9 +385,10 @@ class JsonMachine {
     int target_node = -1;
     size_t target_pos = 0;
     bool integer_only = false;  // the current number admits no fraction
-    // The bounded integer being spelled: its node and its digits so far.
+    // The bounded number being spelled: its node and its digits so far.
     int bound_node = -1;
     IntegerPrefix number;
+    DecimalPrefix decimal;
     bool dead = false;
   };
   int expected_node(const Cursor& c) const;
