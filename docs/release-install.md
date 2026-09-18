@@ -23,7 +23,12 @@ imply internet access. Peers receive checkpoints from rank 0 over SSH.
    ```
 
 The package bundles cudart and cuBLASLt; no compiler or CUDA toolkit is needed
-to run it. Keep libibverbs installed even for a single node: the server links
+to run it. Install `poppler-utils` on rank 0 to enable PDF file inputs. PCRE2
+is built statically when system development files are absent; a build using
+system shared PCRE2 also requires that runtime library on every node. The
+PCRE2 license is included under `docs/licenses/`.
+
+Keep libibverbs installed even for a single node: the server links
 it. Multi-node production uses it for RoCE communication. The build baseline
 is Ubuntu 24.04; older distributions may not provide compatible glibc/libstdc++.
 

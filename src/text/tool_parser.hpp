@@ -159,6 +159,7 @@ class ToolCallParser {
   struct Call {
     std::string name;
     std::string arguments;  // a JSON object, json.dumps form
+    bool custom = false;   // serving adapter: arguments holds free-form input
   };
 
   struct Event {
@@ -168,9 +169,15 @@ class ToolCallParser {
     Kind kind = Kind::kContent;
     std::string text;  // kReasoning / kContent: the delta
     Call call;         // kToolCall
+    struct TokenSpan {
+      size_t token;  // index in the generated sequence
+      size_t begin, end;  // byte range in text
+    };
+    std::vector<TokenSpan> tokens;
   };
 
   struct Options {
+    bool track_tokens = false;  // content logprobs need token provenance
     // The prompt ended in <think>: ids route to reasoning until </think>.
     bool start_in_reasoning = true;
     // The prompt itself ends inside a "<tool_call>" block (a prompt-side
@@ -205,6 +212,7 @@ class ToolCallParser {
   struct Run {
     std::vector<int64_t> ids;
     std::string text;
+    std::vector<Event::TokenSpan> tokens;
   };
 
   bool is_marker(int64_t id, const ChatMarker& m) const {
@@ -214,6 +222,9 @@ class ToolCallParser {
                   std::vector<Event>* out);
   void enter_tool_call(int64_t opening_id);
   void abort_block(std::vector<Event>* out);
+  void annotate_block(Event* ev, bool dsml) const;
+  static void slice_tokens(Event* ev, const std::vector<Event::TokenSpan>& tokens,
+                           size_t begin, size_t end);
   void complete_block(std::vector<Event>* out);
   // The Qwen format: the closed block's text into name_/args_ (false when
   // malformed — the caller aborts the block as content).
@@ -244,6 +255,9 @@ class ToolCallParser {
   // The open block.
   Sub sub_ = Sub::kName;
   std::vector<int64_t> raw_;   // every id since (and including) <tool_call>
+  std::vector<size_t> raw_indices_;
+  size_t next_token_ = 0;
+  size_t current_token_ = 0;
   bool raw_has_prefix_ = false;  // raw_ lacks the forced prefix's ids
   std::string seeded_name_;
   std::vector<int64_t> name_ids_, key_ids_, value_ids_;
@@ -254,6 +268,7 @@ class ToolCallParser {
   // the held prefix carried into an open block, the block's parsed calls.
   size_t dsml_emitted_ = 0;
   std::string dsml_held_;
+  std::vector<Event::TokenSpan> dsml_held_tokens_;
   std::vector<Call> dsml_calls_;
 
   int calls_ = 0;

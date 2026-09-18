@@ -29,10 +29,18 @@ struct PlanKey {
   DType io;
   GemmOut od;
   size_t act_row_stride;
+  int batch = 1;
+  int64_t act_batch_stride = 0, weight_batch_stride = 0, out_batch_stride = 0;
+  bool bias = false;
+  bool weight_kn = false;
+  bool fp32_reductions = false;
 
   bool operator<(const PlanKey& o) const {
-    return std::tie(m, n, k, io, od, act_row_stride) <
-           std::tie(o.m, o.n, o.k, o.io, o.od, o.act_row_stride);
+    return std::tie(m, n, k, io, od, act_row_stride, batch, act_batch_stride, weight_batch_stride,
+                    out_batch_stride, bias, weight_kn, fp32_reductions) <
+           std::tie(o.m, o.n, o.k, o.io, o.od, o.act_row_stride, o.batch, o.act_batch_stride,
+                    o.weight_batch_stride, o.out_batch_stride, o.bias, o.weight_kn,
+                    o.fp32_reductions);
   }
 };
 }  // namespace
@@ -71,9 +79,24 @@ struct CublasLtGemm::Impl {
     if (lt) cublasLtDestroy(lt);
   }
 
-  Plan& get_plan(int m, int n, int k, DType io, GemmOut od,
-                 size_t act_row_stride, void* /*ws*/, size_t ws_bytes) {
-    PlanKey key{m, n, k, io, od, act_row_stride};
+  Plan& get_plan(int m, int n, int k, DType io, GemmOut od, size_t act_row_stride, void* /*ws*/,
+                 size_t ws_bytes, int batch = 1, int64_t act_batch_stride = 0,
+                 int64_t weight_batch_stride = 0, int64_t out_batch_stride = 0,
+                 const uint16_t* bias = nullptr, bool weight_kn = false,
+                 bool fp32_reductions = false) {
+    PlanKey key{m,
+                n,
+                k,
+                io,
+                od,
+                act_row_stride,
+                batch,
+                act_batch_stride,
+                weight_batch_stride,
+                out_batch_stride,
+                bias != nullptr,
+                weight_kn,
+                fp32_reductions};
     auto it = plans.find(key);
     if (it != plans.end()) return it->second;
 
@@ -89,7 +112,7 @@ struct CublasLtGemm::Impl {
     Plan p{};
     DGPP_CUBLAS_OK(
         cublasLtMatmulDescCreate(&p.desc, comp, CUDA_R_32F), "desc create");
-    cublasOperation_t ta = CUBLAS_OP_T;
+    cublasOperation_t ta = weight_kn ? CUBLAS_OP_N : CUBLAS_OP_T;
     cublasOperation_t tb = CUBLAS_OP_N;
     DGPP_CUBLAS_OK(cublasLtMatmulDescSetAttribute(
                        p.desc, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof(ta)),
@@ -109,9 +132,19 @@ struct CublasLtGemm::Impl {
                                          &dev_unit_scale, sizeof(void*)),
           "set b scale");
     }
+    if (bias) {
+      const cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
+      DGPP_CUBLAS_OK(cublasLtMatmulDescSetAttribute(p.desc, CUBLASLT_MATMUL_DESC_EPILOGUE,
+                                                    &epilogue, sizeof(epilogue)),
+                     "bias epilogue");
+      DGPP_CUBLAS_OK(cublasLtMatmulDescSetAttribute(p.desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
+                                                    &bias, sizeof(bias)),
+                     "bias pointer");
+    }
 
-    DGPP_CUBLAS_OK(
-        cublasLtMatrixLayoutCreate(&p.la, ab_type, k, n, k), "layout a");
+    DGPP_CUBLAS_OK(cublasLtMatrixLayoutCreate(&p.la, ab_type, weight_kn ? n : k, weight_kn ? k : n,
+                                              weight_kn ? n : k),
+                   "layout a");
     DGPP_CUBLAS_OK(cublasLtMatrixLayoutCreate(&p.lb, ab_type, k, m,
                                               act_row_stride),
                    "layout b");
@@ -120,19 +153,39 @@ struct CublasLtGemm::Impl {
                                               n, m, n),
                    "layout d");
 
+    if (batch > 1) {
+      for (auto layout : {p.la, p.lb, p.ld})
+        DGPP_CUBLAS_OK(cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                                        &batch, sizeof(batch)),
+                       "layout batch count");
+      const auto stride = [](cublasLtMatrixLayout_t layout, int64_t value) {
+        DGPP_CUBLAS_OK(
+            cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                                             &value, sizeof(value)),
+            "layout batch stride");
+      };
+      stride(p.la, weight_batch_stride);
+      stride(p.lb, act_batch_stride);
+      stride(p.ld, out_batch_stride);
+    }
+
     cublasLtMatmulPreference_t pref{};
     DGPP_CUBLAS_OK(cublasLtMatmulPreferenceCreate(&pref), "pref create");
-    DGPP_CUBLAS_OK(
-        cublasLtMatmulPreferenceSetAttribute(
-            pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes,
-            sizeof(ws_bytes)),
-        "pref ws");
+    DGPP_CUBLAS_OK(cublasLtMatmulPreferenceSetAttribute(
+                       pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes, sizeof(ws_bytes)),
+                   "pref ws");
+    if (fp32_reductions) {
+      const uint32_t reduction = CUBLASLT_REDUCTION_SCHEME_COMPUTE_TYPE;
+      DGPP_CUBLAS_OK(
+          cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK,
+                                               &reduction, sizeof(reduction)),
+          "FP32 reductions");
+    }
 
     cublasLtMatmulHeuristicResult_t heur{};
     int nres = 0;
-    cublasStatus_t st = cublasLtMatmulAlgoGetHeuristic(lt, p.desc, p.la, p.lb,
-                                                       p.ld, p.ld, pref, 1,
-                                                       &heur, &nres);
+    cublasStatus_t st =
+        cublasLtMatmulAlgoGetHeuristic(lt, p.desc, p.la, p.lb, p.ld, p.ld, pref, 1, &heur, &nres);
     cublasLtMatmulPreferenceDestroy(pref);
     if (st != CUBLAS_STATUS_SUCCESS || nres == 0)
       throw std::runtime_error(std::format(
@@ -248,8 +301,47 @@ size_t CublasLtGemm::query_workspace_bytes(int, int, int, DType) {
   return kRecommendedWorkspace;
 }
 
-bool CublasLtGemm::ensure_plan(int m, int n, int k, DType io_dtype,
-                               GemmOut out_dtype, size_t act_row_stride) {
+void CublasLtGemm::matmul_batched_bf16(const uint16_t* act, const uint16_t* weight, float* out,
+                                       int m, int n, int k, int batch, int64_t act_stride,
+                                       int64_t weight_stride, int64_t out_stride, void* workspace,
+                                       size_t ws_bytes, cudaStream_t stream, int plan_rows,
+                                       bool weight_kn) {
+  if (m <= 0 || n <= 0 || k <= 0 || batch <= 0 || (plan_rows != 0 && plan_rows < m) ||
+      act_stride < static_cast<int64_t>(m) * k || weight_stride < static_cast<int64_t>(n) * k ||
+      out_stride < static_cast<int64_t>(m) * n)
+    throw std::invalid_argument("batched BF16 matmul: invalid shape or overlapping batch stride");
+  auto& p = impl_->get_plan(m, n, k, DType::BF16, GemmOut::F32, k, workspace, ws_bytes, batch,
+                            act_stride, weight_stride, out_stride, nullptr, weight_kn);
+  const auto& chosen =
+      plan_rows > m
+          ? impl_->get_plan(plan_rows, n, k, DType::BF16, GemmOut::F32, k, workspace, ws_bytes,
+                            batch, static_cast<int64_t>(plan_rows) * k, weight_stride,
+                            static_cast<int64_t>(plan_rows) * n, nullptr, weight_kn)
+          : p;
+  const float alpha = 1.f, beta = 0.f;
+  DGPP_CUBLAS_OK(cublasLtMatmul(impl_->lt, p.desc, &alpha, weight, p.la, act, p.lb, &beta, out,
+                                p.ld, out, p.ld, &chosen.algo, workspace, ws_bytes, stream),
+                 "batched BF16 matmul");
+}
+
+void CublasLtGemm::matmul_linear_bf16(const uint16_t* act, const uint16_t* weight,
+                                      const uint16_t* bias, uint16_t* out, int m, int n, int k,
+                                      void* workspace, size_t ws_bytes, cudaStream_t stream) {
+  if (m <= 0 || n <= 0 || k <= 0) throw std::invalid_argument("BF16 linear: invalid shape");
+  auto& p = impl_->get_plan(m, n, k, DType::BF16, GemmOut::BF16, k, workspace, ws_bytes, 1, 0, 0, 0,
+                            bias, false, true);
+  if (bias)
+    DGPP_CUBLAS_OK(cublasLtMatmulDescSetAttribute(p.desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias,
+                                                  sizeof(bias)),
+                   "bias pointer");
+  const float alpha = 1.f, beta = 0.f;
+  DGPP_CUBLAS_OK(cublasLtMatmul(impl_->lt, p.desc, &alpha, weight, p.la, act, p.lb, &beta, out,
+                                p.ld, out, p.ld, &p.algo, workspace, ws_bytes, stream),
+                 "BF16 linear");
+}
+
+bool CublasLtGemm::ensure_plan(int m, int n, int k, DType io_dtype, GemmOut out_dtype,
+                               size_t act_row_stride) {
   // Callers must hand a workspace sized by query_workspace_bytes(); pass our
   // recommended cap via a scratchless probe — heuristic query alone does not
   // touch the workspace pointer.

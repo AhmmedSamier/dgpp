@@ -68,15 +68,35 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
       dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
   require(one.world() == 1 && one.http_port == 18080, "a one-node world");
   require(one.http_bind == "127.0.0.1", "HTTP defaults to loopback");
+  require(one.http_max_body_bytes == 256ll * 1024 * 1024, "HTTP body default supports large prefills");
 }
 
 DGPP_TEST(cluster_config_http_override_is_order_independent) {
   const auto c = dgpp::serve::parse_cluster_config(
-      R"({"model":"m","nodes":["h"],"http":{"bind_host":"0.0.0.0","port":8080},"ports":{"http":18080},"node_env":[{"HF_HUB_CACHE":"~/cache"}]})", "t");
+      R"({"model":"m","nodes":["h"],"http":{"bind_host":"0.0.0.0","port":8080,"max_body_bytes":5368709120},"ports":{"http":18080},"node_env":[{"HF_HUB_CACHE":"~/cache"}]})", "t");
   require(c.http_bind == "0.0.0.0" && c.http_port == 8080, "deployment HTTP wins over legacy ports");
+  require(c.http_max_body_bytes == 5368709120ll, "body limit retains a 64-bit byte count");
   require(c.node_env.at(0).at("HF_HUB_CACHE") == "~/cache", "node cache retained");
   require(!refusal(R"({"model":"m","nodes":["h"],"http":{"bind_host":"localhost"}})").empty(), "bind must be IPv4");
   require(!refusal(R"({"model":"m","nodes":["h"],"node_env":[{"HF_TOKEN":"x"}]})").empty(), "credentials disallowed");
+}
+
+DGPP_TEST(cluster_config_fileInputLimitsAndPaths) {
+  const auto c = dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"],"engine":{
+    "file_inputs":{"directory":"~/dgpp/input-files","pdf_command":"/usr/bin/pdftotext",
+      "max_file_bytes":5368709120,"max_request_bytes":6442450944,"max_text_bytes":1073741824,
+      "max_storage_bytes":1099511627776,"pdf_timeout_ms":300000,"workers":8}}})", "t");
+  const auto& f = c.engine.file_inputs;
+  require(f.directory == dgpp::serve::expand_home("~/dgpp/input-files") && f.pdf_command == "/usr/bin/pdftotext",
+          "file paths reach the deployment with home expanded");
+  require(f.max_file_bytes == 5368709120ull && f.max_request_bytes == 6442450944ull &&
+          f.max_text_bytes == 1073741824ull && f.max_storage_bytes == 1099511627776ull &&
+          f.pdf_timeout_ms == 300000 && f.workers == 8, "large file limits retain 64-bit byte counts");
+  for (const auto& value : {R"({"workers":0})", R"({"workers":257})", R"({"max_file_bytes":-1})",
+                           R"({"max_text_bytes":1.5})", R"({"pdf_timeout_ms":0})", R"({"unknown":1})"}) {
+    require(refusal(std::string(R"({"model":"m","nodes":["h"],"engine":{"file_inputs":)") + value + "}}")
+                .find("engine.file_inputs.") != std::string::npos, "invalid file settings report their path");
+  }
 }
 
 DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
@@ -101,6 +121,12 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
       {R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":8}})", "'engine.kv_dtype' must be a string"},
       {R"({"model":"m","nodes":["h"],"engine":{"prefill":"fast"}})", "'engine.prefill' must be \"bounded\" or \"exact\""},
       {R"({"model":"m","nodes":["h"],"ports":{"http":70000}})", "'ports.http' must be in [1, 65535]"},
+      {R"({"model":"m","nodes":["h"],"http":{"max_body_bytes":0}})", "'http.max_body_bytes' must be in [1,"},
+      {R"({"model":"m","nodes":["h"],"http":{"max_body_bytes":-1}})", "'http.max_body_bytes' must be in [1,"},
+      {R"({"model":"m","nodes":["h"],"http":{"max_body_bytes":true}})", "'http.max_body_bytes' must be an integer"},
+      {R"({"model":"m","nodes":["h"],"http":{"max_body_bytes":"256MiB"}})", "'http.max_body_bytes' must be an integer"},
+      {R"({"model":"m","nodes":["h"],"http":{"max_body_bytes":1.5}})", "'http.max_body_bytes' must be an integer"},
+      {R"({"model":"m","nodes":["h"],"http":{"max_body_bytes":9223372036854775808}})", "http.max_body_bytes"},
       {R"({"model":"m","nodes":["h"],"ports":{"fabric":5,"journal":5}})", "'ports.fabric' and 'ports.journal' must differ"},
       {R"({"model":"m","nodes":["h"],"paths":{"logs":"/x"}})", "unknown key 'paths.logs'"},
       {R"({"model":"m","nodes":["h"],"paths":{"log_dir":3}})", "'paths.log_dir' must be a string"},

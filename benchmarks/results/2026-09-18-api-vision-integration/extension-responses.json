@@ -1,0 +1,289 @@
+[
+  {
+    "name": "inline text file",
+    "request": {
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is the code in the attached document? Answer only the code."
+            },
+            {
+              "type": "file",
+              "file": {
+                "filename": "code.txt",
+                "file_data": "VGhlIGludGVncmF0aW9uIGNoZWNrIGNvZGUgaXMgQ09CQUxULTQxNy4="
+              }
+            }
+          ]
+        }
+      ],
+      "temperature": 0,
+      "max_completion_tokens": 256,
+      "reasoning_effort": "low"
+    },
+    "response": {
+      "id": "chatcmpl-5127e07c7d705ac9",
+      "object": "chat.completion",
+      "created": 1789767109,
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "COBALT-417",
+            "reasoning_content": "Simple.",
+            "refusal": null
+          },
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 48,
+        "completion_tokens": 10,
+        "total_tokens": 58,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "custom regex",
+    "request": {
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call emit with READY as its input."
+        }
+      ],
+      "temperature": 0,
+      "max_completion_tokens": 256,
+      "reasoning_effort": "low",
+      "tools": [
+        {
+          "type": "custom",
+          "custom": {
+            "name": "emit",
+            "description": "Emit a readiness marker",
+            "format": {
+              "type": "grammar",
+              "grammar": {
+                "syntax": "regex",
+                "definition": "READY"
+              }
+            }
+          }
+        }
+      ],
+      "tool_choice": {
+        "type": "custom",
+        "custom": {
+          "name": "emit"
+        }
+      },
+      "parallel_tool_calls": false
+    },
+    "response": {
+      "id": "chatcmpl-5127e07c7d705aca",
+      "object": "chat.completion",
+      "created": 1789767110,
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_d5112c37a10e65c0",
+                "type": "custom",
+                "custom": {
+                  "name": "emit",
+                  "input": "READY"
+                }
+              }
+            ],
+            "refusal": null
+          },
+          "logprobs": null,
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 228,
+        "completion_tokens": 13,
+        "total_tokens": 241,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "custom lark",
+    "request": {
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call emit with READY as its input."
+        }
+      ],
+      "temperature": 0,
+      "max_completion_tokens": 256,
+      "reasoning_effort": "low",
+      "tools": [
+        {
+          "type": "custom",
+          "custom": {
+            "name": "emit",
+            "description": "Emit a readiness marker",
+            "format": {
+              "type": "grammar",
+              "grammar": {
+                "syntax": "lark",
+                "definition": "start: \"READY\""
+              }
+            }
+          }
+        }
+      ],
+      "tool_choice": {
+        "type": "custom",
+        "custom": {
+          "name": "emit"
+        }
+      },
+      "parallel_tool_calls": false
+    },
+    "response": {
+      "id": "chatcmpl-5127e07c7d705acb",
+      "object": "chat.completion",
+      "created": 1789767111,
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_9927907f1489ea66",
+                "type": "custom",
+                "custom": {
+                  "name": "emit",
+                  "input": "READY"
+                }
+              }
+            ],
+            "refusal": null
+          },
+          "logprobs": null,
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 240,
+        "completion_tokens": 13,
+        "total_tokens": 253,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "strict schema",
+    "request": {
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Return code ABC and value 1.25."
+        }
+      ],
+      "temperature": 0,
+      "max_completion_tokens": 256,
+      "reasoning_effort": "low",
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "integration",
+          "strict": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^[A-Z]{3}$"
+              },
+              "value": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 2,
+                "multipleOf": 0.25
+              }
+            },
+            "required": [
+              "code",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "response": {
+      "id": "chatcmpl-5127e07c7d705acc",
+      "object": "chat.completion",
+      "created": 1789767113,
+      "model": "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "{\"code\": \"ABC\", \"value\": 1.25}\n\n   ",
+            "reasoning_content": "The user's request is ambiguous \u2014 \"Return code ABC and value 1.25.\" Likely they want code that returns these. I should ask for clarification or provide a simple example. Best: brief clarification with a guess.",
+            "refusal": null
+          },
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 22,
+        "completion_tokens": 63,
+        "total_tokens": 85,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 46
+        }
+      }
+    }
+  }
+]

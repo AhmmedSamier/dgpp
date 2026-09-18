@@ -40,8 +40,14 @@ For the abbreviated command sequence, see the [quickstart](../README.md#quicksta
 4. On **rank 0 only**, install build and downloader tools:
 
    ```bash
-   sudo apt-get install git build-essential cmake pkg-config python3-venv libibverbs-dev
+   sudo apt-get install git build-essential cmake pkg-config python3-venv libibverbs-dev poppler-utils
    ```
+
+   PDF file inputs use `pdftotext` from `poppler-utils` on rank 0. String
+   constraints use PCRE2: CMake uses an installed development package when
+   available, otherwise downloads and builds the pinned static library.
+   For an offline build, prefetch PCRE2 10.45 and set
+   `-DFETCHCONTENT_SOURCE_DIR_PCRE2=/path/to/pcre2-10.45` during configuration.
 
    Check the CUDA 13 compiler with `nvcc --version`. If that command is missing,
    try `/usr/local/cuda/bin/nvcc --version`: the toolkit may already be installed
@@ -179,21 +185,24 @@ selection avoids choosing an unintended network.
 ## 5. Build the server on rank 0
 
 ```bash
-cmake --preset ci
-cmake --build --preset ci --target dgpp_serve_app -j 4
+cmake --preset release
+cmake --build --preset release -j 4
 ```
 
-This creates `build-ci/dgpp-serve`. The launcher copies it to peers; their CUDA
-and verbs runtime libraries must already be installed. Set `DGPP_BUILD_DIR`
-in `.env` only if you built into a different directory.
+This creates `build-release/dgpp-serve` with `-O3` optimization and no debug
+symbols. The launcher copies it to peers; their CUDA and verbs runtime
+libraries must already be installed. Leave `DGPP_BUILD_DIR` unset unless you
+use a custom build directory. The separate `ci` preset retains debug symbols
+in `build-ci/` for [testing](testing.md); deploy that build explicitly with
+`--bin build-ci/dgpp-serve` when diagnosing a problem.
 
 CMake searches `PATH` and the conventional `/usr/local/cuda/bin` location.
 For a different installation, or after a failed configure, select the compiler
 explicitly and clear the old configure cache:
 
 ```bash
-CUDACXX=/path/to/cuda/bin/nvcc cmake --fresh --preset ci
-cmake --build --preset ci --target dgpp_serve_app -j 4
+CUDACXX=/path/to/cuda/bin/nvcc cmake --fresh --preset release
+cmake --build --preset release -j 4
 ```
 
 Replace the path with your CUDA 13 installation. `--fresh` resets CMake's

@@ -23,9 +23,31 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/scripts/cluster_env.sh" || exit 1
 BUILD=${DGPP_BUILD_DIR:-$ROOT/build-release}
 DIST=$ROOT/dist
+# Never turn a testing tree into a release tree, or label it as Release when
+# --no-build is used. Select a separate directory with DGPP_BUILD_DIR.
+if [ -f "$BUILD/CMakeCache.txt" ]; then
+  BUILD_TYPE=$(sed -n 's/^CMAKE_BUILD_TYPE:STRING=//p' "$BUILD/CMakeCache.txt")
+  if [ "$BUILD_TYPE" != "Release" ]; then
+    echo "release requires a Release build; $BUILD is ${BUILD_TYPE:-unconfigured}. Select build-release or another release directory with DGPP_BUILD_DIR." >&2
+    exit 1
+  fi
+elif [ "${1:-}" = "--no-build" ]; then
+  echo "no configured release build at $BUILD; run scripts/release.sh first" >&2
+  exit 1
+fi
 if [ "${1:-}" != "--no-build" ]; then
   cmake --preset release -S "$ROOT" -B "$BUILD" >/dev/null
   cmake --build "$BUILD" -j --target dgpp_serve_app
+fi
+if grep -Eq '^DGPP_SANITIZE:STRING=.+' "$BUILD/CMakeCache.txt"; then
+  echo "release cannot contain sanitizer instrumentation: $BUILD" >&2
+  exit 1
+fi
+# Also check the artifact: --no-build may point at an older or custom build.
+SECTIONS=$(readelf --wide --sections "$BUILD/dgpp-serve")
+if printf '%s\n' "$SECTIONS" | grep -Eq '[[:space:]]\.(z?debug_[^[:space:]]*|gnu_debuglink)[[:space:]]'; then
+  echo "release binary contains debug information: $BUILD/dgpp-serve; rebuild with the release preset" >&2
+  exit 1
 fi
 VERSION=$(sed -n 's/^#define DGPP_VERSION "\(.*\)"$/\1/p' "$BUILD/generated/dgpp_version.hpp")
 [ -n "$VERSION" ] || { echo "no version stamp in $BUILD/generated/dgpp_version.hpp"; exit 1; }

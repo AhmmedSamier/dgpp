@@ -251,6 +251,36 @@ DGPP_TEST(tool_parser_dsml_format_one_call_string_and_json_values) {
   require(run.calls[0].arguments == "{\"city\": \"Paris\", \"days\": 3}", "typed arguments: " + run.calls[0].arguments);
 }
 
+DGPP_TEST(tool_parser_content_token_provenance) {
+  ToolCallParser::Options opts;
+  opts.start_in_reasoning = false;
+  opts.track_tokens = true;
+  for (const std::string text : {"if a < b\n\n", "x ｜DSML｜ y",
+                                 "ok\n\n<｜DSML｜ calls>broken"}) {
+    const auto ids = dsml_ids_of(text);
+    ToolCallParser parser(dsml_markers(), fake_decode, weather_schemas(), opts);
+    std::vector<Event> events;
+    for (const auto id : ids) parser.feed(id, &events);
+    parser.finish(&events);
+    std::string content, attributed;
+    for (const auto& ev : events) {
+      if (ev.kind != Kind::kContent) continue;
+      content += ev.text;
+      size_t end = 0;
+      for (const auto& span : ev.tokens) {
+        require(span.begin == end && span.end <= ev.text.size(), "complete, ordered byte attribution");
+        require(span.token < ids.size() && ids[span.token] != kEos, "source token index");
+        const auto decoded = ids[span.token] == kDsml ? std::string("｜DSML｜") : fake_decode({ids[span.token]});
+        require(decoded == ev.text.substr(span.begin, span.end - span.begin), "attributed bytes match source");
+        attributed += decoded;
+        end = span.end;
+      }
+      require(end == ev.text.size(), "no unattributed content bytes");
+    }
+    require(content == text && attributed == text, "held and malformed DSML retains token provenance");
+  }
+}
+
 DGPP_TEST(tool_parser_dsml_format_two_calls_reasoning_and_namespace) {
   const Run run = drive_dsml(
       "think first</think>\n\n<｜DSML｜ calls>\n"

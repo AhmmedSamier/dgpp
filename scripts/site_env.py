@@ -169,12 +169,15 @@ def deployment(path):
     if not isinstance(paths, dict) or set(paths) - {"resident_cache"}:
         raise ValueError("deployment paths may only contain resident_cache; move site paths into .env")
     http = cfg.get("http", {})
-    if not isinstance(http, dict) or set(http) - {"bind_host", "port"}:
-        raise ValueError("http may only contain bind_host and port")
+    if not isinstance(http, dict) or set(http) - {"bind_host", "port", "max_body_bytes"}:
+        raise ValueError("http may only contain bind_host, port and max_body_bytes")
     if "bind_host" in http:
         http_bind({"DGPP_HTTP_BIND": http["bind_host"]})
     if "port" in http and (type(http["port"]) is not int or not 1 <= http["port"] <= 65535):
         raise ValueError("http.port must be an integer in [1, 65535]")
+    if "max_body_bytes" in http and (type(http["max_body_bytes"]) is not int
+                                   or not 1 <= http["max_body_bytes"] <= (1 << 63) - 1):
+        raise ValueError("http.max_body_bytes must be a positive 64-bit integer byte count")
     return cfg
 
 

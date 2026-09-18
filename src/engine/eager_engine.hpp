@@ -59,7 +59,10 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
         grammar_vocab_(grammar_vocab),
         pending_(static_cast<size_t>(max_requests), -1),
         state_(static_cast<size_t>(max_requests)),
-        arena_(model, prefix_slots) {}
+        arena_(model, prefix_slots) {
+    if constexpr (requires { model_->set_prefill_monitor(prefill_monitor()); })
+      model_->set_prefill_monitor(prefill_monitor());
+  }
 
   int max_concurrent_requests() const override { return slots_; }
   int64_t pool_blocks_total() const override {
@@ -122,6 +125,17 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
 
   int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
     return open_slot(req, prompt, [&] { return model_->session_prefill(req, prompt); });
+  }
+  bool supports_images() const override {
+    if constexpr (requires { model_->supports_images(); }) return model_->supports_images();
+    return false;
+  }
+  int32_t prefill_images(int req, const std::vector<int64_t>& prompt,
+                         const std::vector<ImageInput>& images) override {
+    if constexpr (requires { model_->session_prefill_images(req, prompt, images); })
+      return open_slot(req, prompt,
+                       [&] { return model_->session_prefill_images(req, prompt, images); });
+    return sched::SchedulerEngine::prefill_images(req, prompt, images);
   }
 
   // ---- prefix cache (M7) --------------------------------------------------

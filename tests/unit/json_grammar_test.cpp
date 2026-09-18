@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "common/test.hpp"
+#include <array>
 #include "loaders/minijson.hpp"
 #include "text/json_grammar.hpp"
 #include "text/tool_grammar.hpp"
@@ -175,17 +176,10 @@ DGPP_TEST(json_grammar_schemaCompilesTheSubsetAndRefusesNamingTheKeyword) {
                 lax.nodes[static_cast<size_t>(r.property_nodes[2])].types ==
                     dgpp::text::JsonSchemaNode::kString,
             "tolerated keywords leave the types");
-    require(unenforced.size() == 2 &&
-                unenforced[0].rfind("schema.properties.s.pattern: ", 0) == 0 &&
-                unenforced[1].rfind("schema.properties.s.format: ", 0) == 0,
-            "each tolerated keyword named by path, with the reason");
-    bool threw = false;
-    try {
-      dgpp::text::compile_json_schema(p.root);
-    } catch (const std::invalid_argument& e) {
-      threw = std::string(e.what()).rfind("schema.properties.s.pattern", 0) == 0;
-    }
-    require(threw, "the strict compile still refuses by path");
+    require(unenforced.empty(), "pattern and format are now enforced");
+    const auto strict = dgpp::text::compile_json_schema(p.root);
+    require(strict.nodes[strict.nodes[strict.root].property_nodes[2]].strings.size() == 2,
+            "strict schemas compile both string constraints");
   }
   // The bounds' normalization: inclusive int64 after rounding inward and
   // stepping the exclusive forms; an enum is filtered instead of bounded.
@@ -291,14 +285,13 @@ DGPP_TEST(json_grammar_schemaCompilesTheSubsetAndRefusesNamingTheKeyword) {
     const char* path;
   };
   const Refusal refusals[] = {
-      {R"({"type":"object","properties":{"city":{"type":"string","pattern":"^a"}}})",
+      {R"({"type":"object","properties":{"city":{"type":"string","pattern":"["}}})",
        "schema.properties.city.pattern"},
       {R"({"type":"string","minLength":1})", "schema.minLength"},
       {R"({"type":"object","required":["zzz"]})", "schema.required"},
       {R"({"type":"whatever"})", "schema.type"},
-      {R"({"enum":[{"a":1}]})", "schema.enum"},
       {R"({"anyOf":[{"type":"string"}],"type":"string"})", "schema.type"},
-      {R"({"type":"array","items":{"type":"string","format":"date"}})",
+      {R"({"type":"array","items":{"type":"string","format":"unknown-format"}})",
        "schema.items.format"},
       {R"({"type":"string","enum":[1]})", "schema.enum"},
       {R"({"const":1,"enum":[1]})", "schema.const"},
@@ -892,6 +885,188 @@ DGPP_TEST(json_grammar_machineFactsAtTheEdges) {
   for (const char ch : std::string("{\"days\":1")) require(r.feed(static_cast<uint8_t>(ch)), "days only");
   r.mask(vocab(), &mask);
   require(!mask.allows('}') && mask.allows(','), "city still owed");
+}
+
+DGPP_TEST(json_grammar_openaiReferencesPatternsFormatsAndMultiples) {
+  const auto accepts = [](const std::string& schema, const std::string& text) {
+    JsonMachine machine(compile(schema), &tables());
+    for (unsigned char c : text) if (!machine.feed(c)) return false;
+    return machine.done();
+  };
+  const std::string recursive = R"({"type":"object","properties":{"value":{"type":"integer"},"next":{"anyOf":[{"$ref":"#"},{"type":"null"}]}},"required":["value","next"],"additionalProperties":false})";
+  require(accepts(recursive, R"({"value":1,"next":{"value":2,"next":null}})"), "recursive root object");
+  const std::string containers = R"({"enum":[{"a":[1,{"b":true}],"s":"x"},[false,"z"],null]})";
+  for (const auto& value : {R"({"a": [1, {"b": true}], "s": "x"})", R"([false, "z"])", "null"}) {
+    require(accepts(containers, value), "container enum accepts a nested target");
+    JsonMachine candidate(compile(containers), &tables());
+    for (unsigned char c : std::string(value)) {
+      TokenMask actual, oracle;
+      candidate.mask(vocab(), &actual); candidate.mask_brute_force(vocab(), &oracle);
+      require(actual.words == oracle.words && actual.allows(c), "container enum masks match exhaustive simulation");
+      require(candidate.feed(c), "enum target byte accepted");
+    }
+  }
+  require(!accepts(containers, R"({"a": [1, {"b": false}], "s": "x"})"), "nested enum value enforced");
+  require(!accepts(containers, R"([false, "z", 1])"), "container enum length enforced");
+  require(!accepts(recursive, R"({"value":1,"next":{"value":"bad","next":null}})"), "nested recursive type enforced");
+  const std::string defs = R"({"type":"object","properties":{"id":{"$ref":"#/$defs/a~1b~0c"}},"required":["id"],"additionalProperties":false,"$defs":{"a/b~c":{"type":"string","pattern":"^[A-Z]{2}[0-9]{2}$"}}})";
+  require(accepts(defs, R"({"id":"AB12"})"), "escaped pointer resolves pattern");
+  require(accepts(defs, R"({"id":"\u0041B12"})"), "pattern sees decoded JSON escapes");
+  require(!accepts(defs, R"({"id":"ab12"})"), "pattern rejects wrong case");
+  require(!accepts(defs, R"({"id":"AB12x"})"), "anchored pattern rejects suffix");
+  require(accepts(R"({"type":"string","pattern":"a+"})", R"("before aaa after")"), "unanchored schema pattern is search");
+  for (const auto& value : {R"(".a@example.org")", R"("a..b@example.org")", R"("a@-example.org")"})
+    require(!accepts(R"({"type":"string","format":"email"})", value), "email dot-atom and domain syntax");
+  for (const auto& [format, good, bad] : std::vector<std::array<std::string,3>>{
+    {"date","2024-02-29","2025-02-29"}, {"date-time","2024-01-01T12:34:56Z","2024-01-01T25:34:56Z"},
+    {"time","12:34:56+01:00","12:99:56Z"}, {"duration","P1DT2H","PT"},
+    {"email","a@example.org","missing-at"}, {"hostname","example.org","-example.org"},
+    {"ipv4","192.168.50.51","256.1.2.3"}, {"ipv6","2001:db8::1","1:2:3"},
+    {"uuid","550e8400-e29b-41d4-a716-446655440000","550e8400-e29b-41d4-a716-44665544000Z"}}) {
+    auto schema = std::string("{\"type\":\"string\",\"format\":\"") + format + "\"}";
+    require(accepts(schema, "\""+good+"\""), "valid " + format);
+    require(!accepts(schema, "\""+bad+"\""), "invalid " + format);
+  }
+  for (const auto& value : {"0", "0.3", "-0.3", "3e2", "0.300000000000000000000"})
+    require(accepts(R"({"type":"number","multipleOf":0.1})", value), std::string("exact decimal multiple: ") + value);
+  require(!accepts(R"({"type":"number","multipleOf":0.1})", "0.300000000000000000001"), "no floating-point rounding of divisibility");
+  require(accepts(R"({"type":"number","multipleOf":3})", "3e9999"), "large exponent divisibility without huge allocation");
+  require(!accepts(R"({"type":"number","multipleOf":3})", "1e9999"), "large exponent nonmultiple");
+  for (const auto& schema : {R"({"$ref":"#/missing"})", R"({"$ref":"#"})", R"({"type":"number","multipleOf":0})"}) {
+    bool failed = false;
+    try { compile(schema); } catch (const std::invalid_argument&) { failed = true; }
+    require(failed, std::string("invalid schema rejected: ") + schema);
+  }
+  // A mask is tested against complete token texts, including tokens spanning
+  // an escape or the closing quote and the parent object's delimiter.
+  JsonMachine machine(compile(defs), &tables());
+  for (unsigned char c : std::string(R"({"id":"A)")) require(machine.feed(c), "pattern prefix");
+  TokenMask actual, oracle;
+  machine.mask(vocab(), &actual); machine.mask_brute_force(vocab(), &oracle);
+  require(actual.words == oracle.words && actual.allows('B') && !actual.allows('b'), "pattern token mask");
+  JsonMachine alternatives(compile(R"({"type":"string","pattern":"^A(B|C)$"})"), &tables());
+  require(alternatives.feed('"'), "open anchored pattern string");
+  alternatives.mask(vocab(), &actual);
+  require(actual.allows('A') && !actual.allows('b'), "nested alternatives retain anchored prefix pruning");
+}
+
+DGPP_TEST(json_grammar_customRegexAndLark) {
+  using C = dgpp::text::StringConstraint;
+  const C regex("[A-Z]+=[0-9]+", C::Syntax::kRegex);
+  require(regex.accepts("ABC=", false) && regex.accepts("ABC=12", true), "custom regex prefix and complete");
+  require(!regex.accepts("ABC=x", false) && !regex.accepts("ABC=", true), "custom regex rejects invalid/incomplete input");
+  const C lark("start: \"SELECT\" CNAME \"FROM\" CNAME\n%import common.CNAME\n%import common.WS\n%ignore WS\n", C::Syntax::kLark);
+  require(lark.accepts("SELECT name FROM users", true), "Lark imports and ignored whitespace");
+  require(lark.accepts("SELECT name FR", false), "Lark partial literal");
+  require(!lark.accepts("DELETE name FROM users", false), "Lark rejects another statement");
+  const C recursive("start: \"(\" start \" )\" | \"x\"", C::Syntax::kLark);
+  require(recursive.accepts("((x ) )", true), "recursive custom grammar");
+  const C arithmetic("start: start \"+\" INT | INT\n%import common.INT", C::Syntax::kLark);
+  require(arithmetic.accepts("1+2+3", true), "direct left recursion");
+}
+
+DGPP_TEST(json_grammar_edge_decimalMultiplesAgainstIntegerOracle) {
+  // Independent rational arithmetic: generated numbers use cents, so no
+  // binary floating-point arithmetic participates in the expected answer.
+  for (const auto& [numerator, denominator] : std::vector<std::pair<int,int>>{
+      {1,10}, {1,5}, {1,4}, {3,10}, {3,2}, {3,1}, {7,1}}) {
+    const std::string schema = "{\"type\":\"number\",\"multipleOf\":" +
+        std::to_string(double(numerator)/denominator) + ",\"minimum\":-2,\"maximum\":2}";
+    const auto compiled = compile(schema);
+    for (int cents = -250; cents <= 250; ++cents) {
+      const int magnitude = std::abs(cents);
+      const std::string value = std::string(cents < 0 ? "-" : "") + std::to_string(magnitude/100) + "." +
+          (magnitude%100 < 10 ? "0" : "") + std::to_string(magnitude%100);
+      JsonMachine machine(compiled, &tables());
+      bool accepted = true;
+      for (unsigned char c : value) if (!machine.feed(c)) { accepted = false; break; }
+      accepted = accepted && machine.done();
+      const bool expected = cents >= -200 && cents <= 200 && (cents * denominator) % (100 * numerator) == 0;
+      require(accepted == expected, "rational oracle disagrees for " + schema + " value " + value);
+    }
+  }
+}
+
+DGPP_TEST(json_grammar_edge_largeArrayLimitsAndUnsatisfiableEnums) {
+  for (const auto* schema : {
+      R"({"type":"array","maxItems":4294967295})", R"({"type":"array","minItems":2147483648})",
+      R"({"type":"array","maxItems":1e100})", R"({"type":"array","maxItems":1.5})",
+      R"({"type":"string","enum":["bad"],"pattern":"^[A-Z]+$"})",
+      R"({"type":"number","enum":[1,3,5],"multipleOf":2})"}) {
+    bool rejected = false;
+    try { compile(schema); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, std::string("invalid/unsatisfiable schema must be rejected before admission: ") + schema);
+  }
+  const auto schema = compile(R"({"type":"string","enum":["BAD","good"],"pattern":"^[a-z]+$"})");
+  JsonMachine machine(schema, &tables());
+  require(machine.feed('"'), "enum opening quote");
+  TokenMask mask; machine.mask(vocab(), &mask);
+  require(mask.allows('g') && !mask.allows('B'), "enum and pattern intersect");
+}
+
+DGPP_TEST(json_grammar_edge_jsonPointerArraysUnicodeAndCycles) {
+  const auto schema = compile(R"({"$defs":{"values":[{"type":"string","pattern":"^ok$"}]},"$ref":"#/$defs/values/0"})");
+  JsonMachine machine(schema, &tables());
+  for (unsigned char c : std::string(R"("ok")")) require(machine.feed(c), "reference through an array index");
+  require(machine.done(), "array reference accepts target schema");
+  for (const auto* ref : {"#/$defs/values/01", "#/$defs/values/-1", "#/$defs/values/1", "#/$defs/values/9999999999999999999999999"}) {
+    bool rejected = false;
+    try { compile(std::string(R"({"$defs":{"values":[{}]},"$ref":")") + ref + "\"}"); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "invalid array pointer rejected");
+  }
+  for (const auto* text : {R"({"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"$ref":"#/$defs/a"}},"$ref":"#/$defs/a"})",
+                          R"({"$ref":"#/~2"})", R"({"$ref":"https://example.org/schema"})"}) {
+    bool rejected = false;
+    try { compile(text); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "invalid/cyclic reference rejected without recursion failure");
+  }
+}
+
+DGPP_TEST(json_grammar_edge_stringUnicodeFormatsAndEscapes) {
+  const auto accepts = [](const std::string& schema, const std::string& text) {
+    JsonMachine machine(compile(schema), &tables());
+    for (unsigned char c : text) if (!machine.feed(c)) return false;
+    return machine.done();
+  };
+  const std::string emoji = R"({"type":"string","pattern":"^😀$"})";
+  require(accepts(emoji, R"("😀")") && accepts(emoji, R"("\uD83D\uDE00")"), "UTF-8 and surrogate-pair spellings agree");
+  for (const auto* bad : {R"("\uD83D")", R"("\uDE00")", R"("\uD83D\u0041")"})
+    require(!accepts(emoji, bad), "unpaired surrogate rejected");
+  for (const auto& [format, valid, invalid] : std::vector<std::array<std::string,3>>{
+      {"date","2000-02-29","1900-02-29"}, {"time","00:59:60+01:00","12:34:60Z"},
+      {"date-time","2016-12-31T23:59:60Z","2016-12-31T12:34:60Z"},
+      {"duration","P2W","P1WT1H"}, {"email","first.last+tag@example.org","a..b@example.org"},
+      {"hostname",std::string(63,'a')+".org",std::string(64,'a')+".org"},
+      {"ipv4","0.0.0.0","01.2.3.4"}, {"ipv6","::ffff:192.0.2.128","1:2:3:4:5:6:7:8::"},
+      {"uuid","550E8400-E29B-41D4-A716-446655440000","550e8400e29b41d4a716446655440000"}}) {
+    const auto schema = "{\"type\":\"string\",\"format\":\"" + format + "\"}";
+    require(accepts(schema, dgpp::text::json_text_of(dgpp::minijson::Value::make_string(valid))), "valid format boundary: " + format);
+    require(!accepts(schema, dgpp::text::json_text_of(dgpp::minijson::Value::make_string(invalid))), "invalid format boundary: " + format);
+  }
+}
+
+DGPP_TEST(json_grammar_edge_larkOfficialExampleAndMalformedGrammar) {
+  using C = dgpp::text::StringConstraint;
+  const C arithmetic("start: expr\nexpr: term (SP ADD SP term)* -> add\n | term\nterm: factor (SP MUL SP factor)* -> mul\n | factor\nfactor: INT\nSP: \" \"\nADD: \"+\"\nMUL: \"*\"\n%import common.INT", C::Syntax::kLark);
+  require(arithmetic.accepts("4 + 4 * 2", true) && !arithmetic.accepts("4+4", true), "official example preserves explicit whitespace");
+  const C literals(R"(start: "\u0061" "\x62" "\n")", C::Syntax::kLark);
+  require(literals.accepts("ab\n", true), "Lark escaped literals preserve their characters");
+  const C nested("start: \"(\" [start] \")\"", C::Syntax::kLark);
+  require(nested.accepts("()", true) && nested.accepts("((()))", true) &&
+          !nested.accepts("(()", true), "nullable recursive groups remain productive");
+  const C right_recursive("start: \"x\" [tail]\ntail: \"y\" start", C::Syntax::kLark);
+  require(right_recursive.accepts("x", true) && right_recursive.accepts("xyxyx", true) &&
+          !right_recursive.accepts("xy", true), "indirect right recursion remains supported");
+  const C zero_repeat("start: \"a\" ~0..2 \"b\"", C::Syntax::kLark);
+  require(zero_repeat.accepts("b", true) && zero_repeat.accepts("aab", true) &&
+          !zero_repeat.accepts("aaab", true), "zero repetitions have a productive empty branch");
+  for (const auto* grammar : {"", "start: missing", "start: (\"x\"", "start: start", "start: a\na: start",
+                            "start: \"x\" ~3..1", "start: \"x\" ~1..", "start: X\nX.1: \"x\"", "%declare X\nstart: X"}) {
+    bool rejected = false;
+    try { C invalid(grammar, C::Syntax::kLark); } catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, std::string("invalid or unsupported grammar rejected: ") + grammar);
+  }
 }
 
 }  // namespace

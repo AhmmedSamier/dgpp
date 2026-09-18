@@ -1,7 +1,7 @@
 # DGPP implementation status
 
 This page summarizes the implemented features and remaining work as of
-2026-09-11. [DESIGN.md](DESIGN.md) describes the architecture;
+2026-09-18. [DESIGN.md](DESIGN.md) describes the architecture;
 [CHANGELOG.md](CHANGELOG.md) and the dated records in
 [benchmarks/results](benchmarks/results/) contain implementation history
 and measurements. Performance figures apply to the configurations and
@@ -28,8 +28,15 @@ startup checks whether the selected model and request capacity fit.
 
 The text API supports streaming, tools, supported JSON schemas, reasoning
 output, sampling controls, logprobs, stop strings and multiple chat choices.
-Unsupported fields are rejected by name. The served paths do not execute
-vision or audio inputs.
+Unsupported fields are rejected by name. GLM-5.3-Flash also supports PNG/JPEG
+image inputs with a native vision encoder, journaled RGB pixels, streaming
+and MTP. Image requests bypass prefix caching and grouped prefill; see
+[image inputs](docs/vision.md). Audio and video inputs are unsupported.
+Vision arithmetic now follows the CUDA BF16 eager reference, with fixed
+full-encoder and isolated-operation gates. The
+[numerical investigation](benchmarks/results/2026-09-18-glm-vision-numerics.md)
+records the reduction, bias, rotary, attention-layout and LayerNorm fixes,
+with bitwise matching embeddings across the 30-case regression corpus.
 
 ## Original milestones
 
@@ -103,7 +110,8 @@ slot subsets for oversized batches, and
 model-specific performance experiments. See
 [next steps](docs/next_steps.md) for the scope and validation needed for
 each. Failover, data-parallel routing, cross-instance prefix sharing and
-multimodal execution remain future work.
+image-aware prefix identities, additional vision backends, audio and video
+execution remain future work.
 
 The [DeepSeek inference study](benchmarks/results/2026-09-16-dsv41-perf/README.md)
 adds payload-dependent graph consumer widths and uses 4,096-token

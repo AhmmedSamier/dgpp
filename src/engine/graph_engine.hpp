@@ -268,6 +268,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         arena_(model, model == nullptr ? 0 : prefix_slots) {
     if (model_ == nullptr || bus_ == nullptr || pick_scratch == nullptr)
       throw std::invalid_argument("graph engine: null model/bus/pick scratch");
+    if constexpr (requires { model_->set_prefill_monitor(prefill_monitor()); })
+      model_->set_prefill_monitor(prefill_monitor());
     slots_ = model_->max_session_requests();
     // The verify's rows: the pending token plus `mtp_depth` drafts
     // (2026-09-06; depth 1 is the two-row step as built).
@@ -950,9 +952,20 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   }
 
   int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
-    return open_slot(req, prompt,
-                     [&] { return model_->session_prefill(req, prompt); });
+    return open_slot(req, prompt, [&] { return model_->session_prefill(req, prompt); });
   }
+  bool supports_images() const override {
+    if constexpr (requires { model_->supports_images(); }) return model_->supports_images();
+    return false;
+  }
+  int32_t prefill_images(int req, const std::vector<int64_t>& prompt,
+                         const std::vector<ImageInput>& images) override {
+    if constexpr (requires { model_->session_prefill_images(req, prompt, images); })
+      return open_slot(req, prompt,
+                       [&] { return model_->session_prefill_images(req, prompt, images); });
+    return sched::SchedulerEngine::prefill_images(req, prompt, images);
+  }
+
   int64_t prefill_chunk_alignment() const override {
     if constexpr (requires { Model::kResumablePrefill; }) {
       if constexpr (Model::kResumablePrefill) return model_->session_snapshot_align();

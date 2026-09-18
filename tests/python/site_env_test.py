@@ -129,6 +129,24 @@ class SiteEnvTest(unittest.TestCase):
         self.assertNotIn("credential", json.dumps(resolved))
         self.assertEqual(self.config.read_text(), original)
 
+    def test_http_body_limit_survives_deployment_resolution(self):
+        cfg = json.loads(self.config.read_text())
+        cfg["http"] = {"max_body_bytes": 5 * 1024**3}
+        self.config.write_text(json.dumps(cfg))
+        resolved = site_env.resolve_config(self.config, self.values())
+        self.assertEqual(resolved["http"]["max_body_bytes"], 5 * 1024**3)
+        self.assertEqual(resolved["http"]["port"], 18888)
+        self.assertEqual(resolved["http"]["bind_host"], "127.0.0.1")
+
+    def test_invalid_http_body_limits_fail(self):
+        cfg = json.loads(self.config.read_text())
+        for value in (0, -1, True, "256MiB", 1.5, None, 1 << 63):
+            with self.subTest(value=value):
+                cfg["http"] = {"max_body_bytes": value}
+                self.config.write_text(json.dumps(cfg))
+                with self.assertRaisesRegex(ValueError, "http.max_body_bytes"):
+                    site_env.resolve_config(self.config, self.values())
+
     def test_empty_user_has_consistent_login_fallback(self):
         with patch.object(site_env.getpass, "getuser", return_value="fallback"):
             self.assertEqual(site_env.ssh_user(self.values(DGPP_SSH_USER="")), "fallback")

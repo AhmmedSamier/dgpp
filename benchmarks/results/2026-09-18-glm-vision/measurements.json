@@ -1,0 +1,1282 @@
+{
+  "base_revision": "a5fcb189c28f (dirty workspace)",
+  "vision_weight_digest": 2133678757230988767,
+  "host_suites": {
+    "passed": 5,
+    "seconds": 113.97
+  },
+  "encoder": [
+    {
+      "tokens": 24,
+      "max_abs": 0.0150146484375,
+      "relative_rms": 0.07168013602495193,
+      "cosine": 0.9974645376205444,
+      "fixture": "gradient",
+      "max_isolated_block_rms": 0.0023411200381815434
+    },
+    {
+      "tokens": 64,
+      "max_abs": 0.085693359375,
+      "relative_rms": 0.29017969965934753,
+      "cosine": 0.9570627212524414,
+      "fixture": "quadrants",
+      "max_isolated_block_rms": 0.000793835730291903
+    },
+    {
+      "tokens": 64,
+      "max_abs": 0.01910400390625,
+      "relative_rms": 0.0854162946343422,
+      "cosine": 0.9963553547859192,
+      "fixture": "bars",
+      "max_isolated_block_rms": 0.0020065023563802242
+    },
+    {
+      "tokens": 240,
+      "max_abs": 0.023572921752929688,
+      "relative_rms": 0.0646972507238388,
+      "cosine": 0.9979063272476196,
+      "fixture": "ai2d-48"
+    }
+  ],
+  "worlds": [
+    {
+      "log_directory": "build-ci/vision-ai2d-native",
+      "op_stream_md5": {
+        "serve_rank0.ops": "0e7ef9492c99041b1576cc19fa29ff1f",
+        "serve_rank1.ops": "0e7ef9492c99041b1576cc19fa29ff1f"
+      },
+      "identical": true
+    },
+    {
+      "log_directory": "build-ci/vision-ai2d-numbered-native",
+      "op_stream_md5": {
+        "serve_rank0.ops": "c4be8cf6a9512a6aeeed35f0a3acaab9",
+        "serve_rank1.ops": "c4be8cf6a9512a6aeeed35f0a3acaab9"
+      },
+      "identical": true
+    },
+    {
+      "log_directory": "build-ci/vision-ai2d-numbered-reference",
+      "op_stream_md5": {
+        "serve_rank0.ops": "ae44b9caca6009e06869de454b86565f",
+        "serve_rank1.ops": "ae44b9caca6009e06869de454b86565f"
+      },
+      "identical": true
+    },
+    {
+      "log_directory": "build-ci/vision-ai2d-reference",
+      "op_stream_md5": {
+        "serve_rank0.ops": "4e96e3ad7698e5b76c37fad60edb92b1",
+        "serve_rank1.ops": "4e96e3ad7698e5b76c37fad60edb92b1"
+      },
+      "identical": true
+    },
+    {
+      "log_directory": "build-ci/vision-fabric",
+      "op_stream_md5": {
+        "serve_rank0.ops": "87fcfa0a362953eb0cb23ad9b9ca9be0",
+        "serve_rank1.ops": "87fcfa0a362953eb0cb23ad9b9ca9be0"
+      },
+      "identical": true
+    },
+    {
+      "log_directory": "build-ci/vision-quality-native",
+      "op_stream_md5": {
+        "serve_rank0.ops": "7423aca36b8161a12431359500801913",
+        "serve_rank1.ops": "7423aca36b8161a12431359500801913"
+      },
+      "identical": true
+    },
+    {
+      "log_directory": "build-ci/vision-quality-reference",
+      "op_stream_md5": {
+        "serve_rank0.ops": "0be191c78c6d98f41172b510e2b9e6a3",
+        "serve_rank1.ops": "0be191c78c6d98f41172b510e2b9e6a3"
+      },
+      "identical": true
+    }
+  ],
+  "answers": {
+    "native": {
+      "count": 25,
+      "literal_correct": 22,
+      "parsed_correct": 22,
+      "rows": [
+        {
+          "index": 0,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "reasoning_content": "Dairy is D (milk, cheese). Option B.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 4,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 8,
+          "gold": "D",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "refusal": null
+          }
+        },
+        {
+          "index": 12,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "D is chrysalis \u2192 C. chrysalide.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 16,
+          "gold": "C",
+          "literal_match": false,
+          "parsed_match": false,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 20,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "refusal": null
+          }
+        },
+        {
+          "index": 24,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 28,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 32,
+          "gold": "D",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "reasoning_content": "Food chain: A\u2192B\u2192C\u2192D. If A disappears, B decreases, then C decreases, D extinct? B would decrease is direct. Answer D.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 36,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "Egg, larva, pupa, adult = 4 stages. C",
+            "refusal": null
+          }
+        },
+        {
+          "index": 40,
+          "gold": "C",
+          "literal_match": false,
+          "parsed_match": false,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "reasoning_content": "Egg released from adult \u2192 egg mass is step E? The arrow from B to E... The egg mass is E. Egg released during step E. Answer D (option D = E).",
+            "refusal": null
+          }
+        },
+        {
+          "index": 44,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "refusal": null
+          }
+        },
+        {
+          "index": 48,
+          "gold": "D",
+          "literal_match": false,
+          "parsed_match": false,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "reasoning_content": "B is dark circle near sun \u2014 new moon.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 52,
+          "gold": "D",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "refusal": null
+          }
+        },
+        {
+          "index": 56,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "refusal": null
+          }
+        },
+        {
+          "index": 60,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "refusal": null
+          }
+        },
+        {
+          "index": 64,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "reasoning_content": "Black bear receives arrows from squirrel, bobcat, caribou, moose \u2014 4 prey. Gray wolf: caribou, moose \u2014 2. Bobcat: squirrel \u2014 1. Answer B.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 68,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "refusal": null
+          }
+        },
+        {
+          "index": 72,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "Grass\u2192Cricket\u2192Rat\u2192Owl: owl is tertiary.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 76,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "Crickets depend on grass directly.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 80,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "reasoning_content": "Butterfly cycle: egg is J (under H). First stage = egg = J.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 84,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "A points to eye. C.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 88,
+          "gold": "D",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "refusal": null
+          }
+        },
+        {
+          "index": 92,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 96,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "refusal": null
+          }
+        }
+      ]
+    },
+    "reference": {
+      "count": 25,
+      "literal_correct": 23,
+      "parsed_correct": 23,
+      "rows": [
+        {
+          "index": 0,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "reasoning_content": "D is milk/cheese \u2014 dairy. Answer B.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 4,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 8,
+          "gold": "D",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "reasoning_content": "Elephant seal eats fish. Increase in fish \u2192 D.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 12,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "D is chrysalis \u2192 C. chrysalide.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 16,
+          "gold": "C",
+          "literal_match": false,
+          "parsed_match": false,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 20,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "refusal": null
+          }
+        },
+        {
+          "index": 24,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 28,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 32,
+          "gold": "D",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "reasoning_content": "Food chain: A\u2192B\u2192C\u2192D. If A disappears, B decreases, then C decreases, D may go extinct. Answer likely D? Options: B \"c would increase\" no; C \"d would be extinct\" possible; D \"b would decrease\" direct. Standard answer: D.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 36,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "4 stages: egg, larva, pupa, adult. C.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 40,
+          "gold": "C",
+          "literal_match": false,
+          "parsed_match": false,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "reasoning_content": "Egg released from adult \u2192 egg mass is step E? The arrow from B to E... egg released during step E (eggs laid). Answer D (option letter for E).",
+            "refusal": null
+          }
+        },
+        {
+          "index": 44,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "reasoning_content": "Egg mass \u2192 tadpole (A). Answer B.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 48,
+          "gold": "D",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "reasoning_content": "B is between sun and earth \u2014 new moon is B.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 52,
+          "gold": "D",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "refusal": null
+          }
+        },
+        {
+          "index": 56,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "refusal": null
+          }
+        },
+        {
+          "index": 60,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "refusal": null
+          }
+        },
+        {
+          "index": 64,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "reasoning_content": "Black bear receives arrows from squirrel, bobcat, caribou, moose \u2014 4 prey. Gray wolf: caribou, moose \u2014 2. Bobcat: squirrel \u2014 1. Answer B.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 68,
+          "gold": "B",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "B",
+            "refusal": null
+          }
+        },
+        {
+          "index": 72,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "Owl: grass\u2192cricket\u2192rat\u2192owl, tertiary.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 76,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "Crickets depend on grass directly; sheep would decline, not thrive. Answer C.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 80,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "reasoning_content": "Egg is J (label under H). Answer A.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 84,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "reasoning_content": "A points to eye. C.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 88,
+          "gold": "D",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "D",
+            "refusal": null
+          }
+        },
+        {
+          "index": 92,
+          "gold": "A",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "A",
+            "refusal": null
+          }
+        },
+        {
+          "index": 96,
+          "gold": "C",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "C",
+            "refusal": null
+          }
+        }
+      ]
+    },
+    "numbered-native": {
+      "count": 25,
+      "literal_correct": 22,
+      "parsed_correct": 23,
+      "rows": [
+        {
+          "index": 0,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "reasoning_content": "D shows milk and cheese \u2014 dairy. Option 2.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 4,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "refusal": null
+          }
+        },
+        {
+          "index": 8,
+          "gold": "4",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "refusal": null
+          }
+        },
+        {
+          "index": 12,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "reasoning_content": "D is chrysalis \u2192 3.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 16,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "refusal": null
+          }
+        },
+        {
+          "index": 20,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "refusal": null
+          }
+        },
+        {
+          "index": 24,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "refusal": null
+          }
+        },
+        {
+          "index": 28,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "refusal": null
+          }
+        },
+        {
+          "index": 32,
+          "gold": "4",
+          "literal_match": false,
+          "parsed_match": false,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "reasoning_content": "A gone \u2192 B decreases \u2192 C decreases \u2192 D extinct. Answer 3.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 36,
+          "gold": "3",
+          "literal_match": false,
+          "parsed_match": false,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "refusal": null
+          }
+        },
+        {
+          "index": 40,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "reasoning_content": "Egg mass is E; egg released from egg mass \u2192 tadpole hatches at A? \"Egg released from egg mass\" \u2014 hatching occurs at A. Option 3.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 44,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "refusal": null
+          }
+        },
+        {
+          "index": 48,
+          "gold": "4",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "reasoning_content": "Sun on right; new moon is between Earth and Sun: B. Option 4.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 52,
+          "gold": "4",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "refusal": null
+          }
+        },
+        {
+          "index": 56,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "refusal": null
+          }
+        },
+        {
+          "index": 60,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "refusal": null
+          }
+        },
+        {
+          "index": 64,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "reasoning_content": "Black bear: arrows from squirrel, bobcat, caribou, moose \u2192 4 prey. Gray wolf: squirrel, caribou, moose \u2192 3. Answer 2.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 68,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "refusal": null
+          }
+        },
+        {
+          "index": 72,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "reasoning_content": "Owl: grass\u2192cricket\u2192rat\u2192owl, tertiary.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 76,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "refusal": null
+          }
+        },
+        {
+          "index": 80,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "reasoning_content": "Butterfly cycle: egg J, larva C, pupa F, adult E. First stage is egg = J \u2192 option 1.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 84,
+          "gold": "3",
+          "literal_match": false,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "**3**\n\nA points to the insect's eye, which is necessary for the insect to see what's around it.",
+            "reasoning_content": "A points to the eye. Answer 3.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 88,
+          "gold": "4",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "refusal": null
+          }
+        },
+        {
+          "index": 92,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "refusal": null
+          }
+        },
+        {
+          "index": 96,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "refusal": null
+          }
+        }
+      ]
+    },
+    "numbered-reference": {
+      "count": 25,
+      "literal_correct": 21,
+      "parsed_correct": 23,
+      "rows": [
+        {
+          "index": 0,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "reasoning_content": "D shows milk/cheese \u2014 dairy. D is option 2.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 4,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "refusal": null
+          }
+        },
+        {
+          "index": 8,
+          "gold": "4",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "refusal": null
+          }
+        },
+        {
+          "index": 12,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "reasoning_content": "D is chrysalis \u2192 3.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 16,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "refusal": null
+          }
+        },
+        {
+          "index": 20,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "refusal": null
+          }
+        },
+        {
+          "index": 24,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "refusal": null
+          }
+        },
+        {
+          "index": 28,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "refusal": null
+          }
+        },
+        {
+          "index": 32,
+          "gold": "4",
+          "literal_match": false,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "**4**",
+            "reasoning_content": "A is producer; B decreases, then C, D... If B decreases, C decreases, D extinct? Standard answer: 4? Actually if A disappears, B decreases \u2192 C decreases \u2192 D extinct. Which single option? Likely 4.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 36,
+          "gold": "3",
+          "literal_match": false,
+          "parsed_match": false,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "refusal": null
+          }
+        },
+        {
+          "index": 40,
+          "gold": "3",
+          "literal_match": false,
+          "parsed_match": false,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "reasoning_content": "Egg released from adult \u2192 egg mass is step E.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 44,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "refusal": null
+          }
+        },
+        {
+          "index": 48,
+          "gold": "4",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "reasoning_content": "B is between sun and... B is on right side near sun, dark circle = new moon. B is option 4.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 52,
+          "gold": "4",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "refusal": null
+          }
+        },
+        {
+          "index": 56,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "refusal": null
+          }
+        },
+        {
+          "index": 60,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "refusal": null
+          }
+        },
+        {
+          "index": 64,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "reasoning_content": "Black bear: arrows from squirrel, bobcat, caribou, moose \u2192 4 prey. Gray wolf: squirrel, caribou, moose \u2192 3. Answer 2.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 68,
+          "gold": "2",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "2",
+            "refusal": null
+          }
+        },
+        {
+          "index": 72,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "reasoning_content": "Owl: grass\u2192cricket\u2192rat\u2192owl = tertiary.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 76,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "refusal": null
+          }
+        },
+        {
+          "index": 80,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "reasoning_content": "Butterfly cycle: egg J, larva C, pupa F, adult E. First stage = egg = J \u2192 option 1.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 84,
+          "gold": "3",
+          "literal_match": false,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "**3**\n\nA points to the insect's eye, which is necessary for seeing what's around it.",
+            "reasoning_content": "A points to the eye. Answer 3.",
+            "refusal": null
+          }
+        },
+        {
+          "index": 88,
+          "gold": "4",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "4",
+            "refusal": null
+          }
+        },
+        {
+          "index": 92,
+          "gold": "1",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "1",
+            "refusal": null
+          }
+        },
+        {
+          "index": 96,
+          "gold": "3",
+          "literal_match": true,
+          "parsed_match": true,
+          "message": {
+            "role": "assistant",
+            "content": "3",
+            "refusal": null
+          }
+        }
+      ]
+    }
+  },
+  "scoring": "Literal: strip whitespace and trailing space/dot, then exact option identifier. Parsed: leading option identifier with optional Markdown bold and following punctuation, whitespace or end-of-string.",
+  "isolated_gate": {
+    "relative_rms_max": 0.005,
+    "cosine_min": 0.99998,
+    "passed": [
+      "gradient",
+      "quadrants",
+      "bars",
+      "ai2d-48"
+    ]
+  }
+}

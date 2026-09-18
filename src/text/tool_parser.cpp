@@ -1,5 +1,6 @@
 #include "text/tool_parser.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -76,6 +77,11 @@ ToolSchemas::ToolSchemas(const minijson::Value& tools) {
                    ty == "object" || ty == "array" || ty == "null")
             t = Type::kJson;
         }
+        // Constrained strings are spelled as JSON string literals so their
+        // escapes and arbitrary contents survive every model's delimiters.
+        if (prop.value.find("pattern") || prop.value.find("format") ||
+            prop.value.find("$ref") || prop.value.find("anyOf") || prop.value.find("x-dgpp-grammar"))
+          t = Type::kJson;
       }
       params[prop.key] = t;
     }
@@ -123,6 +129,7 @@ void ToolCallParser::run_append(Run* run, int64_t id, Event::Kind kind,
     Event ev;
     ev.kind = kind;
     ev.text.assign(full, run->text.size(), std::string::npos);
+    if (options_.track_tokens) ev.tokens.push_back({current_token_, 0, ev.text.size()});
     out->push_back(std::move(ev));
   }
   run->text = full;
@@ -133,6 +140,7 @@ void ToolCallParser::enter_tool_call(int64_t opening_id) {
   sub_ = Sub::kName;
   raw_.clear();
   raw_.push_back(opening_id);
+  raw_indices_.assign(1, current_token_);
   raw_has_prefix_ = true;
   seeded_name_.clear();
   name_ids_.clear();
@@ -155,11 +163,47 @@ void ToolCallParser::abort_block(std::vector<Event>* out) {
     Event ev;
     ev.kind = Event::Kind::kContent;
     ev.text = std::move(text);
+    annotate_block(&ev, false);
     out->push_back(std::move(ev));
   }
   state_ = State::kContent;
   run_ = Run{};
   raw_.clear();
+}
+
+void ToolCallParser::slice_tokens(Event* ev, const std::vector<Event::TokenSpan>& tokens,
+                                  size_t begin, size_t end) {
+  for (const auto& span : tokens)
+    if (span.begin < end && span.end > begin)
+      ev->tokens.push_back({span.token, std::max(span.begin, begin) - begin,
+                            std::min(span.end, end) - begin});
+}
+
+void ToolCallParser::annotate_block(Event* ev, bool dsml) const {
+  if (!options_.track_tokens) return;
+  // Malformed blocks become literal content, including their delimiters.
+  // Reconstruct the same suffix decodes to retain each generated token's
+  // byte range; this uncommon path runs only when logprobs were requested.
+  size_t offset = dsml ? dsml_held_.size()
+                       : raw_has_prefix_ ? 0 : options_.forced_prefix_text.size();
+  if (dsml) ev->tokens = dsml_held_tokens_;
+  std::vector<int64_t> segment;
+  size_t decoded = 0;
+  for (size_t i = 0; i < raw_.size(); ++i) {
+    size_t bytes = 0;
+    if (dsml && is_marker(raw_[i], markers_.dsml)) {
+      bytes = markers_.dsml.text.size();
+      segment.clear();
+      decoded = 0;
+    } else {
+      segment.push_back(raw_[i]);
+      const size_t length = decode_(segment).size();
+      bytes = length > decoded ? length - decoded : 0;
+      decoded = length;
+    }
+    if (bytes) ev->tokens.push_back({raw_indices_[i], offset, offset + bytes});
+    offset += bytes;
+  }
 }
 
 namespace {
@@ -335,6 +379,7 @@ void ToolCallParser::dsml_flush_held(std::vector<Event>* out) {
     Event ev;
     ev.kind = Event::Kind::kContent;
     ev.text.assign(run_.text, dsml_emitted_, std::string::npos);
+    slice_tokens(&ev, run_.tokens, dsml_emitted_, run_.text.size());
     out->push_back(std::move(ev));
     dsml_emitted_ = run_.text.size();
   }
@@ -348,8 +393,12 @@ void ToolCallParser::dsml_content_append(int64_t id, std::vector<Event>* out) {
     if (!run_.text.empty() && run_.text.back() == '<') {
       const size_t held = dsml_held_suffix(run_.text);
       dsml_held_ = run_.text.substr(run_.text.size() - held);
+      Event provenance;
+      slice_tokens(&provenance, run_.tokens, run_.text.size() - held, run_.text.size());
+      dsml_held_tokens_ = std::move(provenance.tokens);
       enter_dsml_block();
       raw_.push_back(id);
+      raw_indices_.push_back(current_token_);
       return;
     }
     // A tag token without its "<": literal text of the run — but the
@@ -359,6 +408,7 @@ void ToolCallParser::dsml_content_append(int64_t id, std::vector<Event>* out) {
     Event ev;
     ev.kind = Event::Kind::kContent;
     ev.text = kDsmlText;
+    if (options_.track_tokens) ev.tokens.push_back({current_token_, 0, ev.text.size()});
     out->push_back(std::move(ev));
     run_.ids.push_back(id);
     run_.text = decode_(run_.ids);
@@ -367,6 +417,8 @@ void ToolCallParser::dsml_content_append(int64_t id, std::vector<Event>* out) {
   }
   run_.ids.push_back(id);
   const std::string full = decode_(run_.ids);
+  if (options_.track_tokens && full.size() > run_.text.size())
+    run_.tokens.push_back({current_token_, run_.text.size(), full.size()});
   run_.text = full;
   const size_t held = dsml_held_suffix(full);
   const size_t emit_to = full.size() >= held ? full.size() - held : 0;
@@ -374,6 +426,7 @@ void ToolCallParser::dsml_content_append(int64_t id, std::vector<Event>* out) {
     Event ev;
     ev.kind = Event::Kind::kContent;
     ev.text.assign(full, dsml_emitted_, emit_to - dsml_emitted_);
+    slice_tokens(&ev, run_.tokens, dsml_emitted_, emit_to);
     out->push_back(std::move(ev));
     dsml_emitted_ = emit_to;
   }
@@ -382,6 +435,7 @@ void ToolCallParser::dsml_content_append(int64_t id, std::vector<Event>* out) {
 void ToolCallParser::enter_dsml_block() {
   state_ = State::kToolCall;
   raw_.clear();
+  raw_indices_.clear();
   raw_has_prefix_ = true;
   dsml_calls_.clear();
   run_ = Run{};
@@ -522,6 +576,7 @@ void ToolCallParser::abort_dsml_block(std::vector<Event>* out) {
     Event ev;
     ev.kind = Event::Kind::kContent;
     ev.text = text;
+    annotate_block(&ev, true);
     out->push_back(std::move(ev));
   }
   state_ = State::kContent;
@@ -552,6 +607,7 @@ void ToolCallParser::complete_block(std::vector<Event>* out) {
 }
 
 void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
+  current_token_ = next_token_++;
   switch (state_) {
     case State::kReasoning:
       if (is_marker(id, markers_.think_close)) {
@@ -559,6 +615,8 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
         run_ = Run{};
         Event ev;
         ev.kind = Event::Kind::kReasoningClosed;
+        if (options_.track_tokens)
+          ev.tokens.push_back({current_token_, 0, markers_.think_close.text.size()});
         out->push_back(std::move(ev));
         return;
       }
@@ -587,6 +645,7 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
   if (markers_.tool_format() == ToolFormat::kDsml) {
     // The DSML block buffers its ids until its closing text; parsed then.
     raw_.push_back(id);
+    raw_indices_.push_back(current_token_);
     const std::string text = dsml_block_text();
     if (!dsml_block_closed(text)) return;
     if (parse_dsml_block(text)) complete_dsml_block(out);
@@ -598,6 +657,7 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
   // the current segment. A wrong marker aborts the block (its id included
   // in the flushed text); a nested <tool_call> aborts and starts over.
   raw_.push_back(id);
+  raw_indices_.push_back(current_token_);
   const bool open = is_marker(id, markers_.tool_call_open);
   const bool close = is_marker(id, markers_.tool_call_close);
   if (markers_.tool_format() == ToolFormat::kQwenXml) {
@@ -605,6 +665,7 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
     // between the markers is parsed then (a nested opener restarts).
     if (open) {
       raw_.pop_back();
+      raw_indices_.pop_back();
       abort_block(out);
       enter_tool_call(id);
       return;
@@ -626,6 +687,7 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
 
   if (open) {
     raw_.pop_back();  // the nested opener belongs to the next block
+    raw_indices_.pop_back();
     abort_block(out);
     enter_tool_call(id);
     return;

@@ -1,3 +1,4 @@
+#include "kernels/glm_vision.hpp"
 #include "models/glm/forward.hpp"
 
 #include <algorithm>
@@ -223,6 +224,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill_chunks(
       snap->taken = true;
     }
     c0 = c1;
+    report_prefill_progress(req, c1);
   }
   return out;
 }
@@ -1206,6 +1208,7 @@ GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_run_rows(
   if (!capture_mode) debug_sync("uploads", -1, decode_row);
   glm_embed_bcast_streams(globals_.embed, step_tokens_, streams_[0], T, H,
                           stream_);
+  if (!decode_row) apply_image_embeddings(streams_[0], token_start, T);
   if (!capture_mode) debug_sync("embed", -1, decode_row);
 
   Outputs out;
@@ -1644,6 +1647,50 @@ void GlmDiagnosticModel::session_merge_routes(Outputs* out,
       out->routes.push_back(std::move(chunk.routes[i]));
       out->route_biased.push_back(std::move(chunk.route_biased[i]));
     }
+  }
+}
+
+GlmDiagnosticModel::Outputs GlmDiagnosticModel::session_prefill_images(
+    int req, const std::vector<int64_t>& prompt, const std::vector<ImageInput>& images) {
+  if (!vision_) throw std::invalid_argument("GLM: checkpoint has no vision encoder");
+  validate_image_inputs(images, prompt.size());
+  for (const auto& im : images)
+    for (int j = 0; j < im.tokens; ++j)
+      if (prompt[im.offset + j] != 154854)
+        throw std::invalid_argument("GLM: image span does not contain image tokens");
+  image_embeddings_ = vision_->encode(images);
+  prefill_images_ = &images;
+  try {
+    auto out = session_prefill(req, prompt);
+    prefill_images_ = nullptr;
+    image_embeddings_ = nullptr;
+    return out;
+  } catch (...) {
+    prefill_images_ = nullptr;
+    image_embeddings_ = nullptr;
+    throw;
+  }
+}
+void GlmDiagnosticModel::apply_image_embeddings(uint16_t* dst, int64_t first, int rows,
+                                                const uint16_t* mtp_norm) {
+  if (!prefill_images_) return;
+  const int h = cfg_.hidden_size;
+  size_t image_row = 0;
+  for (const auto& im : *prefill_images_) {
+    const int64_t begin = std::max(first, im.offset),
+                  end = std::min(first + rows, im.offset + im.tokens);
+    if (end > begin) {
+      const auto* source = image_embeddings_ + (image_row + begin - im.offset) * h;
+      const int n = static_cast<int>(end - begin);
+      if (mtp_norm) {
+        glm_rmsnorm_bf16(source, mtp_norm, normed_, n, h, cfg_.rms_norm_eps, stream_);
+        DGPP_CUDA_OK(cudaMemcpy2DAsync(dst + (begin - first) * 2 * h, 2 * h * sizeof(uint16_t),
+                                       normed_, h * sizeof(uint16_t), h * sizeof(uint16_t), n,
+                                       cudaMemcpyDeviceToDevice, stream_));
+      } else
+        vision_broadcast(source, dst + (begin - first) * 4 * h, n, h, stream_);
+    }
+    image_row += im.tokens;
   }
 }
 

@@ -96,6 +96,24 @@ class CublasLtGemm : public IGemm {
               size_t act_row_stride, void* workspace, size_t ws_bytes,
               cudaStream_t stream) override;
 
+  // Independent BF16 matrices with FP32 destinations. Batch strides are in
+  // elements; rows within each matrix are contiguous. Always uses cuBLASLt,
+  // including short query tiles (there is no decode/GEMV lowering).
+  // plan_rows selects the algorithm for the untiled matrix while retaining
+  // the actual tile layouts; this keeps query tiling from changing reductions.
+  // weight_kn reads weights as row-major [K,N] instead of [N,K].
+  void matmul_batched_bf16(const uint16_t* act, const uint16_t* weight, float* out, int m, int n,
+                           int k, int batch, int64_t act_stride, int64_t weight_stride,
+                           int64_t out_stride, void* workspace, size_t ws_bytes,
+                           cudaStream_t stream, int plan_rows = 0, bool weight_kn = false);
+
+  // BF16 linear projection with FP32 split-K reductions and one BF16 output
+  // rounding. Optional bias uses the fused epilogue. Always uses cuBLASLt,
+  // including small row counts; ordinary text matmul keeps its own dispatch.
+  void matmul_linear_bf16(const uint16_t* act, const uint16_t* weight, const uint16_t* bias,
+                        uint16_t* out, int m, int n, int k, void* workspace, size_t ws_bytes,
+                        cudaStream_t stream);
+
   size_t query_workspace_bytes(int m, int n, int k, DType io_dtype) override;
 
   bool ensure_plan(int m, int n, int k, DType io_dtype, GemmOut out_dtype,

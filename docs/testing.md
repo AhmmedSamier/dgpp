@@ -1,9 +1,25 @@
 # Tests
 
+Release and testing builds use separate CMake presets and directories:
+
+| Preset | Directory | Purpose |
+| --- | --- | --- |
+| `release` | `build-release/` | Production server; `-O3`, standard assertions disabled, no debug symbols, executable stripped at link time. The build preset builds the server and its dependencies. |
+| `ci` | `build-ci/` | Testing; `RelWithDebInfo` (`-O2 -g -DNDEBUG`) with warnings as errors. The build preset builds all targets. |
+| `debug` | `build-debug/` | Host debugging with symbols and standard assertions enabled. |
+| `asan`, `ubsan` | `build-asan/`, `build-ubsan/` | Testing with the selected host sanitizer and debug symbols. |
+
+CUDA device optimization remains enabled in release and CI; neither preset
+uses the device-debugging flag `-G`. Release retains the project's floating-point
+settings for numerical parity. Leave `DGPP_BUILD_DIR` unset to preserve the
+separate directories. `scripts/ci-local.sh` uses `build-<preset>` when selecting
+another preset with `DGPP_PRESET`.
+
 Build the targets you intend to test. For a first checkout, host and Python
 checks do not need model weights or GPU execution:
 
 ```bash
+cmake --preset ci
 cmake --build build-ci -j 4 --target unit_tests http_server_test serve_test fabric_serve_test scheduler_test roster_check
 ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
 ctest --test-dir build-ci -L python --output-on-failure
@@ -12,6 +28,10 @@ ctest --test-dir build-ci -L python --output-on-failure
 `DGPP_TEST_FILTER=<substring>` runs a subset of a binary's cases; the
 loopback tests use fixed ports in the 299xx range. Run GPU/RDMA tests only
 on idle test hardware, serially; do not run them alongside production serving.
+
+The [Chat API extension validation record](openai-api-validation.md) lists
+focused file/custom-tool/reasoning/schema checks, sanitizer commands and
+the distinction between host conformance tests and live model validation.
 
 CTest labels are `host`, `python`, `checkpoint`, `gpu`, `rdma` and `fixture`.
 Use `ctest --test-dir build-ci -N -L LABEL` to inspect a group before running
@@ -266,3 +286,17 @@ pass vacuously) are pinned in `DESIGN.md` §12.
 
 Cross-node RoCE and NIC→GPU checks are intentionally manual/deployment tests;
 they require a peer and are documented under `benchmarks/README.md`.
+
+## Vision arithmetic
+
+`glm_vision_test` covers eager attention score rounding, softmax size boundaries,
+batched GEMM layouts and strides, preservation of reductions across query tiles,
+fused bias rounding, unbiased split-K cancellation, LayerNorm/GELU CUDA
+reference hashes and attention row placement. The optional
+`tools/glm_vision_norm_reference.py` regenerates the normalization hashes;
+inspect backend changes before updating them. Run the CUDA tests with the existing
+`bf16_gemv_test` after rebuilding the targets. Checkpoint-level validation uses
+`tools/glm_vision_reference.py`; its default CUDA eager gate applies to the full
+encoder as well as isolated stages. The pinned 30-case runner additionally
+requires bitwise equality. Its reproducible procedure and
+measured bounds are in the [numerical record](../benchmarks/results/2026-09-18-glm-vision-numerics.md).

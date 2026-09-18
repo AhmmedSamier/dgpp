@@ -313,6 +313,9 @@ void Scheduler::validate_new(const SchedulerRequest& request) const {
   if (request.prompt.empty())
     throw std::invalid_argument("Scheduler: request '" + request.id +
                                "' has an empty prompt");
+  validate_image_inputs(request.images, request.prompt.size());
+  if (!request.images.empty() && !engine_->supports_images())
+    throw std::invalid_argument("Scheduler: this engine does not support image inputs");
   if (request.max_steps < 1)
     throw std::invalid_argument("Scheduler: request '" + request.id +
                                 "' must generate at least one token");
@@ -448,6 +451,7 @@ int Scheduler::admit_prepare(int arrival) {
   engine_->configure_logit_bias(slot, r.spec.logit_bias);
   // The slot is taken for the group's other members' free_slot() scans.
   slots_[static_cast<size_t>(slot)] = arrival;
+  engine_->prefill_monitor()->begin(slot, r.spec.id, static_cast<int64_t>(r.spec.prompt.size()));
   return slot;
 }
 
@@ -459,7 +463,7 @@ std::vector<int> Scheduler::admissible_group(int first, int64_t budget) {
       : engine_->prefill_group_total_limit();
   if (span_limit <= 0 || total_limit <= 0) return group;
   const auto groupable = [&](const Request& r) {
-    if (r.state != State::kQueued) return false;
+    if (r.state != State::kQueued || !r.spec.images.empty()) return false;
     const int64_t P = static_cast<int64_t>(r.spec.prompt.size());
     if (P <= 0 || P > span_limit) return false;
     if (!cache_on(r)) return true;
@@ -500,7 +504,10 @@ void Scheduler::admit_group(const std::vector<int>& arrivals) {
   try {
     tokens = engine_->prefill_group(slots, prompts);
   } catch (...) {
-    for (const int slot : slots) slots_[static_cast<size_t>(slot)] = -1;
+    for (const int slot : slots) {
+      slots_[static_cast<size_t>(slot)] = -1;
+      engine_->prefill_monitor()->finish(slot);
+    }
     throw;
   }
   const double prefill_ms = std::chrono::duration<double, std::milli>(
@@ -531,8 +538,10 @@ void Scheduler::admit(int arrival) {
   if (!cache_on(r)) {
     // No cache for this request: the pre-cache op, exactly.
     try {
-      token = engine_->prefill(slot, r.spec.prompt);
+      token = r.spec.images.empty() ? engine_->prefill(slot, r.spec.prompt)
+                                    : engine_->prefill_images(slot, r.spec.prompt, r.spec.images);
     } catch (...) {
+      engine_->prefill_monitor()->finish(slot);
       slots_[static_cast<size_t>(slot)] = -1;
       throw;
     }
@@ -566,8 +575,11 @@ void Scheduler::admit(int arrival) {
       }
     }
     try {
+      engine_->prefill_monitor()->begin(slot, r.spec.id, static_cast<int64_t>(r.spec.prompt.size()),
+                                       pp.attach_position);
       token = engine_->prefill_cached(slot, r.spec.prompt, &pp);
     } catch (...) {
+      engine_->prefill_monitor()->finish(slot);
       slots_[static_cast<size_t>(slot)] = -1;
       if (plan.attach_entry >= 0) cache_.detach(plan.attach_entry);
       if (snap_slot >= 0) cache_.give_back_slot(snap_slot);
@@ -634,9 +646,12 @@ void Scheduler::begin_prefill(int arrival, int64_t budget) {
       }
     }
     const int64_t reserved = initial_reserve_tokens(r.spec);
+    engine_->prefill_monitor()->begin(slot, r.spec.id, static_cast<int64_t>(r.spec.prompt.size()),
+                                     pp.attach_position);
     engine_->begin_prefill(slot, r.spec.prompt, reserved, budget, pp);
     r.reserved_tokens = reserved;
   } catch (...) {
+    engine_->prefill_monitor()->finish(slot);
     slots_[static_cast<size_t>(slot)] = -1;
     if (r.attach_entry >= 0) {
       cache_.detach(r.attach_entry);
@@ -672,6 +687,7 @@ void Scheduler::advance_prefill(int arrival, int64_t budget) {
   if (progress.computed_tokens <= 0 || progress.computed_tokens > budget)
     throw std::runtime_error("Scheduler: prefill chunk made no progress or exceeded its token budget");
   r.prefill_computed += progress.computed_tokens;
+  engine_->prefill_monitor()->update(r.slot, r.attached_tokens + r.prefill_computed);
   prompt_tokens_ += progress.computed_tokens;
   prompt_tokens_computed_ += progress.computed_tokens;
   const int64_t expected = static_cast<int64_t>(r.spec.prompt.size()) - r.attached_tokens;
@@ -698,6 +714,7 @@ void Scheduler::advance_prefill(int arrival, int64_t budget) {
 
 void Scheduler::admit_finish(int arrival, int slot, int32_t token, double prefill_ms, int64_t attached,
                               bool resumed) {
+  engine_->prefill_monitor()->finish(slot);
   Request& r = requests_[static_cast<size_t>(arrival)];
   const int64_t reserve = reserve_blocks(r);
   const auto t_prefill = std::chrono::steady_clock::now();
@@ -870,6 +887,7 @@ bool Scheduler::append_token(int arrival, int32_t token,
 void Scheduler::retire(int arrival, Result::Status status,
                        Result::Reason reason) {
   Request& r = requests_[static_cast<size_t>(arrival)];
+  if (r.slot >= 0) engine_->prefill_monitor()->finish(r.slot);
   if (r.state == State::kPrefilling)
     prefill_request_ms_ += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - r.admitted_at).count();
@@ -1009,6 +1027,7 @@ void Scheduler::release_retired(Request& r, Result& res) {
   // empties so their capacity returns to the allocator, not just their
   // size. Every read of a retired record elsewhere is of the tombstone.
   std::vector<int64_t>().swap(r.spec.prompt);
+  std::vector<ImageInput>().swap(r.spec.images);
   std::vector<int64_t>().swap(r.spec.boundaries);
   std::vector<LogitBias>().swap(r.spec.logit_bias);
   r.spec.grammar = text::GrammarSpec{};
@@ -1121,7 +1140,8 @@ bool Scheduler::quantum() {
     const std::vector<int> group = admissible_group(admit_arrival, budget);
     if (group.size() >= 2)
       admit_group(group);
-    else if (budget > 0 && static_cast<int64_t>(requests_[admit_arrival].spec.prompt.size()) > budget) {
+    else if (budget > 0 && requests_[admit_arrival].spec.images.empty() &&
+             static_cast<int64_t>(requests_[admit_arrival].spec.prompt.size()) > budget) {
       begin_prefill(admit_arrival, budget);
       advance_prefill(admit_arrival, budget);
     }

@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 
 #include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -111,6 +112,13 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'http.bind_host' must be an IPv4 address");
         } else if (p.key == "port") {
           http_override = static_cast<int>(integer(p.value, "http.port", what, 1, 65535));
+        } else if (p.key == "max_body_bytes") {
+          // minijson falls back to double for integers outside int64; do not
+          // let as_int() convert an out-of-range floating-point value.
+          if (p.value.kind() != Value::Kind::Int)
+            fail(what, "'http.max_body_bytes' must be an integer (positive 64-bit byte count)");
+          c.http_max_body_bytes = integer(p.value, "http.max_body_bytes", what, 1,
+                                          std::numeric_limits<int64_t>::max());
         } else fail(what, "unknown key 'http." + p.key + "'");
       }
     } else if (k == "node_env") {
@@ -177,6 +185,22 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'" + ek + "' must be \"bounded\" or \"exact\"");
         }
         else if (p.key == "default_max_tokens") e.default_max_tokens = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
+        else if (p.key == "file_inputs") {
+          if (!x.is_object()) fail(what, "engine.file_inputs must be an object");
+          for (const auto& f : x.members()) {
+            const auto path = ek + "." + f.key;
+            if (f.key == "directory" || f.key == "pdf_command") {
+              if (!f.value.is_string()) fail(what, path + " must be a string");
+              (f.key == "directory" ? e.file_inputs.directory : e.file_inputs.pdf_command) = expand_home(std::string(f.value.as_string()));
+            } else if (f.key == "max_file_bytes") e.file_inputs.max_file_bytes = integer(f.value, path, what, 1, INT64_MAX);
+            else if (f.key == "max_request_bytes") e.file_inputs.max_request_bytes = integer(f.value, path, what, 1, INT64_MAX);
+            else if (f.key == "max_text_bytes") e.file_inputs.max_text_bytes = integer(f.value, path, what, 1, INT64_MAX);
+            else if (f.key == "max_storage_bytes") e.file_inputs.max_storage_bytes = integer(f.value, path, what, 1, INT64_MAX);
+            else if (f.key == "pdf_timeout_ms") e.file_inputs.pdf_timeout_ms = static_cast<int>(integer(f.value, path, what, 1, INT32_MAX));
+            else if (f.key == "workers") e.file_inputs.workers = static_cast<int>(integer(f.value, path, what, 1, 256));
+            else fail(what, "unknown key '" + path + "'");
+          }
+        }
         else if (p.key == "queue_limit") e.queue_limit = static_cast<int>(integer(x, ek, what, 1, 1 << 30));
         else if (p.key == "max_connections") e.max_connections = static_cast<int>(integer(x, ek, what, 1, 1 << 20));
         else if (p.key == "no_eos") e.no_eos = boolean(x, ek, what);

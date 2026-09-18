@@ -15,7 +15,8 @@ Run commands from the repository root unless a script says otherwise. Cluster
 launchers run rank 0 locally, so invoke them on the head node: the first entry
 in `DGPP_NODES`. Fabric runs need the relevant binaries built, passwordless SSH
 to the peers, and the checkpoint available in each participating node's local
-cache. Many wrappers use binaries from `build-ci/`.
+cache. Serving defaults to `build-release/dgpp-serve`; test and diagnostic
+wrappers use binaries from `build-ci/`.
 
 Shared node addresses, SSH user, ports, and staging/log/release paths belong in
 the repository's `.env`; [`.env.example`](../.env.example) lists the settings.
@@ -50,8 +51,8 @@ Some older scripts start work immediately and do not implement `--help`.
 | File | What it does | When to use it |
 | --- | --- | --- |
 | [README.md](README.md) | This directory's file index and operating notes. | Start here to choose a launcher, client, or report. |
-| [ci-local.sh](ci-local.sh) | Configures CMake, builds, and runs CTest; defaults to the `ci` preset and `build-ci/`. | Validate a local code change. `DGPP_PRESET` and `DGPP_BUILD_DIR` select another build. |
-| [release.sh](release.sh) | Builds or reuses the release build, stages the install layout, and packages a versioned tarball with checksums under `dist/`. | Prepare an artifact for installation; `--no-build` repackages an existing build. Uses `DGPP_BUILD_DIR` or `build-release/`. |
+| [ci-local.sh](ci-local.sh) | Configures CMake, builds, and runs CTest; defaults to the `ci` preset and `build-ci/`. | Validate a local code change. `DGPP_PRESET` selects `build-<preset>/`; `DGPP_BUILD_DIR` explicitly overrides the directory. |
+| [release.sh](release.sh) | Builds or reuses the release build, stages the install layout, and packages a versioned tarball with checksums under `dist/`. Rejects testing build directories and binaries with debug information or sanitizer instrumentation. | Prepare an artifact for installation; `--no-build` repackages an existing release build. Uses `DGPP_BUILD_DIR` or `build-release/`. |
 | [dgpp-cluster](dgpp-cluster) | Combines site settings with a deployment JSON; starts, stops, and inspects ranks, installs releases, and lists installed versions. | Manage a serving deployment. `resolve` prints the merged runtime JSON without SSH or startup. |
 | [serve_run.sh](serve_run.sh) | Wraps `dgpp-cluster`, passing `DGPP_SERVE_KNOBS` as engine flags and `DGPP_SERVE_LOG` as the log directory. | Run `up`, `down`, or `status` through the environment-based interface used by the test procedures. |
 | [cluster_env.sh](cluster_env.sh) | Loads site settings through `site_env.py` and defines Bash helpers for nodes, peers, user, ports, and config resolution. | Source it from an orchestration script that needs shared site information. |
@@ -109,6 +110,7 @@ affect the results.
 | File | What it does | When to use it |
 | --- | --- | --- |
 | [serve_api_check.py](serve_api_check.py) | Checks stop strings, multiple choices, logit bias, and usage details in streamed and non-streamed responses; fails if a check fails. | Verify request-field behavior after a server change. |
+| [vision_api_check.py](vision_api_check.py) | Generates PNG inputs and checks colors, multiple images, streaming, choices, chunk boundaries and concurrent requests. | Verify a GLM-5.3-Flash image deployment on idle test hardware. |
 | [serve_bench.py](serve_bench.py) | Times a streaming chat request and reports time to first token, decode pace, wall time, and usage. Can obtain its default endpoint from site settings. | Take a quick client-side latency reading. |
 | [serve_load.py](serve_load.py) | Sends fixed-concurrency streaming request phases and reports per-request timing and aggregate throughput. Supports prompt-class sweeps. | Measure serving throughput as concurrency or workload changes. |
 | [serve_mtp_classes.py](serve_mtp_classes.py) | Sends the five class prompts greedily and reads each request's retired line from rank 0's log: pass time, tokens per pass and draft acceptance as the engine counted them. | Compare MTP acceptance per prompt type through the service. |

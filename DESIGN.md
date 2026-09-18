@@ -1,6 +1,6 @@
 # DGPP Engine Design
 
-This document describes the implemented text-serving architecture. The
+This document describes the implemented serving architecture. The
 shared runtime supports GLM-5.3-Flash, Qwen3.8-Flash-Next and GLM-4.7 with
 resident loading, tensor parallelism, decode graphs, sampling, prefix
 caching and MTP. World size and memory requirements depend on the model
@@ -16,8 +16,8 @@ Use [PLAN.md](PLAN.md) for implementation status and
 [operations](docs/operations.md) for deployment. Dated measurements here
 explain design choices; current benchmark tables and reproduction commands
 are in [docs/benchmarks.md](docs/benchmarks.md). Investigation chronology
-is kept in [benchmarks/results](benchmarks/results/). Vision execution is
-not implemented.
+is kept in [benchmarks/results](benchmarks/results/). GLM-5.3-Flash image
+execution is described in §11 and [image inputs](docs/vision.md).
 
 ## 1. Goals and decision rules
 
@@ -1424,6 +1424,10 @@ The prefix cache reuses exact session snapshots at valid prefill cuts.
 snapshot, attach and release operations, so snapshot size and cache
 contents depend on its state representation.
 
+Image requests bypass this token-only index. Equal placeholder IDs do not
+imply equal image embeddings; safe reuse requires image content and geometry
+in the prefix identity, including for generated continuation snapshots.
+
 For GLM-5.3, a snapshot contains KDA recurrent and convolution state, DSA
 tail rings and the draft block's last hidden row. Complete cache blocks
 are pinned by reference; a partial block is copied so the cached prefix
@@ -1929,7 +1933,7 @@ iteration must not influence collective order.
 
 Chat messages support system, user, assistant and tool roles. The text
 frontend handles the checkpoint's template, reasoning markers and tool
-format. Non-text execution and unsupported request fields are rejected
+format. Unsupported input modalities and request fields are rejected
 with errors naming the parameter. Supported schema constraints and
 tool-choice rules are enforced through token masks as described in §10.
 
@@ -1947,6 +1951,38 @@ a possible match suffix back from the client and journals retirement when
 a stop is found. Multiple chat choices use separate scheduler requests
 and can share a prompt through the prefix cache.
 
+### Image inputs
+
+`ModelFrontend::prepare_chat` returns prompt tokens and optional owned RGB
+images with token spans. `supports_images` on both the frontend and engine
+controls admission and the model endpoint's `input_modalities` field.
+GLM's frontend decodes PNG/JPEG data URIs, applies bounded resize/padding and
+expands image markers before running the checkpoint's normal chat template.
+
+The GLM encoder loads the replicated BF16 `model.visual.*` tensors, validates
+shapes, and includes their digest in the startup agreement. It runs patch
+projection, 24 noncausal vision blocks with axial RoPE, spatial downsampling
+and the merger. Startup memory planning includes its weights and maximum
+workspace; all CUDA buffers are allocated before ranks begin collectives.
+The arithmetic target is CUDA BF16 eager attention: FP32 RMS reductions,
+unfused FP32 rotary products, BF16 QK/scaling boundaries and FP32 softmax.
+All vision projections select FP32 reductions and BF16 output, with a fused
+epilogue for bias. Final LayerNorm uses the CUDA reference’s Welford reduction
+order. Attention
+batches heads with values stored as `[heads, tokens, head_dim]`; query tiles
+reuse the algorithm selected for the untiled matrix to avoid changing its
+reduction order. Tiling stays within the reserved workspace. The independent
+oracle gates full-depth relative RMS at 0.5% and cosine at 0.99998; see the
+[numerical record](benchmarks/results/2026-09-18-glm-vision-numerics.md).
+
+Image embeddings replace their placeholder rows in all four mHC streams
+during prefill. The MTP prompt pass applies its embedding norm to the same
+features at its shifted token positions. This handles image spans across
+language-model prefill chunks. Eager and graph adapters share normal slot
+opening and sampling; decode graphs consume ordinary generated token IDs.
+Image admissions currently run individually and bypass prefix-cache lookup,
+insertion and resumable prefill.
+
 ### Admission journal
 
 `src/serve/fabric_serve.*` sends newline-framed JSON from rank 0 to
@@ -1956,6 +1992,9 @@ configuration and cache capacity and coordinates startup graph capture.
 Each subsequent tick record carries accepted submissions and
 cancellations, plus digests of the previous tick's operation stream and
 prefix decisions. Peers apply the record before executing that tick.
+Image submissions also carry bounded base64 RGB bytes, dimensions and prompt
+spans. Decoding and resize happen once on rank 0; every rank validates the
+journaled geometry and runs the same encoder input.
 
 Only accepted scheduler changes are journaled. HTTP validation failures
 stay on rank 0; token production and retirements are derived by each

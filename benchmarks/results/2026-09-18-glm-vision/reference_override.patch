@@ -1,0 +1,25 @@
+--- a/src/models/glm/vision.cpp
++++ b/src/models/glm/vision.cpp
+@@ -1 +1,2 @@
++#include <cstdlib>
+ #include "models/glm/vision.hpp"
+@@ -214,6 +215,19 @@
+     vision_swiglu(gate.b(), up.b(), image.tokens * c.projection, c.swiglu_limit, stream);
+     trace("merger_swiglu", gate.b(), image.tokens * c.projection);
+     linear(gate.b(), dst, image.tokens, o, c.projection, "merger.down_proj");
++    // Diagnostic only: replace visual rows with an independent reference.
++    if (const char* root = std::getenv("DGPP_VISION_REFERENCE_DIR")) {
++      uint64_t id = 14695981039346656037ull;
++      for (const auto b : image.rgb) { id ^= b; id *= 1099511628211ull; }
++      std::ifstream f(std::filesystem::path(root) / (std::to_string(id) + ".bf16"), std::ios::binary | std::ios::ate);
++      const size_t bytes = static_cast<size_t>(image.tokens) * o * 2;
++      if (!f || f.tellg() != static_cast<std::streamoff>(bytes)) throw std::runtime_error("diagnostic reference missing or wrong size");
++      std::vector<uint16_t> data(bytes / 2);
++      f.seekg(0); f.read(reinterpret_cast<char*>(data.data()), bytes);
++      if (!f) throw std::runtime_error("diagnostic reference read failed");
++      DGPP_CUDA_OK(cudaMemcpyAsync(dst, data.data(), bytes, cudaMemcpyHostToDevice, stream));
++      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
++    }
+     DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+   }
+ };

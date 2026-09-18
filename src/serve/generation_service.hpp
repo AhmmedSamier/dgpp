@@ -1,17 +1,20 @@
 #pragma once
+#include <future>
+#include "serve/file_inputs.hpp"
 // OpenAI-compatible text-generation service over the scheduler.
-// Supported fields are validated before admission. Unsupported fields
-// return 400 with an error object naming the parameter. Sampling defaults
+// Supported fields are validated before admission. Known unsupported API
+// features return 400 naming the parameter; unknown top-level client
+// extensions are ignored for compatibility. Sampling defaults
 // come from the model configuration, and constrained output requires
 // an engine that supports token masks.
 //
 
-//   POST /v1/chat/completions   messages[] (system/user/assistant/tool;
+//   POST /v1/chat/completions   messages[] (developer/system/user/assistant/tool;
 //                               string or content-part content, assistant
 //                               tool_calls and reasoning_content, tool
 //                               tool_call_id), max_tokens or
 //                               max_completion_tokens, stream,
-//                               stream_options.include_usage; sampling:
+//                               stream_options.include_usage/include_obfuscation; sampling:
 //                               temperature, top_p, presence_penalty,
 //                               frequency_penalty, seed (the OpenAI
 //                               fields) plus top_k, min_p and
@@ -23,8 +26,8 @@
 //                               sample yet serves greedy defaults and
 //                               refuses temperature > 0 with
 //                               sampling_unsupported. logprobs (bool) and
-//                               top_logprobs (0..20) report every
-//                               generated token's log-probability and
+//                               top_logprobs (0..20) report visible content
+//                               tokens' log-probabilities and
 //                               alternatives (the OpenAI content shape),
 //                               exact from the same sampler; temperature
 //                               0 reports under the raw distribution.
@@ -50,7 +53,8 @@
 //   POST /v1/completions        the legacy prompt API (string prompt).
 //   GET  /v1/models, /v1/models/{id}
 //   GET  /health               liveness (the fabric harnesses' probe).
-//   GET  /metrics, /v1/metrics  JSON scheduler + service counters (ours).
+//   GET  /metrics, /v1/metrics  JSON counters and live prefill progress (ours).
+// See docs/openai-compatibility.md for the complete capability profile.
 //
 // Thread ownership (HTTP and engine threads, one shared mutex):
 //   * HTTP thread — HttpServer::serve() calls handle()/idle()/
@@ -88,6 +92,10 @@ namespace dgpp::serve {
 // so the whole HTTP/SSE/lifecycle stack runs without a model cache.
 class ModelFrontend {
  public:
+  struct ReasoningSettings {
+    std::optional<bool> enable_thinking;
+    std::optional<std::string> effort;
+  };
   virtual ~ModelFrontend() = default;
   // text -> token ids (the exact ByteLevel-BPE encode).
   virtual std::vector<int64_t> encode_text(std::string_view text) const = 0;
@@ -102,6 +110,15 @@ class ModelFrontend {
   // template with the generation prompt appended — the prompt the
   // scheduler will prefill.
   virtual std::string render_chat(const minijson::Value& globals) const = 0;
+  struct ChatInput {
+    std::vector<int64_t> tokens;
+    std::vector<ImageInput> images;
+  };
+  virtual bool supports_images() const { return false; }
+  virtual ChatInput prepare_chat(const minijson::Value& globals) const {
+    return {encode_text(render_chat(globals)), {}};
+  }
+
   // The template's marker tokens (DESIGN §11): the reasoning split and
   // the tool-call parser key on their ids. A frontend without them
   // (the default) serves plain chat: tool requests refuse, nothing is
@@ -111,6 +128,22 @@ class ModelFrontend {
   // gate for chat_template_kwargs: enable_thinking is a knob of the
   // Qwen3.8-Flash-Next and GLM-4.7 templates, not of GLM-5.3-Flash's).
   virtual bool template_reads(std::string_view) const { return false; }
+  // Resolve API effort into controls the model actually consumes. Models
+  // with only a thinking switch map every positive effort to that switch.
+  virtual ReasoningSettings reasoning_settings(std::string_view effort) const {
+    ReasoningSettings out;
+    if (effort == "none") {
+      if (template_reads("enable_thinking")) out.enable_thinking = false;
+      else if (markers().reasoning_available())
+        throw std::invalid_argument("this model cannot disable reasoning");
+    } else {
+      if (template_reads("enable_thinking")) out.enable_thinking = true;
+      if (template_reads("reasoning_effort")) out.effort = std::string(effort);
+      if (!out.enable_thinking && !out.effort)
+        throw std::invalid_argument("this model exposes no reasoning control");
+    }
+    return out;
+  }
   // The prefix cache's boundary tokens (M7): the ids whose positions in a
   // prompt are its structural boundaries — the template's role markers
   // (<|system|>, <|user|>, <|assistant|>, <|observation|>), so consecutive
@@ -120,6 +153,7 @@ class ModelFrontend {
 };
 
 struct ServiceConfig {
+  FileInputConfig file_inputs;
   // What /v1/models reports and what requests must name in "model".
   std::string model_id;
   int default_max_tokens = 256;  // when the request omits max_tokens
@@ -254,7 +288,8 @@ class GenerationService : public HttpHandler,
   bool failed() const;
 
   struct Stats {
-    uint64_t requests_total = 0;
+    // HTTP requests, regardless of n; scheduler/TTFT counters count choices.
+    uint64_t requests_total = 0;     // validated requests reaching admission
     uint64_t requests_shed = 0;      // 503s at the door or at admission
     uint64_t requests_cancelled = 0;  // client disconnects (and the stop)
     uint64_t requests_shed_pool = 0;  // grow-on-demand: cut short at exhaustion
@@ -301,6 +336,8 @@ class GenerationService : public HttpHandler,
     int n = 1;
     int finished = 0;            // choices whose end sequence is written
     bool ended = false;          // the stream ended / the one-shot answered
+    bool counted_shed = false, counted_cancelled = false;
+    bool counted_pool = false, counted_failed = false;
     int completion_tokens = 0;   // summed over the choices
     int reasoning_tokens = 0;
     int cached_tokens = 0;       // choice 0's prefix-cache attach position
@@ -320,6 +357,9 @@ class GenerationService : public HttpHandler,
     bool chat = false;       // chat route (the parser path) vs legacy
     bool stream = false;
     bool include_usage = false;
+    bool include_obfuscation = true;
+    bool report_service_tier = false;
+    std::string metadata;
     bool first_chunk_sent = false;
     bool done = false;         // retired or rejected — ready to finish
     bool reject_overloaded = false;
@@ -356,6 +396,11 @@ class GenerationService : public HttpHandler,
     std::string carry_reasoning, carry_content, carry_args, carry_text;
     int logprobs = -1;         // -1 none; N = top-N alternatives requested
     std::vector<sample::Result> lps;  // one per id when logprobs >= 0
+    std::vector<bool> content_lps;  // generated tokens contributing visible content
+    std::vector<bool> lps_reported;
+    std::vector<ParserEvent::TokenSpan> content_spans;
+    size_t content_input_bytes = 0;
+    size_t content_span_cursor = 0;
     size_t lps_flushed = 0;    // streaming: entries already sent
     std::vector<int64_t> ids;  // generated so far
     // Legacy completions: the suffix-diff text path.
@@ -368,6 +413,8 @@ class GenerationService : public HttpHandler,
     std::string reasoning;     // accumulated (one-shots)
     std::string content;       // accumulated (one-shots)
     std::vector<ToolCall> calls;
+    std::vector<std::string> custom_tools;
+    std::string generation_error;
     int calls_announced = 0;   // streaming: calls already sent (HTTP thread)
     HttpResponseWriter* writer = nullptr;  // HTTP thread only
   };
@@ -380,6 +427,12 @@ class GenerationService : public HttpHandler,
   void route_models(const HttpRequest& req, HttpResponseWriter& w);
   void route_health(HttpResponseWriter& w) const;
   void route_metrics(HttpResponseWriter& w);
+  bool validate_chat_parameters(const minijson::Value& body, HttpResponseWriter& w);
+  bool parse_max_tokens(const minijson::Value& body, HttpResponseWriter& w, int* steps, bool chat);
+  bool parse_stream_options(const minijson::Value& body, HttpResponseWriter& w,
+                            bool stream, bool* usage, bool* obfuscation);
+  void write_stream_event(StreamRecord& r, std::string event, bool usage = false);
+  void mark_content_logprobs(StreamRecord& r);
 
   // The request's sampling spec: every present field validated and
   // applied over the defaults, the seed drawn when omitted. Responds 400
@@ -407,15 +460,18 @@ class GenerationService : public HttpHandler,
     dgpp::text::GrammarSpec grammar;  // the pick's constraint (inactive: none)
     bool tools_requested = false;
     dgpp::text::ToolSchemas schemas;
+    std::vector<std::string> custom_tools;
   };
   bool parse_chat(const dgpp::minijson::Value& body, HttpResponseWriter& w,
                   ChatPlan* plan);
+  void enqueue_file_work(const HttpRequest& req, HttpResponseWriter& writer, bool chat);
+  void pump_file_work();
 
   // The OpenAI error body (never a bare string).
   void respond_error(HttpResponseWriter& w, int status,
                      const std::string& message, const std::string& type,
                      const std::string& param = "",
-                     const std::string& code = "") const;
+                     const std::string& code = "");
 
   // Admits a validated request: creates the record, hands the writer,
   // and enqueues the submit (the engine thread applies it).
@@ -441,9 +497,11 @@ class GenerationService : public HttpHandler,
   void absorb(StreamRecord& r, ParserEvent ev);
   // The OpenAI logprobs content entries for record tokens [from, to).
   std::string logprobs_content(const StreamRecord& r, size_t from,
-                               size_t to) const;
+                               size_t to, bool unreported_only = false) const;
+  std::string take_content_logprobs(StreamRecord& r) const;
   // The legacy text_completion logprobs object over every token.
-  std::string legacy_logprobs(const StreamRecord& r) const;
+  std::string legacy_logprobs(const StreamRecord& r, size_t from = 0,
+                             size_t to = SIZE_MAX) const;
   void on_retire(const std::string& id,
                  const dgpp::sched::Scheduler::Result& result) override;
   // Grow-on-demand's growth events (M6 6d) ride to the audit observer:
@@ -467,6 +525,15 @@ class GenerationService : public HttpHandler,
   void flush_stream_carries(StreamRecord& r);  // the held UTF-8 tails, at the end
 
   ServiceConfig cfg_;
+  FileInputs file_inputs_;
+  struct PendingFileWork {
+    uint64_t tag;
+    HttpResponseWriter* writer;
+    bool chat;
+    std::future<FileResponse> result;
+  };
+  std::vector<PendingFileWork> file_work_;  // HTTP thread only; destroyed before file_inputs_
+  std::atomic<size_t> pending_file_count_{0};  // observed by shutdown drain
   dgpp::sched::SchedulerEngine* engine_;
   const ModelFrontend* frontend_;
   dgpp::text::ChatMarkers markers_;
@@ -490,16 +557,20 @@ class GenerationService : public HttpHandler,
   std::vector<std::string> pending_stops_;  // scheduler ids whose stop matched
   std::vector<std::shared_ptr<StreamRecord>> records_;
   dgpp::sched::Scheduler::Meters meters_;  // engine-published, mutex-guarded
+  dgpp::sched::SchedulerEngine::PrefixEngineStats prefix_stats_;
+  std::chrono::steady_clock::time_point meters_published_ = std::chrono::steady_clock::now();
   bool shutdown_ = false;
   bool failed_ = false;      // fail_engine() happened
   std::string failure_;      // its reason (the clients' message carries it)
   mutable std::mutex mutex_;
 
   // HTTP-thread-only counters guarded by std::atomic where cross-thread.
-  std::atomic<uint64_t> next_tag_{1};
+  std::atomic<uint64_t> next_tag_{(static_cast<uint64_t>(std::random_device{}()) << 32) ^
+                                 static_cast<uint64_t>(std::random_device{}())};
   Stats stats_;  // written under mutex_ (cheap, exact)
   bool sampling_available_ = false;
   std::mt19937_64 seed_rng_;  // HTTP thread only (route handlers)
+  std::mt19937_64 obfuscation_rng_{std::random_device{}()};  // independent of sampler seeds
 };
 
 }  // namespace dgpp::serve

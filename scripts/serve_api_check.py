@@ -24,6 +24,7 @@ import json
 from serve_client import served_model
 import sys
 import http.client
+import uuid
 
 HOST, PORT = sys.argv[1], int(sys.argv[2])
 MODEL = sys.argv[3] if len(sys.argv) > 3 else served_model(HOST, PORT)
@@ -152,16 +153,20 @@ check("n=2 stream",
 # The service does not expose token ids (the logprobs carry text and
 # bytes), so the check forces one id with +100 — every generated token must
 # be that one — bans an id the answer never used (nothing changes) and
-# sends a malformed table (refused by name). The unit and loopback gates
-# cover the ban's exact arithmetic.
+# sends a malformed table (refused by name). Use plain completions for the
+# forced-token probe: forcing a token inside an open chat reasoning block
+# never closes that block, and Chat logprobs cover visible content only.
+# The unit and loopback gates cover the ban's exact arithmetic.
 FORCE_ID = 100
-st, r = post("/v1/chat/completions", chat(prompt, logit_bias={str(FORCE_ID): 100}, max_tokens=6))
-forced_text = (r["choices"][0]["message"].get("reasoning_content") or content_of(r)) if st == 200 else str(r)
-st2, r2 = post("/v1/chat/completions", chat(prompt, logit_bias={str(FORCE_ID): 100}, max_tokens=6,
-                                            logprobs=True, top_logprobs=1))
-toks = [e["token"] for e in r2["choices"][0]["logprobs"]["content"]] if st2 == 200 else []
+forced = {"model": MODEL, "prompt": "Continue: ", "temperature": 0,
+          "logit_bias": {str(FORCE_ID): 100}, "max_tokens": 6}
+st, r = post("/v1/completions", forced)
+forced_text = r["choices"][0]["text"] if st == 200 else str(r)
+st2, r2 = post("/v1/completions", dict(forced, logprobs=1))
+toks = r2["choices"][0]["logprobs"]["tokens"] if st2 == 200 else []
 check("logit_bias force",
-      st == 200 and st2 == 200 and len(set(toks)) == 1 and len(toks) >= 5,
+      st == 200 and st2 == 200 and len(set(toks)) == 1 and len(toks) == 6
+      and forced_text == r2["choices"][0]["text"],
       f"tokens={toks} text={forced_text!r}")
 st, r = post("/v1/chat/completions", chat(prompt, logit_bias={str(FORCE_ID): -100}, **no_think))
 check("logit_bias ban",
@@ -172,7 +177,9 @@ check("logit_bias refused by name", st == 400 and r.get("error", {}).get("param"
       f"status={st} error={r.get('error') if isinstance(r, dict) else r}")
 
 # --- usage details ----------------------------------------------------------
-long_prompt = [{"role": "user", "content": "Summarize the causes of the fall of the Roman Republic in four sentences."}]
+# A fresh leading marker keeps this cold/hot comparison valid when the
+# smoke test is repeated against the same running server.
+long_prompt = [{"role": "user", "content": str(uuid.uuid4()) + "\nSummarize the causes of the fall of the Roman Republic in four sentences."}]
 st, a = post("/v1/chat/completions", chat(long_prompt, max_tokens=96))
 st2, b = post("/v1/chat/completions", chat(long_prompt, max_tokens=96))
 ua, ub = a.get("usage", {}), b.get("usage", {})

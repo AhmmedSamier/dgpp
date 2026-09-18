@@ -85,8 +85,10 @@ content to peers as `<stage_dir>/cluster.json`. Neither `.env` nor its tokens
 are copied to peers. Direct `dgpp-serve --config` commands need this resolved
 JSON, not the deployment template.
 
-`--bin PATH` selects a development binary (default
-`build-ci/dgpp-serve`), `--log-dir DIR` overrides the log directory,
+The launcher defaults to `build-release/dgpp-serve` when no installed release
+or `DGPP_BUILD_DIR` override is selected. `--bin PATH` selects another binary;
+use `--bin build-ci/dgpp-serve` to deploy a testing build with debug symbols.
+`--log-dir DIR` overrides the log directory,
 and `--knobs "FLAGS"` appends server flags after the file settings.
 The compatibility wrapper `scripts/serve_run.sh` maps
 `DGPP_SERVE_KNOBS` and `DGPP_SERVE_LOG` to those options.
@@ -130,6 +132,55 @@ two-node template) holds 262,144 tokens with a 2 GiB prefix arena, and one
 slot would reach about 534,000. Decode costs what the doubled per-rank weight read
 implies, near 1.75x the four-node pace; prefill costs about 1.45x
 (benchmarks.md §3 to §6).
+
+### Large document and agent requests
+
+`http.max_body_bytes` caps each serialized HTTP request body. The default is
+268435456 bytes (256 MiB), allowing large document prefills and conversation
+histories with tool calls and JSON escaping. To allow up to 1 GiB, add this
+top-level section to the deployment JSON:
+
+```json
+{
+  "http": {
+    "max_body_bytes": 1073741824
+  }
+}
+```
+
+Use a positive integer byte count. The binary flag
+`--http-max-body-bytes 1073741824` overrides the file; the launcher accepts it
+through `--knobs`. The startup log reports the effective byte limit. Changing
+it requires restarting the server with the new configuration.
+
+The limit does not allocate that much memory upfront. Upload buffers and JSON
+parsing use host memory as requests arrive; larger simultaneous uploads can
+therefore consume more host memory. Tokenized prompts and requested output
+must still fit `engine.kv_capacity` under the configured admission policy.
+There is no fixed conversion between serialized bytes and model tokens.
+
+HTTP 413 means the request exceeded this byte limit before reaching the model;
+the response names `http.max_body_bytes` and its value. Some agent clients,
+including OpenCode, respond to 413 by compacting their conversation, which can
+look like a much smaller context window. Adjust the byte cap for that case;
+increasing the KV pool alone does not change it.
+
+### GLM-5.3-Flash image requests
+
+GLM-5.3-Flash checkpoints with compatible vision tensors enable image inputs
+automatically. `/v1/models` reports `input_modalities: ["text", "image"]`.
+Send PNG/JPEG data URIs in user `image_url` content parts; the
+[image input guide](vision.md) gives a complete request and limits.
+
+The startup plan reserves 1.05 GiB of vision weights and 0.34 GiB of workspace
+per rank, including for text traffic. Account for this when sizing KV capacity.
+Image requests bypass prefix caching and grouped/continuation prefill; decode
+graphs and MTP remain supported. Before changing a serving deployment, run
+`python3 scripts/vision_api_check.py --url http://127.0.0.1:18080` on idle test
+hardware, then compare rank operation streams after shutdown.
+For numerical validation, stop the serving world before running the CUDA
+encoder oracle; its default full-depth gate is documented in the
+[image guide](vision.md#deployment-and-validation).
 
 ## Stop and inspect
 
@@ -571,7 +622,12 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   for backward compatibility) — JSON counters for requests, sheds, cancellations,
   failures, the admission policy, the prefix cache (entries, hits, tokens
   saved, hop snapshots, the TTFT split by hit and miss), sampling
-  fallbacks. Both metrics paths return `application/json`; direct Prometheus
+  fallbacks. `prefill.requests` reports each active prefill's prompt, processed,
+  cached, computed and remaining tokens, updated at chunk boundaries even
+  during a synchronous prefill. `scheduler.snapshot_age_ms` reports the age of
+  the remaining scheduler/pool counters. See the
+  [metrics contract and monitoring command](openai-compatibility.md#metrics-and-prefill-progress).
+  Both metrics paths return `application/json`; direct Prometheus
   scraping requires a supported
   [exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/),
   which DGPP does not yet provide. `GET /health` is `{"status":"ok"}`

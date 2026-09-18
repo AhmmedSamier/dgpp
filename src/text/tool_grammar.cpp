@@ -121,6 +121,34 @@ bool string_possible(const minijson::Value& prop) {
   return true;  // an unrecognised type value: leave it free
 }
 
+// Keep local references relative to the complete parameter schema, including
+// root recursion, when an argument is decoded by its own JSON machine.
+minijson::Value relocate_refs(const minijson::Value& v) {
+  if (v.is_array()) {
+    std::vector<minijson::Value> items;
+    for (const auto& item : v.items()) items.push_back(relocate_refs(item));
+    return minijson::Value::make_array(std::move(items));
+  }
+  if (!v.is_object()) return v;
+  std::vector<minijson::Member> members;
+  for (const auto& m : v.members()) {
+    if (m.key == "$ref" && m.value.is_string() && m.value.as_string().starts_with("#"))
+      members.push_back({m.key, minijson::Value::make_owned_string(
+          "#/$defs/__dgpp_parameters" + std::string(m.value.as_string().substr(1)))});
+    else members.push_back({m.key, relocate_refs(m.value)});
+  }
+  return minijson::Value::make_object(std::move(members));
+}
+
+minijson::Value argument_schema(const minijson::Value& params, const std::string& key) {
+  using V = minijson::Value;
+  std::string pointer;
+  for (char c : key) pointer += c == '~' ? "~0" : c == '/' ? "~1" : std::string(1, c);
+  return V::make_object({
+    {"$defs", V::make_object({{"__dgpp_parameters", relocate_refs(params)}})},
+    {"$ref", V::make_owned_string("#/$defs/__dgpp_parameters/properties/" + pointer)}});
+}
+
 }  // namespace
 
 GrammarTool grammar_tool_from_function(const minijson::Value& def,
@@ -134,6 +162,13 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
   tool.strict = strict;
   const minijson::Value* params = def.find("parameters");
   if (params == nullptr || !params->is_object()) return tool;
+  if (strict) {
+    try { compile_json_schema(*params); }
+    catch (const std::invalid_argument& e) {
+      const std::string what = e.what();
+      throw std::invalid_argument("parameters" + (what.starts_with("schema") ? what.substr(6) : ": " + what));
+    }
+  }
   const minijson::Value* props = params->find("properties");
   const minijson::Value* extra = params->find("additionalProperties");
   const bool closed = extra != nullptr && extra->is_bool() && !extra->as_bool(true);
@@ -165,6 +200,7 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
     GrammarArg arg;
     arg.key = pm.key;
     const minijson::Value& prop = pm.value;
+    const auto contextual = argument_schema(*params, pm.key);
     const std::string path = "parameters.properties." + pm.key;
     if (!prop.is_object()) {
       if (strict) throw std::invalid_argument(path + ": must be a schema object");
@@ -174,7 +210,7 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
     if (strict) {
       // Every property must lie inside the enforceable subset.
       try {
-        compile_json_schema(prop);
+        compile_json_schema(contextual);
       } catch (const std::invalid_argument& e) {
         const std::string what = e.what();  // "schema.<path>: reason"
         throw std::invalid_argument(
@@ -183,7 +219,8 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
     }
     const minijson::Value* en = prop.find("enum");
     const minijson::Value* cs = prop.find("const");
-    if (string_possible(prop)) {
+    if (string_possible(prop) && !prop.find("pattern") && !prop.find("format") &&
+        !prop.find("$ref") && !prop.find("anyOf") && !prop.find("x-dgpp-grammar")) {
       // Raw text — typable only through an enum's exact texts.
       if (en != nullptr && en->is_array() && !en->items().empty() &&
           prop.find("anyOf") == nullptr) {
@@ -204,9 +241,9 @@ GrammarTool grammar_tool_from_function(const minijson::Value& def,
     // the narrowing is not applied — and noted with the reason.
     try {
       std::vector<std::string> unenforced;
-      compile_json_schema(prop, &unenforced);
+      compile_json_schema(contextual, &unenforced);
       arg.kind = GrammarArg::Kind::kJson;
-      arg.schema = json_text_of(prop);
+      arg.schema = json_text_of(contextual);
       if (notes != nullptr)
         for (const std::string& u : unenforced) {
           // "schema.<path>.<keyword>: <reason>"

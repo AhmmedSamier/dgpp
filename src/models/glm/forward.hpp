@@ -1,4 +1,5 @@
 #pragma once
+#include "models/glm/vision.hpp"
 // GLM-5.3 text model for diagnostic forward passes and serving sessions.
 // Streaming mode rebinds layer objects to one loaded layer at a time;
 // resident mode retains weights for eager and captured decode execution.
@@ -20,6 +21,7 @@
 
 #include <cuda_runtime.h>
 
+#include "common/prefill_progress.hpp"
 #include "core/arena.hpp"
 #include "engine/boundary_reducer.hpp"
 #include "engine/memory_plan.hpp"
@@ -40,7 +42,7 @@ namespace dgpp {
 // The TP block-boundary interface lives with the engine (engine/boundary_reducer.hpp).
 using GlmBoundaryReducer = BoundaryReducer;
 
-class GlmDiagnosticModel {
+class GlmDiagnosticModel : public PrefillReporting {
  public:
   // The engine-facing rows (engine/decode_outputs.hpp: hidden, logits,
   // the rank's vocab slice) plus GLM's route traces.
@@ -168,6 +170,10 @@ class GlmDiagnosticModel {
   // any session is open throws (it would clobber session state) — a
   // parity harness runs engine and reference on SEPARATE instances.
   Outputs session_prefill(int req, const std::vector<int64_t>& prompt_ids);
+  bool supports_images() const { return vision_ != nullptr; }
+  Outputs session_prefill_images(int req, const std::vector<int64_t>& prompt_ids,
+                                 const std::vector<ImageInput>& images);
+
   Outputs session_step(int req, int64_t token_id);
   // Several cold prompts as the spans of one walk (2026-09-14): the
   // engine's group prefill (graph_engine.hpp prefill_group) when the
@@ -806,6 +812,11 @@ class GlmDiagnosticModel {
   KdaGeometry kda_geo_;
   int max_tokens_ = 0;
   int64_t max_context_ = 0;
+
+  std::unique_ptr<GlmVisionEncoder> vision_;
+  const std::vector<ImageInput>* prefill_images_ = nullptr;
+  const uint16_t* image_embeddings_ = nullptr;
+  void apply_image_embeddings(uint16_t* dst, int64_t first, int rows, const uint16_t* mtp_norm = nullptr);
   GlmReplicatedDigest boot_digest_{};
   double boot_digest_ms_ = 0;
   double boot_globals_ms_ = 0;

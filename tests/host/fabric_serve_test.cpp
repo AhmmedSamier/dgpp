@@ -567,7 +567,9 @@ void test_journal_codec() {
   for (const char* schema :
        {"", "{\"type\": \"object\", \"properties\": {\"city\": {\"type\": "
             "\"string\"}, \"n\": {\"enum\": [1, \"a\\\"b\", null]}}, "
-            "\"required\": [\"city\"], \"additionalProperties\": false}"}) {
+            "\"required\": [\"city\"], \"additionalProperties\": false}",
+        R"({"type":"object","properties":{"id":{"$ref":"#/$defs/id"},"score":{"type":"number","multipleOf":0.1}},"$defs":{"id":{"type":"string","pattern":"^[A-Z]+$"}}})",
+        R"({"type":"string","x-dgpp-grammar":{"syntax":"lark","definition":"start: /[A-Z]+/ \"=\" /[0-9]+/"}})"}) {
     for (const auto mode : {dgpp::text::GrammarSpec::Mode::kJson,
                             dgpp::text::GrammarSpec::Mode::kJsonOrTools}) {
       GenerationService::PassEvents ev;
@@ -1389,4 +1391,32 @@ int main() {
     std::fprintf(stderr, "FAIL: %s\n", e.what());
     return 1;
   }
+}
+
+DGPP_TEST(journal_images_roundtrip_and_validation) {
+  dgpp::serve::GenerationService::PassEvents events;
+  dgpp::sched::SchedulerRequest r;
+  r.id = "vision";
+  r.prompt = {42, 154854, 43};
+  r.images.push_back({1, 1, 28, 28, std::vector<uint8_t>(28 * 28 * 3)});
+  for (size_t i = 0; i < r.images[0].rgb.size(); ++i) r.images[0].rgb[i] = static_cast<uint8_t>(i);
+  events.submits.push_back(r);
+  const auto line = dgpp::serve::encode_journal_tick(events);
+  const auto back = dgpp::serve::decode_journal_line(line);
+  require(back.submits[0].images.size() == 1, "image count on peer");
+  const auto& im = back.submits[0].images[0];
+  require(im.offset == 1 && im.tokens == 1 && im.width == 28 && im.height == 28 &&
+              im.rgb == r.images[0].rgb,
+          "image bytes and span roundtrip");
+  auto bad = line;
+  const auto at = bad.find("[1,1,28,28,");
+  require(at != std::string::npos, "wire image found");
+  bad.replace(at, 11, "[1,1,29,28,");
+  bool threw = false;
+  try {
+    (void)dgpp::serve::decode_journal_line(bad);
+  } catch (const std::exception&) {
+    threw = true;
+  }
+  require(threw, "mismatched pixel dimensions rejected");
 }

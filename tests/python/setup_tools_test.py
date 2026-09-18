@@ -268,6 +268,85 @@ class SetupToolsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("No nvcc under CUDAToolkit_ROOT=", result.stderr)
 
+    def test_release_packaging_preserves_testing_build_directory(self):
+        build = self.root / "build-ci"
+        build.mkdir()
+        cache = build / "CMakeCache.txt"
+        for build_type in ("Debug", "RelWithDebInfo", ""):
+            original = f"CMAKE_BUILD_TYPE:STRING={build_type}\n"
+            cache.write_text(original)
+            for arguments in ([], ["--no-build"]):
+                with self.subTest(build_type=build_type, arguments=arguments):
+                    result = subprocess.run(["bash", str(ROOT / "scripts/release.sh"), *arguments],
+                                            env={**self.env, "DGPP_BUILD_DIR": str(build)},
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("release requires a Release build", result.stderr)
+                    self.assertEqual(cache.read_text(), original)
+
+    @unittest.skipUnless(shutil.which("c++") and shutil.which("readelf"), "requires a host compiler and readelf")
+    def test_release_packaging_rejects_debug_artifact(self):
+        build = self.root / "build-release"
+        build.mkdir()
+        (build / "CMakeCache.txt").write_text("CMAKE_BUILD_TYPE:STRING=Release\nDGPP_SANITIZE:STRING=\n")
+        subprocess.run(["c++", "-g", "-x", "c++", "-", "-o", str(build / "dgpp-serve")],
+                       input="int main() { return 0; }\n", text=True, capture_output=True, check=True, timeout=30)
+        result = subprocess.run(["bash", str(ROOT / "scripts/release.sh"), "--no-build"],
+                                env={**self.env, "DGPP_BUILD_DIR": str(build)},
+                                capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release binary contains debug information", result.stderr)
+
+    def test_release_packaging_rejects_sanitizer_build(self):
+        build = self.root / "build-release"
+        build.mkdir()
+        (build / "CMakeCache.txt").write_text("CMAKE_BUILD_TYPE:STRING=Release\nDGPP_SANITIZE:STRING=address\n")
+        result = subprocess.run(["bash", str(ROOT / "scripts/release.sh"), "--no-build"],
+                                env={**self.env, "DGPP_BUILD_DIR": str(build)},
+                                capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release cannot contain sanitizer instrumentation", result.stderr)
+
+    @unittest.skipUnless(shutil.which("cmake") and shutil.which("c++"), "requires CMake and a host compiler")
+    def test_bundled_pcre2_install_requires_only_linked_library(self):
+        # Exercise the actual dependency setup without CUDA or downloads.
+        # Like PCRE2, this fixture installs both its core and POSIX libraries,
+        # but the consumer links/builds only the core library.
+        source = self.root / "release-fixture"
+        dependency = source / "pcre2"
+        dependency.mkdir(parents=True)
+        (dependency / "core.cpp").write_text("int pcre_fixture() { return 0; }\n")
+        (dependency / "posix.cpp").write_text("int unused_posix_fixture() { return 0; }\n")
+        (dependency / "pcre2.h").write_text("int pcre_fixture();\n")
+        (dependency / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.25)\nproject(pcre2 LANGUAGES CXX)\n"
+            "add_library(pcre2-8-static STATIC core.cpp)\n"
+            "add_library(pcre2-posix-static STATIC posix.cpp)\n"
+            "install(TARGETS pcre2-8-static pcre2-posix-static ARCHIVE DESTINATION lib)\n"
+            "install(FILES pcre2.h DESTINATION include)\n")
+        (source / "main.cpp").write_text("int pcre_fixture(); int main() { return pcre_fixture(); }\n")
+        (source / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.25)\nproject(release_fixture LANGUAGES CXX)\n"
+            # Empty defined results force the bundled branch even if the host
+            # has development headers; FetchContent uses our local fixture.
+            'set(PCRE2_INCLUDE_DIR "")\nset(PCRE2_LIBRARY "")\n'
+            f'set(FETCHCONTENT_SOURCE_DIR_PCRE2 "{dependency.as_posix()}")\n'
+            f'include("{(ROOT / "cmake/pcre2.cmake").as_posix()}")\n'
+            "add_executable(consumer main.cpp)\n"
+            "target_link_libraries(consumer PRIVATE dgpp_pcre2)\n"
+            "install(TARGETS consumer RUNTIME DESTINATION bin)\n")
+        build, stage = self.root / "release-build", self.root / "release-stage"
+        commands = (["cmake", "-S", str(source), "-B", str(build)],
+                    ["cmake", "--build", str(build), "--target", "consumer"],
+                    ["cmake", "--install", str(build), "--prefix", str(stage)])
+        for command in commands:
+            result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(list(build.rglob("*posix*.a")), "unused POSIX library must not be required")
+        self.assertEqual({p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file()},
+                         {"bin/consumer"}, "dependency development files must not enter the release")
+        subprocess.run([str(stage / "bin/consumer")], check=True, timeout=10)
+
     def test_discovery_selection_matches_device_order_and_overrides(self):
         rows = [{"device": device, "port": port, "active": active}
                 for device, port, active in (("z", "1", True), ("a", "1", True),

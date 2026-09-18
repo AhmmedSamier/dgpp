@@ -1,0 +1,416 @@
+{
+  "target": "PyTorch 2.14.0+cu130 CUDA BF16 eager attention; TF32 and reduced-precision BF16 reductions disabled",
+  "bounds": {
+    "max_relative_rms": 0.005,
+    "min_cosine": 0.99998
+  },
+  "synthetic": [
+    {
+      "name": "gradient112",
+      "width": 112,
+      "height": 112,
+      "tokens": 16,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0000001192092896,
+      "bitwise_equal": true
+    },
+    {
+      "name": "gradient896",
+      "width": 896,
+      "height": 896,
+      "tokens": 1024,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "gradient",
+      "width": 168,
+      "height": 112,
+      "tokens": 24,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0000001192092896,
+      "bitwise_equal": true
+    },
+    {
+      "name": "quadrants",
+      "width": 224,
+      "height": 224,
+      "tokens": 64,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "bars",
+      "width": 224,
+      "height": 224,
+      "tokens": 64,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    }
+  ],
+  "diagrams": [
+    {
+      "name": "ai2d-0",
+      "width": 616,
+      "height": 476,
+      "tokens": 374,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 0.9999999403953552,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-4",
+      "width": 588,
+      "height": 420,
+      "tokens": 315,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-8",
+      "width": 588,
+      "height": 420,
+      "tokens": 315,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-12",
+      "width": 280,
+      "height": 252,
+      "tokens": 90,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-16",
+      "width": 616,
+      "height": 700,
+      "tokens": 550,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-20",
+      "width": 1092,
+      "height": 728,
+      "tokens": 1014,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-24",
+      "width": 728,
+      "height": 280,
+      "tokens": 260,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-28",
+      "width": 588,
+      "height": 252,
+      "tokens": 189,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-32",
+      "width": 588,
+      "height": 252,
+      "tokens": 189,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-36",
+      "width": 364,
+      "height": 308,
+      "tokens": 143,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0000001192092896,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-40",
+      "width": 616,
+      "height": 532,
+      "tokens": 418,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0000001192092896,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-44",
+      "width": 616,
+      "height": 532,
+      "tokens": 418,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0000001192092896,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-48",
+      "width": 560,
+      "height": 336,
+      "tokens": 240,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-52",
+      "width": 1008,
+      "height": 756,
+      "tokens": 972,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-56",
+      "width": 1008,
+      "height": 756,
+      "tokens": 972,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-60",
+      "width": 868,
+      "height": 616,
+      "tokens": 682,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-64",
+      "width": 868,
+      "height": 616,
+      "tokens": 682,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-68",
+      "width": 868,
+      "height": 616,
+      "tokens": 682,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-72",
+      "width": 364,
+      "height": 140,
+      "tokens": 65,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-76",
+      "width": 364,
+      "height": 140,
+      "tokens": 65,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-80",
+      "width": 504,
+      "height": 364,
+      "tokens": 234,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 0.9999998807907104,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-84",
+      "width": 448,
+      "height": 336,
+      "tokens": 192,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-88",
+      "width": 728,
+      "height": 560,
+      "tokens": 520,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-92",
+      "width": 504,
+      "height": 336,
+      "tokens": 216,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0000001192092896,
+      "bitwise_equal": true
+    },
+    {
+      "name": "ai2d-96",
+      "width": 252,
+      "height": 448,
+      "tokens": 144,
+      "max_abs": 0.0,
+      "relative_rms": 0.0,
+      "cosine": 1.0,
+      "bitwise_equal": true
+    }
+  ],
+  "questions": 25,
+  "distinct_diagrams": 18,
+  "before_eager_relative_rms": {
+    "gradient112": 0.09300336241722107,
+    "gradient": 0.1082107350230217,
+    "quadrants": 0.3749336898326874,
+    "bars": 0.15368923544883728,
+    "ai2d-48": 0.0883345827460289
+  },
+  "server_sha256": {
+    "native": "956ceb82cb922a3987882b6a038ec2d00f2587fe8ce3aa81d80f6f01ec0bafff",
+    "reference_injection": "56b021fa354de180adfb35297796ec4449d62cf43e8a35d707dde722bb51d792"
+  },
+  "corpus_gate": "bitwise equality of all BF16 output bytes",
+  "checker_sha256": "db0fb2efee9d56f2e75269c6480e97d839a8ee7904301c22183c7c369ae02625",
+  "serving": {
+    "config": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.json",
+    "native_run": "build-ci/vision-numerics-final",
+    "reference_run": "build-ci/vision-numerics-reference",
+    "reference_note": "Saved reference-injection run; all 21 injected feature files verified byte-identical to the fresh CUDA eager oracle. Text arithmetic and deployment configuration unchanged.",
+    "synthetic": {
+      "cases": 14,
+      "content_equal": 14,
+      "reasoning_equal": 14,
+      "changed_answers": [],
+      "identical_token_sequences": 14,
+      "aligned_tokens": 65,
+      "mean_logprob_delta": 0.0,
+      "max_abs_logprob_delta": 0.0
+    },
+    "diagrams": {
+      "cases": 25,
+      "content_equal": 25,
+      "reasoning_equal": 25,
+      "changed_answers": [],
+      "identical_token_sequences": 25,
+      "native_correct": 23,
+      "reference_correct": 23,
+      "normalized_equal": 25,
+      "aligned_tokens": 75,
+      "mean_logprob_delta": 0.0,
+      "max_abs_logprob_delta": 0.0
+    },
+    "api_seconds": 11.95,
+    "synthetic_seconds": 8.66,
+    "diagram_seconds": 32.67,
+    "intermediate_before_welford": {
+      "native_run": "build-ci/vision-numerics-native",
+      "synthetic": {
+        "cases": 14,
+        "content_equal": 12,
+        "reasoning_equal": 13,
+        "changed_answers": [
+          {
+            "case": "gradient: What color is at the bottom right corner? Answer only the color name.",
+            "native": "Pink",
+            "reference": "Light pink"
+          },
+          {
+            "case": "gradient: Describe how the colors change across this image in one sentence.",
+            "native": "The image transitions from black in the top-left corner through vivid magenta and pink along the top and right, into bright green at the bottom-left, blending into soft white toward the bottom-right.",
+            "reference": "The image transitions from black in the top-left corner through deep magenta and vibrant pink toward the upper right, while the lower portion shifts from bright green on the left into soft mint and pale pinkish-white toward the bottom right."
+          }
+        ],
+        "identical_token_sequences": 12,
+        "aligned_tokens": 17,
+        "mean_logprob_delta": 0.002498850667058823,
+        "max_abs_logprob_delta": 0.03178978000000002
+      },
+      "diagrams": {
+        "cases": 25,
+        "content_equal": 24,
+        "reasoning_equal": 20,
+        "changed_answers": [
+          {
+            "case": "32",
+            "native": "3",
+            "reference": "**4** \u2014 Organism B feeds on Organism A, so if A disappeared, B would decrease (which would then also affect C and D)."
+          }
+        ],
+        "identical_token_sequences": 20,
+        "native_correct": 22,
+        "reference_correct": 23,
+        "normalized_equal": 24,
+        "aligned_tokens": 40,
+        "mean_logprob_delta": -0.0015170561721099985,
+        "max_abs_logprob_delta": 0.15088273999999996
+      }
+    },
+    "op_stream_md5": {
+      "native": [
+        "32beedccdd629a0f6f5c209b90b0f40f",
+        "32beedccdd629a0f6f5c209b90b0f40f"
+      ],
+      "reference": [
+        "a8709de6b28fa20c19d68b267d023aad",
+        "a8709de6b28fa20c19d68b267d023aad"
+      ],
+      "intermediate_before_welford": [
+        "d84ce30ea4b4f574d8b22c177be98040",
+        "d84ce30ea4b4f574d8b22c177be98040"
+      ]
+    },
+    "all_worlds_stopped": true
+  }
+}

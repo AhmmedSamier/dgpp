@@ -1,6 +1,7 @@
 #include "text/json_grammar.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -22,6 +23,10 @@ std::string json_text_of(const minijson::Value& v) {
 }
 
 namespace {
+
+bool multiple_reachable(const IntegerPrefix& prefix, const IntegerBounds& bounds,
+                        const std::string& step);
+bool multiple_of(std::string_view text, const std::string& step);
 
 uint32_t class_of_text(const std::string& text) {
   if (text.empty()) return 0;
@@ -52,32 +57,65 @@ uint32_t type_bit(std::string_view t, const std::string& path) {
 
 struct Compiler {
   JsonSchema out;
+  const minijson::Value* root = nullptr;
+  std::map<const minijson::Value*, int> compiled;
   std::vector<std::string>* unenforced = nullptr;  // null: the strict compile
+
+  const minijson::Value& resolve(std::string_view ref, const std::string& path) {
+    if (ref.empty() || ref[0] != '#' || (ref.size() > 1 && ref[1] != '/'))
+      throw std::invalid_argument(path + ".$ref: only local JSON Pointer references are supported");
+    const auto* value = root;
+    for (size_t pos = 2; pos <= ref.size() && ref.size() > 1;) {
+      const auto end = ref.find('/', pos);
+      const auto part = ref.substr(pos, end == std::string_view::npos ? ref.size()-pos : end-pos);
+      std::string key;
+      for (size_t i = 0; i < part.size(); ++i) {
+        if (part[i] == '~') {
+          if (++i == part.size() || (part[i] != '0' && part[i] != '1'))
+            throw std::invalid_argument(path + ".$ref: invalid JSON Pointer escape");
+          key += part[i] == '0' ? '~' : '/';
+        } else key += part[i];
+      }
+      if (value && value->is_array()) {
+        size_t index = 0;
+        const auto [end_index, error] = std::from_chars(key.data(), key.data()+key.size(), index);
+        value = error == std::errc{} && end_index == key.data()+key.size() &&
+                (key.size() == 1 || key.front() != '0') && index < value->items().size()
+                    ? &value->items()[index] : nullptr;
+      } else value = value ? value->find(key) : nullptr;
+      if (!value) throw std::invalid_argument(path + ".$ref: unresolved reference");
+      if (end == std::string_view::npos) break;
+      pos = end + 1;
+    }
+    return *value;
+  }
 
   int compile(const minijson::Value& v, const std::string& path) {
     if (!v.is_object())
       throw std::invalid_argument(path + ": a schema must be an object");
+    if (auto it = compiled.find(&v); it != compiled.end()) return it->second;
     const int index = static_cast<int>(out.nodes.size());
+    compiled.emplace(&v, index);
     out.nodes.emplace_back();
     JsonSchemaNode n;
     static const char* kIgnored[] = {"title", "description", "default",
                                      "examples", "$schema", "$comment",
                                      "deprecated", "readOnly", "writeOnly",
-                                     "$id"};
+                                     "$id", "$defs", "definitions"};
     static const char* kSupported[] = {"type", "properties", "required",
                                        "additionalProperties", "items",
                                        "minItems", "maxItems", "enum",
                                        "const", "anyOf", "minimum",
                                        "maximum", "exclusiveMinimum",
-                                       "exclusiveMaximum"};
+                                       "exclusiveMaximum", "$ref", "pattern", "format", "multipleOf",
+                                       "x-dgpp-grammar"};
     // Keywords that narrow a typed value without an automaton behind
     // them: a tool argument's schema tolerates them (recorded, never
     // applied — the value keeps its type); a response_format schema
     // refuses them like any other unsupported one. The integer bounds
     // left this list on 2026-09-07 (compile_bounds decides them).
     static const char* kNarrowing[] = {
-        "multipleOf",    "minLength",     "maxLength",        "pattern",
-        "format",        "minProperties", "maxProperties",    "uniqueItems",
+        "minLength",     "maxLength", "minProperties", "maxProperties", "uniqueItems",
         "minContains",   "maxContains",   "contentEncoding",  "contentMediaType"};
     const auto narrowing = [&](const std::string& key) {
       for (const char* k : kNarrowing)
@@ -99,10 +137,20 @@ struct Compiler {
                                     "additionalProperties, items, minItems, "
                                     "maxItems, enum, const, anyOf, and numeric "
                                     "minimum, maximum, "
-                                    "exclusiveMinimum, exclusiveMaximum)");
+                                    "exclusiveMinimum, exclusiveMaximum, multipleOf, "
+                                    "pattern, format, and local $ref/$defs)");
       if (unenforced != nullptr && narrowing(m.key))
         unenforced->push_back(path + "." + m.key +
                               ": narrows the value; only its type is applied");
+    }
+    if (const auto* ref = v.find("$ref")) {
+      if (!ref->is_string()) throw std::invalid_argument(path + ".$ref: must be a string");
+      for (const auto& m : v.members())
+        if (m.key != "$ref" && !ignored(m.key))
+          throw std::invalid_argument(path + "." + m.key + ": constraints beside $ref are not supported");
+      n.any_of.push_back(compile(resolve(ref->as_string(), path), path + ".$ref"));
+      out.nodes[static_cast<size_t>(index)] = std::move(n);
+      return index;
     }
     if (const minijson::Value* any = v.find("anyOf")) {
       if (!any->is_array() || any->items().empty())
@@ -188,9 +236,10 @@ struct Compiler {
     }
     const auto bound = [&](const char* key, int* into) {
       if (const minijson::Value* b = v.find(key)) {
-        if (!b->is_number() || b->as_int() < 0 || b->as_double() != b->as_int())
+        if (!b->is_number() || !std::isfinite(b->as_double()) || b->as_double() < 0 ||
+            b->as_double() > INT32_MAX || std::floor(b->as_double()) != b->as_double())
           throw std::invalid_argument(path + "." + key +
-                                      ": must be a non-negative integer");
+                                      ": must be an integer in [0, 2147483647]");
         *into = static_cast<int>(b->as_int());
         if (!typed) n.types = JsonSchemaNode::kArray;
       }
@@ -216,10 +265,7 @@ struct Compiler {
       uint32_t classes = 0;
       for (const std::string& t : n.enum_texts) {
         const uint32_t c = class_of_text(t);
-        if (c == JsonSchemaNode::kObject || c == JsonSchemaNode::kArray)
-          throw std::invalid_argument(path + "." + (en ? "enum" : "const") +
-                                      ": object and array values are not "
-                                      "supported");
+        if (c == JsonSchemaNode::kObject || c == JsonSchemaNode::kArray) out.container_enums = true;
         classes |= c;
       }
       if (typed) {
@@ -234,6 +280,50 @@ struct Compiler {
       }
     }
     compile_bounds(v, path, &n);
+    if (const auto* multiple = v.find("multipleOf")) {
+      if (!multiple->is_number() || !(multiple->as_double() > 0) || !std::isfinite(multiple->as_double()))
+        throw std::invalid_argument(path + ".multipleOf: must be a finite positive number");
+      n.multiple_of = json_text_of(*multiple);
+      if (n.bounds.active() && !multiple_reachable(IntegerPrefix{}, n.bounds, n.multiple_of)) {
+        IntegerPrefix negative; negative.negative = true;
+        if (!multiple_reachable(negative, n.bounds, n.multiple_of))
+          throw std::invalid_argument(path + ".multipleOf: no integer multiple satisfies the bounds");
+      }
+    }
+    for (const char* key : {"pattern", "format"}) {
+      if (const auto* constraint = v.find(key)) {
+        if (!constraint->is_string()) throw std::invalid_argument(path + "." + key + ": must be a string");
+        try {
+          n.strings.push_back(std::make_shared<StringConstraint>(std::string(constraint->as_string()),
+            std::string_view(key) == "pattern" ? StringConstraint::Syntax::kPattern : StringConstraint::Syntax::kFormat));
+        } catch (const std::invalid_argument& e) { throw std::invalid_argument(path + "." + key + ": " + e.what()); }
+      }
+    }
+    if (const auto* grammar = v.find("x-dgpp-grammar")) {
+      const auto* syntax = grammar->find("syntax");
+      const auto* definition = grammar->find("definition");
+      if (!syntax || !syntax->is_string() || !definition || !definition->is_string() ||
+          (syntax->as_string() != "regex" && syntax->as_string() != "lark"))
+        throw std::invalid_argument(path + ".x-dgpp-grammar: requires syntax (regex or lark) and definition");
+      try {
+        n.strings.push_back(std::make_shared<StringConstraint>(std::string(definition->as_string()),
+          syntax->as_string() == "regex" ? StringConstraint::Syntax::kRegex : StringConstraint::Syntax::kLark));
+      } catch (const std::invalid_argument& e) { throw std::invalid_argument(path + ".x-dgpp-grammar: " + e.what()); }
+    }
+    if (n.has_enum) {
+      // Filter intersections at compile time. Leaving impossible enum
+      // members live can steer decoding into a prefix with no completion.
+      std::erase_if(n.enum_texts, [&](const std::string& text) {
+        const auto parsed = minijson::parse(text);
+        if (parsed.root.is_number() && !multiple_of(text, n.multiple_of)) return true;
+        if (parsed.root.is_string())
+          for (const auto& constraint : n.strings)
+            if (!constraint->accepts(parsed.root.as_string(), true)) return true;
+        return false;
+      });
+      if (n.enum_texts.empty())
+        throw std::invalid_argument(path + (en ? ".enum" : ".const") + ": no value satisfies the constraints");
+    }
     out.nodes[static_cast<size_t>(index)] = std::move(n);
     return index;
   }
@@ -408,8 +498,20 @@ struct Compiler {
 JsonSchema compile_json_schema(const minijson::Value& schema,
                                std::vector<std::string>* unenforced) {
   Compiler c;
+  c.root = &schema;
   c.unenforced = unenforced;
   c.out.root = c.compile(schema, "schema");
+  // A recursive object/array is productive; a cycle of references/anyOf
+  // alone never consumes a byte and must not recurse in leaves().
+  std::vector<int> state(c.out.nodes.size());
+  const auto visit = [&](const auto& self, int index) -> void {
+    if (state[index] == 1) throw std::invalid_argument("schema.$ref: unproductive reference cycle");
+    if (state[index] == 2) return;
+    state[index] = 1;
+    for (int alt : c.out.nodes[index].any_of) self(self, alt);
+    state[index] = 2;
+  };
+  for (size_t i = 0; i < state.size(); ++i) visit(visit, static_cast<int>(i));
   return std::move(c.out);
 }
 
@@ -1128,6 +1230,25 @@ JsonTables::JsonTables(const GrammarVocab& vocab)
       }
     }
   }
+  // Share token byte prefixes for content-dependent constraints. Once a
+  // prefix is rejected, none of its descendant tokens need simulation.
+  trie_.emplace_back();
+  for (int id = 0; id < vocab_; ++id) {
+    const auto& text = vocab.text(id);
+    if (text.empty()) continue;
+    int node = 0;
+    for (unsigned char b : text) {
+      int child = -1;
+      for (const auto& edge : trie_[node].children) if (edge.first == b) { child = edge.second; break; }
+      if (child < 0) {
+        child = static_cast<int>(trie_.size());
+        trie_[node].children.push_back({b, child});
+        trie_.emplace_back();
+      }
+      node = child;
+    }
+    trie_[node].ids.push_back(id);
+  }
   // The static entries: every existing base, every token, in parallel
   // over the bases (one-time startup work, ~1 s single-threaded).
   struct Job {
@@ -1253,6 +1374,93 @@ bool frame_trivial(const JsonSchemaNode& n) {
          n.items == JsonSchemaNode::kAny && n.min_items == 0 && n.max_items < 0;
 }
 
+// Exact decimal divisibility. Separating powers of 2 and 5 avoids either
+// floating-point rounding or allocating 10^exponent for generated exponents.
+bool multiple_of(std::string_view text, const std::string& step) {
+  if (step.empty()) return true;
+  auto a = DecimalNumber::parse(text), b = DecimalNumber::parse(step);
+  if (a.digits.empty()) return true;
+  int64_t scale = a.exponent - static_cast<int64_t>(a.digits.size()) -
+                  b.exponent + static_cast<int64_t>(b.digits.size());
+  const auto divide = [](std::string* digits, int divisor) {
+    std::string result; int remainder = 0;
+    for (char c : *digits) {
+      int value = remainder * 10 + c - '0';
+      if (!result.empty() || value / divisor) result += static_cast<char>('0' + value / divisor);
+      remainder = value % divisor;
+    }
+    if (!remainder) *digits = result.empty() ? "0" : result;
+    return remainder;
+  };
+  for (int factor : {2, 5}) {
+    int64_t av = 0, bv = 0;
+    while (!divide(&a.digits, factor)) ++av;
+    while (!divide(&b.digits, factor)) ++bv;
+    if (av + scale < bv) return false;
+  }
+  // The remaining divisor is coprime to ten. Decimal long division needs
+  // at most nine subtractions for each input digit.
+  std::string remainder = "0";
+  const auto ge = [](const std::string& x, const std::string& y) {
+    return x.size() != y.size() ? x.size() > y.size() : x >= y;
+  };
+  for (char digit : a.digits) {
+    if (remainder == "0") remainder.clear();
+    remainder += digit;
+    while (ge(remainder, b.digits)) {
+      int borrow = 0;
+      for (size_t i = 0; i < remainder.size(); ++i) {
+        size_t j = remainder.size() - i - 1;
+        int diff = remainder[j] - '0' - borrow -
+                   (i < b.digits.size() ? b.digits[b.digits.size()-i-1]-'0' : 0);
+        borrow = diff < 0; remainder[j] = static_cast<char>('0' + diff + 10 * borrow);
+      }
+      auto first = remainder.find_first_not_of('0');
+      remainder = first == std::string::npos ? "0" : remainder.substr(first);
+    }
+  }
+  return remainder == "0";
+}
+
+bool multiple_reachable(const IntegerPrefix& prefix, const IntegerBounds& bounds,
+                        const std::string& step) {
+  if (step.empty() || !bounds.active()) return true;
+  auto number = DecimalNumber::parse(step);
+  int64_t power = number.exponent - static_cast<int64_t>(number.digits.size()) + 1;
+  if (power < 0) {
+    for (int factor : {2, 5}) {
+      for (int64_t count = 0; count < -power; ++count) {
+        std::string quotient; int rem = 0;
+        for (char c : number.digits) {
+          int v = rem * 10 + c - '0';
+          if (!quotient.empty() || v / factor) quotient += static_cast<char>('0' + v / factor);
+          rem = v % factor;
+        }
+        if (rem) break;
+        number.digits = std::move(quotient);
+      }
+    }
+  } else if (power <= 20) number.digits.append(static_cast<size_t>(power), '0');
+  else number.digits.assign(21, '9');
+  __extension__ using Wide = __int128;
+  Wide divisor = 0;
+  for (char c : number.digits) { divisor = divisor * 10 + c - '0'; if (divisor > (Wide{1} << 64)) break; }
+  Wide lower = bounds.has_min ? bounds.min : INT64_MIN;
+  Wide upper = bounds.has_max ? bounds.max : INT64_MAX;
+  if (prefix.negative) { Wide old = lower; lower = -upper; upper = -old; }
+  lower = std::max(Wide{0}, lower);
+  if (upper < lower || prefix.huge) return false;
+  const auto contains = [&](Wide lo, Wide hi) {
+    lo = std::max(lo, lower); hi = std::min(hi, upper);
+    return lo <= hi && (lo + divisor - 1) / divisor <= hi / divisor;
+  };
+  if (!prefix.digits) return contains(lower, upper);
+  if (!prefix.magnitude) return contains(0, 0);
+  for (Wide scale = 1; Wide{prefix.magnitude} * scale <= upper; scale *= 10)
+    if (contains(Wide{prefix.magnitude} * scale, (Wide{prefix.magnitude} + 1) * scale - 1)) return true;
+  return false;
+}
+
 }  // namespace
 
 bool JsonMachine::sweep() {
@@ -1275,6 +1483,7 @@ bool JsonMachine::done() const {
       const auto& n = schema_->nodes[static_cast<size_t>(c.bound_node)];
       if (n.decimal_bounds.active() ? !c.decimal.within(n.decimal_bounds)
                                     : !c.number.within(n.bounds)) continue;
+      if (!multiple_of(c.decimal.text, n.multiple_of)) continue;
     }
     if (c.target_node >= 0) {
       const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
@@ -1308,6 +1517,8 @@ bool JsonMachine::on_value_start(uint32_t cls, uint8_t b) {
       nc.bound_node = -1;
       nc.number = IntegerPrefix{};
       nc.decimal = DecimalPrefix{};
+      nc.string_node = -1;
+      nc.string_json.clear();
       if (leaf == JsonSchemaNode::kAny) {
         if (cls == JsonSchemaNode::kObject || cls == JsonSchemaNode::kArray) {
           Frame f;
@@ -1335,6 +1546,11 @@ bool JsonMachine::on_value_start(uint32_t cls, uint8_t b) {
         Frame f;
         f.node = leaf;
         f.kind = cls == JsonSchemaNode::kObject ? '{' : '[';
+        if (n.has_enum) {
+          f.enum_targets = std::move(nc.targets);
+          f.enum_pos = 1;  // opening delimiter is this byte, already matched
+          nc.target_node = -1;
+        }
         f.used.assign(n.property_names.size(), false);
         f.value_node = f.kind == '[' ? n.items : JsonSchemaNode::kAny;
         nc.stack.push_back(std::move(f));
@@ -1347,7 +1563,9 @@ bool JsonMachine::on_value_start(uint32_t cls, uint8_t b) {
         if (nc.target_node >= 0) nc.integer_only = targets_integral(nc);
         // The kValueByte of this same byte pushes the first digit (or the
         // sign) and asks whether the range is still reachable.
-        if (n.bounds.active() || n.decimal_bounds.active()) nc.bound_node = leaf;
+        if (n.bounds.active() || n.decimal_bounds.active() || !n.multiple_of.empty()) nc.bound_node = leaf;
+      } else if (cls == JsonSchemaNode::kString && !n.strings.empty()) {
+        nc.string_node = leaf;
       }
       next.push_back(std::move(nc));
     }
@@ -1365,17 +1583,25 @@ bool JsonMachine::on_value_byte(uint8_t b) {
     if (c.bound_node >= 0) {
       const auto& n = schema_->nodes[static_cast<size_t>(c.bound_node)];
       bool reachable;
+      c.decimal.push(b);
       if (n.decimal_bounds.active()) {
-        c.decimal.push(b);
         reachable = c.decimal.can_reach(n.decimal_bounds);
       } else {
         c.number.push(b);
-        reachable = c.number.can_reach(n.bounds);
+        reachable = c.number.can_reach(n.bounds) && multiple_reachable(c.number, n.bounds, n.multiple_of);
       }
       if (!reachable) {
         c.dead = true;
         continue;
       }
+    }
+    if (c.string_node >= 0) {
+      c.string_json += static_cast<char>(b);
+      std::string decoded; bool complete = false;
+      if (!decode_json_string_prefix(c.string_json, &decoded, &complete)) { c.dead = true; continue; }
+      for (const auto& constraint : schema_->nodes[c.string_node].strings)
+        if (!constraint->accepts(decoded, complete)) { c.dead = true; break; }
+      if (c.dead) continue;
     }
     if (c.target_node < 0) continue;
     const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
@@ -1398,6 +1624,13 @@ bool JsonMachine::on_value_byte(uint8_t b) {
 bool JsonMachine::on_value_end() {
   ++epoch_;
   for (Cursor& c : cursors_) {
+    if (c.string_node >= 0) {
+      std::string decoded; bool complete = false;
+      if (!decode_json_string_prefix(c.string_json, &decoded, &complete) || !complete) {
+        c.dead = true;
+        continue;
+      }
+    }
     if (c.bound_node >= 0) {
       const auto& n = schema_->nodes[static_cast<size_t>(c.bound_node)];
       if (n.decimal_bounds.active() ? !c.decimal.within(n.decimal_bounds)
@@ -1405,10 +1638,13 @@ bool JsonMachine::on_value_end() {
         c.dead = true;
         continue;
       }
+      if (!multiple_of(c.decimal.text, n.multiple_of)) { c.dead = true; continue; }
       c.bound_node = -1;
       c.number = IntegerPrefix{};
       c.decimal = DecimalPrefix{};
     }
+    c.string_node = -1;
+    c.string_json.clear();
     if (c.target_node >= 0) {
       const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(c.target_node)];
       bool complete = false;
@@ -1513,6 +1749,12 @@ bool JsonMachine::on_close() {
     const Frame& f = c.stack.back();
     if (f.node != JsonSchemaNode::kAny) {
       const JsonSchemaNode& n = schema_->nodes[static_cast<size_t>(f.node)];
+      if (n.has_enum) {
+        bool complete = false;
+        for (int target : f.enum_targets)
+          complete = complete || n.enum_texts[target].size() == f.enum_pos;
+        if (!complete) c.dead = true;
+      }
       if (f.kind == '{') {
         for (size_t i = 0; i < f.used.size(); ++i)
           if (n.property_required[i] && !f.used[i]) c.dead = true;
@@ -1546,6 +1788,21 @@ bool JsonMachine::apply(const JsonLexer::Step& s, uint8_t b) {
 
 bool JsonMachine::feed(uint8_t b) {
   if (!alive_) return false;
+  // Unlike scalar enum cursors, these stay active through nested JSON
+  // lexer events. The closing delimiter is matched before its frame pops.
+  if (schema_->container_enums) for (auto& cursor : cursors_) {
+    for (auto& frame : cursor.stack) {
+      if (frame.enum_targets.empty()) continue;
+      const auto& targets = schema_->nodes[frame.node].enum_texts;
+      std::erase_if(frame.enum_targets, [&](int target) {
+        return frame.enum_pos >= targets[target].size() ||
+               static_cast<uint8_t>(targets[target][frame.enum_pos]) != b;
+      });
+      ++frame.enum_pos;
+      if (frame.enum_targets.empty()) { cursor.dead = true; break; }
+    }
+  }
+  if (schema_->container_enums && !sweep()) { alive_ = false; return false; }
   const JsonLexer::Step s = lexer_.feed(b);
   if (!s.ok || !apply(s, b)) {
     alive_ = false;
@@ -1621,6 +1878,13 @@ bool JsonMachine::schema_constrains_here() const {
     }
     if (c.target_node >= 0 || c.integer_only || c.bound_node >= 0) return true;
   }
+  return false;
+}
+
+bool JsonMachine::extended_constraints_live() const {
+  for (const auto& n : schema_->nodes)
+    if (!n.strings.empty() || !n.multiple_of.empty() ||
+        (n.has_enum && (n.types & (JsonSchemaNode::kObject | JsonSchemaNode::kArray)))) return true;
   return false;
 }
 
@@ -1718,6 +1982,25 @@ void JsonMachine::mask_brute_force(const GrammarVocab& vocab, TokenMask* out) co
 }
 
 void JsonMachine::mask(const GrammarVocab& vocab, TokenMask* out) const {
+  // Content constraints cannot use the structural representatives. Traverse
+  // the vocabulary trie instead, evaluating each shared byte prefix once.
+  if (extended_constraints_live()) {
+    out->vocab = vocab.vocab_size();
+    out->words.assign(static_cast<size_t>(tables_->words()), 0u);
+    out->allowed = 0;
+    if (!alive_) return;
+    const auto& trie = tables_->token_trie();
+    const auto visit = [&](const auto& self, int node, const JsonMachine& machine) -> void {
+      for (int id : trie[node].ids) set_bit(out->words, id);
+      for (const auto& [byte, child] : trie[node].children) {
+        JsonMachine next = machine;
+        if (next.feed(byte)) self(self, child, next);
+      }
+    };
+    visit(visit, 0, *this);
+    out->allowed = popcount(out->words);
+    return;
+  }
   const int words = tables_->words();
   out->vocab = vocab.vocab_size();
   out->words.assign(static_cast<size_t>(words), 0u);

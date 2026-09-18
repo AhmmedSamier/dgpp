@@ -1,0 +1,8 @@
+old GELU mismatches 1 old hash 0x6e552c6c184f9967
+{
+  "torch": "2.14.0+cu130",
+  "rows": 16,
+  "dim": 4096,
+  "normalized_hash": "0x46d34846b17a3fa4",
+  "gelu_hash": "0x655b7684dac67aec"
+}

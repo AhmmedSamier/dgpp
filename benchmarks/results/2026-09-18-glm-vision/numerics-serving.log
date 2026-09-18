@@ -1,0 +1,6 @@
+running native api
+PASS native api seconds 11.95
+running native synthetic
+PASS native synthetic seconds 8.66
+running native ai2d
+PASS native ai2d seconds 32.67

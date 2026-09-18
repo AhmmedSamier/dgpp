@@ -27,6 +27,8 @@
 #include <vector>
 
 #include "sched/prefix_cache.hpp"
+#include "common/prefill_progress.hpp"
+#include "common/image_input.hpp"
 #include "sample/sampler.hpp"
 #include "text/tool_grammar.hpp"
 
@@ -50,6 +52,12 @@ class SchedulerEngine {
  public:
   virtual ~SchedulerEngine() = default;
 
+  const std::shared_ptr<PrefillMonitor>& prefill_monitor() const { return prefill_monitor_; }
+
+ private:
+  std::shared_ptr<PrefillMonitor> prefill_monitor_ = std::make_shared<PrefillMonitor>();
+
+ public:
   // Engine session slots (== the decode-row bound at real dims: 8).
   virtual int max_concurrent_requests() const = 0;
   // DSA pool meters (a no-DSA model reports an unbounded pool).
@@ -61,6 +69,11 @@ class SchedulerEngine {
   // Opens slot `req` (fresh state), prefills `prompt`, picks the first
   // generated token. Returns a token id in [0, vocab).
   virtual int32_t prefill(int req, const std::vector<int64_t>& prompt) = 0;
+  virtual bool supports_images() const { return false; }
+  virtual int32_t prefill_images(int, const std::vector<int64_t>&, const std::vector<ImageInput>&) {
+    throw std::invalid_argument("this engine does not support image inputs");
+  }
+
   // Opt-in continuation support. One advance executes at most the aligned
   // token budget passed to begin; it returns a first token only on completion.
   virtual int64_t prefill_chunk_alignment() const { return 0; }
@@ -308,6 +321,7 @@ struct SchedulerRequest {
   // The logit bias: the request's entries, applied by the
   // engine on every rank; rides the journal.
   std::vector<LogitBias> logit_bias;
+  std::vector<ImageInput> images;
 };
 
 // The bounded admission queue at capacity (submit() only). A load-shed
@@ -559,7 +573,7 @@ class Scheduler {
     int64_t snap_position = 0;
   };
   bool cache_on(const Request& r) const {
-    return cache_.enabled() && !r.spec.no_cache && !r.cache_off;
+    return cache_.enabled() && r.spec.images.empty() && !r.spec.no_cache && !r.cache_off;
   }
   PrefixPlan plan_prefix(const Request& r) const;
   // The pool block a snapshot's private partial-block copy takes: one when

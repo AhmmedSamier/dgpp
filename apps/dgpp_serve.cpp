@@ -39,6 +39,7 @@
 //     speculative accept test on the device).
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cstdlib>
 #include <chrono>
 #include <cmath>
@@ -90,6 +91,7 @@
 #include "serve/fabric_serve.hpp"
 #include "serve/generation_service.hpp"
 #include "serve/frontend.hpp"
+#include "serve/glm_vision_frontend.hpp"
 #include "serve/http_server.hpp"
 
 namespace fs = std::filesystem;
@@ -136,8 +138,10 @@ void open_ops_file(dgpp::serve::OpStreamObserver* oplog,
 }
 
 struct ServeKnobs {
+  dgpp::serve::FileInputConfig file_inputs;
   uint16_t http_port = 8080;
   std::string http_bind = "127.0.0.1";
+  int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   int max_connections = 64;
   int queue_limit = 64;
   int default_max_tokens = 256;
@@ -711,10 +715,14 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
     tpl.emplace(dgpp::text::ChatTemplate::load((fs::path(ckpt) / "chat_template.jinja").string()));
     template_hash = tpl->source_hash();
     DGPP_LOG_INFO("serve: tokenizer {:#x}, template {:#x} loaded", tok.revision_hash(), template_hash);
-    frontend = std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl);
+    if (family_name == "glm5" && engine->supports_images())
+      frontend = std::make_unique<dgpp::serve::GlmVisionFrontend>(&tok, &*tpl);
+    else
+      frontend = std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl);
   }
 
   dgpp::serve::ServiceConfig scfg;
+  scfg.file_inputs = k.file_inputs;
   scfg.model_id = model_display;
   scfg.default_max_tokens = k.default_max_tokens;
   scfg.queue_limit = k.queue_limit;
@@ -737,7 +745,9 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   dgpp::serve::GenerationService service(scfg, engine, frontend.get(),
                                            std::move(eos));
   if (oplog) service.set_audit_observer(oplog);
-  dgpp::serve::HttpServer http(k.http_port, &service, k.max_connections, k.http_bind);
+  dgpp::serve::HttpServer http(k.http_port, &service, k.max_connections, k.http_bind,
+                             k.http_max_body_bytes);
+  DGPP_LOG_INFO("serve: HTTP request body limit {} bytes", k.http_max_body_bytes);
 
   std::atomic<bool> drained{false};  // the engine thread's drain is done
   // The v1 failure semantics (DESIGN §9 item 6, PLAN M9; built 2026-09-05):
@@ -917,6 +927,8 @@ int main(int argc, char** argv) {
       "    engine knob below; flags given after it override\n"
       "  [--port N (default 18080; rank 0 only)]\n"
       "  [--bind-host IPV4 (default 127.0.0.1; rank 0 only)]\n"
+      "  [--http-max-body-bytes N (default 268435456 = 256 MiB; rank 0 only)]:\n"
+      "    positive serialized request-body byte limit, independent of KV tokens\n"
       "  [--kv-capacity TOKENS (default 8192)]: the KV pool per rank; a prompt\n"
       "    plus its answer must fit. Before anything is allocated the memory\n"
       "    plan (the model, the pool, the activations, the prefix cache) is\n"
@@ -977,12 +989,14 @@ int main(int argc, char** argv) {
   std::string ckpt, model_id, peer;
   uint16_t port = 8080, fabric_port = 29970, journal_port = 29971;
   int64_t kv_capacity = 8192;
+  int64_t http_max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes;
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
+  dgpp::serve::FileInputConfig file_inputs;
   int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
   // The sampled pick's candidate width per rank on the graph engines (the
   // planned 128; narrower forces the exact gather fallback more often —
@@ -1037,6 +1051,7 @@ int main(int argc, char** argv) {
     if (rank > 0 && rank < world) peer = c.nodes[0];
     port = static_cast<uint16_t>(c.http_port);
     http_bind = c.http_bind;
+    http_max_body_bytes = c.http_max_body_bytes;
     if (!c.node_env.empty()) {
       if (rank < 0 || rank >= world) {
         DGPP_LOG_ERROR("rank is outside configured nodes");
@@ -1056,6 +1071,7 @@ int main(int argc, char** argv) {
     prefill = e.prefill;
     embed_sharding = e.embed_sharding;
     default_max_tokens = e.default_max_tokens;
+    file_inputs = e.file_inputs;
     queue_limit = e.queue_limit;
     max_connections = e.max_connections;
     no_eos = e.no_eos;
@@ -1098,6 +1114,14 @@ int main(int argc, char** argv) {
     else if (a == "--checkpoint-dir") ckpt = next();
     else if (a == "--port") port = static_cast<uint16_t>(std::stoi(next()));
     else if (a == "--bind-host") http_bind = next();
+    else if (a == "--http-max-body-bytes") {
+      const std::string value = next();
+      const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), http_max_body_bytes);
+      if (error != std::errc{} || end != value.data() + value.size() || http_max_body_bytes < 1) {
+        DGPP_LOG_ERROR("--http-max-body-bytes must be a positive integer byte count");
+        return 2;
+      }
+    }
     else if (a == "--kv-capacity") kv_capacity = std::stoll(next());
     else if (a == "--kv-dtype") kv_dtype = next();
     else if (a == "--ngram-table") ngram_table = next();
@@ -1664,6 +1688,7 @@ int main(int argc, char** argv) {
     ServeKnobs knobs;
     knobs.http_port = port;
     knobs.http_bind = http_bind;
+    knobs.http_max_body_bytes = http_max_body_bytes;
     knobs.max_connections = max_connections;
     knobs.queue_limit = queue_limit;
     knobs.admission.mode = admission_mode == "grow"
@@ -1673,6 +1698,7 @@ int main(int argc, char** argv) {
     knobs.admission.prefill_budget_tokens = prefill_budget_tokens;
     knobs.admission.prefill_idle_budget_tokens = prefill_idle_budget_tokens;
     knobs.default_max_tokens = default_max_tokens;
+    knobs.file_inputs = file_inputs;
     knobs.sampling_defaults = sampling_defaults;
     knobs.fixed_seed = fixed_seed;
     knobs.reasoning_in_content = reasoning_in_content;

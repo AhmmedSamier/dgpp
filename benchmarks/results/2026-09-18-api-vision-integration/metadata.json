@@ -1,0 +1,17 @@
+{
+  "base_commit": "a5fcb189c28f",
+  "ctest": {
+    "passed": 107,
+    "failed": 0,
+    "seconds": 550.52,
+    "optional_real_tp_subcase": "not enabled"
+  },
+  "release_sha256": "59fc316a0808885444a6cd53ee1ea4a3b2f432494ede72d077cd52153afaf107",
+  "deployment": "deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.json",
+  "world_directory": "build-ci/pre-push-release",
+  "operation_stream_md5": [
+    "26545957fd226300b3f3c8edbc07fefe",
+    "26545957fd226300b3f3c8edbc07fefe"
+  ],
+  "stopped_cleanly": true
+}

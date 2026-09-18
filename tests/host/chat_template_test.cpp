@@ -111,10 +111,11 @@ DGPP_TEST(qwen_reasoning_effort_renders_each_level) {
       (std::filesystem::path(snap) / "tokenizer.json").string());
   const dgpp::serve::TextFrontend frontend(&tok, &tpl);
   std::map<std::string, std::string> renders;
-  for (const std::string effort : {"minimal", "low", "medium", "high", "xhigh"}) {
+  for (const std::string effort : {"minimal", "low", "medium", "high", "xhigh", "max"}) {
+    const auto settings = frontend.reasoning_settings(effort);
     const std::string payload =
         R"({"messages":[{"role":"user","content":"Hi"}],"reasoning_effort":")" +
-        effort + "\"}";
+        *settings.effort + "\"}";
     const auto globals = dgpp::minijson::parse(payload);
     const std::string rendered = frontend.render_chat(globals.root);
     renders[effort] = rendered;
@@ -122,12 +123,12 @@ DGPP_TEST(qwen_reasoning_effort_renders_each_level) {
       require(rendered.find("Reasoning effort is set to") == std::string::npos,
               "Qwen medium uses the template's neutral thinking prompt");
     } else {
-      const std::string expected = effort == "high" ? "xhigh" : effort == "minimal" ? "low" : effort;
+      const std::string expected = effort == "high" || effort == "max" ? "xhigh" : effort == "minimal" ? "low" : effort;
       require(rendered.find("Reasoning effort is set to " + expected + ".") != std::string::npos,
               "Qwen template maps " + effort + " to " + expected);
     }
   }
-  require(renders["high"] == renders["xhigh"] && renders["minimal"] == renders["low"] &&
+  require(renders["max"] == renders["xhigh"] && renders["high"] == renders["xhigh"] && renders["minimal"] == renders["low"] &&
               renders["low"] != renders["medium"] && renders["medium"] != renders["xhigh"],
           "aliases match and the three Qwen reasoning modes differ");
 }
@@ -177,6 +178,71 @@ DGPP_TEST(structured_output_with_tools_over_the_real_tokenizer) {
       require(state.active(), "accepted token preserves the combined grammar");
     }
     require(accepted == doc.second, "structured tools accepted/rejected: " + doc.first);
+  }
+}
+
+DGPP_TEST(reasoning_effort_edge_nativeControlsForEveryCheckpoint) {
+  std::string err;
+  const auto snap = dgpp::hf::model_dir(corpus_model(golden_path(g_argc, g_argv)), &err);
+  if (snap.empty()) { DGPP_LOG_WARN("reasoning checkpoint unavailable ({})", err); std::exit(2); }
+  const auto tok = dgpp::text::Tokenizer::load((std::filesystem::path(snap) / "tokenizer.json").string());
+  const auto tpl = dgpp::text::ChatTemplate::load((std::filesystem::path(snap) / "chat_template.jinja").string());
+  const dgpp::serve::TextFrontend frontend(&tok, &tpl);
+  const bool qwen = frontend.markers().tool_format() == dgpp::text::ToolFormat::kQwenXml;
+  const std::vector<std::string> levels{"minimal","low","medium","high","xhigh","max"};
+  const std::vector<std::string> native = qwen ? std::vector<std::string>{"low","low","medium","xhigh","xhigh","xhigh"} :
+                                               std::vector<std::string>{"low","low","high","high","max","max"};
+  for (size_t i = 0; i < levels.size(); ++i) {
+    const auto settings = frontend.reasoning_settings(levels[i]);
+    require(settings.effort.has_value() == tpl.reads("reasoning_effort"), "effort only emitted for a checkpoint that reads it");
+    if (settings.effort) require(*settings.effort == native[i], "checkpoint receives a native effort level for " + levels[i]);
+    require(settings.enable_thinking.has_value() == tpl.reads("enable_thinking"), "thinking switch matches checkpoint capability");
+    if (settings.enable_thinking) require(*settings.enable_thinking, "positive effort enables switchable thinking");
+  }
+  bool none_rejected = false;
+  try {
+    const auto none = frontend.reasoning_settings("none");
+    require(none.enable_thinking == false && !none.effort, "none disables thinking without a fabricated effort token");
+  } catch (const std::invalid_argument&) { none_rejected = true; }
+  require(none_rejected == !tpl.reads("enable_thinking"), "always-on checkpoint explicitly refuses none");
+}
+
+DGPP_TEST(custom_tools_and_references_over_the_real_tokenizer) {
+  std::string err;
+  const auto snap = dgpp::hf::model_dir(corpus_model(golden_path(g_argc, g_argv)), &err);
+  if (snap.empty()) { DGPP_LOG_WARN("custom tools checkpoint unavailable ({})", err); std::exit(2); }
+  const auto tok = dgpp::text::Tokenizer::load((std::filesystem::path(snap) / "tokenizer.json").string());
+  const auto cfg = eos_and_vocab((std::filesystem::path(snap) / "config.json").string());
+  const auto vocab = dgpp::text::GrammarVocab::from_tokenizer(tok, cfg.eos, cfg.vocab);
+  const auto& mk = vocab.markers();
+  const bool qwen = mk.tool_format() == dgpp::text::ToolFormat::kQwenXml;
+  const auto fn = dgpp::minijson::parse(R"({"name":"assign","strict":true,"parameters":{
+    "type":"object","properties":{"input":{"$ref":"#/$defs/input"}},
+    "required":["input"],"additionalProperties":false,
+    "$defs":{"input":{"type":"string","x-dgpp-grammar":{"syntax":"lark",
+      "definition":"start: /[A-Z]+/ \"=\" /[0-9]+/"}}}}})");
+  dgpp::text::GrammarSpec spec;
+  spec.mode = dgpp::text::GrammarSpec::Mode::kRequired;
+  spec.parallel = false;
+  spec.tools.push_back(dgpp::text::grammar_tool_from_function(fn.root, nullptr));
+  for (const auto& [value, expected] : std::vector<std::pair<std::string, bool>>{
+      {R"("ABC=12")", true}, {R"("\u0041BC=12")", true}, {R"("ABC=x")", false}, {R"("abc=12")", false}}) {
+    const auto call = qwen ? mk.tool_call_open.text + "\n<function=assign>\n<parameter=input>\n" +
+        value + "\n</parameter>\n</function>\n" + mk.tool_call_close.text :
+        mk.tool_call_open.text + "assign" + mk.arg_key_open.text + "input" + mk.arg_key_close.text +
+        mk.arg_value_open.text + value + mk.arg_value_close.text + mk.tool_call_close.text;
+    auto ids = tok.encode(call);
+    ids.push_back(vocab.call_turn_eos());
+    dgpp::text::GrammarState state(&vocab, spec, false);
+    bool accepted = true;
+    for (const auto id : ids) {
+      dgpp::text::TokenMask mask;
+      state.mask(&mask);
+      require(mask.allows(id) == state.allows(id), "custom grammar mask agrees with tokenizer simulation");
+      if (!mask.allows(id)) { accepted = false; break; }
+      state.advance(id);
+    }
+    require(accepted == expected, "custom grammar enforces decoded input: " + value);
   }
 }
 
@@ -903,13 +969,9 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
         R"({"name": "f", "strict": true, "parameters": {"type": "object", "properties": {
               "days": {"type": "integer", "minimum": 0},
               "ratio": {"type": "number", "minimum": 0, "multipleOf": 0.5}}}})");
-    bool threw = false;
-    try {
-      dgpp::text::grammar_tool_from_function(strict.root, nullptr);
-    } catch (const std::invalid_argument& e) {
-      threw = std::string(e.what()).rfind("parameters.properties.ratio.multipleOf", 0) == 0;
-    }
-    require(threw, "strict refuses the keyword by path (numeric bounds pass)");
+    const auto constrained = dgpp::text::grammar_tool_from_function(strict.root, nullptr);
+    require(constrained.args[1].schema.find("multipleOf") != std::string::npos,
+            "strict numeric bounds and multipleOf compile together");
   }
   // A bounded integer argument end to end over the real tokenizer
   // (2026-09-07; the Hermes agent's `timeout`, `limit`, `offset` carry
@@ -1002,6 +1064,14 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
       "\"offset\":{\"type\":\"integer\",\"minimum\":-100,\"maximum\":100}},"
       "\"required\":[\"timeout\"],\"additionalProperties\":false}";
   const Doc docs[] = {
+      {R"({"type":"object","properties":{"id":{"$ref":"#/$defs/id"}},"required":["id"],"additionalProperties":false,"$defs":{"id":{"type":"string","pattern":"^[A-Z]{2}[0-9]{2}$"}}})",
+       R"({"id":"AB12"})", true},
+      {R"({"type":"object","properties":{"email":{"type":"string","format":"email"}},"required":["email"],"additionalProperties":false})",
+       R"({"email":"hello@example.org"})", true},
+      {R"({"type":"object","properties":{"score":{"type":"number","multipleOf":0.1}},"required":["score"],"additionalProperties":false})",
+       R"({"score":0.3})", true},
+      {R"({"type":"object","properties":{"score":{"type":"number","multipleOf":0.1}},"required":["score"],"additionalProperties":false})",
+       R"({"score":0.31})", false},
       {kBounded, "{\"timeout\": 180, \"limit\": 2000, \"offset\": -100}", true},
       {kBounded, "{\"timeout\": 1, \"limit\": 1, \"offset\": 0}", true},
       {kBounded, "{\"timeout\": 0}", false},                     // 0 cannot reach 1

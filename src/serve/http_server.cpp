@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "common/log.hpp"
+#include "serve/json_out.hpp"
 
 namespace dgpp::serve {
 
@@ -25,7 +26,6 @@ namespace {
 
 constexpr int kEpollTimeoutMs = 25;   // the idle() cadence
 constexpr size_t kMaxHeaderBytes = 16 * 1024;
-constexpr size_t kMaxBodyBytes = 4 * 1024 * 1024;
 constexpr size_t kReadChunk = 16 * 1024;
 
 bool set_nonblock(int fd) {
@@ -48,6 +48,7 @@ const char* status_text(int code) {
     case 400: return "Bad Request";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 408: return "Request Timeout";
     case 411: return "Length Required";
     case 413: return "Content Too Large";
     case 431: return "Request Header Fields Too Large";
@@ -184,8 +185,13 @@ bool HttpResponseWriter::client_gone() const {
 // ---------------------------------------------------------------------------
 
 HttpServer::HttpServer(uint16_t port, HttpHandler* handler,
-                       int max_connections, const std::string& bind_host)
-    : port_(port), handler_(handler), max_connections_(max_connections) {
+                       int max_connections, const std::string& bind_host,
+                       int64_t max_body_bytes)
+    : port_(port), handler_(handler), max_connections_(max_connections),
+      max_body_bytes_(static_cast<size_t>(max_body_bytes)) {
+  if (max_body_bytes < 1 ||
+      static_cast<uint64_t>(max_body_bytes) > std::string{}.max_size() - kMaxHeaderBytes)
+    throw std::invalid_argument("http: max_body_bytes must be positive and fit the request buffer");
   if (handler_ == nullptr)
     throw std::invalid_argument("HttpServer: handler must not be null");
   in_addr bind_address{};
@@ -306,11 +312,12 @@ void HttpServer::accept_new() {
       return;
     }
     if (static_cast<int>(conns_.size()) >= max_connections_) {
-      // Shed at the door: a one-line 503, no state allocated.
-      const char busy[] =
-          "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n"
-          "Connection: close\r\n\r\n";
-      (void)!::send(fd, busy, sizeof(busy) - 1, MSG_NOSIGNAL);
+      const std::string body = "{\"error\":{\"message\":\"connection limit reached\","
+                               "\"type\":\"server_error\",\"param\":null,\"code\":\"overloaded\"}}";
+      const std::string busy = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
+                               "Content-Length: " + std::to_string(body.size()) +
+                               "\r\nConnection: close\r\n\r\n" + body;
+      (void)!::send(fd, busy.data(), busy.size(), MSG_NOSIGNAL);
       ::close(fd);
       continue;
     }
@@ -347,8 +354,10 @@ void HttpServer::on_readable(Conn& c) {
     }
     c.in.append(buf, static_cast<size_t>(got));
     if (!process_requests(c)) return;  // error/close already handled
-    if (c.in.size() > kMaxHeaderBytes + kMaxBodyBytes) {
-      queue_response(c, 413, "text/plain", "payload too large", true);
+    if (c.in.size() > kMaxHeaderBytes + max_body_bytes_) {
+      queue_response(c, 413, "text/plain",
+                     "payload too large: http.max_body_bytes is " +
+                         std::to_string(max_body_bytes_) + " bytes", true);
       flush_out(c);
       close_conn(c, false);
       return;
@@ -457,8 +466,10 @@ bool HttpServer::process_requests(Conn& c) {
       close_conn(c, false);
       return false;
     }
-    if (content_length > kMaxBodyBytes) {
-      queue_response(c, 413, "text/plain", "payload too large", true);
+    if (content_length > max_body_bytes_) {
+      queue_response(c, 413, "text/plain",
+                     "payload too large: http.max_body_bytes is " +
+                         std::to_string(max_body_bytes_) + " bytes", true);
       flush_out(c);
       close_conn(c, false);
       return false;
@@ -504,15 +515,26 @@ void HttpServer::on_writable(Conn& c) { flush_out(c); }
 void HttpServer::queue_response(Conn& c, int status,
                                std::string_view content_type,
                                const std::string& body, bool close_after) {
+  std::string payload = body;
+  if (status >= 400 && content_type == "text/plain") {
+    payload = "{\"error\":{\"message\":";
+    append_json_string(&payload, body);
+    payload.append(status < 500 ? ",\"type\":\"invalid_request_error\""
+                                : ",\"type\":\"server_error\"");
+    payload.append(",\"param\":null,\"code\":");
+    payload.append(status == 413 ? "\"request_too_large\"" : "null");
+    payload.append("}}");
+    content_type = "application/json";
+  }
   char head[256];
   const int n = std::snprintf(
       head, sizeof(head),
       "HTTP/1.1 %d %s\r\nContent-Type: %.*s\r\nContent-Length: %zu\r\n"
       "Connection: close\r\n\r\n",
       status, status_text(status), static_cast<int>(content_type.size()),
-      content_type.data(), body.size());
+      content_type.data(), payload.size());
   c.out.append(head, static_cast<size_t>(n));
-  c.out.append(body);
+  c.out.append(payload);
   if (close_after) c.closing = true;
 }
 

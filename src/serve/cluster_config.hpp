@@ -13,11 +13,14 @@
 // serving. See README.md for the schema and deploy/*.example.json for
 // templates. Deployment templates must be resolved before this loader reads them.
 #pragma once
+#include "serve/file_inputs.hpp"
 
 #include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
+
+#include "serve/http_limits.hpp"
 
 namespace dgpp::serve {
 
@@ -28,6 +31,7 @@ struct ClusterConfig {
   std::string release;             // the installed release the launcher runs (launcher-only; empty: the development binary)
   int http_port = 18080;
   std::string http_bind = "127.0.0.1";
+  int64_t http_max_body_bytes = kDefaultHttpMaxBodyBytes;
   // Local paths and device names may differ by rank; no credentials belong here.
   std::vector<std::map<std::string, std::string>> node_env;
   int fabric_port = 29970;
@@ -58,6 +62,7 @@ struct ClusterConfig {
     // row, the parity mode).
     std::string prefill = "bounded";
     int default_max_tokens = 256;
+    FileInputConfig file_inputs;
     int queue_limit = 64;
     int max_connections = 64;
     bool no_eos = false;

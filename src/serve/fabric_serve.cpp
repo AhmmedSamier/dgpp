@@ -5,12 +5,14 @@
 #include <cstdlib>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
 #include <utility>
 
+#include "common/base64.hpp"
 #include "common/log.hpp"
 #include "kernels/latent_format.hpp"
 #include "loaders/minijson.hpp"
@@ -156,6 +158,29 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out += "]";
       }
       if (r.no_cache) out += ",\"nc\":1";
+      if (!r.images.empty()) {
+        validate_image_inputs(r.images, r.prompt.size());
+        out += ",\"images\":[";
+        for (size_t j = 0; j < r.images.size(); ++j) {
+          const auto& im = r.images[j];
+          if (j) out += ',';
+          out += '[';
+          append_json_int(&out, im.offset);
+          out += ',';
+          append_json_int(&out, im.tokens);
+          out += ',';
+          append_json_int(&out, im.width);
+          out += ',';
+          append_json_int(&out, im.height);
+          out += ',';
+          append_json_string(
+              &out, encode_base64(std::string_view(reinterpret_cast<const char*>(im.rgb.data()),
+                                                   im.rgb.size())));
+          out += ']';
+        }
+        out += ']';
+      }
+
       // The logit bias: [id, float bits] pairs.
       if (!r.logit_bias.empty()) {
         out += ",\"lb\":[";
@@ -607,6 +632,30 @@ JournalRecord decode_journal_line(std::string_view line) {
           throw std::runtime_error("journal: submit '" + r.id +
                                    "' has a bad no-cache flag");
         r.no_cache = nc->as_int() == 1;
+      }
+
+      if (const auto* images = item.find("images")) {
+        if (!images->is_array() || images->items().size() > kMaxInputImages)
+          throw std::runtime_error("journal: invalid image list");
+        for (const auto& entry : images->items()) {
+          if (!entry.is_array() || entry.items().size() != 5)
+            throw std::runtime_error("journal: invalid image entry");
+          const auto& a = entry.items();
+          for (int j = 0; j < 4; ++j)
+            if (!a[j].is_number() || !std::isfinite(a[j].as_double()) || a[j].as_double() < 0 ||
+                a[j].as_double() > INT32_MAX || a[j].as_double() != std::floor(a[j].as_double()))
+              throw std::runtime_error("journal: invalid image dimension or span");
+          if (!a[4].is_string()) throw std::runtime_error("journal: invalid image pixels");
+          ImageInput im;
+          im.offset = a[0].as_int();
+          im.tokens = static_cast<int>(a[1].as_int());
+          im.width = static_cast<int>(a[2].as_int());
+          im.height = static_cast<int>(a[3].as_int());
+          const auto bytes = decode_base64(a[4].as_string(), kMaxImagePixels * 3);
+          im.rgb.assign(bytes.begin(), bytes.end());
+          r.images.push_back(std::move(im));
+        }
+        validate_image_inputs(r.images, r.prompt.size());
       }
       if (const dgpp::minijson::Value* lb = item.find("lb")) {
         if (!lb->is_array())

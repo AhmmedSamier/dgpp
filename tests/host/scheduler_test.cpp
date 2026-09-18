@@ -481,10 +481,15 @@ DGPP_TEST(scheduler_chunked_prefill_bounds_work_and_keeps_decode_running) {
             "in-progress prefill tokens are accounted once");
     require(sched.meters().prompt_tokens == sched.meters().prompt_tokens_computed,
             "logical and computed progress advance together; cold chunks are never negative cache hits");
+    const auto progress = engine.prefill_monitor()->snapshot();
+    require(progress.size() == 1 && progress[0].id == "long" && progress[0].total == 11 &&
+                progress[0].processed == 4 * (tick + 1) && progress[0].cached == 0,
+            "live monitor follows resumable chunk progress without reporting generated tokens");
   }
   sched.tick();
   require(sched.meters().tokens_generated > 5 && sched.meters().prefilling == 0,
           "only the final chunk publishes the first token");
+  require(engine.prefill_monitor()->snapshot().empty(), "completed prefill leaves no live entry");
   sched.run_to_completion();
   require(sched.find("long")->generated == std::vector<int64_t>({20, 21, 22}), "chunked transcript");
   require(sched.meters().prompt_tokens_computed == 13 && sched.meters().pool_blocks_in_use == 0,
@@ -539,6 +544,7 @@ DGPP_TEST(scheduler_chunked_prefill_cancel_at_each_yield_releases_cache_and_rese
     require(sched.meters().prefix_entries == 0, "an unfinished prefill does not publish a cache entry");
     require(sched.cancel("cancel"), "in-progress prefill is cancellable");
     sched.tick();
+    require(engine.prefill_monitor()->snapshot().empty(), "cancelled prefill leaves no live entry");
     require(!sched.has_pending() && sched.meters().pool_blocks_in_use == 0 && sched.meters().records == 0,
             "cancellation releases snapshot, blocks and compacted request record");
     request.id = "reuse";
@@ -2367,4 +2373,48 @@ DGPP_TEST(scheduler_logitBias_armsTheEngineAfterTheGrammarAndIsRefusedWithoutSup
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   return dgpp::test::run_all();
+}
+
+DGPP_TEST(scheduler_images_bypass_token_cache_and_grouping) {
+  class ImageEngine : public GroupFakeEngine {
+   public:
+    ImageEngine() : GroupFakeEngine(2, 100, 4, 32, 64) {}
+    int calls = 0;
+    bool supports_images() const override { return true; }
+    int32_t prefill_images(int req, const std::vector<int64_t>& p,
+                           const std::vector<dgpp::ImageInput>& images) override {
+      require(images.size() == 1 && images[0].rgb[0] == 123, "image reaches prefill intact");
+      ++calls;
+      return FakeEngine::prefill(req, p);
+    }
+  } engine;
+  engine.set_prefix_arena(4, 1, 2);
+  engine.arm(0, {10}, 1);
+  engine.arm(0, {11}, 1);
+  Scheduler sched(&engine, {});
+  SchedulerRequest r;
+  r.id = "image-one";
+  r.prompt = {1, 2, 3, 4, 5, 6};
+  r.images.push_back({1, 1, 28, 28, std::vector<uint8_t>(28 * 28 * 3, 123)});
+  sched.submit(r);
+  r.id = "image-two";
+  sched.submit(r);
+  while (sched.tick()) {
+  }
+  require(engine.calls == 2, "both images take their own prefill");
+  require(engine.op_stream().find("PG:") == std::string::npos,
+          "images excluded from grouped text prefill");
+  require(engine.op_stream().find("N:") == std::string::npos &&
+              engine.op_stream().find("X:") == std::string::npos &&
+              engine.op_stream().find("RS:") == std::string::npos,
+          "no image state stored or attached in token-only cache");
+  FakeEngine text(1, 100, 4);
+  Scheduler text_sched(&text, {});
+  bool threw = false;
+  try {
+    text_sched.submit(r);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  require(threw, "text engine cannot silently discard image data");
 }

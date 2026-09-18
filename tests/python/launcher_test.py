@@ -190,6 +190,25 @@ class LauncherScanTest(unittest.TestCase):
         with patch.dict(os.environ, self.environ, clear=True):
             return Cluster(SimpleNamespace(), namespace=str(namespace))
 
+    def test_binary_selection_defaults_to_release_with_explicit_testing_override(self):
+        namespace = self.namespace("selection", "org/model")
+        env = {key: value for key, value in self.environ.items() if key != "DGPP_BUILD_DIR"}
+        cases = (
+            ({}, {}, ROOT / "build-release/dgpp-serve", False),
+            ({"DGPP_BUILD_DIR": "build-ci"}, {}, ROOT / "build-ci/dgpp-serve", False),
+            ({}, {"release": "0.1.0"}, self.root / "releases/dgpp-0.1.0/bin/dgpp-serve", True),
+            ({"DGPP_BUILD_DIR": "build-ci"}, {"release": "0.1.0"},
+             self.root / "releases/dgpp-0.1.0/bin/dgpp-serve", True),
+            ({}, {"release": "0.1.0", "bin": str(ROOT / "build-ci/dgpp-serve")},
+             ROOT / "build-ci/dgpp-serve", False),
+        )
+        for overrides, arguments, expected, installed in cases:
+            with self.subTest(overrides=overrides, arguments=arguments), \
+                    patch.dict(os.environ, {**env, **overrides}, clear=True):
+                cluster = Cluster(SimpleNamespace(**arguments), namespace=str(namespace))
+                self.assertEqual(cluster.bin, str(expected))
+                self.assertEqual(cluster.installed, installed)
+
     def test_unknown_peer_is_failure_and_scan_still_stops_other_deployment(self):
         unknown = self.namespace("aaaa", "org/unknown")
         self.cluster(unknown, peers=1)

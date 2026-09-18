@@ -45,14 +45,18 @@ DGPP_TEST(safetensors_mmap_reader_roundtrip) {
 
   const dgpp::TensorInfo* a = sf->find("a_f32");
   if (!a || a->dtype != dgpp::DType::F32) throw std::runtime_error("a meta");
-  const float* af = static_cast<const float*>(a->data);
+  // This fixture deliberately has an unpadded JSON header. Read its byte
+  // storage without imposing the alignment of float/uint16_t on the mapping.
+  float af[6];
+  std::memcpy(af, a->data, sizeof(af));
   if (af[0] != 1.f || af[1] != -2.5f || af[5] != 0.125f)
     throw std::runtime_error("a data");
 
   const dgpp::TensorInfo& b = sf->at("b_bf16");
   if (b.dtype != dgpp::DType::BF16 || b.numel() != 4)
     throw std::runtime_error("b meta");
-  const uint16_t* bb = static_cast<const uint16_t*>(b.data);
+  uint16_t bb[4];
+  std::memcpy(bb, b.data, sizeof(bb));
   if (bb[2] != dgpp::float_to_bf16_bits(1.0f))
     throw std::runtime_error("b data");
 

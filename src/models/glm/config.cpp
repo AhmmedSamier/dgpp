@@ -521,7 +521,10 @@ GlmTextConfig GlmTextConfig::from_json_file(const std::string& path) {
   if (!tc)
     throw std::runtime_error(
         "config " + path + ": missing text_config object");
-  return parse(*tc, parsed.root.find("quantization_config"));
+  auto config = parse(*tc, parsed.root.find("quantization_config"));
+  if (const auto* vision = parsed.root.find("vision_config"); vision && !vision->is_null())
+    config.vision = GlmVisionConfig::parse(parsed.root, config.hidden_size);
+  return config;
 }
 
 int GlmTextConfig::num_kda_layers() const {

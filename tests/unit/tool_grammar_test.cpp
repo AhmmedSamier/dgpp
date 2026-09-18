@@ -677,7 +677,7 @@ DGPP_TEST(tool_grammar_jsonModeSpellsOneTextThenEos) {
     threw = true;
   }
   require(threw, "unparsable schema text refused");
-  bad.json_schema = "{\"type\":\"string\",\"pattern\":\"^a\"}";
+  bad.json_schema = "{\"type\":\"string\",\"pattern\":\"[\"}";
   threw = false;
   try {
     GrammarState b(&v, bad, false);
@@ -930,14 +930,19 @@ DGPP_TEST(tool_grammar_closedKeysOnceAndStrictRequiredKeysGateTheClose) {
     const dgpp::minijson::ParseResult def = dgpp::minijson::parse(
         R"({"name":"get_weather","strict":true,"parameters":{"type":"object",)"
         R"("properties":{"city":{"type":"string"},"days":{"type":"integer"}},)"
-        R"("required":["city","nope","city"],"additionalProperties":false}})");
+        R"("required":["city","city"],"additionalProperties":false}})");
     std::vector<std::string> warnings;
     const GrammarTool t = dgpp::text::grammar_tool_from_function(def.root, &warnings);
     require(t.strict && t.constrain_keys &&
                 t.required_keys == std::vector<std::string>{"city"},
             "derived: strict, closed, the declared required key once");
-    require(warnings.size() == 1 && warnings[0].find("nope") != std::string::npos,
-            "derived: an undeclared required key warns under strict");
+    require(warnings.empty(), "valid strict schema has no warnings");
+    bool invalid_required = false;
+    try {
+      const auto bad = dgpp::minijson::parse(R"({"name":"f","strict":true,"parameters":{"type":"object","properties":{},"required":["missing"]}})");
+      dgpp::text::grammar_tool_from_function(bad.root, nullptr);
+    } catch (const std::invalid_argument&) { invalid_required = true; }
+    require(invalid_required, "strict tools reject unsatisfiable required keys");
     const dgpp::minijson::ParseResult lax = dgpp::minijson::parse(
         R"({"name":"f","parameters":{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}})");
     const GrammarTool u = dgpp::text::grammar_tool_from_function(lax.root, nullptr);

@@ -22,6 +22,7 @@ char** g_argv = nullptr;
 #include "loaders/minijson.hpp"
 #include "text/dsv41_prompt.hpp"
 #include "text/tokenizer.hpp"
+#include "serve/frontend.hpp"
 
 namespace {
 
@@ -78,6 +79,17 @@ DGPP_TEST(dsv41_prompt_differential_goldens) {
   }
   const dgpp::text::Tokenizer tok =
       dgpp::text::Tokenizer::load((std::filesystem::path(snap) / "tokenizer.json").string());
+  const dgpp::serve::Dsv41Frontend frontend(&tok);
+  for (const auto& [effort, budget] : std::vector<std::pair<std::string,int>>{
+      {"minimal",25},{"low",50},{"medium",62},{"high",75},{"xhigh",100},{"max",100}}) {
+    const auto settings = frontend.reasoning_settings(effort);
+    const std::string payload = R"({"messages":[{"role":"user","content":"Hi"}],"reasoning_effort":")" + *settings.effort + "\"}";
+    const auto globals = dgpp::minijson::parse(payload);
+    require(frontend.render_chat(globals.root).find("Reasoning Effort: " + std::to_string(budget) + " ") != std::string::npos,
+            "API effort maps to native DeepSeek budget: " + effort);
+  }
+  require(frontend.reasoning_settings("none").enable_thinking == false && !frontend.reasoning_settings("none").effort,
+          "DeepSeek none uses native chat mode");
   {
     char got[32];
     std::snprintf(got, sizeof(got), "%016llx", static_cast<unsigned long long>(tok.revision_hash()));

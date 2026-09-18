@@ -1,0 +1,40 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-ci
+Test project /home/stephen/workspace/dgpp/build-ci
+    Start  84: bf16_gemv_test
+1/2 Test  #84: bf16_gemv_test ...................   Passed   16.06 sec
+    Start 106: glm_vision_test
+2/2 Test #106: glm_vision_test ..................   Passed    0.85 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Label Time Summary:
+gpu    =  16.91 sec*proc (2 tests)
+
+Total Test time (real) =  16.92 sec
+
+106/107 Testing: glm_vision_test
+106/107 Test: glm_vision_test
+Command: "/home/stephen/workspace/dgpp/build-ci/glm_vision_test"
+Directory: /home/stephen/workspace/dgpp/build-ci
+"glm_vision_test" start time: Sep 18 20:37 UTC
+Output:
+----------------------------------------------------------
+[ OK ] vision_layernorm_gelu_cuda_reference
+[ OK ] vision_softmax_bf16_score_boundary_and_sizes
+[ OK ] vision_batched_gemm_strides_tiles_and_plan_identity
+[ OK ] vision_query_tiles_preserve_full_matrix_reduction
+[ OK ] vision_bias_single_rounding_and_cached_pointer
+[ OK ] vision_unbiased_linear_preserves_fp32_partial_sums
+[ OK ] vision_attention_tile_scatter
+7 tests, 0 failed
+<end of output>
+Test time =   0.85 sec
+----------------------------------------------------------
+Test Passed.
+"glm_vision_test" end time: Sep 18 20:37 UTC
+"glm_vision_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 18 20:37 UTC
+
+gpu =  16.91 sec*proc

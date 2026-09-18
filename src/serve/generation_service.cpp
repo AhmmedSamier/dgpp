@@ -1,4 +1,5 @@
 #include "serve/generation_service.hpp"
+#include "serve/image_inputs.hpp"
 #include "text/dsv41_prompt.hpp"
 
 #include <mutex>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <limits>
 #include <utility>
 
 #include "common/log.hpp"
@@ -47,6 +49,29 @@ void log_tool_schema_note(bool warn, size_t index, const std::string& text) {
 using dgpp::sched::Scheduler;
 using dgpp::sched::SchedulerRequest;
 using dgpp::text::ToolCallParser;
+
+const minijson::Value* optional_field(const minijson::Value& body, std::string_view name) {
+  const auto* v = body.find(name);
+  return v && !v->is_null() ? v : nullptr;
+}
+
+bool bounded_integer(const minijson::Value& v, int64_t lo, int64_t hi) {
+  if (v.kind() == minijson::Value::Kind::Int) return v.as_int() >= lo && v.as_int() <= hi;
+  // Bounds here fit exactly in double; int64 seeds are checked separately.
+  const double x = v.as_double();
+  return v.is_number() && std::isfinite(x) && x == std::floor(x) &&
+         x >= static_cast<double>(lo) && x <= static_cast<double>(hi);
+}
+
+bool api_name_ok(const minijson::Value* value) {
+  if (!value || !value->is_string()) return false;
+  const auto name = value->as_string();
+  return !name.empty() && name.size() <= 64 &&
+         std::all_of(name.begin(), name.end(), [](unsigned char c) {
+           return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-';
+         });
+}
 
 // OpenAI finish_reason from the scheduler's retire reason. A turn that
 // ended naturally after at least one parsed tool call is "tool_calls";
@@ -158,21 +183,22 @@ std::string tool_call_id(uint64_t tag, int index) {
 // name, empty arguments) and one carrying the complete arguments string
 // — a client that concatenates argument fragments sees one fragment.
 std::string delta_tool_call_start(int index, const std::string& call_id,
-                                  const std::string& name) {
+                                  const std::string& name, bool custom = false) {
   std::string out = "{\"tool_calls\":[{\"index\":";
   append_json_int(&out, index);
   out.append(",\"id\":");
   append_json_string(&out, call_id);
-  out.append(",\"type\":\"function\",\"function\":{\"name\":");
+  out.append(custom ? ",\"type\":\"custom\",\"custom\":{\"name\":" :
+                      ",\"type\":\"function\",\"function\":{\"name\":");
   append_json_string(&out, name);
-  out.append(",\"arguments\":\"\"}}]}");
+  out.append(custom ? ",\"input\":\"\"}}]}" : ",\"arguments\":\"\"}}]}");
   return out;
 }
 
-std::string delta_tool_call_arguments(int index, const std::string& args) {
+std::string delta_tool_call_arguments(int index, const std::string& args, bool custom = false) {
   std::string out = "{\"tool_calls\":[{\"index\":";
   append_json_int(&out, index);
-  out.append(",\"function\":{\"arguments\":");
+  out.append(custom ? ",\"custom\":{\"input\":" : ",\"function\":{\"arguments\":");
   append_json_string(&out, args);
   out.append("}}]}");
   return out;
@@ -257,7 +283,7 @@ std::string text_chunk_preamble_fields(const std::string& id, int64_t created,
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, id);
-  out.append(",\"object\":\"text_completion.chunk\",\"created\":");
+  out.append(",\"object\":\"text_completion\",\"created\":");
   append_json_int(&out, created);
   out.append(",\"model\":");
   append_json_string(&out, model);
@@ -340,7 +366,7 @@ std::string model_object(const std::string& model_id, int64_t created,
                          bool sampling_available,
                          const sample::Params& d, bool tools_available,
                          bool constraints_available,
-                         bool reasoning_in_content) {
+                         bool reasoning_in_content, const ModelFrontend& frontend, bool images_available) {
   std::string out;
   out.append("{\"id\":");
   append_json_string(&out, model_id);
@@ -368,7 +394,26 @@ std::string model_object(const std::string& model_id, int64_t created,
   out.append(constraints_available ? "true" : "false");
   out.append("},\"reasoning\":{\"in_content\":");
   out.append(reasoning_in_content ? "true" : "false");
-  out.append("}}");
+  out.append(",\"effort_mapping\":{");
+  bool first = true;
+  for (const char* effort : {"none", "minimal", "low", "medium", "high", "xhigh", "max"}) {
+    try {
+      auto settings = frontend.reasoning_settings(effort);
+      if (!first) out += ',';
+      first = false;
+      append_json_string(&out, effort); out += ":{";
+      if (settings.enable_thinking) {
+        out += "\"enable_thinking\":"; out += *settings.enable_thinking ? "true" : "false";
+        if (settings.effort) out += ',';
+      }
+      if (settings.effort) { out += "\"reasoning_effort\":"; append_json_string(&out, *settings.effort); }
+      out += '}';
+    } catch (const std::invalid_argument&) { /* unsupported efforts are absent */ }
+  }
+  out += '}';
+  out.append("},\"input_modalities\":[\"text\"");
+  if (images_available) out.append(",\"image\"");
+  out.append("]}");
   return out;
 }
 
@@ -395,6 +440,7 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
                                      const ModelFrontend* frontend,
                                      std::vector<int64_t> eos_token_ids)
     : cfg_(cfg),
+      file_inputs_(cfg.file_inputs),
       engine_(engine),
       frontend_(frontend),
       markers_(frontend != nullptr ? frontend->markers()
@@ -407,6 +453,8 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
     throw std::invalid_argument("GenerationService: frontend required");
   if (cfg_.model_id.empty())
     throw std::invalid_argument("GenerationService: model_id required");
+  meters_ = sched_.meters();
+  prefix_stats_ = engine_->prefix_engine_stats();
   boundary_ids_ = frontend_->boundary_token_ids();
   std::sort(boundary_ids_.begin(), boundary_ids_.end());
   boundary_ids_.erase(std::unique(boundary_ids_.begin(), boundary_ids_.end()),
@@ -511,7 +559,7 @@ std::string StopScanner::finish() {
 }
 
 namespace {
-constexpr int kMaxChoices = 8;           // n's bound
+constexpr int kMaxChoices = 128;         // OpenAI's schema bound; queue capacity still applies
 constexpr size_t kMaxLogitBias = 1024;   // logit_bias entries
 }  // namespace
 
@@ -520,9 +568,7 @@ bool GenerationService::parse_n(const dgpp::minijson::Value& body,
   *n = 1;
   const dgpp::minijson::Value* v = body.find("n");
   if (v == nullptr || v->is_null()) return true;
-  const bool integral =
-      v->is_number() && v->as_double(0.0) == static_cast<double>(v->as_int(0));
-  if (!integral || v->as_int(0) < 1 || v->as_int(0) > kMaxChoices) {
+  if (!bounded_integer(*v, 1, kMaxChoices)) {
     respond_error(w, 400,
                   "n must be an integer in [1, " + std::to_string(kMaxChoices) +
                       "]",
@@ -643,7 +689,7 @@ bool GenerationService::parse_sampling(const dgpp::minijson::Value& body,
   const auto field = [&](const char* name, double lo, double hi,
                          bool integer, const auto& apply) -> bool {
     const dgpp::minijson::Value* v = body.find(name);
-    if (v == nullptr) return true;
+    if (v == nullptr || v->is_null()) return true;
     const double x = v->is_number() ? v->as_double(0.0) : 0.0;
     if (!v->is_number() || !std::isfinite(x) ||
         (integer && x != std::floor(x))) {
@@ -680,13 +726,22 @@ bool GenerationService::parse_sampling(const dgpp::minijson::Value& body,
       !field("presence_penalty", -2.0, 2.0, false,
              [&](double x) { p.presence_penalty = static_cast<float>(x); }) ||
       !field("frequency_penalty", -2.0, 2.0, false,
-             [&](double x) { p.frequency_penalty = static_cast<float>(x); }) ||
-      !field("seed", -9223372036854775808.0, 9223372036854775807.0, true,
-             [&](double) {
-               has_seed = true;
-               *seed = static_cast<uint64_t>(body.find("seed")->as_int(0));
-             }))
+             [&](double x) { p.frequency_penalty = static_cast<float>(x); }))
     return false;
+  if (const auto* s = optional_field(body, "seed")) {
+    if (s->kind() != minijson::Value::Kind::Int) {
+      respond_error(w, 400, "seed must be a signed 64-bit integer", "invalid_request_error", "seed");
+      return false;
+    }
+    has_seed = true;
+    *seed = static_cast<uint64_t>(s->as_int());
+  }
+  // A zero-mass nucleus retains the most likely token. Express it through
+  // the sampler's existing one-candidate path without changing GPU numerics.
+  if (p.top_p == 0.0f) {
+    p.top_p = 1.0f;
+    p.top_k = 1;
+  }
   try {
     sample::validate_params(p);
   } catch (const std::invalid_argument& e) {
@@ -733,9 +788,62 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
 
   // ---- tools --------------------------------------------------------------
   const Value* tools = body.find("tools");
+  Value normalized_tools;
+  if (tools && tools->is_array()) {
+    std::vector<Value> entries;
+    for (size_t i = 0; i < tools->items().size(); ++i) {
+      const auto& tool = tools->items()[i];
+      const auto* type = tool.find("type");
+      if (!type || !type->is_string() || type->as_string() != "custom") { entries.push_back(tool); continue; }
+      const std::string where = "tools[" + std::to_string(i) + "].custom";
+      const auto* custom = tool.find("custom");
+      if (!custom || !custom->is_object()) return refuse("custom must be an object", where);
+      const auto* name = custom->find("name");
+      if (!api_name_ok(name)) return refuse("custom.name must contain 1-64 letters, digits, underscores or dashes", where + ".name");
+      std::string description;
+      if (const auto* d = custom->find("description")) {
+        if (!d->is_string()) return refuse("description must be a string", where + ".description");
+        description = d->as_string();
+      }
+      description += "\nPass the complete free-form tool input in the input parameter, encoded as a JSON string literal.";
+      std::vector<Member> schema{{"type", Value::make_string("string")}};
+      if (const auto* format = custom->find("format")) {
+        const auto* kind = format->find("type");
+        if (!format->is_object() || !kind || !kind->is_string() ||
+            (kind->as_string() != "text" && kind->as_string() != "grammar"))
+          return refuse("custom format.type must be text or grammar", where + ".format.type");
+        if (kind->as_string() == "grammar") {
+          if (!constraints_available()) return refuse("custom grammars require constrained decoding", where + ".format", "constrained_decoding_unsupported");
+          const auto* grammar = format->find("grammar");
+          if (!grammar || !grammar->is_object()) return refuse("grammar must be an object", where + ".format.grammar");
+          schema.push_back({"x-dgpp-grammar", *grammar});
+          try { dgpp::text::compile_json_schema(Value::make_object(schema)); }
+          catch (const std::invalid_argument& e) { return refuse(e.what(), where + ".format.grammar", "invalid_grammar"); }
+          description += "\nInput grammar: " + dgpp::text::json_text_of(*grammar);
+        }
+      }
+      plan->custom_tools.emplace_back(name->as_string());
+      entries.push_back(Value::make_object({{"type", Value::make_string("function")},
+        {"function", Value::make_object({{"name", *name},
+          {"description", Value::make_owned_string(std::move(description))},
+          {"strict", Value::make_bool(constraints_available())},
+          {"parameters", Value::make_object({{"type", Value::make_string("object")},
+            {"properties", Value::make_object({{"input", Value::make_object({
+              {"anyOf", Value::make_array({Value::make_object(std::move(schema))})}})}})},
+            {"required", Value::make_array({Value::make_string("input")})},
+            {"additionalProperties", Value::make_bool(false)}})}})}}));
+    }
+    normalized_tools = Value::make_array(std::move(entries));
+    tools = &normalized_tools;
+  }
+  const auto is_custom = [&](std::string_view name) {
+    return std::find(plan->custom_tools.begin(), plan->custom_tools.end(), name) != plan->custom_tools.end();
+  };
+  Value allowed_tools;
   std::vector<std::string> tool_names;
   if (tools != nullptr) {
     if (!tools->is_array()) return refuse("tools must be an array", "tools");
+    if (tools->items().size() > 128) return refuse("at most 128 tools are supported", "tools");
     for (size_t i = 0; i < tools->items().size(); ++i) {
       const Value& t = tools->items()[i];
       const std::string where = "tools[" + std::to_string(i) + "]";
@@ -750,11 +858,21 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
                       where + ".function");
       const Value& def = fn != nullptr ? *fn : t;
       const Value* name = def.find("name");
-      if (name == nullptr || !name->is_string() || name->as_string().empty())
+      if (!api_name_ok(name))
         return refuse(where + ".function.name is required and must be a "
-                      "non-empty string",
+                      "1-64 character string of letters, digits, underscores or dashes",
                       where + ".function.name");
       const Value* params = def.find("parameters");
+      if (std::find(tool_names.begin(), tool_names.end(), name->as_string()) != tool_names.end())
+        return refuse("tool names must be unique", where + ".function.name");
+      if (const auto* strict = optional_field(def, "strict")) {
+        if (!strict->is_bool()) return refuse("strict must be a boolean", where + ".function.strict");
+        if (strict->as_bool() && !constraints_available())
+          return refuse("strict tools require constrained decoding", where + ".function.strict",
+                        "constrained_decoding_unsupported");
+      }
+      if (const auto* description = def.find("description"))
+        if (!description->is_string()) return refuse("description must be a string", where + ".function.description");
       if (params != nullptr && !params->is_object())
         return refuse(where + ".function.parameters must be an object (a "
                       "JSON schema)",
@@ -774,7 +892,7 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
   Choice choice = Choice::kAuto;
   std::string named;
   if (const Value* tc = body.find("tool_choice")) {
-    if (!have_tools)
+    if (!have_tools && !(tc->is_string() && tc->as_string() == "none"))
       return refuse("tool_choice requires a non-empty tools array",
                     "tool_choice");
     if (tc->is_string()) {
@@ -792,23 +910,58 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
                       "tool_choice");
     } else if (tc->is_object()) {
       const Value* type = tc->find("type");
-      if (type != nullptr &&
-          (!type->is_string() || type->as_string() != "function"))
-        return refuse("tool_choice.type must be \"function\"",
-                      "tool_choice.type");
-      const Value* fn = tc->find("function");
-      const Value* name = fn != nullptr && fn->is_object() ? fn->find("name")
-                                                            : nullptr;
-      if (name == nullptr || !name->is_string())
-        return refuse("tool_choice.function.name must be a string",
-                      "tool_choice.function.name");
-      named = std::string(name->as_string());
-      if (std::find(tool_names.begin(), tool_names.end(), named) ==
-          tool_names.end())
-        return refuse("tool_choice names '" + named +
-                          "', which is not one of the request's tools",
-                      "tool_choice.function.name");
-      choice = Choice::kNamed;
+      if (type && type->is_string() && type->as_string() == "allowed_tools") {
+        if (!constraints_available())
+          return refuse("allowed_tools requires constrained decoding", "tool_choice",
+                        "constrained_decoding_unsupported");
+        const auto* allowed = tc->find("allowed_tools");
+        if (!allowed || !allowed->is_object())
+          return refuse("allowed_tools must be an object", "tool_choice.allowed_tools");
+        const auto* mode = allowed->find("mode");
+        const auto* subset = allowed->find("tools");
+        if (!mode || !mode->is_string() || (mode->as_string() != "auto" && mode->as_string() != "required"))
+          return refuse("allowed_tools.mode must be auto or required", "tool_choice.allowed_tools.mode");
+        if (!subset || !subset->is_array() || subset->items().empty())
+          return refuse("allowed_tools.tools must be a non-empty array", "tool_choice.allowed_tools.tools");
+        std::vector<Value> selected;
+        std::unordered_set<std::string> seen;
+        for (const auto& ref : subset->items()) {
+          const auto* kind = ref.find("type");
+          const bool custom = kind && kind->is_string() && kind->as_string() == "custom";
+          const auto* fn = ref.find(custom ? "custom" : "function");
+          const auto* name = fn && fn->is_object() ? fn->find("name") : nullptr;
+          if (!kind || !kind->is_string() || (!custom && kind->as_string() != "function") || !name || !name->is_string() || is_custom(name->as_string()) != custom)
+            return refuse("allowed tool must name a declared function or custom tool of the same type", "tool_choice.allowed_tools.tools");
+          const std::string key(name->as_string());
+          const auto pos = std::find(tool_names.begin(), tool_names.end(), key);
+          if (pos == tool_names.end() || !seen.insert(key).second)
+            return refuse("allowed tools must name distinct declared functions", "tool_choice.allowed_tools.tools");
+          selected.push_back(tools->items()[static_cast<size_t>(pos - tool_names.begin())]);
+        }
+        allowed_tools = Value::make_array(std::move(selected));
+        tools = &allowed_tools;
+        choice = mode->as_string() == "required" ? Choice::kRequired : Choice::kAuto;
+      } else {
+        const bool custom = type && type->is_string() && type->as_string() == "custom";
+        if (type != nullptr &&
+            (!type->is_string() || (type->as_string() != "function" && !custom)))
+          return refuse("tool_choice.type must be function or custom",
+                        "tool_choice.type");
+        const Value* fn = tc->find(custom ? "custom" : "function");
+        const std::string name_param = custom ? "tool_choice.custom.name" : "tool_choice.function.name";
+        const Value* name = fn != nullptr && fn->is_object() ? fn->find("name")
+                                                              : nullptr;
+        if (name == nullptr || !name->is_string())
+          return refuse(name_param + " must be a string", name_param);
+        named = std::string(name->as_string());
+        if (std::find(tool_names.begin(), tool_names.end(), named) ==
+            tool_names.end())
+          return refuse("tool_choice names '" + named +
+                            "', which is not one of the request's tools",
+                        name_param);
+        if (is_custom(named) != custom) return refuse("tool_choice type does not match the declared tool", "tool_choice.type");
+        choice = Choice::kNamed;
+      }
     } else {
       return refuse("tool_choice must be a string or an object", "tool_choice");
     }
@@ -817,8 +970,6 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
   // ---- parallel_tool_calls ----------------------------------------------
   bool parallel = true;
   if (const Value* ptc = body.find("parallel_tool_calls")) {
-    if (!have_tools)
-      return refuse("parallel_tool_calls requires tools", "parallel_tool_calls");
     if (!ptc->is_bool())
       return refuse("parallel_tool_calls must be a boolean",
                     "parallel_tool_calls");
@@ -837,7 +988,9 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
         // well-formed — a known name, the closed keys, typed values.
         g.mode = have_tools ? GrammarSpec::Mode::kAuto : GrammarSpec::Mode::kNone;
         break;
-      case Choice::kNone: g.mode = GrammarSpec::Mode::kForbidCalls; break;
+      case Choice::kNone:
+        g.mode = have_tools ? GrammarSpec::Mode::kForbidCalls : GrammarSpec::Mode::kNone;
+        break;
       case Choice::kRequired: g.mode = GrammarSpec::Mode::kRequired; break;
       case Choice::kNamed:
         g.mode = GrammarSpec::Mode::kNamed;
@@ -945,9 +1098,9 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
           return refuse("response_format.json_schema must be an object",
                         "response_format.json_schema");
         const Value* name = js->find("name");
-        if (name == nullptr || !name->is_string() || name->as_string().empty())
-          return refuse("response_format.json_schema.name must be a non-empty "
-                        "string",
+        if (!api_name_ok(name))
+          return refuse("response_format.json_schema.name must contain 1-64 "
+                        "letters, digits, underscores or dashes",
                         "response_format.json_schema.name");
         const Value* strict_v = js->find("strict");
         if (strict_v != nullptr && !strict_v->is_bool() && !strict_v->is_null())
@@ -994,12 +1147,12 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
   // ---- reasoning_effort / chat_template_kwargs --------------------------
   std::optional<std::string> effort;
   const auto effort_ok = [](std::string_view s) {
-    return s == "minimal" || s == "low" || s == "medium" || s == "high" || s == "xhigh";
+    return s == "none" || s == "minimal" || s == "low" || s == "medium" ||
+           s == "high" || s == "xhigh" || s == "max";
   };
-  if (const Value* re = body.find("reasoning_effort")) {
+  if (const Value* re = optional_field(body, "reasoning_effort")) {
     if (!re->is_string() || !effort_ok(re->as_string()))
-      return refuse("reasoning_effort must be one of \"minimal\", \"low\", "
-                    "\"medium\", \"high\", \"xhigh\"",
+      return refuse("reasoning_effort must be none, minimal, low, medium, high, xhigh or max",
                     "reasoning_effort");
     effort = std::string(re->as_string());
   }
@@ -1008,15 +1161,16 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
     if (!kw->is_object())
       return refuse("chat_template_kwargs must be an object",
                     "chat_template_kwargs");
+    std::unordered_set<std::string> seen_kwargs;
     for (const Member& m : kw->members()) {
       const std::string where = "chat_template_kwargs." + m.key;
+      if (!seen_kwargs.insert(m.key).second) return refuse("duplicate template parameter", where);
       if (m.key == "clear_thinking") {
         if (!m.value.is_bool()) return refuse(where + " must be a boolean", where);
         extra.push_back(m);
       } else if (m.key == "reasoning_effort") {
         if (!m.value.is_string() || !effort_ok(m.value.as_string()))
-          return refuse(where + " must be one of \"minimal\", \"low\", "
-                        "\"medium\", \"high\", \"xhigh\"",
+          return refuse(where + " must be none, minimal, low, medium, high, xhigh or max",
                         where);
         if (effort.has_value() && *effort != m.value.as_string())
           return refuse("reasoning_effort and chat_template_kwargs."
@@ -1056,6 +1210,33 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
     }
   }
 
+  // Resolve effort once, before rendering, including conflicts with either
+  // spelling of the explicit thinking switch. Do not silently override it.
+  std::optional<bool> thinking;
+  for (const auto& m : extra) {
+    if (m.key != "enable_thinking") continue;
+    if (thinking && *thinking != m.value.as_bool())
+      return refuse("thinking and enable_thinking disagree", "chat_template_kwargs.thinking");
+    thinking = m.value.as_bool();
+  }
+  if (thinking) {
+    std::erase_if(extra, [](const auto& m) { return m.key == "enable_thinking"; });
+    extra.push_back({"enable_thinking", Value::make_bool(*thinking)});
+  }
+  if (effort) {
+    ModelFrontend::ReasoningSettings settings;
+    try { settings = frontend_->reasoning_settings(*effort); }
+    catch (const std::invalid_argument& e) {
+      return refuse(e.what(), "reasoning_effort", "unsupported_reasoning_effort");
+    }
+    if (thinking && ((*effort == "none") == *thinking))
+      return refuse("reasoning_effort conflicts with the explicit thinking switch",
+                    "chat_template_kwargs.enable_thinking");
+    if (settings.enable_thinking && !thinking)
+      extra.push_back({"enable_thinking", Value::make_bool(*settings.enable_thinking)});
+    effort = settings.effort;
+  }
+
   // ---- messages: validate and normalize ----------------------------------
   std::vector<Value> msgs;
   msgs.reserve(messages->items().size());
@@ -1067,13 +1248,56 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
     if (role == nullptr || !role->is_string())
       return refuse(where + ".role is required and must be a string",
                     where + ".role");
-    const std::string_view r = role->as_string();
+    std::string_view r = role->as_string();
+    // These checkpoints use system for application/developer instructions.
+    if (r == "developer") r = "system";
     if (r != "system" && r != "user" && r != "assistant" && r != "tool")
       return refuse(where + ".role '" + std::string(r) +
-                        "' is not one this template renders (system, user, "
+                        "' is not one this template renders (developer, system, user, "
                         "assistant, tool)",
                     where + ".role");
     const Value* content = msg.find("content");
+    Value normalized_content;
+    for (const char* field : {"audio", "function_call"})
+      if (optional_field(msg, field))
+        return refuse("this message feature is not supported", where + "." + field, "unsupported_parameter");
+    if (const auto* name = msg.find("name"))
+      if (!name->is_string()) return refuse("name must be a string", where + ".name");
+    const auto* refusal = optional_field(msg, "refusal");
+    if (refusal && (r != "assistant" || !refusal->is_string()))
+      return refuse("refusal must be a string on an assistant message", where + ".refusal");
+    if ((!content || content->is_null()) && refusal) content = refusal;
+    if (content && content->is_array() && r != "tool") {
+      std::vector<Value> parts;
+      for (size_t j = 0; j < content->items().size(); ++j) {
+        const auto& part = content->items()[j];
+        const std::string at = where + ".content[" + std::to_string(j) + "]";
+        const auto* type = part.find("type");
+        if (!part.is_object() || !type || !type->is_string())
+          return refuse("content part must be an object with a type", at);
+        if (part.find("prompt_cache_breakpoint"))
+          return refuse("explicit cache breakpoints are not supported", at + ".prompt_cache_breakpoint", "unsupported_parameter");
+        if (type->as_string() == "image_url") {
+          if (r != "user") return refuse("images require a user message", at + ".type", "unsupported_content_type");
+          if (!frontend_->supports_images() || !engine_->supports_images())
+            return refuse("the served model does not support image inputs", at + ".type", "unsupported_content_type");
+          const auto* image = part.find("image_url");
+          if (!image || !image->is_object()) return refuse("image_url must be an object", at + ".image_url");
+          parts.push_back(part);
+          continue;
+        }
+        const bool is_refusal = r == "assistant" && type->as_string() == "refusal";
+        if (is_refusal && content->items().size() != 1)
+          return refuse("a refusal part must be the only content part", at);
+        if (type->as_string() != "text" && !is_refusal)
+          return refuse("this model accepts text content only", at + ".type", "unsupported_content_type");
+        const auto* text = part.find(is_refusal ? "refusal" : "text");
+        if (!text || !text->is_string()) return refuse("content part text must be a string", at);
+        parts.push_back(is_refusal ? Value::make_object({{"type", Value::make_string("text")}, {"text", *text}}) : part);
+      }
+      normalized_content = Value::make_array(std::move(parts));
+      content = &normalized_content;
+    }
     std::vector<Member> members;
     members.reserve(msg.members().size() + 1);
     bool content_written = false;
@@ -1085,9 +1309,25 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
           return refuse(where + ".tool_calls must be an array",
                         where + ".tool_calls");
         for (size_t j = 0; j < tcs->items().size(); ++j) {
-          const Value& tc = tcs->items()[j];
+          Value tc = tcs->items()[j];
           const std::string at = where + ".tool_calls[" + std::to_string(j) + "]";
           if (!tc.is_object()) return refuse(at + " must be an object", at);
+          if (const auto* type = tc.find("type"); type && type->is_string() && type->as_string() == "custom") {
+            const auto* id = tc.find("id");
+            if (!id || !id->is_string() || id->as_string().empty())
+              return refuse("custom tool history requires a nonempty call id", at + ".id");
+            const auto* custom = tc.find("custom");
+            const auto* name = custom ? custom->find("name") : nullptr;
+            const auto* input = custom ? custom->find("input") : nullptr;
+            if (!custom || !custom->is_object() || !api_name_ok(name) || !input || !input->is_string())
+              return refuse("custom tool history requires name and string input", at + ".custom");
+            std::vector<Member> fields;
+            if (const auto* id = tc.find("id")) fields.push_back({"id", *id});
+            fields.push_back({"type", Value::make_string("function")});
+            fields.push_back({"function", Value::make_object({{"name", *name},
+              {"arguments", Value::make_object({{"input", *input}})}})});
+            tc = Value::make_object(std::move(fields));
+          }
           const Value* type = tc.find("type");
           if (type != nullptr &&
               (!type->is_string() || type->as_string() != "function"))
@@ -1179,18 +1419,50 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
                       "string, or the template's list of outputs / tool "
                       "references",
                       where + ".content");
-      if (const Value* id = msg.find("tool_call_id"))
-        if (!id->is_string())
+      bool standard_content = content->is_string();
+      if (content->is_array()) {
+        std::string text;
+        bool all_text = true;
+        for (const auto& part : content->items()) {
+          if (!part.is_object()) return refuse("tool content parts must be objects", where + ".content");
+          if (const auto* type = part.find("type")) {
+            if (!type->is_string() || type->as_string() != "text")
+              return refuse("this model accepts text content only", where + ".content", "unsupported_content_type");
+            const auto* value = part.find("text");
+            if (!value || !value->is_string()) return refuse("text must be a string", where + ".content");
+            if (part.find("prompt_cache_breakpoint"))
+              return refuse("explicit cache breakpoints are not supported", where + ".content", "unsupported_parameter");
+            text += value->as_string();
+          } else {
+            // Preserve the existing template-specific output/reference list.
+            all_text = false;
+          }
+        }
+        if (all_text) {
+          normalized_content = Value::make_owned_string(std::move(text));
+          content = &normalized_content;
+          standard_content = true;
+        }
+      }
+      const Value* id = msg.find("tool_call_id");
+      if ((standard_content && !id) || (id && !id->is_string()))
           return refuse(where + ".tool_call_id must be a string",
                         where + ".tool_call_id");
-      for (const Member& m : msg.members()) members.push_back(m);
+      for (const Member& m : msg.members())
+        members.push_back(m.key == "content" ? Member{"content", *content} : m);
     } else {
       if (content == nullptr || !content_form_ok(*content))
         return refuse(where + ".content is required and must be a string or "
                       "an array of content parts",
                       where + ".content");
-      for (const Member& m : msg.members()) members.push_back(m);
+      for (const Member& m : msg.members())
+        members.push_back(m.key == "content" ? Member{"content", *content} : m);
     }
+    for (auto& m : members)
+      if (m.key == "role" && role->as_string() == "developer") m.value = Value::make_string("system");
+    if (r == "assistant" && refusal)
+      for (auto& m : members)
+        if (m.key == "content" && (!msg.find("content") || msg.find("content")->is_null())) m.value = *content;
     msgs.push_back(Value::make_object(std::move(members)));
   }
 
@@ -1217,7 +1489,11 @@ void GenerationService::respond_error(HttpResponseWriter& w, int status,
                                       const std::string& message,
                                       const std::string& type,
                                       const std::string& param,
-                                      const std::string& code) const {
+                                      const std::string& code) {
+  if (status >= 400 && status < 500) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++stats_.rejects_bad;
+  }
   std::string body = "{\"error\":{\"message\":";
   append_json_string(&body, message);
   body.append(",\"type\":");
@@ -1243,15 +1519,20 @@ void GenerationService::respond_error(HttpResponseWriter& w, int status,
 void GenerationService::handle(const HttpRequest& req,
                                HttpResponseWriter& w) {
   const std::string& p = req.path;
+  if (p == "/v1/files" || p.starts_with("/v1/files/")) {
+    enqueue_file_work(req, w, false);
+    return;
+  }
   if (p == "/v1/chat/completions" || p == "/v1/completions") {
     if (req.method != "POST") {
       respond_error(w, 405, req.method + " is not allowed here; use POST",
                     "invalid_request_error");
       return;
     }
-    if (p == "/v1/chat/completions")
-      route_chat_completions(req, w);
-    else
+    if (p == "/v1/chat/completions") {
+      if (FileInputs::needed(req)) enqueue_file_work(req, w, true);
+      else route_chat_completions(req, w);
+    } else
       route_completions(req, w);
     return;
   }
@@ -1265,10 +1546,18 @@ void GenerationService::handle(const HttpRequest& req,
     return;
   }
   if (p == "/health") {
+    if (req.method != "GET") {
+      respond_error(w, 405, "use GET for health", "invalid_request_error");
+      return;
+    }
     route_health(w);
     return;
   }
   if (p == "/metrics" || p == "/v1/metrics") {
+    if (req.method != "GET") {
+      respond_error(w, 405, "use GET for metrics", "invalid_request_error");
+      return;
+    }
     route_metrics(w);
     return;
   }
@@ -1298,6 +1587,108 @@ void GenerationService::route_health(HttpResponseWriter& w) const {
 // ---------------------------------------------------------------------------
 // POST /v1/chat/completions
 // ---------------------------------------------------------------------------
+
+bool GenerationService::validate_chat_parameters(const minijson::Value& body, HttpResponseWriter& w) {
+  const auto refuse = [&](const std::string& param, const std::string& message,
+                          const std::string& code = "unsupported_parameter") {
+    respond_error(w, 400, message, "invalid_request_error", param, code);
+    return false;
+  };
+  // Compatible clients forward provider-specific options (for example
+  // OpenCode's preserveThinking) at the top level. Preserve our historical
+  // tolerance for unknown extensions; they do not become template globals
+  // or generation settings. Reject known unsupported API features explicitly,
+  // and validate the fields we implement in their respective parsers.
+  const std::unordered_set<std::string> unsupported = {
+      "web_search_options", "functions", "function_call", "prompt_cache_options"};
+  const std::unordered_set<std::string> nullable_unsupported = {
+      "audio", "prediction", "moderation", "prompt_cache_key", "prompt_cache_retention", "verbosity"};
+  std::unordered_set<std::string> seen;
+  for (const auto& m : body.members()) {
+    if (!seen.insert(m.key).second) return refuse(m.key, "duplicate request parameter", "invalid_parameter");
+    if (unsupported.count(m.key) || (nullable_unsupported.count(m.key) && !m.value.is_null()))
+      return refuse(m.key, "'" + m.key + "' is not supported by this server");
+  }
+  if (const auto* v = optional_field(body, "store")) {
+    if (!v->is_bool()) return refuse("store", "store must be a boolean", "invalid_parameter");
+    if (v->as_bool()) return refuse("store", "stored completions are not supported; use store: false");
+  }
+  if (const auto* v = optional_field(body, "service_tier")) {
+    if (!v->is_string() || (v->as_string() != "auto" && v->as_string() != "default"))
+      return refuse("service_tier", "this server supports only the auto and default service tiers");
+  }
+  if (const auto* v = optional_field(body, "modalities")) {
+    if (!v->is_array() || v->items().size() != 1 || !v->items()[0].is_string() ||
+        v->items()[0].as_string() != "text")
+      return refuse("modalities", "this model supports only modalities: [\"text\"]");
+  }
+  const auto characters = [](std::string_view s) {
+    return std::count_if(s.begin(), s.end(), [](unsigned char c) { return (c & 0xc0) != 0x80; });
+  };
+  for (const char* name : {"user", "safety_identifier"}) {
+    if (const auto* v = optional_field(body, name)) {
+      if (!v->is_string() || (std::string_view(name) == "safety_identifier" && characters(v->as_string()) > 64))
+        return refuse(name, std::string(name) + " must be a string (safety_identifier: at most 64 characters)",
+                      "invalid_parameter");
+    }
+  }
+  if (const auto* v = optional_field(body, "metadata")) {
+    if (!v->is_object() || v->members().size() > 16)
+      return refuse("metadata", "metadata must be an object with at most 16 entries", "invalid_parameter");
+    for (const auto& m : v->members())
+      if (characters(m.key) > 64 || !m.value.is_string() || characters(m.value.as_string()) > 512)
+        return refuse("metadata", "metadata keys are limited to 64 characters and string values to 512 characters",
+                      "invalid_parameter");
+  }
+  return true;
+}
+
+bool GenerationService::parse_max_tokens(const minijson::Value& body, HttpResponseWriter& w,
+                                         int* steps, bool chat) {
+  const auto* modern = chat ? optional_field(body, "max_completion_tokens") : nullptr;
+  const auto* legacy = optional_field(body, "max_tokens");
+  if (modern && legacy) {
+    respond_error(w, 400, "max_tokens and max_completion_tokens are aliases; send one",
+                  "invalid_request_error", "max_tokens");
+    return false;
+  }
+  const auto* limit = modern ? modern : legacy;
+  *steps = cfg_.default_max_tokens;
+  if (!limit) return true;
+  if (!bounded_integer(*limit, 1, std::numeric_limits<int>::max())) {
+    respond_error(w, 400, "token limit must be an integer in [1, 2147483647]",
+                  "invalid_request_error", modern ? "max_completion_tokens" : "max_tokens");
+    return false;
+  }
+  *steps = static_cast<int>(limit->as_int());
+  return true;
+}
+
+bool GenerationService::parse_stream_options(const minijson::Value& body, HttpResponseWriter& w,
+                                              bool stream, bool* usage, bool* obfuscation) {
+  *usage = false;
+  *obfuscation = true;
+  const auto* options = optional_field(body, "stream_options");
+  if (!options) return true;
+  if (!options->is_object() || !stream) {
+    respond_error(w, 400, "stream_options must be an object and requires stream: true",
+                  "invalid_request_error", "stream_options");
+    return false;
+  }
+  for (const auto& m : options->members()) {
+    if (m.key != "include_usage" && m.key != "include_obfuscation") {
+      respond_error(w, 400, "unsupported stream option", "invalid_request_error",
+                    "stream_options." + m.key, "unsupported_parameter");
+      return false;
+    }
+    if (!m.value.is_bool()) {
+      respond_error(w, 400, "stream option must be a boolean", "invalid_request_error", "stream_options." + m.key);
+      return false;
+    }
+    (m.key == "include_usage" ? *usage : *obfuscation) = m.value.as_bool();
+  }
+  return true;
+}
 
 void GenerationService::route_chat_completions(const HttpRequest& req,
                                               HttpResponseWriter& w) {
@@ -1331,54 +1722,19 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     return;
   }
 
-  // max_completion_tokens (preferred) / max_tokens (legacy) — >= 1.
-  const dgpp::minijson::Value* max_new =
-      body.find("max_completion_tokens");
-  const dgpp::minijson::Value* max_old = body.find("max_tokens");
-  const dgpp::minijson::Value* max_tokens = max_new != nullptr ? max_new : max_old;
-  if (max_new != nullptr && max_old != nullptr && max_new != max_old) {
-    respond_error(w, 400,
-                  "max_tokens and max_completion_tokens are aliases; send one",
-                  "invalid_request_error", "max_tokens");
-    return;
-  }
-  int steps = cfg_.default_max_tokens;
-  if (max_tokens != nullptr) {
-    if (!max_tokens->is_number() || max_tokens->as_int(0) < 1) {
-      respond_error(w, 400, "max_tokens must be a number >= 1",
-                    "invalid_request_error", "max_tokens");
-      return;
-    }
-    steps = static_cast<int>(max_tokens->as_int(0));
-  }
-
-  // stream + stream_options.include_usage.
+  if (!validate_chat_parameters(body, w)) return;
+  int steps = 0;
+  if (!parse_max_tokens(body, w, &steps, true)) return;
   bool stream = false;
-  const dgpp::minijson::Value* sv = body.find("stream");
-  if (sv != nullptr) {
+  if (const auto* sv = optional_field(body, "stream")) {
     if (!sv->is_bool()) {
-      respond_error(w, 400, "stream must be a boolean",
-                    "invalid_request_error", "stream");
+      respond_error(w, 400, "stream must be a boolean", "invalid_request_error", "stream");
       return;
     }
-    stream = sv->as_bool(false);
+    stream = sv->as_bool();
   }
-  bool include_usage = false;
-  const dgpp::minijson::Value* so = body.find("stream_options");
-  if (so != nullptr) {
-    if (!so->is_object()) {
-      respond_error(w, 400, "stream_options must be an object",
-                    "invalid_request_error", "stream_options");
-      return;
-    }
-    const dgpp::minijson::Value* iu = so->find("include_usage");
-    if (iu != nullptr && !iu->is_bool()) {
-      respond_error(w, 400, "stream_options.include_usage must be a boolean",
-                    "invalid_request_error", "stream_options.include_usage");
-      return;
-    }
-    include_usage = iu != nullptr && iu->as_bool(false);
-  }
+  bool include_usage = false, include_obfuscation = true;
+  if (!parse_stream_options(body, w, stream, &include_usage, &include_obfuscation)) return;
   // prefix_cache (ours, M7): false opts the request out of the prefix
   // cache — no attach, no snapshot of its state.
   bool prefix_cache = true;
@@ -1400,8 +1756,8 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   // logprobs (bool) + top_logprobs (0..20): exact from the same sampler.
   int logprobs = -1;
   {
-    const dgpp::minijson::Value* lp = body.find("logprobs");
-    const dgpp::minijson::Value* top = body.find("top_logprobs");
+    const dgpp::minijson::Value* lp = optional_field(body, "logprobs");
+    const dgpp::minijson::Value* top = optional_field(body, "top_logprobs");
     if (lp != nullptr && !lp->is_bool()) {
       respond_error(w, 400, "logprobs must be a boolean",
                     "invalid_request_error", "logprobs");
@@ -1434,25 +1790,6 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     }
   }
 
-  // The unsupported-field checks for everything not implemented in v1.
-  const char* unsupported[] = {
-      "user",       "store",       "metadata",   "service_tier",
-      "prediction", "audio",       "modalities", "web_search_options",
-      "functions",  "function_call",
-  };
-  for (const char* param : unsupported) {
-    if (body.find(param) != nullptr) {
-      respond_error(
-          w, 400,
-          std::string("'") + param +
-              "' is not supported in this server version — accepted "
-              "parameters behave exactly as specified, and unimplemented "
-              "ones are refused rather than ignored",
-          "invalid_request_error", param, "unsupported_parameter");
-      return;
-    }
-  }
-
   // n, stop and logit_bias.
   int n = 1;
   std::vector<std::string> stops;
@@ -1469,10 +1806,15 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   // constrained tool_choice changes nothing here — the grammar rides the
   // scheduler request and masks the pick on every rank (M6 6g).
   std::vector<int64_t> prompt;
-  std::string rendered;
+  std::vector<ImageInput> images;
   try {
-    rendered = frontend_->render_chat(plan.globals);
-    prompt = frontend_->encode_text(rendered);
+    auto input = frontend_->prepare_chat(plan.globals);
+    prompt = std::move(input.tokens);
+    images = std::move(input.images);
+    validate_image_inputs(images, prompt.size());
+  } catch (const ImageInputError& e) {
+    respond_error(w, 400, e.what(), "invalid_request_error", e.param, "invalid_image");
+    return;
   } catch (const std::exception& e) {
     respond_error(w, 400,
                   "the chat template rejected these messages: " +
@@ -1487,6 +1829,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
   }
   const bool opens_thinking = markers_.prompt_opens_thinking(prompt);
   ToolCallParser::Options popts;
+  popts.track_tokens = logprobs >= 0;
   popts.start_in_reasoning = opens_thinking;
 
   // Full-reserve admission arithmetic — a request that can never fit is
@@ -1534,8 +1877,13 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     record->model = cfg_.model_id;
     record->created_unix = created;
     record->chat = true;
+    record->custom_tools = plan.custom_tools;
     record->stream = stream;
     record->include_usage = include_usage;
+    record->include_obfuscation = include_obfuscation;
+    record->report_service_tier = optional_field(body, "service_tier") != nullptr;
+    if (const auto* metadata = optional_field(body, "metadata"))
+      record->metadata = dgpp::text::json_text_of(*metadata);
     record->prompt_tokens = static_cast<int>(prompt.size());
     record->parser = std::make_unique<ToolCallParser>(
         markers_,
@@ -1552,7 +1900,8 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     SchedulerRequest sr;
     sr.id = record->sched_id;
     sr.boundaries = boundaries;
-    sr.no_cache = !prefix_cache;
+    sr.no_cache = !prefix_cache || !images.empty();
+    sr.images = images;
     sr.prompt = prompt;
     sr.max_steps = steps;
     sr.sampling = sampling;
@@ -1564,7 +1913,6 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     requests.push_back(std::move(sr));
   }
   w.set_stream_tag(tag);
-  if (stream) w.begin_stream();
   enqueue_group(std::move(records), std::move(requests));
 }
 
@@ -1609,26 +1957,18 @@ void GenerationService::route_completions(const HttpRequest& req,
     return;
   }
 
-  int steps = cfg_.default_max_tokens;
-  const dgpp::minijson::Value* max_tokens = body.find("max_tokens");
-  if (max_tokens != nullptr) {
-    if (!max_tokens->is_number() || max_tokens->as_int(0) < 1) {
-      respond_error(w, 400, "max_tokens must be a number >= 1",
-                    "invalid_request_error", "max_tokens");
-      return;
-    }
-    steps = static_cast<int>(max_tokens->as_int(0));
-  }
+  int steps = 0;
+  if (!parse_max_tokens(body, w, &steps, false)) return;
   bool stream = false;
-  const dgpp::minijson::Value* sv = body.find("stream");
-  if (sv != nullptr) {
+  if (const auto* sv = optional_field(body, "stream")) {
     if (!sv->is_bool()) {
-      respond_error(w, 400, "stream must be a boolean",
-                    "invalid_request_error", "stream");
+      respond_error(w, 400, "stream must be a boolean", "invalid_request_error", "stream");
       return;
     }
-    stream = sv->as_bool(false);
+    stream = sv->as_bool();
   }
+  bool include_usage = false, include_obfuscation = false;
+  if (!parse_stream_options(body, w, stream, &include_usage, &include_obfuscation)) return;
   bool prefix_cache = true;
   if (const dgpp::minijson::Value* pcv = body.find("prefix_cache")) {
     if (!pcv->is_bool()) {
@@ -1644,7 +1984,7 @@ void GenerationService::route_completions(const HttpRequest& req,
   if (!parse_sampling(body, w, &sampling, &seed)) return;
   // The legacy logprobs: an integer 0..5 (null = none).
   int logprobs = -1;
-  if (const dgpp::minijson::Value* lp = body.find("logprobs")) {
+  if (const dgpp::minijson::Value* lp = optional_field(body, "logprobs")) {
     const double x = lp->is_number() ? lp->as_double(-1.0) : -1.0;
     if (!lp->is_number() || x != std::floor(x) || x < 0.0 || x > 5.0) {
       respond_error(w, 400, "logprobs must be an integer in [0, 5]",
@@ -1712,10 +2052,11 @@ void GenerationService::route_completions(const HttpRequest& req,
   record->created_unix = std::time(nullptr);
   record->chat = false;
   record->stream = stream;
+  record->include_usage = include_usage;
+  record->include_obfuscation = false;
   record->prompt_tokens = static_cast<int>(ids.size());
   record->writer = &w;
   w.set_stream_tag(record->tag);
-  if (stream) w.begin_stream();
 
   SchedulerRequest sr;
   sr.id = record->id;
@@ -1745,7 +2086,7 @@ void GenerationService::route_models(const HttpRequest& req,
                   model_object(cfg_.model_id, created, sampling_available_,
                                cfg_.sampling_defaults, tool_calls_available(),
                                constraints_available(),
-                               cfg_.reasoning_in_content) +
+                               cfg_.reasoning_in_content, *frontend_, frontend_->supports_images() && engine_->supports_images()) +
                   "]}");
     return;
   }
@@ -1754,7 +2095,7 @@ void GenerationService::route_models(const HttpRequest& req,
     w.respond(200, "application/json",
               model_object(id, created, sampling_available_,
                            cfg_.sampling_defaults, tool_calls_available(),
-                           constraints_available(), cfg_.reasoning_in_content));
+                           constraints_available(), cfg_.reasoning_in_content, *frontend_, frontend_->supports_images() && engine_->supports_images()));
     return;
   }
   respond_error(w, 404, "the model '" + id + "' does not exist",
@@ -1773,10 +2114,31 @@ Scheduler::Meters GenerationService::meters() const {
 void GenerationService::route_metrics(HttpResponseWriter& w) {
   Scheduler::Meters m;
   Stats st;
+  const auto prefills = engine_->prefill_monitor()->snapshot();
+  dgpp::sched::SchedulerEngine::PrefixEngineStats pe;
+  double snapshot_age_ms = 0;
+  size_t pending_admissions = 0, pending_cancellations = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     m = meters_;
     st = stats_;
+    pe = prefix_stats_;
+    snapshot_age_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - meters_published_).count();
+    pending_admissions = pending_admissions_.size();
+    pending_cancellations = pending_cancels_.size();
+    // Live gauges include admissions whose synchronous prefill has not yet
+    // returned to the scheduler, as well as requests waiting in the HTTP queue.
+    m.active = 0;
+    m.queued = 0;
+    m.prefilling = static_cast<int>(prefills.size());
+    for (const auto& r : records_) {
+      if (r->done || r->reject_overloaded) continue;
+      const bool prefilling = std::any_of(prefills.begin(), prefills.end(),
+                                         [&](const auto& p) { return p.id == r->sched_id; });
+      if (prefilling || !r->ids.empty()) ++m.active;
+      else ++m.queued;
+    }
   }
   std::string out = "{\"scheduler\":{\"active\":";
   append_json_int(&out, m.active);
@@ -1796,6 +2158,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, m.prefilling);
   out.append(",\"tokens_generated\":");
   append_json_int(&out, m.tokens_generated);
+  out.append(",\"snapshot_age_ms\":");
+  append_json_float(&out, snapshot_age_ms);
   // The throughput line's counters, cumulative: a scraper
   // differences them the way the line does.
   out.append(",\"prompts_prefilled\":");
@@ -1818,6 +2182,10 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, static_cast<int64_t>(st.requests_total));
   out.append(",\"requests_shed\":");
   append_json_int(&out, static_cast<int64_t>(st.requests_shed));
+  out.append(",\"pending_admissions\":");
+  append_json_int(&out, static_cast<int64_t>(pending_admissions));
+  out.append(",\"pending_cancellations\":");
+  append_json_int(&out, static_cast<int64_t>(pending_cancellations));
   out.append(",\"requests_cancelled\":");
   append_json_int(&out, static_cast<int64_t>(st.requests_cancelled));
   out.append(",\"requests_shed_pool\":");
@@ -1846,8 +2214,6 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   // The prefix cache (M7): capacity, hits, tokens saved, entries taken and
   // evicted, blocks pinned, the arena's measured copy times and the TTFT
   // split — every number an operator needs to size the arena.
-  const dgpp::sched::SchedulerEngine::PrefixEngineStats pe =
-      engine_->prefix_engine_stats();
   const auto avg = [](double sum, int64_t n) { return n > 0 ? sum / static_cast<double>(n) : 0.0; };
   char buf[64];
   const auto append_ms = [&](const char* key, double v) {
@@ -1900,6 +2266,43 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_ms("ttft_miss_ms_avg", avg(st.ttft_miss_ms, static_cast<int64_t>(st.ttft_miss_count)));
   out.append(",\"key\":");
   append_json_string(&out, cfg_.prefix_key);
+  out.append("},\"prefill\":{\"requests\":[");
+  int64_t total = 0, processed = 0, cached = 0;
+  const auto now = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < prefills.size(); ++i) {
+    const auto& p = prefills[i];
+    if (i) out.push_back(',');
+    out.append("{\"id\":");
+    append_json_string(&out, p.id);
+    out.append(",\"slot\":");
+    append_json_int(&out, p.slot);
+    out.append(",\"prompt_tokens\":");
+    append_json_int(&out, p.total);
+    out.append(",\"processed_tokens\":");
+    append_json_int(&out, p.processed);
+    out.append(",\"cached_tokens\":");
+    append_json_int(&out, p.cached);
+    out.append(",\"computed_tokens\":");
+    append_json_int(&out, p.processed - p.cached);
+    out.append(",\"remaining_tokens\":");
+    append_json_int(&out, p.total - p.processed);
+    out.append(",\"elapsed_ms\":");
+    append_json_float(&out, std::chrono::duration<double, std::milli>(now - p.started).count());
+    out.push_back('}');
+    total += p.total;
+    processed += p.processed;
+    cached += p.cached;
+  }
+  out.append("],\"prompt_tokens\":");
+  append_json_int(&out, total);
+  out.append(",\"processed_tokens\":");
+  append_json_int(&out, processed);
+  out.append(",\"cached_tokens\":");
+  append_json_int(&out, cached);
+  out.append(",\"computed_tokens\":");
+  append_json_int(&out, processed - cached);
+  out.append(",\"remaining_tokens\":");
+  append_json_int(&out, total - processed);
   out.append("}}");
   w.respond(200, "application/json", std::move(out));
 }
@@ -1921,7 +2324,7 @@ void GenerationService::enqueue_group(
     std::vector<std::shared_ptr<StreamRecord>> records,
     std::vector<SchedulerRequest> requests) {
   std::lock_guard<std::mutex> lock(mutex_);
-  stats_.requests_total += records.size();
+  ++stats_.requests_total;
   // EVERY record enters the lifecycle list at enqueue — the observer,
   // the disconnect hook, and the pump must see a request that is
   // still waiting for the engine thread (a disconnect can race the
@@ -1936,15 +2339,19 @@ void GenerationService::enqueue_group(
       r->shutting_down = shutdown_;
       r->engine_failed = failed_;
     }
-    stats_.requests_shed += records.size();
+    records.front()->group->counted_shed = true;
+    ++stats_.requests_shed;
     return;
   }
+  if (records.front()->stream) records.front()->writer->begin_stream();
   for (size_t i = 0; i < records.size(); ++i)
     pending_admissions_.push_back(
         PendingAdmission{records[i], std::move(requests[i])});
 }
 
 void GenerationService::on_disconnect(uint64_t tag) {
+  for (auto& pending : file_work_)
+    if (pending.tag == tag) pending.writer = nullptr;
   std::lock_guard<std::mutex> lock(mutex_);
   // Every record on the connection (a request's n choices share the tag).
   for (auto& r : records_) {
@@ -1956,7 +2363,10 @@ void GenerationService::on_disconnect(uint64_t tag) {
       // deterministic retire path as scripted cancellation.
       r->cancel_armed = true;
       pending_cancels_.push_back(PendingCancel{r->sched_id});
-      stats_.requests_cancelled++;
+      if (!r->group->counted_cancelled) {
+        r->group->counted_cancelled = true;
+        ++stats_.requests_cancelled;
+      }
       DGPP_LOG_INFO("serve: request {} cancelled by client disconnect",
                     r->sched_id);
     }
@@ -1971,11 +2381,23 @@ void GenerationService::on_disconnect(uint64_t tag) {
 void GenerationService::push_content(StreamRecord& r, std::string text) {
   if (text.empty()) return;
   r.content += text;
+  mark_content_logprobs(r);
   if (r.stream) {
     ParserEvent ev;
     ev.kind = ParserEvent::Kind::kContent;
     ev.text = std::move(text);
     r.pending.push_back(std::move(ev));
+  }
+}
+
+void GenerationService::mark_content_logprobs(StreamRecord& r) {
+  // The stop scanner emits a prefix of its input and may hold a tail.
+  // Attribute only bytes that actually reached message.content.
+  while (r.content_span_cursor < r.content_spans.size()) {
+    const auto& span = r.content_spans[r.content_span_cursor];
+    if (span.begin >= (r.chat ? r.content.size() : r.out_text.size())) break;
+    r.content_lps[span.token] = true;
+    ++r.content_span_cursor;
   }
 }
 
@@ -2008,6 +2430,10 @@ void GenerationService::absorb(StreamRecord& r, ParserEvent ev) {
       break;
     case ParserEvent::Kind::kContent:
       if (ev.text.empty()) return;
+      for (const auto& span : ev.tokens)
+        r.content_spans.push_back({span.token, r.content_input_bytes + span.begin,
+                                   r.content_input_bytes + span.end});
+      r.content_input_bytes += ev.text.size();
       if (r.stop.active()) {
         // The stop strings match the content: the scanner
         // shows what precedes a match and holds a tail that could still
@@ -2018,8 +2444,22 @@ void GenerationService::absorb(StreamRecord& r, ParserEvent ev) {
         ev.text = std::move(shown);
       }
       r.content += ev.text;
+      mark_content_logprobs(r);
       break;
     case ParserEvent::Kind::kToolCall:
+      if (std::find(r.custom_tools.begin(), r.custom_tools.end(), ev.call.name) != r.custom_tools.end()) {
+        try {
+          const auto parsed = dgpp::minijson::parse(ev.call.arguments);
+          const auto* input = parsed.root.find("input");
+          if (!input || !input->is_string()) throw std::invalid_argument("input must be a string");
+          ev.call.arguments = std::string(input->as_string());
+          ev.call.custom = true;
+        } catch (const std::exception&) {
+          r.generation_error = "the model produced an invalid custom tool input";
+          request_stop(r);
+          return;
+        }
+      }
       r.calls.push_back(ev.call);
       stats_.tool_calls_out++;
       break;
@@ -2050,6 +2490,7 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         }
       }
       r->ids.push_back(token);
+      if (r->logprobs >= 0) r->content_lps.push_back(false);
       if (r->chat) {
         if (r->reasoning_open) ++r->reasoning_tokens;
         // The parser routes the id by state (reasoning / content / a tool
@@ -2068,6 +2509,11 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         if (full.size() > r->text.size())
           suffix.assign(full, r->text.size(), std::string::npos);
         r->text = full;
+        if (r->logprobs >= 0 && !suffix.empty()) {
+          r->content_spans.push_back({r->ids.size() - 1, r->content_input_bytes,
+                                      r->content_input_bytes + suffix.size()});
+          r->content_input_bytes += suffix.size();
+        }
         if (r->stop.hit) {
           suffix.clear();
         } else if (r->stop.active()) {
@@ -2076,6 +2522,7 @@ void GenerationService::on_token(const std::string& id, int64_t token,
         }
         r->delta += suffix;
         r->out_text += suffix;
+        mark_content_logprobs(*r);
       }
       stats_.tokens_out++;
       break;
@@ -2118,7 +2565,10 @@ void GenerationService::on_token_logprobs(const std::string& id,
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto& r : records_) {
     if (r->sched_id != id || r->done) continue;
-    if (r->logprobs >= 0) r->lps.push_back(logprobs);
+    if (r->logprobs >= 0) {
+      r->lps.push_back(logprobs);
+      r->lps_reported.push_back(false);
+    }
     break;
   }
 }
@@ -2141,11 +2591,15 @@ void sanitize_utf8(std::string* text);  // the delta streams' UTF-8 discipline, 
 }  // namespace
 
 std::string GenerationService::logprobs_content(const StreamRecord& r,
-                                                size_t from, size_t to) const {
+                                                size_t from, size_t to,
+                                                bool unreported_only) const {
   // {"content":[{"token","logprob","bytes","top_logprobs":[...]}, ...]}
   std::string out = "{\"content\":[";
+  bool first = true;
   for (size_t i = from; i < to && i < r.lps.size(); ++i) {
-    if (i != from) out.push_back(',');
+    if (!r.content_lps[i] || (unreported_only && r.lps_reported[i])) continue;
+    if (!first) out.push_back(',');
+    first = false;
     const sample::Result& lp = r.lps[i];
     const std::string tok = frontend_->decode_ids({r.ids[i]});
     out.append("{\"token\":");
@@ -2176,23 +2630,40 @@ std::string GenerationService::logprobs_content(const StreamRecord& r,
     }
     out.append("]}");
   }
-  out.append("]}");
+  out.append("],\"refusal\":null}");
   return out;
 }
 
-std::string GenerationService::legacy_logprobs(const StreamRecord& r) const {
+std::string GenerationService::take_content_logprobs(StreamRecord& r) const {
+  if (r.logprobs < 0) return {};
+  std::string out = logprobs_content(r, 0, r.lps.size(), true);
+  if (out == "{\"content\":[],\"refusal\":null}") return {};
+  for (size_t i = 0; i < r.lps.size(); ++i)
+    if (r.content_lps[i]) r.lps_reported[i] = true;
+  return out;
+}
+
+std::string GenerationService::legacy_logprobs(const StreamRecord& r, size_t from,
+                                              size_t to) const {
   // {"tokens":[...],"token_logprobs":[...],"top_logprobs":[{tok: lp}],
   //  "text_offset":[...]}
   std::string tokens = "[", lps = "[", tops = "[", offsets = "[";
   size_t offset = 0;
-  for (size_t i = 0; i < r.lps.size(); ++i) {
-    if (i) {
+  bool first = true;
+  for (size_t i = 0; i < r.lps.size() && i < to; ++i) {
+    if (!r.content_lps[i]) continue;
+    const std::string tok = frontend_->decode_ids({r.ids[i]});
+    if (i < from) {
+      offset += tok.size();
+      continue;
+    }
+    if (!first) {
       tokens.push_back(',');
       lps.push_back(',');
       tops.push_back(',');
       offsets.push_back(',');
     }
-    const std::string tok = frontend_->decode_ids({r.ids[i]});
+    first = false;
     append_json_string(&tokens, tok);
     append_json_float(&lps, r.lps[i].logprob);
     tops.push_back('{');
@@ -2230,6 +2701,7 @@ void GenerationService::on_retire(const std::string& id,
           const std::string rest = r->stop.finish();
           r->delta += rest;
           r->out_text += rest;
+          mark_content_logprobs(*r);
         }
       }
       r->done = true;
@@ -2244,8 +2716,10 @@ void GenerationService::on_retire(const std::string& id,
           r->group->cached_tokens =
               r->prefix_hit ? static_cast<int>(r->prefix_position) : 0;
       }
-      if (result.reason == Scheduler::Result::Reason::kPoolExhausted)
-        stats_.requests_shed_pool++;
+      if (result.reason == Scheduler::Result::Reason::kPoolExhausted && !r->group->counted_pool) {
+        r->group->counted_pool = true;
+        ++stats_.requests_shed_pool;
+      }
       break;
     }
   }
@@ -2260,7 +2734,65 @@ void GenerationService::on_retire(const std::string& id,
 // idle(): the record pump (HTTP thread)
 // ---------------------------------------------------------------------------
 
-void GenerationService::idle() { pump_records(); }
+void GenerationService::enqueue_file_work(const HttpRequest& req, HttpResponseWriter& writer, bool chat) {
+  if (file_work_.size() >= static_cast<size_t>(cfg_.file_inputs.workers)) {
+    respond_error(writer, 503, "file preprocessing is busy; retry later", "server_error", "file", "file_processing_busy");
+    return;
+  }
+  const uint64_t tag = next_tag_.fetch_add(1, std::memory_order_relaxed);
+  writer.set_stream_tag(tag);
+  file_work_.push_back({tag, &writer, chat, std::async(std::launch::async, [this, req, chat] {
+    if (chat) return FileResponse{200, "application/json", file_inputs_.prepare(req).body};
+    return file_inputs_.route(req);
+  })});
+  pending_file_count_.fetch_add(1);
+}
+
+void GenerationService::pump_file_work() {
+  for (size_t i = 0; i < file_work_.size();) {
+    auto& pending = file_work_[i];
+    if (pending.result.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) { ++i; continue; }
+    auto job = std::move(pending);
+    file_work_.erase(file_work_.begin() + static_cast<std::ptrdiff_t>(i));
+    if (!job.writer) { pending_file_count_.fetch_sub(1); continue; }
+    try {
+      auto result = job.result.get();
+      if (job.chat) {
+        HttpRequest request;
+        request.method = "POST"; request.path = "/v1/chat/completions"; request.body = std::move(result.body);
+        route_chat_completions(request, *job.writer);
+      } else job.writer->respond(result.status, result.content_type, std::move(result.body));
+    } catch (const FileInputError& e) {
+      respond_error(*job.writer, e.status, e.what(), e.status >= 500 ? "server_error" : "invalid_request_error", e.param, e.code);
+    } catch (const std::exception&) {
+      respond_error(*job.writer, 500, "file processing failed", "server_error", "file", "file_processing_failed");
+    }
+    pending_file_count_.fetch_sub(1);
+  }
+}
+
+void GenerationService::idle() { pump_file_work(); pump_records(); }
+
+void GenerationService::write_stream_event(StreamRecord& r, std::string event, bool usage) {
+  event.pop_back();  // every caller supplies a complete completion JSON object
+  if (r.include_usage && !usage) event.append(",\"usage\":null");
+  if (r.report_service_tier) event.append(",\"service_tier\":\"default\"");
+  if (r.chat && r.include_obfuscation && !usage) {
+    // Pad to 128-byte buckets, with at least 16 random padding characters.
+    // This is transport padding only; it never enters the model's transcript.
+    event.append(",\"obfuscation\":\"");
+    const size_t padding = 16 + (128 - (event.size() + 16 + 2) % 128) % 128;
+    constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    for (size_t i = 0; i < padding; ++i) event.push_back(alphabet[obfuscation_rng_() % 62]);
+    event.push_back('"');
+  }
+  event.push_back('}');
+  if (!r.chat && usage) {
+    const auto at = event.find("chat.completion.chunk");
+    if (at != std::string::npos) event.replace(at, 21, "text_completion");
+  }
+  r.writer->write_event(event);
+}
 
 // ---------------------------------------------------------------------------
 // UTF-8 discipline for the delta streams (the soak's find, 2026-09-05): a
@@ -2342,14 +2874,11 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     events.swap(r.pending);
-    if (!events.empty() && r.logprobs >= 0 && r.lps.size() > r.lps_flushed) {
-      lp_json = logprobs_content(r, r.lps_flushed, r.lps.size());
-      r.lps_flushed = r.lps.size();
-    }
+    lp_json = take_content_logprobs(r);
   }
   if (!r.first_chunk_sent) {
     r.first_chunk_sent = true;
-    r.writer->write_event(
+    write_stream_event(r,
         chat_chunk_first(r.id, r.created_unix, r.model, r.choice));
   }
   for (const ParserEvent& ev : events) {
@@ -2372,23 +2901,26 @@ void GenerationService::flush_chat_stream(StreamRecord& r) {
       case ParserEvent::Kind::kToolCall: {
         const int index = r.calls_announced++;
         const std::string call_id = tool_call_id(r.call_seed, index);
-        r.writer->write_event(chat_chunk_delta(
+        write_stream_event(r, chat_chunk_delta(
             r.id, r.created_unix, r.model,
-            delta_tool_call_start(index, call_id, ev.call.name), lp_json,
+            delta_tool_call_start(index, call_id, ev.call.name, ev.call.custom), "",
             r.choice));
-        lp_json.clear();
         std::string args = ev.call.arguments;
         sanitize_utf8(&args);  // a whole call's arguments: complete by construction
-        delta = delta_tool_call_arguments(index, args);
+        delta = delta_tool_call_arguments(index, args, ev.call.custom);
         break;
       }
       case ParserEvent::Kind::kReasoningClosed:
         continue;
     }
-    r.writer->write_event(chat_chunk_delta(r.id, r.created_unix, r.model,
-                                           delta, lp_json, r.choice));
-    lp_json.clear();
+    write_stream_event(r, chat_chunk_delta(r.id, r.created_unix, r.model,
+                                           delta, "", r.choice));
   }
+  // Logprobs follow the batch's visible deltas. An empty delta is valid;
+  // provenance may arrive after a buffered parser block or stop tail.
+  if (!lp_json.empty())
+    write_stream_event(r, chat_chunk_delta(r.id, r.created_unix, r.model,
+                                           "{}", lp_json, r.choice));
 }
 
 // The stream's end: whatever a field still holds is an incomplete
@@ -2399,7 +2931,7 @@ void GenerationService::flush_stream_carries(StreamRecord& r) {
                                 std::pair{&r.carry_content, "content"}}) {
       const std::string rest = finish_utf8(carry);
       if (rest.empty()) continue;
-      r.writer->write_event(chat_chunk_delta(r.id, r.created_unix, r.model,
+      write_stream_event(r, chat_chunk_delta(r.id, r.created_unix, r.model,
                                              delta_text(field, rest), "",
                                              r.choice));
     }
@@ -2407,7 +2939,7 @@ void GenerationService::flush_stream_carries(StreamRecord& r) {
   }
   const std::string rest = finish_utf8(&r.carry_text);
   if (!rest.empty())
-    r.writer->write_event(text_chunk_delta(r.id, r.created_unix, r.model, rest, ""));
+    write_stream_event(r, text_chunk_delta(r.id, r.created_unix, r.model, rest, ""));
 }
 
 void GenerationService::flush_legacy_stream(StreamRecord& r) {
@@ -2417,17 +2949,17 @@ void GenerationService::flush_legacy_stream(StreamRecord& r) {
     std::lock_guard<std::mutex> lock(mutex_);
     delta.swap(r.delta);
     if (!delta.empty() && r.logprobs >= 0 && r.lps.size() > r.lps_flushed) {
-      lp_json = logprobs_content(r, r.lps_flushed, r.lps.size());
+      lp_json = legacy_logprobs(r, r.lps_flushed, r.lps.size());
       r.lps_flushed = r.lps.size();
     }
   }
   if (!r.first_chunk_sent) {
     r.first_chunk_sent = true;
-    r.writer->write_event(text_chunk_first(r.id, r.created_unix, r.model));
+    write_stream_event(r, text_chunk_first(r.id, r.created_unix, r.model));
   }
   carry_utf8(&delta, &r.carry_text);
   if (!delta.empty())
-    r.writer->write_event(
+    write_stream_event(r,
         text_chunk_delta(r.id, r.created_unix, r.model, delta, lp_json));
 }
 
@@ -2458,7 +2990,7 @@ void GenerationService::pump_records() {
   for (auto& r : finished) {
     if (r->writer != nullptr && !r->writer_dead) {
       ChoiceGroup& g = *r->group;
-      if (r->reject_overloaded || r->shutting_down || r->engine_failed) {
+      if (r->reject_overloaded || r->shutting_down || r->engine_failed || !r->generation_error.empty()) {
         // A shed request, or one the stop interrupted (M6 6c): the
         // one-shot gets the 503 object; a stream that already began gets
         // the error event + [DONE] (the only shape an SSE client can
@@ -2476,7 +3008,7 @@ void GenerationService::pump_records() {
           std::lock_guard<std::mutex> lock(mutex_);
           failure = failure_;
         }
-        const std::string msg =
+        const std::string msg = !r->generation_error.empty() ? r->generation_error :
             failed ? (r->reject_overloaded
                           ? "the engine failed (" + failure +
                                 "); the service is restarting — retry"
@@ -2489,12 +3021,12 @@ void GenerationService::pump_records() {
                 ? "the server is shutting down; retry on another instance"
                 : "the server is shutting down — this response is "
                   "incomplete; retry on another instance";
-        const char* code = failed     ? "engine_failure"
+        const char* code = !r->generation_error.empty() ? "invalid_tool_output" : failed ? "engine_failure"
                            : shutdown ? "server_shutdown"
                                       : "overloaded";
         if (g.ended) {
           // A sibling choice already answered for the request.
-        } else if (r->stream) {
+        } else if (r->stream && r->writer->stream_open()) {
           if (shutdown && !r->reject_overloaded) {
             for (auto& sib : finished) {
               if (sib->group != r->group || sib->writer == nullptr ||
@@ -2526,8 +3058,8 @@ void GenerationService::pump_records() {
         }
       } else if (r->stream) {
         // Flush any straggler events, then this choice's terminal chunk.
-        // The final chunk carries the logprobs entries no content chunk
-        // took (the EOS pick decodes to nothing, so its entry lands here).
+        // The final chunk carries any remaining visible-token logprobs.
+        // EOS and hidden reasoning/tool tokens are not content logprobs.
         // The stream ends — the usage chunk, [DONE] — once every choice
         // of the request is done.
         if (r->chat)
@@ -2539,21 +3071,22 @@ void GenerationService::pump_records() {
         if (r->logprobs >= 0) {
           std::lock_guard<std::mutex> lock(mutex_);
           if (r->lps.size() > r->lps_flushed) {
-            lp_json = logprobs_content(*r, r->lps_flushed, r->lps.size());
+            lp_json = r->chat ? take_content_logprobs(*r)
+                              : legacy_logprobs(*r, r->lps_flushed, r->lps.size());
             r->lps_flushed = r->lps.size();
           }
         }
         const char* finish = finish_reason(r->reason, !r->calls.empty());
-        r->writer->write_event(
+        write_stream_event(*r,
             r->chat ? chat_chunk_final(r->id, r->created_unix, r->model,
                                        finish, lp_json, r->choice)
                     : text_chunk_final(r->id, r->created_unix, r->model,
                                        finish, lp_json));
         if (++g.finished == g.n && !g.ended) {
           if (r->include_usage) {
-            r->writer->write_event(chat_chunk_usage(
+            write_stream_event(*r, chat_chunk_usage(
                 r->id, r->created_unix, r->model, r->prompt_tokens,
-                g.completion_tokens, g.cached_tokens, g.reasoning_tokens));
+                g.completion_tokens, g.cached_tokens, g.reasoning_tokens), true);
           }
           r->writer->write_event("[DONE]");
           r->writer->end_stream();
@@ -2594,15 +3127,16 @@ void GenerationService::pump_records() {
               msg.append("{\"id\":");
               append_json_string(
                   &msg, tool_call_id(r->call_seed, static_cast<int>(i)));
-              msg.append(",\"type\":\"function\",\"function\":{\"name\":");
+              msg.append(r->calls[i].custom ? ",\"type\":\"custom\",\"custom\":{\"name\":" :
+                                             ",\"type\":\"function\",\"function\":{\"name\":");
               append_json_string(&msg, r->calls[i].name);
-              msg.append(",\"arguments\":");
+              msg.append(r->calls[i].custom ? ",\"input\":" : ",\"arguments\":");
               append_json_string(&msg, r->calls[i].arguments);
               msg.append("}}");
             }
             msg.push_back(']');
           }
-          msg.push_back('}');
+          msg.append(",\"refusal\":null}");
           g.choices[static_cast<size_t>(r->choice)] =
               chat_choice_json(r->choice, msg, finish, lp_json);
         } else {
@@ -2615,9 +3149,7 @@ void GenerationService::pump_records() {
             if (i) joined.push_back(',');
             joined += g.choices[i];
           }
-          r->writer->respond(
-              200, "application/json",
-              r->chat ? chat_completion_body(r->id, r->created_unix, r->model,
+          std::string response = r->chat ? chat_completion_body(r->id, r->created_unix, r->model,
                                              joined, r->prompt_tokens,
                                              g.completion_tokens,
                                              g.cached_tokens,
@@ -2625,7 +3157,12 @@ void GenerationService::pump_records() {
                       : text_completion_body(r->id, r->created_unix, r->model,
                                              joined, r->prompt_tokens,
                                              g.completion_tokens,
-                                             g.cached_tokens));
+                                             g.cached_tokens);
+          response.pop_back();
+          if (r->report_service_tier) response.append(",\"service_tier\":\"default\"");
+          if (!r->metadata.empty()) response.append(",\"metadata\":" + r->metadata);
+          response.push_back('}');
+          r->writer->respond(200, "application/json", std::move(response));
           g.ended = true;
         }
       }
@@ -2683,7 +3220,10 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
       if (journaled) events.submits.pop_back();
       std::lock_guard<std::mutex> lock(mutex_);
       a.record->reject_overloaded = true;
-      stats_.requests_shed++;
+      if (!a.record->group->counted_shed) {
+        a.record->group->counted_shed = true;
+        ++stats_.requests_shed;
+      }
     }
   }
   for (const auto& c : cancels) {
@@ -2724,17 +3264,23 @@ bool GenerationService::engine_pass(const PreTickHook& pre_tick) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     meters_ = sched_.meters();
+    prefix_stats_ = engine_->prefix_engine_stats();
+    meters_published_ = std::chrono::steady_clock::now();
     return more || !pending_admissions_.empty();
   }
 }
 
 int GenerationService::begin_shutdown() {
+  file_inputs_.stop();
   std::lock_guard<std::mutex> lock(mutex_);
   shutdown_ = true;
   for (auto& a : pending_admissions_) {
     a.record->reject_overloaded = true;
     a.record->shutting_down = true;
-    stats_.requests_shed++;
+    if (!a.record->group->counted_shed) {
+      a.record->group->counted_shed = true;
+      ++stats_.requests_shed;
+    }
   }
   pending_admissions_.clear();
   int interrupted = 0;
@@ -2745,8 +3291,11 @@ int GenerationService::begin_shutdown() {
     // precedes the step — and on_retire marks it done; the pump then
     // answers it with the shutdown error, not a finish.
     r->shutting_down = true;
-    stats_.requests_cancelled++;
-    pending_cancels_.push_back(PendingCancel{r->id});
+    if (!r->group->counted_cancelled) {
+      r->group->counted_cancelled = true;
+      ++stats_.requests_cancelled;
+    }
+    pending_cancels_.push_back(PendingCancel{r->sched_id});
     ++interrupted;
   }
   return interrupted;
@@ -2754,6 +3303,7 @@ int GenerationService::begin_shutdown() {
 
 bool GenerationService::drained() const {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (pending_file_count_.load() != 0) return false;
   if (!pending_admissions_.empty() || !pending_cancels_.empty()) return false;
   for (const auto& r : records_)
     if (r->writer != nullptr && !r->writer_dead) return false;  // an answer owed
@@ -2761,6 +3311,8 @@ bool GenerationService::drained() const {
 }
 
 int GenerationService::fail_engine(const std::string& what) {
+  file_inputs_.stop();
+  engine_->prefill_monitor()->clear();
   std::lock_guard<std::mutex> lock(mutex_);
   if (!failed_) {
     failed_ = true;
@@ -2770,7 +3322,10 @@ int GenerationService::fail_engine(const std::string& what) {
   for (auto& a : pending_admissions_) {
     a.record->reject_overloaded = true;
     a.record->engine_failed = true;
-    stats_.requests_shed++;
+    if (!a.record->group->counted_shed) {
+      a.record->group->counted_shed = true;
+      ++stats_.requests_shed;
+    }
   }
   pending_admissions_.clear();
   pending_cancels_.clear();  // no pass will ever apply them
@@ -2788,7 +3343,10 @@ int GenerationService::fail_engine(const std::string& what) {
     }
     r->engine_failed = true;
     r->done = true;
-    stats_.requests_failed++;
+    if (!r->group->counted_failed) {
+      r->group->counted_failed = true;
+      ++stats_.requests_failed;
+    }
     ++interrupted;
   }
   return interrupted;

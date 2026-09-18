@@ -55,6 +55,7 @@
 #include <vector>
 
 #include "loaders/minijson.hpp"
+#include "text/string_constraint.hpp"
 
 namespace dgpp::text {
 
@@ -151,6 +152,8 @@ struct JsonSchemaNode {
   // filtered by the range at compile time instead).
   IntegerBounds bounds;
   DecimalBounds decimal_bounds;
+  std::string multiple_of;
+  std::vector<std::shared_ptr<const StringConstraint>> strings;
   // anyOf: the alternatives (a node with alternatives has no other content).
   std::vector<int> any_of;
 };
@@ -158,6 +161,7 @@ struct JsonSchemaNode {
 struct JsonSchema {
   std::vector<JsonSchemaNode> nodes;
   int root = 0;
+  bool container_enums = false;
 };
 
 // Compiles OpenAI's structured-output subset. Throws std::invalid_argument
@@ -167,10 +171,11 @@ struct JsonSchema {
 // node's bounds and are enforced. With `unenforced` given (a
 // tool argument's schema, 2026-09-06), the keywords that only NARROW a
 // typed value without an automaton behind them — minLength/maxLength,
-// pattern, format, multipleOf, ...
+// minProperties/maxProperties, uniqueItems, ...
 // — compile instead of refusing: the value keeps its type, the narrowing
 // is not applied, and "<keyword path>: <reason>" is appended to
-// `unenforced`. Keywords that change a value's shape ($ref, oneOf, allOf,
+// `unenforced`. Local references, pattern, format and multipleOf are enforced
+// in both modes. Unsupported composition keywords (oneOf, allOf,
 // patternProperties, ...) refuse either way.
 JsonSchema compile_json_schema(const minijson::Value& schema,
                                std::vector<std::string>* unenforced = nullptr);
@@ -282,6 +287,11 @@ class JsonLexer {
 
 class JsonTables {
  public:
+  struct TrieNode {
+    std::vector<std::pair<uint8_t, int>> children;
+    std::vector<int> ids;
+  };
+  const std::vector<TrieNode>& token_trie() const { return trie_; }
   explicit JsonTables(const GrammarVocab& vocab);
 
   int vocab_size() const { return vocab_; }
@@ -336,6 +346,7 @@ class JsonTables {
   std::vector<uint32_t> class_[7];
   std::vector<uint32_t> ws_;
   std::vector<Shape> shapes_;
+  std::vector<TrieNode> trie_;
   std::vector<std::string> prefixes_, tails_, scalar_tails_;
   std::vector<int32_t> single_, multi_, structural_, scalar_tail_ids_, numeric_;
   std::vector<std::vector<int32_t>> lead_ws_ids_;  // [kMaxWsRun + 1]
@@ -375,6 +386,9 @@ class JsonMachine {
     int count = 0;                    // array: items so far
     int value_node = JsonSchemaNode::kAny;  // the value being parsed
     std::string key;                  // the key so far (objects)
+    // Container enums retain an exact JSON spelling across nested values.
+    std::vector<int> enum_targets;
+    size_t enum_pos = 0;
   };
   struct Cursor {
     std::vector<Frame> stack;
@@ -389,6 +403,8 @@ class JsonMachine {
     int bound_node = -1;
     IntegerPrefix number;
     DecimalPrefix decimal;
+    int string_node = -1;
+    std::string string_json;
     bool dead = false;
   };
   int expected_node(const Cursor& c) const;
@@ -417,6 +433,7 @@ class JsonMachine {
   // A bounded integer is being spelled (or may start here): the numeric
   // tokens need the digit arithmetic beyond the tables' lexical answer.
   bool bounds_live_here(bool value_start) const;
+  bool extended_constraints_live() const;
   // Whether a numeric token (JsonTables::numeric_ids) survives every
   // cursor's bounds — the prefix arithmetic where the cursors are plain,
   // a simulation where an enum target shares the position.

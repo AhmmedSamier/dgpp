@@ -1,0 +1,228 @@
+Internal ctest changing into directory: /home/stephen/workspace/dgpp/build-ci
+Test project /home/stephen/workspace/dgpp/build-ci
+        Start   1: qwen_forward_fixture
+  1/107 Test   #1: qwen_forward_fixture .....................   Passed    0.19 sec
+        Start   2: qwen_forward_smoke
+  2/107 Test   #2: qwen_forward_smoke .......................   Passed    1.14 sec
+        Start   3: qwen_forward_generate
+  3/107 Test   #3: qwen_forward_generate ....................   Passed   19.05 sec
+        Start   4: qwen_forward_test
+  4/107 Test   #4: qwen_forward_test ........................   Passed    1.33 sec
+        Start   5: qwen_decode_test
+  5/107 Test   #5: qwen_decode_test .........................   Passed    3.30 sec
+        Start   6: nic_regress_selftest
+  6/107 Test   #6: nic_regress_selftest .....................   Passed    0.50 sec
+        Start   7: glm_tp_test
+  7/107 Test   #7: glm_tp_test ..............................   Passed   33.37 sec
+        Start   8: unit_tests
+  8/107 Test   #8: unit_tests ...............................   Passed    9.48 sec
+        Start   9: tokenizer_test
+  9/107 Test   #9: tokenizer_test ...........................   Passed    0.22 sec
+        Start  10: qwen_tokenizer_test
+ 10/107 Test  #10: qwen_tokenizer_test ......................   Passed    0.18 sec
+        Start  11: dsv41_tokenizer_test
+ 11/107 Test  #11: dsv41_tokenizer_test .....................   Passed    0.09 sec
+        Start  12: dsv41_prompt_test
+ 12/107 Test  #12: dsv41_prompt_test ........................   Passed    0.09 sec
+        Start  13: glm4_tokenizer_test
+ 13/107 Test  #13: glm4_tokenizer_test ......................   Passed    0.23 sec
+        Start  14: glm_dsa_tokenizer_test
+ 14/107 Test  #14: glm_dsa_tokenizer_test ...................   Passed    0.25 sec
+        Start  15: chat_template_test
+ 15/107 Test  #15: chat_template_test .......................   Passed    1.80 sec
+        Start  16: qwen_chat_template_test
+ 16/107 Test  #16: qwen_chat_template_test ..................   Passed    1.57 sec
+        Start  17: glm4_chat_template_test
+ 17/107 Test  #17: glm4_chat_template_test ..................   Passed    1.92 sec
+        Start  18: glm_dsa_chat_template_test
+ 18/107 Test  #18: glm_dsa_chat_template_test ...............   Passed    1.76 sec
+        Start  19: http_server_test
+ 19/107 Test  #19: http_server_test .........................   Passed    6.35 sec
+        Start  20: serve_test
+ 20/107 Test  #20: serve_test ...............................   Passed  103.22 sec
+        Start  21: fabric_serve_test
+ 21/107 Test  #21: fabric_serve_test ........................   Passed    2.64 sec
+        Start  22: scheduler_test
+ 22/107 Test  #22: scheduler_test ...........................   Passed    0.00 sec
+        Start  23: unit
+ 23/107 Test  #23: unit .....................................   Passed    9.12 sec
+        Start  24: checkpoint_audit_test
+ 24/107 Test  #24: checkpoint_audit_test ....................   Passed    0.08 sec
+        Start  25: route_trace_test
+ 25/107 Test  #25: route_trace_test .........................   Passed    0.13 sec
+        Start  26: sampling_profile_test
+ 26/107 Test  #26: sampling_profile_test ....................   Passed    0.04 sec
+        Start  27: site_env_test
+ 27/107 Test  #27: site_env_test ............................   Passed    1.71 sec
+        Start  28: script_reports_test
+ 28/107 Test  #28: script_reports_test ......................   Passed    0.58 sec
+        Start  29: portability_test
+ 29/107 Test  #29: portability_test .........................   Passed    0.29 sec
+        Start  30: setup_tools_test
+ 30/107 Test  #30: setup_tools_test .........................   Passed    1.66 sec
+        Start  31: launcher_test
+ 31/107 Test  #31: launcher_test ............................   Passed    8.63 sec
+        Start  32: kda_test
+ 32/107 Test  #32: kda_test .................................   Passed    2.98 sec
+        Start  33: dsa_test
+ 33/107 Test  #33: dsa_test .................................   Passed   15.31 sec
+        Start  34: qwen_gr_test
+ 34/107 Test  #34: qwen_gr_test .............................   Passed    0.40 sec
+        Start  35: qwen_norm_test
+ 35/107 Test  #35: qwen_norm_test ...........................   Passed    0.38 sec
+        Start  36: gdn_test
+ 36/107 Test  #36: gdn_test .................................   Passed    0.42 sec
+        Start  37: qsa_test
+ 37/107 Test  #37: qsa_test .................................   Passed    1.26 sec
+        Start  38: qwen_ple_test
+ 38/107 Test  #38: qwen_ple_test ............................   Passed    0.72 sec
+        Start  39: csa2_test
+ 39/107 Test  #39: csa2_test ................................   Passed    0.47 sec
+        Start  40: csa2_layer_test
+ 40/107 Test  #40: csa2_layer_test ..........................   Passed    3.77 sec
+        Start  41: dsv41_engram_layer_test
+ 41/107 Test  #41: dsv41_engram_layer_test ..................   Passed    1.08 sec
+        Start  42: dsv41_model_test
+ 42/107 Test  #42: dsv41_model_test .........................   Passed    3.75 sec
+        Start  43: dsv41_forward_fixture
+ 43/107 Test  #43: dsv41_forward_fixture ....................   Passed    0.60 sec
+        Start  44: dsv41_forward_smoke
+ 44/107 Test  #44: dsv41_forward_smoke ......................   Passed    0.97 sec
+        Start  45: dsv41_forward_generate
+ 45/107 Test  #45: dsv41_forward_generate ...................   Passed    0.63 sec
+        Start  46: dsv41_forward_test_e2e
+ 46/107 Test  #46: dsv41_forward_test_e2e ...................   Passed    0.94 sec
+        Start  47: dsv41_forward_generate_teacher
+ 47/107 Test  #47: dsv41_forward_generate_teacher ...........   Passed    0.64 sec
+        Start  48: dsv41_forward_test
+ 48/107 Test  #48: dsv41_forward_test .......................   Passed    0.92 sec
+        Start  49: dsv41_forward_generate_bounded
+ 49/107 Test  #49: dsv41_forward_generate_bounded ...........   Passed    0.68 sec
+        Start  50: dsv41_forward_test_bounded_e2e
+ 50/107 Test  #50: dsv41_forward_test_bounded_e2e ...........   Passed    0.93 sec
+        Start  51: dsv41_forward_generate_teacher_bounded
+ 51/107 Test  #51: dsv41_forward_generate_teacher_bounded ...   Passed    0.60 sec
+        Start  52: dsv41_forward_test_bounded
+ 52/107 Test  #52: dsv41_forward_test_bounded ...............   Passed    0.92 sec
+        Start  53: dsv41_decode_test
+ 53/107 Test  #53: dsv41_decode_test ........................   Passed    3.25 sec
+        Start  54: dsv41_engram_test
+ 54/107 Test  #54: dsv41_engram_test ........................   Passed    0.38 sec
+        Start  55: qwen_moe_test
+ 55/107 Test  #55: qwen_moe_test ............................   Passed    2.66 sec
+        Start  56: qwen_loader_test
+ 56/107 Test  #56: qwen_loader_test .........................   Passed    6.12 sec
+        Start  57: glm4_attn_test
+ 57/107 Test  #57: glm4_attn_test ...........................   Passed    0.41 sec
+        Start  58: glm4_loader_test
+ 58/107 Test  #58: glm4_loader_test .........................   Passed    0.95 sec
+        Start  59: glm4_forward_fixture
+ 59/107 Test  #59: glm4_forward_fixture .....................   Passed    0.09 sec
+        Start  60: glm4_forward_smoke
+ 60/107 Test  #60: glm4_forward_smoke .......................   Passed    0.84 sec
+        Start  61: glm4_forward_generate
+ 61/107 Test  #61: glm4_forward_generate ....................   Passed    6.97 sec
+        Start  62: glm4_forward_test
+ 62/107 Test  #62: glm4_forward_test ........................   Passed    0.90 sec
+        Start  63: glm_dsa_forward_fixture
+ 63/107 Test  #63: glm_dsa_forward_fixture ..................   Passed    0.11 sec
+        Start  64: glm_dsa_forward_smoke
+ 64/107 Test  #64: glm_dsa_forward_smoke ....................   Passed    0.92 sec
+        Start  65: glm_dsa_forward_generate
+ 65/107 Test  #65: glm_dsa_forward_generate .................   Passed   13.37 sec
+        Start  66: glm_dsa_forward_test
+ 66/107 Test  #66: glm_dsa_forward_test .....................   Passed    0.97 sec
+        Start  67: glm_dsa_prefill_fixture
+ 67/107 Test  #67: glm_dsa_prefill_fixture ..................   Passed    0.11 sec
+        Start  68: glm_dsa_prefill_generate
+ 68/107 Test  #68: glm_dsa_prefill_generate .................   Passed  105.60 sec
+        Start  69: glm_dsa_prefill_test
+ 69/107 Test  #69: glm_dsa_prefill_test .....................   Passed    0.98 sec
+        Start  70: glm_dsa_decode_test
+ 70/107 Test  #70: glm_dsa_decode_test ......................   Passed    1.34 sec
+        Start  71: glm_dsa_tp_test
+ 71/107 Test  #71: glm_dsa_tp_test ..........................   Passed    2.17 sec
+        Start  72: glm_dsa_engine_test
+ 72/107 Test  #72: glm_dsa_engine_test ......................   Passed    5.93 sec
+        Start  73: glm4_decode_test
+ 73/107 Test  #73: glm4_decode_test .........................   Passed    1.04 sec
+        Start  74: glm4_tp_test
+ 74/107 Test  #74: glm4_tp_test .............................   Passed    1.95 sec
+        Start  75: glm4_engine_test
+ 75/107 Test  #75: glm4_engine_test .........................   Passed    3.31 sec
+        Start  76: glm_dsa_loader_test
+ 76/107 Test  #76: glm_dsa_loader_test ......................   Passed    1.06 sec
+        Start  77: dsv41_loader_test
+ 77/107 Test  #77: dsv41_loader_test ........................   Passed    8.67 sec
+        Start  78: dsv41_tp_test
+ 78/107 Test  #78: dsv41_tp_test ............................   Passed    5.92 sec
+        Start  79: dsv41_engine_test
+ 79/107 Test  #79: dsv41_engine_test ........................   Passed    7.04 sec
+        Start  80: qwen_tp_test
+ 80/107 Test  #80: qwen_tp_test .............................   Passed    4.02 sec
+        Start  81: qwen_engine_test
+ 81/107 Test  #81: qwen_engine_test .........................   Passed    9.30 sec
+        Start  82: qwen_engine_row_independent
+ 82/107 Test  #82: qwen_engine_row_independent ..............   Passed    2.96 sec
+        Start  83: glm_loader_test
+ 83/107 Test  #83: glm_loader_test ..........................   Passed    2.71 sec
+        Start  84: bf16_gemv_test
+ 84/107 Test  #84: bf16_gemv_test ...........................   Passed   16.04 sec
+        Start  85: mma_gemv_test
+ 85/107 Test  #85: mma_gemv_test ............................   Passed    3.09 sec
+        Start  86: fp4_gemv_test
+ 86/107 Test  #86: fp4_gemv_test ............................   Passed    0.50 sec
+        Start  87: packq_gemv_test
+ 87/107 Test  #87: packq_gemv_test ..........................   Passed    0.58 sec
+        Start  88: packq_gemm_test
+ 88/107 Test  #88: packq_gemm_test ..........................   Passed    0.49 sec
+        Start  89: scale_gemm_test
+ 89/107 Test  #89: scale_gemm_test ..........................   Passed    0.80 sec
+        Start  90: glm_mhc_test
+ 90/107 Test  #90: glm_mhc_test .............................   Passed    2.74 sec
+        Start  91: det_math_test
+ 91/107 Test  #91: det_math_test ............................   Passed    4.42 sec
+        Start  92: glm_pick_test
+ 92/107 Test  #92: glm_pick_test ............................   Passed    1.09 sec
+        Start  93: glm_moe_test
+ 93/107 Test  #93: glm_moe_test .............................   Passed   25.03 sec
+        Start  94: glm_forward_fixture
+ 94/107 Test  #94: glm_forward_fixture ......................   Passed    0.12 sec
+        Start  95: glm_forward_generate
+ 95/107 Test  #95: glm_forward_generate .....................   Passed    2.13 sec
+        Start  96: glm_forward_test
+ 96/107 Test  #96: glm_forward_test .........................   Passed    0.90 sec
+        Start  97: dsa_dump_generate
+ 97/107 Test  #97: dsa_dump_generate ........................   Passed    0.51 sec
+        Start  98: dsa_dump_test
+ 98/107 Test  #98: dsa_dump_test ............................   Passed    0.79 sec
+        Start  99: kda_dump_generate
+ 99/107 Test  #99: kda_dump_generate ........................   Passed    0.06 sec
+        Start 100: kda_dump_test
+100/107 Test #100: kda_dump_test ............................   Passed    2.93 sec
+        Start 101: doll_selftest
+101/107 Test #101: doll_selftest ............................   Passed    0.82 sec
+        Start 102: flag_protocol_test
+102/107 Test #102: flag_protocol_test .......................   Passed    1.30 sec
+        Start 103: roster_selftest
+103/107 Test #103: roster_selftest ..........................   Passed    0.25 sec
+        Start 104: bus_test
+104/107 Test #104: bus_test .................................   Passed   30.99 sec
+        Start 105: bus_selftest
+105/107 Test #105: bus_selftest .............................   Passed    2.32 sec
+        Start 106: glm_vision_test
+106/107 Test #106: glm_vision_test ..........................   Passed    0.85 sec
+        Start 107: glm_vision_frontend_test
+107/107 Test #107: glm_vision_frontend_test .................   Passed    0.20 sec
+
+100% tests passed, 0 tests failed out of 107
+
+Label Time Summary:
+checkpoint    =   6.29 sec*proc (9 tests)
+fixture       =  29.12 sec*proc (8 tests)
+gpu           = 370.71 sec*proc (75 tests)
+host          = 150.48 sec*proc (24 tests)
+python        =  13.12 sec*proc (8 tests)
+rdma          =  98.74 sec*proc (10 tests)
+
+Total Test time (real) = 550.52 sec

@@ -46,8 +46,12 @@ ctest --test-dir build-ci --output-on-failure -j 1
 ```
 
 `scripts/ci-local.sh` runs the full build and test sequence, including GPU/RDMA
-suites. Use it only on idle test hardware. The other presets are `release`
-(used by `scripts/release.sh`), `debug`, `asan` and `ubsan`.
+suites. Use it only on idle test hardware. Production uses `cmake --preset release`
+and `cmake --build --preset release -j 4`, producing the server in `build-release/`
+with `-O3` and no debug symbols. The launcher defaults to that binary; select
+`--bin build-ci/dgpp-serve` explicitly for a testing deployment. `scripts/release.sh`
+packages the release build. The other testing presets are `debug`, `asan`
+and `ubsan`; see [build profiles](docs/testing.md).
 
 - **Rebuild the selected test targets before `ctest`; build everything before
   an unfiltered run.** The suite runs whatever binaries exist; an old binary

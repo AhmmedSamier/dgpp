@@ -16,12 +16,15 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -30,6 +33,7 @@
 #include <optional>
 #include <cstring>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "common/log.hpp"
@@ -37,8 +41,10 @@
 #include "common/test.hpp"
 #include "sched/scheduler.hpp"
 #include "serve/generation_service.hpp"
+#include "serve/image_inputs.hpp"
 #include "serve/http_server.hpp"
 #include "serve/serve_stats.hpp"
+#include "text/chat_template.hpp"
 
 namespace {
 
@@ -77,6 +83,15 @@ bool fake_eos_prefill(size_t prompt_len) { return prompt_len % 4 == 2; }
 
 class FakeEngine : public SchedulerEngine {
  public:
+  std::atomic<bool> images_available{false};
+  std::atomic<int> image_prefills{0};
+  bool supports_images() const override { return images_available; }
+  int32_t prefill_images(int req, const std::vector<int64_t>& prompt, const std::vector<dgpp::ImageInput>& images) override {
+    require(!images.empty() && images[0].rgb.size() == 112 * 112 * 3, "decoded image reaches the engine");
+    ++image_prefills;
+    return prefill(req, prompt);
+  }
+
   struct Live {
     size_t prompt_len = 0;
     int64_t held_blocks = 0;
@@ -239,6 +254,13 @@ class FakeEngine : public SchedulerEngine {
   }
 
   int32_t prefill(int req, const std::vector<int64_t>& prompt) override {
+    if (hold_prefill.load()) {
+      prefill_monitor()->update(req, static_cast<int64_t>(prompt.size() / 2));
+      prefill_entered = true;
+      const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      while (hold_prefill.load() && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     if (live_.count(req) != 0)
       throw std::runtime_error("fake: prefill on live slot");
     Live live;
@@ -249,6 +271,7 @@ class FakeEngine : public SchedulerEngine {
     note_logprobs(req, live.last_token, 0);
     return live.last_token;
   }
+  std::atomic<bool> hold_prefill{false}, prefill_entered{false};
   void note_logprobs(int req, int32_t token, int index) {
     if (report_.count(req) == 0 || report_[req] < 0) return;
     dgpp::sample::Result r;
@@ -355,14 +378,36 @@ std::string json_of(const dgpp::minijson::Value& v) {
 // the same rule. It keeps the last globals the service handed it.
 class FakeFrontend : public ModelFrontend {
  public:
+  std::atomic<bool> images_available{false};
+  bool supports_images() const override { return images_available; }
+  ChatInput prepare_chat(const dgpp::minijson::Value& globals) const override {
+    auto input = ModelFrontend::prepare_chat(globals);
+    const auto& messages = globals.at("messages").items();
+    for (size_t i = 0; i < messages.size(); ++i) {
+      const auto* content = messages[i].find("content");
+      if (!content || !content->is_array()) continue;
+      for (size_t j = 0; j < content->items().size(); ++j) {
+        const auto* image = content->items()[j].find("image_url");
+        if (!image) continue;
+        auto im = dgpp::serve::prepare_glm_image(*image,
+            "messages[" + std::to_string(i) + "].content[" + std::to_string(j) + "].image_url");
+        im.offset = input.tokens.size();
+        input.tokens.insert(input.tokens.end(), im.tokens, 154854);
+        input.images.push_back(std::move(im));
+      }
+    }
+    return input;
+  }
+
   explicit FakeFrontend(bool with_markers = false)
       : with_markers_(with_markers) {}
   // The template knob gate: a template that reads enable_thinking (Qwen3.8-
   // Flash-Next, GLM-4.7) accepts it in chat_template_kwargs; the default
   // fake, like GLM-5.3-Flash's template, does not.
-  bool reads_enable_thinking = false;
+  std::atomic<bool> reads_enable_thinking{false};
+  std::atomic<bool> reads_reasoning_effort{true};
   bool template_reads(std::string_view name) const override {
-    return name == "enable_thinking" && reads_enable_thinking;
+    return (name == "reasoning_effort" && reads_reasoning_effort) || (name == "enable_thinking" && reads_enable_thinking);
   }
 
   std::vector<int64_t> encode_text(std::string_view text) const override {
@@ -559,7 +604,8 @@ struct ServiceRig {
                       bool with_markers = false,
                       bool reasoning_in_content = false,
                       dgpp::sched::AdmissionPolicy admission = {},
-                      int prefix_slots = 0)
+                      int prefix_slots = 0,
+                      dgpp::serve::FileInputConfig file_inputs = {})
       : engine(kSlots, /*total_blocks=*/100, /*block_tokens=*/4, can_sample),
         frontend(with_markers),
         cfg([&] {
@@ -572,6 +618,7 @@ struct ServiceRig {
           c.reasoning_in_content = reasoning_in_content;
           c.admission = admission;
           c.vocab_size = 512;  // the fake's ids are bytes and markers
+          c.file_inputs = std::move(file_inputs);
           return c;
         }()),
         service((engine.set_prefix_arena(prefix_slots, 4), cfg), &engine, &frontend,
@@ -813,8 +860,8 @@ DGPP_TEST(serve_refusalLadder_openAIErrorObjects) {
   post_and_expect(chat_body("abcd", 3,
                             ",\"tools\":[{\"type\":\"function\"}]"),
                   400, "\"param\":\"tools[0].function.name\"");
-  post_and_expect(chat_body("abcd", 3, ",\"user\":\"u1\""), 400,
-                  "\"param\":\"user\"");  // n is served since 2026-09-06
+  post_and_expect(chat_body("abcd", 3, ",\"user\":123"), 400,
+                  "\"param\":\"user\"");
   post_and_expect(
       "{\"model\":\"wrong-model\",\"messages\":[{\"role\":\"user\","
       "\"content\":\"hi\"}]}",
@@ -826,9 +873,9 @@ DGPP_TEST(serve_refusalLadder_openAIErrorObjects) {
   post_and_expect(
       "{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"user\","
       "\"content\":[{\"text\":\"hi\"}]}]}",
-      400, "\"param\":\"messages[0].content\"");
+      400, "\"param\":\"messages[0].content[0]\"");
   post_and_expect(
-      "{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"developer\","
+      "{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"unknown\","
       "\"content\":\"hi\"}]}",
       400, "\"param\":\"messages[0].role\"");
   post_and_expect(chat_body("abcd", 3,
@@ -865,6 +912,13 @@ DGPP_TEST(serve_overloadedQueue_503AtTheDoor) {
                                                       shed.substr(0, 120));
   require(shed.find("\"code\":\"overloaded\"") != std::string::npos,
           "overload error object");
+  Client third(rig.port());
+  const auto streaming = chat_body("efgh", 2, ",\"stream\":true");
+  third.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+                  std::to_string(streaming.size()) + "\r\n\r\n" + streaming);
+  const auto stream_shed = third.read_until("overloaded", 1000);
+  require(stream_shed.starts_with("HTTP/1.1 503") && stream_shed.find("text/event-stream") == std::string::npos,
+          "streaming overload is rejected before sending successful stream headers");
   rig.gate = false;
   const std::string done = first.read_until("usage", 5000);
   require(done.find("\"finish_reason\":\"length\"") != std::string::npos,
@@ -932,8 +986,13 @@ DGPP_TEST(serve_modelsHealthMetrics_theOpsSurface) {
   require(met.find("\"scheduler\":{") != std::string::npos &&
               met.find("\"service\":{") != std::string::npos,
           "metrics sections: " + met.substr(0, 200));
-  require(met == legacy_met,
-          "both metrics paths return the same response for an idle service");
+  const auto first = dgpp::minijson::parse(std::string_view(met).substr(met.find("\r\n\r\n") + 4));
+  const auto second = dgpp::minijson::parse(std::string_view(legacy_met).substr(legacy_met.find("\r\n\r\n") + 4));
+  for (const char* key : {"service", "prefix_cache", "prefill"})
+    require(json_of(first.root.at(key)) == json_of(second.root.at(key)), "metrics aliases agree");
+  for (const auto& m : first.root.at("scheduler").members())
+    if (m.key != "snapshot_age_ms")
+      require(json_of(m.value) == json_of(second.root.at("scheduler").at(m.key)), "scheduler gauges agree");
 }
 
 DGPP_TEST(serve_legacyCompletions_theTextCompletionObject) {
@@ -990,6 +1049,146 @@ void expect_invalid_request(const std::string& resp, const std::string& param) {
   require(error.at("type").as_string() == "invalid_request_error",
           "invalid request error type: " + resp);
   require(error.at("param").as_string() == param, "error names " + param + ": " + resp);
+}
+
+DGPP_TEST(serve_api_nullableFieldsAndTextCapabilities) {
+  ServiceRig rig;
+  const auto response = post_chat(rig, chat_body("abcd", 2,
+      R"(,"max_completion_tokens":null,"stream":null,"stream_options":null,"temperature":null,"top_p":null,"seed":null,"n":null,"logprobs":null,"top_logprobs":null,"reasoning_effort":null,"store":false,"modalities":["text"],"tool_choice":"none","parallel_tool_calls":false,"service_tier":"auto","metadata":{"job":"audit"},"user":"client","safety_identifier":"test")"), "\"metadata\"");
+  require(response.find("200 OK") != std::string::npos, "nullable/default text fields accepted: " + response);
+  const auto parsed = dgpp::minijson::parse(std::string_view(response).substr(response.find("\r\n\r\n") + 4));
+  require(parsed.root.at("service_tier").as_string() == "default", "actual service tier reported");
+  require(parsed.root.at("metadata").at("job").as_string() == "audit", "metadata echoed");
+}
+
+DGPP_TEST(serve_api_integerBoundsAndUnsupportedParameters) {
+  ServiceRig rig;
+  for (const auto& [extra, param] : {
+      std::pair{R"(,"max_completion_tokens":1.5)", "max_completion_tokens"},
+      std::pair{R"(,"max_completion_tokens":2147483648)", "max_completion_tokens"},
+      std::pair{R"(,"max_completion_tokens":1e100)", "max_completion_tokens"},
+      std::pair{R"(,"seed":9223372036854775808)", "seed"},
+      std::pair{R"(,"seed":-9223372036854775809)", "seed"},
+      std::pair{R"(,"n":1e100)", "n"},
+      std::pair{R"(,"store":true)", "store"},
+      std::pair{R"(,"modalities":["audio"])", "modalities"},
+      std::pair{R"(,"verbosity":"high")", "verbosity"},
+      std::pair{R"(,"prompt_cache_options":{"ttl":"30m"})", "prompt_cache_options"},
+      std::pair{R"(,"web_search_options":{})", "web_search_options"},
+      std::pair{R"(,"stream_options":{"include_usage":true})", "stream_options"}}) {
+    const auto body = "{\"model\":\"" + kModel + R"(","messages":[{"role":"user","content":"abcd"}])" + extra + "}";
+    expect_invalid_request(post_chat(rig, body, "\"param\""), param);
+  }
+  for (const char* seed : {"9223372036854775807", "-9223372036854775808"}) {
+    const auto response = post_chat(rig, chat_body("abcd", 2, std::string(",\"seed\":") + seed), "usage");
+    require(response.find("200 OK") != std::string::npos, "int64 boundary seed accepted");
+  }
+}
+
+DGPP_TEST(serve_api_opencodeProviderExtensionsRemainCompatible) {
+  ServiceRig rig(8, model_defaults(), true);
+  const std::string settings = R"(,"seed":42,"temperature":0.7,"top_p":0.95,"min_p":0.05,"presence_penalty":0.2,"repetition_penalty":1.1,"chat_template_kwargs":{"clear_thinking":false})";
+  require(post_chat(rig, chat_body("abcd", 2, settings), "usage").find("200 OK") != std::string::npos,
+          "baseline request accepted");
+  const auto globals = rig.frontend.last_globals();
+  const auto baseline = rig.engine.armed().back();
+  for (const std::string extension : {
+       R"(,"preserveThinking":true)", R"(,"preserveThinking":false)",
+       R"(,"preserveThinking":true,"client_extension":{"temperature":100,"store":true})"}) {
+    for (bool stream : {false, true}) {
+      const auto response = post_chat(rig, chat_body("abcd", 2, settings + extension +
+          (stream ? R"(,"stream":true,"stream_options":{"include_usage":true})" : "")),
+          stream ? "\r\n0\r\n\r\n" : "usage");
+      require(response.starts_with("HTTP/1.1 200 OK") &&
+                  response.find("\"completion_tokens\":2") != std::string::npos,
+              "OpenCode provider extensions work on both response paths: " + response);
+      require(rig.frontend.last_globals() == globals, "unknown options never alter template globals");
+      const auto armed = rig.engine.armed().back();
+      require(armed.seed == baseline.seed && armed.params.temperature == baseline.params.temperature &&
+                  armed.params.top_p == baseline.params.top_p && armed.params.min_p == baseline.params.min_p &&
+                  armed.params.presence_penalty == baseline.params.presence_penalty &&
+                  armed.params.repetition_penalty == baseline.params.repetition_penalty,
+              "provider extensions do not override validated sampling settings");
+    }
+  }
+  for (const auto& [extra, param] : {
+       std::pair{R"(,"temperature":100)", "temperature"},
+       std::pair{R"(,"store":true)", "store"},
+       std::pair{R"(,"web_search_options":{})", "web_search_options"},
+       std::pair{R"(,"audio":{"voice":"alloy","format":"wav"})", "audio"}}) {
+    expect_invalid_request(post_chat(rig, chat_body("abcd", 2,
+        std::string(R"(,"preserveThinking":true)") + extra), "\"param\""), param);
+  }
+}
+
+DGPP_TEST(serve_api_developerAndUnsupportedMedia) {
+  ServiceRig rig;
+  const auto response = post_chat(rig, "{\"model\":\"" + kModel +
+      R"(","max_tokens":2,"messages":[{"role":"developer","content":[{"type":"text","text":"abcd"}]}]})", "usage");
+  require(response.find("200 OK") != std::string::npos, "developer message accepted");
+  require(rig.frontend.last_globals().find("\"role\":\"system\"") != std::string::npos,
+          "developer instructions reach the checkpoint's system role");
+  expect_invalid_request(post_chat(rig, "{\"model\":\"" + kModel +
+      R"(","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.invalid/image"}}]}]})", "\"param\""),
+      "messages[0].content[0].type");
+}
+
+DGPP_TEST(serve_api_streamUsageAndObfuscation) {
+  ServiceRig rig;
+  for (const bool obfuscation : {false, true}) {
+    const auto response = post_chat(rig, chat_body("abcd", 3,
+        std::string(R"(,"stream":true,"stream_options":{"include_usage":true,"include_obfuscation":)") +
+        (obfuscation ? "true}" : "false}")), "\r\n0\r\n\r\n", 5000);
+    size_t at = 0;
+    int usage_chunks = 0, delta_chunks = 0;
+    while ((at = response.find("data: ", at)) != std::string::npos) {
+      at += 6;
+      const auto end = response.find("\n\n", at);
+      const auto payload = response.substr(at, end - at);
+      if (payload == "[DONE]") break;
+      const auto parsed = dgpp::minijson::parse(payload);
+      const auto& chunk = parsed.root;
+      require(chunk.at("object").as_string() == "chat.completion.chunk", "stream object");
+      if (chunk.at("choices").items().empty()) {
+        ++usage_chunks;
+        require(chunk.at("usage").at("completion_tokens").as_int() == 3, "final usage");
+      } else {
+        ++delta_chunks;
+        require(chunk.at("usage").is_null(), "non-final usage is null");
+        require((chunk.find("obfuscation") != nullptr) == obfuscation, "obfuscation opt-out honored");
+        if (obfuscation) require(payload.size() % 128 == 0, "stream payload size normalized");
+      }
+      at = end;
+    }
+    require(usage_chunks == 1 && delta_chunks >= 2, "one final usage chunk");
+  }
+}
+
+DGPP_TEST(serve_metrics_liveDuringBlockedPrefill) {
+  ServiceRig rig;
+  rig.engine.hold_prefill = true;
+  Client request(rig.port());
+  const auto body = chat_body("abcdefgh", 2);
+  request.send_all("POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+                   std::to_string(body.size()) + "\r\n\r\n" + body);
+  for (int i = 0; i < 500 && !rig.engine.prefill_entered.load(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  require(rig.engine.prefill_entered.load(), "engine entered synchronous prefill");
+  for (const char* path : {"/metrics", "/v1/metrics"}) {
+    Client metrics(rig.port());
+    metrics.send_all(std::string("GET ") + path + " HTTP/1.1\r\nHost: t\r\n\r\n");
+    const auto response = metrics.read_until("\"remaining_tokens\":4}}", 1000);
+    const auto parsed = dgpp::minijson::parse(std::string_view(response).substr(response.find("\r\n\r\n") + 4));
+    require(parsed.root.at("scheduler").at("prefilling").as_int() == 1, "live prefill gauge");
+    require(parsed.root.at("scheduler").at("active").as_int() == 1, "active during prefill");
+    const auto& progress = parsed.root.at("prefill");
+    require(progress.at("prompt_tokens").as_int() == 8 && progress.at("processed_tokens").as_int() == 4,
+            "chunk progress visible before scheduler pass returns");
+    require(progress.at("requests").items().size() == 1, "request detail");
+  }
+  rig.engine.hold_prefill = false;
+  require(request.read_until("usage", 3000).find("200 OK") != std::string::npos, "request finishes after release");
+  require(rig.engine.prefill_monitor()->snapshot().empty(), "completed prefill removed");
 }
 
 DGPP_TEST(serve_chatStream_usageRequiresOptIn) {
@@ -1092,7 +1291,9 @@ DGPP_TEST(serve_sampling_validationNamesTheField) {
   };
   refused(",\"temperature\":2.5", "temperature");
   refused(",\"temperature\":\"hot\"", "temperature");
-  refused(",\"top_p\":0", "top_p");
+  require(post_chat(rig, chat_body("abcd", 2, ",\"top_p\":0"), "usage").find("200 OK") != std::string::npos,
+          "top_p zero is valid and selects the highest-probability token");
+  refused(",\"top_p\":-0.1", "top_p");
   refused(",\"top_p\":1.01", "top_p");
   refused(",\"presence_penalty\":2.5", "presence_penalty");
   refused(",\"frequency_penalty\":-3", "frequency_penalty");
@@ -1101,7 +1302,9 @@ DGPP_TEST(serve_sampling_validationNamesTheField) {
   refused(",\"min_p\":2", "min_p");
   refused(",\"repetition_penalty\":0", "repetition_penalty");
   refused(",\"seed\":1.5", "seed");
-  require(rig.engine.armed().empty(), "no refused request reached the engine");
+  const auto armed = rig.engine.armed();
+  require(armed.size() == 1 && armed[0].params.top_k == 1 && armed[0].params.top_p == 1.0f,
+          "only the valid top_p zero request reached the engine, as a singleton nucleus");
 }
 
 DGPP_TEST(serve_sampling_greedyEngineCollapsesDefaultsLoudly) {
@@ -1229,6 +1432,76 @@ const std::string kWeatherTools =
     "\"properties\":{\"city\":{\"type\":\"string\"},\"days\":{\"type\":"
     "\"integer\"}},\"required\":[\"city\"]}}}]";
 
+DGPP_TEST(serve_logprobs_visibleContentOnly) {
+  ServiceRig rig(8, model_defaults(), true, std::nullopt, true);
+  for (const auto& [turn, expected, extra] : {
+       std::tuple{std::string("Think</think>OK<tool_call>get_weather<arg_key>city</arg_key><arg_value>Rome</arg_value></tool_call>"),
+                  std::string("OK"), std::string("")},
+       std::tuple{std::string("Think</think>OKSTOPafter"), std::string("OK"), std::string(",\"stop\":\"STOP\"")},
+       std::tuple{std::string("Think</think>OK<tool_call>broken"), std::string("OK<tool_call>broken"), std::string("")},
+       std::tuple{std::string("Think</think>OKST"), std::string("OKST"), std::string(",\"stop\":\"STOP\"")}}) {
+    for (bool stream : {false, true}) {
+      rig.engine.script(5, script_of(rig, turn));
+      const auto response = post_chat(rig, chat_body("abcd", 100,
+          ",\"logprobs\":true" + extra + (stream ? ",\"stream\":true" : "")),
+          stream ? "\r\n0\r\n\r\n" : "usage", 5000);
+      std::string tokens, content;
+      const auto inspect = [&](const dgpp::minijson::Value& choice) {
+        const auto& msg = choice.at(stream ? "delta" : "message");
+        if (const auto* text = msg.find("content"); text && text->is_string()) content += text->as_string();
+        const auto& lp = choice.at("logprobs");
+        if (!lp.is_null()) {
+          require(lp.at("refusal").is_null(), "required refusal logprobs field");
+          for (const auto& token : lp.at("content").items()) tokens += token.at("token").as_string();
+        }
+      };
+      if (stream) {
+        size_t at = 0;
+        while ((at = response.find("data: ", at)) != std::string::npos) {
+          at += 6;
+          const auto end = response.find("\n\n", at);
+          const auto payload = response.substr(at, end - at);
+          if (payload == "[DONE]") break;
+          const auto parsed = dgpp::minijson::parse(payload);
+          for (const auto& choice : parsed.root.at("choices").items()) inspect(choice);
+          at = end;
+        }
+      } else {
+        const auto parsed = dgpp::minijson::parse(std::string_view(response).substr(response.find("\r\n\r\n") + 4));
+        inspect(parsed.root.at("choices").items()[0]);
+      }
+      require(content == expected && tokens == expected,
+              "visible tokens only, including buffered tails: content=" + content + " logprobs=" + tokens);
+    }
+  }
+}
+
+DGPP_TEST(serve_metrics_requestCountsDoNotCountChoices) {
+  ServiceRig rig;
+  (void)post_chat(rig, chat_body("abcd", 2, ",\"n\":3"), "usage");
+  require(rig.service.stats().requests_total == 1, "n=3 is one HTTP request");
+  (void)post_chat(rig, chat_body("abcd", 2, ",\"store\":true"), "unsupported_parameter");
+  require(rig.service.stats().rejects_bad == 1, "bad request counter records the refusal");
+}
+
+DGPP_TEST(serve_api_allowedToolsAndToolTextParts) {
+  ServiceRig rig(8, model_defaults(), true, std::nullopt, true);
+  const std::string tools = R"(,"tools":[{"type":"function","function":{"name":"first"}},{"type":"function","function":{"name":"second"}}])";
+  const std::string choice = R"(,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"second"}}]}})";
+  (void)post_chat(rig, chat_body("abcd", 2, tools + choice), "usage");
+  const auto grammars = rig.engine.grammars();
+  require(grammars.size() == 1 && grammars[0].mode == dgpp::text::GrammarSpec::Mode::kRequired &&
+              grammars[0].tools.size() == 1 && grammars[0].tools[0].name == "second",
+          "only allowed function reaches the decoding constraint");
+  const std::string body = "{\"model\":\"" + kModel +
+      R"(","max_tokens":2,"messages":[{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"ab"},{"type":"text","text":"cd"}]}]})";
+  require(post_chat(rig, body, "usage").find("200 OK") != std::string::npos, "standard tool text parts accepted");
+  require(rig.frontend.last_globals().find(R"("content":"abcd")") != std::string::npos,
+          "tool text parts retain their order through template normalization");
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2,
+      R"(,"tools":[{"type":"function","function":{"name":"bad name"}}])")), "tools[0].function.name");
+}
+
 // Concatenates every `"<field>":"..."` payload in arrival order (the SSE
 // delta contract: clients concatenate fragments).
 std::string concat_field(const std::string& resp, const std::string& field) {
@@ -1255,7 +1528,7 @@ DGPP_TEST(serve_tools_requestSideRendersThroughTheTemplateAndRefusesByName) {
     const std::string ml = models.read_available(800);
     require(ml.find("\"tools\":{\"available\":true,\"constrained\":false},"
                     "\"response_format\":{\"json_object\":false,\"json_schema\":false},"
-                    "\"reasoning\":{\"in_content\":false}") != std::string::npos,
+                    "\"reasoning\":{\"in_content\":false,\"effort_mapping\":") != std::string::npos,
             "models advertise the tool surface (no masks on a greedy engine): " +
                 ml.substr(0, 400));
   }
@@ -1422,7 +1695,7 @@ DGPP_TEST(serve_toolCalls_oneShotMessageShapeAndFinishReason) {
                     "\"call_") != std::string::npos,
           "message shape: " + resp);
   require(resp.find("\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
-                    "\"arguments\":\"{\\\"city\\\": \\\"Paris\\\", \\\"days\\\": 3}\"}}]}") !=
+                    "\"arguments\":\"{\\\"city\\\": \\\"Paris\\\", \\\"days\\\": 3}\"}}],\"refusal\":null}") !=
               std::string::npos,
           "tool call shape: " + resp);
   require(resp.find("\"finish_reason\":\"tool_calls\"") != std::string::npos,
@@ -1596,13 +1869,13 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
   const std::string strict_tools =
       ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"strict\":STRICT,"
       "\"parameters\":{\"type\":\"object\",\"properties\":{\"days\":{\"type\":"
-      "\"number\",\"multipleOf\":2}}}}}]";
+      "\"number\",\"maxLength\":2}}}}}]";
   {
     std::string body = strict_tools;
     body.replace(body.find("STRICT"), 6, "true");
     const std::string resp = post_chat(rig, chat_body("abcd", 2, body));
     require(resp.find("400 ") != std::string::npos &&
-                resp.find("\"param\":\"tools[0].function.parameters.properties.days.multipleOf\"") !=
+                resp.find("\"param\":\"tools[0].function.parameters.properties.days.maxLength\"") !=
                     std::string::npos &&
                 resp.find("\"code\":\"unsupported_schema\"") != std::string::npos,
             "strict refuses by keyword path: " + resp.substr(0, 400));
@@ -1612,11 +1885,11 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
     const std::vector<dgpp::text::GrammarSpec> g3 = rig.engine.grammars();
     require(g3.size() == 8 && g3[7].tools[0].args.size() == 1 &&
                 g3[7].tools[0].args[0].kind == Kind::kJson &&
-                g3[7].tools[0].args[0].schema.find("multipleOf") != std::string::npos,
+                g3[7].tools[0].args[0].schema.find("maxLength") != std::string::npos,
             "non-strict: a narrowing keyword keeps the value typed");
     std::string shaped = strict_tools;
     shaped.replace(shaped.find("STRICT"), 6, "false");
-    shaped.replace(shaped.find("\"multipleOf\":2"), std::string("\"multipleOf\":2").size(), "\"$ref\":\"#/x\"");
+    shaped.replace(shaped.find("\"maxLength\":2"), std::string("\"maxLength\":2").size(), "\"$ref\":\"#/x\"");
     (void)post_until_usage(rig, chat_body("abcd", 64, shaped));
     const std::vector<dgpp::text::GrammarSpec> g4 = rig.engine.grammars();
     require(g4.size() == 9 && g4[8].tools[0].args.size() == 1 &&
@@ -1624,7 +1897,7 @@ DGPP_TEST(serve_toolChoice_armsTheGrammarNotThePrompt) {
             "non-strict: a shape keyword outside the subset leaves the value free");
     std::string bounded = strict_tools;
     bounded.replace(bounded.find("STRICT"), 6, "true");
-    bounded.replace(bounded.find("\"multipleOf\":2"), std::string("\"multipleOf\":2").size(),
+    bounded.replace(bounded.find("\"maxLength\":2"), std::string("\"maxLength\":2").size(),
                     "\"minimum\":0,\"maximum\":10");
     (void)post_until_usage(rig, chat_body("abcd", 64, bounded));
     const auto numeric = rig.engine.grammars().back().tools[0];
@@ -1649,7 +1922,7 @@ DGPP_TEST(serve_reasoning_foldKnobAndUnterminatedCallAtTheCap) {
   {
     Client models(fold.port());
     models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
-    require(models.read_available(800).find("\"reasoning\":{\"in_content\":true}") !=
+    require(models.read_available(800).find("\"reasoning\":{\"in_content\":true,") !=
                 std::string::npos,
             "models report the fold");
   }
@@ -1716,7 +1989,7 @@ DGPP_TEST(serve_responseFormat_armsTheJsonGrammar) {
   (void)post_until_usage(
       rig, chat_body("abcd", 64,
                      ",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":"
-                     "{\"name\":\"p\",\"schema\":{\"type\":\"string\",\"pattern\":\"^a\"}}}"));
+                     "{\"name\":\"p\",\"schema\":{\"type\":\"string\",\"maxLength\":3}}}"));
   // type text: no grammar.
   (void)post_until_usage(rig, chat_body("abcd", 64, ",\"response_format\":{\"type\":\"text\"}"));
   const std::vector<dgpp::text::GrammarSpec> g = rig.engine.grammars();
@@ -1772,8 +2045,8 @@ DGPP_TEST(serve_responseFormat_armsTheJsonGrammar) {
   };
   refused(",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"p\","
           "\"strict\":true,\"schema\":{\"type\":\"object\",\"properties\":{\"city\":"
-          "{\"type\":\"string\",\"pattern\":\"^a\"}}}}}",
-          "response_format.json_schema.schema.properties.city.pattern", "unsupported_schema");
+          "{\"type\":\"string\",\"maxLength\":3}}}}}",
+          "response_format.json_schema.schema.properties.city.maxLength", "unsupported_schema");
   refused(",\"response_format\":{\"type\":\"yaml\"}", "response_format.type", "");
   refused(",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"schema\":{}}}",
           "response_format.json_schema.name", "");
@@ -2651,9 +2924,9 @@ DGPP_TEST(serve_n_answersEveryChoiceByIndexAndSumsTheUsage) {
   // One-shot: two choices, both complete and indexed, the usage summed.
   const std::string one = post_full(rig, chat_body("abcd", 3, ",\"n\":2"));
   require(one.find("\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
-                   "\"content\":\"" + text + "\"}") != std::string::npos &&
+                   "\"content\":\"" + text + "\",\"refusal\":null}") != std::string::npos &&
               one.find("{\"index\":1,\"message\":{\"role\":\"assistant\","
-                       "\"content\":\"" + text + "\"}") != std::string::npos &&
+                       "\"content\":\"" + text + "\",\"refusal\":null}") != std::string::npos &&
               one.find("\"prompt_tokens\":4,\"completion_tokens\":6,"
                        "\"total_tokens\":10") != std::string::npos,
           "n=2 one-shot: " + one);
@@ -2684,8 +2957,8 @@ DGPP_TEST(serve_n_answersEveryChoiceByIndexAndSumsTheUsage) {
                 resp.find("\"completion_tokens\":6,") != std::string::npos,
             "the end sequence once: " + resp);
   }
-  // The bound: n outside [1, 8], or not an integer, is refused by name.
-  for (const std::string bad : {",\"n\":0", ",\"n\":9", ",\"n\":1.5", ",\"n\":\"2\""}) {
+  // The bound: n outside [1, 128], or not an integer, is refused by name.
+  for (const std::string bad : {",\"n\":0", ",\"n\":129", ",\"n\":1.5", ",\"n\":\"2\""}) {
     const std::string resp = post_chat(rig, chat_body("abcd", 3, bad));
     require(resp.find("400") != std::string::npos &&
                 resp.find("\"param\":\"n\"") != std::string::npos,
@@ -2751,7 +3024,279 @@ DGPP_TEST(serve_usage_reportsCachedAndReasoningTokens) {
           "cached tokens: " + hot);
 }
 
+DGPP_TEST(serve_extensions_customToolsWireHistoryAndChoice) {
+  ServiceRig rig(8, model_defaults(), true, std::nullopt, true);
+  const std::string tools = R"(,"tools":[{"type":"custom","custom":{"name":"code_exec","description":"Run code","format":{"type":"text"}}},{"type":"function","function":{"name":"normal","parameters":{"type":"object","properties":{}}}}])";
+  const std::string turn = "Think</think><tool_call>code_exec<arg_key>input</arg_key><arg_value>\"print(\\\"hi\\\")\\n\"</arg_value></tool_call>";
+  rig.engine.script(5, script_of(rig, turn));
+  const auto one = post_until_usage(rig, chat_body("abcd", 128, tools + R"(,"tool_choice":{"type":"custom","custom":{"name":"code_exec"}})"));
+  require(one.find(R"("type":"custom","custom":{"name":"code_exec","input":"print(\"hi\")\n"})") != std::string::npos,
+          "custom one-shot returns input, not JSON arguments: " + one);
+  require(one.find(R"("finish_reason":"tool_calls")") != std::string::npos, "custom finish reason");
+  const auto stream = post_chat(rig, chat_body("abcd", 128, tools + R"(,"stream":true,"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"custom","custom":{"name":"code_exec"}}]}})"), "[DONE]", 5000);
+  require(stream.find(R"("type":"custom","custom":{"name":"code_exec","input":""})") != std::string::npos,
+          "custom stream announces type/name/input: " + stream);
+  require(stream.find(R"("custom":{"input":"print(\"hi\")\n"})") != std::string::npos,
+          "custom input deltas reconstruct exact free-form text: " + stream);
+  require(rig.engine.grammars().back().tools.size() == 1, "allowed_tools filters mixed tool types");
+  const std::string history = "{\"model\":\"" + kModel + R"JSON(","messages":[{"role":"user","content":"abcd"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"custom","custom":{"name":"code_exec","input":"print(1)"}}]},{"role":"tool","tool_call_id":"call_1","content":"1"}],"max_tokens":2)JSON" + tools + "}";
+  const auto response = post_until_usage(rig, history);
+  require(response.find("200 OK") != std::string::npos, "custom call history accepted: " + response);
+  require(rig.frontend.last_globals().find(R"JSON("arguments":{"input":"print(1)"})JSON") != std::string::npos,
+          "custom history translated into model tool format");
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, tools + R"(,"tool_choice":{"type":"function","function":{"name":"code_exec"}})")), "tool_choice.type");
+}
+
+DGPP_TEST(serve_extensions_reasoningMapsAndConflicts) {
+  ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, true);
+  rig.frontend.reads_enable_thinking = true;
+  auto response = post_until_usage(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"none")"));
+  require(response.find("200 OK") != std::string::npos, "none accepted for switchable model");
+  require(rig.frontend.last_globals().find(R"("enable_thinking":false)") != std::string::npos &&
+          rig.frontend.last_globals().find("reasoning_effort") == std::string::npos, "none disables native thinking switch");
+  response = post_until_usage(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"max")"));
+  require(response.find("200 OK") != std::string::npos && rig.frontend.last_globals().find(R"("reasoning_effort":"max")") != std::string::npos,
+          "native max reaches model");
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"none","chat_template_kwargs":{"thinking":true})")), "chat_template_kwargs.enable_thinking");
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"high","chat_template_kwargs":{"enable_thinking":false})")), "chat_template_kwargs.enable_thinking");
+  rig.frontend.reads_enable_thinking = false;
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"none")")), "reasoning_effort");
+}
+
+DGPP_TEST(serve_extensions_fileUploadsInlineReferencesAndDeletion) {
+  ServiceRig rig;
+  const auto http = [&](const std::string& method, const std::string& path,
+                        const std::string& body = "", const std::string& type = "application/json") {
+    Client c(rig.port());
+    c.send_all(method + " " + path + " HTTP/1.1\r\nHost: t\r\nContent-Type: " + type +
+      "\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body);
+    return c.read_available(800);
+  };
+  const std::string inline_body = "{\"model\":\"" + kModel + R"(","messages":[{"role":"user","content":[{"type":"text","text":"Read this"},{"type":"file","file":{"filename":"input.txt","file_data":"aGVsbG8="}}]}],"max_tokens":2})";
+  auto answer = post_until_usage(rig, inline_body);
+  require(answer.find("200 OK") != std::string::npos, "inline file accepted: " + answer);
+  require(rig.frontend.last_globals().find("hello") != std::string::npos &&
+          rig.frontend.last_globals().find("aGVsbG8=") == std::string::npos, "decoded text reaches prompt");
+  const std::string upload = "--BOUND\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\nuser_data\r\n--BOUND\r\nContent-Disposition: form-data; name=\"file\"; filename=\"data.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--BOUND--\r\n";
+  const auto created = http("POST", "/v1/files", upload, "multipart/form-data; boundary=BOUND");
+  require(created.find("200 OK") != std::string::npos, "upload accepted: " + created);
+  const auto meta = dgpp::minijson::parse(std::string_view(created).substr(created.find("\r\n\r\n")+4));
+  const std::string id(meta.root.at("id").as_string());
+  const auto reference = "{\"model\":\"" + kModel + "\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"file\",\"file\":{\"file_id\":\"" + id + "\"}}]}],\"max_tokens\":2}";
+  const auto referenced = post_until_usage(rig, reference);
+  require(referenced.find("200 OK") != std::string::npos, "file_id input accepted: " + referenced);
+  require(http("GET", "/v1/files/"+id+"/content").ends_with("hello"), "download returns original file");
+  require(http("GET", "/v1/files").find(id) != std::string::npos, "list includes upload");
+  const auto deleted = http("DELETE", "/v1/files/"+id);
+  const auto deletion = dgpp::minijson::parse(std::string_view(deleted).substr(deleted.find("\r\n\r\n")+4));
+  require(deletion.root.at("deleted").as_bool(), "delete file: " + deleted);
+  require(post_chat(rig, reference).find("404 Not Found") != std::string::npos, "deleted reference fails");
+  std::string bad = inline_body;
+  bad.replace(bad.find("aGVsbG8="), 8, "aGVsbG9=");
+  require(post_chat(rig, bad).find("400 Bad Request") != std::string::npos, "invalid base64 padding rejected");
+}
+
+DGPP_TEST(serve_extensions_pdfWorkersKeepHealthResponsiveAndBounded) {
+  std::string directory = "/tmp/dgpp-pdf-worker-test-XXXXXX";
+  require(mkdtemp(directory.data()) != nullptr, "temporary extractor directory");
+  struct Cleanup { std::string path; ~Cleanup() { std::filesystem::remove_all(path); } } cleanup{directory};
+  const std::string command = directory + "/extract";
+  { std::ofstream out(command); out << "#!/bin/sh\nexec /bin/sleep 10\n"; }
+  require(chmod(command.c_str(), 0700) == 0, "executable test extractor");
+  dgpp::serve::FileInputConfig config;
+  config.pdf_command = command; config.pdf_timeout_ms = 1000; config.workers = 1;
+  ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, false, false, {}, 0, config);
+  const std::string body = "{\"model\":\"" + kModel + R"(","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"x.pdf","file_data":"JVBERi0="}}]}],"max_tokens":2})";
+  const auto request = "POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+  Client document(rig.port()); document.send_all(request);
+  require(document.read_available(100).empty(), "extractor still processing");
+  Client probe(rig.port()); probe.send_all("GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
+  require(probe.read_until("\"status\":\"ok\"", 250).find("200 OK") != std::string::npos,
+          "health responds during PDF extraction");
+  Client busy(rig.port()); busy.send_all(request);
+  require(busy.read_until("file_processing_busy", 250).find("503 Service Unavailable") != std::string::npos,
+          "configured worker cap bounds processing");
+  require(document.read_until("PDF extraction timed out", 2000).find("408 Request Timeout") != std::string::npos,
+          "extractor deadline returns an API error and reaps the process");
+  Client interrupted(rig.port()); interrupted.send_all(request);
+  require(interrupted.read_available(100).empty(), "next extractor processing");
+  rig.drain(false);
+  require(interrupted.read_until("server_shutdown", 500).find("503 Service Unavailable") != std::string::npos,
+          "shutdown stops extraction and drains its error response");
+  require(rig.service.drained(), "file preprocessing participates in shutdown drain");
+}
+
+DGPP_TEST(serve_edge_customToolValidationAndHistory) {
+  ServiceRig rig(8, model_defaults(), true, std::nullopt, true);
+  const std::string prefix = R"(,"tools":[{"type":"custom","custom":)";
+  for (const auto& [custom, param] : std::vector<std::pair<std::string,std::string>>{
+      {"null", "tools[0].custom"}, {"{}", "tools[0].custom.name"},
+      {R"({"name":"bad name"})", "tools[0].custom.name"},
+      {R"({"name":"exec","description":false})", "tools[0].custom.description"},
+      {R"({"name":"exec","format":null})", "tools[0].custom.format.type"},
+      {R"({"name":"exec","format":{"type":"json"}})", "tools[0].custom.format.type"},
+      {R"({"name":"exec","format":{"type":"grammar"}})", "tools[0].custom.format.grammar"},
+      {R"({"name":"exec","format":{"type":"grammar","grammar":{"syntax":"regex","definition":"["}}})", "tools[0].custom.format.grammar"},
+      {R"({"name":"exec","format":{"type":"grammar","grammar":{"syntax":"lark","definition":"start: a\na: start"}}})", "tools[0].custom.format.grammar"},
+      {R"({"name":"exec","format":{"type":"grammar","grammar":{"syntax":"unknown","definition":"x"}}})", "tools[0].custom.format.grammar"}}) {
+    expect_invalid_request(post_chat(rig, chat_body("abcd", 2, prefix + custom + "}]"), "\"param\""), param);
+  }
+  const std::string tools = R"(,"tools":[{"type":"custom","custom":{"name":"exec"}}])";
+  for (const auto& [choice, param] : std::vector<std::pair<std::string,std::string>>{
+      {R"({"type":"custom","custom":{}})", "tool_choice.custom.name"},
+      {R"({"type":"custom","custom":{"name":"missing"}})", "tool_choice.custom.name"},
+      {R"({"type":"function","function":{"name":"exec"}})", "tool_choice.type"},
+      {R"({"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"custom","custom":{"name":"exec"}},{"type":"custom","custom":{"name":"exec"}}]}})", "tool_choice.allowed_tools.tools"}}) {
+    expect_invalid_request(post_chat(rig, chat_body("abcd", 2, tools + ",\"tool_choice\":" + choice), "\"param\""), param);
+  }
+  const std::string history_prefix = "{\"model\":\"" + kModel + R"(","messages":[{"role":"assistant","tool_calls":[)";
+  for (const auto& [call, param] : std::vector<std::pair<std::string,std::string>>{
+      {R"({"type":"custom","custom":{"name":"exec","input":""}})", "messages[0].tool_calls[0].id"},
+      {R"({"id":"call_1","type":"custom","custom":{"name":"exec","input":{}}})", "messages[0].tool_calls[0].custom"}}) {
+    expect_invalid_request(post_chat(rig, history_prefix + call + "]}]}", "\"param\""), param);
+  }
+  const auto accepted = post_until_usage(rig, history_prefix + R"({"id":"call_1","type":"custom","custom":{"name":"exec","input":""}})" + "]}],\"max_tokens\":2}");
+  require(accepted.find("200 OK") != std::string::npos, "empty custom history input is a valid string");
+}
+
+DGPP_TEST(serve_edge_reasoningAliasesAndSwitchOnlyModels) {
+  ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, true);
+  rig.frontend.reads_enable_thinking = true;
+  for (const auto* value : {"false", "1", "[]", "\"extreme\""})
+    expect_invalid_request(post_chat(rig, chat_body("abcd", 2, std::string(",\"reasoning_effort\":") + value), "\"param\""), "reasoning_effort");
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"low","chat_template_kwargs":{"reasoning_effort":"high"})"), "\"param\""), "chat_template_kwargs.reasoning_effort");
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, R"(,"chat_template_kwargs":{"thinking":true,"enable_thinking":false})"), "\"param\""), "chat_template_kwargs.thinking");
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, R"(,"chat_template_kwargs":{"enable_thinking":true,"enable_thinking":false})"), "\"param\""), "chat_template_kwargs.enable_thinking");
+  const auto response = post_until_usage(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"none","chat_template_kwargs":{"thinking":false,"enable_thinking":false})"));
+  require(response.find("200 OK") != std::string::npos, "agreeing reasoning aliases accepted");
+  const auto globals_text = rig.frontend.last_globals();
+  const auto globals = dgpp::minijson::parse(globals_text);
+  int switches = 0;
+  for (const auto& m : globals.root.members()) switches += m.key == "enable_thinking";
+  require(switches == 1, "thinking aliases produce one unambiguous native global");
+  rig.frontend.reads_reasoning_effort = false;
+  for (const auto* effort : {"minimal","low","medium","high","xhigh","max"}) {
+    const auto result = post_until_usage(rig, chat_body("abcd", 2, std::string(R"(,"reasoning_effort":")") + effort + "\""));
+    require(result.find("200 OK") != std::string::npos, "switch-only model accepts positive effort");
+    require(rig.frontend.last_globals().find(R"("enable_thinking":true)") != std::string::npos &&
+            rig.frontend.last_globals().find("reasoning_effort") == std::string::npos, "no invented effort level on switch-only model");
+  }
+  rig.frontend.reads_enable_thinking = false;
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"low")"), "\"param\""), "reasoning_effort");
+}
+
+DGPP_TEST(serve_edge_filePreprocessingPipeliningAndDisconnect) {
+  ServiceRig rig;
+  const std::string body = "{\"model\":\"" + kModel + R"(","messages":[{"role":"user","content":[{"type":"\u0066ile","\u0066ile":{"\u0066ilename":"x.txt","\u0066ile_data":"aGVsbG8="}}]}],"max_tokens":2})";
+  const std::string request = "POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+  Client pipeline(rig.port());
+  pipeline.send_all(request + "GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
+  const auto responses = pipeline.read_until(R"("status":"ok")", 3000);
+  require(responses.find("chat.completion") < responses.find(R"("status":"ok")"), "file chat response precedes pipelined health response");
+  require(responses.find("400 Bad Request") == std::string::npos && rig.frontend.last_globals().find("hello") != std::string::npos,
+          "escaped file part reaches ordinary completion pipeline");
+  for (int i = 0; i < 12; ++i) { Client gone(rig.port()); gone.send_all(request); gone.hard_close(); }
+  Client health(rig.port()); health.send_all("GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
+  require(health.read_until(R"("status":"ok")", 3000).find("200 OK") != std::string::npos,
+          "disconnect during preprocessing never leaves stale response writers");
+}
+
+DGPP_TEST(serve_edge_customToolsMultipleChoicesAndExactStreamingInput) {
+  ServiceRig rig(8, model_defaults(), true, std::nullopt, true);
+  const std::string input = "\nprint(\"日本語😀\")\\tail\t";
+  const std::string encoded = dgpp::text::Value::string_value(input).to_json(false);
+  const std::string turn = "ok</think><tool_call>exec<arg_key>input</arg_key><arg_value>" + encoded +
+      "</arg_value></tool_call><tool_call>normal<arg_key>value</arg_key><arg_value>7</arg_value></tool_call>";
+  rig.engine.script(5, script_of(rig, turn));
+  const std::string tools = R"(,"n":2,"tools":[{"type":"custom","custom":{"name":"exec"}},{"type":"function","function":{"name":"normal","parameters":{"type":"object","properties":{"value":{"type":"integer"}}}}}])";
+  const auto response = post_until_usage(rig, chat_body("abcd", 128, tools));
+  const auto parsed = dgpp::minijson::parse(std::string_view(response).substr(response.find("\r\n\r\n")+4));
+  const auto& choices = parsed.root.at("choices").items();
+  require(choices.size() == 2, "two choices returned");
+  for (const auto& choice : choices) {
+    const auto& calls = choice.at("message").at("tool_calls").items();
+    require(calls.size() == 2 && calls[0].at("type").as_string() == "custom" && calls[1].at("type").as_string() == "function",
+            "mixed tool types retain independent wire shapes");
+    require(calls[0].at("custom").at("input").as_string() == input, "one-shot custom input preserves exact Unicode and whitespace");
+    require(choice.at("finish_reason").as_string() == "tool_calls", "both choices finish as tool calls");
+  }
+  require(choices[0].at("message").at("tool_calls").items()[0].at("id").as_string() !=
+          choices[1].at("message").at("tool_calls").items()[0].at("id").as_string(), "call IDs differ across choices");
+  const auto stream = post_chat(rig, chat_body("abcd", 128, tools + R"(,"stream":true,"stream_options":{"include_usage":true})"), "[DONE]", 5000);
+  std::map<int, std::string> inputs;
+  std::map<int, int> starts, finishes;
+  int usage_chunks = 0;
+  for (size_t at = 0; (at = stream.find("data: ", at)) != std::string::npos;) {
+    at += 6;
+    const auto end = stream.find('\n', at);
+    const auto payload = std::string_view(stream).substr(at, end-at);
+    if (payload == "[DONE]") break;
+    const auto event = dgpp::minijson::parse(payload);
+    if (const auto* usage = event.root.find("usage"); usage && usage->is_object()) ++usage_chunks;
+    for (const auto& choice : event.root.at("choices").items()) {
+      const int index = choice.at("index").as_int();
+      if (const auto* finish = choice.find("finish_reason"); finish && finish->as_string() == "tool_calls") ++finishes[index];
+      const auto* calls = choice.at("delta").find("tool_calls");
+      if (!calls) continue;
+      for (const auto& call : calls->items()) {
+        if (const auto* custom = call.find("custom")) {
+          require(call.at("index").as_int() == 0 && !call.find("function"), "custom delta preserves tool index and type");
+          if (custom->find("name")) ++starts[index];
+          if (const auto* delta = custom->find("input")) inputs[index] += delta->as_string();
+        }
+      }
+    }
+  }
+  require(inputs.size() == 2 && inputs[0] == input && inputs[1] == input && starts[0] == 1 && starts[1] == 1 &&
+          finishes[0] == 1 && finishes[1] == 1 && usage_chunks == 1, "SSE reconstructs both custom inputs, one finish per choice, one final usage");
+}
+
+DGPP_TEST(serve_edge_malformedModelCustomOutputTerminatesWithError) {
+  ServiceRig rig(8, model_defaults(), true, std::nullopt, true);
+  rig.engine.script(5, script_of(rig, "ok</think><tool_call>exec<arg_key>wrong</arg_key><arg_value>oops</arg_value></tool_call>"));
+  const std::string tools = R"(,"tools":[{"type":"custom","custom":{"name":"exec"}}])";
+  const auto once = post_chat(rig, chat_body("abcd", 128, tools), "invalid_tool_output", 3000);
+  require(once.find("server_error") != std::string::npos && once.find("200 OK") == std::string::npos,
+          "malformed custom result cannot become a successful completion");
+  const auto stream = post_chat(rig, chat_body("abcd", 128, tools + R"(,"stream":true)"), "[DONE]", 3000);
+  require(stream.find("invalid_tool_output") != std::string::npos && stream.find("[DONE]") != std::string::npos &&
+          stream.find(R"("finish_reason":"tool_calls")") == std::string::npos, "stream emits terminal error and DONE");
+}
+
 int main() {
   dgpp::set_log_level_from_env("DGPP_LOG_LEVEL");
   return dgpp::test::run_all();
+}
+
+DGPP_TEST(serve_images_capability_validation_and_streaming) {
+  ServiceRig rig;
+  const std::string png =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
+      "x8AAwMCAO+a0ioAAAAASUVORK5CYII=";
+  const auto body = [&](const std::string& url, bool stream) {
+    return "{\"model\":\"glm-5.3-flash-fp8\",\"max_tokens\":1,\"stream\":" +
+           std::string(stream ? "true" : "false") +
+           ",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+           "\"describe\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"" +
+           url + "\"}}]}]}";
+  };
+  auto response = post_chat(rig, body(png, false), "unsupported_content_type");
+  require(response.find("400 Bad Request") != std::string::npos,
+          "text-only frontend refuses images");
+  rig.frontend.images_available = true;
+  response = post_chat(rig, body(png, false), "unsupported_content_type");
+  require(response.find("400 Bad Request") != std::string::npos, "text-only engine refuses images");
+  rig.engine.images_available = true;
+  response = post_chat(rig, body(png, false), "usage");
+  require(response.find("200 OK") != std::string::npos &&
+              response.find("\"prompt_tokens\":24") != std::string::npos,
+          "image expansion counted in usage: " + response);
+  response = post_chat(rig, body(png, true), "[DONE]");
+  require(
+      response.find("200 OK") != std::string::npos && response.find("[DONE]") != std::string::npos,
+      "image SSE completes");
+  require(rig.engine.image_prefills == 2, "image payload reached both prefills");
+  response = post_chat(rig, body("data:image/png;base64,AAAA", false), "invalid_image");
+  require(response.find("messages[0].content[1].image_url.url") != std::string::npos,
+          "invalid image names the precise field");
 }

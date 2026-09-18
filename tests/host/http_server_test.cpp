@@ -10,6 +10,7 @@
 //     cancellation hook;
 //   * the refusal ladder: malformed → 400 close, chunked request bodies
 //     → 501, POST without length → 411, oversized headers → 431,
+//     configurable body size → 413 before reading the body,
 //     connection cap → 503 at the door;
 //   * stop() returns the loop promptly.
 #include <arpa/inet.h>
@@ -120,6 +121,7 @@ class Client {
 // --- the TestHandler: routes the gate exercises -----------------------
 class TestHandler : public HttpHandler {
  public:
+  std::atomic<int> requests{0};
   std::atomic<int> disconnects{0};
   std::atomic<uint64_t> last_tag{0};
 
@@ -130,6 +132,7 @@ class TestHandler : public HttpHandler {
   // GET  /drip   → SSE: 4 events from idle(), one per pass, + end
   // GET  /tagged → SSE with tag 42; only the client's close ends it
   void handle(const HttpRequest& req, HttpResponseWriter& w) override {
+    ++requests;
     if (req.path == "/hello" && req.method == "GET") {
       w.respond(200, "application/json", "{\"ok\":true}");
     } else if (req.path == "/echo" && req.method == "POST") {
@@ -184,8 +187,9 @@ struct ServerHandle {
   HttpServer server;
   std::thread loop;
 
-  explicit ServerHandle(int max_connections = 64)
-      : server(0, &handler, max_connections),
+  explicit ServerHandle(int max_connections = 64,
+                        int64_t max_body_bytes = dgpp::serve::kDefaultHttpMaxBodyBytes)
+      : server(0, &handler, max_connections, "127.0.0.1", max_body_bytes),
         loop([this] { server.serve(); }) {}
   ~ServerHandle() {
     server.stop();
@@ -268,6 +272,77 @@ DGPP_TEST(http_postBody_contentLengthDeliveredVerbatim) {
   require(resp.find("200 OK") != std::string::npos,
           "echo status: " + resp);
   require(resp.find(body) != std::string::npos, "echo body: " + resp);
+}
+
+DGPP_TEST(http_default_body_limit_accepts_large_prefill_payloads) {
+  ServerHandle sh;
+  Client c(sh.port());
+  const std::string body = "{\"document\":\"" + std::string(5 * 1024 * 1024, 'x') + "\"}";
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+             std::to_string(body.size()) + "\r\n\r\n" + body);
+  const std::string response = c.read_available(500);
+  require(response.starts_with("HTTP/1.1 200 OK\r\n"), "payload above the former 4 MiB cap accepted");
+  require(response.substr(response.find("\r\n\r\n") + 4) == body,
+          "large serialized document reaches the handler intact");
+}
+
+DGPP_TEST(http_body_limit_applies_per_request_at_the_configured_boundary) {
+  constexpr int64_t limit = 32768;
+  ServerHandle sh(64, limit);
+  Client c(sh.port());
+  for (const size_t size : {limit - 1, limit}) {
+    const std::string body(size, 'x');
+    c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+               std::to_string(size) + "\r\n\r\n");
+    c.send_all(std::string_view(body).substr(0, size - 1));
+    require(c.read_available(50).empty(), "partial body waits for its final byte");
+    c.send_all(std::string_view(body).substr(size - 1));
+    const std::string response = c.read_available(100);
+    require(response.starts_with("HTTP/1.1 200 OK\r\n"), "body at or below configured cap accepted");
+    require(response.substr(response.find("\r\n\r\n") + 4) == body,
+            "fragmented body reaches handler intact on reused connection");
+  }
+  c.send_all("POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+             std::to_string(limit + 1) + "\r\n\r\n");
+  const std::string response = c.read_available(500);
+  require(response.starts_with("HTTP/1.1 413 Content Too Large\r\n"),
+          "one byte over cap rejected from headers alone");
+  require(response.find("http.max_body_bytes is 32768 bytes") != std::string::npos,
+          "refusal identifies the configured byte cap");
+  require(response.find("Content-Type: application/json\r\n") != std::string::npos &&
+              response.find("\"error\":{\"message\":") != std::string::npos &&
+              response.find("\"code\":\"request_too_large\"") != std::string::npos,
+          "transport refusal uses the OpenAI error envelope");
+  require(response.find("Connection: close\r\n") != std::string::npos, "oversized request closes connection");
+  require(sh.handler.requests.load() == 2, "oversized request never reaches handler");
+}
+
+DGPP_TEST(http_body_limit_can_exceed_default) {
+  const int64_t length = dgpp::serve::kDefaultHttpMaxBodyBytes + 1;
+  ServerHandle normal;
+  ServerHandle larger(64, 2 * dgpp::serve::kDefaultHttpMaxBodyBytes);
+  const std::string headers = "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: " +
+                              std::to_string(length) + "\r\n\r\n";
+  Client a(normal.port());
+  a.send_all(headers);
+  require(a.read_available(500).starts_with("HTTP/1.1 413 Content Too Large\r\n"),
+          "default still bounds uploads");
+  Client b(larger.port());
+  b.send_all(headers);
+  require(b.read_available(100).empty(), "larger configured cap permits a body above the default");
+  b.hard_close();
+  require(normal.handler.requests.load() == 0 && larger.handler.requests.load() == 0,
+          "headers alone do not invoke the handler");
+}
+
+DGPP_TEST(http_body_limit_must_be_positive) {
+  TestHandler handler;
+  for (const int64_t limit : {0, -1}) {
+    bool refused = false;
+    try { HttpServer invalid(0, &handler, 64, "127.0.0.1", limit); }
+    catch (const std::invalid_argument&) { refused = true; }
+    require(refused, "nonpositive body cap rejected before opening listener");
+  }
 }
 
 DGPP_TEST(http_malformedRequestLine_400AndClose) {

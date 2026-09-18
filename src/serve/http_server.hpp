@@ -19,7 +19,7 @@
 // HTTP/1.1 keep-alive; request bodies by Content-Length only (chunked
 // REQUEST bodies → 501; curl and every OpenAI client send lengths); SSE
 // responses via chunked transfer encoding. Limits: 16 KiB of headers,
-// 4 MiB of body, a configurable connection cap — beyond them,
+// a configurable body cap (default 256 MiB) and connection cap — beyond them,
 // 431/413/503 with the connection closed. Malformed input → 400 close.
 // Fuzzing hardening is M9; the parser is defensive anyway (it runs in
 // the same process as the engine).
@@ -30,6 +30,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "serve/http_limits.hpp"
 
 namespace dgpp::serve {
 
@@ -104,8 +106,11 @@ class HttpHandler {
 class HttpServer {
  public:
   // `max_connections` beyond which accept answers 503 + close.
+  // `max_body_bytes` is a positive byte ceiling, checked from Content-Length;
+  // buffers grow with received data, not with the configured ceiling.
   HttpServer(uint16_t port, HttpHandler* handler, int max_connections,
-             const std::string& bind_host = "127.0.0.1");
+             const std::string& bind_host = "127.0.0.1",
+             int64_t max_body_bytes = kDefaultHttpMaxBodyBytes);
   ~HttpServer();
 
   HttpServer(const HttpServer&) = delete;
@@ -138,6 +143,7 @@ class HttpServer {
   uint16_t port_;
   HttpHandler* handler_;
   int max_connections_;
+  size_t max_body_bytes_;
   int listen_fd_ = -1;
   int epoll_fd_ = -1;
   std::atomic<bool> stopping_{false};

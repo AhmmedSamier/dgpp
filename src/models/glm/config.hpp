@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "loaders/minijson.hpp"
+#include "models/glm/vision_config.hpp"
 #include "models/dsa_geometry.hpp"
 #include "models/glm/mhc.hpp"
 #include "models/glm/moe.hpp"
@@ -91,6 +92,7 @@ struct GlmGenerationDefaults {
 };
 
 struct GlmTextConfig {
+  std::optional<GlmVisionConfig> vision;
   // --- model shape -------------------------------------------------------
   int hidden_size = 4096;
   int vocab_size = 154880;

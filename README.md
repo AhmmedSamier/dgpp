@@ -81,6 +81,12 @@ record the modes measured for each deployment.
   Completions, streaming, constrained tool calls, `response_format` with
   supported JSON schemas, `reasoning_content`, logprobs, `stop`, `n`,
   `logit_bias` and usage details; plus model, health and metrics endpoints.
+  See the [API compatibility profile and live prefill metrics](docs/openai-compatibility.md)
+  for supported options and model-dependent limitations.
+- **GLM-5.3-Flash image inputs**: PNG/JPEG data URIs in Chat Completions,
+  using the checkpoint's native vision encoder. Multiple images, streaming
+  and MTP work together; see [image inputs](docs/vision.md) for examples,
+  memory requirements and the current prefix-cache restriction.
 - **Deterministic across ranks**: admissions journaled from the head, every
   tick's operation-stream digest checked on every peer, and all ranks'
   complete streams compared at shutdown.
@@ -190,9 +196,13 @@ Build the server on rank 0; the launcher stages the executable on peers.
 If CUDA is not found, see [compiler setup](docs/getting-started.md#5-build-the-server-on-rank-0).
 
 ```bash
-cmake --preset ci
-cmake --build --preset ci --target dgpp_serve_app -j 4
+cmake --preset release
+cmake --build --preset release -j 4
 ```
+
+The release preset produces `build-release/dgpp-serve` with `-O3` optimization
+and no debug symbols. Testing uses the separate `ci` preset and `build-ci/`
+directory, with debug symbols retained; see [testing](docs/testing.md).
 
 ### 4. Download the checkpoint
 
@@ -272,7 +282,8 @@ image caches on its local NVMe. `install` unpacks under `paths.release_dir`
 manifest. Versions can be installed side by side; stop the running service
 and select an older version to roll back. The launcher starts the service
 on demand; no boot-time service units are included. When no release is
-selected, `up` stages `build-ci/dgpp-serve` to the peers.
+selected, `up` stages `build-release/dgpp-serve` to the peers. Use
+`--bin build-ci/dgpp-serve` explicitly when deploying a testing build.
 
 ## Configuration
 
@@ -295,7 +306,8 @@ scripts' environment and generated server config.
 | `DGPP_LOG_DIR` | Base directory on rank 0 for logs, process records and collected peer logs. The launcher adds a deployment-specific subdirectory. | `~/dgpp/log` |
 | `DGPP_STAGE_DIR` | Base directory on peers for staged development binaries, runtime config and logs. The launcher adds a deployment-specific subdirectory; it is not the model cache. | `/tmp/bus4` |
 | `DGPP_RELEASE_DIR` | Base directory on each node for versioned installed server releases. Use a persistent, writable location. | `~/dgpp/releases` |
-| `DGPP_BUILD_DIR`, `DGPP_DATA_DIR` | Development binary and evaluation-data locations. Relative paths use the repository root; change only for a custom build/data layout. | `build-ci`, `data` |
+| `DGPP_BUILD_DIR` | Explicit build-directory override. Relative paths use the repository root. Leave unset to keep release and testing builds separate. | `build-release` for serving/packaging; `build-ci` for testing (`build-<preset>` with `DGPP_PRESET`) |
+| `DGPP_DATA_DIR` | Evaluation-data location. Relative paths use the repository root. | `data` |
 | `HF_HUB_CACHE`, `HF_HOME` | Downloaded checkpoints. An explicit hub cache wins; otherwise use `HF_HOME/hub`. Leave unset for the standard cache or choose a disk with room for the full checkpoint on each node. | `~/.cache/huggingface/hub` |
 | `DGPP_RESIDENT_CACHE_DIR` | Per-node disk cache of prepacked weight images for faster reloads, separate from the HF checkpoint. Takes precedence over deployment `paths.resident_cache`. | `~/.cache/dgpp/resident` |
 | `DGPP_ROCE_DEVICES` | One or two ordered local verbs device names, not Linux interface names. Use `discover_roce.py`; match lane subnets in the same order across nodes. | discover active Ethernet devices |
@@ -343,6 +355,7 @@ templates set their serving options explicitly.
 | `world_size` | yes | Number of participating nodes/ranks: 1, 2 or 4. Uses the first N entries of `DGPP_NODES`; each rank stores its tensor-parallel share in memory. Choose a supported model/world pair, not an arbitrary smaller number to save machines. | — |
 | `http.bind_host` | no | IPv4 address on rank 0 that accepts API connections. `127.0.0.1` is local-only; a LAN address exposes that interface; `0.0.0.0` exposes all IPv4 interfaces. The server has no authentication/TLS. Does not select the RoCE interface. | `DGPP_HTTP_BIND`, otherwise `127.0.0.1` |
 | `http.port` | no | TCP port clients use for the API, in 1–65535. Change it if the default is occupied, then update client URLs. Overrides the site HTTP port and must differ from fabric/journal ports in a multi-node deployment. | `DGPP_HTTP_PORT`, otherwise 18080 |
+| `http.max_body_bytes` | no | Maximum serialized HTTP request body in bytes, as a positive integer. Allows large document prefills and agent histories; independent of the model's token/KV capacity. Oversized requests receive HTTP 413 based on Content-Length, before tokenization. Buffers grow with received data, so this does not preallocate the limit per connection. The binary flag `--http-max-body-bytes` overrides it. | 268435456 (256 MiB) |
 | `release` | no | Installed software version to run on every node, not a model revision. Select a version under `DGPP_RELEASE_DIR/dgpp-VERSION`; use it to upgrade or roll back server binaries. `--release` overrides this field; `--bin` overrides binary selection. | Empty: use the development build |
 | `paths.resident_cache` | no | Disk directory for prepacked per-rank weight images, which speed subsequent loads. This is separate from the Hugging Face download cache and consumes additional disk space. Prefer the shared `DGPP_RESIDENT_CACHE_DIR` site setting unless a deployment needs its own directory. | Empty: `~/.cache/dgpp/resident`; `DGPP_RESIDENT_CACHE_DIR` takes precedence |
 

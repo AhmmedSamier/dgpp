@@ -6,6 +6,57 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **GLM-5.3-Flash image inputs** (2026-09-18): accept PNG/JPEG data URIs
+  through Chat Completions, journal processed pixels across ranks, and run
+  the native BF16 vision encoder before prompt prefill, including MTP.
+  Report model input modalities and visual prompt-token usage. Image requests
+  bypass the token-only prefix cache. Add encoder reference checks, API tests
+  and [usage documentation](docs/vision.md). Match the CUDA BF16 eager reference
+  bitwise across the pinned regression corpus after correcting rounding and
+  reduction arithmetic; see the [numerical investigation](benchmarks/results/2026-09-18-glm-vision-numerics.md).
+- **Release packaging with bundled PCRE2** (2026-09-18): exclude the dependency's
+  standalone install rules from DGPP's runtime package. Server-only builds
+  no longer fail packaging because the unused `libpcre2-posix.a` was never
+  built. Add a host-only build/install regression test using the actual
+  dependency configuration.
+- **Chat extension edge-case validation** (2026-09-18): cover malformed file
+  inputs, storage quota races, multipart boundaries, custom-tool streaming
+  and history, native reasoning mappings, schema bounds/references/formats,
+  and malformed Lark grammars. Fix escaped file detection, corrupt metadata
+  handling, array-bound overflow, missing pointer array traversal, impossible
+  scalar enums, Lark escapes/cycles, leap-second validation, custom error
+  fields/history IDs and duplicate thinking globals. Record reproducible
+  checks and remaining limits in `docs/openai-api-validation.md`.
+- **Document inputs and richer Chat tools** (2026-09-18): add inline and
+  uploaded file inputs, bounded asynchronous PDF/text extraction and a
+  configurable persistent file store. Add custom tools with text, regex and
+  Lark formats; map reasoning effort through each model's native controls.
+  Enforce local/recursive JSON Schema references, string patterns and formats,
+  and exact decimal multiples during constrained decoding. Document limits,
+  model mappings and the rank-0 `poppler-utils` dependency in
+  `docs/openai-compatibility.md`.
+- **OpenCode provider-option compatibility** (2026-09-18): restore acceptance
+  of unknown top-level client extensions, including `preserveThinking`.
+  The API audit's strict allowlist incorrectly rejected previously working
+  requests. Supported options remain validated and known unsupported API
+  features still produce explicit errors. Add streaming and one-shot coverage.
+- **Chat API audit and live prefill metrics** (2026-09-18): align nullable
+  options, developer messages, numeric bounds, streamed usage and obfuscation
+  with the OpenAI reference; validate unsupported capabilities explicitly.
+  Correct visible-content logprobs, transport error envelopes and HTTP request
+  counters for multiple choices. Publish per-request prefill progress while a
+  scheduler pass is still running. Document the supported text/tool profile
+  and the DGPP metrics extension in `docs/openai-compatibility.md`.
+- **Release and testing builds** (2026-09-18): the release preset builds the
+  production server with explicit `-O3`, no debug information, and link-time
+  stripping. Deployment defaults to `build-release/dgpp-serve`; testing keeps
+  `build-ci/` and debug symbols, selectable with `--bin`. Release packaging
+  rejects testing build directories and debug/sanitizer artifacts.
+- **Configurable HTTP body limit** (2026-09-18): `http.max_body_bytes` in
+  deployment JSON, or `--http-max-body-bytes`, controls the serialized request
+  limit. The default rises from 4 MiB to 256 MiB for large document prefills
+  and agent histories. HTTP 413 responses name the configured byte cap;
+  this limit is independent of KV capacity and does not preallocate buffers.
 - **Metrics endpoint alias** (2026-09-18): `/metrics` exposes the same JSON
   counters as `/v1/metrics`, which remains available for backward compatibility.
   Prometheus exposition is still a separate follow-up.

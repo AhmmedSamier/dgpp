@@ -42,6 +42,7 @@
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "common/prefill_progress.hpp"
 #include "engine/boundary_reducer.hpp"
 #include "engine/decode_outputs.hpp"
 #include "kernels/gemm.hpp"
@@ -82,7 +83,7 @@ struct SessionParams {
 };
 
 template <class Derived>
-class SessionModel {
+class SessionModel : public PrefillReporting {
  public:
   // No confidence head unless the family says otherwise (the graph engine
   // schedules the verify depth only for a family that shadows this).
@@ -840,6 +841,7 @@ void SessionModel<D>::prefill_chunk(PrefillCursor& cursor, int64_t budget) {
     snap->taken = true;
   }
   cursor.next = c1;
+  report_prefill_progress(req, c1);
 }
 
 template <class D>
@@ -991,6 +993,7 @@ std::vector<typename SessionModel<D>::Outputs> SessionModel<D>::session_prefill_
     at += P;
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  for (int s = 0; s < n; ++s) report_prefill_progress(reqs[s], span_lens[s]);
   return outs;
 }
 

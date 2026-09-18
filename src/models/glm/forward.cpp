@@ -395,6 +395,12 @@ GlmDiagnosticModel::GlmDiagnosticModel(const GlmTextConfig& cfg,
   // can spin while a peer is still inside allocation-phase device syncs.
   const auto t_layers = std::chrono::steady_clock::now();
   preconstruct_layers();
+  if (cfg_.vision) {
+    vision_ = std::make_unique<GlmVisionEncoder>(*cfg_.vision, checkpoint_dir, stream_);
+    boot_digest_.globals ^= vision_->digest();
+    boot_digest_.bytes += cfg_.vision->weight_bytes();
+    boot_digest_.tensors += 14 * cfg_.vision->depth + 11;
+  }
   // The startup budget, itemized — what the resident image cache leaves
   // behind is the digest and the globals, both still read from the shards.
   DGPP_LOG_INFO("rank {} boot phases: digest {:.1f} s ({:.2f} GiB hashed), "
@@ -415,6 +421,10 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
   if (max_requests <= 0)
     throw std::invalid_argument("plan_memory: max_requests must be positive");
   MemoryPlan plan;
+  if (cfg.vision) {
+    plan.add("vision weights (replicated)", cfg.vision->weight_bytes());
+    plan.add("vision workspace (bounded image prefill)", cfg.vision->workspace_bytes());
+  }
   const KdaConfig kda_cfg = with_tp(cfg.kda_config(), tp_world);
   DsaConfig dsa_cfg = with_tp(cfg.dsa_config(), tp_world);
   const int main_dsa_layers = dsa_cfg.num_dsa_layers;
@@ -520,6 +530,7 @@ GlmDiagnosticModel::MemoryPlan GlmDiagnosticModel::plan_memory(
 }
 
 GlmDiagnosticModel::~GlmDiagnosticModel() {
+  vision_.reset();
   cudaFree(gemm_ws_);
   cudaFree(dsa_scratch_);
   cudaFree(d_req_ids_);

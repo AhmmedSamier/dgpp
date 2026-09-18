@@ -17,7 +17,7 @@ if(NOT DEFINED CMAKE_CUDA_COMPILER AND "$ENV{CUDACXX}" STREQUAL "")
     endif()
     find_program(DGPP_NVCC nvcc HINTS "${DGPP_CUDA_ROOT}/bin" NO_DEFAULT_PATH NO_CACHE)
     if(NOT DGPP_NVCC)
-      message(FATAL_ERROR "No nvcc under CUDAToolkit_ROOT=${DGPP_CUDA_ROOT}. Select the CUDA 13 toolkit root, or set CUDACXX=/path/to/cuda/bin/nvcc and retry with cmake --fresh --preset ci.")
+      message(FATAL_ERROR "No nvcc under CUDAToolkit_ROOT=${DGPP_CUDA_ROOT}. Select the CUDA 13 toolkit root, or set CUDACXX=/path/to/cuda/bin/nvcc and retry with cmake --fresh --preset release.")
     endif()
   else()
     find_program(DGPP_NVCC nvcc HINTS "$ENV{CUDA_PATH}/bin" PATHS /usr/local/cuda/bin NO_CACHE)
@@ -29,7 +29,7 @@ endif()
 include(CheckLanguage)
 check_language(CUDA)
 if(NOT CMAKE_CUDA_COMPILER)
-  message(FATAL_ERROR "CUDA compiler not found. Install the CUDA 13 toolkit, or select an existing installation with CUDACXX=/path/to/cuda/bin/nvcc cmake --fresh --preset ci. See docs/getting-started.md.")
+  message(FATAL_ERROR "CUDA compiler not found. Install the CUDA 13 toolkit, or select an existing installation with CUDACXX=/path/to/cuda/bin/nvcc cmake --fresh --preset release. See docs/getting-started.md.")
 endif()
 enable_language(CUDA)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -61,6 +61,8 @@ target_include_directories(dgpp_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src
 find_package(CUDAToolkit 13 REQUIRED COMPONENTS cudart cublasLt)
 find_package(Threads REQUIRED)
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+
+include(cmake/pcre2.cmake)
 
 if(DGPP_ENABLE_IBV)
   find_path(IBVERBS_INCLUDE_DIR NAMES infiniband/verbs.h)
@@ -154,6 +156,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/l2_prefetch.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
+  src/kernels/glm_vision.cu
   src/kernels/glm_norm.cu
   src/kernels/pick.cu
   src/kernels/sample_pick.cu
@@ -209,8 +212,9 @@ add_library(dgpp_text STATIC
   src/text/dsv41_prompt.cpp
   src/text/tool_parser.cpp
   src/text/tool_grammar.cpp
+  src/text/string_constraint.cpp
   src/text/json_grammar.cpp)
-target_link_libraries(dgpp_text PUBLIC dgpp_loaders)
+target_link_libraries(dgpp_text PUBLIC dgpp_loaders dgpp_pcre2)
 dgpp_set_common(dgpp_text)
 
 add_library(dgpp_sched STATIC
@@ -390,6 +394,7 @@ target_link_libraries(dgpp_models_moe PUBLIC dgpp_models_glm dgpp_kernels)
 dgpp_set_common(dgpp_models_moe)
 
 add_library(dgpp_models_glm_loader STATIC
+  src/models/glm/vision.cpp
   src/models/glm/loader.cpp
   src/models/glm/dump.cpp
   src/models/glm/forward.cpp
@@ -554,7 +559,7 @@ if(DGPP_ENABLE_IBV)
     install(FILES "${_real}" DESTINATION lib
             RENAME lib${_lib}.so.${CUDAToolkit_VERSION_MAJOR})
   endforeach()
-  install(PROGRAMS scripts/dgpp-cluster scripts/serve_api_check.py DESTINATION scripts)
+  install(PROGRAMS scripts/dgpp-cluster scripts/serve_api_check.py scripts/vision_api_check.py DESTINATION scripts)
   install(FILES scripts/site_env.py scripts/cluster_process.py scripts/cluster_doctor.py
     scripts/serve_client.py scripts/download_model.py scripts/cache_sync.py
     scripts/discover_roce.py scripts/data_paths.py DESTINATION scripts)
@@ -564,12 +569,15 @@ if(DGPP_ENABLE_IBV)
   install(FILES deploy/README.md DESTINATION deploy)
   install(FILES docs/release-install.md DESTINATION . RENAME README.md)
   install(FILES requirements-download.txt LICENSE DESTINATION .)
-  install(FILES docs/dependencies.md docs/networking.md DESTINATION docs)
+  install(FILES docs/dependencies.md docs/networking.md docs/vision.md DESTINATION docs)
+  install(FILES docs/licenses/PCRE2.md docs/licenses/stb_image.md docs/licenses/pytorch.md DESTINATION docs/licenses)
   install(FILES deploy/nginx.example.conf DESTINATION deploy)
 endif()
 
 enable_testing()
 add_executable(unit_tests
+  tests/unit/image_inputs_test.cpp
+  tests/unit/file_inputs_test.cpp
   tests/unit/log_test.cpp
   tests/unit/minijson_test.cpp
   tests/unit/arena_test.cpp
@@ -669,6 +677,9 @@ set_tests_properties(glm_dsa_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 # engine and frontend, no model cache). Stage 4b adds the admission
 # journal (fabric_serve.cpp over the host-only dgpp_net TCP primitives).
 add_library(dgpp_serve STATIC
+  src/serve/image_inputs.cpp
+  src/serve/glm_vision_frontend.cpp
+  src/serve/file_inputs.cpp
   src/serve/cluster_config.cpp
   src/serve/http_server.cpp
   src/serve/generation_service.cpp
@@ -1354,3 +1365,20 @@ if(DGPP_ENABLE_IBV)
   set_tests_properties(nic_regress_selftest PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
 endif()
 set_tests_properties(roster_selftest PROPERTIES LABELS "host")
+
+# GLM image encoder reference/parity runner (no language-model weights loaded).
+add_executable(glm_vision_check apps/glm_vision_check.cpp)
+target_link_libraries(glm_vision_check PRIVATE dgpp_models_glm_loader CUDA::cudart)
+dgpp_set_common(glm_vision_check)
+
+add_executable(glm_vision_test tests/cuda/glm_vision_test.cpp)
+target_link_libraries(glm_vision_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(glm_vision_test)
+add_test(NAME glm_vision_test COMMAND glm_vision_test)
+set_tests_properties(glm_vision_test PROPERTIES LABELS "gpu" SKIP_RETURN_CODE 2)
+
+add_executable(glm_vision_frontend_test tests/host/glm_vision_frontend_test.cpp)
+target_link_libraries(glm_vision_frontend_test PRIVATE dgpp_serve)
+dgpp_set_common(glm_vision_frontend_test)
+add_test(NAME glm_vision_frontend_test COMMAND glm_vision_frontend_test)
+set_tests_properties(glm_vision_frontend_test PROPERTIES LABELS "host;checkpoint" SKIP_RETURN_CODE 2)

@@ -23,7 +23,7 @@ records limit cleanup to this deployment; up --replace explicitly replaces a
 running instance. --knobs accepts engine flags, not topology/model/HTTP flags.
 --head-wrap prefixes rank 0's command for profiling.
 
-Without --release, up stages the development binary (or --bin override).
+Without --release, up stages build-release/dgpp-serve (or --bin override).
 A named release uses its installed binary on every node. install distributes
 a release tarball; releases lists installed versions. Check scripts/README.md
 and docs/operations.md for task-specific procedures.
@@ -89,7 +89,7 @@ class Cluster:
         self.stage_dir = paths.get("stage_dir", "/tmp/bus4")
         self.release_dir = paths.get("release_dir", "~/dgpp/releases")
         # Which binary: --bin, else the named release (--release or the
-        # config's "release"), else the development build.
+        # config's "release"), else the local release build.
         self.release = getattr(args, "release", None) or self.cfg.get("release") or ""
         release_name(self.release)
         if getattr(args, "bin", None):
@@ -98,7 +98,7 @@ class Cluster:
             rel = f"{self.release_dir}/dgpp-{self.release}/bin/dgpp-serve"
             self.bin, self.installed = expand(rel), True
         else:
-            self.bin, self.installed = os.path.join(settings().get("DGPP_BUILD_DIR", os.path.join(ROOT, "build-ci")), "dgpp-serve"), False
+            self.bin, self.installed = os.path.join(settings().get("DGPP_BUILD_DIR", os.path.join(ROOT, "build-release")), "dgpp-serve"), False
         self.peer_bin = f"{self.release_dir}/dgpp-{self.release}/bin/dgpp-serve" if self.installed else "./dgpp-serve"
         self.knobs = shlex.split(getattr(args, "knobs", "") or "")
         reserved = {"--config", "--rank", "--world", "--model", "--bind-host", "--port", "--http-port", "--head", "--fabric-port", "--journal-port"}
@@ -616,7 +616,7 @@ def main():
     ap.add_argument("verb", choices=["up", "down", "status", "install", "releases", "resolve", "doctor", "signal", "paths"])
     ap.add_argument("tarball", nargs="?", help="install: the release tarball from scripts/release.sh")
     ap.add_argument("--config", type=config_argument, default=None)
-    ap.add_argument("--bin", default=None, help="the dgpp-serve binary (default: the named release, else build-ci/dgpp-serve)")
+    ap.add_argument("--bin", default=None, help="the dgpp-serve binary (default: the named release, else DGPP_BUILD_DIR/dgpp-serve or build-release/dgpp-serve)")
     ap.add_argument("--release", default=None, help="the installed release version to run (overrides the config's \"release\")")
     ap.add_argument("--log-dir", default=None, help="overrides DGPP_LOG_DIR")
     ap.add_argument("--knobs", default="", help="flags appended to every rank's command line")
