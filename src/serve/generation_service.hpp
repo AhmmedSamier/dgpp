@@ -50,7 +50,7 @@
 //   POST /v1/completions        the legacy prompt API (string prompt).
 //   GET  /v1/models, /v1/models/{id}
 //   GET  /health               liveness (the fabric harnesses' probe).
-//   GET  /v1/metrics           scheduler + service counters (ours).
+//   GET  /metrics, /v1/metrics  JSON scheduler + service counters (ours).
 //
 // Thread ownership (HTTP and engine threads, one shared mutex):
 //   * HTTP thread — HttpServer::serve() calls handle()/idle()/

@@ -851,7 +851,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   DGPP_LOG_INFO(
       "serve: listening on :{} — {} (boot {:.1f}s){}; endpoints: POST "
       "/v1/chat/completions, POST /v1/completions, GET /v1/models, GET "
-      "/health, GET /v1/metrics",
+      "/health, GET /metrics, GET /v1/metrics",
       http.port(), scfg.model_id, boot_s, journal ? " [fabric rank 0]" : "");
   http.serve();
 

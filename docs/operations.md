@@ -567,10 +567,15 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   rank therefore cannot serve for more than one tick.
 - **At shutdown:** `down`'s four md5s (the procedure). They are the same
   evidence, post-mortem.
-- **Per request:** `GET /v1/metrics` — requests, sheds, cancellations,
+- **Per request:** `GET /metrics` (also available at `GET /v1/metrics`
+  for backward compatibility) — JSON counters for requests, sheds, cancellations,
   failures, the admission policy, the prefix cache (entries, hits, tokens
   saved, hop snapshots, the TTFT split by hit and miss), sampling
-  fallbacks. `GET /health` is `{"status":"ok"}` while the engine lives.
+  fallbacks. Both metrics paths return `application/json`; direct Prometheus
+  scraping requires a supported
+  [exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/),
+  which DGPP does not yet provide. `GET /health` is `{"status":"ok"}`
+  while the engine lives.
 - **Under load:** `scripts/serve_soak_run.sh MINUTES OUT_DIR` boots the
   world with the production knobs, starts `scripts/node_probe.sh` on every
   node, runs `scripts/serve_soak.py` (multi-turn chat, long generations,

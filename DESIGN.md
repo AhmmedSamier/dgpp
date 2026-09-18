@@ -1925,7 +1925,7 @@ iteration must not influence collective order.
 | `POST /v1/completions` | Legacy string-prompt completion; its accepted fields are a subset of the chat route |
 | `GET /v1/models`, `GET /v1/models/{id}` | Served model information |
 | `GET /health` | Liveness probe |
-| `GET /v1/metrics` | JSON scheduler and service counters |
+| `GET /metrics`, `GET /v1/metrics` | JSON scheduler and service counters; both paths return the same format |
 
 Chat messages support system, user, assistant and tool roles. The text
 frontend handles the checkpoint's template, reasoning markers and tool

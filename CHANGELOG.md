@@ -6,6 +6,9 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Metrics endpoint alias** (2026-09-18): `/metrics` exposes the same JSON
+  counters as `/v1/metrics`, which remains available for backward compatibility.
+  Prometheus exposition is still a separate follow-up.
 - **Agent API compatibility** (2026-09-17): JSON Schema numeric bounds now
   constrain `number` values, including fractions and exponents. Tools can
   accompany `response_format`: auto chooses a tool-call turn or a structured

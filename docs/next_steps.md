@@ -22,8 +22,9 @@ same mixed workload before and after the change.
 
 ## Operations and API coverage
 
-The service has periodic throughput logs, JSON metrics at `/v1/metrics`,
-operation-stream checks and process-failure handling. Structured
+The service has periodic throughput logs, JSON metrics at `/metrics`
+(with `/v1/metrics` retained for compatibility), operation-stream checks
+and process-failure handling. Structured
 request-level logs and Prometheus exposition would make those signals
 easier to monitor. Deployment currently uses `scripts/dgpp-cluster`;
 automatic supervision is a separate deployment choice.

@@ -10,7 +10,7 @@
 //     error object naming the param;
 //   * overload: 503 at the admission door;
 //   * client disconnect mid-stream → scheduler cancellation (metrics);
-//   * /v1/models, /health, /v1/metrics.
+//   * /v1/models, /health, /metrics and its /v1/metrics alias.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -914,8 +914,11 @@ DGPP_TEST(serve_modelsHealthMetrics_theOpsSurface) {
   health.send_all("GET /health HTTP/1.1\r\nHost: t\r\n\r\n");
   const std::string hl = health.read_available(800);
   Client metrics(rig.port());
-  metrics.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+  metrics.send_all("GET /metrics HTTP/1.1\r\nHost: t\r\n\r\n");
   const std::string met = metrics.read_available(800);
+  Client legacy_metrics(rig.port());
+  legacy_metrics.send_all("GET /v1/metrics HTTP/1.1\r\nHost: t\r\n\r\n");
+  const std::string legacy_met = legacy_metrics.read_available(800);
 
   // THEN each answers its documented shape.
   require(ml.find("\"object\":\"list\"") != std::string::npos &&
@@ -923,9 +926,14 @@ DGPP_TEST(serve_modelsHealthMetrics_theOpsSurface) {
               ml.find("\"object\":\"model\"") != std::string::npos,
           "models list: " + ml.substr(0, 200));
   require(hl.find("\"status\":\"ok\"") != std::string::npos, "health");
+  require(met.find("HTTP/1.1 200 OK\r\n") == 0 &&
+              met.find("Content-Type: application/json\r\n") != std::string::npos,
+          "metrics returns JSON directly: " + met.substr(0, 200));
   require(met.find("\"scheduler\":{") != std::string::npos &&
               met.find("\"service\":{") != std::string::npos,
           "metrics sections: " + met.substr(0, 200));
+  require(met == legacy_met,
+          "both metrics paths return the same response for an idle service");
 }
 
 DGPP_TEST(serve_legacyCompletions_theTextCompletionObject) {

@@ -1268,7 +1268,7 @@ void GenerationService::handle(const HttpRequest& req,
     route_health(w);
     return;
   }
-  if (p == "/v1/metrics") {
+  if (p == "/metrics" || p == "/v1/metrics") {
     route_metrics(w);
     return;
   }
@@ -1762,7 +1762,7 @@ void GenerationService::route_models(const HttpRequest& req,
 }
 
 // ---------------------------------------------------------------------------
-// GET /v1/metrics (ours — the scheduler meters, published by the engine)
+// GET /metrics, /v1/metrics (JSON scheduler meters, published by the engine)
 // ---------------------------------------------------------------------------
 
 Scheduler::Meters GenerationService::meters() const {
