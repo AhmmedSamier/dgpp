@@ -210,8 +210,9 @@ counters on both metrics routes:
 The arrays contain `depth` entries, up to eight. Non-MTP engines report zero
 totals and empty arrays. Counts exclude graph padding and the non-speculative
 row. An attempt at a later position still counts when an earlier rejection
-prevents accepting it. These are verification decisions before response stop
-and length trimming, so accepted drafts need not all appear in the response.
+prevents accepting it. Counts include drafts accepted by the exact host fallback during sampled
+decoding. These are final verification decisions before response stop and
+length trimming, so accepted drafts need not all appear in the response.
 
 Counters accumulate for the engine lifetime and reset when it is recreated.
 They come from the existing completed-pass scheduler snapshot; use

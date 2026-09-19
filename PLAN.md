@@ -106,7 +106,8 @@ GLM-Flash row expansion are the next targets in the
 
 The metrics endpoints expose existing engine-lifetime MTP verification counters
 under `scheduler.spec_decode`, including separate round and draft-token totals
-and per-position attempts and accepts. See the
+and per-position attempts and accepts, including sampled exact-fallback
+acceptance. See the
 [metrics contract](docs/openai-compatibility.md#speculative-decoding-counters).
 
 Other work includes request-level observability, additional API fields,

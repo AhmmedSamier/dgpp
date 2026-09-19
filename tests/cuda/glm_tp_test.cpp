@@ -3767,8 +3767,8 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
     int max_steps;
     uint64_t seed;
   };
-  const std::vector<std::vector<Spec>> phases{{{"solo", 7, 7}},
-                                              {{"a", 7, 11}, {"b", 6, 13}}};
+  // The solo seed accepts drafts after the capped candidate prefix falls back.
+  const std::vector<std::vector<Spec>> phases{{{"solo", 7, 814480}}, {{"a", 7, 11}, {"b", 6, 13}}};
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, 29932);
   require(!buses.empty(), "tp bus world failed to start");
@@ -3840,6 +3840,8 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
                                    "device sampler at the capped width");
         dgpp::sched::Scheduler sched(&engine, /*eos=*/{});
 
+        dgpp::sched::SchedulerEngine::MtpAcceptance expected;
+        expected.depth = 1;
         size_t result_index = 0;
         for (const std::vector<Spec>& phase : phases) {
           const size_t n = phase.size();
@@ -3872,6 +3874,7 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
           // Lockstep: one scheduler tick (at most one admission, one replay
           // for every live slot), then one eager step per request that was
           // live in that replay, then the transcript and feed checks.
+          std::vector<dgpp::sched::SchedulerEngine::MtpAcceptance> slot_expected(n);
           std::vector<bool> live(n, false);
           std::vector<bool> finished(n, false);
           while (sched.tick()) {
@@ -3885,6 +3888,16 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
               if (!live[i] || finished[i]) continue;
               engine.drain();
               const std::vector<int32_t> committed = specs[i]->step();
+              // The eager oracle counts final accepted drafts before response
+              // length trimming, including positions resolved by the host.
+              for (int p = 0; p < expected.depth; ++p) {
+                ++expected.attempts[p];
+                ++slot_expected[i].attempts[p];
+                if (committed.size() > static_cast<size_t>(p + 1)) {
+                  ++expected.accepts[p];
+                  ++slot_expected[i].accepts[p];
+                }
+              }
               streams[i].insert(streams[i].end(), committed.begin(),
                                 committed.end());
               const dgpp::sched::Scheduler::Result* res = sched.find(phase[i].id);
@@ -3907,6 +3920,11 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
                 finished[i] = true;
                 continue;
               }
+              const auto slot = engine.mtp_acceptance(res->slot);
+              for (int p = 0; p < expected.depth; ++p)
+                require(slot.attempts[p] == slot_expected[i].attempts[p] &&
+                            slot.accepts[p] == slot_expected[i].accepts[p],
+                        "slot MTP counters match the eager final verdict");
               int64_t fed[2] = {-1, -1};
               DGPP_CUDA_OK(cudaMemcpyAsync(fed, graph.device_feed(res->slot, 2),
                                            sizeof(fed), cudaMemcpyDeviceToHost,
@@ -3927,6 +3945,13 @@ DGPP_TEST(glm_tp_serving_mtp_graph_sampling_matches_eager_speculator) {
                     std::to_string(specs[i]->draft()));
             }
           }
+          const auto actual = engine.mtp_acceptance();
+          require(actual.depth == expected.depth, "MTP counter depth");
+          for (int p = 0; p < expected.depth; ++p)
+            require(actual.attempts[p] == expected.attempts[p] &&
+                        actual.accepts[p] == expected.accepts[p],
+                    "lifetime MTP counters include final fallback accepts");
+          require(expected.accepts[0] > 0, "fixture must accept drafts");
           for (size_t i = 0; i < n; ++i) {
             const auto& got = sched.results()[result_index++].generated;
             if (got.size() != static_cast<size_t>(phase[i].max_steps))
@@ -4328,8 +4353,8 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
     int max_steps;
     uint64_t seed;
   };
-  const std::vector<std::vector<Spec>> phases{{{"solo", 7, 7}},
-                                              {{"a", 7, 11}, {"b", 6, 13}}};
+  // The solo seed accepts drafts after the capped candidate prefix falls back.
+  const std::vector<std::vector<Spec>> phases{{{"solo", 7, 814480}}, {{"a", 7, 11}, {"b", 6, 13}}};
 
   std::vector<std::unique_ptr<CollectiveBus>> buses = start_world(kWorld, port);
   require(!buses.empty(), "tp bus world failed to start");
@@ -4401,6 +4426,8 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
                                    "device sampler at the capped width");
         dgpp::sched::Scheduler sched(&engine, /*eos=*/{});
 
+        dgpp::sched::SchedulerEngine::MtpAcceptance expected;
+        expected.depth = depth;
         size_t result_index = 0;
         for (const std::vector<Spec>& phase : phases) {
           const size_t n = phase.size();
@@ -4433,6 +4460,7 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
           // Lockstep: one scheduler tick (at most one admission, one replay
           // for every live slot), then one eager step per request that was
           // live in that replay, then the transcript and feed checks.
+          std::vector<dgpp::sched::SchedulerEngine::MtpAcceptance> slot_expected(n);
           std::vector<bool> live(n, false);
           std::vector<bool> finished(n, false);
           while (sched.tick()) {
@@ -4446,6 +4474,16 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
               if (!live[i] || finished[i]) continue;
               engine.drain();
               const std::vector<int32_t> committed = specs[i]->step();
+              // The eager oracle counts final accepted drafts before response
+              // length trimming, including positions resolved by the host.
+              for (int p = 0; p < expected.depth; ++p) {
+                ++expected.attempts[p];
+                ++slot_expected[i].attempts[p];
+                if (committed.size() > static_cast<size_t>(p + 1)) {
+                  ++expected.accepts[p];
+                  ++slot_expected[i].accepts[p];
+                }
+              }
               streams[i].insert(streams[i].end(), committed.begin(),
                                 committed.end());
               const dgpp::sched::Scheduler::Result* res = sched.find(phase[i].id);
@@ -4468,9 +4506,21 @@ static void run_mtp_depth_sampling_gate(int depth, int port) {
                 finished[i] = true;
                 continue;
               }
+              const auto slot = engine.mtp_acceptance(res->slot);
+              for (int p = 0; p < expected.depth; ++p)
+                require(slot.attempts[p] == slot_expected[i].attempts[p] &&
+                            slot.accepts[p] == slot_expected[i].accepts[p],
+                        "slot MTP counters match the eager final verdict");
               (void)kSlots;
             }
           }
+          const auto actual = engine.mtp_acceptance();
+          require(actual.depth == expected.depth, "MTP counter depth");
+          for (int p = 0; p < expected.depth; ++p)
+            require(actual.attempts[p] == expected.attempts[p] &&
+                        actual.accepts[p] == expected.accepts[p],
+                    "lifetime MTP counters include final fallback accepts");
+          require(expected.accepts[0] > 0, "fixture must accept drafts");
           for (size_t i = 0; i < n; ++i) {
             const auto& got = sched.results()[result_index++].generated;
             if (got.size() != static_cast<size_t>(phase[i].max_steps))

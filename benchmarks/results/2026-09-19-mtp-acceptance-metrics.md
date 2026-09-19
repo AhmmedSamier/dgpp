@@ -43,9 +43,10 @@ ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
 
 Local raw logs are under the ignored `artifacts/mtp-metrics/` directory.
 
-## Spark hardware validation
+## Initial Spark hardware validation
 
-Tested source commit: `616c3de` (the subsequent changes only record evidence).
+Initial tested source commit: `616c3de`, before the sampled-fallback accounting
+correction described below.
 A separate checkout on a GB10 Spark was configured with `cmake --preset ci`
 and fully built with `cmake --build --preset ci -j 4` before testing. Both
 production ranks were stopped for GPU/RDMA execution. The serial command was:
@@ -98,11 +99,43 @@ new branch was checked through both aliases.
 Raw build, CTest, live API, metric, shutdown and restoration evidence is saved
 locally under `artifacts/mtp-metrics/server-validation/` (ignored by Git).
 
+## Sampled-fallback accounting correction
+
+The isolated review found that `collect_verdict` counted accepts from the
+provisional device verdict. When a capped candidate prefix requires exact
+host fallback, the host can subsequently accept additional drafts without
+those positions reaching the counters. Count attempts and accepts after
+fallback resolution, using the final decided prefix; keep the scheduled
+verification depth as the attempt denominator. Both engine-lifetime and
+per-slot counters use the same accounting loop. Token decisions, RNG draws,
+rollback and collective operations are unchanged.
+
+The existing sampled-MTP eager-oracle gates now assert per-position lifetime
+and live-slot counters at depths 1 and 2. Seed 814480 exercises accepted drafts
+under the capped candidate prefix. Expected counts come from the eager
+speculator's committed prefix before response length trimming, across scalar
+and batched phases and slot reuse.
+
+Both new regressions were built against the unfixed engine and failed with
+`lifetime MTP counters include final fallback accepts` (two tests, two
+failures). Production was restored after that short regression window, and
+response generation and cache reuse passed. The corrected source then
+completed a full native `ci` build successfully.
+
+**Validation pending:** the corrected engine's GPU regression, full suite and
+fabric checks have not run. Hardware belongs to another task; no follow-up
+maintenance job from this thread is running or queued. The successful full
+suite and TP2 results above apply to the initial implementation, not this
+correction. Local evidence and harness files are under the ignored
+`artifacts/mtp-metrics/fallback-fix/` directory (remote build and regression
+logs remain in the matching directory in the isolated Spark checkout).
+
 ## Limits
 
 The live counting requests establish real-model counter publication, not a
 representative acceptance-rate or throughput benchmark. Variable-depth
 arithmetic is covered by the host regression. GPU/RDMA fixtures and a physical
 two-Spark serving world were exercised; a physical four-node run and the
-unavailable checkpoint cases were not. This change only exposes an existing
-host snapshot and does not modify the paths ranks execute together.
+unavailable checkpoint cases were not. The correction changes host-side accounting in the shared graph engine.
+The relevant engine regressions and fabric checks must be rerun before
+claiming the corrected branch is hardware-validated.
