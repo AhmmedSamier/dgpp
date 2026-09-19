@@ -8,7 +8,8 @@ Expose the existing `Scheduler::Meters::mtp` snapshot as
 `scheduler.spec_decode` on `/metrics` and `/v1/metrics`. The change adds no
 engine reads from the HTTP thread, GPU synchronization, kernels, journal
 operations or collectives. It contains no Home Assistant integration,
-decode-batch telemetry or deployment changes.
+decode-batch telemetry or deployment changes. The final change also corrects
+sampled-fallback acceptance accounting, described below.
 
 The engine increments attempts for each verified speculative position and
 accepts only for the accepted prefix. Variable verification depth makes the
@@ -110,25 +111,51 @@ verification depth as the attempt denominator. Both engine-lifetime and
 per-slot counters use the same accounting loop. Token decisions, RNG draws,
 rollback and collective operations are unchanged.
 
-The existing sampled-MTP eager-oracle gates now assert per-position lifetime
-and live-slot counters at depths 1 and 2. Seed 814480 exercises accepted drafts
-under the capped candidate prefix. Expected counts come from the eager
-speculator's committed prefix before response length trimming, across scalar
-and batched phases and slot reuse.
+The sampled-MTP eager-oracle gates assert per-position lifetime and live-slot
+counters at depths 1 and 2. Seed 814480 exercises accepted drafts under the
+capped candidate prefix. Expected counts come from the eager speculator's
+committed prefix before response length trimming. Depth 1 uses a scalar slot
+across successive requests; depth 2 additionally exercises simultaneous scalar
+requests. Both check counter lifetime across slot reuse.
 
-Both new regressions were built against the unfixed engine and failed with
-`lifetime MTP counters include final fallback accepts` (two tests, two
-failures). Production was restored after that short regression window, and
-response generation and cache reuse passed. The corrected source then
-completed a full native `ci` build successfully.
+The initial assertion code relied on `Scheduler::find()` as live state, but
+that stored result is populated at retirement. It stopped the eager oracle
+after one step and therefore mismatched attempt totals even with the corrected
+engine. The final tests use a token observer to follow live output and grouped
+admissions. A strengthened depth-1 batched transcript comparison also exposed
+an unrelated mismatch; that existing test was left unchanged and the new
+counter regression uses the scalar fallback path. This record does not claim
+to resolve that batched transcript discrepancy.
 
-**Validation pending:** the corrected engine's GPU regression, full suite and
-fabric checks have not run. Hardware belongs to another task; no follow-up
-maintenance job from this thread is running or queued. The successful full
-suite and TP2 results above apply to the initial implementation, not this
-correction. Local evidence and harness files are under the ignored
-`artifacts/mtp-metrics/fallback-fix/` directory (remote build and regression
-logs remain in the matching directory in the isolated Spark checkout).
+With the corrected test harness, the four focused sampling checks passed.
+Restoring only the old graph-engine header and rebuilding made exactly the
+two counter regressions fail on `slot MTP counters match the eager final
+verdict`; the other two sampling checks still passed. The fixed header was
+then restored and all native targets rebuilt successfully. A maintenance
+harness expected a different failure message and returned through its
+restoration path; the test output establishes the expected two failures.
+
+Final validated source: `cc88610`. The native checkout retained its initial
+base plus identical engine/test files; their SHA-256 values are saved in the
+maintenance state. A fresh full native build succeeded. The serial unfiltered
+suite then completed in 620.58 seconds: **101 passed, zero failed, 10 skipped**,
+with the same unavailable-checkpoint cases listed above.
+
+The corrected binary passed the two-Spark Qwen TP2/MTP3 metrics and API checks.
+Both metrics aliases reported 84 rounds, 252 attempted drafts and 252 accepted
+drafts for the counting requests. Those greedy requests validate publication;
+the forced-fallback regression is the evidence for the corrected sampled path.
+After clean shutdown, both ranks' operation-stream MD5 was
+`3f353d7f2e51d9289383a783dda33072`.
+
+Production was restored to the original release and unchanged configuration
+on both ranks. Three requests succeeded, with 1,128 cached prompt tokens on
+the second and third requests, 148 prefix-cache slots and no engine failure.
+Both live rank logs confirmed request retirement. The maintenance lock was
+released and no test or maintenance process from this thread remained running.
+
+Raw negative/positive regression, rebuild, full-suite and restoration logs
+are under the ignored `artifacts/mtp-metrics/fallback-fix/` directory.
 
 ## Limits
 
@@ -137,5 +164,6 @@ representative acceptance-rate or throughput benchmark. Variable-depth
 arithmetic is covered by the host regression. GPU/RDMA fixtures and a physical
 two-Spark serving world were exercised; a physical four-node run and the
 unavailable checkpoint cases were not. The correction changes host-side accounting in the shared graph engine.
-The relevant engine regressions and fabric checks must be rerun before
-claiming the corrected branch is hardware-validated.
+Its focused regressions, full available suite and two-Spark fabric checks
+passed; unavailable checkpoints and a physical four-node world remain
+outside this validation.
