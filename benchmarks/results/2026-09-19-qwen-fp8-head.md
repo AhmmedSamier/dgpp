@@ -21,14 +21,26 @@ change the BF16 head, or add telemetry or deployment settings.
 
 ## Tests added
 
-- `scale_gemm_f32_fp8_head_numerics`: K=2560, ragged N=257, rows 4/5/8/16;
+- `scale_gemm_f32_fp8_head_numerics`: K=2560, ragged N=257/4097, rows 4/5/8/16;
   compare unrounded FP32 logits to FP64 accumulation of BF16-rounded
   dequantized weights, plus same-shape bitwise repeatability and GEMV control.
+  N=4097 uses the same eight-warp specialization as the production TP2
+  vocabulary head. For its MMA cases, captured graph inspection requires
+  one streaming kernel with a 256-thread block before executing it. The
+  exhaustive oracle includes the ragged final block; this is specialization
+  coverage, not a full-sized production vocabulary or checkpoint test.
 - `qwen_decode_fp8_head`: teacher-forced fixture at 4/6/8/12/16 rows,
   capturing and replaying the target graph. Inspect the kernel that writes
   the vocabulary-logit buffer to require streaming MMA above the threshold.
   This dispatch assertion fails with the old head. Existing logit/near-tie
   checks and the 0.02-nat mean-NLL bound cover the resulting predictions.
+  The default-threshold lane also compares short-prefill logits at lengths
+  1/4/5/8/16/17 with a model whose four-row decode ceiling retains the old
+  head dispatch. Both models retain the same dense lowering threshold;
+  their final hidden states must be nonempty and bitwise equal. Eight
+  prompts per length check finite logits, relative L2, top-1/near-ties,
+  mean NLL delta per length, same-shape bitwise repetition, and bitwise
+  logits outside the optimized interval.
 - `qwen_decode_fp8_head_row_independent`: the same FP8 checks with the
   threshold at 256, requiring no streaming head.
 - `qwen_engine_fp8_head_4` and `qwen_engine_fp8_head_256`: FP8 versions of
@@ -46,6 +58,12 @@ affected C++/CUDA translation units cross-compiled for AArch64/SM121a.
 Touched ranges were formatted with clang-format 18 using the repository
 style. `git diff --check` passed. These are compile checks, not linked-binary
 or target-execution results.
+
+An isolated review of `5ed96cf` found no demonstrated correctness defect,
+but identified missing asserted coverage for the eight-warp kernel and
+short-prefill outputs. The follow-up adds the cases above without changing
+production code. Both changed test translation units cross-compiled again;
+the new assertions still await execution on idle target hardware.
 
 Both production inference ranks were running during preparation. No service
 was stopped, deployed or reconfigured. GPU/RDMA tests were not run alongside

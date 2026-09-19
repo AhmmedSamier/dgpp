@@ -433,6 +433,49 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
       for (int i = 0; i < V; ++i) sum += std::exp(static_cast<double>(row[i]) - top);
       return top + std::log(sum) - row[token];
     };
+    if (fp8_head && dgpp::dense_gemv_rows() == 4) {
+      // A four-row ceiling retains the old head for 5..16-row prefill.
+      // Both models still use the same four-row dense lowering threshold.
+      // Check hidden states too, so this comparison isolates head numerics.
+      QwenModel old_head(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 1, false, 4);
+      for (const int length : {1, 4, 5, 8, 16, 17}) {
+        double prefill_loss_delta = 0;
+        for (int trial = 0; trial < 8; ++trial) {
+          auto prompt = smoke_tokens(cfg, length + 1, 9000 + 100 * length + trial);
+          const int64_t label = prompt.back();
+          prompt.pop_back();
+          const auto expected = old_head.session_prefill(0, prompt);
+          const auto actual = wide.session_prefill(0, prompt);
+          require(actual.logits.size() == static_cast<size_t>(V) &&
+                      expected.logits.size() == static_cast<size_t>(V),
+                  "FP8 short prefill: one vocabulary row");
+          require(actual.final_hidden_bits.size() == static_cast<size_t>(cfg.hidden_size) &&
+                      actual.final_hidden_bits == expected.final_hidden_bits,
+                  "FP8 short prefill: head controls received different hidden states");
+          for (int col = 0; col < V; ++col)
+            require(std::isfinite(actual.logits[col]) && std::isfinite(expected.logits[col]),
+                    "FP8 short prefill: nonfinite logit");
+          const auto comparison = compare_row(actual.logits.data(), expected.logits.data(), V);
+          require(comparison.l2 < 2e-2, "FP8 short prefill exceeds the logit L2 budget");
+          require(comparison.top1_equal || comparison.near_tie,
+                  "FP8 short prefill changes top-1 beyond the near-tie margin");
+          if (length <= 4 || length > 16)
+            require(bitwise(actual.logits, expected.logits),
+                    "FP8 prefill outside the optimized interval changed logits");
+          prefill_loss_delta +=
+              nll(actual.logits.data(), label) - nll(expected.logits.data(), label);
+          wide.session_close(0);
+          const auto repeated = wide.session_prefill(0, prompt);
+          require(bitwise(actual.logits, repeated.logits), "FP8 short prefill must repeat bitwise");
+          old_head.session_close(0);
+          wide.session_close(0);
+        }
+        std::printf("[ .. ] FP8 prefill length %d: mean NLL delta %.6g\n", length,
+                    prefill_loss_delta / 8);
+        require(std::abs(prefill_loss_delta / 8) < 0.02,
+                "FP8 short prefill exceeds the mean NLL budget");
+      }
+    }
     double loss_delta = 0, worst_l2 = 0;
     int rows = 0, near_ties = 0;
     for (const int count : {2, 3, 4, 6, 8})
