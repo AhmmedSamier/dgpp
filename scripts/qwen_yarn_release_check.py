@@ -226,17 +226,29 @@ class MemorySampler(threading.Thread):
         self.samples = []
         self.present = shutil.which("nvidia-smi") is not None
 
+    def _query(self, args):
+        return subprocess.run(["nvidia-smi"] + args, capture_output=True,
+                              text=True, timeout=15, check=True).stdout
+
     def run(self):
+        # Unified-memory GB10: --query-gpu=memory.used prints [N/A] (the
+        # driver does not expose a per-GPU number); the per-process
+        # --query-compute-apps=used_memory is what reports there.
+        gpu_args = ["--query-gpu=memory.used", "--format=csv,noheader,nounits"]
+        apps_args = ["--query-compute-apps=used_memory", "--format=csv,noheader,nounits"]
         while not self.stop.is_set():
             try:
-                out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used",
-                                      "--format=csv,noheader,nounits"], capture_output=True,
-                                     text=True, timeout=15, check=True).stdout
+                out = self._query(gpu_args)
+                if [l.strip() for l in out.splitlines() if l.strip().isdigit()] == []:
+                    out = self._query(apps_args)
             except Exception:                                                # noqa: BLE001
                 return
+            total = 0
             for line in out.splitlines():
                 if line.strip().isdigit():
-                    self.samples.append(int(line.strip()))
+                    total += int(line.strip())
+            if total:
+                self.samples.append(total)
             self.stop.wait(self.interval)
 
     def report(self):
