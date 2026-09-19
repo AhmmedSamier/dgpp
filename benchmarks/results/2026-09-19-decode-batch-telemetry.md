@@ -108,5 +108,4 @@ locally under `artifacts/decode-batch/server-validation/` (ignored by Git).
 These checks establish counter behavior in synthetic GPU/RDMA fixtures and a
 physical two-Spark serving world. A physical four-node fabric run and the ten
 unavailable checkpoint cases were not exercised. The counting workload is a
-functional test, not a utilization or throughput benchmark. PR creation
-remains intentionally held.
+functional test, not a utilization or throughput benchmark.
