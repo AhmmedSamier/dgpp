@@ -136,6 +136,7 @@ checks. Proposed performance targets remain estimates until measured.
 
 Implemented graph launch, verification-row and padding counters with a capacity
 histogram and retained last-launch shape in the JSON metrics snapshot. Host
-contract tests and graph accounting assertions cover the addition; target GPU
-and fabric validation remain pending. See the
+contract tests, the native Spark suite and live two-rank metrics/API checks
+passed; the physical four-node and unavailable checkpoint cases remain
+untested. See the
 [validation record](benchmarks/results/2026-09-19-decode-batch-telemetry.md).
