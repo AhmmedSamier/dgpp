@@ -299,7 +299,7 @@ void Glm4Model::prefetch_attn(const Glm4AttnResident& a) {
     const void* view = nullptr;
     size_t view_bytes = 0;
     gemm_.resident_view(w, bytes, walk_rows_, &view, &view_bytes);
-    prefetch_.add(view, view_bytes);
+    prefetch_.add_view(w, view, view_bytes);  // a companion is its own allocation
   };
   add(a.q_proj, Q * H * 2);
   add(a.k_proj, KV * H * 2);
@@ -350,7 +350,7 @@ void Glm4Model::prefetch_head() {
     size_t view_bytes = 0;
     gemm_.resident_view(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2, walk_rows_, &view,
                         &view_bytes);
-    prefetch_.add(view, view_bytes);
+    prefetch_.add_view(globals_.lm_head, view, view_bytes);
   }
 }
 

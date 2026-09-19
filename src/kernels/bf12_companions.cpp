@@ -107,11 +107,16 @@ void Bf12Companions::log_summary(int rank, double seconds) const {
                 rank, matrices_, static_cast<double>(raw_bytes_) / kGiB,
                 static_cast<double>(packed_bytes_) / kGiB, escapes_, widest_, raw_rows_, kept_, seconds);
   if (packed_only()) {
-    DGPP_LOG_INFO("rank {} bf12: {} of them released their bf16 bytes ({:.2f} GiB returned; prefill expands "
-                  "through a {:.0f} MiB scratch)",
-                  rank, released_, static_cast<double>(released_bytes_) / kGiB,
-                  static_cast<double>(scratch_bytes_) / (1024.0 * 1024.0));
-    if (released_ != matrices_)
+    if (released_ != 0)
+      DGPP_LOG_INFO("rank {} bf12: {} of them released their bf16 bytes ({:.2f} GiB returned; prefill expands "
+                    "through a {:.0f} MiB scratch)",
+                    rank, released_, static_cast<double>(released_bytes_) / kGiB,
+                    static_cast<double>(scratch_bytes_) / (1024.0 * 1024.0));
+    if (released_ == 0)
+      DGPP_LOG_INFO("rank {} bf12: this family keeps the bf16 bytes beside the companions (its loader grants "
+                    "nothing aside): engine.bf16_weights = bf12 serves as bf12+bf16 here",
+                    rank);
+    else if (released_ != matrices_)
       DGPP_LOG_WARN("rank {} bf12: {} packed matrices kept their bf16 bytes (not granted aside by the "
                     "loader) — the memory plan counted them released",
                     rank, matrices_ - released_);

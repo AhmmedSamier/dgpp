@@ -1520,9 +1520,60 @@ released instance with the bf16 bytes scribbled; `glm_loader_test`'s side
 grants; `glm_tp_test`'s three modes on a 1024-wide fixture). Measured on the fabric against the same binary with the
 key off, transcripts identical: GLM-5.3-Flash +6.0 / +4.3 / +6.4 / +6.1 %
 at one to four live requests (+8.5 % without MTP), GLM-4.7 +11–12 % single
-stream and +5–7 % at four. Families whose bf16 sites ride other kernels
-(Qwen's fused GDN/GR launches and its k = 2560 shapes, DeepSeek's
-tensor-core lowering) accept the key and pack nothing yet.
+stream and +5–7 % at four.
+
+*Format v2: the tail, and Qwen (2026-09-19).* A packed row was whole
+1024-column super-blocks, which shut out Qwen3.8-Flash-Next — hidden 2560,
+1536-wide slices at world 4 — where 81 % of what a rank reads per token is
+bf16. Padding was not an option (2560 padded to 3072 streams a fifth more
+bytes: most of the gain). The columns that do not fill a super-block now
+follow the row's super-blocks in units cut by the 256-column steps they
+hold (`kernels/bf12_gemv.cuh`): two full steps as [sm 512 B | exp 256 B] —
+a lane owns sixteen sm bytes as in a super-block and eight exp bytes, an exp
+vector shared by a lane pair — and a single or partial step as [sm 8 B/lane
+| exp 4 B/lane], a vector shared by two and by four lanes. Twelve bits a
+weight, every load an aligned 16-byte vector inside the row, and a row with
+no tail laid out as before (k = 2560: eight loads a lane against the bf16
+core's ten). The row chain itself moved to that header, as the bf16 core's
+had (`bf16_gemv.cuh`), so the launches that bypass `matmul` could take it:
+`launch_bf12_gemv_multi` is the twin of the multi-problem launch the GDN's
+four input projections share, a problem whose matrix did not pack running
+the bf16 chain in its blocks, and `IGemm::bf12_lookup` lets a layer find the
+companion. Qwen's weights pack cleanly (2–7 escapes per 10,000, no raw rows,
+widest row 16). The microbench on its real shapes is what decided the scope:
+
+| shape (world 4) | cold, from DRAM | warm, from L2 |
+|---|---|---|
+| GDN / QSA projections, k = 2560 and 1536 | −15 to −21 % | +2 to +6 % at one row, +19 to +37 % at two |
+| lm head [62080 × 2560] | −26 % | (never warm) |
+| GR down [320 × 10240] | −4 to +10 % | +70 to +109 % |
+| GR up [10240 × 320] | ±1 % | +56 to +76 % |
+
+A thread here runs its ops in order: rebuilding a weight's bits is ~12
+integer ops where the bf16 core spends ~3, so the packed chain is ~2.3× the
+ops per FMA — invisible while DRAM is the limit, the whole cost once the
+bytes are in L2. The projections and the head are read cold or half-cold and
+win; the GR sites, the routers and the shared experts are read WARM behind
+the prefetch windows (that is how the GR kernels run above the DRAM rate),
+and the two GR shapes are latency- and scheduling-bound even cold (40 blocks
+of 20 KB rows; 1,280 blocks of 640-byte rows), so they keep their bf16 form.
+Packed on Qwen: the GDN's in/out projections, the QSA's q / k / v / index / o,
+the draft block's and its two fc matrices, the head — 1.7 of a world-4 rank's
+3.8 GB per token. Fabric, same binary, transcripts identical: world 4 +6.4 /
++3.8 / +2.4 / +1.3 % at one to four live requests, world 2 +9.0 / +6.7 / +6.6 /
++4.6 %. The family keeps both forms resident under either value of the key
+(every recipe has the room; its loader grants nothing aside), and under
+`dense_weights = "fp8"` the projections and the head are already block-FP8:
+nothing is packed. DeepSeek (tensor-core lowering) still packs nothing.
+
+*Companions and the prefetch windows.* `WeightPrefetcher::add` coalesces a
+window's adds and bridges holes of up to 2 MB between them — a read of
+whatever lies between, which inside one layer image is a neighbouring tensor
+but between two allocations can be unmapped: a released bf16 range stays
+reserved and unreadable, and a neighbouring image's edge is out of bounds
+(the Qwen walk's one-allocation-per-window rule exists for that reason). A
+companion is its own allocation, so its view enters a window through
+`add_isolated` (`add_view` picks): one launch of its own, never joined.
 
 **L2 prefetch.** `WeightPrefetcher` runs bounded weight windows on a
 low-priority side stream while the model executes collectives or other

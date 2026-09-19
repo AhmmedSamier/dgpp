@@ -403,6 +403,12 @@ void CublasLtGemm::register_bf12(const void* weight, const Bf12Matrix& packed) {
 }
 size_t CublasLtGemm::bf12_registered() const { return impl_->bf12.size(); }
 
+const Bf12Matrix* CublasLtGemm::bf12_lookup(const void* weight) const {
+  if (impl_->bf12.empty() || impl_->decode_mma) return nullptr;
+  const auto it = impl_->bf12.find(weight);
+  return it == impl_->bf12.end() ? nullptr : &it->second.m;
+}
+
 void CublasLtGemm::bf12_release_raw(const void* weight) {
   const auto it = impl_->bf12.find(weight);
   if (it == impl_->bf12.end())

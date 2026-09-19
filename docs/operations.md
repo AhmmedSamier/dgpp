@@ -59,7 +59,8 @@ GEMM expands what it reads into a small scratch ("bf16 prefill expansion
 scratch") — about 10 ms per prefill chunk on four-node GLM-5.3-Flash, 20 on
 two nodes. Use `"bf12"` where the context is bounded by the node's memory (the
 two-node GLM-5.3-Flash and full GLM-5.3 templates do) and `"bf12+bf16"` where
-there is room. It takes effect on GLM-5.3-Flash, GLM-4.7 and the full GLM-5.3;
+there is room. It takes effect on GLM-5.3-Flash, GLM-4.7, the full GLM-5.3 and
+Qwen3.8-Flash-Next's FP8 checkpoint (where both values keep both forms resident);
 `--bf16-weights checkpoint` turns it off. Resident images are shared by all
 three values: switching never rebuilds them.
 

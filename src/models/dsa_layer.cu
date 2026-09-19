@@ -828,7 +828,7 @@ void DsaLayer::enqueue_decode(const void* hidden_in, DsaStatePool& state,
       const void* view = nullptr;
       size_t view_bytes = 0;
       gemm_.resident_view(w_.o_proj, o_proj_bytes(), tokens, &view, &view_bytes);
-      prefetch->add(view, view_bytes);
+      prefetch->add_view(w_.o_proj, view, view_bytes);  // a companion is its own allocation
     }
   }
 

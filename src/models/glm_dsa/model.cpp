@@ -581,7 +581,7 @@ void GlmDsaModel::prefetch_bf16(const uint16_t* w, size_t bytes) {
   const void* view = nullptr;
   size_t view_bytes = 0;
   gemm_.resident_view(w, bytes, walk_rows_, &view, &view_bytes);
-  prefetch_.add(view, view_bytes);
+  prefetch_.add_view(w, view, view_bytes);  // a companion is its own allocation
 }
 
 void GlmDsaModel::prefetch_head() {

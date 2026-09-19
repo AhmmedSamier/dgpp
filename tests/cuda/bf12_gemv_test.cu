@@ -322,6 +322,16 @@ DGPP_TEST(bf12_released_weights_answer_bitwise_from_the_companion) {
                   "blocks");
   }
   {
+    // Rows with a tail (Qwen's hidden; the GR up projection): expansion
+    // whole and in weight-row blocks.
+    const int n = 1283, k = 2560;
+    released_gate(gaussian_bf16(static_cast<size_t>(n) * k, 0.02f, 0x74), n, k, static_cast<size_t>(n) * k * 2, 1,
+                  "tail 2560, whole");
+    const int n2 = 4099, k2 = 320;
+    released_gate(gaussian_bf16(static_cast<size_t>(n2) * k2, 0.02f, 0x75), n2, k2,
+                  static_cast<size_t>(1024) * k2 * 2, 1, "tail 320, blocks");
+  }
+  {
     const int n = 515, k = 8192;
     auto w = gaussian_bf16(static_cast<size_t>(n) * k, 0.02f, 0x73);
     for (int c = 0; c < k; c += 3) w[static_cast<size_t>(77) * k + c] = static_cast<uint16_t>(((c % 90) + 60) << 7);
@@ -334,14 +344,87 @@ DGPP_TEST(bf12_trained_shapes_are_bitwise_the_bf16_gemv) {
   // The KDA in_proj class (k = hidden, ragged n), the o_proj class
   // (k = 2048: the two-super-block depth), the eh_proj class (k = 8192:
   // two rows fit the smem bound, three do not).
+  // Then the rows with a TAIL (format v2): Qwen's hidden 2560 and its
+  // 1536-wide slices (a pair unit), the GR up projection's k = 320 (all
+  // tail: a full step and an eight-lane partial one), 1280 (a lone full
+  // step), 1800 (pair + full + a one-lane partial), 3392 (three
+  // super-blocks + 320), 10240 (GR down: ten super-blocks, pairs in flight),
+  // and the smallest row there is.
   for (auto [n, k] : std::vector<std::pair<int, int>>{{1611, 4096}, {1024, 2048}, {515, 8192},
-                                                      {7, 1024}}) {
+                                                      {7, 1024}, {777, 2560}, {1027, 1536},
+                                                      {2051, 320}, {300, 1280}, {301, 1800},
+                                                      {203, 3392}, {163, 10240}, {40, 8},
+                                                      {33, 264}}) {
     const auto w = gaussian_bf16(static_cast<size_t>(n) * k, 0.02f, 0xB12 + n);
     size_t escapes = 0;
     bitwise_gate(w, n, k, "gaussian", &escapes);
     if (static_cast<size_t>(n) * k > 1000000)
       require(escapes > 0, "a trained-looking matrix exercises the escape path");
   }
+}
+
+DGPP_TEST(bf12_multi_launch_is_bitwise_the_bf16_multi_launch) {
+  // The GDN's four input projections in one launch (k = hidden 2560: two
+  // super-blocks and the pair tail): every output bitwise
+  // launch_bf16_gemv_multi's, at one to four rows, both outputs — with one
+  // problem left unpacked (its blocks run the bf16 chain).
+  const int k = 2560;
+  const int ns[4] = {1027, 771, 12, 12};
+  std::vector<std::vector<uint16_t>> w(4);
+  std::vector<uint16_t*> dw(4);
+  std::vector<Packed> pk(4);
+  for (int i = 0; i < 4; ++i) {
+    w[i] = gaussian_bf16(static_cast<size_t>(ns[i]) * k, i == 1 ? 3.0e-4f : 0.02f, 0x300 + i);
+    DGPP_CUDA_OK(cudaMalloc(&dw[i], w[i].size() * 2));
+    DGPP_CUDA_OK(cudaMemcpy(dw[i], w[i].data(), w[i].size() * 2, cudaMemcpyHostToDevice));
+    const Bf12Host h = dgpp::bf12_encode(w[i].data(), ns[i], k);
+    require(h.ok, "multi: encodes");
+    upload(h, ns[i], k, pk[i]);
+  }
+  const size_t stride = static_cast<size_t>(k) + 16;
+  const std::vector<uint16_t> act = gaussian_bf16(4 * stride, 1.5f, 0x3AC7);
+  uint16_t* dx = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&dx, act.size() * 2));
+  DGPP_CUDA_OK(cudaMemcpy(dx, act.data(), act.size() * 2, cudaMemcpyHostToDevice));
+  for (int m = 1; m <= 4; ++m) {
+    for (bool f32 : {false, true}) {
+      for (int unpacked : {-1, 2}) {
+        const size_t es = f32 ? 4 : 2;
+        std::vector<void*> want(4), got(4);
+        dgpp::Bf16GemvProblem p16[4];
+        dgpp::Bf12GemvProblem p12[4];
+        for (int i = 0; i < 4; ++i) {
+          const size_t bytes = static_cast<size_t>(m) * ns[i] * es;
+          DGPP_CUDA_OK(cudaMalloc(&want[i], bytes));
+          DGPP_CUDA_OK(cudaMalloc(&got[i], bytes));
+          DGPP_CUDA_OK(cudaMemset(want[i], 0xA5, bytes));
+          DGPP_CUDA_OK(cudaMemset(got[i], 0x5A, bytes));
+          p16[i] = dgpp::Bf16GemvProblem{dx, stride, dw[i], want[i], ns[i]};
+          p12[i].act = dx;
+          p12[i].act_row_stride = stride;
+          if (i != unpacked) p12[i].packed = pk[i].m;
+          p12[i].weight = dw[i];
+          p12[i].out = got[i];
+          p12[i].n = ns[i];
+        }
+        dgpp::launch_bf16_gemv_multi(p16, 4, f32, m, k, nullptr);
+        dgpp::launch_bf12_gemv_multi(p12, 4, f32, m, k, nullptr);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        for (int i = 0; i < 4; ++i) {
+          const size_t bytes = static_cast<size_t>(m) * ns[i] * es;
+          std::vector<uint8_t> a(bytes), b(bytes);
+          DGPP_CUDA_OK(cudaMemcpy(a.data(), want[i], bytes, cudaMemcpyDeviceToHost));
+          DGPP_CUDA_OK(cudaMemcpy(b.data(), got[i], bytes, cudaMemcpyDeviceToHost));
+          require(a == b, "multi: problem " + std::to_string(i) + " m=" + std::to_string(m) +
+                              (f32 ? " f32" : " bf16") + " bitwise the bf16 multi launch");
+          cudaFree(want[i]);
+          cudaFree(got[i]);
+        }
+      }
+    }
+  }
+  cudaFree(dx);
+  for (uint16_t* d : dw) cudaFree(d);
 }
 
 DGPP_TEST(bf12_rows_of_different_scale_keep_their_own_window) {
@@ -402,7 +485,7 @@ DGPP_TEST(bf12_refuses_what_it_cannot_hold) {
   for (int c = 0; c < k; ++c) w[static_cast<size_t>(3) * k + c] = 0;
   const Bf12Host z = dgpp::bf12_encode(w.data(), n, k);
   require(z.ok, "an all-zero row packs");
-  require(!dgpp::bf12_encode(w.data(), n, 1000).ok, "k off the super-block grid is refused");
+  require(!dgpp::bf12_encode(w.data(), n, 1004).ok, "k off the eight-column grid is refused");
   require(!dgpp::bf12_shape_ok(4, 131072), "a column past 16 bits is refused");
   dgpp::CublasLtGemm gemm;
   Bf12Matrix empty;

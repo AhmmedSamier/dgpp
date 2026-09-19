@@ -17,7 +17,10 @@ Rounds two and three (§5, §6) added the five-to-eight-row packed kernel, the
 other families, the prefill fold overlap and the collective's multi-claim —
 then the 12-bit form as the ONLY resident one (`"bf12"` saves memory: the two
 ceiling-bound templates have their 160K and 120K contexts back) and the
-interleaved gate (the decode collective 40.9 → 35.7 us).
+interleaved gate (the decode collective 40.9 → 35.7 us). Round four (§7)
+gave the format a tail for rows that are not multiples of 1024 columns and
+carried it to Qwen3.8-Flash-Next-FP8: +6.4 % single stream on four Sparks,
++9.0 % on two.
 
 ## 1. Where the physical limits are
 
@@ -395,7 +398,83 @@ reverted. Results are bitwise (the canonical fold): transcripts identical;
 features on (541 requests, 0 failed, op streams identical).
 `DGPP_BUS_GATE=sequential` keeps the per-peer gates.
 
-## 7. Opportunities still open, by expected value
+## 7. Round four (same day): format v2 and Qwen3.8-Flash-Next
+
+Round three's list had "Qwen: a 512-column tail block plus bf12 twins of the
+fused launches". The request: "we should implement bf12 for qwen as well".
+Raw data: `raw/round4-*`.
+
+**Where Qwen's bytes are.** Of the 3.83 GB a world-4 rank of the FP8
+checkpoint reads per token, 3.1 GB (81 %) is BF16: GR sites 1,272 MB
+(replicated), GDN projections 1,038, QSA 354, the head 318 (twice under
+MTP), routers 126, shared experts 118. None of it fitted the format: hidden
+is 2560 and the world-4 slices are 1536 wide (k % 1024 = 512), the GR up
+projection is k = 320.
+
+**Format v2 (the tail).** Padding 2560 to 3072 would stream a fifth more
+bytes — most of the gain — so the columns that do not fill a super-block
+follow the row in units cut by the 256-column steps they hold: two full steps
+as [sm 512 B | exp 256 B] (a lane's exp vector shared with its pair), a single
+or partial step as [sm 8 B/lane | exp 4 B/lane] (vectors shared by two and by
+four lanes). Twelve bits a weight, every load an aligned 16-byte vector, rows
+without a tail unchanged; k = 2560 costs a lane eight loads where the bf16
+core issues ten. Bitwise on thirteen shapes — tail-only rows down to k = 8,
+every unit alone and combined — through the narrow, wide and expansion
+kernels and the new multi-problem launch (`bf12_gemv_test`).
+
+**The real weights pack** (`qwen_escapes.py`): 2–7 escapes per 10,000 weights
+in every class (GDN, QSA, GR down / up, shared experts, routers, the head), no
+row kept raw anywhere, widest row 16.
+
+**The microbench decided the scope** (`qwen_gemv_bench.cu`: real weights,
+production launchers, cold = enough copies to stay out of the 24 MB L2, warm
+= one copy re-read; every output bitwise):
+
+| shape (world 4) | bf16 → packed, cold | warm |
+|---|---|---|
+| GDN qkv [2560 × 2560], 13.1 MB | 53.8 → 43.5 us (−19 %); two rows −15 % | +6 %; two rows +37 % |
+| GDN out [2560 × 1536], 7.9 MB | 35.3 → 28.0 us (−21 %); two rows −18 % | +2 %; two rows +19 % |
+| lm head [62080 × 2560], 318 MB | 1212 → 900 us (−26 %) | — |
+| GR down [320 × 10240], 6.6 MB | 30.4 → 29.2 us (−4 %); two rows +10 % | +109 %; two rows +70 % |
+| GR up [10240 × 320], 6.6 MB | 28.6 → 28.7 us | +76 %; two rows +56 % |
+
+A thread runs its ops in order here: rebuilding a weight's bits is ~12 integer
+ops where the bf16 core spends ~3, so the packed chain is ~2.3× the ops per
+FMA — invisible while DRAM is the limit, the whole cost once the bytes sit in
+L2. The projections and the head are read cold or half-cold and win. The GR
+sites, routers and shared experts are read WARM behind the prefetch windows
+(which is how `gr_norm_down` runs at 347 GB/s and `gr_act_up` at 630), and the
+two GR shapes are latency-bound even cold (40 blocks of 20 KB rows; 1,280
+blocks of 640-byte rows): packed they would cost ~2 ms a step. They stay
+BF16 — a third of Qwen's bytes this format cannot help.
+
+**Fabric** (same binary, `DGPP_BF12=off|both`, MTP greedy, engine decode tok/s;
+transcripts identical, 5 + 3 on each world; prefill unchanged — both forms
+resident):
+
+| live requests | world 4 (4 Sparks) | world 2 (2 Sparks) |
+|---|---|---|
+| 1 | 73.3 → 78.0 (+6.4 %) | 47.1 → 51.4 (+9.0 %) |
+| 2 | 118.8 → 123.3 (+3.8 %) | 73.3 → 78.2 (+6.7 %) |
+| 3 | 141.0 → 144.3 (+2.4 %) | 85.4 → 91.0 (+6.6 %) |
+| 4 | 162.2 → 164.3 (+1.3 %) | 96.2 → 100.6 (+4.6 %) |
+
+248 matrices a rank (1.65 → 1.24 GiB at world 4, 3.20 → 2.41 at world 2).
+Every Qwen recipe has memory to spare (the tightest, two-node FP8, plans
+100.8 GiB with both forms), so the family keeps both forms resident under
+either value of the key and its templates take `"bf12+bf16"`; under
+`dense_weights: "fp8"` (the NVFP4 templates) the projections and the head are
+already block-FP8 and nothing is packed.
+
+**Found on the way.** `WeightPrefetcher::add` bridges holes of up to 2 MB
+between a window's adds; a companion is a separate allocation, and under
+`"bf12"` a hole can be a released — unmapped — BF16 range (2 MB ranges exist:
+the full GLM-5.3's `wk` and `weights_proj`). No fault was ever seen (a layer's
+released ranges are reserved back to back, so a small one sits between other
+released ranges, not between two companions), but it was luck of layout:
+companions now enter a window through `add_isolated`.
+
+## 8. Opportunities still open, by expected value
 
 Decode (GLM-5.3-Flash step now ≈ 31 ms; bytes ≈ 24 ms of it at line rate):
 
@@ -411,11 +490,15 @@ Decode (GLM-5.3-Flash step now ≈ 31 ms; bytes ≈ 24 ms of it at line rate):
    (`max_inline_data = 0` came from the M0 smoke tool, never measured). After
    round three the handshake (14.5 us: the peers' spread, the sender's notice
    and post, the wire) is the collective's largest part.
-3. **Qwen**: a 512-column tail block (hidden 2560, slices of 1536) plus bf12
-   twins of `launch_bf16_gemv_multi` and the GR kernels, which already factor
-   through `bf16_gemv::row_dots`: 2.3 GB/step at world 4, 5.0 at world 2
-   (≈ 5–8 % of a step). The same tail block gives GLM-5.3-Flash's indexer
-   `wq_b` (0.15 ms).
+3. **A packed row chain that is cheap from L2** (~12 integer ops a weight
+   today against the bf16 core's ~3): what keeps Qwen's GR sites (1.27 GB a
+   token, a third of its bytes), routers and shared experts on BF16, and
+   what costs the packed projections +19–37 % when they are read warm at two
+   rows. A layout whose fields need fewer shifts and masks to reach the f32
+   bit pattern, or 64-bit field extraction if the part's 64-bit integer ops
+   are cheap (unmeasured). Worth ≈ +5 % on Qwen if it reaches parity.
+   Format v2's tail also makes GLM-5.3-Flash's indexer `wq_b` (k = 1536)
+   packable (0.15 ms; not in its pack list yet).
 4. **Adaptive depth-2 MTP at C1** (deferred by request) and a truncated
    draft-head vocabulary (excluded: acceptance).
 5. **Batches past eight rows** (the full GLM's 16, GLM-4.7's/DeepSeek's 32):

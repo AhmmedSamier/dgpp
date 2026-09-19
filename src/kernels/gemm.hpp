@@ -56,6 +56,10 @@ class IGemm {
     *ptr = weight;
     *view_bytes = bytes;
   }
+  // The packed companion registered for `weight` (CublasLtGemm::register_bf12),
+  // or null: the fused decode launches that bypass matmul — the GDN's
+  // multi-problem GEMV, the GR site's kernels — pick their packed twins by it.
+  virtual const Bf12Matrix* bf12_lookup(const void* /*weight*/) const { return nullptr; }
 };
 
 // The decode shapes the interface lowers to the row-independent GEMV core: m up
@@ -172,6 +176,7 @@ class CublasLtGemm : public IGemm {
   // take the scalar chain instead, which is what the rows alone compute.
   void set_bf12_wide(bool on);
   size_t bf12_registered() const;
+  const Bf12Matrix* bf12_lookup(const void* weight) const override;
   // bf12-ONLY residency (common/bf16_residency.hpp): `weight`'s own bytes
   // are gone — the loader returned them once the companion existed
   // (loaders/releasable_range.hpp) — and only its address remains, as the

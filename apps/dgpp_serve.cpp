@@ -1577,10 +1577,9 @@ int main(int argc, char** argv) {
     if (std::string(family->name()) != "qwen4_exp" && dense_weights != "checkpoint")
       DGPP_LOG_WARN("serve: --dense-weights {} applies to the Qwen dense stack only; the {} family loads as shipped",
                     dense_weights, family->name());
-    if (bf16_weights != "checkpoint" &&
-        (std::string(family->name()) == "qwen4_exp" || std::string(family->name()) == "deepseek_v41"))
-      DGPP_LOG_INFO("serve: --bf16-weights {} packs nothing on the {} family yet (its bf16 sites ride fused "
-                    "or tensor-core kernels): the bf16 bytes serve as shipped",
+    if (bf16_weights != "checkpoint" && std::string(family->name()) == "deepseek_v41")
+      DGPP_LOG_INFO("serve: --bf16-weights {} packs nothing on the {} family yet (its bf16 sites ride the "
+                    "tensor-core kernels): the bf16 bytes serve as shipped",
                     bf16_weights, family->name());
     if (std::string(family->name()) != "deepseek_v41" && prefill != "bounded")
       DGPP_LOG_WARN("serve: --prefill {} applies to the DeepSeek-V4.1 family only; the {} family prefills every layer",

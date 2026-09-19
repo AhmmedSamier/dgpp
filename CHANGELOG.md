@@ -6,6 +6,30 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **Lossless 12-bit weights on Qwen3.8-Flash-Next; format v2** (2026-09-19;
+  round four of `benchmarks/results/2026-09-19-glm-flash-line-rate/`). The
+  format no longer needs rows of whole 1024-column super-blocks: the columns
+  left over follow the row in units cut by the 256-column steps they hold,
+  twelve bits a weight without padding (`kernels/bf12_gemv.cuh`; k = 2560,
+  1536, 320, any multiple of eight), and a row without a tail is laid out as
+  before. The row chain moved to that shared device header, the multi-problem
+  launch got its packed twin (`launch_bf12_gemv_multi`: the GDN's four input
+  projections) and layers find companions through `IGemm::bf12_lookup`. Qwen
+  packs its GDN and QSA projections, the draft block's and the head (81 % of
+  what a world-4 rank reads per token is BF16; 1.65 → 1.24 GiB per rank):
+  same-binary fabric A/B on the FP8 checkpoint, transcripts identical —
+  world 4 +6.4 / +3.8 / +2.4 / +1.3 % at one to four live requests, world 2
+  +9.0 / +6.7 / +6.6 / +4.6 %, prefill unchanged. The GR sites, routers and
+  shared experts stay BF16: they are read warm behind the prefetcher, where
+  the packed chain's extra integer work loses (microbenched: +56 to +109 %
+  from L2, no gain cold at those shapes). Qwen keeps both forms resident
+  under either value of `engine.bf16_weights` (every recipe has the room);
+  under `dense_weights: "fp8"` nothing is packed. Qwen templates:
+  `"bf12+bf16"`. Also: a companion enters an L2 prefetch window through
+  `WeightPrefetcher::add_isolated` — the coalescing add bridges holes of up to
+  2 MB between adds, which between two allocations can be a released
+  (unmapped) BF16 range; no fault was ever seen, the hazard was latent under
+  `"bf12"` on the full GLM-5.3's small indexer matrices.
 - **bf12-only residency: `engine.bf16_weights: "bf12"` now SAVES memory, and
   the two ceiling-bound templates have their contexts back** (2026-09-19;
   round three of `benchmarks/results/2026-09-19-glm-flash-line-rate/`). The

@@ -57,9 +57,17 @@ the full GLM-5.3) take `"bf12"`, which is what returned their contexts to 160K
 and 120K. Decode is the same either way — identical transcripts, measured on
 every family. Under `"bf12"` a decode batch past eight rows (the full
 GLM-5.3's sixteen-row shape) runs eight-row packed launches, level with the
-BF16 algorithm it replaces. Qwen and DeepSeek accept the key and pack nothing
-yet (their BF16 sites ride fused or tensor-core kernels). `--bf16-weights
-checkpoint` restores the BF16-only form.
+BF16 algorithm it replaces. On Qwen3.8-Flash-Next-FP8 the key packs the GDN and
+QSA projections, the draft block's and the head — 1.65 → 1.24 GiB per rank on
+four nodes, 3.20 → 2.41 on two — for +6.4 / +3.8 / +2.4 / +1.3 % at one to
+four live requests on four nodes and +9.0 / +6.7 / +6.6 / +4.6 % on two,
+transcripts identical; that family keeps both forms resident under either
+value (every Qwen recipe has the room), its GR sites, routers and shared
+experts stay BF16 (they are read warm behind the prefetcher, where the packed
+form loses), and under `dense_weights: "fp8"` (the NVFP4 templates) the
+projections and the head are already FP8, so nothing is packed. DeepSeek
+accepts the key and packs nothing yet (its BF16 sites ride the tensor-core
+kernels). `--bf16-weights checkpoint` restores the BF16-only form.
 
 `engine.embed_sharding` (`"replicated"` by default, `"vocab"` in the full
 GLM-5.3 template) decides whether every rank holds the whole embedding table

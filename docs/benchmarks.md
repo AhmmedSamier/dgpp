@@ -177,6 +177,18 @@ Depth 1 is the shipped setting. The QSA prefill optimization added on
 2026-09-15 does not change decode arithmetic; 80 paired C1 responses retained
 identical text, usage and decode-step counts (§6).
 
+Since 2026-09-19 the templates' `bf16_weights: "bf12+bf16"` streams the GDN and
+QSA projections, the draft block's and the head from their lossless 12-bit
+form (1.65 → 1.24 GiB per rank at world 4, 3.20 → 2.41 at world 2; 81 % of
+what a world-4 rank reads per token is BF16, 1.7 GB of it packed). The same
+binary through the service, MTP greedy, engine decode tok/s at one to four
+live requests: world 4 73.3 / 118.8 / 141.0 / 162.2 → 78.0 / 123.3 / 144.3 /
+164.3 (+6.4 / +3.8 / +2.4 / +1.3 %); world 2 47.1 / 73.3 / 85.4 / 96.2 → 51.4 /
+78.2 / 91.0 / 100.6 (+9.0 / +6.7 / +6.6 / +4.6 %); transcripts byte-identical,
+prefill unchanged
+([record](../benchmarks/results/2026-09-19-glm-flash-line-rate/README.md) §7).
+The rows above predate it.
+
 ### Qwen3.8-Flash-Next-NVFP4, world 1 (one Spark)
 
 | dense stack | mode | ms/pass | tok/pass | ms/token | tokens/s | date |

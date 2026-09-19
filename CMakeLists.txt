@@ -1111,8 +1111,14 @@ add_test(NAME qwen_engine_test COMMAND qwen_engine_test)
 add_test(NAME qwen_engine_row_independent
   COMMAND ${CMAKE_COMMAND} -E env DGPP_DENSE_GEMV_ROWS=256 DGPP_TEST_FILTER=wide
           $<TARGET_FILE:qwen_engine_test>)
-set_tests_properties(qwen_engine_test qwen_engine_row_independent PROPERTIES RESOURCE_LOCK qwen_engine_world)
-set_tests_properties(qwen_engine_row_independent PROPERTIES LABELS "gpu;rdma")
+# The graph engines with the bf16 decode weights' 12-bit companions on
+# (engine.bf16_weights; DGPP_BF12 overrides the process setting): the packed
+# multi launch and the packed GEMVs under capture and replay, against the
+# same references — the form is bitwise, so every gate holds unchanged.
+add_test(NAME qwen_engine_bf12
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_BF12=both $<TARGET_FILE:qwen_engine_test>)
+set_tests_properties(qwen_engine_test qwen_engine_row_independent qwen_engine_bf12 PROPERTIES RESOURCE_LOCK qwen_engine_world)
+set_tests_properties(qwen_engine_row_independent qwen_engine_bf12 PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
 
 add_executable(qwen_forward_check apps/qwen_forward_check.cpp)
 target_link_libraries(qwen_forward_check PRIVATE dgpp_models_qwen_layers dgpp_bus dgpp_loaders CUDA::cudart Threads::Threads)

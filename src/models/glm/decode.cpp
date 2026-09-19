@@ -135,7 +135,7 @@ void GlmDiagnosticModel::prefetch_attention_side(int layer, int rows) {
       const void* view = nullptr;
       size_t view_bytes = 0;
       gemm_.resident_view(r.kda.in_proj, kda_->in_proj_bytes(), rows, &view, &view_bytes);
-      prefetch_.add(view, view_bytes);
+      prefetch_.add_view(r.kda.in_proj, view, view_bytes);  // a companion is its own allocation
     }
   } else {
     if (dsa_) prefetch_.add(r.dsa.qkv_a, dsa_->qkv_a_bytes());
@@ -151,7 +151,7 @@ void GlmDiagnosticModel::prefetch_head(int rows) {
   size_t view_bytes = 0;
   gemm_.resident_view(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2, rows,
                       &view, &view_bytes);
-  prefetch_.add(view, view_bytes);
+  prefetch_.add_view(globals_.lm_head, view, view_bytes);
 }
 
 // ---------------------------------------------------------------------------

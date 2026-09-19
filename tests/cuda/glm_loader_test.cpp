@@ -755,10 +755,11 @@ DGPP_TEST(layer_bump_side_grants_keep_the_staging_layout_and_release) {
   }
 }
 
-// An image captured in one residency mode restores in the other: the draft
-// layer's eh_proj ([512, 1024] — the fixture's one matrix inside the packing
-// contract) is granted aside under bf12-only residency, the image bytes are
-// the same, and its range gives its memory back.
+// An image captured in one residency mode restores in the other: the
+// packable matrices — every KDA layer's in and out projections and the draft
+// layer's eh_proj ([512, 1024]); format v2 packs any row of a multiple of
+// eight columns — are granted aside under bf12-only residency, the image
+// bytes are the same, and a range gives its memory back.
 DGPP_TEST(glm_loader_side_grants_share_the_image_and_release) {
   const Fixture fx = write_fixture();
   const int max_layer = fx.cfg.num_hidden_layers + (fx.cfg.mtp_layer() >= 0 ? 1 : 0);
@@ -778,9 +779,18 @@ DGPP_TEST(glm_loader_side_grants_share_the_image_and_release) {
   const size_t eh_bytes = dgpp::align_up_256(size_t{512} * 1024 * 2);
   require(dgpp::GlmLayerStream::layer_side_bytes(fx.cfg, mtp) == eh_bytes,
           "the draft layer's side bytes are eh_proj's");
+  // A KDA layer's: the fused in_proj [2 head_dim + 3 proj + heads, hidden]
+  // and o_proj [hidden, proj]; a DSA layer grants nothing aside.
+  const size_t kda_hidden = static_cast<size_t>(fx.cfg.hidden_size);
+  const size_t kda_proj = static_cast<size_t>(fx.cfg.kda_num_heads) * fx.cfg.kda_head_dim;
+  const size_t kda_side =
+      dgpp::align_up_256((2 * static_cast<size_t>(fx.cfg.kda_head_dim) + 3 * kda_proj + fx.cfg.kda_num_heads) *
+                         kda_hidden * 2) +
+      dgpp::align_up_256(kda_hidden * kda_proj * 2);
   for (int l = 0; l < fx.cfg.num_hidden_layers; ++l)
-    require(dgpp::GlmLayerStream::layer_side_bytes(fx.cfg, l) == 0,
-            "a 512-wide projection is outside the packing contract: no side grant");
+    require(dgpp::GlmLayerStream::layer_side_bytes(fx.cfg, l) ==
+                (fx.cfg.layers[static_cast<size_t>(l)] == dgpp::GlmLayerKind::Kda ? kda_side : size_t{0}),
+            ("layer " + std::to_string(l) + ": the side bytes are the KDA projections'").c_str());
 
   // Built and captured with the bf16 bytes in place...
   std::vector<std::vector<uint8_t>> built(static_cast<size_t>(max_layer));
@@ -806,7 +816,7 @@ DGPP_TEST(glm_loader_side_grants_share_the_image_and_release) {
       require(got == built[static_cast<size_t>(l)],
               ("layer " + std::to_string(l) + ": a side-grant restore is the built bytes").c_str());
       const auto [base, bytes] = second.resident_layer_span(l);
-      require(bytes == built[static_cast<size_t>(l)].size() - (l == mtp ? eh_bytes : 0),
+      require(bytes == built[static_cast<size_t>(l)].size() - dgpp::GlmLayerStream::layer_side_bytes(fx.cfg, l),
               "the layer's own allocation excludes its side grants");
       if (l != mtp) continue;
       const char* eh = reinterpret_cast<const char*>(r.eh_proj);
