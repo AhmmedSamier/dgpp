@@ -43,11 +43,66 @@ ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
 
 Local raw logs are under the ignored `artifacts/mtp-metrics/` directory.
 
+## Spark hardware validation
+
+Tested source commit: `616c3de` (the subsequent changes only record evidence).
+A separate checkout on a GB10 Spark was configured with `cmake --preset ci`
+and fully built with `cmake --build --preset ci -j 4` before testing. Both
+production ranks were stopped for GPU/RDMA execution. The serial command was:
+
+```bash
+CUDA_DEVICE_MAX_CONNECTIONS=32 ctest --test-dir build-ci --output-on-failure -j 1 --timeout 300
+```
+
+The full run completed in 630.38 seconds: **101 passed, zero failed, 10 skipped**.
+The skipped tests require unavailable checkpoint data: `tokenizer_test`,
+`dsv41_tokenizer_test`, `dsv41_prompt_test`, `glm4_tokenizer_test`,
+`glm_dsa_tokenizer_test`, `chat_template_test`, `glm4_chat_template_test`,
+`glm_dsa_chat_template_test`, `glm_vision_stream_test` and
+`glm_vision_frontend_test`. Optional real-checkpoint cases inside other binaries
+also report their own skips; process success does not validate absent models.
+
+The same native binary was then staged to both Sparks for a separate TP2
+Qwen3.8-Flash-Next-NVFP4 deployment, with concurrency 4, MTP depth 3, 65,536 KV
+tokens and a 1 GiB prefix cache. Three identical counting requests verified
+that both metrics routes returned the same `spec_decode` object:
+
+```json
+{
+  "depth": 3,
+  "num_drafts_total": 84,
+  "num_draft_tokens_total": 252,
+  "num_accepted_tokens_total": 252,
+  "num_draft_tokens_per_pos_total": [84, 84, 84],
+  "num_accepted_tokens_per_pos_total": [84, 84, 84]
+}
+```
+
+The second and third requests each reused 1,136 cached prompt tokens.
+`scripts/serve_api_check.py` passed its stop, streaming, multiple-choice,
+logit-bias and usage checks. After clean shutdown, both ranks' operation
+streams had MD5 `203b9e4b26af40bd8224e12d9820f290`.
+
+The original production release `0.1.0+g42b105d-mtpmetrics` and unchanged
+configuration were restored on both ranks. Three health-check requests
+succeeded; the second and third reused 1,128 prompt tokens. Metrics reported
+148 cache slots and no engine failure, and both live rank logs confirmed
+successful request retirement. Production deployment settings were not changed.
+
+The first maintenance attempt stopped at a harness self-SSH host-key check
+before GPU tests and automatically restored production successfully. The
+check was changed to run locally on rank 0 before the successful run. The
+harness also uses the older production release's `/v1/metrics` route; the
+new branch was checked through both aliases.
+
+Raw build, CTest, live API, metric, shutdown and restoration evidence is saved
+locally under `artifacts/mtp-metrics/server-validation/` (ignored by Git).
+
 ## Limits
 
-The host fixture verifies publication and HTTP serialization of existing
-counters, not real-model acceptance or numerical behavior. This branch does
-not change paths that tensor-parallel ranks execute together, so it introduces
-no new fabric-evidence requirement. The full CUDA/checkpoint/RDMA suite from
-`CONTRIBUTING.md` remains a merge gate on reserved idle hardware; production
-inference was not stopped, restarted or used for this validation.
+The live counting requests establish real-model counter publication, not a
+representative acceptance-rate or throughput benchmark. Variable-depth
+arithmetic is covered by the host regression. GPU/RDMA fixtures and a physical
+two-Spark serving world were exercised; a physical four-node run and the
+unavailable checkpoint cases were not. This change only exposes an existing
+host snapshot and does not modify the paths ranks execute together.
