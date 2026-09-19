@@ -141,3 +141,29 @@ not evidence for missing checkpoints or four-node hardware.
 No inference performance or numerical change is claimed. The full suite
 has been executed, but its two baseline failures and checkpoint skips remain
 explicit limitations rather than a clean full-suite merge-gate result.
+
+## Integration with updated upstream
+
+Upstream `444441feed0c4d7c256ff7ff7868b587823b737f` was merged into the
+published PR branch after the hardware run. Conflict resolution retains
+upstream's guided setup documentation and bootstrap test registration,
+alongside the cross-build instructions and `spark_cross_test`. Relative to
+that upstream commit, this PR still changes no inference source or deployment
+configuration.
+
+Fresh local validation of the merged tree passed:
+
+- Python discovery: 182 tests, 179 passed and three skipped. Updated upstream
+  fixes the two earlier Python failures; their historical results above are
+  retained for the previously tested source revision.
+- Container CTest: all ten Python suites passed, including bootstrap and
+  cross-build tests.
+- Full ARM64 cross-build of all targets, including upstream's new BF12 code.
+- Install staging and ELF checks: server and CUDA libraries remain AArch64,
+  the server retains its install RUNPATH, and PCRE2 remains statically linked.
+- `git diff --check` passed.
+
+Logs are under `artifacts/cross-build-pr/merge-*.log`. No inference node was
+contacted or restarted during this integration. The hardware results above
+apply to `53a5339`; GPU/RDMA and live serving were not rerun for the merged
+upstream runtime.
