@@ -370,12 +370,17 @@ size_t QwenModel::dense_bridge_bytes(const QwenTextConfig& cfg, const QwenLocalG
 
 // The lm_head product into logits_ (f32): the checkpoint's BF16 through the
 // GEMM interface, or the block-FP8 form (engine.dense_weights) through the scale
-// GEMM — 2026-09-10.
+// GEMM.
 void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t stream) {
   const int H = cfg_.hidden_size;
+  // Reuse each weight tile across wider decode-shaped heads. This also
+  // covers short prefill calls; larger prefill keeps its existing lowering.
+  // The streaming MMA preserves weight values but reassociates FP32 sums.
   if (globals_.lm_head_fp8.payload)
-    launch_scale_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_fp8.payload, globals_.lm_head_fp8.scales,
-                          logits_, rows, lm_vocab_count_, H, stream, static_cast<size_t>(lm_vocab_count_));
+    launch_scale_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_fp8.payload,
+                          globals_.lm_head_fp8.scales, logits_, rows, lm_vocab_count_, H, stream,
+                          static_cast<size_t>(lm_vocab_count_),
+                          rows <= max_decode_rows_ ? dense_gemv_rows() + 1 : 0);
   else
     gemm_.matmul(hidden, globals_.lm_head, logits_, rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
                  static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream);

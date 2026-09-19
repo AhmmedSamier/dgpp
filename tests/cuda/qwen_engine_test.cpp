@@ -452,6 +452,13 @@ DGPP_TEST(qwen_engines_loopback_world_2_mtp_depth2_graph_matches_plain_decode) {
 }
 
 DGPP_TEST(qwen_engines_loopback_world_2_wide_mtp_slot_reuse_and_continuation) {
+  const bool old_fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
+  struct RestoreDenseWeights {
+    bool fp8;
+    ~RestoreDenseWeights() { dgpp::QwenLayerStream::set_dense_weights_fp8(fp8); }
+  } restore_dense_weights{old_fp8};
+  if (const char* fp8 = std::getenv("DGPP_TEST_DENSE_FP8"); fp8 && std::string(fp8) == "1")
+    dgpp::QwenLayerStream::set_dense_weights_fp8(true);
   const QwenTextConfig cfg = qwenfx::tiny_config();
   const std::string dir = "qwen_engine_fixture";
   qwenfx::write_fixture(cfg, dir);

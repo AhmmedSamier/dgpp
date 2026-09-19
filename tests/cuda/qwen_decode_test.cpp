@@ -31,6 +31,7 @@
 #include "common/bf16_residency.hpp"
 #include "common/dtypes.hpp"
 #include "engine/speculative.hpp"
+#include "kernels/gemm.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/forward.hpp"
 
@@ -149,7 +150,7 @@ int audit(QwenModel& ref, const std::vector<int64_t>& prompt, const Transcript& 
 }
 
 // ---- the fixture gates ----------------------------------------------------------
-int run_fixture(const std::string& dir) {
+int run_fixture(const std::string& dir, bool fp8_head = false) {
   const QwenTextConfig cfg = QwenTextConfig::from_json_file((fs::path(dir) / "config.json").string());
   const std::vector<int64_t> A = smoke_tokens(cfg, 23, 0x9E3779B97F4A7C15ull);
   const std::vector<int64_t> B = smoke_tokens(cfg, 17, 0xD1B54A32D192ED03ull);
@@ -412,11 +413,17 @@ int run_fixture(const std::string& dir) {
     }
     std::printf("[ OK ] the eager speculator reproduces the greedy transcript through the draft block\n");
   }
-  // Teacher-forced target verification at twelve and sixteen rows. The
+  // Teacher-forced target verification across the GEMV boundary through sixteen rows. The
   // production dense GEMM lowering reassociates the sums across shapes;
   // use the existing logit/margin budget and bound the mean loss change.
   // The separate row-independent graph lane retains exact MTP/plain parity.
   {
+    const bool old_fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
+    struct RestoreDenseWeights {
+      bool fp8;
+      ~RestoreDenseWeights() { dgpp::QwenLayerStream::set_dense_weights_fp8(fp8); }
+    } restore_dense_weights{old_fp8};
+    if (fp8_head) dgpp::QwenLayerStream::set_dense_weights_fp8(true);
     QwenModel reference(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16);
     QwenModel wide(cfg, dir, 64, 2048, QwenResidency::Resident, nullptr, 0, 1, 8, false, 16);
     wide.session_graph_prepare();
@@ -428,49 +435,88 @@ int run_fixture(const std::string& dir) {
     };
     double loss_delta = 0, worst_l2 = 0;
     int rows = 0, near_ties = 0;
-    for (const int count : {6, 8}) for (int trial = 0; trial < 8; ++trial) {
-      std::vector<std::vector<float>> expected;
-      std::vector<std::vector<int64_t>> feeds;
-      std::vector<int64_t> labels;
-      for (int req = 0; req < count; ++req) {
-        const auto prompt = smoke_tokens(cfg, 11 + req, 4000 + 100 * trial + req);
-        const auto teacher = smoke_tokens(cfg, 3, 7000 + 100 * trial + req);
-        (void)reference.session_prefill(req, prompt);
-        (void)wide.session_prefill(req, prompt);
-        wide.session_reserve_blocks(req, 64);
-        for (int row = 0; row < 2; ++row) {
-          expected.push_back(reference.session_step(req, teacher[row]).logits);
-          labels.push_back(teacher[row + 1]);
+    for (const int count : {2, 3, 4, 6, 8})
+      for (int trial = 0; trial < 8; ++trial) {
+        std::vector<std::vector<float>> expected;
+        std::vector<std::vector<int64_t>> feeds;
+        std::vector<int64_t> labels;
+        for (int req = 0; req < count; ++req) {
+          const auto prompt = smoke_tokens(cfg, 11 + req, 4000 + 100 * trial + req);
+          const auto teacher = smoke_tokens(cfg, 3, 7000 + 100 * trial + req);
+          (void)reference.session_prefill(req, prompt);
+          (void)wide.session_prefill(req, prompt);
+          wide.session_reserve_blocks(req, 64);
+          for (int row = 0; row < 2; ++row) {
+            expected.push_back(reference.session_step(req, teacher[row]).logits);
+            labels.push_back(teacher[row + 1]);
+          }
+          feeds.push_back({teacher[0], teacher[1]});
         }
-        feeds.push_back({teacher[0], teacher[1]});
+        // Prefill uses the token-feed buffer as scratch. Seed every feed
+        // after the last prefill, as GraphEngineAdapter does before replay.
+        for (int req = 0; req < count; ++req) wide.session_graph_seed_feed(req, feeds[req]);
+        // Read target logits before any picker or draft can overwrite them.
+        // The FP8 lane also validates capture and the selected head kernel.
+        if (fp8_head) {
+          cudaGraph_t graph = nullptr;
+          cudaGraphExec_t executable = nullptr;
+          DGPP_CUDA_OK(cudaStreamBeginCapture(wide.stream(), cudaStreamCaptureModeGlobal));
+          wide.session_graph_capture_batch(2, count);
+          DGPP_CUDA_OK(cudaStreamEndCapture(wide.stream(), &graph));
+          // Find the streaming kernel writing the vocabulary logits, rather
+          // than counting MMA kernels used by other dense projections.
+          size_t node_count = 0;
+          DGPP_CUDA_OK(cudaGraphGetNodes(graph, nullptr, &node_count));
+          std::vector<cudaGraphNode_t> nodes(node_count);
+          DGPP_CUDA_OK(cudaGraphGetNodes(graph, nodes.data(), &node_count));
+          int streaming_heads = 0;
+          for (const auto node : nodes) {
+            cudaGraphNodeType type;
+            DGPP_CUDA_OK(cudaGraphNodeGetType(node, &type));
+            if (type != cudaGraphNodeTypeKernel) continue;
+            cudaKernelNodeParams params{};
+            DGPP_CUDA_OK(cudaGraphKernelNodeGetParams(node, &params));
+            const char* name = nullptr;
+            DGPP_CUDA_OK(cudaFuncGetName(&name, params.func));
+            if (std::string(name).find("mma_gemv_kernel") == std::string::npos) continue;
+            // mma_gemv_kernel's fifth argument is its output pointer.
+            const auto output = *static_cast<void**>(params.kernelParams[4]);
+            if (output == wide.device_logits()) ++streaming_heads;
+          }
+          const bool expect_streaming = 2 * count > dgpp::dense_gemv_rows();
+          const bool dispatch_ok = streaming_heads == (expect_streaming ? 1 : 0);
+          DGPP_CUDA_OK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
+          DGPP_CUDA_OK(cudaGraphLaunch(executable, wide.stream()));
+          DGPP_CUDA_OK(cudaStreamSynchronize(wide.stream()));
+          DGPP_CUDA_OK(cudaGraphExecDestroy(executable));
+          DGPP_CUDA_OK(cudaGraphDestroy(graph));
+          require(dispatch_ok, "FP8 vocabulary head did not honor the dense GEMV row boundary");
+        } else {
+          wide.session_graph_capture_batch(2, count);
+        }
+        DGPP_CUDA_OK(cudaStreamSynchronize(wide.stream()));
+        std::vector<float> got(static_cast<size_t>(2 * count) * V);
+        DGPP_CUDA_OK(cudaMemcpy(got.data(), wide.device_logits(), got.size() * sizeof(float),
+                                cudaMemcpyDeviceToHost));
+        for (int row = 0; row < 2 * count; ++row) {
+          const float* actual = got.data() + static_cast<size_t>(row) * V;
+          const auto comparison = compare_row(actual, expected[row].data(), V);
+          require(comparison.l2 < 2e-2, "wide target verification exceeds the logit l2 budget: " +
+                                            std::to_string(comparison.l2) + " at width " +
+                                            std::to_string(2 * count) + " row " +
+                                            std::to_string(row));
+          require(comparison.top1_equal || comparison.near_tie,
+                  "wide target verification changes a top-1 decision beyond the near-tie margin");
+          worst_l2 = std::max(worst_l2, comparison.l2);
+          near_ties += !comparison.top1_equal;
+          loss_delta += nll(actual, labels[row]) - nll(expected[row].data(), labels[row]);
+          ++rows;
+        }
+        for (int req = 0; req < count; ++req) {
+          reference.session_close(req);
+          wide.session_close(req);
+        }
       }
-      // Prefill uses the token-feed buffer as scratch. Seed every feed
-      // after the last prefill, as GraphEngineAdapter does before replay.
-      for (int req = 0; req < count; ++req) wide.session_graph_seed_feed(req, feeds[req]);
-      // Execute the capture body eagerly so its target logits are available
-      // before any picker or draft can overwrite them.
-      wide.session_graph_capture_batch(2, count);
-      DGPP_CUDA_OK(cudaStreamSynchronize(wide.stream()));
-      std::vector<float> got(static_cast<size_t>(2 * count) * V);
-      DGPP_CUDA_OK(cudaMemcpy(got.data(), wide.device_logits(), got.size() * sizeof(float), cudaMemcpyDeviceToHost));
-      for (int row = 0; row < 2 * count; ++row) {
-        const float* actual = got.data() + static_cast<size_t>(row) * V;
-        const auto comparison = compare_row(actual, expected[row].data(), V);
-        require(comparison.l2 < 2e-2, "wide target verification exceeds the logit l2 budget: " +
-                    std::to_string(comparison.l2) + " at width " + std::to_string(2 * count) +
-                    " row " + std::to_string(row));
-        require(comparison.top1_equal || comparison.near_tie,
-                "wide target verification changes a top-1 decision beyond the near-tie margin");
-        worst_l2 = std::max(worst_l2, comparison.l2);
-        near_ties += !comparison.top1_equal;
-        loss_delta += nll(actual, labels[row]) - nll(expected[row].data(), labels[row]);
-        ++rows;
-      }
-      for (int req = 0; req < count; ++req) {
-        reference.session_close(req);
-        wide.session_close(req);
-      }
-    }
     std::printf("[ .. ] wide teacher-forced target: %d rows, worst l2 %.5g, %d near ties, mean NLL delta %.6g\n",
                 rows, worst_l2, near_ties, loss_delta / rows);
     require(std::abs(loss_delta / rows) < 0.02, "wide target verification exceeds the mean NLL budget");
@@ -734,18 +780,21 @@ int run_checkpoint(const std::string& dir, const std::vector<int64_t>& ids, int 
 
 int main(int argc, char** argv) {
   std::string fixture, checkpoint, ids_text;
+  bool fp8_head = false;
   int steps = 4;
   int layers_extra = -1;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--fixture" && i + 1 < argc) fixture = argv[++i];
+    else if (a == "--fp8-head")
+      fp8_head = true;
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--ids" && i + 1 < argc) ids_text = argv[++i];
     else if (a == "--steps" && i + 1 < argc) steps = std::stoi(argv[++i]);
     else if (a == "--layers" && i + 1 < argc) layers_extra = std::stoi(argv[++i]);
   }
   try {
-    if (!fixture.empty()) return run_fixture(fixture);
+    if (!fixture.empty()) return run_fixture(fixture, fp8_head);
     if (!checkpoint.empty()) {
       std::vector<int64_t> ids;
       std::stringstream ss(ids_text);
@@ -755,7 +804,9 @@ int main(int argc, char** argv) {
       if (layers_extra >= 0) return run_layers(checkpoint, ids, layers_extra);
       return run_checkpoint(checkpoint, ids, steps);
     }
-    std::fprintf(stderr, "usage: --fixture DIR | --checkpoint-dir DIR --ids 1,2,... [--steps N]\n");
+    std::fprintf(
+        stderr,
+        "usage: --fixture DIR [--fp8-head] | --checkpoint-dir DIR --ids 1,2,... [--steps N]\n");
     return 2;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "[FAIL] %s\n", e.what());

@@ -83,6 +83,12 @@ Their implementation and evaluation records are maintained separately:
 
 ## Remaining work
 
+The Qwen FP8 vocabulary-head streaming MMA dispatch is implemented with
+numerical, graph-dispatch and two-rank MTP test coverage. Target execution,
+the full native suite, matched real-model numerical/performance checks and
+fabric op-stream validation remain pending; see the
+[FP8 head record](benchmarks/results/2026-09-19-qwen-fp8-head.md).
+
 Qwen graph serving can interleave prefill chunks with decode using
 `engine.prefill_budget_tokens`; zero preserves monolithic admission.
 An optional `engine.prefill_idle_budget_tokens` increases chunk size when
