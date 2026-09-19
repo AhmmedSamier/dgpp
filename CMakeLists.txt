@@ -1419,6 +1419,12 @@ dgpp_set_common(glm_vision_test)
 add_test(NAME glm_vision_test COMMAND glm_vision_test)
 set_tests_properties(glm_vision_test PROPERTIES LABELS "gpu" SKIP_RETURN_CODE 2)
 
+add_executable(glm_vision_stream_test tests/cuda/glm_vision_stream_test.cpp)
+target_link_libraries(glm_vision_stream_test PRIVATE dgpp_models_glm_loader CUDA::cudart)
+dgpp_set_common(glm_vision_stream_test)
+add_test(NAME glm_vision_stream_test COMMAND glm_vision_stream_test)
+set_tests_properties(glm_vision_stream_test PROPERTIES LABELS "gpu;checkpoint" SKIP_RETURN_CODE 2 RUN_SERIAL TRUE)
+
 add_executable(glm_vision_frontend_test tests/host/glm_vision_frontend_test.cpp)
 target_link_libraries(glm_vision_frontend_test PRIVATE dgpp_serve)
 dgpp_set_common(glm_vision_frontend_test)
