@@ -167,74 +167,39 @@ git clone https://github.com/HawkBearPig/dgpp.git
 cd dgpp
 ```
 
-Run the remaining commands in this same shell, after installing the
-[dependencies on each node](docs/getting-started.md#1-install-the-dependencies).
-This example serves GLM-5.3-Flash on four Sparks; choose a different
-[deployment template](deploy/README.md) for another model or node count.
-See [Getting started](docs/getting-started.md) for the full walkthrough and troubleshooting guidance.
-
-### 1. Configure your deployment
-
-Copy the model template and create your site file, preserving existing files.
-Edit `.env` to set `DGPP_NODES` (rank 0 first) and `DGPP_SSH_USER`, then
-[verify SSH-key access from rank 0 to each peer](docs/getting-started.md#3-set-your-node-addresses-and-ssh-user).
+Run the guided setup on rank 0:
 
 ```bash
-CONFIG=deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.json
-test -f "$CONFIG" || cp "${CONFIG%.json}.example.json" "$CONFIG"
-test -f .env || cp .env.example .env
+./scripts/setup.sh
 ```
 
-Set `CONFIG` again if you open a new shell; it is the deployment filename, not a persistent setting.
+The wizard helps you choose a supported model and node count, saves your site
+settings, checks SSH and software dependencies on every node, and walks through
+RoCE lane selection for multi-node deployments. It then builds the release
+server, prepares the downloader, downloads the checkpoint once and syncs peers,
+and runs the serving preflight. Existing deployment tuning and unrelated `.env`
+entries are preserved. Reruns reuse the build and complete cached checkpoints.
 
-### 2. Select the RoCE lanes (multiple nodes only)
+Python 3.10+ is needed to run setup. On Ubuntu/DGX OS, the wizard can install
+standard system packages with `sudo`; `--install-system-deps` requests this
+up front. NVIDIA drivers/CUDA and physical network setup remain site prerequisites.
+Expect substantial checkpoint storage and download time on a fresh machine.
+The wizard reports each node's free cache space and explains the lane choices;
+it cannot verify cabling or end-to-end RDMA connectivity.
 
-Discover the interfaces, then copy the appropriate device names and GID indices
-into `.env`, matching lane subnet order across nodes; discovery does not test RDMA connectivity.
+Setup prints the commands to start, inspect and stop the selected deployment.
+Add `--start` to launch after all checks pass:
 
 ```bash
-python3 scripts/discover_roce.py --config "$CONFIG"
+./scripts/setup.sh --start
 ```
 
-### 3. Build
+The API defaults to localhost and has no authentication or TLS. Wait for `READY`
+before sending requests. For unattended setup, read-only checks, offline cache
+sync and the manual walkthrough, see [Getting started](docs/getting-started.md).
+Use `./scripts/setup.sh --help` for all options.
 
-Build the server on rank 0; the launcher stages the executable on peers.
-If CUDA is not found, see [compiler setup](docs/getting-started.md#5-build-the-server-on-rank-0).
-
-```bash
-cmake --preset release
-cmake --build --preset release -j 4
-```
-
-The release preset produces `build-release/dgpp-serve` with `-O3` optimization
-and no debug symbols. Testing uses the separate `ci` preset and `build-ci/`
-directory, with debug symbols retained; see [testing](docs/testing.md).
-
-### 4. Download the checkpoint
-
-Download once into rank 0's standard Hugging Face cache, then sync peers sequentially.
-Add `--sync-only` if rank 0 already has the checkpoint.
-For this example, allow roughly **250 GiB per node** for the checkpoint and
-one resident cache; check [storage and offline options](docs/getting-started.md#6-download-once-and-sync-to-peers) first.
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements-download.txt
-python scripts/download_model.py --config "$CONFIG"
-```
-
-### 5. Check and start
-
-Fix any failed preflight checks, then start the deployment and wait for `READY`.
-The API stays on localhost; it has no authentication or TLS.
-
-```bash
-python3 scripts/dgpp-cluster doctor --config "$CONFIG"
-python3 scripts/dgpp-cluster up --config "$CONFIG"
-```
-
-### 6. Send a request
+### Send a request
 
 Ask the running model a question. This short example requests low reasoning
 effort because reasoning tokens also count toward `max_tokens`:
@@ -250,7 +215,7 @@ jq -n --arg model "$MODEL" \
 Stop it when finished, using the same config:
 
 ```bash
-python3 scripts/dgpp-cluster down --config "$CONFIG"
+python3 scripts/dgpp-cluster down --config /path/to/the/selected/deployment.json
 ```
 
 ## Release and install
@@ -259,6 +224,7 @@ A release is a versioned tarball installed once per node. Starting an
 installed release stages the configuration and uses the installed binary.
 
 ```bash
+CONFIG=/path/to/the/selected/deployment.json        # use the path printed by setup
 scripts/release.sh                                 # build the release preset, stage, verify, pack
 scripts/dgpp-cluster install dist/dgpp-VERSION.tar.zst --config "$CONFIG"
 scripts/dgpp-cluster up --release VERSION --config "$CONFIG"
@@ -303,8 +269,9 @@ scripts' environment and generated server config.
 
 | `.env` key | purpose | default |
 |---|---|---|
-| `DGPP_NODES` | Space-separated hostnames/IPv4 addresses in rank order. The first is rank 0, where launch/download commands run. A deployment uses its first `world_size` nodes. These are host addresses, not RDMA device names. | required |
+| `DGPP_NODES` | Space-separated SSH/control hostnames or IPv4 addresses in rank order, using management IPs, fabric IPs, or a mixture. Rank 0 runs locally, must reach peers over SSH, and must be reachable by peers at its listed address. A deployment uses the first `world_size` entries. See [network layouts](docs/networking.md#ssh-and-control-addresses). | required |
 | `DGPP_SSH_USER` | Peer login for binary staging, process control, diagnostics and checkpoint sync. Needs SSH-key access and write access to the configured directories. | current login when empty or absent |
+| `DGPP_CLUSTER_CONFIG` | Default deployment filename, saved by guided setup. An explicit `--config` takes precedence. | legacy four-node Flash hybrid filename |
 | `DGPP_HTTP_PORT` | Default client-facing API TCP port on rank 0; deployment `http.port` overrides it. | 18080 |
 | `DGPP_HTTP_BIND` | Default IPv4 listening address on rank 0; deployment `http.bind_host` overrides it. Keep localhost unless you have arranged access protection. | `127.0.0.1` |
 | `DGPP_FABRIC_PORT` | Rank-0 TCP rendezvous listener used to establish the inter-node transport. Peers must reach it; clients do not use it. Keep it private to the cluster. | 29970 |
