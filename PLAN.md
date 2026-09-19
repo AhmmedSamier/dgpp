@@ -104,6 +104,11 @@ partial arithmetic and decode kernels. Grouped Qwen continuation and
 GLM-Flash row expansion are the next targets in the
 [performance plan](docs/performance_improvement_plan.md#10-next-priorities-after-the-first-delivery).
 
+The metrics endpoints expose existing engine-lifetime MTP verification counters
+under `scheduler.spec_decode`, including separate round and draft-token totals
+and per-position attempts and accepts. See the
+[metrics contract](docs/openai-compatibility.md#speculative-decoding-counters).
+
 Other work includes request-level observability, additional API fields,
 silent-node-loss detection, wider batching for GLM-5.3-Flash, arbitrary
 slot subsets for oversized batches, and

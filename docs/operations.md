@@ -644,8 +644,11 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
   for backward compatibility) — JSON counters for requests, sheds, cancellations,
   failures, the admission policy, the prefix cache (entries, hits, tokens
   saved, hop snapshots, the TTFT split by hit and miss), sampling
-  fallbacks. `prefill.requests` reports each active prefill's prompt, processed,
-  cached, computed and remaining tokens, updated at chunk boundaries even
+  fallbacks. `scheduler.spec_decode` reports cumulative MTP draft rounds,
+  attempted and accepted draft tokens, and per-position counters; see the
+  [counter definitions](openai-compatibility.md#speculative-decoding-counters)
+  before calculating acceptance rates. `prefill.requests` reports each active
+  prefill's prompt, processed, cached, computed and remaining tokens, updated at chunk boundaries even
   during a synchronous prefill. `scheduler.snapshot_age_ms` reports the age of
   the remaining scheduler/pool counters. See the
   [metrics contract and monitoring command](openai-compatibility.md#metrics-and-prefill-progress).
