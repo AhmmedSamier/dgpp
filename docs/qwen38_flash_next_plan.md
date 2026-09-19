@@ -314,6 +314,18 @@ other family (the launcher warns that the knob applies to `qwen4_exp` only).
 The knob rides the settings record (`"rs"`) so a peer can never rope at
 different frequencies from rank 0, and the canonical config digest.
 
+The oracle is offline-checkable. `tests/python/qwen_yarn_oracle.py --emit`
+runs inside the recipe's container and records vLLM's own numbers — the
+YaRN table, the mscale, the bf16 cos/sin cache rows and rotated Q/K (with
+one attention logit) at several positions — for five parameter
+combinations (the recipe, factor 4, a 16/2 band, an `attn_factor` of 1.2,
+the 1x mrope cache), under the digest of the image that produced them, in
+`tests/data/qwen_yarn_oracle.json`. `tests/unit/qwen_yarn_fixture_test.cpp`
+then compares the engine's builder and rotation against that file with no
+vLLM, no container and no GPU: 160 table lanes, 21 cos/sin rows and 42
+rotated rows, every one of them bit-for-bit. Re-run `--emit` and `--check`
+in the container when the recipe or vLLM's yarn code moves.
+
 ### 1.10 Tokenizer, template, tool format
 
 `tokenizer.json`: byte-level BPE, 248 044 vocabulary + 33 added tokens,
