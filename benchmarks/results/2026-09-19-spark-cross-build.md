@@ -75,11 +75,69 @@ that mount. The wrapper regression covers its paths and access mode.
 Local logs and package checks are retained under the ignored
 `artifacts/cross-build-pr/` directory. No ARM64 executable was run on x86.
 
-## Scope
+## Spark hardware validation
 
-No SSH, deployment, service restart or Spark GPU/RDMA work is part of this
-preparation. Cross-compilation and ELF inspection do not establish runtime
-correctness. Fresh native host C++ tests, target execution, and the full
-GPU/RDMA suite remain outstanding on idle Spark hardware. The contribution
-guide's full-build/full-suite merge gate has not been satisfied by host-only
-wrapper tests. No inference performance or numerical change is claimed.
+The initial workstation preparation above did not contact the inference
+nodes. A subsequent authorized maintenance window validated source commit
+`53a533930664eed0407cc0997f8f16e51d12d3d2` on GB10 with driver 580.173.02.
+Production was stopped through its existing launcher before GPU/RDMA work;
+the stopped world's operation-stream digests matched across both ranks.
+
+The full native `ci` build and full Docker `spark-cross` build passed. Both
+test sets were freshly built, then run serially on the same idle Spark:
+
+```bash
+cmake --preset ci
+cmake --build --preset ci --parallel 2
+CUDA_DEVICE_MAX_CONNECTIONS=32 ctest --test-dir build-ci --output-on-failure -j 1 --timeout 180
+# Build on x86, transfer the cross-built executables and CTest manifest to
+# the same source/build paths on Spark, then run there:
+scripts/spark-cross command cmake --build --preset spark-cross --parallel 2 --target all
+CUDA_DEVICE_MAX_CONNECTIONS=32 ctest --test-dir build-spark-cross --output-on-failure -j 1 --timeout 180
+```
+
+| Build | Passed | Failed | Skipped | Elapsed |
+| --- | ---: | ---: | ---: | ---: |
+| Native `ci` | 97 | 2 | 10 | 602.37 s |
+| Cross-built release | 97 | 2 | 10 | 602.98 s |
+
+The two failures are the same upstream Python checks identified above.
+Depending on directory enumeration order, the scripts-index assertion first
+names `prefill_fairness_check.py` or `vision_prefix_cache_check.py`; both
+entries are missing upstream. No C++/GPU test reported failure in either run.
+The ten CTest skips require unavailable GLM/DeepSeek checkpoints, including
+the GLM vision stream/frontend checks. The optional real-checkpoint subcase
+inside `glm_tp_test` also remained disabled; its synthetic checks passed.
+Local loopback worlds do not constitute a four-node fabric validation.
+
+The staged cross-built server executed successfully on both Sparks and
+resolved its bundled cudart/cuBLASLt libraries. A separate two-rank Qwen
+NVFP4 deployment used the packaged release at C4/MTP3, a 65,536-token KV
+pool and 1 GiB prefix snapshots. Those settings fit upstream's decode-row
+limit; the local production C16/MTP3 configuration depends on later changes
+outside this PR. Test ports, logs and staging directories were isolated.
+
+Both-rank preflight and model startup passed. Running
+`python3 scripts/serve_api_check.py HOST PORT` against the temporary service
+passed all nine checks: streamed and non-streamed stops and multiple choices,
+logit-bias forcing/banning/rejection, cached-token usage and reasoning-token
+usage. Shutdown completed cleanly; both ranks' operation streams had MD5
+`d31c16ee0484151ac304321662f169e6`.
+
+Production was restored to its original release and deployment configuration.
+The deployment file's SHA256 was unchanged, and both ranks retained the
+original server SHA256
+`ab1b88a00de32dedb0de63d285e584651d69c99185c106c4e6d7e549b9585fae`.
+Two identical 1,137-token smoke prompts returned `READY`; the repeat reused
+1,128 prompt tokens. The restored cache reported 148 slots, both ranks were
+running, and service metrics reported zero failed requests and no engine
+failure. The temporary test world was stopped before production restarted.
+
+Build logs, both complete CTest logs, the API results and maintenance/restoration
+records remain under `artifacts/cross-build-pr/server-validation/`. These
+measurements validate this cross-build and two-node configuration; they are
+not evidence for missing checkpoints or four-node hardware.
+
+No inference performance or numerical change is claimed. The full suite
+has been executed, but its two baseline failures and checkpoint skips remain
+explicit limitations rather than a clean full-suite merge-gate result.
