@@ -47,13 +47,21 @@ does not name are knobs — `--no-mtp` for the plain T=1 world, `--mtp-depth N`,
 `dgpp-cluster up --knobs "..."` (deploy/README.md lists the retired variants
 and the knobs that reproduce them).
 
-`bf16_weights: "bf12"` (every template) keeps a lossless 12-bit companion of
-the BF16 matrices that decode streams: bit-identical results from 0.75 of
-those bytes, for about 0.75× their size in additional resident memory (the
-startup memory plan lists it as "bf16 decode packing"). It takes effect on
-GLM-5.3-Flash, GLM-4.7 and the full GLM-5.3; the boot log's `bf12:` line
-reports what was packed. `--bf16-weights checkpoint` turns it off, which is
-also how to recover the memory for a larger context.
+`bf16_weights` (every template sets it) keeps a lossless 12-bit form of the
+BF16 matrices that decode streams: bit-identical results from 0.75 of those
+bytes. `"bf12+bf16"` keeps both forms resident — about 0.75× those matrices in
+additional memory (the startup memory plan lists it as "bf16 decode packing"),
+prefill untouched. `"bf12"` keeps the 12-bit form alone: each matrix's BF16
+bytes return to the node as its layer loads (the plan's weights line says
+"packed bf16 matrices released", and the boot log's second `bf12:` line reports
+what came back), the footprint drops BELOW the BF16-only one, and a prefill
+GEMM expands what it reads into a small scratch ("bf16 prefill expansion
+scratch") — about 10 ms per prefill chunk on four-node GLM-5.3-Flash, 20 on
+two nodes. Use `"bf12"` where the context is bounded by the node's memory (the
+two-node GLM-5.3-Flash and full GLM-5.3 templates do) and `"bf12+bf16"` where
+there is room. It takes effect on GLM-5.3-Flash, GLM-4.7 and the full GLM-5.3;
+`--bf16-weights checkpoint` turns it off. Resident images are shared by all
+three values: switching never rebuilds them.
 
 `kv_dtype` affects only GLM-5.3's latent cache. Qwen and GLM-4.7 K/V
 caches stay BF16. Qwen's `ngram_table` and `dense_weights` settings

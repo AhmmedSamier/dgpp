@@ -120,6 +120,7 @@ endif()
 
 add_library(dgpp_core STATIC
   src/common/log.cpp
+  src/common/bf16_residency.cpp
   src/common/process_memory.cpp
   src/core/trace.cpp)
 dgpp_set_common(dgpp_core)
@@ -139,6 +140,13 @@ add_library(dgpp_loaders STATIC
   src/loaders/resident_image.cpp)
 target_link_libraries(dgpp_loaders PUBLIC dgpp_core)
 dgpp_set_common(dgpp_loaders)
+
+# Device ranges whose memory can be returned while the address stays reserved
+# (the CUDA virtual-memory API: the driver library, beside the runtime). The
+# weight loaders' side grants — bf12-only residency — are built on it.
+add_library(dgpp_device_ranges STATIC src/loaders/releasable_range.cpp)
+target_link_libraries(dgpp_device_ranges PUBLIC CUDA::cudart CUDA::cuda_driver)
+dgpp_set_common(dgpp_device_ranges)
 
 add_library(dgpp_kernels STATIC
   src/kernels/gemm_cublaslt.cpp
@@ -252,7 +260,7 @@ dgpp_set_common(dgpp_models_glm4)
 add_library(dgpp_models_glm4_loader STATIC
   src/models/glm4/loader.cpp)
 target_include_directories(dgpp_models_glm4_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dgpp_models_glm4_loader PUBLIC dgpp_models_glm4 dgpp_loaders CUDA::cudart)
+target_link_libraries(dgpp_models_glm4_loader PUBLIC dgpp_models_glm4 dgpp_loaders CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_glm4_loader)
 
 # The GLM-4.7 layer objects and model (the paged K/V pool first; the layers
@@ -287,7 +295,7 @@ dgpp_set_common(dgpp_models_glm_dsa)
 add_library(dgpp_models_glm_dsa_loader STATIC
   src/models/glm_dsa/loader.cpp)
 target_include_directories(dgpp_models_glm_dsa_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dgpp_models_glm_dsa_loader PUBLIC dgpp_models_glm_dsa dgpp_loaders CUDA::cudart)
+target_link_libraries(dgpp_models_glm_dsa_loader PUBLIC dgpp_models_glm_dsa dgpp_loaders CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_glm_dsa_loader)
 
 # DeepSeek-V4.1-Flash (2026-09-13, docs/deepseek_v41_flash_plan.md): the
@@ -306,7 +314,7 @@ dgpp_set_common(dgpp_models_dsv41)
 add_library(dgpp_models_dsv41_loader STATIC
   src/models/dsv41/loader.cpp)
 target_include_directories(dgpp_models_dsv41_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dgpp_models_dsv41_loader PUBLIC dgpp_models_dsv41 dgpp_loaders CUDA::cudart)
+target_link_libraries(dgpp_models_dsv41_loader PUBLIC dgpp_models_dsv41 dgpp_loaders CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_dsv41_loader)
 
 # The CSA2 attention layer and its caches (plan G4).
@@ -344,7 +352,7 @@ dgpp_set_common(dgpp_models_qwen)
 add_library(dgpp_models_qwen_loader STATIC
   src/models/qwen/loader.cpp)
 target_include_directories(dgpp_models_qwen_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loaders CUDA::cudart)
+target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loaders CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_qwen_loader)
 
 # The Qwen layers (Q3): the MoE on the shared MoE layer, with its oracle.
@@ -405,7 +413,7 @@ add_library(dgpp_models_glm_loader STATIC
   src/models/glm/tp.cpp
   src/models/glm/tp_parity.cpp)
 target_link_libraries(dgpp_models_glm_loader
-  PUBLIC dgpp_models_glm dgpp_models_moe dgpp_kernels dgpp_models_kda dgpp_models_dsa)
+  PUBLIC dgpp_models_glm dgpp_models_moe dgpp_kernels dgpp_models_kda dgpp_models_dsa dgpp_device_ranges)
 dgpp_set_common(dgpp_models_glm_loader)
 
 add_executable(glm_bind_check apps/glm_bind_check.cpp)

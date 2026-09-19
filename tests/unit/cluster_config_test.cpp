@@ -64,6 +64,9 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   const dgpp::serve::ClusterConfig bf12 = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"bf12"}})", "t");
   require(bf12.engine.bf16_weights == "bf12", "bf16_weights bf12");
+  const dgpp::serve::ClusterConfig both = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"bf12+bf16"}})", "t");
+  require(both.engine.bf16_weights == "bf12+bf16", "bf16_weights bf12+bf16");
   require(c.paths.log_dir == "/var/log/dgpp" && c.paths.stage_dir == "/tmp/bus4" &&
               c.paths.release_dir == "~/dgpp/releases" && c.paths.resident_cache.empty(),
           "the paths: given one taken, the rest defaulted");
@@ -124,7 +127,7 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
       {R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":"int8"}})", "'engine.kv_dtype' must be \"bf16\", \"fp8\" or \"fp4\""},
       {R"({"model":"m","nodes":["h"],"engine":{"kv_dtype":8}})", "'engine.kv_dtype' must be a string"},
       {R"({"model":"m","nodes":["h"],"engine":{"prefill":"fast"}})", "'engine.prefill' must be \"bounded\" or \"exact\""},
-      {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"fp8"}})", "'engine.bf16_weights' must be \"checkpoint\" or \"bf12\""},
+      {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"fp8"}})", "'engine.bf16_weights' must be \"checkpoint\", \"bf12\" or \"bf12+bf16\""},
       {R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":true}})", "'engine.bf16_weights' must be a string"},
       {R"({"model":"m","nodes":["h"],"ports":{"http":70000}})", "'ports.http' must be in [1, 65535]"},
       {R"({"model":"m","nodes":["h"],"http":{"max_body_bytes":0}})", "'http.max_body_bytes' must be in [1,"},
@@ -154,7 +157,7 @@ DGPP_TEST(cluster_config_theResolvedFileParsesAndTheDigestIsStable) {
   require(ex.world() == 4 && ex.model == "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8" &&
               ex.http_port == 18080 && ex.engine.max_concurrency == 4 &&
               ex.engine.kv_capacity == 786432 && ex.engine.queue_limit == 8 &&
-              ex.engine.kv_dtype == "bf16" && ex.engine.bf16_weights == "bf12" &&
+              ex.engine.kv_dtype == "bf16" && ex.engine.bf16_weights == "bf12+bf16" &&
               ex.engine.decode_graph && ex.engine.mtp && ex.release.empty() &&
               ex.ssh_user == "ops",
           "the resolved deployment has the model settings and example site values");

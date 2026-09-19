@@ -144,7 +144,8 @@ end down from 52–56 ms.
 
 The routed experts are NVFP4 and everything else is the FP8 release's own
 bytes. The current MTP range comes from the five-class service sweep in §4.
-Both rows are with the template's `bf16_weights: "bf12"` — the lossless
+Both rows are with the template's `bf16_weights` on (`"bf12+bf16"` on four
+nodes, `"bf12"` on two: decode is the same) — the lossless
 12-bit form of the BF16 matrices decode streams (bit-identical transcripts):
 the same binary with the key off measures 27.0 ms at T=1 and 33.7–34.4 ms per
 MTP pass, the 2026-09-16 figures
@@ -226,9 +227,10 @@ The T=1 floor here is about 40 ms, and 6.3 GB per rank per step of it is the
 BF16 attention projections that modelopt left unquantized. That is also what
 bounds this family under concurrency (§5).
 
-Since 2026-09-19 the template's `bf16_weights: "bf12"` streams those
-projections from their lossless 12-bit form (6.36 → 4.78 GiB per rank, +4.8
-GiB resident): the same binary through the service measures 31.4–33.0 → 35.0–
+Since 2026-09-19 the template's `bf16_weights: "bf12+bf16"` streams those
+projections from their lossless 12-bit form (6.36 → 4.78 GiB per rank, +4.9
+GiB resident beside the BF16 bytes; `"bf12"` alone is 1.4 GiB UNDER the BF16
+plan for +2–4 % of prefill): the same binary through the service measures 31.4–33.0 → 35.0–
 36.5 tok/s single stream (+11–12 %) and 66.8–70.2 → 69.9–73.8 at four live
 requests (+5–7 %), transcripts byte-identical
 ([record](../benchmarks/results/2026-09-19-glm-flash-line-rate/README.md)).
@@ -245,9 +247,12 @@ Since 2026-09-19 the template's `bf16_weights: "bf12"` packs what this
 checkpoint leaves BF16 on the matmul seam (the dense layers' and the draft's
 projections, the indexers, the head: 1.65 → 1.24 GiB per rank): 28.3–28.8 →
 29.8–30.6 tok/s single stream (+5–6.5 %), 45.4–46.6 → 48.1–48.4 at four
-(+3–7 %), transcripts identical. The template was sized to the node's
-ceiling, so its context went from 120K to 100K to hold the companions
-(`--bf16-weights checkpoint --kv-capacity 122880` restores it). The rows
+(+3–7 %), transcripts identical. The template is sized to the node's
+ceiling: with both forms resident it held 100K of context; with the 12-bit
+form alone (`"bf12"`, the BF16 bytes returned as each layer loads — the
+template since the same day) it is 0.3 GiB under the BF16 plan and carries
+the 120K shape again, decode level at one, four and eight live requests and
+prefill within 1 %. The rows
 above predate it.
 
 The 754B model at 99.3 GiB of int4/int8 weights per rank: the T=1 step
@@ -314,7 +319,7 @@ The graph pass spans 34–41 ms and commits 1.68–1.97 tokens per pass by class
 ### GLM-5.3-Flash NVFP4/FP8 hybrid, world 4, MTP greedy (2026-09-19)
 
 HTTP service, 256 output tokens, MTP depth one, default thinking mode, the
-template as shipped (`bf16_weights: "bf12"`). Means of two repetitions.
+template as shipped (`bf16_weights` on: `"bf12+bf16"`). Means of two repetitions.
 Engine timing excludes admission/prefill and the first token emitted by
 prefill. Tokens/pass counts committed decode work.
 

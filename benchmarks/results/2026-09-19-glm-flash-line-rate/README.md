@@ -13,6 +13,12 @@ Retained:
 | **bf12**: lossless 12-bit resident form of the decode GEMV's bf16 weights (`engine.bf16_weights: "bf12"`; every template) | C1 decode **+6.9 to +7.5 %** on all five classes; step 34.2 → 32.0 ms | C4 −0.65 to +0.17 % (noise) | 15/15 C1 transcripts byte-identical |
 | **state-only MTP prefill** (default; `DGPP_MTP_PREFILL_FULL=1` restores) | cold prefill **−6.0 / −7.3 / −7.6 %** at ~2K / ~8K / ~32K | n/a | identical first tokens, usage, long-context text, MTP passes and acceptance |
 
+Rounds two and three (§5, §6) added the five-to-eight-row packed kernel, the
+other families, the prefill fold overlap and the collective's multi-claim —
+then the 12-bit form as the ONLY resident one (`"bf12"` saves memory: the two
+ceiling-bound templates have their 160K and 120K contexts back) and the
+interleaved gate (the decode collective 40.9 → 35.7 us).
+
 ## 1. Where the physical limits are
 
 ### Decode
@@ -254,42 +260,191 @@ registration). Whether device stores reach the NIC in order is the next
 probe; the prize is the engine's notice + post, ≈ 3 µs of each handshake
 (≈ 0.3 ms/step) — smaller than the gate serialization above.
 
-## 6. Opportunities still open, by expected value
+## 6. Round three (same day): the 12-bit form alone, and the interleaved gate
 
-Decode (GLM-5.3-Flash step now ≈ 31.5 ms; bytes ≈ 24 ms of it at line rate):
+Round two's list put two items first; the request was both, "we certainly
+want our kv cache back". Same method: microbench, unit gate, same-binary
+fabric A/B with the transcripts as the exactness check. Raw data:
+`raw/round3-*` (the C1–C4 load runs as `round3-load-summary.json`: engine
+decode tok/s per class and concurrency).
 
-1. **One interleaved gate pass for co-claimed peers** in the graph
-   collective (the claim gaps' remaining 3–5 µs and the 7–10 µs of late
-   doorbells): ≈ 0.4–0.8 ms/step (1.5–2.5 %). Kernel-local.
-2. **bf12-only residency**: decode from bf12 everywhere and expand to BF16
-   scratch for prefill, so the raw copies go — the format then SAVES 0.25×
-   (−1.25 GiB/rank on two-node Flash instead of +3.8) and returns the context
-   the ceiling-bound templates gave up. Needs the loader to own those
-   matrices separately; prefill pays ≈ +2 %.
+### 6.1 bf12-only residency (`engine.bf16_weights: "bf12"`)
+
+With both forms resident the format COST 0.75 of the packed matrices, and the
+two templates sized to their nodes' memory had paid it in context (two-node
+Flash 160K → 132K, the full GLM-5.3 120K → 100K). Three things had to hold
+for the bf16 bytes to go:
+
+* **Something must be able to free them.** The matrices sat inside each
+  layer's single `cudaMalloc`. Now a packable matrix is a *side grant* of the
+  layer's bump: its own range of the CUDA virtual-memory API
+  (`loaders/releasable_range.*`; the GB10 supports it, 2 MiB granularity,
+  and a release returns the whole mapped size at once). The staging mirror,
+  the byte formula and the resident image keep the grant order, so an image
+  written in one mode restores in the other and nothing is rebuilt. The
+  GLM-5.3-Flash loader allocates its caches BEFORE its weights, so the release
+  cannot wait for the end of the load: each layer is packed as it lands and
+  its ranges released at once — no more than one layer's bf16 bytes ever sit
+  beside their companions. The address stays reserved: it is still the key
+  every call site holds, nothing can alias it, and a stray read faults cleanly.
+* **Prefill must get its bf16 bits back, exactly.** `launch_bf12_expand`
+  rebuilds them into a scratch at the device memcpy's rate (16.8 MB: 130 us
+  against 122; the 317 MB head: 2.3 ms) and cuBLASLt then runs the algorithm
+  it always ran. The head is far larger than any scratch worth holding, and
+  every family runs it over all T rows of a chunk — so the question was
+  whether an Lt call can run in WEIGHT-row blocks. With the whole call's
+  algorithm pinned it is bitwise the unsplit call on every shape tried (the
+  heads at 5–2048 rows, in_proj, eh_proj; with the block's own algorithm
+  several small-m shapes differ). One trap: an algorithm picked for an
+  aligned n refuses a block that is less aligned (700 rows of 3000 at five
+  activation rows) — blocks are multiples of 64 rows.
+* **Decode batches past eight rows** (the full GLM-5.3's sixteen-row shape)
+  read the bf16 bytes through Lt. Under `"bf12"` they take eight-row packed
+  launches instead — tolerance-equal, as those batches already are to the
+  narrow ones — so a captured graph never touches the scratch.
+
+The first fabric run put the cost of the expansion at ~17 ms per prefill
+chunk on four-node Flash — and showed that a short prompt is THREE chunks
+(the prefix cache's header cut, the body, the snapshot tail), each a
+bandwidth-bound call in which whole-matrix expansion triples the DRAM
+traffic. In 8 MiB weight-row blocks the scratch stays inside the 24 MB L2
+and only the packed bytes cross DRAM. Expansion cost on a KDA in_proj (52.6
+MB, cold, through the GEMM seam):
+
+| activation rows | whole matrix | 8 MiB blocks |
+|---|---|---|
+| 8 | +345 us | +132 us |
+| 64 | +380 us | +154 us |
+| 239 | +358 us | +190 us |
+| 512 | +430 us | +488 us |
+| 1024 | +489 us | +385 us |
+
+Calls of up to 256 rows take the blocks; wide chunks keep whole matrices in
+two slots (the fold overlap's row blocks call a site's in and o twice and
+expand each once).
+
+Fabric, GLM-5.3-Flash on four nodes, same binary, against both forms resident:
+
+| | both forms | 12-bit alone |
+|---|---|---|
+| transcripts (5 classes + 3 long) | — | identical |
+| decode, 1 / 2 / 3 / 4 live (tok/s, 3 reps) | 58.75 / 82.30 / 99.23 / 112.89 | 58.75 / 82.93 / 99.61 / 113.14 |
+| cold prefill 256 / 2K / 8K / 32K tokens (ms) | 446 / 1283 / 5287 / 24600 | 484 / 1328 / 5358 / 24889 |
+| a 37–68-token chat prompt's prefill (ms) | 262–308 | 296–338 |
+| memory plan per rank (GiB; BF16-only: 93.88) | 95.85 | 93.42 |
+
+About 10 ms per prefill chunk: +1.2–1.4 % at 8K–32K, +3.5 % at 2K, +25–40 ms
+on a short prompt. The other deployments (memory plan per rank, GiB):
+
+| recipe | BF16 only | both forms | 12-bit alone | what it bought |
+|---|---|---|---|---|
+| GLM-5.3-Flash, two nodes, 160K | 107.96 | 111.79 | 107.01 | 160K again with 4.8 GiB of the node left at boot (both forms: 0.05 at 160K, shipped 132K) |
+| full GLM-5.3, four nodes, 120K | 110.44 | 111.71 | 110.11 | 120K again (both forms are refused there: shipped 100K) |
+| GLM-4.7, four nodes | 79.21 | 84.10 | 77.84 | — (room to spare: stays `"bf12+bf16"`) |
+| GLM-5.3-Flash, four nodes | 93.88 | 95.85 | 93.42 | — (room to spare: stays `"bf12+bf16"`) |
+
+Each validated against both forms resident on the same binary, transcripts
+identical (5 + 3 on every recipe): two-node Flash decode level, prefill 745 /
+1923 / 8223 → 818 / 1969 / 8356 ms at 256 / 2K / 8K (+20 ms a chunk: twice
+the bytes a rank); the full GLM-5.3 level at one, four and eight live
+requests (48.42 → 48.43 and 46.39 → 46.06 tok/s at four; 56.17 → 56.01 and
+55.62 → 56.80 at eight, the sixteen-row batches' packed launches), prefill
+4546 → 4589 ms at 2K and within 0.5 % at 8K and 30K; GLM-4.7 decode level,
+prefill +22–32 ms short, +3.6 % at 2K, +1.7 % at 8K. Hence three values:
+`"bf12"` where memory bounds the context, `"bf12+bf16"` where there is room.
+
+Gates: `bf12_gemv_test` (the released instance answers every call bitwise
+with the bf16 bytes SCRIBBLED on the device — whole, in blocks, reused,
+short-call blocks, decode at every width), `glm_loader_test` (side grants:
+staging layout, release returns memory, one image across modes),
+`glm_tp_test` (a 1024-wide fixture built in all three modes: prefill, draft
+and decode bitwise; the plan's ordering; the build inside its plan).
+
+### 6.2 The interleaved gate
+
+The plan was one interleaved pass for a round's co-claimed peers. Built
+(`block_fold_payloads`), it moved nothing: 40.9 → 40.6 us. The claim gaps
+showed why — the co-claims fell under 3 us as intended, but at two loads per
+peer in flight the joint pass was two round trips, as long as the two passes
+it replaced, and the first ack moved later by what the second gained. The
+real finding was what a round IS: a chain of system-load round trips, each of
+which 255 threads wait out at a barrier. Taking round trips out of the chain,
+step by step (rank 0's collective on the four-node Flash step, 16 KiB rows):
+
+| step | collective (us) |
+|---|---|
+| sequential gate (round two) | 40.9 = copy 3.6 + handshake 15.3 + skew 16.4 + fold 5.5 |
+| joint pass, two loads per peer in flight | 40.6 |
+| four per peer (a 16 KiB row is one round trip for every peer) | 39.1 |
+| the rest of the door — {len, ctl}, {hash}: one cache line — in ONE round trip behind the `seq` acquire (was four or five dependent loads, half of them on thread 0) | 36.7 |
+| the engine's poison every eighth round; the last claim ends the wait | 36.0 |
+| open gates derived on every thread: no barrier before the first pass | 35.7 = copy 3.5 + handshake 14.5 + skew 13.7 + fold 3.9 (the final build, re-measured: 35.5) |
+
+A round is now 5–7 us where it was 7–10, and 27–34 % of the gaps are under
+3 us. −5.2 us × 94 collectives = −0.49 ms of a 32.5 ms step. Same-binary
+load A/B (three repetitions, five classes): +0.89 % at one live request,
+−0.36 / −0.14 / +0.29 % at two to four (two same-gate arms differ by up to
+0.56 %: level). Those rows are 32–64 KiB — past the 80 KiB staging budget for
+three peers (shared memory is 99 KB a block), so the canonical fold re-reads
+the NIC-placed rows: at 64 KiB the rounds gain 3.9 us and the fold gives 4.3
+back (12.3 → 16.6 us, re-reading rows whose loads were only just issued); the
+collective is 73.6 against 73.2 us. Taking long rows peer by peer inside the
+pass was worse (77.4 us: the first ack waits for all three rows) and was
+reverted. Results are bitwise (the canonical fold): transcripts identical;
+`bus_test`, `glm_tp_test` (45/45), a seven-minute mixed soak with both
+features on (541 requests, 0 failed, op streams identical).
+`DGPP_BUS_GATE=sequential` keeps the per-peer gates.
+
+## 7. Opportunities still open, by expected value
+
+Decode (GLM-5.3-Flash step now ≈ 31 ms; bytes ≈ 24 ms of it at line rate):
+
+1. **The collective at two to four live requests** (32–64 KiB rows): the
+   interleaved gate's gain is returned by the unstaged fold. Either fold in
+   the gate's own pass when a round claims every peer (the rows are already
+   in registers; the staging row holds the copy a failed gate would need), or
+   stage two of three rows within the 99 KB of shared memory: ≈ 4–8 us per
+   collective at those widths (0.4–0.8 ms of a 60–70 ms step).
+2. **GPU-published staging fold** (the engine hashes 16 KiB per generation
+   on the CPU before posting; the bulk path already publishes it from the
+   kernel): ≈ 1.5 us/collective. And the 64-byte doorbell as an inline send
+   (`max_inline_data = 0` came from the M0 smoke tool, never measured). After
+   round three the handshake (14.5 us: the peers' spread, the sender's notice
+   and post, the wire) is the collective's largest part.
 3. **Qwen**: a 512-column tail block (hidden 2560, slices of 1536) plus bf12
    twins of `launch_bf16_gemv_multi` and the GR kernels, which already factor
    through `bf16_gemv::row_dots`: 2.3 GB/step at world 4, 5.0 at world 2
    (≈ 5–8 % of a step). The same tail block gives GLM-5.3-Flash's indexer
    `wq_b` (0.15 ms).
-4. **GPU-published staging fold** (the engine hashes 16 KiB per generation
-   on the CPU before posting; the bulk path already publishes it from the
-   kernel): ≈ 1.5 µs/collective. And the 64-byte doorbell as an inline send
-   (`max_inline_data = 0` came from the M0 smoke tool, never measured).
-5. **Adaptive depth-2 MTP at C1** (deferred by request) and a truncated
+4. **Adaptive depth-2 MTP at C1** (deferred by request) and a truncated
    draft-head vocabulary (excluded: acceptance).
-6. **Batches past eight rows** (the full GLM's 16, GLM-4.7's/DeepSeek's 32):
-   a bf12 variant of the tensor-core `mma_gemv` — also what DeepSeek needs.
+5. **Batches past eight rows** (the full GLM's 16, GLM-4.7's/DeepSeek's 32):
+   a bf12 variant of the tensor-core `mma_gemv` — one read of 0.75 of the
+   bytes where `"bf12"` now reads them once per eight rows and the other
+   modes read all of them; also what DeepSeek needs.
 
 Prefill (GLM-5.3-Flash ≈ 0.66 ms/token):
 
-7. **Find what in a DSA site moves under a row split** (the bisect says the
+6. **`"bf12"`'s expansion beside the compute**: a wide chunk's GEMMs are
+   compute-bound and its expansions bandwidth-bound — expanding the next
+   matrix on a side stream while the current GEMM runs would hide most of the
+   ~10 ms a chunk (−1 to −3 % of prefill in that mode; a third slot and an
+   event per call).
+7. **A prefill that computes the head on its last row only** (every family
+   runs the lm head over all T rows of every chunk — 79 M dot products at
+   2K — for the sake of the prefill == forward bitwise gate): a numerics
+   decision, ≈ 1 % of prefill and the head's expansion under `"bf12"`.
+8. **Short prompts are three chunks** (header cut, body, snapshot tail: 262 ms
+   for 37 tokens), each a full walk of the weights: a request-level cost
+   larger than anything a kernel has left.
+9. **Find what in a DSA site moves under a row split** (the bisect says the
    site, not the fold): fixing it takes the hidden fold share from 37 % to
    50 % and beyond (≈ −2 %).
-8. **Bulk fold wire rate** (≈ 45 % of the two-lane ceiling; 16-slot rounds
-   regress on incast): needs the per-phase bulk timeline first.
-9. **Chunk-parallel KDA recurrence** (8 % of prefill, a numerics project) and
-   skipping the q-side projections in the state-only draft rows (< 1 %).
-10. **`graph_replay_arm` spins on `walk_pub` while holding `coll_mu`**
+10. **Bulk fold wire rate** (≈ 45 % of the two-lane ceiling; 16-slot rounds
+    regress on incast): needs the per-phase bulk timeline first.
+11. **Chunk-parallel KDA recurrence** (8 % of prefill, a numerics project) and
+    skipping the q-side projections in the state-only draft rows (< 1 %).
+12. **`graph_replay_arm` spins on `walk_pub` while holding `coll_mu`**
     (`graph_replay_finish` releases it first): latent, never fired; hoist it.
 
 ## Reproduction
@@ -305,6 +460,15 @@ DGPP_DATA_DIR=build-ci/eval_data python3 scripts/serve_prefill_probe.py HOST 180
   2048 8192 32768 --repeat 3 --seed 916 --tag glm-flash-perf --json-out prefill.json
 python3 benchmarks/results/2026-09-16-glm-flash-perf/long_transcripts.py HOST 18080 long.json
 ```
+
+Round three's arms are environment switches on one binary (the launcher
+forwards `DGPP_*` to every rank): `DGPP_BF12=both|on|off` picks the resident
+form over the config's, `DGPP_BUS_GATE=sequential` the per-peer gates, and
+`DGPP_BUS_TIMELINE=1` + `python3 scripts/bus_window_skew.py LOGDIR` gives the
+collective's decomposition and claim gaps (read rank 0; use a fresh
+`--log-dir` per arm). `bf12_expand_bench.cu`, `expand_block_bench.cu` and
+`lt_nsplit_check.cu` are the expansion's microbenches and the weight-row
+block check.
 
 `st_index.py`, `exponent_stats.py` and `row_escapes.py` reproduce the
 exponent statistics from the checkpoint; `bf12_bench.cu` is the standalone

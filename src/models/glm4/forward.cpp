@@ -159,8 +159,14 @@ Glm4Model::MemoryPlan Glm4Model::plan_memory(const Glm4TextConfig& cfg, int max_
   const int pool_layers = cfg.num_hidden_layers + (mtp ? 1 : 0);
   const int n_split = Glm4AttentionLayer::default_decode_splits();
 
+  // bf12-only residency: the packable bf16 matrices load aside and give
+  // their bytes back as each layer is packed (graph_prepare).
+  const bool bf12_only = Bf12Companions::packed_only() && residency == Glm4Residency::Resident;
   if (residency == Glm4Residency::Resident) {
-    plan.add("model weights (resident)", Glm4LayerStream::resident_bytes(cfg, tp_rank, tp_world, head, mtp));
+    size_t resident = Glm4LayerStream::resident_bytes(cfg, tp_rank, tp_world, head, mtp);
+    if (bf12_only) resident -= Glm4LayerStream::side_bytes(cfg, tp_rank, tp_world, head, mtp);
+    plan.add(bf12_only ? "model weights (resident, packed bf16 matrices released)" : "model weights (resident)",
+             resident);
     plan.add("loader staging (pinned host, freed when the last layer is resident)", 0,
              Glm4LayerStream::staging_plan_bytes(cfg, tp_rank, tp_world, head, mtp));
   } else {
@@ -183,6 +189,13 @@ Glm4Model::MemoryPlan Glm4Model::plan_memory(const Glm4TextConfig& cfg, int max_
                     Bf12Companions::planned_bytes(static_cast<int64_t>(V), Hh);
     if (mtp) packed += Bf12Companions::planned_bytes(Hh, 2 * Hh);
     plan.add("bf16 decode packing (12-bit companions)", packed);
+    if (bf12_only) {
+      const size_t h = static_cast<size_t>(Hh);
+      plan.add("bf16 prefill expansion scratch",
+               static_cast<size_t>(kBf12ExpandSlots) *
+                   Bf12Companions::planned_slot_bytes({static_cast<size_t>(Q) * h * 2, static_cast<size_t>(KV) * h * 2,
+                                                       mtp ? h * 2 * h * 2 : 0, V * h * 2}));
+    }
   }
   plan.add("gemm workspace (at least)", size_t{64} << 20);
   {
@@ -506,46 +519,61 @@ Glm4Model::Outputs Glm4Model::forward(const std::vector<int64_t>& token_ids, boo
 void Glm4Model::graph_prepare() {
   if (loader_.residency() != Glm4Residency::Resident)
     throw std::logic_error("session_graph_prepare: the decode graph needs a resident stack");
+  // The bf16 decode weights' 12-bit companions are packed as each layer
+  // lands (the caches already exist: under bf12-only residency the layer's
+  // bf16 bytes go back at once, so no more than one layer's sit beside
+  // their companions).
+  const bool pack = Bf12Companions::enabled() && !bf12_built_;
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const Glm4LayerResident& r = loader_.load_layer(layer);
     build_layer_objects(r);
     if (r.moe) moe_->prepare_graph_table(moe_ordinal(layer), stream_);
+    if (pack) pack_layer_companions(layer, r);
   }
   if (mtp_) {
     const Glm4LayerResident& r = loader_.load_layer(cfg_.mtp_layer());
     build_layer_objects(r);
     moe_->prepare_graph_table(cfg_.num_moe_layers(), stream_);
+    if (pack) pack_layer_companions(cfg_.mtp_layer(), r);
   }
-  build_bf12_companions();
+  if (pack) finish_companions();
 }
 
 // The lossless 12-bit companions of the decode GEMV's bf16 weights
 // (engine.bf16_weights = "bf12"): the attention projections of every layer
 // — 6.3 of the 9.7 GB a decode step reads per rank at world 4 — the head
-// and the draft's eh_proj, once the stack is resident and before any
-// capture. Prefill and the batches past eight rows keep the bf16 bytes.
-void Glm4Model::build_bf12_companions() {
-  if (!Bf12Companions::enabled() || bf12_built_ || loader_.residency() != Glm4Residency::Resident) return;
-  bf12_built_ = true;
+// and the draft's eh_proj, packed as each layer lands and before any
+// capture. Prefill and the batches past eight rows keep the bf16 bytes —
+// or, under bf12-only residency (the bytes returned here, layer by layer),
+// expand them and take the packed launches (kernels/gemm.hpp).
+void Glm4Model::pack_layer_companions(int layer, const Glm4LayerResident& r) {
   const auto t0 = std::chrono::steady_clock::now();
   const int64_t H = cfg_.hidden_size;
-  const auto pack_attn = [&](const Glm4AttnResident& a) {
-    const int64_t Q = static_cast<int64_t>(a.local_heads) * cfg_.head_dim;
-    const int64_t KV = static_cast<int64_t>(a.local_kv_heads) * cfg_.head_dim;
-    bf12_.pack(a.q_proj, Q, H, gemm_, stream_);
-    bf12_.pack(a.k_proj, KV, H, gemm_, stream_);
-    bf12_.pack(a.v_proj, KV, H, gemm_, stream_);
-    bf12_.pack(a.o_proj, H, Q, gemm_, stream_);
+  const auto release = [&](const void* w) { return loader_.release_packed(layer, w); };
+  const auto pack = [&](const uint16_t* w, int64_t n, int64_t k) {
+    bf12_.pack_and_release(w, n, k, gemm_, stream_, release);
   };
-  for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) pack_attn(loader_.load_layer(layer).attn);
-  if (mtp_) {
-    const Glm4LayerResident& r = loader_.load_layer(cfg_.mtp_layer());
-    pack_attn(r.attn);
-    bf12_.pack(r.eh_proj, H, 2 * H, gemm_, stream_);
-  }
-  bf12_.pack(globals_.lm_head, lm_vocab_count_, H, gemm_, stream_);
-  bf12_.log_summary(loader_.rank(),
-                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+  const Glm4AttnResident& a = r.attn;
+  const int64_t Q = static_cast<int64_t>(a.local_heads) * cfg_.head_dim;
+  const int64_t KV = static_cast<int64_t>(a.local_kv_heads) * cfg_.head_dim;
+  pack(a.q_proj, Q, H);
+  pack(a.k_proj, KV, H);
+  pack(a.v_proj, KV, H);
+  pack(a.o_proj, H, Q);
+  if (layer == cfg_.mtp_layer() && r.eh_proj != nullptr) pack(r.eh_proj, H, 2 * H);
+  bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// The lm head's, the expansion scratch (one slot: no walk of this family
+// calls a matrix twice), and the summary.
+void Glm4Model::finish_companions() {
+  const auto t0 = std::chrono::steady_clock::now();
+  bf12_built_ = true;
+  bf12_.pack_and_release(globals_.lm_head, lm_vocab_count_, cfg_.hidden_size, gemm_, stream_,
+                         [&](const void* w) { return loader_.release_packed(-1, w); });
+  bf12_.finish(gemm_, kBf12ExpandSlots);
+  bf12_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  bf12_.log_summary(loader_.rank(), bf12_s_);
 }
 
 // ---------------------------------------------------------------------------

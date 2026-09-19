@@ -263,6 +263,102 @@ void launch_depth(const uint16_t* act, size_t act_stride, const Bf12Matrix& w, v
     launch_rows<kRows, 2>(act, act_stride, w, out, out_f32, stream);
 }
 
+// ---- expansion (bf12-only residency's prefill path) ------------------------
+
+// One step of one lane: eight elements' bf16 bits as one 16-byte vector.
+__device__ __forceinline__ uint4 expand_step(uint32_t lo, uint32_t hi, uint32_t ew, uint32_t base7,
+                                             int c0, const uint32_t* __restrict__ esc,
+                                             uint32_t esc_b, uint32_t esc_e) {
+  uint32_t v[8];
+#pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    const uint32_t b = ((j < 4 ? lo : hi) >> (8 * (j & 3))) & 0xFFu;
+    const uint32_t code = (ew >> (4 * j)) & 0xFu;
+    v[j] = ((b & 0x80u) << 8) | (b & 0x7Fu) | (base7 + (code << 7));
+  }
+  const uint32_t any15 = ew & (ew >> 1) & (ew >> 2) & (ew >> 3) & 0x11111111u;
+  if (any15 != 0u) {
+    for (int j = 0; j < 8; ++j) {
+      if (((ew >> (4 * j)) & 0xFu) != 0xFu) continue;
+      const uint32_t col = static_cast<uint32_t>(c0 + j);
+      for (uint32_t e = esc_b; e < esc_e; ++e) {
+        const uint32_t ent = esc[e];
+        if ((ent >> 16) == col) {
+          v[j] = ent & 0xFFFFu;
+          break;
+        }
+      }
+    }
+  }
+  uint4 o;
+  o.x = v[0] | (v[1] << 16);
+  o.y = v[2] | (v[3] << 16);
+  o.z = v[4] | (v[5] << 16);
+  o.w = v[6] | (v[7] << 16);
+  return o;
+}
+
+// A warp is one weight row, a lane its sixteen bytes of every segment — the
+// GEMV's ownership, so every load and every store is a whole line's share
+// and a row's 2k output bytes are written by its 32 lanes without overlap.
+// kSB super-blocks of loads are in flight before any is consumed.
+template <int kSB>
+__global__ void bf12_expand_kernel(const uint8_t* __restrict__ w, const uint32_t* __restrict__ rows,
+                                   const uint32_t* __restrict__ esc,
+                                   const uint16_t* __restrict__ raw, uint16_t* __restrict__ out,
+                                   int row0, int nrows, int k) {
+  const int warp = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int local = blockIdx.x * gemv::kWarps + warp;
+  if (local >= nrows) return;
+  const int row = row0 + local;
+  const int nsb = k / kBf12Super;
+  const uint8_t* wr = w + static_cast<size_t>(row) * nsb * kBf12SuperBytes;
+  const uint32_t eb = rows[2 * row];
+  const uint32_t word = rows[2 * row + 1];
+  const uint32_t ee = rows[2 * row + 2];
+  uint16_t* o = out + static_cast<size_t>(local) * k;
+  if ((word & kBf12RawRow) != 0u) {
+    // A row kept bf16: its lane's share of the side array, as it is.
+    const uint16_t* rw = raw + static_cast<size_t>(word & ~kBf12RawRow) * k;
+    for (int sb = 0; sb < nsb; ++sb) {
+      uint4 v[4];
+#pragma unroll
+      for (int t = 0; t < 4; ++t)
+        v[t] = *reinterpret_cast<const uint4*>(rw + sb * kBf12Super + t * 256 + lane * 8);
+#pragma unroll
+      for (int t = 0; t < 4; ++t)
+        *reinterpret_cast<uint4*>(o + sb * kBf12Super + t * 256 + lane * 8) = v[t];
+    }
+    return;
+  }
+  const uint32_t base7 = (word >> 23) << 7;
+  for (int s0 = 0; s0 < nsb; s0 += kSB) {
+    uint4 a[kSB], b[kSB], e[kSB];
+#pragma unroll
+    for (int s = 0; s < kSB; ++s) {
+      const int sb = s0 + s < nsb ? s0 + s : s0;
+      const uint8_t* p = wr + static_cast<size_t>(sb) * kBf12SuperBytes + lane * 16;
+      a[s] = *reinterpret_cast<const uint4*>(p);
+      b[s] = *reinterpret_cast<const uint4*>(p + 512);
+      e[s] = *reinterpret_cast<const uint4*>(p + 1024);
+    }
+#pragma unroll
+    for (int s = 0; s < kSB; ++s) {
+      if (s0 + s >= nsb) break;
+      const int cb = (s0 + s) * kBf12Super + lane * 8;
+      const uint4 v0 = expand_step(a[s].x, a[s].y, e[s].x, base7, cb, esc, eb, ee);
+      const uint4 v1 = expand_step(a[s].z, a[s].w, e[s].y, base7, cb + 256, esc, eb, ee);
+      const uint4 v2 = expand_step(b[s].x, b[s].y, e[s].z, base7, cb + 512, esc, eb, ee);
+      const uint4 v3 = expand_step(b[s].z, b[s].w, e[s].w, base7, cb + 768, esc, eb, ee);
+      *reinterpret_cast<uint4*>(o + cb) = v0;
+      *reinterpret_cast<uint4*>(o + cb + 256) = v1;
+      *reinterpret_cast<uint4*>(o + cb + 512) = v2;
+      *reinterpret_cast<uint4*>(o + cb + 768) = v3;
+    }
+  }
+}
+
 // The packed position of element c of a row: byte and nibble offsets.
 struct Slot {
   size_t sm;   // the sign+mantissa byte
@@ -401,6 +497,23 @@ bool bf12_gemv_accepts(const Bf12Matrix& w, int m) {
   return w.packed != nullptr && w.rows != nullptr && w.esc != nullptr && w.raw != nullptr &&
          gemv::aligned16(w.raw) && bf12_shape_ok(w.n, w.k) && m >= 1 && m <= kBf12MaxRows &&
          gemv::aligned16(w.packed);
+}
+
+void launch_bf12_expand(const Bf12Matrix& w, int row0, int rows, uint16_t* out,
+                        cudaStream_t stream) {
+  if (!bf12_gemv_accepts(w, 1)) throw std::invalid_argument("bf12_expand: not a packed matrix");
+  if (out == nullptr || !gemv::aligned16(out))
+    throw std::invalid_argument("bf12_expand: output must be 16-byte aligned");
+  if (row0 < 0 || rows <= 0 || row0 > w.n - rows)
+    throw std::invalid_argument("bf12_expand: rows outside the matrix");
+  const dim3 grid((rows + gemv::kWarps - 1) / gemv::kWarps);
+  if ((w.k / kBf12Super) % 4 == 0)
+    bf12_expand_kernel<4><<<grid, gemv::kThreads, 0, stream>>>(w.packed, w.rows, w.esc, w.raw, out,
+                                                                 row0, rows, w.k);
+  else
+    bf12_expand_kernel<2><<<grid, gemv::kThreads, 0, stream>>>(w.packed, w.rows, w.esc, w.raw, out,
+                                                                 row0, rows, w.k);
+  DGPP_CUDA_OK(cudaGetLastError());
 }
 
 void launch_bf12_gemv(const uint16_t* act, size_t act_row_stride, const Bf12Matrix& w,

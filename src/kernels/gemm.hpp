@@ -153,9 +153,10 @@ class CublasLtGemm : public IGemm {
   // bitwise the bf16 GEMV's rows, 0.75 of its bytes — and under
   // set_bf12_wide the lowering widens to kBf12MaxRows rows for it (a
   // five-to-eight-row decode batch no longer takes an Lt algorithm over the
-  // bf16 bytes). Wider calls (prefill, the batches past eight rows) keep
-  // the weight's own bytes, so both forms stay resident. The caller owns the companion's memory and registers
-  // before any capture; n and k must be the matmul's.
+  // bf16 bytes). Wider calls (prefill, the batches past eight rows) read
+  // the weight's own bytes — unless they were released (bf12_release_raw).
+  // The caller owns the companion's memory and registers before any
+  // capture; n and k must be the matmul's.
   // bf16 Lt calls of fewer rows than `rows` take the algorithm the heuristic
   // picks for `rows` (0: each call's own). A walk that runs a chunk's site
   // in row blocks (the prefill's fold overlap) sets the chunk's rows so a
@@ -171,6 +172,32 @@ class CublasLtGemm : public IGemm {
   // take the scalar chain instead, which is what the rows alone compute.
   void set_bf12_wide(bool on);
   size_t bf12_registered() const;
+  // bf12-ONLY residency (common/bf16_residency.hpp): `weight`'s own bytes
+  // are gone — the loader returned them once the companion existed
+  // (loaders/releasable_range.hpp) — and only its address remains, as the
+  // key. Every GEMV-lowered launch already streams the companion. What is
+  // left of the bf16 bytes' readers:
+  //  * an Lt call (a prefill chunk): the rows it needs are expanded into the
+  //    expansion scratch first — the exact bf16 bits, so the algorithm
+  //    computes what it always did. A matrix larger than a scratch slot runs
+  //    in WEIGHT-row blocks under the whole call's algorithm: bitwise the
+  //    whole call (an output element's reduction does not depend on the
+  //    weight rows sharing its call once the algorithm is pinned —
+  //    bf12_gemv_test pins it on the head's shapes).
+  //  * a decode batch past the lowering's rows (set_bf12_wide on, nine rows
+  //    and up): kBf12MaxRows-row packed launches — the scalar chain,
+  //    tolerance-equal to the Lt algorithm the other modes run at that
+  //    width, 0.75 of the bytes per eight rows. A captured graph therefore
+  //    never touches the scratch.
+  void bf12_release_raw(const void* weight);
+  bool bf12_raw_released(const void* weight) const;
+  // `slots` scratch buffers of `bytes` each (replaces an earlier reserve).
+  // While set_bf12_wide is off (a prefill walk), a matrix that fits a slot
+  // stays expanded there until the slot is reused: the fold overlap's row
+  // blocks call in, o, in, o per site and expand each once.
+  void bf12_reserve_expand(int slots, size_t bytes);
+  size_t bf12_expand_bytes() const;  // slots * bytes
+  uint64_t bf12_expansions() const;  // expansions launched (tests, telemetry)
   void resident_view(const void* weight, size_t bytes, int m, const void** ptr,
                      size_t* view_bytes) const override;
 

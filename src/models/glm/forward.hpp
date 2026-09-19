@@ -649,6 +649,8 @@ class GlmDiagnosticModel : public PrefillReporting {
   // without_reducer runs the row-block walk at world 1 too — the unit gate:
   // the blocks must be bitwise the chunk.
   void set_prefill_fold_overlap(bool on, int min_rows = 1024, bool without_reducer = false);
+  // The bf16 decode weights' 12-bit companions (gates read its counters).
+  const Bf12Companions& bf12_companions() const { return bf12_; }
 
   // Isolated parity runner (the curated suite's real-checkpoint mode):
   // every layer starts from the REFERENCE trajectory — layer_inputs[L]
@@ -721,9 +723,15 @@ class GlmDiagnosticModel : public PrefillReporting {
   int fold_overlap_min_rows_ = 1024;
   bool fold_overlap_without_reducer_ = false;
   // The lossless 12-bit companions of the decode GEMV's bf16 weights
-  // (engine.bf16_weights = "bf12"; kernels/bf12_companions.hpp).
-  void build_bf12_companions();
+  // (engine.bf16_weights; kernels/bf12_companions.hpp): packed — and, under
+  // bf12-only residency, their bf16 bytes returned — as each layer lands.
+  // Two expansion slots: the fold overlap's row blocks call a KDA site's in
+  // and o projections twice per chunk.
+  static constexpr int kBf12ExpandSlots = 2;
+  void pack_layer_companions(int layer, const GlmLayerResident& r);
+  void finish_companions();
   Bf12Companions bf12_;
+  double bf12_ms_ = 0.0;
   void prefetch_attention_side(int layer, int rows);
   void prefetch_head(int rows);
 

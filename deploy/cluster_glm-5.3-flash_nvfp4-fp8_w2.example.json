@@ -4,7 +4,7 @@
   "release": "",
   "engine": {
     "max_concurrency": 4,
-    "kv_capacity": 135168,
+    "kv_capacity": 163840,
     "kv_dtype": "fp8",
     "bf16_weights": "bf12",
     "default_max_tokens": 256,

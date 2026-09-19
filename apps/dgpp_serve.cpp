@@ -58,6 +58,7 @@
 
 #include <cuda_runtime.h>
 
+#include "common/bf16_residency.hpp"
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
 #include "common/process_memory.hpp"
@@ -935,9 +936,12 @@ int main(int argc, char** argv) {
       "    plan (the model, the pool, the activations, the prefix cache) is\n"
       "    checked against the node's free memory and refused with the plan\n"
       "    itemized when it does not fit\n"
-      "  [--bf16-weights checkpoint|bf12 (default checkpoint)]: bf12 keeps a lossless\n"
-      "    12-bit companion of the bf16 weights the decode GEMV reads (bitwise the\n"
-      "    bf16 GEMV, 0.75 of the bytes per step; +0.75 of those matrices resident)\n"
+      "  [--bf16-weights checkpoint|bf12|bf12+bf16 (default checkpoint)]: the resident\n"
+      "    form of the bf16 weights the decode GEMV reads. bf12: a lossless 12-bit\n"
+      "    form ALONE (bitwise the bf16 GEMV, 0.75 of the bytes per step and of the\n"
+      "    memory; a prefill GEMM expands what it reads into a small scratch, about\n"
+      "    1.5 % of a long prefill). bf12+bf16: both forms resident (the same decode;\n"
+      "    prefill reads the bf16 bytes in place; +0.75 of those matrices' memory)\n"
       "  [--kv-dtype bf16|fp8|fp4 (default bf16)]: the latent cache's storage\n"
       "    format — fp8 halves its bytes, fp4 quarters them, each at a cost in\n"
       "    attention precision; bf16 is every parity gate's format\n"
@@ -997,7 +1001,7 @@ int main(int argc, char** argv) {
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
-  std::string bf16_weights = "checkpoint";  // the decode GEMV's bf16 weights: checkpoint | bf12 (lossless)
+  std::string bf16_weights = "checkpoint";  // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256;
@@ -1389,13 +1393,15 @@ int main(int argc, char** argv) {
     DGPP_LOG_ERROR("--dense-weights must be checkpoint or fp8, got '{}'", dense_weights);
     return 2;
   }
-  if (bf16_weights != "checkpoint" && bf16_weights != "bf12") {
-    DGPP_LOG_ERROR("--bf16-weights must be checkpoint or bf12, got '{}'", bf16_weights);
+  dgpp::Bf16Residency bf16_mode = dgpp::Bf16Residency::Checkpoint;
+  if (!dgpp::parse_bf16_residency(bf16_weights, &bf16_mode)) {
+    DGPP_LOG_ERROR("--bf16-weights must be checkpoint, bf12 or bf12+bf16, got '{}'", bf16_weights);
     return 2;
   }
-  // The decode GEMV's bf16 weights: set before the plan and the build (the
-  // plan carries the companions; every family's model reads it).
-  dgpp::Bf12Companions::set_enabled(bf16_weights == "bf12");
+  // The bf16 decode weights' resident form: set before the plan and the
+  // build (the loaders lay layers out by it, the plan counts by it, every
+  // family's model packs by it).
+  dgpp::set_bf16_residency(bf16_mode);
   if (prefill != "bounded" && prefill != "exact") {
     DGPP_LOG_ERROR("--prefill must be bounded or exact, got '{}'", prefill);
     return 2;
@@ -1571,11 +1577,11 @@ int main(int argc, char** argv) {
     if (std::string(family->name()) != "qwen4_exp" && dense_weights != "checkpoint")
       DGPP_LOG_WARN("serve: --dense-weights {} applies to the Qwen dense stack only; the {} family loads as shipped",
                     dense_weights, family->name());
-    if (bf16_weights == "bf12" &&
+    if (bf16_weights != "checkpoint" &&
         (std::string(family->name()) == "qwen4_exp" || std::string(family->name()) == "deepseek_v41"))
-      DGPP_LOG_INFO("serve: --bf16-weights bf12 packs nothing on the {} family yet (its bf16 sites ride fused "
+      DGPP_LOG_INFO("serve: --bf16-weights {} packs nothing on the {} family yet (its bf16 sites ride fused "
                     "or tensor-core kernels): the bf16 bytes serve as shipped",
-                    family->name());
+                    bf16_weights, family->name());
     if (std::string(family->name()) != "deepseek_v41" && prefill != "bounded")
       DGPP_LOG_WARN("serve: --prefill {} applies to the DeepSeek-V4.1 family only; the {} family prefills every layer",
                     prefill, family->name());

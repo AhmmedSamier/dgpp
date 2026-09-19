@@ -105,4 +105,11 @@ bool bf12_gemv_accepts(const Bf12Matrix& w, int m);
 void launch_bf12_gemv(const uint16_t* act, size_t act_row_stride, const Bf12Matrix& w,
                       void* out, bool out_f32, int m, cudaStream_t stream);
 
+// The exact bf16 bits of weight rows [row0, row0 + rows) into out[rows, k]
+// (16-byte aligned): what a prefill GEMM reads when the matrix's own bf16
+// bytes are not resident (bf12-only residency). A bandwidth kernel — 0.75
+// read, 1.0 written, at the device memcpy's rate (16.8 MB: 130 us).
+void launch_bf12_expand(const Bf12Matrix& w, int row0, int rows, uint16_t* out,
+                        cudaStream_t stream);
+
 }  // namespace dgpp

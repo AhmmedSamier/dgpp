@@ -224,11 +224,16 @@ class GlmDsaModel : public SessionModel<GlmDsaModel> {
   // The bf16 decode weights' 12-bit companions (kernels/bf12_companions.hpp),
   // their planned bytes, and the rows of the walk in flight (the prefetch
   // windows' view).
-  void build_bf12_companions();
+  static constexpr int kBf12ExpandSlots = 1;
+  void pack_layer_companions(int layer, const GlmDsaLayerResident& r);
+  void finish_companions();
   void prefetch_bf16(const uint16_t* w, size_t bytes);
   static size_t bf12_plan_bytes(const GlmDsaTextConfig& cfg, int tp_rank, int tp_world, GlmDsaHeadSharding head,
                                 bool mtp);
+  static size_t bf12_slot_bytes(const GlmDsaTextConfig& cfg, int tp_rank, int tp_world, GlmDsaHeadSharding head,
+                                bool mtp);
   Bf12Companions bf12_;
+  double bf12_s_ = 0.0;
   int walk_rows_ = 1;
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;

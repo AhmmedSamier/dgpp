@@ -5,7 +5,11 @@
 // strided activation view; escapes (zeros, subnormals, outliers, NaN/Inf
 // exponents, a row full of them up to the bound) take the exact path; a
 // pathological row keeps the matrix in its bf16 form; wide calls ignore the
-// companion; the prefetch view names the bytes the launch streams.
+// companion; the prefetch view names the bytes the launch streams. And
+// bf12-ONLY residency: a weight whose bf16 bytes were released answers every
+// call — prefill GEMMs through the expansion scratch, whole or in weight-row
+// blocks, decode batches of any width — bitwise as the resident instance.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -159,7 +163,172 @@ void bitwise_gate(const std::vector<uint16_t>& w, int n, int k, const char* labe
               label, n, k, h.escapes, h.max_row_escapes);
 }
 
+// bf12-ONLY residency (kernels/gemm.hpp, bf12_release_raw): the resident
+// instance answers first from the bf16 bytes; then those bytes are
+// SCRIBBLED on the device (a released weight's are gone — a stale read must
+// not pass by luck), and the released instance has to reproduce every answer
+// from the companion: Lt calls through the expansion scratch — whole, and in
+// weight-row blocks when `slot_bytes` is narrower than the matrix — decode
+// launches at any width, the prefetch view.
+void released_gate(const std::vector<uint16_t>& w, int n, int k, size_t slot_bytes, int slots,
+                   const char* label) {
+  const Bf12Host h = dgpp::bf12_encode(w.data(), n, k);
+  require(h.ok, std::string(label) + ": encodes");
+  uint16_t* dw = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&dw, w.size() * 2));
+  DGPP_CUDA_OK(cudaMemcpy(dw, w.data(), w.size() * 2, cudaMemcpyHostToDevice));
+  Packed pk;
+  upload(h, n, k, pk);
+
+  // The expansion alone: every row range is the original bits.
+  {
+    uint16_t* ex = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(&ex, w.size() * 2));
+    for (auto [r0, rows] : std::vector<std::pair<int, int>>{{0, n}, {0, 1}, {n - 1, 1}, {n / 3, n - n / 3},
+                                                            {1, std::min(n - 1, 9)}}) {
+      DGPP_CUDA_OK(cudaMemset(ex, 0x5A, w.size() * 2));
+      dgpp::launch_bf12_expand(pk.m, r0, rows, ex, nullptr);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      std::vector<uint16_t> back(static_cast<size_t>(rows) * k);
+      DGPP_CUDA_OK(cudaMemcpy(back.data(), ex, back.size() * 2, cudaMemcpyDeviceToHost));
+      require(std::memcmp(back.data(), w.data() + static_cast<size_t>(r0) * k, back.size() * 2) == 0,
+              std::string(label) + ": rows [" + std::to_string(r0) + ", +" + std::to_string(rows) +
+                  ") expand to their bf16 bits");
+    }
+    cudaFree(ex);
+  }
+
+  dgpp::CublasLtGemm resident, released;
+  for (dgpp::CublasLtGemm* g : {&resident, &released}) {
+    g->set_decode_rows(4);
+    g->register_bf12(dw, pk.m);
+  }
+  const std::vector<uint16_t> act = gaussian_bf16(static_cast<size_t>(300) * k, 1.5f, 0x5EED + n);
+  uint16_t* dx = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&dx, act.size() * 2));
+  DGPP_CUDA_OK(cudaMemcpy(dx, act.data(), act.size() * 2, cudaMemcpyHostToDevice));
+  void* ws = nullptr;
+  constexpr size_t kWs = size_t{64} << 20;
+  DGPP_CUDA_OK(cudaMalloc(&ws, kWs));
+  const auto call = [&](dgpp::CublasLtGemm& g, int m, bool f32) {
+    const size_t bytes = static_cast<size_t>(m) * n * (f32 ? 4 : 2);
+    void* out = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(&out, bytes));
+    DGPP_CUDA_OK(cudaMemset(out, 0xA5, bytes));
+    g.matmul(dx, dw, out, m, n, k, dgpp::DType::BF16, f32 ? dgpp::GemmOut::F32 : dgpp::GemmOut::BF16,
+             static_cast<size_t>(k), ws, kWs, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint8_t> got(bytes);
+    DGPP_CUDA_OK(cudaMemcpy(got.data(), out, bytes, cudaMemcpyDeviceToHost));
+    cudaFree(out);
+    return got;
+  };
+  // The resident answers: prefill rows (Lt past four rows, the chain to
+  // four), then a row block under the chunk's pinned algorithm.
+  const std::vector<int> prefill_rows = {1, 3, 4, 5, 8, 9, 20, 64, 257};
+  std::vector<std::vector<uint8_t>> want_bf16, want_f32;
+  for (int m : prefill_rows) {
+    want_bf16.push_back(call(resident, m, false));
+    want_f32.push_back(call(resident, m, true));
+  }
+  resident.set_plan_rows(257);
+  const auto want_block = call(resident, 96, false);
+  resident.set_plan_rows(0);
+  // Decode batches: the resident instance's launches of up to eight rows.
+  resident.set_bf12_wide(true);
+  std::vector<std::vector<uint8_t>> want_decode;
+  for (int m = 1; m <= 8; ++m) want_decode.push_back(call(resident, m, false));
+
+  // The bf16 bytes go away.
+  DGPP_CUDA_OK(cudaMemset(dw, 0xEE, w.size() * 2));
+  released.bf12_release_raw(dw);
+  require(released.bf12_raw_released(dw) && !resident.bf12_raw_released(dw), "the release is per instance");
+  bool threw = false;
+  try {
+    (void)call(released, 64, false);
+  } catch (const std::logic_error&) {
+    threw = true;
+  }
+  require(threw, "a released weight's Lt call without a scratch is refused");
+  released.bf12_reserve_expand(slots, slot_bytes);
+  require(released.bf12_expand_bytes() >= static_cast<size_t>(slots) * slot_bytes, "the scratch is reserved");
+
+  for (size_t i = 0; i < prefill_rows.size(); ++i) {
+    const int m = prefill_rows[i];
+    require(call(released, m, false) == want_bf16[i],
+            std::string(label) + ": released prefill m=" + std::to_string(m) + " bf16 bitwise the resident call");
+    require(call(released, m, true) == want_f32[i],
+            std::string(label) + ": released prefill m=" + std::to_string(m) + " f32 bitwise the resident call");
+  }
+  released.set_plan_rows(257);
+  require(call(released, 96, false) == want_block,
+          std::string(label) + ": a released row block under the chunk's algorithm is bitwise the resident one");
+  released.set_plan_rows(0);
+  const bool whole = slot_bytes >= w.size() * 2;
+  if (whole) {
+    // A prefill walk finds the matrix still expanded: no second expansion
+    // (wide calls; a short call runs L2-sized row blocks instead).
+    const uint64_t before = released.bf12_expansions();
+    require(call(released, 257, false) == want_bf16.back(), std::string(label) + ": a reused expansion is bitwise");
+    require(call(released, 257, true) == want_f32.back(), std::string(label) + ": a reused expansion is bitwise (f32)");
+    require(released.bf12_expansions() == before, std::string(label) + ": an expanded matrix is reused in place");
+    // A short call's row blocks run through the scratch without leaving a
+    // stale key behind: wide, short, wide again — every answer the resident one.
+    require(call(released, 20, false) == want_bf16[6], std::string(label) + ": a short call after a wide one");
+    require(call(released, 257, false) == want_bf16.back(), std::string(label) + ": a wide call after a short one");
+  }
+  // Decode batches: packed launches at every width, never the scratch —
+  // to eight rows bitwise the resident instance's, past them the same
+  // scalar chain in eight-row launches.
+  released.set_bf12_wide(true);
+  const uint64_t before = released.bf12_expansions();
+  for (int m = 1; m <= 8; ++m)
+    require(call(released, m, false) == want_decode[static_cast<size_t>(m - 1)],
+            std::string(label) + ": released decode m=" + std::to_string(m) + " bitwise the resident launch");
+  {
+    const auto wide = call(released, 13, false);  // rows 0..7 then 8..12
+    const size_t row_bytes = static_cast<size_t>(n) * 2;
+    require(std::memcmp(wide.data(), want_decode[7].data(), 8 * row_bytes) == 0,
+            std::string(label) + ": a thirteen-row decode batch's first launch is the eight-row chain");
+  }
+  require(released.bf12_expansions() == before, std::string(label) + ": a decode batch never touches the scratch");
+  const void* view = nullptr;
+  size_t view_bytes = 0;
+  released.resident_view(dw, w.size() * 2, 300, &view, &view_bytes);
+  require(view == pk.m.packed && view_bytes == dgpp::bf12_packed_bytes(n, k),
+          std::string(label) + ": a released weight's view is the packed bytes at any width");
+  released.set_bf12_wide(false);
+  cudaFree(ws);
+  cudaFree(dx);
+  cudaFree(dw);
+  std::printf("[ OK ] %s N%dxK%d released through %d x %zu KiB (%s): bitwise the resident instance\n", label, n, k,
+              slots, slot_bytes >> 10, whole ? "whole" : "row blocks");
+}
+
 }  // namespace
+
+DGPP_TEST(bf12_released_weights_answer_bitwise_from_the_companion) {
+  // Whole-matrix slots (the KDA in/o classes, two slots: the fold overlap's
+  // reuse), then slots narrower than the matrix — the head's row blocks,
+  // ragged last block included — and a matrix with raw rows and escapes.
+  {
+    const int n = 1611, k = 4096;
+    released_gate(gaussian_bf16(static_cast<size_t>(n) * k, 0.02f, 0x71), n, k, static_cast<size_t>(n) * k * 2, 2,
+                  "whole");
+  }
+  {
+    const int n = 3000, k = 2048;
+    released_gate(gaussian_bf16(static_cast<size_t>(n) * k, 0.02f, 0x72), n, k, static_cast<size_t>(700) * k * 2, 1,
+                  "blocks");
+  }
+  {
+    const int n = 515, k = 8192;
+    auto w = gaussian_bf16(static_cast<size_t>(n) * k, 0.02f, 0x73);
+    for (int c = 0; c < k; c += 3) w[static_cast<size_t>(77) * k + c] = static_cast<uint16_t>(((c % 90) + 60) << 7);
+    for (int c = 0; c < k; c += 911) w[static_cast<size_t>(5) * k + c] = 0x0000;
+    released_gate(w, n, k, static_cast<size_t>(128) * k * 2, 1, "raw rows + escapes, blocks");
+  }
+}
 
 DGPP_TEST(bf12_trained_shapes_are_bitwise_the_bf16_gemv) {
   // The KDA in_proj class (k = hidden, ragged n), the o_proj class

@@ -6,6 +6,47 @@ The history by milestone. The dated engineering record in
 
 ## Unreleased
 
+- **bf12-only residency: `engine.bf16_weights: "bf12"` now SAVES memory, and
+  the two ceiling-bound templates have their contexts back** (2026-09-19;
+  round three of `benchmarks/results/2026-09-19-glm-flash-line-rate/`). The
+  12-bit form can now be the only resident one: each packable BF16 matrix
+  loads into its own releasable range (the CUDA virtual-memory API —
+  `loaders/releasable_range.*`, `LayerBump::alloc_side`), is packed as its
+  layer lands, and its BF16 bytes go back to the node at once while the
+  address stays reserved as the key (a stray read is a clean fault). The
+  staging mirror, byte formula and resident image keep their layout — an
+  image written in one mode restores in another, no rebuild. A prefill GEMM
+  expands the rows it reads into a small scratch (`launch_bf12_expand`, at
+  the device memcpy's rate) and runs the algorithm it always ran: whole
+  matrices for wide chunks (two slots: the fold overlap's row blocks reuse an
+  expansion), 8 MiB weight-row blocks that stay in the L2 for calls of up to
+  256 rows, weight-row blocks for the lm head — bitwise the unsplit call
+  under the pinned algorithm. Decode batches past eight rows take eight-row
+  packed launches, so a captured graph never touches the scratch. The key now
+  has three values: `"checkpoint"`, `"bf12"` (the 12-bit form alone: 0.5–1.4
+  GiB per rank UNDER the BF16 plan; about 10 ms per prefill chunk on
+  four-node GLM-5.3-Flash — +1–2 % at 8K–32K, +25–40 ms to a short prompt's
+  first token — within 1 % on the full GLM-5.3) and `"bf12+bf16"` (both forms
+  resident: the previous behaviour, no prefill cost). Transcripts identical
+  to the both-forms build on GLM-5.3-Flash (four and two nodes), GLM-4.7 and
+  the full GLM-5.3; decode level at every concurrency, the full GLM-5.3's
+  sixteen-row batches included. Templates: two-node GLM-5.3-Flash `"bf12"` at
+  160K again (4.8 GiB of the node left at boot, where both forms left 0.05),
+  the full GLM-5.3 `"bf12"` at 120K again (both forms were refused there);
+  four-node GLM-5.3-Flash and GLM-4.7 `"bf12+bf16"`. `DGPP_BF12=off|on|both`
+  overrides for A/B runs.
+- **Decode collective: the interleaved gate, −5 us per collective**
+  (2026-09-19, same record). The graph all-reduce kernel gates a round's
+  co-claimed peers in one interleaved pass, reads the rest of a claimed
+  doorbell ({len, ctl}, {hash}: one cache line) in one round trip behind its
+  `seq` acquire instead of four or five dependent system loads, looks for the
+  engine's poison every eighth round, and ends the wait on the last claim.
+  Rank 0's collective on the four-node GLM-5.3-Flash step: 40.9 → 35.7 us
+  (−0.5 ms of a 32.5 ms step); single-stream decode +0.9–1.5 %, two to four
+  live requests level (their 32–64 KiB rows are past the staging budget, and
+  the unstaged fold gives the rounds' gain back). Results bitwise (the
+  canonical fold), transcripts identical, seven-minute soak clean;
+  `DGPP_BUS_GATE=sequential` keeps the per-peer gates.
 - **Lossless 12-bit BF16 decode weights, `engine.bf16_weights: "bf12"`**
   (2026-09-19; `benchmarks/results/2026-09-19-glm-flash-line-rate/`): a second
   resident form of the BF16 matrices the decode GEMV streams — the

@@ -487,6 +487,11 @@ void test_journal_codec() {
         refused_form = true;
       }
       require(refused_form, "codec: a settings record with an unknown bf16 weight form is refused");
+      // Both forms resident: its own name on the wire.
+      dgpp::serve::WorldSettings both = ws;
+      both.bf16_weights = "bf12+bf16";
+      require(dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(both)).world_settings == both,
+              "codec: the bf12+bf16 form round-trips");
     }
     bool refused = false;
     try {

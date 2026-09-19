@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "common/base64.hpp"
+#include "common/bf16_residency.hpp"
 #include "common/log.hpp"
 #include "kernels/latent_format.hpp"
 #include "loaders/minijson.hpp"
@@ -549,7 +550,7 @@ JournalRecord decode_journal_line(std::string_view line) {
         !latent_format_from_string(s.kv_dtype) ||
         (s.ngram_table != "resident" && s.ngram_table != "mmap") ||
         (s.dense_weights != "checkpoint" && s.dense_weights != "fp8") ||
-        (s.bf16_weights != "checkpoint" && s.bf16_weights != "bf12") ||
+        !parse_bf16_residency(s.bf16_weights, nullptr) ||
         (s.prefill != "bounded" && s.prefill != "exact") ||
         (s.embed_sharding != "replicated" && s.embed_sharding != "vocab"))
       throw std::runtime_error("journal: settings record with impossible values");

@@ -1,7 +1,5 @@
 #include "kernels/bf12_companions.hpp"
 
-#include <atomic>
-#include <cstdlib>
 #include <string>
 
 #include "common/cuda_check.hpp"
@@ -11,31 +9,33 @@
 namespace dgpp {
 namespace {
 
-std::atomic<bool> g_enabled{false};
-
-// DGPP_BF12: -1 unset, 0 off, 1 on.
-int env_override() {
-  static const int v = [] {
-    const char* e = std::getenv("DGPP_BF12");
-    if (e == nullptr) return -1;
-    const std::string s(e);
-    if (s == "on" || s == "1") return 1;
-    if (s == "off" || s == "0") return 0;
-    DGPP_LOG_WARN("DGPP_BF12={} ignored (on|off)", s);
-    return -1;
-  }();
-  return v;
-}
-
 size_t round16(size_t bytes) { return (bytes + 15) / 16 * 16; }
 
 }  // namespace
 
-void Bf12Companions::set_enabled(bool on) { g_enabled.store(on); }
+size_t Bf12Companions::planned_slot_bytes(std::initializer_list<size_t> matrix_bytes) {
+  size_t largest = 0;
+  bool any = false;
+  for (const size_t b : matrix_bytes) {
+    if (b == 0) continue;
+    any = true;
+    if (b <= kExpandSlotCap) largest = std::max(largest, b);
+  }
+  if (!any) return 0;
+  // Every matrix past the cap: the blocks' slot is the cap itself.
+  const size_t slot = largest != 0 ? largest : kExpandSlotCap;
+  return (slot + 255) / 256 * 256;
+}
 
-bool Bf12Companions::enabled() {
-  const int env = env_override();
-  return env >= 0 ? env == 1 : g_enabled.load();
+void Bf12Companions::finish(CublasLtGemm& gemm, int slots) {
+  // The read-back buffer held the largest matrix (the head: 0.3-0.6 GiB of
+  // the unified pool) — give it back now that nothing more is packed.
+  std::vector<uint16_t>().swap(host_);
+  if (released_ == 0) return;
+  // Every released matrix was past the cap: the blocks' slot is the cap.
+  const size_t slot = largest_slot_ != 0 ? largest_slot_ : kExpandSlotCap;
+  gemm.bf12_reserve_expand(slots, slot);
+  scratch_bytes_ = gemm.bf12_expand_bytes();
 }
 
 size_t Bf12Companions::planned_bytes(int64_t n, int64_t k) {
@@ -106,6 +106,16 @@ void Bf12Companions::log_summary(int rank, double seconds) const {
                 "widest row {}, {} rows kept raw; {} matrices kept bf16) in {:.1f} s",
                 rank, matrices_, static_cast<double>(raw_bytes_) / kGiB,
                 static_cast<double>(packed_bytes_) / kGiB, escapes_, widest_, raw_rows_, kept_, seconds);
+  if (packed_only()) {
+    DGPP_LOG_INFO("rank {} bf12: {} of them released their bf16 bytes ({:.2f} GiB returned; prefill expands "
+                  "through a {:.0f} MiB scratch)",
+                  rank, released_, static_cast<double>(released_bytes_) / kGiB,
+                  static_cast<double>(scratch_bytes_) / (1024.0 * 1024.0));
+    if (released_ != matrices_)
+      DGPP_LOG_WARN("rank {} bf12: {} packed matrices kept their bf16 bytes (not granted aside by the "
+                    "loader) — the memory plan counted them released",
+                    rank, matrices_ - released_);
+  }
 }
 
 }  // namespace dgpp
