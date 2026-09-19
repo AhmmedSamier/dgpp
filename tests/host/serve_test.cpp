@@ -86,6 +86,7 @@ class FakeEngine : public SchedulerEngine {
   std::atomic<bool> images_available{false};
   std::atomic<int> image_prefills{0};
   bool supports_images() const override { return images_available; }
+  bool supports_image_prefix_cache() const override { return images_available; }
   int32_t prefill_images(int req, const std::vector<int64_t>& prompt, const std::vector<dgpp::ImageInput>& images) override {
     require(!images.empty() && images[0].rgb.size() == 112 * 112 * 3, "decoded image reaches the engine");
     ++image_prefills;
@@ -192,6 +193,11 @@ class FakeEngine : public SchedulerEngine {
   }
   int32_t prefill_cached(int req, const std::vector<int64_t>& prompt,
                          dgpp::sched::SchedulerEngine::PrefixPrefill* plan) override {
+    if (plan->images && !plan->images->empty()) {
+      require(images_available && plan->images->front().rgb.size() == 112 * 112 * 3,
+              "image payload survives cached admission");
+      ++image_prefills;
+    }
     if (plan->attach_slot >= 0) {
       std::lock_guard<std::mutex> lock(armed_mu_);
       prefix_ops_.push_back("X:" + std::to_string(req) + ":" +
@@ -3299,4 +3305,24 @@ DGPP_TEST(serve_images_capability_validation_and_streaming) {
   response = post_chat(rig, body("data:image/png;base64,AAAA", false), "invalid_image");
   require(response.find("messages[0].content[1].image_url.url") != std::string::npos,
           "invalid image names the precise field");
+}
+
+DGPP_TEST(serve_images_prefix_cache_defaults_on_and_respects_opt_out) {
+  ServiceRig rig(8, dgpp::sample::greedy_params(), false, std::nullopt, false, false, {}, 4);
+  rig.frontend.images_available = true;
+  rig.engine.images_available = true;
+  const std::string body =
+      R"({"model":"glm-5.3-flash-fp8","max_tokens":1,"messages":[{"role":"user","content":[)"
+      R"({"type":"text","text":"ab|cd|ef"},{"type":"image_url","image_url":{"url":)"
+      R"("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0ioAAAAASUVORK5CYII="}}]}]})";
+  const auto first = post_chat(rig, body, "usage");
+  const auto second = post_chat(rig, body, "usage");
+  require(first.find("200 OK") != std::string::npos && second.find("\"cached_tokens\":4") != std::string::npos,
+          "image request uses its available prefix by default: " + second);
+  const auto operations = rig.engine.prefix_ops();
+  const auto disabled = body.substr(0, body.size() - 1) + ",\"prefix_cache\":false}";
+  const auto uncached = post_chat(rig, disabled, "usage");
+  require(uncached.find("\"cached_tokens\":0") != std::string::npos &&
+              rig.engine.prefix_ops() == operations && rig.engine.image_prefills == 3,
+          "explicit opt-out still performs image prefill without cache operations");
 }

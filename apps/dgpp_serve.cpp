@@ -969,7 +969,7 @@ int main(int argc, char** argv) {
       "    tokens, grows at tick top, and sheds the youngest request\n"
       "    (finish_reason length) when the pool runs out; every rank takes\n"
       "    rank 0's policy from the warm record\n"
-      "  [--prefill-budget-tokens N (default 0)]: Qwen graph prefill tokens/tick, 0 disables\n"
+      "  [--prefill-budget-tokens N (default 0)]: Qwen/GLM-5.3-Flash graph prefill tokens/tick, 0 disables\n"
       "  [--prefill-idle-budget-tokens N (default 0)]: larger budget without active decode; 0 uses the busy budget\n"
       "  bus (the prefill's bulk all-reduce): [--bulk-pace-gbps X]: sender\n"
       "    pacing per (peer, lane) queue pair (default: derived from the\n"
@@ -1510,8 +1510,9 @@ int main(int argc, char** argv) {
       DGPP_LOG_WARN("engine.embed_sharding = vocab applies to the full GLM-5.3 and DeepSeek-V4.1; {} keeps its "
                     "embedding replicated", family->name());
     DGPP_LOG_INFO("serve: model family {} ({})", family->name(), ckpt);
-    if (prefill_budget_tokens > 0 && (!decode_graph || std::string(family->name()) != "qwen4_exp")) {
-      DGPP_LOG_ERROR("--prefill-budget-tokens is supported on the Qwen graph engine only");
+    if (prefill_budget_tokens > 0 && (!decode_graph ||
+        (std::string(family->name()) != "qwen4_exp" && std::string(family->name()) != "glm5"))) {
+      DGPP_LOG_ERROR("--prefill-budget-tokens requires a Qwen or GLM-5.3-Flash graph engine");
       return 1;
     }
     // The decode rows (2026-09-10, engine/decode_outputs.hpp): the fixed

@@ -1900,7 +1900,7 @@ void GenerationService::route_chat_completions(const HttpRequest& req,
     SchedulerRequest sr;
     sr.id = record->sched_id;
     sr.boundaries = boundaries;
-    sr.no_cache = !prefix_cache || !images.empty();
+    sr.no_cache = !prefix_cache;
     sr.images = images;
     sr.prompt = prompt;
     sr.max_steps = steps;
@@ -2248,6 +2248,10 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {
   append_json_int(&out, m.prefix_skipped_no_block);
   out.append(",\"skipped_no_slot\":");
   append_json_int(&out, m.prefix_skipped);
+  out.append(",\"skipped_image_bytes\":");
+  append_json_int(&out, m.prefix_skipped_image_bytes);
+  out.append(",\"image_bytes\":");
+  append_json_int(&out, m.prefix_image_bytes);
   out.append(",\"blocks_pinned\":");
   append_json_int(&out, m.prefix_blocks_pinned);
   out.append(",\"snapshot_bytes\":");
