@@ -382,6 +382,13 @@ set_tests_properties(qwen_forward_smoke PROPERTIES DEPENDS qwen_forward_fixture)
 add_test(NAME qwen_forward_smoke_yarn
   COMMAND qwen_forward_test --smoke ${QWEN_FORWARD_FIXTURE} --rope-scaling 2.0:4096)
 set_tests_properties(qwen_forward_smoke_yarn PROPERTIES DEPENDS qwen_forward_fixture)
+# The YaRN ceiling actually crossed (the 2026-09-18 review): a synthetic
+# native limit of 8 under the factor-2 knob (the extended 16) — both
+# forward modes over the final valid position, the session's refusal of
+# work past the extended limit, and a pool below the ceiling.
+add_test(NAME qwen_forward_cross_limit
+  COMMAND qwen_forward_test --cross-limit ${QWEN_FORWARD_FIXTURE})
+set_tests_properties(qwen_forward_cross_limit PROPERTIES DEPENDS qwen_forward_fixture)
 add_test(NAME qwen_forward_generate
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen_reference_dump.py
           gen-pure --checkpoint-dir ${QWEN_FORWARD_FIXTURE}
